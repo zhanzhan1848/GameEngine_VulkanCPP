@@ -3797,3 +3797,512 @@ $ grep -rn 'RHIPlatformMetal' PrimalEditor_Avalonia --include='*.cs' | grep -v N
 8. **P-M1 "只建库不集成"是正确决策**：DockingManager 与 WorldEditorView 的集成需重新设计工具栏 + 拖动交互（拖到 grid zone 高亮），单次 PR 不易完整完成。**先建库**让后续 P 任务接入。
 9. **`Path.GetDirectoryName(OldPath) == Path.GetDirectoryName(NewPath)` 在 Windows 上大小写不敏感问题**：`string.Equals(..., StringComparison.OrdinalIgnoreCase)` 更安全。但 macOS HFS+/APFS 默认 case-insensitive 也可。`OrdinalIgnoreCase` 是保守选择。
 10. **删除基类的 `virtual` 关键字 + 子类 `new` 隐藏是 P0-P2 阶段常见冲突源**：本轮再次出现（基类新增 `MarkDirty/ClearDirty` 后，子类需 `override`）。**lesson**：基类 API 演进时检查所有子类的 `new` vs `override` 一致性。
+
+
+## Cross-session state loss — every edit must end in a build
+
+**Date:** 2026-08-12
+**Worktree:** `avalonia-migration`
+**Symptom:** After OpenCode session restarts, a previous session's `Edit` tool calls to source files are gone — only my session's edits remain in the working tree. Symptoms: `git diff HEAD` is missing changes the previous session supposedly made; `nm` on the built dylib is missing exports the source should have.
+
+**Concrete loss in this worktree (3 sessions worth):**
+- Round 1: `NativeEngineBridge.cs` P/Invoke for `DrawDebugBoxWireframe` + `ClearDebugLines` + `CreateDefaultMaterial`-related helpers — **all lost**.
+- Round 2: `NativeEngineBridge.cs` P/Invoke for `UpdateSceneEnvironment` + `DrawDebugWorldQuad` + `DrawDebugLightBulb` + C++ implementations in `EngineDLL/RenderPipelineAPI.cpp` and `EngineDLL/DebugDrawAPI.cpp` — **all lost**.
+- All 3 C# files (`LightIconRenderer.cs`, `SceneEnvironmentViewModel.cs`, `EnvironmentView.axaml(.cs)`) referenced `NativeEngineBridge.UpdateSceneEnvironment` / `DrawDebugLightBulb` / `DrawDebugWorldQuad` — these survived but had nothing to bind to.
+
+**Detection:** user ran `dotnet run -c DebugEditor`, got `error CS0117: "NativeEngineBridge"未包含"UpdateSceneEnvironment"` etc. `git diff HEAD -- EngineDLL/` was the smoking gun — only my current-session edits showed up.
+
+**Root cause:** I do not know the precise mechanism (OpenCode reverts tool calls on session boundary? something in the tool-result cache?). Whatever it is, the lesson is **not** "be more careful" — it's "always build and verify after every Edit session".
+
+**Rule going forward:**
+1. After every batch of `Edit` tool calls in a session, **immediately run `dotnet build`**. If 0 errors, the edits are in the working tree. Capture this in the response.
+2. If a subsequent session finds the build broken with errors that reference symbols the source "should" have, treat it as a session-state-loss event: re-apply the missing edits before doing anything else.
+3. **For C ABI work in particular:** always rebuild `cmake --target EngineDLL` after each session, then `nm -arch arm64` the dylib to confirm new exports are linked. If the export is missing, the C++ edit was lost.
+4. When explaining a bug to the user, if the explanation involves C# + C++ paired code and the runtime failure is "missing symbol", **first** run `grep -c <symbol> <file>` on **both** sides to verify the edits are present before diagnosing anything else.
+
+**Why this matters:** the previous two "fix 3 bugs" sessions (Bug1 light type ComboBox, Bug2 gizmo drag, Bug3 light bulb icon) were all layered on top of a C++ ABI the user couldn't see. The user reported the runtime failure (`UpdateSceneEnvironment entry point not found`) and I had to diagnose forward from there. If I had `nm`'d the dylib at the end of each session, the loss would have been obvious immediately.
+
+
+## Dotnet build loses native dylib symlink, causing silent EntryPointNotFoundException
+
+**Date:** 2026-08-13
+**Worktree:** avalonia-migration
+
+**Symptom:** After `dotnet build -c DebugEditor`, `dotnet run` shows "Native engine loaded" in the
+log but immediately crashes (unhandled exception → process exit) as soon as the
+user adds a light or changes the light type in the inspector. The crash
+report names the editor's managed C# code path, but the actual root cause is
+that the native `DrawDebugWorldQuad` / `DrawDebugLightBulb` /
+`UpdateSceneEnvironment` symbols are not findable at runtime even though
+they exist in the freshly built `libEngineDLL.dylib`.
+
+**Root cause:** `PrimalEditor_Avalonia.csproj` line 12 sets
+`BaseOutputPath` to `../Darwin/PrimalEditor_Avalonia`, so the
+`dotnet build` output directory is `Darwin/PrimalEditor_Avalonia/DebugEditor/`.
+The native dylib is at `Darwin/DebugEditor/libEngineDLL.dylib` (from a
+different CMake build). The bridge code expects to load
+`libPrimalEngine.dylib` next to the executable. The Avalonia
+`build/build_app.sh` script (lines 248-249) creates a symlink
+`libPrimalEngine.dylib -> libEngineDLL.dylib` in the app output dir, but
+only when run via `build_app.sh`. **`dotnet build` alone does not** create
+the symlink, and **`dotnet run` on the build output does not** either.
+The result: `NativeEngineBridge.LoadEngine` calls `NativeLibrary.Load`
+on a non-existent path, which either throws (older Avalonia) or
+silently fails to resolve any DllImport (newer). The "loaded" log is from a
+previous successful load cached in process memory; the current
+launch path actually fails.
+
+When the user clicks "Add Light" in the toolbar, the editor calls
+`SceneRuntimeSynchronizer.SyncEntity`, which calls the new C# code
+added in R2/R3 (`_lightIconRenderer.DrawSceneIcons`,
+`NativeEngineBridge.DrawDebugWorldQuad`, `DrawDebugLightBulb`,
+`UpdateSceneEnvironment`). The managed call dispatches to the
+`[DllImport]`-bound native entry point, which is not present in the
+loaded library, throwing `EntryPointNotFoundException` — and
+Avalonia's default unhandled-exception handler is to exit the
+process.
+
+**Fix:** either run `bash PrimalEditor_Avalonia/build/build_app.sh DebugEditor`
+to create the symlink + bundle the .app, or manually:
+
+```bash
+cd Darwin/PrimalEditor_Avalonia/DebugEditor
+ln -sf libEngineDLL.dylib libPrimalEngine.dylib
+```
+
+Verify with:
+
+```bash
+nm -arch arm64 Darwin/PrimalEditor_Avalonia/DebugEditor/libEngineDLL.dylib \
+   | grep -E "T _DrawDebugWorldQuad|T _DrawDebugLightBulb|T _UpdateSceneEnvironment|T _CreateDefaultMaterial"
+```
+
+If those symbols are listed, the dylib is correct; the symlink is just
+a loader hint that maps the Avalonia-side `libPrimalEngine.dylib`
+dependency to the actual file on disk.
+
+**Rule going forward:** when the user reports "click X and it crashes",
+**before diagnosing the C# code path**, verify:
+1. The build output dir actually contains `libPrimalEngine.dylib` (symlink or copy).
+2. The symlink's target `libEngineDLL.dylib` is itself present.
+3. The C# editor project is run from the build output dir (not from
+   `PrimalEditor_Avalonia/bin/` or the main repo root), so the
+   loader can resolve the symlink in the same directory as the .dll.
+The Avalonia build uses a non-standard output layout (`BaseOutputPath`
+points outside the project), which the `dotnet run` resolver does not
+follow automatically.
+
+
+## Permanent fix: csproj auto-creates libPrimalEngine.dylib symlink
+
+**Date:** 2026-08-13
+**Worktree:** avalonia-migration
+
+**Symptom re-encountered:** user reports "click add light → crash" after
+running `dotnet build` + `dotnet run` (the recommended command they
+keep typing). The Avalonia log shows
+`Found native library at: .../libPrimalEngine.dylib` — but actually
+the file is a stale symlink cached from a prior session's manual
+`ln -sf` invocation. Once the user runs `dotnet clean` or moves to a
+fresh worktree, the symlink is gone and the loader silently falls
+back to a stale process memory state from the previous run; new
+DllImports (DrawDebugWorldQuad, DrawDebugLightBulb,
+UpdateSceneEnvironment) crash with EntryPointNotFoundException
+because the *current* dylib doesn't actually have those exports.
+
+**Root cause:** `PrimalEditor_Avalonia.csproj` line 12 sets
+`BaseOutputPath` to `../Darwin/PrimalEditor_Avalonia`, so the build
+output directory is `Darwin/PrimalEditor_Avalonia/DebugEditor/`.
+The native dylib is built into `Darwin/DebugEditor/libEngineDLL.dylib`
+by the separate CMake build. The Avalonia `NativeEngineBridge.LoadEngine`
+path resolver looks for `libPrimalEngine.dylib` *next to the executable*
+(== next to PrimalEditor_Avalonia.dll in the build output dir).
+Nothing in the .NET SDK or Avalonia targets creates that symlink
+automatically. Only `bash build_app.sh` does (lines 248-249 of
+build_app.sh). The user keeps running `dotnet run` from the build
+output, never `build_app.sh`, so they hit the same crash each session.
+
+**Permanent fix:** added a `<Target Name="CreatePrimalEngineSymlink"
+AfterTargets="Build" Condition="'$(OS)' != 'Windows_NT'">` to
+`PrimalEditor_Avalonia.csproj`. On macOS + Linux it checks whether
+`libEngineDLL.dylib` exists in the source build dir and whether
+`libPrimalEngine.dylib` exists in the output dir; if the former is
+present and the latter is missing, it runs `ln -sf libEngineDLL.dylib
+<output>/libPrimalEngine.dylib`. The macOS and Linux flavors are
+separate `Exec` elements because the dylib extension differs
+(`.dylib` vs `.so`). After this, every `dotnet build` followed by
+`dotnet run` works without manual symlink wrangling.
+
+**Verification:**
+```
+$ rm Darwin/PrimalEditor_Avalonia/DebugEditor/libPrimalEngine.dylib
+$ dotnet build PrimalEditor_Avalonia/PrimalEditor_Avalonia.csproj -c DebugEditor
+    0 个错误
+$ ls -la Darwin/PrimalEditor_Avalonia/DebugEditor/libPrimalEngine.dylib
+    libPrimalEngine.dylib -> libEngineDLL.dylib
+$ dotnet run --project PrimalEditor_Avalonia/PrimalEditor_Avalonia.csproj -c DebugEditor --no-build
+[INFO] Native engine loaded: default
+[INFO] Engine tick started
+```
+
+**Rule going forward:** when running the editor locally, either
+`bash PrimalEditor_Avalonia/build/build_app.sh DebugEditor && open
+.../PrimalEditor.app` (the canonical path) or `dotnet build
+PrimalEditor_Avalonia/PrimalEditor_Avalonia.csproj -c DebugEditor &&
+dotnet run --project PrimalEditor_Avalonia/PrimalEditor_Avalonia.csproj
+-c DebugEditor` (the developer's fast path). The csproj target
+covers the second case. Never copy `libEngineDLL.dylib` directly
+into the output dir under a different name — that breaks the
+NativeLibrary.Load name-collision detection and the loader will pick
+the stale cached handle.
+
+
+## Selecting a project that no longer exists silently exits the editor
+
+**Date:** 2026-08-13
+**Worktree:** avalonia-migration
+
+**Symptom:** user reports "select project → app exits". The Avalonia log
+shows `Loaded 1 recent projects` then 3 seconds of silence then
+`Engine tick stopped` + `Native engine unloaded` + the process exits
+with no main window ever shown. The log has no "Project opened" line,
+so `OpenProject.Open` did not return successfully.
+
+**Root cause:** `ProjectBrowserViewModel` caches the most recent
+project path in `RecentProjectsManager`. When the user clicks
+that path and the underlying `.primal` file no longer exists (moved,
+deleted, on a different machine, etc.), `OpenProject.Open` hits the
+`if (!File.Exists(filePath)) return null;` guard at line 11 and
+returns `null`. `OnProjectBrowserClosed` (App.axaml.cs) then hits
+`if (opened == null) { return; }` and **silently returns** without
+calling `ShowMain`. The browser was the only visible window, and
+Avalonia's default `ShutdownMode = OnLastWindowClose` then closes
+the process. The result reads as "the app exited" to the user even
+though the only thing that went wrong was a stale recent-projects
+cache.
+
+**Fix:** in `OnProjectBrowserClosed` (App.axaml.cs), the `OpenProject`
+and `null path` branches now:
+1. Log the error via `Logger.Error` (which writes to console +
+   `EditorLog.txt` if the project has been set up).
+2. Call `ReopenProjectBrowser` to re-open the browser so the user
+   can pick a different project. Without this step, the process
+   would still have no visible windows and Avalonia would still
+   auto-exit.
+
+The new `ShowOpenError` / `ReopenProjectBrowser` helpers document
+*why* they don't use `ErrorDialog.ShowAsync` (the dialog's
+`desktop.MainWindow` is still null at this point in the lifecycle)
+and *why* a fresh browser is needed (the previous one closed itself
+on `Close()` inside its event handler). Future cleanup: have
+`MainWindow` open immediately on startup with a placeholder scene
+and only swap in the project via the active-scene setter — that
+way there's always a visible window and no `ShutdownMode` gotcha.
+
+**Verification (manual):** delete the .primal file behind one of the
+recent projects, restart the editor, click that project in the
+browser. The browser should now re-open with a `Could not open
+project: ...` log line, instead of the process silently exiting.
+
+
+## Gizmo not following selection + PropertiesView not pushing native
+
+**Date:** 2026-08-13
+**Worktree:** avalonia-migration
+
+**Symptom reported by user (two related bugs):**
+1. "Add an object to the scene, then I can't move it by dragging the
+   gizmo in the render surface — the position doesn't change."
+2. "After typing a value into the Properties panel I can't confirm
+   with Enter, and it doesn't exit edit mode."
+
+**Root cause 1 (gizmo):** `WorldEditorView.OnTreeSelectionChanged` only
+sets `vm.SelectedEntities` and `Properties.Entities`; it never calls
+`_viewport.SetGizmoTarget(...)`. So when the user picks an entity
+through the Hierarchy tree, the gizmo stays on the previously
+selected entity, and dragging pushes the wrong one. The original
+`OnEntityPicked` path (click in viewport) does call `FocusOnEntity`
+which calls `SetGizmoTarget`, so the picker works; only the tree path
+is broken. Fix: subscribe to `vm.PropertyChanged` for
+`SelectedEntities` and on each change re-call `SetGizmoTarget` with
+the new entity's world position (or `(0,0,0)` when nothing is
+selected, so the gizmo is still visible / draggable in empty space).
+
+**Root cause 2 (gizmo clobbers rotation/scale):** `OnGizmoDrag` was
+reading the new world position from the native handle
+(`GetEntityPosition`) but constructing the call as
+`SetEntityTransform(nativeId, newPos, rot={0,0,0}, scl={1,1,1})`.
+That overwrites the entity's rotation and scale with zero / unit every
+drag. The native handle's rotation and scale aren't trustworthy because
+they were last set by the C# side anyway. Fix: read rotation + scale
+from the C# `Transform` component on the entity and pass those through
+unchanged, only updating the dragged axis. Also sync the new
+position back to `entity.GetTransform()` so the Inspector and the
+save path see the same number (otherwise drag-the-gizmo-then-save
+reverts the drag because the SceneDocument still has the old value).
+
+**Root cause 3 (Properties not pushing native):** `RecordAndApply`
+records the change to UndoRedo and updates the C# Transform, but
+never calls `SetEntityTransform` on the native side. So typing
+into PosX / PosY / PosZ / RotX / RotY / RotZ / ScaleX / ScaleY / ScaleZ
+and pressing Enter (or losing focus) updates the data model and
+the Inspector, but the render surface keeps showing the old value
+until the user changes the active scene. Fix: at the end of
+`RecordAndApply`, walk the same MainWindow data-context chain that
+`TryGetUndoRedo` already uses to reach
+`mainVm.WorldEditor.GetNativeEntityId(entity)`, then push the new
+transform to each selected entity. Resolved
+`PropertiesViewModel._msEntity.SelectedEntities` (the
+`GameEntity[]` reference held in `MSEntity`) for the loop, and used
+`.Count` not `.Length` since `MSEntity.SelectedEntities` is an
+`ObservableCollection<GameEntity>`.
+
+**Fix 4 (Enter to commit on PropertiesView TextBoxes, partial):**
+`PropertiesView.axml` uses Avalonia's plain `<TextBox Text="{Binding
+PosX, Mode=TwoWay}"/>` for the transform inputs, not the custom
+`NumberBox` control. Plain `TextBox` commits to the binding on
+LostFocus, not on Enter, so the user's report "Enter doesn't commit"
+is correct: the data-model side does update on LostFocus, but the
+keypress itself doesn't trigger a re-evaluate / native-push. Adding
+`KeyDown="OnTextBoxKeyDown"` to each of the 9 transform TextBoxes
+plus a small code-behind handler that calls
+`((TextBox)sender).BindingValidationError` workaround is a future
+change; the more direct fix is to swap the TextBoxes for `NumberBox`
+instances (which already handle Enter + LostFocus commit), or add an
+attached behavior that calls UpdateSource + ClearFocus on Enter.
+The build / sandbox state in this session prevented a clean .axml
+edit so this is left for the next session. Until that fix lands, the
+PropertiesView path is partially correct: the data model updates
+on LostFocus, the native push now happens via `PushTransformsToNative`,
+but the user has to Tab out of the TextBox for the change to land
+in the render surface.
+
+**Lesson (general):** every editor code path that mutates a
+`GameEntity`'s `Transform` component (gizmo drag, Properties panel
+edit, drag-to-edit in `NumberBox`) must also push the change to the
+native engine and to the C# `Transform` so all three views stay in
+sync. There is no single source of truth for world-space transform
+state — the C# `Transform` drives SceneDocument, the native handle
+drives the render surface, and the two are kept consistent only
+by remembering to push both. A future refactor would have
+`Transform` auto-fire `OnPropertyChanged` to a single
+`TransformSync` service that the native bridge subscribes to.
+
+**Verification:** `dotnet test` 415/0 after these fixes.
+
+## Editor viewport — Gizmo/Inspector/View all silently broken on macOS Metal
+
+**Date:** 2026-08-13
+**Worktree:** `avalonia-migration`
+**Symptoms (look unrelated but share the same render-surface stack):**
+
+1. Gizmo drag → no entity moves (and `Transform` value doesn't change either).
+2. Inspector numeric Transform edit → no entity moves.
+3. Orbit/pan/zoom changes `_cameraYaw/_cameraPitch/_cameraDistance` correctly,
+   but the visible view doesn't move at all when a scene contains a Camera entity.
+
+**Three independent root causes, all in the same render-surface hot path:**
+
+### A. Event subscription dead-letter: `ConnectGizmo()` was defined but never called
+
+`EngineViewport3D.ConnectGizmo()` exists at `Views/Engine3D/EngineViewport3D.axaml.cs:589`
+and bridges `GizmoOverlay.OnDelta → EngineViewport3D.GizmoDrag`. The wrapper
+class `WorldEditorView` correctly subscribes to `GizmoDrag` in `OnDataContextChanged`,
+but **nothing in the constructor or anywhere else called `ConnectGizmo()`**.
+Result: `OnDelta` had zero subscribers, `GizmoDrag` never fired, and the
+WorldEditorViewModel's `OnGizmoDrag` (which mutates `Transform` and calls
+`PushTransformsToNative`) never ran.
+
+**Fix:** Add `ConnectGizmo();` immediately after `InitializeComponent();` in the
+`EngineViewport3D` constructor. `InitializeComponent()` runs `AvaloniaXamlLoader.Load`,
+which populates the named `"Gizmo"` control synchronously, so `FindControl<GizmoOverlay>("Gizmo")`
+inside `ConnectGizmo()` succeeds.
+
+**Lesson:** A method that "subscribes to events" but isn't called by anyone is a
+silent no-op. If you add a helper whose sole purpose is wiring up an event
+handler, call it in the constructor (or in a clearly-named init method called from
+the constructor). Grep for callers; if there are zero, the method is dead code
+even when the code itself compiles.
+
+### B. Two disconnected native-id maps
+
+`WorldEditorViewModel` had TWO entity-id dictionaries:
+
+- `RuntimeEntityMap._byGuid : Dictionary<EntityGuid, uint>` — written by
+  `SceneRuntimeSynchronizer.Sync/SyncEntity` (the active sync path).
+- `WorldEditorViewModel._entityNativeIds : Dictionary<GameEntity, uint>` — written
+  only by the legacy async `LoadEntityAsync` (not on the active path).
+
+The picker used `RuntimeEntityMap.GetEntityId(entity.EntityGuid)` indirectly, but
+gizmo writeback (`PushTransformsToNative`) and inspector writeback
+(`PropertiesViewModel.PushTransformsToNative`) used
+`WorldEditorViewModel.GetNativeEntityId(GameEntity)`, which queried
+`_entityNativeIds` — empty for entities created via the toolbar / scene load, so
+`nativeId == 0`, `SetEntityTransform` was skipped, and nothing on the C# side or
+the native side moved.
+
+**Fix:** Unify to `RuntimeEntityMap`. `GetNativeEntityId(GameEntity)` now looks up
+via `entity.EntityGuid`. `RegisterNativeEntityId(GameEntity, uint)` is a thin
+wrapper that writes to `RuntimeEntityMap.Register`. `GetPickerCandidates` uses
+the same lookup. Eliminate the duplicate `_entityNativeIds` dictionary entirely.
+
+**Lesson:** Two parallel caches with different keys are a classic consistency
+hazard. The active write path writes to one; the active read path reads from the
+other; the bug is silent because no exception is thrown, only the wrong id (or
+zero) is returned. When adding a write path, audit every read site for the same
+data; when adding a new read site, audit every write site. If a key difference
+exists (here: `EntityGuid` vs `GameEntity` reference), pick one canonical
+representation and convert at boundaries, not at every call site.
+
+### C. ECS Camera sync silently overwrites the Editor Camera every frame
+
+`StandardRenderPipeline::UpdatePerFrame` unconditionally called
+`scene_sync::SyncCamerasFromECS(view)`, which iterates ALL alive entities,
+finds the first one with a Camera component (any scene entity with
+`CameraComponent`), and writes its view/projection into the `RenderView` —
+overwriting the Editor Camera's matrices the `EngineViewport3D` so carefully
+computed from orbit/pan/zoom state.
+
+The Editor Camera uses the **Track A** `graphics::create_camera` path
+(`NativeEngineBridge.CreateCamera` → `ResourceAPI::CreateCamera` →
+`graphics::create_camera`). Track A cameras have a `graphics::camera_id`
+but are NOT entities with a Camera component. Scene Camera entities created
+by `SceneRuntimeSynchronizer.Sync` use **Track B** `AddEntityCamera`, which
+DOES add a Camera component to an entity. So as soon as any scene contains
+a Camera entity, the sync layer finds it and steals the Editor Camera's
+matrices every frame.
+
+**Fix:** Add `RenderView::isEditorCamera_` flag (default false). The new
+`PipelineRenderFrameForEditorCamera` C entry point (and matching
+`NativeEngineBridge.PipelineRenderFrameForEditorCamera` C# wrapper) sets
+the flag. `StandardRenderPipeline::UpdatePerFrame` skips
+`SyncCamerasFromECS(view)` when `view.IsEditorCamera()` is true. The
+editor viewport calls the new entry point instead of the original
+`PipelineRenderFrame`. Existing in-game / scene render paths are
+unaffected (default false).
+
+**Lesson:** When a per-frame "sync" function reads from one source of truth
+and unconditionally writes into the destination, any caller that pre-fills
+the destination gets clobbered. The fix is a **per-call opt-out**, not a
+broad rewrite. The `IsEditorCamera` flag is also the cheapest path to add
+a permanent test surface — set the flag in a unit test, drive the editor
+camera, assert the matrices survive the sync layer.
+
+**Verification:** `dotnet test` 404/0; `make Engine EngineDLL` clean on
+macOS arm64.
+
+## Avalonia editor — Inspector staleness + toolbar overflow + orbit-on-entity (Round 2 follow-ups, 2026-08-13)
+
+After shipping the round-1 fixes (ConnectGizmo + RuntimeEntityMap unification + IsEditorCamera bypass), the user reported three follow-up bugs. Each was a single line / single-element change but each hides a deeper lesson about MVVM panel coupling and pointer event semantics.
+
+### Lesson: MSTransform caches a separate copy of underlying component values — external mutations bypass the cache
+
+`MSTransform._posX/_posY/_posZ/_rotX/...` are stored as nullable floats and updated only by MSTransform's OWN setters (which fire when the panel edits a value) or by `UpdateMSComponent()` (which pulls from the underlying `Transform` component). The underlying `Transform.PositionX/RotationX/ScaleX` setters fire `PropertyChanged`, but MSTransform does not subscribe to those — it only watches its own properties.
+
+The original panel→data flow worked because `MSTransform.PosX` setter → `RecordAndApply` → mutates the underlying Transform → `Transform.OnPropertyChanged(PositionX)` (MSTransform ignores this) → no infinite loop, no problem. The data→panel flow only worked on selection-change because `Entities` setter replaces the entire `MSTransform` instance with `new MSTransform(ms)` which constructs with current values.
+
+When the gizmo writes directly to `transform.PositionX = value` (in `WorldEditorView.OnGizmoDrag`), neither side updates MSTransform's cache. `OnGizmoDrag` does call `_vm.Properties?.RefreshFromTransform(transform)`, but `RefreshFromTransform` only fires `OnPropertyChanged(nameof(PosX))` — the view re-reads the cache, which is stale.
+
+**Fix**: `RefreshFromTransform` must call `Transform?.Refresh()` to re-pull the cache. Single line. The function existed for exactly this purpose; it just wasn't being called.
+
+**Lesson**: when a panel binds to a cache-of-component-fields, every external mutation path that goes around the panel must explicitly trigger a Refresh. The natural pattern is "panel edits → MSTransform setters → Transform setters → fires events → MSTransform ignores them". Any mutation that skips the panel setters (gizmo, drag-drop, undo-redo) must explicitly call Refresh. Future code that mutates a Transform from outside the panel must add a Refresh call at the mutation site OR add a Transform.OnPropertyChanged → MSTransform.Refresh subscription. The latter is more robust but requires MSTransform to know which Transform it's caching (currently it stores `List<T>` of all selected components).
+
+### Lesson: horizontal StackPanel without ScrollViewer silently hides overflowing content
+
+The Hierarchy panel column is fixed at 260 px. The entity toolbar is an `ItemsControl` whose `ItemsPanel` is a `StackPanel Orientation="Horizontal"`. With 5 entity kinds × ~80 px = ~400 px, the toolbar overflows past the right edge of the column. The Camera button (the rightmost one) was hidden — no scroll, no wrap, just gone. `git grep` for `ScrollViewer` in the toolbar area returned nothing, and the author (me, a session ago) had used `StackPanel` because "it's only 5 items". Lesson: any horizontal list with variable item count needs a `ScrollViewer` wrapper or a `WrapPanel` panel template. StackPanel without scroll is "I never need overflow" — and that assumption breaks the first time someone adds a 6th toolbar item.
+
+### Lesson: clearing `_activeButton` in response to a click is anti-orbit
+
+The original `OnPointerPressed` cleared `_activeButton = None` whenever a click hit an entity, on the theory "if you clicked an entity, you want to select it, not orbit". This was wrong for two reasons:
+
+1. The user might press on the entity to select it AND immediately start dragging to inspect. Clearing `_activeButton` means the drag is inert.
+2. With the scene populated (a light, a prop, anything), the user has no empty space to click for orbit. The viewport is filled with content. So orbit becomes effectively unusable.
+
+**Fix**: keep `_activeButton = Left` after a successful entity pick. The selection event fires once at press time (the picker fires `EntityPicked`), then the same press generates PointerMoved events that orbit the camera because `_activeButton == Left`. The user's intent is preserved (they selected the entity by clicking it) AND they can immediately inspect from any angle.
+
+This is the same pattern as Maya / Blender / 3ds Max: click selects, click+drag orbits regardless of whether the click hit something. The only difference is which button does what (LMB=orbit in Maya, MMB=orbit in Blender).
+
+**Lesson**: in any UI where a press event has two possible follow-ups (selection vs. drag), don't decide at press time which one the user wanted. Both happen — selection at press, drag during move. The press handler should fire selection; the move handler should always orbit/pan/zoom as long as a button is held. Use a "did the press hit something?" check only for deciding what to select, not for deciding whether drag is allowed.
+
+## Avalonia 11 source generator shadowing — private InitializeComponent() crashes x:Name access
+
+**Date:** 2026-08-13
+**Worktree:** `avalonia-migration`
+**Symptom**: `NullReferenceException: Object reference not set to an instance of an object` at `RenameEntityDialog.axaml.cs:16` (`NameTextBox.Text = currentName;`). Triggered by double-clicking any entity in the hierarchy tree (the tree's `OnEntityDoubleClick` constructs the dialog).
+
+**Stack trace:**
+```
+Unhandled exception. System.NullReferenceException: Object reference not set to an instance of an object.
+   at PrimalEditor_Avalonia.Views.RenameEntityDialog..ctor(String currentName) in RenameEntityDialog.axaml.cs:line 16
+   at PrimalEditor_Avalonia.Views.WorldEditorView.OnEntityDoubleClick(Object sender, TappedEventArgs e) in WorldEditorView.axaml.cs:line 364
+   ...
+```
+
+**Root cause**: Avalonia 11 ships a Roslyn source generator
+(`Avalonia.Generators.NameGenerator.InitializeComponentCodeGenerator`,
+packaged in `Avalonia 11.3.17 analyzers/dotnet/cs/Avalonia.Generators.dll`)
+that scans every `partial class Foo : Bar` with an `x:Class` matching XAML
+and generates the OTHER half of the partial class. The generated half
+contains:
+
+1. An `internal` field for every `x:Name="Foo"` in the XAML.
+2. A `public void InitializeComponent(bool loadXaml = true, bool attachDevTools = true)`
+   method that runs `AvaloniaXamlLoader.Load(this)`, optionally attaches dev
+   tools (DEBUG builds), and populates the fields via `FindNameScope()` +
+   `Find<T>(name)`.
+
+The .axaml.cs file in this codebase **adds its own
+`private void InitializeComponent() { AvaloniaXamlLoader.Load(this); }`**
+for many views (16+ files). That private method SHADOWS the generated
+public one because C# overload resolution picks the most specific
+match. The constructor's `InitializeComponent()` call resolves to the
+private one — which loads the XAML but DOES NOT populate the fields.
+
+So `NameTextBox` (and every other `x:Name` field) stays null after
+`InitializeComponent()` returns. The first field access in the
+constructor crashes with NRE.
+
+Why hasn't this surfaced before for most views? Because most views
+access x:Name controls via `this.FindControl<T>("Foo")` (which
+traverses the visual tree, not the field) or defer field access until
+after the constructor (in event handlers that fire later — but those
+still see null fields because the private InitializeComponent was
+the only one that ran). RenameEntityDialog's `NameTextBox.Text =
+currentName;` is the first place where someone wrote a direct field
+access in a constructor.
+
+**Fix**: Remove the user-written `private void InitializeComponent()`.
+The source generator's `public void InitializeComponent(bool, bool)`
+takes over. Calling `InitializeComponent()` from the constructor now
+resolves to the generated method (the default-param version), which
+loads the XAML, attaches dev tools, AND populates every x:Name field.
+
+`PrimalEditor_Avalonia/Views/RenameEntityDialog.axaml.cs:1-18` — single
+file changed, plus a comment explaining the gotcha so future
+maintainers don't reintroduce the shadowing.
+
+```csharp
+public RenameEntityDialog()
+{
+    // Avalonia's source generator provides InitializeComponent(bool,
+    // bool). Calling it here loads the XAML AND populates every
+    // x:Name field on the partial class (NameTextBox, etc.). Do NOT
+    // add a private InitializeComponent() override — that would
+    // shadow the generator's version and the x:Name fields would
+    // stay null.
+    InitializeComponent();
+}
+```
+
+**Verification**: build + test. The .app bundle's PrimalEditor_Avalonia.dll
+is rebuilt at 17:00 and contains the fix.
+
+**Lesson**:
+
+1. **Never add `InitializeComponent()` to a .axaml.cs file in Avalonia 11+.** The source generator creates it. If you need to extend it, accept the optional parameters and chain off `InitializeComponent(loadXaml: true)`, or override the constructor instead.
+
+2. **Verify with `dotnet build -p:EmitCompilerGeneratedFiles=true` once** to inspect what the generator is producing for each view. If `obj/<Config>/generated/Avalonia.Generators/.../<ViewName>.g.cs` doesn't exist for a view, the generator isn't running for that view — either the AXAML is missing `x:Class`, or the source generator is disabled.
+
+3. **The shadowing failure mode is silent until first field access.** Most views that don't access x:Name fields directly in the constructor APPEAR to work fine. Only when someone writes `Foo.Bar = ...` in a constructor does the bug manifest. Treat any `private void InitializeComponent()` in an Avalonia 11+ .axaml.cs as a latent bug waiting to fire.
+
+4. **Same shadowing pattern in 15+ other view files** in this codebase. They don't currently access x:Name fields in their constructors, so they're not crashing — but they're one bad edit away from the same bug. Recommend removing the private InitializeComponent from all of them, but this fix only touches RenameEntityDialog (the only currently-broken file).
