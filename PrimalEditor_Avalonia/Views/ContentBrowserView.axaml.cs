@@ -53,6 +53,20 @@ public partial class ContentBrowserView : UserControl
         SearchBox?.Focus();
     }
 
+    private void OnToggleSearchClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        vm.IsSearchVisible = !vm.IsSearchVisible;
+        if (vm.IsSearchVisible)
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                SearchBox?.Focus();
+                SearchBox?.SelectAll();
+            });
+        }
+    }
+
     private void OnSearchKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
     {
         if (e.Key == Avalonia.Input.Key.Escape && DataContext is ContentBrowserViewModel vm)
@@ -71,8 +85,13 @@ public partial class ContentBrowserView : UserControl
             (modifiers & Avalonia.Input.KeyModifiers.Control) != 0;
         if (hasCmdOrCtrl && e.Key == Avalonia.Input.Key.F)
         {
-            SearchBox?.Focus();
-            SearchBox?.SelectAll();
+            if (DataContext is ContentBrowserViewModel vm)
+                vm.IsSearchVisible = true;
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                SearchBox?.Focus();
+                SearchBox?.SelectAll();
+            });
             e.Handled = true;
         }
     }

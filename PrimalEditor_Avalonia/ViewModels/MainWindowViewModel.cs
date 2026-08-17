@@ -94,32 +94,84 @@ public class MainWindowViewModel : ViewModelBase
     public void ToggleContentBrowserTab() => IsContentBrowserVisible = !IsContentBrowserVisible;
 
     /// <summary>
-    /// Add or remove a dockable from <see cref="Layout"/>'s
-    /// <c>VisibleDockables</c>. The single DocumentDock is the
-    /// parent; toggling the world editor tab means adding/removing
-    /// <see cref="WorldEditor"/> from that document list. No-op if
-    /// <paramref name="visible"/> matches current state, so
-    /// repeated calls don't double-add.
+    /// Add or remove a dockable from the dock that hosts it. WorldEditor
+    /// lives in the center DocumentDock; ContentBrowser lives in the
+    /// left ToolDock. When the target is hidden we walk the tree to
+    /// find its owning dock; when re-shown we add it back to that same
+    /// dock. Layout docks may be nested (RootDock → ProportionalDock →
+    /// DocumentDock/ToolDock), so the lookup has to descend.
     /// </summary>
     private void ApplyDockableVisibility(Dock.Model.Core.IDockable dockable, bool visible)
     {
         if (Layout == null || dockable == null) return;
-        foreach (var rootChild in Layout.VisibleDockables)
+        if (visible)
+            ShowDockable(dockable);
+        else
+            HideDockable(dockable);
+    }
+
+    private void HideDockable(Dock.Model.Core.IDockable target)
+    {
+        var owner = FindOwningDock(Layout, target);
+        if (owner != null)
         {
-            if (rootChild is Dock.Model.Mvvm.Controls.DocumentDock docs)
+            owner.VisibleDockables.Remove(target);
+        }
+    }
+
+    private void ShowDockable(Dock.Model.Core.IDockable target)
+    {
+        // Find any dock that already contains this dockable — covers the
+        // case where a previous hide-and-show cycle must restore it.
+        var owner = FindOwningDock(Layout, target);
+        if (owner != null && !owner.VisibleDockables.Contains(target))
+        {
+            owner.VisibleDockables.Add(target);
+            return;
+        }
+        // First-time show: fall back to the default host. DocumentDock
+        // for tabs (WorldEditor), ToolDock for tool windows (ContentBrowser).
+        var fallback = ResolveDefaultHost(Layout, target);
+        fallback?.VisibleDockables.Add(target);
+    }
+
+    private static Dock.Model.Core.IDock? FindOwningDock(
+        Dock.Model.Core.IDockable? node,
+        Dock.Model.Core.IDockable target)
+    {
+        if (node is Dock.Model.Core.IDock dock)
+        {
+            if (dock.VisibleDockables.Contains(target)) return dock;
+            foreach (var child in dock.VisibleDockables)
             {
-                bool contains = docs.VisibleDockables.Contains(dockable);
-                if (visible && !contains)
-                {
-                    docs.VisibleDockables.Add(dockable);
-                }
-                else if (!visible && contains)
-                {
-                    docs.VisibleDockables.Remove(dockable);
-                }
-                return;
+                var found = FindOwningDock(child, target);
+                if (found != null) return found;
             }
         }
+        return null;
+    }
+
+    private Dock.Model.Core.IDock? ResolveDefaultHost(
+        Dock.Model.Core.IDockable? node,
+        Dock.Model.Core.IDockable target)
+    {
+        // WorldEditor goes to the first DocumentDock; ContentBrowser goes
+        // to the first ToolDock. The factory always provides exactly one
+        // of each, so picking the first match is deterministic.
+        var wantDocument = target is Dock.Model.Mvvm.Controls.Document;
+        if (node is Dock.Model.Mvvm.Controls.DocumentDock docs && wantDocument)
+            return docs;
+        if (node is Dock.Model.Mvvm.Controls.ToolDock tool && !wantDocument)
+            return tool;
+        if (node is Dock.Model.Core.IDock dock)
+        {
+            foreach (var child in dock.VisibleDockables)
+            {
+                var found = ResolveDefaultHost(child, target);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     public Project? Project
@@ -273,19 +325,12 @@ public class MainWindowViewModel : ViewModelBase
     /// </summary>
     public void ApplyLayout(DockingLayout? saved)
     {
-        if (saved == null || saved.Entries.Count == 0) return;
-        // Reuse the existing factory so DockControl's `Factory`
-        // binding (which points at this VM's `Factory` property)
-        // still references the same instance — otherwise swapping
-        // the factory reference would also reset DockControl's
-        // internal state.
-        Layout = DockingLayoutBridge.ToDockTree(saved, Factory, entry => entry.Id switch
-        {
-            "WorldEditor" => WorldEditor,
-            "ContentBrowser" => ContentBrowser,
-            _ => null,
-        });
-        Factory.InitLayout(Layout!);
+        // The dock tree no longer represents ContentBrowser/BuildLog/Logger
+        // — they live inside WorldEditorView's XAML now. Any persisted
+        // dock snapshot from before that refactor would recreate a
+        // separate ToolDock/Document tab for those surfaces and hide
+        // them outside the world editor. Always skip the restore and
+        // rely on the factory's default (single-document) layout.
     }
 
     /// <summary>

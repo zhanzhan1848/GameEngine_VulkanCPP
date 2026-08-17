@@ -15,12 +15,11 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="120"/>
+            <RowDefinition Height="280"/>
         </Grid.RowDefinitions>
 
         <!-- =========== ROW 0: Toolbar (floating glass) =========== -->
-        <Border Grid.Row="0" Classes="floating" Margin="6,6,6,4">
+        <Border Grid.Row="0" Classes="floating" Margin="6,6,6,2">
             <StackPanel Orientation="Horizontal" Spacing="6" Margin="8,4">
                 <TextBlock Text="BUILD" FontFamily="{StaticResource FontDisplay}"
                            FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
@@ -41,7 +40,7 @@
                 <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
                 <Separator Margin="6,0"/>
                 <Button Content="W Move" Click="OnTranslateModeClick" Padding="8,2" ToolTip.Tip="Translate gizmo (W)"/>
-                <Button Content="E Rotate" Click="OnRotateModeClick" Padding="8,2" ToolTip.Tip="Rotate gizmo (E)"/>
+                <Button Content="E Rotate" Click="OnRotateModeClick" Padding="8,2" ToolTip.Tip="Rotate gizmo (R)"/>
                 <Button Content="R Scale" Click="OnScaleModeClick" Padding="8,2" ToolTip.Tip="Scale gizmo (R)"/>
                 <Separator Margin="6,0"/>
                 <CheckBox Name="OrthoToggle" Content="Ortho" VerticalAlignment="Center"
@@ -52,8 +51,8 @@
         <!-- =========== ROW 1: Hierarchy | Viewport | Inspector =========== -->
         <Grid Grid.Row="1" ColumnDefinitions="260,*,320" Background="Transparent">
 
-            <!-- Hierarchy panel -->
-            <Border Grid.Column="0" Classes="floating" Margin="6,4,4,4">
+            <!-- Hierarchy panel (single, no TabControl) -->
+            <Border Grid.Column="0" Classes="floating" Margin="6,2,4,2">
                 <DockPanel>
                     <Border DockPanel.Dock="Top" Padding="8,8,8,4">
                         <StackPanel Spacing="6">
@@ -80,12 +79,6 @@
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
 
-                            <!-- Toolbar driven by EntityFactory. Adding a new
-                                 entity kind = one row in EntityFactory; the
-                                 view layer is intentionally declarative.
-                                 Wrapped in ScrollViewer so narrow Hierarchy
-                                 widths (260 px column) don't hide Camera /
-                                 Character / Prop buttons off-screen. -->
                             <ScrollViewer HorizontalScrollBarVisibility="Auto"
                                           VerticalScrollBarVisibility="Disabled">
                                 <ItemsControl ItemsSource="{Binding EntityFactoryItems}">
@@ -147,7 +140,7 @@
             </Border>
 
             <!-- Viewport panel -->
-            <Border Grid.Column="1" Classes="floating" Margin="2,4,2,4"
+            <Border Grid.Column="1" Classes="floating" Margin="2,2,2,2"
                     DragDrop.AllowDrop="True"
                     DragDrop.Drop="OnAssetDrop"
                     DragDrop.DragOver="OnDragOver">
@@ -157,7 +150,7 @@
             </Border>
 
             <!-- Inspector panel -->
-            <Border Grid.Column="2" Classes="floating" Margin="4,4,6,4">
+            <Border Grid.Column="2" Classes="floating" Margin="4,2,6,2">
                 <DockPanel>
                     <TextBlock DockPanel.Dock="Top" Text="INSPECTOR"
                                FontFamily="{StaticResource FontDisplay}"
@@ -169,35 +162,33 @@
             </Border>
         </Grid>
 
-        <!-- =========== ROW 2: Debug bar =========== -->
-        <Border Grid.Row="2" Classes="floating" Margin="6,4,6,4">
-            <TextBlock Grid.Row="2"
-                       Text="{Binding DebugMessage}"
-                       Classes="mono"
-                       Margin="8,4" Foreground="{StaticResource AmberBrush}"/>
-        </Border>
-
-        <!-- =========== ROW 3: Build log =========== -->
-        <Border Grid.Row="3" Classes="floating" Margin="6,4,6,6">
-            <DockPanel>
-                <TextBlock DockPanel.Dock="Top" Text="BUILD LOG"
-                           FontFamily="{StaticResource FontDisplay}"
-                           FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           Padding="10,6,8,4"/>
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="4,0,4,4">
-                    <TextBox Name="BuildLogText" IsReadOnly="True"
-                             AcceptsReturn="True" TextWrapping="Wrap"
-                             FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
-                             FontSize="11"
-                             Background="{StaticResource VoidBrush}"
-                             Foreground="{StaticResource MintBrush}"
-                             CaretBrush="{StaticResource ElectricBlueBrush}"
-                             BorderThickness="0"
-                             DoubleTapped="OnBuildLogDoubleClick"
-                             Padding="8"/>
-                </ScrollViewer>
-            </DockPanel>
-        </Border>
+        <!-- =========== ROW 2: Content Browser | Build Log / Logger tab =========== -->
+        <Grid Grid.Row="2" ColumnDefinitions="*,*" Margin="6,2,6,6">
+            <!-- LEFT: Content Browser -->
+            <Border Grid.Column="0" Classes="floating" Margin="0,0,3,0">
+                <views:ContentBrowserView Name="ContentBrowserBottomView"/>
+            </Border>
+            <!-- RIGHT: Build Log + Logger tab -->
+            <Border Grid.Column="1" Classes="floating" Margin="3,0,0,0">
+                <TabControl SelectedIndex="0" Background="Transparent" Padding="0">
+                    <TabItem>
+                        <TabItem.Header>
+                            <TextBlock Text="BUILD LOG" FontFamily="{StaticResource FontDisplay}"
+                                       FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                                       Margin="6,0"/>
+                        </TabItem.Header>
+                        <views:BuildLogView/>
+                    </TabItem>
+                    <TabItem>
+                        <TabItem.Header>
+                            <TextBlock Text="LOGGER" FontFamily="{StaticResource FontDisplay}"
+                                       FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                                       Margin="6,0"/>
+                        </TabItem.Header>
+                        <views:LoggerView Name="LoggerTabView"/>
+                    </TabItem>
+                </TabControl>
+            </Border>
+        </Grid>
     </Grid>
 </UserControl>

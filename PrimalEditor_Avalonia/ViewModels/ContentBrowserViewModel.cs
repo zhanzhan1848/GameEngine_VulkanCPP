@@ -52,6 +52,7 @@ public class ContentBrowserViewModel : Document
     private string _importingStatus = string.Empty;
     private FileViewMode _viewMode = FileViewMode.Thumbnails;
     private string _searchQuery = string.Empty;
+    private bool _isSearchVisible;
 
     public ObservableCollection<ContentFolder> Folders { get; } = new();
     public ObservableCollection<AssetInfo> Files { get; } = new();
@@ -231,6 +232,24 @@ public class ContentBrowserViewModel : Document
 
     public bool HasActiveSearch => !string.IsNullOrEmpty(_searchQuery);
 
+    public bool IsSearchVisible
+    {
+        get => _isSearchVisible;
+        set
+        {
+            if (_isSearchVisible == value) return;
+            _isSearchVisible = value;
+            OnPropertyChanged(nameof(IsSearchVisible));
+            OnPropertyChanged(nameof(IsPathVisible));
+        }
+    }
+
+    public bool IsPathVisible => !_isSearchVisible;
+
+    public string CurrentPathDisplay => Breadcrumbs.Count == 0
+        ? "Content"
+        : string.Join("  /  ", Breadcrumbs.Select(segment => segment.Name));
+
     public string ResultCountDisplay =>
         HasActiveSearch
             ? $"{FilteredFiles.Count} of {Files.Count}"
@@ -260,6 +279,7 @@ public class ContentBrowserViewModel : Document
             {
                 Name = "Content",
                 FullPath = _project.ContentPath,
+                IsExpanded = true,
             };
             LoadSubfolders(root);
             Folders.Add(root);
@@ -280,6 +300,7 @@ public class ContentBrowserViewModel : Document
                 OnPropertyChanged(nameof(SelectedFolder));
                 LoadFilesForSelectedFolder();
             }
+            RebuildBreadcrumbs();
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -312,7 +333,7 @@ public class ContentBrowserViewModel : Document
     private void RebuildFilteredFiles()
     {
         FilteredFiles.Clear();
-        foreach (var file in Files)
+        foreach (var file in ContentBrowserFilter.Apply(Files))
         {
             if (AssetSearchFilter.Match(file.FileName, _searchQuery))
                 FilteredFiles.Add(file);
@@ -326,12 +347,14 @@ public class ContentBrowserViewModel : Document
         if (string.IsNullOrEmpty(root))
         {
             OnPropertyChanged(nameof(HasBreadcrumbs));
+            OnPropertyChanged(nameof(CurrentPathDisplay));
             return;
         }
         var selected = _selectedFolder?.FullPath;
         foreach (var seg in BreadcrumbBuilder.Build(root, selected))
             Breadcrumbs.Add(seg);
         OnPropertyChanged(nameof(HasBreadcrumbs));
+        OnPropertyChanged(nameof(CurrentPathDisplay));
     }
 
     public bool HasBreadcrumbs => Breadcrumbs.Count > 0;

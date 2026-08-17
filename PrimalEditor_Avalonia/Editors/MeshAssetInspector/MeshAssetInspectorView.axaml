@@ -1,0 +1,124 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors"
+             xmlns:meshvm="using:PrimalEditor_Avalonia.Editors.MeshAssetInspector"
+             xmlns:content="using:PrimalEditor_Avalonia.Content"
+             x:Class="PrimalEditor_Avalonia.Editors.MeshAssetInspector.MeshAssetInspectorView"
+             x:DataType="meshvm:MeshAssetInspectorViewModel"
+             Background="{StaticResource VoidBrush}">
+
+    <Border Classes="floating" Margin="3,6,6,6">
+        <DockPanel>
+            <!-- Header -->
+            <Border DockPanel.Dock="Top" Padding="10,8,8,4">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Left" Text="{Binding Title}"
+                               FontFamily="{StaticResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                               Foreground="{StaticResource ElectricBlueBrush}"
+                               VerticalAlignment="Center"/>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
+                                HorizontalAlignment="Right" Spacing="6">
+                        <ComboBox SelectedIndex="{Binding ActiveLodIndex, FallbackValue=0}"
+                                  MinWidth="100"
+                                  ToolTip.Tip="Active LOD"
+                                  ItemsSource="{Binding LodIndices}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StringFormat=LOD {0}}"
+                                               FontFamily="{StaticResource FontMono}"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- Status -->
+            <TextBlock DockPanel.Dock="Bottom"
+                       Text="{Binding StatusMessage}"
+                       FontFamily="{StaticResource FontMono}"
+                       Foreground="{StaticResource AmberBrush}"
+                       Padding="10,4"/>
+
+            <!-- Three-column body -->
+            <Grid ColumnDefinitions="220,*,280">
+                <!-- LEFT: tree -->
+                <Border Grid.Column="0" Classes="floating" Margin="2,2,2,2">
+                    <TreeView Name="InspectorTree"
+                              ItemsSource="{Binding TreeRoots}"
+                              SelectedItem="{Binding SelectedNode, Mode=TwoWay}"
+                              Padding="4">
+                        <TreeView.ItemTemplate>
+                            <TreeDataTemplate ItemsSource="{Binding Children}"
+                                              DataType="content:AssetNode">
+                                <TextBlock Text="{Binding Name}"
+                                           FontFamily="{StaticResource FontMono}"
+                                           FontSize="11"/>
+                            </TreeDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </Border>
+
+                <!-- CENTER: preview -->
+                <Border Grid.Column="1" Classes="floating" Margin="2,2,2,2">
+                    <Panel Background="{StaticResource VoidBrush}">
+                        <StackPanel HorizontalAlignment="Center"
+                                    VerticalAlignment="Center" Spacing="8">
+                            <TextBlock Text="3D preview"
+                                       FontFamily="{StaticResource FontDisplay}"
+                                       FontWeight="SemiBold" FontSize="14"
+                                       Foreground="{StaticResource MutedTextBrush}"/>
+                            <TextBlock Text="{Binding StatusMessage}"
+                                       FontFamily="{StaticResource FontMono}"
+                                       FontSize="11"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="Wrap"
+                                       MaxWidth="320"
+                                       TextAlignment="Center"/>
+                        </StackPanel>
+                    </Panel>
+                </Border>
+
+                <!-- RIGHT: inspector sections -->
+                <Border Grid.Column="2" Classes="floating" Margin="2,2,2,2">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <ItemsControl ItemsSource="{Binding InspectorSections}" Padding="10">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="vm:InspectorSection">
+                                    <StackPanel Margin="0,0,0,12">
+                                        <TextBlock Text="{Binding Title}"
+                                                   FontFamily="{StaticResource FontDisplay}"
+                                                   FontWeight="SemiBold" FontSize="10"
+                                                   LetterSpacing="2"
+                                                   Foreground="{StaticResource ElectricBlueBrush}"
+                                                   Margin="0,0,0,6"/>
+                                        <ItemsControl ItemsSource="{Binding Rows}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate DataType="vm:InspectorRow">
+                                                    <Grid ColumnDefinitions="100,*" Margin="0,2">
+                                                        <TextBlock Grid.Column="0"
+                                                                   Text="{Binding Label}"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   FontSize="11"
+                                                                   Foreground="{StaticResource MutedTextBrush}"/>
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding Value}"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   FontSize="11"
+                                                                   Foreground="{StaticResource FontBrush}"
+                                                                   TextWrapping="Wrap"/>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </DockPanel>
+    </Border>
+</UserControl>

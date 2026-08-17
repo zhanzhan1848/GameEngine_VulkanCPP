@@ -255,8 +255,8 @@
   <Style Selector="TreeViewItem">
     <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
     <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
-    <Setter Property="FontSize"   Value="12"/>
-    <Setter Property="Padding"    Value="3"/>
+    <Setter Property="FontSize"   Value="11"/>
+    <Setter Property="Padding"    Value="2,1"/>
   </Style>
   <Style Selector="TreeViewItem:pointerover">
     <Setter Property="Background" Value="{StaticResource BlueTint12}"/>

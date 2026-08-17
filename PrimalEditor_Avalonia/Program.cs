@@ -294,10 +294,10 @@ sealed class Program
             info => new Editors.Texture.TextureEditorViewModel());
         Editors.AssetEditorRegistry.Register(
             Native.AssetType.Mesh,
-            info => new Editors.Geometry.GeometryEditorViewModel());
+            info => new Editors.MeshAssetInspector.MeshAssetInspectorViewModel(info));
         Editors.AssetEditorRegistry.Register(
             Native.AssetType.Model,
-            info => new Editors.Geometry.GeometryEditorViewModel());
+            info => new Editors.MeshAssetInspector.MeshAssetInspectorViewModel(info));
         Editors.AssetEditorRegistry.Register(
             Native.AssetType.Material,
             info => new Editors.Material.MaterialEditorViewModel());

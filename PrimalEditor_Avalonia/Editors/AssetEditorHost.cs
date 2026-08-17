@@ -65,6 +65,7 @@ public class AssetEditorHost : Window
         Texture.TextureEditorViewModel => new Texture.TextureEditorView { DataContext = vm },
         Geometry.GeometryEditorViewModel => new Geometry.GeometryEditorView { DataContext = vm },
         PrimitiveMesh.PrimitiveMeshViewModel => new PrimitiveMesh.PrimitiveMeshView { DataContext = vm },
+        MeshAssetInspector.MeshAssetInspectorViewModel => new MeshAssetInspector.MeshAssetInspectorView { DataContext = vm },
         _ => null,
     };
 

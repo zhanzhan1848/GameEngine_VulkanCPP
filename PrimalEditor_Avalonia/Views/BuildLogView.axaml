@@ -1,0 +1,27 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="PrimalEditor_Avalonia.Views.BuildLogView"
+             Background="{StaticResource VoidBrush}">
+
+    <Border Classes="floating" Margin="6">
+        <DockPanel>
+            <TextBlock DockPanel.Dock="Top" Text="BUILD LOG"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Padding="10,6,8,4"/>
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="4,0,4,4">
+                <TextBox Name="BuildLogText" IsReadOnly="True"
+                         AcceptsReturn="True" TextWrapping="Wrap"
+                         FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
+                         FontSize="11"
+                         Background="{StaticResource VoidBrush}"
+                         Foreground="{StaticResource MintBrush}"
+                         CaretBrush="{StaticResource ElectricBlueBrush}"
+                         BorderThickness="0"
+                         DoubleTapped="OnBuildLogDoubleClick"
+                         Padding="8"/>
+            </ScrollViewer>
+        </DockPanel>
+    </Border>
+</UserControl>

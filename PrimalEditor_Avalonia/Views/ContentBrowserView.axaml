@@ -19,22 +19,23 @@
         <StreamGeometry x:Key="FileIconGeometry">M0,0 L25,0 L40,15 L40,40 L0,40 Z M25,0 L25,15 L40,15</StreamGeometry>
     </UserControl.Resources>
 
-    <Grid ColumnDefinitions="220,*,280">
+    <Grid ColumnDefinitions="140,*,0">
 
-        <!-- =========== LEFT: folder tree (floating) =========== -->
+        <!-- =========== LEFT: folder tree =========== -->
         <Border Grid.Column="0" Classes="floating" Margin="6,6,3,6">
             <DockPanel>
-                <Border DockPanel.Dock="Top" Padding="8,8,8,4">
+                <Border DockPanel.Dock="Top" Padding="4,4,4,2">
                     <TextBlock Text="FOLDERS"
                                FontFamily="{StaticResource FontDisplay}"
-                               FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                               FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
                                Foreground="{StaticResource ElectricBlueBrush}"/>
                 </Border>
                 <TreeView ItemsSource="{Binding Folders}"
                           SelectedItem="{Binding SelectedFolder}"
                           DoubleTapped="OnFolderDoubleClick"
                           DragDrop.AllowDrop="True"
-                          Margin="2,0,2,6"
+                          Margin="2,0,2,4"
+                          FontSize="11"
                           Background="Transparent"
                           BorderThickness="0">
                     <TreeView.Styles>
@@ -67,68 +68,61 @@
             <Border Classes="floating">
                 <DockPanel>
 
-                    <Border DockPanel.Dock="Top" Padding="8,8,8,4">
-                        <Grid RowDefinitions="Auto,Auto" Margin="0">
-                            <ItemsControl Grid.Row="0" ItemsSource="{Binding Breadcrumbs}"
-                                          IsVisible="{Binding HasBreadcrumbs}"
-                                          Margin="0,0,0,6">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <StackPanel Orientation="Horizontal" Spacing="2"/>
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Orientation="Horizontal" Spacing="2">
-                                            <Button Content="{Binding Name}"
-                                                    Click="OnBreadcrumbClick"
-                                                    Tag="{Binding}"
-                                                    Padding="6,1"
-                                                    Background="Transparent"
-                                                    BorderThickness="0"
-                                                    FontFamily="{StaticResource FontMono}"/>
-                                            <TextBlock Text="›" VerticalAlignment="Center"
-                                                       Foreground="{StaticResource ElectricBlueBrush}"/>
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                            <Grid Grid.Row="1" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
-                                <TextBlock Grid.Column="0" Text="FILES"
-                                           FontFamily="{StaticResource FontDisplay}"
-                                           FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                                           Foreground="{StaticResource ElectricBlueBrush}"
-                                           VerticalAlignment="Center"/>
-                                <TextBox Grid.Column="1"
-                                         Name="SearchBox"
-                                         Watermark="Search..."
-                                         Text="{Binding SearchQuery, Mode=TwoWay}"
-                                         Width="180"
-                                         Margin="8,0,4,0"
-                                         KeyDown="OnSearchKeyDown"/>
-                                <Button Grid.Column="2" Content="×"
-                                        Click="OnClearSearchClick"
-                                        IsVisible="{Binding HasActiveSearch}"
-                                        ToolTip.Tip="Clear search"
-                                        Width="28" Margin="0,0,4,0" Padding="0"/>
-                                <TextBlock Grid.Column="3"
-                                           Text="{Binding ResultCountDisplay}"
-                                           Classes="mono"
-                                           VerticalAlignment="Center"
-                                           Margin="0,0,8,0"
-                                           Foreground="{StaticResource SecondaryTextBrush}"/>
-                                <Button Grid.Column="4" Content="+ Folder" Click="OnNewFolderClick" Width="80" Margin="0,0,4,0"/>
-                                <Button Grid.Column="5" Content="Rename" Click="OnRenameClick" Width="70" Margin="0,0,4,0"/>
-                                <Button Grid.Column="6" Content="Delete" Click="OnDeleteClick" Width="64" Margin="0,0,4,0" Classes="danger"/>
-                                <ToggleButton Grid.Column="7"
-                                              IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
-                                              ToolTip.Tip="Toggle thumbnails view"
-                                              Margin="0,0,4,0"
-                                              Padding="8,4">
-                                    <TextBlock Text="▦ Thumbnails" FontSize="12"/>
-                                </ToggleButton>
-                                <Button Grid.Column="8" Content="Import..." Click="OnImportClick" Width="80"/>
-                            </Grid>
+                    <!-- Compact toolbar: current path | collapsible search | actions -->
+                    <Border DockPanel.Dock="Top" Padding="4,4,4,2">
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
+                            <TextBlock Grid.Column="0" Text="FILES"
+                                       FontFamily="{StaticResource FontDisplay}"
+                                       FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                                       Foreground="{StaticResource ElectricBlueBrush}"
+                                       VerticalAlignment="Center"
+                                       Margin="2,0,6,0"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding CurrentPathDisplay}"
+                                       IsVisible="{Binding IsPathVisible}"
+                                       Classes="mono"
+                                       FontSize="10"
+                                       Foreground="{StaticResource SecondaryTextBrush}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"
+                                       ToolTip.Tip="{Binding SelectedFolder.FullPath}"
+                                       Margin="0,0,4,0"/>
+                            <TextBox Grid.Column="1"
+                                     Name="SearchBox"
+                                     Watermark="Search..."
+                                     Text="{Binding SearchQuery, Mode=TwoWay}"
+                                     IsVisible="{Binding IsSearchVisible}"
+                                     Margin="0,0,4,0"
+                                     FontSize="11"
+                                     KeyDown="OnSearchKeyDown"/>
+                            <Button Grid.Column="2" Content="⌕"
+                                    Click="OnToggleSearchClick"
+                                    ToolTip.Tip="Search (Ctrl/Cmd+F)"
+                                    Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
+                            <Button Grid.Column="3" Content="×"
+                                    Click="OnClearSearchClick"
+                                    IsVisible="{Binding HasActiveSearch}"
+                                    ToolTip.Tip="Clear search"
+                                    Width="22" Height="22" Margin="0,0,4,0" Padding="0"/>
+                            <Button Grid.Column="4" Content="+" Click="OnNewFolderClick"
+                                    ToolTip.Tip="New folder"
+                                    Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
+                            <Button Grid.Column="5" Content="R" Click="OnRenameClick"
+                                    ToolTip.Tip="Rename"
+                                    Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
+                            <Button Grid.Column="6" Content="D" Click="OnDeleteClick"
+                                    ToolTip.Tip="Delete"
+                                    Width="22" Height="22" Margin="0,0,4,0" Padding="0"
+                                    Classes="danger"/>
+                            <ToggleButton Grid.Column="7"
+                                          IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
+                                          ToolTip.Tip="Toggle thumbnails view"
+                                          Width="22" Height="22" Margin="0,0,2,0" Padding="0">
+                                <TextBlock Text="▦" FontSize="11"/>
+                            </ToggleButton>
+                            <Button Grid.Column="8" Content="⬇" Click="OnImportClick"
+                                    ToolTip.Tip="Import asset"
+                                    Width="22" Height="22" Padding="0"/>
                         </Grid>
                     </Border>
 
@@ -141,7 +135,7 @@
                     <TextBlock DockPanel.Dock="Bottom"
                                Text="{Binding StatusMessage}"
                                Foreground="{StaticResource SecondaryTextBrush}"
-                               IsVisible="{Binding HasStatus}" Padding="8,6"/>
+                               IsVisible="{Binding HasStatus}" Padding="6,2" FontSize="10"/>
 
                     <!-- List view (compact rows; submesh expansion happens in
                          the thumbnails view instead, so this is a flat list). -->
@@ -150,33 +144,34 @@
                              SelectionChanged="OnFileSelectionChanged"
                              DoubleTapped="OnFileDoubleClick"
                              IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsList}}"
-                             Background="Transparent" BorderThickness="0" Padding="6">
+                             Background="Transparent" BorderThickness="0" Padding="4">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="content:AssetInfo">
-                                <Grid ColumnDefinitions="40,*,100" Margin="2"
+                                <Grid ColumnDefinitions="24,*,70" Margin="1"
                                       PointerPressed="OnAssetItemPointerPressed">
-                                    <Path Grid.Column="0" Width="22" Height="22" Stretch="Uniform"
+                                    <Path Grid.Column="0" Width="14" Height="14" Stretch="Uniform"
                                           Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
                                           Fill="{StaticResource ElectricBlueBrush}"
                                           VerticalAlignment="Center"/>
                                     <TextBlock Grid.Column="1" Text="{Binding FileName}"
-                                               VerticalAlignment="Center" Margin="6,0"
-                                               Classes="mono"/>
+                                               VerticalAlignment="Center" Margin="4,0"
+                                               FontSize="11" Classes="mono"
+                                               TextTrimming="CharacterEllipsis"/>
                                     <TextBlock Grid.Column="2" Text="{Binding SizeDisplay}"
                                                VerticalAlignment="Center"
-                                               Classes="mono dim"
+                                               Classes="mono" FontSize="10"
                                                Foreground="{StaticResource SecondaryTextBrush}"/>
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
 
-                    <!-- Thumbnail view -->
+                    <!-- Thumbnail view (compact tiles) -->
                     <ListBox ItemsSource="{Binding FilteredFiles}"
                              SelectedItem="{Binding SelectedFile}"
                              DoubleTapped="OnFileDoubleClick"
                              IsVisible="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.IsThumbnails}}"
-                             Background="Transparent" BorderThickness="0" Padding="6"
+                             Background="Transparent" BorderThickness="0" Padding="4"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                         <ListBox.ItemsPanel>
                             <ItemsPanelTemplate>
@@ -186,16 +181,12 @@
                         </ListBox.ItemsPanel>
                         <ListBox.Styles>
                             <Style Selector="ListBoxItem">
-                                <Setter Property="MinHeight" Value="150"/>
+                                <Setter Property="MinHeight" Value="56"/>
                                 <Setter Property="VerticalAlignment" Value="Top"/>
                                 <Setter Property="VerticalContentAlignment" Value="Top"/>
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                                <Setter Property="Padding" Value="4"/>
-                                <Setter Property="Margin" Value="3"/>
-                                <!-- The Fluent ListBoxItem template paints selection inside its
-                                     own presenter, so setting Background on ListBoxItem does not
-                                     remove the oversized blue block. Thumbnail cards provide
-                                     their own border; use a neutral presenter for this list. -->
+                                <Setter Property="Padding" Value="2"/>
+                                <Setter Property="Margin" Value="2"/>
                                 <Setter Property="Template">
                                     <ControlTemplate>
                                         <ContentPresenter Content="{TemplateBinding Content}"
@@ -213,15 +204,15 @@
                                 <Panel>
                                     <!-- Ordinary asset (texture, .fbx, material, etc.): single tile -->
                                     <Border IsVisible="{Binding !IsContainer}"
-                                            Width="140" Height="150"
+                                            Width="68" Height="52"
                                             BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
                                             Background="{StaticResource VoidBrush}"
                                             ClipToBounds="True"
                                             PointerPressed="OnAssetItemPointerPressed">
                                         <StackPanel HorizontalAlignment="Center">
-                                            <Panel Width="96" Height="96" Margin="0,4,0,0">
+                                            <Panel Width="20" Height="20" Margin="0,2,0,0">
                                                 <Image Source="{Binding, Converter={x:Static conv:FileTypeConverters.ToThumbnailSource}}" Stretch="Uniform"/>
-                                                <Path Width="48" Height="48" Stretch="Uniform"
+                                                <Path Width="14" Height="14" Stretch="Uniform"
                                                       Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
                                                       Fill="{StaticResource ElectricBlueBrush}"
                                                       IsVisible="{Binding !IsImage}"
@@ -229,19 +220,15 @@
                                                       VerticalAlignment="Center"/>
                                             </Panel>
                                             <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
-                                                       MaxWidth="130" TextAlignment="Center"
-                                                       Classes="mono"
-                                                       HorizontalAlignment="Center" Margin="0,6,0,0"
+                                                       MaxWidth="62" TextAlignment="Center"
+                                                       Classes="mono" FontSize="9"
+                                                       HorizontalAlignment="Center" Margin="0,2,0,0"
                                                        ToolTip.Tip="{Binding FullPath}"/>
                                         </StackPanel>
                                     </Border>
 
-                                    <!-- The custom outer panel gives an expanded model the full
-                                         browser width.  Its tile is translated back to the slot
-                                         it occupied before expansion; children then start on a
-                                         separate full-width row and wrap horizontally. -->
                                     <StackPanel IsVisible="{Binding IsContainer}">
-                                        <Border Width="140" Height="150"
+                                        <Border Width="68" Height="52"
                                                 BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
                                                 Background="{StaticResource VoidBrush}"
                                                 ClipToBounds="True"
@@ -252,37 +239,37 @@
                                             </Border.RenderTransform>
                                             <Grid>
                                                 <StackPanel HorizontalAlignment="Center">
-                                                    <Panel Width="96" Height="96" Margin="0,4,0,0">
-                                                        <Path Width="48" Height="48" Stretch="Uniform"
+                                                    <Panel Width="20" Height="20" Margin="0,2,0,0">
+                                                        <Path Width="14" Height="14" Stretch="Uniform"
                                                               Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
                                                               Fill="{StaticResource ElectricBlueBrush}"
                                                               HorizontalAlignment="Center"
                                                               VerticalAlignment="Center"/>
                                                     </Panel>
                                                     <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
-                                                               MaxWidth="130" TextAlignment="Center"
-                                                               Classes="mono"
-                                                               HorizontalAlignment="Center" Margin="0,6,0,0"
+                                                               MaxWidth="62" TextAlignment="Center"
+                                                               Classes="mono" FontSize="9"
+                                                               HorizontalAlignment="Center" Margin="0,2,0,0"
                                                                ToolTip.Tip="{Binding FullPath}"/>
                                                 </StackPanel>
                                                 <Button HorizontalAlignment="Right" VerticalAlignment="Top"
-                                                        Width="26" Height="26" Margin="0,4,4,0" Padding="0"
+                                                        Width="14" Height="14" Margin="0,2,2,0" Padding="0"
                                                         Tag="{Binding}" Click="OnContainerToggleClick"
                                                         ToolTip.Tip="Expand or collapse LODs and submeshes">
-                                                    <Panel Width="12" Height="12">
-                                                        <Path Data="M2,4 L10,4 L6,9 Z" Fill="{StaticResource ElectricBlueBrush}"
+                                                    <Panel Width="8" Height="8">
+                                                        <Path Data="M1,2 L5,2 L3,5 Z" Fill="{StaticResource ElectricBlueBrush}"
                                                               IsVisible="{Binding IsExpanded}" Stretch="Uniform"/>
-                                                        <Path Data="M4,2 L9,6 L4,10 Z" Fill="{StaticResource ElectricBlueBrush}"
+                                                        <Path Data="M2,1 L5,4 L2,7 Z" Fill="{StaticResource ElectricBlueBrush}"
                                                               IsVisible="{Binding !IsExpanded}" Stretch="Uniform"/>
                                                     </Panel>
                                                 </Button>
                                             </Grid>
                                         </Border>
-                                        <Border Margin="0,6,0,0" Padding="7"
+                                        <Border Margin="0,2,0,0" Padding="3"
                                                 IsVisible="{Binding IsExpanded}"
                                                 Background="#090D17"
                                                 BorderBrush="#26364D" BorderThickness="1"
-                                                CornerRadius="3">
+                                                CornerRadius="2">
                                             <ItemsControl ItemsSource="{Binding Children}">
                                                 <ItemsControl.ItemsPanel>
                                                     <ItemsPanelTemplate>
@@ -291,14 +278,14 @@
                                                 </ItemsControl.ItemsPanel>
                                                 <ItemsControl.ItemTemplate>
                                                     <DataTemplate x:DataType="content:AssetInfo">
-                                                        <Border Width="140" Height="150" Margin="3"
+                                                        <Border Width="68" Height="52" Margin="1"
                                                                 BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
                                                                 Background="{StaticResource VoidBrush}"
                                                                 ClipToBounds="True"
                                                                 PointerPressed="OnSubmeshItemPointerPressed">
                                                             <StackPanel HorizontalAlignment="Center">
-                                                                <Panel Width="96" Height="96" Margin="0,4,0,0">
-                                                                    <Path Width="48" Height="48" Stretch="Uniform"
+                                                                <Panel Width="20" Height="20" Margin="0,2,0,0">
+                                                                    <Path Width="14" Height="14" Stretch="Uniform"
                                                                           Data="{StaticResource MeshIconGeometry}"
                                                                           Fill="{StaticResource ElectricBlueBrush}"
                                                                           HorizontalAlignment="Center"
@@ -306,9 +293,9 @@
                                                                 </Panel>
                                                                 <TextBlock Text="{Binding FileName}"
                                                                            TextTrimming="CharacterEllipsis"
-                                                                           MaxWidth="130" TextAlignment="Center"
-                                                                           Classes="mono"
-                                                                           HorizontalAlignment="Center" Margin="0,6,0,0"/>
+                                                                           MaxWidth="62" TextAlignment="Center"
+                                                                           Classes="mono" FontSize="9"
+                                                                           HorizontalAlignment="Center" Margin="0,2,0,0"/>
                                                             </StackPanel>
                                                         </Border>
                                                     </DataTemplate>
@@ -339,9 +326,5 @@
                            VerticalAlignment="Center"/>
             </Border>
         </Panel>
-
-        <!-- =========== RIGHT-RIGHT: preview pane =========== -->
-        <views:ContentBrowserPreviewView Grid.Column="2"
-                                         DataContext="{Binding PreviewViewModel}"/>
     </Grid>
 </UserControl>

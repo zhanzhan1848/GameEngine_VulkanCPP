@@ -12,8 +12,8 @@ namespace PrimalEditor_Avalonia.Views;
 /// </summary>
 public sealed class AssetThumbnailPanel : Panel
 {
-    internal const double SlotWidth = 166;
-    internal const double MinimumRowHeight = 160;
+    internal const double SlotWidth = 80;
+    internal const double MinimumRowHeight = 60;
 
     protected override Size MeasureOverride(Size availableSize)
     {

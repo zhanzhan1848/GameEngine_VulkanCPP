@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
@@ -29,17 +30,31 @@ namespace PrimalEditor_Avalonia.Views;
             InitializeComponent();
             DataContextChanged += OnDataContextChanged;
             KeyDown += OnWorldEditorKeyDown;
-            BuildService.OnOutput += OnBuildOutput;
-            BuildService.OnCompleted += OnBuildCompleted;
-            Unloaded += (_, _) =>
+            // Polling timer that mirrors BuildService.IsRunning into the
+            // view's IsBuilding property. The static BuildService class
+            // has no events for the running→stopped transition, so a
+            // 100ms UI-thread poll is the cheapest reliable signal.
+            _buildPollTimer = new Avalonia.Threading.DispatcherTimer
             {
-                BuildService.OnOutput -= OnBuildOutput;
-                BuildService.OnCompleted -= OnBuildCompleted;
+                Interval = TimeSpan.FromMilliseconds(100),
             };
+            _buildPollTimer.Tick += (_, _) => IsBuilding = BuildService.IsRunning;
+            _buildPollTimer.Start();
         }
 
-        private EngineViewport3D? _viewport;
-        private WorldEditorViewModel? _vm;
+private EngineViewport3D? _viewport;
+    private WorldEditorViewModel? _vm;
+    private Avalonia.Threading.DispatcherTimer? _buildPollTimer;
+
+    private static MainWindowViewModel? ResolveMainVm()
+    {
+        if (Avalonia.Application.Current?.ApplicationLifetime
+            is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            return desktop.MainWindow?.DataContext as MainWindowViewModel;
+        }
+        return null;
+    }
 
     private void OnDataContextChanged(object? sender, System.EventArgs e)
     {
@@ -59,6 +74,15 @@ namespace PrimalEditor_Avalonia.Views;
         }
         _vm = DataContext as WorldEditorViewModel;
         _viewport = this.FindControl<EngineViewport3D>("WorldViewport");
+        var mainVm = ResolveMainVm();
+        if (mainVm != null && this.FindControl<LoggerView>("LoggerTabView") is { } loggerView)
+        {
+            loggerView.DataContext = mainVm.Logger;
+        }
+        if (mainVm != null && this.FindControl<ContentBrowserView>("ContentBrowserBottomView") is { } cbView)
+        {
+            cbView.DataContext = mainVm.ContentBrowser;
+        }
         if (_vm != null)
         {
             _vm.PickerCandidatesChanged += OnPickerCandidatesChanged;
@@ -557,28 +581,12 @@ namespace PrimalEditor_Avalonia.Views;
         if (DataContext is not WorldEditorViewModel vm) return;
         var config = vm.Project?.BuildConfigName ?? "DebugEditor";
         AppendBuildLog($"[run] launching app (config={config})");
+        IsBuilding = true;
         if (!BuildService.StartApp(config))
         {
             AppendBuildLog("[run] failed to launch — check script path and console");
+            IsBuilding = false;
         }
-    }
-
-    private void OnBuildLogDoubleClick(object? sender, Avalonia.Input.TappedEventArgs e)
-    {
-        if (this.FindControl<Avalonia.Controls.TextBox>("BuildLogText") is not Avalonia.Controls.TextBox logBox) return;
-        // Get the line under the cursor (or use selected text if any).
-        var selected = logBox.SelectedText;
-        if (string.IsNullOrEmpty(selected)) selected = logBox.Text ?? string.Empty;
-        var hit = BuildErrorParser.Parse(selected);
-        if (hit == null)
-        {
-            AppendBuildLog("[jump] no file:line:col pattern in selection");
-            return;
-        }
-        AppendBuildLog($"[jump] {hit.Value.File}:{hit.Value.Line}:{hit.Value.Column} (file exists: {System.IO.File.Exists(hit.Value.File)})");
-        // TODO: integrate with native OpenInEditor once the engine
-        // exposes that API. For now we surface the parsed location
-        // in the log; users can right-click → Reveal in Finder.
     }
 
     private void OnBuildStopClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -587,28 +595,14 @@ namespace PrimalEditor_Avalonia.Views;
         BuildService.Stop();
     }
 
-    private void OnBuildOutput(string line)
-    {
-        Avalonia.Threading.Dispatcher.UIThread.Post(() => AppendBuildLog(line));
-    }
-
-    private void OnBuildCompleted(int exitCode, bool success)
-    {
-        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-        {
-            AppendBuildLog($"[build] exit code={exitCode} success={success}");
-            IsBuilding = false;
-            if (DataContext is WorldEditorViewModel vm)
-            {
-                vm.DebugMessage = success ? "Build succeeded" : $"Build failed (exit {exitCode})";
-            }
-        });
-    }
-
+    // BuildLogView (the inner control at the bottom of WorldEditorView's
+    // tab strip) subscribes to BuildService itself. Toolbar buttons call
+    // AppendBuildLog to record their user-action lines alongside the
+    // captured stdout / exit-code entries.
     private void AppendBuildLog(string line)
     {
-        var textBox = this.FindControl<Avalonia.Controls.TextBox>("BuildLogText");
-        if (textBox == null) return;
+        if (this.FindControl<PrimalEditor_Avalonia.Views.BuildLogView>(null) is not { } logView) return;
+        if (logView.FindControl<Avalonia.Controls.TextBox>("BuildLogText") is not Avalonia.Controls.TextBox textBox) return;
         textBox.Text += (textBox.Text.Length > 0 ? "\n" : string.Empty) + line;
     }
 

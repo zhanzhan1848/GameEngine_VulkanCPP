@@ -27,10 +27,13 @@ public sealed class ContentBrowserViewModelTests
             Root = Path.Combine(Path.GetTempPath(), "P1bTest_" + System.Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Root);
             Directory.CreateDirectory(Path.Combine(Root, "Content"));
-            // Add a few asset files so the filtered list is non-empty.
-            File.WriteAllText(Path.Combine(Root, "Content", "hero.png"), "fake");
-            File.WriteAllText(Path.Combine(Root, "Content", "monster.png"), "fake");
-            File.WriteAllText(Path.Combine(Root, "Content", "level.obj"), "fake");
+            // Use engine-format files (the Content Browser filter restricts
+            // the listing to .model.json/.model/.mesh/.texture). Raw .png
+            // and .obj are no longer visible to the user — they enter
+            // through the Import pipeline instead.
+            File.WriteAllText(Path.Combine(Root, "Content", "hero.model.json"), "{}");
+            File.WriteAllText(Path.Combine(Root, "Content", "monster.texture"), "fake");
+            File.WriteAllText(Path.Combine(Root, "Content", "level.mesh"), "fake");
             Project = new Project { Path = Root };
             ViewModel = new ContentBrowserViewModel { Project = Project };
         }
@@ -49,7 +52,7 @@ public sealed class ContentBrowserViewModelTests
 
         t.ViewModel.SearchQuery = "hero";
         Assert.Single(t.ViewModel.FilteredFiles);
-        Assert.Equal("hero.png", t.ViewModel.FilteredFiles[0].FileName);
+        Assert.Equal("hero.model.json", t.ViewModel.FilteredFiles[0].FileName);
     }
 
     [Fact]
@@ -58,7 +61,7 @@ public sealed class ContentBrowserViewModelTests
         using var t = new TestProject();
         t.ViewModel.SearchQuery = "HERO";
         Assert.Single(t.ViewModel.FilteredFiles);
-        Assert.Equal("hero.png", t.ViewModel.FilteredFiles[0].FileName);
+        Assert.Equal("hero.model.json", t.ViewModel.FilteredFiles[0].FileName);
     }
 
     [Fact]
@@ -99,9 +102,10 @@ public sealed class ContentBrowserViewModelTests
     public void ResultCountDisplay_FormatsWhenSearching()
     {
         using var t = new TestProject();
-        t.ViewModel.SearchQuery = "png";
-        // 2 PNG files in the fixture; FilteredFiles.Count should be 2.
-        Assert.Equal($"2 of {t.ViewModel.Files.Count}", t.ViewModel.ResultCountDisplay);
+        // Fixture ships 3 engine-format files (hero.model.json, monster.texture,
+        // level.mesh). "hero" matches one of them.
+        t.ViewModel.SearchQuery = "hero";
+        Assert.Equal($"1 of {t.ViewModel.Files.Count}", t.ViewModel.ResultCountDisplay);
     }
 
     [Fact]
@@ -129,5 +133,41 @@ public sealed class ContentBrowserViewModelTests
         var before = t.ViewModel.SelectedFolder?.FullPath;
         t.ViewModel.NavigateToBreadcrumb(root);
         Assert.Equal(before, t.ViewModel.SelectedFolder?.FullPath);
+    }
+
+    [Fact]
+    public void Subfolder_IsVisibleInFileArea()
+    {
+        using var t = new TestProject();
+        Directory.CreateDirectory(Path.Combine(t.Project.ContentPath, "Assets"));
+
+        t.ViewModel.RefreshFolders();
+
+        var folder = Assert.Single(t.ViewModel.FilteredFiles, item => item.IsFolder);
+        Assert.Equal("Assets", folder.FileName);
+    }
+
+    [Fact]
+    public void CurrentPathDisplay_FollowsSelectedFolder()
+    {
+        using var t = new TestProject();
+        Directory.CreateDirectory(Path.Combine(t.Project.ContentPath, "Assets"));
+        t.ViewModel.RefreshFolders();
+        var assets = Assert.Single(t.ViewModel.Folders[0].Subfolders);
+
+        t.ViewModel.SelectedFolder = assets;
+
+        Assert.Equal("Content  /  Assets", t.ViewModel.CurrentPathDisplay);
+    }
+
+    [Fact]
+    public void SearchVisibility_TogglesPathVisibility()
+    {
+        using var t = new TestProject();
+        Assert.True(t.ViewModel.IsPathVisible);
+
+        t.ViewModel.IsSearchVisible = true;
+
+        Assert.False(t.ViewModel.IsPathVisible);
     }
 }
