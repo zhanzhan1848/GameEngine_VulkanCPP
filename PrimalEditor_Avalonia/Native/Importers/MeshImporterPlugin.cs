@@ -39,29 +39,29 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
 
     public async Task<ImportedAsset> RunAsync(ImportRequest request, IProgress<double>? progress, CancellationToken ct)
     {
-        var destPath = Path.Combine(request.DestinationDir, Path.GetFileName(request.SourcePath));
-        var cookedPath = Path.ChangeExtension(destPath, ".mesh");
+        // Source file (e.g. .fbx / .obj / .gltf) is NOT copied into the
+        // project; the content browser shows the model via its cooked
+        // .mesh + .model.json sidecar. The source path is recorded in
+        // the sidecar's Source field for traceability and re-cooking.
         Directory.CreateDirectory(request.DestinationDir);
+
+        var sourceStem = Path.GetFileNameWithoutExtension(request.SourcePath);
+        var cookedPath = Path.Combine(request.DestinationDir, sourceStem + ".mesh");
+        var sidecarPath = Path.Combine(request.DestinationDir, sourceStem + ".model.json");
 
         var settings = (GeometryImportSettings)request.Settings;
 
-        try { File.Copy(request.SourcePath, destPath, overwrite: true); }
-        catch (Exception ex)
+        if (!NativeEngineBridge.IsLoaded)
         {
             return new ImportedAsset
             {
                 SourcePath = request.SourcePath,
-                DestinationPath = destPath,
-                Type = AssetType.Mesh,
+                DestinationPath = sidecarPath,
+                Type = AssetType.Model,
                 Success = false,
-                ErrorMessage = ex.Message,
+                ErrorMessage = "ContentTools not loaded; cannot cook mesh.",
             };
         }
-
-        AssetImportSettingsStore.Save<GeometryImportSettings>(destPath, settings);
-
-        if (!NativeEngineBridge.IsLoaded)
-            return new ImportedAsset { SourcePath = request.SourcePath, DestinationPath = destPath, Type = AssetType.Mesh, Success = true };
 
         var pod = settings.ToPOD();
         var cookOk = await Task.Run(() => NativeEngineBridge.CookMeshWithPipeline(request.SourcePath, cookedPath, pod), ct);
@@ -70,8 +70,8 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
             return new ImportedAsset
             {
                 SourcePath = request.SourcePath,
-                DestinationPath = destPath,
-                Type = AssetType.Mesh,
+                DestinationPath = sidecarPath,
+                Type = AssetType.Model,
                 Success = false,
                 ErrorMessage = "ContentTools cooking failed",
             };
@@ -85,14 +85,25 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
                 $"(meshes={pod.MeshCount}, meshlets={pod.MeshletCount}).");
         }
 
+        // The .model.json sidecar is already written by ContentTools'
+        // CookMeshWithPipeline (ContentTools.cpp:762) using real per-mesh
+        // metadata. We only need to mint the asset GUID + import settings
+        // here; the sidecar itself is the cooker's responsibility.
+
+        // Save .meta against the sidecar (not the cooked .mesh): the
+        // registry registers the sidecar as the user-visible asset, and
+        // .mesh is a hidden cooked artifact. Keeping .meta with the
+        // user-facing file prevents GUID drift if the mesh is regenerated.
+        AssetImportSettingsStore.Save<GeometryImportSettings>(sidecarPath, settings);
+
         var requestId = NativeEngineBridge.ImportMesh(cookedPath);
         if (requestId == 0)
         {
             return new ImportedAsset
             {
                 SourcePath = request.SourcePath,
-                DestinationPath = destPath,
-                Type = AssetType.Mesh,
+                DestinationPath = sidecarPath,
+                Type = AssetType.Model,
                 Success = false,
                 ErrorMessage = "Mesh loader rejected the request (job system down?)",
             };
@@ -109,8 +120,8 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
                 return new ImportedAsset
                 {
                     SourcePath = request.SourcePath,
-                    DestinationPath = destPath,
-                    Type = AssetType.Mesh,
+                    DestinationPath = sidecarPath,
+                    Type = AssetType.Model,
                     Success = status == NativeEngineBridge.MeshImportResultStatus.Success,
                     NativeHandle = meshId,
                     ErrorMessage = status switch
@@ -127,8 +138,8 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
         return new ImportedAsset
         {
             SourcePath = request.SourcePath,
-            DestinationPath = destPath,
-            Type = AssetType.Mesh,
+            DestinationPath = sidecarPath,
+            Type = AssetType.Model,
             Success = false,
             ErrorMessage = $"Mesh import timed out after {MeshPollTimeoutMs / 1000}s",
         };

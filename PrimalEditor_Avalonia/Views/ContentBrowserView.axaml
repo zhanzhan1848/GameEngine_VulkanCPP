@@ -153,7 +153,8 @@
                              Background="Transparent" BorderThickness="0" Padding="6">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="content:AssetInfo">
-                                <Grid ColumnDefinitions="40,*,100" Margin="2">
+                                <Grid ColumnDefinitions="40,*,100" Margin="2"
+                                      PointerPressed="OnAssetItemPointerPressed">
                                     <Path Grid.Column="0" Width="22" Height="22" Stretch="Uniform"
                                           Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
                                           Fill="{StaticResource ElectricBlueBrush}"
@@ -215,7 +216,8 @@
                                             Width="140" Height="150"
                                             BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
                                             Background="{StaticResource VoidBrush}"
-                                            ClipToBounds="True">
+                                            ClipToBounds="True"
+                                            PointerPressed="OnAssetItemPointerPressed">
                                         <StackPanel HorizontalAlignment="Center">
                                             <Panel Width="96" Height="96" Margin="0,4,0,0">
                                                 <Image Source="{Binding, Converter={x:Static conv:FileTypeConverters.ToThumbnailSource}}" Stretch="Uniform"/>
@@ -292,7 +294,8 @@
                                                         <Border Width="140" Height="150" Margin="3"
                                                                 BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
                                                                 Background="{StaticResource VoidBrush}"
-                                                                ClipToBounds="True">
+                                                                ClipToBounds="True"
+                                                                PointerPressed="OnSubmeshItemPointerPressed">
                                                             <StackPanel HorizontalAlignment="Center">
                                                                 <Panel Width="96" Height="96" Margin="0,4,0,0">
                                                                     <Path Width="48" Height="48" Stretch="Uniform"

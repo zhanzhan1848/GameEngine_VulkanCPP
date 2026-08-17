@@ -1,6 +1,7 @@
 using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Markup.Xaml;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
@@ -413,36 +414,34 @@ namespace PrimalEditor_Avalonia.Views;
         if (DataContext is not WorldEditorViewModel vm) return;
         if (vm.ActiveScene == null) return;
 
-        var files = e.Data.Contains(Avalonia.Input.DataFormats.Files)
-            ? e.Data.Get(Avalonia.Input.DataFormats.Files) as System.Collections.IEnumerable
-            : null;
-
-        string? droppedPath = null;
-        if (files != null)
+        // First try the in-process drag payload from ContentBrowser —
+        // this carries the canonical GUID and lets submesh children
+        // resolve to their parent model.
+        var payload = ReadAssetDragPayload(e);
+        AssetInfo? info = null;
+        if (payload != null)
         {
-            foreach (var f in files)
+            info = ResolveFromPayload(payload);
+        }
+
+        // Fall back to OS file drops (Finder/Explorer). These carry raw
+        // file paths, not AssetInfo, so we look the path up in the
+        // registry and synthesise one if missing.
+        if (info == null)
+        {
+            var droppedPath = FirstDroppedFilePath(e);
+            if (string.IsNullOrEmpty(droppedPath) || !System.IO.File.Exists(droppedPath))
             {
-                if (f is string s) { droppedPath = s; break; }
-                if (f is Avalonia.Platform.Storage.IStorageItem item && item.Path.IsFile)
-                {
-                    droppedPath = item.Path.LocalPath;
-                    break;
-                }
+                return;
             }
-        }
-        if (string.IsNullOrEmpty(droppedPath) || !System.IO.File.Exists(droppedPath))
-        {
-            return;
+
+            info = AssetRegistry.Get(droppedPath) ?? new AssetInfo
+            {
+                FullPath = droppedPath,
+                Type = ContentHelper.GetAssetType(droppedPath),
+            };
         }
 
-        // Find the .meta sidecar's AssetInfo (it was registered when the
-        // .mesh was cooked). If not, create a temporary AssetInfo from
-        // the path so the drop pipeline can still proceed.
-        var info = PrimalEditor_Avalonia.Content.AssetRegistry.Get(droppedPath) ?? new PrimalEditor_Avalonia.Content.AssetInfo
-        {
-            FullPath = droppedPath,
-            Type = PrimalEditor_Avalonia.Content.ContentHelper.GetAssetType(droppedPath),
-        };
         try
         {
             await vm.DropAssetAsync(info, 0f, 0f, 0f);
@@ -451,6 +450,58 @@ namespace PrimalEditor_Avalonia.Views;
         {
             Logger.Error("DropAsset failed", ex);
         }
+    }
+
+    private static AssetDragPayload? ReadAssetDragPayload(Avalonia.Input.DragEventArgs e)
+    {
+        var format = Avalonia.Input.DataFormat.CreateStringApplicationFormat(AssetDragPayload.DataFormat);
+        if (!e.DataTransfer.Contains(format)) return null;
+        var raw = e.DataTransfer.TryGetValue(format);
+        return AssetDragPayload.Deserialize(raw ?? string.Empty);
+    }
+
+    private static string? FirstDroppedFilePath(Avalonia.Input.DragEventArgs e)
+    {
+        if (!e.DataTransfer.Contains(Avalonia.Input.DataFormat.File)) return null;
+        var items = e.DataTransfer.TryGetFiles();
+        if (items == null) return null;
+        foreach (var item in items)
+        {
+            if (item is Avalonia.Platform.Storage.IStorageItem storage && storage.Path.IsFile)
+            {
+                return storage.Path.LocalPath;
+            }
+        }
+        return null;
+    }
+
+    // Reconstruct an AssetInfo for the drop target. For model containers
+    // and submesh children dragged from ContentBrowser the original
+    // FullPath may not point to a file on disk, so we always rely on the
+    // GUID and look the entry up in the registry. The caller passes the
+    // original payload so it can decide whether to fall back to the
+    // synthetic child path for downstream consumers.
+    private static AssetInfo? ResolveFromPayload(AssetDragPayload payload)
+    {
+        var info = AssetRegistry.GetByGuid(payload.Guid);
+        if (info != null) return info;
+
+        // Submesh children are synthetic — they live inside their
+        // parent's Children list rather than the top-level registry.
+        // Fall back to the parent if we know about it.
+        if (payload.ParentGuid.HasValue)
+        {
+            var parent = AssetRegistry.GetByGuid(payload.ParentGuid.Value);
+            if (parent != null) return parent;
+        }
+
+        // Last resort: synthesise from the payload itself.
+        return new AssetInfo
+        {
+            Guid = payload.Guid,
+            FullPath = payload.FullPath,
+            Type = payload.IsContainer ? AssetType.Model : AssetType.Unknown,
+        };
     }
 
     private void OnDragOver(object? sender, Avalonia.Input.DragEventArgs e)

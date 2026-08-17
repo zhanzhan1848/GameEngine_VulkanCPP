@@ -3,8 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Markup.Xaml;
+using Avalonia.Input;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors;
 using PrimalEditor_Avalonia.ViewModels;
@@ -13,15 +14,20 @@ namespace PrimalEditor_Avalonia.Views;
 
 public partial class ContentBrowserView : UserControl
 {
+    private const double DragThreshold = 5.0;
+
+    private AssetInfo? _dragCandidate;
+    private Guid? _dragCandidateParentGuid;
+    private Point _dragStart;
+    private bool _toggleContainerOnRelease;
+    private bool _dragInProgress;
+
     public ContentBrowserView()
     {
         InitializeComponent();
         KeyDown += OnContentBrowserKeyDown;
-    }
-
-    private void InitializeComponent()
-    {
-        AvaloniaXamlLoader.Load(this);
+        PointerMoved += OnAssetPointerMoved;
+        PointerReleased += OnAssetPointerReleased;
     }
 
     private void OnFolderDoubleClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -216,9 +222,92 @@ public partial class ContentBrowserView : UserControl
         if (e.Source is Button) return;
         if (sender is Control { DataContext: AssetInfo info })
         {
-            ToggleContainer(info);
-            e.Handled = true;
+            BeginPotentialAssetDrag(e, info, parentGuid: null, toggleContainerOnRelease: true);
         }
+    }
+
+    private void OnAssetItemPointerPressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        if (sender is Control { DataContext: AssetInfo info })
+        {
+            BeginPotentialAssetDrag(e, info, parentGuid: null, toggleContainerOnRelease: false);
+        }
+    }
+
+    private void OnSubmeshItemPointerPressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        if (sender is Control { DataContext: AssetInfo info })
+        {
+            var parentGuid = FindParentOf(info)?.Guid;
+            BeginPotentialAssetDrag(e, info, parentGuid, toggleContainerOnRelease: false);
+        }
+    }
+
+    private void BeginPotentialAssetDrag(
+        Avalonia.Input.PointerPressedEventArgs e,
+        AssetInfo info,
+        Guid? parentGuid,
+        bool toggleContainerOnRelease)
+    {
+        _dragCandidate = info.IsFolder ? null : info;
+        _dragCandidateParentGuid = parentGuid;
+        _dragStart = e.GetPosition(this);
+        _toggleContainerOnRelease = toggleContainerOnRelease;
+    }
+
+    private async void OnAssetPointerMoved(object? sender, Avalonia.Input.PointerEventArgs e)
+    {
+        if (_dragCandidate == null || _dragInProgress) return;
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            ClearPotentialAssetDrag();
+            return;
+        }
+
+        var current = e.GetPosition(this);
+        if (!HasExceededDragThreshold(_dragStart, current)) return;
+
+        var info = _dragCandidate;
+        var parentGuid = _dragCandidateParentGuid;
+        ClearPotentialAssetDrag();
+        _dragInProgress = true;
+
+        try
+        {
+            var payload = new AssetDragPayload(info.Guid, info.FullPath, info.IsContainer, parentGuid);
+            var format = Avalonia.Input.DataFormat.CreateStringApplicationFormat(AssetDragPayload.DataFormat);
+            var drag = new Avalonia.Input.DataTransfer();
+            drag.Add(Avalonia.Input.DataTransferItem.Create(format, payload.Serialize()));
+            await Avalonia.Input.DragDrop.DoDragDropAsync(e, drag, Avalonia.Input.DragDropEffects.Copy);
+        }
+        catch (Exception ex)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Error("Asset drag failed", ex);
+        }
+        finally
+        {
+            _dragInProgress = false;
+        }
+    }
+
+    private void OnAssetPointerReleased(object? sender, Avalonia.Input.PointerReleasedEventArgs e)
+    {
+        var container = _toggleContainerOnRelease ? _dragCandidate : null;
+        ClearPotentialAssetDrag();
+        if (container != null) ToggleContainer(container);
+    }
+
+    internal static bool HasExceededDragThreshold(Point start, Point current) =>
+        Math.Abs(current.X - start.X) >= DragThreshold ||
+        Math.Abs(current.Y - start.Y) >= DragThreshold;
+
+    private void ClearPotentialAssetDrag()
+    {
+        _dragCandidate = null;
+        _dragCandidateParentGuid = null;
+        _toggleContainerOnRelease = false;
     }
 
     private void OnContainerToggleClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -260,25 +349,35 @@ public partial class ContentBrowserView : UserControl
 
     private void OnDragEnter(object? sender, Avalonia.Input.DragEventArgs e)
     {
-        if (!e.Data.Contains(Avalonia.Input.DataFormats.Files)) return;
+        if (!HasDroppedFiles(e))
+        {
+            e.DragEffects = Avalonia.Input.DragDropEffects.None;
+            return;
+        }
         e.DragEffects = Avalonia.Input.DragDropEffects.Copy;
-        DropOverlay.IsVisible = true;
+        if (DropOverlay != null) DropOverlay.IsVisible = true;
     }
 
     private void OnDragLeave(object? sender, Avalonia.Input.DragEventArgs e)
     {
-        DropOverlay.IsVisible = false;
+        if (DropOverlay != null) DropOverlay.IsVisible = false;
     }
 
     private void OnDragOver(object? sender, Avalonia.Input.DragEventArgs e)
     {
-        if (!e.Data.Contains(Avalonia.Input.DataFormats.Files)) return;
-        e.DragEffects = Avalonia.Input.DragDropEffects.Copy;
+        e.DragEffects = HasDroppedFiles(e)
+            ? Avalonia.Input.DragDropEffects.Copy
+            : Avalonia.Input.DragDropEffects.None;
     }
 
     private async void OnFileDrop(object? sender, Avalonia.Input.DragEventArgs e)
     {
-        DropOverlay.IsVisible = false;
+        if (DropOverlay != null) DropOverlay.IsVisible = false;
+
+        // Internal Content Browser asset drags use AssetDragPayload, not
+        // DataFormat.File. They may be released over this panel and must not
+        // enter the external-file import path.
+        if (!HasDroppedFiles(e)) return;
 
         if (DataContext is not ContentBrowserViewModel vm) return;
         if (vm.Project == null)
@@ -287,18 +386,13 @@ public partial class ContentBrowserView : UserControl
             return;
         }
 
-        var files = e.Data.Contains(Avalonia.Input.DataFormats.Files)
-            ? e.Data.Get(Avalonia.Input.DataFormats.Files) as System.Collections.IEnumerable
-            : null;
-
         var paths = new System.Collections.Generic.List<string>();
+        var files = e.DataTransfer.TryGetFiles();
         if (files != null)
         {
             foreach (var f in files)
             {
-                var p = f as string;
-                if (!string.IsNullOrEmpty(p)) paths.Add(p);
-                else if (f is Avalonia.Platform.Storage.IStorageItem item && item.Path.IsFile)
+                if (f is Avalonia.Platform.Storage.IStorageItem item && item.Path.IsFile)
                     paths.Add(item.Path.LocalPath);
             }
         }
@@ -306,8 +400,19 @@ public partial class ContentBrowserView : UserControl
         if (paths.Count == 0) return;
 
         var ownerWindow = Avalonia.Controls.TopLevel.GetTopLevel(this) as Avalonia.Controls.Window;
-        if (ownerWindow != null) await vm.ImportPathsAsync(paths, ownerWindow);
+        if (ownerWindow == null) return;
+        try
+        {
+            await vm.ImportPathsAsync(paths, ownerWindow);
+        }
+        catch (Exception ex)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Error("Dropped-file import failed", ex);
+        }
     }
+
+    private static bool HasDroppedFiles(Avalonia.Input.DragEventArgs e) =>
+        e.DataTransfer.Contains(Avalonia.Input.DataFormat.File);
 
     private async void OnImportClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {

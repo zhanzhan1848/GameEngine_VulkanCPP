@@ -78,14 +78,15 @@ public static class LegacyMetaMigrator
 
     private static string InferImporterFromExtension(string assetPath)
     {
+        var fileName = Path.GetFileName(assetPath).ToLowerInvariant();
         var ext = Path.GetExtension(assetPath).ToLowerInvariant();
         return ext switch
         {
             ".png" or ".jpg" or ".jpeg" or ".bmp" or ".tga" or ".dds" or ".ktx" or ".ktx2" or ".hdr" or ".exr" => "TextureImporter",
-            ".fbx" or ".obj" or ".gltf" or ".glb" or ".dae" or ".blend" or ".mesh" => "GeometryImporter",
+            ".mesh" or ".fbx" or ".obj" or ".gltf" or ".glb" or ".dae" or ".blend" => "GeometryImporter",
             ".material" => "MaterialImporter",
             ".shader" => "ShaderImporter",
-            _ => "UnknownImporter",
+            _ => fileName.EndsWith(".model.json", StringComparison.Ordinal) ? "GeometryImporter" : "UnknownImporter",
         };
     }
 }

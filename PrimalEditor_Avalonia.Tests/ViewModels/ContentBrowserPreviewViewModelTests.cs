@@ -94,6 +94,48 @@ public sealed class ContentBrowserPreviewViewModelTests
     }
 
     [Fact]
+    public void LoadMesh_MalformedCookedMesh_FailsPreviewWithoutThrowing()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "PrimalPreview_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var sidecarPath = Path.Combine(dir, "broken.model.json");
+            var meshPath = Path.Combine(dir, "broken.mesh");
+            File.WriteAllText(sidecarPath,
+                $"{{ \"version\": 1, \"source\": \"broken.fbx\", \"mesh\": \"{meshPath}\", \"submeshes\": [] }}");
+
+            // A corrupt/old cooked file used to flow into the wireframe
+            // render callback, where invalid indices could escape as an
+            // unhandled exception and terminate the Avalonia process.
+            using (var fs = File.Create(meshPath))
+            using (var bw = new BinaryWriter(fs))
+            {
+                bw.Write(0u); // empty scene name
+                bw.Write(0u); // material count
+                bw.Write(1u); // LOD count
+                bw.Write(0u); // empty LOD name
+                bw.Write(uint.MaxValue); // impossible mesh count
+            }
+
+            var vm = new ContentBrowserPreviewViewModel();
+            var exception = Record.Exception(() => vm.Asset = new AssetInfo
+            {
+                Type = AssetType.Model,
+                FullPath = sidecarPath,
+            });
+
+            Assert.Null(exception);
+            Assert.Equal("Could not parse mesh file", vm.StatusMessage);
+            Assert.Null(vm.PreviewLOD);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Asset_setter_refreshes_when_switching_between_distinct_assets()
     {
         var dir = Path.Combine(Path.GetTempPath(), "PrimalPreview_" + Guid.NewGuid().ToString("N"));

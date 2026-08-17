@@ -296,6 +296,9 @@ sealed class Program
             Native.AssetType.Mesh,
             info => new Editors.Geometry.GeometryEditorViewModel());
         Editors.AssetEditorRegistry.Register(
+            Native.AssetType.Model,
+            info => new Editors.Geometry.GeometryEditorViewModel());
+        Editors.AssetEditorRegistry.Register(
             Native.AssetType.Material,
             info => new Editors.Material.MaterialEditorViewModel());
         Editors.AssetEditorRegistry.Register(
@@ -741,30 +744,21 @@ sealed class Program
 
             using var fs = File.OpenRead(cookedPath);
             using var br = new System.IO.BinaryReader(fs);
-            var nameLen = br.ReadUInt32();
-            if (nameLen > 256)
+            var lodCount = br.ReadUInt32();
+            if (lodCount == 0 || lodCount > 1024)
             {
-                Logger.Error($"FAIL: Implausible scene name length: {nameLen}");
+                Logger.Error($"FAIL: Implausible LOD count: {lodCount}");
                 Directory.Delete(verifyDir, true);
                 return 1;
             }
-            string name = "(empty)";
-            if (nameLen > 0)
-            {
-                name = new string(br.ReadChars((int)nameLen));
-            }
-            Logger.Info($"  scene name: '{name}' (len: {nameLen})");
-            var materialCount = br.ReadUInt32();
-            Logger.Info($"  materials: {materialCount}");
-            for (uint i = 0; i < materialCount; i++)
-            {
-                var matNameLen = br.ReadUInt32();
-                if (matNameLen > 256) break;
-                var matName = matNameLen > 0 ? new string(br.ReadChars((int)matNameLen)) : "(empty)";
-                Logger.Info($"    [{i}] {matName}");
-            }
-            var lodCount = br.ReadUInt32();
             Logger.Info($"  LODs: {lodCount}");
+            for (uint i = 0; i < lodCount; i++)
+            {
+                var threshold = br.ReadSingle();
+                var meshCount = br.ReadUInt32();
+                br.ReadUInt32(); // size_of_submeshes (placeholder)
+                Logger.Info($"    [{i}] threshold={threshold:F2}, meshes={meshCount}");
+            }
 
             Directory.Delete(verifyDir, true);
             Logger.Info($"PASS: Cooked .mesh file is well-formed (size: {info.Length} bytes, {lodCount} LODs)");

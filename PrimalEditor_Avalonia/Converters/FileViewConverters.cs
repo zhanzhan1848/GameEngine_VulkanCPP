@@ -30,6 +30,32 @@ public sealed class BoolInverterConverter : IValueConverter
 public static class CommonConverters
 {
     public static readonly IValueConverter InvertBool = BoolInverterConverter.Instance;
+    public static readonly IValueConverter BoolToOnOffText = new BoolToOnOffConverter();
+    public static readonly IValueConverter BoolToOnOffBrush = new BoolToOnOffBrushConverter();
+}
+
+/// <summary>Maps a bool to "ON" / "OFF" display text for module-status badges.</summary>
+public sealed class BoolToOnOffConverter : IValueConverter
+{
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is bool b && b ? "ON" : "OFF";
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
+/// <summary>
+/// Maps a bool to an accent brush suitable for the ON/OFF badge background:
+/// electric blue (active) vs muted hairline (disabled).
+/// </summary>
+public sealed class BoolToOnOffBrushConverter : IValueConverter
+{
+    private static readonly IBrush OnBrush = new SolidColorBrush(Color.FromArgb(0x66, 0x6F, 0xA8, 0xFF));  // ElectricBlue @ 40%
+    private static readonly IBrush OffBrush = new SolidColorBrush(Color.FromArgb(0x66, 0x2C, 0x33, 0x49)); // Hairline   @ 40%
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is bool b && b ? OnBrush : (IBrush)OffBrush;
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
 }
 
 public class ViewModeToBoolConverter : IValueConverter

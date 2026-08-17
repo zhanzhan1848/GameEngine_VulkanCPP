@@ -100,6 +100,70 @@ public sealed class GeometryDataTests
         Assert.False(geom.Load(path));
     }
 
+    [Fact]
+    public void Load_Rejects_Buffer_Size_That_Exceeds_Remaining_File()
+    {
+        using var temp = new TestInfrastructure.TemporaryDirectory();
+        var path = Path.Combine(temp.Path, "oversized.mesh");
+
+        using (var fs = File.Create(path))
+        using (var bw = new BinaryWriter(fs))
+        {
+            WriteU32String(bw, "Broken");
+            bw.Write(0u); // material_count
+            bw.Write(1u); // lod_count
+            WriteU32String(bw, "LOD0");
+            bw.Write(1u); // mesh_count
+            WriteU32String(bw, "Body");
+            bw.Write(0u); // lod_id
+            bw.Write(0u); // material_idx
+            bw.Write(20u); // element_size
+            bw.Write(3u); // elements_type
+            bw.Write(uint.MaxValue); // malicious vertex_count
+            bw.Write(4u); // index_size
+            bw.Write(3u); // index_count
+            bw.Write(0f); // lod_threshold
+        }
+
+        var geom = new MeshGeometry();
+        Assert.False(geom.Load(path));
+        Assert.Empty(geom.LODs);
+    }
+
+    [Fact]
+    public void Load_Rejects_Index_Outside_Vertex_Buffer()
+    {
+        using var temp = new TestInfrastructure.TemporaryDirectory();
+        var path = Path.Combine(temp.Path, "bad-index.mesh");
+
+        using (var fs = File.Create(path))
+        using (var bw = new BinaryWriter(fs))
+        {
+            WriteU32String(bw, "Broken");
+            bw.Write(0u); // material_count
+            bw.Write(1u); // lod_count
+            WriteU32String(bw, "LOD0");
+            bw.Write(1u); // mesh_count
+            WriteU32String(bw, "Body");
+            bw.Write(0u); // lod_id
+            bw.Write(0u); // material_idx
+            bw.Write(0u); // element_size
+            bw.Write(0u); // elements_type
+            bw.Write(3u); // vertex_count
+            bw.Write(4u); // index_size
+            bw.Write(3u); // index_count
+            bw.Write(0f); // lod_threshold
+            bw.Write(new byte[3 * 12]); // positions
+            bw.Write(0u);
+            bw.Write(1u);
+            bw.Write(99u); // outside the 3-vertex buffer
+        }
+
+        var geom = new MeshGeometry();
+        Assert.False(geom.Load(path));
+        Assert.Empty(geom.LODs);
+    }
+
     private static void WriteU32String(BinaryWriter bw, string s)
     {
         var bytes = Encoding.UTF8.GetBytes(s);

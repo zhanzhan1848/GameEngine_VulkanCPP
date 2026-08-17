@@ -2,6 +2,16 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
   <!-- =========================================================== -->
+  <!-- TRANSITION INFRA                                            -->
+  <!-- Avalonia XAML resolves transition target properties (e.g.   -->
+  <!-- "Background") against the parent style's TargetType. We      -->
+  <!-- can't define <Transitions> as a detached resource, so each   -->
+  <!-- control's <Transitions> is inlined right where it's used.    -->
+  <!-- Timing stays in the 120–220ms band — anything longer feels   -->
+  <!-- sluggish in a tool.                                          -->
+  <!-- =========================================================== -->
+
+  <!-- =========================================================== -->
   <!-- GLOBAL TEXT — calm, no aggressive letter-spacing             -->
   <!-- =========================================================== -->
   <Style Selector="TextBlock">
@@ -54,6 +64,13 @@
     <Setter Property="CornerRadius" Value="6"/>
     <Setter Property="HorizontalContentAlignment" Value="Center"/>
     <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="Button:pointerover">
     <Setter Property="Background" Value="{StaticResource PanelHoverBrush}"/>
@@ -67,6 +84,9 @@
     <Setter Property="Background" Value="{StaticResource ElectricBlueBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
     <Setter Property="Foreground" Value="#FFFFFF"/>
+  </Style>
+  <Style Selector="Button.accent:pointerover">
+    <Setter Property="Background" Value="{StaticResource ElectricBlueDeepBrush}"/>
   </Style>
   <Style Selector="Button.danger">
     <Setter Property="BorderBrush" Value="{StaticResource CoralBrush}"/>
@@ -89,6 +109,13 @@
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="Padding" Value="14,6"/>
     <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="ToggleButton:pointerover">
     <Setter Property="Background" Value="{StaticResource PanelHoverBrush}"/>
@@ -115,6 +142,13 @@
     <Setter Property="CornerRadius" Value="4"/>
     <Setter Property="Padding" Value="8,5"/>
     <Setter Property="MinHeight" Value="26"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="TextBox:focus">
     <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
@@ -139,6 +173,13 @@
     <Setter Property="FontSize"       Value="12"/>
     <Setter Property="MinHeight"      Value="26"/>
     <Setter Property="Padding"        Value="8,2"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="ComboBox:focus">
     <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
@@ -167,6 +208,11 @@
     <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
     <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
     <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.15"/>
+      </Transitions>
+    </Setter>
   </Style>
 
   <!-- =========================================================== -->
@@ -293,18 +339,82 @@
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="Border.panel">
     <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="Border.floating">
     <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- EXPANDER                                                     -->
+  <!-- Calm expand/collapse; chevron rotation animation is provided  -->
+  <!-- by the Fluent theme, here we just restyle the header and      -->
+  <!-- the content card to match the cyberpunk palette.             -->
+  <!-- =========================================================== -->
+  <Style Selector="Expander">
+    <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="Padding" Value="10,8,10,8"/>
+    <Setter Property="Margin" Value="0,4,0,0"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="HorizontalAlignment" Value="Stretch"/>
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+  </Style>
+  <Style Selector="Expander /template/ ToggleButton#ExpanderHeader">
+    <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="Padding" Value="10,8"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Expander /template/ ToggleButton#ExpanderHeader:pointerover">
+    <Setter Property="Background" Value="{StaticResource PanelHoverBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+  <Style Selector="Expander /template/ Border#ExpanderContent">
+    <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1,0,1,1"/>
+    <Setter Property="CornerRadius" Value="0,0,6,6"/>
   </Style>
 
 </Styles>

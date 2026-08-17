@@ -67,6 +67,14 @@ public static class WireframeRenderer
         {
             if (submeshIndex.HasValue && submeshIndex.Value != meshIdx) continue;
             var mesh = lod.Meshes[meshIdx];
+            var expectedPositionBytes = (long)mesh.VertexCount * sizeof(float) * 3;
+            var expectedIndexBytes = (long)mesh.IndexCount * mesh.IndexSize;
+            if (mesh.VertexCount <= 0 || mesh.IndexCount <= 0 ||
+                mesh.IndexSize is not (sizeof(ushort) or sizeof(uint)) ||
+                expectedPositionBytes != mesh.Positions.Length ||
+                expectedIndexBytes != mesh.Indices.Length)
+                continue;
+
             var pos = mesh.GetPositionsAsFloat3();
             var idx = mesh.GetIndicesAsInt();
 
@@ -90,7 +98,19 @@ public static class WireframeRenderer
             for (int i = 0; i + 2 < idx.Length; i += 3)
             {
                 int a = idx[i + 0], b = idx[i + 1], c = idx[i + 2];
+                // Geometry.Load rejects malformed indices, but keep the
+                // render boundary defensive as Mesh instances can also be
+                // created by editor tools and tests. An exception escaping
+                // Avalonia's Render callback terminates the desktop app.
+                if ((uint)a >= (uint)screen.Length ||
+                    (uint)b >= (uint)screen.Length ||
+                    (uint)c >= (uint)screen.Length)
+                    continue;
                 var pa = screen[a]; var pb = screen[b]; var pc = screen[c];
+                if (!float.IsFinite(pa.x) || !float.IsFinite(pa.y) ||
+                    !float.IsFinite(pb.x) || !float.IsFinite(pb.y) ||
+                    !float.IsFinite(pc.x) || !float.IsFinite(pc.y))
+                    continue;
 
                 // Backface cull: cross product of edge vectors; the z
                 // component of the cross product in screen space determines

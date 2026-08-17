@@ -594,7 +594,8 @@ public class ContentBrowserViewModel : Document
                 if (plugin == null) continue;
                 if (plugin is MeshImporterPlugin)
                 {
-                    ImportingStatus = $"Cooking {name} → {Path.ChangeExtension(name, ".mesh")} ({index}/{total}) — large meshes may take several minutes...";
+                    var stem = Path.GetFileNameWithoutExtension(name);
+                    ImportingStatus = $"Cooking {name} → {stem}.mesh + {stem}.model.json ({index}/{total}) — large meshes may take several minutes...";
                 }
                 else
                 {

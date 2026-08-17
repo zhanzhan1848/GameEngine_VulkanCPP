@@ -403,9 +403,11 @@ public uint GetNativeEntityId(GameEntity? entity)
 
     /// <summary>
     /// Drop an asset from the Content Browser into the active scene.
-    /// Supports .mesh: imports the geometry, creates an ECS entity bound
-    /// to the resulting content id, and adds it to the scene.
-    /// Returns the created entity or null on failure.
+    /// Supports .mesh / .fbx / .obj / .gltf / .glb / .model.json: imports
+    /// the geometry, creates an ECS entity bound to the resulting content
+    /// id, and adds it to the scene. Model containers (.model.json) drop
+    /// their cooked .mesh companion so a single entity renders the whole
+    /// model. Returns the created entity or null on failure.
     /// </summary>
     public async Task<GameEntity?> DropAssetAsync(AssetInfo info, float posX = 0f, float posY = 0f, float posZ = 0f)
     {
@@ -415,21 +417,20 @@ public uint GetNativeEntityId(GameEntity? entity)
             PrimalEditor_Avalonia.Common.Logger.Warning("DropAsset: no active scene");
             return null;
         }
-        var ext = System.IO.Path.GetExtension(info.FullPath).ToLowerInvariant();
-        if (ext != ".mesh" && ext != ".obj" && ext != ".fbx" && ext != ".gltf" && ext != ".glb")
+        var (nativeMeshPath, entityName) = ResolveDropTarget(info);
+        if (nativeMeshPath == null)
         {
-            PrimalEditor_Avalonia.Common.Logger.Warning($"DropAsset: unsupported asset type {ext}");
+            PrimalEditor_Avalonia.Common.Logger.Warning($"DropAsset: unsupported asset type {info.FullPath}");
             return null;
         }
 
-        var entityName = System.IO.Path.GetFileNameWithoutExtension(info.FullPath);
         var entity = new GameEntity(entityName);
         entity.Components.Add(new Transform { PositionX = posX, PositionY = posY, PositionZ = posZ });
         entity.Components.Add(new MeshRendererComponent { MeshGuid = new AssetGuid(info.Guid) });
 
         if (NativeEngineBridge.IsLoaded)
         {
-            var requestId = NativeEngineBridge.ImportMesh(info.FullPath);
+            var requestId = NativeEngineBridge.ImportMesh(nativeMeshPath);
             if (requestId == 0)
             {
                 PrimalEditor_Avalonia.Common.Logger.Warning("DropAsset: native import rejected the request");
@@ -473,6 +474,30 @@ public uint GetNativeEntityId(GameEntity? entity)
         if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
         PrimalEditor_Avalonia.Common.Logger.Info($"Dropped asset: {info.FileName} → entity {entity.Name}");
         return entity;
+    }
+
+    private static (string? nativePath, string entityName) ResolveDropTarget(AssetInfo info)
+    {
+        var ext = System.IO.Path.GetExtension(info.FullPath).ToLowerInvariant();
+        var entityName = System.IO.Path.GetFileNameWithoutExtension(info.FullPath);
+        switch (ext)
+        {
+            case ".fbx":
+            case ".obj":
+            case ".gltf":
+            case ".glb":
+            case ".mesh":
+                return (info.FullPath, entityName);
+            case ".model.json":
+            case ".model":
+            {
+                var cookedMesh = System.IO.Path.ChangeExtension(info.FullPath, ".mesh");
+                if (!System.IO.File.Exists(cookedMesh)) return (null, entityName);
+                return (cookedMesh, entityName);
+            }
+            default:
+                return (null, entityName);
+        }
     }
 
     /// <summary>

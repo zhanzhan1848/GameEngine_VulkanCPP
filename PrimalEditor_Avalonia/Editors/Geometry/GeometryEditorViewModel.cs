@@ -1,7 +1,9 @@
 using System;
+using System.IO;
 using System.Linq;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Native;
 
 namespace PrimalEditor_Avalonia.Editors.Geometry;
 
@@ -125,8 +127,23 @@ public class GeometryEditorViewModel : AssetEditorViewModel, IDirtyTrackable
         Settings = AssetImportSettingsStore.Load<GeometryImportSettings>(info.FullPath);
         ClearDirty();
         State = AssetEditorState.Loading;
+
+        // When the user opens a model container (.model.json) we have to
+        // load the cooked .mesh sibling, not the sidecar — Geometry.Load
+        // is a binary reader for the cooked format. info.FullPath is the
+        // sidecar in the new no-copy design (source .fbx no longer lives
+        // inside the project).
+        var meshPath = ResolveCookedMeshPath(info);
+        if (meshPath == null)
+        {
+            Logger.Error($"Geometry load failed: cooked .mesh missing for {info.FullPath}");
+            State = AssetEditorState.Done;
+            OnPropertyChanged(nameof(CanSave));
+            return;
+        }
+
         var g = new Geometry();
-        var ok = g.Load(info.FullPath);
+        var ok = g.Load(meshPath);
         if (ok)
         {
             Data = g;
@@ -135,10 +152,35 @@ public class GeometryEditorViewModel : AssetEditorViewModel, IDirtyTrackable
         }
         else
         {
-            Logger.Error($"Geometry load failed: {info.FullPath}");
+            Logger.Error($"Geometry load failed: {meshPath}");
         }
         State = AssetEditorState.Done;
         OnPropertyChanged(nameof(CanSave));
+    }
+
+    private static string? ResolveCookedMeshPath(AssetInfo info)
+    {
+        if (info.Type == AssetType.Mesh)
+        {
+            // Legacy case: .mesh file or pre-no-copy .fbx whose sibling
+            // .mesh exists. info.FullPath is the user-visible file.
+            return info.FullPath;
+        }
+        if (info.Type == AssetType.Model)
+        {
+            // New no-copy design: info.FullPath is the .model.json
+            // sidecar. Sidecar.Mesh is the canonical pointer when
+            // present; otherwise fall back to the sibling .mesh file
+            // (Path.ChangeExtension is unsafe on .model.json because
+            // Path.GetExtension only returns ".json").
+            var sidecar = ModelSidecar.Load(info.FullPath);
+            if (sidecar != null && !string.IsNullOrEmpty(sidecar.Mesh) && System.IO.File.Exists(sidecar.Mesh))
+                return sidecar.Mesh;
+            var stem = System.IO.Path.GetFileNameWithoutExtension(info.FullPath);
+            var sibling = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(info.FullPath) ?? string.Empty, stem + ".mesh");
+            return System.IO.File.Exists(sibling) ? sibling : null;
+        }
+        return info.FullPath;
     }
 
     public void Reimport()

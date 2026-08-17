@@ -96,7 +96,21 @@ public sealed class GeometryImportPanelViewModel : ImportSettingsViewModelBase
     public bool EnableDerive { get => _settings.EnableDerive; set { _settings.EnableDerive = value; OnPropertyChanged(); } }
     public bool AutoDeriveAfterSubdivide { get => _settings.AutoDeriveAfterSubdivide; set { _settings.AutoDeriveAfterSubdivide = value; OnPropertyChanged(); } }
     public bool EnableSdf { get => _settings.EnableSdf; set { _settings.EnableSdf = value; OnPropertyChanged(); } }
-    public uint SdfGridResolution { get => _settings.SdfGridResolution; set { _settings.SdfGridResolution = value; OnPropertyChanged(); } }
+    public uint SdfGridResolution
+    {
+        get => _settings.SdfGridResolution;
+        set
+        {
+            // Clamp + snap-to-8: matches the NumericUpDown's old behaviour
+            // (Min=4, Max=256, Increment=8) so the bound TextBox can accept
+            // free-form input without letting the user bake at invalid values.
+            if (value < 4) value = 4;
+            else if (value > 256) value = 256;
+            else value = value - (value % 8);
+            _settings.SdfGridResolution = value;
+            OnPropertyChanged();
+        }
+    }
 
     public PipelineSubdivideScheme SubdivideScheme { get => _settings.SubdivideScheme; set { _settings.SubdivideScheme = value; OnPropertyChanged(); } }
     public uint SubdivideLevels { get => _settings.SubdivideLevels; set { _settings.SubdivideLevels = value; OnPropertyChanged(); } }
