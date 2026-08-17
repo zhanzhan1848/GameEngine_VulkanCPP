@@ -1,0 +1,204 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — Gather pass (SH evaluation + probe bilateral
+// gather). Hand-written GLSL port of ScreenProbeGather.metal
+// (entry: screen_probe_gather).
+//
+// For each full-res pixel: reads depth/normal, finds the screen-space probe
+// covering it, evaluates the already-filtered probe SH at the pixel's surface
+// normal, and gathers center + 4 cardinal neighbors with bilateral weights
+// (5-tap cross matching SpatialFilter's kernel) to fill sparse coverage.
+//
+// ThreadGroupSize: (8, 8, 1).
+//
+// Flat descriptor bindings (Metal skips buffer(1); Vulkan flat layout):
+//   binding 0 = texture2D         depthTexture    (full-res, sampled)
+//   binding 1 = texture2D         normalTexture   (full-res, sampled, N*0.5+0.5)
+//   binding 2 = writeonly image2D outputTexture   (rgba16f, full-res)
+//   binding 3 = SSBO read         probePositions[]
+//   binding 4 = SSBO read         probeSH[]       (filtered, 4 vec4/probe)
+//   binding 5 = UBO               ScreenProbeGlobalData (352B, inline)
+//   binding 6 = SSBO read         probeNormals[]
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D depthTexture;
+layout(set = 0, binding = 1) uniform texture2D normalTexture;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D outputTexture;
+
+layout(set = 0, binding = 3, std430) readonly buffer ProbePositionsBlock {
+    vec4 data[];
+} probePositions;
+
+layout(set = 0, binding = 4, std430) readonly buffer ProbeSHBlock {
+    vec4 data[];
+} probeSH;
+
+// ScreenProbeGlobalData UBO — 352 bytes, mirrors C++ struct. Declared inline.
+layout(set = 0, binding = 5, std140) uniform GlobalBlock {
+    mat4 view_projection;
+    mat4 inv_view_projection;
+    vec4 camera_position;
+    vec4 grid_params;            // x=gridW, y=gridH, z=downsample, w=raysPerProbe
+    vec4 trace_params;           // x=maxRayDist, y=gatherRadius, z=renderW, w=renderH
+    vec4 sdf_origins[3];
+    vec4 sdf_voxel_sizes[3];
+    vec4 sdf_extents[3];
+    uvec4 sdf_resolutions;       // xyz=res0/1/2, w=cascadeCount
+    vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=unused
+} global;
+
+layout(set = 0, binding = 6, std430) readonly buffer ProbeNormalsBlock {
+    vec4 data[];
+} probeNormals;
+
+// --------------------------------------------------------------------------------
+// SH basis (must match ScreenProbeAverage::shBasis):
+//   Y0 = 0.282095
+//   Y1 = 0.488603 * d.y
+//   Y2 = 0.488603 * d.z
+//   Y3 = 0.488603 * d.x
+// Average stores SH coefficients C_i such that E(N) = sum C_i * Y_i(N).
+// --------------------------------------------------------------------------------
+vec3 evalSH(vec3 sh0, vec3 sh1, vec3 sh2, vec3 sh3, vec3 N) {
+    return sh0 * 0.282095
+         + sh1 * (0.488603 * N.y)
+         + sh2 * (0.488603 * N.z)
+         + sh3 * (0.488603 * N.x);
+}
+
+// Manual bilinear sample replicating Metal linear sampler (clamp_to_edge).
+vec4 sampleBilinearRGBA(texture2D tex, vec2 uv) {
+    vec2 size = vec2(textureSize(tex, 0));
+    vec2 px = uv * size - 0.5;
+    ivec2 p0 = ivec2(floor(px));
+    vec2 f = fract(px);
+
+    ivec2 c00 = clamp(p0,               ivec2(0), ivec2(size) - 1);
+    ivec2 c10 = clamp(p0 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
+    ivec2 c01 = clamp(p0 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
+    ivec2 c11 = clamp(p0 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
+
+    vec4 s00 = texelFetch(tex, c00, 0);
+    vec4 s10 = texelFetch(tex, c10, 0);
+    vec4 s01 = texelFetch(tex, c01, 0);
+    vec4 s11 = texelFetch(tex, c11, 0);
+
+    vec4 a = mix(s00, s10, f.x);
+    vec4 b = mix(s01, s11, f.x);
+    return mix(a, b, f.y);
+}
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void screen_probe_gather() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+
+    uint renderW = uint(global.trace_params.z);
+    uint renderH = uint(global.trace_params.w);
+
+    if (tid.x >= renderW || tid.y >= renderH) return;
+
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
+    float downsample = global.grid_params.z;
+
+    // ---------------------------------------------------------------
+    // Read pixel depth + normal
+    // ---------------------------------------------------------------
+    vec2 invRes = 1.0 / vec2(renderW, renderH);
+    vec2 pixelUV = (vec2(tid) + 0.5) * invRes;
+
+    float depth = sampleBilinearRGBA(depthTexture, pixelUV).r;
+
+    if (depth <= 0.0001 || depth >= 0.999) {
+        imageStore(outputTexture, ivec2(tid), vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    vec4 normalEncoded = sampleBilinearRGBA(normalTexture, pixelUV);
+    vec3 surfaceNormal = normalize(normalEncoded.xyz * 2.0 - 1.0);
+
+    // ---------------------------------------------------------------
+    // Center probe coord for this pixel
+    // ---------------------------------------------------------------
+    ivec2 centerProbe = ivec2(int(tid.x) / int(downsample),
+                              int(tid.y) / int(downsample));
+
+    // 5-tap cross pattern: center + 4 cardinals (matches SpatialFilter kernel).
+    ivec2 offsets[5];
+    offsets[0] = ivec2( 0,  0);
+    offsets[1] = ivec2(-1,  0);
+    offsets[2] = ivec2( 1,  0);
+    offsets[3] = ivec2( 0, -1);
+    offsets[4] = ivec2( 0,  1);
+
+    // Spatial weights for the cross (center gets 2.0, neighbors 1.0).
+    // Mirrors SpatialFilter's center-weighted blending so we don't double-smooth.
+    float spatialW[5];
+    spatialW[0] = 2.0;
+    spatialW[1] = 1.0;
+    spatialW[2] = 1.0;
+    spatialW[3] = 1.0;
+    spatialW[4] = 1.0;
+
+    vec3 irradianceSum = vec3(0.0);
+    float confidenceOut = 0.0;
+    float weightSum     = 0.0;
+
+    for (int i = 0; i < 5; ++i) {
+        ivec2 npc = centerProbe + offsets[i];
+        if (npc.x < 0 || npc.y < 0 ||
+            npc.x >= int(gridW) || npc.y >= int(gridH)) {
+            continue;
+        }
+
+        uint probeIdx = uint(npc.y) * gridW + uint(npc.x);
+
+        vec4 posData = probePositions.data[probeIdx];
+        if (posData.w <= 0.0) continue;
+
+        uint shBase = probeIdx * 4u;
+        float sh0w = probeSH.data[shBase + 0u].w;
+        if (sh0w <= 0.0) continue;
+
+        vec3 sh0 = probeSH.data[shBase + 0u].rgb;
+        vec3 sh1 = probeSH.data[shBase + 1u].rgb;
+        vec3 sh2 = probeSH.data[shBase + 2u].rgb;
+        vec3 sh3 = probeSH.data[shBase + 3u].rgb;
+
+        // Proper SH evaluation at the pixel's surface normal.
+        vec3 irr = evalSH(sh0, sh1, sh2, sh3, surfaceNormal);
+        irr = max(irr, vec3(0.0));
+
+        // Reject probes whose normal faces away from the pixel's surface.
+        float normalWeight = 1.0;
+        vec4 probeNormData = probeNormals.data[probeIdx];
+        if (probeNormData.w > 0.0) {
+            vec3 probeN = normalize(probeNormData.xyz);
+            float nDot = max(dot(surfaceNormal, probeN), 0.0);
+            // Gentle falloff: similar-facing probes contribute fully, orthogonal
+            // contribute half, opposite contribute ~0.
+            normalWeight = pow(nDot, 2.0);
+        }
+
+        float w = spatialW[i] * normalWeight * sh0w;
+        irradianceSum += irr * w;
+        confidenceOut += sh0w * w;
+        weightSum += w;
+    }
+
+    if (weightSum <= 0.0) {
+        imageStore(outputTexture, ivec2(tid), vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    vec3 finalIrr = irradianceSum / weightSum;
+    float finalConf = confidenceOut / weightSum;
+    imageStore(outputTexture, ivec2(tid), vec4(max(finalIrr, vec3(0.0)), finalConf));
+}

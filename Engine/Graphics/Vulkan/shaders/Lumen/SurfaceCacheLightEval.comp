@@ -1,0 +1,139 @@
+#version 450 core
+// Vulkan Lumen Surface Cache Light Eval — GLSL port of SurfaceCacheLightEval.metal.
+// Entry point: surface_cache_light_eval  (glslangValidator -e surface_cache_light_eval)
+//
+// Merged per-card texel lighting (LightCull + LightEval in one pass).
+// Dispatch: 1D, total_texels = sum(card.resolution^2) threads.
+// ThreadGroupSize: (256, 1, 1)
+//
+// Thread mapping:
+//   global_tid -> binary search card_dispatch[] -> card_idx
+//   -> local_texel = tid - card.texel_offset
+//   -> atlas_uv = card.atlas_offset + (local_x, local_y)
+//
+// Flat descriptor bindings:
+//   binding 0 = StorageImage(rgba8)  albedo_atlas     (readonly, imageLoad)
+//   binding 1 = StorageImage(rg16f)  normal_atlas     (readonly, imageLoad)
+//   binding 2 = StorageImage(rgba16f) emissive_atlas  (readonly, imageLoad)
+//   binding 3 = StorageImage(rgba16f) lighting_out    (writeonly, imageStore)
+//   binding 4 = UniformBuffer        FlattenedLightingParams
+//   binding 5 = StorageBuffer        cards[]          (SurfaceCacheCard, std430)
+//   binding 6 = StorageBuffer        lights[]         (LightInfo, std430)
+//   binding 7 = StorageBuffer        card_dispatch[]  (CardDispatchInfo, std430)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0, rgba8)   readonly uniform image2D albedo_atlas;
+layout(set = 0, binding = 1, rg16f)   readonly uniform image2D normal_atlas;
+layout(set = 0, binding = 2, rgba16f) readonly uniform image2D emissive_atlas;
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D lighting_out;
+
+layout(set = 0, binding = 4, std140) uniform FlattenedLightingParamsBlock {
+    FlattenedLightingParams params;
+} flp;
+
+layout(set = 0, binding = 5, std430) readonly buffer CardsBlock {
+    SurfaceCacheCard data[];
+} cards;
+
+layout(set = 0, binding = 6, std430) readonly buffer LightsBlock {
+    LightInfo data[];
+} lights;
+
+layout(set = 0, binding = 7, std430) readonly buffer CardDispatchBlock {
+    CardDispatchInfo data[];
+} card_dispatch;
+
+// Phase 3 (Lumen multi-bounce): previous frame's lighting atlas.
+// Reading the 2-frame-old lighting at this texel position provides the
+// accumulated GI — multiplying by albedo gives each bounce the surface
+// color, creating multi-bounce colored GI through the SC itself.
+layout(set = 0, binding = 8, rgba16f) readonly uniform image2D prev_lighting_atlas;
+
+// --------------------------------------------------------------------------------
+void surface_cache_light_eval()
+{
+    uint global_tid = gl_GlobalInvocationID.x;
+    if (global_tid >= flp.params.total_texels) return;
+
+    // Binary search: find card whose [texel_offset, texel_offset+texel_count)
+    // contains global_tid. O(log N) where N = card_count (typically < 100).
+    uint lo = 0u;
+    uint hi = flp.params.card_count;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        if (card_dispatch.data[mid].texel_offset + card_dispatch.data[mid].texel_count <= global_tid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo >= flp.params.card_count) return;
+
+    uint local_texel = global_tid - card_dispatch.data[lo].texel_offset;
+    uint res = card_dispatch.data[lo].resolution;
+    uint local_x = local_texel % res;
+    uint local_y = local_texel / res;
+    uvec2 atlas_uv = uvec2(
+        card_dispatch.data[lo].atlas_offset_x + local_x,
+        card_dispatch.data[lo].atlas_offset_y + local_y);
+
+    // Read material data
+    vec4 albedo = imageLoad(albedo_atlas, ivec2(atlas_uv));
+    if (albedo.a < 0.01) return;
+
+
+    vec2 enc_n = imageLoad(normal_atlas, ivec2(atlas_uv)).rg;
+    vec3 normal = octDecode(enc_n);
+    vec3 emissive = imageLoad(emissive_atlas, ivec2(atlas_uv)).rgb;
+
+    // Inline per-texel lighting (replaces separate LightCull pass)
+    vec3 direct_light = vec3(0.0);
+    uint lightCount = min(flp.params.light_count, 256u);
+
+    for (uint li = 0u; li < lightCount; ++li) {
+        vec3 L;
+        float attenuation;
+        uint lightType = uint(lights.data[li].direction.w);
+
+        if (lightType == 1u) {
+            // Directional light: always visible
+            L = -normalize(lights.data[li].direction.xyz);
+            attenuation = 1.0;
+        } else {
+            // Point/spot light: per-texel distance check
+            vec3 world_pos = cardTexelToWorld(atlas_uv, 0.0, cards.data[lo]);
+            vec3 to_light = lights.data[li].position.xyz - world_pos;
+            float dist = length(to_light);
+            float radius = lights.data[li].position.w;
+
+            if (dist > radius) continue;
+
+            L = to_light / max(dist, 0.001);
+            float r2 = radius * radius;
+            attenuation = max(1.0 - (dist * dist) / r2, 0.0);
+        }
+
+        float NdotL = max(dot(normal, L), 0.0);
+        direct_light += lights.data[li].color.xyz * NdotL * attenuation;
+    }
+
+    // Phase 3 (Lumen multi-bounce): indirect from the previous frame's
+    // lighting atlas. Each frame this texel's lighting = direct × albedo +
+    // prev_lighting × albedo × feedback. Over frames, bounces accumulate
+    // through the atlas itself — each bounce tinted by the surface albedo,
+    // independent of the DDGI probe feedback loop.
+    vec3 prev_light = imageLoad(prev_lighting_atlas, ivec2(atlas_uv)).rgb;
+    const float SC_FEEDBACK = 0.85;
+
+    vec3 result = direct_light * albedo.rgb
+                + prev_light * albedo.rgb * SC_FEEDBACK
+                + emissive;
+    imageStore(lighting_out, ivec2(atlas_uv), vec4(result, 1.0));
+}

@@ -87,9 +87,9 @@ struct SSRConfig {
     float reflection_strength = 0.7f;   ///< 反射整体强度倍率
     float max_roughness       = 0.85f;  ///< 粗糙度 > 此值的像素不反射（早退）
     float fresnel_power       = 3.0f;   ///< Fresnel 指数（ grazing 角度反射增强 ）
-    float max_trace_distance  = 50.0f;  ///< Hi-Z 光线步进最大距离（view-space units）
-    float thickness           = 2.0f;   ///< 层厚度（ ray-hit 碰撞判定 ）
-    float temporal_feedback   = 0.8f;   ///< 时间累积权重（越高越平滑，0..1）
+    float max_trace_distance  = 30.0f;  ///< Hi-Z 光线步进最大距离（view-space units）
+    float thickness           = 0.5f;   ///< 层厚度（ ray-hit 碰撞判定，小值防穿透重影 ）
+    float temporal_feedback   = 0.88f;  ///< 时间累积权重（越高越平滑，0..1）
 };
 
 // ============================================================================
@@ -103,7 +103,7 @@ struct PipelineQualityConfig {
     bool enable_ssgi              = true;
     bool enable_ssr               = false;
     bool enable_ddgi              = true;
-    bool enable_surface_cache     = false;
+    bool enable_surface_cache     = true;   // Vulkan AtlasInit path now produces valid atlas data
     bool enable_screen_probes     = false;
     bool enable_shadow            = true;
     bool enable_deferred_lighting = true;

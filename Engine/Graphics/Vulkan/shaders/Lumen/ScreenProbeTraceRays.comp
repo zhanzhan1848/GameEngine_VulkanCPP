@@ -1,0 +1,327 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — Trace Rays. Hand-written GLSL port of
+// ScreenProbeTraceRays.metal, monolithic entry only (entry: screen_probe_trace_rays).
+// Split sdf/finalize variants are intentionally skipped (see Metal source lines
+// 294+); Vulkan has no Apple-Silicon texture3D/buffer mixing flicker.
+//
+// Each thread traces one ray from one probe through the GlobalSDF volume using
+// Fibonacci sphere sampling. On hit, samples prev-frame lit color (or surface
+// cache atlas for near hits) as radiance. On miss, emits a sky-ambient color.
+//
+// ThreadGroupSize: (64, 1, 1), 1D dispatch.
+//
+// Flat descriptor bindings (Vulkan — no overlapping Metal namespaces):
+//   binding 0  = texture3D   sdf0                  (samplerless texelFetch nearest)
+//   binding 1  = texture3D   sdf1
+//   binding 2  = texture3D   sdf2
+//   binding 3  = texture2D   prevFrameColor        (sampled, manual bilinear)
+//   binding 4  = texture2D   surface_cache_lighting (may be dummy 1x1)
+//   binding 5  = SSBO read   probePositions[]
+//   binding 6  = SSBO read   probeNormals[]
+//   binding 7  = SSBO write  probeRadiance[]       (gridW*gridH*raysPerProbe)
+//   binding 8  = UBO         ScreenProbeGlobalData (352B, inline)
+//   binding 9  = SSBO read   SurfaceCacheCard cards[]
+//   binding 10 = SSBO read   SurfaceCacheCardLookup cardLookup[] (may be dummy)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture3D sdf0;
+layout(set = 0, binding = 1) uniform texture3D sdf1;
+layout(set = 0, binding = 2) uniform texture3D sdf2;
+layout(set = 0, binding = 3) uniform texture2D prevFrameColor;
+layout(set = 0, binding = 4) uniform texture2D surface_cache_lighting;
+
+layout(set = 0, binding = 5, std430) readonly buffer ProbePositionsBlock {
+    vec4 data[];
+} probePositions;
+
+layout(set = 0, binding = 6, std430) readonly buffer ProbeNormalsBlock {
+    vec4 data[];
+} probeNormals;
+
+layout(set = 0, binding = 7, std430) buffer ProbeRadianceBlock {
+    vec4 data[];
+} probeRadiance;
+
+// ScreenProbeGlobalData UBO — 352 bytes, mirrors C++ struct. Declared inline.
+layout(set = 0, binding = 8, std140) uniform GlobalBlock {
+    mat4 view_projection;
+    mat4 inv_view_projection;
+    vec4 camera_position;
+    vec4 grid_params;            // x=gridW, y=gridH, z=downsample, w=raysPerProbe
+    vec4 trace_params;           // x=maxRayDist, y=gatherRadius, z=renderW, w=renderH
+    vec4 sdf_origins[3];
+    vec4 sdf_voxel_sizes[3];
+    vec4 sdf_extents[3];
+    uvec4 sdf_resolutions;       // xyz=res0/1/2, w=cascadeCount
+    vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=unused
+} global;
+
+layout(set = 0, binding = 9, std430) readonly buffer CardsBlock {
+    SurfaceCacheCard data[];
+} cards;
+
+layout(set = 0, binding = 10, std430) readonly buffer CardLookupBlock {
+    SurfaceCacheCardLookup data[];
+} cardLookup;
+
+// --------------------------------------------------------------------------------
+// Constants
+// --------------------------------------------------------------------------------
+const float PI_VAL          = 3.14159265358979323846;
+const float GOLDEN_RATIO    = 1.618033988749895;
+// Was 4 — too few for sphere tracing. Most rays failed to converge and reported
+// "miss", producing extremely dim SPGI output. 32 gives rays enough iterations.
+const uint  MAX_SDF_STEPS   = 32u;
+
+// SDFHitResult — ported from SDFTraceCommon.metal.
+struct SDFHitResult {
+    bool  hit;
+    vec3  position;
+    float distance;
+};
+
+// --------------------------------------------------------------------------------
+// SDF cascade sampling (inlined from SDFTraceCommon.metal).
+// Metal uses linear-filtered texture3D with clamp_to_edge. Vulkan port uses
+// nearest texelFetch (porting rule 17: nearest acceptable for SDF tracing).
+// Cascade convention matches Metal: uvw = (worldPos - origin) / extent, with
+// origin = corner and extent = full box size, so [0,1] spans the whole volume.
+// --------------------------------------------------------------------------------
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    vec3 local = pos - origin;
+    return local.x >= 0.0 && local.x < extent.x &&
+           local.y >= 0.0 && local.y < extent.y &&
+           local.z >= 0.0 && local.z < extent.z;
+}
+
+float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
+                       vec3 cascadeOrigin, vec3 cascadeExtent) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) {
+        return 1e10;
+    }
+    ivec3 size = textureSize(sdfTexture, 0);
+    ivec3 coord = ivec3(clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size));
+    return texelFetch(sdfTexture, coord, 0).r;
+}
+
+// else-if cascade selection — 1 texture3D read per call (finest first).
+float sampleBestSDF(vec3 pos) {
+    if (global.sdf_resolutions.w > 0u &&
+        isInsideCascade(pos, global.sdf_origins[0].xyz, global.sdf_extents[0].xyz)) {
+        return sampleSDFCascade(sdf0, pos, global.sdf_origins[0].xyz, global.sdf_extents[0].xyz);
+    } else if (global.sdf_resolutions.w > 1u &&
+               isInsideCascade(pos, global.sdf_origins[1].xyz, global.sdf_extents[1].xyz)) {
+        return sampleSDFCascade(sdf1, pos, global.sdf_origins[1].xyz, global.sdf_extents[1].xyz);
+    } else if (global.sdf_resolutions.w > 2u &&
+               isInsideCascade(pos, global.sdf_origins[2].xyz, global.sdf_extents[2].xyz)) {
+        return sampleSDFCascade(sdf2, pos, global.sdf_origins[2].xyz, global.sdf_extents[2].xyz);
+    }
+    return 1e10;
+}
+
+// --------------------------------------------------------------------------------
+// Sphere tracing through GlobalSDF (ported from TraceRays.metal::traceSDF)
+// --------------------------------------------------------------------------------
+SDFHitResult traceSDF(vec3 origin, vec3 direction, float maxDist) {
+    SDFHitResult result;
+    result.hit = false;
+    result.position = origin;
+    result.distance = 0.0;
+
+    vec3 pos = origin;
+    float remainingDist = maxDist;
+
+    float hitThreshold = global.sdf_voxel_sizes[0].x * 0.5;
+    float minStep = global.sdf_voxel_sizes[0].x * 0.25;
+
+    for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
+        float d = sampleBestSDF(pos);
+
+        if (d < hitThreshold) {
+            result.hit = true;
+            result.position = pos;
+            result.distance = length(pos - origin);
+            return result;
+        }
+
+        // Relaxed advancement: overstep when far, conservative when close
+        float advance;
+        if (d > hitThreshold * 4.0) {
+            advance = d * 1.2;
+        } else {
+            advance = max(d, minStep);
+        }
+        if (advance > remainingDist) break;
+
+        pos += direction * advance;
+        remainingDist -= advance;
+    }
+
+    result.distance = length(pos - origin);
+    return result;
+}
+
+// --------------------------------------------------------------------------------
+// Fibonacci sphere direction generation + normal alignment
+// --------------------------------------------------------------------------------
+vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
+    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
+    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
+    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+}
+
+vec3 orientAroundNormal(vec3 dir, vec3 normal) {
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
+}
+
+// --------------------------------------------------------------------------------
+// Manual bilinear sample of a 2D texture (porting rule 17 alternative).
+// Replicates Metal linear sampler (clamp_to_edge).
+// --------------------------------------------------------------------------------
+vec3 sampleBilinearRGB(texture2D tex, vec2 uv) {
+    vec2 size = vec2(textureSize(tex, 0));
+    vec2 px = uv * size - 0.5;
+    ivec2 p0 = ivec2(floor(px));
+    vec2 f = fract(px);
+
+    ivec2 c00 = clamp(p0,               ivec2(0), ivec2(size) - 1);
+    ivec2 c10 = clamp(p0 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
+    ivec2 c01 = clamp(p0 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
+    ivec2 c11 = clamp(p0 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
+
+    vec3 s00 = texelFetch(tex, c00, 0).rgb;
+    vec3 s10 = texelFetch(tex, c10, 0).rgb;
+    vec3 s01 = texelFetch(tex, c01, 0).rgb;
+    vec3 s11 = texelFetch(tex, c11, 0).rgb;
+
+    vec3 a = mix(s00, s10, f.x);
+    vec3 b = mix(s01, s11, f.x);
+    return mix(a, b, f.y);
+}
+
+// --------------------------------------------------------------------------------
+// Sample prev frame color at a world position
+// (ported from TraceRays.metal::samplePrevFrameColor)
+// --------------------------------------------------------------------------------
+vec3 samplePrevFrameColor(vec3 worldPos) {
+    // Project to screen space
+    vec4 clipPos = global.view_projection * vec4(worldPos, 1.0);
+    if (clipPos.w <= 0.0) return vec3(0.0);
+
+    vec2 ndc = clipPos.xy / clipPos.w;
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - ndc.y * 0.5 - 0.5);
+
+    // Bounds check
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return vec3(0.0);
+    }
+
+    return sampleBilinearRGB(prevFrameColor, uv);
+}
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void screen_probe_trace_rays() {
+    uint global_id = gl_GlobalInvocationID.x;
+
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
+    uint raysPerProbe = uint(global.grid_params.w);
+    uint totalRays = gridW * gridH * raysPerProbe;
+
+    if (global_id >= totalRays) return;
+
+    uint probeIdx = global_id / raysPerProbe;
+    uint rayIdx   = global_id % raysPerProbe;
+
+    // Read probe position and normal
+    vec4 posData = probePositions.data[probeIdx];
+    vec4 normData = probeNormals.data[probeIdx];
+
+    // Check if probe is active (w > 0)
+    if (posData.w <= 0.0) {
+        probeRadiance.data[global_id] = vec4(0.0, 0.0, 0.0, -1.0); // -1 = inactive
+        return;
+    }
+
+    vec3 probePos = posData.xyz;
+    vec3 probeNormal = normalize(normData.xyz);
+
+    // Generate ray direction (Fibonacci + normal alignment)
+    vec3 rayDir = fibonacciDirection(rayIdx, raysPerProbe);
+    rayDir = orientAroundNormal(rayDir, probeNormal);
+
+    // Offset origin slightly to avoid self-intersection
+    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
+
+    // Trace ray through GlobalSDF
+    float maxDist = global.trace_params.x;
+    SDFHitResult hit = traceSDF(origin, rayDir, maxDist);
+
+    vec3 radiance = vec3(0.0);
+    float cosTheta = 0.0;  // cosine weight for irradiance integration
+
+    if (hit.hit) {
+        // Try surface cache sampling for near hits (< 2 world units)
+        bool usedSurfaceCache = false;
+        float nearDistance = 2.0;
+
+        if (hit.distance < nearDistance && global.surface_cache_params.z > 0.5) {
+            // Iterate cards to find matching atlas UV (capped for Apple Silicon parity)
+            uint cardCount = min(uint(global.surface_cache_params.y), 32u);
+            float atlasSize = global.surface_cache_params.x;
+
+            for (uint ci = 0u; ci < cardCount && !usedSurfaceCache; ++ci) {
+                vec2 atlas_uv;
+                if (worldToCardUV(hit.position, cards.data[ci], atlas_uv)) {
+                    // Convert atlas pixel coords to normalized UV for sampling
+                    vec2 uv_norm = atlas_uv / vec2(atlasSize);
+                    radiance = sampleBilinearRGB(surface_cache_lighting, uv_norm);
+                    usedSurfaceCache = true;
+                }
+            }
+        }
+
+        // Fall back to prev frame color if surface cache not used or not available
+        if (!usedSurfaceCache) {
+            radiance = samplePrevFrameColor(hit.position);
+        }
+
+        // NaN/Inf guard
+        if (any(isnan(radiance)) || any(isinf(radiance))) {
+            radiance = vec3(0.0);
+        }
+
+        // Store cosine weight (applied during averaging)
+        cosTheta = max(dot(probeNormal, rayDir), 0.0);
+    } else {
+        // Miss ray: simple sky ambient (hemisphere-weighted sky color).
+        // Prevents probes from going completely black when many rays miss.
+        float skyWeight = max(dot(probeNormal, rayDir), 0.0);
+        if (skyWeight > 0.0) {
+            // Simple sky gradient: blue-ish at horizon, lighter at zenith
+            float skyY = rayDir.y * 0.5 + 0.5;
+            radiance = mix(vec3(0.15, 0.18, 0.25), vec3(0.4, 0.5, 0.65), skyY);
+            cosTheta = skyWeight;
+        }
+    }
+
+    // Write output: xyz = radiance, w = cosine weight (>= 0 for both hit and sky miss)
+    float outputWeight = cosTheta;
+    probeRadiance.data[global_id] = vec4(radiance, outputWeight);
+}

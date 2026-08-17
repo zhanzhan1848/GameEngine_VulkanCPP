@@ -64,8 +64,12 @@ float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+// Vulkan [0,1] NDC depth → linear view depth.
+// The old OpenGL [-1,1] formula gave near-zero values for valid Vulkan
+// depths, causing the sky check (linear < near) to reject EVERYTHING —
+// all pixels early-outed and the SSGI output was solid black.
 float NDCDepthToLinear(float ndcDepth, float nearPlane, float farPlane) {
-    return (2.0 * nearPlane * farPlane) / (farPlane + nearPlane - ndcDepth * (farPlane - nearPlane));
+    return nearPlane * farPlane / (farPlane - ndcDepth * (farPlane - nearPlane));
 }
 
 vec3 viewToScreen(vec3 viewPos) {
@@ -84,9 +88,13 @@ vec3 screenToView(vec2 uv, float ndcDepth) {
 }
 
 vec3 cosineHemisphereSample(vec3 N, vec2 seed, int sampleIndex, uint frameIndex, uint rayCount) {
-    float xi1 = fract((float(sampleIndex) + 0.5) / float(rayCount) + float(frameIndex) * 0.618033988749);
-    float xi2 = fract(hash(seed + vec2(float(sampleIndex) * 0.13, float(sampleIndex) * 0.91))
-                      + float(frameIndex) * 0.7071067811865476);
+    // Deterministic stratified sampling — NO frameIndex rotation.
+    // The old frame-varying rotation (golden ratio per frame) produced
+    // different ray sets each frame → temporal noise → moving stripe
+    // artifacts. With fixed per-pixel rays, the spatial pattern is stable;
+    // temporal accumulation converges smoothly without flicker.
+    float xi1 = fract((float(sampleIndex) + 0.5) / float(rayCount));
+    float xi2 = fract(hash(seed + vec2(float(sampleIndex) * 0.13, float(sampleIndex) * 0.91)));
     float phi = 2.0 * PI_VAL * xi1;
     float cosTheta = sqrt(max(xi2, 0.001));
     float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
@@ -151,6 +159,7 @@ bool traceRayHZB(vec2 origin_uv, vec3 ray_origin_view, vec3 ray_dir_view,
 // --- Main ---
 void ssgi_trace() {
     uvec2 half_res_pos = gl_GlobalInvocationID.xy;
+
     if (half_res_pos.x >= params.output_width || half_res_pos.y >= params.output_height) return;
 
     // Map half-res to full-res
@@ -189,10 +198,11 @@ void ssgi_trace() {
     float total_hit_dist = 0.0;
     uint hit_count = 0u;
 
-    vec2 base_seed = vec2(float(full_res_pos.x) * 0.001 + float(params.frame_index) * 0.01,
-                           float(full_res_pos.y) * 0.0017 + float(params.frame_index) * 0.013);
+    vec2 base_seed = vec2(float(full_res_pos.x) * 0.001,
+                           float(full_res_pos.y) * 0.0017);
 
     uint rayCount = max(params.ray_count, 1u);
+
 
     for (uint ray_idx = 0u; ray_idx < rayCount; ++ray_idx) {
         vec3 ray_dir = cosineHemisphereSample(view_normal, base_seed, int(ray_idx),

@@ -1,0 +1,209 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — Change-penalizing temporal accumulation.
+// Hand-written GLSL port of ScreenProbeTemporal.metal (entry: screen_probe_temporal).
+//
+// Core principle: penalize change, don't reward stability.
+//   - Base alpha = slow accumulation (0.1)
+//   - High gradient (|current - history|) -> faster adaptation (trust current)
+//   - Low confidence -> reset history (clear bad data)
+//   - Disocclusion -> reset history
+//   - History clamping + gradient limiter prevent energy explosion
+//
+// ThreadGroupSize: (64, 1, 1), 1D dispatch.
+//
+// Flat descriptor bindings:
+//   binding 0 = SSBO read   currentSH[]       (4 vec4 per probe)
+//   binding 1 = SSBO read   historySH[]       (prev frame temporal output)
+//   binding 2 = SSBO read   currentPositions[]
+//   binding 3 = SSBO read   historyPositions[]
+//   binding 4 = SSBO write  outputSH[]
+//   binding 5 = UBO         TemporalConstants (32B)
+//   binding 6 = SSBO read   currentNormals[]
+//   binding 7 = SSBO read   historyNormals[]
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0, std430) readonly buffer CurrentSHBlock {
+    vec4 data[];
+} currentSH;
+
+layout(set = 0, binding = 1, std430) readonly buffer HistorySHBlock {
+    vec4 data[];
+} historySH;
+
+layout(set = 0, binding = 2, std430) readonly buffer CurrentPositionsBlock {
+    vec4 data[];
+} currentPositions;
+
+layout(set = 0, binding = 3, std430) readonly buffer HistoryPositionsBlock {
+    vec4 data[];
+} historyPositions;
+
+layout(set = 0, binding = 4, std430) buffer OutputSHBlock {
+    vec4 data[];
+} outputSH;
+
+layout(set = 0, binding = 5, std140) uniform TemporalConstantsBlock {
+    uint  totalProbes;
+    float baseAlpha;        // base blend alpha (e.g. 0.1)
+    float posThreshold;     // world-space distance threshold for disocclusion
+    float normalThreshold;  // normal dot-product threshold (reject if below)
+    float clampScale;       // history clamp range relative to current
+    float maxGradient;      // maximum SH change per frame (gradient limiter)
+    uint  pad0;
+    uint  pad1;
+} params;
+
+layout(set = 0, binding = 6, std430) readonly buffer CurrentNormalsBlock {
+    vec4 data[];
+} currentNormals;
+
+layout(set = 0, binding = 7, std430) readonly buffer HistoryNormalsBlock {
+    vec4 data[];
+} historyNormals;
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void screen_probe_temporal() {
+    uint global_id = gl_GlobalInvocationID.x;
+
+    if (global_id >= params.totalProbes) return;
+
+    // If current probe is inactive, zero output
+    vec4 curPos = currentPositions.data[global_id];
+    if (curPos.w <= 0.0) {
+        uint base = global_id * 4u;
+        outputSH.data[base + 0u] = vec4(0.0);
+        outputSH.data[base + 1u] = vec4(0.0);
+        outputSH.data[base + 2u] = vec4(0.0);
+        outputSH.data[base + 3u] = vec4(0.0);
+        return;
+    }
+
+    uint base = global_id * 4u;
+
+    // Read current SH and probe confidence (multi-factor from Average)
+    vec4 curSH0 = currentSH.data[base + 0u];
+    float probeConfidence = curSH0.w;
+
+    if (probeConfidence <= 0.0) {
+        // No valid rays -> output zeros
+        outputSH.data[base + 0u] = vec4(0.0);
+        outputSH.data[base + 1u] = vec4(0.0);
+        outputSH.data[base + 2u] = vec4(0.0);
+        outputSH.data[base + 3u] = vec4(0.0);
+        return;
+    }
+
+    // =================================================================
+    // Check history validity
+    // =================================================================
+    vec4 histSH0 = historySH.data[base + 0u];
+    bool historyValid = (histSH0.w > 0.0);
+
+    // If no valid history -> use current directly (no blending)
+    if (!historyValid) {
+        for (int b = 0; b < 4; b++) {
+            vec4 cur = currentSH.data[base + uint(b)];
+            outputSH.data[base + uint(b)] = (b == 0) ? vec4(cur.rgb, probeConfidence)
+                                                     : vec4(cur.rgb, cur.w);
+        }
+        return;
+    }
+
+    // =================================================================
+    // Disocclusion check 1: world-space position distance
+    // =================================================================
+    bool disoccluded = false;
+    vec4 histPos = historyPositions.data[global_id];
+    if (histPos.w > 0.0) {
+        float posDist = distance(curPos.xyz, histPos.xyz);
+        if (posDist > params.posThreshold) {
+            disoccluded = true;
+        }
+    } else {
+        disoccluded = true;
+    }
+
+    // =================================================================
+    // Disocclusion check 2: normal similarity
+    // =================================================================
+    if (!disoccluded) {
+        vec4 curNorm = currentNormals.data[global_id];
+        vec4 histNorm = historyNormals.data[global_id];
+        if (curNorm.w > 0.0 && histNorm.w > 0.0) {
+            float normalSim = dot(normalize(curNorm.xyz), normalize(histNorm.xyz));
+            if (normalSim < params.normalThreshold) {
+                disoccluded = true;
+            }
+        }
+    }
+
+    // If disoccluded -> reset to current (no history blending)
+    if (disoccluded) {
+        for (int b = 0; b < 4; b++) {
+            vec4 cur = currentSH.data[base + uint(b)];
+            outputSH.data[base + uint(b)] = (b == 0) ? vec4(cur.rgb, probeConfidence)
+                                                     : vec4(cur.rgb, cur.w);
+        }
+        return;
+    }
+
+    // =================================================================
+    // Low confidence -> reset history (clear bad accumulated data)
+    // =================================================================
+    if (probeConfidence < 0.05) {
+        for (int b = 0; b < 4; b++) {
+            vec4 cur = currentSH.data[base + uint(b)];
+            outputSH.data[base + uint(b)] = (b == 0) ? vec4(cur.rgb, probeConfidence)
+                                                     : vec4(cur.rgb, cur.w);
+        }
+        return;
+    }
+
+    // =================================================================
+    // Compute per-probe gradient (how much SH changed)
+    // =================================================================
+    vec3 diff0 = curSH0.rgb - histSH0.rgb;
+    float gradient = length(diff0);
+
+    // =================================================================
+    // Change-penalizing blend:
+    //   High gradient -> high alpha -> trust current (adapt to change)
+    //   Low gradient -> base alpha -> slow accumulation
+    // =================================================================
+    float changeAlpha = clamp(gradient / params.maxGradient, 0.0, 1.0);
+    float alpha = max(params.baseAlpha, changeAlpha);
+
+    // =================================================================
+    // Blend 4 SH coefficients with clamping + gradient limiter
+    // =================================================================
+    for (int b = 0; b < 4; b++) {
+        vec4 cur = currentSH.data[base + uint(b)];
+        vec4 hist = historySH.data[base + uint(b)];
+
+        // Clamp history to prevent energy drift
+        vec3 curAbs = max(abs(cur.rgb), vec3(0.1));
+        vec3 lo = cur.rgb - params.clampScale * curAbs;
+        vec3 hi = cur.rgb + params.clampScale * curAbs;
+        vec3 clampedHist = clamp(hist.rgb, lo, hi);
+
+        // Gradient limiter: cap per-frame change
+        vec3 diff = cur.rgb - clampedHist;
+        float diffLen = length(diff);
+        if (diffLen > params.maxGradient && diffLen > 0.001) {
+            cur.rgb = clampedHist + normalize(diff) * params.maxGradient;
+        }
+
+        // Blend
+        vec3 blended = mix(clampedHist, cur.rgb, alpha);
+        outputSH.data[base + uint(b)] = (b == 0) ? vec4(blended, probeConfidence)
+                                                 : vec4(blended, cur.w);
+    }
+}

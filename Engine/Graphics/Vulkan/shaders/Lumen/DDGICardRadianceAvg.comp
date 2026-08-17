@@ -1,0 +1,70 @@
+#version 450 core
+// Vulkan Lumen DDGI Card Radiance Avg — GLSL port of DDGICardRadianceAvg.metal.
+// Entry point: ddgi_card_radiance_avg
+//   (glslangValidator --source-entrypoint main -e ddgi_card_radiance_avg)
+//
+// Reads the Surface Cache Lighting Atlas at each card's center texel and
+// writes a per-card float3 average radiance to a compact buffer.
+//
+// Dispatch: (CardCount, 1, 1), threadGroupSize = (64, 1, 1)
+//
+// Flat bindings (Vulkan forbids Metal's overlapping texture/buffer namespaces):
+//   binding 0 = SampledImage lighting_atlas (texture2D, texelFetch at center)
+//   binding 1 = UniformBuffer   SurfaceCacheParams (via SurfaceCacheData.glsl)
+//   binding 2 = readonly buffer SurfaceCacheCard cards[] (std430 SSBO)
+//   binding 3 = buffer vec4     card_radiance[] (write, xyz=radiance, w=1.0)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat — see header)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D lighting_atlas;
+
+layout(set = 0, binding = 1, std140) uniform ParamBlock {
+    SurfaceCacheParams params;
+} pb;
+
+layout(set = 0, binding = 2, std430) readonly buffer CardBuffer {
+    SurfaceCacheCard cards[];
+};
+
+// One vec4 per card: xyz = radiance, w = 1.0. Matches Metal float3 output, but
+// padded to vec4 for SSBO 16-byte stride (Vulkan std430 scalar vec3 stores are
+// 16-byte aligned in arrays; vec4 keeps the contract explicit and matches the
+// downstream DDGIProbeIrradianceFromCards reader).
+layout(set = 0, binding = 3, std430) buffer CardRadianceBuffer {
+    vec4 card_radiance[];
+};
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void ddgi_card_radiance_avg() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pb.params.max_cards) return;
+
+    SurfaceCacheCard card = cards[gid];
+    if (card.resolution == 0u) {
+        card_radiance[gid] = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    // Center texel of this card in atlas space.
+    float center = float(card.resolution) * 0.5;
+    ivec2 atlas_uv = ivec2(
+        int(float(card.atlas_offset_x) + center),
+        int(float(card.atlas_offset_y) + center)
+    );
+
+    // Fetch lighting atlas at card center texel. The Metal original used a
+    // normalized linear sample; texelFetch at the rounded center texel is the
+    // samplerless equivalent (samplerless_texture_functions required).
+    vec3 radiance = texelFetch(lighting_atlas, atlas_uv, 0).xyz;
+
+    card_radiance[gid] = vec4(radiance, 1.0);
+}

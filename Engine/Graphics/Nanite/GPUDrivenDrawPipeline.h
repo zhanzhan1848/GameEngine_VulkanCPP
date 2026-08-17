@@ -226,6 +226,12 @@ public:
     }
 
     // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
+    /// TAA sub-pixel jitter gate. Only enable when a TAA resolve pass actually
+    /// runs in the frame graph — jitter without temporal resolve is visible
+    /// as per-frame pixel crawl.
+    void SetJitterEnabled(bool enabled) { jitter_enabled_ = enabled; }
+    bool IsJitterEnabled() const { return jitter_enabled_; }
+
     rhi::ResourceHandle GetGBufferAlbedo() const { return gbuffer_albedo_texture_; }
     rhi::ResourceHandle GetGBufferNormal() const { return gbuffer_normal_texture_; }
     rhi::ResourceHandle GetGBufferORM() const { return gbuffer_orm_texture_; }
@@ -243,6 +249,8 @@ public:
     rhi::ResourceHandle GetGlobalMeshletTrianglesBuffer() const { return global_meshlet_triangles_buffer_; }
     rhi::ResourceHandle GetClusterMapBuffer() const { return cluster_map_buffer_; }
     rhi::ResourceHandle GetGlobalInstanceDataBuffer() const { return global_instance_data_buffer_; }
+    rhi::ResourceHandle GetMaterialDataBuffer() const { return global_material_data_buffer_; }
+    rhi::ResourceHandle GetAlbedoTextureArray() const { return albedo_texture_array_; }
 
     // T4.6.5 part 35.2: total meshlet count for OOB validation in culling
     // shader's per-cluster bounds lookup. Returns 0 before first Execute().
@@ -378,6 +386,8 @@ private:
     rhi::ResourceHandle final_depth_texture_{ rhi::handles::INVALID_RESOURCE };
 
     // GBuffer render targets (created in CreateRenderPasses)
+    bool jitter_enabled_ = false;   // TAA-only: sub-pixel jitter gate
+    math::v2 prev_jitter_{0.0f, 0.0f};  // jitter the previous frame rendered with
     rhi::ResourceHandle gbuffer_albedo_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_normal_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_orm_texture_{ rhi::handles::INVALID_RESOURCE };

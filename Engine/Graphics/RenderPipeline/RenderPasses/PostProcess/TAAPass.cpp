@@ -56,15 +56,52 @@ static std::string LoadShaderSource(const std::string& path) {
 #endif
 }
 
+// Platform-branched shader loader.
+//   Vulkan: load precompiled .comp.spv bytecode (hand-written GLSL).
+//   Metal/Dawn: load source text (.metal / .wgsl) for runtime compilation.
+static std::vector<u8> LoadShaderBytes(RHIPlatform platform, bool* outIsBinary) {
+    *outIsBinary = (platform == RHIPlatform::Vulkan);
+
+    if (platform == RHIPlatform::Vulkan) {
+        // Hand-written GLSL compiled to Lumen/TAA.comp.spv
+        const std::string relPath = "Engine/Graphics/Vulkan/shaders/Lumen/TAA.comp.spv";
+        const std::vector<std::string> candidates = {
+            relPath,
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+        };
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
+            return bytecode;
+        }
+        std::cerr << "[TAA] Failed to load SPIR-V: Lumen/TAA.comp.spv" << std::endl;
+        return {};
+    }
+
+    // Metal / Dawn: source text
+#ifdef __EMSCRIPTEN__
+    std::string src = dawn::LoadWGSL("TAA");
+    return std::vector<u8>(src.begin(), src.end());
+#else
+    std::string path = utils::ShaderRegistry::GetShaderPath(platform, "TAA");
+    std::string src = LoadShaderSource(path);
+    return std::vector<u8>(src.begin(), src.end());
+#endif
+}
+
 static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     if (s_Pipeline != handles::INVALID_PIPELINE) return true;
 
     auto platform = device.GetPlatform();
-    std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "TAA");
-    std::string source = LoadShaderSource(shaderPath);
-    if (source.empty()) { std::cerr << "[TAA] Shader source empty: " << shaderPath << std::endl; return false; }
+    bool isBinary = false;
+    std::vector<u8> shaderBytes = LoadShaderBytes(platform, &isBinary);
+    if (shaderBytes.empty()) { std::cerr << "[TAA] Shader load failed" << std::endl; return false; }
 
-    ShaderHandle cs = device.CreateShader(source.data(), source.size(), ShaderStage::Compute, "taa_main");
+    ShaderHandle cs = device.CreateShader(shaderBytes.data(), shaderBytes.size(), ShaderStage::Compute, "taa_main");
     if (cs == handles::INVALID_SHADER) { std::cerr << "[TAA] Shader creation failed" << std::endl; return false; }
 
     // 5 bindings: 0..2 = sampled images (curr, hist, vel), 3 = storage image (output),

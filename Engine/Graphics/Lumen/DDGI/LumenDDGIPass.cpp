@@ -432,10 +432,30 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
 
     // --- SDF Trace: texture3D-only + minimal buffer reads ---
     // Apple Silicon stable: only 4 texture3D reads per thread, no Surface Cache buffer mixing.
-    // Skip on Vulkan/Dawn — split-pass has no WGSL entry, pipeline stays INVALID.
-    const bool skipSplitPass = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
-                                device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-    if (!skipSplitPass) {
+    // Vulkan: hand-written GLSL split-pass (DDGITraceSDF.comp) with FLAT bindings.
+    // Dawn: no split-pass entry — pipeline stays INVALID (unified entry only).
+    const bool isVulkanPlatform = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    const bool skipSplitPass = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    if (isVulkanPlatform) {
+        // Flat bindings — no texture/buffer namespace overlap.
+        DescriptorSetLayoutBinding sdfTraceBindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 2
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_distance_buffer (write)
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probeUpdateList (read)
+        };
+        sdfTraceBindings[0].is3D = true;
+        sdfTraceBindings[1].is3D = true;
+        sdfTraceBindings[2].is3D = true;
+        sdfTraceBindings[0].unfilterableFloat = true;
+        sdfTraceBindings[1].unfilterableFloat = true;
+        sdfTraceBindings[2].unfilterableFloat = true;
+        sdfTraceBindings[5].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{6, sdfTraceBindings};
+        sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding sdfTraceBindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 1
@@ -460,8 +480,29 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Finalize: buffer-only + texture2D (no texture3D) ---
-    // Skip on Vulkan/Dawn — split-pass has no WGSL entry.
-    if (!skipSplitPass) {
+    if (isVulkanPlatform) {
+        // Flat bindings.
+        DescriptorSetLayoutBinding finalizeBindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // lighting_atlas (SC fallback)
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_distance_buffer (read)
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probeUpdateList (read)
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray_buffer (write)
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_lookups (read)
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_data (read)
+            {7, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // ViewProjection (64B)
+            {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_frame_color
+            {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // gbuffer_albedo
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (multi-bounce)
+        };
+        finalizeBindings[2].readonly = true;
+        finalizeBindings[3].readonly = true;
+        finalizeBindings[5].readonly = true;
+        finalizeBindings[6].readonly = true;
+        finalizeBindings[10].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{11, finalizeBindings};
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
             {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // lighting_atlas
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
@@ -488,16 +529,21 @@ void LumenDDGIPass::CreatePipelines() {
     auto irradianceShader = CompileShader("DDGIUpdateIrradiance", "ddgi_update_irradiance");
     auto depthShader = CompileShader("DDGIUpdateDepth", "ddgi_update_depth");
 
-    // Split-pass shaders (ddgi_trace_sdf / ddgi_trace_finalize) are Metal-only
-    // Apple Silicon optimizations. Dawn and Vulkan use the unified ddgi_trace_rays
-    // WGSL entry — split-pass entries don't exist in WGSL. Only compile them on
-    // Metal (matching the pipeline-creation guard below at :550).
-    const bool isMetalOrVkSplit = (device_->GetPlatform() == rhi::RHIPlatform::Metal);
+    // Split-pass shaders (ddgi_trace_sdf / ddgi_trace_finalize):
+    //   Metal:   both entries live in DDGITraceRays.metal.
+    //   Vulkan:  hand-written GLSL ports in separate files (DDGITraceSDF.comp /
+    //            DDGITraceFinalize.comp → .comp.spv). Entry names identical.
+    //   Dawn:    no split-pass entry — unified ddgi_trace_rays only.
+    const bool isVulkanPlatform = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    const bool isMetalOrVkSplit = (device_->GetPlatform() == rhi::RHIPlatform::Metal) || isVulkanPlatform;
     ShaderHandle sdfTraceShader = handles::INVALID_SHADER;
     ShaderHandle finalizeShader = handles::INVALID_SHADER;
-    if (isMetalOrVkSplit) {
+    if (device_->GetPlatform() == rhi::RHIPlatform::Metal) {
         sdfTraceShader = CompileShader("DDGITraceRays", "ddgi_trace_sdf");
         finalizeShader = CompileShader("DDGITraceRays", "ddgi_trace_finalize");
+    } else if (isVulkanPlatform) {
+        sdfTraceShader = CompileShader("DDGITraceSDF", "ddgi_trace_sdf");
+        finalizeShader = CompileShader("DDGITraceFinalize", "ddgi_trace_finalize");
     }
 
     if (traceShader == handles::INVALID_SHADER ||
@@ -508,8 +554,8 @@ void LumenDDGIPass::CreatePipelines() {
     }
 
     // Create pipeline layouts
-    const bool skipSplitPass = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
-                                device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    // (Split-pass layouts exist on Metal AND Vulkan now; Dawn only.)
+    const bool skipSplitPass = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
     {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
@@ -528,13 +574,13 @@ void LumenDDGIPass::CreatePipelines() {
         plDesc.setLayouts = &depth_set_layout_;
         depth_layout_ = device_->CreatePipelineLayout(plDesc);
     }
-    if (!skipSplitPass) {
+    if (!skipSplitPass && sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &sdf_trace_set_layout_;
         sdf_trace_layout_ = device_->CreatePipelineLayout(plDesc);
     }
-    if (!skipSplitPass) {
+    if (!skipSplitPass && finalize_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &finalize_set_layout_;
@@ -570,9 +616,11 @@ void LumenDDGIPass::CreatePipelines() {
     // exists in WGSL).
     const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
     const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
-    if (!isDawn && !isVulkan) {
+    if (!isDawn) {
         // SDF trace (split pass 1): texture3D-only, (8,8,1) threadgroup
-        {
+        // (Vulkan now builds split-pass too — GLSL ports + flat layouts.)
+        if (sdfTraceShader != handles::INVALID_SHADER &&
+            sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
             ComputePipelineDesc pipeDesc{};
             pipeDesc.computeShader = sdfTraceShader;
             pipeDesc.layout = sdf_trace_layout_;
@@ -580,7 +628,8 @@ void LumenDDGIPass::CreatePipelines() {
             sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
         }
         // Finalize (split pass 2): buffer-only, (8,8,1) threadgroup
-        {
+        if (finalizeShader != handles::INVALID_SHADER &&
+            finalize_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
             ComputePipelineDesc pipeDesc{};
             pipeDesc.computeShader = finalizeShader;
             pipeDesc.layout = finalize_layout_;
@@ -645,6 +694,7 @@ void LumenDDGIPass::CreateConstantBuffers() {
 
     CreateCBs(global_cb_, 512);          // GlobalShaderData (432 bytes, padded)
     CreateCBs(volume_cb_, 512);          // DDGIVolumeData
+    CreateCBs(finalize_vp_cb_, 64);      // ViewProjection for screen-space prev_color sampling
 }
 
 void LumenDDGIPass::CreateProbeTextures() {
@@ -1260,6 +1310,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     mapped->PreviousViewProjection = camera_data.prev_proj_matrix * camera_data.prev_view_matrix;
                     mapped->InvViewProjection = rhi::math::Inverse(mapped->ViewProjection);
 
+                    // Cache for finalize's screen-space prev_color sampling.
+                    current_view_projection_ = mapped->ViewProjection;
+
                     math::m4x4 invView = rhi::math::Inverse(camera_data.view_matrix);
                     mapped->CameraPositionAndViewWidth = {
                         invView.columns[3][0], invView.columns[3][1],
@@ -1301,7 +1354,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.FrameIndex = camera_data.frame_index;
                     vd.RayMaxDistance = params_.ray_max_distance;
                     vd.ProbeHysteresis = dawnDebugParams_.probeHysteresis;
-                    vd.TemporalAlpha = 1.0f; // DEBUG: full overwrite (no EMA) to see immediate effect
+                    vd.TemporalAlpha = params_.irradiance_temporal_weight; // EMA alpha (default 0.05)
                     vd.LightDirection = {camera_data.light_direction.x,
                                          camera_data.light_direction.y,
                                          camera_data.light_direction.z, 0.0f};
@@ -1485,13 +1538,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                 // --- 1a: SDF trace (texture3D-only, 4 steps) ---
                 {
+                    const bool splitIsVk =
+                        (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                    // Flat bindings on Vulkan (UBO=3, hit_dist=4, list=5);
+                    // Metal keeps overlapping slots (UBO=1, hit_dist=2, list=3).
                     DescriptorData sdfTraceParams[] = {
                         {0, DescriptorType::SampledImage,  sdfTextures[0]},
                         {1, DescriptorType::SampledImage,  sdfTextures[1]},
                         {2, DescriptorType::SampledImage,  sdfTextures[2]},
-                        {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
-                        {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
-                        {3, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                        {splitIsVk ? 3u : 1u, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                        {splitIsVk ? 4u : 2u, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                        {splitIsVk ? 5u : 3u, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
                     };
                     UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 6);
 
@@ -1511,6 +1568,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                 // --- 1b: Finalize (buffer + texture2D, no texture3D) ---
                 {
+                    // Vulkan: primary radiance = prev_frame_color (screen-space,
+                    // has real material colors); SC atlas = fallback for
+                    // off-screen hits. Metal keeps the SC-or-prev logic.
                     ResourceHandle lightingAtlasTex = sc_enabled_
                         ? sc_lighting_atlas_
                         : prevColorTex;
@@ -1519,16 +1579,48 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // causes GPU hang on Apple Silicon. Skip finalize if no valid source.
                     if (lightingAtlasTex != handles::INVALID_RESOURCE) {
 
-                    DescriptorData finalizeParams[] = {
-                        {3, DescriptorType::SampledImage,  lightingAtlasTex},
-                        {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
-                        {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
-                        {3, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
-                        {4, DescriptorType::StorageBuffer, ray_data_buffer_},
-                        {5, DescriptorType::StorageBuffer, sc_card_lookup_buffer_},
-                        {6, DescriptorType::StorageBuffer, sc_card_data_buffer_},
-                    };
-                    UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 7);
+                    const bool finIsVk =
+                        (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+
+                    // Upload ViewProjection for screen-space prev_color sampling
+                    // (64-byte CB, per-frame slot).
+                    if (finIsVk && finalize_vp_cb_[frameIdx] != handles::INVALID_RESOURCE) {
+                        auto* vpm = static_cast<math::m4x4*>(
+                            device_->MapBuffer(finalize_vp_cb_[frameIdx]));
+                        if (vpm) {
+                            *vpm = current_view_projection_;
+                            device_->UnmapBuffer(finalize_vp_cb_[frameIdx]);
+                        }
+                    }
+
+                    // Flat bindings on Vulkan; Metal overlap.
+                    if (finIsVk) {
+                        DescriptorData finalizeParams[] = {
+                            {0, DescriptorType::SampledImage,  lightingAtlasTex},
+                            {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                            {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                            {3, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                            {4, DescriptorType::StorageBuffer, ray_data_buffer_},
+                            {5, DescriptorType::StorageBuffer, sc_card_lookup_buffer_},
+                            {6, DescriptorType::StorageBuffer, sc_card_data_buffer_},
+                            {7, DescriptorType::UniformBuffer, finalize_vp_cb_[frameIdx]},
+                            {8, DescriptorType::SampledImage,  prevColorTex},
+                            {9, DescriptorType::SampledImage,  gbufferAlbedoTex},
+                            {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
+                        };
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 11);
+                    } else {
+                        DescriptorData finalizeParams[] = {
+                            {3, DescriptorType::SampledImage,  lightingAtlasTex},
+                            {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                            {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                            {3, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                            {4, DescriptorType::StorageBuffer, ray_data_buffer_},
+                            {5, DescriptorType::StorageBuffer, sc_card_lookup_buffer_},
+                            {6, DescriptorType::StorageBuffer, sc_card_data_buffer_},
+                        };
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 7);
+                    }
 
                     cmd->BindComputePipeline(finalize_pipeline_);
                     const DescriptorSetHandle sets[] = { finalize_ds_[frameIdx] };

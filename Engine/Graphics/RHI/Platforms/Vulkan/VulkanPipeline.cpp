@@ -248,7 +248,12 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
     rs.rasterizerDiscardEnable = VK_FALSE;
     rs.polygonMode = ToVkPolygonMode(desc.fillMode);
     rs.cullMode     = ToVkCullMode(desc.cullMode);
-    rs.frontFace    = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // naga (WGSL→SPIR-V) negates gl_Position.y to bridge WebGPU/Metal's
+    // Y-up NDC into Vulkan's Y-down — which inverts the rasterized winding.
+    // With CCW every triangle reads as back-facing: back-face culling eats
+    // geometry, and GPUDrivenDraw's `if (!is_front) N = -N` flips ALL world
+    // normals (deferred NdotL ≈ 0 → flat gray). CW matches the actual winding.
+    rs.frontFace    = VK_FRONT_FACE_CLOCKWISE;
     rs.depthBiasEnable = (desc.depthBias != 0.0f || desc.slopeScaledDepthBias != 0.0f) ? VK_TRUE : VK_FALSE;
     rs.depthBiasConstantFactor = desc.depthBias;
     rs.depthBiasClamp          = desc.depthBiasClamp;

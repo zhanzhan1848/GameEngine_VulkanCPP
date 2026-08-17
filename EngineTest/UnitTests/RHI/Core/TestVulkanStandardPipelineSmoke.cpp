@@ -64,6 +64,7 @@
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
 #include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanTexture.h"
 #endif
 
 #include <iostream>
@@ -733,6 +734,277 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     pipeline.Render(scene, view, renderTarget, rtDesc);
     std::cout << "[Part26] Render() returned." << std::endl;
 
+    // === SurfaceCache lighting-atlas dump (SC visual verification) ===
+    // Reads back the card atlas LightEval produced (RGBA16F) and writes an
+    // 8-bit BMP. Non-zero + spatially-varied content = Capture gathered real
+    // Sponza material and LightEval lit it.
+    {
+        auto* scPass = pipeline.GetSurfaceCachePass();
+        if (scPass) {
+            const u32 AW = 2048, AH = 2048;   // atlas_size default
+            // Diagnostic A: albedo atlas (RGBA8, 4B/texel — same readback path
+            // as the working GBuffer dumps). If non-zero, dispatches + readback
+            // are fine and the issue is LightEval output or 16F readback.
+            {
+                rhi::ResourceHandle atlas = scPass->GetEmissiveAtlas();
+                if (atlas != rhi::handles::INVALID_RESOURCE) {
+                BufferDesc abDesc{};
+                abDesc.size = (u64)AW * AH * 8;
+                abDesc.type = BufferType::Raw;
+                abDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle ab = fx.base->CreateBuffer(abDesc);
+                CommandBufferHandle acmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vacmd = fx.vk->GetCommandBuffer(acmd);
+                vacmd->Reset(); vacmd->Begin();
+                rhi::ResourceBarrier ab_{};
+                ab_.resource = atlas; ab_.beforeState = rhi::ResourceState::UnorderedAccess;
+                ab_.afterState = rhi::ResourceState::CopySource;
+                ab_.subresource = 0xFFFFFFFF; ab_.queueFamily = 0xFFFFFFFF;
+                vacmd->InsertBarrier(&ab_, 1);
+                rhi::BufferTextureCopyRegion ar{};
+                ar.imageSubresource = {0, 0, 1};
+                ar.imageExtent = {AW, AH, 1};
+                vacmd->CopyTextureToBuffer(atlas, ab, &ar, 1);
+                vacmd->End(); vacmd->Submit(0); vacmd->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(acmd);
+                auto* amapped = static_cast<u8*>(fx.base->MapBuffer(ab, 0, (u64)AW * AH * 8));
+                if (amapped) {
+                    u64 nonZero = 0;
+                    for (u64 i = 0; i < (u64)AW * AH * 8; ++i) if (amapped[i]) ++nonZero;
+                    std::ofstream bmp("sc_emissive_atlas.raw", std::ios::binary);
+                    if (bmp.is_open()) bmp.write(reinterpret_cast<const char*>(amapped), (u64)AW*AH*8);
+                    if (bmp.is_open()) bmp.close();
+                    std::cout << "[SCDump] EMISSIVE atlas (binding3 target) nonZeroBytes=" << nonZero
+                              << "/" << (u64)AW * AH * 8 << std::endl;
+                    fx.base->UnmapBuffer(ab);
+                }
+                fx.base->DestroyBuffer(ab);
+                }
+            }
+            // Diagnostic B: lighting atlas (RGBA16F) — all 3 triple-buffer slots.
+            for (u32 slot = 0; slot < 3; ++slot) {
+            rhi::ResourceHandle atlas = scPass->GetLightingAtlas(slot);
+            if (atlas == rhi::handles::INVALID_RESOURCE) continue;
+                BufferDesc abDesc{};
+                abDesc.size = (u64)AW * AH * 8;   // RGBA16F = 8 bytes/texel
+                abDesc.type = BufferType::Raw;
+                abDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle ab = fx.base->CreateBuffer(abDesc);
+
+                CommandBufferHandle acmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vacmd = fx.vk->GetCommandBuffer(acmd);
+                vacmd->Reset(); vacmd->Begin();
+                rhi::ResourceBarrier ab_{};
+                ab_.resource = atlas; ab_.beforeState = rhi::ResourceState::ShaderResource;
+                ab_.afterState = rhi::ResourceState::CopySource;
+                ab_.subresource = 0xFFFFFFFF; ab_.queueFamily = 0xFFFFFFFF;
+                vacmd->InsertBarrier(&ab_, 1);
+                rhi::BufferTextureCopyRegion ar{};
+                ar.imageSubresource = {0, 0, 1};
+                ar.imageExtent = {AW, AH, 1};
+                vacmd->CopyTextureToBuffer(atlas, ab, &ar, 1);
+                vacmd->End(); vacmd->Submit(0); vacmd->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(acmd);
+
+                auto* amapped = static_cast<u8*>(fx.base->MapBuffer(ab, 0, (u64)AW * AH * 8));
+                {
+                    auto* vtex = fx.vk->GetTexture(atlas);
+                    std::cout << "[SCDump] slot " << slot << " handle=" << (u64)atlas
+                              << " mapped=" << (amapped ? "yes" : "NO")
+                              << " layout=" << (vtex ? (int)vtex->GetCurrentLayout() : -1)
+                              << " view=" << (vtex && vtex->GetNativeView() ? "ok" : "NULL")
+                              << " image=" << (vtex && vtex->GetNativeImage() ? "ok" : "NULL")
+                              << std::endl;
+                }
+                if (amapped) {
+                    // f16 → 8-bit, tonemap via simple clamp, write BMP
+                    std::vector<u8> rgb((size_t)AW * AH * 4, 0);
+                    u64 nonZero = 0; double lumSum = 0.0;
+                    for (u32 y = 0; y < AH; ++y) {
+                        for (u32 x = 0; x < AW; ++x) {
+                            const _Float16* px = reinterpret_cast<const _Float16*>(&amapped[((u64)y * AW + x) * 8]);
+                            float r = (float)px[0], g = (float)px[1], b = (float)px[2];
+                            // Count texels LightEval actually wrote: alpha=1.0
+                            // marks written texels even when rgb == 0 (NdotL=0).
+                            if (r > 0.0f || g > 0.0f || b > 0.0f || px[3] > 0.5f) ++nonZero;
+                            lumSum += (r + g + b) / 3.0f;
+                            u8* dst = &rgb[((u64)y * AW + x) * 4];
+                            dst[0] = (u8)std::min(255.0f, r * 255.0f);
+                            dst[1] = (u8)std::min(255.0f, g * 255.0f);
+                            dst[2] = (u8)std::min(255.0f, b * 255.0f);
+                            dst[3] = 255;
+                        }
+                    }
+                    std::ofstream bmp(("sc_lighting_atlas_s" + std::to_string(slot) + ".bmp").c_str(), std::ios::binary);
+                    if (bmp.is_open()) {
+                        u32 fs = 54 + AW * AH * 4;
+                        u8 hdr[54] = {};
+                        hdr[0]='B'; hdr[1]='M';
+                        hdr[2]=fs&0xFF; hdr[3]=(fs>>8)&0xFF; hdr[4]=(fs>>16)&0xFF;
+                        hdr[10]=54; hdr[14]=40;
+                        hdr[18]=AW&0xFF; hdr[19]=(AW>>8)&0xFF;
+                        hdr[22]=AH&0xFF; hdr[23]=(AH>>8)&0xFF;
+                        hdr[26]=1; hdr[28]=32;
+                        bmp.write(reinterpret_cast<const char*>(hdr), 54);
+                        for (u32 y = AH; y-- > 0;)
+                            bmp.write(reinterpret_cast<const char*>(&rgb[(u64)y * AW * 4]), AW * 4);
+                        bmp.close();
+                    }
+                    std::cout << "[SCDump] slot " << slot << " nonZeroTexels="
+                              << nonZero << "/" << (u64)AW * AH
+                              << " avgLum=" << (lumSum / ((double)AW * AH))
+                              << std::endl;
+                    fx.base->UnmapBuffer(ab);
+                }
+                fx.base->DestroyBuffer(ab);
+            }
+        }
+    }
+
+    // === DeferredLighting output dump (composition-chain diagnosis) ===
+    {
+        auto* dlMod = pipeline.GetDeferredLightingModule();
+        if (dlMod) {
+            for (u32 slot = 0; slot < 3; ++slot) {
+                rhi::ResourceHandle dtex = dlMod->GetOutputTexture(slot);
+                if (dtex == rhi::handles::INVALID_RESOURCE) continue;
+                BufferDesc dbDesc{};
+                dbDesc.size = (u64)W * H * 8;
+                dbDesc.type = BufferType::Raw;
+                dbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle db = fx.base->CreateBuffer(dbDesc);
+                CommandBufferHandle dcmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vdcmd = fx.vk->GetCommandBuffer(dcmd);
+                vdcmd->Reset(); vdcmd->Begin();
+                rhi::ResourceBarrier dbk{};
+                dbk.resource = dtex; dbk.beforeState = rhi::ResourceState::ShaderResource;
+                dbk.afterState = rhi::ResourceState::CopySource;
+                dbk.subresource = 0xFFFFFFFF; dbk.queueFamily = 0xFFFFFFFF;
+                vdcmd->InsertBarrier(&dbk, 1);
+                rhi::BufferTextureCopyRegion dgn{};
+                dgn.imageSubresource = {0, 0, 1};
+                dgn.imageExtent = {W, H, 1};
+                vdcmd->CopyTextureToBuffer(dtex, db, &dgn, 1);
+                vdcmd->End(); vdcmd->Submit(0); vdcmd->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(dcmd);
+                auto* dm = static_cast<u8*>(fx.base->MapBuffer(db, 0, (u64)W * H * 8));
+                if (dm) {
+                    double rSum = 0.0, gSum = 0.0, bSum = 0.0; u64 n = 0;
+                    for (u32 y = 0; y < H; y += 4) {
+                        for (u32 x = 0; x < W; x += 4) {
+                            const _Float16* px = reinterpret_cast<const _Float16*>(&dm[((u64)y * W + x) * 8]);
+                            rSum += (float)px[0]; gSum += (float)px[1]; bSum += (float)px[2]; ++n;
+                        }
+                    }
+                    std::cout << "[DLDump] slot " << slot
+                              << " R(shadowVis)=" << (rSum / n)
+                              << " G(NdotL)=" << (gSum / n)
+                              << " B=" << (bSum / n)
+                              << " (" << n << " samples)" << std::endl;
+                    fx.base->UnmapBuffer(db);
+                }
+                fx.base->DestroyBuffer(db);
+            }
+        }
+    }
+
+    // === SSGI output dump (diagnosis: is SSGI producing black?) ===
+    {
+        auto* ssgiPass = pipeline.GetSSGIPass();
+        // Dump trace (half-res) and filter (full-res) to narrow down zero source
+        if (ssgiPass && ssgiPass->IsInitialized()) {
+            struct TexInfo { rhi::ResourceHandle tex; const char* name; u32 tw, th; };
+            TexInfo infos[] = {
+                {ssgiPass->GetTraceTexture(), "trace(half)", W/2, H/2},
+                {ssgiPass->GetFilterTexture(), "filter(full)", W, H},
+            };
+            for (auto& ti : infos) {
+                if (ti.tex == rhi::handles::INVALID_RESOURCE) continue;
+                BufferDesc tbDesc{};
+                tbDesc.size = (u64)ti.tw * ti.th * 8;
+                tbDesc.type = BufferType::Raw;
+                tbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle tb = fx.base->CreateBuffer(tbDesc);
+                CommandBufferHandle tcmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vtcmd = fx.vk->GetCommandBuffer(tcmd);
+                vtcmd->Reset(); vtcmd->Begin();
+                rhi::ResourceBarrier tbk{};
+                tbk.resource = ti.tex; tbk.beforeState = rhi::ResourceState::ShaderResource;
+                tbk.afterState = rhi::ResourceState::CopySource;
+                tbk.subresource = 0xFFFFFFFF; tbk.queueFamily = 0xFFFFFFFF;
+                vtcmd->InsertBarrier(&tbk, 1);
+                rhi::BufferTextureCopyRegion tgn{};
+                tgn.imageSubresource = {0, 0, 1};
+                tgn.imageExtent = {ti.tw, ti.th, 1};
+                vtcmd->CopyTextureToBuffer(ti.tex, tb, &tgn, 1);
+                vtcmd->End(); vtcmd->Submit(0); vtcmd->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(tcmd);
+                auto* tm = static_cast<u8*>(fx.base->MapBuffer(tb, 0, (u64)ti.tw * ti.th * 8));
+                if (tm) {
+                    double rSum=0, gSum=0; u64 nz=0;
+                    u64 total = ((ti.th+7)/8) * ((ti.tw+7)/8);
+                    for (u32 y = 0; y < ti.th; y += 8) {
+                        for (u32 x = 0; x < ti.tw; x += 8) {
+                            const _Float16* px = reinterpret_cast<const _Float16*>(&tm[((u64)y * ti.tw + x) * 8]);
+                            rSum += (float)px[0]; gSum += (float)px[1];
+                            if ((float)px[0] > 0.001f) ++nz;
+                        }
+                    }
+                    std::cout << "[SSGIDump] " << ti.name
+                              << " R=" << (rSum/total) << " G=" << (gSum/total)
+                              << " nonZero=" << nz << "/" << total << std::endl;
+                    fx.base->UnmapBuffer(tb);
+                }
+                fx.base->DestroyBuffer(tb);
+            }
+        }
+        // Temporal dump
+        if (ssgiPass && ssgiPass->IsInitialized()) {
+            for (u32 slot = 0; slot < 3; ++slot) {
+                rhi::ResourceHandle stex = ssgiPass->GetTemporalTexture(slot);
+                if (stex == rhi::handles::INVALID_RESOURCE) continue;
+                BufferDesc sbDesc{};
+                sbDesc.size = (u64)W * H * 8;   // RGBA16F
+                sbDesc.type = BufferType::Raw;
+                sbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle sb = fx.base->CreateBuffer(sbDesc);
+                CommandBufferHandle scmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vscmd = fx.vk->GetCommandBuffer(scmd);
+                vscmd->Reset(); vscmd->Begin();
+                rhi::ResourceBarrier sbk{};
+                sbk.resource = stex; sbk.beforeState = rhi::ResourceState::ShaderResource;
+                sbk.afterState = rhi::ResourceState::CopySource;
+                sbk.subresource = 0xFFFFFFFF; sbk.queueFamily = 0xFFFFFFFF;
+                vscmd->InsertBarrier(&sbk, 1);
+                rhi::BufferTextureCopyRegion sgn{};
+                sgn.imageSubresource = {0, 0, 1};
+                sgn.imageExtent = {W, H, 1};
+                vscmd->CopyTextureToBuffer(stex, sb, &sgn, 1);
+                vscmd->End(); vscmd->Submit(0); vscmd->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(scmd);
+                auto* sm = static_cast<u8*>(fx.base->MapBuffer(sb, 0, (u64)W * H * 8));
+                if (sm) {
+                    double rSum=0, gSum=0, bSum=0, aSum=0; u64 nz=0;
+                    for (u32 y = 0; y < H; y += 8) {
+                        for (u32 x = 0; x < W; x += 8) {
+                            const _Float16* px = reinterpret_cast<const _Float16*>(&sm[((u64)y * W + x) * 8]);
+                            rSum += (float)px[0]; gSum += (float)px[1];
+                            bSum += (float)px[2]; aSum += (float)px[3];
+                            if ((float)px[0] > 0.001f || (float)px[1] > 0.001f || (float)px[2] > 0.001f) ++nz;
+                        }
+                    }
+                    u64 total = ((H+7)/8) * ((W+7)/8);
+                    std::cout << "[SSGIDump] slot " << slot
+                              << " R=" << (rSum/total) << " G=" << (gSum/total)
+                              << " B=" << (bSum/total) << " A(hitDist)=" << (aSum/total)
+                              << " nonZero=" << nz << "/" << total << std::endl;
+                    fx.base->UnmapBuffer(sb);
+                }
+                fx.base->DestroyBuffer(sb);
+            }
+        }
+    }
+
     // === GBuffer diagnostic dump (Phase 2 debugging) ===
     // Dump Nanite GBuffer albedo + depth to BMP to isolate whether the all-black
     // output comes from GBuffer (Nanite raster) or DeferredLighting.
@@ -794,6 +1066,7 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
         };
         dumpTexture(gbAlbedo, "albedo", false);
         dumpTexture(gbDepth, "depth", true);
+        dumpTexture(gpuDraw.GetGBufferNormal(), "normal", false);
 
         // Also dump DeferredLighting output if available
         // DeferredLightingModule output is RGBA16F at full res

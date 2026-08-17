@@ -39,7 +39,7 @@ struct DDGIRuntimeParams {
     u32   probe_count_z = 16;
     u32   rays_per_probe = 64;
     float probe_spacing = 4.0f;                 // 16 probes * 4.0 = 64 units coverage
-    float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
+    float irradiance_temporal_weight = 0.05f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
     u32   max_probes_per_frame = 16384;          // Update ALL probes every frame (no flicker)
@@ -302,6 +302,13 @@ private:
 
     // Hit distance buffer (intermediate between split trace dispatches)
     rhi::ResourceHandle hit_distance_buffer_{ rhi::handles::INVALID_RESOURCE };
+
+    // Finalize screen-space sampling (Vulkan): ViewProjection CB (64B ×3) +
+    // current frame's view-projection for projecting hit positions to screen.
+    rhi::ResourceHandle finalize_vp_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    math::m4x4 current_view_projection_{};
 
     // Probe state tracking (importance-based partial update)
     std::vector<DDGIProbeState> probe_states_;

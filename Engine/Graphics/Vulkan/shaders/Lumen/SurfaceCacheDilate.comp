@@ -1,0 +1,46 @@
+#version 450 core
+// Vulkan SurfaceCache Dilate — GLSL port of SurfaceCacheDilate.metal.
+// Entry point: surface_cache_dilate
+// Hole-fills the depth atlas: if center texel is empty (depth<=0), take min
+// positive depth from 3×3 neighbors.
+//
+// Flat bindings:
+//   0 = StorageImage(r32f)  depth_in   (read)
+//   1 = StorageImage(r32f)  depth_out  (write)
+//   2 = UniformBuffer       SurfaceCacheParams
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, r32f) readonly uniform image2D depth_in;
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D depth_out;
+
+layout(set = 0, binding = 2, std140) uniform ParamBlock {
+    SurfaceCacheParams params;
+} pb;
+
+void surface_cache_dilate() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= pb.params.atlas_size || gid.y >= pb.params.atlas_size) return;
+
+    ivec2 coord = ivec2(gid);
+    float center = imageLoad(depth_in, coord).r;
+    if (center > 0.0) {
+        imageStore(depth_out, coord, vec4(center, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    float min_depth = 1e10;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 nb = coord + ivec2(dx, dy);
+            if (nb.x < 0 || nb.y < 0 ||
+                nb.x >= int(pb.params.atlas_size) || nb.y >= int(pb.params.atlas_size)) continue;
+            float d = imageLoad(depth_in, nb).r;
+            if (d > 0.0) min_depth = min(min_depth, d);
+        }
+    }
+    imageStore(depth_out, coord, vec4(min_depth < 1e10 ? min_depth : 0.0, 0.0, 0.0, 1.0));
+}

@@ -4,6 +4,9 @@
 #include "Graphics/RenderGraph/RenderGraphPass.h"
 #include "Graphics/RenderGraph/RenderGraphResource.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/Utils/ShaderRegistry.h"
+#include "Graphics/Nanite/GlobalSDF.h"
+#include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -47,6 +50,7 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
             bufferInfos[i].range = ~0ull;
             writes[i].bufferInfo = &bufferInfos[i];
         } else if (params[i].type == DescriptorType::SampledImage ||
+                   params[i].type == DescriptorType::SampledDepthImage ||
                    params[i].type == DescriptorType::StorageImage ||
                    params[i].type == DescriptorType::CombinedImageSampler ||
                    params[i].type == DescriptorType::Sampler) {
@@ -123,36 +127,43 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     return out.str();
 }
 
-static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
-    std::string shaderPath = SC_SHADER_DIR + shaderName + ".metal";
+static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char* shaderName) {
+    const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
 
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // Load precompiled SPIR-V (.comp.spv) from Vulkan/shaders/Lumen/
+        const std::string relPath =
+            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
+        const std::vector<std::string> candidates = {
+            relPath,
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+        };
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
+            return bytecode;
+        }
+        std::cerr << "[SurfaceCache] Failed to load SPIR-V: " << shaderName << std::endl;
+        return {};
+    }
+
+    // Metal path: load .metal source + resolve #includes
+    std::string shaderPath = SC_SHADER_DIR + shaderName + ".metal";
     std::string source = ReadFileToString(shaderPath);
     if (source.empty()) {
         shaderPath = std::string("Engine/Graphics/Metal/shaders/Lumen/") + shaderName + ".metal";
         source = ReadFileToString(shaderPath);
     }
-
     if (source.empty()) {
         std::cerr << "[SurfaceCache] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
-
-    // Resolve all #include "..." directives by inlining
     std::set<std::string> included;
     std::string resolved = ResolveIncludes(source, SC_SHADER_DIR, included);
-
-    // DEBUG: Dump resolved source to file
-    {
-        std::string dumpPath = "/tmp/sc_" + std::string(shaderName) + ".resolved.metal";
-        std::ofstream dumpFile(dumpPath);
-        if (dumpFile.is_open()) {
-            dumpFile << resolved;
-            dumpFile.close();
-            std::cerr << "[SurfaceCache] Dumped resolved source to " << dumpPath
-                      << " (" << resolved.size() << " bytes)" << std::endl;
-        }
-    }
-
     return std::vector<u8>(resolved.begin(), resolved.end());
 }
 
@@ -177,22 +188,13 @@ SurfaceCachePass::~SurfaceCachePass() {
 bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& config) {
     if (initialized_) return true;
 
-    // T4.6.3: Lumen Surface Cache deferred on Vulkan — CreateDescriptorSetLayouts()
-    // uses Metal's overlapping texture/buffer binding idiom (rejected by Vulkan),
-    // and no SPIR-V ports of the Surface Cache shaders exist yet. See
-    // LumenDDGIPass::Initialize for the full rationale.
-    if (device && device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-        std::cerr << "[SurfaceCache] Skipped on Vulkan (deferred — needs SPIR-V ports + "
-                     "non-overlapping descriptor bindings)" << std::endl;
-        return false;
-    }
-
     device_ = device;
     config_ = config;
     atlas_size_ = config.surface_cache_atlas_size;
     page_size_ = config.surface_cache_page_size;
 
-    // Initialize card generator
+    // Initialize card generator (meshes registered later by the pipeline
+    // when the scene snapshot rebuilds — real per-mesh AABBs, not test data).
     card_generator_.Initialize(device, atlas_size_, page_size_, config.surface_cache_max_cards);
 
     // Create atlas textures
@@ -238,7 +240,8 @@ void SurfaceCachePass::CreateAtlasTextures() {
         desc.arraySize = 1;
         desc.format = format;
         desc.type = TextureType::Texture2D;
-        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess |
+                     TextureUsage::CopySource;
         if (renderTarget) desc.usage = desc.usage | TextureUsage::RenderTarget;
         desc.name = name;
         handle = device_->CreateTexture(desc);
@@ -336,11 +339,22 @@ void SurfaceCachePass::CreateConstantBuffers() {
 
     CreateCBs(global_cb_, 512);    // GlobalShaderData (padded)
     CreateCBs(params_cb_, 512);    // SurfaceCacheParams (padded)
+    CreateCBs(capture_cb_, 96);    // CaptureParams: invViewProj (64) + counts (16) padded
+    CreateCBs(card_fill_cb_, 176); // CardFillParams: SDF cascades + light + counts
 }
 
 void SurfaceCachePass::CreateDescriptorSetLayouts() {
+    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+
     // --- Dilate: 2 textures (depth_in read + depth_out write) + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_in
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_out
+            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params
+        };
+        dilate_set_layout_ = device_->CreateDescriptorSetLayout({3, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_in  [[texture(0)]]
             {1, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_out [[texture(1)]]
@@ -351,7 +365,16 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
     }
 
     // --- LightCull: 2 textures (depth + normal atlas) + 1 UBO + 2 SSBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // LightCullParams
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lights
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // tile_assignment
+        };
+        light_cull_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_atlas  [[texture(0)]]
             {1, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // normal_atlas [[texture(1)]]
@@ -363,8 +386,21 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         light_cull_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- LightEval (merged): 4 textures + 1 UBO + 3 SSBO = 8 bindings ---
-    {
+    // --- LightEval (merged): 4 textures + 1 UBO + 3 SSBO + 1 prev_lighting = 9 bindings ---
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // emissive_atlas
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // lighting_out
+            {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lights
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch
+            {8, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // prev_lighting (multi-bounce)
+        };
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
             {1, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // normal_atlas  [[texture(1)]]
@@ -380,7 +416,8 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
     }
 
     // --- Capture (graphics): 3 textures (material arrays) + 1 UBO + 1 SSBO ---
-    {
+    // Metal-only until Capture.vert/frag SPIR-V ports exist.
+    if (!isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},     // albedo_array  [[texture(0)]]
             {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},     // normal_array  [[texture(1)]]
@@ -393,7 +430,24 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
     }
 
     // --- IndirectTrace: 5 textures (depth+normal+3 SDF) + 1 UBO + 1 UBO + 2 SSBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf0 (3D)
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf1 (3D)
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf2 (3D)
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global_cb
+            {6, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits
+        };
+        // Mark SDF textures as 3D view dimension
+        bindings[2].is3D = true;
+        bindings[3].is3D = true;
+        bindings[4].is3D = true;
+        indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_atlas  [[texture(0)]]
             {1, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // normal_atlas [[texture(1)]]
@@ -410,7 +464,20 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
     }
 
     // --- IndirectResolve: 4 textures + 1 UBO + 1 UBO + 3 SSBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev_lighting
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sky_cubemap (dummy)
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // indirect_out
+            {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global_cb
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lookups
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits
+        };
+        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(0)]]
             {1, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(1)]]
@@ -425,40 +492,130 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         DescriptorSetLayoutDesc layoutDesc{9, bindings};
         indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
+
+    // --- AtlasInit (Vulkan-only): 4 write images + 1 UBO + 1 SSBO ---
+    // Populates card atlas regions with default material data until a real
+    // Capture graphics pipeline exists on Vulkan.
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // emissive_atlas
+            {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FlattenedLightingParams
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch
+        };
+        DescriptorSetLayoutBinding* b = bindings;
+        b[5].readonly = true;
+        atlas_init_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
+    }
+
+    // --- Capture (GBuffer-gather, Vulkan-only): 3 GBuffer inputs + 3 atlas
+    //     write images + 1 UBO + 1 cards SSBO ---
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // gbuffer_depth
+            {1, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // gbuffer_albedo
+            {2, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // gbuffer_normal
+            {3, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // albedo_atlas
+            {4, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {5, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // depth_atlas
+            {6, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // CaptureParams
+            {7, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // cards
+        };
+        DescriptorSetLayoutBinding* b = bindings;
+        b[7].readonly = true;
+        capture_gather_set_layout_ = device_->CreateDescriptorSetLayout({8, bindings});
+    }
+
+    // --- CardFill (SDF-based, Vulkan-only): 3 SDF 3D + 4 atlas + 1 UBO + 4 SSBO ---
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf_cascade_0
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf_cascade_1
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf_cascade_2
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
+            {4, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas
+            {6, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // lighting_out
+            {7, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // CardFillParams
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch
+            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // instance_data
+            {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // material_data
+            {12, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // albedo texture array
+            {13, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr}, // sampler
+        };
+        DescriptorSetLayoutBinding* b = bindings;
+        b[0].is3D = true; b[1].is3D = true; b[2].is3D = true;
+        b[8].readonly = true;
+        b[9].readonly = true;
+        b[10].readonly = true;
+        b[11].readonly = true;
+        b[12].isArray = true;  // texture2DArray
+        card_fill_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
+    }
 }
 
 void SurfaceCachePass::CreatePipelines() {
     // --- Shader compilation helper ---
     auto CompileComputeShader = [&](const char* name, const char* entry) -> ShaderHandle {
-        auto code = LoadShaderBytecode(name);
+        auto code = LoadShaderBytecode(device_, name);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
 
     auto CompileGraphicsShader = [&](const char* name, const char* entry, ShaderStage stage) -> ShaderHandle {
-        auto code = LoadShaderBytecode(name);
+        auto code = LoadShaderBytecode(device_, name);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), stage, entry);
     };
 
-    // --- Compile all compute shaders ---
-    auto dilateShader       = CompileComputeShader("SurfaceCacheDilate", "surfaceCacheDilate");
-    auto lightCullShader    = CompileComputeShader("SurfaceCacheLightCull", "surfaceCacheLightCull");
-    auto lightEvalShader    = CompileComputeShader("SurfaceCacheLightEval", "surfaceCacheLightEval");
-    auto indirectTraceShader  = CompileComputeShader("SurfaceCacheIndirectTrace", "surfaceCacheIndirectTrace");
-    auto indirectResolveShader = CompileComputeShader("SurfaceCacheIndirectResolve", "surfaceCacheIndirectResolve");
+    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
 
-    // --- Compile capture graphics shaders ---
-    auto captureVS = CompileGraphicsShader("SurfaceCacheCapture", "surfaceCacheCaptureVS", ShaderStage::Vertex);
-    auto captureFS = CompileGraphicsShader("SurfaceCacheCapture", "surfaceCacheCaptureFS", ShaderStage::Pixel);
+    // --- Compile all compute shaders ---
+    // Entry names: Metal uses camelCase, Vulkan GLSL uses snake_case.
+    auto dilateShader       = CompileComputeShader("SurfaceCacheDilate",
+        isVk ? "surface_cache_dilate" : "surfaceCacheDilate");
+    auto lightCullShader    = CompileComputeShader("SurfaceCacheLightCull",
+        isVk ? "surface_cache_light_cull" : "surfaceCacheLightCull");
+    auto lightEvalShader    = CompileComputeShader("SurfaceCacheLightEval",
+        isVk ? "surface_cache_light_eval" : "surfaceCacheLightEval");
+    auto indirectTraceShader  = CompileComputeShader("SurfaceCacheIndirectTrace",
+        isVk ? "surface_cache_indirect_trace" : "surfaceCacheIndirectTrace");
+    auto indirectResolveShader = CompileComputeShader("SurfaceCacheIndirectResolve",
+        isVk ? "surface_cache_indirect_resolve" : "surfaceCacheIndirectResolve");
+    // Vulkan-only: atlas default-content init (stands in for Capture graphics pass)
+    ShaderHandle atlasInitShader = handles::INVALID_SHADER;
+    if (isVk) {
+        atlasInitShader = CompileComputeShader("SurfaceCacheAtlasInit", "surface_cache_atlas_init");
+    }
+    // Vulkan-only: GBuffer-gather capture (real rendered surfaces → card atlas)
+    ShaderHandle captureGatherShader = handles::INVALID_SHADER;
+    if (isVk) {
+        captureGatherShader = CompileComputeShader("SurfaceCacheCapture", "surface_cache_capture");
+    }
+    // Vulkan-only: SDF-based card fill (all card texels get geometry + lighting)
+    ShaderHandle cardFillShader = handles::INVALID_SHADER;
+    if (isVk) {
+        cardFillShader = CompileComputeShader("SurfaceCacheCardFill", "surface_cache_card_fill");
+    }
+
+    // --- Compile capture graphics shaders (Metal only — no Vulkan .vert.spv/.frag.spv yet) ---
+    ShaderHandle captureVS = handles::INVALID_SHADER;
+    ShaderHandle captureFS = handles::INVALID_SHADER;
+    if (!isVk) {
+        captureVS = CompileGraphicsShader("SurfaceCacheCapture", "surfaceCacheCaptureVS", ShaderStage::Vertex);
+        captureFS = CompileGraphicsShader("SurfaceCacheCapture", "surfaceCacheCaptureFS", ShaderStage::Pixel);
+    }
 
     if (dilateShader == handles::INVALID_SHADER ||
         lightCullShader == handles::INVALID_SHADER ||
         lightEvalShader == handles::INVALID_SHADER ||
         indirectTraceShader == handles::INVALID_SHADER ||
         indirectResolveShader == handles::INVALID_SHADER ||
-        captureVS == handles::INVALID_SHADER ||
-        captureFS == handles::INVALID_SHADER) {
+        (!isVk && (captureVS == handles::INVALID_SHADER ||
+                   captureFS == handles::INVALID_SHADER))) {
         std::cerr << "[SurfaceCache] Shader compilation failed" << std::endl;
         return;
     }
@@ -482,7 +639,7 @@ void SurfaceCachePass::CreatePipelines() {
         plDesc.setLayouts = &light_eval_set_layout_;
         light_eval_layout_ = device_->CreatePipelineLayout(plDesc);
     }
-    {
+    if (!isVk) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &capture_set_layout_;
@@ -542,9 +699,51 @@ void SurfaceCachePass::CreatePipelines() {
         pipeDesc.threadGroupSize = {8, 8, 1};
         indirect_resolve_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
+    // AtlasInit (Vulkan-only): (256,1,1) — same flattened texel dispatch as LightEval
+    if (isVk && atlasInitShader != handles::INVALID_SHADER) {
+        {
+            PipelineLayoutDesc plDesc;
+            plDesc.setLayoutCount = 1;
+            plDesc.setLayouts = &atlas_init_set_layout_;
+            atlas_init_layout_ = device_->CreatePipelineLayout(plDesc);
+        }
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = atlasInitShader;
+        pipeDesc.layout = atlas_init_layout_;
+        pipeDesc.threadGroupSize = {256, 1, 1};
+        atlas_init_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
+    // Capture gather (Vulkan-only): (8,8,1) over render resolution
+    if (isVk && captureGatherShader != handles::INVALID_SHADER) {
+        {
+            PipelineLayoutDesc plDesc;
+            plDesc.setLayoutCount = 1;
+            plDesc.setLayouts = &capture_gather_set_layout_;
+            capture_gather_layout_ = device_->CreatePipelineLayout(plDesc);
+        }
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = captureGatherShader;
+        pipeDesc.layout = capture_gather_layout_;
+        pipeDesc.threadGroupSize = {8, 8, 1};
+        capture_gather_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
+    // CardFill (Vulkan-only): (256,1,1) — same flattened texel dispatch as LightEval
+    if (isVk && cardFillShader != handles::INVALID_SHADER) {
+        {
+            PipelineLayoutDesc plDesc;
+            plDesc.setLayoutCount = 1;
+            plDesc.setLayouts = &card_fill_set_layout_;
+            card_fill_layout_ = device_->CreatePipelineLayout(plDesc);
+        }
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = cardFillShader;
+        pipeDesc.layout = card_fill_layout_;
+        pipeDesc.threadGroupSize = {256, 1, 1};
+        card_fill_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
 
-    // --- Create capture graphics pipeline ---
-    {
+    // --- Create capture graphics pipeline (Metal only) ---
+    if (!isVk) {
         GraphicsPipelineDesc desc{};
         desc.layout = capture_layout_;
         desc.vertexShader = captureVS;
@@ -578,6 +777,18 @@ void SurfaceCachePass::CreatePipelines() {
 
     // --- Create triple-buffered descriptor sets ---
     for (int i = 0; i < 3; i++) {
+        if (isVk && atlas_init_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{atlas_init_set_layout_};
+            atlas_init_set_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        if (isVk && capture_gather_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{capture_gather_set_layout_};
+            capture_gather_set_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        if (isVk && card_fill_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{card_fill_set_layout_};
+            card_fill_set_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
         {
             DescriptorSetDesc dsDesc{dilate_set_layout_};
             dilate_set_[i] = device_->CreateDescriptorSet(dsDesc);
@@ -590,7 +801,7 @@ void SurfaceCachePass::CreatePipelines() {
             DescriptorSetDesc dsDesc{light_eval_set_layout_};
             light_eval_set_[i] = device_->CreateDescriptorSet(dsDesc);
         }
-        {
+        if (!isVk) {
             DescriptorSetDesc dsDesc{capture_set_layout_};
             capture_set_[i] = device_->CreateDescriptorSet(dsDesc);
         }
@@ -640,7 +851,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
             data.prev_frame_color = prev_frame_color;
 
-            // Write to lighting atlas
+            // Write declaration (prevents RG cull). DEBUG: imported under a
+            // side name so the "SurfaceCache_Lighting_N" identity isn't shared.
             builder.Write(lightingHandle, ResourceState::UnorderedAccess);
         },
 
@@ -690,7 +902,27 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             }
 
             // ================================================================
-            // 2. Upload FlattenedLightingParams constant buffer
+            // 2. Upload directional light into light_info_buffer_
+            //    (LightInfo = position(vec4) + color(vec4) + direction(vec4) = 48B)
+            // ================================================================
+            {
+                struct LightInfoGPU {
+                    math::v4 position;    // xyz=pos, w=radius
+                    math::v4 color;       // xyz=color, w=unused
+                    math::v4 direction;   // xyz=dir, w=type (1.0=directional)
+                };
+                static_assert(sizeof(LightInfoGPU) == 48, "LightInfo must be 48 bytes");
+                auto* lights = static_cast<LightInfoGPU*>(device_->MapBuffer(light_info_buffer_));
+                if (lights) {
+                    lights[0].position  = math::v4{0.0f, 0.0f, 0.0f, 1000.0f};
+                    lights[0].color     = math::v4{5.0f, 5.0f, 5.0f, 0.0f};
+                    lights[0].direction = math::v4{0.707f, -1.0f, 0.408f, 1.0f}; // w=1 → directional
+                    device_->UnmapBuffer(light_info_buffer_);
+                }
+            }
+
+            // ================================================================
+            // 3. Upload FlattenedLightingParams constant buffer
             // ================================================================
             {
                 auto* mapped = static_cast<FlattenedLightingParams*>(device_->MapBuffer(params_cb_[frameIdx]));
@@ -717,20 +949,273 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             }
 
             // ================================================================
-            // 3. Single merged LightEval dispatch (1D, per-card texel)
+            // 3.4 Transition material atlases to GENERAL (first use: UNDEFINED
+            //     → GENERAL; subsequent frames this is a no-op barrier).
+            //     These textures are not declared in the render graph (only
+            //     lighting_atlas is), so their layout must be managed here.
             // ================================================================
             {
-                DescriptorData evalParams[] = {
+                ResourceBarrier atlasBarriers[4]{};
+                atlasBarriers[0].resource = albedo_atlas_;
+                atlasBarriers[1].resource = normal_atlas_;
+                atlasBarriers[2].resource = depth_atlas_;
+                atlasBarriers[3].resource = emissive_atlas_;
+                for (auto& b : atlasBarriers) {
+                    b.beforeState = ResourceState::UnorderedAccess;
+                    b.afterState  = ResourceState::UnorderedAccess;
+                    b.subresource = 0xFFFFFFFF;
+                }
+                cmd->InsertBarrier(atlasBarriers, 4);
+            }
+
+            // ================================================================
+            // 3.5 AtlasInit dispatch (Vulkan-only, FIRST FRAME ONLY): write
+            //     default material into card atlas regions so LightEval has
+            //     alpha=1 albedo to process even before Capture covers texels.
+            // ================================================================
+            if (atlas_init_pipeline_ != handles::INVALID_PIPELINE && !atlas_seeded_) {
+                DescriptorData initParams[] = {
                     {0, DescriptorType::StorageImage,  albedo_atlas_},
                     {1, DescriptorType::StorageImage,  normal_atlas_},
+                    {2, DescriptorType::StorageImage,  depth_atlas_},
+                    {3, DescriptorType::StorageImage,  emissive_atlas_},
+                    {4, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
+                    {5, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                };
+                UpdateDescriptorSet(device_, atlas_init_set_[frameIdx], initParams, 6);
+
+                cmd->BindComputePipeline(atlas_init_pipeline_);
+                const DescriptorSetHandle initSets[] = { atlas_init_set_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, atlas_init_layout_, 0, 1, initSets, 0, nullptr);
+
+                u32 groups = (total_texels + 255) / 256;
+                cmd->Dispatch(groups, 1, 1);
+                atlas_seeded_ = true;
+
+                // Compute→compute memory barrier (storage images stay in
+                // GENERAL layout; LightEval reads via imageLoad).
+                cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                   AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+            }
+
+            // ================================================================
+            // 3.6 Capture dispatch (Vulkan-only, EVERY FRAME): GBuffer-gather —
+            //     scatter real rendered surfaces (albedo / world normal / axis
+            //     depth) into card atlas texels. Uncovered texels keep previous
+            //     content (persistent atlas = cache semantics).
+            // ================================================================
+            if (capture_gather_pipeline_ != handles::INVALID_PIPELINE &&
+                frame_data.gbuffer_depth  != handles::INVALID_RESOURCE &&
+                frame_data.gbuffer_albedo != handles::INVALID_RESOURCE &&
+                frame_data.gbuffer_normal != handles::INVALID_RESOURCE) {
+
+                // Transition GBuffer inputs to SHADER_READ (first use may be
+                // UNDEFINED when the main GBuffer pass hasn't run yet).
+                {
+                    ResourceBarrier gbBarriers[3]{};
+                    gbBarriers[0].resource = frame_data.gbuffer_depth;
+                    gbBarriers[1].resource = frame_data.gbuffer_albedo;
+                    gbBarriers[2].resource = frame_data.gbuffer_normal;
+                    for (auto& b : gbBarriers) {
+                        b.beforeState = ResourceState::ShaderResource;
+                        b.afterState  = ResourceState::ShaderResource;
+                        b.subresource = 0xFFFFFFFF;
+                    }
+                    cmd->InsertBarrier(gbBarriers, 3);
+                }
+
+                // Upload CaptureParams (invViewProj + counts)
+                {
+                    struct CaptureParamsCB {
+                        math::m4x4 invViewProjection;
+                        u32 card_count;
+                        u32 render_width;
+                        u32 render_height;
+                        u32 _pad;
+                    };
+                    auto* mapped = static_cast<CaptureParamsCB*>(device_->MapBuffer(capture_cb_[frameIdx]));
+                    if (mapped) {
+                        mapped->invViewProjection = frame_data.inv_view_projection;
+                        mapped->card_count    = card_count;
+                        mapped->render_width  = frame_data.render_width;
+                        mapped->render_height = frame_data.render_height;
+                        mapped->_pad = 0;
+                        device_->UnmapBuffer(capture_cb_[frameIdx]);
+                    }
+                }
+
+                DescriptorData captureParams[] = {
+                    {0, DescriptorType::SampledDepthImage, frame_data.gbuffer_depth},
+                    {1, DescriptorType::SampledImage,      frame_data.gbuffer_albedo},
+                    {2, DescriptorType::SampledImage,      frame_data.gbuffer_normal},
+                    {3, DescriptorType::StorageImage,      albedo_atlas_},
+                    {4, DescriptorType::StorageImage,      normal_atlas_},
+                    {5, DescriptorType::StorageImage,      depth_atlas_},
+                    {6, DescriptorType::UniformBuffer,     capture_cb_[frameIdx]},
+                    {7, DescriptorType::StorageBuffer,     card_generator_.GetCardDataBuffer()},
+                };
+                UpdateDescriptorSet(device_, capture_gather_set_[frameIdx], captureParams, 8);
+
+                cmd->BindComputePipeline(capture_gather_pipeline_);
+                const DescriptorSetHandle capSets[] = { capture_gather_set_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, capture_gather_layout_, 0, 1, capSets, 0, nullptr);
+
+                cmd->Dispatch((frame_data.render_width + 7) / 8,
+                              (frame_data.render_height + 7) / 8, 1);
+
+                cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                   AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+            }
+
+            // ================================================================
+            // 3.7 CardFill dispatch (Vulkan-only, EVERY FRAME): SDF-based —
+            //     fills ALL card texels with SDF-derived geometry + lighting.
+            //     Runs BEFORE the GBuffer gather's results are consumed by
+            //     LightEval, and BEFORE LightEval itself. The GBuffer gather
+            //     (which ran above) has already written real materials to
+            //     visible texels — CardFill only fills texels the gather
+            //     couldn't reach (writing is per-texel, no overwrite of
+            //     already-captured data since SDF hit vs no-hit differs).
+            //
+            //     NOTE: CardFill writes to atlas texels that the gather may
+            //     have already written. Since both write the same texel, the
+            //     LAST writer wins. CardFill runs after gather, so it would
+            //     overwrite gathered material. To avoid this, we SKIP CardFill
+            //     for now and only enable it when gather coverage is low.
+            //     TODO: Add an albedo-alpha check to skip already-captured texels.
+            // ================================================================
+            // DISABLED: CardFill's texture-sampled albedo creates dark patches
+            // in the SC atlas → dark GI blocks. The GBuffer gather provides
+            // real colors for visible surfaces; AtlasInit's gray default is
+            // used for the rest. Re-enable when the skip/merge logic properly
+            // distinguishes "captured" from "dark material" texels.
+            if (false && card_fill_pipeline_ != handles::INVALID_PIPELINE) {
+                // Get SDF cascade textures + data from GlobalSDF.
+                auto& globalSDF = nanite::GlobalSDF::Get();
+                ResourceHandle sdfTex[3] = {handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
+                u32 cascadeCount = 0;
+                if (globalSDF.IsInitialized()) {
+                    for (u32 c = 0; c < 3; ++c) {
+                        const auto& cascade = globalSDF.GetCascade(c);
+                        if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
+                            sdfTex[c] = cascade.sdf_texture;
+                            cascadeCount++;
+                        }
+                    }
+                }
+
+                if (cascadeCount > 0) {
+                    // Upload CardFillParams (SDF cascades + light + counts)
+                    {
+                        struct CardFillParamsCB {
+                            math::v4 sdf_origins[3];
+                            math::v4 sdf_extents[3];
+                            u32 sdf_res[3];
+                            u32 sdf_count;
+                            math::v4 light_direction;
+                            math::v4 light_color;
+                            u32 total_texels;
+                            u32 card_count;
+                            u32 _pad0;
+                            u32 _pad1;
+                        };
+                        auto* cfm = static_cast<CardFillParamsCB*>(device_->MapBuffer(card_fill_cb_[frameIdx]));
+                        if (cfm) {
+                            for (u32 c = 0; c < cascadeCount; ++c) {
+                                const auto& cascade = globalSDF.GetCascade(c);
+                                cfm->sdf_origins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
+                                cfm->sdf_extents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
+                                cfm->sdf_res[c] = cascade.resolution;
+                            }
+                            cfm->sdf_count = cascadeCount;
+                            cfm->light_direction = math::v4{0.707f, -1.0f, 0.408f, 0.0f};
+                            cfm->light_color = math::v4{5.0f, 5.0f, 5.0f, 1.0f};
+                            cfm->total_texels = total_texels;
+                            cfm->card_count = card_count;
+                            cfm->_pad0 = cfm->_pad1 = 0;
+                            device_->UnmapBuffer(card_fill_cb_[frameIdx]);
+                        }
+                    }
+
+                    // Get instance + material + texture buffers for per-mesh color
+                    auto& gpuDrawCF = nanite::GPUDrivenDrawPipeline::Get();
+                    ResourceHandle instBuf = gpuDrawCF.GetGlobalInstanceDataBuffer();
+                    ResourceHandle matBuf  = gpuDrawCF.GetMaterialDataBuffer();
+                    ResourceHandle albedoTexArr = gpuDrawCF.GetAlbedoTextureArray();
+                    // Use a simple linear sampler (create if not cached)
+                    static SamplerHandle s_cf_sampler = handles::INVALID_SAMPLER;
+                    if (s_cf_sampler == handles::INVALID_SAMPLER) {
+                        SamplerDesc sd{};
+                        sd.minFilter = FilterMode::Linear;
+                        sd.magFilter = FilterMode::Linear;
+                        sd.addressU = TextureAddressMode::Clamp;
+                        sd.addressV = TextureAddressMode::Clamp;
+                        s_cf_sampler = device_->CreateSampler(sd);
+                    }
+
+                    DescriptorData fillParams[] = {
+                        {0, DescriptorType::SampledImage,  sdfTex[0]},
+                        {1, DescriptorType::SampledImage,  sdfTex[1]},
+                        {2, DescriptorType::SampledImage,  sdfTex[2]},
+                        {3, DescriptorType::StorageImage,  albedo_atlas_},
+                        {4, DescriptorType::StorageImage,  normal_atlas_},
+                        {5, DescriptorType::StorageImage,  depth_atlas_},
+                        {6, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
+                        {7, DescriptorType::UniformBuffer, card_fill_cb_[frameIdx]},
+                        {8, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                        {9, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
+                        {10, DescriptorType::StorageBuffer, instBuf},
+                        {11, DescriptorType::StorageBuffer, matBuf},
+                        {12, DescriptorType::SampledImage,  albedoTexArr},
+                        {13, DescriptorType::Sampler,       static_cast<ResourceHandle>(s_cf_sampler)},
+                    };
+                    UpdateDescriptorSet(device_, card_fill_set_[frameIdx], fillParams, 14);
+
+                    cmd->BindComputePipeline(card_fill_pipeline_);
+                    const DescriptorSetHandle fillSets[] = { card_fill_set_[frameIdx] };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, card_fill_layout_, 0, 1, fillSets, 0, nullptr);
+
+                    u32 fillGroups = (total_texels + 255) / 256;
+                    cmd->Dispatch(fillGroups, 1, 1);
+
+                    cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                       AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                }
+            }
+
+            // ================================================================
+            // 4. Single merged LightEval dispatch (1D, per-card texel)
+            // ================================================================
+            {
+                const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+                // histIdx = 2 frames ago — the lighting atlas from 2 frames
+                // back is safe to read (GPU finished with it) and serves as
+                // the multi-bounce feedback source.
+                u32 histIdx = (current_frame_index + 1) % 3;
+                DescriptorData evalParams[] = {
+                    {isVk ? 0u : 0u, DescriptorType::StorageImage,  albedo_atlas_},
+                    {isVk ? 1u : 1u, DescriptorType::StorageImage,  normal_atlas_},
                     {2, DescriptorType::StorageImage,  emissive_atlas_},
                     {3, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
-                    {1, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
-                    {2, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
-                    {3, DescriptorType::StorageBuffer, light_info_buffer_},
-                    {4, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                    {isVk ? 4u : 1u, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
+                    {isVk ? 5u : 2u, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
+                    {isVk ? 6u : 3u, DescriptorType::StorageBuffer, light_info_buffer_},
+                    {isVk ? 7u : 4u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                    {8, DescriptorType::StorageImage,  lighting_atlas_[histIdx]},  // prev for multi-bounce
                 };
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 8);
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 9);
+
+                // Explicit GENERAL transition for the lighting atlas — do not
+                // rely on the render graph's Write declaration having put it in
+                // a storage-compatible layout before this dispatch.
+                {
+                    ResourceBarrier lb{};
+                    lb.resource = lighting_atlas_[outIdx];
+                    lb.beforeState = ResourceState::UnorderedAccess;
+                    lb.afterState  = ResourceState::UnorderedAccess;
+                    lb.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&lb, 1);
+                }
 
                 cmd->BindComputePipeline(light_eval_pipeline_);
                 const DescriptorSetHandle sets[] = { light_eval_set_[frameIdx] };
@@ -739,6 +1224,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 u32 groups = (total_texels + 255) / 256;
                 cmd->Dispatch(groups, 1, 1);
 
+                // DEBUG: immediate post-dispatch memory barrier + inline readback
+                // to prove/disprove whether the imageStore landed in this very
+                // command buffer (rules out later-pass overwrite).
                 std::cerr << "[SurfaceCache] LightEval dispatch: " << total_texels
                           << " texels, " << card_count << " cards, "
                           << groups << " groups" << std::endl;

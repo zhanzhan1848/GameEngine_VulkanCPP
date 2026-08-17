@@ -134,6 +134,16 @@ public:
         return surface_cache_pass_ ? surface_cache_pass_.get() : nullptr;
     }
 
+    // Debug/testing: SSGI output texture access.
+    lumen::LumenSSGIPass* GetSSGIPass() const {
+        return ssgi_pass_ ? ssgi_pass_.get() : nullptr;
+    }
+
+    // Debug/testing: deferred lighting output texture access.
+    DeferredLightingModule* GetDeferredLightingModule() const {
+        return deferred_module_ ? deferred_module_.get() : nullptr;
+    }
+
     rhi::RHIDeviceBase* GetDevice() const { return device_; }
 
     // --- Editor mode (lightweight forward rendering) ---

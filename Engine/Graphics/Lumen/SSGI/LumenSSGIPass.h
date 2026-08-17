@@ -20,12 +20,12 @@ struct SSGIParams {
     float radius = 2.0f;              ///< Spatial filter kernel radius (world units)
     float max_trace_distance = 30.0f; ///< Ray march cap (world units) — decoupled from filter radius
     float thickness = 0.25f;
-    float temporal_feedback = 0.95f;
+    float temporal_feedback = 0.98f;
     float filter_sigma_depth = 10.0f;
     float filter_sigma_normal = 16.0f;
     float filter_sigma_hit_dist = 8.0f;
-    float filter_sigma_spatial = 2.5f;
-    u32   filter_kernel_radius = 3;
+    float filter_sigma_spatial = 4.0f;
+    u32   filter_kernel_radius = 5;
 };
 
 /// Per-frame camera data that the caller must provide.
@@ -75,6 +75,15 @@ public:
         u32 hzb_mip_levels);
 
     bool IsInitialized() const { return initialized_; }
+
+    /// Debug/testing: final SSGI output texture (temporally accumulated).
+    rhi::ResourceHandle GetTemporalTexture(u32 frame_index) const {
+        return (frame_index < 3) ? temporal_textures_[frame_index] : rhi::handles::INVALID_RESOURCE;
+    }
+    /// Debug/testing: half-res trace output (pre-filter, pre-temporal).
+    rhi::ResourceHandle GetTraceTexture() const { return trace_texture_; }
+    /// Debug/testing: full-res filter output (pre-temporal).
+    rhi::ResourceHandle GetFilterTexture() const { return filter_texture_; }
 
 private:
     void CreateDescriptorSetLayouts();

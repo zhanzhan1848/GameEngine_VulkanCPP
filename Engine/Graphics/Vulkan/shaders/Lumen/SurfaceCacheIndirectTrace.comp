@@ -1,0 +1,221 @@
+#version 450 core
+// Vulkan Lumen Surface Cache Indirect Trace — GLSL port of SurfaceCacheIndirectTrace.metal.
+// Entry point: surface_cache_indirect_trace  (glslangValidator -e surface_cache_indirect_trace)
+//
+// SDF cone/ray trace per probe to populate ray_hits buffer.
+// ThreadGroupSize: (8, 8, 1)
+//
+// Flat descriptor bindings:
+//   binding 0 = StorageImage(r32f)   depth_atlas       (readonly, imageLoad)
+//   binding 1 = StorageImage(rg16f)  normal_atlas      (readonly, imageLoad)
+//   binding 2 = texture3D            sdf0              (samplerless, texelFetch nearest)
+//   binding 3 = texture3D            sdf1              (samplerless, texelFetch nearest)
+//   binding 4 = texture3D            sdf2              (samplerless, texelFetch nearest)
+//   binding 5 = UniformBuffer        GlobalShaderData  (480B, inline)
+//   binding 6 = UniformBuffer        IndirectTraceParams
+//   binding 7 = StorageBuffer        cards[]           (SurfaceCacheCard, std430)
+//   binding 8 = StorageBuffer        ray_hits[]        (ProbeRayHit, read-write, std430)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0, r32f)  readonly uniform image2D depth_atlas;
+layout(set = 0, binding = 1, rg16f) readonly uniform image2D normal_atlas;
+
+layout(set = 0, binding = 2) uniform texture3D sdf0;
+layout(set = 0, binding = 3) uniform texture3D sdf1;
+layout(set = 0, binding = 4) uniform texture3D sdf2;
+
+// GlobalShaderData UBO — 480 bytes, mirrors C++ RHIShaderCommon.h.
+// Declared inline (not via #include RHIShaderTypes.glsl) to avoid the awk
+// inliner's source-dir-relative path resolution limitation with "../" prefixes.
+layout(set = 0, binding = 5, std140) uniform GDBlock {
+    mat4  view;
+    mat4  projection;
+    mat4  invProjection;
+    mat4  viewProjection;
+    mat4  previousViewProjection;
+    mat4  invViewProjection;
+    vec4  cameraPositionAndViewWidth;
+    vec4  cameraDirectionAndViewHeight;
+    uint  numDirectionalLights;
+    uint  numPunctualLights;
+    float deltaTime;
+    float frameCount;
+    uint  renderMode;
+    uint  enableIBL;
+    uint  enableDDGI;
+    uint  _pad_before_jitter;
+    vec2  jitterOffset;
+    float debug_directLightBoost;
+    float debug_iblStrength;
+    float debug_ddgiIndirectWeight;
+    float debug_exposure;
+    float _pad_after_debug_0;
+    float _pad_after_debug_1;
+} gd;
+
+struct IndirectTraceParams {
+    SurfaceCacheParams sc_params;
+    uint tile_size;
+    uint rays_per_probe;
+    uint frame_index;
+    float near_distance;
+    float max_ray_distance;
+    vec4 sdf_origins[3];
+    vec4 sdf_voxel_sizes[3];
+    vec4 sdf_extents[3];
+    uint sdf_resolutions[3];
+    uint sdf_cascade_count;
+};
+
+layout(set = 0, binding = 6, std140) uniform IndirectTraceParamsBlock {
+    IndirectTraceParams params;
+} itp;
+
+layout(set = 0, binding = 7, std430) readonly buffer CardsBlock {
+    SurfaceCacheCard data[];
+} cards;
+
+// ProbeRayHit — two vec4s (32 bytes) per hit.
+//   hit_position_dist.xyz = position, .w = hit_distance
+//   hit_type_pad.x = hit_type (0=near, 1=far, 2=sky)
+struct ProbeRayHit {
+    vec4 hit_position_dist;
+    uvec4 hit_type_pad;
+};
+
+layout(set = 0, binding = 8, std430) buffer RayHitsBlock {
+    ProbeRayHit data[];
+} ray_hits;
+
+// --------------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------------
+uint findOwningCard(uvec2 uv, int count) {
+    // Apple Silicon: cap device reads to ~24 to stay within limits
+    uint limit = min(uint(count), 24u);
+    for (uint i = 0u; i < limit; ++i) {
+        if (uv.x >= cards.data[i].atlas_offset_x &&
+            uv.x <  cards.data[i].atlas_offset_x + cards.data[i].resolution &&
+            uv.y >= cards.data[i].atlas_offset_y &&
+            uv.y <  cards.data[i].atlas_offset_y + cards.data[i].resolution)
+            return i;
+    }
+    return uint(count);
+}
+
+// Nearest-sample SDF from a 3D texture at normalized uvw (samplerless texelFetch).
+float sampleSDFNearest(texture3D sdf, vec3 uvw) {
+    ivec3 size = textureSize(sdf, 0);
+    ivec3 coord = ivec3(clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size));
+    return texelFetch(sdf, coord, 0).r;
+}
+
+// Apple Silicon: else-if cascade selection = 1 texture3D read per step (not 3)
+float sampleSDF(vec3 pos) {
+    if (itp.params.sdf_cascade_count > 0u) {
+        vec3 local_p = (pos - itp.params.sdf_origins[0].xyz) / itp.params.sdf_extents[0].xyz;
+        vec3 uvw = local_p * 0.5 + 0.5;
+        if (uvw.x >= 0.0 && uvw.x <= 1.0 && uvw.y >= 0.0 && uvw.y <= 1.0 && uvw.z >= 0.0 && uvw.z <= 1.0)
+            return sampleSDFNearest(sdf0, uvw) * itp.params.sdf_extents[0].x;
+    }
+    if (itp.params.sdf_cascade_count > 1u) {
+        vec3 local_p = (pos - itp.params.sdf_origins[1].xyz) / itp.params.sdf_extents[1].xyz;
+        vec3 uvw = local_p * 0.5 + 0.5;
+        if (uvw.x >= 0.0 && uvw.x <= 1.0 && uvw.y >= 0.0 && uvw.y <= 1.0 && uvw.z >= 0.0 && uvw.z <= 1.0)
+            return sampleSDFNearest(sdf1, uvw) * itp.params.sdf_extents[1].x;
+    }
+    if (itp.params.sdf_cascade_count > 2u) {
+        vec3 local_p = (pos - itp.params.sdf_origins[2].xyz) / itp.params.sdf_extents[2].xyz;
+        vec3 uvw = local_p * 0.5 + 0.5;
+        if (uvw.x >= 0.0 && uvw.x <= 1.0 && uvw.y >= 0.0 && uvw.y <= 1.0 && uvw.z >= 0.0 && uvw.z <= 1.0)
+            return sampleSDFNearest(sdf2, uvw) * itp.params.sdf_extents[2].x;
+    }
+    return 1e6;
+}
+
+// --------------------------------------------------------------------------------
+void surface_cache_indirect_trace()
+{
+    uint probe_x = gl_GlobalInvocationID.x;
+    uint probe_y = gl_GlobalInvocationID.y;
+    if (itp.params.tile_size == 0u) return;
+    uint tiles_x = itp.params.sc_params.atlas_size / itp.params.tile_size;
+    uint probe_idx = probe_y * tiles_x + probe_x;
+
+    uvec2 tile_origin = uvec2(probe_x * itp.params.tile_size + itp.params.tile_size / 2u,
+                              probe_y * itp.params.tile_size + itp.params.tile_size / 2u);
+    if (tile_origin.x >= itp.params.sc_params.atlas_size || tile_origin.y >= itp.params.sc_params.atlas_size) return;
+
+    float depth = imageLoad(depth_atlas, ivec2(tile_origin)).r;
+    if (depth <= 0.0) return;
+
+    vec2 enc_n = imageLoad(normal_atlas, ivec2(tile_origin)).rg;
+    vec3 probe_normal = octDecode(enc_n);
+
+    // Find owning card for correct world position
+    uint card_idx = findOwningCard(tile_origin, int(itp.params.sc_params.max_cards));
+    if (card_idx >= itp.params.sc_params.max_cards) return;
+    vec3 probe_pos = cardTexelToWorld(tile_origin, depth, cards.data[card_idx]);
+
+    uint rays = itp.params.rays_per_probe;
+    // Apple Silicon: 4 SDF steps x 1 texture3D read/step = 4 reads/ray (within ~4 limit)
+    const uint kMaxSDFSteps = 4u;
+    for (uint r = 0u; r < rays; ++r) {
+        float r1 = hash(vec2(float(probe_idx * rays + r), float(itp.params.frame_index)));
+        float r2 = hash(vec2(float(itp.params.frame_index), float(probe_idx * rays + r))) * 2.0 * 3.14159265;
+        float sin_t = sqrt(r1);
+        float cos_t = sqrt(1.0 - r1);
+        vec3 local_dir = vec3(cos_t * cos(r2), cos_t * sin(r2), sin_t);
+
+        vec3 up = abs(probe_normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 tangent = normalize(cross(up, probe_normal));
+        vec3 bitangent = cross(probe_normal, tangent);
+        vec3 ray_dir = normalize(tangent * local_dir.x + bitangent * local_dir.y + probe_normal * local_dir.z);
+
+        float t = 0.0;
+        bool hit = false;
+        vec3 hit_pos = vec3(0.0);
+
+        // Adaptive threshold based on finest cascade voxel size
+        float hitThreshold = itp.params.sdf_extents[0].x * 0.5;
+        float minStep = itp.params.sdf_extents[0].x * 0.25;
+
+        for (uint step = 0u; step < kMaxSDFSteps; ++step) {
+            vec3 p = probe_pos + ray_dir * t;
+            float d = sampleSDF(p);
+
+            if (d < hitThreshold) { hit = true; hit_pos = p; break; }
+            if (t > itp.params.max_ray_distance) break;
+
+            // Relaxed advancement: overstep when far, conservative when close
+            float advance;
+            if (d > hitThreshold * 4.0) {
+                advance = d * 1.2;
+            } else {
+                advance = max(d, minStep);
+            }
+            t += advance;
+        }
+
+        uint hit_idx = probe_idx * rays + r;
+        ray_hits.data[hit_idx].hit_position_dist.w = t;
+        if (hit && t < itp.params.near_distance) {
+            ray_hits.data[hit_idx].hit_type_pad.x = 0u;
+            ray_hits.data[hit_idx].hit_position_dist.xyz = hit_pos;
+        } else if (hit) {
+            ray_hits.data[hit_idx].hit_type_pad.x = 1u;
+            ray_hits.data[hit_idx].hit_position_dist.xyz = hit_pos;
+        } else {
+            ray_hits.data[hit_idx].hit_type_pad.x = 2u;
+            ray_hits.data[hit_idx].hit_position_dist.xyz = vec3(0.0);
+        }
+    }
+}

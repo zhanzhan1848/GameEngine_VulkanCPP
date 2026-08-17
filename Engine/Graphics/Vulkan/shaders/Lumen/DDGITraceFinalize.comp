@@ -1,0 +1,418 @@
+#version 450 core
+// Vulkan DDGI Split-Pass 2 — Finalize (SC atlas sampling).
+// GLSL port of the `ddgi_trace_finalize` entry in DDGITraceRays.metal.
+// Entry point: ddgi_trace_finalize
+//
+// Reads per-ray hit distances (from DDGITraceSDF.comp), reconstructs hit
+// positions, and looks up radiance in the Surface Cache lighting atlas via
+// the card system (AABB prefilter → worldToCardUV → atlas sample). Sky
+// fallback when no card matches. Writes DDGIRayData at the ABSOLUTE probe
+// index (note: hit_distance was indexed by update-slot — this remap is
+// intentional, preserve it).
+//
+// Threadgroup (8,8,1): one group per probe-update slot. Lookup AABBs are
+// cooperatively staged into shared memory BEFORE any early return (all
+// threads must reach the barrier).
+//
+// Flat bindings:
+//   0 = SampledImage (texture2D)  lighting_atlas (SC) or prev_frame_color
+//   1 = UniformBuffer             DDGIVolumeData (336B)
+//   2 = StorageBuffer (readonly)  hit_distance[]
+//   3 = StorageBuffer (readonly)  probeUpdateList[]
+//   4 = StorageBuffer (write)     ray_buffer[] (DDGIRayData = vec4)
+//   5 = StorageBuffer (readonly)  SurfaceCacheCardLookup card_lookups[]
+//   6 = StorageBuffer (readonly)  SurfaceCacheCard card_data[]
+//   7 = UniformBuffer             ViewProjection (mat4, 64B) — for screen-space
+//                                  prev_frame_color sampling at hit positions
+//   8 = SampledImage (texture2D)  prev_frame_color — real rendered scene colors
+//                                  (has material albedo + lighting variation)
+//   9 = SampledImage (texture2D)  gbuffer_albedo — per-surface albedo for the
+//                                  multi-bounce self-circulating term
+//   10 = StorageBuffer (readonly) irradiance_history — previous frame's probe
+//                                  irradiance for multi-bounce colored GI
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D lighting_atlas;
+
+layout(set = 0, binding = 2, std430) readonly buffer HitDistanceBuf {
+    float hit_distance[];
+} hd;
+
+layout(set = 0, binding = 3, std430) readonly buffer ProbeUpdateBuf {
+    uint probe_update_list[];
+} pul;
+
+layout(set = 0, binding = 4) writeonly buffer RayBuffer {
+    vec4 ray_buffer[];   // xyz = radiance, w = hit_distance (negative = miss)
+} rb;
+
+layout(set = 0, binding = 5, std430) readonly buffer CardLookupBuf {
+    SurfaceCacheCardLookup card_lookups[];
+} cl;
+
+layout(set = 0, binding = 6, std430) readonly buffer CardDataBuf {
+    SurfaceCacheCard card_data[];
+} cd;
+
+layout(set = 0, binding = 7, std140) uniform ViewProjBlock {
+    mat4 viewProjection;
+} vp;
+
+layout(set = 0, binding = 8) uniform texture2D prev_frame_color;
+layout(set = 0, binding = 9) uniform texture2D gbuffer_albedo;
+
+layout(set = 0, binding = 10, std430) readonly buffer IrradianceHistoryBuf {
+    float irradiance_history[];
+} ih;
+
+// DDGIVolumeData UBO — 336 bytes, matches DDGITraceRays.comp.
+layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88
+    uint  SCAtlasSize;              //  92
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    float _pad_to_sdf;              // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+    vec4  SkyColor;                 // 304
+    vec4  Albedo;                   // 320
+} volume;
+
+const vec3 DDGI_SKY_COLOR = vec3(0.3, 0.3, 0.35);
+const uint MAX_LOOKUP_CACHE = 128u;
+
+// Cooperative lookup cache in shared memory.
+shared vec4 tg_aabb_min[MAX_LOOKUP_CACHE];
+shared vec4 tg_aabb_max[MAX_LOOKUP_CACHE];
+shared uvec2 tg_card_info[MAX_LOOKUP_CACHE];   // x = card_start, y = card_count
+
+// ----------------------------------------------------------------------------
+// Helpers (copied from DDGITraceRays.comp)
+// ----------------------------------------------------------------------------
+
+vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
+    const float INV_PHI = 0.6180339887498948482;
+    const float PI_VAL  = 3.14159265358979323846;
+    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
+    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
+    float theta = 2.0 * PI_VAL * u;
+    float phi   = acos(1.0 - 2.0 * v);
+    float sinPhi = sin(phi);
+    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
+}
+
+uvec3 ddgiProbeGridCoord(uint probeIdx, uvec3 counts) {
+    uint pz  = probeIdx / (counts.x * counts.y);
+    uint rem = probeIdx % (counts.x * counts.y);
+    uint py  = rem / counts.x;
+    uint px  = rem % counts.x;
+    return uvec3(px, py, pz);
+}
+
+vec3 ddgiProbeWorldPos(uvec3 gc, vec3 origin, float spacing) {
+    return origin + vec3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
+}
+
+// Manual bilinear over the lighting atlas (samplerless, clamp-to-edge).
+vec3 sampleAtlasBilinear(vec2 uvPx) {
+    float atlasSize = float(volume.SCAtlasSize);
+    vec2 coord = clamp(uvPx, vec2(0.0), vec2(atlasSize - 1.0)) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 f = clamp(fract(coord), vec2(0.0), vec2(1.0));
+    int maxC = int(atlasSize) - 1;
+
+    vec3 c00 = texelFetch(lighting_atlas, clamp(base,                ivec2(0), ivec2(maxC)), 0).rgb;
+    vec3 c10 = texelFetch(lighting_atlas, clamp(base + ivec2(1, 0),  ivec2(0), ivec2(maxC)), 0).rgb;
+    vec3 c01 = texelFetch(lighting_atlas, clamp(base + ivec2(0, 1),  ivec2(0), ivec2(maxC)), 0).rgb;
+    vec3 c11 = texelFetch(lighting_atlas, clamp(base + ivec2(1, 1),  ivec2(0), ivec2(maxC)), 0).rgb;
+
+    return c00 * (1.0 - f.x) * (1.0 - f.y)
+         + c10 * f.x * (1.0 - f.y)
+         + c01 * (1.0 - f.x) * f.y
+         + c11 * f.x * f.y;
+}
+
+// Screen-space radiance sampling at a world-space hit position (Mode 11
+// approach): project to screen, sample prev_frame_color which has real
+// material colors + lighting variation. This gives DDGI colored bounce
+// light (warm reds from brick, cool grays from stone) instead of the
+// uniform pale yellow the SC atlas produces while its Capture coverage
+// is still ~0.1%.
+vec3 samplePrevColor(vec3 hitPos) {
+    vec4 clip = vp.viewProjection * vec4(hitPos, 1.0);
+    if (clip.w <= 0.0) return vec3(0.0);
+    vec3 ndc = clip.xyz / clip.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return vec3(0.0);  // off-screen hit
+    }
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    ivec2 dims = textureSize(prev_frame_color, 0);
+    ivec2 texel = clamp(ivec2(uv * vec2(dims)), ivec2(0), dims - ivec2(1));
+    return texelFetch(prev_frame_color, texel, 0).rgb;
+}
+
+// Hit-position -> GBuffer albedo (per-surface color for multi-bounce).
+// NOTE: off-screen hits fall back to volume.Albedo (uniform gray) — this is
+// the main reason GI colors don't reflect scene albedo for ~75% of rays.
+// Fix requires Phase 4 full (Capture graphics pipeline for per-surface colors).
+vec3 sampleHitAlbedo(vec3 hitPos) {
+    vec4 clip = vp.viewProjection * vec4(hitPos, 1.0);
+    if (clip.w <= 0.0) return volume.Albedo.xyz;
+    vec3 ndc = clip.xyz / clip.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) return volume.Albedo.xyz;
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    ivec2 dims = textureSize(gbuffer_albedo, 0);
+    ivec2 texel = clamp(ivec2(uv * vec2(dims)), ivec2(0), dims - ivec2(1));
+    return texelFetch(gbuffer_albedo, texel, 0).rgb;
+}
+
+// ----------------------------------------------------------------------------
+// Tetrahedral 4-probe SH interpolation (from DDGITraceRays.comp)
+// ----------------------------------------------------------------------------
+const float _C0 = 0.282095;
+const float _C1 = 0.488603;
+
+struct TetraResult {
+    uint pi[4];
+    float bw[4];
+};
+
+TetraResult tetrahedral(vec3 gp, uvec3 gd) {
+    TetraResult r;
+    uvec3 b0 = clamp(uvec3(floor(gp)), uvec3(0u), gd - 1u);
+    uvec3 b1 = min(b0 + 1u, gd - 1u);
+    uint gx  = gd.x;
+    uint gxy = gd.x * gd.y;
+
+    uint p[8];
+    p[0] = b0.x + b0.y * gx + b0.z * gxy;
+    p[1] = b1.x + b0.y * gx + b0.z * gxy;
+    p[2] = b0.x + b1.y * gx + b0.z * gxy;
+    p[3] = b1.x + b1.y * gx + b0.z * gxy;
+    p[4] = b0.x + b0.y * gx + b1.z * gxy;
+    p[5] = b1.x + b0.y * gx + b1.z * gxy;
+    p[6] = b0.x + b1.y * gx + b1.z * gxy;
+    p[7] = b1.x + b1.y * gx + b1.z * gxy;
+
+    float fx = fract(gp.x);
+    float fy = fract(gp.y);
+    float fz = fract(gp.z);
+
+    if (fx >= fy && fy >= fz) {
+        r.pi[0]=p[0]; r.pi[1]=p[1]; r.pi[2]=p[3]; r.pi[3]=p[7];
+        r.bw[0]=1.0-fx; r.bw[1]=fx-fy; r.bw[2]=fy-fz; r.bw[3]=fz;
+    } else if (fx >= fz && fz >= fy) {
+        r.pi[0]=p[0]; r.pi[1]=p[1]; r.pi[2]=p[5]; r.pi[3]=p[7];
+        r.bw[0]=1.0-fx; r.bw[1]=fx-fz; r.bw[2]=fz-fy; r.bw[3]=fy;
+    } else if (fy >= fx && fx >= fz) {
+        r.pi[0]=p[0]; r.pi[1]=p[2]; r.pi[2]=p[3]; r.pi[3]=p[7];
+        r.bw[0]=1.0-fy; r.bw[1]=fy-fx; r.bw[2]=fx-fz; r.bw[3]=fz;
+    } else if (fy >= fz && fz >= fx) {
+        r.pi[0]=p[0]; r.pi[1]=p[2]; r.pi[2]=p[6]; r.pi[3]=p[7];
+        r.bw[0]=1.0-fy; r.bw[1]=fy-fz; r.bw[2]=fz-fx; r.bw[3]=fx;
+    } else if (fz >= fx && fx >= fy) {
+        r.pi[0]=p[0]; r.pi[1]=p[4]; r.pi[2]=p[5]; r.pi[3]=p[7];
+        r.bw[0]=1.0-fz; r.bw[1]=fz-fx; r.bw[2]=fx-fy; r.bw[3]=fy;
+    } else {
+        r.pi[0]=p[0]; r.pi[1]=p[4]; r.pi[2]=p[6]; r.pi[3]=p[7];
+        r.bw[0]=1.0-fz; r.bw[1]=fz-fy; r.bw[2]=fy-fx; r.bw[3]=fx;
+    }
+    for (uint i = 0u; i < 4u; i++) r.bw[i] = max(r.bw[i], 0.0);
+    return r;
+}
+
+vec3 shDot4(vec3 c[4], vec3 d) {
+    return c[0] * _C0
+         + c[1] * (-_C1 * d.y)
+         + c[2] * ( _C1 * d.z)
+         + c[3] * (-_C1 * d.x);
+}
+
+// Previous-frame probe irradiance at a world position (multi-bounce feedback).
+// This is the self-circulating term: L_i_prev sampled at the hit position
+// carries the previous frame's accumulated GI (which includes earlier bounces'
+// albedo colors). Each frame adds one more bounce, each tinted by the
+// surface's albedo — producing colored multi-bounce GI.
+vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
+    vec3 origin = volume.ProbeOrigin.xyz;
+    float spacing = volume.ProbeSpacing;
+    uvec3 counts = volume.ProbeCounts.xyz;
+    vec3 gp = (pos - origin) / spacing;
+    vec3 gridMax = vec3(float(counts.x - 1u), float(counts.y - 1u), float(counts.z - 1u));
+    if (any(lessThan(gp, vec3(0.0))) || any(greaterThan(gp, gridMax))) {
+        return vec3(0.0);
+    }
+    TetraResult tet = tetrahedral(gp, counts);
+    vec3 result = vec3(0.0);
+    float totalWeight = 0.0;
+    // irradiance_history: vec4[9] per probe = 36 floats/probe.
+    for (uint p = 0u; p < 4u; p++) {
+        if (tet.bw[p] < 0.001) continue;
+        uint base = tet.pi[p] * 36u;
+        vec3 sh[4];
+        for (uint i = 0u; i < 4u; i++) {
+            uint cb_i = base + i * 4u;
+            sh[i] = vec3(ih.irradiance_history[cb_i + 0u],
+                         ih.irradiance_history[cb_i + 1u],
+                         ih.irradiance_history[cb_i + 2u]);
+        }
+        vec3 irradiance = shDot4(sh, N);
+        result += irradiance * tet.bw[p];
+        totalWeight += tet.bw[p];
+    }
+    if (totalWeight > 0.0) return result / totalWeight;
+    return vec3(0.0);
+}
+
+// ----------------------------------------------------------------------------
+// Main
+// ----------------------------------------------------------------------------
+
+void ddgi_trace_finalize() {
+    uint tid      = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;
+    uint group_id = gl_GlobalInvocationID.x;
+
+    // ---- Phase 0: cooperative lookup load (before ANY early return) ----
+    uint lookupCount = min(volume.SCLookupCount, MAX_LOOKUP_CACHE);
+    for (uint i = tid; i < lookupCount; i += 64u) {
+        tg_aabb_min[i]  = cl.card_lookups[i].aabb_min;
+        tg_aabb_max[i]  = cl.card_lookups[i].aabb_max;
+        tg_card_info[i] = uvec2(cl.card_lookups[i].card_start,
+                                cl.card_lookups[i].card_count);
+    }
+    barrier();
+
+    if (group_id >= volume.ProbeUpdateCount) return;
+    if (tid >= volume.RaysPerProbe) return;
+
+    uint probeIdx = pul.probe_update_list[group_id];
+    if (probeIdx >= volume.ProbeCountTotal) return;
+
+    uint globalRayIdx = group_id * volume.RaysPerProbe + tid;
+    float hitDistance = hd.hit_distance[globalRayIdx];
+
+    uvec3 counts = volume.ProbeCounts.xyz;
+    uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
+    vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
+    vec3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+
+    vec4 result = vec4(DDGI_SKY_COLOR, -1.0);   // default = miss + sky
+
+    if (hitDistance >= 0.0) {
+        // ---- Hit: colored GI via prev_color + albedo × multi-bounce ----
+        // Primary radiance = prev_frame_color at hit screen position (has
+        // real material albedo + lighting from the rendered scene).
+        // Multi-bounce = albedo × L_i_prev × 0.85 (self-circulating: each
+        // bounce tints by the hit surface's albedo color).
+        // SC lighting atlas is a supplement for off-screen hits only — its
+        // coverage is still ~0.1% (Capture gather), so on-screen hits use
+        // prev_color which has genuine per-pixel colors.
+        vec3 hitPos = probePos + rayDir * hitDistance;
+        result.w = hitDistance;
+
+        vec3 N = -rayDir;
+        vec3 L_i_prev = samplePrevProbeGrid(hitPos, N);
+        vec3 albedo = sampleHitAlbedo(hitPos);
+
+        vec3 prevRadiance = samplePrevColor(hitPos);
+        if (dot(prevRadiance, prevRadiance) > 0.0001) {
+            // On-screen: real rendered color + multi-bounce colored GI
+            result.xyz = prevRadiance + albedo * L_i_prev * 0.85;
+        } else {
+            // Off-screen: try SC atlas first (has cached lighting even for
+            // surfaces the camera can't see), fall back to analytic.
+            bool scUsed = false;
+            uint deviceReads = 0u;
+            const uint kMaxDeviceReads = 16u;
+            for (uint li = 0u; li < lookupCount && deviceReads < kMaxDeviceReads && !scUsed; ++li) {
+                if (hitPos.x < tg_aabb_min[li].x || hitPos.x > tg_aabb_max[li].x ||
+                    hitPos.y < tg_aabb_min[li].y || hitPos.y > tg_aabb_max[li].y ||
+                    hitPos.z < tg_aabb_min[li].z || hitPos.z > tg_aabb_max[li].z)
+                    continue;
+                for (uint ci = 0u; ci < min(tg_card_info[li].y, 6u) && deviceReads < kMaxDeviceReads; ++ci) {
+                    uint cardIdx = tg_card_info[li].x + ci;
+                    if (cardIdx >= 4096u) continue;
+                    SurfaceCacheCard card = cd.card_data[cardIdx];
+                    ++deviceReads;
+                    vec2 atlasUV;
+                    if (worldToCardUV(hitPos, card, atlasUV)) {
+                        vec3 scRadiance = sampleAtlasBilinear(atlasUV);
+                        if (dot(scRadiance, scRadiance) > 0.0001) {
+                            // SC cached lighting + multi-bounce
+                            result.xyz = scRadiance + albedo * L_i_prev * 0.85;
+                            scUsed = true;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!scUsed) {
+                // Analytic: self-computed direct + sky + multi-bounce
+                vec3 L = normalize(-volume.LightDirection.xyz);
+                float NdotL = max(0.0, dot(N, L));
+                vec3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
+                float NdotUp = max(0.0, N.y);
+                vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp);
+                const float PI_VAL = 3.14159265358979;
+                result.xyz = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.85);
+            }
+        }
+    } else {
+        // ---- Miss: nearby card search centered on the PROBE (not hit) ----
+        uint deviceReads = 0u;
+        const uint kMaxMissReads = 8u;
+        bool found = false;
+        for (uint li = 0u; li < lookupCount && deviceReads < kMaxMissReads && !found; ++li) {
+            if (probePos.x < tg_aabb_min[li].x || probePos.x > tg_aabb_max[li].x ||
+                probePos.y < tg_aabb_min[li].y || probePos.y > tg_aabb_max[li].y ||
+                probePos.z < tg_aabb_min[li].z || probePos.z > tg_aabb_max[li].z)
+                continue;
+
+            for (uint ci = 0u; ci < min(tg_card_info[li].y, 4u) && deviceReads < kMaxMissReads; ++ci) {
+                uint cardIdx = tg_card_info[li].x + ci;
+                if (cardIdx >= 4096u) continue;
+                SurfaceCacheCard card = cd.card_data[cardIdx];
+                ++deviceReads;
+
+                vec2 atlasUV;
+                if (worldToCardUV(probePos, card, atlasUV)) {
+                    result.xyz = sampleAtlasBilinear(atlasUV);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) result.xyz = DDGI_SKY_COLOR;
+    }
+
+    // Write at ABSOLUTE probe index (remap from update-slot is intentional).
+    rb.ray_buffer[probeIdx * volume.RaysPerProbe + tid] = result;
+}

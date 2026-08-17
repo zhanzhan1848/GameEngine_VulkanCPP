@@ -1,0 +1,123 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — Place. Hand-written GLSL port of
+// ScreenProbePlace.metal (entry: screen_probe_place).
+//
+// Places probes on a uniform screen-space grid. Each probe samples the
+// GBuffer depth/normal at its center to determine its world position. Sky
+// pixels (depth ~0 or very far) are marked inactive (w = 0).
+//
+// ThreadGroupSize: (64, 1, 1), 1D dispatch.
+//
+// Flat descriptor bindings (Vulkan — no overlapping Metal namespaces):
+//   binding 0 = texture2D   depthTexture  (sampled, texelFetch nearest)
+//   binding 1 = texture2D   normalTexture (sampled, texelFetch nearest)
+//   binding 2 = SSBO write  probePositions[]
+//   binding 3 = SSBO write  probeNormals[]
+//   binding 4 = UBO         ScreenProbeGlobalData (352B, inline)
+//
+// Metal buffer mapping note: Metal uses buffer(0)/buffer(1) for positions/
+// normals, buffer(3) for global (skips buffer(2)). Vulkan flat layout:
+// depth=0, normal=1, positions=2, normals=3, global=4.
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D depthTexture;
+layout(set = 0, binding = 1) uniform texture2D normalTexture;
+
+layout(set = 0, binding = 2, std430) writeonly buffer ProbePositionsBlock {
+    vec4 data[];
+} probePositions;
+
+layout(set = 0, binding = 3, std430) writeonly buffer ProbeNormalsBlock {
+    vec4 data[];
+} probeNormals;
+
+// ScreenProbeGlobalData UBO — 352 bytes, mirrors C++ struct.
+// Declared inline per established pattern (see SSAOTrace.comp).
+layout(set = 0, binding = 4, std140) uniform GlobalBlock {
+    mat4 view_projection;
+    mat4 inv_view_projection;
+    vec4 camera_position;
+    vec4 grid_params;            // x=gridW, y=gridH, z=downsample, w=raysPerProbe
+    vec4 trace_params;           // x=maxRayDist, y=gatherRadius, z=renderW, w=renderH
+    vec4 sdf_origins[3];
+    vec4 sdf_voxel_sizes[3];
+    vec4 sdf_extents[3];
+    uvec4 sdf_resolutions;       // xyz=res0/1/2, w=cascadeCount
+    vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=unused
+} global;
+
+// --------------------------------------------------------------------------------
+// Helper: reconstruct world position from depth + invViewProj
+// (ported from ScreenProbePlace.metal:reconstructWorldPos)
+// --------------------------------------------------------------------------------
+vec3 reconstructWorldPos(vec2 uv, float depth, mat4 invVP) {
+    // NDC coordinates [-1, 1]
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec4 clipPos = vec4(ndc, depth, 1.0);
+    vec4 worldPos = invVP * clipPos;
+    return worldPos.xyz / worldPos.w;
+}
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void screen_probe_place() {
+    uint global_id = gl_GlobalInvocationID.x;
+
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
+    uint totalProbes = gridW * gridH;
+
+    if (global_id >= totalProbes) return;
+
+    // Compute 2D grid coordinates from 1D index
+    uint gx = global_id % gridW;
+    uint gy = global_id / gridW;
+
+    float downsample = global.grid_params.z;
+    float renderW = global.trace_params.z;
+    float renderH = global.trace_params.w;
+
+    uint probeIdx = global_id;
+
+    // Screen-space center of this probe
+    vec2 pixelCenter = vec2(gx * downsample + downsample * 0.5,
+                            gy * downsample + downsample * 0.5);
+
+    // UV coordinates [0, 1]
+    vec2 uv = pixelCenter / vec2(renderW, renderH);
+
+    // Sample depth with POINT filtering — linear interpolation on depth
+    // produces ghost values at object edges, creating floating probes.
+    ivec2 depthTexel = ivec2(clamp(uv * vec2(renderW, renderH),
+                                   vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
+    float depth = texelFetch(depthTexture, depthTexel, 0).r;
+
+    // Check for sky / far plane ('active' is a GLSL reserved word -> use isActive)
+    bool isActive = (depth > 0.0001 && depth < 0.999);
+
+    if (!isActive) {
+        // Mark as inactive: position = (0,0,0,0), normal = (0,0,0,0)
+        probePositions.data[probeIdx] = vec4(0.0, 0.0, 0.0, 0.0);
+        probeNormals.data[probeIdx]   = vec4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    // Reconstruct world position
+    vec3 worldPos = reconstructWorldPos(uv, depth, global.inv_view_projection);
+
+    // Sample normal (world-space, encoded as N*0.5+0.5). Metal used a linear
+    // sampler; texelFetch nearest is acceptable for normals here.
+    vec3 normal = texelFetch(normalTexture, depthTexel, 0).rgb;
+    normal = normalize(normal * 2.0 - 1.0);
+
+    // Write outputs: w = 1.0 = active flag
+    probePositions.data[probeIdx] = vec4(worldPos, 1.0);
+    probeNormals.data[probeIdx]   = vec4(normal, 1.0);
+}

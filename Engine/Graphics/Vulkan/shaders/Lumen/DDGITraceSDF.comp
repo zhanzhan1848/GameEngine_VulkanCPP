@@ -1,0 +1,196 @@
+#version 450 core
+// Vulkan DDGI Split-Pass 1 — SDF trace (texture3D-only).
+// GLSL port of the `ddgi_trace_sdf` entry in DDGITraceRays.metal.
+// Entry point: ddgi_trace_sdf
+//
+// Apple Silicon splits the DDGI trace into two dispatches because mixing
+// texture3D reads with buffer reads flickers on Metal; Vulkan/MoltenVK does
+// not have that limitation but we keep the split for Metal parity — this
+// pass marches the SDF and writes per-ray hit distances; pass 2
+// (DDGITraceFinalize.comp) turns distances into radiance via the Surface
+// Cache atlas.
+//
+// Threadgroup (8,8,1): one group per probe-update slot, 64 ray lanes.
+// Dispatch: (updateCount, 1, 1).
+//
+// Flat bindings:
+//   0..2 = SampledImage (3D, texelFetch)  SDF cascades 0..2
+//   3    = UniformBuffer                  DDGIVolumeData (336B)
+//   4    = StorageBuffer (write)          hit_distance[] (per update-slot ray)
+//   5    = StorageBuffer (readonly)       probeUpdateList[]
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture3D sdf_cascade_0;
+layout(set = 0, binding = 1) uniform texture3D sdf_cascade_1;
+layout(set = 0, binding = 2) uniform texture3D sdf_cascade_2;
+
+layout(set = 0, binding = 4) writeonly buffer HitDistanceBuf {
+    float hit_distance[];
+} hd;
+
+layout(set = 0, binding = 5, std430) readonly buffer ProbeUpdateBuf {
+    uint probe_update_list[];
+} pul;
+
+// DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h (336 bytes).
+// Same declaration as DDGITraceRays.comp.
+layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88
+    uint  SCAtlasSize;              //  92
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    float _pad_to_sdf;              // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+    vec4  SkyColor;                 // 304
+    vec4  Albedo;                   // 320
+} volume;
+
+// ----------------------------------------------------------------------------
+// Helpers (copied from DDGITraceRays.comp for consistency)
+// ----------------------------------------------------------------------------
+
+vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
+    const float INV_PHI = 0.6180339887498948482;
+    const float PI_VAL  = 3.14159265358979323846;
+    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
+    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
+    float theta = 2.0 * PI_VAL * u;
+    float phi   = acos(1.0 - 2.0 * v);
+    float sinPhi = sin(phi);
+    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
+}
+
+uvec3 ddgiProbeGridCoord(uint probeIdx, uvec3 counts) {
+    uint pz  = probeIdx / (counts.x * counts.y);
+    uint rem = probeIdx % (counts.x * counts.y);
+    uint py  = rem / counts.x;
+    uint px  = rem % counts.x;
+    return uvec3(px, py, pz);
+}
+
+vec3 ddgiProbeWorldPos(uvec3 gc, vec3 origin, float spacing) {
+    return origin + vec3(float(gc.x), float(gc.y), float(gc.z)) * spacing;
+}
+
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    vec3 local = pos - origin;
+    return local.x >= 0.0 && local.x < extent.x &&
+           local.y >= 0.0 && local.y < extent.y &&
+           local.z >= 0.0 && local.z < extent.z;
+}
+
+float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
+                       vec3 cascadeOrigin, vec3 cascadeExtent, uint resolution) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) {
+        return 1.0e10;
+    }
+    int resI = int(resolution);
+    int tx = clamp(int(uvw.x * float(resI)), 0, resI - 1);
+    int ty = clamp(int(uvw.y * float(resI)), 0, resI - 1);
+    int tz = clamp(int(uvw.z * float(resI)), 0, resI - 1);
+    return texelFetch(sdfTexture, ivec3(tx, ty, tz), 0).r;
+}
+
+// Else-if cascade selection — 1 texture3D read per step (finest first).
+float sampleBestSDF(vec3 pos) {
+    uint cc = volume.SdfResolutionsAndCount.w;
+    if (cc > 0u && isInsideCascade(pos, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz)) {
+        return sampleSDFCascade(sdf_cascade_0, pos, volume.SdfOrigins[0].xyz,
+                                volume.SdfExtents[0].xyz, volume.SdfResolutionsAndCount.x);
+    } else if (cc > 1u && isInsideCascade(pos, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz)) {
+        return sampleSDFCascade(sdf_cascade_1, pos, volume.SdfOrigins[1].xyz,
+                                volume.SdfExtents[1].xyz, volume.SdfResolutionsAndCount.y);
+    } else if (cc > 2u && isInsideCascade(pos, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz)) {
+        return sampleSDFCascade(sdf_cascade_2, pos, volume.SdfOrigins[2].xyz,
+                                volume.SdfExtents[2].xyz, volume.SdfResolutionsAndCount.z);
+    }
+    return 1.0e10;
+}
+
+// ----------------------------------------------------------------------------
+// Main
+// ----------------------------------------------------------------------------
+
+void ddgi_trace_sdf() {
+    uint tid      = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;  // ray lane 0..63
+    uint group_id = gl_GlobalInvocationID.x;                               // probe update slot
+
+    if (group_id >= volume.ProbeUpdateCount) return;
+    if (tid >= volume.RaysPerProbe) return;
+
+    uint probeIdx = pul.probe_update_list[group_id];
+    if (probeIdx >= volume.ProbeCountTotal) return;
+
+    uvec3 counts = volume.ProbeCounts.xyz;
+    uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
+    vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
+    vec3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+
+    float t = 0.0;
+    float hitDistance = -1.0;  // -1 = miss
+
+    float hitThreshold = volume.SdfVoxelSizes[0].x * 0.5;
+    float minStep      = volume.SdfVoxelSizes[0].x * 0.25;
+    uint coarsest      = min(2u, volume.SdfResolutionsAndCount.w - 1u);
+    float fallbackStride = volume.SdfExtents[coarsest].x * 0.1;
+
+    const uint MAX_SDF_STEPS = 4u;
+    for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
+        vec3 pos = probePos + rayDir * t;
+        float d = sampleBestSDF(pos);
+
+        // Outside all cascades — fallback stride
+        if (d >= 1.0e9) {
+            t += fallbackStride;
+            if (t > volume.RayMaxDistance) break;
+            continue;
+        }
+
+        if (d < hitThreshold) {
+            hitDistance = t;
+            break;
+        }
+
+        // Relaxed advancement: overstep when far, conservative when close
+        float advance;
+        if (d > hitThreshold * 4.0) {
+            advance = d * 1.2;
+        } else {
+            advance = max(d, minStep);
+        }
+        t += advance;
+        if (t > volume.RayMaxDistance) break;
+    }
+
+    // Indexed by update-slot (group) — finalize re-maps to absolute probe index.
+    uint globalRayIdx = group_id * volume.RaysPerProbe + tid;
+    hd.hit_distance[globalRayIdx] = hitDistance;
+}

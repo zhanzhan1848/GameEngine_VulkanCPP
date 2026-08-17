@@ -150,10 +150,11 @@ TraceResult traceRayHZB(vec3 rayOriginView, vec3 rayDirView, vec2 sourceUV) {
             sampleUV.y < 0.0 || sampleUV.y > 1.0) break;
         if (rayPos.z < params.nearPlane) continue;
 
-        // Skip source surface (within 2 pixels) to reduce self-hit noise.
+        // Skip source surface (within 4 pixels) to reduce self-hit noise that
+        // produces ghost doubles of nearby geometry.
         float dpx = abs(sampleUV.x - sourceUV.x) * params.screenSize.x;
         float dpy = abs(sampleUV.y - sourceUV.y) * params.screenSize.y;
-        if (max(dpx, dpy) < 2.0) continue;
+        if (max(dpx, dpy) < 4.0) continue;
 
         ivec2 mipDims = textureSize(hzbTex, int(mip));
         ivec2 mipCoord = clamp(ivec2(sampleUV * vec2(mipDims)), ivec2(0), mipDims - ivec2(1));

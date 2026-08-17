@@ -1,0 +1,155 @@
+#version 450 core
+// Vulkan TAA — hand-written GLSL port of TAA.wgsl (Temporal Anti-Aliasing).
+// Entry point: taa_main  (passed via glslangValidator -e taa_main)
+//
+// Algorithm:
+//   1. Reproject current pixel to history UV using velocity
+//   2. Sample 3×3 neighborhood in current color, compute min/max AABB
+//   3. Convert neighborhood AABB to YCoCg space, clip history to AABB
+//   4. Blend: result = mix(history_clipped, current, alpha)
+//      alpha = 0.1 (slow convergence for stability); 1.0 on first frame
+//
+// Flat descriptor bindings (Vulkan forbids overlapping texture/buffer namespaces):
+//   binding 0 = SampledImage   currentColorTex (this frame's jittered HDR)
+//   binding 1 = SampledImage   historyColorTex (last frame's resolved HDR)
+//   binding 2 = SampledImage   velocityTex     (per-pixel motion, NDC Y-up)
+//   binding 3 = StorageImage   outputTex       (RGBA16F, imageStore)
+//   binding 4 = UniformBuffer  TAAGlobals
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D currentColorTex;
+layout(set = 0, binding = 1) uniform texture2D historyColorTex;
+layout(set = 0, binding = 2) uniform texture2D velocityTex;
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D outputTex;
+
+layout(set = 0, binding = 4, std140) uniform TAAGlobals {
+    vec4  screenSize;       // xy = (width, height), zw = (1/width, 1/height)
+    float invHistoryValid;  // 1.0 if history uninitialized (first frame)
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+} globals;
+
+// --------------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------------
+
+// Manual bilinear via 4 texelFetch — avoids needing a sampler binding.
+vec3 sampleBilinear(texture2D tex, vec2 uv, ivec2 dims) {
+    vec2 coord = uv * vec2(dims) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 frac_ = fract(coord);
+    ivec2 maxCoord = ivec2(dims.x - 1, dims.y - 1);
+
+    ivec2 c00 = clamp(base,               ivec2(0), maxCoord);
+    ivec2 c10 = clamp(base + ivec2(1, 0), ivec2(0), maxCoord);
+    ivec2 c01 = clamp(base + ivec2(0, 1), ivec2(0), maxCoord);
+    ivec2 c11 = clamp(base + ivec2(1, 1), ivec2(0), maxCoord);
+
+    vec3 h00 = texelFetch(tex, c00, 0).rgb;
+    vec3 h10 = texelFetch(tex, c10, 0).rgb;
+    vec3 h01 = texelFetch(tex, c01, 0).rgb;
+    vec3 h11 = texelFetch(tex, c11, 0).rgb;
+
+    float fx = clamp(frac_.x, 0.0, 1.0);
+    float fy = clamp(frac_.y, 0.0, 1.0);
+
+    return h00 * (1.0 - fx) * (1.0 - fy)
+         + h10 * fx * (1.0 - fy)
+         + h01 * (1.0 - fx) * fy
+         + h11 * fx * fy;
+}
+
+// RGB ↔ YCoCg (better chroma separation for variance clipping).
+vec3 rgbToYCoCg(vec3 c) {
+    float y  = 0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
+    float co = 0.5 * c.r - 0.5 * c.b;
+    float cg = -0.25 * c.r + 0.5 * c.g - 0.25 * c.b;
+    return vec3(y, co, cg);
+}
+
+vec3 yCoCgToRGB(vec3 c) {
+    float y  = c.x;
+    float co = c.y;
+    float cg = c.z;
+    float tmp = y - cg;
+    return vec3(tmp + co, y + cg, tmp - co);
+}
+
+// Karis-style clip history to neighborhood AABB (in YCoCg space).
+vec3 clipToAABB(vec3 aabbMin, vec3 aabbMax, vec3 p) {
+    vec3 center  = 0.5 * (aabbMin + aabbMax);
+    vec3 extents = 0.5 * (aabbMax - aabbMin);
+    vec3 v = p - center;
+    vec3 unit = v / max(extents, vec3(0.0001));
+    vec3 absUnit = abs(unit);
+    float maxComp = max(absUnit.x, max(absUnit.y, absUnit.z));
+    if (maxComp <= 1.0) {
+        return p;  // inside AABB
+    }
+    return center + v / maxComp;
+}
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void taa_main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    ivec2 dims = ivec2(globals.screenSize.xy);
+    if (gid.x >= uint(dims.x) || gid.y >= uint(dims.y)) return;
+
+    ivec2 pixel = ivec2(gid);
+
+    vec3 currColor = texelFetch(currentColorTex, pixel, 0).rgb;
+    vec2 velocity  = texelFetch(velocityTex,     pixel, 0).xy;
+
+    // Velocity is clip-space NDC (Y up). Convert to UV-space delta (Y down).
+    vec2 currUV    = (vec2(pixel) + 0.5) * globals.screenSize.zw;
+    vec2 historyUV = currUV - vec2(velocity.x, -velocity.y) * 0.5;
+
+    // Out-of-bounds or uninitialized history: keep current frame only.
+    vec3 historyColor = currColor;
+    if (globals.invHistoryValid < 0.5 &&
+        historyUV.x >= 0.0 && historyUV.x <= 1.0 &&
+        historyUV.y >= 0.0 && historyUV.y <= 1.0) {
+        ivec2 histDims = textureSize(historyColorTex, 0);
+        historyColor = sampleBilinear(historyColorTex, historyUV, histDims);
+    }
+
+    // 3×3 neighborhood of current color (for variance clipping).
+    vec3 neighborMin = currColor;
+    vec3 neighborMax = currColor;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 npixel = pixel + ivec2(dx, dy);
+            if (npixel.x < 0 || npixel.x >= dims.x ||
+                npixel.y < 0 || npixel.y >= dims.y) continue;
+            vec3 ncolor = texelFetch(currentColorTex, npixel, 0).rgb;
+            neighborMin = min(neighborMin, ncolor);
+            neighborMax = max(neighborMax, ncolor);
+        }
+    }
+
+    // Convert AABB to YCoCg space, clip history.
+    vec3 aabbMinYC   = rgbToYCoCg(neighborMin);
+    vec3 aabbMaxYC   = rgbToYCoCg(neighborMax);
+    vec3 historyYC   = clipToAABB(aabbMinYC, aabbMaxYC, rgbToYCoCg(historyColor));
+    vec3 historyClipped = yCoCgToRGB(historyYC);
+
+    // Blend — lower alpha for stability (slower convergence, less ghosting).
+    // First frame: force alpha=1.0 to bypass uninitialized history.
+    float alpha = 0.1;
+    if (globals.invHistoryValid > 0.5) {
+        alpha = 1.0;
+    }
+    vec3 result = mix(historyClipped, currColor, alpha);
+
+    imageStore(outputTex, pixel, vec4(result, 1.0));
+}

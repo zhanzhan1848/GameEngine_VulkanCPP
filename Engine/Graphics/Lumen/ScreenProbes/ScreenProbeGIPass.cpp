@@ -5,6 +5,7 @@
 #include "Graphics/RenderGraph/RenderGraphResource.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 // MetalDevice.h intentionally excluded — causes Rect naming conflict with MacTypes.h
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Field/FieldRegistry.h"
@@ -119,7 +120,31 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     return out.str();
 }
 
-static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
+static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char* shaderName) {
+    const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // Load precompiled SPIR-V (.comp.spv) from Vulkan/shaders/Lumen/
+        const std::string relPath =
+            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
+        const std::vector<std::string> candidates = {
+            relPath,
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+        };
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
+            return bytecode;
+        }
+        std::cerr << "[ScreenProbeGI] Failed to load SPIR-V: " << shaderName << std::endl;
+        return {};
+    }
+
+    // Metal path: load .metal source + resolve #includes
     std::string shaderPath = SCREEN_PROBE_SHADER_DIR + shaderName + ".metal";
     std::string source = ReadFileToString(shaderPath);
 
@@ -160,16 +185,6 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
                                     const ScreenProbeParams& params) {
     if (initialized_) return true;
 
-    // T4.6.3: Lumen Screen Probes deferred on Vulkan — CreateDescriptorSetLayouts()
-    // uses Metal's overlapping texture/buffer binding idiom (rejected by Vulkan),
-    // and no SPIR-V ports of the Screen Probe shaders exist yet. See
-    // LumenDDGIPass::Initialize for the full rationale.
-    if (device && device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-        std::cerr << "[ScreenProbeGI] Skipped on Vulkan (deferred — needs SPIR-V ports + "
-                     "non-overlapping descriptor bindings)" << std::endl;
-        return false;
-    }
-
     device_ = device;
     params_ = params;
     render_width_ = render_width;
@@ -206,8 +221,19 @@ void ScreenProbeGIPass::Shutdown() {
 // ============================================================================
 
 void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
+    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+
     // --- Place: 2 textures (depth, normal) + 2 SSBO (positions, normals) + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depthTexture
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTexture
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probePositions (write)
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeNormals (write)
+            {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // ScreenProbeGlobalData
+        };
+        place_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             // Textures
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -222,7 +248,31 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Trace: 5 textures (3 SDF + prev_color + surface_cache_lighting) + 3 SSBO (positions, normals, radiance) + 2 SSBO (card_data, card_lookup) + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf0 (3D)
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf1 (3D)
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf2 (3D)
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prevFrameColor
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // surface_cache_lighting
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probePositions (readonly)
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeNormals (readonly)
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeRadiance (read-write)
+            {8, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // ScreenProbeGlobalData
+            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards (readonly)
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // cardLookup (readonly)
+        };
+        // Mark SDF textures as 3D view dimension
+        bindings[0].is3D = true;
+        bindings[1].is3D = true;
+        bindings[2].is3D = true;
+        // Mark read-only SSBOs
+        bindings[5].readonly = true;  // probePositions
+        bindings[6].readonly = true;  // probeNormals
+        bindings[9].readonly = true;  // cards
+        bindings[10].readonly = true; // cardLookup
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({11, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             // Textures (SDF cascades + prev frame color + surface cache lighting atlas)
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 0
@@ -243,7 +293,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- SDF Trace: 3 textures (SDF) + 2 SSBO (positions, normals) + 1 SSBO (hit_distance out) + 1 UBO ---
-    {
+    // Skip on Vulkan — split-pass is Metal-only; Vulkan uses the monolithic trace.
+    if (!isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 0
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 1
@@ -258,7 +309,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Finalize: 2 textures (prev_color + surface_cache_lighting) + 4 SSBO + 1 UBO + 2 SSBO (cards) ---
-    {
+    // Skip on Vulkan — split-pass is Metal-only; Vulkan uses the monolithic trace.
+    if (!isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev frame color
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // surface cache lighting atlas
@@ -275,7 +327,22 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Gather: 2 textures (depth, normal) + 1 storage image (output) + 2 SSBO + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depthTexture
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTexture
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // outputTexture (rgba16f)
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probePositions (readonly)
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeSH (readonly)
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // ScreenProbeGlobalData
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeNormals (readonly)
+        };
+        // Mark read-only SSBOs
+        bindings[3].readonly = true;  // probePositions
+        bindings[4].readonly = true;  // probeSH
+        bindings[6].readonly = true;  // probeNormals
+        gather_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             // Textures
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -292,7 +359,18 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Average: 3 SSBO (rayRadiance in, probeSH out, probeNormals in) + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // rayRadiance (readonly)
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeSHOut (read-write)
+            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // {totalProbes, raysPerProbe} (16 bytes)
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeNormals (readonly)
+        };
+        // Mark read-only SSBOs
+        bindings[0].readonly = true;  // rayRadiance
+        bindings[3].readonly = true;  // probeNormals
+        avg_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray radiance (read)
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe SH output (write)
@@ -304,7 +382,26 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Temporal: 7 SSBO + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // currentSH (readonly)
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // historySH (readonly)
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // currentPositions (readonly)
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // historyPositions (readonly)
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // outputSH (read-write)
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // TemporalConstants
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // currentNormals (readonly)
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // historyNormals (readonly)
+        };
+        // Mark read-only SSBOs
+        bindings[0].readonly = true;  // currentSH
+        bindings[1].readonly = true;  // historySH
+        bindings[2].readonly = true;  // currentPositions
+        bindings[3].readonly = true;  // historyPositions
+        bindings[6].readonly = true;  // currentNormals
+        bindings[7].readonly = true;  // historyNormals
+        temporal_set_layout_ = device_->CreateDescriptorSetLayout({8, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // current avg radiance (read)
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // history avg radiance (read)
@@ -320,7 +417,18 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Spatial Filter: 3 SSBO (inputSH, outputSH, positions) + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // inputSH (readonly)
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // outputSH (read-write)
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probePos (readonly)
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // {totalProbes, gridW, sigma, pad}
+        };
+        // Mark read-only SSBOs
+        bindings[0].readonly = true;  // inputSH
+        bindings[2].readonly = true;  // probePos
+        spatial_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // input SH (read)
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // output SH (write)
@@ -332,7 +440,18 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- Denoise: 3 sampled textures + 1 storage image + 1 UBO ---
-    {
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // giInput
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTexture
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depthTexture (r32f, readonly)
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // giOutput (rgba16f)
+            {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // DenoiseParams (32 bytes)
+        };
+        // Mark read-only storage image
+        bindings[2].readonly = true;  // depthTexture
+        denoise_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
+    } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // GI input (from Gather)
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal
@@ -347,15 +466,13 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
 
 void ScreenProbeGIPass::CreatePipelines() {
     auto CompileShader = [&](const char* name, const char* entry) -> ShaderHandle {
-        auto code = LoadShaderBytecode(name);
+        auto code = LoadShaderBytecode(device_, name);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
 
     auto placeShader = CompileShader("ScreenProbePlace", "screen_probe_place");
     auto traceShader = CompileShader("ScreenProbeTraceRays", "screen_probe_trace_rays");
-    auto sdfTraceShader = CompileShader("ScreenProbeTraceRays", "screen_probe_trace_sdf");
-    auto finalizeShader = CompileShader("ScreenProbeTraceRays", "screen_probe_trace_finalize");
     auto avgShader = CompileShader("ScreenProbeAverage", "screen_probe_average");
     if (avgShader == handles::INVALID_SHADER) {
         std::cerr << "[ScreenProbeGI] Average shader compilation failed" << std::endl;
@@ -366,14 +483,26 @@ void ScreenProbeGIPass::CreatePipelines() {
     auto spatialShader = CompileShader("ScreenProbeSpatialFilter", "screen_probe_spatial_filter");
     auto denoiseShader = CompileShader("ScreenProbeDenoise", "screen_probe_denoise");
 
+    // Split-pass shaders (screen_probe_trace_sdf / screen_probe_trace_finalize) are
+    // Metal-only Apple Silicon optimizations. Vulkan uses only the monolithic
+    // screen_probe_trace_rays entry — split-pass entries don't exist in the SPIR-V.
+    // Skip compilation on Vulkan to avoid a spurious shader-load failure.
+    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+    ShaderHandle sdfTraceShader = handles::INVALID_SHADER;
+    ShaderHandle finalizeShader = handles::INVALID_SHADER;
+    if (!isVk) {
+        sdfTraceShader = CompileShader("ScreenProbeTraceRays", "screen_probe_trace_sdf");
+        finalizeShader = CompileShader("ScreenProbeTraceRays", "screen_probe_trace_finalize");
+    }
+
     if (placeShader == handles::INVALID_SHADER ||
         traceShader == handles::INVALID_SHADER ||
-        sdfTraceShader == handles::INVALID_SHADER ||
-        finalizeShader == handles::INVALID_SHADER ||
         gatherShader == handles::INVALID_SHADER ||
         temporalShader == handles::INVALID_SHADER ||
         spatialShader == handles::INVALID_SHADER ||
-        denoiseShader == handles::INVALID_SHADER) {
+        denoiseShader == handles::INVALID_SHADER ||
+        (!isVk && (sdfTraceShader == handles::INVALID_SHADER ||
+                   finalizeShader == handles::INVALID_SHADER))) {
         std::cerr << "[ScreenProbeGI] Shader compilation failed" << std::endl;
         return;
     }
@@ -391,13 +520,13 @@ void ScreenProbeGIPass::CreatePipelines() {
         plDesc.setLayouts = &trace_set_layout_;
         trace_layout_ = device_->CreatePipelineLayout(plDesc);
     }
-    {
+    if (!isVk) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &sdf_trace_set_layout_;
         sdf_trace_layout_ = device_->CreatePipelineLayout(plDesc);
     }
-    {
+    if (!isVk) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &finalize_set_layout_;
@@ -449,19 +578,25 @@ void ScreenProbeGIPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {64, 1, 1};
         trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
-    {
-        ComputePipelineDesc pipeDesc{};
-        pipeDesc.computeShader = sdfTraceShader;
-        pipeDesc.layout = sdf_trace_layout_;
-        pipeDesc.threadGroupSize = {64, 1, 1};
-        sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
-    }
-    {
-        ComputePipelineDesc pipeDesc{};
-        pipeDesc.computeShader = finalizeShader;
-        pipeDesc.layout = finalize_layout_;
-        pipeDesc.threadGroupSize = {64, 1, 1};
-        finalize_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    // SDF trace (split pass 1) + Finalize (split pass 2) — Metal-only.
+    // Skip on Vulkan: no SPIR-V entry points exist, and Vulkan uses only the
+    // monolithic trace_pipeline_. Leaving both as INVALID_PIPELINE routes Vulkan
+    // through trace_pipeline_ at dispatch time.
+    if (!isVk) {
+        {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = sdfTraceShader;
+            pipeDesc.layout = sdf_trace_layout_;
+            pipeDesc.threadGroupSize = {64, 1, 1};
+            sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        }
+        {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = finalizeShader;
+            pipeDesc.layout = finalize_layout_;
+            pipeDesc.threadGroupSize = {64, 1, 1};
+            finalize_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        }
     }
     {
         ComputePipelineDesc pipeDesc{};
@@ -510,11 +645,11 @@ void ScreenProbeGIPass::CreatePipelines() {
             DescriptorSetDesc dsDesc{trace_set_layout_};
             trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
-        {
+        if (!isVk) {
             DescriptorSetDesc dsDesc{sdf_trace_set_layout_};
             sdf_trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
-        {
+        if (!isVk) {
             DescriptorSetDesc dsDesc{finalize_set_layout_};
             finalize_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }

@@ -671,7 +671,8 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     (void)texSampler_;
 
     // Load offline per-mesh SDF from pipeline model for SDF visualization.
-    {
+    // TEMPORARILY DISABLED: SDF merge is very slow (~5 min). SSR/SSGI don't need it.
+    if (false) {
         offlineSDFMerger_ = new primal::graphics::nanite::OfflineSDFMerger();
         std::string pipeModelPath = baseDir + "Sponza_pipeline.model";
         u32 sdfCount = offlineSDFMerger_->LoadFromPipelineModel(pipeModelPath.c_str());
@@ -1225,7 +1226,7 @@ void TestVulkanSponzaRenderGraph::Run() {
     // DEBUG: capture frame 60 to PPM for visual inspection of SSGI/SSR.
     // Runs AFTER Present — uses a dedicated one-shot command buffer so it
     // doesn't interfere with the per-frame render loop.
-    if (frameCount_ == 2) {
+    if (frameCount_ == 60 || frameCount_ == 61) {
         u32 capW = targetDesc.size.x;
         u32 capH = targetDesc.size.y;
         BufferDesc sbDesc{};

@@ -70,12 +70,12 @@ layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
     float ProbeHysteresis;          //  76
     float TemporalAlpha;            //  80
     uint  ProbeUpdateCount;         //  84
-    float _pad_before_relocation;   //  88
-    int   ProbeRelocationShiftX;    //  92
-    int   ProbeRelocationShiftY;    //  96
-    int   ProbeRelocationShiftZ;    // 100
-    float _pad_to_sdf_0;            // 104
-    float _pad_to_sdf_1;            // 108
+    uint  SCLookupCount;            //  88  (Surface Cache card lookup count)
+    uint  SCAtlasSize;              //  92  (Surface Cache lighting atlas size)
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    float _pad_to_sdf;              // 108
     vec4  SdfOrigins[3];            // 112
     vec4  SdfVoxelSizes[3];         // 160
     vec4  SdfExtents[3];            // 208

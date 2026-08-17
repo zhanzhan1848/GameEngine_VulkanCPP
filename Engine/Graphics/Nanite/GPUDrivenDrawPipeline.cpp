@@ -14,6 +14,7 @@
 #include "../../Content/ContentToEngine.h" // Needed for get_rhi_mesh_asset
 #include "../Dawn/ShaderLoader.h"
 #include "../Utils/ShaderRegistry.h"
+#include "../Utils/HaltonSequence.h"
 #include "CommonHeaders.h"
 #include <cassert>
 #include <fstream>
@@ -363,7 +364,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     frame_resources_.resize(3);
     for (int i = 0; i < 3; ++i) {
         rhi::BufferDesc constantsDesc{};
-        constantsDesc.size = 352; // sizeof(DrawConstants) with prev matrices
+        constantsDesc.size = 368; // sizeof(DrawConstants) with prev matrices + TAA jitter
         constantsDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
         constantsDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic; // Updated every frame
 
@@ -2445,6 +2446,11 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
         u32 has_prev_frame;            // 1 if previous frame data is available
         u32 debug_mode;                // 0=off, 1=meshlet, 2=triangle, 3=mesh
         u32 padding2[2];               // Alignment padding to 16 bytes
+        // --- TAA jitter (368 bytes total) ---
+        math::v2 jitter;               // TAA sub-pixel jitter (current frame)
+        math::v2 prev_jitter;          // previous frame's jitter — velocity
+                                       // must be jitter-inclusive on BOTH
+                                       // sides for TAA's reprojection.
     } drawConsts;
 
     drawConsts.view_matrix = cached_view_matrix_;
@@ -2461,6 +2467,12 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     drawConsts.has_prev_frame = has_prev_frame_ ? 1u : 0u;
     drawConsts.debug_mode = meshlet_debug_mode_;
     drawConsts.padding2[0] = drawConsts.padding2[1] = 0;
+    // TAA sub-pixel jitter (Halton(2,3) sequence, 16-sample cycle).
+    drawConsts.jitter = jitter_enabled_
+        ? utils::GetJitterOffset(frame_index, visibility_config_.width, visibility_config_.height)
+        : math::v2{0.0f, 0.0f};
+    drawConsts.prev_jitter = prev_jitter_;   // what the previous frame rendered with
+    prev_jitter_ = drawConsts.jitter;        // store for next frame
 
     void* constData = device_->MapBuffer(cameraConstBuffer);
     if (constData) {

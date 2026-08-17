@@ -114,7 +114,7 @@ PipelineQualityConfig PipelineQualityConfig::FromPreset(lumen::LumenQualityPrese
         cfg.enable_ssao = true;
         cfg.enable_ssgi = true;
         cfg.enable_ddgi = true;
-        cfg.enable_surface_cache = false;
+        cfg.enable_surface_cache = true;   // AtlasInit path (no full Capture) is lightweight
         cfg.enable_screen_probes = false;
         cfg.shadow_quality = lumen::ShadowQuality::PCF_16;
         cfg.render_scale = 1.0f;

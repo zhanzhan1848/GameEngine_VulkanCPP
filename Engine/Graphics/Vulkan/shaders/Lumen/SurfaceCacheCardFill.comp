@@ -1,0 +1,308 @@
+#version 450 core
+// Vulkan SurfaceCache CardFill — SDF-based atlas filling (Phase 4).
+// Entry point: surface_cache_card_fill
+//
+// For each card texel:
+//   1. Compute world-space position on the card's orthographic plane
+//   2. March along the card's forward axis through the GlobalSDF
+//   3. At surface hit: compute normal from SDF gradient, evaluate lighting
+//   4. Write albedo(gray)/normal/depth/lighting to atlas
+//
+// GBuffer gather (separate pass) overwrites visible texels with real material
+// colors. CardFill ensures ALL texels have geometric + lighting data.
+//
+// Dispatch: 1D, total_texels threads. Threadgroup (256,1,1).
+//
+// Flat bindings:
+//   0-2 = SampledImage (3D)       SDF cascades
+//   3   = StorageImage(rgba8)     albedo_atlas (write)
+//   4   = StorageImage(rg16f)     normal_atlas (write)
+//   5   = StorageImage(r32f)      depth_atlas  (write)
+//   6   = StorageImage(rgba16f)   lighting_out (write)
+//   7   = UniformBuffer           CardFillParams (SDF + light + counts)
+//   8   = readonly buffer         CardDispatchInfo[] (std430)
+//   9   = readonly buffer         SurfaceCacheCard[] (std430)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture3D sdf_cascade_0;
+layout(set = 0, binding = 1) uniform texture3D sdf_cascade_1;
+layout(set = 0, binding = 2) uniform texture3D sdf_cascade_2;
+
+layout(set = 0, binding = 3, rgba8)   uniform image2D albedo_atlas;    // read+write: skip captured texels
+layout(set = 0, binding = 4, rg16f)   writeonly uniform image2D normal_atlas;
+layout(set = 0, binding = 5, r32f)    writeonly uniform image2D depth_atlas;
+layout(set = 0, binding = 6, rgba16f) writeonly uniform image2D lighting_out;
+
+layout(set = 0, binding = 8, std430) readonly buffer CardDispatchBuf {
+    CardDispatchInfo dispatch[];
+} cd;
+
+layout(set = 0, binding = 9, std430) readonly buffer CardDataBuf {
+    SurfaceCacheCard cards[];
+} cb;
+
+layout(set = 0, binding = 7, std140) uniform CardFillParamsBlock {
+    vec4  sdf_origins[3];         //   0
+    vec4  sdf_extents[3];         //  48
+    uvec4 sdf_resolutions_count;  //  96
+    vec4  light_direction;        // 112: xyz = dir light travels
+    vec4  light_color;            // 128: xyz = color, w = intensity
+    uint  total_texels;           // 144
+    uint  card_count;             // 148
+    uint  _pad0;                  // 152
+    uint  _pad1;                  // 156  (total 160)
+} cfp;
+
+// Per-mesh material color: samples the albedo TEXTURE (real material colors)
+// via instance → material_id → albedo_texture_idx → texture sample.
+// The material tint is always (1,1,1) white — actual colors live in textures.
+layout(set = 0, binding = 10, std430) readonly buffer InstanceDataBuf {
+    vec4 inst_data[];   // 12 vec4s per instance (192B)
+} inst;
+
+layout(set = 0, binding = 11, std430) readonly buffer MaterialDataBuf {
+    vec4 mat_data[];    // 3 vec4s per material (48B)
+} mat;
+
+// Albedo texture array (same as GPUDrivenDraw binding 10).
+layout(set = 0, binding = 12) uniform texture2DArray albedo_textures;
+layout(set = 0, binding = 13) uniform sampler albedo_sampler;
+
+// Get per-mesh color by sampling the albedo texture at its center.
+// Guards against black/invalid texture layers that would create permanent
+// dark patches in the atlas (the skip logic preserves non-gray writes).
+vec3 getMeshTint(uint meshInstanceId) {
+    // instance → material_id
+    uint matId = uint(inst.inst_data[meshInstanceId * 12u + 8u].y);
+    // material → albedo_texture_idx
+    uint texIdx = uint(mat.mat_data[matId * 3u + 0u].x);
+    if (texIdx == 0xFFFFFFFFu) return vec3(0.5);  // invalid material
+
+    // Sample albedo texture at center UV
+    vec3 tex_color = texture(sampler2DArray(albedo_textures, albedo_sampler),
+                             vec3(0.5, 0.5, float(texIdx))).rgb;
+
+    // Guard: if the texture sample is too dark (uninitialized layer or
+    // genuinely black material), use a neutral warm-gray fallback instead.
+    // This prevents permanent black patches in the atlas.
+    float lum = dot(tex_color, vec3(0.2126, 0.7152, 0.0722));
+    if (lum < 0.03) return vec3(0.4, 0.38, 0.35);  // warm gray fallback
+
+    return tex_color;
+}
+
+// ----------------------------------------------------------------------------
+// SDF sampling
+// ----------------------------------------------------------------------------
+
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    vec3 local = pos - origin;
+    return local.x >= 0.0 && local.x < extent.x &&
+           local.y >= 0.0 && local.y < extent.y &&
+           local.z >= 0.0 && local.z < extent.z;
+}
+
+float sampleSDF(texture3D tex, vec3 pos, vec3 origin, vec3 extent, uint res) {
+    vec3 uvw = (pos - origin) / extent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) return 1.0e10;
+    int r = int(res);
+    ivec3 t = clamp(ivec3(uvw * float(r)), ivec3(0), ivec3(r - 1));
+    return texelFetch(tex, t, 0).r;
+}
+
+float sampleBestSDF(vec3 pos) {
+    uint cc = cfp.sdf_resolutions_count.w;
+    if (cc > 0u && isInsideCascade(pos, cfp.sdf_origins[0].xyz, cfp.sdf_extents[0].xyz))
+        return sampleSDF(sdf_cascade_0, pos, cfp.sdf_origins[0].xyz,
+                         cfp.sdf_extents[0].xyz, cfp.sdf_resolutions_count.x);
+    if (cc > 1u && isInsideCascade(pos, cfp.sdf_origins[1].xyz, cfp.sdf_extents[1].xyz))
+        return sampleSDF(sdf_cascade_1, pos, cfp.sdf_origins[1].xyz,
+                         cfp.sdf_extents[1].xyz, cfp.sdf_resolutions_count.y);
+    if (cc > 2u && isInsideCascade(pos, cfp.sdf_origins[2].xyz, cfp.sdf_extents[2].xyz))
+        return sampleSDF(sdf_cascade_2, pos, cfp.sdf_origins[2].xyz,
+                         cfp.sdf_extents[2].xyz, cfp.sdf_resolutions_count.z);
+    return 1.0e10;
+}
+
+// ----------------------------------------------------------------------------
+// Main
+// ----------------------------------------------------------------------------
+
+void surface_cache_card_fill() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= cfp.total_texels) return;
+
+    // Binary search: find card for this texel.
+    uint lo = 0u, hi = cfp.card_count;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1u;
+        if (cd.dispatch[mid].texel_offset + cd.dispatch[mid].texel_count <= tid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo >= cfp.card_count) return;
+
+    SurfaceCacheCard card = cb.cards[lo];
+    if (card.resolution == 0u) return;
+
+    uint local_texel = tid - cd.dispatch[lo].texel_offset;
+    uint res = card.resolution;
+    uint lx = local_texel % res;
+    uint ly = local_texel / res;
+    ivec2 atlas_uv = ivec2(int(card.atlas_offset_x + lx),
+                           int(card.atlas_offset_y + ly));
+
+    // Skip texels already captured by the GBuffer gather (real material).
+    // The gather writes alpha=1 with actual material colors. AtlasInit also
+    // writes alpha=1 with gray — but the gather runs first and overwrites.
+    // We detect "gathered" by checking if albedo is non-gray (any channel
+    // differs from 0.5 by > 0.05). Gray texels (AtlasInit default or
+    // uncaptured) get CardFill's SDF-informed data.
+    vec4 existing_albedo = imageLoad(albedo_atlas, atlas_uv);
+    bool is_gray = abs(existing_albedo.r - 0.5) < 0.05 &&
+                   abs(existing_albedo.g - 0.5) < 0.05 &&
+                   abs(existing_albedo.b - 0.5) < 0.05;
+    if (!is_gray && existing_albedo.a > 0.5) {
+        return;  // Already has real material from gather — don't overwrite
+    }
+
+    // Texel UV in [0,1] on the card plane.
+    float u = (float(lx) + 0.5) / float(res);
+    float v = (float(ly) + 0.5) / float(res);
+
+    // Build the card's orthographic basis (same as Metal Capture vertex shader).
+    uint axis = card.axis_direction & 0xFFu;
+    uint dir  = (card.axis_direction >> 8) & 0xFFu;
+    float s = (dir > 0u) ? 1.0 : -1.0;
+
+    vec3 fwd, right, up;
+    float ex, ey;  // card plane half-extents
+    if (axis == 0u) {
+        // X-axis card: right=Y, up=Z, fwd=±X
+        right = vec3(0,1,0); up = vec3(0,0,1); fwd = vec3(s,0,0);
+        ex = card.extent.y; ey = card.extent.z;
+    } else if (axis == 1u) {
+        // Y-axis card: right=X, up=Z, fwd=±Y
+        right = vec3(1,0,0); up = vec3(0,0,1); fwd = vec3(0,s,0);
+        ex = card.extent.x; ey = card.extent.z;
+    } else {
+        // Z-axis card: right=X, up=Y, fwd=±Z
+        right = vec3(1,0,0); up = vec3(0,1,0); fwd = vec3(0,0,s);
+        ex = card.extent.x; ey = card.extent.y;
+    }
+
+    // World-space position on the card plane.
+    // March along fwd from the card center to find the surface.
+    vec3 card_center = card.center.xyz;
+    vec3 plane_pos = card_center
+                   + right * ((u - 0.5) * ex * 2.0)
+                   + up    * ((v - 0.5) * ey * 2.0);
+
+    // March along the forward axis through the SDF.
+    float max_depth = card.extent.x;  // depth extent
+    float t = 0.0;
+    float hit_dist = -1.0;
+    vec3 hit_pos = plane_pos;
+
+    const uint MAX_STEPS = 32u;
+    float voxel = max(cfp.sdf_extents[0].x / float(cfp.sdf_resolutions_count.x), 0.05);
+    float hit_threshold = voxel * 0.5;
+    float minStep = voxel * 0.25;
+
+    for (uint step = 0u; step < MAX_STEPS; ++step) {
+        vec3 p = plane_pos + fwd * t;
+        float d = sampleBestSDF(p);
+
+        if (d > 1.0e9) {
+            // Outside cascades — advance by a coarse step
+            t += max_depth * 0.1;
+            if (t > max_depth) break;
+            continue;
+        }
+
+        if (d < hit_threshold) {
+            hit_dist = t;
+            hit_pos = p;
+            break;
+        }
+
+        // Relaxed sphere tracing
+        float advance = (d > hit_threshold * 4.0) ? d * 1.2 : max(d, minStep);
+        t += advance;
+        if (t > max_depth) break;
+    }
+
+    // Get this mesh's material tint (per-mesh color from material data).
+    vec3 mesh_tint = getMeshTint(card.mesh_instance_id);
+    // Hard floor: never allow near-black (prevents permanent dark patches
+    // that the skip-logic would preserve). Minimum luminance ≈ 0.18.
+    mesh_tint = clamp(mesh_tint, vec3(0.18), vec3(1.0));
+
+    if (hit_dist < 0.0) {
+        // No surface along this ray → sample directional sky gradient.
+        // Sky color varies with the card's forward direction: blue from above,
+        // warm at horizon, dim from below — matching how a sky box would look.
+        float up_component = fwd.y;  // +1 = zenith, -1 = nadir, 0 = horizon
+        vec3 zenith  = vec3(0.20, 0.25, 0.40);   // blue sky from above
+        vec3 horizon = vec3(0.35, 0.32, 0.28);   // warm haze at horizon
+        vec3 nadir   = vec3(0.08, 0.08, 0.10);   // dark ground bounce
+        vec3 sky_color;
+        if (up_component >= 0.0) {
+            sky_color = mix(horizon, zenith, up_component);
+        } else {
+            sky_color = mix(horizon, nadir, -up_component);
+        }
+
+        imageStore(albedo_atlas,  atlas_uv, vec4(mesh_tint, 1.0));
+        imageStore(normal_atlas,  atlas_uv, vec4(0.5, 0.5, 0.0, 1.0));
+        imageStore(depth_atlas,   atlas_uv, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(lighting_out,  atlas_uv, vec4(sky_color, 1.0));
+        return;
+    }
+
+    // Surface normal from SDF gradient (central differences).
+    float eps = voxel;
+    vec3 grad = vec3(
+        sampleBestSDF(hit_pos + vec3(eps, 0, 0)) - sampleBestSDF(hit_pos - vec3(eps, 0, 0)),
+        sampleBestSDF(hit_pos + vec3(0, eps, 0)) - sampleBestSDF(hit_pos - vec3(0, eps, 0)),
+        sampleBestSDF(hit_pos + vec3(0, 0, eps)) - sampleBestSDF(hit_pos - vec3(0, 0, eps))
+    );
+    float gradLen = length(grad);
+    vec3 N = (gradLen > 0.0001) ? normalize(-grad) : -fwd;  // fallback: face back toward card
+
+    // Direct lighting: NdotL × sun_color
+    vec3 L = normalize(-cfp.light_direction.xyz);
+    float NdotL = max(dot(N, L), 0.0);
+    vec3 direct = cfp.light_color.xyz * cfp.light_color.w * NdotL;
+
+    // Sky ambient — directional gradient matching the no-hit sky.
+    // Upward normals get blue sky, downward get dim ground bounce.
+    float NdotUp = N.y;
+    vec3 sky_zenith  = vec3(0.20, 0.25, 0.40);
+    vec3 sky_horizon = vec3(0.35, 0.32, 0.28);
+    vec3 sky_nadir   = vec3(0.08, 0.08, 0.10);
+    vec3 sky;
+    if (NdotUp >= 0.0) {
+        sky = mix(sky_horizon, sky_zenith, NdotUp);
+    } else {
+        sky = mix(sky_horizon, sky_nadir, -NdotUp);
+    }
+
+    // Total lighting with mesh tint, clamped to minimum brightness.
+    // Without this clamp, dark materials × zero NdotL × zero sky = near-black
+    // → permanent black patches in the SC atlas → black GI blocks on screen.
+    vec3 total_light = (direct + sky) * mesh_tint;
+    total_light = max(total_light, vec3(0.08, 0.08, 0.09));  // minimum ambient
+
+    imageStore(albedo_atlas,  atlas_uv, vec4(mesh_tint, 1.0));
+    imageStore(normal_atlas,  atlas_uv, vec4(octEncode(N), 0.0, 1.0));
+    imageStore(depth_atlas,   atlas_uv, vec4(hit_dist, 0.0, 0.0, 1.0));
+    imageStore(lighting_out,  atlas_uv, vec4(total_light, 1.0));
+}

@@ -66,7 +66,10 @@ void fusion_indirect() {
     ddgiBlur /= totalWeight;
 
     // DDGI (low-freq global) + SSGI (high-freq screen-space) combined.
-    vec3 indirect = albedo * (ddgiBlur * 0.15 + ssgi_irr * ssgi_conf * 0.8);
+    // DDGI 0.8 keeps colored bounce visible; SSGI 0.2 reserved for when
+    // screen-space detail is needed. Overall scaled to 0.7 to avoid
+    // washing out direct lighting.
+    vec3 indirect = albedo * (ddgiBlur * 0.8 + ssgi_irr * ssgi_conf * 0.2) * 0.7;
     indirect *= ao;
     outColor = vec4(indirect, 1.0);
 }

@@ -72,6 +72,15 @@ struct SurfaceCacheFrameData {
     uint32_t   frame_index;
     uint32_t   light_count;
     float      _pad2[2];
+
+    // GBuffer-gather capture inputs (Vulkan Capture path): main-pass GBuffer
+    // handles + inverse view-projection for world-position reconstruction.
+    math::m4x4 inv_view_projection;
+    uint32_t   render_width  = 0;
+    uint32_t   render_height = 0;
+    rhi::ResourceHandle gbuffer_depth  { rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle gbuffer_albedo { rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle gbuffer_normal { rhi::handles::INVALID_RESOURCE };
 };
 
 struct SurfaceCacheOutput {

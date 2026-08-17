@@ -126,6 +126,7 @@ void main() {
     vec3 orm = texture(sampler2D(ormTex, defaultSampler), inUv).rgb;
     float depth = texture(sampler2D(depthTex, defaultSampler), inUv).r;
 
+
     // Background discard — sky pixels have depth = 1.0.
     if (depth >= 1.0) {
         outColor = vec4(0.0, 0.0, 0.0, 1.0);

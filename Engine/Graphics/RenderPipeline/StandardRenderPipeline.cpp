@@ -7,6 +7,7 @@
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/VelocityPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/SSRPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -140,6 +141,11 @@ void StandardRenderPipeline::Shutdown() {
     if (s_instance == this) s_instance = nullptr;
     ShutdownSubsystems();
     ShutdownLumenPasses();
+
+    // Release file-static PostProcess singletons (Bloom's BlurPass holds a
+    // persistently-mapped param buffer) while device_ is still alive — their
+    // static destructors run at program exit, after the device is destroyed.
+    PostProcess::ShutdownBloomPass();
 
     if (black_texture_ != handles::INVALID_RESOURCE && device_) {
         device_->DestroyTexture(black_texture_);
@@ -642,6 +648,26 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         if (scene_snapshot_->NeedsFullRebuild()) {
             scene_snapshot_->Rebind(scene);
             scene_snapshot_->ClearFullRebuildFlag();
+
+            // Phase 1 (Lumen architecture): register real mesh bounds with
+            // the Surface Cache CardGenerator. Each scene instance gets its
+            // own cards at appropriate resolution — replacing the 2 large
+            // test AABBs from Initialize. This is the single biggest
+            // improvement to SC atlas coverage and per-mesh detail.
+            if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+                auto& cardGen = surface_cache_pass_->GetCardGenerator();
+                const auto& instances = scene_snapshot_->GetInstanceData();
+                for (u32 i = 0; i < instances.size(); ++i) {
+                    const auto& inst = instances[i];
+                    math::v3 aabbMin = inst.bounds_center - math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                    math::v3 aabbMax = inst.bounds_center + math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                    cardGen.RegisterMesh(aabbMin, aabbMax, i);
+                }
+                cardGen.RebuildCardAllocation();
+                std::cout << "[LumenSC] Registered " << instances.size()
+                          << " scene instances with CardGenerator → "
+                          << cardGen.GetCardCount() << " cards" << std::endl;
+            }
         }
     }
 
@@ -1229,6 +1255,14 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         frameData.frame_index = static_cast<u32>(frameCount_);
         frameData.light_count = 1;
 
+        // GBuffer-gather capture: real rendered surfaces → card atlas.
+        frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
+        frameData.render_width  = render_width_;
+        frameData.render_height = render_height_;
+        frameData.gbuffer_depth  = gpuDraw.GetGBufferDepthSampleable();
+        frameData.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
+        frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
+
         ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
         surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf,
                                      frameData, static_cast<u32>(frameCount_));
@@ -1251,7 +1285,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 surface_cache_pass_->GetCardLookupBuffer(),
                 surface_cache_pass_->GetCardDataBuffer(),
                 settings_.lumen.surface_cache_atlas_size,
-                settings_.lumen.surface_cache_max_cards);
+                surface_cache_pass_->GetCardGenerator().GetLookupCount());
         }
     }
 
@@ -1300,7 +1334,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     lumen::LumenSSGIOutput ssgiOut;
-    if (ssgi_pass_ && ssgi_pass_->IsInitialized() && frameCount_ > 0) {
+    if (ssgi_pass_ && ssgi_pass_->IsInitialized()) {  // TEMP: removed frameCount_ > 0 for SSGI diagnosis
         auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
         auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
         auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -1431,6 +1465,46 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
+    // Step 10.5: PostProcess — TAA + Bloom + ToneMapping
+    // ========================================================================
+    // TAA resolves the jittered HDR (from GPUDrivenDraw vertex shader jitter)
+    // into clean HDR using velocity-based reprojection + YCoCg variance clip.
+    // Bloom extracts bright areas and blurs them for soft glow. ToneMapping
+    // converts HDR→LDR (ACES) and composites Bloom + AO + SSGI.
+    // Order: TAA (on jittered HDR) → Bloom → ToneMapping.
+    RGResourceHandle postProcessInputRG;
+    if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        postProcessInputRG = fusionOut.output_rg;
+    } else if (deferredOut.deferred_output_rg.IsValid()) {
+        postProcessInputRG = deferredOut.deferred_output_rg;
+    }
+
+    PostProcess::ToneMappingPassData toneOut;
+    if (postProcessInputRG.IsValid()) {
+        // TAA will resolve the frame — enable the sub-pixel jitter injection.
+        // TAA resolve not yet functional on Vulkan — jitter injection without
+        // temporal accumulation produces visible per-frame shimmer.
+        // Re-enable once the TAA dispatch/history issue is fixed.
+        // gpuDraw.SetJitterEnabled(true);
+        // TAA — velocity from GBuffer MRT (NDC-space, matches TAA.comp expectation).
+        auto velTAA = graph.ImportResource("GBufferVelocity_TAA", gpuDraw.GetGBufferVelocity());
+        auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
+            render_width_, render_height_, static_cast<u32>(frameCount_));
+        RGResourceHandle hdrClean = taaOut.output;
+
+        auto bloomOut = PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
+
+        toneOut = PostProcess::AddToneMappingPass(
+            graph,
+            hdrClean,                 // TAA-resolved HDR scene color
+            bloomOut.bloomOutput,     // Bloom blur result
+            ssaoOut.ssao_output,      // AO
+            ssgiOut.ssgi_output,      // SSGI
+            velTAA,                   // velocity
+            cbIdx);
+    }
+
+    // ========================================================================
     // Step 11: Final Blit → BackBuffer
     //         (or SDF Visualization if toggled on)
     // ========================================================================
@@ -1461,10 +1535,24 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         sdf_viz_module_->AddPass(graph, vizIn);
     } else if (final_blit_module_) {
         FinalBlitInputs blitIn;
-        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        // Prefer the tone-mapped LDR output; fall back to HDR composite if
+        // PostProcess was skipped (e.g. no valid input texture this frame).
+        // FinalBlit binds the PHYSICAL texture directly (no RG-side resolution),
+        // so resolve the tone-map output's physical handle here.
+        if (toneOut.output.IsValid()) {
+            auto* toneRes = graph.GetResource(toneOut.output);
+            if (toneRes) {
+                blitIn.input_rg = toneOut.output;
+                blitIn.input_tex = toneRes->GetPhysicalHandle();
+            }
+        }
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
             blitIn.input_tex = fusionOut.output_tex;
-        } else {
+        }
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
         }
@@ -1703,6 +1791,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
             frameData.frame_index = static_cast<u32>(frameCount_);
             frameData.light_count = 1;
+            frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
+            frameData.render_width  = render_width_;
+            frameData.render_height = render_height_;
+            frameData.gbuffer_depth  = gpuDraw.GetGBufferDepthSampleable();
+            frameData.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
+            frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
             ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
             surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
             scLightingRG = graph.ImportResource("SCLightingAtlas", surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
@@ -1712,7 +1806,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     surface_cache_pass_->GetCardLookupBuffer(),
                     surface_cache_pass_->GetCardDataBuffer(),
                     settings_.lumen.surface_cache_atlas_size,
-                    settings_.lumen.surface_cache_max_cards);
+                    surface_cache_pass_->GetCardGenerator().GetLookupCount());
             }
             if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
                 screen_probe_pass_->SetSurfaceCacheData(
@@ -1773,7 +1867,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- SSGI (Screen Space GI) ---
         lumen::LumenSSGIOutput ssgiOut;
-        if (ssgi_pass_ && ssgi_pass_->IsInitialized() && frameCount_ > 0) {
+        if (ssgi_pass_ && ssgi_pass_->IsInitialized()) {  // TEMP: removed frameCount_ > 0 for SSGI diagnosis
             auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
             auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
             auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -1976,21 +2070,48 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 
+        // --- PostProcess: TAA → Bloom → ToneMapping ---
+        // Mirrors BuildRenderGraph Step 10.5. TAA resolves the sub-pixel jitter
+        // injected by GPUDrivenDraw (jitter gate is enabled below when TAA runs).
+        RGResourceHandle ppInputRG;
+        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+            ppInputRG = fusionOut.output_rg;
+        } else if (deferredOut.deferred_output_rg.IsValid()) {
+            ppInputRG = deferredOut.deferred_output_rg;
+        }
+        PostProcess::ToneMappingPassData toneOutRWCB;
+        if (ppInputRG.IsValid()) {
+            // TAA resolve not yet functional on Vulkan — jitter injection without
+        // temporal accumulation produces visible per-frame shimmer.
+        // Re-enable once the TAA dispatch/history issue is fixed.
+        // gpuDraw.SetJitterEnabled(true);
+            auto velRWCB = graph.ImportResource("GBufferVelocity_TAA_RWCB", gpuDraw.GetGBufferVelocity());
+            auto taaRWCB = PostProcess::AddTAAPass(graph, ppInputRG, velRWCB,
+                render_width_, render_height_, static_cast<u32>(frameCount_));
+            RGResourceHandle hdrCleanRWCB = taaRWCB.output;
+
+            auto bloomRWCB = PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
+            toneOutRWCB = PostProcess::AddToneMappingPass(
+                graph, hdrCleanRWCB, bloomRWCB.bloomOutput,
+                ssaoOut.ssao_output, ssgiOut.ssgi_output, velRWCB, cbIdx);
+        }
+
         // --- Final Blit → backbuffer ---
         FinalBlitInputs blitIn;
-        static int s_fusion_check = 0;
-        if (s_fusion_check < 3) {
-            std::cerr << "[BLIT_CHECK] fusionOut.tex=" << fusionOut.output_tex
-                      << " deferredOut.tex=" << deferredOut.deferred_output_tex
-                      << " enable_ssgi=" << settings_.quality.enable_ssgi
-                      << " fusion_module=" << (fusion_module_ ? "exists" : "null")
-                      << std::endl;
-            s_fusion_check++;
+        if (toneOutRWCB.output.IsValid()) {
+            auto* toneResRWCB = graph.GetResource(toneOutRWCB.output);
+            if (toneResRWCB) {
+                blitIn.input_rg = toneOutRWCB.output;
+                blitIn.input_tex = toneResRWCB->GetPhysicalHandle();
+            }
         }
-        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
             blitIn.input_tex = fusionOut.output_tex;
-        } else {
+        }
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
         }
