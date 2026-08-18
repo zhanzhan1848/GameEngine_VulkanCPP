@@ -35,4 +35,8 @@ void main() {
 
     vWorldPos = worldPos;
     gl_Position = view_projection * vec4(worldPos, 1.0);
+    // The main scene is rasterized by naga-compiled WGSL, which auto-inserts
+    // a Y-negate on clip position — without matching it here the quad lands
+    // upside-down at the top of the frame instead of on the floor.
+    gl_Position.y = -gl_Position.y;
 }

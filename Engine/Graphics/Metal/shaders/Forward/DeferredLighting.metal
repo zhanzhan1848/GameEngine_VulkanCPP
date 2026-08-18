@@ -161,34 +161,46 @@ float GetShadowVisibility(float2 uv, texture2d<float> shadowVisibility, sampler 
 
 // VSM: project worldPos into the cascade's light clip space, sample the
 // blurred (z, z²) moments, Chebyshev upper bound. Mirrors
-// RHIShaderFunctions.metal ChebyshevUpperBound. Metal NDC→UV flips Y
-// (same convention as ReadRawShadowDepth above).
+// RHIShaderFunctions.metal ChebyshevUpperBound. NDC→UV flips Y
+// (same convention as ReadRawShadowDepth above). Cascade selection is
+// BOUNDS-based with fallback (0 → 1 → lit), matching the GLSL version —
+// a distance split leaves a hard boundary at the cascade-0 ortho box edge.
 float GetVSMShadowVisibility(constant SceneData& sceneData, float3 worldPos,
                              texture2d<float> moments0, texture2d<float> moments1) {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
 
-    float camDist = length(worldPos - sceneData.viewPos.xyz);
-    bool nearCascade = camDist < sceneData.shadowParams.y;
-    float4x4 shadowVP = nearCascade ? sceneData.shadowMatrix0 : sceneData.shadowMatrix1;
-
-    float4 clipPos = shadowVP * float4(worldPos, 1.0);
-    float3 proj = clipPos.xyz / clipPos.w;
-    float2 suv = float2(proj.x * 0.5 + 0.5, proj.y * -0.5 + 0.5);
-
-    if (proj.z <= 0.0 || proj.z >= 1.0 ||
-        suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) {
-        return 1.0;  // outside the shadow map — lit
+    float4 clip0 = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
+    float3 sc0 = clip0.xyz / clip0.w;
+    float2 uv0 = float2(sc0.x * 0.5 + 0.5, 0.5 - sc0.y * 0.5);
+    bool inCascade0 = uv0.x >= 0.0 && uv0.x <= 1.0 && uv0.y >= 0.0 && uv0.y <= 1.0 &&
+                      sc0.z >= 0.0 && sc0.z <= 1.0;
+    if (inCascade0) {
+        float2 moments = moments0.sample(s, uv0).xy;
+        const float minVariance = 0.00002;
+        if (sc0.z <= moments.x) return 1.0;
+        float variance = moments.y - (moments.x * moments.x);
+        variance = max(variance, minVariance);
+        float d = sc0.z - moments.x;
+        float pMax = variance / (variance + d * d);
+        return smoothstep(0.05, 1.0, pMax);
     }
 
-    float2 moments = (nearCascade ? moments0 : moments1).sample(s, suv).xy;
-    const float minVariance = 0.00002;  // VSM_MIN_VARIANCE
-    if (proj.z <= moments.x) return 1.0;
-
-    float variance = moments.y - (moments.x * moments.x);
-    variance = max(variance, minVariance);
-    float d = proj.z - moments.x;
-    float pMax = variance / (variance + d * d);
-    return smoothstep(0.05, 1.0, pMax);  // light-bleed reduction
+    float4 clip1 = sceneData.shadowMatrix1 * float4(worldPos, 1.0);
+    float3 sc1 = clip1.xyz / clip1.w;
+    float2 uv1 = float2(sc1.x * 0.5 + 0.5, 0.5 - sc1.y * 0.5);
+    bool inCascade1 = uv1.x >= 0.0 && uv1.x <= 1.0 && uv1.y >= 0.0 && uv1.y <= 1.0 &&
+                      sc1.z >= 0.0 && sc1.z <= 1.0;
+    if (inCascade1) {
+        float2 moments = moments1.sample(s, uv1).xy;
+        const float minVariance = 0.00002;
+        if (sc1.z <= moments.x) return 1.0;
+        float variance = moments.y - (moments.x * moments.x);
+        variance = max(variance, minVariance);
+        float d = sc1.z - moments.x;
+        float pMax = variance / (variance + d * d);
+        return smoothstep(0.05, 1.0, pMax);
+    }
+    return 1.0;  // outside both shadow maps — lit
 }
 
 // ================================================================================================

@@ -20,12 +20,12 @@ layout(location = 0) in vec3 vWorldPos;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    // Project the world pixel through the REFLECTED VP. naga inserts a
-    // Y-negate on WGSL vertex output, so the reflection RT's V axis follows
-    // the WGSL convention: v = 0.5 - 0.5 * ndc.y (same as Metal).
+    // Project the world pixel through the REFLECTED VP. The reflection RT is
+    // rasterized by raw GLSL (MirrorReflection.vert — NO naga Y-flip), so its
+    // V axis follows the plain Vulkan convention v = ndc.y*0.5 + 0.5.
     vec4 clip = reflected_view_projection * vec4(vWorldPos, 1.0);
     vec3 ndc = clip.xyz / clip.w;
-    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
 
     // Off-mirror guard (quad is exact, but fp noise at borders).
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
