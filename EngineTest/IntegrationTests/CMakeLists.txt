@@ -104,6 +104,10 @@ endfunction()
 
 enable_testing()
 
+# 所有平台的集成测试源码（RenderItem/ShaderCompilation 等）都调用 ContentTools API，
+# BUILD_CONTENT_TOOLS=OFF 时（如无 FBX SDK 的 CI runner）整体跳过，
+# 只保留空的 IntegrationTests 聚合目标供 run_integration_tests 等 DEPENDS 引用。
+if(TARGET ContentTools)
 if(APPLE)
     # 1. TestRendererMac
     add_executable(TestRendererMac
@@ -558,7 +562,7 @@ elseif(WIN32)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestRenderer)
-    
+
     add_custom_target(IntegrationTests DEPENDS TestRenderer)
 
 elseif(LINUX)
@@ -573,6 +577,10 @@ elseif(LINUX)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestRenderer)
-    
+
     add_custom_target(IntegrationTests DEPENDS TestRenderer)
+endif()
+else()
+    message(STATUS "Integration tests skipped: ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
+    add_custom_target(IntegrationTests)
 endif()

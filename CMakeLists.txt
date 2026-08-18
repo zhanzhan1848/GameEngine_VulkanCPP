@@ -299,7 +299,11 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # 添加子项目
-if(NOT EMSCRIPTEN)
+# ContentTools 的 Windows 构建依赖 FBX SDK 与 DirectXTex（find_package REQUIRED，
+# 且仓库内没有对应的 Find 模块），无这些 SDK 的机器（如 CI runner）用
+# -DBUILD_CONTENT_TOOLS=OFF 跳过；Engine 与 RHI 单元测试不依赖 ContentTools。
+option(BUILD_CONTENT_TOOLS "Build ContentTools (Windows requires FBX SDK + DirectXTex)" ON)
+if(NOT EMSCRIPTEN AND BUILD_CONTENT_TOOLS)
     add_subdirectory(ContentTools)
 endif()
 # Emscripten: Particles/*.cpp pulls in Metal headers and breaks the WASM build.
@@ -408,15 +412,26 @@ endif()
 
 # 设置构建顺序依赖
 if(NOT EMSCRIPTEN)
-    add_dependencies(ContentTools Engine)
-    add_dependencies(EngineDLL Engine ContentTools)
+    if(BUILD_CONTENT_TOOLS)
+        add_dependencies(ContentTools Engine)
+        add_dependencies(EngineDLL Engine ContentTools)
 
-    # 配置安装规则
-    install(TARGETS Engine EngineDLL ContentTools
-        RUNTIME DESTINATION bin
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib
-    )
+        # 配置安装规则
+        install(TARGETS Engine EngineDLL ContentTools
+            RUNTIME DESTINATION bin
+            LIBRARY DESTINATION lib
+            ARCHIVE DESTINATION lib
+        )
+    else()
+        add_dependencies(EngineDLL Engine)
+        message(STATUS "ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
+
+        install(TARGETS Engine EngineDLL
+            RUNTIME DESTINATION bin
+            LIBRARY DESTINATION lib
+            ARCHIVE DESTINATION lib
+        )
+    endif()
 endif()
 
 # 打印配置信息

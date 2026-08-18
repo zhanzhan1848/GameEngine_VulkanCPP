@@ -81,8 +81,12 @@ jobs:
           # (multi-config). ENABLE_VULKAN=ON enables
           # Engine/Graphics/RHI/Platforms/Vulkan, find_package(Vulkan REQUIRED)
           # and all TestVulkan* targets.
+          # BUILD_CONTENT_TOOLS=OFF skips ContentTools (its Windows build needs
+          # FBX SDK + DirectXTex which are not installed on this runner) and
+          # the legacy TestRenderer integration test that links it.
+          # Vulkan RHI coverage comes from Engine + TestVulkan* unit tests.
           # To pin a generator use: -G "Visual Studio 17 2022" -A x64
-          cmake -S . -B build -DENABLE_VULKAN=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: 编译 (Release)
         shell: powershell
