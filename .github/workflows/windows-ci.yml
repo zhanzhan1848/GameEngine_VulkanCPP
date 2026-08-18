@@ -29,7 +29,7 @@ concurrency:
 jobs:
   build-and-test:
     name: 编译与测试 (Windows / MSVC / Vulkan)
-    runs-on: [self-hosted, Windows]
+    runs-on: [self-hosted, Windows, x64]
     timeout-minutes: 120
 
     steps:
