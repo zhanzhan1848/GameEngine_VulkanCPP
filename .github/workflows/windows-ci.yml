@@ -1,0 +1,99 @@
+name: Windows CI (Self-Hosted)
+
+# 文件级注释：
+# 推送 feat/vulkan-rhi-backend 时，在自托管 Windows runner 上编译并运行测试。
+# 与 dispatch-ci.yml（GitHub 托管 macOS runner 的调度器）互不影响——
+# 该调度器的分支过滤为 feature/**、features/**，不匹配 feat/* 前缀。
+#
+# Runner 机器前置要求（一次性安装）：
+#   - Git for Windows（runner 本身也依赖）
+#   - CMake >= 3.20（在 PATH 中）
+#   - Visual Studio 2022（含 C++ 桌面开发工作负载；不指定 -G，CMake 自动选最新 VS 生成器）
+#   - LunarG Vulkan SDK（安装器会设置系统级 VULKAN_SDK 环境变量，find_package(Vulkan) 依赖它）
+#   - GitHub Actions runner 以 Windows 服务方式注册（GPU 测试在该会话下窗口不可见，但可正常执行）
+
+on:
+  push:
+    branches:
+      - feat/vulkan-rhi-backend
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# 同一分支快速连续推送时，取消旧的排队/运行任务，避免单台 runner 被积压
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: 编译与测试 (Windows / MSVC / Vulkan)
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 120
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # 自托管 runner 保留工作区，让 build/ 可以增量编译。
+          # 默认 clean:true 会执行 git clean -ffdx，每次推送都清空构建目录导致全量重编。
+          clean: false
+
+      - name: 初始化必需的 submodule
+        shell: bash
+        run: |
+          # 只拉取 Windows 构建实际依赖的 submodule（root CMakeLists 缺 meshoptimizer 会 FATAL_ERROR）。
+          # 刻意跳过 dawn / PhysX / WebGPU / astc-encoder：仅 WASM 与 WebGPU 构建需要，
+          # dawn 仓库数 GB，全部 --recursive 会显著拖慢每次检出。
+          git submodule update --init \
+            third_party/meshoptimizer \
+            third_party/stb \
+            third_party/moodycamel-ConcurrentQueue \
+            third_party/lua
+
+      - name: 打印环境信息
+        shell: bash
+        run: |
+          echo "VULKAN_SDK = ${VULKAN_SDK:-<未设置>（find_package(Vulkan) 仍可能通过注册表/默认安装路径找到 SDK）}"
+          cmake --version
+          git --version
+
+      - name: 配置 CMake (Release + Vulkan RHI)
+        shell: bash
+        run: |
+          # 不指定 -G：CMake 自动选择机器上最新的 Visual Studio 生成器（多配置）。
+          # ENABLE_VULKAN=ON 是本分支的核心目标——开启 Engine/Graphics/RHI/Platforms/Vulkan
+          # 并启用 find_package(Vulkan REQUIRED) 与全部 TestVulkan* 测试目标。
+          # 如需固定生成器，改用: -G "Visual Studio 17 2022" -A x64
+          cmake -S . -B build \
+            -DENABLE_VULKAN=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: 编译 (Release)
+        shell: bash
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: 运行测试 (ctest)
+        shell: bash
+        run: |
+          # 全量跑已注册的测试（单元 + 集成 + TestVulkan*）。
+          # --timeout 兜底防止窗口化图形测试在无交互会话中挂死。
+          # 若个别测试在 runner 上不稳定，可加 -E "TestVulkanStress|..." 排除。
+          ctest --test-dir build -C Release \
+            --output-on-failure \
+            --timeout 600 \
+            --no-tests=error
+
+      - name: 上传测试日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-${{ github.run_id }}
+          path: |
+            build/Testing/**/*.log
+            build/Testing/**/*.xml
+          if-no-files-found: ignore
+          retention-days: 14
