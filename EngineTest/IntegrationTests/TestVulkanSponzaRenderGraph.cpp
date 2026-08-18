@@ -1197,6 +1197,18 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
 
+    // F10: toggle TAA sub-pixel jitter (A/B the temporal resolve).
+    {
+        using namespace primal::input;
+        input_value f10;
+        get(input_source::keyboard, input_code::key_f10, f10);
+        if (f10.current.x > 0.0f && f10.previous.x == 0.0f && pipeline_) {
+            bool on = !pipeline_->IsTAAJitter();
+            pipeline_->SetTAAJitter(on);
+            std::cout << "[TAA] jitter: " << (on ? "ON" : "OFF") << std::endl;
+        }
+    }
+
     camera_.Update(dt);
     view_.SetViewMatrix(camera_.GetViewMatrix());
     view_.UpdateFrustum();
@@ -1290,10 +1302,11 @@ void TestVulkanSponzaRenderGraph::Run() {
 
     renderSystem_.EndFrame(renderDoneSem);
 
-    // DEBUG: capture frame 60 to PPM for visual inspection of SSGI/SSR.
-    // Runs AFTER Present — uses a dedicated one-shot command buffer so it
-    // doesn't interfere with the per-frame render loop.
-    if (frameCount_ == 60 || frameCount_ == 61) {
+    // Backbuffer PPM capture — pixel-exact frames for temporal-stability
+    // analysis. Fires at frames 60/61 (baseline, jitter ON) and for two
+    // adjacent frames after an F10 jitter toggle (A/B without window-scaling
+    // artifacts). Runs AFTER Present via a dedicated one-shot command buffer.
+    auto capturePPM = [&](const char* tag) {
         u32 capW = targetDesc.size.x;
         u32 capH = targetDesc.size.y;
         BufferDesc sbDesc{};
@@ -1338,23 +1351,28 @@ void TestVulkanSponzaRenderGraph::Run() {
 
         auto* mapped = static_cast<u8*>(device_->MapBuffer(stagingBuf));
         if (mapped) {
-            std::string ppmPath = "/tmp/sponza_frame" + std::to_string(frameCount_) + ".ppm";
+            std::string ppmPath = "/tmp/sponza_" + std::string(tag) + "_" +
+                                  std::to_string(frameCount_) + ".ppm";
             std::ofstream ppm(ppmPath, std::ios::binary);
             ppm << "P6\n" << capW << " " << capH << "\n255\n";
             for (u32 y = 0; y < capH; ++y) {
                 for (u32 x = 0; x < capW; ++x) {
                     u8* p = mapped + (y * capW + x) * 4;
-                    // BGRA8 → RGB
+                    // BGRA8 -> RGB
                     ppm.write(reinterpret_cast<const char*>(&p[2]), 1);
                     ppm.write(reinterpret_cast<const char*>(&p[1]), 1);
                     ppm.write(reinterpret_cast<const char*>(&p[0]), 1);
                 }
             }
             device_->UnmapBuffer(stagingBuf);
-            std::cerr << "[DEBUG] Frame " << frameCount_ << " captured to " << ppmPath << " ("
-                      << capW << "x" << capH << ")" << std::endl;
+            std::cerr << "[DEBUG] Frame " << frameCount_ << " captured to " << ppmPath
+                      << " (" << capW << "x" << capH << ")" << std::endl;
         }
         device_->DestroyBuffer(stagingBuf);
+    };
+
+    if (frameCount_ == 60 || frameCount_ == 61) {
+        capturePPM("jit_on");
     }
 
     frameCount_++;

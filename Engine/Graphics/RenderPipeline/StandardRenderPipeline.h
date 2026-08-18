@@ -188,6 +188,11 @@ public:
     }
     bool IsVSMShadows() const { return shadow_module_ && shadow_module_->IsVSMEnabled(); }
 
+    /// TAA sub-pixel jitter gate (A/B testing the resolve; TAA pass itself
+    /// keeps running — with jitter off it converges to a passthrough).
+    void SetTAAJitter(bool on) { taa_jitter_enabled_ = on; }
+    bool IsTAAJitter() const { return taa_jitter_enabled_; }
+
     // --- Offline SDF data source for SDF visualization ---
     // When set, SDF visualization uses this pre-built global SDF texture
     // instead of the runtime GlobalSDF cascades.
@@ -379,6 +384,9 @@ private:
     // Toon post-process toggle + params (Step 10.6).
     bool toon_enabled_{false};
     renderpass::ToonParams toon_params_{};
+
+    // TAA sub-pixel jitter gate (default on; A/B togglable at runtime).
+    bool taa_jitter_enabled_{true};
 
     // Offline SDF data source for SDF visualization.
     bool has_offline_sdf_{false};

@@ -1492,7 +1492,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // T4.6.5 followup: TAAPass now has working SPIR-V (Vulkan) + MSL (Metal)
         // shaders, triple-buffered history with resize handling, so jitter is
         // safe to enable on both platforms.
-        gpuDraw.SetJitterEnabled(true);
+        gpuDraw.SetJitterEnabled(taa_jitter_enabled_);
         // TAA — velocity from GBuffer MRT (NDC-space, matches TAA.comp expectation).
         auto velTAA = graph.ImportResource("GBufferVelocity_TAA", gpuDraw.GetGBufferVelocity());
         auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
@@ -2127,7 +2127,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         if (ppInputRG.IsValid()) {
             // TAA resolve active on Vulkan + Metal — jitter is safe (see
             // BuildRenderGraph Step 10.5).
-            gpuDraw.SetJitterEnabled(true);
+            gpuDraw.SetJitterEnabled(taa_jitter_enabled_);
             auto velRWCB = graph.ImportResource("GBufferVelocity_TAA_RWCB", gpuDraw.GetGBufferVelocity());
             auto taaRWCB = PostProcess::AddTAAPass(graph, ppInputRG, velRWCB,
                 render_width_, render_height_, static_cast<u32>(frameCount_));

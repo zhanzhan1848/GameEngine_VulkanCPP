@@ -138,8 +138,16 @@ void taa_main() {
     }
 
     // Convert AABB to YCoCg space, clip history.
+    // Dilate the 3×3 min/max box by 25% around its center first — thin
+    // high-frequency geometry (grilles, foliage) otherwise flickers when
+    // sub-pixel jitter moves coverage between frames and the history gets
+    // hard-clipped to the exact neighborhood min/max.
     vec3 aabbMinYC   = rgbToYCoCg(neighborMin);
     vec3 aabbMaxYC   = rgbToYCoCg(neighborMax);
+    vec3 aabbCenter  = 0.5 * (aabbMinYC + aabbMaxYC);
+    vec3 aabbExtents = 0.5 * (aabbMaxYC - aabbMinYC) * 1.25;
+    aabbMinYC = aabbCenter - aabbExtents;
+    aabbMaxYC = aabbCenter + aabbExtents;
     vec3 historyYC   = clipToAABB(aabbMinYC, aabbMaxYC, rgbToYCoCg(historyColor));
     vec3 historyClipped = yCoCgToRGB(historyYC);
 

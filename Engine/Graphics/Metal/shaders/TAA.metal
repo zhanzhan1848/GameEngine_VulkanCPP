@@ -128,8 +128,15 @@ kernel void taa_main(
     }
 
     // Convert AABB to YCoCg space, clip history.
+    // Dilate the 3×3 min/max box by 25% around its center first — thin
+    // high-frequency geometry otherwise flickers under sub-pixel jitter
+    // (same fix as the GLSL version).
     float3 aabbMinYC     = rgbToYCoCg(neighborMin);
     float3 aabbMaxYC     = rgbToYCoCg(neighborMax);
+    float3 aabbCenter    = 0.5 * (aabbMinYC + aabbMaxYC);
+    float3 aabbExtents   = 0.5 * (aabbMaxYC - aabbMinYC) * 1.25;
+    aabbMinYC = aabbCenter - aabbExtents;
+    aabbMaxYC = aabbCenter + aabbExtents;
     float3 historyYC     = clipToAABB(aabbMinYC, aabbMaxYC, rgbToYCoCg(historyColor));
     float3 historyClipped = yCoCgToRGB(historyYC);
 
