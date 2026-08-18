@@ -1173,6 +1173,18 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
 
+    // F8: toggle Toon cel-shading (StandardRenderPipeline Step 10.6).
+    {
+        using namespace primal::input;
+        input_value f8;
+        get(input_source::keyboard, input_code::key_f8, f8);
+        if (f8.current.x > 0.0f && f8.previous.x == 0.0f && pipeline_) {
+            bool enabled = !pipeline_->IsToonEnabled();
+            pipeline_->SetToonEnabled(enabled);
+            std::cout << "[Toon] cel-shading: " << (enabled ? "ON" : "OFF") << std::endl;
+        }
+    }
+
     camera_.Update(dt);
     view_.SetViewMatrix(camera_.GetViewMatrix());
     view_.UpdateFrustum();

@@ -1,0 +1,62 @@
+#version 450 core
+// Toon.comp — hand-written GLSL port of Metal/shaders/ToonShader.metal.
+// Entry point: main (Metal: toon_main).
+//
+// Cel-shading post process: color quantization + depth-based Sobel edge
+// detection (edges darken to black).
+//
+// Flat descriptor bindings (Vulkan forbids overlapping texture/buffer namespaces):
+//   binding 0 = SampledImage  inColorTex  (tone-mapped LDR)
+//   binding 1 = SampledImage  inDepthTex  (GBuffer depth)
+//   binding 2 = SampledImage  inNormalTex (GBuffer normal — reserved for
+//                                          combined depth+normal edges)
+//   binding 3 = StorageImage  outColorImg (RGBA8)
+//   binding 4 = UniformBuffer ToonConstants
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D inColorTex;
+layout(set = 0, binding = 1) uniform texture2D inDepthTex;
+layout(set = 0, binding = 2) uniform texture2D inNormalTex;
+layout(set = 0, binding = 3, rgba8) writeonly uniform image2D outColorImg;
+
+layout(set = 0, binding = 4, std140) uniform ToonConstantsUBO {
+    float edgeThreshold;
+    float colorLevels;
+    float _pad0;
+    float _pad1;
+} toon;
+
+// Simple depth-based edge detection (same 4-tap as the Metal version).
+// Taps clamp to the image edge — Metal texture.read clamps out-of-bounds
+// coordinates, while GLSL texelFetch returns undefined (0 on most drivers),
+// which would false-edge the 1-px border.
+float detectEdge(ivec2 pixel, ivec2 dims) {
+    ivec2 c = clamp(pixel, ivec2(0), dims - ivec2(1));
+    float d = texelFetch(inDepthTex, c, 0).r;
+    float dLeft  = texelFetch(inDepthTex, clamp(pixel + ivec2(-1, 0), ivec2(0), dims - ivec2(1)), 0).r;
+    float dRight = texelFetch(inDepthTex, clamp(pixel + ivec2(1, 0), ivec2(0), dims - ivec2(1)), 0).r;
+    float dUp    = texelFetch(inDepthTex, clamp(pixel + ivec2(0, -1), ivec2(0), dims - ivec2(1)), 0).r;
+    float dDown  = texelFetch(inDepthTex, clamp(pixel + ivec2(0, 1), ivec2(0), dims - ivec2(1)), 0).r;
+
+    return abs(d - dLeft) + abs(d - dRight) + abs(d - dUp) + abs(d - dDown);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dims = imageSize(outColorImg);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= dims.x || pixel.y >= dims.y) return;
+
+    vec4 color = texelFetch(inColorTex, pixel, 0);
+
+    // 1. Color quantization
+    vec3 quantized = floor(color.rgb * toon.colorLevels) / toon.colorLevels;
+
+    // 2. Edge detection
+    float edge = detectEdge(pixel, dims);
+    float edgeFactor = (edge > toon.edgeThreshold) ? 0.0 : 1.0;
+
+    imageStore(outColorImg, pixel, vec4(quantized * edgeFactor, color.a));
+}

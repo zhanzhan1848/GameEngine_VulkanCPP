@@ -4,6 +4,7 @@
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RHI/Core/RHIGPUOptimizer.h"
 #include "Graphics/RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/ToonPass.h"
 #include "Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
@@ -170,6 +171,15 @@ public:
     const GeometryDebugSettings& GetGeometryDebugSettings() const {
         return geometry_debug_settings_;
     }
+
+    /// Toon/cel-shading post process (quantize + depth Sobel edges) applied to
+    /// the tone-mapped frame. Cheap per-frame toggle + params.
+    void SetToonEnabled(bool enabled,
+                        const renderpass::ToonParams& params = renderpass::ToonParams{}) {
+        toon_enabled_ = enabled;
+        toon_params_ = params;
+    }
+    bool IsToonEnabled() const { return toon_enabled_; }
 
     // --- Offline SDF data source for SDF visualization ---
     // When set, SDF visualization uses this pre-built global SDF texture
@@ -358,6 +368,10 @@ private:
     // AddGeometryDebugPass; set at the top of Render/RenderWithCommandBuffer).
     GeometryDebugSettings geometry_debug_settings_{};
     RenderView* frame_view_{nullptr};
+
+    // Toon post-process toggle + params (Step 10.6).
+    bool toon_enabled_{false};
+    renderpass::ToonParams toon_params_{};
 
     // Offline SDF data source for SDF visualization.
     bool has_offline_sdf_{false};

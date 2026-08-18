@@ -231,6 +231,19 @@ if [ -f "$src" ]; then
     rm -rf "$tmpdir"
 else echo "MISS  ShadowFilter.comp (skipped)"; fi
 
+# Toon cel-shading post process (compute, entry main) — color quantization +
+# depth Sobel edges. Mirrors Metal/shaders/ToonShader.metal (entry toon_main).
+src="$DEST_DIR/PostProcess/Toon.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/PostProcess/Toon.comp.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/Toon.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V --source-entrypoint main -e main "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out"); printf "OK    PostProcess/Toon.comp.spv              (%d bytes)\n" "$sz"
+    else echo "FAIL  PostProcess/Toon.comp"; sed 's/^/    /' "$tmpdir/err"; fi
+    rm -rf "$tmpdir"
+else echo "MISS  PostProcess/Toon.comp (skipped)"; fi
+
 # ============================================================================
 # Lumen WGSL (naga) — Phase 2 DDGI shaders from Dawn/shaders/Lumen/.
 # DDGI uses WGSL "Mode 11 canonical" path (self-circulating irradiance_history +

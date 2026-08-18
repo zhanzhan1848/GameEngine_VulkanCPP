@@ -1505,15 +1505,31 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
+    // Step 10.6: Toon post process (optional, both platforms)
+    // ========================================================================
+    // Cel shading on the tone-mapped LDR frame: color quantization + depth
+    // Sobel edges. Runs before the GeometryDebug overlay so debug colors stay
+    // unquantized.
+    RGResourceHandle postToonColor;
+    if (toneOut.output.IsValid()) postToonColor = toneOut.output;
+    if (toon_enabled_ && postToonColor.IsValid()) {
+        auto toonDepth = graph.ImportResource("GBufferDepth_Toon", gpuDraw.GetGBufferDepthSampleable());
+        auto toonNormal = graph.ImportResource("GBufferNormal_Toon", gpuDraw.GetGBufferNormal());
+        auto toonOut = renderpass::AddToonPass(graph, postToonColor, toonDepth, toonNormal,
+                                               toon_params_, cbIdx, render_width_, render_height_);
+        if (toonOut.toonOutput.IsValid()) postToonColor = toonOut.toonOutput;
+    }
+
+    // ========================================================================
     // Step 10.7: Geometry debug overlay (optional, both platforms)
     // ========================================================================
     // Meshlet / SDF-slice / vector-field / voxel visualizations blended onto
     // the tone-mapped frame. Debug pipelines lazy-init on the first enabled
     // frame; view comes from the Render()/RenderWithCommandBuffer() argument.
-    if (geometry_debug_settings_.enable && frame_view_ && toneOut.output.IsValid()) {
+    if (geometry_debug_settings_.enable && frame_view_ && postToonColor.IsValid()) {
         auto gbufferDepthGD = graph.ImportResource("GBufferDepth_GeometryDebug",
                                                    gpuDraw.GetGBufferDepthSampleable());
-        AddGeometryDebugPass(graph, toneOut.output, gbufferDepthGD,
+        AddGeometryDebugPass(graph, postToonColor, gbufferDepthGD,
                              *frame_view_, &geometry_debug_settings_);
     }
 
@@ -1548,14 +1564,14 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         sdf_viz_module_->AddPass(graph, vizIn);
     } else if (final_blit_module_) {
         FinalBlitInputs blitIn;
-        // Prefer the tone-mapped LDR output; fall back to HDR composite if
-        // PostProcess was skipped (e.g. no valid input texture this frame).
-        // FinalBlit binds the PHYSICAL texture directly (no RG-side resolution),
-        // so resolve the tone-map output's physical handle here.
-        if (toneOut.output.IsValid()) {
-            auto* toneRes = graph.GetResource(toneOut.output);
+        // Prefer the tone-mapped LDR output (Toon-processed when enabled);
+        // fall back to HDR composite if PostProcess was skipped (e.g. no valid
+        // input texture this frame). FinalBlit binds the PHYSICAL texture
+        // directly (no RG-side resolution), so resolve the physical handle here.
+        if (postToonColor.IsValid()) {
+            auto* toneRes = graph.GetResource(postToonColor);
             if (toneRes) {
-                blitIn.input_rg = toneOut.output;
+                blitIn.input_rg = postToonColor;
                 blitIn.input_tex = toneRes->GetPhysicalHandle();
             }
         }
@@ -2109,20 +2125,36 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 ssaoOut.ssao_output, ssgiOut.ssgi_output, velRWCB, cbIdx);
         }
 
+        // Toon post process — mirrors BuildRenderGraph Step 10.6.
+        RGResourceHandle postToonColorRWCB;
+        if (toneOutRWCB.output.IsValid()) postToonColorRWCB = toneOutRWCB.output;
+        if (toon_enabled_ && postToonColorRWCB.IsValid()) {
+            auto toonDepthRWCB = graph.ImportResource("GBufferDepth_Toon_RWCB",
+                                                      gpuDraw.GetGBufferDepthSampleable());
+            auto toonNormalRWCB = graph.ImportResource("GBufferNormal_Toon_RWCB",
+                                                       gpuDraw.GetGBufferNormal());
+            auto toonOutRWCB = renderpass::AddToonPass(graph, postToonColorRWCB,
+                                                       toonDepthRWCB, toonNormalRWCB,
+                                                       toon_params_, cbIdx,
+                                                       render_width_, render_height_);
+            if (toonOutRWCB.toonOutput.IsValid()) postToonColorRWCB = toonOutRWCB.toonOutput;
+        }
+
         // Geometry debug overlay — mirrors BuildRenderGraph Step 10.7.
-        if (geometry_debug_settings_.enable && frame_view_ && toneOutRWCB.output.IsValid()) {
+        if (geometry_debug_settings_.enable && frame_view_ && postToonColorRWCB.IsValid()) {
             auto gbufferDepthGDRWCB = graph.ImportResource("GBufferDepth_GeometryDebug_RWCB",
                                                            gpuDraw.GetGBufferDepthSampleable());
-            AddGeometryDebugPass(graph, toneOutRWCB.output, gbufferDepthGDRWCB,
+            AddGeometryDebugPass(graph, postToonColorRWCB, gbufferDepthGDRWCB,
                                  *frame_view_, &geometry_debug_settings_);
         }
 
         // --- Final Blit → backbuffer ---
         FinalBlitInputs blitIn;
-        if (toneOutRWCB.output.IsValid()) {
-            auto* toneResRWCB = graph.GetResource(toneOutRWCB.output);
+        // Prefer the Toon-processed frame (== toneOutRWCB.output when toon is off).
+        if (postToonColorRWCB.IsValid()) {
+            auto* toneResRWCB = graph.GetResource(postToonColorRWCB);
             if (toneResRWCB) {
-                blitIn.input_rg = toneOutRWCB.output;
+                blitIn.input_rg = postToonColorRWCB;
                 blitIn.input_tex = toneResRWCB->GetPhysicalHandle();
             }
         }

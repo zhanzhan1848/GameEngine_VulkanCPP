@@ -371,6 +371,29 @@ if(ENABLE_VULKAN)
                 $<TARGET_FILE_DIR:TestVulkanTAA>/Engine/Graphics/Vulkan/shaders
     )
 
+    # Toon: cel-shading post-process through the real AddToonPass + RenderGraph.
+    # Quantization + depth Sobel edge split vs closed-form CPU reference.
+    add_executable(TestVulkanToon
+        RHI/Core/TestVulkanToon.cpp
+    )
+    target_include_directories(TestVulkanToon PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+    )
+    target_link_libraries(TestVulkanToon PRIVATE Engine)
+    target_compile_definitions(TestVulkanToon PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanToon COMMAND TestVulkanToon)
+    set_target_properties(TestVulkanToon PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanToon POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+                $<TARGET_FILE_DIR:TestVulkanToon>/Engine/Graphics/Vulkan/shaders
+    )
+
     # Phase 4b-T3.4: Bloom bright-pass extraction.
     # Single-pass luminance threshold; CPU reference comparison (no Metal).
     add_executable(TestVulkanBloom
