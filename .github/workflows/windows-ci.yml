@@ -42,7 +42,10 @@ jobs:
           clean: false
 
       - name: 初始化必需的 submodule
-        shell: bash
+        # 不用 shell: bash —— 自托管机器上 PATH 会把 C:\Windows\System32\bash.exe（WSL 启动器）
+        # 解析在 Git Bash 之前，未装 WSL 发行版时直接报错退出。
+        # 显式指向 Git for Windows 的 bash；若 Git 安装路径不同，改这里即可（用 where.exe git 确认）。
+        shell: 'C:/Program Files/Git/bin/bash.EXE --noprofile --norc -e -o pipefail {0}'
         run: |
           # 只拉取 Windows 构建实际依赖的 submodule（root CMakeLists 缺 meshoptimizer 会 FATAL_ERROR）。
           # 刻意跳过 dawn / PhysX / WebGPU / astc-encoder：仅 WASM 与 WebGPU 构建需要，
@@ -54,14 +57,20 @@ jobs:
             third_party/lua
 
       - name: 打印环境信息
-        shell: bash
+        # 不用 shell: bash —— 自托管机器上 PATH 会把 C:\Windows\System32\bash.exe（WSL 启动器）
+        # 解析在 Git Bash 之前，未装 WSL 发行版时直接报错退出。
+        # 显式指向 Git for Windows 的 bash；若 Git 安装路径不同，改这里即可（用 where.exe git 确认）。
+        shell: 'C:/Program Files/Git/bin/bash.EXE --noprofile --norc -e -o pipefail {0}'
         run: |
           echo "VULKAN_SDK = ${VULKAN_SDK:-<未设置>（find_package(Vulkan) 仍可能通过注册表/默认安装路径找到 SDK）}"
           cmake --version
           git --version
 
       - name: 配置 CMake (Release + Vulkan RHI)
-        shell: bash
+        # 不用 shell: bash —— 自托管机器上 PATH 会把 C:\Windows\System32\bash.exe（WSL 启动器）
+        # 解析在 Git Bash 之前，未装 WSL 发行版时直接报错退出。
+        # 显式指向 Git for Windows 的 bash；若 Git 安装路径不同，改这里即可（用 where.exe git 确认）。
+        shell: 'C:/Program Files/Git/bin/bash.EXE --noprofile --norc -e -o pipefail {0}'
         run: |
           # 不指定 -G：CMake 自动选择机器上最新的 Visual Studio 生成器（多配置）。
           # ENABLE_VULKAN=ON 是本分支的核心目标——开启 Engine/Graphics/RHI/Platforms/Vulkan
@@ -72,12 +81,18 @@ jobs:
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: 编译 (Release)
-        shell: bash
+        # 不用 shell: bash —— 自托管机器上 PATH 会把 C:\Windows\System32\bash.exe（WSL 启动器）
+        # 解析在 Git Bash 之前，未装 WSL 发行版时直接报错退出。
+        # 显式指向 Git for Windows 的 bash；若 Git 安装路径不同，改这里即可（用 where.exe git 确认）。
+        shell: 'C:/Program Files/Git/bin/bash.EXE --noprofile --norc -e -o pipefail {0}'
         run: |
           cmake --build build --config Release --parallel
 
       - name: 运行测试 (ctest)
-        shell: bash
+        # 不用 shell: bash —— 自托管机器上 PATH 会把 C:\Windows\System32\bash.exe（WSL 启动器）
+        # 解析在 Git Bash 之前，未装 WSL 发行版时直接报错退出。
+        # 显式指向 Git for Windows 的 bash；若 Git 安装路径不同，改这里即可（用 where.exe git 确认）。
+        shell: 'C:/Program Files/Git/bin/bash.EXE --noprofile --norc -e -o pipefail {0}'
         run: |
           # 全量跑已注册的测试（单元 + 集成 + TestVulkan*）。
           # --timeout 兜底防止窗口化图形测试在无交互会话中挂死。
