@@ -347,6 +347,30 @@ if(ENABLE_VULKAN)
                 $<TARGET_FILE_DIR:TestVulkanToneMap>/Assets
     )
 
+    # TAA: two-frame accumulation through the real PostProcess::AddTAAPass +
+    # RenderGraph path. Frame 0 = passthrough (alpha=1), frame 1 = exact
+    # 1-texel history reproject blend (CPU closed-form reference).
+    add_executable(TestVulkanTAA
+        RHI/Core/TestVulkanTAA.cpp
+    )
+    target_include_directories(TestVulkanTAA PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+    )
+    target_link_libraries(TestVulkanTAA PRIVATE Engine)
+    target_compile_definitions(TestVulkanTAA PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanTAA COMMAND TestVulkanTAA)
+    set_target_properties(TestVulkanTAA PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanTAA POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+                $<TARGET_FILE_DIR:TestVulkanTAA>/Engine/Graphics/Vulkan/shaders
+    )
+
     # Phase 4b-T3.4: Bloom bright-pass extraction.
     # Single-pass luminance threshold; CPU reference comparison (no Metal).
     add_executable(TestVulkanBloom

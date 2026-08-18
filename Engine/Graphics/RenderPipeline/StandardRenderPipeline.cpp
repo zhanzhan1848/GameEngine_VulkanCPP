@@ -1482,10 +1482,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     PostProcess::ToneMappingPassData toneOut;
     if (postProcessInputRG.IsValid()) {
         // TAA will resolve the frame — enable the sub-pixel jitter injection.
-        // TAA resolve not yet functional on Vulkan — jitter injection without
-        // temporal accumulation produces visible per-frame shimmer.
-        // Re-enable once the TAA dispatch/history issue is fixed.
-        // gpuDraw.SetJitterEnabled(true);
+        // T4.6.5 followup: TAAPass now has working SPIR-V (Vulkan) + MSL (Metal)
+        // shaders, triple-buffered history with resize handling, so jitter is
+        // safe to enable on both platforms.
+        gpuDraw.SetJitterEnabled(true);
         // TAA — velocity from GBuffer MRT (NDC-space, matches TAA.comp expectation).
         auto velTAA = graph.ImportResource("GBufferVelocity_TAA", gpuDraw.GetGBufferVelocity());
         auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
@@ -2081,10 +2081,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
         PostProcess::ToneMappingPassData toneOutRWCB;
         if (ppInputRG.IsValid()) {
-            // TAA resolve not yet functional on Vulkan — jitter injection without
-        // temporal accumulation produces visible per-frame shimmer.
-        // Re-enable once the TAA dispatch/history issue is fixed.
-        // gpuDraw.SetJitterEnabled(true);
+            // TAA resolve active on Vulkan + Metal — jitter is safe (see
+            // BuildRenderGraph Step 10.5).
+            gpuDraw.SetJitterEnabled(true);
             auto velRWCB = graph.ImportResource("GBufferVelocity_TAA_RWCB", gpuDraw.GetGBufferVelocity());
             auto taaRWCB = PostProcess::AddTAAPass(graph, ppInputRG, velRWCB,
                 render_width_, render_height_, static_cast<u32>(frameCount_));

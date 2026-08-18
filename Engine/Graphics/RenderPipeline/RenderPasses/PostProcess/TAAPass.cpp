@@ -19,14 +19,22 @@ static constexpr u32 MAX_SETS_PER_FRAME = 2;
 static PipelineHandle s_Pipeline = handles::INVALID_PIPELINE;
 static PipelineLayoutHandle s_Layout = handles::INVALID_PIPELINE_LAYOUT;
 static DescriptorSetLayoutHandle s_DSL = handles::INVALID_RESOURCE;
-static DescriptorSetHandle s_SetPool[MAX_FRAMES][MAX_SETS_PER_FRAME] = {};
+// Handles are u64 with INVALID == (u64)-1 — zero-init would read as a valid
+// handle 0, so every array below must be explicitly INVALID-initialized.
+static DescriptorSetHandle s_SetPool[MAX_FRAMES][MAX_SETS_PER_FRAME] = {
+    {handles::INVALID_DESCRIPTOR_SET, handles::INVALID_DESCRIPTOR_SET},
+    {handles::INVALID_DESCRIPTOR_SET, handles::INVALID_DESCRIPTOR_SET},
+    {handles::INVALID_DESCRIPTOR_SET, handles::INVALID_DESCRIPTOR_SET}};
 static u32 s_SetIndex[MAX_FRAMES] = {};
 
 static SamplerHandle s_LinearSampler = handles::INVALID_SAMPLER;
 
 // Triple-buffered history textures — ping-pong: read from frameIndex, write to next frame's slot
-static ResourceHandle s_HistoryTex[MAX_FRAMES] = {};
+static ResourceHandle s_HistoryTex[MAX_FRAMES] = {
+    handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
 static bool s_HistoryInit[MAX_FRAMES] = {}; // false until first write to this slot
+static u32 s_TexWidth = 0;                  // dimensions the history textures were
+static u32 s_TexHeight = 0;                 // created with — recreate on resize
 
 // Persistent params buffer per frame slot
 struct TAAGlobalsCPU {
@@ -34,7 +42,8 @@ struct TAAGlobalsCPU {
     f32   invHistoryValid;   // 1.0 if history slot is uninitialized
     u32   _pad0, _pad1, _pad2;
 };
-static ResourceHandle s_ParamsBuf[MAX_FRAMES] = {};
+static ResourceHandle s_ParamsBuf[MAX_FRAMES] = {
+    handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
 static void* s_ParamsMapped[MAX_FRAMES] = {};
 
 static u32 s_LastFrameIndex = ~0u; // For detecting first-ever frame (force invHistoryValid=1)
@@ -94,6 +103,24 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, bool* outIsBinary) 
 }
 
 static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
+    // History textures must follow the render size — the output→history
+    // BlitTexture is a 1:1 copy and validation-rejects mismatched extents.
+    // destroyTextureImpl is GC-deferred, so destroying while the previous
+    // frame's dispatch may still be in flight is safe.
+    bool needHistory = (s_HistoryTex[0] == handles::INVALID_RESOURCE) ||
+                       (s_TexWidth != width) || (s_TexHeight != height);
+    if (needHistory) {
+        for (u32 i = 0; i < MAX_FRAMES; ++i) {
+            if (s_HistoryTex[i] != handles::INVALID_RESOURCE) {
+                device.DestroyTexture(s_HistoryTex[i]);
+                s_HistoryTex[i] = handles::INVALID_RESOURCE;
+            }
+            s_HistoryInit[i] = false;
+        }
+        s_TexWidth = width;
+        s_TexHeight = height;
+    }
+
     if (s_Pipeline != handles::INVALID_PIPELINE) return true;
 
     auto platform = device.GetPlatform();
@@ -136,7 +163,8 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     // Keeping the field for ABI but not creating/binding the sampler.
     s_LinearSampler = handles::INVALID_SAMPLER;
 
-    // Allocate persistent history textures + params buffers per frame slot
+    // Allocate persistent history textures (size-tracked) + params buffers
+    // and descriptor sets (size-independent, created once) per frame slot.
     TextureDesc histDesc;
     histDesc.size = {width, height, 1};
     histDesc.format = DataFormat::RGBA16_Float;
@@ -145,21 +173,26 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     histDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
 
     for (u32 i = 0; i < MAX_FRAMES; ++i) {
-        s_HistoryTex[i] = device.CreateTexture(histDesc);
-        s_HistoryInit[i] = false;
+        if (needHistory) {
+            s_HistoryTex[i] = device.CreateTexture(histDesc);
+        }
 
-        BufferDesc bufDesc{};
-        bufDesc.size = sizeof(TAAGlobalsCPU);
-        bufDesc.type = BufferType::Constant;
-        bufDesc.usage = GPUMemoryUsage::Dynamic;
-        bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        s_ParamsBuf[i] = device.CreateBuffer(bufDesc);
-        s_ParamsMapped[i] = device.MapBuffer(s_ParamsBuf[i], 0, sizeof(TAAGlobalsCPU));
+        if (s_ParamsBuf[i] == handles::INVALID_RESOURCE) {
+            BufferDesc bufDesc{};
+            bufDesc.size = sizeof(TAAGlobalsCPU);
+            bufDesc.type = BufferType::Constant;
+            bufDesc.usage = GPUMemoryUsage::Dynamic;
+            bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            s_ParamsBuf[i] = device.CreateBuffer(bufDesc);
+            s_ParamsMapped[i] = device.MapBuffer(s_ParamsBuf[i], 0, sizeof(TAAGlobalsCPU));
+        }
 
-        for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
-            DescriptorSetDesc dsDesc;
-            dsDesc.layout = s_DSL;
-            s_SetPool[i][j] = device.CreateDescriptorSet(dsDesc);
+        if (s_SetPool[i][0] == handles::INVALID_RESOURCE) {
+            for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
+                DescriptorSetDesc dsDesc;
+                dsDesc.layout = s_DSL;
+                s_SetPool[i][j] = device.CreateDescriptorSet(dsDesc);
+            }
         }
     }
 
@@ -188,7 +221,6 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     bool histValid = s_HistoryInit[histReadIdx] && !firstEverFrame;
 
     // Update params uniform for this frame slot
-    // Update params uniform for this frame slot
     if (s_ParamsMapped[fi]) {
         auto* params = static_cast<TAAGlobalsCPU*>(s_ParamsMapped[fi]);
         params->screenSize = {(f32)width, (f32)height, 1.0f / width, 1.0f / height};
@@ -210,7 +242,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             outDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource | TextureUsage::CopySource;
             data.output = builder.CreateTexture("TAA_Output", outDesc, ResourceState::UnorderedAccess);
         },
-        [inputHDR, velocityTexture, width, height, fi, histReadIdx]
+        [inputHDR, velocityTexture, width, height, fi, histReadIdx, histValid]
          (const TAAPassData& data, RenderGraphContext& context) {
             if (s_Pipeline == handles::INVALID_PIPELINE) {
                 std::cerr << "[TAA] Execute abort: pipeline INVALID" << std::endl;
@@ -227,7 +259,12 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             auto* outRes = context.graph->GetResource(data.output);
             ResourceHandle outHandle = outRes ? outRes->GetPhysicalHandle() : handles::INVALID_RESOURCE;
 
-            ResourceHandle histHandle = s_HistoryTex[histReadIdx];
+            // When history is invalid (first frame / reset / resize) the history
+            // slot may still be in VK_IMAGE_LAYOUT_UNDEFINED — binding it as a
+            // sampled image is a validation error even though the shader never
+            // samples it (invHistoryValid branch). Bind the input texture as a
+            // stand-in instead; the result is identical (alpha=1 passthrough).
+            ResourceHandle histHandle = histValid ? s_HistoryTex[histReadIdx] : inHandle;
             // Write target is the current frame's slot — distinct from histHandle
             // (read slot) to avoid write-after-read on the same texture within
             // one command buffer.
@@ -289,6 +326,18 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             blitRegion.dstOffsets[0] = {0, 0, 0};
             blitRegion.dstOffsets[1] = {(s32)width, (s32)height, 1};
             cmd->BlitTexture(outHandle, histWriteHandle, &blitRegion, 1, FilterMode::Nearest);
+
+            // BlitTexture leaves the destination in TRANSFER_DST_OPTIMAL; the
+            // next frame binds this slot as a sampled image, which requires
+            // SHADER_READ_ONLY. InsertBarrier derives oldLayout from the
+            // texture's tracked layout, so this is a no-op when already correct.
+            ResourceBarrier histBarrier{};
+            histBarrier.resource = histWriteHandle;
+            histBarrier.beforeState = ResourceState::CopyDest;
+            histBarrier.afterState = ResourceState::ShaderResource;
+            histBarrier.subresource = 0xFFFFFFFF;
+            histBarrier.queueFamily = 0xFFFFFFFF;
+            cmd->InsertBarrier(&histBarrier, 1);
 
             s_HistoryInit[fi] = true;
         }

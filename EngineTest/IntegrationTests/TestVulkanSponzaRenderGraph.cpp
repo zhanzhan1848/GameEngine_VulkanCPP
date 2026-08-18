@@ -22,6 +22,7 @@
 #include "Engine/Content/ContentToEngine.h"
 #include "Engine/Content/AsyncResourceLoader.h"
 #include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
+#include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
 
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
@@ -1127,6 +1128,20 @@ void TestVulkanSponzaRenderGraph::Run() {
             pipeline_->SetSDFVisualization(enabled);
             std::cout << "[SDF_VIZ] GlobalSDF visualization: "
                       << (enabled ? "ON" : "OFF") << std::endl;
+        }
+    }
+
+    // R: reset camera + TAA history. The view jump invalidates TAA's temporal
+    // reprojection — without the reset the stale history ghosts for ~10 frames
+    // (alpha 0.1 convergence).
+    {
+        using namespace primal::input;
+        input_value r;
+        get(input_source::keyboard, input_code::key_r, r);
+        if (r.current.x > 0.0f && r.previous.x == 0.0f) {
+            camera_.Initialize({0.0f, 5.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+            PostProcess::ResetTAAHistory();
+            std::cout << "[TAA] Camera reset + TAA history cleared" << std::endl;
         }
     }
 
