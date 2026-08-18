@@ -387,6 +387,14 @@ void StandardRenderPipeline::InitializeSubsystems() {
         shadow_module_->InitializeShadowFilter(shadow_filter_shader_);
     }
 
+    // Planar reflection (Mirror) — fails soft: if shader loading fails the
+    // module stays invalid and the frame simply skips the mirror passes.
+    reflection_module_ = std::make_unique<PlanarReflectionModule>();
+    if (!reflection_module_->Initialize(device_, &gpuDraw, 10000)) {
+        std::cerr << "[StandardRenderPipeline] PlanarReflection init failed — mirror disabled" << std::endl;
+        reflection_module_.reset();
+    }
+
     deferred_module_ = std::make_unique<DeferredLightingModule>();
     deferred_module_->Initialize(device_, deferred_vs_, deferred_ps_, render_width_, render_height_);
     // T4.6.5 part 37: forward cached IBL handles (if SetIBLResources was
@@ -447,6 +455,7 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (sdf_viz_module_) { sdf_viz_module_->Shutdown(); sdf_viz_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
+    if (reflection_module_) { reflection_module_->Shutdown(); reflection_module_.reset(); }
 
     // Forward renderer (editor mode)
     if (forward_renderer_) { forward_renderer_->Shutdown(); forward_renderer_.reset(); }
@@ -1486,6 +1495,25 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         postProcessInputRG = deferredOut.deferred_output_rg;
     }
 
+    // ========================================================================
+    // Step 10.45: Planar reflection composite (optional, both platforms)
+    // ========================================================================
+    // Mirror quad blended over the HDR frame BEFORE TAA so the reflection is
+    // temporally resolved together with the scene.
+    if (reflection_module_ && reflection_module_->IsEnabled() && postProcessInputRG.IsValid() &&
+        scene_snapshot_) {
+        PlanarReflectionInputs reflIn;
+        reflIn.scene_snapshot = scene_snapshot_.get();
+        reflIn.view_matrix = view_matrix_;
+        reflIn.proj_matrix = proj_matrix_;
+        reflIn.camera_position = camera_position_;
+        math::v3 mLDir = Normalize(settings_.lighting.light_direction);
+        reflIn.light_dir = math::v4{-mLDir.x, -mLDir.y, -mLDir.z, 0.0f};  // TO light
+        reflIn.light_color = settings_.lighting.light_color;
+        reflIn.current_buffer_index = cbIdx;
+        reflection_module_->AddPasses(graph, postProcessInputRG, reflIn);
+    }
+
     PostProcess::ToneMappingPassData toneOut;
     if (postProcessInputRG.IsValid()) {
         // TAA will resolve the frame — enable the sub-pixel jitter injection.
@@ -2123,6 +2151,21 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         } else if (deferredOut.deferred_output_rg.IsValid()) {
             ppInputRG = deferredOut.deferred_output_rg;
         }
+        // Planar reflection composite — mirrors BuildRenderGraph Step 10.45.
+        if (reflection_module_ && reflection_module_->IsEnabled() && ppInputRG.IsValid() &&
+            scene_snapshot_) {
+            PlanarReflectionInputs reflInRWCB;
+            reflInRWCB.scene_snapshot = scene_snapshot_.get();
+            reflInRWCB.view_matrix = view_matrix_;
+            reflInRWCB.proj_matrix = proj_matrix_;
+            reflInRWCB.camera_position = camera_position_;
+            math::v3 mLDirRWCB = Normalize(settings_.lighting.light_direction);
+            reflInRWCB.light_dir = math::v4{-mLDirRWCB.x, -mLDirRWCB.y, -mLDirRWCB.z, 0.0f};
+            reflInRWCB.light_color = settings_.lighting.light_color;
+            reflInRWCB.current_buffer_index = cbIdx;
+            reflection_module_->AddPasses(graph, ppInputRG, reflInRWCB);
+        }
+
         PostProcess::ToneMappingPassData toneOutRWCB;
         if (ppInputRG.IsValid()) {
             // TAA resolve active on Vulkan + Metal — jitter is safe (see

@@ -19,6 +19,7 @@
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/RenderPipeline/Modules/ForwardSceneRenderer.h"
 #include "Graphics/RenderPipeline/Modules/ShadowMapModule.h"
+#include "Graphics/RenderPipeline/Modules/PlanarReflectionModule.h"
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
 #include "Graphics/RenderPipeline/Modules/SDFVisualizationModule.h"
@@ -193,6 +194,19 @@ public:
     void SetTAAJitter(bool on) { taa_jitter_enabled_ = on; }
     bool IsTAAJitter() const { return taa_jitter_enabled_; }
 
+    /// Planar reflection (mirror). The module renders the scene from the
+    /// mirrored camera and composites the mirror quad over the HDR frame
+    /// (before TAA). Plane defaults to a 10×10 floor mirror at the origin.
+    void SetMirrorEnabled(bool enabled) {
+        if (reflection_module_) reflection_module_->SetEnabled(enabled);
+    }
+    bool IsMirrorEnabled() const {
+        return reflection_module_ && reflection_module_->IsEnabled();
+    }
+    void SetMirrorPlane(const PlanarReflectionPlane& plane) {
+        if (reflection_module_) reflection_module_->SetPlane(plane);
+    }
+
     // --- Offline SDF data source for SDF visualization ---
     // When set, SDF visualization uses this pre-built global SDF texture
     // instead of the runtime GlobalSDF cascades.
@@ -352,6 +366,7 @@ private:
 
     // --- Pipeline modules ---
     std::unique_ptr<ShadowMapModule> shadow_module_;
+    std::unique_ptr<PlanarReflectionModule> reflection_module_;
     std::unique_ptr<DeferredLightingModule> deferred_module_;
     std::unique_ptr<FinalBlitModule> final_blit_module_;
     std::unique_ptr<GIGatherModule> gi_gather_module_;

@@ -227,6 +227,22 @@ public:
     // Metal TBDR cannot sample D32_Float; this uses the same compute pipeline as shadow blit.
     bool ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_buffer);
 
+    // --- Planar reflection (Mirror) ---
+    // Renders the scene through a reflected camera into caller-owned RTs
+    // (PlanarReflectionModule supplies 1024² RGBA16F + D32). CPU frustum
+    // culling (ExtractFrustumPlanes on the reflected VP) + vertex-pulling
+    // forward-lit raster (lambert + ambient, albedo from material arrays).
+    bool InitializeReflectionResources(u32 max_clusters);
+    void ShutdownReflectionResources();
+    bool IsReflectionReady() const { return reflection_initialized_; }
+    bool ExecuteReflectionPass(rhi::RHICommandBuffer* cmd_buffer,
+                               const RenderSceneSnapshot& scene_snapshot,
+                               const math::m4x4& reflected_view_projection,
+                               const math::v4& light_dir, const math::v4& light_color,
+                               const math::v4& ambient,
+                               rhi::ResourceHandle color_rt, rhi::ResourceHandle depth_rt,
+                               u32 buffer_index);
+
     const ShadowFrameResources& GetShadowFrameResources(u32 buffer_index) const {
         return shadow_frames_[buffer_index % 3];
     }
@@ -434,6 +450,24 @@ private:
 
     // ---- Shadow Mapping Resources ----
     ShadowFrameResources shadow_frames_[3];                         // Triple-buffered per-frame
+
+    // ---- Planar Reflection (Mirror) Resources ----
+    bool reflection_initialized_{false};
+    u32 reflection_max_clusters_{0};
+    rhi::PipelineHandle reflection_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineLayoutHandle reflection_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::DescriptorSetLayoutHandle reflection_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    // Triple-buffered per-frame buffers (visible-list uvec4 entries + indirect
+    // args + params CB) and descriptor sets.
+    rhi::ResourceHandle reflection_visible_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle reflection_indirect_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle reflection_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::DescriptorSetHandle reflection_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
+
     rhi::PipelineHandle shadow_cull_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: cluster culling
     rhi::PipelineHandle shadow_depth_pipeline_{ rhi::handles::INVALID_PIPELINE };   // Graphics: depth-only raster
     rhi::PipelineHandle shadow_moments_pipeline_{ rhi::handles::INVALID_PIPELINE }; // Graphics: VSM moments raster (ShadowDepth VS + moments FS)

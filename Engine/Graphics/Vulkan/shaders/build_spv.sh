@@ -258,6 +258,35 @@ if [ -f "$src" ]; then
     rm -rf "$tmpdir"
 else echo "MISS  Nanite/ShadowMoments.frag (skipped)"; fi
 
+# Mirror planar reflection — vertex-pulling forward-lit raster into the
+# mirror's 1024² RT. Mirrors EngineTest/shaders/MirrorReflection.metal
+# (entries mirror_reflection_vs/fs).
+if [ -f "$DEST_DIR/Nanite/MirrorReflection.vert" ] && [ -f "$DEST_DIR/Nanite/MirrorReflection.frag" ]; then
+    for stage in vert frag; do
+        tmpdir="$(mktemp -d)"
+        inline_includes "$DEST_DIR/Nanite/MirrorReflection.$stage" > "$tmpdir/mr.$stage"
+        if glslangValidator --quiet -V "$tmpdir/mr.$stage" -o "$DEST_DIR/Nanite/MirrorReflection.$stage.spv" 2>"$tmpdir/err"; then
+            sz=$(stat -f %z "$DEST_DIR/Nanite/MirrorReflection.$stage.spv")
+            printf "OK    Nanite/MirrorReflection.%s.spv        (%d bytes)\n" "$stage" "$sz"
+        else echo "FAIL  Nanite/MirrorReflection.$stage"; sed 's/^/    /' "$tmpdir/err"; fi
+        rm -rf "$tmpdir"
+    done
+else echo "MISS  Nanite/MirrorReflection.vert/.frag (skipped)"; fi
+
+# Mirror composite — draws the mirror quad, samples the reflection RT
+# (SrcAlpha blend over HDR). Mirrors Metal/shaders/MirrorComposite.metal.
+if [ -f "$DEST_DIR/PostProcess/MirrorComposite.vert" ] && [ -f "$DEST_DIR/PostProcess/MirrorComposite.frag" ]; then
+    for stage in vert frag; do
+        tmpdir="$(mktemp -d)"
+        inline_includes "$DEST_DIR/PostProcess/MirrorComposite.$stage" > "$tmpdir/mc.$stage"
+        if glslangValidator --quiet -V "$tmpdir/mc.$stage" -o "$DEST_DIR/PostProcess/MirrorComposite.$stage.spv" 2>"$tmpdir/err"; then
+            sz=$(stat -f %z "$DEST_DIR/PostProcess/MirrorComposite.$stage.spv")
+            printf "OK    PostProcess/MirrorComposite.%s.spv   (%d bytes)\n" "$stage" "$sz"
+        else echo "FAIL  PostProcess/MirrorComposite.$stage"; sed 's/^/    /' "$tmpdir/err"; fi
+        rm -rf "$tmpdir"
+    done
+else echo "MISS  PostProcess/MirrorComposite.vert/.frag (skipped)"; fi
+
 # ============================================================================
 # Lumen WGSL (naga) — Phase 2 DDGI shaders from Dawn/shaders/Lumen/.
 # DDGI uses WGSL "Mode 11 canonical" path (self-circulating irradiance_history +

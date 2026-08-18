@@ -3655,6 +3655,346 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     return true;
 }
 
+// =====================================================================================
+// Planar reflection (Mirror)
+// =====================================================================================
+
+bool GPUDrivenDrawPipeline::InitializeReflectionResources(u32 max_clusters) {
+    if (reflection_initialized_) return true;
+    if (!device_) return false;
+    reflection_max_clusters_ = max_clusters;
+
+    // Vulkan SPIR-V carries stage suffixes (Nanite/MirrorReflection.vert.spv);
+    // Metal source is a single EngineTest/shaders/MirrorReflection.metal.
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    auto vsCode = LoadShaderBytecode(isVulkan ? "MirrorReflection.vert" : "MirrorReflection",
+                                     "mirror_reflection_vs", device_);
+    auto fsCode = LoadShaderBytecode(isVulkan ? "MirrorReflection.frag" : "MirrorReflection",
+                                     "mirror_reflection_fs", device_);
+    if (vsCode.empty() || fsCode.empty()) {
+        std::cerr << "[Mirror] Failed to load MirrorReflection shaders" << std::endl;
+        return false;
+    }
+    auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex,
+                                    isVulkan ? "main" : "mirror_reflection_vs");
+    auto fs = device_->CreateShader(fsCode.data(), fsCode.size(), rhi::ShaderStage::Pixel,
+                                    isVulkan ? "main" : "mirror_reflection_fs");
+    if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
+        std::cerr << "[Mirror] Failed to create MirrorReflection shader handles" << std::endl;
+        return false;
+    }
+
+    // 11 bindings — flat, matches MirrorReflection.vert/.frag:
+    //   0 UBO params (VS|PS), 1..8 SSBOs (VS), 9 albedo array (PS), 10 sampler (PS).
+    {
+        rhi::DescriptorSetLayoutBinding b[11];
+        for (int i = 0; i < 11; ++i) {
+            b[i].binding = i;
+            b[i].descriptorCount = 1;
+        }
+        b[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+        b[0].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
+        const rhi::ShaderStage vsStage = rhi::ShaderStage::Vertex;
+        b[1].descriptorType = rhi::DescriptorType::StorageBuffer;  b[1].stageFlags = vsStage;  // meshlets
+        b[1].readonly = true;
+        b[2].descriptorType = rhi::DescriptorType::StorageBuffer;  b[2].stageFlags = vsStage;  // meshlet vertex indices
+        b[2].readonly = true;
+        b[3].descriptorType = rhi::DescriptorType::StorageBuffer;  b[3].stageFlags = vsStage;  // meshlet triangle indices
+        b[3].readonly = true;
+        b[4].descriptorType = rhi::DescriptorType::StorageBuffer;  b[4].stageFlags = vsStage;  // positions
+        b[4].readonly = true;
+        b[5].descriptorType = rhi::DescriptorType::StorageBuffer;  b[5].stageFlags = vsStage;  // elements
+        b[5].readonly = true;
+        b[6].descriptorType = rhi::DescriptorType::StorageBuffer;  b[6].stageFlags = vsStage;  // reflection visible list
+        b[6].readonly = true;
+        b[7].descriptorType = rhi::DescriptorType::StorageBuffer;  b[7].stageFlags = vsStage;  // instances
+        b[7].readonly = true;
+        b[8].descriptorType = rhi::DescriptorType::StorageBuffer;  b[8].stageFlags = vsStage;  // material data
+        b[8].readonly = true;
+        b[9].descriptorType = rhi::DescriptorType::SampledImage;   b[9].stageFlags = rhi::ShaderStage::Pixel;  // albedo array
+        b[10].descriptorType = rhi::DescriptorType::Sampler;       b[10].stageFlags = rhi::ShaderStage::Pixel;
+
+        rhi::DescriptorSetLayoutDesc dslDesc{11, b};
+        reflection_set_layout_ = device_->CreateDescriptorSetLayout(dslDesc);
+        if (reflection_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
+
+        rhi::PipelineLayoutDesc plDesc{1, &reflection_set_layout_};
+        reflection_layout_ = device_->CreatePipelineLayout(plDesc);
+        if (reflection_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+    }
+
+    // Graphics pipeline — RGBA16F color + D32. The reflection matrix mirrors
+    // winding (det = -1), so cull NOTHING rather than guessing the flipped
+    // front-face convention per backend.
+    {
+        rhi::GraphicsPipelineDesc desc{};
+        desc.layout = reflection_layout_;
+        desc.vertexShader = vs;
+        desc.pixelShader = fs;
+        desc.renderTargetCount = 1;
+        desc.renderTargetFormats[0] = rhi::DataFormat::RGBA16_Float;
+        desc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = rhi::ComparisonFunc::Less;
+        desc.cullMode = rhi::CullMode::None;
+        desc.vertexAttributes.clear();
+        desc.vertexBindings.clear();
+        reflection_pipeline_ = device_->CreateGraphicsPipeline(desc);
+        if (reflection_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[Mirror] Failed to create reflection graphics pipeline" << std::endl;
+            return false;
+        }
+    }
+
+    // Triple-buffered buffers + descriptor sets
+    for (u32 f = 0; f < 3; ++f) {
+        rhi::BufferDesc visDesc{};
+        visDesc.size = (u64)max_clusters * 16;  // uvec4 per visible cluster
+        visDesc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
+        visDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        reflection_visible_buffer_[f] = device_->CreateBuffer(visDesc);
+        if (reflection_visible_buffer_[f] == rhi::handles::INVALID_RESOURCE) return false;
+
+        rhi::BufferDesc indDesc{};
+        indDesc.size = sizeof(u32) * 4;
+        indDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Indirect | rhi::BufferUsageFlags::Storage);
+        indDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        reflection_indirect_buffer_[f] = device_->CreateBuffer(indDesc);
+        if (reflection_indirect_buffer_[f] == rhi::handles::INVALID_RESOURCE) return false;
+
+        rhi::BufferDesc cbDesc{};
+        cbDesc.size = 112;  // ReflectionParams (mat4 + 3×vec4)
+        cbDesc.type = rhi::BufferType::Constant;
+        cbDesc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
+        cbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        reflection_cb_[f] = device_->CreateBuffer(cbDesc);
+        if (reflection_cb_[f] == rhi::handles::INVALID_RESOURCE) return false;
+
+        rhi::DescriptorSetDesc dsDesc;
+        dsDesc.layout = reflection_set_layout_;
+        reflection_ds_[f] = device_->CreateDescriptorSet(dsDesc);
+        if (reflection_ds_[f] == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
+    }
+
+    reflection_initialized_ = true;
+    return true;
+}
+
+void GPUDrivenDrawPipeline::ShutdownReflectionResources() {
+    if (!reflection_initialized_ || !device_) return;
+    for (u32 f = 0; f < 3; ++f) {
+        if (reflection_visible_buffer_[f] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(reflection_visible_buffer_[f]);
+            reflection_visible_buffer_[f] = rhi::handles::INVALID_RESOURCE;
+        }
+        if (reflection_indirect_buffer_[f] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(reflection_indirect_buffer_[f]);
+            reflection_indirect_buffer_[f] = rhi::handles::INVALID_RESOURCE;
+        }
+        if (reflection_cb_[f] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(reflection_cb_[f]);
+            reflection_cb_[f] = rhi::handles::INVALID_RESOURCE;
+        }
+        if (reflection_ds_[f] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            device_->DestroyDescriptorSet(reflection_ds_[f]);
+            reflection_ds_[f] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
+    }
+    if (reflection_pipeline_ != rhi::handles::INVALID_PIPELINE) {
+        device_->DestroyPipeline(reflection_pipeline_);
+        reflection_pipeline_ = rhi::handles::INVALID_PIPELINE;
+    }
+    if (reflection_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+        device_->DestroyPipelineLayout(reflection_layout_);
+        reflection_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    }
+    if (reflection_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device_->DestroyDescriptorSetLayout(reflection_set_layout_);
+        reflection_set_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    reflection_initialized_ = false;
+}
+
+bool GPUDrivenDrawPipeline::ExecuteReflectionPass(rhi::RHICommandBuffer* cmd_buffer,
+                                                   const RenderSceneSnapshot& scene_snapshot,
+                                                   const math::m4x4& reflected_view_projection,
+                                                   const math::v4& light_dir,
+                                                   const math::v4& light_color,
+                                                   const math::v4& ambient,
+                                                   rhi::ResourceHandle color_rt,
+                                                   rhi::ResourceHandle depth_rt,
+                                                   u32 buffer_index) {
+    if (!reflection_initialized_ || !cmd_buffer) return false;
+    if (color_rt == rhi::handles::INVALID_RESOURCE || depth_rt == rhi::handles::INVALID_RESOURCE) return false;
+    if (scene_snapshot.GetInstanceCount() == 0) return true;
+
+    // Geometry buffers must be ready (same guard family as the shadow passes).
+    if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_element_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
+
+    u32 bi = buffer_index % 3;
+
+    // --- CPU frustum culling against the reflected VP (shadow-culling pattern).
+    // Writes uvec4 entries {meshletIdx, instanceIdx, materialId, pad} so the
+    // vertex shader needs no cluster-map reverse lookup.
+    math::v4 frustumPlanes[6];
+    ExtractFrustumPlanes(reflected_view_projection, frustumPlanes);
+
+    auto sphereVsFrustum = [&](const math::v3& center, float radius) -> bool {
+        for (int i = 0; i < 6; ++i) {
+            float dist = frustumPlanes[i].x*center.x + frustumPlanes[i].y*center.y +
+                         frustumPlanes[i].z*center.z + frustumPlanes[i].w;
+            if (dist < -radius) return false;
+        }
+        return true;
+    };
+
+    u32 totalVisible = 0;
+    utl::vector<math::v4> visibleEntries;  // u32 payload packed in v4
+    visibleEntries.reserve(reflection_max_clusters_);
+    {
+        const auto& instances = scene_snapshot.GetInstanceData();
+        if (!cpu_meshlet_cache_.empty()) {
+            const auto* meshlets = cpu_meshlet_cache_.data();
+            for (u32 instIdx = 0; instIdx < instances.size(); ++instIdx) {
+                const auto& inst = instances[instIdx];
+                if (!sphereVsFrustum(inst.bounds_center, inst.bounds_radius)) continue;
+                for (u32 c = 0; c < inst.cluster_count; ++c) {
+                    u32 globalIdx = inst.cluster_start + c;
+                    if (globalIdx >= cpu_meshlet_cache_.size()) continue;
+                    const auto& meshlet = meshlets[globalIdx];
+                    math::v3 localCenter{meshlet.center[0], meshlet.center[1], meshlet.center[2]};
+                    math::v4 worldCenter4 = inst.world_matrix *
+                        math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
+                    if (!sphereVsFrustum(math::v3{worldCenter4.x, worldCenter4.y, worldCenter4.z},
+                                         meshlet.radius)) continue;
+                    // uvec4 payload: meshletIdx, instanceIdx, materialId, pad
+                    // (bit-exact via memcpy — f32 array is just transport).
+                    u32 payload[4] = { globalIdx, instIdx, inst.material_id, 0u };
+                    f32 asF32[4];
+                    static_assert(sizeof(payload) == sizeof(asF32), "u32/f32 size mismatch");
+                    memcpy(asF32, payload, sizeof(payload));
+                    visibleEntries.push_back(math::v4{asF32[0], asF32[1], asF32[2], asF32[3]});
+                }
+            }
+            std::sort(visibleEntries.begin(), visibleEntries.end(),
+                      [](const math::v4& a, const math::v4& b) { return a.x < b.x; });
+            totalVisible = static_cast<u32>(visibleEntries.size());
+        }
+    }
+
+    // Upload visible entries + indirect args + params.
+    if (totalVisible > 0) {
+        void* vis = device_->MapBuffer(reflection_visible_buffer_[bi], 0,
+                                       totalVisible * sizeof(math::v4));
+        if (vis) {
+            memcpy(vis, visibleEntries.data(), totalVisible * sizeof(math::v4));
+            device_->UnmapBuffer(reflection_visible_buffer_[bi]);
+        }
+    }
+    {
+        void* args = device_->MapBuffer(reflection_indirect_buffer_[bi], 0, sizeof(u32) * 4);
+        if (args) {
+            u32* p = static_cast<u32*>(args);
+            p[0] = 126 * 3;   // vertexCount
+            p[1] = totalVisible;
+            p[2] = 0;         // vertexStart
+            p[3] = 0;         // baseInstance
+            device_->UnmapBuffer(reflection_indirect_buffer_[bi]);
+        }
+    }
+
+    // Params UBO — matches ReflectionParams in MirrorReflection.vert/.frag.
+    struct ReflectionParamsCB {
+        math::m4x4 reflected_view_projection;
+        math::v4 light_dir;
+        math::v4 light_color;
+        math::v4 ambient;
+    };
+    {
+        void* cb = device_->MapBuffer(reflection_cb_[bi], 0, sizeof(ReflectionParamsCB));
+        if (cb) {
+            auto* p = static_cast<ReflectionParamsCB*>(cb);
+            p->reflected_view_projection = reflected_view_projection;
+            p->light_dir = light_dir;
+            p->light_color = light_color;
+            p->ambient = ambient;
+            device_->UnmapBuffer(reflection_cb_[bi]);
+        }
+    }
+
+    // Descriptor set (11 bindings)
+    rhi::DescriptorBufferInfo bufInfos[9];
+    rhi::DescriptorImageInfo imgInfos[2];
+    rhi::WriteDescriptorSet writes[11];
+    for (int i = 0; i < 11; ++i) {
+        writes[i] = {};
+        writes[i].dstSet = reflection_ds_[bi];
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+    }
+    writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+    writes[0].bufferInfo = &bufInfos[0];
+    for (int i = 1; i <= 8; ++i) {
+        writes[i].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[i].bufferInfo = &bufInfos[i];
+    }
+    writes[9].descriptorType = rhi::DescriptorType::SampledImage;
+    writes[9].imageInfo = &imgInfos[0];
+    writes[10].descriptorType = rhi::DescriptorType::Sampler;
+    writes[10].imageInfo = &imgInfos[1];
+
+    bufInfos[0] = { reflection_cb_[bi], 0, sizeof(ReflectionParamsCB) };
+    bufInfos[1] = { global_meshlet_buffer_, 0, ~0ULL };
+    bufInfos[2] = { global_meshlet_vertices_buffer_, 0, ~0ULL };
+    bufInfos[3] = { global_meshlet_triangles_buffer_, 0, ~0ULL };
+    bufInfos[4] = { global_vertex_buffer_, 0, ~0ULL };
+    bufInfos[5] = { global_element_buffer_, 0, ~0ULL };
+    bufInfos[6] = { reflection_visible_buffer_[bi], 0, ~0ULL };
+    bufInfos[7] = { global_instance_data_buffer_, 0, ~0ULL };
+    bufInfos[8] = { global_material_data_buffer_, 0, ~0ULL };
+    imgInfos[0].imageView = albedo_texture_array_;
+    imgInfos[0].imageLayout = rhi::ResourceState::ShaderResource;
+    imgInfos[1].sampler = texture_sampler_;
+
+    device_->UpdateDescriptorSets(11, writes);
+
+    // Render pass into the caller's RTs.
+    rhi::RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(1);
+    rpDesc.colorAttachments[0].texture = color_rt;
+    rpDesc.colorAttachments[0].format = rhi::DataFormat::RGBA16_Float;
+    rpDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
+    rpDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+    rpDesc.colorAttachments[0].clearValue = rhi::ClearValue{math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
+    rpDesc.depthAttachment.texture = depth_rt;
+    rpDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    rpDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+    rpDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
+    rpDesc.depthAttachment.clearValue.depth = 1.0f;
+
+    cmd_buffer->BeginRenderPass(rpDesc);
+    cmd_buffer->SetViewport({{0, 0}, {1024.0f, 1024.0f}, 0, 1});
+    cmd_buffer->SetScissor({{0, 0}, {1024, 1024}});
+
+    cmd_buffer->BindGraphicsPipeline(reflection_pipeline_);
+    rhi::DescriptorSetHandle dsHandle = reflection_ds_[bi];
+    cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, reflection_layout_, 0, 1, &dsHandle, 0, nullptr);
+
+    cmd_buffer->DrawIndirect(reflection_indirect_buffer_[bi], 0, 1);
+
+    cmd_buffer->EndRenderPass();
+    return true;
+}
+
 bool GPUDrivenDrawPipeline::ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_buffer) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) return false;

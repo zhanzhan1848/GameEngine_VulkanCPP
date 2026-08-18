@@ -192,8 +192,11 @@ void main() {
             suv.y < 0.0 || suv.y > 1.0) {
             shadowVisibility = 1.0;  // outside the shadow map — lit
         } else {
-            vec2 moments = texture(sampler2D(nearCascade ? shadowMoments0 : shadowMoments1,
-                                             defaultSampler), suv).xy;
+            // GLSL ternary can't select opaque texture samplers — branch on
+            // the sample call itself.
+            vec2 moments = nearCascade
+                ? texture(sampler2D(shadowMoments0, defaultSampler), suv).xy
+                : texture(sampler2D(shadowMoments1, defaultSampler), suv).xy;
             float minVariance = 0.00002;  // VSM_MIN_VARIANCE
             if (proj.z <= moments.x) {
                 shadowVisibility = 1.0;

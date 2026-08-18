@@ -407,6 +407,17 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     // FusionComposite blends the reflection color additively into the scene.
     pipeline_->SetPassEnabled(RenderPassID::SSR, true);
 
+    // Mirror plane: cover the whole Sponza floor (the camera starts at
+    // {0,5,0} looking horizontally — a small mirror at the origin sits
+    // directly beneath it and out of view; a 40x40 floor mirror is visible
+    // from any vantage point).
+    primal::graphics::PlanarReflectionPlane mirrorPlane;
+    mirrorPlane.position = {0.0f, 0.02f, 0.0f};
+    mirrorPlane.normal = {0.0f, 1.0f, 0.0f};
+    mirrorPlane.half_extents = {20.0f, 20.0f};
+    mirrorPlane.reflectivity = 0.85f;
+    pipeline_->SetMirrorPlane(mirrorPlane);
+
     subsystemsInitialized_ = true;
     return true;
 }
@@ -1206,6 +1217,20 @@ void TestVulkanSponzaRenderGraph::Run() {
             bool on = !pipeline_->IsTAAJitter();
             pipeline_->SetTAAJitter(on);
             std::cout << "[TAA] jitter: " << (on ? "ON" : "OFF") << std::endl;
+        }
+    }
+
+    // F11: toggle the planar-reflection mirror (StandardRenderPipeline
+    // Step 10.45 — reflection rendered from the mirrored camera, mirror quad
+    // composited over HDR before TAA).
+    {
+        using namespace primal::input;
+        input_value f11;
+        get(input_source::keyboard, input_code::key_f11, f11);
+        if (f11.current.x > 0.0f && f11.previous.x == 0.0f && pipeline_) {
+            bool enabled = !pipeline_->IsMirrorEnabled();
+            pipeline_->SetMirrorEnabled(enabled);
+            std::cout << "[Mirror] planar reflection: " << (enabled ? "ON" : "OFF") << std::endl;
         }
     }
 
