@@ -179,7 +179,11 @@ public:
         rhi::ResourceHandle shadow_depth_rt_1{ rhi::handles::INVALID_RESOURCE };
         rhi::ResourceHandle shadow_map_0{ rhi::handles::INVALID_RESOURCE };       // R32_Float sampleable
         rhi::ResourceHandle shadow_map_1{ rhi::handles::INVALID_RESOURCE };
-        
+        // VSM moments (RG32_Float = (z, z²)), written directly by the moments
+        // raster pass — replaces the D32→R32 blit + ShadowFilter chain.
+        rhi::ResourceHandle shadow_moments_0{ rhi::handles::INVALID_RESOURCE };
+        rhi::ResourceHandle shadow_moments_1{ rhi::handles::INVALID_RESOURCE };
+
         // Per-cascade resources to avoid CPU/GPU data races and descriptor set overwrite issues
         rhi::ResourceHandle visible_clusters_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
         rhi::ResourceHandle visible_counter_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };  // atomic counter per cascade
@@ -187,7 +191,7 @@ public:
         rhi::ResourceHandle light_frustum_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
         rhi::ResourceHandle shadow_depth_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };    // ShadowDepthUniforms for raster pass
         rhi::ResourceHandle blit_resolution_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE }; // BlitResolution for depth blit
-        
+
         rhi::DescriptorSetHandle shadow_cull_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
         rhi::DescriptorSetHandle shadow_depth_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };  // 8 bindings for vertex pulling
         rhi::DescriptorSetHandle shadow_blit_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };   // 3 bindings for D32→R32 blit
@@ -207,6 +211,14 @@ public:
                              u32 cascade_index,
                              u32 buffer_index);
 
+    // VSM variant: same vertex pulling + CPU-side state as ExecuteShadowRaster,
+    // but the pipeline writes (z, z²) moments into the cascade's RG32 color
+    // target (shadow_moments_c) while depth-testing against the shared D32.
+    bool ExecuteShadowMomentsRaster(rhi::RHICommandBuffer* cmd_buffer,
+                                    const math::m4x4& light_view_projection,
+                                    u32 cascade_index,
+                                    u32 buffer_index);
+
     bool ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_buffer,
                                 u32 cascade_index,
                                 u32 buffer_index);
@@ -223,6 +235,12 @@ public:
         return (cascade_index == 0)
             ? shadow_frames_[buffer_index % 3].shadow_map_0
             : shadow_frames_[buffer_index % 3].shadow_map_1;
+    }
+
+    rhi::ResourceHandle GetShadowMoments(u32 cascade_index, u32 buffer_index) const {
+        return (cascade_index == 0)
+            ? shadow_frames_[buffer_index % 3].shadow_moments_0
+            : shadow_frames_[buffer_index % 3].shadow_moments_1;
     }
 
     // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
@@ -418,6 +436,7 @@ private:
     ShadowFrameResources shadow_frames_[3];                         // Triple-buffered per-frame
     rhi::PipelineHandle shadow_cull_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: cluster culling
     rhi::PipelineHandle shadow_depth_pipeline_{ rhi::handles::INVALID_PIPELINE };   // Graphics: depth-only raster
+    rhi::PipelineHandle shadow_moments_pipeline_{ rhi::handles::INVALID_PIPELINE }; // Graphics: VSM moments raster (ShadowDepth VS + moments FS)
     rhi::PipelineHandle shadow_finalize_pipeline_{ rhi::handles::INVALID_PIPELINE }; // Compute: finalize indirect args
     rhi::PipelineHandle shadow_blit_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: D32→R32 blit
     rhi::PipelineLayoutHandle shadow_cull_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };

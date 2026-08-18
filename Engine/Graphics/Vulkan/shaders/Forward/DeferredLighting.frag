@@ -64,6 +64,9 @@ layout(set = 0, binding = 1) uniform SceneData {
     mat4 shadowMatrix1;
     vec2 jitter;
     vec2 previousJitter;
+    // x = shadow mode (0 = pre-filtered R8 visibility, 1 = VSM moments +
+    // Chebyshev), y = cascade 0 split distance, zw unused.
+    vec4 shadowParams;
 };
 
 layout(set = 0, binding = 2) uniform texture2D albedoTex;
@@ -78,6 +81,9 @@ layout(set = 0, binding = 9) uniform texture2D fallbackTex;  // unused
 layout(set = 0, binding = 10) uniform textureCube irradianceMap;
 layout(set = 0, binding = 11) uniform textureCube prefilterMap;
 layout(set = 0, binding = 12) uniform texture2D brdfLUT;
+// VSM blurred RG32 shadow moments per cascade (Chebyshev upper bound).
+layout(set = 0, binding = 13) uniform texture2D shadowMoments0;
+layout(set = 0, binding = 14) uniform texture2D shadowMoments1;
 
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
@@ -169,8 +175,39 @@ void main() {
     vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
     vec3 diffuse = kD * albedo / PI;
 
-    // Shadow visibility from ShadowMapModule's pre-filtered texture.
-    float shadowVisibility = texture(sampler2D(shadowVisTex, defaultSampler), inUv).r;
+    // Shadow visibility.
+    //   mode 0 (PCSS): ShadowMapModule's pre-filtered R8 visibility texture.
+    //   mode 1 (VSM): project worldPos into the cascade's light clip space,
+    //                 sample blurred (z, z²) moments, Chebyshev upper bound.
+    // Chebyshev math mirrors RHIShaderFunctions.glsl ChebyshevUpperBound.
+    float shadowVisibility;
+    if (shadowParams.x > 0.5) {
+        float camDist = length(worldPos - viewPos.xyz);
+        bool nearCascade = camDist < shadowParams.y;
+        mat4 shadowVP = nearCascade ? shadowMatrix0 : shadowMatrix1;
+        vec4 sc = shadowVP * vec4(worldPos, 1.0);
+        vec3 proj = sc.xyz / sc.w;
+        vec2 suv = proj.xy * 0.5 + 0.5;
+        if (proj.z <= 0.0 || proj.z >= 1.0 || suv.x < 0.0 || suv.x > 1.0 ||
+            suv.y < 0.0 || suv.y > 1.0) {
+            shadowVisibility = 1.0;  // outside the shadow map — lit
+        } else {
+            vec2 moments = texture(sampler2D(nearCascade ? shadowMoments0 : shadowMoments1,
+                                             defaultSampler), suv).xy;
+            float minVariance = 0.00002;  // VSM_MIN_VARIANCE
+            if (proj.z <= moments.x) {
+                shadowVisibility = 1.0;
+            } else {
+                float variance = moments.y - (moments.x * moments.x);
+                variance = max(variance, minVariance);
+                float d = proj.z - moments.x;
+                float pMax = variance / (variance + d * d);
+                shadowVisibility = smoothstep(0.05, 1.0, pMax);  // light-bleed reduction
+            }
+        }
+    } else {
+        shadowVisibility = texture(sampler2D(shadowVisTex, defaultSampler), inUv).r;
+    }
 
     vec3 Lo = (diffuse + specular) * lightColor.rgb * NdotL * shadowVisibility
             * DIRECT_INTENSITY;

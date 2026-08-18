@@ -101,6 +101,9 @@ struct SceneData {
     float4 viewPos;
     float4x4 shadowMatrix0;
     float4x4 shadowMatrix1;
+    // x = shadow mode (0 = pre-filtered R8 visibility, 1 = VSM moments +
+    // Chebyshev), y = cascade 0 split distance, zw unused.
+    float4 shadowParams;
 };
 
 struct ViewData {
@@ -156,6 +159,38 @@ float GetShadowVisibility(float2 uv, texture2d<float> shadowVisibility, sampler 
     return saturate(v);
 }
 
+// VSM: project worldPos into the cascade's light clip space, sample the
+// blurred (z, z²) moments, Chebyshev upper bound. Mirrors
+// RHIShaderFunctions.metal ChebyshevUpperBound. Metal NDC→UV flips Y
+// (same convention as ReadRawShadowDepth above).
+float GetVSMShadowVisibility(constant SceneData& sceneData, float3 worldPos,
+                             texture2d<float> moments0, texture2d<float> moments1) {
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+
+    float camDist = length(worldPos - sceneData.viewPos.xyz);
+    bool nearCascade = camDist < sceneData.shadowParams.y;
+    float4x4 shadowVP = nearCascade ? sceneData.shadowMatrix0 : sceneData.shadowMatrix1;
+
+    float4 clipPos = shadowVP * float4(worldPos, 1.0);
+    float3 proj = clipPos.xyz / clipPos.w;
+    float2 suv = float2(proj.x * 0.5 + 0.5, proj.y * -0.5 + 0.5);
+
+    if (proj.z <= 0.0 || proj.z >= 1.0 ||
+        suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) {
+        return 1.0;  // outside the shadow map — lit
+    }
+
+    float2 moments = (nearCascade ? moments0 : moments1).sample(s, suv).xy;
+    const float minVariance = 0.00002;  // VSM_MIN_VARIANCE
+    if (proj.z <= moments.x) return 1.0;
+
+    float variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, minVariance);
+    float d = proj.z - moments.x;
+    float pMax = variance / (variance + d * d);
+    return smoothstep(0.05, 1.0, pMax);  // light-bleed reduction
+}
+
 // ================================================================================================
 // Fragment Shader (PBR Lighting)
 // ================================================================================================
@@ -206,7 +241,9 @@ fragment float4 fragmentLighting_v3(
     texture2d<float> shadowVisibility [[texture(6)]],
     texturecube<float> irradianceMap [[texture(8)]],
     texturecube<float> prefilterMap [[texture(9)]],
-    texture2d<float> brdfLUT [[texture(10)]]
+    texture2d<float> brdfLUT [[texture(10)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]]
 ) {
     float2 uv = in.uv;
 
@@ -253,17 +290,21 @@ fragment float4 fragmentLighting_v3(
     // Direct light contribution
     float3 Lo = (diffuse + specBRDF) * sceneData.lightColor.rgb * NdotL;
 
-    // Shadow: simple depth comparison from shadow map
+    // Shadow — VSM moments + Chebyshev, or the legacy depth-compare path.
     float shadow = 1.0;
-    float4 shadowClip = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
-    float3 shadowCoord = shadowClip.xyz / shadowClip.w;
-    shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
-    shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
-    if (shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 &&
-        shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
-        shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
-        float shadowDepth = SampleShadow(shadowCoord.xy, shadowVisibility);
-        shadow = (shadowCoord.z - 0.005) > shadowDepth ? 0.3 : 1.0;
+    if (sceneData.shadowParams.x > 0.5) {
+        shadow = GetVSMShadowVisibility(sceneData, worldPos, shadowMoments0, shadowMoments1);
+    } else {
+        float4 shadowClip = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
+        float3 shadowCoord = shadowClip.xyz / shadowClip.w;
+        shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
+        shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
+        if (shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 &&
+            shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
+            shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
+            float shadowDepth = SampleShadow(shadowCoord.xy, shadowVisibility);
+            shadow = (shadowCoord.z - 0.005) > shadowDepth ? 0.3 : 1.0;
+        }
     }
     Lo *= shadow;
 
@@ -411,6 +452,8 @@ fragment float4 fragmentLighting_gpuDriven(
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
     texture2d<float> shadowVisibility [[texture(6)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]],
 
     sampler defaultSampler [[sampler(8)]]
 ) {
@@ -443,8 +486,14 @@ fragment float4 fragmentLighting_gpuDriven(
     float4 worldPos4 = viewData.invViewProjection * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
-    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    // 3. Shadow — VSM moments + Chebyshev, or pre-filtered visibility
+    //    (half-res, bilinear upsample).
+    float shadow;
+    if (sceneData.shadowParams.x > 0.5) {
+        shadow = GetVSMShadowVisibility(sceneData, worldPos, shadowMoments0, shadowMoments1);
+    } else {
+        shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    }
 
     // 4. Direct Lighting (Cook-Torrance PBR + shadow)
     float3 N = normalize(normal);

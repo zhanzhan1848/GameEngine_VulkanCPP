@@ -1155,6 +1155,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         deferredIn.current_buffer_index = cbIdx;
         deferredIn.shadow_visibility_rg = shadowOut.shadow_visibility_rg;
         deferredIn.shadow_visibility_tex = shadowOut.shadow_visibility_tex;
+        // VSM: blurred moments + mode flag (shader falls back to the R8
+        // visibility path when vsm_enabled is false).
+        deferredIn.vsm_enabled = shadowOut.vsm_enabled;
+        deferredIn.shadow_moments_rg[0] = shadowOut.shadow_moments_rg[0];
+        deferredIn.shadow_moments_rg[1] = shadowOut.shadow_moments_rg[1];
+        deferredIn.shadow_moments_tex[0] = shadowOut.shadow_moments_tex[0];
+        deferredIn.shadow_moments_tex[1] = shadowOut.shadow_moments_tex[1];
         deferredIn.gbuffer_albedo_rg = gbufferAlbedoDL;
         deferredIn.gbuffer_normal_rg = gbufferNormalDL;
         deferredIn.gbuffer_orm_rg = gbufferORMDL;
@@ -1793,6 +1800,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         deferredIn.current_buffer_index = cbIdx;
         deferredIn.shadow_visibility_rg = shadowOut.shadow_visibility_rg;
         deferredIn.shadow_visibility_tex = shadowOut.shadow_visibility_tex;
+        // VSM: blurred moments + mode flag (shader falls back to the R8
+        // visibility path when vsm_enabled is false).
+        deferredIn.vsm_enabled = shadowOut.vsm_enabled;
+        deferredIn.shadow_moments_rg[0] = shadowOut.shadow_moments_rg[0];
+        deferredIn.shadow_moments_rg[1] = shadowOut.shadow_moments_rg[1];
+        deferredIn.shadow_moments_tex[0] = shadowOut.shadow_moments_tex[0];
+        deferredIn.shadow_moments_tex[1] = shadowOut.shadow_moments_tex[1];
         deferredIn.gbuffer_albedo_rg = gbufferAlbedoDL;
         deferredIn.gbuffer_normal_rg = gbufferNormalDL;
         deferredIn.gbuffer_orm_rg = gbufferORMDL;

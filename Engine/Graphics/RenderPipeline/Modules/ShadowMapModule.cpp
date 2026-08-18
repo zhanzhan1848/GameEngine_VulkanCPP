@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/Passes/BlurPass.h"
 
 namespace primal::graphics {
 
@@ -59,6 +60,24 @@ bool ShadowMapModule::Initialize(RHIDeviceBase* device, nanite::GPUDrivenDrawPip
     if (gpu_draw_pipeline_) {
         gpu_draw_pipeline_->InitializeShadowResources(num_instances, max_clusters);
     }
+
+    // VSM blur infrastructure (harmless on PCSS — only dispatched when VSM is
+    // enabled). BlurPass loads its own platform-aware shader.
+    if (!moments_blur_) {
+        moments_blur_ = std::make_unique<BlurPass>();
+        if (!moments_blur_->Initialize(device_)) {
+            std::cerr << "[ShadowMapModule] BlurPass init failed — VSM unavailable" << std::endl;
+            moments_blur_.reset();
+        }
+    }
+    if (moments_temp_ == handles::INVALID_RESOURCE && device_) {
+        TextureDesc tempDesc{};
+        tempDesc.size = {2048, 2048, 1};
+        tempDesc.format = DataFormat::RG32_Float;
+        tempDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        tempDesc.memoryUsage = GPUMemoryUsage::Static;
+        moments_temp_ = device_->CreateTexture(tempDesc);
+    }
     return true;
 }
 
@@ -77,6 +96,15 @@ void ShadowMapModule::Shutdown() {
     if (shadow_filter_sampler_ != handles::INVALID_SAMPLER && device_) {
         device_->DestroySampler(shadow_filter_sampler_);
         shadow_filter_sampler_ = handles::INVALID_SAMPLER;
+    }
+
+    if (moments_blur_) {
+        moments_blur_->Shutdown();
+        moments_blur_.reset();
+    }
+    if (moments_temp_ != handles::INVALID_RESOURCE && device_) {
+        device_->DestroyTexture(moments_temp_);
+        moments_temp_ = handles::INVALID_RESOURCE;
     }
 }
 
@@ -237,13 +265,25 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     u32 cbIdx = inputs.current_buffer_index % 3;
     math::v3 lightDir = Normalize(inputs.light_direction);
 
+    const bool vsm = vsm_enabled_ && moments_blur_ &&
+                     moments_temp_ != handles::INVALID_RESOURCE;
+
     rendergraph::RGResourceHandle shadowMapRG[2];
+    rendergraph::RGResourceHandle momentsRG[2];
     for (u32 c = 0; c < 2; ++c) {
         auto smHandle = gpu_draw_pipeline_->GetShadowMap(c, inputs.current_buffer_index);
         if (smHandle != handles::INVALID_RESOURCE) {
             shadowMapRG[c] = graph.ImportResource(
                 "ShadowMap_C" + std::to_string(c) + "_" + std::to_string(inputs.current_buffer_index),
                 smHandle);
+        }
+        if (vsm) {
+            auto momHandle = gpu_draw_pipeline_->GetShadowMoments(c, inputs.current_buffer_index);
+            if (momHandle != handles::INVALID_RESOURCE) {
+                momentsRG[c] = graph.ImportResource(
+                    "ShadowMoments_C" + std::to_string(c) + "_" + std::to_string(inputs.current_buffer_index),
+                    momHandle);
+            }
         }
     }
 
@@ -255,6 +295,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     };
 
     struct ShadowPassData {};
+    bool rasteredThisFrame[2] = {false, false};
 
     for (u32 cascade = 0; cascade < 2; ++cascade) {
         float orthoExtent = (cascade == 0) ? 30.0f : 150.0f;
@@ -268,6 +309,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
         else outputs.shadow_matrix1 = lightVP;
 
         if (cache_hit) continue;
+        rasteredThisFrame[cascade] = true;
 
         nanite::GPUDrivenDrawPipeline::DirectionalLightData lightData{};
         lightData.direction = {lightDir.x, lightDir.y, lightDir.z, 0.0f};
@@ -287,29 +329,36 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
             }
         );
 
-        // Shadow Raster
+        // Shadow Raster — VSM writes (z, z²) moments directly (RG32 color +
+        // depth-tested D32); PCSS keeps the depth-only raster + D32→R32 blit.
         graph.AddPass<ShadowPassData>("ShadowRaster_C" + std::to_string(cascade),
             rendergraph::RGPassType::Graphics, rendergraph::RGPassCategory::Lighting,
             [](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) { builder.SideEffect(); },
-            [this, lightVP, cascade, bufIdx = inputs.current_buffer_index]
+            [this, lightVP, cascade, bufIdx = inputs.current_buffer_index, vsm]
             (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
-                gpu_draw_pipeline_->ExecuteShadowRaster(context.cmdBuffer, lightVP, cascade, bufIdx);
+                if (vsm) {
+                    gpu_draw_pipeline_->ExecuteShadowMomentsRaster(context.cmdBuffer, lightVP, cascade, bufIdx);
+                } else {
+                    gpu_draw_pipeline_->ExecuteShadowRaster(context.cmdBuffer, lightVP, cascade, bufIdx);
+                }
             }
         );
 
-        // Shadow Depth Blit
-        graph.AddPass<ShadowPassData>("ShadowBlit_C" + std::to_string(cascade),
-            rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
-            [shadowMapRG, cascade](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) {
-                builder.SideEffect();
-                if (shadowMapRG[cascade].IsValid())
-                    builder.Write(shadowMapRG[cascade], ResourceState::UnorderedAccess);
-            },
-            [this, cascade, bufIdx = inputs.current_buffer_index]
-            (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
-                gpu_draw_pipeline_->ExecuteShadowDepthBlit(context.cmdBuffer, cascade, bufIdx);
-            }
-        );
+        if (!vsm) {
+            // Shadow Depth Blit (PCSS only)
+            graph.AddPass<ShadowPassData>("ShadowBlit_C" + std::to_string(cascade),
+                rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+                [shadowMapRG, cascade](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect();
+                    if (shadowMapRG[cascade].IsValid())
+                        builder.Write(shadowMapRG[cascade], ResourceState::UnorderedAccess);
+                },
+                [this, cascade, bufIdx = inputs.current_buffer_index]
+                (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
+                    gpu_draw_pipeline_->ExecuteShadowDepthBlit(context.cmdBuffer, cascade, bufIdx);
+                }
+            );
+        }
 
         cached_shadow_vp_[cbIdx][cascade] = lightVP;
         shadow_cache_valid_[cbIdx][cascade] = true;
@@ -317,7 +366,54 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
 
     shadow_cache_globally_valid_ = true;
 
-    // Shadow Filter (half-res compute)
+    if (vsm) {
+        // VSM moments blur — H+V Gaussian ping-pong per cascade (radius 3 /
+        // sigma 1.0, matching Metal's ForwardRenderer VSM parameters). Runs
+        // after both cascades rasterized; BlurPass leaves the output in
+        // ShaderResource for DeferredLighting's Chebyshev sampling.
+        graph.AddPass<ShadowPassData>("ShadowMomentsBlur",
+            rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+            [momentsRG](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) {
+                builder.SideEffect();
+                for (u32 c = 0; c < 2; ++c)
+                    if (momentsRG[c].IsValid())
+                        builder.Write(momentsRG[c], ResourceState::UnorderedAccess);
+            },
+            [this, bufIdx = inputs.current_buffer_index, frameIdx = inputs.current_buffer_index,
+             rastered = rasteredThisFrame]
+            (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                for (u32 c = 0; c < 2; ++c) {
+                    // VP-cache hit: moments unchanged since last frame —
+                    // re-blurring would soften them progressively.
+                    if (!rastered[c]) continue;
+                    ResourceHandle mom = gpu_draw_pipeline_->GetShadowMoments(c, bufIdx);
+                    if (mom == handles::INVALID_RESOURCE) continue;
+
+                    // Raster left the moments in RenderTarget state.
+                    ResourceBarrier b{};
+                    b.resource = mom;
+                    b.beforeState = ResourceState::RenderTarget;
+                    b.afterState = ResourceState::ShaderResource;
+                    b.subresource = 0xFFFFFFFF;
+                    b.queueFamily = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&b, 1);
+
+                    moments_blur_->Execute(cmd, mom, mom, moments_temp_,
+                                           2048, 2048, 1, frameIdx, 3, 1.0f);
+                }
+            }
+        );
+
+        for (u32 c = 0; c < 2; ++c) {
+            outputs.shadow_moments_rg[c] = momentsRG[c];
+            outputs.shadow_moments_tex[c] = gpu_draw_pipeline_->GetShadowMoments(c, inputs.current_buffer_index);
+        }
+        outputs.vsm_enabled = true;
+        return outputs;
+    }
+
+    // Shadow Filter (half-res compute, PCSS path)
     outputs.shadow_visibility_tex = shadow_visibility_tex_;
     if (shadow_filter_pipeline_ != handles::INVALID_PIPELINE && shadow_visibility_tex_ != handles::INVALID_RESOURCE) {
         outputs.shadow_visibility_rg = graph.ImportResource("ShadowVisibility", shadow_visibility_tex_);

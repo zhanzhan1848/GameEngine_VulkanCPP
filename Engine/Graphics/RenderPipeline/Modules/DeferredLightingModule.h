@@ -28,6 +28,15 @@ struct DeferredLightingInputs {
     rendergraph::RGResourceHandle shadow_visibility_rg;
     rhi::ResourceHandle shadow_visibility_tex;
 
+    // VSM path (ShadowMapModule vsm_enabled): blurred RG32 moments per
+    // cascade — shader samples + Chebyshev upper bound instead of the
+    // pre-filtered R8 visibility. shadow_moments_tex[] must be valid when
+    // vsm_enabled is set, otherwise binding 6 (R8) is used.
+    bool vsm_enabled = false;
+    rendergraph::RGResourceHandle shadow_moments_rg[2];
+    rhi::ResourceHandle shadow_moments_tex[2]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+
     // GBuffer RG handles for render graph dependency tracking
     rendergraph::RGResourceHandle gbuffer_albedo_rg;
     rendergraph::RGResourceHandle gbuffer_normal_rg;

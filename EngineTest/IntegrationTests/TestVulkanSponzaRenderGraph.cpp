@@ -1185,6 +1185,18 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
 
+    // F9: toggle VSM (moments + Chebyshev) vs PCSS (R8 visibility) shadows.
+    {
+        using namespace primal::input;
+        input_value f9;
+        get(input_source::keyboard, input_code::key_f9, f9);
+        if (f9.current.x > 0.0f && f9.previous.x == 0.0f && pipeline_) {
+            bool enabled = !pipeline_->IsVSMShadows();
+            pipeline_->SetVSMShadows(enabled);
+            std::cout << "[Shadow] VSM: " << (enabled ? "ON" : "OFF (PCSS)") << std::endl;
+        }
+    }
+
     camera_.Update(dt);
     view_.SetViewMatrix(camera_.GetViewMatrix());
     view_.UpdateFrustum();

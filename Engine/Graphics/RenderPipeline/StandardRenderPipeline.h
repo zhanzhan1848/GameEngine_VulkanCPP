@@ -181,6 +181,13 @@ public:
     }
     bool IsToonEnabled() const { return toon_enabled_; }
 
+    /// VSM shadows (moments + Chebyshev) vs PCSS (R8 visibility). Forwards to
+    /// the ShadowMapModule; affects the next frame's shadow chain.
+    void SetVSMShadows(bool enabled) {
+        if (shadow_module_) shadow_module_->SetVSMEnabled(enabled);
+    }
+    bool IsVSMShadows() const { return shadow_module_ && shadow_module_->IsVSMEnabled(); }
+
     // --- Offline SDF data source for SDF visualization ---
     // When set, SDF visualization uses this pre-built global SDF texture
     // instead of the runtime GlobalSDF cascades.

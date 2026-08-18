@@ -2927,6 +2927,51 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         }
     }
 
+    // --- VSM moments graphics pipeline (ShadowDepth VS + moments FS) ---
+    // Writes (z, z²) into an RG32_Float color target while depth-testing
+    // against the shared D32 — replaces the D32→R32 blit + ShadowFilter chain
+    // when VSM is enabled. Vertex pulling bindings are identical to the
+    // depth-only pipeline, so it reuses shadow_depth_layout_.
+    {
+        // Vulkan SPIR-V carries a stage suffix in the file name
+        // (Nanite/ShadowMoments.frag.spv); Metal source is
+        // EngineTest/shaders/ShadowMoments.metal.
+        const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+        auto momentsCode = LoadShaderBytecode(isVulkan ? "ShadowMoments.frag" : "ShadowMoments",
+                                              "shadow_moments_fs", device_);
+        if (momentsCode.empty()) {
+            std::cerr << "[Shadow] Failed to load ShadowMoments fragment shader" << std::endl;
+            return false;
+        }
+        auto momentsFS = device_->CreateShader(momentsCode.data(), momentsCode.size(),
+                                               rhi::ShaderStage::Pixel,
+                                               isVulkan ? "main" : "shadow_moments_fs");
+        if (momentsFS == rhi::handles::INVALID_SHADER) {
+            std::cerr << "[Shadow] Failed to create ShadowMoments fragment shader" << std::endl;
+            return false;
+        }
+
+        rhi::GraphicsPipelineDesc desc{};
+        desc.layout = shadow_depth_layout_;
+        desc.vertexShader = depthVS;
+        desc.pixelShader = momentsFS;
+        desc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = rhi::ComparisonFunc::Less;
+        desc.renderTargetCount = 1;
+        desc.renderTargetFormats[0] = rhi::DataFormat::RG32_Float;
+        desc.cullMode = rhi::CullMode::Back;
+        desc.vertexAttributes.clear();
+        desc.vertexBindings.clear();
+
+        shadow_moments_pipeline_ = device_->CreateGraphicsPipeline(desc);
+        if (shadow_moments_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[Shadow] Failed to create shadow moments graphics pipeline" << std::endl;
+            return false;
+        }
+    }
+
     // --- Shadow blit descriptor layout (3 bindings) ---
     // N1a: On Dawn the source is texture_depth_2d (D32_Float depth target) and
     // must be bound as SampledDepthImage. Metal treats depth and color textures
@@ -2984,6 +3029,20 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 auto& rt = (cascade == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
                 rt = device_->CreateTexture(desc);
                 if (rt == rhi::handles::INVALID_RESOURCE) return false;
+            }
+
+            // VSM moments (RG32_Float, 2048x2048) — color target of the
+            // moments raster pass, blurred in place by BlurPass afterwards.
+            {
+                rhi::TextureDesc desc{};
+                desc.size = {2048, 2048, 1};
+                desc.format = rhi::DataFormat::RG32_Float;
+                desc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
+                              rhi::TextureUsage::UnorderedAccess;
+                desc.memoryUsage = rhi::GPUMemoryUsage::Static;
+                auto& mom = (cascade == 0) ? frame.shadow_moments_0 : frame.shadow_moments_1;
+                mom = device_->CreateTexture(desc);
+                if (mom == rhi::handles::INVALID_RESOURCE) return false;
             }
 
             // Shadow map sampleable (R32_Float, 2048x2048)
@@ -3106,9 +3165,11 @@ void GPUDrivenDrawPipeline::ShutdownShadowResources() {
         // Cascade 0 resources
         if (frame.shadow_depth_rt_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_depth_rt_0); frame.shadow_depth_rt_0 = rhi::handles::INVALID_RESOURCE; }
         if (frame.shadow_map_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_map_0); frame.shadow_map_0 = rhi::handles::INVALID_RESOURCE; }
+        if (frame.shadow_moments_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_moments_0); frame.shadow_moments_0 = rhi::handles::INVALID_RESOURCE; }
         // Cascade 1 resources
         if (frame.shadow_depth_rt_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_depth_rt_1); frame.shadow_depth_rt_1 = rhi::handles::INVALID_RESOURCE; }
         if (frame.shadow_map_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_map_1); frame.shadow_map_1 = rhi::handles::INVALID_RESOURCE; }
+        if (frame.shadow_moments_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_moments_1); frame.shadow_moments_1 = rhi::handles::INVALID_RESOURCE; }
 
         for (u32 cascade = 0; cascade < 2; ++cascade) {
             if (frame.visible_counter_buffer[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyBuffer(frame.visible_counter_buffer[cascade]); frame.visible_counter_buffer[cascade] = rhi::handles::INVALID_RESOURCE; }
@@ -3126,6 +3187,7 @@ void GPUDrivenDrawPipeline::ShutdownShadowResources() {
     if (shadow_cull_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_cull_pipeline_); shadow_cull_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_finalize_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_finalize_pipeline_); shadow_finalize_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_depth_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_depth_pipeline_); shadow_depth_pipeline_ = rhi::handles::INVALID_PIPELINE; }
+    if (shadow_moments_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_moments_pipeline_); shadow_moments_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_blit_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_blit_pipeline_); shadow_blit_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_cull_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(shadow_cull_layout_); shadow_cull_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT; }
     if (shadow_depth_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(shadow_depth_layout_); shadow_depth_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT; }
@@ -3412,6 +3474,102 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, shadow_depth_layout_, 0, 1, &dsHandle, 0, nullptr);
 
     // DrawIndirect using the indirect args from culling pass
+    cmd_buffer->DrawIndirect(frame.indirect_draw_buffer[cascade_index], 0, 1);
+
+    cmd_buffer->EndRenderPass();
+
+    return true;
+}
+
+bool GPUDrivenDrawPipeline::ExecuteShadowMomentsRaster(rhi::RHICommandBuffer* cmd_buffer,
+                                                        const math::m4x4& light_view_projection,
+                                                        u32 cascade_index,
+                                                        u32 buffer_index) {
+    if (!shadow_initialized_ || !cmd_buffer) return false;
+    if (cascade_index > 1) return false;
+    if (shadow_moments_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
+
+    u32 bi = buffer_index % 3;
+    auto& frame = shadow_frames_[bi];
+    auto& ds = frame.shadow_depth_descriptor_set[cascade_index];
+    auto& depthRT = (cascade_index == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
+    auto& momentsRT = (cascade_index == 0) ? frame.shadow_moments_0 : frame.shadow_moments_1;
+
+    // Same geometry-readiness guard as ExecuteShadowRaster (B4 fix).
+    if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
+
+    // Upload ShadowDepthUniforms — identical layout to the depth-only path;
+    // the moments pipeline reuses the same vertex shader and descriptor set.
+    struct ShadowDepthCB {
+        float light_view_projection[16];
+        u32 visible_cluster_count;
+        u32 padding[3];
+    } depthCB;
+
+    memcpy(depthCB.light_view_projection, &light_view_projection, sizeof(float) * 16);
+    depthCB.visible_cluster_count = shadow_max_clusters_;
+    depthCB.padding[0] = depthCB.padding[1] = depthCB.padding[2] = 0;
+
+    void* mapped = device_->MapBuffer(frame.shadow_depth_cb[cascade_index]);
+    if (mapped) {
+        memcpy(mapped, &depthCB, sizeof(ShadowDepthCB));
+        device_->UnmapBuffer(frame.shadow_depth_cb[cascade_index]);
+    }
+
+    rhi::DescriptorBufferInfo bufInfos[8];
+    rhi::WriteDescriptorSet writes[8];
+    for (int i = 0; i < 8; ++i) {
+        writes[i] = {};
+        writes[i].dstSet = ds;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[i].bufferInfo = &bufInfos[i];
+    }
+    writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+
+    bufInfos[0] = { frame.shadow_depth_cb[cascade_index], 0, sizeof(ShadowDepthCB) };
+    bufInfos[1] = { frame.visible_clusters_buffer[cascade_index], 0, ~0ULL };
+    bufInfos[2] = { cluster_map_buffer_, 0, ~0ULL };
+    bufInfos[3] = { global_instance_data_buffer_, 0, ~0ULL };
+    bufInfos[4] = { global_meshlet_buffer_, 0, ~0ULL };
+    bufInfos[5] = { global_meshlet_vertices_buffer_, 0, ~0ULL };
+    bufInfos[6] = { global_meshlet_triangles_buffer_, 0, ~0ULL };
+    bufInfos[7] = { global_vertex_buffer_, 0, ~0ULL };
+
+    device_->UpdateDescriptorSets(8, writes);
+
+    // Color = moments (cleared to (1,1) = fully lit), depth = shared D32 for
+    // correct self-occlusion during raster.
+    rhi::RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(1);
+    rpDesc.colorAttachments[0].texture = momentsRT;
+    rpDesc.colorAttachments[0].format = rhi::DataFormat::RG32_Float;
+    rpDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
+    rpDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+    rpDesc.colorAttachments[0].clearValue = rhi::ClearValue{math::v4{1.0f, 1.0f, 1.0f, 1.0f}};
+
+    rpDesc.depthAttachment.texture = depthRT;
+    rpDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    rpDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+    rpDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
+    rpDesc.depthAttachment.clearValue.depth = 1.0f;
+
+    cmd_buffer->BeginRenderPass(rpDesc);
+    cmd_buffer->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
+    cmd_buffer->SetScissor({{0, 0}, {2048, 2048}});
+
+    cmd_buffer->BindGraphicsPipeline(shadow_moments_pipeline_);
+    rhi::DescriptorSetHandle dsHandle = ds;
+    cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, shadow_depth_layout_, 0, 1, &dsHandle, 0, nullptr);
+
     cmd_buffer->DrawIndirect(frame.indirect_draw_buffer[cascade_index], 0, 1);
 
     cmd_buffer->EndRenderPass();

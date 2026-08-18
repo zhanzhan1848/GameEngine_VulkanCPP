@@ -137,7 +137,7 @@ echo "==> Hand-written GLSL (glslangValidator) ===="
 # Phase 0.6: GLSL sources may `#include "RHIShader*.glsl"` for shared structs /
 # helpers. inline_includes (awk-based) inlines those headers before passing to
 # glslangValidator. Headers themselves are not compiled standalone.
-GLSL_NAMES=( "Particle/Particle" "Forward/Line"
+GLSL_NAMES=( "Particle/Particle" "Forward/Line" "Forward/DeferredLighting"
              "Debug/MeshletDebug" "Debug/SDFDebug" "Debug/VectorFieldDebug" "Debug/VoxelDebug" )
 for pair in "${GLSL_NAMES[@]}"; do
     src_dir="$(dirname "$pair")"
@@ -243,6 +243,20 @@ if [ -f "$src" ]; then
     else echo "FAIL  PostProcess/Toon.comp"; sed 's/^/    /' "$tmpdir/err"; fi
     rm -rf "$tmpdir"
 else echo "MISS  PostProcess/Toon.comp (skipped)"; fi
+
+# VSM shadow moments fragment (entry main) — lone fragment; the vertex stage
+# reuses ShadowDepth.spv's shadow_depth_vs. Mirrors
+# EngineTest/shaders/ShadowMoments.metal (entry shadow_moments_fs).
+src="$DEST_DIR/Nanite/ShadowMoments.frag"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Nanite/ShadowMoments.frag.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/ShadowMoments.frag"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out"); printf "OK    Nanite/ShadowMoments.frag.spv         (%d bytes)\n" "$sz"
+    else echo "FAIL  Nanite/ShadowMoments.frag"; sed 's/^/    /' "$tmpdir/err"; fi
+    rm -rf "$tmpdir"
+else echo "MISS  Nanite/ShadowMoments.frag (skipped)"; fi
 
 # ============================================================================
 # Lumen WGSL (naga) — Phase 2 DDGI shaders from Dawn/shaders/Lumen/.

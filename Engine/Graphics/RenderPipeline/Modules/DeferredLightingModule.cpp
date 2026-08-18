@@ -25,7 +25,9 @@ struct SceneData {
     math::m4x4 shadowMatrix1;   // offset 288
     math::v2 jitter;            // offset 352
     math::v2 previousJitter;    // offset 360
-    math::v2 padding;           // offset 368
+    // offset 368: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
+    // y = cascade 0 split distance (world units from camera), zw unused.
+    math::v4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 // ViewData struct
@@ -83,6 +85,8 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     // fidelity). 10=irradianceMap (cube), 11=prefilterMap (cube),
     // 12=brdfLUT (2D). Descriptor type is SampledImage (combined with
     // sampler at binding 8 in the shader via samplerCube(...)/sampler2D(...)).
+    // VSM: 13/14 = blurred RG32 shadow moments per cascade (Chebyshev
+    // sampling in the shader; fall back to the 1x1 white texture on PCSS).
     DescriptorSetLayoutBinding bindings[] = {
         {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel | ShaderStage::Vertex, nullptr},
         {1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr},
@@ -97,8 +101,10 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         {10, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
         {11, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
         {12, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {13, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {14, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
     };
-    set_layout_ = device->CreateDescriptorSetLayout({13, bindings});
+    set_layout_ = device->CreateDescriptorSetLayout({15, bindings});
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
     // Triple-buffered output textures (RGBA16_Float for HDR)
@@ -265,6 +271,8 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::Lighting,
         [deferredRG, visRG = inputs.shadow_visibility_rg,
+             mom0RG = inputs.shadow_moments_rg[0],
+             mom1RG = inputs.shadow_moments_rg[1],
              albedoRG = inputs.gbuffer_albedo_rg,
              normalRG = inputs.gbuffer_normal_rg,
              ormRG = inputs.gbuffer_orm_rg,
@@ -273,6 +281,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
 
             if (visRG.IsValid())
                 builder.Read(visRG, ResourceState::ShaderResource);
+            if (mom0RG.IsValid())
+                builder.Read(mom0RG, ResourceState::ShaderResource);
+            if (mom1RG.IsValid())
+                builder.Read(mom1RG, ResourceState::ShaderResource);
 
             // Declare GBuffer texture reads so the render graph inserts
             // RenderTarget → ShaderResource barriers before this pass
@@ -319,6 +331,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                     sd->viewPos = math::v4{inputs.camera_position.x, inputs.camera_position.y, inputs.camera_position.z, 1.0f};
                     sd->shadowMatrix0 = inputs.shadow_matrix0;
                     sd->shadowMatrix1 = inputs.shadow_matrix1;
+                    sd->shadowParams = math::v4{
+                        inputs.vsm_enabled ? 1.0f : 0.0f,
+                        inputs.cascade_splits.x,
+                        0.0f, 0.0f};
                     device_->UnmapBuffer(scene_cb_[cbIdx]);
                 }
             }
@@ -365,8 +381,14 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                  validOrFallback(ibl_prefilter_, fallback_tex_)},
                 {12, DescriptorType::SampledImage,
                  validOrFallback(ibl_brdf_lut_, fallback_tex_)},
+                // VSM shadow moments (13/14). White fallback keeps Chebyshev
+                // math valid (moments (1,1) → unoccluded) when VSM is off.
+                {13, DescriptorType::SampledImage,
+                 validOrFallback(inputs.shadow_moments_tex[0], fallback_tex_)},
+                {14, DescriptorType::SampledImage,
+                 validOrFallback(inputs.shadow_moments_tex[1], fallback_tex_)},
             };
-            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 13);
+            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 15);
 
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
