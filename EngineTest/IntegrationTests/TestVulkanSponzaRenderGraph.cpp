@@ -1145,6 +1145,34 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
 
+    // F7: cycle GeometryDebug overlay modes (Off → Meshlet → SDF slice → …).
+    // Rendered by StandardRenderPipeline Step 10.7 via AddGeometryDebugPass.
+    {
+        using namespace primal::input;
+        input_value f7;
+        get(input_source::keyboard, input_code::key_f7, f7);
+        if (f7.current.x > 0.0f && f7.previous.x == 0.0f && pipeline_) {
+            static u32 debugCycle = 0;
+            debugCycle = (debugCycle + 1) % 5;
+
+            primal::graphics::GeometryDebugSettings dbg{};
+            switch (debugCycle) {
+            case 0: dbg.enable = false; break;                       // Off
+            case 1: dbg.enable = true;  dbg.visualize_meshlets = true; dbg.wireframe = true; break;
+            case 2: dbg.enable = true;  dbg.visualize_sdf = true; break;
+            case 3: dbg.enable = true;  dbg.visualize_voxels = true; break;
+            case 4: dbg.enable = true;  dbg.visualize_vector_field = true; break;
+            }
+            pipeline_->SetGeometryDebugSettings(dbg);
+            std::cout << "[GeometryDebug] cycle=" << debugCycle
+                      << " enable=" << dbg.enable
+                      << " (meshlets=" << dbg.visualize_meshlets
+                      << " sdf=" << dbg.visualize_sdf
+                      << " voxels=" << dbg.visualize_voxels
+                      << " vf=" << dbg.visualize_vector_field << ")" << std::endl;
+        }
+    }
+
     camera_.Update(dt);
     view_.SetViewMatrix(camera_.GetViewMatrix());
     view_.UpdateFrustum();

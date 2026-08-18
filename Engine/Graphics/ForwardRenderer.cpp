@@ -2567,9 +2567,11 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 #endif
 
     // 6. Geometry Debug Pass
-    if (!skipShadows) {
-        RenderGeometryDebug(*device_, cmdBuffer, view, renderTarget, depthStencil, rhi::DataFormat::BGRA8_UNorm, rhi::DataFormat::D32_Float, debugSettings_);
-    }
+    // Not shadow-dependent — the debug pipelines build their own descriptors
+    // from mesh SSBOs / 3D textures, so this runs on every platform. (The old
+    // skipShadows gate existed because shader loading was Metal-source-only;
+    // the loader is platform-aware now.)
+    RenderGeometryDebug(*device_, cmdBuffer, view, renderTarget, depthStencil, rhi::DataFormat::BGRA8_UNorm, rhi::DataFormat::D32_Float, debugSettings_);
 
     cmdBuffer->EndRenderPass();
 

@@ -1505,6 +1505,19 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
+    // Step 10.7: Geometry debug overlay (optional, both platforms)
+    // ========================================================================
+    // Meshlet / SDF-slice / vector-field / voxel visualizations blended onto
+    // the tone-mapped frame. Debug pipelines lazy-init on the first enabled
+    // frame; view comes from the Render()/RenderWithCommandBuffer() argument.
+    if (geometry_debug_settings_.enable && frame_view_ && toneOut.output.IsValid()) {
+        auto gbufferDepthGD = graph.ImportResource("GBufferDepth_GeometryDebug",
+                                                   gpuDraw.GetGBufferDepthSampleable());
+        AddGeometryDebugPass(graph, toneOut.output, gbufferDepthGD,
+                             *frame_view_, &geometry_debug_settings_);
+    }
+
+    // ========================================================================
     // Step 11: Final Blit → BackBuffer
     //         (or SDF Visualization if toggled on)
     // ========================================================================
@@ -1576,6 +1589,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     SyncHandle signalFence)
 {
     current_scene_ = &scene;
+    frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !cmd || !renderGraph_) return;
 
@@ -2095,6 +2109,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 ssaoOut.ssao_output, ssgiOut.ssgi_output, velRWCB, cbIdx);
         }
 
+        // Geometry debug overlay — mirrors BuildRenderGraph Step 10.7.
+        if (geometry_debug_settings_.enable && frame_view_ && toneOutRWCB.output.IsValid()) {
+            auto gbufferDepthGDRWCB = graph.ImportResource("GBufferDepth_GeometryDebug_RWCB",
+                                                           gpuDraw.GetGBufferDepthSampleable());
+            AddGeometryDebugPass(graph, toneOutRWCB.output, gbufferDepthGDRWCB,
+                                 *frame_view_, &geometry_debug_settings_);
+        }
+
         // --- Final Blit → backbuffer ---
         FinalBlitInputs blitIn;
         if (toneOutRWCB.output.IsValid()) {
@@ -2211,6 +2233,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
                                      ResourceHandle target, const TextureDesc& targetDesc,
                                      SyncHandle signalFence) {
     current_scene_ = &scene;
+    frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !renderGraph_) return;
 

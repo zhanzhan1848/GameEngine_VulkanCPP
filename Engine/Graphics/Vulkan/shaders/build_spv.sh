@@ -137,7 +137,8 @@ echo "==> Hand-written GLSL (glslangValidator) ===="
 # Phase 0.6: GLSL sources may `#include "RHIShader*.glsl"` for shared structs /
 # helpers. inline_includes (awk-based) inlines those headers before passing to
 # glslangValidator. Headers themselves are not compiled standalone.
-GLSL_NAMES=( "Particle/Particle" "Forward/Line" )
+GLSL_NAMES=( "Particle/Particle" "Forward/Line"
+             "Debug/MeshletDebug" "Debug/SDFDebug" "Debug/VectorFieldDebug" "Debug/VoxelDebug" )
 for pair in "${GLSL_NAMES[@]}"; do
     src_dir="$(dirname "$pair")"
     src_name="$(basename "$pair")"

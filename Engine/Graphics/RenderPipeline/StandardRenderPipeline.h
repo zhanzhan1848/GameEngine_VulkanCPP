@@ -3,6 +3,7 @@
 #include "RenderPipeline.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RHI/Core/RHIGPUOptimizer.h"
+#include "Graphics/RenderPipeline/RenderPasses/Debug/GeometryDebugPass.h"
 #include "Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
@@ -159,6 +160,16 @@ public:
     /// Cheap per-frame bool — does NOT trigger pipeline re-initialization.
     void SetSDFVisualization(bool enabled) { sdf_visualization_enabled_ = enabled; }
     bool IsSDFVisualizationEnabled() const { return sdf_visualization_enabled_; }
+
+    /// Geometry debug overlay (meshlets / SDF slices / vector fields / voxels).
+    /// Drawn on the tone-mapped frame before FinalBlit. Cheap per-frame
+    /// settings copy — the debug pipelines lazy-init on first enabled frame.
+    void SetGeometryDebugSettings(const GeometryDebugSettings& settings) {
+        geometry_debug_settings_ = settings;
+    }
+    const GeometryDebugSettings& GetGeometryDebugSettings() const {
+        return geometry_debug_settings_;
+    }
 
     // --- Offline SDF data source for SDF visualization ---
     // When set, SDF visualization uses this pre-built global SDF texture
@@ -342,6 +353,11 @@ private:
     /// When true, the pipeline outputs a fullscreen GlobalSDF ray-march view
     /// instead of the normal FinalBlit scene.  Cheap per-frame toggle.
     bool sdf_visualization_enabled_{false};
+
+    // Geometry debug overlay settings + the frame's view (needed by
+    // AddGeometryDebugPass; set at the top of Render/RenderWithCommandBuffer).
+    GeometryDebugSettings geometry_debug_settings_{};
+    RenderView* frame_view_{nullptr};
 
     // Offline SDF data source for SDF visualization.
     bool has_offline_sdf_{false};
