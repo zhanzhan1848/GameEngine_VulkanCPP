@@ -48,10 +48,13 @@ jobs:
 
       - name: 初始化必需的 submodule
         shell: powershell
+        # 注意：run 块内容必须纯 ASCII。runner 写出的 .ps1 无 BOM，
+        # 中文系统的 PowerShell 5.1 按 GBK 解码非 ASCII 字符会乱码并引发解析错误。
         run: |
-          # 只拉取 Windows 构建实际依赖的 submodule（root CMakeLists 缺 meshoptimizer 会 FATAL_ERROR）。
-          # 刻意跳过 dawn / PhysX / WebGPU / astc-encoder：仅 WASM 与 WebGPU 构建需要，
-          # dawn 仓库数 GB，全部 --recursive 会显著拖慢每次检出。
+          # Only fetch submodules needed by the native Windows build
+          # (root CMakeLists FATAL_ERRORs without meshoptimizer).
+          # Skip dawn/PhysX/WebGPU/astc-encoder: only used by WASM/WebGPU
+          # builds; dawn alone is multi-GB.
           $submodules = @(
             'third_party/meshoptimizer',
             'third_party/stb',
@@ -66,7 +69,7 @@ jobs:
           if ($env:VULKAN_SDK) {
             Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
           } else {
-            Write-Host "VULKAN_SDK 未设置（find_package(Vulkan) 仍可能通过默认安装路径找到 SDK）"
+            Write-Host "VULKAN_SDK not set (find_package(Vulkan) may still find the SDK via default install paths)"
           }
           cmake --version
           git --version
@@ -74,10 +77,11 @@ jobs:
       - name: 配置 CMake (Release + Vulkan RHI)
         shell: powershell
         run: |
-          # 不指定 -G：CMake 自动选择机器上最新的 Visual Studio 生成器（多配置）。
-          # ENABLE_VULKAN=ON 是本分支的核心目标——开启 Engine/Graphics/RHI/Platforms/Vulkan
-          # 并启用 find_package(Vulkan REQUIRED) 与全部 TestVulkan* 测试目标。
-          # 如需固定生成器，改用: -G "Visual Studio 17 2022" -A x64
+          # No -G: CMake picks the newest installed Visual Studio generator
+          # (multi-config). ENABLE_VULKAN=ON enables
+          # Engine/Graphics/RHI/Platforms/Vulkan, find_package(Vulkan REQUIRED)
+          # and all TestVulkan* targets.
+          # To pin a generator use: -G "Visual Studio 17 2022" -A x64
           cmake -S . -B build -DENABLE_VULKAN=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: 编译 (Release)
@@ -87,9 +91,10 @@ jobs:
       - name: 运行测试 (ctest)
         shell: powershell
         run: |
-          # 全量跑已注册的测试（单元 + 集成 + TestVulkan*）。
-          # --timeout 兜底防止窗口化图形测试在无交互会话中挂死。
-          # 若个别测试在 runner 上不稳定，可加 -E "TestVulkanStress|..." 排除。
+          # Run all registered tests (unit + integration + TestVulkan*).
+          # --timeout guards against windowed graphics tests hanging in a
+          # non-interactive session.
+          # To exclude flaky tests add: -E "TestVulkanStress|..."
           ctest --test-dir build -C Release --output-on-failure --timeout 600 --no-tests=error
 
       - name: 上传测试日志（失败时）
