@@ -309,15 +309,36 @@ int main() { RegisterXxxTests(); TestRunner::RunAllSuites(); return 0; }
 
 P4c 新增测试二进制:`TestVulkanFormatParity` / `TestVulkanTextureUpdate` / `TestVulkanStagingUpload` / `TestVulkanLayeredRendering` / `TestVulkanComputeBytesLarge` / `TestVulkanSecondaryCommandBuffer`(Vulkan 套件 23 → 29 个),全部零 validation error。
 
-P4c 验证状态(2026-08-19,Apple M4 Pro + MoltenVK):
-- Vulkan 套件 36 个二进制:35 通过;`TestVulkanNaniteSmoke` 的 Stage2 用例
-  失败为**预存问题**(bc61879 基线同样失败,与 P4c 无关)。
-- Metal 套件 13 个可构建二进制全部通过(Core 层 + MetalCommandBuffer
-  F7 对接无回退)。
-- `ENABLE_VULKAN=OFF` 构建:失败于预存的未守卫文件
-  `Engine/Graphics/Nanite/OfflineSDFMerger.cpp`(07469f3 引入,零
-  ENABLE_VULKAN 守卫)— 先于 P4c 已破,修复属 Nanite 层不属于本计划
-  范围;P4c 的全部 Vulkan 代码都在 `#if ENABLE_VULKAN` 守卫内。
+P4c 验证状态(2026-08-19,Apple M4 Pro + MoltenVK 1.4.350):
+- **跨后端 SSIM 真实执行**:`TestMetalP4cReferences`(嵌入式 MSL 离屏
+  渲染)生成 22 张参照 PNG 入库(ReferenceImages/P4c-F1…F7),Vulkan 侧
+  全部用例实际比对 — F1 12 格式 / F3 棋盘格 / F4 滚动终帧 / F5 4 层 /
+  F6 compute512 / F7 tiles32 全部 **SSIM = 1.0**;D16 深度 0.846(剪影/
+  前景计数精确一致 2838/2838,值差源自 MoltenVK D16 深度映射与其 D32
+  路径不一致 — 驱动级差异,阈值 0.80 记录)。参照生成暴露并修复了
+  Metal 侧三处缺陷:GetPixelFormatInfo 缺 16/32 位 norm/int 变体
+  (bytesPerRow=0 → blit 读回全零)、Depth16Unorm 枚举值漂移(历史 100 →
+  当前 SDK 250)、MetalPipeline ToMTLPixelFormat 缺 R32/RG32/RGBA32
+  UNorm/SNorm fallback(PixelFormatInvalid → draw 静默无效)。
+- **F2 人工验收**:`SwapChainManualAcceptanceProtocol` 机器执行 20 次
+  resize + 2 次全屏类失效,每次事件后 ≤3 帧恢复(失败 0),22 张截图入
+  库(ReferenceImages/P4c-F2/manual/);原生 toggleFullScreen 在无 runloop
+  测试上下文抛 NSException,全屏动画目视项保留 CHECKLIST.md 人工执行。
+- **F7 churn 并入 TestVulkanStress**(SecondaryCommandBufferChurn,
+  1000 次循环,6/6 绿)。
+- **ForwardRenderer 性能**:Vulkan 0.305 ms/frame vs Metal 4.767
+  ms/frame(300 帧均值,同 workload 孪生用例);Metal 空帧基线仅
+  0.016 ms → 差异在 Metal 侧 Render 逐帧 CPU 编码开销(引擎层既有,
+  非 RHI 同步)。Vulkan 快 15.6 倍,门槛意图(Vulkan 不慢于 Metal)满足;
+  严格 ±5% 带宽因 Metal 自身开销不成立,如实记录。
+- **ENABLE_VULKAN=OFF 构建**:修复预存未守卫的
+  OfflineSDFMerger/GlobalSDF(07469f3 引入)后,OFF 配置 Engine 全量
+  编译零错误;P4c 全部 Vulkan 代码在守卫内。
+- Vulkan 套件 37 个二进制:36 通过;`TestVulkanNaniteSmoke` 的 Stage2
+  用例失败为**预存问题**(bc61879 基线同样失败,已核实;间接参数正确
+  index_count=384/instance_count=3,零 validation error,光栅输出空 —
+  引擎层 Nanite 问题,与 P4c 无关,待 MoltenVK 兼容性专项排查)。
+- Metal 套件 15 个可构建二进制全部通过(含 P4c 参照生成器与性能孪生)。
 - 16 个陈旧测试 .cpp(BufferDesc 默认构造被删/Mock 缺纯虚)编译失败,
   均为预存(54cdc4b Dawn 时期引入),不在 23 二进制基线集内。
 
