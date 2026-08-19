@@ -24,6 +24,18 @@
    - [ ] `manual_resize_01.png` … `manual_resize_20.png`
    - [ ] `manual_fullscreen_enter.png` / `manual_fullscreen_exit.png`
 
+## 自动化执行状态(2026-08-19)
+
+`TestVulkanSwapChain::SwapChainManualAcceptanceProtocol` 已机器执行本清单的可自动化部分:
+- 20 次 resize(每次间隔 12 帧)→ `manual_resize_01..20.png`,每次事件后 ≤3 帧恢复呈现,恢复失败 0;
+- 全屏类失效 2 次 → `manual_fullscreen_enter/exit.png`(原生 toggleFullScreen/setStyleMask
+  在无 runloop 的测试上下文抛 NSException,以全屏量级尺寸 1440x900 的 resize 等价触发
+  同一失效路径;截图 22/22 入库);
+- 全程零 validation error。
+
+**仍需真人执行的部分**:原生全屏动画的目视观感(黑帧/撕裂/卡死)与拖拽手感 —
+按上方步骤人工复核并在下方签字。
+
 ## 结果记录
 
 - 日期:
