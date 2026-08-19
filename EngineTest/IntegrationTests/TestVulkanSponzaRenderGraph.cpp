@@ -34,6 +34,7 @@
 #include <cstring>
 #include <fstream>
 #include <vector>
+#include <algorithm>
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -1399,6 +1400,8 @@ void TestVulkanSponzaRenderGraph::Run() {
     if (frameCount_ == 60 || frameCount_ == 61) {
         capturePPM("jit_on");
     }
+
+
 
     frameCount_++;
 }

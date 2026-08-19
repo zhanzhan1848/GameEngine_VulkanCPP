@@ -151,8 +151,13 @@ void main() {
         return;
     }
 
-    // Reconstruct world position (Vulkan NDC: Z in [0,1], Y NOT flipped).
-    vec2 ndcXY = vec2(inUv.x * 2.0 - 1.0, inUv.y * 2.0 - 1.0);
+    // Reconstruct world position. Y is FLIPPED (1 - uv.y*2) to match naga's
+    // auto-inserted Y-negate in the WGSL GBuffer raster — the same
+    // convention ShadowFilter.comp uses (T4.6.5 part 40.2) and the Metal
+    // original uses. The previous unflipped port mirrored world-space Y:
+    // every shadow lookup sampled the mirrored location, inverting the
+    // apparent light direction.
+    vec2 ndcXY = vec2(inUv.x * 2.0 - 1.0, 1.0 - inUv.y * 2.0);
     vec4 ndc = vec4(ndcXY, depth, 1.0);
     vec4 worldPosH = invViewProjection * ndc;
     vec3 worldPos = worldPosH.xyz / max(worldPosH.w, 1e-6);
