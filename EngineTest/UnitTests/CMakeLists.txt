@@ -1350,6 +1350,37 @@ if(APPLE)
                 $<TARGET_FILE_DIR:TestMetalDepthPrePass>/Assets
     )
 
+    # P4c: Metal-side reference frame generator for the F1-F7 cross-backend
+    # SSIM acceptance (mirrors the Vulkan P4c tests' deterministic scenes).
+    add_executable(TestMetalP4cReferences
+        Graphics/Metal/TestMetalP4cReferences.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestMetalP4cReferences PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestMetalP4cReferences PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalP4cReferences COMMAND TestMetalP4cReferences)
+    set_target_properties(TestMetalP4cReferences PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestMetalP4cReferences POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestMetalP4cReferences>/Assets
+    )
+
     # T3.2: Metal reference generator for ShadowPass parity (4 cascade layers).
     add_executable(TestMetalShadowPass
         Graphics/Metal/TestMetalShadowPass.cpp

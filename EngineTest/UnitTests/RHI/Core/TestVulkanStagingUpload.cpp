@@ -241,6 +241,22 @@ TestResult TestRollingGradient300Frames() {
     std::cout << "[TestVulkanStagingUpload] untouched-region mismatches: " << mismatched << std::endl;
     TEST_ASSERT(mismatched == 0, "untouched guard rows byte-identical across frames 1→300");
 
+    // P4c-F4 跨后端:与 Metal staged 路径参照帧(TestMetalP4cReferences 以
+    // updateData 上传同一 CPU 期望帧生成)SSIM ≥ 0.95;参照缺失时 skip。
+    {
+        std::vector<u8> ref;
+        u32 rw = 0, rh = 0;
+        if (et::LoadPNG("Assets/ReferenceImages/P4c-F4/rolling_final_metal.png", ref, rw, rh)
+            && rw == kW && rh == kH) {
+            float ssim = et::ComputeSSIM(finalRB.data(), ref.data(), kW, kH);
+            std::cout << "[TestVulkanStagingUpload] SSIM vs Metal staged ref: " << ssim << std::endl;
+            TEST_ASSERT(ssim >= 0.95f, "rolling final vs Metal staged path SSIM >= 0.95");
+        } else {
+            std::cerr << "[TestVulkanStagingUpload] Metal reference missing — skipping SSIM"
+                      << std::endl;
+        }
+    }
+
     fx.base->DestroyCommandBuffer(cmd);
     fx.base->DestroyTexture(tex);
     return TestResult::Passed;

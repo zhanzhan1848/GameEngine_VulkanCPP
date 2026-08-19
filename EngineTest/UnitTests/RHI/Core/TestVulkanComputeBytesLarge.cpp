@@ -217,6 +217,18 @@ TestResult TestComputeBytesLarge() {
                   << ") want (" << wantR << "," << wantG << "," << wantB << ")" << std::endl;
         TEST_ASSERT(bad == 0, "512B constants drive compute exactly (incl. offset 496)");
         et::SavePNG("P4cF6_compute512_vulkan.png", r.pixels.data(), kW, kH);
+        // P4c-F6 跨后端:与 Metal setBytes 参照 SSIM ≥ 0.95;缺失时 skip
+        std::vector<u8> ref;
+        u32 rw = 0, rh = 0;
+        if (et::LoadPNG("Assets/ReferenceImages/P4c-F6/compute512_metal.png", ref, rw, rh)
+            && rw == kW && rh == kH) {
+            float ssim = et::ComputeSSIM(r.pixels.data(), ref.data(), kW, kH);
+            std::cout << "[TestVulkanComputeBytesLarge] SSIM vs Metal setBytes ref: " << ssim << std::endl;
+            TEST_ASSERT(ssim >= 0.95f, "compute512 vs Metal setBytes SSIM >= 0.95");
+        } else {
+            std::cerr << "[TestVulkanComputeBytesLarge] Metal reference missing — skipping SSIM"
+                      << std::endl;
+        }
     }
 
     // === Case B: 另一档超限 blob(探针 A/B;C 通道内容未定义不检查) ===

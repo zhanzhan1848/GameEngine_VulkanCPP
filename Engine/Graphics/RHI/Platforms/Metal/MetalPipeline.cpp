@@ -35,6 +35,11 @@ namespace {
             case DataFormat::R32_UInt: return MTL::PixelFormatR32Uint;
             case DataFormat::R32_SInt: return MTL::PixelFormatR32Sint;
             case DataFormat::R32_Float: return MTL::PixelFormatR32Float;
+            // P4c-F1: UNorm/SNorm 32 位按 Metal 先例 fallback Float
+            // (MetalDevice.cpp 的映射同款;缺 case 会得到 PixelFormatInvalid
+            // → 管线与 framebuffer 格式失配 → draw 静默无效)
+            case DataFormat::R32_UNorm: return MTL::PixelFormatR32Float;
+            case DataFormat::R32_SNorm: return MTL::PixelFormatR32Float;
             
             case DataFormat::RG16_UNorm: return MTL::PixelFormatRG16Unorm;
             case DataFormat::RG16_SNorm: return MTL::PixelFormatRG16Snorm;
@@ -53,6 +58,9 @@ namespace {
             case DataFormat::RG32_UInt: return MTL::PixelFormatRG32Uint;
             case DataFormat::RG32_SInt: return MTL::PixelFormatRG32Sint;
             case DataFormat::RG32_Float: return MTL::PixelFormatRG32Float;
+            // P4c-F1: 同上 fallback
+            case DataFormat::RG32_UNorm: return MTL::PixelFormatRG32Float;
+            case DataFormat::RG32_SNorm: return MTL::PixelFormatRG32Float;
             
             case DataFormat::RGBA16_UNorm: return MTL::PixelFormatRGBA16Unorm;
             case DataFormat::RGBA16_SNorm: return MTL::PixelFormatRGBA16Snorm;
@@ -63,6 +71,9 @@ namespace {
             case DataFormat::RGBA32_UInt: return MTL::PixelFormatRGBA32Uint;
             case DataFormat::RGBA32_SInt: return MTL::PixelFormatRGBA32Sint;
             case DataFormat::RGBA32_Float: return MTL::PixelFormatRGBA32Float;
+            // P4c-F1: 同上 fallback
+            case DataFormat::RGBA32_UNorm: return MTL::PixelFormatRGBA32Float;
+            case DataFormat::RGBA32_SNorm: return MTL::PixelFormatRGBA32Float;
             
             case DataFormat::D32_Float: return MTL::PixelFormatDepth32Float;
             case DataFormat::D16_UNorm: return MTL::PixelFormatDepth16Unorm;

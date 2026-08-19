@@ -1379,9 +1379,39 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
             case MTL::PixelFormatR32Float:
                 return {4, 1, 1};
 
+            // P4c-F1: F1 格式补全带出的 16/32 位变体(此前缺 case 会落到
+            // {0,0,0} → bytesPerRow=0 → blit 读回全零)
+            // (R16Unorm=20 已由上方数字 case 覆盖)
+            case MTL::PixelFormatR16Snorm:
+            case MTL::PixelFormatR16Uint:
+            case MTL::PixelFormatR16Sint:
+                return {2, 1, 1};
+            // (RG16Unorm=60 已由上方数字 case 覆盖)
+            case MTL::PixelFormatRG16Snorm:
+            case MTL::PixelFormatRG16Uint:
+            case MTL::PixelFormatRG16Sint:
+                return {4, 1, 1};
+            case MTL::PixelFormatRGBA16Unorm:
+            case MTL::PixelFormatRGBA16Snorm:
+            case MTL::PixelFormatRGBA16Uint:
+            case MTL::PixelFormatRGBA16Sint:
+                return {8, 1, 1};
+            case MTL::PixelFormatR32Uint:
+            case MTL::PixelFormatR32Sint:
+                return {4, 1, 1};
+            case MTL::PixelFormatRG32Float:
+            case MTL::PixelFormatRG32Uint:
+            case MTL::PixelFormatRG32Sint:
+                return {8, 1, 1};
+            case MTL::PixelFormatRGBA32Uint:
+            case MTL::PixelFormatRGBA32Sint:
+                return {16, 1, 1};
+
             // Depth formats (bytes-per-pixel matches the raw depth data layout
             // for blit copies). Stencil8 shares byte size with R8.
-            case 100: // MTL::PixelFormatDepth16Unorm
+            // P4c-F1: Depth16Unorm 的历史数值是 100,当前 SDK 枚举值为 250 —
+            // 用枚举名避免再漂移
+            case MTL::PixelFormatDepth16Unorm:
                 return {2, 1, 1};
             case 252: // MTL::PixelFormatDepth32Float
                 return {4, 1, 1};
