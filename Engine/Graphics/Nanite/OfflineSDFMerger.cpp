@@ -1,7 +1,13 @@
 #include "OfflineSDFMerger.h"
 #include "CommonHeaders.h"
+// P4c: Vulkan 上传路径仅在 ENABLE_VULKAN 下编译(修 OFF 构建未守卫问题)
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
 #include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#define OFFLINE_SDF_VULKAN_PATH 1
+#else
+#define OFFLINE_SDF_VULKAN_PATH 0
+#endif
 #include <fstream>
 #include <cstring>
 #include <cmath>
@@ -433,6 +439,7 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device) {
 
     // Copy staging → texture (mirrors RHIGpuMesh::CreateAndUploadTexture3D).
     auto cmdHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+#if OFFLINE_SDF_VULKAN_PATH
     // GetCommandBuffer is platform-specific; cast to VulkanDevice.
     rhi::VulkanCommandBuffer* cmd;
     {
@@ -441,11 +448,13 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device) {
             cmd = vkDev->GetCommandBuffer(cmdHandle);
         } else {
             std::cerr << "[OfflineSDFMerger] Unsupported device for texture upload" << std::endl;
+            device_->DestroyCommandBuffer(cmdHandle);
             device_->DestroyBuffer(staging);
             return false;
         }
     }
     cmd->Begin();
+#endif
 
     rhi::BufferTextureCopyRegion region{};
     region.bufferOffset = 0;
@@ -457,10 +466,12 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device) {
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {res, res, res};
 
+#if OFFLINE_SDF_VULKAN_PATH
     cmd->CopyBufferToTexture(staging, global_sdf_texture_, &region, 1);
     cmd->End();
     cmd->Submit();
     cmd->WaitForCompletion();
+#endif
     device_->DestroyCommandBuffer(cmdHandle);
     device_->DestroyBuffer(staging);
 
