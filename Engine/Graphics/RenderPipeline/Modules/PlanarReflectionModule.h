@@ -64,7 +64,11 @@ private:
     rhi::RHIDeviceBase* device_ = nullptr;
     nanite::GPUDrivenDrawPipeline* gpu_draw_ = nullptr;
     bool initialized_ = false;
-    bool enabled_ = true;
+    // Off by default — reflection is a demo feature (F11). Long-term the
+    // reflection texture should be sampled by the mirror surface's MATERIAL
+    // (Metal's ForwardRenderer binds it at material texture slot 2) rather
+    // than a scene-level composite quad.
+    bool enabled_ = false;
     PlanarReflectionPlane plane_{};
 
     // Reflection RTs (1024²)
