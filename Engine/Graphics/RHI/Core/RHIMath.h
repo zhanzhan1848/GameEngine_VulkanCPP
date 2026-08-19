@@ -221,8 +221,6 @@ T SmoothLerp(const T& a, const T& b, float t) {
 inline m4x4 MatrixIdentity() {
 #if defined(__APPLE__)
     return matrix_identity_float4x4;
-#elif defined(_WIN32)
-    return DirectX::XMMatrixIdentity();
 #else
     return m4x4{
         v4{1.0f, 0.0f, 0.0f, 0.0f},
@@ -662,15 +660,13 @@ inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ)
     result.columns[2] = simd::float4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f};
     result.columns[3] = simd::float4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f};
     return result;
-#elif defined(_WIN32)
-    return DirectX::XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ);
 #else
     float f = 1.0f / std::tanf(fovY * 0.5f);
     return m4x4{
         v4{f / aspect, 0.0f, 0.0f, 0.0f},
         v4{0.0f, f, 0.0f, 0.0f},
         v4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f},
-        v4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 0.0f}
+        v4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f}
     };
 #endif
 }
@@ -686,8 +682,6 @@ inline m4x4 MatrixTranslation(const v3& translation) {
                           simd::float4{0.0f, 1.0f, 0.0f, 0.0f},
                           simd::float4{0.0f, 0.0f, 1.0f, 0.0f},
                           simd::float4{translation.x, translation.y, translation.z, 1.0f});
-#elif defined(_WIN32)
-    return DirectX::XMMatrixTranslation(translation.x, translation.y, translation.z);
 #else
     return m4x4{
         v4{1.0f, 0.0f, 0.0f, 0.0f},

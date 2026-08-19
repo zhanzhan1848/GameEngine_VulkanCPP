@@ -159,12 +159,20 @@ option(ENABLE_VULKAN "Enable Vulkan RHI backend (Win32 + Linux + macOS via Molte
 option(DISABLE_PARTICLE_SYSTEM "Disable particle system compilation" OFF)
 
 if(WIN32)
-    file(GLOB_RECURSE GRAPHICS_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
-    )
+    if(ENABLE_VULKAN)
+        # ENABLE_VULKAN=ON 时只编下方自包含的新 Vulkan RHI 后端（RHI/Platforms/Vulkan）。
+        # legacy Direct3D12 / Graphics/Vulkan 基于旧 XMFLOAT 数学层（XMLoad/XMStore 直取
+        # math 类型地址），与新的带运算符数学类型不兼容；macOS 的 ENABLE_VULKAN 构建
+        # 同样不包含这两个目录。
+        set(GRAPHICS_SOURCES "")
+    else()
+        file(GLOB_RECURSE GRAPHICS_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
+        )
+    endif()
 elseif(APPLE)
     file(GLOB_RECURSE GRAPHICS_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.h"
@@ -173,10 +181,14 @@ elseif(APPLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.h"
     )
 elseif(LINUX)
-    file(GLOB_RECURSE GRAPHICS_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
-    )
+    if(ENABLE_VULKAN)
+        set(GRAPHICS_SOURCES "")
+    else()
+        file(GLOB_RECURSE GRAPHICS_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
+        )
+    endif()
 endif()
 
 # Vulkan RHI 后端 (Engine/Graphics/RHI/Platforms/Vulkan/*) — 与平台独立的 legacy Graphics/Vulkan/* 解耦。

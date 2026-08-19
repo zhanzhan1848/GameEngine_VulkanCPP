@@ -12,7 +12,9 @@ namespace primal::particles::gpu {
 // Embedded vertex/fragment shader for GPU particle rendering
 static const char* gpu_particle_render_shader = R"(
 #include <metal_stdlib>
+#if defined(__APPLE__)
 #include <simd/simd.h>
+#endif
 using namespace metal;
 
 struct GPUParticleData {

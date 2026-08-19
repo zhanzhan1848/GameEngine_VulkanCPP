@@ -2,6 +2,7 @@
 
 #include "CommonHeaders.h"
 #include "MathTypes.h"
+#include <cmath>
 
 #if defined(_MSC_VER)
     #include <intrin.h>
@@ -270,6 +271,72 @@ namespace primal::math
         );
 
         return proj;
+    }
+#else
+	// 可移植实现（Windows / Emscripten）：与上方 Apple 分支逐列对应（列主序，
+	// columns[i] 为第 i 列），语义与数值完全一致。
+	[[nodiscard]] inline math::m4x4 createLookToLH(
+        const math::v3& eyePosition,
+        const math::v3& eyeDirection,
+        const math::v3& upDirection)
+    {
+		auto cross = [](const math::v3& a, const math::v3& b) {
+			return math::v3{ a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+		};
+
+		// 标准化方向向量（左手系 Z 轴指向摄像机前方）
+		math::v3 zAxis = eyeDirection;
+		const f32 zlen = std::sqrt(zAxis.x * zAxis.x + zAxis.y * zAxis.y + zAxis.z * zAxis.z);
+		const f32 zinv = 1.0f / zlen;
+		zAxis = math::v3{ zAxis.x * zinv, zAxis.y * zinv, zAxis.z * zinv };
+
+		// eyeDirection 与 upDirection 平行时选择替代上方向，避免叉积退化
+		math::v3 up = upDirection;
+		math::v3 c = cross(up, zAxis);
+		if (c.x * c.x + c.y * c.y + c.z * c.z < 1e-6f) {
+			up = (std::abs(zAxis.y) > 0.9f) ? math::v3{ 1.0f, 0.0f, 0.0f } : math::v3{ 0.0f, 1.0f, 0.0f };
+			c = cross(up, zAxis);
+		}
+		const f32 cinv = 1.0f / std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+		math::v3 xAxis{ c.x * cinv, c.y * cinv, c.z * cinv };
+		math::v3 yAxis = cross(zAxis, xAxis);
+
+		// translation = R^T * (-eye)
+		const math::v3 translation{
+			-(xAxis.x * eyePosition.x + yAxis.x * eyePosition.y + zAxis.x * eyePosition.z),
+			-(xAxis.y * eyePosition.x + yAxis.y * eyePosition.y + zAxis.y * eyePosition.z),
+			-(xAxis.z * eyePosition.x + yAxis.z * eyePosition.y + zAxis.z * eyePosition.z)
+		};
+
+		return math::m4x4{
+			math::v4{ xAxis.x, yAxis.x, zAxis.x, 0.0f },
+			math::v4{ xAxis.y, yAxis.y, zAxis.y, 0.0f },
+			math::v4{ xAxis.z, yAxis.z, zAxis.z, 0.0f },
+			math::v4{ translation.x, translation.y, translation.z, 1.0f }
+		};
+    }
+
+    [[nodiscard]] inline math::m4x4 createPerspectiveFovLH(float fovY, float aspectRatio, float nearZ, float farZ)
+    {
+        const float tanHalfFovY = std::tan(fovY * 0.5f);
+        const float f = 1.0f / tanHalfFovY;
+
+        return math::m4x4{
+            math::v4{ f / aspectRatio, 0.0f, 0.0f, 0.0f },
+            math::v4{ 0.0f, f, 0.0f, 0.0f },
+            math::v4{ 0.0f, 0.0f, farZ / (farZ - nearZ), 1.0f },
+            math::v4{ 0.0f, 0.0f, -(nearZ * farZ) / (farZ - nearZ), 0.0f }
+        };
+    }
+
+    [[nodiscard]] inline math::m4x4 createOrthographicLH(float width, float height, float nearZ, float farZ)
+    {
+        return math::m4x4{
+            math::v4{ 2.0f / width, 0.0f, 0.0f, 0.0f },
+            math::v4{ 0.0f, 2.0f / height, 0.0f, 0.0f },
+            math::v4{ 0.0f, 0.0f, 1.0f / (farZ - nearZ), 0.0f },
+            math::v4{ 0.0f, 0.0f, -nearZ / (farZ - nearZ), 1.0f }
+        };
     }
 #endif
 }

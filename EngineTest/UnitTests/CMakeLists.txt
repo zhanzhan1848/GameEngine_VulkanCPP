@@ -37,13 +37,16 @@ target_include_directories(TestRHIDeviceFactory PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC
 )
-target_link_libraries(TestRHIDeviceFactory PRIVATE
-    Engine
-    "-framework Foundation"
-    "-framework Metal"
-    "-framework MetalKit"
-    "-framework QuartzCore"
-)
+target_link_libraries(TestRHIDeviceFactory PRIVATE Engine)
+if(APPLE)
+    # macOS 框架；Windows 上这些链接项会变成无法识别的链接器选项
+    target_link_libraries(TestRHIDeviceFactory PRIVATE
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+endif()
 if(ENABLE_VULKAN)
     # Vulkan 后端测试需要 ENABLE_VULKAN 编译定义,以匹配 Engine 内对 VulkanDevice 的启用逻辑。
     target_compile_definitions(TestRHIDeviceFactory PRIVATE ENABLE_VULKAN=1)

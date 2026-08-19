@@ -1,12 +1,6 @@
 #pragma once
 
-#if defined(_WIN64)
-#include "CommonHeaders.h"
-#elif defined(__APPLE__)
 #include "../Common/PrimitiveTypes.h"
-#elif defined(__EMSCRIPTEN__)
-#include "../Common/PrimitiveTypes.h"
-#endif
 
 #if defined(__APPLE__)
 #include <simd/simd.h>
@@ -17,24 +11,6 @@ constexpr f32 pi{ 3.1415926535897932384626433832795f };
 constexpr f32 half_pi{ pi * 0.5f };
 constexpr f32 two_pi{ 2.f * pi };
 constexpr f32 epsilon{ 1e-5f };
-
-#if defined(_WIN64)
-	using v2 = DirectX::XMFLOAT2;
-	using v2a = DirectX::XMFLOAT2A;
-	using v3 = DirectX::XMFLOAT3;
-	using v3a = DirectX::XMFLOAT3A;
-	using v4 = DirectX::XMFLOAT4;
-	using v4a = DirectX::XMFLOAT4A;
-	using u32v2 = DirectX::XMUINT2;
-	using u32v3 = DirectX::XMUINT3;
-	using u32v4 = DirectX::XMUINT4;
-	using s32v2 = DirectX::XMINT2;
-	using s32v3 = DirectX::XMINT3;
-	using s32v4 = DirectX::XMINT4;
-	using m3x3 = DirectX::XMFLOAT3X3;
-	using m4x4 = DirectX::XMFLOAT4X4;
-	using m4x4a = DirectX::XMFLOAT4X4A;
-#endif
 
 #if defined(__APPLE__)
 	using v2 = simd::float2;
@@ -54,7 +30,12 @@ constexpr f32 epsilon{ 1e-5f };
 	using m4x4a = simd::float4x4;
 #endif
 
-#if defined(__EMSCRIPTEN__)
+// Windows / Emscripten（及其他未特化平台）共用可移植结构体实现。
+// 注意：Windows 不能把 v3/v4/m4x4 别名到 XMFLOAT* ——它们没有运算符，
+// 且 XMFLOAT4X4 是行主序，与 simd::float4x4 的列主序 GPU 上传布局不一致。
+// 本实现的内存布局与 Apple simd 对齐：v3 为 16 字节（第 4 分量作填充）、
+// m4x4 列主序（columns[i] 是第 i 列）。
+#if !defined(__APPLE__)
 	struct v2 {
 		float x, y;
 		constexpr v2() : x(0), y(0) {}
