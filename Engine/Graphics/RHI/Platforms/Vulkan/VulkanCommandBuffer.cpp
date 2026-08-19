@@ -21,6 +21,7 @@
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
+#include <cstring>
 #include <iostream>
 #include <algorithm>
 
@@ -1107,11 +1108,29 @@ void VulkanCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size)
     // Metal-ism:setBytes(index, bytes, size) 在 Vulkan 没有直接对应。
     // 简化映射:当成 push constant 写到 offset = index*16 字节,stage = Compute。
     // (caller 端的 push constant block 通常以 16B 对齐分槽)
-    // 局限:size + offset 不能超 VkPhysicalDeviceLimits::maxPushConstantsSize(通常 128B);
-    // 超出走 staging UBO 是 Phase 6 工作。
     if (!data || size == 0) return;
     if (boundPipelineLayout_ == VK_NULL_HANDLE) return;
+    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VkDeviceSize offset = static_cast<VkDeviceSize>(index) * 16;
+    if (offset + size > vk.GetMaxPushConstantsSize()) {
+        // P4c-F6: >maxPushConstantsSize(通常 128B)回退到隐式 UBO。
+        // 内容 = 完整 bytes blob,绑定为 set 3 / binding 0(UNIFORM_BUFFER_
+        // DYNAMIC + 动态偏移)。shader 布局约定见 RHIShaderCommon.glsl。
+        VulkanDevice::ImplicitUBOAlloc a = vk.AllocImplicitComputeUBO(size);
+        if (!a.valid) {
+            std::cerr << "[VulkanCommandBuffer] SetComputeBytes: implicit UBO exhausted "
+                         "(size=" << size << ") — constants dropped" << std::endl;
+            return;
+        }
+        std::memcpy(a.dst, data, size);
+        VkDescriptorSet ds = vk.GetImplicitComputeDescSet();
+        u32 dynOff = static_cast<u32>(a.offset);
+        vkCmdBindDescriptorSets(cmdBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                boundPipelineLayout_,
+                                VulkanDevice::kImplicitComputeSetIndex,
+                                1, &ds, 1, &dynOff);
+        return;
+    }
     vkCmdPushConstants(cmdBuffer_, boundPipelineLayout_,
                        VK_SHADER_STAGE_COMPUTE_BIT,
                        static_cast<u32>(offset), size, data);

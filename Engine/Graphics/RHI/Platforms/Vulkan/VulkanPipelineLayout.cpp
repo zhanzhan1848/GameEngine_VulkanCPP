@@ -56,6 +56,23 @@ bool VulkanPipelineLayout::Initialize() {
         vkPush.push_back(vk);
     }
 
+    // P4c-F6: set 3 保留给隐式 compute UBO(SetComputeBytes >128B 回退)。
+    // 用户 set 数 < 4 时自动追加(空档用设备共享的空 DSL 填充 — NULL set
+    // layout 需 graphicsPipelineLibrary feature,不可用)。布局约定见
+    // RHIShaderCommon.glsl。
+    if (vkSetLayouts.size() < VulkanDevice::kImplicitComputeSetIndex + 1) {
+        VkDescriptorSetLayout implicitLayout = static_cast<VulkanDevice&>(device_)
+                                                    .GetImplicitComputeSetLayout();
+        if (implicitLayout != VK_NULL_HANDLE) {
+            const u32 firstPad = static_cast<u32>(vkSetLayouts.size());
+            vkSetLayouts.resize(VulkanDevice::kImplicitComputeSetIndex + 1, VK_NULL_HANDLE);
+            for (u32 i = firstPad; i < VulkanDevice::kImplicitComputeSetIndex; ++i) {
+                vkSetLayouts[i] = static_cast<VulkanDevice&>(device_).GetEmptyPaddingSetLayout();
+            }
+            vkSetLayouts[VulkanDevice::kImplicitComputeSetIndex] = implicitLayout;
+        }
+    }
+
     VkPipelineLayoutCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     ci.setLayoutCount = static_cast<u32>(vkSetLayouts.size());

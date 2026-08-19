@@ -92,6 +92,27 @@ public:
         recordingCount_.store(v > 0 ? v - 1 : 0);
     }
 
+    // ========================================================================
+    // P4c-F6: SetComputeBytes >128B 隐式 UBO 回退
+    // ========================================================================
+    /// 隐式 UBO 绑定的保留 set 索引(shader 布局约定见 RHIShaderCommon.glsl)
+    static constexpr u32 kImplicitComputeSetIndex = 3;
+
+    u32 GetMaxPushConstantsSize() const { return maxPushConstantsSize_; }
+
+    struct ImplicitUBOAlloc {
+        void* dst      = nullptr;  // CPU 写入目标(持久映射)
+        u64  offset    = 0;        // buffer 内偏移(descriptor 动态偏移用)
+        bool valid     = false;
+    };
+    /// 分配隐式 compute UBO 区段(256B 对齐)。per-frame region ring:
+    /// region 随 currentFrameIndex_ 切换并归零 bump(帧 N-3 fence 已等过,
+    /// 复用安全 — 与 staging pool 同款论证)。容量耗尽返回 invalid。
+    ImplicitUBOAlloc AllocImplicitComputeUBO(u32 size);
+    VkDescriptorSet GetImplicitComputeDescSet() const { return implicitComputeDescSet_; }
+    VkDescriptorSetLayout GetImplicitComputeSetLayout() const { return implicitComputeSetLayout_; }
+    VkDescriptorSetLayout GetEmptyPaddingSetLayout() const { return emptyPaddingSetLayout_; }
+
     /// Debug utils 设对象名函数(给资源挂 label)
     PFN_vkSetDebugUtilsObjectNameEXT GetDebugUtilsSetObjectName() const {
         return vkSetDebugUtilsObjectName_;
@@ -256,6 +277,21 @@ private:
 
     // P4c-F4: recording 状态的 VulkanCommandBuffer 计数(见 IsFrameRecording)
     std::atomic<u32> recordingCount_{0};
+
+    // === P4c-F6: SetComputeBytes >128B 隐式 UBO ===
+    u32 maxPushConstantsSize_{128};
+    VkBuffer              implicitComputeUBO_{VK_NULL_HANDLE};
+    VmaAllocation         implicitComputeUBOAlloc_{nullptr};
+    void*                 implicitComputeUBOMapped_{nullptr};
+    u64                   implicitComputeUBOCapacity_{0};
+    u64                   implicitUBOOffset_[4] = {0, 0, 0, 0};  // per-frame-region bump
+    u32                   implicitUBOLastRegion_{UINT32_MAX};
+    VkDescriptorSetLayout implicitComputeSetLayout_{VK_NULL_HANDLE};
+    VkDescriptorPool      implicitComputePool_{VK_NULL_HANDLE};
+    VkDescriptorSet       implicitComputeDescSet_{VK_NULL_HANDLE};
+    /// set 空档填充用(0 binding 的合法 DSL — NULL set layout 需
+    /// graphicsPipelineLibrary feature,不可用)
+    VkDescriptorSetLayout emptyPaddingSetLayout_{VK_NULL_HANDLE};
 
     // Tracked for shutdown ordering / diagnostics.
     bool validationEnabled_{false};

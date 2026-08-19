@@ -115,6 +115,82 @@ bool VulkanDevice::initializeImpl() {
     // P4c-F4:传入 queue + family,FlushBlocking(立即模式)可直接提交
     stagingAllocator_.Initialize(device_, vmaAllocator_, graphicsQueue_, graphicsQueueFamily_);
 
+    // === P4c-F6: SetComputeBytes >128B 隐式 UBO 回退基建 ===
+    // 1MB HOST_VISIBLE UBO + UNIFORM_BUFFER_DYNAMIC descriptor(set 3 约定,
+    // 见 RHIShaderCommon.glsl)。失败不致命 — 回退路径禁用,走 push 上限。
+    {
+        constexpr u64 kImplicitUBOBytes = 1ULL << 20;
+        VkBufferCreateInfo uboCI{};
+        uboCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        uboCI.size = kImplicitUBOBytes;
+        uboCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        uboCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo uboACI{};
+        uboACI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                     | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        uboACI.usage = VMA_MEMORY_USAGE_AUTO;
+        VmaAllocationInfo uboInfo{};
+        if (vmaCreateBuffer(vmaAllocator_, &uboCI, &uboACI, &implicitComputeUBO_,
+                            &implicitComputeUBOAlloc_, &uboInfo) == VK_SUCCESS) {
+            implicitComputeUBOMapped_ = uboInfo.pMappedData;
+            implicitComputeUBOCapacity_ = kImplicitUBOBytes;
+
+            VkDescriptorSetLayoutBinding b{};
+            b.binding = 0;
+            b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            b.descriptorCount = 1;
+            b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            VkDescriptorSetLayoutCreateInfo dslCI{};
+            dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            dslCI.bindingCount = 1;
+            dslCI.pBindings = &b;
+            vkCreateDescriptorSetLayout(device_, &dslCI, nullptr, &implicitComputeSetLayout_);
+
+            // set 空档填充用空 DSL(0 binding)
+            VkDescriptorSetLayoutCreateInfo emptyCI{};
+            emptyCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            emptyCI.bindingCount = 0;
+            vkCreateDescriptorSetLayout(device_, &emptyCI, nullptr, &emptyPaddingSetLayout_);
+
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            poolSize.descriptorCount = 1;
+            VkDescriptorPoolCreateInfo poolCI{};
+            poolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolCI.maxSets = 1;
+            poolCI.poolSizeCount = 1;
+            poolCI.pPoolSizes = &poolSize;
+            if (vkCreateDescriptorPool(device_, &poolCI, nullptr, &implicitComputePool_) == VK_SUCCESS) {
+                VkDescriptorSetAllocateInfo dsAI{};
+                dsAI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                dsAI.descriptorPool = implicitComputePool_;
+                dsAI.descriptorSetCount = 1;
+                dsAI.pSetLayouts = &implicitComputeSetLayout_;
+                vkAllocateDescriptorSets(device_, &dsAI, &implicitComputeDescSet_);
+
+                VkDescriptorBufferInfo dbi{};
+                dbi.buffer = implicitComputeUBO_;
+                dbi.offset = 0;
+                // range = region 容量:动态偏移(region 基址 + bump)+ range
+                // 恰好不超过 buffer 总量(VUID-01979)
+                dbi.range = kImplicitUBOBytes / 4;
+                VkWriteDescriptorSet w{};
+                w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w.dstSet = implicitComputeDescSet_;
+                w.dstBinding = 0;
+                w.dstArrayElement = 0;
+                w.descriptorCount = 1;
+                w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+                w.pBufferInfo = &dbi;
+                vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+            }
+        } else {
+            std::cerr << "[VulkanDevice] implicit compute UBO creation failed — "
+                         "SetComputeBytes >maxPushConstants will be dropped" << std::endl;
+            implicitComputeUBO_ = VK_NULL_HANDLE;
+        }
+    }
+
     if (validationEnabled_) {
         std::cout << "[VulkanDevice] Initialized with validation layers enabled." << std::endl;
     } else {
@@ -126,6 +202,29 @@ bool VulkanDevice::initializeImpl() {
 void VulkanDevice::shutdownImpl() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
+    }
+
+    // P4c-F6: 隐式 compute UBO 基建(pool → set → layout → buffer)
+    if (device_ != VK_NULL_HANDLE) {
+        if (implicitComputePool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, implicitComputePool_, nullptr);
+            implicitComputePool_ = VK_NULL_HANDLE;
+            implicitComputeDescSet_ = VK_NULL_HANDLE;
+        }
+        if (implicitComputeSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_, implicitComputeSetLayout_, nullptr);
+            implicitComputeSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (emptyPaddingSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_, emptyPaddingSetLayout_, nullptr);
+            emptyPaddingSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (implicitComputeUBO_ != VK_NULL_HANDLE && implicitComputeUBOAlloc_) {
+            vmaDestroyBuffer(vmaAllocator_, implicitComputeUBO_, implicitComputeUBOAlloc_);
+            implicitComputeUBO_ = VK_NULL_HANDLE;
+            implicitComputeUBOAlloc_ = nullptr;
+            implicitComputeUBOMapped_ = nullptr;
+        }
     }
 
     // 1) GC 双趟:第一趟把所有延迟销毁的 lambda 执行;allocators 释放时可能再入队
@@ -180,6 +279,31 @@ void VulkanDevice::beginFrameImpl() {
     stagingAllocator_.BeginFrame();
 }
 
+VulkanDevice::ImplicitUBOAlloc VulkanDevice::AllocImplicitComputeUBO(u32 size) {
+    ImplicitUBOAlloc ret{};
+    if (implicitComputeUBOMapped_ == nullptr || size == 0) return ret;
+
+    // per-frame-region ring:1MB / 4 region = 每 region 256KB 独立地址段
+    // (region 间基址隔离 — 跨帧的 SetComputeBytes 数据不会互相覆写;
+    // region 复用安全性同 staging pool:BeginFrame 已等过 frame N-3 fence)
+    const u64 regionCapacity = implicitComputeUBOCapacity_ / 4;
+    const u32 region = currentFrameIndex_.load() % 4;
+    if (region != implicitUBOLastRegion_) {
+        implicitUBOLastRegion_ = region;
+        implicitUBOOffset_[region] = 0;
+    }
+    constexpr u64 kAlign = 256;  // UBO 动态偏移的标准对齐(minUboOffsetAlign ≤ 256)
+    u64 bump = (implicitUBOOffset_[region] + kAlign - 1) & ~(kAlign - 1);
+    if (bump + size > regionCapacity) return ret;  // region 容量耗尽
+
+    implicitUBOOffset_[region] = bump + size;
+    const u64 off = u64(region) * regionCapacity + bump;
+    ret.dst = static_cast<u8*>(implicitComputeUBOMapped_) + off;
+    ret.offset = off;
+    ret.valid = true;
+    return ret;
+}
+
 void VulkanDevice::endFrameImpl() {
     // Phase 2+ 在这里 flush staging allocator / per-frame command pool 回收。
 }
@@ -212,6 +336,8 @@ void VulkanDevice::queryDeviceInfo(DeviceInfo& info) {
         info.maxSamplerStates = props.limits.maxPerStageDescriptorSamplers;
         info.maxConstantBufferSize = props.limits.maxUniformBufferRange;
         timestampPeriodNs_ = props.limits.timestampPeriod;
+        // P4c-F6: SetComputeBytes 回退阈值
+        maxPushConstantsSize_ = props.limits.maxPushConstantsSize;
     }
 
     if (physicalDevice_ != VK_NULL_HANDLE) {
