@@ -38,6 +38,9 @@ namespace primal::graphics::rhi {
  */
 class MetalDevice : public RHIDevice<MetalDevice> {
     friend class RHIDevice<MetalDevice>;
+    // P4c-F7: BeginSecondaryCommandBuffer 需要把 parallel 子 encoder 包装的
+    // MetalCommandBuffer 注册进 allocator(句柄化)
+    friend class MetalCommandBuffer;
 
 public:
     /**

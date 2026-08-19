@@ -45,6 +45,19 @@ public:
     void BeginRenderPass(const RenderPassDesc& desc) override;
     void BeginRenderPass(RenderPassHandle renderPass) override;
     void EndRenderPass() override;
+
+    // ========================================================================
+    // P4c-F7: Secondary CommandBuffer / 并行录制
+    // ========================================================================
+    /// 在本(primary)cmdbuf 上创建并 Begin 一个 SECONDARY 级 cmdbuf。
+    /// desc.inheritRenderPass 提供 VkCommandBufferInheritanceInfo(与
+    /// primary 后续 BeginRenderPass 的 attachment 兼容);secondary 内
+    /// BeginRenderPass/Submit/WaitForCompletion 均被拒绝(见 Core 契约)。
+    CommandBufferHandle BeginSecondaryCommandBuffer(const SecondaryCommandBufferDesc& desc) override;
+    /// 在当前 render pass 实例内 vkCmdExecuteCommands(必须已 BeginRenderPass)
+    void ExecuteSecondaryCommandBuffers(u32 count, CommandBufferHandle* secondaries) override;
+
+    bool IsSecondary() const { return isSecondary_; }
     void SetViewport(const ViewportDesc& viewport) override;
     void SetScissor(const Rect& scissor) override;
     void BindGraphicsPipeline(PipelineHandle pipeline) override;
@@ -118,6 +131,14 @@ private:
     // P4c-F4: beginImpl/endImpl/resetImpl 维护 — 驱动 VulkanDevice 的
     // IsFrameRecording()(帧内上传走 staging 队列的分流依据)。
     bool            isRecording_{false};
+
+    // P4c-F7: secondary 状态(SECONDARY 级分配 + 继承 renderpass)
+    bool            isSecondary_{false};
+    VkRenderPass    inheritRenderPass_{VK_NULL_HANDLE};
+    u32             inheritSubpass_{0};
+    /// primary 上:本 cmdbuf 创建过 secondary → 下一个 BeginRenderPass 以
+    /// SECONDARY_COMMAND_BUFFERS 模式开始(Vulkan 每 subpass 单一模式契约)
+    bool            pendingSecondaryMode_{false};
 
     // scope 状态(Phase 4 用,Phase 3 仅记录)
     enum class Scope : u8 { None, RenderPass, Compute, Blit };

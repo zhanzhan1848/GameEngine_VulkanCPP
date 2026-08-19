@@ -602,6 +602,40 @@ void MetalCommandBuffer::BeginParallelRenderPass(RenderPassHandle renderPass) {
     }
 }
 
+// ============================================================================
+// P4c-F7: Secondary CommandBuffer / 并行录制(Core 统一虚函数对接)
+// ============================================================================
+CommandBufferHandle MetalCommandBuffer::BeginSecondaryCommandBuffer(
+    const SecondaryCommandBufferDesc& desc) {
+    (void)desc;  // Metal parallel 子 encoder 自动继承 parallel encoder 的目标
+    if (isSecondary_ || !parallelRenderEncoder_) {
+        std::cerr << "[MetalCommandBuffer] BeginSecondaryCommandBuffer requires an "
+                     "active parallel render pass on a primary" << std::endl;
+        return handles::INVALID_COMMAND_BUFFER;
+    }
+    MTL::RenderCommandEncoder* subEncoder = parallelRenderEncoder_->renderCommandEncoder();
+    if (!subEncoder) return handles::INVALID_COMMAND_BUFFER;
+
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    u32 id = metalDevice.commandBufferAllocator_.Allocate(metalDevice, type_, subEncoder);
+    return static_cast<CommandBufferHandle>(id);
+}
+
+void MetalCommandBuffer::ExecuteSecondaryCommandBuffers(u32 count,
+                                                         CommandBufferHandle* secondaries) {
+    // Metal:子 encoder 的命令自动并行汇入 parallel encoder — 无需显式
+    // execute 调用;这里只把各 secondary 的 encoder 结束(等同 EndRenderPass
+    // 的 secondary 分支),保证 End 前编码闭合。
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    for (u32 i = 0; i < count; ++i) {
+        MetalCommandBuffer* sec =
+            metalDevice.commandBufferAllocator_.Get(static_cast<u32>(secondaries[i]));
+        if (sec && sec->isSecondary_) {
+            sec->EndRenderPass();  // secondary 分支:endEncoding
+        }
+    }
+}
+
 MetalCommandBuffer* MetalCommandBuffer::CreateSecondaryCommandBuffer() {
     if (!parallelRenderEncoder_) return nullptr;
     

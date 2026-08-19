@@ -79,7 +79,7 @@ bool VulkanCommandBuffer::Initialize() {
     // of VkCommandPool/VkCommandBuffer/VkFence, leaking the 1st set
     // (3 objects per Render() call).
     if (cmdPool_ != VK_NULL_HANDLE && cmdBuffer_ != VK_NULL_HANDLE &&
-        submitFence_ != VK_NULL_HANDLE) {
+        (submitFence_ != VK_NULL_HANDLE || isSecondary_)) {
         return true;
     }
 
@@ -102,13 +102,21 @@ bool VulkanCommandBuffer::Initialize() {
     VkCommandBufferAllocateInfo ai{};
     ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     ai.commandPool = cmdPool_;
-    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    // P4c-F7: secondary 级分配(RENDER_PASS_CONTINUE 继承)
+    ai.level = isSecondary_ ? VK_COMMAND_BUFFER_LEVEL_SECONDARY
+                            : VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
     if (vkAllocateCommandBuffers(dev, &ai, &cmdBuffer_) != VK_SUCCESS) {
         std::cerr << "[VulkanCommandBuffer] vkAllocateCommandBuffers failed" << std::endl;
         vkDestroyCommandPool(dev, cmdPool_, nullptr);
         cmdPool_ = VK_NULL_HANDLE;
         return false;
+    }
+
+    // P4c-F7: secondary 不拥有 fence(同步由执行它的 primary 承担)
+    if (isSecondary_) {
+        state_ = CommandBufferState::Reset;
+        return true;
     }
 
     VkFenceCreateInfo fci{};
@@ -168,6 +176,7 @@ bool VulkanCommandBuffer::resetImpl() {
     // T4.6.5 part 30.6 (X7 fix): clear external-fence flag — fresh submit.
     externalFenceSignaled_ = false;
     scope_ = Scope::None;
+    pendingSecondaryMode_ = false;
     return true;
 }
 
@@ -176,18 +185,37 @@ bool VulkanCommandBuffer::beginImpl() {
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     bi.pInheritanceInfo = nullptr;
+
+    // P4c-F7: secondary 带 InheritanceInfo(RENDER_PASS_CONTINUE 让驱动
+    // 在 pass 内重放时省去状态恢复;renderpass 须与 primary 的兼容)
+    VkCommandBufferInheritanceInfo inheritanceInfo{};
+    if (isSecondary_ && inheritRenderPass_ != VK_NULL_HANDLE) {
+        inheritanceInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+        inheritanceInfo.renderPass = inheritRenderPass_;
+        inheritanceInfo.subpass = inheritSubpass_;
+        inheritanceInfo.framebuffer = VK_NULL_HANDLE;
+        inheritanceInfo.occlusionQueryEnable = VK_FALSE;
+        bi.flags |= VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+        bi.pInheritanceInfo = &inheritanceInfo;
+    }
     VkResult res = vkBeginCommandBuffer(cmdBuffer_, &bi);
     if (res != VK_SUCCESS) {
         std::cerr << "[VulkanCommandBuffer] vkBeginCommandBuffer failed: " << res << std::endl;
         return false;
     }
-    scope_ = Scope::None;
-    // P4c-F4 接线:帧首把 staging 队列的 pending blits 编码进本 cmdbuf
-    // (用户 pass 之前 — 对齐 Metal "单 blit encoder 前置" 语义)。
-    // 帧内 Queue 的上传由此落 GPU,消除逐次 fence 等待。
-    static_cast<VulkanDevice&>(device_).GetStagingAllocator().EncodePendingBlits(cmdBuffer_);
+    // P4c-F7: secondary 的录制期整体处于"继承的 render pass 内"(其执行
+    // 被强制发生在 primary 的 pass 实例中)— 置 RenderPass scope 让
+    // Draw/SetViewport 等命令的 scope 守卫放行(secondary 不能显式
+    // BeginRenderPass,否则永远无法录绘制命令)。
+    scope_ = isSecondary_ ? Scope::RenderPass : Scope::None;
     isRecording_ = true;
     static_cast<VulkanDevice&>(device_).IncrementRecording();
+    if (!isSecondary_) {
+        // P4c-F4 接线:帧首把 staging 队列的 pending blits 编码进本 cmdbuf
+        // (用户 pass 之前 — 对齐 Metal "单 blit encoder 前置" 语义)。
+        // 帧内 Queue 的上传由此落 GPU,消除逐次 fence 等待。
+        static_cast<VulkanDevice&>(device_).GetStagingAllocator().EncodePendingBlits(cmdBuffer_);
+    }
     return true;
 }
 
@@ -208,6 +236,14 @@ bool VulkanCommandBuffer::submitImpl(u32 /*waitFlags*/) {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VkQueue queue = vk.GetGraphicsQueue();
     if (!queue || !cmdBuffer_) return false;
+
+    // P4c-F7 契约:secondary 不拥有 fence,不能独立提交 — 由 primary 的
+    // ExecuteSecondaryCommandBuffers + 提交统一执行
+    if (isSecondary_) {
+        std::cerr << "[VulkanCommandBuffer] Submit rejected on secondary command "
+                     "buffer (execute via primary)" << std::endl;
+        return false;
+    }
 
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -618,6 +654,62 @@ void VulkanCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 bar
     UpdateStats(CommandType::Barrier);
 }
 
+// ============================================================================
+// P4c-F7: Secondary CommandBuffer / 并行录制
+// ============================================================================
+CommandBufferHandle VulkanCommandBuffer::BeginSecondaryCommandBuffer(
+    const SecondaryCommandBufferDesc& desc) {
+    if (isSecondary_) {
+        std::cerr << "[VulkanCommandBuffer] secondary cannot nest another secondary" << std::endl;
+        return handles::INVALID_COMMAND_BUFFER;
+    }
+    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
+
+    VkRenderPass inheritRP = VK_NULL_HANDLE;
+    if (desc.inheritRenderPass != handles::INVALID_RENDER_PASS) {
+        VulkanRenderPass* rp = vk.GetRenderPass(desc.inheritRenderPass);
+        if (rp) inheritRP = rp->GetNativeRenderPass();
+    }
+
+    // 经设备 allocator 建 VulkanCommandBuffer(secondary 标志先置,
+    // Initialize 据此走 SECONDARY 分配 + 跳过 fence)
+    u32 id = vk.commandBufferAllocator_->Allocate(vk, CommandQueueType::Graphics);
+    VulkanCommandBuffer* sec = vk.commandBufferAllocator_->Get(id);
+    if (!sec) return handles::INVALID_COMMAND_BUFFER;
+    sec->isSecondary_ = true;
+    sec->inheritRenderPass_ = inheritRP;
+    sec->inheritSubpass_ = desc.subpass;
+    pendingSecondaryMode_ = true;
+    if (!sec->Initialize() || !sec->Begin()) {
+        std::cerr << "[VulkanCommandBuffer] secondary Initialize/Begin failed" << std::endl;
+        vk.commandBufferAllocator_->Free(id);
+        return handles::INVALID_COMMAND_BUFFER;
+    }
+    return static_cast<CommandBufferHandle>(id);
+}
+
+void VulkanCommandBuffer::ExecuteSecondaryCommandBuffers(u32 count,
+                                                          CommandBufferHandle* secondaries) {
+    if (isSecondary_ || count == 0 || !secondaries) return;
+    if (scope_ != Scope::RenderPass) {
+        std::cerr << "[VulkanCommandBuffer] ExecuteSecondaryCommandBuffers must be "
+                     "called inside a render pass instance" << std::endl;
+        return;
+    }
+    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
+    std::vector<VkCommandBuffer> buffers;
+    buffers.reserve(count);
+    for (u32 i = 0; i < count; ++i) {
+        VulkanCommandBuffer* sec = vk.GetCommandBuffer(static_cast<CommandBufferHandle>(secondaries[i]));
+        if (sec && sec->isSecondary_ && sec->cmdBuffer_ != VK_NULL_HANDLE) {
+            buffers.push_back(sec->cmdBuffer_);
+        }
+    }
+    if (!buffers.empty()) {
+        vkCmdExecuteCommands(cmdBuffer_, static_cast<u32>(buffers.size()), buffers.data());
+    }
+}
+
 void VulkanCommandBuffer::TransitionImageLayout(VulkanTexture* tex, VkImageLayout newLayout,
                                                 u32 baseMip, u32 mipCount) {
     if (!tex || !tex->GetNativeImage()) return;
@@ -744,6 +836,14 @@ void VulkanCommandBuffer::TransitionImageLayout(VulkanTexture* tex, VkImageLayou
 void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VkDevice dev = vk.GetNativeDevice();
+
+    // P4c-F7 契约:secondary 内 BeginRenderPass 被拒绝(继承式二级缓冲,
+    // 非嵌套 pass;见 RHICommand.h 注释)
+    if (isSecondary_) {
+        std::cerr << "[VulkanCommandBuffer] BeginRenderPass rejected on secondary "
+                     "command buffer (inherited render pass)" << std::endl;
+        return;
+    }
 
     // 通过 desc 临时构建 VkRenderPass + VkFramebuffer
     // (Phase 5+ 改为 cache by hash 或 dynamic rendering)
@@ -921,7 +1021,14 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     bi.clearValueCount = static_cast<u32>(clears.size());
     bi.pClearValues = clears.data();
 
-    vkCmdBeginRenderPass(cmdBuffer_, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    // P4c-F7: 本 cmdbuf 创建过 secondary(BeginSecondaryCommandBuffer)时,
+    // pass 以 SECONDARY_COMMAND_BUFFERS 模式开始 — Vulkan 每个 subpass 只
+    // 能选一种模式(inline 或 secondary),契约:创建过 secondary 的 pass
+    // 内只能 ExecuteSecondaryCommandBuffers,直接 draw 会被 validation 拒绝。
+    const VkSubpassContents contents = pendingSecondaryMode_
+        ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS
+        : VK_SUBPASS_CONTENTS_INLINE;
+    vkCmdBeginRenderPass(cmdBuffer_, &bi, contents);
     scope_ = Scope::RenderPass;
 
     // 暂存 rp/fb 以便 EndRenderPass 销毁
@@ -931,16 +1038,22 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     // 自动设置 viewport/scissor(pipeline 用 dynamic state)
     // Apply the same fallback as renderArea: if caller left desc.viewport at {0,0},
     // use the framebuffer dimensions we derived.
-    ViewportDesc effectiveVP = desc.viewport;
-    if (effectiveVP.size.x <= 0.0f || effectiveVP.size.y <= 0.0f) {
-        effectiveVP.size.x = static_cast<float>(fbW);
-        effectiveVP.size.y = static_cast<float>(fbH);
+    // P4c-F7: SECONDARY 模式的 pass 内 primary 不能录任何内联命令(含
+    // viewport/scissor)— 状态由各 secondary 自行设置(secondary 的
+    // BeginRenderPass 被拒,viewport/scissor 在其 Execute 前由 secondary 的
+    // SetViewport/SetScissor 提供)。
+    if (!pendingSecondaryMode_) {
+        ViewportDesc effectiveVP = desc.viewport;
+        if (effectiveVP.size.x <= 0.0f || effectiveVP.size.y <= 0.0f) {
+            effectiveVP.size.x = static_cast<float>(fbW);
+            effectiveVP.size.y = static_cast<float>(fbH);
+        }
+        SetViewport(effectiveVP);
+        Rect effectiveScissor = desc.scissor;
+        if (effectiveScissor.extent.x == 0) effectiveScissor.extent.x = areaW;
+        if (effectiveScissor.extent.y == 0) effectiveScissor.extent.y = areaH;
+        SetScissor(effectiveScissor);
     }
-    SetViewport(effectiveVP);
-    Rect effectiveScissor = desc.scissor;
-    if (effectiveScissor.extent.x == 0) effectiveScissor.extent.x = areaW;
-    if (effectiveScissor.extent.y == 0) effectiveScissor.extent.y = areaH;
-    SetScissor(effectiveScissor);
     UpdateStats(CommandType::BeginRenderPass);
 }
 
@@ -959,6 +1072,8 @@ void VulkanCommandBuffer::EndRenderPass() {
     if (scope_ != Scope::RenderPass) return;
     vkCmdEndRenderPass(cmdBuffer_);
     scope_ = Scope::None;
+    // P4c-F7: pass 结束回到 inline 模式(除非又创建了新 secondary)
+    pendingSecondaryMode_ = false;
 
     // Update tracked layouts: the Vulkan render pass performed implicit
     // layout transitions to finalLayout for each attachment. The texture's
