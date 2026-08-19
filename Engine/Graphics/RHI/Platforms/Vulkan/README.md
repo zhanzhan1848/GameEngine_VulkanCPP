@@ -290,6 +290,45 @@ int main() { RegisterXxxTests(); TestRunner::RunAllSuites(); return 0; }
 | 7 (optional) | `VK_EXT_descriptor_indexing` | Bindless — **Linux/Win only**; macOS MoltenVK 31-resource cap prevents it. Gate with `#if !defined(__APPLE__)`. Requires DescriptorSetLayout `bindingFlags` + DescriptorSet `update-after-bind` |
 | 7 (optional) | `VK_KHR_buffer_device_address` | For GPU-resilient scene hierarchy. Requires `vkGetPhysicalDeviceFeatures2` query + `features12.bufferDeviceAddress` |
 
+### P4c 双后端功能对等(2026-08-19)— F1–F10 完成/处置
+
+按 `Docs/2026-08-19-rhi-vulkan-metal-parity-plan.md` 收口,Metal 相对缺口的 10 项全部落地或有书面处置:
+
+| ID | 状态 | 交付 |
+|---|---|---|
+| F1 DataFormat 映射 | **完成** | `ToVkFormat` 补 36 case(D16/16 位/32 位/BC 全系,UNorm/SNorm 32 位按 Metal 先例 fallback Float);`vkGetPhysicalDeviceFormatProperties` 能力检查(不匹配显式拒绝);aspect 判断统一 `IsDepthVkFormat`。`TestVulkanFormatParity` 6 用例(静态遍历 78/78、逐格式创建、整数 roundtrip 精确、渐变/整数渲染、D16 DepthPrePass) |
+| F2 Swapchain 重建 | **完成** | OUT_OF_DATE/SUBOPTIMAL/SURFACE_LOST 全路径自动恢复(acquire 循环重试 ≤8 次,present 置标志下一帧重建;oldSwapchain 手递手;GC Flush 保证 view 先于旧链销毁)。`ResizeRecovery` 双 pass 对照 SSIM=1.0 |
+| F3 纹理 updateData/Map | **完成** | 立即模式 one-shot + 行粒度子矩形;布局 RHI 内部闭合;Staging/Readback 用途 HOST_VISIBLE+LINEAR 可 map,DEVICE_LOCAL 拒绝 + 一次性 warn。`TestVulkanTextureUpdate` 4 用例(棋盘格采样像素精确、16 段子矩形逐字节相等、无互踩、map 语义) |
+| F4 Staging 队列 | **完成** | QueueBlit_Buffer/Texture + EncodePendingBlits(布局统一闭合,字节参数内部换算 texel 单位)+ FlushBlocking;`VulkanCommandBuffer::Begin` 帧首自动 Encode;`IsFrameRecording` 分流帧内/帧外上传;overflow → drain + one-shot。`TestVulkanStagingUpload` 3 用例(300 帧滚动精确、>16MB fallback、无帧上下文 flush) |
+| F5 Layered 渲染 | **完成** | `renderTargetArrayLength > 1` → `GetArrayView()` 全层视图 + framebuffer layers 对齐;`VK_EXT_shader_viewport_index_layer` 按支持启用。`TestVulkanLayeredRendering` 3 用例(layered vs 逐层 SSIM=1、层隔离零串层、D32 array 深度) |
+| F6 SetComputeBytes 回退 | **完成** | 超限时隐式 UBO(set 3/binding 0 保留,约定见 `RHIShaderCommon.glsl`;UNIFORM_BUFFER_DYNAMIC + per-frame-region ring);管线布局自动追加隐式 set。`TestVulkanComputeBytesLarge` 三探针(0/128/504)像素精确 |
+| F7 Secondary CB | **完成** | Core 虚函数 `BeginSecondaryCommandBuffer`/`ExecuteSecondaryCommandBuffers`(契约在 `RHICommand.h`)+ Vulkan SECONDARY/InheritanceInfo + Metal parallel encoder 对接;secondary 录制期视为继承 pass 内(scope 守卫);创建过 secondary 的 pass 自动切 SECONDARY_CONTENTS 模式。`TestVulkanSecondaryCommandBuffer` 4 用例(32 draw 逐字节相等、N=1/4/16、契约拒绝、1000 次 churn) |
+| F8 Immutable Sampler | **完成** | layout 创建时消费 `immutableSamplers`(pImmutableSamplers),无效句柄回退 mutable 并 warn。`ImmutableSamplerParity` 用例:与 mutable 渲染逐字节相等 |
+| F9 Cube Storage Image | **记录为已知不对等** | 引擎立方体存储路径已用 2D-array 绕过(`VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT` 已支持);按计划推荐仅记录不实现。若未来需要原生 cube storage,补 per-face 2D view 别名(`VulkanTexture` storage view 路径) |
+| F10 Linux XCB Surface | **记录:合并不阻塞** | `VulkanSurface_Linux.cpp` connection 仍为 nullptr;macOS 为主开发平台。**Linux 成为构建目标前必须完成**(从窗口句柄推导/调用方传入 xcb_connection_t) |
+
+P4c 新增测试二进制:`TestVulkanFormatParity` / `TestVulkanTextureUpdate` / `TestVulkanStagingUpload` / `TestVulkanLayeredRendering` / `TestVulkanComputeBytesLarge` / `TestVulkanSecondaryCommandBuffer`(Vulkan 套件 23 → 29 个),全部零 validation error。
+
+P4c 验证状态(2026-08-19,Apple M4 Pro + MoltenVK):
+- Vulkan 套件 36 个二进制:35 通过;`TestVulkanNaniteSmoke` 的 Stage2 用例
+  失败为**预存问题**(bc61879 基线同样失败,与 P4c 无关)。
+- Metal 套件 13 个可构建二进制全部通过(Core 层 + MetalCommandBuffer
+  F7 对接无回退)。
+- `ENABLE_VULKAN=OFF` 构建:失败于预存的未守卫文件
+  `Engine/Graphics/Nanite/OfflineSDFMerger.cpp`(07469f3 引入,零
+  ENABLE_VULKAN 守卫)— 先于 P4c 已破,修复属 Nanite 层不属于本计划
+  范围;P4c 的全部 Vulkan 代码都在 `#if ENABLE_VULKAN` 守卫内。
+- 16 个陈旧测试 .cpp(BufferDesc 默认构造被删/Mock 缺纯虚)编译失败,
+  均为预存(54cdc4b Dawn 时期引入),不在 23 二进制基线集内。
+
+P4c 期间的行为差异/陷阱(追加):
+- `VkBufferImageCopy::bufferRowLength` 单位是 **texel** 而非字节 — Metal 风格的 bytesPerRow 参数必须换算(F4 踩坑)。
+- `maxPushConstantsSize` 是设备属性(MoltenVK 4096,桌面常见 128)— >128B 回退必须按查询值分流,不能硬编码 128。
+- MoltenVK 深度映射观测为 z_ndc 直通式(z=0.5 → depth 0.5)而非 Vulkan 折半式;深度断言需驱动无关(接受两种约定)。
+- Vulkan 每个 subpass 只能选一种 contents 模式(inline 或 secondary);创建过 secondary 的 cmdbuf 其 pass 自动切 SECONDARY 模式,该 pass 内 primary 禁内联命令。
+- NULL set layout 填充 set 空档需 `VK_EXT_graphics_pipeline_library`;用共享空 DSL 替代。
+- 纹理 map 语义差异(写入限制表):Metal ReplaceRegion 本质是内核 staging,Vulkan 暴露为 updateData(staging 上传)而非 map;DEVICE_LOCAL 纹理 map 返回 nullptr。
+
 ### Phase 4b-T3 complete (2026-07-29)
 
 Tier 3 ported every ForwardRenderer pass to Vulkan via raw RHI parity tests. Each sub-phase follows the same pattern: WGSL→SPIR-V (naga) or hand-written GLSL→SPIR-V (glslangValidator), CPU reference where tractable, Metal reference frame + SSIM ≥ 0.95 otherwise. Per-pass parity tests bypass ForwardRenderer entirely (Nanite meshlet synthesis is the upstream blocker — see T2 plan) and exercise the shader + raw RHI primitives directly.
