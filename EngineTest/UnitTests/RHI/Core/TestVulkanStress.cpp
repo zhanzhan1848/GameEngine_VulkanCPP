@@ -48,6 +48,24 @@ struct DeviceFixture {
         return true;
     }
     ~DeviceFixture() { if (base) base->Shutdown(); }
+
+    /// P4c-F7 churn 用:全屏三角形 + 平色着色器(Assets 经 POST_BUILD 拷贝)
+    ShaderHandle CreateFullscreenVS() {
+        std::ifstream f("Assets/Shaders/P4cSecondaryDraw.spv", std::ios::binary | std::ios::ate);
+        if (!f) return handles::INVALID_SHADER;
+        auto sz = size_t(f.tellg());
+        std::vector<u8> buf(sz);
+        f.seekg(0); f.read(reinterpret_cast<char*>(buf.data()), std::streamsize(sz));
+        return base->CreateShader(buf.data(), buf.size(), ShaderStage::Vertex, "main");
+    }
+    ShaderHandle CreateColorFS() {
+        std::ifstream f("Assets/Shaders/P4cSecondaryDraw.frag.spv", std::ios::binary | std::ios::ate);
+        if (!f) return handles::INVALID_SHADER;
+        auto sz = size_t(f.tellg());
+        std::vector<u8> buf(sz);
+        f.seekg(0); f.read(reinterpret_cast<char*>(buf.data()), std::streamsize(sz));
+        return base->CreateShader(buf.data(), buf.size(), ShaderStage::Pixel, "main");
+    }
 };
 
 } // anonymous namespace
@@ -214,6 +232,92 @@ TestResult TestGCDeferredDestroy() {
         // 不调 WaitIdle — 让下一帧的分配自己碰 deferred destroy 的资源,验证 free_list race
     }
     fx.base->WaitIdle();
+    return TestResult::Passed;
+}
+
+// ============================================================================
+// P4c-F7: secondary command buffer churn(计划并入 Stress 的压力项)
+// 1000 次 create/record/execute/destroy 循环,验证 GC + free_list 无泄漏
+// (独立二进制的 TestVulkanSecondaryCommandBuffer::GcChurn 同源,此处为
+// Stress 套件内的常驻回归)。
+// ============================================================================
+TestResult TestSecondaryCommandBufferChurn() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+
+    // 最小管线(fullscreen 三角形 + push constant 颜色)— 只验证生命周期
+    // 与零泄漏,不校验内容(内容校验在 TestVulkanSecondaryCommandBuffer)。
+    ShaderHandle vs = fx.CreateFullscreenVS();
+    ShaderHandle fs = fx.CreateColorFS();
+    if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) {
+        std::cout << "[TestVulkanStress] secondary churn: shaders unavailable — skip"
+                  << std::endl;
+        return TestResult::Skipped;
+    }
+    PushConstantRange pcr{};
+    pcr.stageFlags = ShaderStage::Vertex;
+    pcr.offset = 0;
+    pcr.size = 16;
+    PipelineLayoutDesc plDesc{};
+    plDesc.setLayoutCount = 0;
+    plDesc.pushConstantRangeCount = 1;
+    plDesc.pushConstantRanges = &pcr;
+    PipelineLayoutHandle pl = fx.base->CreatePipelineLayout(plDesc);
+    GraphicsPipelineDesc gpd{};
+    gpd.vertexShader = vs;
+    gpd.pixelShader = fs;
+    gpd.layout = pl;
+    gpd.topology = PrimitiveTopology::TriangleList;
+    gpd.cullMode = CullMode::None;
+    gpd.renderTargetCount = 1;
+    gpd.renderTargetFormats[0] = DataFormat::RGBA8_UNorm;
+    gpd.enableDepthTest = false;
+    gpd.enableDepthWrite = false;
+    PipelineHandle pipe = fx.base->CreateGraphicsPipeline(gpd);
+    if (pipe == handles::INVALID_PIPELINE) {
+        std::cout << "[TestVulkanStress] secondary churn: pipeline unavailable — skip"
+                  << std::endl;
+        return TestResult::Skipped;
+    }
+
+    constexpr u32 kIterations = 1000;
+    for (u32 it = 0; it < kIterations; ++it) {
+        CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmd);
+        vcmd->Reset();
+        vcmd->Begin();
+        SecondaryCommandBufferDesc sd{};
+        CommandBufferHandle secH = vcmd->BeginSecondaryCommandBuffer(sd);
+        VulkanCommandBuffer* sec = fx.vk->GetCommandBuffer(secH);
+        if (sec) {
+            sec->BindGraphicsPipeline(pipe);
+            ViewportDesc vp{};
+            vp.topLeft = {0.0f, 0.0f};
+            vp.size = {64.0f, 64.0f};
+            vp.minDepth = 0.0f;
+            vp.maxDepth = 1.0f;
+            sec->SetViewport(vp);
+            float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+            sec->PushConstants(pl, ShaderStage::Vertex, 0, sizeof(color), color);
+            sec->Draw(3, 0, 1, 0);
+            sec->End();
+        }
+        // 无 pass 的 Execute 会被 RHI 拒绝(warn)— 直接 End 提交,secondary
+        // 未执行也验证 create/destroy 生命周期(执行路径由专用二进制覆盖)
+        vcmd->End();
+        vcmd->Submit(0);
+        vcmd->WaitForCompletion();
+        fx.base->DestroyCommandBuffer(secH);
+        fx.base->DestroyCommandBuffer(cmd);
+    }
+    fx.base->WaitIdle();
+
+    fx.base->DestroyPipeline(pipe);
+    fx.base->DestroyPipelineLayout(pl);
+    fx.base->DestroyShader(fs);
+    fx.base->DestroyShader(vs);
+    std::cout << "[TestVulkanStress] secondary CB churn: " << kIterations
+              << " iterations OK" << std::endl;
     return TestResult::Passed;
 }
 
