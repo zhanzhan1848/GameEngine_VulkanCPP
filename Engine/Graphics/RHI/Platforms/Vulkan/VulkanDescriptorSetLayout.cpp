@@ -7,6 +7,7 @@
 
 #include "VulkanDescriptorSetLayout.h"
 #include "VulkanDevice.h"
+#include "VulkanSampler.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -58,13 +59,45 @@ bool VulkanDescriptorSetLayout::Initialize() {
     // === VkDescriptorSetLayout ===
     std::vector<VkDescriptorSetLayoutBinding> vkBindings;
     vkBindings.reserve(bindings_.size());
+    // P4c-F8: immutable sampler 的 VkSampler 数组须存活到
+    // vkCreateDescriptorSetLayout 返回 — 按绑定持久化
+    std::vector<std::vector<VkSampler>> immutableSamplers;
+    immutableSamplers.reserve(bindings_.size());
     for (const auto& b : bindings_) {
         VkDescriptorSetLayoutBinding vk{};
         vk.binding         = b.binding;
         vk.descriptorType  = ToVkDescriptorType(b.descriptorType);
         vk.descriptorCount = std::max<u32>(1u, b.descriptorCount);
         vk.stageFlags      = ToVkShaderStageFlags(b.stageFlags);
-        vk.pImmutableSamplers = nullptr;  // Phase 4 暂不支持 immutable
+        vk.pImmutableSamplers = nullptr;
+        // P4c-F8: 消费 ImmutableSampler 数组(Sampler/CombinedImageSampler 绑定
+        // 有效;绑定后 descriptor write 不再需要 sampler)
+        if (b.immutableSamplers != nullptr &&
+            (b.descriptorType == DescriptorType::Sampler ||
+             b.descriptorType == DescriptorType::CombinedImageSampler)) {
+            immutableSamplers.emplace_back();
+            auto& samplers = immutableSamplers.back();
+            samplers.reserve(vk.descriptorCount);
+            VulkanDevice& vkDev = static_cast<VulkanDevice&>(device_);
+            for (u32 i = 0; i < vk.descriptorCount; ++i) {
+                VulkanSampler* s = vkDev.GetSampler(b.immutableSamplers[i]);
+                if (!s || s->GetNativeSampler() == VK_NULL_HANDLE) {
+                    std::cerr << "[VulkanDescriptorSetLayout] immutable sampler "
+                              << i << " invalid at binding " << b.binding
+                              << " — falling back to mutable" << std::endl;
+                    samplers.clear();
+                    break;
+                }
+                samplers.push_back(s->GetNativeSampler());
+            }
+            if (!samplers.empty()) {
+                vk.pImmutableSamplers = samplers.data();
+            } else {
+                immutableSamplers.pop_back();
+            }
+        } else {
+            immutableSamplers.emplace_back();
+        }
         vkBindings.push_back(vk);
     }
 

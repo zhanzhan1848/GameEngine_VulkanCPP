@@ -416,12 +416,168 @@ TestResult TestMapSemantics() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// Case 5: P4c-F8 immutable sampler — 绑定后 write 不需要 sampler,
+// 渲染结果与可变 sampler 像素精确一致
+// ============================================================================
+TestResult TestImmutableSamplerParity() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+
+    constexpr u32 kT = 8, kW = 64, kH = 64;
+    std::vector<u8> checker(size_t(kT) * kT * 4);
+    for (u32 y = 0; y < kT; ++y) {
+        for (u32 x = 0; x < kT; ++x) {
+            const bool white = ((x / 4) + (y / 4)) % 2 == 0;
+            u8 v = white ? 255 : 0;
+            u8* p = &checker[(y * kT + x) * 4];
+            p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
+        }
+    }
+    ResourceHandle tex = MakeTexture(fx, kT, kT, "ImmutableTex");
+    TEST_ASSERT(tex != handles::INVALID_RESOURCE, "CreateTexture");
+    TEST_ASSERT(fx.vk->GetTexture(tex)->UpdateData(checker.data(), checker.size(), 0),
+                "UpdateData");
+
+    auto vert = ReadSPV("Assets/Shaders/P4cSampleTexture.spv");
+    auto frag = ReadSPV("Assets/Shaders/P4cSampleTexture.frag.spv");
+    TEST_ASSERT(!vert.empty() && !frag.empty(), "Read SPIR-V");
+    ShaderHandle vs = fx.base->CreateShader(vert.data(), vert.size(), ShaderStage::Vertex, "main");
+    ShaderHandle fs = fx.base->CreateShader(frag.data(), frag.size(), ShaderStage::Pixel, "main");
+
+    SamplerDesc sd{};
+    sd.minFilter = FilterMode::Point;
+    sd.magFilter = FilterMode::Point;
+    sd.mipFilter = FilterMode::Point;
+    sd.addressU = TextureAddressMode::Clamp;
+    sd.addressV = TextureAddressMode::Clamp;
+    sd.maxAnisotropy = 1;
+    sd.comparisonFunc = ComparisonFunc::Never;
+    SamplerHandle sampler = fx.base->CreateSampler(sd);
+
+    // 渲染 helper:mutable / immutable 两种 descriptor 路径共用
+    auto renderOnce = [&](DescriptorSetLayoutHandle dsl, DescriptorSetHandle ds) {
+        PipelineLayoutDesc plDesc{};
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &dsl;
+        plDesc.pushConstantRangeCount = 0;
+        PipelineLayoutHandle pl = fx.base->CreatePipelineLayout(plDesc);
+        GraphicsPipelineDesc gpd{};
+        gpd.vertexShader = vs;
+        gpd.pixelShader = fs;
+        gpd.layout = pl;
+        gpd.topology = PrimitiveTopology::TriangleList;
+        gpd.cullMode = CullMode::None;
+        gpd.renderTargetCount = 1;
+        gpd.renderTargetFormats[0] = DataFormat::RGBA8_UNorm;
+        gpd.enableDepthTest = false;
+        gpd.enableDepthWrite = false;
+        PipelineHandle pipe = fx.base->CreateGraphicsPipeline(gpd);
+        ResourceHandle rt = MakeTexture(fx, kW, kH, "ImmRT",
+                                        TextureUsage::RenderTarget | TextureUsage::CopySource);
+        std::vector<u8> out;
+        CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmd);
+        if (vcmd && vcmd->Reset() && vcmd->Begin()) {
+            RenderPassDesc rpd{};
+            rpd.colorAttachments.resize(1);
+            rpd.colorAttachments[0].texture = rt;
+            rpd.colorAttachments[0].format = DataFormat::RGBA8_UNorm;
+            rpd.colorAttachments[0].loadOp = LoadAction::DontCare;
+            rpd.colorAttachments[0].storeOp = StoreAction::Store;
+            rpd.viewport.topLeft = {0.0f, 0.0f};
+            rpd.viewport.size = {float(kW), float(kH)};
+            rpd.scissor.offset = {0, 0};
+            rpd.scissor.extent = {kW, kH};
+            vcmd->BeginRenderPass(rpd);
+            vcmd->BindGraphicsPipeline(pipe);
+            vcmd->BindDescriptorSets(PipelineBindPoint::Graphics, pl, 0, 1, &ds, 0, nullptr);
+            vcmd->Draw(3, 0, 1, 0);
+            vcmd->EndRenderPass();
+            if (vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion()) {
+                out = ReadbackTexture(fx, rt, kW, kH);
+            }
+        }
+        fx.base->DestroyCommandBuffer(cmd);
+        fx.base->DestroyTexture(rt);
+        fx.base->DestroyPipeline(pipe);
+        fx.base->DestroyPipelineLayout(pl);
+        return out;
+    };
+
+    // --- mutable 路径(write 带 sampler) ---
+    DescriptorSetLayoutBinding bindM{};
+    bindM.binding = 0;
+    bindM.descriptorType = DescriptorType::CombinedImageSampler;
+    bindM.descriptorCount = 1;
+    bindM.stageFlags = ShaderStage::Pixel;
+    DescriptorSetLayoutDesc dslM{};
+    dslM.bindingCount = 1;
+    dslM.bindings = &bindM;
+    DescriptorSetLayoutHandle dslMutable = fx.base->CreateDescriptorSetLayout(dslM);
+    DescriptorSetDesc dsM{}; dsM.layout = dslMutable;
+    DescriptorSetHandle dsMutable = fx.base->CreateDescriptorSet(dsM);
+    DescriptorImageInfo imgM{};
+    imgM.sampler = sampler;
+    imgM.imageView = tex;
+    imgM.imageLayout = ResourceState::ShaderResource;
+    WriteDescriptorSet wM{};
+    wM.dstSet = dsMutable; wM.dstBinding = 0; wM.dstArrayElement = 0;
+    wM.descriptorCount = 1; wM.descriptorType = DescriptorType::CombinedImageSampler;
+    wM.imageInfo = &imgM;
+    fx.base->UpdateDescriptorSets(1, &wM);
+    std::vector<u8> mutableOut = renderOnce(dslMutable, dsMutable);
+    TEST_ASSERT(!mutableOut.empty(), "mutable render");
+
+    // --- immutable 路径(layout 固定 sampler;write 不传 sampler) ---
+    DescriptorSetLayoutBinding bindI{};
+    bindI.binding = 0;
+    bindI.descriptorType = DescriptorType::CombinedImageSampler;
+    bindI.descriptorCount = 1;
+    bindI.stageFlags = ShaderStage::Pixel;
+    bindI.immutableSamplers = &sampler;   // ← F8 核心
+    DescriptorSetLayoutDesc dslI{};
+    dslI.bindingCount = 1;
+    dslI.bindings = &bindI;
+    DescriptorSetLayoutHandle dslImm = fx.base->CreateDescriptorSetLayout(dslI);
+    TEST_ASSERT(dslImm != handles::INVALID_RESOURCE, "immutable layout create");
+    DescriptorSetDesc dsI{}; dsI.layout = dslImm;
+    DescriptorSetHandle dsImm = fx.base->CreateDescriptorSet(dsI);
+    DescriptorImageInfo imgI{};
+    imgI.sampler = handles::INVALID_SAMPLER;   // 不再需要 sampler
+    imgI.imageView = tex;
+    imgI.imageLayout = ResourceState::ShaderResource;
+    WriteDescriptorSet wI{};
+    wI.dstSet = dsImm; wI.dstBinding = 0; wI.dstArrayElement = 0;
+    wI.descriptorCount = 1; wI.descriptorType = DescriptorType::CombinedImageSampler;
+    wI.imageInfo = &imgI;
+    fx.base->UpdateDescriptorSets(1, &wI);
+    std::vector<u8> immOut = renderOnce(dslImm, dsImm);
+    TEST_ASSERT(!immOut.empty(), "immutable render");
+
+    const int maxDiff = et::MaxAbsDiff(immOut.data(), mutableOut.data(), kW, kH);
+    std::cout << "[TestVulkanTextureUpdate] immutable-vs-mutable sampler max-abs-diff = "
+              << maxDiff << std::endl;
+    TEST_ASSERT(maxDiff == 0, "immutable sampler rendering identical to mutable");
+
+    fx.base->DestroyDescriptorSet(dsImm);
+    fx.base->DestroyDescriptorSetLayout(dslImm);
+    fx.base->DestroyDescriptorSet(dsMutable);
+    fx.base->DestroyDescriptorSetLayout(dslMutable);
+    fx.base->DestroySampler(sampler);
+    fx.base->DestroyShader(fs);
+    fx.base->DestroyShader(vs);
+    fx.base->DestroyTexture(tex);
+    return TestResult::Passed;
+}
+
 void RegisterVulkanTextureUpdateTests() {
     auto suite = std::make_shared<TestSuite>("VulkanTextureUpdateTests");
     suite->AddTestCase(TestCase("CheckerboardExact",   TestCheckerboardExact));
     suite->AddTestCase(TestCase("ProgressiveSubrect",  TestProgressiveSubrect));
     suite->AddTestCase(TestCase("SubrectNoClobber",    TestSubrectNoClobber));
     suite->AddTestCase(TestCase("MapSemantics",        TestMapSemantics));
+    suite->AddTestCase(TestCase("ImmutableSamplerParity", TestImmutableSamplerParity));
     TestRunner::RegisterTestSuite(suite);
 }
 
