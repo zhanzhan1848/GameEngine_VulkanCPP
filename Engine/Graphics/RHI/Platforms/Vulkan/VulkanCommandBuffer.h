@@ -115,6 +115,10 @@ private:
     // authoritative sync. Reset to false in resetImpl.
     bool            externalFenceSignaled_{false};
 
+    // P4c-F4: beginImpl/endImpl/resetImpl 维护 — 驱动 VulkanDevice 的
+    // IsFrameRecording()(帧内上传走 staging 队列的分流依据)。
+    bool            isRecording_{false};
+
     // scope 状态(Phase 4 用,Phase 3 仅记录)
     enum class Scope : u8 { None, RenderPass, Compute, Blit };
     Scope scope_{Scope::None};

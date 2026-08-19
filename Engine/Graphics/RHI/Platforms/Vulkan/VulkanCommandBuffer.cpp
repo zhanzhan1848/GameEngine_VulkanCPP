@@ -147,6 +147,12 @@ bool VulkanCommandBuffer::resetImpl() {
     if (cmdBuffer_ == VK_NULL_HANDLE) return false;
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
 
+    // P4c-F4: recording 中被 Reset 视为放弃录制,回退计数
+    if (isRecording_) {
+        isRecording_ = false;
+        static_cast<VulkanDevice&>(device_).DecrementRecording();
+    }
+
     // Reset command buffer (commands cleared, ready to begin)
     VkResult res = vkResetCommandBuffer(cmdBuffer_, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
     if (res != VK_SUCCESS) {
@@ -175,6 +181,12 @@ bool VulkanCommandBuffer::beginImpl() {
         return false;
     }
     scope_ = Scope::None;
+    // P4c-F4 接线:帧首把 staging 队列的 pending blits 编码进本 cmdbuf
+    // (用户 pass 之前 — 对齐 Metal "单 blit encoder 前置" 语义)。
+    // 帧内 Queue 的上传由此落 GPU,消除逐次 fence 等待。
+    static_cast<VulkanDevice&>(device_).GetStagingAllocator().EncodePendingBlits(cmdBuffer_);
+    isRecording_ = true;
+    static_cast<VulkanDevice&>(device_).IncrementRecording();
     return true;
 }
 
@@ -183,6 +195,10 @@ bool VulkanCommandBuffer::endImpl() {
     if (res != VK_SUCCESS) {
         std::cerr << "[VulkanCommandBuffer] vkEndCommandBuffer failed: " << res << std::endl;
         return false;
+    }
+    if (isRecording_) {
+        isRecording_ = false;
+        static_cast<VulkanDevice&>(device_).DecrementRecording();
     }
     return true;
 }

@@ -81,6 +81,17 @@ public:
     /// 这样 InsertBarrier(via GetTexture(handle)) 才能找到。
     RHIAllocator<VulkanTexture>& GetTextureAllocator() { return *textureAllocator_; }
 
+    /// P4c-F4: 当前是否有 VulkanCommandBuffer 处于 recording 状态
+    /// (beginImpl ++, endImpl/resetImpl --)。纹理 updateData 等上传路径据此
+    /// 分流:帧内走 staging 队列(下一 cmdbuf Begin 编码,零逐次等待),
+    /// 无帧上下文走同步 one-shot(资产加载期语义)。
+    bool IsFrameRecording() const { return recordingCount_.load() > 0; }
+    void IncrementRecording() { recordingCount_.fetch_add(1); }
+    void DecrementRecording() {
+        u32 v = recordingCount_.load();
+        recordingCount_.store(v > 0 ? v - 1 : 0);
+    }
+
     /// Debug utils 设对象名函数(给资源挂 label)
     PFN_vkSetDebugUtilsObjectNameEXT GetDebugUtilsSetObjectName() const {
         return vkSetDebugUtilsObjectName_;
@@ -242,6 +253,9 @@ private:
 
     float timestampPeriodNs_{1.0f};
     std::atomic<u32> currentFrameIndex_{0};
+
+    // P4c-F4: recording 状态的 VulkanCommandBuffer 计数(见 IsFrameRecording)
+    std::atomic<u32> recordingCount_{0};
 
     // Tracked for shutdown ordering / diagnostics.
     bool validationEnabled_{false};

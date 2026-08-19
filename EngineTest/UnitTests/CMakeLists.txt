@@ -295,6 +295,26 @@ if(ENABLE_VULKAN)
                 $<TARGET_FILE_DIR:TestVulkanTextureUpdate>/Assets
     )
 
+    # P4c-F4: staging upload queue — 300-frame rolling churn, overflow fallback,
+    # FlushBlocking without frame context.
+    add_executable(TestVulkanStagingUpload
+        RHI/Core/TestVulkanStagingUpload.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanStagingUpload PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanStagingUpload PRIVATE Engine)
+    target_compile_definitions(TestVulkanStagingUpload PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanStagingUpload COMMAND TestVulkanStagingUpload)
+    set_target_properties(TestVulkanStagingUpload PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
     # Phase 4b-T3.0: D32_FLOAT aspect mask end-to-end (staging → tex → readback).
     add_executable(TestVulkanDepthAspect RHI/Core/TestVulkanDepthAspect.cpp)
     target_include_directories(TestVulkanDepthAspect PRIVATE

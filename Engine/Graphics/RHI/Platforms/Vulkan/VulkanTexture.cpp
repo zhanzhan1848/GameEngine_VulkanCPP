@@ -572,7 +572,40 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     u32 queueFamily = vkDev.GetGraphicsQueueFamily();
     if (!allocator || queueFamily == UINT32_MAX) return false;
 
-    // 1. 一次性 staging(VulkanBuffer 慢路径同款;帧内队列化路径属 F4)。
+    const VkImageAspectFlags aspect = GetAspectMask();
+    // 布局闭合由 RHI 内部负责(与 Metal 语义对齐,调用方无需手动 barrier):
+    // currentLayout_ → TRANSFER_DST → 拷贝 → 回 currentLayout_(UNDEFINED 时
+    // 提升为 SHADER_READ_ONLY)。
+    const VkImageLayout layoutBefore = currentLayout_;
+    const VkImageLayout layoutAfter =
+        (layoutBefore != VK_IMAGE_LAYOUT_UNDEFINED && layoutBefore != VK_IMAGE_LAYOUT_PREINITIALIZED)
+            ? layoutBefore : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    // === P4c-F4: 帧内模式 — staging 队列(下一 cmdbuf Begin 编码,零等待) ===
+    // 契约:帧内更新的数据在下一个 command buffer 开始时可见;需要本 cmdbuf
+    // 立即可见的调用方应使用无帧上下文的同步路径(资产加载期)。
+    if (vkDev.IsFrameRecording()) {
+        VulkanStagingAllocator& staging = vkDev.GetStagingAllocator();
+        VulkanStagingAllocator::Allocation alloc = staging.Allocate(size, 256);
+        if (!alloc.overflow) {
+            std::memcpy(alloc.cpuPtr, data, size);
+            staging.QueueBlit_Texture(alloc, vkImage_,
+                                      /*mipLevel=*/0, /*slice=*/0,
+                                      /*origin=*/0, y0, 0,
+                                      /*extent=*/width, rows, 1,
+                                      /*bytesPerRow=*/0, /*bytesPerImage=*/0,
+                                      /*currentLayout=*/layoutBefore,
+                                      /*backLayout=*/layoutAfter,
+                                      /*aspect=*/aspect,
+                                      /*texelSize=*/static_cast<u32>(bpt));
+            SetCurrentLayout(layoutAfter);
+            return true;
+        }
+        // overflow fallback:排干已 queue 数据后走一次性路径(README 记录)
+        staging.FlushBlocking();
+    }
+
+    // === 立即模式:一次性 staging + one-shot cmdbuf(资产加载期语义) ===
     VkBufferCreateInfo stagingCI{};
     stagingCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     stagingCI.size = size;
@@ -617,16 +650,6 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &bi);
-
-    const VkImageAspectFlags aspect = GetAspectMask();
-
-    // 布局闭合由 RHI 内部负责(与 Metal 语义对齐,调用方无需手动 barrier):
-    // currentLayout_ → TRANSFER_DST → 拷贝 → 回 currentLayout_(UNDEFINED 时
-    // 提升为 SHADER_READ_ONLY)。
-    const VkImageLayout layoutBefore = currentLayout_;
-    const VkImageLayout layoutAfter =
-        (layoutBefore != VK_IMAGE_LAYOUT_UNDEFINED && layoutBefore != VK_IMAGE_LAYOUT_PREINITIALIZED)
-            ? layoutBefore : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     auto imageBarrier = [&](VkImageLayout oldL, VkImageLayout newL,
                             VkAccessFlags srcAccess, VkPipelineStageFlags srcStage,

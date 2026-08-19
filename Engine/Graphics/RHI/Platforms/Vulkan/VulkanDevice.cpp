@@ -112,7 +112,8 @@ bool VulkanDevice::initializeImpl() {
     renderPassAllocator_->Reserve(64);
 
     // Staging allocator — 4 frame ring of 16MB HOST_VISIBLE pool
-    stagingAllocator_.Initialize(device_, vmaAllocator_);
+    // P4c-F4:传入 queue + family,FlushBlocking(立即模式)可直接提交
+    stagingAllocator_.Initialize(device_, vmaAllocator_, graphicsQueue_, graphicsQueueFamily_);
 
     if (validationEnabled_) {
         std::cout << "[VulkanDevice] Initialized with validation layers enabled." << std::endl;
