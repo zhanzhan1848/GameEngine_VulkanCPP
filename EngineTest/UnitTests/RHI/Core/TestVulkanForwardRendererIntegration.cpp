@@ -42,6 +42,7 @@
 #include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
 #endif
 
+#include <chrono>
 #include <iostream>
 #include <cmath>
 #include <cstring>
@@ -255,8 +256,91 @@ TestResult TestForwardRendererIntegration_Smoke() {
     return TestResult::Passed;
 }
 
+
+// ============================================================================
+// P4c §4 性能门槛:ForwardRenderer 集成帧耗时基准(与 Metal 孪生用例
+// TestMetalForwardRendererIntegration::FrameTiming 同 workload 对比,
+// 目标偏差 ≤ ±5%)。
+// ============================================================================
+TestResult TestForwardRendererIntegration_FrameTiming() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+
+    constexpr u32 W = 64, H = 64;
+    TextureDesc rtDesc{
+        {W, H, 1}, 1, 1, DataFormat::RGBA16_Float, TextureType::Texture2D,
+        TextureUsage::RenderTarget | TextureUsage::CopySource | TextureUsage::ShaderResource,
+        GPUMemoryUsage::Static, "TimingRT"};
+    ResourceHandle renderTarget = fx.base->CreateTexture(rtDesc);
+    TEST_ASSERT(renderTarget != handles::INVALID_RESOURCE, "CreateTexture renderTarget");
+    TextureDesc depthDesc{
+        {W, H, 1}, 1, 1, DataFormat::D32_Float, TextureType::Texture2D,
+        TextureUsage::DepthStencil | TextureUsage::CopySource | TextureUsage::ShaderResource,
+        GPUMemoryUsage::Static, "TimingDepth"};
+    ResourceHandle depth = fx.base->CreateTexture(depthDesc);
+    TEST_ASSERT(depth != handles::INVALID_RESOURCE, "CreateTexture depth");
+
+    ForwardRenderer renderer;
+    TEST_ASSERT(renderer.Initialize(fx.base), "ForwardRenderer::Initialize");
+
+    RenderScene scene;
+    RenderLight light;
+    light.type = LightType::Directional;
+    light.direction = v3{0.0f, -1.0f, 0.0f};
+    light.color = v3{1.0f, 1.0f, 1.0f};
+    light.intensity = 1.0f;
+    scene.AddLight(light);
+
+    RenderView view;
+    m4x4 viewMat = make_identity_m4x4();
+    viewMat.columns[3][2] = 5.0f;
+    view.SetViewMatrix(viewMat);
+    constexpr float pi = 3.14159265358979323846f;
+    float fov = 60.0f * (pi / 180.0f);
+    float aspect = float(W) / float(H);
+    float f = 1.0f / std::tan(fov * 0.5f);
+    m4x4 proj{};
+    std::memset(&proj, 0, sizeof(proj));
+    proj.columns[0][0] = f / aspect;
+    proj.columns[1][1] = f;
+    proj.columns[2][2] = 50.0f / (0.1f - 100.0f);
+    proj.columns[2][3] = 1.0f;
+    proj.columns[3][2] = -(0.1f * 100.0f) / (0.1f - 100.0f);
+    view.SetProjectionMatrix(proj);
+    view.Cull(scene);
+
+    CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+    VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmd);
+    TEST_ASSERT(vcmd != nullptr, "GetCommandBuffer");
+
+    std::unordered_map<primal::id::id_type, std::shared_ptr<MaterialInstance>> emptyMaterials;
+    auto renderOneFrame = [&]() {
+        TEST_ASSERT(vcmd->Reset() && vcmd->Begin(), "Begin");
+        renderer.Render(vcmd, scene, view, renderTarget,
+                        handles::INVALID_RESOURCE, depth, emptyMaterials, 0, W, H);
+        TEST_ASSERT(vcmd->End() && vcmd->Submit(0) && vcmd->WaitForCompletion(), "Submit");
+    };
+
+    constexpr u32 kWarmup = 30;
+    constexpr u32 kFrames = 300;
+    for (u32 i = 0; i < kWarmup; ++i) renderOneFrame();
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (u32 i = 0; i < kFrames; ++i) renderOneFrame();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    std::cout << "[ForwardRendererTiming] Vulkan FRAME_TIME_AVG = "
+              << (ms / kFrames) << " ms/frame (" << kFrames << " frames)"
+              << " [P4C_PERF_VULKAN=" << (ms / kFrames) << "]" << std::endl;
+
+    fx.base->DestroyCommandBuffer(cmd);
+    return TestResult::Passed;
+}
+
 void RegisterVulkanForwardRendererIntegration_Tests() {
     auto suite = std::make_shared<TestSuite>("VulkanForwardRendererIntegration_Tests");
+    suite->AddTestCase(TestCase("FrameTiming", TestForwardRendererIntegration_FrameTiming));
     suite->AddTestCase(TestCase("Smoke", TestForwardRendererIntegration_Smoke));
     TestRunner::RegisterTestSuite(suite);
 }

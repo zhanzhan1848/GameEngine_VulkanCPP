@@ -1381,6 +1381,30 @@ if(APPLE)
                 $<TARGET_FILE_DIR:TestMetalP4cReferences>/Assets
     )
 
+    # P4c §4: ForwardRenderer integration frame-time twin (Metal side) for the
+    # ±5% cross-backend performance gate.
+    add_executable(TestMetalForwardRendererIntegration
+        Graphics/Metal/TestMetalForwardRendererIntegration.cpp
+    )
+    target_include_directories(TestMetalForwardRendererIntegration PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalForwardRendererIntegration PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalForwardRendererIntegration COMMAND TestMetalForwardRendererIntegration)
+    set_target_properties(TestMetalForwardRendererIntegration PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
     # T3.2: Metal reference generator for ShadowPass parity (4 cascade layers).
     add_executable(TestMetalShadowPass
         Graphics/Metal/TestMetalShadowPass.cpp
