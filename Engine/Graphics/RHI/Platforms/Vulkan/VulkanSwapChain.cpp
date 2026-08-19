@@ -134,7 +134,7 @@ VkExtent2D VulkanSwapChain::chooseSwapExtent(const VkSurfaceCapabilitiesKHR& cap
     return actual;
 }
 
-bool VulkanSwapChain::createSwapchain() {
+bool VulkanSwapChain::createSwapchain(VkSwapchainKHR oldSwapchain) {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VkPhysicalDevice pd = vk.GetNativePhysicalDevice();
 
@@ -189,7 +189,9 @@ bool VulkanSwapChain::createSwapchain() {
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = presentMode;
     ci.clipped = VK_TRUE;
-    ci.oldSwapchain = VK_NULL_HANDLE;  // Phase 4b MVP:不处理 recreate
+    // P4c-F2: recreate 时手递手旧 swapchain,驱动可复用资源配置,
+    // 避免表面闪烁(旧 handle 在新链创建成功后销毁)。
+    ci.oldSwapchain = oldSwapchain;
 
     if (vkCreateSwapchainKHR(vk.GetNativeDevice(), &ci, nullptr, &swapchain_) != VK_SUCCESS) {
         std::cerr << "[VulkanSwapChain] vkCreateSwapchainKHR failed" << std::endl;
@@ -271,6 +273,58 @@ ResourceHandle VulkanSwapChain::GetBackBuffer(u32 index) const {
 }
 
 // ============================================================================
+// P4c-F2: 失效自动重建
+// ============================================================================
+
+bool VulkanSwapChain::recreateSurface() {
+    // SURFACE_LOST 恢复路径:销毁并按原始窗口句柄(swapChainDesc_.window,
+    // 从未变过)重建 VkSurfaceKHR。必须在 swapchain 重建之前完成 —
+    // createSwapchain 的 capability 查询依赖活着的 surface。
+    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
+    vkDeviceWaitIdle(vk.GetNativeDevice());
+    device_.GetGarbageCollector().Flush();
+    destroySurface();
+    if (!createSurface()) {
+        std::cerr << "[VulkanSwapChain] recreateSurface: createSurface failed" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool VulkanSwapChain::Recreate() {
+    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
+    vkDeviceWaitIdle(vk.GetNativeDevice());
+
+    // backbuffer 包装纹理走 Destroy()(view 经 GC 延迟销毁),随后 Flush
+    // 让 view 在旧 swapchain 销毁前真正死亡 — 消除 use-after-free
+    // validation error。RenderSystem 侧若仍持句柄,GetTexture() 会得到
+    // slot 空态,而下一次 GetBackBuffer() 拿到的是新包装。
+    destroyBackBufferTextures();
+    device_.GetGarbageCollector().Flush();
+
+    VkSwapchainKHR old = swapchain_;
+    swapchain_ = VK_NULL_HANDLE;
+    if (!createSwapchain(old)) {
+        std::cerr << "[VulkanSwapChain] Recreate: createSwapchain failed" << std::endl;
+        if (old != VK_NULL_HANDLE) {
+            vkDestroySwapchainKHR(vk.GetNativeDevice(), old, nullptr);
+        }
+        return false;
+    }
+    // 新链已接管,现在销毁旧链(image 归旧链所有)。
+    if (old != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(vk.GetNativeDevice(), old, nullptr);
+    }
+    if (!createBackBufferTextures()) {
+        std::cerr << "[VulkanSwapChain] Recreate: createBackBufferTextures failed" << std::endl;
+        return false;
+    }
+    std::cout << "[VulkanSwapChain] Recreate: "
+              << swapChainDesc_.width << "x" << swapChainDesc_.height << std::endl;
+    return true;
+}
+
+// ============================================================================
 // Acquire / Present
 // ============================================================================
 
@@ -278,6 +332,13 @@ bool VulkanSwapChain::AcquireNextImage(u32* imageIndex, SyncHandle semaphore,
                                        SyncHandle fence) {
     if (swapchain_ == VK_NULL_HANDLE) return false;
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
+
+    // P4c-F2: 上一帧 present 端置位的失效标志在此消费 — 渲染循环无需
+    // 任何调用方干预即可恢复(隐式 resize/DPI 变化的自动恢复路径)。
+    if (needsRecreate_) {
+        needsRecreate_ = false;
+        if (!Recreate()) return false;
+    }
 
     VkSemaphore sem = VK_NULL_HANDLE;
     VkFence     fen = VK_NULL_HANDLE;
@@ -290,21 +351,38 @@ bool VulkanSwapChain::AcquireNextImage(u32* imageIndex, SyncHandle semaphore,
         if (s) fen = s->GetFence();
     }
 
-    u32 idx = 0;
-    VkResult res = vkAcquireNextImageKHR(vk.GetNativeDevice(), swapchain_,
-                                         UINT64_MAX, sem, fen, &idx);
-    if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
-        // Phase 4b MVP:仅 log,不 recreate(留给 Phase 4c)
-        std::cerr << "[VulkanSwapChain] AcquireNextImage out-of-date/suboptimal — recreate TODO" << std::endl;
-        return false;
-    }
-    if (res != VK_SUCCESS) {
+    // P4c-F2: OUT_OF_DATE 时重建并重试(上限 8 次 — 持续失效说明窗口
+    // 处于持续 resize 风暴中,放弃本次 acquire 让上层跳帧)。
+    constexpr u32 kMaxAcquireRetries = 8;
+    for (u32 attempt = 0; attempt < kMaxAcquireRetries; ++attempt) {
+        u32 idx = 0;
+        VkResult res = vkAcquireNextImageKHR(vk.GetNativeDevice(), swapchain_,
+                                             UINT64_MAX, sem, fen, &idx);
+        if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
+            // SUBOPTIMAL:本次仍可呈现,下一帧入口重建。
+            if (res == VK_SUBOPTIMAL_KHR) needsRecreate_ = true;
+            currentIndex_ = idx;
+            if (imageIndex) *imageIndex = idx;
+            return true;
+        }
+        if (res == VK_ERROR_OUT_OF_DATE_KHR) {
+            std::cerr << "[VulkanSwapChain] AcquireNextImage OUT_OF_DATE — recreating (attempt "
+                      << attempt + 1 << "/" << kMaxAcquireRetries << ")" << std::endl;
+            if (!Recreate()) return false;
+            continue;
+        }
+        if (res == VK_ERROR_SURFACE_LOST_KHR) {
+            std::cerr << "[VulkanSwapChain] AcquireNextImage SURFACE_LOST — recreating surface"
+                      << std::endl;
+            if (!recreateSurface() || !Recreate()) return false;
+            continue;
+        }
         std::cerr << "[VulkanSwapChain] vkAcquireNextImageKHR failed: " << res << std::endl;
         return false;
     }
-    currentIndex_ = idx;
-    if (imageIndex) *imageIndex = idx;
-    return true;
+    std::cerr << "[VulkanSwapChain] AcquireNextImage: swapchain kept being out-of-date after "
+              << kMaxAcquireRetries << " recreates — skipping this frame" << std::endl;
+    return false;
 }
 
 void VulkanSwapChain::Present(SyncHandle semaphore) {
@@ -329,7 +407,15 @@ void VulkanSwapChain::Present(SyncHandle semaphore) {
 
     VkResult res = vkQueuePresentKHR(vk.GetGraphicsQueue(), &pi);
     if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
-        std::cerr << "[VulkanSwapChain] Present out-of-date/suboptimal — recreate TODO" << std::endl;
+        // P4c-F2: 置标志,下一帧 Acquire 入口重建 — 不在 present 返回
+        // 路径里同步重建(避免打断当前帧的收尾)。
+        std::cerr << "[VulkanSwapChain] Present out-of-date/suboptimal — will recreate next frame"
+                  << std::endl;
+        needsRecreate_ = true;
+    } else if (res == VK_ERROR_SURFACE_LOST_KHR) {
+        std::cerr << "[VulkanSwapChain] Present SURFACE_LOST — recreating surface" << std::endl;
+        needsRecreate_ = true;
+        recreateSurface();
     } else if (res != VK_SUCCESS) {
         std::cerr << "[VulkanSwapChain] vkQueuePresentKHR failed: " << res << std::endl;
     }
@@ -342,20 +428,9 @@ void VulkanSwapChain::Resize(u32 width, u32 height) {
     swapChainDesc_.width = width;
     swapChainDesc_.height = height;
 
-    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
-    vkDeviceWaitIdle(vk.GetNativeDevice());
-
-    destroyBackBufferTextures();
-    destroySwapchain();
-    // surface 不重建(window 句柄未变)
-
-    if (!createSwapchain()) {
-        std::cerr << "[VulkanSwapChain] Resize: createSwapchain failed" << std::endl;
-        return;
-    }
-    if (!createBackBufferTextures()) {
-        std::cerr << "[VulkanSwapChain] Resize: createBackBufferTextures failed" << std::endl;
-    }
+    // P4c-F2: 显式 resize 复用与隐式失效相同的重建路径
+    // (GC Flush 保证 view 先于旧 swapchain 销毁)。
+    if (!Recreate()) return;
 }
 
 } // namespace primal::graphics::rhi

@@ -220,18 +220,29 @@ if(ENABLE_VULKAN)
     )
 
     # Phase 4b: SwapChain acquire/present end-to-end (uses platform window)
-    add_executable(TestVulkanSwapChain RHI/Core/TestVulkanSwapChain.cpp)
+    # P4c-F2: + ResizeRecovery(自动重建 + 双 pass SSIM 对照,用 ImageCompare)
+    add_executable(TestVulkanSwapChain
+        RHI/Core/TestVulkanSwapChain.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
     target_include_directories(TestVulkanSwapChain PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/Engine
         ${CMAKE_SOURCE_DIR}/Engine/Common
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
     )
     target_link_libraries(TestVulkanSwapChain PRIVATE Engine)
     target_compile_definitions(TestVulkanSwapChain PRIVATE ENABLE_VULKAN=1)
     add_test(NAME TestVulkanSwapChain COMMAND TestVulkanSwapChain)
     set_target_properties(TestVulkanSwapChain PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanSwapChain POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanSwapChain>/Assets
     )
 
     # P4c-F1: DataFormat mapping parity — static traversal + per-format texture

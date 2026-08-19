@@ -51,12 +51,18 @@ protected:
 private:
     bool createSurface();
     void destroySurface();
+    bool recreateSurface();
 
-    bool createSwapchain();
+    bool createSwapchain(VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
     void destroySwapchain();
 
     bool createBackBufferTextures();
     void destroyBackBufferTextures();
+
+    /// P4c-F2: 失效自动重建。vkDeviceWaitIdle → 释放 backbuffer 包装(经 GC
+    /// 延迟销毁 + Flush,确保 view 先于旧 swapchain 死亡)→ 以 oldSwapchain
+    /// 手递手重建 → 重建 backbuffer → 更新对外尺寸。
+    bool Recreate();
 
     VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& available) const;
     VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& available) const;
@@ -71,6 +77,10 @@ private:
     std::vector<VkImage>         nativeImages_;   // swapchain 拥有
     std::vector<ResourceHandle>  backBufferHandles_;  // wrap 后的 VulkanTexture handles
     u32                          currentIndex_{0};
+
+    /// P4c-F2: SUBOPTIMAL/OUT_OF_DATE 在 present 端只置标志,下一帧
+    /// AcquireNextImage 入口处统一重建(免调用方干预的自动恢复路径)。
+    bool needsRecreate_{false};
 };
 
 } // namespace primal::graphics::rhi
