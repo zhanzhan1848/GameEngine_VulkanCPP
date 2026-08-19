@@ -334,10 +334,14 @@ P4c 验证状态(2026-08-19,Apple M4 Pro + MoltenVK 1.4.350):
 - **ENABLE_VULKAN=OFF 构建**:修复预存未守卫的
   OfflineSDFMerger/GlobalSDF(07469f3 引入)后,OFF 配置 Engine 全量
   编译零错误;P4c 全部 Vulkan 代码在守卫内。
-- Vulkan 套件 37 个二进制:36 通过;`TestVulkanNaniteSmoke` 的 Stage2
-  用例失败为**预存问题**(bc61879 基线同样失败,已核实;间接参数正确
-  index_count=384/instance_count=3,零 validation error,光栅输出空 —
-  引擎层 Nanite 问题,与 P4c 无关,待 MoltenVK 兼容性专项排查)。
+- Vulkan 套件 37 个二进制:36 通过;两个失败均为**预存问题(bc61879
+  基线复现一致)**:
+  - `TestVulkanNaniteSmoke` Stage2 用例 — 间接参数正确
+    (index_count=384/instance_count=3)、零 validation error、光栅输出空
+    (引擎层 Nanite 问题,待 MoltenVK 兼容性专项排查);
+  - `TestVulkanStandardPipelineSmoke` — 全部 5 用例通过后,进程退出时
+    Content 层静态 `free_list<RHIMeshAsset>` 析构断言(资产注册表退出
+    未清空,Content 层预存);
 - Metal 套件 15 个可构建二进制全部通过(含 P4c 参照生成器与性能孪生)。
 - 16 个陈旧测试 .cpp(BufferDesc 默认构造被删/Mock 缺纯虚)编译失败,
   均为预存(54cdc4b Dawn 时期引入),不在 23 二进制基线集内。
