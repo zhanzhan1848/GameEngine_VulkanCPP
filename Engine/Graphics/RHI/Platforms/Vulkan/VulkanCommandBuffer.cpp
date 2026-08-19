@@ -753,6 +753,10 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     pendingAttachments_.clear();
 
     const u32 colorCount = static_cast<u32>(desc.colorAttachments.size());
+    // P4c-F5: layered 渲染(renderTargetArrayLength > 1)时 attachment 改绑
+    // 2D_ARRAY 全层视图 + framebuffer layers 对齐;shader 内 gl_Layer 选层。
+    // Metal 等价物:setRenderTargetArrayLength(desc.renderTargetArrayLength)。
+    const bool layered = desc.renderTargetArrayLength > 1;
     colorRefs.reserve(colorCount);
     for (u32 i = 0; i < colorCount; ++i) {
         const auto& a = desc.colorAttachments[i];
@@ -791,7 +795,8 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         cv.color.float32[3] = a.clearValue.color.w;
         clears.push_back(cv);
         // Per-layer view: array textures pick the slice; single-layer textures fall through to vkView_.
-        fbAttachments.push_back(tex->GetLayerView(a.arrayLayer));
+        // P4c-F5: layered 模式改绑全层 2D_ARRAY 视图。
+        fbAttachments.push_back(layered ? tex->GetArrayView() : tex->GetLayerView(a.arrayLayer));
     }
 
     VkAttachmentReference depthRef{};
@@ -828,7 +833,8 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             cv.depthStencil.depth = a.clearValue.depth;
             cv.depthStencil.stencil = a.clearValue.stencil;
             clears.push_back(cv);
-            fbAttachments.push_back(tex->GetLayerView(a.arrayLayer));
+            // P4c-F5: depth attachment 同样走 array 视图(layered CSM 深度)。
+            fbAttachments.push_back(layered ? tex->GetArrayView() : tex->GetLayerView(a.arrayLayer));
         }
     }
 
@@ -876,7 +882,24 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     fbci.pAttachments = fbAttachments.data();
     fbci.width  = fbW;
     fbci.height = fbH;
+    // P4c-F5: layered 模式 framebuffer layers = renderTargetArrayLength
+    // (clamp 到 attachment 实际 layer 数 — 超出是调用方 bug,不静默)。
     fbci.layers = 1;
+    if (layered) {
+        u32 maxLayers = 1;
+        for (const auto viewTex : {vk.GetTexture(desc.colorAttachments.empty() ? handles::INVALID_RESOURCE : desc.colorAttachments[0].texture),
+                                    vk.GetTexture(desc.depthAttachment.texture)}) {
+            if (viewTex) {
+                maxLayers = std::max<u32>(maxLayers, viewTex->GetTextureDesc().arraySize);
+            }
+        }
+        if (desc.renderTargetArrayLength > maxLayers) {
+            std::cerr << "[VulkanCommandBuffer] renderTargetArrayLength "
+                      << desc.renderTargetArrayLength << " > attachment layers "
+                      << maxLayers << " — clamping" << std::endl;
+        }
+        fbci.layers = std::min(desc.renderTargetArrayLength, maxLayers);
+    }
     VkFramebuffer fb;
     if (vkCreateFramebuffer(dev, &fbci, nullptr, &fb) != VK_SUCCESS) {
         std::cerr << "[VulkanCommandBuffer] vkCreateFramebuffer failed" << std::endl;

@@ -736,6 +736,35 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     return true;
 }
 
+VkImageView VulkanTexture::GetArrayView() {
+    // P4c-F5: 非 array 纹理的默认 view 已覆盖唯一 layer。
+    if (texDesc_.arraySize <= 1 && texDesc_.type != TextureType::Texture2DArray) {
+        return vkView_;
+    }
+    if (arrayView_ != VK_NULL_HANDLE) return arrayView_;
+
+    VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = vkImage_;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vci.format = vkFormat_;
+    vci.components = VkComponentMapping{ VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+    vci.subresourceRange.aspectMask = GetAspectMask();
+    vci.subresourceRange.baseMipLevel = 0;
+    vci.subresourceRange.levelCount = texDesc_.mipLevels;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount = std::max<u32>(texDesc_.arraySize, 1u);
+
+    if (vkCreateImageView(dev, &vci, nullptr, &arrayView_) != VK_SUCCESS) {
+        std::cerr << "[VulkanTexture] GetArrayView vkCreateImageView failed" << std::endl;
+        arrayView_ = VK_NULL_HANDLE;
+        return VK_NULL_HANDLE;
+    }
+    return arrayView_;
+}
+
 void VulkanTexture::destroyImpl() {
     if (vkImage_ == VK_NULL_HANDLE && allocation_ == nullptr && vkView_ == VK_NULL_HANDLE) return;
 
@@ -748,10 +777,11 @@ void VulkanTexture::destroyImpl() {
 
     // Capture per-layer views so the deferred destroyer can release them too.
     std::vector<VkImageView> layerViewsToDestroy;
-    layerViewsToDestroy.reserve(layerViews_.size());
+    layerViewsToDestroy.reserve(layerViews_.size() + 1);
     for (const auto& [k, v] : layerViews_) {
         if (v != VK_NULL_HANDLE) layerViewsToDestroy.push_back(v);
     }
+    if (arrayView_ != VK_NULL_HANDLE) layerViewsToDestroy.push_back(arrayView_);
 
     device_.GetGarbageCollector().DeferredDestroy([dev, allocator, image, view, alloc, owned,
                                                    layerViewsToDestroy]() {
@@ -773,6 +803,7 @@ void VulkanTexture::destroyImpl() {
     currentLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     mipLayouts_.clear();
     layerViews_.clear();
+    arrayView_ = VK_NULL_HANDLE;
 }
 
 } // namespace primal::graphics::rhi

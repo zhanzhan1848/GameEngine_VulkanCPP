@@ -60,6 +60,11 @@ public:
     /// 单层 texture (arraySize<=1) 直接返回 vkView_,跳过 cache 查找。
     VkImageView GetLayerView(u32 layer);
 
+    /// P4c-F5: 获取覆盖全部 layer+mip 的 2D_ARRAY 视图(layered 渲染用,
+    /// 对应 Metal 的 renderTargetArrayLength 路径)。lazy 缓存,复用
+    /// GetLayerView 的模式;非 array 纹理直接返回 vkView_。
+    VkImageView GetArrayView();
+
     /// 原始 TextureDesc(包含 width/height/depth/mipLevels 等真实几何,
     /// RHIResource 基类的 ResourceDesc::size 是 u64 字节数,无法承载这些信息)
     const TextureDesc& GetTextureDesc() const { return texDesc_; }
@@ -134,6 +139,10 @@ private:
     /// Per-layer ImageView cache for array textures (key = array layer index).
     /// Lazily populated by GetLayerView(). Single-layer textures never touch this.
     std::unordered_map<u32, VkImageView> layerViews_;
+
+    /// P4c-F5: layered 渲染的 2D_ARRAY 全层视图(lazy)。destroyImpl 随
+    /// layerViews_ 一起延迟销毁。
+    VkImageView     arrayView_{VK_NULL_HANDLE};
 
     VkImageUsageFlags vkUsageFlags_{0};  // 构造时从 TextureDesc 缓存
     VkFormat         vkFormat_{VK_FORMAT_UNDEFINED};

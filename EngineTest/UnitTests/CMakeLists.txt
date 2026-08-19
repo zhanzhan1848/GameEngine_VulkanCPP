@@ -315,6 +315,30 @@ if(ENABLE_VULKAN)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 
+    # P4c-F5: layered rendering — cascade self-parity, layer isolation, layered depth.
+    add_executable(TestVulkanLayeredRendering
+        RHI/Core/TestVulkanLayeredRendering.cpp
+        ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
+    )
+    target_include_directories(TestVulkanLayeredRendering PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+    )
+    target_link_libraries(TestVulkanLayeredRendering PRIVATE Engine)
+    target_compile_definitions(TestVulkanLayeredRendering PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanLayeredRendering COMMAND TestVulkanLayeredRendering)
+    set_target_properties(TestVulkanLayeredRendering PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_custom_command(TARGET TestVulkanLayeredRendering POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
+                $<TARGET_FILE_DIR:TestVulkanLayeredRendering>/Assets
+    )
+
     # Phase 4b-T3.0: D32_FLOAT aspect mask end-to-end (staging → tex → readback).
     add_executable(TestVulkanDepthAspect RHI/Core/TestVulkanDepthAspect.cpp)
     target_include_directories(TestVulkanDepthAspect PRIVATE

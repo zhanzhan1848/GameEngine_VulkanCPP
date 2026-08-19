@@ -1131,6 +1131,23 @@ bool VulkanDevice::createLogicalDevice() {
     deviceExtensions.push_back("VK_KHR_portability_subset");
 #endif
 
+    // P4c-F5: layered 渲染的 vertex-shader gl_Layer 写出需要该能力
+    // (Vulkan 1.2 core;旧实例上以扩展形式提供)。按支持情况启用。
+    {
+        u32 extCount = 0;
+        vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> avail(extCount);
+        if (extCount > 0) {
+            vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount, avail.data());
+        }
+        for (const auto& e : avail) {
+            if (std::strcmp(e.extensionName, VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME) == 0) {
+                deviceExtensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+                break;
+            }
+        }
+    }
+
     // Vulkan 1.0+ 弃用 device-level layers;validation 必须在 instance 层开。
     // 保留 enabledLayerCount=0 以满足 VUID-VkDeviceCreateInfo-enabledLayerCount-12384。
 
