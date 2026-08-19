@@ -3,11 +3,17 @@
 // Entry point: taa_main  (passed via glslangValidator -e taa_main)
 //
 // Algorithm:
-//   1. Reproject current pixel to history UV using velocity
+//   1. Reproject current pixel to history UV:
+//        - When depth inputs are bound (depthValid): full matrix reprojection
+//          currDepth + currInvViewProj → world → prevViewProj → prevUV, and a
+//          disocclusion test against the previous frame's depth history
+//          (3×3 closest-depth compare, DepthHistoryManager's R32 copy).
+//        - Otherwise (Dawn / degenerate frames): velocity-based fallback.
 //   2. Sample 3×3 neighborhood in current color, compute min/max AABB
 //   3. Convert neighborhood AABB to YCoCg space, clip history to AABB
 //   4. Blend: result = mix(history_clipped, current, alpha)
-//      alpha = 0.1 (slow convergence for stability); 1.0 on first frame
+//      alpha = 0.1 (slow convergence for stability); 1.0 on first frame or
+//      when the depth test flags a disocclusion (history rejected)
 //
 // Flat descriptor bindings (Vulkan forbids overlapping texture/buffer namespaces):
 //   binding 0 = SampledImage   currentColorTex (this frame's jittered HDR)
@@ -15,6 +21,8 @@
 //   binding 2 = SampledImage   velocityTex     (per-pixel motion, NDC Y-up)
 //   binding 3 = StorageImage   outputTex       (RGBA16F, imageStore)
 //   binding 4 = UniformBuffer  TAAGlobals
+//   binding 5 = SampledImage   currDepthTex    (D32 GBuffer depth)
+//   binding 6 = SampledImage   prevDepthTex    (R32F previous-frame depth copy)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
@@ -27,13 +35,17 @@ layout(set = 0, binding = 0) uniform texture2D currentColorTex;
 layout(set = 0, binding = 1) uniform texture2D historyColorTex;
 layout(set = 0, binding = 2) uniform texture2D velocityTex;
 layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D outputTex;
+layout(set = 0, binding = 5) uniform texture2D currDepthTex;
+layout(set = 0, binding = 6) uniform texture2D prevDepthTex;
 
 layout(set = 0, binding = 4, std140) uniform TAAGlobals {
     vec4  screenSize;       // xy = (width, height), zw = (1/width, 1/height)
     float invHistoryValid;  // 1.0 if history uninitialized (first frame)
-    uint  _pad0;
+    uint  depthValid;       // 1.0 if currDepth/prevDepth + matrices are bound
     uint  _pad1;
     uint  _pad2;
+    mat4  currInvViewProj;  // inverse of this frame's view-projection
+    mat4  prevViewProj;     // previous frame's view-projection
 } globals;
 
 // --------------------------------------------------------------------------------
@@ -113,6 +125,38 @@ void taa_main() {
     vec2 currUV    = (vec2(pixel) + 0.5) * globals.screenSize.zw;
     vec2 historyUV = currUV - vec2(velocity.x, -velocity.y) * 0.5;
 
+    // Depth reprojection — replaces the (currently all-zero) velocity with a
+    // full matrix reprojection, and validates the history against the previous
+    // frame's depth to reject disoccluded pixels.
+    bool disoccluded = false;
+    if (globals.depthValid > 0u) {
+        float currDepth = texelFetch(currDepthTex, pixel, 0).r;
+
+        // NDC conventions mirror DeferredLighting.frag: NDC Y-up, z in [0,1].
+        vec3 ndc = vec3(currUV.x * 2.0 - 1.0, 1.0 - currUV.y * 2.0, currDepth);
+        vec4 worldH = globals.currInvViewProj * vec4(ndc, 1.0);
+        vec3 world = worldH.xyz / max(worldH.w, 1e-6);
+        vec4 prevClip = globals.prevViewProj * vec4(world, 1.0);
+        vec2 prevNDC = prevClip.xy / prevClip.w;
+        float expectedPrevDepth = prevClip.z / prevClip.w;
+
+        historyUV = vec2(prevNDC.x * 0.5 + 0.5, 0.5 - prevNDC.y * 0.5);
+
+        // Disocclusion: 3×3 closest-depth compare. If the surface we expect to
+        // find is farther than everything the previous frame saw around the
+        // reprojected position, the history pixel belongs to other geometry.
+        ivec2 prevDims = textureSize(prevDepthTex, 0);
+        ivec2 prevPixel = ivec2(historyUV * vec2(prevDims));
+        float closestPrev = 1.0;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                ivec2 sp = clamp(prevPixel + ivec2(dx, dy), ivec2(0), prevDims - 1);
+                closestPrev = min(closestPrev, texelFetch(prevDepthTex, sp, 0).r);
+            }
+        }
+        disoccluded = expectedPrevDepth > closestPrev + max(closestPrev * 0.1, 0.002);
+    }
+
     // Out-of-bounds or uninitialized history: keep current frame only.
     vec3 historyColor = currColor;
     if (globals.invHistoryValid < 0.5 &&
@@ -152,9 +196,9 @@ void taa_main() {
     vec3 historyClipped = yCoCgToRGB(historyYC);
 
     // Blend — lower alpha for stability (slower convergence, less ghosting).
-    // First frame: force alpha=1.0 to bypass uninitialized history.
+    // First frame or disoccluded pixel: force alpha=1.0 (history rejected).
     float alpha = 0.1;
-    if (globals.invHistoryValid > 0.5) {
+    if (globals.invHistoryValid > 0.5 || disoccluded) {
         alpha = 1.0;
     }
     vec3 result = mix(historyClipped, currColor, alpha);

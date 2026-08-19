@@ -328,6 +328,13 @@ private:
     std::unique_ptr<nanite::ColorHistoryManager> color_history_;
     std::unique_ptr<nanite::HZBSystem> hzb_system_;
 
+    // --- TAA depth reprojection ---
+    // Previous frame's view-projection (cached after each Render() that stores
+    // depth history). Together with DepthHistoryManager's prev depth copy it
+    // drives TAAPass's matrix reprojection + disocclusion rejection.
+    math::m4x4 prev_taa_view_proj_{};
+    bool has_prev_taa_view_proj_ = false;
+
     // --- Scene snapshot ---
     std::unique_ptr<RenderSceneSnapshot> scene_snapshot_;
 

@@ -1523,8 +1523,28 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         gpuDraw.SetJitterEnabled(taa_jitter_enabled_);
         // TAA — velocity from GBuffer MRT (NDC-space, matches TAA.comp expectation).
         auto velTAA = graph.ImportResource("GBufferVelocity_TAA", gpuDraw.GetGBufferVelocity());
+        // Depth reprojection: curr/prev depth + view-projection pair. Active on
+        // Vulkan/Metal once the first depth-history store has completed; until
+        // then (or when history is invalid) AddTAAPass keeps the velocity path.
+        PostProcess::TAADepthInputs taaDepth;
+        PostProcess::TAADepthInputs* taaDepthPtr = nullptr;
+        {
+            const auto prevDepth = depth_history_
+                ? depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_))
+                : nanite::DepthHistoryManager::DepthBuffer{};
+            if (has_prev_taa_view_proj_ && prevDepth.is_valid &&
+                prevDepth.texture != handles::INVALID_RESOURCE &&
+                gpuDraw.GetGBufferDepthSampleable() != handles::INVALID_RESOURCE) {
+                const math::m4x4 currVP = proj_matrix_ * view_matrix_;
+                taaDepth.currDepth = gpuDraw.GetGBufferDepthSampleable();
+                taaDepth.prevDepth = prevDepth.texture;
+                taaDepth.currInvViewProj = Inverse(currVP);
+                taaDepth.prevViewProj = prev_taa_view_proj_;
+                taaDepthPtr = &taaDepth;
+            }
+        }
         auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
-            render_width_, render_height_, static_cast<u32>(frameCount_));
+            render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthPtr);
         RGResourceHandle hdrClean = taaOut.output;
 
         auto bloomOut = PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
@@ -2172,8 +2192,26 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // BuildRenderGraph Step 10.5).
             gpuDraw.SetJitterEnabled(taa_jitter_enabled_);
             auto velRWCB = graph.ImportResource("GBufferVelocity_TAA_RWCB", gpuDraw.GetGBufferVelocity());
+            // Depth reprojection inputs — same gating as BuildRenderGraph.
+            PostProcess::TAADepthInputs taaDepthRWCB;
+            PostProcess::TAADepthInputs* taaDepthRWCBPtr = nullptr;
+            {
+                const auto prevDepthRWCB = depth_history_
+                    ? depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_))
+                    : nanite::DepthHistoryManager::DepthBuffer{};
+                if (has_prev_taa_view_proj_ && prevDepthRWCB.is_valid &&
+                    prevDepthRWCB.texture != handles::INVALID_RESOURCE &&
+                    gpuDraw.GetGBufferDepthSampleable() != handles::INVALID_RESOURCE) {
+                    const math::m4x4 currVP_RWCB = proj_matrix_ * view_matrix_;
+                    taaDepthRWCB.currDepth = gpuDraw.GetGBufferDepthSampleable();
+                    taaDepthRWCB.prevDepth = prevDepthRWCB.texture;
+                    taaDepthRWCB.currInvViewProj = Inverse(currVP_RWCB);
+                    taaDepthRWCB.prevViewProj = prev_taa_view_proj_;
+                    taaDepthRWCBPtr = &taaDepthRWCB;
+                }
+            }
             auto taaRWCB = PostProcess::AddTAAPass(graph, ppInputRG, velRWCB,
-                render_width_, render_height_, static_cast<u32>(frameCount_));
+                render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthRWCBPtr);
             RGResourceHandle hdrCleanRWCB = taaRWCB.output;
 
             auto bloomRWCB = PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
@@ -2233,6 +2271,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         graph.Compile();
         graph.Execute(cmd);
+
+        // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
+        // store. RWCB's command buffer is caller-owned; the store only records
+        // into it, submission stays with the caller.
+        if (depth_history_ && gpuDraw.IsInitialized()) {
+            if (depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_))) {
+                prev_taa_view_proj_ = proj_matrix_ * view_matrix_;
+                has_prev_taa_view_proj_ = true;
+            }
+        }
     } else if (!wants_gbuffer && final_blit_module_) {
         // T4.6.5 part 39: VisibilityBufferOnly path. Stage2 rasterized into
         // visibility_buffer_, ResolveVisibilityBuffer (auto-called in
@@ -2253,6 +2301,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         graph.Compile();
         graph.Execute(cmd);
+
+        // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
+        // store. RWCB's command buffer is caller-owned; the store only records
+        // into it, submission stays with the caller.
+        if (depth_history_ && gpuDraw.IsInitialized()) {
+            if (depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_))) {
+                prev_taa_view_proj_ = proj_matrix_ * view_matrix_;
+                has_prev_taa_view_proj_ = true;
+            }
+        }
     } else {
         // Fallback: manual blit GBuffer albedo to backbuffer
         RenderPassDesc rpDesc{};
@@ -2412,7 +2470,13 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
 
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
     if (depth_history_ && gpuDraw.IsInitialized()) {
-        depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_));
+        if (depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_))) {
+            // Depth copy for frame N landed — cache frame N's view-projection so
+            // next frame's TAA can reproject against this depth (the buffer the
+            // manager returns for frame N+1 is exactly the one stored here).
+            prev_taa_view_proj_ = proj_matrix_ * view_matrix_;
+            has_prev_taa_view_proj_ = true;
+        }
     }
     if (color_history_ && deferred_module_) {
         color_history_->StoreCurrentFrameColor(

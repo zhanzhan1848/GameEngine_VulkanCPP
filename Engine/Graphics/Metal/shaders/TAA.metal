@@ -3,11 +3,17 @@
 // include resolution — do not add #include here).
 //
 // Algorithm (identical to the GLSL version):
-//   1. Reproject current pixel to history UV using velocity
+//   1. Reproject current pixel to history UV:
+//        - When depth inputs are bound (depthValid): full matrix reprojection
+//          currDepth + currInvViewProj → world → prevViewProj → prevUV, and a
+//          disocclusion test against the previous frame's depth history
+//          (3×3 closest-depth compare, DepthHistoryManager's R32 copy).
+//        - Otherwise: velocity-based fallback.
 //   2. Sample 3x3 neighborhood in current color, compute min/max AABB
 //   3. Convert neighborhood AABB to YCoCg space, clip history to AABB
 //   4. Blend: result = mix(history_clipped, current, alpha)
-//      alpha = 0.1 (slow convergence for stability); 1.0 on first frame
+//      alpha = 0.1 (slow convergence for stability); 1.0 on first frame or
+//      disocclusion (history rejected)
 //
 // Bindings (flat slots, matching the RHI descriptor set layout):
 //   texture(0) = currentColorTex (this frame's jittered HDR)
@@ -15,6 +21,8 @@
 //   texture(2) = velocityTex     (per-pixel motion, NDC Y-up)
 //   texture(3) = outputTex       (RGBA16F, write)
 //   buffer(4)  = TAAGlobals
+//   texture(5) = currDepthTex    (D32 GBuffer depth)
+//   texture(6) = prevDepthTex    (R32F previous-frame depth copy)
 
 #include <metal_stdlib>
 using namespace metal;
@@ -22,9 +30,11 @@ using namespace metal;
 struct TAAGlobals {
     float4 screenSize;       // xy = (width, height), zw = (1/width, 1/height)
     float  invHistoryValid;  // 1.0 if history uninitialized (first frame)
-    uint32_t _pad0;
+    uint32_t depthValid;     // 1.0 if depth reprojection inputs are bound
     uint32_t _pad1;
     uint32_t _pad2;
+    float4x4 currInvViewProj;  // this frame's inverse view-projection
+    float4x4 prevViewProj;     // previous frame's view-projection
 };
 
 // Manual bilinear via 4 reads — no sampler, mirrors the GLSL samplerless path.
@@ -89,6 +99,8 @@ kernel void taa_main(
     texture2d<float, access::read>  velocityTex     [[texture(2)]],
     texture2d<float, access::write> outputTex       [[texture(3)]],
     constant TAAGlobals& globals [[buffer(4)]],
+    depth2d<float, access::read>   currDepthTex    [[texture(5)]],
+    texture2d<float, access::read> prevDepthTex    [[texture(6)]],
     uint2 gid [[thread_position_in_grid]])
 {
     int2 dims = int2(globals.screenSize.xy);
@@ -102,6 +114,34 @@ kernel void taa_main(
     // Velocity is clip-space NDC (Y up). Convert to UV-space delta (Y down).
     float2 currUV    = (float2(pixel) + 0.5) * globals.screenSize.zw;
     float2 historyUV = currUV - float2(velocity.x, -velocity.y) * 0.5;
+
+    // Depth reprojection — mirrors DeferredLighting.metal's NDC conventions
+    // (NDC Y-up, z in [0,1]) and rejects disoccluded history pixels.
+    bool disoccluded = false;
+    if (globals.depthValid > 0u) {
+        float currDepth = currDepthTex.read(uint2(pixel));
+
+        float3 ndc = float3(currUV.x * 2.0 - 1.0, 1.0 - currUV.y * 2.0, currDepth);
+        float4 worldH = globals.currInvViewProj * float4(ndc, 1.0);
+        float3 world = worldH.xyz / max(worldH.w, 1e-6);
+        float4 prevClip = globals.prevViewProj * float4(world, 1.0);
+        float2 prevNDC = prevClip.xy / prevClip.w;
+        float expectedPrevDepth = prevClip.z / prevClip.w;
+
+        historyUV = float2(prevNDC.x * 0.5 + 0.5, 0.5 - prevNDC.y * 0.5);
+
+        // Disocclusion: 3×3 closest-depth compare against the prev-frame copy.
+        int2 prevDims = int2(prevDepthTex.get_width(), prevDepthTex.get_height());
+        int2 prevPixel = int2(historyUV * float2(prevDims));
+        float closestPrev = 1.0;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int2 sp = clamp(prevPixel + int2(dx, dy), int2(0), prevDims - 1);
+                closestPrev = min(closestPrev, prevDepthTex.read(uint2(sp)).r);
+            }
+        }
+        disoccluded = expectedPrevDepth > closestPrev + max(closestPrev * 0.1, 0.002);
+    }
 
     // Out-of-bounds or uninitialized history: keep current frame only.
     float3 historyColor = currColor;
@@ -141,9 +181,9 @@ kernel void taa_main(
     float3 historyClipped = yCoCgToRGB(historyYC);
 
     // Blend — lower alpha for stability (slower convergence, less ghosting).
-    // First frame: force alpha=1.0 to bypass uninitialized history.
+    // First frame or disoccluded pixel: force alpha=1.0 (history rejected).
     float alpha = 0.1;
-    if (globals.invHistoryValid > 0.5) {
+    if (globals.invHistoryValid > 0.5 || disoccluded) {
         alpha = 1.0;
     }
     float3 result = mix(historyClipped, currColor, alpha);
