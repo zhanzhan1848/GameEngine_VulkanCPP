@@ -102,14 +102,34 @@ public:
 
 protected:
     void destroyImpl() override;
-    void* mapImpl(u64 offset, u64 size) override { return nullptr; }     // Texture 不支持 map
-    void unmapImpl() override {}
-    bool updateDataImpl(const void* data, u64 size, u64 offset) override { return false; }
+
+    /// P4c-F3: 仅 GPUMemoryUsage::Staging/Readback(VMA HOST_VISIBLE 持久映射)
+    /// 返回映射指针;DEVICE_LOCAL 返回 nullptr 并打一次 warn。
+    /// 与 Metal 的行为差异:Metal ReplaceRegion 本质也是内核 staging,
+    /// Vulkan 暴露为 updateData 而非 map(见 README 限制表)。
+    void* mapImpl(u64 offset, u64 size) override;
+    void unmapImpl() override;
+
+    /// P4c-F3: 立即模式纹理上传(资产加载期,无帧上下文)。
+    /// 语义:data 为 mip0/slice0 的紧密行主序 blob;
+    ///   - offset=0 且 size=整图 → 全图更新;
+    ///   - offset 非 0 → 行粒度子矩形(须满足 offset % bytesPerRow == 0,
+    ///     size 为 bytesPerRow 整数倍,覆盖 [offset/bytesPerRow, +rows) 行)。
+    /// 布局由 RHI 内部闭合:copy 后 barrier 回 currentLayout_(UNDEFINED 时
+    /// 提升为 SHADER_READ_ONLY),调用方无需手动 barrier(与 Metal 对齐)。
+    /// 帧内队列化路径(QueueBlit_Texture)属 F4;BC 压缩格式暂不支持
+    /// (走 CopyBufferToTexture 命令路径)。
+    bool updateDataImpl(const void* data, u64 size, u64 offset) override;
 
 private:
     VkImage          vkImage_{VK_NULL_HANDLE};
     VkImageView      vkView_{VK_NULL_HANDLE};
     VmaAllocation    allocation_{nullptr};
+
+    /// P4c-F3: Staging/Readback 内存用途的持久映射指针(VMA MAPPED)。
+    void*            mappedPtr_{nullptr};
+    /// P4c-F3: DEVICE_LOCAL map 拒绝只 warn 一次。
+    bool             warnedMapUnsupported_{false};
 
     /// Per-layer ImageView cache for array textures (key = array layer index).
     /// Lazily populated by GetLayerView(). Single-layer textures never touch this.

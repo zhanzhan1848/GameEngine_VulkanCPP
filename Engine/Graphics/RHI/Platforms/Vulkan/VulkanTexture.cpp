@@ -135,6 +135,8 @@ VulkanTexture::VulkanTexture(VulkanTexture&& other) noexcept
       vkImage_(other.vkImage_),
       vkView_(other.vkView_),
       allocation_(other.allocation_),
+      mappedPtr_(other.mappedPtr_),
+      warnedMapUnsupported_(other.warnedMapUnsupported_),
       vkUsageFlags_(other.vkUsageFlags_),
       vkFormat_(other.vkFormat_),
       ownsImage_(other.ownsImage_),
@@ -148,6 +150,7 @@ VulkanTexture::VulkanTexture(VulkanTexture&& other) noexcept
     other.vkImage_ = VK_NULL_HANDLE;
     other.vkView_ = VK_NULL_HANDLE;
     other.allocation_ = nullptr;
+    other.mappedPtr_ = nullptr;
     other.ownsImage_ = true;
     other.wrappedImage_ = VK_NULL_HANDLE;
     other.isView_ = false;
@@ -162,6 +165,8 @@ VulkanTexture& VulkanTexture::operator=(VulkanTexture&& other) noexcept {
         vkImage_ = other.vkImage_;
         vkView_ = other.vkView_;
         allocation_ = other.allocation_;
+        mappedPtr_ = other.mappedPtr_;
+        warnedMapUnsupported_ = other.warnedMapUnsupported_;
         vkUsageFlags_ = other.vkUsageFlags_;
         vkFormat_ = other.vkFormat_;
         ownsImage_ = other.ownsImage_;
@@ -175,6 +180,7 @@ VulkanTexture& VulkanTexture::operator=(VulkanTexture&& other) noexcept {
         other.vkImage_ = VK_NULL_HANDLE;
         other.vkView_ = VK_NULL_HANDLE;
         other.allocation_ = nullptr;
+        other.mappedPtr_ = nullptr;
         other.ownsImage_ = true;
         other.wrappedImage_ = VK_NULL_HANDLE;
         other.isView_ = false;
@@ -300,9 +306,15 @@ bool VulkanTexture::Initialize() {
     // 不静默:usage 需要的 feature bit 缺失时显式 warn 并失败,
     // 而不是让 vkCreateImage / 首次 draw 抛出晦涩的 validation error。
     // transfer bits 仅 warn(Vulkan 1.0 实现按 spec 隐含支持,部分驱动不显式上报)。
+    // P4c-F3: Staging/Readback 走 LINEAR tiling(host-visible 映射的 spec 正确
+    // 路径),capability 按对应 tiling 的 features 查询。
+    const bool hostVisibleUsage = (texDesc_.memoryUsage == GPUMemoryUsage::Staging ||
+                                   texDesc_.memoryUsage == GPUMemoryUsage::Readback);
     {
         VkFormatProperties fp{};
         vkGetPhysicalDeviceFormatProperties(vkDevice.GetNativePhysicalDevice(), vkFormat_, &fp);
+        const VkFormatFeatureFlags tilingFeatures =
+            hostVisibleUsage ? fp.linearTilingFeatures : fp.optimalTilingFeatures;
         struct FeatureCheck { VkImageUsageFlagBits usage; VkFormatFeatureFlags required; const char* name; };
         const FeatureCheck checks[] = {
             { VK_IMAGE_USAGE_SAMPLED_BIT,              VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,          "SAMPLED" },
@@ -352,7 +364,8 @@ bool VulkanTexture::Initialize() {
     // Otherwise use the caller-specified arraySize (1 for non-array, N for 2D-array).
     ici.arrayLayers = isCube ? 6u : std::max<u32>(1u, texDesc_.arraySize);
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    // P4c-F3: host-visible 用途走 LINEAR(映射写 spec 正确);其余 OPTIMAL。
+    ici.tiling = hostVisibleUsage ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
     ici.usage = vkUsageFlags_;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -360,6 +373,16 @@ bool VulkanTexture::Initialize() {
     VmaAllocationCreateInfo aci{};
     aci.flags = 0;
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;  // Texture 默认 GPU-only
+    // P4c-F3: Staging/Readback → HOST_VISIBLE + 持久 MAPPED(mapImpl 契约)。
+    if (texDesc_.memoryUsage == GPUMemoryUsage::Staging) {
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                  | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+    } else if (texDesc_.memoryUsage == GPUMemoryUsage::Readback) {
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                  | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+    }
     aci.memoryTypeBits = 0;
     aci.pool = nullptr;
     aci.pUserData = nullptr;
@@ -373,6 +396,7 @@ bool VulkanTexture::Initialize() {
                   << " fmt=" << static_cast<int>(vkFormat_) << std::endl;
         return false;
     }
+    mappedPtr_ = info.pMappedData;
 
     // === Default VkImageView ===
     // Choose viewType by TextureType:
@@ -475,6 +499,218 @@ VkImageView VulkanTexture::GetLayerView(u32 layer) {
     }
     layerViews_[layer] = view;
     return view;
+}
+
+// ============================================================================
+// P4c-F3: map / unmap / updateData
+// ============================================================================
+void* VulkanTexture::mapImpl(u64 offset, u64 size) {
+    (void)size;
+    if (mappedPtr_ != nullptr) {
+        return static_cast<u8*>(mappedPtr_) + offset;
+    }
+    if (!warnedMapUnsupported_) {
+        std::cerr << "[VulkanTexture] map on DEVICE_LOCAL texture unsupported — use "
+                     "updateData (staging upload) or create with GPUMemoryUsage::Staging/"
+                     "Readback. Further map attempts will fail silently." << std::endl;
+        warnedMapUnsupported_ = true;
+    }
+    return nullptr;
+}
+
+void VulkanTexture::unmapImpl() {
+    // 持久映射,nothing to do(VMA MAPPED 模式)。
+}
+
+bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
+    if (!data || size == 0) return false;
+    if (!ownsImage_ || isView_) {
+        std::cerr << "[VulkanTexture] updateData on wrap/view texture unsupported" << std::endl;
+        return false;
+    }
+    if (vkImage_ == VK_NULL_HANDLE || state_ != ResourceState::Ready) return false;
+
+    // P4c-F3 范围:2D 单 slice mip0;3D/cube/array/BC 留给命令路径。
+    if (texDesc_.size.z > 1 || texDesc_.type == TextureType::TextureCube ||
+        texDesc_.arraySize > 1) {
+        std::cerr << "[VulkanTexture] updateData: only 2D single-slice supported (F3 scope), "
+                     "use CopyBufferToTexture for 3D/cube/array" << std::endl;
+        return false;
+    }
+    if (vulkan::IsBlockCompressedFormat(texDesc_.format)) {
+        std::cerr << "[VulkanTexture] updateData: BC formats unsupported (block layout) — "
+                     "use CopyBufferToTexture" << std::endl;
+        return false;
+    }
+    const u64 bpt = vulkan::BytesPerTexel(texDesc_.format);
+    if (bpt == 0) {
+        std::cerr << "[VulkanTexture] updateData: unknown texel size for format "
+                  << static_cast<int>(texDesc_.format) << std::endl;
+        return false;
+    }
+
+    const u32 width  = std::max<u32>(1u, texDesc_.size.x);
+    const u32 height = std::max<u32>(1u, texDesc_.size.y);
+    const u64 bytesPerRow = u64(width) * bpt;
+    if (offset % bytesPerRow != 0 || size % bytesPerRow != 0) {
+        std::cerr << "[VulkanTexture] updateData: offset/size must be row-aligned ("
+                  << "bytesPerRow=" << bytesPerRow << ", offset=" << offset
+                  << ", size=" << size << ")" << std::endl;
+        return false;
+    }
+    const u32 y0 = static_cast<u32>(offset / bytesPerRow);
+    const u32 rows = static_cast<u32>(size / bytesPerRow);
+    if (y0 + rows > height) {
+        std::cerr << "[VulkanTexture] updateData: rows [" << y0 << ", " << y0 + rows
+                  << ") exceed height " << height << std::endl;
+        return false;
+    }
+
+    VulkanDevice& vkDev = static_cast<VulkanDevice&>(device_);
+    VmaAllocator allocator = vkDev.GetVmaAllocator();
+    VkDevice vkDevice = vkDev.GetNativeDevice();
+    u32 queueFamily = vkDev.GetGraphicsQueueFamily();
+    if (!allocator || queueFamily == UINT32_MAX) return false;
+
+    // 1. 一次性 staging(VulkanBuffer 慢路径同款;帧内队列化路径属 F4)。
+    VkBufferCreateInfo stagingCI{};
+    stagingCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingCI.size = size;
+    stagingCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo stagingACI{};
+    stagingACI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                     | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    stagingACI.usage = VMA_MEMORY_USAGE_AUTO;
+    VkBuffer stagingBuf = VK_NULL_HANDLE;
+    VmaAllocation stagingAlloc = nullptr;
+    VmaAllocationInfo stagingInfo{};
+    if (vmaCreateBuffer(allocator, &stagingCI, &stagingACI,
+                        &stagingBuf, &stagingAlloc, &stagingInfo) != VK_SUCCESS) {
+        std::cerr << "[VulkanTexture] updateData: staging vmaCreateBuffer failed" << std::endl;
+        return false;
+    }
+    std::memcpy(stagingInfo.pMappedData, data, size);
+
+    // 2. transient pool + one-shot cmdbuf(VulkanBuffer 慢路径同款)。
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = queueFamily;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(vkDevice, &pci, nullptr, &pool) != VK_SUCCESS) {
+        vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+        return false;
+    }
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    ai.commandPool = pool;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(vkDevice, &ai, &cmd) != VK_SUCCESS) {
+        vkDestroyCommandPool(vkDevice, pool, nullptr);
+        vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+        return false;
+    }
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    const VkImageAspectFlags aspect = GetAspectMask();
+
+    // 布局闭合由 RHI 内部负责(与 Metal 语义对齐,调用方无需手动 barrier):
+    // currentLayout_ → TRANSFER_DST → 拷贝 → 回 currentLayout_(UNDEFINED 时
+    // 提升为 SHADER_READ_ONLY)。
+    const VkImageLayout layoutBefore = currentLayout_;
+    const VkImageLayout layoutAfter =
+        (layoutBefore != VK_IMAGE_LAYOUT_UNDEFINED && layoutBefore != VK_IMAGE_LAYOUT_PREINITIALIZED)
+            ? layoutBefore : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    auto imageBarrier = [&](VkImageLayout oldL, VkImageLayout newL,
+                            VkAccessFlags srcAccess, VkPipelineStageFlags srcStage,
+                            VkAccessFlags dstAccess, VkPipelineStageFlags dstStage) {
+        VkImageMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = srcAccess;
+        b.dstAccessMask = dstAccess;
+        b.oldLayout = oldL;
+        b.newLayout = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = vkImage_;
+        b.subresourceRange.aspectMask = aspect;
+        b.subresourceRange.baseMipLevel = 0;
+        b.subresourceRange.levelCount = 1;   // 只更新 mip0
+        b.subresourceRange.baseArrayLayer = 0;
+        b.subresourceRange.layerCount = 1;
+        vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+
+    imageBarrier(layoutBefore, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = 0;
+    copy.bufferRowLength = 0;   // 紧密行主序
+    copy.bufferImageHeight = 0;
+    copy.imageSubresource.aspectMask = aspect;
+    copy.imageSubresource.mipLevel = 0;
+    copy.imageSubresource.baseArrayLayer = 0;
+    copy.imageSubresource.layerCount = 1;
+    copy.imageOffset = {0, static_cast<int32_t>(y0), 0};
+    copy.imageExtent = {width, rows, 1};
+    vkCmdCopyBufferToImage(cmd, stagingBuf, vkImage_,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    // 回布局:access/stage 按 final layout 配对(避免 VUID-VkImageMemoryBarrier-
+    // imageLayout-01215 家族)。
+    switch (layoutAfter) {
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            imageBarrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layoutAfter,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            break;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            imageBarrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layoutAfter,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+            imageBarrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layoutAfter,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                             VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+            break;
+        default:
+            imageBarrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layoutAfter,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+            break;
+    }
+    vkEndCommandBuffer(cmd);
+
+    // 3. submit + wait(同步语义:调用方期望返回后即可采样)。
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(vkDev.GetGraphicsQueue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(vkDev.GetGraphicsQueue());
+
+    vkFreeCommandBuffers(vkDevice, pool, 1, &cmd);
+    vkDestroyCommandPool(vkDevice, pool, nullptr);
+    vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+
+    SetCurrentLayout(layoutAfter);
+    return true;
 }
 
 void VulkanTexture::destroyImpl() {
