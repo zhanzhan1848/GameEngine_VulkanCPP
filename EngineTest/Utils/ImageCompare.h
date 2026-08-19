@@ -54,4 +54,16 @@ void Depth32ToRGBA8(const std::uint8_t* src, std::uint8_t* dst,
 float ComputeSSIM(const std::uint8_t* a, const std::uint8_t* b,
                   std::uint32_t w, std::uint32_t h);
 
+/// Maximum absolute per-channel difference between two RGBA8 buffers,
+/// in [0, 255]. Deterministic assertion primitive complementary to SSIM
+/// (P4c-F1 onwards: exact roundtrip checks use this, not SSIM).
+int MaxAbsDiff(const std::uint8_t* a, const std::uint8_t* b,
+               std::uint32_t w, std::uint32_t h);
+
+/// Convert a D16_UNORM depth buffer (2 bytes/pixel, [0, 1] range) to RGBA8
+/// grayscale (RGB = depth * 255, A = 255), mirroring Depth32ToRGBA8.
+/// `src` length must be w*h*2; `dst` length must be w*h*4.
+void Depth16ToRGBA8(const std::uint8_t* src, std::uint8_t* dst,
+                    std::uint32_t w, std::uint32_t h);
+
 } // namespace EngineTest

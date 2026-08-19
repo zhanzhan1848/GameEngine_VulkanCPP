@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -214,6 +215,36 @@ float ComputeSSIM(const std::uint8_t* a, const std::uint8_t* b,
     }
 
     return static_cast<float>(ssim_sum / double(num_windows));
+}
+
+int MaxAbsDiff(const std::uint8_t* a, const std::uint8_t* b,
+               std::uint32_t w, std::uint32_t h) {
+    int maxDiff = 0;
+    const std::size_t n = std::size_t(w) * h * 4;
+    for (std::size_t i = 0; i < n; ++i) {
+        int d = std::abs(int(a[i]) - int(b[i]));
+        if (d > maxDiff) maxDiff = d;
+    }
+    return maxDiff;
+}
+
+void Depth16ToRGBA8(const std::uint8_t* src, std::uint8_t* dst,
+                    std::uint32_t w, std::uint32_t h) {
+    // D16_UNORM: u16 per pixel, scaled to [0,1] by 65535.
+    for (std::uint32_t y = 0; y < h; ++y) {
+        for (std::uint32_t x = 0; x < w; ++x) {
+            std::size_t srcIdx = std::size_t(y) * w + x;
+            std::uint16_t raw;
+            std::memcpy(&raw, src + srcIdx * 2, 2);
+            float d = raw / 65535.0f;
+            std::uint8_t v = static_cast<std::uint8_t>(d * 255.0f + 0.5f);
+            std::size_t dstIdx = (std::size_t(y) * w + x) * 4;
+            dst[dstIdx + 0] = v;
+            dst[dstIdx + 1] = v;
+            dst[dstIdx + 2] = v;
+            dst[dstIdx + 3] = 255;
+        }
+    }
 }
 
 } // namespace EngineTest

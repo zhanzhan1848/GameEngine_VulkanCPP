@@ -95,9 +95,7 @@ public:
     /// 给 VulkanCommandBuffer 的 copy/blit/barrier 路径使用,替代旧的硬编码 COLOR_BIT。
     /// (与 Initialize() 中 VkImageView 的 aspectMask 计算保持一致 — 见 VulkanTexture.cpp:185,258。)
     VkImageAspectFlags GetAspectMask() const {
-        return (vkFormat_ == VK_FORMAT_D32_SFLOAT ||
-                vkFormat_ == VK_FORMAT_D24_UNORM_S8_UINT ||
-                vkFormat_ == VK_FORMAT_D32_SFLOAT_S8_UINT)
+        return vulkan::IsDepthVkFormat(vkFormat_)
                    ? VK_IMAGE_ASPECT_DEPTH_BIT
                    : VK_IMAGE_ASPECT_COLOR_BIT;
     }

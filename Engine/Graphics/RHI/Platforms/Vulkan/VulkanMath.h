@@ -24,7 +24,11 @@ namespace primal::graphics::rhi::vulkan {
 
 // ============================================================================
 // DataFormat → VkFormat
-// 仅映射当前测试和 ForwardRenderer 用到的子集,后续 Phase 按需扩展。
+// P4c-F1: 与 Metal ToMTLPixelFormat 全量对齐 — 除 Unknown / RGBA32_sRGB
+// (双方共同不支持项) 外全部映射到有效 VkFormat。
+// 32 位整型的 UNorm/SNorm 变体无 Vulkan/Metal 等价格式,按 Metal 先例
+// (R32_UNorm→R32Float) fallback 到 Float。
+// BC 压缩格式 macOS MoltenVK 路径不可用(反向缺口),为 Linux/Win 对齐。
 // 未支持的格式返回 VK_FORMAT_UNDEFINED 让上层在 vkCreateImage 时报错。
 // ============================================================================
 inline VkFormat ToVkFormat(DataFormat fmt) {
@@ -54,25 +58,158 @@ inline VkFormat ToVkFormat(DataFormat fmt) {
         case DataFormat::RGBA8_UInt:          return VK_FORMAT_R8G8B8A8_UINT;
         case DataFormat::RGBA8_SInt:          return VK_FORMAT_R8G8B8A8_SINT;
         case DataFormat::RGBA8_sRGB:          return VK_FORMAT_R8G8B8A8_SRGB;
-        case DataFormat::R16_Float:           return VK_FORMAT_R16_SFLOAT;
+        // --- 16 位整型变体(P4c-F1) ---
+        case DataFormat::R16_UNorm:           return VK_FORMAT_R16_UNORM;
+        case DataFormat::R16_SNorm:           return VK_FORMAT_R16_SNORM;
         case DataFormat::R16_UInt:            return VK_FORMAT_R16_UINT;
+        case DataFormat::R16_SInt:            return VK_FORMAT_R16_SINT;
+        case DataFormat::R16_Float:           return VK_FORMAT_R16_SFLOAT;
+        case DataFormat::RG16_UNorm:          return VK_FORMAT_R16G16_UNORM;
+        case DataFormat::RG16_SNorm:          return VK_FORMAT_R16G16_SNORM;
         case DataFormat::RG16_UInt:           return VK_FORMAT_R16G16_UINT;
+        case DataFormat::RG16_SInt:           return VK_FORMAT_R16G16_SINT;
         case DataFormat::RG16_Float:          return VK_FORMAT_R16G16_SFLOAT;
+        case DataFormat::RGBA16_UNorm:        return VK_FORMAT_R16G16B16A16_UNORM;
+        case DataFormat::RGBA16_SNorm:        return VK_FORMAT_R16G16B16A16_SNORM;
+        case DataFormat::RGBA16_UInt:         return VK_FORMAT_R16G16B16A16_UINT;
+        case DataFormat::RGBA16_SInt:         return VK_FORMAT_R16G16B16A16_SINT;
         case DataFormat::RGBA16_Float:        return VK_FORMAT_R16G16B16A16_SFLOAT;
-        case DataFormat::R32_Float:           return VK_FORMAT_R32_SFLOAT;
+        // --- 32 位(P4c-F1;UNorm/SNorm 按 Metal 先例 fallback Float) ---
+        case DataFormat::R32_UNorm:           return VK_FORMAT_R32_SFLOAT;
+        case DataFormat::R32_SNorm:           return VK_FORMAT_R32_SFLOAT;
         case DataFormat::R32_UInt:            return VK_FORMAT_R32_UINT;
+        case DataFormat::R32_SInt:            return VK_FORMAT_R32_SINT;
+        case DataFormat::R32_Float:           return VK_FORMAT_R32_SFLOAT;
+        case DataFormat::RG32_UNorm:          return VK_FORMAT_R32G32_SFLOAT;
+        case DataFormat::RG32_SNorm:          return VK_FORMAT_R32G32_SFLOAT;
+        case DataFormat::RG32_UInt:           return VK_FORMAT_R32G32_UINT;
+        case DataFormat::RG32_SInt:           return VK_FORMAT_R32G32_SINT;
         case DataFormat::RG32_Float:          return VK_FORMAT_R32G32_SFLOAT;
+        // RGB32 是 3 通道 12 字节;部分驱动对 storage/blit 受限,仅作采样/RT。
+        case DataFormat::RGB32_UNorm:         return VK_FORMAT_R32G32B32_SFLOAT;
+        case DataFormat::RGB32_SNorm:         return VK_FORMAT_R32G32B32_SFLOAT;
+        case DataFormat::RGB32_UInt:          return VK_FORMAT_R32G32B32_UINT;
+        case DataFormat::RGB32_SInt:          return VK_FORMAT_R32G32B32_SINT;
         case DataFormat::RGB32_Float:         return VK_FORMAT_R32G32B32_SFLOAT;
+        case DataFormat::RGBA32_UNorm:        return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case DataFormat::RGBA32_SNorm:        return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case DataFormat::RGBA32_UInt:         return VK_FORMAT_R32G32B32A32_UINT;
+        case DataFormat::RGBA32_SInt:         return VK_FORMAT_R32G32B32A32_SINT;
         case DataFormat::RGBA32_Float:        return VK_FORMAT_R32G32B32A32_SFLOAT;
+        // --- 深度模板(P4c-F1 补 D16) ---
+        case DataFormat::D16_UNorm:           return VK_FORMAT_D16_UNORM;
         case DataFormat::D32_Float:           return VK_FORMAT_D32_SFLOAT;
         case DataFormat::D24_UNorm_S8_UInt:   return VK_FORMAT_D24_UNORM_S8_UINT;
         case DataFormat::D32_Float_S8X24_UInt:return VK_FORMAT_D32_SFLOAT_S8_UINT;
+        // --- BC 压缩(P4c-F1 补齐全系;macOS 不可用,为 Linux/Win 对齐) ---
         case DataFormat::BC1_UNorm:           return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+        case DataFormat::BC1_sRGB:            return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case DataFormat::BC2_UNorm:           return VK_FORMAT_BC2_UNORM_BLOCK;
+        case DataFormat::BC2_sRGB:            return VK_FORMAT_BC2_SRGB_BLOCK;
         case DataFormat::BC3_UNorm:           return VK_FORMAT_BC3_UNORM_BLOCK;
+        case DataFormat::BC3_sRGB:            return VK_FORMAT_BC3_SRGB_BLOCK;
+        case DataFormat::BC4_UNorm:           return VK_FORMAT_BC4_UNORM_BLOCK;
+        case DataFormat::BC4_SNorm:           return VK_FORMAT_BC4_SNORM_BLOCK;
         case DataFormat::BC5_UNorm:           return VK_FORMAT_BC5_UNORM_BLOCK;
+        case DataFormat::BC5_SNorm:           return VK_FORMAT_BC5_SNORM_BLOCK;
+        case DataFormat::BC6H_UF16:           return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+        case DataFormat::BC6H_SF16:           return VK_FORMAT_BC6H_SFLOAT_BLOCK;
         case DataFormat::BC7_UNorm:           return VK_FORMAT_BC7_UNORM_BLOCK;
+        case DataFormat::BC7_sRGB:            return VK_FORMAT_BC7_SRGB_BLOCK;
         default:                              return VK_FORMAT_UNDEFINED;
     }
+}
+
+// ============================================================================
+// DataFormat 每 texel 字节数(未压缩格式;BC 压缩按 4x4 block 尺寸返回 block 字节数)
+// P4c-F1/F3: updateDataImpl 计算 bytesPerRow/bytesPerImage、EstimateTextureSizeBytes
+// 复用。返回 0 = 未知格式(调用方需显式处理,不静默)。
+// ============================================================================
+inline u64 BytesPerTexel(DataFormat fmt) {
+    switch (fmt) {
+        case DataFormat::R8_UNorm: case DataFormat::R8_SNorm:
+        case DataFormat::R8_UInt:  case DataFormat::R8_SInt:
+            return 1;
+        case DataFormat::R16_UNorm: case DataFormat::R16_SNorm:
+        case DataFormat::R16_UInt:  case DataFormat::R16_SInt:
+        case DataFormat::R16_Float:
+        case DataFormat::RG8_UNorm: case DataFormat::RG8_SNorm:
+        case DataFormat::RG8_UInt:  case DataFormat::RG8_SInt:
+            return 2;
+        case DataFormat::R8G8B8_UNorm: case DataFormat::R8G8B8_SNorm:
+        case DataFormat::R8G8B8_UInt:  case DataFormat::R8G8B8_SInt:
+            return 3;
+        case DataFormat::R32_UNorm: case DataFormat::R32_SNorm:
+        case DataFormat::R32_UInt:  case DataFormat::R32_SInt:
+        case DataFormat::R32_Float:
+        case DataFormat::RG16_UNorm: case DataFormat::RG16_SNorm:
+        case DataFormat::RG16_UInt:  case DataFormat::RG16_SInt:
+        case DataFormat::RG16_Float:
+        case DataFormat::RG8B8A8_UNorm: case DataFormat::RG8B8A8_SNorm:
+        case DataFormat::RG8B8A8_UInt:  case DataFormat::RG8B8A8_SInt:
+        case DataFormat::BGRA8_UNorm: case DataFormat::BGRA8_SNorm:
+        case DataFormat::BGRA8_UInt:  case DataFormat::BGRA8_SInt:
+        case DataFormat::RGBA8_UNorm: case DataFormat::RGBA8_SNorm:
+        case DataFormat::RGBA8_UInt:  case DataFormat::RGBA8_SInt:
+        case DataFormat::RGBA8_sRGB:
+        case DataFormat::D16_UNorm:
+        case DataFormat::D32_Float:
+        case DataFormat::D24_UNorm_S8_UInt:
+        case DataFormat::D32_Float_S8X24_UInt:
+            return 4;
+        case DataFormat::RG32_UNorm: case DataFormat::RG32_SNorm:
+        case DataFormat::RG32_UInt:  case DataFormat::RG32_SInt:
+        case DataFormat::RG32_Float:
+        case DataFormat::RGB32_UNorm: case DataFormat::RGB32_SNorm:
+        case DataFormat::RGB32_UInt:  case DataFormat::RGB32_SInt:
+        case DataFormat::RGB32_Float:
+        case DataFormat::RGBA16_UNorm: case DataFormat::RGBA16_SNorm:
+        case DataFormat::RGBA16_UInt:  case DataFormat::RGBA16_SInt:
+        case DataFormat::RGBA16_Float:
+            return 8;
+        case DataFormat::RGBA32_UNorm: case DataFormat::RGBA32_SNorm:
+        case DataFormat::RGBA32_UInt:  case DataFormat::RGBA32_SInt:
+        case DataFormat::RGBA32_Float:
+            return 16;
+        // BC 压缩:block 尺寸(8B = BC1/BC4,16B = BC2/BC3/BC5/BC6H/BC7)。
+        // 换算成 per-texel 需除以 16(block 4x4),由调用方处理。
+        case DataFormat::BC1_UNorm: case DataFormat::BC1_sRGB:
+        case DataFormat::BC4_UNorm: case DataFormat::BC4_SNorm:
+            return 8;
+        case DataFormat::BC2_UNorm: case DataFormat::BC2_sRGB:
+        case DataFormat::BC3_UNorm: case DataFormat::BC3_sRGB:
+        case DataFormat::BC5_UNorm: case DataFormat::BC5_SNorm:
+        case DataFormat::BC6H_UF16: case DataFormat::BC6H_SF16:
+        case DataFormat::BC7_UNorm: case DataFormat::BC7_sRGB:
+            return 16;
+        default:
+            return 0;
+    }
+}
+
+/// BC 压缩格式判断(影响 BytesPerTexel 的语义:updateData 按 block 计)
+inline bool IsBlockCompressedFormat(DataFormat fmt) {
+    switch (fmt) {
+        case DataFormat::BC1_UNorm: case DataFormat::BC1_sRGB:
+        case DataFormat::BC2_UNorm: case DataFormat::BC2_sRGB:
+        case DataFormat::BC3_UNorm: case DataFormat::BC3_sRGB:
+        case DataFormat::BC4_UNorm: case DataFormat::BC4_SNorm:
+        case DataFormat::BC5_UNorm: case DataFormat::BC5_SNorm:
+        case DataFormat::BC6H_UF16: case DataFormat::BC6H_SF16:
+        case DataFormat::BC7_UNorm: case DataFormat::BC7_sRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// 深度(含深度+模板)格式判断 — VkImageView aspectMask / barrier aspect 计算
+/// 统一入口。P4c-F1 起含 D16_UNORM。
+inline bool IsDepthVkFormat(VkFormat fmt) {
+    return fmt == VK_FORMAT_D16_UNORM ||
+           fmt == VK_FORMAT_D32_SFLOAT ||
+           fmt == VK_FORMAT_D24_UNORM_S8_UINT ||
+           fmt == VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
 // ============================================================================

@@ -235,8 +235,7 @@ bool VulkanTexture::Initialize() {
         vci.components = VkComponentMapping{ VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
         vci.subresourceRange.aspectMask =
-            (vkFormat_ == VK_FORMAT_D32_SFLOAT || vkFormat_ == VK_FORMAT_D24_UNORM_S8_UINT ||
-             vkFormat_ == VK_FORMAT_D32_SFLOAT_S8_UINT)
+            vulkan::IsDepthVkFormat(vkFormat_)
             ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
         vci.subresourceRange.baseMipLevel = viewDesc_.mostDetailedMip;
         vci.subresourceRange.levelCount   = std::max<u32>(1u, viewDesc_.mipCount);
@@ -270,8 +269,7 @@ bool VulkanTexture::Initialize() {
         vci.components = VkComponentMapping{ VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
         vci.subresourceRange.aspectMask =
-            (vkFormat_ == VK_FORMAT_D32_SFLOAT || vkFormat_ == VK_FORMAT_D24_UNORM_S8_UINT ||
-             vkFormat_ == VK_FORMAT_D32_SFLOAT_S8_UINT)
+            vulkan::IsDepthVkFormat(vkFormat_)
             ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
         vci.subresourceRange.baseMipLevel = 0;
         vci.subresourceRange.levelCount = std::max<u32>(1u, static_cast<u32>(mipLayouts_.size()));
@@ -296,6 +294,43 @@ bool VulkanTexture::Initialize() {
     if (vkUsageFlags_ == 0) {
         std::cerr << "[VulkanTexture] usage=Unknown rejected" << std::endl;
         return false;
+    }
+
+    // === P4c-F1: format capability 检查(vkGetPhysicalDeviceFormatProperties) ===
+    // 不静默:usage 需要的 feature bit 缺失时显式 warn 并失败,
+    // 而不是让 vkCreateImage / 首次 draw 抛出晦涩的 validation error。
+    // transfer bits 仅 warn(Vulkan 1.0 实现按 spec 隐含支持,部分驱动不显式上报)。
+    {
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(vkDevice.GetNativePhysicalDevice(), vkFormat_, &fp);
+        struct FeatureCheck { VkImageUsageFlagBits usage; VkFormatFeatureFlags required; const char* name; };
+        const FeatureCheck checks[] = {
+            { VK_IMAGE_USAGE_SAMPLED_BIT,              VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,          "SAMPLED" },
+            { VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,     VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,       "COLOR_ATTACHMENT" },
+            { VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, "DEPTH_STENCIL_ATTACHMENT" },
+            { VK_IMAGE_USAGE_STORAGE_BIT,              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT,          "STORAGE_IMAGE" },
+            { VK_IMAGE_USAGE_TRANSFER_SRC_BIT,         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT,           "TRANSFER_SRC" },
+            { VK_IMAGE_USAGE_TRANSFER_DST_BIT,         VK_FORMAT_FEATURE_TRANSFER_DST_BIT,           "TRANSFER_DST" },
+        };
+        const bool transferOnlyWarn = true;
+        for (const auto& c : checks) {
+            if ((vkUsageFlags_ & c.usage) == 0) continue;
+            if ((fp.optimalTilingFeatures & c.required) == 0) {
+                std::cerr << "[VulkanTexture] format " << static_cast<int>(texDesc_.format)
+                          << " (VkFormat " << static_cast<int>(vkFormat_) << ") lacks optimalTiling "
+                          << c.name << " support required by usage — "
+                          << ((c.usage == VK_IMAGE_USAGE_TRANSFER_SRC_BIT ||
+                               c.usage == VK_IMAGE_USAGE_TRANSFER_DST_BIT) && transferOnlyWarn
+                                  ? "continuing (implicit in Vk1.0)"
+                                  : "rejecting")
+                          << std::endl;
+                if (!(transferOnlyWarn &&
+                      (c.usage == VK_IMAGE_USAGE_TRANSFER_SRC_BIT ||
+                       c.usage == VK_IMAGE_USAGE_TRANSFER_DST_BIT))) {
+                    return false;
+                }
+            }
+        }
     }
 
     // === VkImageCreateInfo ===
@@ -378,8 +413,7 @@ bool VulkanTexture::Initialize() {
     vci.components = VkComponentMapping{ VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                          VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
     vci.subresourceRange.aspectMask =
-        (vkFormat_ == VK_FORMAT_D32_SFLOAT || vkFormat_ == VK_FORMAT_D24_UNORM_S8_UINT ||
-         vkFormat_ == VK_FORMAT_D32_SFLOAT_S8_UINT)
+        vulkan::IsDepthVkFormat(vkFormat_)
         ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     vci.subresourceRange.baseMipLevel = 0;
     vci.subresourceRange.levelCount = ici.mipLevels;
