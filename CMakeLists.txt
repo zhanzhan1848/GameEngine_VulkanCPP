@@ -310,6 +310,11 @@ if(NOT EMSCRIPTEN)
     include_directories(${CMAKE_SOURCE_DIR}/OSAPI/MAC)
 endif()
 
+# 启用测试注册（必须在所有 add_subdirectory 之前，否则子目录里的 add_test
+# 会被静默丢弃——EngineTest 曾因在其自身 CMakeLists 的 add_subdirectory 之后
+# 才调用 enable_testing() 导致 ctest 永远列出 0 个测试）
+enable_testing()
+
 # 添加子项目
 # ContentTools 的 Windows 构建依赖 FBX SDK 与 DirectXTex（find_package REQUIRED，
 # 且仓库内没有对应的 Find 模块），无这些 SDK 的机器（如 CI runner）用

@@ -44,7 +44,8 @@ add_custom_target(run_integration_tests
 )
 
 # 设置CTEST配置
-enable_testing()
+# NOTE: enable_testing() 已上移至顶层 CMakeLists.txt（必须在 add_subdirectory
+# 之前调用才能让本目录树内的 add_test 注册进 ctest）。
 set(CTEST_OUTPUT_ON_FAILURE TRUE)
 
 # 输出配置信息
