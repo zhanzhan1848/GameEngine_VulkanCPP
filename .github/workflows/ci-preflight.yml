@@ -1,0 +1,142 @@
+name: CI Preflight (Pre-Build Validation)
+
+# 编译前校验门禁（可复用工作流）。
+# 被 windows-ci.yml / wasm-build.yml / linux-ci.yml 作为首道 job 调用，
+# 各架构的编译 job 通过 needs: preflight 依赖本工作流——校验不通过则
+# 不消耗昂贵的构建资源（自托管 Windows / Emscripten 全量构建）。
+#
+# 全部检查在设计上都是"快而严"：
+#   - YAML / 冲突标记 / 脚本语法 / .gitmodules 健全性：秒级，纯静态
+#   - CMake configure 冒烟（默认 + Vulkan 开启）：不编译任何代码，
+#     只验证 CMake 脚本与依赖探测
+#   - ctest 注册数 > 0：守住 enable_testing 位置的回归（曾因在
+#     add_subdirectory 之后调用导致 ctest 永远列出 0 个测试，测试腐烂
+#     无人发现——见 dev 分支 4365d2e）
+#
+# 运行环境为 GitHub 托管 ubuntu-latest，无需 macOS runner。
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: 编译前校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 初始化轻量 submodule（configure 冒烟所需）
+        # 根 CMakeLists 在缺失 meshoptimizer 头文件时 FATAL_ERROR，
+        # configure 冒烟必须带上。与 windows-ci 相同的选择性集合，
+        # 跳过 dawn/PhysX/WebGPU/astc-encoder（数 GB，仅 WASM/WebGPU 用）。
+        run: |
+          git submodule update --init \
+            third_party/meshoptimizer \
+            third_party/stb \
+            third_party/moodycamel-ConcurrentQueue \
+            third_party/lua
+
+      - name: 校验 workflow YAML 有效性
+        run: |
+          python3 - <<'PY'
+          import glob, sys
+          import yaml
+          files = sorted(glob.glob('.github/workflows/*.yml'))
+          if not files:
+              sys.exit('no workflow files found')
+          bad = []
+          for f in files:
+              try:
+                  with open(f) as fh:
+                      yaml.safe_load(fh)
+                  print(f'[yaml-ok] {f}')
+              except Exception as e:
+                  print(f'[yaml-FAIL] {f}: {e}')
+                  bad.append(f)
+          if bad:
+              sys.exit(f'invalid YAML: {bad}')
+          PY
+
+      - name: 扫描合并冲突标记
+        run: |
+          # 防止带冲突标记的文件被提交（坏合并进库后所有架构一起红）。
+          # git grep 命中时退出码为 0，因此命中即主动失败。
+          if git grep -nE '^(<{7} |>{7} )' -- .; then
+            echo '::error::conflict markers found (see list above)'
+            exit 1
+          fi
+          echo '[ok] no conflict markers'
+
+      - name: 脚本语法检查
+        run: |
+          shopt -s nullglob
+          scripts=(scripts/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo '[skip] no shell scripts found'
+          fi
+          for f in "${scripts[@]}"; do
+            bash -n "$f" || exit 1
+            echo "[bash-ok] $f"
+          done
+
+      - name: 校验 .gitmodules 路径健全性
+        run: |
+          python3 - <<'PY'
+          import configparser, os, sys
+          if not os.path.exists('.gitmodules'):
+              print('[skip] no .gitmodules')
+              sys.exit(0)
+          cfg = configparser.ConfigParser()
+          cfg.read('.gitmodules')
+          bad = []
+          for sec in cfg.sections():
+              path = cfg.get(sec, 'path', fallback=None)
+              if not path:
+                  bad.append(f'{sec}: missing path')
+              elif not os.path.isdir(path):
+                  bad.append(f'{sec}: path not in tree: {path}')
+              else:
+                  print(f'[submodule-ok] {sec} -> {path}')
+          if bad:
+              sys.exit('.gitmodules issues: ' + '; '.join(bad))
+          PY
+
+      - name: 安装 Vulkan 开发包（configure 冒烟用）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan-dev
+
+      - name: CMake configure 冒烟（默认配置）
+        run: |
+          cmake -S . -B build-check \
+            -DBUILD_CONTENT_TOOLS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: CMake configure 冒烟（Vulkan 开启）
+        run: |
+          cmake -S . -B build-check-vk \
+            -DBUILD_CONTENT_TOOLS=OFF \
+            -DENABLE_VULKAN=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: ctest 注册防回归（测试数必须 > 0）
+        run: |
+          # 只读已生成的 CTestTestfile，不编译。enable_testing() 若被挪回
+          # add_subdirectory 之后，这里会立刻变 0 并挡下本次推送。
+          # 注意：ctest -N 的逐条列表会被截断，不能按行数统计，
+          # 必须解析末尾的 "Total Tests: N" 汇总行。
+          total=$(ctest --test-dir build-check -N 2>/dev/null | grep -oE 'Total Tests: [0-9]+' | grep -oE '[0-9]+') || total=0
+          total=${total:-0}
+          echo "registered tests: $total"
+          if [ "$total" -eq 0 ]; then
+            echo '::error::ctest registered 0 tests — enable_testing() regression?'
+            exit 1
+          fi

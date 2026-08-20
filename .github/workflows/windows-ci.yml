@@ -1,9 +1,9 @@
 name: Windows CI (Self-Hosted)
 
 # 文件级注释：
-# 推送 feat/vulkan-rhi-backend 时，在自托管 Windows runner 上编译并运行测试。
-# 与 dispatch-ci.yml（GitHub 托管 macOS runner 的调度器）互不影响——
-# 该调度器的分支过滤为 feature/**、features/**，不匹配 feat/* 前缀。
+# 推送 dev 分支时，在自托管 Windows runner 上编译并运行测试。
+# （原触发分支 feat/vulkan-rhi-backend 已合并进 dev，随合并迁移。）
+# macOS CI 已全链路移除（费用问题），本仓库不再有 GitHub 托管 macOS runner。
 #
 # 脚本步骤统一用 shell: powershell（Windows 内置，runner 原生支持）。
 # 不要用 shell: bash——自托管机器上默认解析到 C:\Windows\System32\bash.exe（WSL 启动器）；
@@ -20,7 +20,7 @@ name: Windows CI (Self-Hosted)
 on:
   push:
     branches:
-      - feat/vulkan-rhi-backend
+      - dev
   workflow_dispatch: {}
 
 permissions:
@@ -32,8 +32,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 编译前校验门禁：YAML/冲突标记/脚本语法/.gitmodules/configure 冒烟/
+  # ctest 注册数，全部通过才进入自托管构建（省 runner 时间，坏提交直接挡下）。
+  preflight:
+    name: 编译前校验
+    uses: ./.github/workflows/ci-preflight.yml
+
   build-and-test:
     name: 编译与测试 (Windows / MSVC / Vulkan)
+    needs: preflight
     runs-on: [self-hosted, Windows, x64]
     timeout-minutes: 120
 

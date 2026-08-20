@@ -1,0 +1,76 @@
+name: Linux CI (Compile-Only)
+
+# 推送 dev 分支时在 ubuntu 上做原生 Linux 编译验证（gcc + clang 双编译器矩阵）。
+#
+# 仅编译、不运行测试：Linux 的 Vulkan XCB surface 尚未实现（对齐计划 F10，
+# VulkanSurface_Linux.cpp 的 XCB connection 仍为 nullptr），渲染类测试在
+# Linux 上无法运行。本工作流的价值是把 Linux 特有的编译期问题（pthread
+# 链接守卫、X11/平台头文件、编译器差异）挡在合入前。
+#
+# 只构建 Engine 目标（含 Vulkan RHI 后端）：EngineTest 的部分测试目标
+# 尚未在 Linux 上移植（Apple 专有代码守卫不全），全量构建从零开始必然
+# 红；待测试目标 Linux 化后再扩展为全量构建 + ctest。
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 编译前校验门禁（与 windows-ci / wasm-build 共用）
+  preflight:
+    name: 编译前校验
+    uses: ./.github/workflows/ci-preflight.yml
+
+  compile:
+    name: 编译 (${{ matrix.compiler }} / Vulkan)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 初始化必需的 submodule
+        # 与 windows-ci 相同的选择性集合；跳过 dawn/PhysX/WebGPU/astc-encoder
+        run: |
+          git submodule update --init \
+            third_party/meshoptimizer \
+            third_party/stb \
+            third_party/moodycamel-ConcurrentQueue \
+            third_party/lua
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libvulkan-dev
+          ${{ matrix.compiler }} --version
+
+      - name: 配置 CMake (Release + Vulkan RHI)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
+            -DENABLE_VULKAN=ON \
+            -DBUILD_CONTENT_TOOLS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: 编译 Engine 目标
+        run: |
+          cmake --build build --target Engine --parallel $(nproc)

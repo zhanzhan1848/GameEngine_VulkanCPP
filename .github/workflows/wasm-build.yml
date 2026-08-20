@@ -1,17 +1,30 @@
 name: WASM Build & Deploy
 
+# 推送 dev 分支时交叉编译 WASM (Emscripten + WebGPU) 并部署 gh-pages。
+# （原触发分支 dawn-webgpu-backend 已删除、features/dawn-webgpu-backend
+# 已合并休眠，随 Dawn→dev 合并迁移。移除旧触发避免与 dev 互相覆盖 gh-pages。）
 on:
   push:
     branches:
-      - dawn-webgpu-backend
-      - features/dawn-webgpu-backend
+      - dev
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# 连续推送时取消旧的排队/运行任务，避免 gh-pages 部署互相覆盖与堆叠
+concurrency:
+  group: wasm-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # 编译前校验门禁：通过后才进入昂贵的 Emscripten 全量构建
+  preflight:
+    name: 编译前校验
+    uses: ./.github/workflows/ci-preflight.yml
+
   build-and-deploy:
+    needs: preflight
     runs-on: ubuntu-latest
 
     steps:
