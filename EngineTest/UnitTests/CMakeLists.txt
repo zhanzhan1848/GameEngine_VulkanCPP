@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 # 设置C++标准
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 设置测试输出目录
@@ -38,7 +38,7 @@ add_test(NAME StandaloneRHI_Test COMMAND StandaloneRHI_Test)
 set_target_properties(StandaloneRHI_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI设备管理测试
 add_executable(StandaloneRHI_Device_Test RHI/Core/TestRHIDevice.cpp)
@@ -47,7 +47,7 @@ add_test(NAME StandaloneRHI_Device_Test COMMAND StandaloneRHI_Device_Test)
 set_target_properties(StandaloneRHI_Device_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_Device_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_Device_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI设备工厂测试（端到端验证 CreateRHIDevice/DestroyRHIDevice）
 add_executable(TestRHIDeviceFactory RHI/Core/TestRHIDeviceFactory.cpp)
@@ -858,7 +858,7 @@ add_test(NAME StandaloneRHI_Resource_Test COMMAND StandaloneRHI_Resource_Test)
 set_target_properties(StandaloneRHI_Resource_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_Resource_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_Resource_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI自适应内存池测试
 add_executable(StandaloneRHI_AdaptiveMemoryPool_Test 
@@ -877,7 +877,7 @@ target_include_directories(StandaloneRHI_AdaptiveMemoryPool_Test PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
-target_compile_definitions(StandaloneRHI_AdaptiveMemoryPool_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_AdaptiveMemoryPool_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建哈希基准测试
 add_executable(HashBenchmark RHI/Core/HashBenchmark.cpp)
@@ -901,7 +901,7 @@ add_test(NAME StandaloneRHI_BatchRenderer_Test COMMAND StandaloneRHI_BatchRender
 set_target_properties(StandaloneRHI_BatchRenderer_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_BatchRenderer_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_BatchRenderer_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI确定性预取测试
 add_executable(StandaloneRHI_DeterministicPrefetch_Test RHI/Core/TestRHIDeterministicPrefetch.cpp)
@@ -917,7 +917,7 @@ add_test(NAME StandaloneRHI_DeterministicPrefetch_Test COMMAND StandaloneRHI_Det
 set_target_properties(StandaloneRHI_DeterministicPrefetch_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_DeterministicPrefetch_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_DeterministicPrefetch_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建ShadowUtils测试
 add_executable(StandaloneRHI_ShadowUtils_Test 
@@ -934,7 +934,7 @@ target_include_directories(StandaloneRHI_ShadowUtils_Test PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
-target_compile_definitions(StandaloneRHI_ShadowUtils_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_ShadowUtils_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 # stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
 # not covered by the hand-picked file list; link Engine for the remainder.
 target_link_libraries(StandaloneRHI_ShadowUtils_Test PRIVATE Engine)
@@ -950,7 +950,7 @@ target_include_directories(TestSphericalHarmonics PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
-target_compile_definitions(TestSphericalHarmonics PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestSphericalHarmonics PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 PRT Baker 测试
 add_executable(TestPRTBaker Graphics/TestPRTBaker.cpp)
@@ -964,7 +964,7 @@ add_test(NAME TestPRTBaker COMMAND TestPRTBaker)
 set_target_properties(TestPRTBaker PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestPRTBaker PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestPRTBaker PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建SamplingUtils测试
 add_executable(StandaloneRHI_SamplingUtils_Test Graphics/TestSamplingUtils.cpp)
@@ -979,7 +979,7 @@ add_test(NAME StandaloneRHI_SamplingUtils_Test COMMAND StandaloneRHI_SamplingUti
 set_target_properties(StandaloneRHI_SamplingUtils_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_SamplingUtils_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_SamplingUtils_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 
 # 创建Metal数学库测试
@@ -1417,7 +1417,7 @@ if(APPLE)
     set_target_properties(TestMetalCommandEncoding PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    target_compile_definitions(TestMetalCommandEncoding PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestMetalCommandEncoding PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 创建 Metal Shader 熱重载测试
     add_executable(TestMetalHotReload Graphics/Metal/TestMetalHotReload.cpp)
@@ -1432,7 +1432,7 @@ if(APPLE)
     set_target_properties(TestMetalHotReload PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    target_compile_definitions(TestMetalHotReload PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestMetalHotReload PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 创建 ShaderIR + MaterialGraphToIR 测试
     add_executable(TestShaderIR Graphics/TestShaderIR.cpp)
@@ -1446,7 +1446,7 @@ if(APPLE)
     set_target_properties(TestShaderIR PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    target_compile_definitions(TestShaderIR PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestShaderIR PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 创建 IBL Shader 测试
     add_executable(StandaloneGraphics_IBL_Test Graphics/TestIBLShaders.cpp)
@@ -1456,7 +1456,7 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/Engine/Common
         ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
     )
-    target_compile_definitions(StandaloneGraphics_IBL_Test PRIVATE DEBUG _DEBUG STANDALONE_TEST PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(StandaloneGraphics_IBL_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG> STANDALONE_TEST PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
     add_test(NAME StandaloneGraphics_IBL_Test COMMAND StandaloneGraphics_IBL_Test)
     set_target_properties(StandaloneGraphics_IBL_Test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
@@ -1477,7 +1477,7 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/Engine/Common
         ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
     )
-    target_compile_definitions(StandaloneGraphics_Material_Test PRIVATE DEBUG _DEBUG STANDALONE_TEST PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(StandaloneGraphics_Material_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG> STANDALONE_TEST PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
     add_test(NAME StandaloneGraphics_Material_Test COMMAND StandaloneGraphics_Material_Test)
     set_target_properties(StandaloneGraphics_Material_Test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
@@ -1499,7 +1499,7 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
     )
     target_link_libraries(TestRHISceneSynchronizer PRIVATE Engine)
-    target_compile_definitions(TestRHISceneSynchronizer PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestRHISceneSynchronizer PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
     add_test(NAME TestRHISceneSynchronizer COMMAND TestRHISceneSynchronizer)
     set_target_properties(TestRHISceneSynchronizer PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
@@ -1662,7 +1662,7 @@ add_test(NAME StandaloneRHI_GPUOptimizer_Test COMMAND StandaloneRHI_GPUOptimizer
 set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_GPUOptimizer_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_GPUOptimizer_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI多线程命令生成器测试
 add_executable(StandaloneRHI_MultiThreadedCommandGenerator_Test RHI/Core/TestRHIMultiThreadedCommandGenerator.cpp)
@@ -1676,12 +1676,14 @@ target_include_directories(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIV
 # 链接Engine库以获取RHIMultiThreadedCommandGenerator实现
 target_link_libraries(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE Engine)
 # 添加pthread支持用于多线程测试
-target_link_libraries(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE pthread)
+if(NOT WIN32)  # MSVC 没有 pthread.lib
+    target_link_libraries(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE pthread)
+endif()
 add_test(NAME StandaloneRHI_MultiThreadedCommandGenerator_Test COMMAND StandaloneRHI_MultiThreadedCommandGenerator_Test)
 set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_MultiThreadedCommandGenerator_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI分配器测试
 add_executable(StandaloneRHI_Allocator_Test RHI/Core/TestRHIAllocator.cpp)
@@ -1692,12 +1694,15 @@ target_include_directories(StandaloneRHI_Allocator_Test PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
 # 链接Engine库
-target_link_libraries(StandaloneRHI_Allocator_Test PRIVATE Engine pthread)
+if(NOT WIN32)
+    target_link_libraries(StandaloneRHI_Allocator_Test PRIVATE pthread)
+endif()
+target_link_libraries(StandaloneRHI_Allocator_Test PRIVATE Engine)
 add_test(NAME StandaloneRHI_Allocator_Test COMMAND StandaloneRHI_Allocator_Test)
 set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_Allocator_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_Allocator_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI垃圾回收器测试
 add_executable(StandaloneRHI_GarbageCollector_Test RHI/Core/TestRHIGarbageCollector.cpp)
@@ -1708,12 +1713,15 @@ target_include_directories(StandaloneRHI_GarbageCollector_Test PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
 # 链接Engine库
-target_link_libraries(StandaloneRHI_GarbageCollector_Test PRIVATE Engine pthread)
+if(NOT WIN32)
+    target_link_libraries(StandaloneRHI_GarbageCollector_Test PRIVATE pthread)
+endif()
+target_link_libraries(StandaloneRHI_GarbageCollector_Test PRIVATE Engine)
 add_test(NAME StandaloneRHI_GarbageCollector_Test COMMAND StandaloneRHI_GarbageCollector_Test)
 set_target_properties(StandaloneRHI_GarbageCollector_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_GarbageCollector_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_GarbageCollector_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 
 # 创建RHI命令队列测试
@@ -1723,7 +1731,7 @@ add_test(NAME StandaloneRHI_Queue_Test COMMAND StandaloneRHI_Queue_Test)
 set_target_properties(StandaloneRHI_Queue_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_Queue_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_Queue_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RenderMesh测试
 add_executable(StandaloneGraphics_RenderMesh_Test 
@@ -1745,7 +1753,7 @@ add_test(NAME StandaloneGraphics_RenderMesh_Test COMMAND StandaloneGraphics_Rend
 set_target_properties(StandaloneGraphics_RenderMesh_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderMesh_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_RenderMesh_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(StandaloneGraphics_RenderMesh_Test PROPERTIES FOLDER "Tests/Graphics")
 
 # 创建 Pipeline Component 测试
@@ -1760,7 +1768,7 @@ add_test(NAME TestPipelineComponent COMMAND TestPipelineComponent)
 set_target_properties(TestPipelineComponent PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestPipelineComponent PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestPipelineComponent PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 CommandBuffer Component 测试
 add_executable(TestCommandBufferComponent Components/TestCommandBufferComponent.cpp)
@@ -1774,7 +1782,7 @@ add_test(NAME TestCommandBufferComponent COMMAND TestCommandBufferComponent)
 set_target_properties(TestCommandBufferComponent PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestCommandBufferComponent PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestCommandBufferComponent PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 
 # 创建RenderTexture测试
@@ -1797,7 +1805,7 @@ add_test(NAME StandaloneGraphics_RenderTexture_Test COMMAND StandaloneGraphics_R
 set_target_properties(StandaloneGraphics_RenderTexture_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderTexture_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_RenderTexture_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(StandaloneGraphics_RenderTexture_Test PROPERTIES FOLDER "Tests/Graphics")
 
 # 创建RenderProxy测试
@@ -1819,7 +1827,7 @@ add_test(NAME StandaloneGraphics_RenderProxy_Test COMMAND StandaloneGraphics_Ren
 set_target_properties(StandaloneGraphics_RenderProxy_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderProxy_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_RenderProxy_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 # stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
 # not covered by the hand-picked file list; link Engine for the remainder.
 target_link_libraries(StandaloneGraphics_RenderProxy_Test PRIVATE Engine)
@@ -1844,7 +1852,7 @@ add_test(NAME StandaloneGraphics_RenderScene_Test COMMAND StandaloneGraphics_Ren
 set_target_properties(StandaloneGraphics_RenderScene_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderScene_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_RenderScene_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 # stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
 # not covered by the hand-picked file list; link Engine for the remainder.
 target_link_libraries(StandaloneGraphics_RenderScene_Test PRIVATE Engine)
@@ -1870,7 +1878,7 @@ add_test(NAME StandaloneGraphics_RenderSceneLight_Test COMMAND StandaloneGraphic
 set_target_properties(StandaloneGraphics_RenderSceneLight_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderSceneLight_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_RenderSceneLight_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 # stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
 # not covered by the hand-picked file list; link Engine for the remainder.
 target_link_libraries(StandaloneGraphics_RenderSceneLight_Test PRIVATE Engine)
@@ -1897,7 +1905,7 @@ add_test(NAME StandaloneGraphics_RenderView_Test COMMAND StandaloneGraphics_Rend
 set_target_properties(StandaloneGraphics_RenderView_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderView_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_RenderView_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 # stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
 # not covered by the hand-picked file list; link Engine for the remainder.
 target_link_libraries(StandaloneGraphics_RenderView_Test PRIVATE Engine)
@@ -1936,7 +1944,7 @@ add_test(NAME StandaloneGraphics_RenderSystem_Test COMMAND StandaloneGraphics_Re
 set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -1961,7 +1969,7 @@ add_test(NAME TestRenderGraph COMMAND TestRenderGraph)
 set_target_properties(TestRenderGraph PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRenderGraph PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestRenderGraph PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestRenderGraph PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -1988,7 +1996,7 @@ add_test(NAME TestRenderGraphDebug COMMAND TestRenderGraphDebug)
 set_target_properties(TestRenderGraphDebug PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRenderGraphDebug PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestRenderGraphDebug PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestRenderGraphDebug PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -2013,12 +2021,14 @@ target_compile_definitions(MpscQueueSimpleTest PRIVATE
     _DEBUG
 )
 set_target_properties(MpscQueueSimpleTest PROPERTIES
-    CXX_STANDARD 17
+    CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 # 添加pthread支持
-target_link_libraries(MpscQueueSimpleTest PRIVATE pthread)
+if(NOT WIN32)  # MSVC 没有 pthread.lib
+    target_link_libraries(MpscQueueSimpleTest PRIVATE pthread)
+endif()
 # 添加到测试集合
 add_test(NAME MpscQueueSimpleTest COMMAND MpscQueueSimpleTest)
 
@@ -2041,7 +2051,7 @@ set_target_properties(StandaloneRHI_GPUBufferComponent_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/RHI/Components"
 )
-target_compile_definitions(StandaloneRHI_GPUBufferComponent_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_GPUBufferComponent_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 
 # 创建 TextureComponent 测试
@@ -2060,7 +2070,7 @@ set_target_properties(StandaloneRHI_TextureComponent_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/RHI/Components" 
 )
-target_compile_definitions(StandaloneRHI_TextureComponent_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_TextureComponent_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 RenderLayerComponent 测试
 add_executable(StandaloneRHI_RenderLayerComponent_Test 
@@ -2078,7 +2088,7 @@ set_target_properties(StandaloneRHI_RenderLayerComponent_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/RHI/Components"
 )
-target_compile_definitions(StandaloneRHI_RenderLayerComponent_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_RenderLayerComponent_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 MaterialComponent 测试
 add_executable(StandaloneRHI_MaterialComponent_Test 
@@ -2100,7 +2110,7 @@ set_target_properties(StandaloneRHI_MaterialComponent_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/RHI/Components"
 )
-target_compile_definitions(StandaloneRHI_MaterialComponent_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_MaterialComponent_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建RHI时间戳测试
 add_executable(StandaloneRHI_Timestamp_Test RHI/Core/TestRHITimestamp.cpp)
@@ -2115,7 +2125,7 @@ add_test(NAME StandaloneRHI_Timestamp_Test COMMAND StandaloneRHI_Timestamp_Test)
 set_target_properties(StandaloneRHI_Timestamp_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneRHI_Timestamp_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneRHI_Timestamp_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 RenderGraph Timestamp Integration 测试
 add_executable(TestRenderGraphTimestamp 
@@ -2146,7 +2156,7 @@ add_test(NAME TestRenderGraphTimestamp COMMAND TestRenderGraphTimestamp)
 set_target_properties(TestRenderGraphTimestamp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRenderGraphTimestamp PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestRenderGraphTimestamp PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestRenderGraphTimestamp PROPERTIES FOLDER "Tests/Graphics")
 
 # 创建RHI实体管理器测试
@@ -2182,7 +2192,7 @@ set_target_properties(RHI_EntityManager_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/RHI/Core"
 )
-target_compile_definitions(RHI_EntityManager_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(RHI_EntityManager_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 RHI RenderSystem ECS Integration 测试
 add_executable(TestRenderSystemECS 
@@ -2223,7 +2233,7 @@ set_target_properties(TestRenderSystemECS PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/Graphics"
 )
-target_compile_definitions(TestRenderSystemECS PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestRenderSystemECS PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 ## 创建一个宏来运行所有RHI测试
 add_custom_target(RHI_All_Tests
@@ -2290,7 +2300,7 @@ add_test(NAME TestRealTimePRT COMMAND TestRealTimePRT)
 set_target_properties(TestRealTimePRT PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRealTimePRT PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestRealTimePRT PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 Light Probe 测试
 add_executable(TestLightProbe 
@@ -2306,7 +2316,7 @@ add_test(NAME TestLightProbe COMMAND TestLightProbe)
 set_target_properties(TestLightProbe PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestLightProbe PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestLightProbe PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建SceneDataAdapter测试
 add_executable(StandaloneGraphics_SceneDataAdapter_Test 
@@ -2327,7 +2337,7 @@ add_test(NAME StandaloneGraphics_SceneDataAdapter_Test COMMAND StandaloneGraphic
 set_target_properties(StandaloneGraphics_SceneDataAdapter_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_SceneDataAdapter_Test PRIVATE DEBUG _DEBUG)
+target_compile_definitions(StandaloneGraphics_SceneDataAdapter_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # ======================
 # Particle System Tests
@@ -2348,13 +2358,16 @@ target_include_directories(TestParticles PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
 )
-target_link_libraries(TestParticles PRIVATE Engine pthread)
+if(NOT WIN32)
+    target_link_libraries(TestParticles PRIVATE pthread)
+endif()
+target_link_libraries(TestParticles PRIVATE Engine)
 add_test(NAME TestParticles COMMAND TestParticles)
 set_target_properties(TestParticles PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/Particles"
 )
-target_compile_definitions(TestParticles PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestParticles PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 message(STATUS "Particle System Tests configured:")
 message(STATUS "  - TestParticles: Particle pool and emitter unit tests")
@@ -2372,7 +2385,7 @@ add_test(NAME TestRenderSystemIntegration COMMAND TestRenderSystemIntegration)
 set_target_properties(TestRenderSystemIntegration PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRenderSystemIntegration PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestRenderSystemIntegration PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestRenderSystemIntegration PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -2396,7 +2409,7 @@ add_test(NAME TestJobSystem COMMAND TestJobSystem)
 set_target_properties(TestJobSystem PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestJobSystem PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestJobSystem PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestJobSystem PROPERTIES FOLDER "Tests/JobSystem")
 
 # JobSystem thread support
@@ -2419,7 +2432,7 @@ add_test(NAME TestMaterialGraphAPI COMMAND TestMaterialGraphAPI)
 set_target_properties(TestMaterialGraphAPI PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestMaterialGraphAPI PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestMaterialGraphAPI PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestMaterialGraphAPI PROPERTIES FOLDER "Tests/MaterialGraph")
 
 # ==================================
@@ -2438,7 +2451,7 @@ add_test(NAME TestMaterialReflection COMMAND TestMaterialReflection)
 set_target_properties(TestMaterialReflection PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestMaterialReflection PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestMaterialReflection PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestMaterialReflection PROPERTIES FOLDER "Tests/MaterialGraph")
 
 # ==================================
@@ -2457,7 +2470,7 @@ add_test(NAME TestParticleMaterialAPI COMMAND TestParticleMaterialAPI)
 set_target_properties(TestParticleMaterialAPI PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestParticleMaterialAPI PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestParticleMaterialAPI PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestParticleMaterialAPI PROPERTIES FOLDER "Tests/MaterialGraph")
 
 # ==================================
@@ -2476,7 +2489,7 @@ add_test(NAME TestMaterialAPIExtended COMMAND TestMaterialAPIExtended)
 set_target_properties(TestMaterialAPIExtended PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestMaterialAPIExtended PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestMaterialAPIExtended PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestMaterialAPIExtended PROPERTIES FOLDER "Tests/Material")
 
 # ==================================
@@ -2494,7 +2507,7 @@ add_test(NAME TestLightComponent COMMAND TestLightComponent)
 set_target_properties(TestLightComponent PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestLightComponent PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestLightComponent PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestLightComponent PROPERTIES FOLDER "Tests/Components")
 
 add_executable(TestCameraComponent Components/TestCameraComponent.cpp)
@@ -2508,7 +2521,7 @@ add_test(NAME TestCameraComponent COMMAND TestCameraComponent)
 set_target_properties(TestCameraComponent PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestCameraComponent PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestCameraComponent PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestCameraComponent PROPERTIES FOLDER "Tests/Components")
 
 # ==================================
@@ -2528,7 +2541,7 @@ add_test(NAME TestLightSyncSystem COMMAND TestLightSyncSystem)
 set_target_properties(TestLightSyncSystem PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestLightSyncSystem PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestLightSyncSystem PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestLightSyncSystem PROPERTIES FOLDER "Tests/Components")
 
 # ==================================
@@ -2548,7 +2561,7 @@ add_test(NAME TestCameraSyncSystem COMMAND TestCameraSyncSystem)
 set_target_properties(TestCameraSyncSystem PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestCameraSyncSystem PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestCameraSyncSystem PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestCameraSyncSystem PROPERTIES FOLDER "Tests/Components")
 
 # ==================================
@@ -2568,7 +2581,7 @@ add_test(NAME TestScriptFoundation COMMAND TestScriptFoundation)
 set_target_properties(TestScriptFoundation PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptFoundation PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptFoundation PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptFoundation PROPERTIES FOLDER "Tests/Components")
 # C++17 std::thread
 find_package(Threads REQUIRED)
@@ -2591,7 +2604,7 @@ add_test(NAME TestScriptLifecycle COMMAND TestScriptLifecycle)
 set_target_properties(TestScriptLifecycle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptLifecycle PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptLifecycle PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptLifecycle PROPERTIES FOLDER "Tests/Components")
 
 # ==================================
@@ -2611,7 +2624,7 @@ add_test(NAME TestScriptReflection COMMAND TestScriptReflection)
 set_target_properties(TestScriptReflection PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptReflection PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptReflection PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptReflection PROPERTIES FOLDER "Tests/Components")
 
 # ==================================
@@ -2632,7 +2645,7 @@ add_test(NAME TestScriptEventBus COMMAND TestScriptEventBus)
 set_target_properties(TestScriptEventBus PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptEventBus PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptEventBus PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptEventBus PROPERTIES FOLDER "Tests/Components")
 # Test uses typeid (RTTI) and std::function lambdas with captures that may throw
 # on allocation failure; mirror Script.cpp per-file -fexceptions to be safe.
@@ -2661,7 +2674,7 @@ add_test(NAME TestScriptExternal COMMAND TestScriptExternal)
 set_target_properties(TestScriptExternal PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptExternal PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptExternal PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptExternal PROPERTIES FOLDER "Tests/Components")
 # Mirror Script.cpp per-file -fexceptions: test verifies that thrown exceptions
 # from external callbacks are caught + logged (future test addition).
@@ -2690,7 +2703,7 @@ add_test(NAME TestScriptReload COMMAND TestScriptReload)
 set_target_properties(TestScriptReload PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptReload PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptReload PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptReload PROPERTIES FOLDER "Tests/Components")
 # Mirror Script.cpp per-file -fexceptions: reload dispatch wraps each hook
 # in try/catch; test may exercise exception paths in future.
@@ -2719,7 +2732,7 @@ add_test(NAME TestScriptEventBusExternal COMMAND TestScriptEventBusExternal)
 set_target_properties(TestScriptEventBusExternal PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptEventBusExternal PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptEventBusExternal PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptEventBusExternal PROPERTIES FOLDER "Tests/Components")
 # Mirror TestScriptEventBus.cpp per-file -fexceptions: tests verify that
 # exceptions from handlers / deleters behave correctly.
@@ -2747,7 +2760,7 @@ add_test(NAME TestScriptPostMainThread COMMAND TestScriptPostMainThread)
 set_target_properties(TestScriptPostMainThread PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptPostMainThread PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptPostMainThread PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptPostMainThread PROPERTIES FOLDER "Tests/Components")
 # MPSC tests spawn std::thread — need Threads::Threads.
 find_package(Threads REQUIRED)
@@ -2784,7 +2797,7 @@ add_test(NAME TestScriptSelfTestBackend COMMAND TestScriptSelfTestBackend)
 set_target_properties(TestScriptSelfTestBackend PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestScriptSelfTestBackend PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestScriptSelfTestBackend PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestScriptSelfTestBackend PROPERTIES FOLDER "Tests/Components")
 # Mirror Script.cpp per-file -fexceptions: the C++ driver's lambdas may
 # allocate, and the adapter wraps each hook in try/catch.
@@ -2813,11 +2826,14 @@ target_include_directories(TestDebugDrawQueue PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
 )
-target_link_libraries(TestDebugDrawQueue PRIVATE Engine pthread)
+if(NOT WIN32)
+    target_link_libraries(TestDebugDrawQueue PRIVATE pthread)
+endif()
+target_link_libraries(TestDebugDrawQueue PRIVATE Engine)
 add_test(NAME TestDebugDrawQueue COMMAND TestDebugDrawQueue)
 set_target_properties(TestDebugDrawQueue PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestDebugDrawQueue PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestDebugDrawQueue PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestDebugDrawQueue PROPERTIES FOLDER "Tests/Graphics")
 

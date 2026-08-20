@@ -38,7 +38,7 @@ static const char* GetDebugLevelName(DebugLevel level) {
         case DebugLevel::DEBUG_LEVEL: return "DEBUG";
         case DebugLevel::INFO:  return "INFO ";
         case DebugLevel::WARN:  return "WARN ";
-        case DebugLevel::ERROR: return "ERROR";
+        case DebugLevel::ERR: return "ERROR";
         case DebugLevel::FATAL: return "FATAL";
         default: return "UNKN ";
     }
