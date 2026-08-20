@@ -225,7 +225,10 @@ jobs:
           # No -G: CMake picks the newest installed Visual Studio generator
           # (multi-config). BUILD_CONTENT_TOOLS=OFF: ContentTools needs
           # FBX SDK + DirectXTex which are not installed on this runner.
-          cmake -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          # --fresh 重置 CMake 缓存：runner 的缓存曾被早期坏配置污染（CMAKE_CXX_FLAGS
+          # 里残留 _DEBUG 类标志 → Engine 以 MDd 运行时编译 → 测试链接 LNK2038
+          # MDd/MD 混链）。保留对象文件，标志变化的 TU 自动重编。
+          cmake --fresh -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: 编译 (Release)
         shell: powershell
@@ -322,7 +325,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libc6-dev libvulkan-dev
+            build-essential libc6-dev libvulkan-dev libx11-dev
           ${{ matrix.compiler }} --version
 
       - name: 工具链健全性探测

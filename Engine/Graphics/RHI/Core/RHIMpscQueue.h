@@ -11,6 +11,7 @@
 
 #include "CommonHeaders.h"
 #include "RHITypes.h"
+#include <queue>
 #include <memory>    // for shared_ptr
 #include <cstring>   // for memset
 

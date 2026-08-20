@@ -59,7 +59,8 @@ struct emitter_curves {
     bool use_alpha_curve{ false };
     
     // Color gradient over lifetime (overrides color_start/color_end)
-    color_gradient* color_gradient{ nullptr };
+    // 成员不可与类型同名：gcc14 的 -Wchanges-meaning 视为错误
+    color_gradient* color_gradient_curve{ nullptr };
     bool use_color_gradient{ false };
     
     // Velocity multiplier over lifetime (for speed control)
@@ -84,7 +85,7 @@ struct emitter_curves {
     void clear() {
         scale_curve = nullptr;
         alpha_curve = nullptr;
-        color_gradient = nullptr;
+        color_gradient_curve = nullptr;
         velocity_curve = nullptr;
         force_curve = nullptr;
         rotation_curve = nullptr;

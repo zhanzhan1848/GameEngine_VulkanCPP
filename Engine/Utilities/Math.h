@@ -6,12 +6,11 @@
 
 #if defined(_MSC_VER)
     #include <intrin.h>
-// #elif !defined(__GNUC__) || !defined(__clang__)
-//     #include <x86intrin.h>
-#elif defined(__APPLE__)
-	#include <arm_neon.h>
-	#include "CRC64Table.h"
-#elif defined(__EMSCRIPTEN__)
+#else
+    // 非 MSVC 平台（Apple/Linux/Emscripten）的 CRC fallback 都查 crc64_tab
+	#if defined(__APPLE__)
+		#include <arm_neon.h>
+	#endif
 	#include "CRC64Table.h"
 #endif
 

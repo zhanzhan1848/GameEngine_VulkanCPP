@@ -86,8 +86,8 @@ void particle_emitter::update(f32 delta_time, particle_pool& pool) {
             }
             
             // Color gradient
-            if (_config.curves.use_color_gradient && _config.curves.color_gradient) {
-                const math::v4 gradient_color = _config.curves.color_gradient->evaluate(normalized_age);
+            if (_config.curves.use_color_gradient && _config.curves.color_gradient_curve) {
+                const math::v4 gradient_color = _config.curves.color_gradient_curve->evaluate(normalized_age);
                 modified_p.color.x = gradient_color.x;
                 modified_p.color.y = gradient_color.y;
                 modified_p.color.z = gradient_color.z;

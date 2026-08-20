@@ -10,6 +10,7 @@
 #include "Graphics/MaterialGraph/Nodes/CurveNode.h"
 #include "Graphics/MaterialGraph/Nodes/UtilityNodes.h"
 #include "Graphics/MaterialGraph/Nodes/MaterialOutputNode.h"
+#include <array>
 #include <sstream>
 #include <string>
 
