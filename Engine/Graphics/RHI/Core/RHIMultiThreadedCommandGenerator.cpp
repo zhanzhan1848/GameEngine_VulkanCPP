@@ -192,7 +192,7 @@ public:
              }
         } else {
             // 模拟
-             result.commandBuffer = reinterpret_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
+             result.commandBuffer = static_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
              result.generatedCommands = task.renderBatch.commandCount;
         }
 
@@ -309,7 +309,7 @@ private:
         } else {
             // 默认模拟逻辑
             result.generatedCommands = task.renderBatch.commandCount;
-            result.commandBuffer = reinterpret_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
+            result.commandBuffer = static_cast<CommandBufferHandle>(0x100000000ULL | task.taskId);
         }
         
         auto endTime = std::chrono::high_resolution_clock::now();

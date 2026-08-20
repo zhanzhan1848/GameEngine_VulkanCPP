@@ -5,7 +5,9 @@
 #include "Graphics/Dawn/ShaderLoader.h"
 #endif
 #include "Graphics/RHI/Core/RHIShaderCommon.h"  // T4.6.5 part 6: GlobalShaderData + ForwardLightBuffer
-#if !defined(__EMSCRIPTEN__)
+#if defined(__APPLE__)
+// Metal 平台头仅 macOS 编译（Windows/Linux 下 MTL 符号不存在；此前守卫只排除了
+// Emscripten，导致 MSVC 把 Metal 头拉进编译单元）
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
 #include "Graphics/RHI/Platforms/Metal/MetalPipeline.h"

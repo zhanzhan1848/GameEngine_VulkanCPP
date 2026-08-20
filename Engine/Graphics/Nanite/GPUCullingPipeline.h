@@ -5,6 +5,7 @@
 #include "../Scene/RenderSceneSnapshot.h"
 #include <mutex>
 #include <atomic>
+#include <array>
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;

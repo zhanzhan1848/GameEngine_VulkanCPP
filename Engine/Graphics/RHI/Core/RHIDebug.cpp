@@ -263,7 +263,7 @@ void CreateSystemSnapshot() {
     GetCounterStats(countersBuffer, sizeof(countersBuffer));
     GetMemoryStats(memoryBuffer, sizeof(memoryBuffer));
     
-    RHI_DEBUG("=== RHI系统快照 ===");
+    RHI_DEBUG("=== RHI system snapshot ===");
     RHI_DEBUG("%s", countersBuffer);
     RHI_DEBUG("%s", memoryBuffer);
     RHI_DEBUG("==================");
@@ -274,7 +274,7 @@ void DumpDiagnostics() {
     CreateSystemSnapshot();
     
     // 可以添加更多诊断信息
-    RHI_DEBUG("=== 诊断信息转储完成 ===");
+    RHI_DEBUG("=== diagnostics dump done ===");
 }
 
 } // namespace primal::graphics::rhi::debug

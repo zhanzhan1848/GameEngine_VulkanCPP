@@ -1,5 +1,6 @@
 // Engine/Graphics/WFC/WFCPropagator.cpp
 #include "WFCPropagator.h"
+#include <bit>
 #include "WaveGrid.h"
 #include "TileAdjacency.h"
 #include "WFCTileRegistry.h"
@@ -102,7 +103,7 @@ u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
             for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
                 u64 m = new_mask[w];
                 while (m) {
-                    u32 in_word = __builtin_ctzll(m);
+                    u32 in_word = std::countr_zero(m);
                     m &= m - 1;
                     u32 bit = w * WFCTileRegistry::kBitsPerMaskWord + in_word;
                     wfc_tile_id my_tile = WFCTileRegistry::TileForBit(bit);
@@ -127,7 +128,7 @@ u32 WFCPropagator::RunPass(WaveGrid& grid, const TileAdjacencyTable& adjacency,
                 cell.candidate_mask[w] = new_mask[w];
                 cell_changed = true;
             }
-            total_count += static_cast<u32>(__builtin_popcountll(new_mask[w]));
+            total_count += static_cast<u32>(std::popcount(new_mask[w]));
         }
 
         if (cell_changed) {

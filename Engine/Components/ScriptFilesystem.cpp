@@ -2,6 +2,7 @@
 #include "Components/Script.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #if !defined(_WIN32)  // MSVC 没有 pthread.h；Windows 路径不设置线程名
@@ -22,15 +23,19 @@ constexpr size_t kMaxListEntries     = 10000;
 // macOS: arc4random. WASM: emscripten_get_now seeded linear congruential.
 std::string random_suffix() {
     char buf[17];
-#if defined(__EMSCRIPTEN__)
-    static unsigned seed = static_cast<unsigned>(emscripten_get_now() * 1000.0);
+#if defined(__APPLE__)
+    // arc4random 是 BSD/macOS 专有（MSVC 无此符号）
+    unsigned r1 = arc4random();
+    unsigned r2 = arc4random();
+#else
+    // Emscripten/Windows: LCG（Emscripten 无强随机源；Windows 曾在此分支调用
+    // arc4random 导致 C3861）
+    static unsigned seed = static_cast<unsigned>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
     seed = seed * 1103515245u + 12345u;
     unsigned r1 = seed;
     seed = seed * 1103515245u + 12345u;
     unsigned r2 = seed;
-#else
-    unsigned r1 = arc4random();
-    unsigned r2 = arc4random();
 #endif
     std::snprintf(buf, sizeof(buf), "%08x%08x", r1, r2);
     return std::string(buf);

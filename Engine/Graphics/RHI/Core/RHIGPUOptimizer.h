@@ -15,6 +15,7 @@
 #include "RHIDevice.h"
 #include "RHICommand.h"
 #include "RHIMpscQueue.h"
+#include <queue>
 
 namespace primal::graphics::rhi {
 

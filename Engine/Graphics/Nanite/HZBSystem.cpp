@@ -300,8 +300,8 @@ bool HZBSystem::CreateHZBComputePipeline() {
     };
 
     rhi::DescriptorSetLayoutDesc layoutDesc{
-        .bindings = hzbBindings,
-        .bindingCount = 2
+        .bindingCount = 2,
+        .bindings = hzbBindings
     };
 
     hzb_descriptor_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);

@@ -9,8 +9,10 @@
 #include "Graphics/RHI/Core/RHIMeshAsset.h"
 #include "Graphics/RHI/Core/RHIGpuMesh.h"
 #ifdef __APPLE__
+#if defined(__APPLE__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
+#endif
 #endif
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"

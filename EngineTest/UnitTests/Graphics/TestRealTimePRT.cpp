@@ -10,11 +10,15 @@ using namespace simd;
 #else
 // 便携回退：Apple simd 的 normalize/dot 在非 Apple 平台不可用
 namespace {
-    v3 normalize(const v3& v) {
+    // 用限定名：此处 primal::math 的 using-directive 在文件更下方才出现，
+    // 裸 v3 在 MSVC 下不可见（clang 曾靠传递包含侥幸解析）
+    primal::math::v3 normalize(const primal::math::v3& v) {
         const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-        return v3{ v.x / len, v.y / len, v.z / len };
+        return primal::math::v3{ v.x / len, v.y / len, v.z / len };
     }
-    float dot(const v3& a, const v3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    float dot(const primal::math::v3& a, const primal::math::v3& b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    }
 }
 #endif
 

@@ -213,8 +213,8 @@ bool GPUCullingPipeline::CreatePipelines() {
     cullingBindings[12].readonly = true; // cluster_map
 
     rhi::DescriptorSetLayoutDesc cullingLayoutDesc{
-        .bindings = cullingBindings,
-        .bindingCount = 13  // T4.6.5 part 35.2: bumped from 12 to 13 (added cluster_map)
+        .bindingCount = 13,  // T4.6.5 part 35.2: bumped from 12 to 13 (added cluster_map)
+        .bindings = cullingBindings
     };
 
     culling_descriptor_layout_ = device_->CreateDescriptorSetLayout(cullingLayoutDesc);

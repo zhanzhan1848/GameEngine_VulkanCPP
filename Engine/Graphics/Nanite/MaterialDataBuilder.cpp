@@ -4,7 +4,9 @@
 #include "../RHI/Core/RHICommand.h"
 #ifdef __APPLE__
 #include "../RHI/Platforms/Metal/MetalDevice.h"
+#if defined(__APPLE__)
 #include "../RHI/Platforms/Metal/MetalTexture.h"
+#endif
 #endif
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "../RHI/Platforms/Dawn/DawnDevice.h"

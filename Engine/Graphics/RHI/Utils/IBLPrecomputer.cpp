@@ -6,6 +6,7 @@
 #include "../Core/RHIShaderCommon.h"
 #include "../Core/RHIResource.h"
 #include <fstream>
+#include <sstream>
 #include <iostream>
 #include <cmath>
 #include "Utilities/Vector.h"
