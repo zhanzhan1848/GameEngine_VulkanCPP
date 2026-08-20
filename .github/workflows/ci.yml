@@ -314,8 +314,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libvulkan-dev
+            build-essential libc6-dev libvulkan-dev
           ${{ matrix.compiler }} --version
+
+      - name: 工具链健全性探测
+        # 上一轮 CI 出现 cstdlib include_next 找不到 stdlib.h（gcc 与 clang
+        # 同时失败）——先做最小编译探针，失败时把诊断写进错误日志再失败，
+        # 下一轮报告能区分"runner 工具链损坏"与"项目代码问题"
+        run: |
+          set -o pipefail
+          echo '#include <cstdlib>
+          int main() { return 0; }' > /tmp/probe.cpp
+          if ! ${{ matrix.compiler }} -x c++ /tmp/probe.cpp -fsyntax-only 2>&1 | tee toolchain-probe.log; then
+            echo '(toolchain probe FAILED — runner toolchain broken, not a project error)' >> toolchain-probe.log
+            ls -la /usr/include/stdlib.h /usr/include/c++/ >> toolchain-probe.log 2>&1 || true
+            exit 1
+          fi
+          echo '[probe-ok] ${{ matrix.compiler }} can compile <cstdlib>'
 
       - name: 配置 CMake (Release + Vulkan RHI)
         run: |
@@ -334,8 +349,9 @@ jobs:
       - name: 提取编译错误
         if: failure()
         run: |
-          grep -E '(fatal )?error:' build-linux.log > compile-errors-linux-${{ matrix.label }}.log \
-            || echo '(no error lines found in build log — configure/timeout failure?)' > compile-errors-linux-${{ matrix.label }}.log
+          { grep -E '(fatal )?error:' build-linux.log 2>/dev/null; cat toolchain-probe.log 2>/dev/null; } \
+            > compile-errors-linux-${{ matrix.label }}.log \
+            || echo '(no error lines found — configure/timeout failure?)' > compile-errors-linux-${{ matrix.label }}.log
           wc -l compile-errors-linux-${{ matrix.label }}.log
 
       - name: 上传编译错误制品（失败时）

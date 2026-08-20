@@ -2,18 +2,23 @@
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
-// 平台 surface 扩展的宏/原型需要先定义 VK_USE_PLATFORM_* 再包含对应头，
-// 否则 VK_KHR_WIN32_SURFACE_EXTENSION_NAME 等宏不会被声明（MSVC C2065）
+// 平台 surface 支持：VK_USE_PLATFORM_* 宏必须在 vulkan.h 之前定义；
+// 平台扩展头（vulkan_win32/xcb.h）必须在 vulkan.h 之后包含——旧版 SDK
+//（如 runner 上的 1.3.211）的平台头不自含 vulkan_core.h，先包含会因
+// VkResult/VKAPI_PTR 未定义产生数千条级联错误
 #if defined(_WIN32)
 #define VK_USE_PLATFORM_WIN32_KHR 1
-#include <vulkan/vulkan_win32.h>
 #elif defined(__linux__)
 #define VK_USE_PLATFORM_XCB_KHR 1
-#include <vulkan/vulkan_xcb.h>
 #endif
 
 #include <vulkan/vulkan.h>
-#if defined(__APPLE__)
+
+#if defined(_WIN32)
+#include <vulkan/vulkan_win32.h>
+#elif defined(__linux__)
+#include <vulkan/vulkan_xcb.h>
+#elif defined(__APPLE__)
 // MoltenVK 表面扩展
 #include <vulkan/vulkan_metal.h>
 #endif

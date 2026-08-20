@@ -4,8 +4,13 @@ set(PROJECT_NAME EngineTest)
 # CMake最低版本要求
 cmake_minimum_required(VERSION 3.20)
 
-# 设置编译器标志
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
+# 设置编译器标志（-stdlib=libc++ 仅 Apple/clang；Linux 下会把 g++/clang++
+# 指向未安装的 libc++ 导致 'stdlib.h' file not found）
+if(APPLE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++17")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+endif()
     
 # 设置Objective-C++标志
 set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -std=c++17")

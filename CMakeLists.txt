@@ -306,7 +306,9 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/third_party/stb
 )
-if(NOT EMSCRIPTEN)
+if(APPLE)
+    # OSAPI/MAC 仅 macOS；此前 NOT EMSCRIPTEN 守卫把 Objective-C 头文件
+    # 目录泄漏给了 Windows/Linux 的 include 路径
     include_directories(${CMAKE_SOURCE_DIR}/OSAPI/MAC)
 endif()
 
