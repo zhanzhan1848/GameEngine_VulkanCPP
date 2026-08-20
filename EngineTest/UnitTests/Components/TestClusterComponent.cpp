@@ -73,7 +73,7 @@ TestResult TestEntityDestroyDoesNotImmediatelyFreeResources() {
     TEST_ASSERT_EQ(resource, resourceAfterCreate, "Should reuse existing resource");
     TEST_ASSERT_EQ(2u, resource->ref_count.load(), "Ref count should be 2 after component create");
 
-    remove(c1);
+    primal::cluster::remove(c1);
     TEST_ASSERT_EQ(1u, resource->ref_count.load(), 
         "Ref count should be 1 after component remove (resource still alive)");
 
@@ -125,7 +125,7 @@ TestResult TestMultipleEntitiesShareOneResource() {
 
     for (u32 i = 0; i < num_entities / 2; ++i)
  {
-        remove(components[i]);
+        primal::cluster::remove(components[i]);
     }
 
     TEST_ASSERT_EQ(1u + num_entities - (num_entities / 2), sharedResource->ref_count.load(),
@@ -133,7 +133,7 @@ TestResult TestMultipleEntitiesShareOneResource() {
 
     for (u32 i = num_entities / 2; i < num_entities; ++i)
  {
-        remove(components[i]);
+        primal::cluster::remove(components[i]);
     }
 
     TEST_ASSERT_EQ(1u, sharedResource->ref_count.load(),
@@ -194,7 +194,7 @@ TestResult TestComponentGeometryBindingUpdate() {
     TEST_ASSERT_EQ(geometry_id_2, cache->geometry_content_id, 
         "Cache should reflect new geometry ID");
 
-    remove(c);
+    primal::cluster::remove(c);
     TEST_ASSERT_EQ(1u, resource2->ref_count.load(), 
         "Resource 2 ref count should be 1 after component removal");
 
@@ -219,7 +219,7 @@ TestResult TestInvalidComponentOperations() {
     const component_cache* cache = get(invalid_c);
     TEST_ASSERT_EQ(cache, nullptr, "Invalid component should return null cache");
 
-    remove(invalid_c);
+    primal::cluster::remove(invalid_c);
 
     manager.Shutdown();
 
@@ -264,7 +264,7 @@ TestResult TestLODPolicyUpdate() {
     TEST_ASSERT_EQ(-00.5f, cache->lod_bias, "LOD bias should handle negative values");
     TEST_ASSERT_EQ(0, cache->forced_lod, "Forced LOD should handle 0");
 
-    remove(c);
+    primal::cluster::remove(c);
     manager.ReleaseGeometryRef(test_geometry_id);
     remove_game_entity(e.get_id());
     manager.Shutdown();
@@ -308,7 +308,7 @@ TestResult TestVisibilityFlagsUpdate() {
     cache = get(c);
     TEST_ASSERT_EQ(0xABCDEF12, cache->visibility_flags, "Visibility flags should handle arbitrary values");
 
-    remove(c);
+    primal::cluster::remove(c);
     manager.ReleaseGeometryRef(test_geometry_id);
     remove_game_entity(e.get_id());
     manager.Shutdown();
@@ -362,7 +362,7 @@ TestResult TestBatchUpdate() {
 
     for (u32 i = 0; i < num_components; ++i)
     {
-        remove(components[i]);
+        primal::cluster::remove(components[i]);
         manager.ReleaseGeometryRef(base_geometry_id + i);
         remove_game_entity(entities[i].get_id());
     }
@@ -411,7 +411,7 @@ TestResult TestGetReturnsCorrectCacheData() {
     cache = get(c);
     TEST_ASSERT_EQ(0x87654321u, cache->visibility_flags, "Cache should reflect visibility flags update");
 
-    remove(c);
+    primal::cluster::remove(c);
     cache = get(c);
     TEST_ASSERT(cache == nullptr, "get() should return nullptr after component removal");
     
@@ -445,7 +445,7 @@ TestResult TestResourceDestructionWhenRefCountReachesZero() {
     TEST_ASSERT_EQ(resource, resourceAfterCreate, "Should reuse existing resource");
     TEST_ASSERT_EQ(2u, resource->ref_count.load(), "Ref count should be 2 after component create");
 
-    remove(c);
+    primal::cluster::remove(c);
     TEST_ASSERT_EQ(1u, resource->ref_count.load(), 
         "Ref count should be 1 after component remove (resource still alive)");
 
@@ -487,7 +487,7 @@ TestResult TestDuplicateCreateOperations() {
     TEST_ASSERT_NOT_NULL(resource, "Resource should exist");
     TEST_ASSERT_EQ(1u, resource->ref_count.load(), "Ref count should remain 1 (component creation doesn't increase ref count)");
 
-    remove(c1);
+    primal::cluster::remove(c1);
     manager.ReleaseGeometryRef(geometry_id);
     remove_game_entity(e.get_id());
     manager.Shutdown();
@@ -514,10 +514,10 @@ TestResult TestDuplicateRemoveOperations() {
     TEST_ASSERT(c != invalid_id, "Component should be created");
     TEST_ASSERT_EQ(2u, resource->ref_count.load(), "Ref count should be 2");
 
-    remove(c);
+    primal::cluster::remove(c);
     TEST_ASSERT_EQ(1u, resource->ref_count.load(), "Ref count should be 1 after first remove");
 
-    remove(c);
+    primal::cluster::remove(c);
     TEST_ASSERT_EQ(1u, resource->ref_count.load(), "Duplicate remove should not affect ref count");
 
     manager.ReleaseGeometryRef(geometry_id);
@@ -593,7 +593,7 @@ TestResult TestPerformanceLargeScaleCreate() {
     TEST_ASSERT_EQ(1u + num_entities, resource->ref_count.load(), "All components should reference resource");
 
     for (u32 i = 0; i < num_entities; ++i)    {
-        remove(components[i]);
+        primal::cluster::remove(components[i]);
         remove_game_entity(entities[i].get_id());
     }
 
@@ -629,7 +629,7 @@ TestResult TestPerformanceLargeScaleRemove() {
 
     for (u32 i = 0; i < num_entities; ++i)
     {
-        remove(components[i]);
+        primal::cluster::remove(components[i]);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -684,7 +684,7 @@ TestResult TestPerformanceGeometryBindingSwitch() {
     TEST_ASSERT(duration.count() < 50, "1000 geometry switches should take < 50ms");
     std::cout << "    [PERF] 1000 geometry switches took " << duration.count() << "ms" << std::endl;
 
-    remove(c);
+    primal::cluster::remove(c);
     manager.ReleaseGeometryRef(geometry_id_1);
     manager.ReleaseGeometryRef(geometry_id_2);
     remove_game_entity(e.get_id());

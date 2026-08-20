@@ -1522,8 +1522,8 @@ if(APPLE)
         "-framework QuartzCore"
     )
     target_compile_definitions(TestMetalPRT PRIVATE 
-        DEBUG 
-        _DEBUG 
+        $<$<CONFIG:Debug>:DEBUG> 
+        $<$<CONFIG:Debug>:_DEBUG> 
         PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
     )
     add_test(NAME TestMetalPRT COMMAND TestMetalPRT)
@@ -1552,8 +1552,8 @@ if(APPLE)
         "-framework QuartzCore"
     )
     target_compile_definitions(TestNaniteResourceManager PRIVATE 
-        DEBUG 
-        _DEBUG 
+        $<$<CONFIG:Debug>:DEBUG> 
+        $<$<CONFIG:Debug>:_DEBUG> 
         PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
     )
     add_test(NAME TestNaniteResourceManager COMMAND TestNaniteResourceManager)
@@ -1579,8 +1579,8 @@ if(APPLE)
         "-framework QuartzCore"
     )
     target_compile_definitions(TestNaniteStreamingManager PRIVATE 
-        DEBUG 
-        _DEBUG 
+        $<$<CONFIG:Debug>:DEBUG> 
+        $<$<CONFIG:Debug>:_DEBUG> 
         PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
     )
     add_test(NAME TestNaniteStreamingManager COMMAND TestNaniteStreamingManager)
@@ -1606,8 +1606,8 @@ if(APPLE)
         "-framework QuartzCore"
     )
     target_compile_definitions(TestClusterComponent PRIVATE 
-        DEBUG 
-        _DEBUG 
+        $<$<CONFIG:Debug>:DEBUG> 
+        $<$<CONFIG:Debug>:_DEBUG> 
         PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
     )
     add_test(NAME TestClusterComponent COMMAND TestClusterComponent)
@@ -1634,8 +1634,8 @@ if(APPLE)
         "-framework QuartzCore"
     )
     target_compile_definitions(TestSceneSnapshot PRIVATE 
-        DEBUG 
-        _DEBUG 
+        $<$<CONFIG:Debug>:DEBUG> 
+        $<$<CONFIG:Debug>:_DEBUG> 
         PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
     )
     add_test(NAME TestSceneSnapshot COMMAND TestSceneSnapshot)
@@ -2017,8 +2017,8 @@ target_include_directories(MpscQueueSimpleTest PRIVATE
 )
 # 设置编译定义
 target_compile_definitions(MpscQueueSimpleTest PRIVATE 
-    DEBUG 
-    _DEBUG
+    $<$<CONFIG:Debug>:DEBUG> 
+    $<$<CONFIG:Debug>:_DEBUG>
 )
 set_target_properties(MpscQueueSimpleTest PROPERTIES
     CXX_STANDARD 20
@@ -2854,7 +2854,7 @@ add_test(NAME TestWaveGrid COMMAND TestWaveGrid)
 set_target_properties(TestWaveGrid PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWaveGrid PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWaveGrid PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWaveGrid PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestTileAdjacency Graphics/WFC/TestTileAdjacency.cpp)
@@ -2869,7 +2869,7 @@ add_test(NAME TestTileAdjacency COMMAND TestTileAdjacency)
 set_target_properties(TestTileAdjacency PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestTileAdjacency PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestTileAdjacency PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestTileAdjacency PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCConfig Graphics/WFC/TestWFCConfig.cpp)
@@ -2884,7 +2884,7 @@ add_test(NAME TestWFCConfig COMMAND TestWFCConfig)
 set_target_properties(TestWFCConfig PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCConfig PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCConfig PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCConfig PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestAutoSocketClassifier Graphics/WFC/TestAutoSocketClassifier.cpp)
@@ -2899,7 +2899,7 @@ add_test(NAME TestAutoSocketClassifier COMMAND TestAutoSocketClassifier)
 set_target_properties(TestAutoSocketClassifier PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestAutoSocketClassifier PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestAutoSocketClassifier PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestAutoSocketClassifier PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestProceduralRoomPack Graphics/WFC/TestProceduralRoomPack.cpp)
@@ -2914,7 +2914,7 @@ add_test(NAME TestProceduralRoomPack COMMAND TestProceduralRoomPack)
 set_target_properties(TestProceduralRoomPack PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestProceduralRoomPack PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestProceduralRoomPack PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestProceduralRoomPack PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestTileAdjacencyBuild Graphics/WFC/TestTileAdjacencyBuild.cpp)
@@ -2929,7 +2929,7 @@ add_test(NAME TestTileAdjacencyBuild COMMAND TestTileAdjacencyBuild)
 set_target_properties(TestTileAdjacencyBuild PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestTileAdjacencyBuild PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestTileAdjacencyBuild PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestTileAdjacencyBuild PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestConflictSeedMemory Graphics/WFC/TestConflictSeedMemory.cpp)
@@ -2944,7 +2944,7 @@ add_test(NAME TestConflictSeedMemory COMMAND TestConflictSeedMemory)
 set_target_properties(TestConflictSeedMemory PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestConflictSeedMemory PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestConflictSeedMemory PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestConflictSeedMemory PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCSolveBudget Graphics/WFC/TestWFCSolveBudget.cpp)
@@ -2959,7 +2959,7 @@ add_test(NAME TestWFCSolveBudget COMMAND TestWFCSolveBudget)
 set_target_properties(TestWFCSolveBudget PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCSolveBudget PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCSolveBudget PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCSolveBudget PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCStepBuffer Graphics/WFC/TestWFCStepBuffer.cpp)
@@ -2974,7 +2974,7 @@ add_test(NAME TestWFCStepBuffer COMMAND TestWFCStepBuffer)
 set_target_properties(TestWFCStepBuffer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCStepBuffer PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCStepBuffer PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCStepBuffer PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCRandom Graphics/WFC/TestWFCRandom.cpp)
@@ -2989,7 +2989,7 @@ add_test(NAME TestWFCRandom COMMAND TestWFCRandom)
 set_target_properties(TestWFCRandom PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCRandom PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCRandom PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCRandom PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCObserver Graphics/WFC/TestWFCObserver.cpp)
@@ -3004,7 +3004,7 @@ add_test(NAME TestWFCObserver COMMAND TestWFCObserver)
 set_target_properties(TestWFCObserver PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCObserver PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCObserver PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCObserver PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCDistanceObserver Graphics/WFC/TestWFCDistanceObserver.cpp)
@@ -3019,7 +3019,7 @@ add_test(NAME TestWFCDistanceObserver COMMAND TestWFCDistanceObserver)
 set_target_properties(TestWFCDistanceObserver PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCDistanceObserver PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCDistanceObserver PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCDistanceObserver PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCPropagator Graphics/WFC/TestWFCPropagator.cpp)
@@ -3034,7 +3034,7 @@ add_test(NAME TestWFCPropagator COMMAND TestWFCPropagator)
 set_target_properties(TestWFCPropagator PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCPropagator PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCPropagator PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCPropagator PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestRestartPolicy Graphics/WFC/TestRestartPolicy.cpp)
@@ -3049,7 +3049,7 @@ add_test(NAME TestRestartPolicy COMMAND TestRestartPolicy)
 set_target_properties(TestRestartPolicy PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRestartPolicy PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestRestartPolicy PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestRestartPolicy PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCTileRegistry Graphics/WFC/TestWFCTileRegistry.cpp)
@@ -3064,7 +3064,7 @@ add_test(NAME TestWFCTileRegistry COMMAND TestWFCTileRegistry)
 set_target_properties(TestWFCTileRegistry PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCTileRegistry PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCTileRegistry PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCTileRegistry PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCSolver Graphics/WFC/TestWFCSolver.cpp)
@@ -3079,7 +3079,7 @@ add_test(NAME TestWFCSolver COMMAND TestWFCSolver)
 set_target_properties(TestWFCSolver PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestWFCSolver PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCSolver PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestWFCSolver PROPERTIES FOLDER "Tests/Graphics/WFC")
 
 add_executable(TestWFCCategory
@@ -3094,7 +3094,7 @@ add_test(NAME TestWFCCategory COMMAND TestWFCCategory)
 set_target_properties(TestWFCCategory PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCCategory PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCCategory PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 add_executable(TestWFCTileLayout
     Graphics/WFC/TestWFCTileLayout.cpp)
@@ -3108,7 +3108,7 @@ add_test(NAME TestWFCTileLayout COMMAND TestWFCTileLayout)
 set_target_properties(TestWFCTileLayout PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCTileLayout PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCTileLayout PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 add_executable(TestWFCTileRegistryPacking
     Graphics/WFC/TestWFCTileRegistryPacking.cpp)
@@ -3123,7 +3123,7 @@ add_test(NAME TestWFCTileRegistryPacking COMMAND TestWFCTileRegistryPacking)
 set_target_properties(TestWFCTileRegistryPacking PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCTileRegistryPacking PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCTileRegistryPacking PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 add_executable(TestWFCTileCatalog
     Graphics/WFC/TestWFCTileCatalog.cpp)
@@ -3138,7 +3138,7 @@ add_test(NAME TestWFCTileCatalog COMMAND TestWFCTileCatalog)
 set_target_properties(TestWFCTileCatalog PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCTileCatalog PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCTileCatalog PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 add_executable(TestParametricTileNode
     Graphics/WFC/TestParametricTileNode.cpp)
@@ -3153,7 +3153,7 @@ add_test(NAME TestParametricTileNode COMMAND TestParametricTileNode)
 set_target_properties(TestParametricTileNode PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestParametricTileNode PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestParametricTileNode PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 add_executable(TestWFCOutput
     Graphics/WFC/TestWFCOutput.cpp)
@@ -3168,7 +3168,7 @@ add_test(NAME TestWFCOutput COMMAND TestWFCOutput)
 set_target_properties(TestWFCOutput PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCOutput PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCOutput PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # WFC Phase B.1 Task 5: TestWFCCornerMeshes — corner_in/out generator sanity
 add_executable(TestWFCCornerMeshes
@@ -3184,7 +3184,7 @@ add_test(NAME TestWFCCornerMeshes COMMAND TestWFCCornerMeshes)
 set_target_properties(TestWFCCornerMeshes PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCCornerMeshes PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCCornerMeshes PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # WFC Phase C.1 Task 6: TestWFCRuinsMaterialPalette — ruins palette sanity
 add_executable(TestWFCRuinsMaterialPalette
@@ -3200,7 +3200,7 @@ add_test(NAME TestWFCRuinsMaterialPalette COMMAND TestWFCRuinsMaterialPalette)
 set_target_properties(TestWFCRuinsMaterialPalette PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCRuinsMaterialPalette PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCRuinsMaterialPalette PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # WFC Phase C.1 Task 7: TestWFCProceduralMeshesRuins — RegisterProceduralMesh signature
 add_executable(TestWFCProceduralMeshesRuins
@@ -3216,7 +3216,7 @@ add_test(NAME TestWFCProceduralMeshesRuins COMMAND TestWFCProceduralMeshesRuins)
 set_target_properties(TestWFCProceduralMeshesRuins PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCProceduralMeshesRuins PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCProceduralMeshesRuins PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # WFC Phase B.2 Task 1: TestWFCStreamDrain — DrainStream unit tests
 add_executable(TestWFCStreamDrain
@@ -3232,7 +3232,7 @@ add_test(NAME TestWFCStreamDrain COMMAND TestWFCStreamDrain)
 set_target_properties(TestWFCStreamDrain PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCStreamDrain PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCStreamDrain PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # WFC Phase C.1 Task 13: TestWFCSocketOps — GetFaceCorners + QuantizeTo2Bit helpers
 add_executable(TestWFCSocketOps
@@ -3248,7 +3248,7 @@ add_test(NAME TestWFCSocketOps COMMAND TestWFCSocketOps)
 set_target_properties(TestWFCSocketOps PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCSocketOps PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCSocketOps PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # WFC Phase C.1 Mixed Task 1: TestWFCCandidateLayout — u64[4] mask layout + MaxTiles bump
 # NOTE: Header-only canary — verifies WFCTypes/WFCTileRegistry constexpr layout
@@ -3267,5 +3267,5 @@ add_test(NAME TestWFCCandidateLayout COMMAND TestWFCCandidateLayout)
 set_target_properties(TestWFCCandidateLayout PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
-target_compile_definitions(TestWFCCandidateLayout PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestWFCCandidateLayout PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 

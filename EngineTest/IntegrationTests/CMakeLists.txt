@@ -489,7 +489,7 @@ if(APPLE)
     set_target_properties(TestWFC3DParametric PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
         FOLDER "EngineTest/IntegrationTests")
-    target_compile_definitions(TestWFC3DParametric PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestWFC3DParametric PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 30. TestWFCRendering (WFC Phase A.4 Task 2: Metal window + empty render loop)
     # Mirrors TestPCGScatter pattern: Main.cpp + TestWFCRendering.cpp + MacKeyboard.mm.
@@ -563,7 +563,7 @@ if(APPLE)
     set_target_properties(TestWFCCategorySolve PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
         FOLDER "EngineTest/IntegrationTests")
-    target_compile_definitions(TestWFCCategorySolve PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestWFCCategorySolve PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 34. TestWFCRuinsAdjacencyConsistency (WFC Phase C.1 T24)
     # Headless, no GPU. Verifies every (tile, variant, face) has >= 1 partner
@@ -583,7 +583,7 @@ if(APPLE)
     set_target_properties(TestWFCRuinsAdjacencyConsistency PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
         FOLDER "EngineTest/IntegrationTests")
-    target_compile_definitions(TestWFCRuinsAdjacencyConsistency PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestWFCRuinsAdjacencyConsistency PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 35. TestWFCRuinsSolveSmall (WFC Phase C.1 T25)
     # Headless, no GPU. Small 3×3×3 Ruins-only solve that requires all 27
@@ -605,7 +605,7 @@ if(APPLE)
     set_target_properties(TestWFCRuinsSolveSmall PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
         FOLDER "EngineTest/IntegrationTests")
-    target_compile_definitions(TestWFCRuinsSolveSmall PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestWFCRuinsSolveSmall PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 36. TestWFCRuinsMixedCategories (WFC Phase C.1 T26)
     # Headless, no GPU. 6×3×6 Primitive+Ruins mixed solve: asserts collapse
@@ -627,7 +627,7 @@ if(APPLE)
     set_target_properties(TestWFCRuinsMixedCategories PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
         FOLDER "EngineTest/IntegrationTests")
-    target_compile_definitions(TestWFCRuinsMixedCategories PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestWFCRuinsMixedCategories PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 37. TestWFCRuinsRestart (WFC Phase C.1 T26)
     # Headless, no GPU. 8×4×8 Ruins-only solve on seed=0xDEAD1: asserts the
@@ -648,7 +648,7 @@ if(APPLE)
     set_target_properties(TestWFCRuinsRestart PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/IntegrationTests
         FOLDER "EngineTest/IntegrationTests")
-    target_compile_definitions(TestWFCRuinsRestart PRIVATE DEBUG _DEBUG)
+    target_compile_definitions(TestWFCRuinsRestart PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
     # 38. TestWFCRuinsRendering (WFC Phase C.1 T27 visual smoke binary)
     # Live Metal window + StandardRenderPipeline. Boots engine, registers 15
