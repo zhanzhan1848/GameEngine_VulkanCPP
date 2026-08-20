@@ -505,14 +505,15 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     bool cullOk = cull.Execute(vcmd, snap, viewMat, projMat, nullptr, 0);
     TEST_ASSERT(cullOk, "GPUCullingPipeline::Execute");
 
-    // T4.6.5 part 22.1 FIX: GPUDrivenDrawPipeline reads cull results from
-    // slot (cbIdx + N - 1) % N (production pipelining — gpuDraw reads frame
-    // N-1's cull output while cull runs for frame N). For a one-shot test
-    // this means cbIdx=0 reads slot 2 which was never written → DrawIndirect
-    // gets garbage → 0 fragments. Passing cbIdx=1 makes gpuDraw read slot 0
-    // (the slot cull just wrote via cull.Execute(bufIdx=0)).
+    // T4.6.5 part 22.1 → 07469f3 语义修正:GPUDrivenDrawPipeline 与 GPUCullingPipeline
+    // 现在按"同帧同槽"约定工作 —— Stage2/Stage3 用 buffer_index 直接读 cull 本帧
+    // 写入的 slot（生产侧 StandardRenderPipeline 对两者传同一个 cbIdx；cull 结尾的
+    // ComputeShader→DrawIndirect|VertexInput 内存屏障保证同帧可见性）。旧的
+    // (cbIdx+N-1)%N 上一帧轮转读法已废弃:若按旧约定传 cull(0)+gpuDraw(1)，
+    // Stage2 会读 slot 1 —— 一个从未被写过的空槽，DrawIndirect 拿到
+    // vertexCount=0，光栅输出为空（本测试此前长期失败的根因，非 MoltenVK 问题）。
     bool drawOk = gpuDraw.Execute(vcmd, snap, viewMat, projMat,
-                                   cull.GetResults(), /*frame=*/0, /*cbIdx=*/1);
+                                   cull.GetResults(), /*frame=*/0, /*cbIdx=*/0);
     TEST_ASSERT(drawOk, "GPUDrivenDrawPipeline::Execute");
 
     // T4.6.5 part 23: ResolveVisibilityBuffer is now auto-called at the end of
@@ -603,17 +604,17 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
                     "Submit vis readback");
         fx.base->DestroyCommandBuffer(cmd);
 
+        u32 nonZero = 0;
         u32* visMapped = static_cast<u32*>(fx.base->MapBuffer(visRb, 0, kVisBytes));
         if (visMapped) {
-            u32 nonZero = 0;
             for (u64 i = 0; i < kVisBytes / 4; ++i) {
                 if (visMapped[i] != 0) ++nonZero;
             }
             std::cout << "[TestGPUCulling] visibility_buffer_ non-zero u32s: "
                       << nonZero << "/" << (kVisBytes / 4) << std::endl;
-            TEST_ASSERT(nonZero > 0, "Stage2 wrote visibility_buffer_ (meshlet fragments)");
             fx.base->UnmapBuffer(visRb);
         }
+        TEST_ASSERT(nonZero > 0, "Stage2 wrote visibility_buffer_ (meshlet fragments)");
         fx.base->DestroyBuffer(visRb);
 
         // Also read back final_color_texture_ (Stage3 output) for comparison.
