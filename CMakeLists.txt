@@ -28,7 +28,7 @@ project(GameEngine_VulkanCPP
 )
 
 # 设置C++标准
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -251,14 +251,19 @@ else()
 endif()
 
 # Debug/Release特定定义
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_definitions(
-        -DDEBUG
-        -D_DEBUG
-    )
-else()
-    add_definitions(-DNDEBUG)
-endif()
+# 必须用生成器表达式而非 CMAKE_BUILD_TYPE 判断：VS 等多配置生成器的
+# CMAKE_BUILD_TYPE 恒为空（上文还会将其强制设为 Debug），导致 Release 配置
+# 也被注入 _DEBUG，链接期混入 Debug CRT 符号（LNK2019 __imp__CrtDbgReport）。
+add_compile_definitions(
+    $<$<CONFIG:Debug>:DEBUG>
+    $<$<CONFIG:Debug>:_DEBUG>
+    $<$<CONFIG:DebugEditor>:DEBUG>
+    $<$<CONFIG:DebugEditor>:_DEBUG>
+    $<$<CONFIG:Release>:NDEBUG>
+    $<$<CONFIG:ReleaseEditor>:NDEBUG>
+    $<$<CONFIG:RelWithDebInfo>:NDEBUG>
+    $<$<CONFIG:MinSizeRel>:NDEBUG>
+)
 
 # 设置通用编译选项
 if(MSVC)
@@ -266,11 +271,18 @@ if(MSVC)
     add_compile_options(
         /MP             # 多处理器编译
         /W4             # 警告级别
-        /WX             # 警告视为错误
+        /utf-8          # 源码与执行字符集均为 UTF-8：源文件含中文注释/字符串，
+                        # 默认按系统代码页(GBK)解读会产生 C4819/C2001 大量误报
         /GR-            # 禁用RTTI
         /EHs-c-        # 禁用异常处理
         /fp:fast        # 快速浮点计算
+        # /WX 暂不启用（与 clang 侧一致，-Werror 本就注释）：
+        # Windows 首次全量编译存在结构性警告（C4324 对齐填充、C4100 未引用参数等），
+        # 先以 /W4 观察输出，清零后再恢复警告即错误。
     )
+    # windows.h 的 min/max 宏与 std::min/std::max 及 AABB 等成员名冲突
+    # （C2059/C2589/C4003 大面积级联），全局屏蔽
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     # GCC/Clang编译选项
     add_compile_options(
@@ -299,7 +311,11 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # 添加子项目
-if(NOT EMSCRIPTEN)
+# ContentTools 的 Windows 构建依赖 FBX SDK 与 DirectXTex（find_package REQUIRED，
+# 且仓库内没有对应的 Find 模块），无这些 SDK 的机器（如 CI runner）用
+# -DBUILD_CONTENT_TOOLS=OFF 跳过；Engine 与 RHI 单元测试不依赖 ContentTools。
+option(BUILD_CONTENT_TOOLS "Build ContentTools (Windows requires FBX SDK + DirectXTex)" ON)
+if(NOT EMSCRIPTEN AND BUILD_CONTENT_TOOLS)
     add_subdirectory(ContentTools)
 endif()
 # Emscripten: Particles/*.cpp pulls in Metal headers and breaks the WASM build.
@@ -502,15 +518,26 @@ endif()
 
 # 设置构建顺序依赖
 if(NOT EMSCRIPTEN)
-    add_dependencies(ContentTools Engine)
-    add_dependencies(EngineDLL Engine ContentTools)
+    if(BUILD_CONTENT_TOOLS)
+        add_dependencies(ContentTools Engine)
+        add_dependencies(EngineDLL Engine ContentTools)
 
-    # 配置安装规则
-    install(TARGETS Engine EngineDLL ContentTools
-        RUNTIME DESTINATION bin
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib
-    )
+        # 配置安装规则
+        install(TARGETS Engine EngineDLL ContentTools
+            RUNTIME DESTINATION bin
+            LIBRARY DESTINATION lib
+            ARCHIVE DESTINATION lib
+        )
+    else()
+        add_dependencies(EngineDLL Engine)
+        message(STATUS "ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
+
+        install(TARGETS Engine EngineDLL
+            RUNTIME DESTINATION bin
+            LIBRARY DESTINATION lib
+            ARCHIVE DESTINATION lib
+        )
+    endif()
 endif()
 
 # 打印配置信息

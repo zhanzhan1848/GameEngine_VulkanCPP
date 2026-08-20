@@ -13,14 +13,18 @@ namespace primal::graphics::rhi {
 //   4: skyColorIntensity   (LumenDDGIPass SkyColor magnitude, default 0.2)
 //   5: albedoIntensity     (LumenDDGIPass Albedo magnitude, default 0.4)
 //   6: probeHysteresis     (LumenDDGIPass ProbeHysteresis, default 0.08)
+// Tuned for desktop Vulkan Sponza (not WASM defaults).
+// skyColorIntensity 0.4: warm sky tint (0.85,0.85,1.0) × 0.4 gives soft blue ambient.
+// albedoIntensity 0.5: moderate surface reflectance for multi-bounce.
+// probeHysteresis 0.2: faster convergence (was 0.08 for WASM perf).
 struct DawnDebugParams {
     float directLightBoost   = 3.0f;
     float iblStrength        = 0.2f;
     float ddgiIndirectWeight = 0.45f;
     float exposure           = 0.1f;
-    float skyColorIntensity  = 0.2f;
-    float albedoIntensity    = 0.4f;
-    float probeHysteresis    = 0.08f;
+    float skyColorIntensity  = 0.4f;
+    float albedoIntensity    = 0.5f;
+    float probeHysteresis    = 0.2f;
 };
 
 } // namespace primal::graphics::rhi

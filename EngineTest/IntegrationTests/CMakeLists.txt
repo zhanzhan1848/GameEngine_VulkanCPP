@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(IntegrationTests)
 
 # 设置C++标准
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(COMMON_HEADERS
@@ -86,17 +86,11 @@ function(setup_test_target target_name)
 
     target_link_libraries(${target_name} PRIVATE Engine ContentTools)
     
-    # 复制着色器和资源文件
-    add_custom_command(TARGET ${target_name} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
-        $<TARGET_FILE_DIR:${target_name}>/shaders
-    )
-    add_custom_command(TARGET ${target_name} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/../assets
-        $<TARGET_FILE_DIR:${target_name}>/assets
-    )
+    # stale-test port: per-target POST_BUILD copies of shaders/assets into the shared
+    # Darwin/Debug output raced under `ninja -j` ("Error copying directory ... No such
+    # file or directory"). All integration targets share that output dir, so a single
+    # stamp-based copy target replaces them.
+    add_dependencies(${target_name} IntegrationTestsAssetsCopy)
     
     # 注册测试 (使用 Engine_Integration_Tests_ 前缀以便被 run_integration_tests 目标捕获)
     add_test(NAME Engine_Integration_Tests_${target_name} COMMAND ${target_name})
@@ -104,6 +98,27 @@ endfunction()
 
 enable_testing()
 
+# stale-test port: one-time (per build) copy of shaders/assets into the shared
+# Darwin/Debug output directory used by every integration test target.
+set(ITEST_ASSETS_STAMP ${CMAKE_BINARY_DIR}/IntegrationTestsAssetsCopy.stamp)
+add_custom_command(OUTPUT ${ITEST_ASSETS_STAMP}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+        ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../assets
+        ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/assets
+    COMMAND ${CMAKE_COMMAND} -E touch ${ITEST_ASSETS_STAMP}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../shaders ${CMAKE_CURRENT_SOURCE_DIR}/../assets
+    COMMENT "Copying EngineTest shaders/assets to output directory"
+    VERBATIM
+)
+add_custom_target(IntegrationTestsAssetsCopy DEPENDS ${ITEST_ASSETS_STAMP})
+
+# 所有平台的集成测试源码（RenderItem/ShaderCompilation 等）都调用 ContentTools API，
+# BUILD_CONTENT_TOOLS=OFF 时（如无 FBX SDK 的 CI runner）整体跳过，
+# 只保留空的 IntegrationTests 聚合目标供 run_integration_tests 等 DEPENDS 引用。
+if(TARGET ContentTools)
 if(APPLE)
     # 1. TestRendererMac
     add_executable(TestRendererMac
@@ -127,6 +142,9 @@ if(APPLE)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestMetalRenderer)
+    # stale-test port: TestMetalRenderer.cpp implements Engine_Test from TestRenderer.h;
+    # without a TEST_* define Main.cpp hits its #error guard.
+    target_compile_definitions(TestMetalRenderer PRIVATE "TEST_RENDERER=1")
 
     # 3. TestCSMIntegration
     add_executable(TestCSMIntegration
@@ -136,6 +154,8 @@ if(APPLE)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestCSMIntegration)
+    # stale-test port: missing test-selection define made Main.cpp hit its #error guard.
+    target_compile_definitions(TestCSMIntegration PRIVATE "TEST_CSM_INTEGRATION=1" "TEST_RENDERER=0")
 
     # 4. TestStandardPipeline
     add_executable(TestStandardPipeline
@@ -233,6 +253,32 @@ if(APPLE)
     )
     setup_test_target(TestNaniteStreamingPipeline)
     target_compile_definitions(TestNaniteStreamingPipeline PRIVATE "TEST_NANITE_STREAMING_PIPELINE=1" "TEST_RENDERER=0")
+
+    # 10b. TestVulkanSponzaRenderGraph (T4.6.5 part 30.4)
+    # First visible-window Vulkan Sponza render via RenderSystem abstraction.
+    # Mirrors TestNaniteStreamingPipeline scaffolding (RenderTestRunner + RenderSystem)
+    # but drives StandardRenderPipeline::RenderWithCommandBuffer on a Vulkan device.
+    add_executable(TestVulkanSponzaRenderGraph
+        "Main.cpp"
+        "TestVulkanSponzaRenderGraph.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
+    )
+    setup_test_target(TestVulkanSponzaRenderGraph)
+    target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
+
+    # T4.6.5 part 35.3: bundle Vulkan SPIR-V shaders next to the test binary.
+    # Without this, LoadShaderBytecode falls back to
+    # /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/ + relative path, which
+    # resolves to the MAIN repo (feat/wfc-pcg branch) containing stale
+    # pre-Part-35.2 .spv files. The relative-path lookup only works if the
+    # .spv files exist at <binary_dir>/Engine/Graphics/Vulkan/shaders/...
+    add_custom_command(TARGET TestVulkanSponzaRenderGraph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+        $<TARGET_FILE_DIR:TestVulkanSponzaRenderGraph>/Engine/Graphics/Vulkan/shaders
+    )
 
     # 11. TestHZBStandalone
     add_executable(TestHZBStandalone
@@ -755,7 +801,7 @@ elseif(WIN32)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestRenderer)
-    
+
     add_custom_target(IntegrationTests DEPENDS TestRenderer)
 
 elseif(LINUX)
@@ -770,6 +816,10 @@ elseif(LINUX)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestRenderer)
-    
+
     add_custom_target(IntegrationTests DEPENDS TestRenderer)
+endif()
+else()
+    message(STATUS "Integration tests skipped: ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
+    add_custom_target(IntegrationTests)
 endif()

@@ -3,8 +3,14 @@
 #include "../RHI/Core/RHICommand.h"
 #include "../RHI/Core/RHIMath.h"
 #include "../Dawn/ShaderLoader.h"
+#include "../Utils/ShaderRegistry.h"
 #if !defined(__EMSCRIPTEN__)
 #include "../RHI/Platforms/Metal/MetalDevice.h"
+// P4c: Vulkan 分支仅在 ENABLE_VULKAN 下编译(修 OFF 构建未守卫问题)
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "../RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "../RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#endif
 #endif
 #include "Graphics/Field/FieldRegistry.h"
 #include <algorithm>
@@ -222,13 +228,6 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
     }
 
     // Mark re-voxelization needed only when the snapped grid cell changes.
-    // For static scenes this is rare (cascade_size is 60/120/240m), so the
-    // per-frame voxelization cost collapses to ~0 after the initial fill.
-    // Without this guard, needs_voxelization stays true forever (default at
-    // init) and TestDawnForwardRenderer's `if (CascadeNeedsVoxelization(c))`
-    // dispatches a 262K-invocation compute shader EVERY FRAME for EACH of
-    // the 3 cascades. This was the Mode 11 WASM perf cliff: 4 FPS → expected
-    // 100+ FPS once restored.
     math::v3 new_origin = CalculateCascadeOrigin(cascade.cascade_index, camera_position, cascade.voxel_size);
     if (!cascade.ever_voxelized
         || new_origin.x != cascade.origin.x
@@ -274,7 +273,7 @@ bool GlobalSDF::AllocateTexture(rhi::ResourceHandle& handle, u32 resolution, u32
     desc.arraySize = 1;
     desc.format = rhi::DataFormat::R32_Float;
     desc.type = rhi::TextureType::Texture3D;
-    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::CopySource;
     desc.memoryUsage = rhi::GPUMemoryUsage::Static;
     
     handle = device_->CreateTexture(desc);
@@ -416,6 +415,39 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         }
         return std::vector<u8>(src.begin(), src.end());
     }
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // T4.6.5 part 35.3: CWD-relative first (bundled next to test binary),
+        // then worktree source root. Previous single fallback hit the MAIN
+        // repo (feat/wfc-pcg) with stale .spv files.
+        const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
+        std::vector<std::string> candidates;
+        candidates.push_back(relPath);
+        candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+        std::ifstream file;
+        std::string openedPath;
+        for (const auto& candidate : candidates) {
+            file.open(candidate, std::ios::binary | std::ios::ate);
+            if (file.is_open()) {
+                openedPath = candidate;
+                break;
+            }
+        }
+        if (!file.is_open()) {
+            std::cerr << "[GlobalSDF] Failed to open SPIR-V: " << name
+                      << "\n  tried: " << candidates[0]
+                      << "\n  tried: " << candidates[1] << std::endl;
+            return {};
+        }
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        std::vector<u8> bytecode(static_cast<size_t>(size));
+        if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+            std::cerr << "[GlobalSDF] Failed to read SPIR-V: " << openedPath << std::endl;
+            return {};
+        }
+        return bytecode;
+    }
     std::string path = SDF_SHADER_DIR + std::string(name) + ".metal";
     std::string source = ReadFileToString(path);
     if (source.empty()) {
@@ -496,8 +528,9 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     // Create descriptor set layout
     // Metal: texture(0) = SDF output, buffer(0..6) = cascade + geometry data
     //        (Metal has separate texture/buffer namespaces — indices can overlap)
-    // WebGPU: single namespace — texture + UBO + 6 SSBOs use bindings 0..7
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    // WebGPU/Vulkan: single namespace — texture + UBO + 6 SSBOs use bindings 0..7
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     if (isDawn) {
         // WebGPU/WGSL bindings — see GlobalSDFVoxelization.wgsl header comment.
         // F2 (2026-07-13): storage texture is R32Float 3D (was RGBA16Float 2D).
@@ -676,7 +709,8 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     }
 
     // Update descriptor set
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     {
         if (isDawn) {
             // WebGPU/WGSL bindings: 0=texture, 1=UBO, 2-7=SSBOs (matches WGSL header).
@@ -708,7 +742,17 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         }
     }
 
-    // Bind and dispatch
+    // Pre-barrier: ensure SDF texture is in GENERAL (UAV) layout for storage write.
+    {
+        rhi::ResourceBarrier preBarrier{};
+        preBarrier.resource = cascade.sdf_texture;
+        preBarrier.beforeState = rhi::ResourceState::ShaderResource;
+        preBarrier.afterState = rhi::ResourceState::UnorderedAccess;
+        preBarrier.subresource = 0xFFFFFFFF;
+        preBarrier.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&preBarrier, 1);
+    }
+
     cmd->BindComputePipeline(vox_pipeline_);
     const rhi::DescriptorSetHandle sets[] = { vox_descriptor_sets_[frameIdx] };
     cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, vox_layout_, 0, 1, sets, 0, nullptr);
@@ -769,7 +813,7 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
     }
     if (max_res == 0) return false;
 
-    const u64 staging_bytes = static_cast<u64>(max_res) * max_res * max_res * sizeof(u16);
+    const u64 staging_bytes = static_cast<u64>(max_res) * max_res * max_res * sizeof(f32);
     rhi::BufferDesc bufDesc{
         staging_bytes,
         rhi::BufferType::Unknown,
@@ -781,7 +825,9 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
     if (staging == rhi::handles::INVALID_RESOURCE) return false;
 
     // Scratch CPU buffer for the largest cascade; reused for smaller ones.
-    utl::vector<u16> cpu_data;
+    // Cascade textures are R32_Float (AllocateTexture line 278), so we write
+    // f32 directly — no f32_to_f16 conversion needed.
+    utl::vector<f32> cpu_data;
     cpu_data.resize(max_res * max_res * max_res);
 
     bool all_ok = true;
@@ -805,12 +851,12 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
                         c.origin.y + (static_cast<f32>(y) + 0.5f) * voxel_step.y,
                         c.origin.z + (static_cast<f32>(z) + 0.5f) * voxel_step.z};
                     const f32 d = sdf_fn(p);
-                    cpu_data[(z * res + y) * res + x] = f32_to_f16(d);
+                    cpu_data[(z * res + y) * res + x] = d;
                 }
             }
         }
 
-        const u64 cascade_bytes = static_cast<u64>(res) * res * res * sizeof(u16);
+        const u64 cascade_bytes = static_cast<u64>(res) * res * res * sizeof(f32);
         if (!device_->UpdateBufferData(staging, cpu_data.data(), cascade_bytes, 0)) {
             all_ok = false;
             continue;
@@ -820,13 +866,20 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
         // Bypass rhi::GetCommandBuffer (global singleton): test binaries that use
         // C++ engine APIs link both libEngine.a (static) and libEngineDLL.dylib,
         // producing two singleton instances. The dylib registers, the static
-        // reads — lookup fails. MetalDevice::GetCommandBuffer routes through
+        // reads — lookup fails. PlatformDevice::GetCommandBuffer routes through
         // the device's own allocator and is singleton-free.
 #if defined(__EMSCRIPTEN__)
         auto* cmd = rhi::GetCommandBuffer(cmdHandle);
 #else
-        auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_);
-        auto* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmdHandle) : nullptr;
+        rhi::RHICommandBuffer* cmd = nullptr;
+        if (auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_)) {
+            cmd = metal_dev->GetCommandBuffer(cmdHandle);
+        }
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+        else if (auto* vk_dev = dynamic_cast<rhi::VulkanDevice*>(device_)) {
+            cmd = vk_dev->GetCommandBuffer(cmdHandle);
+        }
+#endif
 #endif
         if (!cmd) { all_ok = false; continue; }
 
@@ -841,6 +894,19 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
         region.imageOffset = {0, 0, 0};
         region.imageExtent = {res, res, res};
         cmd->CopyBufferToTexture(staging, c.sdf_texture, &region, 1);
+
+        // Vulkan: CopyBufferToTexture leaves dst in TRANSFER_DST_OPTIMAL; cascade
+        // textures are bound as StorageImage in voxelization shaders which
+        // requires GENERAL. Transition back so subsequent dispatches don't hit
+        // VUID-vkCmdDraw-None-09600. Dawn/Metal InsertBarrier are no-ops.
+        rhi::ResourceBarrier toUA{};
+        toUA.resource = c.sdf_texture;
+        toUA.beforeState = rhi::ResourceState::CopyDest;
+        toUA.afterState = rhi::ResourceState::UnorderedAccess;
+        toUA.subresource = 0xFFFFFFFF;
+        toUA.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toUA, 1);
+
         cmd->End();
 
         rhi::QueueSubmitInfo submit{};

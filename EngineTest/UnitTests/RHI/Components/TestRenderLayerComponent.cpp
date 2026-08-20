@@ -53,14 +53,16 @@ Engine::Test::TestResult TestRenderLayerComponent_Match() {
 Engine::Test::TestResult TestRenderLayerComponent_ViewportScissor() {
     RenderLayerComponent component;
     
-    ViewportDesc vp(10, 20, 800, 600);
+    // stale-test port: ViewportDesc is now an aggregate (topLeft v2 / size v2 / minDepth / maxDepth)
+    ViewportDesc vp{{10.0f, 20.0f}, {800.0f, 600.0f}, 0.0f, 1.0f};
     component.viewport = vp;
     component.useCustomViewport = true;
     
     TEST_ASSERT(component.viewport.topLeft.x == 10, "Viewport X mismatch");
     TEST_ASSERT(component.viewport.size.x == 800, "Viewport Width mismatch");
     
-    Rect scissor(0, 0, 1920, 1080);
+    // stale-test port: Rect is now an aggregate (offset s32v2 / extent u32v2)
+    Rect scissor{{0, 0}, {1920, 1080}};
     component.scissor = scissor;
     component.useCustomScissor = true;
     

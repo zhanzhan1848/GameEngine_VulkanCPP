@@ -4,6 +4,7 @@
 #include "JobTypes.h"
 #include "JobHandle.h"
 #include "JobScheduler.h"
+#include <queue>  // MSVC 不会间接提供 std::queue，需显式包含
 
 namespace primal::jobsystem {
 

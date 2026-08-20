@@ -6,6 +6,8 @@
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/HZBPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/VelocityPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/SSRPass.h"
+#include "Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -103,6 +105,33 @@ bool StandardRenderPipeline::Initialize(RHIDeviceBase* device) {
         desc.format = DataFormat::RGBA16_Float;
         desc.usage = TextureUsage::ShaderResource;
         black_texture_ = device->CreateTexture(desc);
+
+        // T4.6.5 part 24.12 (B7 fix): one-time transition UNDEFINED → ShaderResource.
+        // FusionComposite samples black_texture_ as fallback when SSGI/DDGI/SPGI/AO
+        // aren't populated; without this, validation fires VUID-vkCmdDraw-None-09600
+        // on every FusionComposite draw. Apple Silicon's zero-init masks the visual
+        // bug (samples zeros) but Vulkan validation still tracks the layout.
+        if (black_texture_ != handles::INVALID_RESOURCE) {
+            CommandBufferHandle cmdH = device->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (cmdH != handles::INVALID_COMMAND_BUFFER) {
+                RHICommandBuffer* cmd = GetCommandBuffer(cmdH);
+                if (cmd && cmd->Begin()) {
+                    ResourceBarrier b{};
+                    b.resource = black_texture_;
+                    b.beforeState = ResourceState::Unknown;
+                    b.afterState = ResourceState::ShaderResource;
+                    b.subresource = RHI_ALL_SUBRESOURCES;
+                    b.queueFamily = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&b, 1);
+                    cmd->End();
+                    QueueSubmitInfo si{};
+                    si.cmdBuffer = cmdH;
+                    device->Submit(si);
+                    cmd->WaitForCompletion();
+                }
+                device->DestroyCommandBuffer(cmdH);
+            }
+        }
     }
 
     return true;
@@ -112,6 +141,11 @@ void StandardRenderPipeline::Shutdown() {
     if (s_instance == this) s_instance = nullptr;
     ShutdownSubsystems();
     ShutdownLumenPasses();
+
+    // Release file-static PostProcess singletons (Bloom's BlurPass holds a
+    // persistently-mapped param buffer) while device_ is still alive — their
+    // static destructors run at program exit, after the device is destroyed.
+    PostProcess::ShutdownBloomPass();
 
     if (black_texture_ != handles::INVALID_RESOURCE && device_) {
         device_->DestroyTexture(black_texture_);
@@ -172,6 +206,23 @@ void StandardRenderPipeline::SetPassEnabled(RenderPassID pass, bool enabled) {
     }
 }
 
+void StandardRenderPipeline::SetIBLResources(rhi::ResourceHandle irradiance,
+                                             rhi::ResourceHandle prefilter,
+                                             rhi::ResourceHandle brdfLUT) {
+    // T4.6.5 part 37: cache handles — apply to deferred module once it exists.
+    // If subsystems are already initialized, forward immediately; otherwise
+    // InitializeSubsystems will pick them up when it creates the deferred
+    // module (call sequence: SetShaderHandles -> SetIBLResources -> SetLumenConfig
+    // triggers InitializeSubsystems).
+    if (deferred_module_) {
+        deferred_module_->SetIBLResources(irradiance, prefilter, brdfLUT);
+    }
+    // Stash on members for late-init path.
+    ibl_irradiance_ = irradiance;
+    ibl_prefilter_ = prefilter;
+    ibl_brdf_lut_ = brdfLUT;
+}
+
 bool StandardRenderPipeline::IsPassEnabled(RenderPassID pass) const {
     return settings_.quality.IsPassEnabled(pass);
 }
@@ -186,6 +237,7 @@ bool StandardRenderPipeline::IsPassActive(RenderPassID pass) const {
         case RenderPassID::SurfaceCache:     return surface_cache_pass_ && surface_cache_pass_->IsInitialized();
         case RenderPassID::SCDDGIIntegration:return sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_;
         case RenderPassID::SSGI:             return ssgi_pass_ && ssgi_pass_->IsInitialized();
+        case RenderPassID::SSR:              return settings_.quality.enable_ssr;
         case RenderPassID::ScreenProbes:     return screen_probe_pass_ && screen_probe_pass_->IsInitialized();
         case RenderPassID::GIGather:         return gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized();
         case RenderPassID::VolumePass:       return (volume_pass_ && volume_pass_->IsInitialized()) ||
@@ -289,10 +341,36 @@ void StandardRenderPipeline::InitializeSubsystems() {
     scene_snapshot_ = std::make_unique<RenderSceneSnapshot>();
     scene_snapshot_->Initialize(device_);
 
-    // Global SDF
+    // Global SDF — use larger cascades to cover the full Sponza scene.
     auto& globalSDF = nanite::GlobalSDF::Get();
     if (!globalSDF.IsInitialized()) {
-        globalSDF.Initialize(device_);
+        // SDF cascade tuned for Sponza: voxel 1.0 × res 80 = 80 units cascade 0
+        nanite::GlobalSDFConfig sdfConfig;
+        sdfConfig.cascade_count = 3;
+        sdfConfig.base_resolution = 80;
+        sdfConfig.cascade_scale_factor = 2;
+        sdfConfig.voxel_size_base = 1.0f;
+        globalSDF.Initialize(device_, sdfConfig);
+    }
+
+    // Initialize GlobalSDF voxelization pipeline from Nanite mesh buffers.
+    // This enables DDGI SDF ray tracing — without it, SDF cascades are empty
+    // and DDGI trace produces no directional indirect light.
+    if (globalSDF.IsInitialized() && gpuDraw.IsInitialized()) {
+        nanite::SDFVoxelizationResources voxResources;
+        voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+        voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+        voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+        voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+        voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+        voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+        voxResources.num_instances = 0;
+        std::cerr << "[SDF_INIT] vb=" << voxResources.vertex_buffer
+                  << " mb=" << voxResources.meshlet_buffer
+                  << " cmb=" << voxResources.cluster_map_buffer
+                  << " ready_before=" << globalSDF.IsVoxelizationReady() << std::endl;
+        globalSDF.InitVoxelization(voxResources);
+        std::cerr << "[SDF_INIT] ready_after=" << globalSDF.IsVoxelizationReady() << std::endl;
     }
 
     // PCG SDF readback — matches cascade 0 resolution
@@ -315,11 +393,29 @@ void StandardRenderPipeline::InitializeSubsystems() {
         shadow_module_->InitializeShadowFilter(shadow_filter_shader_);
     }
 
+    // Planar reflection (Mirror) — fails soft: if shader loading fails the
+    // module stays invalid and the frame simply skips the mirror passes.
+    reflection_module_ = std::make_unique<PlanarReflectionModule>();
+    if (!reflection_module_->Initialize(device_, &gpuDraw, 10000)) {
+        std::cerr << "[StandardRenderPipeline] PlanarReflection init failed — mirror disabled" << std::endl;
+        reflection_module_.reset();
+    }
+
     deferred_module_ = std::make_unique<DeferredLightingModule>();
     deferred_module_->Initialize(device_, deferred_vs_, deferred_ps_, render_width_, render_height_);
+    // T4.6.5 part 37: forward cached IBL handles (if SetIBLResources was
+    // called before SetLumenConfig).
+    deferred_module_->SetIBLResources(ibl_irradiance_, ibl_prefilter_, ibl_brdf_lut_);
 
     final_blit_module_ = std::make_unique<FinalBlitModule>();
     final_blit_module_->Initialize(device_, blit_vs_, blit_ps_);
+
+    // SDF visualization module (toggled at runtime via SetSDFVisualization).
+    // Reuses the fullscreen triangle vertex shader (blit_vs_).
+    if (sdf_viz_ps_ != handles::INVALID_SHADER) {
+        sdf_viz_module_ = std::make_unique<SDFVisualizationModule>();
+        sdf_viz_module_->Initialize(device_, blit_vs_, sdf_viz_ps_);
+    }
 
     if (settings_.quality.enable_ddgi && gi_gather_shader_ != handles::INVALID_SHADER) {
         gi_gather_module_ = std::make_unique<GIGatherModule>();
@@ -363,8 +459,10 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (fusion_module_) { fusion_module_->Shutdown(); fusion_module_.reset(); }
     if (gi_gather_module_) { gi_gather_module_->Shutdown(); gi_gather_module_.reset(); }
     if (final_blit_module_) { final_blit_module_->Shutdown(); final_blit_module_.reset(); }
+    if (sdf_viz_module_) { sdf_viz_module_->Shutdown(); sdf_viz_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
+    if (reflection_module_) { reflection_module_->Shutdown(); reflection_module_.reset(); }
 
     // Forward renderer (editor mode)
     if (forward_renderer_) { forward_renderer_->Shutdown(); forward_renderer_.reset(); }
@@ -391,6 +489,14 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (!device_) return;
     const auto& config = settings_.lumen;
 
+    // T4.6.5 part 33: Lumen suite (DDGI/SSAO/SSGI/SurfaceCache) is deferred on
+    // Vulkan — needs SPIR-V ports + non-overlapping descriptor bindings per
+    // memory vulkan-rhi-t46-subsystems-probe-findings.md. Silently skip the
+    // init call rather than let Initialize() return false + print alarming
+    // "init failed" log. The bypassProd flag in ForwardRenderer already keeps
+    // production code paths off Vulkan; Lumen modules remain nullptr here.
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+
     // DDGI
     if (settings_.quality.enable_ddgi) {
         ddgi_pass_ = std::make_unique<lumen::LumenDDGIPass>();
@@ -406,6 +512,11 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         if (!ddgi_pass_->Initialize(device_, ddgiParams)) {
             std::cerr << "[Lumen] DDGI init failed" << std::endl;
             ddgi_pass_.reset();
+        } else {
+            // Enable dynamic mode (Mode 11) — runtime SDF trace over static-bake.
+            // Without this, DDGI stays in Mode 10 (static-bake only) and never
+            // traces the GlobalSDF, producing no dynamic indirect light.
+            ddgi_pass_->SetDynamicMode(true);
         }
     }
 
@@ -553,6 +664,26 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         if (scene_snapshot_->NeedsFullRebuild()) {
             scene_snapshot_->Rebind(scene);
             scene_snapshot_->ClearFullRebuildFlag();
+
+            // Phase 1 (Lumen architecture): register real mesh bounds with
+            // the Surface Cache CardGenerator. Each scene instance gets its
+            // own cards at appropriate resolution — replacing the 2 large
+            // test AABBs from Initialize. This is the single biggest
+            // improvement to SC atlas coverage and per-mesh detail.
+            if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+                auto& cardGen = surface_cache_pass_->GetCardGenerator();
+                const auto& instances = scene_snapshot_->GetInstanceData();
+                for (u32 i = 0; i < instances.size(); ++i) {
+                    const auto& inst = instances[i];
+                    math::v3 aabbMin = inst.bounds_center - math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                    math::v3 aabbMax = inst.bounds_center + math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                    cardGen.RegisterMesh(aabbMin, aabbMax, i);
+                }
+                cardGen.RebuildCardAllocation();
+                std::cout << "[LumenSC] Registered " << instances.size()
+                          << " scene instances with CardGenerator → "
+                          << cardGen.GetCardCount() << " cards" << std::endl;
+            }
         }
     }
 
@@ -873,6 +1004,38 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
                 gpuDraw.Execute(cmd, *data.scene_snapshot, data.view_matrix, data.proj_matrix,
                                 cullingResults, static_cast<u32>(data.frame_count), data.buffer_index);
+
+                // Step 1d: GlobalSDF voxelization — inline after NaniteSceneRender
+                // (mesh buffers are now populated for this frame).
+                {
+                    static int s_vox_check = 0;
+                    if (s_vox_check < 3) {
+                        auto& gsdf = nanite::GlobalSDF::Get();
+                        std::cout << "[VOX_CHECK] sceneRender done, sdfInit=" << gsdf.IsInitialized()
+                                  << " voxReady=" << gsdf.IsVoxelizationReady()
+                                  << " cascade0Needs=" << (gsdf.GetConfig().cascade_count > 0 ? "check" : "n/a")
+                                  << std::endl;
+                        s_vox_check++;
+                    }
+                }
+                auto& globalSDF = nanite::GlobalSDF::Get();
+                if (globalSDF.IsInitialized()) {
+                    nanite::SDFVoxelizationResources voxResources;
+                    voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+                    voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+                    voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+                    voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+                    voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+                    voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+                    voxResources.num_instances = data.scene_snapshot ? data.scene_snapshot->GetInstanceCount() : 0;
+                    globalSDF.SetVoxelizationResources(voxResources);
+
+                    for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                        if (globalSDF.CascadeNeedsVoxelization(c)) {
+                            globalSDF.DispatchVoxelization(cmd, c);
+                        }
+                    }
+                }
             }
         );
 
@@ -891,6 +1054,53 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                     hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), ctx.cmdBuffer);
                 }
             );
+        }
+
+        // Step 1d: GlobalSDF voxelization
+        {
+            auto& globalSDF = nanite::GlobalSDF::Get();
+            // Always register the pass if SDF is initialized — buffer handles
+            // are refreshed inside the execute lambda.
+            if (globalSDF.IsInitialized()) {
+                graph.AddPass<NanitePassData>(
+                    "GlobalSDF_Voxelization",
+                    RGPassType::Compute,
+                    [&](NanitePassData& data, RenderGraphBuilder& builder) {
+                        builder.SideEffect();
+                        data.buffer_index = cbIdx;
+                    },
+                    [this](const NanitePassData& data, RenderGraphContext& ctx) {
+                        auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+                        auto& globalSDF = nanite::GlobalSDF::Get();
+                        if (!gpuDraw.IsInitialized()) return;
+
+                        static int s_vox_diag = 0;
+                        if (s_vox_diag < 5) {
+                            std::cerr << "[SDF_VOX] pass executing, ready=" << globalSDF.IsVoxelizationReady()
+                                      << " instances=" << (scene_snapshot_ ? scene_snapshot_->GetInstanceCount() : 0)
+                                      << std::endl;
+                            s_vox_diag++;
+                        }
+
+                        // Refresh buffer handles each frame (may change with streaming)
+                        nanite::SDFVoxelizationResources voxResources;
+                        voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+                        voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+                        voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+                        voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+                        voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+                        voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+                        voxResources.num_instances = scene_snapshot_ ? scene_snapshot_->GetInstanceCount() : 0;
+                        globalSDF.SetVoxelizationResources(voxResources);
+
+                        for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                            if (globalSDF.CascadeNeedsVoxelization(c)) {
+                                globalSDF.DispatchVoxelization(ctx.cmdBuffer, c);
+                            }
+                        }
+                    }
+                );
+            }
         }
     }
 
@@ -949,7 +1159,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
         DeferredLightingInputs deferredIn;
         deferredIn.gpu_draw_pipeline = &gpuDraw;
-        deferredIn.ssao_pass = nullptr;
+        deferredIn.ssao_pass = ssao_pass_.get();
         deferredIn.view_matrix = view_matrix_;
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
@@ -961,6 +1171,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         deferredIn.current_buffer_index = cbIdx;
         deferredIn.shadow_visibility_rg = shadowOut.shadow_visibility_rg;
         deferredIn.shadow_visibility_tex = shadowOut.shadow_visibility_tex;
+        // VSM: blurred moments + mode flag (shader falls back to the R8
+        // visibility path when vsm_enabled is false).
+        deferredIn.vsm_enabled = shadowOut.vsm_enabled;
+        deferredIn.shadow_moments_rg[0] = shadowOut.shadow_moments_rg[0];
+        deferredIn.shadow_moments_rg[1] = shadowOut.shadow_moments_rg[1];
+        deferredIn.shadow_moments_tex[0] = shadowOut.shadow_moments_tex[0];
+        deferredIn.shadow_moments_tex[1] = shadowOut.shadow_moments_tex[1];
         deferredIn.gbuffer_albedo_rg = gbufferAlbedoDL;
         deferredIn.gbuffer_normal_rg = gbufferNormalDL;
         deferredIn.gbuffer_orm_rg = gbufferORMDL;
@@ -1061,6 +1278,14 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         frameData.frame_index = static_cast<u32>(frameCount_);
         frameData.light_count = 1;
 
+        // GBuffer-gather capture: real rendered surfaces → card atlas.
+        frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
+        frameData.render_width  = render_width_;
+        frameData.render_height = render_height_;
+        frameData.gbuffer_depth  = gpuDraw.GetGBufferDepthSampleable();
+        frameData.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
+        frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
+
         ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
         surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf,
                                      frameData, static_cast<u32>(frameCount_));
@@ -1083,7 +1308,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 surface_cache_pass_->GetCardLookupBuffer(),
                 surface_cache_pass_->GetCardDataBuffer(),
                 settings_.lumen.surface_cache_atlas_size,
-                settings_.lumen.surface_cache_max_cards);
+                surface_cache_pass_->GetCardGenerator().GetLookupCount());
         }
     }
 
@@ -1132,7 +1357,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     lumen::LumenSSGIOutput ssgiOut;
-    if (ssgi_pass_ && ssgi_pass_->IsInitialized() && frameCount_ > 0) {
+    if (ssgi_pass_ && ssgi_pass_->IsInitialized()) {  // TEMP: removed frameCount_ > 0 for SSGI diagnosis
         auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
         auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
         auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -1155,6 +1380,32 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             gbufferVelocitySSGI, hzbHandle, prevColorSSGI,
             ssgiCam, static_cast<u32>(frameCount_),
             hzb_system_->GetMipLevels());
+    }
+
+    // ========================================================================
+    // Step 8.5: SSR (Screen-Space Reflections)
+    // ========================================================================
+    // SSR traces reflection rays through the HZB, temporally accumulates, then
+    // upsamples to full-res with roughness attenuation. The output is a pure
+    // reflection-color texture that FusionComposite blends additively into the
+    // scene. GBuffer ORM (.g=roughness, .b=metallic) gates reflection strength.
+    PostProcess::SSRPassData ssrOut;
+    if (settings_.quality.enable_ssr && frameCount_ > 0) {
+        RGResourceHandle hdrSSR;
+        if (deferredOut.deferred_output_rg.IsValid()) {
+            hdrSSR = deferredOut.deferred_output_rg;
+        } else if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
+            hdrSSR = graph.ImportResource("SSR_HdrSource", deferredOut.deferred_output_tex);
+        }
+        auto depthSSR = graph.ImportResource("GBufferDepth_SSR", gpuDraw.GetGBufferDepthSampleable());
+        auto hzbSSR   = graph.ImportResource("HZBTexture_SSR", hzb_system_->GetHZBTexture());
+        auto velSSR   = graph.ImportResource("GBufferVelocity_SSR", gpuDraw.GetGBufferVelocity());
+        auto ormSSR   = graph.ImportResource("GBufferORM_SSR", gpuDraw.GetGBufferORM());
+
+        math::m4x4 invProj = Inverse(proj_matrix_);
+        ssrOut = PostProcess::AddSSRPass(graph, hdrSSR, depthSSR, hzbSSR, velSSR, ormSSR,
+            render_width_, render_height_, static_cast<u32>(frameCount_),
+            proj_matrix_, invProj, settings_.ssr);
     }
 
     // ========================================================================
@@ -1211,7 +1462,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     FusionOutputs fusionOut;
-    if (fusion_module_ && settings_.quality.enable_ssgi) {
+    if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr)) {
         FusionInputs fusionIn;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
         fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -1224,6 +1475,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
         fusionIn.ssao_rg = ssaoOut.ssao_output;
         fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
+        fusionIn.ssr_rg = ssrOut.outputColor;
+        fusionIn.ssr_tex = handles::INVALID_RESOURCE;  // RG-resolved inside module
+        fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
         fusionIn.volume_scatter_rg = volumeOut.volume_scatter;
         fusionIn.volume_scatter_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
         fusionIn.current_buffer_index = cbIdx;
@@ -1234,15 +1488,162 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
+    // Step 10.5: PostProcess — TAA + Bloom + ToneMapping
+    // ========================================================================
+    // TAA resolves the jittered HDR (from GPUDrivenDraw vertex shader jitter)
+    // into clean HDR using velocity-based reprojection + YCoCg variance clip.
+    // Bloom extracts bright areas and blurs them for soft glow. ToneMapping
+    // converts HDR→LDR (ACES) and composites Bloom + AO + SSGI.
+    // Order: TAA (on jittered HDR) → Bloom → ToneMapping.
+    RGResourceHandle postProcessInputRG;
+    if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        postProcessInputRG = fusionOut.output_rg;
+    } else if (deferredOut.deferred_output_rg.IsValid()) {
+        postProcessInputRG = deferredOut.deferred_output_rg;
+    }
+
+    // ========================================================================
+    // Step 10.45: Planar reflection composite (optional, both platforms)
+    // ========================================================================
+    // Mirror quad blended over the HDR frame BEFORE TAA so the reflection is
+    // temporally resolved together with the scene.
+    if (reflection_module_ && reflection_module_->IsEnabled() && postProcessInputRG.IsValid() &&
+        scene_snapshot_) {
+        PlanarReflectionInputs reflIn;
+        reflIn.scene_snapshot = scene_snapshot_.get();
+        reflIn.view_matrix = view_matrix_;
+        reflIn.proj_matrix = proj_matrix_;
+        reflIn.camera_position = camera_position_;
+        math::v3 mLDir = Normalize(settings_.lighting.light_direction);
+        reflIn.light_dir = math::v4{-mLDir.x, -mLDir.y, -mLDir.z, 0.0f};  // TO light
+        reflIn.light_color = settings_.lighting.light_color;
+        reflIn.current_buffer_index = cbIdx;
+        reflection_module_->AddPasses(graph, postProcessInputRG, reflIn);
+    }
+
+    PostProcess::ToneMappingPassData toneOut;
+    if (postProcessInputRG.IsValid()) {
+        // TAA will resolve the frame — enable the sub-pixel jitter injection.
+        // T4.6.5 followup: TAAPass now has working SPIR-V (Vulkan) + MSL (Metal)
+        // shaders, triple-buffered history with resize handling, so jitter is
+        // safe to enable on both platforms.
+        gpuDraw.SetJitterEnabled(taa_jitter_enabled_);
+        // TAA — velocity from GBuffer MRT (NDC-space, matches TAA.comp expectation).
+        auto velTAA = graph.ImportResource("GBufferVelocity_TAA", gpuDraw.GetGBufferVelocity());
+        // Depth reprojection: curr/prev depth + view-projection pair. Active on
+        // Vulkan/Metal once the first depth-history store has completed; until
+        // then (or when history is invalid) AddTAAPass keeps the velocity path.
+        PostProcess::TAADepthInputs taaDepth;
+        PostProcess::TAADepthInputs* taaDepthPtr = nullptr;
+        {
+            const auto prevDepth = depth_history_
+                ? depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_))
+                : nanite::DepthHistoryManager::DepthBuffer{};
+            if (has_prev_taa_view_proj_ && prevDepth.is_valid &&
+                prevDepth.texture != handles::INVALID_RESOURCE &&
+                gpuDraw.GetGBufferDepthSampleable() != handles::INVALID_RESOURCE) {
+                const math::m4x4 currVP = proj_matrix_ * view_matrix_;
+                taaDepth.currDepth = gpuDraw.GetGBufferDepthSampleable();
+                taaDepth.prevDepth = prevDepth.texture;
+                taaDepth.currInvViewProj = Inverse(currVP);
+                taaDepth.prevViewProj = prev_taa_view_proj_;
+                taaDepthPtr = &taaDepth;
+            }
+        }
+        auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
+            render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthPtr);
+        RGResourceHandle hdrClean = taaOut.output;
+
+        auto bloomOut = PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
+
+        toneOut = PostProcess::AddToneMappingPass(
+            graph,
+            hdrClean,                 // TAA-resolved HDR scene color
+            bloomOut.bloomOutput,     // Bloom blur result
+            ssaoOut.ssao_output,      // AO
+            ssgiOut.ssgi_output,      // SSGI
+            velTAA,                   // velocity
+            cbIdx);
+    }
+
+    // ========================================================================
+    // Step 10.6: Toon post process (optional, both platforms)
+    // ========================================================================
+    // Cel shading on the tone-mapped LDR frame: color quantization + depth
+    // Sobel edges. Runs before the GeometryDebug overlay so debug colors stay
+    // unquantized.
+    RGResourceHandle postToonColor;
+    if (toneOut.output.IsValid()) postToonColor = toneOut.output;
+    if (toon_enabled_ && postToonColor.IsValid()) {
+        auto toonDepth = graph.ImportResource("GBufferDepth_Toon", gpuDraw.GetGBufferDepthSampleable());
+        auto toonNormal = graph.ImportResource("GBufferNormal_Toon", gpuDraw.GetGBufferNormal());
+        auto toonOut = renderpass::AddToonPass(graph, postToonColor, toonDepth, toonNormal,
+                                               toon_params_, cbIdx, render_width_, render_height_);
+        if (toonOut.toonOutput.IsValid()) postToonColor = toonOut.toonOutput;
+    }
+
+    // ========================================================================
+    // Step 10.7: Geometry debug overlay (optional, both platforms)
+    // ========================================================================
+    // Meshlet / SDF-slice / vector-field / voxel visualizations blended onto
+    // the tone-mapped frame. Debug pipelines lazy-init on the first enabled
+    // frame; view comes from the Render()/RenderWithCommandBuffer() argument.
+    if (geometry_debug_settings_.enable && frame_view_ && postToonColor.IsValid()) {
+        auto gbufferDepthGD = graph.ImportResource("GBufferDepth_GeometryDebug",
+                                                   gpuDraw.GetGBufferDepthSampleable());
+        AddGeometryDebugPass(graph, postToonColor, gbufferDepthGD,
+                             *frame_view_, &geometry_debug_settings_);
+    }
+
+    // ========================================================================
     // Step 11: Final Blit → BackBuffer
+    //         (or SDF Visualization if toggled on)
     // ========================================================================
 
-    if (final_blit_module_) {
+    if (sdf_visualization_enabled_ && sdf_viz_module_ && sdf_viz_module_->IsInitialized()) {
+        // SDF visualization replaces the normal scene output.
+        SDFVisualizationInputs vizIn;
+        vizIn.backbuffer_rg = graph.ImportResource("BackBuffer", backBuffer);
+        vizIn.current_buffer_index = cbIdx;
+        vizIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        vizIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        vizIn.camera_position = { camera_position_.x, camera_position_.y,
+                                  camera_position_.z, 0.0f };
+        vizIn.view_matrix = view_matrix_;
+        vizIn.proj_matrix = proj_matrix_;
+        vizIn.light_direction = { settings_.lighting.light_direction.x,
+                                  settings_.lighting.light_direction.y,
+                                  settings_.lighting.light_direction.z, 0.0f };
+        vizIn.light_intensity = 3.0f;
+        // Use offline SDF if available; otherwise fall back to GlobalSDF cascades.
+        if (has_offline_sdf_) {
+            vizIn.use_offline_sdf = true;
+            vizIn.offline_sdf_texture = offline_sdf_texture_;
+            vizIn.offline_sdf_origin = offline_sdf_origin_;
+            vizIn.offline_sdf_extent = offline_sdf_extent_;
+            vizIn.offline_sdf_resolution = offline_sdf_resolution_;
+        }
+        sdf_viz_module_->AddPass(graph, vizIn);
+    } else if (final_blit_module_) {
         FinalBlitInputs blitIn;
-        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        // Prefer the tone-mapped LDR output (Toon-processed when enabled);
+        // fall back to HDR composite if PostProcess was skipped (e.g. no valid
+        // input texture this frame). FinalBlit binds the PHYSICAL texture
+        // directly (no RG-side resolution), so resolve the physical handle here.
+        if (postToonColor.IsValid()) {
+            auto* toneRes = graph.GetResource(postToonColor);
+            if (toneRes) {
+                blitIn.input_rg = postToonColor;
+                blitIn.input_tex = toneRes->GetPhysicalHandle();
+            }
+        }
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
             blitIn.input_tex = fusionOut.output_tex;
-        } else {
+        }
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
         }
@@ -1266,6 +1667,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     SyncHandle signalFence)
 {
     current_scene_ = &scene;
+    frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !cmd || !renderGraph_) return;
 
@@ -1326,8 +1728,91 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         cullingResults, static_cast<u32>(frameCount_), cbIdx);
     }
 
-    // After draw: Shadow + Deferred + FinalBlit via RenderGraph
-    if (deferred_module_ && final_blit_module_) {
+    // GlobalSDF voxelization — fill SDF cascades from Nanite mesh data so
+    // DDGI can do SDF ray tracing. Must run AFTER gpuDraw.Execute (mesh
+    // buffers populated) and BEFORE DDGI trace.
+    {
+        auto& globalSDF = nanite::GlobalSDF::Get();
+        if (globalSDF.IsInitialized() && globalSDF.IsVoxelizationReady()) {
+            nanite::SDFVoxelizationResources voxResources;
+            voxResources.vertex_buffer = gpuDraw.GetGlobalVertexBuffer();
+            voxResources.meshlet_buffer = gpuDraw.GetGlobalMeshletBuffer();
+            voxResources.meshlet_vertices_buffer = gpuDraw.GetGlobalMeshletVerticesBuffer();
+            voxResources.meshlet_triangles_buffer = gpuDraw.GetGlobalMeshletTrianglesBuffer();
+            voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
+            voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
+            voxResources.num_instances = scene_snapshot_ ? scene_snapshot_->GetInstanceCount() : 0;
+            globalSDF.SetVoxelizationResources(voxResources);
+
+            for (u32 c = 0; c < globalSDF.GetConfig().cascade_count; ++c) {
+                if (globalSDF.CascadeNeedsVoxelization(c)) {
+                    globalSDF.DispatchVoxelization(cmd, c);
+                }
+            }
+        }
+    }
+
+    // T4.6.5 part 39: Stage2/Stage3 mutual exclusion. In VisibilityBufferOnly
+    // mode, Stage3 is skipped (gpuDraw.Execute gates internally). Downstream
+    // passes that read GBuffer RTs must also be skipped — their input handles
+    // are INVALID_RESOURCE which would cause validation errors.
+    const bool wants_gbuffer = (gpuDraw.GetRenderMode() != nanite::GPURenderMode::VisibilityBufferOnly);
+
+    // T4.6.5 part 35.5: Build HZB from this frame's GBuffer depth. The
+    // non-Editor path was missing this — Culling samples hzb_texture_ in
+    // Stage5 occlusion, but without BuildHZB the texture contained only
+    // the initialization-time allocation (uninitialized/stale data).
+    // Result: false-occlusion of mid-frustum geometry (pillars, cloth) that
+    // varied frame-to-frame because the stale HZB never matched the live
+    // scene. BuildHZB writes nearest-depth mip chain via MIN filter so
+    // next frame's Stage5 has correct occluder depths.
+    if (hzb_system_ && hzb_system_->IsReady() && gpuDraw.IsInitialized()) {
+        hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), cmd);
+    }
+
+    // ========================================================================
+    // SDF Visualization early-out: when toggled on, skip the entire
+    // GBuffer/Deferred/Fusion pipeline and render ONLY the fullscreen SDF
+    // ray-march pass. This avoids resource-state conflicts with passes whose
+    // outputs would otherwise have no downstream consumer.
+    // ========================================================================
+    if (sdf_visualization_enabled_ && sdf_viz_module_ && sdf_viz_module_->IsInitialized()) {
+        renderGraph_->Clear();
+        auto& graph = *renderGraph_;
+
+        SDFVisualizationInputs vizIn;
+        vizIn.backbuffer_rg = graph.ImportResource("BackBuffer", target);
+        vizIn.current_buffer_index = cbIdx;
+        vizIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        vizIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        vizIn.camera_position = { camera_position_.x, camera_position_.y,
+                                  camera_position_.z, 0.0f };
+        vizIn.view_matrix = view_matrix_;
+        vizIn.proj_matrix = proj_matrix_;
+        vizIn.light_direction = { settings_.lighting.light_direction.x,
+                                  settings_.lighting.light_direction.y,
+                                  settings_.lighting.light_direction.z, 0.0f };
+        vizIn.light_intensity = 3.0f;
+        // Use offline SDF if available; otherwise fall back to GlobalSDF cascades.
+        if (has_offline_sdf_) {
+            vizIn.use_offline_sdf = true;
+            vizIn.offline_sdf_texture = offline_sdf_texture_;
+            vizIn.offline_sdf_origin = offline_sdf_origin_;
+            vizIn.offline_sdf_extent = offline_sdf_extent_;
+            vizIn.offline_sdf_resolution = offline_sdf_resolution_;
+        }
+        sdf_viz_module_->AddPass(graph, vizIn);
+
+        graph.Compile();
+        graph.Execute(cmd);
+        return;
+    }
+
+    // After draw: Shadow + Deferred + FinalBlit via RenderGraph.
+    // T4.6.5 part 39: GBuffer path requires Stage3 to have populated the
+    // GBuffer RTs. In VisibilityBufferOnly mode, skip the entire block and
+    // fall through to the resolve-output blit instead.
+    if (wants_gbuffer && deferred_module_ && final_blit_module_) {
         renderGraph_->Clear();
         auto& graph = *renderGraph_;
 
@@ -1358,7 +1843,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // Deferred Lighting — lightPos = direction TO light = -lightDir
         DeferredLightingInputs deferredIn;
         deferredIn.gpu_draw_pipeline = &gpuDraw;
-        deferredIn.ssao_pass = nullptr;
+        deferredIn.ssao_pass = ssao_pass_.get();
         deferredIn.view_matrix = view_matrix_;
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
@@ -1370,6 +1855,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         deferredIn.current_buffer_index = cbIdx;
         deferredIn.shadow_visibility_rg = shadowOut.shadow_visibility_rg;
         deferredIn.shadow_visibility_tex = shadowOut.shadow_visibility_tex;
+        // VSM: blurred moments + mode flag (shader falls back to the R8
+        // visibility path when vsm_enabled is false).
+        deferredIn.vsm_enabled = shadowOut.vsm_enabled;
+        deferredIn.shadow_moments_rg[0] = shadowOut.shadow_moments_rg[0];
+        deferredIn.shadow_moments_rg[1] = shadowOut.shadow_moments_rg[1];
+        deferredIn.shadow_moments_tex[0] = shadowOut.shadow_moments_tex[0];
+        deferredIn.shadow_moments_tex[1] = shadowOut.shadow_moments_tex[1];
         deferredIn.gbuffer_albedo_rg = gbufferAlbedoDL;
         deferredIn.gbuffer_normal_rg = gbufferNormalDL;
         deferredIn.gbuffer_orm_rg = gbufferORMDL;
@@ -1398,6 +1890,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
             frameData.frame_index = static_cast<u32>(frameCount_);
             frameData.light_count = 1;
+            frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
+            frameData.render_width  = render_width_;
+            frameData.render_height = render_height_;
+            frameData.gbuffer_depth  = gpuDraw.GetGBufferDepthSampleable();
+            frameData.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
+            frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
             ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
             surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
             scLightingRG = graph.ImportResource("SCLightingAtlas", surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
@@ -1407,7 +1905,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     surface_cache_pass_->GetCardLookupBuffer(),
                     surface_cache_pass_->GetCardDataBuffer(),
                     settings_.lumen.surface_cache_atlas_size,
-                    settings_.lumen.surface_cache_max_cards);
+                    surface_cache_pass_->GetCardGenerator().GetLookupCount());
             }
             if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
                 screen_probe_pass_->SetSurfaceCacheData(
@@ -1468,7 +1966,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- SSGI (Screen Space GI) ---
         lumen::LumenSSGIOutput ssgiOut;
-        if (ssgi_pass_ && ssgi_pass_->IsInitialized() && frameCount_ > 0) {
+        if (ssgi_pass_ && ssgi_pass_->IsInitialized()) {  // TEMP: removed frameCount_ > 0 for SSGI diagnosis
             auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
             auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
             auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -1585,6 +2083,28 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             volumeOut = volume_pass_->AddPass(graph, volIn);
         }
 
+        // --- SSR (Screen-Space Reflections) ---
+        // Trace → Temporal → Upsample. Output is a pure reflection-color texture
+        // (RGBA16F: RGB=reflection, A=strength). FusionComposite blends it in.
+        PostProcess::SSRPassData ssrOutRWCB;
+        if (settings_.quality.enable_ssr && frameCount_ > 0) {
+            RGResourceHandle hdrSSR;
+            if (deferredOut.deferred_output_rg.IsValid()) {
+                hdrSSR = deferredOut.deferred_output_rg;
+            } else if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
+                hdrSSR = graph.ImportResource("SSR_HdrSource", deferredOut.deferred_output_tex);
+            }
+            auto depthSSR = graph.ImportResource("GBufferDepth_SSR", gpuDraw.GetGBufferDepthSampleable());
+            auto hzbSSR   = graph.ImportResource("HZBTexture_SSR", hzb_system_->GetHZBTexture());
+            auto velSSR   = graph.ImportResource("GBufferVelocity_SSR", gpuDraw.GetGBufferVelocity());
+            auto ormSSR   = graph.ImportResource("GBufferORM_SSR", gpuDraw.GetGBufferORM());
+
+            math::m4x4 invProjRWCB = Inverse(proj_matrix_);
+            ssrOutRWCB = PostProcess::AddSSRPass(graph, hdrSSR, depthSSR, hzbSSR, velSSR, ormSSR,
+                render_width_, render_height_, static_cast<u32>(frameCount_),
+                proj_matrix_, invProjRWCB, settings_.ssr);
+        }
+
         // --- Fluid Render ---
         fluid::FluidOutput fluidOut;
         if (fluid_render_pass_ && fluid_render_pass_->IsInitialized()) {
@@ -1624,7 +2144,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- FusionComposite ---
         FusionOutputs fusionOut;
-        if (fusion_module_ && settings_.quality.enable_ssgi) {
+        if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr)) {
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -1637,6 +2157,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
             fusionIn.ssao_rg = ssaoOut.ssao_output;
             fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
+            fusionIn.ssr_rg = ssrOutRWCB.outputColor;
+            fusionIn.ssr_tex = handles::INVALID_RESOURCE;
+            fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
             fusionIn.current_buffer_index = cbIdx;
             fusionIn.render_width = render_width_;
             fusionIn.render_height = render_height_;
@@ -1646,12 +2169,104 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 
+        // --- PostProcess: TAA → Bloom → ToneMapping ---
+        // Mirrors BuildRenderGraph Step 10.5. TAA resolves the sub-pixel jitter
+        // injected by GPUDrivenDraw (jitter gate is enabled below when TAA runs).
+        RGResourceHandle ppInputRG;
+        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+            ppInputRG = fusionOut.output_rg;
+        } else if (deferredOut.deferred_output_rg.IsValid()) {
+            ppInputRG = deferredOut.deferred_output_rg;
+        }
+        // Planar reflection composite — mirrors BuildRenderGraph Step 10.45.
+        if (reflection_module_ && reflection_module_->IsEnabled() && ppInputRG.IsValid() &&
+            scene_snapshot_) {
+            PlanarReflectionInputs reflInRWCB;
+            reflInRWCB.scene_snapshot = scene_snapshot_.get();
+            reflInRWCB.view_matrix = view_matrix_;
+            reflInRWCB.proj_matrix = proj_matrix_;
+            reflInRWCB.camera_position = camera_position_;
+            math::v3 mLDirRWCB = Normalize(settings_.lighting.light_direction);
+            reflInRWCB.light_dir = math::v4{-mLDirRWCB.x, -mLDirRWCB.y, -mLDirRWCB.z, 0.0f};
+            reflInRWCB.light_color = settings_.lighting.light_color;
+            reflInRWCB.current_buffer_index = cbIdx;
+            reflection_module_->AddPasses(graph, ppInputRG, reflInRWCB);
+        }
+
+        PostProcess::ToneMappingPassData toneOutRWCB;
+        if (ppInputRG.IsValid()) {
+            // TAA resolve active on Vulkan + Metal — jitter is safe (see
+            // BuildRenderGraph Step 10.5).
+            gpuDraw.SetJitterEnabled(taa_jitter_enabled_);
+            auto velRWCB = graph.ImportResource("GBufferVelocity_TAA_RWCB", gpuDraw.GetGBufferVelocity());
+            // Depth reprojection inputs — same gating as BuildRenderGraph.
+            PostProcess::TAADepthInputs taaDepthRWCB;
+            PostProcess::TAADepthInputs* taaDepthRWCBPtr = nullptr;
+            {
+                const auto prevDepthRWCB = depth_history_
+                    ? depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_))
+                    : nanite::DepthHistoryManager::DepthBuffer{};
+                if (has_prev_taa_view_proj_ && prevDepthRWCB.is_valid &&
+                    prevDepthRWCB.texture != handles::INVALID_RESOURCE &&
+                    gpuDraw.GetGBufferDepthSampleable() != handles::INVALID_RESOURCE) {
+                    const math::m4x4 currVP_RWCB = proj_matrix_ * view_matrix_;
+                    taaDepthRWCB.currDepth = gpuDraw.GetGBufferDepthSampleable();
+                    taaDepthRWCB.prevDepth = prevDepthRWCB.texture;
+                    taaDepthRWCB.currInvViewProj = Inverse(currVP_RWCB);
+                    taaDepthRWCB.prevViewProj = prev_taa_view_proj_;
+                    taaDepthRWCBPtr = &taaDepthRWCB;
+                }
+            }
+            auto taaRWCB = PostProcess::AddTAAPass(graph, ppInputRG, velRWCB,
+                render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthRWCBPtr);
+            RGResourceHandle hdrCleanRWCB = taaRWCB.output;
+
+            auto bloomRWCB = PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
+            toneOutRWCB = PostProcess::AddToneMappingPass(
+                graph, hdrCleanRWCB, bloomRWCB.bloomOutput,
+                ssaoOut.ssao_output, ssgiOut.ssgi_output, velRWCB, cbIdx);
+        }
+
+        // Toon post process — mirrors BuildRenderGraph Step 10.6.
+        RGResourceHandle postToonColorRWCB;
+        if (toneOutRWCB.output.IsValid()) postToonColorRWCB = toneOutRWCB.output;
+        if (toon_enabled_ && postToonColorRWCB.IsValid()) {
+            auto toonDepthRWCB = graph.ImportResource("GBufferDepth_Toon_RWCB",
+                                                      gpuDraw.GetGBufferDepthSampleable());
+            auto toonNormalRWCB = graph.ImportResource("GBufferNormal_Toon_RWCB",
+                                                       gpuDraw.GetGBufferNormal());
+            auto toonOutRWCB = renderpass::AddToonPass(graph, postToonColorRWCB,
+                                                       toonDepthRWCB, toonNormalRWCB,
+                                                       toon_params_, cbIdx,
+                                                       render_width_, render_height_);
+            if (toonOutRWCB.toonOutput.IsValid()) postToonColorRWCB = toonOutRWCB.toonOutput;
+        }
+
+        // Geometry debug overlay — mirrors BuildRenderGraph Step 10.7.
+        if (geometry_debug_settings_.enable && frame_view_ && postToonColorRWCB.IsValid()) {
+            auto gbufferDepthGDRWCB = graph.ImportResource("GBufferDepth_GeometryDebug_RWCB",
+                                                           gpuDraw.GetGBufferDepthSampleable());
+            AddGeometryDebugPass(graph, postToonColorRWCB, gbufferDepthGDRWCB,
+                                 *frame_view_, &geometry_debug_settings_);
+        }
+
         // --- Final Blit → backbuffer ---
         FinalBlitInputs blitIn;
-        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        // Prefer the Toon-processed frame (== toneOutRWCB.output when toon is off).
+        if (postToonColorRWCB.IsValid()) {
+            auto* toneResRWCB = graph.GetResource(postToonColorRWCB);
+            if (toneResRWCB) {
+                blitIn.input_rg = postToonColorRWCB;
+                blitIn.input_tex = toneResRWCB->GetPhysicalHandle();
+            }
+        }
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
             blitIn.input_tex = fusionOut.output_tex;
-        } else {
+        }
+        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+            deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
         }
@@ -1663,6 +2278,46 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         graph.Compile();
         graph.Execute(cmd);
+
+        // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
+        // store. RWCB's command buffer is caller-owned; the store only records
+        // into it, submission stays with the caller.
+        if (depth_history_ && gpuDraw.IsInitialized()) {
+            if (depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_))) {
+                prev_taa_view_proj_ = proj_matrix_ * view_matrix_;
+                has_prev_taa_view_proj_ = true;
+            }
+        }
+    } else if (!wants_gbuffer && final_blit_module_) {
+        // T4.6.5 part 39: VisibilityBufferOnly path. Stage2 rasterized into
+        // visibility_buffer_, ResolveVisibilityBuffer (auto-called in
+        // gpuDraw.Execute) wrote resolve_output_texture_. Skip Shadow +
+        // Deferred + SSAO + Fusion entirely; FinalBlit reads resolve_output_texture_
+        // directly as the backbuffer source.
+        renderGraph_->Clear();
+        auto& graph = *renderGraph_;
+
+        FinalBlitInputs blitIn;
+        blitIn.input_rg = graph.ImportResource("ResolveOutput_DL", gpuDraw.GetResolveOutputTexture());
+        blitIn.input_tex = gpuDraw.GetResolveOutputTexture();
+        blitIn.backbuffer_rg = graph.ImportResource("BackBuffer", target);
+        blitIn.current_buffer_index = cbIdx;
+        blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        blitIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        final_blit_module_->AddPass(graph, blitIn);
+
+        graph.Compile();
+        graph.Execute(cmd);
+
+        // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
+        // store. RWCB's command buffer is caller-owned; the store only records
+        // into it, submission stays with the caller.
+        if (depth_history_ && gpuDraw.IsInitialized()) {
+            if (depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_))) {
+                prev_taa_view_proj_ = proj_matrix_ * view_matrix_;
+                has_prev_taa_view_proj_ = true;
+            }
+        }
     } else {
         // Fallback: manual blit GBuffer albedo to backbuffer
         RenderPassDesc rpDesc{};
@@ -1685,7 +2340,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             write.dstArrayElement = 0;
             write.descriptorCount = 1;
             write.descriptorType = DescriptorType::SampledImage;
-            imgInfo.imageView = gpuDraw.GetGBufferAlbedo();
+            // T4.6.5 part 39: fallback path fires only when final_blit_module_
+            // is null (subsystems not initialized). In that case render_mode_
+            // is at its default GBuffer; pick the right source texture anyway
+            // for defensive correctness.
+            imgInfo.imageView = wants_gbuffer ? gpuDraw.GetGBufferAlbedo()
+                                              : gpuDraw.GetResolveOutputTexture();
             imgInfo.imageLayout = ResourceState::ShaderResource;
             write.imageInfo = &imgInfo;
             device_->UpdateDescriptorSets(1, &write);
@@ -1727,6 +2387,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
                                      ResourceHandle target, const TextureDesc& targetDesc,
                                      SyncHandle signalFence) {
     current_scene_ = &scene;
+    frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();
     if (!device_ || !renderGraph_) return;
 
@@ -1816,7 +2477,13 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
 
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
     if (depth_history_ && gpuDraw.IsInitialized()) {
-        depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_));
+        if (depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_))) {
+            // Depth copy for frame N landed — cache frame N's view-projection so
+            // next frame's TAA can reproject against this depth (the buffer the
+            // manager returns for frame N+1 is exactly the one stored here).
+            prev_taa_view_proj_ = proj_matrix_ * view_matrix_;
+            has_prev_taa_view_proj_ = true;
+        }
     }
     if (color_history_ && deferred_module_) {
         color_history_->StoreCurrentFrameColor(
@@ -1829,6 +2496,15 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
     submitInfo.cmdBuffer = cmdHandle;
     submitInfo.signalFence = signalFence;
     device_->Submit(submitInfo);
+
+    // T4.6.5 part 24.6 (B8 fix): wait for cmd buffer completion before
+    // destroying. Submit returns immediately while the GPU is still
+    // processing; destroying the cmd buffer (which owns the VkFence) before
+    // completion triggers VUID-vkFreeCommandBuffers-pCommandBuffers-00047 +
+    // cascades into GPU lost. WaitForCompletion is a no-op on Metal/Dawn
+    // (their cmd buffers don't expose per-buffer fences this way) but is
+    // required on Vulkan.
+    cmd->WaitForCompletion();
 
     const auto& cmdStats = cmd->GetStats();
     stats_.drawCallCount = cmdStats.drawCallCount;

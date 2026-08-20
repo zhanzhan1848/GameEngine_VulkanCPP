@@ -22,6 +22,7 @@ class MetalDevice;
  */
 class MetalCommandBuffer : public RHICommandBuffer {
     friend class MetalDevice;
+    template<typename T> friend class RHIAllocator;  // P4c-F7: allocator 就地构造 secondary
 public:
     /**
      * @brief 构造函数
@@ -64,6 +65,10 @@ public:
      * @return 用于并行记录的子命令缓冲区
      */
     MetalCommandBuffer* CreateSecondaryCommandBuffer();
+
+    // P4c-F7: Core 统一虚函数对接(parallel 子 encoder 路径)
+    CommandBufferHandle BeginSecondaryCommandBuffer(const SecondaryCommandBufferDesc& desc) override;
+    void ExecuteSecondaryCommandBuffers(u32 count, CommandBufferHandle* secondaries) override;
 
     void EndRenderPass() override;
     void SetViewport(const ViewportDesc& viewport) override;
@@ -127,10 +132,15 @@ private:
     
     // 注意: RenderEncoder必须通过BeginRenderPass创建
     /**
-     * @brief 私有构造函数，用于创建Secondary CommandBuffer
+     * @brief Secondary CommandBuffer 构造(包装 parallel 子 encoder)
+     * @details P4c-F7 起 public:RHIAllocator 的内部容器(utl::vector/FreeList)
+     *          placement-new 需要访问权(friend 不级联)。仅经
+     *          BeginSecondaryCommandBuffer 使用,外部不要直接构造。
      */
+public:
     MetalCommandBuffer(MetalDevice& device, CommandQueueType type, MTL::RenderCommandEncoder* encoder);
 
+private:
     MTL::CommandBuffer* mtlCommandBuffer_{nullptr}; ///< Metal命令缓冲区
     NS::AutoreleasePool* pool_{nullptr};            ///< 自动释放池
      // 并行渲染支持

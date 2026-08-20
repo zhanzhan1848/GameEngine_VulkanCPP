@@ -15,7 +15,7 @@ struct particle_component {
     bool is_active{ true };
 };
 
-std::unordered_map<particle_id, particle_component> component_map;
+std::unordered_map<particle_id, particle_component, particle_id_hash> component_map;
 std::unordered_map<id::id_type, particle_id> entity_to_particle;
 std::mutex component_mutex;
 

@@ -1,0 +1,225 @@
+#version 450 core
+// DDGIUpdateDepth.comp — Vulkan Lumen hand-written GLSL port of
+// DDGIUpdateDepth.wgsl. Entry point: ddgi_update_depth
+//   (glslangValidator --source-entrypoint main -e ddgi_update_depth)
+//
+// Bins ray hit distances for one probe into 64 (8x8) octahedral texels,
+// computes mean + variance per texel, applies a temporal EMA with a
+// history buffer, and writes the result.
+//
+// Buffer layout per probe: 128 floats
+//   Indices [0..63]:   mean distance per octahedral texel
+//   Indices [64..127]: variance per octahedral texel
+//   Index: probeIdx*128 + texelIdx (mean) / probeIdx*128 + 64 + texelIdx (var)
+//
+// Why GLSL (not naga-compiled WGSL): the WGSL DDGIVolumeData uniform struct
+// contains array<vec4<f32>, 3> fields (SdfOrigins/VoxelSizes/Extents). naga
+// emits these as spvUnsafeArray, which MoltenVK cannot consume inside a uniform
+// struct. GLSL std140 handles vec4[3] natively. Same pattern as SSAOTrace.comp
+// and DDGIGIGather.comp.
+//
+// Flat descriptor bindings (matches LumenDDGIPass.cpp:413-419 Vulkan branch):
+//   binding 0 = UniformBuffer        GlobalShaderData
+//   binding 1 = UniformBuffer        DDGIVolumeData
+//   binding 2 = StorageBuffer (ro)   ray_buffer
+//   binding 3 = StorageBuffer (ro)   depth_history
+//   binding 4 = StorageBuffer (rw)   depth_output
+//   binding 5 = StorageBuffer (ro)   probe_update_list
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ----------------------------------------------------------------------------
+// Bindings (flat — see header)
+// ----------------------------------------------------------------------------
+
+// GlobalShaderData UBO — mirrors C++ RHIShaderCommon.h / WGSL GlobalShaderData.
+layout(set = 0, binding = 0, std140) uniform GlobalShaderData {
+    mat4 View;
+    mat4 Projection;
+    mat4 InvProjection;
+    mat4 ViewProjection;
+    mat4 PreviousViewProjection;
+    mat4 InvViewProjection;
+    vec4 CameraPositionAndViewWidth;
+    vec4 CameraDirectionAndViewHeight;
+    uint NumDirectionalLights;
+    float DeltaTime;
+    float FrameCount;
+    uint  _padding;
+} globalData;
+
+// DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h.
+// The C++ struct is 336 bytes (extends to Albedo @ 320); this shader only
+// references fields through LightColor @ 288. Trailing bytes are uploaded
+// but not read — Vulkan allows a UBO block to be smaller than the bound
+// buffer as long as accessed offsets are in-bounds.
+layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88  (Surface Cache card lookup count)
+    uint  SCAtlasSize;              //  92  (Surface Cache lighting atlas size)
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    float _pad_to_sdf;              // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+} volume;
+
+// DDGIRayData — storage buffer element. Packed as vec4 (16B stride).
+struct DDGIRayData {
+    vec4 radiance_and_dist;  // xyz = radiance, w = hit_distance
+};
+
+layout(set = 0, binding = 2) readonly buffer RayBuffer {
+    DDGIRayData ray_buffer[];
+};
+layout(set = 0, binding = 3) readonly buffer DepthHistory {
+    float depth_history[];
+};
+layout(set = 0, binding = 4) buffer DepthOutput {
+    float depth_output[];
+};
+layout(set = 0, binding = 5) readonly buffer ProbeUpdateList {
+    uint probe_update_list[];
+};
+
+// ----------------------------------------------------------------------------
+// Constants
+// ----------------------------------------------------------------------------
+const uint DDGI_DEPTH_RES    = 8u;
+const uint DDGI_DEPTH_TEXELS = 64u;  // DDGI_DEPTH_RES * DDGI_DEPTH_RES
+
+// ----------------------------------------------------------------------------
+// Helpers (verbatim from DDGIUpdateIrradiance.comp / WGSL)
+// ----------------------------------------------------------------------------
+
+// Fibonacci sphere ray direction
+vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
+    const float INV_PHI = 0.6180339887498948482;
+    const float PI_VAL  = 3.14159265358979323846;
+    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
+    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
+    float theta = 2.0 * PI_VAL * u;
+    float phi   = acos(1.0 - 2.0 * v);
+    float sinPhi = sin(phi);
+    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
+}
+
+// Sphere direction -> octahedral UV in [0,1]^2.
+// WGSL select(a, b, c) returns (c ? b : a) — same as GLSL mix(a, b, float(c)).
+// Here we use bvec2 comparison -> mix via componentwise bool->float.
+vec2 octahedralEncode(vec3 d) {
+    float l1norm = abs(d.x) + abs(d.y) + abs(d.z);
+    vec2 uv = d.xy / l1norm;
+    if (d.z < 0.0) {
+        vec2 s = mix(vec2(-1.0), vec2(1.0), vec2(greaterThanEqual(uv.xy, vec2(0.0))));
+        uv = (1.0 - abs(uv.yx)) * s;
+    }
+    return uv * 0.5 + 0.5;
+}
+
+// ----------------------------------------------------------------------------
+// Main Kernel: ddgi_update_depth
+// ----------------------------------------------------------------------------
+void ddgi_update_depth() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (gid >= volume.ProbeUpdateCount) {
+        return;
+    }
+
+    uint probeIdx = probe_update_list[gid];
+
+    // -----------------------------------------------------------------------
+    // Accumulate per-texel mean + variance from all rays (octahedral binning)
+    // -----------------------------------------------------------------------
+
+    uint texels = DDGI_DEPTH_TEXELS;
+    float sumDist[64];
+    float sumDistSq[64];
+    uint  rayCountArr[64];
+    for (uint t = 0u; t < texels; t++) {
+        sumDist[t]   = 0.0;
+        sumDistSq[t] = 0.0;
+        rayCountArr[t] = 0u;
+    }
+
+    uint res = DDGI_DEPTH_RES;
+
+    for (uint r = 0u; r < volume.RaysPerProbe; r++) {
+        DDGIRayData ray = ray_buffer[probeIdx * volume.RaysPerProbe + r];
+
+        // Skip miss rays (negative distance)
+        if (ray.radiance_and_dist.w < 0.0) {
+            continue;
+        }
+
+        // Compute ray direction and map to octahedral texel
+        vec3 rayDir = ddgiRayDirection(r, volume.RaysPerProbe, volume.FrameIndex);
+        vec2 uv = octahedralEncode(rayDir);
+        uvec2 texel = uvec2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
+                            clamp(uint(uv.y * float(res)), 0u, res - 1u));
+        uint texelIdx = texel.y * res + texel.x;
+
+        float dist = ray.radiance_and_dist.w;
+        sumDist[texelIdx]   = sumDist[texelIdx] + dist;
+        sumDistSq[texelIdx] = sumDistSq[texelIdx] + dist * dist;
+        rayCountArr[texelIdx] = rayCountArr[texelIdx] + 1u;
+    }
+
+    // -----------------------------------------------------------------------
+    // Temporal filter with history and write output
+    // -----------------------------------------------------------------------
+
+    uint floatsPerProbe = texels * 2u;  // 128
+    uint probeBase = probeIdx * floatsPerProbe;
+
+    // Smooth alpha ramp for depth
+    const float rampFrames = 60.0;
+    float t = clamp(float(max(volume.FrameIndex, 1u) - 1u) / rampFrames, 0.0, 1.0);
+    float alpha = mix(1.0, volume.DepthBlurSigma, t);
+
+    for (uint texelIdx = 0u; texelIdx < texels; texelIdx++) {
+        uint meanIdx = probeBase + texelIdx;
+        uint varIdx  = probeBase + texels + texelIdx;
+
+        // No rays hit in this texel: keep history unchanged
+        if (rayCountArr[texelIdx] == 0u) {
+            depth_output[meanIdx] = depth_history[meanIdx];
+            depth_output[varIdx]  = depth_history[varIdx];
+            continue;
+        }
+
+        float mean = sumDist[texelIdx] / float(rayCountArr[texelIdx]);
+        float variance = abs(sumDistSq[texelIdx] / float(rayCountArr[texelIdx]) - mean * mean);
+
+        // Few samples: inflate variance to avoid overconfidence
+        if (rayCountArr[texelIdx] < 4u) {
+            variance = max(variance, volume.ProbeSpacing * volume.ProbeSpacing * 0.1);
+        }
+        variance = max(variance, 0.001);
+
+        // Exponential moving average
+        depth_output[meanIdx] = mix(depth_history[meanIdx], mean, alpha);
+        depth_output[varIdx]  = mix(depth_history[varIdx], variance, alpha);
+    }
+}

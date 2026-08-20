@@ -88,7 +88,8 @@ std::vector<BenchmarkRenderItemKey> GenerateTestData(size_t count) {
     std::mt19937 gen(rd());
     std::uniform_int_distribution<u64> dist64(1, 1000000);
     std::uniform_int_distribution<u32> dist32(1, 1000);
-    std::uniform_int_distribution<u8> dist8(1, 10);
+    // MSVC 的 uniform_int_distribution 不允许 8 位类型（static_assert 限制）
+    std::uniform_int_distribution<u16> dist8(1, 10);
     
     for (size_t i = 0; i < count; ++i) {
         BenchmarkRenderItemKey key;

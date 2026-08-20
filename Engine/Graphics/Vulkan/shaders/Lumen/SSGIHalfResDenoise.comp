@@ -1,0 +1,68 @@
+#version 450 core
+// Vulkan Lumen SSGI Half-Res Denoise — GLSL port of SSGIHalfResDenoise.metal.
+// Entry point: ssgi_halfres_denoise
+//   (glslangValidator -V --source-entrypoint main SSGIHalfResDenoise.comp
+//    -e ssgi_halfres_denoise -o SSGIHalfResDenoise.comp.spv)
+//
+// Pure 5x5 Gaussian pre-smooth at half-res. No edge-stopping weights —
+// edge preservation is handled by the full-res bilateral spatial filter.
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledImage  trace_input   (half-res RGBA16F)
+//   binding 1 = StorageImage  trace_output  (half-res RGBA16F)
+//   binding 2 = UniformBuffer params
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D trace_input;
+layout(set = 0, binding = 1, rgba16f) writeonly uniform image2D trace_output;
+
+layout(set = 0, binding = 2, std140) uniform HalfResDenoiseParams {
+    uint  width;
+    uint  height;
+    float sigma;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+    float _pad3;
+    float _pad4;
+} params;
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= params.width || gid.y >= params.height) return;
+
+    float invTwoSigmaSq = 1.0 / (2.0 * params.sigma * params.sigma);
+
+    vec3 filteredIrr  = vec3(0.0);
+    float filteredDist = 0.0;
+    float totalWeight  = 0.0;
+
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            ivec2 pos = ivec2(gid) + ivec2(dx, dy);
+            if (pos.x < 0 || pos.y < 0 ||
+                pos.x >= int(params.width) || pos.y >= int(params.height)) {
+                continue;
+            }
+
+            vec4 s = texelFetch(trace_input, pos, 0);
+
+            float spatial2 = float(dx * dx + dy * dy);
+            float w = exp(-spatial2 * invTwoSigmaSq);
+
+            filteredIrr   += s.rgb * w;
+            filteredDist  += s.a   * w;
+            totalWeight   += w;
+        }
+    }
+
+    if (totalWeight > 0.001) {
+        imageStore(trace_output, ivec2(gid), vec4(filteredIrr / totalWeight,
+                                                  filteredDist / totalWeight));
+    } else {
+        imageStore(trace_output, ivec2(gid), texelFetch(trace_input, ivec2(gid), 0));
+    }
+}

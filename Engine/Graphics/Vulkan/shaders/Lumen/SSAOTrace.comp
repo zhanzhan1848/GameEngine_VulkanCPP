@@ -1,0 +1,224 @@
+#version 450 core
+// Vulkan Lumen SSAO Trace — hand-written GLSL port of SSAOTrace.metal (GTAO).
+// Entry point: ssao_trace  (passed via glslangValidator -e ssao_trace)
+//
+// Phase 1 of Vulkan Lumen/GI port (see Docs/2026-08-09-vulkan-lumen-gi-port-design.md).
+// Flat descriptor bindings (Vulkan forbids Metal's overlapping texture/buffer
+// namespaces — VUID-VkDescriptorSetLayoutCreateInfo-binding-00279):
+//   binding 0 = SampledImage        gbuffer_normal (RGBA16F, texelFetch)
+//   binding 1 = SampledDepthImage   gbuffer_depth  (D32, texelFetch)
+//   binding 2 = StorageImage(r16f)  ssao_out       (half-res AO, imageStore)
+//   binding 3 = UniformBuffer       GlobalShaderData (480B)
+//   binding 4 = UniformBuffer       SSAOTraceParams
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat — see header comment)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D gbuffer_normal;
+layout(set = 0, binding = 1) uniform texture2D gbuffer_depth;
+layout(set = 0, binding = 2, r16f) writeonly uniform image2D ssao_out;
+
+// GlobalShaderData UBO — 480 bytes, mirrors C++ RHIShaderCommon.h.
+// Declared inline (not via #include RHIShaderTypes.glsl) to avoid the awk
+// inliner's source-dir-relative path resolution limitation with "../" prefixes.
+layout(set = 0, binding = 3, std140) uniform GDBlock {
+    mat4  view;
+    mat4  projection;
+    mat4  invProjection;
+    mat4  viewProjection;
+    mat4  previousViewProjection;
+    mat4  invViewProjection;
+    vec4  cameraPositionAndViewWidth;
+    vec4  cameraDirectionAndViewHeight;
+    uint  numDirectionalLights;
+    uint  numPunctualLights;
+    float deltaTime;
+    float frameCount;
+    uint  renderMode;
+    uint  enableIBL;
+    uint  enableDDGI;
+    uint  _pad_before_jitter;
+    vec2  jitterOffset;
+    float debug_directLightBoost;
+    float debug_iblStrength;
+    float debug_ddgiIndirectWeight;
+    float debug_exposure;
+    float _pad_after_debug_0;
+    float _pad_after_debug_1;
+} gd;
+
+layout(set = 0, binding = 4, std140) uniform SSAOTraceParams {
+    float radius;           // World-space AO radius
+    float power;            // Contrast power
+    uint  direction_count;  // Number of slice directions
+    uint  sample_count;     // Samples per direction per side
+    uint  frame_index;      // For temporal rotation
+    uint  output_width;     // Half-res width
+    uint  output_height;    // Half-res height
+    float near_plane;
+    float far_plane;
+} params;
+
+// --------------------------------------------------------------------------------
+// Helpers (ported from SSAOTrace.metal)
+// --------------------------------------------------------------------------------
+const float PI_VAL = 3.14159265359;
+
+vec3 ReconstructViewPosAO(vec2 uv, float depth_ndc) {
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec4 clipPos = vec4(ndc, depth_ndc, 1.0);
+    vec4 viewPosH = gd.invProjection * clipPos;
+    vec3 viewPos = viewPosH.xyz / viewPosH.w;
+    viewPos.z = -viewPos.z;
+    return viewPos;
+}
+
+float InterleavedGradientNoise(uvec2 pixel, uint frameIndex) {
+    vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+    vec2 noise = vec2(pixel) + vec2(frameIndex % 5u, (frameIndex / 5u) % 5u) * 4.0;
+    return fract(magic.z * fract(dot(noise, magic.xy)));
+}
+
+// Per-step spatial hash for breaking fixed ray marching patterns
+float hashStep(uvec2 pixel, uint sliceIdx, uint stepIdx) {
+    uint n = pixel.x * 374761393u + pixel.y * 668265263u + sliceIdx * 1274126177u + stepIdx * 1911520717u;
+    n = (n ^ (n >> 13u)) * 1274126177u;
+    return float(n & 0xFFFFu) / 65535.0;
+}
+
+// --------------------------------------------------------------------------------
+// Main — GTAO trace (half-res)
+// --------------------------------------------------------------------------------
+void ssao_trace() {
+    uvec2 pixel_pos = gl_GlobalInvocationID.xy;
+    if (pixel_pos.x >= params.output_width || pixel_pos.y >= params.output_height) return;
+
+    uvec2 full_pixel = pixel_pos * 2u;
+    vec2 full_size = vec2(gd.cameraPositionAndViewWidth.w, gd.cameraDirectionAndViewHeight.w);
+    vec2 uv = (vec2(full_pixel) + 0.5) / full_size;
+
+    float depth_ndc = texelFetch(gbuffer_depth, ivec2(full_pixel), 0).r;
+    if (depth_ndc >= 1.0) {
+        imageStore(ssao_out, ivec2(pixel_pos), vec4(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    vec4 normal_encoded = texelFetch(gbuffer_normal, ivec2(full_pixel), 0);
+    vec3 normal_vs = normalize(normal_encoded.xyz * 2.0 - 1.0);
+    vec3 view_pos = ReconstructViewPosAO(uv, depth_ndc);
+
+    // View direction: pixel -> camera (perspective-correct reference for angle computation)
+    vec3 view_dir = normalize(-view_pos);
+
+    // Normal bias: push ray origin along normal to prevent self-occlusion from depth precision
+    float bias = 0.005 * abs(view_pos.z);
+    vec3 biased_pos = view_pos + normal_vs * bias;
+
+    // View ray: camera -> pixel (for slice plane cross product)
+    vec3 view_ray = normalize(view_pos);
+
+    float noise = InterleavedGradientNoise(pixel_pos, 0u);
+    float visibility = 0.0;
+
+    for (uint slice = 0u; slice < params.direction_count; ++slice) {
+        float slice_angle = (float(slice) + noise) * PI_VAL / float(params.direction_count);
+        vec2 slice_dir = vec2(cos(slice_angle), sin(slice_angle));
+
+        // Screen-space step size: world radius / depth -> UV-scale
+        float step_size = params.radius / max(abs(view_pos.z), 0.01);
+        step_size = min(step_size, 0.2);
+
+        float horizon_pos = -1.0;
+        float horizon_neg = -1.0;
+
+        for (uint step = 1u; step <= params.sample_count; ++step) {
+            // Per-step spatial hash jitter: breaks concentric banding into high-freq noise
+            float jitter = hashStep(pixel_pos, slice, step);
+            float t = (float(step) - 0.5 + jitter) / float(params.sample_count);
+
+            // --- March positive direction ---
+            {
+                vec2 sample_uv = uv + slice_dir * step_size * t;
+                if (sample_uv.x > 0.0 && sample_uv.x < 1.0 &&
+                    sample_uv.y > 0.0 && sample_uv.y < 1.0) {
+                    ivec2 sp = ivec2(clamp(sample_uv * full_size, vec2(0.0), full_size - 1.0));
+                    float sd = texelFetch(gbuffer_depth, sp, 0).r;
+                    if (sd < 1.0) {
+                        vec3 sv = ReconstructViewPosAO(sample_uv, sd);
+                        vec3 delta = sv - biased_pos;
+                        float len = length(delta);
+                        if (len > 0.001) {
+                            // Quadratic falloff: gentle near, soft at edge
+                            float falloff = 1.0 - clamp(len * len / (params.radius * params.radius), 0.0, 1.0);
+                            // Soft thickness: reduce contribution from thin foreground objects
+                            float thickness_w = 1.0;
+                            if (sd < depth_ndc) {
+                                thickness_w = clamp(1.0 - (depth_ndc - sd) * 30.0, 0.0, 1.0);
+                            }
+                            float cos_a = dot(delta, view_dir) / len;
+                            float weighted = mix(-1.0, cos_a, falloff * thickness_w);
+                            horizon_pos = max(horizon_pos, weighted);
+                        }
+                    }
+                }
+            }
+
+            // --- March negative direction ---
+            {
+                vec2 sample_uv = uv - slice_dir * step_size * t;
+                if (sample_uv.x > 0.0 && sample_uv.x < 1.0 &&
+                    sample_uv.y > 0.0 && sample_uv.y < 1.0) {
+                    ivec2 sp = ivec2(clamp(sample_uv * full_size, vec2(0.0), full_size - 1.0));
+                    float sd = texelFetch(gbuffer_depth, sp, 0).r;
+                    if (sd < 1.0) {
+                        vec3 sv = ReconstructViewPosAO(sample_uv, sd);
+                        vec3 delta = sv - biased_pos;
+                        float len = length(delta);
+                        if (len > 0.001) {
+                            float falloff = 1.0 - clamp(len * len / (params.radius * params.radius), 0.0, 1.0);
+                            float thickness_w = 1.0;
+                            if (sd < depth_ndc) {
+                                thickness_w = clamp(1.0 - (depth_ndc - sd) * 30.0, 0.0, 1.0);
+                            }
+                            float cos_a = dot(delta, view_dir) / len;
+                            float weighted = mix(-1.0, cos_a, falloff * thickness_w);
+                            horizon_neg = max(horizon_neg, weighted);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Slice plane normal via cross product of view ray and screen-space slice direction
+        vec3 slice_3d = vec3(slice_dir.x, slice_dir.y, 0.0);
+        vec3 slice_normal = normalize(cross(view_ray, slice_3d));
+
+        // Project surface normal onto slice plane
+        vec3 proj = normal_vs - slice_normal * dot(normal_vs, slice_normal);
+        float pl = length(proj);
+        if (pl > 0.001) proj /= pl;
+        else proj = view_dir;
+
+        // Normal cosine relative to view direction (perspective-correct)
+        float n_cos = dot(proj, view_dir);
+
+        // Relative horizons
+        float h1 = clamp(horizon_pos - n_cos, -1.0, 1.0);
+        float h2 = clamp(horizon_neg - n_cos, -1.0, 1.0);
+
+        // GTAO analytical integration
+        visibility += 0.25 * (-h2 * sqrt(max(1.0 - h2 * h2, 0.0)) + acos(clamp(h2, -1.0, 1.0)))
+                    + 0.25 * ( h1 * sqrt(max(1.0 - h1 * h1, 0.0)) + acos(clamp(h1, -1.0, 1.0)));
+    }
+
+    float ao = clamp(visibility / float(params.direction_count), 0.0, 1.0);
+    ao = pow(ao, params.power);
+    // AO floor: even deepest corners retain faint bounce light, prevent dead black
+    ao = max(ao, 0.1);
+
+    imageStore(ssao_out, ivec2(pixel_pos), vec4(ao, 0.0, 0.0, 0.0));
+}

@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/Passes/BlurPass.h"
 
 namespace primal::graphics {
 
@@ -59,6 +60,24 @@ bool ShadowMapModule::Initialize(RHIDeviceBase* device, nanite::GPUDrivenDrawPip
     if (gpu_draw_pipeline_) {
         gpu_draw_pipeline_->InitializeShadowResources(num_instances, max_clusters);
     }
+
+    // VSM blur infrastructure (harmless on PCSS — only dispatched when VSM is
+    // enabled). BlurPass loads its own platform-aware shader.
+    if (!moments_blur_) {
+        moments_blur_ = std::make_unique<BlurPass>();
+        if (!moments_blur_->Initialize(device_)) {
+            std::cerr << "[ShadowMapModule] BlurPass init failed — VSM unavailable" << std::endl;
+            moments_blur_.reset();
+        }
+    }
+    if (moments_temp_ == handles::INVALID_RESOURCE && device_) {
+        TextureDesc tempDesc{};
+        tempDesc.size = {2048, 2048, 1};
+        tempDesc.format = DataFormat::RG32_Float;
+        tempDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        tempDesc.memoryUsage = GPUMemoryUsage::Static;
+        moments_temp_ = device_->CreateTexture(tempDesc);
+    }
     return true;
 }
 
@@ -70,20 +89,51 @@ void ShadowMapModule::Shutdown() {
     for (int b = 0; b < 3; ++b)
         for (int c = 0; c < 2; ++c)
             shadow_cache_valid_[b][c] = false;
+
+    // T4.6.5 part 40: sampler cleanup. Other resources (pipeline/layout/DS/
+    // CB/texture) are owned by gpu_draw_pipeline_ via ShutdownShadowResources
+    // or by the device GC; sampler is module-local.
+    if (shadow_filter_sampler_ != handles::INVALID_SAMPLER && device_) {
+        device_->DestroySampler(shadow_filter_sampler_);
+        shadow_filter_sampler_ = handles::INVALID_SAMPLER;
+    }
+
+    if (moments_blur_) {
+        moments_blur_->Shutdown();
+        moments_blur_.reset();
+    }
+    if (moments_temp_ != handles::INVALID_RESOURCE && device_) {
+        device_->DestroyTexture(moments_temp_);
+        moments_temp_ = handles::INVALID_RESOURCE;
+    }
 }
 
 bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) {
-    if (!device_ || shadow_filter_shader == handles::INVALID_SHADER) return false;
+    if (!device_) {
+        std::cerr << "[ShadowMapModule] InitializeShadowFilter: device is null" << std::endl;
+        return false;
+    }
+    if (shadow_filter_shader == handles::INVALID_SHADER) {
+        std::cerr << "[ShadowMapModule] InitializeShadowFilter: shadow_filter_shader is INVALID_SHADER "
+                  << "(real shadows disabled — DeferredLighting binding 6 falls back to 1x1 white)"
+                  << std::endl;
+        return false;
+    }
 
+    // T4.6.5 part 40: layout mirrors ShadowFilter.comp bindings 0-6. The
+    // previous layout declared binding 0 twice (UBO + SampledImage overlap)
+    // which is invalid Vulkan and silently masked by InitializeShadowFilter
+    // never running until Part 40.
     DescriptorSetLayoutBinding bindings[] = {
-        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
-        {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
-        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
-        {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // Params UBO
+        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap0
+        {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap1
+        {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // visibilityOut
+        {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTex
+        {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depthTex
+        {6, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr},  // linearSampler
     };
-    shadow_filter_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
+    shadow_filter_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
     shadow_filter_layout_ = device_->CreatePipelineLayout({1, &shadow_filter_set_layout_});
 
     for (int i = 0; i < 3; ++i)
@@ -106,8 +156,24 @@ bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) 
     for (int i = 0; i < 3; ++i) {
         BufferDesc cbDesc{};
         cbDesc.size = 512;
+        cbDesc.type = BufferType::Constant;  // T4.6.5 part 40: UBO usage flag
         cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         shadow_filter_cb_[i] = device_->CreateBuffer(cbDesc);
+    }
+
+    // T4.6.5 part 40: linear sampler for all ShadowFilter texture samples.
+    // comparisonFunc MUST be Never — VulkanSampler treats != Never as
+    // compareEnable=TRUE which produces a comparison sampler incompatible with
+    // plain SampledImage (per memory vulkan-sampler-comparison-default-trap.md).
+    SamplerDesc samplerDesc{};
+    samplerDesc.addressU = TextureAddressMode::Clamp;
+    samplerDesc.addressV = TextureAddressMode::Clamp;
+    samplerDesc.addressW = TextureAddressMode::Clamp;
+    samplerDesc.comparisonFunc = ComparisonFunc::Never;
+    shadow_filter_sampler_ = device_->CreateSampler(samplerDesc);
+    if (shadow_filter_sampler_ == handles::INVALID_SAMPLER) {
+        std::cerr << "[ShadowMapModule] CreateSampler failed" << std::endl;
+        return false;
     }
     return true;
 }
@@ -186,16 +252,38 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     ShadowMapOutputs outputs{};
     if (!gpu_draw_pipeline_ || !inputs.scene_snapshot) return outputs;
 
+    // T4.6.5 part 24.9 (B7 fix): skip shadow passes entirely on empty scene.
+    // ExecuteShadowRaster + ExecuteShadowDepthBlit already self-guard via the
+    // INVALID-buffer check, but the ShadowFilter dispatch at the tail still
+    // references sm0/sm1 (R32_Float) which are never written in empty scene,
+    // staying UNDEFINED → VUID-vkCmdDraw-None-09600 (color aspect UNDEFINED).
+    if (inputs.scene_snapshot->GetInstanceCount() == 0 ||
+        inputs.scene_snapshot->GetClusterRefCount() == 0) {
+        return outputs;
+    }
+
     u32 cbIdx = inputs.current_buffer_index % 3;
     math::v3 lightDir = Normalize(inputs.light_direction);
 
+    const bool vsm = vsm_enabled_ && moments_blur_ &&
+                     moments_temp_ != handles::INVALID_RESOURCE;
+
     rendergraph::RGResourceHandle shadowMapRG[2];
+    rendergraph::RGResourceHandle momentsRG[2];
     for (u32 c = 0; c < 2; ++c) {
         auto smHandle = gpu_draw_pipeline_->GetShadowMap(c, inputs.current_buffer_index);
         if (smHandle != handles::INVALID_RESOURCE) {
             shadowMapRG[c] = graph.ImportResource(
                 "ShadowMap_C" + std::to_string(c) + "_" + std::to_string(inputs.current_buffer_index),
                 smHandle);
+        }
+        if (vsm) {
+            auto momHandle = gpu_draw_pipeline_->GetShadowMoments(c, inputs.current_buffer_index);
+            if (momHandle != handles::INVALID_RESOURCE) {
+                momentsRG[c] = graph.ImportResource(
+                    "ShadowMoments_C" + std::to_string(c) + "_" + std::to_string(inputs.current_buffer_index),
+                    momHandle);
+            }
         }
     }
 
@@ -207,6 +295,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     };
 
     struct ShadowPassData {};
+    bool rasteredThisFrame[2] = {false, false};
 
     for (u32 cascade = 0; cascade < 2; ++cascade) {
         float orthoExtent = (cascade == 0) ? 30.0f : 150.0f;
@@ -220,6 +309,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
         else outputs.shadow_matrix1 = lightVP;
 
         if (cache_hit) continue;
+        rasteredThisFrame[cascade] = true;
 
         nanite::GPUDrivenDrawPipeline::DirectionalLightData lightData{};
         lightData.direction = {lightDir.x, lightDir.y, lightDir.z, 0.0f};
@@ -239,29 +329,36 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
             }
         );
 
-        // Shadow Raster
+        // Shadow Raster — VSM writes (z, z²) moments directly (RG32 color +
+        // depth-tested D32); PCSS keeps the depth-only raster + D32→R32 blit.
         graph.AddPass<ShadowPassData>("ShadowRaster_C" + std::to_string(cascade),
             rendergraph::RGPassType::Graphics, rendergraph::RGPassCategory::Lighting,
             [](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) { builder.SideEffect(); },
-            [this, lightVP, cascade, bufIdx = inputs.current_buffer_index]
+            [this, lightVP, cascade, bufIdx = inputs.current_buffer_index, vsm]
             (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
-                gpu_draw_pipeline_->ExecuteShadowRaster(context.cmdBuffer, lightVP, cascade, bufIdx);
+                if (vsm) {
+                    gpu_draw_pipeline_->ExecuteShadowMomentsRaster(context.cmdBuffer, lightVP, cascade, bufIdx);
+                } else {
+                    gpu_draw_pipeline_->ExecuteShadowRaster(context.cmdBuffer, lightVP, cascade, bufIdx);
+                }
             }
         );
 
-        // Shadow Depth Blit
-        graph.AddPass<ShadowPassData>("ShadowBlit_C" + std::to_string(cascade),
-            rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
-            [shadowMapRG, cascade](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) {
-                builder.SideEffect();
-                if (shadowMapRG[cascade].IsValid())
-                    builder.Write(shadowMapRG[cascade], ResourceState::UnorderedAccess);
-            },
-            [this, cascade, bufIdx = inputs.current_buffer_index]
-            (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
-                gpu_draw_pipeline_->ExecuteShadowDepthBlit(context.cmdBuffer, cascade, bufIdx);
-            }
-        );
+        if (!vsm) {
+            // Shadow Depth Blit (PCSS only)
+            graph.AddPass<ShadowPassData>("ShadowBlit_C" + std::to_string(cascade),
+                rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+                [shadowMapRG, cascade](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect();
+                    if (shadowMapRG[cascade].IsValid())
+                        builder.Write(shadowMapRG[cascade], ResourceState::UnorderedAccess);
+                },
+                [this, cascade, bufIdx = inputs.current_buffer_index]
+                (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
+                    gpu_draw_pipeline_->ExecuteShadowDepthBlit(context.cmdBuffer, cascade, bufIdx);
+                }
+            );
+        }
 
         cached_shadow_vp_[cbIdx][cascade] = lightVP;
         shadow_cache_valid_[cbIdx][cascade] = true;
@@ -269,7 +366,54 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
 
     shadow_cache_globally_valid_ = true;
 
-    // Shadow Filter (half-res compute)
+    if (vsm) {
+        // VSM moments blur — H+V Gaussian ping-pong per cascade (radius 3 /
+        // sigma 1.0, matching Metal's ForwardRenderer VSM parameters). Runs
+        // after both cascades rasterized; BlurPass leaves the output in
+        // ShaderResource for DeferredLighting's Chebyshev sampling.
+        graph.AddPass<ShadowPassData>("ShadowMomentsBlur",
+            rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+            [momentsRG](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) {
+                builder.SideEffect();
+                for (u32 c = 0; c < 2; ++c)
+                    if (momentsRG[c].IsValid())
+                        builder.Write(momentsRG[c], ResourceState::UnorderedAccess);
+            },
+            [this, bufIdx = inputs.current_buffer_index, frameIdx = inputs.current_buffer_index,
+             rastered = rasteredThisFrame]
+            (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                for (u32 c = 0; c < 2; ++c) {
+                    // VP-cache hit: moments unchanged since last frame —
+                    // re-blurring would soften them progressively.
+                    if (!rastered[c]) continue;
+                    ResourceHandle mom = gpu_draw_pipeline_->GetShadowMoments(c, bufIdx);
+                    if (mom == handles::INVALID_RESOURCE) continue;
+
+                    // Raster left the moments in RenderTarget state.
+                    ResourceBarrier b{};
+                    b.resource = mom;
+                    b.beforeState = ResourceState::RenderTarget;
+                    b.afterState = ResourceState::ShaderResource;
+                    b.subresource = 0xFFFFFFFF;
+                    b.queueFamily = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&b, 1);
+
+                    moments_blur_->Execute(cmd, mom, mom, moments_temp_,
+                                           2048, 2048, 1, frameIdx, 3, 1.0f);
+                }
+            }
+        );
+
+        for (u32 c = 0; c < 2; ++c) {
+            outputs.shadow_moments_rg[c] = momentsRG[c];
+            outputs.shadow_moments_tex[c] = gpu_draw_pipeline_->GetShadowMoments(c, inputs.current_buffer_index);
+        }
+        outputs.vsm_enabled = true;
+        return outputs;
+    }
+
+    // Shadow Filter (half-res compute, PCSS path)
     outputs.shadow_visibility_tex = shadow_visibility_tex_;
     if (shadow_filter_pipeline_ != handles::INVALID_PIPELINE && shadow_visibility_tex_ != handles::INVALID_RESOURCE) {
         outputs.shadow_visibility_rg = graph.ImportResource("ShadowVisibility", shadow_visibility_tex_);
@@ -346,13 +490,14 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
 
                 DescData params[] = {
                     {0, DescriptorType::UniformBuffer, shadow_filter_cb_[cbIdx]},
-                    {0, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()},
                     {1, DescriptorType::SampledImage, sm0},
                     {2, DescriptorType::SampledImage, sm1},
                     {3, DescriptorType::StorageImage, shadow_visibility_tex_},
                     {4, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferNormal()},
+                    {5, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()},
+                    {6, DescriptorType::Sampler, shadow_filter_sampler_},
                 };
-                UpdateDesc(device_, shadow_filter_ds_[cbIdx], params, 6);
+                UpdateDesc(device_, shadow_filter_ds_[cbIdx], params, 7);
 
                 cmd->BindComputePipeline(shadow_filter_pipeline_);
                 const DescriptorSetHandle sets[] = { shadow_filter_ds_[cbIdx] };

@@ -1,0 +1,201 @@
+#version 450 core
+// GlobalSDFVoxelizationGLSL.comp — Vulkan-only SDF voxelizer with enlarged
+// cull ranges (hand-written GLSL, NOT compiled from WGSL).
+//
+// The WGSL version uses `voxel_size * 4.0` for instance cull and
+// `voxel_size * 2.0` for meshlet cull, which is too aggressive for large
+// scenes — most geometry gets skipped. This GLSL version uses cascade-extent
+// proportional cull so all geometry within the cascade is evaluated.
+//
+// This file ONLY overrides the Vulkan .spv; the WGSL path (Dawn/WebGPU) is
+// unaffected.
+//
+// Bindings (flat — matches GlobalSDF.cpp Vulkan/Dawn branch):
+//   0 = StorageImage (image3D, r32f, write)  sdf_output
+//   1 = UniformBuffer                       CascadeUniforms
+//   2 = StorageBuffer (ro)                  vertex_positions (packed float3)
+//   3 = StorageBuffer (ro)                  meshlets
+//   4 = StorageBuffer (ro)                  meshlet_vertex_indices (u32)
+//   5 = StorageBuffer (ro)                  meshlet_triangle_indices (u32, byte-packed)
+//   6 = StorageBuffer (ro)                  cluster_map
+//   7 = StorageBuffer (ro)                  instance_data
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0, r32f) writeonly uniform image3D sdf_output;
+
+layout(set = 0, binding = 1, std140) uniform Cascade {
+    vec4  origin;    // xyz = cascade origin, w = voxel_size
+    uvec4 params;    // xyz = resolution, w = num_instances
+};
+
+// MeshletData — matches RHIMeshlet.h packing.
+struct MeshletData {
+    uvec4 header;     // x=vert_offset, y=tri_offset(bytes), z=?, w=tri_count
+    vec4 cone1;       // xyz=cone_dir, w=center_x
+    vec4 cone2;       // x=center_y, y=center_z, z=radius, w=?
+};
+
+layout(set = 0, binding = 2) readonly buffer VertexPositions { float vertex_positions[]; };
+layout(set = 0, binding = 3) readonly buffer Meshlets { MeshletData meshlets[]; };
+layout(set = 0, binding = 4) readonly buffer MeshletVertexIndices { uint meshlet_vertex_indices[]; };
+layout(set = 0, binding = 5) readonly buffer MeshletTriIndices { uint meshlet_triangle_indices[]; };
+
+struct ClusterMap { uvec4 data; };
+layout(set = 0, binding = 6) readonly buffer ClusterMapBuf { ClusterMap cluster_map[]; };
+
+// InstanceData — matches RenderSceneSnapshot.h. We only need bounds + matrix.
+// The struct is 192 bytes. world_matrix is at offset 0 (16 floats = 64 bytes).
+// bounds_center is at offset 160 (simd::float3 = 16 bytes aligned).
+// bounds_radius is at offset 176.
+struct InstanceData {
+    vec4 world_col0;    //   0
+    vec4 world_col1;    //  16
+    vec4 world_col2;    //  32
+    vec4 world_col3;    //  48
+    vec4 meta0;         //  64
+    vec4 meta1;         //  80
+    vec4 meta2;         //  96
+    vec4 meta3;         // 112
+    vec4 pad0;          // 128
+    vec4 pad1;          // 144
+    vec4 bounds_center; // 160 (xyz = center, w = padding)
+    vec4 bounds_meta;   // 176 (x = bounds_radius)
+};
+layout(set = 0, binding = 7) readonly buffer InstanceDataBuf { InstanceData instance_data[]; };
+
+// ---------------------------------------------------------------------------
+// Point-to-triangle distance (ported from WGSL point_to_triangle_distance).
+// ---------------------------------------------------------------------------
+float pointToTriangleDistance(vec3 p, vec3 a, vec3 b, vec3 c) {
+    vec3 ab = b - a;
+    vec3 ac = c - a;
+    vec3 ap = p - a;
+
+    float d1 = dot(ab, ap);
+    float d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) return length(p - a);
+
+    vec3 bp = p - b;
+    float d3 = dot(ab, bp);
+    float d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) return length(p - b);
+
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        float v = d1 / (d1 - d3);
+        return length(p - (a + v * ab));
+    }
+
+    vec3 cp = p - c;
+    float d5 = dot(ab, cp);
+    float d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) return length(p - c);
+
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        float w = d2 / (d2 - d6);
+        return length(p - (a + w * ac));
+    }
+
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return length(p - (b + w * (c - b)));
+    }
+
+    float denom = 1.0 / (va + vb + vc);
+    float v = vb * denom;
+    float w = vc * denom;
+    return length(p - (a + ab * v + ac * w));
+}
+
+void voxelize_sdf() {
+    uvec3 tid = gl_GlobalInvocationID.xyz;
+    uvec3 resolution = params.xyz;
+    // Diagnostic: if resolution is 0, write -1 to voxel (0,0,0).
+    if (all(equal(resolution, uvec3(0u)))) {
+        if (tid == uvec3(0u)) imageStore(sdf_output, ivec3(0), vec4(-1.0, 0,0,0));
+        return;
+    }
+    if (any(greaterThanEqual(tid, resolution))) return;
+
+    vec3 cascade_origin = origin.xyz;
+    float voxel_size = origin.w;
+    uint num_instances = params.w;
+
+    vec3 voxel_pos = cascade_origin + (vec3(tid) + 0.5) * voxel_size;
+
+    float min_dist = 1.0e10;
+
+    // Cull range: half the cascade extent. This ensures all geometry within
+    // the cascade volume is evaluated (the WGSL version's voxel_size * 4.0
+    // skips most geometry in large scenes).
+    float cull_range = voxel_size * float(resolution.x) * 0.5;
+
+    for (uint inst_idx = 0u; inst_idx < num_instances; inst_idx++) {
+        if (min_dist <= 0.0) break;
+
+        InstanceData inst = instance_data[inst_idx];
+
+        // Reconstruct world matrix from 4 columns.
+        mat4 world_matrix = mat4(inst.world_col0, inst.world_col1,
+                                 inst.world_col2, inst.world_col3);
+
+        // Instance bounding sphere cull.
+        vec3 inst_center = inst.bounds_center.xyz;
+        float dist_to_bounds = length(voxel_pos - inst_center) - inst.bounds_meta.x;
+        if (dist_to_bounds > cull_range) continue;
+
+        uint cluster_start = uint(inst.meta0.z);
+        uint cluster_count = uint(inst.meta0.w);
+
+        for (uint c = 0u; c < cluster_count; c++) {
+            uint global_cluster_idx = cluster_start + c;
+            uint meshlet_idx = cluster_map[global_cluster_idx].data.x;
+
+            MeshletData meshlet = meshlets[meshlet_idx];
+
+            // Reconstruct meshlet center & radius.
+            vec3 meshlet_center = vec3(meshlet.cone1.w, meshlet.cone2.x, meshlet.cone2.y);
+            float meshlet_radius = meshlet.cone2.z;
+
+            vec3 world_center = (world_matrix * vec4(meshlet_center, 1.0)).xyz;
+            float dist_to_meshlet = length(voxel_pos - world_center) - meshlet_radius;
+            if (dist_to_meshlet > cull_range) continue;
+
+            uint tri_offset = meshlet.header.y;   // bytes
+            uint tri_count  = meshlet.header.w;
+            uint vert_offset = meshlet.header.x;
+
+            for (uint t = 0u; t < tri_count; t++) {
+                // meshlet_triangle_indices is u32 array but data is byte-packed.
+                uint base_byte = tri_offset + t * 3u;
+                uint w0 = base_byte / 4u;
+                uint w1 = (base_byte + 1u) / 4u;
+                uint w2 = (base_byte + 2u) / 4u;
+                uint i0 = (meshlet_triangle_indices[w0] >> ((base_byte % 4u) * 8u)) & 0xFFu;
+                uint i1 = (meshlet_triangle_indices[w1] >> (((base_byte + 1u) % 4u) * 8u)) & 0xFFu;
+                uint i2 = (meshlet_triangle_indices[w2] >> (((base_byte + 2u) % 4u) * 8u)) & 0xFFu;
+
+                uint gi0 = meshlet_vertex_indices[vert_offset + i0];
+                uint gi1 = meshlet_vertex_indices[vert_offset + i1];
+                uint gi2 = meshlet_vertex_indices[vert_offset + i2];
+
+                vec3 lp0 = vec3(vertex_positions[gi0 * 3u], vertex_positions[gi0 * 3u + 1u], vertex_positions[gi0 * 3u + 2u]);
+                vec3 lp1 = vec3(vertex_positions[gi1 * 3u], vertex_positions[gi1 * 3u + 1u], vertex_positions[gi1 * 3u + 2u]);
+                vec3 lp2 = vec3(vertex_positions[gi2 * 3u], vertex_positions[gi2 * 3u + 1u], vertex_positions[gi2 * 3u + 2u]);
+
+                vec3 wp0 = (world_matrix * vec4(lp0, 1.0)).xyz;
+                vec3 wp1 = (world_matrix * vec4(lp1, 1.0)).xyz;
+                vec3 wp2 = (world_matrix * vec4(lp2, 1.0)).xyz;
+
+                float d = pointToTriangleDistance(voxel_pos, wp0, wp1, wp2);
+                min_dist = min(min_dist, d);
+            }
+        }
+    }
+
+    // GLSL marker: write fixed 77.0 to verify imageStore works.
+    imageStore(sdf_output, ivec3(tid), vec4(77.0, 0.0, 0.0, 0.0));
+}

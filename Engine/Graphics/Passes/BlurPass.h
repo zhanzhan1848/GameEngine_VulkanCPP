@@ -48,8 +48,12 @@ private:
     rhi::DescriptorSetLayoutHandle descriptorSetLayout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     
     // Resource Management
-    // We use a ring buffer of descriptor sets to handle dynamic texture bindings
-    static constexpr u32 MAX_SETS_PER_FRAME = 128; // Enough for many layers
+    // We use a ring buffer of descriptor sets to handle dynamic texture bindings.
+    // Each Execute consumes 2 sets (H + V pass); 16/frame is ample headroom.
+    // NOTE: Vulkan's per-layout descriptor pool caps at 256 sets — the old
+    // 128×3 = 384 pre-allocation exhausted it (256 vkAllocateDescriptorSets
+    // failures) the first time BlurPass ran on Vulkan (VSM shadows).
+    static constexpr u32 MAX_SETS_PER_FRAME = 16; // Enough for many layers
     rhi::DescriptorSetHandle setPool_[rhi::MAX_FRAMES_IN_FLIGHT][MAX_SETS_PER_FRAME];
     u32 currentSetIndex_[rhi::MAX_FRAMES_IN_FLIGHT] = {0};
     

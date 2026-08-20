@@ -3,10 +3,44 @@
 #include "CommonHeaders.h"
 #include <fstream>
 #include <iostream>
+#include <vector>
 
 namespace primal::graphics {
 
 using namespace rhi;
+
+// T4.6.5 part 16.4: local descriptor-write helper. Mirrors the pattern in
+// ForwardSceneRenderer.cpp:83-118 — kept local to avoid expanding the RHI
+// surface for one tiny debug-visualization pass.
+namespace {
+struct DescData {
+    u32 binding;
+    DescriptorType type;
+    ResourceHandle resource;
+    u32 count = 1;
+};
+
+void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set,
+                const DescData* params, u32 count) {
+    std::vector<WriteDescriptorSet> writes(count);
+    std::vector<DescriptorBufferInfo> bufferInfos(count);
+
+    for (u32 i = 0; i < count; ++i) {
+        writes[i].dstSet = set;
+        writes[i].dstBinding = params[i].binding;
+        writes[i].descriptorCount = params[i].count;
+        writes[i].descriptorType = params[i].type;
+        if (params[i].type == DescriptorType::UniformBuffer ||
+            params[i].type == DescriptorType::StorageBuffer) {
+            bufferInfos[i].buffer = params[i].resource;
+            bufferInfos[i].offset = 0;
+            bufferInfos[i].range = ~0ull;
+            writes[i].bufferInfo = &bufferInfos[i];
+        }
+    }
+    device->UpdateDescriptorSets(count, writes.data());
+}
+} // anonymous namespace
 
 LineBatchRenderer::~LineBatchRenderer() {
     Shutdown();
@@ -14,7 +48,10 @@ LineBatchRenderer::~LineBatchRenderer() {
 
 bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     if (initialized_) return true;
+    if (!device) return false;
+
     device_ = device;
+    const bool isVulkan = (device->GetPlatform() == RHIPlatform::Vulkan);
 
 #ifdef __EMSCRIPTEN__
     // LineBatchRenderer is a debug overlay and is not yet ported to WGSL.
@@ -24,42 +61,114 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     initialized_ = true;
     return true;
 #else
-    // Load shaders
-    const char* shader_path =
-        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Forward/Line.metal";
+    // T4.6.5 part 16.4: Load SPIR-V (Vulkan) or .metal (Metal) shaders.
+    ShaderHandle vs, fs;
+    if (isVulkan) {
+        // SPIR-V path: try relative, then dev-machine fallback.
+        auto loadSpv = [](const char* relPath) -> std::vector<u8> {
+            {
+                std::ifstream f(relPath, std::ios::binary | std::ios::ate);
+                if (f.is_open()) {
+                    const size_t sz = static_cast<size_t>(f.tellg());
+                    std::vector<u8> buf(sz);
+                    f.seekg(0);
+                    f.read(reinterpret_cast<char*>(buf.data()), sz);
+                    return buf;
+                }
+            }
+            const char* FALLBACK_ROOT = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/";
+            std::string fb = std::string(FALLBACK_ROOT) + relPath;
+            std::ifstream f(fb, std::ios::binary | std::ios::ate);
+            if (f.is_open()) {
+                const size_t sz = static_cast<size_t>(f.tellg());
+                std::vector<u8> buf(sz);
+                f.seekg(0);
+                f.read(reinterpret_cast<char*>(buf.data()), sz);
+                return buf;
+            }
+            return {};
+        };
+        auto vertBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Line.vert.spv");
+        auto fragBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Line.frag.spv");
+        if (vertBytes.empty() || fragBytes.empty()) {
+            std::cerr << "[LineBatchRenderer] Failed to load Vulkan Line SPIR-V." << std::endl;
+            return false;
+        }
+        vs = device_->CreateShader(vertBytes.data(), vertBytes.size(),
+                                    ShaderStage::Vertex, "main");
+        fs = device_->CreateShader(fragBytes.data(), fragBytes.size(),
+                                    ShaderStage::Pixel, "main");
+    } else {
+        // Metal path — read .metal text, use named entry points.
+        const char* shader_path =
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Forward/Line.metal";
 
-    std::ifstream file(shader_path, std::ios::ate | std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "[LineBatchRenderer] Failed to open shader: " << shader_path << std::endl;
-        return false;
+        std::ifstream file(shader_path, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "[LineBatchRenderer] Failed to open shader: " << shader_path << std::endl;
+            return false;
+        }
+        const size_t file_size = static_cast<size_t>(file.tellg());
+        std::vector<char> shader_data(file_size);
+        file.seekg(0);
+        file.read(shader_data.data(), file_size);
+        file.close();
+        vs = device_->CreateShader(shader_data.data(), shader_data.size(),
+                                    ShaderStage::Vertex, "line_vs");
+        fs = device_->CreateShader(shader_data.data(), shader_data.size(),
+                                    ShaderStage::Pixel, "line_fs");
     }
-    const size_t file_size = static_cast<size_t>(file.tellg());
-    std::vector<char> shader_data(file_size);
-    file.seekg(0);
-    file.read(shader_data.data(), file_size);
-    file.close();
-
-    ShaderHandle vs = device_->CreateShader(shader_data.data(), shader_data.size(),
-                                             ShaderStage::Vertex, "line_vs");
-    ShaderHandle fs = device_->CreateShader(shader_data.data(), shader_data.size(),
-                                             ShaderStage::Pixel, "line_fs");
 
     if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) {
         std::cerr << "[LineBatchRenderer] Failed to create shaders." << std::endl;
         return false;
     }
 
-    // Pipeline layout with no descriptor sets (view_proj via push constants)
+    // T4.6.5 part 16.4: Vulkan needs a descriptor set layout for the SSBO
+    // (vertex buffer bound at set 0 / binding 1; matches Line.vert). Metal
+    // path keeps the no-descriptor-set layout (uses BindVertexBuffers).
+    DescriptorSetLayoutHandle set_layout = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    if (isVulkan) {
+        DescriptorSetLayoutBinding ssbo_binding{};
+        ssbo_binding.binding = 1;
+        ssbo_binding.descriptorType = DescriptorType::StorageBuffer;
+        ssbo_binding.descriptorCount = 1;
+        ssbo_binding.stageFlags = ShaderStage::Vertex;
+
+        DescriptorSetLayoutDesc ds_desc{};
+        ds_desc.bindingCount = 1;
+        ds_desc.bindings = &ssbo_binding;
+        set_layout = device_->CreateDescriptorSetLayout(ds_desc);
+        if (set_layout == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            std::cerr << "[LineBatchRenderer] Failed to create descriptor set layout." << std::endl;
+            return false;
+        }
+        set_layout_ = set_layout;
+
+        // Allocate persistent descriptor set; the SSBO is rebound per-frame.
+        DescriptorSetHandle ds = device_->CreateDescriptorSet({set_layout});
+        if (ds == handles::INVALID_DESCRIPTOR_SET) {
+            std::cerr << "[LineBatchRenderer] Failed to allocate descriptor set." << std::endl;
+            return false;
+        }
+        descriptor_set_ = ds;
+    }
+
     PipelineLayoutDesc pl_desc{};
-    pl_desc.setLayoutCount = 0;
-    pl_desc.setLayouts     = nullptr;
-    // Push constant range: 64 bytes = float4x4 view_proj at binding 0
     pl_desc.pushConstantRangeCount = 1;
     PushConstantRange pc_range;
     pc_range.stageFlags = ShaderStage::Vertex;
-    pc_range.offset     = 2;
+    pc_range.offset     = 0;
     pc_range.size       = 64; // sizeof(float4x4)
     pl_desc.pushConstantRanges = &pc_range;
+
+    if (isVulkan) {
+        pl_desc.setLayoutCount = 1;
+        pl_desc.setLayouts = &set_layout;
+    } else {
+        pl_desc.setLayoutCount = 0;
+        pl_desc.setLayouts = nullptr;
+    }
 
     layout_ = device_->CreatePipelineLayout(pl_desc);
     if (layout_ == handles::INVALID_PIPELINE_LAYOUT) {
@@ -67,7 +176,6 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
         return false;
     }
 
-    // Create pipeline -- LineList topology, depth test ON, depth write OFF
     GraphicsPipelineDesc p_desc;
     p_desc.vertexShader   = vs;
     p_desc.pixelShader    = fs;
@@ -92,7 +200,8 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
         return false;
     }
 
-    std::cout << "[LineBatchRenderer] Initialized successfully." << std::endl;
+    std::cout << "[LineBatchRenderer] Initialized successfully."
+              << (isVulkan ? " (Vulkan)" : "") << std::endl;
     initialized_ = true;
     return true;
 #endif
@@ -104,6 +213,14 @@ void LineBatchRenderer::Shutdown() {
     if (vertex_buffer_ != handles::INVALID_RESOURCE) {
         device_->DestroyBuffer(vertex_buffer_);
         vertex_buffer_ = handles::INVALID_RESOURCE;
+    }
+    if (descriptor_set_ != handles::INVALID_DESCRIPTOR_SET) {
+        device_->DestroyDescriptorSet(descriptor_set_);
+        descriptor_set_ = handles::INVALID_DESCRIPTOR_SET;
+    }
+    if (set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device_->DestroyDescriptorSetLayout(set_layout_);
+        set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     }
     if (pipeline_ != handles::INVALID_PIPELINE) {
         device_->DestroyPipeline(pipeline_);
@@ -149,11 +266,22 @@ void LineBatchRenderer::Render(RHICommandBuffer* cmd, const math::m4x4& view_pro
 
     // Bind pipeline and push view_proj
     cmd->BindGraphicsPipeline(pipeline_);
-    cmd->PushConstants(layout_, ShaderStage::Vertex, 2, sizeof(math::m4x4), &view_proj);
+    cmd->PushConstants(layout_, ShaderStage::Vertex, 0, sizeof(math::m4x4), &view_proj);
 
-    // Bind vertex buffer at slot 1 (matches shader [[buffer(1)]])
-    const u64 offset = 0;
-    cmd->BindVertexBuffers(1, 1, &vertex_buffer_, &offset);
+    const bool isVulkan = (device_->GetPlatform() == RHIPlatform::Vulkan);
+    if (isVulkan) {
+        // Write the SSBO to descriptor set binding 1, then bind the set.
+        DescData params[] = {
+            {1, DescriptorType::StorageBuffer, vertex_buffer_},
+        };
+        UpdateDesc(device_, descriptor_set_, params, 1);
+        const DescriptorSetHandle sets[] = {descriptor_set_};
+        cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout_, 0, 1, sets, 0, nullptr);
+    } else {
+        // Metal path: bind vertex buffer at slot 1 (matches shader [[buffer(1)]]).
+        const u64 offset = 0;
+        cmd->BindVertexBuffers(1, 1, &vertex_buffer_, &offset);
+    }
 
     // Draw
     cmd->Draw(vertex_count, 0, 1, 0);
@@ -169,9 +297,13 @@ void LineBatchRenderer::ensure_buffer(u32 required_vertices) {
         device_->DestroyBuffer(vertex_buffer_);
     }
 
+    const bool isVulkan = (device_->GetPlatform() == RHIPlatform::Vulkan);
+
     BufferDesc desc{};
     desc.size          = required_bytes;
-    desc.type          = BufferType::Vertex;
+    // T4.6.5 part 16.4: Vulkan reads vertices via SSBO (Line.vert binding 1).
+    // Metal uses the Vertex buffer type.
+    desc.type          = isVulkan ? BufferType::Structured : BufferType::Vertex;
     desc.usage         = GPUMemoryUsage::Dynamic;
     desc.memoryUsage   = GPUMemoryUsage::Dynamic;
     desc.vertex.vertexCount  = required_vertices;

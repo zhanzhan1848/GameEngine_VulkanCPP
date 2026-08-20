@@ -91,7 +91,12 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     }
 
     // 4. Create Global Descriptor Set Layout (Set 0)
+    // Production-bypass platforms (Dawn, Vulkan) share a simplified code path:
+    // no VSM shadow loop, no ECS scene extraction, separate shadow tex+sampler.
+    // Metal remains on the full production path.
     bool isDawn = (device->GetPlatform() == rhi::RHIPlatform::Dawn);
+    const bool isVulkan = (device->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    const bool bypassProd = isDawn || isVulkan;
     utl::vector<rhi::DescriptorSetLayoutBinding> globalBindings;
     {
         rhi::DescriptorSetLayoutBinding b;
@@ -109,7 +114,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         b.stageFlags = rhi::ShaderStage::Pixel;
         globalBindings.push_back(b);
     }
-    if (!isDawn) {
+    if (!bypassProd) {
         {
             rhi::DescriptorSetLayoutBinding b;
             b.binding = SHADOW_MAP_BINDING;
@@ -127,7 +132,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             globalBindings.push_back(b);
         }
     } else {
-        // Dawn/WebGPU: separate texture + sampler bindings for shadow
+        // Dawn/Vulkan: separate texture + sampler bindings for shadow
         {
             rhi::DescriptorSetLayoutBinding b;
             b.binding = SHADOW_MAP_BINDING; // 13
@@ -201,7 +206,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     perObjectDescriptorSetLayout_ = device->CreateDescriptorSetLayout(perObjectLayoutDesc);
 
     // 6. Create Shadow Map Resources
-    if (!isDawn) {
+    if (!bypassProd) {
         // Shared Depth Buffer (Transient for Shadow Passes)
         rhi::TextureDesc shadowDepthDesc{
             { 2048, 2048, 1 },
@@ -534,7 +539,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     //   11 outputTex (storage_2d).
     // G-Buffer textures are caller-supplied each frame, so the per-frame
     // descriptor set is updated at dispatch time, not Initialize() time.
-    if (isDawn) {
+    if (bypassProd) {
         // 12 bindings matching DeferredLighting.wgsl. The CSM shadow binding
         // is texture_depth_2d_array (isArray=true) and the IBL cube maps
         // are texture_cube<f32> (isCube=true). Without these flags Dawn sees
@@ -748,7 +753,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         writes.push_back(writeFrame);
         writes.push_back(writeLight);
 
-        if (!isDawn) {
+        if (!bypassProd) {
             rhi::DescriptorImageInfo shadowInfo;
             shadowInfo.sampler = shadowMapSampler_;
             shadowInfo.imageView = shadowMapArray_;
@@ -775,7 +780,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             writeShadowCube.imageInfo = &shadowCubeInfo;
             writes.push_back(writeShadowCube);
         } else {
-            // Dawn: write separate shadow depth texture + sampler bindings
+            // Dawn/Vulkan: write separate shadow depth texture + sampler bindings
             rhi::DescriptorImageInfo shadowTexInfo;
             shadowTexInfo.imageView = shadowDepthBuffer_;
             shadowTexInfo.imageLayout = rhi::ResourceState::ShaderResource;
@@ -814,7 +819,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
         rhi::WriteDescriptorSet writePerObject;
         writePerObject.dstSet = perObjectDescriptorSets_[i];
-        writePerObject.dstBinding = isDawn ? 0 : PER_OBJECT_BINDING;
+        writePerObject.dstBinding = bypassProd ? 0 : PER_OBJECT_BINDING;
         writePerObject.descriptorType = rhi::DescriptorType::UniformBufferDynamic;
         writePerObject.descriptorCount = 1;
         writePerObject.bufferInfo = &perObjectInfo;
@@ -823,14 +828,14 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     }
 
     // 8. Initialize Passes
-    if (!isDawn) {
+    if (!bypassProd) {
 
     if (!blurPass_.Initialize(device_)) {
-        if (!isDawn) {
+        if (!bypassProd) {
             std::cerr << "ForwardRenderer: Failed to initialize BlurPass" << std::endl;
             return false;
         }
-        std::cerr << "ForwardRenderer: BlurPass skipped (Dawn)" << std::endl;
+        std::cerr << "ForwardRenderer: BlurPass skipped (bypass)" << std::endl;
     }
 
     // Initialize SSR Pass
@@ -838,16 +843,16 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             std::cerr << "ForwardRenderer: Failed to initialize SSRPass" << std::endl;
             return false;
     }
-    } // !isDawn
+    } // !bypassProd
 
 #ifndef DISABLE_PARTICLE_SYSTEM
-    // Initialize Particle Pass (Dawn skips — no WGSL particle shaders)
+    // Initialize Particle Pass (bypass platforms skip — no WGSL/GLSL particle shaders)
     if (!particlePass_.initialize(device_)) {
-        if (!isDawn) {
+        if (!bypassProd) {
             std::cerr << "ForwardRenderer: Failed to initialize ParticlePass" << std::endl;
             return false;
         }
-        std::cerr << "ForwardRenderer: ParticlePass skipped (Dawn)" << std::endl;
+        std::cerr << "ForwardRenderer: ParticlePass skipped (bypass)" << std::endl;
     }
 #endif
 
@@ -857,8 +862,8 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         return false;
     }
 
-    // Initialize Composite Pipeline (SSR Blending) — Dawn skips (no SSR)
-    if (!isDawn) {
+    // Initialize Composite Pipeline (SSR Blending) — bypass platforms skip (no SSR)
+    if (!bypassProd) {
         rhi::DescriptorSetLayoutBinding binding;
         binding.binding = 0;
         binding.descriptorType = rhi::DescriptorType::CombinedImageSampler;
@@ -922,7 +927,7 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
                 compositePipeline_ = device_->CreateGraphicsPipeline(pDesc);
             }
         }
-    } // !isDawn
+    } // !bypassProd
 
     return true;
 }
@@ -2143,8 +2148,9 @@ void ForwardRenderer::SetupLights(const RenderScene& scene,
                     }
                 }
 
-                // Dawn: fill viewProjections with externally-provided cascade VPs
-                bool isDawnLight = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+                // Bypass platforms (Dawn/Vulkan): fill viewProjections with externally-provided cascade VPs
+                bool isDawnLight = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                                     device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
                 if (isDawnLight && dawnShadowDepthTex_ != rhi::handles::INVALID_RESOURCE) {
                     for (int j = 0; j < 4; ++j) {
                         dl.viewProjections[j] = dawnCascadeVPs_[j];
@@ -2221,9 +2227,10 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     // Reset Per-Object Buffer Offset
     perObjectBufferOffset_ = 0;
 
-    // Scene extraction requires valid ECS entities (transform system). Skip on Dawn
-    // where we create proxies directly without the ECS.
-    bool skipSceneExtraction = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    // Scene extraction requires valid ECS entities (transform system). Skip on bypass
+    // platforms (Dawn/Vulkan) where we create proxies directly without the ECS.
+    bool skipSceneExtraction = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                                device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
 
     if (sceneExtractionEnabled_ && !skipSceneExtraction) {
         sceneExtractionSystem_.QueryDirtyTransforms(scene);
@@ -2250,8 +2257,10 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     u32 spotShadowCount = 0;
     u32 pointShadowCount = 0;
 
-    // Stage 1: Dawn uses its own depth-only shadow pass; Metal/Vulkan uses VSM shadow loop
-    bool skipShadows = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    // Stage 1: Bypass platforms (Dawn/Vulkan) use their own depth-only shadow pass
+    // set up externally via RenderDawnShadowPass(); Metal uses VSM shadow loop here.
+    bool skipShadows = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                        device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
 
     if (skipShadows) {
         // Shadow pass handled by test's RenderShadowPass() — do not overwrite dawnShadowLightVP_
@@ -2558,9 +2567,11 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
 #endif
 
     // 6. Geometry Debug Pass
-    if (!skipShadows) {
-        RenderGeometryDebug(*device_, cmdBuffer, view, renderTarget, depthStencil, rhi::DataFormat::BGRA8_UNorm, rhi::DataFormat::D32_Float, debugSettings_);
-    }
+    // Not shadow-dependent — the debug pipelines build their own descriptors
+    // from mesh SSBOs / 3D textures, so this runs on every platform. (The old
+    // skipShadows gate existed because shader loading was Metal-source-only;
+    // the loader is platform-aware now.)
+    RenderGeometryDebug(*device_, cmdBuffer, view, renderTarget, depthStencil, rhi::DataFormat::BGRA8_UNorm, rhi::DataFormat::D32_Float, debugSettings_);
 
     cmdBuffer->EndRenderPass();
 

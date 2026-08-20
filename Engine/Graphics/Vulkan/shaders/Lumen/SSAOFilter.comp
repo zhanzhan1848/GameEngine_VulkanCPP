@@ -1,0 +1,171 @@
+#version 450 core
+// Vulkan Lumen SSAO Bilateral Filter — hand-written GLSL port of SSAOFilter.metal.
+// Entry point: ssao_filter  (passed via glslangValidator -e ssao_filter)
+//
+// Edge-aware upsampling from half-res to full-res using normal/depth similarity.
+// The Metal version samples half-res AO via hardware bilinear (access::sample);
+// this Vulkan port uses texelFetch + manual bilinear to avoid an extra sampler
+// descriptor binding (keeps the 6-binding layout aligned with C++).
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledImage        ssao_input (half-res R16F, manual bilinear via texelFetch)
+//   binding 1 = SampledImage        gbuffer_normal (full-res RGBA16F)
+//   binding 2 = SampledDepthImage   gbuffer_depth  (full-res D32)
+//   binding 3 = StorageImage(r16f)  ssao_out       (full-res AO, imageStore)
+//   binding 4 = UniformBuffer       GlobalShaderData (480B)
+//   binding 5 = UniformBuffer       SSAOFilterParams
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D ssao_input;   // half-res
+layout(set = 0, binding = 1) uniform texture2D gbuffer_normal;
+layout(set = 0, binding = 2) uniform texture2D gbuffer_depth;
+layout(set = 0, binding = 3, r16f) writeonly uniform image2D ssao_out;
+
+layout(set = 0, binding = 4, std140) uniform GDBlock {
+    mat4  view;
+    mat4  projection;
+    mat4  invProjection;
+    mat4  viewProjection;
+    mat4  previousViewProjection;
+    mat4  invViewProjection;
+    vec4  cameraPositionAndViewWidth;
+    vec4  cameraDirectionAndViewHeight;
+    uint  numDirectionalLights;
+    uint  numPunctualLights;
+    float deltaTime;
+    float frameCount;
+    uint  renderMode;
+    uint  enableIBL;
+    uint  enableDDGI;
+    uint  _pad_before_jitter;
+    vec2  jitterOffset;
+    float debug_directLightBoost;
+    float debug_iblStrength;
+    float debug_ddgiIndirectWeight;
+    float debug_exposure;
+    float _pad_after_debug_0;
+    float _pad_after_debug_1;
+} gd;
+
+layout(set = 0, binding = 5, std140) uniform SSAOFilterParams {
+    float sigma_depth;
+    float sigma_normal;
+    uint  kernel_radius;
+    uint  full_width;
+    uint  full_height;
+    uint  half_width;
+    uint  half_height;
+} params;
+
+// --------------------------------------------------------------------------------
+// NDCDepthToLinear — ported from CommonFunction.metal:51
+// Metal/Vulkan both use [0,1] depth range (not OpenGL [-1,1]).
+// --------------------------------------------------------------------------------
+float NDCDepthToLinear(float ndcDepth, float nearPlane, float farPlane) {
+    return (2.0 * nearPlane * farPlane) / (farPlane + nearPlane - ndcDepth * (farPlane - nearPlane));
+}
+
+// --------------------------------------------------------------------------------
+// Manual bilinear sample of the half-res AO texture (replaces Metal hardware
+// access::sample + sampler). Samples 4 nearest half-res texels with bilinear
+// weights derived from full-res UV.
+// --------------------------------------------------------------------------------
+float sampleHalfResBilinear(vec2 uv) {
+    // Map full-res UV to half-res texel coordinates (centered)
+    vec2 hcoord = uv * vec2(params.half_width, params.half_height) - 0.5;
+    ivec2 p0 = ivec2(floor(hcoord));
+    vec2 f = fract(hcoord);
+    p0 = clamp(p0, ivec2(0), ivec2(int(params.half_width) - 1, int(params.half_height) - 1));
+    ivec2 p1 = clamp(p0 + ivec2(1), ivec2(0), ivec2(int(params.half_width) - 1, int(params.half_height) - 1));
+
+    float v00 = texelFetch(ssao_input, p0, 0).r;
+    float v10 = texelFetch(ssao_input, ivec2(p1.x, p0.y), 0).r;
+    float v01 = texelFetch(ssao_input, ivec2(p0.x, p1.y), 0).r;
+    float v11 = texelFetch(ssao_input, p1, 0).r;
+
+    float a = mix(v00, v10, f.x);
+    float b = mix(v01, v11, f.x);
+    return mix(a, b, f.y);
+}
+
+// --------------------------------------------------------------------------------
+// Main — bilateral filter (full-res)
+// --------------------------------------------------------------------------------
+void ssao_filter() {
+    uvec2 pixel_pos = gl_GlobalInvocationID.xy;
+    if (pixel_pos.x >= params.full_width || pixel_pos.y >= params.full_height) return;
+
+    // Sky pixels: no occlusion
+    float center_depth = texelFetch(gbuffer_depth, ivec2(pixel_pos), 0).r;
+    if (center_depth >= 1.0) {
+        imageStore(ssao_out, ivec2(pixel_pos), vec4(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    // Read center normal
+    vec4 normal_encoded = texelFetch(gbuffer_normal, ivec2(pixel_pos), 0);
+    vec3 center_normal = normalize(normal_encoded.xyz * 2.0 - 1.0);
+
+    vec2 full_size = vec2(params.full_width, params.full_height);
+
+    // Center UV for sampling the half-res texture
+    vec2 center_uv = (vec2(pixel_pos) + 0.5) / full_size;
+
+    // Linear depth for center pixel (for bilateral weight)
+    float center_linear = NDCDepthToLinear(center_depth, 0.1, 1000.0);
+
+    float ao_sum = 0.0;
+    float weight_sum = 0.0;
+
+    int radius = int(params.kernel_radius);
+
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            // Sample position at full-res
+            ivec2 sample_full = ivec2(pixel_pos) + ivec2(dx, dy);
+            if (sample_full.x < 0 || sample_full.x >= int(params.full_width) ||
+                sample_full.y < 0 || sample_full.y >= int(params.full_height)) {
+                continue;
+            }
+
+            // Sample half-res AO with manual bilinear interpolation
+            vec2 sample_uv = (vec2(sample_full) + 0.5) / full_size;
+            float ao_val = sampleHalfResBilinear(sample_uv);
+
+            // Read sample normal and depth for bilateral weight
+            vec4 s_normal_enc = texelFetch(gbuffer_normal, sample_full, 0);
+            vec3 sample_normal = normalize(s_normal_enc.xyz * 2.0 - 1.0);
+            float sample_depth = texelFetch(gbuffer_depth, sample_full, 0).r;
+            float sample_linear = NDCDepthToLinear(sample_depth, 0.1, 1000.0);
+
+            // Bilateral weights — use relative depth for consistent behavior across distance
+            float depth_diff = abs(center_linear - sample_linear);
+            float min_depth = max(min(center_linear, sample_linear), 0.001);
+            float relative_depth = depth_diff / min_depth;
+            float w_depth = exp(-relative_depth * params.sigma_depth);
+
+            float normal_sim = max(dot(center_normal, sample_normal), 0.0);
+            float w_normal = pow(normal_sim, params.sigma_normal);
+
+            // Spatial weight (Gaussian)
+            float dist2 = float(dx * dx + dy * dy);
+            float w_spatial = exp(-dist2 / (2.0 * float(radius) * float(radius)));
+
+            float w = w_depth * w_normal * w_spatial;
+
+            ao_sum += ao_val * w;
+            weight_sum += w;
+        }
+    }
+
+    float ao = (weight_sum > 0.0) ? ao_sum / weight_sum : 1.0;
+    ao = clamp(ao, 0.0, 1.0);
+
+    imageStore(ssao_out, ivec2(pixel_pos), vec4(ao, 0.0, 0.0, 0.0));
+}

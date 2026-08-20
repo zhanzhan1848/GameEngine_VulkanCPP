@@ -112,6 +112,9 @@ private:
     rhi::DescriptorSetLayoutHandle capture_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle indirect_trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle indirect_resolve_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle atlas_init_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle capture_gather_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle card_fill_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
 
     // Pipelines
     rhi::PipelineHandle capture_pipeline_{ rhi::handles::INVALID_PIPELINE };
@@ -120,6 +123,9 @@ private:
     rhi::PipelineHandle light_eval_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle indirect_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle indirect_resolve_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle atlas_init_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle capture_gather_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle card_fill_pipeline_{ rhi::handles::INVALID_PIPELINE };
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle capture_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
@@ -128,8 +134,20 @@ private:
     rhi::PipelineLayoutHandle light_eval_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle indirect_trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle indirect_resolve_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle atlas_init_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle capture_gather_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle card_fill_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
 
     // Descriptor sets (triple-buffered per pass)
+    rhi::DescriptorSetHandle atlas_init_set_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle capture_gather_set_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle card_fill_set_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
     rhi::DescriptorSetHandle capture_set_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
@@ -157,6 +175,16 @@ private:
 
     u32 atlas_size_ = 0;
     u32 page_size_ = 0;
+
+    // GBuffer-gather capture state
+    rhi::ResourceHandle capture_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    // CardFill (SDF-based fill) state
+    rhi::ResourceHandle card_fill_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    bool atlas_seeded_ = false;   // AtlasInit runs once; Capture overwrites per frame
 };
 
 } // namespace primal::graphics::lumen

@@ -87,6 +87,10 @@ public:
         static RHIGarbageCollector gc;
         return gc;
     }
+
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    void SetBufferDirtySize(ResourceHandle, u64) override {}
+    RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
 };
 
 // === 测试用例 ===

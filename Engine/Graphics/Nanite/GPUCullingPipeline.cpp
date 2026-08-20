@@ -25,9 +25,12 @@ GPUCullingPipeline& GPUCullingPipeline::Get() {
 
 namespace {
     // N0c: Forks shader loading on backend.
-    //   Metal: loads from EngineTest/shaders/<name>.metal (existing path).
-    //   Dawn:  loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
-    //          (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Metal:  loads from EngineTest/shaders/<name>.metal (existing path).
+    //   Dawn:   loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
+    //           (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Vulkan: loads SPIR-V binary from Engine/Graphics/Vulkan/shaders/Nanite/<name>.spv
+    //           via ShaderRegistry. No null terminator (VulkanShader rejects if
+    //           size % 4 != 0 — padding bytes would break the SPIR-V parser).
     std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint,
                                        rhi::RHIDeviceBase* device) {
         auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
@@ -68,6 +71,47 @@ namespace {
 #endif
         }
 
+        if (platform == rhi::RHIPlatform::Vulkan) {
+            // T4.6.5 part 35.3: lookup order matters. The previous single
+            // fallback resolved to /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/
+            // which is the MAIN repo (feat/wfc-pcg branch) — its stale .spv
+            // files bypassed Part 35.2's per-cluster bounds + Y-flip fixes.
+            // Try CWD-relative first (works when shaders are bundled next to
+            // the test binary via CMake POST_BUILD), then worktree source root.
+            const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
+
+            std::vector<std::string> candidates;
+            candidates.push_back(relPath);
+            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+            std::ifstream file;
+            std::string openedPath;
+            for (const auto& candidate : candidates) {
+                file.open(candidate, std::ios::binary | std::ios::ate);
+                if (file.is_open()) {
+                    openedPath = candidate;
+                    break;
+                }
+            }
+            if (!file.is_open()) {
+                std::cerr << "[GPUCullingPipeline] Failed to load SPIR-V shader: "
+                          << shaderName << " (entry: " << entryPoint << ")"
+                          << "\n  tried: " << candidates[0]
+                          << "\n  tried: " << candidates[1] << std::endl;
+                return {};
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            // Exact byte count — VulkanShader rejects SPIR-V whose size % 4 != 0.
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[GPUCullingPipeline] Failed to read SPIR-V shader: "
+                          << shaderName << " from " << openedPath << std::endl;
+                return {};
+            }
+            return bytecode;
+        }
+
         // Metal path (unchanged)
         std::string shaderPath = std::string("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/") + shaderName + ".metal";
 
@@ -95,10 +139,18 @@ namespace {
 bool GPUCullingPipeline::Initialize(rhi::RHIDeviceBase* device, const CullingConfig& config) {
     if (!device) return false;
     if (initialized_) return true;
-    
+
     device_ = device;
     config_ = config;
-    
+
+    // T4.6.5 part 35.2: HZB occlusion culling now enabled on all platforms.
+    // Prior hotfix (part 35.1) disabled it on Vulkan because Stage4's
+    // instance-bounds-for-all-clusters mitigation made Stage5 HZB test at
+    // instance center → pillars/cloth false-occluded by closer nearby floor.
+    // Stage4 now reads per-cluster bounds via cluster_map → meshlets (binding
+    // 12); small clusters fall under Stage5's conservative 0.08 screen-space
+    // threshold and skip HZB entirely.
+
     if (!CreatePipelines()) {
         std::cerr << "Failed to create pipelines" << std::endl;
         return false;
@@ -142,20 +194,27 @@ bool GPUCullingPipeline::CreatePipelines() {
         { 10, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
         // Binding 11: Global meshlet buffer (read-only, for Normal Cone backface culling)
         { 11, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
+        // T4.6.5 part 35.2: Binding 12: cluster_map buffer (read-only).
+        // Maps flatClusterID → globalMeshletIndex. Stage4 uses this to fetch
+        // per-cluster bounds for HZB occlusion testing instead of falling
+        // back to instance bounds (which caused false-occlusion of pillars
+        // and cloth at mid-frustum).
+        { 12, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Compute, nullptr },
     };
 
     // WebGPU requires the layout's buffer access mode to match the shader's
-    // `var<storage, ...>` declaration exactly. Bindings 0, 3, 11 are declared
-    // `var<storage, read>` in WGSL → mark them read-only so DawnDescriptorSetLayout
-    // emits WGPUBufferBindingType_ReadOnlyStorage.
+    // `var<storage, ...>` declaration exactly. Bindings 0, 3, 11, 12 are
+    // declared `var<storage, read>` in WGSL → mark them read-only so
+    // DawnDescriptorSetLayout emits WGPUBufferBindingType_ReadOnlyStorage.
     cullingBindings[0].readonly = true;  // instances
     cullingBindings[3].readonly = true;  // cluster_refs
     cullingBindings[8].unfilterableFloat = true; // HZB R32Float
     cullingBindings[11].readonly = true; // meshlets
+    cullingBindings[12].readonly = true; // cluster_map
 
     rhi::DescriptorSetLayoutDesc cullingLayoutDesc{
         .bindings = cullingBindings,
-        .bindingCount = 12  // Updated from 11 to 12 (added meshlet buffer)
+        .bindingCount = 13  // T4.6.5 part 35.2: bumped from 12 to 13 (added cluster_map)
     };
 
     culling_descriptor_layout_ = device_->CreateDescriptorSetLayout(cullingLayoutDesc);
@@ -343,7 +402,13 @@ bool GPUCullingPipeline::CreateBuffers() {
 
         // Culling constants buffer
         rhi::BufferDesc constantsDesc{};
-        constantsDesc.size = sizeof(float) * 68; // Match Metal shader CullingUniforms size (272 bytes)
+        // T4.6.5 part 35.3: struct is 276 bytes (3 m4x4 + v4 + 17 u32/float
+        // after Part 35.2 added total_meshlet_count). Round up to 16-byte
+        // alignment for Vulkan UBO requirements (288 bytes). Previous 272-byte
+        // allocation caused memcpy to overflow by 4 bytes and WGSL reads of
+        // _pad_cm1/_pad_cm2 were outside the descriptor range.
+        constexpr u32 kCullingConstantsBufSize = 288;
+        constantsDesc.size = kCullingConstantsBufSize;
         constantsDesc.type = rhi::BufferType::Constant;
         constantsDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
         constantsDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ConstantBuffer) | static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
@@ -376,6 +441,17 @@ bool GPUCullingPipeline::CreateBuffers() {
             std::cerr << "[GPUCulling] Failed to create debug buffer " << i << std::endl;
             return false;
         }
+    }
+
+    // T4.6.5 part 35.4: triple-buffered host-visible staging for indirect_args.
+    // Size matches indirectDesc (5 u32 + padding = 20 bytes; round to 32).
+    for (u32 i = 0; i < 3; ++i) {
+        rhi::BufferDesc readbackDesc{};
+        readbackDesc.size = 32;
+        readbackDesc.type = rhi::BufferType::Raw;
+        readbackDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+        readbackDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
+        indirect_readback_staging_[i] = device_->CreateBuffer(readbackDesc);
     }
 
 //    std::cout << "GPU Culling buffers created successfully with triple buffering" << std::endl;
@@ -413,9 +489,12 @@ void GPUCullingPipeline::Shutdown() {
         device_->DestroyDescriptorSetLayout(streaming_descriptor_layout_);
         streaming_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     }
-    if (streaming_descriptor_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
-        device_->DestroyDescriptorSet(streaming_descriptor_set_);
-        streaming_descriptor_set_ = rhi::handles::INVALID_DESCRIPTOR_SET;
+    // T4.6.5 part 30.6 (X6 fix): triple-buffered streaming descriptor sets.
+    for (u32 i = 0; i < 3; ++i) {
+        if (streaming_descriptor_sets_[i] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            device_->DestroyDescriptorSet(streaming_descriptor_sets_[i]);
+            streaming_descriptor_sets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
     }
     
     // Destroy triple-buffered frame resources
@@ -467,11 +546,70 @@ void GPUCullingPipeline::Shutdown() {
         }
     }
 
+    // T4.6.5 part 35.4: destroy indirect_args readback staging.
+    for (auto& staging : indirect_readback_staging_) {
+        if (staging != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(staging);
+            staging = rhi::handles::INVALID_RESOURCE;
+        }
+    }
+    indirect_readback_idx_ = 0;
+    indirect_readback_filled_ = 0;
+
+    // T4.6.5 part 30.2: tear down everything Execute() creates lazily. Without
+    // this, culling_descriptor_sets_ + placeholder_meshlet_buffer_ +
+    // streaming_constant_buffers_ leak across sub-tests; the next sub-test's
+    // Execute sees them as already-valid (stale handles from the dead device)
+    // and binds them, triggering the null descriptor set cascade.
+    for (u32 i = 0; i < 3; ++i) {
+        if (culling_descriptor_sets_[i] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            device_->DestroyDescriptorSet(culling_descriptor_sets_[i]);
+            culling_descriptor_sets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
+        if (streaming_constant_buffers_[i] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(streaming_constant_buffers_[i]);
+            streaming_constant_buffers_[i] = rhi::handles::INVALID_RESOURCE;
+        }
+    }
+    if (placeholder_meshlet_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(placeholder_meshlet_buffer_);
+        placeholder_meshlet_buffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (culling_descriptor_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device_->DestroyDescriptorSetLayout(culling_descriptor_layout_);
+        culling_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    if (culling_pipeline_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+        device_->DestroyPipelineLayout(culling_pipeline_layout_);
+        culling_pipeline_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    }
+    // Stage 0-7 compute pipelines. CreatePipelines() recreates them on re-init.
+    auto destroyPipe = [this](rhi::PipelineHandle& p) {
+        if (p != rhi::handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(p);
+            p = rhi::handles::INVALID_PIPELINE;
+        }
+    };
+    destroyPipe(reset_buffers_pipeline_);
+    destroyPipe(frustum_culling_pipeline_);
+    destroyPipe(distance_culling_pipeline_);
+    destroyPipe(lod_selection_pipeline_);
+    destroyPipe(cluster_expansion_pipeline_);
+    destroyPipe(occlusion_culling_pipeline_);
+    destroyPipe(compaction_pipeline_);
+    destroyPipe(indirect_command_pipeline_);
+    execute_call_count_ = 0;
+    basic_descriptor_sets_created_ = false;
+    backface_descriptor_sets_created_ = false;
+    hzb_bindings_updated_ = false;
+    matrix_print_count_ = 0;
+    warned_streaming_constants_invalid_ = false;
+
     device_ = nullptr;
     initialized_ = false;
 }
 
-static u32 callCount = 0;
+static u32 callCount = 0;  // T4.6.5 part 30.2: legacy file-scope static kept for debug-log only — production state is execute_call_count_ member.
 
 bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                  const RenderSceneSnapshot& snapshot,
@@ -479,10 +617,11 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                  const math::m4x4& projectionMatrix,
                  NaniteStreamingManager* streamingManager,
                  u32 bufferIndex) {
-    if (callCount == 0) {
+    if (execute_call_count_ == 0) {
 //        std::cout << "[GPUCulling] GPU Progressive Filtering Execute called, initialized_=" << initialized_ << std::endl;
     }
-    callCount++;
+    ++execute_call_count_;
+    callCount = execute_call_count_;  // mirror for any debug-log reads; remove after Part 30 cleanup.
 
     if (!initialized_) {
         std::cerr << "GPUCullingPipeline: Not initialized" << std::endl;
@@ -490,7 +629,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     }
 
     if (!config_.enable_gpu_culling) {
-        if (callCount == 1) {
+        if (execute_call_count_ == 1) {
 //            std::cout << "[GPUCulling] GPU culling disabled, skipping" << std::endl;
         }
         return true;
@@ -502,11 +641,10 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     // 🔥 CRITICAL: Check if HZB system became ready and update bindings if needed
     // This fixes the issue where descriptor sets are created before HZB is ready
-    static bool hzb_bindings_updated = false;
-    if (!hzb_bindings_updated && hzb_system_ && hzb_system_->IsReady()) {
-//        std::cout << "[GPUCulling] HZB system became ready at call #" << callCount << ", updating bindings..." << std::endl;
+    if (!hzb_bindings_updated_ && hzb_system_ && hzb_system_->IsReady()) {
+//        std::cout << "[GPUCulling] HZB system became ready at call #" << execute_call_count_ << ", updating bindings..." << std::endl;
         if (UpdateHZBBindings()) {
-            hzb_bindings_updated = true;
+            hzb_bindings_updated_ = true;
 //            std::cout << "[GPUCulling] HZB bindings updated successfully!" << std::endl;
         } else {
             std::cerr << "[GPUCulling] Failed to update HZB bindings" << std::endl;
@@ -514,8 +652,8 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     }
 
     // Reduce spam: only print first 5 calls
-    if (callCount <= 5) {
-        // std::cout << "[GPUCulling] Execute call #" << callCount << " using buffer_index=" << bufferIndex << " (resource " << current_frame_resource_ << ")" << std::endl;
+    if (execute_call_count_ <= 5) {
+        // std::cout << "[GPUCulling] Execute call #" << execute_call_count_ << " using buffer_index=" << bufferIndex << " (resource " << current_frame_resource_ << ")" << std::endl;
     }
 
     const u32 instanceCount = snapshot.GetInstanceCount();
@@ -537,7 +675,49 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     const u32 safeInstanceCount = std::min(instanceCount, config_.max_instances_per_dispatch);
     const u32 safeClusterCount = std::min(clusterCount, config_.max_clusters_per_dispatch);
 
-    if (callCount == 1) {
+    // T4.6.5 part 35.4 diagnostic: capture cull-time state every 30 frames to
+    // narrow down "pillars/cloth missing in mid-frustum" symptom. Logs only on
+    // Vulkan to avoid spam on Metal/Dawn where the issue isn't reported.
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        static u32 diagCounter = 0;
+        if ((diagCounter++ % 30) == 0) {
+            const u32 totalMeshlets = gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0u;
+            const bool hzbReady = hzb_system_ ? hzb_system_->IsReady() : false;
+            std::cerr << "[CullDiag] frame=" << execute_call_count_
+                      << " inst=" << safeInstanceCount << "/" << instanceCount
+                      << " cluster=" << safeClusterCount << "/" << clusterCount
+                      << " occ=" << (config_.enable_occlusion_culling ? 1 : 0)
+                      << " force_pass=" << (force_pass_all_debug_ ? 1 : 0)
+                      << " totalMeshlet=" << totalMeshlets
+                      << " hzbReady=" << (hzbReady ? 1 : 0)
+                      << " hzbBound=" << (hzb_bindings_updated_ ? 1 : 0)
+                      << std::endl;
+        }
+    }
+
+    // T4.6.5 part 35.4: drain previous frame's indirect_args readback. We
+    // staged a copy last frame; the test loop's WaitForCompletion guarantees
+    // the GPU has finished, so the staging slot is safe to map.
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+        indirect_readback_filled_ >= 1 &&
+        execute_call_count_ >= 2) {
+        const u32 readSlot = (indirect_readback_idx_ + (3 - indirect_readback_filled_)) % 3;
+        if (indirect_readback_staging_[readSlot] != rhi::handles::INVALID_RESOURCE) {
+            const u32* mapped = static_cast<const u32*>(device_->MapBuffer(indirect_readback_staging_[readSlot]));
+            if (mapped) {
+                // Layout: [vertex_count, instance_count, first_vertex, first_instance]
+                static u32 visibleCounter = 0;
+                if ((visibleCounter++ % 30) == 0) {
+                    std::cerr << "[CullDiag] gpu_post_cull visible=" << mapped[1]
+                              << "/" << safeClusterCount
+                              << " vertex_count=" << mapped[0] << std::endl;
+                }
+                device_->UnmapBuffer(indirect_readback_staging_[readSlot]);
+            }
+        }
+    }
+
+    if (execute_call_count_ == 1) {
         // std::cout << "[GPUCulling] Camera parameters:" << std::endl;
         // std::cout << "  Camera position: " << cameraPos.x << ", " << cameraPos.y << ", " << cameraPos.z << std::endl;
         // std::cout << "  Instance count: " << instanceCount << " (safe: " << safeInstanceCount << ")" << std::endl;
@@ -695,20 +875,19 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // 🔥 FIX: Handle meshlet buffer availability across triple buffering
     // Frame 1: Create basic descriptor sets (meshlet buffer not ready yet)
     // Frame 3: Recreate descriptor sets with meshlet buffer binding for backface culling
-    static bool basic_descriptor_sets_created = false;
-    static bool backface_descriptor_sets_created = false;
+    // T4.6.5 part 30.2: basic_/backface_descriptor_sets_created_ are members now (reset on Shutdown).
 
-    if (!basic_descriptor_sets_created && callCount == 1) {
+    if (!basic_descriptor_sets_created_ && callCount == 1) {
 //        std::cout << "[GPUCulling] Frame " << bufferIndex << ": Creating basic descriptor sets (backface culling disabled until frame 3)..." << std::endl;
         if (!CreateDescriptorSets(snapshot)) {
             std::cerr << "Failed to create basic descriptor sets" << std::endl;
             return false;
         }
-        basic_descriptor_sets_created = true;
+        basic_descriptor_sets_created_ = true;
     }
 
     // Frame 3: Recreate descriptor sets with meshlet buffer for backface culling
-    if (!backface_descriptor_sets_created && callCount >= 3) {
+    if (!backface_descriptor_sets_created_ && callCount >= 3) {
         // Check if meshlet buffer is now available
         if (gpuDrawPipeline_) {
             auto meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
@@ -728,7 +907,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                     std::cerr << "Failed to recreate descriptor sets with meshlet buffer" << std::endl;
                     return false;
                 }
-                backface_descriptor_sets_created = true;
+                backface_descriptor_sets_created_ = true;
 //                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Backface culling descriptor sets created successfully!" << std::endl;
             } else {
                 if (bufferIndex == 0) {
@@ -828,11 +1007,18 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     // CRITICAL: Insert a final global barrier to ensure all indirect commands and buffers are fully visible
     // This is essential before any DrawIndirect calls
+    //
+    // dstAccessMask notes (T4.6.5 part 18.5): removed ShaderRead from the previous
+    // mask — DRAW_INDIRECT and VERTEX_INPUT stages don't support VK_ACCESS_SHADER_READ_BIT
+    // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816). The indirect_args buffer is
+    // consumed by DRAW_INDIRECT (IndirectCommandRead) and the vertex/index buffers by
+    // VERTEX_INPUT (VertexAttributeRead); the vertex shader never reads these buffers
+    // directly via a SSBO binding, so ShaderRead isn't needed.
     cmdBuffer->MemoryBarrier(
         rhi::PipelineStage::ComputeShader,
-        rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexInput | rhi::PipelineStage::VertexShader,
+        rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexInput,
         rhi::AccessFlag::ShaderWrite,
-        rhi::AccessFlag::IndirectCommandRead | rhi::AccessFlag::ShaderRead | rhi::AccessFlag::VertexAttributeRead
+        rhi::AccessFlag::IndirectCommandRead | rhi::AccessFlag::VertexAttributeRead
     );
 
     // === GPU TO CPU COPY FOR DEBUGGING ===
@@ -844,6 +1030,20 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     //     cmdBuffer->CopyBuffer(current_frame_res.instance_visibility_buffer, debug_readback_buffer_, 0, 0, copySize);
     //     results_.needs_readback = true;
     // }
+
+    // T4.6.5 part 35.4: schedule indirect_args readback. Stage7 wrote
+    // visible_count into indirect_commands[1] on the GPU. indirect_args is
+    // GPU-only on Vulkan, so we copy to a host-visible staging slot and read
+    // the previous frame's slot at the top of the next Execute().
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+        current_frame_res.indirect_args_buffer != rhi::handles::INVALID_RESOURCE &&
+        indirect_readback_staging_[indirect_readback_idx_] != rhi::handles::INVALID_RESOURCE) {
+        cmdBuffer->CopyBuffer(current_frame_res.indirect_args_buffer,
+                              indirect_readback_staging_[indirect_readback_idx_],
+                              0, 0, 16);
+        indirect_readback_idx_ = (indirect_readback_idx_ + 1) % 3;
+        if (indirect_readback_filled_ < 3) ++indirect_readback_filled_;
+    }
 
     // Set buffers for GPU-driven draw pipeline using current frame resource
     results_.indirect_args_buffer = current_frame_res.indirect_args_buffer;
@@ -1043,20 +1243,24 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         device_->UnmapBuffer(constantBuffer);
     }
     
-    if (streaming_descriptor_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) {
+    // T4.6.5 part 30.6 (X6 fix): triple-buffer the streaming descriptor set.
+    // Single-set variant updated every frame while the prior frame's cmd
+    // buffer was still in flight → VUID-vkUpdateDescriptorSets-None-03047.
+    const u32 slot = bufferIndex % 3;
+    if (streaming_descriptor_sets_[slot] == rhi::handles::INVALID_DESCRIPTOR_SET) {
         rhi::DescriptorSetDesc desc{};
         desc.layout = streaming_descriptor_layout_;
-        streaming_descriptor_set_ = device_->CreateDescriptorSet(desc);
+        streaming_descriptor_sets_[slot] = device_->CreateDescriptorSet(desc);
     }
-    
-    if (streaming_descriptor_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+
+    if (streaming_descriptor_sets_[slot] != rhi::handles::INVALID_DESCRIPTOR_SET) {
         rhi::WriteDescriptorSet writes[4];
         rhi::DescriptorBufferInfo bufferInfos[4];
         
         bufferInfos[0].buffer = residencyBuffer;
         bufferInfos[0].offset = 0;
         bufferInfos[0].range = ~0ull;
-        writes[0].dstSet = streaming_descriptor_set_;
+        writes[0].dstSet = streaming_descriptor_sets_[slot];
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = rhi::DescriptorType::StorageBuffer;
@@ -1065,7 +1269,7 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         bufferInfos[1].buffer = requestBuffer;
         bufferInfos[1].offset = 0;
         bufferInfos[1].range = ~0ull;
-        writes[1].dstSet = streaming_descriptor_set_;
+        writes[1].dstSet = streaming_descriptor_sets_[slot];
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = rhi::DescriptorType::StorageBuffer;
@@ -1074,7 +1278,7 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         bufferInfos[2].buffer = feedbackBuffer;
         bufferInfos[2].offset = 0;
         bufferInfos[2].range = ~0ull;
-        writes[2].dstSet = streaming_descriptor_set_;
+        writes[2].dstSet = streaming_descriptor_sets_[slot];
         writes[2].dstBinding = 2;
         writes[2].descriptorCount = 1;
         writes[2].descriptorType = rhi::DescriptorType::StorageBuffer;
@@ -1083,7 +1287,7 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         bufferInfos[3].buffer = constantBuffer;
         bufferInfos[3].offset = 0;
         bufferInfos[3].range = sizeof(StreamingConstants);
-        writes[3].dstSet = streaming_descriptor_set_;
+        writes[3].dstSet = streaming_descriptor_sets_[slot];
         writes[3].dstBinding = 3;
         writes[3].descriptorCount = 1;
         writes[3].descriptorType = rhi::DescriptorType::UniformBuffer;
@@ -1094,15 +1298,11 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
         cmdBuffer->BindComputePipeline(streaming_feedback_pipeline_);
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute,
                                        streaming_pipeline_layout_,
-                                       0, 1, &streaming_descriptor_set_,
+                                       0, 1, &streaming_descriptor_sets_[slot],
                                        0, nullptr);
         
         u32 threadGroups = (constants.cluster_count + 63) / 64;
         cmdBuffer->Dispatch(threadGroups, 1, 1);
-    }
-    
-    if (streaming_descriptor_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
-        // ... (update descriptor set) ...
     }
 
     // Wait for the compute shader to finish reading the constant buffer before destroying it
@@ -1160,17 +1360,17 @@ void GPUCullingPipeline::StreamingFeedback(rhi::RHICommandBuffer* cmdBuffer,
     
     // Wait, `StreamingFeedback` is called once per frame.
     // I can make `static rhi::ResourceHandle s_streamingConstantBuffers[3]` to cycle them.
-    
-    static rhi::ResourceHandle s_streamingConstantBuffers[3] = { rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
-    
+    // T4.6.5 part 30.2: converted to streaming_constant_buffers_ member for proper
+    // cross-test cleanup. Statics leaked buffers across sub-tests when device changed.
+
     // Destroy the old buffer for this frame slot if it exists
-    if (s_streamingConstantBuffers[bufferIndex % 3] != rhi::handles::INVALID_RESOURCE) {
-        device_->DestroyBuffer(s_streamingConstantBuffers[bufferIndex % 3]);
-        s_streamingConstantBuffers[bufferIndex % 3] = rhi::handles::INVALID_RESOURCE;
+    if (streaming_constant_buffers_[bufferIndex % 3] != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(streaming_constant_buffers_[bufferIndex % 3]);
+        streaming_constant_buffers_[bufferIndex % 3] = rhi::handles::INVALID_RESOURCE;
     }
 
     // Assign the new buffer to the slot
-    s_streamingConstantBuffers[bufferIndex % 3] = constantBuffer;
+    streaming_constant_buffers_[bufferIndex % 3] = constantBuffer;
     
     // device_->DestroyBuffer(constantBuffer); // REMOVED
 }
@@ -1291,8 +1491,8 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
 
         // Set up all bindings for this frame's descriptor set
         auto& frame_res = frame_resources_[i];
-        rhi::WriteDescriptorSet writes[12];  // Updated from 11 to 12 (added meshlet buffer)
-        rhi::DescriptorBufferInfo bufferInfos[12];  // Updated from 11 to 12 (added meshlet buffer)
+        rhi::WriteDescriptorSet writes[13];  // T4.6.5 part 35.2: bumped from 12 to 13 (added cluster_map)
+        rhi::DescriptorBufferInfo bufferInfos[13];  // T4.6.5 part 35.2: bumped from 12 to 13
         rhi::DescriptorImageInfo imageInfo;
         u32 writeCount = 0;
 
@@ -1320,12 +1520,12 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
 
         // Binding 2: Culling constants (frame-specific)
         // WGSL uniform structs are padded to a 16-byte multiple; CullingConstants
-        // is 260 bytes of fields but the shader expects 272 (17 vec4s). The
-        // buffer itself is allocated as 272 (see CreateBuffers); the descriptor
-        // range must match or Dawn rejects the binding.
+        // T4.6.5 part 35.3: descriptor range matches the 288-byte buffer
+        // allocation. WGSL CullingUniforms has 21 fields (3 mat4 + 1 vec4 +
+        // 17 u32/float) = 276 bytes; 16-byte aligned → 288.
         bufferInfos[writeCount].buffer = frame_res.culling_constants_buffer;
         bufferInfos[writeCount].offset = 0;
-        bufferInfos[writeCount].range = sizeof(float) * 68;
+        bufferInfos[writeCount].range = 288;
         writes[writeCount].dstSet = culling_descriptor_sets_[i];
         writes[writeCount].dstBinding = 2;
         writes[writeCount].descriptorCount = 1;
@@ -1439,17 +1639,17 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         if (global_meshlet_buffer == rhi::handles::INVALID_RESOURCE) {
             // Create a placeholder buffer if meshlet buffer is not available yet
             // This prevents Metal validation errors while waiting for meshlet buffer to be ready
-            static rhi::ResourceHandle placeholder_meshlet_buffer = rhi::handles::INVALID_RESOURCE;
-            if (placeholder_meshlet_buffer == rhi::handles::INVALID_RESOURCE) {
+            // T4.6.5 part 30.2: converted to placeholder_meshlet_buffer_ member for cross-test cleanup.
+            if (placeholder_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE) {
                 rhi::BufferDesc placeholderDesc{};
                 placeholderDesc.size = sizeof(float) * 16; // Minimal valid buffer size
                 placeholderDesc.type = rhi::BufferType::Structured;
                 placeholderDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
                 placeholderDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ShaderResource);
-                placeholder_meshlet_buffer = device_->CreateBuffer(placeholderDesc);
+                placeholder_meshlet_buffer_ = device_->CreateBuffer(placeholderDesc);
 //                std::cout << "[GPUCulling] Created placeholder meshlet buffer for binding 11" << std::endl;
             }
-            global_meshlet_buffer = placeholder_meshlet_buffer;
+            global_meshlet_buffer = placeholder_meshlet_buffer_;
         }
 
         bufferInfos[writeCount].buffer = global_meshlet_buffer;
@@ -1457,6 +1657,34 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         bufferInfos[writeCount].range = ~0ull; // Use full range for both real and placeholder buffers
         writes[writeCount].dstSet = culling_descriptor_sets_[i];
         writes[writeCount].dstBinding = 11;
+        writes[writeCount].descriptorCount = 1;
+        writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[writeCount].bufferInfo = &bufferInfos[writeCount];
+        writeCount++;
+
+        // T4.6.5 part 35.2: Binding 12: cluster_map (flatClusterID → globalMeshletIndex).
+        // Critical for per-cluster bounds in Stage4. Falls back to placeholder
+        // (same as binding 11) when GPUDrivenDrawPipeline hasn't populated it
+        // yet — Stage4 shader detects OOB via total_meshlet_count uniform
+        // and falls back to instance bounds.
+        auto cluster_map_buffer = gpuDrawPipeline_ ? gpuDrawPipeline_->GetClusterMapBuffer() : rhi::handles::INVALID_RESOURCE;
+        if (cluster_map_buffer == rhi::handles::INVALID_RESOURCE) {
+            if (placeholder_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE) {
+                rhi::BufferDesc placeholderDesc{};
+                placeholderDesc.size = sizeof(float) * 16;
+                placeholderDesc.type = rhi::BufferType::Structured;
+                placeholderDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+                placeholderDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::ShaderResource);
+                placeholder_meshlet_buffer_ = device_->CreateBuffer(placeholderDesc);
+            }
+            cluster_map_buffer = placeholder_meshlet_buffer_;
+        }
+
+        bufferInfos[writeCount].buffer = cluster_map_buffer;
+        bufferInfos[writeCount].offset = 0;
+        bufferInfos[writeCount].range = ~0ull;
+        writes[writeCount].dstSet = culling_descriptor_sets_[i];
+        writes[writeCount].dstBinding = 12;
         writes[writeCount].descriptorCount = 1;
         writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
         writes[writeCount].bufferInfo = &bufferInfos[writeCount];
@@ -1474,7 +1702,18 @@ bool GPUCullingPipeline::UpdateCullingConstants(u32 frame_index, const CullingCo
     if (current_frame_res.culling_constants_buffer != rhi::handles::INVALID_RESOURCE) {
         void* mapped = device_->MapBuffer(current_frame_res.culling_constants_buffer);
         if (mapped) {
-            memcpy(mapped, &constants, sizeof(CullingConstants));
+            // T4.6.5 part 35.3: struct sizeof on Apple is 288 bytes (m4x4
+            // alignment-16 forces trailing pad; field layout is 3*64 + 16 +
+            // 17*4 = 276, padded to 288). Buffer allocation is also 288, so
+            // the memcpy covers the full struct.
+            constexpr u32 kStructBytes = sizeof(CullingConstants);
+            constexpr u32 kBufBytes = 288;
+            static_assert(kStructBytes == 288, "CullingConstants layout changed");
+            memcpy(mapped, &constants, kStructBytes);
+            // Defensive: if struct ever shrinks, zero the trailing bytes.
+            if (kBufBytes > kStructBytes) {
+                memset(static_cast<u8*>(mapped) + kStructBytes, 0, kBufBytes - kStructBytes);
+            }
             device_->UnmapBuffer(current_frame_res.culling_constants_buffer);
             return true;
         }
@@ -1574,6 +1813,12 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     constants.cluster_count = snapshot.GetClusterRefCount();
     constants.force_pass_all = force_pass_all_debug_ ? 1u : 0u;
     constants.enable_debug_output = 1;
+    // T4.6.5 part 35.2: per-cluster bounds OOB guard. 0 on first frame
+    // (gpuDraw hasn't run yet) — Stage4 falls back to instance bounds.
+    constants.total_meshlet_count = gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0u;
+    constants._pad_cm0 = 0;
+    constants._pad_cm1 = 0;
+    constants._pad_cm2 = 0;
 
     // Additional validation to prevent corrupted data
     if (constants.instance_count > 100000) {
@@ -1827,13 +2072,17 @@ bool GPUCullingPipeline::Stage7_BuildIndirectCommands(rhi::RHICommandBuffer* cmd
     // Single thread to build the indirect command
     cmdBuffer->Dispatch(1, 1, 1);
 
-    // CRITICAL BARRIER: Ensure indirect commands are fully written before Draw stage reads them
-    // Enhanced barrier: Sync with DrawIndirect AND VertexInput (for safety)
+    // CRITICAL BARRIER: Ensure indirect commands are fully written before Draw stage reads them.
+    //
+    // dstAccessMask notes (T4.6.5 part 18.5): removed ShaderRead — DRAW_INDIRECT and
+    // VERTEX_INPUT don't support VK_ACCESS_SHADER_READ_BIT. Indirect args are consumed
+    // by DRAW_INDIRECT only; VertexInput is included defensively for any subsequent
+    // vertex-fetch from related buffers.
     cmdBuffer->MemoryBarrier(
         rhi::PipelineStage::ComputeShader,
         rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexInput,
         rhi::AccessFlag::ShaderWrite,
-        rhi::AccessFlag::IndirectCommandRead | rhi::AccessFlag::ShaderRead
+        rhi::AccessFlag::IndirectCommandRead
     );
 
     // NOTE: A previous debug readback here mapped indirect_args_buffer (a GPU-only

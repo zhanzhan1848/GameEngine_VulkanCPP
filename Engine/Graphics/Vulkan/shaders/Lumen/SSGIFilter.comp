@@ -1,0 +1,156 @@
+#version 450 core
+// Vulkan Lumen SSGI Spatial Filter — GLSL port of SSGIFilter.metal.
+// Entry point: ssgi_filter
+//   (glslangValidator -V --source-entrypoint main SSGIFilter.comp
+//    -e ssgi_filter -o SSGIFilter.comp.spv)
+//
+// Full-resolution compute:
+//   1. Bilinearly upsamples half-res SSGI trace to full-res
+//   2. Applies depth-aware bilateral filter (normal weight derived from
+//      depth gradients, since Vulkan DSL has no separate normal texture)
+//   3. Preserves edges using full-res GBuffer depth weights
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledImage      ssgi_input   (half-res trace)
+//   binding 1 = SampledDepthImage gbuffer_depth (full-res)
+//   binding 2 = StorageImage      ssgi_output   (full-res RGBA16F)
+//   binding 3 = UniformBuffer     params
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D ssgi_input;
+layout(set = 0, binding = 1) uniform texture2D gbuffer_depth;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D ssgi_output;
+
+layout(set = 0, binding = 3, std140) uniform FilterParams {
+    float sigma_depth;     // Depth weight sharpness (default 10.0)
+    float sigma_normal;    // Normal weight power (default 16.0)
+    float sigma_hit_dist;  // Hit distance weight sharpness (default 8.0)
+    float sigma_spatial;   // Gaussian spatial falloff (default 2.5)
+    uint  kernel_radius;   // Filter kernel radius (default 2 = 5x5)
+} params;
+
+// Manual bilinear fetch (samplerless texture functions have no sampler).
+vec4 sampleBilinear(texture2D tex, vec2 uv, ivec2 dims) {
+    vec2 coord = uv * vec2(dims) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 f = fract(coord);
+    ivec2 maxCoord = dims - ivec2(1);
+
+    ivec2 c00 = clamp(base,               ivec2(0), maxCoord);
+    ivec2 c10 = clamp(base + ivec2(1, 0), ivec2(0), maxCoord);
+    ivec2 c01 = clamp(base + ivec2(0, 1), ivec2(0), maxCoord);
+    ivec2 c11 = clamp(base + ivec2(1, 1), ivec2(0), maxCoord);
+
+    vec4 h00 = texelFetch(tex, c00, 0);
+    vec4 h10 = texelFetch(tex, c10, 0);
+    vec4 h01 = texelFetch(tex, c01, 0);
+    vec4 h11 = texelFetch(tex, c11, 0);
+
+    return h00 * (1.0 - f.x) * (1.0 - f.y)
+         + h10 * f.x * (1.0 - f.y)
+         + h01 * (1.0 - f.x) * f.y
+         + h11 * f.x * f.y;
+}
+
+// Depth-gradient normal proxy: returns a 2D "gradient" vector whose dot
+// product approximates surface-orientation similarity. Two pixels on the
+// same plane share similar gradients; across an edge they diverge.
+vec2 depthGradient(ivec2 pixel) {
+    float dC = texelFetch(gbuffer_depth, pixel, 0).r;
+    float dR = texelFetch(gbuffer_depth, pixel + ivec2(1, 0), 0).r;
+    float dD = texelFetch(gbuffer_depth, pixel + ivec2(0, 1), 0).r;
+    return vec2(dR - dC, dD - dC);
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    ivec2 pixel_pos = ivec2(gid);
+
+    ivec2 outDims = imageSize(ssgi_output);
+    if (pixel_pos.x >= outDims.x || pixel_pos.y >= outDims.y) return;
+
+    uint width  = uint(outDims.x);
+    uint height = uint(outDims.y);
+
+    vec2 invRes = 1.0 / vec2(width, height);
+
+    // --- Center pixel ---
+    vec2 center_uv = (vec2(pixel_pos) + 0.5) * invRes;
+    ivec2 inputDims = textureSize(ssgi_input, 0);
+    vec4 center_ssgi = sampleBilinear(ssgi_input, center_uv, inputDims);
+    float center_depth = texelFetch(gbuffer_depth, pixel_pos, 0).r;
+    vec2 center_grad = depthGradient(pixel_pos);
+
+    vec3 center_irradiance = center_ssgi.rgb;
+    float center_hit_dist  = center_ssgi.a;
+
+    // --- Bilateral filter ---
+    uint radius = min(params.kernel_radius, 4u);
+
+    vec3 filtered_irradiance = vec3(0.0);
+    float filtered_hit_dist  = 0.0;
+    float total_weight       = 0.0;
+
+    for (int dy = -int(radius); dy <= int(radius); dy++) {
+        for (int dx = -int(radius); dx <= int(radius); dx++) {
+            ivec2 sample_pos = pixel_pos + ivec2(dx, dy);
+            if (sample_pos.x < 0 || sample_pos.y < 0 ||
+                sample_pos.x >= int(width) || sample_pos.y >= int(height)) {
+                continue;
+            }
+
+            vec2 sample_uv = (vec2(sample_pos) + 0.5) * invRes;
+            vec4 sample_ssgi = sampleBilinear(ssgi_input, sample_uv, inputDims);
+
+            float sample_depth = texelFetch(gbuffer_depth, sample_pos, 0).r;
+            vec2 sample_grad = depthGradient(sample_pos);
+
+            // Depth weight
+            float depth_diff = abs(center_depth - sample_depth);
+            float w_depth = exp(-depth_diff * params.sigma_depth);
+
+            // Normal weight (gradient-dot proxy): gradients aligned → same surface.
+            // Normalize and dot, clamp to [0,1]. Small gradients (head-on) →
+            // near-zero vector; use maxmag fallback to avoid div-by-zero noise.
+            float gLenC = length(center_grad);
+            float gLenS = length(sample_grad);
+            float w_normal;
+            if (gLenC < 1e-5 && gLenS < 1e-5) {
+                w_normal = 1.0;  // both head-on → same orientation
+            } else {
+                float ng = max(0.0, dot(center_grad, sample_grad) /
+                                    max(gLenC * gLenS, 1e-8));
+                w_normal = pow(ng, params.sigma_normal);
+            }
+
+            // Hit distance weight
+            float dist_diff = abs(center_hit_dist - sample_ssgi.a);
+            float w_dist = exp(-dist_diff * params.sigma_hit_dist);
+
+            // Adaptive spatial weight (close = small kernel, far = large kernel)
+            float adaptive_sigma = max(params.sigma_spatial * center_hit_dist * 0.5,
+                                       params.sigma_spatial * 0.5);
+            float spatial_dist2 = float(dx * dx + dy * dy);
+            float w_spatial = exp(-spatial_dist2 / (2.0 * adaptive_sigma * adaptive_sigma));
+
+            float weight = w_depth * w_normal * w_dist * w_spatial;
+
+            filtered_irradiance += sample_ssgi.rgb * weight;
+            filtered_hit_dist   += sample_ssgi.a   * weight;
+            total_weight        += weight;
+        }
+    }
+
+    if (total_weight > 1e-6) {
+        filtered_irradiance /= total_weight;
+        filtered_hit_dist   /= total_weight;
+    } else {
+        filtered_irradiance = center_irradiance;
+        filtered_hit_dist   = center_hit_dist;
+    }
+
+    imageStore(ssgi_output, pixel_pos, vec4(filtered_irradiance, filtered_hit_dist));
+}

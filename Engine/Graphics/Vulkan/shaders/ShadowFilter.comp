@@ -1,0 +1,207 @@
+// T4.6.5 part 40 — ShadowFilter compute port (Metal → GLSL).
+//
+// Half-res compute pass producing a visibility texture that DeferredLighting
+// samples (1 tap) instead of running multi-tap PCF in the lighting pass. This
+// mirrors EngineTest/shaders/ShadowFilter.metal:94-148 — same params struct,
+// same cascade selection logic, same PCF kernel.
+//
+// Bindings (Vulkan, separate texture + sampler):
+//   0: UBO Params (inv_view_proj, shadow_vp[2], light_dir, texel sizes, ...)
+//   1: texture2D shadowMap0 (R32_Float, manual compare)
+//   2: texture2D shadowMap1 (R32_Float, manual compare)
+//   3: image2D visibilityOut (R8_UNorm, write-only)
+//   4: texture2D normalTex (GBuffer normal, currently unused — reserved)
+//   5: texture2D depthTex  (GBuffer depth, for world reconstruction)
+//   6: sampler linearSampler (shared across all texture samples)
+//
+// Metal bindings: buffer(0)=params, texture(0..4)=depth/sm0/sm1/out/normal.
+// Vulkan can't overlap UBO + SampledImage at the same binding (the previous
+// ShadowMapModule layout had binding 0 declared twice — bug). Shadow maps use
+// manual depth compare (no sampler2DShadow / comparison sampler needed); keeps
+// descriptor setup simple and matches the existing linear sampler pattern.
+//
+// Workgroup: 8x8x1 (matches ShadowMapModule.cpp:95 threadGroupSize + 2D
+// shared-memory IGN noise pattern).
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Constants mirroring RHIShaderConstants.metal. Kept inline to match the
+// single-file pattern of other Vulkan shaders in this directory.
+const float TWO_PI = 6.28318530718;
+const vec3 IGN_MAGIC = vec3(0.7548776662, 0.5698402909, 0.2659582193);
+
+const vec2 POISSON_DISK_16[16] = vec2[16](
+    vec2(-0.5274373, -0.7259060),
+    vec2( 0.8218882, -0.1694079),
+    vec2(-0.7959683,  0.5603005),
+    vec2( 0.5697909,  0.7113788),
+    vec2(-0.1583544, -0.8058264),
+    vec2( 0.7826165,  0.5406202),
+    vec2(-0.6480213, -0.1694079),
+    vec2( 0.5500000, -0.4500000),
+    vec2(-0.3000000,  0.7000000),
+    vec2( 0.7000000, -0.7000000),
+    vec2(-0.7000000,  0.3000000),
+    vec2( 0.3000000,  0.8000000),
+    vec2(-0.6000000, -0.5000000),
+    vec2( 0.8500000,  0.4000000),
+    vec2(-0.2000000,  0.9000000),
+    vec2( 0.4000000, -0.3000000)
+);
+
+// Match ShadowMapModule.cpp:306-316 Params struct exactly. std140 layout:
+// m4x4 (64B) + m4x4×2 (128B) + v4 (16B) + v2+v2 (16B) + u32×3 + f32 + pad.
+layout(set = 0, binding = 0, std140) uniform Params {
+    mat4 inv_view_proj;
+    mat4 shadow_vp[2];
+    vec4 light_dir;
+    vec2 texel_size;          // 1.0 / 2048.0
+    vec2 depth_texel_size;    // 1.0 / (render_width, render_height)
+    uint shadow_quality;      // 0=Hard, 1=PCF, 2=PCSS
+    uint render_width;
+    uint render_height;
+    float _pad0;
+};
+
+layout(set = 0, binding = 1) uniform texture2D shadowMap0;
+layout(set = 0, binding = 2) uniform texture2D shadowMap1;
+layout(set = 0, binding = 3, r8) uniform writeonly image2D visibilityOut;
+layout(set = 0, binding = 4) uniform texture2D normalTex;
+layout(set = 0, binding = 5) uniform texture2D depthTex;
+layout(set = 0, binding = 6) uniform sampler linearSampler;
+
+// --- Shadow sampling (manual compare; matches Metal's plain .sample path) ---
+
+float pcfShadow(texture2D<float> sm, vec3 sc, vec2 screenPos,
+                float filterRadius, float bias) {
+    float shadow = 0.0;
+    float noise = fract(IGN_MAGIC.z * fract(dot(screenPos, IGN_MAGIC.xy)));
+    float angle = noise * TWO_PI;
+    float sa = sin(angle), ca = cos(angle);
+
+    for (int i = 0; i < 8; ++i) {
+        vec2 offset = POISSON_DISK_16[i];
+        vec2 rotated = vec2(offset.x * ca - offset.y * sa,
+                            offset.x * sa + offset.y * ca);
+        vec2 uv = sc.xy + rotated * filterRadius;
+        float d = texture(sampler2D(sm, linearSampler), uv).r;
+        shadow += (sc.z - bias > d) ? 0.0 : 1.0;
+    }
+    return shadow / 8.0;
+}
+
+float pcssShadow(texture2D<float> sm, vec3 sc, vec2 screenPos,
+                 vec2 texSize, float bias, float lightSizeUV) {
+    // Blocker search (8 taps)
+    float blockerSum = 0.0;
+    float blockerCount = 0.0;
+    float noise = fract(IGN_MAGIC.z * fract(dot(screenPos, IGN_MAGIC.xy)));
+    float angle = noise * TWO_PI;
+    float sa = sin(angle), ca = cos(angle);
+
+    for (int i = 0; i < 8; ++i) {
+        vec2 offset = POISSON_DISK_16[i];
+        vec2 rotated = vec2(offset.x * ca - offset.y * sa,
+                            offset.x * sa + offset.y * ca);
+        vec2 uv = sc.xy + rotated * lightSizeUV;
+        float d = texture(sampler2D(sm, linearSampler), uv).r;
+        if (d < sc.z - bias) {
+            blockerSum += d;
+            blockerCount += 1.0;
+        }
+    }
+    if (blockerCount < 0.5) return 1.0;
+
+    float penumbraRatio = (sc.z - blockerSum / blockerCount) / max(sc.z, 1e-4);
+    float filterRadius = clamp(penumbraRatio * lightSizeUV,
+                               texSize.x * 2.0, lightSizeUV * 4.0);
+
+    float shadow = 0.0;
+    for (int i = 0; i < 16; ++i) {
+        vec2 offset = POISSON_DISK_16[i];
+        vec2 rotated = vec2(offset.x * ca - offset.y * sa,
+                            offset.x * sa + offset.y * ca);
+        vec2 uv = sc.xy + rotated * filterRadius;
+        float d = texture(sampler2D(sm, linearSampler), uv).r;
+        shadow += (sc.z - bias > d) ? 0.0 : 1.0;
+    }
+    return shadow / 16.0;
+}
+
+float sampleShadowMap(texture2D<float> sm, vec3 sc, vec2 screenPos,
+                      vec2 texSize, float bias, uint quality) {
+    if (quality == 0u) {
+        float d = texture(sampler2D(sm, linearSampler), sc.xy).r;
+        return (sc.z - bias > d) ? 0.0 : 1.0;
+    } else if (quality == 1u) {
+        return pcfShadow(sm, sc, screenPos, 2.0 * texSize.x, bias);
+    } else {
+        return pcssShadow(sm, sc, screenPos, texSize, bias, 0.005);
+    }
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    uvec2 outSize = imageSize(visibilityOut);
+    if (any(greaterThanEqual(gid, outSize))) return;
+
+    // Half-res visibility — sample full-res depth at gid*2+0.5 mapped to [0,1].
+    vec2 fullUV = (vec2(gid) * 2.0 + 1.0) / vec2(render_width, render_height);
+
+    float depth = texture(sampler2D(depthTex, linearSampler), fullUV).r;
+    if (depth >= 1.0) {
+        imageStore(visibilityOut, ivec2(gid), vec4(1.0));
+        return;
+    }
+
+    // T4.6.5 part 40.2: flip Y in NDC to match naga's auto-inserted
+    // OpFNegate on gl_Position.y in GBuffer.wgsl vertex shader. After
+    // naga Y-negate, framebuffer pixel (0,0) [Vulkan BOTTOM] contains world
+    // Y+ content. fullUV.y=0 → samples world Y+ depth → must reconstruct
+    // world Y+ → needs ndc.y=+1. Old formula `fullUV.y*2-1` gave -1 →
+    // reconstructed world Y- → wrong cascade lookup → shadows tracked
+    // camera movement. Reference: Dawn CommonFunction.wgsl:51.
+    vec2 ndc = vec2(fullUV.x * 2.0 - 1.0, 1.0 - fullUV.y * 2.0);
+    vec4 clipPos = vec4(ndc, depth, 1.0);
+    vec4 worldPos4 = inv_view_proj * clipPos;
+    vec3 worldPos = worldPos4.xyz / max(worldPos4.w, 1e-6);
+
+    float bias = 0.003;
+    vec2 screenPos = vec2(gid);
+    float visibility = 1.0;
+
+    // Cascade 0
+    vec4 clip0 = shadow_vp[0] * vec4(worldPos, 1.0);
+    vec3 sc0 = clip0.xyz / max(clip0.w, 1e-6);
+    sc0.x = sc0.x * 0.5 + 0.5;
+    // T4.6.5 part 40.1: Y-flip to match naga's auto-inserted OpFNegate on
+    // gl_Position.y in ShadowDepth.wgsl vertex shader. After Y-negate,
+    // shadow-map framebuffer pixel (0,0) [Vulkan BOTTOM] contains world Y+
+    // in light space; sampling at UV y=0 returns world Y+ depth. So for a
+    // receiver with positive clip-space y (world Y+ in cascade space), we
+    // need UV y=0 (not 1). Old code `cy*0.5+0.5` produced UV y=1 for cy=+1
+    // → sampled world Y- depth → inverted shadow comparison.
+    sc0.y = 0.5 - sc0.y * 0.5;
+
+    if (sc0.x >= 0.0 && sc0.x <= 1.0 && sc0.y >= 0.0 && sc0.y <= 1.0 &&
+        sc0.z >= 0.0 && sc0.z <= 1.0) {
+        visibility = sampleShadowMap(shadowMap0, sc0, screenPos,
+                                     texel_size, bias, shadow_quality);
+    } else {
+        // Cascade 1
+        vec4 clip1 = shadow_vp[1] * vec4(worldPos, 1.0);
+        vec3 sc1 = clip1.xyz / max(clip1.w, 1e-6);
+        sc1.x = sc1.x * 0.5 + 0.5;
+        sc1.y = 0.5 - sc1.y * 0.5;  // T4.6.5 part 40.1: Y-flip (same as cascade 0)
+
+        if (sc1.x >= 0.0 && sc1.x <= 1.0 && sc1.y >= 0.0 && sc1.y <= 1.0 &&
+            sc1.z >= 0.0 && sc1.z <= 1.0) {
+            visibility = sampleShadowMap(shadowMap1, sc1, screenPos,
+                                         texel_size, bias, shadow_quality);
+        }
+    }
+
+    imageStore(visibilityOut, ivec2(gid), vec4(visibility));
+}

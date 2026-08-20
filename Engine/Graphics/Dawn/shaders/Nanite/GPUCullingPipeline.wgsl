@@ -67,6 +67,19 @@ struct ClusterRef {
     _pad: u32,
 };
 
+// T4.6.5 part 35.2: matches C++ ClusterMapEntry (GPUDrivenDrawPipeline.cpp:1656-1661).
+// Maps flatClusterID → (globalMeshletIndex, instanceIndex, materialID).
+// Without this binding, Stage4 had to use instance bounds for ALL clusters
+// (a mitigation for an older local-vs-global meshlet_id bug) → Stage5 HZB
+// tested every cluster at instance center → thin geometry (pillars/cloth)
+// got false-occluded by closer nearby floor at min-filter mip.
+struct ClusterMapEntry {
+    globalMeshletIndex: u32,
+    instanceIndex: u32,
+    materialID: u32,
+    _pad: u32,
+};
+
 // Matches C++ CullingConstants (sizeof == 260, padded to 272 = 17 vec4s).
 struct CullingUniforms {
     view_matrix: mat4x4<f32>,
@@ -86,6 +99,10 @@ struct CullingUniforms {
     cluster_count: u32,
     force_pass_all: u32,
     enable_debug_output: u32,
+    total_meshlet_count: u32,  // T4.6.5 part 35.2: OOB guard for cluster_map → meshlets lookup
+    _pad_cm0: u32,
+    _pad_cm1: u32,
+    _pad_cm2: u32,
 };
 
 // 48 bytes/entry — matches C++ allocation (12 u32s). Use individual f32s
@@ -119,6 +136,7 @@ struct ClusterVisibility {
 @group(0) @binding(9) var<storage, read_write> cluster_visibility_counter: atomic<u32>;
 @group(0) @binding(10) var<storage, read_write> debug_buffer: array<u32>;
 @group(0) @binding(11) var<storage, read> meshlets: array<MeshletData>;
+@group(0) @binding(12) var<storage, read> cluster_map: array<ClusterMapEntry>;
 
 // Constants matching Metal.
 const MAX_CLUSTERS_PER_INSTANCE: u32 = 256u;
@@ -393,15 +411,35 @@ fn stage4_cluster_expansion(@builtin(global_invocation_id) gid: vec3<u32>) {
                 continue;
             }
 
-            // Note: cluster_refs.meshlet_id is LOCAL per-geometry, but the
-            // global meshlet buffer is laid out with geometries concatenated.
-            // Reading meshlets[local_id] returns the wrong meshlet for any
-            // geometry that isn't first in the buffer — leading to wrong
-            // bounds and incorrect culling. Use instance bounds for all
-            // clusters. Stage1 instance-level culling already filtered
-            // off-screen instances, so this is safe (coarser but correct).
+            // T4.6.5 part 35.2: per-cluster bounds via cluster_map → meshlets.
+            // Old mitigation (instance bounds for all clusters) made Stage5 HZB
+            // test every cluster at instance center → thin geometry (pillars,
+            // cloth) was false-occluded by closer nearby floor sampled at
+            // min-filter mip. Per-cluster bounds mean small clusters fall
+            // under the 0.08 screen-space threshold and skip HZB entirely.
+            //
+            // First-frame defense: cluster_map may be empty (built inside
+            // gpuDraw.Execute which runs AFTER cull). Fall back to instance
+            // bounds if globalMeshletIndex is OOB or uniform sentinel.
             var cluster_world_center = vec3<f32>(inst.bounds_center_x, inst.bounds_center_y, inst.bounds_center_z);
             var cluster_world_radius = inst.bounds_radius;
+            let cmap_entry = cluster_map[cluster_map_idx];
+            let meshlet_idx = cmap_entry.globalMeshletIndex;
+            if (meshlet_idx < uniforms.total_meshlet_count) {
+                let m = meshlets[meshlet_idx];
+                // MeshletData packing (mirrors RHIMeshlet): cone1.w = center.x,
+                // cone2.xy = center.yz, cone2.z = radius.
+                let local_center = vec3<f32>(m.cone1.w, m.cone2.x, m.cone2.y);
+                let local_radius = m.cone2.z;
+                let world_center_4 = inst.world_matrix * vec4<f32>(local_center, 1.0);
+                cluster_world_center = world_center_4.xyz;
+                // Radius scales by max axis scale of the world matrix.
+                let col0_len = length(inst.world_matrix[0].xyz);
+                let col1_len = length(inst.world_matrix[1].xyz);
+                let col2_len = length(inst.world_matrix[2].xyz);
+                let max_scale = max(max(col0_len, col1_len), col2_len);
+                cluster_world_radius = local_radius * max_scale;
+            }
 
             // Per-cluster far-plane cull only. Side-plane test removed: it
             // used view-space XY against world-space VP planes (math mismatch
@@ -460,7 +498,13 @@ fn stage5_occlusion_culling(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let ndc = clip_pos.xy / clip_pos.w;
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
+    // T4.6.5 part 35: HZB texture has top-left origin (framebuffer convention
+    // after naga's automatic Y-flip in vertex shaders). NDC.y = +1 (world-up)
+    // → top of screen → uv.y = 0 (row 0 of HZB). NDC.y = -1 (world-down) →
+    // bottom → uv.y = 1. Old math `ndc.y * 0.5 + 0.5` assumed OpenGL
+    // bottom-left texture origin and produced world-up geometry sampling
+    // world-down HZB region → false-occlusion of ceiling / upper-half scene.
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         return; // Off-screen, assume visible.
     }

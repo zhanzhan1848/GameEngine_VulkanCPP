@@ -75,19 +75,63 @@ struct GeometryDebugContext {
     bool initialized = false;
     RenderPassHandle compatibleRenderPass = handles::INVALID_RESOURCE;
     SamplerHandle defaultSampler = handles::INVALID_SAMPLER;
-    
-    // Shader Paths
-    const char* meshlet_vs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/MeshletDebug.metal";
-    const char* meshlet_fs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/MeshletDebug.metal";
-    
-    const char* sdf_vs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/SDFDebug.metal";
-    const char* sdf_fs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/SDFDebug.metal";
-    
-    const char* vf_vs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/VectorFieldDebug.metal";
-    const char* vf_fs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/VectorFieldDebug.metal";
+    SamplerHandle nearestSampler = handles::INVALID_SAMPLER;
+    // Formats the pipelines were created against — mismatched pipeline vs
+    // render-pass formats fail pipeline creation on Vulkan.
+    DataFormat colorFormat = DataFormat::RGBA16_Float;
+    DataFormat depthFormat = DataFormat::D32_Float;
 
-    const char* voxel_vs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/VoxelDebug.metal";
-    const char* voxel_fs_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/Debug/VoxelDebug.metal";
+    // Shader loading — platform-aware (Vulkan: SPIR-V pair with entry "main";
+    // Metal: .metal source with named entries). Relative paths first (work
+    // next to the binary), then the worktree source root as fallback.
+    static bool ReadFileBytes(const std::string& path, utl::vector<char>& out) {
+        std::ifstream file(path, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) return false;
+        size_t fileSize = (size_t)file.tellg();
+        out.resize(fileSize);
+        file.seekg(0);
+        if (fileSize > 0) file.read(out.data(), fileSize);
+        file.close();
+        return true;
+    }
+
+    static bool ReadShaderFile(const std::string& relPath, utl::vector<char>& out) {
+        if (ReadFileBytes(relPath, out)) return true;
+        static const std::string fallbackRoot =
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/";
+        return ReadFileBytes(fallbackRoot + relPath, out);
+    }
+
+    // Loads one debug shader (VS or FS). vsEntry/fsEntry are the Metal entry
+    // names; Vulkan SPIR-V always uses "main".
+    ShaderHandle LoadDebugShader(RHIDeviceBase& device, bool isVulkan,
+                                 const char* name, bool isVertex,
+                                 const char* metalEntry) {
+        utl::vector<char> data;
+        if (isVulkan) {
+            std::string stage = isVertex ? "vert" : "frag";
+            if (!ReadShaderFile(std::string("Engine/Graphics/Vulkan/shaders/Debug/") +
+                                name + "." + stage + ".spv", data) ||
+                data.empty()) {
+                std::cerr << "[GeometryDebug] Failed to load SPIR-V: Debug/" << name
+                          << "." << stage << ".spv" << std::endl;
+                return handles::INVALID_SHADER;
+            }
+            return device.CreateShader(data.data(), data.size(),
+                                       isVertex ? ShaderStage::Vertex : ShaderStage::Pixel,
+                                       "main");
+        }
+        if (!ReadShaderFile(std::string("Engine/Graphics/RHI/Shaders/Debug/") +
+                            std::string(name) + ".metal", data) ||
+            data.empty()) {
+            std::cerr << "[GeometryDebug] Failed to load Metal source: Debug/" << name
+                      << ".metal" << std::endl;
+            return handles::INVALID_SHADER;
+        }
+        return device.CreateShader(data.data(), data.size(),
+                                   isVertex ? ShaderStage::Vertex : ShaderStage::Pixel,
+                                   metalEntry);
+    }
 
     // Uniform Buffer Management
     struct FrameData {
@@ -105,23 +149,11 @@ struct GeometryDebugContext {
     std::unordered_map<u64, DescriptorSetHandle> vf_ds_cache[3];
     std::unordered_map<u64, DescriptorSetHandle> voxel_ds_cache[3];
 
-    // Helper to load shader data
-    utl::vector<char> LoadShaderData(const char* path) {
-        std::ifstream file(path, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) {
-            std::cerr << "Failed to open shader file: " << path << std::endl;
-            return {};
-        }
-        size_t fileSize = (size_t)file.tellg();
-        utl::vector<char> buffer(fileSize);
-        file.seekg(0);
-        file.read(buffer.data(), fileSize);
-        file.close();
-        return buffer;
-    }
-
-    void Initialize(RHIDeviceBase& device, RenderPassHandle renderPass) {
+    void Initialize(RHIDeviceBase& device, RenderPassHandle renderPass,
+                    DataFormat inColorFormat, DataFormat inDepthFormat) {
         if (initialized) return;
+        colorFormat = inColorFormat;
+        depthFormat = inDepthFormat;
 
         // Create Default Sampler
         if (defaultSampler == handles::INVALID_SAMPLER) {
@@ -132,28 +164,29 @@ struct GeometryDebugContext {
             desc.addressU = TextureAddressMode::Clamp;
             desc.addressV = TextureAddressMode::Clamp;
             desc.addressW = TextureAddressMode::Clamp;
+            // VulkanSampler treats comparisonFunc != Never as compareEnable —
+            // a comparison sampler cannot back a plain sampler3D binding.
+            desc.comparisonFunc = ComparisonFunc::Never;
             defaultSampler = device.CreateSampler(desc);
         }
+        if (nearestSampler == handles::INVALID_SAMPLER) {
+            SamplerDesc desc;
+            desc.minFilter = FilterMode::Nearest;
+            desc.magFilter = FilterMode::Nearest;
+            desc.mipFilter = FilterMode::Nearest;
+            desc.addressU = TextureAddressMode::Clamp;
+            desc.addressV = TextureAddressMode::Clamp;
+            desc.addressW = TextureAddressMode::Clamp;
+            desc.comparisonFunc = ComparisonFunc::Never;
+            nearestSampler = device.CreateSampler(desc);
+        }
+
+        const bool isVulkan = (device.GetPlatform() == RHIPlatform::Vulkan);
 
         // 1. Meshlet Pipeline
         {
-            // Load Shaders
-            utl::vector<char> vs_data = LoadShaderData(meshlet_vs_path);
-            utl::vector<char> fs_data = LoadShaderData(meshlet_fs_path);
-            
-            ShaderHandle vs = handles::INVALID_SHADER;
-            ShaderHandle fs = handles::INVALID_SHADER;
-
-            if (!vs_data.empty()) {
-                vs = device.CreateShader(vs_data.data(), vs_data.size(), ShaderStage::Vertex, "meshlet_debug_vs");
-            } else {
-                std::cerr << "Failed to load Meshlet VS data from: " << meshlet_vs_path << std::endl;
-            }
-            if (!fs_data.empty()) {
-                fs = device.CreateShader(fs_data.data(), fs_data.size(), ShaderStage::Pixel, "meshlet_debug_fs");
-            } else {
-                std::cerr << "Failed to load Meshlet FS data from: " << meshlet_fs_path << std::endl;
-            }
+            ShaderHandle vs = LoadDebugShader(device, isVulkan, "MeshletDebug", true,  "meshlet_debug_vs");
+            ShaderHandle fs = LoadDebugShader(device, isVulkan, "MeshletDebug", false, "meshlet_debug_fs");
             
             if (vs != handles::INVALID_SHADER && fs != handles::INVALID_SHADER) {
                 std::cout << "Meshlet Debug Pipeline Created Successfully." << std::endl;
@@ -184,11 +217,11 @@ struct GeometryDebugContext {
                 p_desc.layout = meshlet_layout;
                 p_desc.topology = PrimitiveTopology::TriangleList;
                 
-                // Formats
+                // Formats (parameterized — Vulkan rejects pipeline/render-pass format mismatches)
                 p_desc.renderTargetCount = 1;
-                p_desc.renderTargetFormats[0] = DataFormat::RGBA16_Float;
-                p_desc.depthStencilFormat = DataFormat::D32_Float;
-                
+                p_desc.renderTargetFormats[0] = colorFormat;
+                p_desc.depthStencilFormat = depthFormat;
+
                 // Enable blending for transparency
                 p_desc.enableBlend = true;
                 p_desc.srcColorBlendFactor = BlendFactor::SrcAlpha;
@@ -197,14 +230,14 @@ struct GeometryDebugContext {
                 p_desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
                 p_desc.colorBlendOp = BlendOp::Add;
                 p_desc.alphaBlendOp = BlendOp::Add;
-                
+
                 p_desc.enableDepthTest = true;
                 p_desc.enableDepthWrite = false;
                 p_desc.depthFunc = ComparisonFunc::Always; // DEBUG
-                
+
                 p_desc.cullMode = CullMode::None;
                 p_desc.fillMode = FillMode::Solid;
-                
+
                 meshlet_pipeline = device.CreateGraphicsPipeline(p_desc);
             } else {
                 std::cerr << "Failed to create Meshlet Shaders." << std::endl;
@@ -214,48 +247,40 @@ struct GeometryDebugContext {
 
         // 2. SDF Pipeline
         {
-            // Load Shaders
-            utl::vector<char> vs_data = LoadShaderData(sdf_vs_path);
-            utl::vector<char> fs_data = LoadShaderData(sdf_fs_path);
-            
-            ShaderHandle vs = handles::INVALID_SHADER;
-            ShaderHandle fs = handles::INVALID_SHADER;
-
-            if (!vs_data.empty()) {
-                vs = device.CreateShader(vs_data.data(), vs_data.size(), ShaderStage::Vertex, "sdf_debug_vs");
-            }
-            if (!fs_data.empty()) {
-                fs = device.CreateShader(fs_data.data(), fs_data.size(), ShaderStage::Pixel, "sdf_slice_debug_fs");
-            }
+            ShaderHandle vs = LoadDebugShader(device, isVulkan, "SDFDebug", true,  "sdf_debug_vs");
+            ShaderHandle fs = LoadDebugShader(device, isVulkan, "SDFDebug", false, "sdf_slice_debug_fs");
             
             if (vs != handles::INVALID_SHADER && fs != handles::INVALID_SHADER) {
+                // Vulkan GLSL samples via separate samplers (Metal uses
+                // constexpr samplers and ignores the extra slots).
                 DescriptorSetLayoutBinding bindings[] = {
                     { 0, DescriptorType::SampledImage, 1, ShaderStage::Pixel },      // SDF Texture
-                    { 1, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel } // Uniforms (Dynamic)
+                    { 1, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel }, // Uniforms (Dynamic)
+                    { 2, DescriptorType::Sampler, 1, ShaderStage::Pixel }            // Linear sampler
                 };
-                
+
                 DescriptorSetLayoutDesc layout_desc;
-                layout_desc.bindingCount = 2;
+                layout_desc.bindingCount = 3;
                 layout_desc.bindings = bindings;
-                
+
                 DescriptorSetLayoutHandle set_layout = device.CreateDescriptorSetLayout(layout_desc);
                 sdf_set_layout = set_layout;
-                
+
                 PipelineLayoutDesc pl_desc;
                 pl_desc.setLayoutCount = 1;
                 pl_desc.setLayouts = &set_layout;
                 sdf_layout = device.CreatePipelineLayout(pl_desc);
-                
+
                 GraphicsPipelineDesc p_desc;
                 p_desc.vertexShader = vs;
                 p_desc.pixelShader = fs;
                 p_desc.layout = sdf_layout;
                 p_desc.topology = PrimitiveTopology::TriangleList;
-                
-                // Formats
+
+                // Formats (parameterized — Vulkan rejects pipeline/render-pass format mismatches)
                 p_desc.renderTargetCount = 1;
-                p_desc.renderTargetFormats[0] = DataFormat::RGBA16_Float;
-                p_desc.depthStencilFormat = DataFormat::D32_Float;
+                p_desc.renderTargetFormats[0] = colorFormat;
+                p_desc.depthStencilFormat = depthFormat;
                 
                 p_desc.enableBlend = true;
                 p_desc.srcColorBlendFactor = BlendFactor::SrcAlpha;
@@ -276,48 +301,38 @@ struct GeometryDebugContext {
         
         // 3. Vector Field Pipeline
         {
-            // Load Shaders
-            utl::vector<char> vs_data = LoadShaderData(vf_vs_path);
-            utl::vector<char> fs_data = LoadShaderData(vf_fs_path);
-            
-            ShaderHandle vs = handles::INVALID_SHADER;
-            ShaderHandle fs = handles::INVALID_SHADER;
-
-            if (!vs_data.empty()) {
-                vs = device.CreateShader(vs_data.data(), vs_data.size(), ShaderStage::Vertex, "vector_field_debug_vs");
-            }
-            if (!fs_data.empty()) {
-                fs = device.CreateShader(fs_data.data(), fs_data.size(), ShaderStage::Pixel, "vector_field_debug_fs");
-            }
+            ShaderHandle vs = LoadDebugShader(device, isVulkan, "VectorFieldDebug", true,  "vector_field_debug_vs");
+            ShaderHandle fs = LoadDebugShader(device, isVulkan, "VectorFieldDebug", false, "vector_field_debug_fs");
             
             if (vs != handles::INVALID_SHADER && fs != handles::INVALID_SHADER) {
                 DescriptorSetLayoutBinding bindings[] = {
-                    { 0, DescriptorType::SampledImage, 1, ShaderStage::Vertex | ShaderStage::Pixel },        // VF Texture
-                    { 1, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel } // Uniforms (Dynamic)
+                    { 0, DescriptorType::SampledImage, 1, ShaderStage::Vertex | ShaderStage::Pixel },        // VF Texture (vertex-stage sampling)
+                    { 1, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel }, // Uniforms (Dynamic)
+                    { 2, DescriptorType::Sampler, 1, ShaderStage::Vertex | ShaderStage::Pixel }               // Linear sampler
                 };
-                
+
                 DescriptorSetLayoutDesc layout_desc;
-                layout_desc.bindingCount = 2;
+                layout_desc.bindingCount = 3;
                 layout_desc.bindings = bindings;
-                
+
                 DescriptorSetLayoutHandle set_layout = device.CreateDescriptorSetLayout(layout_desc);
                 vector_field_set_layout = set_layout;
-                
+
                 PipelineLayoutDesc pl_desc;
                 pl_desc.setLayoutCount = 1;
                 pl_desc.setLayouts = &set_layout;
                 vector_field_layout = device.CreatePipelineLayout(pl_desc);
-                
+
                 GraphicsPipelineDesc p_desc;
                 p_desc.vertexShader = vs;
                 p_desc.pixelShader = fs;
                 p_desc.layout = vector_field_layout;
                 p_desc.topology = PrimitiveTopology::LineList;
-                
-                // Formats
+
+                // Formats (parameterized — Vulkan rejects pipeline/render-pass format mismatches)
                 p_desc.renderTargetCount = 1;
-                p_desc.renderTargetFormats[0] = DataFormat::RGBA16_Float;
-                p_desc.depthStencilFormat = DataFormat::D32_Float;
+                p_desc.renderTargetFormats[0] = colorFormat;
+                p_desc.depthStencilFormat = depthFormat;
                 
                 p_desc.enableDepthTest = true;
                 p_desc.enableDepthWrite = false;
@@ -334,48 +349,40 @@ struct GeometryDebugContext {
 
         // 4. Voxel Pipeline
         {
-            // Load Shaders
-            utl::vector<char> vs_data = LoadShaderData(voxel_vs_path);
-            utl::vector<char> fs_data = LoadShaderData(voxel_fs_path);
-            
-            ShaderHandle vs = handles::INVALID_SHADER;
-            ShaderHandle fs = handles::INVALID_SHADER;
-
-            if (!vs_data.empty()) {
-                vs = device.CreateShader(vs_data.data(), vs_data.size(), ShaderStage::Vertex, "voxel_debug_vs");
-            }
-            if (!fs_data.empty()) {
-                fs = device.CreateShader(fs_data.data(), fs_data.size(), ShaderStage::Pixel, "voxel_debug_fs");
-            }
+            ShaderHandle vs = LoadDebugShader(device, isVulkan, "VoxelDebug", true,  "voxel_debug_vs");
+            ShaderHandle fs = LoadDebugShader(device, isVulkan, "VoxelDebug", false, "voxel_debug_fs");
             
             if (vs != handles::INVALID_SHADER && fs != handles::INVALID_SHADER) {
+                // Voxel VS samples linear (b2), FS re-samples nearest (b3).
                 DescriptorSetLayoutBinding bindings[] = {
                     { 0, DescriptorType::SampledImage, 1, ShaderStage::Vertex | ShaderStage::Pixel },        // Voxel Texture
-                    { 1, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel } // Uniforms (Dynamic)
+                    { 1, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel }, // Uniforms (Dynamic)
+                    { 2, DescriptorType::Sampler, 1, ShaderStage::Vertex },                                    // Linear sampler (VS)
+                    { 3, DescriptorType::Sampler, 1, ShaderStage::Pixel }                                      // Nearest sampler (FS)
                 };
-                
+
                 DescriptorSetLayoutDesc layout_desc;
-                layout_desc.bindingCount = 2;
+                layout_desc.bindingCount = 4;
                 layout_desc.bindings = bindings;
-                
+
                 DescriptorSetLayoutHandle set_layout = device.CreateDescriptorSetLayout(layout_desc);
                 voxel_set_layout = set_layout;
-                
+
                 PipelineLayoutDesc pl_desc;
                 pl_desc.setLayoutCount = 1;
                 pl_desc.setLayouts = &set_layout;
                 voxel_layout = device.CreatePipelineLayout(pl_desc);
-                
+
                 GraphicsPipelineDesc p_desc;
                 p_desc.vertexShader = vs;
                 p_desc.pixelShader = fs;
                 p_desc.layout = voxel_layout;
                 p_desc.topology = PrimitiveTopology::TriangleList; // Cube Triangles
-                
-                // Formats
+
+                // Formats (parameterized — Vulkan rejects pipeline/render-pass format mismatches)
                 p_desc.renderTargetCount = 1;
-                p_desc.renderTargetFormats[0] = DataFormat::RGBA16_Float;
-                p_desc.depthStencilFormat = DataFormat::D32_Float;
+                p_desc.renderTargetFormats[0] = colorFormat;
+                p_desc.depthStencilFormat = depthFormat;
                 
                 p_desc.enableDepthTest = true;
                 p_desc.enableDepthWrite = true; // Voxels are opaque usually
@@ -544,7 +551,16 @@ struct GeometryDebugContext {
         texWrite.descriptorCount = 1;
         texWrite.descriptorType = DescriptorType::SampledImage;
         texWrite.imageInfo = &texInfo;
-        
+
+        DescriptorImageInfo sampInfo;
+        sampInfo.sampler = defaultSampler;
+        WriteDescriptorSet sampWrite;
+        sampWrite.dstSet = ds;
+        sampWrite.dstBinding = 2;
+        sampWrite.descriptorCount = 1;
+        sampWrite.descriptorType = DescriptorType::Sampler;
+        sampWrite.imageInfo = &sampInfo;
+
         DescriptorBufferInfo uniformBufferInfo;
         uniformBufferInfo.buffer = frames[frameIndex].uniformBuffer;
         uniformBufferInfo.offset = 0;
@@ -557,8 +573,8 @@ struct GeometryDebugContext {
         uniformWrite.descriptorType = DescriptorType::UniformBufferDynamic;
         uniformWrite.bufferInfo = &uniformBufferInfo;
 
-        WriteDescriptorSet writes[] = {texWrite, uniformWrite};
-        device.UpdateDescriptorSets(2, writes);
+        WriteDescriptorSet writes[] = {texWrite, sampWrite, uniformWrite};
+        device.UpdateDescriptorSets(3, writes);
 
         sdf_ds_cache[frameIndex][key] = ds;
         return ds;
@@ -586,7 +602,16 @@ struct GeometryDebugContext {
         texWrite.descriptorCount = 1;
         texWrite.descriptorType = DescriptorType::SampledImage;
         texWrite.imageInfo = &texInfo;
-        
+
+        DescriptorImageInfo sampInfo;
+        sampInfo.sampler = defaultSampler;
+        WriteDescriptorSet sampWrite;
+        sampWrite.dstSet = ds;
+        sampWrite.dstBinding = 2;
+        sampWrite.descriptorCount = 1;
+        sampWrite.descriptorType = DescriptorType::Sampler;
+        sampWrite.imageInfo = &sampInfo;
+
         DescriptorBufferInfo uniformBufferInfo;
         uniformBufferInfo.buffer = frames[frameIndex].uniformBuffer;
         uniformBufferInfo.offset = 0;
@@ -599,8 +624,8 @@ struct GeometryDebugContext {
         uniformWrite.descriptorType = DescriptorType::UniformBufferDynamic;
         uniformWrite.bufferInfo = &uniformBufferInfo;
 
-        WriteDescriptorSet writes[] = {texWrite, uniformWrite};
-        device.UpdateDescriptorSets(2, writes);
+        WriteDescriptorSet writes[] = {texWrite, sampWrite, uniformWrite};
+        device.UpdateDescriptorSets(3, writes);
 
         vf_ds_cache[frameIndex][key] = ds;
         return ds;
@@ -628,7 +653,25 @@ struct GeometryDebugContext {
         texWrite.descriptorCount = 1;
         texWrite.descriptorType = DescriptorType::SampledImage;
         texWrite.imageInfo = &texInfo;
-        
+
+        DescriptorImageInfo linInfo;
+        linInfo.sampler = defaultSampler;
+        WriteDescriptorSet linWrite;
+        linWrite.dstSet = ds;
+        linWrite.dstBinding = 2;
+        linWrite.descriptorCount = 1;
+        linWrite.descriptorType = DescriptorType::Sampler;
+        linWrite.imageInfo = &linInfo;
+
+        DescriptorImageInfo nearInfo;
+        nearInfo.sampler = nearestSampler;
+        WriteDescriptorSet nearWrite;
+        nearWrite.dstSet = ds;
+        nearWrite.dstBinding = 3;
+        nearWrite.descriptorCount = 1;
+        nearWrite.descriptorType = DescriptorType::Sampler;
+        nearWrite.imageInfo = &nearInfo;
+
         DescriptorBufferInfo uniformBufferInfo;
         uniformBufferInfo.buffer = frames[frameIndex].uniformBuffer;
         uniformBufferInfo.offset = 0;
@@ -641,8 +684,8 @@ struct GeometryDebugContext {
         uniformWrite.descriptorType = DescriptorType::UniformBufferDynamic;
         uniformWrite.bufferInfo = &uniformBufferInfo;
 
-        WriteDescriptorSet writes[] = {texWrite, uniformWrite};
-        device.UpdateDescriptorSets(2, writes);
+        WriteDescriptorSet writes[] = {texWrite, linWrite, nearWrite, uniformWrite};
+        device.UpdateDescriptorSets(4, writes);
 
         voxel_ds_cache[frameIndex][key] = ds;
         return ds;
@@ -976,20 +1019,23 @@ const GeometryDebugData& AddGeometryDebugPass(
                 if (g_debugContext.compatibleRenderPass == handles::INVALID_RESOURCE) {
                     auto* targetRes = static_cast<rendergraph::RenderGraphTexture*>(context.graph->GetResource(data.target));
                     auto* depthRes = static_cast<rendergraph::RenderGraphTexture*>(context.graph->GetResource(depth));
-                    
+
                     rhi::RenderPassDesc desc;
                     desc.colorAttachments.resize(1);
                     desc.colorAttachments[0].format = targetRes->GetDesc().format;
                     desc.colorAttachments[0].loadOp = rhi::LoadAction::Load;
                     desc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
-                    
+
                     desc.depthAttachment.format = depthRes->GetDesc().format;
                     desc.depthAttachment.loadOp = rhi::LoadAction::Load;
                     desc.depthAttachment.storeOp = rhi::StoreAction::Store;
-                    
+
                     g_debugContext.compatibleRenderPass = device.CreateRenderPass(desc);
                 }
-                g_debugContext.Initialize(device, g_debugContext.compatibleRenderPass);
+                auto* targetRes = static_cast<rendergraph::RenderGraphTexture*>(context.graph->GetResource(data.target));
+                auto* depthRes = static_cast<rendergraph::RenderGraphTexture*>(context.graph->GetResource(depth));
+                g_debugContext.Initialize(device, g_debugContext.compatibleRenderPass,
+                                          targetRes->GetDesc().format, depthRes->GetDesc().format);
             }
             
             ExecuteGeometryDebug(device, cmdList, view, *settings);  // Dereference pointer!
@@ -1025,7 +1071,7 @@ void RenderGeometryDebug(
             
             g_debugContext.compatibleRenderPass = device.CreateRenderPass(desc);
         }
-        g_debugContext.Initialize(device, g_debugContext.compatibleRenderPass);
+        g_debugContext.Initialize(device, g_debugContext.compatibleRenderPass, colorFormat, depthFormat);
     }
     
     ExecuteGeometryDebug(device, cmdBuffer, view, settings);

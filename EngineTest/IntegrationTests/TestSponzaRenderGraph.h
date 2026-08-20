@@ -36,7 +36,7 @@ private:
     // Scene Assets
     primal::graphics::RenderScene scene;
     primal::graphics::RenderView view;
-    std::vector<primal::graphics::SceneDataMeshInfo> sceneMeshes;
+    primal::utl::vector<primal::graphics::SceneDataMeshInfo> sceneMeshes; // stale-test port: LoadRenderItemData returns utl::vector
     
     // Shader Management
     std::unordered_map<std::string, primal::graphics::rhi::ShaderHandle> shaderVariantMap;

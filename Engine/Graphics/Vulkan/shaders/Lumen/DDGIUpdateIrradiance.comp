@@ -1,0 +1,219 @@
+#version 450 core
+// DDGIUpdateIrradiance.comp — Vulkan Lumen hand-written GLSL port of
+// DDGIUpdateIrradiance.wgsl. Entry point: ddgi_update_irradiance
+//   (glslangValidator --source-entrypoint main -e ddgi_update_irradiance)
+//
+// Projects ray radiance into SH9 (9 coeffs/probe) and blends temporally
+// with a history buffer using a hysteresis EMA.
+//
+// Why GLSL (not naga-compiled WGSL): the WGSL DDGIVolumeData uniform struct
+// contains array<vec4<f32>, 3> fields (SdfOrigins/VoxelSizes/Extents). naga
+// emits these as spvUnsafeArray, which MoltenVK cannot consume inside a uniform
+// struct. GLSL std140 handles vec4[3] natively. Same pattern as SSAOTrace.comp
+// and DDGIGIGather.comp.
+//
+// Flat descriptor bindings (matches LumenDDGIPass.cpp:393-401 Vulkan branch):
+//   binding 0 = UniformBuffer        GlobalShaderData
+//   binding 1 = UniformBuffer        DDGIVolumeData
+//   binding 2 = StorageBuffer (ro)   ray_buffer
+//   binding 3 = StorageBuffer (ro)   irradiance_history
+//   binding 4 = StorageBuffer (rw)   irradiance_output
+//   binding 5 = StorageBuffer (ro)   probe_update_list
+// (binding 6 confidence buffer is bound by C++ but unused by this shader.)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ----------------------------------------------------------------------------
+// Bindings (flat — see header)
+// ----------------------------------------------------------------------------
+
+// GlobalShaderData UBO — mirrors C++ RHIShaderCommon.h / WGSL GlobalShaderData.
+layout(set = 0, binding = 0, std140) uniform GlobalShaderData {
+    mat4 View;
+    mat4 Projection;
+    mat4 InvProjection;
+    mat4 ViewProjection;
+    mat4 PreviousViewProjection;
+    mat4 InvViewProjection;
+    vec4 CameraPositionAndViewWidth;
+    vec4 CameraDirectionAndViewHeight;
+    uint NumDirectionalLights;
+    float DeltaTime;
+    float FrameCount;
+    uint  _padding;
+} globalData;
+
+// DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h.
+// The C++ struct is 336 bytes (extends to Albedo @ 320); this shader only
+// references fields through LightColor @ 288. Trailing bytes are uploaded
+// but not read — Vulkan allows a UBO block to be smaller than the bound
+// buffer as long as accessed offsets are in-bounds.
+layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88  (Surface Cache card lookup count)
+    uint  SCAtlasSize;              //  92  (Surface Cache lighting atlas size)
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    float _pad_to_sdf;              // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+} volume;
+
+// DDGIRayData — storage buffer element. Packed as vec4 (16B stride).
+struct DDGIRayData {
+    vec4 radiance_and_dist;  // xyz = radiance, w = hit_distance
+};
+
+layout(set = 0, binding = 2) readonly buffer RayBuffer {
+    DDGIRayData ray_buffer[];
+};
+// Packed float[] layout: 9 coeffs/probe * 3 floats/coeff = 27 floats/probe
+// (12-byte stride). Declaring this as vec3[] would silently use 16-byte stride
+// under std140/std430 rules for vec3 arrays.
+// Packed as vec4[] (16B stride per coeff) — matches GIGather's declaration.
+// Each coeff: xyz = SH coefficient (RGB), w = unused.
+layout(set = 0, binding = 3) readonly buffer IrradianceHistory {
+    vec4 irradiance_history[];
+};
+layout(set = 0, binding = 4) buffer IrradianceOutput {
+    vec4 irradiance_output[];
+};
+layout(set = 0, binding = 5) readonly buffer ProbeUpdateList {
+    uint probe_update_list[];
+};
+
+// ----------------------------------------------------------------------------
+// Constants
+// ----------------------------------------------------------------------------
+const vec3 DDGI_SKY_COLOR = vec3(0.3, 0.3, 0.35);
+
+const float DDGI_SH_C0   = 0.282095;
+const float DDGI_SH_C1   = 0.488603;
+const float DDGI_SH_C2_0 = 1.092548;
+const float DDGI_SH_C2_1 = 0.315392;
+const float DDGI_SH_C2_2 = 0.546274;
+
+// ----------------------------------------------------------------------------
+// Helpers (verbatim from DDGITraceRays.comp)
+// ----------------------------------------------------------------------------
+
+// Fibonacci sphere ray direction
+vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
+    const float INV_PHI = 0.6180339887498948482;
+    const float PI_VAL  = 3.14159265358979323846;
+    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
+    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
+    float theta = 2.0 * PI_VAL * u;
+    float phi   = acos(1.0 - 2.0 * v);
+    float sinPhi = sin(phi);
+    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
+}
+
+// ----------------------------------------------------------------------------
+// Main Kernel: ddgi_update_irradiance
+// ----------------------------------------------------------------------------
+void ddgi_update_irradiance() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (gid >= volume.ProbeUpdateCount) {
+        return;
+    }
+
+    // Map sparse update index to real probe index
+    uint probeIdx = probe_update_list[gid];
+    uint rayOffset = probeIdx * volume.RaysPerProbe;
+
+    // Accumulate L0+L1+L2 (9 coefficients)
+    vec3 shAccum[9];
+    for (uint i = 0u; i < 9u; i++) {
+        shAccum[i] = vec3(0.0);
+    }
+
+    for (uint r = 0u; r < volume.RaysPerProbe; r++) {
+        uint rayIdx = rayOffset + r;
+        vec3 radiance = ray_buffer[rayIdx].radiance_and_dist.xyz;
+        float hitDist = ray_buffer[rayIdx].radiance_and_dist.w;
+
+        if (hitDist < 0.0) {
+            radiance = DDGI_SKY_COLOR;
+        } else {
+            // Gentler distance falloff — only attenuate near max distance
+            float distWeight = 1.0 - smoothstep(volume.RayMaxDistance * 0.8, volume.RayMaxDistance, hitDist);
+            radiance = radiance * max(distWeight, 0.2);
+        }
+
+        vec3 d = ddgiRayDirection(r, volume.RaysPerProbe, volume.FrameIndex);
+        float x = d.x;
+        float y = d.y;
+        float z = d.z;
+        float x2 = x * x;
+        float y2 = y * y;
+        float z2 = z * z;
+
+        // L0+L1+L2 SH basis
+        float basis[9];
+        basis[0] =  DDGI_SH_C0;
+        basis[1] = -DDGI_SH_C1 * y;
+        basis[2] =  DDGI_SH_C1 * z;
+        basis[3] = -DDGI_SH_C1 * x;
+        basis[4] =  DDGI_SH_C2_0 * y * x;
+        basis[5] = -DDGI_SH_C2_0 * y * z;
+        basis[6] =  DDGI_SH_C2_1 * (3.0 * z2 - 1.0);
+        basis[7] = -DDGI_SH_C2_0 * x * z;
+        basis[8] =  DDGI_SH_C2_2 * (x2 - y2);
+
+        float mcWeight = 4.0 * 3.14159265 / float(volume.RaysPerProbe);
+
+        for (uint i = 0u; i < 9u; i++) {
+            shAccum[i] = shAccum[i] + radiance * basis[i] * mcWeight;
+        }
+    }
+
+    // Temporal blend with history (9 coeffs as vec4 = 9 vec4s per probe).
+    uint probeBase = probeIdx * 9u;
+
+    float alpha = volume.TemporalAlpha; // EMA blend factor (from C++ params_.irradiance_temporal_weight)
+
+    vec3 sh0 = shAccum[0];
+    float l1Limit = max(length(sh0) * 3.0, 0.1);
+    float l2Limit = max(length(sh0) * 2.0, 0.05);
+
+    for (uint i = 0u; i < 9u; i++) {
+        vec3 history = irradiance_history[probeBase + i].xyz;
+        vec3 filtered = mix(history, shAccum[i], alpha);
+
+        // Energy-aware clamp
+        if (i == 0u) {
+            float mag = length(filtered);
+            if (mag > 10.0) filtered = filtered * (10.0 / mag);
+        } else if (i < 4u) {
+            float mag = length(filtered);
+            if (mag > l1Limit) filtered = filtered * (l1Limit / mag);
+        } else {
+            float mag = length(filtered);
+            if (mag > l2Limit) filtered = filtered * (l2Limit / mag);
+        }
+
+        irradiance_output[probeBase + i] = vec4(filtered, 0.0);
+    }
+}

@@ -20,20 +20,7 @@ namespace primal::transform {
 			assert(rotations.size() >= index);
 			assert(positions.size() >= index);
 			assert(scales.size() >= index);
-#if defined(_WIN32)
-			using namespace DirectX;
-			XMVECTOR r{ XMLoadFloat4(&rotations[index]) };
-			XMVECTOR t{ XMLoadFloat3(&positions[index]) };
-			XMVECTOR s{ XMLoadFloat3(&scales[index]) };
-
-			XMMATRIX world{ XMMatrixAffineTransformation(s, XMQuaternionIdentity(), r, t) };
-			XMStoreFloat4x4(&to_world[index], world);
-
-			// NOTE: (F. Luna) Intro to DirectX 12, section 8.2.2
-			world.r[3] = XMVectorSet(0.f, 0.f, 0.f, 1.f);
-			XMMATRIX inverse_world{ XMMatrixInverse(nullptr, world) };
-			XMStoreFloat4x4(&inv_world[index], inverse_world);
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
 			using namespace simd;
 			// 构建四元数 (w, x, y, z)
 			simd::quatf r = simd_quaternion(rotations[index].x, rotations[index].y, rotations[index].z, rotations[index].w);
@@ -128,14 +115,7 @@ namespace primal::transform {
 
 		math::v3 calculate_orientation(math::v4 rotations)
 		{
-#if defined(_WIN32)
-			using namespace DirectX;
-			XMVECTOR rotation_quat{ XMLoadFloat4(&rotations) };
-			XMVECTOR front{ XMVectorSet(0.f, 0.f, 1.f, 0.f) };
-			math::v3 orientation;
-			XMStoreFloat3(&orientation, XMVector3Rotate(front, rotation_quat));
-			return orientation;
-#elif defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
 			using namespace simd;
 			// 构建四元数 (w, x, y, z)
 			simd::quatf r = simd_quaternion(rotations.x, rotations.y, rotations.z, rotations.w);

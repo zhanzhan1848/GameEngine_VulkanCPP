@@ -1,0 +1,200 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — SH2 (L0+L1) accumulation with multi-factor
+// confidence. Hand-written GLSL port of ScreenProbeAverage.metal
+// (entry: screen_probe_average).
+//
+// Each threadgroup handles one probe. Each thread reads 1 ray, recomputes its
+// ray direction (Fibonacci + orientAroundNormal), evaluates 4 SH basis
+// functions, and accumulates into shared memory via parallel reduction.
+//
+//   Confidence = hitRatio * radianceConsistency
+//     hitRatio           = fraction of rays that hit geometry
+//     radianceConsistency = exp(-variance_of_luminance)
+//
+// Output: 4 vec4 per probe (interleaved [sh0, sh1, sh2, sh3]).
+//   sh[0].w = confidence,  sh[1..3].w = 1.0 (validity flag)
+//
+// REQUIREMENT: ThreadGroupSize must equal raysPerProbe (64).
+// Dispatch: totalProbes, 1, 1  (one threadgroup per probe).
+//
+// Flat descriptor bindings:
+//   binding 0 = SSBO read   rayRadiance[]  (per-ray: xyz=radiance, w=cosTheta, neg=miss)
+//   binding 1 = SSBO write  probeSHOut[]   (4 vec4 per probe)
+//   binding 2 = UBO         { uint totalProbes; uint raysPerProbe; } (16B)
+//   binding 3 = SSBO read   probeNormals[]
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0, std430) readonly buffer RayRadianceBlock {
+    vec4 data[];
+} rayRadiance;
+
+layout(set = 0, binding = 1, std430) buffer ProbeSHOutBlock {
+    vec4 data[];
+} probeSHOut;
+
+layout(set = 0, binding = 2, std140) uniform AvgConstantsBlock {
+    uint totalProbes;
+    uint raysPerProbe;
+    uint _pad0;
+    uint _pad1;
+} constants;
+
+layout(set = 0, binding = 3, std430) readonly buffer ProbeNormalsBlock {
+    vec4 data[];
+} probeNormals;
+
+// --------------------------------------------------------------------------------
+// Constants
+// --------------------------------------------------------------------------------
+const float PI_VAL       = 3.14159265358979323846;
+const float GOLDEN_RATIO = 1.618033988749895;
+const uint  AVG_TG_SIZE  = 64u;
+
+// --------------------------------------------------------------------------------
+// Fibonacci sphere direction + normal alignment (must match TraceRays)
+// --------------------------------------------------------------------------------
+vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
+    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
+    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
+    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+}
+
+vec3 orientAroundNormal(vec3 dir, vec3 normal) {
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
+}
+
+// SH basis (L0 + L1, 4 coefficients)
+vec4 shBasis(vec3 d) {
+    return vec4(
+        0.282095,                // Y0 (L0)
+        0.488603 * d.y,          // Y1 (L1, y)
+        0.488603 * d.z,          // Y2 (L1, z)
+        0.488603 * d.x           // Y3 (L1, x)
+    );
+}
+
+// --------------------------------------------------------------------------------
+// Shared memory for parallel reduction
+// --------------------------------------------------------------------------------
+shared vec3 sharedSH[4][AVG_TG_SIZE];   // 4 SH bands
+shared float sharedWeight[AVG_TG_SIZE]; // cosTheta sum
+shared float sharedLum[AVG_TG_SIZE];    // luminance sum for variance
+shared float sharedLumSq[AVG_TG_SIZE];  // luminance^2 sum for variance
+shared float sharedHit[AVG_TG_SIZE];    // 1.0 if hit, 0.0 if miss
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void screen_probe_average() {
+    uint tid     = gl_LocalInvocationID.x;
+    uint group_id = gl_WorkGroupID.x;
+
+    if (group_id >= constants.totalProbes) return;
+
+    // Each thread reads exactly 1 ray
+    uint rayIdx = group_id * constants.raysPerProbe + tid;
+    vec4 rayData = rayRadiance.data[rayIdx];
+
+    if (rayData.w >= 0.0) {
+        // Hit: clamp radiance at source to prevent firefly propagation
+        const float MAX_RAY_RADIANCE = 5.0;
+        float rayLum = dot(rayData.rgb, vec3(0.2126, 0.7152, 0.0722));
+        if (rayLum > MAX_RAY_RADIANCE) {
+            rayData.rgb *= MAX_RAY_RADIANCE / rayLum;
+        }
+
+        // Hit: compute SH basis and accumulate
+        vec4 normData = probeNormals.data[group_id];
+        vec3 probeNormal = normalize(normData.xyz);
+
+        vec3 localDir = fibonacciDirection(tid, constants.raysPerProbe);
+        vec3 rayDir = orientAroundNormal(localDir, probeNormal);
+
+        vec4 Y = shBasis(rayDir);
+
+        vec3 weightedRadiance = rayData.rgb * rayData.w;
+        sharedSH[0][tid] = weightedRadiance * Y.x;
+        sharedSH[1][tid] = weightedRadiance * Y.y;
+        sharedSH[2][tid] = weightedRadiance * Y.z;
+        sharedSH[3][tid] = weightedRadiance * Y.w;
+        sharedWeight[tid] = rayData.w;
+
+        // Luminance for variance computation
+        float lum = dot(rayData.rgb, vec3(0.2126, 0.7152, 0.0722));
+        sharedLum[tid] = lum;
+        sharedLumSq[tid] = lum * lum;
+        sharedHit[tid] = 1.0;
+    } else {
+        // Miss: contribute nothing
+        sharedSH[0][tid] = vec3(0.0);
+        sharedSH[1][tid] = vec3(0.0);
+        sharedSH[2][tid] = vec3(0.0);
+        sharedSH[3][tid] = vec3(0.0);
+        sharedWeight[tid] = 0.0;
+        sharedLum[tid] = 0.0;
+        sharedLumSq[tid] = 0.0;
+        sharedHit[tid] = 0.0;
+    }
+
+    barrier();
+
+    // Parallel reduction (log2(64) = 6 steps)
+    for (uint stride = AVG_TG_SIZE >> 1; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            sharedSH[0][tid] += sharedSH[0][tid + stride];
+            sharedSH[1][tid] += sharedSH[1][tid + stride];
+            sharedSH[2][tid] += sharedSH[2][tid + stride];
+            sharedSH[3][tid] += sharedSH[3][tid + stride];
+            sharedWeight[tid] += sharedWeight[tid + stride];
+            sharedLum[tid]    += sharedLum[tid + stride];
+            sharedLumSq[tid]  += sharedLumSq[tid + stride];
+            sharedHit[tid]    += sharedHit[tid + stride];
+        }
+        barrier();
+    }
+
+    // Thread 0 writes the final SH coefficients + multi-factor confidence
+    if (tid == 0u) {
+        uint base = group_id * 4u;
+        float hitCount = sharedHit[0];
+        float totalWeight = sharedWeight[0];
+
+        if (totalWeight > 0.0 && hitCount > 0.0) {
+            float invWeight = 1.0 / totalWeight;
+
+            // Hit ratio: how many rays hit geometry
+            float hitRatio = hitCount / float(constants.raysPerProbe);
+
+            // Radiance variance: Var(X) = E[X^2] - E[X]^2
+            float avgLum = sharedLum[0] / hitCount;
+            float avgLumSq = sharedLumSq[0] / hitCount;
+            float lumVariance = max(avgLumSq - avgLum * avgLum, 0.0);
+
+            // Radiance consistency: low variance -> high consistency
+            // Scale factor: variance of 1.0 -> consistency ~ 0.02
+            float radianceConsistency = exp(-lumVariance * 4.0);
+
+            // Multi-factor confidence
+            float confidence = hitRatio * radianceConsistency;
+
+            probeSHOut.data[base + 0u] = vec4(sharedSH[0][0] * invWeight, confidence);
+            probeSHOut.data[base + 1u] = vec4(sharedSH[1][0] * invWeight, 1.0);
+            probeSHOut.data[base + 2u] = vec4(sharedSH[2][0] * invWeight, 1.0);
+            probeSHOut.data[base + 3u] = vec4(sharedSH[3][0] * invWeight, 1.0);
+        } else {
+            probeSHOut.data[base + 0u] = vec4(0.0, 0.0, 0.0, 0.0);
+            probeSHOut.data[base + 1u] = vec4(0.0, 0.0, 0.0, 0.0);
+            probeSHOut.data[base + 2u] = vec4(0.0, 0.0, 0.0, 0.0);
+            probeSHOut.data[base + 3u] = vec4(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+}

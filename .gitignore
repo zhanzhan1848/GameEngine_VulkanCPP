@@ -370,6 +370,7 @@ project_rules.md
 *.plist
 
 build/
+__cmake_systeminformation/
 xcode_build/
 .claude/
 MEMORY.md
@@ -392,11 +393,26 @@ GameEngine_VulkanCPP_Debug/
 *.ir
 *.model
 *.texture
-EngineTest/assets/
+# EngineTest/assets/ holds heavy binaries (models, textures) that shouldn't be
+# tracked. Use contents-list pattern (assets/*) not dir pattern (assets/) so
+# specific subdirs can be re-included below.
+EngineTest/assets/*
+!EngineTest/assets/Shaders/
+!EngineTest/assets/ReferenceImages/
+# Global *.spv / *.png rules below would still match files under Shaders/ and
+# ReferenceImages/. Re-include those file types explicitly per subdir.
+!EngineTest/assets/Shaders/**
+!EngineTest/assets/ReferenceImages/**
+
+# Production Vulkan shaders (SPIR-V binaries) — needed by ForwardRenderer on
+# Vulkan devices via ShaderRegistry. Re-include the .spv files explicitly.
+!Engine/Graphics/Vulkan/shaders/**
+
 # WFC demo needs Kenney tiles + colormap to embed in the WASM binary;
 # CI has no BatchConvert pipeline, so the processed assets must live in git.
 !EngineTest/assets/Processed/kenney_dungeon_tiles/
 !EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png
+
 .trae/
 .venv/
 .sisyphus/

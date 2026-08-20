@@ -94,6 +94,9 @@ public:
     void UnmapBuffer(rhi::ResourceHandle) override {}
     double GetTimestampPeriod() const override { return 1.0; }
     rhi::RHIGarbageCollector& GetGarbageCollector() override { return gc_; }
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    void SetBufferDirtySize(rhi::ResourceHandle, u64) override {}
+    rhi::RHIPlatform GetPlatform() const override { return rhi::RHIPlatform::Unknown; }
 };
 
 bool test_streaming_manager_initialization() {

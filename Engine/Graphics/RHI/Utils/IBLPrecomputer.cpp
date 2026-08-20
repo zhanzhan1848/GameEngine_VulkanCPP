@@ -13,15 +13,26 @@
 
 namespace primal::graphics::rhi {
 
+// T4.6.5 part 37 (IBLPrecomputer fix): structs must mirror WGSL layout.
+// WGSL IrradianceParams { faceSize, _pad0, _pad1, _pad2 } — single dispatch
+// with z=6 uses gid.z as face index (no per-face loop on Vulkan).
+// Metal IrradianceParams { faceIndex, padding[3] } reuses offset 0 as face
+// index for its per-face dispatch path — same u32 slot, different semantic.
 struct IrradianceParams {
-    u32 faceIndex;
-    float padding[3];
+    u32 faceSize;     // WGSL: bounds check; Metal: faceIndex (same u32 slot)
+    u32 _pad0;
+    u32 _pad1;
+    u32 _pad2;
 };
 
+// WGSL PrefilterParams { faceSize, _pad0, roughness, srcResolution }.
+// Metal PrefilterParams { faceIndex, roughness, padding[2] } has roughness
+// at offset 4 — different layout. The Vulkan path uses the WGSL layout.
 struct PrefilterParams {
-    u32 faceIndex;
+    u32 faceSize;       // WGSL: bounds check; Metal path unused at this slot
+    u32 _pad0;
     float roughness;
-    float padding[2];
+    float srcResolution;
 };
 
 IBLPrecomputer::IBLPrecomputer(RHIDeviceBase* device) : device_(device) {}
@@ -108,6 +119,33 @@ std::string IBLPrecomputer::LoadShaderSource(const std::string& filename) {
 }
 
 ShaderHandle IBLPrecomputer::CreateComputeShader(const std::string& filename, const char* entryPoint) {
+    auto platform = device_->GetPlatform();
+
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        // SPIR-V path: load precompiled .spv bytes.
+        utl::vector<std::string> searchPaths;
+        searchPaths.push_back("Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("../Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("../../Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("../../../Engine/Graphics/Vulkan/shaders/");
+        searchPaths.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/");
+
+        for (const auto& prefix : searchPaths) {
+            std::string path = prefix + filename;
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            auto size = file.tellg();
+            if (size <= 0) continue;
+            utl::vector<char> bytes(static_cast<size_t>(size));
+            file.seekg(0);
+            file.read(bytes.data(), size);
+            return device_->CreateShader(bytes.data(), bytes.size(), ShaderStage::Compute, entryPoint);
+        }
+        std::cerr << "[IBLPrecomputer] Failed to open SPIR-V shader file: " << filename << std::endl;
+        return handles::INVALID_SHADER;
+    }
+
+    // Text path: Metal .metal or Dawn .wgsl, loaded with #include resolution.
     std::string source = LoadShaderSource(filename);
     if (source.empty()) return handles::INVALID_SHADER;
     return device_->CreateShader(source.data(), source.size(), ShaderStage::Compute, entryPoint);
@@ -131,9 +169,11 @@ bool IBLPrecomputer::CreatePipelines() {
     commonBindings[1].descriptorCount = 1;
     commonBindings[1].stageFlags = ShaderStage::Compute;
     
-    // Binding 2: Sampler
+    // Binding 2: Sampler (Vulkan/WGSL declares `var smp: sampler` — sampler
+    // only, no imageView. Metal uses `sampler smp [[sampler(2)]]` which is
+    // also sampler-only at slot 2.)
     commonBindings[2].binding = 2;
-    commonBindings[2].descriptorType = DescriptorType::CombinedImageSampler;
+    commonBindings[2].descriptorType = DescriptorType::Sampler;
     commonBindings[2].descriptorCount = 1;
     commonBindings[2].stageFlags = ShaderStage::Compute;
     
@@ -191,9 +231,18 @@ bool IBLPrecomputer::CreatePipelines() {
     brdfPipelineLayout_ = device_->CreatePipelineLayout(brdfPipeLayoutDesc);
 
     // 3. Create Shaders
-    ShaderHandle irradianceShader = CreateComputeShader("IBL_IrradianceConvolution.metal", "CS_IrradianceConvolution");
-    ShaderHandle prefilterShader = CreateComputeShader("IBL_SpecularPrefilter.metal", "CS_SpecularPrefilter");
-    ShaderHandle brdfShader = CreateComputeShader("IBL_BRDFIntegration.metal", "CS_BRDFIntegration");
+    auto platform = device_->GetPlatform();
+    const bool isVulkan = (platform == rhi::RHIPlatform::Vulkan);
+    const char* ext = isVulkan ? ".spv" : ".metal";
+    // SPIR-V preserves the WGSL entry-point name (naga does not rewrite to
+    // "main"). WGSL convention: cs_main for compute.
+    const char* irradianceEntry = isVulkan ? "cs_main" : "CS_IrradianceConvolution";
+    const char* prefilterEntry = isVulkan ? "cs_main" : "CS_SpecularPrefilter";
+    const char* brdfEntry = isVulkan ? "cs_main" : "CS_BRDFIntegration";
+
+    ShaderHandle irradianceShader = CreateComputeShader(std::string("IBL_IrradianceConvolution") + ext, irradianceEntry);
+    ShaderHandle prefilterShader = CreateComputeShader(std::string("IBL_SpecularPrefilter") + ext, prefilterEntry);
+    ShaderHandle brdfShader = CreateComputeShader(std::string("IBL_BRDFIntegration") + ext, brdfEntry);
 
     if (irradianceShader == handles::INVALID_SHADER ||
         prefilterShader == handles::INVALID_SHADER ||
@@ -234,14 +283,14 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, u32 o
     // 1. Create Output Cubemap
     TextureDesc desc;
     desc.type = TextureType::TextureCube;
-    desc.format = DataFormat::RGBA16_Float; 
+    desc.format = DataFormat::RGBA16_Float;
     desc.size = {outputSize, outputSize, 1};
     desc.arraySize = 1;
     desc.mipLevels = 1;
     desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
     desc.memoryUsage = GPUMemoryUsage::Static;
     desc.name = "IBL_IrradianceMap";
-    
+
     ResourceHandle outputTexture = device_->CreateTexture(desc);
     if (outputTexture == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
 
@@ -260,128 +309,148 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, u32 o
     if (!cmd) return handles::INVALID_RESOURCE;
 
     cmd->Begin();
+
+    // T4.6.5 part 37 (Bug A fix): output cubemap starts in UNDEFINED layout.
+    // StorageImage descriptor requires GENERAL — transition the whole image
+    // before any Storage write. Without this, validation fires
+    // VUID-vkCmdDispatch-None-01020 and storage writes are silently discarded.
+    ResourceBarrier toUA{};
+    toUA.resource = outputTexture;
+    toUA.beforeState = ResourceState::Unknown;
+    toUA.afterState = ResourceState::UnorderedAccess;
+    toUA.subresource = 0xFFFFFFFF;
+    toUA.queueFamily = 0xFFFFFFFF;
+    cmd->InsertBarrier(&toUA, 1);
+
     cmd->BindComputePipeline(irradiancePipeline_);
 
-    // Keep track of temporary resources to destroy later
-    utl::vector<ResourceHandle> tempTextures;
-    utl::vector<ResourceHandle> tempBuffers;
-    utl::vector<DescriptorSetHandle> tempSets;
+    // T4.6.5 part 37 (Bug C fix): WGSL declares output as
+    // `texture_storage_2d_array<rgba16float, write>` (OpTypeImage Arrayed=1).
+    // Per-face Texture2D views (Arrayed=0) trigger
+    // VUID-vkCmdDispatch-viewType-07752. Use a single Texture2DArray view
+    // covering all 6 faces — the shader indexes via gid.z.
+    TextureViewDesc arrayViewDesc;
+    arrayViewDesc.texture = outputTexture;
+    arrayViewDesc.viewType = TextureType::Texture2DArray;
+    arrayViewDesc.format = desc.format;
+    arrayViewDesc.mostDetailedMip = 0;
+    arrayViewDesc.mipCount = 1;
+    arrayViewDesc.firstArraySlice = 0;
+    arrayViewDesc.arraySize = 6;
+    ResourceHandle outputArrayView = device_->CreateTextureView(arrayViewDesc);
 
-    // 4. Process each face
-    for (u32 face = 0; face < 6; ++face) {
-        // Create Face View
-        TextureViewDesc viewDesc;
-        viewDesc.texture = outputTexture;
-        viewDesc.viewType = TextureType::Texture2D;
-        viewDesc.format = desc.format;
-        viewDesc.mostDetailedMip = 0;
-        viewDesc.mipCount = 1;
-        viewDesc.firstArraySlice = face;
-        viewDesc.arraySize = 1;
-        
-        ResourceHandle faceView = device_->CreateTextureView(viewDesc);
-        tempTextures.push_back(faceView);
-        
-        // Create Params Buffer
-        BufferDesc bufDesc{
-            sizeof(IrradianceParams),
-            BufferType::Constant,
-            GPUMemoryUsage::Dynamic,
-            GPUMemoryUsage::Dynamic,
-            static_cast<u32>(BufferUsageFlags::Uniform)
-        };
-        ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
-        tempBuffers.push_back(paramBuffer);
-        
-        IrradianceParams params;
-        params.faceIndex = face;
-        
-        void* mapped = device_->MapBuffer(paramBuffer, 0, sizeof(IrradianceParams));
-        if (mapped) {
-            memcpy(mapped, &params, sizeof(IrradianceParams));
-            device_->UnmapBuffer(paramBuffer);
-        }
+    // Single params buffer (WGSL IrradianceParams: faceSize at offset 0)
+    BufferDesc bufDesc{
+        sizeof(IrradianceParams),
+        BufferType::Constant,
+        GPUMemoryUsage::Dynamic,
+        GPUMemoryUsage::Dynamic,
+        static_cast<u32>(BufferUsageFlags::Uniform)
+    };
+    ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
 
-        // Allocate DescriptorSet
-        DescriptorSetDesc dsDesc;
-        dsDesc.layout = irradianceDescLayout_;
-        DescriptorSetHandle ds = device_->CreateDescriptorSet(dsDesc);
-        tempSets.push_back(ds);
-        
-        // Update DescriptorSet
-        DescriptorImageInfo envMapInfo;
-        envMapInfo.imageView = envMap;
-        envMapInfo.imageLayout = ResourceState::ShaderResource;
-        envMapInfo.sampler = handles::INVALID_SAMPLER;
-        
-        WriteDescriptorSet write0;
-        write0.dstSet = ds;
-        write0.dstBinding = 0;
-        write0.descriptorType = DescriptorType::SampledImage;
-        write0.descriptorCount = 1;
-        write0.imageInfo = &envMapInfo;
-        
-        DescriptorImageInfo outputInfo;
-        outputInfo.imageView = faceView;
-        outputInfo.imageLayout = ResourceState::UnorderedAccess;
-        outputInfo.sampler = handles::INVALID_SAMPLER;
-        
-        WriteDescriptorSet write1;
-        write1.dstSet = ds;
-        write1.dstBinding = 1;
-        write1.descriptorType = DescriptorType::StorageImage;
-        write1.descriptorCount = 1;
-        write1.imageInfo = &outputInfo;
-        
-        DescriptorImageInfo samplerInfo;
-        samplerInfo.sampler = sampler;
-        samplerInfo.imageView = handles::INVALID_RESOURCE;
-        samplerInfo.imageLayout = ResourceState::Unknown;
-        
-        WriteDescriptorSet write2;
-        write2.dstSet = ds;
-        write2.dstBinding = 2;
-        write2.descriptorType = DescriptorType::CombinedImageSampler;
-        write2.descriptorCount = 1;
-        write2.imageInfo = &samplerInfo;
-        
-        DescriptorBufferInfo bufInfo;
-        bufInfo.buffer = paramBuffer;
-        bufInfo.offset = 0;
-        bufInfo.range = sizeof(IrradianceParams);
-        
-        WriteDescriptorSet write3;
-        write3.dstSet = ds;
-        write3.dstBinding = 3;
-        write3.descriptorType = DescriptorType::UniformBuffer;
-        write3.descriptorCount = 1;
-        write3.bufferInfo = &bufInfo;
-        
-        utl::vector<WriteDescriptorSet> writes;
-        writes.push_back(write0);
-        writes.push_back(write1);
-        writes.push_back(write2);
-        writes.push_back(write3);
-        device_->UpdateDescriptorSets(writes.size(), writes.data());
-        
-        cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiancePipelineLayout_, 0, 1, &ds, 0, nullptr);
-        
-        u32 groups = (outputSize + 7) / 8;
-        cmd->Dispatch(groups, groups, 1);
+    IrradianceParams params;
+    params.faceSize = outputSize;
+    params._pad0 = params._pad1 = params._pad2 = 0;
+
+    void* mapped = device_->MapBuffer(paramBuffer, 0, sizeof(IrradianceParams));
+    if (mapped) {
+        memcpy(mapped, &params, sizeof(IrradianceParams));
+        device_->UnmapBuffer(paramBuffer);
     }
-    
+
+    DescriptorSetDesc dsDesc;
+    dsDesc.layout = irradianceDescLayout_;
+    DescriptorSetHandle ds = device_->CreateDescriptorSet(dsDesc);
+
+    DescriptorImageInfo envMapInfo;
+    envMapInfo.imageView = envMap;
+    envMapInfo.imageLayout = ResourceState::ShaderResource;
+    envMapInfo.sampler = handles::INVALID_SAMPLER;
+
+    WriteDescriptorSet write0;
+    write0.dstSet = ds;
+    write0.dstBinding = 0;
+    write0.descriptorType = DescriptorType::SampledImage;
+    write0.descriptorCount = 1;
+    write0.imageInfo = &envMapInfo;
+
+    DescriptorImageInfo outputInfo;
+    outputInfo.imageView = outputArrayView;
+    outputInfo.imageLayout = ResourceState::UnorderedAccess;
+    outputInfo.sampler = handles::INVALID_SAMPLER;
+
+    WriteDescriptorSet write1;
+    write1.dstSet = ds;
+    write1.dstBinding = 1;
+    write1.descriptorType = DescriptorType::StorageImage;
+    write1.descriptorCount = 1;
+    write1.imageInfo = &outputInfo;
+
+    // T4.6.5 part 37 (Bug B fix): WGSL binding 2 is `var smp: sampler`
+    // (sampler only). CombinedImageSampler required an imageView, which we
+    // didn't have at this slot — validation fired NULL imageView error.
+    DescriptorImageInfo samplerInfo;
+    samplerInfo.sampler = sampler;
+    samplerInfo.imageView = handles::INVALID_RESOURCE;
+    samplerInfo.imageLayout = ResourceState::Unknown;
+
+    WriteDescriptorSet write2;
+    write2.dstSet = ds;
+    write2.dstBinding = 2;
+    write2.descriptorType = DescriptorType::Sampler;
+    write2.descriptorCount = 1;
+    write2.imageInfo = &samplerInfo;
+
+    DescriptorBufferInfo bufInfo;
+    bufInfo.buffer = paramBuffer;
+    bufInfo.offset = 0;
+    bufInfo.range = sizeof(IrradianceParams);
+
+    WriteDescriptorSet write3;
+    write3.dstSet = ds;
+    write3.dstBinding = 3;
+    write3.descriptorType = DescriptorType::UniformBuffer;
+    write3.descriptorCount = 1;
+    write3.bufferInfo = &bufInfo;
+
+    utl::vector<WriteDescriptorSet> writes;
+    writes.push_back(write0);
+    writes.push_back(write1);
+    writes.push_back(write2);
+    writes.push_back(write3);
+    device_->UpdateDescriptorSets(writes.size(), writes.data());
+
+    cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiancePipelineLayout_, 0, 1, &ds, 0, nullptr);
+
+    // WGSL workgroup_size(16, 16, 1); z dimension is the face index (0..5).
+    u32 groups = (outputSize + 15) / 16;
+    cmd->Dispatch(groups, groups, 6);
+
+    // T4.6.5 part 37: transition output to ShaderResource for downstream
+    // sampling (DeferredLighting binds irradianceMap as SampledImage, which
+    // requires SHADER_READ_ONLY_OPTIMAL — leaving it in GENERAL post-storage
+    // fires VUID-vkCmdDraw-None-09600 at draw time).
+    ResourceBarrier toSRV{};
+    toSRV.resource = outputTexture;
+    toSRV.beforeState = ResourceState::UnorderedAccess;
+    toSRV.afterState = ResourceState::ShaderResource;
+    toSRV.subresource = 0xFFFFFFFF;
+    toSRV.queueFamily = 0xFFFFFFFF;
+    cmd->InsertBarrier(&toSRV, 1);
+
     cmd->End();
-    
+
     QueueSubmitInfo submitInfo;
     submitInfo.cmdBuffer = cmdHandle;
-    
+
     device_->Submit(submitInfo);
     device_->WaitIdle(); // Wait for completion
-    
+
     // Cleanup Temp Resources
-    for (auto h : tempSets) device_->DestroyDescriptorSet(h);
-    for (auto h : tempTextures) device_->DestroyTexture(h); // TextureView is destroyed via DestroyTexture
-    for (auto h : tempBuffers) device_->DestroyBuffer(h);
+    device_->DestroyDescriptorSet(ds);
+    device_->DestroyTexture(outputArrayView);
+    device_->DestroyBuffer(paramBuffer);
     device_->DestroySampler(sampler);
     device_->DestroyCommandBuffer(cmdHandle);
 
@@ -402,7 +471,7 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
     desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
     desc.memoryUsage = GPUMemoryUsage::Static;
     desc.name = "IBL_PrefilterMap";
-    
+
     ResourceHandle outputTexture = device_->CreateTexture(desc);
     if (outputTexture == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
 
@@ -420,131 +489,163 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
     if (!cmd) return handles::INVALID_RESOURCE;
 
     cmd->Begin();
+
+    // T4.6.5 part 37 (Bug A fix): transition whole mip chain UNDEFINED→GENERAL.
+    ResourceBarrier toUA{};
+    toUA.resource = outputTexture;
+    toUA.beforeState = ResourceState::Unknown;
+    toUA.afterState = ResourceState::UnorderedAccess;
+    toUA.subresource = 0xFFFFFFFF;
+    toUA.queueFamily = 0xFFFFFFFF;
+    cmd->InsertBarrier(&toUA, 1);
+
     cmd->BindComputePipeline(prefilterPipeline_);
-    
+
     utl::vector<ResourceHandle> tempTextures;
     utl::vector<ResourceHandle> tempBuffers;
     utl::vector<DescriptorSetHandle> tempSets;
 
+    // T4.6.5 part 37 (Bug C fix): one Texture2DArray view per mip + single
+    // dispatch with z=6 per mip. WGSL `texture_storage_2d_array` (Arrayed=1)
+    // cannot accept per-face Texture2D views.
     for (u32 mip = 0; mip < mipLevels; ++mip) {
         u32 mipSize = outputSize >> mip;
         if (mipSize == 0) mipSize = 1;
-        
+
         float roughness = (float)mip / (float)(mipLevels - 1);
-        
-        for (u32 face = 0; face < 6; ++face) {
-            TextureViewDesc viewDesc;
-            viewDesc.texture = outputTexture;
-            viewDesc.viewType = TextureType::Texture2D;
-            viewDesc.format = desc.format;
-            viewDesc.mostDetailedMip = mip;
-            viewDesc.mipCount = 1;
-            viewDesc.firstArraySlice = face;
-            viewDesc.arraySize = 1;
-            ResourceHandle faceView = device_->CreateTextureView(viewDesc);
-            tempTextures.push_back(faceView);
-            
-            BufferDesc bufDesc{
-                sizeof(PrefilterParams),
-                BufferType::Constant,
-                GPUMemoryUsage::Dynamic,
-                GPUMemoryUsage::Dynamic,
-                static_cast<u32>(BufferUsageFlags::Uniform)
-            };
-            ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
-            tempBuffers.push_back(paramBuffer);
-            
-            PrefilterParams params;
-            params.faceIndex = face;
-            params.roughness = roughness;
-            
-            void* mapped = device_->MapBuffer(paramBuffer, 0, sizeof(PrefilterParams));
-            if (mapped) {
-                memcpy(mapped, &params, sizeof(PrefilterParams));
-                device_->UnmapBuffer(paramBuffer);
-            }
 
-            DescriptorSetDesc dsDesc;
-            dsDesc.layout = prefilterDescLayout_;
-            DescriptorSetHandle ds = device_->CreateDescriptorSet(dsDesc);
-            tempSets.push_back(ds);
+        TextureViewDesc viewDesc;
+        viewDesc.texture = outputTexture;
+        viewDesc.viewType = TextureType::Texture2DArray;
+        viewDesc.format = desc.format;
+        viewDesc.mostDetailedMip = mip;
+        viewDesc.mipCount = 1;
+        viewDesc.firstArraySlice = 0;
+        viewDesc.arraySize = 6;
+        ResourceHandle mipArrayView = device_->CreateTextureView(viewDesc);
+        tempTextures.push_back(mipArrayView);
 
-            DescriptorImageInfo envMapInfo;
-            envMapInfo.imageView = envMap;
-            envMapInfo.imageLayout = ResourceState::ShaderResource;
-            envMapInfo.sampler = handles::INVALID_SAMPLER;
-            
-            DescriptorImageInfo outputInfo;
-            outputInfo.imageView = faceView;
-            outputInfo.imageLayout = ResourceState::UnorderedAccess;
-            outputInfo.sampler = handles::INVALID_SAMPLER;
-            
-            DescriptorImageInfo samplerInfo;
-            samplerInfo.sampler = sampler;
-            samplerInfo.imageView = handles::INVALID_RESOURCE;
-            
-            DescriptorBufferInfo bufInfo;
-            bufInfo.buffer = paramBuffer;
-            bufInfo.offset = 0;
-            bufInfo.range = sizeof(PrefilterParams);
-            
-            WriteDescriptorSet write0;
-            write0.dstSet = ds;
-            write0.dstBinding = 0;
-            write0.descriptorType = DescriptorType::SampledImage;
-            write0.descriptorCount = 1;
-            write0.imageInfo = &envMapInfo;
-            
-            WriteDescriptorSet write1;
-            write1.dstSet = ds;
-            write1.dstBinding = 1;
-            write1.descriptorType = DescriptorType::StorageImage;
-            write1.descriptorCount = 1;
-            write1.imageInfo = &outputInfo;
-            
-            WriteDescriptorSet write2;
-            write2.dstSet = ds;
-            write2.dstBinding = 2;
-            write2.descriptorType = DescriptorType::CombinedImageSampler;
-            write2.descriptorCount = 1;
-            write2.imageInfo = &samplerInfo;
-            
-            WriteDescriptorSet write3;
-            write3.dstSet = ds;
-            write3.dstBinding = 3;
-            write3.descriptorType = DescriptorType::UniformBuffer;
-            write3.descriptorCount = 1;
-            write3.bufferInfo = &bufInfo;
-            
-            utl::vector<WriteDescriptorSet> writes;
-            writes.push_back(write0);
-            writes.push_back(write1);
-            writes.push_back(write2);
-            writes.push_back(write3);
-            device_->UpdateDescriptorSets(writes.size(), writes.data());
-            
-            cmd->BindDescriptorSets(PipelineBindPoint::Compute, prefilterPipelineLayout_, 0, 1, &ds, 0, nullptr);
-            
-            u32 groups = (mipSize + 7) / 8;
-            cmd->Dispatch(groups, groups, 1);
+        BufferDesc bufDesc{
+            sizeof(PrefilterParams),
+            BufferType::Constant,
+            GPUMemoryUsage::Dynamic,
+            GPUMemoryUsage::Dynamic,
+            static_cast<u32>(BufferUsageFlags::Uniform)
+        };
+        ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
+        tempBuffers.push_back(paramBuffer);
+
+        PrefilterParams params;
+        params.faceSize = mipSize;
+        params._pad0 = 0;
+        params.roughness = roughness;
+        // Approximation: srcResolution ideally = source env map's resolution.
+        // We don't have it here without a backend query. Using outputSize
+        // gives slightly wrong importance-sampling mip selection but the
+        // visual result is plausible. Fix later by passing srcResolution
+        // as an explicit parameter if a Tier 5.1 visual parity test demands.
+        params.srcResolution = (float)outputSize;
+
+        void* mapped = device_->MapBuffer(paramBuffer, 0, sizeof(PrefilterParams));
+        if (mapped) {
+            memcpy(mapped, &params, sizeof(PrefilterParams));
+            device_->UnmapBuffer(paramBuffer);
         }
+
+        DescriptorSetDesc dsDesc;
+        dsDesc.layout = prefilterDescLayout_;
+        DescriptorSetHandle ds = device_->CreateDescriptorSet(dsDesc);
+        tempSets.push_back(ds);
+
+        DescriptorImageInfo envMapInfo;
+        envMapInfo.imageView = envMap;
+        envMapInfo.imageLayout = ResourceState::ShaderResource;
+        envMapInfo.sampler = handles::INVALID_SAMPLER;
+
+        DescriptorImageInfo outputInfo;
+        outputInfo.imageView = mipArrayView;
+        outputInfo.imageLayout = ResourceState::UnorderedAccess;
+        outputInfo.sampler = handles::INVALID_SAMPLER;
+
+        DescriptorImageInfo samplerInfo;
+        samplerInfo.sampler = sampler;
+        samplerInfo.imageView = handles::INVALID_RESOURCE;
+        samplerInfo.imageLayout = ResourceState::Unknown;
+
+        DescriptorBufferInfo bufInfo;
+        bufInfo.buffer = paramBuffer;
+        bufInfo.offset = 0;
+        bufInfo.range = sizeof(PrefilterParams);
+
+        WriteDescriptorSet write0;
+        write0.dstSet = ds;
+        write0.dstBinding = 0;
+        write0.descriptorType = DescriptorType::SampledImage;
+        write0.descriptorCount = 1;
+        write0.imageInfo = &envMapInfo;
+
+        WriteDescriptorSet write1;
+        write1.dstSet = ds;
+        write1.dstBinding = 1;
+        write1.descriptorType = DescriptorType::StorageImage;
+        write1.descriptorCount = 1;
+        write1.imageInfo = &outputInfo;
+
+        // T4.6.5 part 37 (Bug B fix): sampler-only binding.
+        WriteDescriptorSet write2;
+        write2.dstSet = ds;
+        write2.dstBinding = 2;
+        write2.descriptorType = DescriptorType::Sampler;
+        write2.descriptorCount = 1;
+        write2.imageInfo = &samplerInfo;
+
+        WriteDescriptorSet write3;
+        write3.dstSet = ds;
+        write3.dstBinding = 3;
+        write3.descriptorType = DescriptorType::UniformBuffer;
+        write3.descriptorCount = 1;
+        write3.bufferInfo = &bufInfo;
+
+        utl::vector<WriteDescriptorSet> writes;
+        writes.push_back(write0);
+        writes.push_back(write1);
+        writes.push_back(write2);
+        writes.push_back(write3);
+        device_->UpdateDescriptorSets(writes.size(), writes.data());
+
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, prefilterPipelineLayout_, 0, 1, &ds, 0, nullptr);
+
+        // WGSL workgroup_size(16, 16, 1); z dimension is the face index (0..5).
+        u32 groups = (mipSize + 15) / 16;
+        cmd->Dispatch(groups, groups, 6);
     }
 
+    // T4.6.5 part 37: transition whole mip chain to ShaderResource for
+    // downstream sampling (DeferredLighting binds prefilterMap as SampledImage
+    // + mip-filtered sampler, requires SHADER_READ_ONLY_OPTIMAL).
+    ResourceBarrier toSRV{};
+    toSRV.resource = outputTexture;
+    toSRV.beforeState = ResourceState::UnorderedAccess;
+    toSRV.afterState = ResourceState::ShaderResource;
+    toSRV.subresource = 0xFFFFFFFF;
+    toSRV.queueFamily = 0xFFFFFFFF;
+    cmd->InsertBarrier(&toSRV, 1);
+
     cmd->End();
-    
+
     QueueSubmitInfo submitInfo;
     submitInfo.cmdBuffer = cmdHandle;
-    
+
     device_->Submit(submitInfo);
     device_->WaitIdle();
-    
+
     // Cleanup temp resources
     for (auto h : tempSets) device_->DestroyDescriptorSet(h);
     for (auto h : tempTextures) device_->DestroyTexture(h);
     for (auto h : tempBuffers) device_->DestroyBuffer(h);
     device_->DestroySampler(sampler);
     device_->DestroyCommandBuffer(cmdHandle);
-    
+
     return outputTexture;
 }
 
@@ -553,14 +654,18 @@ ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(u32 outputSize) {
 
     TextureDesc desc;
     desc.type = TextureType::Texture2D;
-    desc.format = DataFormat::RG16_Float;
+    // WGSL source declares texture_storage_2d<rgba16float, write>; SPIR-V
+    // OpTypeImage encodes Rgba16f and Vulkan requires the VkImage format to
+    // match. Metal's texture2d<float, access::write> is format-agnostic and
+    // accepts RG16F silently, which masked this mismatch pre-Vulkan.
+    desc.format = DataFormat::RGBA16_Float;
     desc.size = {outputSize, outputSize, 1};
     desc.arraySize = 1;
     desc.mipLevels = 1;
-    desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
     desc.memoryUsage = GPUMemoryUsage::Static;
     desc.name = "IBL_BRDF_LUT";
-    
+
     ResourceHandle outputTexture = device_->CreateTexture(desc);
     if (outputTexture == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
 
@@ -569,6 +674,18 @@ ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(u32 outputSize) {
     if (!cmd) return handles::INVALID_RESOURCE;
 
     cmd->Begin();
+
+    // Fresh texture is in Unknown/UNDEFINED layout — transition to UnorderedAccess
+    // (GENERAL on Vulkan) before the compute shader writes to it. Metal's encoder-
+    // level tracking makes this a no-op there; Vulkan requires an explicit barrier.
+    ResourceBarrier toUA{};
+    toUA.resource = outputTexture;
+    toUA.beforeState = ResourceState::Unknown;
+    toUA.afterState = ResourceState::UnorderedAccess;
+    toUA.subresource = 0xFFFFFFFF;
+    toUA.queueFamily = 0xFFFFFFFF;
+    cmd->InsertBarrier(&toUA, 1);
+
     cmd->BindComputePipeline(brdfPipeline_);
 
     DescriptorSetDesc dsDesc;
@@ -588,12 +705,22 @@ ResourceHandle IBLPrecomputer::ComputeBRDFIntegrationMap(u32 outputSize) {
     write0.imageInfo = &outputInfo;
     
     device_->UpdateDescriptorSets(1, &write0);
-    
+
     cmd->BindDescriptorSets(PipelineBindPoint::Compute, brdfPipelineLayout_, 0, 1, &ds, 0, nullptr);
-    
+
     u32 groups = (outputSize + 7) / 8;
     cmd->Dispatch(groups, groups, 1);
-    
+
+    // T4.6.5 part 37: transition to ShaderResource for downstream sampling
+    // (DeferredLighting binds brdfLUT as SampledImage).
+    ResourceBarrier toSRV{};
+    toSRV.resource = outputTexture;
+    toSRV.beforeState = ResourceState::UnorderedAccess;
+    toSRV.afterState = ResourceState::ShaderResource;
+    toSRV.subresource = 0xFFFFFFFF;
+    toSRV.queueFamily = 0xFFFFFFFF;
+    cmd->InsertBarrier(&toSRV, 1);
+
     cmd->End();
     
     QueueSubmitInfo submitInfo;

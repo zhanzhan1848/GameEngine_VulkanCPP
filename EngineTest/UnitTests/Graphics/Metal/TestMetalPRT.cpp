@@ -219,7 +219,7 @@ namespace
             {{ 1,  1, 0}, {0, 0, 1}},
         };
         
-        BufferDesc vbDesc;
+        BufferDesc vbDesc{};
         vbDesc.size = sizeof(vertices);
         vbDesc.type = BufferType::Vertex;
         vbDesc.usage = GPUMemoryUsage::Static;
@@ -251,7 +251,7 @@ namespace
         for(int i=0; i<9; ++i) uniforms.envSH[i] = {0,0,0};
         uniforms.envSH[0] = {intensity * c0, intensity * c0, intensity * c0};
         
-        BufferDesc ubDesc;
+        BufferDesc ubDesc{};
         ubDesc.size = sizeof(Uniforms);
         ubDesc.type = BufferType::Constant;
         ubDesc.usage = GPUMemoryUsage::Dynamic;
@@ -316,7 +316,7 @@ namespace
         attachment.texture = texHandle;
         attachment.loadOp = LoadAction::Clear;
         attachment.storeOp = StoreAction::Store;
-        attachment.clearValue = ClearValue(0, 0, 0, 1);
+        attachment.clearValue = ClearValue{primal::math::v4{0, 0, 0, 1}};
         passDesc.colorAttachments.push_back(attachment);
         
         cmdBuffer->BeginRenderPass(passDesc);
@@ -511,7 +511,7 @@ namespace
 
         // 6. Create Buffers
         // Vertex Buffer
-        BufferDesc vbDesc;
+        BufferDesc vbDesc{};
         vbDesc.size = vertices.size() * sizeof(Vertex);
         vbDesc.type = BufferType::Vertex;
         vbDesc.usage = GPUMemoryUsage::Static;
@@ -525,7 +525,7 @@ namespace
         }
 
         // Index Buffer
-        BufferDesc ibDesc;
+        BufferDesc ibDesc{};
         ibDesc.size = indices.size() * sizeof(uint32_t);
         ibDesc.type = BufferType::Index;
         ibDesc.usage = GPUMemoryUsage::Static;
@@ -539,7 +539,7 @@ namespace
         }
 
         // Transfer Buffer
-        BufferDesc tbDesc;
+        BufferDesc tbDesc{};
         tbDesc.size = transferData.size() * sizeof(TransferSH);
         tbDesc.type = BufferType::Vertex;
         tbDesc.usage = GPUMemoryUsage::Static;
@@ -563,7 +563,7 @@ namespace
         for(int i=0; i<9; ++i) uniforms.envSH[i] = {0,0,0};
         uniforms.envSH[0] = {intensity * c0, intensity * c0, intensity * c0};
 
-        BufferDesc ubDesc;
+        BufferDesc ubDesc{};
         ubDesc.size = sizeof(Uniforms);
         ubDesc.type = BufferType::Constant;
         ubDesc.usage = GPUMemoryUsage::Dynamic;
@@ -620,7 +620,7 @@ namespace
         attachment.texture = texHandle;
         attachment.loadOp = LoadAction::Clear;
         attachment.storeOp = StoreAction::Store;
-        attachment.clearValue = ClearValue(0, 0, 0, 1);
+        attachment.clearValue = ClearValue{primal::math::v4{0, 0, 0, 1}};
         passDesc.colorAttachments.push_back(attachment);
         
         cmdBuffer->BeginRenderPass(passDesc);

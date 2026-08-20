@@ -1,0 +1,161 @@
+#version 450 core
+// Vulkan Lumen Surface Cache Indirect Resolve — GLSL port of SurfaceCacheIndirectResolve.metal.
+// Entry point: surface_cache_indirect_resolve  (glslangValidator -e surface_cache_indirect_resolve)
+//
+// Gather ray hits per probe, sample prev_lighting atlas, splat indirect into tile.
+// ThreadGroupSize: (8, 8, 1)
+//
+// Flat descriptor bindings:
+//   binding 0 = texture2D             prev_lighting    (samplerless, texelFetch nearest)
+//   binding 1 = StorageImage(rgba8)   albedo_atlas     (readonly, imageLoad)
+//   binding 2 = texture2D             sky_cubemap      (samplerless, declared/unused dummy)
+//   binding 3 = StorageImage(rgba16f) indirect_out     (writeonly, imageStore)
+//   binding 4 = UniformBuffer         GlobalShaderData (480B, inline)
+//   binding 5 = UniformBuffer         IndirectResolveParams
+//   binding 6 = StorageBuffer         lookups[]        (SurfaceCacheCardLookup, std430)
+//   binding 7 = StorageBuffer         cards[]          (SurfaceCacheCard, std430)
+//   binding 8 = StorageBuffer         ray_hits[]       (ProbeRayHit, readonly, std430)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0) uniform texture2D prev_lighting;
+layout(set = 0, binding = 1, rgba8) readonly uniform image2D albedo_atlas;
+layout(set = 0, binding = 2) uniform texture2D sky_cubemap;   // unused/dummy in Metal
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D indirect_out;
+
+// GlobalShaderData UBO — 480 bytes, mirrors C++ RHIShaderCommon.h.
+// Declared inline (not via #include RHIShaderTypes.glsl) to avoid the awk
+// inliner's source-dir-relative path resolution limitation with "../" prefixes.
+layout(set = 0, binding = 4, std140) uniform GDBlock {
+    mat4  view;
+    mat4  projection;
+    mat4  invProjection;
+    mat4  viewProjection;
+    mat4  previousViewProjection;
+    mat4  invViewProjection;
+    vec4  cameraPositionAndViewWidth;
+    vec4  cameraDirectionAndViewHeight;
+    uint  numDirectionalLights;
+    uint  numPunctualLights;
+    float deltaTime;
+    float frameCount;
+    uint  renderMode;
+    uint  enableIBL;
+    uint  enableDDGI;
+    uint  _pad_before_jitter;
+    vec2  jitterOffset;
+    float debug_directLightBoost;
+    float debug_iblStrength;
+    float debug_ddgiIndirectWeight;
+    float debug_exposure;
+    float _pad_after_debug_0;
+    float _pad_after_debug_1;
+} gd;
+
+struct IndirectResolveParams {
+    SurfaceCacheParams sc_params;
+    uint tile_size;
+    uint rays_per_probe;
+    float temporal_weight;
+    uint frame_index;
+    uint lookup_count;
+};
+
+layout(set = 0, binding = 5, std140) uniform IndirectResolveParamsBlock {
+    IndirectResolveParams params;
+} irp;
+
+layout(set = 0, binding = 6, std430) readonly buffer LookupsBlock {
+    SurfaceCacheCardLookup data[];
+} lookups;
+
+layout(set = 0, binding = 7, std430) readonly buffer CardsBlock {
+    SurfaceCacheCard data[];
+} cards;
+
+// ProbeRayHit — two vec4s (32 bytes) per hit (matches IndirectTrace).
+//   hit_position_dist.xyz = position, .w = hit_distance
+//   hit_type_pad.x = hit_type (0=near, 1=far, 2=sky)
+struct ProbeRayHit {
+    vec4 hit_position_dist;
+    uvec4 hit_type_pad;
+};
+
+layout(set = 0, binding = 8, std430) readonly buffer RayHitsBlock {
+    ProbeRayHit data[];
+} ray_hits;
+
+// --------------------------------------------------------------------------------
+void surface_cache_indirect_resolve()
+{
+    uint probe_x = gl_GlobalInvocationID.x;
+    uint probe_y = gl_GlobalInvocationID.y;
+    uint tiles_x = irp.params.sc_params.atlas_size / irp.params.tile_size;
+    uint probe_idx = probe_y * tiles_x + probe_x;
+
+    uint rays = irp.params.rays_per_probe;
+    uint tile_size = irp.params.tile_size;
+    uvec2 tile_origin = uvec2(probe_x * tile_size, probe_y * tile_size);
+
+    if (tile_origin.x >= irp.params.sc_params.atlas_size || tile_origin.y >= irp.params.sc_params.atlas_size) return;
+
+    vec3 indirect = vec3(0.0);
+    float total_weight = 0.0;
+
+    for (uint r = 0u; r < rays; ++r) {
+        uint hit_idx = probe_idx * rays + r;
+        vec3 hit_pos = ray_hits.data[hit_idx].hit_position_dist.xyz;
+        uint hit_type = ray_hits.data[hit_idx].hit_type_pad.x;
+        vec3 radiance = vec3(0.0);
+
+        if (hit_type == 0u) {
+            // Near hit: lookup atlas UV through card system
+            vec2 atlas_uv;
+            bool found = false;
+            for (uint li = 0u; li < irp.params.lookup_count && !found; ++li) {
+                vec3 mn = lookups.data[li].aabb_min.xyz;
+                vec3 mx = lookups.data[li].aabb_max.xyz;
+                if (hit_pos.x < mn.x || hit_pos.x > mx.x ||
+                    hit_pos.y < mn.y || hit_pos.y > mx.y ||
+                    hit_pos.z < mn.z || hit_pos.z > mx.z) continue;
+                for (uint ci = lookups.data[li].card_start;
+                     ci < lookups.data[li].card_start + lookups.data[li].card_count && !found; ++ci) {
+                    found = worldToCardUV(hit_pos, cards.data[ci], atlas_uv);
+                }
+            }
+            if (found) {
+                // Nearest sample prev_lighting at integer atlas coords
+                radiance = texelFetch(prev_lighting, ivec2(atlas_uv), 0).rgb;
+            } else {
+                radiance = vec3(0.02, 0.02, 0.03);
+            }
+        } else if (hit_type == 1u) {
+            // Far hit: DDGI placeholder (Phase A)
+            radiance = vec3(0.02, 0.02, 0.03);
+        } else {
+            // Sky
+            radiance = vec3(0.05, 0.05, 0.08);
+        }
+
+        indirect += radiance;
+        total_weight += 1.0;
+    }
+
+    if (total_weight > 0.0) indirect /= total_weight;
+
+    for (uint dy = 0u; dy < tile_size; ++dy) {
+        for (uint dx = 0u; dx < tile_size; ++dx) {
+            uvec2 texel = tile_origin + uvec2(dx, dy);
+            if (texel.x >= irp.params.sc_params.atlas_size || texel.y >= irp.params.sc_params.atlas_size) continue;
+            vec3 albedo = imageLoad(albedo_atlas, ivec2(texel)).rgb;
+            imageStore(indirect_out, ivec2(texel), vec4(indirect * albedo, 1.0));
+        }
+    }
+}

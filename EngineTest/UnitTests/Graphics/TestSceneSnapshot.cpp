@@ -117,6 +117,10 @@ namespace {
             static rhi::RHIGarbageCollector gc;
             return gc;
         }
+
+        // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+        void SetBufferDirtySize(rhi::ResourceHandle, u64) override {}
+        rhi::RHIPlatform GetPlatform() const override { return rhi::RHIPlatform::Unknown; }
     };
     
     MockRHIDevice g_mockDevice;

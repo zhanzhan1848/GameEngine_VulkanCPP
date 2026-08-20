@@ -11,16 +11,16 @@ namespace primal::particle {
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
-namespace std {
-    template<>
-    struct hash<primal::particle::particle_id> {
-        size_t operator()(primal::particle::particle_id id) const noexcept {
-            return static_cast<size_t>(static_cast<primal::id::id_type>(id));
-        }
-    };
-}
-
 namespace primal::particle {
+
+// particle_id is an alias of id_type (u32), so std::hash<particle_id> would
+// respecialize std::hash<unsigned int>, which libc++ (C++20) rejects after
+// implicit instantiation. Pass this hasher explicitly instead.
+struct particle_id_hash {
+    size_t operator()(particle_id id) const noexcept {
+        return static_cast<size_t>(static_cast<id::id_type>(id));
+    }
+};
 
 struct init_info {
     particles::emitter_config config;

@@ -6,7 +6,7 @@ project(${PROJECT_NAME})
 
 
 # 设置C++标准
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 if(APPLE AND NOT EMSCRIPTEN)
@@ -36,8 +36,9 @@ if(WIN32)
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputWin32.cpp"
     )
 elseif(APPLE)
-    file(GLOB_RECURSE PLATFORM_SOURCES 
+    file(GLOB_RECURSE PLATFORM_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Platform/PlatformMac.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Platform/*.mm"
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Input/InputMac.mm"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.h"
@@ -157,28 +158,54 @@ file(GLOB_RECURSE GRAPHICS_UTILS
 # 检查是否启用WebGPU支持
 option(ENABLE_WEBGPU "Enable WebGPU support via Dawn library" OFF)
 
+# 检查是否启用 Vulkan RHI 后端 (Win32 + Linux + macOS via MoltenVK)
+option(ENABLE_VULKAN "Enable Vulkan RHI backend (Win32 + Linux + macOS via MoltenVK)" OFF)
+
 # 检查是否禁用粒子系统
 option(DISABLE_PARTICLE_SYSTEM "Disable particle system compilation" OFF)
 
 if(WIN32)
-    file(GLOB_RECURSE GRAPHICS_SOURCES 
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
-    )
+    if(ENABLE_VULKAN)
+        # ENABLE_VULKAN=ON 时只编下方自包含的新 Vulkan RHI 后端（RHI/Platforms/Vulkan）。
+        # legacy Direct3D12 / Graphics/Vulkan 基于旧 XMFLOAT 数学层（XMLoad/XMStore 直取
+        # math 类型地址），与新的带运算符数学类型不兼容；macOS 的 ENABLE_VULKAN 构建
+        # 同样不包含这两个目录。
+        set(GRAPHICS_SOURCES "")
+    else()
+        file(GLOB_RECURSE GRAPHICS_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Direct3D12/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
+        )
+    endif()
 elseif(APPLE)
-    file(GLOB_RECURSE GRAPHICS_SOURCES 
+    file(GLOB_RECURSE GRAPHICS_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Metal/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Metal/*.h"
     )
 elseif(LINUX)
-    file(GLOB_RECURSE GRAPHICS_SOURCES 
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
+    if(ENABLE_VULKAN)
+        set(GRAPHICS_SOURCES "")
+    else()
+        file(GLOB_RECURSE GRAPHICS_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Vulkan/*.cpp"
+        )
+    endif()
+endif()
+
+# Vulkan RHI 后端 (Engine/Graphics/RHI/Platforms/Vulkan/*) — 与平台独立的 legacy Graphics/Vulkan/* 解耦。
+# ENABLE_VULKAN=ON 时编入；legacy Graphics/Vulkan/* 在 Win32/Linux 仍按上面的 glob 编入（不同 namespace、不同抽象层）。
+if(ENABLE_VULKAN)
+    file(GLOB_RECURSE VULKAN_RHI_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Vulkan/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/Vulkan/*.cpp"
     )
+    list(APPEND GRAPHICS_SOURCES ${VULKAN_RHI_SOURCES})
+    message(STATUS "Vulkan RHI backend enabled (Engine/Graphics/RHI/Platforms/Vulkan)")
 endif()
 
 # 添加WebGPU平台支持（如果启用）
@@ -505,11 +532,29 @@ elseif(UNIX AND NOT APPLE)
     )
 endif()
 
-# Vulkan支持
-# find_package(Vulkan REQUIRED)
-# target_link_libraries(${PROJECT_NAME} PRIVATE
-#     Vulkan::Vulkan
-# )
+# Vulkan RHI 后端依赖：Vulkan SDK + VulkanMemoryAllocator（单头）
+if(ENABLE_VULKAN)
+    find_package(Vulkan REQUIRED)
+    # /usr/local/include 在 macOS 上是 CMake 的 implicit include directory,会被自动剥离;
+    # 显式从 implicit 列表移除,确保 target_include_directories 能把它传给编译器。
+    list(REMOVE_ITEM CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES ${Vulkan_INCLUDE_DIR})
+    list(REMOVE_ITEM CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES ${Vulkan_INCLUDE_DIR})
+    target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Vulkan)
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${Vulkan_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/VulkanMemoryAllocator/include
+    )
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        ENABLE_VULKAN=1
+    )
+    if(APPLE)
+        # MoltenVK needs Metal/QuartzCore/IOKit frameworks transitively.
+        target_link_options(${PROJECT_NAME} PRIVATE
+            -framework Metal -framework QuartzCore -framework IOKit
+        )
+    endif()
+    message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIR}")
+endif()
 
 # 添加平台相关库
 if(UNIX AND NOT APPLE)

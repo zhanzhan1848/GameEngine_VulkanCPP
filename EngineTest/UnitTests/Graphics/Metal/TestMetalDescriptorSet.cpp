@@ -26,7 +26,7 @@ TestResult TestDescriptorSetUpdate() {
     }
 
     // 1. Create Buffer
-    BufferDesc bufferDesc;
+    BufferDesc bufferDesc{};
     bufferDesc.size = 256;
     bufferDesc.type = BufferType::Constant;
     bufferDesc.usage = GPUMemoryUsage::Staging;

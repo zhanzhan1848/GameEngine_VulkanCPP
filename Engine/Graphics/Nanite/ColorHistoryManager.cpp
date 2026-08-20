@@ -191,23 +191,14 @@ bool ColorHistoryManager::CopyColorTexture(rhi::ResourceHandle source,
         return false;
     }
 
-    // Insert barrier: source -> CopySource, destination -> CopyDest
-    // CRITICAL: Source texture was used as RenderTarget in the previous render pass,
-    // so beforeState must be RenderTarget (not ShaderResource).
-    rhi::ResourceBarrier barriers[2]{};
-    barriers[0].resource = source;
-    barriers[0].beforeState = rhi::ResourceState::RenderTarget;
-    barriers[0].afterState = rhi::ResourceState::CopySource;
-    barriers[0].subresource = 0xFFFFFFFF;
-    barriers[0].queueFamily = 0xFFFFFFFF;
-
-    barriers[1].resource = destination;
-    barriers[1].beforeState = rhi::ResourceState::Unknown;
-    barriers[1].afterState = rhi::ResourceState::CopyDest;
-    barriers[1].subresource = 0xFFFFFFFF;
-    barriers[1].queueFamily = 0xFFFFFFFF;
-
-    cmd_buffer->InsertBarrier(barriers, 2);
+    // T4.6.5 part 36: removed the explicit InsertBarrier here. The previous
+    // code hardcoded `beforeState = RenderTarget` for the source, but the
+    // texture's actual layout at this point is SHADER_READ_ONLY_OPTIMAL
+    // (DeferredLighting output is read by FinalBlit as a SampledImage).
+    // The mismatch fired VUID-VkImageMemoryBarrier-oldLayout-01197.
+    // BlitTexture already calls TransitionImageLayout on both src and dst,
+    // querying tex->GetCurrentLayout() for oldLayout — so the barriers
+    // here were both wrong AND redundant.
 
     // Blit copy from source to destination
     rhi::TextureBlitRegion region{};

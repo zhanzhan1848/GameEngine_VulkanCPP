@@ -7,11 +7,11 @@ namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
 
 namespace nanite { class GPUDrivenDrawPipeline; }
-class SSAOPass;
+namespace lumen { class LumenSSAOPass; }
 
 struct DeferredLightingInputs {
     nanite::GPUDrivenDrawPipeline* gpu_draw_pipeline = nullptr;
-    SSAOPass* ssao_pass = nullptr;
+    lumen::LumenSSAOPass* ssao_pass = nullptr;
 
     math::m4x4 view_matrix{};
     math::m4x4 proj_matrix{};
@@ -27,6 +27,15 @@ struct DeferredLightingInputs {
     // From ShadowMapModule outputs
     rendergraph::RGResourceHandle shadow_visibility_rg;
     rhi::ResourceHandle shadow_visibility_tex;
+
+    // VSM path (ShadowMapModule vsm_enabled): blurred RG32 moments per
+    // cascade — shader samples + Chebyshev upper bound instead of the
+    // pre-filtered R8 visibility. shadow_moments_tex[] must be valid when
+    // vsm_enabled is set, otherwise binding 6 (R8) is used.
+    bool vsm_enabled = false;
+    rendergraph::RGResourceHandle shadow_moments_rg[2];
+    rhi::ResourceHandle shadow_moments_tex[2]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
 
     // GBuffer RG handles for render graph dependency tracking
     rendergraph::RGResourceHandle gbuffer_albedo_rg;
@@ -50,6 +59,13 @@ public:
     DeferredLightingOutputs AddPasses(rendergraph::RenderGraph& graph, const DeferredLightingInputs& inputs);
 
     rhi::ResourceHandle GetOutputTexture(u32 buffer_index) const;
+
+    // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). Call after
+    // Initialize. Pass INVALID_RESOURCE to disable IBL (shader falls back to
+    // flat ambient). irradiance/prefilter are cube maps; brdfLUT is 2D.
+    void SetIBLResources(rhi::ResourceHandle irradiance,
+                         rhi::ResourceHandle prefilter,
+                         rhi::ResourceHandle brdfLUT);
 
     rhi::ResourceHandle GetViewCB(u32 idx) const { return idx < 3 ? view_cb_[idx] : rhi::handles::INVALID_RESOURCE; }
     rhi::ResourceHandle GetSceneCB(u32 idx) const { return idx < 3 ? scene_cb_[idx] : rhi::handles::INVALID_RESOURCE; }
@@ -88,6 +104,18 @@ private:
         rhi::handles::INVALID_RESOURCE
     };
     rhi::SamplerHandle sampler_{rhi::handles::INVALID_SAMPLER};
+
+    // T4.6.5 part 24.4 (B2 fix): 1x1 fallback texture for invalid bindings
+    // (SSAO/shadow_visibility when those features aren't enabled). Vulkan
+    // validation rejects VK_NULL_HANDLE imageView without nullDescriptor
+    // feature — use a real texture as a safe fallback.
+    rhi::ResourceHandle fallback_tex_{rhi::handles::INVALID_RESOURCE};
+
+    // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity).
+    // Set via SetIBLResources before first AddPasses call.
+    rhi::ResourceHandle ibl_irradiance_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ibl_prefilter_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ibl_brdf_lut_{rhi::handles::INVALID_RESOURCE};
 };
 
 } // namespace primal::graphics

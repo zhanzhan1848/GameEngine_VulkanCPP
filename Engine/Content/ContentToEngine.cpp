@@ -15,6 +15,10 @@
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
 #endif
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#endif
 
 // Metal Headers for parsing and upload
 #ifdef __APPLE__
@@ -746,7 +750,7 @@ namespace primal::content
 
 			// Try RHI first
 			if (graphics::rhi::g_deviceManager.GetDeviceCount() > 0) {
-				auto* device = graphics::rhi::g_deviceManager.GetDevice(1);
+				auto* device = graphics::rhi::g_deviceManager.GetActiveDevice();
 				if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Metal) {
 #ifdef __APPLE__
 					utl::blob_stream_reader blob(raw_ptr);					const u32 width{ blob.read<u32>() };
@@ -944,6 +948,128 @@ namespace primal::content
 					return id::invalid_id;
 #endif
 				}
+				else if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Vulkan) {
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+					// T4.6.5 part 27: real pixel upload via staging buffer +
+					// CopyBufferToTexture (mirrors Metal/Dawn pattern through
+					// the RHI abstraction). Same blob format as Metal/Dawn:
+					// header (width,height,array_size,flags,mip_levels,format)
+					// then per (slice, mip): row_pitch(u32) + slice_pitch(u32) + pixels.
+					utl::blob_stream_reader blob((const u8*)data);
+					const u32 width{ blob.read<u32>() };
+					const u32 height{ blob.read<u32>() };
+					const u32 array_size{ blob.read<u32>() };
+					[[maybe_unused]] const u32 flags{ blob.read<u32>() };
+					const u32 mip_levels{ blob.read<u32>() };
+					const u32 format_u32{ blob.read<u32>() };
+
+					graphics::rhi::TextureDesc desc{};
+					desc.size = { width, height, 1 };
+					desc.arraySize = array_size;
+					desc.mipLevels = mip_levels;
+					desc.type = (array_size > 1) ? graphics::rhi::TextureType::Texture2DArray : graphics::rhi::TextureType::Texture2D;
+
+					if (format_u32 == 28) desc.format = graphics::rhi::DataFormat::RGBA8_UNorm;
+					else if (format_u32 == 29) desc.format = graphics::rhi::DataFormat::RGBA8_sRGB;
+					else if (format_u32 == 71) desc.format = graphics::rhi::DataFormat::BC1_UNorm;
+					else if (format_u32 == 72) desc.format = graphics::rhi::DataFormat::BC1_sRGB;
+					else if (format_u32 == 98) desc.format = graphics::rhi::DataFormat::BC7_UNorm;
+					else if (format_u32 == 99) desc.format = graphics::rhi::DataFormat::BC7_sRGB;
+					else desc.format = graphics::rhi::DataFormat::RGBA8_UNorm;
+
+					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest | graphics::rhi::TextureUsage::CopySource;
+
+					auto handle = device->CreateTexture(desc);
+					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
+						std::cerr << "[CTE/Vulkan] Failed to create texture." << std::endl;
+						return id::invalid_id;
+					}
+
+					// Walk blob once: capture per-region metadata + accumulate pixel
+					// bytes into a contiguous CPU buffer. Each region is one
+					// (slice, mip) layer.
+					struct RegionInfo {
+						u32 slice;
+						u32 mip;
+						u64 bufferOffset;
+					};
+					std::vector<RegionInfo> regions;
+					std::vector<u8> pixels;
+					regions.reserve((size_t)array_size * mip_levels);
+					for (u32 i = 0; i < array_size; ++i) {
+						for (u32 j = 0; j < mip_levels; ++j) {
+							const u32 row_pitch = blob.read<u32>();
+							const u32 slice_pitch = blob.read<u32>();
+							RegionInfo r;
+							r.slice = i;
+							r.mip = j;
+							r.bufferOffset = pixels.size();
+							regions.push_back(r);
+							const u8* p = blob.position();
+							pixels.insert(pixels.end(), p, p + slice_pitch);
+							blob.skip(slice_pitch);
+							(void)row_pitch;  // tightly packed in staging; Vulkan computes from imageExtent
+						}
+					}
+
+					// Single staging buffer + per-region CopyBufferToTexture via
+					// one cmd buffer submit. Pattern from TestVulkanStandardPipelineSmoke.cpp
+					// CreateTextureFromData helper.
+					if (!pixels.empty()) {
+						using namespace graphics::rhi;
+						BufferDesc sdesc{};
+						sdesc.size = pixels.size();
+						sdesc.type = BufferType::Raw;
+						sdesc.memoryUsage = GPUMemoryUsage::Dynamic;
+						sdesc.name = "CTE_TexStaging";
+						ResourceHandle staging = device->CreateBuffer(sdesc);
+						if (staging == handles::INVALID_RESOURCE) {
+							std::cerr << "[CTE/Vulkan] Failed to create staging buffer" << std::endl;
+						} else if (!device->UpdateBufferData(staging, pixels.data(), pixels.size(), 0)) {
+							std::cerr << "[CTE/Vulkan] UpdateBufferData failed for texture staging" << std::endl;
+							device->DestroyBuffer(staging);
+						} else {
+							CommandBufferHandle cmd = device->CreateCommandBuffer(CommandQueueType::Graphics);
+							if (cmd != handles::INVALID_COMMAND_BUFFER) {
+								auto* vk = static_cast<VulkanDevice*>(device);
+								VulkanCommandBuffer* vcmd = vk->GetCommandBuffer(cmd);
+								if (vcmd && vcmd->Reset() && vcmd->Begin()) {
+									std::vector<BufferTextureCopyRegion> copyRegions;
+									copyRegions.reserve(regions.size());
+									for (const auto& r : regions) {
+										u32 mipW = std::max(1u, width >> r.mip);
+										u32 mipH = std::max(1u, height >> r.mip);
+										BufferTextureCopyRegion cr{};
+										cr.bufferOffset = r.bufferOffset;
+										cr.bufferRowLength = 0;  // tightly packed
+										cr.bufferImageHeight = 0;
+										cr.imageSubresource = { r.slice, r.mip, 1 };  // { baseArrayLayer, mipLevel, layerCount }
+										cr.imageOffset = { 0, 0, 0 };
+										cr.imageExtent = { mipW, mipH, 1 };
+										copyRegions.push_back(cr);
+									}
+									vcmd->CopyBufferToTexture(staging, handle, copyRegions.data(),
+									                          (u32)copyRegions.size());
+									vcmd->End();
+									vcmd->Submit(0);
+									vcmd->WaitForCompletion();
+								}
+								device->DestroyCommandBuffer(cmd);
+							}
+							device->DestroyBuffer(staging);
+						}
+					}
+
+					id::id_type new_id = rhi_texture_id_counter++;
+					{
+						std::lock_guard lock(rhi_texture_mutex());
+						rhi_texture_map()[new_id] = handle;
+					}
+					return new_id;
+#else
+					return id::invalid_id;
+#endif
+				}
 			}
 
 
@@ -1029,7 +1155,7 @@ namespace primal::content
             if (!get_rhi_mesh_asset(id, asset)) return nullptr;
         }
 
-        auto* device = graphics::rhi::g_deviceManager.GetDevice(1); // Use device 1 as per convention in this file
+        auto* device = graphics::rhi::g_deviceManager.GetActiveDevice();
         if (!device) return nullptr;
 
         auto mesh = std::make_unique<graphics::rhi::RHIGpuMesh>();

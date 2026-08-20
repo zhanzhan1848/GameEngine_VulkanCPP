@@ -34,23 +34,45 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
 
     if (shader == handles::INVALID_SHADER) return false;
 
-    // 13 bindings: 4 textures + 9 buffers
-    DescriptorSetLayoutBinding bindings[] = {
-        {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
-        {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal
-        {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // output
-        {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // history
-        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // invViewProj
-        {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // probeOriginSpacing
-        {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // probeCounts
-        {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // staticSkySH
-        {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // staticSkyFactor
-        {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // staticProbeParams
-        {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // confidenceBuffer
-        {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradianceBuffer
-        {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // depthBuffer
-    };
-    set_layout_ = device->CreateDescriptorSetLayout({13, bindings});
+    // 13 bindings: 4 textures + 9 buffers.
+    // Metal: overlapping texture/buffer namespaces (idiomatic Metal).
+    // Vulkan: flat 0..12 (depth as SampledDepthImage) — matches GLSL shader.
+    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    if (isVk) {
+        DescriptorSetLayoutBinding vkBindings[] = {
+            {0,  DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // depth
+            {1,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // normal
+            {2,  DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // output
+            {3,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // history
+            {4,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // invViewProj
+            {5,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeOriginSpacing
+            {6,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeCounts
+            {7,  DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // staticSkySH
+            {8,  DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // staticSkyFactor
+            {9,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // staticProbeParams
+            {10, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // confidenceBuffer
+            {11, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // irradianceBuffer
+            {12, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // depthBuffer
+        };
+        set_layout_ = device->CreateDescriptorSetLayout({13, vkBindings});
+    } else {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // output
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // history
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // invViewProj
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // probeOriginSpacing
+            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // probeCounts
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // staticSkySH
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // staticSkyFactor
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // staticProbeParams
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // confidenceBuffer
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradianceBuffer
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // depthBuffer
+        };
+        set_layout_ = device->CreateDescriptorSetLayout({13, bindings});
+    }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
     ComputePipelineDesc pd{};
@@ -69,25 +91,35 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     texDesc.size = {halfW, halfH, 1};
     texDesc.format = DataFormat::RGBA16_Float;
     texDesc.type = TextureType::Texture2D;
-    texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+    texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
     gi_halfres_texture_ = device->CreateTexture(texDesc);
+    texDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
     gi_halfres_history_ = device->CreateTexture(texDesc);
 
-    // Constant buffers
+    // Constant buffers — need UniformBuffer bind flag for UBO descriptors.
     BufferDesc cbDesc{};
     cbDesc.size = 256;
+    cbDesc.type = BufferType::Constant;
     cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    cbDesc.usage = GPUMemoryUsage::Dynamic;
+    cbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Uniform);
     probe_cb_ = device->CreateBuffer(cbDesc);
 
     BufferDesc spCbDesc{};
     spCbDesc.size = 512;
+    spCbDesc.type = BufferType::Constant;
     spCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    spCbDesc.usage = GPUMemoryUsage::Dynamic;
+    spCbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Uniform);
     static_probe_cb_ = device->CreateBuffer(spCbDesc);
 
-    // Dummy buffer for missing static probe bindings
+    // Dummy buffer for missing static probe bindings — used as SSBO.
     BufferDesc dummyDesc{};
     dummyDesc.size = 64;
+    dummyDesc.type = BufferType::Structured;
     dummyDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    dummyDesc.usage = GPUMemoryUsage::Dynamic;
+    dummyDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
     dummy_buffer_ = device->CreateBuffer(dummyDesc);
 
     return true;
@@ -117,6 +149,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
         rendergraph::RGPassCategory::Lighting,
         [outRG = outputs.gi_output_rg, depthRG = inputs.gbuffer_depth_rg, normalRG = inputs.gbuffer_normal_rg]
         (PassData& data, rendergraph::RenderGraphBuilder& builder) {
+            builder.SideEffect(); // prevent RG culling — outputs go to imported textures
             if (depthRG.IsValid()) builder.Read(depthRG, ResourceState::ShaderResource);
             if (normalRG.IsValid()) builder.Read(normalRG, ResourceState::ShaderResource);
             data.output = builder.Write(outRG, ResourceState::UnorderedAccess);
@@ -151,6 +184,16 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     }
                     device_->UnmapBuffer(static_probe_cb_);
                 }
+            }
+
+            // Ensure history texture is in SRV layout (binding 3 placeholder).
+            {
+                ResourceBarrier histBar{};
+                histBar.resource = gi_halfres_history_;
+                histBar.beforeState = ResourceState::ShaderResource;
+                histBar.afterState = ResourceState::ShaderResource;
+                histBar.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&histBar, 1);
             }
 
             // Barrier DDGI buffers from UAV to ShaderResource
@@ -191,13 +234,14 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // Texture bindings
             WriteDescriptorSet texWrites[4];
             DescriptorImageInfo imgInfos[4];
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
             {
-                // texture(0): depth
+                // texture(0): depth (SampledDepthImage on Vulkan/Dawn, SampledImage on Metal)
                 texWrites[0].dstSet = descriptor_set_;
                 texWrites[0].dstBinding = 0;
                 texWrites[0].dstArrayElement = 0;
                 texWrites[0].descriptorCount = 1;
-                texWrites[0].descriptorType = DescriptorType::SampledImage;
+                texWrites[0].descriptorType = isVk ? DescriptorType::SampledDepthImage : DescriptorType::SampledImage;
                 texWrites[0].imageInfo = &imgInfos[0];
                 imgInfos[0].sampler = handles::INVALID_SAMPLER;
                 imgInfos[0].imageView = inputs.gbuffer_depth;
@@ -230,7 +274,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 texWrites[3].descriptorType = DescriptorType::SampledImage;
                 texWrites[3].imageInfo = &imgInfos[3];
                 imgInfos[3].sampler = handles::INVALID_SAMPLER;
-                imgInfos[3].imageView = gi_halfres_history_;
+                imgInfos[3].imageView = gi_halfres_history_; // binding 3 (unused, but must be valid)
                 imgInfos[3].imageLayout = ResourceState::ShaderResource;
                 device_->UpdateDescriptorSets(4, texWrites);
             }
@@ -247,25 +291,28 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     bufWrites[i].imageInfo = nullptr;
                     bufWrites[i].bufferInfo = &bufInfos[i];
                 }
-                bufWrites[0].dstBinding = 0;
+                // Vulkan: flat bindings 4..12 (texture namespace 0..3 already used).
+                // Metal: overlapping buffer namespace 0..8.
+                const u32 bufBase = isVk ? 4u : 0u;
+                bufWrites[0].dstBinding = bufBase + 0;
                 bufInfos[0].buffer = probe_cb_; bufInfos[0].offset = 0; bufInfos[0].range = 64;
-                bufWrites[1].dstBinding = 1;
+                bufWrites[1].dstBinding = bufBase + 1;
                 bufInfos[1].buffer = probe_cb_; bufInfos[1].offset = 64; bufInfos[1].range = 16;
-                bufWrites[2].dstBinding = 2;
+                bufWrites[2].dstBinding = bufBase + 2;
                 bufInfos[2].buffer = probe_cb_; bufInfos[2].offset = 80; bufInfos[2].range = 16;
-                bufWrites[3].dstBinding = 3; bufWrites[3].descriptorType = DescriptorType::StorageBuffer;
+                bufWrites[3].dstBinding = bufBase + 3; bufWrites[3].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[3].buffer = (skySH != handles::INVALID_RESOURCE) ? skySH : dummy_buffer_;
                 bufInfos[3].offset = 0; bufInfos[3].range = ~0ull;
-                bufWrites[4].dstBinding = 4; bufWrites[4].descriptorType = DescriptorType::StorageBuffer;
+                bufWrites[4].dstBinding = bufBase + 4; bufWrites[4].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[4].buffer = (skyFactor != handles::INVALID_RESOURCE) ? skyFactor : dummy_buffer_;
                 bufInfos[4].offset = 0; bufInfos[4].range = ~0ull;
-                bufWrites[5].dstBinding = 5;
+                bufWrites[5].dstBinding = bufBase + 5;
                 bufInfos[5].buffer = static_probe_cb_; bufInfos[5].offset = 0; bufInfos[5].range = ~0ull;
-                bufWrites[6].dstBinding = 6; bufWrites[6].descriptorType = DescriptorType::StorageBuffer;
+                bufWrites[6].dstBinding = bufBase + 6; bufWrites[6].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[6].buffer = ddgi->GetConfidenceBuffer(ddgiReadIdx); bufInfos[6].offset = 0; bufInfos[6].range = ~0ull;
-                bufWrites[7].dstBinding = 7; bufWrites[7].descriptorType = DescriptorType::StorageBuffer;
+                bufWrites[7].dstBinding = bufBase + 7; bufWrites[7].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[7].buffer = ddgi->GetIrradianceBuffer(ddgiReadIdx); bufInfos[7].offset = 0; bufInfos[7].range = ~0ull;
-                bufWrites[8].dstBinding = 8; bufWrites[8].descriptorType = DescriptorType::StorageBuffer;
+                bufWrites[8].dstBinding = bufBase + 8; bufWrites[8].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[8].buffer = ddgi->GetDepthBuffer(ddgiReadIdx); bufInfos[8].offset = 0; bufInfos[8].range = ~0ull;
                 device_->UpdateDescriptorSets(9, bufWrites);
             }
@@ -278,7 +325,9 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             u32 halfH = render_height_ / 2;
             cmd->Dispatch((halfW + 7) / 8, (halfH + 7) / 8, 1);
 
-            // Barrier output + blit to history
+            // Barrier output UAV → SRV for downstream Fusion pass.
+            // History blit disabled (temporal accumulation not used — causes
+            // layout issues with uninitialized history texture on first frame).
             {
                 ResourceBarrier outBarrier{};
                 outBarrier.resource = gi_halfres_texture_;
@@ -286,13 +335,6 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 outBarrier.afterState = ResourceState::ShaderResource;
                 outBarrier.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&outBarrier, 1);
-
-                TextureBlitRegion blitRegion{};
-                blitRegion.srcOffsets[0] = {0, 0, 0};
-                blitRegion.srcOffsets[1] = {(int)halfW, (int)halfH, 1};
-                blitRegion.dstOffsets[0] = {0, 0, 0};
-                blitRegion.dstOffsets[1] = {(int)halfW, (int)halfH, 1};
-                cmd->BlitTexture(gi_halfres_texture_, gi_halfres_history_, &blitRegion, 1, FilterMode::Nearest);
             }
         }
     );

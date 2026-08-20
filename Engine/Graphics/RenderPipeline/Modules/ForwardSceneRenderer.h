@@ -149,6 +149,8 @@ private:
     rhi::ShaderHandle shadow_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle lighting_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle lighting_ps_{rhi::handles::INVALID_SHADER};
+    // T4.6.5 part 4 Path B: Vulkan-only compute shader replacing lighting_vs_+lighting_ps_.
+    rhi::ShaderHandle lighting_cs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle skybox_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle skybox_ps_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle blit_vs_{rhi::handles::INVALID_SHADER};
@@ -209,6 +211,8 @@ private:
     rhi::PipelineLayoutHandle gbuffer_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle shadow_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle lighting_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    // T4.6.5 part 4 Path B: Vulkan-only compute pipeline layout (12 bindings).
+    rhi::PipelineLayoutHandle lighting_compute_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle skybox_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle blit_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
 
@@ -216,6 +220,9 @@ private:
     rhi::DescriptorSetLayoutHandle global_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle material_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle lighting_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    // T4.6.5 part 4 Path B: Vulkan-only compute descriptor set layout matching
+    // Engine/Graphics/Vulkan/shaders/DeferredLighting.spv (12 bindings).
+    rhi::DescriptorSetLayoutHandle lighting_compute_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle skybox_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle blit_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
 
@@ -223,9 +230,30 @@ private:
     rhi::DescriptorSetHandle global_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
+    // T4.6.5 part 15.3: Vulkan-only shadow-pass descriptor sets. Replaces Metal's
+    // BindVertexBuffers(0, 1, &shadow_view_cb_[c], ...) per-vertex slot override.
+    // One per cascade: binding 0 = shadow_view_cb_[c], bindings 1+2 mirror global_ds_.
+    rhi::DescriptorSetHandle shadow_global_ds_[2]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
     rhi::DescriptorSetHandle lighting_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
+    // T4.6.5 part 4 Path B: Vulkan-only compute descriptor sets (12 bindings).
+    rhi::DescriptorSetHandle lighting_compute_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET};
+
+    // T4.6.5 part 6 Path B: Vulkan-only UBOs for compute lighting pass.
+    // GlobalShaderData (480B) and ForwardLightBuffer (25808B) match the engine
+    // UBO layout that existing DeferredLighting.spv expects at bindings 9 and 10.
+    rhi::ResourceHandle lighting_global_ubos_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle lighting_light_ubos_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    void* lighting_global_mapped_[3]{nullptr, nullptr, nullptr};
+    void* lighting_light_mapped_[3]{nullptr, nullptr, nullptr};
     rhi::DescriptorSetHandle skybox_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};

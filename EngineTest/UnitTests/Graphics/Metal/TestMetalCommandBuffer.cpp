@@ -106,7 +106,7 @@ TestResult TestCommandBufferCopyBuffer() {
     }
 
     // 创建源缓冲区
-    BufferDesc srcDesc;
+    BufferDesc srcDesc{};
     srcDesc.size = 256;
     srcDesc.type = BufferType::Raw;
     srcDesc.memoryUsage = GPUMemoryUsage::Dynamic; // 使用Dynamic以便CPU写入
@@ -123,7 +123,7 @@ TestResult TestCommandBufferCopyBuffer() {
     device.GetBuffer(srcHandle)->UpdateData(srcData.data(), srcData.size() * sizeof(uint32_t), 0);
 
     // 创建目标缓冲区
-    BufferDesc dstDesc;
+    BufferDesc dstDesc{};
     dstDesc.size = 256;
     dstDesc.type = BufferType::Raw;
     dstDesc.memoryUsage = GPUMemoryUsage::Staging; // 使用Staging以便CPU读取验证
@@ -205,7 +205,7 @@ TestResult TestRenderPassEncoding() {
     passDesc.colorAttachments[0].texture = colorTex;
     passDesc.colorAttachments[0].loadOp = LoadAction::Clear;
     passDesc.colorAttachments[0].storeOp = StoreAction::Store;
-    passDesc.colorAttachments[0].clearValue = {0.0f, 0.0f, 0.0f, 1.0f};
+    passDesc.colorAttachments[0].clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
     
     passDesc.viewport.size = {800.0f, 600.0f};
     passDesc.scissor.extent = {800, 600};
@@ -270,7 +270,7 @@ TestResult TestGenerateMipmaps() {
     uint32_t bpp = 4;
     uint32_t dataSize = width * height * bpp;
 
-    BufferDesc srcBufDesc;
+    BufferDesc srcBufDesc{};
     srcBufDesc.size = dataSize;
     srcBufDesc.type = BufferType::Raw;
     srcBufDesc.memoryUsage = GPUMemoryUsage::Dynamic; // CPU Write
@@ -291,7 +291,7 @@ TestResult TestGenerateMipmaps() {
     uint32_t level1Height = 32;
     uint32_t level1Size = level1Width * level1Height * bpp;
 
-    BufferDesc dstBufDesc;
+    BufferDesc dstBufDesc{};
     dstBufDesc.size = level1Size;
     dstBufDesc.type = BufferType::Raw;
     dstBufDesc.memoryUsage = GPUMemoryUsage::Staging; // CPU Read
@@ -514,7 +514,7 @@ TestResult TestDescriptorArrayBinding() {
     passDesc.colorAttachments[0].texture = rt;
     passDesc.colorAttachments[0].loadOp = LoadAction::Clear;
     passDesc.colorAttachments[0].storeOp = StoreAction::Store;
-    passDesc.colorAttachments[0].clearValue = {0.0f, 0.0f, 0.0f, 1.0f};
+    passDesc.colorAttachments[0].clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
     passDesc.viewport.size = {64.0f, 64.0f};
     passDesc.scissor.extent = {64, 64};
 

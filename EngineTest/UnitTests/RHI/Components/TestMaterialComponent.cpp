@@ -97,6 +97,9 @@ public:
     void UnmapBuffer(ResourceHandle handle) override {}
     double GetTimestampPeriod() const override { return 1.0; }
     RHIGarbageCollector& GetGarbageCollector() override { return gc; }
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    void SetBufferDirtySize(ResourceHandle handle, u64 size) override { (void)handle; (void)size; }
+    RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
 };
 
 // --- Tests ---

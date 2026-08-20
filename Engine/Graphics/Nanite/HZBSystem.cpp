@@ -98,7 +98,7 @@ bool HZBSystem::CreateHZBTexture() {
     hzbDesc.format = rhi::DataFormat::R32_Float;  // Color format for compute shader write access
     hzbDesc.type = rhi::TextureType::Texture2D;
     hzbDesc.mipLevels = mip_levels_;
-    hzbDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+    hzbDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::CopySource;
 
     hzb_texture_ = device_->CreateTexture(hzbDesc);
     if (hzb_texture_ == rhi::handles::INVALID_RESOURCE) {
@@ -137,13 +137,18 @@ bool HZBSystem::CreateHZBSampler() {
 bool HZBSystem::CreateHZBComputePipeline() {
 //    std::cout << "[HZBSystem] ========== Creating HZB Compute Pipeline ==========" << std::endl;
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    const rhi::RHIPlatform platform = device_->GetPlatform();
+    const bool isDawn = (platform == rhi::RHIPlatform::Dawn);
+    const bool isVulkan = (platform == rhi::RHIPlatform::Vulkan);
+    // Dawn + Vulkan share the same DSL/descriptor semantics (separate depth/color
+    // sampled image types). Metal uses a single SampledImage for both.
+    const bool isCrossPlatform = isDawn || isVulkan;
 
-    if (isDawn) {
-        // ---- Dawn path: split copy + mip into separate layouts ----
+    if (isCrossPlatform) {
+        // ---- Dawn/Vulkan path: split copy + mip into separate layouts ----
         // Copy stage binds texture_depth_2d (SampledDepthImage); mip stage binds
-        // texture_2d<f32> (SampledImage). WGSL forbids both binding types at
-        // slot 0 in a single module, so we use two files + two DSLs.
+        // texture_2d<f32> (SampledImage). WGSL/SPIR-V both require separate
+        // layouts because the binding 0 type differs between stages.
 
         // Mip-stage layout (also used by existing hzb_descriptor_layout_).
         rhi::DescriptorSetLayoutBinding mipBindings[] = {
@@ -151,7 +156,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
             { 1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr }
         };
         mipBindings[0].unfilterableFloat = true; // source is R32Float (UnfilterableFloat in WebGPU)
-        mipBindings[1].format = rhi::DataFormat::R32_Float;  // HZBMip.wgsl: texture_storage_2d<r32float, write>
+        mipBindings[1].format = rhi::DataFormat::R32_Float;  // HZBMip: texture_storage_2d<r32float, write>
         rhi::DescriptorSetLayoutDesc mipLayoutDesc{ 2, mipBindings };
         hzb_descriptor_layout_ = device_->CreateDescriptorSetLayout(mipLayoutDesc);
         if (hzb_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
@@ -171,7 +176,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
             { 0, rhi::DescriptorType::SampledDepthImage, 1, rhi::ShaderStage::Compute, nullptr },
             { 1, rhi::DescriptorType::StorageImage,      1, rhi::ShaderStage::Compute, nullptr }
         };
-        copyBindings[1].format = rhi::DataFormat::R32_Float;  // HZBCopy.wgsl: texture_storage_2d<r32float, write>
+        copyBindings[1].format = rhi::DataFormat::R32_Float;  // HZBCopy: texture_storage_2d<r32float, write>
         rhi::DescriptorSetLayoutDesc copyLayoutDesc{ 2, copyBindings };
         hzb_copy_descriptor_layout_ = device_->CreateDescriptorSetLayout(copyLayoutDesc);
         if (hzb_copy_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
@@ -186,10 +191,9 @@ bool HZBSystem::CreateHZBComputePipeline() {
             return false;
         }
 
-        // Load WGSL shaders — use vector<u8> with explicit null terminator
-        // (matches GPUDrivenDrawPipeline's loader). ToWGPUStringView uses
-        // WGPU_STRLEN which calls strlen on the buffer.
-        auto loadWgsl = [](const char* name) -> std::vector<u8> {
+        // Shader loader: Dawn loads WGSL text (null-terminated for WGPU_STRLEN);
+        // Vulkan loads SPIR-V binary (no null terminator, multiple of 4 bytes).
+        auto loadShader = [platform](const char* name) -> std::vector<u8> {
 #ifdef __EMSCRIPTEN__
             std::string fullName = std::string("Nanite/") + name;
             std::string src = dawn::LoadWGSL(fullName.c_str());
@@ -198,36 +202,49 @@ bool HZBSystem::CreateHZBComputePipeline() {
             bytecode.push_back(0);
             return bytecode;
 #else
-            std::string path = utils::ShaderRegistry::GetNaniteShaderPath(
-                rhi::RHIPlatform::Dawn, name);
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file.is_open()) {
-                path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.claude/worktrees/dawn-webgpu-backend/" + path;
-                file.open(path, std::ios::binary | std::ios::ate);
+            // T4.6.5 part 35.3: try CWD-relative first, then worktree source root.
+            const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
+            std::vector<std::string> candidates;
+            candidates.push_back(relPath);
+            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+            std::ifstream file;
+            std::string openedPath;
+            for (const auto& candidate : candidates) {
+                file.open(candidate, std::ios::binary | std::ios::ate);
+                if (file.is_open()) {
+                    openedPath = candidate;
+                    break;
+                }
             }
             if (!file.is_open()) {
-                std::cerr << "[HZBSystem] Failed to open WGSL: " << path << std::endl;
+                std::cerr << "[HZBSystem] Failed to open shader: " << name
+                          << "\n  tried: " << candidates[0]
+                          << "\n  tried: " << candidates[1] << std::endl;
                 return {};
             }
             std::streamsize size = file.tellg();
             file.seekg(0, std::ios::beg);
-            std::vector<u8> bytecode(static_cast<size_t>(size) + 1, 0);
+            // Dawn/WGSL needs a null terminator (WGPU_STRLEN). Vulkan/SPIR-V takes
+            // exact byte count (VulkanShader rejects if size % 4 != 0).
+            size_t pad = (platform == rhi::RHIPlatform::Vulkan) ? 0 : 1;
+            std::vector<u8> bytecode(static_cast<size_t>(size) + pad, 0);
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[HZBSystem] Failed to read WGSL: " << path << std::endl;
+                std::cerr << "[HZBSystem] Failed to read shader: " << openedPath << std::endl;
                 return {};
             }
             return bytecode;
 #endif
         };
 
-        std::vector<u8> copySrc = loadWgsl("HZBCopy");
+        std::vector<u8> copySrc = loadShader("HZBCopy");
         if (copySrc.empty()) {
-            std::cerr << "[HZBSystem] Failed to load HZBCopy.wgsl" << std::endl;
+            std::cerr << "[HZBSystem] Failed to load HZBCopy shader" << std::endl;
             return false;
         }
-        std::vector<u8> mipSrc = loadWgsl("HZBMip");
+        std::vector<u8> mipSrc = loadShader("HZBMip");
         if (mipSrc.empty()) {
-            std::cerr << "[HZBSystem] Failed to load HZBMip.wgsl" << std::endl;
+            std::cerr << "[HZBSystem] Failed to load HZBMip shader" << std::endl;
             return false;
         }
         std::cerr << "[HZB] Loaded shaders: HZBCopy=" << copySrc.size()
@@ -443,18 +460,43 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 //    std::cout << "[HZBSystem] ✅ HZB texture is valid: " << hzb_texture_ << std::endl;
 
     std::vector<rhi::ResourceHandle> temporaryViews;
+    std::vector<rhi::DescriptorSetHandle> temporaryDescriptorSets;
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                         device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    // Vulkan requires explicit per-mip layout transitions (UNDEFINED → GENERAL for
+    // StorageImage write, GENERAL → SHADER_READ_ONLY for next iteration's source).
+    // Dawn's InsertBarrier is a no-op (WebGPU tracks internally). Metal's path
+    // reuses the single descriptor layout and doesn't reach this branch.
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    auto emitImageBarrier = [&](rhi::ResourceHandle tex, u32 mip,
+                                 rhi::ResourceState before, rhi::ResourceState after) {
+        if (!isVulkan) return;
+        rhi::ResourceBarrier b{};
+        b.resource = tex;
+        b.beforeState = before;
+        b.afterState = after;
+        b.subresource = mip;
+        b.queueFamily = 0xFFFFFFFF;
+        cmd_buffer->InsertBarrier(&b, 1);
+    };
 
     // On Dawn the copy stage needs a separate descriptor set (reads texture_depth_2d
     // via SampledDepthImage); mip stages share the regular SampledImage layout.
     rhi::DescriptorSetDesc descriptorDesc{};
     descriptorDesc.layout = hzb_descriptor_layout_;
 
-    rhi::DescriptorSetHandle descriptorSet = device_->CreateDescriptorSet(descriptorDesc);
-    if (descriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-        std::cerr << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
-        return false;
+    // Metal reuses one descriptor set for both stages. Dawn/Vulkan allocate a
+    // fresh set per HZBMip iteration — updating a bound set without
+    // UPDATE_AFTER_BIND trips Vulkan validation ("descriptor set updated without
+    // UPDATE_AFTER_BIND").
+    rhi::DescriptorSetHandle descriptorSet = rhi::handles::INVALID_DESCRIPTOR_SET;
+    if (!isDawn) {
+        descriptorSet = device_->CreateDescriptorSet(descriptorDesc);
+        if (descriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
+            std::cerr << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
+            return false;
+        }
     }
 
     rhi::DescriptorSetHandle copyDescriptorSet = rhi::handles::INVALID_DESCRIPTOR_SET;
@@ -464,9 +506,9 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         copyDescriptorSet = device_->CreateDescriptorSet(copyDesc);
         if (copyDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
             std::cerr << "[HZBSystem] Failed to create HZB copy descriptor set" << std::endl;
-            device_->DestroyDescriptorSet(descriptorSet);
             return false;
         }
+        temporaryDescriptorSets.push_back(copyDescriptorSet);
     } else {
         // Metal path reuses the single descriptorSet for both stages.
         copyDescriptorSet = descriptorSet;
@@ -483,8 +525,8 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     rhi::ResourceHandle hzbMip0View = device_->CreateTextureView(baseTargetViewDesc);
     if (hzbMip0View == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[HZBSystem] Failed to create HZB mip0 view" << std::endl;
-        device_->DestroyDescriptorSet(descriptorSet);
-        if (isDawn) device_->DestroyDescriptorSet(copyDescriptorSet);
+        if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
+        for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
         return false;
     }
     temporaryViews.push_back(hzbMip0View);
@@ -514,6 +556,18 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     device_->UpdateDescriptorSets(2, baseWrites);
 
     const rhi::DescriptorSetHandle copyDescriptorSets[] = { copyDescriptorSet };
+
+    // T4.6.5 part 28: source depth may be in DepthStencil (Stage3 left) OR
+    // ShaderResource (ResolveVisibilityBuffer's barrier left — Resolve auto-
+    // fires at end of Execute() before HZBBuild pass). Using Unknown (UNDEFINED)
+    // accepts either actual layout; MoltenVK preserves content in practice.
+    // Hardcoding DepthStencil trips VUID-VkImageMemoryBarrier-oldLayout-01197
+    // when Resolve already transitioned to ShaderResource.
+    emitImageBarrier(depth_texture, 0xFFFFFFFFu,
+                     rhi::ResourceState::Unknown, rhi::ResourceState::ShaderResource);
+    emitImageBarrier(hzb_texture_, 0,
+                     rhi::ResourceState::Unknown, rhi::ResourceState::UnorderedAccess);
+
     cmd_buffer->BindComputePipeline(hzb_copy_pipeline_);
     cmd_buffer->BindDescriptorSets(
         rhi::PipelineBindPoint::Compute,
@@ -533,6 +587,11 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         rhi::AccessFlag::ShaderRead
     );
 
+    // Vulkan: HZBCopy wrote mip 0 in GENERAL. First HZBMip iteration samples mip 0
+    // via SampledImage → needs ShaderResource (SHADER_READ_ONLY_OPTIMAL).
+    emitImageBarrier(hzb_texture_, 0,
+                     rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+
     for (u32 mip_level = 0; mip_level < mip_levels_ - 1; ++mip_level) {
         rhi::TextureViewDesc sourceViewDesc{};
         sourceViewDesc.texture = hzb_texture_;
@@ -546,7 +605,8 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         if (sourceView == rhi::handles::INVALID_RESOURCE) {
             std::cerr << "[HZBSystem] Failed to create source mip view" << std::endl;
             for (auto view : temporaryViews) device_->DestroyTexture(view);
-            device_->DestroyDescriptorSet(descriptorSet);
+            for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+            if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
             return false;
         }
         temporaryViews.push_back(sourceView);
@@ -563,10 +623,31 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         if (targetView == rhi::handles::INVALID_RESOURCE) {
             std::cerr << "[HZBSystem] Failed to create target mip view" << std::endl;
             for (auto view : temporaryViews) device_->DestroyTexture(view);
-            device_->DestroyDescriptorSet(descriptorSet);
+            for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+            if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
             return false;
         }
         temporaryViews.push_back(targetView);
+
+        // Dawn/Vulkan: allocate a fresh descriptor set per iteration. Updating a
+        // descriptor set after it's been bound to the command buffer (without
+        // UPDATE_AFTER_BIND) trips Vulkan validation. Metal's API is permissive
+        // and reuses the single descriptorSet across iterations.
+        rhi::DescriptorSetHandle iterDescriptorSet;
+        if (isDawn) {
+            rhi::DescriptorSetDesc iterDesc{};
+            iterDesc.layout = hzb_descriptor_layout_;
+            iterDescriptorSet = device_->CreateDescriptorSet(iterDesc);
+            if (iterDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
+                std::cerr << "[HZBSystem] Failed to create HZB mip descriptor set" << std::endl;
+                for (auto view : temporaryViews) device_->DestroyTexture(view);
+                for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+                return false;
+            }
+            temporaryDescriptorSets.push_back(iterDescriptorSet);
+        } else {
+            iterDescriptorSet = descriptorSet;
+        }
 
         rhi::DescriptorImageInfo sourceInfo{};
         sourceInfo.imageView = sourceView;
@@ -577,12 +658,12 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         targetInfo.imageLayout = rhi::ResourceState::UnorderedAccess;
         targetInfo.sampler = rhi::handles::INVALID_SAMPLER;
         rhi::WriteDescriptorSet mipWrites[2]{};
-        mipWrites[0].dstSet = descriptorSet;
+        mipWrites[0].dstSet = iterDescriptorSet;
         mipWrites[0].dstBinding = 0;
         mipWrites[0].descriptorCount = 1;
         mipWrites[0].descriptorType = rhi::DescriptorType::SampledImage;
         mipWrites[0].imageInfo = &sourceInfo;
-        mipWrites[1].dstSet = descriptorSet;
+        mipWrites[1].dstSet = iterDescriptorSet;
         mipWrites[1].dstBinding = 1;
         mipWrites[1].descriptorCount = 1;
         mipWrites[1].descriptorType = rhi::DescriptorType::StorageImage;
@@ -590,7 +671,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         device_->UpdateDescriptorSets(2, mipWrites);
 
         cmd_buffer->BindComputePipeline(hzb_downsample_pipeline_);
-        const rhi::DescriptorSetHandle mipDescriptorSets[] = { descriptorSet };
+        const rhi::DescriptorSetHandle mipDescriptorSets[] = { iterDescriptorSet };
         cmd_buffer->BindDescriptorSets(
             rhi::PipelineBindPoint::Compute,
             hzb_pipeline_layout_,
@@ -602,6 +683,10 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         u32 target_height = std::max(config_.max_height >> (mip_level + 1), 1u);
         threadGroupsX = (target_width + 15) / 16;
         threadGroupsY = (target_height + 15) / 16;
+
+        // Vulkan: target mip (level+1) is still UNDEFINED; StorageImage write needs GENERAL.
+        emitImageBarrier(hzb_texture_, mip_level + 1,
+                         rhi::ResourceState::Unknown, rhi::ResourceState::UnorderedAccess);
 
         // 🔇 DISABLED: Verbose HZB output
         // std::cout << "[HZBSystem] 🚀 Generating mip " << (mip_level + 1) << " from mip " << mip_level
@@ -616,11 +701,22 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
             rhi::AccessFlag::ShaderRead
         );
 
+        // Vulkan: target mip (level+1) becomes the source for the next iteration's
+        // SampledImage read → transition UA → ShaderResource.
+        emitImageBarrier(hzb_texture_, mip_level + 1,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+
     }
 
+    // HZB build complete — leave all mips in ShaderResource (SHADER_READ_ONLY_OPTIMAL).
+    // Downstream passes (SSGI/DDGI/GIGather/culling) read HZB as SampledImage.
+    // Previous code transitioned back to GENERAL to satisfy a VUID-04152 check,
+    // but this caused per-mip layout tracking conflicts with InsertBarrier.
+    // The descriptors that were GENERAL are no longer bound after build completes.
+
     for (auto view : temporaryViews) device_->DestroyTexture(view);
-    device_->DestroyDescriptorSet(descriptorSet);
-    if (isDawn) device_->DestroyDescriptorSet(copyDescriptorSet);
+    for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
+    if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
 
     // 🔇 DISABLED: Verbose HZB output
     // std::cout << "[HZBSystem] ✅ HZB generation dispatch completed" << std::endl;

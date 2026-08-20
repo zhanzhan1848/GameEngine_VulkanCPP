@@ -101,6 +101,9 @@ struct SceneData {
     float4 viewPos;
     float4x4 shadowMatrix0;
     float4x4 shadowMatrix1;
+    // x = shadow mode (0 = pre-filtered R8 visibility, 1 = VSM moments +
+    // Chebyshev), y = cascade 0 split distance, zw unused.
+    float4 shadowParams;
 };
 
 struct ViewData {
@@ -156,6 +159,50 @@ float GetShadowVisibility(float2 uv, texture2d<float> shadowVisibility, sampler 
     return saturate(v);
 }
 
+// VSM: project worldPos into the cascade's light clip space, sample the
+// blurred (z, z²) moments, Chebyshev upper bound. Mirrors
+// RHIShaderFunctions.metal ChebyshevUpperBound. NDC→UV flips Y
+// (same convention as ReadRawShadowDepth above). Cascade selection is
+// BOUNDS-based with fallback (0 → 1 → lit), matching the GLSL version —
+// a distance split leaves a hard boundary at the cascade-0 ortho box edge.
+float GetVSMShadowVisibility(constant SceneData& sceneData, float3 worldPos,
+                             texture2d<float> moments0, texture2d<float> moments1) {
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+
+    float4 clip0 = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
+    float3 sc0 = clip0.xyz / clip0.w;
+    float2 uv0 = float2(sc0.x * 0.5 + 0.5, 0.5 - sc0.y * 0.5);
+    bool inCascade0 = uv0.x >= 0.0 && uv0.x <= 1.0 && uv0.y >= 0.0 && uv0.y <= 1.0 &&
+                      sc0.z >= 0.0 && sc0.z <= 1.0;
+    if (inCascade0) {
+        float2 moments = moments0.sample(s, uv0).xy;
+        const float minVariance = 0.00002;
+        if (sc0.z <= moments.x) return 1.0;
+        float variance = moments.y - (moments.x * moments.x);
+        variance = max(variance, minVariance);
+        float d = sc0.z - moments.x;
+        float pMax = variance / (variance + d * d);
+        return smoothstep(0.05, 1.0, pMax);
+    }
+
+    float4 clip1 = sceneData.shadowMatrix1 * float4(worldPos, 1.0);
+    float3 sc1 = clip1.xyz / clip1.w;
+    float2 uv1 = float2(sc1.x * 0.5 + 0.5, 0.5 - sc1.y * 0.5);
+    bool inCascade1 = uv1.x >= 0.0 && uv1.x <= 1.0 && uv1.y >= 0.0 && uv1.y <= 1.0 &&
+                      sc1.z >= 0.0 && sc1.z <= 1.0;
+    if (inCascade1) {
+        float2 moments = moments1.sample(s, uv1).xy;
+        const float minVariance = 0.00002;
+        if (sc1.z <= moments.x) return 1.0;
+        float variance = moments.y - (moments.x * moments.x);
+        variance = max(variance, minVariance);
+        float d = sc1.z - moments.x;
+        float pMax = variance / (variance + d * d);
+        return smoothstep(0.05, 1.0, pMax);
+    }
+    return 1.0;  // outside both shadow maps — lit
+}
+
 // ================================================================================================
 // Fragment Shader (PBR Lighting)
 // ================================================================================================
@@ -206,7 +253,9 @@ fragment float4 fragmentLighting_v3(
     texture2d<float> shadowVisibility [[texture(6)]],
     texturecube<float> irradianceMap [[texture(8)]],
     texturecube<float> prefilterMap [[texture(9)]],
-    texture2d<float> brdfLUT [[texture(10)]]
+    texture2d<float> brdfLUT [[texture(10)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]]
 ) {
     float2 uv = in.uv;
 
@@ -253,17 +302,21 @@ fragment float4 fragmentLighting_v3(
     // Direct light contribution
     float3 Lo = (diffuse + specBRDF) * sceneData.lightColor.rgb * NdotL;
 
-    // Shadow: simple depth comparison from shadow map
+    // Shadow — VSM moments + Chebyshev, or the legacy depth-compare path.
     float shadow = 1.0;
-    float4 shadowClip = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
-    float3 shadowCoord = shadowClip.xyz / shadowClip.w;
-    shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
-    shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
-    if (shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 &&
-        shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
-        shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
-        float shadowDepth = SampleShadow(shadowCoord.xy, shadowVisibility);
-        shadow = (shadowCoord.z - 0.005) > shadowDepth ? 0.3 : 1.0;
+    if (sceneData.shadowParams.x > 0.5) {
+        shadow = GetVSMShadowVisibility(sceneData, worldPos, shadowMoments0, shadowMoments1);
+    } else {
+        float4 shadowClip = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
+        float3 shadowCoord = shadowClip.xyz / shadowClip.w;
+        shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
+        shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
+        if (shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 &&
+            shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
+            shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
+            float shadowDepth = SampleShadow(shadowCoord.xy, shadowVisibility);
+            shadow = (shadowCoord.z - 0.005) > shadowDepth ? 0.3 : 1.0;
+        }
     }
     Lo *= shadow;
 
@@ -411,6 +464,8 @@ fragment float4 fragmentLighting_gpuDriven(
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
     texture2d<float> shadowVisibility [[texture(6)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]],
 
     sampler defaultSampler [[sampler(8)]]
 ) {
@@ -443,8 +498,14 @@ fragment float4 fragmentLighting_gpuDriven(
     float4 worldPos4 = viewData.invViewProjection * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
-    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    // 3. Shadow — VSM moments + Chebyshev, or pre-filtered visibility
+    //    (half-res, bilinear upsample).
+    float shadow;
+    if (sceneData.shadowParams.x > 0.5) {
+        shadow = GetVSMShadowVisibility(sceneData, worldPos, shadowMoments0, shadowMoments1);
+    } else {
+        shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    }
 
     // 4. Direct Lighting (Cook-Torrance PBR + shadow)
     float3 N = normalize(normal);

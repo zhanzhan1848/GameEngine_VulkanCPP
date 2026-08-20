@@ -2,8 +2,10 @@
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
 #include "../Dawn/ShaderLoader.h"
+#include "../Utils/ShaderRegistry.h"
 #include <iostream>
 #include <fstream>
+#include <vector>
 
 namespace primal::graphics::nanite {
 
@@ -203,6 +205,26 @@ bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
 
     device_->UpdateDescriptorSets(2, writes);
 
+    // Vulkan: explicit layout transitions. The source may sit in DepthStencil
+    // (left by the last RG pass) or ShaderResource (post-resolve barrier), and
+    // the history texture must be GENERAL for the r32f imageStore. Unknown-as-old
+    // accepts either source state — same pattern as HZBSystem's HZB copy. Metal
+    // has no image layouts and needs none of this.
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        rhi::ResourceBarrier barriers[2]{};
+        barriers[0].resource = source;
+        barriers[0].beforeState = rhi::ResourceState::Unknown;
+        barriers[0].afterState = rhi::ResourceState::ShaderResource;
+        barriers[0].subresource = 0xFFFFFFFF;
+        barriers[0].queueFamily = 0xFFFFFFFF;
+        barriers[1].resource = destination;
+        barriers[1].beforeState = rhi::ResourceState::Unknown;
+        barriers[1].afterState = rhi::ResourceState::UnorderedAccess;
+        barriers[1].subresource = 0;
+        barriers[1].queueFamily = 0xFFFFFFFF;
+        cmd_buffer->InsertBarrier(barriers, 2);
+    }
+
     u32 groupsX = (config_.width + 15) / 16;
     u32 groupsY = (config_.height + 15) / 16;
 
@@ -217,6 +239,20 @@ bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
         rhi::AccessFlag::ShaderRead
     );
 
+    // Vulkan: the copy left the history texture in GENERAL (UnorderedAccess).
+    // Downstream consumers (TAAPass's prevDepth binding) sample it as
+    // SHADER_READ_ONLY — transition back so the recorded descriptor layout
+    // matches the actual one next frame. Metal has no layouts.
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        rhi::ResourceBarrier srBarrier{};
+        srBarrier.resource = destination;
+        srBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
+        srBarrier.afterState = rhi::ResourceState::ShaderResource;
+        srBarrier.subresource = 0;
+        srBarrier.queueFamily = 0xFFFFFFFF;
+        cmd_buffer->InsertBarrier(&srBarrier, 1);
+    }
+
     return true;
 }
 
@@ -226,6 +262,12 @@ bool DepthHistoryManager::CreateCopyPipeline() {
         { 0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
         { 1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr }
     };
+    const bool isVulkan = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+    if (isVulkan) {
+        // SPIR-V storage image is declared r32f (HZBCopy.wgsl) — annotate the
+        // layout like HZBSystem's copy-stage layout.
+        bindings[1].format = rhi::DataFormat::R32_Float;
+    }
 
     rhi::DescriptorSetLayoutDesc layoutDesc{ 2, bindings };
     depth_copy_ds_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
@@ -236,25 +278,61 @@ bool DepthHistoryManager::CreateCopyPipeline() {
     if (depth_copy_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
 
     // Load HZBGeneration shader (contains copy_depth_to_hzb_mip0 entry point)
-    std::string code;
+    rhi::ShaderHandle shader = rhi::handles::INVALID_SHADER;
+    if (isVulkan) {
+        // Vulkan: reuse Nanite/HZBCopy.spv (naga product of
+        // Dawn/shaders/Nanite/HZBCopy.wgsl) — a 1:1 port of HZBGeneration.metal's
+        // copy_depth_to_hzb_mip0: texel-fetch source depth, clamp NaN/Inf to 1.0,
+        // store to R32F. Its 16x16 workgroup matches the dispatch below.
+        // Same load pattern as HZBSystem: CWD-relative first, worktree root second.
+        const std::string relPath =
+            utils::ShaderRegistry::GetNaniteShaderPath(rhi::RHIPlatform::Vulkan, "HZBCopy");
+        const std::string candidates[2] = {
+            relPath,
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+        };
+        std::vector<u8> bytecode;
+        for (const auto& path : candidates) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) continue;
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            bytecode.resize(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[DepthHistoryManager] Failed to read SPIR-V: " << path << std::endl;
+                return false;
+            }
+            break;
+        }
+        if (bytecode.empty()) {
+            std::cerr << "[DepthHistoryManager] Failed to load HZBCopy SPIR-V\n"
+                      << "  tried: " << candidates[0] << "\n"
+                      << "  tried: " << candidates[1] << std::endl;
+            return false;
+        }
+        shader = device_->CreateShader(
+            bytecode.data(), bytecode.size(), rhi::ShaderStage::Compute, "copy_depth_to_hzb_mip0");
+    } else {
 #ifdef __EMSCRIPTEN__
-    code = primal::graphics::dawn::LoadWGSL("HZBGeneration");
-    if (code.empty()) {
-        std::cerr << "[DepthHistoryManager] Failed to load HZBGeneration.wgsl from MEMFS" << std::endl;
-        return false;
-    }
+        std::string code = primal::graphics::dawn::LoadWGSL("HZBGeneration");
+        if (code.empty()) {
+            std::cerr << "[DepthHistoryManager] Failed to load HZBGeneration.wgsl from MEMFS" << std::endl;
+            return false;
+        }
 #else
-    std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/HZBGeneration.metal";
-    std::ifstream file(shaderPath);
-    if (!file.is_open()) {
-        std::cerr << "[DepthHistoryManager] Failed to open shader: " << shaderPath << std::endl;
-        return false;
-    }
-    code.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    file.close();
+        // Metal: HZBGeneration.metal contains the copy_depth_to_hzb_mip0 entry point
+        std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/HZBGeneration.metal";
+        std::ifstream file(shaderPath);
+        if (!file.is_open()) {
+            std::cerr << "[DepthHistoryManager] Failed to open shader: " << shaderPath << std::endl;
+            return false;
+        }
+        std::string code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        file.close();
 #endif
 
-    auto shader = device_->CreateShader(code.data(), code.size(), rhi::ShaderStage::Compute, "copy_depth_to_hzb_mip0");
+        shader = device_->CreateShader(code.data(), code.size(), rhi::ShaderStage::Compute, "copy_depth_to_hzb_mip0");
+    }
     if (shader == rhi::handles::INVALID_SHADER) {
         std::cerr << "[DepthHistoryManager] Failed to create depth copy shader" << std::endl;
         return false;

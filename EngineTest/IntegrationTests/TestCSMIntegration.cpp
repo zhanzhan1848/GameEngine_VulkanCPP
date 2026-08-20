@@ -177,8 +177,12 @@ bool CSMIntegrationTestCase::Initialize() {
     primal::id::id_type floorMaterialId = 301;
     
     // Register Materials
-    renderSystem.RegisterMaterialInstance(cubeMaterialId, materialInstance);
-    renderSystem.RegisterMaterialInstance(floorMaterialId, floorMaterialInstance);
+    // stale-test port: RegisterMaterialInstance takes shared_ptr; the test keeps raw
+    // ownership (manual delete below), so wrap with a non-owning deleter.
+    renderSystem.RegisterMaterialInstance(cubeMaterialId,
+        std::shared_ptr<MaterialInstance>(materialInstance, [](MaterialInstance*) {}));
+    renderSystem.RegisterMaterialInstance(floorMaterialId,
+        std::shared_ptr<MaterialInstance>(floorMaterialInstance, [](MaterialInstance*) {}));
 
     // 5. Create Mesh (Cube with Normals)
     float cubeVertices[] = {

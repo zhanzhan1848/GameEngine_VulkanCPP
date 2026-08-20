@@ -24,7 +24,7 @@ enum class DebugLevel : u8 {
     DEBUG_LEVEL = 1,    ///< 调试级别：开发和调试信息
     INFO = 2,     ///< 信息级别：重要状态变更
     WARN = 3,     ///< 警告级别：潜在问题
-    ERROR = 4,    ///< 错误级别：严重错误
+    ERR = 4,      ///< 错误级别：严重错误（原名 ERROR，与 windows.h 的 ERROR 宏冲突而改名）
     FATAL = 5     ///< 致命级别：系统崩溃
 };
 
@@ -143,10 +143,10 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
  */
 #define RHI_ERROR(fmt, ...) \
     DEBUG_OP( \
-        if (RHI_SHOULD_LOG(DebugLevel::ERROR)) { \
+        if (RHI_SHOULD_LOG(DebugLevel::ERR)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
             snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
-            OutputDebugMessage(DebugLevel::ERROR, __FILE__, __LINE__, __FUNCTION__, buffer); \
+            OutputDebugMessage(DebugLevel::ERR, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
 

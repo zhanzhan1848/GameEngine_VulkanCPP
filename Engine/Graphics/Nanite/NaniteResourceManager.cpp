@@ -153,27 +153,31 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
 }
 
 void NaniteResourceManager::DestroyResource(NaniteRuntimeResource* resource) {
+    // Caller MUST hold mutex_ — only caller is ReleaseGeometryRef which already
+    // takes the lock. A lock_guard here would deadlock on a non-recursive
+    // std::mutex (this was the bug: T4.6.5 part 18 Test 3 hung in cleanup
+    // because cluster::remove → ReleaseGeometryRef → DestroyResource
+    // attempted to re-lock the same mutex).
+    //
+    // Caller also owns the iterator+erases from resources_/ref_counts_, so
+    // this function only destroys the GPU-side buffers. Doing the erase here
+    // too invalidates the caller's iterator (UB on std::unordered_map).
     if (!resource || !device_) return;
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    
     if (resource->gpu_mesh) {
-        // delete resource->gpu_mesh;
+        // gpu_mesh is owned by ContentToEngine — do not delete.
         resource->gpu_mesh = nullptr;
     }
-    
+
     if (resource->streaming_data.residency_buffer != rhi::handles::INVALID_RESOURCE) {
         device_->DestroyBuffer(resource->streaming_data.residency_buffer);
         resource->streaming_data.residency_buffer = rhi::handles::INVALID_RESOURCE;
     }
-    
+
     if (resource->streaming_data.request_buffer != rhi::handles::INVALID_RESOURCE) {
         device_->DestroyBuffer(resource->streaming_data.request_buffer);
         resource->streaming_data.request_buffer = rhi::handles::INVALID_RESOURCE;
     }
-    
-    resources_.erase(resource->geometry_id);
-    ref_counts_.erase(resource->geometry_id);
 }
 
 void NaniteResourceManager::AddGeometryRef(id::id_type geometry_id) {

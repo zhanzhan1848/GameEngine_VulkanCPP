@@ -39,10 +39,10 @@ struct DDGIRuntimeParams {
     u32   probe_count_z = 16;
     u32   rays_per_probe = 64;
     float probe_spacing = 4.0f;                 // 16 probes * 4.0 = 64 units coverage
-    float irradiance_temporal_weight = 0.02f;   // EMA alpha for irradiance
+    float irradiance_temporal_weight = 0.05f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
-    u32   max_probes_per_frame = 512;            // Max probes updated per frame (importance-based)
+    u32   max_probes_per_frame = 16384;          // Update ALL probes every frame (no flicker)
 };
 
 /// Per-frame camera data that the caller must provide.
@@ -212,6 +212,19 @@ public:
     // irradiance update pass on irradiance_buffers_.
     void ClearSurfaceCacheResources();
 
+    // --- Offline SDF data source ---
+    // When set, DDGI trace uses this pre-built high-resolution SDF volume
+    // instead of the runtime GlobalSDF cascades. The volume stores unsigned
+    // distances; traceSDF uses adaptive first-hit marching.
+    void SetOfflineSDFSource(rhi::ResourceHandle texture,
+                             math::v3 origin, math::v3 extent, u32 resolution) {
+        offline_sdf_texture_ = texture;
+        offline_sdf_origin_ = origin;
+        offline_sdf_extent_ = extent;
+        offline_sdf_resolution_ = resolution;
+        has_offline_sdf_ = (texture != rhi::handles::INVALID_RESOURCE && resolution > 0);
+    }
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
@@ -290,6 +303,13 @@ private:
     // Hit distance buffer (intermediate between split trace dispatches)
     rhi::ResourceHandle hit_distance_buffer_{ rhi::handles::INVALID_RESOURCE };
 
+    // Finalize screen-space sampling (Vulkan): ViewProjection CB (64B ×3) +
+    // current frame's view-projection for projecting hit positions to screen.
+    rhi::ResourceHandle finalize_vp_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    math::m4x4 current_view_projection_{};
+
     // Probe state tracking (importance-based partial update)
     std::vector<DDGIProbeState> probe_states_;
     // Triple-buffered: CPU writes frameIdx's copy while GPU reads previous frames' copies.
@@ -326,6 +346,13 @@ private:
     u32                 sc_atlas_size_ = 0;
     u32                 sc_lookup_count_ = 0;
     bool                sc_enabled_ = false;
+
+    // Offline SDF data source (replaces GlobalSDF cascades when active)
+    bool                has_offline_sdf_{ false };
+    rhi::ResourceHandle offline_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
+    math::v3            offline_sdf_origin_{ 0, 0, 0 };
+    math::v3            offline_sdf_extent_{ 0, 0, 0 };
+    u32                 offline_sdf_resolution_{ 0 };
 };
 
 } // namespace primal::graphics::lumen

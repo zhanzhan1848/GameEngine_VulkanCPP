@@ -1,8 +1,10 @@
 #include "DeferredLightingModule.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
+#include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 
 namespace primal::graphics {
 
@@ -23,7 +25,9 @@ struct SceneData {
     math::m4x4 shadowMatrix1;   // offset 288
     math::v2 jitter;            // offset 352
     math::v2 previousJitter;    // offset 360
-    math::v2 padding;           // offset 368
+    // offset 368: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
+    // y = cascade 0 split distance (world units from camera), zw unused.
+    math::v4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 // ViewData struct
@@ -76,7 +80,13 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     render_height_ = render_height;
 
     // Descriptor set layout: matches fragmentLighting_gpuDriven shader signature
-    // buffer(0)=ViewData, buffer(1)=SceneData, texture(2-6,9), sampler(8)
+    // buffer(0)=ViewData, buffer(1)=SceneData, texture(2-6,9), sampler(8).
+    // T4.6.5 part 37: bindings 10/11/12 are IBL resources (Tier 5 visual
+    // fidelity). 10=irradianceMap (cube), 11=prefilterMap (cube),
+    // 12=brdfLUT (2D). Descriptor type is SampledImage (combined with
+    // sampler at binding 8 in the shader via samplerCube(...)/sampler2D(...)).
+    // VSM: 13/14 = blurred RG32 shadow moments per cascade (Chebyshev
+    // sampling in the shader; fall back to the 1x1 white texture on PCSS).
     DescriptorSetLayoutBinding bindings[] = {
         {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel | ShaderStage::Vertex, nullptr},
         {1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr},
@@ -85,30 +95,48 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         {4, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
         {5, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
         {6, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
+        {7, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},  // SSAO
         {8, DescriptorType::Sampler,       1, ShaderStage::Pixel, nullptr},
         {9, DescriptorType::SampledImage,  1, ShaderStage::Pixel, nullptr},
+        {10, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {11, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {12, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {13, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {14, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
     };
-    set_layout_ = device->CreateDescriptorSetLayout({9, bindings});
+    set_layout_ = device->CreateDescriptorSetLayout({15, bindings});
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
     // Triple-buffered output textures (RGBA16_Float for HDR)
+    // T4.6.5 part 24.3 (B5 fix): CopySource required because the output is
+    // blitted FROM into ColorHistoryManager each frame
+    // (ColorHistoryManager::CopyColorTexture at line 225). Without
+    // TRANSFER_SRC_BIT, vkCmdBlitImage triggers
+    // VUID-vkCmdBlitImage-srcImage-00219.
     TextureDesc outputDesc{};
     outputDesc.size = {render_width, render_height, 1};
     outputDesc.format = DataFormat::RGBA16_Float;
-    outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+    outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource | TextureUsage::CopySource;
     outputDesc.memoryUsage = GPUMemoryUsage::Static;
     for (int i = 0; i < 3; ++i)
         output_textures_[i] = device->CreateTexture(outputDesc);
 
     // Triple-buffered constant buffers
+    // T4.6.5 part 24.4 (B1 fix): type=Constant required so VulkanBuffer
+    // translates to VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT. Without it, the
+    // default BufferType falls through the switch in BufferDescToVkUsage
+    // and the buffer only gets TRANSFER_SRC|DST_BIT — vkUpdateDescriptorSets
+    // rejects it for UNIFORM_BUFFER descriptor (VUID-...-00330).
     for (int i = 0; i < 3; ++i) {
         BufferDesc viewCbDesc{};
         viewCbDesc.size = sizeof(ViewData);
+        viewCbDesc.type = BufferType::Constant;
         viewCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         view_cb_[i] = device->CreateBuffer(viewCbDesc);
 
         BufferDesc sceneCbDesc{};
         sceneCbDesc.size = sizeof(SceneData);
+        sceneCbDesc.type = BufferType::Constant;
         sceneCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         scene_cb_[i] = device->CreateBuffer(sceneCbDesc);
 
@@ -125,6 +153,65 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         desc.addressV = TextureAddressMode::Clamp;
         desc.addressW = TextureAddressMode::Clamp;
         sampler_ = device->CreateSampler(desc);
+    }
+
+    // T4.6.5 part 24.4 (B2 fix): 1x1 white fallback texture.
+    // T4.6.5 part 24.9 (B7 fix): on Vulkan, initialize the texture with a
+    // 4-byte staging copy + barrier to ShaderResource. Without this, the
+    // texture stays in UNDEFINED layout and descriptor writes (which hardcode
+    // SHADER_READ_ONLY_OPTIMAL) trigger VUID-vkCmdDraw-None-09600 when the
+    // bound descriptor is read at the deferred lighting draw.
+    TextureDesc fallbackDesc{};
+    fallbackDesc.size = {1, 1, 1};
+    fallbackDesc.format = DataFormat::RGBA8_UNorm;
+    fallbackDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    fallbackDesc.memoryUsage = GPUMemoryUsage::Static;
+    fallback_tex_ = device->CreateTexture(fallbackDesc);
+
+    if (fallback_tex_ != handles::INVALID_RESOURCE &&
+        device->GetPlatform() == RHIPlatform::Vulkan) {
+        u8 white_pixel[4] = { 255, 255, 255, 255 };
+        BufferDesc staging{};
+        staging.size = 4;
+        staging.memoryUsage = GPUMemoryUsage::Dynamic;
+        ResourceHandle stagingHandle = device->CreateBuffer(staging);
+        if (stagingHandle != handles::INVALID_RESOURCE) {
+            void* mapped = device->MapBuffer(stagingHandle);
+            if (mapped) {
+                std::memcpy(mapped, white_pixel, 4);
+                device->UnmapBuffer(stagingHandle);
+            }
+            SyncHandle fence = device->CreateSync();
+            auto cmdHandle = device->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* cmd = GetCommandBuffer(cmdHandle);
+            if (cmd && cmd->Begin()) {
+                BufferTextureCopyRegion region{};
+                region.bufferOffset = 0;
+                region.imageSubresource.baseArrayLayer = 0;
+                region.imageSubresource.layerCount = 1;
+                region.imageOffset = {0, 0, 0};
+                region.imageExtent = {1, 1, 1};
+                cmd->CopyBufferToTexture(stagingHandle, fallback_tex_, &region, 1);
+
+                ResourceBarrier toSRV;
+                toSRV.resource = fallback_tex_;
+                toSRV.beforeState = ResourceState::CopyDest;
+                toSRV.afterState = ResourceState::ShaderResource;
+                toSRV.subresource = RHI_ALL_SUBRESOURCES;
+                toSRV.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&toSRV, 1);
+
+                cmd->End();
+                QueueSubmitInfo submitInfo{};
+                submitInfo.cmdBuffer = cmdHandle;
+                submitInfo.signalFence = fence;
+                device->Submit(submitInfo);
+                device->WaitForSync(fence, UINT32_MAX);
+            }
+            device->DestroySync(fence);
+            device->DestroyCommandBuffer(cmdHandle);
+            device->DestroyBuffer(stagingHandle);
+        }
     }
 
     // Graphics pipeline
@@ -155,6 +242,14 @@ ResourceHandle DeferredLightingModule::GetOutputTexture(u32 buffer_index) const 
     return (buffer_index < 3) ? output_textures_[buffer_index] : handles::INVALID_RESOURCE;
 }
 
+void DeferredLightingModule::SetIBLResources(rhi::ResourceHandle irradiance,
+                                             rhi::ResourceHandle prefilter,
+                                             rhi::ResourceHandle brdfLUT) {
+    ibl_irradiance_ = irradiance;
+    ibl_prefilter_ = prefilter;
+    ibl_brdf_lut_ = brdfLUT;
+}
+
 DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGraph& graph,
                                                            const DeferredLightingInputs& inputs) {
     DeferredLightingOutputs outputs{};
@@ -176,6 +271,8 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::Lighting,
         [deferredRG, visRG = inputs.shadow_visibility_rg,
+             mom0RG = inputs.shadow_moments_rg[0],
+             mom1RG = inputs.shadow_moments_rg[1],
              albedoRG = inputs.gbuffer_albedo_rg,
              normalRG = inputs.gbuffer_normal_rg,
              ormRG = inputs.gbuffer_orm_rg,
@@ -184,6 +281,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
 
             if (visRG.IsValid())
                 builder.Read(visRG, ResourceState::ShaderResource);
+            if (mom0RG.IsValid())
+                builder.Read(mom0RG, ResourceState::ShaderResource);
+            if (mom1RG.IsValid())
+                builder.Read(mom1RG, ResourceState::ShaderResource);
 
             // Declare GBuffer texture reads so the render graph inserts
             // RenderTarget → ShaderResource barriers before this pass
@@ -230,28 +331,64 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                     sd->viewPos = math::v4{inputs.camera_position.x, inputs.camera_position.y, inputs.camera_position.z, 1.0f};
                     sd->shadowMatrix0 = inputs.shadow_matrix0;
                     sd->shadowMatrix1 = inputs.shadow_matrix1;
+                    sd->shadowParams = math::v4{
+                        inputs.vsm_enabled ? 1.0f : 0.0f,
+                        inputs.cascade_splits.x,
+                        0.0f, 0.0f};
                     device_->UnmapBuffer(scene_cb_[cbIdx]);
                 }
             }
 
             // Bind resources
             auto depthSampleable = inputs.gpu_draw_pipeline->GetGBufferDepthSampleable();
-            // Note: SSAOPass is forward-declared in the header; the caller sets ssao_pass = nullptr.
-            // SSAO texture binding is handled separately via FusionCompositeModule.
-            ResourceHandle ssaoTex = handles::INVALID_RESOURCE;
+            // T4.6.5 part 24.4 (B2 fix): use fallback_tex_ for invalid bindings
+            // so descriptor has a valid imageView. SSAO/shadow_visibility may
+            // be INVALID when those features aren't enabled.
+            auto validOrFallback = [](ResourceHandle h, ResourceHandle fb) {
+                return h != handles::INVALID_RESOURCE ? h : fb;
+            };
+
+            ResourceHandle albedoTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferAlbedo(), fallback_tex_);
+            ResourceHandle normalTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferNormal(), fallback_tex_);
+            ResourceHandle ormTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferORM(), fallback_tex_);
+            ResourceHandle depthTex = validOrFallback(depthSampleable, fallback_tex_);
+            ResourceHandle shadowVisTex = validOrFallback(inputs.shadow_visibility_tex, fallback_tex_);
+            // SSAO filter output — binding 7. When SSAO pass is absent, fall back
+            // to white (1.0 = unoccluded) so ambient is unchanged.
+            ResourceHandle ssaoTex = fallback_tex_;
+            if (inputs.ssao_pass && inputs.ssao_pass->IsInitialized()) {
+                ResourceHandle ft = inputs.ssao_pass->GetFilterTexture();
+                if (ft != handles::INVALID_RESOURCE) ssaoTex = ft;
+            }
 
             DescData params[] = {
                 {0, DescriptorType::UniformBuffer, view_cb_[cbIdx]},
                 {1, DescriptorType::UniformBuffer, scene_cb_[cbIdx]},
-                {2, DescriptorType::SampledImage, inputs.gpu_draw_pipeline->GetGBufferAlbedo()},
-                {3, DescriptorType::SampledImage, inputs.gpu_draw_pipeline->GetGBufferNormal()},
-                {4, DescriptorType::SampledImage, inputs.gpu_draw_pipeline->GetGBufferORM()},
-                {5, DescriptorType::SampledImage, depthSampleable},
-                {6, DescriptorType::SampledImage, inputs.shadow_visibility_tex},
+                {2, DescriptorType::SampledImage, albedoTex},
+                {3, DescriptorType::SampledImage, normalTex},
+                {4, DescriptorType::SampledImage, ormTex},
+                {5, DescriptorType::SampledImage, depthTex},
+                {6, DescriptorType::SampledImage, shadowVisTex},
+                {7, DescriptorType::SampledImage, ssaoTex},
                 {8, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
-                {9, DescriptorType::SampledImage, ssaoTex},
+                {9, DescriptorType::SampledImage, fallback_tex_},
+                // T4.6.5 part 37: IBL bindings 10/11/12. Fall back to the 1x1
+                // white texture when IBL isn't configured — shader's IBL branch
+                // still samples something valid (white = no ambient tint added).
+                {10, DescriptorType::SampledImage,
+                 validOrFallback(ibl_irradiance_, fallback_tex_)},
+                {11, DescriptorType::SampledImage,
+                 validOrFallback(ibl_prefilter_, fallback_tex_)},
+                {12, DescriptorType::SampledImage,
+                 validOrFallback(ibl_brdf_lut_, fallback_tex_)},
+                // VSM shadow moments (13/14). White fallback keeps Chebyshev
+                // math valid (moments (1,1) → unoccluded) when VSM is off.
+                {13, DescriptorType::SampledImage,
+                 validOrFallback(inputs.shadow_moments_tex[0], fallback_tex_)},
+                {14, DescriptorType::SampledImage,
+                 validOrFallback(inputs.shadow_moments_tex[1], fallback_tex_)},
             };
-            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 9);
+            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 15);
 
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});

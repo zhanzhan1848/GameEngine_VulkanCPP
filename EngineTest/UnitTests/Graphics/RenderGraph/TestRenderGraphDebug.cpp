@@ -81,6 +81,11 @@ public:
     
     virtual RHIGarbageCollector& GetGarbageCollector() override { static RHIGarbageCollector gc; return gc; }
 
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    virtual ResourceHandle CreateTextureView(const TextureViewDesc& desc) override { return handles::INVALID_RESOURCE; }
+    virtual void SetBufferDirtySize(ResourceHandle handle, uint64_t size) override {}
+    virtual RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
+
 private:
     uint32_t dsCounter_ = 1;
 };
@@ -133,6 +138,14 @@ public:
     virtual void GenerateMipmaps(ResourceHandle texture) override {}
     virtual void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override {}
     virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
+
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    virtual void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
+                               uint32_t offset, uint32_t size, const void* pValues) override {}
+    virtual void SetComputeBytes(uint32_t index, const void* data, uint32_t size) override {}
+    virtual void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,
+                               AccessFlag srcAccessMask, AccessFlag dstAccessMask) override {}
+
     virtual bool Initialize() override { return true; }
 
 protected:
@@ -172,7 +185,8 @@ Engine::Test::TestResult TestTexturePreview() {
     RenderGraphTexture resource("TestTexture", {1, 0}, texDesc);
     resource.SetPhysicalHandle({1}); // Valid handle
     
-    std::vector<std::pair<std::string, RenderGraphResource*>> debugResources;
+    // stale-test port: SetDebugResources now takes utl::vector
+    primal::utl::vector<std::pair<std::string, RenderGraphResource*>> debugResources;
     debugResources.push_back({"TestTexture", &resource});
     
     debug.SetDebugResources(debugResources);

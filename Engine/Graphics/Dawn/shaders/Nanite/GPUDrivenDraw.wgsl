@@ -19,9 +19,10 @@
 //  12: texture_2d_array<f32>          — orm_texture_array_
 //  13: sampler                        — texture_sampler_
 
-// Matches C++ DrawConstants (352 bytes). prev_view_matrix at offset 208 is
+// Matches C++ DrawConstants (368 bytes). prev_view_matrix at offset 208 is
 // 16-aligned naturally (208 / 16 = 13). padding2 declared as 3 individual
 // u32s to avoid WGSL vec3<u32> 16-byte alignment pushing the field to 352.
+// jitter (vec2, 8 bytes) + pad3 (2×u32) appended for TAA → 368 bytes total.
 struct DrawConstants {
     view_matrix: mat4x4<f32>,
     proj_matrix: mat4x4<f32>,
@@ -36,6 +37,10 @@ struct DrawConstants {
     debug_mode: u32,   // 0=off, 1=meshlet_id, 2=triangle_id, 3=mesh_id
     pad2_1: u32,
     pad2_2: u32,
+    jitter: vec2<f32>,      // TAA sub-pixel jitter (current frame)
+    prev_jitter: vec2<f32>, // previous frame's jitter — velocity must carry
+                            // jitter on BOTH sides or TAA's reprojection is
+                            // off by (currJitter - prevJitter) pixels.
 };
 
 // Matches C++ RHIMeshlet (64 bytes). See GlobalSDFVoxelization.wgsl.
@@ -188,6 +193,9 @@ struct VSOutput {
     //     → source data fine, InstanceData.world_matrix isn't identity.
     //   mode 5 also tilted → source vertex data or vertex pull is wrong.
     @location(10) object_normal: vec3<f32>,
+    // World-space position for derivative-based geometric-normal orientation
+    // in the fragment shader (stable per-triangle, view-angle independent).
+    @location(11) world_pos: vec3<f32>,
 };
 
 // Hash u32 → vec3 color for debug visualization. Uses the PCG-style hash
@@ -281,14 +289,25 @@ fn gpu_driven_vertex_shader(
     let view_pos = uniforms.view_matrix * world_pos;
     out.position = uniforms.proj_matrix * view_pos;
 
-    // Velocity: current vs previous clip position.
-    out.current_clip = out.position;
+    // TAA jitter: sub-pixel offset in clip space (only current frame;
+    // previous frame used its own jitter, compensated by velocity reprojection).
+    out.position = vec4<f32>(
+        out.position.xy + uniforms.jitter * out.position.w,
+        out.position.zw);
+
+    // Velocity: current vs previous clip position. Both sides carry their
+    // own frame's jitter so the motion vector lands exactly where the
+    // history was rendered (TAA resolves historyUV = currUV - velocity).
+    out.current_clip = out.position;   // already jittered above
     if (uniforms.has_prev_frame != 0u) {
-        out.previous_clip = uniforms.prev_proj_matrix *
-                            (uniforms.prev_view_matrix * world_pos);
+        let prevClip = uniforms.prev_proj_matrix *
+                       (uniforms.prev_view_matrix * world_pos);
+        out.previous_clip = vec4<f32>(
+            prevClip.xy + uniforms.prev_jitter * prevClip.w, prevClip.zw);
     } else {
         out.previous_clip = out.current_clip;
     }
+    out.world_pos = world_pos.xyz;
 
     // Build 3x3 for normal/tangent transform (upper-left of world_matrix).
     var normal_matrix: mat3x3<f32>;
@@ -350,13 +369,21 @@ fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: boo
         return out;
     }
 
-    // CullMode::None means back-faces render. Their stored normal points away
-    // from the camera (toward the sun on the opposite side), which without
-    // correction makes the visible back-face brightly lit while the expected
-    // front face reads dark. Flip N for back-faces and rebuild the TBN basis
-    // from the (possibly flipped) N + T — mirrors ForwardPBR.wgsl:248-251.
+    // Double-sided normal orientation — winding-independent.
+    // CullMode::None renders both sides and meshlet winding varies, so
+    // front_facing is not a reliable orientation signal. Instead, flip N to
+    // face the camera: in view space a visible surface's shading normal must
+    // have positive Z (toward the viewer at the origin looking down -Z).
+    // Replaces the old `if (!is_front) { N = -N; }`.
+    // Double-sided normal orientation — derivative-based geometric normal.
+    // geomN from screen-space position derivatives is constant across each
+    // triangle, so the flip decision is stable. NOTE the cross order: in a
+    // y-down framebuffer cross(dpdx, dpdy) points AWAY from the viewer —
+    // swapping to cross(dpdy, dpdx) makes geomN face the camera so N aligns
+    // with the VISIBLE side.
     var N = normalize(in.normal);
-    if (!is_front) { N = -N; }
+    let geomN = normalize(cross(dpdy(in.world_pos), dpdx(in.world_pos)));
+    if (dot(N, geomN) < 0.0) { N = -N; }
     let T = normalize(in.tangent);
     let B = normalize(cross(N, T));
 
@@ -419,7 +446,11 @@ fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: boo
     if (uniforms.has_prev_frame != 0u) {
         let current_ndc  = in.current_clip.xy / in.current_clip.w;
         let previous_ndc = in.previous_clip.xy / in.previous_clip.w;
-        out.velocity = (current_ndc - previous_ndc) * 0.5;
+        // Full NDC delta — TAA.comp applies its own *0.5 for NDC→UV. The
+        // previous *0.5 here halved the reprojection distance (residual
+        // ±0.5px/frame error → visible crawl the neighborhood clamp could
+        // not fully reject).
+        out.velocity = current_ndc - previous_ndc;
     } else {
         out.velocity = vec2<f32>(0.0);
     }

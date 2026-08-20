@@ -602,6 +602,40 @@ void MetalCommandBuffer::BeginParallelRenderPass(RenderPassHandle renderPass) {
     }
 }
 
+// ============================================================================
+// P4c-F7: Secondary CommandBuffer / 并行录制(Core 统一虚函数对接)
+// ============================================================================
+CommandBufferHandle MetalCommandBuffer::BeginSecondaryCommandBuffer(
+    const SecondaryCommandBufferDesc& desc) {
+    (void)desc;  // Metal parallel 子 encoder 自动继承 parallel encoder 的目标
+    if (isSecondary_ || !parallelRenderEncoder_) {
+        std::cerr << "[MetalCommandBuffer] BeginSecondaryCommandBuffer requires an "
+                     "active parallel render pass on a primary" << std::endl;
+        return handles::INVALID_COMMAND_BUFFER;
+    }
+    MTL::RenderCommandEncoder* subEncoder = parallelRenderEncoder_->renderCommandEncoder();
+    if (!subEncoder) return handles::INVALID_COMMAND_BUFFER;
+
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    u32 id = metalDevice.commandBufferAllocator_.Allocate(metalDevice, type_, subEncoder);
+    return static_cast<CommandBufferHandle>(id);
+}
+
+void MetalCommandBuffer::ExecuteSecondaryCommandBuffers(u32 count,
+                                                         CommandBufferHandle* secondaries) {
+    // Metal:子 encoder 的命令自动并行汇入 parallel encoder — 无需显式
+    // execute 调用;这里只把各 secondary 的 encoder 结束(等同 EndRenderPass
+    // 的 secondary 分支),保证 End 前编码闭合。
+    MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+    for (u32 i = 0; i < count; ++i) {
+        MetalCommandBuffer* sec =
+            metalDevice.commandBufferAllocator_.Get(static_cast<u32>(secondaries[i]));
+        if (sec && sec->isSecondary_) {
+            sec->EndRenderPass();  // secondary 分支:endEncoding
+        }
+    }
+}
+
 MetalCommandBuffer* MetalCommandBuffer::CreateSecondaryCommandBuffer() {
     if (!parallelRenderEncoder_) return nullptr;
     
@@ -1344,7 +1378,50 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
                 return {16, 1, 1};
             case MTL::PixelFormatR32Float:
                 return {4, 1, 1};
-            
+
+            // P4c-F1: F1 格式补全带出的 16/32 位变体(此前缺 case 会落到
+            // {0,0,0} → bytesPerRow=0 → blit 读回全零)
+            // (R16Unorm=20 已由上方数字 case 覆盖)
+            case MTL::PixelFormatR16Snorm:
+            case MTL::PixelFormatR16Uint:
+            case MTL::PixelFormatR16Sint:
+                return {2, 1, 1};
+            // (RG16Unorm=60 已由上方数字 case 覆盖)
+            case MTL::PixelFormatRG16Snorm:
+            case MTL::PixelFormatRG16Uint:
+            case MTL::PixelFormatRG16Sint:
+                return {4, 1, 1};
+            case MTL::PixelFormatRGBA16Unorm:
+            case MTL::PixelFormatRGBA16Snorm:
+            case MTL::PixelFormatRGBA16Uint:
+            case MTL::PixelFormatRGBA16Sint:
+                return {8, 1, 1};
+            case MTL::PixelFormatR32Uint:
+            case MTL::PixelFormatR32Sint:
+                return {4, 1, 1};
+            case MTL::PixelFormatRG32Float:
+            case MTL::PixelFormatRG32Uint:
+            case MTL::PixelFormatRG32Sint:
+                return {8, 1, 1};
+            case MTL::PixelFormatRGBA32Uint:
+            case MTL::PixelFormatRGBA32Sint:
+                return {16, 1, 1};
+
+            // Depth formats (bytes-per-pixel matches the raw depth data layout
+            // for blit copies). Stencil8 shares byte size with R8.
+            // P4c-F1: Depth16Unorm 的历史数值是 100,当前 SDK 枚举值为 250 —
+            // 用枚举名避免再漂移
+            case MTL::PixelFormatDepth16Unorm:
+                return {2, 1, 1};
+            case 252: // MTL::PixelFormatDepth32Float
+                return {4, 1, 1};
+            case 253: // MTL::PixelFormatStencil8
+                return {1, 1, 1};
+            case 255: // MTL::PixelFormatDepth24Unorm_Stencil8 (32bpp, packed)
+                return {4, 1, 1};
+            case 260: // MTL::PixelFormatDepth32Float_Stencil8 (8bpp: 4 depth + 4 stencil pad)
+                return {8, 1, 1};
+
             // Compressed formats (BC/DXT)
             case MTL::PixelFormatBC1_RGBA:
             case MTL::PixelFormatBC1_RGBA_sRGB:

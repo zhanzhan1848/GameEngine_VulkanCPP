@@ -14,6 +14,7 @@
 #include "../../Content/ContentToEngine.h" // Needed for get_rhi_mesh_asset
 #include "../Dawn/ShaderLoader.h"
 #include "../Utils/ShaderRegistry.h"
+#include "../Utils/HaltonSequence.h"
 #include "CommonHeaders.h"
 #include <cassert>
 #include <fstream>
@@ -27,9 +28,12 @@ namespace primal::graphics::nanite {
 
 namespace {
     // N0c: Forks shader loading on backend.
-    //   Metal: loads from EngineTest/shaders/<name>.metal (existing path).
-    //   Dawn:  loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
-    //          (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Metal:  loads from EngineTest/shaders/<name>.metal (existing path).
+    //   Dawn:   loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
+    //           (native) or via dawn::LoadWGSL MEMFS lookup (WASM).
+    //   Vulkan: loads SPIR-V binary from Engine/Graphics/Vulkan/shaders/Nanite/<name>.spv
+    //           via ShaderRegistry. No null terminator (VulkanShader rejects if
+    //           size % 4 != 0 — padding bytes would break the SPIR-V parser).
     std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* entryPoint,
                                        rhi::RHIDeviceBase* device) {
         auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
@@ -72,6 +76,44 @@ namespace {
             }
             return bytecode;
 #endif
+        }
+
+        if (platform == rhi::RHIPlatform::Vulkan) {
+            // T4.6.5 part 35.3: CWD-relative first (works when shaders are
+            // bundled next to the test binary), then worktree source root.
+            // The previous single fallback resolved to the MAIN repo
+            // (feat/wfc-pcg branch) which has stale .spv files.
+            const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
+            std::vector<std::string> candidates;
+            candidates.push_back(relPath);
+            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+
+            std::ifstream file;
+            std::string openedPath;
+            for (const auto& candidate : candidates) {
+                file.open(candidate, std::ios::binary | std::ios::ate);
+                if (file.is_open()) {
+                    openedPath = candidate;
+                    break;
+                }
+            }
+            if (!file.is_open()) {
+                std::cerr << "[GPUDrivenDrawPipeline] Failed to load SPIR-V shader: "
+                          << shaderName << " (entry: " << entryPoint << ")"
+                          << "\n  tried: " << candidates[0]
+                          << "\n  tried: " << candidates[1] << std::endl;
+                return {};
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            // Exact byte count — VulkanShader rejects SPIR-V whose size % 4 != 0.
+            std::vector<u8> bytecode(static_cast<size_t>(size));
+            if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+                std::cerr << "[GPUDrivenDrawPipeline] Failed to read SPIR-V shader: "
+                          << shaderName << " from " << openedPath << std::endl;
+                return {};
+            }
+            return bytecode;
         }
 
         // Metal path (unchanged)
@@ -192,6 +234,11 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (global_element_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_element_buffer_); // 🔥 NEW
         if (cluster_map_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cluster_map_buffer_);
         if (global_instance_data_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_instance_data_buffer_);
+        if (owns_material_data_buffer_ && global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(global_material_data_buffer_);
+        }
+        global_material_data_buffer_ = rhi::handles::INVALID_RESOURCE;
+        owns_material_data_buffer_ = false;
         
         // Destroy test geometry buffers
         if (vertex_position_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(vertex_position_buffer_);
@@ -226,6 +273,28 @@ void GPUDrivenDrawPipeline::Shutdown() {
         if (normal_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(normal_texture_array_);
         if (orm_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(orm_texture_array_);
         if (texture_sampler_ != rhi::handles::INVALID_SAMPLER) device_->DestroySampler(texture_sampler_);
+
+        // T4.6.5 part 20: resolve pipeline resources
+        if (resolve_cb_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(resolve_cb_);
+        if (resolve_output_texture_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(resolve_output_texture_);
+        if (resolve_sampler_ != rhi::handles::INVALID_SAMPLER) device_->DestroySampler(resolve_sampler_);
+        resolve_descriptor_written_ = false;
+
+        // T4.6.5 part 22 + part 30 X10: Stage2 visibility pipeline resources.
+        // Per-frame CB + descriptor set are triple-buffered in frame_resources_.
+        for (auto& fr : frame_resources_) {
+            if (fr.visibility_cb != rhi::handles::INVALID_RESOURCE) {
+                device_->DestroyBuffer(fr.visibility_cb);
+                fr.visibility_cb = rhi::handles::INVALID_RESOURCE;
+            }
+            if (fr.visibility_descriptor_set != rhi::handles::INVALID_DESCRIPTOR_SET) {
+                device_->DestroyDescriptorSet(fr.visibility_descriptor_set);
+                fr.visibility_descriptor_set = rhi::handles::INVALID_DESCRIPTOR_SET;
+            }
+        }
+        if (visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            device_->DestroyDescriptorSetLayout(visibility_descriptor_set_layout_);
+        }
 
         // Cleanup shadow resources
         ShutdownShadowResources();
@@ -265,7 +334,9 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     rhi::TextureDesc visibilityDesc{};
     visibilityDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
     visibilityDesc.format = visibility_config_.format;
-    visibilityDesc.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    // T4.6.5 part 22: RenderTarget for Stage2 color attachment + CopySource for test readback.
+    visibilityDesc.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
+                         | rhi::TextureUsage::RenderTarget | rhi::TextureUsage::CopySource;
 
     visibility_buffer_ = device_->CreateTexture(visibilityDesc);
     if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) {
@@ -293,7 +364,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     frame_resources_.resize(3);
     for (int i = 0; i < 3; ++i) {
         rhi::BufferDesc constantsDesc{};
-        constantsDesc.size = 352; // sizeof(DrawConstants) with prev matrices
+        constantsDesc.size = 368; // sizeof(DrawConstants) with prev matrices + TAA jitter
         constantsDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
         constantsDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic; // Updated every frame
 
@@ -360,12 +431,54 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     // TODO: Initialize with white color or upload actual texture data
     // For now, textures will use default values
 
+    // Material data buffer: if no caller wired one up via SetMaterialDataBuffer,
+    // allocate a small dummy SSBO so binding 9 isn't VK_NULL_HANDLE. Without this,
+    // vkUpdateDescriptorSets + vkCmdDrawIndirect both fire validation errors
+    // (VUID-VkWriteDescriptorSet-descriptorType-00330 + VUID-vkCmdDraw-None-02749).
+    // The pipeline doesn't sample material data when materials aren't bound, so a
+    // 16-byte zeroed buffer is sufficient.
+    if (global_material_data_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        rhi::BufferDesc matDesc{};
+        matDesc.size = 16;
+        matDesc.type = rhi::BufferType::Structured;
+        matDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::Storage);
+        matDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+        matDesc.name = "GPUDrivenDrawPipeline_dummy_material_data";
+        global_material_data_buffer_ = device_->CreateBuffer(matDesc);
+        if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+            owns_material_data_buffer_ = true;
+        } else {
+            std::cerr << "[GPUDrivenDrawPipeline] Failed to create dummy material data buffer" << std::endl;
+            return false;
+        }
+    }
+
     // std::cout << "[GPUDrivenDrawPipeline] Resources created successfully" << std::endl;
     return true;
 }
 
 bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     // std::cout << "[GPUDrivenDrawPipeline] Creating render passes..." << std::endl;
+
+    // T4.6.5 part 22.2: Create final_depth_texture_ FIRST so both
+    // visibility_render_pass_ (Stage2) and final_render_pass_ (Stage3) can
+    // share it as their depth attachment. Previously this was created later
+    // (between GBuffer textures and final_render_pass_), which left
+    // visibility_render_pass_ with a texture-less depth attachment.
+    rhi::TextureDesc finalDepthDesc{};
+    finalDepthDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
+    finalDepthDesc.format = rhi::DataFormat::D32_Float;
+    // DepthStencil = render target for depth. ShaderResource = HZB sampling.
+    // (Do NOT add TextureUsage::RenderTarget — that maps to COLOR_ATTACHMENT_BIT
+    // in Vulkan, which is illegal on a D32_SFLOAT image. Metal silently accepts
+    // the redundant bit; Vulkan rejects with VUID-VkImageCreateInfo-imageCreateMaxMipLevels-02251.)
+    finalDepthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+
+    final_depth_texture_ = device_->CreateTexture(finalDepthDesc);
+    if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[GPUDrivenDrawPipeline] Failed to create final depth texture" << std::endl;
+        return false;
+    }
 
     // Create Visibility Buffer Render Pass — only when the visibility buffer
     // texture was actually created. On Dawn the R32_UInt storage format isn't
@@ -384,8 +497,10 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
         visibilityPassDesc.colorAttachments.push_back(visibilityColorAttachment);
 
-        // Depth attachment
+        // Depth attachment — T4.6.5 part 22.2: share final_depth_texture_ with
+        // Stage3 so both stages share the same depth buffer convention.
         rhi::RenderPassDesc::Attachment depthAttachment{};
+        depthAttachment.texture = final_depth_texture_;
         depthAttachment.format = rhi::DataFormat::D32_Float;
         depthAttachment.loadOp = rhi::LoadAction::Clear;
         depthAttachment.storeOp = rhi::StoreAction::Store;
@@ -455,18 +570,9 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     // Keep final_color_texture_ for compatibility (use albedo as output)
     final_color_texture_ = gbuffer_albedo_texture_;
 
-    // Create depth texture for final render pass
-    rhi::TextureDesc finalDepthDesc{};
-    finalDepthDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
-    finalDepthDesc.format = rhi::DataFormat::D32_Float;
-    // CRITICAL: Add ShaderResource usage to allow depth texture to be sampled by HZB generation shader
-    finalDepthDesc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-
-    final_depth_texture_ = device_->CreateTexture(finalDepthDesc);
-    if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create final depth texture" << std::endl;
-        return false;
-    }
+    // T4.6.5 part 22.2: final_depth_texture_ is now created at the top of
+    // CreateRenderPasses (before visibility_render_pass_) so Stage2 + Stage3
+    // can share it. Skip the duplicate creation here.
 
     rhi::RenderPassDesc finalPassDesc{};
 
@@ -623,9 +729,49 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         );
 
         if (binningShader != rhi::handles::INVALID_SHADER) {
+            // T4.6.5 part 17.2: Vulkan validation rejects pipelines whose SPIR-V
+            // uses descriptors not declared in the layout. Metal is permissive —
+            // empty PipelineLayoutDesc still allows buffer(N) binding at runtime.
+            // Build a 4-binding DSL (clusters/config/bins/bin_counter) on Vulkan
+            // to match ClusterBinning.comp.
+            rhi::PipelineLayoutHandle binningLayout = rhi::handles::INVALID_PIPELINE_LAYOUT;
+            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+            if (isVulkan) {
+                rhi::DescriptorSetLayoutBinding binningBindings[4]{};
+                binningBindings[0].binding = 0;
+                binningBindings[0].descriptorType = rhi::DescriptorType::StorageBuffer;
+                binningBindings[0].descriptorCount = 1;
+                binningBindings[0].stageFlags = rhi::ShaderStage::Compute;
+                binningBindings[1].binding = 1;
+                binningBindings[1].descriptorType = rhi::DescriptorType::UniformBuffer;
+                binningBindings[1].descriptorCount = 1;
+                binningBindings[1].stageFlags = rhi::ShaderStage::Compute;
+                binningBindings[2].binding = 2;
+                binningBindings[2].descriptorType = rhi::DescriptorType::StorageBuffer;
+                binningBindings[2].descriptorCount = 1;
+                binningBindings[2].stageFlags = rhi::ShaderStage::Compute;
+                binningBindings[3].binding = 3;
+                binningBindings[3].descriptorType = rhi::DescriptorType::StorageBuffer;
+                binningBindings[3].descriptorCount = 1;
+                binningBindings[3].stageFlags = rhi::ShaderStage::Compute;
+
+                rhi::DescriptorSetLayoutDesc dslDesc{};
+                dslDesc.bindingCount = 4;
+                dslDesc.bindings = binningBindings;
+                rhi::DescriptorSetLayoutHandle dsl = device_->CreateDescriptorSetLayout(dslDesc);
+
+                rhi::PipelineLayoutDesc plDesc{};
+                plDesc.setLayoutCount = 1;
+                plDesc.setLayouts = &dsl;
+                binningLayout = device_->CreatePipelineLayout(plDesc);
+                // DSL lifecycle: short-lived; safe to release after layout built.
+                device_->DestroyDescriptorSetLayout(dsl);
+            }
+
             rhi::ComputePipelineDesc binningPipelineDesc{};
             binningPipelineDesc.computeShader = binningShader;
-            binningPipelineDesc.threadGroupSize = {64, 1, 1}; // Adjust based on cluster count
+            binningPipelineDesc.threadGroupSize = {64, 1, 1};
+            if (isVulkan) binningPipelineDesc.layout = binningLayout;
 
             binning_pipeline_ = device_->CreateComputePipeline(binningPipelineDesc);
             if (binning_pipeline_ != rhi::handles::INVALID_PIPELINE) {
@@ -633,6 +779,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             } else {
                 std::cerr << "[GPUDrivenDrawPipeline] Failed to create Cluster Binning pipeline" << std::endl;
             }
+            if (isVulkan) device_->DestroyPipelineLayout(binningLayout);
         }
     } else {
         // std::cout << "[GPUDrivenDrawPipeline] Cluster Binning shader not found, using CPU fallback" << std::endl;
@@ -658,10 +805,63 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         );
 
         if (visibilityVS != rhi::handles::INVALID_SHADER && visibilityFS != rhi::handles::INVALID_SHADER) {
-            // Create pipeline layout for visibility buffer
+            // T4.6.5 part 22.1: Vulkan validation rejects pipelines whose SPIR-V
+            // uses descriptors not declared in the layout. Metal is permissive.
+            // Build an 8-binding DSL matching the rewritten VisibilityBuffer.vert
+            // (meshlet-aware vertex pulling, mirrors Stage3).
+            // T4.6.5 part 22.4: Retain the DSL as a member so we can allocate
+            // descriptor sets from it after pipeline creation. Was destroyed
+            // immediately before, which made it impossible to write Stage2 descriptors.
+            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+            if (isVulkan) {
+                rhi::DescriptorSetLayoutBinding visBindings[8]{};
+                visBindings[0].binding = 0;  // UBO  DrawConstants
+                visBindings[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+                visBindings[0].descriptorCount = 1;
+                visBindings[0].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
+                visBindings[1].binding = 1;  // SSBO meshlets
+                visBindings[1].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[1].descriptorCount = 1;
+                visBindings[1].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[2].binding = 2;  // SSBO meshlet_vertices
+                visBindings[2].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[2].descriptorCount = 1;
+                visBindings[2].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[3].binding = 3;  // SSBO meshlet_triangles
+                visBindings[3].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[3].descriptorCount = 1;
+                visBindings[3].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[4].binding = 4;  // SSBO positions (tightly packed float[])
+                visBindings[4].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[4].descriptorCount = 1;
+                visBindings[4].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[5].binding = 5;  // SSBO compact_cluster_ids (visible cluster list)
+                visBindings[5].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[5].descriptorCount = 1;
+                visBindings[5].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[6].binding = 6;  // SSBO cluster_map (uvec4 per entry)
+                visBindings[6].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[6].descriptorCount = 1;
+                visBindings[6].stageFlags = rhi::ShaderStage::Vertex;
+                visBindings[7].binding = 7;  // SSBO instance_data (192B per entry)
+                visBindings[7].descriptorType = rhi::DescriptorType::StorageBuffer;
+                visBindings[7].descriptorCount = 1;
+                visBindings[7].stageFlags = rhi::ShaderStage::Vertex;
+
+                rhi::DescriptorSetLayoutDesc dslDesc{};
+                dslDesc.bindingCount = 8;
+                dslDesc.bindings = visBindings;
+                visibility_descriptor_set_layout_ = device_->CreateDescriptorSetLayout(dslDesc);
+            }
+
             rhi::PipelineLayoutDesc visibilityLayoutDesc{};
-            // TODO: Add descriptor set layouts for cluster data, vertex buffers, etc.
+            if (isVulkan && visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+                visibilityLayoutDesc.setLayoutCount = 1;
+                visibilityLayoutDesc.setLayouts = &visibility_descriptor_set_layout_;
+            }
             visibility_pipeline_layout_ = device_->CreatePipelineLayout(visibilityLayoutDesc);
+            // T4.6.5 part 22.4: Do NOT destroy visibility_descriptor_set_layout_ here.
+            // It must remain alive for descriptor set allocation below + each frame.
 
             if (visibility_pipeline_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
                 rhi::GraphicsPipelineDesc visibilityPipelineDesc{};
@@ -687,6 +887,25 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
                 visibility_pipeline_ = device_->CreateGraphicsPipeline(visibilityPipelineDesc);
                 if (visibility_pipeline_ != rhi::handles::INVALID_PIPELINE) {
+                    // T4.6.5 part 22.4 + part 30 X10: Allocate per-frame CB + descriptor
+                    // set for Stage2, triple-buffered (one slot per FrameResource).
+                    // Single-set version caused VUID-vkUpdateDescriptorSets-None-03047
+                    // when the next frame's Stage2 updated the same set the prior frame's
+                    // cmd buffer was still referencing.
+                    if (isVulkan && visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+                        rhi::BufferDesc visCbDesc{};
+                        visCbDesc.size = 256;  // DrawConstants is 208B (3 m4x4 + 4 u32); 256B padded
+                        visCbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
+                        visCbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+                        for (u32 i = 0; i < frame_resources_.size(); ++i) {
+                            frame_resources_[i].visibility_cb = device_->CreateBuffer(visCbDesc);
+                            frame_resources_[i].visibility_descriptor_set =
+                                device_->CreateDescriptorSet({ visibility_descriptor_set_layout_ });
+                            if (frame_resources_[i].visibility_descriptor_set == rhi::handles::INVALID_DESCRIPTOR_SET) {
+                                std::cerr << "[GPUDrivenDrawPipeline] Failed to allocate visibility descriptor set " << i << std::endl;
+                            }
+                        }
+                    }
                     // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer pipeline created successfully" << std::endl;
                 } else {
                     std::cerr << "[GPUDrivenDrawPipeline] Failed to create Visibility Buffer pipeline" << std::endl;
@@ -697,25 +916,30 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer shaders not found" << std::endl;
     }
     
-    // Load GPU Driven Draw shaders for the main rendering pipeline
-    auto gpuDrawVertexShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_vertex_shader", device_);
-    auto gpuDrawFragmentShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_fragment_shader", device_);
+    // Load GPU Driven Draw shaders (original WGSL-converted SPV).
+    std::vector<u8> gpuDrawVertexShaderCode;
+    std::vector<u8> gpuDrawFragmentShaderCode;
+    gpuDrawVertexShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_vertex_shader", device_);
+    gpuDrawFragmentShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_fragment_shader", device_);
 
     if (!gpuDrawVertexShaderCode.empty() && !gpuDrawFragmentShaderCode.empty()) {
         // std::cout << "[GPUDrivenDrawPipeline] Loaded GPU Draw shaders (" << gpuDrawVertexShaderCode.size()
         //           << " VS bytes, " << gpuDrawFragmentShaderCode.size() << " FS bytes)" << std::endl;
 
+        const char* vsEntry = "gpu_driven_vertex_shader";
+        const char* fsEntry = "gpu_driven_fragment_shader";
+
         rhi::ShaderHandle gpuDrawVS = device_->CreateShader(
             gpuDrawVertexShaderCode.data(),
             gpuDrawVertexShaderCode.size(),
             rhi::ShaderStage::Vertex,
-            "gpu_driven_vertex_shader"
+            vsEntry
         );
         rhi::ShaderHandle gpuDrawFS = device_->CreateShader(
             gpuDrawFragmentShaderCode.data(),
             gpuDrawFragmentShaderCode.size(),
             rhi::ShaderStage::Pixel,
-            "gpu_driven_fragment_shader"
+            fsEntry
         );
 
         // std::cout << "[GPUDrivenDrawPipeline] VS handle: " << gpuDrawVS << ", FS handle: " << gpuDrawFS << std::endl;
@@ -880,26 +1104,37 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     
     // std::cout << "[GPUDrivenDrawPipeline] Creating Visibility Buffer Resolve compute pipeline..." << std::endl;
     
-    rhi::DescriptorSetLayoutBinding resolveBindings[4];
+    rhi::DescriptorSetLayoutBinding resolveBindings[5];
+    // T4.6.5 part 17.4: Vulkan unified buffer+texture namespace. Mirror the
+    // Metal layout (3 textures + 2 buffers) into a single binding sequence:
+    //   0: visibility_buffer (usampler2D / R32UINT combined image sampler)
+    //   1: depth_buffer (sampler2D / D32 combined image sampler)
+    //   2: output_color (storage image RGBA8, write-only)
+    //   3: DrawConstants (UBO)
+    //   4: ClusterData[] (SSBO)
     resolveBindings[0].binding = 0;
-    resolveBindings[0].descriptorType = rhi::DescriptorType::SampledImage;
+    resolveBindings[0].descriptorType = rhi::DescriptorType::CombinedImageSampler;
     resolveBindings[0].descriptorCount = 1;
     resolveBindings[0].stageFlags = rhi::ShaderStage::Compute;
     resolveBindings[1].binding = 1;
-    resolveBindings[1].descriptorType = rhi::DescriptorType::SampledImage;
+    resolveBindings[1].descriptorType = rhi::DescriptorType::CombinedImageSampler;
     resolveBindings[1].descriptorCount = 1;
     resolveBindings[1].stageFlags = rhi::ShaderStage::Compute;
     resolveBindings[2].binding = 2;
-    resolveBindings[2].descriptorType = rhi::DescriptorType::SampledImage;
+    resolveBindings[2].descriptorType = rhi::DescriptorType::StorageImage;
     resolveBindings[2].descriptorCount = 1;
     resolveBindings[2].stageFlags = rhi::ShaderStage::Compute;
     resolveBindings[3].binding = 3;
-    resolveBindings[3].descriptorType = rhi::DescriptorType::StorageBuffer;
+    resolveBindings[3].descriptorType = rhi::DescriptorType::UniformBuffer;
     resolveBindings[3].descriptorCount = 1;
     resolveBindings[3].stageFlags = rhi::ShaderStage::Compute;
+    resolveBindings[4].binding = 4;
+    resolveBindings[4].descriptorType = rhi::DescriptorType::StorageBuffer;
+    resolveBindings[4].descriptorCount = 1;
+    resolveBindings[4].stageFlags = rhi::ShaderStage::Compute;
     
     rhi::DescriptorSetLayoutDesc resolveLayoutDesc{};
-    resolveLayoutDesc.bindingCount = 4;
+    resolveLayoutDesc.bindingCount = 5;
     resolveLayoutDesc.bindings = resolveBindings;
     resolve_descriptor_layout_ = device_->CreateDescriptorSetLayout(resolveLayoutDesc);
     if (resolve_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
@@ -942,16 +1177,32 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     rhi::SamplerDesc resolveSamplerDesc{};
     resolveSamplerDesc.minFilter = rhi::FilterMode::Nearest;
     resolveSamplerDesc.magFilter = rhi::FilterMode::Nearest;
+    // T4.6.5 part 20: R32_UINT visibility buffer has no SAMPLED_IMAGE_FILTER_LINEAR_BIT format
+    // feature — mip filter must also be Nearest or vkCmdDispatch validation fires.
+    resolveSamplerDesc.mipFilter = rhi::FilterMode::Nearest;
     resolveSamplerDesc.addressU = rhi::TextureAddressMode::Clamp;
     resolveSamplerDesc.addressV = rhi::TextureAddressMode::Clamp;
+    // T4.6.5 part 20: MoltenVK portability requires compareEnable=FALSE on non-comparison samplers.
+    // SamplerDesc defaults comparisonFunc=Always which VulkanSampler treats as compareEnable=TRUE
+    // (VUID-VkDescriptorImageInfo-mutableComparisonSamplers-04450).
+    resolveSamplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
     resolve_sampler_ = device_->CreateSampler(resolveSamplerDesc);
-    
+
     rhi::TextureDesc resolveOutputDesc{};
     resolveOutputDesc.size = { visibility_config_.width, visibility_config_.height, 1 };
     resolveOutputDesc.format = rhi::DataFormat::RGBA8_UNorm;
-    resolveOutputDesc.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    // T4.6.5 part 20: UnorderedAccess for imageStore + CopySource for test readback.
+    resolveOutputDesc.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopySource;
     resolve_output_texture_ = device_->CreateTexture(resolveOutputDesc);
-    
+
+    // T4.6.5 part 20: per-frame DrawConstants CB for the resolve compute shader.
+    // Layout: 3 m4x4 (192B) + 4 u32 (16B) = 208 bytes; pad to 256 for 16-byte alignment safety.
+    rhi::BufferDesc resolveCbDesc{};
+    resolveCbDesc.size = 256;
+    resolveCbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
+    resolveCbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    resolve_cb_ = device_->CreateBuffer(resolveCbDesc);
+
     resolve_descriptor_set_ = device_->CreateDescriptorSet({resolve_descriptor_layout_});
     
     // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer Resolve resources created successfully!" << std::endl;
@@ -1115,8 +1366,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     meshletVerticesDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_meshlet_vertices_buffer_ = device_->CreateBuffer(meshletVerticesDesc);
 
-    // Meshlet Triangles (Local Indices)
-    // WebGPU requires storage buffer sizes to be multiples of 4. Pad up.
+    // Meshlet Triangles (Local Indices) — byte-packed u8.
     rhi::BufferDesc meshletTrianglesDesc{};
     const u32 triangleBytesPadded = (totalTriangles + 3u) & ~3u;
     meshletTrianglesDesc.size = triangleBytesPadded;
@@ -1153,6 +1403,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     utl::vector<u32> mergedVertices;
     mergedVertices.reserve(totalVertices);
 
+    // Meshlet triangle indices (byte-packed u8).
     utl::vector<u8> mergedTriangles;
     mergedTriangles.reserve(totalTriangles);
 
@@ -1375,7 +1626,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
                 currentTriangleOffset += (u32)meshAsset.meshlet_triangles.size();
             }
             currentPositionOffset += posCount;
-            
+
             processedGeometries.insert(instance.geometry_id);
         }
     }
@@ -1752,6 +2003,69 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
     cached_view_matrix_ = view_matrix;
     cached_proj_matrix_ = projection_matrix;
 
+    // First-frame: transition placeholder texture arrays (albedo/normal/ORM, 1×1
+    // RGBA8_UNorm) from VK_IMAGE_LAYOUT_UNDEFINED to SHADER_READ_ONLY_OPTIMAL.
+    // Without this, descriptor writes at Stage3 reference SHADER_READ_ONLY but the
+    // images are still in UNDEFINED — vkQueueSubmit validation fires VUID for
+    // each texture (3 errors). The pipeline owns these placeholder textures so
+    // the transition belongs here, not in callers.
+    if (!placeholder_textures_layout_done_) {
+        rhi::ResourceBarrier barriers[3];
+        barriers[0].resource = albedo_texture_array_;
+        barriers[0].beforeState = rhi::ResourceState::Unknown;
+        barriers[0].afterState  = rhi::ResourceState::ShaderResource;
+        barriers[1].resource = normal_texture_array_;
+        barriers[1].beforeState = rhi::ResourceState::Unknown;
+        barriers[1].afterState  = rhi::ResourceState::ShaderResource;
+        barriers[2].resource = orm_texture_array_;
+        barriers[2].beforeState = rhi::ResourceState::Unknown;
+        barriers[2].afterState  = rhi::ResourceState::ShaderResource;
+        cmd_buffer->InsertBarrier(barriers, 3);
+        placeholder_textures_layout_done_ = true;
+    }
+
+    // T4.6.5 part 24.1 (B4 fix): empty-scene no-op. UpdateGeometryData
+    // early-returns leaving global buffers INVALID when the snapshot has no
+    // instances; Stage2/3 would cascade-fail on INVALID descriptor writes.
+    // Skip GPU stages cleanly + let StandardRenderPipeline continue to other
+    // passes (HZB/Deferred/Blit) which don't depend on geometry.
+    //
+    // T4.6.5 part 24.8 (B7 fix): fire Stage3's render pass + transition GBuffer
+    // textures to ShaderResource. Without this, the GBuffer textures stay in
+    // UNDEFINED layout and DeferredLighting's descriptor reads (expecting
+    // SHADER_READ_ONLY_OPTIMAL) trigger VUID-vkCmdDraw-None-09600. RenderGraph
+    // skips barriers for imported resources (RenderGraph.cpp:337-340), so the
+    // transition must happen here in the producer.
+    if (scene_snapshot.GetInstanceCount() == 0 ||
+        scene_snapshot.GetClusterRefCount() == 0) {
+        if (final_render_pass_ != rhi::handles::INVALID_RENDER_PASS) {
+            cmd_buffer->BeginRenderPass(final_render_pass_);
+            cmd_buffer->EndRenderPass();
+
+            // T4.6.5 part 24.8 (B7 fix): transition GBuffer color textures
+            // (albedo/normal/orm/velocity) to ShaderResource. Depth is left
+            // in DEPTH_STENCIL_ATTACHMENT_OPTIMAL from final_render_pass_ —
+            // downstream HZB read needs ShaderResource but a separate
+            // barrier fires VUID-vkCmdPipelineBarrier-None-01224 because the
+            // render pass auto-transition already put the texture in a known
+            // state. The depth UNDEFINED errors come from shadow cascade
+            // textures, not final_depth_texture_.
+            rhi::ResourceBarrier barriers[4];
+            barriers[0].resource = gbuffer_albedo_texture_;
+            barriers[0].beforeState = rhi::ResourceState::RenderTarget;
+            barriers[0].afterState  = rhi::ResourceState::ShaderResource;
+            barriers[0].subresource = rhi::RHI_ALL_SUBRESOURCES;
+            barriers[0].queueFamily = 0xFFFFFFFF;
+            barriers[1] = barriers[0]; barriers[1].resource = gbuffer_normal_texture_;
+            barriers[2] = barriers[0]; barriers[2].resource = gbuffer_orm_texture_;
+            barriers[3] = barriers[0]; barriers[3].resource = gbuffer_velocity_texture_;
+            cmd_buffer->InsertBarrier(barriers, 4);
+        }
+        results_ = {};
+        has_prev_frame_ = false;
+        return true;
+    }
+
     // Update geometry data from scene snapshot
     UpdateGeometryData(scene_snapshot);
 
@@ -1762,16 +2076,30 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
     }
 
     // Stage 2: Visibility Buffer
-    if (!Stage2_VisibilityBuffer(cmd_buffer, scene_snapshot, view_matrix, projection_matrix, frame_index)) {
+    if (!Stage2_VisibilityBuffer(cmd_buffer, scene_snapshot, view_matrix, projection_matrix,
+                                  culling_results, frame_index, buffer_index)) {
         std::cerr << "[GPUDrivenDrawPipeline] Visibility Buffer failed" << std::endl;
         return false;
     }
 
-    // Stage 3: GPU Draw Calls
-    if (!Stage3_GPUDrawCalls(cmd_buffer, scene_snapshot, culling_results, results_, frame_index, buffer_index)) {
-        std::cerr << "[GPUDrivenDrawPipeline] GPU Draw Calls failed" << std::endl;
-        return false;
+    // T4.6.5 part 39: Stage3 only runs in GBuffer (default) or Hybrid modes.
+    // VisibilityBufferOnly mode skips Stage3 — downstream passes read
+    // resolve_output_texture_ instead of GBuffer RTs. Stage2 self-gates on
+    // visibility_pipeline_ != INVALID; in GBuffer mode it's effectively a
+    // no-op (visibility_buffer_ cleared but ResolveVisibilityBuffer produces
+    // background blue).
+    if (render_mode_ != GPURenderMode::VisibilityBufferOnly) {
+        // Stage 3: GPU Draw Calls
+        if (!Stage3_GPUDrawCalls(cmd_buffer, scene_snapshot, culling_results, results_, frame_index, buffer_index)) {
+            std::cerr << "[GPUDrivenDrawPipeline] GPU Draw Calls failed" << std::endl;
+            return false;
+        }
     }
+
+    // T4.6.5 part 23: auto-resolve. Execute() now leaves resolve_output_texture_
+    // populated; callers no longer need a separate ResolveVisibilityBuffer() call.
+    // Self-gates on INVALID handles, so this is safe even when Stage2 was skipped.
+    ResolveVisibilityBuffer(cmd_buffer);
 
     if (frame_index == 0) {
 //        std::cout << "[GPUDrivenDrawPipeline] Pipeline execution complete" << std::endl;
@@ -1844,18 +2172,180 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
                                                     const RenderSceneSnapshot& scene_snapshot,
                                                     const math::m4x4& view_matrix,
                                                     const math::m4x4& projection_matrix,
-                                                    u32 frame_index) {
-    // Skip Stage2 for now - we'll do everything in Stage3 with GPU Indirect Draw
-    // This avoids the complexity of managing two different rendering paths and shader compatibility issues
+                                                    const CullingResults& culling_results,
+                                                    u32 frame_index,
+                                                    u32 buffer_index) {
+    (void)view_matrix;
+    (void)projection_matrix;
+
+    // T4.6.5 part 22.5: Stage2 rasterizes meshlets into visibility_buffer_
+    // (R32_UINT packed (meshlet_id<<24)|primitive_id). Stage3 then rasterizes
+    // the same meshlets to GBuffer using a separate pipeline. Both stages
+    // share final_depth_texture_ as their depth attachment.
+    //
+    // Bail-out conditions: Stage2 only runs if the visibility pipeline,
+    // render pass, per-frame CB, and descriptor set are all initialized.
+    // On Dawn the R32_UInt storage format isn't always supported, so
+    // visibility_buffer_ may be INVALID — skip silently in that case.
+    if (visibility_pipeline_ == rhi::handles::INVALID_PIPELINE) return true;
+    if (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS) return true;
+    if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) return true;
+
+    // T4.6.5 part 30 X10: per-frame CB + descriptor set (triple-buffered).
+    u32 visResourceIndex = buffer_index;
+    if (visResourceIndex >= frame_resources_.size()) visResourceIndex = 0;
+    FrameResource& visFrame = frame_resources_[visResourceIndex];
+    if (visFrame.visibility_cb == rhi::handles::INVALID_RESOURCE) return true;
+    if (visFrame.visibility_descriptor_set == rhi::handles::INVALID_DESCRIPTOR_SET) return true;
+
+    // T4.6.5 part 30.3 (null-buffer guard): Stage2 writes 8 descriptor bindings
+    // from global geometry buffers. If UpdateGeometryData hasn't populated them
+    // yet (first frame, or empty scene slipped past the Execute-level guard),
+    // the writes would feed VK_NULL_HANDLE to vkUpdateDescriptorSets and the
+    // subsequent DrawIndirect would fire VUID-vkCmdDraw-None-02729. Skip
+    // cleanly — Stage3 has the same guard, and Execute's auto-resolve is a
+    // no-op when visibility_buffer_ was never written.
+    if (global_meshlet_buffer_           == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_  == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_            == rhi::handles::INVALID_RESOURCE ||
+        cluster_map_buffer_              == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_     == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
 
     if (results_.bin_count == 0) {
         results_.bin_count = 1;
         results_.total_clusters_rendered = 0;
     }
 
-    if (frame_index == 0) {
-//        std::cout << "[GPUDrivenDrawPipeline] Stage 2: Skipping visibility buffer, using Stage3 GPU Indirect Draw" << std::endl;
+    // 1. Fill DrawConstants CB (matches VisibilityBuffer.vert struct layout:
+    // 3 m4x4 + 4 u32 = 208 bytes).
+    struct VisDrawConstants {
+        math::m4x4 view_matrix;
+        math::m4x4 proj_matrix;
+        math::m4x4 world_matrix;
+        u32 view_width;
+        u32 view_height;
+        u32 meshlet_count;
+        u32 _pad;
+    };
+    VisDrawConstants dc{};
+    dc.view_matrix = cached_view_matrix_;
+    dc.proj_matrix = cached_proj_matrix_;
+    dc.world_matrix = rhi::math::MatrixIdentity();
+    dc.view_width = visibility_config_.width;
+    dc.view_height = visibility_config_.height;
+    dc.meshlet_count = total_meshlet_count_;
+
+    void* mapped = device_->MapBuffer(visFrame.visibility_cb);
+    if (mapped) {
+        memcpy(mapped, &dc, sizeof(dc));
+        device_->UnmapBuffer(visFrame.visibility_cb);
     }
+
+    // 2. Resolve read_buffer_index + per-frame buffers FIRST.
+    // compact_cluster_ids (visible cluster list) changes every frame, so the
+    // descriptor set must be rewritten unconditionally — not one-shot.
+    // Same-frame read: culling and visibility raster are sequenced in the same
+    // command buffer (pipeline barrier guarantees ordering).
+    u32 read_buffer_index = buffer_index;
+    rhi::ResourceHandle indirectBuffer = rhi::handles::INVALID_RESOURCE;
+    if (culling_pipeline_) {
+        indirectBuffer = culling_pipeline_->GetIndirectBuffer(read_buffer_index);
+    } else if (culling_results.indirect_args_buffer != rhi::handles::INVALID_RESOURCE) {
+        indirectBuffer = culling_results.indirect_args_buffer;
+    }
+    if (indirectBuffer == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[Stage2] No valid indirect buffer — skipping visibility raster" << std::endl;
+        return false;
+    }
+    rhi::ResourceHandle correctVisibleClusterBuffer = culling_results.visible_cluster_list_buffer;
+    if (culling_pipeline_) {
+        correctVisibleClusterBuffer = culling_pipeline_->GetVisibleClusterListBuffer(read_buffer_index);
+    }
+
+    // 3. Write descriptor set every frame (8 bindings) into the per-frame set.
+    rhi::DescriptorBufferInfo cbInfo{ visFrame.visibility_cb, 0, ~0ULL };
+    rhi::DescriptorBufferInfo meshletInfo{ global_meshlet_buffer_, 0, ~0ULL };
+    rhi::DescriptorBufferInfo meshletVertsInfo{ global_meshlet_vertices_buffer_, 0, ~0ULL };
+    rhi::DescriptorBufferInfo meshletTrisInfo{ global_meshlet_triangles_buffer_, 0, ~0ULL };
+    rhi::DescriptorBufferInfo positionsInfo{ global_vertex_buffer_, 0, ~0ULL };
+    rhi::DescriptorBufferInfo compactClusterInfo{ correctVisibleClusterBuffer, 0, ~0ULL };
+    rhi::DescriptorBufferInfo clusterMapInfo{ cluster_map_buffer_, 0, ~0ULL };
+    rhi::DescriptorBufferInfo instanceInfo{ global_instance_data_buffer_, 0, ~0ULL };
+
+    rhi::WriteDescriptorSet writes[8];
+    writes[0].dstSet = visFrame.visibility_descriptor_set;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+    writes[0].bufferInfo = &cbInfo;
+
+    writes[1].dstSet = visFrame.visibility_descriptor_set;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[1].bufferInfo = &meshletInfo;
+
+    writes[2].dstSet = visFrame.visibility_descriptor_set;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[2].bufferInfo = &meshletVertsInfo;
+
+    writes[3].dstSet = visFrame.visibility_descriptor_set;
+    writes[3].dstBinding = 3;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[3].bufferInfo = &meshletTrisInfo;
+
+    writes[4].dstSet = visFrame.visibility_descriptor_set;
+    writes[4].dstBinding = 4;
+    writes[4].descriptorCount = 1;
+    writes[4].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[4].bufferInfo = &positionsInfo;
+
+    writes[5].dstSet = visFrame.visibility_descriptor_set;
+    writes[5].dstBinding = 5;
+    writes[5].descriptorCount = 1;
+    writes[5].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[5].bufferInfo = &compactClusterInfo;
+
+    writes[6].dstSet = visFrame.visibility_descriptor_set;
+    writes[6].dstBinding = 6;
+    writes[6].descriptorCount = 1;
+    writes[6].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[6].bufferInfo = &clusterMapInfo;
+
+    writes[7].dstSet = visFrame.visibility_descriptor_set;
+    writes[7].dstBinding = 7;
+    writes[7].descriptorCount = 1;
+    writes[7].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[7].bufferInfo = &instanceInfo;
+
+    device_->UpdateDescriptorSets(8, writes);
+
+    // 4. BeginRenderPass + viewport + bind + draw.
+    cmd_buffer->BeginRenderPass(visibility_render_pass_);
+    cmd_buffer->SetViewport({
+        {0, 0},
+        {static_cast<float>(visibility_config_.width), static_cast<float>(visibility_config_.height)},
+        0, 1
+    });
+    cmd_buffer->SetScissor({
+        {0, 0},
+        {visibility_config_.width, visibility_config_.height}
+    });
+    cmd_buffer->BindGraphicsPipeline(visibility_pipeline_);
+
+    const rhi::DescriptorSetHandle dsHandles[] = { visFrame.visibility_descriptor_set };
+    cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics,
+                                    visibility_pipeline_layout_,
+                                    0, 1, dsHandles, 0, nullptr);
+
+    cmd_buffer->DrawIndirect(indirectBuffer, 0, 1);
+    cmd_buffer->EndRenderPass();
 
     return true;
 }
@@ -1868,14 +2358,6 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
                                                  u32 buffer_index) {
     (void)intermediate_results;
 
-    static u32 s3diag = 0;
-    if (s3diag < 5) {
-        std::cout << "[Stage3] ENTER frame=" << frame_index << " bufIdx=" << buffer_index
-                  << " draw_pipeline=" << draw_pipeline_ << " renderPass=" << final_render_pass_
-                  << " cluster_map=" << cluster_map_buffer_ << " instance_data=" << global_instance_data_buffer_
-                  << " final_color=" << final_color_texture_ << std::endl;
-        s3diag++;
-    }
 
     if (results_.bin_count == 0) {
         results_.bin_count = 1;
@@ -1899,11 +2381,22 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     // Validate that we have the necessary pre-built buffers
     if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
-        final_color_texture_ == rhi::handles::INVALID_RESOURCE) {
+        final_color_texture_ == rhi::handles::INVALID_RESOURCE ||
+        // T4.6.5 part 30.3: extend guard to cover all 8 SSBOs written below.
+        // Without these, vkUpdateDescriptorSets feeds VK_NULL_HANDLE and
+        // DrawIndirect fires VUID-vkCmdDraw-None-02729 cascade.
+        global_meshlet_buffer_           == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_  == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_            == rhi::handles::INVALID_RESOURCE) {
         std::cerr << "[GPUDraw] Frame " << frame_index << " ERROR: Invalid resources:" << std::endl;
         std::cerr << "  cluster_map_buffer_: " << cluster_map_buffer_ << std::endl;
         std::cerr << "  global_instance_data_buffer_: " << global_instance_data_buffer_ << std::endl;
         std::cerr << "  final_color_texture_: " << final_color_texture_ << std::endl;
+        std::cerr << "  global_meshlet_buffer_: " << global_meshlet_buffer_ << std::endl;
+        std::cerr << "  global_meshlet_vertices_buffer_: " << global_meshlet_vertices_buffer_ << std::endl;
+        std::cerr << "  global_meshlet_triangles_buffer_: " << global_meshlet_triangles_buffer_ << std::endl;
+        std::cerr << "  global_vertex_buffer_: " << global_vertex_buffer_ << std::endl;
         cmd_buffer->EndRenderPass();
         return false;
     }
@@ -1918,7 +2411,13 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     // from buffer[N] when frame N+3's Stage 0 resets it. Reading from buffer[(N+1)%3]
     // (1-frame delay) ensures the GPU has finished reading before we write again.
     // This is the standard triple-buffer synchronization pattern.
-    u32 read_buffer_index = (buffer_index + frame_resources_.size() - 1) % frame_resources_.size();
+    //
+    // HOWEVER: within a single command buffer (Vulkan RG path), the culling pass
+    // and draw pass are sequenced by pipeline barriers — reading the SAME frame's
+    // culling results is safe and correct. The N-1 delay was a Metal remnant that
+    // caused the first frame to read uninitialized indirect args (slot N-1 never
+    // written), producing near-empty GBuffer. Use buffer_index (same-frame read).
+    u32 read_buffer_index = buffer_index;
 
     rhi::DescriptorSetHandle globalDrawDS = currentFrame.global_draw_descriptor_set;
     rhi::ResourceHandle cameraConstBuffer = currentFrame.camera_constants_buffer;
@@ -1947,6 +2446,11 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
         u32 has_prev_frame;            // 1 if previous frame data is available
         u32 debug_mode;                // 0=off, 1=meshlet, 2=triangle, 3=mesh
         u32 padding2[2];               // Alignment padding to 16 bytes
+        // --- TAA jitter (368 bytes total) ---
+        math::v2 jitter;               // TAA sub-pixel jitter (current frame)
+        math::v2 prev_jitter;          // previous frame's jitter — velocity
+                                       // must be jitter-inclusive on BOTH
+                                       // sides for TAA's reprojection.
     } drawConsts;
 
     drawConsts.view_matrix = cached_view_matrix_;
@@ -1963,6 +2467,12 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     drawConsts.has_prev_frame = has_prev_frame_ ? 1u : 0u;
     drawConsts.debug_mode = meshlet_debug_mode_;
     drawConsts.padding2[0] = drawConsts.padding2[1] = 0;
+    // TAA sub-pixel jitter (Halton(2,3) sequence, 16-sample cycle).
+    drawConsts.jitter = jitter_enabled_
+        ? utils::GetJitterOffset(frame_index, visibility_config_.width, visibility_config_.height)
+        : math::v2{0.0f, 0.0f};
+    drawConsts.prev_jitter = prev_jitter_;   // what the previous frame rendered with
+    prev_jitter_ = drawConsts.jitter;        // store for next frame
 
     void* constData = device_->MapBuffer(cameraConstBuffer);
     if (constData) {
@@ -2108,13 +2618,6 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     DrawStreamingMeshes(cmd_buffer);
 
     // Indirect Draw
-    static u32 drawDiag = 0;
-    if (drawDiag < 5) {
-        std::cout << "[Stage3] PreDraw: culling_pipeline=" << (void*)culling_pipeline_
-                  << " read_bufIdx=" << read_buffer_index
-                  << " draw_pipeline=" << draw_pipeline_ << std::endl;
-        drawDiag++;
-    }
 
     // DrawIndirect — use the culling pipeline's indirect args from the SAME
     // frame slot as the visible cluster list (read_buffer_index). Mixing
@@ -2187,18 +2690,111 @@ rhi::ResourceHandle GPUDrivenDrawPipeline::GetPreviousFrameDepth() {
 }
 
 void GPUDrivenDrawPipeline::ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer) {
-//    std::cout << "[GPUDrivenDrawPipeline] Resolving Visibility Buffer..." << std::endl;
+    if (!initialized_) return;
+    if (resolve_pipeline_ == rhi::handles::INVALID_PIPELINE) return;
+    if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) return;
+    if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) return;
+    if (resolve_cb_ == rhi::handles::INVALID_RESOURCE) return;
+    if (resolve_descriptor_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) return;
 
-    // TODO: Implement full-screen quad render to resolve visibility buffer
-    // This should:
-    // 1. Render a full-screen quad
-    // 2. In fragment shader, read visibility buffer and depth buffer
-    // 3. For each pixel, reconstruct geometry from visibility data
-    // 4. Apply proper materials and lighting
-    // 5. Write final color to output
+    // 1. Fill DrawConstants CB (matches shader layout at VisibilityBufferResolve.comp:23-31).
+    struct ResolveDrawConstants {
+        math::m4x4 view_matrix;
+        math::m4x4 proj_matrix;
+        math::m4x4 world_matrix;
+        u32 view_width;
+        u32 view_height;
+        u32 meshlet_count;
+        u32 _pad;
+    };
+    ResolveDrawConstants dc{
+        cached_view_matrix_,
+        cached_proj_matrix_,
+        rhi::math::MatrixIdentity(),
+        visibility_config_.width,
+        visibility_config_.height,
+        total_meshlet_count_,
+        0
+    };
+    void* mapped = device_->MapBuffer(resolve_cb_);
+    if (mapped) {
+        memcpy(mapped, &dc, sizeof(dc));
+        device_->UnmapBuffer(resolve_cb_);
+    }
 
-    // For now, this is a placeholder
-//    std::cout << "[GPUDrivenDrawPipeline] Visibility buffer resolve - PLACEHOLDER" << std::endl;
+    // 2. Write descriptor set (once — resource handles don't change across frames).
+    if (!resolve_descriptor_written_) {
+        rhi::DescriptorImageInfo visInfo{ resolve_sampler_, visibility_buffer_, rhi::ResourceState::ShaderResource };
+        rhi::DescriptorImageInfo depthInfo{ resolve_sampler_, final_depth_texture_, rhi::ResourceState::ShaderResource };
+        rhi::DescriptorImageInfo outInfo{ rhi::handles::INVALID_SAMPLER, resolve_output_texture_, rhi::ResourceState::UnorderedAccess };
+        rhi::DescriptorBufferInfo cbInfo{ resolve_cb_, 0, ~0ULL };
+        rhi::DescriptorBufferInfo meshletInfo{ global_meshlet_buffer_, 0, ~0ULL };
+
+        rhi::WriteDescriptorSet writes[5];
+        writes[0].dstSet = resolve_descriptor_set_;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = rhi::DescriptorType::CombinedImageSampler;
+        writes[0].imageInfo = &visInfo;
+        writes[1] = writes[0];
+        writes[1].dstBinding = 1;
+        writes[1].imageInfo = &depthInfo;
+        writes[2] = writes[0];
+        writes[2].dstBinding = 2;
+        writes[2].descriptorType = rhi::DescriptorType::StorageImage;
+        writes[2].imageInfo = &outInfo;
+        writes[3] = writes[0];
+        writes[3].dstBinding = 3;
+        writes[3].descriptorType = rhi::DescriptorType::UniformBuffer;
+        writes[3].imageInfo = nullptr;
+        writes[3].bufferInfo = &cbInfo;
+        writes[4] = writes[3];
+        writes[4].dstBinding = 4;
+        writes[4].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[4].bufferInfo = &meshletInfo;
+
+        device_->UpdateDescriptorSets(5, writes);
+        resolve_descriptor_written_ = true;
+    }
+
+    // 3. Layout transitions before dispatch.
+    //    visibility_buffer_ (T4.6.5 part 22): Stage2 now rasterizes into it, so
+    //    before-state is RenderTarget (COLOR_ATTACHMENT_OPTIMAL). Using Unknown
+    //    (UNDEFINED) discards Stage2's content and resolve reads zeros.
+    //    final_depth_texture_: Stage3 leaves it in DepthStencil (after
+    //    storeOp=Store). Transition to ShaderResource.
+    //    resolve_output_texture_ → UnorderedAccess (storage image, GENERAL).
+    rhi::ResourceBarrier barriers[3];
+    barriers[0].resource = visibility_buffer_;
+    barriers[0].beforeState = rhi::ResourceState::RenderTarget;
+    barriers[0].afterState = rhi::ResourceState::ShaderResource;
+    barriers[1].resource = final_depth_texture_;
+    barriers[1].beforeState = rhi::ResourceState::DepthStencil;
+    barriers[1].afterState = rhi::ResourceState::ShaderResource;
+    barriers[2].resource = resolve_output_texture_;
+    barriers[2].beforeState = rhi::ResourceState::Unknown;
+    barriers[2].afterState = rhi::ResourceState::UnorderedAccess;
+    cmd_buffer->InsertBarrier(barriers, 3);
+
+    // 4. Bind + dispatch.
+    cmd_buffer->BindComputePipeline(resolve_pipeline_);
+    const rhi::DescriptorSetHandle sets[] = { resolve_descriptor_set_ };
+    cmd_buffer->BindDescriptorSets(
+        rhi::PipelineBindPoint::Compute,
+        resolve_pipeline_layout_,
+        0, 1, sets,
+        0, nullptr
+    );
+    const u32 gx = (visibility_config_.width + 7) / 8;
+    const u32 gy = (visibility_config_.height + 7) / 8;
+    cmd_buffer->Dispatch(gx, gy, 1);
+
+    // 5. Transition output to CopySource so the test/caller can read it back.
+    rhi::ResourceBarrier after;
+    after.resource = resolve_output_texture_;
+    after.beforeState = rhi::ResourceState::UnorderedAccess;
+    after.afterState = rhi::ResourceState::CopySource;
+    cmd_buffer->InsertBarrier(&after, 1);
 }
 
 // ============================================================================
@@ -2331,12 +2927,58 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         }
     }
 
+    // --- VSM moments graphics pipeline (ShadowDepth VS + moments FS) ---
+    // Writes (z, z²) into an RG32_Float color target while depth-testing
+    // against the shared D32 — replaces the D32→R32 blit + ShadowFilter chain
+    // when VSM is enabled. Vertex pulling bindings are identical to the
+    // depth-only pipeline, so it reuses shadow_depth_layout_.
+    {
+        // Vulkan SPIR-V carries a stage suffix in the file name
+        // (Nanite/ShadowMoments.frag.spv); Metal source is
+        // EngineTest/shaders/ShadowMoments.metal.
+        const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+        auto momentsCode = LoadShaderBytecode(isVulkan ? "ShadowMoments.frag" : "ShadowMoments",
+                                              "shadow_moments_fs", device_);
+        if (momentsCode.empty()) {
+            std::cerr << "[Shadow] Failed to load ShadowMoments fragment shader" << std::endl;
+            return false;
+        }
+        auto momentsFS = device_->CreateShader(momentsCode.data(), momentsCode.size(),
+                                               rhi::ShaderStage::Pixel,
+                                               isVulkan ? "main" : "shadow_moments_fs");
+        if (momentsFS == rhi::handles::INVALID_SHADER) {
+            std::cerr << "[Shadow] Failed to create ShadowMoments fragment shader" << std::endl;
+            return false;
+        }
+
+        rhi::GraphicsPipelineDesc desc{};
+        desc.layout = shadow_depth_layout_;
+        desc.vertexShader = depthVS;
+        desc.pixelShader = momentsFS;
+        desc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = rhi::ComparisonFunc::Less;
+        desc.renderTargetCount = 1;
+        desc.renderTargetFormats[0] = rhi::DataFormat::RG32_Float;
+        desc.cullMode = rhi::CullMode::Back;
+        desc.vertexAttributes.clear();
+        desc.vertexBindings.clear();
+
+        shadow_moments_pipeline_ = device_->CreateGraphicsPipeline(desc);
+        if (shadow_moments_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[Shadow] Failed to create shadow moments graphics pipeline" << std::endl;
+            return false;
+        }
+    }
+
     // --- Shadow blit descriptor layout (3 bindings) ---
     // N1a: On Dawn the source is texture_depth_2d (D32_Float depth target) and
     // must be bound as SampledDepthImage. Metal treats depth and color textures
     // uniformly via SampledImage.
     {
-        bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+        bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
         rhi::DescriptorSetLayoutBinding blitBindings[3];
         blitBindings[0].binding = 0;
         blitBindings[0].descriptorType = isDawn ? rhi::DescriptorType::SampledDepthImage
@@ -2387,6 +3029,20 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 auto& rt = (cascade == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
                 rt = device_->CreateTexture(desc);
                 if (rt == rhi::handles::INVALID_RESOURCE) return false;
+            }
+
+            // VSM moments (RG32_Float, 2048x2048) — color target of the
+            // moments raster pass, blurred in place by BlurPass afterwards.
+            {
+                rhi::TextureDesc desc{};
+                desc.size = {2048, 2048, 1};
+                desc.format = rhi::DataFormat::RG32_Float;
+                desc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
+                              rhi::TextureUsage::UnorderedAccess;
+                desc.memoryUsage = rhi::GPUMemoryUsage::Static;
+                auto& mom = (cascade == 0) ? frame.shadow_moments_0 : frame.shadow_moments_1;
+                mom = device_->CreateTexture(desc);
+                if (mom == rhi::handles::INVALID_RESOURCE) return false;
             }
 
             // Shadow map sampleable (R32_Float, 2048x2048)
@@ -2509,9 +3165,11 @@ void GPUDrivenDrawPipeline::ShutdownShadowResources() {
         // Cascade 0 resources
         if (frame.shadow_depth_rt_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_depth_rt_0); frame.shadow_depth_rt_0 = rhi::handles::INVALID_RESOURCE; }
         if (frame.shadow_map_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_map_0); frame.shadow_map_0 = rhi::handles::INVALID_RESOURCE; }
+        if (frame.shadow_moments_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_moments_0); frame.shadow_moments_0 = rhi::handles::INVALID_RESOURCE; }
         // Cascade 1 resources
         if (frame.shadow_depth_rt_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_depth_rt_1); frame.shadow_depth_rt_1 = rhi::handles::INVALID_RESOURCE; }
         if (frame.shadow_map_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_map_1); frame.shadow_map_1 = rhi::handles::INVALID_RESOURCE; }
+        if (frame.shadow_moments_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_moments_1); frame.shadow_moments_1 = rhi::handles::INVALID_RESOURCE; }
 
         for (u32 cascade = 0; cascade < 2; ++cascade) {
             if (frame.visible_counter_buffer[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyBuffer(frame.visible_counter_buffer[cascade]); frame.visible_counter_buffer[cascade] = rhi::handles::INVALID_RESOURCE; }
@@ -2529,6 +3187,7 @@ void GPUDrivenDrawPipeline::ShutdownShadowResources() {
     if (shadow_cull_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_cull_pipeline_); shadow_cull_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_finalize_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_finalize_pipeline_); shadow_finalize_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_depth_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_depth_pipeline_); shadow_depth_pipeline_ = rhi::handles::INVALID_PIPELINE; }
+    if (shadow_moments_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_moments_pipeline_); shadow_moments_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_blit_pipeline_ != rhi::handles::INVALID_PIPELINE) { device_->DestroyPipeline(shadow_blit_pipeline_); shadow_blit_pipeline_ = rhi::handles::INVALID_PIPELINE; }
     if (shadow_cull_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(shadow_cull_layout_); shadow_cull_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT; }
     if (shadow_depth_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(shadow_depth_layout_); shadow_depth_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT; }
@@ -2617,6 +3276,11 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
                                                    u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (cascade_index > 1) return false;
+
+    // T4.6.5 part 24.1 (B4 fix): mirror Execute's empty-scene guard. Without
+    // this, ExecuteShadowRaster's "geometry buffers not ready" path fires per
+    // cascade per frame even though Execute() is now clean.
+    if (scene_snapshot.GetInstanceCount() == 0) return true;
 
     // Ensure global geometry buffers are built before shadow passes run
     UpdateGeometryData(scene_snapshot);
@@ -2736,19 +3400,19 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
     auto& ds = frame.shadow_depth_descriptor_set[cascade_index];
     auto& depthRT = (cascade_index == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
 
-    // Validate critical geometry buffers before proceeding
+    // Validate critical geometry buffers before proceeding.
+    // T4.6.5 part 24.1 (B4 fix): post-empty-scene-guard, INVALID buffers here
+    // means the cascade from ExecuteShadowCulling's empty-scene early-return —
+    // not a real error. Silently skip; logging every frame floods production
+    // output. Real "geometry not ready" bugs surface via Stage3's explicit
+    // INVALID-buffer guard which still logs.
     if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_meshlet_vertices_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_vertex_buffer_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[ShadowRaster] ERROR: geometry buffers not ready (cluster_map="
-                  << cluster_map_buffer_ << " instances=" << global_instance_data_buffer_
-                  << " meshlets=" << global_meshlet_buffer_ << " verts=" << global_meshlet_vertices_buffer_
-                  << " tris=" << global_meshlet_triangles_buffer_ << " positions=" << global_vertex_buffer_
-                  << ")" << std::endl;
-        return false;
+        return true;
     }
 
     // Upload ShadowDepthUniforms
@@ -2817,11 +3481,119 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
     return true;
 }
 
+bool GPUDrivenDrawPipeline::ExecuteShadowMomentsRaster(rhi::RHICommandBuffer* cmd_buffer,
+                                                        const math::m4x4& light_view_projection,
+                                                        u32 cascade_index,
+                                                        u32 buffer_index) {
+    if (!shadow_initialized_ || !cmd_buffer) return false;
+    if (cascade_index > 1) return false;
+    if (shadow_moments_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
+
+    u32 bi = buffer_index % 3;
+    auto& frame = shadow_frames_[bi];
+    auto& ds = frame.shadow_depth_descriptor_set[cascade_index];
+    auto& depthRT = (cascade_index == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
+    auto& momentsRT = (cascade_index == 0) ? frame.shadow_moments_0 : frame.shadow_moments_1;
+
+    // Same geometry-readiness guard as ExecuteShadowRaster (B4 fix).
+    if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
+
+    // Upload ShadowDepthUniforms — identical layout to the depth-only path;
+    // the moments pipeline reuses the same vertex shader and descriptor set.
+    struct ShadowDepthCB {
+        float light_view_projection[16];
+        u32 visible_cluster_count;
+        u32 padding[3];
+    } depthCB;
+
+    memcpy(depthCB.light_view_projection, &light_view_projection, sizeof(float) * 16);
+    depthCB.visible_cluster_count = shadow_max_clusters_;
+    depthCB.padding[0] = depthCB.padding[1] = depthCB.padding[2] = 0;
+
+    void* mapped = device_->MapBuffer(frame.shadow_depth_cb[cascade_index]);
+    if (mapped) {
+        memcpy(mapped, &depthCB, sizeof(ShadowDepthCB));
+        device_->UnmapBuffer(frame.shadow_depth_cb[cascade_index]);
+    }
+
+    rhi::DescriptorBufferInfo bufInfos[8];
+    rhi::WriteDescriptorSet writes[8];
+    for (int i = 0; i < 8; ++i) {
+        writes[i] = {};
+        writes[i].dstSet = ds;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[i].bufferInfo = &bufInfos[i];
+    }
+    writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+
+    bufInfos[0] = { frame.shadow_depth_cb[cascade_index], 0, sizeof(ShadowDepthCB) };
+    bufInfos[1] = { frame.visible_clusters_buffer[cascade_index], 0, ~0ULL };
+    bufInfos[2] = { cluster_map_buffer_, 0, ~0ULL };
+    bufInfos[3] = { global_instance_data_buffer_, 0, ~0ULL };
+    bufInfos[4] = { global_meshlet_buffer_, 0, ~0ULL };
+    bufInfos[5] = { global_meshlet_vertices_buffer_, 0, ~0ULL };
+    bufInfos[6] = { global_meshlet_triangles_buffer_, 0, ~0ULL };
+    bufInfos[7] = { global_vertex_buffer_, 0, ~0ULL };
+
+    device_->UpdateDescriptorSets(8, writes);
+
+    // Color = moments (cleared to (1,1) = fully lit), depth = shared D32 for
+    // correct self-occlusion during raster.
+    rhi::RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(1);
+    rpDesc.colorAttachments[0].texture = momentsRT;
+    rpDesc.colorAttachments[0].format = rhi::DataFormat::RG32_Float;
+    rpDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
+    rpDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+    rpDesc.colorAttachments[0].clearValue = rhi::ClearValue{math::v4{1.0f, 1.0f, 1.0f, 1.0f}};
+
+    rpDesc.depthAttachment.texture = depthRT;
+    rpDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    rpDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+    rpDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
+    rpDesc.depthAttachment.clearValue.depth = 1.0f;
+
+    cmd_buffer->BeginRenderPass(rpDesc);
+    cmd_buffer->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
+    cmd_buffer->SetScissor({{0, 0}, {2048, 2048}});
+
+    cmd_buffer->BindGraphicsPipeline(shadow_moments_pipeline_);
+    rhi::DescriptorSetHandle dsHandle = ds;
+    cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, shadow_depth_layout_, 0, 1, &dsHandle, 0, nullptr);
+
+    cmd_buffer->DrawIndirect(frame.indirect_draw_buffer[cascade_index], 0, 1);
+
+    cmd_buffer->EndRenderPass();
+
+    return true;
+}
+
 bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_buffer,
                                                      u32 cascade_index,
                                                      u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (cascade_index > 1) return false;
+
+    // T4.6.5 part 24.9 (B7 fix): mirror ExecuteShadowRaster's empty-scene
+    // guard. In empty scene, ExecuteShadowRaster early-returns leaving
+    // shadow_depth_rt_X in UNDEFINED layout; without this guard, the blit
+    // shader reads UNDEFINED depth + writes UNDEFINED shadow_map_X via
+    // StorageImage, triggering VUID-vkCmdDraw-None-09600 (2 depth + 1 color
+    // layout UNDEFINED errors per frame).
+    if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
 
     u32 bi = buffer_index % 3;
     auto& frame = shadow_frames_[bi];
@@ -2837,12 +3609,32 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
         device_->UnmapBuffer(frame.blit_resolution_cb[cascade_index]);
     }
 
+    // T4.6.5 part 28 (B7+HZB layout fix): insert layout transitions before the
+    // blit dispatch. ExecuteShadowRaster's render pass left depthRT in
+    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL; the blit shader samples it as
+    // SHADER_READ_ONLY (per DescriptorImageInfo::ShaderResource → validation
+    // expects SHADER_READ_ONLY_OPTIMAL). shadowMap has no prior write — its
+    // actual layout is UNDEFINED, so use Unknown (maps to UNDEFINED) for the
+    // beforeState. Without these barriers, dispatch triggers
+    // VUID-vkCmdDraw-None-09600 (2 errors per cascade per frame).
+    {
+        rhi::ResourceBarrier barriers[2];
+        barriers[0].resource = depthRT;
+        barriers[0].beforeState = rhi::ResourceState::DepthStencil;
+        barriers[0].afterState = rhi::ResourceState::ShaderResource;
+        barriers[1].resource = shadowMap;
+        barriers[1].beforeState = rhi::ResourceState::Unknown;
+        barriers[1].afterState = rhi::ResourceState::UnorderedAccess;
+        cmd_buffer->InsertBarrier(barriers, 2);
+    }
+
     // Update descriptor set (3 bindings)
     rhi::DescriptorImageInfo srcInfo{ rhi::handles::INVALID_SAMPLER, depthRT, rhi::ResourceState::ShaderResource };
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, shadowMap, rhi::ResourceState::UnorderedAccess };
     rhi::DescriptorBufferInfo resInfo{ frame.blit_resolution_cb[cascade_index], 0, 8 };
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 
@@ -2860,6 +3652,346 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, shadow_blit_layout_, 0, 1, &dsHandle, 0, nullptr);
     cmd_buffer->Dispatch(groups, groups, 1);
 
+    return true;
+}
+
+// =====================================================================================
+// Planar reflection (Mirror)
+// =====================================================================================
+
+bool GPUDrivenDrawPipeline::InitializeReflectionResources(u32 max_clusters) {
+    if (reflection_initialized_) return true;
+    if (!device_) return false;
+    reflection_max_clusters_ = max_clusters;
+
+    // Vulkan SPIR-V carries stage suffixes (Nanite/MirrorReflection.vert.spv);
+    // Metal source is a single EngineTest/shaders/MirrorReflection.metal.
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    auto vsCode = LoadShaderBytecode(isVulkan ? "MirrorReflection.vert" : "MirrorReflection",
+                                     "mirror_reflection_vs", device_);
+    auto fsCode = LoadShaderBytecode(isVulkan ? "MirrorReflection.frag" : "MirrorReflection",
+                                     "mirror_reflection_fs", device_);
+    if (vsCode.empty() || fsCode.empty()) {
+        std::cerr << "[Mirror] Failed to load MirrorReflection shaders" << std::endl;
+        return false;
+    }
+    auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex,
+                                    isVulkan ? "main" : "mirror_reflection_vs");
+    auto fs = device_->CreateShader(fsCode.data(), fsCode.size(), rhi::ShaderStage::Pixel,
+                                    isVulkan ? "main" : "mirror_reflection_fs");
+    if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
+        std::cerr << "[Mirror] Failed to create MirrorReflection shader handles" << std::endl;
+        return false;
+    }
+
+    // 11 bindings — flat, matches MirrorReflection.vert/.frag:
+    //   0 UBO params (VS|PS), 1..8 SSBOs (VS), 9 albedo array (PS), 10 sampler (PS).
+    {
+        rhi::DescriptorSetLayoutBinding b[11];
+        for (int i = 0; i < 11; ++i) {
+            b[i].binding = i;
+            b[i].descriptorCount = 1;
+        }
+        b[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+        b[0].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
+        const rhi::ShaderStage vsStage = rhi::ShaderStage::Vertex;
+        b[1].descriptorType = rhi::DescriptorType::StorageBuffer;  b[1].stageFlags = vsStage;  // meshlets
+        b[1].readonly = true;
+        b[2].descriptorType = rhi::DescriptorType::StorageBuffer;  b[2].stageFlags = vsStage;  // meshlet vertex indices
+        b[2].readonly = true;
+        b[3].descriptorType = rhi::DescriptorType::StorageBuffer;  b[3].stageFlags = vsStage;  // meshlet triangle indices
+        b[3].readonly = true;
+        b[4].descriptorType = rhi::DescriptorType::StorageBuffer;  b[4].stageFlags = vsStage;  // positions
+        b[4].readonly = true;
+        b[5].descriptorType = rhi::DescriptorType::StorageBuffer;  b[5].stageFlags = vsStage;  // elements
+        b[5].readonly = true;
+        b[6].descriptorType = rhi::DescriptorType::StorageBuffer;  b[6].stageFlags = vsStage;  // reflection visible list
+        b[6].readonly = true;
+        b[7].descriptorType = rhi::DescriptorType::StorageBuffer;  b[7].stageFlags = vsStage;  // instances
+        b[7].readonly = true;
+        b[8].descriptorType = rhi::DescriptorType::StorageBuffer;  b[8].stageFlags = vsStage;  // material data
+        b[8].readonly = true;
+        b[9].descriptorType = rhi::DescriptorType::SampledImage;   b[9].stageFlags = rhi::ShaderStage::Pixel;  // albedo array
+        b[10].descriptorType = rhi::DescriptorType::Sampler;       b[10].stageFlags = rhi::ShaderStage::Pixel;
+
+        rhi::DescriptorSetLayoutDesc dslDesc{11, b};
+        reflection_set_layout_ = device_->CreateDescriptorSetLayout(dslDesc);
+        if (reflection_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
+
+        rhi::PipelineLayoutDesc plDesc{1, &reflection_set_layout_};
+        reflection_layout_ = device_->CreatePipelineLayout(plDesc);
+        if (reflection_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+    }
+
+    // Graphics pipeline — RGBA16F color + D32. The reflection matrix mirrors
+    // winding (det = -1), so cull NOTHING rather than guessing the flipped
+    // front-face convention per backend.
+    {
+        rhi::GraphicsPipelineDesc desc{};
+        desc.layout = reflection_layout_;
+        desc.vertexShader = vs;
+        desc.pixelShader = fs;
+        desc.renderTargetCount = 1;
+        desc.renderTargetFormats[0] = rhi::DataFormat::RGBA16_Float;
+        desc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = rhi::ComparisonFunc::Less;
+        desc.cullMode = rhi::CullMode::None;
+        desc.vertexAttributes.clear();
+        desc.vertexBindings.clear();
+        reflection_pipeline_ = device_->CreateGraphicsPipeline(desc);
+        if (reflection_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[Mirror] Failed to create reflection graphics pipeline" << std::endl;
+            return false;
+        }
+    }
+
+    // Triple-buffered buffers + descriptor sets
+    for (u32 f = 0; f < 3; ++f) {
+        rhi::BufferDesc visDesc{};
+        visDesc.size = (u64)max_clusters * 16;  // uvec4 per visible cluster
+        visDesc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
+        visDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        reflection_visible_buffer_[f] = device_->CreateBuffer(visDesc);
+        if (reflection_visible_buffer_[f] == rhi::handles::INVALID_RESOURCE) return false;
+
+        rhi::BufferDesc indDesc{};
+        indDesc.size = sizeof(u32) * 4;
+        indDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Indirect | rhi::BufferUsageFlags::Storage);
+        indDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        reflection_indirect_buffer_[f] = device_->CreateBuffer(indDesc);
+        if (reflection_indirect_buffer_[f] == rhi::handles::INVALID_RESOURCE) return false;
+
+        rhi::BufferDesc cbDesc{};
+        cbDesc.size = 112;  // ReflectionParams (mat4 + 3×vec4)
+        cbDesc.type = rhi::BufferType::Constant;
+        cbDesc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
+        cbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        reflection_cb_[f] = device_->CreateBuffer(cbDesc);
+        if (reflection_cb_[f] == rhi::handles::INVALID_RESOURCE) return false;
+
+        rhi::DescriptorSetDesc dsDesc;
+        dsDesc.layout = reflection_set_layout_;
+        reflection_ds_[f] = device_->CreateDescriptorSet(dsDesc);
+        if (reflection_ds_[f] == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
+    }
+
+    reflection_initialized_ = true;
+    return true;
+}
+
+void GPUDrivenDrawPipeline::ShutdownReflectionResources() {
+    if (!reflection_initialized_ || !device_) return;
+    for (u32 f = 0; f < 3; ++f) {
+        if (reflection_visible_buffer_[f] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(reflection_visible_buffer_[f]);
+            reflection_visible_buffer_[f] = rhi::handles::INVALID_RESOURCE;
+        }
+        if (reflection_indirect_buffer_[f] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(reflection_indirect_buffer_[f]);
+            reflection_indirect_buffer_[f] = rhi::handles::INVALID_RESOURCE;
+        }
+        if (reflection_cb_[f] != rhi::handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(reflection_cb_[f]);
+            reflection_cb_[f] = rhi::handles::INVALID_RESOURCE;
+        }
+        if (reflection_ds_[f] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            device_->DestroyDescriptorSet(reflection_ds_[f]);
+            reflection_ds_[f] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
+    }
+    if (reflection_pipeline_ != rhi::handles::INVALID_PIPELINE) {
+        device_->DestroyPipeline(reflection_pipeline_);
+        reflection_pipeline_ = rhi::handles::INVALID_PIPELINE;
+    }
+    if (reflection_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
+        device_->DestroyPipelineLayout(reflection_layout_);
+        reflection_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    }
+    if (reflection_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        device_->DestroyDescriptorSetLayout(reflection_set_layout_);
+        reflection_set_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    }
+    reflection_initialized_ = false;
+}
+
+bool GPUDrivenDrawPipeline::ExecuteReflectionPass(rhi::RHICommandBuffer* cmd_buffer,
+                                                   const RenderSceneSnapshot& scene_snapshot,
+                                                   const math::m4x4& reflected_view_projection,
+                                                   const math::v4& light_dir,
+                                                   const math::v4& light_color,
+                                                   const math::v4& ambient,
+                                                   rhi::ResourceHandle color_rt,
+                                                   rhi::ResourceHandle depth_rt,
+                                                   u32 buffer_index) {
+    if (!reflection_initialized_ || !cmd_buffer) return false;
+    if (color_rt == rhi::handles::INVALID_RESOURCE || depth_rt == rhi::handles::INVALID_RESOURCE) return false;
+    if (scene_snapshot.GetInstanceCount() == 0) return true;
+
+    // Geometry buffers must be ready (same guard family as the shadow passes).
+    if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_element_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        return true;
+    }
+
+    u32 bi = buffer_index % 3;
+
+    // --- CPU frustum culling against the reflected VP (shadow-culling pattern).
+    // Writes uvec4 entries {meshletIdx, instanceIdx, materialId, pad} so the
+    // vertex shader needs no cluster-map reverse lookup.
+    math::v4 frustumPlanes[6];
+    ExtractFrustumPlanes(reflected_view_projection, frustumPlanes);
+
+    auto sphereVsFrustum = [&](const math::v3& center, float radius) -> bool {
+        for (int i = 0; i < 6; ++i) {
+            float dist = frustumPlanes[i].x*center.x + frustumPlanes[i].y*center.y +
+                         frustumPlanes[i].z*center.z + frustumPlanes[i].w;
+            if (dist < -radius) return false;
+        }
+        return true;
+    };
+
+    u32 totalVisible = 0;
+    utl::vector<math::v4> visibleEntries;  // u32 payload packed in v4
+    visibleEntries.reserve(reflection_max_clusters_);
+    {
+        const auto& instances = scene_snapshot.GetInstanceData();
+        if (!cpu_meshlet_cache_.empty()) {
+            const auto* meshlets = cpu_meshlet_cache_.data();
+            for (u32 instIdx = 0; instIdx < instances.size(); ++instIdx) {
+                const auto& inst = instances[instIdx];
+                if (!sphereVsFrustum(inst.bounds_center, inst.bounds_radius)) continue;
+                for (u32 c = 0; c < inst.cluster_count; ++c) {
+                    u32 globalIdx = inst.cluster_start + c;
+                    if (globalIdx >= cpu_meshlet_cache_.size()) continue;
+                    const auto& meshlet = meshlets[globalIdx];
+                    math::v3 localCenter{meshlet.center[0], meshlet.center[1], meshlet.center[2]};
+                    math::v4 worldCenter4 = inst.world_matrix *
+                        math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
+                    if (!sphereVsFrustum(math::v3{worldCenter4.x, worldCenter4.y, worldCenter4.z},
+                                         meshlet.radius)) continue;
+                    // uvec4 payload: meshletIdx, instanceIdx, materialId, pad
+                    // (bit-exact via memcpy — f32 array is just transport).
+                    u32 payload[4] = { globalIdx, instIdx, inst.material_id, 0u };
+                    f32 asF32[4];
+                    static_assert(sizeof(payload) == sizeof(asF32), "u32/f32 size mismatch");
+                    memcpy(asF32, payload, sizeof(payload));
+                    visibleEntries.push_back(math::v4{asF32[0], asF32[1], asF32[2], asF32[3]});
+                }
+            }
+            std::sort(visibleEntries.begin(), visibleEntries.end(),
+                      [](const math::v4& a, const math::v4& b) { return a.x < b.x; });
+            totalVisible = static_cast<u32>(visibleEntries.size());
+        }
+    }
+
+    // Upload visible entries + indirect args + params.
+    if (totalVisible > 0) {
+        void* vis = device_->MapBuffer(reflection_visible_buffer_[bi], 0,
+                                       totalVisible * sizeof(math::v4));
+        if (vis) {
+            memcpy(vis, visibleEntries.data(), totalVisible * sizeof(math::v4));
+            device_->UnmapBuffer(reflection_visible_buffer_[bi]);
+        }
+    }
+    {
+        void* args = device_->MapBuffer(reflection_indirect_buffer_[bi], 0, sizeof(u32) * 4);
+        if (args) {
+            u32* p = static_cast<u32*>(args);
+            p[0] = 126 * 3;   // vertexCount
+            p[1] = totalVisible;
+            p[2] = 0;         // vertexStart
+            p[3] = 0;         // baseInstance
+            device_->UnmapBuffer(reflection_indirect_buffer_[bi]);
+        }
+    }
+
+    // Params UBO — matches ReflectionParams in MirrorReflection.vert/.frag.
+    struct ReflectionParamsCB {
+        math::m4x4 reflected_view_projection;
+        math::v4 light_dir;
+        math::v4 light_color;
+        math::v4 ambient;
+    };
+    {
+        void* cb = device_->MapBuffer(reflection_cb_[bi], 0, sizeof(ReflectionParamsCB));
+        if (cb) {
+            auto* p = static_cast<ReflectionParamsCB*>(cb);
+            p->reflected_view_projection = reflected_view_projection;
+            p->light_dir = light_dir;
+            p->light_color = light_color;
+            p->ambient = ambient;
+            device_->UnmapBuffer(reflection_cb_[bi]);
+        }
+    }
+
+    // Descriptor set (11 bindings)
+    rhi::DescriptorBufferInfo bufInfos[9];
+    rhi::DescriptorImageInfo imgInfos[2];
+    rhi::WriteDescriptorSet writes[11];
+    for (int i = 0; i < 11; ++i) {
+        writes[i] = {};
+        writes[i].dstSet = reflection_ds_[bi];
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+    }
+    writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+    writes[0].bufferInfo = &bufInfos[0];
+    for (int i = 1; i <= 8; ++i) {
+        writes[i].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[i].bufferInfo = &bufInfos[i];
+    }
+    writes[9].descriptorType = rhi::DescriptorType::SampledImage;
+    writes[9].imageInfo = &imgInfos[0];
+    writes[10].descriptorType = rhi::DescriptorType::Sampler;
+    writes[10].imageInfo = &imgInfos[1];
+
+    bufInfos[0] = { reflection_cb_[bi], 0, sizeof(ReflectionParamsCB) };
+    bufInfos[1] = { global_meshlet_buffer_, 0, ~0ULL };
+    bufInfos[2] = { global_meshlet_vertices_buffer_, 0, ~0ULL };
+    bufInfos[3] = { global_meshlet_triangles_buffer_, 0, ~0ULL };
+    bufInfos[4] = { global_vertex_buffer_, 0, ~0ULL };
+    bufInfos[5] = { global_element_buffer_, 0, ~0ULL };
+    bufInfos[6] = { reflection_visible_buffer_[bi], 0, ~0ULL };
+    bufInfos[7] = { global_instance_data_buffer_, 0, ~0ULL };
+    bufInfos[8] = { global_material_data_buffer_, 0, ~0ULL };
+    imgInfos[0].imageView = albedo_texture_array_;
+    imgInfos[0].imageLayout = rhi::ResourceState::ShaderResource;
+    imgInfos[1].sampler = texture_sampler_;
+
+    device_->UpdateDescriptorSets(11, writes);
+
+    // Render pass into the caller's RTs.
+    rhi::RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(1);
+    rpDesc.colorAttachments[0].texture = color_rt;
+    rpDesc.colorAttachments[0].format = rhi::DataFormat::RGBA16_Float;
+    rpDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
+    rpDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+    rpDesc.colorAttachments[0].clearValue = rhi::ClearValue{math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
+    rpDesc.depthAttachment.texture = depth_rt;
+    rpDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    rpDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+    rpDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
+    rpDesc.depthAttachment.clearValue.depth = 1.0f;
+
+    cmd_buffer->BeginRenderPass(rpDesc);
+    cmd_buffer->SetViewport({{0, 0}, {1024.0f, 1024.0f}, 0, 1});
+    cmd_buffer->SetScissor({{0, 0}, {1024, 1024}});
+
+    cmd_buffer->BindGraphicsPipeline(reflection_pipeline_);
+    rhi::DescriptorSetHandle dsHandle = reflection_ds_[bi];
+    cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, reflection_layout_, 0, 1, &dsHandle, 0, nullptr);
+
+    cmd_buffer->DrawIndirect(reflection_indirect_buffer_[bi], 0, 1);
+
+    cmd_buffer->EndRenderPass();
     return true;
 }
 
@@ -2881,7 +4013,8 @@ bool GPUDrivenDrawPipeline::ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_b
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, gbuffer_depth_sampleable_, rhi::ResourceState::UnorderedAccess };
     rhi::DescriptorBufferInfo resInfo{ gbuffer_depth_blit_cb_, 0, 8 };
 
-    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
+    bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 

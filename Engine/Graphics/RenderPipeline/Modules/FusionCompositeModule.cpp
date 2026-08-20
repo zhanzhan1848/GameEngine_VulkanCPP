@@ -2,6 +2,7 @@
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include <iostream>
 
 namespace primal::graphics {
 
@@ -23,8 +24,12 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const Des
         writes[i].dstBinding = params[i].binding;
         writes[i].descriptorCount = params[i].count;
         writes[i].descriptorType = params[i].type;
-        imageInfos[i].imageView = params[i].resource;
-        imageInfos[i].imageLayout = ResourceState::ShaderResource;
+        if (params[i].type == DescriptorType::Sampler) {
+            imageInfos[i].sampler = static_cast<SamplerHandle>(params[i].resource);
+        } else {
+            imageInfos[i].imageView = params[i].resource;
+            imageInfos[i].imageLayout = ResourceState::ShaderResource;
+        }
         writes[i].imageInfo = &imageInfos[i];
     }
     device->UpdateDescriptorSets(count, writes.data());
@@ -39,16 +44,37 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
     render_height_ = render_height;
     vertex_shader_ = composite_vs;
 
-    // --- Pass 1: FusionIndirect (half-res, 5 texture reads) ---
+    // Vulkan needs an explicit Sampler descriptor (Metal uses implicit samplers).
+    // Create a linear-clamp sampler for the Fusion passes.
+    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    if (isVk) {
+        SamplerDesc sDesc{};
+        sDesc.minFilter = FilterMode::Linear;
+        sDesc.magFilter = FilterMode::Linear;
+        sDesc.mipFilter = FilterMode::Linear;
+        sDesc.addressU = TextureAddressMode::Clamp;
+        sDesc.addressV = TextureAddressMode::Clamp;
+        sDesc.addressW = TextureAddressMode::Clamp;
+        sDesc.comparisonFunc = ComparisonFunc::Never;
+        default_sampler_ = device->CreateSampler(sDesc);
+        if (default_sampler_ == handles::INVALID_SAMPLER) {
+            std::cerr << "[FusionComposite] Failed to create default_sampler_" << std::endl;
+        }
+    }
+
+    // --- Pass 1: FusionIndirect (half-res, 5 texture reads + 1 sampler on Vulkan) ---
     {
-        DescriptorSetLayoutBinding bindings[] = {
-            {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // SSGI
-            {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // DDGI
-            {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // SPGI
-            {3, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // albedo
-            {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // SSAO
-        };
-        indirect_set_layout_ = device->CreateDescriptorSetLayout({5, bindings});
+        const u32 indirectBindingCount = isVk ? 6 : 5;
+        DescriptorSetLayoutBinding bindings[6];
+        bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // SSGI
+        bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // DDGI
+        bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // SPGI
+        bindings[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // albedo
+        bindings[4] = {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // SSAO
+        if (isVk) {
+            bindings[5] = {5, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
+        }
+        indirect_set_layout_ = device->CreateDescriptorSetLayout({indirectBindingCount, bindings});
         indirect_layout_ = device->CreatePipelineLayout({1, &indirect_set_layout_});
 
         for (int i = 0; i < 3; ++i)
@@ -79,14 +105,20 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         }
     }
 
-    // --- Pass 2: FusionComposite (full-res, 3 texture reads) ---
+    // --- Pass 2: FusionComposite (full-res, 5 texture reads + 1 sampler on Vulkan) ---
     {
-        DescriptorSetLayoutBinding bindings[] = {
-            {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // scene
-            {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // indirect
-            {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // volume_scatter
-        };
-        composite_set_layout_ = device->CreateDescriptorSetLayout({3, bindings});
+        // bindings: 0=scene, 1=indirect, 2=volume_scatter, 3=ssr, 4=orm, [5=sampler(Vk)]
+        const u32 compositeBindingCount = isVk ? 6 : 5;
+        DescriptorSetLayoutBinding bindings[6];
+        bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // scene
+        bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // indirect
+        bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // volume_scatter
+        bindings[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // ssr
+        bindings[4] = {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // orm
+        if (isVk) {
+            bindings[5] = {5, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
+        }
+        composite_set_layout_ = device->CreateDescriptorSetLayout({compositeBindingCount, bindings});
         composite_layout_ = device->CreatePipelineLayout({1, &composite_set_layout_});
 
         for (int i = 0; i < 3; ++i)
@@ -95,7 +127,7 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         // Full-res output (BGRA8_UNorm)
         TextureDesc outDesc{};
         outDesc.size = {render_width, render_height, 1};
-        outDesc.format = DataFormat::BGRA8_UNorm;
+        outDesc.format = DataFormat::RGBA16_Float;  // HDR — FinalBlit does tonemap
         outDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
         for (int i = 0; i < 3; ++i)
             fusion_output_[i] = device->CreateTexture(outDesc);
@@ -152,7 +184,7 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
             pd.layout = composite_layout_;
             pd.vertexShader = composite_vs;
             pd.pixelShader = composite_ps;
-            pd.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+            pd.renderTargetFormats[0] = DataFormat::RGBA16_Float;  // HDR — FinalBlit does tonemap
             pd.renderTargetCount = 1;
             pd.depthStencilFormat = DataFormat::Unknown;
             pd.enableDepthTest = false;
@@ -204,6 +236,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
         [inputs, indirectRG](IndirectData& data, rendergraph::RenderGraphBuilder& builder) {
+            builder.SideEffect(); // prevent RG culling
             if (inputs.ssgi_rg.IsValid()) builder.Read(inputs.ssgi_rg, ResourceState::ShaderResource);
             if (inputs.ddgi_rg.IsValid()) builder.Read(inputs.ddgi_rg, ResourceState::ShaderResource);
             if (inputs.spgi_rg.IsValid()) builder.Read(inputs.spgi_rg, ResourceState::ShaderResource);
@@ -216,20 +249,53 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         },
         [this, inputs, cbIdx, resolve](const IndirectData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
+            static int s_fusion_diag = 0;
+            if (s_fusion_diag < 3) { std::cerr << "[FUSION_INDIRECT] exec " << s_fusion_diag << std::endl; s_fusion_diag++; }
             u32 halfW = render_width_ / 2;
             u32 halfH = render_height_ / 2;
 
             cmd->SetViewport({{0, 0}, {static_cast<float>(halfW), static_cast<float>(halfH)}, 0, 1});
             cmd->SetScissor({{0, 0}, {halfW, halfH}});
 
-            DescData params[5] = {
-                {0, DescriptorType::SampledImage, inputs.ssgi_tex != handles::INVALID_RESOURCE ? inputs.ssgi_tex : inputs.black_texture},
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            const u32 paramCount = isVk ? 6 : 5;
+
+            // Resolve SSGI/DDGI/SPGI from RG handles when physical tex is INVALID.
+            ResourceHandle ssgiTex = inputs.ssgi_tex;
+            if (ssgiTex == handles::INVALID_RESOURCE && inputs.ssgi_rg.IsValid())
+                ssgiTex = resolve(inputs.ssgi_rg);
+            if (ssgiTex == handles::INVALID_RESOURCE) ssgiTex = inputs.black_texture;
+
+            static int s_ssgi_resolve = 0;
+            if (s_ssgi_resolve < 5) {
+                std::cerr << "[FUSION_SSGI] ssgi_tex=" << inputs.ssgi_tex
+                          << " ssgi_rg_valid=" << inputs.ssgi_rg.IsValid()
+                          << " resolved=" << ssgiTex
+                          << " black=" << inputs.black_texture << std::endl;
+                s_ssgi_resolve++;
+            }
+
+            // Force SSGI texture to SRV layout — it may be left in TRANSFER_DST
+            // by SSGI's internal blit or layout tracking issues.
+            if (ssgiTex != inputs.black_texture) {
+                ResourceBarrier ssgiBar{};
+                ssgiBar.resource = ssgiTex;
+                ssgiBar.beforeState = ResourceState::ShaderResource;
+                ssgiBar.afterState = ResourceState::ShaderResource;
+                ssgiBar.subresource = 0xFFFFFFFF;
+                ssgiBar.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&ssgiBar, 1);
+            }
+
+            DescData params[6] = {
+                {0, DescriptorType::SampledImage, ssgiTex},
                 {1, DescriptorType::SampledImage, inputs.ddgi_tex != handles::INVALID_RESOURCE ? inputs.ddgi_tex : inputs.black_texture},
                 {2, DescriptorType::SampledImage, inputs.spgi_tex != handles::INVALID_RESOURCE ? inputs.spgi_tex : inputs.black_texture},
                 {3, DescriptorType::SampledImage, inputs.gbuffer_albedo != handles::INVALID_RESOURCE ? inputs.gbuffer_albedo : inputs.black_texture},
                 {4, DescriptorType::SampledImage, inputs.ssao_tex != handles::INVALID_RESOURCE ? inputs.ssao_tex : inputs.black_texture},
+                {5, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
             };
-            UpdateDesc(device_, indirect_ds_[cbIdx], params, 5);
+            UpdateDesc(device_, indirect_ds_[cbIdx], params, paramCount);
             cmd->BindGraphicsPipeline(indirect_pipeline_);
             const DescriptorSetHandle sets[] = { indirect_ds_[cbIdx] };
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, indirect_layout_, 0, 1, sets, 0, nullptr);
@@ -245,10 +311,12 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
     graph.AddPass<ComposeData>("FusionComposite",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
-        [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
+        [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, ssrRG = inputs.ssr_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
+            builder.SideEffect(); // prevent RG culling
             if (primaryRG.IsValid()) builder.Read(primaryRG, ResourceState::ShaderResource);
             builder.Read(indirectRG, ResourceState::ShaderResource);
             if (volumeRG.IsValid()) builder.Read(volumeRG, ResourceState::ShaderResource);
+            if (ssrRG.IsValid()) builder.Read(ssrRG, ResourceState::ShaderResource);
             data.output = builder.Write(fusionOutRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
@@ -257,20 +325,45 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         },
         [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx], resolve](const ComposeData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
+            static int s_composite_diag = 0;
+            if (s_composite_diag < 3) { std::cerr << "[FUSION_COMPOSITE] exec " << s_composite_diag << std::endl; s_composite_diag++; }
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            // Resolve volume scatter from RG, or fall back to identity texture (transmittance=1)
-            ResourceHandle volTex = resolve(inputs.volume_scatter_rg);
-            if (volTex == inputs.black_texture || volTex == handles::INVALID_RESOURCE)
+            // Resolve volume scatter from RG, or fall back to identity texture (transmittance=1).
+            // On Vulkan, volume pass is not active — force identity to avoid binding
+            // an incorrectly-formatted texture from RG (causes R32_UINT validation error).
+            ResourceHandle volTex;
+            if (device_->GetPlatform() == RHIPlatform::Vulkan) {
                 volTex = volume_identity_tex_;
+            } else {
+                volTex = resolve(inputs.volume_scatter_rg);
+                if (volTex == inputs.black_texture || volTex == handles::INVALID_RESOURCE)
+                    volTex = volume_identity_tex_;
+            }
 
-            DescData params[3] = {
+            // Resolve SSR from RG when physical tex is INVALID; fall back to black.
+            ResourceHandle ssrTex = inputs.ssr_tex;
+            if (ssrTex == handles::INVALID_RESOURCE && inputs.ssr_rg.IsValid())
+                ssrTex = resolve(inputs.ssr_rg);
+            if (ssrTex == handles::INVALID_RESOURCE) ssrTex = inputs.black_texture;
+
+            // ORM texture (roughness/metallic) — fall back to white (roughness=1) when absent,
+            // so SSR contribution is fully attenuated (smoothstep at roughness=1 → weight 0).
+            ResourceHandle ormTex = inputs.gbuffer_orm;
+            if (ormTex == handles::INVALID_RESOURCE) ormTex = inputs.black_texture;
+
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            const u32 paramCount = isVk ? 6 : 5;
+            DescData params[6] = {
                 {0, DescriptorType::SampledImage, inputs.primary_input_tex},
                 {1, DescriptorType::SampledImage, indirectTex},
                 {2, DescriptorType::SampledImage, volTex},
+                {3, DescriptorType::SampledImage, ssrTex},
+                {4, DescriptorType::SampledImage, ormTex},
+                {5, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
             };
-            UpdateDesc(device_, composite_ds_[cbIdx], params, 3);
+            UpdateDesc(device_, composite_ds_[cbIdx], params, paramCount);
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = { composite_ds_[cbIdx] };
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);

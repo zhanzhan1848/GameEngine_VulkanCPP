@@ -74,6 +74,7 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
     cmdBufferHandles_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_COMMAND_BUFFER);
     cmdBuffers_.resize(rhi::MAX_FRAMES_IN_FLIGHT, nullptr);
     frameFences_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_SYNC);
+    imageSemaphores_.resize(rhi::MAX_FRAMES_IN_FLIGHT, rhi::handles::INVALID_SYNC);
 
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         cmdBufferHandles_[i] = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
@@ -90,6 +91,17 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
         frameFences_[i] = device_->CreateSync();
         if (frameFences_[i] == rhi::handles::INVALID_SYNC) {
              std::cerr << "RenderSystem::Initialize failed: Could not create fence " << i << std::endl;
+             return false;
+        }
+        // T4.6.5 part 30.5 (Bug A): per-frame acquire semaphore. Vulkan spec
+        // requires at least one of (semaphore, fence) be non-NULL on
+        // vkAcquireNextImageKHR. Passing the fence would work but lacks GPU-GPU
+        // sync between acquire→draw — caller would have to CPU-wait before
+        // recording. Semaphore lets the draw cmd buffer queue immediately,
+        // GPU blocks on semaphore until acquire completes.
+        imageSemaphores_[i] = device_->CreateSync();
+        if (imageSemaphores_[i] == rhi::handles::INVALID_SYNC) {
+             std::cerr << "RenderSystem::Initialize failed: Could not create image semaphore " << i << std::endl;
              return false;
         }
     }
@@ -137,6 +149,11 @@ void RenderSystem::Shutdown() {
         device_->DestroySync(fence);
     }
     frameFences_.clear();
+
+    for (auto sem : imageSemaphores_) {
+        if (sem != rhi::handles::INVALID_SYNC) device_->DestroySync(sem);
+    }
+    imageSemaphores_.clear();
 
     device_ = nullptr;
     std::cout << "[RenderSystem] Shutdown End" << std::endl;
@@ -200,15 +217,28 @@ void RenderSystem::Resize(u32 width, u32 height) {
 bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandle& outSignalFence) {
     if (!device_ || !swapChain_) return false;
 
+    // T4.6.5 part 35.6: drive device-level frame lifecycle so the GC's
+    // currentFrame_ advances and DeferredDestroy items eventually get
+    // processed. Without this, per-frame descriptor set allocations
+    // (HZBSystem allocates ~11 sets per BuildHZB) accumulate in the GC
+    // queue forever and exhaust the per-layout descriptor pool after
+    // ~20 frames ("vkAllocateDescriptorSets failed").
+    device_->BeginFrame();
+
     // Internal Frame Sync
     Wait(currentFrameIndex_);
 
-    // Acquire Next Image
-    if (!swapChain_->AcquireNextImage(&currentImageIndex_)) {
+    // Acquire Next Image — T4.6.5 part 30.5 (Bug A): pass GPU-GPU acquire
+    // semaphore. Vulkan spec requires semaphore OR fence be non-NULL.
+    // Without this, validation fires VUID-vkAcquireNextImageKHR-semaphore-01780
+    // every frame, and the swapchain image is never properly acquired (which
+    // cascades into "image has not been acquired" errors on Submit/Present).
+    const rhi::SyncHandle imageSem = imageSemaphores_[currentFrameIndex_];
+    if (!swapChain_->AcquireNextImage(&currentImageIndex_, imageSem)) {
         std::cerr << "RenderSystem: Failed to acquire next image." << std::endl;
         return false;
     }
-    
+
     outBackBuffer = swapChain_->GetBackBuffer(currentImageIndex_);
     outSignalFence = frameFences_[currentFrameIndex_];
     return true;
@@ -220,6 +250,24 @@ void RenderSystem::EndFrame() {
         // Advance frame index
         currentFrameIndex_ = (currentFrameIndex_ + 1) % rhi::MAX_FRAMES_IN_FLIGHT;
     }
+    // T4.6.5 part 35.6: drive GC update so deferred descriptor set destroys
+    // actually fire. Otherwise pools exhaust within ~20 frames.
+    device_->EndFrame();
+}
+
+void RenderSystem::EndFrame(rhi::SyncHandle renderDoneSemaphore) {
+    if (swapChain_) {
+        // T4.6.5 part 30.12 (X1 fix): Present waits on the render-done semaphore
+        // signaled by Submit. The prior Present(INVALID_SYNC) skipped GPU-GPU
+        // sync, so the next AcquireNextImage could fire while the previous
+        // frame's draws were still pending (validation VUID-vkQueuePresentKHR
+        // semaphores chain broken).
+        swapChain_->Present(renderDoneSemaphore);
+        currentFrameIndex_ = (currentFrameIndex_ + 1) % rhi::MAX_FRAMES_IN_FLIGHT;
+    }
+    // T4.6.5 part 35.6: drive GC update so deferred descriptor set destroys
+    // actually fire. Otherwise pools exhaust within ~20 frames.
+    device_->EndFrame();
 }
 
 rhi::TextureDesc RenderSystem::GetBackBufferDesc() const {

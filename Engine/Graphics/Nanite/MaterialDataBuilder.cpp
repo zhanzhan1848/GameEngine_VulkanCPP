@@ -10,6 +10,10 @@
 #include "../RHI/Platforms/Dawn/DawnDevice.h"
 #include "../RHI/Platforms/Dawn/DawnTexture.h"
 #endif
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "../RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "../RHI/Platforms/Vulkan/VulkanTexture.h"
+#endif
 #include "../../Content/ContentToEngine.h"
 #include "../../Utilities/IOStream.h"
 #include <iostream>
@@ -260,6 +264,16 @@ namespace {
             }
         }
 #endif
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+        if (platform == RHIPlatform::Vulkan) {
+            VulkanDevice* vkDevice = static_cast<VulkanDevice*>(device);
+            VulkanTexture* vkTex = vkDevice->GetTexture(texture);
+            if (vkTex) {
+                const auto& desc = vkTex->GetTextureDesc();
+                return {desc.size.x, desc.size.y};
+            }
+        }
+#endif
 
         std::cerr << "[MaterialDataBuilder] WARNING: Could not get texture size, using default 512x512" << std::endl;
         return {512, 512};
@@ -302,6 +316,15 @@ namespace {
             DawnTexture* dawnTex = dawnDevice->GetTexture(texture);
             if (dawnTex) {
                 return dawnTex->GetTextureDesc().format;
+            }
+        }
+#endif
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+        if (platform == RHIPlatform::Vulkan) {
+            VulkanDevice* vkDevice = static_cast<VulkanDevice*>(device);
+            VulkanTexture* vkTex = vkDevice->GetTexture(texture);
+            if (vkTex) {
+                return vkTex->GetTextureDesc().format;
             }
         }
 #endif
@@ -761,6 +784,20 @@ bool MaterialDataBuilder::CreateTextureArray(
 
     // If we owned the command buffer, submit and wait now.
     if (ownedCmdHandle != rhi::handles::INVALID_RESOURCE) {
+        // T4.6.5 part 30: BlitTexture leaves the array in TRANSFER_DST_OPTIMAL.
+        // Subsequent descriptor writes hardcode SHADER_READ_ONLY_OPTIMAL
+        // (VulkanDescriptorSet.cpp:131) → VUID-vkCmdDraw-None-09600 fires.
+        // Transition all layers+mips to ShaderResource so sampling works.
+        // When the caller passes its own cmd buffer, the caller owns this
+        // transition (mirror CopyBufferToTexture contract).
+        rhi::ResourceBarrier toSRV;
+        toSRV.resource = outArray;
+        toSRV.beforeState = rhi::ResourceState::CopyDest;
+        toSRV.afterState = rhi::ResourceState::ShaderResource;
+        toSRV.subresource = rhi::RHI_ALL_SUBRESOURCES;
+        toSRV.queueFamily = 0xFFFFFFFF;
+        activeCmd->InsertBarrier(&toSRV, 1);
+
         activeCmd->End();
         rhi::QueueSubmitInfo submitInfo{};
         submitInfo.cmdBuffer = ownedCmdHandle;

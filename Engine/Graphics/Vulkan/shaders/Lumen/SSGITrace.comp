@@ -1,0 +1,253 @@
+#version 450 core
+// Vulkan Lumen SSGI Trace — GLSL port of SSGITrace.metal.
+// Entry point: ssgi_trace  (glslangValidator --source-entrypoint main -e ssgi_trace)
+//
+// Half-resolution compute: HZB-based screen space GI ray tracing.
+// Casts rays in hemisphere around surface normal, traces through HZB depth
+// pyramid, samples scene color at hit for indirect irradiance.
+//
+// Flat descriptor bindings (Metal overlapping → Vulkan flat):
+//   binding 0 = SampledImage       gbuffer_normal (full-res)
+//   binding 1 = SampledDepthImage  gbuffer_depth  (full-res)
+//   binding 2 = SampledImage       hzb_texture (mip chain)
+//   binding 3 = SampledImage       prev_frame_color (scene HDR)
+//   binding 4 = StorageImage       ssgi_output (half-res RGBA16F)
+//   binding 5 = UniformBuffer      GlobalShaderData
+//   binding 6 = UniformBuffer      SSGIParams
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --- Bindings ---
+layout(set = 0, binding = 0) uniform texture2D gbuffer_normal;
+layout(set = 0, binding = 1) uniform texture2D gbuffer_depth;
+layout(set = 0, binding = 2) uniform texture2D hzb_texture;
+layout(set = 0, binding = 3) uniform texture2D prev_frame_color;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D ssgi_output;
+
+layout(set = 0, binding = 5, std140) uniform GlobalShaderData {
+    mat4 View;
+    mat4 Projection;
+    mat4 InvProjection;
+    mat4 ViewProjection;
+    mat4 PreviousViewProjection;
+    mat4 InvViewProjection;
+    vec4 CameraPositionAndViewWidth;
+    vec4 CameraDirectionAndViewHeight;
+    uint NumDirectionalLights;
+    float DeltaTime;
+    float FrameCount;
+    uint _padding;
+} gd;
+
+layout(set = 0, binding = 6, std140) uniform SSGIParams {
+    uint  ray_count;
+    float radius;
+    float thickness;
+    uint  frame_index;
+    uint  output_width;
+    uint  output_height;
+    float near_plane;
+    float far_plane;
+    uint  hzb_mip_levels;
+    float max_trace_distance;
+} params;
+
+// --- Constants ---
+const float PI_VAL = 3.14159265358979;
+const uint  MAX_STEPS    = 64;
+const float MAX_RADIANCE = 2.0;
+
+// --- Helpers ---
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+// Vulkan [0,1] NDC depth → linear view depth.
+// The old OpenGL [-1,1] formula gave near-zero values for valid Vulkan
+// depths, causing the sky check (linear < near) to reject EVERYTHING —
+// all pixels early-outed and the SSGI output was solid black.
+float NDCDepthToLinear(float ndcDepth, float nearPlane, float farPlane) {
+    return nearPlane * farPlane / (farPlane - ndcDepth * (farPlane - nearPlane));
+}
+
+vec3 viewToScreen(vec3 viewPos) {
+    vec4 clipPos = gd.Projection * vec4(viewPos, 1.0);
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    // Vulkan: NDC Y up, texture Y down → flip
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    return vec3(uv, ndc.z);
+}
+
+vec3 screenToView(vec2 uv, float ndcDepth) {
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - 2.0 * uv.y);
+    vec4 clipPos = vec4(ndc, ndcDepth, 1.0);
+    vec4 viewPos = gd.InvProjection * clipPos;
+    return viewPos.xyz / viewPos.w;
+}
+
+vec3 cosineHemisphereSample(vec3 N, vec2 seed, int sampleIndex, uint frameIndex, uint rayCount) {
+    // Deterministic stratified sampling — NO frameIndex rotation.
+    // The old frame-varying rotation (golden ratio per frame) produced
+    // different ray sets each frame → temporal noise → moving stripe
+    // artifacts. With fixed per-pixel rays, the spatial pattern is stable;
+    // temporal accumulation converges smoothly without flicker.
+    float xi1 = fract((float(sampleIndex) + 0.5) / float(rayCount));
+    float xi2 = fract(hash(seed + vec2(float(sampleIndex) * 0.13, float(sampleIndex) * 0.91)));
+    float phi = 2.0 * PI_VAL * xi1;
+    float cosTheta = sqrt(max(xi2, 0.001));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    vec3 localDir = vec3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+    vec3 result = tangent * localDir.x + bitangent * localDir.y + N * localDir.z;
+    if (dot(result, N) < 0.0) result = -result;
+    return normalize(result);
+}
+
+// HZB hierarchical ray march
+bool traceRayHZB(vec2 origin_uv, vec3 ray_origin_view, vec3 ray_dir_view,
+                out vec2 hit_uv, out float hit_depth) {
+    float baseStep = params.max_trace_distance / float(MAX_STEPS);
+    float t = 0.0;
+    uint mip = 1;
+
+    for (uint step = 0u; step < MAX_STEPS; ++step) {
+        float mipScale = float(1u << mip);
+        t += baseStep * mipScale;
+        if (t > params.max_trace_distance) break;
+
+        vec3 ray_pos = ray_origin_view + ray_dir_view * t;
+        vec3 screen = viewToScreen(ray_pos);
+        vec2 sample_uv = screen.xy;
+
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 ||
+            sample_uv.y < 0.0 || sample_uv.y > 1.0) break;
+        if (ray_pos.z > -params.near_plane) continue;
+
+        // Sample HZB at current mip
+        ivec2 mipSize = textureSize(hzb_texture, int(mip));
+        if (mipSize.x == 0 || mipSize.y == 0) break;
+
+        vec2 mipCoordF = sample_uv * vec2(mipSize);
+        ivec2 mipCoord = clamp(ivec2(mipCoordF), ivec2(0), mipSize - ivec2(1));
+
+        float sceneDepthNDC = texelFetch(hzb_texture, mipCoord, int(mip)).r;
+        float sceneDepthLinear = NDCDepthToLinear(sceneDepthNDC, params.near_plane, params.far_plane);
+        float rayDepthLinear = -ray_pos.z;
+
+        if (rayDepthLinear > sceneDepthLinear) {
+            if (mip == 0u) {
+                if (rayDepthLinear <= sceneDepthLinear + params.thickness) {
+                    hit_uv = sample_uv;
+                    hit_depth = sceneDepthLinear;
+                    return true;
+                }
+            } else {
+                t -= baseStep * mipScale;
+                mip--;
+            }
+        } else {
+            mip = min(mip + 1u, params.hzb_mip_levels - 1u);
+        }
+    }
+    return false;
+}
+
+// --- Main ---
+void ssgi_trace() {
+    uvec2 half_res_pos = gl_GlobalInvocationID.xy;
+
+    if (half_res_pos.x >= params.output_width || half_res_pos.y >= params.output_height) return;
+
+    // Map half-res to full-res
+    uvec2 full_res_pos = half_res_pos * 2u;
+    ivec2 fullSize = textureSize(gbuffer_depth, 0);
+    if (int(full_res_pos.x) >= fullSize.x || int(full_res_pos.y) >= fullSize.y) {
+        imageStore(ssgi_output, ivec2(half_res_pos), vec4(0.0));
+        return;
+    }
+
+    // Read GBuffer normal (full-res). GBuffer stores WORLD-space normals
+    // (see GBuffer.vert: normalMatrix = mat3(model)). Transform to view space
+    // so the hemisphere sampling and ray march operate in a consistent frame.
+    vec4 normal_enc = texelFetch(gbuffer_normal, ivec2(full_res_pos), 0);
+    vec3 world_normal = normalize(normal_enc.xyz * 2.0 - 1.0);
+    vec3 surface_normal = normalize(mat3(gd.View) * world_normal);
+
+    // Read depth (full-res)
+    float depth_ndc = texelFetch(gbuffer_depth, ivec2(full_res_pos), 0).r;
+    float linear_depth = NDCDepthToLinear(depth_ndc, params.near_plane, params.far_plane);
+
+    if (linear_depth < params.near_plane || linear_depth > params.far_plane * 0.999) {
+        imageStore(ssgi_output, ivec2(half_res_pos), vec4(0.0));
+        return;
+    }
+
+    // Reconstruct view-space position
+    vec2 pixel_uv = (vec2(full_res_pos) + 0.5) / vec2(fullSize);
+    vec3 view_pos = screenToView(pixel_uv, depth_ndc);
+    view_pos.z = -abs(view_pos.z); // Right-handed view space (negative Z forward)
+
+    vec3 view_normal = surface_normal;
+
+    // Ray casting
+    vec3 total_irradiance = vec3(0.0);
+    float total_hit_dist = 0.0;
+    uint hit_count = 0u;
+
+    vec2 base_seed = vec2(float(full_res_pos.x) * 0.001,
+                           float(full_res_pos.y) * 0.0017);
+
+    uint rayCount = max(params.ray_count, 1u);
+
+
+    for (uint ray_idx = 0u; ray_idx < rayCount; ++ray_idx) {
+        vec3 ray_dir = cosineHemisphereSample(view_normal, base_seed, int(ray_idx),
+                                               params.frame_index, rayCount);
+        vec3 ray_origin = view_pos + view_normal * 0.05;
+
+        vec2 hit_uv = vec2(0.0);
+        float hit_depth_val = 0.0;
+
+        if (traceRayHZB(pixel_uv, ray_origin, ray_dir, hit_uv, hit_depth_val)) {
+            if (hit_uv.x >= 0.0 && hit_uv.x <= 1.0 && hit_uv.y >= 0.0 && hit_uv.y <= 1.0) {
+                ivec2 colorSize = textureSize(prev_frame_color, 0);
+                vec2 colorCoord = hit_uv * vec2(colorSize);
+                ivec2 ci0 = clamp(ivec2(floor(colorCoord)), ivec2(0), colorSize - ivec2(1));
+                ivec2 ci1 = clamp(ci0 + ivec2(1), ivec2(0), colorSize - ivec2(1));
+                vec2 f = fract(colorCoord);
+
+                vec3 c00 = texelFetch(prev_frame_color, ci0, 0).rgb;
+                vec3 c10 = texelFetch(prev_frame_color, ivec2(ci1.x, ci0.y), 0).rgb;
+                vec3 c01 = texelFetch(prev_frame_color, ivec2(ci0.x, ci1.y), 0).rgb;
+                vec3 c11 = texelFetch(prev_frame_color, ci1, 0).rgb;
+                vec3 hit_color = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+
+                vec3 clamped = min(hit_color, vec3(MAX_RADIANCE));
+                float hitLum = dot(clamped, vec3(0.2126, 0.7152, 0.0722));
+                float brightPenalty = 1.0 / (1.0 + max(hitLum - 1.0, 0.0) * 2.0);
+                clamped *= brightPenalty;
+
+                float distAttenuation = 1.0 - smoothstep(params.max_trace_distance * 0.7,
+                                                         params.max_trace_distance,
+                                                         hit_depth_val);
+                vec2 edgeDist = min(hit_uv, 1.0 - hit_uv);
+                float edgeFade = smoothstep(0.0, 0.15, min(edgeDist.x, edgeDist.y));
+
+                total_irradiance += clamped * PI_VAL * distAttenuation * edgeFade;
+                total_hit_dist += hit_depth_val;
+                hit_count++;
+            }
+        } else {
+            total_hit_dist += params.max_trace_distance;
+        }
+    }
+
+    float avg_hit_dist = total_hit_dist / float(rayCount);
+    vec3 output_irradiance = total_irradiance / float(rayCount);
+
+    imageStore(ssgi_output, ivec2(half_res_pos), vec4(output_irradiance, avg_hit_dist));
+}

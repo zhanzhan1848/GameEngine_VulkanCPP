@@ -1,0 +1,19 @@
+#version 450
+// P4c-F6: SetComputeBytes >128B implicit-UBO fallback verification.
+// 512B constant block read from set 3 / binding 0 (RHIShaderCommon.glsl
+// convention). Probes offsets 0 / 128 (push-constant boundary) / 496
+// (only reachable via the UBO path).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform image2D outImage;
+layout(set = 3, binding = 0) uniform BigBlock {
+    vec4 v[32];   // 512B
+} big;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    vec4 a = big.v[0];    // offset   0
+    vec4 b = big.v[8];    // offset 128 — push constant 边界
+    vec4 c = big.v[31];   // offset 496 — 仅 UBO 路径可达
+    imageStore(outImage, p, vec4(a.x, b.y, c.z, 1.0));
+}

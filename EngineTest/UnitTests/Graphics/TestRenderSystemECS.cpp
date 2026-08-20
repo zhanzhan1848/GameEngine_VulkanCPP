@@ -9,6 +9,7 @@
 #include "Graphics/RenderMesh.h"
 #include "Common/Id.h"
 #include <vector>
+#include <cstdlib>
 #include <unordered_map>
 #include <cstring>
 
@@ -52,6 +53,10 @@ public:
     void DrawIndirect(ResourceHandle, uint64_t, uint32_t) override {}
     void BindComputePipeline(PipelineHandle) override {}
     void WriteTimestamp(QueryPoolHandle, uint32_t) override {}
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    void PushConstants(PipelineLayoutHandle, ShaderStage, uint32_t, uint32_t, const void*) override {}
+    void SetComputeBytes(uint32_t, const void*, uint32_t) override {}
+    void MemoryBarrier(PipelineStage, PipelineStage, AccessFlag, AccessFlag) override {}
     void Dispatch(uint32_t, uint32_t, uint32_t) override {}
     void DispatchIndirect(ResourceHandle, uint64_t) override {}
     void CopyBuffer(ResourceHandle, ResourceHandle, uint64_t, uint64_t, uint64_t) override {}
@@ -129,6 +134,9 @@ public:
     void endFrameImpl() {}
     void presentImpl() {}
     void queryDeviceInfo(DeviceInfo&) {}
+    // stale-test port: Impl hooks added to the RHIDevice CRTP base after the Dawn era
+    void setBufferDirtySizeImpl(ResourceHandle, u64) {}
+    u32 getCurrentFrameIndexImpl() const { return 0; }
     
     bool submitImpl(const QueueSubmitInfo& info) {
         if (mockCmdBuffer && mockCmdBuffer->GetHandle() == info.cmdBuffer) {
@@ -159,7 +167,12 @@ public:
     // Mock Buffer Storage
     ResourceHandle createBufferImpl(const BufferDesc&) { return (ResourceHandle)1001; }
     void destroyBufferImpl(ResourceHandle) {}
-    void* mapBufferImpl(ResourceHandle, u64, u64) { return nullptr; }
+    // stale-test port: ParticlePass::initialize maps its per-frame uniform
+    // buffer and fails on nullptr — back the mock with static scratch memory.
+    void* mapBufferImpl(ResourceHandle, u64, u64) {
+        static u8* scratch = (u8*)calloc(1, 1 << 20);
+        return scratch;
+    }
     void unmapBufferImpl(ResourceHandle) {}
 
     ResourceHandle createTextureImpl(const TextureDesc&) { return (ResourceHandle)2002; }

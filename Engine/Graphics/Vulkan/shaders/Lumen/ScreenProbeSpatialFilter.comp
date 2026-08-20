@@ -1,0 +1,145 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — Bilateral spatial filter on probe SH
+// coefficients. Hand-written GLSL port of ScreenProbeSpatialFilter.metal
+// (entry: screen_probe_spatial_filter).
+//
+// Cross-pattern 5-probe bilateral blur: center + 4 cardinal neighbors.
+// Smooths probe grid boundaries while preserving edges at depth discontinuities.
+//
+// ThreadGroupSize: (64, 1, 1), 1D dispatch.
+//
+// Flat descriptor bindings:
+//   binding 0 = SSBO read   inputSH[]   (4 vec4 per probe, interleaved)
+//   binding 1 = SSBO write  outputSH[]  (4 vec4 per probe, interleaved)
+//   binding 2 = SSBO read   probePos[]  (bilateral weighting)
+//   binding 3 = UBO         { uint totalProbes; uint gridW; float sigma; uint pad; } (16B)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0, std430) readonly buffer InputSHBlock {
+    vec4 data[];
+} inputSH;
+
+layout(set = 0, binding = 1, std430) buffer OutputSHBlock {
+    vec4 data[];
+} outputSH;
+
+layout(set = 0, binding = 2, std430) readonly buffer ProbePosBlock {
+    vec4 data[];
+} probePos;
+
+layout(set = 0, binding = 3, std140) uniform SpatialConstantsBlock {
+    uint  totalProbes;
+    uint  gridW;
+    float sigma;    // bilateral spatial sigma (world-space)
+    uint  pad;
+} params;
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void screen_probe_spatial_filter() {
+    uint global_id = gl_GlobalInvocationID.x;
+
+    if (global_id >= params.totalProbes) return;
+
+    uint gx = global_id % params.gridW;
+    uint gy = global_id / params.gridW;
+
+    // Read center probe position
+    vec4 centerPosData = probePos.data[global_id];
+
+    // If center probe is inactive, output zeros
+    if (centerPosData.w <= 0.0) {
+        uint base = global_id * 4u;
+        outputSH.data[base + 0u] = vec4(0.0);
+        outputSH.data[base + 1u] = vec4(0.0);
+        outputSH.data[base + 2u] = vec4(0.0);
+        outputSH.data[base + 3u] = vec4(0.0);
+        return;
+    }
+
+    // Read center SH
+    uint centerBase = global_id * 4u;
+    vec3 centerSH[4];
+    for (int b = 0; b < 4; b++) {
+        centerSH[b] = inputSH.data[centerBase + uint(b)].rgb;
+    }
+
+    // Check if center SH is valid
+    if (inputSH.data[centerBase + 0u].w <= 0.0) {
+        // Invalid center: output zeros
+        outputSH.data[centerBase + 0u] = vec4(0.0);
+        outputSH.data[centerBase + 1u] = vec4(0.0);
+        outputSH.data[centerBase + 2u] = vec4(0.0);
+        outputSH.data[centerBase + 3u] = vec4(0.0);
+        return;
+    }
+
+    vec3 centerPos = centerPosData.xyz;
+    float invTwoSigmaSq = 1.0 / (2.0 * params.sigma * params.sigma);
+
+    // Cardinal neighbor offsets (cross pattern)
+    ivec2 offsets[4];
+    offsets[0] = ivec2(-1,  0);  // left
+    offsets[1] = ivec2( 1,  0);  // right
+    offsets[2] = ivec2( 0, -1);  // up
+    offsets[3] = ivec2( 0,  1);  // down
+
+    // Accumulate filtered SH + confidence.
+    // Center-weighted: center weight = 2.0 (strong self-preservation).
+    vec3 filteredSH[4] = vec3[4](
+        centerSH[0] * 2.0,
+        centerSH[1] * 2.0,
+        centerSH[2] * 2.0,
+        centerSH[3] * 2.0
+    );
+    float totalWeight = 2.0;  // center weight = 2.0
+    float centerConf = inputSH.data[centerBase + 0u].w;
+    float filteredConf = centerConf * 2.0;  // center weight = 2.0
+
+    for (int n = 0; n < 4; n++) {
+        int nx = int(gx) + offsets[n].x;
+        int ny = int(gy) + offsets[n].y;
+
+        // Bounds check
+        if (nx < 0 || nx >= int(params.gridW) || ny < 0) continue;
+        if (uint(ny) * params.gridW + uint(nx) >= params.totalProbes) continue;
+
+        uint nidx = uint(ny) * params.gridW + uint(nx);
+
+        // Check neighbor active
+        vec4 neighborPosData = probePos.data[nidx];
+        if (neighborPosData.w <= 0.0) continue;
+
+        // Check neighbor SH valid
+        uint neighborBase = nidx * 4u;
+        if (inputSH.data[neighborBase + 0u].w <= 0.0) continue;
+
+        // Bilateral weight based on world-space distance
+        vec3 delta = centerPos - neighborPosData.xyz;
+        float dist2 = dot(delta, delta);
+        float w = exp(-dist2 * invTwoSigmaSq);
+
+        // Read and accumulate neighbor SH
+        for (int b = 0; b < 4; b++) {
+            filteredSH[b] += inputSH.data[neighborBase + uint(b)].rgb * w;
+        }
+        // Accumulate confidence from neighbor
+        filteredConf += inputSH.data[neighborBase + 0u].w * w;
+        totalWeight += w;
+    }
+
+    // Normalize and write output
+    float invWeight = 1.0 / totalWeight;
+    uint outBase = global_id * 4u;
+    outputSH.data[outBase + 0u] = vec4(filteredSH[0] * invWeight, filteredConf * invWeight);
+    outputSH.data[outBase + 1u] = vec4(filteredSH[1] * invWeight, 1.0);
+    outputSH.data[outBase + 2u] = vec4(filteredSH[2] * invWeight, 1.0);
+    outputSH.data[outBase + 3u] = vec4(filteredSH[3] * invWeight, 1.0);
+}

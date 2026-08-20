@@ -9,7 +9,9 @@
 #include "../../Graphics/RHI/Core/RHIMeshAsset.h"
 #include "../../Content/ContentToEngine.h"
 #ifdef __APPLE__
+#if defined(__APPLE__)
 #include <simd/simd.h>
+#endif
 #endif
 #include <iostream>
 #include <cmath>

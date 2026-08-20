@@ -1,0 +1,65 @@
+#version 450 core
+// Vulkan SurfaceCache AtlasInit — populates card atlas regions with default
+// material data so LightEval has valid albedo (alpha=1) to process.
+// Without this (or a full Capture graphics pass), albedo_atlas alpha is 0 and
+// LightEval early-returns on every texel (albedo.a < 0.01 check).
+//
+// Entry point: surface_cache_atlas_init
+// Dispatch: 1D, total_texels threads (same as LightEval).
+//
+// Flat bindings:
+//   0 = StorageImage(rgba8)  albedo_atlas   (write)
+//   1 = StorageImage(rg16f)  normal_atlas   (write)
+//   2 = StorageImage(r32f)   depth_atlas    (write)
+//   3 = StorageImage(rgba16f) emissive_atlas (write)
+//   4 = UniformBuffer        FlattenedLightingParams (for card_dispatch)
+//   5 = readonly buffer      CardDispatchInfo card_dispatch[] (std430)
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8)  writeonly uniform image2D albedo_atlas;
+layout(set = 0, binding = 1, rg16f)  writeonly uniform image2D normal_atlas;
+layout(set = 0, binding = 2, r32f)   writeonly uniform image2D depth_atlas;
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D emissive_atlas;
+
+layout(set = 0, binding = 4, std140) uniform ParamBlock {
+    FlattenedLightingParams params;
+} pb;
+
+layout(set = 0, binding = 5, std430) readonly buffer CardDispatchBuf {
+    CardDispatchInfo dispatch[];
+} cd;
+
+void surface_cache_atlas_init() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= pb.params.total_texels) return;
+
+    // Binary search: find card whose [texel_offset, texel_offset+texel_count) contains tid.
+    uint lo = 0u;
+    uint hi = pb.params.card_count;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1u;
+        if (cd.dispatch[mid].texel_offset + cd.dispatch[mid].texel_count <= tid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo >= pb.params.card_count) return;
+
+    uint local_texel = tid - cd.dispatch[lo].texel_offset;
+    uint res = cd.dispatch[lo].resolution;
+    uint local_x = local_texel % res;
+    uint local_y = local_texel / res;
+    ivec2 atlas_uv = ivec2(
+        int(cd.dispatch[lo].atlas_offset_x + local_x),
+        int(cd.dispatch[lo].atlas_offset_y + local_y));
+
+    // Write default material: gray albedo (alpha=1 to pass LightEval gate),
+    // +Z normal (oct-encoded as (0.5, 0.5) in RG16F), depth=0.5, zero emissive.
+    imageStore(albedo_atlas,   atlas_uv, vec4(0.5, 0.5, 0.5, 1.0));
+    imageStore(normal_atlas,   atlas_uv, vec4(0.5, 0.5, 0.0, 1.0));
+    imageStore(depth_atlas,    atlas_uv, vec4(0.5, 0.0, 0.0, 1.0));
+    imageStore(emissive_atlas, atlas_uv, vec4(0.0, 0.0, 0.0, 1.0));
+}

@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <typeinfo>
 #include <memory>
+#include <functional>
 #include <unordered_map>
 #include <mutex>
 #include <cstring>

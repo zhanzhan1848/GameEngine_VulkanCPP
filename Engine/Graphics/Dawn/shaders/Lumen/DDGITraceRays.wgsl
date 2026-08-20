@@ -115,8 +115,8 @@ struct SDFHitResult {
 // Existing helpers (Fibonacci direction, probe grid coord, SDF sampling/trace)
 // ============================================================================
 
-fn ddgiGetProbeCounts(vol: ptr<uniform, DDGIVolumeData>) -> vec3<u32> {
-    return vec3<u32>((*vol).ProbeCounts.xyz);
+fn ddgiGetProbeCounts(vol: DDGIVolumeData) -> vec3<u32> {
+    return vec3<u32>(vol.ProbeCounts.xyz);
 }
 
 fn ddgiRayDirection(rayIndex: u32, rayCount: u32, frameIndex: u32) -> vec3<f32> {
@@ -142,8 +142,8 @@ fn ddgiProbeWorldPos(gc: vec3<u32>, origin: vec3<f32>, spacing: f32) -> vec3<f32
     return origin + vec3<f32>(f32(gc.x), f32(gc.y), f32(gc.z)) * spacing;
 }
 
-fn sdfCascadeCount(vol: ptr<uniform, DDGIVolumeData>) -> u32 {
-    return (*vol).SdfResolutionsAndCount.w;
+fn sdfCascadeCount(vol: DDGIVolumeData) -> u32 {
+    return vol.SdfResolutionsAndCount.w;
 }
 
 fn sampleSDFCascade(sdfTexture: texture_3d<f32>,
@@ -175,26 +175,26 @@ fn sampleBestSDF(pos: vec3<f32>,
                  sdf0: texture_3d<f32>,
                  sdf1: texture_3d<f32>,
                  sdf2: texture_3d<f32>,
-                 vol: ptr<uniform, DDGIVolumeData>) -> f32 {
+                 vol: DDGIVolumeData) -> f32 {
     var d: f32 = 1.0e10;
     let cc: u32 = sdfCascadeCount(vol);
     if (cc > 0u &&
-        isInsideCascade(pos, (*vol).SdfOrigins[0].xyz, (*vol).SdfExtents[0].xyz)) {
-        d = min(d, sampleSDFCascade(sdf0, pos, (*vol).SdfOrigins[0].xyz,
-                                     (*vol).SdfExtents[0].xyz,
-                                     (*vol).SdfResolutionsAndCount.x));
+        isInsideCascade(pos, vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz)) {
+        d = min(d, sampleSDFCascade(sdf0, pos, vol.SdfOrigins[0].xyz,
+                                     vol.SdfExtents[0].xyz,
+                                     vol.SdfResolutionsAndCount.x));
     }
     if (cc > 1u &&
-        isInsideCascade(pos, (*vol).SdfOrigins[1].xyz, (*vol).SdfExtents[1].xyz)) {
-        d = min(d, sampleSDFCascade(sdf1, pos, (*vol).SdfOrigins[1].xyz,
-                                     (*vol).SdfExtents[1].xyz,
-                                     (*vol).SdfResolutionsAndCount.y));
+        isInsideCascade(pos, vol.SdfOrigins[1].xyz, vol.SdfExtents[1].xyz)) {
+        d = min(d, sampleSDFCascade(sdf1, pos, vol.SdfOrigins[1].xyz,
+                                     vol.SdfExtents[1].xyz,
+                                     vol.SdfResolutionsAndCount.y));
     }
     if (cc > 2u &&
-        isInsideCascade(pos, (*vol).SdfOrigins[2].xyz, (*vol).SdfExtents[2].xyz)) {
-        d = min(d, sampleSDFCascade(sdf2, pos, (*vol).SdfOrigins[2].xyz,
-                                     (*vol).SdfExtents[2].xyz,
-                                     (*vol).SdfResolutionsAndCount.z));
+        isInsideCascade(pos, vol.SdfOrigins[2].xyz, vol.SdfExtents[2].xyz)) {
+        d = min(d, sampleSDFCascade(sdf2, pos, vol.SdfOrigins[2].xyz,
+                                     vol.SdfExtents[2].xyz,
+                                     vol.SdfResolutionsAndCount.z));
     }
     return d;
 }
@@ -205,7 +205,7 @@ fn traceSDF(rayOrigin: vec3<f32>,
             sdf0: texture_3d<f32>,
             sdf1: texture_3d<f32>,
             sdf2: texture_3d<f32>,
-            vol: ptr<uniform, DDGIVolumeData>) -> SDFHitResult {
+            vol: DDGIVolumeData) -> SDFHitResult {
     var result: SDFHitResult;
     result.hit = 0u;
     result.position = rayOrigin;
@@ -223,41 +223,41 @@ fn traceSDF(rayOrigin: vec3<f32>,
         var insideAny: bool = false;
 
         if (cc > 0u &&
-            isInsideCascade(pos, (*vol).SdfOrigins[0].xyz, (*vol).SdfExtents[0].xyz)) {
+            isInsideCascade(pos, vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz)) {
             minDist = min(minDist, sampleSDFCascade(sdf0, pos,
-                (*vol).SdfOrigins[0].xyz, (*vol).SdfExtents[0].xyz,
-                (*vol).SdfResolutionsAndCount.x));
+                vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz,
+                vol.SdfResolutionsAndCount.x));
             insideAny = true;
         }
         if (cc > 1u &&
-            isInsideCascade(pos, (*vol).SdfOrigins[1].xyz, (*vol).SdfExtents[1].xyz)) {
+            isInsideCascade(pos, vol.SdfOrigins[1].xyz, vol.SdfExtents[1].xyz)) {
             minDist = min(minDist, sampleSDFCascade(sdf1, pos,
-                (*vol).SdfOrigins[1].xyz, (*vol).SdfExtents[1].xyz,
-                (*vol).SdfResolutionsAndCount.y));
+                vol.SdfOrigins[1].xyz, vol.SdfExtents[1].xyz,
+                vol.SdfResolutionsAndCount.y));
             insideAny = true;
         }
         if (cc > 2u &&
-            isInsideCascade(pos, (*vol).SdfOrigins[2].xyz, (*vol).SdfExtents[2].xyz)) {
+            isInsideCascade(pos, vol.SdfOrigins[2].xyz, vol.SdfExtents[2].xyz)) {
             minDist = min(minDist, sampleSDFCascade(sdf2, pos,
-                (*vol).SdfOrigins[2].xyz, (*vol).SdfExtents[2].xyz,
-                (*vol).SdfResolutionsAndCount.z));
+                vol.SdfOrigins[2].xyz, vol.SdfExtents[2].xyz,
+                vol.SdfResolutionsAndCount.z));
             insideAny = true;
         }
 
         if (!insideAny) {
             let coarsest: u32 = min(2u, cc - 1u);
-            t += (*vol).SdfExtents[coarsest].x * 0.1;
+            t += vol.SdfExtents[coarsest].x * 0.1;
             if (t > maxDist) { break; }
             continue;
         }
 
-        let hitThreshold: f32 = (*vol).SdfVoxelSizes[0].x * 0.5;
+        let hitThreshold: f32 = vol.SdfVoxelSizes[0].x * 0.5;
         if (minDist < hitThreshold) {
             result.hit = 1u;
             result.position = pos;
             result.distance = t;
 
-            let eps: f32 = max((*vol).SdfVoxelSizes[0].x, 0.01);
+            let eps: f32 = max(vol.SdfVoxelSizes[0].x, 0.01);
             let gradient: vec3<f32> = vec3<f32>(
                 sampleBestSDF(pos + vec3<f32>(eps, 0.0, 0.0), sdf0, sdf1, sdf2, vol) -
                 sampleBestSDF(pos - vec3<f32>(eps, 0.0, 0.0), sdf0, sdf1, sdf2, vol),
@@ -357,7 +357,7 @@ fn shDot4(c: array<vec3<f32>, 4>, d: vec3<f32>) -> vec3<f32> {
 fn samplePrevProbeGrid(pos: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     let origin: vec3<f32> = volume.ProbeOrigin.xyz;
     let spacing: f32 = volume.ProbeSpacing;
-    let counts: vec3<u32> = ddgiGetProbeCounts(&volume);
+    let counts: vec3<u32> = ddgiGetProbeCounts(volume);
     let gp: vec3<f32> = (pos - origin) / spacing;
     let gridMax: vec3<f32> = vec3<f32>(
         f32(counts.x - 1u),
@@ -472,7 +472,7 @@ fn sampleHitAlbedo(hitPos: vec3<f32>) -> vec3<f32> {
 // surface's own SDF field self-occluding the first step.
 fn sdfShadowTest(hitPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>,
                  sdf0: texture_3d<f32>,
-                 vol: ptr<uniform, DDGIVolumeData>) -> f32 {
+                 vol: DDGIVolumeData) -> f32 {
     const SHADOW_MAX_STEPS: u32 = 8u;
     const SHADOW_MAX_DIST: f32 = 30.0;
     const SHADOW_BIAS: f32 = 0.1;
@@ -488,14 +488,14 @@ fn sdfShadowTest(hitPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>,
         // (better to leak some direct light than to systematically darken
         // hits near cascade boundary). Coarser cascades aren't sampled
         // because their 2-4m voxels miss thin occluders.
-        if (!isInsideCascade(pos, (*vol).SdfOrigins[0].xyz, (*vol).SdfExtents[0].xyz)) {
+        if (!isInsideCascade(pos, vol.SdfOrigins[0].xyz, vol.SdfExtents[0].xyz)) {
             return 1.0;
         }
 
         let d: f32 = sampleSDFCascade(sdf0, pos,
-                                       (*vol).SdfOrigins[0].xyz,
-                                       (*vol).SdfExtents[0].xyz,
-                                       (*vol).SdfResolutionsAndCount.x);
+                                       vol.SdfOrigins[0].xyz,
+                                       vol.SdfExtents[0].xyz,
+                                       vol.SdfResolutionsAndCount.x);
 
         if (d < SHADOW_HIT_THRESHOLD) {
             return 0.0;
@@ -527,7 +527,7 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
 
     let probeIdx: u32 = probeUpdateList[localProbeIdx];
 
-    let counts: vec3<u32> = ddgiGetProbeCounts(&volume);
+    let counts: vec3<u32> = ddgiGetProbeCounts(volume);
     let gc: vec3<u32> = ddgiProbeGridCoord(probeIdx, counts);
     let probePos: vec3<f32> = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
 
@@ -535,7 +535,7 @@ fn ddgi_trace_rays(@builtin(global_invocation_id) gid_vec: vec3<u32>) {
 
     var hit: SDFHitResult = traceSDF(
         probePos, rayDir, volume.RayMaxDistance,
-        sdf_cascade_0, sdf_cascade_1, sdf_cascade_2, &volume);
+        sdf_cascade_0, sdf_cascade_1, sdf_cascade_2, volume);
 
     var result: DDGIRayData;
 

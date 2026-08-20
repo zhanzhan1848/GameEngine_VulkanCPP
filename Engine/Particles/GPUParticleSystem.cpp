@@ -11,7 +11,9 @@ namespace primal::particles::gpu {
 // Embedded Metal compute shader source for particle update
 static const char* gpu_particle_compute_source = R"(
 #include <metal_stdlib>
+#if defined(__APPLE__)
 #include <simd/simd.h>
+#endif
 using namespace metal;
 
 // Must match GPUParticleTypes.h structures

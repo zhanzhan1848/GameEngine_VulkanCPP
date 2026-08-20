@@ -36,6 +36,24 @@ struct VisibilityBufferConfig {
     bool enable_conservative_rasterization{ false };
 };
 
+// T4.6.5 part 39: Stage2/Stage3 mutual exclusion. Determines which raster
+// path runs in Execute() and what downstream passes (HZB / Shadow / Deferred
+// / FinalBlit) read from.
+//   GBuffer              — (default) Stage3 rasterizes GBuffer RTs; Stage2
+//                          skipped. DeferredLighting + shadows + SSAO all
+//                          consume GBuffer. FinalBlit reads deferred output.
+//   VisibilityBufferOnly — Stage2 rasterizes visibility_buffer_; Stage3 +
+//                          DeferredLighting + shadows + SSAO skipped (HZB
+//                          still works — Stage2 writes final_depth_texture_).
+//                          FinalBlit reads resolve_output_texture_.
+//   Hybrid               — Both stages run (current behavior pre-Part 39).
+//                          Downstream reads Stage3 output. Kept for debugging.
+enum class GPURenderMode : u32 {
+    GBuffer              = 0,
+    VisibilityBufferOnly = 1,
+    Hybrid               = 2,
+};
+
 struct IndirectDrawCommand {
     u32 indexCount;
     u32 instanceCount;
@@ -96,6 +114,12 @@ public:
     // Written into DrawConstants.debug_mode each frame.
     void SetDebugMode(u32 mode) { meshlet_debug_mode_ = mode; }
 
+    // T4.6.5 part 39: Stage2/Stage3 mutual exclusion switch. Default = GBuffer
+    // (production). Switch to VisibilityBufferOnly for debug visualization of
+    // meshlet IDs. Hybrid runs both stages (wasteful; for debugging only).
+    void SetRenderMode(GPURenderMode mode) { render_mode_ = mode; }
+    GPURenderMode GetRenderMode() const { return render_mode_; }
+
     // Phase 9.3b: Streaming terrain — RenderScene accessor for iterating
     // GetStreamingMeshes() and issuing one DrawIndirect per visible mesh.
     void SetRenderScene(RenderScene* scene) { render_scene_ = scene; }
@@ -121,6 +145,21 @@ public:
     // Get the final output texture that was rendered to
     rhi::ResourceHandle GetFinalOutputTexture() const { return final_color_texture_; }
 
+    // T4.6.5 part 23: ResolveVisibilityBuffer output (RGBA8_UNorm, W×H from
+    // VisibilityBufferConfig). Populated automatically at the end of Execute().
+    rhi::ResourceHandle GetResolveOutputTexture() const { return resolve_output_texture_; }
+
+    // T4.6.5 part 22.1: diagnostic accessor for tests to read back visibility_buffer_
+    // (R32_UInt) directly and verify Stage2 actually rasterized geometry.
+    rhi::ResourceHandle GetVisibilityBuffer() const { return visibility_buffer_; }
+
+    // T4.6.5 part 23: Dispatch the resolve compute shader. Auto-called at the
+    // end of Execute() — external callers no longer need to invoke this. Kept
+    // public for rare cases where a caller wants to re-resolve with different
+    // state (e.g., after a debug-mode change). Reads visibility_buffer_ +
+    // final_depth_texture_, writes resolve_output_texture_.
+    void ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer);
+
     // Get the final depth texture for HZB generation
     rhi::ResourceHandle GetFinalDepthTexture() const { return final_depth_texture_; }
 
@@ -140,7 +179,11 @@ public:
         rhi::ResourceHandle shadow_depth_rt_1{ rhi::handles::INVALID_RESOURCE };
         rhi::ResourceHandle shadow_map_0{ rhi::handles::INVALID_RESOURCE };       // R32_Float sampleable
         rhi::ResourceHandle shadow_map_1{ rhi::handles::INVALID_RESOURCE };
-        
+        // VSM moments (RG32_Float = (z, z²)), written directly by the moments
+        // raster pass — replaces the D32→R32 blit + ShadowFilter chain.
+        rhi::ResourceHandle shadow_moments_0{ rhi::handles::INVALID_RESOURCE };
+        rhi::ResourceHandle shadow_moments_1{ rhi::handles::INVALID_RESOURCE };
+
         // Per-cascade resources to avoid CPU/GPU data races and descriptor set overwrite issues
         rhi::ResourceHandle visible_clusters_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
         rhi::ResourceHandle visible_counter_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };  // atomic counter per cascade
@@ -148,7 +191,7 @@ public:
         rhi::ResourceHandle light_frustum_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
         rhi::ResourceHandle shadow_depth_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };    // ShadowDepthUniforms for raster pass
         rhi::ResourceHandle blit_resolution_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE }; // BlitResolution for depth blit
-        
+
         rhi::DescriptorSetHandle shadow_cull_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
         rhi::DescriptorSetHandle shadow_depth_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };  // 8 bindings for vertex pulling
         rhi::DescriptorSetHandle shadow_blit_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };   // 3 bindings for D32→R32 blit
@@ -168,6 +211,14 @@ public:
                              u32 cascade_index,
                              u32 buffer_index);
 
+    // VSM variant: same vertex pulling + CPU-side state as ExecuteShadowRaster,
+    // but the pipeline writes (z, z²) moments into the cascade's RG32 color
+    // target (shadow_moments_c) while depth-testing against the shared D32.
+    bool ExecuteShadowMomentsRaster(rhi::RHICommandBuffer* cmd_buffer,
+                                    const math::m4x4& light_view_projection,
+                                    u32 cascade_index,
+                                    u32 buffer_index);
+
     bool ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_buffer,
                                 u32 cascade_index,
                                 u32 buffer_index);
@@ -175,6 +226,22 @@ public:
     // GBuffer depth blit: D32_Float -> R32_Float via compute shader (ShadowBlit.metal)
     // Metal TBDR cannot sample D32_Float; this uses the same compute pipeline as shadow blit.
     bool ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_buffer);
+
+    // --- Planar reflection (Mirror) ---
+    // Renders the scene through a reflected camera into caller-owned RTs
+    // (PlanarReflectionModule supplies 1024² RGBA16F + D32). CPU frustum
+    // culling (ExtractFrustumPlanes on the reflected VP) + vertex-pulling
+    // forward-lit raster (lambert + ambient, albedo from material arrays).
+    bool InitializeReflectionResources(u32 max_clusters);
+    void ShutdownReflectionResources();
+    bool IsReflectionReady() const { return reflection_initialized_; }
+    bool ExecuteReflectionPass(rhi::RHICommandBuffer* cmd_buffer,
+                               const RenderSceneSnapshot& scene_snapshot,
+                               const math::m4x4& reflected_view_projection,
+                               const math::v4& light_dir, const math::v4& light_color,
+                               const math::v4& ambient,
+                               rhi::ResourceHandle color_rt, rhi::ResourceHandle depth_rt,
+                               u32 buffer_index);
 
     const ShadowFrameResources& GetShadowFrameResources(u32 buffer_index) const {
         return shadow_frames_[buffer_index % 3];
@@ -186,7 +253,19 @@ public:
             : shadow_frames_[buffer_index % 3].shadow_map_1;
     }
 
+    rhi::ResourceHandle GetShadowMoments(u32 cascade_index, u32 buffer_index) const {
+        return (cascade_index == 0)
+            ? shadow_frames_[buffer_index % 3].shadow_moments_0
+            : shadow_frames_[buffer_index % 3].shadow_moments_1;
+    }
+
     // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
+    /// TAA sub-pixel jitter gate. Only enable when a TAA resolve pass actually
+    /// runs in the frame graph — jitter without temporal resolve is visible
+    /// as per-frame pixel crawl.
+    void SetJitterEnabled(bool enabled) { jitter_enabled_ = enabled; }
+    bool IsJitterEnabled() const { return jitter_enabled_; }
+
     rhi::ResourceHandle GetGBufferAlbedo() const { return gbuffer_albedo_texture_; }
     rhi::ResourceHandle GetGBufferNormal() const { return gbuffer_normal_texture_; }
     rhi::ResourceHandle GetGBufferORM() const { return gbuffer_orm_texture_; }
@@ -204,6 +283,12 @@ public:
     rhi::ResourceHandle GetGlobalMeshletTrianglesBuffer() const { return global_meshlet_triangles_buffer_; }
     rhi::ResourceHandle GetClusterMapBuffer() const { return cluster_map_buffer_; }
     rhi::ResourceHandle GetGlobalInstanceDataBuffer() const { return global_instance_data_buffer_; }
+    rhi::ResourceHandle GetMaterialDataBuffer() const { return global_material_data_buffer_; }
+    rhi::ResourceHandle GetAlbedoTextureArray() const { return albedo_texture_array_; }
+
+    // T4.6.5 part 35.2: total meshlet count for OOB validation in culling
+    // shader's per-cluster bounds lookup. Returns 0 before first Execute().
+    u32 GetTotalMeshletCount() const { return total_meshlet_count_; }
 
 private:
     GPUDrivenDrawPipeline() = default;
@@ -222,7 +307,9 @@ private:
                                   const RenderSceneSnapshot& scene_snapshot,
                                   const math::m4x4& view_matrix,
                                   const math::m4x4& projection_matrix,
-                                  u32 frame_index);
+                                  const CullingResults& culling_results,
+                                  u32 frame_index,
+                                  u32 buffer_index);
 
     bool Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffer,
                              const RenderSceneSnapshot& scene_snapshot,
@@ -232,7 +319,6 @@ private:
                              u32 buffer_index);
 
     void SetupVisibilityBufferPipeline(rhi::RHICommandBuffer* cmd_buffer);
-    void ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_buffer);
     rhi::ResourceHandle GetPreviousFrameDepth();
 
     rhi::RHIDeviceBase* device_{ nullptr };
@@ -260,6 +346,12 @@ private:
     struct FrameResource {
         rhi::ResourceHandle camera_constants_buffer{ rhi::handles::INVALID_RESOURCE };
         rhi::DescriptorSetHandle global_draw_descriptor_set{ rhi::handles::INVALID_DESCRIPTOR_SET };
+        // T4.6.5 part 30 X10: per-frame Stage2 visibility-buffer resources.
+        // Previously a single visibility_descriptor_set_ was written every frame;
+        // the prior frame's cmd buffer was still pending when the next frame's
+        // vkUpdateDescriptorSets fired → VUID-vkUpdateDescriptorSets-None-03047.
+        rhi::ResourceHandle visibility_cb{ rhi::handles::INVALID_RESOURCE };
+        rhi::DescriptorSetHandle visibility_descriptor_set{ rhi::handles::INVALID_DESCRIPTOR_SET };
     };
 
     utl::vector<FrameResource> frame_resources_;
@@ -286,6 +378,8 @@ private:
     rhi::ResourceHandle cluster_map_buffer_{ rhi::handles::INVALID_RESOURCE }; // Cluster ID -> (MeshletID, InstanceID)
     rhi::ResourceHandle global_instance_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Instance ID -> World Matrix
     rhi::ResourceHandle global_material_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Material Data (for material sampling)
+    bool owns_material_data_buffer_{ false };     // True if pipeline allocated a dummy buffer
+    bool placeholder_textures_layout_done_{ false }; // True after first Execute transitions placeholder arrays to ShaderResource
 
     // 🎨 Texture arrays for material sampling
     rhi::ResourceHandle albedo_texture_array_{ rhi::handles::INVALID_RESOURCE };    // Albedo texture array
@@ -308,7 +402,8 @@ private:
     math::m4x4 prev_view_matrix_;   // Previous frame view matrix for velocity
     math::m4x4 prev_proj_matrix_;   // Previous frame proj matrix for velocity
     bool has_prev_frame_{ false };   // Whether previous frame data is available
-    u32 meshlet_debug_mode_{ 0 };   // 0=off, 1=meshlet, 2=triangle, 3=mesh (mirrors DrawConstants.debug_mode)
+    u32 meshlet_debug_mode_{ 0 };   // Normal rendering
+    GPURenderMode render_mode_{ GPURenderMode::GBuffer };  // T4.6.5 part 39
     u32 vertex_count_{ 0 };
     u32 index_count_{ 0 };
     rhi::DataFormat index_format_{ rhi::DataFormat::R32_UInt };
@@ -325,6 +420,8 @@ private:
     rhi::ResourceHandle final_depth_texture_{ rhi::handles::INVALID_RESOURCE };
 
     // GBuffer render targets (created in CreateRenderPasses)
+    bool jitter_enabled_ = false;   // TAA-only: sub-pixel jitter gate
+    math::v2 prev_jitter_{0.0f, 0.0f};  // jitter the previous frame rendered with
     rhi::ResourceHandle gbuffer_albedo_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_normal_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_orm_texture_{ rhi::handles::INVALID_RESOURCE };
@@ -341,10 +438,39 @@ private:
     rhi::ResourceHandle resolve_output_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::SamplerHandle resolve_sampler_{ rhi::handles::INVALID_SAMPLER };
 
+    // T4.6.5 part 20: per-frame DrawConstants CB for the resolve compute shader + one-shot descriptor write flag.
+    rhi::ResourceHandle resolve_cb_{ rhi::handles::INVALID_RESOURCE };
+    bool resolve_descriptor_written_{ false };
+
+    // T4.6.5 part 22: Stage2 visibility-buffer raster resources.
+    // Per-frame CB + descriptor set live in FrameResource (triple-buffered, X10 fix).
+    // visibility_descriptor_set_layout_ retained so we can allocate descriptor sets
+    //   from it after pipeline creation (was previously destroyed immediately).
+    rhi::DescriptorSetLayoutHandle visibility_descriptor_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+
     // ---- Shadow Mapping Resources ----
     ShadowFrameResources shadow_frames_[3];                         // Triple-buffered per-frame
+
+    // ---- Planar Reflection (Mirror) Resources ----
+    bool reflection_initialized_{false};
+    u32 reflection_max_clusters_{0};
+    rhi::PipelineHandle reflection_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineLayoutHandle reflection_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::DescriptorSetLayoutHandle reflection_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    // Triple-buffered per-frame buffers (visible-list uvec4 entries + indirect
+    // args + params CB) and descriptor sets.
+    rhi::ResourceHandle reflection_visible_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle reflection_indirect_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle reflection_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::DescriptorSetHandle reflection_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
+
     rhi::PipelineHandle shadow_cull_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: cluster culling
     rhi::PipelineHandle shadow_depth_pipeline_{ rhi::handles::INVALID_PIPELINE };   // Graphics: depth-only raster
+    rhi::PipelineHandle shadow_moments_pipeline_{ rhi::handles::INVALID_PIPELINE }; // Graphics: VSM moments raster (ShadowDepth VS + moments FS)
     rhi::PipelineHandle shadow_finalize_pipeline_{ rhi::handles::INVALID_PIPELINE }; // Compute: finalize indirect args
     rhi::PipelineHandle shadow_blit_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: D32→R32 blit
     rhi::PipelineLayoutHandle shadow_cull_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };

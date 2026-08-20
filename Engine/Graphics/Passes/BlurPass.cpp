@@ -20,7 +20,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "BlurPass");
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
-        shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+        shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + shaderPath;
         file.open(shaderPath, std::ios::ate | std::ios::binary);
     }
 
@@ -30,13 +30,18 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     }
     
     size_t fileSize = (size_t)file.tellg();
-    utl::vector<char> buffer(fileSize + 1);
+    // SPIR-V (Vulkan) is 4-byte-aligned binary — do NOT append a null byte
+    // (2344+1=2345 breaks the alignment and the driver rejects the module).
+    // Metal/Dawn source text keeps the null terminator for runtime compile.
+    const bool isBinarySpirV = (platform == rhi::RHIPlatform::Vulkan);
+    size_t codeSize = isBinarySpirV ? fileSize : fileSize + 1;
+    utl::vector<char> buffer(codeSize);
     file.seekg(0);
     file.read(buffer.data(), fileSize);
-    buffer[fileSize] = '\0';
+    if (!isBinarySpirV) buffer[fileSize] = '\0';
     file.close();
 
-    computeShader_ = device_->CreateShader(buffer.data(), fileSize + 1, rhi::ShaderStage::Compute, "blurCS");
+    computeShader_ = device_->CreateShader(buffer.data(), codeSize, rhi::ShaderStage::Compute, "blurCS");
     if (computeShader_ == rhi::handles::INVALID_SHADER) {
         std::cerr << "BlurPass: Failed to create compute shader" << std::endl;
         return false;
@@ -224,13 +229,18 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
                        u32 frameIndex,
                        int radius, float sigma) {
     
+    // Guard: if Initialize failed (invalid pipeline / unmapped params), no-op
+    // rather than crash writing an unmapped param buffer.
+    if (pipeline_ == rhi::handles::INVALID_PIPELINE ||
+        !paramBufferMapped_[frameIndex] || !cmdBuffer) return;
+
     static u32 lastFrameIndex = -1;
     if (lastFrameIndex != frameIndex) {
         paramBufferOffset_[frameIndex] = 0;
         currentSetIndex_[frameIndex] = 0;
         lastFrameIndex = frameIndex;
     }
-    
+
     cmdBuffer->BindComputePipeline(pipeline_);
     
     // Barrier: Prepare Temp for writing (ShaderResource -> UnorderedAccess)

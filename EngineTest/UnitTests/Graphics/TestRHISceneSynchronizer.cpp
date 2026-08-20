@@ -76,6 +76,10 @@ protected:
     void GenerateMipmaps(ResourceHandle) override {}
     void InsertBarrier(const ResourceBarrier*, uint32_t) override {}
     void WriteTimestamp(QueryPoolHandle, uint32_t) override {}
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    void PushConstants(PipelineLayoutHandle, ShaderStage, uint32_t, uint32_t, const void*) override {}
+    void SetComputeBytes(uint32_t, const void*, uint32_t) override {}
+    void MemoryBarrier(PipelineStage, PipelineStage, AccessFlag, AccessFlag) override {}
 };
 
 class MockDevice : public RHIDeviceBase {
@@ -131,6 +135,9 @@ public:
     void* MapBuffer(ResourceHandle, u64, u64) override { return nullptr; }
     void UnmapBuffer(ResourceHandle) override {}
     RHIGarbageCollector& GetGarbageCollector() override { static RHIGarbageCollector gc; return gc; }
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    void SetBufferDirtySize(ResourceHandle, u64) override {}
+    RHIPlatform GetPlatform() const override { return desc_.platform; }
     
     CommandBufferHandle CreateCommandBuffer(CommandQueueType) override { return reinterpret_cast<CommandBufferHandle>(new MockCommandBuffer(*this)); }
     void DestroyCommandBuffer(CommandBufferHandle cmd) override { delete reinterpret_cast<MockCommandBuffer*>(cmd); }
@@ -169,7 +176,8 @@ private:
         
         primal::id::id_type materialId = 3001;
         MaterialInstance materialInstance(nullptr); // Using default constructor for test
-        renderSystem.RegisterMaterialInstance(materialId, &materialInstance);
+        // stale-test port: RegisterMaterialInstance now owns via shared_ptr
+        renderSystem.RegisterMaterialInstance(materialId, std::make_shared<MaterialInstance>(nullptr));
         
         // Create Scene and Proxy
         RenderScene scene;

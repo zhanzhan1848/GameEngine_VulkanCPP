@@ -57,6 +57,9 @@ public:
     // Implementing missing pure virtual methods
     void* MapBuffer(ResourceHandle, u64 = 0, u64 = 0) override { return nullptr; }
     void UnmapBuffer(ResourceHandle) override {}
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    void SetBufferDirtySize(ResourceHandle, u64) override {}
+    RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
 
     // === Target Methods Implementation ===
     

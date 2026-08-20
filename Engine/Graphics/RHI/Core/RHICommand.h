@@ -329,12 +329,45 @@ public:
         if (state_ != CommandBufferState::Recording) {
             return false;
         }
-        
+
         bool result = endImpl();
         if (result) {
             state_ = CommandBufferState::RecordingEnded;
         }
         return result;
+    }
+
+    // ========================================================================
+    // P4c-F7: Secondary CommandBuffer / 并行录制(双方语义统一)
+    //
+    // 契约(两端一致):
+    //   - BeginSecondaryCommandBuffer 在 primary 上调用,返回一个已完成
+    //     Begin 的 secondary;secondary 内不得再 BeginRenderPass(拒绝);
+    //     也不得 Submit/WaitForCompletion(secondary 不拥有 fence —— 同步
+    //     由执行它的 primary 提交统一完成)。
+    //   - ExecuteSecondaryCommandBuffers 在 primary 的 render pass 实例内
+    //     调用(Vulkan 在 pass 内 vkCmdExecuteCommands;Metal 的 parallel
+    //     子 encoder 命令自动汇入,Execute 为 no-op)。
+    //   - 生命周期:secondary 挂到 primary 的提交帧,随 primary 一起回收;
+    //     调用方在 primary WaitForCompletion 后 Destroy 即安全。
+    // ========================================================================
+
+    /**
+     * @brief 创建并开始录制一个 secondary command buffer
+     * @param desc 继承信息(Vulkan 的 VkCommandBufferInheritanceInfo;
+     *             Metal 的 parallel 子 encoder 自动继承,字段忽略)
+     * @return secondary 句柄(失败返回 INVALID_COMMAND_BUFFER)
+     */
+    virtual CommandBufferHandle BeginSecondaryCommandBuffer(const SecondaryCommandBufferDesc& desc) {
+        (void)desc;
+        return handles::INVALID_COMMAND_BUFFER;
+    }
+
+    /**
+     * @brief 在当前 render pass 实例内执行一组 secondary(primary 调用)
+     */
+    virtual void ExecuteSecondaryCommandBuffers(u32 count, CommandBufferHandle* secondaries) {
+        (void)count; (void)secondaries;
     }
     
     /**
@@ -486,6 +519,17 @@ public:
      * @param queryIndex 查询索引
      */
     virtual void WriteTimestamp(QueryPoolHandle queryPool, u32 queryIndex) = 0;
+
+    /**
+     * @brief 重置查询池中的查询（GPU 端，vkCmdResetQueryPool）
+     * @param queryPool 查询池句柄
+     * @param firstQuery 起始 query 索引
+     * @param queryCount 重置数量
+     * @details T4.6.5 part 24.2 (B6 fix): Vulkan spec 要求 query 在 cmd buffer
+     *          使用前 reset。GPU 端 reset 比 CPU 端 vkResetQueryPool 在某些
+     *          验证层/MoltenVK 路径上更可靠。Metal/Dawn 实现为 no-op。
+     */
+    virtual void ResetQueryPool(QueryPoolHandle queryPool, u32 firstQuery, u32 queryCount) {}
     
     /**
      * @brief 绘制

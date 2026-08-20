@@ -65,6 +65,14 @@ public:
     u32 GetCurrentFrameIndex() const { return currentFrameIndex_; }
 
     /**
+     * @brief 获取当前 acquired swapchain image 的索引
+     * @details T4.6.5 part 30.13 (X5 fix): caller 需要 per-image semaphore
+     *          来避免 render-done semaphore 重用。RenderSystem 内部有
+     *          currentImageIndex_,这里暴露给外部使用。
+     */
+    u32 GetCurrentImageIndex() const { return currentImageIndex_; }
+
+    /**
      * @brief 获取当前帧的 Command Buffer
      * @return 当前帧的 Command Buffer 指针
      */
@@ -109,6 +117,38 @@ public:
     void EndFrame();
 
     /**
+     * @brief 结束当前帧 (T4.6.5 part 30.12: GPU-GPU 同步重载)
+     * @details Present 等待 render-done semaphore,确保上一帧的 draw 完成后才 present
+     * @param renderDoneSemaphore Submit 信号给的 render-done 信号量
+     */
+    void EndFrame(rhi::SyncHandle renderDoneSemaphore);
+
+    /**
+     * @brief 获取当前帧的 fence (CPU-GPU 同步)
+     * @details 外部调用 Submit 时可能需要传入 fence,此接口返回当前帧的 fence
+     * @param frameIndex 帧索引 (内部对 MAX_FRAMES_IN_FLIGHT 取模)
+     * @return SyncHandle,如果未初始化返回 INVALID_SYNC
+     */
+    rhi::SyncHandle GetFrameFence(u32 frameIndex) const {
+        if (frameFences_.empty()) return rhi::handles::INVALID_SYNC;
+        return frameFences_[frameIndex % rhi::MAX_FRAMES_IN_FLIGHT];
+    }
+
+    /**
+     * @brief 获取当前帧 acquire→draw 的 GPU-GPU 信号量
+     * @details T4.6.5 part 30.14 (X1 follow-up): BeginFrame 内部调用
+     *          AcquireNextImage(imageSemaphores_[currentFrameIndex_]),这个
+     *          semaphore 由 acquire 信号、由 caller 的 Submit 等待。原本
+     *          BeginFrame 没有把这个 semaphore 暴露出来,caller 只能拿到 fence
+     *          (CPU-GPU),导致 Submit 传 waitSemaphore=garbage 触发
+     *          VUID-vkQueueSubmit-pWaitSemaphores-03238。
+     */
+    rhi::SyncHandle GetCurrentImageAvailableSemaphore() const {
+        if (imageSemaphores_.empty()) return rhi::handles::INVALID_SYNC;
+        return imageSemaphores_[currentFrameIndex_];
+    }
+
+    /**
      * @brief 获取当前后台缓冲区的描述信息
      * @return 纹理描述
      */
@@ -144,6 +184,7 @@ private:
     utl::vector<rhi::CommandBufferHandle> cmdBufferHandles_;
     utl::vector<rhi::RHICommandBuffer*> cmdBuffers_;
     utl::vector<rhi::SyncHandle> frameFences_; // CPU-GPU sync fences
+    utl::vector<rhi::SyncHandle> imageSemaphores_; // T4.6.5 part 30.5: GPU-GPU acquire→draw semaphores
     u32 currentFrameIndex_{0};
     u32 currentImageIndex_{0}; // Index of the swapchain image acquired for the current frame
 

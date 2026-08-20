@@ -1,0 +1,174 @@
+#version 450 core
+#extension GL_EXT_samplerless_texture_functions : require
+
+// OfflineSDFViz.comp — Sphere tracing against merged SIGNED SDF.
+// The merged SDF stores true signed distances (negative inside surfaces).
+// Standard sphere tracing: t += d at each step, hit when d < threshold.
+//
+// Bindings (match SDFVisualizationModule's compute pipeline layout):
+//   0: texture3D  sdf_volume (R16F, samplerless)
+//   3: image2D    output_image (RGBA8, writeonly)
+//   4: UBO        uniforms
+
+layout(set = 0, binding = 0) uniform texture3D sdf_volume;
+layout(set = 0, binding = 3) writeonly uniform image2D output_image;
+
+layout(set = 0, binding = 4) uniform SDFVizUniforms {
+    vec4  SdfOrigins[3];
+    vec4  SdfExtents[3];
+    vec4  SdfVoxelSizes[3];
+    vec4  SdfResolutionsAndCount; // .xyz = resolution (float), .w = count
+    vec4  CameraPosAndMaxDist;
+    vec4  CameraForward;
+    vec4  CameraRight;
+    vec4  CameraUp;
+    vec4  LightDirAndIntensity;
+    vec4  FovAndAspect;
+} uniforms;
+
+float sampleSDF(vec3 worldPos) {
+    vec3 origin = uniforms.SdfOrigins[0].xyz;
+    vec3 extent = uniforms.SdfExtents[0].xyz;
+    float res = uniforms.SdfResolutionsAndCount.x;
+
+    vec3 uvw = (worldPos - origin) / extent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) return 1.0e10;
+
+    // Trilinear interpolation
+    vec3 gridF = uvw * res - 0.5;
+    ivec3 i0 = ivec3(clamp(gridF, vec3(0.0), vec3(res - 1.0)));
+    ivec3 i1 = ivec3(clamp(gridF + 1.0, vec3(0.0), vec3(res - 1.0)));
+    vec3 f = clamp(gridF - vec3(i0), vec3(0.0), vec3(1.0));
+
+    float c000 = texelFetch(sdf_volume, i0, 0).r;
+    float c100 = texelFetch(sdf_volume, ivec3(i1.x, i0.y, i0.z), 0).r;
+    float c010 = texelFetch(sdf_volume, ivec3(i0.x, i1.y, i0.z), 0).r;
+    float c110 = texelFetch(sdf_volume, ivec3(i1.x, i1.y, i0.z), 0).r;
+    float c001 = texelFetch(sdf_volume, ivec3(i0.x, i0.y, i1.z), 0).r;
+    float c101 = texelFetch(sdf_volume, ivec3(i1.x, i0.y, i1.z), 0).r;
+    float c011 = texelFetch(sdf_volume, ivec3(i0.x, i1.y, i1.z), 0).r;
+    float c111 = texelFetch(sdf_volume, i1, 0).r;
+
+    return mix(mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y),
+               mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y), f.z);
+}
+
+vec3 computeNormal(vec3 pos) {
+    float eps = max(uniforms.SdfVoxelSizes[0].x * 1.5, 0.02);
+    float dx = sampleSDF(pos + vec3(eps, 0, 0)) - sampleSDF(pos - vec3(eps, 0, 0));
+    float dy = sampleSDF(pos + vec3(0, eps, 0)) - sampleSDF(pos - vec3(0, eps, 0));
+    float dz = sampleSDF(pos + vec3(0, 0, eps)) - sampleSDF(pos - vec3(0, 0, eps));
+    vec3 n = vec3(dx, dy, dz);
+    if (dot(n, n) < 1e-12) return vec3(0.0, 1.0, 0.0);
+    return normalize(n);
+}
+
+bool isInsideVolume(vec3 pos) {
+    vec3 o = uniforms.SdfOrigins[0].xyz;
+    vec3 e = uniforms.SdfExtents[0].xyz;
+    vec3 local = pos - o;
+    return local.x >= 0.0 && local.x < e.x &&
+           local.y >= 0.0 && local.y < e.y &&
+           local.z >= 0.0 && local.z < e.z;
+}
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imgSize = imageSize(output_image);
+    if (pixel.x >= imgSize.x || pixel.y >= imgSize.y) return;
+
+    vec3 camPos   = uniforms.CameraPosAndMaxDist.xyz;
+    float maxDist = uniforms.CameraPosAndMaxDist.w;
+    float voxelSize = uniforms.SdfVoxelSizes[0].x;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(imgSize);
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
+
+    float tanHalf = uniforms.FovAndAspect.x;
+    float aspect  = uniforms.FovAndAspect.y;
+    vec3 forward  = normalize(uniforms.CameraForward.xyz);
+    vec3 right    = normalize(uniforms.CameraRight.xyz);
+    vec3 up       = normalize(uniforms.CameraUp.xyz);
+
+    vec3 rayDir = normalize(forward + ndc.x * tanHalf * aspect * right
+                                  + ndc.y * tanHalf * up);
+
+    // Ray-AABB intersection to limit march to SDF volume.
+    vec3 volOrigin = uniforms.SdfOrigins[0].xyz;
+    vec3 volExtent = uniforms.SdfExtents[0].xyz;
+    vec3 tMin3 = (volOrigin - camPos) / max(rayDir, vec3(1e-8));
+    vec3 tMax3 = (volOrigin + volExtent - camPos) / max(rayDir, vec3(1e-8));
+    vec3 t1 = min(tMin3, tMax3);
+    vec3 t2 = max(tMin3, tMax3);
+    float tNear = max(max(t1.x, t1.y), max(t1.z, 0.0));
+    float tFar  = min(min(t2.x, t2.y), t2.z);
+
+    if (tNear > tFar || tFar < 0.0) {
+        vec3 skyTop = vec3(0.35, 0.45, 0.65);
+        vec3 skyBot = vec3(0.7, 0.75, 0.85);
+        imageStore(output_image, pixel, vec4(mix(skyBot, skyTop, uv.y), 1.0));
+        return;
+    }
+    tFar = min(tFar, maxDist);
+
+    // --- Dense ray march: find FIRST surface crossing (unsigned distance) ---
+    // For unsigned distance, we detect surface by finding where distance
+    // drops below a threshold. We march in small steps and stop at the
+    // first point close to a surface.
+    float hitThreshold = voxelSize * 0.75;
+    float stepSize = voxelSize * 0.5;
+    float t = tNear;
+    bool hit = false;
+    vec3 hitPos = vec3(0.0);
+    float prevDist = 1e10;
+
+    for (int i = 0; i < 512 && t <= tFar; ++i) {
+        vec3 pos = camPos + rayDir * t;
+        float d = sampleSDF(pos);
+
+        // Detect surface crossing: distance was large, now small.
+        if (d < hitThreshold) {
+            hit = true;
+            hitPos = pos;
+            break;
+        }
+
+        // Adaptive step: if distance is large, we can step further.
+        // But cap to avoid overshooting.
+        float step = min(d * 0.9, stepSize * 4.0);
+        step = max(step, stepSize);
+        t += step;
+    }
+
+    if (!hit) {
+        vec3 skyTop = vec3(0.35, 0.45, 0.65);
+        vec3 skyBot = vec3(0.7, 0.75, 0.85);
+        imageStore(output_image, pixel, vec4(mix(skyBot, skyTop, uv.y), 1.0));
+        return;
+    }
+
+    // SDF visualization: normal mapping (R=X, G=Y, B=Z) + contour lines.
+    // No diffuse lighting — this is for inspecting SDF geometry/precision.
+    float distAtHit = sampleSDF(hitPos);
+    vec3 N = computeNormal(hitPos);
+    if (dot(N, rayDir) > 0.0) N = -N;
+
+    vec3 normalColor = N * 0.5 + 0.5;
+
+    // Contour lines at integer voxel boundaries — shows SDF precision/steps.
+    float contour = abs(fract(distAtHit / voxelSize) - 0.5);
+    float contourLine = smoothstep(0.35, 0.5, contour);
+
+    // Subtle depth tint for spatial awareness.
+    float depthT = clamp(t / maxDist, 0.0, 1.0);
+    vec3 depthTint = mix(vec3(1.0, 0.95, 0.85), vec3(0.7, 0.8, 1.0), depthT);
+
+    vec3 finalColor = normalColor * depthTint;
+    finalColor = mix(finalColor, vec3(1.0), contourLine * 0.25);
+
+    imageStore(output_image, pixel, vec4(finalColor, 1.0));
+}

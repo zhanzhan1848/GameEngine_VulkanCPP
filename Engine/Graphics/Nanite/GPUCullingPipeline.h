@@ -196,24 +196,52 @@ private:
     std::array<rhi::ResourceHandle, 3> culling_debug_buffers_{ rhi::handles::INVALID_RESOURCE };
     static constexpr u32 MAX_DEBUG_ENTRIES = 1000; // Limit debug data size
 
+    // T4.6.5 part 35.4: triple-buffered staging for indirect_args readback.
+    // Stage7 writes visible_count to indirect_commands[1] on the GPU; we copy
+    // to host-visible staging at the end of Execute() and read it on the NEXT
+    // frame (after WaitForCompletion in the test loop). Required because the
+    // indirect_args buffer itself is GPU-only (host-invisible) on Vulkan.
+    std::array<rhi::ResourceHandle, 3> indirect_readback_staging_{ rhi::handles::INVALID_RESOURCE };
+    u32 indirect_readback_idx_{ 0 };          // triple-buffer ring slot
+    u32 indirect_readback_filled_{ 0 };       // count of staged frames (gates readback)
+
     rhi::PipelineLayoutHandle culling_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle culling_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    std::array<rhi::DescriptorSetHandle, 3> culling_descriptor_sets_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    // Note: brace-init with a single value only initializes element 0 — the rest
+    // get value-initialized to 0, which is a VALID DescriptorSetHandle. UpdateHZBBindings
+    // would then write to descriptor sets belonging to OTHER layouts (silent corruption).
+    std::array<rhi::DescriptorSetHandle, 3> culling_descriptor_sets_{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
     
     rhi::PipelineLayoutHandle streaming_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle streaming_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    rhi::DescriptorSetHandle streaming_descriptor_set_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    // T4.6.5 part 30.6 (X6 fix): triple-buffer streaming descriptor set.
+    // Single-set variant updated every frame while the prior frame's cmd
+    // buffer was still in flight → VUID-vkUpdateDescriptorSets-None-03047.
+    std::array<rhi::DescriptorSetHandle, 3> streaming_descriptor_sets_{
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET
+    };
 
     bool initialized_{ false };
     std::mutex mutex_;
 
     // Execution state tracking (replaces static locals in Execute())
     // These must be member variables to reset properly across Initialize/Shutdown cycles
+    // T4.6.5 part 30.2: previously these were file/function-scope statics, which
+    // leaked across sub-tests in the same binary — singleton Shutdown left them
+    // set, so the next sub-test's Execute never re-created descriptor sets on
+    // the new device → null descriptor set cascade.
     u32 execute_call_count_{ 0 };
     bool basic_descriptor_sets_created_{ false };
     bool backface_descriptor_sets_created_{ false };
     bool hzb_bindings_updated_{ false };
     u32 matrix_print_count_{ 0 };
+
+    // T4.6.5 part 30.2: converted from function-scope statics for the same reason.
+    rhi::ResourceHandle placeholder_meshlet_buffer_{ rhi::handles::INVALID_RESOURCE };
+    std::array<rhi::ResourceHandle, 3> streaming_constant_buffers_{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    bool warned_streaming_constants_invalid_{ false };
 
     // Reflects CullingConstants.force_pass_all for the diagnostic toggle.
     // Default false so production behavior is unchanged.
@@ -238,6 +266,11 @@ private:
         u32 cluster_count;
         u32 force_pass_all; // 🔥 DEBUG: Force all geometry to pass culling
         u32 enable_debug_output; // 🔥 DEBUG: Enable debug output
+        // T4.6.5 part 35.2: OOB guard for cluster_map → meshlets lookup.
+        u32 total_meshlet_count;
+        u32 _pad_cm0;
+        u32 _pad_cm1;
+        u32 _pad_cm2;
     };
 
     bool CreatePipelines();

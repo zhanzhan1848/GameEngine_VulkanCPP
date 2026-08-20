@@ -565,7 +565,7 @@ void MultiViewTestCase::CreateCubeMesh() {
         // Note: In a real scenario, we'd use a RenderMesh class that manages these.
         // For this test, we create raw buffers and bind them manually.
         
-        BufferDesc vbDesc;
+        BufferDesc vbDesc{};
         vbDesc.size = vertices.size() * sizeof(Vertex);
         vbDesc.vertex.vertexStride = sizeof(Vertex);
         vbDesc.type = BufferType::Vertex;
@@ -579,7 +579,7 @@ void MultiViewTestCase::CreateCubeMesh() {
         memcpy(vbData, vertices.data(), vbDesc.size);
         device->UnmapBuffer(vertexBuffer);
         
-        BufferDesc ibDesc;
+        BufferDesc ibDesc{};
         ibDesc.size = indices.size() * sizeof(uint32_t);
         ibDesc.index.format = DataFormat::R32_UInt;
         ibDesc.type = BufferType::Index;
@@ -649,7 +649,7 @@ void MultiViewTestCase::CreateSphereMesh() {
         }
     }
     
-    BufferDesc vbDesc;
+    BufferDesc vbDesc{};
     vbDesc.size = vertices.size() * sizeof(Vertex);
     vbDesc.vertex.vertexStride = sizeof(Vertex);
     vbDesc.type = BufferType::Vertex;
@@ -663,7 +663,7 @@ void MultiViewTestCase::CreateSphereMesh() {
     memcpy(vbData, vertices.data(), vbDesc.size);
     device->UnmapBuffer(sphereVertexBuffer);
     
-    BufferDesc ibDesc;
+    BufferDesc ibDesc{};
     ibDesc.size = indices.size() * sizeof(uint32_t);
     ibDesc.index.format = DataFormat::R32_UInt;
     ibDesc.type = BufferType::Index;
@@ -723,7 +723,7 @@ bool MultiViewTestCase::SetupIBL() {
         // Let's rely on CreateTexture with initial data if possible? No.
         
         // Use CopyBufferToTexture
-        BufferDesc stageDesc;
+        BufferDesc stageDesc{};
         stageDesc.size = pixels.size() * 4;
         stageDesc.bindFlags = static_cast<uint32_t>(BufferUsageFlags::TransferSrc);
         stageDesc.usage = GPUMemoryUsage::Staging;
@@ -1227,7 +1227,7 @@ bool MultiViewTestCase::Initialize() {
     blitDSLayout = device->CreateDescriptorSetLayout(blitDSDesc);
     
     // Create Blit Uniform Buffer
-    BufferDesc bubDesc;
+    BufferDesc bubDesc{};
     bubDesc.size = sizeof(math::m4x4); // Rotation Matrix
     bubDesc.usage = GPUMemoryUsage::Dynamic;
     bubDesc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -1260,7 +1260,7 @@ bool MultiViewTestCase::Initialize() {
     
     // Create Present Uniform Buffer (Identity)
     {
-        BufferDesc bubDesc;
+        BufferDesc bubDesc{};
         bubDesc.size = sizeof(math::m4x4);
         bubDesc.usage = GPUMemoryUsage::Dynamic;
         bubDesc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -1364,7 +1364,7 @@ bool MultiViewTestCase::Initialize() {
     }
     
     // 8. Create Uniform Buffers
-    BufferDesc ubDesc;
+    BufferDesc ubDesc{};
     ubDesc.size = sizeof(math::m4x4) * 12; // View Uniforms (6 ViewProjs + 6 PreviousViewProjs)
     ubDesc.usage = GPUMemoryUsage::Dynamic;
     ubDesc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -1414,7 +1414,7 @@ bool MultiViewTestCase::Initialize() {
 
     // 8.1 Create Main View Uniform Buffer
     {
-        BufferDesc bufDesc;
+        BufferDesc bufDesc{};
         bufDesc.size = sizeof(math::m4x4) * 12;
         bufDesc.usage = GPUMemoryUsage::Dynamic;
         bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -1695,7 +1695,7 @@ bool MultiViewTestCase::Initialize() {
 
     // 12.2 Initialize ShortBox Resources (Independent Movement & SH)
     {
-        BufferDesc ubDesc;
+        BufferDesc ubDesc{};
         ubDesc.size = sizeof(SceneData);
         ubDesc.type = BufferType::Constant;
         ubDesc.usage = GPUMemoryUsage::Dynamic;
@@ -1947,7 +1947,7 @@ bool MultiViewTestCase::CreateReflectionResources() {
     reflectionDepthTexture3 = device->CreateTexture(texDesc);
     
     // 2. Buffers
-    BufferDesc ubDesc;
+    BufferDesc ubDesc{};
     ubDesc.size = sizeof(math::m4x4) * 6; // Standard View Buffer size
     ubDesc.usage = GPUMemoryUsage::Dynamic;
     ubDesc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -2622,7 +2622,7 @@ void MultiViewTestCase::Run() {
             colorAtt.texture = data.output;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
+            colorAtt.clearColor = ClearValue{math::v4{0.1f, 0.1f, 0.1f, 0.0f}};
             rpDesc.colors.push_back(colorAtt);
             
             RGAttachmentDesc depthAtt;
@@ -2717,7 +2717,7 @@ void MultiViewTestCase::Run() {
             colorAtt.texture = data.output;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
+            colorAtt.clearColor = ClearValue{math::v4{0.1f, 0.1f, 0.1f, 0.0f}};
             rpDesc.colors.push_back(colorAtt);
             
             RGAttachmentDesc depthAtt;
@@ -2810,7 +2810,7 @@ void MultiViewTestCase::Run() {
             colorAtt.texture = data.output;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
+            colorAtt.clearColor = ClearValue{math::v4{0.1f, 0.1f, 0.1f, 0.0f}};
             rpDesc.colors.push_back(colorAtt);
             
             RGAttachmentDesc depthAtt;
@@ -2901,7 +2901,7 @@ void MultiViewTestCase::Run() {
             colorAtt.texture = data.cubeMap;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.1f, 0.2f, 0.3f, 1.0f);
+            colorAtt.clearColor = ClearValue{math::v4{0.1f, 0.2f, 0.3f, 1.0f}};
             colorAtt.slice = 0; // Base slice
             rpDesc.colors.push_back(colorAtt);
             
@@ -3005,14 +3005,14 @@ void MultiViewTestCase::Run() {
             colorAtt.texture = data.output;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.1f, 0.1f, 0.1f, 0.0f);
+            colorAtt.clearColor = ClearValue{math::v4{0.1f, 0.1f, 0.1f, 0.0f}};
             rpDesc.colors.push_back(colorAtt);
 
             RGAttachmentDesc velocityAtt;
             velocityAtt.texture = data.velocity;
             velocityAtt.loadOp = LoadAction::Clear;
             velocityAtt.storeOp = StoreAction::Store;
-            velocityAtt.clearColor = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+            velocityAtt.clearColor = ClearValue{math::v4{0.0f, 0.0f, 0.0f, 0.0f}};
             rpDesc.colors.push_back(velocityAtt);
 
             RGAttachmentDesc depthAtt;
@@ -3135,7 +3135,7 @@ void MultiViewTestCase::Run() {
             colorAtt.texture = data.output;
             colorAtt.loadOp = LoadAction::Clear;
             colorAtt.storeOp = StoreAction::Store;
-            colorAtt.clearColor = ClearValue(0.0f, 0.0f, 0.0f, 1.0f);
+            colorAtt.clearColor = ClearValue{math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
             rpDesc.colors.push_back(colorAtt);
             
             builder.DeclareRenderPass(rpDesc);

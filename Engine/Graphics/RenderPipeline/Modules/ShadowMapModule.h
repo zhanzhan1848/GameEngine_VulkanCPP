@@ -3,11 +3,15 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
+#include "Graphics/Passes/BlurPass.h"
+
+#include <memory>
 
 namespace primal::graphics {
 
 namespace nanite { class GPUDrivenDrawPipeline; }
 struct RenderSceneSnapshot;
+class BlurPass;
 
 namespace rendergraph { class RenderGraph; }
 
@@ -27,6 +31,12 @@ struct ShadowMapOutputs {
     rhi::ResourceHandle shadow_visibility_tex;
     math::m4x4 shadow_matrix0;   // Cascade 0 light VP
     math::m4x4 shadow_matrix1;   // Cascade 1 light VP
+    // VSM path: blurred RG32 moments per cascade (INVALID when VSM is off —
+    // DeferredLighting then samples shadow_visibility_tex instead).
+    rendergraph::RGResourceHandle shadow_moments_rg[2];
+    rhi::ResourceHandle shadow_moments_tex[2]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    bool vsm_enabled = false;
 };
 
 class ShadowMapModule {
@@ -42,6 +52,12 @@ public:
 
     rhi::ResourceHandle GetShadowVisibilityTexture(u32 /*buffer_index*/) const { return shadow_visibility_tex_; }
     const math::m4x4* GetCachedShadowVP(u32 buffer_index) const { return cached_shadow_vp_[buffer_index % 3]; }
+
+    // VSM (variance shadow maps): moments raster + Gaussian blur + Chebyshev
+    // sampling in DeferredLighting. When off, the module falls back to the
+    // PCSS chain (D32 → R32 blit → ShadowFilter half-res visibility).
+    void SetVSMEnabled(bool enabled) { vsm_enabled_ = enabled; }
+    bool IsVSMEnabled() const { return vsm_enabled_; }
 
 private:
     bool InitializeShadowFilterPipeline();
@@ -59,6 +75,13 @@ private:
     bool shadow_cache_valid_[3][2]{false};
     bool shadow_cache_globally_valid_{false};
 
+    // VSM moments blur (BlurPass ping-pong H+V, radius 3 / sigma 1.0 — same
+    // parameters as Metal's ForwardRenderer VSM loop)
+    bool vsm_enabled_{true};
+    std::unique_ptr<BlurPass> moments_blur_;
+    rhi::ResourceHandle moments_temp_{
+        rhi::handles::INVALID_RESOURCE};        // shared blur ping-pong target
+
     // Shadow filter (half-res compute)
     rhi::PipelineHandle shadow_filter_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineLayoutHandle shadow_filter_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
@@ -74,6 +97,10 @@ private:
         rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE
     };
+    // T4.6.5 part 40: linear sampler shared across all ShadowFilter texture
+    // samples (shadowMap0/1, normalTex, depthTex). Sampler binding lives at
+    // descriptor slot 6 (see InitializeShadowFilter layout).
+    rhi::SamplerHandle shadow_filter_sampler_{rhi::handles::INVALID_SAMPLER};
 };
 
 } // namespace primal::graphics

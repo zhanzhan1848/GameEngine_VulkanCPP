@@ -1,0 +1,128 @@
+#version 450 core
+// Vulkan Lumen Surface Cache Light Cull — GLSL port of SurfaceCacheLightCull.metal.
+// Entry point: surface_cache_light_cull  (glslangValidator -e surface_cache_light_cull)
+//
+// Per-tile sparse depth/normal scan to assign up to 4 lights per tile.
+// ThreadGroupSize: (8, 8, 1)
+//
+// Flat descriptor bindings:
+//   binding 0 = StorageImage(r32f)   depth_atlas          (readonly, imageLoad)
+//   binding 1 = StorageImage(rg16f)  normal_atlas         (readonly, imageLoad)
+//   binding 2 = UniformBuffer        LightCullParams
+//   binding 3 = StorageBuffer        lights[]             (LightInfo, std430)
+//   binding 4 = StorageBuffer        tile_light_assignment[] (uvec4, read-write)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// Bindings (flat)
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0, r32f)  readonly uniform image2D depth_atlas;
+layout(set = 0, binding = 1, rg16f) readonly uniform image2D normal_atlas;
+
+struct LightCullParams {
+    SurfaceCacheParams sc_params;
+    uint tiles_x;
+    uint tile_size;
+    uint light_count;
+    uint tiles_y;
+};
+
+layout(set = 0, binding = 2, std140) uniform LightCullParamsBlock {
+    LightCullParams params;
+} lcp;
+
+layout(set = 0, binding = 3, std430) readonly buffer LightsBlock {
+    LightInfo data[];
+} lights;
+
+layout(set = 0, binding = 4, std430) buffer TileLightAssignmentBlock {
+    uvec4 data[];
+} tile_light_assignment;
+
+// --------------------------------------------------------------------------------
+void surface_cache_light_cull()
+{
+    uint tile_x = gl_GlobalInvocationID.x;
+    uint tile_y = gl_GlobalInvocationID.y;
+    if (tile_x >= lcp.params.tiles_x || tile_y >= lcp.params.tiles_y) return;
+
+    uint tile_idx = tile_y * lcp.params.tiles_x + tile_x;
+    uint tile_size = lcp.params.tile_size;
+    uvec2 tile_origin = uvec2(tile_x * tile_size, tile_y * tile_size);
+
+    // Apple Silicon bandwidth optimization:
+    // Full 8x8 scan = 64 depth reads/thread x 65K threads = 4.2M pixel reads (over ~2M limit).
+    // Instead, use sparse 4x4 subsampling (16 reads) for occupancy check,
+    // then full scan only for occupied tiles that need normal data for point lights.
+
+    float min_depth = 1e10;
+    float max_depth = 0.0;
+
+    // Phase 1: Sparse depth scan (every other texel = 4x4 = 16 reads)
+    for (uint dy = 0; dy < tile_size; dy += 2) {
+        for (uint dx = 0; dx < tile_size; dx += 2) {
+            uvec2 texel = tile_origin + uvec2(dx, dy);
+            if (texel.x >= lcp.params.sc_params.atlas_size || texel.y >= lcp.params.sc_params.atlas_size) continue;
+            float d = imageLoad(depth_atlas, ivec2(texel)).r;
+            if (d > 0.0) {
+                min_depth = min(min_depth, d);
+                max_depth = max(max_depth, d);
+            }
+        }
+    }
+
+    // Skip tiles with no valid depth data
+    if (max_depth <= 0.0) {
+        tile_light_assignment.data[tile_idx] = uvec4(0xFFFFFFFFu);
+        return;
+    }
+
+    // Phase 2: Sparse normal scan for occupied tiles (point/spot light culling).
+    // Same 4x4 sparse pattern as Phase 1 to keep bandwidth bounded.
+    vec3 avg_normal = vec3(0.0);
+    uint valid_count = 0u;
+
+    for (uint dy = 0; dy < tile_size; dy += 2) {
+        for (uint dx = 0; dx < tile_size; dx += 2) {
+            uvec2 texel = tile_origin + uvec2(dx, dy);
+            if (texel.x >= lcp.params.sc_params.atlas_size || texel.y >= lcp.params.sc_params.atlas_size) continue;
+            float d = imageLoad(depth_atlas, ivec2(texel)).r;
+            if (d > 0.0) {
+                vec2 enc = imageLoad(normal_atlas, ivec2(texel)).rg;
+                avg_normal += octDecode(enc);
+                valid_count++;
+            }
+        }
+    }
+
+    uvec4 assigned = uvec4(0xFFFFFFFFu);
+    uint assign_count = 0u;
+
+    if (valid_count > 0u) {
+        avg_normal = normalize(avg_normal);
+        for (uint li = 0u; li < lcp.params.light_count && assign_count < 4u; ++li) {
+            bool visible = false;
+            if (uint(lights.data[li].direction.w) == 1u) {
+                visible = true;
+            } else {
+                float light_range = lights.data[li].position.w;
+                if (max_depth < light_range) visible = true;
+            }
+            if (visible) {
+                switch (assign_count) {
+                    case 0u: assigned.x = li; break;
+                    case 1u: assigned.y = li; break;
+                    case 2u: assigned.z = li; break;
+                    case 3u: assigned.w = li; break;
+                }
+                assign_count++;
+            }
+        }
+    }
+    tile_light_assignment.data[tile_idx] = assigned;
+}

@@ -954,7 +954,7 @@ void CompareModelFiles(primal::graphics::rhi::RHIDeviceBase* device) {
     }
 
     // Logical Comparison via SceneDataAdapter
-    auto LoadMeshes = [&](const std::vector<uint8_t>& data) -> std::vector<SceneDataMeshInfo> {
+    auto LoadMeshes = [&](const std::vector<uint8_t>& data) -> primal::utl::vector<SceneDataMeshInfo> { // stale-test port: adapter returns utl::vector
         if (data.empty()) return {};
         SceneDataAdapter adapter;
         return adapter.LoadRenderItemData(device, data.data(), (uint32_t)data.size());
@@ -1105,9 +1105,9 @@ bool TestGeometryDebugSponza::LoadScene() {
     
     // Remove duplicate texture paths
     std::sort(_pendingTexturePaths.begin(), _pendingTexturePaths.end());
-    _pendingTexturePaths.erase(
-        std::unique(_pendingTexturePaths.begin(), _pendingTexturePaths.end()),
-        _pendingTexturePaths.end());
+    // stale-test port: utl::vector erase takes a single iterator; dedupe via resize
+    auto new_end = std::unique(_pendingTexturePaths.begin(), _pendingTexturePaths.end());
+    _pendingTexturePaths.resize(new_end - _pendingTexturePaths.begin());
     
     _asyncTexturesTotalCount = static_cast<u32>(_pendingTexturePaths.size());
     std::cout << "Collected " << _pendingTexturePaths.size() << " unique textures for async loading" << std::endl;
@@ -1610,7 +1610,7 @@ void TestGeometryDebugSponza::StartAsyncTextureLoading()
     // Start async loading using JobSystem
     _asyncLoadHandle = content::AsyncResourceLoader::Get()->LoadTexturesAsync(
         _pendingTexturePaths,
-        [this](const std::vector<content::TextureLoadResult>& results)
+        [this](const primal::utl::vector<content::TextureLoadResult>& results) // stale-test port: callback takes utl::vector
         {
             // This callback runs on main thread
             std::cout << "[Async] Texture loading complete!" << std::endl;

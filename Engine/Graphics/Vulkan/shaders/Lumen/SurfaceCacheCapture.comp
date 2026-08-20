@@ -1,0 +1,116 @@
+#version 450 core
+// Vulkan SurfaceCache Capture — GBuffer-gather approach.
+// Entry point: surface_cache_capture
+//
+// Instead of a graphics pipeline re-rendering geometry per card (the Metal
+// design, never wired on either backend), this compute pass scatters the
+// main-pass GBuffer into the card atlas: each screen pixel reconstructs its
+// world position, projects it into every card whose ortho frame contains it
+// (worldToCardUV), and writes albedo / oct-encoded normal / axis depth into
+// the atlas texels. Texels not covered this frame keep their previous content
+// (persistent atlas = cache semantics); never-covered texels stay zero, which
+// LightEval's albedo.a < 0.01 early-out already handles.
+//
+// Dispatch: 2D (8x8) over render resolution.
+//
+// Flat bindings:
+//   0 = SampledDepthImage  gbuffer_depth  (raw NDC Z, 1.0 = sky)
+//   1 = SampledImage       gbuffer_albedo
+//   2 = SampledImage       gbuffer_normal (world normal packed *0.5+0.5)
+//   3 = StorageImage(rgba8)  albedo_atlas   (write)
+//   4 = StorageImage(rg16f)  normal_atlas   (write, oct-encoded)
+//   5 = StorageImage(r32f)   depth_atlas    (write, axis distance)
+//   6 = UniformBuffer      { invViewProjection, card_count, render_size }
+//   7 = readonly buffer    SurfaceCacheCard cards[] (std430)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D gbuffer_depth;
+layout(set = 0, binding = 1) uniform texture2D gbuffer_albedo;
+layout(set = 0, binding = 2) uniform texture2D gbuffer_normal;
+
+layout(set = 0, binding = 3, rgba8)  writeonly uniform image2D albedo_atlas;
+layout(set = 0, binding = 4, rg16f)  writeonly uniform image2D normal_atlas;
+layout(set = 0, binding = 5, r32f)   writeonly uniform image2D depth_atlas;
+
+layout(set = 0, binding = 6, std140) uniform CaptureParams {
+    mat4  invViewProjection;   // offset 0
+    uint  card_count;          // offset 64
+    uint  render_width;        // offset 68
+    uint  render_height;       // offset 72
+    uint  _pad;                // offset 76  (total 80)
+} cp;
+
+layout(set = 0, binding = 7, std430) readonly buffer CardBuf {
+    SurfaceCacheCard cards[];
+} cb;
+
+// Project world position into a card's atlas frame. Also outputs the depth
+// along the card axis (same switch as worldToCardUV in SurfaceCacheData.glsl,
+// duplicated here to return the depth value as well).
+bool projectToCard(vec3 worldPos, SurfaceCacheCard card, out vec2 out_uv, out float out_depth) {
+    vec3 local = worldPos - card.center.xyz;
+    float u, v, depth;
+
+    uint axis = card.axis_direction & 0xFFu;
+    uint dir  = (card.axis_direction >> 8) & 0xFFu;
+
+    if (axis == 0u) {
+        depth = local.x * (dir > 0u ? 1.0 : -1.0);
+        u = (local.y / (card.extent.y * 2.0)) + 0.5;
+        v = (local.z / (card.extent.z * 2.0)) + 0.5;
+    } else if (axis == 1u) {
+        depth = local.y * (dir > 0u ? 1.0 : -1.0);
+        u = (local.x / (card.extent.x * 2.0)) + 0.5;
+        v = (local.z / (card.extent.z * 2.0)) + 0.5;
+    } else {
+        depth = local.z * (dir > 0u ? 1.0 : -1.0);
+        u = (local.x / (card.extent.x * 2.0)) + 0.5;
+        v = (local.y / (card.extent.y * 2.0)) + 0.5;
+    }
+
+    if (depth < 0.0 || u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return false;
+
+    out_uv = vec2(float(card.atlas_offset_x) + u * float(card.resolution),
+                  float(card.atlas_offset_y) + v * float(card.resolution));
+    out_depth = depth;
+    return true;
+}
+
+void surface_cache_capture() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(cp.render_width) || pixel.y >= int(cp.render_height)) return;
+
+    float depth = texelFetch(gbuffer_depth, pixel, 0).r;
+    if (depth >= 1.0) return;  // sky
+
+    // Reconstruct world position (standard-Z NDC, Vulkan Y-flip).
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(cp.render_width, cp.render_height);
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec4 worldPosH = cp.invViewProjection * vec4(ndc, depth, 1.0);
+    vec3 worldPos = worldPosH.xyz / worldPosH.w;
+
+    vec3 albedo = texelFetch(gbuffer_albedo, pixel, 0).rgb;
+    vec3 n = texelFetch(gbuffer_normal, pixel, 0).xyz;
+    n = normalize(n * 2.0 - 1.0);
+    vec2 encN = octEncode(n);
+
+    // Scatter into every card whose ortho frame contains this point.
+    // Cap matches the Metal card-search budget (~24 device reads).
+    uint limit = min(cp.card_count, 24u);
+    for (uint i = 0u; i < limit; ++i) {
+        SurfaceCacheCard card = cb.cards[i];
+        vec2 atlasUV;
+        float axisDepth;
+        if (projectToCard(worldPos, card, atlasUV, axisDepth)) {
+            ivec2 texel = ivec2(atlasUV);
+            imageStore(albedo_atlas, texel, vec4(albedo, 1.0));
+            imageStore(normal_atlas, texel, vec4(encN, 0.0, 1.0));
+            imageStore(depth_atlas,  texel, vec4(axisDepth, 0.0, 0.0, 1.0));
+        }
+    }
+}

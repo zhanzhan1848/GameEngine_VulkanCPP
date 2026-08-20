@@ -253,10 +253,10 @@ bool CSMIntegrationRenderGraphTestCase::Initialize() {
 
     // Vertex Attributes
     // Position (v3), Color (v3), Normal (v3) - Match Data and Shader
-    shadowDesc.vertexAttributes.push_back(VertexInputAttribute(0, 0, DataFormat::RGB32_Float, 0)); // Position
-    shadowDesc.vertexAttributes.push_back(VertexInputAttribute(1, 0, DataFormat::RGB32_Float, 12)); // Color
-    shadowDesc.vertexAttributes.push_back(VertexInputAttribute(2, 0, DataFormat::RGB32_Float, 24)); // Normal
-    shadowDesc.vertexBindings.push_back(VertexInputBinding(0, 36, true));
+    shadowDesc.vertexAttributes.push_back(VertexInputAttribute{0, 0, DataFormat::RGB32_Float, 0}); // Position
+    shadowDesc.vertexAttributes.push_back(VertexInputAttribute{1, 0, DataFormat::RGB32_Float, 12}); // Color
+    shadowDesc.vertexAttributes.push_back(VertexInputAttribute{2, 0, DataFormat::RGB32_Float, 24}); // Normal
+    shadowDesc.vertexBindings.push_back(VertexInputBinding{0, 36, true});
 
     shadowPipeline = device->CreateGraphicsPipeline(shadowDesc);
     if (shadowPipeline == handles::INVALID_PIPELINE) {
@@ -269,13 +269,13 @@ bool CSMIntegrationRenderGraphTestCase::Initialize() {
     
     // Set Vertex Attributes for Material (Main Pass)
     utl::vector<VertexInputAttribute> matVertexAttributes;
-    matVertexAttributes.push_back(VertexInputAttribute(0, 0, DataFormat::RGB32_Float, 0)); // Position
-    matVertexAttributes.push_back(VertexInputAttribute(1, 0, DataFormat::RGB32_Float, 12)); // Color
-    matVertexAttributes.push_back(VertexInputAttribute(2, 0, DataFormat::RGB32_Float, 24)); // Normal
+    matVertexAttributes.push_back(VertexInputAttribute{0, 0, DataFormat::RGB32_Float, 0}); // Position
+    matVertexAttributes.push_back(VertexInputAttribute{1, 0, DataFormat::RGB32_Float, 12}); // Color
+    matVertexAttributes.push_back(VertexInputAttribute{2, 0, DataFormat::RGB32_Float, 24}); // Normal
     material->SetVertexAttributes(matVertexAttributes);
 
     utl::vector<VertexInputBinding> matVertexBindings;
-    matVertexBindings.push_back(VertexInputBinding(0, 36, true));
+    matVertexBindings.push_back(VertexInputBinding{0, 36, true});
     material->SetVertexBindings(matVertexBindings);
 
     // Set Main Pass Render Target Formats
@@ -425,8 +425,12 @@ bool CSMIntegrationRenderGraphTestCase::Initialize() {
     floorMaterialInstance->SetUniformData(0, &floorUniforms, sizeof(MaterialUniformData));
 
     // Register
-    renderSystem.RegisterMaterialInstance(300, materialInstance);
-    renderSystem.RegisterMaterialInstance(301, floorMaterialInstance);
+    // stale-test port: RegisterMaterialInstance takes shared_ptr; test keeps raw
+    // ownership (manual delete in shutdown), so wrap with a non-owning deleter.
+    renderSystem.RegisterMaterialInstance(300,
+        std::shared_ptr<MaterialInstance>(materialInstance, [](MaterialInstance*) {}));
+    renderSystem.RegisterMaterialInstance(301,
+        std::shared_ptr<MaterialInstance>(floorMaterialInstance, [](MaterialInstance*) {}));
 
     // 7. Create Mesh (Cube)
     std::cout << "Step 10: Create Mesh" << std::endl;
@@ -606,7 +610,8 @@ void CSMIntegrationRenderGraphTestCase::DrawScene(RHICommandBuffer* cmdBuffer, R
             cmdBuffer->BindDescriptorSets(PipelineBindPoint::Graphics, pipelineLayout, 1, 1, perObjectSets, 1, dynamicOffsets);
 
             // Bind Material Set
-            MaterialInstance* matInst = renderSystem.GetMaterialInstance(proxy.materialId);
+            // stale-test port: GetMaterialInstance returns shared_ptr now
+            std::shared_ptr<MaterialInstance> matInst = renderSystem.GetMaterialInstance(proxy.materialId);
             if (matInst && matInst->GetDescriptorSet() != handles::INVALID_RESOURCE) {
                 ResourceHandle matSets[] = { matInst->GetDescriptorSet() };
                 cmdBuffer->BindDescriptorSets(PipelineBindPoint::Graphics, pipelineLayout, 2, 1, matSets, 0, nullptr);
@@ -795,13 +800,13 @@ void CSMIntegrationRenderGraphTestCase::Run() {
             desc.colorAttachments[0].texture = context.graph->GetResource(data.shadowMoments)->GetPhysicalHandle();
             desc.colorAttachments[0].loadOp = LoadAction::Clear;
             desc.colorAttachments[0].storeOp = StoreAction::Store;
-            desc.colorAttachments[0].clearValue = ClearValue(1.0f, 1.0f, 0.0f, 0.0f);
+            desc.colorAttachments[0].clearValue = ClearValue{primal::math::v4{1.0f, 1.0f, 0.0f, 0.0f}};
 
             // Depth Attachment
             desc.depthAttachment.texture = context.graph->GetResource(data.shadowDepth)->GetPhysicalHandle();
             desc.depthAttachment.loadOp = LoadAction::Clear;
             desc.depthAttachment.storeOp = StoreAction::Store;
-            desc.depthAttachment.clearValue = ClearValue(1.0f, 0); // Far plane
+            desc.depthAttachment.clearValue = ClearValue{}; desc.depthAttachment.clearValue.depth = 1.0f; // Far plane
             
             context.cmdBuffer->BeginRenderPass(desc);
             
@@ -891,31 +896,31 @@ void CSMIntegrationRenderGraphTestCase::Run() {
             desc.colorAttachments[0].texture = context.graph->GetResource(data.backBuffer)->GetPhysicalHandle();
             desc.colorAttachments[0].loadOp = LoadAction::Clear;
             desc.colorAttachments[0].storeOp = StoreAction::Store;
-            desc.colorAttachments[0].clearValue = ClearValue(0.2f, 0.3f, 0.4f, 1.0f);
+            desc.colorAttachments[0].clearValue = ClearValue{primal::math::v4{0.2f, 0.3f, 0.4f, 1.0f}};
             
             // 1: WorldPos
             desc.colorAttachments[1].texture = context.graph->GetResource(data.worldPosBuffer)->GetPhysicalHandle();
             desc.colorAttachments[1].loadOp = LoadAction::Clear;
             desc.colorAttachments[1].storeOp = StoreAction::Store;
-            desc.colorAttachments[1].clearValue = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+            desc.colorAttachments[1].clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 0.0f}};
 
             // 2: Normal
             desc.colorAttachments[2].texture = context.graph->GetResource(data.normalBuffer)->GetPhysicalHandle();
             desc.colorAttachments[2].loadOp = LoadAction::Clear;
             desc.colorAttachments[2].storeOp = StoreAction::Store;
-            desc.colorAttachments[2].clearValue = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+            desc.colorAttachments[2].clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 0.0f}};
             
             // 3: UV
             desc.colorAttachments[3].texture = context.graph->GetResource(data.uvBuffer)->GetPhysicalHandle();
             desc.colorAttachments[3].loadOp = LoadAction::Clear;
             desc.colorAttachments[3].storeOp = StoreAction::Store;
-            desc.colorAttachments[3].clearValue = ClearValue(0.0f, 0.0f, 0.0f, 0.0f);
+            desc.colorAttachments[3].clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 0.0f}};
             
             // Depth Buffer
             desc.depthAttachment.texture = context.graph->GetResource(data.depthBuffer)->GetPhysicalHandle();
             desc.depthAttachment.loadOp = LoadAction::Clear;
             desc.depthAttachment.storeOp = StoreAction::Store;
-            desc.depthAttachment.clearValue = ClearValue(1.0f, 0);
+            desc.depthAttachment.clearValue = ClearValue{}; desc.depthAttachment.clearValue.depth = 1.0f;
             
             context.cmdBuffer->BeginRenderPass(desc);
             
@@ -937,7 +942,8 @@ void CSMIntegrationRenderGraphTestCase::Run() {
     );
 
     // Add Debug Pass
-    std::vector<primal::graphics::DebugResource> debugResources;
+    // stale-test port: AddDebugPass takes utl::vector
+    primal::utl::vector<primal::graphics::DebugResource> debugResources;
     debugResources.push_back({"ShadowMoments", shadowData.shadowMoments});
     debugResources.push_back({"ShadowDepth", shadowData.shadowDepth});
     debugResources.push_back({"MainDepth", mainPassData.depthBuffer});

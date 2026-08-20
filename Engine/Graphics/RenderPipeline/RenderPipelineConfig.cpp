@@ -15,6 +15,7 @@ static const RenderPassInfo kPassInfos[] = {
     {"SurfaceCache",       "Surface cache card capture",                 false},
     {"SC-DDGI",            "Surface cache → DDGI integration",           false},
     {"SSGI",               "Screen-space global illumination",           true},
+    {"SSR",                "Screen-space reflections",                   false},
     {"ScreenProbes",       "Screen probe GI",                            false},
     {"GIGather",           "DDGI → half-res screen texture",             true},
     {"VolumePass",         "Post-process volumetric fog",                false},
@@ -45,13 +46,14 @@ bool PipelineQualityConfig::IsPassEnabled(RenderPassID id) const {
         case RenderPassID::SurfaceCache:       return enable_surface_cache;
         case RenderPassID::SCDDGIIntegration:  return enable_surface_cache && enable_ddgi;
         case RenderPassID::SSGI:               return enable_ssgi;
+        case RenderPassID::SSR:                return enable_ssr;
         case RenderPassID::ScreenProbes:       return enable_screen_probes;
         case RenderPassID::GIGather:           return enable_ddgi;
         case RenderPassID::VolumePass:         return enable_volume_pass;
         case RenderPassID::VolumeRenderer:     return enable_volume_renderer;
         case RenderPassID::FroxelFog:         return enable_froxel_fog;
         case RenderPassID::FluidRender:       return enable_fluid_render;
-        case RenderPassID::FusionComposite:    return enable_ssgi || enable_ddgi;
+        case RenderPassID::FusionComposite:    return enable_ssgi || enable_ddgi || enable_ssr;
         case RenderPassID::FinalBlit:          return enable_final_blit;
         default: return false;
     }
@@ -66,6 +68,7 @@ void PipelineQualityConfig::SetPassEnabled(RenderPassID id, bool enabled) {
         case RenderPassID::SurfaceCache:       enable_surface_cache = enabled; break;
         case RenderPassID::SCDDGIIntegration:  break; // derived: enable SurfaceCache + DDGI instead
         case RenderPassID::SSGI:               enable_ssgi = enabled; break;
+        case RenderPassID::SSR:                enable_ssr = enabled; break;
         case RenderPassID::ScreenProbes:       enable_screen_probes = enabled; break;
         case RenderPassID::GIGather:           break; // derived: enable DDGI instead
         case RenderPassID::VolumePass:         enable_volume_pass = enabled; break;
@@ -111,7 +114,7 @@ PipelineQualityConfig PipelineQualityConfig::FromPreset(lumen::LumenQualityPrese
         cfg.enable_ssao = true;
         cfg.enable_ssgi = true;
         cfg.enable_ddgi = true;
-        cfg.enable_surface_cache = false;
+        cfg.enable_surface_cache = true;   // AtlasInit path (no full Capture) is lightweight
         cfg.enable_screen_probes = false;
         cfg.shadow_quality = lumen::ShadowQuality::PCF_16;
         cfg.render_scale = 1.0f;

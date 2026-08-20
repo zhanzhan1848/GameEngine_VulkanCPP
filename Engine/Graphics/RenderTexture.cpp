@@ -244,8 +244,8 @@ bool RenderTexture::GenerateMipmaps(rhi::RHIDeviceBase* device) {
         s32 nextDepth = std::max(1, depth / 2);
         rhi::TextureBlitRegion region{
             .srcSubresource = {i, 0, 1},
-            .dstSubresource = {i + 1, 0, 1},
             .srcOffsets = {rhi::Offset3D{0, 0, 0}, rhi::Offset3D{width, height, depth}},
+            .dstSubresource = {i + 1, 0, 1},
             .dstOffsets = {rhi::Offset3D{0, 0, 0}, rhi::Offset3D{nextWidth, nextHeight, nextDepth}},
         };
         

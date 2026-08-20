@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
 #include "Graphics/Dawn/ShaderLoader.h"
 #endif
+#include "Graphics/RHI/Core/RHIShaderCommon.h"  // T4.6.5 part 6: GlobalShaderData + ForwardLightBuffer
 #if !defined(__EMSCRIPTEN__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
@@ -120,11 +121,34 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set,
     device->UpdateDescriptorSets(count, writes.data());
 }
 
+// T4.6.5 part 16.2: shader dir paths are now relative (worktree-portable).
+// Test cwd is `build/Tests/UnitTests/`; CMake POST_BUILD copies Engine/ tree
+// next to the binary. Absolute path used as fallback for dev-machine runs
+// where the POST_BUILD copy hasn't populated yet.
 static const std::string SHADER_DIR =
-    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Forward/";
+    "Engine/Graphics/Metal/shaders/Forward/";
 
 static const std::string RHI_SHADER_DIR =
-    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/RHI/Shaders/";
+    "Engine/Graphics/RHI/Shaders/";
+
+static const std::string VULKAN_SHADER_DIR =
+    "Engine/Graphics/Vulkan/shaders/Forward/";
+
+static const std::string VULKAN_COMPUTE_SHADER_DIR =
+    "Engine/Graphics/Vulkan/shaders/";
+
+static const char* SHADER_FALLBACK_ROOT =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/";
+
+// T4.6.5 part 16.2: try `relPath` first (matches POST_BUILD copy layout);
+// fall back to `<dev-machine-root>/<relPath>` if the test binary is run from
+// a cwd where the copy hasn't been done (e.g. ad-hoc dev runs).
+static std::string ResolveShaderPath(const std::string& relPath) {
+    if (std::ifstream(relPath).is_open()) return relPath;
+    std::string fb = std::string(SHADER_FALLBACK_ROOT) + relPath;
+    if (std::ifstream(fb).is_open()) return fb;
+    return relPath;  // let the caller's open() produce the error
+}
 
 static std::string ReadFileToString(const std::string& path) {
     std::ifstream file(path);
@@ -134,10 +158,22 @@ static std::string ReadFileToString(const std::string& path) {
     return ss.str();
 }
 
+// Binary file reader for precompiled SPIR-V. Returns empty vector on failure.
+static std::vector<u8> ReadFileToBytes(const std::string& path) {
+    std::ifstream file(path, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) return {};
+    const std::streamsize size = file.tellg();
+    if (size <= 0) return {};
+    file.seekg(0, std::ios::beg);
+    std::vector<u8> bytes(static_cast<size_t>(size));
+    file.read(reinterpret_cast<char*>(bytes.data()), size);
+    return bytes;
+}
+
 static std::string ResolveInclude(const std::string& name) {
     // Search Forward/ then RHI/Shaders/
     for (const auto& dir : {SHADER_DIR, RHI_SHADER_DIR}) {
-        auto content = ReadFileToString(dir + name);
+        auto content = ReadFileToString(ResolveShaderPath(dir + name));
         if (!content.empty()) return content;
     }
     return {};
@@ -184,8 +220,46 @@ static std::string InlineIncludes(const std::string& source, int depth,
     return result;
 }
 
-static std::vector<u8> LoadShaderSource(const char* filename) {
-    std::string path = SHADER_DIR + filename + std::string(".metal");
+// T4.6.5: LoadShaderSource is platform-aware.
+//   Metal: text-mode .metal with #include inlining. Entry-point name passed
+//          through to CreateShader as-is.
+//   Vulkan: binary .spv with stage suffix (e.g. "Skybox.vert.spv",
+//           "Skybox.frag.spv"). Single entry point per file named "main".
+//
+// Note: full Vulkan activation is blocked beyond just file existence — the
+// existing SPIR-V ports use different stage models (e.g. DeferredLighting.spv
+// is a GLCompute shader, but the Metal path loads vertexMain/fragmentLighting_v3
+// as vertex+fragment). Removing the T4.6.3 skip requires aligning stage models,
+// not just adding more .spv files. See plan T4.6.5 for the full blocker list.
+static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platform,
+                                        ShaderStage stage) {
+    if (platform == RHIPlatform::Vulkan) {
+        // Convention: <Name>.<stage>.spv with entry point "main"
+        // Compute path: existing DeferredLighting.spv lives in the parent
+        // shaders/ dir (not Forward/), with no stage suffix (single .spv file).
+        // Caller passes "DeferredLighting" + ShaderStage::Compute to hit that path.
+        if (stage == ShaderStage::Compute) {
+            std::string relPath = VULKAN_COMPUTE_SHADER_DIR + filename + ".spv";
+            std::string path = ResolveShaderPath(relPath);
+            auto bytes = ReadFileToBytes(path);
+            if (bytes.empty()) {
+                std::cerr << "[ForwardSceneRenderer] Failed to load compute SPIR-V: " << path << std::endl;
+                return {};
+            }
+            return bytes;
+        }
+        const char* stageSuffix = (stage == ShaderStage::Vertex) ? ".vert" : ".frag";
+        std::string relPath = VULKAN_SHADER_DIR + filename + stageSuffix + ".spv";
+        std::string path = ResolveShaderPath(relPath);
+        auto bytes = ReadFileToBytes(path);
+        if (bytes.empty()) {
+            std::cerr << "[ForwardSceneRenderer] Failed to load SPIR-V: " << path << std::endl;
+            return {};
+        }
+        return bytes;
+    }
+
+    std::string path = ResolveShaderPath(SHADER_DIR + filename + std::string(".metal"));
     std::string source = ReadFileToString(path);
     if (source.empty()) {
         std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << filename << std::endl;
@@ -311,6 +385,17 @@ ForwardSceneRenderer::~ForwardSceneRenderer() { Shutdown(); }
 
 bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height) {
     if (initialized_) return true;
+
+    // T4.6.5 complete: all 11 ForwardSceneRenderer shaders ported to SPIR-V
+    // (parts 1-14), runtime wiring done (parts 15.1-15.4: instance buffer,
+    // shadow VP, SoA streaming all wired via Vulkan descriptor writes),
+    // Initialize() skip lifted (part 15.5), Editor render smoke passing
+    // (part 15.6). Runs end-to-end on Vulkan via StandardRenderPipeline.
+    if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
+        std::cout << "[ForwardSceneRenderer] Initializing on Vulkan (T4.6.5 parts 1-15 complete)"
+                  << std::endl;
+    }
+
     device_ = device;
     render_width_ = render_width;
     render_height_ = render_height;
@@ -355,11 +440,27 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
         desc.layout = lighting_set_layout_;
         lighting_ds_[i] = device_->CreateDescriptorSet(desc);
 
+        // T4.6.5 part 4 Path B: Vulkan-only compute descriptor sets.
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            desc.layout = lighting_compute_set_layout_;
+            lighting_compute_ds_[i] = device_->CreateDescriptorSet(desc);
+        }
+
         desc.layout = skybox_set_layout_;
         skybox_ds_[i] = device_->CreateDescriptorSet(desc);
 
         desc.layout = blit_set_layout_;
         blit_ds_[i] = device_->CreateDescriptorSet(desc);
+    }
+
+    // T4.6.5 part 15.3: Vulkan-only shadow-pass descriptor sets, one per cascade.
+    // Bindings are written per-frame in Render() once shadow VP + scene CB are updated.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        for (int c = 0; c < 2; c++) {
+            DescriptorSetDesc desc{};
+            desc.layout = global_set_layout_;
+            shadow_global_ds_[c] = device_->CreateDescriptorSet(desc);
+        }
     }
 
     // Streaming mesh default material DS — created after white_texture_ and
@@ -412,12 +513,12 @@ void ForwardSceneRenderer::Shutdown() {
         if (*p != handles::INVALID_PIPELINE) { device_->DestroyPipeline(*p); *p = handles::INVALID_PIPELINE; }
     }
     // Destroy layouts
-    for (auto* l : {&gbuffer_layout_, &shadow_layout_, &lighting_layout_,
+    for (auto* l : {&gbuffer_layout_, &shadow_layout_, &lighting_layout_, &lighting_compute_layout_,
                     &skybox_layout_, &blit_layout_}) {
         if (*l != handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(*l); *l = handles::INVALID_PIPELINE_LAYOUT; }
     }
     // Destroy descriptor set layouts
-    for (auto* d : {&global_set_layout_, &material_set_layout_, &lighting_set_layout_,
+    for (auto* d : {&global_set_layout_, &material_set_layout_, &lighting_set_layout_, &lighting_compute_set_layout_,
                     &skybox_set_layout_, &blit_set_layout_}) {
         if (*d != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device_->DestroyDescriptorSetLayout(*d); *d = handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
     }
@@ -432,6 +533,19 @@ void ForwardSceneRenderer::Shutdown() {
         }
         if (view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(view_cb_[i]); view_cb_[i] = handles::INVALID_RESOURCE; }
         if (scene_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(scene_cb_[i]); scene_cb_[i] = handles::INVALID_RESOURCE; }
+        // T4.6.5 part 6 Path B: Vulkan-only UBOs.
+        if (lighting_global_ubos_[i] != handles::INVALID_RESOURCE) {
+            device_->UnmapBuffer(lighting_global_ubos_[i]);
+            device_->DestroyBuffer(lighting_global_ubos_[i]);
+            lighting_global_ubos_[i] = handles::INVALID_RESOURCE;
+            lighting_global_mapped_[i] = nullptr;
+        }
+        if (lighting_light_ubos_[i] != handles::INVALID_RESOURCE) {
+            device_->UnmapBuffer(lighting_light_ubos_[i]);
+            device_->DestroyBuffer(lighting_light_ubos_[i]);
+            lighting_light_ubos_[i] = handles::INVALID_RESOURCE;
+            lighting_light_mapped_[i] = nullptr;
+        }
     }
     for (int i = 0; i < 2; i++) {
         if (shadow_view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(shadow_view_cb_[i]); shadow_view_cb_[i] = handles::INVALID_RESOURCE; }
@@ -474,7 +588,37 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Vertex | ShaderStage::Pixel},
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Vertex | ShaderStage::Pixel},
         };
-        global_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
+        // T4.6.5 part 13: Vulkan DepthOnly.vert declares instanceData SSBO at
+        // set 0 binding 2 for skeletal/PCG instancing. Add StorageBuffer binding
+        // on Vulkan only — Metal path uses [[buffer(N)]] auto-binding and
+        // doesn't need a descriptor slot. Declaring an extra binding that
+        // other shaders (GBuffer.vert) don't use is valid in Vulkan (just
+        // unused).
+        //
+        // T4.6.5 part 15: Vulkan StreamingGBuffer.vert declares three more SoA
+        // SSBOs at set 0 bindings 3/4/5 (positions, elements, indices) for
+        // manual indexed drawing indirection. Metal path uses BindVertexBuffers
+        // (20,3,...) + per-vertex [[buffer(N)]] semantics; Vulkan cannot express
+        // `attributes[indices[gl_VertexIndex]]` via vkCmdBindVertexBuffers alone,
+        // so we expose the SoA buffers as SSBOs and replicate the indirection
+        // in GLSL. RenderStreamingMeshes still calls BindVertexBuffers(20,3,...)
+        // on Vulkan (no-op until C++ wires up the SoA descriptor set writes);
+        // the streaming_pipeline_ creation succeeds and an early-out in
+        // RenderStreamingMeshes skips draws when streaming_material_ds_ is the
+        // default white-fallback DS.
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            DescriptorSetLayoutBinding vkBindings[] = {
+                bindings[0],
+                bindings[1],
+                {2, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+                {3, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+                {4, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+                {5, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex},
+            };
+            global_set_layout_ = device_->CreateDescriptorSetLayout({6, vkBindings});
+        } else {
+            global_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
+        }
     }
     // Material set (albedo + normal + ORM + sampler)
     {
@@ -515,6 +659,26 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
         };
         lighting_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     }
+    // T4.6.5 part 4 Path B: Vulkan-only compute lighting set (matches existing
+    // Engine/Graphics/Vulkan/shaders/DeferredLighting.spv bindings).
+    // Metal path keeps the 13-binding lighting_set_layout_ above.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {1,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {2,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {3,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {4,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {5,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {6,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {7,  DescriptorType::SampledImage,   1, ShaderStage::Compute},
+            {8,  DescriptorType::Sampler,        1, ShaderStage::Compute},
+            {9,  DescriptorType::UniformBuffer,  1, ShaderStage::Compute},
+            {10, DescriptorType::UniformBuffer,  1, ShaderStage::Compute},
+            {11, DescriptorType::StorageImage,   1, ShaderStage::Compute},
+        };
+        lighting_compute_set_layout_ = device_->CreateDescriptorSetLayout({12, bindings});
+    }
     // Skybox set — binding 2 is a texture_cube, needs isCube=true on Dawn.
     {
         DescriptorSetLayoutBinding bindings[] = {
@@ -529,8 +693,9 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
     {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
+            {1, DescriptorType::Sampler, 1, ShaderStage::Pixel},
         };
-        blit_set_layout_ = device_->CreateDescriptorSetLayout({1, bindings});
+        blit_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
     }
 }
 
@@ -567,13 +732,24 @@ void ForwardSceneRenderer::CreateShaders() {
     skybox_ps_   = loadWgsl("ForwardScene/Skybox",           "fragmentSkybox",     ShaderStage::Pixel);
     return;
 #else
-    auto load = [this](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
-        auto src = LoadShaderSource(file);
+    const RHIPlatform platform = device_->GetPlatform();
+    auto load = [this, platform](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
+        auto src = LoadShaderSource(file, platform, stage);
         if (src.empty()) {
             std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << file << "/" << entry << std::endl;
             return handles::INVALID_SHADER;
         }
-        auto handle = device_->CreateShader(src.data(), src.size(), stage, entry);
+        // Vulkan SPIR-V files use "main" entry point by convention; Metal uses
+        // named entries. Exception: DeferredLighting.spv is a Dawn WGSL→SPIR-V
+        // product (naga) that keeps its original WGSL entry "deferred_lighting_cs".
+        const char* useEntry = entry;
+        if (platform == RHIPlatform::Vulkan) {
+            const bool isLightingCompute =
+                (std::strcmp(file, "DeferredLighting") == 0) &&
+                (stage == ShaderStage::Compute);
+            useEntry = isLightingCompute ? "deferred_lighting_cs" : "main";
+        }
+        auto handle = device_->CreateShader(src.data(), src.size(), stage, useEntry);
         if (handle == handles::INVALID_SHADER) {
             std::cerr << "[ForwardSceneRenderer] Failed to compile shader: " << file << "/" << entry << std::endl;
         }
@@ -584,10 +760,26 @@ void ForwardSceneRenderer::CreateShaders() {
     gbuffer_ps_ = load("GBuffer", "fragmentMain", ShaderStage::Pixel);
     shadow_vs_ = load("DepthOnly", "shadow_mapping_vs", ShaderStage::Vertex);
 
-    lighting_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
-    lighting_ps_ = load("DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);
-    blit_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
-    blit_ps_ = load("DeferredLighting", "fragmentBlit", ShaderStage::Pixel);
+    // T4.6.5 part 5 Path B: Vulkan loads single compute shader for lighting
+    // (existing Engine/Graphics/Vulkan/shaders/DeferredLighting.spv). The
+    // Metal vert/frag path stays untouched.
+    if (platform == RHIPlatform::Vulkan) {
+        // entry name "deferred_lighting_cs" is rewritten inside `load` for this
+        // specific file/stage combination (see load lambda above).
+        lighting_cs_ = load("DeferredLighting", "deferred_lighting_cs", ShaderStage::Compute);
+    } else {
+        lighting_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
+        lighting_ps_ = load("DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);
+    }
+    // T4.6.5 part 3: Vulkan uses dedicated Blit shaders (Path A); Metal still
+    // uses the multi-entry DeferredLighting.metal fragmentBlit.
+    if (platform == RHIPlatform::Vulkan) {
+        blit_vs_ = load("Blit", "main", ShaderStage::Vertex);
+        blit_ps_ = load("Blit", "main", ShaderStage::Pixel);
+    } else {
+        blit_vs_ = load("DeferredLighting", "vertexMain", ShaderStage::Vertex);
+        blit_ps_ = load("DeferredLighting", "fragmentBlit", ShaderStage::Pixel);
+    }
 
     skybox_vs_ = load("Skybox", "vertexSkybox", ShaderStage::Vertex);
     skybox_ps_ = load("Skybox", "fragmentSkybox", ShaderStage::Pixel);
@@ -604,11 +796,20 @@ void ForwardSceneRenderer::CreateShaders() {
     transparent_vs_ = load("GBufferTransparent", "vertexMain", ShaderStage::Vertex);
     transparent_ps_ = load("GBufferTransparent", "fragmentMain", ShaderStage::Pixel);
 
-    // Forward pass shaders for Water/Transparent (inline PBR, rendered after deferred lighting)
-    forward_water_vs_ = load("ForwardTransparency", "forwardWaterVS", ShaderStage::Vertex);
-    forward_water_ps_ = load("ForwardTransparency", "forwardWaterFS", ShaderStage::Pixel);
-    forward_transparent_vs_ = load("ForwardTransparency", "forwardTransparentVS", ShaderStage::Vertex);
-    forward_transparent_ps_ = load("ForwardTransparency", "forwardTransparentFS", ShaderStage::Pixel);
+    // Forward pass shaders for Water/Transparent (inline PBR, rendered after deferred lighting).
+    // T4.6.5 part 14: Metal funnels 4 entry points into one ForwardTransparency.metal; Vulkan
+    // splits them into 4 SPIR-V files with a single `main` entry each.
+    if (platform == RHIPlatform::Vulkan) {
+        forward_water_vs_ = load("ForwardWater", "main", ShaderStage::Vertex);
+        forward_water_ps_ = load("ForwardWater", "main", ShaderStage::Pixel);
+        forward_transparent_vs_ = load("ForwardTransparent", "main", ShaderStage::Vertex);
+        forward_transparent_ps_ = load("ForwardTransparent", "main", ShaderStage::Pixel);
+    } else {
+        forward_water_vs_ = load("ForwardTransparency", "forwardWaterVS", ShaderStage::Vertex);
+        forward_water_ps_ = load("ForwardTransparency", "forwardWaterFS", ShaderStage::Pixel);
+        forward_transparent_vs_ = load("ForwardTransparency", "forwardTransparentVS", ShaderStage::Vertex);
+        forward_transparent_ps_ = load("ForwardTransparency", "forwardTransparentFS", ShaderStage::Pixel);
+    }
 
     // Streaming mesh shaders (Phase 9.3b Task 12) — SoA vertex pulling
     streaming_vs_ = load("StreamingGBuffer", "streamingVertexMain", ShaderStage::Vertex);
@@ -648,7 +849,29 @@ void ForwardSceneRenderer::CreatePipelines() {
 #endif
     };
 
-    PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
+    // Offset 0 is 4-byte aligned as Vulkan requires (VUID-VkPushConstantRange-
+    // offset-00295); Metal ignores the offset parameter (reserved buffer index).
+    PushConstantRange modelPush{ShaderStage::Vertex, 0, sizeof(PCGPushConsts)};
+
+    // T4.6.5 part 14: every GBuffer-style vert shader (GBuffer, AlphaClip, Unlit,
+    // Foliage, Water, Transparent, ForwardWater, ForwardTransparent) declares
+    // the same 5-location vertex input matching the engine VertexInput layout
+    // (32-byte stride). Apply the declaration on Vulkan only — Metal relies on
+    // [[buffer(N)]] auto-binding from the shader. StreamingGBuffer uses SoA
+    // SSBOs (no vertex attributes); Skybox/Blit are procedural (cleared).
+    auto applyGBufferVertexInput = [this](GraphicsPipelineDesc& desc) {
+        if (device_->GetPlatform() != RHIPlatform::Vulkan) return;
+        utl::vector<VertexInputAttribute> attrs(5);
+        attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};
+        attrs[1] = {1, 0, DataFormat::R32_UInt,     12};
+        attrs[2] = {2, 0, DataFormat::RG16_UInt,    16};
+        attrs[3] = {3, 0, DataFormat::RG16_UInt,    20};
+        attrs[4] = {4, 0, DataFormat::RG32_Float,   24};
+        desc.vertexAttributes = attrs;
+        utl::vector<VertexInputBinding> binds(1);
+        binds[0] = {0, 32, true};
+        desc.vertexBindings = binds;
+    };
 
     // GBuffer
     {
@@ -670,6 +893,25 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
         populateWasmVertexInput(desc);
+
+        // T4.6.5 part 12: Vulkan needs explicit vertex input declaration.
+        // Mirror ForwardRenderer bypassProd pattern (cpp:347-356): single
+        // binding stride=32, 5 attributes. Use RG16_UInt for normal/tangent
+        // to match GBuffer.vert's `uvec2` declaration (ForwardRenderer uses
+        // R32_UInt because ForwardPBR_Lite reads them as u32; GBuffer.vert
+        // declares uvec2 so we use the 2-component RG16_UInt format).
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            utl::vector<VertexInputAttribute> attrs(5);
+            attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};   // position
+            attrs[1] = {1, 0, DataFormat::R32_UInt,     12};  // colorTSign
+            attrs[2] = {2, 0, DataFormat::RG16_UInt,    16};  // normal (packed_ushort2)
+            attrs[3] = {3, 0, DataFormat::RG16_UInt,    20};  // tangent (packed_ushort2)
+            attrs[4] = {4, 0, DataFormat::RG32_Float,   24};  // uv
+            desc.vertexAttributes = attrs;
+            utl::vector<VertexInputBinding> binds(1);
+            binds[0] = {0, 32, true};
+            desc.vertexBindings = binds;
+        }
         gbuffer_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Shadow
@@ -687,10 +929,32 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
         populateWasmVertexInput(desc);
+        // T4.6.5 part 13: DepthOnly.vert reads only `in_position` at location 0.
+        // Same 32-byte stride as GBuffer, but only the position attribute is
+        // declared (shader doesn't read normal/uv/etc).
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            utl::vector<VertexInputAttribute> attrs(1);
+            attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};
+            desc.vertexAttributes = attrs;
+            utl::vector<VertexInputBinding> binds(1);
+            binds[0] = {0, 32, true};
+            desc.vertexBindings = binds;
+        }
         shadow_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Lighting
-    {
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        // T4.6.5 part 5 Path B: Vulkan uses compute dispatch. Existing .spv
+        // declares workgroup_size 8x8x1; threadGroupSize here is informational
+        // (actual dispatch happens at bind site with explicit group counts).
+        lighting_compute_layout_ = device_->CreatePipelineLayout({1, &lighting_compute_set_layout_});
+
+        ComputePipelineDesc desc{};
+        desc.layout = lighting_compute_layout_;
+        desc.computeShader = lighting_cs_;
+        desc.threadGroupSize = {8, 8, 1};
+        lighting_pipeline_ = device_->CreateComputePipeline(desc);
+    } else {
         lighting_layout_ = device_->CreatePipelineLayout({1, &lighting_set_layout_});
 
         GraphicsPipelineDesc desc{};
@@ -764,6 +1028,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        applyGBufferVertexInput(desc);
         alphaclip_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Unlit technique — shares gbuffer layout, different shader
@@ -782,6 +1047,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        applyGBufferVertexInput(desc);
         unlit_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Foliage technique — two-sided, wind animation, alpha discard
@@ -800,6 +1066,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        applyGBufferVertexInput(desc);
         foliage_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Water technique — alpha blend, no depth write
@@ -825,6 +1092,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         water_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Transparent technique — alpha blend, no depth write
@@ -850,6 +1118,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Forward Water — single RT (lighting_output_), blend over deferred result, depth test against GBuffer
@@ -872,6 +1141,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         forward_water_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Forward Transparent — same configuration
@@ -894,6 +1164,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.srcAlphaBlendFactor = BlendFactor::One;
         desc.dstAlphaBlendFactor = BlendFactor::InvSrcAlpha;
         desc.alphaBlendOp = BlendOp::Add;
+        applyGBufferVertexInput(desc);
         forward_transparent_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
 #endif // !__EMSCRIPTEN__
@@ -916,6 +1187,13 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.enableDepthWrite = true;
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
+        // T4.6.5 part 14: StreamingGBuffer.vert pulls vertices from SoA SSBOs
+        // (positions/elements/indices) at set 0 bindings 3/4/5 using
+        // gl_VertexIndex — no vertex attributes or bindings needed.
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            desc.vertexAttributes.clear();
+            desc.vertexBindings.clear();
+        }
         streaming_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
 #endif // !__EMSCRIPTEN__
@@ -965,24 +1243,61 @@ void ForwardSceneRenderer::CreatePersistentResources() {
     }
 
     // Triple-buffered GBuffer + lighting textures
+    // T4.6.5 part 4 Path B: lighting_output_ gains UnorderedAccess usage on
+    // Vulkan so the compute DeferredLighting.spv can write HDR output via
+    // OpImageStore.
+    const RHIPlatform platform = device_->GetPlatform();
+    const bool lightingNeedsUAV = (platform == RHIPlatform::Vulkan);
     for (int i = 0; i < 3; i++) {
-        auto makeTex = [&](DataFormat fmt, const char* name) -> ResourceHandle {
+        auto makeTex = [&](DataFormat fmt, const char* name, bool uav) -> ResourceHandle {
             TextureDesc desc{};
             desc.size = {render_width_, render_height_, 1};
             desc.format = fmt;
             desc.type = TextureType::Texture2D;
-            desc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            // T4.6.5 part 16.3: D32 depth can't take RenderTarget on Vulkan
+            // (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT illegal on D32_SFLOAT).
+            // Use DepthStencil which maps to depth-attachment usage. Metal
+            // accepts the redundant bit silently; Vulkan validation rejects it.
+            const bool isDepth = (fmt == DataFormat::D32_Float);
+            TextureUsage baseUsage = isDepth ? TextureUsage::DepthStencil
+                                             : TextureUsage::RenderTarget;
+            TextureUsage usage = baseUsage | TextureUsage::ShaderResource;
+            if (uav) usage = usage | TextureUsage::UnorderedAccess;
+            desc.usage = usage;
             desc.memoryUsage = GPUMemoryUsage::Static;
             desc.name = name;
             return device_->CreateTexture(desc);
         };
+        gbuffer_albedo_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdAlbedo", false);
+        gbuffer_normal_[i] = makeTex(DataFormat::RGBA16_Float, "FwdNormal", false);
+        gbuffer_orm_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdORM", false);
+        gbuffer_velocity_[i] = makeTex(DataFormat::RG16_Float, "FwdVelocity", false);
+        gbuffer_depth_[i] = makeTex(DataFormat::D32_Float, "FwdDepth", false);
+        lighting_output_[i] = makeTex(DataFormat::RGBA16_Float, "FwdLighting", lightingNeedsUAV);
 
-        gbuffer_albedo_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdAlbedo");
-        gbuffer_normal_[i] = makeTex(DataFormat::RGBA16_Float, "FwdNormal");
-        gbuffer_orm_[i] = makeTex(DataFormat::BGRA8_UNorm, "FwdORM");
-        gbuffer_velocity_[i] = makeTex(DataFormat::RG16_Float, "FwdVelocity");
-        gbuffer_depth_[i] = makeTex(DataFormat::D32_Float, "FwdDepth");
-        lighting_output_[i] = makeTex(DataFormat::RGBA16_Float, "FwdLighting");
+        // T4.6.5 part 6 Path B: Vulkan-only UBOs for compute lighting.
+        // Mirror ForwardRenderer.cpp:54-85 pattern (triple-buffered, mapped).
+        if (lightingNeedsUAV) {
+            BufferDesc globalDesc{};
+            globalDesc.size = sizeof(rhi::GlobalShaderData);
+            globalDesc.type = BufferType::Constant;
+            globalDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            globalDesc.usage = GPUMemoryUsage::Dynamic;
+            globalDesc.bindFlags = static_cast<u32>(ResourceUsage::ConstantBuffer);
+            lighting_global_ubos_[i] = device_->CreateBuffer(globalDesc);
+            lighting_global_mapped_[i] = device_->MapBuffer(lighting_global_ubos_[i], 0,
+                                                            sizeof(rhi::GlobalShaderData));
+
+            BufferDesc lightDesc{};
+            lightDesc.size = sizeof(rhi::ForwardLightBuffer);
+            lightDesc.type = BufferType::Constant;
+            lightDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            lightDesc.usage = GPUMemoryUsage::Dynamic;
+            lightDesc.bindFlags = static_cast<u32>(ResourceUsage::ConstantBuffer);
+            lighting_light_ubos_[i] = device_->CreateBuffer(lightDesc);
+            lighting_light_mapped_[i] = device_->MapBuffer(lighting_light_ubos_[i], 0,
+                                                           sizeof(rhi::ForwardLightBuffer));
+        }
     }
 }
 
@@ -1427,13 +1742,17 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         }
 
         for (auto& [meshIdx, range] : all_ranges[t]) {
+            // T4.6.5 part 15.2: instance buffer bound via SSBO descriptor at binding 2
+            // on Vulkan; Metal still uses BindVertexBuffers(3, 1, ...) at vertex stage.
             u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
 #ifdef __EMSCRIPTEN__
             // WASM uses standard vertex attributes (slot 0) + instance-rate
             // attributes (slot 1). Metal keeps the legacy slot-20/3 vertex-pull.
             cmd->BindVertexBuffers(1, 1, &pcg_instance_buffer_, &inst_offset);
 #else
-            cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+            if (device_->GetPlatform() != RHIPlatform::Vulkan) {
+                cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+            }
 #endif
             auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
             const DescriptorSetHandle matSets[] = {matSet};
@@ -1441,7 +1760,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             PCGPushConsts pc{};
             pc.transform = MatrixIdentity();
             pc.use_instances = 1;
-            cmd->PushConstants(layout, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+            cmd->PushConstants(layout, ShaderStage::Vertex, 0, sizeof(PCGPushConsts), &pc);
 #ifdef __EMSCRIPTEN__
             mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 0);
 #else
@@ -1540,7 +1859,7 @@ void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 fram
     PCGPushConsts pc{};
     pc.transform = MatrixIdentity();
     pc.use_instances = 0;
-    cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+    cmd->PushConstants(gbuffer_layout_, ShaderStage::Vertex, 0, sizeof(PCGPushConsts), &pc);
 
     render_scene_->ForEachStreamingMesh([&](const StreamingMeshRecord& sm) {
         if (sm.slot != target_slot) return;  // skip non-matching triple-buffer slots
@@ -1572,12 +1891,26 @@ void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 fram
             ++s_render_diag;
         }
 
-        // Bind positions (20), elements (21), indices (22). The shader does
-        // manual indexed drawing — DrawIndirect issues idx_count invocations,
-        // and indices[vid] maps each invocation to the actual vertex.
-        ResourceHandle vb[3] = { sm.mesh->positions, sm.mesh->elements, sm.mesh->indices };
-        u64 offsets[3] = { 0, 0, 0 };
-        cmd->BindVertexBuffers(20, 3, vb, offsets);
+        // T4.6.5 part 15.4: Vulkan writes SoA buffers as SSBOs at bindings 3/4/5
+        // of global_ds_ per-mesh; Metal keeps BindVertexBuffers(20, 3, ...) vertex
+        // slot semantics. Per-mesh UpdateDesc churn is accepted for correctness.
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            DescData soaParams[] = {
+                {3, DescriptorType::StorageBuffer, sm.mesh->positions},
+                {4, DescriptorType::StorageBuffer, sm.mesh->elements},
+                {5, DescriptorType::StorageBuffer, sm.mesh->indices},
+            };
+            UpdateDesc(device_, global_ds_[frame_index], soaParams, 3);
+            const DescriptorSetHandle globalSets[] = {global_ds_[frame_index]};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, gbuffer_layout_, 0, 1, globalSets, 0, nullptr);
+        } else {
+            // Bind positions (20), elements (21), indices (22). The shader does
+            // manual indexed drawing — DrawIndirect issues idx_count invocations,
+            // and indices[vid] maps each invocation to the actual vertex.
+            ResourceHandle vb[3] = { sm.mesh->positions, sm.mesh->elements, sm.mesh->indices };
+            u64 offsets[3] = { 0, 0, 0 };
+            cmd->BindVertexBuffers(20, 3, vb, offsets);
+        }
         cmd->DrawIndirect(sm.mesh->indirect_args, 0, 1);
     });
 
@@ -1683,6 +2016,15 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         UpdateDesc(device_, global_ds_[idx], params, 2);
     }
 
+    // T4.6.5 part 15.2: Vulkan wires pcg_instance_buffer_ as SSBO at binding 2 of
+    // global_ds_. Metal path uses BindVertexBuffers(3, 1, ...) at vertex stage —
+    // see RenderDynamicInstances (cpp:1621) — which has no equivalent on Vulkan.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan &&
+        pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
+        DescData instParam = {2, DescriptorType::StorageBuffer, pcg_instance_buffer_};
+        UpdateDesc(device_, global_ds_[idx], &instParam, 1);
+    }
+
     // --- Direct rendering (bypass render graph for reliability) ---
 
     // Pre-fill shadow VP constant buffers (before any render passes)
@@ -1693,6 +2035,22 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         svd.previousViewProjection = svd.viewProjection;
         auto* mapped = static_cast<ViewData*>(device_->MapBuffer(shadow_view_cb_[c]));
         if (mapped) { *mapped = svd; device_->UnmapBuffer(shadow_view_cb_[c]); }
+    }
+
+    // T4.6.5 part 15.3: write shadow_global_ds_[c] bindings per-frame on Vulkan.
+    // Binding 0 = shadow_view_cb_[c] (cascade-specific VP); 1+2 mirror global_ds_.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        for (int c = 0; c < 2; c++) {
+            DescData params[] = {
+                {0, DescriptorType::UniformBuffer, shadow_view_cb_[c]},
+                {1, DescriptorType::UniformBuffer, scene_cb_[idx]},
+            };
+            UpdateDesc(device_, shadow_global_ds_[c], params, 2);
+            if (pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
+                DescData instParam = {2, DescriptorType::StorageBuffer, pcg_instance_buffer_};
+                UpdateDesc(device_, shadow_global_ds_[c], &instParam, 1);
+            }
+        }
     }
 
     // Pass 1: Shadow cascade 0
@@ -1713,12 +2071,18 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->BindGraphicsPipeline(shadow_pipeline_);
         cmd->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
         cmd->SetScissor({{0, 0}, {2048, 2048}});
-        const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
+        // T4.6.5 part 15.3: Vulkan uses shadow_global_ds_[0] (binding 0 pre-set to
+        // shadow_view_cb_[0]). Metal keeps global_ds_[idx] + BindVertexBuffers override.
+        const DescriptorSetHandle globalSets[] = {
+            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_global_ds_[0] : global_ds_[idx]
+        };
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
-        // Override buffer slot 0 with dedicated shadow VP CB for this cascade
-        u64 zeroOffset = 0;
-        cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[0], &zeroOffset);
+        // Metal-only: override vertex slot 0 with dedicated shadow VP CB for this cascade.
+        if (device_->GetPlatform() != RHIPlatform::Vulkan) {
+            u64 zeroOffset = 0;
+            cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[0], &zeroOffset);
+        }
 
         RenderDynamicInstances(cmd, cached_shadow_vp_[0], idx, true);
 
@@ -1737,12 +2101,16 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->BindGraphicsPipeline(shadow_pipeline_);
         cmd->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
         cmd->SetScissor({{0, 0}, {2048, 2048}});
-        const DescriptorSetHandle globalSets[] = {global_ds_[idx]};
+        const DescriptorSetHandle globalSets[] = {
+            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_global_ds_[1] : global_ds_[idx]
+        };
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
-        // Override buffer slot 0 with dedicated shadow VP CB for this cascade
-        u64 zeroOffset = 0;
-        cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[1], &zeroOffset);
+        // Metal-only: override vertex slot 0 with dedicated shadow VP CB for this cascade.
+        if (device_->GetPlatform() != RHIPlatform::Vulkan) {
+            u64 zeroOffset = 0;
+            cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[1], &zeroOffset);
+        }
 
         RenderDynamicInstances(cmd, cached_shadow_vp_[1], idx, true);
 
@@ -1791,8 +2159,131 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     // the streaming surface). Loads existing color+depth, no clear.
     RenderStreamingMeshes(cmd, idx);
 
+    // T4.6.5 part 8 Path B: per-frame UBO fill for compute lighting dispatch.
+    // GlobalShaderData (480B) + ForwardLightBuffer (25808B) mirror the engine
+    // UBO layout that DeferredLighting.spv expects at bindings 9 and 10.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        math::m4x4 viewInv = Inverse(view_matrix);
+        math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+
+        if (auto* frameData = static_cast<rhi::GlobalShaderData*>(lighting_global_mapped_[idx])) {
+            frameData->view = view_matrix;
+            frameData->projection = proj_matrix;
+            frameData->viewProjection = proj_matrix * view_matrix;
+            frameData->previousViewProjection = proj_matrix * view_matrix;
+            frameData->invProjection = Inverse(proj_matrix);
+            frameData->invViewProjection = Inverse(frameData->viewProjection);
+            frameData->cameraPositionAndViewWidth = {camera_position.x, camera_position.y, camera_position.z, static_cast<float>(render_width_)};
+            frameData->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, static_cast<float>(render_height_)};
+            frameData->numDirectionalLights = 0;
+            frameData->numPunctualLights = 0;
+            frameData->deltaTime = 0.016f;
+            frameData->frameCount = 0.0f;
+            frameData->renderMode = ibl_ready_ ? 2u : 0u;  // 2 = ShadowAndIBL
+            frameData->enableIBL = ibl_ready_ ? 1u : 0u;
+            frameData->enableDDGI = 0u;
+            frameData->jitterOffset = math::v2{0.0f, 0.0f};
+            frameData->debug_directLightBoost = 2.0f;
+            frameData->debug_iblStrength = 0.2f;
+            frameData->debug_ddgiIndirectWeight = 1.0f;
+            frameData->debug_exposure = 1.8f;
+        }
+
+        if (auto* lightBuf = static_cast<rhi::ForwardLightBuffer*>(lighting_light_mapped_[idx])) {
+            lightBuf->directionalLightCount = 0;
+            lightBuf->punctualLightCount = 0;
+
+            if (render_scene_) {
+                for (const auto& rl : render_scene_->GetLights()) {
+                    if (rl.type == LightType::Directional) {
+                        if (lightBuf->directionalLightCount < 4) {
+                            auto& dl = lightBuf->directionalLights[lightBuf->directionalLightCount++];
+                            dl.viewProjections[0] = cached_shadow_vp_[0];
+                            dl.viewProjections[1] = cached_shadow_vp_[1];
+                            dl.viewProjections[2] = cached_shadow_vp_[0];
+                            dl.viewProjections[3] = cached_shadow_vp_[1];
+                            dl.splits = {0.1f, 50.0f, 200.0f, 1000.0f};
+                            dl.directionAndIntensity = {rl.direction.x, rl.direction.y, rl.direction.z, rl.intensity};
+                            dl.colorAndShadow = {rl.color.x, rl.color.y, rl.color.z, 1.0f};
+                        }
+                    } else {
+                        if (lightBuf->punctualLightCount < 128) {
+                            auto& pl = lightBuf->lights[lightBuf->punctualLightCount++];
+                            pl.position = rl.position;
+                            pl.intensity = rl.intensity;
+                            pl.direction = rl.direction;
+                            pl.range = rl.range;
+                            pl.color = rl.color;
+                            pl.cosUmbra = rl.outerCone;
+                            pl.cosPenumbra = rl.innerCone;
+                            pl.attenuation = {1.0f, 0.0f, 0.0f};
+                            pl.lightType = (rl.type == LightType::Point) ? 1 : 2;
+                            pl.shadowIndex = -1;
+                            pl.viewProjection = MatrixIdentity();
+                        }
+                    }
+                }
+            }
+
+            // ForwardShaderData.numDirectionalLights / numPunctualLights are read
+            // from the ForwardLightBuffer header (bindings 10), but GlobalShaderData
+            // also has these counts — sync them for any shader that reads from GSD.
+            if (auto* frameData = static_cast<rhi::GlobalShaderData*>(lighting_global_mapped_[idx])) {
+                frameData->numDirectionalLights = lightBuf->directionalLightCount;
+                frameData->numPunctualLights = lightBuf->punctualLightCount;
+            }
+        }
+    }
+
     // Pass 4: Deferred Lighting
-    {
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        // T4.6.5 part 7 Path B: compute dispatch using existing .spv. Writes
+        // HDR output via OpImageStore (no render pass, no Draw).
+        // Bindings match Engine/Graphics/Vulkan/shaders/DeferredLighting.spv.
+        //
+        // T4.6.5 part 9: explicit layout transitions for lighting_output_.
+        // StorageImage descriptor (binding 11) requires GENERAL layout — fresh
+        // texture starts Unknown, and previous frame's Blit left it in
+        // SHADER_READ_ONLY. After Dispatch, transition back to ShaderResource
+        // so Pass 4b (Forward Transparency render pass) or Pass 5 (Blit
+        // sample) can read it.
+        ResourceBarrier toUA{};
+        toUA.resource = lighting_output_[idx];
+        toUA.beforeState = ResourceState::ShaderResource;
+        toUA.afterState = ResourceState::UnorderedAccess;
+        toUA.subresource = 0xFFFFFFFF;
+        toUA.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toUA, 1);
+
+        DescData params[] = {
+            {0,  DescriptorType::SampledImage,   gbuffer_albedo_[idx]},
+            {1,  DescriptorType::SampledImage,   gbuffer_normal_[idx]},
+            {2,  DescriptorType::SampledImage,   gbuffer_orm_[idx]},
+            {3,  DescriptorType::SampledImage,   gbuffer_velocity_[idx]},
+            {4,  DescriptorType::SampledImage,   shadow_map_[0]},
+            {5,  DescriptorType::SampledImage,   ibl_ready_ ? irradiance_map_ : black_cube_texture_},
+            {6,  DescriptorType::SampledImage,   ibl_ready_ ? prefiltered_map_ : black_cube_texture_},
+            {7,  DescriptorType::SampledImage,   ibl_ready_ ? brdf_lut_ : white_texture_},
+            {8,  DescriptorType::Sampler,        static_cast<ResourceHandle>(default_sampler_)},
+            {9,  DescriptorType::UniformBuffer,  lighting_global_ubos_[idx]},
+            {10, DescriptorType::UniformBuffer,  lighting_light_ubos_[idx]},
+            {11, DescriptorType::StorageImage,   lighting_output_[idx]},
+        };
+        UpdateDesc(device_, lighting_compute_ds_[idx], params, 12);
+
+        cmd->BindComputePipeline(lighting_pipeline_);
+        const DescriptorSetHandle sets[] = {lighting_compute_ds_[idx]};
+        cmd->BindDescriptorSets(PipelineBindPoint::Compute, lighting_compute_layout_, 0, 1, sets, 0, nullptr);
+        cmd->Dispatch((render_width_ + 7) / 8, (render_height_ + 7) / 8, 1);
+
+        ResourceBarrier toSR{};
+        toSR.resource = lighting_output_[idx];
+        toSR.beforeState = ResourceState::UnorderedAccess;
+        toSR.afterState = ResourceState::ShaderResource;
+        toSR.subresource = 0xFFFFFFFF;
+        toSR.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toSR, 1);
+    } else {
         constexpr DescriptorType depthType =
 #ifdef __EMSCRIPTEN__
             DescriptorType::SampledDepthImage;
@@ -1865,12 +2356,20 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         }
     }
 
+    // Pass 4c: Particles (T4.6.5 part 38). Blend additive particles over the
+    // deferred-lit scene before Blit. ParticlePass internally gates on
+    // active_count==0 (ParticlePass.cpp:336), so zero-particle frames are no-op.
+#ifndef DISABLE_PARTICLE_SYSTEM
+    RenderParticlePass(cmd, idx, view_matrix, proj_matrix);
+#endif
+
     // Pass 5: Blit to backbuffer
     {
         DescData params[] = {
             {0, DescriptorType::SampledImage, lighting_output_[idx]},
+            {1, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
         };
-        UpdateDesc(device_, blit_ds_[idx], params, 1);
+        UpdateDesc(device_, blit_ds_[idx], params, 2);
 
         RenderPassDesc rpDesc{};
         rpDesc.colorAttachments.resize(1);
@@ -1937,5 +2436,35 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->EndRenderPass();
     }
 }
+
+// T4.6.5 part 38: ParticlePass runtime wiring. Blends additive particles over
+// the deferred-lit scene (lighting_output_[idx]) before Pass 5 Blit. Caller
+// gates by check that ParticleSystem has emitted at least one particle this
+// frame; ParticlePass::execute additionally early-returns on active_count==0.
+// ParticlePass does NOT begin its own render pass — caller wraps it.
+#ifndef DISABLE_PARTICLE_SYSTEM
+void ForwardSceneRenderer::RenderParticlePass(rhi::RHICommandBuffer* cmd, u32 frame_index,
+                                              const math::m4x4& view_matrix,
+                                              const math::m4x4& proj_matrix) {
+    if (!initialized_) return;
+    u32 idx = frame_index % 3;
+
+    RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(1);
+    rpDesc.colorAttachments[0].texture = lighting_output_[idx];
+    rpDesc.colorAttachments[0].loadOp  = LoadAction::Load;
+    rpDesc.colorAttachments[0].storeOp = StoreAction::Store;
+    rpDesc.depthAttachment.texture  = gbuffer_depth_[idx];
+    rpDesc.depthAttachment.loadOp   = LoadAction::Load;
+    rpDesc.depthAttachment.storeOp  = StoreAction::DontCare;
+    cmd->BeginRenderPass(rpDesc);
+    cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
+    cmd->SetScissor ({{0, 0}, {render_width_, render_height_}});
+
+    particle_pass_.execute(cmd, frame_index, view_matrix, proj_matrix);
+
+    cmd->EndRenderPass();
+}
+#endif // DISABLE_PARTICLE_SYSTEM
 
 } // namespace primal::graphics

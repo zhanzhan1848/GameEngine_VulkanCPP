@@ -1,0 +1,176 @@
+#version 450 core
+// Vulkan Lumen SSR Temporal — GLSL port of SSRTemporal.wgsl.
+// Entry point: ssr_temporal  (glslangValidator -V SSRTemporal.comp -e ssr_temporal -o SSRTemporal.spv)
+//
+// Half-resolution temporal accumulation for SSR.
+//   1. Reads half-res SSR trace output (RGBA16F: RGB=reflection, A=hit mask)
+//   2. Reprojects using full-res velocity (bilinear sampled at half-res pixel)
+//   3. Samples history buffer with manual bilinear interpolation
+//   4. YCoCg variance clip on 3x3 neighborhood
+//   5. Exponential blend: result = mix(current, clamped_history, feedback)
+//   6. Outputs RGBA16F: RGB = temporally stable reflection, A = accumulated mask
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledImage  ssrTrace    (half-res trace output)
+//   binding 1 = SampledImage  ssrHistory  (half-res prev-frame temporal)
+//   binding 2 = SampledImage  velocityTex (full-res motion vectors)
+//   binding 3 = StorageImage  ssrOutput   (half-res RGBA16F)
+//   binding 4 = UniformBuffer params
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D ssrTrace;
+layout(set = 0, binding = 1) uniform texture2D ssrHistory;
+layout(set = 0, binding = 2) uniform texture2D velocityTex;
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D ssrOutput;
+
+layout(set = 0, binding = 4, std140) uniform SSRTemporalParams {
+    float feedback;
+    uint  halfWidth;
+    uint  halfHeight;
+    uint  fullWidth;
+    uint  fullHeight;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+} params;
+
+vec4 sampleBilinear(texture2D tex, vec2 uv, ivec2 dims) {
+    vec2 coord = uv * vec2(dims) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 frac_ = fract(coord);
+    ivec2 maxCoord = ivec2(dims.x - 1, dims.y - 1);
+
+    ivec2 c00 = clamp(base,                       ivec2(0), maxCoord);
+    ivec2 c10 = clamp(base + ivec2(1, 0),         ivec2(0), maxCoord);
+    ivec2 c01 = clamp(base + ivec2(0, 1),         ivec2(0), maxCoord);
+    ivec2 c11 = clamp(base + ivec2(1, 1),         ivec2(0), maxCoord);
+
+    vec4 h00 = texelFetch(tex, c00, 0);
+    vec4 h10 = texelFetch(tex, c10, 0);
+    vec4 h01 = texelFetch(tex, c01, 0);
+    vec4 h11 = texelFetch(tex, c11, 0);
+
+    float fx = clamp(frac_.x, 0.0, 1.0);
+    float fy = clamp(frac_.y, 0.0, 1.0);
+
+    return h00 * (1.0 - fx) * (1.0 - fy)
+         + h10 * fx * (1.0 - fy)
+         + h01 * (1.0 - fx) * fy
+         + h11 * fx * fy;
+}
+
+vec2 sampleVelocity(vec2 fullPixelUV) {
+    ivec2 dims = ivec2(params.fullWidth, params.fullHeight);
+    vec2 coord = fullPixelUV * vec2(dims) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 frac_ = fract(coord);
+    ivec2 maxCoord = dims - ivec2(1);
+
+    ivec2 c00 = clamp(base,                       ivec2(0), maxCoord);
+    ivec2 c10 = clamp(base + ivec2(1, 0),         ivec2(0), maxCoord);
+    ivec2 c01 = clamp(base + ivec2(0, 1),         ivec2(0), maxCoord);
+    ivec2 c11 = clamp(base + ivec2(1, 1),         ivec2(0), maxCoord);
+
+    vec2 h00 = texelFetch(velocityTex, c00, 0).rg;
+    vec2 h10 = texelFetch(velocityTex, c10, 0).rg;
+    vec2 h01 = texelFetch(velocityTex, c01, 0).rg;
+    vec2 h11 = texelFetch(velocityTex, c11, 0).rg;
+
+    float fx = clamp(frac_.x, 0.0, 1.0);
+    float fy = clamp(frac_.y, 0.0, 1.0);
+
+    return h00 * (1.0 - fx) * (1.0 - fy)
+         + h10 * fx * (1.0 - fy)
+         + h01 * (1.0 - fx) * fy
+         + h11 * fx * fy;
+}
+
+vec3 rgbToYCoCg(vec3 c) {
+    float Y  =  0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
+    float Co =  0.5  * c.r - 0.5 * c.b;
+    float Cg = -0.25 * c.r + 0.5 * c.g - 0.25 * c.b;
+    return vec3(Y, Co, Cg);
+}
+
+vec3 ycocgToRgb(vec3 c) {
+    float R = c.x + c.y - c.z;
+    float G = c.x + c.z;
+    float B = c.x - c.y - c.z;
+    return vec3(R, G, B);
+}
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    if (gid.x >= params.halfWidth || gid.y >= params.halfHeight) return;
+
+    ivec2 halfPixel = ivec2(gid.xy);
+    vec2 halfUV = (vec2(halfPixel) + 0.5) / vec2(float(params.halfWidth), float(params.halfHeight));
+    vec2 fullUV = (vec2(halfPixel * 2) + 1.0) / vec2(float(params.fullWidth), float(params.fullHeight));
+
+    vec4 current = texelFetch(ssrTrace, halfPixel, 0);
+    vec3 currentColor = current.rgb;
+    float currentMask = current.a;
+
+    // Full-res velocity → half-res by bilinear. Velocity is in UV units at
+    // full-res; same units apply at half-res.
+    vec2 velocity = sampleVelocity(fullUV);
+    vec2 prevHalfUV = halfUV - velocity;
+
+    bool inBounds = prevHalfUV.x >= 0.0 && prevHalfUV.x <= 1.0 &&
+                    prevHalfUV.y >= 0.0 && prevHalfUV.y <= 1.0;
+
+    if (!inBounds) {
+        imageStore(ssrOutput, halfPixel, vec4(currentColor, currentMask));
+        return;
+    }
+
+    ivec2 histDims = textureSize(ssrHistory, 0);
+    vec4 history = sampleBilinear(ssrHistory, prevHalfUV, histDims);
+
+    vec3 historyColor = history.rgb;
+    float historyMask = history.a;
+
+    // 3x3 neighborhood of current trace output (YCoCg space for tighter clip).
+    vec3 nbSum = rgbToYCoCg(currentColor);
+    vec3 nbSum2 = nbSum * nbSum;
+    int nbCount = 1;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 nPos = halfPixel + ivec2(dx, dy);
+            if (nPos.x < 0 || nPos.y < 0 ||
+                nPos.x >= int(params.halfWidth) || nPos.y >= int(params.halfHeight)) {
+                continue;
+            }
+            vec3 nb = rgbToYCoCg(texelFetch(ssrTrace, nPos, 0).rgb);
+            nbSum += nb;
+            nbSum2 += nb * nb;
+            nbCount++;
+        }
+    }
+
+    float fCount = float(nbCount);
+    vec3 mean = nbSum / fCount;
+    vec3 variance = abs(nbSum2 / fCount - mean * mean);
+    vec3 sigma = sqrt(max(variance, vec3(0.0)));
+    vec3 sigmaFloor = max(abs(mean) * 0.1, vec3(0.01));
+    vec3 aabbMin = mean - sigma * 2.0 - sigmaFloor;
+    vec3 aabbMax = mean + sigma * 2.0 + sigmaFloor;
+
+    vec3 histYCoCg = rgbToYCoCg(historyColor);
+    vec3 clampedYCoCg = clamp(histYCoCg, aabbMin, aabbMax);
+    vec3 clampedHistory = ycocgToRgb(clampedYCoCg);
+
+    // Lower feedback for fresh hits (more weight on current), higher for misses.
+    float confidenceScale = mix(0.5, 1.0, currentMask);
+    float effectiveFeedback = params.feedback * confidenceScale;
+
+    vec3 resultColor = mix(currentColor, clampedHistory, effectiveFeedback);
+    float resultMask = mix(currentMask, historyMask, effectiveFeedback);
+
+    imageStore(ssrOutput, halfPixel, vec4(resultColor, resultMask));
+}

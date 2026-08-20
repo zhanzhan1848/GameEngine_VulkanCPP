@@ -99,7 +99,11 @@ public:
     void Dispatch(uint32_t, uint32_t, uint32_t) override {}
     void DispatchIndirect(ResourceHandle, uint64_t) override {}
 
-    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {} 
+    void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    void PushConstants(PipelineLayoutHandle, ShaderStage, uint32_t, uint32_t, const void*) override {}
+    void SetComputeBytes(uint32_t, const void*, uint32_t) override {}
+    void MemoryBarrier(PipelineStage, PipelineStage, AccessFlag, AccessFlag) override {}
     // Resource Ops
     void CopyBuffer(ResourceHandle, ResourceHandle, uint64_t, uint64_t, uint64_t) override {}
     void CopyBufferToTexture(ResourceHandle, ResourceHandle, const BufferTextureCopyRegion*, uint32_t) override {}
@@ -228,6 +232,11 @@ public:
         static RHIGarbageCollector gc;
         return gc;
     }
+
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    ResourceHandle CreateTextureView(const TextureViewDesc&) override { return handles::INVALID_RESOURCE; }
+    void SetBufferDirtySize(ResourceHandle, u64) override {}
+    RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
 
     // Command Buffer
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type) override {

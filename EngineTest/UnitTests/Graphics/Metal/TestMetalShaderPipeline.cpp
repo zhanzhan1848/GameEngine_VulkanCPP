@@ -198,7 +198,7 @@ TestResult TestCreateComputePipeline() {
 
     // Test Compute Dispatch and Buffer Binding
     // Create output buffer
-    BufferDesc bufferDesc;
+    BufferDesc bufferDesc{};
     bufferDesc.size = 1024; // 256 floats
     bufferDesc.type = BufferType::Structured;
     bufferDesc.structured.elementStride = 4;

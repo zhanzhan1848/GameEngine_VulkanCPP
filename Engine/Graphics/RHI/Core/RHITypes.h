@@ -1106,4 +1106,15 @@ struct RenderPassDesc {
     u32 renderTargetArrayLength{1};
 };
 
+/**
+ * @brief P4c-F7 secondary command buffer 的继承信息
+ * @details Vulkan:映射为 VkCommandBufferInheritanceInfo(renderPass +
+ *          subpass,RENDER_PASS_CONTINUE_BIT);Metal:parallel 子 encoder
+ *          自动继承 parallel encoder 的目标,字段被忽略。
+ */
+struct SecondaryCommandBufferDesc {
+    RenderPassHandle inheritRenderPass{ handles::INVALID_RENDER_PASS };
+    u32 subpass{ 0 };
+};
+
 } // namespace primal::graphics::rhi

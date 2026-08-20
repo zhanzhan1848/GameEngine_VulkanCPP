@@ -1,0 +1,203 @@
+#version 450 core
+// Vulkan Lumen DDGI Probe Irradiance From Cards — GLSL port of
+// DDGIProbeIrradianceFromCards.metal. Entry point: ddgi_probe_irradiance_from_cards
+//   (glslangValidator --source-entrypoint main -e ddgi_probe_irradiance_from_cards)
+//
+// Projects pre-computed card radiance contributions onto DDGI probe SH.
+//
+// Reads per-probe contribution lists (pre-computed on CPU) containing card
+// indices and SH projection weights, then multiplies by per-card radiance (from
+// DDGICardRadianceAvg) to produce updated probe irradiance SH coefficients.
+//
+// Confidence-based blending with Path A (SDF Ray Trace):
+//   - Reads convergenceAge from confidence buffer
+//   - Young probes (age < 0.33): SC projection dominates (bootstrap)
+//   - Mature probes (age >= 0.33): Path A result preserved, B contribution = 0
+//
+// Uses only L0+L1 (4 SH bands) — L2 coefficients (4-8) preserved from Path A.
+//
+// Dispatch: (ProbeUpdateCount, 1, 1), threadGroupSize = (64, 1, 1)
+//
+// Flat bindings (Vulkan forbids Metal's overlapping texture/buffer namespaces):
+//   binding 0 = UniformBuffer       DDGIVolumeData (336 bytes, inline)
+//   binding 1 = readonly buffer     ProbeContribRange ranges[]
+//   binding 2 = readonly buffer     ProbeCardContrib contribs[]
+//   binding 3 = readonly buffer     vec4 card_radiance[] (9 vec4/probe? no — per card)
+//   binding 4 = readonly buffer     vec4 irradiance_history[] (9 vec4/probe)
+//   binding 5 = buffer vec4         irradiance_output[] (9 vec4/probe, write)
+//   binding 6 = readonly buffer     uint probeUpdateList[]
+//   binding 7 = readonly buffer     float confidenceBuffer[]
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --------------------------------------------------------------------------------
+// DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h
+// DDGIVolumeData (336 bytes). Copied inline from DDGITraceRays.comp (the WGSL
+// struct has array<vec4,3> fields that naga emits as spvUnsafeArray, which
+// MoltenVK rejects — so all DDGI GLSL ports declare the struct inline).
+// std140: vec4 = 16B, float/uint/int = 4B, vec4[3] = 48B (no per-element pad).
+// --------------------------------------------------------------------------------
+layout(set = 0, binding = 0, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88  (Surface Cache card lookup count)
+    uint  SCAtlasSize;              //  92  (Surface Cache lighting atlas size)
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    float _pad_to_sdf;              // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288  (.w = intensity)
+    vec4  SkyColor;                 // 304  (Mode 11)
+    vec4  Albedo;                   // 320  (Mode 11)
+} volume;
+
+// --------------------------------------------------------------------------------
+// SSBO structs (std430). The Lumen surface-cache module is currently a stub on
+// the C++ side, so these layouts are the canonical Vulkan contract: padded to
+// 16/32 bytes per std430 rules for array element alignment.
+// --------------------------------------------------------------------------------
+
+// ProbeContribRange — 16 bytes (2 uints + 2 pad).
+struct ProbeContribRange {
+    uint start;
+    uint count;
+    uint _pad0;
+    uint _pad1;
+};
+
+// ProbeCardContrib — 32 bytes. Metal had { uint card_index; float sh_weights[4]; }
+// (20 bytes). std430 rounds the struct to 16B alignment for array elements and
+// the 4 trailing floats would make the struct 20B, so the array stride becomes
+// 32B; pad explicitly to make the contract explicit (4 floats weights + 3 pad
+// + card_index at offset 0, trailing pad to 32B).
+struct ProbeCardContrib {
+    uint  card_index;   //  0
+    float w0;           //  4
+    float w1;           //  8
+    float w2;           // 12
+    float w3;           // 16
+    float _pad0;        // 20
+    float _pad1;        // 24
+    float _pad2;        // 28
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer RangeBuffer {
+    ProbeContribRange ranges[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer ContribBuffer {
+    ProbeCardContrib contribs[];
+};
+
+// Per-card radiance from DDGICardRadianceAvg (xyz = radiance, w = 1.0).
+layout(set = 0, binding = 3, std430) readonly buffer CardRadianceBuffer {
+    vec4 card_radiance[];
+};
+
+// Previous-frame probe irradiance SH (9 vec4 per probe: L0 + L1 + L2).
+layout(set = 0, binding = 4, std430) readonly buffer IrradianceHistoryBuffer {
+    vec4 irradiance_history[];
+};
+
+// Output probe irradiance SH (9 vec4 per probe). Path A (SDF ray trace) already
+// wrote this frame's L0+L1+L2 here; this shader rewrites L0+L1 only.
+layout(set = 0, binding = 5, std430) buffer IrradianceOutputBuffer {
+    vec4 irradiance_output[];
+};
+
+layout(set = 0, binding = 6, std430) readonly buffer ProbeUpdateListBuffer {
+    uint probeUpdateList[];
+};
+
+// confidenceBuffer[probeIdx*4 + 3] = convergenceAge (ramps 0->1 over ~30 frames).
+layout(set = 0, binding = 7, std430) readonly buffer ConfidenceBuffer {
+    float confidenceBuffer[];
+};
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+void ddgi_probe_irradiance_from_cards() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= volume.ProbeUpdateCount) return;
+
+    uint probeIdx = probeUpdateList[gid];
+    ProbeContribRange range = ranges[probeIdx];
+
+    // Accumulate SH from card contributions (up to 6 contributions per probe).
+    vec3 sh[4];
+    for (uint i = 0u; i < 4u; ++i) sh[i] = vec3(0.0);
+
+    uint n = min(range.count, 6u);
+    for (uint i = 0u; i < n; ++i) {
+        ProbeCardContrib c = contribs[range.start + i];
+        vec3 radiance = card_radiance[c.card_index].xyz;
+        sh[0] += c.w0 * radiance;
+        sh[1] += c.w1 * radiance;
+        sh[2] += c.w2 * radiance;
+        sh[3] += c.w3 * radiance;
+    }
+
+    uint base = probeIdx * 9u;
+    float alpha = volume.ProbeHysteresis;
+    vec3 sh0 = sh[0];
+    float l1Limit = max(length(sh0) * 3.0, 0.1);
+
+    // Step 1: Compute SC-filtered results (temporal blend with history + energy clamp).
+    vec3 scResult[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        vec3 history = irradiance_history[base + i].xyz;
+        uvec3 bits = floatBitsToUint(history);
+        if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
+            history = vec3(0.0);
+
+        vec3 filtered = mix(history, sh[i], alpha);
+        if (i == 0u) {
+            float mag = length(filtered);
+            if (mag > 10.0) filtered *= 10.0 / mag;
+        } else {
+            float mag = length(filtered);
+            if (mag > l1Limit) filtered *= l1Limit / mag;
+        }
+        scResult[i] = filtered;
+    }
+
+    // Step 2: Read Path A result (SDF ray trace already wrote to output this frame).
+    vec3 pathA[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        pathA[i] = irradiance_output[base + i].xyz;
+    }
+
+    // Step 3: Confidence-based blend.
+    // convergenceAge ramps 0->1 over ~30 frames; young probes get SC bootstrap.
+    float convergenceAge = confidenceBuffer[probeIdx * 4u + 3u];
+    float bootstrapWeight = clamp(1.0 - convergenceAge * 3.0, 0.0, 1.0);
+
+    // Write blended L0 + L1. Preserve output w component (history reads use .xyz).
+    for (uint i = 0u; i < 4u; ++i) {
+        vec3 blended = mix(pathA[i], scResult[i], bootstrapWeight);
+        vec4 prev = irradiance_output[base + i];
+        irradiance_output[base + i] = vec4(blended, prev.w);
+    }
+
+    // L2 bands (4-8): preserve Path A values (already in output from SDF ray trace).
+}

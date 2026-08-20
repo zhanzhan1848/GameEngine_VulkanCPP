@@ -25,6 +25,7 @@ using namespace primal::graphics::rhi;
 
 // 简单的RHIDevice实现用于测试
 class MockRHIDevice : public RHIDevice<MockRHIDevice> {
+
 public:
     MockRHIDevice() : RHIDevice<MockRHIDevice>(DeviceDesc{}) {
         auto& desc = const_cast<DeviceDesc&>(GetDesc());
@@ -35,6 +36,12 @@ public:
     }
     
     // === CRTP实现方法 ===
+    // stale-test port: Impl hooks added to the RHIDevice CRTP base after the Dawn era
+    void beginFrameImpl() {}
+    void endFrameImpl() {}
+    ResourceHandle createTextureViewImpl(const TextureViewDesc&) { return handles::INVALID_RESOURCE; }
+    void setBufferDirtySizeImpl(ResourceHandle, u64) {}
+
     bool initializeImpl() {
         return true;
     }
@@ -258,7 +265,7 @@ TestResult TestParallelCommandGeneration() {
     TEST_ASSERT_EQ(100, scene.meshes.size(), "验证场景网格数量");
     
     // 测试并行生成
-    std::vector<CommandBufferHandle> outputs;
+    primal::utl::vector<CommandBufferHandle> outputs; // stale-test port: GenerateCommandsParallel takes utl::vector
     
     // 使用现有场景进行测试
     
@@ -391,7 +398,7 @@ TestResult TestPerformanceMonitoring() {
     
     // 创建测试场景并生成命令以产生性能数据
     RenderScene scene = CreateTestRenderScene(200, 1000);
-    std::vector<CommandBufferHandle> outputs;
+    primal::utl::vector<CommandBufferHandle> outputs; // stale-test port: GenerateCommandsParallel takes utl::vector
     
     auto startTime = std::chrono::high_resolution_clock::now();
     bool generationResult = generator.GenerateCommandsParallel(scene, outputs);
@@ -474,7 +481,7 @@ TestResult TestEdgeCasesAndErrorHandling() {
     
     // 测试未初始化状态下的操作
     RenderScene scene = CreateTestRenderScene(10, 50);
-    std::vector<CommandBufferHandle> outputs;
+    primal::utl::vector<CommandBufferHandle> outputs; // stale-test port: GenerateCommandsParallel takes utl::vector
     
     bool uninitializedResult = generator.GenerateCommandsParallel(scene, outputs);
     TEST_ASSERT(!uninitializedResult, "未初始化状态下生成命令应失败");
@@ -527,7 +534,7 @@ TestResult TestLargeScalePerformance() {
     TEST_ASSERT_EQ(50000, largeScene.totalDrawCalls, "验证大规模场景绘制调用数量");
     
     // 测试大规模并行生成
-    std::vector<CommandBufferHandle> outputs;
+    primal::utl::vector<CommandBufferHandle> outputs; // stale-test port: GenerateCommandsParallel takes utl::vector
     
     auto startTime = std::chrono::high_resolution_clock::now();
     bool generationResult = generator.GenerateCommandsParallel(largeScene, outputs);
@@ -577,7 +584,7 @@ TestResult TestConcurrencySafety() {
         threads.emplace_back([&generator, &successCount, &failureCount, operationsPerThread, t]() {
             for (int i = 0; i < operationsPerThread; ++i) {
                 RenderScene scene = CreateTestRenderScene(50, 200);
-                std::vector<CommandBufferHandle> outputs;
+                primal::utl::vector<CommandBufferHandle> outputs; // stale-test port: GenerateCommandsParallel takes utl::vector
                 
                 bool result = generator.GenerateCommandsParallel(scene, outputs);
                 if (result) {
