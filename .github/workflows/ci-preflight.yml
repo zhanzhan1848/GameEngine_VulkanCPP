@@ -102,11 +102,15 @@ jobs:
               if not path:
                   bad.append(f'{sec}: missing path')
               elif not os.path.isdir(path):
+                  # 同时打到 stdout：sys.exit(str) 只写 stderr，混在大量
+                  # 正常输出里容易被漏看（本地验证时实际失败过一次被忽略）
+                  print(f'[submodule-STALE] {sec}: path not in tree: {path}')
                   bad.append(f'{sec}: path not in tree: {path}')
               else:
                   print(f'[submodule-ok] {sec} -> {path}')
           if bad:
-              sys.exit('.gitmodules issues: ' + '; '.join(bad))
+              print('::error::.gitmodules declares submodules with no tree entry: ' + '; '.join(bad))
+              sys.exit(1)
           PY
 
       - name: 安装 Vulkan 开发包（configure 冒烟用）
