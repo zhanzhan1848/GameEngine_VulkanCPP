@@ -1,57 +1,522 @@
 name: CI
 
-# CI 编排器——dev push 的唯一流水线入口。
+# 全平台统一流水线——dev push 的唯一工作流入口（单文件、单记录、单运行）。
 #
 # 结构：
 #   preflight → { windows, linux, wasm } → compile-error-report
 #
-# 三个平台 job 调用各自的可复用工作流（保留原文件名，独立 workflow_dispatch
-# 调试能力不变）。全部平台（无论成败）结束后，compile-error-report 把
-# 各平台上传的 compile-errors-* 制品聚合成一份跨平台编译错误报告：
-# 运行页面 Summary 直接可见汇总表 + 每平台可折叠明细，完整报告另存制品。
+# 所有平台的步骤全部内联在本文件（无 workflow_call 间接层，Actions 侧边栏
+# 只出现一个工作流条目，每次 push 只有一条运行记录）。手动调试可用
+# workflow_dispatch 的 platform 参数只跑单个平台。
 #
-# macOS CI 已全链路移除（费用问题，本地已双配置验证）。
+# 平台职责：
+#   windows — 自托管 MSVC 编译 + ctest 全量测试（含 TestVulkan*）
+#   linux   — gcc/clang 双编译器编译验证（不跑测试：XCB surface 未实现，F10）
+#   wasm    — Emscripten+WebGPU 构建 + Chrome 兼容 JS patch + gh-pages 部署
+#             （构建成功即部署，不等其他平台——发布节奏独立于 native 平台）
+#   compile-error-report — 汇总所有平台的编译错误到运行页 Summary
+#
+# macOS CI 已移除（费用问题，本地已双配置全量验证）。
 
 on:
   push:
     branches:
       - dev
   workflow_dispatch:
+    inputs:
+      platform:
+        description: '运行哪个平台'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - windows
+          - linux
+          - wasm
 
 permissions:
-  # write 供 wasm 平台的 gh-pages 部署；各被调工作流自行收窄（preflight/linux
-  # 声明 read，为 write 的合法子集）
-  contents: write
+  contents: write   # write 供 wasm 的 gh-pages 部署
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # 编译前校验门禁：YAML/冲突标记/脚本语法/.gitmodules/configure 冒烟/
-  # ctest 注册数。不通过则三个平台构建全部跳过，不消耗资源。
+  # ============================================================
+  # 编译前校验门禁：不通过则三个平台构建全部跳过，不消耗构建资源
+  # ============================================================
   preflight:
     name: 编译前校验
-    uses: ./.github/workflows/ci-preflight.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 初始化轻量 submodule（configure 冒烟所需）
+        # 根 CMakeLists 在缺失 meshoptimizer 头文件时 FATAL_ERROR，
+        # configure 冒烟必须带上。跳过 dawn/PhysX/WebGPU/astc-encoder（数 GB）。
+        run: |
+          git submodule update --init \
+            third_party/meshoptimizer \
+            third_party/stb \
+            third_party/moodycamel-ConcurrentQueue \
+            third_party/lua
+
+      - name: 校验 workflow YAML 有效性
+        run: |
+          python3 - <<'PY'
+          import glob, sys
+          import yaml
+          files = sorted(glob.glob('.github/workflows/*.yml'))
+          if not files:
+              sys.exit('no workflow files found')
+          bad = []
+          for f in files:
+              try:
+                  with open(f) as fh:
+                      yaml.safe_load(fh)
+                  print(f'[yaml-ok] {f}')
+              except Exception as e:
+                  print(f'[yaml-FAIL] {f}: {e}')
+                  bad.append(f)
+          if bad:
+              sys.exit(f'invalid YAML: {bad}')
+          PY
+
+      - name: 扫描合并冲突标记
+        run: |
+          # 防止带冲突标记的文件被提交（坏合并进库后所有架构一起红）。
+          if git grep -nE '^(<{7} |>{7} )' -- .; then
+            echo '::error::conflict markers found (see list above)'
+            exit 1
+          fi
+          echo '[ok] no conflict markers'
+
+      - name: 脚本语法检查
+        run: |
+          shopt -s nullglob
+          scripts=(scripts/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo '[skip] no shell scripts found'
+          fi
+          for f in "${scripts[@]}"; do
+            bash -n "$f" || exit 1
+            echo "[bash-ok] $f"
+          done
+
+      - name: 校验 .gitmodules 路径健全性
+        run: |
+          python3 - <<'PY'
+          import configparser, os, sys
+          if not os.path.exists('.gitmodules'):
+              print('[skip] no .gitmodules')
+              sys.exit(0)
+          cfg = configparser.ConfigParser()
+          cfg.read('.gitmodules')
+          bad = []
+          for sec in cfg.sections():
+              path = cfg.get(sec, 'path', fallback=None)
+              if not path:
+                  bad.append(f'{sec}: missing path')
+              elif not os.path.isdir(path):
+                  print(f'[submodule-STALE] {sec}: path not in tree: {path}')
+                  bad.append(f'{sec}: path not in tree: {path}')
+              else:
+                  print(f'[submodule-ok] {sec} -> {path}')
+          if bad:
+              print('::error::.gitmodules declares submodules with no tree entry: ' + '; '.join(bad))
+              sys.exit(1)
+          PY
+
+      - name: 安装 Vulkan 开发包（configure 冒烟用）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan-dev
+
+      - name: CMake configure 冒烟（默认配置）
+        run: |
+          cmake -S . -B build-check \
+            -DBUILD_CONTENT_TOOLS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: CMake configure 冒烟（Vulkan 开启）
+        run: |
+          cmake -S . -B build-check-vk \
+            -DBUILD_CONTENT_TOOLS=OFF \
+            -DENABLE_VULKAN=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: ctest 注册防回归（测试数必须 > 0）
+        run: |
+          # 只读已生成的 CTestTestfile，不编译。enable_testing() 若被挪回
+          # add_subdirectory 之后，这里会立刻变 0 并挡下本次推送。
+          # 注意：ctest -N 的逐条列表会被截断，必须解析 Total Tests 汇总行。
+          total=$(ctest --test-dir build-check -N 2>/dev/null | grep -oE 'Total Tests: [0-9]+' | grep -oE '[0-9]+') || total=0
+          total=${total:-0}
+          echo "registered tests: $total"
+          if [ "$total" -eq 0 ]; then
+            echo '::error::ctest registered 0 tests — enable_testing() regression?'
+            exit 1
+          fi
+
+  # ============================================================
+  # Windows（自托管 MSVC）
+  # shell 必须用 powershell：自托管机 bash 解析到 WSL bash.exe；
+  # run 块必须纯 ASCII：无 BOM .ps1 在 GBK 代码页 PowerShell 5.1 下
+  # 中文会乱码并引发解析错误。
+  # Runner 前置：CMake>=3.20 / VS2022 / LunarG Vulkan SDK。
+  # ============================================================
   windows:
     name: Windows (MSVC / Vulkan)
     needs: preflight
-    uses: ./.github/workflows/windows-ci.yml
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: [self-hosted, Windows, x64]
+    timeout-minutes: 120
 
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # 保留工作区让 build/ 增量编译（默认 clean 会清空构建目录）
+          clean: false
+
+      - name: 初始化必需的 submodule
+        shell: powershell
+        run: |
+          # Only fetch submodules needed by the native Windows build
+          # (root CMakeLists FATAL_ERRORs without meshoptimizer).
+          # Skip dawn/PhysX/WebGPU/astc-encoder: multi-GB, WASM-only.
+          $submodules = @(
+            'third_party/meshoptimizer',
+            'third_party/stb',
+            'third_party/moodycamel-ConcurrentQueue',
+            'third_party/lua'
+          )
+          git submodule update --init @submodules
+
+      - name: 打印环境信息
+        shell: powershell
+        run: |
+          if ($env:VULKAN_SDK) {
+            Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
+          } else {
+            Write-Host "VULKAN_SDK not set (find_package(Vulkan) may still find the SDK via default install paths)"
+          }
+          cmake --version
+          git --version
+
+      - name: 配置 CMake (Release + Vulkan RHI)
+        shell: powershell
+        run: |
+          # No -G: CMake picks the newest installed Visual Studio generator
+          # (multi-config). BUILD_CONTENT_TOOLS=OFF: ContentTools needs
+          # FBX SDK + DirectXTex which are not installed on this runner.
+          cmake -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: 编译 (Release)
+        shell: powershell
+        run: |
+          # Build via cmd so stdout+stderr land in one log file verbatim
+          # (PowerShell 5.1 native 2>&1 wraps stderr lines in ErrorRecords).
+          cmd /c "cmake --build build --config Release --parallel > msbuild-full.log 2>&1"
+          $code = $LASTEXITCODE
+          Get-Content msbuild-full.log
+          exit $code
+
+      - name: 提取编译错误摘要
+        if: failure()
+        shell: powershell
+        run: |
+          # Digest MSVC diagnostics: every error line goes to msbuild-errors.log,
+          # a grouped-by-error-code summary is appended to the run summary page.
+          if (-not (Test-Path msbuild-full.log)) { Write-Host 'no build log found'; exit 0 }
+          $lines = Get-Content msbuild-full.log
+          $err = $lines | Where-Object { $_ -match '(fatal error C\d+|error C\d+|error LNK\d+|LNK\d{4}|error MSB\d+)' }
+          if (-not $err) { Write-Host 'no compile errors found in log'; exit 0 }
+          $err | Set-Content msbuild-errors.log
+
+          $codes = $err | ForEach-Object {
+              if ($_ -match '(?:fatal error |error )(C\d+|LNK\d+|MSB\d+)') { $Matches[1] }
+          }
+          $summary = "### Compile errors: $($err.Count) lines`n`n"
+          $summary += "| Code | Count |`n|---|---|`n"
+          $codes | Group-Object | Sort-Object Count -Descending | ForEach-Object {
+              $summary += "| $($_.Name) | $($_.Count) |`n"
+          }
+          $summary += "`n<details><summary>First 80 error lines</summary><pre>`n"
+          $err | Select-Object -First 80 | ForEach-Object { $summary += "$_`n" }
+          $summary += "</pre></details>`n"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          Write-Host $summary
+
+      - name: 运行测试 (ctest)
+        shell: powershell
+        run: |
+          # --timeout guards against windowed graphics tests hanging in a
+          # non-interactive session.
+          ctest --test-dir build -C Release --output-on-failure --timeout 600 --no-tests=error
+
+      - name: 上传编译错误制品（失败时）
+        # 供 compile-error-report job 聚合跨平台报告
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-errors-windows
+          path: |
+            msbuild-errors.log
+            msbuild-full.log
+            build/Testing/**/*.log
+            build/Testing/**/*.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ============================================================
+  # Linux（gcc/clang 编译验证，不跑测试）
+  # ============================================================
   linux:
-    name: Linux (gcc+clang / Vulkan)
+    name: Linux (${{ matrix.label }} / Vulkan)
     needs: preflight
-    uses: ./.github/workflows/linux-ci.yml
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
+    strategy:
+      fail-fast: false
+      matrix:
+        # label 用于日志/制品命名：GitHub artifact 名不允许 '+' 字符
+        include:
+          - compiler: g++
+            label: gcc
+          - compiler: clang++
+            label: clang
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 初始化必需的 submodule
+        run: |
+          git submodule update --init \
+            third_party/meshoptimizer \
+            third_party/stb \
+            third_party/moodycamel-ConcurrentQueue \
+            third_party/lua
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libvulkan-dev
+          ${{ matrix.compiler }} --version
+
+      - name: 配置 CMake (Release + Vulkan RHI)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
+            -DENABLE_VULKAN=ON \
+            -DBUILD_CONTENT_TOOLS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: 编译 Engine 目标
+        # pipefail + tee：完整日志落盘（供错误提取），保留失败退出码
+        run: |
+          set -o pipefail
+          cmake --build build --target Engine --parallel $(nproc) 2>&1 | tee build-linux.log
+
+      - name: 提取编译错误
+        if: failure()
+        run: |
+          grep -E '(fatal )?error:' build-linux.log > compile-errors-linux-${{ matrix.label }}.log \
+            || echo '(no error lines found in build log — configure/timeout failure?)' > compile-errors-linux-${{ matrix.label }}.log
+          wc -l compile-errors-linux-${{ matrix.label }}.log
+
+      - name: 上传编译错误制品（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-errors-linux-${{ matrix.label }}
+          path: compile-errors-linux-${{ matrix.label }}.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ============================================================
+  # WASM（Emscripten + WebGPU 构建 + gh-pages 部署）
+  # ============================================================
   wasm:
     name: WASM (Emscripten / WebGPU)
     needs: preflight
-    secrets: inherit
-    uses: ./.github/workflows/wasm-build.yml
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'wasm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
+    steps:
+      - name: 检出仓库（含全部 submodule）
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Verify Emscripten
+        run: emcc --version
+
+      - name: Cache Emscripten ports
+        uses: actions/cache@v4
+        with:
+          path: ~/.emscripten_cache
+          key: emscripten-ports-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            emscripten-ports-${{ runner.os }}-
+
+      - name: Pre-fetch emdawnwebgpu port
+        run: embuilder build emdawnwebgpu --force 2>&1 || true
+
+      - name: Configure (Emscripten + WebGPU)
+        run: |
+          emcmake cmake -B build_wasm \
+            -DENABLE_WEBGPU=ON \
+            -DCMAKE_BUILD_TYPE=MinSizeRel
+
+      - name: Build
+        # pipefail + tee：完整日志落盘（供错误提取），保留失败退出码
+        run: |
+          set -o pipefail
+          cmake --build build_wasm --parallel $(nproc) 2>&1 | tee build-wasm.log
+
+      - name: 提取编译错误
+        if: failure()
+        run: |
+          grep -E '(fatal )?error:' build-wasm.log > compile-errors-wasm.log \
+            || echo '(no error lines found in build log — configure/timeout failure?)' > compile-errors-wasm.log
+          wc -l compile-errors-wasm.log
+
+      - name: 上传编译错误制品（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-errors-wasm
+          path: compile-errors-wasm.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Patch generated JS for Chrome's resizable ArrayBuffer rejection
+        # WebAssembly.Memory uses a resizable ArrayBuffer when ALLOW_MEMORY_GROWTH=1
+        # + finite MAXIMUM_MEMORY (our config). Recent Chrome refuses resizable
+        # views in crypto.getRandomValues, GPUQueue.writeBuffer, and
+        # GPUQueue.writeTexture. Insert a prototype-level polyfill at the top of
+        # the generated JS. Applies to BOTH TestDawnWASM.js and
+        # TestKenneyTilePreviewWASM.js.
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          POLY = '''// Resizable-ArrayBuffer polyfill (Chrome 125+ rejects resizable views in
+          // crypto.getRandomValues, GPUQueue.writeBuffer, GPUQueue.writeTexture).
+          (function() {
+            if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+              var origRand = crypto.getRandomValues.bind(crypto);
+              crypto.getRandomValues = function(view) {
+                if (view && view.buffer && view.buffer.resizable) {
+                  var copy = new view.constructor(view.byteLength / view.BYTES_PER_ELEMENT);
+                  var r = origRand(copy);
+                  view.set(r);
+                  return r;
+                }
+                return origRand(view);
+              };
+            }
+            if (typeof GPUQueue !== 'undefined' && GPUQueue.prototype) {
+              var origWB = GPUQueue.prototype.writeBuffer;
+              GPUQueue.prototype.writeBuffer = function(buffer, offset, data) {
+                if (data && data.buffer && data.buffer.resizable) {
+                  var copy = new Uint8Array(data.byteLength);
+                  copy.set(data);
+                  return origWB.call(this, buffer, offset, copy, arguments[3], arguments[4]);
+                }
+                return origWB.apply(this, arguments);
+              };
+              var origWT = GPUQueue.prototype.writeTexture;
+              GPUQueue.prototype.writeTexture = function(dest, data, layout, size) {
+                if (data && data.buffer && data.buffer.resizable) {
+                  var copy = new Uint8Array(data.byteLength);
+                  copy.set(data);
+                  return origWT.call(this, dest, copy, layout, size);
+                }
+                return origWT.apply(this, arguments);
+              };
+            }
+          })();
+          '''
+          targets = list(pathlib.Path('WASM').glob('Test*WASM*.js'))
+          targets += list(pathlib.Path('build_wasm').rglob('Test*WASM*.js'))
+          if not targets:
+              raise SystemExit('[patch] no Test*WASM.js found')
+          for p in targets:
+              src = p.read_text()
+              if 'Resizable-ArrayBuffer polyfill' in src:
+                  print(f'[patch] already present in {p}')
+                  continue
+              p.write_text(POLY + src)
+              print(f'[patch] inserted polyfill in {p}')
+          PY
+
+      - name: Prepare deploy directory
+        run: |
+          mkdir -p deploy
+          # Flat layout — every demo HTML loads its binary + assets via
+          # relative ./ paths. Demo HTMLs renamed to avoid clashes:
+          #   deploy/index.html  (launcher) / wfc.html / wasm.html /
+          #   Test*WASM.{js,wasm} / wasm_manifest.js + assets/
+          cp WASM/TestDawnWASM.js WASM/TestDawnWASM.wasm deploy/ 2>/dev/null || true
+          cp WASM/TestKenneyTilePreviewWASM.js WASM/TestKenneyTilePreviewWASM.wasm deploy/ 2>/dev/null || true
+          # CMake occasionally parks outputs in build_wasm/ — sweep as fallback.
+          find build_wasm -maxdepth 3 \( -name 'TestDawnWASM.*' -o -name 'TestKenneyTilePreviewWASM.*' \) \
+            -exec cp {} deploy/ \; 2>/dev/null || true
+
+          # Launcher must be the LAST copy for index.html.
+          if [ -f index.html ]; then
+            cp index.html deploy/index.html
+          fi
+          if [ -f wfc/shell.html ]; then
+            cp wfc/shell.html deploy/wfc.html
+          fi
+          if [ -f wasm/index.html ]; then
+            cp wasm/index.html deploy/wasm.html
+          fi
+          if [ -f build_wasm/wasm_manifest.js ]; then
+            cp build_wasm/wasm_manifest.js deploy/
+          fi
+          mkdir -p deploy/assets/models/Sponza
+          cp EngineTest/assets/Sponza.model deploy/assets/
+          cp EngineTest/assets/models/Sponza/*.png deploy/assets/models/Sponza/ 2>/dev/null || true
+          echo "=== Deploy contents ==="
+          du -sh deploy/
+          ls -la deploy/
+
+      - name: Deploy to GitHub Pages
+        if: success()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          publish_branch: gh-pages
+
+  # ============================================================
   # 跨平台编译错误报告：无论平台成败都执行（if: always()）。
   # 本 job 自身恒成功——失败语义由各平台 job 承担，报告只负责暴露。
+  # ============================================================
   compile-error-report:
     name: 跨平台编译错误报告
     needs: [windows, linux, wasm]
@@ -145,7 +610,7 @@ jobs:
                       f'测试阶段（ctest）或超时/取消。查看该平台 job 的完整日志。')
               elif result == 'skipped':
                   sections.append(
-                      f'## {label} — 跳过\n\npreflight 未通过或上游被取消。')
+                      f'## {label} — 跳过\n\npreflight 未通过、手动单平台运行或上游被取消。')
 
           md.append('| 平台 | 结果 | 错误行数 |')
           md.append('|---|---|---|')
