@@ -334,17 +334,27 @@ P4c 验证状态(2026-08-19,Apple M4 Pro + MoltenVK 1.4.350):
 - **ENABLE_VULKAN=OFF 构建**:修复预存未守卫的
   OfflineSDFMerger/GlobalSDF(07469f3 引入)后,OFF 配置 Engine 全量
   编译零错误;P4c 全部 Vulkan 代码在守卫内。
-- Vulkan 套件 37 个二进制:36 通过;两个失败均为**预存问题(bc61879
-  基线复现一致)**:
-  - `TestVulkanNaniteSmoke` Stage2 用例 — 间接参数正确
-    (index_count=384/instance_count=3)、零 validation error、光栅输出空
-    (引擎层 Nanite 问题,待 MoltenVK 兼容性专项排查);
-  - `TestVulkanStandardPipelineSmoke` — 全部 5 用例通过后,进程退出时
-    Content 层静态 `free_list<RHIMeshAsset>` 析构断言(资产注册表退出
-    未清空,Content 层预存);
+- Vulkan 套件 37 个二进制 **全部通过(2026-08-20 修复两个 P4c 遗留失败)**:
+  - `TestVulkanNaniteSmoke` Stage2 — **非 MoltenVK 问题**:07469f3 把
+    GPUDrivenDrawPipeline 的 cull 结果读取从 `(cbIdx+N-1)%N` 上一帧轮转
+    改为 `buffer_index` 同帧同槽(与 StandardRenderPipeline 对 cull/draw
+    传同一 cbIdx 的新约定一致),但测试仍按旧轮转语义传
+    cull(bufIdx=0)+gpuDraw(cbIdx=1),Stage2 读到从未写过的空槽,
+    DrawIndirect 拿到 vertexCount=0 → 光栅输出空。测试改为 cbIdx=0 后
+    3/3 绿(visibility 392/4096 非零、resolve 非背景 392/4096);
+  - `TestVulkanStandardPipelineSmoke` — 5 用例通过后退出时 Content 层
+    静态 `free_list<RHIMeshAsset>` 析构断言。main 末尾补
+    `content::shutdown()` 清空注册表后干净退出。
 - Metal 套件 15 个可构建二进制全部通过(含 P4c 参照生成器与性能孪生)。
-- 16 个陈旧测试 .cpp(BufferDesc 默认构造被删/Mock 缺纯虚)编译失败,
-  均为预存(54cdc4b Dawn 时期引入),不在 23 二进制基线集内。
+- **陈旧测试全量恢复(2026-08-20)**:Dawn 时期(54cdc4b)失编译的
+  BufferDesc 默认构造/Mock 缺纯虚/ClearValue 构造/shader_type 二义/
+  utl::vector 接口漂移等 13 类错误全部修复,`cmake --build --parallel`
+  全绿(含 IntegrationTests);单测 91 个二进制运行全部通过。附带修复
+  两处真实引擎问题:ParticlePass `static_cast<MetalDevice*>` 由 `!isVulkan`
+    改为正向 `==Metal` 判断(Dawn/mock 在 macOS 上会被误判为 Metal 而
+  崩溃);RenderSystem 类测试改用真实 ECS entity(渲染循环经
+  transform 注册表解析 proxy)。注:Darwin/Debug/libEngine.a 为 ON/OFF
+  两个 build 目录共享输出,OFF 门禁构建后需强制重链 ON 库。
 
 P4c 期间的行为差异/陷阱(追加):
 - `VkBufferImageCopy::bufferRowLength` 单位是 **texel** 而非字节 — Metal 风格的 bytesPerRow 参数必须换算(F4 踩坑)。
