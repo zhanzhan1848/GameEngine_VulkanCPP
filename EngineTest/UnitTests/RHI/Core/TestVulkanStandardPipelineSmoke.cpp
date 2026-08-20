@@ -55,6 +55,7 @@
 #include "Components/Cluster.h"
 #include "Components/Transform.h"
 #include "JobSystem/JobSystem.h"
+#include "Content/ContentToEngine.h"
 
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
@@ -1162,6 +1163,12 @@ void RegisterVulkanStandardPipelineSmoke_Tests() {
 int main() {
     RegisterVulkanStandardPipelineSmoke_Tests();
     TestRunner::RunAllSuites();
+    // Test cases register procedural mesh assets in the Content-layer static
+    // free_list<RHIMeshAsset> registry but don't destroy them individually.
+    // Without this explicit drain the static free_list destructs non-empty at
+    // process exit and asserts !_size (FreeList.h:27). RHIGpuMesh cleanup is
+    // device-independent-safe per ContentToEngine.cpp shutdown().
+    primal::content::shutdown();
     return 0;
 }
 
