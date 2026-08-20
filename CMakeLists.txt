@@ -266,11 +266,18 @@ if(MSVC)
     add_compile_options(
         /MP             # 多处理器编译
         /W4             # 警告级别
-        /WX             # 警告视为错误
+        /utf-8          # 源码与执行字符集均为 UTF-8：源文件含中文注释/字符串，
+                        # 默认按系统代码页(GBK)解读会产生 C4819/C2001 大量误报
         /GR-            # 禁用RTTI
         /EHs-c-        # 禁用异常处理
         /fp:fast        # 快速浮点计算
+        # /WX 暂不启用（与 clang 侧一致，-Werror 本就注释）：
+        # Windows 首次全量编译存在结构性警告（C4324 对齐填充、C4100 未引用参数等），
+        # 先以 /W4 观察输出，清零后再恢复警告即错误。
     )
+    # windows.h 的 min/max 宏与 std::min/std::max 及 AABB 等成员名冲突
+    # （C2059/C2589/C4003 大面积级联），全局屏蔽
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     # GCC/Clang编译选项
     add_compile_options(
