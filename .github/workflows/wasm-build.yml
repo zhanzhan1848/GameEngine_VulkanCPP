@@ -1,30 +1,20 @@
 name: WASM Build & Deploy
 
-# 推送 dev 分支时交叉编译 WASM (Emscripten + WebGPU) 并部署 gh-pages。
+# 可复用平台工作流（workflow_call）——由 ci.yml 编排器在 dev push 时调用，
+# 也可 workflow_dispatch 单独手动运行。
 # （原触发分支 dawn-webgpu-backend 已删除、features/dawn-webgpu-backend
-# 已合并休眠，随 Dawn→dev 合并迁移。移除旧触发避免与 dev 互相覆盖 gh-pages。）
+# 已合并休眠，随 Dawn→dev 合并迁移。）
+# 交叉编译 WASM (Emscripten + WebGPU) 并部署 gh-pages；失败时上传
+# compile-errors-wasm 制品供编排器聚合跨平台错误报告。
 on:
-  push:
-    branches:
-      - dev
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# 连续推送时取消旧的排队/运行任务，避免 gh-pages 部署互相覆盖与堆叠
-concurrency:
-  group: wasm-build-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # 编译前校验门禁：通过后才进入昂贵的 Emscripten 全量构建
-  preflight:
-    name: 编译前校验
-    uses: ./.github/workflows/ci-preflight.yml
-
   build-and-deploy:
-    needs: preflight
     runs-on: ubuntu-latest
 
     steps:
@@ -61,7 +51,27 @@ jobs:
             -DCMAKE_BUILD_TYPE=MinSizeRel
 
       - name: Build
-        run: cmake --build build_wasm --parallel $(nproc)
+        # pipefail + tee：完整日志落盘（供错误提取与深挖），保留失败退出码
+        run: |
+          set -o pipefail
+          cmake --build build_wasm --parallel $(nproc) 2>&1 | tee build-wasm.log
+
+      - name: 提取编译错误
+        if: failure()
+        run: |
+          # emcc/clang 错误行格式：'file:line:col: error: ...'（fatal error 同理）
+          grep -E '(fatal )?error:' build-wasm.log > compile-errors-wasm.log \
+            || echo '(no error lines found in build log — configure/timeout failure?)' > compile-errors-wasm.log
+          wc -l compile-errors-wasm.log
+
+      - name: 上传编译错误制品（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-errors-wasm
+          path: compile-errors-wasm.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Patch generated JS for Chrome's resizable ArrayBuffer rejection
         # WebAssembly.Memory uses a resizable ArrayBuffer when ALLOW_MEMORY_GROWTH=1

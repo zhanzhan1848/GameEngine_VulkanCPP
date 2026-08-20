@@ -1,6 +1,9 @@
 name: Linux CI (Compile-Only)
 
-# 推送 dev 分支时在 ubuntu 上做原生 Linux 编译验证（gcc + clang 双编译器矩阵）。
+# 可复用平台工作流（workflow_call）——由 ci.yml 编排器在 dev push 时调用，
+# 也可 workflow_dispatch 单独手动运行。
+#
+# 在 ubuntu 上做原生 Linux 编译验证（gcc + clang 双编译器矩阵）。
 #
 # 仅编译、不运行测试：Linux 的 Vulkan XCB surface 尚未实现（对齐计划 F10，
 # VulkanSurface_Linux.cpp 的 XCB connection 仍为 nullptr），渲染类测试在
@@ -10,36 +13,32 @@ name: Linux CI (Compile-Only)
 # 只构建 Engine 目标（含 Vulkan RHI 后端）：EngineTest 的部分测试目标
 # 尚未在 Linux 上移植（Apple 专有代码守卫不全），全量构建从零开始必然
 # 红；待测试目标 Linux 化后再扩展为全量构建 + ctest。
+#
+# 失败时上传 compile-errors-linux-<compiler> 制品，由编排器的
+# compile-error-report job 汇总进跨平台错误报告。
 
 on:
-  push:
-    branches:
-      - dev
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: linux-ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # 编译前校验门禁（与 windows-ci / wasm-build 共用）
-  preflight:
-    name: 编译前校验
-    uses: ./.github/workflows/ci-preflight.yml
-
   compile:
-    name: 编译 (${{ matrix.compiler }} / Vulkan)
-    needs: preflight
+    name: 编译 (${{ matrix.label }} / Vulkan)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     strategy:
       fail-fast: false
       matrix:
-        compiler: [g++, clang++]
+        # label 用于日志/制品命名：GitHub artifact 名不允许 '+' 字符
+        include:
+          - compiler: g++
+            label: gcc
+          - compiler: clang++
+            label: clang
 
     steps:
       - name: 检出仓库
@@ -72,5 +71,25 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
 
       - name: 编译 Engine 目标
+        # pipefail + tee：完整日志落盘（供错误提取与深挖），同时保留
+        # cmake 的失败退出码——裸 tee 会把管道退出码吞成 0。
         run: |
-          cmake --build build --target Engine --parallel $(nproc)
+          set -o pipefail
+          cmake --build build --target Engine --parallel $(nproc) 2>&1 | tee build-linux.log
+
+      - name: 提取编译错误
+        if: failure()
+        run: |
+          # gcc/clang 错误行格式：'file:line:col: error: ...'（fatal error 同理）
+          grep -E '(fatal )?error:' build-linux.log > compile-errors-linux-${{ matrix.label }}.log \
+            || echo '(no error lines found in build log — configure/timeout failure?)' > compile-errors-linux-${{ matrix.label }}.log
+          wc -l compile-errors-linux-${{ matrix.label }}.log
+
+      - name: 上传编译错误制品（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-errors-linux-${{ matrix.label }}
+          path: compile-errors-linux-${{ matrix.label }}.log
+          if-no-files-found: ignore
+          retention-days: 14

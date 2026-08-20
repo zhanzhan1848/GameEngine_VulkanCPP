@@ -1,0 +1,174 @@
+name: CI
+
+# CI 编排器——dev push 的唯一流水线入口。
+#
+# 结构：
+#   preflight → { windows, linux, wasm } → compile-error-report
+#
+# 三个平台 job 调用各自的可复用工作流（保留原文件名，独立 workflow_dispatch
+# 调试能力不变）。全部平台（无论成败）结束后，compile-error-report 把
+# 各平台上传的 compile-errors-* 制品聚合成一份跨平台编译错误报告：
+# 运行页面 Summary 直接可见汇总表 + 每平台可折叠明细，完整报告另存制品。
+#
+# macOS CI 已全链路移除（费用问题，本地已双配置验证）。
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  # write 供 wasm 平台的 gh-pages 部署；各被调工作流自行收窄（preflight/linux
+  # 声明 read，为 write 的合法子集）
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 编译前校验门禁：YAML/冲突标记/脚本语法/.gitmodules/configure 冒烟/
+  # ctest 注册数。不通过则三个平台构建全部跳过，不消耗资源。
+  preflight:
+    name: 编译前校验
+    uses: ./.github/workflows/ci-preflight.yml
+
+  windows:
+    name: Windows (MSVC / Vulkan)
+    needs: preflight
+    uses: ./.github/workflows/windows-ci.yml
+
+  linux:
+    name: Linux (gcc+clang / Vulkan)
+    needs: preflight
+    uses: ./.github/workflows/linux-ci.yml
+
+  wasm:
+    name: WASM (Emscripten / WebGPU)
+    needs: preflight
+    secrets: inherit
+    uses: ./.github/workflows/wasm-build.yml
+
+  # 跨平台编译错误报告：无论平台成败都执行（if: always()）。
+  # 本 job 自身恒成功——失败语义由各平台 job 承担，报告只负责暴露。
+  compile-error-report:
+    name: 跨平台编译错误报告
+    needs: [windows, linux, wasm]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 下载各平台错误制品
+        uses: actions/download-artifact@v4
+        with:
+          # 平台失败时才上传（成功=无制品），merge 把所有文件摊平到 errors/
+          pattern: compile-errors-*
+          merge-multiple: true
+          path: errors
+        continue-on-error: true
+
+      - name: 生成跨平台编译错误报告
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, glob, collections
+
+          needs = json.loads(os.environ['NEEDS'])
+          platforms = [
+              ('windows', 'Windows (MSVC)'),
+              ('linux',   'Linux (gcc/clang)'),
+              ('wasm',    'WASM (Emscripten)'),
+          ]
+
+          def platform_files(key):
+              if key == 'windows':
+                  return sorted(glob.glob('errors/msbuild-errors.log'))
+              if key == 'linux':
+                  return sorted(glob.glob('errors/compile-errors-linux-*.log'))
+              return sorted(glob.glob('errors/compile-errors-wasm.log'))
+
+          msvc_code = re.compile(r'(?:fatal error |error )(C\d{4}|LNK\d{4}|MSB\d{4})')
+          gcc_loc   = re.compile(r'^([^ :]+):(\d+):\d+: (?:fatal )?error:')
+
+          md = ['# 跨平台编译错误报告', '']
+          rows = []
+          sections = []
+          any_errors = False
+
+          for key, label in platforms:
+              result = needs.get(key, {}).get('result', 'skipped')
+              icon = {'success': '✅', 'failure': '❌',
+                      'cancelled': '🚫', 'skipped': '⏭️'}.get(result, '❓')
+              files = platform_files(key)
+              lines = []
+              for f in files:
+                  with open(f, errors='ignore') as fh:
+                      lines.extend(l.rstrip() for l in fh if l.strip())
+              lines = [l for l in lines if not l.startswith('(')]  # 占位说明行不算错误
+              n = len(lines)
+              rows.append(f'| {label} | {icon} {result} | {n} |')
+              if n:
+                  any_errors = True
+                  sec = [f'## {label} — {n} 条错误', '']
+                  if key == 'windows':
+                      codes = collections.Counter(
+                          m.group(1) for l in lines for m in [msvc_code.search(l)] if m)
+                      if codes:
+                          sec.append('按错误码：' + ', '.join(
+                              f'`{c}` ×{cnt}' for c, cnt in codes.most_common()))
+                          sec.append('')
+                  else:
+                      byfile = collections.Counter()
+                      for l in lines:
+                          m = gcc_loc.match(l)
+                          byfile[os.path.basename(m.group(1)) if m else '(other)'] += 1
+                      if byfile:
+                          sec.append('按文件：' + ', '.join(
+                              f'`{f}` ×{cnt}' for f, cnt in byfile.most_common(15)))
+                          sec.append('')
+                  sec.append('<details><summary>错误明细（前 100 行）</summary>')
+                  sec.append('')
+                  sec.append('```')
+                  sec.extend(lines[:100])
+                  if len(lines) > 100:
+                      sec.append(f'...（共 {len(lines)} 行，完整内容见制品）')
+                  sec.append('```')
+                  sec.append('</details>')
+                  sections.append('\n'.join(sec))
+              elif result == 'failure':
+                  sections.append(
+                      f'## {label} — 失败但无编译错误日志\n\n'
+                      f'构建日志中没有 error 行：可能失败于 configure 阶段、'
+                      f'测试阶段（ctest）或超时/取消。查看该平台 job 的完整日志。')
+              elif result == 'skipped':
+                  sections.append(
+                      f'## {label} — 跳过\n\npreflight 未通过或上游被取消。')
+
+          md.append('| 平台 | 结果 | 错误行数 |')
+          md.append('|---|---|---|')
+          md.extend(rows)
+          md.append('')
+          if not any_errors:
+              md.append('全部已运行平台的构建日志中均无编译错误。')
+          md.append('')
+          md.extend(sections)
+
+          report = '\n'.join(md) + '\n'
+          with open('compile-error-report.md', 'w') as fh:
+              fh.write(report)
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a') as fh:
+                  fh.write(report)
+          print(report)
+          PY
+
+      - name: 上传报告制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-error-report-${{ github.run_id }}
+          path: compile-error-report.md
+          retention-days: 14
