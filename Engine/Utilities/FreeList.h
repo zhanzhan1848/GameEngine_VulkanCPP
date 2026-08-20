@@ -84,7 +84,12 @@ namespace primal::utl
 			assert(id < _array.size() && !already_removed(id, false));
 			T& item{ _array[id] };
 			item.~T();
-			DEBUG_OP(memset((void*)std::addressof(_array[id]), 0xcc, sizeof(T)));
+			// 0xcc 毒化必须无条件执行：already_removed() 靠扫描 [4, sizeof(T))
+			// 的 0xcc 字节判定槽位已释放，is_valid()/add() 的复用检查都依赖它。
+			// 此前包在 DEBUG_OP 里，Release 下不毒化 → is_valid 对运行期已 Free
+			// 的槽位返回 true → RHIAllocator::Shutdown() 二次析构 → 经被空闲链
+			// 戳覆盖 vptr 的对象做虚调用（destroyImpl）→ 跳转野地址段错误。
+			memset((void*)std::addressof(_array[id]), 0xcc, sizeof(T));
 			*(u32 *const)std::addressof(_array[id]) = _next_free_index;
 			_next_free_index = id;
 			--_size;
