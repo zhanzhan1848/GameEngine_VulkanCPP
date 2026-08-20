@@ -2130,6 +2130,9 @@ set_target_properties(StandaloneRHI_Timestamp_Test PROPERTIES
 target_compile_definitions(StandaloneRHI_Timestamp_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 RenderGraph Timestamp Integration 测试
+# Apple-only：测试本体绑定 MetalDevice（CreateTestDevice 直接 new MetalDevice），
+# Vulkan 时间戳覆盖在 TestVulkan* 套件
+if(APPLE)
 add_executable(TestRenderGraphTimestamp 
     Graphics/RenderGraph/TestRenderGraphTimestamp.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RenderGraph/RenderGraph.cpp
@@ -2160,6 +2163,7 @@ set_target_properties(TestRenderGraphTimestamp PROPERTIES
 )
 target_compile_definitions(TestRenderGraphTimestamp PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestRenderGraphTimestamp PROPERTIES FOLDER "Tests/Graphics")
+endif()
 
 # 创建RHI实体管理器测试
 add_executable(RHI_EntityManager_Test 

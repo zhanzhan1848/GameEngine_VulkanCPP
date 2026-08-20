@@ -13,7 +13,9 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #if !defined(__EMSCRIPTEN__)
+#if defined(__APPLE__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#endif
 #endif
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/RenderPipeline/StreamingMesh.h"
@@ -652,8 +654,11 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
 #if defined(__EMSCRIPTEN__)
     RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmd_handle);
 #else
+    RHICommandBuffer* cmd = nullptr;
+#if defined(__APPLE__)
     auto* metal_dev = dynamic_cast<MetalDevice*>(device_);
-    RHICommandBuffer* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+    cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+#endif
 #endif
     if (!cmd) {
         device_->DestroyDescriptorSet(classify_ds);
@@ -1112,8 +1117,11 @@ bool GPUMesher::GenerateSurfaceNetsFromGlobalSDF(
 #if defined(__EMSCRIPTEN__)
     RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmd_handle);
 #else
+    RHICommandBuffer* cmd = nullptr;
+#if defined(__APPLE__)
     auto* metal_dev = dynamic_cast<MetalDevice*>(device_);
-    RHICommandBuffer* cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+    cmd = metal_dev ? metal_dev->GetCommandBuffer(cmd_handle) : nullptr;
+#endif
 #endif
     if (!cmd) {
         device_->DestroyDescriptorSet(fill_scalar_ds);

@@ -2,7 +2,9 @@
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
+#if defined(__APPLE__)
 #include "Graphics/RHI/Platforms/Metal/MetalCommandBuffer.h"
+#endif
 
 #include <cstring>
 #include <iostream>

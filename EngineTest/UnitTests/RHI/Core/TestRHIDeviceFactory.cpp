@@ -9,7 +9,9 @@
 
 #include "../../TestFramework.h"
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
+#if defined(__APPLE__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#endif
 
 using namespace primal::graphics::rhi;
 using namespace Engine::Test;

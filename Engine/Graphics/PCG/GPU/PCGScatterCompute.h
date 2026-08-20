@@ -3,7 +3,9 @@
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#if defined(__APPLE__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#endif
 #include "Graphics/PCG/PCGTypes.h"
 #include "Utilities/Math.h"
 #include <vector>
@@ -21,6 +23,8 @@ namespace primal::graphics::pcg {
 //   gpu_scatter.Initialize(device);
 //   gpu_scatter.SetParams({...});
 //   gpu_scatter.DispatchAndReadback(cmd);
+#if defined(__APPLE__)
+// Metal 专属 GPU scatter 工具（当前无跨平台使用者；非 Apple 平台整体缺席）
 class PCGScatterCompute {
 public:
     struct ScatterParams {
@@ -228,5 +232,7 @@ private:
     ScatterParams params_;
     bool initialized_{false};
 };
+
+#endif // defined(__APPLE__)
 
 } // namespace primal::graphics::pcg

@@ -5,7 +5,9 @@
 #include "../Dawn/ShaderLoader.h"
 #include "../Utils/ShaderRegistry.h"
 #if !defined(__EMSCRIPTEN__)
+#if defined(__APPLE__)
 #include "../RHI/Platforms/Metal/MetalDevice.h"
+#endif
 // P4c: Vulkan 分支仅在 ENABLE_VULKAN 下编译(修 OFF 构建未守卫问题)
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include "../RHI/Platforms/Vulkan/VulkanDevice.h"
@@ -872,9 +874,11 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
         auto* cmd = rhi::GetCommandBuffer(cmdHandle);
 #else
         rhi::RHICommandBuffer* cmd = nullptr;
+#if defined(__APPLE__)
         if (auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_)) {
             cmd = metal_dev->GetCommandBuffer(cmdHandle);
         }
+#endif
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
         else if (auto* vk_dev = dynamic_cast<rhi::VulkanDevice*>(device_)) {
             cmd = vk_dev->GetCommandBuffer(cmdHandle);

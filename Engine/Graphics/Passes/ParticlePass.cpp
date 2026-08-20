@@ -3,8 +3,10 @@
 #ifndef DISABLE_PARTICLE_SYSTEM
 
 #include "Particles/ParticleSystem.h"
+#if defined(__APPLE__)
 #include "Graphics/RHI/Platforms/Metal/MetalCommandBuffer.h"
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#endif
 #include "Engine/Content/ContentToEngine.h"
 #include "Utilities/IOStream.h"
 
