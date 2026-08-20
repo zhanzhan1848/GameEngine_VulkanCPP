@@ -225,10 +225,14 @@ jobs:
           # No -G: CMake picks the newest installed Visual Studio generator
           # (multi-config). BUILD_CONTENT_TOOLS=OFF: ContentTools needs
           # FBX SDK + DirectXTex which are not installed on this runner.
-          # --fresh 重置 CMake 缓存：runner 的缓存曾被早期坏配置污染（CMAKE_CXX_FLAGS
-          # 里残留 _DEBUG 类标志 → Engine 以 MDd 运行时编译 → 测试链接 LNK2038
-          # MDd/MD 混链）。保留对象文件，标志变化的 TU 自动重编。
-          cmake --fresh -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          # 缓存重置（等价 cmake --fresh，兼容 runner 上 <3.24 的 CMake）：
+          # runner 的缓存曾被早期坏配置污染（Engine 的 Release 以 MDd 运行时
+          # 编译 → 测试链接 LNK2038 MDd/MD 混链）。删缓存 + 删 Engine 对象
+          # 目录（重编 Engine），测试目标对象保留增量。
+          if (Test-Path build/CMakeCache.txt) { Remove-Item build/CMakeCache.txt -Force }
+          if (Test-Path build/CMakeFiles) { Remove-Item build/CMakeFiles -Recurse -Force }
+          if (Test-Path build/Engine) { Remove-Item build/Engine -Recurse -Force }
+          cmake -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: 编译 (Release)
         shell: powershell
