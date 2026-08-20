@@ -16,6 +16,7 @@
 #endif
 #include "Graphics/Field/FieldRegistry.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -877,13 +878,15 @@ bool GlobalSDF::DebugFill(std::function<f32(const math::v3&)> sdf_fn) {
 #if defined(__APPLE__)
         if (auto* metal_dev = dynamic_cast<rhi::MetalDevice*>(device_)) {
             cmd = metal_dev->GetCommandBuffer(cmdHandle);
-        }
+        } else
 #endif
+        {
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-        else if (auto* vk_dev = dynamic_cast<rhi::VulkanDevice*>(device_)) {
-            cmd = vk_dev->GetCommandBuffer(cmdHandle);
-        }
+            if (auto* vk_dev = dynamic_cast<rhi::VulkanDevice*>(device_)) {
+                cmd = vk_dev->GetCommandBuffer(cmdHandle);
+            }
 #endif
+        }
 #endif
         if (!cmd) { all_ok = false; continue; }
 

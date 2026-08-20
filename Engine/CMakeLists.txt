@@ -535,6 +535,15 @@ endif()
 # Vulkan RHI 后端依赖：Vulkan SDK + VulkanMemoryAllocator（单头）
 if(ENABLE_VULKAN)
     find_package(Vulkan REQUIRED)
+    # Ubuntu 的 libvulkan-dev 头文件位于 /usr/include，CMake 会把导入目标的
+    # include 目录标记为 SYSTEM，生成 -isystem /usr/include —— 显式指向
+    # /usr/include 会打乱 g++/clang 的 include_next 链（cstdlib → stdlib.h
+    # 断裂，报 'stdlib.h' file not found）。关闭 SYSTEM 改用普通 -I。
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.25)
+        set_target_properties(Vulkan::Vulkan PROPERTIES SYSTEM OFF)
+    else()
+        set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
+    endif()
     # /usr/local/include 在 macOS 上是 CMake 的 implicit include directory,会被自动剥离;
     # 显式从 implicit 列表移除,确保 target_include_directories 能把它传给编译器。
     list(REMOVE_ITEM CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES ${Vulkan_INCLUDE_DIR})
