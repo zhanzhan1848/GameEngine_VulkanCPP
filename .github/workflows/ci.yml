@@ -34,6 +34,11 @@ on:
           - windows
           - linux
           - wasm
+      clean_build:
+        description: '深度清理 runner 工作区（git clean -ffdx，全量重编）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write   # write 供 wasm 的 gh-pages 部署
@@ -183,8 +188,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          # 保留工作区让 build/ 增量编译（默认 clean 会清空构建目录）
-          clean: false
+          # 默认保留工作区让 build/ 增量编译。结构性头文件守卫变更后，
+          # MSBuild 的 .tlog 依赖记录可能残留旧 include 关系（曾出现已
+          # 守卫的 Metal 头仍被报错），此时用 dispatch 的 clean_build
+          # 深度清理做一次全量重编
+          clean: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_build == true }}
 
       - name: 初始化必需的 submodule
         shell: powershell

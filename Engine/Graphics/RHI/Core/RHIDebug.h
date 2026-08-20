@@ -11,6 +11,12 @@
 
 #include "CommonHeaders.h"
 
+// 注意：这两个头必须位于 namespace debug 之外——曾因放在命名空间内，
+// 在 primal::graphics::rhi::debug 下造出嵌套伪 std，导致后续 std::atomic
+// 全部 C2039
+#include <cstdarg>
+#include <cstdio>
+
 namespace primal::graphics::rhi::debug {
 
 // === 调试级别枚举 ===
@@ -72,9 +78,6 @@ enum class DebugLevel : u8 {
  * @param function 函数名
  * @param message 消息内容
  */
-#include <cstdarg>
-#include <cstdio>
-
 /**
  * @brief 变参日志格式化（供 RHI_* 日志宏使用）
  * @note 宏内 snprintf(fmt, 逗号吞并扩展) 在 MSVC 传统预处理器下不生效
@@ -113,7 +116,7 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::TRACE)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
+            primal::graphics::rhi::debug::FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::TRACE, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -125,7 +128,7 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::DEBUG_LEVEL)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
+            primal::graphics::rhi::debug::FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::DEBUG_LEVEL, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -137,7 +140,7 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::INFO)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
+            primal::graphics::rhi::debug::FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::INFO, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -149,7 +152,7 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::WARN)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
+            primal::graphics::rhi::debug::FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::WARN, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -161,7 +164,7 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::ERR)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
+            primal::graphics::rhi::debug::FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::ERR, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -174,7 +177,7 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::FATAL)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
+            primal::graphics::rhi::debug::FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::FATAL, __FILE__, __LINE__, __FUNCTION__, buffer); \
             assert(false && buffer); \
         } \
