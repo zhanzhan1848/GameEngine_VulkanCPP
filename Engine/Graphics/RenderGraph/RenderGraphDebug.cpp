@@ -90,11 +90,16 @@ void RenderGraphDebug::CreatePipeline() {
     
     std::cout << "Loading shader from: " << shaderPath_ << std::endl;
     std::string source = ShaderLoader::LoadShaderSource(shaderPath_);
-    if (source.empty()) {
-        // Fallback to absolute path
-        std::string absolutePath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath_;
+    if (source.empty() && shaderPath_.rfind("../", 0) == 0) {
+        // shaderPath_ 以 "../" 开头时假定 CWD 为构建根目录；从其他目录运行
+        // （如 Tests/UnitTests）时退回源码根。PROJECT_ROOT 由测试目标注入
+        // ${CMAKE_SOURCE_DIR}，替代此前硬编码的开发机绝对路径——旧拼接
+        // root + "../Engine/..." 会逃出仓库，永远指向不存在的位置。
+#ifdef PROJECT_ROOT
+        std::string absolutePath = std::string{PROJECT_ROOT} + "/" + shaderPath_.substr(3);
         std::cout << "Retrying with absolute path: " << absolutePath << std::endl;
         source = ShaderLoader::LoadShaderSource(absolutePath);
+#endif
     }
     
     if (source.empty()) {

@@ -1996,7 +1996,9 @@ add_test(NAME TestRenderGraphDebug COMMAND TestRenderGraphDebug)
 set_target_properties(TestRenderGraphDebug PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRenderGraphDebug PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+target_compile_definitions(TestRenderGraphDebug PRIVATE
+    $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>
+    PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(TestRenderGraphDebug PROPERTIES FOLDER "Tests/Graphics")
 
 
