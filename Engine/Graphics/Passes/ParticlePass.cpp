@@ -635,10 +635,14 @@ void ParticlePass::create_default_texture() {
     // T4.6.5 part 16.3: Metal-path uses native replaceRegion. Vulkan needs
     // staging buffer + CopyBufferToTexture. Guard via runtime platform check
     // (NOT __APPLE__ — macOS Vulkan via MoltenVK is __APPLE__ but not Metal).
+    // Must be a positive Metal check, NOT "!isVulkan": Dawn-on-macOS and
+    // Unknown-platform devices (unit-test mocks) fell into the Metal
+    // static_cast and crashed inside RHIAllocator's shared_mutex.
     const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    const bool isMetal = (device_->GetPlatform() == rhi::RHIPlatform::Metal);
 
 #ifdef __APPLE__
-    if (!isVulkan) {
+    if (isMetal) {
         auto* metalDevice = static_cast<rhi::MetalDevice*>(device_);
         auto* metalTex = metalDevice->GetTexture(particle_texture_);
         if (metalTex && metalTex->GetNativeTexture()) {
