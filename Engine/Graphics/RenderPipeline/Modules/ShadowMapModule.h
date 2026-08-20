@@ -10,7 +10,7 @@
 namespace primal::graphics {
 
 namespace nanite { class GPUDrivenDrawPipeline; }
-struct RenderSceneSnapshot;
+class RenderSceneSnapshot;
 class BlurPass;
 
 namespace rendergraph { class RenderGraph; }

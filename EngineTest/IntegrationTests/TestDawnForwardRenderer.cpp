@@ -917,9 +917,18 @@ void Engine_Test::RenderFrame() {
             // Pass frameIndex_ (true counter) — same reason as SSGI: SSR's
             // temporal jitter hashes by params.frameIndex and would otherwise
             // see only 3 distinct seeds cycling.
+            // ORM G-Buffer RT3 (RGBA8_UNorm) feeds roughness-based reflection
+            // attenuation; SSRConfig{} = PipelineQualityConfig defaults (same
+            // starting point StandardRenderPipeline uses for settings_.ssr).
+            rhi::TextureDesc ormDescForRG;
+            ormDescForRG.size = {width_, height_, 1};
+            ormDescForRG.format = rhi::DataFormat::RGBA8_UNorm;
+            ormDescForRG.type = rhi::TextureType::Texture2D;
+            ormDescForRG.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+            auto ormRG = renderGraph_->ImportTexture("GBufferORM_SSR", gbufferTextures_[3], ormDescForRG);
             const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
-                                                          velMrtRG, width_, height_, frameIndex_,
-                                                          view_.GetProjectionMatrix(), invProj);
+                                                          velMrtRG, ormRG, width_, height_, frameIndex_,
+                                                          view_.GetProjectionMatrix(), invProj, SSRConfig{});
             taaHDR = ssrOut.outputColor;
         }
 
