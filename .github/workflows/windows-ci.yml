@@ -90,7 +90,41 @@ jobs:
 
       - name: 编译 (Release)
         shell: powershell
-        run: cmake --build build --config Release --parallel
+        run: |
+          # Build via cmd so stdout+stderr land in one log file verbatim
+          # (PowerShell 5.1 native 2>&1 wraps stderr lines in ErrorRecords).
+          # Full log is echoed back so the Actions console log stays complete.
+          cmd /c "cmake --build build --config Release --parallel > msbuild-full.log 2>&1"
+          $code = $LASTEXITCODE
+          Get-Content msbuild-full.log
+          exit $code
+
+      - name: 提取编译错误摘要
+        if: failure()
+        shell: powershell
+        run: |
+          # Digest MSVC diagnostics from the full build log: every error line
+          # goes to msbuild-errors.log, and a grouped-by-error-code summary is
+          # appended to the run summary page.
+          if (-not (Test-Path msbuild-full.log)) { Write-Host 'no build log found'; exit 0 }
+          $lines = Get-Content msbuild-full.log
+          $err = $lines | Where-Object { $_ -match '(fatal error C\d+|error C\d+|error LNK\d+|LNK\d{4}|error MSB\d+)' }
+          if (-not $err) { Write-Host 'no compile errors found in log'; exit 0 }
+          $err | Set-Content msbuild-errors.log
+
+          $codes = $err | ForEach-Object {
+              if ($_ -match '(?:fatal error |error )(C\d+|LNK\d+|MSB\d+)') { $Matches[1] }
+          }
+          $summary = "### Compile errors: $($err.Count) lines`n`n"
+          $summary += "| Code | Count |`n|---|---|`n"
+          $codes | Group-Object | Sort-Object Count -Descending | ForEach-Object {
+              $summary += "| $($_.Name) | $($_.Count) |`n"
+          }
+          $summary += "`n<details><summary>First 80 error lines</summary><pre>`n"
+          $err | Select-Object -First 80 | ForEach-Object { $summary += "$_`n" }
+          $summary += "</pre></details>`n"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          Write-Host $summary
 
       - name: 运行测试 (ctest)
         shell: powershell
@@ -101,12 +135,14 @@ jobs:
           # To exclude flaky tests add: -E "TestVulkanStress|..."
           ctest --test-dir build -C Release --output-on-failure --timeout 600 --no-tests=error
 
-      - name: 上传测试日志（失败时）
+      - name: 上传日志制品（失败时）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-${{ github.run_id }}
+          name: ci-logs-${{ github.run_id }}
           path: |
+            msbuild-full.log
+            msbuild-errors.log
             build/Testing/**/*.log
             build/Testing/**/*.xml
           if-no-files-found: ignore
