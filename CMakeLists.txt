@@ -251,14 +251,19 @@ else()
 endif()
 
 # Debug/Release特定定义
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_definitions(
-        -DDEBUG
-        -D_DEBUG
-    )
-else()
-    add_definitions(-DNDEBUG)
-endif()
+# 必须用生成器表达式而非 CMAKE_BUILD_TYPE 判断：VS 等多配置生成器的
+# CMAKE_BUILD_TYPE 恒为空（上文还会将其强制设为 Debug），导致 Release 配置
+# 也被注入 _DEBUG，链接期混入 Debug CRT 符号（LNK2019 __imp__CrtDbgReport）。
+add_compile_definitions(
+    $<$<CONFIG:Debug>:DEBUG>
+    $<$<CONFIG:Debug>:_DEBUG>
+    $<$<CONFIG:DebugEditor>:DEBUG>
+    $<$<CONFIG:DebugEditor>:_DEBUG>
+    $<$<CONFIG:Release>:NDEBUG>
+    $<$<CONFIG:ReleaseEditor>:NDEBUG>
+    $<$<CONFIG:RelWithDebInfo>:NDEBUG>
+    $<$<CONFIG:MinSizeRel>:NDEBUG>
+)
 
 # 设置通用编译选项
 if(MSVC)

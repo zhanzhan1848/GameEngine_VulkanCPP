@@ -38,8 +38,15 @@ set(LUA_SRC
 add_library(lua_static STATIC ${LUA_SRC})
 target_include_directories(lua_static PUBLIC ${CMAKE_SOURCE_DIR}/third_party/lua)
 
-# Lua 5.4 needs this define for default config
-target_compile_definitions(lua_static PRIVATE LUA_USE_MACOSX=1)
+# Lua 5.4 needs a platform define for default config
+# （Windows 下必须用 LUA_USE_WINDOWS，POSIX 宏会引入 sys/wait.h、dlfcn.h）
+if(APPLE)
+    target_compile_definitions(lua_static PRIVATE LUA_USE_MACOSX=1)
+elseif(WIN32)
+    target_compile_definitions(lua_static PRIVATE LUA_USE_WINDOWS=1)
+else()
+    target_compile_definitions(lua_static PRIVATE LUA_USE_LINUX=1)
+endif()
 
 # === Phase 2a Task 2: TestLuaBackend skeleton ===
 
@@ -60,7 +67,7 @@ add_test(NAME TestLuaBackend COMMAND TestLuaBackend)
 set_target_properties(TestLuaBackend PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestLuaBackend PRIVATE DEBUG _DEBUG)
+target_compile_definitions(TestLuaBackend PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestLuaBackend PROPERTIES FOLDER "Tests/Components")
 
 # Script.cpp uses -fexceptions; the Lua adapter wraps each hook in try/catch

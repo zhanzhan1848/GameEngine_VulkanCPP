@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#if !defined(_WIN32)  // MSVC 没有 pthread.h；Windows 路径不设置线程名
 #include <pthread.h>
+#endif
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -340,7 +342,7 @@ void ScriptFilesystem::initialize() {
     if (worker_.joinable()) return;  // already running
     stop_ = false;
     worker_ = std::thread([this]() {
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
         pthread_setname_np("ScriptFSWorker");
 #endif
         worker_loop();

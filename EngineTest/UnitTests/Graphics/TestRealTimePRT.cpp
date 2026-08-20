@@ -7,6 +7,15 @@
 #if defined(__APPLE__)
 #include <simd/simd.h>
 using namespace simd;
+#else
+// 便携回退：Apple simd 的 normalize/dot 在非 Apple 平台不可用
+namespace {
+    v3 normalize(const v3& v) {
+        const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        return v3{ v.x / len, v.y / len, v.z / len };
+    }
+    float dot(const v3& a, const v3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+}
 #endif
 
 using namespace primal::math;
@@ -22,7 +31,7 @@ namespace
         // 1. Setup a directional light environment (simple delta function)
         // L(w) = Intensity * delta(w - lightDir)
         // Note: On Mac, v3 is simd::float3 which needs {} initialization
-        v3 lightDir = normalize((v3){1.0f, 1.0f, 1.0f});
+        v3 lightDir = normalize(v3{1.0f, 1.0f, 1.0f});
         v3 lightColor = {1.0f, 0.8f, 0.5f};
         
         SH9 basis;
@@ -35,7 +44,7 @@ namespace
         }
 
         // 2. Define a surface normal
-        v3 normal = normalize((v3){0.0f, 0.0f, 1.0f});
+        v3 normal = normalize(v3{0.0f, 0.0f, 1.0f});
 
         // 3. Compute Irradiance using Method A: Convolution + Reconstruction
         // E_lm = A_l * L_lm
