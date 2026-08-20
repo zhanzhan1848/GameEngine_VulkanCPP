@@ -338,7 +338,8 @@ jobs:
             -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
             -DENABLE_VULKAN=ON \
             -DBUILD_CONTENT_TOOLS=OFF \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: 编译 Engine 目标
         # pipefail + tee：完整日志落盘（供错误提取），保留失败退出码
@@ -349,8 +350,34 @@ jobs:
       - name: 提取编译错误
         if: failure()
         run: |
-          { grep -E '(fatal )?error:' build-linux.log 2>/dev/null; cat toolchain-probe.log 2>/dev/null; } \
-            > compile-errors-linux-${{ matrix.label }}.log \
+          { grep -E '(fatal )?error:' build-linux.log 2>/dev/null; cat toolchain-probe.log 2>/dev/null; \
+            echo '--- compile command of the first failing TU (for path/flag diagnosis) ---'; \
+            python3 - <<'PYEOF'
+          import json, re, glob, os
+          # 从构建日志提取第一个出错的项目源文件，输出其完整编译命令
+          cmd_file = 'build/compile_commands.json'
+          if not os.path.exists(cmd_file):
+              print('(no compile_commands.json)')
+          else:
+              src = None
+              for line in open('build-linux.log', errors='ignore'):
+                  m = re.search(r'([/\w.+\-]+\.(?:cpp|cc|c)):\d+:\d+:', line)
+                  if m and '/usr/' not in m.group(1) and 'include/c++' not in m.group(1):
+                      src = os.path.normpath(m.group(1))
+                      break
+              if not src:
+                  print('(no failing project TU identified in log)')
+              else:
+                  db = json.load(open(cmd_file))
+                  for e in db:
+                      if os.path.normpath(e['file']) == src:
+                          print('FILE:', e['file'])
+                          print('CMD :', e['command'][:2000])
+                          break
+                  else:
+                      print('(TU not found in compile_commands:', src, ')')
+          PYEOF
+          } > compile-errors-linux-${{ matrix.label }}.log 2>&1 \
             || echo '(no error lines found — configure/timeout failure?)' > compile-errors-linux-${{ matrix.label }}.log
           wc -l compile-errors-linux-${{ matrix.label }}.log
 

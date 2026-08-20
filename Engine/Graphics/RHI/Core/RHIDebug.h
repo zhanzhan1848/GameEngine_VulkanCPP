@@ -72,6 +72,22 @@ enum class DebugLevel : u8 {
  * @param function 函数名
  * @param message 消息内容
  */
+#include <cstdarg>
+#include <cstdio>
+
+/**
+ * @brief 变参日志格式化（供 RHI_* 日志宏使用）
+ * @note 宏内 snprintf(fmt, 逗号吞并扩展) 在 MSVC 传统预处理器下不生效
+ *       ——空参数调用（RHI_DEBUG("x")）会展开成 snprintf(buf, size, "x", )
+ *       产生 C2059。改为纯 __VA_ARGS__ 转发到本函数，两种预处理器下都正确。
+ */
+inline void FormatDebugMessage(char* buffer, size_t size, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, size, fmt, args);
+    va_end(args);
+}
+
 extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line, 
                               const char* function, const char* message);
 
@@ -93,11 +109,11 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
  * @param format 格式字符串（仅支持%s, %d, %u, %x, %f等基础格式）
  * @param ... 参数列表
  */
-#define RHI_TRACE(fmt, ...) \
+#define RHI_TRACE(...) \
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::TRACE)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
+            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::TRACE, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -105,11 +121,11 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
 /**
  * @brief DEBUG级别调试输出宏
  */
-#define RHI_DEBUG(fmt, ...) \
+#define RHI_DEBUG(...) \
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::DEBUG_LEVEL)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
+            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::DEBUG_LEVEL, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -117,11 +133,11 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
 /**
  * @brief INFO级别调试输出宏
  */
-#define RHI_INFO(fmt, ...) \
+#define RHI_INFO(...) \
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::INFO)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
+            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::INFO, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -129,11 +145,11 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
 /**
  * @brief WARN级别调试输出宏
  */
-#define RHI_WARN(fmt, ...) \
+#define RHI_WARN(...) \
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::WARN)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
+            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::WARN, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -141,11 +157,11 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
 /**
  * @brief ERROR级别调试输出宏
  */
-#define RHI_ERROR(fmt, ...) \
+#define RHI_ERROR(...) \
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::ERR)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
+            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::ERR, __FILE__, __LINE__, __FUNCTION__, buffer); \
         } \
     )
@@ -154,11 +170,11 @@ extern void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
  * @brief FATAL级别调试输出宏
  * @note 致命错误会终止程序执行
  */
-#define RHI_FATAL(fmt, ...) \
+#define RHI_FATAL(...) \
     DEBUG_OP( \
         if (RHI_SHOULD_LOG(DebugLevel::FATAL)) { \
             char buffer[RHI_DEBUG_BUFFER_SIZE]; \
-            snprintf(buffer, sizeof(buffer), fmt, ##__VA_ARGS__); \
+            FormatDebugMessage(buffer, sizeof(buffer), __VA_ARGS__); \
             OutputDebugMessage(DebugLevel::FATAL, __FILE__, __LINE__, __FUNCTION__, buffer); \
             assert(false && buffer); \
         } \

@@ -2,7 +2,9 @@
 #include "GraphicsPlatformInterface.h"
 #include "Direct3D12//D3D12Interface.h"
 #include "Vulkan/VulkanInterface.h"
+#if defined(__APPLE__)
 #include "Metal/MetalInterface.h"
+#endif
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #if defined(__APPLE__)
 #include "Metal/MetalCore.h"
@@ -52,9 +54,11 @@ namespace primal::graphics
 			case graphics_platform::vulkan_1:
 				vulkan::get_platform_interface(gfx);
 				break;
+#if defined(__APPLE__)
 			case graphics_platform::metal:
 				metal::get_platform_interface(gfx);
 				break;
+#endif
 			default:
 				return false;
 			}

@@ -3,7 +3,9 @@
 #include "GraphicsPlatformInterface.h"
 #include "Direct3D12/D3D12Interface.h"
 #include "Vulkan/VulkanInterface.h"
+#if defined(__APPLE__)
 #include "Metal/MetalInterface.h"
+#endif
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Dawn/DawnInterface.h"
@@ -28,9 +30,11 @@ set_platform_interface(graphics_platform platform, platform_interface& pi)
         vulkan::get_platform_interface(pi);
         break;
 #endif
+#if defined(__APPLE__)
     case graphics_platform::metal:
         metal::get_platform_interface(pi);
         break;
+#endif
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
     case graphics_platform::dawn:
         dawn::get_platform_interface(pi);
