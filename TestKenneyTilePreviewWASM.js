@@ -981,12 +981,16 @@ async function createWasm() {
       }
     }
   
+  
+  var __Unwind_RaiseException = (ex) => {
+      assert(false, 'Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.');
+    };
   var ___cxa_throw = (ptr, type, destructor) => {
       var info = new ExceptionInfo(ptr);
       // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
       info.init(type, destructor);
       uncaughtExceptionCount++;
-      assert(false, 'Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.');
+      __Unwind_RaiseException(ptr);
     };
 
   var syscallGetVarargI = () => {
@@ -4527,10 +4531,6 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         return 1; // Return non-zero on failure, can't set timing mode when there is no main loop.
       }
   
-      if (!MainLoop.running) {
-        
-        MainLoop.running = true;
-      }
       if (mode == 0) {
         MainLoop.scheduler = function MainLoop_scheduler_setTimeout() {
           var timeUntilNextTick = Math.max(0, MainLoop.tickStartTime + value - _emscripten_get_now())|0;
@@ -4577,10 +4577,9 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       return 0;
     };
   var MainLoop = {
-  running:false,
+  func:null,
   scheduler:null,
   currentlyRunningMainloop:0,
-  func:null,
   arg:0,
   timingMode:0,
   timingValue:0,
@@ -4589,9 +4588,12 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   preMainLoop:[],
   postMainLoop:[],
   pause() {
-        MainLoop.scheduler = null;
-        // Incrementing this signals the previous main loop that it's now become old, and it must return.
-        MainLoop.currentlyRunningMainloop++;
+        if (MainLoop.scheduler) {
+          MainLoop.scheduler = null;
+          // Incrementing this signals the previous main loop that it's now become old, and it must return.
+          MainLoop.currentlyRunningMainloop++;
+          
+        }
       },
   resume() {
         MainLoop.currentlyRunningMainloop++;
@@ -4673,7 +4675,6 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       var thisMainLoopId = MainLoop.currentlyRunningMainloop;
       function checkIsRunning() {
         if (thisMainLoopId < MainLoop.currentlyRunningMainloop) {
-          
           maybeExit();
           return false;
         }
@@ -4682,10 +4683,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
       // We create the loop runner here but it is not actually running until
       // _emscripten_set_main_loop_timing is called (which might happen at a
-      // later time).  This member signifies that the current runner has not
-      // yet been started so that we can call runtimeKeepalivePush when it
-      // gets its timing set for the first time.
-      MainLoop.running = false;
+      // later time).
       MainLoop.runner = function MainLoop_runner() {
         if (ABORT) return;
         if (MainLoop.queue.length > 0) {
@@ -8006,6 +8004,12 @@ var _wfc_set_grid_h = Module['_wfc_set_grid_h'] = makeInvalidEarlyAccess('_wfc_s
 var _wfc_set_grid_d = Module['_wfc_set_grid_d'] = makeInvalidEarlyAccess('_wfc_set_grid_d');
 var _wfc_reseed_same = Module['_wfc_reseed_same'] = makeInvalidEarlyAccess('_wfc_reseed_same');
 var _wfc_reseed_new = Module['_wfc_reseed_new'] = makeInvalidEarlyAccess('_wfc_reseed_new');
+var _wfc_get_style_count = Module['_wfc_get_style_count'] = makeInvalidEarlyAccess('_wfc_get_style_count');
+var _wfc_get_style_name = Module['_wfc_get_style_name'] = makeInvalidEarlyAccess('_wfc_get_style_name');
+var _wfc_get_style_display_name = Module['_wfc_get_style_display_name'] = makeInvalidEarlyAccess('_wfc_get_style_display_name');
+var _wfc_get_active_style_count = Module['_wfc_get_active_style_count'] = makeInvalidEarlyAccess('_wfc_get_active_style_count');
+var _wfc_get_active_style = Module['_wfc_get_active_style'] = makeInvalidEarlyAccess('_wfc_get_active_style');
+var _wfc_compose = Module['_wfc_compose'] = makeInvalidEarlyAccess('_wfc_compose');
 var _wfc_get_observer = Module['_wfc_get_observer'] = makeInvalidEarlyAccess('_wfc_get_observer');
 var _wfc_get_origin = Module['_wfc_get_origin'] = makeInvalidEarlyAccess('_wfc_get_origin');
 var _wfc_get_grid_w = Module['_wfc_get_grid_w'] = makeInvalidEarlyAccess('_wfc_get_grid_w');
@@ -8070,6 +8074,7 @@ var dynCall_vif = makeInvalidEarlyAccess('dynCall_vif');
 var dynCall_iii = makeInvalidEarlyAccess('dynCall_iii');
 var dynCall_viiijij = makeInvalidEarlyAccess('dynCall_viiijij');
 var dynCall_iijii = makeInvalidEarlyAccess('dynCall_iijii');
+var dynCall_jii = makeInvalidEarlyAccess('dynCall_jii');
 var dynCall_vij = makeInvalidEarlyAccess('dynCall_vij');
 var dynCall_viiiii = makeInvalidEarlyAccess('dynCall_viiiii');
 var dynCall_vijij = makeInvalidEarlyAccess('dynCall_vijij');
@@ -8077,6 +8082,7 @@ var dynCall_viijiiiii = makeInvalidEarlyAccess('dynCall_viijiiiii');
 var dynCall_vijiiii = makeInvalidEarlyAccess('dynCall_vijiiii');
 var dynCall_viiii = makeInvalidEarlyAccess('dynCall_viiii');
 var dynCall_viji = makeInvalidEarlyAccess('dynCall_viji');
+var dynCall_vijii = makeInvalidEarlyAccess('dynCall_vijii');
 var dynCall_vijji = makeInvalidEarlyAccess('dynCall_vijji');
 var dynCall_vijj = makeInvalidEarlyAccess('dynCall_vijj');
 var dynCall_vijjjjj = makeInvalidEarlyAccess('dynCall_vijjjjj');
@@ -8086,7 +8092,6 @@ var dynCall_iijj = makeInvalidEarlyAccess('dynCall_iijj');
 var dynCall_iiijj = makeInvalidEarlyAccess('dynCall_iiijj');
 var dynCall_ji = makeInvalidEarlyAccess('dynCall_ji');
 var dynCall_iiji = makeInvalidEarlyAccess('dynCall_iiji');
-var dynCall_jii = makeInvalidEarlyAccess('dynCall_jii');
 var dynCall_jiiiii = makeInvalidEarlyAccess('dynCall_jiiiii');
 var dynCall_iijiiii = makeInvalidEarlyAccess('dynCall_iijiiii');
 var dynCall_iijjj = makeInvalidEarlyAccess('dynCall_iijjj');
@@ -8121,6 +8126,12 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['wfc_set_grid_d'] != 'undefined', 'missing Wasm export: wfc_set_grid_d');
   assert(typeof wasmExports['wfc_reseed_same'] != 'undefined', 'missing Wasm export: wfc_reseed_same');
   assert(typeof wasmExports['wfc_reseed_new'] != 'undefined', 'missing Wasm export: wfc_reseed_new');
+  assert(typeof wasmExports['wfc_get_style_count'] != 'undefined', 'missing Wasm export: wfc_get_style_count');
+  assert(typeof wasmExports['wfc_get_style_name'] != 'undefined', 'missing Wasm export: wfc_get_style_name');
+  assert(typeof wasmExports['wfc_get_style_display_name'] != 'undefined', 'missing Wasm export: wfc_get_style_display_name');
+  assert(typeof wasmExports['wfc_get_active_style_count'] != 'undefined', 'missing Wasm export: wfc_get_active_style_count');
+  assert(typeof wasmExports['wfc_get_active_style'] != 'undefined', 'missing Wasm export: wfc_get_active_style');
+  assert(typeof wasmExports['wfc_compose'] != 'undefined', 'missing Wasm export: wfc_compose');
   assert(typeof wasmExports['wfc_get_observer'] != 'undefined', 'missing Wasm export: wfc_get_observer');
   assert(typeof wasmExports['wfc_get_origin'] != 'undefined', 'missing Wasm export: wfc_get_origin');
   assert(typeof wasmExports['wfc_get_grid_w'] != 'undefined', 'missing Wasm export: wfc_get_grid_w');
@@ -8185,6 +8196,7 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['dynCall_iii'] != 'undefined', 'missing Wasm export: dynCall_iii');
   assert(typeof wasmExports['dynCall_viiijij'] != 'undefined', 'missing Wasm export: dynCall_viiijij');
   assert(typeof wasmExports['dynCall_iijii'] != 'undefined', 'missing Wasm export: dynCall_iijii');
+  assert(typeof wasmExports['dynCall_jii'] != 'undefined', 'missing Wasm export: dynCall_jii');
   assert(typeof wasmExports['dynCall_vij'] != 'undefined', 'missing Wasm export: dynCall_vij');
   assert(typeof wasmExports['dynCall_viiiii'] != 'undefined', 'missing Wasm export: dynCall_viiiii');
   assert(typeof wasmExports['dynCall_vijij'] != 'undefined', 'missing Wasm export: dynCall_vijij');
@@ -8192,6 +8204,7 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['dynCall_vijiiii'] != 'undefined', 'missing Wasm export: dynCall_vijiiii');
   assert(typeof wasmExports['dynCall_viiii'] != 'undefined', 'missing Wasm export: dynCall_viiii');
   assert(typeof wasmExports['dynCall_viji'] != 'undefined', 'missing Wasm export: dynCall_viji');
+  assert(typeof wasmExports['dynCall_vijii'] != 'undefined', 'missing Wasm export: dynCall_vijii');
   assert(typeof wasmExports['dynCall_vijji'] != 'undefined', 'missing Wasm export: dynCall_vijji');
   assert(typeof wasmExports['dynCall_vijj'] != 'undefined', 'missing Wasm export: dynCall_vijj');
   assert(typeof wasmExports['dynCall_vijjjjj'] != 'undefined', 'missing Wasm export: dynCall_vijjjjj');
@@ -8201,7 +8214,6 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['dynCall_iiijj'] != 'undefined', 'missing Wasm export: dynCall_iiijj');
   assert(typeof wasmExports['dynCall_ji'] != 'undefined', 'missing Wasm export: dynCall_ji');
   assert(typeof wasmExports['dynCall_iiji'] != 'undefined', 'missing Wasm export: dynCall_iiji');
-  assert(typeof wasmExports['dynCall_jii'] != 'undefined', 'missing Wasm export: dynCall_jii');
   assert(typeof wasmExports['dynCall_jiiiii'] != 'undefined', 'missing Wasm export: dynCall_jiiiii');
   assert(typeof wasmExports['dynCall_iijiiii'] != 'undefined', 'missing Wasm export: dynCall_iijiiii');
   assert(typeof wasmExports['dynCall_iijjj'] != 'undefined', 'missing Wasm export: dynCall_iijjj');
@@ -8232,6 +8244,12 @@ function assignWasmExports(wasmExports) {
   _wfc_set_grid_d = Module['_wfc_set_grid_d'] = createExportWrapper('wfc_set_grid_d', wasmExports['wfc_set_grid_d'], 1);
   _wfc_reseed_same = Module['_wfc_reseed_same'] = createExportWrapper('wfc_reseed_same', wasmExports['wfc_reseed_same'], 0);
   _wfc_reseed_new = Module['_wfc_reseed_new'] = createExportWrapper('wfc_reseed_new', wasmExports['wfc_reseed_new'], 0);
+  _wfc_get_style_count = Module['_wfc_get_style_count'] = createExportWrapper('wfc_get_style_count', wasmExports['wfc_get_style_count'], 0);
+  _wfc_get_style_name = Module['_wfc_get_style_name'] = createExportWrapper('wfc_get_style_name', wasmExports['wfc_get_style_name'], 1);
+  _wfc_get_style_display_name = Module['_wfc_get_style_display_name'] = createExportWrapper('wfc_get_style_display_name', wasmExports['wfc_get_style_display_name'], 1);
+  _wfc_get_active_style_count = Module['_wfc_get_active_style_count'] = createExportWrapper('wfc_get_active_style_count', wasmExports['wfc_get_active_style_count'], 0);
+  _wfc_get_active_style = Module['_wfc_get_active_style'] = createExportWrapper('wfc_get_active_style', wasmExports['wfc_get_active_style'], 1);
+  _wfc_compose = Module['_wfc_compose'] = createExportWrapper('wfc_compose', wasmExports['wfc_compose'], 2);
   _wfc_get_observer = Module['_wfc_get_observer'] = createExportWrapper('wfc_get_observer', wasmExports['wfc_get_observer'], 0);
   _wfc_get_origin = Module['_wfc_get_origin'] = createExportWrapper('wfc_get_origin', wasmExports['wfc_get_origin'], 0);
   _wfc_get_grid_w = Module['_wfc_get_grid_w'] = createExportWrapper('wfc_get_grid_w', wasmExports['wfc_get_grid_w'], 0);
@@ -8296,6 +8314,7 @@ function assignWasmExports(wasmExports) {
   dynCall_iii = dynCalls['iii'] = createExportWrapper('dynCall_iii', wasmExports['dynCall_iii'], 3);
   dynCall_viiijij = dynCalls['viiijij'] = createExportWrapper('dynCall_viiijij', wasmExports['dynCall_viiijij'], 7);
   dynCall_iijii = dynCalls['iijii'] = createExportWrapper('dynCall_iijii', wasmExports['dynCall_iijii'], 5);
+  dynCall_jii = dynCalls['jii'] = createExportWrapper('dynCall_jii', wasmExports['dynCall_jii'], 3);
   dynCall_vij = dynCalls['vij'] = createExportWrapper('dynCall_vij', wasmExports['dynCall_vij'], 3);
   dynCall_viiiii = dynCalls['viiiii'] = createExportWrapper('dynCall_viiiii', wasmExports['dynCall_viiiii'], 6);
   dynCall_vijij = dynCalls['vijij'] = createExportWrapper('dynCall_vijij', wasmExports['dynCall_vijij'], 5);
@@ -8303,6 +8322,7 @@ function assignWasmExports(wasmExports) {
   dynCall_vijiiii = dynCalls['vijiiii'] = createExportWrapper('dynCall_vijiiii', wasmExports['dynCall_vijiiii'], 7);
   dynCall_viiii = dynCalls['viiii'] = createExportWrapper('dynCall_viiii', wasmExports['dynCall_viiii'], 5);
   dynCall_viji = dynCalls['viji'] = createExportWrapper('dynCall_viji', wasmExports['dynCall_viji'], 4);
+  dynCall_vijii = dynCalls['vijii'] = createExportWrapper('dynCall_vijii', wasmExports['dynCall_vijii'], 5);
   dynCall_vijji = dynCalls['vijji'] = createExportWrapper('dynCall_vijji', wasmExports['dynCall_vijji'], 5);
   dynCall_vijj = dynCalls['vijj'] = createExportWrapper('dynCall_vijj', wasmExports['dynCall_vijj'], 4);
   dynCall_vijjjjj = dynCalls['vijjjjj'] = createExportWrapper('dynCall_vijjjjj', wasmExports['dynCall_vijjjjj'], 7);
@@ -8312,7 +8332,6 @@ function assignWasmExports(wasmExports) {
   dynCall_iiijj = dynCalls['iiijj'] = createExportWrapper('dynCall_iiijj', wasmExports['dynCall_iiijj'], 5);
   dynCall_ji = dynCalls['ji'] = createExportWrapper('dynCall_ji', wasmExports['dynCall_ji'], 2);
   dynCall_iiji = dynCalls['iiji'] = createExportWrapper('dynCall_iiji', wasmExports['dynCall_iiji'], 4);
-  dynCall_jii = dynCalls['jii'] = createExportWrapper('dynCall_jii', wasmExports['dynCall_jii'], 3);
   dynCall_jiiiii = dynCalls['jiiiii'] = createExportWrapper('dynCall_jiiiii', wasmExports['dynCall_jiiiii'], 6);
   dynCall_iijiiii = dynCalls['iijiiii'] = createExportWrapper('dynCall_iijiiii', wasmExports['dynCall_iijiiii'], 7);
   dynCall_iijjj = dynCalls['iijjj'] = createExportWrapper('dynCall_iijjj', wasmExports['dynCall_iijjj'], 5);
