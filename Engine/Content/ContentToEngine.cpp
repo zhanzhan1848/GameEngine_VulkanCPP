@@ -1124,14 +1124,10 @@ namespace primal::content
 	bool get_rhi_mesh_asset(id::id_type id, graphics::rhi::RHIMeshAsset& asset)
 	{
 		std::lock_guard lock{ rhi_mesh_mutex };
-		// Check if id is valid. free_list doesn't support direct existence check easily without potentially crashing if index is out of bounds?
-		// Assuming id is valid if passed here. But we can catch exceptions if free_list throws.
-		// Or simply assume the caller knows what they are doing.
-		// However, we should try to be safe.
-		// Since we don't have a simple 'contains' method for free_list without checking implementation,
-		// we will assume valid ID for now, or check against size if possible.
-		// But free_list reuses IDs.
-		// Let's just access it.
+		// 调用方可能传入未加载任何内容时的任意 id（如 NaniteResourceManager
+		// 在单测/无资产环境下直接 GetOrCreateResource）——必须先做槽位有效性
+		// 检查，否则 free_list::operator[] 在 Debug 断言、Release 越界读。
+		if (!rhi_mesh_assets.is_valid(id)) return false;
 		asset = rhi_mesh_assets[id];
 		return true;
 	}
@@ -1189,6 +1185,9 @@ namespace primal::content
     id::id_type get_rhi_mesh_id(id::id_type geometry_id)
     {
         std::lock_guard lock{ geometry_mutex };
+        // 同 get_rhi_mesh_asset：未注册的 geometry_id 必须安全返回 invalid_id，
+        // 不能直接 operator[]（Debug 断言 / Release 越界读）。
+        if (!geometry_hierarchies.is_valid(geometry_id)) return id::invalid_id;
         u8* const pointer{ geometry_hierarchies[geometry_id] };
         if ((uintptr_t)pointer & single_mesh_marker)
         {

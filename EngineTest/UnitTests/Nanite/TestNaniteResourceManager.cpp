@@ -6,8 +6,13 @@
 #include <vector>
 #include <atomic>
 #include <iostream>
+#include <cstring>
+#include <unordered_map>
+#include <vector>
+#include "Engine/Graphics/RHI/Core/RHIDevice.h"
 
 using namespace Engine::Test;
+using namespace primal::graphics;
 using namespace primal::graphics::nanite;
 using namespace primal::id;
 using Engine::Test::TestResult;
@@ -18,11 +23,74 @@ using primal::graphics::nanite::NaniteResourceManager;
 using primal::graphics::nanite::NaniteRuntimeResource;
 
 namespace {
+// 与 TestNaniteStreamingManager 相同的 Mock 模式：NaniteResourceManager 在
+// dev 上改为必须 Initialize(device) 才允许 GetOrCreateResource（device_ 门槛），
+// 单测无真实 GPU 设备，用空实现 mock 翻过门槛。
+class MockRHIDeviceForResourceManager : public primal::graphics::rhi::RHIDeviceBase {
+public:
+    rhi::DeviceInfo deviceInfo_;
+    bool valid_ = true;
+    rhi::RHIGarbageCollector gc_;
+
+    MockRHIDeviceForResourceManager() {
+        std::strncpy(deviceInfo_.deviceName, "MockResourceManagerDevice",
+                     sizeof(deviceInfo_.deviceName) - 1);
+    }
+    ~MockRHIDeviceForResourceManager() override = default;
+
+    bool IsValid() const override { return valid_; }
+    const rhi::DeviceInfo& GetDeviceInfo() const override { return deviceInfo_; }
+    const rhi::DeviceDesc& GetDesc() const override { static rhi::DeviceDesc desc; return desc; }
+    void WaitIdle() const override {}
+    void Shutdown() override { valid_ = false; }
+    bool Submit(const rhi::QueueSubmitInfo&) override { return true; }
+    rhi::SyncHandle CreateSync() override { return (rhi::SyncHandle)1; }
+    bool WaitForSync(rhi::SyncHandle, u32) override { return true; }
+    void DestroySync(rhi::SyncHandle) override {}
+    rhi::QueryPoolHandle CreateQueryPool(const rhi::QueryPoolDesc&) override { return rhi::handles::INVALID_QUERY_POOL; }
+    void DestroyQueryPool(rhi::QueryPoolHandle) override {}
+    bool GetQueryPoolResults(rhi::QueryPoolHandle, u32, u32, void*, size_t) override { return false; }
+    rhi::SamplerHandle CreateSampler(const rhi::SamplerDesc&) override { return (rhi::SamplerHandle)1; }
+    void DestroySampler(rhi::SamplerHandle) override {}
+    rhi::DescriptorSetLayoutHandle CreateDescriptorSetLayout(const rhi::DescriptorSetLayoutDesc&) override { return (rhi::DescriptorSetLayoutHandle)1; }
+    void DestroyDescriptorSetLayout(rhi::DescriptorSetLayoutHandle) override {}
+    rhi::PipelineLayoutHandle CreatePipelineLayout(const rhi::PipelineLayoutDesc&) override { return (rhi::PipelineLayoutHandle)1; }
+    void DestroyPipelineLayout(rhi::PipelineLayoutHandle) override {}
+    rhi::DescriptorSetHandle CreateDescriptorSet(const rhi::DescriptorSetDesc&) override { return (rhi::DescriptorSetHandle)1; }
+    void DestroyDescriptorSet(rhi::DescriptorSetHandle) override {}
+    void UpdateDescriptorSets(u32, const rhi::WriteDescriptorSet*) override {}
+    rhi::RHISwapChain* CreateSwapChain(const rhi::SwapChainDesc&) override { return nullptr; }
+    void DestroySwapChain(rhi::RHISwapChain*) override {}
+    rhi::ResourceHandle CreateBuffer(const rhi::BufferDesc&) override { return (rhi::ResourceHandle)1001; }
+    rhi::ResourceHandle CreateTexture(const rhi::TextureDesc&) override { return (rhi::ResourceHandle)1; }
+    rhi::ResourceHandle CreateTextureView(const rhi::TextureViewDesc&) override { return (rhi::ResourceHandle)1; }
+    rhi::ShaderHandle CreateShader(const void*, size_t, rhi::ShaderStage, const char*) override { return (rhi::ShaderHandle)1; }
+    rhi::PipelineHandle CreateGraphicsPipeline(const rhi::GraphicsPipelineDesc&) override { return (rhi::PipelineHandle)1; }
+    rhi::PipelineHandle CreateComputePipeline(const rhi::ComputePipelineDesc&) override { return (rhi::PipelineHandle)1; }
+    rhi::RenderPassHandle CreateRenderPass(const rhi::RenderPassDesc&) override { return rhi::handles::INVALID_RENDER_PASS; }
+    void DestroyRenderPass(rhi::RenderPassHandle) override {}
+    rhi::CommandBufferHandle CreateCommandBuffer(rhi::CommandQueueType) override { return rhi::handles::INVALID_COMMAND_BUFFER; }
+    void DestroyCommandBuffer(rhi::CommandBufferHandle) override {}
+    void DestroyBuffer(rhi::ResourceHandle) override {}
+    void DestroyTexture(rhi::ResourceHandle) override {}
+    void DestroyShader(rhi::ShaderHandle) override {}
+    void DestroyPipeline(rhi::PipelineHandle) override {}
+    void* MapBuffer(rhi::ResourceHandle, u64, u64) override { return nullptr; }
+    void UnmapBuffer(rhi::ResourceHandle) override {}
+    double GetTimestampPeriod() const override { return 1.0; }
+    rhi::RHIGarbageCollector& GetGarbageCollector() override { return gc_; }
+    void SetBufferDirtySize(rhi::ResourceHandle, u64) override {}
+    rhi::RHIPlatform GetPlatform() const override { return rhi::RHIPlatform::Unknown; }
+};
+
+MockRHIDeviceForResourceManager g_mockDevice;
+
 
 TestResult TestReferenceCountBasic() {
     auto& manager = NaniteResourceManager::Get();
     
     manager.Shutdown();
+    manager.Initialize(&g_mockDevice);
     
     const id_type test_geometry_id = 1;
     
@@ -52,6 +120,7 @@ TestResult TestReferenceCountMultiInstance() {
     auto& manager = NaniteResourceManager::Get();
     
     manager.Shutdown();
+    manager.Initialize(&g_mockDevice);
     
     const id_type geometry_id = 100;
     
@@ -79,6 +148,7 @@ TestResult TestReferenceCountThreadSafety() {
     auto& manager = NaniteResourceManager::Get();
     
     manager.Shutdown();
+    manager.Initialize(&g_mockDevice);
     
     const id_type geometry_id = 200;
     constexpr u32 num_threads = 8;
@@ -179,6 +249,7 @@ TestResult TestInvalidGeometryIdHandling() {
     auto& manager = NaniteResourceManager::Get();
     
     manager.Shutdown();
+    manager.Initialize(&g_mockDevice);
     
     manager.AddGeometryRef(primal::id::invalid_id);
     
@@ -197,6 +268,7 @@ TestResult TestIntegration1000InstancesShareOneResource() {
     auto& manager = NaniteResourceManager::Get();
     
     manager.Shutdown();
+    manager.Initialize(&g_mockDevice);
     
     constexpr id_type shared_geometry_id = 1000;
     
