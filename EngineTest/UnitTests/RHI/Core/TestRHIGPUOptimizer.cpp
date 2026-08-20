@@ -21,6 +21,7 @@ using namespace primal::graphics::rhi;
 // === Mock设备类用于测试 ===
 
 class MockRHIDevice : public RHIDevice<MockRHIDevice> {
+
 public:
     MockRHIDevice() : RHIDevice<MockRHIDevice>(DeviceDesc{}), currentMemoryUsage_(0) {
         // 初始化设备
@@ -33,6 +34,12 @@ public:
     u64 GetCurrentMemoryUsage() const { return currentMemoryUsage_; }
     
     // === CRTP实现方法 ===
+    // stale-test port: Impl hooks added to the RHIDevice CRTP base after the Dawn era
+    void beginFrameImpl() {}
+    void endFrameImpl() {}
+    ResourceHandle createTextureViewImpl(const TextureViewDesc&) { return handles::INVALID_RESOURCE; }
+    void setBufferDirtySizeImpl(ResourceHandle, u64) {}
+
     bool initializeImpl() { return true; }
     void queryDeviceInfo(DeviceInfo& info) { 
         memset(&info, 0, sizeof(info)); 

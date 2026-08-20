@@ -1,6 +1,9 @@
 
-#include "Graphics/RenderGraph/RenderGraph.h"
+// stale-test port: Metal headers must come first — RenderGraphDefinitions.h opens a
+// global `using namespace rhi`, which clashes with ::Rect from MacTypes.h (pulled in
+// by MetalCommon.h) if RenderGraph.h is included before the Metal chain.
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "../../TestFramework.h"
 #include <thread>
@@ -82,7 +85,7 @@ TestResult TestRenderGraphTimestampIntegration() {
                     colorAtt.texture = data.output;
                     colorAtt.loadOp = LoadAction::Clear;
                     colorAtt.storeOp = StoreAction::Store;
-                    colorAtt.clearColor = {0.0f, 1.0f, 0.0f, 1.0f};
+                    colorAtt.clearColor = ClearValue{primal::math::v4{0.0f, 1.0f, 0.0f, 1.0f}};
                     rgDesc.colors.push_back(colorAtt);
                     
                     builder.DeclareRenderPass(rgDesc);

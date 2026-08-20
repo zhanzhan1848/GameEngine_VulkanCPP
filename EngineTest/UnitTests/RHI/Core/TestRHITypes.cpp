@@ -294,7 +294,7 @@ bool TestStructs() {
     TEST_ASSERT_EQ(texDesc.binding, ResourceBinding::None, "TextureDesc默认binding应该为None");
     
     // 测试BufferDesc结构体
-    BufferDesc bufDesc;
+    BufferDesc bufDesc{};
     TEST_ASSERT_EQ(bufDesc.sizeInBytes, 0, "BufferDesc默认sizeInBytes应该为0");
     TEST_ASSERT_EQ(bufDesc.usage, ResourceUsage::Default, "BufferDesc默认usage应该为Default");
     TEST_ASSERT_EQ(bufDesc.binding, ResourceBinding::None, "BufferDesc默认binding应该为None");
@@ -327,7 +327,7 @@ bool TestResourceTypes() {
     TEST_ASSERT_EQ(texture2D.binding, static_cast<ResourceBinding>(0x00000018), "纹理绑定应该为ShaderResource|RenderTarget");
     
     // 创建缓冲区描述
-    BufferDesc constantBuffer;
+    BufferDesc constantBuffer{};
     constantBuffer.sizeInBytes = 256;
     constantBuffer.usage = ResourceUsage::Dynamic;
     constantBuffer.binding = ResourceBinding::ConstantBuffer;

@@ -45,7 +45,7 @@ private:
 
     TestResult TestUniformBufferBinding() {
         // 1. 创建 Uniform Buffer
-        BufferDesc bufDesc;
+        BufferDesc bufDesc{};
         bufDesc.size = 256;
         bufDesc.type = BufferType::Constant;
         bufDesc.usage = GPUMemoryUsage::Dynamic;
@@ -139,7 +139,7 @@ private:
 
     TestResult TestMultiStageBinding() {
         // 1. 创建资源
-        BufferDesc bufDesc;
+        BufferDesc bufDesc{};
         bufDesc.size = 256;
         bufDesc.type = BufferType::Constant;
         bufDesc.usage = GPUMemoryUsage::Dynamic;
@@ -230,7 +230,7 @@ private:
 
     TestResult TestMultiThreadedBinding() {
         // 1. 准备公共资源
-        BufferDesc bufDesc;
+        BufferDesc bufDesc{};
         bufDesc.size = 256;
         bufDesc.type = BufferType::Constant;
         bufDesc.usage = GPUMemoryUsage::Dynamic;

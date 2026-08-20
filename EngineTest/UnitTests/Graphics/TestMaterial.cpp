@@ -157,6 +157,11 @@ public:
         static RHIGarbageCollector gc;
         return gc;
     }
+
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    ResourceHandle CreateTextureView(const TextureViewDesc&) override { return handles::INVALID_RESOURCE; }
+    void SetBufferDirtySize(ResourceHandle, u64) override {}
+    RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
 };
 
 // --- Tests ---

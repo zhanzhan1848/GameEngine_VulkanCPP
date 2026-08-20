@@ -77,7 +77,7 @@ int main() {
         passDesc.colorAttachments[0].texture = texture;
         passDesc.colorAttachments[0].loadOp = LoadAction::Clear;
         passDesc.colorAttachments[0].storeOp = StoreAction::Store;
-        passDesc.colorAttachments[0].clearValue = {0.0f, 0.0f, 0.0f, 1.0f};
+        passDesc.colorAttachments[0].clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
         
         // Enable Timestamp
         passDesc.enableTimestamp = true;

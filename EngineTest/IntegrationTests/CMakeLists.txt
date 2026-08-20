@@ -86,23 +86,34 @@ function(setup_test_target target_name)
 
     target_link_libraries(${target_name} PRIVATE Engine ContentTools)
     
-    # 复制着色器和资源文件
-    add_custom_command(TARGET ${target_name} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
-        $<TARGET_FILE_DIR:${target_name}>/shaders
-    )
-    add_custom_command(TARGET ${target_name} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/../assets
-        $<TARGET_FILE_DIR:${target_name}>/assets
-    )
+    # stale-test port: per-target POST_BUILD copies of shaders/assets into the shared
+    # Darwin/Debug output raced under `ninja -j` ("Error copying directory ... No such
+    # file or directory"). All integration targets share that output dir, so a single
+    # stamp-based copy target replaces them.
+    add_dependencies(${target_name} IntegrationTestsAssetsCopy)
     
     # 注册测试 (使用 Engine_Integration_Tests_ 前缀以便被 run_integration_tests 目标捕获)
     add_test(NAME Engine_Integration_Tests_${target_name} COMMAND ${target_name})
 endfunction()
 
 enable_testing()
+
+# stale-test port: one-time (per build) copy of shaders/assets into the shared
+# Darwin/Debug output directory used by every integration test target.
+set(ITEST_ASSETS_STAMP ${CMAKE_BINARY_DIR}/IntegrationTestsAssetsCopy.stamp)
+add_custom_command(OUTPUT ${ITEST_ASSETS_STAMP}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+        ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../assets
+        ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/assets
+    COMMAND ${CMAKE_COMMAND} -E touch ${ITEST_ASSETS_STAMP}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../shaders ${CMAKE_CURRENT_SOURCE_DIR}/../assets
+    COMMENT "Copying EngineTest shaders/assets to output directory"
+    VERBATIM
+)
+add_custom_target(IntegrationTestsAssetsCopy DEPENDS ${ITEST_ASSETS_STAMP})
 
 # 所有平台的集成测试源码（RenderItem/ShaderCompilation 等）都调用 ContentTools API，
 # BUILD_CONTENT_TOOLS=OFF 时（如无 FBX SDK 的 CI runner）整体跳过，
@@ -131,6 +142,9 @@ if(APPLE)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestMetalRenderer)
+    # stale-test port: TestMetalRenderer.cpp implements Engine_Test from TestRenderer.h;
+    # without a TEST_* define Main.cpp hits its #error guard.
+    target_compile_definitions(TestMetalRenderer PRIVATE "TEST_RENDERER=1")
 
     # 3. TestCSMIntegration
     add_executable(TestCSMIntegration
@@ -140,6 +154,8 @@ if(APPLE)
         ${COMMON_HEADERS}
     )
     setup_test_target(TestCSMIntegration)
+    # stale-test port: missing test-selection define made Main.cpp hit its #error guard.
+    target_compile_definitions(TestCSMIntegration PRIVATE "TEST_CSM_INTEGRATION=1" "TEST_RENDERER=0")
 
     # 4. TestStandardPipeline
     add_executable(TestStandardPipeline

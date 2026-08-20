@@ -9,6 +9,12 @@
 #include "Graphics/RHI/Core/RHISwapChain.h"
 #include "Graphics/RenderMesh.h"
 #include "Common/Id.h"
+// stale-test port: the render loop resolves proxies through the ECS transform
+// registry (SceneExtractionSystem::QueryDirtyTransforms →
+// transform::get_updated_components_flags), so proxies must carry a real
+// entity id — fabricated ids fail the entity.is_valid() assert.
+#include "Components/Entity.h"
+#include "Components/Transform.h"
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -84,6 +90,11 @@ public:
     void BindComputePipeline(PipelineHandle) override {}
 
     void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
+
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    void PushConstants(PipelineLayoutHandle, ShaderStage, uint32_t, uint32_t, const void*) override {}
+    void SetComputeBytes(uint32_t, const void*, uint32_t) override {}
+    void MemoryBarrier(PipelineStage, PipelineStage, AccessFlag, AccessFlag) override {}
 
     // Tracking flags
     bool drawCalled = false;
@@ -228,6 +239,11 @@ public:
     void destroyTextureImpl(ResourceHandle) {}
     void destroyShaderImpl(ShaderHandle) {}
     void destroyPipelineImpl(PipelineHandle) {}
+
+    // stale-test port: Impl hooks added to the RHIDevice CRTP base after the Dawn era
+    ResourceHandle createTextureViewImpl(const TextureViewDesc&) { return handles::INVALID_RESOURCE; }
+    void setBufferDirtySizeImpl(ResourceHandle, u64) {}
+    u32 getCurrentFrameIndexImpl() const { return 0; }
     
     // void* mapBufferImpl(ResourceHandle, u64, u64) { return nullptr; } // Removed as it is now implemented above
     // void unmapBufferImpl(ResourceHandle) {} // Removed as it is now implemented above
@@ -293,17 +309,30 @@ TestResult TestRenderSystemRender() {
     
     // Register Material
     primal::id::id_type materialId = (primal::id::id_type)300;
-    system.RegisterMaterialInstance(materialId, &materialInstance);
+    // stale-test port: RegisterMaterialInstance now owns via shared_ptr
+    system.RegisterMaterialInstance(materialId, std::make_shared<MaterialInstance>(&material));
     
     // Add proxy pointing to this mesh
-    RenderProxy proxy = RenderProxy::Create((primal::id::id_type)200, meshEntityId, materialId);
+    // stale-test port: create a real ECS entity (identity transform) instead
+    // of a fabricated id — QueryDirtyTransforms indexes the transform
+    // component registry with the proxy's entity id and asserts validity.
+    primal::transform::init_info tfInfo{};
+    tfInfo.rotation[3] = 1.0f;  // identity quaternion {x,y,z,w}
+    primal::game_entity::entity_info entInfo{};
+    entInfo.transform = &tfInfo;
+    primal::game_entity::entity renderEntity = primal::game_entity::create(entInfo);
+    if (!renderEntity.is_valid()) {
+        return TestResult::Failed;
+    }
+    RenderProxy proxy = RenderProxy::Create(renderEntity.get_id(), meshEntityId, materialId);
     scene.AddProxy(proxy);
     std::cout << "TestRenderSystem: Proxy Added" << std::endl;
-    
+
     // Render
     // This should not crash and should internally cull and iterate
     system.Render(scene, view);
     std::cout << "TestRenderSystem: Render Completed" << std::endl;
+    primal::game_entity::remove(renderEntity.get_id());
     
     // Verify command buffer calls
     if (mockDevice.mockCmdBuffer) {

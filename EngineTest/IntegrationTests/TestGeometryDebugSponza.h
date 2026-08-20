@@ -57,7 +57,7 @@ private:
     // Scene Assets
     primal::graphics::RenderScene scene;
     primal::graphics::RenderView view;
-    std::vector<primal::graphics::SceneDataMeshInfo> sceneMeshes;
+    primal::utl::vector<primal::graphics::SceneDataMeshInfo> sceneMeshes; // stale-test port: LoadRenderItemData returns utl::vector
     
     // Shader Management
     std::unordered_map<std::string, primal::graphics::rhi::ShaderHandle, StringHash> shaderVariantMap;
@@ -152,7 +152,7 @@ private:
     
     // Async loading state
     std::unordered_map<std::string, primal::graphics::rhi::ResourceHandle> _asyncTextureMap;
-    std::vector<std::string> _pendingTexturePaths;
+    primal::utl::vector<std::string> _pendingTexturePaths; // stale-test port: LoadTexturesAsync takes utl::vector
     std::atomic<bool> _asyncTexturesLoaded{false};
     std::atomic<u32> _asyncTexturesLoadedCount{0};
     std::atomic<u32> _asyncTexturesTotalCount{0};

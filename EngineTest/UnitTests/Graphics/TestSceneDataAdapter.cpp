@@ -4,6 +4,9 @@
 #include "Graphics/RHI/Core/RHIResource.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RenderMesh.h"
+// LoadRenderItemData registers meshes in the Content-layer static free_list
+// registry; drain it before exit or ~free_list asserts !_size at teardown.
+#include "Content/ContentToEngine.h"
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -60,6 +63,9 @@ protected:
     void GenerateMipmaps(ResourceHandle) override {}
     void InsertBarrier(const ResourceBarrier*, uint32_t) override {}
     void WriteTimestamp(QueryPoolHandle, uint32_t) override {}
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    void SetComputeBytes(uint32_t, const void*, uint32_t) override {}
+    void MemoryBarrier(PipelineStage, PipelineStage, AccessFlag, AccessFlag) override {}
 };
 
 class MockDevice : public RHIDeviceBase {
@@ -131,6 +137,9 @@ public:
     void* MapBuffer(ResourceHandle, u64, u64) override { return nullptr; }
     void UnmapBuffer(ResourceHandle) override {}
     RHIGarbageCollector& GetGarbageCollector() override { static RHIGarbageCollector gc; return gc; }
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    void SetBufferDirtySize(ResourceHandle, u64) override {}
+    RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
     
     CommandBufferHandle CreateCommandBuffer(CommandQueueType) override { return reinterpret_cast<CommandBufferHandle>(new MockCommandBuffer(*this)); }
     void DestroyCommandBuffer(CommandBufferHandle cmd) override { delete reinterpret_cast<MockCommandBuffer*>(cmd); }
@@ -356,14 +365,31 @@ public:
         MockDevice device;
         SceneDataAdapter adapter;
 
-        // Construct Mock Data following MeshCPU.cpp format (Writer)
-        // 1. lod_count (u32)
-        // 2. thresholds (f32 * lod_count)
-        // 3. lod_offsets (lod_offset * lod_count)
-        // 4. LOD Blocks...
-        
+        // Construct Mock Data following the CURRENT MeshCPU/SceneDataAdapter
+        // reader format:
+        // 1. [u32 num_materials] × { [u32 name_len][name]
+        //                            [u32 diff_len][diffuse]
+        //                            [u32 norm_len][normal] }   (3-field variant)
+        // 2. lod_count (u32)
+        // 3. thresholds (f32 * lod_count)
+        // 4. lod_offsets (lod_offset * lod_count)
+        // 5. LOD Blocks...
+        // stale-test port: the reader gained a material table header after the
+        // Dawn era — without it the first threshold float gets parsed as a
+        // material-name length (0.5f → 1056964608 → "Name too long").
         std::vector<uint8_t> data;
-        
+
+        auto WriteStr = [this, &data](const char* s) {
+            uint32_t len = (uint32_t)strlen(s);
+            Write<uint32_t>(data, len);
+            for (uint32_t i = 0; i < len; ++i) Write<uint8_t>(data, (uint8_t)s[i]);
+        };
+
+        Write<uint32_t>(data, 1);   // num_materials
+        WriteStr("mock_material");
+        WriteStr("");               // diffuse path
+        WriteStr("");               // normal path
+
         uint32_t lodCount = 1;
         Write<uint32_t>(data, lodCount);
         
@@ -372,7 +398,11 @@ public:
         
         // LOD Offsets
         struct lod_offset { uint16_t offset; uint16_t count; };
-        lod_offset lo { 0, 1 };
+        // count=0: the packed u32 {0,0}=0x00000000 stays outside the pipeline-
+        // format probe range (50,500000) — {0,1}=0x00010000=65536 would be
+        // misdetected as a pipeline mesh_count. The value is unused by the
+        // reader (the array is skipped wholesale).
+        lod_offset lo { 0, 0 };
         Write<uint16_t>(data, lo.offset);
         Write<uint16_t>(data, lo.count);
         
@@ -385,13 +415,17 @@ public:
         Write<uint32_t>(data, 0);
         size_t submeshStart = data.size();
         
-        // Submesh 0
+        // Submesh 0 — old (MeshCPU) submesh header is SIX u32s: the reader
+        // treats the first as materialIndex, then elementSize/vertexCount/
+        // indexCount/elementsType/primitiveTopology.
+        uint32_t materialIndex = 0;
         uint32_t elementSize = 0; // Position only
         uint32_t vertexCount = 1;
         uint32_t indexCount = 3;
         uint32_t elementsType = 0;
         uint32_t primitiveTopology = 4; // Triangle List
-        
+
+        Write<uint32_t>(data, materialIndex);
         Write<uint32_t>(data, elementSize);
         Write<uint32_t>(data, vertexCount);
         Write<uint32_t>(data, indexCount);
@@ -439,6 +473,10 @@ int main() {
         std::cerr << "LoadRenderItemData_Matches_MeshCPU_Format Failed" << std::endl;
         result = 1;
     }
-    
+
+    // LoadRenderItemData registers meshes in the Content-layer static
+    // free_list<RHIMeshAsset> registry; drain before exit or the static
+    // destructor asserts !_size (FreeList.h:27).
+    primal::content::shutdown();
     return result;
 }

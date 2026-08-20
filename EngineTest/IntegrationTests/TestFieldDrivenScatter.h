@@ -1,5 +1,12 @@
 #pragma once
 
+// stale-test port: Apple headers must come first — the PCG/RHI include chain below
+// pulls in rhi::Rect, which clashes with ::Rect from MacTypes.h (via AppKit) if the
+// AppKit chain is included afterwards.
+#ifdef __APPLE__
+#include <AppKit/AppKit.hpp>
+#endif
+
 #include "Test.h"
 #include "Engine/Geometry/Geometry.h"
 #include "Engine/Geometry/GeometryFieldRasterizer.h"
@@ -12,10 +19,6 @@
 #include "Engine/Graphics/PCG/Nodes/FieldScatterNode.h"
 #include "Engine/Graphics/PCG/Nodes/TransformNode.h"
 #include "Engine/Graphics/PCG/Nodes/MeshAssignNode.h"
-
-#ifdef __APPLE__
-#include <AppKit/AppKit.hpp>
-#endif
 
 #include <iostream>
 #include <cassert>

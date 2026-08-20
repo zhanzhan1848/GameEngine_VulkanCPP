@@ -7,6 +7,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 设置测试输出目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
 
+
+# ======================
+# Shared test-assets copy (stale-test port)
+# Previously ~28 targets each ran an identical POST_BUILD copy_directory into the
+# same destination; under `ninja -j` those copies raced and failed with
+# "Error copying directory ... No such file or directory". A stamp-based custom
+# target runs the copy exactly once and all test targets depend on it.
+# ======================
+set(UNITTEST_ASSETS_STAMP ${CMAKE_BINARY_DIR}/Tests/UnitTests/assets_copy.stamp)
+add_custom_command(OUTPUT ${UNITTEST_ASSETS_STAMP}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/EngineTest/assets
+            ${CMAKE_BINARY_DIR}/Tests/UnitTests/Assets
+    COMMAND ${CMAKE_COMMAND} -E touch ${UNITTEST_ASSETS_STAMP}
+    DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/assets
+    COMMENT "Copying EngineTest/assets to Tests/UnitTests/Assets"
+    VERBATIM
+)
+add_custom_target(UnitTestAssetsCopy DEPENDS ${UNITTEST_ASSETS_STAMP})
+
 # ======================
 # 独立RHI测试目标 - 不依赖任何外部库
 # ======================
@@ -129,11 +149,8 @@ if(ENABLE_VULKAN)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
     # Test reads "Assets/Shaders/SPIRV/*.spv" relative to its CWD — copy next to the binary.
-    add_custom_command(TARGET TestVulkanTriangle POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanTriangle>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanTriangle UnitTestAssetsCopy)
 
     # Phase 5: PushConstants + Shader HotReload
     add_executable(TestVulkanPushConstants RHI/Core/TestVulkanPushConstants.cpp)
@@ -148,11 +165,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanPushConstants PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanPushConstants POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanPushConstants>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanPushConstants UnitTestAssetsCopy)
 
     # Phase 6: UBO DescriptorSet binding
     add_executable(TestVulkanDescriptorSet RHI/Core/TestVulkanDescriptorSet.cpp)
@@ -167,11 +181,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanDescriptorSet PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanDescriptorSet POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanDescriptorSet>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanDescriptorSet UnitTestAssetsCopy)
 
     # Phase 4b-T2.4: Vulkan raw RHI PBR parity test.
     # Renders sphere via SimplePBR.{vert,frag}.spv → 64×64 RGBA16F RT →
@@ -194,11 +205,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanSimplePBR PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanSimplePBR POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanSimplePBR>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanSimplePBR UnitTestAssetsCopy)
 
     # Phase 6: Rapid create/destroy stress (GC + free_list correctness)
     add_executable(TestVulkanStress RHI/Core/TestVulkanStress.cpp)
@@ -213,11 +221,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanStress PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanStress POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanStress>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanStress UnitTestAssetsCopy)
 
     # Phase 4b: SwapChain acquire/present end-to-end (uses platform window)
     # P4c-F2: + ResizeRecovery(自动重建 + 双 pass SSIM 对照,用 ImageCompare)
@@ -239,11 +244,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanSwapChain PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanSwapChain POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanSwapChain>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanSwapChain UnitTestAssetsCopy)
 
     # P4c-F1: DataFormat mapping parity — static traversal + per-format texture
     # creation + int roundtrip + gradient render + D16 DepthPrePass.
@@ -264,11 +266,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanFormatParity PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanFormatParity POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanFormatParity>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanFormatParity UnitTestAssetsCopy)
 
     # P4c-F3: texture updateData/Map — checkerboard exact sampling, progressive
     # subrect, no-clobber, map semantics.
@@ -289,11 +288,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanTextureUpdate PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanTextureUpdate POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanTextureUpdate>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanTextureUpdate UnitTestAssetsCopy)
 
     # P4c-F4: staging upload queue — 300-frame rolling churn, overflow fallback,
     # FlushBlocking without frame context.
@@ -333,11 +329,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanLayeredRendering PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanLayeredRendering POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanLayeredRendering>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanLayeredRendering UnitTestAssetsCopy)
 
     # P4c-F6: SetComputeBytes >128B implicit-UBO fallback.
     add_executable(TestVulkanComputeBytesLarge
@@ -357,11 +350,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanComputeBytesLarge PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanComputeBytesLarge POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanComputeBytesLarge>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanComputeBytesLarge UnitTestAssetsCopy)
 
     # P4c-F7: secondary command buffers — same-commands parity, multi-count,
     # contract rejects, GC churn.
@@ -382,11 +372,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanSecondaryCommandBuffer PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanSecondaryCommandBuffer POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanSecondaryCommandBuffer>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanSecondaryCommandBuffer UnitTestAssetsCopy)
 
     # Phase 4b-T3.0: D32_FLOAT aspect mask end-to-end (staging → tex → readback).
     add_executable(TestVulkanDepthAspect RHI/Core/TestVulkanDepthAspect.cpp)
@@ -420,11 +407,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanDepthPrePass PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanDepthPrePass POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanDepthPrePass>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanDepthPrePass UnitTestAssetsCopy)
 
     # Phase 4b-T3.2: ShadowPass + CSM (ShadowDepth.wgsl + 4-layer D32 2D-array).
     # Renders sphere to 4 cascades of a D32 2D-array RT with same light VP, reads
@@ -446,11 +430,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanShadowPass PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanShadowPass POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanShadowPass>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanShadowPass UnitTestAssetsCopy)
 
     # Phase 4b-T3.3: BlurPass VSM (compute, 5-tap separable Gaussian).
     # Dispatches BlurPass.spv on 32×32 RGBA16F pattern, compares against
@@ -472,11 +453,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanBlurPass PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanBlurPass POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanBlurPass>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanBlurPass UnitTestAssetsCopy)
 
     # Phase 4b-T3.4: ToneMap (ACES + gamma, full-screen triangle).
     # Renders HDR gradient via ToneMapping.spv (multi-entry-point SPIR-V),
@@ -498,11 +476,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanToneMap PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanToneMap POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanToneMap>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanToneMap UnitTestAssetsCopy)
 
     # TAA: two-frame accumulation through the real PostProcess::AddTAAPass +
     # RenderGraph path. Frame 0 = passthrough (alpha=1), frame 1 = exact
@@ -570,11 +545,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanBloom PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanBloom POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanBloom>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanBloom UnitTestAssetsCopy)
 
     # Phase 4b-T3.5a: IBL BRDF Integration LUT (compute, no input).
     # 1024-sample Hammersley integration; CPU reference comparison.
@@ -595,11 +567,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanIBL_BRDFLUT PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanIBL_BRDFLUT POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanIBL_BRDFLUT>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanIBL_BRDFLUT UnitTestAssetsCopy)
 
     # Phase 4b-T4.0: production IBLPrecomputer path on Vulkan (smoke).
     # Validates T4.0.4 SPIR-V branch — IBLPrecomputer loads .spv via
@@ -621,11 +590,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanIBLPrecomputer PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanIBLPrecomputer POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanIBLPrecomputer>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanIBLPrecomputer UnitTestAssetsCopy)
 
     # Phase 4b-T4.2: production ForwardRenderer end-to-end smoke test on Vulkan.
     # Validates T4.1 bypassProd gating — ForwardRenderer::Initialize creates
@@ -756,11 +722,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanIBL_Equirect PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanIBL_Equirect POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanIBL_Equirect>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanIBL_Equirect UnitTestAssetsCopy)
 
     # Phase 4b-T3.5c: IBL Irradiance Convolution + Specular Prefilter (compute).
     add_executable(TestVulkanIBL_IrradiancePrefilter
@@ -780,11 +743,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanIBL_IrradiancePrefilter PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanIBL_IrradiancePrefilter POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanIBL_IrradiancePrefilter>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanIBL_IrradiancePrefilter UnitTestAssetsCopy)
 
     # Phase 4b-T3.6: SSR Pass placeholder (compute, multi-texture + mat4 UBO).
     add_executable(TestVulkanSSRPass
@@ -804,11 +764,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanSSRPass PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanSSRPass POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanSSRPass>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanSSRPass UnitTestAssetsCopy)
 
     # Phase 4b-T3.6: SSR Composite (Fresnel-weighted additive blend with SSR).
     add_executable(TestVulkanSSRComposite
@@ -828,11 +785,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanSSRComposite PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanSSRComposite POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanSSRComposite>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanSSRComposite UnitTestAssetsCopy)
 
     # Phase 4b-T3.6: SSR Trace smoke test (HZB ray march; finite-output check).
     add_executable(TestVulkanSSRTrace
@@ -852,11 +806,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanSSRTrace PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanSSRTrace POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanSSRTrace>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanSSRTrace UnitTestAssetsCopy)
 
     # Phase 4b-T3.7: ForwardPBR_Lite — ForwardLightBuffer (25808B) layout validation.
     add_executable(TestVulkanForwardPBR_Lite
@@ -876,11 +827,8 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanForwardPBR_Lite PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanForwardPBR_Lite POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestVulkanForwardPBR_Lite>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestVulkanForwardPBR_Lite UnitTestAssetsCopy)
 endif()
 
 # Phase 4b-T2.0: ImageCompare utility (PNG save/load + Wang-Bovik SSIM).
@@ -987,6 +935,9 @@ target_include_directories(StandaloneRHI_ShadowUtils_Test PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
 target_compile_definitions(StandaloneRHI_ShadowUtils_Test PRIVATE DEBUG _DEBUG)
+# stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
+# not covered by the hand-picked file list; link Engine for the remainder.
+target_link_libraries(StandaloneRHI_ShadowUtils_Test PRIVATE Engine)
 
 # 创建 Spherical Harmonics 测试
 add_executable(TestSphericalHarmonics Graphics/TestSphericalHarmonics.cpp)
@@ -1344,11 +1295,8 @@ if(APPLE)
     set_target_properties(TestMetalDepthPrePass PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestMetalDepthPrePass POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestMetalDepthPrePass>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestMetalDepthPrePass UnitTestAssetsCopy)
 
     # P4c: Metal-side reference frame generator for the F1-F7 cross-backend
     # SSIM acceptance (mirrors the Vulkan P4c tests' deterministic scenes).
@@ -1375,11 +1323,8 @@ if(APPLE)
     set_target_properties(TestMetalP4cReferences PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestMetalP4cReferences POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestMetalP4cReferences>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestMetalP4cReferences UnitTestAssetsCopy)
 
     # P4c §4: ForwardRenderer integration frame-time twin (Metal side) for the
     # ±5% cross-backend performance gate.
@@ -1429,11 +1374,8 @@ if(APPLE)
     set_target_properties(TestMetalShadowPass PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestMetalShadowPass POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestMetalShadowPass>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestMetalShadowPass UnitTestAssetsCopy)
 
     # T3.4: Metal reference generator for ToneMap parity (ACES + gamma).
     add_executable(TestMetalToneMap
@@ -1459,11 +1401,8 @@ if(APPLE)
     set_target_properties(TestMetalToneMap PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestMetalToneMap POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/EngineTest/Assets
-                $<TARGET_FILE_DIR:TestMetalToneMap>/Assets
-    )
+    # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
+    add_dependencies(TestMetalToneMap UnitTestAssetsCopy)
 
     # 创建Metal命令编码测试
     add_executable(TestMetalCommandEncoding Graphics/Metal/TestMetalCommandEncoding.cpp)
@@ -1793,6 +1732,9 @@ add_executable(StandaloneGraphics_RenderMesh_Test
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIResource.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp
 )
+# stale-test port: RenderMesh::CreateFromAsset references content::get_rhi_mesh_asset
+# (Engine/Content/ContentToEngine.cpp) which the hand-picked source list cannot provide.
+target_link_libraries(StandaloneGraphics_RenderMesh_Test PRIVATE Engine)
 target_include_directories(StandaloneGraphics_RenderMesh_Test PRIVATE 
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
@@ -1878,6 +1820,9 @@ set_target_properties(StandaloneGraphics_RenderProxy_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(StandaloneGraphics_RenderProxy_Test PRIVATE DEBUG _DEBUG)
+# stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
+# not covered by the hand-picked file list; link Engine for the remainder.
+target_link_libraries(StandaloneGraphics_RenderProxy_Test PRIVATE Engine)
 set_target_properties(StandaloneGraphics_RenderProxy_Test PROPERTIES FOLDER "Tests/Graphics")
 
 # 创建RenderScene测试
@@ -1900,6 +1845,9 @@ set_target_properties(StandaloneGraphics_RenderScene_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(StandaloneGraphics_RenderScene_Test PRIVATE DEBUG _DEBUG)
+# stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
+# not covered by the hand-picked file list; link Engine for the remainder.
+target_link_libraries(StandaloneGraphics_RenderScene_Test PRIVATE Engine)
 set_target_properties(StandaloneGraphics_RenderScene_Test PROPERTIES FOLDER "Tests/Graphics")
 
 # Create RenderScene Light Test
@@ -1923,6 +1871,9 @@ set_target_properties(StandaloneGraphics_RenderSceneLight_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(StandaloneGraphics_RenderSceneLight_Test PRIVATE DEBUG _DEBUG)
+# stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
+# not covered by the hand-picked file list; link Engine for the remainder.
+target_link_libraries(StandaloneGraphics_RenderSceneLight_Test PRIVATE Engine)
 set_target_properties(StandaloneGraphics_RenderSceneLight_Test PROPERTIES FOLDER "Tests/Graphics")
 
 # 创建RenderView测试
@@ -1947,6 +1898,9 @@ set_target_properties(StandaloneGraphics_RenderView_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(StandaloneGraphics_RenderView_Test PRIVATE DEBUG _DEBUG)
+# stale-test port: sources grew references (RenderView::SetViewMatrix, content::get_rhi_mesh_*)
+# not covered by the hand-picked file list; link Engine for the remainder.
+target_link_libraries(StandaloneGraphics_RenderView_Test PRIVATE Engine)
 set_target_properties(StandaloneGraphics_RenderView_Test PROPERTIES FOLDER "Tests/Graphics")
 
 # 创建RenderSystem测试
@@ -1968,7 +1922,11 @@ add_executable(StandaloneGraphics_RenderSystem_Test
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHISwapChain.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
 )
-target_include_directories(StandaloneGraphics_RenderSystem_Test PRIVATE 
+# stale-test port: RenderSystem/ForwardRenderer grew references to ParticlePass/SSRPass/
+# RenderGeometryDebug and content::get_rhi_mesh_* that the hand-picked source list
+# cannot provide; link the Engine library for the remainder.
+target_link_libraries(StandaloneGraphics_RenderSystem_Test PRIVATE Engine)
+target_include_directories(StandaloneGraphics_RenderSystem_Test PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
@@ -2250,7 +2208,11 @@ add_executable(TestRenderSystemECS
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHISwapChain.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/RHI/Core/RHIDevice.cpp
 )
-target_include_directories(TestRenderSystemECS PRIVATE 
+# stale-test port: RenderSystem/ForwardRenderer grew references (ParticlePass,
+# RenderGeometryDebug, SceneExtractionSystem, content::get_rhi_mesh_*) that the
+# hand-picked source list cannot provide; link the Engine library for the remainder.
+target_link_libraries(TestRenderSystemECS PRIVATE Engine)
+target_include_directories(TestRenderSystemECS PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common

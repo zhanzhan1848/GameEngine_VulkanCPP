@@ -71,7 +71,7 @@ private:
         colorAtt.texture = texHandle;
         colorAtt.loadOp = LoadAction::Clear;
         colorAtt.storeOp = StoreAction::Store;
-        colorAtt.clearValue = ClearValue(0.0f, 0.0f, 0.0f, 1.0f);
+        colorAtt.clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
         passDesc.colorAttachments.push_back(colorAtt);
 
         passDesc.viewport.topLeft = { 0, 0 };
@@ -176,7 +176,7 @@ private:
         colorAtt.texture = texHandle;
         colorAtt.loadOp = LoadAction::Clear;
         colorAtt.storeOp = StoreAction::Store;
-        colorAtt.clearValue = ClearValue(0.0f, 0.0f, 0.0f, 1.0f);
+        colorAtt.clearValue = ClearValue{primal::math::v4{0.0f, 0.0f, 0.0f, 1.0f}};
         passDesc.colorAttachments.push_back(colorAtt);
         
         passDesc.viewport.topLeft = { 0, 0 };

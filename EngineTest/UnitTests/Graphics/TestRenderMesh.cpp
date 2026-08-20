@@ -121,6 +121,17 @@ public:
     void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {
         calls.push_back("WriteTimestamp");
     }
+
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    void PushConstants(PipelineLayoutHandle, ShaderStage, uint32_t, uint32_t, const void*) override {
+        calls.push_back("PushConstants");
+    }
+    void SetComputeBytes(uint32_t, const void*, uint32_t) override {
+        calls.push_back("SetComputeBytes");
+    }
+    void MemoryBarrier(PipelineStage, PipelineStage, AccessFlag, AccessFlag) override {
+        calls.push_back("MemoryBarrier");
+    }
 };
 
 class MockDevice : public RHIDeviceBase {
@@ -188,6 +199,11 @@ public:
         static RHIGarbageCollector gc;
         return gc;
     }
+
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    ResourceHandle CreateTextureView(const TextureViewDesc&) override { return handles::INVALID_RESOURCE; }
+    void SetBufferDirtySize(ResourceHandle, u64) override {}
+    RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
 
     // Helper for test (overrides RHIDeviceBase)
     CommandBufferHandle CreateCommandBuffer(CommandQueueType type = CommandQueueType::Graphics) override { return reinterpret_cast<CommandBufferHandle>(new MockCommandBuffer(*this)); }

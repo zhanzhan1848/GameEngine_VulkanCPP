@@ -119,16 +119,16 @@ namespace {
 // Shader file descriptions
 // ============================================================================
 namespace {
-    const shader_file_info kDeferredVS     { "DeferredLighting.metal", "vertexMain",                    shader_type::vertex };
-    const shader_file_info kDeferredPS     { "DeferredLighting.metal", "fragmentLighting_gpuDriven",     shader_type::pixel  };
-    const shader_file_info kBlitVS         { "DeferredLighting.metal", "vertexMain",                    shader_type::vertex };
-    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlit",                  shader_type::pixel  };
-    const shader_file_info kShadowFilter   { "ShadowFilter.metal",     "shadow_filter_compute",          shader_type::compute };
-    const shader_file_info kGIGather       { "DDGIGIGather.metal",     "ddgi_gi_gather",                 shader_type::compute };
-    const shader_file_info kFusionIndirect { "DeferredLighting.metal", "fragmentFusionIndirect",         shader_type::pixel  };
-    const shader_file_info kFusionComposite{ "DeferredLighting.metal", "fragmentFusion",                 shader_type::pixel  };
-    const shader_file_info kSCCardRadiance { "Lumen/DDGICardRadianceAvg.metal",           "ddgi_card_radiance_avg",              shader_type::compute };
-    const shader_file_info kSCProbeIrr     { "Lumen/DDGIProbeIrradianceFromCards.metal",  "ddgi_probe_irradiance_from_cards",    shader_type::compute };
+    const shader_file_info kDeferredVS     { "DeferredLighting.metal", "vertexMain",                    ::shader_type::vertex };
+    const shader_file_info kDeferredPS     { "DeferredLighting.metal", "fragmentLighting_gpuDriven",     ::shader_type::pixel  };
+    const shader_file_info kBlitVS         { "DeferredLighting.metal", "vertexMain",                    ::shader_type::vertex };
+    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlit",                  ::shader_type::pixel  };
+    const shader_file_info kShadowFilter   { "ShadowFilter.metal",     "shadow_filter_compute",          ::shader_type::compute };
+    const shader_file_info kGIGather       { "DDGIGIGather.metal",     "ddgi_gi_gather",                 ::shader_type::compute };
+    const shader_file_info kFusionIndirect { "DeferredLighting.metal", "fragmentFusionIndirect",         ::shader_type::pixel  };
+    const shader_file_info kFusionComposite{ "DeferredLighting.metal", "fragmentFusion",                 ::shader_type::pixel  };
+    const shader_file_info kSCCardRadiance { "Lumen/DDGICardRadianceAvg.metal",           "ddgi_card_radiance_avg",              ::shader_type::compute };
+    const shader_file_info kSCProbeIrr     { "Lumen/DDGIProbeIrradianceFromCards.metal",  "ddgi_probe_irradiance_from_cards",    ::shader_type::compute };
 }
 
 // ============================================================================
@@ -217,9 +217,9 @@ bool TestModularPipeline::CompileShaders() {
 
         ShaderStage stage;
         switch (info.type) {
-            case shader_type::vertex:    stage = ShaderStage::Vertex;   break;
-            case shader_type::pixel:     stage = ShaderStage::Pixel;    break;
-            case shader_type::compute:   stage = ShaderStage::Compute;  break;
+            case ::shader_type::vertex:    stage = ShaderStage::Vertex;   break;
+            case ::shader_type::pixel:     stage = ShaderStage::Pixel;    break;
+            case ::shader_type::compute:   stage = ShaderStage::Compute;  break;
             default:                     stage = ShaderStage::Compute;  break;
         }
 

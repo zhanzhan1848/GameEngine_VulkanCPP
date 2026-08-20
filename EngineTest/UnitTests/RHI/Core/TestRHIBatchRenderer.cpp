@@ -28,6 +28,7 @@ using namespace primal::graphics::rhi;
 
 // 简单的RHIDevice实现用于测试
 class MockRHIDevice : public RHIDevice<MockRHIDevice> {
+
 public:
     MockRHIDevice() : RHIDevice<MockRHIDevice>(DeviceDesc{}) {
         auto& desc = const_cast<DeviceDesc&>(GetDesc());
@@ -38,6 +39,11 @@ public:
     }
     
     // === CRTP实现方法 ===
+    // stale-test port: Impl hooks added to the RHIDevice CRTP base after the Dawn era
+    void beginFrameImpl() {}
+    void endFrameImpl() {}
+    void setBufferDirtySizeImpl(ResourceHandle, u64) {}
+
     bool initializeImpl() {
         return true;
     }
@@ -291,6 +297,8 @@ protected:
     void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override { (void)barriers; (void)barrierCount; }
     void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask, AccessFlag srcAccessMask, AccessFlag dstAccessMask) override { (void)srcStageMask; (void)dstStageMask; (void)srcAccessMask; (void)dstAccessMask; }
     void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags, uint32_t offset, uint32_t size, const void* pValues) override { (void)layout; (void)stageFlags; (void)offset; (void)size; (void)pValues; }
+    // stale-test port: pure virtual added to RHICommandBuffer after the Dawn era
+    void SetComputeBytes(uint32_t index, const void* data, uint32_t size) override { (void)index; (void)data; (void)size; }
 
     void destroyImpl() override {}
     bool resetImpl() override { return true; }

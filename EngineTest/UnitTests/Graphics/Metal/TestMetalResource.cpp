@@ -14,7 +14,7 @@ TestResult TestMetalBufferCreation() {
     bool initResult = device.Initialize();
     TEST_ASSERT(initResult, "Device initialization failed");
     
-    BufferDesc bufferDesc;
+    BufferDesc bufferDesc{};
     bufferDesc.size = 256;
     bufferDesc.type = BufferType::Vertex;
     bufferDesc.usage = GPUMemoryUsage::Dynamic;
@@ -63,7 +63,7 @@ TestResult TestMetalStaticBufferUpdate() {
     bool initResult = device.Initialize();
     TEST_ASSERT(initResult, "Device initialization failed");
     
-    BufferDesc bufferDesc;
+    BufferDesc bufferDesc{};
     bufferDesc.size = sizeof(int) * 2;
     bufferDesc.type = BufferType::Vertex;
     bufferDesc.usage = GPUMemoryUsage::Static;

@@ -41,6 +41,13 @@ public:
 
     virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
 
+    // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
+    virtual void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
+                               uint32_t offset, uint32_t size, const void* pValues) override {}
+    virtual void SetComputeBytes(uint32_t index, const void* data, uint32_t size) override {}
+    virtual void MemoryBarrier(PipelineStage srcStageMask, PipelineStage dstStageMask,
+                               AccessFlag srcAccessMask, AccessFlag dstAccessMask) override {}
+
     virtual bool Initialize() override { return true; }
 
 protected:
@@ -102,6 +109,11 @@ public:
     virtual void UnmapBuffer(ResourceHandle) override {}
     virtual bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
     virtual RHIGarbageCollector& GetGarbageCollector() override { static RHIGarbageCollector gc; return gc; }
+
+    // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
+    virtual ResourceHandle CreateTextureView(const TextureViewDesc& desc) override { return handles::INVALID_RESOURCE; }
+    virtual void SetBufferDirtySize(ResourceHandle handle, uint64_t size) override {}
+    virtual RHIPlatform GetPlatform() const override { return RHIPlatform::Unknown; }
 
 private:
     uint64_t bufferCounter_ = 1;

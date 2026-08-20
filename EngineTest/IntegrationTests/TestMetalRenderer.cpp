@@ -345,8 +345,12 @@ bool Engine_Test::initialize() {
     g_Test->scene.AddProxy(proxy4);
 
     // Register Material
-    g_Test->renderSystem.RegisterMaterialInstance(materialId, g_Test->materialInstance);
-    g_Test->renderSystem.RegisterMaterialInstance(transMaterialId, g_Test->transparentMaterialInstance);
+    // stale-test port: RegisterMaterialInstance takes shared_ptr; the test keeps raw
+    // ownership (manual delete in shutdown), so wrap with a non-owning deleter.
+    g_Test->renderSystem.RegisterMaterialInstance(materialId,
+        std::shared_ptr<MaterialInstance>(g_Test->materialInstance, [](MaterialInstance*) {}));
+    g_Test->renderSystem.RegisterMaterialInstance(transMaterialId,
+        std::shared_ptr<MaterialInstance>(g_Test->transparentMaterialInstance, [](MaterialInstance*) {}));
 
     // 7. Setup View
     v3 eye = {0.0f, 2.0f, 5.0f}; 
