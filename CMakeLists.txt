@@ -271,6 +271,9 @@ if(MSVC)
     # 以 MDd 编译导致测试链接 LNK2038 混链（环境/缓存来源不明），显式声明
     # 消除一切歧义。
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    # 双保险：命令行显式 /MD——cl 以最后出现的 /M 标志为准，可覆盖任何
+    # 来源注入到 vcxproj RuntimeLibrary 属性的 MDd
+    add_compile_options($<$<CONFIG:Release>:/MD> $<$<CONFIG:Debug>:/MDd>)
     # MSVC编译选项
     add_compile_options(
         /MP             # 多处理器编译

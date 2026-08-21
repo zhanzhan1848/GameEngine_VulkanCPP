@@ -135,7 +135,7 @@ set_window_closed(window_id id)
 }
 } // anonymous namespace
 
-Window
+window
 create_window(const window_init_info* const init_info /*= nullptr*/, void* disp /*= nullptr*/)
 {
     // Cache a casted pointer of the display to save on casting later
@@ -201,6 +201,6 @@ remove_window(window_id id)
 }
 }
 
-#include "IncludeWindowCpp.h"
+#include "IncludeWindowCPP.h"
 
 #endif // __linux__

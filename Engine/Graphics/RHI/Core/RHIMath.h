@@ -653,7 +653,7 @@ inline v3 HSVToRGB(const v3& hsv) {
 inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ) {
 #if defined(__APPLE__)
     // Metal使用的透视矩阵（NDC Z范围[0,1]，右手坐标系）
-    float f = 1.0f / std::tanf(fovY * 0.5f);
+    float f = 1.0f / std::tan(fovY * 0.5f);
     simd::float4x4 result{};
     result.columns[0] = simd::float4{f / aspect, 0.0f, 0.0f, 0.0f};
     result.columns[1] = simd::float4{0.0f, f, 0.0f, 0.0f};
@@ -661,7 +661,7 @@ inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ)
     result.columns[3] = simd::float4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f};
     return result;
 #else
-    float f = 1.0f / std::tanf(fovY * 0.5f);
+    float f = 1.0f / std::tan(fovY * 0.5f);
     return m4x4{
         v4{f / aspect, 0.0f, 0.0f, 0.0f},
         v4{0.0f, f, 0.0f, 0.0f},
