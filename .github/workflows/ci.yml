@@ -236,11 +236,11 @@ jobs:
           # runner 的缓存曾被早期坏配置污染（Engine 的 Release 以 MDd 运行时
           # 编译 → 测试链接 LNK2038 MDd/MD 混链）。删缓存 + 删 Engine 对象
           # 目录（重编 Engine），测试目标对象保留增量。
-          if (Test-Path build/CMakeCache.txt) { Remove-Item build/CMakeCache.txt -Force }
-          if (Test-Path build/CMakeFiles) { Remove-Item build/CMakeFiles -Recurse -Force }
-          if (Test-Path build/Engine) { Remove-Item build/Engine -Recurse -Force }
-          # 外置归档输出目录（顶层 CMake 设 ${SOURCE}/${SYSTEM_NAME}/${TYPE}），
-          # 在 build/ 之外——陈旧的 MDd Engine.lib 可能藏在这里被链接
+          # 全量 wipe build 目录：部分清理（缓存/Engine 工程/外置输出）三连后
+          # MDd 混链仍复现，唯一剩余嫌疑是 MSBuild 的陈旧解/工程元数据
+          # （.vs、tlog、sln 配置映射）。放弃增量直到链接稳定，之后可回退为
+          # 仅清 CMakeCache 的轻量模式。外置输出目录（Windows/）一并清理。
+          if (Test-Path build) { Remove-Item build -Recurse -Force }
           if (Test-Path Windows) { Remove-Item Windows -Recurse -Force }
           cmake -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           # 诊断：确认生成的 Engine.vcxproj Release 运行时与缓存标志

@@ -302,11 +302,7 @@ namespace primal::content
 			const u32 lod_count{ blob.read<u32>() };
 			assert(lod_count);
 			// add size or lod_count, thresholds and lod offsets to the size of hierarchy.
-#if defined(_WIN32)
-			u32 size{ sizeof(u32) + (sizeof(f32) + sizeof(lod_offset)) * lod_count };
-#elif defined(__APPLE__)
 			u32 size{ static_cast<u32>(sizeof(u32) + (sizeof(f32) + sizeof(lod_offset)) * lod_count) };
-#endif
 
 			for (u32 lod_idx{ 0 }; lod_idx < lod_count; ++lod_idx)
 			{
@@ -486,23 +482,15 @@ namespace primal::content
 			return submesh_count == 1;
 		}
 
-#if defined(_WIN32)
-		constexpr id::id_type gpu_id_from_fake_pointer(u8 *const pointer)
-		{
-			assert((uintptr_t)pointer & single_mesh_marker);
-			static_assert(sizeof(uintptr_t) > sizeof(id::id_type));
-			constexpr u8 shift_bits{ (sizeof(uintptr_t) - sizeof(id::id_type)) << 3 };
-			return (((uintptr_t)pointer) >> shift_bits) & (uintptr_t)id::invalid_id; // '& (uintptr_t)id::invalid_id' is to clear the higher bits. Probably not necessary for x64
-		}
-#elif defined(__APPLE__)
+		// 原 #if _WIN32 / #elif __APPLE__ 双分支实现完全相同但漏了 Linux，
+		// 导致 gcc/clang 报 undeclared identifier——合并为无条件版本
 		id::id_type gpu_id_from_fake_pointer(u8 *const pointer)
 		{
 			assert((uintptr_t)pointer & single_mesh_marker);
 			static_assert(sizeof(uintptr_t) > sizeof(id::id_type));
 			constexpr u8 shift_bits{ (sizeof(uintptr_t) - sizeof(id::id_type)) << 3 };
-			return (((uintptr_t)pointer) >> shift_bits) & (uintptr_t)id::invalid_id; // '& (uintptr_t)id::invalid_id' is to clear the higher bits. Probably not necessary for x64
+			return (((uintptr_t)pointer) >> shift_bits) & (uintptr_t)id::invalid_id;
 		}
-#endif
 
 		// NOTE: Expects 'data' to contain:
 		// struct
