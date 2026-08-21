@@ -41,7 +41,10 @@ if(EMSCRIPTEN)
     set(CMAKE_EXECUTABLE_SUFFIX ".js")
 endif()
 # 设置构建类型
-if(NOT CMAKE_BUILD_TYPE)
+# 仅单配置生成器（Makefile/Ninja）需要默认值。VS/Xcode 多配置生成器不使用
+# CMAKE_BUILD_TYPE（恒为空）——此前无条件强制写 Debug 会误导所有依赖该变量的
+# 判断（Engine 曾因此在 Release 配置注入 _DEBUG，链接期 MDd/MD 混链 LNK2038）。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose build type: Debug Release" FORCE)
 endif()
 

@@ -1,6 +1,7 @@
 #include "../../TestFramework.h"
 #include "Engine/Graphics/WFC/AutoSocketClassifier.h"
 #include "Engine/Content/ProceduralMesh.h"
+#include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/RHI/Core/RHIMeshAsset.h"
 
 using namespace primal::math;
@@ -51,7 +52,9 @@ TestResult TestClassifyFaceSolidCube() {
     RHIMeshAsset cube;
     emit_box_geometry(cube, 1.0f, 1.0f, 1.0f);  // unit cube at origin
 
-    const m4x4 identity = matrix_identity_float4x4;
+    // matrix_identity_float4x4 是 Apple <simd/simd.h> 的全局量，Windows 无此符号；
+    // RHIMath::MatrixIdentity() 内部做了平台分支。
+    const m4x4 identity = primal::graphics::rhi::math::MatrixIdentity();
     const SocketEncoding sig = AutoSocketClassifier::ClassifyFace(
         cube, WFCFace::PosX, identity);
     TEST_ASSERT_EQ(0xFFFFFFFFFFFFFFFFULL, sig,
@@ -63,7 +66,9 @@ TestResult TestClassifyFaceSolidCube() {
 // every face is all-zero.
 TestResult TestClassifyFaceEmptyMesh() {
     RHIMeshAsset empty;  // default-constructed: zero-sized buffers
-    const m4x4 identity = matrix_identity_float4x4;
+    // matrix_identity_float4x4 是 Apple <simd/simd.h> 的全局量，Windows 无此符号；
+    // RHIMath::MatrixIdentity() 内部做了平台分支。
+    const m4x4 identity = primal::graphics::rhi::math::MatrixIdentity();
     const SocketEncoding sig = AutoSocketClassifier::ClassifyFace(
         empty, WFCFace::PosX, identity);
     TEST_ASSERT_EQ(0ULL, sig, "empty mesh face must be all zeros");
@@ -89,7 +94,7 @@ TestResult TestClassifyTileReturnsSixFaces() {
     emit_box_geometry(cube, 1.0f, 1.0f, 1.0f);
 
     AutoSocketClassifier::FaceSignatures sigs =
-        AutoSocketClassifier::ClassifyTile(cube, matrix_identity_float4x4);
+        AutoSocketClassifier::ClassifyTile(cube, primal::graphics::rhi::math::MatrixIdentity());
     for (u32 f = 0; f < 6; ++f) {
         TEST_ASSERT_EQ(0xFFFFFFFFFFFFFFFFULL, sigs.face[f], "all faces solid");
     }
@@ -104,7 +109,7 @@ TestResult TestClassifyDoorwayCube() {
     emit_doorway_cube_geometry(doorway, 1.0f, 1.0f, 1.0f);
 
     const SocketEncoding sig = AutoSocketClassifier::ClassifyFace(
-        doorway, WFCFace::PosX, matrix_identity_float4x4);
+        doorway, WFCFace::PosX, primal::graphics::rhi::math::MatrixIdentity());
 
     // Corners solid (row 0/7, col 0/7)
     TEST_ASSERT((sig & (SocketEncoding{1} << 0))  != 0, "(0,0) solid");

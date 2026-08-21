@@ -335,8 +335,9 @@ RenderItem CreateTestRenderItem(u32 id, bool isInstanced = false) {
     
     // 变换矩阵
     item.worldMatrix = primal::graphics::rhi::math::MatrixIdentity();
+    // simd::float3 是 Apple 专属类型；rhi::math::v3 跨平台（Apple 上即 simd::float3）
     item.worldMatrix = primal::graphics::rhi::math::MatrixTranslation(
-        simd::float3{
+        primal::graphics::rhi::math::v3{
             static_cast<f32>(id * 10.0f),
             static_cast<f32>(id * 5.0f),
             static_cast<f32>(id * 2.0f)
@@ -547,7 +548,7 @@ TestResult TestFrustumCulling() {
         // 将一半的物体放在很远的地方（会被剔除）
         if (i >= 5) {
             item.worldMatrix = primal::graphics::rhi::math::MatrixTranslation(
-                simd::float3{10000.0f, 0.0f, 0.0f});
+                primal::graphics::rhi::math::v3{10000.0f, 0.0f, 0.0f});
         }
         items.push_back(item);
     }

@@ -417,14 +417,16 @@ elseif(EMSCRIPTEN)
 endif()
 
 # 编译定义
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(${PROJECT_NAME} PRIVATE 
-        DEBUG 
-        _DEBUG
-    )
-else()
-    target_compile_definitions(${PROJECT_NAME} PRIVATE NDEBUG)
-endif()
+# 必须用生成器表达式：VS/Xcode 多配置生成器下顶层 CMake 会把 CMAKE_BUILD_TYPE
+# 视为空（或被强制为 Debug），任何 CMAKE_BUILD_TYPE 判断都会把 Debug 分支应用到
+# 全部配置——曾导致 Engine 的 Release 也被注入 _DEBUG：MSVC 的
+# _ITERATOR_DEBUG_LEVEL/RuntimeLibrary 标记随 _DEBUG 翻转（MDd/IDL=2），
+# 测试（MD/IDL=0）链接 LNK2038 + __imp__calloc_dbg LNK2019。
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Debug>:DEBUG>
+    $<$<CONFIG:Debug>:_DEBUG>
+    $<$<NOT:$<CONFIG:Debug>>:NDEBUG>
+)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     PRIMAL_PLUS
@@ -448,16 +450,18 @@ if(MSVC)
         /Y-
     )
     
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(${PROJECT_NAME} PRIVATE /Od /ZI)
-    else()
-        target_compile_options(${PROJECT_NAME} PRIVATE /Ox /Oi /GF /Oy /Gy)
-    endif()
-    
+    # 同上：生成器表达式替代 CMAKE_BUILD_TYPE 判断（/ZI 的 EDITANDCONTINUE
+    # 对象曾随 Debug 分支泄漏进 Release，链接期 LNK4075）
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<CONFIG:Debug>:/Od>
+        $<$<CONFIG:Debug>:/ZI>
+        $<$<NOT:$<CONFIG:Debug>>:/Ox;/Oi;/GF;/Oy;/Gy>
+    )
+
     target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS)
-    if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_link_options(${PROJECT_NAME} PRIVATE /OPT:REF /OPT:ICF)
-    endif()
+    target_link_options(${PROJECT_NAME} PRIVATE
+        $<$<NOT:$<CONFIG:Debug>>:/OPT:REF;/OPT:ICF>
+    )
     
     # Windows平台需要D3D12
     find_package(Microsoft.Direct3D.D3D12 CONFIG)
@@ -489,11 +493,12 @@ else()
         )
     endif()
     
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(${PROJECT_NAME} PRIVATE -O0 -g)
-    else()
-        target_compile_options(${PROJECT_NAME} PRIVATE -O3)
-    endif()
+    # 生成器表达式替代 CMAKE_BUILD_TYPE 判断（多配置生成器下该变量不可靠）
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<CONFIG:Debug>:-O0>
+        $<$<CONFIG:Debug>:-g>
+        $<$<NOT:$<CONFIG:Debug>>:-O3>
+    )
 endif()
 
 # === Phase 1 Task 2: script dispatch 需要在边界 catch 脚本抛出的异常 ===

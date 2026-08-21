@@ -1,6 +1,7 @@
 #include "../../TestFramework.h"
 #include "Engine/Graphics/WFC/AutoSocketClassifier.h"
 #include "Engine/Graphics/WFC/ProceduralRoomPack.h"
+#include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/RHI/Core/RHIMeshAsset.h"
 
 #include <set>
@@ -84,7 +85,9 @@ TestResult TestGenerateTileMeshDoorOnPosXFace() {
     RHIMeshAsset mesh;
     ProceduralRoomPack::GenerateTileMesh(0, mesh);
 
-    const m4x4 identity = matrix_identity_float4x4;
+    // matrix_identity_float4x4 是 Apple <simd/simd.h> 的全局量，Windows 无此符号；
+    // RHIMath::MatrixIdentity() 内部做了平台分支。
+    const m4x4 identity = primal::graphics::rhi::math::MatrixIdentity();
     const SocketEncoding sig = AutoSocketClassifier::ClassifyFace(
         mesh, WFCFace::PosX, identity);
 
@@ -111,7 +114,7 @@ TestResult TestGenerateTileMeshNoDoorOnNegXFace() {
     RHIMeshAsset mesh;
     ProceduralRoomPack::GenerateTileMesh(0, mesh);
 
-    const m4x4 identity = matrix_identity_float4x4;
+    const m4x4 identity = primal::graphics::rhi::math::MatrixIdentity();
     const SocketEncoding sig = AutoSocketClassifier::ClassifyFace(
         mesh, WFCFace::NegX, identity);
     TEST_ASSERT_EQ(0xFFFFFFFFFFFFFFFFULL, sig, "-X face must be fully solid");
