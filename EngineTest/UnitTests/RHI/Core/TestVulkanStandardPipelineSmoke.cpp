@@ -31,6 +31,7 @@
  */
 
 #include "../../TestFramework.h"
+#include "Graphics/PCG/PCGSDFReadbackManager.h"  // HalfToFloat
 
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
@@ -823,11 +824,11 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
                     u64 nonZero = 0; double lumSum = 0.0;
                     for (u32 y = 0; y < AH; ++y) {
                         for (u32 x = 0; x < AW; ++x) {
-                            const _Float16* px = reinterpret_cast<const _Float16*>(&amapped[((u64)y * AW + x) * 8]);
-                            float r = (float)px[0], g = (float)px[1], b = (float)px[2];
+                            const u16* px = reinterpret_cast<const u16*>(&amapped[((u64)y * AW + x) * 8]);
+                            float r = primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[0]), g = primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[1]), b = primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[2]);
                             // Count texels LightEval actually wrote: alpha=1.0
                             // marks written texels even when rgb == 0 (NdotL=0).
-                            if (r > 0.0f || g > 0.0f || b > 0.0f || px[3] > 0.5f) ++nonZero;
+                            if (r > 0.0f || g > 0.0f || b > 0.0f || primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[3]) > 0.5f) ++nonZero;
                             lumSum += (r + g + b) / 3.0f;
                             u8* dst = &rgb[((u64)y * AW + x) * 4];
                             dst[0] = (u8)std::min(255.0f, r * 255.0f);
@@ -893,8 +894,8 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
                     double rSum = 0.0, gSum = 0.0, bSum = 0.0; u64 n = 0;
                     for (u32 y = 0; y < H; y += 4) {
                         for (u32 x = 0; x < W; x += 4) {
-                            const _Float16* px = reinterpret_cast<const _Float16*>(&dm[((u64)y * W + x) * 8]);
-                            rSum += (float)px[0]; gSum += (float)px[1]; bSum += (float)px[2]; ++n;
+                            const u16* px = reinterpret_cast<const u16*>(&dm[((u64)y * W + x) * 8]);
+                            rSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[0]); gSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[1]); bSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[2]); ++n;
                         }
                     }
                     std::cout << "[DLDump] slot " << slot
@@ -946,9 +947,9 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
                     u64 total = ((ti.th+7)/8) * ((ti.tw+7)/8);
                     for (u32 y = 0; y < ti.th; y += 8) {
                         for (u32 x = 0; x < ti.tw; x += 8) {
-                            const _Float16* px = reinterpret_cast<const _Float16*>(&tm[((u64)y * ti.tw + x) * 8]);
-                            rSum += (float)px[0]; gSum += (float)px[1];
-                            if ((float)px[0] > 0.001f) ++nz;
+                            const u16* px = reinterpret_cast<const u16*>(&tm[((u64)y * ti.tw + x) * 8]);
+                            rSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[0]); gSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[1]);
+                            if (primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[0]) > 0.001f) ++nz;
                         }
                     }
                     std::cout << "[SSGIDump] " << ti.name
@@ -988,10 +989,10 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
                     double rSum=0, gSum=0, bSum=0, aSum=0; u64 nz=0;
                     for (u32 y = 0; y < H; y += 8) {
                         for (u32 x = 0; x < W; x += 8) {
-                            const _Float16* px = reinterpret_cast<const _Float16*>(&sm[((u64)y * W + x) * 8]);
-                            rSum += (float)px[0]; gSum += (float)px[1];
-                            bSum += (float)px[2]; aSum += (float)px[3];
-                            if ((float)px[0] > 0.001f || (float)px[1] > 0.001f || (float)px[2] > 0.001f) ++nz;
+                            const u16* px = reinterpret_cast<const u16*>(&sm[((u64)y * W + x) * 8]);
+                            rSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[0]); gSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[1]);
+                            bSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[2]); aSum += primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[3]);
+                            if (primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[0]) > 0.001f || primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[1]) > 0.001f || primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat(px[2]) > 0.001f) ++nz;
                         }
                     }
                     u64 total = ((H+7)/8) * ((W+7)/8);

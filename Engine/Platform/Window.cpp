@@ -27,7 +27,7 @@ namespace primal::platform
 		assert(is_valid());
 		set_window_caption(_id, caption);
 	}
-#elif defined(__clang__)
+#else
 	void window::set_caption(const char* caption) const
 	{
 		assert(is_valid());
@@ -52,7 +52,7 @@ namespace primal::platform
 		math::u32v4 s{ size() };
 #if defined(_MSC_VER)
 		return s.z - s.x;
-#elif defined(__clang__)
+#else
 		return s.z - s.x;
 #endif
 	}
@@ -62,7 +62,7 @@ namespace primal::platform
 		math::u32v4 s{ size() };
 #if defined(_MSC_VER)
 		return s.w - s.y;
-#elif defined(__clang__)
+#else
 		return s.w - s.y;
 #endif
 	}

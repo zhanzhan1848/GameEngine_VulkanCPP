@@ -141,41 +141,36 @@ namespace primal::input
 		}
 
 		utl::vector<input_source>& sources{ input_binding.sources };
-#if defined(_MSC_VER)
 		input_value sub_value{};
 		input_value result{};
-#elif defined(__clang__)
-		input_value sub_value{ math::v3{ 0.f, 0.f, 0.f }, math::v3{ 0.f, 0.f, 0.f } };
-		input_value result{ math::v3{ 0.f, 0.f, 0.f }, math::v3{ 0.f, 0.f, 0.f } };
-#endif
 
 		for (const auto& source : sources)
 		{
 			assert(source.binding == binding);
 			get(source.source_type, (input_code::code)source.code, sub_value);
-			assert(source.axis <= axis::z);
+			assert(source.dst_axis <= axis::z);
 			if (source.source_type == input_source::mouse)
 			{
 #if defined(_MSC_VER)
 				const f32 current{ (&sub_value.current.x)[source.source_axis] };
 				const f32 previous{ (&sub_value.previous.x)[source.source_axis] };
-				(&result.current.x)[source.axis] += (current - previous) * source.multiplier;
-#elif defined(__clang__)
+				(&result.current.x)[source.dst_axis] += (current - previous) * source.multiplier;
+#else
 				// 使用simd库访问向量分量
 				const f32 current{ sub_value.current[source.source_axis] };
 				const f32 previous{ sub_value.previous[source.source_axis] };
-				result.current[source.axis] += (current - previous) * source.multiplier;
+				result.current[source.dst_axis] += (current - previous) * source.multiplier;
 #endif
 			}
 			else
 			{
 #if defined(_MSC_VER)
-				(&result.previous.x)[source.axis] += (&sub_value.previous.x)[source.source_axis] * source.multiplier;
-				(&result.current.x)[source.axis] += (&sub_value.current.x)[source.source_axis] * source.multiplier;
-#elif defined(__clang__)
+				(&result.previous.x)[source.dst_axis] += (&sub_value.previous.x)[source.source_axis] * source.multiplier;
+				(&result.current.x)[source.dst_axis] += (&sub_value.current.x)[source.source_axis] * source.multiplier;
+#else
 				// 使用simd库访问向量分量
-				result.previous[source.axis] += sub_value.previous[source.source_axis] * source.multiplier;
-				result.current[source.axis] += sub_value.current[source.source_axis] * source.multiplier;
+				result.previous[source.dst_axis] += sub_value.previous[source.source_axis] * source.multiplier;
+				result.current[source.dst_axis] += sub_value.current[source.source_axis] * source.multiplier;
 #endif
 			}
 		}

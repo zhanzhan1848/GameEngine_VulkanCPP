@@ -179,7 +179,8 @@ namespace primal::input
 		u32							code{ 0 };
 		float						multiplier{ 0 };
 		bool						is_discrete{ true };
-		axis::type					axis{};
+		// 成员不可与类型同名（gcc14 -Wchanges-meaning）：axis -> dst_axis
+		axis::type					dst_axis{};
 		axis::type					source_axis{};
 		modifier_key::key			modifier{};
 	};

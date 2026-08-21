@@ -104,13 +104,10 @@ get_display(window_id id)
 }
 
 void
-set_window_caption(window_id id, const wchar_t* caption)
+set_window_caption(window_id id, const char* caption)
 {
     window_info& info{ get_from_id(id) };
-    size_t out_size = (sizeof(caption) * sizeof(wchar_t)) + 1;
-    char title[out_size];
-    wcstombs(title, caption, out_size);
-    XStoreName(info.display, info.wnd, title);
+    XStoreName(info.display, info.wnd, caption);
 }
 
 math::u32v4
