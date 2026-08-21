@@ -167,7 +167,13 @@ bool MetalCommandBuffer::beginImpl() {
 
     // Keep reference
     mtlCommandBuffer_->retain();
-    
+
+    // VT M0: 与 Vulkan 契约对齐(VulkanCommandBuffer::Begin 同款)— Begin 时
+    // 先编码当前 pending staging blits,使 Begin 之前排队的上传(如加载期
+    // updateData/updateRegion)先于本 cmdbuf 的用户 pass 执行。录制期间
+    // 排队的 blits 仍由 submitImpl 在提交时编码(下一 cmdbuf 可见,同 Vulkan)。
+    metalDevice.GetStagingAllocator().EncodePendingBlits(mtlCommandBuffer_);
+
     return true;
 }
 

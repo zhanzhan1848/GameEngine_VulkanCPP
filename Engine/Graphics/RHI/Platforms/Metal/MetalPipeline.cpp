@@ -79,7 +79,15 @@ namespace {
             case DataFormat::D16_UNorm: return MTL::PixelFormatDepth16Unorm;
             case DataFormat::D24_UNorm_S8_UInt: return MTL::PixelFormatDepth24Unorm_Stencil8;
             case DataFormat::D32_Float_S8X24_UInt: return MTL::PixelFormatDepth32Float_Stencil8;
-            
+
+            // VT M0.8: ASTC(Apple GPU 原生;离散 Mac 不支持 — 见 MetalDevice::queryDeviceInfo)
+            case DataFormat::ASTC_4x4_UNorm: return MTL::PixelFormatASTC_4x4_LDR;
+            case DataFormat::ASTC_4x4_sRGB: return MTL::PixelFormatASTC_4x4_sRGB;
+            case DataFormat::ASTC_6x6_UNorm: return MTL::PixelFormatASTC_6x6_LDR;
+            case DataFormat::ASTC_6x6_sRGB: return MTL::PixelFormatASTC_6x6_sRGB;
+            case DataFormat::ASTC_8x8_UNorm: return MTL::PixelFormatASTC_8x8_LDR;
+            case DataFormat::ASTC_8x8_sRGB: return MTL::PixelFormatASTC_8x8_sRGB;
+
             default: return MTL::PixelFormatInvalid;
         }
     }

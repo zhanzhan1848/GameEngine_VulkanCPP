@@ -105,6 +105,15 @@ public:
                    : VK_IMAGE_ASPECT_COLOR_BIT;
     }
 
+    /// VT M0.7: 任意子区域上传(2D 单 slice、任意 mip、非压缩格式)。
+    /// data 为紧密行主序(region.width * bytesPerTexel / 行),size 必须
+    /// 精确等于 bytesPerRow * region.height。语义与 updateDataImpl 相同:
+    /// 帧内(有 recording cmdbuf)走 staging 队列零等待;无帧上下文走
+    /// one-shot 阻塞路径。布局由 RHI 内部闭合(→ TRANSFER_DST → 回
+    /// currentLayout_ / SHADER_READ_ONLY)。块压缩格式返回 false,
+    /// 用命令层 CopyBufferToTexture。
+    bool updateRegion(const void* data, u64 size, const TextureRegionUpdate& region);
+
 protected:
     void destroyImpl() override;
 

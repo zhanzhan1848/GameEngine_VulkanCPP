@@ -356,6 +356,15 @@ void VulkanDevice::queryDeviceInfo(DeviceInfo& info) {
     info.supportsRayTracing = false;
     info.supportsMeshShaders = false;
     info.supportsVariableRateShading = false;
+
+    // VT M0.8: ASTC tile 格式采样能力(MoltenVK/Apple Silicon 为 true;
+    // 桌面离散 GPU 通常 false — 烘焙管线据此选 BCn 或 ASTC 数据段)。
+    if (physicalDevice_ != VK_NULL_HANDLE) {
+        VkFormatProperties astcProps{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice_,
+                                            VK_FORMAT_ASTC_4x4_UNORM_BLOCK, &astcProps);
+        info.supportsASTC = astcProps.optimalTilingFeatures != 0;
+    }
 }
 
 u32 VulkanDevice::getCurrentFrameIndexImpl() const {
@@ -497,6 +506,14 @@ bool VulkanDevice::UpdateBufferData(ResourceHandle handle, const void* data, u64
     VulkanBuffer* buffer = GetBuffer(handle);
     if (!buffer || !data || size == 0) return false;
     return buffer->updateDataImpl(data, size, offset);
+}
+
+// VT M0.7: 子区域上传 — 同 ODR-bypass 理由走 device-local 查表
+bool VulkanDevice::UpdateTextureRegion(ResourceHandle handle, const void* data, u64 size,
+                                        const TextureRegionUpdate& region) {
+    VulkanTexture* texture = GetTexture(handle);
+    if (!texture || !data || size == 0) return false;
+    return texture->updateRegion(data, size, region);
 }
 
 // ============================================================================

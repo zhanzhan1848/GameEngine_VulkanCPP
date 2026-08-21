@@ -79,12 +79,24 @@ public:
 
     /**
      * @brief 释放原生事件的所有权
-     * @return 原生事件指针，调用者负责释放
+     * @return 原生事件指针，调用方负责释放
      */
     MTL::SharedEvent* DetachNativeEvent();
 
+    // === VT M0.5: signalFence 的"待等目标值"跟踪 ===
+    // 背景:submitImpl 曾在 encodeSignalEvent 后立刻 CPU 端 SetValue(nextVal),
+    // 导致 signaledValue 提前推进、WaitForSync 的 fast path 立即返回 —
+    // fence 完全不等待 GPU(RenderSystem 帧 fence 同样受影响,被 present
+    // 节奏掩盖)。正确语义:CPU 只记录递增的目标值,GPU 执行 encodeSignalEvent
+    // 时才真实推进 signaledValue,WaitForSync 按目标值等 GPU。
+    /// 分配下一个信号目标值(每次 signalFence 提交递增)
+    u64 AcquireNextSignalValue() { return ++waitTarget_; }
+    /// 当前应等待的目标值(0 = 从未提交过 signalFence,视为已完成)
+    u64 GetWaitTarget() const { return waitTarget_; }
+
 private:
     MTL::SharedEvent* event_{nullptr}; ///< Metal 共享事件对象
+    u64 waitTarget_{0};                ///< signalFence 提交的递增目标值
 };
 
 } // namespace primal::graphics::rhi

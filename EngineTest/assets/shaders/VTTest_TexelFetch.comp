@@ -1,0 +1,25 @@
+#version 450
+// VT M0.6/M0.7: R16_UINT 整数纹理 texelFetch(页表采样路径)+ 子区域上传验证。
+// 全图拷贝到输出 buffer,CPU 侧核对区域内容与未触碰区域。
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform Params {
+    uint width;
+    uint height;
+    uint pad0;
+    uint pad1;
+} params;
+
+layout(set = 0, binding = 1) writeonly buffer OutBuf {
+    uint data[];
+} out_buf;
+
+// 整数纹理用分离 image 语法(utexture2D),texelFetch 返回 uvec4
+layout(set = 0, binding = 2) uniform utexture2D srcTex;
+
+void main() {
+    uvec2 xy = gl_GlobalInvocationID.xy;
+    if (xy.x >= params.width || xy.y >= params.height) return;
+    out_buf.data[xy.y * params.width + xy.x] = texelFetch(srcTex, ivec2(xy), 0).r;
+}

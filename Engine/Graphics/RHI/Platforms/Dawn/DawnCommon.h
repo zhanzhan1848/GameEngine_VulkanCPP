@@ -49,6 +49,14 @@ inline WGPUTextureFormat ToWGPUTextureFormat(DataFormat format) {
         case DataFormat::BC1_sRGB:          return WGPUTextureFormat_BC1RGBAUnormSrgb;
         case DataFormat::BC3_sRGB:          return WGPUTextureFormat_BC3RGBAUnormSrgb;
         case DataFormat::BC7_sRGB:          return WGPUTextureFormat_BC7RGBAUnormSrgb;
+        // VT M0.8: ASTC(WebGPU 标准格式;后端 adapter 能力由 supportsASTC 查询,
+        // Dawn 侧保持 false 由上层选择非 ASTC 数据段)
+        case DataFormat::ASTC_4x4_UNorm:    return WGPUTextureFormat_ASTC4x4Unorm;
+        case DataFormat::ASTC_4x4_sRGB:     return WGPUTextureFormat_ASTC4x4UnormSrgb;
+        case DataFormat::ASTC_6x6_UNorm:    return WGPUTextureFormat_ASTC6x6Unorm;
+        case DataFormat::ASTC_6x6_sRGB:     return WGPUTextureFormat_ASTC6x6UnormSrgb;
+        case DataFormat::ASTC_8x8_UNorm:    return WGPUTextureFormat_ASTC8x8Unorm;
+        case DataFormat::ASTC_8x8_sRGB:     return WGPUTextureFormat_ASTC8x8UnormSrgb;
         default:                            return WGPUTextureFormat_Undefined;
     }
 }

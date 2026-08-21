@@ -107,6 +107,21 @@ if(ENABLE_VULKAN)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 
+    # VT M0: readback ring / R16_UINT texelFetch / UpdateTextureRegion / ASTC query
+    add_executable(TestVulkanVTPrimitives RHI/Core/TestVulkanVTPrimitives.cpp)
+    target_include_directories(TestVulkanVTPrimitives PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanVTPrimitives PRIVATE Engine)
+    target_compile_definitions(TestVulkanVTPrimitives PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanVTPrimitives COMMAND TestVulkanVTPrimitives)
+    set_target_properties(TestVulkanVTPrimitives PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestVulkanVTPrimitives UnitTestAssetsCopy)
+
     # Phase 2: Sync (VkFence + VkSemaphore) 句柄池 + timeout 行为
     add_executable(TestVulkanSync RHI/Core/TestVulkanSync.cpp)
     target_include_directories(TestVulkanSync PRIVATE
@@ -1325,6 +1340,27 @@ if(APPLE)
     )
     # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
     add_dependencies(TestMetalP4cReferences UnitTestAssetsCopy)
+
+    # VT M0: readback ring / R16_UINT texelFetch / UpdateTextureRegion / ASTC query (Metal)
+    add_executable(TestMetalVTPrimitives Graphics/Metal/TestMetalVTPrimitives.cpp)
+    target_include_directories(TestMetalVTPrimitives PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+    )
+    target_link_libraries(TestMetalVTPrimitives PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalVTPrimitives COMMAND TestMetalVTPrimitives)
+    set_target_properties(TestMetalVTPrimitives PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestMetalVTPrimitives UnitTestAssetsCopy)
 
     # P4c §4: ForwardRenderer integration frame-time twin (Metal side) for the
     # ±5% cross-backend performance gate.

@@ -1,0 +1,22 @@
+#version 450
+// VT M0.5: fenced readback ring roundtrip — CS 写入校验模式到 storage buffer。
+// 输出值 = tag * 0x01010101 + gid,CPU 侧按同公式核对(帧 ring 轮转下 tag 不同)。
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform Params {
+    uint tag;     // 帧标记
+    uint count;   // 元素数
+    uint pad0;
+    uint pad1;
+} params;
+
+layout(set = 0, binding = 1) writeonly buffer OutBuf {
+    uint data[];
+} out_buf;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid < params.count) {
+        out_buf.data[gid] = params.tag * 0x01010101u + gid;
+    }
+}

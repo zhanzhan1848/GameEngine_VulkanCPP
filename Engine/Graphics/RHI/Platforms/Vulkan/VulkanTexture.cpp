@@ -736,6 +736,199 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     return true;
 }
 
+// VT M0.7: 任意子区域上传。结构镜像 updateDataImpl,差异点:
+// 任意 mip/origin 的 bounds 校验 + barrier 的 baseMipLevel 跟随 region。
+bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegionUpdate& region) {
+    if (!data || size == 0) return false;
+    if (!ownsImage_ || isView_) {
+        std::cerr << "[VulkanTexture] updateRegion on wrap/view texture unsupported" << std::endl;
+        return false;
+    }
+    if (vkImage_ == VK_NULL_HANDLE || state_ != ResourceState::Ready) return false;
+
+    if (texDesc_.type != TextureType::Texture2D || texDesc_.size.z > 1 ||
+        texDesc_.arraySize > 1) {
+        std::cerr << "[VulkanTexture] updateRegion: only 2D single-slice supported (M0 scope)" << std::endl;
+        return false;
+    }
+    if (vulkan::IsBlockCompressedFormat(texDesc_.format)) {
+        std::cerr << "[VulkanTexture] updateRegion: block-compressed formats unsupported — "
+                     "use CopyBufferToTexture" << std::endl;
+        return false;
+    }
+    const u64 bpt = vulkan::BytesPerTexel(texDesc_.format);
+    if (bpt == 0) {
+        std::cerr << "[VulkanTexture] updateRegion: unknown texel size for format "
+                  << static_cast<int>(texDesc_.format) << std::endl;
+        return false;
+    }
+    if (region.mipLevel >= texDesc_.mipLevels) {
+        std::cerr << "[VulkanTexture] updateRegion: mip " << region.mipLevel
+                  << " >= mipLevels " << texDesc_.mipLevels << std::endl;
+        return false;
+    }
+    if (region.offsetZ != 0 || region.depth != 1) {
+        std::cerr << "[VulkanTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
+        return false;
+    }
+
+    const u32 mipW = std::max<u32>(1u, texDesc_.size.x >> region.mipLevel);
+    const u32 mipH = std::max<u32>(1u, texDesc_.size.y >> region.mipLevel);
+    if (region.width == 0 || region.height == 0 ||
+        region.offsetX + region.width > mipW || region.offsetY + region.height > mipH) {
+        std::cerr << "[VulkanTexture] updateRegion: region [" << region.offsetX << ","
+                  << region.offsetY << " " << region.width << "x" << region.height
+                  << ") exceeds mip " << region.mipLevel << " dims "
+                  << mipW << "x" << mipH << std::endl;
+        return false;
+    }
+    const u64 bytesPerRow = u64(region.width) * bpt;
+    if (size != bytesPerRow * region.height) {
+        std::cerr << "[VulkanTexture] updateRegion: size " << size << " != tightly-packed "
+                  << bytesPerRow * region.height << " (bytesPerRow=" << bytesPerRow
+                  << " x rows=" << region.height << ")" << std::endl;
+        return false;
+    }
+
+    VulkanDevice& vkDev = static_cast<VulkanDevice&>(device_);
+    VmaAllocator allocator = vkDev.GetVmaAllocator();
+    VkDevice vkDevice = vkDev.GetNativeDevice();
+    u32 queueFamily = vkDev.GetGraphicsQueueFamily();
+    if (!allocator || queueFamily == UINT32_MAX) return false;
+
+    const VkImageAspectFlags aspect = GetAspectMask();
+    const VkImageLayout trackedLayout = mipLayouts_.empty()
+                                            ? currentLayout_
+                                            : GetMipLayout(region.mipLevel);
+    const VkImageLayout layoutBefore =
+        (trackedLayout != VK_IMAGE_LAYOUT_UNDEFINED && trackedLayout != VK_IMAGE_LAYOUT_PREINITIALIZED)
+            ? trackedLayout : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const VkImageLayout layoutAfter = layoutBefore;
+
+    // === 帧内模式:staging 队列(下一 cmdbuf Begin 编码,零等待) ===
+    if (vkDev.IsFrameRecording()) {
+        VulkanStagingAllocator& staging = vkDev.GetStagingAllocator();
+        VulkanStagingAllocator::Allocation alloc = staging.Allocate(size, 256);
+        if (!alloc.overflow) {
+            std::memcpy(alloc.cpuPtr, data, size);
+            staging.QueueBlit_Texture(alloc, vkImage_,
+                                      region.mipLevel, region.baseArrayLayer,
+                                      region.offsetX, region.offsetY, region.offsetZ,
+                                      region.width, region.height, region.depth,
+                                      /*bytesPerRow=*/0, /*bytesPerImage=*/0,
+                                      /*currentLayout=*/layoutBefore,
+                                      /*backLayout=*/layoutAfter,
+                                      /*aspect=*/aspect,
+                                      /*texelSize=*/static_cast<u32>(bpt));
+            SetMipLayout(region.mipLevel, layoutAfter);
+            return true;
+        }
+        staging.FlushBlocking();
+    }
+
+    // === 立即模式:一次性 staging + one-shot cmdbuf(资产加载期语义) ===
+    VkBufferCreateInfo stagingCI{};
+    stagingCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingCI.size = size;
+    stagingCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo stagingACI{};
+    stagingACI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                     | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    stagingACI.usage = VMA_MEMORY_USAGE_AUTO;
+    VkBuffer stagingBuf = VK_NULL_HANDLE;
+    VmaAllocation stagingAlloc = nullptr;
+    VmaAllocationInfo stagingInfo{};
+    if (vmaCreateBuffer(allocator, &stagingCI, &stagingACI,
+                        &stagingBuf, &stagingAlloc, &stagingInfo) != VK_SUCCESS) {
+        std::cerr << "[VulkanTexture] updateRegion: staging vmaCreateBuffer failed" << std::endl;
+        return false;
+    }
+    std::memcpy(stagingInfo.pMappedData, data, size);
+
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = queueFamily;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(vkDevice, &pci, nullptr, &pool) != VK_SUCCESS) {
+        vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+        return false;
+    }
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    ai.commandPool = pool;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(vkDevice, &ai, &cmd) != VK_SUCCESS) {
+        vkDestroyCommandPool(vkDevice, pool, nullptr);
+        vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+        return false;
+    }
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    auto imageBarrier = [&](VkImageLayout oldL, VkImageLayout newL,
+                            VkAccessFlags srcAccess, VkPipelineStageFlags srcStage,
+                            VkAccessFlags dstAccess, VkPipelineStageFlags dstStage) {
+        VkImageMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = srcAccess;
+        b.dstAccessMask = dstAccess;
+        b.oldLayout = oldL;
+        b.newLayout = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = vkImage_;
+        b.subresourceRange.aspectMask = aspect;
+        b.subresourceRange.baseMipLevel = region.mipLevel;
+        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.baseArrayLayer = region.baseArrayLayer;
+        b.subresourceRange.layerCount = 1;
+        vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+
+    imageBarrier(layoutBefore, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = 0;
+    copy.bufferRowLength = 0;   // 紧密行主序
+    copy.bufferImageHeight = 0;
+    copy.imageSubresource.aspectMask = aspect;
+    copy.imageSubresource.mipLevel = region.mipLevel;
+    copy.imageSubresource.baseArrayLayer = region.baseArrayLayer;
+    copy.imageSubresource.layerCount = 1;
+    copy.imageOffset = {int32_t(region.offsetX), int32_t(region.offsetY), 0};
+    copy.imageExtent = {region.width, region.height, 1};
+    vkCmdCopyBufferToImage(cmd, stagingBuf, vkImage_,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    imageBarrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layoutAfter,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(vkDev.GetGraphicsQueue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(vkDev.GetGraphicsQueue());
+
+    vkFreeCommandBuffers(vkDevice, pool, 1, &cmd);
+    vkDestroyCommandPool(vkDevice, pool, nullptr);
+    vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
+
+    SetMipLayout(region.mipLevel, layoutAfter);
+    return true;
+}
+
 VkImageView VulkanTexture::GetArrayView() {
     // P4c-F5: 非 array 纹理的默认 view 已覆盖唯一 layer。
     if (texDesc_.arraySize <= 1 && texDesc_.type != TextureType::Texture2DArray) {
