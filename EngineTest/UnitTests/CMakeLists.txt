@@ -2244,6 +2244,12 @@ set_target_properties(TestRenderSystemECS PROPERTIES
 target_compile_definitions(TestRenderSystemECS PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 ## 创建一个宏来运行所有RHI测试
+# Timestamp 测试仅 Apple 存在（Metal 绑定），聚合命令按平台条件注入
+if(APPLE)
+    set(TIMESTAMP_TEST_CMD COMMAND StandaloneRHI_Timestamp_Test)
+else()
+    set(TIMESTAMP_TEST_CMD "")
+endif()
 add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_Test
     COMMAND StandaloneRHI_Device_Test
@@ -2255,7 +2261,7 @@ add_custom_target(RHI_All_Tests
     COMMAND StandaloneRHI_MultiThreadedCommandGenerator_Test
     COMMAND StandaloneRHI_Allocator_Test
     COMMAND StandaloneRHI_GarbageCollector_Test
-    COMMAND StandaloneRHI_Timestamp_Test
+    ${TIMESTAMP_TEST_CMD}
     COMMAND StandaloneRHI_GPUBufferComponent_Test
     COMMAND StandaloneRHI_RenderLayerComponent_Test
     COMMAND RHI_EntityManager_Test
@@ -2276,7 +2282,9 @@ set_target_properties(StandaloneRHI_GPUOptimizer_Test PROPERTIES FOLDER "Tests/R
 set_target_properties(StandaloneRHI_MultiThreadedCommandGenerator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_Allocator_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(StandaloneRHI_GarbageCollector_Test PROPERTIES FOLDER "Tests/RHI")
+if(APPLE)
 set_target_properties(StandaloneRHI_Timestamp_Test PROPERTIES FOLDER "Tests/RHI")
+endif()
 set_target_properties(StandaloneRHI_GPUBufferComponent_Test PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(MpscQueueSimpleTest PROPERTIES FOLDER "Tests/RHI")
 set_target_properties(RHI_All_Tests PROPERTIES FOLDER "Tests/RHI")
