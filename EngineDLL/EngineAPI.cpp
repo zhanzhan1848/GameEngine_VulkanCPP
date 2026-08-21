@@ -20,6 +20,18 @@ namespace {
 	utl::vector<graphics::render_surface> surfaces;
 }// anonymous namespace
 
+// 与 __clang__ 分支一致：把匿名命名空间的 surfaces 向量暴露给其它 API 编译
+// 单元（FrameAPI/CaptureAPI/RenderPipelineAPI 经 EngineAPIInternal.h 引用）。
+// 此前只存在于 clang 分支，MSVC 分支缺失 → EngineDLL.dll LNK2019/LNK1120。
+namespace primal::engine_dll {
+graphics::render_surface* GetSurface(u32 id) {
+    return id < surfaces.size() ? &surfaces[id] : nullptr;
+}
+u32 GetSurfaceCount() {
+    return static_cast<u32>(surfaces.size());
+}
+} // namespace primal::engine_dll
+
 EDITOR_INTERFACE u32 LoadGameCodeDll(const char* dll_path)
 {
 	if (game_code_dll) return FALSE;
