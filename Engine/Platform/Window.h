@@ -20,7 +20,7 @@ public:
     void* handle() const;
 #if defined(_MSC_VER)
     void set_caption(const wchar_t* caption) const;
-#elif defined(__clang__)
+#else
     void set_caption(const char* caption) const;
 #endif
     math::u32v4 size() const;
