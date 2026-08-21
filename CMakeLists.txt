@@ -290,7 +290,11 @@ if(MSVC)
         /W4             # 警告级别
         /utf-8          # 源码与执行字符集均为 UTF-8：源文件含中文注释/字符串，
                         # 默认按系统代码页(GBK)解读会产生 C4819/C2001 大量误报
-        /GR-            # 禁用RTTI
+        /GR             # 显式开启 RTTI：Script/Nanite/RenderGraph 等 12 处
+                        # dynamic_cast 依赖运行时类型信息。/GR- 下 MSVC 的
+                        # dynamic_cast 运行时抛 bad_cast，异常又被 /EHs-c- 禁用
+                        # → terminate → abort(0xc0000409)。GCC/Clang 侧
+                        # -fno-rtti 一直处于注释状态（RTTI 开启），MSVC 对齐。
         /EHs-c-        # 禁用异常处理
         /fp:fast        # 快速浮点计算
         # /WX 暂不启用（与 clang 侧一致，-Werror 本就注释）：

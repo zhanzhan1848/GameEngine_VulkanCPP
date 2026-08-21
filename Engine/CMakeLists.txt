@@ -446,7 +446,8 @@ if(MSVC)
         /MP
         /GS-
         /fp:fast
-        /GR-
+        /GR             # RTTI 必须开：RenderGraph/Nanite/Script 的 dynamic_cast
+                        # 在 /GR- 下运行时抛 bad_cast（异常已禁 → 0xc0000409）
         /Y-
     )
     

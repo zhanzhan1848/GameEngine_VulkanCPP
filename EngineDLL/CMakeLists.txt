@@ -83,7 +83,8 @@ if(WIN32)
     target_compile_options(${PROJECT_NAME} PRIVATE
         /W4
         /MP
-        /GR-             # 禁用RTTI
+        /GR             # 与 Engine 一致：RTTI 开（/GR- 下 dynamic_cast 运行时抛
+                        # bad_cast，异常已禁 → 0xc0000409）
         /fp:fast         # 快速浮点运算
         /EHs-c-         # 禁用异常处理
         /Y-             # 禁用预编译头
@@ -161,6 +162,23 @@ endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Engine
     # ContentTools
+)
+
+# EngineDLL.dll 部署到测试输出目录：TestMaterialGraphAPI / TestParticleMaterialAPI /
+# TestMaterialAPIExtended 直接链接本 DLL。此前 DLL 只输出到源码树 Windows/，exe
+# 启动时找不到 → STATUS_DLL_NOT_FOUND(0xc0000135)。VS 生成器把 exe 放在
+# Tests/UnitTests/$<CONFIG>/（自动追加配置子目录），Ninja/Makefile 直接放
+# Tests/UnitTests/——两个布局各拷一份（make_directory 保证目录存在）。
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_BINARY_DIR}/Tests/UnitTests/$<CONFIG>
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:${PROJECT_NAME}>
+            ${CMAKE_BINARY_DIR}/Tests/UnitTests/$<CONFIG>/
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:${PROJECT_NAME}>
+            ${CMAKE_BINARY_DIR}/Tests/UnitTests/
+    COMMENT "Deploying EngineDLL to Tests/UnitTests (config + root layouts)"
 )
 
 # 配置编译器特性
