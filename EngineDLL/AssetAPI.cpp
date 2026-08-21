@@ -5,7 +5,9 @@
 #include "../Engine/Content/ContentLoader.h"
 #include "../Content/ContentToEngine.h"
 #include "../Engine/Graphics/SceneDataAdapter.h"
+#include <cstring>
 #include <fstream>
+#include <string>
 #include <vector>
 
 #pragma comment(lib, "Engine.lib")

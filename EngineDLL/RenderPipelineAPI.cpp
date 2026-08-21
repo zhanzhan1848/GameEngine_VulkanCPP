@@ -1,17 +1,7 @@
-#if defined(_MSC_VER)
-#include "Common.h"
-#include "CommonHeaders.h"
-#include "Graphics/RenderPipeline/RenderPipeline.h"
-#include "Graphics/RenderPipeline/StandardRenderPipeline.h"
-#include "Graphics/RenderPipeline/StreamingMesh.h"
-#include "Graphics/RenderPipeline/PipelineQualityConfig.h"
-#include "Graphics/Lumen/LumenTypes.h"
-#include "Graphics/Scene/RenderSceneSnapshot.h"
-#include <cstring>
-
-#pragma comment(lib, "Engine.lib")
-
-#elif defined(__clang__)
+// include 列表对所有编译器统一。此前 _MSC_VER 分支只保留了文件早期版本的 8 个
+// include，后来新增的 PipelineLight/Transform/std::cerr 等代码只更新了 __clang__
+// 分支——MSVC 编译时 PipelineLightDesc、transform::component_cache、std::cerr
+// 全部未声明（report-14 的 C2039/C2065 级联）。GCC 此前无任何分支可用，一并修复。
 #include "Common.h"
 #include "CommonHeaders.h"
 #include "Graphics/RenderPipeline/RenderPipeline.h"
@@ -38,6 +28,8 @@
 #include <cstring>
 #include <iostream>
 
+#if defined(_MSC_VER)
+#pragma comment(lib, "Engine.lib")
 #endif
 
 using namespace primal;
