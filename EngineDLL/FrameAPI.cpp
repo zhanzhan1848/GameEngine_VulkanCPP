@@ -9,7 +9,16 @@
 
 using namespace primal;
 
+// FrameAPI.h 已在 extern "C" 块内声明本函数。MSVC 对"块内声明 + 带(dllexport)
+// 的定义"组合误判 C2375（不同的链接）——RenderFrame 是 EngineDLL 中唯一在头
+// 文件预声明的导出函数，其余 EDITOR_INTERFACE 函数均无前置声明故不触发。
+// MSVC 下改用与声明完全一致的裸 extern "C"；符号导出由 CMake 的
+// CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS 兜底。Apple 保留 visibility 属性。
+#if defined(_MSC_VER)
+extern "C" u32 RenderFrame(const RenderFrameParams* params)
+#else
 EDITOR_INTERFACE u32 RenderFrame(const RenderFrameParams* params)
+#endif
 {
     if (!params) {
         std::fprintf(stderr, "[RenderFrame] null params\n");

@@ -50,9 +50,18 @@ static void SetWindowFullscreen(void* nsWindow, bool fullscreen) {
 
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <vector>
+
+// Windows 的 window_init_info::caption 是 const wchar_t*（PlatformTypes.h
+// 按平台分叉），macOS/Linux 是 const char*。测试统一经该宏传窄字符串字面量。
+#ifdef _WIN32
+#define TEST_CAPTION(s) L##s
+#else
+#define TEST_CAPTION(s) s
+#endif
 
 using namespace primal::graphics::rhi;
 using namespace Engine::Test;
@@ -85,7 +94,7 @@ TestResult TestSwapChainCreate_NullWindow() {
 TestResult TestSwapChainAcquireImage() {
     // === 平台 window ===
     primal::platform::window_init_info wi{};
-    wi.caption = "VulkanSwapChain Test";
+    wi.caption = TEST_CAPTION("VulkanSwapChain Test");
     wi.width = 128;
     wi.height = 128;
     primal::platform::window win = primal::platform::create_window(&wi);
@@ -104,7 +113,7 @@ TestResult TestSwapChainAcquireImage() {
 
     // === SwapChain ===
     SwapChainDesc scd{};
-    scd.window = win.handle();
+    scd.window = static_cast<primal::platform::window_handle>(win.handle());
     scd.width = 128;
     scd.height = 128;
     scd.format = DataFormat::BGRA8_UNorm;
@@ -140,7 +149,7 @@ TestResult TestSwapChainAcquireImage() {
 TestResult TestSwapChainAcquirePresent() {
     // === 平台 window ===
     primal::platform::window_init_info wi{};
-    wi.caption = "VulkanSwapChain Acquire/Present";
+    wi.caption = TEST_CAPTION("VulkanSwapChain Acquire/Present");
     wi.width = 128;
     wi.height = 128;
     primal::platform::window win = primal::platform::create_window(&wi);
@@ -159,7 +168,7 @@ TestResult TestSwapChainAcquirePresent() {
 
     // === SwapChain ===
     SwapChainDesc scd{};
-    scd.window = win.handle();
+    scd.window = static_cast<primal::platform::window_handle>(win.handle());
     scd.width = 128;
     scd.height = 128;
     scd.format = DataFormat::BGRA8_UNorm;
@@ -278,7 +287,8 @@ ResizeRunResult RunResizeTestPass(bool enableResize) {
 
     // 窗口
     primal::platform::window_init_info wi{};
-    wi.caption = enableResize ? "VulkanSwapChain ResizeRecovery" : "VulkanSwapChain Baseline";
+    wi.caption = enableResize ? TEST_CAPTION("VulkanSwapChain ResizeRecovery")
+                              : TEST_CAPTION("VulkanSwapChain Baseline");
     wi.width = 128;
     wi.height = 128;
     primal::platform::window win = primal::platform::create_window(&wi);
@@ -297,7 +307,7 @@ ResizeRunResult RunResizeTestPass(bool enableResize) {
 
     // SwapChain
     SwapChainDesc scd{};
-    scd.window = win.handle();
+    scd.window = static_cast<primal::platform::window_handle>(win.handle());
     scd.width = 128;
     scd.height = 128;
     scd.format = DataFormat::BGRA8_UNorm;
@@ -551,7 +561,7 @@ TestResult TestSwapChainResizeRecovery() {
 TestResult TestSwapChainManualAcceptanceProtocol() {
     // === 平台 window ===
     primal::platform::window_init_info wi{};
-    wi.caption = "VulkanSwapChain ManualAcceptance";
+    wi.caption = TEST_CAPTION("VulkanSwapChain ManualAcceptance");
     wi.width = 256;
     wi.height = 256;
     primal::platform::window win = primal::platform::create_window(&wi);
@@ -569,7 +579,7 @@ TestResult TestSwapChainManualAcceptanceProtocol() {
     VulkanDevice* vkDev = static_cast<VulkanDevice*>(device);
 
     SwapChainDesc scd{};
-    scd.window = win.handle();
+    scd.window = static_cast<primal::platform::window_handle>(win.handle());
     scd.width = 256;
     scd.height = 256;
     scd.format = DataFormat::BGRA8_UNorm;

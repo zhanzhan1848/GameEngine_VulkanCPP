@@ -8,6 +8,11 @@
 
 #include <cmath>
 
+// MSVC 的 <cmath> 不定义 M_PI（POSIX 扩展，clang/gcc 有）——补回退定义
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 using namespace primal;
 
 namespace {

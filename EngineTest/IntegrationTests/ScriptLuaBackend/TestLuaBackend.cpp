@@ -20,14 +20,13 @@
 
 #include <cmath>
 #include <cstdio>
+#include <atomic>
 #include <fstream>
 #include <filesystem>
 #include <string>
 #include <vector>
 #include <thread>
 #include <chrono>
-#include <unistd.h>
-#include <fcntl.h>
 
 extern "C" {
 #include "lua.h"
@@ -597,58 +596,54 @@ TestResult test_lua_reload_preserves_old_state() {
 
 // === Phase 2b.3 Test 7: type-level source reload ===
 //
-// Tempfile helper: writes initial content, supports rewrite. RAII unlinks on
-// destruction. Uses mkstemp for unique filename.
+// Tempfile helper: writes initial content, supports rewrite. RAII removes the
+// file on destruction. mkstemp/ssize_t 等 POSIX 专有 API 在 MSVC 上不存在
+// （report-15 的 C3861/C2065 级联源头），改用 std::ofstream + std::filesystem
+// 的跨平台实现；进程内递增计数保证文件名唯一（测试为单进程顺序执行）。
 class TempLuaFile {
 public:
     const std::string& get_path() const { return path; }
 
     explicit TempLuaFile(const std::string& content) {
-        path = "/tmp/lua_reload_type_test_XXXXXX.lua";
-        std::vector<char> tmpl(path.begin(), path.end());
-        tmpl.push_back('\0');
-        int fd = mkstemp(tmpl.data());
-        if (fd == -1) {
-            std::fprintf(stderr, "mkstemp failed\n");
+        static std::atomic<unsigned> next_id{0};
+        path = (std::filesystem::temp_directory_path() /
+                ("lua_reload_type_test_" +
+                 std::to_string(next_id.fetch_add(1)) + ".lua"))
+                   .string();
+        if (!write_file(path, content)) {
             path.clear();
-            return;
         }
-        path = tmpl.data();
-        if (write(fd, content.data(), content.size()) != (ssize_t)content.size()) {
-            std::fprintf(stderr, "write failed\n");
-            close(fd);
-            unlink(path.c_str());
-            path.clear();
-            return;
-        }
-        close(fd);
     }
 
     void rewrite(const std::string& content) {
         if (path.empty()) return;
-        int fd = open(path.c_str(), O_WRONLY | O_TRUNC);
-        if (fd == -1) {
-            std::fprintf(stderr, "rewrite open failed\n");
-            return;
-        }
-        if (write(fd, content.data(), content.size()) != (ssize_t)content.size()) {
+        if (!write_file(path, content)) {
             std::fprintf(stderr, "rewrite write failed\n");
-            close(fd);
-            unlink(path.c_str());
             path.clear();
-            return;
         }
-        close(fd);
     }
 
     ~TempLuaFile() {
-        if (!path.empty()) unlink(path.c_str());
+        if (!path.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(std::filesystem::path{path}, ec);
+        }
     }
 
     TempLuaFile(const TempLuaFile&) = delete;
     TempLuaFile& operator=(const TempLuaFile&) = delete;
 
 private:
+    static bool write_file(const std::string& p, const std::string& content) {
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            std::fprintf(stderr, "temp file open failed\n");
+            return false;
+        }
+        f.write(content.data(), static_cast<std::streamsize>(content.size()));
+        return static_cast<bool>(f);
+    }
+
     std::string path;
 };
 
