@@ -728,17 +728,17 @@ namespace primal::graphics::vulkan
 		void vulkan_scene::updateView(frame_info info)
 		{
 			glsl::GlobalShaderData data;
-			graphics::vulkan::camera::get(info.camera_id).update();
+			graphics::vulkan::camera::get(info.camera).update();
 
-			DirectX::XMStoreFloat4x4(&data.View, graphics::vulkan::camera::get(info.camera_id).view());
-			DirectX::XMStoreFloat4x4(&data.Projection, graphics::vulkan::camera::get(info.camera_id).projection());
-			DirectX::XMStoreFloat4x4(&data.InvProjection, graphics::vulkan::camera::get(info.camera_id).inverse_projection());
-			DirectX::XMStoreFloat4x4(&data.ViewProjection, graphics::vulkan::camera::get(info.camera_id).view_projection());
-			DirectX::XMStoreFloat4x4(&data.InvViewProjection, graphics::vulkan::camera::get(info.camera_id).inverse_view_projection());
-			DirectX::XMStoreFloat3(&data.CameraPositon, graphics::vulkan::camera::get(info.camera_id).position());
-			DirectX::XMStoreFloat3(&data.CameraDirection, graphics::vulkan::camera::get(info.camera_id).direction());
-			data.NearPlane = graphics::vulkan::camera::get(info.camera_id).near_z();
-			data.FarPlane = graphics::vulkan::camera::get(info.camera_id).far_z();
+			DirectX::XMStoreFloat4x4(&data.View, graphics::vulkan::camera::get(info.camera).view());
+			DirectX::XMStoreFloat4x4(&data.Projection, graphics::vulkan::camera::get(info.camera).projection());
+			DirectX::XMStoreFloat4x4(&data.InvProjection, graphics::vulkan::camera::get(info.camera).inverse_projection());
+			DirectX::XMStoreFloat4x4(&data.ViewProjection, graphics::vulkan::camera::get(info.camera).view_projection());
+			DirectX::XMStoreFloat4x4(&data.InvViewProjection, graphics::vulkan::camera::get(info.camera).inverse_view_projection());
+			DirectX::XMStoreFloat3(&data.CameraPositon, graphics::vulkan::camera::get(info.camera).position());
+			DirectX::XMStoreFloat3(&data.CameraDirection, graphics::vulkan::camera::get(info.camera).direction());
+			data.NearPlane = graphics::vulkan::camera::get(info.camera).near_z();
+			data.FarPlane = graphics::vulkan::camera::get(info.camera).far_z();
 			data.ViewHeight = 900;
 			data.ViewWidth = 1600;
 			data.DeltaTime = info.average_frame_time;

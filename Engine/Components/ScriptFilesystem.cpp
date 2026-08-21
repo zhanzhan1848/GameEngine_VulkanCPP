@@ -348,7 +348,12 @@ void ScriptFilesystem::initialize() {
     stop_ = false;
     worker_ = std::thread([this]() {
 #if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+#if defined(__APPLE__)
         pthread_setname_np("ScriptFSWorker");
+#else
+        // Linux 签名带 pthread_t（macOS 版本作用于当前线程无此参数）
+        pthread_setname_np(pthread_self(), "ScriptFSWorker");
+#endif
 #endif
         worker_loop();
     });

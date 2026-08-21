@@ -16,7 +16,7 @@ namespace primal::graphics {
         //   4) 构造 RenderLight，调 scene.AddLight(...)
         //
         // Camera 组件同步未实现 —— 现有 graphics::create_camera 路径
-        // （Track A CreateCamera / EngineAPI frame_info.camera_id）仍可工作。
+        // （Track A CreateCamera / EngineAPI frame_info.camera）仍可工作。
         // 后续会补 CameraSyncSystem。
         //
         // 注意：本函数**不是线程安全**的 —— 必须在渲染线程的同一帧内调用。

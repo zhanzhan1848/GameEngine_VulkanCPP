@@ -163,7 +163,7 @@ namespace primal::graphics::metal::core
 
         metal_frame_info get_metal_frame_info(frame_info info, constant_buffer& cbuffer, const metal_surface& surface, u32 frame_idx, u32 frame_count, f32 delta_time)
         {
-            camera::metal_camera& camera{ camera::get(info.camera_id) };
+            camera::metal_camera& camera{ camera::get(info.camera) };
 			msl::GlobalShaderData data{};
 
             data.PreviousViewProjection = camera.view_projection();

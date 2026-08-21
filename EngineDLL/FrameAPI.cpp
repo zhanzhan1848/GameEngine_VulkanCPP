@@ -29,7 +29,7 @@ EDITOR_INTERFACE u32 RenderFrame(const RenderFrameParams* params)
     }
 
     graphics::frame_info info{};
-    info.camera_id = graphics::camera_id{ params->camera_id };
+    info.camera = graphics::camera_id{ params->camera_id };
     info.light_set_key = params->light_set_key;
     info.render_item_count = params->render_item_count;
     // frame_info has non-const pointers by design (legacy). Cast carefully.

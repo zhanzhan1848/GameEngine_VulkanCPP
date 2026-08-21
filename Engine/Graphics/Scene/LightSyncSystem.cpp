@@ -8,7 +8,7 @@
 //     而不是旧的 light_set_key + MetalLight 后端路径。
 //     把 ECS Light 直接 push 到 RenderScene 才能让 Phase 4 真正闭环。
 //   - Camera 同步暂未实现 —— 现有 graphics::create_camera 路径（Track A CreateCamera
-//     或 frame_info.camera_id）仍然工作。CameraSyncSystem 留作后续 sub-step。
+//     或 frame_info.camera）仍然工作。CameraSyncSystem 留作后续 sub-step。
 
 #include "LightSyncSystem.h"
 #include "../RenderScene.h"

@@ -239,7 +239,15 @@ jobs:
           if (Test-Path build/CMakeCache.txt) { Remove-Item build/CMakeCache.txt -Force }
           if (Test-Path build/CMakeFiles) { Remove-Item build/CMakeFiles -Recurse -Force }
           if (Test-Path build/Engine) { Remove-Item build/Engine -Recurse -Force }
+          # 外置归档输出目录（顶层 CMake 设 ${SOURCE}/${SYSTEM_NAME}/${TYPE}），
+          # 在 build/ 之外——陈旧的 MDd Engine.lib 可能藏在这里被链接
+          if (Test-Path Windows) { Remove-Item Windows -Recurse -Force }
           cmake -S . -B build -DENABLE_VULKAN=ON -DBUILD_CONTENT_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          # 诊断：确认生成的 Engine.vcxproj Release 运行时与缓存标志
+          Write-Host '--- Engine.vcxproj RuntimeLibrary (Release) ---'
+          Select-String -Path build/Engine/Engine.vcxproj -Pattern 'RuntimeLibrary' | ForEach-Object { Write-Host $_.Line.Trim() }
+          Write-Host '--- CMakeCache CXX flags ---'
+          Select-String -Path build/CMakeCache.txt -Pattern 'CMAKE_CXX_FLAGS' | ForEach-Object { Write-Host $_.Line.Trim() }
 
       - name: 编译 (Release)
         shell: powershell

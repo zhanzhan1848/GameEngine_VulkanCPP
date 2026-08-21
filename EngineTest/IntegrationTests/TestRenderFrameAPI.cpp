@@ -188,7 +188,7 @@ int main() {
         // 8) Render 10 frames
         RenderFrameParams params{};
         params.surface_id = surface_id;
-        params.camera_id = camera_id;
+        params.camera = camera_id;
         params.light_set_key = light_set_key;
         params.render_item_count = 0;
         params.render_item_ids = nullptr;

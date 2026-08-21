@@ -277,7 +277,7 @@ namespace primal::graphics::d3d12::core
 
 		d3d12_frame_info get_d3d12_frame_info(frame_info info, constant_buffer& cbuffer, const d3d12_surface& surface, u32 frame_idx, f32 delta_time)
 		{
-			camera::d3d12_camera& camera{ camera::get(info.camera_id) };
+			camera::d3d12_camera& camera{ camera::get(info.camera) };
 			camera.update();
 			hlsl::GlobalShaderData data{};
 

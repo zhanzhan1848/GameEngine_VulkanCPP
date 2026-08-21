@@ -26,7 +26,8 @@ namespace primal::graphics
 		f32									last_frame_time{ 16.7f };
 		f32									average_frame_time{ 16.7f };
 		u32									render_item_count{ 0 };
-		camera_id							camera_id{ id::invalid_id };
+		// 成员不可与类型同名：gcc14 的 -Wchanges-meaning 视为错误
+		camera_id							camera{ id::invalid_id };
 	};
 
 	DEFINE_TYPED_ID(surface_id);
