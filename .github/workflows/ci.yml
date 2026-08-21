@@ -194,6 +194,13 @@ jobs:
           # 深度清理做一次全量重编
           clean: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_build == true }}
 
+      - name: 清理上一轮的陈旧构建日志
+        shell: powershell
+        # 防止 configure 失败时把旧日志上传进错误报告造成误诊
+        run: |
+          if (Test-Path msbuild-full.log) { Remove-Item msbuild-full.log -Force }
+          if (Test-Path msbuild-errors.log) { Remove-Item msbuild-errors.log -Force }
+
       - name: 初始化必需的 submodule
         shell: powershell
         run: |

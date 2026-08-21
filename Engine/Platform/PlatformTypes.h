@@ -48,6 +48,15 @@ struct window_init_info
 #elif defined(__linux__)
 #include <X11/Xlib.h>
 #include <stdlib.h>
+// X11 的 X.h 把 None/Always/Bool/True/False/Status 定义为宏（如 None=0L），
+// 与 RHI 枚举成员名（QueryResultFlags::None、ComparisonFunc::Always 等）冲突
+// （'expected identifier before numeric constant'）。包含后立即撤销。
+#undef None
+#undef Always
+#undef Bool
+#undef True
+#undef False
+#undef Status
 
 namespace primal::platform {
 

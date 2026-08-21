@@ -267,6 +267,10 @@ add_compile_definitions(
 
 # 设置通用编译选项
 if(MSVC)
+    # 显式钉死运行时库选择：Release=MD / Debug=MDd。曾出现 Engine 的 Release
+    # 以 MDd 编译导致测试链接 LNK2038 混链（环境/缓存来源不明），显式声明
+    # 消除一切歧义。
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     # MSVC编译选项
     add_compile_options(
         /MP             # 多处理器编译

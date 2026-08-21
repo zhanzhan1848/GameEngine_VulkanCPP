@@ -2114,7 +2114,8 @@ set_target_properties(StandaloneRHI_MaterialComponent_Test PROPERTIES
 )
 target_compile_definitions(StandaloneRHI_MaterialComponent_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
-# 创建RHI时间戳测试
+# 创建RHI时间戳测试（Apple-only：本体直接 new MetalDevice）
+if(APPLE)
 add_executable(StandaloneRHI_Timestamp_Test RHI/Core/TestRHITimestamp.cpp)
 target_include_directories(StandaloneRHI_Timestamp_Test PRIVATE 
     ${CMAKE_SOURCE_DIR}
@@ -2128,6 +2129,7 @@ set_target_properties(StandaloneRHI_Timestamp_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(StandaloneRHI_Timestamp_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+endif()
 
 # 创建 RenderGraph Timestamp Integration 测试
 # Apple-only：测试本体绑定 MetalDevice（CreateTestDevice 直接 new MetalDevice），
