@@ -79,6 +79,48 @@ set_target_properties(TestRHIDeviceFactory PROPERTIES
 # Vulkan RHI 后端设备测试 — 仅在 ENABLE_VULKAN 时编入 Vulkan 代码路径。
 # ENABLE_VULKAN 未定义时此 TU 仍可编译（main 返回 0），但不会连接 Vulkan SDK。
 if(ENABLE_VULKAN)
+    # Vulkan/Metal shader 共享拷贝（stamp 目标）：此前 6 个 TestVulkan* 目标各自
+    # POST_BUILD copy_directory 到同一目的地，MSBuild --parallel 下并发写同一目录
+    # 竞态失败（MSB3073，report-17）——与上方 UnitTestAssetsCopy 同模式收敛为单次
+    # 拷贝。拷两份：exe 输出目录根（手动运行场景）+ ctest 工作目录（CTest 以
+    # add_test 所在目录为 CWD，测试以相对路径 Engine/Graphics/*/shaders 读文件）。
+    set(VULKAN_SHADERS_SRC ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders)
+    if(EXISTS "${VULKAN_SHADERS_SRC}")
+        set(VULKAN_SHADERS_STAMP ${CMAKE_BINARY_DIR}/Tests/UnitTests/vulkan_shaders_copy.stamp)
+        add_custom_command(OUTPUT ${VULKAN_SHADERS_STAMP}
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${VULKAN_SHADERS_SRC}
+                    ${CMAKE_BINARY_DIR}/Tests/UnitTests/Engine/Graphics/Vulkan/shaders
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${VULKAN_SHADERS_SRC}
+                    ${CMAKE_BINARY_DIR}/EngineTest/UnitTests/Engine/Graphics/Vulkan/shaders
+            COMMAND ${CMAKE_COMMAND} -E touch ${VULKAN_SHADERS_STAMP}
+            DEPENDS ${VULKAN_SHADERS_SRC}
+            COMMENT "Copying Vulkan shaders for TestVulkan* tests"
+            VERBATIM
+        )
+        add_custom_target(VulkanShadersCopy DEPENDS ${VULKAN_SHADERS_STAMP})
+    endif()
+    set(METAL_SHADERS_SRC ${CMAKE_SOURCE_DIR}/Engine/Graphics/Metal/shaders)
+    if(EXISTS "${METAL_SHADERS_SRC}")
+        # TestVulkanStandardPipelineSmoke 的 ForwardSceneRenderer 以 Metal 源码作
+        # #include 回退，需要 Metal shaders 一并就位。
+        set(METAL_SHADERS_STAMP ${CMAKE_BINARY_DIR}/Tests/UnitTests/metal_shaders_copy.stamp)
+        add_custom_command(OUTPUT ${METAL_SHADERS_STAMP}
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${METAL_SHADERS_SRC}
+                    ${CMAKE_BINARY_DIR}/Tests/UnitTests/Engine/Graphics/Metal/shaders
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${METAL_SHADERS_SRC}
+                    ${CMAKE_BINARY_DIR}/EngineTest/UnitTests/Engine/Graphics/Metal/shaders
+            COMMAND ${CMAKE_COMMAND} -E touch ${METAL_SHADERS_STAMP}
+            DEPENDS ${METAL_SHADERS_SRC}
+            COMMENT "Copying Metal shaders for TestVulkanStandardPipelineSmoke"
+            VERBATIM
+        )
+        add_custom_target(MetalShadersCopy DEPENDS ${METAL_SHADERS_STAMP})
+    endif()
+
     # Phase 1: 设备骨架
     add_executable(TestVulkanDevice RHI/Core/TestVulkanDevice.cpp)
     target_include_directories(TestVulkanDevice PRIVATE
@@ -497,11 +539,7 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanTAA PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanTAA POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
-                $<TARGET_FILE_DIR:TestVulkanTAA>/Engine/Graphics/Vulkan/shaders
-    )
+    add_dependencies(TestVulkanTAA VulkanShadersCopy)
 
     # Toon: cel-shading post-process through the real AddToonPass + RenderGraph.
     # Quantization + depth Sobel edge split vs closed-form CPU reference.
@@ -520,11 +558,7 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanToon PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanToon POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
-                $<TARGET_FILE_DIR:TestVulkanToon>/Engine/Graphics/Vulkan/shaders
-    )
+    add_dependencies(TestVulkanToon VulkanShadersCopy)
 
     # Phase 4b-T3.4: Bloom bright-pass extraction.
     # Single-pass luminance threshold; CPU reference comparison (no Metal).
@@ -614,11 +648,7 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanForwardRendererIntegration PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanForwardRendererIntegration POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
-                $<TARGET_FILE_DIR:TestVulkanForwardRendererIntegration>/Engine/Graphics/Vulkan/shaders
-    )
+    add_dependencies(TestVulkanForwardRendererIntegration VulkanShadersCopy)
 
     # Tier 4.4.6: Nanite runtime smoke (HZBSystem + GlobalSDF + GPUCulling).
     # Validates that the 3 Nanite systems shipped in T4.4.0-T4.4.5 actually
@@ -640,11 +670,7 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanNaniteSmoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanNaniteSmoke POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
-                $<TARGET_FILE_DIR:TestVulkanNaniteSmoke>/Engine/Graphics/Vulkan/shaders
-    )
+    add_dependencies(TestVulkanNaniteSmoke VulkanShadersCopy)
 
     # Tier 4.5.1: StandardRenderPipeline plumbing smoke on Vulkan.
     # Validates minimal Initialize() + no-op RenderWithCommandBuffer path.
@@ -667,16 +693,9 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanStandardPipelineSmoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    # T4.6.5 part 16.2: copy Vulkan shaders + Metal sources (for #include fallback)
-    # next to the binary so ForwardSceneRenderer's relative shader dir resolves.
-    add_custom_command(TARGET TestVulkanStandardPipelineSmoke POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
-                $<TARGET_FILE_DIR:TestVulkanStandardPipelineSmoke>/Engine/Graphics/Vulkan/shaders
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Metal/shaders
-                $<TARGET_FILE_DIR:TestVulkanStandardPipelineSmoke>/Engine/Graphics/Metal/shaders
-    )
+    # T4.6.5 part 16.2: Vulkan shaders + Metal sources (for #include fallback)
+    # via shared stamp targets — ForwardSceneRenderer's relative shader dir resolves.
+    add_dependencies(TestVulkanStandardPipelineSmoke VulkanShadersCopy MetalShadersCopy)
 
     # Phase 1 Vulkan Lumen/GI port: LumenSSAOPass smoke.
     # Validates hand-written GLSL SPIR-V (SSAOTrace.comp.spv / SSAOFilter.comp.spv)
@@ -698,11 +717,7 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanLumenSSAO PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_custom_command(TARGET TestVulkanLumenSSAO POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
-                $<TARGET_FILE_DIR:TestVulkanLumenSSAO>/Engine/Graphics/Vulkan/shaders
-    )
+    add_dependencies(TestVulkanLumenSSAO VulkanShadersCopy)
 
     # Phase 4b-T3.5b: IBL Equirectangular → Cube (compute).
     add_executable(TestVulkanIBL_Equirect
