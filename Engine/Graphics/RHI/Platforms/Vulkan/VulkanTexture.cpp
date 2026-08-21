@@ -800,10 +800,14 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
     const VkImageLayout trackedLayout = mipLayouts_.empty()
                                             ? currentLayout_
                                             : GetMipLayout(region.mipLevel);
-    const VkImageLayout layoutBefore =
+    // old 用真实跟踪布局(UNDEFINED 合法,首传丢弃语义);back-layout 在
+    // 未定义时提升为 SHADER_READ_ONLY — 两者不能混用(旧实现把提升值同时
+    // 当 old 传给首屏障,触发 validation "expects SHADER_READ_ONLY, got
+    // UNDEFINED")。
+    const VkImageLayout layoutBefore = trackedLayout;
+    const VkImageLayout layoutAfter =
         (trackedLayout != VK_IMAGE_LAYOUT_UNDEFINED && trackedLayout != VK_IMAGE_LAYOUT_PREINITIALIZED)
             ? trackedLayout : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    const VkImageLayout layoutAfter = layoutBefore;
 
     // === 帧内模式:staging 队列(下一 cmdbuf Begin 编码,零等待) ===
     if (vkDev.IsFrameRecording()) {
@@ -820,7 +824,8 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
                                       /*backLayout=*/layoutAfter,
                                       /*aspect=*/aspect,
                                       /*texelSize=*/static_cast<u32>(bpt));
-            SetMipLayout(region.mipLevel, layoutAfter);
+            if (mipLayouts_.empty()) SetCurrentLayout(layoutAfter);
+            else SetMipLayout(region.mipLevel, layoutAfter);
             return true;
         }
         staging.FlushBlocking();
@@ -914,18 +919,36 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
                  VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     vkEndCommandBuffer(cmd);
 
+    // VT M0.9: 带 fence 提交再 vkWaitForFences — validation layer 的后台
+    // retire 线程在"无 fence submit + waitIdle + 立即 free transient pool"
+    // 高频序列下存在内部竞争(layer 内 QueueSubState::Retire 崩溃,80 次/帧
+    // 级上传可复现)。fence 信号强制 layer 同步完成 retire,再释放资源。
+    VkFence submitFence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (vkCreateFence(vkDevice, &fci, nullptr, &submitFence) != VK_SUCCESS) {
+        submitFence = VK_NULL_HANDLE;
+    }
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    vkQueueSubmit(vkDev.GetGraphicsQueue(), 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(vkDev.GetGraphicsQueue());
+    vkQueueSubmit(vkDev.GetGraphicsQueue(), 1, &si, submitFence);
+    if (submitFence != VK_NULL_HANDLE) {
+        vkWaitForFences(vkDevice, 1, &submitFence, VK_TRUE, UINT64_MAX);
+    } else {
+        vkQueueWaitIdle(vkDev.GetGraphicsQueue());
+    }
 
     vkFreeCommandBuffers(vkDevice, pool, 1, &cmd);
     vkDestroyCommandPool(vkDevice, pool, nullptr);
+    if (submitFence != VK_NULL_HANDLE) {
+        vkDestroyFence(vkDevice, submitFence, nullptr);
+    }
     vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
 
-    SetMipLayout(region.mipLevel, layoutAfter);
+    if (mipLayouts_.empty()) SetCurrentLayout(layoutAfter);
+    else SetMipLayout(region.mipLevel, layoutAfter);
     return true;
 }
 

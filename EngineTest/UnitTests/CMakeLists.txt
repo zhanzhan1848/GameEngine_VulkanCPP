@@ -122,6 +122,21 @@ if(ENABLE_VULKAN)
     )
     add_dependencies(TestVulkanVTPrimitives UnitTestAssetsCopy)
 
+    # VT M0 原型: 页表 + 物理 atlas + 两段式采样端到端
+    add_executable(TestVulkanVTPrototype RHI/Core/TestVulkanVTPrototype.cpp)
+    target_include_directories(TestVulkanVTPrototype PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanVTPrototype PRIVATE Engine)
+    target_compile_definitions(TestVulkanVTPrototype PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanVTPrototype COMMAND TestVulkanVTPrototype)
+    set_target_properties(TestVulkanVTPrototype PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestVulkanVTPrototype UnitTestAssetsCopy)
+
     # Phase 2: Sync (VkFence + VkSemaphore) 句柄池 + timeout 行为
     add_executable(TestVulkanSync RHI/Core/TestVulkanSync.cpp)
     target_include_directories(TestVulkanSync PRIVATE
@@ -1361,6 +1376,27 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
     add_dependencies(TestMetalVTPrimitives UnitTestAssetsCopy)
+
+    # VT M0 原型 (Metal): 页表 + 物理 atlas + 两段式采样端到端
+    add_executable(TestMetalVTPrototype Graphics/Metal/TestMetalVTPrototype.cpp)
+    target_include_directories(TestMetalVTPrototype PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+    )
+    target_link_libraries(TestMetalVTPrototype PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalVTPrototype COMMAND TestMetalVTPrototype)
+    set_target_properties(TestMetalVTPrototype PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestMetalVTPrototype UnitTestAssetsCopy)
 
     # P4c §4: ForwardRenderer integration frame-time twin (Metal side) for the
     # ±5% cross-backend performance gate.

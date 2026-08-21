@@ -1,0 +1,23 @@
+#version 450
+// VT M0.12: 页表 CS 更新 — 从 entries buffer 批量写页表纹理(R32_UINT)。
+// 页表是 16x16 单 mip 打包布局(各 mip 层级的页占据不同列区间,见
+// VTProto_Sample.comp 的 levelOrigin 常量),本 shader 只做裸写入;
+// 屏障(写→读一致性)由测试里的 InsertBarrier/MemoryBarrier 覆盖。
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, r32ui) uniform uimage2D vtPageTable;
+
+// entries 布局: [count, (ptX, ptY, value) * count]
+layout(set = 0, binding = 1) readonly buffer Entries {
+    uint data[];
+} entries;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint count = entries.data[0];
+    if (i >= count) return;
+    uint ptX = entries.data[1 + i * 3 + 0];
+    uint ptY = entries.data[1 + i * 3 + 1];
+    uint value = entries.data[1 + i * 3 + 2];
+    imageStore(vtPageTable, ivec2(int(ptX), int(ptY)), uvec4(value, 0u, 0u, 0u));
+}
