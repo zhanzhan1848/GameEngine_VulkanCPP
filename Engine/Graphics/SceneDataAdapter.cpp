@@ -1195,10 +1195,22 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
                 if (meshletMagic == 0x4C48534D) {
                     reader.Skip(4);
                     u32 meshletCount = reader.Read<u32>();
-                    if (meshletCount > 0 && meshletCount < 100000) {
+                    if (meshletCount < 100000) {
                         meshAsset.meshlets.resize(meshletCount);
+                        // Wire entries are 60 bytes (ContentTools mesh::meshlet);
+                        // RHIMeshlet pads to 64 for GPU alignment — read field-wise.
                         for (u32 m = 0; m < meshletCount; ++m) {
-                            reader.Skip(60); // RHIMeshlet is 60 bytes
+                            rhi::RHIMeshlet& ml = meshAsset.meshlets[m];
+                            ml.vertex_offset = reader.Read<u32>();
+                            ml.triangle_offset = reader.Read<u32>();
+                            ml.vertex_count = reader.Read<u32>();
+                            ml.triangle_count = reader.Read<u32>();
+                            reader.Read(&ml.cone_apex[0], sizeof(float) * 3);
+                            reader.Read(&ml.cone_axis[0], sizeof(float) * 3);
+                            reader.Read(&ml.cone_cutoff, sizeof(float));
+                            reader.Read(&ml.center[0], sizeof(float) * 3);
+                            reader.Read(&ml.radius, sizeof(float));
+                            ml.padding = 0;
                         }
                         u32 mvCount = reader.Read<u32>();
                         if (mvCount > 0) { meshAsset.meshlet_vertices.resize(mvCount); reader.Read(meshAsset.meshlet_vertices.data(), mvCount * 4); }
@@ -1388,7 +1400,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             u32 magicMshl = readU32();
             if (magicMshl == 0x4C48534D) { // "MSHL"
                 u32 meshletCount = readU32();
-                if (meshletCount > 0) skipBytes(meshletCount * 64); // sizeof(meshlet) ≈ 64
+                if (meshletCount > 0) skipBytes(meshletCount * 60); // ContentTools mesh::meshlet wire size
                 u32 mvCount = readU32();
                 if (mvCount > 0) skipBytes(mvCount * 4);
                 u32 mtCount = readU32();

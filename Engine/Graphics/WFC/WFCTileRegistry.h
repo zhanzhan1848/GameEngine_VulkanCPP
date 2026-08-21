@@ -3,6 +3,7 @@
 #include "../../Common/CommonHeaders.h"
 #include "../../Utilities/Vector.h"
 #include "WFCTypes.h"
+#include <bit>
 #include <vector>
 
 namespace primal::graphics::wfc {
@@ -54,5 +55,27 @@ private:
     utl::vector<WFCTile> tiles_;
     u32                  max_variants_{0};
 };
+
+// std::popcount / std::countr_zero 属 C++20 <bit>；现阶段项目统一 C++17
+// （Apple/Linux 均显式 -std=c++17，MSVC CI 侧 __cpp_lib_bitops 可用）。
+// 按特性宏分派，保证同一调用点在两端都编译。语义对齐 std 版本：
+// CountrZeroU64(0) == 64（宽度），与 std::countr_zero 一致。
+inline u32 PopcountU64(u64 v)
+{
+#if defined(__cpp_lib_bitops)
+    return static_cast<u32>(std::popcount(v));
+#else
+    return static_cast<u32>(__builtin_popcountll(v));
+#endif
+}
+
+inline u32 CountrZeroU64(u64 v)
+{
+#if defined(__cpp_lib_bitops)
+    return static_cast<u32>(std::countr_zero(v));
+#else
+    return v ? static_cast<u32>(__builtin_ctzll(v)) : 64u;
+#endif
+}
 
 } // namespace primal::graphics::wfc

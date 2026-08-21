@@ -89,7 +89,7 @@ void WFCSolver::PopulateAllCandidates(WaveGrid& grid, const WFCTileRegistry& reg
     }
     u32 total_candidates = 0;
     for (u32 w = 0; w < WFCCell::kMaskWords; ++w) {
-        total_candidates += static_cast<u32>(std::popcount(full_mask[w]));
+        total_candidates += PopcountU64(full_mask[w]);
     }
 
     auto& cells = grid.CellsMutable();
@@ -137,7 +137,7 @@ void WFCSolver::CollapseCell(WaveGrid& grid, WFCGridCoord coord,
         u64 m = c.candidate_mask[w];
         while (m) {
             if (pick == 0) {
-                chosen_bit = w * WFCTileRegistry::kBitsPerMaskWord + std::countr_zero(m);
+                chosen_bit = w * WFCTileRegistry::kBitsPerMaskWord + CountrZeroU64(m);
                 found = true;
                 break;
             }
@@ -150,7 +150,7 @@ void WFCSolver::CollapseCell(WaveGrid& grid, WFCGridCoord coord,
     if (!found) {
         for (u32 w = 0; w < WFCCell::kMaskWords && !found; ++w) {
             if (c.candidate_mask[w]) {
-                chosen_bit = w * WFCTileRegistry::kBitsPerMaskWord + std::countr_zero(c.candidate_mask[w]);
+                chosen_bit = w * WFCTileRegistry::kBitsPerMaskWord + CountrZeroU64(c.candidate_mask[w]);
                 found = true;
             }
         }

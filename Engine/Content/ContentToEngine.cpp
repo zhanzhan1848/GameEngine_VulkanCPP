@@ -127,12 +127,30 @@ namespace primal::content
         std::unordered_map<id::id_type, std::unique_ptr<graphics::rhi::RHIGpuMesh>> rhi_gpu_meshes;
         std::mutex                                      rhi_gpu_mesh_mutex;
 
+		// Wire layout of ContentTools' mesh::meshlet (ContentTools/Geometry.h) as
+		// written by pack_mesh_data and SceneBlobWriter::Serialize. RHIMeshlet
+		// carries a trailing padding field (64 bytes total, GPU alignment), so
+		// meshlets must be converted field-wise — never memcpy'd between the two.
+		struct meshlet_wire
+		{
+			u32										vertex_offset;
+			u32										triangle_offset;
+			u32										vertex_count;
+			u32										triangle_count;
+			f32										cone_apex[3];
+			f32										cone_axis[3];
+			f32										cone_cutoff;
+			f32										center[3];
+			f32										radius;
+		};
+		static_assert(sizeof(meshlet_wire) == 60, "must match ContentTools mesh::meshlet");
+
 		void skip_mesh_in_blob(utl::blob_stream_reader& blob)
 		{
 			// Name
 			const u32 name_len{ blob.read<u32>() };
 			blob.skip(name_len);
-			
+
 			// Read headers to calculate skip sizes
 			blob.skip(sizeof(u32)); // lod_id
 			blob.skip(sizeof(u32)); // material_idx
@@ -142,6 +160,21 @@ namespace primal::content
 			const u32 index_size{ blob.read<u32>() };
 			const u32 num_indices{ blob.read<u32>() };
 			blob.skip(sizeof(f32)); // threshold
+
+			// Buffers
+			blob.skip(12 * num_vertices); // position buffer
+			blob.skip(elem_size * num_vertices); // element buffer
+			blob.skip(index_size * num_indices); // index buffer
+
+			// Meshlets
+			const u32 magic_mshl{ blob.read<u32>() };
+			assert(magic_mshl == 0x4C48534D); // "MSHL"
+			const u32 meshlet_count{ blob.read<u32>() };
+			blob.skip(meshlet_count * sizeof(meshlet_wire));
+			const u32 meshlet_vert_count{ blob.read<u32>() };
+			blob.skip(meshlet_vert_count * sizeof(u32));
+			const u32 meshlet_tri_count{ blob.read<u32>() };
+			blob.skip(meshlet_tri_count * sizeof(u8));
 
 			// SDF
 			blob.skip(sizeof(u32)); // magic_sdf
@@ -203,8 +236,22 @@ namespace primal::content
 			asset.meshlets.resize(meshlet_count);
 			if (meshlet_count > 0)
 			{
-				memcpy(asset.meshlets.data(), blob.position(), meshlet_count * sizeof(graphics::rhi::RHIMeshlet));
-				blob.skip(meshlet_count * sizeof(graphics::rhi::RHIMeshlet));
+				const meshlet_wire* const wire{ (const meshlet_wire*)blob.position() };
+				for (u32 i{ 0 }; i < meshlet_count; ++i)
+				{
+					graphics::rhi::RHIMeshlet& ml{ asset.meshlets[i] };
+					ml.vertex_offset = wire[i].vertex_offset;
+					ml.triangle_offset = wire[i].triangle_offset;
+					ml.vertex_count = wire[i].vertex_count;
+					ml.triangle_count = wire[i].triangle_count;
+					memcpy(ml.cone_apex, wire[i].cone_apex, sizeof(f32) * 3);
+					memcpy(ml.cone_axis, wire[i].cone_axis, sizeof(f32) * 3);
+					ml.cone_cutoff = wire[i].cone_cutoff;
+					memcpy(ml.center, wire[i].center, sizeof(f32) * 3);
+					ml.radius = wire[i].radius;
+					ml.padding = 0;
+				}
+				blob.skip(meshlet_count * sizeof(meshlet_wire));
 			}
 
 			const u32 meshlet_vert_count{ blob.read<u32>() };

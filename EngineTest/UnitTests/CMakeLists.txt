@@ -2267,6 +2267,7 @@ add_custom_target(RHI_All_Tests
     COMMAND RHI_EntityManager_Test
     COMMAND TestRenderSystemECS
     COMMAND StandaloneGraphics_SceneDataAdapter_Test
+    COMMAND StandaloneContent_MeshFormatRoundTrip_Test
     COMMAND MpscQueueSimpleTest
     COMMENT "Running all RHI tests"
 )
@@ -2354,6 +2355,28 @@ set_target_properties(StandaloneGraphics_SceneDataAdapter_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 target_compile_definitions(StandaloneGraphics_SceneDataAdapter_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+
+# ======================
+# Content 模型格式回归测试
+# ======================
+
+# ContentTools pack_mesh_data / SceneBlobWriter 字节布局 ↔ content::create_resource
+# 解析路径的端到端契约测试（meshlet 60B wire、子网格段跳过、SDF 三段尺寸）。
+add_executable(StandaloneContent_MeshFormatRoundTrip_Test
+    Content/TestContentMeshFormatRoundTrip.cpp
+)
+target_include_directories(StandaloneContent_MeshFormatRoundTrip_Test PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+target_link_libraries(StandaloneContent_MeshFormatRoundTrip_Test PRIVATE Engine)
+add_test(NAME StandaloneContent_MeshFormatRoundTrip_Test COMMAND StandaloneContent_MeshFormatRoundTrip_Test)
+set_target_properties(StandaloneContent_MeshFormatRoundTrip_Test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/Content"
+)
 
 # ======================
 # Particle System Tests
