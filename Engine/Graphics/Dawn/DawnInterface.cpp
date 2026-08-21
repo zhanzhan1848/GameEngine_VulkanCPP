@@ -43,12 +43,12 @@ namespace primal::graphics::dawn
         pi.initialize = initialize;
         pi.shutdown = shutdown;
 
-        pi.surface.create = create_surface;
-        pi.surface.remove = remove_surface;
-        pi.surface.resize = resize_surface;
-        pi.surface.width = surface_width;
-        pi.surface.height = surface_height;
-        pi.surface.render = render_surface;
+        pi.surface_ops.create = create_surface;
+        pi.surface_ops.remove = remove_surface;
+        pi.surface_ops.resize = resize_surface;
+        pi.surface_ops.width = surface_width;
+        pi.surface_ops.height = surface_height;
+        pi.surface_ops.render = render_surface;
 
         pi.light.create_light_set = create_light_set;
         pi.light.remove_light_set = remove_light_set;
@@ -57,10 +57,10 @@ namespace primal::graphics::dawn
         pi.light.set_parameter = set_light_parameter;
         pi.light.get_parameter = get_light_parameter;
 
-        pi.camera.create = create_camera;
-        pi.camera.remove = remove_camera;
-        pi.camera.set_parameter = set_camera_parameter;
-        pi.camera.get_parameter = get_camera_parameter;
+        pi.camera_ops.create = create_camera;
+        pi.camera_ops.remove = remove_camera;
+        pi.camera_ops.set_parameter = set_camera_parameter;
+        pi.camera_ops.get_parameter = get_camera_parameter;
 
         pi.resources.add_submesh = add_submesh;
         pi.resources.remove_submesh = remove_submesh;

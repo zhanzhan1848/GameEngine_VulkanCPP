@@ -103,7 +103,8 @@ struct RGRenderPassDesc {
 
 namespace std {
     template<>
-    struct ::std::hash<primal::graphics::rendergraph::RGResourceHandle> {
+    // 已在 namespace std 内，gcc 拒绝 struct ::std::hash 全局限定写法
+    struct hash<primal::graphics::rendergraph::RGResourceHandle> {
         size_t operator()(const primal::graphics::rendergraph::RGResourceHandle& handle) const {
             // Use MurmurHash3 from Engine/Utilities/Hash.h
             u32 hashOut;

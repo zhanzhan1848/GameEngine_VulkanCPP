@@ -23,12 +23,12 @@ namespace primal::graphics::vulkan {
         pi.initialize = core::initialize;
         pi.shutdown = core::shutdown;
 
-        pi.surface.create = core::create_surface;
-        pi.surface.remove = core::remove_surface;
-        pi.surface.resize = core::resize_surface;
-        pi.surface.width = core::surface_width;
-        pi.surface.height = core::surface_height;
-        pi.surface.render = core::render_surface;
+        pi.surface_ops.create = core::create_surface;
+        pi.surface_ops.remove = core::remove_surface;
+        pi.surface_ops.resize = core::resize_surface;
+        pi.surface_ops.width = core::surface_width;
+        pi.surface_ops.height = core::surface_height;
+        pi.surface_ops.render = core::render_surface;
 
         pi.light.create_light_set = light::create_light_set;
         pi.light.remove_light_set = light::remove_light_set;
@@ -37,10 +37,10 @@ namespace primal::graphics::vulkan {
         pi.light.set_parameter = light::set_parameter;
         pi.light.get_parameter = light::get_parameter;
 
-        pi.camera.create = camera::create;
-        pi.camera.remove = camera::remove;
-        pi.camera.set_parameter = camera::set_parameter;
-        pi.camera.get_parameter = camera::get_parameter;
+        pi.camera_ops.create = camera::create;
+        pi.camera_ops.remove = camera::remove;
+        pi.camera_ops.set_parameter = camera::set_parameter;
+        pi.camera_ops.get_parameter = camera::get_parameter;
         pi.resources.add_submesh = submesh::add;
         pi.resources.remove_submesh = submesh::remove;
 

@@ -259,6 +259,13 @@ jobs:
           Get-Content msbuild-full.log
           exit $code
 
+      - name: Engine.lib 位置诊断
+        if: failure()
+        shell: powershell
+        run: |
+          Get-ChildItem -Path . -Recurse -Filter Engine.lib -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "$($_.FullName)  $($_.LastWriteTime)" }
+
       - name: 提取编译错误摘要
         if: failure()
         shell: powershell

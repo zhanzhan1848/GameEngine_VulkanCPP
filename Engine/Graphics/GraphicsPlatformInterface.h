@@ -39,7 +39,7 @@ namespace primal::graphics {
 			// rhi::ResourceHandle) to keep this deprecated header decoupled
 			// from the RHI layer.
 			u32(*blit_and_present)(surface_id, u64);
-		} surface;
+		} surface_ops;
 
 		struct
 		{
@@ -61,7 +61,7 @@ namespace primal::graphics {
 			void(*remove)(camera_id);
 			void(*set_parameter)(camera_id, camera_parameter::parameter, const void *const, u32);
 			void(*get_parameter)(camera_id, camera_parameter::parameter, void *const, u32);
-		} camera;
+		} camera_ops;
 
 		struct {
 			id::id_type(*add_submesh)(const u8*&);
