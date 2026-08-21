@@ -6,6 +6,7 @@
 
 #include "TestFramework.h"
 #include "CommonHeaders.h"
+#include <filesystem>
 #include <iostream>
 #include <cstring>
 #include <cmath>
@@ -241,11 +242,15 @@ TestResult TestFileIO() {
     GraphAddNode(g1, "ConstantFloat4");
     GraphAddNode(g1, "MaterialOutput");
 
-    const char* path = "/tmp/test_material_graph_api.json";
-    u32 rc = SaveMaterialGraphToFile(g1, path);
+    // "/tmp" 是 POSIX 路径——Windows 上 fopen("/tmp/...") 解析到当前盘符根的
+    // C:\tmp(不存在)→ 保存失败。改用系统临时目录的可移植路径。
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "test_material_graph_api.json")
+            .string();
+    u32 rc = SaveMaterialGraphToFile(g1, path.c_str());
     TEST_ASSERT_EQ(0u, rc, "Save should succeed");
 
-    u32 g2 = LoadMaterialGraphFromFile(path);
+    u32 g2 = LoadMaterialGraphFromFile(path.c_str());
     TEST_ASSERT(g2 != 0, "Load should return valid id");
 
     u32 count = GraphGetNodeCount(g2);
