@@ -865,6 +865,31 @@ endif()
 # No GPU dependency — pure host code. Linked into a self-test binary now;
 # T2.1 (TestGenerateMetalReference) and T2.4 (TestVulkanForwardRenderer)
 # will include the same .cpp as a source so they don't need a shared library.
+# VT M1: VTBaker + VTEX 容器测试(平台无关;需 BUILD_VTBAKE 的 astc-encoder)
+if(BUILD_VTBAKE)
+    add_executable(TestVTEXContainer
+        Content/TestVTEXContainer.cpp
+        ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
+    )
+    target_include_directories(TestVTEXContainer PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/ContentTools/common
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+        ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
+    )
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static ZLIB::ZLIB)
+    else()
+        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static z)
+    endif()
+    add_test(NAME TestVTEXContainer COMMAND TestVTEXContainer)
+    set_target_properties(TestVTEXContainer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+endif()
+
 add_executable(TestImageCompare
     RHI/Core/TestImageCompare.cpp
     ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp

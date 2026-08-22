@@ -247,12 +247,12 @@ float4 VTSample(VTParams vt, SamplerState s, float2 vUV, int2 pixelPos)
 | # | 能力 | 用途 | 现状判断 | 工作量 |
 |---|---|---|---|---|
 | 1 | 整数格式纹理（R16/G16/R32_UINT）+ texelFetch 采样 | 页表 | RHI 有格式系统，需补 texelFetch 采样路径三后端 | 小 |
-| 2 | fragment 阶段 SSBO 随机写 | feedback 写入 | Vulkan 支持；Metal 对应 MSL buffer+device fragment writes；D3D12 UAV | 中 |
+| 2 | fragment 阶段 SSBO 随机写 | feedback 写入 | Vulkan 支持；Metal 对应 MSL buffer+device fragment writes；Dawn storage buffer（M0 更正：RHI 实际后端为 Vulkan/Metal/Dawn，无 D3D12） | 中 |
 | 3 | 带 fence 的异步回读 buffer（多帧轮转） | feedback 回读 | 现无通用 readback 路径，需新增 RHI 接口 | 中 |
 | 4 | staging → 纹理**局部区域**上传（带 offset 的 CopyBufferToImage） | tile 上传 | VulkanTexture 已有块压缩上传，需暴露带 offset 的页粒度版本 | 小 |
 | 5 | storage image 写（format qualified） | RVT GPUFinalizer / 页表 CS 更新 | 需三后端补齐 | 中 |
 | 6 | ASTC 格式支持 | Apple tile | 现无 ASTC，MoltenVK 原生支持，RHI 格式表补条目 | 小 |
-| 7 | CS 写任意 mip level 的纹理（页表更新） | 页表 | Vulkan/Metal/D3D12 均可，走 storage image 或 CS+image barrier | 中 |
+| 7 | CS 写任意 mip level 的纹理（页表更新） | 页表 | Vulkan/Metal 均可（M0 以单 mip 打包布局落地），Dawn 走基类默认 | 中 |
 
 - 页表更新选 **CS 直写**（比 UE 的"图形管线 instanced quad 渲染进页表"简单直接，Vulkan/Metal 均自然支持）；
 - 上传统一走传输队列可选项（M6 性能调优时评估专用 transfer queue）。
@@ -288,8 +288,8 @@ float4 VTSample(VTParams vt, SamplerState s, float2 vUV, int2 pixelPos)
 
 | 平台 | tile 格式 | 说明 |
 |---|---|---|
-| Windows / Linux（D3D12/Vulkan） | BCn | TextureImporter 已有压缩能力直接复用 |
-| macOS / iOS（Metal/MoltenVK） | ASTC（离线烘焙） | Apple GPU 无原生 BCn 采样；MoltenVK 载入转 BCn→ASTC 作为未双烘资产的兜底路径（页粒度小，转码成本可控） |
+| Windows / Linux（Vulkan） | BCn | Windows 走 TextureImporter/DirectXTex；跨平台路径用 VTBaker 内置 BC1/BC4/BC5 编码器（M1） |
+| macOS / iOS（Metal/MoltenVK） | ASTC（离线烘焙，`third_party/astc-encoder`） | Apple GPU 无原生 BCn 采样；MoltenVK 载入转 BCn→ASTC 作为未双烘资产的兜底路径（页粒度小，转码成本可控） |
 
 - 内存预算默认：物理池每格式组 2048²（≈ BCn 128×128 tile + border 下 240 页/池），全局上限可配；
 - 移动端降级：`r.VT.PoolSizeScale 0.5`、FeedbackFactor 放宽、tile 256 减少 bookkeeping（后评估）。
