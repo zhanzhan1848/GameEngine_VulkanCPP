@@ -184,7 +184,7 @@ private:
     vt_stats stats_{};
 
     std::unordered_map<u32, vt_entry> vts_;
-    u32 next_vt_id_ = 1;
+    u32 next_vt_id_ = 1;             // 兼容保留;实际分配改为扫描空闲 id
 
     ResourceHandle page_table_ = 0;
     // 子矩形分配器:尺寸(2^n)→ 已分配原点集合 + 空闲方块(简单贪婪)

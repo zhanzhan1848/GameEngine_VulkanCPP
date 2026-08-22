@@ -453,10 +453,92 @@ TestResult TestVTSVT_RegisterReleaseStress() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// M2.13 材质 stack 机制:3 个 VT(albedo BC1/ASTC、normal BC5/ASTC、orm BC4/ASTC)
+// 共享一张页表,单 feedback 流多路复用 3 个 vtId,3 格式页池并行驻留
+// ============================================================================
+TestResult TestVTSVT_MaterialStack() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    auto& sys = virtual_texture_system::instance();
+
+    vt_config cfg;
+    cfg.feedback_slots = sample_pass::kOutW * sample_pass::kOutW;
+    cfg.atlas_size = 2048;
+    TEST_ASSERT(sys.initialize(fx.base, cfg), "system initialize");
+
+    // 三张 256² 源图(color/normal/scalar 各一种 kind → BC1+BC5+BC4 三池)
+    const content::vt::channel_kind kinds[3] = {
+        content::vt::channel_kind::color,
+        content::vt::channel_kind::normal,
+        content::vt::channel_kind::scalar};
+    std::vector<u8> src[3];
+    std::vector<u8> vtFile[3];
+    u32 vt[3];
+    for (int i = 0; i < 3; ++i) {
+        // 平滑渐变(层间相位错开)— 压缩友好,验证目标是地址翻译而非编解码质量
+        src[i].resize(size_t(256) * 256 * 4);
+        for (u32 y = 0; y < 256; ++y)
+            for (u32 x = 0; x < 256; ++x) {
+                u8* p = &src[i][(size_t(y) * 256 + x) * 4];
+                p[0] = uint8_t((x * (255 - i * 60)) / 255);
+                p[1] = uint8_t((y * (200 + i * 20)) / 255);
+                p[2] = uint8_t(((x + y) * (180 + i * 30)) / 510);
+                p[3] = 255;
+            }
+        content::vt::bake_config bc;
+        bc.kind = kinds[i];
+        TEST_ASSERT(content::vt::bake(src[i].data(), 256, 256, bc, vtFile[i]),
+                    "bake stack layer");
+        vt[i] = sys.register_texture(vtFile[i].data(), vtFile[i].size());
+        TEST_ASSERT(vt[i] != ~0u, "register stack layer");
+    }
+    // 三层分处不同页表子矩形(albedo 原点应与 normal/orm 不同)
+    std::cout << "[VTSys] subrects: (" << sys.vt_pt_origin_x(vt[0]) << "," << sys.vt_pt_origin_y(vt[0])
+              << ") (" << sys.vt_pt_origin_x(vt[1]) << "," << sys.vt_pt_origin_y(vt[1])
+              << ") (" << sys.vt_pt_origin_x(vt[2]) << "," << sys.vt_pt_origin_y(vt[2]) << ")" << std::endl;
+    TEST_ASSERT(sys.vt_pt_origin_x(vt[0]) != sys.vt_pt_origin_x(vt[1]) ||
+                sys.vt_pt_origin_y(vt[0]) != sys.vt_pt_origin_y(vt[1]),
+                "distinct page table subrects");
+
+    // 逐层跑闭环(每层独立采样 pass + feedback;同一系统实例)
+    for (int i = 0; i < 3; ++i) {
+        sample_pass pass;
+        TEST_ASSERT(pass.build(fx.base, sys.page_table_texture(),
+                               sys.atlas_texture(0), sys.feedback_buffer(0)),
+                    "build stack pass");
+        for (u32 frame = 0; frame < 8; ++frame) {
+            TEST_ASSERT(pass.dispatch_frame(fx.base, sys, vt[i], frame, 1.0f, 0, 0, 2048),
+                        "dispatch stack layer");
+            sys.update(frame + i * 10);
+        }
+        for (u32 k = 0; k < 4; ++k) sys.update(300 + i * 10 + k);
+        // 每层 PSNR:scalar 层取 .r 通道语义(源即三通道同图,阈值一致)
+        double psnr = pass.read_psnr(fx.base, src[i], 256);
+        std::cout << "[VTSys] stack layer " << i << " PSNR=" << psnr << " dB" << std::endl;
+        TEST_ASSERT(psnr >= 26.0, "stack layer PSNR");
+        pass.destroy(fx.base);
+    }
+
+    // 三层全部驻留(每层 5 页 = 15),三格式池并存
+    const vt_stats& st = sys.stats();
+    std::cout << "[VTSys] stack: resident=" << st.resident_pages
+              << " pool=" << st.pool_pages_used << "/" << st.pool_pages_total
+              << " evict=" << st.evictions_total << std::endl;
+    TEST_ASSERT_EQ(15u, st.resident_pages, "3 layers x 5 pages resident");
+    // ASTC 平台(如 MoltenVK)三种 kind 共用 ASTC_4x4 段 → 单池;BCn 平台才会分池
+    TEST_ASSERT(st.pool_pages_total >= 225, "at least one format pool");
+
+    for (int i = 0; i < 3; ++i) sys.release_texture(vt[i]);
+    sys.shutdown();
+    return TestResult::Passed;
+}
+
 void RegisterVTSVTRuntimeTests() {
     auto suite = std::make_shared<TestSuite>("VTSVTRuntimeTests");
     suite->AddTestCase(TestCase("RuntimeLoop", TestVTSVT_RuntimeLoop));
     suite->AddTestCase(TestCase("RegisterReleaseStress", TestVTSVT_RegisterReleaseStress));
+    suite->AddTestCase(TestCase("MaterialStack", TestVTSVT_MaterialStack));
     TestRunner::RegisterTestSuite(suite);
 }
 

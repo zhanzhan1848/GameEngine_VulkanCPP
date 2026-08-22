@@ -86,6 +86,7 @@ bool virtual_texture_system::initialize(RHIDeviceBase* device, const vt_config& 
         return false;
     }
 
+    next_vt_id_ = 1;   // feedback 编码 vtId 为 4 位(≤15) — 新会话从 1 重新编号
     shutdown_requested_ = false;
     worker_ = std::thread([this]() {
         std::unique_lock<std::mutex> lock(stream_mutex_);
@@ -238,7 +239,18 @@ u32 virtual_texture_system::register_texture(const u8* vtex_data, u64 vtex_size)
         std::cerr << "[VTSys] 页表空间不足(pages_top=" << e.pages_top << ")" << std::endl;
         return ~0u;
     }
-    e.id = next_vt_id_++;
+    // feedback 编码 vtId 为 4 位:并发上限 15。直接扫描空闲 id
+    // (回收列表与计数器混用会撞车 — emplace 静默失败导致重复映射)
+    u32 newId = 0;
+    for (u32 candidate = 1; candidate <= 15; ++candidate) {
+        if (vts_.find(candidate) == vts_.end()) { newId = candidate; break; }
+    }
+    if (newId == 0) {
+        std::cerr << "[VTSys] 并发 VT 数达 feedback 编码上限 15,拒绝注册" << std::endl;
+        free_page_table_subrect(e.pages_top, e.pt_origin_x, e.pt_origin_y);
+        return ~0u;
+    }
+    e.id = newId;
     e.resident_page_to_slot.assign(total_page_count(e.pages_top), ~0u);
 
     u32 id = e.id;
