@@ -84,7 +84,10 @@ function(setup_test_target target_name)
         target_link_libraries(${target_name} PRIVATE X11 vulkan)
     endif()
 
-    target_link_libraries(${target_name} PRIVATE Engine ContentTools)
+    # VT 目标自带依赖(不依赖 ContentTools 目标)
+    if(NOT target_name STREQUAL "TestSponzaVT")
+        target_link_libraries(${target_name} PRIVATE Engine ContentTools)
+    endif()
     
     # stale-test port: per-target POST_BUILD copies of shaders/assets into the shared
     # Darwin/Debug output raced under `ninja -j` ("Error copying directory ... No such
@@ -118,6 +121,25 @@ add_custom_target(IntegrationTestsAssetsCopy DEPENDS ${ITEST_ASSETS_STAMP})
 # 所有平台的集成测试源码（RenderItem/ShaderCompilation 等）都调用 ContentTools API，
 # BUILD_CONTENT_TOOLS=OFF 时（如无 FBX SDK 的 CI runner）整体跳过，
 # 只保留空的 IntegrationTests 聚合目标供 run_integration_tests 等 DEPENDS 引用。
+# VT M2.16: Sponza 全材质 VT 化(ForwardSceneRenderer mesh 路径,离屏无窗口)
+# 不依赖 ContentTools 目标 — 直接编译 VTBaker.cpp(与单测同模式)
+add_executable(TestSponzaVT
+    TestSponzaVT.cpp
+    ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
+)
+setup_test_target(TestSponzaVT)
+target_include_directories(TestSponzaVT PRIVATE
+    ${CMAKE_SOURCE_DIR}/ContentTools/common
+    ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
+)
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+else()
+    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static z)
+endif()
+target_compile_definitions(TestSponzaVT PRIVATE "ENABLE_VULKAN=1")
+
 if(TARGET ContentTools)
 if(APPLE)
     # 1. TestRendererMac

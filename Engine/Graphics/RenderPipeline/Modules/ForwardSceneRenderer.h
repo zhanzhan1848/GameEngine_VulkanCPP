@@ -42,6 +42,23 @@ public:
 
     void SetLightDirection(math::v3 dir);
     void SetLightColor(math::v4 color);
+
+    /// VT M2 mesh 路径:启用 VT 材质模式。vtexAssetsDir 为烘焙好的 .vtex
+    /// 资产目录(空串 = 关闭)。材质三槽(albedo/normal/orm)的 .vtex 齐备才
+    /// 走 GBufferVT 管线,否则回退常规材质。feedback 回读由
+    /// AttachVTFeedback 在帧末挂接(调用方 submit 前),系统 update 由
+    /// 帧驱动方调用 virtual_texture_system::instance().update(frame)。
+    void EnableVirtualTextures(const std::string& vtexAssetsDir);
+    /// 帧末调用:把 VT 材质 set 的 feedback 绑定切到本帧槽并记录回读拷贝,
+    /// 同时把 ring fence 挂到 si(调用方随后 submit si)。
+    void AttachVTFeedback(rhi::RHICommandBuffer* cb, u32 frame_index, rhi::QueueSubmitInfo& si);
+    bool IsVirtualTextureEnabled() const { return vt_mode_; }
+    /// VT 化的材质数(LoadScene 后统计)
+    u32 VTMaterialCount() const {
+        u32 n = 0;
+        for (bool b : material_is_vt_) if (b) ++n;
+        return n;
+    }
     ParticlePass* GetParticlePass();
 
     // ECS bridge: sync entities via SyncEntitiesToRenderScene + RenderDynamicInstances
@@ -225,6 +242,16 @@ private:
     rhi::DescriptorSetLayoutHandle material_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     // VT M2.14: VT 材质 set(页表 + 3 atlas + 采样器 + 参数 UBO + feedback)
     rhi::DescriptorSetLayoutHandle material_set_vt_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    // VT M2 mesh 路径状态
+    bool vt_mode_{false};
+    std::string vt_assets_dir_;
+    rhi::ResourceHandle vt_material_params_buf_{rhi::handles::INVALID_RESOURCE};
+    std::vector<bool> material_is_vt_;
+    std::vector<rhi::DescriptorSetHandle> vt_material_ds_;
+    std::unordered_map<std::string, u32> vt_registered_;   // vtex 路径 → vtId
+    // 尝试为 mesh 创建 VT 材质(三槽 .vtex 齐备才成功;失败走常规)
+    bool TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo, u32 meshIdx,
+                             const std::string& assetBaseDir);
     rhi::DescriptorSetLayoutHandle lighting_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     // T4.6.5 part 4 Path B: Vulkan-only compute descriptor set layout matching
     // Engine/Graphics/Vulkan/shaders/DeferredLighting.spv (12 bindings).

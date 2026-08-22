@@ -1202,6 +1202,11 @@ namespace primal::content
         return result;
     }
 
+    void release_mesh_asset(id::id_type rhi_mesh_id) {
+        std::lock_guard rhi_lock{ rhi_mesh_mutex };
+        rhi_mesh_assets.remove(rhi_mesh_id);
+    }
+
     id::id_type register_mesh_asset(graphics::rhi::RHIMeshAsset& asset)
     {
         id::id_type rhi_id;

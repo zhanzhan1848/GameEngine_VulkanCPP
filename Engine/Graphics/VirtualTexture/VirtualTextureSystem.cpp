@@ -139,6 +139,28 @@ bool virtual_texture_system::initialize(RHIDeviceBase* device, const vt_config& 
         }
     });
 
+    // 页表初始布局:UNDEFINED → ShaderResource(首次采样前必须;renderer 路径
+    // 无人补 barrier — 系统自理)
+    {
+        CommandBufferHandle cmd = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        RHICommandBuffer* cb = rhi::GetCommandBuffer(cmd);
+        if (cb) {
+            cb->Reset();
+            cb->Begin();
+            ResourceBarrier b{};
+            b.resource = page_table_;
+            b.beforeState = ResourceState::Unknown;
+            b.afterState = ResourceState::ShaderResource;
+            b.subresource = 0xFFFFFFFF;
+            b.queueFamily = 0xFFFFFFFF;
+            cb->InsertBarrier(&b, 1);
+            cb->End();
+            cb->Submit(0);
+            cb->WaitForCompletion();
+            device_->DestroyCommandBuffer(cmd);
+        }
+    }
+
     stats_ = vt_stats{};
     return true;
 }
@@ -290,6 +312,26 @@ u32 virtual_texture_system::ensure_pool(u32 format_value) {
     aDesc.name = "VTSys_Atlas";
     pool.atlas = device_->CreateTexture(aDesc);
     if (pool.atlas == handles::INVALID_RESOURCE) return ~0u;
+    // atlas 初始布局 → ShaderResource(同页表;上传路径自身会再转 CopyDest)
+    {
+        CommandBufferHandle cmd = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        RHICommandBuffer* cb = rhi::GetCommandBuffer(cmd);
+        if (cb) {
+            cb->Reset();
+            cb->Begin();
+            ResourceBarrier b{};
+            b.resource = pool.atlas;
+            b.beforeState = ResourceState::Unknown;
+            b.afterState = ResourceState::ShaderResource;
+            b.subresource = 0xFFFFFFFF;
+            b.queueFamily = 0xFFFFFFFF;
+            cb->InsertBarrier(&b, 1);
+            cb->End();
+            cb->Submit(0);
+            cb->WaitForCompletion();
+            device_->DestroyCommandBuffer(cmd);
+        }
+    }
     pool.tiles_per_row = cfg_.atlas_size / (cfg_.tile_size + 2 * cfg_.border);
     const u32 capacity = pool.tiles_per_row * pool.tiles_per_row;
     pool.pages.assign(capacity, pool_page{});

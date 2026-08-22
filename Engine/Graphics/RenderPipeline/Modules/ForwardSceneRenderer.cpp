@@ -1,4 +1,5 @@
 #include "ForwardSceneRenderer.h"
+#include "../../VirtualTexture/VirtualTextureSystem.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
@@ -499,12 +500,28 @@ void ForwardSceneRenderer::Shutdown() {
     if (!initialized_) return;
     initialized_ = false;
 
+    // 先卸载场景(mesh/content 资产释放;此前 Shutdown 不调 UnloadScene,
+    // 直连使用方Shutdown 即泄漏 rhi_mesh_assets 条目 — 退出时 free_list assert)
+    if (scene_loaded_) UnloadScene();
+
     // Geometry line renderer
     line_renderer_.Shutdown();
 
 #ifndef DISABLE_PARTICLE_SYSTEM
     particle_pass_.shutdown();
 #endif
+
+    // VT mesh 路径资源
+    for (auto& ds : vt_material_ds_)
+        if (ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(ds);
+    vt_material_ds_.clear();
+    material_is_vt_.clear();
+    vt_registered_.clear();
+    if (vt_material_params_buf_ != handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(vt_material_params_buf_);
+        vt_material_params_buf_ = handles::INVALID_RESOURCE;
+    }
+    vt_mode_ = false;
 
     // Destroy pipelines
     for (auto* p : {&gbuffer_pipeline_, &gbuffer_vt_pipeline_, &shadow_pipeline_, &lighting_pipeline_,
@@ -1466,6 +1483,11 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
         };
         UpdateDesc(device_, matSet, params, 4);
         material_ds_.push_back(matSet);
+        // VT M2 mesh 路径:.vtex 齐备时额外建 VT 材质(draw 点据此选管线;
+        // 常规 set 保留 — shadow 等 pass 仍用其布局)
+        if (vt_mode_) {
+            TryCreateVTMaterial(meshInfo, u32(material_ds_.size()) - 1, assetBaseDir);
+        }
     }
 
     std::cout << "[ForwardSceneRenderer] Loaded scene: " << model_path
@@ -1489,6 +1511,17 @@ void ForwardSceneRenderer::UnloadScene() {
         if (ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(ds);
     }
     material_ds_.clear();
+    for (auto& mi : mesh_infos_) {
+        if (mi.mesh) mi.mesh->Destroy(device_);
+        // 释放 content 侧注册的 RHIMeshAsset(SceneDataAdapter 注册,
+        // 不释放则 rhi_mesh_assets free_list 在进程退出时 assert)
+        if (mi.meshEntityId != primal::id::invalid_id) {
+            // meshEntityId 是 register_mesh_asset 返回的 geometry_hierarchies
+            // 包装 id(内含 single_mesh_marker 假指针)— 走 destroy_resource
+            content::destroy_resource(mi.meshEntityId, content::asset_type::mesh,
+                                      content::GraphicsAPI::RHI);
+        }
+    }
     mesh_infos_.clear();
     material_textures_.clear();
     scene_loaded_ = false;
@@ -1532,6 +1565,166 @@ void ForwardSceneRenderer::SetGeometryEntities(const std::vector<id::id_type>& e
 
 void ForwardSceneRenderer::ClearGeometryEntities() {
     geometry_entity_ids_.clear();
+}
+
+// ============================================================================
+// VT M2 mesh 路径
+// ============================================================================
+void ForwardSceneRenderer::EnableVirtualTextures(const std::string& vtexAssetsDir) {
+    vt_mode_ = !vtexAssetsDir.empty();
+    vt_assets_dir_ = vtexAssetsDir;
+    if (!vt_mode_ || !device_) return;
+    auto& sys = graphics::vt::virtual_texture_system::instance();
+    if (!sys.is_initialized()) {
+        graphics::vt::vt_config cfg;
+        // 每像素 3 层请求:3 × 宽 × 高(GBufferVT.frag 的 feedback 索引约定)
+        cfg.feedback_slots = 3u * render_width_ * render_height_;
+        sys.initialize(device_, cfg);
+    }
+    // 每材质参数块(5 × vec4 = 80B),上限 256 材质
+    if (vt_material_params_buf_ == handles::INVALID_RESOURCE) {
+        BufferDesc d{};
+        d.size = 80ull * 256;
+        d.type = BufferType::Constant;
+        d.memoryUsage = GPUMemoryUsage::Dynamic;
+        d.name = "FSR_VTMaterialParams";
+        vt_material_params_buf_ = device_->CreateBuffer(d);
+    }
+}
+
+void ForwardSceneRenderer::AttachVTFeedback(RHICommandBuffer* cb, u32 frame_index,
+                                            QueueSubmitInfo& si) {
+    if (!vt_mode_ || !cb) return;
+    auto& sys = graphics::vt::virtual_texture_system::instance();
+    if (!sys.is_initialized()) return;
+    // VT 材质 set 的 binding 6 切到本帧 feedback 槽(每帧重绑)
+    ResourceHandle fb = sys.feedback_buffer(frame_index);
+    for (auto& ds : vt_material_ds_) {
+        if (ds == handles::INVALID_DESCRIPTOR_SET) continue;
+        DescriptorBufferInfo fInfo{fb, 0, 0};
+        WriteDescriptorSet w{};
+        w.dstSet = ds; w.dstBinding = 6; w.dstArrayElement = 0;
+        w.descriptorCount = 1; w.descriptorType = DescriptorType::StorageBuffer;
+        w.bufferInfo = &fInfo;
+        device_->UpdateDescriptorSets(1, &w);
+    }
+    sys.record_feedback_copy(cb, frame_index, si);
+}
+
+bool ForwardSceneRenderer::TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo, u32 meshIdx,
+                                               const std::string& assetBaseDir) {
+    if (!vt_mode_ || gbuffer_vt_pipeline_ == handles::INVALID_PIPELINE ||
+        material_set_vt_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        return false;
+    }
+    auto& sys = graphics::vt::virtual_texture_system::instance();
+    if (!sys.is_initialized()) return false;
+
+    // 三槽 .vtex 候选:纹理路径同 stem 换扩展名,vtex 目录优先、原目录次之
+    auto findVtex = [&](const std::string& texPath) -> std::string {
+        if (texPath.empty()) return std::string();
+        std::string stem = texPath;
+        auto dot = stem.rfind('.');
+        if (dot != std::string::npos) stem = stem.substr(0, dot);
+        stem += ".vtex";
+        for (const std::string& dir : {vt_assets_dir_, assetBaseDir}) {
+            if (dir.empty()) continue;
+            std::string p = dir.back() == '/' || dir.back() == '\\' ? dir + stem : dir + "/" + stem;
+            std::ifstream f(p);
+            if (f.good()) return p;
+        }
+        return std::string();
+    };
+    std::string paths[3] = {
+        findVtex(meshInfo.diffuseTexturePath),
+        findVtex(meshInfo.normalTexturePath),
+        findVtex(meshInfo.ormTexturePath.empty()
+                     ? (meshInfo.roughnessTexturePath.empty() ? meshInfo.metallicTexturePath
+                                                              : meshInfo.roughnessTexturePath)
+                     : meshInfo.ormTexturePath)};
+    // 严格模式:albedo 必需;normal/orm 缺失时复用 albedo 的 VT(占位)
+    if (paths[0].empty()) return false;
+
+    auto registerVtex = [&](const std::string& path) -> u32 {
+        auto it = vt_registered_.find(path);
+        if (it != vt_registered_.end()) return it->second;
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return ~0u;
+        auto sz = f.tellg();
+        f.seekg(0);
+        std::vector<u8> blob(size_t(sz), 0u);
+        f.read(reinterpret_cast<char*>(blob.data()), sz);
+        u32 id = sys.register_texture(blob.data(), blob.size());
+        if (id != ~0u) vt_registered_[path] = id;
+        return id;
+    };
+    u32 ids[3];
+    ids[0] = registerVtex(paths[0]);
+    if (ids[0] == ~0u) return false;
+    ids[1] = paths[1].empty() ? ids[0] : (registerVtex(paths[1]) == ~0u ? ids[0] : registerVtex(paths[1]));
+    ids[2] = paths[2].empty() ? ids[0] : (registerVtex(paths[2]) == ~0u ? ids[0] : registerVtex(paths[2]));
+    // 注:registerVtex 幂等(缓存),两次调用不会重复注册
+
+    // 材质 set(7 绑定;feedback 绑定由 AttachVTFeedback 每帧切换)
+    DescriptorSetDesc desc{};
+    desc.layout = material_set_vt_layout_;
+    DescriptorSetHandle ds = device_->CreateDescriptorSet(desc);
+    if (ds == handles::INVALID_DESCRIPTOR_SET) return false;
+
+    DescriptorImageInfo ptInfo{};
+    ptInfo.imageView = sys.page_table_texture();
+    ptInfo.imageLayout = ResourceState::ShaderResource;
+    DescriptorImageInfo atlasInfo[3]{};
+    for (int i = 0; i < 3; ++i) {
+        atlasInfo[i].imageView = sys.atlas_texture(0);
+        atlasInfo[i].imageLayout = ResourceState::ShaderResource;
+    }
+    DescriptorImageInfo sampInfo{};
+    sampInfo.sampler = static_cast<ResourceHandle>(default_sampler_);
+    DescriptorBufferInfo pInfo{vt_material_params_buf_, u64(meshIdx) * 80, 80};
+    DescriptorBufferInfo fInfo{sys.feedback_buffer(0), 0, 0};
+
+    WriteDescriptorSet w[7]{};
+    for (u32 i = 0; i < 7; ++i) {
+        w[i].dstSet = ds; w[i].dstBinding = i; w[i].dstArrayElement = 0;
+        w[i].descriptorCount = 1;
+    }
+    w[0].descriptorType = DescriptorType::SampledImage;   w[0].imageInfo = &ptInfo;
+    w[1].descriptorType = DescriptorType::SampledImage;   w[1].imageInfo = &atlasInfo[0];
+    w[2].descriptorType = DescriptorType::SampledImage;   w[2].imageInfo = &atlasInfo[1];
+    w[3].descriptorType = DescriptorType::SampledImage;   w[3].imageInfo = &atlasInfo[2];
+    w[4].descriptorType = DescriptorType::Sampler;        w[4].imageInfo = &sampInfo;
+    w[5].descriptorType = DescriptorType::UniformBuffer;  w[5].bufferInfo = &pInfo;
+    w[6].descriptorType = DescriptorType::StorageBuffer;  w[6].bufferInfo = &fInfo;
+    device_->UpdateDescriptorSets(7, w);
+
+    // 参数块(5 × vec4;与 GBufferVT.frag/VTMaterialParams 一致)
+    struct P5 { float p[5][4]; } p{};
+    for (int i = 0; i < 3; ++i) {
+        p.p[i][0] = float(sys.vt_pt_origin_x(ids[i]));
+        p.p[i][1] = float(sys.vt_pt_origin_y(ids[i]));
+        p.p[i][2] = float(sys.vt_pages_top(ids[i]));
+        p.p[i][3] = float(sys.vt_avg_color(ids[i]));
+    }
+    p.p[3][0] = 128.0f;
+    p.p[3][1] = 1.0f / 2048.0f;
+    p.p[3][2] = 1.0f; p.p[3][3] = 0.0f;
+    p.p[4][0] = float(ids[0]);
+    p.p[4][1] = float(ids[1]);
+    p.p[4][2] = float(ids[2]);
+    p.p[4][3] = 1024.0f;   // feedbackWidth(AttachVTFeedback 槽容量内)
+    if (!device_->UpdateBufferData(vt_material_params_buf_, &p, sizeof(p), u64(meshIdx) * 80)) {
+        device_->DestroyDescriptorSet(ds);
+        return false;
+    }
+
+    if (meshIdx >= vt_material_ds_.size()) {
+        vt_material_ds_.resize(meshIdx + 1, handles::INVALID_DESCRIPTOR_SET);
+        material_is_vt_.resize(meshIdx + 1, false);
+    }
+    vt_material_ds_[meshIdx] = ds;
+    material_is_vt_[meshIdx] = true;
+    return true;
 }
 
 rhi::PipelineHandle ForwardSceneRenderer::GetTechniquePipeline(ShaderTechnique technique) const {
@@ -1777,6 +1970,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     auto layout = shadow_pass ? shadow_layout_ : gbuffer_layout_;
 
     // Draw each technique bucket in render order
+    bool vtPipelineBound_ = false;   // VT 管线覆盖状态(桶内逐 mesh 切换)
     for (u32 t = 0; t < TechniqueCount; ++t) {
         if (all_ranges[t].empty()) continue;
 
@@ -1808,8 +2002,23 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             }
 #endif
             auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
+            // VT M2:材质为 VT 且非 shadow/forward 桶 → 覆盖管线/set1(布局随管线)
+            const bool meshVT = !shadow_pass && !forward_pass &&
+                                meshIdx < material_is_vt_.size() && material_is_vt_[meshIdx] &&
+                                gbuffer_vt_pipeline_ != handles::INVALID_PIPELINE &&
+                                meshIdx < vt_material_ds_.size() &&
+                                vt_material_ds_[meshIdx] != handles::INVALID_DESCRIPTOR_SET;
+            if (meshVT) {
+                cmd->BindGraphicsPipeline(gbuffer_vt_pipeline_);
+                matSet = vt_material_ds_[meshIdx];
+            } else if (vtPipelineBound_) {
+                // 前一 mesh 是 VT,恢复桶管线
+                cmd->BindGraphicsPipeline(GetTechniquePipeline(static_cast<ShaderTechnique>(t)));
+            }
+            vtPipelineBound_ = meshVT;
             const DescriptorSetHandle matSets[] = {matSet};
-            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout, 1, 1, matSets, 0, nullptr);
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics,
+                                    meshVT ? gbuffer_vt_layout_ : layout, 1, 1, matSets, 0, nullptr);
             PCGPushConsts pc{};
             pc.transform = MatrixIdentity();
             pc.use_instances = 1;
