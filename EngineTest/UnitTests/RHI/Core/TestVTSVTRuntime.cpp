@@ -405,9 +405,58 @@ TestResult TestVTSVT_RuntimeLoop() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// M2.17 压测:注册/采样/释放循环 — 页池与流送队列计数归零(泄漏审计)
+// ============================================================================
+TestResult TestVTSVT_RegisterReleaseStress() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    auto& sys = virtual_texture_system::instance();
+
+    vt_config cfg;
+    cfg.feedback_slots = 256 * 256;
+    cfg.atlas_size = 1024;   // 7x7 = 49 页容量
+    TEST_ASSERT(sys.initialize(fx.base, cfg), "system initialize");
+
+    std::vector<u8> src = make_source(256);
+    std::vector<u8> vtFile;
+    TEST_ASSERT(content::vt::bake(src.data(), 256, 256, content::vt::bake_config{}, vtFile),
+                "bake stress");
+
+    for (u32 round = 0; round < 20; ++round) {
+        u32 vt = sys.register_texture(vtFile.data(), vtFile.size());
+        TEST_ASSERT(vt != ~0u, "register round");
+        sample_pass pass;
+        TEST_ASSERT(pass.build(fx.base, sys.page_table_texture(),
+                               sys.atlas_texture(0), sys.feedback_buffer(0)),
+                    "build stress pass");
+        for (u32 frame = 0; frame < 3; ++frame) {
+            TEST_ASSERT(pass.dispatch_frame(fx.base, sys, vt, frame, 1.0f, 0, 0, 1024),
+                        "dispatch stress");
+            sys.update(frame);
+        }
+        for (u32 i = 0; i < 3; ++i) sys.update(900 + i);
+        pass.destroy(fx.base);
+        sys.release_texture(vt);
+    }
+    // 收尾:排干 worker + 统计
+    for (u32 i = 0; i < 8; ++i) sys.update(2000 + i);
+    const vt_stats& st = sys.stats();
+    std::cout << "[VTSys] stress: registered=" << st.registered
+              << " poolUsed=" << st.pool_pages_used << "/" << st.pool_pages_total
+              << " pending=" << st.pending_requests
+              << " evict=" << st.evictions_total << std::endl;
+    TEST_ASSERT_EQ(0u, st.registered, "all released");
+    TEST_ASSERT_EQ(0u, st.pool_pages_used, "pool fully freed");
+    TEST_ASSERT_EQ(0u, st.pending_requests, "streaming queue drained");
+    sys.shutdown();
+    return TestResult::Passed;
+}
+
 void RegisterVTSVTRuntimeTests() {
     auto suite = std::make_shared<TestSuite>("VTSVTRuntimeTests");
     suite->AddTestCase(TestCase("RuntimeLoop", TestVTSVT_RuntimeLoop));
+    suite->AddTestCase(TestCase("RegisterReleaseStress", TestVTSVT_RegisterReleaseStress));
     TestRunner::RegisterTestSuite(suite);
 }
 

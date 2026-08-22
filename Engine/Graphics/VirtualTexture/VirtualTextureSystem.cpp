@@ -305,6 +305,22 @@ void virtual_texture_system::release_texture(u32 vt_id) {
     }
     free_page_table_subrect(it->second.pages_top, it->second.pt_origin_x, it->second.pt_origin_y);
     vts_.erase(it);
+    // 清扫该 VT 的 in-flight 请求与待上传(槽位归还见 update 阶段 2/3 的存活校验)
+    for (auto q = stream_queue_.begin(); q != stream_queue_.end();) {
+        if (q->first == vt_id) q = stream_queue_.erase(q);
+        else ++q;
+    }
+    for (u64 key : std::vector<u64>(stream_in_flight_.begin(), stream_in_flight_.end())) {
+        if (u32(key >> 32) == vt_id) stream_in_flight_.erase(key);
+    }
+    auto drop = [&](std::vector<ready_upload>& list) {
+        for (auto it2 = list.begin(); it2 != list.end();) {
+            if (it2->vt_id == vt_id) it2 = list.erase(it2);
+            else ++it2;
+        }
+    };
+    drop(upload_ready_);
+    drop(upload_pending_);
     stats_.registered = u32(vts_.size());
 }
 
@@ -347,6 +363,11 @@ void virtual_texture_system::update(u32 frame_index) {
     {
         std::lock_guard<std::mutex> g(stream_mutex_);
         for (auto& up : upload_ready_) {
+            if (vts_.find(up.vt_id) == vts_.end()) {
+                // VT 已释放:丢弃(槽位未分配,无泄漏)
+                stream_in_flight_.erase((u64(up.vt_id) << 32) | up.page);
+                continue;
+            }
             const u32 poolIdx = ensure_pool(up.format);
             if (poolIdx == ~0u) {
                 stream_in_flight_.erase((u64(up.vt_id) << 32) | up.page);
@@ -384,6 +405,22 @@ void virtual_texture_system::update(u32 frame_index) {
     while (!upload_pending_.empty() && stats_.uploads_this_frame < cfg_.max_uploads_per_frame) {
         ready_upload up = std::move(upload_pending_.front());
         upload_pending_.erase(upload_pending_.begin());
+        {
+            std::lock_guard<std::mutex> g(stream_mutex_);
+            if (vts_.find(up.vt_id) == vts_.end()) {
+                // VT 已释放但槽位已分配:归还槽位
+                pools_[up.pool_index].pages[
+                    (up.atlas_x / (cfg_.tile_size + 2 * cfg_.border)) +
+                    (up.atlas_y / (cfg_.tile_size + 2 * cfg_.border)) *
+                        pools_[up.pool_index].tiles_per_row].used = false;
+                pools_[up.pool_index].free_pages.push_back(
+                    (up.atlas_x / (cfg_.tile_size + 2 * cfg_.border)) +
+                    (up.atlas_y / (cfg_.tile_size + 2 * cfg_.border)) *
+                        pools_[up.pool_index].tiles_per_row);
+                stream_in_flight_.erase((u64(up.vt_id) << 32) | up.page);
+                continue;
+            }
+        }
         physical_pool& pool = pools_[up.pool_index];
 
         BufferDesc stagingDesc{};
