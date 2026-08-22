@@ -890,6 +890,33 @@ if(BUILD_VTBAKE)
     )
 endif()
 
+# VT M2: SVT 运行时闭环(feedback 驱动流送 + 淘汰;需 Vulkan + astc/zlib)
+if(BUILD_VTBAKE AND ENABLE_VULKAN)
+    add_executable(TestVTSVTRuntime
+        RHI/Core/TestVTSVTRuntime.cpp
+        ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
+    )
+    target_include_directories(TestVTSVTRuntime PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/ContentTools/common
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+        ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
+    )
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+    else()
+        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static z)
+    endif()
+    target_compile_definitions(TestVTSVTRuntime PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVTSVTRuntime COMMAND TestVTSVTRuntime)
+    set_target_properties(TestVTSVTRuntime PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestVTSVTRuntime UnitTestAssetsCopy)
+endif()
+
 add_executable(TestImageCompare
     RHI/Core/TestImageCompare.cpp
     ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp

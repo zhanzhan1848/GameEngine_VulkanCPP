@@ -210,7 +210,7 @@ struct astc_encoder_ctx {
     astcenc_config cfg{};
     bool init(float quality) {
         float q = quality > 0.0f ? quality : 25.0f;  // 0 = 默认快速档
-        astcenc_error err = astcenc_config_init(ASTCENC_PRF_LDR_SRGB,
+        astcenc_error err = astcenc_config_init(ASTCENC_PRF_LDR,
                                                 4, 4, 1, q, 0, &cfg);
         if (err != ASTCENC_SUCCESS) return false;
         err = astcenc_context_alloc(&cfg, 1, &ctx);

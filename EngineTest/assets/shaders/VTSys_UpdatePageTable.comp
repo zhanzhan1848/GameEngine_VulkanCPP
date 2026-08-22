@@ -1,0 +1,18 @@
+#version 450
+// VT M2: 系统级页表更新 CS(与 M0 原型同构,由 VirtualTextureSystem 驱动)
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, r32ui) uniform uimage2D vtPageTable;
+layout(set = 0, binding = 1) readonly buffer Entries {
+    uint data[];   // [count, (ptX, ptY, value) * count]
+} entries;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint count = entries.data[0];
+    if (i >= count) return;
+    uint ptX = entries.data[1 + i * 3 + 0];
+    uint ptY = entries.data[1 + i * 3 + 1];
+    uint value = entries.data[1 + i * 3 + 2];
+    imageStore(vtPageTable, ivec2(int(ptX), int(ptY)), uvec4(value, 0u, 0u, 0u));
+}

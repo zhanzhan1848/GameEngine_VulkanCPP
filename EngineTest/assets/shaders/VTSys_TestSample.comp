@@ -1,0 +1,62 @@
+#version 450
+// VT M2: feedback 驱动闭环的采样测试 CS。
+// 两段式采样(页表 texelFetch + atlas 采样器取数)+ feedback 写入 +
+// 页未驻留时的逐级上移回退(金字塔打包布局的天然性质)+ 平均色兜底。
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform utexture2D vtPageTable;
+layout(set = 0, binding = 1) uniform texture2D vtAtlas;
+layout(set = 0, binding = 2) uniform sampler vtSampler;   // 测试用 NEAREST
+
+layout(set = 0, binding = 3) uniform Params {
+    vec4 p0;   // x=vtId y=ptOriginX z=ptOriginY w=pagesTop
+    vec4 p1;   // x=level y=outWidth z=uvScale w=uvOffsetX
+    vec4 p2;   // x=uvOffsetY y=atlasSizeInv z=avgColor w=tileSize
+} params;
+
+layout(set = 0, binding = 4) writeonly buffer OutBuf {
+    uint data[];   // RGBA8 打包
+} out_buf;
+layout(set = 0, binding = 5) buffer FeedbackBuf {
+    uint data[];
+} feedback;
+
+void main() {
+    uvec2 xy = gl_GlobalInvocationID.xy;
+    uint outWidth = uint(params.p1.y);
+    if (xy.x >= outWidth || xy.y >= outWidth) return;
+    uint idx = xy.y * outWidth + xy.x;
+
+    vec2 uv = (vec2(xy) + 0.5) / float(outWidth);
+    uv = clamp(uv * params.p1.z + vec2(params.p1.w, params.p2.x), vec2(0.0), vec2(0.99999));
+
+    uint level = uint(params.p1.x);
+    uint s = uint(params.p0.w) >> level;                 // 该 mip 页格边长
+    uvec2 vPage = min(uvec2(uv * float(s)), uvec2(s - 1u));
+
+    // feedback:请求该页(未驻留则系统随后流送)
+    feedback.data[idx] = (uint(params.p0.x) << 28) | (level << 24)
+                       | ((vPage.y & 0xFFFu) << 12) | (vPage.x & 0xFFFu);
+
+    // 页表查找 + 逐级上移回退(粗 mip 网格嵌套于子矩形左上)
+    uint entry = 0u;
+    for (uint k = 0; (level + k) < 16u; ++k) {
+        ivec2 c = ivec2(int(params.p0.y), int(params.p0.z)) + ivec2(vPage >> k);
+        entry = texelFetch(vtPageTable, c, 0).r;
+        if ((entry & 1u) != 0u) break;
+    }
+    if ((entry & 1u) == 0u) {
+        out_buf.data[idx] = uint(params.p2.z);   // 平均色兜底
+        return;
+    }
+    uint ox = (entry >> 8) & 0x7FFu;
+    uint oy = (entry >> 19) & 0x7FFu;
+    vec2 frac = uv * float(s) - vec2(vPage);
+    float tileSize = params.p2.w;
+    vec2 pUV = (vec2(float(ox), float(oy)) + 4.0 + frac * tileSize)
+               * params.p2.y;
+    vec4 c = texture(sampler2D(vtAtlas, vtSampler), pUV);
+    uvec4 b = uvec4(clamp(c * 255.0 + 0.5, vec4(0.0), vec4(255.0)));
+    out_buf.data[idx] = b.r | (b.g << 8) | (b.b << 16) | (b.a << 24);
+}
