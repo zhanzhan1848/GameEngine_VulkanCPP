@@ -49,6 +49,16 @@
 - Minimal Impact: Changes should only touch what's necessary. Avoid introducing bugs.
 - Core Layer as Capability Provider (核心层只提供能力): 核心层(`Engine/Core`、`Engine/Components`、`Engine/Graphics` 等所有引擎核心模块)统一作为能力提供者,不实现应用逻辑。所有能力通过稳定接口暴露给 UI 层、外部脚本层、外部绑定去组合使用。所有核心模块的设计与开发必须遵循此原则。
 
+## Build Constraints (构建约束 — 违反即 CI 红灯,2026-08 Windows 收口教训)
+
+- **RTTI 必须开启**:Engine/RenderGraph、Nanite、Script 等 12 处使用 `dynamic_cast`。MSVC 侧三处(根/Engine/EngineDLL 的 CMakeLists)必须保持 `/GR`——`/GR-` 下 MSVC 的 `dynamic_cast` 运行时抛 `bad_cast`;GCC/Clang 侧的 `-fno-rtti` 必须保持注释状态。想关 RTTI 就得先把这 12 处换成类型标签虚函数。
+- **异常全局禁用**(MSVC `/EHs-c-`,GCC/Clang `-fno-exceptions`):引擎代码不得依赖 throw 传播。MSVC 下任何异常 → terminate → abort,进程退出码 `0xc0000409`。需要 catch 的边界(如 Script.cpp 的脚本 dispatch)用 per-file `-fexceptions` 例外(见 Engine/CMakeLists 的 set_source_files_properties)。
+- **VS/Xcode 多配置生成器下 `CMAKE_BUILD_TYPE` 恒为空**(根 CMakeLists 已不再对多配置生成器强制设 Debug):CMake 里判断构建配置一律用 `$<CONFIG:Debug>` 生成器表达式,任何 `CMAKE_BUILD_TYPE STREQUAL` 判断都会把 Debug 分本应用到全部配置——曾导致 Engine 的 Release 被注入 `_DEBUG`,链接期 MDd/MD 混链(LNK2038,单轮 6898 错)。
+- **`CMAKE_SUPPRESS_REGENERATION ON`**:构建系统不会自动 re-configure。本地(及任何增量环境)改 CMakeLists 后必须手动 `cmake -S . -B build`,否则改动静默不生效;CI Windows 每轮显式 configure 即为此。
+- **Apple 专属符号不得进跨平台代码**:`matrix_identity_float4x4`/`simd::float3`(`<simd/simd.h>`)、`mkstemp`/`ssize_t`/`/tmp` 路径(POSIX)。可移植替代:`rhi::math::MatrixIdentity()`、`rhi::math::v3`、`std::filesystem::temp_directory_path()`。注意 Linux CI 只编 Engine 目标、IntegrationTests 因 BUILD_CONTENT_TOOLS=OFF 跳过——**只有 Windows CI 编全部 UnitTests**,测试代码的跨平台问题只在 Windows 暴露。
+- **测试资源拷贝必须用 stamp 共享目标**(UnitTestAssetsCopy / VulkanShadersCopy / MetalShadersCopy 模式):多个目标 POST_BUILD copy_directory 到同一目的地在 MSBuild --parallel 下竞态(MSB3073)。
+- **链接 EngineDLL 的测试**依赖 EngineDLL 的 POST_BUILD 部署(Tests/UnitTests 的 $<CONFIG>/ 与根目录双布局);DLL 不在 exe 旁 = 启动即 `0xc0000135`。
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
