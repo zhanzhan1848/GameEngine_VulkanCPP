@@ -34,6 +34,8 @@ declare -a SHADERS=(
     "GBufferFoliage       vert frag"
     "GBufferWater         vert frag"
     "GBufferTransparent   vert frag"
+    # VT M2.14: GBuffer 的 VT 采样变体(vertex 复用 GBuffer.vert,仅 frag)
+    "GBufferVT            frag"
     # T4.6.5 part 14: Metal ForwardTransparency.metal has 4 entry points; Vulkan
     # splits into one SPIR-V per entry point → ForwardWater.{vert,frag} and
     # ForwardTransparent.{vert,frag}. Each .spv has a single `main` entry.

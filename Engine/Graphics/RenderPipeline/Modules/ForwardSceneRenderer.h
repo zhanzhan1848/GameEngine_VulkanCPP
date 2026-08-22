@@ -146,6 +146,8 @@ private:
     // Shaders
     rhi::ShaderHandle gbuffer_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle gbuffer_ps_{rhi::handles::INVALID_SHADER};
+    // VT M2.14: GBuffer 的 VT 采样变体(vertex 复用 gbuffer_vs_)
+    rhi::ShaderHandle gbuffer_vt_ps_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle shadow_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle lighting_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle lighting_ps_{rhi::handles::INVALID_SHADER};
@@ -188,6 +190,7 @@ private:
 
     // Pipelines
     rhi::PipelineHandle gbuffer_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle gbuffer_vt_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle shadow_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle lighting_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineHandle skybox_pipeline_{rhi::handles::INVALID_PIPELINE};
@@ -209,6 +212,7 @@ private:
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle gbuffer_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::PipelineLayoutHandle gbuffer_vt_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle shadow_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle lighting_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     // T4.6.5 part 4 Path B: Vulkan-only compute pipeline layout (12 bindings).
@@ -219,6 +223,8 @@ private:
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle global_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle material_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    // VT M2.14: VT 材质 set(页表 + 3 atlas + 采样器 + 参数 UBO + feedback)
+    rhi::DescriptorSetLayoutHandle material_set_vt_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::DescriptorSetLayoutHandle lighting_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     // T4.6.5 part 4 Path B: Vulkan-only compute descriptor set layout matching
     // Engine/Graphics/Vulkan/shaders/DeferredLighting.spv (12 bindings).

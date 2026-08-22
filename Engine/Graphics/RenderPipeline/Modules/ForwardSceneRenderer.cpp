@@ -507,7 +507,7 @@ void ForwardSceneRenderer::Shutdown() {
 #endif
 
     // Destroy pipelines
-    for (auto* p : {&gbuffer_pipeline_, &shadow_pipeline_, &lighting_pipeline_,
+    for (auto* p : {&gbuffer_pipeline_, &gbuffer_vt_pipeline_, &shadow_pipeline_, &lighting_pipeline_,
                     &skybox_pipeline_, &blit_pipeline_, &alphaclip_pipeline_, &unlit_pipeline_,
                     &foliage_pipeline_, &water_pipeline_, &transparent_pipeline_,
                     &forward_water_pipeline_, &forward_transparent_pipeline_,
@@ -515,7 +515,7 @@ void ForwardSceneRenderer::Shutdown() {
         if (*p != handles::INVALID_PIPELINE) { device_->DestroyPipeline(*p); *p = handles::INVALID_PIPELINE; }
     }
     // Destroy layouts
-    for (auto* l : {&gbuffer_layout_, &shadow_layout_, &lighting_layout_, &lighting_compute_layout_,
+    for (auto* l : {&gbuffer_layout_, &gbuffer_vt_layout_, &shadow_layout_, &lighting_layout_, &lighting_compute_layout_,
                     &skybox_layout_, &blit_layout_}) {
         if (*l != handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(*l); *l = handles::INVALID_PIPELINE_LAYOUT; }
     }
@@ -631,6 +631,20 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
             {3, DescriptorType::Sampler, 1, ShaderStage::Pixel},
         };
         material_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+    }
+    // VT M2.14: VT 材质 set — 页表 + 3 层 atlas + 采样器 + 参数 UBO + feedback
+    // (GBufferVT.frag set 1 布局;GBufferVT.metal texture(0..3)/sampler(4)/buffer(5,6))
+    {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Pixel},
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Pixel},
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Pixel},
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Pixel},
+            {4, DescriptorType::Sampler,       1, ShaderStage::Pixel},
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel},
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Pixel},
+        };
+        material_set_vt_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
     }
     // Lighting set (13 bindings). On Dawn the depth texture (binding 5) AND
     // shadow maps (bindings 6/7) must be SampledDepthImage so WGSL can declare
@@ -760,6 +774,8 @@ void ForwardSceneRenderer::CreateShaders() {
 
     gbuffer_vs_ = load("GBuffer", "vertexMain", ShaderStage::Vertex);
     gbuffer_ps_ = load("GBuffer", "fragmentMain", ShaderStage::Pixel);
+    // VT M2.14: 变体缺失不阻塞(shader 文件未部署时保持 INVALID,走原管线)
+    gbuffer_vt_ps_ = load("GBufferVT", "fragmentMain", ShaderStage::Pixel);
     shadow_vs_ = load("DepthOnly", "shadow_mapping_vs", ShaderStage::Vertex);
 
     // T4.6.5 part 5 Path B: Vulkan loads single compute shader for lighting
@@ -915,6 +931,41 @@ void ForwardSceneRenderer::CreatePipelines() {
             desc.vertexBindings = binds;
         }
         gbuffer_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
+    // VT M2.14: GBuffer 的 VT 采样管线(vertex 复用 gbuffer_vs_,pixel 用 VT 变体)
+    if (gbuffer_vt_ps_ != handles::INVALID_SHADER &&
+        material_set_vt_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        DescriptorSetLayoutHandle sets[] = {global_set_layout_, material_set_vt_layout_};
+        gbuffer_vt_layout_ = device_->CreatePipelineLayout({2, sets, 1, &modelPush});
+
+        GraphicsPipelineDesc desc{};
+        desc.layout = gbuffer_vt_layout_;
+        desc.vertexShader = gbuffer_vs_;
+        desc.pixelShader = gbuffer_vt_ps_;
+        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+        desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+        desc.renderTargetCount = 4;
+        desc.depthStencilFormat = DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = ComparisonFunc::Less;
+        desc.cullMode = CullMode::None;
+        populateWasmVertexInput(desc);
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            utl::vector<VertexInputAttribute> attrs(5);
+            attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};   // position
+            attrs[1] = {1, 0, DataFormat::R32_UInt,     12};  // colorTSign
+            attrs[2] = {2, 0, DataFormat::RG16_UInt,    16};  // normal
+            attrs[3] = {3, 0, DataFormat::RG16_UInt,    20};  // tangent
+            attrs[4] = {4, 0, DataFormat::RG32_Float,   24};  // uv
+            desc.vertexAttributes = attrs;
+            utl::vector<VertexInputBinding> binds(1);
+            binds[0] = {0, 32, true};
+            desc.vertexBindings = binds;
+        }
+        gbuffer_vt_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
     // Shadow
     {

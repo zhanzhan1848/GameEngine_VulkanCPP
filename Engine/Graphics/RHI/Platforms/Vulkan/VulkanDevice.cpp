@@ -1265,6 +1265,8 @@ bool VulkanDevice::createLogicalDevice() {
     if (supported.geometryShader)    features.geometryShader = VK_TRUE;
     if (supported.depthClamp)        features.depthClamp = VK_TRUE;
     if (supported.fillModeNonSolid)  features.fillModeNonSolid = VK_TRUE;
+    // VT M2.14: 片元级 feedback 写入(SSBO store)— 设计文档 §7 能力 #2
+    if (supported.fragmentStoresAndAtomics) features.fragmentStoresAndAtomics = VK_TRUE;
     // Phase 4+ 在 features2 链中开 mesh shader / raytracing / bindless。
 
     std::vector<const char*> deviceExtensions;
