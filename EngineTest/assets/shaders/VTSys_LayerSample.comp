@@ -1,9 +1,11 @@
 #version 450
-// VT M2.7: Layer 打包采样 — 一次页表 texelFetch(uvec4)取三层物理地址,
-// 各通道解码后三次 atlas 采样。页表 RGBA32UI(R=层0 G=层1 B=层2)。
+// VT M2.7/M3: Layer 打包采样 + 过滤质量。
+// 一次页表 texelFetch(uvec4)取三层物理地址;各通道独立解码/回退;
+// filterMode 0=NEAREST 1=textureGrad(重映射 UV 的显式导数 — 隐式导数
+// 对重映射坐标不正确);jitterFrame>0 时 InterleavedGradientNoise 帧抖动
+// (trilinear 经 TAA 积分)。
 #extension GL_EXT_samplerless_texture_functions : require
 layout(local_size_x = 8, local_size_y = 8) in;
-
 layout(set = 0, binding = 0) uniform utexture2D vtPageTable;
 layout(set = 0, binding = 1) uniform texture2D atlas0;
 layout(set = 0, binding = 2) uniform texture2D atlas1;
@@ -14,7 +16,8 @@ layout(set = 0, binding = 5) uniform Params {
     vec4 p0;   // x=ptOriginX y=ptOriginY z=pagesTop w=outWidth
     vec4 p1;   // x=atlasSizeInv y=tileSize z=level w=avgColor0
     vec4 p2;   // x=avgColor1 y=avgColor2 z=uvScale w=uvOffsetX
-    vec4 p3;   // x=uvOffsetY y=feedbackWidth z=vtId w=0
+    vec4 p3;   // x=uvOffsetY y=feedbackWidth z=vtId w=filterMode
+    vec4 p4;   // x=jitterFrame(0=关) y=dUv/dPx.x z=dUv/dPx.y w=0
 } params;
 
 layout(set = 0, binding = 6) buffer OutBuf {
@@ -23,6 +26,20 @@ layout(set = 0, binding = 6) buffer OutBuf {
 layout(set = 0, binding = 7) buffer FeedbackBuf {
     uint data[];
 } feedback;
+
+// M3:手动双线性 — 4 次 texelFetch + 权重(连续坐标恰在整数边界时 50/50,
+// 页边界接缝验证即在此;MoltenVK/ASTC 硬件线性路径实测异常故测试端手动)
+vec4 vtBilinear(texture2D t, uint entryCh, vec2 frac, float tileSize) {
+    vec2 origin = vec2(float((entryCh >> 8) & 0x7FFu), float((entryCh >> 19) & 0x7FFu));
+    vec2 c = origin + 4.0 + frac * tileSize;   // texelFetch 纹素中心=整数坐标,无半像素偏移
+    ivec2 p0 = ivec2(floor(c));
+    vec2 w = c - vec2(p0);
+    vec4 t00 = texelFetch(t, p0 + ivec2(0, 0), 0);
+    vec4 t10 = texelFetch(t, p0 + ivec2(1, 0), 0);
+    vec4 t01 = texelFetch(t, p0 + ivec2(0, 1), 0);
+    vec4 t11 = texelFetch(t, p0 + ivec2(1, 1), 0);
+    return mix(mix(t00, t10, w.x), mix(t01, t11, w.x), w.y);
+}
 
 void main() {
     uvec2 xy = gl_GlobalInvocationID.xy;
@@ -33,40 +50,54 @@ void main() {
     vec2 uv = clamp((vec2(xy) + 0.5) / float(outWidth) * params.p2.z
                         + vec2(params.p2.w, params.p3.x),
                     vec2(0.0), vec2(0.99999));
-    uint level = uint(params.p1.z);
+    float levelF = params.p1.z;
+    // M3:TAA mip 抖动(InterleavedGradientNoise,帧号调相)
+    if (params.p4.x > 0.0) {
+        float n = fract(52.9829189 * fract(0.06711056 * float(xy.x)
+                        + 0.00583715 * float(xy.y) + params.p4.x * 0.6187));
+        levelF += n - 0.5;
+    }
+    levelF = clamp(levelF, 0.0, 15.0);
+    uint level = uint(levelF);
     uint s = max(uint(params.p0.z) >> level, 1u);
     uvec2 vPage = min(uvec2(uv * float(s)), uvec2(s - 1u));
 
     feedback.data[idx] = (uint(params.p3.z) << 28) | (level << 24)
                        | ((vPage.y & 0xFFFu) << 12) | (vPage.x & 0xFFFu);
 
-    // 一次查找取四通道;逐级上移回退任一通道 valid 即用该通道(层独立回退)
     uvec4 entry = uvec4(0u);
     for (uint k = 0; (level + k) < 16u; ++k) {
         ivec2 c = ivec2(int(params.p0.x), int(params.p0.y)) + ivec2(vPage >> k);
         entry = texelFetch(vtPageTable, c, 0);
-        if ((entry.r & 1u) != 0u) break;   // 层 0 驱动回退(其余层同页齐驻留)
+        if ((entry.r & 1u) != 0u) break;
     }
     float tileSize = params.p1.y;
     float atlasInv = params.p1.x;
     vec2 f = uv * float(s);
     vec2 frac = f - vec2(vPage);
-    vec2 base = (vec2(vPage) * 0.0 + frac * tileSize + 4.0) * atlasInv;   // border 内偏移
+
+    // M3:手动双线性(filterMode=1)— 4 次 texelFetch + 权重。完全确定性
+    // (MoltenVK/ASTC 的硬件线性/textureGrad/textureLod 实测均异常);
+    // fragment 端(GBufferVT)在合规驱动上用硬件线性。
+    bool useGrad = params.p3.w > 0.5;
 
     vec4 c0 = ((entry.r & 1u) != 0u)
-        ? texture(sampler2D(atlas0, vtSampler),
-                  (vec2(float((entry.r >> 8) & 0x7FFu), float((entry.r >> 19) & 0x7FFu))
-                   + 4.0 + frac * tileSize) * atlasInv)
+        ? (useGrad ? vtBilinear(atlas0, entry.r, frac, tileSize)
+                   : texture(sampler2D(atlas0, vtSampler),
+                       (vec2(float((entry.r >> 8) & 0x7FFu), float((entry.r >> 19) & 0x7FFu))
+                        + 4.0 + frac * tileSize) * atlasInv))
         : vec4(params.p1.w);
     vec4 c1 = ((entry.g & 1u) != 0u)
-        ? texture(sampler2D(atlas1, vtSampler),
-                  (vec2(float((entry.g >> 8) & 0x7FFu), float((entry.g >> 19) & 0x7FFu))
-                   + 4.0 + frac * tileSize) * atlasInv)
+        ? (useGrad ? vtBilinear(atlas1, entry.g, frac, tileSize)
+                   : texture(sampler2D(atlas1, vtSampler),
+                       (vec2(float((entry.g >> 8) & 0x7FFu), float((entry.g >> 19) & 0x7FFu))
+                        + 4.0 + frac * tileSize) * atlasInv))
         : vec4(params.p2.x);
     vec4 c2 = ((entry.b & 1u) != 0u)
-        ? texture(sampler2D(atlas2, vtSampler),
-                  (vec2(float((entry.b >> 8) & 0x7FFu), float((entry.b >> 19) & 0x7FFu))
-                   + 4.0 + frac * tileSize) * atlasInv)
+        ? (useGrad ? vtBilinear(atlas2, entry.b, frac, tileSize)
+                   : texture(sampler2D(atlas2, vtSampler),
+                       (vec2(float((entry.b >> 8) & 0x7FFu), float((entry.b >> 19) & 0x7FFu))
+                        + 4.0 + frac * tileSize) * atlasInv))
         : vec4(params.p2.y);
 
     uvec4 b0 = uvec4(clamp(c0 * 255.0 + 0.5, vec4(0.0), vec4(255.0)));

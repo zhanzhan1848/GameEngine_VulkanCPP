@@ -71,8 +71,31 @@ std::vector<mip_level> generate_mips(const uint8_t* rgba, uint32_t w, uint32_t h
     return mips;
 }
 
-// 提取 (px,py) 页:tile + border clamp 扩展(M0 同款;邻页边缘扩展属 M3)
+// 提取 (px,py) 页:tile + border。
+// M3:border 取邻页真实像素(消除 tile 边缘双线性接缝) — 采样点落在
+// 本 mip 的绝对坐标上,页边缘处自然 clamp 到整图边界。
 std::vector<uint8_t> extract_tile(const mip_level& mip, uint32_t px, uint32_t py,
+                                  uint32_t tile, uint32_t border) {
+    const uint32_t phys = tile + 2 * border;
+    std::vector<uint8_t> out(size_t(phys) * phys * 4);
+    // M3:直接按 mip 绝对坐标采样(页内 + border 区自动越过页界读邻页;
+    // 图外 clamp — 与单张连续图的双线性行为一致)
+    auto sample_clamped = [&](int sx, int sy) -> const uint8_t* {
+        sx = std::clamp(sx, 0, int(mip.side_x) - 1);
+        sy = std::clamp(sy, 0, int(mip.side_y) - 1);
+        return &mip.rgba[(size_t(sy) * mip.side_x + sx) * 4];
+    };
+    const int absX0 = int(px * tile) - int(border);
+    const int absY0 = int(py * tile) - int(border);
+    for (uint32_t y = 0; y < phys; ++y)
+        for (uint32_t x = 0; x < phys; ++x) {
+            std::memcpy(&out[(size_t(y) * phys + x) * 4],
+                        sample_clamped(absX0 + int(x), absY0 + int(y)), 4);
+        }
+    return out;
+}
+#if 0   // M0 旧版保留注释位:clamp-only border
+std::vector<uint8_t> extract_tile_clamp(const mip_level& mip, uint32_t px, uint32_t py,
                                   uint32_t tile, uint32_t border) {
     const uint32_t phys = tile + 2 * border;
     std::vector<uint8_t> out(size_t(phys) * phys * 4);
@@ -85,11 +108,14 @@ std::vector<uint8_t> extract_tile(const mip_level& mip, uint32_t px, uint32_t py
         for (uint32_t x = 0; x < phys; ++x) {
             int sx = int(px * tile) + int(x) - int(border);
             int sy = int(py * tile) + int(y) - int(border);
+            sx = std::clamp(sx, int(px * tile), int(px * tile + tile - 1));   // 页内 clamp(旧行为)
+            sy = std::clamp(sy, int(py * tile), int(py * tile + tile - 1));
             std::memcpy(&out[(size_t(y) * phys + x) * 4],
                         sample_clamped(sx, sy), 4);
         }
     return out;
 }
+#endif
 
 // ============================================================================
 // BC 编码器(4x4 block;luminance 拟合)

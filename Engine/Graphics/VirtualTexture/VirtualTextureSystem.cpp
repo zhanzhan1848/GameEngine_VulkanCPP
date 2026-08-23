@@ -63,7 +63,8 @@ bool virtual_texture_system::initialize(RHIDeviceBase* device, const vt_config& 
     ptDesc.arraySize = 1;
     ptDesc.format = DataFormat::RGBA32_UInt;   // 2.7:每通道一层(一次查找取全层)
     ptDesc.type = TextureType::Texture2D;
-    ptDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+    ptDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess |
+                    TextureUsage::CopySource;   // 调试探针回读
     ptDesc.memoryUsage = GPUMemoryUsage::Static;
     ptDesc.name = "VTSys_PageTable";
     page_table_ = device_->CreateTexture(ptDesc);
@@ -412,6 +413,41 @@ void virtual_texture_system::record_feedback_copy(RHICommandBuffer* cb, u32 fram
     feedback_[slot].submitted = true;
 }
 
+void virtual_texture_system::prefetch_page(u32 vt_id, u32 mip, u32 px, u32 py) {
+    std::lock_guard<std::mutex> g(stream_mutex_);
+    auto it = vts_.find(vt_id);
+    if (it == vts_.end()) return;
+    const vt_entry& vt = it->second;
+    if (mip >= vt.asset.header().mip_count) return;
+    const u32 s = vt.pages_top >> mip;
+    if (px >= s || py >= s) return;
+    const u32 page = mip_page_linear(vt.pages_top, mip, px, py);
+    if (page >= vt.page_layer_bits.size()) return;
+    const u8 fullMask = u8((1u << vt.layer_count) - 1u);
+    if (vt.page_layer_bits[page] == fullMask) return;   // 已驻留
+    submit_streaming(vt_id, page);
+}
+
+void virtual_texture_system::prefetch_rect(u32 vt_id, float cx, float cy, float r) {
+    std::lock_guard<std::mutex> g(stream_mutex_);
+    auto it = vts_.find(vt_id);
+    if (it == vts_.end()) return;
+    const vt_entry& vt = it->second;
+    const float x0 = std::clamp(cx - r, 0.0f, 1.0f);
+    const float x1 = std::clamp(cx + r, 0.0f, 1.0f);
+    const float y0 = std::clamp(cy - r, 0.0f, 1.0f);
+    const float y1 = std::clamp(cy + r, 0.0f, 1.0f);
+    const u32 s = vt.pages_top;
+    for (u32 py = u32(y0 * s); py <= u32(y1 * s) && py < s; ++py)
+        for (u32 px = u32(x0 * s); px <= u32(x1 * s) && px < s; ++px) {
+            const u32 page = mip_page_linear(vt.pages_top, 0, px, py);
+            if (page >= vt.page_layer_bits.size()) continue;
+            const u8 fullMask = u8((1u << vt.layer_count) - 1u);
+            if (vt.page_layer_bits[page] == fullMask) continue;
+            submit_streaming(vt_id, page);
+        }
+}
+
 void virtual_texture_system::record_feedback(RHICommandBuffer* cb, u32 frame_index) {
     if (!cb || !device_) return;
     const u32 slot = frame_index % feedback_.size();
@@ -633,7 +669,15 @@ void virtual_texture_system::update(u32 frame_index) {
                     cpd.layout = pt_update_layout_;
                     cpd.threadGroupSize = {64, 1, 1};
                     pt_update_pipeline_ = device_->CreateComputePipeline(cpd);
+                    if (pt_update_pipeline_ == handles::INVALID_PIPELINE) {
+                        std::cerr << "[VTSys] 页表更新管线创建失败(shader/格式不匹配?)"
+                                  << std::endl;
+                    }
                 }
+            }
+            if (pt_update_pipeline_ == handles::INVALID_PIPELINE) {
+                std::cerr << "[VTSys] 页表更新被跳过(管线无效)— 条目数 "
+                          << pt_entries_.size() / 6 << std::endl;
             }
             if (pt_update_pipeline_) {
                 CommandBufferHandle cmd = device_->CreateCommandBuffer(CommandQueueType::Graphics);

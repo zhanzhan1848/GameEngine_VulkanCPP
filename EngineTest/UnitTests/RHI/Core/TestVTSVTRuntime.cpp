@@ -1181,6 +1181,271 @@ TestResult TestVTSVT_LayerPacked() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// M3:过滤质量(邻页扩展 border + textureGrad + jitter)+ HybridPrefetcher
+// ============================================================================
+TestResult TestVTSVT_FilterQuality() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    auto& sys = virtual_texture_system::instance();
+
+    vt_config cfg;
+    cfg.feedback_slots = 256 * 256;
+    TEST_ASSERT(sys.initialize(fx.base, cfg), "system initialize");
+
+    // ---- Part A:HybridPrefetcher(纯 CPU 预取,无采样 feedback)----
+    {
+        std::vector<u8> srcA(size_t(256) * 256 * 4);
+        for (u32 y = 0; y < 256; ++y)
+            for (u32 x = 0; x < 256; ++x) {
+                u8* p = &srcA[(size_t(y) * 256 + x) * 4];
+                p[0] = uint8_t(x); p[1] = uint8_t(y); p[2] = 128; p[3] = 255;
+            }
+        content::vt::bake_config bc;
+        std::vector<u8> f;
+        TEST_ASSERT(content::vt::bake(srcA.data(), 256, 256, bc, f), "bake A");
+        u32 vt = sys.register_texture(f.data(), f.size());
+        TEST_ASSERT(vt != ~0u, "register A");
+        sys.prefetch_page(vt, 0, 0, 0);
+        sys.prefetch_rect(vt, 0.5f, 0.5f, 0.75f);
+        for (u32 i = 0; i < 10 && sys.stats().resident_pages < 5; ++i) sys.update(i);
+        std::cout << "[VTSys] prefetch: resident=" << sys.stats().resident_pages << std::endl;
+        TEST_ASSERT_EQ(5u, sys.stats().resident_pages, "prefetch drives residency");
+        sys.prefetch_rect(vt, 0.5f, 0.5f, 1.0f);
+        for (u32 i = 0; i < 3; ++i) sys.update(100 + i);
+        TEST_ASSERT_EQ(0u, sys.stats().pending_requests, "prefetch idempotent");
+        sys.release_texture(vt);
+    }
+
+    // ---- Part B:邻页扩展 border + textureGrad + jitter ----
+    std::vector<u8> checker(size_t(256) * 256 * 4);
+    for (u32 y = 0; y < 256; ++y)
+        for (u32 x = 0; x < 256; ++x) {
+            u8 v = ((x / 16 + y / 16) & 1) ? 230 : 25;
+            u8* p = &checker[(size_t(y) * 256 + x) * 4];
+            p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
+        }
+    u32 vtB = ~0u;
+    {
+        content::vt::bake_config bc;
+        bc.astc_quality = 95.0f;   // 高质量(快速档在高频内容上会整体平均)
+        std::vector<u8> f;
+        TEST_ASSERT(content::vt::bake(checker.data(), 256, 256, bc, f), "bake checker");
+        vtB = sys.register_texture(f.data(), f.size());
+        TEST_ASSERT(vtB != ~0u, "register checker");
+    }
+
+    auto readSpvFile = [](const char* path) -> std::vector<u8> {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return {};
+        auto sz = f.tellg();
+        f.seekg(0);
+        std::vector<u8> d(size_t(sz), 0u);
+        f.read(reinterpret_cast<char*>(d.data()), sz);
+        return d;
+    };
+    auto cs = readSpvFile("Assets/Shaders/VTSys_LayerSample.comp.spv");
+    TEST_ASSERT(!cs.empty(), "read spv");
+    ShaderHandle shader = fx.base->CreateShader(cs.data(), cs.size(), ShaderStage::Compute, "main");
+    TEST_ASSERT(shader != handles::INVALID_SHADER, "shader");
+
+    auto makeSampler = [&](FilterMode f) {
+        SamplerDesc d{};
+        d.minFilter = f; d.magFilter = f;
+        d.addressU = TextureAddressMode::Clamp;
+        d.addressV = TextureAddressMode::Clamp;
+        return fx.base->CreateSampler(d);
+    };
+    SamplerHandle bilinear = makeSampler(FilterMode::Linear);
+    SamplerHandle nearest = makeSampler(FilterMode::Nearest);
+
+    DescriptorSetLayoutBinding b[8]{};
+    b[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[4] = {4, DescriptorType::Sampler, 1, ShaderStage::Compute, nullptr};
+    b[5] = {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr};
+    b[6] = {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};
+    b[7] = {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};
+    DescriptorSetLayoutDesc dsl{};
+    dsl.bindingCount = 8;
+    dsl.bindings = b;
+    DescriptorSetLayoutHandle dsLayout = fx.base->CreateDescriptorSetLayout(dsl);
+    PipelineLayoutDesc pl{};
+    pl.setLayoutCount = 1;
+    pl.setLayouts = &dsLayout;
+    pl.pushConstantRangeCount = 0;
+    PipelineLayoutHandle layout = fx.base->CreatePipelineLayout(pl);
+    ComputePipelineDesc cpd{};
+    cpd.computeShader = shader;
+    cpd.layout = layout;
+    cpd.threadGroupSize = {8, 8, 1};
+    PipelineHandle pipe = fx.base->CreateComputePipeline(cpd);
+    TEST_ASSERT(pipe != handles::INVALID_PIPELINE, "pipeline");
+
+    constexpr u32 kW = 256;
+    struct P5 { float p[5][4]; };
+    BufferDesc pdesc{};
+    pdesc.size = sizeof(P5);
+    pdesc.type = BufferType::Constant;
+    pdesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    pdesc.name = "M3Params";
+    ResourceHandle paramsBuf = fx.base->CreateBuffer(pdesc);
+    BufferDesc odesc{};
+    odesc.size = u64(kW) * kW * 3 * 4;
+    odesc.type = BufferType::Raw;
+    odesc.memoryUsage = GPUMemoryUsage::Static;
+    ResourceHandle outBuf = fx.base->CreateBuffer(odesc);
+    BufferDesc rb = odesc;
+    rb.memoryUsage = GPUMemoryUsage::Readback;
+    ResourceHandle outRead = fx.base->CreateBuffer(rb);
+    TEST_ASSERT(paramsBuf != handles::INVALID_RESOURCE && outBuf != handles::INVALID_RESOURCE &&
+                outRead != handles::INVALID_RESOURCE, "buffers");
+
+    DescriptorSetDesc dd{};
+    dd.layout = dsLayout;
+    DescriptorSetHandle ds = fx.base->CreateDescriptorSet(dd);
+    TEST_ASSERT(ds != handles::INVALID_DESCRIPTOR_SET, "desc set");
+
+    // 收敛(采样 feedback 驱动 5 页驻留;NEAREST 阶段)
+    u32 frame = 0;
+    auto dispatchOnce = [&](P5& p, u32 filterMode, float jitterFrame, SamplerHandle samp = handles::INVALID_SAMPLER, float level = 0.0f) -> bool {
+        p.p[0][0] = float(sys.vt_pt_origin_x(vtB));
+        p.p[0][1] = float(sys.vt_pt_origin_y(vtB));
+        p.p[0][2] = float(sys.vt_pages_top(vtB));
+        p.p[0][3] = float(kW);
+        p.p[1][0] = 1.0f / 2048.0f;
+        p.p[1][1] = 128.0f;
+        p.p[1][2] = level;
+        p.p[1][3] = 0.5f;
+        p.p[2][0] = 0.5f; p.p[2][1] = 0.5f;
+        p.p[2][2] = 1.0f; p.p[2][3] = 0;
+        p.p[3][0] = 0; p.p[3][1] = float(kW);
+        p.p[3][2] = float(vtB);
+        p.p[3][3] = float(filterMode);
+        p.p[4][0] = jitterFrame;
+        p.p[4][1] = 1.0f / float(kW);   // dUv/dPx.x(线性映射)
+        p.p[4][2] = 1.0f / float(kW);
+        if (!fx.base->UpdateBufferData(paramsBuf, &p, sizeof(p), 0)) return false;
+        DescriptorImageInfo ptInfo{}, a0{}, a1{}, a2{};
+        ptInfo.imageView = sys.page_table_texture();
+        ptInfo.imageLayout = ResourceState::ShaderResource;
+        a0 = a1 = a2 = ptInfo;
+        a0.imageView = a1.imageView = a2.imageView = sys.atlas_texture(0);
+        DescriptorImageInfo sampInfo{};
+        sampInfo.sampler = (samp == handles::INVALID_SAMPLER) ? bilinear : samp;
+        DescriptorBufferInfo pInfo{paramsBuf, 0, sizeof(P5)};
+        DescriptorBufferInfo oInfo{outBuf, 0, 0};
+        DescriptorBufferInfo fInfo{sys.feedback_buffer(frame), 0, 0};
+        WriteDescriptorSet w[8]{};
+        for (u32 i = 0; i < 8; ++i) {
+            w[i].dstSet = ds; w[i].dstBinding = i; w[i].dstArrayElement = 0;
+            w[i].descriptorCount = 1;
+        }
+        w[0].descriptorType = DescriptorType::SampledImage;   w[0].imageInfo = &ptInfo;
+        w[1].descriptorType = DescriptorType::SampledImage;   w[1].imageInfo = &a0;
+        w[2].descriptorType = DescriptorType::SampledImage;   w[2].imageInfo = &a1;
+        w[3].descriptorType = DescriptorType::SampledImage;   w[3].imageInfo = &a2;
+        w[4].descriptorType = DescriptorType::Sampler;        w[4].imageInfo = &sampInfo;
+        w[5].descriptorType = DescriptorType::UniformBuffer;  w[5].bufferInfo = &pInfo;
+        w[6].descriptorType = DescriptorType::StorageBuffer;  w[6].bufferInfo = &oInfo;
+        w[7].descriptorType = DescriptorType::StorageBuffer;  w[7].bufferInfo = &fInfo;
+        fx.base->UpdateDescriptorSets(8, w);
+
+        CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        RHICommandBuffer* cb = GetCommandBuffer(cmd);
+        if (!cb || !cb->Reset() || !cb->Begin()) return false;
+        cb->BindComputePipeline(pipe);
+        cb->BindDescriptorSets(PipelineBindPoint::Compute, layout, 0, 1, &ds, 0, nullptr);
+        cb->Dispatch(kW / 8, kW / 8, 1);
+        cb->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                          AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+        cb->CopyBuffer(outBuf, outRead, 0, 0, odesc.size);
+        cb->End();
+        cb->Submit(0);
+        cb->WaitForCompletion();
+        fx.base->DestroyCommandBuffer(cmd);
+        return true;
+    };
+
+    P5 p{};
+    // 收敛:prefetch 驱动(注意 frame 计数独立 — Part A 已推进共享 frame;
+    // 且 release 后 stats_ 残留旧值,先 update 一次刷新)
+    sys.update(frame);
+    for (u32 i = 0; i < 40 && sys.stats().resident_pages < 5; ++i) {
+        if (i == 0) sys.prefetch_rect(vtB, 0.5f, 0.5f, 1.0f);
+        sys.update(frame + 1 + i);
+    }
+    TEST_ASSERT_EQ(5u, sys.stats().resident_pages, "checker pages resident");
+
+    // 1) filterMode=1(手动双线性):与 CPU 双线性参考比(含页边界)
+    TEST_ASSERT(dispatchOnce(p, 1, 0), "dispatch grad");
+    {
+        const u32* m = static_cast<const u32*>(fx.base->MapBuffer(outRead, 0, 0));
+        TEST_ASSERT(m != nullptr, "map");
+        double sse = 0;
+        u32 seamBad = 0;
+        for (u32 y = 0; y < kW; ++y)
+            for (u32 x = 0; x < kW; ++x) {
+                u32 got = m[(size_t(y) * kW + x) * 3];
+                // CPU 双线性参考:texel 中心 (x+0.5)/256 → 源坐标 x+0.5,
+                // 恰在整数边界 → v(x)/v(x+1) 各半;块边界处即页边界验证
+                float fx = x + 0.5f, fy = y + 0.5f;
+                auto vAt = [&](float px, float py) -> float {
+                    return ((int(px) / 16 + int(py) / 16) & 1) ? 230.0f : 25.0f;
+                };
+                float ref = 0.25f * (vAt(std::floor(fx - 0.5f), std::floor(fy - 0.5f))
+                                   + vAt(std::floor(fx + 0.5f), std::floor(fy - 0.5f))
+                                   + vAt(std::floor(fx - 0.5f), std::floor(fy + 0.5f))
+                                   + vAt(std::floor(fx + 0.5f), std::floor(fy + 0.5f)));
+                double g = double((got >> 8) & 0xFF);
+                sse += (g - ref) * (g - ref);
+                // 页边界列(x=127 → 采 127.5=页0/页1 交界):旧 clamp border
+                // 会给单侧值(25 或 230),正确混合给 ~127
+                if (x == 127 && (y / 16) % 2 == 0) {
+                    if (std::abs(g - ref) > 64) ++seamBad;
+                }
+            }
+        fx.base->UnmapBuffer(outRead);
+        double mse = sse / (double(kW) * kW);
+        double psnr = 10.0 * std::log10(255.0 * 255.0 / mse);
+        std::cout << "[VTSys] filter: textureGrad PSNR=" << psnr
+                  << " dB seamBad=" << seamBad << std::endl;
+        TEST_ASSERT(psnr >= 26.0, "neighbor-border bilinear PSNR(ASTC 棋盘硬边固有损失 ~29dB)");
+        TEST_ASSERT_EQ(0u, seamBad, "no seam artifacts at page boundary");
+    }
+
+    // 2) jitter:level=1 + 不同帧号 → 输出不同;帧号 0 → 确定性
+    std::vector<u32> snapA, snapB;
+    auto capture = [&](std::vector<u32>& out) {
+        const u32* m = static_cast<const u32*>(fx.base->MapBuffer(outRead, 0, 0));
+        out.assign(m, m + size_t(kW) * kW * 3 / 3);
+        fx.base->UnmapBuffer(outRead);
+    };
+    TEST_ASSERT(dispatchOnce(p, 1, 1, handles::INVALID_SAMPLER, 1.0f), "jitter f1"); capture(snapA);
+    TEST_ASSERT(dispatchOnce(p, 1, 2, handles::INVALID_SAMPLER, 1.0f), "jitter f2"); capture(snapB);
+    u32 diffCount = 0;
+    for (size_t i = 0; i < snapA.size(); ++i)
+        if (snapA[i] != snapB[i]) ++diffCount;
+    std::cout << "[VTSys] filter: jitter diff pixels=" << diffCount << std::endl;
+    TEST_ASSERT(diffCount > 0, "TAA jitter varies output");
+
+    fx.base->DestroyBuffer(outRead);
+    fx.base->DestroyBuffer(outBuf);
+    fx.base->DestroyBuffer(paramsBuf);
+    fx.base->DestroyDescriptorSet(ds);
+    fx.base->DestroySampler(bilinear);
+    fx.base->DestroySampler(nearest);
+    fx.base->DestroyPipeline(pipe);
+    fx.base->DestroyPipelineLayout(layout);
+    fx.base->DestroyDescriptorSetLayout(dsLayout);
+    fx.base->DestroyShader(shader);
+    sys.release_texture(vtB);
+    sys.shutdown();
+    return TestResult::Passed;
+}
+
 void RegisterVTSVTRuntimeTests() {
     auto suite = std::make_shared<TestSuite>("VTSVTRuntimeTests");
     suite->AddTestCase(TestCase("RuntimeLoop", TestVTSVT_RuntimeLoop));
@@ -1188,6 +1453,7 @@ void RegisterVTSVTRuntimeTests() {
     suite->AddTestCase(TestCase("MaterialStack", TestVTSVT_MaterialStack));
     suite->AddTestCase(TestCase("GBufferVTFragment", TestVTSVT_GBufferVTFragment));
     suite->AddTestCase(TestCase("LayerPacked", TestVTSVT_LayerPacked));
+    suite->AddTestCase(TestCase("FilterQuality", TestVTSVT_FilterQuality));
     TestRunner::RegisterTestSuite(suite);
 }
 

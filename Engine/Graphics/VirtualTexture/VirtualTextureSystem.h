@@ -116,6 +116,14 @@ public:
         return readback_ring_.wait(device_, frame_index % feedback_.size(), timeout_ms);
     }
 
+    /// M3 HybridPrefetcher(UE 5.6 式):CPU 侧主动预取 — 距离/速度驱动的
+    /// 页请求入口。与 feedback 路径共用流送队列(优先级可见 > 预取由
+    /// 队列 FIFO 保证);幂等(已驻留/在途则忽略)。
+    /// mip/px/py 为该 VT 的页坐标(金字塔打包语义同 feedback 编码)。
+    void prefetch_page(u32 vt_id, u32 mip, u32 px, u32 py);
+    /// 便利:预取 UV 矩形覆盖的全部 mip0 页(相机前方区域)
+    void prefetch_rect(u32 vt_id, float uv_center_x, float uv_center_y, float uv_radius);
+
     /// 帧末在渲染命令缓冲上记录 feedback 回读拷贝,并把 ring fence 挂到提交信息。
     /// 调用方随后 submit si;update() 会在若干帧后轮询到就绪并处理。
     void record_feedback_copy(RHICommandBuffer* cb, u32 frame_index, QueueSubmitInfo& si);
