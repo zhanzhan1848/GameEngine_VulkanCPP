@@ -390,4 +390,133 @@ bool bake(const uint8_t* rgba, uint32_t width, uint32_t height,
     return true;
 }
 
+
+// ============================================================================
+// 2.7 多层烘焙:复用单层管线;页索引共享,数据段按层×格式
+// ============================================================================
+bool bake_layers(const uint8_t* const* layer_rgba, uint32_t width, uint32_t height,
+                 const bake_layers_config& cfg, std::vector<uint8_t>& out_vtex,
+                 bake_stats* stats) {
+    out_vtex.clear();
+    if (!layer_rgba || width == 0 || height == 0) return false;
+    if ((width & (width - 1)) != 0 || (height & (height - 1)) != 0) return false;
+    if (!cfg.validate()) return false;
+
+    // 每层独立跑单层管线,取其页索引(全部一致 — 同尺寸同 tile)与数据段
+    std::vector<std::vector<uint8_t>> sectionBcn(cfg.layer_count), sectionAstc(cfg.layer_count);
+    std::vector<std::vector<vtex_page_index>> indexAll(cfg.layer_count);
+    uint32_t mipCount = 0, pageCount = 0;
+    uint32_t layerBcnFormats[4] = {0, 0, 0, 0};
+    uint32_t avgColors[4] = {0, 0, 0, 0};
+
+    for (uint32_t l = 0; l < cfg.layer_count; ++l) {
+        bake_config single;
+        single.tile_size = cfg.tile_size;
+        single.border = cfg.border;
+        single.kind = cfg.kinds[l];
+        single.use_bcn = cfg.use_bcn;
+        single.use_astc = cfg.use_astc;
+        single.zlib_tiles = cfg.zlib_tiles;
+        single.astc_quality = cfg.astc_quality;
+        std::vector<uint8_t> one;
+        if (!bake(layer_rgba[l], width, height, single, one)) return false;
+        // 解析单层容器取段与索引(直接按偏移切)
+        const vtex_header* h = reinterpret_cast<const vtex_header*>(one.data());
+        mipCount = h->mip_count;
+        pageCount = h->page_count;
+        layerBcnFormats[l] = h->bcn_format;
+        avgColors[l] = h->avg_color;
+        const vtex_page_index* idx = reinterpret_cast<const vtex_page_index*>(
+            one.data() + h->index_offset);
+        indexAll[l].assign(idx, idx + h->page_count);
+        if (h->bcn_size) {
+            const uint8_t* p = one.data() + h->bcn_offset;
+            sectionBcn[l].assign(p, p + h->bcn_size);
+        }
+        if (h->astc_size) {
+            const uint8_t* p = one.data() + h->astc_offset;
+            sectionAstc[l].assign(p, p + h->astc_size);
+        }
+    }
+
+    // 组装:header + 共享页索引 + [层×格式]数据段
+    // 注:各层同格式对齐下索引偏移一致;BCn 段尺寸相同(同 kind 系列)
+    // 若层间 bcn 段尺寸不一(BC1 vs BC5),页索引按层记录各自的段内偏移,
+    // 这里直接串接,索引条目里 offset/size 已是段内相对值 ✓
+    std::vector<uint8_t> bcnAll, astcAll;
+    for (uint32_t l = 0; l < cfg.layer_count; ++l) {
+        bcnAll.insert(bcnAll.end(), sectionBcn[l].begin(), sectionBcn[l].end());
+        astcAll.insert(astcAll.end(), sectionAstc[l].begin(), sectionAstc[l].end());
+    }
+    // 修正各层索引的段内偏移(层 l 的条目 offset += 前面层的段尺寸)
+    {
+        std::vector<uint64_t> bcnPrefix(cfg.layer_count + 1, 0), astcPrefix(cfg.layer_count + 1, 0);
+        for (uint32_t l = 0; l < cfg.layer_count; ++l) {
+            bcnPrefix[l + 1] = bcnPrefix[l] + sectionBcn[l].size();
+            astcPrefix[l + 1] = astcPrefix[l] + sectionAstc[l].size();
+        }
+        for (uint32_t l = 1; l < cfg.layer_count; ++l) {
+            for (auto& e : indexAll[l]) {
+                e.bcn_offset += uint32_t(bcnPrefix[l]);
+                e.astc_offset += uint32_t(astcPrefix[l]);
+            }
+        }
+    }
+    // 页索引:层 0 的条目为准(共享虚拟页);数据段内偏移取层 0
+    // 注:完整方案是每层一份索引(层间同页不同段偏移)——VTEX v1 保留
+    // reserved[0]=layer_count;读取侧(vtex_asset_mt)按层偏移访问
+
+    vtex_header hdr{};
+    std::memcpy(hdr.magic, "VTEX", 4);
+    hdr.version = kVTEXVersion;
+    hdr.width = width;
+    hdr.height = height;
+    hdr.tile_size = cfg.tile_size;
+    hdr.border = cfg.border;
+    hdr.mip_count = mipCount;
+    hdr.flags = cfg.zlib_tiles ? kVTEXFlagZlibTiles : 0;
+    hdr.bcn_format = layerBcnFormats[0];   // 兼容单层读取(层 0)
+    hdr.astc_format = cfg.use_astc ? astc_format::ASTC_4x4_UNorm : 0;
+    hdr.page_count = pageCount;
+    hdr.avg_color = avgColors[0];
+    // 2.7 多层元数据(reserved 区)
+    hdr.reserved[0] = cfg.layer_count;
+    hdr.reserved[1] = layerBcnFormats[0];
+    hdr.reserved[2] = layerBcnFormats[1];
+    hdr.reserved[3] = layerBcnFormats[2];
+    hdr.reserved[4] = layerBcnFormats[3];
+    hdr.index_offset = sizeof(vtex_header);
+    hdr.bcn_offset = uint32_t(sizeof(vtex_header) + pageCount * sizeof(vtex_page_index));
+    hdr.bcn_size = uint32_t(bcnAll.size());
+    hdr.astc_offset = hdr.bcn_offset + hdr.bcn_size;
+    hdr.astc_size = uint32_t(astcAll.size());
+
+    // 索引区:全部层(层 l 起始于 l*page_count;单层读取器兼容层 0 段)
+    hdr.index_offset = sizeof(vtex_header);
+    hdr.bcn_offset = uint32_t(sizeof(vtex_header) +
+                               cfg.layer_count * pageCount * sizeof(vtex_page_index));
+    hdr.astc_offset = hdr.bcn_offset + hdr.bcn_size;
+
+    out_vtex.reserve(hdr.astc_offset + hdr.astc_size);
+    const uint8_t* hb = reinterpret_cast<const uint8_t*>(&hdr);
+    out_vtex.insert(out_vtex.end(), hb, hb + sizeof(hdr));
+    for (uint32_t l = 0; l < cfg.layer_count; ++l) {
+        const uint8_t* ib = reinterpret_cast<const uint8_t*>(indexAll[l].data());
+        out_vtex.insert(out_vtex.end(), ib,
+                        ib + indexAll[l].size() * sizeof(vtex_page_index));
+    }
+    out_vtex.insert(out_vtex.end(), bcnAll.begin(), bcnAll.end());
+    out_vtex.insert(out_vtex.end(), astcAll.begin(), astcAll.end());
+
+    if (stats) {
+        stats->mip_count = mipCount;
+        stats->page_count = pageCount;
+        stats->bcn_bytes = bcnAll.size();
+        stats->astc_bytes = astcAll.size();
+        stats->total_bytes = out_vtex.size();
+        stats->avg_color = avgColors[0];
+    }
+    return true;
+}
+
 } // namespace primal::content::vt

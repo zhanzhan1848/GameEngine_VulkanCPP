@@ -50,6 +50,18 @@ public:
         return reinterpret_cast<const vt::vtex_page_index*>(p);
     }
 
+    /// 多层容器:层计数(reserved[0];单层=1)
+    uint32_t layer_count() const {
+        return _header ? std::max(1u, _header->reserved[0]) : 1u;
+    }
+    /// 多层容器:层 l 的页索引(索引区 [l*page_count, (l+1)*page_count))
+    const vt::vtex_page_index* page_layer(uint32_t i, uint32_t layer) const {
+        if (!_header || layer >= layer_count() || i >= _header->page_count) return nullptr;
+        const uint8_t* p = _data + _header->index_offset +
+            (uint64_t(layer) * _header->page_count + i) * sizeof(vt::vtex_page_index);
+        return reinterpret_cast<const vt::vtex_page_index*>(p);
+    }
+
     /// 指定页的段数据指针与字节数(astc=false → BCn 段)
     const uint8_t* tile_data(const vt::vtex_page_index& p, bool astc,
                              uint64_t& out_size) const {

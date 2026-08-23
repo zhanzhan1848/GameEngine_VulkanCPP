@@ -124,4 +124,40 @@ bool bake(const uint8_t* rgba, uint32_t width, uint32_t height,
           const bake_config& cfg, std::vector<uint8_t>& out_vtex,
           bake_stats* stats = nullptr);
 
+// ============================================================================
+// 2.7 Layer 打包:多材质层(albedo/normal/orm)烘焙进单一 VTEX
+// ============================================================================
+
+/// 多层烘焙配置:每层一张同尺寸 RGBA8 源图 + 各自通道语义
+struct bake_layers_config {
+    uint32_t tile_size = 128;
+    uint32_t border    = 4;
+    channel_kind kinds[4] = {channel_kind::color, channel_kind::normal,
+                             channel_kind::scalar, channel_kind::color};
+    uint32_t layer_count = 3;          // 1-4
+    bool use_bcn       = true;
+    bool use_astc      = true;
+    bool zlib_tiles    = false;
+    float astc_quality = 0.0f;
+
+    bool validate() const {
+        return layer_count >= 1 && layer_count <= 4 &&
+               tile_size >= 16 && (tile_size & (tile_size - 1)) == 0 &&
+               border >= 2 && border <= 16 &&
+               ((tile_size + 2 * border) % 4) == 0 &&
+               (use_bcn || use_astc);
+    }
+};
+
+/**
+ * @brief 多层烘焙:layer_rgba[i] 为第 i 层源图(全部同尺寸)
+ * @details 页索引共享(同一虚拟页网格);数据段按层×格式组织:
+ *          [层0 BCn][层0 ASTC][层1 BCn][层1 ASTC]...
+ *          header.reserved[0] = layer_count;reserved[1..4] = 每层 bcn_format
+ *          (astc_format 全层统一 ASTC_4x4)。采样一次页表查找取全层地址。
+ */
+bool bake_layers(const uint8_t* const* layer_rgba, uint32_t width, uint32_t height,
+                 const bake_layers_config& cfg, std::vector<uint8_t>& out_vtex,
+                 bake_stats* stats = nullptr);
+
 } // namespace primal::content::vt

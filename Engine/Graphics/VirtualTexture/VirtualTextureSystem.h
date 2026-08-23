@@ -148,6 +148,11 @@ private:
         // 页驻留状态:线性 page = mip 页表坐标(金字塔打包)相对原点
         std::vector<u32> resident_page_to_slot;  // 页 → 物理池槽位(~0u 未驻留)
         u64 resident_count = 0;
+        // 2.7 多层:层格式(平台选定段)与 per-page 层完成位(L 位全 1 = 驻留)
+        u32 layer_count = 1;
+        u32 layer_formats[4] = {0, 0, 0, 0};
+        std::vector<u8> page_layer_bits;        // 每页一个位掩码
+        std::vector<u32> page_layer_origins;    // 每页 4 槽:层 l 的 atlas origin(x|y<<16)
     };
 
     struct pool_page {
@@ -218,6 +223,7 @@ private:
     std::unordered_set<u64> stream_in_flight_;          // key = vt<<32 | page
     struct ready_upload {
         u32 vt_id, page;
+        u32 layer = 0;   // 2.7:多层 VT 的层号(页表通道/层池)
         u32 format;
         std::vector<u8> data;      // 解压后的 tile 数据(压缩或原始)
         u64 data_size;

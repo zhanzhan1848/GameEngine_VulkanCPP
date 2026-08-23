@@ -30,10 +30,12 @@ kernel void vtSysUpdatePageTable(texture2d<uint, access::read_write> pageTable [
 {
     uint count = entries[0];
     if (gid >= count) return;
-    uint ptX = entries[1 + gid * 3 + 0];
-    uint ptY = entries[1 + gid * 3 + 1];
-    uint val = entries[1 + gid * 3 + 2];
-    pageTable.write(uint4(val, 0u, 0u, 0u), ushort2(ptX, ptY), 0);
+    // 2.7:6 元组条目 — RGBA 四通道一次写(每通道一层物理地址)
+    uint ptX = entries[1 + gid * 6 + 0];
+    uint ptY = entries[1 + gid * 6 + 1];
+    uint4 val(entries[1 + gid * 6 + 2], entries[1 + gid * 6 + 3],
+              entries[1 + gid * 6 + 4], entries[1 + gid * 6 + 5]);
+    pageTable.write(val, ushort2(ptX, ptY), 0);
 }
 )";
 
@@ -59,7 +61,7 @@ bool virtual_texture_system::initialize(RHIDeviceBase* device, const vt_config& 
     ptDesc.size = {cfg_.page_table_size, cfg_.page_table_size, 1};
     ptDesc.mipLevels = 1;
     ptDesc.arraySize = 1;
-    ptDesc.format = DataFormat::R32_UInt;
+    ptDesc.format = DataFormat::RGBA32_UInt;   // 2.7:每通道一层(一次查找取全层)
     ptDesc.type = TextureType::Texture2D;
     ptDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
     ptDesc.memoryUsage = GPUMemoryUsage::Static;
@@ -97,9 +99,8 @@ bool virtual_texture_system::initialize(RHIDeviceBase* device, const vt_config& 
             const auto [vt_id, page] = stream_queue_.front();
             stream_queue_.pop_front();
             // 临界区内取数据(vts_ 节点引用稳定,但 blob/asset 访问尽量短)
-            ready_upload up{};
-            up.vt_id = vt_id;
-            up.page = page;
+            // 2.7:每层独立 ready_upload(层格式/段偏移各异)
+            u32 producedLayers = 0;
             {
                 auto it = vts_.find(vt_id);
                 if (it == vts_.end() || page >= u32(it->second.asset.page_count())) {
@@ -108,34 +109,39 @@ bool virtual_texture_system::initialize(RHIDeviceBase* device, const vt_config& 
                 }
                 const vt_entry& vt = it->second;
                 const bool useAstc = device_->GetDeviceInfo().supportsASTC;
-                up.format = useAstc ? vt.asset.header().astc_format
-                                    : vt.asset.header().bcn_format;
-                const content::vt::vtex_page_index* pi = vt.asset.page(page);
-                u64 sz = 0;
-                const u8* data = pi ? vt.asset.tile_data(*pi, useAstc, sz) : nullptr;
-                if (!data || sz == 0 || up.format == 0) {
-                    stream_in_flight_.erase((u64(vt_id) << 32) | page);
-                    continue;
-                }
-                up.data.resize(sz);
-                std::memcpy(up.data.data(), data, sz);
-                up.data_size = sz;
-                if (vt.asset.uses_zlib()) {
-                    const u64 blockBytes =
-                        (up.format == content::vt::bcn_format::BC1_UNorm ||
-                         up.format == content::vt::bcn_format::BC4_UNorm) ? 8 : 16;
-                    const u64 raw = 34ull * 34 * blockBytes;
-                    std::vector<u8> plain(uLongf(raw), 0u);
-                    uLongf plainLen = uLongf(raw);
-                    if (uncompress(plain.data(), &plainLen, up.data.data(), uLong(sz)) != Z_OK) {
-                        stream_in_flight_.erase((u64(vt_id) << 32) | page);
-                        continue;
+                for (u32 l = 0; l < vt.layer_count; ++l) {
+                    ready_upload up{};
+                    up.vt_id = vt_id;
+                    up.page = page;
+                    up.layer = l;
+                    up.format = vt.layer_formats[l];
+                    const content::vt::vtex_page_index* pi = vt.asset.page_layer(page, l);
+                    u64 sz = 0;
+                    const u8* data = pi ? vt.asset.tile_data(*pi, useAstc, sz) : nullptr;
+                    if (!data || sz == 0 || up.format == 0) continue;
+                    up.data.resize(sz);
+                    std::memcpy(up.data.data(), data, sz);
+                    up.data_size = sz;
+                    if (vt.asset.uses_zlib()) {
+                        const u64 blockBytes =
+                            (up.format == content::vt::bcn_format::BC1_UNorm ||
+                             up.format == content::vt::bcn_format::BC4_UNorm) ? 8 : 16;
+                        const u64 raw = 34ull * 34 * blockBytes;
+                        std::vector<u8> plain(uLongf(raw), 0u);
+                        uLongf plainLen = uLongf(raw);
+                        if (uncompress(plain.data(), &plainLen, up.data.data(), uLong(sz)) != Z_OK) {
+                            continue;
+                        }
+                        up.data.swap(plain);
+                        up.data_size = plainLen;
                     }
-                    up.data.swap(plain);
-                    up.data_size = plainLen;
+                    upload_ready_.push_back(std::move(up));
+                    ++producedLayers;
                 }
             }
-            upload_ready_.push_back(std::move(up));
+            if (producedLayers == 0) {
+                stream_in_flight_.erase((u64(vt_id) << 32) | page);
+            }
         }
     });
 
@@ -257,6 +263,16 @@ u32 virtual_texture_system::register_texture(const u8* vtex_data, u64 vtex_size)
         return ~0u;
     }
     e.pages_top = std::max<u32>(1, h.width / cfg_.tile_size);
+    e.layer_count = std::max(1u, h.reserved[0] ? h.reserved[0] : 1u);
+    const bool useAstc = device_->GetDeviceInfo().supportsASTC;
+    for (u32 l = 0; l < e.layer_count; ++l) {
+        // 多层容器:BCn 段格式在 reserved[1+l];ASTC 平台全层统一 ASTC 池
+        e.layer_formats[l] = useAstc ? h.astc_format
+                                     : (l == 0 ? h.bcn_format
+                                               : h.reserved[1 + l]);
+    }
+    e.page_layer_bits.assign(total_page_count(e.pages_top), 0);
+    e.page_layer_origins.assign(total_page_count(e.pages_top) * 4, 0);
     if (!allocate_page_table_subrect(e.pages_top, e.pt_origin_x, e.pt_origin_y)) {
         std::cerr << "[VTSys] 页表空间不足(pages_top=" << e.pages_top << ")" << std::endl;
         return ~0u;
@@ -280,13 +296,12 @@ u32 virtual_texture_system::register_texture(const u8* vtex_data, u64 vtex_size)
         std::lock_guard<std::mutex> g(stream_mutex_);
         vts_.emplace(id, std::move(e));
     }
-    // 懒建页池(ASTC 或 BCn 段格式)
-    const bool useAstc = device_->GetDeviceInfo().supportsASTC;
-    const u32 sectionFormat = useAstc ? vts_[id].asset.header().astc_format
-                                      : vts_[id].asset.header().bcn_format;
-    if (ensure_pool(sectionFormat) == ~0u) {
-        release_texture(id);
-        return ~0u;
+    // 懒建页池:每层一个(ASTC 平台同格式 → 同池;BCn 平台按层格式分池)
+    for (u32 l = 0; l < vts_[id].layer_count; ++l) {
+        if (ensure_pool(vts_[id].layer_formats[l]) == ~0u) {
+            release_texture(id);
+            return ~0u;
+        }
     }
     // root 页(coarsest mip,单页)立即入队 — 采样安全网
     const u32 rootPage = total_page_count(vts_[id].pages_top) - 1;
@@ -345,15 +360,13 @@ void virtual_texture_system::release_texture(u32 vt_id) {
     std::lock_guard<std::mutex> g(stream_mutex_);
     auto it = vts_.find(vt_id);
     if (it == vts_.end()) return;
-    for (u32 page = 0; page < it->second.resident_page_to_slot.size(); ++page) {
-        u32 slot = it->second.resident_page_to_slot[page];
-        if (slot == ~0u) continue;
-        for (auto& pool : pools_) {
-            if (slot < pool.pages.size() && pool.pages[slot].used &&
-                pool.pages[slot].vt_id == vt_id && pool.pages[slot].page == page) {
+    // 2.7:按池反查回收该 VT 全部槽位(多层多池;位图语义下不再依赖
+    // resident_page_to_slot 单槽记录)
+    for (auto& pool : pools_) {
+        for (u32 slot = 0; slot < pool.pages.size(); ++slot) {
+            if (pool.pages[slot].used && pool.pages[slot].vt_id == vt_id) {
                 pool.pages[slot].used = false;
                 pool.free_pages.push_back(slot);
-                break;
             }
         }
     }
@@ -425,11 +438,14 @@ void virtual_texture_system::update(u32 frame_index) {
     {
         std::lock_guard<std::mutex> g(stream_mutex_);
         for (auto& up : upload_ready_) {
-            if (vts_.find(up.vt_id) == vts_.end()) {
+            auto vtIt = vts_.find(up.vt_id);
+            if (vtIt == vts_.end()) {
                 // VT 已释放:丢弃(槽位未分配,无泄漏)
                 stream_in_flight_.erase((u64(up.vt_id) << 32) | up.page);
                 continue;
             }
+            // 单层 VT 的兼容:layer 0
+            if (up.layer >= vtIt->second.layer_count) up.layer = 0;
             const u32 poolIdx = ensure_pool(up.format);
             if (poolIdx == ~0u) {
                 stream_in_flight_.erase((u64(up.vt_id) << 32) | up.page);
@@ -449,11 +465,6 @@ void virtual_texture_system::update(u32 frame_index) {
             pool.pages[pageSlot].vt_id = up.vt_id;
             pool.pages[pageSlot].page = up.page;
             pool.pages[pageSlot].last_use_frame = frame_counter_;
-            auto it = vts_.find(up.vt_id);
-            if (it != vts_.end()) {
-                it->second.resident_page_to_slot[up.page] = pageSlot;
-                ++it->second.resident_count;
-            }
             up.pool_index = poolIdx;
             up.atlas_x = (pageSlot % pool.tiles_per_row) * (cfg_.tile_size + 2 * cfg_.border);
             up.atlas_y = (pageSlot / pool.tiles_per_row) * (cfg_.tile_size + 2 * cfg_.border);
@@ -526,24 +537,38 @@ void virtual_texture_system::update(u32 frame_index) {
         ++stats_.uploads_this_frame;
 
         auto it = vts_.find(up.vt_id);
-        if (it != vts_.end()) {
-            u32 base = 0, s = it->second.pages_top, mip = 0;
-            while (base + s * s <= up.page) { base += s * s; s >>= 1; ++mip; }
-            const u32 px = (up.page - base) % s;
-            const u32 py = (up.page - base) / s;
-            pt_entries_.push_back(it->second.pt_origin_x + px);
-            pt_entries_.push_back(it->second.pt_origin_y + py);
-            pt_entries_.push_back(pack_pt_entry(up.atlas_x, up.atlas_y));
+        if (it != vts_.end() && up.page < it->second.page_layer_bits.size()) {
+            // 2.7:层完成位;全层齐才写页表(RGBA 四通道一次写)并记驻留
+            it->second.page_layer_bits[up.page] |= u8(1u << up.layer);
+            it->second.page_layer_origins[up.page * 4 + up.layer] =
+                up.atlas_x | (up.atlas_y << 16);
+            const u8 fullMask = u8((1u << it->second.layer_count) - 1u);
+            if (it->second.page_layer_bits[up.page] == fullMask) {
+                u32 base = 0, s = it->second.pages_top, mip = 0;
+                while (base + s * s <= up.page) { base += s * s; s >>= 1; ++mip; }
+                const u32 px = (up.page - base) % s;
+                const u32 py = (up.page - base) / s;
+                pt_entries_.push_back(it->second.pt_origin_x + px);
+                pt_entries_.push_back(it->second.pt_origin_y + py);
+                // RGBA 四通道:每层各自的物理 origin(层齐后一次写)
+                for (u32 l = 0; l < 4; ++l) {
+                    const u32 o = it->second.page_layer_origins[up.page * 4 + l];
+                    pt_entries_.push_back(l < it->second.layer_count
+                        ? pack_pt_entry(o & 0xFFFF, o >> 16) : 0);
+                }
+                it->second.resident_page_to_slot[up.page] = up.pool_index;
+                ++it->second.resident_count;
+            }
         }
         stream_in_flight_.erase((u64(up.vt_id) << 32) | up.page);
     }
 
     // 4. 页表 CS 更新
     if (!pt_entries_.empty()) {
-        const u64 bytes = (pt_entries_.size() / 3 + 1) * 3 * sizeof(u32);  // 含 count 头
+        // 2.7:条目 6 元组 (ptX, ptY, vR, vG, vB, vA) — RGBA 四通道一次写
         std::vector<u32> upload;
-        upload.reserve(pt_entries_.size() / 3 * 3 + 1);
-        upload.push_back(u32(pt_entries_.size() / 3));
+        upload.reserve(pt_entries_.size() + 1);
+        upload.push_back(u32(pt_entries_.size() / 6));
         upload.insert(upload.end(), pt_entries_.begin(), pt_entries_.end());
         if (pt_entry_buffer_ == 0) {
             BufferDesc d{};
@@ -626,7 +651,7 @@ void virtual_texture_system::update(u32 frame_index) {
                     cb->BindComputePipeline(pt_update_pipeline_);
                     cb->BindDescriptorSets(PipelineBindPoint::Compute, pt_update_layout_,
                                            0, 1, &pt_update_ds_, 0, nullptr);
-                    cb->Dispatch((u32(upload.size() / 3) + 63) / 64, 1, 1);
+                    cb->Dispatch((u32(upload.size() / 6) + 63) / 64, 1, 1);
                     ResourceBarrier b2{};
                     b2.resource = page_table_;
                     b2.beforeState = ResourceState::UnorderedAccess;
@@ -681,8 +706,9 @@ void virtual_texture_system::process_feedback(u32 slot) {
         const u32 s = vt.pages_top >> mip;
         if (px >= s || py >= s) continue;
         const u32 page = mip_page_linear(vt.pages_top, mip, px, py);
-        if (page >= vt.resident_page_to_slot.size()) continue;
-        if (vt.resident_page_to_slot[page] != ~0u) {
+        if (page >= vt.page_layer_bits.size()) continue;
+        const u8 fullMask = u8((1u << vt.layer_count) - 1u);
+        if (vt.page_layer_bits[page] == fullMask) {
             // LRU touch
             for (auto& pool : pools_) {
                 u32 ps = vt.resident_page_to_slot[page];
@@ -738,6 +764,10 @@ void virtual_texture_system::evict(u32 needed) {
             pt_entries_.push_back(it->second.pt_origin_x + px);
             pt_entries_.push_back(it->second.pt_origin_y + py);
             pt_entries_.push_back(0);
+            pt_entries_.push_back(0);
+            pt_entries_.push_back(0);
+            pt_entries_.push_back(0);
+            it->second.page_layer_bits[victim.page] = 0;
         }
         victim.used = false;
         bestPool->free_pages.push_back(bestSlot);

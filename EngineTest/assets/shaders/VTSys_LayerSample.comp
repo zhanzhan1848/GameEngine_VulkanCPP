@@ -1,0 +1,78 @@
+#version 450
+// VT M2.7: Layer 打包采样 — 一次页表 texelFetch(uvec4)取三层物理地址,
+// 各通道解码后三次 atlas 采样。页表 RGBA32UI(R=层0 G=层1 B=层2)。
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform utexture2D vtPageTable;
+layout(set = 0, binding = 1) uniform texture2D atlas0;
+layout(set = 0, binding = 2) uniform texture2D atlas1;
+layout(set = 0, binding = 3) uniform texture2D atlas2;
+layout(set = 0, binding = 4) uniform sampler vtSampler;
+
+layout(set = 0, binding = 5) uniform Params {
+    vec4 p0;   // x=ptOriginX y=ptOriginY z=pagesTop w=outWidth
+    vec4 p1;   // x=atlasSizeInv y=tileSize z=level w=avgColor0
+    vec4 p2;   // x=avgColor1 y=avgColor2 z=uvScale w=uvOffsetX
+    vec4 p3;   // x=uvOffsetY y=feedbackWidth z=vtId w=0
+} params;
+
+layout(set = 0, binding = 6) buffer OutBuf {
+    uint data[];   // 每像素 3 × u32(层 0/1/2 RGBA8 打包)
+} out_buf;
+layout(set = 0, binding = 7) buffer FeedbackBuf {
+    uint data[];
+} feedback;
+
+void main() {
+    uvec2 xy = gl_GlobalInvocationID.xy;
+    uint outWidth = uint(params.p0.w);
+    if (xy.x >= outWidth || xy.y >= outWidth) return;
+    uint idx = xy.y * outWidth + xy.x;
+
+    vec2 uv = clamp((vec2(xy) + 0.5) / float(outWidth) * params.p2.z
+                        + vec2(params.p2.w, params.p3.x),
+                    vec2(0.0), vec2(0.99999));
+    uint level = uint(params.p1.z);
+    uint s = max(uint(params.p0.z) >> level, 1u);
+    uvec2 vPage = min(uvec2(uv * float(s)), uvec2(s - 1u));
+
+    feedback.data[idx] = (uint(params.p3.z) << 28) | (level << 24)
+                       | ((vPage.y & 0xFFFu) << 12) | (vPage.x & 0xFFFu);
+
+    // 一次查找取四通道;逐级上移回退任一通道 valid 即用该通道(层独立回退)
+    uvec4 entry = uvec4(0u);
+    for (uint k = 0; (level + k) < 16u; ++k) {
+        ivec2 c = ivec2(int(params.p0.x), int(params.p0.y)) + ivec2(vPage >> k);
+        entry = texelFetch(vtPageTable, c, 0);
+        if ((entry.r & 1u) != 0u) break;   // 层 0 驱动回退(其余层同页齐驻留)
+    }
+    float tileSize = params.p1.y;
+    float atlasInv = params.p1.x;
+    vec2 f = uv * float(s);
+    vec2 frac = f - vec2(vPage);
+    vec2 base = (vec2(vPage) * 0.0 + frac * tileSize + 4.0) * atlasInv;   // border 内偏移
+
+    vec4 c0 = ((entry.r & 1u) != 0u)
+        ? texture(sampler2D(atlas0, vtSampler),
+                  (vec2(float((entry.r >> 8) & 0x7FFu), float((entry.r >> 19) & 0x7FFu))
+                   + 4.0 + frac * tileSize) * atlasInv)
+        : vec4(params.p1.w);
+    vec4 c1 = ((entry.g & 1u) != 0u)
+        ? texture(sampler2D(atlas1, vtSampler),
+                  (vec2(float((entry.g >> 8) & 0x7FFu), float((entry.g >> 19) & 0x7FFu))
+                   + 4.0 + frac * tileSize) * atlasInv)
+        : vec4(params.p2.x);
+    vec4 c2 = ((entry.b & 1u) != 0u)
+        ? texture(sampler2D(atlas2, vtSampler),
+                  (vec2(float((entry.b >> 8) & 0x7FFu), float((entry.b >> 19) & 0x7FFu))
+                   + 4.0 + frac * tileSize) * atlasInv)
+        : vec4(params.p2.y);
+
+    uvec4 b0 = uvec4(clamp(c0 * 255.0 + 0.5, vec4(0.0), vec4(255.0)));
+    uvec4 b1 = uvec4(clamp(c1 * 255.0 + 0.5, vec4(0.0), vec4(255.0)));
+    uvec4 b2 = uvec4(clamp(c2 * 255.0 + 0.5, vec4(0.0), vec4(255.0)));
+    out_buf.data[idx * 3u + 0u] = b0.r | (b0.g << 8) | (b0.b << 16) | (b0.a << 24);
+    out_buf.data[idx * 3u + 1u] = b1.r | (b1.g << 8) | (b1.b << 16) | (b1.a << 24);
+    out_buf.data[idx * 3u + 2u] = b2.r | (b2.g << 8) | (b2.b << 16) | (b2.a << 24);
+}

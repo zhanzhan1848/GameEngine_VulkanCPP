@@ -934,12 +934,260 @@ TestResult TestVTSVT_GBufferVTFragment() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// M2.7 Layer 打包:单 VT 三层 — 一次页表查找取三层物理地址
+// ============================================================================
+TestResult TestVTSVT_LayerPacked() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    auto& sys = virtual_texture_system::instance();
+
+    vt_config cfg;
+    cfg.feedback_slots = 256 * 256;
+    cfg.atlas_size = 2048;
+    cfg.max_uploads_per_frame = 16;   // 三层页一次 3 上传
+    TEST_ASSERT(sys.initialize(fx.base, cfg), "system initialize");
+
+    // 三层源(渐变,相位错开;color/normal/scalar 三 kind → BC1/BC5/BC4)
+    std::vector<u8> src[3];
+    for (int i = 0; i < 3; ++i) {
+        src[i].resize(size_t(256) * 256 * 4);
+        for (u32 y = 0; y < 256; ++y)
+            for (u32 x = 0; x < 256; ++x) {
+                u8* p = &src[i][(size_t(y) * 256 + x) * 4];
+                p[0] = uint8_t(x * (255 - i * 60) / 255);
+                p[1] = uint8_t(y * (200 + i * 20) / 255);
+                p[2] = uint8_t((x + y) * (180 + i * 30) / 510);
+                p[3] = 255;
+            }
+    }
+    content::vt::bake_layers_config bc;
+    bc.layer_count = 3;
+    const u8* layers[3] = {src[0].data(), src[1].data(), src[2].data()};
+    std::vector<u8> vtFile;
+    content::vt::bake_stats st;
+    TEST_ASSERT(content::vt::bake_layers(layers, 256, 256, bc, vtFile, &st),
+                "bake_layers");
+    TEST_ASSERT_EQ(5u, st.page_count, "shared page grid");
+
+    u32 vt = sys.register_texture(vtFile.data(), vtFile.size());
+    TEST_ASSERT(vt != ~0u, "register layer-packed VT");
+
+    // 读 spv + 建管线
+    auto readSpvFile = [](const char* path) -> std::vector<u8> {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return {};
+        auto sz = f.tellg();
+        f.seekg(0);
+        std::vector<u8> d(size_t(sz), 0u);
+        f.read(reinterpret_cast<char*>(d.data()), sz);
+        return d;
+    };
+    auto cs = readSpvFile("Assets/Shaders/VTSys_LayerSample.comp.spv");
+    TEST_ASSERT(!cs.empty(), "read layer sample spv");
+    ShaderHandle shader = fx.base->CreateShader(cs.data(), cs.size(), ShaderStage::Compute, "main");
+    TEST_ASSERT(shader != handles::INVALID_SHADER, "shader");
+
+    SamplerDesc sdesc{};
+    sdesc.minFilter = FilterMode::Nearest;
+    sdesc.magFilter = FilterMode::Nearest;
+    sdesc.addressU = TextureAddressMode::Clamp;
+    sdesc.addressV = TextureAddressMode::Clamp;
+    SamplerHandle sampler = fx.base->CreateSampler(sdesc);
+
+    DescriptorSetLayoutBinding b[8]{};
+    b[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[4] = {4, DescriptorType::Sampler, 1, ShaderStage::Compute, nullptr};
+    b[5] = {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr};
+    b[6] = {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};
+    b[7] = {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};
+    DescriptorSetLayoutDesc dsl{};
+    dsl.bindingCount = 8;
+    dsl.bindings = b;
+    DescriptorSetLayoutHandle dsLayout = fx.base->CreateDescriptorSetLayout(dsl);
+    PipelineLayoutDesc pl{};
+    pl.setLayoutCount = 1;
+    pl.setLayouts = &dsLayout;
+    pl.pushConstantRangeCount = 0;
+    PipelineLayoutHandle layout = fx.base->CreatePipelineLayout(pl);
+    ComputePipelineDesc cpd{};
+    cpd.computeShader = shader;
+    cpd.layout = layout;
+    cpd.threadGroupSize = {8, 8, 1};
+    PipelineHandle pipe = fx.base->CreateComputePipeline(cpd);
+    TEST_ASSERT(pipe != handles::INVALID_PIPELINE, "pipeline");
+
+    constexpr u32 kW = 256;
+    struct P4 { float p[4][4]; };
+    BufferDesc pdesc{};
+    pdesc.size = sizeof(P4);
+    pdesc.type = BufferType::Constant;
+    pdesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    ResourceHandle paramsBuf = fx.base->CreateBuffer(pdesc);
+    BufferDesc odesc{};
+    odesc.size = u64(kW) * kW * 3 * 4;
+    odesc.type = BufferType::Raw;
+    odesc.memoryUsage = GPUMemoryUsage::Static;
+    ResourceHandle outBuf = fx.base->CreateBuffer(odesc);
+    BufferDesc rb = odesc;
+    rb.memoryUsage = GPUMemoryUsage::Readback;
+    ResourceHandle outRead = fx.base->CreateBuffer(rb);
+    TEST_ASSERT(paramsBuf != handles::INVALID_RESOURCE && outBuf != handles::INVALID_RESOURCE &&
+                outRead != handles::INVALID_RESOURCE, "buffers");
+
+    // 收敛循环:渲染+feedback+update 直至 5 页全驻留(三层齐)
+    DescriptorSetHandle ds = handles::INVALID_DESCRIPTOR_SET;
+    {
+        DescriptorSetDesc dd{};
+        dd.layout = dsLayout;
+        ds = fx.base->CreateDescriptorSet(dd);
+        TEST_ASSERT(ds != handles::INVALID_DESCRIPTOR_SET, "desc set");
+    }
+    u32 frame = 0;
+    for (; frame < 40 && sys.stats().resident_pages < 5; ++frame) {
+        P4 p{};
+        p.p[0][0] = float(sys.vt_pt_origin_x(vt));
+        p.p[0][1] = float(sys.vt_pt_origin_y(vt));
+        p.p[0][2] = float(sys.vt_pages_top(vt));
+        p.p[0][3] = float(kW);
+        p.p[1][0] = 1.0f / 2048.0f;
+        p.p[1][1] = 128.0f;
+        p.p[1][2] = 0;   // level 0
+        p.p[1][3] = float(sys.vt_avg_color(vt) & 0xFFu) / 255.0f;
+        p.p[2][0] = 0.5f;
+        p.p[2][1] = 0.5f;
+        p.p[2][2] = 1.0f;   // uvScale
+        p.p[2][3] = 0;
+        p.p[3][0] = 0;
+        p.p[3][1] = float(kW);
+        p.p[3][2] = float(vt);
+        TEST_ASSERT(fx.base->UpdateBufferData(paramsBuf, &p, sizeof(p), 0), "params");
+
+        // ASTC 平台三格式同池 → 三 atlas 同句柄;BCn 平台各异(层池)
+        DescriptorImageInfo ptInfo{}, a0{}, a1{}, a2{};
+        ptInfo.imageView = sys.page_table_texture();
+        ptInfo.imageLayout = ResourceState::ShaderResource;
+        a0 = a1 = a2 = ptInfo;
+        a0.imageView = a1.imageView = a2.imageView = sys.atlas_texture(0);
+        DescriptorImageInfo sampInfo{};
+        sampInfo.sampler = sampler;
+        DescriptorBufferInfo pInfo{paramsBuf, 0, sizeof(P4)};
+        DescriptorBufferInfo oInfo{outBuf, 0, 0};
+        DescriptorBufferInfo fInfo{sys.feedback_buffer(frame), 0, 0};
+        WriteDescriptorSet w[8]{};
+        for (u32 i = 0; i < 8; ++i) {
+            w[i].dstSet = ds; w[i].dstBinding = i; w[i].dstArrayElement = 0;
+            w[i].descriptorCount = 1;
+        }
+        w[0].descriptorType = DescriptorType::SampledImage;   w[0].imageInfo = &ptInfo;
+        w[1].descriptorType = DescriptorType::SampledImage;   w[1].imageInfo = &a0;
+        w[2].descriptorType = DescriptorType::SampledImage;   w[2].imageInfo = &a1;
+        w[3].descriptorType = DescriptorType::SampledImage;   w[3].imageInfo = &a2;
+        w[4].descriptorType = DescriptorType::Sampler;        w[4].imageInfo = &sampInfo;
+        w[5].descriptorType = DescriptorType::UniformBuffer;  w[5].bufferInfo = &pInfo;
+        w[6].descriptorType = DescriptorType::StorageBuffer;  w[6].bufferInfo = &oInfo;
+        w[7].descriptorType = DescriptorType::StorageBuffer;  w[7].bufferInfo = &fInfo;
+        fx.base->UpdateDescriptorSets(8, w);
+
+        CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        RHICommandBuffer* cb = GetCommandBuffer(cmd);
+        TEST_ASSERT(cb && cb->Reset() && cb->Begin(), "begin");
+        if (frame == 0) {
+            ResourceBarrier ib[2]{};
+            ib[0].resource = sys.page_table_texture();
+            ib[0].beforeState = ResourceState::Unknown;
+            ib[0].afterState = ResourceState::ShaderResource;
+            ib[0].subresource = 0xFFFFFFFF; ib[0].queueFamily = 0xFFFFFFFF;
+            ib[1] = ib[0];
+            ib[1].resource = sys.atlas_texture(0);
+            cb->InsertBarrier(ib, 2);
+        }
+        cb->BindComputePipeline(pipe);
+        cb->BindDescriptorSets(PipelineBindPoint::Compute, layout, 0, 1, &ds, 0, nullptr);
+        cb->Dispatch(kW / 8, kW / 8, 1);
+        QueueSubmitInfo si{};
+        si.cmdBuffer = cmd;
+        sys.record_feedback_copy(cb, frame, si);
+        cb->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                          AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+        cb->CopyBuffer(outBuf, outRead, 0, 0, odesc.size);
+        TEST_ASSERT(cb->End(), "end");
+        TEST_ASSERT(fx.base->Submit(si), "submit");
+        TEST_ASSERT(sys.wait_feedback(frame, 5000), "fence");
+        fx.base->DestroyCommandBuffer(cmd);
+        sys.update(frame);
+    }
+    // 再渲最终帧(全部页驻留后的画面)
+    {
+        CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        RHICommandBuffer* cb = GetCommandBuffer(cmd);
+        cb->Reset(); cb->Begin();
+        cb->BindComputePipeline(pipe);
+        cb->BindDescriptorSets(PipelineBindPoint::Compute, layout, 0, 1, &ds, 0, nullptr);
+        cb->Dispatch(kW / 8, kW / 8, 1);
+        cb->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                          AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+        cb->CopyBuffer(outBuf, outRead, 0, 0, odesc.size);
+        cb->End();
+        cb->Submit(0);
+        cb->WaitForCompletion();
+        fx.base->DestroyCommandBuffer(cmd);
+    }
+
+    const vt_stats& st2 = sys.stats();
+    std::cout << "[VTSys] layerPacked: frames=" << frame
+              << " resident=" << st2.resident_pages
+              << " pool=" << st2.pool_pages_used << "/" << st2.pool_pages_total
+              << " evict=" << st2.evictions_total << std::endl;
+    TEST_ASSERT_EQ(5u, st2.resident_pages, "5 pages resident (3-layer complete)");
+
+    // 三层 PSNR(一次查找的结果)
+    const u32* m = static_cast<const u32*>(fx.base->MapBuffer(outRead, 0, 0));
+    TEST_ASSERT(m != nullptr, "map");
+    double psnr[3] = {-1, -1, -1};
+    for (int l = 0; l < 3; ++l) {
+        double sse = 0;
+        for (u32 y = 0; y < kW; ++y)
+            for (u32 x = 0; x < kW; ++x) {
+                u32 got = m[(size_t(y) * kW + x) * 3 + l];
+                const u8* e = &src[l][(size_t(y) * 256 + x) * 4];
+                u32 ev = u32(e[0]) | (u32(e[1]) << 8) | (u32(e[2]) << 16) | 0xFF000000u;
+                for (int c = 0; c < 3; ++c) {
+                    double d = double((got >> (8 * c)) & 0xFF) - double((ev >> (8 * c)) & 0xFF);
+                    sse += d * d;
+                }
+            }
+        double mse = sse / (double(kW) * kW * 3);
+        psnr[l] = mse <= 0 ? 99 : 10.0 * std::log10(255.0 * 255.0 / mse);
+        std::cout << "[VTSys] layerPacked L" << l << " PSNR=" << psnr[l] << " dB" << std::endl;
+        TEST_ASSERT(psnr[l] >= 28.0, "layer PSNR");
+    }
+    fx.base->UnmapBuffer(outRead);
+
+    fx.base->DestroyBuffer(outRead);
+    fx.base->DestroyBuffer(outBuf);
+    fx.base->DestroyBuffer(paramsBuf);
+    fx.base->DestroyDescriptorSet(ds);
+    fx.base->DestroySampler(sampler);
+    fx.base->DestroyPipeline(pipe);
+    fx.base->DestroyPipelineLayout(layout);
+    fx.base->DestroyDescriptorSetLayout(dsLayout);
+    fx.base->DestroyShader(shader);
+    sys.release_texture(vt);
+    sys.shutdown();
+    return TestResult::Passed;
+}
+
 void RegisterVTSVTRuntimeTests() {
     auto suite = std::make_shared<TestSuite>("VTSVTRuntimeTests");
     suite->AddTestCase(TestCase("RuntimeLoop", TestVTSVT_RuntimeLoop));
     suite->AddTestCase(TestCase("RegisterReleaseStress", TestVTSVT_RegisterReleaseStress));
     suite->AddTestCase(TestCase("MaterialStack", TestVTSVT_MaterialStack));
     suite->AddTestCase(TestCase("GBufferVTFragment", TestVTSVT_GBufferVTFragment));
+    suite->AddTestCase(TestCase("LayerPacked", TestVTSVT_LayerPacked));
     TestRunner::RegisterTestSuite(suite);
 }
 
