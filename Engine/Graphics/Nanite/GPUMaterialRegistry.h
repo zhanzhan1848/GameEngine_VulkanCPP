@@ -34,8 +34,22 @@ public:
         float roughness_factor;
         float normal_scale;
         float uv_scale[2];            // UV scaling (tiling) for texture repetition
-        uint32_t flags;               // Reserved for future use
+        uint32_t flags;               // bit0 = VT 材质;bits[4:8) = vtId(M4;
+                                     // 单尺寸 Texture2DArray 限制随 VT 化解除)
     };
+
+    // M4:flags 编码 — VT 材质标志 + vtId(feedback 编码上限 15)
+    static constexpr uint32_t kMaterialVTFlag = 0x1u;
+    static constexpr uint32_t kMaterialVTIdShift = 4;
+    static constexpr uint32_t kMaterialVTIdMask = 0xFu;
+    static uint32_t EncodeVTFlags(uint32_t vtId) {
+        return kMaterialVTFlag | ((vtId & kMaterialVTIdMask) << kMaterialVTIdShift);
+    }
+    static bool DecodeVTFlags(uint32_t flags, uint32_t& vtId) {
+        if ((flags & kMaterialVTFlag) == 0) return false;
+        vtId = (flags >> kMaterialVTIdShift) & kMaterialVTIdMask;
+        return true;
+    }
 
     // Material ID type
     using MaterialID = uint32_t;
@@ -61,6 +75,14 @@ public:
     // Register a material (extract data from MaterialInstance)
     // Returns: MaterialID, or INVALID_MATERIAL_ID on failure
     MaterialID RegisterMaterial(graphics::MaterialInstance* instance);
+
+    // M4:VT 材质注册 — 纹理走 virtual_texture_system(页表/atlas 全局
+    // set),无需 Texture2DArray 层;uvScale 平铺进 MaterialData。
+    // texture_idx 三槽置 0(数组未用)。
+    MaterialID RegisterVTMaterial(uint32_t vt_id,
+                                  const math::v3& albedo_tint = math::v3{1, 1, 1},
+                                  float metallic = 0.0f, float roughness = 1.0f,
+                                  float uv_scale_x = 1.0f, float uv_scale_y = 1.0f);
 
     // Async build material data structures
     // Returns: JobHandle for tracking completion
