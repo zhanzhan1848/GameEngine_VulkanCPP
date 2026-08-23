@@ -2026,7 +2026,13 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
 #ifdef __EMSCRIPTEN__
             mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 0);
 #else
-            mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
+            if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+                // Vulkan:管线顶点输入在 binding 0(单 interleaved VB);
+                // 实例经 set0 binding2 SSBO,gl_InstanceIndex 需绝对偏移
+                mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, range.offset, 0);
+            } else {
+                mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
+            }
 #endif
         }
     }

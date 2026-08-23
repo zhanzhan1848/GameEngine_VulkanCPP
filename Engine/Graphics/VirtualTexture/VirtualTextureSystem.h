@@ -104,6 +104,13 @@ public:
     /// 本帧采样 pass 用的 feedback SSBO(绑定到 set,采样函数写入)
     ResourceHandle feedback_buffer(u32 frame_index);
 
+    /// 某帧 feedback ring fence(调用方 submit 时作 signalFence)
+    SyncHandle feedback_fence_handle(u32 frame_index) const {
+        return readback_ring_.fence(frame_index % feedback_.size());
+    }
+    /// 仅记录回读拷贝(不构造 si — 配合直接传 signalFence 的提交路径)
+    void record_feedback(RHICommandBuffer* cb, u32 frame_index);
+
     /// 等待某帧 feedback 提交的 fence(测试/工具用;正常管线由 update 轮询)
     bool wait_feedback(u32 frame_index, u32 timeout_ms) {
         return readback_ring_.wait(device_, frame_index % feedback_.size(), timeout_ms);

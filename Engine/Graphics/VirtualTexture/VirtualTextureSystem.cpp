@@ -399,6 +399,14 @@ void virtual_texture_system::record_feedback_copy(RHICommandBuffer* cb, u32 fram
     feedback_[slot].submitted = true;
 }
 
+void virtual_texture_system::record_feedback(RHICommandBuffer* cb, u32 frame_index) {
+    if (!cb || !device_) return;
+    const u32 slot = frame_index % feedback_.size();
+    cb->CopyBuffer(feedback_[slot].buffer, readback_ring_.buffer(slot), 0, 0,
+                   u64(cfg_.feedback_slots) * sizeof(u32));
+    feedback_[slot].submitted = true;
+}
+
 // ============================================================================
 // update
 // ============================================================================

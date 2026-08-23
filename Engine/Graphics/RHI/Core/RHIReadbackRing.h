@@ -64,6 +64,9 @@ public:
     /// slot 的回读 buffer（作为 CopyBuffer/CopyTextureToBuffer 的目标）
     ResourceHandle buffer(u32 slot) const;
 
+    /// slot 的 fence（调用方 submit 作 signalFence 用）
+    SyncHandle fence(u32 slot) const { return slot < ringSize_ ? fences_[slot] : handles::INVALID_SYNC; }
+
     /// 把 slot 的 fence 挂到提交信息上（GPU 完成信号）
     void attach_fence(QueueSubmitInfo& info, u32 slot) const;
 
