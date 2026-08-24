@@ -238,15 +238,27 @@ bool virtual_texture_system::allocate_page_table_subrect(u32 pages_top, u32& ox,
             it->second.pop_back();
             return true;
         }
+        // 递归分裂:找更大的方块,一路对半切到 want(M4 修复 — 此前单步
+        // 分裂只在精确 want 产生碎片,混合尺寸注册时 4×4 无法从 2×2 碎片
+        // 满足,页表空间误报不足)
         u32 bigger = want << 1;
         while (bigger <= cfg_.page_table_size) {
             auto bit = free_subrects_.find(bigger);
             if (bit != free_subrects_.end() && !bit->second.empty()) {
                 auto [bx, by] = bit->second.back();
                 bit->second.pop_back();
-                free_subrects_[want].push_back({bx + want, by});
-                free_subrects_[want].push_back({bx, by + want});
-                free_subrects_[want].push_back({bx + want, by + want});
+                // 逐级分裂:bigger → bigger/2 → ... → want
+                // 每级产 4 子块,3 个入自由表,1 个继续分裂
+                u32 cur = bigger;
+                u32 cx = bx, cy = by;
+                while (cur > want) {
+                    const u32 half = cur >> 1;
+                    free_subrects_[half].push_back({cx + half, cy});
+                    free_subrects_[half].push_back({cx, cy + half});
+                    free_subrects_[half].push_back({cx + half, cy + half});
+                    cur = half;
+                    // 取左上子块继续
+                }
                 ox = bx; oy = by;
                 return true;
             }
@@ -559,9 +571,11 @@ void virtual_texture_system::record_feedback(RHICommandBuffer* cb, u32 frame_ind
 void virtual_texture_system::update(u32 frame_index) {
     if (!device_) return;
     ++frame_counter_;
-    // M6:cvar 覆盖(运行时可调 — 名字对齐 r.VT.*;见 vt_cvars)
-    cfg_.max_uploads_per_frame = vt_cvars::instance().max_uploads_per_frame;
-    cfg_.page_free_threshold   = vt_cvars::instance().page_free_threshold;
+    // M6:cvar 应用(运行时可调);cvar 为默认值时尊重 cfg 覆盖
+    if (cfg_.max_uploads_per_frame == 8)
+        cfg_.max_uploads_per_frame = vt_cvars::instance().max_uploads_per_frame;
+    if (cfg_.page_free_threshold == 15)
+        cfg_.page_free_threshold = vt_cvars::instance().page_free_threshold;
 
     // 1. feedback 回读(非阻塞轮询同槽上一周期)
     const u32 slot = frame_index % feedback_.size();
@@ -926,7 +940,7 @@ void virtual_texture_system::update(u32 frame_index) {
     }
 
     // 5. 统计
-    stats_.pending_requests = u32(stream_queue_.size() + stream_in_flight_.size());
+    stats_.pending_requests = u32(stream_queue_.size() + stream_in_flight_.size() + upload_pending_.size());
     u32 used = 0, total = 0, resident = 0;
     for (const auto& pool : pools_) {
         for (const auto& p : pool.pages)

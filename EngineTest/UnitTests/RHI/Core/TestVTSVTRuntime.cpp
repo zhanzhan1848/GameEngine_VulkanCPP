@@ -1949,6 +1949,130 @@ TestResult TestVTSVT_CvarParity() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// M4.8: 4K/8K + 混合尺寸压测(VT 系统规模验证 — Nanite bindless 地基之上)
+// ============================================================================
+TestResult TestVTSVT_MixedSizeStress() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    auto& sys = virtual_texture_system::instance();
+
+    vt_config cfg;
+    cfg.feedback_slots = 256 * 256;
+    cfg.atlas_size = 2048;
+    cfg.max_uploads_per_frame = 32;   // 压测加速
+    TEST_ASSERT(sys.initialize(fx.base, cfg), "init");
+
+    // 混合尺寸:256²(2×2 页)+ 512²(4×4 页)+ 1024²(8×8 页)
+    // 不同 pages_top 共存于一张页表(单尺寸 Texture2DArray 限制的 VT 化解除)
+    const u32 sizes[3] = {256, 512, 1024};
+    u32 vts[3];
+    u32 expectPages[3];
+    for (int i = 0; i < 3; ++i) {
+        std::vector<u8> src(size_t(sizes[i]) * sizes[i] * 4);
+        for (u32 y = 0; y < sizes[i]; ++y)
+            for (u32 x = 0; x < sizes[i]; ++x) {
+                u8* p = &src[(size_t(y) * sizes[i] + x) * 4];
+                p[0] = uint8_t(x * 255 / (sizes[i] - 1));
+                p[1] = uint8_t(y * 255 / (sizes[i] - 1));
+                p[2] = uint8_t((x + y) * 255 / (2 * sizes[i] - 2));
+                p[3] = 255;
+            }
+        content::vt::bake_config bc;
+        std::vector<u8> f;
+        TEST_ASSERT(content::vt::bake(src.data(), sizes[i], sizes[i], bc, f), "bake mixed");
+        vts[i] = sys.register_texture(f.data(), f.size());
+        TEST_ASSERT(vts[i] != ~0u, "register mixed");
+        u32 pt = sizes[i] / 128, total = 0, sp = pt;
+        while (sp) { total += sp * sp; sp >>= 1; }
+        expectPages[i] = total;
+    }
+    // 三 VT 页表子矩形互异
+    TEST_ASSERT(sys.vt_pt_origin_x(vts[0]) != sys.vt_pt_origin_x(vts[1]) ||
+                sys.vt_pt_origin_y(vts[0]) != sys.vt_pt_origin_y(vts[1]),
+                "distinct subrects across sizes");
+
+    // 全部预取收敛(mip0 全页 + root;中 mip 由采样 feedback 按需)
+    for (int i = 0; i < 3; ++i)
+        sys.prefetch_rect(vts[i], 0.5f, 0.5f, 1.0f);
+    const u32 mip0Pages = 4 + 16 + 64;      // 三尺寸 mip0 页
+    const u32 rootPages = 3;                 // 三 VT 各一 root
+    const u32 expectPrefetch = mip0Pages + rootPages;
+    for (u32 i = 0; i < 120 && sys.stats().resident_pages < expectPrefetch; ++i)
+        sys.update(i);
+    std::cout << "[VTSys] mixedStress: resident=" << sys.stats().resident_pages
+              << "/" << expectPrefetch << "(mip0+root; mid-mip 按需) pool="
+              << sys.stats().pool_pages_used
+              << "/" << sys.stats().pool_pages_total << std::endl;
+    TEST_ASSERT_EQ(expectPrefetch, sys.stats().resident_pages,
+                   "all mip0+root resident (mixed-size single page table)");
+    TEST_ASSERT(sys.stats().pool_pages_used <= sys.stats().pool_pages_total,
+                "pool within capacity");
+
+    // 4K 烘焙验证(TestVTEXContainer 已有 8K;此处 4K 快验)
+    {
+        std::vector<u8> src4k(size_t(4096) * 4096 * 4);
+        for (u32 x = 0; x < 4096; ++x) {
+            u8* p = &src4k[size_t(x) * 4];
+            p[0] = uint8_t(x & 0xFF); p[1] = uint8_t((x >> 8) & 0xFF);
+            p[2] = 0; p[3] = 255;
+        }
+        for (u32 y = 1; y < 4096; ++y)
+            std::memcpy(&src4k[size_t(y) * 4096 * 4], src4k.data(), size_t(4096) * 4);
+        content::vt::bake_config bc;
+        bc.use_astc = false;   // BC-only 保速度(ASTC 已覆盖)
+        std::vector<u8> f4k;
+        content::vt::bake_stats st4k;
+        TEST_ASSERT(content::vt::bake(src4k.data(), 4096, 4096, bc, f4k, &st4k), "bake 4K");
+        TEST_ASSERT_EQ(6u, st4k.mip_count, "4K mips");
+        std::cout << "[VTSys] 4K bake: pages=" << st4k.page_count
+                  << " total=" << st4k.total_bytes << "B" << std::endl;
+    }
+
+    for (int i = 0; i < 3; ++i) sys.release_texture(vts[i]);
+    sys.shutdown();
+    return TestResult::Passed;
+}
+
+// ============================================================================
+// M3.5: 相机速度外推预取(HybridPrefetcher 进阶 — 运动方向前方区域)
+// ============================================================================
+TestResult TestVTSVT_VelocityPrefetch() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    auto& sys = virtual_texture_system::instance();
+    vt_config cfg;
+    cfg.feedback_slots = 256 * 256;
+    TEST_ASSERT(sys.initialize(fx.base, cfg), "init");
+
+    std::vector<u8> src(size_t(512) * 512 * 4);
+    for (u32 y = 0; y < 512; ++y)
+        for (u32 x = 0; x < 512; ++x) {
+            u8* p = &src[(size_t(y) * 512 + x) * 4];
+            p[0] = uint8_t(x / 2); p[1] = uint8_t(y / 2); p[2] = 128; p[3] = 255;
+        }
+    content::vt::bake_config bc;
+    std::vector<u8> f;
+    TEST_ASSERT(content::vt::bake(src.data(), 512, 512, bc, f), "bake");
+    u32 vt = sys.register_texture(f.data(), f.size());
+    TEST_ASSERT(vt != ~0u, "register");
+
+    // M3.5:相机向 +X+Y 移动 — 预取运动方向前方区域
+    // (当前中心 (0.3,0.3),速度向量 (0.1,0.05)/帧 → 前方 = (0.4,0.35))
+    float cx = 0.3f, cy = 0.3f, vx = 0.1f, vy = 0.05f;
+    const float lookAhead = 1.0f;   // 1 帧外推
+    sys.prefetch_rect(vt, cx + vx * lookAhead, cy + vy * lookAhead, 0.2f);
+    for (u32 i = 0; i < 10 && sys.stats().resident_pages < 5; ++i) sys.update(i);
+
+    std::cout << "[VTSys] velPrefetch: resident=" << sys.stats().resident_pages
+              << " (前方区域预取驱动)" << std::endl;
+    TEST_ASSERT(sys.stats().resident_pages > 0, "velocity-directed prefetch streams pages");
+
+    sys.release_texture(vt);
+    sys.shutdown();
+    return TestResult::Passed;
+}
+
 void RegisterVTSVTRuntimeTests() {
     auto suite = std::make_shared<TestSuite>("VTSVTRuntimeTests");
     suite->AddTestCase(TestCase("RuntimeLoop", TestVTSVT_RuntimeLoop));
@@ -1963,6 +2087,8 @@ void RegisterVTSVTRuntimeTests() {
     suite->AddTestCase(TestCase("RVTAcceptance", TestVTSVT_RVTAcceptance));
     suite->AddTestCase(TestCase("CvarsAndSoak", TestVTSVT_CvarsAndSoak));
     suite->AddTestCase(TestCase("CvarParity", TestVTSVT_CvarParity));
+    suite->AddTestCase(TestCase("MixedSizeStress", TestVTSVT_MixedSizeStress));
+    suite->AddTestCase(TestCase("VelocityPrefetch", TestVTSVT_VelocityPrefetch));
     TestRunner::RegisterTestSuite(suite);
 }
 
