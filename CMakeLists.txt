@@ -343,6 +343,24 @@ enable_testing()
 # 且仓库内没有对应的 Find 模块），无这些 SDK 的机器（如 CI runner）用
 # -DBUILD_CONTENT_TOOLS=OFF 跳过；Engine 与 RHI 单元测试不依赖 ContentTools。
 option(BUILD_CONTENT_TOOLS "Build ContentTools (Windows requires FBX SDK + DirectXTex)" ON)
+# VT M1: 跨平台烘焙 CLI + astc-encoder 静态库(vtbake 与 VTEX 单测共用;
+# 与 BUILD_CONTENT_TOOLS 解耦 — 本机(macOS)ContentTools 主工程因 FBX SDK
+# 不可配置,但 vtbake 必须可构建可验证)
+option(BUILD_VTBAKE "Build vtbake CLI (VT offline baker, needs zlib)" ON)
+if(NOT EMSCRIPTEN AND BUILD_VTBAKE)
+    # 走 astc-encoder 根 CMakeLists(负责声明/翻译 ISA 选项),单 ISA native;
+    # 关 WERROR 避免第三方警告在 CI 高版本编译器下变 fatal
+    set(ASTCENC_CLI OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_UNITTEST OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_DECOMPRESSOR OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_SHAREDLIB OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_UNIVERSAL_BUILD OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_ISA_NATIVE ON CACHE BOOL "" FORCE)
+    set(ASTCENC_WERROR OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/astc-encoder astc-encoder-vt)
+    add_subdirectory(ContentTools/vtbake)
+endif()
+
 if(NOT EMSCRIPTEN AND BUILD_CONTENT_TOOLS)
     add_subdirectory(ContentTools)
 endif()

@@ -69,6 +69,30 @@ GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::
     return newID;
 }
 
+GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterVTMaterial(
+    uint32_t vt_id, const math::v3& albedo_tint, float metallic, float roughness,
+    float uv_scale_x, float uv_scale_y) {
+    MaterialID newID = static_cast<MaterialID>(materials_.size());
+    MaterialData data{};
+    data.albedo_texture_idx = 0;
+    data.normal_texture_idx = 0;
+    data.orm_texture_idx = 0;
+    data.albedo_tint[0] = albedo_tint.x;
+    data.albedo_tint[1] = albedo_tint.y;
+    data.albedo_tint[2] = albedo_tint.z;
+    data.metallic_factor = metallic;
+    data.roughness_factor = roughness;
+    data.normal_scale = 1.0f;
+    data.uv_scale[0] = uv_scale_x;
+    data.uv_scale[1] = uv_scale_y;
+    data.flags = EncodeVTFlags(vt_id);
+    materials_.push_back(data);
+    registeredInstances_.push_back(nullptr);   // VT 材质无 MaterialInstance
+    std::cout << "[GPUMaterialRegistry] VT material id=" << newID
+              << " vtId=" << vt_id << std::endl;
+    return newID;
+}
+
 jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device) {
 //    std::cout << "[GPUMaterialRegistry] Starting async material data build..." << std::endl;
 
@@ -187,17 +211,28 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
                   << texCtx.normalToIndex.size() << " normal, "
                   << texCtx.ormToIndex.size() << " ORM unique textures)" << std::endl;
 
-        // Rebuild materials_ vector with correct texture indices
-        materials_.clear();
-        materials_.reserve(instances.size());
-
+        // Rebuild materials_ vector with correct texture indices.
+        // M4:VT 材质(instance == nullptr,flags 带 kMaterialVTFlag)原样保留 —
+        // 其纹理走 VT 系统页表/atlas,不依赖 Texture2DArray 映射
+        std::vector<MaterialData> rebuilt;
+        rebuilt.reserve(instances.size());
+        size_t nextVT = 0;
+        const std::vector<MaterialData> oldMaterials = materials_;
         for (auto* instance : instances) {
-            if (!instance) continue;
-
-            // Extract material data with texture mapping
-            MaterialData data = MaterialDataBuilder::ExtractMaterialData(instance, texCtx);
-            materials_.push_back(data);
+            if (!instance) {
+                // VT 条目槽位:按注册序回填旧 VT 数据
+                while (nextVT < oldMaterials.size() &&
+                       !(oldMaterials[nextVT].flags & kMaterialVTFlag))
+                    ++nextVT;
+                if (nextVT < oldMaterials.size()) {
+                    rebuilt.push_back(oldMaterials[nextVT]);
+                    ++nextVT;
+                }
+                continue;
+            }
+            rebuilt.push_back(MaterialDataBuilder::ExtractMaterialData(instance, texCtx));
         }
+        materials_ = std::move(rebuilt);
 
         // Diagnostic: print first 3 materials' key fields
         for (size_t i = 0; i < std::min(materials_.size(), (size_t)3); ++i) {

@@ -1,0 +1,13 @@
+#version 450
+// M5 Pass3(GPUFinalizer):packed 纹理 → 物理 atlas 存储镜像直写
+// (无 CPU 往返;对应 UE 5.2 UAV-aliasing 路径)。
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba8) uniform readonly image2D packedTex;
+layout(set = 0, binding = 1, rgba8) uniform image2D atlas;
+layout(push_constant) uniform Params { uvec2 atlasOrigin; uvec2 tileSize; } params;
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= int(params.tileSize.x) || xy.y >= int(params.tileSize.y)) return;
+    vec4 c = imageLoad(packedTex, xy);
+    imageStore(atlas, ivec2(params.atlasOrigin) + xy, c);
+}

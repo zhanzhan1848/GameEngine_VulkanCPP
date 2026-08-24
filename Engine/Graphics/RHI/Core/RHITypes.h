@@ -464,7 +464,35 @@ enum class DataFormat : u16 {
     D16_UNorm = 76,
     D24_UNorm_S8_UInt = 77,
     D32_Float = 78,
-    D32_Float_S8X24_UInt = 79
+    D32_Float_S8X24_UInt = 79,
+
+    // ASTC 压缩格式(VT M0.8:Apple/移动平台 tile 格式)
+    // 每 block 恒 16 字节;block 覆盖的 texel 数由枚举名给出(4x4/6x6/8x8)。
+    // 注意:非 4x4 block 的 bytesPerRow→rowLength 换算与 BC 不同,见
+    // VulkanStagingAllocator::QueueBlit_Texture 的 texelSize 语义注释。
+    // 追加在枚举尾部,避免重排已有序列化值。
+    ASTC_4x4_UNorm = 80,
+    ASTC_4x4_sRGB = 81,
+    ASTC_6x6_UNorm = 82,
+    ASTC_6x6_sRGB = 83,
+    ASTC_8x8_UNorm = 84,
+    ASTC_8x8_sRGB = 85
+};
+
+/**
+ * @brief 纹理子区域上传描述(VT M0.7:页表/物理页 tile 更新)
+ * @details 2D 单 slice 语义:数据为紧密行主序(width * bytesPerTexel(format)/行)。
+ *          压缩格式(BC/ASTC)走命令层 CopyBufferToTexture(块对齐由调用方保证)。
+ */
+struct TextureRegionUpdate {
+    u32 mipLevel      = 0;      ///< 目标 mip 层级
+    u32 baseArrayLayer = 0;     ///< 目标 array layer(2D 单 slice 场景恒 0)
+    u32 offsetX       = 0;      ///< 区域起始 X(texel)
+    u32 offsetY       = 0;      ///< 区域起始 Y(texel)
+    u32 offsetZ       = 0;      ///< 区域起始 Z(2D 恒 0)
+    u32 width         = 0;      ///< 区域宽(texel)
+    u32 height        = 0;      ///< 区域高(texel)
+    u32 depth         = 1;      ///< 区域深(2D 恒 1)
 };
 
 /**

@@ -145,6 +145,11 @@ public:
     /// disagree on the handle→resource map).
     bool UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset = 0) override;
 
+    /// VT M0.7: 纹理子区域上传(页表/tile 更新),dispatch 到 MetalTexture::updateRegion。
+    /// 同 UpdateBufferData 的 dylib ODR-bypass 理由走 device 本地查表。
+    bool UpdateTextureRegion(ResourceHandle handle, const void* data, u64 size,
+                             const TextureRegionUpdate& region) override;
+
     /**
      * @brief 获取采样器对象 (内部使用)
      */

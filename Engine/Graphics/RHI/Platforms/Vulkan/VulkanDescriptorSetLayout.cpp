@@ -120,20 +120,20 @@ bool VulkanDescriptorSetLayout::Initialize() {
     }
     std::vector<VkDescriptorPoolSize> sizes;
     sizes.reserve(poolSizes.size());
-    // T4.6.5 part 35.6: pool size multiplier 16 was too small for per-frame
-    // descriptor set allocators (HZBSystem allocates ~11 sets per BuildHZB
-    // call). With 3 frames in flight + GC offset 3, peak alive is ~33 sets;
-    // 16-descriptor cap per type caused vkAllocateDescriptorSets to fail
-    // after ~2 frames. Bumped to 256 to match maxSets headroom. The cost
-    // is per-pool memory overhead (a few KB per layout) — acceptable.
+    // T4.6.5 part 35.6 → FSR-VK-GAP: 256 maxSets 在全场景材质集下耗尽
+    // (Sponza 393 个 material_ds_ 同布局 — 第 257 个分配失败返回 INVALID,
+    // draw 绑定失效 set → MoltenVK 惰性编码 bindDescriptorSets 段错误)。
+    // Vulkan 池是容量预留而非预分配,扩到 4096 无实内存代价;
+    // 耗尽路径改为显式错误(不再静默 INVALID)。
+    static constexpr u32 kPoolMaxSets = 4096;
     for (const auto& kv : poolSizes) {
-        sizes.push_back({ kv.first, kv.second * 256 });
+        sizes.push_back({ kv.first, kv.second * kPoolMaxSets });
     }
 
     VkDescriptorPoolCreateInfo pci{};
     pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pci.maxSets = 256;
+    pci.maxSets = kPoolMaxSets;
     pci.poolSizeCount = static_cast<u32>(sizes.size());
     pci.pPoolSizes    = sizes.data();
 

@@ -1,0 +1,54 @@
+#version 450
+// VT M0.10/M0.11: 两段式采样原型 — 页表 texelFetch + 物理 atlas texelFetch。
+// 在 texel 中心采样 + 整数取数,结果应与源 mip 逐像素精确一致
+// (双线性/各向异性/border 过滤是 M3 范围)。
+//
+// 页表打包布局(16x16 单 mip 纹理,各 mip 层级占不同列区间):
+//   L0: x∈[0,8)   8x8 页   L1: x∈[8,12)  4x4 页
+//   L2: x∈[12,14) 2x2 页   L3: x=14      1x1 页
+// 条目位打包(R32_UINT): bit0=valid, bits[8:19)=atlasOriginX, bits[19:30)=atlasOriginY
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform utexture2D vtPageTable;
+layout(set = 0, binding = 1) uniform texture2D vtAtlas;
+
+layout(set = 0, binding = 2) uniform Params {
+    uint outWidth;   // 本级输出边长(= 该 mip 的分辨率)
+    uint vLevel;     // 采样 mip 层级
+    uint pad0;
+    uint pad1;
+} params;
+
+layout(set = 0, binding = 3) writeonly buffer OutBuf {
+    uint data[];     // RGBA8 打包为 u32
+} out_buf;
+
+uint pageTableAddrX(uint vPageX, uint vLevel) {
+    return vPageX + (vLevel == 0u ? 0u : (vLevel == 1u ? 8u : (vLevel == 2u ? 12u : 14u)));
+}
+
+void main() {
+    uvec2 xy = gl_GlobalInvocationID.xy;
+    if (xy.x >= params.outWidth || xy.y >= params.outWidth) return;
+
+    const uint tileSize = 128u;
+    uvec2 vPage = xy / tileSize;
+    uvec2 fracPx = xy % tileSize;   // tile 内像素(0..127)
+
+    uint entry = texelFetch(vtPageTable,
+                            ivec2(int(pageTableAddrX(vPage.x, params.vLevel)), int(vPage.y)), 0).r;
+    uint idx = xy.y * params.outWidth + xy.x;
+    if ((entry & 1u) == 0u) {
+        out_buf.data[idx] = 0u;   // 未驻留 → 草稿黑(M2 换平均色兜底)
+        return;
+    }
+    uint originX = (entry >> 8) & 0x7FFu;
+    uint originY = (entry >> 19) & 0x7FFu;
+
+    // 物理 atlas 取数:border 偏移 + tile 内坐标
+    vec4 c = texelFetch(vtAtlas,
+                        ivec2(int(originX + 4u + fracPx.x), int(originY + 4u + fracPx.y)), 0);
+    uvec4 b = uvec4(clamp(c * 255.0 + 0.5, vec4(0.0), vec4(255.0)));
+    out_buf.data[idx] = b.r | (b.g << 8) | (b.b << 16) | (b.a << 24);
+}

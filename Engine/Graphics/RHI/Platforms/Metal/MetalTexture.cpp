@@ -8,6 +8,7 @@
 
 #include "MetalTexture.h"
 #include "MetalDevice.h"
+#include <algorithm>
 #include <iostream>
 
 namespace primal::graphics::rhi {
@@ -178,7 +179,15 @@ static MTL::PixelFormat ToMTLPixelFormat(DataFormat format) {
         case DataFormat::D32_Float: return MTL::PixelFormatDepth32Float;
         case DataFormat::D24_UNorm_S8_UInt: return MTL::PixelFormatDepth24Unorm_Stencil8;
         case DataFormat::D32_Float_S8X24_UInt: return MTL::PixelFormatDepth32Float_Stencil8;
-        
+
+        // VT M0.8: ASTC(Apple GPU 原生;离散 Mac 不支持 — 见 MetalDevice::queryDeviceInfo)
+        case DataFormat::ASTC_4x4_UNorm: return MTL::PixelFormatASTC_4x4_LDR;
+        case DataFormat::ASTC_4x4_sRGB: return MTL::PixelFormatASTC_4x4_sRGB;
+        case DataFormat::ASTC_6x6_UNorm: return MTL::PixelFormatASTC_6x6_LDR;
+        case DataFormat::ASTC_6x6_sRGB: return MTL::PixelFormatASTC_6x6_sRGB;
+        case DataFormat::ASTC_8x8_UNorm: return MTL::PixelFormatASTC_8x8_LDR;
+        case DataFormat::ASTC_8x8_sRGB: return MTL::PixelFormatASTC_8x8_sRGB;
+
         default: return MTL::PixelFormatInvalid;
     }
 }
@@ -401,6 +410,98 @@ bool MetalTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
         mtlTexture_->replaceRegion(region, 0, data, bytesPerRow);
     }
 
+    return true;
+}
+
+// VT M0.7: 任意子区域上传(镜像 VulkanTexture::updateRegion 语义)
+bool MetalTexture::updateRegion(const void* data, u64 size, const TextureRegionUpdate& region) {
+    if (!mtlTexture_ || !data || size == 0) return false;
+    if (textureDesc_.type != TextureType::Texture2D || textureDesc_.size.z > 1 ||
+        textureDesc_.arraySize > 1) {
+        std::cerr << "[MetalTexture] updateRegion: only 2D single-slice supported (M0 scope)" << std::endl;
+        return false;
+    }
+    // 块压缩格式(BC/ASTC)不支持紧密行主序线性布局
+    switch (textureDesc_.format) {
+        case DataFormat::BC1_UNorm: case DataFormat::BC1_sRGB:
+        case DataFormat::BC2_UNorm: case DataFormat::BC2_sRGB:
+        case DataFormat::BC3_UNorm: case DataFormat::BC3_sRGB:
+        case DataFormat::BC4_UNorm: case DataFormat::BC4_SNorm:
+        case DataFormat::BC5_UNorm: case DataFormat::BC5_SNorm:
+        case DataFormat::BC6H_UF16: case DataFormat::BC6H_SF16:
+        case DataFormat::BC7_UNorm: case DataFormat::BC7_sRGB:
+        case DataFormat::ASTC_4x4_UNorm: case DataFormat::ASTC_4x4_sRGB:
+        case DataFormat::ASTC_6x6_UNorm: case DataFormat::ASTC_6x6_sRGB:
+        case DataFormat::ASTC_8x8_UNorm: case DataFormat::ASTC_8x8_sRGB:
+            std::cerr << "[MetalTexture] updateRegion: block-compressed formats unsupported — "
+                         "use CopyBufferToTexture" << std::endl;
+            return false;
+        default: break;
+    }
+    const u32 bytesPerPixel = GetBytePerPixel(textureDesc_.format);
+    if (bytesPerPixel == 0) {
+        std::cerr << "[MetalTexture] updateRegion: unknown texel size for format "
+                  << static_cast<int>(textureDesc_.format) << std::endl;
+        return false;
+    }
+    if (region.mipLevel >= textureDesc_.mipLevels) {
+        std::cerr << "[MetalTexture] updateRegion: mip " << region.mipLevel
+                  << " >= mipLevels " << textureDesc_.mipLevels << std::endl;
+        return false;
+    }
+    if (region.offsetZ != 0 || region.depth != 1) {
+        std::cerr << "[MetalTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
+        return false;
+    }
+    const u32 mipW = std::max<u32>(1u, textureDesc_.size.x >> region.mipLevel);
+    const u32 mipH = std::max<u32>(1u, textureDesc_.size.y >> region.mipLevel);
+    if (region.width == 0 || region.height == 0 ||
+        region.offsetX + region.width > mipW || region.offsetY + region.height > mipH) {
+        std::cerr << "[MetalTexture] updateRegion: region [" << region.offsetX << ","
+                  << region.offsetY << " " << region.width << "x" << region.height
+                  << ") exceeds mip " << region.mipLevel << " dims "
+                  << mipW << "x" << mipH << std::endl;
+        return false;
+    }
+    const NS::UInteger bytesPerRow = NS::UInteger(region.width) * bytesPerPixel;
+    const NS::UInteger bytesPerImage = bytesPerRow * region.height;
+    if (size != u64(bytesPerImage)) {
+        std::cerr << "[MetalTexture] updateRegion: size " << size << " != tightly-packed "
+                  << bytesPerImage << std::endl;
+        return false;
+    }
+
+    if (mtlTexture_->storageMode() == MTL::StorageModePrivate) {
+        // 异步路径:staging 队列(下一 submit 的 EncodePendingBlits 编码)
+        MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
+        MetalStagingAllocator& allocator = metalDevice.GetStagingAllocator();
+        if (!allocator.IsInitialized()) {
+            std::cerr << "[MetalTexture] updateRegion: staging allocator not initialized" << std::endl;
+            return false;
+        }
+        MetalStagingAllocator::Allocation alloc = allocator.Allocate(size, 256);
+        if (alloc.overflow) {
+            // 排干队列后重试一次(对齐 Vulkan 侧 overflow 约定)
+            allocator.FlushBlocking();
+            alloc = allocator.Allocate(size, 256);
+            if (alloc.overflow) {
+                std::cerr << "[MetalTexture] updateRegion: staging pool overflow, size="
+                          << size << std::endl;
+                return false;
+            }
+        }
+        std::memcpy(alloc.cpuPtr, data, size);
+        allocator.QueueBlit_Texture(alloc, mtlTexture_,
+                                    region.mipLevel, region.baseArrayLayer,
+                                    region.offsetX, region.offsetY, region.offsetZ,
+                                    region.width, region.height, region.depth,
+                                    u32(bytesPerRow), u32(bytesPerImage));
+    } else {
+        // Shared/Managed: replaceRegion 立即生效
+        MTL::Region mtlRegion = MTL::Region::Make2D(region.offsetX, region.offsetY,
+                                                    region.width, region.height);
+        mtlTexture_->replaceRegion(mtlRegion, region.mipLevel, data, bytesPerRow);
+    }
     return true;
 }
 

@@ -59,6 +59,7 @@ struct DeviceInfo {
     bool supportsRayTracing;            ///< 是否支持光线追踪
     bool supportsMeshShaders;           ///< 是否支持网格着色器
     bool supportsVariableRateShading;   ///< 是否支持可变速率着色
+    bool supportsASTC;                  ///< 是否支持 ASTC 纹理采样(VT tile 格式,Apple/移动平台)
     
     DeviceInfo() : platform(RHIPlatform::Unknown), deviceName{0}, driverVersion{0},
                   dedicatedVideoMemory(0), sharedSystemMemory(0),
@@ -66,7 +67,7 @@ struct DeviceInfo {
                   maxTextureCubeSize(0), maxRenderTargets(0), maxVertexAttributes(0),
                   maxSamplerStates(0), maxConstantBufferSize(0),
                   supportsRayTracing(false), supportsMeshShaders(false),
-                  supportsVariableRateShading(false) {}
+                  supportsVariableRateShading(false), supportsASTC(false) {}
 };
 
 
@@ -228,6 +229,19 @@ public:
     /// `ResourceManager::Instance().GetResource(h)->UpdateData(...)`.
     virtual bool UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset = 0) {
         (void)handle; (void)data; (void)size; (void)offset;
+        return false;
+    }
+
+    /// Upload tightly-packed rows into a sub-region of a texture (VT M0.7:
+    /// page-table / physical-pool tile updates). Uncompressed formats only —
+    /// block-compressed tiles go through command-level CopyBufferToTexture.
+    /// In-frame calls are queued into the per-frame staging ring (visible at
+    /// the next command-buffer Begin); off-frame calls take the one-shot
+    /// blocking path (asset-load semantics). Returns false on unsupported
+    /// backend (Dawn inherits this default).
+    virtual bool UpdateTextureRegion(ResourceHandle texture, const void* data, u64 size,
+                                     const TextureRegionUpdate& region) {
+        (void)texture; (void)data; (void)size; (void)region;
         return false;
     }
 

@@ -87,6 +87,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ForwardRenderer.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Core/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Core/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/VirtualTexture/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/VirtualTexture/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Systems/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Systems/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Utils/*.h"

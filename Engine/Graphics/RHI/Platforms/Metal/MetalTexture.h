@@ -53,13 +53,22 @@ public:
      * @details 用于交换链等需要动态替换底层纹理的场景。
      *          会自动处理引用计数：release旧纹理，retain新纹理。
      */
-    void SetNativeTexture(MTL::Texture* texture) { 
+    void SetNativeTexture(MTL::Texture* texture) {
         if (mtlTexture_ != texture) {
             if (mtlTexture_) mtlTexture_->release();
             mtlTexture_ = texture;
             if (mtlTexture_) mtlTexture_->retain();
         }
     }
+
+    /**
+     * @brief VT M0.7: 任意子区域上传(2D 单 slice、任意 mip、非压缩格式)
+     * @details data 为紧密行主序(region.width * bytesPerPixel / 行),size 必须
+     *          精确等于 bytesPerRow * region.height。Private 存储走 staging
+     *          队列(下一 submit 时编码);Shared/Managed 走 replaceRegion 立即生效。
+     *          块压缩格式(BC/ASTC)返回 false,用命令层 CopyBufferToTexture。
+     */
+    bool updateRegion(const void* data, u64 size, const TextureRegionUpdate& region);
 
 protected:
     // === RHIResource 接口实现 ===

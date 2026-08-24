@@ -149,6 +149,36 @@ if(ENABLE_VULKAN)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 
+    # VT M0: readback ring / R16_UINT texelFetch / UpdateTextureRegion / ASTC query
+    add_executable(TestVulkanVTPrimitives RHI/Core/TestVulkanVTPrimitives.cpp)
+    target_include_directories(TestVulkanVTPrimitives PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanVTPrimitives PRIVATE Engine)
+    target_compile_definitions(TestVulkanVTPrimitives PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanVTPrimitives COMMAND TestVulkanVTPrimitives)
+    set_target_properties(TestVulkanVTPrimitives PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestVulkanVTPrimitives UnitTestAssetsCopy)
+
+    # VT M0 原型: 页表 + 物理 atlas + 两段式采样端到端
+    add_executable(TestVulkanVTPrototype RHI/Core/TestVulkanVTPrototype.cpp)
+    target_include_directories(TestVulkanVTPrototype PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+    )
+    target_link_libraries(TestVulkanVTPrototype PRIVATE Engine)
+    target_compile_definitions(TestVulkanVTPrototype PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVulkanVTPrototype COMMAND TestVulkanVTPrototype)
+    set_target_properties(TestVulkanVTPrototype PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestVulkanVTPrototype UnitTestAssetsCopy)
+
     # Phase 2: Sync (VkFence + VkSemaphore) 句柄池 + timeout 行为
     add_executable(TestVulkanSync RHI/Core/TestVulkanSync.cpp)
     target_include_directories(TestVulkanSync PRIVATE
@@ -850,6 +880,59 @@ endif()
 # No GPU dependency — pure host code. Linked into a self-test binary now;
 # T2.1 (TestGenerateMetalReference) and T2.4 (TestVulkanForwardRenderer)
 # will include the same .cpp as a source so they don't need a shared library.
+# VT M1: VTBaker + VTEX 容器测试(平台无关;需 BUILD_VTBAKE 的 astc-encoder)
+if(BUILD_VTBAKE)
+    add_executable(TestVTEXContainer
+        Content/TestVTEXContainer.cpp
+        ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
+    )
+    target_include_directories(TestVTEXContainer PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/ContentTools/common
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+        ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
+    )
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static ZLIB::ZLIB)
+    else()
+        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static z)
+    endif()
+    add_test(NAME TestVTEXContainer COMMAND TestVTEXContainer)
+    set_target_properties(TestVTEXContainer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+endif()
+
+# VT M2: SVT 运行时闭环(feedback 驱动流送 + 淘汰;需 Vulkan + astc/zlib)
+if(BUILD_VTBAKE AND ENABLE_VULKAN)
+    add_executable(TestVTSVTRuntime
+        RHI/Core/TestVTSVTRuntime.cpp
+        ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/VirtualTexture/RuntimeVTVolume.cpp
+    )
+    target_include_directories(TestVTSVTRuntime PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/ContentTools/common
+        ${CMAKE_SOURCE_DIR}/third_party/stb
+        ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
+    )
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+    else()
+        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static z)
+    endif()
+    target_compile_definitions(TestVTSVTRuntime PRIVATE ENABLE_VULKAN=1)
+    add_test(NAME TestVTSVTRuntime COMMAND TestVTSVTRuntime)
+    set_target_properties(TestVTSVTRuntime PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestVTSVTRuntime UnitTestAssetsCopy)
+endif()
+
 add_executable(TestImageCompare
     RHI/Core/TestImageCompare.cpp
     ${CMAKE_SOURCE_DIR}/EngineTest/Utils/ImageCompare.cpp
@@ -1340,6 +1423,48 @@ if(APPLE)
     )
     # stale-test port: shared UnitTestAssetsCopy target replaces racy per-target POST_BUILD copy
     add_dependencies(TestMetalP4cReferences UnitTestAssetsCopy)
+
+    # VT M0: readback ring / R16_UINT texelFetch / UpdateTextureRegion / ASTC query (Metal)
+    add_executable(TestMetalVTPrimitives Graphics/Metal/TestMetalVTPrimitives.cpp)
+    target_include_directories(TestMetalVTPrimitives PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+    )
+    target_link_libraries(TestMetalVTPrimitives PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalVTPrimitives COMMAND TestMetalVTPrimitives)
+    set_target_properties(TestMetalVTPrimitives PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestMetalVTPrimitives UnitTestAssetsCopy)
+
+    # VT M0 原型 (Metal): 页表 + 物理 atlas + 两段式采样端到端
+    add_executable(TestMetalVTPrototype Graphics/Metal/TestMetalVTPrototype.cpp)
+    target_include_directories(TestMetalVTPrototype PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/EngineTest
+    )
+    target_link_libraries(TestMetalVTPrototype PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalVTPrototype COMMAND TestMetalVTPrototype)
+    set_target_properties(TestMetalVTPrototype PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+    add_dependencies(TestMetalVTPrototype UnitTestAssetsCopy)
 
     # P4c §4: ForwardRenderer integration frame-time twin (Metal side) for the
     # ±5% cross-backend performance gate.

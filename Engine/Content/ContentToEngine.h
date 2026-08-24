@@ -68,6 +68,10 @@ namespace primal::content
     // --- Unified resource import: one call per resource ---
 [[nodiscard]] id::id_type create_resource(const void *const data, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
     void destroy_resource(id::id_type id, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
+
+    // 释放 register_mesh_asset 返回的裸 rhi_mesh_assets id(destroy_resource
+    // 走 geometry_hierarchies 包装 id 的解码路径,不能用于裸 id)
+    void release_mesh_asset(id::id_type rhi_mesh_id);
     void shutdown();
 
     // RHI Forwarding Helpers

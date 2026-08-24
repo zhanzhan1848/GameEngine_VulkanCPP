@@ -116,6 +116,13 @@ inline VkFormat ToVkFormat(DataFormat fmt) {
         case DataFormat::BC6H_SF16:           return VK_FORMAT_BC6H_SFLOAT_BLOCK;
         case DataFormat::BC7_UNorm:           return VK_FORMAT_BC7_UNORM_BLOCK;
         case DataFormat::BC7_sRGB:            return VK_FORMAT_BC7_SRGB_BLOCK;
+        // --- ASTC(VT M0.8:Apple/移动 tile 格式;MoltenVK 映射 ASTC LDR) ---
+        case DataFormat::ASTC_4x4_UNorm:      return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+        case DataFormat::ASTC_4x4_sRGB:       return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+        case DataFormat::ASTC_6x6_UNorm:      return VK_FORMAT_ASTC_6x6_UNORM_BLOCK;
+        case DataFormat::ASTC_6x6_sRGB:       return VK_FORMAT_ASTC_6x6_SRGB_BLOCK;
+        case DataFormat::ASTC_8x8_UNorm:      return VK_FORMAT_ASTC_8x8_UNORM_BLOCK;
+        case DataFormat::ASTC_8x8_sRGB:       return VK_FORMAT_ASTC_8x8_SRGB_BLOCK;
         default:                              return VK_FORMAT_UNDEFINED;
     }
 }
@@ -181,13 +188,18 @@ inline u64 BytesPerTexel(DataFormat fmt) {
         case DataFormat::BC5_UNorm: case DataFormat::BC5_SNorm:
         case DataFormat::BC6H_UF16: case DataFormat::BC6H_SF16:
         case DataFormat::BC7_UNorm: case DataFormat::BC7_sRGB:
+        // ASTC block 恒 16 字节(4x4/6x6/8x8 同);per-texel 换算按各自
+        // block 覆盖数(16/36/64 texel),由调用方处理 — 与 BC 的"/16"约定不同。
+        case DataFormat::ASTC_4x4_UNorm: case DataFormat::ASTC_4x4_sRGB:
+        case DataFormat::ASTC_6x6_UNorm: case DataFormat::ASTC_6x6_sRGB:
+        case DataFormat::ASTC_8x8_UNorm: case DataFormat::ASTC_8x8_sRGB:
             return 16;
         default:
             return 0;
     }
 }
 
-/// BC 压缩格式判断(影响 BytesPerTexel 的语义:updateData 按 block 计)
+/// BC/ASTC 压缩格式判断(影响 BytesPerTexel 的语义:updateData 按 block 计)
 inline bool IsBlockCompressedFormat(DataFormat fmt) {
     switch (fmt) {
         case DataFormat::BC1_UNorm: case DataFormat::BC1_sRGB:
@@ -197,6 +209,9 @@ inline bool IsBlockCompressedFormat(DataFormat fmt) {
         case DataFormat::BC5_UNorm: case DataFormat::BC5_SNorm:
         case DataFormat::BC6H_UF16: case DataFormat::BC6H_SF16:
         case DataFormat::BC7_UNorm: case DataFormat::BC7_sRGB:
+        case DataFormat::ASTC_4x4_UNorm: case DataFormat::ASTC_4x4_sRGB:
+        case DataFormat::ASTC_6x6_UNorm: case DataFormat::ASTC_6x6_sRGB:
+        case DataFormat::ASTC_8x8_UNorm: case DataFormat::ASTC_8x8_sRGB:
             return true;
         default:
             return false;

@@ -193,6 +193,15 @@ static MTL::PixelFormat ToMTLPixelFormat(DataFormat format) {
         case DataFormat::D24_UNorm_S8_UInt: return MTL::PixelFormatDepth24Unorm_Stencil8;
         case DataFormat::D32_Float_S8X24_UInt: return MTL::PixelFormatDepth32Float_Stencil8;
 
+        // VT M0.8: ASTC(Apple GPU 原生;离散 Mac 无 — queryDeviceInfo 的
+        // supportsASTC 依据 GPU family 判定,烘焙管线据此选择数据段)
+        case DataFormat::ASTC_4x4_UNorm: return MTL::PixelFormatASTC_4x4_LDR;
+        case DataFormat::ASTC_4x4_sRGB: return MTL::PixelFormatASTC_4x4_sRGB;
+        case DataFormat::ASTC_6x6_UNorm: return MTL::PixelFormatASTC_6x6_LDR;
+        case DataFormat::ASTC_6x6_sRGB: return MTL::PixelFormatASTC_6x6_sRGB;
+        case DataFormat::ASTC_8x8_UNorm: return MTL::PixelFormatASTC_8x8_LDR;
+        case DataFormat::ASTC_8x8_sRGB: return MTL::PixelFormatASTC_8x8_sRGB;
+
         default: return MTL::PixelFormatInvalid;
     }
 }
@@ -262,7 +271,11 @@ void MetalDevice::queryDeviceInfo(DeviceInfo& info) {
         info.supportsRayTracing = true;
         info.supportsMeshShaders = true;
     }
-    
+
+    // VT M0.8: ASTC LDR 全系在 Apple GPU family(A8 起)可用;
+    // 离散 GPU(AMD/Intel Mac,仅支持 Mac family)不支持 — 以 Apple2 family 判定。
+    info.supportsASTC = mtlDevice_->supportsFamily(MTL::GPUFamilyApple2);
+
     // 设置一些合理的默认值
     info.maxTexture2DSize = 16384;
     info.maxTexture3DSize = 2048;
@@ -280,6 +293,14 @@ bool MetalDevice::UpdateBufferData(ResourceHandle handle, const void* data, u64 
     MetalBuffer* buffer = GetBuffer(handle);
     if (!buffer || !data || size == 0) return false;
     return buffer->updateDataImpl(data, size, offset);
+}
+
+// VT M0.7: 子区域上传 — 同 ODR-bypass 理由走 device-local 查表
+bool MetalDevice::UpdateTextureRegion(ResourceHandle handle, const void* data, u64 size,
+                                       const TextureRegionUpdate& region) {
+    MetalTexture* texture = GetTexture(handle);
+    if (!texture || !data || size == 0) return false;
+    return texture->updateRegion(data, size, region);
 }
 
 MetalTexture* MetalDevice::GetTexture(ResourceHandle handle) {
@@ -382,11 +403,14 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
         if (info.signalFence != handles::INVALID_SYNC) {
             MetalSync* sync = GetSync(info.signalFence);
             if (sync && sync->GetNativeEvent()) {
-                 u64 nextVal = sync->GetValue() + 1;
+                 // VT M0.5 修复:只记录递增目标值并编码 GPU 信号;不再 CPU 端
+                 // SetValue 预推进 signaledValue(旧实现使 WaitForSync 立即返回,
+                 // 完全不等 GPU — 详见 MetalSync.h 注释)。GPU 执行 encodeSignalEvent
+                 // 时 signaledValue 才真实推进。
+                 u64 nextVal = sync->AcquireNextSignalValue();
                  // 直接访问 MetalCommandBuffer 的私有成员，因为是 friend
                  if (cmdBuf->mtlCommandBuffer_) {
                      cmdBuf->mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), nextVal);
-                     sync->SetValue(nextVal);
                  }
             }
         }
@@ -413,35 +437,16 @@ SyncHandle MetalDevice::createSyncImpl() {
 bool MetalDevice::waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
     MetalSync* sync = GetSync(handle);
     if (!sync) return false;
-    
-    // Metal SharedEvent 等待通常需要通过 CommandBuffer 提交 wait 命令，
-    // 或者使用 waitUntilSignaledValue (CPU 等待)
+
     MTL::SharedEvent* event = sync->GetNativeEvent();
     if (!event) return false;
 
-    // 获取当前期望的目标值 (假设由 Submit 递增)
-    u64 value = sync->GetValue();
+    // VT M0.5:等待 signalFence 提交时记录的目标值(GPU 执行 encodeSignalEvent
+    // 才推进 signaledValue)。目标 0 = 从未提交过 signalFence,视为已完成。
+    u64 value = sync->GetWaitTarget();
     if (value == 0) return true; // 初始状态，视为已完成
-
-    // 使用 dispatch_semaphore 实现同步等待
-    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-    dispatch_retain(sema); // Retain for the block
-    
-    MTL::SharedEventListener* listener = MTL::SharedEventListener::alloc()->init();
-    
-    // 注册监听器
-    event->notifyListener(listener, value, ^(MTL::SharedEvent* evt, u64 val) {
-        dispatch_semaphore_signal(sema);
-        dispatch_release(sema);
-    });
-    
-    // 等待信号量
-    long result = dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, timeoutMs * NSEC_PER_MSEC));
-    
-    listener->release();
-    dispatch_release(sema);
-    
-    return result == 0;
+    (void)event;
+    return sync->Wait(value, timeoutMs);
 }
 
 void MetalDevice::initializeMemoryPool() {

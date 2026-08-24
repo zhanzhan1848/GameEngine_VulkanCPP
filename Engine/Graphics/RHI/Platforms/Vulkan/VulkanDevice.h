@@ -180,6 +180,10 @@ protected:
     // ODR-bypass:跨 dylib 边界时,RHIResource singleton 分裂,必须经设备本地查表
     bool UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset = 0) override;
 
+    // VT M0.7: 纹理子区域上传(页表/tile 更新),dispatch 到 VulkanTexture::updateRegion
+    bool UpdateTextureRegion(ResourceHandle handle, const void* data, u64 size,
+                             const TextureRegionUpdate& region) override;
+
     // T4.6.5 part 24.2 (B6 fix): Vulkan-spec query pool reset. Override base
     // virtual directly (no CRTP shim) — Metal/Dawn inherit empty default.
     void ResetQueryPool(QueryPoolHandle handle, u32 firstQuery, u32 queryCount) override;
