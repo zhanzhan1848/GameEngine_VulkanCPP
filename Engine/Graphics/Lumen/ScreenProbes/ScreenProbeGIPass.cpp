@@ -896,7 +896,7 @@ void ScreenProbeGIPass::CreateBuffers() {
     // Temporal accumulation constant buffers (triple-buffered)
     for (int i = 0; i < 3; ++i) {
         BufferDesc desc{};
-        desc.size = 32;  // totalProbes + alpha + posThreshold + normalThreshold + clampScale + pad[3]
+        desc.size = 96;  // T5.2: prev_view_projection (mat4) + 8 scalars
         desc.type = BufferType::Constant;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -1438,11 +1438,25 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             }
 
             // ==================================================================
-            // Sub-pass 2.75: Probe Temporal Accumulation
+            // Sub-pass 2.75: Probe Temporal Accumulation (T5.2 reprojection)
             // ==================================================================
             if (temporal_pipeline_ != handles::INVALID_PIPELINE) {
-                struct TemporalCB { u32 totalProbes; float alpha; float posThreshold; float normalThreshold; float clampScale; float maxGradient; u32 pad[2]; };
-                TemporalCB tcb{grid_width_ * grid_height_, 0.1f, 0.5f, 0.5f, 2.0f, 2.0f, {0, 0}};
+                // std140 layout: mat4 prevVP (64B) + 8 scalars (32B) = 96B
+                struct alignas(16) TemporalCB {
+                    math::m4x4 prev_view_projection;
+                    u32 totalProbes; float alpha; float posThreshold; float normalThreshold;
+                    float clampScale; float maxGradient; u32 gridW; u32 gridH;
+                };
+                TemporalCB tcb{
+                    camera_data.prev_proj_matrix * camera_data.prev_view_matrix,
+                    grid_width_ * grid_height_, 0.1f, 0.5f, 0.5f, 2.0f, 2.0f,
+                    grid_width_, grid_height_};
+
+                // Vulkan reads the pool UBO (binding 5); Metal uses setBytes below.
+                {
+                    auto* cb = static_cast<TemporalCB*>(device_->MapBuffer(temporal_cb_[frameIdx]));
+                    if (cb) { *cb = tcb; device_->UnmapBuffer(temporal_cb_[frameIdx]); }
+                }
 
                 DescriptorData params[] = {
                     {0, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},
@@ -1459,7 +1473,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->BindComputePipeline(temporal_pipeline_);
                 const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, temporal_layout_, 0, 1, sets, 0, nullptr);
-                cmd->SetComputeBytes(5, &tcb, sizeof(TemporalCB));
+                if (!splitIsVk) cmd->SetComputeBytes(5, &tcb, sizeof(TemporalCB));
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);

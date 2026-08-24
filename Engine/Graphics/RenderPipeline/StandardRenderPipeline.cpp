@@ -686,6 +686,10 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     // 设置的矩阵（保持旧行为兼容）。
     scene_sync::SyncCamerasFromECS(view);
 
+    // T5.2: retain last frame's matrices for SPGI probe reprojection before
+    // overwriting with the current camera.
+    prev_view_matrix_ = view_matrix_;
+    prev_proj_matrix_ = proj_matrix_;
     view_matrix_ = view.GetViewMatrix();
     proj_matrix_ = view.GetProjectionMatrix();
 
@@ -1513,6 +1517,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         lumen::ScreenProbeCameraData spCam{};
         spCam.view_matrix = view_matrix_;
         spCam.proj_matrix = proj_matrix_;
+        spCam.prev_view_matrix = prev_view_matrix_;
+        spCam.prev_proj_matrix = prev_proj_matrix_;
         spCam.camera_position = camera_position_;
         spCam.frame_index = static_cast<u32>(frameCount_);
 
@@ -2146,6 +2152,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             lumen::ScreenProbeCameraData spCam{};
             spCam.view_matrix = view_matrix_;
             spCam.proj_matrix = proj_matrix_;
+            spCam.prev_view_matrix = prev_view_matrix_;
+            spCam.prev_proj_matrix = prev_proj_matrix_;
             spCam.camera_position = camera_position_;
             spCam.frame_index = static_cast<u32>(frameCount_);
 

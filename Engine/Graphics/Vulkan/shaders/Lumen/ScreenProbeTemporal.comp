@@ -49,14 +49,15 @@ layout(set = 0, binding = 4, std430) buffer OutputSHBlock {
 } outputSH;
 
 layout(set = 0, binding = 5, std140) uniform TemporalConstantsBlock {
+    mat4  prev_view_projection;  // T5.2: previous frame VP for reprojection
     uint  totalProbes;
     float baseAlpha;        // base blend alpha (e.g. 0.1)
     float posThreshold;     // world-space distance threshold for disocclusion
     float normalThreshold;  // normal dot-product threshold (reject if below)
     float clampScale;       // history clamp range relative to current
     float maxGradient;      // maximum SH change per frame (gradient limiter)
-    uint  pad0;
-    uint  pad1;
+    uint  gridW;            // T5.2: probe grid dims for prev-cell lookup
+    uint  gridH;
 } params;
 
 layout(set = 0, binding = 6, std430) readonly buffer CurrentNormalsBlock {
@@ -102,51 +103,56 @@ void screen_probe_temporal() {
     }
 
     // =================================================================
-    // Check history validity
+    // T5.2 velocity reprojection: find this probe's history in the
+    // PREVIOUS frame's screen grid instead of the same cell (which is a
+    // different world location once the camera moves). Neighbors pass the
+    // same world-position/normal disocclusion tests the same-cell path used.
     // =================================================================
-    vec4 histSH0 = historySH.data[base + 0u];
-    bool historyValid = (histSH0.w > 0.0);
+    vec4 histSH[4];
+    float histW = 0.0;
+    bool historyValid = false;
+    {
+        vec4 clipP = params.prev_view_projection * vec4(curPos.xyz, 1.0);
+        if (clipP.w > 0.0) {
+            vec2 ndc = clipP.xy / clipP.w;
+            vec2 prevUV = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+            if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThanEqual(prevUV, vec2(1.0)))) {
+                vec2 cellF = prevUV * vec2(params.gridW, params.gridH) - 0.5;
+                ivec2 c0 = ivec2(floor(cellF));
+                vec2 fr = fract(cellF);
+                vec4 curNorm = currentNormals.data[global_id];
+                for (int b = 0; b < 4; ++b) histSH[b] = vec4(0.0);
 
-    // If no valid history -> use current directly (no blending)
-    if (!historyValid) {
-        for (int b = 0; b < 4; b++) {
-            vec4 cur = currentSH.data[base + uint(b)];
-            outputSH.data[base + uint(b)] = (b == 0) ? vec4(cur.rgb, probeConfidence)
-                                                     : vec4(cur.rgb, cur.w);
-        }
-        return;
-    }
-
-    // =================================================================
-    // Disocclusion check 1: world-space position distance
-    // =================================================================
-    bool disoccluded = false;
-    vec4 histPos = historyPositions.data[global_id];
-    if (histPos.w > 0.0) {
-        float posDist = distance(curPos.xyz, histPos.xyz);
-        if (posDist > params.posThreshold) {
-            disoccluded = true;
-        }
-    } else {
-        disoccluded = true;
-    }
-
-    // =================================================================
-    // Disocclusion check 2: normal similarity
-    // =================================================================
-    if (!disoccluded) {
-        vec4 curNorm = currentNormals.data[global_id];
-        vec4 histNorm = historyNormals.data[global_id];
-        if (curNorm.w > 0.0 && histNorm.w > 0.0) {
-            float normalSim = dot(normalize(curNorm.xyz), normalize(histNorm.xyz));
-            if (normalSim < params.normalThreshold) {
-                disoccluded = true;
+                for (int dy = 0; dy <= 1; ++dy)
+                for (int dx = 0; dx <= 1; ++dx) {
+                    ivec2 c = c0 + ivec2(dx, dy);
+                    if (c.x < 0 || c.y < 0 || c.x >= int(params.gridW) || c.y >= int(params.gridH)) continue;
+                    uint hIdx = uint(c.y) * params.gridW + uint(c.x);
+                    vec4 hPos = historyPositions.data[hIdx];
+                    if (hPos.w <= 0.0) continue;
+                    // World-space consistency: history must describe this surface.
+                    if (distance(curPos.xyz, hPos.xyz) > params.posThreshold) continue;
+                    vec4 hNorm = historyNormals.data[hIdx];
+                    if (hNorm.w > 0.0 && curNorm.w > 0.0 &&
+                        dot(normalize(curNorm.xyz), normalize(hNorm.xyz)) < params.normalThreshold) continue;
+                    uint hb = hIdx * 4u;
+                    if (historySH.data[hb].w <= 0.0) continue;  // invalid history entry
+                    float w = ((dx == 0) ? (1.0 - fr.x) : fr.x)
+                            * ((dy == 0) ? (1.0 - fr.y) : fr.y);
+                    for (int b = 0; b < 4; ++b)
+                        histSH[b] += historySH.data[hb + uint(b)] * w;
+                    histW += w;
+                }
+                if (histW > 0.001) {
+                    historyValid = true;
+                    for (int b = 0; b < 4; ++b) histSH[b] /= histW;
+                }
             }
         }
     }
 
-    // If disoccluded -> reset to current (no history blending)
-    if (disoccluded) {
+    // If no valid history -> use current directly (no blending)
+    if (!historyValid) {
         for (int b = 0; b < 4; b++) {
             vec4 cur = currentSH.data[base + uint(b)];
             outputSH.data[base + uint(b)] = (b == 0) ? vec4(cur.rgb, probeConfidence)
@@ -170,7 +176,7 @@ void screen_probe_temporal() {
     // =================================================================
     // Compute per-probe gradient (how much SH changed)
     // =================================================================
-    vec3 diff0 = curSH0.rgb - histSH0.rgb;
+    vec3 diff0 = curSH0.rgb - histSH[0].rgb;
     float gradient = length(diff0);
 
     // =================================================================
@@ -186,7 +192,7 @@ void screen_probe_temporal() {
     // =================================================================
     for (int b = 0; b < 4; b++) {
         vec4 cur = currentSH.data[base + uint(b)];
-        vec4 hist = historySH.data[base + uint(b)];
+        vec4 hist = histSH[b];
 
         // Clamp history to prevent energy drift
         vec3 curAbs = max(abs(cur.rgb), vec3(0.1));

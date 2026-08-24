@@ -20,13 +20,15 @@
 using namespace metal;
 
 struct TemporalConstants {
+    float4x4 prev_view_projection;  // T5.2: previous frame VP for reprojection
     uint  totalProbes;
     float baseAlpha;        // base blend alpha (e.g. 0.1)
     float posThreshold;     // world-space distance threshold for disocclusion
     float normalThreshold;  // normal dot-product threshold (reject if below)
     float clampScale;       // history clamp range relative to current
     float maxGradient;      // maximum SH change per frame (gradient limiter)
-    uint  pad[2];
+    uint  gridW;            // T5.2: probe grid dims for prev-cell lookup
+    uint  gridH;
 };
 
 kernel void screen_probe_temporal(
@@ -69,51 +71,54 @@ kernel void screen_probe_temporal(
     }
 
     // =================================================================
-    // Check history validity
+    // T5.2 velocity reprojection: find this probe's history in the
+    // PREVIOUS frame's screen grid instead of the same cell. Neighbors
+    // pass the same world-position/normal disocclusion tests inline.
     // =================================================================
-    float4 histSH0 = historySH[base + 0];
-    bool historyValid = (histSH0.w > 0.0f);
+    float4 histSH[4];
+    float histW = 0.0f;
+    bool historyValid = false;
+    {
+        float4 clipP = params.prev_view_projection * float4(curPos.xyz, 1.0f);
+        if (clipP.w > 0.0f) {
+            float2 ndc = clipP.xy / clipP.w;
+            float2 prevUV = float2(ndc.x * 0.5f + 0.5f, 1.0f - (ndc.y * 0.5f + 0.5f));
+            if (all(prevUV >= float2(0.0f)) && all(prevUV <= float2(1.0f))) {
+                float2 cellF = prevUV * float2(params.gridW, params.gridH) - 0.5f;
+                int2 c0 = int2(floor(cellF));
+                float2 fr = fract(cellF);
+                float4 curNorm = currentNormals[global_id];
+                for (int b = 0; b < 4; ++b) histSH[b] = float4(0.0f);
 
-    // If no valid history → use current directly (no blending)
-    if (!historyValid) {
-        for (int b = 0; b < 4; b++) {
-            float4 cur = currentSH[base + b];
-            outputSH[base + b] = (b == 0) ? float4(cur.rgb, probeConfidence)
-                                          : float4(cur.rgb, cur.w);
-        }
-        return;
-    }
-
-    // =================================================================
-    // Disocclusion check 1: world-space position distance
-    // =================================================================
-    bool disoccluded = false;
-    float4 histPos = historyPositions[global_id];
-    if (histPos.w > 0.0f) {
-        float posDist = distance(curPos.xyz, histPos.xyz);
-        if (posDist > params.posThreshold) {
-            disoccluded = true;
-        }
-    } else {
-        disoccluded = true;
-    }
-
-    // =================================================================
-    // Disocclusion check 2: normal similarity
-    // =================================================================
-    if (!disoccluded) {
-        float4 curNorm = currentNormals[global_id];
-        float4 histNorm = historyNormals[global_id];
-        if (curNorm.w > 0.0f && histNorm.w > 0.0f) {
-            float normalSim = dot(normalize(curNorm.xyz), normalize(histNorm.xyz));
-            if (normalSim < params.normalThreshold) {
-                disoccluded = true;
+                for (int dy = 0; dy <= 1; ++dy)
+                for (int dx = 0; dx <= 1; ++dx) {
+                    int2 c = c0 + int2(dx, dy);
+                    if (c.x < 0 || c.y < 0 || c.x >= int(params.gridW) || c.y >= int(params.gridH)) continue;
+                    uint hIdx = uint(c.y) * params.gridW + uint(c.x);
+                    float4 hPos = historyPositions[hIdx];
+                    if (hPos.w <= 0.0f) continue;
+                    if (distance(curPos.xyz, hPos.xyz) > params.posThreshold) continue;
+                    float4 hNorm = historyNormals[hIdx];
+                    if (hNorm.w > 0.0f && curNorm.w > 0.0f &&
+                        dot(normalize(curNorm.xyz), normalize(hNorm.xyz)) < params.normalThreshold) continue;
+                    uint hb = hIdx * 4u;
+                    if (historySH[hb].w <= 0.0f) continue;
+                    float w = ((dx == 0) ? (1.0f - fr.x) : fr.x)
+                            * ((dy == 0) ? (1.0f - fr.y) : fr.y);
+                    for (int b = 0; b < 4; ++b)
+                        histSH[b] += historySH[hb + b] * w;
+                    histW += w;
+                }
+                if (histW > 0.001f) {
+                    historyValid = true;
+                    for (int b = 0; b < 4; ++b) histSH[b] /= histW;
+                }
             }
         }
     }
 
-    // If disoccluded → reset to current (no history blending)
-    if (disoccluded) {
+    // No valid reprojected history → use current directly (no blending)
+    if (!historyValid) {
         for (int b = 0; b < 4; b++) {
             float4 cur = currentSH[base + b];
             outputSH[base + b] = (b == 0) ? float4(cur.rgb, probeConfidence)
@@ -137,7 +142,7 @@ kernel void screen_probe_temporal(
     // =================================================================
     // Compute per-probe gradient (how much SH changed)
     // =================================================================
-    float3 diff0 = curSH0.rgb - histSH0.rgb;
+    float3 diff0 = curSH0.rgb - histSH[0].rgb;
     float gradient = length(diff0);
 
     // =================================================================
@@ -153,7 +158,7 @@ kernel void screen_probe_temporal(
     // =================================================================
     for (int b = 0; b < 4; b++) {
         float4 cur = currentSH[base + b];
-        float4 hist = historySH[base + b];
+        float4 hist = histSH[b];
 
         // Clamp history to prevent energy drift
         float3 curAbs = max(abs(cur.rgb), float3(0.1f));

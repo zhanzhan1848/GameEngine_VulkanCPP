@@ -33,6 +33,11 @@ struct ScreenProbeCameraData {
     math::m4x4 proj_matrix;
     math::v3   camera_position;
     u32        frame_index;
+    // T5.2: previous-frame matrices for probe reprojection (velocity-free
+    // camera-motion compensation; static-scene assumption matches the
+    // probe-grid disocclusion checks).
+    math::m4x4 prev_view_matrix{};
+    math::m4x4 prev_proj_matrix{};
 };
 
 /// Output from AddPass.

@@ -457,6 +457,9 @@ private:
     // --- Persistent render state ---
     math::m4x4 view_matrix_{};
     math::m4x4 proj_matrix_{};
+    // T5.2: previous-frame matrices for SPGI probe reprojection.
+    math::m4x4 prev_view_matrix_{};
+    math::m4x4 prev_proj_matrix_{};
     math::v3 camera_position_{};
 
     // Per-frame data
