@@ -45,7 +45,9 @@ kernel void ddgi_update_irradiance(
     uint rayOffset = probeIdx * vol.RaysPerProbe;
 
     // =====================================================================
-    // Phase 1: Each thread reads one ray and computes partial SH
+    // Phase 1: Each thread processes rays tid, tid+64, ... (T4.2: supports
+    // RaysPerProbe > 64 — e.g. 128 = two iterations per thread) and
+    // accumulates partial SH into its threadgroup slot.
     // =====================================================================
     threadgroup PartialSH tg_partial[64];
     threadgroup uint tg_hitFlags[64];
@@ -54,8 +56,8 @@ kernel void ddgi_update_irradiance(
         tg_partial[tid].sh[i] = float3(0.0f);
     tg_hitFlags[tid] = 0u;
 
-    if (tid < vol.RaysPerProbe) {
-        DDGIRayData ray = rayData[rayOffset + tid];
+    for (uint r = tid; r < vol.RaysPerProbe; r += 64u) {
+        DDGIRayData ray = rayData[rayOffset + r];
         float3 radiance = ray.radiance_and_dist.xyz;
         float hitDist = ray.radiance_and_dist.w;
 
@@ -67,7 +69,7 @@ kernel void ddgi_update_irradiance(
             tg_hitFlags[tid] = 1u;
         }
 
-        float3 d = ddgiRayDirection(tid, vol.RaysPerProbe, vol.FrameIndex);
+        float3 d = ddgiRayDirection(r, vol.RaysPerProbe, vol.FrameIndex);
         float x = d.x, y = d.y, z = d.z;
         float x2 = x*x, y2 = y*y, z2 = z*z;
 
@@ -85,7 +87,7 @@ kernel void ddgi_update_irradiance(
         float mcWeight = 4.0f * 3.14159265f / float(vol.RaysPerProbe);
 
         for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
-            tg_partial[tid].sh[i] = radiance * basis[i] * mcWeight;
+            tg_partial[tid].sh[i] += radiance * basis[i] * mcWeight;
         }
     }
 
