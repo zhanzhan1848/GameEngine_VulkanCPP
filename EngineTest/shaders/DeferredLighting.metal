@@ -574,7 +574,7 @@ fragment float4 fragmentFusionIndirect(
     float3 indirect = albedo *
         (ddgi * 0.8f * (1.0f - spgi_w)
        + ssgi_irr * ssgi_conf * 0.2f * (1.0f - spgi_w)
-       + spgi4.rgb * spgi_w) * 0.7f;
+       + spgi4.rgb * spgi_w * 1.25f) * 0.7f;
     indirect *= ao;
 
     return float4(indirect, 1.0f);
@@ -674,7 +674,7 @@ kernel void computeFusionIndirect(
     float3 indirect = albedo *
         (ddgi * 0.8f * (1.0f - spgi_w)
        + ssgi_irr * ssgi_conf * 0.2f * (1.0f - spgi_w)
-       + spgi4.rgb * spgi_w) * 0.7f;
+       + spgi4.rgb * spgi_w * 1.25f) * 0.7f;
 
     indirectOut.write(float4(indirect, 1.0f), gid);
 }

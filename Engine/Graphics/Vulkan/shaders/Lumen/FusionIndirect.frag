@@ -77,7 +77,7 @@ void fusion_indirect() {
     vec3 indirect = albedo *
         (ddgiBlur * 0.8 * (1.0 - spgi_w)
        + ssgi_irr * ssgi_conf * 0.2 * (1.0 - spgi_w)
-       + spgi4.rgb * spgi_w) * 0.7;
+       + spgi4.rgb * spgi_w * 1.25) * 0.7;
     indirect *= ao;
     outColor = vec4(indirect, 1.0);
 }

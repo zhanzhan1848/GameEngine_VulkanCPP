@@ -125,6 +125,7 @@ PipelineQualityConfig PipelineQualityConfig::FromPreset(lumen::LumenQualityPrese
         cfg.enable_ssgi = true;
         cfg.enable_ddgi = true;
         cfg.enable_surface_cache = true;
+        cfg.enable_screen_probes = true;   // T5.6: SPGI default-on at High+
         cfg.enable_screen_probes = false;
         cfg.shadow_quality = lumen::ShadowQuality::PCSS;
         cfg.render_scale = 2.0f;
