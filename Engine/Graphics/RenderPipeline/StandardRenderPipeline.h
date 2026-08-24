@@ -13,6 +13,7 @@
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Volume/VolumePass.h"
+#include "Graphics/RenderPipeline/Modules/GIAdaptiveGovernor.h"
 #include "Graphics/Volume/VolumeRenderer.h"
 #include "Graphics/Volume/FroxelFogPass.h"
 #include "Graphics/Fluid/FluidRenderPass.h"
@@ -377,6 +378,11 @@ private:
     std::unique_ptr<DeferredLightingModule> deferred_module_;
     std::unique_ptr<FinalBlitModule> final_blit_module_;
     std::unique_ptr<GIGatherModule> gi_gather_module_;
+
+    // T4.1: frame-rate-driven GI quality governor (FPS ≥ 30 floor).
+    GIAdaptiveGovernor gi_governor_;
+    u32 gi_base_probe_budget_ = 0;   // full-quality DDGI probe update count
+    u32 gi_base_page_budget_ = 0;    // full-quality LightEval page budget
     std::unique_ptr<FusionCompositeModule> fusion_module_;
     std::unique_ptr<SCDDGIIntegrationModule> sc_ddgi_module_;
     std::unique_ptr<SDFVisualizationModule> sdf_viz_module_;

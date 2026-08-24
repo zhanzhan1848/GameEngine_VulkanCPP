@@ -489,6 +489,12 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (!device_) return;
     const auto& config = settings_.lumen;
 
+    // T4.1: capture the base GI budgets before the governor starts scaling them.
+    gi_base_probe_budget_ = config.ddgi_probe_count_x * config.ddgi_probe_count_y *
+                            config.ddgi_probe_count_z;
+    gi_base_page_budget_ = config.surface_cache_capture_budget;
+    gi_governor_ = {};   // reset to full quality on (re)initialization
+
     // T4.6.5 part 33: Lumen suite (DDGI/SSAO/SSGI/SurfaceCache) is deferred on
     // Vulkan — needs SPIR-V ports + non-overlapping descriptor bindings per
     // memory vulkan-rhi-t46-subsystems-probe-findings.md. Silently skip the
@@ -928,6 +934,17 @@ bool StandardRenderPipeline::UpdateLightEntity(id::id_type entity_id, const ligh
 void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbIdx) {
     auto& graph = *renderGraph_;
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+
+    // T4.1: governor tick — scale the GI budgets for this frame (FPS ≥ 30 floor).
+    gi_governor_.RecordFrame();
+    if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+        ddgi_pass_->SetMaxProbesPerFrame(
+            GIAdaptiveGovernor::ScaleBudget(gi_base_probe_budget_, gi_governor_.Scale()));
+    }
+    if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+        surface_cache_pass_->SetPageBudget(
+            GIAdaptiveGovernor::ScaleBudget(gi_base_page_budget_, gi_governor_.Scale()));
+    }
 
     // NOTE: GBuffer and culling buffers are NOT tracked through the render graph.
     // Matching TestNaniteStreamingPipeline's approach: each downstream pass imports
@@ -1689,6 +1706,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     CommandBufferHandle cmdHandle,
     SyncHandle signalFence)
 {
+    // T4.1: governor tick — scale the GI budgets for this frame (FPS ≥ 30 floor).
+    gi_governor_.RecordFrame();
+    if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+        ddgi_pass_->SetMaxProbesPerFrame(
+            GIAdaptiveGovernor::ScaleBudget(gi_base_probe_budget_, gi_governor_.Scale()));
+    }
+    if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+        surface_cache_pass_->SetPageBudget(
+            GIAdaptiveGovernor::ScaleBudget(gi_base_page_budget_, gi_governor_.Scale()));
+    }
     current_scene_ = &scene;
     frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();

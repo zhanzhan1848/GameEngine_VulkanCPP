@@ -60,6 +60,10 @@ public:
     rhi::ResourceHandle GetLightInfoBuffer() const { return light_info_buffer_; }
     u32 GetAtlasSize() const { return atlas_size_; }
     u32 GetPageSize() const { return page_size_; }
+
+    // T4.1: runtime LightEval page budget (GIAdaptiveGovernor). 0 keeps the
+    // legacy full-update path; takes effect at the next AddPass.
+    void SetPageBudget(u32 pages) { config_.surface_cache_capture_budget = pages; }
     rhi::ResourceHandle GetCardDataBuffer() const {
         return card_generator_.GetCardDataBuffer();
     }

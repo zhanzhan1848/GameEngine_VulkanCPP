@@ -168,6 +168,12 @@ public:
     const DDGIRuntimeParams& GetParams() const { return params_; }
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
 
+    // T4.1: runtime probe-update budget (GIAdaptiveGovernor). Applied at the
+    // next AddPass — CPU-side only, no reallocation.
+    void SetMaxProbesPerFrame(u32 n) {
+        if (n > 0) params_.max_probes_per_frame = n;
+    }
+
     // Accessors for Surface Cache → DDGI integration
     rhi::ResourceHandle GetProbeUpdateListBuffer(u32 frame_idx = 0) const {
         return probe_update_list_buffers_[frame_idx % 3];
