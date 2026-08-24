@@ -354,6 +354,7 @@ private:
 
     // --- Lumen GI ---
     std::unique_ptr<lumen::LumenDDGIPass> ddgi_pass_;
+    std::unique_ptr<lumen::LumenDDGIPass> ddgi_far_pass_;  // T4.4 far-field coarse layer
     std::unique_ptr<lumen::LumenSSAOPass> ssao_pass_;
     std::unique_ptr<lumen::LumenSSGIPass> ssgi_pass_;
     std::unique_ptr<lumen::SurfaceCachePass> surface_cache_pass_;

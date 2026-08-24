@@ -41,6 +41,16 @@ struct LumenConfig {
     float ddgi_depth_temporal_weight = 0.2f;
     float ddgi_ray_max_distance = 50.0f;
 
+    // DDGI far-field coarse volume (T4.4): second layer so pixels outside the
+    // near-field box still receive GI. Extent = counts × spacing (default
+    // 16×8×16 @ 8 = 128×64×128 world units vs near 32×16×32 @ 2 = 64×32×64).
+    bool ddgi_enable_far_volume = true;
+    u32 ddgi_far_probe_count_x = 16;
+    u32 ddgi_far_probe_count_y = 8;
+    u32 ddgi_far_probe_count_z = 16;
+    float ddgi_far_probe_spacing = 8.0f;
+    float ddgi_far_ray_max_distance = 128.0f;
+
     // Surface Cache settings
     u32 surface_cache_atlas_size = 2048;
     u32 surface_cache_page_size = 32;               // 2048/32 = 64 pages per side = 4096 total pages

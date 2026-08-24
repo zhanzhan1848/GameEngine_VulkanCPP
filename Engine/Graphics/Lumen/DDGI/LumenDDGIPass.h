@@ -194,6 +194,12 @@ public:
     // the static bake indefinitely.
     void SetDynamicMode(bool enabled) { dynamic_mode_ = enabled; }
 
+    // T4.4: tag prepended to all RenderGraph import names and the pass name.
+    // Required when two volumes live in one graph (near + far coarse layer) —
+    // without it both instances import different physical buffers under the
+    // same "LumenDDGI_Irradiance_N" name and the graph aliases them.
+    void SetRGNamePrefix(const std::string& prefix) { rg_name_prefix_ = prefix; }
+
     // Live-tunable debug params (WASM sidebar). Indices 4..6 of DawnDebugParams
     // map to SkyColor intensity, Albedo intensity, ProbeHysteresis. Values are
     // consumed in AddPass when uploading DDGIVolumeData to the GPU.
@@ -338,6 +344,9 @@ private:
 
     // Mode 11 flag — see SetDynamicMode comment. False = Mode 10 (static-bake only).
     bool dynamic_mode_{false};
+
+    // T4.4: RenderGraph import-name tag for multi-volume graphs ("" = legacy names).
+    std::string rg_name_prefix_;
 
     // Live-tunable debug params (WASM sidebar). Only indices 4..6 are read
     // here: SkyColor intensity, Albedo intensity, ProbeHysteresis. Applied

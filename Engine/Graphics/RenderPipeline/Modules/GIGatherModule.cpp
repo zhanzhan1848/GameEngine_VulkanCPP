@@ -56,8 +56,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {12, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // depthBuffer
             {13, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // gbuffer_orm (T4.3)
             {14, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // specular output (T4.3)
+            {15, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // far volume CB (T4.4)
+            {16, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // far irradiance (T4.4)
         };
-        set_layout_ = device->CreateDescriptorSetLayout({15, vkBindings});
+        set_layout_ = device->CreateDescriptorSetLayout({17, vkBindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -112,6 +114,8 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     cbDesc.usage = GPUMemoryUsage::Dynamic;
     cbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Uniform);
     probe_cb_ = device->CreateBuffer(cbDesc);
+    // T4.4: far-volume params (origin+spacing, counts) — same 256B shape.
+    far_cb_ = device->CreateBuffer(cbDesc);
 
     BufferDesc spCbDesc{};
     spCbDesc.size = 512;
@@ -149,6 +153,10 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
     // Import DDGI buffers
     auto irrHandle = graph.ImportResource("DDGIIrrRead", inputs.ddgi_pass->GetIrradianceBuffer(ddgiReadIdx));
     auto depthHandle = graph.ImportResource("DDGIDepthRead", inputs.ddgi_pass->GetDepthBuffer(ddgiReadIdx));
+    // T4.4: far volume read dependency (ordering vs. its trace pass).
+    if (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized()) {
+        graph.ImportResource("DDGIFarIrrRead", inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx));
+    }
 
     struct PassData {
         rendergraph::RGResourceHandle output;
@@ -187,6 +195,21 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 }
             }
 
+            // T4.4: upload far-volume params (origin+spacing / counts / flags)
+            {
+                auto* fb = static_cast<math::v4*>(device_->MapBuffer(far_cb_));
+                if (fb) {
+                    memset(fb, 0, 64);
+                    if (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized()) {
+                        const auto& fvol = inputs.ddgi_far_pass->GetVolumeData();
+                        const auto& fp = inputs.ddgi_far_pass->GetParams();
+                        fb[0] = math::v4{fvol.ProbeOrigin.x, fvol.ProbeOrigin.y, fvol.ProbeOrigin.z, fp.probe_spacing};
+                        fb[1] = math::v4{(float)fp.probe_count_x, (float)fp.probe_count_y, (float)fp.probe_count_z, 1.0f}; // w = enabled
+                    }
+                    device_->UnmapBuffer(far_cb_);
+                }
+            }
+
             // Upload static probe params
             {
                 auto* sp = static_cast<GPUStaticProbeData*>(device_->MapBuffer(static_probe_cb_));
@@ -213,7 +236,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
 
             // Barrier DDGI buffers from UAV to ShaderResource
             {
-                ResourceBarrier barriers[3]{};
+                ResourceBarrier barriers[4]{};
                 int bc = 0;
                 auto irrBuf = ddgi->GetIrradianceBuffer(ddgiReadIdx);
                 auto depthBuf = ddgi->GetDepthBuffer(ddgiReadIdx);
@@ -234,6 +257,15 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 }
                 if (confBuf != handles::INVALID_RESOURCE) {
                     barriers[bc].resource = confBuf;
+                    barriers[bc].beforeState = ResourceState::UnorderedAccess;
+                    barriers[bc].afterState = ResourceState::ShaderResource;
+                    barriers[bc].subresource = 0xFFFFFFFF;
+                    bc++;
+                }
+                // T4.4: far volume irradiance
+                if (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized() &&
+                    inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx) != handles::INVALID_RESOURCE) {
+                    barriers[bc].resource = inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx);
                     barriers[bc].beforeState = ResourceState::UnorderedAccess;
                     barriers[bc].afterState = ResourceState::ShaderResource;
                     barriers[bc].subresource = 0xFFFFFFFF;
@@ -317,6 +349,31 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[5].imageView = gi_specular_texture_;
                 imgInfos[5].imageLayout = ResourceState::UnorderedAccess;
                 device_->UpdateDescriptorSets(6, texWrites);
+            }
+
+            // T4.4: far-volume bindings (Vulkan flat 15/16; Metal deferred with
+            // the Metal catch-up round — engine Metal gather shader not present).
+            if (isVk) {
+                WriteDescriptorSet farWrites[2];
+                DescriptorBufferInfo farInfos[2];
+                farWrites[0].dstSet = descriptor_set_;
+                farWrites[0].dstBinding = 15;
+                farWrites[0].dstArrayElement = 0;
+                farWrites[0].descriptorCount = 1;
+                farWrites[0].descriptorType = DescriptorType::UniformBuffer;
+                farWrites[0].bufferInfo = &farInfos[0];
+                farInfos[0].buffer = far_cb_; farInfos[0].offset = 0; farInfos[0].range = 64;
+                farWrites[1].dstSet = descriptor_set_;
+                farWrites[1].dstBinding = 16;
+                farWrites[1].dstArrayElement = 0;
+                farWrites[1].descriptorCount = 1;
+                farWrites[1].descriptorType = DescriptorType::StorageBuffer;
+                farWrites[1].bufferInfo = &farInfos[1];
+                ResourceHandle farIrr = (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized())
+                    ? inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx) : dummy_buffer_;
+                if (farIrr == handles::INVALID_RESOURCE) farIrr = dummy_buffer_;
+                farInfos[1].buffer = farIrr; farInfos[1].offset = 0; farInfos[1].range = ~0ull;
+                device_->UpdateDescriptorSets(2, farWrites);
             }
 
             // Buffer bindings with sub-allocation from probe_cb_

@@ -614,6 +614,9 @@ fragment float4 fragmentFusion(
     float2 ab = float2(-1.04f, 1.04f) * a004 + r.zw;
     float3 F0 = mix(float3(0.04f), albedo, metallic);
     float3 reflection = ddgiSpec.rgb * (F0 * ab.x + ab.y);
+    // (1 - roughness²) suppresses the double count with the diffuse indirect —
+    // the widened lobe converges to E(N) which FusionIndirect already adds.
+    reflection *= (1.0f - roughness * roughness) * 0.75f;
 
     float3 result = (scene + indirect + reflection) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));

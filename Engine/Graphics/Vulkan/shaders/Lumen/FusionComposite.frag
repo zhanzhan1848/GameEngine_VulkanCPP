@@ -53,10 +53,13 @@ void fusion_composite() {
     // T4.3 roughness relay: SSR owns the smooth segment (ssr.a is already
     // roughness-attenuated by the upsample pass); DDGI glossy irradiance
     // fills the rough end where screen-space tracing fades out.
+    // (1 - roughness²) suppresses the double count with the diffuse indirect —
+    // the widened lobe converges to E(N) which FusionIndirect already adds.
     float NoV = clamp(ddgiSpec.a, 0.05, 1.0);
     vec2 ab = envBRDFApproxAB(roughness, NoV);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 ddgiGlossy = ddgiSpec.rgb * (F0 * ab.x + ab.y);
+    ddgiGlossy *= (1.0 - roughness * roughness) * 0.75;
 
     float ssrW = clamp(ssr.a, 0.0, 1.0);
     vec3 reflection = ssr.rgb * ssrW * 0.25 + (1.0 - ssrW) * ddgiGlossy;

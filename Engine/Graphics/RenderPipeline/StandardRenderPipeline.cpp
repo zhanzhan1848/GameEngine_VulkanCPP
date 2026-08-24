@@ -524,6 +524,36 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             // traces the GlobalSDF, producing no dynamic indirect light.
             ddgi_pass_->SetDynamicMode(true);
         }
+
+        // T4.4: far-field coarse volume — GI outside the near-field box.
+        // Same center, double extent (16×8×16 @ 8 vs 32×16×32 @ 2). Updated at
+        // a quarter of the near volume's probe budget (governor-modulated).
+        if (config.ddgi_enable_far_volume) {
+            ddgi_far_pass_ = std::make_unique<lumen::LumenDDGIPass>();
+            lumen::DDGIRuntimeParams farParams{};
+            farParams.probe_count_x = config.ddgi_far_probe_count_x;
+            farParams.probe_count_y = config.ddgi_far_probe_count_y;
+            farParams.probe_count_z = config.ddgi_far_probe_count_z;
+            farParams.rays_per_probe = config.ddgi_rays_per_probe;
+            farParams.probe_spacing = config.ddgi_far_probe_spacing;
+            farParams.irradiance_temporal_weight = config.ddgi_irradiance_temporal_weight;
+            farParams.depth_temporal_weight = config.ddgi_depth_temporal_weight;
+            farParams.ray_max_distance = config.ddgi_far_ray_max_distance;
+            farParams.max_probes_per_frame = ddgiParams.max_probes_per_frame / 4;
+            if (!ddgi_far_pass_->Initialize(device_, farParams)) {
+                std::cerr << "[Lumen] DDGI far-volume init failed (continuing near-only)" << std::endl;
+                ddgi_far_pass_.reset();
+            } else {
+                ddgi_far_pass_->SetRGNamePrefix("Far");
+                ddgi_far_pass_->SetDynamicMode(true);
+                // Both volumes center at world origin (Initialize derives origin
+                // from counts×spacing), so the far shell wraps the near box.
+                std::cout << "[Lumen] DDGI far volume initialized ("
+                          << farParams.probe_count_x << "x" << farParams.probe_count_y
+                          << "x" << farParams.probe_count_z << " @ spacing "
+                          << farParams.probe_spacing << ")" << std::endl;
+            }
+        }
     }
 
     // SSAO
@@ -634,6 +664,7 @@ void StandardRenderPipeline::ShutdownLumenPasses() {
     if (surface_cache_pass_) { surface_cache_pass_->Shutdown(); surface_cache_pass_.reset(); }
     if (ssao_pass_) { ssao_pass_->Shutdown(); ssao_pass_.reset(); }
     if (ddgi_pass_) { ddgi_pass_->Shutdown(); ddgi_pass_.reset(); }
+    if (ddgi_far_pass_) { ddgi_far_pass_->Shutdown(); ddgi_far_pass_.reset(); }
 }
 
 // ============================================================================
@@ -1364,6 +1395,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
         ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData,
                                        static_cast<u32>(frameCount_), scLightingRG);
+
+        // T4.4: far-field coarse volume — no SC atlas (card data is near-field;
+        // far probes take radiance from the canonical trace chain only).
+        if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized()) {
+            ddgi_far_pass_->AddPass(graph, prevColor, camData,
+                                     static_cast<u32>(frameCount_), RGResourceHandle{});
+        }
     }
 
     // ========================================================================
@@ -1486,6 +1524,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
         GIGatherInputs giIn;
         giIn.ddgi_pass = ddgi_pass_.get();
+        giIn.ddgi_far_pass = ddgi_far_pass_.get();
         giIn.static_probe_volume = static_probe_volume_.get();
         giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
         giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -2000,6 +2039,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE)
                 prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
             ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
+
+            // T4.4: far-field coarse volume (no SC atlas — near-field data only).
+            if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized()) {
+                ddgi_far_pass_->AddPass(graph, prevColor, camData,
+                                         static_cast<u32>(frameCount_), RGResourceHandle{});
+            }
         }
 
         // --- SC-DDGI Integration ---
@@ -2022,6 +2067,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
             GIGatherInputs giIn;
             giIn.ddgi_pass = ddgi_pass_.get();
+            giIn.ddgi_far_pass = ddgi_far_pass_.get();
             giIn.static_probe_volume = static_probe_volume_.get();
             giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
             giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();

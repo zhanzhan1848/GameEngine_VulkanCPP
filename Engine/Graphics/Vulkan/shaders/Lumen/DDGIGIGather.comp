@@ -22,6 +22,9 @@
 //   binding 13 = SampledImage       gbuffer_orm (r=AO, g=Roughness, b=Metallic)
 //   binding 14 = StorageImage(rgba16f) spec_output_tex (half-res glossy:
 //                                    RGB = SH(R) lobe radiance, A = NdotV)
+//   binding 15 = UniformBuffer      farVolume (T4.4: origin.xyz+spacing.w,
+//                                    counts.xyz+enabled.w)
+//   binding 16 = StorageBuffer(ro)  farIrradianceBuffer (9 vec4 per probe)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
@@ -75,6 +78,13 @@ layout(set = 0, binding = 12) readonly buffer DDGIDepthBuf {
 };
 layout(set = 0, binding = 13) uniform texture2D gbuffer_orm;
 layout(set = 0, binding = 14, rgba16f) writeonly uniform image2D spec_output_tex;
+layout(set = 0, binding = 15, std140) uniform FarVolumeCB {
+    vec4 farOriginSpacing;  // xyz = origin, w = spacing (T4.4)
+    vec4 farCountsEnabled;  // xyz = counts, w = enabled flag
+};
+layout(set = 0, binding = 16) readonly buffer FarIrradianceBuf {
+    vec4 farIrradianceBuffer[];  // 9 vec4 per probe
+};
 
 // --------------------------------------------------------------------------------
 // Constants
@@ -277,9 +287,78 @@ void ddgi_gi_gather() {
 
     // Phase 1: per-pixel trilinear interpolation
     if (inBounds && !isActive) {
-        // Outside probe grid: output dim ambient instead of pure black.
-        imageStore(output_tex, ivec2(tid), vec4(0.03, 0.03, 0.035, 1.0));
-        imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
+        // T4.4 two-stage: outside the near grid, try the far coarse volume
+        // before falling back to dim ambient.
+        bool farHit = false;
+        if (farCountsEnabled.w > 0.5 && depth < 1.0) {
+            vec3 fgp = (worldPos - farOriginSpacing.xyz) / farOriginSpacing.w;
+            vec3 fcounts = farCountsEnabled.xyz;
+            vec3 fgridMax = fcounts - 1.0;
+            if (all(greaterThanEqual(fgp, vec3(0.0))) && all(lessThanEqual(fgp, fgridMax))) {
+                uvec3 fb0 = clamp(uvec3(floor(fgp)), uvec3(0u), uvec3(fcounts) - 1u);
+                uvec3 fb1 = min(fb0 + 1u, uvec3(fcounts) - 1u);
+                vec3 ffrac = fract(fgp);
+                float ffx = ffrac.x, ffy = ffrac.y, ffz = ffrac.z;
+
+                float ftw[8];
+                ftw[0] = (1.0 - ffx) * (1.0 - ffy) * (1.0 - ffz);
+                ftw[1] = ffx           * (1.0 - ffy) * (1.0 - ffz);
+                ftw[2] = (1.0 - ffx) * ffy           * (1.0 - ffz);
+                ftw[3] = ffx           * ffy           * (1.0 - ffz);
+                ftw[4] = (1.0 - ffx) * (1.0 - ffy) * ffz;
+                ftw[5] = ffx           * (1.0 - ffy) * ffz;
+                ftw[6] = (1.0 - ffx) * ffy           * ffz;
+                ftw[7] = ffx           * ffy           * ffz;
+
+                uvec3 fpc[8];
+                fpc[0] = uvec3(fb0.x, fb0.y, fb0.z); fpc[1] = uvec3(fb1.x, fb0.y, fb0.z);
+                fpc[2] = uvec3(fb0.x, fb1.y, fb0.z); fpc[3] = uvec3(fb1.x, fb1.y, fb0.z);
+                fpc[4] = uvec3(fb0.x, fb0.y, fb1.z); fpc[5] = uvec3(fb1.x, fb0.y, fb1.z);
+                fpc[6] = uvec3(fb0.x, fb1.y, fb1.z); fpc[7] = uvec3(fb1.x, fb1.y, fb1.z);
+
+                const float SH_C0   = 0.28209479;
+                const float SH_C1   = 0.48860251;
+                const float SH_C2_0 = 1.09254843;
+                const float SH_C2_1 = 0.31539157;
+                const float SH_C2_2 = 0.54627421;
+                float nx = normal.x, ny = normal.y, nz = normal.z;
+                float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
+                float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
+
+                vec3 fresult = vec3(0.0);
+                float ftotalW = 0.0;
+                for (int p = 0; p < 8; ++p) {
+                    if (ftw[p] < 0.01) continue;
+                    uint pIdx = fpc[p].x + fpc[p].y * uint(fcounts.x) + fpc[p].z * uint(fcounts.x) * uint(fcounts.y);
+                    vec3 sh[9];
+                    for (int i = 0; i < 9; ++i)
+                        sh[i] = farIrradianceBuffer[pIdx * 9u + uint(i)].xyz;
+                    vec3 irr = sh[0] * SH_C0
+                             + sh[1] * (SH_C1 * ny)
+                             + sh[2] * (SH_C1 * nz)
+                             + sh[3] * (SH_C1 * nx)
+                             + sh[4] * (SH_C2_0 * nxy)
+                             + sh[5] * (SH_C2_0 * nyz)
+                             + sh[6] * (SH_C2_0 * nzx)
+                             + sh[7] * (SH_C2_1 * (3.0*nzz - 1.0))
+                             + sh[8] * (SH_C2_2 * (nxx - nyy));
+                    fresult += irr * ftw[p];
+                    ftotalW += ftw[p];
+                }
+                if (ftotalW > 0.0) {
+                    fresult /= ftotalW;
+                    fresult = max(fresult, vec3(0.02, 0.02, 0.025));
+                    imageStore(output_tex, ivec2(tid), vec4(fresult, 1.0));
+                    imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
+                    farHit = true;
+                }
+            }
+        }
+        if (!farHit) {
+            // Outside both grids: dim ambient.
+            imageStore(output_tex, ivec2(tid), vec4(0.03, 0.03, 0.035, 1.0));
+            imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
+        }
     }
 
     if (isActive) {

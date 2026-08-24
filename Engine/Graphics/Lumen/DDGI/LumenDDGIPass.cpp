@@ -1113,20 +1113,22 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
     u32 outIdx = current_frame_index % 3;
     u32 histIdx = (current_frame_index + 2) % 3;
 
-    // Import persistent probe buffers/textures into render graph
+    // Import persistent probe buffers/textures into render graph.
+    // T4.4: rg_name_prefix_ disambiguates near/far volume instances.
+    const std::string tag = rg_name_prefix_.empty() ? std::string{} : (rg_name_prefix_ + "_");
     auto irradianceOutHandle = graph.ImportResource(
-        "LumenDDGI_Irradiance_" + std::to_string(outIdx), irradiance_buffers_[outIdx]);
+        tag + "LumenDDGI_Irradiance_" + std::to_string(outIdx), irradiance_buffers_[outIdx]);
     auto irradianceHistHandle = graph.ImportResource(
-        "LumenDDGI_IrradianceHist_" + std::to_string(histIdx), irradiance_buffers_[histIdx]);
+        tag + "LumenDDGI_IrradianceHist_" + std::to_string(histIdx), irradiance_buffers_[histIdx]);
     auto depthOutHandle = graph.ImportResource(
-        "LumenDDGI_Depth_" + std::to_string(outIdx), depth_buffers_[outIdx]);
+        tag + "LumenDDGI_Depth_" + std::to_string(outIdx), depth_buffers_[outIdx]);
     auto depthHistHandle = graph.ImportResource(
-        "LumenDDGI_DepthHist_" + std::to_string(histIdx), depth_buffers_[histIdx]);
+        tag + "LumenDDGI_DepthHist_" + std::to_string(histIdx), depth_buffers_[histIdx]);
 
     output.ddgi_irradiance = irradianceOutHandle;
     output.ddgi_irradiance_hist = irradianceHistHandle;
 
-    graph.AddPass<LumenDDGIData>("LumenDDGI",
+    graph.AddPass<LumenDDGIData>(rg_name_prefix_.empty() ? "LumenDDGI" : ("LumenDDGI_" + rg_name_prefix_),
         RGPassType::Compute, RGPassCategory::Lighting,
 
         // ====================================================================

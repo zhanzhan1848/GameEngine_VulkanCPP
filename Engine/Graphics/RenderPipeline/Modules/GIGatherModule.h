@@ -10,6 +10,7 @@ namespace lumen { class LumenDDGIPass; class StaticProbeVolume; }
 
 struct GIGatherInputs {
     lumen::LumenDDGIPass* ddgi_pass = nullptr;
+    lumen::LumenDDGIPass* ddgi_far_pass = nullptr;  // T4.4 far-field fallback
     lumen::StaticProbeVolume* static_probe_volume = nullptr;
 
     rhi::ResourceHandle gbuffer_depth;
@@ -58,6 +59,7 @@ private:
     rhi::ResourceHandle gi_halfres_history_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle gi_specular_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle probe_cb_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle far_cb_{rhi::handles::INVALID_RESOURCE};      // T4.4 far volume params
     rhi::ResourceHandle static_probe_cb_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle dummy_buffer_{rhi::handles::INVALID_RESOURCE};
 };
