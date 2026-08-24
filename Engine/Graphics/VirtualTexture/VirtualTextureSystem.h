@@ -72,6 +72,14 @@ struct vt_stats {
     u32 evictions_total  = 0;
     u32 producer_pages_produced = 0;   // M5:RVT 页生产次数
     u32 producer_cache_hits      = 0;   // M5:请求时已驻留(免生产)
+    u32 feedback_page_hits       = 0;   // M5.8:feedback 命中已驻留页(LRU touch)
+    /// M5.8:命中率 = hits / (hits + misses);misses = producer_pages_produced
+    /// (RVT)+ 首次加载的 SVT 页。返回 [0,1];无请求返回 1.0。
+    double hit_rate() const {
+        const u64 hits = u64(producer_cache_hits) + u64(feedback_page_hits);
+        const u64 total = hits + u64(producer_pages_produced);
+        return total == 0 ? 1.0 : double(hits) / double(total);
+    }
 };
 
 // feedback 32bit 编码:|4bit vtId|4bit mip|12bit vPageX|12bit vPageY|
@@ -86,6 +94,23 @@ inline void unpack_feedback(u32 v, u32& vt_id, u32& mip, u32& px, u32& py) {
 inline u32 pack_pt_entry(u32 atlas_x, u32 atlas_y) {
     return 1u | (atlas_x << 8) | (atlas_y << 19);
 }
+
+// ============================================================================
+// M6:VT cvar 注册表(轻量 — 名字对齐 r.VT.*;引擎通用 cvar 系统接入后迁移)
+// ============================================================================
+struct vt_cvars {
+    static vt_cvars& instance() {
+        static vt_cvars c;
+        return c;
+    }
+    u32 max_uploads_per_frame = 8;    // r.VT.MaxUploadsPerFrame
+    u32 page_free_threshold   = 15;   // r.VT.PageFreeThreshold
+    float pool_size_scale     = 1.0f; // r.VT.PoolSizeScale
+    u32 feedback_factor       = 2;    // r.VT.FeedbackFactor(N×N 降采样)
+    u32 space_release_frames  = 150;  // r.VT.SpaceReleaseFrames(0=off)
+    u32 max_anisotropy        = 4;    // r.VT.MaxAnisotropy
+};
+#define VT_CVAR(var) (vt::vt_cvars::instance().var)
 
 // ============================================================================
 // M5:Producer 接口 — 页数据生产者(SVT=磁盘;RVT=GPU 渲染)

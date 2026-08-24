@@ -559,6 +559,9 @@ void virtual_texture_system::record_feedback(RHICommandBuffer* cb, u32 frame_ind
 void virtual_texture_system::update(u32 frame_index) {
     if (!device_) return;
     ++frame_counter_;
+    // M6:cvar 覆盖(运行时可调 — 名字对齐 r.VT.*;见 vt_cvars)
+    cfg_.max_uploads_per_frame = vt_cvars::instance().max_uploads_per_frame;
+    cfg_.page_free_threshold   = vt_cvars::instance().page_free_threshold;
 
     // 1. feedback 回读(非阻塞轮询同槽上一周期)
     const u32 slot = frame_index % feedback_.size();
@@ -960,6 +963,7 @@ void virtual_texture_system::process_feedback(u32 slot) {
         if (page >= vt.page_layer_bits.size()) continue;
         const u8 fullMask = u8((1u << vt.layer_count) - 1u);
         if (vt.page_layer_bits[page] == fullMask) {
+            ++stats_.feedback_page_hits;   // M5.8:命中已驻留
             // LRU touch
             for (auto& pool : pools_) {
                 u32 ps = vt.resident_page_to_slot[page];
