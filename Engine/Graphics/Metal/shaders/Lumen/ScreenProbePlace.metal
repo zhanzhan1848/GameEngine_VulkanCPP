@@ -103,6 +103,34 @@ kernel void screen_probe_place(
     // Check for sky / far plane
     bool active = (depth > 0.0001f && depth < 0.999f);
 
+    // ------------------------------------------------------------------
+    // T5.3 two-level adaptive grid: checkerboard coarse tier always active;
+    // fine-tier cells activate only on local depth/normal variance. The
+    // cross patterns in Gather/SpatialFilter reach coarse cells from any
+    // fine cell, so inactive fine cells stay covered.
+    // ------------------------------------------------------------------
+    if (active && ((gx + gy) & 1u) != 0u) {
+        uint2 base = uint2(clamp(uv * float2(renderW, renderH), float2(0.0f),
+                                 float2(renderW - 1.0f, renderH - 1.0f)));
+        int2 halfBlock = int2(int(downsample) / 2);
+        int2 maxTexel = int2(int(renderW) - 1, int(renderH) - 1);
+        float3 nC = normalize(normalTexture.read(base).rgb * 2.0f - 1.0f);
+        float dMin = depth, dMax = depth;
+        float minNDot = 1.0f;
+        int2 cardinals[4] = {
+            int2(base) + int2(halfBlock.x, 0), int2(base) - int2(halfBlock.x, 0),
+            int2(base) + int2(0, halfBlock.y), int2(base) - int2(0, halfBlock.y)};
+        for (int i = 0; i < 4; ++i) {
+            int2 t = clamp(cardinals[i], int2(0), maxTexel);
+            float d = depthTexture.read(uint2(t)).r;
+            dMin = min(dMin, d); dMax = max(dMax, d);
+            float3 n = normalize(normalTexture.read(uint2(t)).rgb * 2.0f - 1.0f);
+            minNDot = min(minNDot, dot(nC, n));
+        }
+        bool highVariance = (dMax - dMin > 0.0015f) || (minNDot < 0.8f);
+        if (!highVariance) active = false;
+    }
+
     if (!active) {
         // Mark as inactive: position = (0,0,0,0), normal = (0,0,0,0)
         probePositions[probeIdx] = float4(0.0f, 0.0f, 0.0f, 0.0f);

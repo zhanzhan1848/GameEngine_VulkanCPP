@@ -102,6 +102,37 @@ void screen_probe_place() {
     // Check for sky / far plane ('active' is a GLSL reserved word -> use isActive)
     bool isActive = (depth > 0.0001 && depth < 0.999);
 
+    // ------------------------------------------------------------------
+    // T5.3 two-level adaptive grid: checkerboard coarse tier always active;
+    // fine-tier cells activate only where the local block has depth/normal
+    // variance. Gather/SpatialFilter use a cross pattern whose neighbors of
+    // any (x+y odd) cell are all coarse — inactive fine cells stay covered.
+    // ------------------------------------------------------------------
+    if (isActive && ((gx + gy) & 1u) != 0u) {
+        vec3 nC = texelFetch(normalTexture, depthTexel, 0).rgb;
+        nC = normalize(nC * 2.0 - 1.0);
+        float dMin = depth, dMax = depth;
+        float minNDot = 1.0;
+        ivec2 halfBlock = ivec2(int(downsample) / 2);
+        ivec2 cardinals[4] = ivec2[4](
+            depthTexel + ivec2(halfBlock.x, 0),
+            depthTexel - ivec2(halfBlock.x, 0),
+            depthTexel + ivec2(0, halfBlock.y),
+            depthTexel - ivec2(0, halfBlock.y));
+        ivec2 maxTexel = ivec2(int(renderW) - 1, int(renderH) - 1);
+        for (int i = 0; i < 4; ++i) {
+            ivec2 t = clamp(cardinals[i], ivec2(0), maxTexel);
+            float d = texelFetch(depthTexture, t, 0).r;
+            dMin = min(dMin, d); dMax = max(dMax, d);
+            vec3 n = texelFetch(normalTexture, t, 0).rgb;
+            n = normalize(n * 2.0 - 1.0);
+            minNDot = min(minNDot, dot(nC, n));
+        }
+        // Depth range in [0,1] NDC + normal deviation drive the fine tier.
+        bool highVariance = (dMax - dMin > 0.0015) || (minNDot < 0.8);
+        if (!highVariance) isActive = false;
+    }
+
     if (!isActive) {
         // Mark as inactive: position = (0,0,0,0), normal = (0,0,0,0)
         probePositions.data[probeIdx] = vec4(0.0, 0.0, 0.0, 0.0);

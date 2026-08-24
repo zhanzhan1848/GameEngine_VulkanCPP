@@ -14,7 +14,7 @@
 // Flat descriptor bindings:
 //   binding 0 = texture2D         giInput        (sampled, manual bilinear)
 //   binding 1 = texture2D         normalTexture  (sampled, manual bilinear)
-//   binding 2 = readonly image2D  depthTexture   (r32f, imageLoad)
+//   binding 2 = texture2D         depthTexture   (SampledDepthImage, texelFetch)
 //   binding 3 = writeonly image2D giOutput       (rgba16f)
 //   binding 4 = UBO               DenoiseParams (32B)
 
@@ -27,7 +27,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 // --------------------------------------------------------------------------------
 layout(set = 0, binding = 0) uniform texture2D giInput;
 layout(set = 0, binding = 1) uniform texture2D normalTexture;
-layout(set = 0, binding = 2, r32f) readonly uniform image2D depthTexture;
+layout(set = 0, binding = 2) uniform texture2D depthTexture;
 layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D giOutput;
 
 layout(set = 0, binding = 4, std140) uniform DenoiseParamsBlock {
@@ -107,7 +107,7 @@ void screen_probe_denoise() {
     vec2 centerUV = (vec2(pixel_pos) + 0.5) * invRes;
 
     vec4 centerGI     = sampleBilinearRGBA(giInput, centerUV);
-    float centerDepth = imageLoad(depthTexture, ivec2(pixel_pos)).r;
+    float centerDepth = texelFetch(depthTexture, ivec2(pixel_pos), 0).r;
     vec3 centerNormal = decodeNormal(vec4(sampleBilinearRGB(normalTexture, centerUV), 0.0));
 
     // Early out for sky pixels
@@ -141,7 +141,7 @@ void screen_probe_denoise() {
             vec2 sampleUV = (vec2(samplePos) + 0.5) * invRes;
             vec4 sampleGI = sampleBilinearRGBA(giInput, sampleUV);
 
-            float sampleDepth  = imageLoad(depthTexture, samplePos).r;
+            float sampleDepth  = texelFetch(depthTexture, samplePos, 0).r;
             vec3 sampleNormal = decodeNormal(vec4(sampleBilinearRGB(normalTexture, sampleUV), 0.0));
 
             // Depth weight

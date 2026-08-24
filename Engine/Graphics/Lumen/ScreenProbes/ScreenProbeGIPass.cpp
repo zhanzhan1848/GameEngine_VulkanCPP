@@ -519,12 +519,10 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // giInput
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTexture
-            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depthTexture (r32f, readonly)
+            {2, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // depthTexture (texelFetch)
             {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // giOutput (rgba16f)
             {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // DenoiseParams (32 bytes)
         };
-        // Mark read-only storage image
-        bindings[2].readonly = true;  // depthTexture
         denoise_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
@@ -994,11 +992,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     // Import persistent output textures into render graph
     auto giOutputHandle = graph.ImportResource("ScreenProbeGI_Output", output_texture_);
     auto giFilteredHandle = graph.ImportResource("ScreenProbeGI_Filtered", output_texture_filtered_);
-    // Bypass denoise: returning giFilteredHandle produced solid-color output in
-    // fusion composite (mode 6) while mode 5 (which reads output_texture_ via
-    // GetOutputTexture()) looked correct. Until denoise is debugged, route
-    // downstream passes through the raw Gather texture for parity with mode 5.
-    output.gi_output = giOutputHandle;
+    // T5.3: denoise re-enabled. The historical "solid color in mode 6" came from
+    // the descriptor-update bug fixed in the denoise dispatch (Vulkan bindings
+    // clashed at 0 and the params UBO was never bound). GetOutputTexture()
+    // still returns the raw Gather texture for debug modes.
+    output.gi_output = giFilteredHandle;
 
     // Import surface cache resources into render graph (needed for RGResourceHandle conversion)
     RGResourceHandle scLightingHandle;
@@ -1569,19 +1567,35 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 };
                 DenoiseCB dcb{8.0f, 8.0f, 1.2f, 0.0f, 1, render_width_, render_height_, 0};
 
-                DescriptorData params[] = {
-                    {0, DescriptorType::SampledImage,  outputTex},
-                    {1, DescriptorType::SampledImage,  normalTex},
-                    {2, DescriptorType::SampledImage,  depthTex},
-                    {3, DescriptorType::StorageImage,  filteredTex},
-                    {0, DescriptorType::UniformBuffer, denoise_cb_[frameIdx]},
-                };
-                UpdateDescriptorSet(device_, denoise_ds_[frameIdx], params, 5);
+                // T5.3: Vulkan flat DSL puts depth at StorageImage(2, readonly)
+                // and params at UBO(4) — the previous single Metal-style write
+                // clashed depth/params on binding 0 and never bound the UBO.
+                if (splitIsVk) {
+                    DescriptorData params[] = {
+                        {0, DescriptorType::SampledImage,  outputTex},
+                        {1, DescriptorType::SampledImage,  normalTex},
+                        {2, DescriptorType::SampledDepthImage, depthTex},
+                        {3, DescriptorType::StorageImage,  filteredTex},
+                        {4, DescriptorType::UniformBuffer, denoise_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, denoise_ds_[frameIdx], params, 5);
+                    auto* cb = static_cast<DenoiseCB*>(device_->MapBuffer(denoise_cb_[frameIdx]));
+                    if (cb) { *cb = dcb; device_->UnmapBuffer(denoise_cb_[frameIdx]); }
+                } else {
+                    DescriptorData params[] = {
+                        {0, DescriptorType::SampledImage,  outputTex},
+                        {1, DescriptorType::SampledImage,  normalTex},
+                        {2, DescriptorType::SampledImage,  depthTex},
+                        {3, DescriptorType::StorageImage,  filteredTex},
+                        {0, DescriptorType::UniformBuffer, denoise_cb_[frameIdx]},
+                    };
+                    UpdateDescriptorSet(device_, denoise_ds_[frameIdx], params, 5);
+                }
 
                 cmd->BindComputePipeline(denoise_pipeline_);
                 const DescriptorSetHandle sets[] = { denoise_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, denoise_layout_, 0, 1, sets, 0, nullptr);
-                cmd->SetComputeBytes(0, &dcb, sizeof(DenoiseCB));
+                if (!splitIsVk) cmd->SetComputeBytes(0, &dcb, sizeof(DenoiseCB));
 
                 u32 dispatchX = (render_width_ + 7) / 8;
                 u32 dispatchY = (render_height_ + 7) / 8;
