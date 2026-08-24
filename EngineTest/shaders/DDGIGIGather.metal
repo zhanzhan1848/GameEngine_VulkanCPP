@@ -7,8 +7,8 @@
 //     - Uses half3 to reduce register pressure
 //     - Rational 1/(1+k*x²) instead of exp() — no transcendental in filter loop
 //   - Phase 3: temporal accumulation
-//   - Per-thread device reads: ~18 (load) + ~8 (bilateral) + 1 (confidence) + 3 (tex) ≈ 30
-//   Total per-thread accesses: ≤30 (within Apple Silicon ~32 limit)
+//   - Per-thread device reads: ~18 (load) + ~8 (bilateral) + 1 (confidence) + 4 (tex) + 1 (ORM, T4.3) ≈ 31
+//   Total per-thread accesses: ≤31 (within Apple Silicon ~32 limit)
 
 #include <metal_stdlib>
 using namespace metal;
@@ -98,6 +98,8 @@ kernel void ddgi_gi_gather(
     texture2d<float, access::sample> normalTex [[texture(1)]],
     texture2d<float, access::write> outputTex [[texture(2)]],
     texture2d<float, access::sample> historyTex [[texture(3)]],
+    texture2d<float, access::sample> ormTex [[texture(4)]],           // T4.3
+    texture2d<float, access::write> specularTex [[texture(5)]],       // T4.3
 
     constant float4* viewCB                [[buffer(0)]],
     constant float4& probeOriginSpacing    [[buffer(1)]],
@@ -240,6 +242,7 @@ kernel void ddgi_gi_gather(
     // ========================================================================
     if (inBounds && !active) {
         outputTex.write(float4(0.0f), tid);
+        specularTex.write(float4(0.0f), tid);
     }
 
     if (active) {
@@ -326,6 +329,26 @@ kernel void ddgi_gi_gather(
         uint tgIdx = tidInGroup.y * TILE_SIZE + tidInGroup.x;
         tg_indirect[tgIdx] = indirect;
         tg_pixelDepth[tgIdx] = depth;
+
+        // T4.3 glossy: reflection-vector SH9, plain trilinear weights (the
+        // diffuse normalWeight/dynVis terms are cosine-lobe specific). Lobe
+        // widens with roughness by blending towards the diffuse limit.
+        // One extra device read (ORM) — budget ~31 of ~32 Apple limit.
+        float3 camPos = viewCB[4].xyz;
+        float3 V = normalize(camPos - worldPos);
+        float NdotV = clamp(dot(normal, V), 0.05f, 1.0f);
+        float3 R = reflect(-V, normal);
+        float roughness = clamp(ormTex.sample(sampler(address::clamp_to_edge), uv).g, 0.04f, 1.0f);
+        float3 reflAccum = float3(0.0f);
+        float reflW = 0.0f;
+        for (uint p = 0u; p < 8u; ++p) {
+            if (tw[p] < 0.05f) continue;
+            reflAccum += evalSH9(tg_probes[p].sh, R) * tw[p];
+            reflW += tw[p];
+        }
+        if (reflW > 0.0f) reflAccum /= reflW;
+        float3 specIrr = mix(reflAccum, indirect, roughness * roughness);
+        specularTex.write(float4(specIrr, NdotV), tid);
     } else {
         uint tgIdx = tidInGroup.y * TILE_SIZE + tidInGroup.x;
         tg_indirect[tgIdx] = float3(0.0f);

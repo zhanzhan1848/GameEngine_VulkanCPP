@@ -14,6 +14,7 @@ struct GIGatherCB {
     math::m4x4 inv_view_projection;
     math::v4   probe_origin_spacing;
     math::v4   probe_counts;
+    math::v4   camera_pos;  // T4.3: world-space camera for reflection vectors
 };
 
 struct GPUStaticProbeData {
@@ -34,9 +35,9 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
 
     if (shader == handles::INVALID_SHADER) return false;
 
-    // 13 bindings: 4 textures + 9 buffers.
+    // 15 bindings: 6 textures + 9 buffers.
     // Metal: overlapping texture/buffer namespaces (idiomatic Metal).
-    // Vulkan: flat 0..12 (depth as SampledDepthImage) — matches GLSL shader.
+    // Vulkan: flat 0..14 (depth as SampledDepthImage) — matches GLSL shader.
     const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
     if (isVk) {
         DescriptorSetLayoutBinding vkBindings[] = {
@@ -44,7 +45,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {1,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // normal
             {2,  DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // output
             {3,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // history
-            {4,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // invViewProj
+            {4,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // invViewProj+cameraPos
             {5,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeOriginSpacing
             {6,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeCounts
             {7,  DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // staticSkySH
@@ -53,14 +54,18 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {10, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // confidenceBuffer
             {11, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // irradianceBuffer
             {12, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // depthBuffer
+            {13, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // gbuffer_orm (T4.3)
+            {14, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // specular output (T4.3)
         };
-        set_layout_ = device->CreateDescriptorSetLayout({13, vkBindings});
+        set_layout_ = device->CreateDescriptorSetLayout({15, vkBindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal
             {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // output
             {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // history
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // orm (T4.3)
+            {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // specular output (T4.3)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // invViewProj
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // probeOriginSpacing
             {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // probeCounts
@@ -71,7 +76,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradianceBuffer
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // depthBuffer
         };
-        set_layout_ = device->CreateDescriptorSetLayout({13, bindings});
+        set_layout_ = device->CreateDescriptorSetLayout({15, bindings});
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
@@ -95,6 +100,9 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     gi_halfres_texture_ = device->CreateTexture(texDesc);
     texDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
     gi_halfres_history_ = device->CreateTexture(texDesc);
+    // T4.3: half-res glossy specular output (RGB = SH(R) radiance, A = NdotV)
+    texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+    gi_specular_texture_ = device->CreateTexture(texDesc);
 
     // Constant buffers — need UniformBuffer bind flag for UBO descriptors.
     BufferDesc cbDesc{};
@@ -133,6 +141,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
 
     outputs.gi_output_tex = gi_halfres_texture_;
     outputs.gi_output_rg = graph.ImportResource("DDGIHalfResGI", gi_halfres_texture_);
+    outputs.gi_specular_tex = gi_specular_texture_;
+    outputs.gi_specular_rg = graph.ImportResource("DDGIHalfResGlossy", gi_specular_texture_);
 
     u32 ddgiReadIdx = (inputs.current_buffer_index + 2) % 3;
 
@@ -147,12 +157,15 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
     graph.AddPass<PassData>("DDGIGIGather",
         rendergraph::RGPassType::Compute,
         rendergraph::RGPassCategory::Lighting,
-        [outRG = outputs.gi_output_rg, depthRG = inputs.gbuffer_depth_rg, normalRG = inputs.gbuffer_normal_rg]
+        [outRG = outputs.gi_output_rg, specRG = outputs.gi_specular_rg,
+         depthRG = inputs.gbuffer_depth_rg, normalRG = inputs.gbuffer_normal_rg, ormRG = inputs.gbuffer_orm_rg]
         (PassData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling — outputs go to imported textures
             if (depthRG.IsValid()) builder.Read(depthRG, ResourceState::ShaderResource);
             if (normalRG.IsValid()) builder.Read(normalRG, ResourceState::ShaderResource);
+            if (ormRG.IsValid()) builder.Read(ormRG, ResourceState::ShaderResource);
             data.output = builder.Write(outRG, ResourceState::UnorderedAccess);
+            builder.Write(specRG, ResourceState::UnorderedAccess);
         },
         [this, inputs, ddgiReadIdx](const PassData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
@@ -161,6 +174,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // Upload GIGatherCB
             {
                 math::m4x4 vp = inputs.proj_matrix * inputs.view_matrix;
+                math::m4x4 invView = Inverse(inputs.view_matrix);
                 auto* cb = static_cast<GIGatherCB*>(device_->MapBuffer(probe_cb_));
                 if (cb) {
                     cb->inv_view_projection = Inverse(vp);
@@ -168,6 +182,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     const auto& params = ddgi->GetParams();
                     cb->probe_origin_spacing = math::v4{vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z, params.probe_spacing};
                     cb->probe_counts = math::v4{(float)params.probe_count_x, (float)params.probe_count_y, (float)params.probe_count_z, 9.0f};
+                    cb->camera_pos = math::v4{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2], 1.0f};
                     device_->UnmapBuffer(probe_cb_);
                 }
             }
@@ -231,10 +246,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             ResourceHandle skySH = inputs.static_probe_volume ? inputs.static_probe_volume->GetStaticSkySH() : handles::INVALID_RESOURCE;
             ResourceHandle skyFactor = inputs.static_probe_volume ? inputs.static_probe_volume->GetStaticSkyFactor() : handles::INVALID_RESOURCE;
 
-            // Texture bindings
-            WriteDescriptorSet texWrites[4];
-            DescriptorImageInfo imgInfos[4];
+            // Texture bindings (6: depth/normal/output/history/orm/specular)
+            WriteDescriptorSet texWrites[6];
+            DescriptorImageInfo imgInfos[6];
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            const u32 ormBinding = isVk ? 13u : 4u;
+            const u32 specBinding = isVk ? 14u : 5u;
             {
                 // texture(0): depth (SampledDepthImage on Vulkan/Dawn, SampledImage on Metal)
                 texWrites[0].dstSet = descriptor_set_;
@@ -276,7 +293,30 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[3].sampler = handles::INVALID_SAMPLER;
                 imgInfos[3].imageView = gi_halfres_history_; // binding 3 (unused, but must be valid)
                 imgInfos[3].imageLayout = ResourceState::ShaderResource;
-                device_->UpdateDescriptorSets(4, texWrites);
+                // texture(4/13): gbuffer ORM (T4.3) — fallback keeps descriptor valid
+                ResourceHandle ormTex = inputs.gbuffer_orm;
+                if (ormTex == handles::INVALID_RESOURCE) ormTex = inputs.fallback_texture;
+                if (ormTex == handles::INVALID_RESOURCE) ormTex = gi_halfres_history_;
+                texWrites[4].dstSet = descriptor_set_;
+                texWrites[4].dstBinding = ormBinding;
+                texWrites[4].dstArrayElement = 0;
+                texWrites[4].descriptorCount = 1;
+                texWrites[4].descriptorType = DescriptorType::SampledImage;
+                texWrites[4].imageInfo = &imgInfos[4];
+                imgInfos[4].sampler = handles::INVALID_SAMPLER;
+                imgInfos[4].imageView = ormTex;
+                imgInfos[4].imageLayout = ResourceState::ShaderResource;
+                // texture(5/14): glossy specular output (T4.3, UAV)
+                texWrites[5].dstSet = descriptor_set_;
+                texWrites[5].dstBinding = specBinding;
+                texWrites[5].dstArrayElement = 0;
+                texWrites[5].descriptorCount = 1;
+                texWrites[5].descriptorType = DescriptorType::StorageImage;
+                texWrites[5].imageInfo = &imgInfos[5];
+                imgInfos[5].sampler = handles::INVALID_SAMPLER;
+                imgInfos[5].imageView = gi_specular_texture_;
+                imgInfos[5].imageLayout = ResourceState::UnorderedAccess;
+                device_->UpdateDescriptorSets(6, texWrites);
             }
 
             // Buffer bindings with sub-allocation from probe_cb_
@@ -295,7 +335,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // Metal: overlapping buffer namespace 0..8.
                 const u32 bufBase = isVk ? 4u : 0u;
                 bufWrites[0].dstBinding = bufBase + 0;
-                bufInfos[0].buffer = probe_cb_; bufInfos[0].offset = 0; bufInfos[0].range = 64;
+                bufInfos[0].buffer = probe_cb_; bufInfos[0].offset = 0; bufInfos[0].range = 80;
                 bufWrites[1].dstBinding = bufBase + 1;
                 bufInfos[1].buffer = probe_cb_; bufInfos[1].offset = 64; bufInfos[1].range = 16;
                 bufWrites[2].dstBinding = bufBase + 2;
@@ -329,12 +369,16 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // History blit disabled (temporal accumulation not used — causes
             // layout issues with uninitialized history texture on first frame).
             {
-                ResourceBarrier outBarrier{};
-                outBarrier.resource = gi_halfres_texture_;
-                outBarrier.beforeState = ResourceState::UnorderedAccess;
-                outBarrier.afterState = ResourceState::ShaderResource;
-                outBarrier.subresource = 0xFFFFFFFF;
-                cmd->InsertBarrier(&outBarrier, 1);
+                ResourceBarrier outBarriers[2]{};
+                outBarriers[0].resource = gi_halfres_texture_;
+                outBarriers[0].beforeState = ResourceState::UnorderedAccess;
+                outBarriers[0].afterState = ResourceState::ShaderResource;
+                outBarriers[0].subresource = 0xFFFFFFFF;
+                outBarriers[1].resource = gi_specular_texture_;
+                outBarriers[1].beforeState = ResourceState::UnorderedAccess;
+                outBarriers[1].afterState = ResourceState::ShaderResource;
+                outBarriers[1].subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(outBarriers, 2);
             }
         }
     );

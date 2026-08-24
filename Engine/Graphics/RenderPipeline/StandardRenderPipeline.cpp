@@ -1489,11 +1489,15 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         giIn.static_probe_volume = static_probe_volume_.get();
         giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
         giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
+        giIn.gbuffer_orm = gpuDraw.GetGBufferORM();
         giIn.gbuffer_depth_rg = gbufferDepthGI;
         giIn.gbuffer_normal_rg = gbufferNormalGI;
+        auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
+        giIn.gbuffer_orm_rg = gbufferOrmGI;
         giIn.view_matrix = view_matrix_;
         giIn.proj_matrix = proj_matrix_;
         giIn.current_buffer_index = cbIdx;
+        giIn.fallback_texture = black_texture_;
         giOut = gi_gather_module_->AddPasses(graph, giIn);
     }
 
@@ -1518,6 +1522,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionIn.ssr_rg = ssrOut.outputColor;
         fusionIn.ssr_tex = handles::INVALID_RESOURCE;  // RG-resolved inside module
         fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
+        fusionIn.ddgi_specular_rg = giOut.gi_specular_rg;
+        fusionIn.ddgi_specular_tex = giOut.gi_specular_tex;
         fusionIn.volume_scatter_rg = volumeOut.volume_scatter;
         fusionIn.volume_scatter_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
         fusionIn.current_buffer_index = cbIdx;
@@ -2013,16 +2019,20 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized()) {
             auto gbufferDepthGI = graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
             auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
+            auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
             GIGatherInputs giIn;
             giIn.ddgi_pass = ddgi_pass_.get();
             giIn.static_probe_volume = static_probe_volume_.get();
             giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
             giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
+            giIn.gbuffer_orm = gpuDraw.GetGBufferORM();
             giIn.gbuffer_depth_rg = gbufferDepthGI;
             giIn.gbuffer_normal_rg = gbufferNormalGI;
+            giIn.gbuffer_orm_rg = gbufferOrmGI;
             giIn.view_matrix = view_matrix_;
             giIn.proj_matrix = proj_matrix_;
             giIn.current_buffer_index = cbIdx;
+            giIn.fallback_texture = black_texture_;
             giOut = gi_gather_module_->AddPasses(graph, giIn);
         }
 
@@ -2232,6 +2242,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.ssr_rg = ssrOutRWCB.outputColor;
             fusionIn.ssr_tex = handles::INVALID_RESOURCE;
             fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
+            fusionIn.ddgi_specular_rg = giOut.gi_specular_rg;
+            fusionIn.ddgi_specular_tex = giOut.gi_specular_tex;
             fusionIn.current_buffer_index = cbIdx;
             fusionIn.render_width = render_width_;
             fusionIn.render_height = render_height_;

@@ -580,21 +580,42 @@ fragment float4 fragmentFusionIndirect(
     return float4(indirect, 1.0f);
 }
 
-// Fusion Pass 2 (full-res): scene + pre-combined indirect + volume scatter → tonemapped output
+// Fusion Pass 2 (full-res): scene + pre-combined indirect + DDGI glossy + volume scatter → tonemapped output
 // Tonemap happens here (single tonemap). FinalBlit's mode 6 path uses fragmentBlitNoTonemap
 // to sample this LDR result directly, avoiding double-tonemap.
+// T4.3: adds DDGI glossy specular (albedo/orm for F0 & roughness). Metal has no
+// SSR pass — the roughness relay degrades to DDGI-glossy-only here.
 fragment float4 fragmentFusion(
     VertexOut in [[stage_in]],
     texture2d<float> sceneColor    [[texture(0)]],
     texture2d<float> indirectColor [[texture(1)]],
-    texture2d<float> volumeScatter [[texture(2)]])
+    texture2d<float> volumeScatter [[texture(2)]],
+    texture2d<float> albedoTex     [[texture(3)]],
+    texture2d<float> ddgiSpecular  [[texture(4)]],
+    texture2d<float> ormTex        [[texture(5)]])
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     float3 scene   = sceneColor.sample(s, in.uv).rgb;
     float3 indirect = indirectColor.sample(s, in.uv).rgb;
     float4 vol     = volumeScatter.sample(s, in.uv);
+    float3 albedo  = albedoTex.sample(s, in.uv).rgb;
+    float4 ddgiSpec = ddgiSpecular.sample(s, in.uv);
+    float4 orm     = ormTex.sample(s, in.uv);
 
-    float3 result = (scene + indirect) * vol.a + vol.rgb;
+    // T4.3 glossy: analytic split-sum (Karis mobile approximation of the
+    // preintegrated DFG LUT — pure ALU, same formula on all backends).
+    float roughness = clamp(orm.g, 0.04f, 1.0f);
+    float metallic  = orm.b;
+    float NoV = clamp(ddgiSpec.a, 0.05f, 1.0f);
+    const float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
+    float4 r = float4(roughness) * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28f * NoV)) * r.x + r.y;
+    float2 ab = float2(-1.04f, 1.04f) * a004 + r.zw;
+    float3 F0 = mix(float3(0.04f), albedo, metallic);
+    float3 reflection = ddgiSpec.rgb * (F0 * ab.x + ab.y);
+
+    float3 result = (scene + indirect + reflection) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));
     result = toneMap(result);
 

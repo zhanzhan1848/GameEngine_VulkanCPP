@@ -341,6 +341,7 @@ private:
     primal::graphics::rhi::DescriptorSetHandle  gi_gather_descriptor_set_ {primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET};
     primal::graphics::rhi::ResourceHandle        gi_halfres_texture_   {primal::graphics::rhi::handles::INVALID_RESOURCE};
     primal::graphics::rhi::ResourceHandle        gi_halfres_history_   {primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle        gi_specular_texture_ {primal::graphics::rhi::handles::INVALID_RESOURCE};  // T4.3 glossy
 
     // Probe data atlas textures (buffer → texture for Apple GPU)
     primal::graphics::rhi::ResourceHandle dyn_sh_atlas_       {primal::graphics::rhi::handles::INVALID_RESOURCE};

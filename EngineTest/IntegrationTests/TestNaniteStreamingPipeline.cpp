@@ -850,13 +850,14 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
             }
         }
 
-        // Pass 2: Final fusion (3 texture bindings: scene, indirect, volumeScatter; BGRA8 output)
+        // Pass 2: Final fusion (6 texture bindings: scene, indirect, volumeScatter,
+        // albedo, ddgiSpecular(T4.3), orm; BGRA8 output)
         if (fusion_ok) {
-            primal::graphics::rhi::DescriptorSetLayoutBinding fus_bindings[3];
-            for (u32 i = 0; i < 3; ++i)
+            primal::graphics::rhi::DescriptorSetLayoutBinding fus_bindings[6];
+            for (u32 i = 0; i < 6; ++i)
                 fus_bindings[i] = { i, primal::graphics::rhi::DescriptorType::SampledImage, 1, primal::graphics::rhi::ShaderStage::Pixel, nullptr };
 
-            primal::graphics::rhi::DescriptorSetLayoutDesc fus_set_desc{ .bindingCount = 3, .bindings = fus_bindings };
+            primal::graphics::rhi::DescriptorSetLayoutDesc fus_set_desc{ .bindingCount = 6, .bindings = fus_bindings };
             fusion_fragment_set_layout_ = device_->CreateDescriptorSetLayout(fus_set_desc);
 
             primal::graphics::rhi::PipelineLayoutDesc fus_pl_desc{ .setLayoutCount = 1, .setLayouts = &fusion_fragment_set_layout_ };
@@ -1354,13 +1355,15 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                     std::cerr << "[DDGIGIGather] Invalid shader handle" << std::endl;
                 } else {
                     DescriptorSetLayoutBinding giGatherBindings[] = {
-                        // Textures (4)
+                        // Textures (6)
                         {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // depth
                         {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // normal
                         {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // output
                         {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // history
+                        {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // orm (T4.3)
+                        {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // specular out (T4.3)
                         // Buffers (9)
-                        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // invViewProj
+                        {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // invViewProj + cameraPos
                         {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeOriginSpacing
                         {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // probeCounts
                         {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // staticSkySH
@@ -1370,7 +1373,7 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                         {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // irradianceBuffer
                         {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // depthBuffer
                     };
-                    DescriptorSetLayoutDesc layoutDesc{13, giGatherBindings};
+                    DescriptorSetLayoutDesc layoutDesc{15, giGatherBindings};
                     gi_gather_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
 
                     PipelineLayoutDesc plDesc;
@@ -1398,6 +1401,8 @@ bool TestNaniteStreamingPipeline::InitializeDDGIBlitPipeline() {
                     gi_halfres_texture_ = device_->CreateTexture(texDesc);
                     // History texture for temporal accumulation
                     gi_halfres_history_ = device_->CreateTexture(texDesc);
+                    // T4.3: half-res glossy specular output (RGB = SH(R) radiance, A = NdotV)
+                    gi_specular_texture_ = device_->CreateTexture(texDesc);
 
                     std::cout << "[DDGIGIGather] Initialized (half-res " << halfW << "x" << halfH << ")" << std::endl;
                 }
@@ -4856,6 +4861,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                             primal::math::m4x4 inv_view_projection;
                             primal::math::v4   probe_origin_spacing;
                             primal::math::v4   probe_counts;
+                            primal::math::v4   camera_pos;  // T4.3: world camera for reflection vectors
                         };
 
                         auto* cb = static_cast<GIGatherCB*>(device_->MapBuffer(ddgi_probe_cb_[cbIdx]));
@@ -4868,6 +4874,11 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                                 static_cast<f32>(ddgiParams.probe_count_x),
                                 static_cast<f32>(ddgiParams.probe_count_y),
                                 static_cast<f32>(ddgiParams.probe_count_z), 0.0f};
+                            primal::math::m4x4 invView = rhi::math::Inverse(
+                                cameraBuffers_[currentBufferIndex].view_matrix);
+                            cb->camera_pos = primal::math::v4{
+                                invView.columns[3][0], invView.columns[3][1],
+                                invView.columns[3][2], 1.0f};
                             device_->UnmapBuffer(ddgi_probe_cb_[cbIdx]);
                         }
 
@@ -4916,13 +4927,21 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
                     // === Phase 3: GI Gather (threadgroup cached probe reads) ===
                     {
+                        // T4.3: ORM for lobe widening; glossy specular UAV output.
+                        rhi::ResourceHandle ormH = gpuDrawPipeline_
+                            ? gpuDrawPipeline_->GetGBufferORM() : rhi::handles::INVALID_RESOURCE;
+                        if (ormH == rhi::handles::INVALID_RESOURCE) ormH = gi_halfres_history_;
+                        if (gi_specular_texture_ == rhi::handles::INVALID_RESOURCE) return;
+
                         DescriptorData texParams[] = {
                             {0, DescriptorType::SampledImage, depthH},
                             {1, DescriptorType::SampledImage, normalH},
                             {2, DescriptorType::StorageImage, outputH},
                             {3, DescriptorType::SampledImage, gi_halfres_history_},
+                            {4, DescriptorType::SampledImage, ormH},
+                            {5, DescriptorType::StorageImage, gi_specular_texture_},
                         };
-                        UpdateDescriptorSet(device_, gi_gather_descriptor_set_, texParams, 4);
+                        UpdateDescriptorSet(device_, gi_gather_descriptor_set_, texParams, 6);
                     }
                     {
                         constexpr int kNumBuf = 9;
@@ -4937,7 +4956,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                             bufWrites[i].bufferInfo = &bufInfos[i];
                             bufInfos[i].buffer = ddgi_probe_cb_[cbIdx];
                         }
-                        bufInfos[0].offset = 0;   bufInfos[0].range = 64;
+                        bufInfos[0].offset = 0;   bufInfos[0].range = 80;
                         bufInfos[1].offset = 64;  bufInfos[1].range = 16;
                         bufInfos[2].offset = 80;  bufInfos[2].range = 16;
                         // buffer(3): staticSkySH
@@ -5026,12 +5045,17 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
                     // Copy output to history for next frame's temporal accumulation
                     {
-                        rhi::ResourceBarrier outBarrier{};
-                        outBarrier.resource = outputH;
-                        outBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
-                        outBarrier.afterState = rhi::ResourceState::ShaderResource;
-                        outBarrier.subresource = 0xFFFFFFFF;
-                        cmd->InsertBarrier(&outBarrier, 1);
+                        rhi::ResourceBarrier outBarriers[2]{};
+                        outBarriers[0].resource = outputH;
+                        outBarriers[0].beforeState = rhi::ResourceState::UnorderedAccess;
+                        outBarriers[0].afterState = rhi::ResourceState::ShaderResource;
+                        outBarriers[0].subresource = 0xFFFFFFFF;
+                        // T4.3: glossy specular texture also transitions for the Fusion pass
+                        outBarriers[1].resource = gi_specular_texture_;
+                        outBarriers[1].beforeState = rhi::ResourceState::UnorderedAccess;
+                        outBarriers[1].afterState = rhi::ResourceState::ShaderResource;
+                        outBarriers[1].subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(outBarriers, 2);
 
                         rhi::TextureBlitRegion blitRegion{};
                         blitRegion.srcOffsets[0] = {0, 0, 0};
@@ -5175,14 +5199,27 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 cmd->SetViewport({ {0, 0}, {static_cast<float>(renderWidth_), static_cast<float>(renderHeight_)}, 0, 1 });
                 cmd->SetScissor({ {0, 0}, {renderWidth_, renderHeight_} });
 
-                // Shader expects 3 textures (sceneColor, indirectColor, volumeScatter).
-                // Bind fallback (0,0,0,1) so vol.a=1 passes scene+indirect through.
-                DescriptorData params[3] = {
+                // Shader expects 6 textures (scene, indirect, volumeScatter,
+                // albedo, ddgiSpecular(T4.3), orm). Bind fallback (0,0,0,1) so
+                // vol.a=1 passes scene+indirect through; black spec/albedo/orm
+                // degrade the glossy relay to off (roughness=0, black radiance).
+                rhi::ResourceHandle albedoTexF = gpuDrawPipeline_
+                    ? gpuDrawPipeline_->GetGBufferAlbedo() : rhi::handles::INVALID_RESOURCE;
+                if (albedoTexF == rhi::handles::INVALID_RESOURCE) albedoTexF = ssgi_black_texture_;
+                rhi::ResourceHandle ormTexF = gpuDrawPipeline_
+                    ? gpuDrawPipeline_->GetGBufferORM() : rhi::handles::INVALID_RESOURCE;
+                if (ormTexF == rhi::handles::INVALID_RESOURCE) ormTexF = ssgi_black_texture_;
+                rhi::ResourceHandle specTexF = (gi_specular_texture_ != rhi::handles::INVALID_RESOURCE)
+                    ? gi_specular_texture_ : ssgi_black_texture_;
+                DescriptorData params[6] = {
                     { 0, DescriptorType::SampledImage, sceneHandle },
                     { 1, DescriptorType::SampledImage, indirectHandle },
                     { 2, DescriptorType::SampledImage, volume_scatter_fallback_texture_ },
+                    { 3, DescriptorType::SampledImage, albedoTexF },
+                    { 4, DescriptorType::SampledImage, specTexF },
+                    { 5, DescriptorType::SampledImage, ormTexF },
                 };
-                UpdateDescriptorSet(device_, fusion_fragment_descriptor_set_[cbIdx], params, 3);
+                UpdateDescriptorSet(device_, fusion_fragment_descriptor_set_[cbIdx], params, 6);
                 cmd->BindGraphicsPipeline(fusion_fragment_pipeline_);
                 const rhi::DescriptorSetHandle gfx_sets[] = { fusion_fragment_descriptor_set_[cbIdx] };
                 cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, fusion_fragment_layout_, 0, 1, gfx_sets, 0, nullptr);

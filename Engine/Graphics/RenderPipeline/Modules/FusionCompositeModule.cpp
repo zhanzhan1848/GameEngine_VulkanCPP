@@ -105,18 +105,21 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         }
     }
 
-    // --- Pass 2: FusionComposite (full-res, 5 texture reads + 1 sampler on Vulkan) ---
+    // --- Pass 2: FusionComposite (full-res, 7 texture reads + 1 sampler on Vulkan) ---
     {
-        // bindings: 0=scene, 1=indirect, 2=volume_scatter, 3=ssr, 4=orm, [5=sampler(Vk)]
-        const u32 compositeBindingCount = isVk ? 6 : 5;
-        DescriptorSetLayoutBinding bindings[6];
+        // bindings: 0=scene, 1=indirect, 2=volume_scatter, 3=ssr, 4=orm,
+        //           5=albedo, 6=ddgi_specular (T4.3), [7=sampler(Vk)]
+        const u32 compositeBindingCount = isVk ? 8 : 7;
+        DescriptorSetLayoutBinding bindings[8];
         bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // scene
         bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // indirect
         bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // volume_scatter
         bindings[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // ssr
         bindings[4] = {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // orm
+        bindings[5] = {5, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // albedo (T4.3)
+        bindings[6] = {6, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // ddgi_specular (T4.3)
         if (isVk) {
-            bindings[5] = {5, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
+            bindings[7] = {7, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
         }
         composite_set_layout_ = device->CreateDescriptorSetLayout({compositeBindingCount, bindings});
         composite_layout_ = device->CreatePipelineLayout({1, &composite_set_layout_});
@@ -311,12 +314,14 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
     graph.AddPass<ComposeData>("FusionComposite",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
-        [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, ssrRG = inputs.ssr_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
+        [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, ssrRG = inputs.ssr_rg,
+         specRG = inputs.ddgi_specular_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling
             if (primaryRG.IsValid()) builder.Read(primaryRG, ResourceState::ShaderResource);
             builder.Read(indirectRG, ResourceState::ShaderResource);
             if (volumeRG.IsValid()) builder.Read(volumeRG, ResourceState::ShaderResource);
             if (ssrRG.IsValid()) builder.Read(ssrRG, ResourceState::ShaderResource);
+            if (specRG.IsValid()) builder.Read(specRG, ResourceState::ShaderResource);
             data.output = builder.Write(fusionOutRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
@@ -353,15 +358,27 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             ResourceHandle ormTex = inputs.gbuffer_orm;
             if (ormTex == handles::INVALID_RESOURCE) ormTex = inputs.black_texture;
 
+            // T4.3: DDGI glossy specular + albedo (metallic F0). Black fallbacks
+            // degrade the glossy relay to SSR-only.
+            ResourceHandle specTex = inputs.ddgi_specular_tex;
+            if (specTex == handles::INVALID_RESOURCE && inputs.ddgi_specular_rg.IsValid())
+                specTex = resolve(inputs.ddgi_specular_rg);
+            if (specTex == handles::INVALID_RESOURCE || specTex == inputs.black_texture)
+                specTex = inputs.black_texture;
+            ResourceHandle albedoTex = inputs.gbuffer_albedo;
+            if (albedoTex == handles::INVALID_RESOURCE) albedoTex = inputs.black_texture;
+
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
-            const u32 paramCount = isVk ? 6 : 5;
-            DescData params[6] = {
+            const u32 paramCount = isVk ? 8 : 7;
+            DescData params[8] = {
                 {0, DescriptorType::SampledImage, inputs.primary_input_tex},
                 {1, DescriptorType::SampledImage, indirectTex},
                 {2, DescriptorType::SampledImage, volTex},
                 {3, DescriptorType::SampledImage, ssrTex},
                 {4, DescriptorType::SampledImage, ormTex},
-                {5, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
+                {5, DescriptorType::SampledImage, albedoTex},
+                {6, DescriptorType::SampledImage, specTex},
+                {7, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
             };
             UpdateDesc(device_, composite_ds_[cbIdx], params, paramCount);
             cmd->BindGraphicsPipeline(composite_pipeline_);

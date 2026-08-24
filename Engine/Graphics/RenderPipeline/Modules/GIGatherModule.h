@@ -14,17 +14,23 @@ struct GIGatherInputs {
 
     rhi::ResourceHandle gbuffer_depth;
     rhi::ResourceHandle gbuffer_normal;
+    rhi::ResourceHandle gbuffer_orm;      // T4.3: roughness for lobe widening
     rendergraph::RGResourceHandle gbuffer_depth_rg;
     rendergraph::RGResourceHandle gbuffer_normal_rg;
+    rendergraph::RGResourceHandle gbuffer_orm_rg;
 
     math::m4x4 view_matrix{};
     math::m4x4 proj_matrix{};
     u32 current_buffer_index = 0;
+    rhi::ResourceHandle fallback_texture{rhi::handles::INVALID_RESOURCE};  // when ORM missing
 };
 
 struct GIGatherOutputs {
     rendergraph::RGResourceHandle gi_output_rg;
     rhi::ResourceHandle gi_output_tex;
+    // T4.3: half-res glossy specular (RGB = SH(R) lobe radiance, A = NdotV).
+    rendergraph::RGResourceHandle gi_specular_rg;
+    rhi::ResourceHandle gi_specular_tex;
 };
 
 class GIGatherModule {
@@ -50,6 +56,7 @@ private:
 
     rhi::ResourceHandle gi_halfres_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle gi_halfres_history_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle gi_specular_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle probe_cb_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle static_probe_cb_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle dummy_buffer_{rhi::handles::INVALID_RESOURCE};

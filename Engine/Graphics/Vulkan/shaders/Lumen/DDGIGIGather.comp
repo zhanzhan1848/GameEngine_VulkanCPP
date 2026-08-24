@@ -10,7 +10,7 @@
 //   binding 1  = SampledImage       gbuffer_normal
 //   binding 2  = StorageImage(rgba16f) output_tex  (half-res GI)
 //   binding 3  = SampledImage       history_tex    (temporal)
-//   binding 4  = UniformBuffer      invViewProj (4 vec4 = 64B)
+//   binding 4  = UniformBuffer      invViewProj + cameraPos (5 vec4 = 80B)
 //   binding 5  = UniformBuffer      probeOriginSpacing (origin.xyz + spacing.w)
 //   binding 6  = UniformBuffer      probeCounts (xyz)
 //   binding 7  = StorageBuffer(ro)  staticSkySH (9 float3)
@@ -19,6 +19,9 @@
 //   binding 10 = StorageBuffer(ro)  confidenceBuffer
 //   binding 11 = StorageBuffer(ro)  irradianceBuffer (9 float3 per probe)
 //   binding 12 = StorageBuffer(ro)  ddgiDepthBuffer (128 floats per probe)
+//   binding 13 = SampledImage       gbuffer_orm (r=AO, g=Roughness, b=Metallic)
+//   binding 14 = StorageImage(rgba16f) spec_output_tex (half-res glossy:
+//                                    RGB = SH(R) lobe radiance, A = NdotV)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
@@ -34,6 +37,7 @@ layout(set = 0, binding = 3) uniform texture2D history_tex; // unused (temporal 
 
 layout(set = 0, binding = 4, std140) uniform ViewCB {
     vec4 viewRows[4];  // invViewProj as 4 vec4 rows (column-major matrix)
+    vec4 cameraPos;    // world-space camera position (T4.3 glossy reflections)
 };
 layout(set = 0, binding = 5, std140) uniform ProbeOriginSpacing {
     vec4 probeOriginSpacing;  // xyz=origin, w=spacing
@@ -69,6 +73,8 @@ layout(set = 0, binding = 11) readonly buffer IrradianceBuf {
 layout(set = 0, binding = 12) readonly buffer DDGIDepthBuf {
     float ddgiDepthBuffer[];
 };
+layout(set = 0, binding = 13) uniform texture2D gbuffer_orm;
+layout(set = 0, binding = 14, rgba16f) writeonly uniform image2D spec_output_tex;
 
 // --------------------------------------------------------------------------------
 // Constants
@@ -273,6 +279,7 @@ void ddgi_gi_gather() {
     if (inBounds && !isActive) {
         // Outside probe grid: output dim ambient instead of pure black.
         imageStore(output_tex, ivec2(tid), vec4(0.03, 0.03, 0.035, 1.0));
+        imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
     }
 
     if (isActive) {
@@ -312,6 +319,23 @@ void ddgi_gi_gather() {
 
         vec3 result = vec3(0.0);
         float totalW = 0.0;
+
+        // T4.3 glossy: reflection vector R = reflect(-V, N), evaluated with the
+        // same SH9 coefficients. Roughness widens the lobe by blending towards
+        // the diffuse reconstruction (cosine-lobe limit at roughness → 1).
+        vec3 V = normalize(cameraPos.xyz - worldPos);
+        float NdotV = clamp(dot(normal, V), 0.05, 1.0);
+        vec3 R = reflect(-V, normal);
+        float roughness = 1.0;
+        {
+            ivec2 fullOrmTexel = ivec2(vec2(textureSize(gbuffer_orm, 0)) * uv);
+            roughness = clamp(texelFetch(gbuffer_orm, fullOrmTexel, 0).g, 0.04, 1.0);
+        }
+        float rx = R.x, ry = R.y, rz = R.z;
+        float rxy = rx*ry, ryz = ry*rz, rzx = rz*rx;
+        float rxx = rx*rx, ryy = ry*ry, rzz = rz*rz;
+        vec3 reflResult = vec3(0.0);
+
         for (int p = 0; p < 8; ++p) {
             if (tw[p] < 0.01) continue;
             uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
@@ -330,9 +354,28 @@ void ddgi_gi_gather() {
                      + sh[8] * (SH_C2_2 * (nxx - nyy));
             result += irr * tw[p];
             totalW += tw[p];
+
+            // Same coefficients along R — no extra device reads.
+            reflResult += sh[0] * SH_C0
+                        + sh[1] * (SH_C1 * ry)
+                        + sh[2] * (SH_C1 * rz)
+                        + sh[3] * (SH_C1 * rx)
+                        + sh[4] * (SH_C2_0 * rxy)
+                        + sh[5] * (SH_C2_0 * ryz)
+                        + sh[6] * (SH_C2_0 * rzx)
+                        + sh[7] * (SH_C2_1 * (3.0*rzz - 1.0))
+                        + sh[8] * (SH_C2_2 * (rxx - ryy));
         }
-        if (totalW > 0.0) result /= totalW;
+        if (totalW > 0.0) {
+            result /= totalW;
+            reflResult /= totalW;
+        }
         result = max(result, vec3(0.02, 0.02, 0.025));
         imageStore(output_tex, ivec2(tid), vec4(result, 1.0));
+
+        // Glossy output: RGB = lobe radiance, A = NdotV (DFG happens in
+        // FusionComposite where albedo/metallic are available).
+        vec3 specIrr = mix(reflResult, result, roughness * roughness);
+        imageStore(spec_output_tex, ivec2(tid), vec4(specIrr, NdotV));
     }
 }

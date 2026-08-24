@@ -28,6 +28,10 @@ struct FusionInputs {
     rhi::ResourceHandle ssr_tex{rhi::handles::INVALID_RESOURCE};
     // GBuffer ORM (AO.r, Roughness.g, Metallic.b) — used to attenuate SSR by roughness.
     rhi::ResourceHandle gbuffer_orm{rhi::handles::INVALID_RESOURCE};
+    // T4.3: DDGI glossy specular (half-res RGBA16F: RGB=SH(R) lobe radiance,
+    // A=NdotV). Invalid → black → glossy relay degrades to SSR-only.
+    rendergraph::RGResourceHandle ddgi_specular_rg{};
+    rhi::ResourceHandle ddgi_specular_tex{rhi::handles::INVALID_RESOURCE};
 
     // Volume scatter (RGBA16_Float: RGB=scatter, A=transmittance)
     rendergraph::RGResourceHandle volume_scatter_rg{};
