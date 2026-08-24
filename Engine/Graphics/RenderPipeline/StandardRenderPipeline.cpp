@@ -511,56 +511,58 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     // production code paths off Vulkan; Lumen modules remain nullptr here.
     const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
 
-    // DDGI
+    // DDGI — T5.5 multi-volume runtime (cap 4, config-driven).
     if (settings_.quality.enable_ddgi) {
-        ddgi_pass_ = std::make_unique<lumen::LumenDDGIPass>();
-        lumen::DDGIRuntimeParams ddgiParams{};
-        ddgiParams.probe_count_x = config.ddgi_probe_count_x;
-        ddgiParams.probe_count_y = config.ddgi_probe_count_y;
-        ddgiParams.probe_count_z = config.ddgi_probe_count_z;
-        ddgiParams.rays_per_probe = config.ddgi_rays_per_probe;
-        ddgiParams.probe_spacing = config.ddgi_probe_spacing;
-        ddgiParams.irradiance_temporal_weight = config.ddgi_irradiance_temporal_weight;
-        ddgiParams.depth_temporal_weight = config.ddgi_depth_temporal_weight;
-        ddgiParams.ray_max_distance = config.ddgi_ray_max_distance;
-        if (!ddgi_pass_->Initialize(device_, ddgiParams)) {
-            std::cerr << "[Lumen] DDGI init failed" << std::endl;
-            ddgi_pass_.reset();
-        } else {
-            // Enable dynamic mode (Mode 11) — runtime SDF trace over static-bake.
-            // Without this, DDGI stays in Mode 10 (static-bake only) and never
-            // traces the GlobalSDF, producing no dynamic indirect light.
-            ddgi_pass_->SetDynamicMode(true);
-        }
-
-        // T4.4: far-field coarse volume — GI outside the near-field box.
-        // Same center, double extent (16×8×16 @ 8 vs 32×16×32 @ 2). Updated at
-        // a quarter of the near volume's probe budget (governor-modulated).
-        if (config.ddgi_enable_far_volume) {
-            ddgi_far_pass_ = std::make_unique<lumen::LumenDDGIPass>();
-            lumen::DDGIRuntimeParams farParams{};
-            farParams.probe_count_x = config.ddgi_far_probe_count_x;
-            farParams.probe_count_y = config.ddgi_far_probe_count_y;
-            farParams.probe_count_z = config.ddgi_far_probe_count_z;
-            farParams.rays_per_probe = config.ddgi_rays_per_probe;
-            farParams.probe_spacing = config.ddgi_far_probe_spacing;
-            farParams.irradiance_temporal_weight = config.ddgi_irradiance_temporal_weight;
-            farParams.depth_temporal_weight = config.ddgi_depth_temporal_weight;
-            farParams.ray_max_distance = config.ddgi_far_ray_max_distance;
-            farParams.max_probes_per_frame = ddgiParams.max_probes_per_frame / 4;
-            if (!ddgi_far_pass_->Initialize(device_, farParams)) {
-                std::cerr << "[Lumen] DDGI far-volume init failed (continuing near-only)" << std::endl;
-                ddgi_far_pass_.reset();
-            } else {
-                ddgi_far_pass_->SetRGNamePrefix("Far");
-                ddgi_far_pass_->SetDynamicMode(true);
-                // Both volumes center at world origin (Initialize derives origin
-                // from counts×spacing), so the far shell wraps the near box.
-                std::cout << "[Lumen] DDGI far volume initialized ("
-                          << farParams.probe_count_x << "x" << farParams.probe_count_y
-                          << "x" << farParams.probe_count_z << " @ spacing "
-                          << farParams.probe_spacing << ")" << std::endl;
+        // Volume list: explicit overrides win; else derive near + far (T4.4).
+        std::vector<lumen::LumenVolumeConfig> vols = config.volume_overrides;
+        if (vols.empty()) {
+            vols.push_back(lumen::LumenVolumeConfig{});   // near defaults filled below
+            if (config.ddgi_enable_far_volume) {
+                lumen::LumenVolumeConfig far{};
+                far.probe_count_x = config.ddgi_far_probe_count_x;
+                far.probe_count_y = config.ddgi_far_probe_count_y;
+                far.probe_count_z = config.ddgi_far_probe_count_z;
+                far.probe_spacing = config.ddgi_far_probe_spacing;
+                far.rays_per_probe = config.ddgi_rays_per_probe;
+                far.ray_max_distance = config.ddgi_far_ray_max_distance;
+                far.update_budget_divisor = 4;
+                vols.push_back(far);
             }
+            vols[0].probe_count_x = config.ddgi_probe_count_x;
+            vols[0].probe_count_y = config.ddgi_probe_count_y;
+            vols[0].probe_count_z = config.ddgi_probe_count_z;
+            vols[0].rays_per_probe = config.ddgi_rays_per_probe;
+            vols[0].probe_spacing = config.ddgi_probe_spacing;
+            vols[0].ray_max_distance = config.ddgi_ray_max_distance;
+        }
+        if (vols.size() > 4) vols.resize(4);
+
+        static const char* kPrefixes[4] = {"", "Far", "Vol2", "Vol3"};
+        for (u32 vi = 0; vi < vols.size(); ++vi) {
+            const auto& vc = vols[vi];
+            lumen::DDGIRuntimeParams vp{};
+            vp.probe_count_x = vc.probe_count_x;
+            vp.probe_count_y = vc.probe_count_y;
+            vp.probe_count_z = vc.probe_count_z;
+            vp.rays_per_probe = vc.rays_per_probe;
+            vp.probe_spacing = vc.probe_spacing;
+            vp.irradiance_temporal_weight = config.ddgi_irradiance_temporal_weight;
+            vp.depth_temporal_weight = config.ddgi_depth_temporal_weight;
+            vp.ray_max_distance = vc.ray_max_distance;
+            if (vi > 0 && vc.update_budget_divisor > 1)
+                vp.max_probes_per_frame = 16384u / vc.update_budget_divisor;
+            auto vol = std::make_unique<lumen::LumenDDGIPass>();
+            if (!vol->Initialize(device_, vp)) {
+                std::cerr << "[Lumen] DDGI volume " << vi << " init failed (skipping)" << std::endl;
+                continue;
+            }
+            vol->SetDynamicMode(true);   // Mode 11: runtime SDF trace
+            if (vi > 0) vol->SetRGNamePrefix(kPrefixes[vi]);
+            ddgi_volumes_[ddgi_volume_count_++] = std::move(vol);
+            std::cout << "[Lumen] DDGI volume " << vi << " initialized ("
+                      << vp.probe_count_x << "x" << vp.probe_count_y
+                      << "x" << vp.probe_count_z << " @ spacing "
+                      << vp.probe_spacing << ")" << std::endl;
         }
     }
 
@@ -671,8 +673,10 @@ void StandardRenderPipeline::ShutdownLumenPasses() {
     if (screen_probe_pass_) { screen_probe_pass_->Shutdown(); screen_probe_pass_.reset(); }
     if (surface_cache_pass_) { surface_cache_pass_->Shutdown(); surface_cache_pass_.reset(); }
     if (ssao_pass_) { ssao_pass_->Shutdown(); ssao_pass_.reset(); }
-    if (ddgi_pass_) { ddgi_pass_->Shutdown(); ddgi_pass_.reset(); }
-    if (ddgi_far_pass_) { ddgi_far_pass_->Shutdown(); ddgi_far_pass_.reset(); }
+    for (u32 vi = 0; vi < ddgi_volume_count_; ++vi) {
+        if (ddgi_volumes_[vi]) { ddgi_volumes_[vi]->Shutdown(); ddgi_volumes_[vi].reset(); }
+    }
+    ddgi_volume_count_ = 0;
 }
 
 // ============================================================================
@@ -1408,11 +1412,14 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData,
                                        static_cast<u32>(frameCount_), scLightingRG);
 
-        // T4.4: far-field coarse volume — no SC atlas (card data is near-field;
-        // far probes take radiance from the canonical trace chain only).
-        if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized() && lumen::GIDebug().ddgi_far_volume) {
-            ddgi_far_pass_->AddPass(graph, prevColor, camData,
-                                     static_cast<u32>(frameCount_), RGResourceHandle{});
+        // T5.5: secondary volumes (no SC atlas — card data is near-field).
+        if (lumen::GIDebug().ddgi_far_volume) {
+            for (u32 vi = 1; vi < ddgi_volume_count_; ++vi) {
+                if (ddgi_volumes_[vi] && ddgi_volumes_[vi]->IsInitialized()) {
+                    ddgi_volumes_[vi]->AddPass(graph, prevColor, camData,
+                                               static_cast<u32>(frameCount_), RGResourceHandle{});
+                }
+            }
         }
     }
 
@@ -1545,7 +1552,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
         GIGatherInputs giIn;
         giIn.ddgi_pass = ddgi_pass_.get();
-        giIn.ddgi_far_pass = ddgi_far_pass_.get();
+        giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
         giIn.static_probe_volume = static_probe_volume_.get();
         giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
         giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -2061,10 +2068,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
             ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
 
-            // T4.4: far-field coarse volume (no SC atlas — near-field data only).
-            if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized() && lumen::GIDebug().ddgi_far_volume) {
-                ddgi_far_pass_->AddPass(graph, prevColor, camData,
-                                         static_cast<u32>(frameCount_), RGResourceHandle{});
+            // T5.5: secondary volumes (no SC atlas — near-field data only).
+            if (lumen::GIDebug().ddgi_far_volume) {
+                for (u32 vi = 1; vi < ddgi_volume_count_; ++vi) {
+                    if (ddgi_volumes_[vi] && ddgi_volumes_[vi]->IsInitialized()) {
+                        ddgi_volumes_[vi]->AddPass(graph, prevColor, camData,
+                                                   static_cast<u32>(frameCount_), RGResourceHandle{});
+                    }
+                }
             }
         }
 
@@ -2088,7 +2099,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
             GIGatherInputs giIn;
             giIn.ddgi_pass = ddgi_pass_.get();
-            giIn.ddgi_far_pass = ddgi_far_pass_.get();
+            giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
             giIn.static_probe_volume = static_probe_volume_.get();
             giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
             giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();

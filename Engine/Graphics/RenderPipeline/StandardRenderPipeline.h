@@ -11,6 +11,7 @@
 #include "Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
+#include <array>
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Lumen/GIPlatformProfile.h"
 #include "Graphics/Volume/VolumePass.h"
@@ -354,8 +355,12 @@ private:
     RenderScene default_scene_{};
 
     // --- Lumen GI ---
-    std::unique_ptr<lumen::LumenDDGIPass> ddgi_pass_;
-    std::unique_ptr<lumen::LumenDDGIPass> ddgi_far_pass_;  // T4.4 far-field coarse layer
+    // T5.5 multi-volume runtime (cap 4). ddgi_pass_ aliases volumes[0] — all
+    // legacy consumers (SC integration, SPGI fallback, pass gating) keep
+    // working against the near volume.
+    std::array<std::unique_ptr<lumen::LumenDDGIPass>, 4> ddgi_volumes_{};
+    u32 ddgi_volume_count_ = 0;
+    std::unique_ptr<lumen::LumenDDGIPass>& ddgi_pass_ = ddgi_volumes_[0];
     lumen::GIPlatformProfile gi_profile_{};                // T4.5/C5 capability ceiling
     std::unique_ptr<lumen::LumenSSAOPass> ssao_pass_;
     std::unique_ptr<lumen::LumenSSGIPass> ssgi_pass_;

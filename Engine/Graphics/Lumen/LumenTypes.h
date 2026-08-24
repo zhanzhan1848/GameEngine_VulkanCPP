@@ -2,6 +2,7 @@
 
 #include "CommonHeaders.h"
 #include "../RHI/Core/RHITypes.h"
+#include <vector>
 
 namespace primal::graphics::lumen {
 
@@ -22,6 +23,22 @@ enum class LumenQualityPreset {
 /**
  * @brief Lumen configuration (runtime adjustable)
  */
+// --- Multi-volume runtime (T5.5, cap 4) ---
+// Entry 0 = primary near volume; entry 1 = far-field coarse shell (T4.4).
+// Entries 2..3 are user placements (editor/M6). When `overrides` is empty the
+// pipeline derives entries 0/1 from the ddgi_* fields above (backward compat).
+struct LumenVolumeConfig {
+    u32    probe_count_x = 32;
+    u32    probe_count_y = 16;
+    u32    probe_count_z = 32;
+    float  probe_spacing = 2.0f;
+    u32    rays_per_probe = 64;
+    float  ray_max_distance = 50.0f;
+    u32    update_budget_divisor = 1;   // probe budget = near budget / divisor
+    math::v3 origin_override{0.0f, 0.0f, 0.0f};  // (0,0,0) = world-centered
+    bool   use_origin_override = false;
+};
+
 struct LumenConfig {
     LumenQualityPreset quality = LumenQualityPreset::Medium;
 
@@ -50,6 +67,10 @@ struct LumenConfig {
     u32 ddgi_far_probe_count_z = 16;
     float ddgi_far_probe_spacing = 8.0f;
     float ddgi_far_ray_max_distance = 128.0f;
+
+    // T5.5: explicit volume list (cap 4). Empty → derive 0/1 from the fields
+    // above. Non-empty → overrides win; entry 0 must be the near volume.
+    std::vector<LumenVolumeConfig> volume_overrides;
 
     // Surface Cache settings
     u32 surface_cache_atlas_size = 2048;
