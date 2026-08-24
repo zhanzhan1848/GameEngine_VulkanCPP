@@ -6,6 +6,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Utils/ShaderRegistry.h"
+#include "Engine/Graphics/Dawn/ShaderLoader.h"  // for dawn::LoadWGSL
 // MetalDevice.h intentionally excluded — causes Rect naming conflict with MacTypes.h
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Field/FieldRegistry.h"
@@ -122,6 +123,31 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
 
 static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char* shaderName) {
     const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+
+    if (platform == rhi::RHIPlatform::Dawn) {
+        // WGSL path. dawn::LoadWGSL has two overloads (ShaderLoader.h):
+        //   WASM:   LoadWGSL(const char* name) — kShaderMap + MEMFS fallback at
+        //           /Engine/Graphics/Dawn/shaders/{name}.wgsl
+        //   Native: LoadWGSL(const std::string& path) — opens filesystem path as-is
+        // ScreenProbe shaders live in Engine/Graphics/Dawn/shaders/Lumen/. On
+        // native we pass the full path. On WASM, Emscripten --embed-file
+        // preserves subdirs, so the shader is at
+        // /Engine/Graphics/Dawn/shaders/Lumen/ in MEMFS — pass a relative name
+        // and let LoadWGSL's fallback construct the right path.
+        std::string src;
+#ifdef __EMSCRIPTEN__
+        std::string lumenName = std::string("Lumen/") + shaderName;
+        src = dawn::LoadWGSL(lumenName.c_str());
+#else
+        std::string path = std::string("Engine/Graphics/Dawn/shaders/Lumen/") + shaderName + ".wgsl";
+        src = dawn::LoadWGSL(path);
+#endif
+        if (src.empty()) {
+            std::cerr << "[ScreenProbeGI] Failed to load WGSL shader: " << shaderName << std::endl;
+            return {};
+        }
+        return std::vector<u8>(src.begin(), src.end());
+    }
 
     if (platform == rhi::RHIPlatform::Vulkan) {
         // Load precompiled SPIR-V (.comp.spv) from Vulkan/shaders/Lumen/
