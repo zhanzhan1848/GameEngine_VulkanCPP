@@ -2,6 +2,7 @@
 
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
+#include "Graphics/Lumen/GICacheView.h"
 
 namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
@@ -12,6 +13,12 @@ struct GIGatherInputs {
     lumen::LumenDDGIPass* ddgi_pass = nullptr;
     lumen::LumenDDGIPass* ddgi_far_pass = nullptr;  // T4.4 far-field fallback
     lumen::StaticProbeVolume* static_probe_volume = nullptr;
+
+    // X2/A3: 远场 volume 数据视图（可选）。有效时远场 CB 上传与 binding 16
+    // 的 irradiance 句柄优先从 view 取数；无效时回退 ddgi_far_pass 指针路径
+    // （两条路径字段来源相同，上传逐字节等价）。ddgi_far_pass 仍负责 RG 侧
+    // "DDGIFarIrrRead" import 声明，保持 RG 声明零变化。
+    lumen::DDGIVolumeView far_volume_view{};
 
     rhi::ResourceHandle gbuffer_depth;
     rhi::ResourceHandle gbuffer_normal;

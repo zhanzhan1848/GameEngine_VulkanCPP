@@ -185,6 +185,15 @@ SurfaceCachePass::~SurfaceCachePass() {
     Shutdown();
 }
 
+// X2/A3: 时域策略枚举存储。SC 自身无 probe 时域链（LightEval 页预算走
+// round-robin 游标），当前所有枚举值都不改变行为；X3 归并入五轴 GI 配置。
+void SurfaceCachePass::SetTemporalStrategy(GITemporalStrategy strategy) {
+    if (temporal_strategy_ == strategy) return;
+    temporal_strategy_ = strategy;
+    std::cout << "[SurfaceCache] Temporal strategy -> "
+              << GITemporalStrategyName(strategy) << " (stored; takes effect in X3)" << std::endl;
+}
+
 bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& config) {
     if (initialized_) return true;
 

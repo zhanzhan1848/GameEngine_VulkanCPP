@@ -6,6 +6,7 @@
 #include "SurfaceCacheTypes.h"
 #include "CardGenerator.h"
 #include "../LumenTypes.h"
+#include "../GICacheView.h"
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
@@ -76,6 +77,27 @@ public:
     rhi::ResourceHandle GetGridCardsBuffer() const {
         return card_generator_.GetGridCardsBuffer();
     }
+
+    // X2/A3: 统一 Cache View —— 消费者（DDGI finalize、SPGI）从这里取 SC 数据
+    // 快照，不再逐个摸 pass 内部 buffer getter。纯数据搬运，逐字段等价于上方
+    // 现有 getter 的组合；lighting_rg 由管线侧按需回填。
+    SurfaceCacheView GetCacheView(u32 atlas_idx) const {
+        SurfaceCacheView view;
+        view.lighting_atlas = GetLightingAtlas(atlas_idx);
+        view.card_data = card_generator_.GetCardDataBuffer();
+        view.card_lookup = card_generator_.GetCardLookupBuffer();
+        view.grid_offsets = card_generator_.GetGridOffsetsBuffer();
+        view.grid_cards = card_generator_.GetGridCardsBuffer();
+        view.atlas_size = atlas_size_;                 // == LumenConfig::surface_cache_atlas_size
+        view.card_count = card_generator_.GetCardCount();
+        view.max_card_count = card_generator_.GetMaxCardCount();
+        view.lookup_count = card_generator_.GetLookupCount();
+        return view;
+    }
+
+    // X2/A3: 时域策略枚举存储（SC 自身无 probe 时域链；X3 归并入五轴配置）。
+    void SetTemporalStrategy(GITemporalStrategy strategy);
+    GITemporalStrategy GetTemporalStrategy() const { return temporal_strategy_; }
 
     bool IsInitialized() const { return initialized_; }
 
@@ -193,6 +215,7 @@ private:
     u32 atlas_size_ = 0;
     u32 page_size_ = 0;
     u32 light_eval_rr_cursor_ = 0;   // T1.4: round-robin card cursor for page-budget LightEval
+    GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;   // X2/A3 枚举存储（暂不改变行为）
 
     // GBuffer-gather capture state
     rhi::ResourceHandle capture_cb_[3]{

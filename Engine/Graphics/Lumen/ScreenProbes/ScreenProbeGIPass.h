@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
+#include "Graphics/Lumen/GICacheView.h"
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
@@ -127,6 +128,22 @@ public:
     }
 
     // Surface Cache integration
+    // X2/A3: 视图签名（推荐）—— 从 SurfaceCachePass::GetCacheView() 直传。
+    // 注意 cardCount 上传的是容量值（max_card_count == LumenConfig::
+    // surface_cache_max_cards），与旧注入点逐字节等价；活跃卡片数在
+    // view.card_count，供后续消费者使用。
+    void SetSurfaceCacheData(const SurfaceCacheView& view) {
+        surface_cache_lighting_atlas_ = view.lighting_atlas;
+        surface_cache_card_data_buffer_ = view.card_data;
+        surface_cache_card_lookup_buffer_ = view.card_lookup;
+        surface_cache_atlas_size_ = view.atlas_size;
+        surface_cache_card_count_ = view.max_card_count;
+        surface_cache_grid_offsets_buffer_ = view.grid_offsets;
+        surface_cache_grid_cards_buffer_ = view.grid_cards;
+        surface_cache_available_ = true;
+    }
+
+    // DEPRECATED (X2/A3): 旧签名保留为转发适配器（等价映射进视图签名）。
     void SetSurfaceCacheData(
         rhi::ResourceHandle lighting_atlas,
         rhi::ResourceHandle card_data,
@@ -135,29 +152,46 @@ public:
         u32 card_count = 0,
         rhi::ResourceHandle grid_offsets = rhi::handles::INVALID_RESOURCE,
         rhi::ResourceHandle grid_cards = rhi::handles::INVALID_RESOURCE) {
-        surface_cache_lighting_atlas_ = lighting_atlas;
-        surface_cache_card_data_buffer_ = card_data;
-        surface_cache_card_lookup_buffer_ = card_lookup;
-        surface_cache_atlas_size_ = atlas_size;
-        surface_cache_card_count_ = card_count;
-        surface_cache_grid_offsets_buffer_ = grid_offsets;
-        surface_cache_grid_cards_buffer_ = grid_cards;
-        surface_cache_available_ = true;
+        SurfaceCacheView view;
+        view.lighting_atlas = lighting_atlas;
+        view.card_data = card_data;
+        view.card_lookup = card_lookup;
+        view.grid_offsets = grid_offsets;
+        view.grid_cards = grid_cards;
+        view.atlas_size = atlas_size;
+        view.max_card_count = card_count;   // 旧语义即容量值
+        SetSurfaceCacheData(view);
     }
 
     // DDGI probe fallback (T2.2): miss rays evaluate the nearest DDGI probe's
     // SH L0+L1 along the ray direction.
+    // X2/A3: 视图签名（推荐）—— 从 LumenDDGIPass::GetVolumeView() 直传。
+    void SetDDGIFallbackData(const DDGIVolumeView& view) {
+        ddgi_irradiance_buffer_ = view.irradiance;
+        ddgi_fb_origin_ = view.origin;
+        ddgi_fb_counts_ = view.counts;
+        ddgi_fb_spacing_ = view.spacing;
+        ddgi_fallback_available_ = (view.irradiance != rhi::handles::INVALID_RESOURCE);
+    }
+
+    // DEPRECATED (X2/A3): 旧签名保留为转发适配器。
     void SetDDGIFallbackData(
         rhi::ResourceHandle irradiance_buffer,
         const math::v3& probe_origin,
         const math::v3& probe_counts,
         float probe_spacing) {
-        ddgi_irradiance_buffer_ = irradiance_buffer;
-        ddgi_fb_origin_ = probe_origin;
-        ddgi_fb_counts_ = probe_counts;
-        ddgi_fb_spacing_ = probe_spacing;
-        ddgi_fallback_available_ = (irradiance_buffer != rhi::handles::INVALID_RESOURCE);
+        DDGIVolumeView view;
+        view.irradiance = irradiance_buffer;
+        view.origin = probe_origin;
+        view.counts = probe_counts;
+        view.spacing = probe_spacing;
+        SetDDGIFallbackData(view);
     }
+
+    // X2/A3: 时域策略映射 —— EMA 即现有 temporal accumulation alpha 路径
+    // （默认，行为不变）；EMAVarianceClamp/Reprojection 暂存枚举（TODO X3）。
+    void SetTemporalStrategy(GITemporalStrategy strategy);
+    GITemporalStrategy GetTemporalStrategy() const { return temporal_strategy_; }
 
 private:
     void CreateDescriptorSetLayouts();
@@ -301,6 +335,9 @@ private:
     // T5.1: HZB near-field input
     rhi::ResourceHandle hzb_texture_{ rhi::handles::INVALID_RESOURCE };
     u32 hzb_mip_levels_ = 0;
+
+    // X2/A3 时域策略枚举存储（EMA = 现有 temporal accumulation，行为不变）
+    GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;
 };
 
 } // namespace primal::graphics::lumen

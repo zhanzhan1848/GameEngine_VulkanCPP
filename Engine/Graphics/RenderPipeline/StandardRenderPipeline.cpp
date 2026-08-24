@@ -1364,25 +1364,16 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
 
         if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+            // X2/A3: SC 数据走统一 Cache View（atlas_size/cardCount 与旧
+            // settings 传值同源，上传逐字节等价）
             screen_probe_pass_->SetSurfaceCacheData(
-                surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
-                surface_cache_pass_->GetCardDataBuffer(),
-                surface_cache_pass_->GetCardLookupBuffer(),
-                settings_.lumen.surface_cache_atlas_size,
-                settings_.lumen.surface_cache_max_cards,
-                surface_cache_pass_->GetGridOffsetsBuffer(),
-                surface_cache_pass_->GetGridCardsBuffer());
+                surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
         }
 
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            // X2/A3: SC→DDGI trace 注入走统一 Cache View
             ddgi_pass_->SetSurfaceCacheResources(
-                surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
-                surface_cache_pass_->GetCardLookupBuffer(),
-                surface_cache_pass_->GetCardDataBuffer(),
-                settings_.lumen.surface_cache_atlas_size,
-                surface_cache_pass_->GetCardGenerator().GetLookupCount(),
-                surface_cache_pass_->GetGridOffsetsBuffer(),
-                surface_cache_pass_->GetGridCardsBuffer());
+                surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
         }
     }
 
@@ -1503,13 +1494,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // T2.2: DDGI probe fallback for miss rays (hist slot — one frame
         // behind, no read/write race with this frame's DDGI update).
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-            const auto& dp = ddgi_pass_->GetParams();
-            const auto& dv = ddgi_pass_->GetVolumeData();
+            // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
             screen_probe_pass_->SetDDGIFallbackData(
-                ddgi_pass_->GetIrradianceBuffer(static_cast<u32>(frameCount_ + 2) % 3),
-                math::v3{dv.ProbeOrigin.x, dv.ProbeOrigin.y, dv.ProbeOrigin.z},
-                math::v3{(float)dp.probe_count_x, (float)dp.probe_count_y, (float)dp.probe_count_z},
-                dp.probe_spacing);
+                ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
         }
         auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
         auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
@@ -1553,6 +1540,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         GIGatherInputs giIn;
         giIn.ddgi_pass = ddgi_pass_.get();
         giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
+        // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
+        giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
+            ? ddgi_volumes_[1]->GetVolumeView((cbIdx + 2) % 3) : lumen::DDGIVolumeView{};
         giIn.static_probe_volume = static_probe_volume_.get();
         giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
         giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -2029,24 +2019,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
             scLightingRG = graph.ImportResource("SCLightingAtlas", surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+                // X2/A3: SC→DDGI trace 注入走统一 Cache View
                 ddgi_pass_->SetSurfaceCacheResources(
-                    surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
-                    surface_cache_pass_->GetCardLookupBuffer(),
-                    surface_cache_pass_->GetCardDataBuffer(),
-                    settings_.lumen.surface_cache_atlas_size,
-                    surface_cache_pass_->GetCardGenerator().GetLookupCount(),
-                    surface_cache_pass_->GetGridOffsetsBuffer(),
-                    surface_cache_pass_->GetGridCardsBuffer());
+                    surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
             }
             if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+                // X2/A3: SC 数据走统一 Cache View（atlas_size/cardCount 与旧
+                // settings 传值同源，上传逐字节等价）
                 screen_probe_pass_->SetSurfaceCacheData(
-                    surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)),
-                    surface_cache_pass_->GetCardDataBuffer(),
-                    surface_cache_pass_->GetCardLookupBuffer(),
-                    settings_.lumen.surface_cache_atlas_size,
-                    settings_.lumen.surface_cache_max_cards,
-                    surface_cache_pass_->GetGridOffsetsBuffer(),
-                    surface_cache_pass_->GetGridCardsBuffer());
+                    surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
             }
         }
 
@@ -2100,6 +2081,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             GIGatherInputs giIn;
             giIn.ddgi_pass = ddgi_pass_.get();
             giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
+            // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
+            giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
+                ? ddgi_volumes_[1]->GetVolumeView((cbIdx + 2) % 3) : lumen::DDGIVolumeView{};
             giIn.static_probe_volume = static_probe_volume_.get();
             giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
             giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -2145,13 +2129,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
             // T2.2: DDGI probe fallback for miss rays
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-                const auto& dp = ddgi_pass_->GetParams();
-                const auto& dv = ddgi_pass_->GetVolumeData();
+                // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
                 screen_probe_pass_->SetDDGIFallbackData(
-                    ddgi_pass_->GetIrradianceBuffer(static_cast<u32>(frameCount_ + 2) % 3),
-                    math::v3{dv.ProbeOrigin.x, dv.ProbeOrigin.y, dv.ProbeOrigin.z},
-                    math::v3{(float)dp.probe_count_x, (float)dp.probe_count_y, (float)dp.probe_count_z},
-                    dp.probe_spacing);
+                    ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
             }
             auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
             auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());

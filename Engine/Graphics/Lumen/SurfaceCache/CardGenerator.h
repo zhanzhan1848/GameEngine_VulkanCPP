@@ -26,6 +26,9 @@ public:
     rhi::ResourceHandle GetGridCardsBuffer() const { return grid_cards_buffer_; }
     uint32_t GetCardCount() const { return card_count_; }
     uint32_t GetLookupCount() const { return static_cast<uint32_t>(meshes_.size()); }
+    // X2/A3: 配置容量（== LumenConfig::surface_cache_max_cards）。旧 SPGI 注入点
+    // 上传的 cardCount 是该容量值；SurfaceCacheView 同时携带活跃值与容量。
+    uint32_t GetMaxCardCount() const { return max_cards_; }
     const std::vector<SurfaceCacheCard>& GetCards() const { return cards_; }
     const std::vector<SurfaceCacheCardLookup>& GetLookups() const { return lookups_; }
 

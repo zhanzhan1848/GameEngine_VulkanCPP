@@ -206,6 +206,16 @@ ScreenProbeGIPass::~ScreenProbeGIPass() {
     Shutdown();
 }
 
+// X2/A3: 时域策略映射 —— EMA 即现有 temporal accumulation alpha 路径（默认，
+// 行为不变）；EMAVarianceClamp/Reprojection 暂存枚举（TODO X3 完整实现）。
+void ScreenProbeGIPass::SetTemporalStrategy(GITemporalStrategy strategy) {
+    if (temporal_strategy_ == strategy) return;
+    temporal_strategy_ = strategy;
+    std::cout << "[ScreenProbeGI] Temporal strategy -> "
+              << GITemporalStrategyName(strategy)
+              << " (EMA path unchanged; full mapping lands in X3)" << std::endl;
+}
+
 bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
                                     u32 render_width, u32 render_height,
                                     const ScreenProbeParams& params) {

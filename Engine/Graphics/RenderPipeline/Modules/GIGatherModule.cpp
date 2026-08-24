@@ -179,6 +179,14 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             auto cmd = context.cmdBuffer;
             auto ddgi = inputs.ddgi_pass;
 
+            // X2/A3: 远场 volume 数据优先走 view；view 未填时回退旧 pass 指针
+            // 路径。两条来源字段一致（origin/counts/spacing/irradiance 同源同
+            // 槽位），CB 上传与 barrier/descriptor 取数逐字节等价。
+            lumen::DDGIVolumeView farView = inputs.far_volume_view;
+            if (!farView.IsValid() && inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized()) {
+                farView = inputs.ddgi_far_pass->GetVolumeView(ddgiReadIdx);
+            }
+
             // Upload GIGatherCB
             {
                 math::m4x4 vp = inputs.proj_matrix * inputs.view_matrix;
@@ -196,15 +204,14 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             }
 
             // T4.4: upload far-volume params (origin+spacing / counts / flags)
+            // X2/A3: 数据源改为 farView（view 优先、pass 兜底），上传值不变。
             {
                 auto* fb = static_cast<math::v4*>(device_->MapBuffer(far_cb_));
                 if (fb) {
                     memset(fb, 0, 64);
-                    if (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized()) {
-                        const auto& fvol = inputs.ddgi_far_pass->GetVolumeData();
-                        const auto& fp = inputs.ddgi_far_pass->GetParams();
-                        fb[0] = math::v4{fvol.ProbeOrigin.x, fvol.ProbeOrigin.y, fvol.ProbeOrigin.z, fp.probe_spacing};
-                        fb[1] = math::v4{(float)fp.probe_count_x, (float)fp.probe_count_y, (float)fp.probe_count_z, 1.0f}; // w = enabled
+                    if (farView.IsValid()) {
+                        fb[0] = math::v4{farView.origin.x, farView.origin.y, farView.origin.z, farView.spacing};
+                        fb[1] = math::v4{farView.counts.x, farView.counts.y, farView.counts.z, 1.0f}; // w = enabled
                     }
                     device_->UnmapBuffer(far_cb_);
                 }
@@ -262,10 +269,9 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     barriers[bc].subresource = 0xFFFFFFFF;
                     bc++;
                 }
-                // T4.4: far volume irradiance
-                if (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized() &&
-                    inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx) != handles::INVALID_RESOURCE) {
-                    barriers[bc].resource = inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx);
+                // T4.4: far volume irradiance (X2/A3: 取数改走 farView，句柄同源)
+                if (farView.IsValid() && farView.irradiance != handles::INVALID_RESOURCE) {
+                    barriers[bc].resource = farView.irradiance;
                     barriers[bc].beforeState = ResourceState::UnorderedAccess;
                     barriers[bc].afterState = ResourceState::ShaderResource;
                     barriers[bc].subresource = 0xFFFFFFFF;
@@ -369,8 +375,9 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 farWrites[1].descriptorCount = 1;
                 farWrites[1].descriptorType = DescriptorType::StorageBuffer;
                 farWrites[1].bufferInfo = &farInfos[1];
-                ResourceHandle farIrr = (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized())
-                    ? inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx) : dummy_buffer_;
+                // X2/A3: 远场 irradiance 句柄改走 farView（view 优先、pass 兜底）。
+                ResourceHandle farIrr = (farView.IsValid() && farView.irradiance != handles::INVALID_RESOURCE)
+                    ? farView.irradiance : dummy_buffer_;
                 if (farIrr == handles::INVALID_RESOURCE) farIrr = dummy_buffer_;
                 farInfos[1].buffer = farIrr; farInfos[1].offset = 0; farInfos[1].range = ~0ull;
                 device_->UpdateDescriptorSets(2, farWrites);

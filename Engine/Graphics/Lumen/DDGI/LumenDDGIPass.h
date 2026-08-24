@@ -5,6 +5,7 @@
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/Dawn/DawnDebugParams.h"
 #include "Graphics/Lumen/GIDebugParams.h"
+#include "Graphics/Lumen/GICacheView.h"
 #include <vector>
 
 namespace primal::graphics::rhi {
@@ -169,6 +170,27 @@ public:
     const DDGIRuntimeParams& GetParams() const { return params_; }
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
 
+    // X2/A3: 统一 Cache View —— 消费者（SPGI 回退、GIGather 远场）从这里取
+    // volume 数据快照，不再逐个摸 pass 内部 getter。irradiance 取
+    // frame_idx % 3 槽位；origin/counts/spacing 与旧上传字段逐一对应。
+    DDGIVolumeView GetVolumeView(u32 frame_idx) const {
+        DDGIVolumeView view;
+        view.irradiance = irradiance_buffers_[frame_idx % 3];
+        view.origin = math::v3{ volume_data_.ProbeOrigin.x,
+                                volume_data_.ProbeOrigin.y,
+                                volume_data_.ProbeOrigin.z };
+        view.counts = math::v3{ static_cast<float>(params_.probe_count_x),
+                                static_cast<float>(params_.probe_count_y),
+                                static_cast<float>(params_.probe_count_z) };
+        view.spacing = params_.probe_spacing;
+        return view;
+    }
+
+    // X2/A3: 时域策略映射 —— EMA 即现有 irradiance/depth EMA（默认，行为
+    // 不变）；EMAVarianceClamp/Reprojection 暂等同 EMA（TODO X3 落地完整实现）。
+    void SetTemporalStrategy(GITemporalStrategy strategy);
+    GITemporalStrategy GetTemporalStrategy() const { return temporal_strategy_; }
+
     // T4.1: runtime probe-update budget (GIAdaptiveGovernor). Applied at the
     // next AddPass — CPU-side only, no reallocation.
     void SetMaxProbesPerFrame(u32 n) {
@@ -221,6 +243,12 @@ public:
     // pair (T1.3) is optional — Vulkan finalize uses it for O(1) card lookup;
     // without it the buffer handles stay INVALID and shaders fall back to the
     // 0xFFFFFFFF cell sentinel (no SC card sampling).
+    //
+    // X2/A3: 视图签名（推荐）—— 从 SurfaceCachePass::GetCacheView() 直传。
+    void SetSurfaceCacheResources(const SurfaceCacheView& view);
+
+    // DEPRECATED (X2/A3): 旧 7 参签名保留为转发适配器，等价映射进视图签名，
+    // 避免破坏未知调用点（TestNaniteStreamingPipeline 等）。
     void SetSurfaceCacheResources(
         rhi::ResourceHandle lighting_atlas,
         rhi::ResourceHandle card_lookup_buffer,
@@ -228,7 +256,17 @@ public:
         u32 atlas_size,
         u32 lookup_count,
         rhi::ResourceHandle grid_offsets_buffer = rhi::handles::INVALID_RESOURCE,
-        rhi::ResourceHandle grid_cards_buffer = rhi::handles::INVALID_RESOURCE);
+        rhi::ResourceHandle grid_cards_buffer = rhi::handles::INVALID_RESOURCE) {
+        SurfaceCacheView view;
+        view.lighting_atlas = lighting_atlas;
+        view.card_lookup = card_lookup_buffer;
+        view.card_data = card_data_buffer;
+        view.grid_offsets = grid_offsets_buffer;
+        view.grid_cards = grid_cards_buffer;
+        view.atlas_size = atlas_size;
+        view.lookup_count = lookup_count;
+        SetSurfaceCacheResources(view);
+    }
 
     // Clear Surface Cache resources — call when leaving SC mode to prevent
     // DDGI finalize from reading stale SC card data and racing with the
@@ -262,6 +300,7 @@ private:
     math::v3          probe_origin_{ 0.0f };
     math::v3          last_snapped_cam_{ 0.0f };  // last camera position snapped to grid
     int               relocation_shift_[3]{ 0, 0, 0 };  // current frame grid shift (probe cells)
+    GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;   // X2/A3 枚举存储（EMA=现状）
 
     // Compute pipelines (3 sub-passes)
     rhi::PipelineHandle trace_pipeline_{ rhi::handles::INVALID_PIPELINE };

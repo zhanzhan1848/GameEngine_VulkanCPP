@@ -1003,37 +1003,43 @@ sky_estimate:
 // Surface Cache integration
 // ============================================================================
 
-void LumenDDGIPass::SetSurfaceCacheResources(
-    ResourceHandle lighting_atlas,
-    ResourceHandle card_lookup_buffer,
-    ResourceHandle card_data_buffer,
-    u32 atlas_size,
-    u32 lookup_count,
-    ResourceHandle grid_offsets_buffer,
-    ResourceHandle grid_cards_buffer)
+// X2/A3: 视图签名实现（旧 7 参签名在头文件内转发到此）。
+// 字段映射与旧实现逐一相同——上传数据（DDGIVolumeData 的 SCLookupCount/
+// SCAtlasSize）与 sc_enabled_ 判定逐字节等价。
+void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
 {
-    sc_lighting_atlas_ = lighting_atlas;
-    sc_card_lookup_buffer_ = card_lookup_buffer;
-    sc_card_data_buffer_ = card_data_buffer;
-    sc_atlas_size_ = atlas_size;
-    sc_lookup_count_ = lookup_count;
-    sc_grid_offsets_buffer_ = grid_offsets_buffer;
-    sc_grid_cards_buffer_ = grid_cards_buffer;
+    sc_lighting_atlas_ = view.lighting_atlas;
+    sc_card_lookup_buffer_ = view.card_lookup;
+    sc_card_data_buffer_ = view.card_data;
+    sc_atlas_size_ = view.atlas_size;
+    sc_lookup_count_ = view.lookup_count;
+    sc_grid_offsets_buffer_ = view.grid_offsets;
+    sc_grid_cards_buffer_ = view.grid_cards;
 
     // Store SC params in DDGIVolumeData (triple-buffered, confirmed working)
     // instead of a separate sc_params buffer (binding 6 was not working).
-    volume_data_.SCLookupCount = lookup_count;
-    volume_data_.SCAtlasSize = atlas_size;
+    volume_data_.SCLookupCount = view.lookup_count;
+    volume_data_.SCAtlasSize = view.atlas_size;
 
-    sc_enabled_ = (lighting_atlas != handles::INVALID_RESOURCE &&
-                   card_lookup_buffer != handles::INVALID_RESOURCE &&
-                   card_data_buffer != handles::INVALID_RESOURCE &&
-                   lookup_count > 0);
+    sc_enabled_ = (view.lighting_atlas != handles::INVALID_RESOURCE &&
+                   view.card_lookup != handles::INVALID_RESOURCE &&
+                   view.card_data != handles::INVALID_RESOURCE &&
+                   view.lookup_count > 0);
 
     if (sc_enabled_) {
-        std::cout << "[LumenDDGI] Surface Cache enabled: atlas_size=" << atlas_size
-                  << ", lookup_count=" << lookup_count << std::endl;
+        std::cout << "[LumenDDGI] Surface Cache enabled: atlas_size=" << view.atlas_size
+                  << ", lookup_count=" << view.lookup_count << std::endl;
     }
+}
+
+// X2/A3: 时域策略映射 —— EMA 即现有 irradiance/depth EMA（默认，行为不变）；
+// EMAVarianceClamp/Reprojection 当前无独立代码路径，暂存枚举（TODO X3）。
+void LumenDDGIPass::SetTemporalStrategy(GITemporalStrategy strategy) {
+    if (temporal_strategy_ == strategy) return;
+    temporal_strategy_ = strategy;
+    std::cout << "[LumenDDGI] Temporal strategy -> "
+              << GITemporalStrategyName(strategy)
+              << " (EMA path unchanged; full mapping lands in X3)" << std::endl;
 }
 
 void LumenDDGIPass::ClearSurfaceCacheResources() {
