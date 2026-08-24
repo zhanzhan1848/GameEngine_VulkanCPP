@@ -35,7 +35,7 @@ struct LumenConfig {
     u32 ddgi_probe_count_x = 32;
     u32 ddgi_probe_count_y = 16;
     u32 ddgi_probe_count_z = 32;
-    u32 ddgi_rays_per_probe = 128;   // T4.2: 64→128 — L2 SH stability; UpdateIrradiance strides rays across 64 threads
+    u32 ddgi_rays_per_probe = 64;    // T4.2 note: 128 blocked — ddgi_trace_sdf/finalize kernels are 64-rays-per-probe (8x8 groups); striding required before re-bump
     float ddgi_probe_spacing = 2.0f;
     float ddgi_irradiance_temporal_weight = 0.02f;
     float ddgi_depth_temporal_weight = 0.2f;
