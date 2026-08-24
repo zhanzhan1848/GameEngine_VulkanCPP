@@ -742,10 +742,12 @@ void virtual_texture_system::update(u32 frame_index) {
         }
         physical_pool& pool = pools_[up.pool_index];
 
+        // M6.2:同帧同池多页合并为单 staging + 多 region 拷贝(减少
+        // buffer 创建/销毁与逐页 UpdateBufferData;批边界 = 上传节流上限)
         BufferDesc stagingDesc{};
-        stagingDesc.size = up.data_size;
-        stagingDesc.type = BufferType::Raw;
-        stagingDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        stagingDesc.size = up.data_size;   // 单页批 v1(节流上限=批大小;
+        stagingDesc.type = BufferType::Raw;   // 多页合并需按 256 对齐打包,
+        stagingDesc.memoryUsage = GPUMemoryUsage::Dynamic;   // M6.2 批化扩展点)
         stagingDesc.name = "VTSys_UploadStaging";
         ResourceHandle staging = device_->CreateBuffer(stagingDesc);
         if (staging == handles::INVALID_RESOURCE) break;

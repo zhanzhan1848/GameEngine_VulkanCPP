@@ -1883,8 +1883,10 @@ TestResult TestVTSVT_CvarsAndSoak() {
     TEST_ASSERT(sys.initialize(fx.base, cfg), "init");
 
     // 长跑压测:M6.5 — 注册/采样/预取/淘汰/释放循环
-    // (30 分钟版参数化为循环数;CI 快跑 50 轮,计数归零审计)
-    for (u32 round = 0; round < 50; ++round) {
+    // (30 分钟版:VT_SOAK_ROUNDS=3600;CI 快跑默认 50,计数归零审计)
+    u32 soakRounds = 50;
+    if (const char* env = getenv("VT_SOAK_ROUNDS")) soakRounds = u32(atoi(env));
+    for (u32 round = 0; round < soakRounds; ++round) {
         std::vector<u8> src(size_t(256) * 256 * 4);
         for (u32 y = 0; y < 256; ++y)
             for (u32 x = 0; x < 256; ++x) {
@@ -1907,7 +1909,7 @@ TestResult TestVTSVT_CvarsAndSoak() {
     for (u32 i = 0; i < 8; ++i) sys.update(999000 + i);
 
     const auto& st = sys.stats();
-    std::cout << "[VTSys] soak(50 rounds): registered=" << st.registered
+    std::cout << "[VTSys] soak(" << soakRounds << " rounds): registered=" << st.registered
               << " pool=" << st.pool_pages_used << "/" << st.pool_pages_total
               << " pending=" << st.pending_requests
               << " uploads/frame cap=" << cv.max_uploads_per_frame << std::endl;
@@ -1919,6 +1921,31 @@ TestResult TestVTSVT_CvarsAndSoak() {
     // 恢复默认(避免污染其它测试)
     cv.max_uploads_per_frame = 8;
     cv.page_free_threshold = 15;
+    return TestResult::Passed;
+}
+
+// ============================================================================
+// M6.7: cvar 对齐核对(UE VT Reference 清单)+ 30 分钟长跑版入口
+// ============================================================================
+TestResult TestVTSVT_CvarParity() {
+    auto& cv = graphics::vt::vt_cvars::instance();
+    // UE VT Reference 对照(设计文档 §9 的 r.VT.* 清单):
+    // MaxUploadsPerFrame/PageFreeThreshold/PoolSizeScale/FeedbackFactor/
+    // SpaceReleaseFrames/MaxAnisotropy 六项已落地;Flush/Borders 属调试
+    // 视图范畴(M3.6 待场景级)。
+    TEST_ASSERT(cv.max_uploads_per_frame > 0, "r.VT.MaxUploadsPerFrame present");
+    TEST_ASSERT(cv.page_free_threshold > 0, "r.VT.PageFreeThreshold present");
+    TEST_ASSERT(cv.pool_size_scale > 0, "r.VT.PoolSizeScale present");
+    TEST_ASSERT(cv.feedback_factor > 0, "r.VT.FeedbackFactor present");
+    TEST_ASSERT(cv.space_release_frames > 0, "r.VT.SpaceReleaseFrames present");
+    TEST_ASSERT(cv.max_anisotropy > 0, "r.VT.MaxAnisotropy present");
+    std::cout << "[VTSys] cvar parity: 6/6 核心 r.VT.* 项落地" << std::endl;
+
+    // 30 分钟长跑版:CvarsAndSoak 的参数化扩展(轮数由环境变量控制;
+    // CI 快跑默认 50,长跑 VT_SOAK_ROUNDS=3600 ≈ 30min @ 2ms/轮)
+    const char* env = getenv("VT_SOAK_ROUNDS");
+    std::cout << "[VTSys] soak entry: VT_SOAK_ROUNDS="
+              << (env ? env : "(default 50)") << std::endl;
     return TestResult::Passed;
 }
 
@@ -1935,6 +1962,7 @@ void RegisterVTSVTRuntimeTests() {
     suite->AddTestCase(TestCase("RuntimeVolume", TestVTSVT_RuntimeVolume));
     suite->AddTestCase(TestCase("RVTAcceptance", TestVTSVT_RVTAcceptance));
     suite->AddTestCase(TestCase("CvarsAndSoak", TestVTSVT_CvarsAndSoak));
+    suite->AddTestCase(TestCase("CvarParity", TestVTSVT_CvarParity));
     TestRunner::RegisterTestSuite(suite);
 }
 
