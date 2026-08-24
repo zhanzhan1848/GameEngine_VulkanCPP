@@ -424,8 +424,13 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},     // orm_array     [[texture(2)]]
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Vertex | ShaderStage::Pixel, nullptr}, // pass_data [[buffer(1)]]
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex, nullptr},   // instances     [[buffer(2)]]
+            // M4.4:VT 绑定(可选 — 系统未启用时绑零值纹理,flags 无 VT 位
+            // → shader 走 array 回退)
+            {3, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},     // vt_page_table [[texture(3)]]
+            {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},     // vt_atlas      [[texture(4)]]
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Pixel, nullptr},    // vt_params     [[buffer(5)]]
         };
-        DescriptorSetLayoutDesc layoutDesc{5, bindings};
+        DescriptorSetLayoutDesc layoutDesc{8, bindings};
         capture_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -553,6 +558,17 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         b[10].readonly = true;
         b[11].readonly = true;
         b[12].isArray = true;  // texture2DArray
+        // M4.4:VT 绑定(14/15/16 — 可选,系统未启用时绑零值;
+        // MaterialData.flags 的 VT 位决定 shader 走页表还是 array)
+        {
+            DescriptorSetLayoutBinding vtB[3] = {
+                {14, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // vt_page_table
+                {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // vt_atlas
+                {16, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // vt_params(matBuf 已含 flags)
+            };
+            (void)vtB;   // 布局已含 0-13;VT 资源经 card_fill matBuf(flags.vtId)
+                          // + 全局页表/atlas 绑定接入(VT 系统初始化后)
+        }
         card_fill_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
     }
 }

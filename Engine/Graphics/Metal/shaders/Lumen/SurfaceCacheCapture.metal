@@ -72,6 +72,51 @@ static float4 sampleAlbedo(uint mid, float2 uv, texture2d_array<float> tex) {
     return tex.sample(s, uv, mid);
 }
 
+// M4.4: VT 两段式采样 — 页表 read + 物理 atlas 采样。
+// material_id → VT 参数表索引;未启用 VT 的材质(vtParams[mid].flags 无
+// VT 位)回退 texture array 路径。
+struct VTMaterialGPUParams {
+    uint32_t flags;          // bit0 = VT;bits[4:8) = vtId
+    uint32_t pages_top;
+    uint32_t pt_origin_x;
+    uint32_t pt_origin_y;
+    float    avg_color;
+    float    pad[3];
+};
+
+static float4 sampleAlbedoVT(
+    uint mid, float2 uv,
+    texture2d_array<float> fallback_array,
+    texture2d<uint, access::sample> page_table,
+    texture2d<float, access::sample> atlas,
+    constant VTMaterialGPUParams* vtParams,
+    float atlas_inv,
+    float tile_size)
+{
+    constant VTMaterialGPUParams& mp = vtParams[mid];
+    if ((mp.flags & 0x1u) == 0u) {
+        // 非 VT 材质 — 原 texture array 路径
+        constexpr sampler s(coord::normalized, filter::linear, address::repeat);
+        return fallback_array.sample(s, uv, mid);
+    }
+    // 两段式:页表条目(R 通道 = 层 0/albedo)
+    const uint s_grid = max(mp.pages_top, 1u);
+    const float2 f = saturate(uv) * float(s_grid);
+    const uint2 vPage = uint2(min(f, float2(s_grid - 1u)));
+    const uint entry = page_table.read(ushort2(mp.pt_origin_x + vPage.x,
+                                               mp.pt_origin_y + vPage.y), 0).r;
+    if ((entry & 1u) == 0u) {
+        return float4(mp.avg_color);   // 平均色兜底
+    }
+    const uint ox = (entry >> 8) & 0x7FFu;
+    const uint oy = (entry >> 19) & 0x7FFu;
+    const float2 frac = f - float2(vPage);
+    const float2 pUV = (float2(float(ox), float(oy)) + 4.0f + frac * tile_size)
+                     * atlas_inv;
+    constexpr sampler vs(coord::normalized, filter::linear, address::clamp_to_edge);
+    return atlas.sample(vs, pUV);
+}
+
 struct CaptureOutput {
     float4 albedo  [[color(0)]];
     float4 normal  [[color(1)]];
@@ -84,10 +129,18 @@ fragment CaptureOutput surfaceCacheCaptureFS(
     texture2d_array<float> albedo_array [[texture(0)]],
     texture2d_array<float> normal_array [[texture(1)]],
     texture2d_array<float> orm_array    [[texture(2)]],
-    constant CapturePassData& pass      [[buffer(1)]])
+    constant CapturePassData& pass      [[buffer(1)]],
+    // M4.4: VT 绑定(可选 — VT 系统启用时由管线写入;未启用时为零值,
+    // flags 无 VT 位 → 走 array 回退)
+    texture2d<uint, access::sample> vt_page_table [[texture(3)]],
+    texture2d<float, access::sample> vt_atlas     [[texture(4)]],
+    constant VTMaterialGPUParams* vt_params       [[buffer(5)]])
 {
     CaptureOutput out;
-    out.albedo = sampleAlbedo(in.material_id, in.uv, albedo_array);
+    // M4.4:VT 两段式采样(VT 材质走页表+atlas,非 VT 走 array)
+    out.albedo = sampleAlbedoVT(in.material_id, in.uv, albedo_array,
+                                vt_page_table, vt_atlas, vt_params,
+                                1.0f / 2048.0f, 128.0f);
 
     float3 wn = normalize(in.world_normal);
     out.normal = float4(octEncode(wn), 0.0, 1.0);
