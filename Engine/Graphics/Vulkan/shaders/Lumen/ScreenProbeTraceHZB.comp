@@ -1,0 +1,145 @@
+#version 450 core
+// T5.1: SPGI hybrid trace — near-field HZB march (dispatch 2a).
+// Entry point: screen_probe_trace_hzb
+// (glslangValidator --source-entrypoint main -e screen_probe_trace_hzb)
+//
+// Traces each probe ray through the screen-space HZB mip chain up to
+// hzb_params.w world units. Rays that hit get priority (sharp screen-space
+// detail); rays that miss fall through to the SDF far-field kernel (2b).
+//
+// Flat descriptor bindings:
+//   binding 0 = SampledImage  hzb_texture (R32F mip chain, min-reduced)
+//   binding 1 = StorageBuffer(ro) probePositions  (w>0 = active)
+//   binding 2 = StorageBuffer(ro) probeNormals
+//   binding 3 = StorageBuffer     hit_buffer (vec4 per ray, read-write)
+//   binding 4 = UniformBuffer    ScreenProbeGlobalData
+//
+// hit_buffer encoding: x = hit distance, yz = hit UV (HZB only), w = source
+//   (0 = miss/unresolved, 1 = HZB hit, 2 = SDF hit — written by 2b)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D hzb_texture;
+layout(set = 0, binding = 1) readonly buffer ProbePositionsBuf {
+    vec4 data[];
+} probePositions;
+layout(set = 0, binding = 2) readonly buffer ProbeNormalsBuf {
+    vec4 data[];
+} probeNormals;
+layout(set = 0, binding = 3) buffer HitBufferBuf {
+    vec4 data[];
+} hit_buffer;
+layout(set = 0, binding = 4, std140) uniform GlobalData {
+    mat4 view_projection;        // offset 0
+    mat4 inv_view_projection;    // offset 64
+    vec4 camera_position;        // offset 128
+    vec4 grid_params;            // offset 144: gridW, gridH, downsample, raysPerProbe
+    vec4 trace_params;           // offset 160: maxRayDist, gatherRadius, width, height
+    vec4 sdf_origins[3];
+    vec4 sdf_voxel_sizes[3];
+    vec4 sdf_extents[3];
+    vec4 sdf_resolutions;        // offset 320
+    vec4 surface_cache_params;   // offset 336
+    vec4 ddgi_fb[2];             // offset 352
+    vec4 hzb_params;             // offset 368: near, far, mip_levels, max_distance
+} global;
+
+#define MAX_HZB_STEPS 32u
+
+float hash1(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+// Fibonacci sphere direction + TBN orientation — MUST match
+// ScreenProbeTraceRays.comp byte-for-byte so every kernel generates the
+// same ray for the same global_id (hit_buffer is indexed by ray).
+#define PI_VAL 3.14159265358979
+#define GOLDEN_RATIO 1.61803398875
+
+vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
+    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
+    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
+    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+}
+
+vec3 orientAroundNormal(vec3 dir, vec3 normal) {
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
+}
+
+// Vulkan [0,1] NDC depth → linear view depth.
+float ndcToLinear(float ndcDepth, float nearPlane, float farPlane) {
+    return nearPlane * farPlane / (farPlane - ndcDepth * (farPlane - nearPlane));
+}
+
+void screen_probe_trace_hzb() {
+    uint global_id = gl_GlobalInvocationID.x;
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
+    uint raysPerProbe = uint(global.grid_params.w);
+    uint totalRays = gridW * gridH * raysPerProbe;
+    if (global_id >= totalRays) return;
+
+    // Default: unresolved.
+    hit_buffer.data[global_id] = vec4(-1.0, 0.0, 0.0, 0.0);
+
+    vec4 posData = probePositions.data[global_id / raysPerProbe];
+    if (posData.w <= 0.0) return;  // inactive probe — Average skips (-1 sentinel)
+    vec3 probeNormal = normalize(probeNormals.data[global_id / raysPerProbe].xyz);
+    vec3 probePos = posData.xyz;
+
+    uint rayIdx = global_id % raysPerProbe;
+    vec3 rayDir = orientAroundNormal(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
+
+    float near = global.hzb_params.x;
+    float far = global.hzb_params.y;
+    uint mipLevels = max(uint(global.hzb_params.z), 1u);
+    float maxDist = global.hzb_params.w;
+    if (maxDist <= 0.0) return;  // HZB disabled
+
+    float baseStep = maxDist / float(MAX_HZB_STEPS);
+    float t = 0.0;
+    uint mip = 1u;
+    float thickness = 0.3;
+
+    for (uint step = 0u; step < MAX_HZB_STEPS; ++step) {
+        float mipScale = float(1u << mip);
+        t += baseStep * mipScale;
+        if (t > maxDist) break;
+
+        vec3 world = origin + rayDir * t;
+        vec4 clip = global.view_projection * vec4(world, 1.0);
+        if (clip.w <= 0.0) break;
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;  // left screen
+
+        ivec2 mipSize = textureSize(hzb_texture, int(mip));
+        if (mipSize.x <= 0 || mipSize.y <= 0) break;
+        ivec2 mipCoord = clamp(ivec2(uv * vec2(mipSize)), ivec2(0), mipSize - ivec2(1));
+
+        float sceneNDC = texelFetch(hzb_texture, mipCoord, int(mip)).r;
+        float sceneLin = ndcToLinear(sceneNDC, near, far);
+        float rayLin = ndcToLinear(ndc.z, near, far);
+
+        if (rayLin > sceneLin) {
+            if (mip == 0u) {
+                if (rayLin <= sceneLin + thickness) {
+                    hit_buffer.data[global_id] = vec4(t, uv.x, uv.y, 1.0);
+                    return;
+                }
+                // Passed through — keep marching at mip 0.
+            } else {
+                t -= baseStep * mipScale;
+                mip--;
+            }
+        } else {
+            mip = min(mip + 1u, mipLevels - 1u);
+        }
+    }
+}

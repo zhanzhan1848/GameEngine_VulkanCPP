@@ -1516,8 +1516,15 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         spCam.camera_position = camera_position_;
         spCam.frame_index = static_cast<u32>(frameCount_);
 
+        // T5.1: HZB near-field input for the hybrid split trace.
+        RGResourceHandle spHzb;
+        if (hzb_system_) {
+            spHzb = graph.ImportResource("HZBTexture_SPGI", hzb_system_->GetHZBTexture());
+            screen_probe_pass_->SetHZBData(hzb_system_->GetHZBTexture(),
+                                           hzb_system_->GetMipLevels());
+        }
         spgiOut = screen_probe_pass_->AddPass(graph, spDepth, spNormal,
-            spRadiance, spCam, static_cast<u32>(frameCount_));
+            spRadiance, spCam, static_cast<u32>(frameCount_), spHzb);
     }
 
     // ========================================================================
@@ -2142,8 +2149,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             spCam.camera_position = camera_position_;
             spCam.frame_index = static_cast<u32>(frameCount_);
 
+            // T5.1: HZB near-field input for the hybrid split trace.
+            RGResourceHandle spHzb;
+            if (hzb_system_) {
+                spHzb = graph.ImportResource("HZBTexture_SPGI", hzb_system_->GetHZBTexture());
+                screen_probe_pass_->SetHZBData(hzb_system_->GetHZBTexture(),
+                                               hzb_system_->GetMipLevels());
+            }
             spgiOut = screen_probe_pass_->AddPass(graph, spDepth, spNormal,
-                spRadiance, spCam, static_cast<u32>(frameCount_));
+                spRadiance, spCam, static_cast<u32>(frameCount_), spHzb);
         }
 
         // --- Volume (Froxel Fog or Ray March) ---

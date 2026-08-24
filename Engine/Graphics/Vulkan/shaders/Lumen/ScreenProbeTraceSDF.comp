@@ -1,0 +1,132 @@
+#version 450 core
+// T5.1: SPGI hybrid trace — far-field GlobalSDF march (dispatch 2b).
+// Entry point: screen_probe_trace_sdf
+// (glslangValidator --source-entrypoint main -e screen_probe_trace_sdf)
+//
+// Pure texture3D + probe-buffer reads (mirrors the proven ddgi_trace_sdf
+// split pattern): no texture2D in this kernel. Rays already resolved by the
+// HZB near-field kernel (hit_buffer.w == 1.0) are skipped.
+//
+// Flat descriptor bindings:
+//   binding 0-2 = SampledImage  sdf0/sdf1/sdf2 (texture3D, R32F)
+//   binding 3   = StorageBuffer(ro) probePositions
+//   binding 4   = StorageBuffer(ro) probeNormals
+//   binding 5   = StorageBuffer     hit_buffer (vec4 per ray, read-write)
+//   binding 6   = UniformBuffer    ScreenProbeGlobalData
+//
+// hit_buffer encoding: x = hit distance, yz = hit UV, w = source
+//   (0 = miss, 1 = HZB hit [untouched here], 2 = SDF hit)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture3D sdf0;
+layout(set = 0, binding = 1) uniform texture3D sdf1;
+layout(set = 0, binding = 2) uniform texture3D sdf2;
+
+layout(set = 0, binding = 3) readonly buffer ProbePositionsBuf {
+    vec4 data[];
+} probePositions;
+layout(set = 0, binding = 4) readonly buffer ProbeNormalsBuf {
+    vec4 data[];
+} probeNormals;
+layout(set = 0, binding = 5) buffer HitBufferBuf {
+    vec4 data[];
+} hit_buffer;
+layout(set = 0, binding = 6, std140) uniform GlobalData {
+    mat4 view_projection;
+    mat4 inv_view_projection;
+    vec4 camera_position;
+    vec4 grid_params;
+    vec4 trace_params;
+    vec4 sdf_origins[3];
+    vec4 sdf_voxel_sizes[3];
+    vec4 sdf_extents[3];
+    vec4 sdf_resolutions;
+    vec4 surface_cache_params;
+    vec4 ddgi_fb[2];
+    vec4 hzb_params;
+} global;
+
+#define PI_VAL 3.14159265358979
+#define GOLDEN_RATIO 1.61803398875
+#define MAX_SDF_STEPS 32u
+
+vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
+    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
+    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
+    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+}
+
+vec3 orientAroundNormal(vec3 dir, vec3 normal) {
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
+}
+
+float sampleSDFCascade(texture3D tex, vec4 originExt, vec4 res, vec3 pos) {
+    vec3 uvw = (pos - originExt.xyz) / originExt.w;
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) return 1e10;
+    ivec3 size = textureSize(tex, 0);
+    vec3 texel = uvw * vec3(size) - 0.5;
+    return texelFetch(tex, clamp(ivec3(texel), ivec3(0), size - ivec3(1)), 0).r;
+}
+
+// Nearest-cascade-first SDF sample (matches monolithic ScreenProbeTraceRays).
+float sampleBestSDF(vec3 pos) {
+    float d = sampleSDFCascade(sdf0, global.sdf_origins[0], global.sdf_resolutions, pos);
+    if (d > 1e9) d = sampleSDFCascade(sdf1, global.sdf_origins[1], global.sdf_resolutions, pos);
+    if (d > 1e9) d = sampleSDFCascade(sdf2, global.sdf_origins[2], global.sdf_resolutions, pos);
+    return d;
+}
+
+void screen_probe_trace_sdf() {
+    uint global_id = gl_GlobalInvocationID.x;
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
+    uint raysPerProbe = uint(global.grid_params.w);
+    uint totalRays = gridW * gridH * raysPerProbe;
+    if (global_id >= totalRays) return;
+
+    // HZB kernel already resolved this ray — keep its result.
+    if (hit_buffer.data[global_id].w == 1.0) return;
+
+    vec4 posData = probePositions.data[global_id / raysPerProbe];
+    if (posData.w <= 0.0) {
+        hit_buffer.data[global_id] = vec4(-1.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    vec3 probeNormal = normalize(probeNormals.data[global_id / raysPerProbe].xyz);
+    vec3 probePos = posData.xyz;
+
+    uint rayIdx = global_id % raysPerProbe;
+    vec3 rayDir = orientAroundNormal(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
+
+    float maxDist = global.trace_params.x;
+    float hitThreshold = global.sdf_voxel_sizes[0].x * 0.5;
+    float minStep = global.sdf_voxel_sizes[0].x * 0.25;
+
+    vec3 pos = origin;
+    float remainingDist = maxDist;
+    bool hit = false;
+    float hitDist = 0.0;
+
+    for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
+        float d = sampleBestSDF(pos);
+        if (d > 1e9) break;  // outside all cascades → miss
+        if (d < hitThreshold) { hit = true; hitDist = maxDist - remainingDist; break; }
+        float advance = (d > hitThreshold * 4.0) ? d * 1.2 : max(d, minStep);
+        if (advance > remainingDist) break;
+        pos += rayDir * advance;
+        remainingDist -= advance;
+    }
+
+    if (hit) {
+        hit_buffer.data[global_id] = vec4(hitDist, 0.0, 0.0, 2.0);
+    } else {
+        hit_buffer.data[global_id] = vec4(-1.0, 0.0, 0.0, 0.0);
+    }
+}

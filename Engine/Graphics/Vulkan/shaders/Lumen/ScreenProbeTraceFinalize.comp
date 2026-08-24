@@ -1,0 +1,227 @@
+#version 450 core
+// T5.1: SPGI hybrid trace — radiance finalize (dispatch 2c).
+// Entry point: screen_probe_trace_finalize
+// (glslangValidator --source-entrypoint main -e screen_probe_trace_finalize)
+//
+// Pure texture2D + buffer reads (mirrors ddgi_trace_finalize): no texture3D
+// in this kernel. Consumes the hit_buffer written by 2a (HZB near) and 2b
+// (SDF far):
+//   w == 1  → HZB hit: sample prev frame color at the hit UV (sharp
+//             screen-space detail — the whole point of the hybrid)
+//   w == 2  → SDF hit: near SC card grid (T1.3) → prev color projection
+//   w == 0  → miss: DDGI probe fallback (T2.2) → sky gradient
+//
+// Flat descriptor bindings:
+//   binding 0  = SampledImage  prevFrameColor
+//   binding 1  = SampledImage  surface_cache_lighting
+//   binding 2  = StorageBuffer(ro) probePositions
+//   binding 3  = StorageBuffer(ro) probeNormals
+//   binding 4  = StorageBuffer(ro) hit_buffer (vec4 per ray)
+//   binding 5  = UniformBuffer ScreenProbeGlobalData
+//   binding 6  = StorageBuffer    probeRadiance (vec4 per ray, write)
+//   binding 7  = StorageBuffer(ro) cards (SurfaceCacheCard[])
+//   binding 8  = StorageBuffer(ro) cardLookup
+//   binding 9  = StorageBuffer(ro) sc_grid_offsets (T1.3)
+//   binding 10 = StorageBuffer(ro) sc_grid_cards  (T1.3)
+//   binding 11 = StorageBuffer(ro) ddgi_irradiance (T2.2)
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D prevFrameColor;
+layout(set = 0, binding = 1) uniform texture2D surface_cache_lighting;
+
+layout(set = 0, binding = 2) readonly buffer ProbePositionsBuf {
+    vec4 data[];
+} probePositions;
+layout(set = 0, binding = 3) readonly buffer ProbeNormalsBuf {
+    vec4 data[];
+} probeNormals;
+layout(set = 0, binding = 4) readonly buffer HitBufferBuf {
+    vec4 data[];
+} hit_buffer;
+layout(set = 0, binding = 5, std140) uniform GlobalData {
+    mat4 view_projection;
+    mat4 inv_view_projection;
+    vec4 camera_position;
+    vec4 grid_params;
+    vec4 trace_params;
+    vec4 sdf_origins[3];
+    vec4 sdf_voxel_sizes[3];
+    vec4 sdf_extents[3];
+    vec4 sdf_resolutions;
+    vec4 surface_cache_params;
+    vec4 ddgi_fb[2];
+    vec4 hzb_params;
+} global;
+layout(set = 0, binding = 6) buffer ProbeRadianceBuf {
+    vec4 data[];
+} probeRadiance;
+
+layout(set = 0, binding = 7) readonly buffer CardsBuf {
+    SurfaceCacheCard data[];
+} cards;
+layout(set = 0, binding = 8) readonly buffer CardLookupBuf {
+    uint data[];
+} cardLookup;
+layout(set = 0, binding = 9) readonly buffer SCGridOffsetsBuf {
+    uint sc_grid_offsets[];
+} scgo;
+layout(set = 0, binding = 10) readonly buffer SCGridCardsBuf {
+    uint sc_grid_cards[];
+} scgc;
+layout(set = 0, binding = 11) readonly buffer DDGIIrradianceBuf {
+    vec4 ddgi_irradiance_vec4[];
+} ddgiIrr;
+
+#define PI_VAL 3.14159265358979
+#define GOLDEN_RATIO 1.61803398875
+
+vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
+    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
+    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
+    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+}
+
+vec3 orientAroundNormal(vec3 dir, vec3 normal) {
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
+}
+
+vec3 sampleBilinearRGB(texture2D tex, vec2 uv) {
+    vec2 size = vec2(textureSize(tex, 0));
+    vec2 px = uv * size - 0.5;
+    ivec2 p0 = ivec2(floor(px));
+    vec2 f = fract(px);
+
+    ivec2 c00 = clamp(p0,               ivec2(0), ivec2(size) - 1);
+    ivec2 c10 = clamp(p0 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
+    ivec2 c01 = clamp(p0 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
+    ivec2 c11 = clamp(p0 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
+
+    vec3 s00 = texelFetch(tex, c00, 0).rgb;
+    vec3 s10 = texelFetch(tex, c10, 0).rgb;
+    vec3 s01 = texelFetch(tex, c01, 0).rgb;
+    vec3 s11 = texelFetch(tex, c11, 0).rgb;
+
+    vec3 a = mix(s00, s10, f.x);
+    vec3 b = mix(s01, s11, f.x);
+    return mix(a, b, f.y);
+}
+
+vec3 samplePrevFrameColorAt(vec2 uv) {
+    return sampleBilinearRGB(prevFrameColor, uv);
+}
+
+vec3 samplePrevFrameColor(vec3 worldPos) {
+    vec4 clipPos = global.view_projection * vec4(worldPos, 1.0);
+    if (clipPos.w <= 0.0) return vec3(0.0);
+    vec2 ndc = clipPos.xy / clipPos.w;
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - ndc.y * 0.5 - 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec3(0.0);
+    return sampleBilinearRGB(prevFrameColor, uv);
+}
+
+void screen_probe_trace_finalize() {
+    uint global_id = gl_GlobalInvocationID.x;
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
+    uint raysPerProbe = uint(global.grid_params.w);
+    uint totalRays = gridW * gridH * raysPerProbe;
+    if (global_id >= totalRays) return;
+
+    uint probeIdx = global_id / raysPerProbe;
+    uint rayIdx   = global_id % raysPerProbe;
+
+    vec4 posData = probePositions.data[probeIdx];
+    vec4 normData = probeNormals.data[probeIdx];
+    if (posData.w <= 0.0) {
+        probeRadiance.data[global_id] = vec4(0.0, 0.0, 0.0, -1.0);
+        return;
+    }
+
+    vec3 probePos = posData.xyz;
+    vec3 probeNormal = normalize(normData.xyz);
+    vec3 rayDir = orientAroundNormal(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
+
+    vec4 hit = hit_buffer.data[global_id];
+    vec3 radiance = vec3(0.0);
+    float cosTheta = 0.0;
+
+    if (hit.w == 1.0) {
+        // HZB near-field hit — sharp screen-space radiance at the hit UV.
+        radiance = samplePrevFrameColorAt(hit.yz);
+        if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+        cosTheta = max(dot(probeNormal, rayDir), 0.0);
+    } else if (hit.w == 2.0) {
+        // SDF far-field hit — SC card grid (T1.3) for near hits, else project.
+        vec3 hitPos = origin + rayDir * hit.x;
+        bool usedSurfaceCache = false;
+        float nearDistance = 2.0;
+
+        if (hit.x < nearDistance && global.surface_cache_params.z > 0.5) {
+            float atlasSize = global.surface_cache_params.x;
+            uvec4 gh0 = uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
+                              scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]);
+            uvec4 gh1 = uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
+                              scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]);
+            uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
+                              scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
+            SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+            uint cell = scGridCellIndex(gp, hitPos);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = scgo.sc_grid_offsets[16u + cell];
+                uint end   = scgo.sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && !usedSurfaceCache; ++gi) {
+                    vec2 atlas_uv;
+                    if (worldToCardUV(hitPos, cards.data[scgc.sc_grid_cards[gi]], atlas_uv)) {
+                        vec2 uv_norm = atlas_uv / vec2(atlasSize);
+                        radiance = sampleBilinearRGB(surface_cache_lighting, uv_norm);
+                        usedSurfaceCache = true;
+                    }
+                }
+            }
+        }
+        if (!usedSurfaceCache) {
+            radiance = samplePrevFrameColor(hitPos);
+        }
+        if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+        cosTheta = max(dot(probeNormal, rayDir), 0.0);
+    } else {
+        // Miss → DDGI probe fallback (T2.2) → sky gradient.
+        if (global.ddgi_fb[1].w > 0.5) {
+            vec3 org = global.ddgi_fb[0].xyz;
+            float spacing = max(global.ddgi_fb[0].w, 0.01);
+            ivec3 counts = ivec3(global.ddgi_fb[1].xyz);
+            ivec3 gc = ivec3(floor((probePos - org) / spacing));
+            gc = clamp(gc, ivec3(0), counts - ivec3(1));
+            uint pidx = uint(gc.x) + uint(counts.x) * (uint(gc.y) + uint(counts.y) * uint(gc.z));
+            vec3 sh0 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 0u].xyz;
+            vec3 sh1 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 1u].xyz;
+            vec3 sh2 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 2u].xyz;
+            vec3 sh3 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 3u].xyz;
+            radiance = max(vec3(0.0),
+                0.282095 * sh0
+                - 0.488603 * sh1 * rayDir.y
+                + 0.488603 * sh2 * rayDir.z
+                - 0.488603 * sh3 * rayDir.x);
+            cosTheta = max(dot(probeNormal, rayDir), 0.0);
+        } else {
+            float skyWeight = max(dot(probeNormal, rayDir), 0.0);
+            if (skyWeight > 0.0) {
+                float skyY = rayDir.y * 0.5 + 0.5;
+                radiance = mix(vec3(0.15, 0.18, 0.25), vec3(0.4, 0.5, 0.65), skyY);
+                cosTheta = skyWeight;
+            }
+        }
+    }
+
+    probeRadiance.data[global_id] = vec4(radiance, cosTheta);
+}

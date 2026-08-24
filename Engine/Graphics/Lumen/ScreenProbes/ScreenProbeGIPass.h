@@ -24,6 +24,7 @@ struct ScreenProbeParams {
     u32   rays_per_probe    = 64;    // Rays per probe (64 for better directional coverage)
     float max_ray_distance  = 50.0f; // Maximum ray travel distance (world units)
     float gather_radius     = 2.0f;  // Bilateral filter radius in probe grid cells
+    float hzb_max_distance  = 12.0f; // T5.1: near-field HZB trace range (world units)
 };
 
 /// Per-frame camera data.
@@ -65,6 +66,10 @@ struct ScreenProbeGlobalData {
     // DDGI probe fallback (T2.2) — miss rays sample the DDGI probe grid
     // instead of a constant sky gradient (Lumen's world-probe fallback edge).
     math::v4   ddgi_fb[2];             // offset 352: [0]=probe origin.xyz + spacing, [1]=counts.xyz + enabled(0/1)
+
+    // T5.1 hybrid trace: near-field HZB march parameters
+    // (near/far match the SSGI/SSR convention: 0.1/1000)
+    math::v4   hzb_params;             // offset 368: x=near, y=far, z=mip_levels, w=hzb_max_distance
 };
 
 // ============================================================================
@@ -99,7 +104,8 @@ public:
         rendergraph::RGResourceHandle gbuffer_normal,
         rendergraph::RGResourceHandle prev_frame_color,
         const ScreenProbeCameraData& camera_data,
-        u32 current_frame_index);
+        u32 current_frame_index,
+        rendergraph::RGResourceHandle hzb_texture = rendergraph::RGResourceHandle{});  // T5.1 near-field
 
     bool IsInitialized() const { return initialized_; }
 
@@ -107,6 +113,13 @@ public:
     rhi::ResourceHandle GetOutputTexture() const { return output_texture_; }  // DEBUG: bypass denoise
 
     const ScreenProbeParams& GetParams() const { return params_; }
+
+    // T5.1: HZB near-field input (nanite::HZBSystem R32F min-mip chain).
+    // Call alongside AddPass's hzb RG handle; mip count feeds the march.
+    void SetHZBData(rhi::ResourceHandle hzb_texture, u32 mip_levels) {
+        hzb_texture_ = hzb_texture;
+        hzb_mip_levels_ = mip_levels;
+    }
 
     // Surface Cache integration
     void SetSurfaceCacheData(
@@ -158,8 +171,9 @@ private:
     // Compute pipelines (7 sub-passes + split trace)
     rhi::PipelineHandle place_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
-    rhi::PipelineHandle sdf_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
-    rhi::PipelineHandle finalize_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle hzb_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };   // T5.1 2a near-field
+    rhi::PipelineHandle sdf_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };   // T5.1 2b far-field
+    rhi::PipelineHandle finalize_pipeline_{ rhi::handles::INVALID_PIPELINE };    // T5.1 2c radiance
     rhi::PipelineHandle avg_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle temporal_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle spatial_pipeline_{ rhi::handles::INVALID_PIPELINE };
@@ -169,6 +183,7 @@ private:
     // Pipeline layouts
     rhi::PipelineLayoutHandle place_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle hzb_trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle sdf_trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle finalize_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle avg_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
@@ -180,6 +195,7 @@ private:
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle place_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle hzb_trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle sdf_trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle finalize_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle avg_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
@@ -193,6 +209,9 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle trace_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle hzb_trace_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
     rhi::DescriptorSetHandle sdf_trace_ds_[3]{
@@ -273,6 +292,10 @@ private:
     math::v3 ddgi_fb_counts_{ 0.0f };
     float ddgi_fb_spacing_ = 0.0f;
     bool ddgi_fallback_available_ = false;
+
+    // T5.1: HZB near-field input
+    rhi::ResourceHandle hzb_texture_{ rhi::handles::INVALID_RESOURCE };
+    u32 hzb_mip_levels_ = 0;
 };
 
 } // namespace primal::graphics::lumen

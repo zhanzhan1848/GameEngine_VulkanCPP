@@ -41,6 +41,9 @@ struct ScreenProbeGlobalData {
 
     // T2.2: DDGI probe fallback — [0]=probe origin.xyz + spacing, [1]=counts.xyz + enabled(0/1)
     float4   ddgi_fb[2];
+
+    // T5.1 hybrid trace: HZB near-field march params (near/far/mips/maxDist)
+    float4   hzb_params;
 };
 
 // ============================================================================
@@ -334,6 +337,86 @@ kernel void screen_probe_trace_rays(
 // Both use (64,1,1) threadgroups, 1D dispatch.
 // ============================================================================
 
+// ============================================================================
+// T5.1 2a: HZB near-field trace — texture2D (mip chain) + probe buffers only.
+// Resolved rays write (dist, hitUV.xy, 1); everything else stays unresolved.
+// ============================================================================
+kernel void screen_probe_trace_hzb(
+    texture2d<float, access::sample>  hzb_texture    [[texture(0)]],
+
+    device const float4*              probePositions [[buffer(0)]],
+    device const float4*              probeNormals   [[buffer(1)]],
+    device float4*                    hit_buffer     [[buffer(2)]],
+    constant ScreenProbeGlobalData&   global         [[buffer(3)]],
+
+    uint global_id [[thread_position_in_grid]])
+{
+    uint gridW = uint(global.grid_params.x);
+    uint gridH = uint(global.grid_params.y);
+    uint raysPerProbe = uint(global.grid_params.w);
+    uint totalRays = gridW * gridH * raysPerProbe;
+    if (global_id >= totalRays) return;
+
+    hit_buffer[global_id] = float4(-1.0f, 0.0f, 0.0f, 0.0f);
+
+    float4 posData = probePositions[global_id / raysPerProbe];
+    if (posData.w <= 0.0f) return;
+
+    float3 probeNormal = normalize(probeNormals[global_id / raysPerProbe].xyz);
+    uint rayIdx = global_id % raysPerProbe;
+    float3 rayDir = orientAroundNormal(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    float3 origin = posData.xyz + probeNormal * global.sdf_voxel_sizes[0].x * 2.0f;
+
+    float near = global.hzb_params.x;
+    float far  = global.hzb_params.y;
+    uint mipLevels = max(uint(global.hzb_params.z), 1u);
+    float maxDist = global.hzb_params.w;
+    if (maxDist <= 0.0f || global.hzb_params.z <= 0.0f) return;
+
+    constexpr uint MAX_HZB_STEPS = 32u;
+    float baseStep = maxDist / float(MAX_HZB_STEPS);
+    float t = 0.0f;
+    uint mip = 1u;
+    float thickness = 0.3f;
+
+    for (uint step = 0u; step < MAX_HZB_STEPS; ++step) {
+        float mipScale = float(1u << mip);
+        t += baseStep * mipScale;
+        if (t > maxDist) break;
+
+        float3 world = origin + rayDir * t;
+        float4 clip = global.view_projection * float4(world, 1.0f);
+        if (clip.w <= 0.0f) break;
+        float3 ndc = clip.xyz / clip.w;
+        float2 uv = float2(ndc.x * 0.5f + 0.5f, 1.0f - (ndc.y * 0.5f + 0.5f));
+        if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f) break;
+
+        constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
+        float sceneNDC = hzb_texture.sample(s, uv, level(float(mip))).r;
+        // Linearize both (Vulkan [0,1] NDC convention, matches the HZB chain).
+        float sceneLin = near * far / (far - sceneNDC * (far - near));
+        float rayLin   = near * far / (far - ndc.z * (far - near));
+
+        if (rayLin > sceneLin) {
+            if (mip == 0u) {
+                if (rayLin <= sceneLin + thickness) {
+                    hit_buffer[global_id] = float4(t, uv.x, uv.y, 1.0f);
+                    return;
+                }
+            } else {
+                t -= baseStep * mipScale;
+                mip--;
+            }
+        } else {
+            mip = min(mip + 1u, mipLevels - 1u);
+        }
+    }
+}
+
+// ============================================================================
+// T5.1 2b: SDF far-field trace — texture3D + probe buffers only. Skips rays
+// the HZB kernel already resolved (hit_buffer.w == 1).
+// ============================================================================
 kernel void screen_probe_trace_sdf(
     texture3d<float, access::sample>  sdf0          [[texture(0)]],
     texture3d<float, access::sample>  sdf1          [[texture(1)]],
@@ -341,7 +424,7 @@ kernel void screen_probe_trace_sdf(
 
     device const float4*              probePositions [[buffer(0)]],
     device const float4*              probeNormals   [[buffer(1)]],
-    device float*                     hit_distance_buffer [[buffer(2)]],
+    device float4*                    hit_buffer     [[buffer(2)]],
     constant ScreenProbeGlobalData&   global         [[buffer(3)]],
 
     uint global_id [[thread_position_in_grid]])
@@ -353,12 +436,15 @@ kernel void screen_probe_trace_sdf(
 
     if (global_id >= totalRays) return;
 
+    // HZB kernel already resolved this ray — keep its result.
+    if (hit_buffer[global_id].w == 1.0f) return;
+
     uint probeIdx = global_id / raysPerProbe;
     uint rayIdx   = global_id % raysPerProbe;
 
     float4 posData = probePositions[probeIdx];
     if (posData.w <= 0.0f) {
-        hit_distance_buffer[global_id] = -2.0f; // inactive probe
+        hit_buffer[global_id] = float4(-1.0f, 0.0f, 0.0f, 0.0f); // inactive probe
         return;
     }
 
@@ -398,20 +484,31 @@ kernel void screen_probe_trace_sdf(
         remainingDist -= advance;
     }
 
-    hit_distance_buffer[global_id] = hitDistance;
+    hit_buffer[global_id] = (hitDistance > 0.0f)
+        ? float4(hitDistance, 0.0f, 0.0f, 2.0f)
+        : float4(-1.0f, 0.0f, 0.0f, 0.0f);
 }
 
+// ============================================================================
+// T5.1 2c: radiance finalize — texture2D + buffers only (no texture3D).
+//   w==1 HZB hit → prev frame color at hit UV (sharp screen-space detail)
+//   w==2 SDF hit → SC card grid (T1.3) for near hits → prev color projection
+//   w==0 miss    → DDGI probe fallback (T2.2) → sky gradient
+// ============================================================================
 kernel void screen_probe_trace_finalize(
     texture2d<float, access::sample>  prevFrameColor        [[texture(0)]],
     texture2d<float, access::sample>  surface_cache_lighting [[texture(1)]],
 
     device const float4*              probePositions  [[buffer(0)]],
     device const float4*              probeNormals    [[buffer(1)]],
-    device const float*               hit_distance_buffer [[buffer(2)]],
+    device const float4*              hit_buffer      [[buffer(2)]],
     constant ScreenProbeGlobalData&   global          [[buffer(3)]],
     device float4*                    probeRadiance   [[buffer(4)]],
     constant SurfaceCacheCard*        cards           [[buffer(5)]],
     constant SurfaceCacheCardLookup*  cardLookup      [[buffer(6)]],
+    device const uint*                sc_grid_offsets [[buffer(7)]],
+    device const uint*                sc_grid_cards   [[buffer(8)]],
+    device const float4*              ddgiIrradiance  [[buffer(9)]],
 
     uint global_id [[thread_position_in_grid]])
 {
@@ -425,68 +522,93 @@ kernel void screen_probe_trace_finalize(
     uint probeIdx = global_id / raysPerProbe;
     uint rayIdx   = global_id % raysPerProbe;
 
-    float hitDistance = hit_distance_buffer[global_id];
-
-    // Inactive probe
-    if (hitDistance <= -1.5f) {
-        probeRadiance[global_id] = float4(0.0f, 0.0f, 0.0f, -1.0f);
+    float4 posData = probePositions[probeIdx];
+    if (posData.w <= 0.0f) {
+        probeRadiance[global_id] = float4(0.0f, 0.0f, 0.0f, -1.0f); // inactive
         return;
     }
 
-    // Recompute ray direction for sky/weight calculation
     float3 probeNormal = normalize(probeNormals[probeIdx].xyz);
     float3 rayDir = fibonacciDirection(rayIdx, raysPerProbe);
     rayDir = orientAroundNormal(rayDir, probeNormal);
+    float3 origin = posData.xyz + probeNormal * global.sdf_voxel_sizes[0].x * 2.0f;
 
-    // Miss
-    if (hitDistance < 0.0f) {
-        float3 radiance = float3(0.0f);
-        float cosTheta = 0.0f;
-        float skyWeight = max(dot(probeNormal, rayDir), 0.0f);
-        if (skyWeight > 0.0f) {
-            float skyY = rayDir.y * 0.5f + 0.5f;
-            radiance = mix(float3(0.15f, 0.18f, 0.25f), float3(0.4f, 0.5f, 0.65f), skyY);
-            cosTheta = skyWeight;
-        }
-        probeRadiance[global_id] = float4(radiance, -1.0f);
-        return;
-    }
-
-    // Hit: recompute position from probe data + distance
-    float3 probePos = probePositions[probeIdx].xyz;
-    float3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0f;
-    float3 hitPos = origin + rayDir * hitDistance;
-
+    float4 hit = hit_buffer[global_id];
     float3 radiance = float3(0.0f);
-    bool usedSurfaceCache = false;
+    float cosTheta = 0.0f;
 
-    // Try Surface Cache for near hits
-    // Apple Silicon: cap card iteration to 32 device reads to stay within limits
-    if (hitDistance < 2.0f && global.surface_cache_params.z > 0.5f) {
-        uint cardCount = min(uint(global.surface_cache_params.y), 32u);
-        float atlasSize = global.surface_cache_params.x;
+    if (hit.w == 1.0f) {
+        // HZB near-field hit — sharp screen-space radiance at the hit UV.
+        constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+        radiance = prevFrameColor.sample(s, hit.yz).rgb;
+        if (any(isnan(radiance)) || any(isinf(radiance))) radiance = float3(0.0f);
+        cosTheta = max(dot(probeNormal, rayDir), 0.0f);
+    } else if (hit.w == 2.0f) {
+        // SDF far-field hit — SC card grid (T1.3) near / prev color projection.
+        float3 hitPos = origin + rayDir * hit.x;
+        bool usedSurfaceCache = false;
 
-        for (uint ci = 0; ci < cardCount && !usedSurfaceCache; ++ci) {
-            float2 atlas_uv;
-            if (worldToCardUV(hitPos, cards[ci], atlas_uv)) {
-                float2 uv_norm = atlas_uv / float2(atlasSize);
-                constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-                radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
-                usedSurfaceCache = true;
+        if (hit.x < 2.0f && global.surface_cache_params.z > 0.5f) {
+            float atlasSize = global.surface_cache_params.x;
+            uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
+                              sc_grid_offsets[2], sc_grid_offsets[3]);
+            uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
+                              sc_grid_offsets[6], sc_grid_offsets[7]);
+            uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
+                              sc_grid_offsets[10], sc_grid_offsets[11]);
+            SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+            uint cell = scGridCellIndex(gp, hitPos);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = sc_grid_offsets[16u + cell];
+                uint end   = sc_grid_offsets[17u + cell];
+                uint reads = 0u;
+                for (uint gi = begin; gi < end && reads < 8u; ++gi, ++reads) {
+                    float2 atlas_uv;
+                    if (worldToCardUV(hitPos, cards[sc_grid_cards[gi]], atlas_uv)) {
+                        float2 uv_norm = atlas_uv / float2(atlasSize);
+                        constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+                        radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
+                        usedSurfaceCache = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!usedSurfaceCache) {
+            radiance = samplePrevFrameColor(hitPos, prevFrameColor, global);
+        }
+        if (any(isnan(radiance)) || any(isinf(radiance))) radiance = float3(0.0f);
+        cosTheta = max(dot(probeNormal, rayDir), 0.0f);
+    } else {
+        // Miss → DDGI probe fallback (T2.2) → sky gradient.
+        if (global.ddgi_fb[1].w > 0.5f) {
+            float3 org = global.ddgi_fb[0].xyz;
+            float spacing = max(global.ddgi_fb[0].w, 0.01f);
+            int3 counts = int3(global.ddgi_fb[1].xyz);
+            int3 gc = int3(floor((posData.xyz - org) / spacing));
+            gc = clamp(gc, int3(0), counts - int3(1));
+            uint pidx = uint(gc.x) + uint(counts.x) * (uint(gc.y) + uint(counts.y) * uint(gc.z));
+            // SH3 coefficients @ 16B stride (vec4 view of the DDGI buffer)
+            float3 sh0 = ddgiIrradiance[pidx * 9u + 0u].xyz;
+            float3 sh1 = ddgiIrradiance[pidx * 9u + 1u].xyz;
+            float3 sh2 = ddgiIrradiance[pidx * 9u + 2u].xyz;
+            float3 sh3 = ddgiIrradiance[pidx * 9u + 3u].xyz;
+            radiance = max(float3(0.0f),
+                0.282095f * sh0
+                - 0.488603f * sh1 * rayDir.y
+                + 0.488603f * sh2 * rayDir.z
+                - 0.488603f * sh3 * rayDir.x);
+            cosTheta = max(dot(probeNormal, rayDir), 0.0f);
+        } else {
+            float skyWeight = max(dot(probeNormal, rayDir), 0.0f);
+            if (skyWeight > 0.0f) {
+                float skyY = rayDir.y * 0.5f + 0.5f;
+                radiance = mix(float3(0.15f, 0.18f, 0.25f), float3(0.4f, 0.5f, 0.65f), skyY);
+                cosTheta = skyWeight;
             }
         }
     }
 
-    // Fall back to prev frame color
-    if (!usedSurfaceCache) {
-        radiance = samplePrevFrameColor(hitPos, prevFrameColor, global);
-    }
-
-    // NaN/Inf guard
-    if (any(isnan(radiance)) || any(isinf(radiance))) {
-        radiance = float3(0.0f);
-    }
-
-    float cosTheta = max(dot(probeNormal, rayDir), 0.0f);
     probeRadiance[global_id] = float4(radiance, cosTheta);
 }
