@@ -18,6 +18,12 @@
 //   (0 = miss, 1 = HZB hit [untouched here], 2 = SDF hit)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+// Shared shader library (axis refactor X1): SDF cascade sampling + relaxed
+// march and Fibonacci + TBN direction generation live in ShaderLib/.
+#include "ShaderLib/TraceLib.glsl"
+#include "ShaderLib/EncodeLib.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -49,38 +55,15 @@ layout(set = 0, binding = 6, std140) uniform GlobalData {
     vec4 hzb_params;
 } global;
 
-#define PI_VAL 3.14159265358979
-#define GOLDEN_RATIO 1.61803398875
-#define MAX_SDF_STEPS 32u
-
-vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
-    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
-    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
-    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
-}
-
-vec3 orientAroundNormal(vec3 dir, vec3 normal) {
-    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    vec3 tangent = normalize(cross(up, normal));
-    vec3 bitangent = cross(normal, tangent);
-    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
-}
-
-float sampleSDFCascade(texture3D tex, vec4 originExt, vec4 res, vec3 pos) {
-    vec3 uvw = (pos - originExt.xyz) / originExt.w;
-    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) return 1e10;
-    ivec3 size = textureSize(tex, 0);
-    vec3 texel = uvw * vec3(size) - 0.5;
-    return texelFetch(tex, clamp(ivec3(texel), ivec3(0), size - ivec3(1)), 0).r;
-}
-
-// Nearest-cascade-first SDF sample (matches monolithic ScreenProbeTraceRays).
-float sampleBestSDF(vec3 pos) {
-    float d = sampleSDFCascade(sdf0, global.sdf_origins[0], global.sdf_resolutions, pos);
-    if (d > 1e9) d = sampleSDFCascade(sdf1, global.sdf_origins[1], global.sdf_resolutions, pos);
-    if (d > 1e9) d = sampleSDFCascade(sdf2, global.sdf_origins[2], global.sdf_resolutions, pos);
-    return d;
-}
+// fibonacciDirection / orientAroundNormalTBN (was orientAroundNormal),
+// sampleSDFCascade / sampleBestSDF and the relaxed march moved to
+// ShaderLib/{EncodeLib,TraceLib}.glsl (axis refactor X1).
+//
+// NOTE (X1): the old local sampleSDFCascade divided uvw by sdf_origins[c].w,
+// which the C++ UBO upload (FieldView::WriteSDFToScreenProbe) sets to 0.0 —
+// every cascade sample returned 1e10 and every ray reported "miss". The
+// TraceLib version uses sdf_extents[c].xyz like the monolithic
+// ScreenProbeTraceRays kernel, restoring a real far-field trace.
 
 void screen_probe_trace_sdf() {
     uint global_id = gl_GlobalInvocationID.x;
@@ -102,30 +85,20 @@ void screen_probe_trace_sdf() {
     vec3 probePos = posData.xyz;
 
     uint rayIdx = global_id % raysPerProbe;
-    vec3 rayDir = orientAroundNormal(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    vec3 rayDir = orientAroundNormalTBN(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
     vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
 
-    float maxDist = global.trace_params.x;
-    float hitThreshold = global.sdf_voxel_sizes[0].x * 0.5;
-    float minStep = global.sdf_voxel_sizes[0].x * 0.25;
+    // Relaxed sphere march (TraceLib): 32 steps, hitThreshold = voxel0 * 0.5,
+    // minStep = voxel0 * 0.25, d * 1.2 overstep when far — same march the
+    // monolithic ScreenProbeTraceRays kernel runs.
+    SDFTraceResult res = traceSDF_relaxed(origin, rayDir, global.trace_params.x,
+                                          sdf0, sdf1, sdf2,
+                                          global.sdf_origins, global.sdf_extents,
+                                          global.sdf_voxel_sizes,
+                                          uint(global.sdf_resolutions.w));
 
-    vec3 pos = origin;
-    float remainingDist = maxDist;
-    bool hit = false;
-    float hitDist = 0.0;
-
-    for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
-        float d = sampleBestSDF(pos);
-        if (d > 1e9) break;  // outside all cascades → miss
-        if (d < hitThreshold) { hit = true; hitDist = maxDist - remainingDist; break; }
-        float advance = (d > hitThreshold * 4.0) ? d * 1.2 : max(d, minStep);
-        if (advance > remainingDist) break;
-        pos += rayDir * advance;
-        remainingDist -= advance;
-    }
-
-    if (hit) {
-        hit_buffer.data[global_id] = vec4(hitDist, 0.0, 0.0, 2.0);
+    if (res.hit) {
+        hit_buffer.data[global_id] = vec4(res.distance, 0.0, 0.0, 2.0);
     } else {
         hit_buffer.data[global_id] = vec4(-1.0, 0.0, 0.0, 0.0);
     }

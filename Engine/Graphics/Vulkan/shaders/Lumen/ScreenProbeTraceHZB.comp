@@ -18,6 +18,16 @@
 //   (0 = miss/unresolved, 1 = HZB hit, 2 = SDF hit — written by 2b)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+// Shared shader library (axis refactor X1): Fibonacci + TBN direction
+// generation (EncodeLib) and the Vulkan NDC-depth helper (TraceLib, replaces
+// the local ndcToLinear). The world-space HZB march below stays inline: it
+// differs from TraceLib's view-space traceRayHZB (projects each step with
+// view_projection, no near-plane skip) — not unifiable without changing
+// trace behavior.
+#include "ShaderLib/EncodeLib.glsl"
+#include "ShaderLib/TraceLib.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -52,29 +62,11 @@ float hash1(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
-// Fibonacci sphere direction + TBN orientation — MUST match
-// ScreenProbeTraceRays.comp byte-for-byte so every kernel generates the
+// Fibonacci sphere direction + TBN orientation now live in
+// ShaderLib/EncodeLib.glsl (orientAroundNormalTBN). MUST stay byte-for-byte
+// identical to ScreenProbeTraceRays.comp so every kernel generates the
 // same ray for the same global_id (hit_buffer is indexed by ray).
-#define PI_VAL 3.14159265358979
-#define GOLDEN_RATIO 1.61803398875
-
-vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
-    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
-    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
-    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
-}
-
-vec3 orientAroundNormal(vec3 dir, vec3 normal) {
-    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    vec3 tangent = normalize(cross(up, normal));
-    vec3 bitangent = cross(normal, tangent);
-    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
-}
-
-// Vulkan [0,1] NDC depth → linear view depth.
-float ndcToLinear(float ndcDepth, float nearPlane, float farPlane) {
-    return nearPlane * farPlane / (farPlane - ndcDepth * (farPlane - nearPlane));
-}
+// ndcToLinear moved to ShaderLib/TraceLib.glsl as NDCDepthToLinear.
 
 void screen_probe_trace_hzb() {
     uint global_id = gl_GlobalInvocationID.x;
@@ -93,7 +85,7 @@ void screen_probe_trace_hzb() {
     vec3 probePos = posData.xyz;
 
     uint rayIdx = global_id % raysPerProbe;
-    vec3 rayDir = orientAroundNormal(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    vec3 rayDir = orientAroundNormalTBN(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
     vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
 
     float near = global.hzb_params.x;
@@ -124,8 +116,8 @@ void screen_probe_trace_hzb() {
         ivec2 mipCoord = clamp(ivec2(uv * vec2(mipSize)), ivec2(0), mipSize - ivec2(1));
 
         float sceneNDC = texelFetch(hzb_texture, mipCoord, int(mip)).r;
-        float sceneLin = ndcToLinear(sceneNDC, near, far);
-        float rayLin = ndcToLinear(ndc.z, near, far);
+        float sceneLin = NDCDepthToLinear(sceneNDC, near, far);
+        float rayLin = NDCDepthToLinear(ndc.z, near, far);
 
         if (rayLin > sceneLin) {
             if (mip == 0u) {

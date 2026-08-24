@@ -22,6 +22,11 @@
 //   binding 7 = SSBO read   historyNormals[]
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+// Shared shader library (axis refactor X1): previous-frame reprojection
+// lives in ShaderLib/TemporalLib.glsl.
+#include "ShaderLib/TemporalLib.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -112,10 +117,10 @@ void screen_probe_temporal() {
     float histW = 0.0;
     bool historyValid = false;
     {
-        vec4 clipP = params.prev_view_projection * vec4(curPos.xyz, 1.0);
-        if (clipP.w > 0.0) {
-            vec2 ndc = clipP.xy / clipP.w;
-            vec2 prevUV = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+        // T5.2 reprojection via TemporalLib: clip -> ndc -> Y-flipped UV.
+        vec4 rp = reprojectPrevUV(curPos.xyz, params.prev_view_projection);
+        if (rp.w > 0.0) {
+            vec2 prevUV = rp.xy;
             if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThanEqual(prevUV, vec2(1.0)))) {
                 vec2 cellF = prevUV * vec2(params.gridW, params.gridH) - 0.5;
                 ivec2 c0 = ivec2(floor(cellF));

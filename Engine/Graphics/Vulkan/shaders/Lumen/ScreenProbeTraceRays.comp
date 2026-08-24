@@ -27,6 +27,11 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
+// Shared shader library (axis refactor X1): SDF cascade sampling / relaxed
+// sphere march and Fibonacci + TBN direction generation now live in
+// ShaderLib/. Include SurfaceCacheData.glsl first (octEncode guard order).
+#include "ShaderLib/TraceLib.glsl"
+#include "ShaderLib/EncodeLib.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -90,118 +95,11 @@ layout(set = 0, binding = 13, std430) readonly buffer DDGIIrradianceBuf {
 // --------------------------------------------------------------------------------
 // Constants
 // --------------------------------------------------------------------------------
-const float PI_VAL          = 3.14159265358979323846;
-const float GOLDEN_RATIO    = 1.618033988749895;
-// Was 4 — too few for sphere tracing. Most rays failed to converge and reported
-// "miss", producing extremely dim SPGI output. 32 gives rays enough iterations.
-const uint  MAX_SDF_STEPS   = 32u;
-
-// SDFHitResult — ported from SDFTraceCommon.metal.
-struct SDFHitResult {
-    bool  hit;
-    vec3  position;
-    float distance;
-};
-
-// --------------------------------------------------------------------------------
-// SDF cascade sampling (inlined from SDFTraceCommon.metal).
-// Metal uses linear-filtered texture3D with clamp_to_edge. Vulkan port uses
-// nearest texelFetch (porting rule 17: nearest acceptable for SDF tracing).
-// Cascade convention matches Metal: uvw = (worldPos - origin) / extent, with
-// origin = corner and extent = full box size, so [0,1] spans the whole volume.
-// --------------------------------------------------------------------------------
-bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
-    vec3 local = pos - origin;
-    return local.x >= 0.0 && local.x < extent.x &&
-           local.y >= 0.0 && local.y < extent.y &&
-           local.z >= 0.0 && local.z < extent.z;
-}
-
-float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
-                       vec3 cascadeOrigin, vec3 cascadeExtent) {
-    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
-    if (uvw.x < 0.0 || uvw.x > 1.0 ||
-        uvw.y < 0.0 || uvw.y > 1.0 ||
-        uvw.z < 0.0 || uvw.z > 1.0) {
-        return 1e10;
-    }
-    ivec3 size = textureSize(sdfTexture, 0);
-    ivec3 coord = ivec3(clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size));
-    return texelFetch(sdfTexture, coord, 0).r;
-}
-
-// else-if cascade selection — 1 texture3D read per call (finest first).
-float sampleBestSDF(vec3 pos) {
-    if (global.sdf_resolutions.w > 0u &&
-        isInsideCascade(pos, global.sdf_origins[0].xyz, global.sdf_extents[0].xyz)) {
-        return sampleSDFCascade(sdf0, pos, global.sdf_origins[0].xyz, global.sdf_extents[0].xyz);
-    } else if (global.sdf_resolutions.w > 1u &&
-               isInsideCascade(pos, global.sdf_origins[1].xyz, global.sdf_extents[1].xyz)) {
-        return sampleSDFCascade(sdf1, pos, global.sdf_origins[1].xyz, global.sdf_extents[1].xyz);
-    } else if (global.sdf_resolutions.w > 2u &&
-               isInsideCascade(pos, global.sdf_origins[2].xyz, global.sdf_extents[2].xyz)) {
-        return sampleSDFCascade(sdf2, pos, global.sdf_origins[2].xyz, global.sdf_extents[2].xyz);
-    }
-    return 1e10;
-}
-
-// --------------------------------------------------------------------------------
-// Sphere tracing through GlobalSDF (ported from TraceRays.metal::traceSDF)
-// --------------------------------------------------------------------------------
-SDFHitResult traceSDF(vec3 origin, vec3 direction, float maxDist) {
-    SDFHitResult result;
-    result.hit = false;
-    result.position = origin;
-    result.distance = 0.0;
-
-    vec3 pos = origin;
-    float remainingDist = maxDist;
-
-    float hitThreshold = global.sdf_voxel_sizes[0].x * 0.5;
-    float minStep = global.sdf_voxel_sizes[0].x * 0.25;
-
-    for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
-        float d = sampleBestSDF(pos);
-
-        if (d < hitThreshold) {
-            result.hit = true;
-            result.position = pos;
-            result.distance = length(pos - origin);
-            return result;
-        }
-
-        // Relaxed advancement: overstep when far, conservative when close
-        float advance;
-        if (d > hitThreshold * 4.0) {
-            advance = d * 1.2;
-        } else {
-            advance = max(d, minStep);
-        }
-        if (advance > remainingDist) break;
-
-        pos += direction * advance;
-        remainingDist -= advance;
-    }
-
-    result.distance = length(pos - origin);
-    return result;
-}
-
-// --------------------------------------------------------------------------------
-// Fibonacci sphere direction generation + normal alignment
-// --------------------------------------------------------------------------------
-vec3 fibonacciDirection(uint rayIndex, uint totalRays) {
-    float theta = 2.0 * PI_VAL * float(rayIndex) / GOLDEN_RATIO;
-    float phi = acos(1.0 - 2.0 * (float(rayIndex) + 0.5) / float(totalRays));
-    return vec3(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
-}
-
-vec3 orientAroundNormal(vec3 dir, vec3 normal) {
-    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    vec3 tangent = normalize(cross(up, normal));
-    vec3 bitangent = cross(normal, tangent);
-    return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
-}
+// PI_VAL / GOLDEN_RATIO / MAX_SDF_STEPS, the SDF cascade samplers, traceSDF,
+// fibonacciDirection and orientAroundNormal moved to ShaderLib/TraceLib.glsl
+// and ShaderLib/EncodeLib.glsl (axis refactor X1). MAX_SDF_STEPS = 32 there
+// (LUMEN_MAX_SDF_STEPS) — raised from 4 because rays failed to converge and
+// produced extremely dim SPGI output.
 
 // --------------------------------------------------------------------------------
 // Manual bilinear sample of a 2D texture (porting rule 17 alternative).
@@ -279,14 +177,18 @@ void screen_probe_trace_rays() {
 
     // Generate ray direction (Fibonacci + normal alignment)
     vec3 rayDir = fibonacciDirection(rayIdx, raysPerProbe);
-    rayDir = orientAroundNormal(rayDir, probeNormal);
+    rayDir = orientAroundNormalTBN(rayDir, probeNormal);
 
     // Offset origin slightly to avoid self-intersection
     vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
 
     // Trace ray through GlobalSDF
     float maxDist = global.trace_params.x;
-    SDFHitResult hit = traceSDF(origin, rayDir, maxDist);
+    SDFTraceResult hit = traceSDF_relaxed(origin, rayDir, maxDist,
+                                          sdf0, sdf1, sdf2,
+                                          global.sdf_origins, global.sdf_extents,
+                                          global.sdf_voxel_sizes,
+                                          uint(global.sdf_resolutions.w));
 
     vec3 radiance = vec3(0.0);
     float cosTheta = 0.0;  // cosine weight for irradiance integration

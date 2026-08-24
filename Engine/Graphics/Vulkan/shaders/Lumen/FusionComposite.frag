@@ -15,6 +15,11 @@
 //   binding 7 = Sampler       defaultSampler  (Vulkan-only)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+// Shared shader library (axis refactor X1): the Karis EnvBRDF approximation
+// lives in ShaderLib/EncodeLib.glsl.
+#include "ShaderLib/EncodeLib.glsl"
 
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
@@ -28,15 +33,8 @@ layout(set = 0, binding = 5) uniform texture2D albedoTex;
 layout(set = 0, binding = 6) uniform texture2D ddgiSpecular;
 layout(set = 0, binding = 7) uniform sampler defaultSampler;
 
-// Karis analytic split-sum integral (mobile EnvBRDF approximation).
-// Returns the (scale, bias) pair: specular = F0 * AB.x + AB.y.
-vec2 envBRDFApproxAB(float roughness, float NoV) {
-    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
-    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
-    vec4 r = vec4(roughness) * c0 + c1;
-    float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
-    return vec2(-1.04, 1.04) * a004 + r.zw;
-}
+// envBRDFApproxAB moved to ShaderLib/EncodeLib.glsl (axis refactor X1):
+// returns the (scale, bias) pair, specular = F0 * AB.x + AB.y.
 
 void fusion_composite() {
     vec3 scene    = texture(sampler2D(sceneColor,    defaultSampler), inUv).rgb;
