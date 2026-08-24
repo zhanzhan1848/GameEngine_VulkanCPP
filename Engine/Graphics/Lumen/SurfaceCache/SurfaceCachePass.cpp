@@ -1225,12 +1225,16 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             //     for now and only enable it when gather coverage is low.
             //     TODO: Add an albedo-alpha check to skip already-captured texels.
             // ================================================================
-            // DISABLED: CardFill's texture-sampled albedo creates dark patches
-            // in the SC atlas → dark GI blocks. The GBuffer gather provides
-            // real colors for visible surfaces; AtlasInit's gray default is
-            // used for the rest. Re-enable when the skip/merge logic properly
-            // distinguishes "captured" from "dark material" texels.
-            if (false && card_fill_pipeline_ != handles::INVALID_PIPELINE) {
+            // T3.4 RE-ENABLED (Vulkan): the shader now has the skip guard
+            // (non-gray albedo alpha≥0.5 = gather-captured → skip), a
+            // min-luminance clamp (no dark patches), and sky fallback —
+            // all added after the original disable. CardFill covers texels
+            // the screen-space gather can never reach (~0.1% offscreen
+            // coverage → SDF-complete coverage of static geometry); its
+            // lighting write is transient (LightEval recomputes with real
+            // light + T3.3 shadows right after). Metal stays gather-only
+            // until a Metal CardFill port lands (M5).
+            if (card_fill_pipeline_ != handles::INVALID_PIPELINE) {
                 // Get SDF cascade textures + data from GlobalSDF.
                 auto& globalSDF = nanite::GlobalSDF::Get();
                 ResourceHandle sdfTex[3] = {handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
