@@ -895,6 +895,7 @@ if(BUILD_VTBAKE AND ENABLE_VULKAN)
     add_executable(TestVTSVTRuntime
         RHI/Core/TestVTSVTRuntime.cpp
         ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/VirtualTexture/RuntimeVTVolume.cpp
     )
     target_include_directories(TestVTSVTRuntime PRIVATE
         ${CMAKE_SOURCE_DIR}

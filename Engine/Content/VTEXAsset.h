@@ -34,7 +34,8 @@ public:
             uint64_t(h->bcn_offset) + h->bcn_size > size) return false;
         if (h->astc_size > 0 &&
             uint64_t(h->astc_offset) + h->astc_size > size) return false;
-        if (h->bcn_size == 0 && h->astc_size == 0) return false;
+        // M5:空数据段合法(运行时 VT — 页由 producer 生产,不走 tile_data)。
+        // 判定改为:索引区存在即可。
         _data = data;
         _header = h;
         return true;

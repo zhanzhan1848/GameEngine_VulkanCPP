@@ -9,6 +9,7 @@
 #include "../RHI/Core/RHIDevice.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -97,6 +98,18 @@ bool virtual_texture_system::initialize(RHIDeviceBase* device, const vt_config& 
             while (stream_queue_.empty() && !shutdown_requested_)
                 stream_cv_.wait(lock);
             if (shutdown_requested_) break;
+            // producer VT 检查在 pop 之前 — 弹出即丢失(阶段 1.5 只扫队列)
+            {
+                auto peek = vts_.find(stream_queue_.front().first);
+                if (peek != vts_.end() && peek->second.producer != nullptr) {
+                    // 留给 update 阶段 1.5 GPU 生产;不删 in_flight。
+                    // 解锁让出,避免自旋占满
+                    lock.unlock();
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    lock.lock();
+                    continue;
+                }
+            }
             const auto [vt_id, page] = stream_queue_.front();
             stream_queue_.pop_front();
             // 临界区内取数据(vts_ 节点引用稳定,但 blob/asset 访问尽量短)
@@ -297,16 +310,86 @@ u32 virtual_texture_system::register_texture(const u8* vtex_data, u64 vtex_size)
         std::lock_guard<std::mutex> g(stream_mutex_);
         vts_.emplace(id, std::move(e));
     }
-    // 懒建页池:每层一个(ASTC 平台同格式 → 同池;BCn 平台按层格式分池)
-    for (u32 l = 0; l < vts_[id].layer_count; ++l) {
-        if (ensure_pool(vts_[id].layer_formats[l]) == ~0u) {
-            release_texture(id);
-            return ~0u;
+    // 懒建页池:每层一个(ASTC 平台同格式 → 同池;BCn 平台按层格式分池)。
+    // M5:空数据段(RVT 合成容器,段格式 0)不建池 — 由
+    // register_runtime_texture 按生产格式建
+    if (vts_[id].asset.header().bcn_size > 0 || vts_[id].asset.header().astc_size > 0) {
+        for (u32 l = 0; l < vts_[id].layer_count; ++l) {
+            if (ensure_pool(vts_[id].layer_formats[l]) == ~0u) {
+                release_texture(id);
+                return ~0u;
+            }
         }
     }
     // root 页(coarsest mip,单页)立即入队 — 采样安全网
     const u32 rootPage = total_page_count(vts_[id].pages_top) - 1;
     submit_streaming(id, rootPage);
+    stats_.registered = u32(vts_.size());
+    return id;
+}
+
+u32 virtual_texture_system::register_runtime_texture(u32 width, u32 height,
+                                                        u32 format,
+                                                        IVTProducer* producer) {
+    if (!device_ || !producer) return ~0u;
+    if ((width & (width - 1)) != 0 || (height & (height - 1)) != 0) return ~0u;
+
+    // 合成最小 vtex 容器(页网格/mip 语义与磁盘 VT 一致;数据段为空 —
+    // 页内容由 producer 生产)
+    std::vector<u8> blob(sizeof(content::vt::vtex_header), 0);
+    {
+        content::vt::vtex_header h{};
+        std::memcpy(h.magic, "VTEX", 4);
+        h.version = content::vt::kVTEXVersion;
+        h.width = width;
+        h.height = height;
+        h.tile_size = cfg_.tile_size;
+        h.border = cfg_.border;
+        u32 side = width;
+        u32 mips = 0;
+        while (side >= cfg_.tile_size && mips < 8) { ++mips; side >>= 1; }
+        if (side > 0 && side < cfg_.tile_size && mips > 0) { /* 最低 mip 边长<tile:最后一层单页 */ }
+        h.mip_count = std::max(1u, mips);
+        h.bcn_format = 0;
+        h.astc_format = 0;
+        // 页数按金字塔打包(同 total_page_count)
+        u32 total = 0, sp = std::max(1u, width / cfg_.tile_size);
+        while (sp) { total += sp * sp; sp >>= 1; }
+        h.page_count = total;
+        h.avg_color = 0xFF808080u;
+        h.index_offset = sizeof(content::vt::vtex_header);
+        h.bcn_offset = h.index_offset;
+        h.bcn_size = 0;
+        h.astc_offset = h.index_offset;
+        h.astc_size = 0;
+        std::memcpy(blob.data(), &h, sizeof(h));
+        // 合成容器必须含索引段(读取器结构校验);条目为零 — producer VT
+        // 不走 tile_data,索引仅满足布局校验
+        blob.resize(sizeof(h) + size_t(total) * sizeof(content::vt::vtex_page_index), 0);
+    }
+
+    // 复用 register_texture 的页表分配/池登记,再挂 producer 与格式
+    u32 id = register_texture(blob.data(), blob.size());
+    if (id == ~0u) return ~0u;
+    {
+        std::lock_guard<std::mutex> g(stream_mutex_);
+        auto it = vts_.find(id);
+        if (it == vts_.end()) return ~0u;
+        it->second.producer = producer;
+        for (u32 l = 0; l < it->second.layer_count; ++l)
+            it->second.layer_formats[l] = format;
+    }
+    // 确保对应池存在(RVT 通常 RGBA8 独立池)
+    if (ensure_pool(format) == ~0u) {
+        release_texture(id);
+        return ~0u;
+    }
+    // root 页请求(同磁盘 VT 安全网)
+    {
+        std::lock_guard<std::mutex> g(stream_mutex_);
+        const u32 rootPage = total_page_count(vts_[id].pages_top) - 1;
+        submit_streaming(id, rootPage);
+    }
     stats_.registered = u32(vts_.size());
     return id;
 }
@@ -323,7 +406,15 @@ u32 virtual_texture_system::ensure_pool(u32 format_value) {
     aDesc.arraySize = 1;
     aDesc.format = DataFormat(format_value);
     aDesc.type = TextureType::Texture2D;
+    // M5:GPUFinalizer 存储镜像直写需要 UAV — 仅未压缩格式支持
+    // (ASTC/BCn 无存储镜像能力,RVT 池用 RGBA8)
     aDesc.usage = TextureUsage::ShaderResource;
+    if (DataFormat(format_value) == DataFormat::RGBA8_UNorm ||
+        DataFormat(format_value) == DataFormat::BGRA8_UNorm ||
+        DataFormat(format_value) == DataFormat::RGBA16_Float ||
+        DataFormat(format_value) == DataFormat::R32_UInt) {
+        aDesc.usage = aDesc.usage | TextureUsage::UnorderedAccess;
+    }
     aDesc.memoryUsage = GPUMemoryUsage::Static;
     aDesc.name = "VTSys_Atlas";
     pool.atlas = device_->CreateTexture(aDesc);
@@ -424,7 +515,10 @@ void virtual_texture_system::prefetch_page(u32 vt_id, u32 mip, u32 px, u32 py) {
     const u32 page = mip_page_linear(vt.pages_top, mip, px, py);
     if (page >= vt.page_layer_bits.size()) return;
     const u8 fullMask = u8((1u << vt.layer_count) - 1u);
-    if (vt.page_layer_bits[page] == fullMask) return;   // 已驻留
+    if (vt.page_layer_bits[page] == fullMask) {
+        ++stats_.producer_cache_hits;   // M5:请求即命中(免生产)
+        return;
+    }
     submit_streaming(vt_id, page);
 }
 
@@ -443,7 +537,10 @@ void virtual_texture_system::prefetch_rect(u32 vt_id, float cx, float cy, float 
             const u32 page = mip_page_linear(vt.pages_top, 0, px, py);
             if (page >= vt.page_layer_bits.size()) continue;
             const u8 fullMask = u8((1u << vt.layer_count) - 1u);
-            if (vt.page_layer_bits[page] == fullMask) continue;
+            if (vt.page_layer_bits[page] == fullMask) {
+                ++stats_.producer_cache_hits;   // M5:请求即命中
+                continue;
+            }
             submit_streaming(vt_id, page);
         }
 }
@@ -470,10 +567,94 @@ void virtual_texture_system::update(u32 frame_index) {
         feedback_[slot].submitted = false;
     }
 
+    // 1.5 M5:producer VT(RVT)请求 — 同步 GPU 生产(三 pass 直写物理池)
+    {
+        std::vector<std::pair<u32, u32>> producerReqs;
+        {
+            std::lock_guard<std::mutex> g(stream_mutex_);
+            for (auto it = stream_queue_.begin(); it != stream_queue_.end();) {
+                auto vit = vts_.find(it->first);
+                if (vit != vts_.end() && vit->second.producer) {
+                    producerReqs.push_back(*it);
+                    it = stream_queue_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (auto& [pvt, page] : producerReqs) {
+            std::lock_guard<std::mutex> g(stream_mutex_);
+            auto vit = vts_.find(pvt);
+            if (vit == vts_.end()) { stream_in_flight_.erase((u64(pvt) << 32) | page); continue; }
+            vt_entry& vt = vit->second;
+            if (page >= vt.page_layer_bits.size()) { stream_in_flight_.erase((u64(pvt) << 32) | page); continue; }
+            const u8 fullMask = u8((1u << vt.layer_count) - 1u);
+            if (vt.page_layer_bits[page] == fullMask) {
+                ++stats_.producer_cache_hits;   // 已驻留(免生产)
+                stream_in_flight_.erase((u64(pvt) << 32) | page);
+                continue;
+            }
+            const u32 poolIdx = ensure_pool(vt.layer_formats[0]);
+            if (poolIdx == ~0u) { stream_in_flight_.erase((u64(pvt) << 32) | page); continue; }
+            physical_pool& pool = pools_[poolIdx];
+            if (pool.free_pages.empty()) {
+                evict(1);
+                if (pool.free_pages.empty()) {
+                    stream_in_flight_.erase((u64(pvt) << 32) | page);
+                    continue;
+                }
+            }
+            const u32 pageSlot = pool.free_pages.back();
+            pool.free_pages.pop_back();
+            pool.pages[pageSlot].used = true;
+            pool.pages[pageSlot].vt_id = pvt;
+            pool.pages[pageSlot].page = page;
+            pool.pages[pageSlot].last_use_frame = frame_counter_;
+            const u32 ax = (pageSlot % pool.tiles_per_row) * (cfg_.tile_size + 2 * cfg_.border);
+            const u32 ay = (pageSlot / pool.tiles_per_row) * (cfg_.tile_size + 2 * cfg_.border);
+            // 逐层生产(GPU 三 pass,同步完成)
+            bool allLayers = true;
+            for (u32 l = 0; l < vt.layer_count; ++l) {
+                if (!vt.producer->produce_page(device_, pvt, page, l, pool.atlas, ax, ay)) {
+                    allLayers = false;
+                    break;
+                }
+            }
+            if (!allLayers) {
+                pool.pages[pageSlot].used = false;
+                pool.free_pages.push_back(pageSlot);
+                stream_in_flight_.erase((u64(pvt) << 32) | page);
+                continue;
+            }
+            // 立即置位 — 同批重复请求(队列多条同页)不再重复生产
+            vt.page_layer_bits[page] = fullMask;
+            vt.page_layer_origins[page * 4 + 0] = ax | (ay << 16);
+            vt.resident_page_to_slot[page] = poolIdx;
+            ++vt.resident_count;
+            // 构造 gpu_direct 的 ready_upload(跳过 staging,直接标完成)
+            ready_upload up{};
+            up.vt_id = pvt;
+            up.page = page;
+            up.layer = 0;
+            up.gpu_direct = true;
+            up.format = vt.layer_formats[0];
+            up.pool_index = poolIdx;
+            up.atlas_x = ax;
+            up.atlas_y = ay;
+            up.data_size = 0;
+            upload_ready_.push_back(std::move(up));
+            ++stats_.producer_pages_produced;
+        }
+    }
+
     // 2. worker 完成的解压 → 分配物理槽 → upload_pending
     {
         std::lock_guard<std::mutex> g(stream_mutex_);
         for (auto& up : upload_ready_) {
+            if (up.gpu_direct) {
+                upload_pending_.push_back(std::move(up));
+                continue;
+            }
             auto vtIt = vts_.find(up.vt_id);
             if (vtIt == vts_.end()) {
                 // VT 已释放:丢弃(槽位未分配,无泄漏)
@@ -514,6 +695,32 @@ void virtual_texture_system::update(u32 frame_index) {
     while (!upload_pending_.empty() && stats_.uploads_this_frame < cfg_.max_uploads_per_frame) {
         ready_upload up = std::move(upload_pending_.front());
         upload_pending_.erase(upload_pending_.begin());
+        if (up.gpu_direct) {
+            // M5:GPU 三 pass 已直写 atlas — 仅做完成记账 + 页表条目
+            // (bits 已在阶段 1.5 立即置位;此处只补页表条目)
+            auto it2 = vts_.find(up.vt_id);
+            if (it2 != vts_.end() && up.page < it2->second.page_layer_bits.size()) {
+                it2->second.page_layer_bits[up.page] |= u8((1u << it2->second.layer_count) - 1u);
+                it2->second.page_layer_origins[up.page * 4 + 0] =
+                    up.atlas_x | (up.atlas_y << 16);
+                u32 base2 = 0, s2 = it2->second.pages_top, mip2 = 0;
+                while (base2 + s2 * s2 <= up.page) { base2 += s2 * s2; s2 >>= 1; ++mip2; }
+                const u32 px2 = (up.page - base2) % s2;
+                const u32 py2 = (up.page - base2) / s2;
+                pt_entries_.push_back(it2->second.pt_origin_x + px2);
+                pt_entries_.push_back(it2->second.pt_origin_y + py2);
+                for (u32 l = 0; l < 4; ++l) {
+                    const u32 o = (l == 0)
+                        ? (up.atlas_x | (up.atlas_y << 16)) : 0u;
+                    pt_entries_.push_back(l < it2->second.layer_count
+                        ? pack_pt_entry(o & 0xFFFF, o >> 16) : 0);
+                }
+                it2->second.resident_page_to_slot[up.page] = up.pool_index;
+            }
+            stream_in_flight_.erase((u64(up.vt_id) << 32) | up.page);
+            ++stats_.uploads_this_frame;
+            continue;
+        }
         {
             std::lock_guard<std::mutex> g(stream_mutex_);
             if (vts_.find(up.vt_id) == vts_.end()) {

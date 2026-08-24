@@ -1,0 +1,15 @@
+#version 450
+// M5 Pass2(压缩):capture RT(采样)→ packed 纹理。本平台 RGBA8 恒等
+// (BCn/ASTC 编码钩子位 — PC 上此处运行 BCn 编码 CS)。
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform texture2D capture;
+layout(set = 0, binding = 1) uniform sampler samp;
+layout(set = 0, binding = 2, rgba8) uniform image2D packedOut;
+layout(push_constant) uniform Params { uvec2 tileSize; uvec2 pad; } params;
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= int(params.tileSize.x) || xy.y >= int(params.tileSize.y)) return;
+    vec4 c = texelFetch(sampler2D(capture, samp), xy, 0);
+    // 压缩钩子:RGBA8 恒等;PC 路径此处输出 BCn 块数据
+    imageStore(packedOut, xy, c);
+}

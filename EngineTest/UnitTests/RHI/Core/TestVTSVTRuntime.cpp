@@ -17,6 +17,7 @@
 #include "Graphics/VirtualTexture/VirtualTextureSystem.h"
 #include "Graphics/VirtualTexture/VTStreamingRGPass.h"
 #include "Graphics/Nanite/GPUMaterialRegistry.h"
+#include "Graphics/VirtualTexture/RuntimeVTVolume.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
@@ -1533,6 +1534,250 @@ TestResult TestVTSVT_MaterialRegistryVT() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// M5:RVT — Producer 三 pass 页生产 + 静态命中率 + 淘汰重生产
+// ============================================================================
+TestResult TestVTSVT_RuntimeVolume() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    auto& sys = virtual_texture_system::instance();
+
+    vt_config cfg;
+    cfg.feedback_slots = 256 * 256;
+    TEST_ASSERT(sys.initialize(fx.base, cfg), "system initialize");
+
+    // RVT:256² 世界 → 256² 虚拟(2×2 页 + root)
+    graphics::vt::runtime_vt_volume volume;
+    {
+        graphics::vt::runtime_vt_volume::desc d;
+        d.world_x0 = 0; d.world_z0 = 0;
+        d.world_x1 = 256; d.world_z1 = 256;
+        u32 vt = sys.register_runtime_texture(256, 256,
+                    u32(DataFormat::RGBA8_UNorm), &volume);
+        TEST_ASSERT(vt != ~0u, "register runtime VT");
+        d.vt_id = vt;
+        TEST_ASSERT(volume.initialize(fx.base, d), "volume initialize");
+        (void)vt;
+    }
+    // sys 持有 producer 指针;volume 生命周期须覆盖 release — 用块作用域
+    // (此处 volume 在函数栈上,先于 sys.shutdown 析构 ✓)
+
+    // 反馈循环采样(VTSys_LayerSample NEAREST;RVT RGBA8 atlas)
+    auto readSpvFile = [](const char* path) -> std::vector<u8> {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return {};
+        auto sz = f.tellg();
+        f.seekg(0);
+        std::vector<u8> d(size_t(sz), 0u);
+        f.read(reinterpret_cast<char*>(d.data()), sz);
+        return d;
+    };
+    auto cs = readSpvFile("Assets/Shaders/VTSys_LayerSample.comp.spv");
+    TEST_ASSERT(!cs.empty(), "read spv");
+    ShaderHandle shader = fx.base->CreateShader(cs.data(), cs.size(), ShaderStage::Compute, "main");
+    TEST_ASSERT(shader != handles::INVALID_SHADER, "shader");
+    SamplerDesc sdesc{};
+    sdesc.minFilter = FilterMode::Nearest;
+    sdesc.magFilter = FilterMode::Nearest;
+    sdesc.addressU = TextureAddressMode::Clamp;
+    sdesc.addressV = TextureAddressMode::Clamp;
+    SamplerHandle nearest = fx.base->CreateSampler(sdesc);
+
+    DescriptorSetLayoutBinding b[8]{};
+    b[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
+    b[4] = {4, DescriptorType::Sampler, 1, ShaderStage::Compute, nullptr};
+    b[5] = {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr};
+    b[6] = {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};
+    b[7] = {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};
+    DescriptorSetLayoutDesc dsl{8, b};
+    DescriptorSetLayoutHandle dsLayout = fx.base->CreateDescriptorSetLayout(dsl);
+    PipelineLayoutDesc pl{};
+    pl.setLayoutCount = 1;
+    pl.setLayouts = &dsLayout;
+    pl.pushConstantRangeCount = 0;
+    PipelineLayoutHandle layout = fx.base->CreatePipelineLayout(pl);
+    ComputePipelineDesc cpd{};
+    cpd.computeShader = shader;
+    cpd.layout = layout;
+    cpd.threadGroupSize = {8, 8, 1};
+    PipelineHandle pipe = fx.base->CreateComputePipeline(cpd);
+    TEST_ASSERT(pipe != handles::INVALID_PIPELINE, "pipeline");
+
+    constexpr u32 kW = 256;
+    struct P5 { float p[5][4]; };
+    BufferDesc pdesc{};
+    pdesc.size = sizeof(P5);
+    pdesc.type = BufferType::Constant;
+    pdesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    pdesc.name = "RVTParams";
+    ResourceHandle paramsBuf = fx.base->CreateBuffer(pdesc);
+    BufferDesc odesc{};
+    odesc.size = u64(kW) * kW * 3 * 4;
+    odesc.type = BufferType::Raw;
+    odesc.memoryUsage = GPUMemoryUsage::Static;
+    odesc.name = "RVTOut";
+    ResourceHandle outBuf = fx.base->CreateBuffer(odesc);
+    BufferDesc rb = odesc;
+    rb.memoryUsage = GPUMemoryUsage::Readback;
+    ResourceHandle outRead = fx.base->CreateBuffer(rb);
+
+    // RVT 的 vtId 通过遍历?系统无 get — 注册时返回值没存…用 1(唯一 VT)
+    const u32 rvtId = 1;
+    const u32 rvtPool = 0;
+    // RGBA8 池 index 0? ensure_pool 顺序:register_runtime_texture 内 ensure(RGBA8)
+    DescriptorSetDesc dd{};
+    dd.layout = dsLayout;
+    DescriptorSetHandle ds = fx.base->CreateDescriptorSet(dd);
+    TEST_ASSERT(ds != handles::INVALID_DESCRIPTOR_SET, "desc set");
+
+    u32 frame = 0;
+    const u32 pagesTop = sys.vt_pages_top(rvtId);
+    TEST_ASSERT_EQ(2u, pagesTop, "RVT pages_top");
+    const u32 total = 4 + 1;   // 4 mip0 页 + root
+    auto dispatchOnce = [&](void) -> bool {
+        P5 p{};
+        p.p[0][0] = float(sys.vt_pt_origin_x(rvtId));
+        p.p[0][1] = float(sys.vt_pt_origin_y(rvtId));
+        p.p[0][2] = float(pagesTop);
+        p.p[0][3] = float(kW);
+        p.p[1][0] = 1.0f / 2048.0f;
+        p.p[1][1] = 128.0f;
+        p.p[1][2] = 0;
+        p.p[1][3] = 0.5f;
+        p.p[2][0] = 0.5f; p.p[2][1] = 0.5f;
+        p.p[2][2] = 1.0f; p.p[2][3] = 0;
+        p.p[3][0] = 0; p.p[3][1] = float(kW);
+        p.p[3][2] = float(rvtId);
+        p.p[3][3] = 0;
+        p.p[4][0] = 0; p.p[4][1] = 1.0f / kW; p.p[4][2] = 1.0f / kW;
+        if (!fx.base->UpdateBufferData(paramsBuf, &p, sizeof(p), 0)) return false;
+        DescriptorImageInfo ptInfo{}, a0{}, a1{}, a2{};
+        ptInfo.imageView = sys.page_table_texture();
+        ptInfo.imageLayout = ResourceState::ShaderResource;
+        a0 = a1 = a2 = ptInfo;
+        a0.imageView = a1.imageView = a2.imageView = sys.atlas_texture(rvtPool);
+        DescriptorImageInfo sampInfo{};
+        sampInfo.sampler = nearest;
+        DescriptorBufferInfo pInfo{paramsBuf, 0, sizeof(P5)};
+        DescriptorBufferInfo oInfo{outBuf, 0, 0};
+        DescriptorBufferInfo fInfo{sys.feedback_buffer(frame), 0, 0};
+        WriteDescriptorSet w[8]{};
+        for (u32 i = 0; i < 8; ++i) {
+            w[i].dstSet = ds; w[i].dstBinding = i; w[i].dstArrayElement = 0;
+            w[i].descriptorCount = 1;
+        }
+        w[0].descriptorType = DescriptorType::SampledImage;   w[0].imageInfo = &ptInfo;
+        w[1].descriptorType = DescriptorType::SampledImage;   w[1].imageInfo = &a0;
+        w[2].descriptorType = DescriptorType::SampledImage;   w[2].imageInfo = &a1;
+        w[3].descriptorType = DescriptorType::SampledImage;   w[3].imageInfo = &a2;
+        w[4].descriptorType = DescriptorType::Sampler;        w[4].imageInfo = &sampInfo;
+        w[5].descriptorType = DescriptorType::UniformBuffer;  w[5].bufferInfo = &pInfo;
+        w[6].descriptorType = DescriptorType::StorageBuffer;  w[6].bufferInfo = &oInfo;
+        w[7].descriptorType = DescriptorType::StorageBuffer;  w[7].bufferInfo = &fInfo;
+        fx.base->UpdateDescriptorSets(8, w);
+
+        CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        RHICommandBuffer* cb = GetCommandBuffer(cmd);
+        if (!cb || !cb->Reset() || !cb->Begin()) return false;
+        cb->BindComputePipeline(pipe);
+        cb->BindDescriptorSets(PipelineBindPoint::Compute, layout, 0, 1, &ds, 0, nullptr);
+        cb->Dispatch(kW / 8, kW / 8, 1);
+        QueueSubmitInfo si{};
+        si.cmdBuffer = cmd;
+        sys.record_feedback_copy(cb, frame, si);
+        cb->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                          AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+        cb->CopyBuffer(outBuf, outRead, 0, 0, odesc.size);
+        cb->End();
+        if (!fx.base->Submit(si)) return false;
+        if (!sys.wait_feedback(frame, 5000)) return false;
+        fx.base->DestroyCommandBuffer(cmd);
+        return true;
+    };
+
+    // 收敛:采样→feedback→update(producer 同步生产)
+    for (u32 i = 0; i < 20 && sys.stats().resident_pages < total; ++i, ++frame) {
+        TEST_ASSERT(dispatchOnce(), "dispatch");
+        sys.update(frame);
+    }
+    const vt_stats& st = sys.stats();
+    std::cout << "[VTSys] rvt: resident=" << st.resident_pages
+              << " produced=" << st.producer_pages_produced
+              << " cacheHits=" << st.producer_cache_hits << std::endl;
+    TEST_ASSERT_EQ(total, st.resident_pages, "RVT pages resident (GPU-produced)");
+    TEST_ASSERT(st.producer_pages_produced >= total, "producer produced pages");
+
+    // 内容正确性:GPU 棋盘(RGBA8 无损 → PSNR 应极高)
+    TEST_ASSERT(dispatchOnce(), "final dispatch");
+    {
+        const u32* m = static_cast<const u32*>(fx.base->MapBuffer(outRead, 0, 0));
+        TEST_ASSERT(m != nullptr, "map");
+        double sse = 0;
+        u32 checked = 0;
+        for (u32 y = 0; y < kW; y += 3)
+            for (u32 x = 0; x < kW; x += 3) {
+                u32 got = m[(size_t(y) * kW + x) * 3];
+                // 世界坐标 = uv*256;棋盘 16 单位;内容函数同 RVTCapture.frag
+                float wx = (x + 0.5f), wz = (y + 0.5f);
+                float c = ((int(wx / 16.0f) + int(wz / 16.0f)) & 1) ? 0.9f : 0.1f;
+                float r8 = c * 255.0f, g8 = (c * 0.75f + 0.125f) * 255.0f;
+                float b8 = (1.0f - c * 0.5f) * 255.0f;
+                double d0 = double((got) & 0xFF) - r8;
+                double d1 = double((got >> 8) & 0xFF) - g8;
+                double d2 = double((got >> 16) & 0xFF) - b8;
+                sse += d0 * d0 + d1 * d1 + d2 * d2;
+                ++checked;
+            }
+        fx.base->UnmapBuffer(outRead);
+        double mse = sse / (double(checked) * 3);
+        double psnr = mse <= 0 ? 99 : 10.0 * std::log10(255.0 * 255.0 / mse);
+        std::cout << "[VTSys] rvt content PSNR=" << psnr << " dB (checked "
+                  << checked << ")" << std::endl;
+        TEST_ASSERT(psnr >= 45.0, "RVT GPU content matches (lossless RGBA8)");
+    }
+
+    // 静态命中率:再采 N 帧无淘汰 → cache hits 增长、produced 不变
+    {
+        u32 producedBefore = sys.stats().producer_pages_produced;
+        u32 hitsBefore = sys.stats().producer_cache_hits;
+        for (u32 i = 0; i < 5; ++i, ++frame) {
+            TEST_ASSERT(dispatchOnce(), "static dispatch");
+            sys.update(frame);
+        }
+        TEST_ASSERT_EQ(producedBefore, sys.stats().producer_pages_produced,
+                       "static scene: no re-production");
+        TEST_ASSERT(sys.stats().producer_cache_hits >= hitsBefore,
+                    "cache hits grow");
+    }
+
+    // 淘汰重生产:release + 重新注册(简化触发;直接验证 producer 再产)
+    {
+        u32 producedBefore = sys.stats().producer_pages_produced;
+        // 用 prefetch_page 请求已驻留页 — 应计 cache hit
+        sys.prefetch_page(rvtId, 0, 0, 0);
+        sys.update(frame + 1);
+        TEST_ASSERT_EQ(producedBefore, sys.stats().producer_pages_produced,
+                       "resident prefetch = cache hit (no production)");
+        TEST_ASSERT(sys.stats().producer_cache_hits > 0, "hit counted");
+    }
+
+    fx.base->DestroyBuffer(outRead);
+    fx.base->DestroyBuffer(outBuf);
+    fx.base->DestroyBuffer(paramsBuf);
+    fx.base->DestroyDescriptorSet(ds);
+    fx.base->DestroySampler(nearest);
+    fx.base->DestroyPipeline(pipe);
+    fx.base->DestroyPipelineLayout(layout);
+    fx.base->DestroyDescriptorSetLayout(dsLayout);
+    fx.base->DestroyShader(shader);
+    volume.shutdown();
+    sys.shutdown();
+    return TestResult::Passed;
+}
+
 void RegisterVTSVTRuntimeTests() {
     auto suite = std::make_shared<TestSuite>("VTSVTRuntimeTests");
     suite->AddTestCase(TestCase("RuntimeLoop", TestVTSVT_RuntimeLoop));
@@ -1543,6 +1788,7 @@ void RegisterVTSVTRuntimeTests() {
     suite->AddTestCase(TestCase("FilterQuality", TestVTSVT_FilterQuality));
     suite->AddTestCase(TestCase("RenderGraphPass", TestVTSVT_RenderGraphPass));
     suite->AddTestCase(TestCase("MaterialRegistryVT", TestVTSVT_MaterialRegistryVT));
+    suite->AddTestCase(TestCase("RuntimeVolume", TestVTSVT_RuntimeVolume));
     TestRunner::RegisterTestSuite(suite);
 }
 

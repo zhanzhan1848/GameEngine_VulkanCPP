@@ -70,6 +70,8 @@ struct vt_stats {
     u32 pool_pages_used  = 0;
     u32 pool_pages_total = 0;
     u32 evictions_total  = 0;
+    u32 producer_pages_produced = 0;   // M5:RVT 页生产次数
+    u32 producer_cache_hits      = 0;   // M5:请求时已驻留(免生产)
 };
 
 // feedback 32bit 编码:|4bit vtId|4bit mip|12bit vPageX|12bit vPageY|
@@ -85,6 +87,19 @@ inline u32 pack_pt_entry(u32 atlas_x, u32 atlas_y) {
     return 1u | (atlas_x << 8) | (atlas_y << 19);
 }
 
+// ============================================================================
+// M5:Producer 接口 — 页数据生产者(SVT=磁盘;RVT=GPU 渲染)
+// ============================================================================
+struct IVTProducer {
+    virtual ~IVTProducer() = default;
+    /// GPU 直写物理池:系统已分配 atlas 槽位,producer 负责把该页该层的
+    /// 内容写进 atlas[atlas_x, atlas_y] 起 136×136 区域(三 pass:
+    /// 内容捕获 → 压缩 → 存储镜像直写)。同步完成(返回即就绪)。
+    /// 返回 false 则系统取消该请求(不标驻留)。
+    virtual bool produce_page(RHIDeviceBase* device, u32 vt_id, u32 page, u32 layer,
+                              ResourceHandle atlas, u32 atlas_x, u32 atlas_y) = 0;
+};
+
 class virtual_texture_system {
 public:
     static virtual_texture_system& instance();
@@ -95,6 +110,11 @@ public:
 
     /// 注册 VTEX 容器(blob 拷贝由系统持有)。返回 vt_id;失败返回 ~0u。
     u32 register_texture(const u8* vtex_data, u64 vtex_size);
+
+    /// M5:注册运行时 VT(RVT — 无磁盘容器,页由 producer 按需生产)。
+    /// width/height 为虚拟分辨率(2^n);format 通常 RGBA8(RVT 池)。
+    u32 register_runtime_texture(u32 width, u32 height, u32 format,
+                                 IVTProducer* producer);
     void release_texture(u32 vt_id);
 
     /// 采样绑定资源(页表 / 物理池 atlas;descriptor 用)
@@ -159,6 +179,7 @@ private:
         // 2.7 多层:层格式(平台选定段)与 per-page 层完成位(L 位全 1 = 驻留)
         u32 layer_count = 1;
         u32 layer_formats[4] = {0, 0, 0, 0};
+        IVTProducer* producer = nullptr;   // M5:非空 = 页请求路由到 GPU 生产
         std::vector<u8> page_layer_bits;        // 每页一个位掩码
         std::vector<u32> page_layer_origins;    // 每页 4 槽:层 l 的 atlas origin(x|y<<16)
     };
@@ -233,6 +254,7 @@ private:
         u32 vt_id, page;
         u32 layer = 0;   // 2.7:多层 VT 的层号(页表通道/层池)
         u32 format;
+        bool gpu_direct = false;   // M5:GPU 直写已完成,跳过 staging 上传
         std::vector<u8> data;      // 解压后的 tile 数据(压缩或原始)
         u64 data_size;
         u32 atlas_x, atlas_y;      // 已分配的物理槽位 origin
