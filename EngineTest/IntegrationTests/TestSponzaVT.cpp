@@ -23,6 +23,9 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RenderPipeline/Modules/ForwardSceneRenderer.h"
 #include "Graphics/RenderScene.h"
+#include "Graphics/RenderView.h"
+#include "Graphics/RenderPipeline/StandardRenderPipeline.h"
+#include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "Components/Transform.h"
 #include "Graphics/VirtualTexture/VirtualTextureSystem.h"
 
@@ -117,145 +120,138 @@ TestResult TestSponzaVT_Integration() {
         }
     }
 
-    ForwardSceneRenderer renderer;
-    TEST_ASSERT(renderer.Initialize(fx.base, 1024, 768), "renderer initialize");
-    renderer.EnableVirtualTextures(vtexDir);
-    TEST_ASSERT(renderer.IsVirtualTextureEnabled(), "VT mode enabled");
-
-    // 最小合法 .model(测试内生成):1 材质(Sponza_Arch 三张贴图路径)+ 1 四边形
-    // 网格 — 真实走完 LoadScene → 材质加载/VT 创建 → draw 全路径。
-    // 格式:[NumMat][5 字符串材质] [LodCount][thresholds][lod_offsets]
-    //       [SubmeshCount][SizeOfSubmeshes] compact mesh
-    //       [NameLen][Name][lodId][matIdx][elemSize][elemType][vertCount]
-    //       [idxSize][idxCount][threshold] + pos(16 对齐)+elem(16 对齐)+idx
-    std::vector<u8> model;
-    auto w32 = [&](u32 v) {
-        for (int i = 0; i < 4; ++i) model.push_back(u8((v >> (8 * i)) & 0xFF));
-    };
-    auto wstr = [&](const std::string& str) {
-        w32(u32(str.size()));
-        model.insert(model.end(), str.begin(), str.end());
-    };
-    auto wf32 = [&](float f) { w32(*reinterpret_cast<const u32*>(&f)); };
-    w32(1);                                        // numMaterials
-    wstr("Arch");
-    wstr("Sponza_Arch_diffuse.png");
-    wstr("Sponza_Arch_normal.png");
-    wstr("Sponza_Arch_roughness.png");
-    wstr("");
-    w32(1);                                        // lodCount
-    wf32(100.0f);                                  // thresholds
-    w32(0);                                        // lod_offsets(旧格式,1 项)
-    w32(1);                                        // submeshCount
-    w32(0);                                        // sizeOfSubmeshes
-    wstr("QuadMesh");                              // compact mesh 名
-    w32(0);                                        // lodId
-    w32(0);                                        // matIdx
-    w32(20);                                       // elementSize(colorTSign4+normal4+tangent4+uv8)
-    w32(0);                                        // elementsType
-    w32(4);                                        // vertexCount
-    w32(2);                                        // indexSize(u16)
-    w32(6);                                        // indexCount
-    wf32(100.0f);                                  // lodThreshold
-    // positions:uv 覆盖 [0,1] 的四边形(48B → pad 16 对齐至 64)
-    const float pos[4][3] = {{-1, -1, 5}, {1, -1, 5}, {1, 1, 5}, {-1, 1, 5}};
-    for (auto& v : pos) { wf32(v[0]); wf32(v[1]); wf32(v[2]); }
-    model.insert(model.end(), 16, 0);              // posPadding
-    // elements:colorTSign=0,normal/tangent=中值(解码为 0 向量),uv 四角
-    for (int i = 0; i < 4; ++i) {
-        w32(0);                                    // colorTSign
-        const u16 mid = 32767;
-        for (int k = 0; k < 2; ++k) model.push_back(u8(mid & 0xFF)), model.push_back(u8(mid >> 8));
-        for (int k = 0; k < 2; ++k) model.push_back(u8(mid & 0xFF)), model.push_back(u8(mid >> 8));
-        const float uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-        wf32(uv[i][0]); wf32(uv[i][1]);
-    }                                              // 4×20=80B,已 16 对齐
-    // indices(u16,两三角)
-    for (u16 idx : (u16[6]){0, 1, 2, 0, 2, 3}) {
-        model.push_back(u8(idx & 0xFF));
-        model.push_back(u8(idx >> 8));
-    }
+    // StandardRenderPipeline(编辑模式 = ForwardSceneRenderer 直连路径 —
+    // FSR-VK-GAP 修复验证:全场景 Vulkan 渲染)
+    StandardRenderPipeline pipeline;
+    TEST_ASSERT(pipeline.Initialize(fx.base), "pipeline initialize");
+    pipeline.SetEditorMode(true);
     {
-        std::ofstream f("/tmp/vt_minimal.model", std::ios::binary);
-        f.write(reinterpret_cast<const char*>(model.data()), std::streamsize(model.size()));
+        auto loadSpv = [&](const char* rel) -> rhi::ShaderHandle {
+            std::ifstream f(rel, std::ios::binary | std::ios::ate);
+            if (!f) return rhi::handles::INVALID_SHADER;
+            auto sz = f.tellg();
+            f.seekg(0);
+            std::vector<char> b(size_t(sz), 0);
+            f.read(b.data(), sz);
+            return fx.base->CreateShader(b.data(), b.size(),
+                                         std::string(rel).find(".vert.spv") != std::string::npos
+                                             ? rhi::ShaderStage::Vertex
+                                             : rhi::ShaderStage::Pixel,
+                                         "main");
+        };
+        StandardRenderPipeline::ShaderHandles handles;
+        handles.deferred_vs = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.vert.spv");
+        handles.deferred_ps = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.frag.spv");
+        handles.blit_vs = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Blit.vert.spv");
+        handles.blit_ps = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Blit.frag.spv");
+        handles.shadow_filter = loadSpv("Engine/Graphics/Vulkan/shaders/ShadowFilter.spv");
+        pipeline.SetShaderHandles(handles);
+        pipeline.SetLumenConfig({});   // 触发 InitializeSubsystems(forward_renderer_)
     }
-    TEST_ASSERT(renderer.LoadScene("/tmp/vt_minimal.model"), "LoadScene");
+    ForwardSceneRenderer* fr = pipeline.GetForwardRenderer();
+    TEST_ASSERT(fr != nullptr, "forward renderer");
+    fr->EnableVirtualTextures(vtexDir);
+    TEST_ASSERT(fr->IsVirtualTextureEnabled(), "VT mode enabled");
 
-    // ECS 桥:静态实体 → RenderScene proxies(渲染管线从 RenderScene 画)
-    auto statics = renderer.CreateStaticEntities();
+    // 真实 Sponza 全场景(393 代理 — FSR-VK-GAP 崩溃复现规模)
+    TEST_ASSERT(pipeline.LoadEditorScene("EngineTest/assets/Sponza.model"), "LoadEditorScene");
+    const u32 vtCount = fr->VTMaterialCount();
+    std::cout << "[SponzaVT] VT materials: " << vtCount << std::endl;
+    TEST_ASSERT(vtCount > 0, "VT materials created (mesh path)");
+
+    // ECS 桥
+    auto statics = fr->CreateStaticEntities();
     graphics::RenderScene scene;
     for (size_t i = 0; i < statics.entity_ids.size(); ++i) {
         const id::id_type eid = statics.entity_ids[i];
         primal::math::m4x4 world, invWorld;
         primal::transform::get_transform_matrices(game_entity::entity_id{eid}, world, invWorld);
-        const auto* mi = renderer.GetMeshInfo(statics.mesh_slot_indices[i]);
+        const auto* mi = fr->GetMeshInfo(statics.mesh_slot_indices[i]);
         if (!mi || !mi->mesh) continue;
         auto proxy = graphics::RenderProxy::Create(
             eid, mi->mesh->GetEntityId(), mi->gpuMaterialId);
         proxy.UpdateTransform(world);
         scene.AddProxy(proxy);
     }
-    renderer.SetRenderScene(&scene);
+    fr->SetRenderScene(&scene);
+    {
+        graphics::RenderLight sun{};
+        sun.type = graphics::LightType::Directional;
+        sun.color = primal::math::v3{1.0f, 0.96f, 0.9f};
+        sun.intensity = 3.0f;
+        scene.AddLight(sun);
+    }
+    graphics::RenderView view;
+    {
+        namespace rhimath = primal::graphics::rhi::math;
+        view.SetViewMatrix(rhimath::CreateLookAtMatrix(
+            rhimath::v3{0.0f, 2.0f, -8.0f}, rhimath::v3{0.0f, 2.0f, 0.0f},
+            rhimath::v3{0.0f, 1.0f, 0.0f}));
+        view.SetProjectionMatrix(rhimath::CreatePerspectiveMatrix(
+            60.0f * rhimath::constants::DEG_TO_RAD, 1024.0f / 768.0f, 0.1f, 1000.0f));
+        view.SetViewport({{0, 0}, {1024.0f, 768.0f}, 0, 1});
+        view.SetScissor({{0, 0}, {1024, 768}});
+        view.UpdateFrustum();
+        view.Cull(scene);
+    }
 
-    const u32 vtCount = renderer.VTMaterialCount();
-    std::cout << "[SponzaVT] VT materials: " << vtCount << std::endl;
-    TEST_ASSERT(vtCount > 0, "at least one VT material (mesh path wired)");
+    // 输出 RT
+    rhi::TextureDesc outDesc{};
+    outDesc.size = {1024, 768, 1};
+    outDesc.mipLevels = 1;
+    outDesc.arraySize = 1;
+    outDesc.format = rhi::DataFormat::BGRA8_UNorm;
+    outDesc.type = rhi::TextureType::Texture2D;
+    outDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::CopySource;
+    outDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+    outDesc.name = "SponzaVT_Output";
+    rhi::ResourceHandle output = fx.base->CreateTexture(outDesc);
+    TEST_ASSERT(output != rhi::handles::INVALID_RESOURCE, "output RT");
 
-    // backbuffer RT(Render 目标;RenderGraph 内部有 gbuffer RTs)
-    rhi::TextureDesc bbDesc{};
-    bbDesc.size = {1024, 768, 1};
-    bbDesc.mipLevels = 1;
-    bbDesc.arraySize = 1;
-    bbDesc.format = rhi::DataFormat::BGRA8_UNorm;
-    bbDesc.type = rhi::TextureType::Texture2D;
-    bbDesc.usage = rhi::TextureUsage::RenderTarget;
-    bbDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
-    bbDesc.name = "SponzaVT_Backbuffer";
-    rhi::ResourceHandle backbuffer = fx.base->CreateTexture(bbDesc);
-    TEST_ASSERT(backbuffer != rhi::handles::INVALID_RESOURCE, "backbuffer");
-
+    // 帧循环:RenderWithCommandBuffer → feedback 拷贝 → Submit(ring fence)
+    // → wait → update
     auto& sys = vt::virtual_texture_system::instance();
-    namespace rhimath = primal::graphics::rhi::math;
-    rhimath::m4x4 view = rhimath::CreateLookAtMatrix(
-        rhimath::v3{0.0f, 1.5f, 0.0f}, rhimath::v3{0.0f, 1.5f, 5.0f},
-        rhimath::v3{0.0f, 1.0f, 0.0f});
-    rhimath::m4x4 proj = rhimath::MatrixPerspective(
-        3.1415926f * 0.25f, 1024.0f / 768.0f, 0.1f, 100.0f);
-
-    // 帧循环:Render → AttachVTFeedback → submit → update
     const u32 kFrames = 24;
     for (u32 frame = 0; frame < kFrames; ++frame) {
         rhi::CommandBufferHandle cmd = fx.base->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
         rhi::RHICommandBuffer* cb = rhi::GetCommandBuffer(cmd);
         TEST_ASSERT(cb && cb->Reset() && cb->Begin(), "begin frame");
-        // 缓慢环绕:让不同材质进视野触发各自的 feedback
-        renderer.Render(cb, view, proj, rhimath::v3{0.0f, 1.5f, 0.0f}, backbuffer, frame);
+        pipeline.RenderWithCommandBuffer(scene, view, output, outDesc, cb, 0, cmd,
+                                          rhi::handles::INVALID_SYNC);
         rhi::QueueSubmitInfo si{};
         si.cmdBuffer = cmd;
-        renderer.AttachVTFeedback(cb, frame, si);
+        si.signalFence = sys.feedback_fence_handle(frame);
+        sys.record_feedback(cb, frame);
         TEST_ASSERT(cb->End(), "end frame");
         TEST_ASSERT(fx.base->Submit(si), "submit frame");
-        // fence 等待后才能销毁命令缓冲(free-while-pending 会破坏 validation
-        // layer 内部状态 — M0.9 同款教训)
         TEST_ASSERT(sys.wait_feedback(frame, 5000), "feedback fence");
         fx.base->DestroyCommandBuffer(cmd);
         sys.update(frame);
     }
 
-    // 背缓冲探针:非零像素数(判断是否真的有内容被画)
+    // 场景级闭环统计(FSR-VK-GAP 修复后应全过)
+    {
+        // 排空 GPU 后读输出画面
+        CommandBufferHandle drain = fx.base->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+        RHICommandBuffer* wc = rhi::GetCommandBuffer(drain);
+        wc->Reset(); wc->Begin(); wc->End();
+        wc->Submit(0);
+        wc->WaitForCompletion();
+        fx.base->DestroyCommandBuffer(drain);
+    }
     {
         rhi::BufferDesc rb{};
         rb.size = 1024ull * 768 * 4;
         rb.type = rhi::BufferType::Raw;
         rb.memoryUsage = rhi::GPUMemoryUsage::Readback;
         rhi::ResourceHandle rbBuf = fx.base->CreateBuffer(rb);
-        rhi::CommandBufferHandle cmd = fx.base->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+        CommandBufferHandle cmd = fx.base->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
         auto* cb = rhi::GetCommandBuffer(cmd);
         cb->Reset(); cb->Begin();
         rhi::BufferTextureCopyRegion reg{};
         reg.imageSubresource.layerCount = 1;
         reg.imageExtent = {1024, 768, 1};
-        cb->CopyTextureToBuffer(backbuffer, rbBuf, &reg, 1);
+        cb->CopyTextureToBuffer(output, rbBuf, &reg, 1);
         cb->End();
         cb->Submit(0);
         cb->WaitForCompletion();
@@ -265,8 +261,8 @@ TestResult TestSponzaVT_Integration() {
         for (u64 i = 0; i < rb.size; ++i) if (m[i]) ++nonzero;
         fx.base->UnmapBuffer(rbBuf);
         fx.base->DestroyBuffer(rbBuf);
-        std::cout << "[SponzaVT] backbuffer non-zero bytes: " << nonzero << "/" << rb.size
-                  << " proxies=" << scene.GetProxies().size() << std::endl;
+        std::cout << "[SponzaVT] output non-zero bytes: " << nonzero << "/" << rb.size << std::endl;
+        TEST_ASSERT(nonzero > rb.size / 10, "scene visibly rendered");
     }
 
     const vt::vt_stats& st = sys.stats();
@@ -274,16 +270,13 @@ TestResult TestSponzaVT_Integration() {
               << " resident=" << st.resident_pages
               << " pool=" << st.pool_pages_used << "/" << st.pool_pages_total
               << " evict=" << st.evictions_total << std::endl;
-    // 2.16 当前验证层次(mesh 路径):LoadScene → .vtex 发现/注册 → VT 材质
-    // set 创建 → 多帧渲染稳定。片元 feedback 驱动的场景级闭环依赖
-    // ForwardSceneRenderer 直连 Render 的 Vulkan 路径补全(实例 SSBO +
-    // 顶点绑定,存量缺口,见 cpp:2255 注释)或 StandardRenderPipeline/
-    // RenderGraph 骨架接入 — 已列 openspec 2.16 跑道。
-    TEST_ASSERT(st.resident_pages >= 3, "root pages resident (3 layers)");
-    TEST_ASSERT(st.pool_pages_used <= st.pool_pages_total, "pool occupancy sane");
+    TEST_ASSERT(st.feedback_processed > 0, "fragment feedback processed (scene loop)");
+    TEST_ASSERT(st.resident_pages > 3, "pages streamed beyond roots");
+    TEST_ASSERT(st.pool_pages_used > 0 && st.pool_pages_used <= st.pool_pages_total,
+                "pool occupancy sane");
 
-    fx.base->DestroyTexture(backbuffer);
-    renderer.Shutdown();
+    fx.base->DestroyTexture(output);
+    pipeline.Shutdown();
     sys.shutdown();
     return TestResult::Passed;
 }
