@@ -1,0 +1,57 @@
+#pragma once
+
+#include "CommonHeaders.h"
+#include "Graphics/Dawn/DawnDebugParams.h"
+
+namespace primal::graphics::lumen {
+
+// ============================================================================
+// GIDebugParams — 三端统一的 GI 调试旋钮（C3，T4.5）
+//
+// 取代 DawnDebugParams 的 GI 部分：同一份参数对象被 Vulkan/Metal/Dawn 三端
+// 的 pass 在 AddPass 时读取——"三端同一旋钮生效"。
+// 旧 WASM sidebar 的 DawnDebugParams 滑条通过 ApplyLegacy() 桥接进来，
+// 行为不变。
+// ============================================================================
+struct GIDebugParams {
+    // ------------------------------------------------------------------
+    // 逐 pass 开关（false = 跳过 dispatch；已有输出保持上帧内容）
+    // ------------------------------------------------------------------
+    bool ddgi_trace = true;          ///< DDGI 近场 trace/update 链
+    bool ddgi_far_volume = true;     ///< T4.4 远场粗 volume
+    bool sc_capture = true;          ///< Surface Cache capture
+    bool sc_lighting = true;         ///< SC LightEval（页预算调度）
+    bool sc_shadow = true;           ///< T3.3 SDF 阴影 split-pass
+    bool gi_gather = true;           ///< GIGather（近场+远场 gather）
+    bool fusion = true;              ///< FusionIndirect/Composite
+
+    // ------------------------------------------------------------------
+    // 权重热调（CPU 侧即时生效；shader 内常量旋钮随 T6.1 CB 化）
+    // ------------------------------------------------------------------
+    float sky_color_intensity = 0.4f;    ///< DDGI 天空色强度（原 DawnDebugParams[4]）
+    float albedo_intensity = 0.5f;       ///< DDGI 多反弹 albedo 强度（原 [5]）
+    float probe_hysteresis = 0.2f;       ///< probe EMA 滞回（原 [6]）
+    float fusion_glossy_strength = 0.75f; ///< T4.3 光泽项强度（0.75 为实测达标值）
+
+    // ------------------------------------------------------------------
+    // freeze frame —— 冻结 probe 更新（读旧槽数据，用于 A/B 对比）
+    // ------------------------------------------------------------------
+    bool freeze_probe_updates = false;
+
+    // ------------------------------------------------------------------
+    // 旧接口桥接（WASM sidebar → 统一旋钮）
+    // ------------------------------------------------------------------
+    void ApplyLegacy(const rhi::DawnDebugParams& p) {
+        sky_color_intensity = p.skyColorIntensity;
+        albedo_intensity = p.albedoIntensity;
+        probe_hysteresis = p.probeHysteresis;
+    }
+};
+
+// 进程级实例（Meyers singleton，WASM 安全）
+inline GIDebugParams& GIDebug() {
+    static GIDebugParams instance;
+    return instance;
+}
+
+} // namespace primal::graphics::lumen

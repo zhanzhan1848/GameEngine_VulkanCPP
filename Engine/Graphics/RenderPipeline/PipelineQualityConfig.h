@@ -122,6 +122,12 @@ struct PipelineQualityConfig {
     void SetPassEnabled(RenderPassID id, bool enabled);
 
     static PipelineQualityConfig FromPreset(lumen::LumenQualityPreset p);
+
+    // T4.5/C4: axis-schema mapping — one source of truth for preset → Lumen
+    // axis parameters (probe grid / rays / far volume / SC budgets / probes).
+    // FromPreset and editor UI both consume this so pass toggles and GI axis
+    // values can never drift apart.
+    static lumen::LumenConfig LumenConfigFromPreset(lumen::LumenQualityPreset p);
 };
 
 // ============================================================================
@@ -138,6 +144,15 @@ struct RenderPipelineSettings {
     volume::VolumeRuntimeParams volume;
     volume::FroxelGridConfig froxel;
     fluid::FluidConfig fluid;
+
+    // T4.5/C4: one call — pass toggles and Lumen axis values from the same
+    // preset (both route through FromPreset / LumenConfigFromPreset).
+    static RenderPipelineSettings FromPreset(lumen::LumenQualityPreset p) {
+        RenderPipelineSettings s{};
+        s.quality = PipelineQualityConfig::FromPreset(p);
+        s.lumen = PipelineQualityConfig::LumenConfigFromPreset(p);
+        return s;
+    }
 };
 
 // ============================================================================

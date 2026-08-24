@@ -146,6 +146,55 @@ PipelineQualityConfig PipelineQualityConfig::FromPreset(lumen::LumenQualityPrese
 }
 
 // ============================================================================
+// T4.5/C4 — preset → Lumen axis-schema mapping (single source of truth)
+// ============================================================================
+
+lumen::LumenConfig PipelineQualityConfig::LumenConfigFromPreset(lumen::LumenQualityPreset p) {
+    // Medium is the tuned Sponza baseline; Low/Off scale down, High/Ultra up.
+    lumen::LumenConfig c{};
+
+    switch (p) {
+    case lumen::LumenQualityPreset::Off:
+        c.ddgi_probe_count_x = 8;  c.ddgi_probe_count_y = 4;  c.ddgi_probe_count_z = 8;
+        c.ddgi_probe_spacing = 8.0f;
+        c.ddgi_rays_per_probe = 16;
+        c.ddgi_enable_far_volume = false;
+        c.surface_cache_capture_budget = 0;      // SC lighting off at this tier
+        break;
+
+    case lumen::LumenQualityPreset::Low:
+        c.ddgi_probe_count_x = 16; c.ddgi_probe_count_y = 8;  c.ddgi_probe_count_z = 16;
+        c.ddgi_probe_spacing = 4.0f;
+        c.ddgi_rays_per_probe = 32;
+        c.ddgi_enable_far_volume = false;
+        c.surface_cache_capture_budget = 64;
+        break;
+
+    case lumen::LumenQualityPreset::Medium:
+        c.ddgi_probe_count_x = 32; c.ddgi_probe_count_y = 16; c.ddgi_probe_count_z = 32;
+        c.ddgi_probe_spacing = 2.0f;
+        c.ddgi_rays_per_probe = 64;              // split-trace kernel ceiling (T4.2)
+        c.ddgi_enable_far_volume = true;
+        c.surface_cache_capture_budget = 256;
+        break;
+
+    case lumen::LumenQualityPreset::High:
+    case lumen::LumenQualityPreset::Ultra:
+    case lumen::LumenQualityPreset::UltraRT:
+        c.ddgi_probe_count_x = 32; c.ddgi_probe_count_y = 16; c.ddgi_probe_count_z = 32;
+        c.ddgi_probe_spacing = 2.0f;
+        c.ddgi_rays_per_probe = 64;
+        c.ddgi_enable_far_volume = true;
+        c.surface_cache_capture_budget = 512;
+        break;
+    }
+
+    // Axis values the governor (T4.1) modulates within these ceilings.
+    c.max_gi_time_ms = 6.0f;
+    return c;
+}
+
+// ============================================================================
 // ParamDescriptor table
 // ============================================================================
 

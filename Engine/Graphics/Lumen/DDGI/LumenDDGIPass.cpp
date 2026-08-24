@@ -1,4 +1,5 @@
 #include "LumenDDGIPass.h"
+#include "Engine/Graphics/Lumen/GIDebugParams.h"
 #include "Engine/Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/SurfaceCacheTypes.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
@@ -1167,6 +1168,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
+            // T4.5: unified debug knobs — freeze frame / per-pass toggle.
+            // Skipping dispatches keeps the triple-buffered probe data at its
+            // last-written content (readers still get valid slots).
+            if (GIDebug().freeze_probe_updates || !GIDebug().ddgi_trace) return;
+
             static int s_ddgi_exec = 0;
             if (s_ddgi_exec < 3) {
                 std::cerr << "[DDGI_EXEC] frame " << s_ddgi_exec
@@ -1412,7 +1418,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.DeltaTime = camera_data.delta_time;
                     vd.FrameIndex = camera_data.frame_index;
                     vd.RayMaxDistance = params_.ray_max_distance;
-                    vd.ProbeHysteresis = dawnDebugParams_.probeHysteresis;
+                    // T4.5: unified three-backend debug knobs (GIDebug()).
+                    // DawnDebugParams sliders bridge in via ApplyLegacy.
+                    vd.ProbeHysteresis = GIDebug().probe_hysteresis;
                     vd.TemporalAlpha = params_.irradiance_temporal_weight; // EMA alpha (default 0.05)
                     vd.LightDirection = {camera_data.light_direction.x,
                                          camera_data.light_direction.y,
@@ -1423,13 +1431,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.LightColor = {camera_data.light_color.x,
                                      camera_data.light_color.y,
                                      camera_data.light_color.z, 3.0f};
-                    // Mode 11 canonical radiance inputs — live-tunable from the
-                    // WASM debug panel (default 0.6). SkyColor.xyz are scaled by
-                    // dawnDebugParams_.skyColorIntensity preserving the 0.85/0.85/1.0
-                    // tint ratio; Albedo.xyz are set uniformly from
-                    // dawnDebugParams_.albedoIntensity.
-                    float sky = dawnDebugParams_.skyColorIntensity;
-                    float alb = dawnDebugParams_.albedoIntensity;
+                    // Mode 11 canonical radiance inputs — live-tunable (default
+                    // sky 0.4 / albedo 0.5). SkyColor.xyz preserve the 0.85/0.85/1.0
+                    // tint ratio; Albedo.xyz are set uniformly.
+                    float sky = GIDebug().sky_color_intensity;
+                    float alb = GIDebug().albedo_intensity;
                     vd.SkyColor = {sky * 0.85f, sky * 0.85f, sky * 1.0f, 0.0f};
                     vd.Albedo   = {alb, alb, alb, 0.0f};
 

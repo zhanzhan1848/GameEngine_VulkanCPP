@@ -495,6 +495,14 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     gi_base_page_budget_ = config.surface_cache_capture_budget;
     gi_governor_ = {};   // reset to full quality on (re)initialization
 
+    // T4.5/C5: platform capability ceiling — the profile clamps GI budgets so
+    // no dispatch exceeds per-thread read limits regardless of config.
+    gi_profile_ = lumen::GIPlatformProfile::Detect(device_);
+    if (gi_base_probe_budget_ > gi_profile_.max_probes_per_frame)
+        gi_base_probe_budget_ = gi_profile_.max_probes_per_frame;
+    if (gi_base_page_budget_ > gi_profile_.page_budget)
+        gi_base_page_budget_ = gi_profile_.page_budget;
+
     // T4.6.5 part 33: Lumen suite (DDGI/SSAO/SSGI/SurfaceCache) is deferred on
     // Vulkan — needs SPIR-V ports + non-overlapping descriptor bindings per
     // memory vulkan-rhi-t46-subsystems-probe-findings.md. Silently skip the
@@ -1398,7 +1406,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
         // T4.4: far-field coarse volume — no SC atlas (card data is near-field;
         // far probes take radiance from the canonical trace chain only).
-        if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized()) {
+        if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized() && lumen::GIDebug().ddgi_far_volume) {
             ddgi_far_pass_->AddPass(graph, prevColor, camData,
                                      static_cast<u32>(frameCount_), RGResourceHandle{});
         }
@@ -1517,7 +1525,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     GIGatherOutputs giOut;
-    if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+    if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized() && lumen::GIDebug().gi_gather) {
         // Import GBuffer under UNIQUE names for GIGather — same physical textures,
         // different RG identities.
         auto gbufferDepthGI = graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
@@ -1545,7 +1553,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     FusionOutputs fusionOut;
-    if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr)) {
+    if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr) && lumen::GIDebug().fusion) {
         FusionInputs fusionIn;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
         fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -2041,7 +2049,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
 
             // T4.4: far-field coarse volume (no SC atlas — near-field data only).
-            if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized()) {
+            if (ddgi_far_pass_ && ddgi_far_pass_->IsInitialized() && lumen::GIDebug().ddgi_far_volume) {
                 ddgi_far_pass_->AddPass(graph, prevColor, camData,
                                          static_cast<u32>(frameCount_), RGResourceHandle{});
             }
@@ -2061,7 +2069,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- GIGather ---
         GIGatherOutputs giOut;
-        if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+        if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized() && lumen::GIDebug().gi_gather) {
             auto gbufferDepthGI = graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
             auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
             auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
@@ -2272,7 +2280,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- FusionComposite ---
         FusionOutputs fusionOut;
-        if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr)) {
+        if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr) && lumen::GIDebug().fusion) {
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;

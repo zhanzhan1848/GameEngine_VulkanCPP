@@ -12,6 +12,7 @@
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include "Graphics/Lumen/LumenTypes.h"
+#include "Graphics/Lumen/GIPlatformProfile.h"
 #include "Graphics/Volume/VolumePass.h"
 #include "Graphics/RenderPipeline/Modules/GIAdaptiveGovernor.h"
 #include "Graphics/Volume/VolumeRenderer.h"
@@ -355,6 +356,7 @@ private:
     // --- Lumen GI ---
     std::unique_ptr<lumen::LumenDDGIPass> ddgi_pass_;
     std::unique_ptr<lumen::LumenDDGIPass> ddgi_far_pass_;  // T4.4 far-field coarse layer
+    lumen::GIPlatformProfile gi_profile_{};                // T4.5/C5 capability ceiling
     std::unique_ptr<lumen::LumenSSAOPass> ssao_pass_;
     std::unique_ptr<lumen::LumenSSGIPass> ssgi_pass_;
     std::unique_ptr<lumen::SurfaceCachePass> surface_cache_pass_;

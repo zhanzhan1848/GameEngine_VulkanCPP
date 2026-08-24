@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/Dawn/DawnDebugParams.h"
+#include "Graphics/Lumen/GIDebugParams.h"
 #include <vector>
 
 namespace primal::graphics::rhi {
@@ -203,7 +204,12 @@ public:
     // Live-tunable debug params (WASM sidebar). Indices 4..6 of DawnDebugParams
     // map to SkyColor intensity, Albedo intensity, ProbeHysteresis. Values are
     // consumed in AddPass when uploading DDGIVolumeData to the GPU.
-    void SetDawnDebugParams(const DawnDebugParams& params) { dawnDebugParams_ = params; }
+    // T4.5: legacy WASM sidebar bridge — routes into the unified GIDebug()
+    // knobs (three-backend single source). Kept for API compatibility.
+    void SetDawnDebugParams(const DawnDebugParams& params) {
+        dawnDebugParams_ = params;
+        GIDebug().ApplyLegacy(params);
+    }
 
     // Accessor for confidence buffer (for Task 5 later)
     rhi::ResourceHandle GetConfidenceBuffer(u32 frame_idx = 0) const {
