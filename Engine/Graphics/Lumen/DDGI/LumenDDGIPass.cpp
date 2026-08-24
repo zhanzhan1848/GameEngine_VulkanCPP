@@ -517,10 +517,15 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_data
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // sc_grid_offsets (T1.3)
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // sc_grid_cards (T1.3)
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_frame_color (T3.1)
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // gbuffer_albedo (T3.1)
+            {9, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // ViewProjection (T3.1)
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (T3.1)
         };
         finalizeBindings[7].readonly = true;
         finalizeBindings[8].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{9, finalizeBindings};
+        finalizeBindings[10].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{13, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 }
@@ -1674,8 +1679,12 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {6, DescriptorType::StorageBuffer, sc_card_data_buffer_},
                             {7, DescriptorType::StorageBuffer, sc_grid_offsets_buffer_},
                             {8, DescriptorType::StorageBuffer, sc_grid_cards_buffer_},
+                            {4, DescriptorType::SampledImage,  prevColorTex},
+                            {5, DescriptorType::SampledImage,  gbufferAlbedoTex},
+                            {9, DescriptorType::UniformBuffer, finalize_vp_cb_[frameIdx]},
+                            {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 9);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 13);
                     }
 
                     cmd->BindComputePipeline(finalize_pipeline_);

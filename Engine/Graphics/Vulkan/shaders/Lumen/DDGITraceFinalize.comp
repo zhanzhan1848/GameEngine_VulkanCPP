@@ -68,8 +68,8 @@ layout(set = 0, binding = 8) uniform texture2D prev_frame_color;
 layout(set = 0, binding = 9) uniform texture2D gbuffer_albedo;
 
 layout(set = 0, binding = 10, std430) readonly buffer IrradianceHistoryBuf {
-    float irradiance_history[];
-} ih;
+    vec4 irradiance_history[];   // T3.1 fix: vec4 view (16B stride) — matches the
+} ih;                           // structured elementStride of LumenDDGIPass buffers
 
 // DDGIVolumeData UBO — 336 bytes, matches DDGITraceRays.comp.
 layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
@@ -287,16 +287,13 @@ vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
     TetraResult tet = tetrahedral(gp, counts);
     vec3 result = vec3(0.0);
     float totalWeight = 0.0;
-    // irradiance_history: vec4[9] per probe = 36 floats/probe.
+    // irradiance_history: vec4[9] per probe (16B-stride structured elements).
     for (uint p = 0u; p < 4u; p++) {
         if (tet.bw[p] < 0.001) continue;
-        uint base = tet.pi[p] * 36u;
+        uint base = tet.pi[p] * 9u;
         vec3 sh[4];
         for (uint i = 0u; i < 4u; i++) {
-            uint cb_i = base + i * 4u;
-            sh[i] = vec3(ih.irradiance_history[cb_i + 0u],
-                         ih.irradiance_history[cb_i + 1u],
-                         ih.irradiance_history[cb_i + 2u]);
+            sh[i] = ih.irradiance_history[base + i].xyz;
         }
         vec3 irradiance = shDot4(sh, N);
         result += irradiance * tet.bw[p];

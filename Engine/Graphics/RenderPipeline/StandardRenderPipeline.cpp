@@ -1277,6 +1277,12 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
         frameData.frame_index = static_cast<u32>(frameCount_);
         frameData.light_count = 1;
+        // T3.2: real light from settings instead of the SC-internal hardcode
+        math::v3 scLightDir = Normalize(settings_.lighting.light_direction);
+        frameData.light_direction = scLightDir;
+        frameData.light_color = {settings_.lighting.ddgi_light_color.x,
+                                 settings_.lighting.ddgi_light_color.y,
+                                 settings_.lighting.ddgi_light_color.z};
 
         // GBuffer-gather capture: real rendered surfaces → card atlas.
         frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
@@ -1907,6 +1913,12 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
             frameData.frame_index = static_cast<u32>(frameCount_);
             frameData.light_count = 1;
+            // T3.2: real light from settings instead of the SC-internal hardcode
+            math::v3 scLightDir2 = Normalize(settings_.lighting.light_direction);
+            frameData.light_direction = scLightDir2;
+            frameData.light_color = {settings_.lighting.ddgi_light_color.x,
+                                     settings_.lighting.ddgi_light_color.y,
+                                     settings_.lighting.ddgi_light_color.z};
             frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
             frameData.render_width  = render_width_;
             frameData.render_height = render_height_;

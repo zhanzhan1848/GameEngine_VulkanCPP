@@ -939,7 +939,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             }
 
             // ================================================================
-            // 2. Upload directional light into light_info_buffer_
+            // 2. Upload light list into light_info_buffer_ (T3.2: direction/
+            //    color come from the caller's frame data — the pipeline
+            //    injects settings_.lighting — replacing the hardcoded light).
             //    (LightInfo = position(vec4) + color(vec4) + direction(vec4) = 48B)
             // ================================================================
             {
@@ -951,9 +953,16 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 static_assert(sizeof(LightInfoGPU) == 48, "LightInfo must be 48 bytes");
                 auto* lights = static_cast<LightInfoGPU*>(device_->MapBuffer(light_info_buffer_));
                 if (lights) {
-                    lights[0].position  = math::v4{0.0f, 0.0f, 0.0f, 1000.0f};
-                    lights[0].color     = math::v4{5.0f, 5.0f, 5.0f, 0.0f};
-                    lights[0].direction = math::v4{0.707f, -1.0f, 0.408f, 1.0f}; // w=1 → directional
+                    const u32 lightCount = frame_data.light_count > 0 ? frame_data.light_count : 1u;
+                    for (u32 i = 0; i < lightCount; ++i) {
+                        lights[i].position  = math::v4{0.0f, 0.0f, 0.0f, 1000.0f};
+                        lights[i].color     = math::v4{frame_data.light_color.x,
+                                                       frame_data.light_color.y,
+                                                       frame_data.light_color.z, 0.0f};
+                        lights[i].direction = math::v4{frame_data.light_direction.x,
+                                                       frame_data.light_direction.y,
+                                                       frame_data.light_direction.z, 1.0f}; // w=1 → directional
+                    }
                     device_->UnmapBuffer(light_info_buffer_);
                 }
             }

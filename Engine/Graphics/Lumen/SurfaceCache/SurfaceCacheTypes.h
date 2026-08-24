@@ -73,6 +73,13 @@ struct SurfaceCacheFrameData {
     uint32_t   light_count;
     float      _pad2[2];
 
+    // T3.2: light injected by the caller (pipeline passes settings_.lighting);
+    // defaults preserve the old hardcoded directional light.
+    math::v3   light_direction{0.707f, -1.0f, 0.408f};
+    float      _pad3;
+    math::v3   light_color{5.0f, 5.0f, 5.0f};
+    float      _pad4;
+
     // GBuffer-gather capture inputs (Vulkan Capture path): main-pass GBuffer
     // handles + inverse view-projection for world-position reconstruction.
     math::m4x4 inv_view_projection;
