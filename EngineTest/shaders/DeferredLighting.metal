@@ -555,20 +555,26 @@ fragment float4 fragmentFusionIndirect(
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     float4 ssgi4   = ssgiColor.sample(s, in.uv);
     float3 ddgi    = ddgiColor.sample(s, in.uv).rgb;
-    float3 spgi    = spgiColor.sample(s, in.uv).rgb;
+    float4 spgi4   = spgiColor.sample(s, in.uv);
     float3 albedo  = albedoTex.sample(s, in.uv).rgb;
     float  ssao    = ssaoTex.sample(s, in.uv).r;
     if (ssao <= 0.0f) ssao = 1.0f;
     float ao = pow(ssao, 1.5f);
 
-    // SSGI alpha encodes average hit distance in world units (range 0..max_trace_distance,
-    // default 30). Older formula `1 - hit/2.0` saturated to 0 for any non-trivial hit,
-    // zeroing SSGI contribution. Match fragmentBlitComposite (mode 0): use raw irradiance.
     float3 ssgi_irr = ssgi4.rgb;
+    float  ssgi_hit = ssgi4.a;
+    float  ssgi_hit_norm = clamp(ssgi_hit, 0.0f, 30.0f) / 30.0f;
+    float  ssgi_conf = saturate(1.0f - ssgi_hit_norm * 0.7f);
+    // SPGI confidence gate (T2.3): dummy black texture has alpha 0 → weight 0
+    float  spgi_w = saturate(spgi4.a * 2.0f);
 
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    float3 indirect = albedo * (ddgi * 0.08f + spgi * 0.5f + ssgi_irr * 0.3f);
+    // Unified three-source blend (T2.3 — matches Vulkan FusionIndirect.frag)
+    float3 indirect = albedo *
+        (ddgi * 0.8f * (1.0f - spgi_w)
+       + ssgi_irr * ssgi_conf * 0.2f * (1.0f - spgi_w)
+       + spgi4.rgb * spgi_w) * 0.7f;
     indirect *= ao;
 
     return float4(indirect, 1.0f);
@@ -622,7 +628,7 @@ kernel void computeFusionIndirect(
 
     float4 ssgi4  = ssgiColor.read(gid);
     float3 albedo = albedoTex.read(gid).rgb;
-    float3 spgi   = spgiColor.read(gid).rgb;
+    float4 spgi4  = spgiColor.read(gid);
 
     // DDGI is half-resolution: read at half pixel coords
     uint2 ddgiCoord = gid / 2u;
@@ -636,11 +642,15 @@ kernel void computeFusionIndirect(
 
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    float ssgi_conf = saturate(1.0f - ssgi_hit / 2.0f);
-    float3 indirect_ddgi = albedo * ddgi * 0.08f;
-    float3 indirect_spgi = albedo * spgi * 0.5f;
-    float3 indirect_ssgi = albedo * ssgi_irr * ssgi_conf * 0.3f;
-    float3 indirect = indirect_ddgi + indirect_spgi + indirect_ssgi;
+    float ssgi_hit_norm = clamp(ssgi_hit, 0.0f, 30.0f) / 30.0f;
+    float ssgi_conf = saturate(1.0f - ssgi_hit_norm * 0.7f);
+    float spgi_w = saturate(spgi4.a * 2.0f);
+
+    // Unified three-source blend (T2.3 — matches Vulkan FusionIndirect.frag)
+    float3 indirect = albedo *
+        (ddgi * 0.8f * (1.0f - spgi_w)
+       + ssgi_irr * ssgi_conf * 0.2f * (1.0f - spgi_w)
+       + spgi4.rgb * spgi_w) * 0.7f;
 
     indirectOut.write(float4(indirect, 1.0f), gid);
 }

@@ -38,6 +38,9 @@ struct ScreenProbeGlobalData {
     float4   sdf_resolutions; // x=res0, y=res1, z=res2, w=cascadeCount
 
     float4   surface_cache_params; // x=atlasSize, y=cardCount, z=surfaceCacheAvailable(0/1), w=unused
+
+    // T2.2: DDGI probe fallback — [0]=probe origin.xyz + spacing, [1]=counts.xyz + enabled(0/1)
+    float4   ddgi_fb[2];
 };
 
 // ============================================================================
@@ -190,6 +193,8 @@ kernel void screen_probe_trace_rays(
     // T1.3: uniform card grid (header + prefix sums / card indices)
     device const uint*                sc_grid_offsets [[buffer(6)]],
     device const uint*                sc_grid_cards   [[buffer(7)]],
+    // T2.2: DDGI probe irradiance (SH3, 16B-stride float3 elements) for miss fallback
+    device const float3*              ddgi_irradiance [[buffer(8)]],
 
     // Thread positioning (1D to be compatible with shared Metal compute encoder)
     uint global_id [[thread_position_in_grid]])
@@ -278,14 +283,36 @@ kernel void screen_probe_trace_rays(
         // Store cosine weight (applied during averaging)
         cosTheta = max(dot(probeNormal, rayDir), 0.0f);
     } else {
-        // Miss ray: simple sky ambient (hemisphere-weighted sky color)
-        // This prevents probes from going completely black when many rays miss
-        float skyWeight = max(dot(probeNormal, rayDir), 0.0f);
-        if (skyWeight > 0.0f) {
+        // Miss ray fallback chain (T2.2): DDGI probe grid → sky gradient.
+        // Nearest-probe SH L0+L1 evaluated along the ray direction — the
+        // Lumen-style "miss → world probe cache" edge. Sky gradient remains
+        // the terminal fallback when DDGI is unavailable.
+        if (global.ddgi_fb[1].w > 0.5f) {
+            float3 org = global.ddgi_fb[0].xyz;
+            float spacing = max(global.ddgi_fb[0].w, 0.01f);
+            int3 counts = int3(global.ddgi_fb[1].xyz);
+            int3 gc = int3(floor((probePos - org) / spacing));
+            gc = clamp(gc, int3(0), counts - int3(1));
+            uint pidx = uint(gc.x) + uint(counts.x) * (uint(gc.y) + uint(counts.y) * uint(gc.z));
+            // SH3 coefficients @ 16B stride (matches LumenDDGIPass irradiance buffers)
+            float3 sh0 = ddgi_irradiance[pidx * 9u + 0u];
+            float3 sh1 = ddgi_irradiance[pidx * 9u + 1u];
+            float3 sh2 = ddgi_irradiance[pidx * 9u + 2u];
+            float3 sh3 = ddgi_irradiance[pidx * 9u + 3u];
+            radiance = max(0.0f,
+                0.282095f * sh0
+                - 0.488603f * sh1 * rayDir.y
+                + 0.488603f * sh2 * rayDir.z
+                - 0.488603f * sh3 * rayDir.x);
+            cosTheta = max(dot(probeNormal, rayDir), 0.0f);
+        } else {
             // Simple sky gradient: blue-ish at horizon, lighter at zenith
-            float skyY = rayDir.y * 0.5f + 0.5f;
-            radiance = mix(float3(0.15f, 0.18f, 0.25f), float3(0.4f, 0.5f, 0.65f), skyY);
-            cosTheta = skyWeight;
+            float skyWeight = max(dot(probeNormal, rayDir), 0.0f);
+            if (skyWeight > 0.0f) {
+                float skyY = rayDir.y * 0.5f + 0.5f;
+                radiance = mix(float3(0.15f, 0.18f, 0.25f), float3(0.4f, 0.5f, 0.65f), skyY);
+                cosTheta = skyWeight;
+            }
         }
     }
 

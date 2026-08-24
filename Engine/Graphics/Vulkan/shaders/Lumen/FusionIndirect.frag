@@ -29,7 +29,7 @@ layout(set = 0, binding = 5) uniform sampler defaultSampler;
 void fusion_indirect() {
     vec4 ssgi4   = texture(sampler2D(ssgiColor, defaultSampler), inUv);
     vec3 ddgi    = texture(sampler2D(ddgiColor, defaultSampler), inUv).rgb;
-    vec3 spgi    = texture(sampler2D(spgiColor, defaultSampler), inUv).rgb;
+    vec4 spgi4   = texture(sampler2D(spgiColor, defaultSampler), inUv);
     vec3 albedo  = texture(sampler2D(albedoTex, defaultSampler), inUv).rgb;
     float ssao   = texture(sampler2D(ssaoTex, defaultSampler), inUv).r;
     if (ssao <= 0.0) ssao = 1.0;
@@ -45,6 +45,11 @@ void fusion_indirect() {
     // guard against garbage values from the temporal/filter pipeline.
     float ssgi_hit_norm = clamp(ssgi_hit, 0.0, 30.0) / 30.0;
     float ssgi_conf = clamp(1.0 - ssgi_hit_norm * 0.7, 0.3, 1.0);
+
+    // SPGI confidence gate (T2.3): gather output alpha = probe confidence.
+    // The dummy 1x1 black texture bound when SPGI is disabled has alpha 0 →
+    // weight 0 → formula degrades exactly to the DDGI+SSGI-only blend.
+    float spgi_w = clamp(spgi4.a * 2.0, 0.0, 1.0);
 
     albedo = clamp(albedo, vec3(0.0), vec3(1.0));
 
@@ -65,11 +70,14 @@ void fusion_indirect() {
     }
     ddgiBlur /= totalWeight;
 
-    // DDGI (low-freq global) + SSGI (high-freq screen-space) combined.
-    // DDGI 0.8 keeps colored bounce visible; SSGI 0.2 reserved for when
-    // screen-space detail is needed. Overall scaled to 0.7 to avoid
-    // washing out direct lighting.
-    vec3 indirect = albedo * (ddgiBlur * 0.8 + ssgi_irr * ssgi_conf * 0.2) * 0.7;
+    // Unified three-source blend (T2.3, matches Metal ports):
+    // DDGI low-freq global + SSGI high-freq screen-space, jointly scaled by
+    // (1 - spgi_w); SPGI takes over where its probes have confidence.
+    // Overall scaled to 0.7 to avoid washing out direct lighting.
+    vec3 indirect = albedo *
+        (ddgiBlur * 0.8 * (1.0 - spgi_w)
+       + ssgi_irr * ssgi_conf * 0.2 * (1.0 - spgi_w)
+       + spgi4.rgb * spgi_w) * 0.7;
     indirect *= ao;
     outColor = vec4(indirect, 1.0);
 }

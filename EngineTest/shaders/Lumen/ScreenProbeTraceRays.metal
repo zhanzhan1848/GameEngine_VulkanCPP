@@ -18,6 +18,7 @@
 using namespace metal;
 
 #include "SurfaceCacheData.metal"
+#include "SDFTraceCommon.metal"
 
 // ============================================================================
 // Constant buffer layout (must match C++ ScreenProbeGlobalData)
@@ -45,56 +46,25 @@ struct ScreenProbeGlobalData {
 
 constant float PI = 3.14159265358979323846f;
 constant float GOLDEN_RATIO = 1.618033988749895f;
-// Was 4 — too few for sphere tracing. Bumped to 32 so rays actually reach
-// geometry within maxDist instead of reporting miss.
+// Was 4 — way too few for sphere tracing. Most rays failed to converge within
+// 4 steps and reported "miss", producing extremely dim SPGI output.
+// 32 gives rays enough iterations to actually reach geometry within maxDist.
 constant uint  MAX_SDF_STEPS = 32;
-constant float SDF_HIT_THRESHOLD_FACTOR = 1.5f;
 
 // ============================================================================
-// SDF Sampling (same as DDGITraceRays)
+// Screen Probe SDF trace wrapper
 // ============================================================================
 
-static bool isInsideCascade(float3 pos, float3 origin, float3 extent) {
-    float3 local = pos - origin;
-    return local.x >= 0.0f && local.x < extent.x &&
-           local.y >= 0.0f && local.y < extent.y &&
-           local.z >= 0.0f && local.z < extent.z;
-}
-
-static float sampleSDFCascade(texture3d<float, access::sample> sdfTexture,
-                               float3 worldPos,
-                               float3 cascadeOrigin,
-                               float3 cascadeExtent) {
-    float3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
-    if (uvw.x < 0.0f || uvw.x > 1.0f ||
-        uvw.y < 0.0f || uvw.y > 1.0f ||
-        uvw.z < 0.0f || uvw.z > 1.0f) {
-        return 1e10f;
-    }
-    sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
-    return sdfTexture.sample(samp, uvw).r;
-}
-
-static float sampleBestSDF(float3 pos,
+static float screenProbeSampleBestSDF(float3 pos,
     texture3d<float, access::sample> sdf0,
     texture3d<float, access::sample> sdf1,
     texture3d<float, access::sample> sdf2,
-    constant ScreenProbeGlobalData& global) {
-    uint cascadeCount = uint(global.sdf_resolutions.w);
-
-    // Apple Silicon: else-if cascade = 1 texture3D read per step (not 3).
-    // Finest cascade first for best accuracy.
-    if (cascadeCount > 0 &&
-        isInsideCascade(pos, global.sdf_origins[0].xyz, global.sdf_extents[0].xyz))
-        return sampleSDFCascade(sdf0, pos, global.sdf_origins[0].xyz, global.sdf_extents[0].xyz);
-    else if (cascadeCount > 1 &&
-        isInsideCascade(pos, global.sdf_origins[1].xyz, global.sdf_extents[1].xyz))
-        return sampleSDFCascade(sdf1, pos, global.sdf_origins[1].xyz, global.sdf_extents[1].xyz);
-    else if (cascadeCount > 2 &&
-        isInsideCascade(pos, global.sdf_origins[2].xyz, global.sdf_extents[2].xyz))
-        return sampleSDFCascade(sdf2, pos, global.sdf_origins[2].xyz, global.sdf_extents[2].xyz);
-
-    return 1e10f;
+    constant ScreenProbeGlobalData& global)
+{
+    return sampleBestSDF_elseIf(pos, sdf0, sdf1, sdf2,
+        global.sdf_origins[0], global.sdf_origins[1], global.sdf_origins[2],
+        global.sdf_extents[0], global.sdf_extents[1], global.sdf_extents[2],
+        uint(global.sdf_resolutions.w));
 }
 
 // ============================================================================
@@ -120,12 +90,7 @@ static float3 orientAroundNormal(float3 dir, float3 normal) {
 // ============================================================================
 // Sphere tracing through GlobalSDF
 // ============================================================================
-
-struct SDFHitResult {
-    bool   hit;
-    float3 position;
-    float  distance;
-};
+// SDFHitResult struct and sampleBestSDF_elseIf are provided by SDFTraceCommon.metal.
 
 static SDFHitResult traceSDF(float3 origin, float3 direction, float maxDist,
     texture3d<float, access::sample> sdf0,
@@ -141,13 +106,12 @@ static SDFHitResult traceSDF(float3 origin, float3 direction, float maxDist,
     float3 pos = origin;
     float remainingDist = maxDist;
 
-    // Use the finest cascade's voxel size as hit threshold
-    float hitThreshold = global.sdf_voxel_sizes[0].x * SDF_HIT_THRESHOLD_FACTOR;
+    float hitThreshold = global.sdf_voxel_sizes[0].x * 0.5f;
+    float minStep = global.sdf_voxel_sizes[0].x * 0.25f;
 
     for (uint step = 0; step < MAX_SDF_STEPS; ++step) {
-        float d = sampleBestSDF(pos, sdf0, sdf1, sdf2, global);
+        float d = screenProbeSampleBestSDF(pos, sdf0, sdf1, sdf2, global);
 
-        // Hit detected
         if (d < hitThreshold) {
             result.hit = true;
             result.position = pos;
@@ -155,8 +119,13 @@ static SDFHitResult traceSDF(float3 origin, float3 direction, float maxDist,
             return result;
         }
 
-        // Advance along ray
-        float advance = max(d, hitThreshold);
+        // Relaxed advancement: overstep when far, conservative when close
+        float advance;
+        if (d > hitThreshold * 4.0f) {
+            advance = d * 1.2f;
+        } else {
+            advance = max(d, minStep);
+        }
         if (advance > remainingDist) break;
 
         pos += direction * advance;
@@ -218,6 +187,10 @@ kernel void screen_probe_trace_rays(
     constant SurfaceCacheCard*        cards       [[buffer(4)]],
     constant SurfaceCacheCardLookup*  cardLookup  [[buffer(5)]],
 
+    // T1.3: uniform card grid (header + prefix sums / card indices)
+    device const uint*                sc_grid_offsets [[buffer(6)]],
+    device const uint*                sc_grid_cards   [[buffer(7)]],
+
     // Thread positioning (1D to be compatible with shared Metal compute encoder)
     uint global_id [[thread_position_in_grid]])
 {
@@ -264,18 +237,30 @@ kernel void screen_probe_trace_rays(
         float nearDistance = 2.0f;
 
         if (hit.distance < nearDistance && global.surface_cache_params.z > 0.5f) {
-            // Iterate cards to find matching atlas UV (capped for Apple Silicon)
-            uint cardCount = min(uint(global.surface_cache_params.y), 32u);
+            // T1.3: grid lookup — candidates from the hit position's cell
+            // (≤ kMaxCardsPerGridCell entries) instead of scanning 32 cards.
             float atlasSize = global.surface_cache_params.x;
 
-            for (uint ci = 0; ci < cardCount && !usedSurfaceCache; ++ci) {
-                float2 atlas_uv;
-                if (worldToCardUV(hit.position, cards[ci], atlas_uv)) {
-                    // Convert atlas pixel coords to normalized UV for sampling
-                    float2 uv_norm = atlas_uv / float2(atlasSize);
-                    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-                    radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
-                    usedSurfaceCache = true;
+            uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
+                              sc_grid_offsets[2], sc_grid_offsets[3]);
+            uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
+                              sc_grid_offsets[6], sc_grid_offsets[7]);
+            uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
+                              sc_grid_offsets[10], sc_grid_offsets[11]);
+            SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+            uint cell = scGridCellIndex(gp, hit.position);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = sc_grid_offsets[16u + cell];
+                uint end   = sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && !usedSurfaceCache; ++gi) {
+                    float2 atlas_uv;
+                    if (worldToCardUV(hit.position, cards[sc_grid_cards[gi]], atlas_uv)) {
+                        // Convert atlas pixel coords to normalized UV for sampling
+                        float2 uv_norm = atlas_uv / float2(atlasSize);
+                        constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+                        radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
+                        usedSurfaceCache = true;
+                    }
                 }
             }
         }
@@ -358,21 +343,28 @@ kernel void screen_probe_trace_sdf(
 
     float3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0f;
     float maxDist = global.trace_params.x;
-    float hitThreshold = global.sdf_voxel_sizes[0].x * SDF_HIT_THRESHOLD_FACTOR;
+    float hitThreshold = global.sdf_voxel_sizes[0].x * 0.5f;
+    float minStep = global.sdf_voxel_sizes[0].x * 0.25f;
 
     float3 pos = origin;
     float remainingDist = maxDist;
     float hitDistance = -1.0f; // miss
 
     for (uint step = 0; step < MAX_SDF_STEPS; ++step) {
-        float d = sampleBestSDF(pos, sdf0, sdf1, sdf2, global);
+        float d = screenProbeSampleBestSDF(pos, sdf0, sdf1, sdf2, global);
 
         if (d < hitThreshold) {
             hitDistance = length(pos - origin);
             break;
         }
 
-        float advance = max(d, hitThreshold);
+        // Relaxed advancement: overstep when far, conservative when close
+        float advance;
+        if (d > hitThreshold * 4.0f) {
+            advance = d * 1.2f;
+        } else {
+            advance = max(d, minStep);
+        }
         if (advance > remainingDist) break;
 
         pos += rayDir * advance;

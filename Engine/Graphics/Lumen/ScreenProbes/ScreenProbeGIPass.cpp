@@ -263,6 +263,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // cardLookup (readonly)
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_offsets (T1.3)
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_cards (T1.3)
+            {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi_irradiance (T2.2)
         };
         // Mark SDF textures as 3D view dimension
         bindings[0].is3D = true;
@@ -275,7 +276,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[10].readonly = true; // cardLookup
         bindings[11].readonly = true; // sc_grid_offsets
         bindings[12].readonly = true; // sc_grid_cards
-        trace_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
+        bindings[13].readonly = true; // ddgi_irradiance
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             // Textures (SDF cascades + prev frame color + surface cache lighting atlas)
@@ -293,8 +295,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // surface cache card lookup
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi_irradiance (T2.2)
         };
-        DescriptorSetLayoutDesc layoutDesc{13, bindings};
+        DescriptorSetLayoutDesc layoutDesc{14, bindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1043,6 +1046,12 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     surface_cache_available_ ? 1.0f : 0.0f,
                     0.0f
                 };
+
+                // T2.2: DDGI probe fallback params for miss rays
+                gd.ddgi_fb[0] = {ddgi_fb_origin_.x, ddgi_fb_origin_.y, ddgi_fb_origin_.z,
+                                 ddgi_fb_spacing_};
+                gd.ddgi_fb[1] = {ddgi_fb_counts_.x, ddgi_fb_counts_.y, ddgi_fb_counts_.z,
+                                 ddgi_fallback_available_ ? 1.0f : 0.0f};
             }
 
             // ==================================================================
@@ -1094,6 +1103,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 ResourceHandle scGridCards = (surface_cache_available_ &&
                     surface_cache_grid_cards_buffer_ != handles::INVALID_RESOURCE)
                     ? surface_cache_grid_cards_buffer_ : dummy_buffer_;
+                ResourceHandle ddgiIrr = (ddgi_fallback_available_ &&
+                    ddgi_irradiance_buffer_ != handles::INVALID_RESOURCE)
+                    ? ddgi_irradiance_buffer_ : dummy_buffer_;
 
                 DescriptorData params[] = {
                     {0, DescriptorType::SampledImage,  sdfTextures[0]},
@@ -1109,8 +1121,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     {5, DescriptorType::StorageBuffer, scCardLookup},
                     {6, DescriptorType::StorageBuffer, scGridOffsets},
                     {7, DescriptorType::StorageBuffer, scGridCards},
+                    {8, DescriptorType::StorageBuffer, ddgiIrr},
                 };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 13);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 14);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };

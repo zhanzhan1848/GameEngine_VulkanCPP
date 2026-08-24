@@ -1353,6 +1353,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         scDDGIIn.surface_cache_pass = surface_cache_pass_.get();
         scDDGIIn.current_buffer_index = cbIdx;
         scDDGIIn.sc_lighting_rg = scLightingRG;
+        scDDGIIn.ddgi_irradiance = ddgiOut.ddgi_irradiance;
+        scDDGIIn.ddgi_irradiance_hist = ddgiOut.ddgi_irradiance_hist;
         sc_ddgi_module_->AddPass(graph, scDDGIIn);
     }
 
@@ -1418,6 +1420,17 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
     lumen::ScreenProbeGIOutput spgiOut;
     if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
+        // T2.2: DDGI probe fallback for miss rays (hist slot — one frame
+        // behind, no read/write race with this frame's DDGI update).
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            const auto& dp = ddgi_pass_->GetParams();
+            const auto& dv = ddgi_pass_->GetVolumeData();
+            screen_probe_pass_->SetDDGIFallbackData(
+                ddgi_pass_->GetIrradianceBuffer(static_cast<u32>(frameCount_ + 2) % 3),
+                math::v3{dv.ProbeOrigin.x, dv.ProbeOrigin.y, dv.ProbeOrigin.z},
+                math::v3{(float)dp.probe_count_x, (float)dp.probe_count_y, (float)dp.probe_count_z},
+                dp.probe_spacing);
+        }
         auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
         auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
 
@@ -1951,6 +1964,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             scDDGIIn.surface_cache_pass = surface_cache_pass_.get();
             scDDGIIn.current_buffer_index = cbIdx;
             scDDGIIn.sc_lighting_rg = scLightingRG;
+            scDDGIIn.ddgi_irradiance = ddgiOut.ddgi_irradiance;
+            scDDGIIn.ddgi_irradiance_hist = ddgiOut.ddgi_irradiance_hist;
             sc_ddgi_module_->AddPass(graph, scDDGIIn);
         }
 
@@ -2001,6 +2016,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // --- SPGI (Screen Probe GI) ---
         lumen::ScreenProbeGIOutput spgiOut;
         if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
+            // T2.2: DDGI probe fallback for miss rays
+            if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+                const auto& dp = ddgi_pass_->GetParams();
+                const auto& dv = ddgi_pass_->GetVolumeData();
+                screen_probe_pass_->SetDDGIFallbackData(
+                    ddgi_pass_->GetIrradianceBuffer(static_cast<u32>(frameCount_ + 2) % 3),
+                    math::v3{dv.ProbeOrigin.x, dv.ProbeOrigin.y, dv.ProbeOrigin.z},
+                    math::v3{(float)dp.probe_count_x, (float)dp.probe_count_y, (float)dp.probe_count_z},
+                    dp.probe_spacing);
+            }
             auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
             auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
 

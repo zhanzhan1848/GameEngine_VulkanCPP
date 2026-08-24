@@ -63,6 +63,7 @@ layout(set = 0, binding = 8, std140) uniform GlobalBlock {
     vec4 sdf_extents[3];
     uvec4 sdf_resolutions;       // xyz=res0/1/2, w=cascadeCount
     vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=unused
+    vec4 ddgi_fb[2];             // T2.2: [0]=origin.xyz+spacing, [1]=counts.xyz+enabled
 } global;
 
 layout(set = 0, binding = 9, std430) readonly buffer CardsBlock {
@@ -80,6 +81,11 @@ layout(set = 0, binding = 11, std430) readonly buffer SCGridOffsetsBuf {
 layout(set = 0, binding = 12, std430) readonly buffer SCGridCardsBuf {
     uint sc_grid_cards[];
 } scgc;
+
+// T2.2: DDGI probe irradiance (SH3 coefficients, 16B-stride elements) for miss fallback
+layout(set = 0, binding = 13, std430) readonly buffer DDGIIrradianceBuf {
+    vec4 ddgi_irradiance_vec4[];   // xyz = SH coeff, w = padding (16B stride)
+} ddgiIrr;
 
 // --------------------------------------------------------------------------------
 // Constants
@@ -330,14 +336,33 @@ void screen_probe_trace_rays() {
         // Store cosine weight (applied during averaging)
         cosTheta = max(dot(probeNormal, rayDir), 0.0);
     } else {
-        // Miss ray: simple sky ambient (hemisphere-weighted sky color).
-        // Prevents probes from going completely black when many rays miss.
-        float skyWeight = max(dot(probeNormal, rayDir), 0.0);
-        if (skyWeight > 0.0) {
+        // Miss ray fallback chain (T2.2): DDGI probe grid → sky gradient.
+        if (global.ddgi_fb[1].w > 0.5) {
+            vec3 org = global.ddgi_fb[0].xyz;
+            float spacing = max(global.ddgi_fb[0].w, 0.01);
+            ivec3 counts = ivec3(global.ddgi_fb[1].xyz);
+            ivec3 gc = ivec3(floor((probePos - org) / spacing));
+            gc = clamp(gc, ivec3(0), counts - ivec3(1));
+            uint pidx = uint(gc.x) + uint(counts.x) * (uint(gc.y) + uint(counts.y) * uint(gc.z));
+            // SH3 coefficients @ 16B stride (vec4 view of the DDGI buffer)
+            vec3 sh0 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 0u].xyz;
+            vec3 sh1 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 1u].xyz;
+            vec3 sh2 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 2u].xyz;
+            vec3 sh3 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 3u].xyz;
+            radiance = max(vec3(0.0),
+                0.282095 * sh0
+                - 0.488603 * sh1 * rayDir.y
+                + 0.488603 * sh2 * rayDir.z
+                - 0.488603 * sh3 * rayDir.x);
+            cosTheta = max(dot(probeNormal, rayDir), 0.0);
+        } else {
             // Simple sky gradient: blue-ish at horizon, lighter at zenith
-            float skyY = rayDir.y * 0.5 + 0.5;
-            radiance = mix(vec3(0.15, 0.18, 0.25), vec3(0.4, 0.5, 0.65), skyY);
-            cosTheta = skyWeight;
+            float skyWeight = max(dot(probeNormal, rayDir), 0.0);
+            if (skyWeight > 0.0) {
+                float skyY = rayDir.y * 0.5 + 0.5;
+                radiance = mix(vec3(0.15, 0.18, 0.25), vec3(0.4, 0.5, 0.65), skyY);
+                cosTheta = skyWeight;
+            }
         }
     }
 

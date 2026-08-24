@@ -61,6 +61,10 @@ struct ScreenProbeGlobalData {
 
     // Surface Cache integration data
     math::v4   surface_cache_params;   // offset 336: x=atlasSize, y=cardCount, z=surfaceCacheAvailable(0/1), w=unused
+
+    // DDGI probe fallback (T2.2) — miss rays sample the DDGI probe grid
+    // instead of a constant sky gradient (Lumen's world-probe fallback edge).
+    math::v4   ddgi_fb[2];             // offset 352: [0]=probe origin.xyz + spacing, [1]=counts.xyz + enabled(0/1)
 };
 
 // ============================================================================
@@ -121,6 +125,20 @@ public:
         surface_cache_grid_offsets_buffer_ = grid_offsets;
         surface_cache_grid_cards_buffer_ = grid_cards;
         surface_cache_available_ = true;
+    }
+
+    // DDGI probe fallback (T2.2): miss rays evaluate the nearest DDGI probe's
+    // SH L0+L1 along the ray direction.
+    void SetDDGIFallbackData(
+        rhi::ResourceHandle irradiance_buffer,
+        const math::v3& probe_origin,
+        const math::v3& probe_counts,
+        float probe_spacing) {
+        ddgi_irradiance_buffer_ = irradiance_buffer;
+        ddgi_fb_origin_ = probe_origin;
+        ddgi_fb_counts_ = probe_counts;
+        ddgi_fb_spacing_ = probe_spacing;
+        ddgi_fallback_available_ = (irradiance_buffer != rhi::handles::INVALID_RESOURCE);
     }
 
 private:
@@ -248,6 +266,13 @@ private:
     u32  surface_cache_atlas_size_ = 0;
     u32  surface_cache_card_count_ = 0;
     bool surface_cache_available_ = false;
+
+    // DDGI probe fallback (T2.2)
+    rhi::ResourceHandle ddgi_irradiance_buffer_{ rhi::handles::INVALID_RESOURCE };
+    math::v3 ddgi_fb_origin_{ 0.0f };
+    math::v3 ddgi_fb_counts_{ 0.0f };
+    float ddgi_fb_spacing_ = 0.0f;
+    bool ddgi_fallback_available_ = false;
 };
 
 } // namespace primal::graphics::lumen
