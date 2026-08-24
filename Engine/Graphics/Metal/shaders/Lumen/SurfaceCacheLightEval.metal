@@ -29,7 +29,8 @@ kernel void surfaceCacheLightEval(
     constant FlattenedLightingParams& params         [[buffer(1)]],
     constant SurfaceCacheCard*        cards          [[buffer(2)]],
     constant LightInfo*               lights         [[buffer(3)]],
-    constant CardDispatchInfo*        card_dispatch  [[buffer(4)]])
+    constant CardDispatchInfo*        card_dispatch  [[buffer(4)]],
+    device const float*               shadow_visibility [[buffer(5)]])  // T3.3
 {
     if (global_tid >= params.total_texels) return;
 
@@ -66,15 +67,19 @@ kernel void surfaceCacheLightEval(
     float3 direct_light = float3(0.0);
     uint lightCount = min(params.light_count, 256u);
 
+    // T3.3: directional visibility from the shadow pass (atlas-space index).
+    uint atlas_size = params.sc_params.atlas_size;
+    float dir_visibility = shadow_visibility[atlas_uv.x + atlas_size * atlas_uv.y];
+
     for (uint li = 0; li < lightCount; ++li) {
         float3 L;
         float attenuation;
         uint lightType = uint(lights[li].direction.w);
 
         if (lightType == 1) {
-            // Directional light: always visible
+            // Directional light: visibility from the SDF shadow pass (T3.3)
             L = -normalize(lights[li].direction.xyz);
-            attenuation = 1.0;
+            attenuation = dir_visibility;
         } else {
             // Point/spot light: per-texel distance check
             float3 world_pos = cardTexelToWorld(atlas_uv, 0.0, cards[lo]);

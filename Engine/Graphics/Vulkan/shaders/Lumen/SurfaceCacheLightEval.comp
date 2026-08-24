@@ -22,6 +22,7 @@
 //   binding 7 = StorageBuffer        card_dispatch[]  (CardDispatchInfo, std430)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
 
@@ -56,6 +57,12 @@ layout(set = 0, binding = 7, std430) readonly buffer CardDispatchBlock {
 // accumulated GI — multiplying by albedo gives each bounce the surface
 // color, creating multi-bounce colored GI through the SC itself.
 layout(set = 0, binding = 8, rgba16f) readonly uniform image2D prev_lighting_atlas;
+
+// T3.3: per-texel directional-light visibility from SurfaceCacheShadow
+// (atlas-space float; CPU-initialized to 1.0, so untraced texels stay lit).
+layout(set = 0, binding = 9, std430) readonly buffer ShadowVisibilityBlock {
+    float shadow_visibility[];
+} shadow_vis;
 
 // --------------------------------------------------------------------------------
 void surface_cache_light_eval()
@@ -97,15 +104,19 @@ void surface_cache_light_eval()
     vec3 direct_light = vec3(0.0);
     uint lightCount = min(flp.params.light_count, 256u);
 
+    // T3.3: directional visibility from the shadow pass (atlas-space index).
+    uint atlas_size = flp.params.sc_params.atlas_size;
+    float dir_visibility = shadow_vis.shadow_visibility[atlas_uv.x + atlas_size * atlas_uv.y];
+
     for (uint li = 0u; li < lightCount; ++li) {
         vec3 L;
         float attenuation;
         uint lightType = uint(lights.data[li].direction.w);
 
         if (lightType == 1u) {
-            // Directional light: always visible
+            // Directional light: visibility from the SDF shadow pass (T3.3)
             L = -normalize(lights.data[li].direction.xyz);
-            attenuation = 1.0;
+            attenuation = dir_visibility;
         } else {
             // Point/spot light: per-texel distance check
             vec3 world_pos = cardTexelToWorld(atlas_uv, 0.0, cards.data[lo]);

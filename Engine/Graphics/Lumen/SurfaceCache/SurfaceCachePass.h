@@ -117,6 +117,7 @@ private:
     rhi::DescriptorSetLayoutHandle atlas_init_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle capture_gather_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle card_fill_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle shadow_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };   // T3.3
 
     // Pipelines
     rhi::PipelineHandle capture_pipeline_{ rhi::handles::INVALID_PIPELINE };
@@ -128,6 +129,7 @@ private:
     rhi::PipelineHandle atlas_init_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle capture_gather_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle card_fill_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle shadow_pipeline_{ rhi::handles::INVALID_PIPELINE };   // T3.3
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle capture_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
@@ -139,6 +141,7 @@ private:
     rhi::PipelineLayoutHandle atlas_init_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle capture_gather_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle card_fill_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle shadow_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };   // T3.3
 
     // Descriptor sets (triple-buffered per pass)
     rhi::DescriptorSetHandle atlas_init_set_[3]{
@@ -150,6 +153,9 @@ private:
     rhi::DescriptorSetHandle card_fill_set_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
+    rhi::DescriptorSetHandle shadow_set_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };   // T3.3
     rhi::DescriptorSetHandle capture_set_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
@@ -173,6 +179,12 @@ private:
     rhi::ResourceHandle light_info_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ray_hits_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle card_dispatch_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // T3.3: atlas-space directional visibility (float per atlas texel,
+    // CPU-initialized to 1.0) + triple-buffered shadow params CB.
+    rhi::ResourceHandle shadow_visibility_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle shadow_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
 
     u32 atlas_size_ = 0;
     u32 page_size_ = 0;

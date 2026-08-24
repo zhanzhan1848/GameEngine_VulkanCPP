@@ -317,6 +317,25 @@ void SurfaceCachePass::CreateConstantBuffers() {
     CreateCBs(params_cb_, 512);    // SurfaceCacheParams (padded)
     CreateCBs(capture_cb_, 96);    // CaptureParams: invViewProj (64) + counts (16) padded
     CreateCBs(card_fill_cb_, 176); // CardFillParams: SDF cascades + light + counts
+    CreateCBs(shadow_cb_, 176);    // T3.3: ShadowParams (SDF cascades + light + counts)
+
+    // T3.3: atlas-space visibility buffer (float per atlas texel), CPU-
+    // initialized to 1.0 so untraced texels / SDF-unavailable frames stay lit.
+    if (shadow_visibility_buffer_ == handles::INVALID_RESOURCE && atlas_size_ > 0) {
+        BufferDesc visDesc{};
+        visDesc.size = (u64)atlas_size_ * atlas_size_ * sizeof(float);
+        visDesc.type = BufferType::Structured;
+        visDesc.usage = GPUMemoryUsage::Dynamic;
+        visDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        visDesc.structured.elementCount = atlas_size_ * atlas_size_;
+        visDesc.structured.elementStride = sizeof(float);
+        shadow_visibility_buffer_ = device_->CreateBuffer(visDesc);
+        auto* vis = static_cast<float*>(device_->MapBuffer(shadow_visibility_buffer_));
+        if (vis) {
+            for (u64 i = 0; i < (u64)atlas_size_ * atlas_size_; ++i) vis[i] = 1.0f;
+            device_->UnmapBuffer(shadow_visibility_buffer_);
+        }
+    }
 }
 
 void SurfaceCachePass::CreateDescriptorSetLayouts() {
@@ -362,7 +381,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         light_cull_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- LightEval (merged): 4 textures + 1 UBO + 3 SSBO + 1 prev_lighting = 9 bindings ---
+    // --- LightEval (merged): 4 textures + 1 UBO + 3 SSBO + 1 prev_lighting + 1 shadow_vis = 10 bindings ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
@@ -374,8 +393,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lights
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch
             {8, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // prev_lighting (multi-bounce)
+            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // shadow_visibility (T3.3)
         };
-        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+        DescriptorSetLayoutBinding* b = bindings;
+        b[9].readonly = true;
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
@@ -386,8 +408,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards         [[buffer(2)]]
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lights        [[buffer(3)]]
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch [[buffer(4)]]
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // shadow_visibility [[buffer(5)]] (T3.3)
         };
-        DescriptorSetLayoutDesc layoutDesc{8, bindings};
+        DescriptorSetLayoutBinding* bm = bindings;
+        bm[5].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{9, bindings};
         light_eval_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -550,6 +575,52 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
                           // + 全局页表/atlas 绑定接入(VT 系统初始化后)
         }
         card_fill_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
+    }
+
+    // --- Shadow (T3.3): 3 SDF texture3D + depth/normal atlas reads + params CB
+    //     + dispatch/cards SSBOs + visibility write. Vulkan flat / Metal overlap. ---
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // sdf_cascade_0
+            {1, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // sdf_cascade_1
+            {2, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // sdf_cascade_2
+            {3, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas (read)
+            {4, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // normal_atlas (read)
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // ShadowParams
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // card_dispatch
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // cards
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // visibility (write)
+        };
+        DescriptorSetLayoutBinding* b = bindings;
+        b[0].is3D = true;
+        b[1].is3D = true;
+        b[2].is3D = true;
+        b[3].readonly = true;
+        b[4].readonly = true;
+        b[6].readonly = true;
+        b[7].readonly = true;
+        shadow_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+    } else {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // sdf0          [[texture(0)]]
+            {1, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // sdf1          [[texture(1)]]
+            {2, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // sdf2          [[texture(2)]]
+            {3, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas   [[texture(3)]]
+            {4, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // normal_atlas  [[texture(4)]]
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // ShadowParams  [[buffer(0)]]
+            {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // card_dispatch [[buffer(1)]]
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // cards         [[buffer(2)]]
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // visibility    [[buffer(3)]]
+        };
+        DescriptorSetLayoutBinding* b = bindings;
+        b[0].is3D = true;
+        b[1].is3D = true;
+        b[2].is3D = true;
+        b[3].readonly = true;
+        b[4].readonly = true;
+        b[6].readonly = true;
+        b[7].readonly = true;
+        shadow_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
     }
 }
 
@@ -736,6 +807,28 @@ void SurfaceCachePass::CreatePipelines() {
         pipeDesc.layout = card_fill_layout_;
         pipeDesc.threadGroupSize = {256, 1, 1};
         card_fill_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
+    // Shadow (T3.3): (256,1,1) — per-texel SDF shadow march toward the light
+    {
+        auto shadowShader = CompileComputeShader("SurfaceCacheShadow",
+            isVk ? "surface_cache_shadow" : "surfaceCacheShadow");
+        if (shadowShader != handles::INVALID_SHADER) {
+            PipelineLayoutDesc plDesc;
+            plDesc.setLayoutCount = 1;
+            plDesc.setLayouts = &shadow_set_layout_;
+            shadow_layout_ = device_->CreatePipelineLayout(plDesc);
+
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = shadowShader;
+            pipeDesc.layout = shadow_layout_;
+            pipeDesc.threadGroupSize = {256, 1, 1};
+            shadow_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+
+            for (int i = 0; i < 3; ++i)
+                shadow_set_[i] = device_->CreateDescriptorSet({shadow_set_layout_});
+        } else {
+            std::cerr << "[SurfaceCache] Shadow shader compilation failed (shadows disabled)" << std::endl;
+        }
     }
 
     // --- Create capture graphics pipeline (Metal only) ---
@@ -1232,6 +1325,90 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             }
 
             // ================================================================
+            // 3.8 (T3.3) Shadow dispatch — per-texel SDF march toward the light.
+            // Split-pass by read type: texture3D-heavy shadow first, then the
+            // buffer/image-only LightEval consumes the visibility buffer.
+            // Skipped when GlobalSDF is unavailable — visibility stays 1.0.
+            // ================================================================
+            {
+                auto& globalSDF = nanite::GlobalSDF::Get();
+                if (shadow_pipeline_ != handles::INVALID_PIPELINE &&
+                    shadow_visibility_buffer_ != handles::INVALID_RESOURCE &&
+                    globalSDF.IsInitialized()) {
+
+                    ResourceHandle sdfTex[3] = {
+                        handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
+                    u32 cascadeCount = 0;
+                    for (u32 c = 0; c < 3; ++c) {
+                        const auto& cascade = globalSDF.GetCascade(c);
+                        if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
+                            sdfTex[c] = cascade.sdf_texture;
+                            ++cascadeCount;
+                        }
+                    }
+
+                    if (cascadeCount > 0) {
+                        const bool shIsVk =
+                            device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+
+                        // ShadowParams (mirror of the shader UBO, 96B)
+                        struct ShadowParamsGPU {
+                            math::v4 sdf_origins[3];
+                            math::v4 sdf_extents[3];
+                            math::v4 sdf_res_count;
+                            math::v4 light_dir_toward;
+                            math::v4 shadow_params;   // x=maxDist, y=bias, z=atlasSize
+                            math::v4 counts;          // x=total_texels, y=card_count
+                        };
+                        auto* sp = static_cast<ShadowParamsGPU*>(device_->MapBuffer(shadow_cb_[frameIdx]));
+                        if (sp) {
+                            memset(sp, 0, sizeof(ShadowParamsGPU));
+                            float resArr[3] = {0.0f, 0.0f, 0.0f};
+                            for (u32 c = 0; c < cascadeCount; ++c) {
+                                const auto& cascade = globalSDF.GetCascade(c);
+                                sp->sdf_origins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
+                                sp->sdf_extents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
+                                resArr[c] = (float)cascade.resolution;
+                            }
+                            sp->sdf_res_count = {resArr[0], resArr[1], resArr[2], (float)cascadeCount};
+                            math::v3 ld = frame_data.light_direction;
+                            float ldLen = std::sqrt(ld.x * ld.x + ld.y * ld.y + ld.z * ld.z);
+                            if (ldLen < 1e-5f) ldLen = 1.0f;
+                            math::v3 toward = {-ld.x / ldLen, -ld.y / ldLen, -ld.z / ldLen};
+                            sp->light_dir_toward = {toward.x, toward.y, toward.z, 0.0f};
+                            sp->shadow_params = {50.0f, 1.5f, (float)atlas_size_, 0.0f};
+                            sp->counts = {(float)total_texels, (float)card_count, 0.0f, 0.0f};
+                            device_->UnmapBuffer(shadow_cb_[frameIdx]);
+                        }
+
+                        DescriptorData shadowParams[] = {
+                            {0, DescriptorType::SampledImage, sdfTex[0]},
+                            {1, DescriptorType::SampledImage, sdfTex[1]},
+                            {2, DescriptorType::SampledImage, sdfTex[2]},
+                            {3, DescriptorType::StorageImage, depth_atlas_},
+                            {4, DescriptorType::StorageImage, normal_atlas_},
+                            {shIsVk ? 5u : 0u, DescriptorType::UniformBuffer, shadow_cb_[frameIdx]},
+                            {shIsVk ? 6u : 1u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                            {shIsVk ? 7u : 2u, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
+                            {shIsVk ? 8u : 3u, DescriptorType::StorageBuffer, shadow_visibility_buffer_},
+                        };
+                        UpdateDescriptorSet(device_, shadow_set_[frameIdx], shadowParams, 9);
+
+                        cmd->BindComputePipeline(shadow_pipeline_);
+                        const DescriptorSetHandle shSets[] = { shadow_set_[frameIdx] };
+                        cmd->BindDescriptorSets(PipelineBindPoint::Compute, shadow_layout_, 0, 1, shSets, 0, nullptr);
+
+                        u32 shGroups = (total_texels + 255) / 256;
+                        cmd->Dispatch(shGroups, 1, 1);
+
+                        // visibility write → LightEval read
+                        cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                           AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                    }
+                }
+            }
+
+            // ================================================================
             // 4. Single merged LightEval dispatch (1D, per-card texel)
             // ================================================================
             {
@@ -1250,8 +1427,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     {isVk ? 6u : 3u, DescriptorType::StorageBuffer, light_info_buffer_},
                     {isVk ? 7u : 4u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
                     {8, DescriptorType::StorageImage,  lighting_atlas_[histIdx]},  // prev for multi-bounce
+                    {isVk ? 9u : 5u, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
                 };
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 9);
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 10);
 
                 // Explicit GENERAL transition for the lighting atlas — do not
                 // rely on the render graph's Write declaration having put it in
