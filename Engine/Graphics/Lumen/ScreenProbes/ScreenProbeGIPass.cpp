@@ -247,7 +247,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         place_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Trace: 5 textures (3 SDF + prev_color + surface_cache_lighting) + 3 SSBO (positions, normals, radiance) + 2 SSBO (card_data, card_lookup) + 1 UBO ---
+    // --- Trace: 5 textures (3 SDF + prev_color + surface_cache_lighting) + 3 SSBO (positions, normals, radiance) + 2 SSBO (card_data, card_lookup) + 2 SSBO (card grid, T1.3) + 1 UBO ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf0 (3D)
@@ -261,6 +261,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {8, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // ScreenProbeGlobalData
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards (readonly)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // cardLookup (readonly)
+            {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_offsets (T1.3)
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_cards (T1.3)
         };
         // Mark SDF textures as 3D view dimension
         bindings[0].is3D = true;
@@ -271,7 +273,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[6].readonly = true;  // probeNormals
         bindings[9].readonly = true;  // cards
         bindings[10].readonly = true; // cardLookup
-        trace_set_layout_ = device_->CreateDescriptorSetLayout({11, bindings});
+        bindings[11].readonly = true; // sc_grid_offsets
+        bindings[12].readonly = true; // sc_grid_cards
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             // Textures (SDF cascades + prev frame color + surface cache lighting atlas)
@@ -287,8 +291,10 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // surface cache card data
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // surface cache card lookup
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
         };
-        DescriptorSetLayoutDesc layoutDesc{11, bindings};
+        DescriptorSetLayoutDesc layoutDesc{13, bindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1082,6 +1088,12 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 ResourceHandle scLightingAtlas = surface_cache_available_ ? surface_cache_lighting_atlas_ : dummy_texture_2d_;
                 ResourceHandle scCardData = surface_cache_available_ ? surface_cache_card_data_buffer_ : dummy_buffer_;
                 ResourceHandle scCardLookup = surface_cache_available_ ? surface_cache_card_lookup_buffer_ : dummy_buffer_;
+                ResourceHandle scGridOffsets = (surface_cache_available_ &&
+                    surface_cache_grid_offsets_buffer_ != handles::INVALID_RESOURCE)
+                    ? surface_cache_grid_offsets_buffer_ : dummy_buffer_;
+                ResourceHandle scGridCards = (surface_cache_available_ &&
+                    surface_cache_grid_cards_buffer_ != handles::INVALID_RESOURCE)
+                    ? surface_cache_grid_cards_buffer_ : dummy_buffer_;
 
                 DescriptorData params[] = {
                     {0, DescriptorType::SampledImage,  sdfTextures[0]},
@@ -1095,8 +1107,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                     {4, DescriptorType::StorageBuffer, scCardData},
                     {5, DescriptorType::StorageBuffer, scCardLookup},
+                    {6, DescriptorType::StorageBuffer, scGridOffsets},
+                    {7, DescriptorType::StorageBuffer, scGridCards},
                 };
-                UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 11);
+                UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 13);
 
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };

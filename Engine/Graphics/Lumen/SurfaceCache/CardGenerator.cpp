@@ -173,7 +173,115 @@ void CardGenerator::RebuildCardAllocation() {
     }
 
     UploadToGPU();
+    BuildCardGrid();
     allocation_dirty_ = false;
+}
+
+void CardGenerator::BuildCardGrid() {
+    // Grid rebuilds with card allocation — release stale buffers first.
+    if (grid_offsets_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(grid_offsets_buffer_);
+        grid_offsets_buffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (grid_cards_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(grid_cards_buffer_);
+        grid_cards_buffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    if (cards_.empty()) return;
+
+    // World AABB over all cards (a card's world AABB equals its mesh AABB).
+    float wminx = 3.402823466e+38f, wminy = wminx, wminz = wminx;
+    float wmaxx = -3.402823466e+38f, wmaxy = wmaxx, wmaxz = wmaxx;
+    for (const auto& c : cards_) {
+        wminx = std::min(wminx, c.center.x - c.extent.x);
+        wminy = std::min(wminy, c.center.y - c.extent.y);
+        wminz = std::min(wminz, c.center.z - c.extent.z);
+        wmaxx = std::max(wmaxx, c.center.x + c.extent.x);
+        wmaxy = std::max(wmaxy, c.center.y + c.extent.y);
+        wmaxz = std::max(wmaxz, c.center.z + c.extent.z);
+    }
+
+    // Cell size: aim ≤64 cells per axis, never below 1 world unit.
+    const float ex = std::max(wmaxx - wminx, 0.001f);
+    const float ey = std::max(wmaxy - wminy, 0.001f);
+    const float ez = std::max(wmaxz - wminz, 0.001f);
+    const float cell = std::max(1.0f, std::ceil(std::max({ex, ey, ez}) / 64.0f));
+    const uint32_t dx = std::max(1u, static_cast<uint32_t>(std::ceil(ex / cell)));
+    const uint32_t dy = std::max(1u, static_cast<uint32_t>(std::ceil(ey / cell)));
+    const uint32_t dz = std::max(1u, static_cast<uint32_t>(std::ceil(ez / cell)));
+    const uint32_t cell_count = dx * dy * dz;
+
+    // Rasterize every card's AABB into the cells it overlaps. Cards_ is
+    // sorted by mesh AABB volume descending, so per-cell lists inherit
+    // large-mesh-first priority. Cap per cell to bound shader worst case.
+    std::vector<std::vector<uint32_t>> per_cell(cell_count);
+    for (uint32_t i = 0; i < cards_.size(); ++i) {
+        const auto& c = cards_[i];
+        const auto clampi = [](float v, int lo, int hi) {
+            return std::min(std::max(static_cast<int>(v), lo), hi);
+        };
+        const int x0 = clampi((c.center.x - c.extent.x - wminx) / cell, 0, int(dx - 1));
+        const int x1 = clampi((c.center.x + c.extent.x - wminx) / cell, 0, int(dx - 1));
+        const int y0 = clampi((c.center.y - c.extent.y - wminy) / cell, 0, int(dy - 1));
+        const int y1 = clampi((c.center.y + c.extent.y - wminy) / cell, 0, int(dy - 1));
+        const int z0 = clampi((c.center.z - c.extent.z - wminz) / cell, 0, int(dz - 1));
+        const int z1 = clampi((c.center.z + c.extent.z - wminz) / cell, 0, int(dz - 1));
+        for (int z = z0; z <= z1; ++z) {
+            for (int y = y0; y <= y1; ++y) {
+                for (int x = x0; x <= x1; ++x) {
+                    auto& list = per_cell[(uint32_t)x + dx * ((uint32_t)y + dy * (uint32_t)z)];
+                    if (list.size() < kMaxCardsPerGridCell) list.push_back(i);
+                }
+            }
+        }
+    }
+
+    std::vector<uint32_t> offsets(cell_count + 1, 0);
+    for (uint32_t i = 0; i < cell_count; ++i) {
+        offsets[i + 1] = offsets[i] + static_cast<uint32_t>(per_cell[i].size());
+    }
+    std::vector<uint32_t> flat_cards;
+    flat_cards.reserve(offsets[cell_count]);
+    for (uint32_t i = 0; i < cell_count; ++i) {
+        for (uint32_t ci : per_cell[i]) flat_cards.push_back(ci);
+    }
+
+    // Assemble the offsets buffer: 64B header + prefix sums.
+    SurfaceCacheCardGridHeader header{};
+    std::memcpy(&header.min_bits[0], &wminx, 4);
+    std::memcpy(&header.min_bits[1], &wminy, 4);
+    std::memcpy(&header.min_bits[2], &wminz, 4);
+    std::memcpy(&header.max_bits[0], &wmaxx, 4);
+    std::memcpy(&header.max_bits[1], &wmaxy, 4);
+    std::memcpy(&header.max_bits[2], &wmaxz, 4);
+    std::memcpy(&header.cell_size_bits, &cell, 4);
+    header.card_count = card_count_;
+    header.dims[0] = dx; header.dims[1] = dy; header.dims[2] = dz;
+    header.header_words = 16;
+
+    std::vector<uint32_t> offsets_buf;
+    offsets_buf.reserve(16 + cell_count + 1);
+    const auto* hdr_words = reinterpret_cast<const uint32_t*>(&header);
+    offsets_buf.insert(offsets_buf.end(), hdr_words, hdr_words + 16);
+    offsets_buf.insert(offsets_buf.end(), offsets.begin(), offsets.end());
+
+    auto make_u32_buffer = [&](rhi::ResourceHandle& handle, const std::vector<uint32_t>& data) {
+        rhi::BufferDesc desc{};
+        desc.size = data.size() * sizeof(uint32_t);
+        desc.type = rhi::BufferType::Structured;
+        desc.usage = rhi::GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        desc.structured.elementCount = static_cast<uint32_t>(data.size());
+        desc.structured.elementStride = sizeof(uint32_t);
+        handle = device_->CreateBuffer(desc);
+        auto* mapped = static_cast<uint32_t*>(device_->MapBuffer(handle));
+        if (mapped) {
+            std::memcpy(mapped, data.data(), desc.size);
+            device_->UnmapBuffer(handle);
+        }
+    };
+    make_u32_buffer(grid_offsets_buffer_, offsets_buf);
+    make_u32_buffer(grid_cards_buffer_, flat_cards);
 }
 
 void CardGenerator::UploadToGPU() {

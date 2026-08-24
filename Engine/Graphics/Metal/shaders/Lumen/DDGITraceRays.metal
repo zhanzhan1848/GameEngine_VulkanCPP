@@ -268,25 +268,17 @@ kernel void ddgi_trace_finalize(
     device const uint* probeUpdateList [[buffer(3)]],
     device DDGIRayData* ray_buffer [[buffer(4)]],
     device const SurfaceCacheCardLookup* card_lookups [[buffer(5)]],
-    device const SurfaceCacheCard* card_data [[buffer(6)]]
+    device const SurfaceCacheCard* card_data [[buffer(6)]],
+    device const uint* sc_grid_offsets [[buffer(7)]],  // T1.3: header + prefix sums
+    device const uint* sc_grid_cards   [[buffer(8)]]   // T1.3: card indices
 )
 {
     uint tid = tid2d.y * 8u + tid2d.x;
     uint group_id = gid2d.x;
 
-    // Phase 0: Cooperative card lookup loading (buffer reads only, no texture3D)
-    constexpr uint kMaxLookups = 128;
-    threadgroup float4 tg_aabb_min[kMaxLookups];
-    threadgroup float4 tg_aabb_max[kMaxLookups];
-    threadgroup uint2 tg_card_info[kMaxLookups];
-
-    uint lookupCount = min(volume.SCLookupCount, kMaxLookups);
-    for (uint i = tid; i < lookupCount; i += 64u) {
-        tg_aabb_min[i] = card_lookups[i].aabb_min;
-        tg_aabb_max[i] = card_lookups[i].aabb_max;
-        tg_card_info[i] = uint2(card_lookups[i].card_start, card_lookups[i].card_count);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // T1.3: card lookup via uniform grid — no cooperative preload, no
+    // threadgroup cache, no barrier. The grid buffers self-describe from a
+    // 16-u32 header (world AABB, cell size, dims).
 
     if (group_id >= volume.ProbeUpdateCount) return;
     if (tid >= volume.RaysPerProbe) return;
@@ -310,18 +302,23 @@ kernel void ddgi_trace_finalize(
         float3 radiance = DDGI_SKY_COLOR;
         float atlasSize = float(volume.SCAtlasSize);
 
-        // Apple Silicon: cap per-ray device reads to ~16 to stay within ~32 limit
+        // T1.3: grid query at the hit position (≤ kMaxCardsPerGridCell
+        // candidates; worldToCardUVDevice is the precise containment test).
         uint deviceReads = 0u;
         constexpr uint kMaxDeviceReads = 16u;
-        for (uint li = 0; li < lookupCount && deviceReads < kMaxDeviceReads; ++li) {
-            if (hitPos.x < tg_aabb_min[li].x || hitPos.x > tg_aabb_max[li].x ||
-                hitPos.y < tg_aabb_min[li].y || hitPos.y > tg_aabb_max[li].y ||
-                hitPos.z < tg_aabb_min[li].z || hitPos.z > tg_aabb_max[li].z)
-                continue;
-
-            bool found = false;
-            for (uint ci = 0; ci < min(tg_card_info[li].y, 6u) && deviceReads < kMaxDeviceReads; ++ci) {
-                uint cardIdx = tg_card_info[li].x + ci;
+        uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
+                          sc_grid_offsets[2], sc_grid_offsets[3]);
+        uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
+                          sc_grid_offsets[6], sc_grid_offsets[7]);
+        uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
+                          sc_grid_offsets[10], sc_grid_offsets[11]);
+        SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+        uint cell = scGridCellIndex(gp, hitPos);
+        if (cell != 0xFFFFFFFFu) {
+            uint begin = sc_grid_offsets[16u + cell];
+            uint end   = sc_grid_offsets[17u + cell];
+            for (uint gi = begin; gi < end && deviceReads < kMaxDeviceReads; ++gi) {
+                uint cardIdx = sc_grid_cards[gi];
                 if (cardIdx >= 4096u) continue;
                 device const SurfaceCacheCard& card = card_data[cardIdx];
                 ++deviceReads;
@@ -330,11 +327,9 @@ kernel void ddgi_trace_finalize(
                     float2 normUV = atlasUV / atlasSize;
                     sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
                     radiance = lighting_atlas.sample(samp, normUV).xyz;
-                    found = true;
                     break;
                 }
             }
-            if (found) break;
         }
 
         result.radiance_and_dist.xyz = radiance;
@@ -350,14 +345,19 @@ kernel void ddgi_trace_finalize(
         bool missFound = false;
         uint missReads = 0u;
         constexpr uint kMaxMissReads = 8u;
-        for (uint li = 0; li < lookupCount && missReads < kMaxMissReads && !missFound; ++li) {
-            if (probePos.x < tg_aabb_min[li].x || probePos.x > tg_aabb_max[li].x ||
-                probePos.y < tg_aabb_min[li].y || probePos.y > tg_aabb_max[li].y ||
-                probePos.z < tg_aabb_min[li].z || probePos.z > tg_aabb_max[li].z)
-                continue;
-
-            for (uint ci = 0; ci < min(tg_card_info[li].y, 4u) && missReads < kMaxMissReads; ++ci) {
-                uint cardIdx = tg_card_info[li].x + ci;
+        uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
+                          sc_grid_offsets[2], sc_grid_offsets[3]);
+        uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
+                          sc_grid_offsets[6], sc_grid_offsets[7]);
+        uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
+                          sc_grid_offsets[10], sc_grid_offsets[11]);
+        SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+        uint cell = scGridCellIndex(gp, probePos);
+        if (cell != 0xFFFFFFFFu) {
+            uint begin = sc_grid_offsets[16u + cell];
+            uint end   = sc_grid_offsets[17u + cell];
+            for (uint gi = begin; gi < end && missReads < kMaxMissReads; ++gi) {
+                uint cardIdx = sc_grid_cards[gi];
                 if (cardIdx >= 4096u) continue;
                 device const SurfaceCacheCard& card = card_data[cardIdx];
                 ++missReads;

@@ -110,12 +110,16 @@ public:
         rhi::ResourceHandle card_data,
         rhi::ResourceHandle card_lookup,
         u32 atlas_size = 2048,
-        u32 card_count = 0) {
+        u32 card_count = 0,
+        rhi::ResourceHandle grid_offsets = rhi::handles::INVALID_RESOURCE,
+        rhi::ResourceHandle grid_cards = rhi::handles::INVALID_RESOURCE) {
         surface_cache_lighting_atlas_ = lighting_atlas;
         surface_cache_card_data_buffer_ = card_data;
         surface_cache_card_lookup_buffer_ = card_lookup;
         surface_cache_atlas_size_ = atlas_size;
         surface_cache_card_count_ = card_count;
+        surface_cache_grid_offsets_buffer_ = grid_offsets;
+        surface_cache_grid_cards_buffer_ = grid_cards;
         surface_cache_available_ = true;
     }
 
@@ -239,6 +243,8 @@ private:
     rhi::ResourceHandle surface_cache_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle surface_cache_grid_offsets_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle surface_cache_grid_cards_buffer_{ rhi::handles::INVALID_RESOURCE };
     u32  surface_cache_atlas_size_ = 0;
     u32  surface_cache_card_count_ = 0;
     bool surface_cache_available_ = false;

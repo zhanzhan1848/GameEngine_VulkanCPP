@@ -153,6 +153,45 @@ static float3 octDecode(float2 f) {
 // where card data is in device (not constant) address space.
 static bool worldToCardUVDevice(float3 world_pos,
                                  device const SurfaceCacheCard& card,
+                                 thread float2& out_uv);
+
+// ============================================================================
+// Uniform card grid (T1.3) — mirrors SurfaceCacheData.glsl helpers.
+// grid_offsets buffer: 16-u32 header + (cell_count + 1) prefix sums into
+// grid_cards. Buffers may exceed constant-address limits → device space.
+// ============================================================================
+
+struct SCGridParams {
+    float3 grid_min;
+    float3 grid_max;
+    uint3  dims;
+    float  cell_size;
+    uint   card_count;
+};
+
+static SCGridParams scGridDecode(uint4 h0, uint4 h1, uint4 h2) {
+    SCGridParams gp;
+    gp.grid_min = as_type<float3>(uint3(h0.x, h0.y, h0.z));
+    gp.card_count = h0.w;
+    gp.grid_max = as_type<float3>(uint3(h1.x, h1.y, h1.z));
+    gp.cell_size = as_type<float>(h1.w);
+    gp.dims = h2.xyz;
+    return gp;
+}
+
+// World position → linear cell index; 0xFFFFFFFF when outside the grid.
+static uint scGridCellIndex(SCGridParams gp, float3 p) {
+    float3 g = (p - gp.grid_min) / gp.cell_size;
+    if (g.x < 0.0f || g.y < 0.0f || g.z < 0.0f) return 0xFFFFFFFFu;
+    uint3 c = uint3(g);
+    if (c.x >= gp.dims.x || c.y >= gp.dims.y || c.z >= gp.dims.z) return 0xFFFFFFFFu;
+    return c.x + gp.dims.x * (c.y + gp.dims.y * c.z);
+}
+
+// Device-addressable variant of worldToCardUV for use in compute shaders
+// where card data is in device (not constant) address space.
+static bool worldToCardUVDevice(float3 world_pos,
+                                 device const SurfaceCacheCard& card,
                                  thread float2& out_uv)
 {
     float3 local = world_pos - card.center.xyz;

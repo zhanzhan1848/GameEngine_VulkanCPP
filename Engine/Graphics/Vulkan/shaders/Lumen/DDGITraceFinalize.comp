@@ -32,6 +32,7 @@
 //                                  irradiance for multi-bounce colored GI
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
 
@@ -105,12 +106,25 @@ layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
 } volume;
 
 const vec3 DDGI_SKY_COLOR = vec3(0.3, 0.3, 0.35);
-const uint MAX_LOOKUP_CACHE = 128u;
 
-// Cooperative lookup cache in shared memory.
-shared vec4 tg_aabb_min[MAX_LOOKUP_CACHE];
-shared vec4 tg_aabb_max[MAX_LOOKUP_CACHE];
-shared uvec2 tg_card_info[MAX_LOOKUP_CACHE];   // x = card_start, y = card_count
+// T1.3: card lookup via uniform grid (header + prefix sums + card indices).
+// Replaces the shared-memory lookup cache + per-ray AABB prefilter loop.
+layout(set = 0, binding = 11, std430) readonly buffer SCGridOffsetsBuf {
+    uint sc_grid_offsets[];
+} scgo;
+layout(set = 0, binding = 12, std430) readonly buffer SCGridCardsBuf {
+    uint sc_grid_cards[];
+} scgc;
+
+SCGridParams scGridLoad() {
+    return scGridDecode(
+        uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
+              scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]),
+        uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
+              scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]),
+        uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
+              scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]));
+}
 
 // ----------------------------------------------------------------------------
 // Helpers (copied from DDGITraceRays.comp)
@@ -300,15 +314,8 @@ void ddgi_trace_finalize() {
     uint tid      = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;
     uint group_id = gl_GlobalInvocationID.x;
 
-    // ---- Phase 0: cooperative lookup load (before ANY early return) ----
-    uint lookupCount = min(volume.SCLookupCount, MAX_LOOKUP_CACHE);
-    for (uint i = tid; i < lookupCount; i += 64u) {
-        tg_aabb_min[i]  = cl.card_lookups[i].aabb_min;
-        tg_aabb_max[i]  = cl.card_lookups[i].aabb_max;
-        tg_card_info[i] = uvec2(cl.card_lookups[i].card_start,
-                                cl.card_lookups[i].card_count);
-    }
-    barrier();
+    // ---- Phase 0 removed (T1.3): card lookup now goes through the uniform
+    //      grid — no cooperative preload, no barrier, no shared memory. ----
 
     if (group_id >= volume.ProbeUpdateCount) return;
     if (tid >= volume.RaysPerProbe) return;
@@ -352,13 +359,13 @@ void ddgi_trace_finalize() {
             bool scUsed = false;
             uint deviceReads = 0u;
             const uint kMaxDeviceReads = 16u;
-            for (uint li = 0u; li < lookupCount && deviceReads < kMaxDeviceReads && !scUsed; ++li) {
-                if (hitPos.x < tg_aabb_min[li].x || hitPos.x > tg_aabb_max[li].x ||
-                    hitPos.y < tg_aabb_min[li].y || hitPos.y > tg_aabb_max[li].y ||
-                    hitPos.z < tg_aabb_min[li].z || hitPos.z > tg_aabb_max[li].z)
-                    continue;
-                for (uint ci = 0u; ci < min(tg_card_info[li].y, 6u) && deviceReads < kMaxDeviceReads; ++ci) {
-                    uint cardIdx = tg_card_info[li].x + ci;
+            SCGridParams gp = scGridLoad();
+            uint cell = scGridCellIndex(gp, hitPos);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = scgo.sc_grid_offsets[16u + cell];
+                uint end   = scgo.sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && deviceReads < kMaxDeviceReads; ++gi) {
+                    uint cardIdx = scgc.sc_grid_cards[gi];
                     if (cardIdx >= 4096u) continue;
                     SurfaceCacheCard card = cd.card_data[cardIdx];
                     ++deviceReads;
@@ -390,14 +397,13 @@ void ddgi_trace_finalize() {
         uint deviceReads = 0u;
         const uint kMaxMissReads = 8u;
         bool found = false;
-        for (uint li = 0u; li < lookupCount && deviceReads < kMaxMissReads && !found; ++li) {
-            if (probePos.x < tg_aabb_min[li].x || probePos.x > tg_aabb_max[li].x ||
-                probePos.y < tg_aabb_min[li].y || probePos.y > tg_aabb_max[li].y ||
-                probePos.z < tg_aabb_min[li].z || probePos.z > tg_aabb_max[li].z)
-                continue;
-
-            for (uint ci = 0u; ci < min(tg_card_info[li].y, 4u) && deviceReads < kMaxMissReads; ++ci) {
-                uint cardIdx = tg_card_info[li].x + ci;
+        SCGridParams gp = scGridLoad();
+        uint cell = scGridCellIndex(gp, probePos);
+        if (cell != 0xFFFFFFFFu) {
+            uint begin = scgo.sc_grid_offsets[16u + cell];
+            uint end   = scgo.sc_grid_offsets[17u + cell];
+            for (uint gi = begin; gi < end && deviceReads < kMaxMissReads; ++gi) {
+                uint cardIdx = scgc.sc_grid_cards[gi];
                 if (cardIdx >= 4096u) continue;
                 SurfaceCacheCard card = cd.card_data[cardIdx];
                 ++deviceReads;

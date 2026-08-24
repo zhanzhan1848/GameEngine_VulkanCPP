@@ -494,13 +494,17 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_frame_color
             {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // gbuffer_albedo
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (multi-bounce)
+            {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
         };
         finalizeBindings[2].readonly = true;
         finalizeBindings[3].readonly = true;
         finalizeBindings[5].readonly = true;
         finalizeBindings[6].readonly = true;
         finalizeBindings[10].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{11, finalizeBindings};
+        finalizeBindings[11].readonly = true;
+        finalizeBindings[12].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{13, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
@@ -511,8 +515,12 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray_buffer
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_lookups
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_data
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // sc_grid_offsets (T1.3)
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // sc_grid_cards (T1.3)
         };
-        DescriptorSetLayoutDesc layoutDesc{7, finalizeBindings};
+        finalizeBindings[7].readonly = true;
+        finalizeBindings[8].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{9, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 }
@@ -830,6 +838,46 @@ void LumenDDGIPass::CreateProbeTextures() {
         sc_card_lookup_buffer_ = device_->CreateBuffer(desc);
         sc_card_data_buffer_ = device_->CreateBuffer(desc);
     }
+
+    // Dummy card-grid buffers (T1.3) — finalize statically reads the grid, so
+    // bindings must stay valid when no real grid was injected. The dummy
+    // describes an empty 1³ grid at the world origin whose single cell holds
+    // no cards: any query outside [0,1)³ returns the outside sentinel, and a
+    // query inside gets an empty [0,0) range.
+    {
+        uint32_t dummy_words[18] = {};
+        // min_bits[3]=0, card_count=0 | max_bits[3]=0, cell_size_bits(1.0f)
+        const float one = 1.0f;
+        std::memcpy(&dummy_words[7], &one, 4);
+        dummy_words[8] = 1;  // dims.x
+        dummy_words[9] = 1;  // dims.y
+        dummy_words[10] = 1; // dims.z
+        dummy_words[11] = 16; // header_words
+        // words 16..17 = cell offsets [0, 0]
+
+        BufferDesc goff{};
+        goff.size = sizeof(dummy_words);
+        goff.type = BufferType::Structured;
+        goff.usage = GPUMemoryUsage::Dynamic;
+        goff.memoryUsage = GPUMemoryUsage::Dynamic;
+        goff.structured.elementCount = 18;
+        goff.structured.elementStride = sizeof(uint32_t);
+        sc_grid_offsets_buffer_ = device_->CreateBuffer(goff);
+        auto* mapped = static_cast<uint32_t*>(device_->MapBuffer(sc_grid_offsets_buffer_));
+        if (mapped) {
+            std::memcpy(mapped, dummy_words, sizeof(dummy_words));
+            device_->UnmapBuffer(sc_grid_offsets_buffer_);
+        }
+
+        BufferDesc gcards{};
+        gcards.size = 16;
+        gcards.type = BufferType::Structured;
+        gcards.usage = GPUMemoryUsage::Dynamic;
+        gcards.memoryUsage = GPUMemoryUsage::Dynamic;
+        gcards.structured.elementCount = 4;
+        gcards.structured.elementStride = sizeof(uint32_t);
+        sc_grid_cards_buffer_ = device_->CreateBuffer(gcards);
+    }
     {
         BufferDesc desc{};
         desc.size = 256;
@@ -954,13 +1002,17 @@ void LumenDDGIPass::SetSurfaceCacheResources(
     ResourceHandle card_lookup_buffer,
     ResourceHandle card_data_buffer,
     u32 atlas_size,
-    u32 lookup_count)
+    u32 lookup_count,
+    ResourceHandle grid_offsets_buffer,
+    ResourceHandle grid_cards_buffer)
 {
     sc_lighting_atlas_ = lighting_atlas;
     sc_card_lookup_buffer_ = card_lookup_buffer;
     sc_card_data_buffer_ = card_data_buffer;
     sc_atlas_size_ = atlas_size;
     sc_lookup_count_ = lookup_count;
+    sc_grid_offsets_buffer_ = grid_offsets_buffer;
+    sc_grid_cards_buffer_ = grid_cards_buffer;
 
     // Store SC params in DDGIVolumeData (triple-buffered, confirmed working)
     // instead of a separate sc_params buffer (binding 6 was not working).
@@ -1607,8 +1659,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {8, DescriptorType::SampledImage,  prevColorTex},
                             {9, DescriptorType::SampledImage,  gbufferAlbedoTex},
                             {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
+                            {11, DescriptorType::StorageBuffer, sc_grid_offsets_buffer_},
+                            {12, DescriptorType::StorageBuffer, sc_grid_cards_buffer_},
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 11);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 13);
                     } else {
                         DescriptorData finalizeParams[] = {
                             {3, DescriptorType::SampledImage,  lightingAtlasTex},
@@ -1618,8 +1672,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {4, DescriptorType::StorageBuffer, ray_data_buffer_},
                             {5, DescriptorType::StorageBuffer, sc_card_lookup_buffer_},
                             {6, DescriptorType::StorageBuffer, sc_card_data_buffer_},
+                            {7, DescriptorType::StorageBuffer, sc_grid_offsets_buffer_},
+                            {8, DescriptorType::StorageBuffer, sc_grid_cards_buffer_},
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 7);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 9);
                     }
 
                     cmd->BindComputePipeline(finalize_pipeline_);

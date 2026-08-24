@@ -57,7 +57,6 @@ public:
     rhi::ResourceHandle GetNormalAtlas() const { return normal_atlas_; }
     rhi::ResourceHandle GetDepthAtlas() const { return depth_atlas_; }
     rhi::ResourceHandle GetEmissiveAtlas() const { return emissive_atlas_; }
-    rhi::ResourceHandle GetLightAssignmentBuffer() const { return light_assignment_buffer_; }
     rhi::ResourceHandle GetLightInfoBuffer() const { return light_info_buffer_; }
     u32 GetAtlasSize() const { return atlas_size_; }
     u32 GetPageSize() const { return page_size_; }
@@ -66,6 +65,12 @@ public:
     }
     rhi::ResourceHandle GetCardLookupBuffer() const {
         return card_generator_.GetCardLookupBuffer();
+    }
+    rhi::ResourceHandle GetGridOffsetsBuffer() const {
+        return card_generator_.GetGridOffsetsBuffer();
+    }
+    rhi::ResourceHandle GetGridCardsBuffer() const {
+        return card_generator_.GetGridCardsBuffer();
     }
 
     bool IsInitialized() const { return initialized_; }
@@ -91,9 +96,6 @@ private:
     rhi::ResourceHandle depth_atlas_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle emissive_atlas_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle lighting_atlas_[3]{
-        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
-    };
-    rhi::ResourceHandle prev_lighting_atlas_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
 
@@ -168,13 +170,13 @@ private:
     };
 
     // Runtime buffers
-    rhi::ResourceHandle light_assignment_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle light_info_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ray_hits_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle card_dispatch_buffer_{ rhi::handles::INVALID_RESOURCE };
 
     u32 atlas_size_ = 0;
     u32 page_size_ = 0;
+    u32 light_eval_rr_cursor_ = 0;   // T1.4: round-robin card cursor for page-budget LightEval
 
     // GBuffer-gather capture state
     rhi::ResourceHandle capture_cb_[3]{

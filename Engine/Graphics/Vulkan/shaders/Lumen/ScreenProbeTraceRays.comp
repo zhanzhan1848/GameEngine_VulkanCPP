@@ -24,6 +24,7 @@
 //   binding 10 = SSBO read   SurfaceCacheCardLookup cardLookup[] (may be dummy)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
 
@@ -71,6 +72,14 @@ layout(set = 0, binding = 9, std430) readonly buffer CardsBlock {
 layout(set = 0, binding = 10, std430) readonly buffer CardLookupBlock {
     SurfaceCacheCardLookup data[];
 } cardLookup;
+
+// T1.3: uniform card grid — O(1) card lookup replaces the 32-card linear scan.
+layout(set = 0, binding = 11, std430) readonly buffer SCGridOffsetsBuf {
+    uint sc_grid_offsets[];
+} scgo;
+layout(set = 0, binding = 12, std430) readonly buffer SCGridCardsBuf {
+    uint sc_grid_cards[];
+} scgc;
 
 // --------------------------------------------------------------------------------
 // Constants
@@ -282,17 +291,28 @@ void screen_probe_trace_rays() {
         float nearDistance = 2.0;
 
         if (hit.distance < nearDistance && global.surface_cache_params.z > 0.5) {
-            // Iterate cards to find matching atlas UV (capped for Apple Silicon parity)
-            uint cardCount = min(uint(global.surface_cache_params.y), 32u);
+            // T1.3: grid lookup — candidates from the hit position's cell
+            // (≤ kMaxCardsPerGridCell entries) instead of scanning 32 cards.
             float atlasSize = global.surface_cache_params.x;
 
-            for (uint ci = 0u; ci < cardCount && !usedSurfaceCache; ++ci) {
-                vec2 atlas_uv;
-                if (worldToCardUV(hit.position, cards.data[ci], atlas_uv)) {
-                    // Convert atlas pixel coords to normalized UV for sampling
-                    vec2 uv_norm = atlas_uv / vec2(atlasSize);
-                    radiance = sampleBilinearRGB(surface_cache_lighting, uv_norm);
-                    usedSurfaceCache = true;
+            uvec4 gh0 = uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
+                              scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]);
+            uvec4 gh1 = uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
+                              scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]);
+            uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
+                              scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
+            SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+            uint cell = scGridCellIndex(gp, hit.position);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = scgo.sc_grid_offsets[16u + cell];
+                uint end   = scgo.sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && !usedSurfaceCache; ++gi) {
+                    vec2 atlas_uv;
+                    if (worldToCardUV(hit.position, cards.data[scgc.sc_grid_cards[gi]], atlas_uv)) {
+                        vec2 uv_norm = atlas_uv / vec2(atlasSize);
+                        radiance = sampleBilinearRGB(surface_cache_lighting, uv_norm);
+                        usedSurfaceCache = true;
+                    }
                 }
             }
         }

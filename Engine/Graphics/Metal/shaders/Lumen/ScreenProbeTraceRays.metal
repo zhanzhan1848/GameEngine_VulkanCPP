@@ -187,6 +187,10 @@ kernel void screen_probe_trace_rays(
     constant SurfaceCacheCard*        cards       [[buffer(4)]],
     constant SurfaceCacheCardLookup*  cardLookup  [[buffer(5)]],
 
+    // T1.3: uniform card grid (header + prefix sums / card indices)
+    device const uint*                sc_grid_offsets [[buffer(6)]],
+    device const uint*                sc_grid_cards   [[buffer(7)]],
+
     // Thread positioning (1D to be compatible with shared Metal compute encoder)
     uint global_id [[thread_position_in_grid]])
 {
@@ -233,18 +237,30 @@ kernel void screen_probe_trace_rays(
         float nearDistance = 2.0f;
 
         if (hit.distance < nearDistance && global.surface_cache_params.z > 0.5f) {
-            // Iterate cards to find matching atlas UV (capped for Apple Silicon)
-            uint cardCount = min(uint(global.surface_cache_params.y), 32u);
+            // T1.3: grid lookup — candidates from the hit position's cell
+            // (≤ kMaxCardsPerGridCell entries) instead of scanning 32 cards.
             float atlasSize = global.surface_cache_params.x;
 
-            for (uint ci = 0; ci < cardCount && !usedSurfaceCache; ++ci) {
-                float2 atlas_uv;
-                if (worldToCardUV(hit.position, cards[ci], atlas_uv)) {
-                    // Convert atlas pixel coords to normalized UV for sampling
-                    float2 uv_norm = atlas_uv / float2(atlasSize);
-                    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-                    radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
-                    usedSurfaceCache = true;
+            uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
+                              sc_grid_offsets[2], sc_grid_offsets[3]);
+            uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
+                              sc_grid_offsets[6], sc_grid_offsets[7]);
+            uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
+                              sc_grid_offsets[10], sc_grid_offsets[11]);
+            SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+            uint cell = scGridCellIndex(gp, hit.position);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = sc_grid_offsets[16u + cell];
+                uint end   = sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && !usedSurfaceCache; ++gi) {
+                    float2 atlas_uv;
+                    if (worldToCardUV(hit.position, cards[sc_grid_cards[gi]], atlas_uv)) {
+                        // Convert atlas pixel coords to normalized UV for sampling
+                        float2 uv_norm = atlas_uv / float2(atlasSize);
+                        constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+                        radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
+                        usedSurfaceCache = true;
+                    }
                 }
             }
         }

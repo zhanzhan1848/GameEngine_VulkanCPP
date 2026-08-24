@@ -265,33 +265,9 @@ void SurfaceCachePass::CreateAtlasTextures() {
             ("SurfaceCache_Lighting_" + std::to_string(i)).c_str(),
             DataFormat::RGBA16_Float,
             lighting_atlas_[i]);
-        CreateAtlas(
-            ("SurfaceCache_PrevLighting_" + std::to_string(i)).c_str(),
-            DataFormat::RGBA16_Float,
-            prev_lighting_atlas_[i]);
     }
 
     // Runtime buffers
-    {
-        // Light assignment buffer: per-tile light index lists
-        u32 pagesPerSide = atlas_size_ / page_size_;
-        u32 totalPages = pagesPerSide * pagesPerSide;
-        BufferDesc lightAssignDesc{};
-        lightAssignDesc.size = (u64)totalPages * config_.surface_cache_max_cards * sizeof(u32);
-        lightAssignDesc.type = BufferType::Structured;
-        lightAssignDesc.usage = GPUMemoryUsage::Dynamic;
-        lightAssignDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        light_assignment_buffer_ = device_->CreateBuffer(lightAssignDesc);
-
-        // Initialize to all 0xFF (empty tiles) so LightEval skips safely
-        // when LightCull hasn't written to some tiles.
-        auto* mapped = static_cast<uint32_t*>(device_->MapBuffer(light_assignment_buffer_));
-        if (mapped) {
-            memset(mapped, 0xFF, lightAssignDesc.size);
-            device_->UnmapBuffer(light_assignment_buffer_);
-        }
-    }
-
     {
         // Light info buffer: light parameters for evaluation
         BufferDesc lightInfoDesc{};
@@ -511,7 +487,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
     }
 
     // --- Capture (GBuffer-gather, Vulkan-only): 3 GBuffer inputs + 3 atlas
-    //     write images + 1 UBO + 1 cards SSBO ---
+    //     write images + 1 UBO + 1 cards SSBO + 2 card-grid SSBOs (T1.3) ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // gbuffer_depth
@@ -522,10 +498,14 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {5, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // depth_atlas
             {6, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // CaptureParams
             {7, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // cards
+            {8, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // sc_grid_offsets
+            {9, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // sc_grid_cards
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[7].readonly = true;
-        capture_gather_set_layout_ = device_->CreateDescriptorSetLayout({8, bindings});
+        b[8].readonly = true;
+        b[9].readonly = true;
+        capture_gather_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
     }
 
     // --- CardFill (SDF-based, Vulkan-only): 3 SDF 3D + 4 atlas + 1 UBO + 4 SSBO ---
@@ -892,6 +872,47 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // Skip dispatch when no card data
             if (total_texels == 0) return;
 
+            // ================================================================
+            // 1.5 (T1.4) Page-budget round-robin selection.
+            //
+            // Activates surface_cache_capture_budget (was a dead config
+            // field): each frame only a rotating window of cards whose texels
+            // fit `budget_pages × page_size²` is dispatched, so LightEval
+            // invocations drop ~total/budget× instead of lighting every card
+            // texel every frame. Un-updated atlas regions keep their previous
+            // slot content (persistent-cache semantics); the multi-bounce
+            // feedback converges at a proportionally slower rate. budget = 0
+            // or budget ≥ total keeps the legacy full update.
+            // ================================================================
+            {
+                const u32 texel_budget =
+                    config_.surface_cache_capture_budget * page_size_ * page_size_;
+                if (texel_budget > 0 && total_texels > texel_budget && card_count > 1) {
+                    const u32 start = light_eval_rr_cursor_ % card_count;
+                    u32 acc = 0, taken = 0;
+                    for (u32 k = 0; k < card_count; ++k) {
+                        const u32 cnt = dispatch_info[(start + k) % card_count].texel_count;
+                        if (taken > 0 && acc + cnt > texel_budget) break;
+                        acc += cnt;
+                        ++taken;
+                    }
+                    if (taken < card_count) {
+                        std::vector<CardDispatchInfo> selected(taken);
+                        u32 off = 0;
+                        for (u32 k = 0; k < taken; ++k) {
+                            const u32 idx = (start + k) % card_count;
+                            selected[k] = dispatch_info[idx];
+                            selected[k].texel_offset = off;   // rebase to 0
+                            off += selected[k].texel_count;
+                        }
+                        dispatch_info = std::move(selected);
+                        card_count = taken;
+                        total_texels = off;
+                    }
+                    light_eval_rr_cursor_ = (start + taken) % card_count;
+                }
+            }
+
             // Upload dispatch info to GPU
             {
                 auto* mapped = static_cast<CardDispatchInfo*>(device_->MapBuffer(card_dispatch_buffer_));
@@ -1053,8 +1074,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     {5, DescriptorType::StorageImage,      depth_atlas_},
                     {6, DescriptorType::UniformBuffer,     capture_cb_[frameIdx]},
                     {7, DescriptorType::StorageBuffer,     card_generator_.GetCardDataBuffer()},
+                    {8, DescriptorType::StorageBuffer,     card_generator_.GetGridOffsetsBuffer()},
+                    {9, DescriptorType::StorageBuffer,     card_generator_.GetGridCardsBuffer()},
                 };
-                UpdateDescriptorSet(device_, capture_gather_set_[frameIdx], captureParams, 8);
+                UpdateDescriptorSet(device_, capture_gather_set_[frameIdx], captureParams, 10);
 
                 cmd->BindComputePipeline(capture_gather_pipeline_);
                 const DescriptorSetHandle capSets[] = { capture_gather_set_[frameIdx] };

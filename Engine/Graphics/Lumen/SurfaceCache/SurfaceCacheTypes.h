@@ -83,6 +83,28 @@ struct SurfaceCacheFrameData {
     rhi::ResourceHandle gbuffer_normal { rhi::handles::INVALID_RESOURCE };
 };
 
+// ============================================================================
+// Uniform card grid (T1.3): world-space cell → card index list.
+//
+// Layout: a single u32 buffer whose first 16 words are this header, followed
+// by (cell_count + 1) prefix-sum offsets into a second buffer of card indices.
+// Floats are bit-cast into u32 so shaders need no extra CB/UBO plumbing —
+// every consumer binds just the two SSBOs and self-describes from the header.
+// ============================================================================
+
+struct SurfaceCacheCardGridHeader {
+    uint32_t min_bits[3];      // float bits of grid_min.xyz
+    uint32_t card_count;       // total cards indexed by the grid
+    uint32_t max_bits[3];      // float bits of grid_max.xyz
+    uint32_t cell_size_bits;   // float bits of cell_size (world units)
+    uint32_t dims[3];          // cells per axis
+    uint32_t header_words;     // = 16 (u32 words before the offsets array)
+    uint32_t reserved[4];
+};
+static_assert(sizeof(SurfaceCacheCardGridHeader) == 64, "Header must stay 16 u32 words");
+
+constexpr uint32_t kMaxCardsPerGridCell = 8;   // build-side cap; shaders mirror this
+
 struct SurfaceCacheOutput {
     rendergraph::RGResourceHandle lighting_atlas;
 };

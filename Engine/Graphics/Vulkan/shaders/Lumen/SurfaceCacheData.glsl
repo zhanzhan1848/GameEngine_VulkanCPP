@@ -150,4 +150,41 @@ float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+// ============================================================================
+// Uniform card grid (T1.3) — canonical query helpers.
+//
+// The grid_offsets SSBO starts with a 16-u32 header (SurfaceCacheCardGridHeader
+// on the C++ side), followed by (cell_count + 1) prefix-sum u32s into the
+// grid_cards SSBO. Consumers declare their own buffer blocks (binding numbers
+// differ per pass) and use these helpers for decode + cell lookup.
+// ============================================================================
+
+struct SCGridParams {
+    vec3  grid_min;
+    vec3  grid_max;
+    uvec3 dims;
+    float cell_size;
+    uint  card_count;
+};
+
+// Decode the 3 header uvec4s (words 0..11 of grid_offsets).
+SCGridParams scGridDecode(uvec4 h0, uvec4 h1, uvec4 h2) {
+    SCGridParams gp;
+    gp.grid_min = uintBitsToFloat(h0.xyz);
+    gp.card_count = h0.w;
+    gp.grid_max = uintBitsToFloat(h1.xyz);
+    gp.cell_size = uintBitsToFloat(h1.w);
+    gp.dims = h2.xyz;
+    return gp;
+}
+
+// World position → linear cell index; 0xFFFFFFFF when outside the grid.
+uint scGridCellIndex(SCGridParams gp, vec3 p) {
+    vec3 g = (p - gp.grid_min) / gp.cell_size;
+    if (g.x < 0.0 || g.y < 0.0 || g.z < 0.0) return 0xFFFFFFFFu;
+    uvec3 c = uvec3(g);
+    if (c.x >= gp.dims.x || c.y >= gp.dims.y || c.z >= gp.dims.z) return 0xFFFFFFFFu;
+    return c.x + gp.dims.x * (c.y + gp.dims.y * c.z);
+}
+
 #endif // SURFACE_CACHE_DATA_GLSL

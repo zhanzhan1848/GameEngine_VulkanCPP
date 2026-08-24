@@ -1299,7 +1299,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 surface_cache_pass_->GetCardDataBuffer(),
                 surface_cache_pass_->GetCardLookupBuffer(),
                 settings_.lumen.surface_cache_atlas_size,
-                settings_.lumen.surface_cache_max_cards);
+                settings_.lumen.surface_cache_max_cards,
+                surface_cache_pass_->GetGridOffsetsBuffer(),
+                surface_cache_pass_->GetGridCardsBuffer());
         }
 
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
@@ -1308,7 +1310,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 surface_cache_pass_->GetCardLookupBuffer(),
                 surface_cache_pass_->GetCardDataBuffer(),
                 settings_.lumen.surface_cache_atlas_size,
-                surface_cache_pass_->GetCardGenerator().GetLookupCount());
+                surface_cache_pass_->GetCardGenerator().GetLookupCount(),
+                surface_cache_pass_->GetGridOffsetsBuffer(),
+                surface_cache_pass_->GetGridCardsBuffer());
         }
     }
 
@@ -1905,7 +1909,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     surface_cache_pass_->GetCardLookupBuffer(),
                     surface_cache_pass_->GetCardDataBuffer(),
                     settings_.lumen.surface_cache_atlas_size,
-                    surface_cache_pass_->GetCardGenerator().GetLookupCount());
+                    surface_cache_pass_->GetCardGenerator().GetLookupCount(),
+                    surface_cache_pass_->GetGridOffsetsBuffer(),
+                    surface_cache_pass_->GetGridCardsBuffer());
             }
             if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
                 screen_probe_pass_->SetSurfaceCacheData(
@@ -1913,7 +1919,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     surface_cache_pass_->GetCardDataBuffer(),
                     surface_cache_pass_->GetCardLookupBuffer(),
                     settings_.lumen.surface_cache_atlas_size,
-                    settings_.lumen.surface_cache_max_cards);
+                    settings_.lumen.surface_cache_max_cards,
+                    surface_cache_pass_->GetGridOffsetsBuffer(),
+                    surface_cache_pass_->GetGridCardsBuffer());
             }
         }
 

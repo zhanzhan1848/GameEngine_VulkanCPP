@@ -199,13 +199,18 @@ public:
     }
 
     // Set Surface Cache resources for view-independent radiance in TraceRays.
-    // Must be called before AddPass when Surface Cache is active.
+    // Must be called before AddPass when Surface Cache is active. The grid
+    // pair (T1.3) is optional — Vulkan finalize uses it for O(1) card lookup;
+    // without it the buffer handles stay INVALID and shaders fall back to the
+    // 0xFFFFFFFF cell sentinel (no SC card sampling).
     void SetSurfaceCacheResources(
         rhi::ResourceHandle lighting_atlas,
         rhi::ResourceHandle card_lookup_buffer,
         rhi::ResourceHandle card_data_buffer,
         u32 atlas_size,
-        u32 lookup_count);
+        u32 lookup_count,
+        rhi::ResourceHandle grid_offsets_buffer = rhi::handles::INVALID_RESOURCE,
+        rhi::ResourceHandle grid_cards_buffer = rhi::handles::INVALID_RESOURCE);
 
     // Clear Surface Cache resources — call when leaving SC mode to prevent
     // DDGI finalize from reading stale SC card data and racing with the
@@ -342,6 +347,8 @@ private:
     rhi::ResourceHandle sc_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle sc_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle sc_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle sc_grid_offsets_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle sc_grid_cards_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle sc_params_buffer_{ rhi::handles::INVALID_RESOURCE };
     u32                 sc_atlas_size_ = 0;
     u32                 sc_lookup_count_ = 0;

@@ -22,6 +22,8 @@ public:
 
     rhi::ResourceHandle GetCardDataBuffer() const { return card_data_buffer_; }
     rhi::ResourceHandle GetCardLookupBuffer() const { return card_lookup_buffer_; }
+    rhi::ResourceHandle GetGridOffsetsBuffer() const { return grid_offsets_buffer_; }
+    rhi::ResourceHandle GetGridCardsBuffer() const { return grid_cards_buffer_; }
     uint32_t GetCardCount() const { return card_count_; }
     uint32_t GetLookupCount() const { return static_cast<uint32_t>(meshes_.size()); }
     const std::vector<SurfaceCacheCard>& GetCards() const { return cards_; }
@@ -29,6 +31,7 @@ public:
 
 private:
     void UploadToGPU();
+    void BuildCardGrid();
 
     rhi::RHIDeviceBase* device_ = nullptr;
     uint32_t atlas_size_ = 0;
@@ -43,6 +46,11 @@ private:
 
     rhi::ResourceHandle card_data_buffer_ = rhi::handles::INVALID_RESOURCE;
     rhi::ResourceHandle card_lookup_buffer_ = rhi::handles::INVALID_RESOURCE;
+
+    // Uniform card grid (T1.3): offsets buffer carries the 64B header +
+    // per-cell prefix sums; cards buffer holds concatenated card indices.
+    rhi::ResourceHandle grid_offsets_buffer_ = rhi::handles::INVALID_RESOURCE;
+    rhi::ResourceHandle grid_cards_buffer_ = rhi::handles::INVALID_RESOURCE;
 };
 
 } // namespace

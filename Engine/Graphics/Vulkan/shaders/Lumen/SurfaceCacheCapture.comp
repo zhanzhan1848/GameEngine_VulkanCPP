@@ -22,8 +22,11 @@
 //   5 = StorageImage(r32f)   depth_atlas    (write, axis distance)
 //   6 = UniformBuffer      { invViewProjection, card_count, render_size }
 //   7 = readonly buffer    SurfaceCacheCard cards[] (std430)
+//   8 = readonly buffer    uint sc_grid_offsets[] (64B header + prefix sums)
+//   9 = readonly buffer    uint sc_grid_cards[] (concatenated card indices)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
 
@@ -48,6 +51,14 @@ layout(set = 0, binding = 6, std140) uniform CaptureParams {
 layout(set = 0, binding = 7, std430) readonly buffer CardBuf {
     SurfaceCacheCard cards[];
 } cb;
+
+layout(set = 0, binding = 8, std430) readonly buffer SCGridOffsetsBuf {
+    uint sc_grid_offsets[];
+} scgo;
+
+layout(set = 0, binding = 9, std430) readonly buffer SCGridCardsBuf {
+    uint sc_grid_cards[];
+} scgc;
 
 // Project world position into a card's atlas frame. Also outputs the depth
 // along the card axis (same switch as worldToCardUV in SurfaceCacheData.glsl,
@@ -100,17 +111,30 @@ void surface_cache_capture() {
     vec2 encN = octEncode(n);
 
     // Scatter into every card whose ortho frame contains this point.
-    // Cap matches the Metal card-search budget (~24 device reads).
-    uint limit = min(cp.card_count, 24u);
-    for (uint i = 0u; i < limit; ++i) {
-        SurfaceCacheCard card = cb.cards[i];
-        vec2 atlasUV;
-        float axisDepth;
-        if (projectToCard(worldPos, card, atlasUV, axisDepth)) {
-            ivec2 texel = ivec2(atlasUV);
-            imageStore(albedo_atlas, texel, vec4(albedo, 1.0));
-            imageStore(normal_atlas, texel, vec4(encN, 0.0, 1.0));
-            imageStore(depth_atlas,  texel, vec4(axisDepth, 0.0, 0.0, 1.0));
+    // T1.3: uniform grid narrows the candidate set from a linear scan over
+    // min(card_count, 24) cards to the ≤kMaxCardsPerGridCell entries of the
+    // world-position's cell (worldToCardUV stays the precise containment test).
+    uvec4 gh0 = uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
+                      scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]);
+    uvec4 gh1 = uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
+                      scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]);
+    uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
+                      scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
+    SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+    uint cell = scGridCellIndex(gp, worldPos);
+    if (cell != 0xFFFFFFFFu) {
+        uint begin = scgo.sc_grid_offsets[16u + cell];
+        uint end   = scgo.sc_grid_offsets[17u + cell];
+        for (uint gi = begin; gi < end; ++gi) {
+            SurfaceCacheCard card = cb.cards[scgc.sc_grid_cards[gi]];
+            vec2 atlasUV;
+            float axisDepth;
+            if (projectToCard(worldPos, card, atlasUV, axisDepth)) {
+                ivec2 texel = ivec2(atlasUV);
+                imageStore(albedo_atlas, texel, vec4(albedo, 1.0));
+                imageStore(normal_atlas, texel, vec4(encN, 0.0, 1.0));
+                imageStore(depth_atlas,  texel, vec4(axisDepth, 0.0, 0.0, 1.0));
+            }
         }
     }
 }
