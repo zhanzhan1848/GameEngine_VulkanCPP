@@ -8,6 +8,7 @@
 #include "Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
+#include "Graphics/RenderPipeline/GIEditorPanel.h"   // M6/T6.1 GI 面板 API（轻量头）
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "PipelineLightDesc.h"
@@ -23,10 +24,15 @@
 #include "Graphics/RenderTexture.h"      // for RenderTexture::GetDesc/GetHandle
 #include "Graphics/Renderer.h"           // for graphics::render_surface definition
 #include "EngineAPIInternal.h"           // for engine_dll::GetRenderTarget/GetSurface
+// include 顺序敏感：StaticProbeBaker.h 经 BVH.hpp 打开 primal::graphics::utl，
+// 遮蔽后续头文件对 primal::utl（vector）的名字查找——必须放在上面所有 Engine
+// 头之后。其完整类型仅为下方 GIBakeStaticProbes 的 ProbeBakingScene/Params。
+#include "Graphics/Lumen/StaticProbe/StaticProbeBaker.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 #if defined(_MSC_VER)
 #pragma comment(lib, "Engine.lib")
@@ -606,6 +612,193 @@ EDITOR_INTERFACE u32 BlitRenderTargetToSurface(u64 target_handle, u32 surface_id
     // blit PSO, acquires the currentDrawable, renders the fullscreen
     // triangle, and presents.
     return rs->surface.blit_and_present(entry->texture->GetHandle());
+}
+
+// ============================================================================
+// GI Editor Panel (M6/T6.1)
+// ============================================================================
+//
+// GI 面板数据面的 C ABI 投影。UI 宿主（PrimalEditor / WASM shell / 测试）
+// 消费方式：
+//   - 控件：GetPipelineParamDescriptors（含 "GI Axes" 五轴分组，base =
+//     RenderPipelineSettings）+ GetGIDebugParamDescriptors（base =
+//     GIDebugParams 进程单例，写后即时生效）+ GetGIVolumeParamDescriptors
+//     （base = LumenVolumeConfig，配 volume 列表 CRUD 使用）；
+//   - axes 提交：改 GI Axes 控件后调 GIApplyAxesConfig（SetLumenConfig 热重
+//     载，轴1 覆写 pass 开关），不要只 UpdateRenderPipelineSettings；
+//   - volume 提交：Set/Append/Remove VolumeOverride 内部已置
+//     settings_dirty_ —— 下一渲染帧 ApplyConfigChanges 自动重建 Lumen
+//     passes（counts/spacing 变更必须重建，即"改后自动触发重初始化"）；
+//   - Bake 按钮：GIBakeStaticProbes（grid 取当前 volume 0 配置；CPU 几何
+//     由宿主传入；须在渲染帧之外调用）；
+//   - 按钮通用机制：GIRegisterPanelAction / GIGetPanelAction / GIInvokePanelAction。
+//
+// 默认零开销：所有函数被动调用，无每帧轮询；面板不打开 = 无人调用。
+
+EDITOR_INTERFACE const ParamDescriptor* GetGIDebugParamDescriptors(u32* out_count) {
+    if (!out_count) return nullptr;
+    return gi_panel::GetDebugParamDescriptors(*out_count);
+}
+
+EDITOR_INTERFACE const ParamDescriptor* GetGIVolumeParamDescriptors(u32* out_count) {
+    if (!out_count) return nullptr;
+    return gi_panel::GetVolumeParamDescriptors(*out_count);
+}
+
+// --- GIDebugParams 运行时旋钮（进程单例，写后即时生效；三端 AddPass 读取） ---
+
+EDITOR_INTERFACE void GIGetDebugParams(lumen::GIDebugParams* out) {
+    if (!out) return;
+    *out = lumen::GIDebug();
+}
+
+EDITOR_INTERFACE void GISetDebugParams(const lumen::GIDebugParams* params) {
+    if (!params) return;
+    lumen::GIDebug() = *params;
+}
+
+// --- 五轴热重载（SetLumenConfig 路径，勿绕行 UpdateRenderPipelineSettings） ---
+
+EDITOR_INTERFACE u32 GIApplyAxesConfig(const lumen::GIFiveAxisConfig* axes) {
+    if (!axes) return 0;
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    return gi_panel::ApplyAxesConfig(p, *axes) ? 1u : 0u;
+}
+
+// --- volume 列表 CRUD（cap 4；提交自动置 settings_dirty_ 触发下帧重建） ---
+
+EDITOR_INTERFACE u32 GIGetVolumeOverrideCount() {
+    auto* p = GetStdPipeline();
+    return p ? gi_panel::GetVolumeOverrideCount(p) : 0u;
+}
+
+EDITOR_INTERFACE u32 GIGetVolumeOverride(u32 index, lumen::LumenVolumeConfig* out) {
+    if (!out) return 0;
+    auto* p = GetStdPipeline();
+    return (p && gi_panel::GetVolumeOverride(p, index, out)) ? 1u : 0u;
+}
+
+EDITOR_INTERFACE u32 GISetVolumeOverride(u32 index, const lumen::LumenVolumeConfig* v) {
+    if (!v) return 0;
+    auto* p = GetStdPipeline();
+    return (p && gi_panel::SetVolumeOverride(p, index, *v)) ? 1u : 0u;
+}
+
+EDITOR_INTERFACE u32 GIAppendVolumeOverride() {
+    auto* p = GetStdPipeline();
+    return (p && gi_panel::AppendVolumeOverride(p)) ? 1u : 0u;
+}
+
+EDITOR_INTERFACE u32 GIRemoveVolumeOverride(u32 index) {
+    auto* p = GetStdPipeline();
+    return (p && gi_panel::RemoveVolumeOverride(p, index)) ? 1u : 0u;
+}
+
+EDITOR_INTERFACE u32 GIMaterializeDerivedVolumes() {
+    auto* p = GetStdPipeline();
+    return (p && gi_panel::MaterializeDerivedVolumes(p)) ? 1u : 0u;
+}
+
+EDITOR_INTERFACE u32 GIGetEffectiveVolumeConfig(u32 index, lumen::LumenVolumeConfig* out) {
+    if (!out) return 0;
+    auto* p = GetStdPipeline();
+    return (p && gi_panel::GetEffectiveVolumeConfig(p, index, out)) ? 1u : 0u;
+}
+
+// --- Bake（grid 取当前生效 volume 0 配置；CPU 几何宿主提供；渲染帧外调用） ---
+// vertices: vertex_count * 3 个 float（xyz 三元组）；indices: index_count 个
+// u32。light_dir/light_color/sky_color 可为 null（用 ProbeBakingScene 默认）。
+// rays_per_probe=0 / bounce_count=0 → ProbeBakingParams 默认。
+
+EDITOR_INTERFACE u32 GIBakeStaticProbes(const f32* vertices, u32 vertex_count,
+                                         const u32* indices, u32 index_count,
+                                         const f32* light_dir, const f32* light_color,
+                                         f32 light_intensity, const f32* sky_color,
+                                         u32 rays_per_probe, u32 bounce_count,
+                                         char* out_status, u32 status_cap) {
+    auto* p = GetStdPipeline();
+    if (!p) {
+        if (out_status && status_cap)
+            std::snprintf(out_status, status_cap, "Bake failed: no pipeline");
+        return 0;
+    }
+    if ((!vertices && vertex_count) || (!indices && index_count) ||
+        (vertex_count && index_count % 3)) {
+        if (out_status && status_cap)
+            std::snprintf(out_status, status_cap, "Bake failed: bad geometry args");
+        return 0;
+    }
+
+    // f32 三元组 → primal::math::v3（保持 ProbeBakingScene 的 v3 指针布局）
+    std::vector<primal::math::v3> verts;
+    std::vector<u32> idx;
+    if (vertex_count) {
+        verts.reserve(vertex_count);
+        for (u32 i = 0; i < vertex_count; ++i)
+            verts.push_back(primal::math::v3{vertices[i * 3], vertices[i * 3 + 1], vertices[i * 3 + 2]});
+        idx.assign(indices, indices + index_count);
+    }
+
+    lumen::ProbeBakingScene scene{};
+    if (!verts.empty()) {
+        scene.vertices = verts.data();
+        scene.indices = idx.data();
+        scene.vertex_count = vertex_count;
+        scene.index_count = index_count;
+    }
+    if (light_dir)   scene.light_direction = primal::math::v3{light_dir[0], light_dir[1], light_dir[2]};
+    if (light_color) scene.light_color = primal::math::v3{light_color[0], light_color[1], light_color[2]};
+    scene.light_intensity = light_intensity;
+    if (sky_color)   scene.sky_color = primal::math::v3{sky_color[0], sky_color[1], sky_color[2]};
+
+    lumen::ProbeBakingParams params{};
+    if (rays_per_probe) params.rays_per_probe = rays_per_probe;
+    if (bounce_count)   params.bounce_count = bounce_count;
+
+    return gi_panel::BakeStaticProbes(p, scene, params, out_status, status_cap) ? 1u : 0u;
+}
+
+// --- 面板动作（按钮）通用注册机制（被动容器；不注册 = 零开销） ---
+
+EDITOR_INTERFACE void GIRegisterPanelAction(const char* id, const char* label,
+                                            const char* tooltip,
+                                            gi_panel::PanelActionFn fn, void* user_data) {
+    if (!id || !fn) return;
+    gi_panel::PanelAction a{};
+    a.id = id;
+    a.label = label ? label : id;
+    a.tooltip = tooltip ? tooltip : "";
+    a.fn = fn;
+    a.user_data = user_data;
+    gi_panel::RegisterAction(a);
+}
+
+EDITOR_INTERFACE void GIUnregisterPanelAction(const char* id) {
+    gi_panel::UnregisterAction(id);
+}
+
+EDITOR_INTERFACE void GIClearPanelActions() {
+    gi_panel::ClearActions();
+}
+
+EDITOR_INTERFACE u32 GIGetPanelActionCount() {
+    return gi_panel::GetActionCount();
+}
+
+EDITOR_INTERFACE u32 GIGetPanelAction(u32 index, const char** out_id,
+                                      const char** out_label, const char** out_tooltip) {
+    const gi_panel::PanelAction* a = gi_panel::GetActionByIndex(index);
+    if (!a) return 0;
+    if (out_id)       *out_id = a->id;
+    if (out_label)    *out_label = a->label;
+    if (out_tooltip)  *out_tooltip = a->tooltip;
+    return 1;
+}
+
+EDITOR_INTERFACE u32 GIInvokePanelAction(const char* id) {
+    if (!id) return 0;
+    return gi_panel::InvokeAction(id) ? 1u : 0u;
 }
 
 } // extern "C"

@@ -43,6 +43,22 @@ struct GIDebugParams {
     bool freeze_probe_updates = false;
 
     // ------------------------------------------------------------------
+    // M6/T6.1: probe 调试可视化模式（面板开关）。数据面预留——当前三端
+    // pass 均未读取本字段，Off（默认）零开销。计划接线点：DDGIProbeAtlas
+    // 占位 shader 升级（现为 TestNaniteStreamingPipeline 的常量写入测试
+    // kernel）→ 运行时 viz pass 消费 probe_vis 选择显示 irradiance atlas /
+    // octahedral depth atlas / per-probe confidence 着色（T6.3 轮，不动
+    // 现有 kernel 的前提下由独立 viz pass 读取 GI 缓存视图 GICacheView）。
+    // ------------------------------------------------------------------
+    enum class ProbeVisMode : u32 {
+        Off = 0,
+        IrradianceAtlas = 1,
+        DepthAtlas = 2,
+        Confidence = 3,
+    };
+    ProbeVisMode probe_vis = ProbeVisMode::Off;
+
+    // ------------------------------------------------------------------
     // 旧接口桥接（WASM sidebar → 统一旋钮）
     // ------------------------------------------------------------------
     void ApplyLegacy(const rhi::DawnDebugParams& p) {

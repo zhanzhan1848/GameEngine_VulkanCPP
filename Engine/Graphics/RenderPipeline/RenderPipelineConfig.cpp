@@ -301,6 +301,24 @@ static const ParamDescriptor kParams[] = {
     // --- TAA (schema-only; pass-side wiring pending) ---
     {"TAA Sharpness",          "TAA",    ParamType::Float, {0.0f, 1.0f, 0.01f},   OFF(taa.sharpness),           SZ(taa.sharpness),           nullptr},
     {"TAA Feedback",           "TAA",    ParamType::Float, {0.0f, 1.0f, 0.01f},   OFF(taa.feedback),            SZ(taa.feedback),            nullptr},
+
+    // --- GI Axes（M6/T6.1 五轴面板分组；GIFiveAxisConfig 定义见 LumenTypes.h）---
+    // 控件生成约定：轴1 三个 bool（组合=空间缓存拓扑）；轴2/轴3/轴5 枚举
+    // 下拉（enum_names 逗号分隔，序号=枚举值）；轴4 两个 bool（传播边）。
+    // 提交约定：任一轴变更后宿主应走 gi_panel::ApplyAxesConfig（SetLumenConfig
+    // 热重载 + 补 settings_dirty_ 重建 Lumen passes），或经 EngineDLL 的
+    // GIApplyAxesConfig C ABI —— 不要只 UpdateRenderPipelineSettings（会绕过
+    // 轴1 → quality.enable_* 覆写，造成 UI 与实际 pass 漂移）。
+    // 轴2/轴3 是 kernel 分支轴（config 落位，分支点随 T6.3 CB 化）；轴5 的
+    // EMAVarianceClamp/Reprojection 当前映射为 EMA（GICacheView.h 映射注释）。
+    {"Axis1 Use SurfaceCache",  "GI Axes", ParamType::Bool, {0, 1, 1},          OFF(lumen.axes.use_surface_cache),  SZ(lumen.axes.use_surface_cache),  nullptr},
+    {"Axis1 Use DDGI Volume",   "GI Axes", ParamType::Bool, {0, 1, 1},          OFF(lumen.axes.use_ddgi_volume),    SZ(lumen.axes.use_ddgi_volume),    nullptr},
+    {"Axis1 Use ScreenProbes",  "GI Axes", ParamType::Bool, {0, 1, 1},          OFF(lumen.axes.use_screen_probes),  SZ(lumen.axes.use_screen_probes),  nullptr},
+    {"Axis2 Directional",       "GI Axes", ParamType::Enum, {0, 1, 1},          OFF(lumen.axes.directional),        SZ(lumen.axes.directional),        "SH2,SH3"},
+    {"Axis3 DFG Path",          "GI Axes", ParamType::Enum, {0, 1, 1},          OFF(lumen.axes.dfg_path),           SZ(lumen.axes.dfg_path),           "Analytic,PreintegratedLUT"},
+    {"Axis4 SC->DDGI Feed",     "GI Axes", ParamType::Bool, {0, 1, 1},          OFF(lumen.axes.propagate_sc_to_ddgi), SZ(lumen.axes.propagate_sc_to_ddgi), nullptr},
+    {"Axis4 SPGI->DDGI Fallback","GI Axes",ParamType::Bool, {0, 1, 1},          OFF(lumen.axes.fallback_spgi_to_ddgi), SZ(lumen.axes.fallback_spgi_to_ddgi), nullptr},
+    {"Axis5 Temporal Strategy", "GI Axes", ParamType::Enum, {0, 2, 1},          OFF(lumen.axes.temporal),           SZ(lumen.axes.temporal),           "EMA,EMAVarianceClamp,Reprojection"},
 };
 
 #undef OFF
