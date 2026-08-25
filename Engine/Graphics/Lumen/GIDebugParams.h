@@ -43,12 +43,14 @@ struct GIDebugParams {
     bool freeze_probe_updates = false;
 
     // ------------------------------------------------------------------
-    // M6/T6.1: probe 调试可视化模式（面板开关）。数据面预留——当前三端
-    // pass 均未读取本字段，Off（默认）零开销。计划接线点：DDGIProbeAtlas
-    // 占位 shader 升级（现为 TestNaniteStreamingPipeline 的常量写入测试
-    // kernel）→ 运行时 viz pass 消费 probe_vis 选择显示 irradiance atlas /
-    // octahedral depth atlas / per-probe confidence 着色（T6.3 轮，不动
-    // 现有 kernel 的前提下由独立 viz pass 读取 GI 缓存视图 GICacheView）。
+    // M6/T6.1: probe 调试可视化模式（面板开关）。T6.3 sub-A 已接线 Vulkan
+    // 数据面：GIGatherModule 在 DDGIGIGather dispatch 时读取本字段经 CB
+    // （binding 6 debugVis）传入 gather kernel——!=Off 时输出替换为
+    // IrradianceAtlas（8-probe 三线性 SH L0，网外用远场 L0）/ DepthAtlas
+    // （最近 probe octahedral 平均深度）/ Confidence（三线性加权置信度）
+    // 可视化色，spec 输出清零；Off（默认）零开销、输出逐字节不变。
+    // Metal/Dawn 端 gather kernel 未接（引擎侧 Metal gather 不存在，
+    // DDGIProbeAtlas 测试壳可视化另行走 atlas 预滤波路径）。
     // ------------------------------------------------------------------
     enum class ProbeVisMode : u32 {
         Off = 0,

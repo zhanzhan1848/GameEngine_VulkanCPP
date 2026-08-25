@@ -10,6 +10,16 @@ namespace rendergraph { class RenderGraph; }
 namespace lumen { class LumenDDGIPass; class StaticProbeVolume; }
 
 struct GIGatherInputs {
+    // T6.3 sub-B: 全部 DDGI volume 视图（上限 4，与 ddgi_volumes_ 容量一致）。
+    // valid 数 ≥ 2 且设备支持 descriptor indexing 时，GIGatherModule 走 N-volume
+    // gather 路径（binding 17 SSBO 数组 + binding 18 参数 CB）；否则回退
+    // near+far 两槽路径（行为与 T4.4/T5.5 一致）。volume_views[0] 缺省时模块
+    // 用 ddgi_pass 视图补齐，[1] 用 far_volume_view/ddgi_far_pass——现有调用
+    // 点不填本字段也完全兼容（零行为变化）。
+    static constexpr u32 kMaxVolumes = 4;
+    lumen::DDGIVolumeView volume_views[kMaxVolumes]{};
+    u32 volume_count = 0;
+
     lumen::LumenDDGIPass* ddgi_pass = nullptr;
     lumen::LumenDDGIPass* ddgi_far_pass = nullptr;  // T4.4 far-field fallback
     lumen::StaticProbeVolume* static_probe_volume = nullptr;
@@ -69,6 +79,12 @@ private:
     rhi::ResourceHandle far_cb_{rhi::handles::INVALID_RESOURCE};      // T4.4 far volume params
     rhi::ResourceHandle static_probe_cb_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle dummy_buffer_{rhi::handles::INVALID_RESOURCE};
+    // T6.3 sub-B: N-volume 参数 CB（binding 18，144B std140）+ 能力位。
+    // nvolume_supported_ = Vulkan 且设备开启 descriptor indexing
+    // （VulkanDevice::SupportsDescriptorIndexing）。不可用时 DSL 不带
+    // PartiallyBound 标志、CB meta.x 恒 0 → shader 走 legacy 两槽路径。
+    rhi::ResourceHandle nvolumes_cb_{rhi::handles::INVALID_RESOURCE};
+    bool nvolume_supported_ = false;
 };
 
 } // namespace primal::graphics

@@ -106,6 +106,37 @@ bool VulkanDescriptorSetLayout::Initialize() {
     lci.bindingCount = static_cast<u32>(vkBindings.size());
     lci.pBindings    = vkBindings.data();
 
+    // T6.3 sub-B: DescriptorBindingFlags → VkDescriptorSetLayoutBindingFlags。
+    // 目前只映射 PartiallyBound(数组槽位未写合法;无需 UPDATE_AFTER_BIND 池)。
+    // UpdateAfterBind/VariableDescriptorCount 需要池/分配侧配套,暂不消费,
+    // 请求即告警忽略(避免静默拿到错误布局)。
+    std::vector<VkDescriptorBindingFlags> bindingFlags;
+    bool anyBindingFlags = false;
+    for (const auto& b : bindings_) {
+        VkDescriptorBindingFlags f = 0;
+        const u32 raw = static_cast<u32>(b.flags);
+        if (raw & static_cast<u32>(DescriptorBindingFlags::PartiallyBound)) {
+            f |= VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        }
+        if ((raw & static_cast<u32>(DescriptorBindingFlags::UpdateAfterBind)) ||
+            (raw & static_cast<u32>(DescriptorBindingFlags::UpdateUnusedWhilePending)) ||
+            (raw & static_cast<u32>(DescriptorBindingFlags::VariableDescriptorCount))) {
+            std::cerr << "[VulkanDescriptorSetLayout] binding " << b.binding
+                      << " requests unsupported binding flag (UpdateAfterBind/"
+                         "UpdateUnusedWhilePending/VariableDescriptorCount) — ignored"
+                      << std::endl;
+        }
+        if (f != 0) anyBindingFlags = true;
+        bindingFlags.push_back(f);
+    }
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI{};
+    if (anyBindingFlags) {
+        flagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+        flagsCI.bindingCount = static_cast<u32>(bindingFlags.size());
+        flagsCI.pBindingFlags = bindingFlags.data();
+        lci.pNext = &flagsCI;
+    }
+
     if (vkCreateDescriptorSetLayout(dev, &lci, nullptr, &layout_) != VK_SUCCESS) {
         std::cerr << "[VulkanDescriptorSetLayout] vkCreateDescriptorSetLayout failed" << std::endl;
         return false;

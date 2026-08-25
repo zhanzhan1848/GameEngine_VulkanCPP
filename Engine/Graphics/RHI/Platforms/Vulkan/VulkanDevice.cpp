@@ -1278,6 +1278,11 @@ bool VulkanDevice::createLogicalDevice() {
 
     // P4c-F5: layered 渲染的 vertex-shader gl_Layer 写出需要该能力
     // (Vulkan 1.2 core;旧实例上以扩展形式提供)。按支持情况启用。
+    bool hasExtShaderViewportIndexLayer = false;
+    // T6.3 sub-B: descriptor indexing(数组描述符 + partially-bound +
+    // SSBO 数组非一致索引)。Vulkan 1.2 core;旧设备上以
+    // VK_EXT_descriptor_indexing 扩展提供。枚举一次,两处共用。
+    bool hasExtDescriptorIndexing = false;
     {
         u32 extCount = 0;
         vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount, nullptr);
@@ -1287,9 +1292,89 @@ bool VulkanDevice::createLogicalDevice() {
         }
         for (const auto& e : avail) {
             if (std::strcmp(e.extensionName, VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME) == 0) {
-                deviceExtensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+                hasExtShaderViewportIndexLayer = true;
                 break;
             }
+        }
+        if (hasExtShaderViewportIndexLayer)
+            deviceExtensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+        for (const auto& e : avail) {
+            if (std::strcmp(e.extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) == 0) {
+                hasExtDescriptorIndexing = true;
+                break;
+            }
+        }
+    }
+
+    // T6.3 sub-B: 查询并启用 descriptor indexing 特性组合。N-volume GI gather
+    // (GIGatherModule binding 17 SSBO 数组)需要:
+    //   - descriptorBindingPartiallyBound:volume 数 < 4 时未写槽位合法;
+    //   - shaderStorageBufferArrayNonUniformIndexing:逐像素 volume 选择是非
+    //     一致索引(shader 内 nonuniformEXT 标注)。
+    // 能力不足时不开特性、capability 位保持 false,消费者回退两槽路径。
+    VkPhysicalDeviceVulkan12Features vk12Features{};
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT indexingFeaturesEXT{};
+    {
+        VkPhysicalDeviceProperties physProps{};
+        vkGetPhysicalDeviceProperties(physicalDevice_, &physProps);
+        const bool api12 = physProps.apiVersion >= VK_API_VERSION_1_2;
+        // 查询链同时挂 Vulkan12(1.2+ core)与 EXT(1.0/1.1 设备)两个结构,
+        // 驱动按 sType 各自识别填充;两布局不同,不能混读。
+        VkPhysicalDeviceDescriptorIndexingFeaturesEXT supportedEXT{};
+        supportedEXT.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+        VkPhysicalDeviceVulkan12Features supported12{};
+        supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        VkPhysicalDeviceFeatures2 f2{};
+        f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        f2.pNext = &supported12;
+        supported12.pNext = &supportedEXT;
+        vkGetPhysicalDeviceFeatures2(physicalDevice_, &f2);
+
+        bool ok = false;
+        if (api12) {
+            ok = supported12.descriptorIndexing == VK_TRUE &&
+                 supported12.shaderStorageBufferArrayNonUniformIndexing == VK_TRUE &&
+                 supported12.descriptorBindingPartiallyBound == VK_TRUE;
+        } else if (hasExtDescriptorIndexing) {
+            deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+            ok = supportedEXT.shaderStorageBufferArrayNonUniformIndexing == VK_TRUE &&
+                 supportedEXT.descriptorBindingPartiallyBound == VK_TRUE;
+        }
+        if (ok) {
+            if (api12) {
+                vk12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+                vk12Features.descriptorIndexing = VK_TRUE;
+                vk12Features.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+                vk12Features.descriptorBindingPartiallyBound = VK_TRUE;
+                // VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02835:
+                // Vulkan12Features 进 pNext 链后,若同时启用了
+                // VK_EXT_shader_viewport_index_layer(上方按扩展存在性加入),
+                // 必须把对应两个 core 特性一并置 VK_TRUE。不支持时移除该
+                // 扩展(1.2+ 设备上分层渲染走 core 路径,不依赖扩展)。
+                if (hasExtShaderViewportIndexLayer) {
+                    if (supported12.shaderOutputViewportIndex == VK_TRUE &&
+                        supported12.shaderOutputLayer == VK_TRUE) {
+                        vk12Features.shaderOutputViewportIndex = VK_TRUE;
+                        vk12Features.shaderOutputLayer = VK_TRUE;
+                    } else {
+                        for (auto it = deviceExtensions.begin(); it != deviceExtensions.end(); ) {
+                            if (std::strcmp(*it, VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME) == 0)
+                                it = deviceExtensions.erase(it);
+                            else
+                                ++it;
+                        }
+                    }
+                }
+                descriptorIndexingSupported_ = true;
+            } else {
+                indexingFeaturesEXT.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+                indexingFeaturesEXT.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+                indexingFeaturesEXT.descriptorBindingPartiallyBound = VK_TRUE;
+                descriptorIndexingSupported_ = true;
+            }
+            std::cerr << "[VulkanDevice] descriptor indexing enabled ("
+                      << (api12 ? "Vulkan 1.2+ core" : "VK_EXT_descriptor_indexing")
+                      << ") — N-volume GI gather available" << std::endl;
         }
     }
 
@@ -1305,6 +1390,15 @@ bool VulkanDevice::createLogicalDevice() {
     ci.enabledExtensionCount = static_cast<u32>(deviceExtensions.size());
     ci.ppEnabledExtensionNames = deviceExtensions.data();
     ci.pEnabledFeatures = &features;
+    if (descriptorIndexingSupported_) {
+        // vk12Features(1.2+ core)与 indexingFeaturesEXT(1.0/1.1)二选一,
+        // 见上方能力查询块。
+        if (vk12Features.sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
+            ci.pNext = &vk12Features;
+        } else {
+            ci.pNext = &indexingFeaturesEXT;
+        }
+    }
 
     if (vkCreateDevice(physicalDevice_, &ci, nullptr, &device_) != VK_SUCCESS) {
         std::cerr << "[VulkanDevice] vkCreateDevice failed" << std::endl;

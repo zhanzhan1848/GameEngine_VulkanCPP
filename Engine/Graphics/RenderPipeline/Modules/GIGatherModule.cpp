@@ -5,6 +5,9 @@
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 
+#include <cstring>
+#include <iostream>
+
 namespace primal::graphics {
 
 using namespace rhi;
@@ -15,6 +18,19 @@ struct GIGatherCB {
     math::v4   probe_origin_spacing;
     math::v4   probe_counts;
     math::v4   camera_pos;  // T4.3: world-space camera for reflection vectors
+    // T6.3 sub-A: probe_vis 数据面。debug_vis.x = GIDebug().probe_vis 模式
+    // （0=Off）。经 binding 6（48B range，第三 vec4 = offset 112）上传；
+    // camera_pos 槽位（offset 96）在 shader 内是 binding 6 的占位镜像
+    // （未读），布局保持前四字段逐字节不变。
+    math::v4   debug_vis;
+};
+
+// T6.3 sub-B: N-volume 参数 CB（binding 18，std140 布局与
+// DDGIGIGather.comp 的 NVolumeCB 一致：3 个 vec4 数组 + meta）。
+struct NVolumeCB {
+    math::v4 origin_spacing[4];   // xyz = origin, w = spacing
+    math::v4 counts_enabled[4];   // xyz = counts, w = enabled
+    math::v4 meta;                // x = 有效 volume 数（0 = legacy 路径）
 };
 
 struct GPUStaticProbeData {
@@ -39,6 +55,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     // Metal: overlapping texture/buffer namespaces (idiomatic Metal).
     // Vulkan: flat 0..14 (depth as SampledDepthImage) — matches GLSL shader.
     const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    // T6.3 sub-B: descriptor indexing 能力位（VulkanDevice 查询并启用了
+    // descriptorBindingPartiallyBound + shaderStorageBufferArrayNonUniformIndexing）。
+    // Metal/Dawn 继承默认 false → N-volume 分支不存在，两槽路径不变。
+    nvolume_supported_ = isVk && device->SupportsDescriptorIndexing();
     if (isVk) {
         DescriptorSetLayoutBinding vkBindings[] = {
             {0,  DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // depth
@@ -47,7 +67,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {3,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // history
             {4,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // invViewProj+cameraPos
             {5,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeOriginSpacing
-            {6,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeCounts
+            {6,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeCounts (+debugVis, 48B)
             {7,  DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // staticSkySH
             {8,  DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // staticSkyFactor
             {9,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // staticProbeParams
@@ -58,8 +78,16 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {14, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // specular output (T4.3)
             {15, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // far volume CB (T4.4)
             {16, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // far irradiance (T4.4)
+            // T6.3 sub-B: N-volume irradiance 数组（4 槽）。能力可用时
+            // PartiallyBound（volume 数 < 4 允许未写槽——本模块仍全写
+            // dummy 保平局安全）；不可用时普通数组（shader 静态使用存在，
+            // 全槽必写，meta.x=0 永不进入数组访问分支）。
+            {17, DescriptorType::StorageBuffer,     4, ShaderStage::Compute, nullptr,
+             nvolume_supported_ ? DescriptorBindingFlags::PartiallyBound
+                                : DescriptorBindingFlags::None},
+            {18, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // NVolumeCB (T6.3 sub-B)
         };
-        set_layout_ = device->CreateDescriptorSetLayout({17, vkBindings});
+        set_layout_ = device->CreateDescriptorSetLayout({19, vkBindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -116,6 +144,8 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     probe_cb_ = device->CreateBuffer(cbDesc);
     // T4.4: far-volume params (origin+spacing, counts) — same 256B shape.
     far_cb_ = device->CreateBuffer(cbDesc);
+    // T6.3 sub-B: N-volume 参数 CB（144B 实际用量，256B 槽位与 far_cb_ 同形）。
+    nvolumes_cb_ = device->CreateBuffer(cbDesc);
 
     BufferDesc spCbDesc{};
     spCbDesc.size = 512;
@@ -157,6 +187,16 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
     if (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized()) {
         graph.ImportResource("DDGIFarIrrRead", inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx));
     }
+    // T6.3 sub-B: 附加 volume（索引 ≥2）的读依赖注册——与 far import 同模式，
+    // 把第 3/4 个 volume 的 irradiance 纳入本帧图（别名注册 + 与其 trace pass
+    // 的次序约束）。volume[0]/[1] 已由上方 near/far import 覆盖。
+    if (nvolume_supported_ && inputs.volume_count > 2) {
+        for (u32 vi = 2; vi < inputs.volume_count && vi < GIGatherInputs::kMaxVolumes; ++vi) {
+            if (inputs.volume_views[vi].IsValid())
+                graph.ImportResource("DDGINvolIrrRead" + std::to_string(vi),
+                                     inputs.volume_views[vi].irradiance);
+        }
+    }
 
     struct PassData {
         rendergraph::RGResourceHandle output;
@@ -187,6 +227,37 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 farView = inputs.ddgi_far_pass->GetVolumeView(ddgiReadIdx);
             }
 
+            // T6.3 sub-B: 组装 N-volume 视图表。inputs.volume_views 优先（管线
+            // 侧把 ddgi_volumes_[0..count) 全量传入）；[0]/[1] 缺省时回退
+            // near pass / farView——与 legacy 槽同源同槽位，N-volume 激活时
+            // 输出与两槽路径一致。nvolumeActive 仅在能力位开 + ≥2 个有效
+            // volume 时为真；否则 CB meta.x = 0，shader 走 legacy 分支。
+            lumen::DDGIVolumeView nvolViews[GIGatherInputs::kMaxVolumes]{};
+            u32 nvolCount = 0;
+            {
+                for (u32 vi = 0; vi < GIGatherInputs::kMaxVolumes; ++vi) {
+                    if (vi < inputs.volume_count && inputs.volume_views[vi].IsValid())
+                        nvolViews[vi] = inputs.volume_views[vi];
+                }
+                if (!nvolViews[0].IsValid())
+                    nvolViews[0] = ddgi->GetVolumeView(ddgiReadIdx);
+                if (!nvolViews[1].IsValid() && farView.IsValid())
+                    nvolViews[1] = farView;
+                for (u32 vi = 0; vi < GIGatherInputs::kMaxVolumes; ++vi)
+                    if (nvolViews[vi].IsValid()) nvolCount = vi + 1;
+            }
+            const bool nvolumeActive = nvolume_supported_ && nvolCount >= 2;
+            // 路径选择一次性日志（SDFViz 先例）——N-volume 激活/回退可观测。
+            static bool loggedGatherPath = false;
+            if (!loggedGatherPath) {
+                loggedGatherPath = true;
+                std::cerr << "[GIGather] path = "
+                          << (nvolumeActive ? "N-volume (descriptor indexing, "
+                                             : "legacy two-slot (")
+                          << (nvolume_supported_ ? "capability on" : "capability off")
+                          << ", volumes=" << nvolCount << ")" << std::endl;
+            }
+
             // Upload GIGatherCB
             {
                 math::m4x4 vp = inputs.proj_matrix * inputs.view_matrix;
@@ -199,6 +270,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     cb->probe_origin_spacing = math::v4{vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z, params.probe_spacing};
                     cb->probe_counts = math::v4{(float)params.probe_count_x, (float)params.probe_count_y, (float)params.probe_count_z, 9.0f};
                     cb->camera_pos = math::v4{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2], 1.0f};
+                    // T6.3 sub-A: probe_vis 数据面——GIDebug() 热调旋钮进 CB，
+                    // shader binding 6 第三 vec4（offset 112）。Off（默认）时
+                    // x=0，gather 输出零变化。
+                    cb->debug_vis = math::v4{static_cast<float>(
+                        static_cast<u32>(lumen::GIDebug().probe_vis)), 0.0f, 0.0f, 0.0f};
                     device_->UnmapBuffer(probe_cb_);
                 }
             }
@@ -214,6 +290,26 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         fb[1] = math::v4{farView.counts.x, farView.counts.y, farView.counts.z, 1.0f}; // w = enabled
                     }
                     device_->UnmapBuffer(far_cb_);
+                }
+            }
+
+            // T6.3 sub-B: upload N-volume params（binding 18）。nvolumeActive
+            // 时写入 volume[0..nvolCount) 的 origin/spacing/counts（w=enabled）
+            // + meta.x = nvolCount；否则整块清零（meta.x=0 → legacy 路径）。
+            // 无效中段槽位（counts=0/w=0）被 shader 的 enabled 检查跳过。
+            {
+                auto* nv = static_cast<NVolumeCB*>(device_->MapBuffer(nvolumes_cb_));
+                if (nv) {
+                    memset(nv, 0, sizeof(NVolumeCB));
+                    if (nvolumeActive) {
+                        for (u32 vi = 0; vi < nvolCount; ++vi) {
+                            const auto& v = nvolViews[vi];
+                            nv->origin_spacing[vi] = math::v4{v.origin.x, v.origin.y, v.origin.z, v.spacing};
+                            nv->counts_enabled[vi] = math::v4{v.counts.x, v.counts.y, v.counts.z, 1.0f};
+                        }
+                        nv->meta = math::v4{(float)nvolCount, 0.0f, 0.0f, 0.0f};
+                    }
+                    device_->UnmapBuffer(nvolumes_cb_);
                 }
             }
 
@@ -243,7 +339,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
 
             // Barrier DDGI buffers from UAV to ShaderResource
             {
-                ResourceBarrier barriers[4]{};
+                ResourceBarrier barriers[8]{};  // near irr/depth/conf + far + nvol[2..3]
                 int bc = 0;
                 auto irrBuf = ddgi->GetIrradianceBuffer(ddgiReadIdx);
                 auto depthBuf = ddgi->GetDepthBuffer(ddgiReadIdx);
@@ -276,6 +372,18 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     barriers[bc].afterState = ResourceState::ShaderResource;
                     barriers[bc].subresource = 0xFFFFFFFF;
                     bc++;
+                }
+                // T6.3 sub-B: 附加 volume（vi ≥ 2）irradiance 同样 UAV→SRV。
+                // volume[0]/[1] 已由上方 near/far 路径覆盖（同句柄）。
+                if (nvolumeActive) {
+                    for (u32 vi = 2; vi < nvolCount && vi < GIGatherInputs::kMaxVolumes; ++vi) {
+                        if (nvolViews[vi].irradiance == handles::INVALID_RESOURCE) continue;
+                        barriers[bc].resource = nvolViews[vi].irradiance;
+                        barriers[bc].beforeState = ResourceState::UnorderedAccess;
+                        barriers[bc].afterState = ResourceState::ShaderResource;
+                        barriers[bc].subresource = 0xFFFFFFFF;
+                        bc++;
+                    }
                 }
                 if (bc > 0) cmd->InsertBarrier(barriers, bc);
             }
@@ -383,6 +491,42 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 device_->UpdateDescriptorSets(2, farWrites);
             }
 
+            // T6.3 sub-B: N-volume bindings (17 = SSBO 数组×4, 18 = 参数 CB)。
+            // shader 静态使用这两个 binding → 即使 legacy 路径也必须写满
+            // （数组 4 槽全写：有效 view 或 dummy；meta.x=0 保证不进入访问）。
+            // 能力不可用设备的 DSL binding 17 无 PartiallyBound 标志，全写
+            // dummy 同样合法。Metal 分支不带这两个 binding（shader 未声明）。
+            if (isVk) {
+                // binding 17: 数组元素 [0..4) —— dstArrayElement 定位槽位。
+                WriteDescriptorSet nvolWrites[5];
+                DescriptorBufferInfo nvolInfos[5];
+                for (u32 i = 0; i < 4; ++i) {
+                    nvolWrites[i].dstSet = descriptor_set_;
+                    nvolWrites[i].dstBinding = 17;
+                    nvolWrites[i].dstArrayElement = i;
+                    nvolWrites[i].descriptorCount = 1;
+                    nvolWrites[i].descriptorType = DescriptorType::StorageBuffer;
+                    nvolWrites[i].imageInfo = nullptr;
+                    nvolWrites[i].bufferInfo = &nvolInfos[i];
+                    ResourceHandle irr = (nvolumeActive && i < nvolCount &&
+                                          nvolViews[i].irradiance != handles::INVALID_RESOURCE)
+                                         ? nvolViews[i].irradiance : dummy_buffer_;
+                    if (irr == handles::INVALID_RESOURCE) irr = dummy_buffer_;
+                    nvolInfos[i].buffer = irr; nvolInfos[i].offset = 0; nvolInfos[i].range = ~0ull;
+                }
+                // binding 18: 参数 CB。
+                nvolWrites[4].dstSet = descriptor_set_;
+                nvolWrites[4].dstBinding = 18;
+                nvolWrites[4].dstArrayElement = 0;
+                nvolWrites[4].descriptorCount = 1;
+                nvolWrites[4].descriptorType = DescriptorType::UniformBuffer;
+                nvolWrites[4].imageInfo = nullptr;
+                nvolWrites[4].bufferInfo = &nvolInfos[4];
+                nvolInfos[4].buffer = nvolumes_cb_; nvolInfos[4].offset = 0;
+                nvolInfos[4].range = sizeof(NVolumeCB);
+                device_->UpdateDescriptorSets(5, nvolWrites);
+            }
+
             // Buffer bindings with sub-allocation from probe_cb_
             WriteDescriptorSet bufWrites[9];
             DescriptorBufferInfo bufInfos[9];
@@ -403,7 +547,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 bufWrites[1].dstBinding = bufBase + 1;
                 bufInfos[1].buffer = probe_cb_; bufInfos[1].offset = 64; bufInfos[1].range = 16;
                 bufWrites[2].dstBinding = bufBase + 2;
-                bufInfos[2].buffer = probe_cb_; bufInfos[2].offset = 80; bufInfos[2].range = 16;
+                bufInfos[2].buffer = probe_cb_; bufInfos[2].offset = 80; bufInfos[2].range = 48;  // T6.3 sub-A: +debugVis(48B)
                 bufWrites[3].dstBinding = bufBase + 3; bufWrites[3].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[3].buffer = (skySH != handles::INVALID_RESOURCE) ? skySH : dummy_buffer_;
                 bufInfos[3].offset = 0; bufInfos[3].range = ~0ull;

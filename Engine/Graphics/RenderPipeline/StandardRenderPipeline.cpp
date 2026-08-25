@@ -1607,6 +1607,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
         giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
             ? ddgi_volumes_[1]->GetVolumeView((cbIdx + 2) % 3) : lumen::DDGIVolumeView{};
+        // T6.3 sub-B: 全 volume 视图直传（模块内按 descriptor indexing 能力位
+        // 门控 N-volume 路径；能力不可用/有效 volume < 2 时零行为变化）。
+        giIn.volume_count = ddgi_volume_count_;
+        for (u32 vi = 0; vi < ddgi_volume_count_ && vi < GIGatherInputs::kMaxVolumes; ++vi)
+            if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView((cbIdx + 2) % 3);
         giIn.static_probe_volume = static_probe_volume_.get();
         giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
         giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -2150,6 +2155,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
             giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
                 ? ddgi_volumes_[1]->GetVolumeView((cbIdx + 2) % 3) : lumen::DDGIVolumeView{};
+            // T6.3 sub-B: 全 volume 视图直传（同 Render 路径；能力门控在模块内）。
+            giIn.volume_count = ddgi_volume_count_;
+            for (u32 vi = 0; vi < ddgi_volume_count_ && vi < GIGatherInputs::kMaxVolumes; ++vi)
+                if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView((cbIdx + 2) % 3);
             giIn.static_probe_volume = static_probe_volume_.get();
             giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
             giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();

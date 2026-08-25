@@ -251,6 +251,13 @@ public:
      */
     virtual RHIPlatform GetPlatform() const = 0;
 
+    /// T6.3 sub-B: descriptor indexing 能力位（VK_EXT_descriptor_indexing /
+    /// Vulkan 1.2 core: descriptorBindingPartiallyBound +
+    /// shaderStorageBufferArrayNonUniformIndexing 全部可用时为 true）。
+    /// 消费者按此门控 descriptor 数组路径；不可用时回退显式槽路径。
+    /// 非 Vulkan 后端继承默认 false。
+    virtual bool SupportsDescriptorIndexing() const { return false; }
+
     /**
      * @brief 获取垃圾回收器
      * @return 垃圾回收器引用

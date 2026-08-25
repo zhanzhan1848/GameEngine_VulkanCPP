@@ -118,6 +118,11 @@ public:
         return vkSetDebugUtilsObjectName_;
     }
 
+    /// T6.3 sub-B: descriptor indexing 能力（见 RHIDeviceBase::SupportsDescriptorIndexing）。
+    /// createLogicalDevice 时查询 + 启用（Vulkan 1.2 core 或 VK_EXT_descriptor_indexing），
+    /// 需 descriptorBindingPartiallyBound + shaderStorageBufferArrayNonUniformIndexing 同时支持。
+    bool SupportsDescriptorIndexing() const override { return descriptorIndexingSupported_; }
+
     /// Phase 3: Per-type lookup(tests + 外部 caller 用)
     /// Buffer/Sync/QueryPool 在 protected 区域,future 可能 hoist 出来
     VulkanTexture* GetTexture(ResourceHandle handle);
@@ -300,6 +305,9 @@ private:
     // Tracked for shutdown ordering / diagnostics.
     bool validationEnabled_{false};
     bool portabilitySubsetEnabled_{false};
+
+    // T6.3 sub-B: descriptor indexing feature trio enabled at device creation.
+    bool descriptorIndexingSupported_{false};
 
     // === Phase 5: Shader → Pipelines 依赖图(热重载用)===
     std::mutex pipelineDependencyMutex_;
