@@ -126,7 +126,6 @@ PipelineQualityConfig PipelineQualityConfig::FromPreset(lumen::LumenQualityPrese
         cfg.enable_ddgi = true;
         cfg.enable_surface_cache = true;
         cfg.enable_screen_probes = true;   // T5.6: SPGI default-on at High+
-        cfg.enable_screen_probes = false;
         cfg.shadow_quality = lumen::ShadowQuality::PCSS;
         cfg.render_scale = 2.0f;
         break;
@@ -187,6 +186,45 @@ lumen::LumenConfig PipelineQualityConfig::LumenConfigFromPreset(lumen::LumenQual
         c.ddgi_rays_per_probe = 64;
         c.ddgi_enable_far_volume = true;
         c.surface_cache_capture_budget = 512;
+        break;
+    }
+
+    // ========================================================================
+    // X3/A6: 轴1（空间缓存组合）按档位填充。
+    //
+    // 【两表一致性责任 — 改任一侧必须同步另一侧】
+    // 本表 c.axes.use_{surface_cache,ddgi_volume,screen_probes} 与上面
+    // FromPreset() 的 cfg.enable_{surface_cache,ddgi,screen_probes} 必须逐档
+    // 相等：StandardRenderPipeline::SetLumenConfig 会用 axes 覆写
+    // quality.enable_*（轴视图单一真源）。无法用 static_assert 表达（跨两个
+    // 工厂函数的返回值），以本注释为契约——任一表改档位而另一表未跟，即视为
+    // 预设漂移 bug（M6 UI 按 axes 生成控件，漂移会直接表现为 UI 与实际 pass
+    // 不一致）。
+    //   Off   : 全 false（SC/DDGI/SPGI 均关）
+    //   Low   : 同 Off（SSGI-only 档，pass 开关对应全 false）
+    //   Medium: true/true/false（= GIFiveAxisConfig 默认值）
+    //   High+ : true/true/true（T5.6 SPGI default-on）
+    // 轴2–轴5 不分档：SH3 / Analytic / 双传播边开 / EMA（kernel 分支轴的
+    // 分档值随 M6/T6.3 CB 化再引入）。
+    // ========================================================================
+    switch (p) {
+    case lumen::LumenQualityPreset::Off:
+    case lumen::LumenQualityPreset::Low:
+        c.axes.use_surface_cache = false;
+        c.axes.use_ddgi_volume = false;
+        c.axes.use_screen_probes = false;
+        c.axes.directional = lumen::GIFiveAxisConfig::DirectionalParameterization::SH2;
+        c.axes.propagate_sc_to_ddgi = false;
+        c.axes.fallback_spgi_to_ddgi = false;
+        break;
+
+    case lumen::LumenQualityPreset::Medium:
+        break;   // Medium = GIFiveAxisConfig 默认值（true/true/false/SH3/…/EMA）
+
+    case lumen::LumenQualityPreset::High:
+    case lumen::LumenQualityPreset::Ultra:
+    case lumen::LumenQualityPreset::UltraRT:
+        c.axes.use_screen_probes = true;
         break;
     }
 

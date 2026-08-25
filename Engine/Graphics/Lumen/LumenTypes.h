@@ -2,6 +2,7 @@
 
 #include "CommonHeaders.h"
 #include "../RHI/Core/RHITypes.h"
+#include "GICacheView.h"   // X3/A6: GITemporalStrategy（X2 已立的轴5枚举）
 #include <vector>
 
 namespace primal::graphics::lumen {
@@ -39,8 +40,44 @@ struct LumenVolumeConfig {
     bool   use_origin_override = false;
 };
 
+// ============================================================================
+// X3/A6: 五轴显式配置 —— 每轴独立可选，M6 UI 按轴生成控件。
+// 五轴定义见 Docs/2026-08-24-gi-optimization-plan.md §1.3/§2：
+//   空间缓存 × 方向参数化 × 光学量/积分时机 × 更新传播拓扑 × 时域策略
+// 轴2/轴3 是 kernel 分支轴（config 字段落位，分支点随 M6/T6.3 CB 化）；
+// 轴1/轴4/轴5 由 StandardRenderPipeline 接线到现有运行时机制（ApplyGIaxes）。
+// 与 GIDebugParams 的关系：axes 是 init 时配置面（LumenConfig 内嵌，
+// SetLumenConfig 生效）；GIDebug 是运行时热调面（进程级单例）。
+// ============================================================================
+struct GIFiveAxisConfig {
+    // 轴1 空间缓存组合（与 PipelineQualityConfig 的 quality.enable_* 联动，
+    // 此字段为轴视图单一真源；LumenConfigFromPreset 按档位填充两表）
+    bool use_surface_cache = true;
+    bool use_ddgi_volume = true;
+    bool use_screen_probes = false;   // High+ 预设翻 true
+
+    // 轴2 方向参数化（kernel 分支轴：SH2=屏幕探针降级档，SH3=DDGI/Gather 现状）
+    enum class DirectionalParameterization { SH2, SH3 };
+    DirectionalParameterization directional = DirectionalParameterization::SH3;
+
+    // 轴3 光学量/积分时机（kernel 分支轴）：Analytic=Karis 解析 EnvBRDF
+    // （T4.3 现状）；PreintegratedLUT=DFG LUT 纹理（IBL 接线时切换）
+    enum class DFGPath { Analytic, PreintegratedLUT };
+    DFGPath dfg_path = DFGPath::Analytic;
+
+    // 轴4 更新传播拓扑（SC→DDGI 喂食边 / SPGI miss→DDGI fallback 边）
+    bool propagate_sc_to_ddgi = true;
+    bool fallback_spgi_to_ddgi = true;
+
+    // 轴5 时域策略（X2 已立枚举；EMA=现状默认）
+    GITemporalStrategy temporal = GITemporalStrategy::EMA;
+};
+
 struct LumenConfig {
     LumenQualityPreset quality = LumenQualityPreset::Medium;
+
+    // X3/A6: 五轴显式配置（默认值组合 = 现状 Medium 行为）
+    GIFiveAxisConfig axes{};
 
     // SSGI settings
     u32 ssgi_ray_count = 4;

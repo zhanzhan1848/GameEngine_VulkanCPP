@@ -12,6 +12,10 @@ namespace primal::graphics::lumen {
 // 的 pass 在 AddPass 时读取——"三端同一旋钮生效"。
 // 旧 WASM sidebar 的 DawnDebugParams 滑条通过 ApplyLegacy() 桥接进来，
 // 行为不变。
+// X3/A6 注意分面：本结构是【运行时热调面】（进程级单例，AddPass 时读取）；
+// init 时【配置面】是 LumenConfig.axes（GIFiveAxisConfig，LumenTypes.h，
+// SetLumenConfig 生效）——两者同名域（如 pass 开关 vs 轴1 空间缓存组合）
+// 分属不同生命周期，勿混用。
 // ============================================================================
 struct GIDebugParams {
     // ------------------------------------------------------------------

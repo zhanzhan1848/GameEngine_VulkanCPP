@@ -79,6 +79,43 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const Des
 }
 
 // ============================================================================
+// X3/A6: GI 五轴配置（GIFiveAxisConfig）→ 现有运行时机制接线。
+// 红线：零描述符/RG 结构变化；axes 默认值组合映射后与既有 enable_* 完全一致。
+// ============================================================================
+
+// 轴1（空间缓存组合）→ pass 开关覆写：axes 是轴视图单一真源。必须在模块创建
+// 前生效——SetLumenConfig 内、InitializeSubsystems 之前调用（gi_gather/fusion/
+// sc_ddgi 模块与 InitializeLumenPasses 均按 enable_* 创建）。晚于此的
+// SetQualityOverride / SetPassEnabled / UpdateSettings 属用户显式覆盖，优先于
+// 轴默认值且不回写 axes（TestModularPipeline 依赖此覆盖序：SetLumenConfig 后
+// SetQualityOverride(true, true) 开 SPGI——若在 InitializeLumenPasses 内覆写会
+// 把用户覆盖打回轴值）。
+static void ApplyGIAxis1_SpaceCaches(RenderPipelineSettings& s) {
+    s.quality.enable_surface_cache = s.lumen.axes.use_surface_cache;
+    s.quality.enable_ddgi          = s.lumen.axes.use_ddgi_volume;
+    s.quality.enable_screen_probes = s.lumen.axes.use_screen_probes;
+}
+
+// 轴5（时域策略）→ 三缓存模块 SetTemporalStrategy（X2 已立枚举存储；EMA =
+// 现状默认，各模块内自带 early-return，默认档调用为纯 no-op；EMAVarianceClamp/
+// Reprojection 的 kernel 分支随 M6/T6.3 CB 化）。
+// 轴2（directional SH2|SH3）/轴3（dfg_path Analytic|PreintegratedLUT）：
+// config 字段已在 LumenConfig.axes 落位，kernel 分支点随 M6/T6.3 CB 化
+// （TODO）——本任务不做 shader 改动。
+// 轴1 在 SetLumenConfig 覆写；轴4（传播拓扑边）在两处 Render 路径的
+// SC→DDGI AddPass 与 SPGI SetDDGIFallbackData 按 axes 条件门控。
+static void ApplyGIaxes(const lumen::GIFiveAxisConfig& axes,
+                        const std::array<std::unique_ptr<lumen::LumenDDGIPass>, 4>& ddgi_volumes,
+                        u32 ddgi_volume_count,
+                        const std::unique_ptr<lumen::SurfaceCachePass>& surface_cache,
+                        const std::unique_ptr<lumen::ScreenProbeGIPass>& screen_probes) {
+    for (u32 vi = 0; vi < ddgi_volume_count; ++vi)
+        if (ddgi_volumes[vi]) ddgi_volumes[vi]->SetTemporalStrategy(axes.temporal);
+    if (surface_cache) surface_cache->SetTemporalStrategy(axes.temporal);
+    if (screen_probes) screen_probes->SetTemporalStrategy(axes.temporal);
+}
+
+// ============================================================================
 // Lifecycle
 // ============================================================================
 
@@ -171,6 +208,13 @@ bool StandardRenderPipeline::ReloadShader(ShaderHandle shader, const void* data,
 void StandardRenderPipeline::SetLumenConfig(const lumen::LumenConfig& config) {
     settings_.lumen = config;
     settings_.quality = PipelineQualityConfig::FromPreset(config.quality);
+
+    // X3/A6 轴1: axes 覆写 pass 开关（轴视图单一真源）——必须先于下方
+    // InitializeSubsystems 的模块创建。注意 FromPreset 与 LumenConfigFromPreset
+    // 两表按档位保持一致（见 RenderPipelineConfig.cpp 一致性契约注释），此处
+    // 覆写在默认路径上是恒等操作；仅当调用方手工构造 LumenConfig 的 axes 与
+    // quality 档位不一致时以 axes 为准。
+    ApplyGIAxis1_SpaceCaches(settings_);
 
     // Apply render scale: GPU resolution = logical window size × scale
     render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale);
@@ -662,6 +706,17 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             fluid_render_pass_.reset();
         }
     }
+
+    // ========================================================================
+    // X3/A6: 五轴接线收尾 —— 轴5 时域策略注入三缓存模块（EMA=现状默认，
+    // 模块内 early-return，默认档零行为变化/零日志）；轴2（directional）/
+    // 轴3（dfg_path）为 kernel 分支轴，字段已落位、分支点随 M6/T6.3 CB 化
+    // （TODO，不做 shader 改动）；轴1 已在 SetLumenConfig 覆写 pass 开关；
+    // 轴4 传播边在两处 Render 路径按 axes 门控（见 SC→DDGI AddPass 与
+    // SPGI SetDDGIFallbackData 调用点）。
+    // ========================================================================
+    ApplyGIaxes(config.axes, ddgi_volumes_, ddgi_volume_count_,
+                surface_cache_pass_, screen_probe_pass_);
 }
 
 void StandardRenderPipeline::ShutdownLumenPasses() {
@@ -1418,7 +1473,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // Step 7: SC→DDGI Integration
     // ========================================================================
 
-    if (sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_) {
+    // X3/A6 轴4: propagate_sc_to_ddgi=false 跳过喂食边（RG 不声明该 pass，
+    // DDGI 回落自身 trace 链）；默认 true 保持 SC→DDGI AddPass 不变。
+    if (settings_.lumen.axes.propagate_sc_to_ddgi &&
+        sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_) {
         SCDDGIInputs scDDGIIn;
         scDDGIIn.ddgi_pass = ddgi_pass_.get();
         scDDGIIn.surface_cache_pass = surface_cache_pass_.get();
@@ -1494,9 +1552,15 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // T2.2: DDGI probe fallback for miss rays (hist slot — one frame
         // behind, no read/write race with this frame's DDGI update).
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-            // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
-            screen_probe_pass_->SetDDGIFallbackData(
-                ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
+            if (settings_.lumen.axes.fallback_spgi_to_ddgi) {
+                // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
+                screen_probe_pass_->SetDDGIFallbackData(
+                    ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
+            } else {
+                // X3/A6 轴4: fallback 边关断 → Clear 语义（空 view 置
+                // ddgi_fallback_available_=false，miss 回落天空常量）
+                screen_probe_pass_->SetDDGIFallbackData(lumen::DDGIVolumeView{});
+            }
         }
         auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
         auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
@@ -2061,7 +2125,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         // --- SC-DDGI Integration ---
-        if (sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_) {
+        // X3/A6 轴4: propagate_sc_to_ddgi=false 跳过喂食边（同 Step 7 路径）
+        if (settings_.lumen.axes.propagate_sc_to_ddgi &&
+            sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_) {
             SCDDGIInputs scDDGIIn;
             scDDGIIn.ddgi_pass = ddgi_pass_.get();
             scDDGIIn.surface_cache_pass = surface_cache_pass_.get();
@@ -2129,9 +2195,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
             // T2.2: DDGI probe fallback for miss rays
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-                // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
-                screen_probe_pass_->SetDDGIFallbackData(
-                    ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
+                if (settings_.lumen.axes.fallback_spgi_to_ddgi) {
+                    // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
+                    screen_probe_pass_->SetDDGIFallbackData(
+                        ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
+                } else {
+                    // X3/A6 轴4: fallback 边关断 → Clear 语义（空 view 置
+                    // ddgi_fallback_available_=false，miss 回落天空常量）
+                    screen_probe_pass_->SetDDGIFallbackData(lumen::DDGIVolumeView{});
+                }
             }
             auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
             auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
