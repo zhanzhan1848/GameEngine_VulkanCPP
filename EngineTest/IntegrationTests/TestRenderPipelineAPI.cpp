@@ -9,6 +9,9 @@
 //   - M6/T6.1 GI editor panel data plane: GI Axes descriptor group,
 //     GIDebug/volume descriptor tables, panel action registry, volume CRUD +
 //     axes hot-reload on a device-less pipeline, DLL C ABI pre-init safety
+//   - M6/T6.2 GI volume gizmo: viewport pick (nearest AABB), translate →
+//     origin_override, scale clamp 4..128, wireframe endpoints, gizmo.mode.*
+//     panel actions, DLL C ABI pre-init safety
 //
 // No engine init required for these checks — the pipeline static table and
 // per-pipeline-state getters are usable with or without a live RenderPipeline
@@ -19,6 +22,7 @@
 #include "Engine/Common/PrimitiveTypes.h"
 #include "Engine/Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Engine/Graphics/RenderPipeline/GIEditorPanel.h"
+#include "Engine/Graphics/RenderPipeline/GIVolumeGizmo.h"
 #include "Engine/Graphics/RenderPipeline/RenderPipeline.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
 // 本地构造 StandardRenderPipeline（析构经 unique_ptr<RenderSceneSnapshot>）
@@ -30,7 +34,9 @@
 #include "Engine/Graphics/Lumen/StaticProbe/StaticProbeBaker.h"
 #include "Engine/Graphics/Lumen/GIDebugParams.h"
 
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 
 using namespace primal;
@@ -76,6 +82,17 @@ extern "C" {
     u32  GIGetPanelAction(u32 index, const char** out_id,
                           const char** out_label, const char** out_tooltip);
     u32  GIInvokePanelAction(const char* id);
+
+    // M6/T6.2 GI volume gizmo C ABI
+    void GIGizmoSetMode(u32 mode);
+    u32  GIGizmoGetMode();
+    u32  GIGizmoGetSelectedVolume();
+    u32  GIGizmoPick(f32 screenX, f32 screenY, u32 viewportW, u32 viewportH,
+                     const f32* invViewProj, const f32* viewOrigin,
+                     u32* outVolumeIndex, f32* outTMin);
+    u32  GIGizmoTranslate(u32 index, const f32* delta);
+    u32  GIGizmoScale(u32 index, f32 factor, u32 axis);
+    u32  GIGizmoGetWireframe(u32 index, f32* outEndpoints, u32 capacity, u32* outCount);
 }
 
 using Engine::Test::TestResult;
@@ -468,6 +485,362 @@ TestResult TestGIPanelVolumeAndAxesOnLocalPipeline() {
     return TestResult::Passed;
 }
 
+// ============================================================================
+// M6/T6.2 — GI volume gizmo（拾取/平移/缩放/线框/模式）
+// ============================================================================
+
+namespace {
+
+// 视点 (0,0,-10) 朝 +Z 的透视相机的逆视图投影（列主序；tanX=tanY=1，
+// near=1 / far=201，深度 402/(202-200*nz) 经 w 除法）。任何屏幕点的
+// near→far 连线方向 ∝ (ndcX, ndcY, 1) —— 屏幕位置真正改变射线方向
+// （identity 矩阵做不到：near/far 的 xy 相同，所有射线都平行 +Z）。
+primal::math::m4x4 TestInvViewProj() {
+    primal::math::m4x4 m{};
+    m.columns[0] = primal::math::v4{402.0f, 0.0f, 0.0f, 0.0f};
+    m.columns[1] = primal::math::v4{0.0f, 402.0f, 0.0f, 0.0f};
+    m.columns[2] = primal::math::v4{0.0f, 0.0f, 2000.0f, -200.0f};
+    m.columns[3] = primal::math::v4{0.0f, 0.0f, -1618.0f, 202.0f};
+    return m;
+}
+
+// 两个 4x4x4 @ spacing 1 的 volume：origin (0,0,0)（AABB z 0..4）与
+// origin (0,0,8)（AABB z 8..12）——沿 +Z 射线 z 间距 8，tMin 相差 8。
+// StandardRenderPipeline 不可拷贝/移动（unique_ptr 成员），经出参填充。
+void MakeTwoBoxPipeline(StandardRenderPipeline& p, bool nearFirst) {
+    RenderPipelineSettings s = p.GetSettings();
+    lumen::LumenVolumeConfig a{};   // AABB [0,4]^3
+    a.probe_count_x = a.probe_count_y = a.probe_count_z = 4;
+    a.probe_spacing = 1.0f;
+    a.origin_override = primal::math::v3{0.0f, 0.0f, 0.0f};
+    a.use_origin_override = true;
+    lumen::LumenVolumeConfig b = a;   // AABB [0,4]xy × [8,12]z
+    b.origin_override = primal::math::v3{0.0f, 0.0f, 8.0f};
+    if (nearFirst) s.lumen.volume_overrides = {a, b};
+    else           s.lumen.volume_overrides = {b, a};
+    p.UpdateSettings(s);
+}
+
+bool NearlyEqual(f32 x, f32 y, f32 eps = 1e-3f) { return std::abs(x - y) < eps; }
+
+} // namespace
+
+// === Test 15: 拾取命中/未命中/最近优先（+ null 安全 + 空推导列表未命中） ===
+TestResult TestGizmoPickHitMissNearest() {
+    using namespace gi_gizmo;
+    const primal::math::m4x4 invVP = TestInvViewProj();
+    const primal::math::v3 camOrigin{0.0f, 0.0f, -10.0f};
+    constexpr u32 kW = 800, kH = 600;
+
+    // -- 命中 + 最近优先：屏幕中心射线 (0,0,+1) 穿过两个盒，近者 t=10 --
+    {
+        StandardRenderPipeline p;   // device-less: settings-only paths
+        MakeTwoBoxPipeline(p, true);
+        GIVolumeHit h = PickPipelineVolumes(&p, kW * 0.5f, kH * 0.5f, kW, kH,
+                                            invVP, camOrigin);
+        TEST_ASSERT(h.hit, "Center ray hits the stacked volumes");
+        TEST_ASSERT(h.volumeIndex == 0, "Nearest volume (index 0) wins");
+        TEST_ASSERT(NearlyEqual(h.tMin, 10.0f), "tMin = distance to near AABB");
+
+        // 数组顺序反过来：近盒变成 index 1 —— 最近优先与索引无关
+        StandardRenderPipeline p2;
+        MakeTwoBoxPipeline(p2, false);
+        GIVolumeHit h2 = PickPipelineVolumes(&p2, kW * 0.5f, kH * 0.5f, kW, kH,
+                                             invVP, camOrigin);
+        TEST_ASSERT(h2.hit && h2.volumeIndex == 1, "Nearest still wins after reorder");
+        TEST_ASSERT(NearlyEqual(h2.tMin, 10.0f), "Reordered tMin unchanged");
+    }
+
+    // -- 未命中：射线斜出盒外（NDC (1, -1.33) → dir (0,-1.33,1)）--
+    {
+        StandardRenderPipeline p;
+        MakeTwoBoxPipeline(p, true);
+        GIVolumeHit h = PickPipelineVolumes(&p, kW * 0.5f, 700.0f, kW, kH,
+                                            invVP, camOrigin);
+        TEST_ASSERT(!h.hit, "Ray below the boxes misses");
+
+        // 相机在远处侧向：所有射线都不经过盒区
+        GIVolumeHit h2 = PickPipelineVolumes(&p, kW * 0.5f, kH * 0.5f, kW, kH,
+                                             invVP, primal::math::v3{1000.0f, 1000.0f, -1000.0f});
+        TEST_ASSERT(!h2.hit, "Distant side camera misses");
+    }
+
+    // -- null 安全 / 空数组 / 空推导列表（overrides 为空 = 无可编辑对象）--
+    {
+        GIVolumeHit h = PickPipelineVolumes(nullptr, 0, 0, 8, 8, invVP, camOrigin);
+        TEST_ASSERT(!h.hit, "Null pipeline miss");
+        lumen::LumenVolumeConfig none[1]{};
+        GIVolumeHit h2 = PickVolume(0, 0, 8, 8, invVP, camOrigin, nullptr, 1);
+        TEST_ASSERT(!h2.hit, "Null volumes miss");
+        GIVolumeHit h3 = PickVolume(0, 0, 8, 8, invVP, camOrigin, none, 0);
+        TEST_ASSERT(!h3.hit, "Zero count miss");
+
+        StandardRenderPipeline empty;   // 默认 overrides 为空（推导模式）
+        GIVolumeHit h4 = PickPipelineVolumes(&empty, kW * 0.5f, kH * 0.5f, kW, kH,
+                                             invVP, camOrigin);
+        TEST_ASSERT(!h4.hit, "Empty overrides list never picks");
+    }
+    return TestResult::Passed;
+}
+
+// === Test 16: Translate 写 origin_override + use_origin_override（含叠加与拒绝路径） ===
+TestResult TestGizmoTranslateWritesOriginOverride() {
+    using namespace gi_gizmo;
+    StandardRenderPipeline p;
+    MakeTwoBoxPipeline(p, true);
+
+    lumen::LumenVolumeConfig before{};
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 0, &before), "Read volume 0");
+    TEST_ASSERT(before.origin_override.x == 0.0f, "Start at world-centered");
+
+    // 首次平移：world-centered → 显式 origin (1,-2,3)
+    TEST_ASSERT(TranslateVolume(&p, 0, primal::math::v3{1.0f, -2.0f, 3.0f}),
+                "Translate volume 0");
+    lumen::LumenVolumeConfig after{};
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 0, &after), "Re-read volume 0");
+    TEST_ASSERT(after.use_origin_override, "use_origin_override set");
+    TEST_ASSERT(NearlyEqual(after.origin_override.x, 1.0f) &&
+                NearlyEqual(after.origin_override.y, -2.0f) &&
+                NearlyEqual(after.origin_override.z, 3.0f),
+                "origin_override = first delta");
+
+    // 叠加第二次平移：(1,-2,3) + (1,1,1) = (2,-1,4)
+    TEST_ASSERT(TranslateVolume(&p, 0, primal::math::v3{1.0f, 1.0f, 1.0f}),
+                "Translate volume 0 again");
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 0, &after), "Re-read volume 0");
+    TEST_ASSERT(NearlyEqual(after.origin_override.x, 2.0f) &&
+                NearlyEqual(after.origin_override.y, -1.0f) &&
+                NearlyEqual(after.origin_override.z, 4.0f),
+                "Deltas accumulate on origin_override");
+
+    // 相邻 volume 不受影响（helper 里 volume 1 = use_origin_override (0,0,8)）
+    lumen::LumenVolumeConfig v1{};
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 1, &v1), "Read volume 1");
+    TEST_ASSERT(v1.use_origin_override &&
+                NearlyEqual(v1.origin_override.x, 0.0f) &&
+                NearlyEqual(v1.origin_override.y, 0.0f) &&
+                NearlyEqual(v1.origin_override.z, 8.0f),
+                "Volume 1 untouched");
+
+    // 拒绝路径：null 管线 / 越界索引 / NaN delta
+    TEST_ASSERT(!TranslateVolume(nullptr, 0, primal::math::v3{1, 1, 1}), "Null pipeline rejected");
+    TEST_ASSERT(!TranslateVolume(&p, 9, primal::math::v3{1, 1, 1}), "OOB index rejected");
+    const f32 nan3[3] = {std::numeric_limits<f32>::quiet_NaN(), 0.0f, 0.0f};
+    TEST_ASSERT(!TranslateVolume(&p, 0, primal::math::v3{nan3[0], nan3[1], nan3[2]}),
+                "NaN delta rejected");
+    return TestResult::Passed;
+}
+
+// === Test 17: Scale clamp 4..128 + 逐轴/三轴同缩语义 ===
+TestResult TestGizmoScaleClampAndAxes() {
+    using namespace gi_gizmo;
+    StandardRenderPipeline p;
+    MakeTwoBoxPipeline(p, true);
+    lumen::LumenVolumeConfig v{};
+
+    // 向上 clamp：4 * 100 = 400 → 128（helper 的 counts 起步为 4）
+    TEST_ASSERT(ScaleVolume(&p, 0, 100.0f, 0), "Scale up axis x");
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 0, &v) && v.probe_count_x == 128,
+                "Count clamps to 128");
+    TEST_ASSERT(v.probe_count_y == 4 && v.probe_count_z == 4,
+                "Axis 0 touches only x");
+
+    // 向下 clamp：128 * 0.001 = 0.128 → round 0 → clamp 4
+    TEST_ASSERT(ScaleVolume(&p, 0, 0.001f, 0), "Scale down axis x");
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 0, &v) && v.probe_count_x == 4,
+                "Count clamps to 4");
+
+    // 常规乘法：4 * 2 = 8（axis=1 只动 y）
+    TEST_ASSERT(ScaleVolume(&p, 0, 2.0f, 1), "Scale axis y");
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 0, &v) && v.probe_count_y == 8,
+                "y doubled, others unchanged");
+    TEST_ASSERT(v.probe_count_x == 4 && v.probe_count_z == 4, "x/z untouched");
+
+    // 三轴同缩：kScaleAllAxes
+    TEST_ASSERT(ScaleVolume(&p, 0, 4.0f, kScaleAllAxes), "Scale all axes");
+    TEST_ASSERT(gi_panel::GetVolumeOverride(&p, 0, &v), "Re-read after uniform");
+    TEST_ASSERT(v.probe_count_x == 16 && v.probe_count_y == 32 &&
+                v.probe_count_z == 16,
+                "Uniform scale multiplies every count (4/8/4 * 4)");
+    TEST_ASSERT(NearlyEqual(v.probe_spacing, 1.0f), "Spacing unchanged by scale");
+
+    // 拒绝路径：null / OOB / 非法 axis / 非正 factor
+    TEST_ASSERT(!ScaleVolume(nullptr, 0, 2.0f, 0), "Null pipeline rejected");
+    TEST_ASSERT(!ScaleVolume(&p, 9, 2.0f, 0), "OOB index rejected");
+    TEST_ASSERT(!ScaleVolume(&p, 0, 2.0f, 4), "Axis 4 rejected");
+    TEST_ASSERT(!ScaleVolume(&p, 0, 0.0f, 0), "Zero factor rejected");
+    TEST_ASSERT(!ScaleVolume(&p, 0, -1.0f, 0), "Negative factor rejected");
+    return TestResult::Passed;
+}
+
+// === Test 18: DragDelta 世界位移 + 模式/选中状态 + gizmo.mode.* 面板动作 ===
+TestResult TestGizmoDragModesAndActions() {
+    using namespace gi_gizmo;
+    using namespace gi_panel;
+
+    // -- DragDelta：参考平面过拾取点，法线 = cross(right, up) --
+    GizmoRay prev{};
+    prev.origin = primal::math::v3{0.0f, 0.0f, -10.0f};
+    prev.dir    = primal::math::v3{0.0f, 0.0f, 1.0f};
+    GizmoRay cur = prev;
+    const f32 invSqrt2 = 1.0f / std::sqrt(2.0f);
+    cur.dir = primal::math::v3{invSqrt2, 0.0f, invSqrt2};   // 右转 45°
+    const primal::math::v3 delta = DragDelta(prev, cur,
+                                     primal::math::v3{1.0f, 0.0f, 0.0f},
+                                     primal::math::v3{0.0f, 1.0f, 0.0f}, 10.0f);
+    TEST_ASSERT(NearlyEqual(delta.x, 10.0f) && NearlyEqual(delta.y, 0.0f) &&
+                NearlyEqual(delta.z, 0.0f),
+                "45-degree drag on z=0 plane = (10,0,0) world delta");
+
+    // 平行于参考平面（dir 无 z 分量）→ 零位移
+    GizmoRay par = prev;
+    par.dir = primal::math::v3{1.0f, 0.0f, 0.0f};
+    const primal::math::v3 zero = DragDelta(prev, par,
+                                    primal::math::v3{1.0f, 0.0f, 0.0f},
+                                    primal::math::v3{0.0f, 1.0f, 0.0f}, 10.0f);
+    TEST_ASSERT(zero.x == 0.0f && zero.y == 0.0f && zero.z == 0.0f,
+                "Ray parallel to plane yields zero delta");
+
+    // -- 模式 + selected volume + 拖拽参考距离 --
+    SetMode(GizmoMode::Off);
+    TEST_ASSERT(GetMode() == GizmoMode::Off, "Default mode Off");
+    SetSelectedVolume(kNoVolumeSelected);
+    SetDragReferenceDistance(10.0f);
+    SetDragReferenceDistance(-1.0f);   // 非法值被拒
+    TEST_ASSERT(NearlyEqual(GetDragReferenceDistance(), 10.0f),
+                "Invalid reference distance rejected");
+    SetSelectedVolume(1);
+    TEST_ASSERT(GetSelectedVolume() == 1, "Selected volume round-trip");
+
+    // -- gizmo.mode.* 面板动作（经 GIEditorPanel 注册表）--
+    ClearActions();
+    TEST_ASSERT(RegisterDefaultActions(), "Register default gizmo actions");
+    TEST_ASSERT(RegisterDefaultActions(), "Idempotent re-register");
+    TEST_ASSERT(GetActionCount() == 4, "Exactly four gizmo.mode.* actions");
+    TEST_ASSERT(GetActionById("gizmo.mode.select") != nullptr, "select action");
+    TEST_ASSERT(GetActionById("gizmo.mode.translate") != nullptr, "translate action");
+    TEST_ASSERT(GetActionById("gizmo.mode.scale") != nullptr, "scale action");
+    TEST_ASSERT(GetActionById("gizmo.mode.off") != nullptr, "off action");
+
+    TEST_ASSERT(InvokeAction("gizmo.mode.translate"), "Invoke translate action");
+    TEST_ASSERT(GetMode() == GizmoMode::Translate, "Mode now Translate");
+    TEST_ASSERT(InvokeAction("gizmo.mode.scale"), "Invoke scale action");
+    TEST_ASSERT(GetMode() == GizmoMode::Scale, "Mode now Scale");
+    TEST_ASSERT(GetSelectedVolume() == 1, "Selection survives mode switches");
+    TEST_ASSERT(InvokeAction("gizmo.mode.off"), "Invoke off action");
+    TEST_ASSERT(GetMode() == GizmoMode::Off, "Mode back to Off");
+    TEST_ASSERT(GetSelectedVolume() == kNoVolumeSelected,
+                "Off clears selected volume");
+    ClearActions();
+    return TestResult::Passed;
+}
+
+// === Test 19: 线框端点数 24 / 角点封闭 / 端点在 AABB 内 ===
+TestResult TestGizmoWireframeEndpoints() {
+    using namespace gi_gizmo;
+    StandardRenderPipeline p;
+    MakeTwoBoxPipeline(p, true);
+
+    primal::math::v3 endpoints[kWireframeEndpointCount];
+    TEST_ASSERT(GetPipelineVolumeWireframe(&p, 0, endpoints),
+                "Wireframe for volume 0");
+    TEST_ASSERT(!GetPipelineVolumeWireframe(&p, 9, endpoints), "OOB wireframe fails");
+    TEST_ASSERT(!GetPipelineVolumeWireframe(nullptr, 0, endpoints),
+                "Null pipeline wireframe fails");
+    TEST_ASSERT(!GetVolumeWireframe(lumen::LumenVolumeConfig{}, nullptr),
+                "Null out buffer fails");
+
+    // 所有端点都在 AABB [0,4]^3 内
+    for (u32 i = 0; i < kWireframeEndpointCount; ++i) {
+        const primal::math::v3& e = endpoints[i];
+        TEST_ASSERT(e.x >= -1e-4f && e.x <= 4.0f + 1e-4f &&
+                    e.y >= -1e-4f && e.y <= 4.0f + 1e-4f &&
+                    e.z >= -1e-4f && e.z <= 4.0f + 1e-4f,
+                    "Endpoint inside AABB bounds");
+    }
+    // 12 条边：每条边的两端点恰在一根轴上不同（曼哈顿意义）
+    for (u32 e = 0; e < kWireframeEndpointCount / 2; ++e) {
+        const primal::math::v3& a = endpoints[e * 2];
+        const primal::math::v3& b = endpoints[e * 2 + 1];
+        const int diffAxes = (NearlyEqual(a.x, b.x) ? 0 : 1) +
+                             (NearlyEqual(a.y, b.y) ? 0 : 1) +
+                             (NearlyEqual(a.z, b.z) ? 0 : 1);
+        TEST_ASSERT(diffAxes == 1, "Each wireframe edge is axis-aligned");
+    }
+    // 恰好 8 个不同角点（每点出现 3 次 = 立方体顶点度数）
+    u32 uniqueCorners = 0;
+    for (u32 i = 0; i < kWireframeEndpointCount; ++i) {
+        bool first = true;
+        for (u32 j = 0; j < i; ++j) {
+            if (NearlyEqual(endpoints[i].x, endpoints[j].x) &&
+                NearlyEqual(endpoints[i].y, endpoints[j].y) &&
+                NearlyEqual(endpoints[i].z, endpoints[j].z)) { first = false; break; }
+        }
+        if (first) ++uniqueCorners;
+    }
+    TEST_ASSERT(uniqueCorners == 8, "Wireframe covers exactly 8 box corners");
+    // 首端点 = min 角（覆盖 min 落点）
+    TEST_ASSERT(NearlyEqual(endpoints[0].x, 0.0f) &&
+                NearlyEqual(endpoints[0].y, 0.0f) &&
+                NearlyEqual(endpoints[0].z, 0.0f),
+                "First endpoint is the AABB min corner");
+    return TestResult::Passed;
+}
+
+// === Test 20: DLL C ABI gizmo 导出 pre-init 安全（无活管线时全部安全返回） ===
+TestResult TestGizmoAbiPreInitSafety() {
+    using namespace gi_gizmo;
+
+    // 模式往返 + 非法模式拒绝
+    GIGizmoSetMode(2);
+    TEST_ASSERT(GIGizmoGetMode() == 2u, "C ABI mode round-trip (Translate)");
+    GIGizmoSetMode(99);
+    TEST_ASSERT(GIGizmoGetMode() == 2u, "Invalid mode value rejected");
+    GIGizmoSetMode(0);
+    TEST_ASSERT(GIGizmoGetMode() == 0u, "Mode reset to Off");
+
+    SetSelectedVolume(kNoVolumeSelected);
+    TEST_ASSERT(GIGizmoGetSelectedVolume() == 0xFFFFFFFFu,
+                "No-selection sentinel via C ABI");
+
+    // Pick：null 矩阵/原点拒绝；无活管线 → 未命中（矩阵内容此时无关紧要，
+    // 传 identity 即可）
+    f32 m16[16] = {0};
+    for (u32 i = 0; i < 4; ++i) m16[i * 4 + i] = 1.0f;
+    const f32 cam[3] = {0.0f, 0.0f, -10.0f};
+    u32 volIdx = 99;
+    f32 tMin = -1.0f;
+    TEST_ASSERT(GIGizmoPick(400.0f, 300.0f, 800, 600, nullptr, cam,
+                            &volIdx, &tMin) == 0, "Null matrix rejected");
+    TEST_ASSERT(GIGizmoPick(400.0f, 300.0f, 800, 600, m16, nullptr,
+                            &volIdx, &tMin) == 0, "Null origin rejected");
+    TEST_ASSERT(GIGizmoPick(400.0f, 300.0f, 800, 600, m16, cam,
+                            &volIdx, &tMin) == 0,
+                "No live pipeline → pick misses");
+    TEST_ASSERT(volIdx == 99 && tMin == -1.0f, "Out-args untouched on miss");
+
+    // Translate/Scale：无活管线 → 0
+    const f32 delta[3] = {1.0f, 0.0f, 0.0f};
+    TEST_ASSERT(GIGizmoTranslate(0, delta) == 0, "No pipeline translate fails");
+    TEST_ASSERT(GIGizmoTranslate(0, nullptr) == 0, "Null delta rejected");
+    TEST_ASSERT(GIGizmoScale(0, 2.0f, 0) == 0, "No pipeline scale fails");
+
+    // Wireframe：无活管线 → 0；容量不足 → 0 且 *outCount = 24；null 计数 → 0
+    f32 buf[72];
+    u32 cnt = 0;
+    TEST_ASSERT(GIGizmoGetWireframe(0, buf, 72, &cnt) == 0,
+                "No pipeline wireframe fails");
+    TEST_ASSERT(cnt == 0, "Count zero on failure without pipeline");
+    TEST_ASSERT(GIGizmoGetWireframe(0, buf, 8, &cnt) == 0,
+                "Insufficient capacity fails");
+    TEST_ASSERT(cnt == 24, "Capacity failure reports required endpoint count");
+    TEST_ASSERT(GIGizmoGetWireframe(0, nullptr, 72, &cnt) == 0,
+                "Null buffer rejected");
+    TEST_ASSERT(GIGizmoGetWireframe(0, buf, 72, nullptr) == 0,
+                "Null count pointer rejected");
+    return TestResult::Passed;
+}
+
 void RunRenderPipelineAPITests() {
     TestSuite suite("RenderPipeline API C ABI Tests (Phase 5)");
     suite.AddTestCase(TestCase("Pass count matches enum",
@@ -513,6 +886,25 @@ void RunRenderPipelineAPITests() {
     suite.AddTestCase(TestCase("Volume CRUD + axes hot-reload on local pipeline",
         TestGIPanelVolumeAndAxesOnLocalPipeline,
         "Materialize/clamp/append/remove volumes; ApplyAxesConfig overwrites pass toggles"));
+    // M6/T6.2 GI volume gizmo
+    suite.AddTestCase(TestCase("Gizmo pick hit/miss/nearest",
+        TestGizmoPickHitMissNearest,
+        "Screen ray → AABB slab pick: nearest volume wins, misses and nulls safe"));
+    suite.AddTestCase(TestCase("Gizmo translate writes origin_override",
+        TestGizmoTranslateWritesOriginOverride,
+        "worldDelta accumulates onto origin_override + use_origin_override"));
+    suite.AddTestCase(TestCase("Gizmo scale clamps 4..128",
+        TestGizmoScaleClampAndAxes,
+        "Per-axis/uniform count scaling with clamp; invalid axis/factor rejected"));
+    suite.AddTestCase(TestCase("Gizmo drag delta + modes + panel actions",
+        TestGizmoDragModesAndActions,
+        "DragDelta plane math; mode/selection state; gizmo.mode.* registry actions"));
+    suite.AddTestCase(TestCase("Gizmo wireframe endpoints",
+        TestGizmoWireframeEndpoints,
+        "24 endpoints, 8 unique axis-aligned box corners inside the AABB"));
+    suite.AddTestCase(TestCase("Gizmo C ABI pre-init safety",
+        TestGizmoAbiPreInitSafety,
+        "GIGizmo* exports callable without a live pipeline"));
     suite.RunAllTests();
 }
 

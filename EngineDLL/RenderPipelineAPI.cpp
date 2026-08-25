@@ -9,6 +9,7 @@
 #include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/RenderPipeline/GIEditorPanel.h"   // M6/T6.1 GI 面板 API（轻量头）
+#include "Graphics/RenderPipeline/GIVolumeGizmo.h"   // M6/T6.2 GI volume gizmo（轻量头）
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "PipelineLightDesc.h"
@@ -799,6 +800,115 @@ EDITOR_INTERFACE u32 GIGetPanelAction(u32 index, const char** out_id,
 EDITOR_INTERFACE u32 GIInvokePanelAction(const char* id) {
     if (!id) return 0;
     return gi_panel::InvokeAction(id) ? 1u : 0u;
+}
+
+// ============================================================================
+// GI Volume Gizmo (M6/T6.2)
+// ============================================================================
+//
+// world volume 的 viewport 拾取/平移/缩放（引擎侧纯数学/数据层
+// Engine/Graphics/RenderPipeline/GIVolumeGizmo.h 的 C ABI 投影）。UI 宿主
+// 消费方式（典型帧内交互，均在渲染帧之外或帧间隙调用写路径）：
+//   - 模式按钮：GIGizmoSetMode（或经 GIRegisterPanelAction + 引擎内
+//     gi_gizmo::RegisterDefaultActions 注册的 gizmo.mode.* 四个内置动作）；
+//   - 点击拾取：GIGizmoPick —— Select 模式下命中自动 SetSelectedVolume +
+//     记录 tMin 为拖拽参考距离，未命中自动取消选中；Translate/Scale 模式
+//     下只返回命中信息不动选中态（宿主自行驱动）；
+//   - 拖拽平移：宿主用两次 ScreenRay（或自算射线）在引擎侧 DragDelta 换
+//     世界位移后调 GIGizmoTranslate（写 origin_override + use_origin_override）；
+//   - 拖拽缩放：GIGizmoScale（factor 乘 probe_count[axis]，clamp 4..128；
+//     axis 0/1/2 = x/y/z，3 = 三轴同缩）；
+//   - 视口画盒：GIGizmoGetWireframe（24 端点 × 3 float 经输出缓冲区返回，
+//     计数经 outCount 返回；容量不足返回 0 且 *outCount = 需要的端点数）。
+// 拾取/编辑对象 = settings.lumen.volume_overrides（overrides 为空时 Pick 恒
+// 未命中 —— 宿主先 GIMaterializeDerivedVolumes 物化）。写路径均 copy →
+// UpdateSettings 置 settings_dirty_，下一渲染帧自动重建 Lumen passes。
+
+EDITOR_INTERFACE void GIGizmoSetMode(u32 mode) {
+    if (mode > static_cast<u32>(gi_gizmo::GizmoMode::Scale)) return;
+    gi_gizmo::SetMode(static_cast<gi_gizmo::GizmoMode>(mode));
+}
+
+EDITOR_INTERFACE u32 GIGizmoGetMode() {
+    return static_cast<u32>(gi_gizmo::GetMode());
+}
+
+EDITOR_INTERFACE u32 GIGizmoGetSelectedVolume() {
+    const u32 sel = gi_gizmo::GetSelectedVolume();
+    return (sel == gi_gizmo::kNoVolumeSelected) ? 0xFFFFFFFFu : sel;
+}
+
+// invViewProj: 16 个 float，列主序（m.columns[c] = 第 c 列）。
+// viewOrigin: 3 个 float。outVolumeIndex/outTMin 可为 null。
+EDITOR_INTERFACE u32 GIGizmoPick(f32 screenX, f32 screenY,
+                                 u32 viewportW, u32 viewportH,
+                                 const f32* invViewProj, const f32* viewOrigin,
+                                 u32* outVolumeIndex, f32* outTMin) {
+    if (!invViewProj || !viewOrigin) return 0;
+    primal::math::m4x4 m{};
+    for (u32 c = 0; c < 4; ++c)
+        m.columns[c] = primal::math::v4{invViewProj[c * 4 + 0], invViewProj[c * 4 + 1],
+                                invViewProj[c * 4 + 2], invViewProj[c * 4 + 3]};
+    const primal::math::v3 origin{viewOrigin[0], viewOrigin[1], viewOrigin[2]};
+
+    auto* p = GetStdPipeline();
+    const gi_gizmo::GIVolumeHit h =
+        p ? gi_gizmo::PickPipelineVolumes(p, screenX, screenY, viewportW,
+                                          viewportH, m, origin)
+          : gi_gizmo::GIVolumeHit{};
+    if (!h.hit) {
+        // Select 模式点击空白 = 取消选中（典型 gizmo UX）
+        if (gi_gizmo::GetMode() == gi_gizmo::GizmoMode::Select)
+            gi_gizmo::SetSelectedVolume(gi_gizmo::kNoVolumeSelected);
+        return 0;
+    }
+    if (outVolumeIndex) *outVolumeIndex = h.volumeIndex;
+    if (outTMin)        *outTMin        = h.tMin;
+    if (gi_gizmo::GetMode() == gi_gizmo::GizmoMode::Select) {
+        gi_gizmo::SetSelectedVolume(h.volumeIndex);
+        gi_gizmo::SetDragReferenceDistance(h.tMin);
+    }
+    return 1;
+}
+
+// delta: 3 个 float（世界位移，典型来自 gi_gizmo::DragDelta）。
+EDITOR_INTERFACE u32 GIGizmoTranslate(u32 index, const f32* delta) {
+    if (!delta) return 0;
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    const primal::math::v3 d{delta[0], delta[1], delta[2]};
+    return gi_gizmo::TranslateVolume(p, index, d) ? 1u : 0u;
+}
+
+EDITOR_INTERFACE u32 GIGizmoScale(u32 index, f32 factor, u32 axis) {
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    return gi_gizmo::ScaleVolume(p, index, factor, axis) ? 1u : 0u;
+}
+
+// outEndpoints: 调用方缓冲区（float 数）；capacity = 缓冲区 float 容量。
+// 成功写入 24 端点 × 3 = 72 float，*outCount = 24 并返回 1。
+// 容量不足/无管线/越界 → 返回 0（容量不足时 *outCount = 24 供重试分配）。
+EDITOR_INTERFACE u32 GIGizmoGetWireframe(u32 index, f32* outEndpoints,
+                                         u32 capacity, u32* outCount) {
+    const u32 requiredFloats = gi_gizmo::kWireframeEndpointCount * 3;
+    if (outCount) *outCount = 0;
+    if (!outCount) return 0;
+    if (!outEndpoints || capacity < requiredFloats) {
+        *outCount = gi_gizmo::kWireframeEndpointCount;   // 供宿主重试分配
+        return 0;
+    }
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    primal::math::v3 endpoints[gi_gizmo::kWireframeEndpointCount];
+    if (!gi_gizmo::GetPipelineVolumeWireframe(p, index, endpoints)) return 0;
+    for (u32 i = 0; i < gi_gizmo::kWireframeEndpointCount; ++i) {
+        outEndpoints[i * 3 + 0] = endpoints[i].x;
+        outEndpoints[i * 3 + 1] = endpoints[i].y;
+        outEndpoints[i * 3 + 2] = endpoints[i].z;
+    }
+    *outCount = gi_gizmo::kWireframeEndpointCount;
+    return 1;
 }
 
 } // extern "C"
