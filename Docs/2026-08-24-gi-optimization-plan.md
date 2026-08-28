@@ -214,6 +214,27 @@ struct GIPlatformProfile {
 | T8.11 SC 捕获架构审计：屏幕空间重投影是彩色反弹缺失与红框区欠亮的共同根因 **（✅ 2026-08-28 诊断完成——修复为多会话工程，未动）** | 三连审计闭环：① 卡生成器健康（393 实例→407 卡，"4 卡"实为 capture_budget=64 页轮换：64×32²=65536 texel=恰 4 张 128² 卡/帧，其余 403 卡靠 seed 保持——非覆盖 bug）；② LightEval 图集写的是 albedo×光照 ✓；③ **SurfaceCacheCapture 是主相机 GBuffer 的屏幕空间重投影**：逐主相机像素取 albedo/normal/depth 散射进所有正交框住该点的卡——**不可见于当前相机的表面（离屏/被遮挡/背面）永远 alpha=0 → LightEval 早退 → 卡永久黑**；且捕获无逐卡遮挡测试，近景会错误染入远景卡框。推论链：探针射线命中未捕获表面=黑 → 彩色反弹（布料/彩墙）缺失 + 红框区接收欠亮（其来向射线打中的内墙面多为主相机看不见的面）全部同源；轻微偏蓝=sky-miss（另一主题） | **正解路线**（工程量大，立项待批）：a) 真·卡视角正交捕获（每帧预算内渲染 N 张卡的 6 面深度+albedo，替代屏幕空间重投影——Lumen 同款）；b) 过渡方案：主相机多锚点（前后左右四次重投影）扩大覆盖；c) 捕获时逐卡 axisDepth 遮挡比较防错染。临时缓解：无（屏幕空间捕获的相机绑定是架构性的） |
 | T8.12 卡视角捕获落地 **（✅ 2026-08-28 完成并转默认——本 session 决定性修复之二）** | 按 T8.11 立项实施：① 新 shader `Nanite/CardCapture.vert/.frag`——几何解码与 PipelineDraw 逐位一致（cib→cmap→meshlet/instance/material），只换 binding0 为卡参数 UBO（正交 view/proj + card center/fwd），PS 材质采样同款 + 输出改三页（albedo a=1 / normal oct rg16f / axisDepth r32f，语义=projectToCard 的 dot(local,fwd)）；② GPUDriven 新增 `InitializeCardCaptureResources/ExecuteCardCapturePass`（克隆 ExecuteReflectionPass 骨架：CPU ExtractFrustumPlanes 球剔除 → 可见簇表 → 间接绘制；32 个 face scratch 槽）；③ SurfaceCachePass 新增 `AddCardCapturePasses`（批次调度：seed 64 面/帧至全覆盖 → 稳态 8 面/帧；基向量按 axis/dir 表构造，v 轴取 −v_world 对齐 texel 行向）+ env 门控；④ 屏幕空间 gather 与卡视角互斥。**工程勘误**：T8.5 的"gl_InstanceIndex 恒 0"仅限 Draw() 实例化；DrawIndirect 路径（instanceCount=可见簇数）工作正常——本实现与其依赖的 GBuffer 主路径同模式 | **3 跑中位：L_2F 39.4→46.6（p95 92.9→108.3）、L_OUTER 33.3→39.3、REDBOX p50 9.4→16.6（+77%）、R_DIR 77.6（直射 +25% 独立效应）；clip 0.011% 可忽略。全 session 累计：17.54 → 46.6（**+166%**）。目检：双侧柱廊整体受光、对面布料全可读、彩色反弹上墙、日影方向保留。默认 ON（SC_CARDVIEW=0 回退旧路径）。**性能**：Debug 构建 30s 帧计数实测卡视角 20.3 FPS vs 旧屏幕空间 19.5 FPS——非回归且略优（8 卡正交面批 < 全屏 gather），帧耗时 ~49ms 由其他 pass 主导（DDGI 子过程仅 5.25ms）；批大小 2~8 在噪声内 |
 | T8.12b 测量完整性：全局键盘泄漏 + 相机锁定 **（✅ 2026-08-28 发现并修复）** | 定位"跑帧间视点漂移"（两帧 luma 相关性仅 0.30）：测试的 input source 读取**全局键盘状态**，自动化跑帧期间用户在交互窗口的 WASD 会泄漏进跑帧进程，移动跑帧相机——此前所有区域读数都可能带视点污染（含部分跨配置对比）。修复：`SPGI_CAM_LOCK=1` 冻结相机（跳过 `camera_.Update(dt)`），**测量纪律再升级**：自动化读数一律 SPGI_CAM_LOCK=1 + ≥2 跑；锁定后双跑 luma 相关性 0.9998 | **锁定相机最终基线（默认机位，2 跑中位）**：L_2F mean **46.2** / p95 108.5、L_OUTER **40.2**、R_DIRECT **77.7**、REDBOX p50 **17.2**、clipped≈0。全 session：17.54 → 46.2（**+163%**） |
+## Vulkan ↔ Metal 同步清单（2026-08-28 移交，新 session 用）
+
+T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改动（ShadowMapModule 模糊半径、SkyColor 中性化、SSGI 降级策略、SCREEN_PROBE_RAYS/SSAO_DIRS/SSAO_SAMPLES/SC_MIN_CARD_RES/SHADOW_BLUR 等 env、CardGenerator 混合分辨率、GPUDrivenDrawPipeline::ExecuteCardCapturePass）为平台共享代码，Metal 自动生效，无需动作**。需要手工同步的是 Metal 专属 shader 源：
+
+| # | Vulkan 端改动 | Metal 对应文件 | 同步内容 |
+|---|---|---|---|
+| 1 | DDGITraceFinalize.comp：反馈 0.85→0.70、lane-striding(128 射线)、命中带 1.25 voxel、PCSS 光源尺寸(死代码可缓) | `EngineTest/shaders/` 或 Metal Lumen 目录内 `ddgi_trace_finalize` entry（DDGITraceRays.metal） | 同 DDGITraceSDF 条目（Metal 单体文件含 sdf/finalize 两 entry） |
+| 2 | DDGITraceSDF.comp：striding 循环、hitThreshold 0.5→1.25 voxel、MAX_STEPS 64、relax ×1.5 | DDGITraceRays.metal `ddgi_trace_sdf` entry | striding + 命中带 + 步数/松弛同步 |
+| 3 | DDGITraceRays.comp（单体，Vulkan 不派发仅对齐）：反馈 0.70 | DDGITraceRays.metal `ddgi_trace_rays` entry | 反馈 0.70 |
+| 4 | SurfaceCacheLightEval.comp：SC_FEEDBACK 0.85→0.70 | Metal SC LightEval（Engine/Graphics/Metal/shaders/ 下对应 .metal） | SC_FEEDBACK 0.70 |
+| 5 | FusionIndirect.frag：亮度优势裕量门、遮挡调制底光、SSGI 降级联动 | `DeferredLighting.metal::fragmentFusionIndirect` | 融合公式三项同步 |
+| 6 | DeferredLighting.frag：DIRECT_INTENSITY 2.5→3.125 | Metal DeferredLighting 对应常量 | 直射强度校准 |
+| 7 | SkyColor tint 中性化（LumenDDGIPass.cpp 共享 ✓ 自动） | — | 无需动作（引擎层） |
+| 8 | Nanite/CardCapture.vert/.frag + ExecuteCardCapturePass | Metal 需 `CardCapture.metal`（VS/PS 语义同，metal '::main' 入口约定） | 卡视角捕获 Metal 着色器（RT 格式/布局共享 C++ 已备） |
+| 9 | LumenDDGIPass.cpp：AtlasInit 语义/初拥离线 SDF/未捕获=黑（共享 ✓ 自动） | — | 无需动作 |
+| 10 | 阴影：VSM moments blur 半径 3→8（ShadowMapModule.cpp 共享 ✓ 自动） | — | 无需动作 |
+
+**同步后验收**：Metal 端跑同机位帧戳差分 FPS + L_2F/OUTER/REDBOX 三区读数（多跑中位），对照 Vulkan 基线 52.5/46.9/97.2/24.7±1；DDGI_RECT RGB 红染 R−G≥+0.03。
+
+**已知平台差异坑**（同步时注意）：Metal CommandBuffer 的 WriteTimestamp 在 RenderPassEncoder 内被禁用（Apple Silicon）——RG 时间戳对图形 pass 走 desc 括号、compute 走显式 WriteTimestamp 的现有分工即是为此，勿混；D32 不要加 RenderTarget usage（Vulkan VUID）；Dynamic 内存才可 Map。
+
 ## T8.13+ 路线图（2026-08-28 排定，按依赖×收益排序）
 ### T8.13 P0 交付：GPU pass 级分解（2026-08-28，RG-Perf 实测）
 ### T8.13 P1 交付：反馈环增益核算 0.85→0.70（✅ 2026-08-28，双稳态消除）
