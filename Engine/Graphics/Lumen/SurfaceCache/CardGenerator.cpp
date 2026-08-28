@@ -98,8 +98,20 @@ void CardGenerator::RebuildCardAllocation() {
                 else if (axis == 1) proj_size = std::max(half_extent.x, half_extent.z) * 2.0f;
                 else proj_size = std::max(half_extent.x, half_extent.y) * 2.0f;
 
+                // T8.13 P3: min-card-resolution env (SC_MIN_CARD_RES, default
+                // 32). Raises the floor for small-surface bounce detail.
+                // T8.13 P3 final: default 64 — texels 95.3% of the 2048² atlas
+                // (fits); NOTE the shelf packer drops ~33 tail cards (3.9M→4.0M
+                // with rounding) and the SC↔probe equilibrium shifts +27%
+                // brighter (stable over 3 runs, clip 0.24%). SC_MIN_CARD_RES=32
+                // restores the previous packing.
+                static const u32 sc_min_card_res = [] {
+                    const char* e = std::getenv("SC_MIN_CARD_RES");
+                    return e ? (u32)std::max(32, atoi(e)) : 64u;
+                }();
                 uint32_t res = static_cast<uint32_t>(proj_size * texels_per_unit);
-                res = std::max(res, page_size_);
+                uint32_t min_res = std::max(page_size_, sc_min_card_res);
+                res = std::max(res, min_res);
                 uint32_t max_card_res = page_size_ * 4;  // cap at 4 pages
                 res = std::min(res, max_card_res);
                 res = ((res + page_size_ - 1) / page_size_) * page_size_;
@@ -110,7 +122,13 @@ void CardGenerator::RebuildCardAllocation() {
                     current_atlas_y += row_height;
                     row_height = 0;
                 }
-                // Skip card if it doesn't fit in remaining atlas space
+                // T8.13 P3: coverage > detail — a raised card that cannot fit
+                // drops back to one page before being skipped entirely.
+                if (current_atlas_y + res > atlas_size_ && res > page_size_) {
+                    res = page_size_;
+                    card.resolution = static_cast<uint16_t>(res);
+                }
+                // Skip card if it still doesn't fit in remaining atlas space
                 if (current_atlas_y + res > atlas_size_) continue;
 
                 card.atlas_offset_x = current_atlas_x;
@@ -128,6 +146,27 @@ void CardGenerator::RebuildCardAllocation() {
     }
 
     card_count_ = static_cast<uint32_t>(cards_.size());
+
+    // T8.13 P3: resolution distribution + packing audit
+    {
+        u32 bucket[5] = {0, 0, 0, 0, 0};  // 32/64/96/128/other
+        u64 texels = 0;
+        for (const auto& c : cards_) {
+            texels += u64(c.resolution) * c.resolution;
+            switch (c.resolution) {
+                case 32u: ++bucket[0]; break;
+                case 64u: ++bucket[1]; break;
+                case 96u: ++bucket[2]; break;
+                case 128u: ++bucket[3]; break;
+                default: ++bucket[4]; break;
+            }
+        }
+        const u64 capacity = u64(atlas_size_) * atlas_size_;
+        printf("[CardGen] dist: 32px=%u 64px=%u 96px=%u 128px=%u | texels=%llu / %llu (%.1f%% of atlas)\n",
+               bucket[0], bucket[1], bucket[2], bucket[3],
+               (unsigned long long)texels, (unsigned long long)capacity,
+               100.0 * double(texels) / double(capacity));
+    }
 
     // Sort lookups by AABB volume descending — largest meshes first.
     // The trace shader checks only the first N lookups (kMaxLookups),
