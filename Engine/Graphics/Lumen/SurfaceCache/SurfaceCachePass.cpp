@@ -4,9 +4,11 @@
 #include "Graphics/RenderGraph/RenderGraphPass.h"
 #include "Graphics/RenderGraph/RenderGraphResource.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
+#include "Graphics/Scene/RenderSceneSnapshot.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -17,6 +19,7 @@ namespace primal::graphics::lumen {
 
 using namespace rhi;
 using namespace rendergraph;
+namespace rhimath = primal::graphics::rhi::math;
 
 namespace {
 
@@ -72,7 +75,8 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
 // #include without include dirs, so we manually inline local includes.)
 // ============================================================================
 
-static const std::string SHADER_BASE_DIR = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/";
+static const std::string SHADER_BASE_DIR =
+    utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/") + "/";
 static const std::string SC_SHADER_DIR = SHADER_BASE_DIR + "Lumen/";
 
 static std::string ReadFileToString(const std::string& path) {
@@ -136,7 +140,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
             utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
         const std::vector<std::string> candidates = {
             relPath,
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+            utils::ShaderRegistry::ResolveShaderPath(relPath),
         };
         for (const auto& path : candidates) {
             std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -201,6 +205,9 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
     config_ = config;
     atlas_size_ = config.surface_cache_atlas_size;
     page_size_ = config.surface_cache_page_size;
+    light_eval_rr_cursor_ = 0;
+    lighting_atlas_seed_mask_ = 0;
+    atlas_seeded_ = false;
 
     // Initialize card generator (meshes registered later by the pipeline
     // when the scene snapshot rebuilds — real per-mesh AABBs, not test data).
@@ -208,6 +215,26 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // Create atlas textures
     CreateAtlasTextures();
+
+    // T8.12: card-view capture — DEFAULT ON (validated 2026-08-28: L_2F
+    // 39.4→46.6 median, REDBOX 9.4→16.6, colored bounce visible, 0 reg).
+    // SC_CARDVIEW=0 falls back to the legacy screen-space gather.
+    const char* cvEnv = std::getenv("SC_CARDVIEW");
+    card_view_enabled_ = !(cvEnv && strcmp(cvEnv, "0") == 0);
+    if (card_view_enabled_) {
+        rhi::TextureDesc dv{};
+        dv.size = { atlas_size_, atlas_size_, 1 };
+        dv.mipLevels = 1;
+        dv.arraySize = 1;
+        dv.format = DataFormat::D32_Float;
+        dv.type = TextureType::Texture2D;
+        dv.usage = TextureUsage::DepthStencil;
+        dv.name = "SurfaceCache_CardViewDepth";
+        card_view_depth_ = device_->CreateTexture(dv);
+        std::cerr << "[SurfaceCache] T8.12 card-view capture ENABLED (depth "
+                  << (card_view_depth_ != rhi::handles::INVALID_RESOURCE ? "ok" : "FAILED")
+                  << ")" << std::endl;
+    }
 
     // Create triple-buffered constant buffers
     CreateConstantBuffers();
@@ -230,6 +257,8 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 void SurfaceCachePass::Shutdown() {
     if (!initialized_) return;
     initialized_ = false;
+
+    card_view_depth_ = rhi::handles::INVALID_RESOURCE;
 
     device_ = nullptr;
 
@@ -390,7 +419,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         light_cull_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- LightEval (merged): 4 textures + 1 UBO + 3 SSBO + 1 prev_lighting + 1 shadow_vis = 10 bindings ---
+    // --- LightEval (merged): 4 textures + 1 UBO + 3 SSBO + 1 prev_lighting + 1 shadow_vis + 1 ddgi_irradiance + 1 depth_atlas ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
@@ -403,10 +432,13 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch
             {8, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // prev_lighting (multi-bounce)
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // shadow_visibility (T3.3)
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi irradiance (probe-fed indirect)
+            {11, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas (surface-point probe gather)
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[9].readonly = true;
-        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
+        b[10].readonly = true;
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({12, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
@@ -918,6 +950,111 @@ void SurfaceCachePass::CreatePipelines() {
 // AddPass — main entry point called per frame
 // ============================================================================
 
+// ============================================================================
+// T8.12: Card-view capture — renders a rotating batch of cards from their own
+// orthographic views directly into the atlas pages. Replaces the camera-bound
+// screen-space gather when SC_CARDVIEW=1. Each card entry IS one face (the
+// generator allocates per-face), so the cursor walks card indices.
+// ============================================================================
+void SurfaceCachePass::AddCardCapturePasses(
+    RenderGraph& graph,
+    const RenderSceneSnapshot& scene_snapshot,
+    u32 current_frame_index) {
+    (void)current_frame_index;
+    if (!card_view_enabled_ || !initialized_) return;
+
+    auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+    if (!gpuDraw.IsCardCaptureReady() && !gpuDraw.InitializeCardCaptureResources(1u << 20)) return;
+
+    const auto& cards = card_generator_.GetCards();
+    const u32 total = card_generator_.GetCardCount();
+    if (total == 0) return;
+
+    struct CapPassData {};
+    graph.AddPass<CapPassData>(
+        "SurfaceCacheCardCapture",
+        RGPassType::Graphics,
+        RGPassCategory::Lighting,
+        [](CapPassData&, RenderGraphBuilder& builder) {
+            builder.SideEffect();  // atlases are manually barriered module RTs
+        },
+        [this, &scene_snapshot, &gpuDraw, total](const CapPassData&, RenderGraphContext& ctx) {
+            auto* cmd = ctx.cmdBuffer;
+            const auto& cards = card_generator_.GetCards();
+
+            u32 batch = card_view_seeded_ ? 8u : 64u;
+            if (const char* b = std::getenv("SC_CARDVIEW_BATCH"))
+                batch = (u32)std::max(1, atoi(b));
+
+            // Storage (GENERAL) → color-attachment layouts for the three pages.
+            ResourceHandle pages[3] = { albedo_atlas_, normal_atlas_, depth_atlas_ };
+            for (auto h : pages) {
+                ResourceBarrier b{};
+                b.resource = h;
+                b.beforeState = ResourceState::UnorderedAccess;
+                b.afterState  = ResourceState::RenderTarget;
+                b.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&b, 1);
+            }
+
+            u32 faces = 0;
+            for (u32 k = 0; k < total && faces < batch; ++k) {
+                const u32 ci = (card_view_cursor_ + k) % total;
+                const auto& card = cards[ci];
+                if (card.resolution == 0) continue;
+
+                const uint axis = card.axis_direction & 0xFFu;
+                const uint dir  = (card.axis_direction >> 8u) & 0xFFu;
+
+                math::v3 fwd, up;
+                float hu = 0.0f, hv = 0.0f, halfAxis = 0.0f;
+                if (axis == 0u) {
+                    fwd = math::v3{dir > 0u ? 1.0f : -1.0f, 0.0f, 0.0f};
+                    up  = math::v3{0.0f, 0.0f, -1.0f};
+                    hu = card.extent.y; hv = card.extent.z; halfAxis = card.extent.x;
+                } else if (axis == 1u) {
+                    fwd = math::v3{0.0f, dir > 0u ? 1.0f : -1.0f, 0.0f};
+                    up  = math::v3{0.0f, 0.0f, -1.0f};
+                    hu = card.extent.x; hv = card.extent.z; halfAxis = card.extent.y;
+                } else {
+                    fwd = math::v3{0.0f, 0.0f, dir > 0u ? 1.0f : -1.0f};
+                    up  = math::v3{0.0f, -1.0f, 0.0f};
+                    hu = card.extent.x; hv = card.extent.y; halfAxis = card.extent.z;
+                }
+                if (hu <= 0.0f || hv <= 0.0f || halfAxis <= 0.0f) continue;
+
+                const math::v3 center{card.center.x, card.center.y, card.center.z};
+                const math::v3 at = center + fwd;
+                const math::m4x4 view = rhimath::CreateLookAtMatrix(center, at, up);
+                const math::m4x4 proj = rhimath::CreateOrthographicMatrix(
+                    -hu, hu, -hv, hv, 0.05f, 2.0f * halfAxis + 0.5f);
+
+                const bool ok = gpuDraw.ExecuteCardCapturePass(
+                    cmd, scene_snapshot, view, proj,
+                    math::v4{center.x, center.y, center.z, 1.0f},
+                    math::v4{fwd.x, fwd.y, fwd.z, 0.0f},
+                    0.05f, 2.0f * halfAxis + 0.5f,
+                    faces,  // face_slot — unique within this frame
+                    card.atlas_offset_x, card.atlas_offset_y, card.resolution,
+                    albedo_atlas_, normal_atlas_, depth_atlas_, card_view_depth_);
+                if (ok) ++faces;
+            }
+
+            card_view_cursor_ = (card_view_cursor_ + faces) % total;
+            if (card_view_cursor_ == 0 && faces > 0) card_view_seeded_ = true;
+
+            // Back to storage layouts for the LightEval/consumer imageLoads.
+            for (auto h : pages) {
+                ResourceBarrier b{};
+                b.resource = h;
+                b.beforeState = ResourceState::RenderTarget;
+                b.afterState  = ResourceState::UnorderedAccess;
+                b.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&b, 1);
+            }
+        });
+}
+
 SurfaceCacheOutput SurfaceCachePass::AddPass(
     RenderGraph& graph,
     RGResourceHandle prev_frame_color,
@@ -983,6 +1120,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 dispatch_info[i].resolution = res;
                 dispatch_info[i].atlas_offset_x = cards[i].atlas_offset_x;
                 dispatch_info[i].atlas_offset_y = cards[i].atlas_offset_y;
+                dispatch_info[i].card_index = i;
                 memset(dispatch_info[i]._pad, 0, sizeof(dispatch_info[i]._pad));
                 total_texels += count;
             }
@@ -1005,20 +1143,33 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             {
                 const u32 texel_budget =
                     config_.surface_cache_capture_budget * page_size_ * page_size_;
-                if (texel_budget > 0 && total_texels > texel_budget && card_count > 1) {
-                    const u32 start = light_eval_rr_cursor_ % card_count;
+                // Lighting is triple-buffered and partial updates preserve the
+                // untouched texels in each slot. Seed every slot with one full
+                // evaluation before page budgeting starts; otherwise each
+                // atlas contains only its first tiny card batch and consumers
+                // interpret all other, never-written regions as black GI.
+                const u32 atlas_seed_bit = 1u << outIdx;
+                const bool lighting_atlas_seeded =
+                    (lighting_atlas_seed_mask_ & atlas_seed_bit) != 0u;
+                if (lighting_atlas_seeded && texel_budget > 0 &&
+                    total_texels > texel_budget && card_count > 1) {
+                    // Keep the full count for cursor advancement. card_count is
+                    // replaced by `taken` below for the GPU dispatch; taking
+                    // modulo that reduced count pinned the cursor at zero.
+                    const u32 source_card_count = card_count;
+                    const u32 start = light_eval_rr_cursor_ % source_card_count;
                     u32 acc = 0, taken = 0;
-                    for (u32 k = 0; k < card_count; ++k) {
-                        const u32 cnt = dispatch_info[(start + k) % card_count].texel_count;
+                    for (u32 k = 0; k < source_card_count; ++k) {
+                        const u32 cnt = dispatch_info[(start + k) % source_card_count].texel_count;
                         if (taken > 0 && acc + cnt > texel_budget) break;
                         acc += cnt;
                         ++taken;
                     }
-                    if (taken < card_count) {
+                    if (taken < source_card_count) {
                         std::vector<CardDispatchInfo> selected(taken);
                         u32 off = 0;
                         for (u32 k = 0; k < taken; ++k) {
-                            const u32 idx = (start + k) % card_count;
+                            const u32 idx = (start + k) % source_card_count;
                             selected[k] = dispatch_info[idx];
                             selected[k].texel_offset = off;   // rebase to 0
                             off += selected[k].texel_count;
@@ -1027,7 +1178,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         card_count = taken;
                         total_texels = off;
                     }
-                    light_eval_rr_cursor_ = (start + taken) % card_count;
+                    light_eval_rr_cursor_ = (start + taken) % source_card_count;
                 }
             }
 
@@ -1091,6 +1242,16 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     params.card_count = card_count;
                     params.light_count = frame_data.light_count;
                     params._pad = 0;
+                    // Probe-fed indirect grid (Lumen hierarchy); valid flag 0
+                    // keeps the shader on the legacy self-feedback path.
+                    params.ddgi_origin_spacing[0] = frame_data.ddgi_origin.x;
+                    params.ddgi_origin_spacing[1] = frame_data.ddgi_origin.y;
+                    params.ddgi_origin_spacing[2] = frame_data.ddgi_origin.z;
+                    params.ddgi_origin_spacing[3] = frame_data.ddgi_spacing;
+                    params.ddgi_counts_valid[0] = frame_data.ddgi_counts[0];
+                    params.ddgi_counts_valid[1] = frame_data.ddgi_counts[1];
+                    params.ddgi_counts_valid[2] = frame_data.ddgi_counts[2];
+                    params.ddgi_counts_valid[3] = frame_data.ddgi_valid;
                     *mapped = params;
                     device_->UnmapBuffer(params_cb_[frameIdx]);
                 }
@@ -1152,7 +1313,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             //     depth) into card atlas texels. Uncovered texels keep previous
             //     content (persistent atlas = cache semantics).
             // ================================================================
-            if (capture_gather_pipeline_ != handles::INVALID_PIPELINE &&
+            if (!card_view_enabled_ &&
+                capture_gather_pipeline_ != handles::INVALID_PIPELINE &&
                 frame_data.gbuffer_depth  != handles::INVALID_RESOURCE &&
                 frame_data.gbuffer_albedo != handles::INVALID_RESOURCE &&
                 frame_data.gbuffer_normal != handles::INVALID_RESOURCE) {
@@ -1430,30 +1592,64 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // back is safe to read (GPU finished with it) and serves as
                 // the multi-bounce feedback source.
                 u32 histIdx = (current_frame_index + 1) % 3;
-                DescriptorData evalParams[] = {
-                    {isVk ? 0u : 0u, DescriptorType::StorageImage,  albedo_atlas_},
-                    {isVk ? 1u : 1u, DescriptorType::StorageImage,  normal_atlas_},
-                    {2, DescriptorType::StorageImage,  emissive_atlas_},
-                    {3, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
-                    {isVk ? 4u : 1u, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
-                    {isVk ? 5u : 2u, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
-                    {isVk ? 6u : 3u, DescriptorType::StorageBuffer, light_info_buffer_},
-                    {isVk ? 7u : 4u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
-                    {8, DescriptorType::StorageImage,  lighting_atlas_[histIdx]},  // prev for multi-bounce
-                    {isVk ? 9u : 5u, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
-                };
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 10);
+                DescriptorData evalParams[12];
+                if (isVk) {
+                    DescriptorData p[] = {
+                        {0, DescriptorType::StorageImage,  albedo_atlas_},
+                        {1, DescriptorType::StorageImage,  normal_atlas_},
+                        {2, DescriptorType::StorageImage,  emissive_atlas_},
+                        {3, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
+                        {4, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
+                        {5, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
+                        {6, DescriptorType::StorageBuffer, light_info_buffer_},
+                        {7, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                        {8, DescriptorType::StorageImage,  lighting_atlas_[histIdx]},  // prev for multi-bounce
+                        {9, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
+                        // Probe-fed indirect: bind the previous-frame slot
+                        // even when invalid (CB flag gates the shader term).
+                        {10, DescriptorType::StorageBuffer,
+                         frame_data.ddgi_irradiance != handles::INVALID_RESOURCE
+                             ? frame_data.ddgi_irradiance
+                             : card_dispatch_buffer_},
+                        // Surface-point reconstruction for the probe gather
+                        // (same depth source the shadow pass uses).
+                        {11, DescriptorType::StorageImage,  depth_atlas_},
+                    };
+                    memcpy(evalParams, p, sizeof(p));
+                } else {
+                    DescriptorData p[] = {
+                        {0, DescriptorType::StorageImage,  albedo_atlas_},
+                        {1, DescriptorType::StorageImage,  normal_atlas_},
+                        {2, DescriptorType::StorageImage,  emissive_atlas_},
+                        {3, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
+                        {1, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
+                        {2, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
+                        {3, DescriptorType::StorageBuffer, light_info_buffer_},
+                        {4, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                        {5, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
+                    };
+                    memcpy(evalParams, p, sizeof(p));
+                }
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, isVk ? 12 : 9);
 
-                // Explicit GENERAL transition for the lighting atlas — do not
-                // rely on the render graph's Write declaration having put it in
-                // a storage-compatible layout before this dispatch.
+                // Explicit GENERAL transition for the lighting atlases — do not
+                // rely on the render graph's Write declaration having put them
+                // in a storage-compatible layout before this dispatch. Both the
+                // written slot (outIdx) and the multi-bounce feedback slot
+                // (histIdx) are bound as storage images; histIdx is not RG-
+                // declared, and on its first frames it is still UNDEFINED.
+                // The Vulkan backend resolves oldLayout from the tracked layout,
+                // so the first such barrier correctly performs UNDEFINED→UAV.
                 {
-                    ResourceBarrier lb{};
-                    lb.resource = lighting_atlas_[outIdx];
-                    lb.beforeState = ResourceState::UnorderedAccess;
-                    lb.afterState  = ResourceState::UnorderedAccess;
-                    lb.subresource = 0xFFFFFFFF;
-                    cmd->InsertBarrier(&lb, 1);
+                    ResourceBarrier lb[2]{};
+                    lb[0].resource = lighting_atlas_[outIdx];
+                    lb[1].resource = lighting_atlas_[histIdx];
+                    for (auto& b : lb) {
+                        b.beforeState = ResourceState::UnorderedAccess;
+                        b.afterState  = ResourceState::UnorderedAccess;
+                        b.subresource = 0xFFFFFFFF;
+                    }
+                    cmd->InsertBarrier(lb, 2);
                 }
 
                 cmd->BindComputePipeline(light_eval_pipeline_);
@@ -1462,6 +1658,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                 u32 groups = (total_texels + 255) / 256;
                 cmd->Dispatch(groups, 1, 1);
+
+                // Mark this slot as holding one full evaluation (the budget
+                // block above only clips slots that already passed through
+                // here once). AtlasInit sets atlas_seeded_ on frame 0 for
+                // slot 0 only; slots 1/2 rotate in on frames 1/2 and must
+                // seed themselves the same way.
+                lighting_atlas_seed_mask_ |= 1u << outIdx;
 
                 // DEBUG: immediate post-dispatch memory barrier + inline readback
                 // to prove/disprove whether the imageStore landed in this very

@@ -31,6 +31,7 @@
  */
 
 #include "../../TestFramework.h"
+#include <cstdlib>
 #include "Graphics/PCG/PCGSDFReadbackManager.h"  // HalfToFloat
 
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
@@ -492,18 +493,35 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     lumen::LumenConfig lumenConfig{};
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
     pipeline.SetLumenConfig(lumenConfig);
+    // Repro knobs: PRIMAL_TEST_SSR=1 / PRIMAL_TEST_FOG=1 force-enable the two
+    // composite features the editor/High preset turns on, to verify their
+    // effect on the final image (washout attribution).
+    if (getenv("PRIMAL_TEST_SSR") || getenv("PRIMAL_TEST_FOG")) {
+        auto settings = pipeline.GetSettings();
+        if (getenv("PRIMAL_TEST_SSR")) settings.quality.enable_ssr = true;
+        if (getenv("PRIMAL_TEST_FOG")) settings.quality.enable_froxel_fog = true;
+        pipeline.UpdateSettings(settings);
+        std::cout << "[Part26] Forced settings: ssr="
+                  << (getenv("PRIMAL_TEST_SSR") ? 1 : 0)
+                  << " fog=" << (getenv("PRIMAL_TEST_FOG") ? 1 : 0) << std::endl;
+    }
 
     // -------------------------------------------------------------
     // Step 1: Load Sponza.model via SceneDataAdapter.
     // -------------------------------------------------------------
     const std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
-    const std::string modelPath = baseDir + "Sponza.model";
+    // Signed-v3 asset: the legacy Sponza.model encodes t_sign low bits as zero
+    // for every vertex (normal/tangent Z signs lost) — surfaces decode facing
+    // away from the light, direct lighting dies, and gamma-lifting the flat
+    // dark result reads as a washed-out pale image. Same repaired asset the
+    // Metal integration test uses; same SceneDataAdapter loader.
+    const std::string modelPath = baseDir + "Sponza_pipeline_signed_v3.model";
     std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
-    TEST_ASSERT(file.is_open(), "Open Sponza.model");
+    TEST_ASSERT(file.is_open(), "Open Sponza_pipeline_signed_v3.model");
     std::streamsize modelSize = file.tellg();
     file.seekg(0, std::ios::beg);
     std::vector<char> modelBuffer(static_cast<size_t>(modelSize));
-    TEST_ASSERT(file.read(modelBuffer.data(), modelSize), "Read Sponza.model");
+    TEST_ASSERT(file.read(modelBuffer.data(), modelSize), "Read Sponza_pipeline_signed_v3.model");
 
     SceneDataAdapter adapter;
     auto sceneMeshes = adapter.LoadRenderItemData(
@@ -732,9 +750,270 @@ TestResult TestVulkanStandardPipelineRender_NonEditor() {
     ResourceHandle renderTarget = fx.base->CreateTexture(rtDesc);
     TEST_ASSERT(renderTarget != handles::INVALID_RESOURCE, "CreateTexture renderTarget");
 
+    // CPU reference reconstruction for convention diagnosis.
+    {
+        primal::graphics::rhi::math::m4x4 vp = projMat * viewMat;
+        auto inv = primal::graphics::rhi::math::Inverse(vp);
+        float depthMid = 0.955f;
+        auto wh = inv * primal::graphics::rhi::math::v4{0.f, 0.f, depthMid, 1.f};
+        auto wp = wh / wh.w;
+        std::cout << "[CPUScreenRecon] center@0.955: world=(" << wp.x << "," << wp.y << "," << wp.z << ")" << std::endl;
+    }
+
     std::cout << "[Part26] Invoking StandardRenderPipeline::Render()..." << std::endl;
-    pipeline.Render(scene, view, renderTarget, rtDesc);
-    std::cout << "[Part26] Render() returned." << std::endl;
+    // GI warmup: DDGI probes EMA-accumulate and GlobalSDF voxelization retries
+    // once the streaming upload populates gpuDraw's global buffers (skipped on
+    // frame 0). A single frame leaves probes at the dim sky-estimate init and
+    // the SDF empty, so GI collapses to the floor constant. Render a warmup
+    // sequence and measure the settled state.
+    for (int warm = 0; warm < 30; ++warm) {
+        pipeline.Render(scene, view, renderTarget, rtDesc);
+    }
+    std::cout << "[Part26] Render() x31 returned (30 GI warmup frames)." << std::endl;
+
+    // === Quantitative attribution dumps: deferred(direct) / gather(GI) / final ===
+    {
+        auto dumpStats = [&](const char* tag, rhi::ResourceHandle tex, u32 tw, u32 th,
+                             bool halfFloat, u32 strideBytes) {
+            if (tex == rhi::handles::INVALID_RESOURCE) {
+                std::cout << "[ChainDump] " << tag << " INVALID" << std::endl;
+                return;
+            }
+            BufferDesc bDesc{};
+            bDesc.size = (u64)tw * th * strideBytes;
+            bDesc.type = BufferType::Raw;
+            bDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+            rhi::ResourceHandle db = fx.base->CreateBuffer(bDesc);
+            CommandBufferHandle dc = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* vdc = fx.vk->GetCommandBuffer(dc);
+            vdc->Reset(); vdc->Begin();
+            rhi::ResourceBarrier bk{};
+            bk.resource = tex; bk.beforeState = rhi::ResourceState::ShaderResource;
+            bk.afterState = rhi::ResourceState::CopySource;
+            bk.subresource = 0xFFFFFFFF; bk.queueFamily = 0xFFFFFFFF;
+            vdc->InsertBarrier(&bk, 1);
+            rhi::BufferTextureCopyRegion gn{};
+            gn.imageSubresource = {0, 0, 1};
+            gn.imageExtent = {tw, th, 1};
+            vdc->CopyTextureToBuffer(tex, db, &gn, 1);
+            vdc->End(); vdc->Submit(0); vdc->WaitForCompletion();
+            fx.base->DestroyCommandBuffer(dc);
+            auto* m = static_cast<u8*>(fx.base->MapBuffer(db, 0, bDesc.size));
+            if (m) {
+                double sum = 0.0, mx = 0.0; u64 n = 0, over1 = 0;
+                auto h2f = primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat;
+                for (u32 y = 0; y < th; y += 4) {
+                    for (u32 x = 0; x < tw; x += 4) {
+                        float r, g, b;
+                        if (halfFloat) {
+                            const u16* px = reinterpret_cast<const u16*>(&m[((u64)y * tw + x) * strideBytes]);
+                            r = h2f(px[0]); g = h2f(px[1]); b = h2f(px[2]);
+                        } else {
+                            const u8* px = &m[((u64)y * tw + x) * strideBytes];
+                            r = px[2] / 255.0f; g = px[1] / 255.0f; b = px[0] / 255.0f; // BGRA
+                        }
+                        double lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                        sum += lum; if (lum > mx) mx = lum; if (lum > 1.0) ++over1; ++n;
+                    }
+                }
+                std::cout << "[ChainDump] " << tag << " avgLum=" << (sum / n)
+                          << " maxLum=" << mx << " over1=" << over1 << "/" << n << std::endl;
+                fx.base->UnmapBuffer(db);
+            }
+            fx.base->DestroyBuffer(db);
+        };
+        if (auto* dmod = pipeline.GetDeferredLightingModule())
+            dumpStats("deferred(direct)", dmod->GetOutputTexture(0), W, H, true, 8);
+        if (auto* gmod = pipeline.GetGIGatherModule()) {
+            // Print a few RGB pixels of the half-res gather output for diagnosis.
+            rhi::ResourceHandle gt = gmod->GetOutputTexture();
+            if (gt != rhi::handles::INVALID_RESOURCE) {
+                u32 tw = W / 2, th = H / 2;
+                BufferDesc gbDesc{};
+                gbDesc.size = (u64)tw * th * 8;
+                gbDesc.type = BufferType::Raw;
+                gbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle gb = fx.base->CreateBuffer(gbDesc);
+                CommandBufferHandle gc = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vgc = fx.vk->GetCommandBuffer(gc);
+                vgc->Reset(); vgc->Begin();
+                rhi::ResourceBarrier gbk{};
+                gbk.resource = gt; gbk.beforeState = rhi::ResourceState::ShaderResource;
+                gbk.afterState = rhi::ResourceState::CopySource;
+                gbk.subresource = 0xFFFFFFFF; gbk.queueFamily = 0xFFFFFFFF;
+                vgc->InsertBarrier(&gbk, 1);
+                rhi::BufferTextureCopyRegion ggn{};
+                ggn.imageSubresource = {0, 0, 1};
+                ggn.imageExtent = {tw, th, 1};
+                vgc->CopyTextureToBuffer(gt, gb, &ggn, 1);
+                vgc->End(); vgc->Submit(0); vgc->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(gc);
+                auto* gm = static_cast<u8*>(fx.base->MapBuffer(gb, 0, gbDesc.size));
+                if (gm) {
+                    auto h2f = primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat;
+                    std::cout << "[GatherPixels]";
+                    for (u32 i = 0; i < 5; ++i) {
+                        u32 x = 40 + i * 100, y = 100 + i * 60;
+                        const u16* px = reinterpret_cast<const u16*>(&gm[((u64)y * tw + x) * 8]);
+                        std::cout << " (" << x << "," << y << ": "
+                                  << h2f(px[0]) << "," << h2f(px[1]) << "," << h2f(px[2]) << ")";
+                    }
+                    std::cout << std::endl;
+                    fx.base->UnmapBuffer(gb);
+                }
+                fx.base->DestroyBuffer(gb);
+            }
+        }
+        // Raw depth content stats (D32, 4 bytes/texel) after the full render.
+        {
+            auto& gpuDrawD = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+            rhi::ResourceHandle dt = gpuDrawD.GetGBufferDepthSampleable();
+            if (dt != rhi::handles::INVALID_RESOURCE) {
+                BufferDesc dbDesc{};
+                dbDesc.size = (u64)W * H * 4;
+                dbDesc.type = BufferType::Raw;
+                dbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle db = fx.base->CreateBuffer(dbDesc);
+                CommandBufferHandle dc = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vdc = fx.vk->GetCommandBuffer(dc);
+                vdc->Reset(); vdc->Begin();
+                rhi::ResourceBarrier bk{};
+                bk.resource = dt; bk.beforeState = rhi::ResourceState::ShaderResource;
+                bk.afterState = rhi::ResourceState::CopySource;
+                bk.subresource = 0xFFFFFFFF; bk.queueFamily = 0xFFFFFFFF;
+                vdc->InsertBarrier(&bk, 1);
+                rhi::BufferTextureCopyRegion gn{};
+                gn.imageSubresource = {0, 0, 1};
+                gn.imageExtent = {W, H, 1};
+                vdc->CopyTextureToBuffer(dt, db, &gn, 1);
+                vdc->End(); vdc->Submit(0); vdc->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(dc);
+                auto* dm = static_cast<u8*>(fx.base->MapBuffer(db, 0, dbDesc.size));
+                if (dm) {
+                    double mn = 1e9, mx = -1e9, sum = 0; u64 n = 0;
+                    for (u32 y = 0; y < H; y += 4) {
+                        for (u32 x = 0; x < W; x += 4) {
+                            float d;
+                            std::memcpy(&d, &dm[((u64)y * W + x) * 4], 4);
+                            mn = std::min(mn, (double)d); mx = std::max(mx, (double)d);
+                            sum += d; ++n;
+                        }
+                    }
+                    std::cout << "[ChainDump] depthRaw min=" << mn << " max=" << mx
+                              << " avg=" << (sum / n) << std::endl;
+                    fx.base->UnmapBuffer(db);
+                }
+                fx.base->DestroyBuffer(db);
+            }
+        }
+        if (auto* gmod = pipeline.GetGIGatherModule())
+            dumpStats("gather(GI,half)", gmod->GetOutputTexture(), W / 2, H / 2, true, 8);
+        // Shadow visibility (R8 half-res): how much direct light survives.
+        if (auto* smod = pipeline.GetShadowMapModule()) {
+            rhi::ResourceHandle vt = smod->GetShadowVisibilityTexture(0);
+            if (vt != rhi::handles::INVALID_RESOURCE) {
+                BufferDesc vbDesc{};
+                vbDesc.size = (u64)(W / 2) * (H / 2);
+                vbDesc.type = BufferType::Raw;
+                vbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle vb = fx.base->CreateBuffer(vbDesc);
+                CommandBufferHandle vc = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vvc = fx.vk->GetCommandBuffer(vc);
+                vvc->Reset(); vvc->Begin();
+                rhi::ResourceBarrier vbk{};
+                vbk.resource = vt; vbk.beforeState = rhi::ResourceState::ShaderResource;
+                vbk.afterState = rhi::ResourceState::CopySource;
+                vbk.subresource = 0xFFFFFFFF; vbk.queueFamily = 0xFFFFFFFF;
+                vvc->InsertBarrier(&vbk, 1);
+                rhi::BufferTextureCopyRegion vgn{};
+                vgn.imageSubresource = {0, 0, 1};
+                vgn.imageExtent = {W / 2, H / 2, 1};
+                vvc->CopyTextureToBuffer(vt, vb, &vgn, 1);
+                vvc->End(); vvc->Submit(0); vvc->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(vc);
+                auto* vm = static_cast<u8*>(fx.base->MapBuffer(vb, 0, vbDesc.size));
+                if (vm) {
+                    double sum = 0; u64 lit = 0, occ = 0, mid = 0, n = 0;
+                    for (u64 i = 0; i < vbDesc.size; i += 4) {
+                        double v = vm[i] / 255.0;
+                        sum += v; ++n;
+                        if (v > 0.9) ++lit; else if (v < 0.1) ++occ; else ++mid;
+                    }
+                    std::cout << "[ChainDump] shadowVis avg=" << (sum / n)
+                              << " lit(>0.9)=" << lit << " mid=" << mid
+                              << " occ(<0.1)=" << occ << "/" << n << std::endl;
+                    fx.base->UnmapBuffer(vb);
+                }
+                fx.base->DestroyBuffer(vb);
+            }
+        }
+        // GBuffer normal samples: decode a grid of world normals (BGRA8, *2-1).
+        {
+            // TEMP-DIAG: in mode 4 the ALBEDO holds the geometric world normal.
+            auto& gpuDrawNS = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+            rhi::ResourceHandle nt = gpuDrawNS.GetGBufferAlbedo();
+            if (nt != rhi::handles::INVALID_RESOURCE) {
+                BufferDesc nbDesc{};
+                nbDesc.size = (u64)W * H * 4;
+                nbDesc.type = BufferType::Raw;
+                nbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rhi::ResourceHandle nb = fx.base->CreateBuffer(nbDesc);
+                CommandBufferHandle nc = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* vnc = fx.vk->GetCommandBuffer(nc);
+                vnc->Reset(); vnc->Begin();
+                rhi::ResourceBarrier nbk{};
+                nbk.resource = nt; nbk.beforeState = rhi::ResourceState::ShaderResource;
+                nbk.afterState = rhi::ResourceState::CopySource;
+                nbk.subresource = 0xFFFFFFFF; nbk.queueFamily = 0xFFFFFFFF;
+                vnc->InsertBarrier(&nbk, 1);
+                rhi::BufferTextureCopyRegion ngn{};
+                ngn.imageSubresource = {0, 0, 1};
+                ngn.imageExtent = {W, H, 1};
+                vnc->CopyTextureToBuffer(nt, nb, &ngn, 1);
+                vnc->End(); vnc->Submit(0); vnc->WaitForCompletion();
+                fx.base->DestroyCommandBuffer(nc);
+                auto* nm = static_cast<u8*>(fx.base->MapBuffer(nb, 0, nbDesc.size));
+                if (nm) {
+                    std::cout << "[ChainDump] gbufferNormal decoded grid (row x: nrm):" << std::endl;
+                    for (u32 row : {100u, 360u, 620u, 700u}) {
+                        std::cout << "  y=" << row << ":";
+                        for (u32 x = 80; x < W; x += 320) {
+                            const u8* p = &nm[((u64)row * W + x) * 4];
+                            float nx = (p[2] / 255.0f) * 2 - 1;  // BGRA
+                            float ny = (p[1] / 255.0f) * 2 - 1;
+                            float nz = (p[0] / 255.0f) * 2 - 1;
+                            std::cout << " (" << x << ":" << nx << "," << ny << "," << nz << ")";
+                        }
+                        std::cout << std::endl;
+                    }
+                    fx.base->UnmapBuffer(nb);
+                }
+                fx.base->DestroyBuffer(nb);
+            }
+        }
+        dumpStats("final(BGRA8)", renderTarget, W, H, false, 4);
+        // DDGI probe irradiance sanity: probe 0's SH9 coefficients from the
+        // slot GIGather reads on frame 0 (host-visible buffer, direct map).
+        if (auto* ddgiP = pipeline.GetDDGIPass()) {
+            rhi::ResourceHandle irr = ddgiP->GetIrradianceBuffer(2);
+            if (irr != rhi::handles::INVALID_RESOURCE) {
+                float* m = static_cast<float*>(fx.base->MapBuffer(irr, 0, 36 * sizeof(float)));
+                if (m) {
+                    std::cout << "[ProbeDump] p0.sh0=(" << m[0] << "," << m[1] << "," << m[2] << ")"
+                              << " sh1=(" << m[3] << "," << m[4] << "," << m[5] << ")"
+                              << " sh4=(" << m[12] << "," << m[13] << "," << m[14] << ")" << std::endl;
+                    fx.base->UnmapBuffer(irr);
+                }
+            }
+        }
+        if (auto* fmod = pipeline.GetFusionCompositeModule()) {
+            dumpStats("fusionIndirect(half)", fmod->GetIndirectOutput(0), W / 2, H / 2, true, 8);
+            dumpStats("fusionOutput(HDR)", fmod->GetFusionOutput(0), W, H, true, 8);
+        }
+        // Volume fog scatter (RGBA16F): RGB=scatter lift, A=transmittance.
+        if (auto* fmod2 = pipeline.GetFroxelFogPass())
+            dumpStats("volScatter(fog)", fmod2->GetScatterTexture(0), W, H, true, 8);
+    }
 
     // === SurfaceCache lighting-atlas dump (SC visual verification) ===
     // Reads back the card atlas LightEval produced (RGBA16F) and writes an

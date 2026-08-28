@@ -381,7 +381,11 @@ private:
         primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET,
         primal::graphics::rhi::handles::INVALID_DESCRIPTOR_SET
     };
-    primal::graphics::rhi::ResourceHandle shadow_visibility_tex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle shadow_visibility_tex_[3]{
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE,
+        primal::graphics::rhi::handles::INVALID_RESOURCE
+    };
     primal::graphics::rhi::ResourceHandle shadow_filter_cb_[3]{
         primal::graphics::rhi::handles::INVALID_RESOURCE,
         primal::graphics::rhi::handles::INVALID_RESOURCE,
@@ -486,5 +490,5 @@ private:
 
     // SSGI visualization mode: 0=Composite(scene+SSGI), 1=SSGI only, 2=Scene only
     u32 ssgiVisMode_{ 0 };  // Composite (default)
-    u32 mode_diag_{ 0 };    // Mode 6 diagnostic: 0=simple blit, 1=fusion same-tex, 2=fusion real, 3=7-bind simple shader
+    u32 mode_diag_{ 0 };    // Mode 6 diagnostic: 0=simple blit, 1=FusionRender output
 };

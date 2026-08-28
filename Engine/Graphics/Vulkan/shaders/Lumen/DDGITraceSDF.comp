@@ -21,6 +21,11 @@
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
+// Shared probe ray sampler (single source with DDGITraceRays / UpdateIrradiance):
+// mode 0 = legacy Fibonacci (bit-identical), 1 = per-frame jitter,
+// 2 = cosine-lobe mixture around the light. See ShaderLib/ProbeSampleLib.glsl.
+#include "ShaderLib/ProbeSampleLib.glsl"
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture3D sdf_cascade_0;
@@ -59,7 +64,7 @@ layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
     int   ProbeRelocationShiftX;    //  96
     int   ProbeRelocationShiftY;    // 100
     int   ProbeRelocationShiftZ;    // 104
-    float _pad_to_sdf;              // 108
+    int   RaySampleMode;            // 108 — ray sampler mode (ProbeSampleLib)
     vec4  SdfOrigins[3];            // 112
     vec4  SdfVoxelSizes[3];         // 160
     vec4  SdfExtents[3];            // 208
@@ -74,16 +79,7 @@ layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
 // Helpers (copied from DDGITraceRays.comp for consistency)
 // ----------------------------------------------------------------------------
 
-vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
-    const float INV_PHI = 0.6180339887498948482;
-    const float PI_VAL  = 3.14159265358979323846;
-    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
-    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
-    float theta = 2.0 * PI_VAL * u;
-    float phi   = acos(1.0 - 2.0 * v);
-    float sinPhi = sin(phi);
-    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
-}
+// ddgiRayDirection moved to ShaderLib/ProbeSampleLib.glsl (ddgiSampleRayDirection).
 
 uvec3 ddgiProbeGridCoord(uint probeIdx, uvec3 counts) {
     uint pz  = probeIdx / (counts.x * counts.y);
@@ -136,6 +132,60 @@ float sampleBestSDF(vec3 pos) {
 }
 
 // ----------------------------------------------------------------------------
+// Probe relocation (ray-origin only) — same policy as
+// DDGITraceRays.comp::ddgiRelocateProbeOrigin: push a buried ray origin out
+// along the local SDF gradient until it clears the hit-bias skin, capped at
+// 0.45 × spacing so gather-side grid-distance visibility tests stay valid.
+// Without this, 3 m-grid probes sitting inside arcade masonry bake
+// wall-interior black and starve the second-floor GI.
+// ----------------------------------------------------------------------------
+vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
+    // Classic DDGI relocation (multi-axis deepest-free-point). The old
+    // single-gradient push parked probes ON the nearest surface — useless for
+    // probes inside thick walls or the floor slab. This searches 6 axes + 8
+    // diagonals per round and keeps the candidate with the LARGEST SDF
+    // distance, i.e. actual free-air volume (corridor interiors, rooms).
+    // Free probes exit after a single read; buried probes pay ~3x14x6 reads,
+    // bounded and only for the buried minority.
+    float voxel = volume.SdfVoxelSizes[0].x;
+    float skin = max(voxel * 1.5, spacing * 0.05);
+    const float maxPush = spacing * 0.45;
+    float d0 = sampleBestSDF(probePos);
+    if (d0 > skin) return probePos;
+    vec3 best = probePos;
+    float bestD = d0;
+    vec3 dirs[14] = vec3[14](
+        vec3( 1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0),
+        vec3( 0.0, 1.0, 0.0), vec3( 0.0,-1.0, 0.0),
+        vec3( 0.0, 0.0, 1.0), vec3( 0.0, 0.0,-1.0),
+        normalize(vec3( 1.0, 1.0, 1.0)), normalize(vec3(-1.0, 1.0, 1.0)),
+        normalize(vec3( 1.0,-1.0, 1.0)), normalize(vec3(-1.0,-1.0, 1.0)),
+        normalize(vec3( 1.0, 1.0,-1.0)), normalize(vec3(-1.0, 1.0,-1.0)),
+        normalize(vec3( 1.0,-1.0,-1.0)), normalize(vec3(-1.0,-1.0,-1.0)));
+    const float stepLen = max(voxel, spacing * 0.1);
+    for (int round = 0; round < 3; ++round) {
+        vec3 roundBest = best;
+        float roundBestD = bestD;
+        for (int k = 0; k < 14; ++k) {
+            vec3 p = best;
+            for (int st = 0; st < 6; ++st) {
+                p += dirs[k] * stepLen;
+                vec3 delta = p - probePos;
+                if (dot(delta, delta) > maxPush * maxPush) break;
+                float d = sampleBestSDF(p);
+                if (d > roundBestD) { roundBestD = d; roundBest = p; }
+                if (d > skin) break;
+            }
+        }
+        if (roundBestD <= bestD) break;
+        best = roundBest;
+        bestD = roundBestD;
+        if (bestD > skin) break;
+    }
+    return best;
+}
+
+// ----------------------------------------------------------------------------
 // Main
 // ----------------------------------------------------------------------------
 
@@ -152,17 +202,31 @@ void ddgi_trace_sdf() {
     uvec3 counts = volume.ProbeCounts.xyz;
     uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
     vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
-    vec3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+    // Relocate buried ray origins (see ddgiRelocateProbeOrigin).
+    probePos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing);
+    vec3 toLight = normalize(-volume.LightDirection.xyz);
+    vec3 rayDir = ddgiSampleRayDirection(tid, volume.RaysPerProbe,
+                                         volume.FrameIndex,
+                                         uint(volume.RaySampleMode), toLight).xyz;
 
     float t = 0.0;
     float hitDistance = -1.0;  // -1 = miss
 
-    float hitThreshold = volume.SdfVoxelSizes[0].x * 0.5;
+    // T8.10b: hit band widened for the UNSIGNED shallow merged field
+    // (min positive ≈0.19-0.38 m almost everywhere). voxel*0.5 left most
+    // rays marching past surfaces without ever entering the sub-threshold
+    // band → step exhaustion → miss→sky. 1.25×voxel inflates surfaces by
+    // ~half a step-band (≈24 cm at this res) — invisible at GI frequencies.
+    float hitThreshold = volume.SdfVoxelSizes[0].x * 1.25;
     float minStep      = volume.SdfVoxelSizes[0].x * 0.25;
     uint coarsest      = min(2u, volume.SdfResolutionsAndCount.w - 1u);
     float fallbackStride = volume.SdfExtents[coarsest].x * 0.1;
 
-    const uint MAX_SDF_STEPS = 4u;
+    // 32 relaxed steps (matches ScreenProbeTraceSDF). The old 4-step march
+    // could not cross a full atrium: probes inside deep-shadow arcades never
+    // reached the sunlit geometry, so their SH only ever accumulated the gray
+    // sky constant and shadowed regions stayed flat.
+    const uint MAX_SDF_STEPS = 64u;
     for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
         vec3 pos = probePos + rayDir * t;
         float d = sampleBestSDF(pos);
@@ -179,10 +243,11 @@ void ddgi_trace_sdf() {
             break;
         }
 
-        // Relaxed advancement: overstep when far, conservative when close
+        // Relaxed advancement: overstep when far, conservative when close.
+        // BASELINE (cap off) for T8.10f A/B — bistability requires ≥3 runs.
         float advance;
         if (d > hitThreshold * 4.0) {
-            advance = d * 1.2;
+            advance = d * 1.5;
         } else {
             advance = max(d, minStep);
         }

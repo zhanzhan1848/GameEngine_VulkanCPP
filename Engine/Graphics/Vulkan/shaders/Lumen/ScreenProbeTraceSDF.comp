@@ -15,7 +15,8 @@
 //   binding 6   = UniformBuffer    ScreenProbeGlobalData
 //
 // hit_buffer encoding: x = hit distance, yz = hit UV, w = source
-//   (0 = miss, 1 = HZB hit [untouched here], 2 = SDF hit)
+//   (0 = miss, 1 = HZB hit [untouched here], 2 = SDF hit,
+//    3 = far-cache early-out [F1: march hit the budget, query DDGI at stop])
 
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
@@ -53,7 +54,13 @@ layout(set = 0, binding = 6, std140) uniform GlobalData {
     vec4 surface_cache_params;
     vec4 ddgi_fb[2];
     vec4 hzb_params;
+    vec4 cache_params;   // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
 } global;
+
+// F2 (M7): previous frame's final probe SH — importance-resampling proposal.
+layout(set = 0, binding = 7, std430) readonly buffer ImportanceSHBlock {
+    vec4 data[];
+} importanceSH;
 
 // fibonacciDirection / orientAroundNormalTBN (was orientAroundNormal),
 // sampleSDFCascade / sampleBestSDF and the relaxed march moved to
@@ -84,14 +91,41 @@ void screen_probe_trace_sdf() {
     vec3 probeNormal = normalize(probeNormals.data[global_id / raysPerProbe].xyz);
     vec3 probePos = posData.xyz;
 
+    uint probeIdx = global_id / raysPerProbe;
     uint rayIdx = global_id % raysPerProbe;
-    vec3 rayDir = orientAroundNormalTBN(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    vec3 rayDir;
+    float invNq;   // unused here; Finalize owns the importance weight
+    if (global.cache_params.y > 0.5) {
+        // F2 (M7) 形态 c: importance resampling against the previous frame's
+        // final SH (4 reads). Every direction consumer regenerates identically.
+        uint hb = probeIdx * 4u;
+        vec4 h0 = importanceSH.data[hb + 0u];
+        vec4 h1 = importanceSH.data[hb + 1u];
+        vec4 h2 = importanceSH.data[hb + 2u];
+        vec4 h3 = importanceSH.data[hb + 3u];
+        rayDir = spgiImportanceDirection(rayIdx, raysPerProbe, probeIdx,
+                                         global.camera_position.w, probeNormal,
+                                         h0.rgb, h1.rgb, h2.rgb, h3.rgb, invNq);
+        rayDir = orientAroundNormalTBN(rayDir, probeNormal);
+    } else {
+        rayDir = fibonacciDirection(rayIdx, raysPerProbe);
+        rayDir = spgiJitterRotation(probeIdx, global.camera_position.w) * rayDir;
+        rayDir = orientAroundNormalTBN(rayDir, probeNormal);
+    }
     vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
+
+    // F1 (M7): cap the march at far_cache_start_distance — UE world-probe
+    // semantics. Unresolved rays become far-cache queries (w = 3) evaluated
+    // at the stop point by Finalize instead of marching the full 50 units.
+    float cacheStart = global.cache_params.x;
+    float marchDist = (cacheStart > 0.0)
+        ? min(global.trace_params.x, cacheStart)
+        : global.trace_params.x;
 
     // Relaxed sphere march (TraceLib): 32 steps, hitThreshold = voxel0 * 0.5,
     // minStep = voxel0 * 0.25, d * 1.2 overstep when far — same march the
     // monolithic ScreenProbeTraceRays kernel runs.
-    SDFTraceResult res = traceSDF_relaxed(origin, rayDir, global.trace_params.x,
+    SDFTraceResult res = traceSDF_relaxed(origin, rayDir, marchDist,
                                           sdf0, sdf1, sdf2,
                                           global.sdf_origins, global.sdf_extents,
                                           global.sdf_voxel_sizes,
@@ -99,6 +133,9 @@ void screen_probe_trace_sdf() {
 
     if (res.hit) {
         hit_buffer.data[global_id] = vec4(res.distance, 0.0, 0.0, 2.0);
+    } else if (cacheStart > 0.0) {
+        // F1 far-cache: x = travelled distance (stop point = origin + dir * x).
+        hit_buffer.data[global_id] = vec4(res.distance, 0.0, 0.0, 3.0);
     } else {
         hit_buffer.data[global_id] = vec4(-1.0, 0.0, 0.0, 0.0);
     }

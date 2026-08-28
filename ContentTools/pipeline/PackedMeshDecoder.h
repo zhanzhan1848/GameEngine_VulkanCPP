@@ -15,16 +15,9 @@
 //     (position_only / static_color / static_normal / static_normal_texture).
 //   - Skeletal_* are unreachable from IR; decoder rejects them with an error.
 //
-// Lossy fields (irreversible — caller must run derive::Run to rebuild):
-//   - For static_normal_texture: tangent.w collapses to a single bit
-//     (bit 0 of t_sign encodes "(tw > 0) && (tz > 0)"). Decoder sets w=1.f
-//     on positive sign, w=-1.f on negative; tz is rebuilt via sqrt.
-//   - For static_normal_texture: normal.z bit (bit 1 of t_sign) is NOT
-//     written by the encoder due to a latent pack_vertices bug — the
-//     static_normal_texture branch overwrites t_sign entirely. Decoder
-//     defaults nz to +sqrt(...) in this case (matches the static_normal
-//     branch's encoding intent). Round-tripping then re-deriving is the
-//     only correct path.
+// The current static_normal_texture layout stores tangent handedness,
+// normal.z sign, and tangent.z sign independently in t_sign bits 0..2.
+// Legacy blobs that predate this contract should be repaired or re-derived.
 //
 // Index widening: u16 indices are widened to u32 on decode (ProcessableMesh
 // uses utl::vector<u32> indices uniformly).

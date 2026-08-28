@@ -27,6 +27,8 @@ using namespace metal;
 struct AvgConstants {
     uint totalProbes;
     uint raysPerProbe;
+    float frameSeed;   // F5: same value as camera_position.w (< 0 disables)
+    float isMode;      // F2: importance resampling on/off (matches cache_params.y)
 };
 
 constant float PI = 3.14159265358979323846f;
@@ -48,6 +50,73 @@ static float3 orientAroundNormal(float3 dir, float3 normal) {
     float3 tangent = normalize(cross(up, normal));
     float3 bitangent = cross(normal, tangent);
     return normalize(tangent * dir.x + bitangent * dir.y + normal * dir.z);
+}
+
+// F5 (M7): per-frame jitter — byte-equivalent to EncodeLib.glsl's
+// spgiJitterHash/spgiJitterRotation (seed via AvgConstants.frameSeed).
+static uint spgiJitterHash(uint v) {
+    v ^= v >> 16u; v *= 0x7feb352du;
+    v ^= v >> 15u; v *= 0x846ca68bu;
+    v ^= v >> 16u;
+    return v;
+}
+
+static float3x3 spgiJitterRotation(uint probeIdx, float frameSeed) {
+    if (frameSeed < 0.0f) return float3x3(1.0f);
+    uint fs = uint(frameSeed);
+    uint h1 = spgiJitterHash(probeIdx * 0x9e3779b9u ^ fs);
+    uint h2 = spgiJitterHash(h1 ^ 0x68bc21ebu);
+    float a1 = float(h1) * (2.0f * PI / 4294967295.0f);
+    float a2 = float(h2) * (2.0f * PI / 4294967295.0f);
+    float c1 = cos(a1), s1 = sin(a1);
+    float c2 = cos(a2), s2 = sin(a2);
+    float3x3 rz1(float3( c1, s1, 0.0f), float3(-s1, c1, 0.0f), float3(0.0f, 0.0f, 1.0f));
+    float3x3 rxf(float3(1.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, -1.0f), float3(0.0f, 1.0f, 0.0f));
+    float3x3 rz2(float3( c2, s2, 0.0f), float3(-s2, c2, 0.0f), float3(0.0f, 0.0f, 1.0f));
+    return rz2 * rxf * rz1;
+}
+
+// F2 (M7) 形态 c: importance resampling — byte-equivalent to
+// EncodeLib.glsl::spgiImportanceDirection (see TraceRays.metal's copy for
+// the full contract; Average regenerates directions to match the traces).
+static const uint SPGI_IS_MAX_RAYS = 64u;
+
+static float3 spgiImportanceDirection(uint rayIdx, uint raysPerProbe,
+                                      uint probeIdx, float frameSeed,
+                                      float3 probeNormal,
+                                      float3 sh0, float3 sh1, float3 sh2, float3 sh3,
+                                      thread float& invNq) {
+    uint n = min(raysPerProbe, SPGI_IS_MAX_RAYS);
+    float3x3 rot = spgiJitterRotation(probeIdx, frameSeed);
+
+    float3 up = fabs(probeNormal.y) < 0.999f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    float3 tangent = normalize(cross(up, probeNormal));
+    float3 bitangent = cross(probeNormal, tangent);
+
+    float pdf[SPGI_IS_MAX_RAYS];
+    float sum = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        float3 local = rot * fibonacciDirection(i, n);
+        float3 world = tangent * local.x + bitangent * local.y + probeNormal * local.z;
+        float3 irr = sh0 * 0.282095f
+                   + sh1 * (0.488603f * world.y)
+                   + sh2 * (0.488603f * world.z)
+                   + sh3 * (0.488603f * world.x);
+        float lum = max(dot(irr, float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
+        pdf[i] = max(local.z, 0.02f) * (lum + 0.05f);
+        sum += pdf[i];
+    }
+
+    float u = (float(rayIdx) + 0.5f) / float(n) * sum;
+    uint c = n - 1u;
+    float acc = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        acc += pdf[i];
+        if (u <= acc) { c = i; break; }
+    }
+
+    invNq = sum / (float(n) * max(pdf[c], 1e-6f));
+    return rot * fibonacciDirection(c, n);
 }
 
 // ============================================================================
@@ -82,6 +151,9 @@ kernel void screen_probe_average(
     // Probe normals (needed to recompute ray directions)
     device const float4* probeNormals  [[buffer(3)]],
 
+    // F2 (M7): previous frame's final probe SH — importance proposal
+    device const float4* importanceSH  [[buffer(4)]],
+
     uint tid      [[thread_index_in_threadgroup]],
     uint group_id [[threadgroup_position_in_grid]])
 {
@@ -110,8 +182,23 @@ kernel void screen_probe_average(
         float4 normData = probeNormals[group_id];
         float3 probeNormal = normalize(normData.xyz);
 
-        float3 localDir = fibonacciDirection(tid, constants.raysPerProbe);
-        float3 rayDir = orientAroundNormal(localDir, probeNormal);
+        float3 rayDir;
+        float invNq;   // already applied to rayData.w by the Finalize kernel
+        if (constants.isMode > 0.5f) {
+            uint hb = group_id * 4u;
+            float4 h0 = importanceSH[hb + 0u];
+            float4 h1 = importanceSH[hb + 1u];
+            float4 h2 = importanceSH[hb + 2u];
+            float4 h3 = importanceSH[hb + 3u];
+            rayDir = spgiImportanceDirection(tid, constants.raysPerProbe, group_id,
+                                             constants.frameSeed, probeNormal,
+                                             h0.rgb, h1.rgb, h2.rgb, h3.rgb, invNq);
+            rayDir = orientAroundNormal(rayDir, probeNormal);
+        } else {
+            float3 localDir = fibonacciDirection(tid, constants.raysPerProbe);
+            localDir = spgiJitterRotation(group_id, constants.frameSeed) * localDir;
+            rayDir = orientAroundNormal(localDir, probeNormal);
+        }
 
         float4 Y = shBasis(rayDir);
 
@@ -165,6 +252,12 @@ kernel void screen_probe_average(
         if (totalWeight > 0.0f && hitCount > 0.0f) {
             float invWeight = 1.0f / totalWeight;
 
+            // The reduced coefficients are cosine-weighted hemispherical
+            // expectations. Convert to the normalization expected by the
+            // standard SH evaluator (L0 * 2pi, L1 * pi).
+            constant float L0_HEMISPHERE_SCALE = 6.28318530718f;
+            constant float L1_HEMISPHERE_SCALE = 3.14159265359f;
+
             // Hit ratio: how many rays hit geometry
             float hitRatio = hitCount / float(constants.raysPerProbe);
 
@@ -180,10 +273,10 @@ kernel void screen_probe_average(
             // Multi-factor confidence
             float confidence = hitRatio * radianceConsistency;
 
-            probeSHOut[base + 0] = float4(sharedSH[0][0] * invWeight, confidence);
-            probeSHOut[base + 1] = float4(sharedSH[1][0] * invWeight, 1.0f);
-            probeSHOut[base + 2] = float4(sharedSH[2][0] * invWeight, 1.0f);
-            probeSHOut[base + 3] = float4(sharedSH[3][0] * invWeight, 1.0f);
+            probeSHOut[base + 0] = float4(sharedSH[0][0] * invWeight * L0_HEMISPHERE_SCALE, confidence);
+            probeSHOut[base + 1] = float4(sharedSH[1][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0f);
+            probeSHOut[base + 2] = float4(sharedSH[2][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0f);
+            probeSHOut[base + 3] = float4(sharedSH[3][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0f);
         } else {
             probeSHOut[base + 0] = float4(0.0f, 0.0f, 0.0f, 0.0f);
             probeSHOut[base + 1] = float4(0.0f, 0.0f, 0.0f, 0.0f);

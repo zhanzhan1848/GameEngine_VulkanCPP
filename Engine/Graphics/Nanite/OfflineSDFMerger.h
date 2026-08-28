@@ -36,9 +36,16 @@ public:
     // Returns the number of meshes with SDF data loaded.
     u32 LoadFromPipelineModel(const char* filePath);
 
-    // Merge all per-mesh SDFs into a single 256³ global volume and upload
+    // Merge all per-mesh SDFs into a single 384³ global volume and upload
     // to GPU as an R16F Texture3D. Must be called after LoadFromPipelineModel.
-    bool BuildAndUpload(rhi::RHIDeviceBase* device);
+    // When cachePath is non-null the merged volume is written there so later
+    // runs can skip the multi-minute merge via LoadFromCache.
+    bool BuildAndUpload(rhi::RHIDeviceBase* device, const char* cachePath = nullptr);
+
+    // Load a previously cached merged volume (written by BuildAndUpload) and
+    // upload it — no pipeline model parse, no merge. Returns false when the
+    // cache is missing/stale (caller should fall back to the slow path).
+    bool LoadFromCache(rhi::RHIDeviceBase* device, const char* cachePath);
 
     // --- Accessors (valid after BuildAndUpload) ---
     rhi::ResourceHandle GetTexture() const { return global_sdf_texture_; }
@@ -59,6 +66,10 @@ private:
     // Trilinear sample of a mesh SDF at a local-space position.
     // Returns signed distance (negative inside, positive outside).
     f32 SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) const;
+
+    // Shared upload path for merged volumes (BuildAndUpload/LoadFromCache).
+    // data layout: z-major res³ u16 half-floats, matching the staging copy.
+    bool UploadGlobal(rhi::RHIDeviceBase* device, const u16* data);
 };
 
 } // namespace primal::graphics::nanite

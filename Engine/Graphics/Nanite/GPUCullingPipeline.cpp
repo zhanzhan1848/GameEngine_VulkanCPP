@@ -82,7 +82,7 @@ namespace {
 
             std::vector<std::string> candidates;
             candidates.push_back(relPath);
-            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+            candidates.push_back(utils::ShaderRegistry::ResolveShaderPath(relPath));
 
             std::ifstream file;
             std::string openedPath;

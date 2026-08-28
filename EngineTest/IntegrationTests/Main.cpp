@@ -16,6 +16,8 @@
 #include "TestStandardPipeline.h"
 #elif TEST_MODULAR_PIPELINE
 #include "TestModularPipeline.h"
+#elif TEST_METAL_GI_FUSION
+#include "TestModularPipeline.h"
 #elif TEST_RENDERER
 #include "TestRenderer.h"
 #elif TEST_CSM_INTEGRATION

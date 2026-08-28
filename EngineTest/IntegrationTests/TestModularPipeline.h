@@ -75,9 +75,14 @@ private:
     void SetupCamera();
     bool LoadSponzaScene();
     bool LoadMaterialTextures();
+
+#ifdef TEST_METAL_GI_FUSION
+    // GI composite alignment verification (frame GI_VERIFY_FRAME).
+    void RunGIFusionVerification(primal::graphics::rhi::ResourceHandle backBuffer);
+#endif
 };
 
-#ifdef TEST_MODULAR_PIPELINE
+#if defined(TEST_MODULAR_PIPELINE) || defined(TEST_METAL_GI_FUSION)
 class Engine_Test : public primal::test::RenderTestRunner {
 public:
     Engine_Test();

@@ -55,14 +55,17 @@ static float2 sampleOctDepthTG(
 static float3 evalSH9(threadgroup float3 sh[SH_COEFF_COUNT], float3 d) {
     float x = d.x, y = d.y, z = d.z;
     float x2 = x*x, y2 = y*y, z2 = z*z;
+    // Must exactly match DDGIUpdateIrradiance.metal. The previous evaluator
+    // used a different L1 sign convention and swapped the L2 z^2/xz slots,
+    // mirroring directional irradiance across the X/Y axes.
     return sh[0] * 0.28209479177f
-         + sh[1] * (0.48860251190f * y)
+         + sh[1] * (-0.48860251190f * y)
          + sh[2] * (0.48860251190f * z)
-         + sh[3] * (0.48860251190f * x)
+         + sh[3] * (-0.48860251190f * x)
          + sh[4] * (1.09254843059f * y * x)
-         + sh[5] * (1.09254843059f * y * z)
-         + sh[6] * (1.09254843059f * z * x)
-         + sh[7] * (0.31539156525f * (3.0f * z2 - 1.0f))
+         + sh[5] * (-1.09254843059f * y * z)
+         + sh[6] * (0.31539156525f * (3.0f * z2 - 1.0f))
+         + sh[7] * (-1.09254843059f * x * z)
          + sh[8] * (0.54627421530f * (x2 - y2));
 }
 

@@ -133,13 +133,12 @@ PackedMesh BuildPackedMesh(const ProcessableMesh& m,
             eb[i].color[2] = pack_color(c.z);
             const math::v3 n = (i < m.normals.size()) ? m.normals[i] : math::v3{0.f,1.f,0.f};
             const math::v4 t = (i < m.tangents.size()) ? m.tangents[i] : math::v4{0.f,1.f,0.f,1.f};
-            // Replicate pack_vertices:358-376 latent bug: static_normal_texture
-            // OVERWRITES t_sign set by static_normal branch, dropping the
-            // normal.z bit and keeping only the tangent handedness × tangent.z bit.
-            // This MUST be preserved for byte-for-byte compatibility with the
-            // 4 downstream consumers (ContentToEngine.cpp / pack_geometry.py /
-            // MeshletValidator.py / C# PrimalEditor).
-            eb[i].t_sign = (u8)((t.w > 0.f) && (t.z > 0.f));
+            // Store the three independent signs separately. The legacy format
+            // collapsed tangent.z and tangent.w into bit 0, which cannot be
+            // decoded into a valid tangent frame for normal mapping.
+            eb[i].t_sign = (u8)(((t.w < 0.f) ? 0x01 : 0x00) |
+                                ((n.z > 0.f) ? 0x02 : 0x00) |
+                                ((t.z > 0.f) ? 0x04 : 0x00));
             eb[i].normal[0]  = pack_dir(n.x);
             eb[i].normal[1]  = pack_dir(n.y);
             eb[i].tangent[0] = pack_dir(t.x);

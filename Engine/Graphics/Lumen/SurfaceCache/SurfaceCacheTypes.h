@@ -52,7 +52,8 @@ struct CardDispatchInfo {
     uint32_t resolution;       // card texel resolution (square)
     uint32_t atlas_offset_x;   // atlas pixel origin X
     uint32_t atlas_offset_y;   // atlas pixel origin Y
-    uint32_t _pad[3];
+    uint32_t card_index;       // original index in the full SurfaceCacheCard buffer
+    uint32_t _pad[2];
 };
 static_assert(sizeof(CardDispatchInfo) == 32, "CardDispatchInfo must be 32 bytes");
 
@@ -64,6 +65,11 @@ struct FlattenedLightingParams {
     uint32_t           card_count;   // number of active cards in dispatch
     uint32_t           light_count;
     uint32_t           _pad;
+    // Probe-fed indirect (Lumen hierarchy): near-volume grid so LightEval can
+    // gather incoming irradiance from the DDGI probes (appended at the end —
+    // backends whose shaders predate this field keep reading the first 64B).
+    float              ddgi_origin_spacing[4];  // xyz origin, w spacing
+    uint32_t           ddgi_counts_valid[4];    // xyz counts, w valid flag
 };
 
 struct SurfaceCacheFrameData {
@@ -88,6 +94,15 @@ struct SurfaceCacheFrameData {
     rhi::ResourceHandle gbuffer_depth  { rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_albedo { rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_normal { rhi::handles::INVALID_RESOURCE };
+
+    // Probe-fed indirect (Lumen hierarchy): near-volume irradiance (9 vec4 per
+    // probe, previous-frame slot — SC runs before the DDGI update) + grid
+    // params. ddgi_valid = 0 leaves LightEval on the legacy self-feedback.
+    rhi::ResourceHandle ddgi_irradiance{ rhi::handles::INVALID_RESOURCE };
+    math::v3   ddgi_origin{};
+    float      ddgi_spacing = 0.0f;
+    uint32_t   ddgi_counts[3] = {0, 0, 0};
+    uint32_t   ddgi_valid = 0;
 };
 
 // ============================================================================

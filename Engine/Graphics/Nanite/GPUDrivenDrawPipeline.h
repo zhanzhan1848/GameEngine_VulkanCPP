@@ -243,6 +243,31 @@ public:
                                rhi::ResourceHandle color_rt, rhi::ResourceHandle depth_rt,
                                u32 buffer_index);
 
+    // --- T8.12 card-view capture (Surface Cache atlas) ---
+    // Renders the scene from ONE Surface Cache card's orthographic view into
+    // the card's atlas pages (caller-owned RTs: albedo rgba8, normal rg16f,
+    // axis-depth r32f). Same vertex-pulling + CPU-cull skeleton as
+    // ExecuteReflectionPass, but the visible list is CLUSTER IDS (feeding the
+    // PipelineDraw-style cib→cmap decode) and the pixel shader writes the
+    // card-axis depth (worldToCardUV semantics). Call once per captured card
+    // face; face_slot selects triple-safe scratch buffers (0..31).
+    bool InitializeCardCaptureResources(u32 max_clusters);
+    void ShutdownCardCaptureResources();
+    bool IsCardCaptureReady() const { return card_capture_initialized_; }
+    bool ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_buffer,
+                                const RenderSceneSnapshot& scene_snapshot,
+                                const math::m4x4& view,
+                                const math::m4x4& proj,
+                                const math::v4& card_center,
+                                const math::v4& card_fwd,
+                                float depth_near, float depth_far,
+                                u32 face_slot,
+                                u32 viewport_x, u32 viewport_y, u32 resolution,
+                                rhi::ResourceHandle albedo_rt,
+                                rhi::ResourceHandle normal_rt,
+                                rhi::ResourceHandle depth_rt,
+                                rhi::ResourceHandle depth_attachment_rt);
+
     const ShadowFrameResources& GetShadowFrameResources(u32 buffer_index) const {
         return shadow_frames_[buffer_index % 3];
     }
@@ -466,6 +491,24 @@ private:
     rhi::ResourceHandle reflection_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
     rhi::DescriptorSetHandle reflection_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
+
+    // ---- T8.12 Card-View Capture Resources ----
+    // 32 face slots so a multi-face batch can coexist in flight; visible list
+    // = u32 cluster ids, indirect = 4×u32, params = CardCaptureParams (176B).
+    static constexpr u32 kCardCaptureSlots = 32;
+    bool card_capture_initialized_{false};
+    u32 card_capture_max_clusters_{0};
+    rhi::PipelineHandle card_capture_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineLayoutHandle card_capture_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::DescriptorSetLayoutHandle card_capture_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::ResourceHandle card_capture_visible_buffer_[kCardCaptureSlots]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle card_capture_indirect_buffer_[kCardCaptureSlots]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle card_capture_params_buffer_[kCardCaptureSlots]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+    rhi::DescriptorSetHandle card_capture_ds_[kCardCaptureSlots]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
 
     rhi::PipelineHandle shadow_cull_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: cluster culling

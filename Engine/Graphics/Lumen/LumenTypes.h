@@ -90,7 +90,11 @@ struct LumenConfig {
     u32 ddgi_probe_count_y = 16;
     u32 ddgi_probe_count_z = 32;
     u32 ddgi_rays_per_probe = 64;    // T4.2 note: 128 blocked — ddgi_trace_sdf/finalize kernels are 64-rays-per-probe (8x8 groups); striding required before re-bump
-    float ddgi_probe_spacing = 2.0f;
+    // 3.0 covers ±46×±22×±46 around the origin — Sponza's side arcades extend
+    // past the old ±31 box, and out-of-box pixels fall to the far volume whose
+    // probes have no SC feed (near-black in enclosed areas), which read as
+    // dead columns/cloth. Same probe count, half the density.
+    float ddgi_probe_spacing = 3.0f;
     float ddgi_irradiance_temporal_weight = 0.02f;
     float ddgi_depth_temporal_weight = 0.2f;
     float ddgi_ray_max_distance = 50.0f;
@@ -141,6 +145,10 @@ struct LumenConfig {
     // Screen Probes settings
     u32 screen_probes_spacing = 8;
     u32 screen_probes_rays = 64;
+    bool screen_probes_jitter = true;   // F5 (M7): per-frame probe/ray jitter
+    float screen_probes_far_cache_start = 30.0f;  // F1 (M7): SDF far-field early-out → DDGI cache query (0 disables)
+    bool screen_probes_importance = true;  // F2 (M7): importance resampling of ray directions (history-SH guided)
+    float screen_probes_adaptive_pos_error = 0.35f;  // F4 (M7): fine-tier interpolation-failure threshold (0 → legacy variance test)
 
     // Performance budget (ms)
     float max_gi_time_ms = 6.0f;

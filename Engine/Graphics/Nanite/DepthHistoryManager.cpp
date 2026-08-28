@@ -289,7 +289,7 @@ bool DepthHistoryManager::CreateCopyPipeline() {
             utils::ShaderRegistry::GetNaniteShaderPath(rhi::RHIPlatform::Vulkan, "HZBCopy");
         const std::string candidates[2] = {
             relPath,
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+            utils::ShaderRegistry::ResolveShaderPath(relPath),
         };
         std::vector<u8> bytecode;
         for (const auto& path : candidates) {

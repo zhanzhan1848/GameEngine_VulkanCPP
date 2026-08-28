@@ -86,7 +86,7 @@ namespace {
             const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
             std::vector<std::string> candidates;
             candidates.push_back(relPath);
-            candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+            candidates.push_back(utils::ShaderRegistry::ResolveShaderPath(relPath));
 
             std::ifstream file;
             std::string openedPath;
@@ -3990,6 +3990,353 @@ bool GPUDrivenDrawPipeline::ExecuteReflectionPass(rhi::RHICommandBuffer* cmd_buf
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, reflection_layout_, 0, 1, &dsHandle, 0, nullptr);
 
     cmd_buffer->DrawIndirect(reflection_indirect_buffer_[bi], 0, 1);
+
+    cmd_buffer->EndRenderPass();
+    return true;
+}
+
+// =====================================================================================
+// T8.12 Card-view capture (Surface Cache atlas)
+// =====================================================================================
+
+// Matches CardCapture.vert/.frag binding 0 (176 bytes).
+struct CardCaptureParamsCB {
+    math::m4x4 view;
+    math::m4x4 proj;
+    math::v4   center;
+    math::v4   fwd;
+    math::v4   misc;   // x=depth_near, y=depth_far
+};
+
+bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
+    if (card_capture_initialized_) return true;
+    if (!device_) return false;
+    card_capture_max_clusters_ = max_clusters;
+
+    auto vsCode = LoadShaderBytecode("CardCapture.vert", "main", device_);
+    auto fsCode = LoadShaderBytecode("CardCapture.frag", "main", device_);
+    if (vsCode.empty() || fsCode.empty()) {
+        std::cerr << "[CardCapture] Failed to load CardCapture shaders" << std::endl;
+        return false;
+    }
+    auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex, "main");
+    auto fs = device_->CreateShader(fsCode.data(), fsCode.size(), rhi::ShaderStage::Pixel, "main");
+    if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) return false;
+
+    // 12 bindings — matches CardCapture.vert/.frag:
+    //   0 UBO params (VS|PS), 1..8 SSBOs (VS: meshlets/mverts/mtris/positions/
+    //   visible-clusters/cluster-map/instances/elements), 9 material SSBO (PS),
+    //   10 albedo texture2DArray (PS), 11 sampler (PS).
+    {
+        rhi::DescriptorSetLayoutBinding b[12];
+        for (int i = 0; i < 12; ++i) {
+            b[i].binding = i;
+            b[i].descriptorCount = 1;
+        }
+        b[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+        b[0].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel;
+        const rhi::ShaderStage vsStage = rhi::ShaderStage::Vertex;
+        for (int i = 1; i <= 8; ++i) {
+            b[i].descriptorType = rhi::DescriptorType::StorageBuffer;
+            b[i].stageFlags = vsStage;
+            b[i].readonly = true;
+        }
+        b[9].descriptorType = rhi::DescriptorType::StorageBuffer;
+        b[9].stageFlags = rhi::ShaderStage::Pixel;
+        b[9].readonly = true;
+        b[10].descriptorType = rhi::DescriptorType::SampledImage;
+        b[10].stageFlags = rhi::ShaderStage::Pixel;
+        b[11].descriptorType = rhi::DescriptorType::Sampler;
+        b[11].stageFlags = rhi::ShaderStage::Pixel;
+
+        rhi::DescriptorSetLayoutDesc dslDesc{12, b};
+        card_capture_set_layout_ = device_->CreateDescriptorSetLayout(dslDesc);
+        if (card_capture_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
+
+        rhi::PipelineLayoutDesc plDesc{1, &card_capture_set_layout_};
+        card_capture_layout_ = device_->CreatePipelineLayout(plDesc);
+        if (card_capture_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+    }
+
+    // Graphics pipeline — 3 RTs matching the atlas pages
+    // (albedo rgba8, normal rg16f, axis-depth r32f) + D32 occlusion depth.
+    // Cull NOTHING: cloth/thin geometry must capture from both windings.
+    {
+        rhi::GraphicsPipelineDesc desc{};
+        desc.layout = card_capture_layout_;
+        desc.vertexShader = vs;
+        desc.pixelShader = fs;
+        desc.renderTargetCount = 3;
+        desc.renderTargetFormats[0] = rhi::DataFormat::RGBA8_UNorm;
+        desc.renderTargetFormats[1] = rhi::DataFormat::RG16_Float;
+        desc.renderTargetFormats[2] = rhi::DataFormat::R32_Float;
+        desc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        desc.enableDepthTest = true;
+        desc.enableDepthWrite = true;
+        desc.depthFunc = rhi::ComparisonFunc::Less;
+        desc.cullMode = rhi::CullMode::None;
+        desc.vertexAttributes.clear();
+        desc.vertexBindings.clear();
+        card_capture_pipeline_ = device_->CreateGraphicsPipeline(desc);
+        if (card_capture_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            std::cerr << "[CardCapture] Failed to create card capture graphics pipeline" << std::endl;
+            return false;
+        }
+    }
+
+    for (u32 f = 0; f < kCardCaptureSlots; ++f) {
+        rhi::BufferDesc visDesc{};
+        visDesc.size = (u64)max_clusters * 4;  // u32 per visible cluster
+        visDesc.type = rhi::BufferType::Structured;
+        visDesc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
+        visDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        visDesc.structured.elementCount = max_clusters;
+        visDesc.structured.elementStride = sizeof(u32);
+        card_capture_visible_buffer_[f] = device_->CreateBuffer(visDesc);
+
+        rhi::BufferDesc indDesc{};
+        indDesc.size = sizeof(u32) * 4;
+        indDesc.type = rhi::BufferType::Structured;
+        indDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Indirect | rhi::BufferUsageFlags::Storage);
+        indDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        indDesc.structured.elementCount = 4;
+        indDesc.structured.elementStride = sizeof(u32);
+        card_capture_indirect_buffer_[f] = device_->CreateBuffer(indDesc);
+
+        rhi::BufferDesc cbDesc{};
+        cbDesc.size = sizeof(CardCaptureParamsCB);
+        cbDesc.type = rhi::BufferType::Constant;
+        cbDesc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
+        cbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        card_capture_params_buffer_[f] = device_->CreateBuffer(cbDesc);
+
+        rhi::DescriptorSetDesc dsDesc;
+        dsDesc.layout = card_capture_set_layout_;
+        card_capture_ds_[f] = device_->CreateDescriptorSet(dsDesc);
+
+        if (card_capture_visible_buffer_[f] == rhi::handles::INVALID_RESOURCE ||
+            card_capture_indirect_buffer_[f] == rhi::handles::INVALID_RESOURCE ||
+            card_capture_params_buffer_[f] == rhi::handles::INVALID_RESOURCE ||
+            card_capture_ds_[f] == rhi::handles::INVALID_DESCRIPTOR_SET) {
+            return false;
+        }
+    }
+
+    card_capture_initialized_ = true;
+    return true;
+}
+
+void GPUDrivenDrawPipeline::ShutdownCardCaptureResources() {
+    if (!card_capture_initialized_ || !device_) return;
+    for (u32 f = 0; f < kCardCaptureSlots; ++f) {
+        if (card_capture_visible_buffer_[f] != rhi::handles::INVALID_RESOURCE)
+            device_->DestroyBuffer(card_capture_visible_buffer_[f]);
+        if (card_capture_indirect_buffer_[f] != rhi::handles::INVALID_RESOURCE)
+            device_->DestroyBuffer(card_capture_indirect_buffer_[f]);
+        if (card_capture_params_buffer_[f] != rhi::handles::INVALID_RESOURCE)
+            device_->DestroyBuffer(card_capture_params_buffer_[f]);
+        if (card_capture_ds_[f] != rhi::handles::INVALID_DESCRIPTOR_SET)
+            device_->DestroyDescriptorSet(card_capture_ds_[f]);
+        card_capture_visible_buffer_[f] = rhi::handles::INVALID_RESOURCE;
+        card_capture_indirect_buffer_[f] = rhi::handles::INVALID_RESOURCE;
+        card_capture_params_buffer_[f] = rhi::handles::INVALID_RESOURCE;
+        card_capture_ds_[f] = rhi::handles::INVALID_DESCRIPTOR_SET;
+    }
+    if (card_capture_pipeline_ != rhi::handles::INVALID_PIPELINE)
+        device_->DestroyPipeline(card_capture_pipeline_);
+    if (card_capture_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT)
+        device_->DestroyPipelineLayout(card_capture_layout_);
+    if (card_capture_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        device_->DestroyDescriptorSetLayout(card_capture_set_layout_);
+    card_capture_pipeline_ = rhi::handles::INVALID_PIPELINE;
+    card_capture_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
+    card_capture_set_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    card_capture_initialized_ = false;
+}
+
+bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_buffer,
+                                                   const RenderSceneSnapshot& scene_snapshot,
+                                                   const math::m4x4& view,
+                                                   const math::m4x4& proj,
+                                                   const math::v4& card_center,
+                                                   const math::v4& card_fwd,
+                                                   float depth_near, float depth_far,
+                                                   u32 face_slot,
+                                                   u32 viewport_x, u32 viewport_y, u32 resolution,
+                                                   rhi::ResourceHandle albedo_rt,
+                                                   rhi::ResourceHandle normal_rt,
+                                                   rhi::ResourceHandle depth_rt,
+                                                   rhi::ResourceHandle depth_attachment_rt) {
+    if (!card_capture_initialized_ || !cmd_buffer) return false;
+    if (face_slot >= kCardCaptureSlots) return false;
+    if (albedo_rt == rhi::handles::INVALID_RESOURCE ||
+        normal_rt == rhi::handles::INVALID_RESOURCE ||
+        depth_rt == rhi::handles::INVALID_RESOURCE ||
+        depth_attachment_rt == rhi::handles::INVALID_RESOURCE) return false;
+    if (scene_snapshot.GetInstanceCount() == 0) return true;
+
+    if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_instance_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_vertices_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_vertex_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_element_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        global_material_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
+        albedo_texture_array_ == rhi::handles::INVALID_RESOURCE ||
+        texture_sampler_ == rhi::handles::INVALID_SAMPLER) {
+        return true;
+    }
+
+    u32 slot = face_slot % kCardCaptureSlots;
+
+    // --- CPU cull: meshlet world spheres vs the card's view frustum
+    // (ortho box encoded in view*proj — ExtractFrustumPlanes works for both).
+    math::m4x4 view_proj = proj * view;
+    math::v4 frustumPlanes[6];
+    ExtractFrustumPlanes(view_proj, frustumPlanes);
+
+    auto sphereVsFrustum = [&](const math::v3& center, float radius) -> bool {
+        for (int i = 0; i < 6; ++i) {
+            float dist = frustumPlanes[i].x*center.x + frustumPlanes[i].y*center.y +
+                         frustumPlanes[i].z*center.z + frustumPlanes[i].w;
+            if (dist < -radius) return false;
+        }
+        return true;
+    };
+
+    u32 totalVisible = 0;
+    utl::vector<u32> visibleClusters;
+    visibleClusters.reserve(card_capture_max_clusters_);
+    {
+        const auto& instances = scene_snapshot.GetInstanceData();
+        if (!cpu_meshlet_cache_.empty()) {
+            const auto* meshlets = cpu_meshlet_cache_.data();
+            for (u32 instIdx = 0; instIdx < instances.size(); ++instIdx) {
+                const auto& inst = instances[instIdx];
+                if (!sphereVsFrustum(inst.bounds_center, inst.bounds_radius)) continue;
+                for (u32 c = 0; c < inst.cluster_count; ++c) {
+                    u32 globalIdx = inst.cluster_start + c;
+                    if (globalIdx >= cpu_meshlet_cache_.size()) continue;
+                    const auto& meshlet = meshlets[globalIdx];
+                    math::v3 localCenter{meshlet.center[0], meshlet.center[1], meshlet.center[2]};
+                    math::v4 worldCenter4 = inst.world_matrix *
+                        math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
+                    if (!sphereVsFrustum(math::v3{worldCenter4.x, worldCenter4.y, worldCenter4.z},
+                                         meshlet.radius)) continue;
+                    visibleClusters.push_back(globalIdx);
+                }
+            }
+            totalVisible = static_cast<u32>(visibleClusters.size());
+        }
+    }
+
+    // Upload visible cluster ids + indirect args + params UBO.
+    if (totalVisible > 0) {
+        void* vis = device_->MapBuffer(card_capture_visible_buffer_[slot], 0,
+                                       totalVisible * sizeof(u32));
+        if (vis) {
+            memcpy(vis, visibleClusters.data(), totalVisible * sizeof(u32));
+            device_->UnmapBuffer(card_capture_visible_buffer_[slot]);
+        }
+    }
+    {
+        void* args = device_->MapBuffer(card_capture_indirect_buffer_[slot], 0, sizeof(u32) * 4);
+        if (args) {
+            u32* p = static_cast<u32*>(args);
+            p[0] = 126 * 3;       // vertexCount (max meshlet verts)
+            p[1] = totalVisible;  // instanceCount = visible clusters
+            p[2] = 0;
+            p[3] = 0;
+            device_->UnmapBuffer(card_capture_indirect_buffer_[slot]);
+        }
+    }
+    {
+        void* cbMem = device_->MapBuffer(card_capture_params_buffer_[slot], 0,
+                                         sizeof(CardCaptureParamsCB));
+        if (cbMem) {
+            auto* p = static_cast<CardCaptureParamsCB*>(cbMem);
+            p->view = view;
+            p->proj = proj;
+            p->center = card_center;
+            p->fwd = card_fwd;
+            p->misc = math::v4{depth_near, depth_far, 0.0f, 0.0f};
+            device_->UnmapBuffer(card_capture_params_buffer_[slot]);
+        }
+    }
+
+    // Descriptor set — 12 bindings (see layout above).
+    rhi::DescriptorBufferInfo bufInfos[10];
+    rhi::DescriptorImageInfo imgInfos[2];
+    rhi::WriteDescriptorSet writes[12];
+    for (int i = 0; i < 12; ++i) {
+        writes[i] = {};
+        writes[i].dstSet = card_capture_ds_[slot];
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+    }
+    writes[0].descriptorType = rhi::DescriptorType::UniformBuffer;
+    writes[0].bufferInfo = &bufInfos[0];
+    for (int i = 1; i <= 8; ++i) {
+        writes[i].descriptorType = rhi::DescriptorType::StorageBuffer;
+        writes[i].bufferInfo = &bufInfos[i];
+    }
+    writes[9].descriptorType = rhi::DescriptorType::StorageBuffer;
+    writes[9].bufferInfo = &bufInfos[9];
+    writes[10].descriptorType = rhi::DescriptorType::SampledImage;
+    writes[10].imageInfo = &imgInfos[0];
+    writes[11].descriptorType = rhi::DescriptorType::Sampler;
+    writes[11].imageInfo = &imgInfos[1];
+
+    bufInfos[0] = { card_capture_params_buffer_[slot], 0, sizeof(CardCaptureParamsCB) };
+    bufInfos[1] = { global_meshlet_buffer_, 0, ~0ULL };
+    bufInfos[2] = { global_meshlet_vertices_buffer_, 0, ~0ULL };
+    bufInfos[3] = { global_meshlet_triangles_buffer_, 0, ~0ULL };
+    bufInfos[4] = { global_vertex_buffer_, 0, ~0ULL };
+    bufInfos[5] = { card_capture_visible_buffer_[slot], 0, ~0ULL };
+    bufInfos[6] = { cluster_map_buffer_, 0, ~0ULL };
+    bufInfos[7] = { global_instance_data_buffer_, 0, ~0ULL };
+    bufInfos[8] = { global_element_buffer_, 0, ~0ULL };
+    bufInfos[9] = { global_material_data_buffer_, 0, ~0ULL };
+    imgInfos[0].imageView = albedo_texture_array_;
+    imgInfos[0].imageLayout = rhi::ResourceState::ShaderResource;
+    imgInfos[1].sampler = texture_sampler_;
+
+    device_->UpdateDescriptorSets(12, writes);
+
+    // Render one card face into the atlas region. Colors LOAD (preserve every
+    // other card's pages); depth CLEARS (scratch, pass-local).
+    rhi::RenderPassDesc rpDesc{};
+    rpDesc.colorAttachments.resize(3);
+    rpDesc.colorAttachments[0].texture = albedo_rt;
+    rpDesc.colorAttachments[0].format = rhi::DataFormat::RGBA8_UNorm;
+    rpDesc.colorAttachments[0].loadOp = rhi::LoadAction::Load;
+    rpDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
+    rpDesc.colorAttachments[1].texture = normal_rt;
+    rpDesc.colorAttachments[1].format = rhi::DataFormat::RG16_Float;
+    rpDesc.colorAttachments[1].loadOp = rhi::LoadAction::Load;
+    rpDesc.colorAttachments[1].storeOp = rhi::StoreAction::Store;
+    rpDesc.colorAttachments[2].texture = depth_rt;
+    rpDesc.colorAttachments[2].format = rhi::DataFormat::R32_Float;
+    rpDesc.colorAttachments[2].loadOp = rhi::LoadAction::Load;
+    rpDesc.colorAttachments[2].storeOp = rhi::StoreAction::Store;
+    rpDesc.depthAttachment.texture = depth_attachment_rt;
+    rpDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
+    rpDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
+    rpDesc.depthAttachment.storeOp = rhi::StoreAction::DontCare;
+    rpDesc.depthAttachment.clearValue.depth = 1.0f;
+
+    cmd_buffer->BeginRenderPass(rpDesc);
+    cmd_buffer->SetViewport({{float(viewport_x), float(viewport_y)},
+                             {float(resolution), float(resolution)}, 0.0f, 1.0f});
+    cmd_buffer->SetScissor({{int(viewport_x), int(viewport_y)}, {resolution, resolution}});
+
+    cmd_buffer->BindGraphicsPipeline(card_capture_pipeline_);
+    rhi::DescriptorSetHandle dsHandle = card_capture_ds_[slot];
+    cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, card_capture_layout_, 0, 1, &dsHandle, 0, nullptr);
+
+    if (totalVisible > 0)
+        cmd_buffer->DrawIndirect(card_capture_indirect_buffer_[slot], 0, 1);
 
     cmd_buffer->EndRenderPass();
     return true;

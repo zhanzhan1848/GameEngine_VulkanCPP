@@ -1,7 +1,9 @@
 /**
  * @file DDGICardRadianceAvg.metal
- * @brief Reads the Surface Cache Lighting Atlas at each card's center texel
- *        and writes a per-card float3 average radiance to a compact buffer.
+ * @brief Samples a 4x4 texel grid across each card's area in the Surface Cache
+ *        Lighting Atlas and writes a coverage-weighted average radiance. The w
+ *        component carries the fraction of sampled texels that held any
+ *        energy — DDGIProbeIrradianceFromCards uses it as per-card SC validity.
  *
  * Dispatch: (CardCount, 1, 1), threadGroupSize = (64, 1, 1)
  */
@@ -16,27 +18,41 @@ kernel void ddgi_card_radiance_avg(
 
     constant SurfaceCacheParams& params [[buffer(0)]],
     device const SurfaceCacheCard* cards [[buffer(1)]],
-    device float3* card_radiance        [[buffer(2)]],
+    device float4* card_radiance        [[buffer(2)]],
 
     texture2d<float, access::sample> lighting_atlas [[texture(0)]]
 ) {
     if (gid >= params.max_cards) return;
 
-    const device auto& card = cards[gid];
+    device const SurfaceCacheCard& card = cards[gid];
     if (card.resolution == 0) {
-        card_radiance[gid] = float3(0.0);
+        card_radiance[gid] = float4(0.0);
         return;
     }
 
-    // Sample lighting atlas at card center texel
-    float2 atlas_uv = float2(
-        float(card.atlas_offset_x) + float(card.resolution) * 0.5,
-        float(card.atlas_offset_y) + float(card.resolution) * 0.5
-    );
-    float2 texCoord = atlas_uv / float(params.atlas_size);
+    // 4x4 grid across the card area (never-captured atlas texels read as the
+    // init default zero, so "any energy" doubles as a captured-validity test).
+    float res = float(card.resolution);
+    float3 sum = float3(0.0);
+    float valid = 0.0;
+    for (int j = 0; j < 4; ++j) {
+        for (int i = 0; i < 4; ++i) {
+            float2 uv = float2(
+                float(card.atlas_offset_x) + res * (float(i) + 0.5) / 4.0,
+                float(card.atlas_offset_y) + res * (float(j) + 0.5) / 4.0
+            ) / float(params.atlas_size);
+            float3 r = lighting_atlas.sample(sampler(coord::normalized, filter::nearest,
+                                                     address::clamp_to_edge), uv).xyz;
+            if (dot(r, r) > 1e-6) {
+                sum += r;
+                valid += 1.0;
+            }
+        }
+    }
 
-    sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
-    float3 radiance = lighting_atlas.sample(samp, texCoord).xyz;
-
-    card_radiance[gid] = radiance;
+    if (valid > 0.0) {
+        card_radiance[gid] = float4(sum / valid, valid / 16.0);
+    } else {
+        card_radiance[gid] = float4(0.0);
+    }
 }

@@ -466,6 +466,14 @@ void StandardRenderPipeline::InitializeSubsystems() {
         gi_gather_module_->Initialize(device_, gi_gather_shader_, render_width_, render_height_);
     }
 
+    // M8/T8.5: real-mesh DDGI probe sphere overlay (SetProbeSphereDebug /
+    // SPGI_PROBE_SPHERES=1 in the Sponza test).
+    if (probe_sphere_vs_ != handles::INVALID_SHADER &&
+        probe_sphere_ps_ != handles::INVALID_SHADER) {
+        probe_sphere_module_ = std::make_unique<DebugProbeSphereModule>();
+        probe_sphere_module_->Initialize(device_, probe_sphere_vs_, probe_sphere_ps_);
+    }
+
     if (settings_.quality.enable_ssgi || settings_.quality.enable_ddgi) {
         fusion_module_ = std::make_unique<FusionCompositeModule>();
         fusion_module_->Initialize(device_, fusion_indirect_ps_, blit_vs_,
@@ -504,6 +512,7 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (gi_gather_module_) { gi_gather_module_->Shutdown(); gi_gather_module_.reset(); }
     if (final_blit_module_) { final_blit_module_->Shutdown(); final_blit_module_.reset(); }
     if (sdf_viz_module_) { sdf_viz_module_->Shutdown(); sdf_viz_module_.reset(); }
+    if (probe_sphere_module_) { probe_sphere_module_->Shutdown(); probe_sphere_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
     if (reflection_module_) { reflection_module_->Shutdown(); reflection_module_.reset(); }
@@ -610,6 +619,18 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         }
     }
 
+    // Re-apply the offline SDF source to the (possibly rebuilt) near volume.
+    // SetLumenConfig → ApplyConfigChanges tears down and recreates the DDGI
+    // passes; without this the offline source set by the host during pipeline
+    // Initialize dies with the old instance and the trace silently falls back
+    // to the coarse runtime GlobalSDF.
+    if (ddgi_pass_ && offline_sdf_texture_ != handles::INVALID_RESOURCE) {
+        ddgi_pass_->SetOfflineSDFSource(offline_sdf_texture_, offline_sdf_origin_,
+                                        offline_sdf_extent_, offline_sdf_resolution_);
+        std::cerr << "[Lumen] Offline SDF re-applied to DDGI trace ("
+                  << offline_sdf_resolution_ << "³)" << std::endl;
+    }
+
     // SSAO
     if (settings_.quality.enable_ssao) {
         ssao_pass_ = std::make_unique<lumen::LumenSSAOPass>();
@@ -649,9 +670,22 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         lumen::ScreenProbeParams probeParams{};
         probeParams.downsample_factor = config.screen_probes_spacing;
         probeParams.rays_per_probe = config.screen_probes_rays;
+        probeParams.enable_jitter = config.screen_probes_jitter;   // F5 (M7)
+        probeParams.far_cache_start_distance = config.screen_probes_far_cache_start;  // F1 (M7)
+        probeParams.enable_importance = config.screen_probes_importance;  // F2 (M7)
+        probeParams.adaptive_pos_threshold = config.screen_probes_adaptive_pos_error;  // F4 (M7)
         if (!screen_probe_pass_->Initialize(device_, render_width_, render_height_, probeParams)) {
             std::cerr << "[Lumen] Screen Probes init failed" << std::endl;
             screen_probe_pass_.reset();
+        } else if (offline_sdf_texture_ != handles::INVALID_RESOURCE) {
+            // Same rebuild-survival concern as the DDGI forward above: the
+            // SDF far-field trace must run on the high-res offline volume.
+            screen_probe_pass_->SetOfflineSDFSource(offline_sdf_texture_,
+                                                    offline_sdf_origin_,
+                                                    offline_sdf_extent_,
+                                                    offline_sdf_resolution_);
+            std::cerr << "[Lumen] Offline SDF re-applied to SPGI trace ("
+                      << offline_sdf_resolution_ << "³)" << std::endl;
         }
     }
 
@@ -1399,9 +1433,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // T3.2: real light from settings instead of the SC-internal hardcode
         math::v3 scLightDir = Normalize(settings_.lighting.light_direction);
         frameData.light_direction = scLightDir;
-        frameData.light_color = {settings_.lighting.ddgi_light_color.x,
-                                 settings_.lighting.ddgi_light_color.y,
-                                 settings_.lighting.ddgi_light_color.z};
+        // T3.2+: SC texels see the REAL sun (light_color). The old
+        // ddgi_light_color (≈half intensity, tuned when the trace chain was
+        // broken) made every card's direct term 2× dimmer than the main pass
+        // — the whole GI pyramid inherited the deficit.
+        frameData.light_color = {settings_.lighting.light_color.x,
+                                 settings_.lighting.light_color.y,
+                                 settings_.lighting.light_color.z};
 
         // GBuffer-gather capture: real rendered surfaces → card atlas.
         frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
@@ -1411,7 +1449,29 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         frameData.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
         frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
 
+        // Probe-fed indirect (Lumen hierarchy): previous-frame near-volume
+        // irradiance — SC runs before the DDGI update, so (frame+2)%3 is the
+        // last fully integrated result. Shadowed texels gather their bounce
+        // from these probes instead of collapsing to black.
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            const auto& vol = ddgi_pass_->GetVolumeData();
+            frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBuffer(
+                (static_cast<u32>(frameCount_) + 2) % 3);
+            frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
+            frameData.ddgi_spacing = vol.ProbeSpacing;
+            frameData.ddgi_counts[0] = vol.ProbeCounts[0];
+            frameData.ddgi_counts[1] = vol.ProbeCounts[1];
+            frameData.ddgi_counts[2] = vol.ProbeCounts[2];
+            frameData.ddgi_valid = 1;
+        }
+
         ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
+        // T8.12: card-view capture (SC_CARDVIEW=1) — runs instead of the
+        // screen-space gather inside AddPass.
+        if (surface_cache_pass_->IsCardViewEnabled() && scene_snapshot_) {
+            surface_cache_pass_->AddCardCapturePasses(graph, *scene_snapshot_,
+                                                      static_cast<u32>(frameCount_));
+        }
         surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf,
                                      frameData, static_cast<u32>(frameCount_));
 
@@ -1480,6 +1540,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         SCDDGIInputs scDDGIIn;
         scDDGIIn.ddgi_pass = ddgi_pass_.get();
         scDDGIIn.surface_cache_pass = surface_cache_pass_.get();
+        scDDGIIn.frame_index = static_cast<u32>(frameCount_);
         scDDGIIn.current_buffer_index = cbIdx;
         scDDGIIn.sc_lighting_rg = scLightingRG;
         scDDGIIn.ddgi_irradiance = ddgiOut.ddgi_irradiance;
@@ -1606,12 +1667,12 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
         // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
         giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
-            ? ddgi_volumes_[1]->GetVolumeView((cbIdx + 2) % 3) : lumen::DDGIVolumeView{};
+            ? ddgi_volumes_[1]->GetVolumeView(static_cast<u32>(frameCount_) % 3) : lumen::DDGIVolumeView{};
         // T6.3 sub-B: 全 volume 视图直传（模块内按 descriptor indexing 能力位
         // 门控 N-volume 路径；能力不可用/有效 volume < 2 时零行为变化）。
         giIn.volume_count = ddgi_volume_count_;
         for (u32 vi = 0; vi < ddgi_volume_count_ && vi < GIGatherInputs::kMaxVolumes; ++vi)
-            if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView((cbIdx + 2) % 3);
+            if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView(static_cast<u32>(frameCount_) % 3);
         giIn.static_probe_volume = static_probe_volume_.get();
         giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
         giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -1623,16 +1684,18 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         giIn.view_matrix = view_matrix_;
         giIn.proj_matrix = proj_matrix_;
         giIn.current_buffer_index = cbIdx;
+        giIn.frame_index = static_cast<u32>(frameCount_);
         giIn.fallback_texture = black_texture_;
         giOut = gi_gather_module_->AddPasses(graph, giIn);
     }
 
     // ========================================================================
-    // Step 10: Fusion Composite
+    // Step 10: GI Fusion Composite
     // ========================================================================
 
     FusionOutputs fusionOut;
-    if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr) && lumen::GIDebug().fusion) {
+    if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
+                           settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
         FusionInputs fusionIn;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
         fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -1728,12 +1791,16 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
         auto bloomOut = PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
 
+        // FusionIndirect has already applied AO and blended SSGI/DDGI/SPGI.
+        // Do not feed AO/SSGI to ToneMapping again or the legacy post-process
+        // composition path will count them a second time.
+        const bool giAlreadyComposited = fusionOut.output_tex != handles::INVALID_RESOURCE;
         toneOut = PostProcess::AddToneMappingPass(
             graph,
             hdrClean,                 // TAA-resolved HDR scene color
             bloomOut.bloomOutput,     // Bloom blur result
-            ssaoOut.ssao_output,      // AO
-            ssgiOut.ssgi_output,      // SSGI
+            giAlreadyComposited ? RGResourceHandle{} : ssaoOut.ssao_output,
+            giAlreadyComposited ? RGResourceHandle{} : ssgiOut.ssgi_output,
             velTAA,                   // velocity
             cbIdx);
     }
@@ -1771,6 +1838,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // Step 11: Final Blit → BackBuffer
     //         (or SDF Visualization if toggled on)
     // ========================================================================
+
+    // Output node of whatever produced the final LDR image (blit or SDF viz);
+    // the probe-sphere overlay must chain after it for RG ordering.
+    RGResourceHandle finalOutputNode{};
 
     if (sdf_visualization_enabled_ && sdf_viz_module_ && sdf_viz_module_->IsInitialized()) {
         // SDF visualization replaces the normal scene output.
@@ -1823,7 +1894,38 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         blitIn.current_buffer_index = cbIdx;
         blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
         blitIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        finalOutputNode = blitIn.backbuffer_rg;
         final_blit_module_->AddPass(graph, blitIn);
+    }
+
+    // M8/T8.5: probe sphere overlay — after the tonemapped blit so spheres
+    // composite over the final LDR image, depth-occluded by the gbuffer.
+    if (probe_sphere_debug_ && probe_sphere_module_ && probe_sphere_module_->IsInitialized() &&
+        ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+        const auto& vol = ddgi_pass_->GetVolumeData();
+        const u32 probeCount = vol.ProbeCountTotal;
+        if (probeCount > 0) {
+            DebugProbeSphereInputs psIn;
+            psIn.backbuffer_rg = graph.ImportResource("BackBuffer_ProbeSphere", backBuffer);
+            psIn.blit_output_rg = finalOutputNode;
+            psIn.current_buffer_index = cbIdx;
+            psIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+            psIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+            psIn.view_matrix = view_matrix_;
+            psIn.proj_matrix = proj_matrix_;
+            psIn.camera_position = {camera_position_.x, camera_position_.y,
+                                    camera_position_.z, 0.0f};
+            math::v3 toLight = -Normalize(settings_.lighting.light_direction);
+            psIn.sun_dir = {toLight.x, toLight.y, toLight.z, 0.0f};
+            psIn.probe_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y,
+                                 vol.ProbeOrigin.z};
+            psIn.probe_counts[0] = ddgi_pass_->GetParams().probe_count_x;
+            psIn.probe_counts[1] = ddgi_pass_->GetParams().probe_count_y;
+            psIn.probe_counts[2] = ddgi_pass_->GetParams().probe_count_z;
+            psIn.probe_count = probeCount;
+            psIn.probe_spacing = ddgi_pass_->GetParams().probe_spacing;
+            probe_sphere_module_->AddPass(graph, psIn);
+        }
     }
 }
 
@@ -2084,6 +2186,18 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             frameData.gbuffer_depth  = gpuDraw.GetGBufferDepthSampleable();
             frameData.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
             frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
+            // Probe-fed indirect — see the BuildRenderGraph twin site.
+            if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+                const auto& vol = ddgi_pass_->GetVolumeData();
+                frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBuffer(
+                    (static_cast<u32>(frameCount_) + 2) % 3);
+                frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
+                frameData.ddgi_spacing = vol.ProbeSpacing;
+                frameData.ddgi_counts[0] = vol.ProbeCounts[0];
+                frameData.ddgi_counts[1] = vol.ProbeCounts[1];
+                frameData.ddgi_counts[2] = vol.ProbeCounts[2];
+                frameData.ddgi_valid = 1;
+            }
             ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
             surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
             scLightingRG = graph.ImportResource("SCLightingAtlas", surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
@@ -2136,6 +2250,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             SCDDGIInputs scDDGIIn;
             scDDGIIn.ddgi_pass = ddgi_pass_.get();
             scDDGIIn.surface_cache_pass = surface_cache_pass_.get();
+            scDDGIIn.frame_index = static_cast<u32>(frameCount_);
             scDDGIIn.current_buffer_index = cbIdx;
             scDDGIIn.sc_lighting_rg = scLightingRG;
             scDDGIIn.ddgi_irradiance = ddgiOut.ddgi_irradiance;
@@ -2154,11 +2269,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
             // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
             giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
-                ? ddgi_volumes_[1]->GetVolumeView((cbIdx + 2) % 3) : lumen::DDGIVolumeView{};
+                ? ddgi_volumes_[1]->GetVolumeView(static_cast<u32>(frameCount_) % 3) : lumen::DDGIVolumeView{};
             // T6.3 sub-B: 全 volume 视图直传（同 Render 路径；能力门控在模块内）。
             giIn.volume_count = ddgi_volume_count_;
             for (u32 vi = 0; vi < ddgi_volume_count_ && vi < GIGatherInputs::kMaxVolumes; ++vi)
-                if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView((cbIdx + 2) % 3);
+                if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView(static_cast<u32>(frameCount_) % 3);
             giIn.static_probe_volume = static_probe_volume_.get();
             giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
             giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -2169,6 +2284,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             giIn.view_matrix = view_matrix_;
             giIn.proj_matrix = proj_matrix_;
             giIn.current_buffer_index = cbIdx;
+            giIn.frame_index = static_cast<u32>(frameCount_);
             giIn.fallback_texture = black_texture_;
             giOut = gi_gather_module_->AddPasses(graph, giIn);
         }
@@ -2374,7 +2490,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- FusionComposite ---
         FusionOutputs fusionOut;
-        if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr) && lumen::GIDebug().fusion) {
+        if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
+                               settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
@@ -2454,9 +2571,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             RGResourceHandle hdrCleanRWCB = taaRWCB.output;
 
             auto bloomRWCB = PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
+            // FusionIndirect already owns AO/GI composition. ToneMapping only
+            // receives those legacy inputs when Fusion was unavailable.
+            const bool giAlreadyCompositedRWCB =
+                fusionOut.output_tex != handles::INVALID_RESOURCE;
             toneOutRWCB = PostProcess::AddToneMappingPass(
                 graph, hdrCleanRWCB, bloomRWCB.bloomOutput,
-                ssaoOut.ssao_output, ssgiOut.ssgi_output, velRWCB, cbIdx);
+                giAlreadyCompositedRWCB ? RGResourceHandle{} : ssaoOut.ssao_output,
+                giAlreadyCompositedRWCB ? RGResourceHandle{} : ssgiOut.ssgi_output,
+                velRWCB, cbIdx);
         }
 
         // Toon post process — mirrors BuildRenderGraph Step 10.6.
@@ -2507,6 +2630,52 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
         blitIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
         final_blit_module_->AddPass(graph, blitIn);
+
+        // M8/T8.5: probe sphere overlay (RenderWithCommandBuffer path — the
+        // Sponza test drives THIS entrypoint; mirrors the BuildRenderGraph
+        // injection at the end of its Step 11).
+        {
+            static bool psLogged = false;
+            if (!psLogged) {
+                psLogged = true;
+                const bool modOk = probe_sphere_module_ && probe_sphere_module_->IsInitialized();
+                const bool ddgiOk = ddgi_pass_ && ddgi_pass_->IsInitialized();
+                std::cerr << "[ProbeSpheres] RWCB injection: enabled=" << probe_sphere_debug_
+                          << " module=" << (modOk ? "ok" : "missing")
+                          << " ddgi=" << (ddgiOk ? "ok" : "missing")
+                          << " probes=" << (ddgiOk ? ddgi_pass_->GetVolumeData().ProbeCountTotal : 0u)
+                          << std::endl;
+            }
+        }
+        if (probe_sphere_debug_ && probe_sphere_module_ && probe_sphere_module_->IsInitialized() &&
+            ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            const auto& volPS = ddgi_pass_->GetVolumeData();
+            if (volPS.ProbeCountTotal > 0) {
+                DebugProbeSphereInputs psIn;
+                // WRITE a fresh alias of the swapchain image; declare READ on
+                // the blit's output node so the RG serializes after FinalBlit
+                // (a bare alias has no edge and the blit would overwrite us).
+                psIn.backbuffer_rg = graph.ImportResource("BackBuffer_ProbeSphere", target);
+                psIn.blit_output_rg = blitIn.backbuffer_rg;
+                psIn.current_buffer_index = cbIdx;
+                psIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+                psIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+                psIn.view_matrix = view_matrix_;
+                psIn.proj_matrix = proj_matrix_;
+                psIn.camera_position = {camera_position_.x, camera_position_.y,
+                                        camera_position_.z, 0.0f};
+                math::v3 toLightPS = -Normalize(settings_.lighting.light_direction);
+                psIn.sun_dir = {toLightPS.x, toLightPS.y, toLightPS.z, 0.0f};
+                psIn.probe_origin = {volPS.ProbeOrigin.x, volPS.ProbeOrigin.y,
+                                     volPS.ProbeOrigin.z};
+                psIn.probe_counts[0] = ddgi_pass_->GetParams().probe_count_x;
+                psIn.probe_counts[1] = ddgi_pass_->GetParams().probe_count_y;
+                psIn.probe_counts[2] = ddgi_pass_->GetParams().probe_count_z;
+                psIn.probe_count = volPS.ProbeCountTotal;
+                psIn.probe_spacing = ddgi_pass_->GetParams().probe_spacing;
+                probe_sphere_module_->AddPass(graph, psIn);
+            }
+        }
 
         graph.Compile();
         graph.Execute(cmd);

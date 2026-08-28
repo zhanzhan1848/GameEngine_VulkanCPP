@@ -6,7 +6,7 @@
 //   - Magic values MSHL=0x4C48534D + SDF=0x20464453 present at correct offsets
 //   - Header fields (lod_id / material_idx / num_vertices / num_indices) round-trip
 //   - Index size switches u16↔u32 at the 65536-vertex boundary
-//   - t_sign latent bug replicated for static_normal_texture
+//   - t_sign preserves normal.z for static_normal_texture
 //   - static_normal + static_color element layouts match Geometry.cpp
 
 #include "pipeline/SceneBlobWriter.h"
@@ -204,7 +204,7 @@ bool test_serialize_magics_present() {
     return found_mshl && found_sdf;
 }
 
-// ---- t_sign latent-bug preservation -----------------------------------
+// ---- t_sign preservation ----------------------------------------------
 
 bool test_t_sign_static_normal_keeps_normal_z_bit() {
     ProcessableMesh m = make_textured_cube();
@@ -227,12 +227,10 @@ bool test_t_sign_static_normal_keeps_normal_z_bit() {
     return true;
 }
 
-bool test_t_sign_static_normal_texture_loses_normal_z_bit() {
+bool test_t_sign_static_normal_texture_keeps_normal_z_bit() {
     ProcessableMesh m = make_textured_cube();
     // Override tangents so even vertices have t.z>0 and odd have t.z<0.
-    // This isolates the latent-bug claim: t_sign should encode ONLY the
-    // tangent handedness bit (t.w>0 && t.z>0), ignoring the normal.z bit
-    // that the static_normal branch would otherwise set.
+    // t_sign encodes handedness in bit 0, normal.z in bit 1, tangent.z in bit 2.
     for (u32 i = 0; i < (u32)m.tangents.size(); ++i) {
         m.tangents[i] = (i % 2 == 0) ? v4{1.f, 0.f, 1.f, 1.f}
                                      : v4{1.f, 0.f, -1.f, 1.f};
@@ -241,15 +239,14 @@ bool test_t_sign_static_normal_texture_loses_normal_z_bit() {
     PackedMesh pm = BuildPackedMesh(m, {}, u32_invalid_id, -1.f, errs);
 
     // static_normal_texture layout (sizeof == 24 due to math::v2 alignment).
-    // Even vertices: t=(1,0,1,1) → t.w>0 && t.z>0 → bit 0 set → t_sign = 0x01
-    // Odd  vertices: t=(1,0,-1,1) → t.z not > 0  → bit 0 NOT set → t_sign = 0x00
-    // Critically: even vertices have normal.z = ±1 (some +, some -), but the
-    // static_normal_texture path overwrites the normal.z bit (bit 1) so the
-    // result depends only on the tangent. That's the preserved latent bug.
+    // Even vertices have positive tangent.z → bit 2 set.
+    // Odd vertices have negative tangent.z → bit 2 clear.
     const size_t stride = sizeof(elements::static_normal_texture);
     for (u32 i = 0; i < (u32)m.positions.size(); ++i) {
         const u8 t_sign = pm.element_buffer[i * stride + 3];
-        const u8 expected = (i % 2 == 0) ? 0x01 : 0x00;
+        const u8 tangent_bit = (i % 2 == 0) ? 0x04 : 0x00;
+        const u8 normal_bit = (m.normals[i].z > 0.f) ? 0x02 : 0x00;
+        const u8 expected = tangent_bit | normal_bit;
         if (t_sign != expected) return false;
     }
     return true;
@@ -343,7 +340,7 @@ int main() {
         CASE(test_serialize_size_matches_get_packed_mesh_size),
         CASE(test_serialize_magics_present),
         CASE(test_t_sign_static_normal_keeps_normal_z_bit),
-        CASE(test_t_sign_static_normal_texture_loses_normal_z_bit),
+        CASE(test_t_sign_static_normal_texture_keeps_normal_z_bit),
         CASE(test_index_size_u32_above_65536_verts),
         CASE(test_meshlet_section_round_trip),
     };

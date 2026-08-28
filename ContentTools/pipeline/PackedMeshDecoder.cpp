@@ -147,13 +147,12 @@ bool decode_static_normal(const PackedMeshView& v, ProcessableMesh& dst) {
 // compute the uv offset as elements_size - sizeof(f32) * 2 to handle both
 // layouts — uv is always the LAST 8 bytes of the struct.
 //
-// t_sign bit semantics (encoded by pack_vertices:358-376):
-//   bit 0 (mask 0x01): (tangent.w > 0) && (tangent.z > 0)
-//   bit 1 (mask 0x02): NEVER SET for static_normal_texture — encoder bug
-//     overwrites t_sign entirely in the static_normal_texture branch,
-//     dropping the normal.z bit. Decoder reads bit 1 = 0 and returns
-//     -sqrt(1-nx²-ny²). Caller should run derive::Run to rebuild normals
-//     correctly.
+// t_sign bit semantics (encoded by pack_vertices):
+//   bit 0 (mask 0x01): tangent handedness is negative
+//   bit 1 (mask 0x02): normal.z is positive. Legacy blobs
+//     affected by the old overwrite bug have this bit clear; running
+//     derive::Run while rebuilding those assets reconstructs their normals.
+//   bit 2 (mask 0x04): tangent.z is positive
 bool decode_static_normal_texture(const PackedMeshView& v, ProcessableMesh& dst) {
     const u32 n = v.num_vertices;
     dst.colors.resize(n);
@@ -181,12 +180,12 @@ bool decode_static_normal_texture(const PackedMeshView& v, ProcessableMesh& dst)
         const f32 nz = reconstruct_z(nx, ny, normal_sign_pos);
         dst.normals[i] = math::v3{nx, ny, nz};
 
-        // Tangent: bit 0 = (tw > 0) && (tz > 0). Single bit collapses two signs.
+        // Tangent Z and handedness use independent bits in current blobs.
         const f32 tx = unpack_dir(read_u16(p + 8));
         const f32 ty = unpack_dir(read_u16(p + 10));
-        const bool tangent_sign_pos = (t_sign & 0x01) != 0;
-        const f32 tz = reconstruct_z(tx, ty, tangent_sign_pos);
-        const f32 tw = tangent_sign_pos ? 1.f : -1.f;
+        const bool tangent_z_pos = (t_sign & 0x04) != 0;
+        const f32 tz = reconstruct_z(tx, ty, tangent_z_pos);
+        const f32 tw = (t_sign & 0x01) ? -1.f : 1.f;
         dst.tangents[i] = math::v4{tx, ty, tz, tw};
 
         dst.uv_sets[0].coords[i] = math::v2{

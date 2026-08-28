@@ -272,10 +272,11 @@ inline VkImageUsageFlags ToVkImageUsageFlags(TextureUsage usage) {
     if (u & static_cast<u32>(TextureUsage::UnorderedAccess))   f |= VK_IMAGE_USAGE_STORAGE_BIT;
     if (u & static_cast<u32>(TextureUsage::CopySource))        f |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (u & static_cast<u32>(TextureUsage::CopyDest))          f |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    // RenderTarget / ShaderResource 都需要 TRANSFER_DST 才能 clear / upload
+    // RenderTarget / ShaderResource need TRANSFER_DST for clear / upload and
+    // TRANSFER_SRC for readback (diagnostic dumps, ColorHistory blits).
     if ((u & static_cast<u32>(TextureUsage::RenderTarget)) ||
         (u & static_cast<u32>(TextureUsage::ShaderResource))) {
-        f |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        f |= VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
     return f;
 }

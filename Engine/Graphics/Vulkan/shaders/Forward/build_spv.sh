@@ -27,7 +27,7 @@ declare -a SHADERS=(
     # name                stages
     "DepthOnly            vert"
     "Skybox               vert frag"
-    "Blit                 vert frag"   # T4.6.5 part 3: tone-map blit (replaces DeferredLighting fragmentBlit)
+    "Blit                 vert frag"   # Final LDR copy; ToneMappingPass owns HDR -> LDR conversion
     "GBuffer              vert frag"
     "GBufferAlphaClip     vert frag"
     "GBufferUnlit         vert frag"

@@ -69,7 +69,8 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
 // Shader source loader with #include resolution
 // ============================================================================
 
-static const std::string SHADER_BASE_DIR = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/";
+static const std::string SHADER_BASE_DIR =
+    utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/") + "/";
 static const std::string LUMEN_SHADER_DIR = SHADER_BASE_DIR + "Lumen/";
 
 static std::string ReadFileToString(const std::string& path) {
@@ -138,7 +139,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
         // then worktree source root (matches GPUDrivenDrawPipeline.cpp:85-88).
         const std::vector<std::string> candidates = {
             relPath,
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+            utils::ShaderRegistry::ResolveShaderPath(relPath),
         };
         for (const auto& path : candidates) {
             std::ifstream file(path, std::ios::binary | std::ios::ate);

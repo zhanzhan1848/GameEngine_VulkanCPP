@@ -97,8 +97,7 @@ kernel void shadow_filter_compute(
     texture2d<float> depthTex [[texture(0)]],
     texture2d<float> shadowMap0 [[texture(1)]],
     texture2d<float> shadowMap1 [[texture(2)]],
-    texture2d<float, access::write> visibilityOut [[texture(3)]],
-    texture2d<float> normalTex [[texture(4)]]
+    texture2d<float, access::write> visibilityOut [[texture(3)]]
 ) {
     uint2 outSize = uint2(visibilityOut.get_width(), visibilityOut.get_height());
     if (any(gid >= outSize)) return;

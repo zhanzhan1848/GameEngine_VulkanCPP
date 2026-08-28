@@ -36,6 +36,11 @@
 
 #include "SurfaceCacheData.glsl"
 
+// Shared probe ray sampler — the finalize pass re-derives each ray's direction
+// from its index to shade the SC-first hierarchy; it MUST agree with the
+// trace side (jitter/cosine modes rotate the set per frame).
+#include "ShaderLib/ProbeSampleLib.glsl"
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D lighting_atlas;
@@ -94,7 +99,7 @@ layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
     int   ProbeRelocationShiftX;    //  96
     int   ProbeRelocationShiftY;    // 100
     int   ProbeRelocationShiftZ;    // 104
-    float _pad_to_sdf;              // 108
+    int   RaySampleMode;            // 108 — ray sampler mode (ProbeSampleLib)
     vec4  SdfOrigins[3];            // 112
     vec4  SdfVoxelSizes[3];         // 160
     vec4  SdfExtents[3];            // 208
@@ -130,16 +135,8 @@ SCGridParams scGridLoad() {
 // Helpers (copied from DDGITraceRays.comp)
 // ----------------------------------------------------------------------------
 
-vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
-    const float INV_PHI = 0.6180339887498948482;
-    const float PI_VAL  = 3.14159265358979323846;
-    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
-    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
-    float theta = 2.0 * PI_VAL * u;
-    float phi   = acos(1.0 - 2.0 * v);
-    float sinPhi = sin(phi);
-    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
-}
+// ddgiRayDirection moved to ShaderLib/ProbeSampleLib.glsl (ddgiSampleRayDirection)
+// — single source shared with the trace side.
 
 uvec3 ddgiProbeGridCoord(uint probeIdx, uvec3 counts) {
     uint pz  = probeIdx / (counts.x * counts.y);
@@ -213,6 +210,9 @@ vec3 sampleHitAlbedo(vec3 hitPos) {
 // ----------------------------------------------------------------------------
 const float _C0 = 0.282095;
 const float _C1 = 0.488603;
+const float _C2_0 = 1.092548;
+const float _C2_1 = 0.315392;
+const float _C2_2 = 0.546274;
 
 struct TetraResult {
     uint pi[4];
@@ -270,6 +270,22 @@ vec3 shDot4(vec3 c[4], vec3 d) {
          + c[3] * (-_C1 * d.x);
 }
 
+// Full L0-L2 evaluation with the canonical basis (matches
+// DDGIUpdateIrradiance's projection). The old 4-coefficient evaluation left
+// the directional colour detail the SC path now projects into bands 4-8
+// unread.
+vec3 shDot9(vec3 c[9], vec3 d) {
+    return c[0] * _C0
+         + c[1] * (-_C1 * d.y)
+         + c[2] * ( _C1 * d.z)
+         + c[3] * (-_C1 * d.x)
+         + c[4] * ( _C2_0 * d.y * d.x)
+         + c[5] * (-_C2_0 * d.y * d.z)
+         + c[6] * ( _C2_1 * (3.0 * d.z * d.z - 1.0))
+         + c[7] * (-_C2_0 * d.x * d.z)
+         + c[8] * ( _C2_2 * (d.x * d.x - d.y * d.y));
+}
+
 // Previous-frame probe irradiance at a world position (multi-bounce feedback).
 // This is the self-circulating term: L_i_prev sampled at the hit position
 // carries the previous frame's accumulated GI (which includes earlier bounces'
@@ -291,11 +307,11 @@ vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
     for (uint p = 0u; p < 4u; p++) {
         if (tet.bw[p] < 0.001) continue;
         uint base = tet.pi[p] * 9u;
-        vec3 sh[4];
-        for (uint i = 0u; i < 4u; i++) {
+        vec3 sh[9];
+        for (uint i = 0u; i < 9u; i++) {
             sh[i] = ih.irradiance_history[base + i].xyz;
         }
-        vec3 irradiance = shDot4(sh, N);
+        vec3 irradiance = shDot9(sh, N);
         result += irradiance * tet.bw[p];
         totalWeight += tet.bw[p];
     }
@@ -326,34 +342,33 @@ void ddgi_trace_finalize() {
     uvec3 counts = volume.ProbeCounts.xyz;
     uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
     vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
-    vec3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+    vec3 rayDir = ddgiSampleRayDirection(tid, volume.RaysPerProbe,
+                                         volume.FrameIndex,
+                                         uint(volume.RaySampleMode),
+                                         normalize(-volume.LightDirection.xyz)).xyz;
 
     vec4 result = vec4(DDGI_SKY_COLOR, -1.0);   // default = miss + sky
+#ifdef DDGI_PATH_DEBUG
+    uint dbgPath = 0u;  // 1=SC atlas 2=prev-screen 3=analytic (miss stays 0)
+#endif
 
     if (hitDistance >= 0.0) {
-        // ---- Hit: colored GI via prev_color + albedo × multi-bounce ----
-        // Primary radiance = prev_frame_color at hit screen position (has
-        // real material albedo + lighting from the rendered scene).
-        // Multi-bounce = albedo × L_i_prev × 0.85 (self-circulating: each
-        // bounce tints by the hit surface's albedo color).
-        // SC lighting atlas is a supplement for off-screen hits only — its
-        // coverage is still ~0.1% (Capture gather), so on-screen hits use
-        // prev_color which has genuine per-pixel colors.
+        // ---- Hit: SC-first radiance hierarchy ----
+        // 1. Surface Cache lighting atlas — the cached final lighting; its own
+        //    0.85 feedback already accumulates multi-bounce light, so no extra
+        //    albedo × L_i_prev term is added on this path (that would count
+        //    the same bounce twice).
+        // 2. Prev-frame screen color (real rendered color) + one
+        //    self-circulating bounce term.
+        // 3. Analytic direct + sky + multi-bounce as the last resort.
         vec3 hitPos = probePos + rayDir * hitDistance;
         result.w = hitDistance;
 
         vec3 N = -rayDir;
-        vec3 L_i_prev = samplePrevProbeGrid(hitPos, N);
         vec3 albedo = sampleHitAlbedo(hitPos);
 
-        vec3 prevRadiance = samplePrevColor(hitPos);
-        if (dot(prevRadiance, prevRadiance) > 0.0001) {
-            // On-screen: real rendered color + multi-bounce colored GI
-            result.xyz = prevRadiance + albedo * L_i_prev * 0.85;
-        } else {
-            // Off-screen: try SC atlas first (has cached lighting even for
-            // surfaces the camera can't see), fall back to analytic.
-            bool scUsed = false;
+        bool scUsed = false;
+        {
             uint deviceReads = 0u;
             const uint kMaxDeviceReads = 16u;
             SCGridParams gp = scGridLoad();
@@ -370,15 +385,37 @@ void ddgi_trace_finalize() {
                     if (worldToCardUV(hitPos, card, atlasUV)) {
                         vec3 scRadiance = sampleAtlasBilinear(atlasUV);
                         if (dot(scRadiance, scRadiance) > 0.0001) {
-                            // SC cached lighting + multi-bounce
-                            result.xyz = scRadiance + albedo * L_i_prev * 0.85;
+                            result.xyz = scRadiance;
                             scUsed = true;
+#ifdef DDGI_PATH_DEBUG
+                            dbgPath = 1u;
+#endif
                         }
                         break;
                     }
                 }
             }
-            if (!scUsed) {
+        }
+        if (!scUsed) {
+            vec3 L_i_prev = samplePrevProbeGrid(hitPos, N);
+            vec3 prevRadiance = samplePrevColor(hitPos);
+            if (dot(prevRadiance, prevRadiance) > 0.0001) {
+                // On-screen: real rendered color + multi-bounce colored GI.
+                // A cloth hit can be shadowed/back-facing in prevRadiance even
+                // though its saturated albedo must still tint incoming ambient
+                // light. Keep a small albedo-driven diffuse source so red/green/
+                // blue fabrics contribute chroma instead of becoming black emitters.
+                float sourceLum = dot(prevRadiance, vec3(0.2126, 0.7152, 0.0722));
+                float albedoMax = max(max(albedo.r, albedo.g), albedo.b);
+                float albedoMin = min(min(albedo.r, albedo.g), albedo.b);
+                float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3);
+                float materialWeight = mix(0.15, 0.85, saturation);
+                vec3 materialBounce = albedo * max(sourceLum, 0.12) * materialWeight;
+                result.xyz = prevRadiance + materialBounce + albedo * L_i_prev * 0.85;
+#ifdef DDGI_PATH_DEBUG
+                dbgPath = 2u;
+#endif
+            } else {
                 // Analytic: self-computed direct + sky + multi-bounce
                 vec3 L = normalize(-volume.LightDirection.xyz);
                 float NdotL = max(0.0, dot(N, L));
@@ -387,6 +424,9 @@ void ddgi_trace_finalize() {
                 vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp);
                 const float PI_VAL = 3.14159265358979;
                 result.xyz = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.85);
+#ifdef DDGI_PATH_DEBUG
+                dbgPath = 3u;
+#endif
             }
         }
     } else {
@@ -407,9 +447,16 @@ void ddgi_trace_finalize() {
 
                 vec2 atlasUV;
                 if (worldToCardUV(probePos, card, atlasUV)) {
-                    result.xyz = sampleAtlasBilinear(atlasUV);
-                    found = true;
-                    break;
+                    vec3 missRadiance = sampleAtlasBilinear(atlasUV);
+                    // Only accept card light that actually has energy — in
+                    // shadowed arcades the atlas is still converging and a
+                    // black card must not override the sky term; try the
+                    // next covering card instead.
+                    if (dot(missRadiance, missRadiance) > 0.0001) {
+                        result.xyz = missRadiance;
+                        found = true;
+                        break;
+                    }
                 }
             }
         }
@@ -417,5 +464,12 @@ void ddgi_trace_finalize() {
     }
 
     // Write at ABSOLUTE probe index (remap from update-slot is intentional).
+#ifdef DDGI_PATH_DEBUG
+    // Diagnostic build: park the path id at distance 40+k·0.001 —
+    // UpdateIrradiance's falloff is 1-smoothstep(40, 50, d), i.e. flat 1 for
+    // d ≥ 40, so replacing real hit distance there keeps radiance weighting
+    // identical while making the tag decodable on CPU.
+    if (result.w >= 0.0) result.w = 40.0 + float(dbgPath) * 0.001;
+#endif
     rb.ray_buffer[probeIdx * volume.RaysPerProbe + tid] = result;
 }

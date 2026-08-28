@@ -859,6 +859,12 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                 case DescriptorType::StorageBuffer:
                 case DescriptorType::StorageBufferDynamic: {
                     if (binding.resources.empty()) break;
+                    // INVALID_RESOURCE is the engine's documented "not provided"
+                    // sentinel for optional bindings (e.g. the T1.3 SC grid pair).
+                    // Leave the shader argument unbound; shaders guard reads with
+                    // the 0xFFFFFFFF cell sentinel. Only a non-INVALID handle that
+                    // fails to resolve indicates a real (stale handle) bug.
+                    if (binding.resources[0] == handles::INVALID_RESOURCE) break;
                     MetalBuffer* buffer = metalDevice.GetBuffer(binding.resources[0]);
                     if (buffer && buffer->GetNativeBuffer()) {
                                 u64 offset = (binding.bufferOffsets.empty() ? 0 : binding.bufferOffsets[0]) + dynamicOffset;
@@ -893,12 +899,14 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                                 computeEncoder->setBuffer(buffer->GetNativeBuffer(), offset, slot);
                         }
                     } else {
-                        // std::cerr << "[MetalCommandBuffer] ERROR - Failed to bind buffer at slot " << slot
-                        //           << " (binding type: " << (int)binding.type << ")" << std::endl;
                         if (!buffer) {
-                            std::cerr << "  Buffer is null" << std::endl;
+                            std::cerr << "[MetalCommandBuffer] Buffer binding slot " << slot
+                                      << " resolves to no MetalBuffer (handle=" << binding.resources[0]
+                                      << ", type=" << (int)binding.type << ")" << std::endl;
                         } else if (!buffer->GetNativeBuffer()) {
-                            std::cerr << "  Native buffer is null" << std::endl;
+                            std::cerr << "[MetalCommandBuffer] Buffer binding slot " << slot
+                                      << " has null native buffer (handle=" << binding.resources[0]
+                                      << ", type=" << (int)binding.type << ")" << std::endl;
                         }
                     }
                     break;

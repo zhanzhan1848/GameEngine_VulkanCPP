@@ -12,7 +12,10 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <iostream>
+#include <thread>
+#include <vector>
 
 namespace primal::graphics::nanite {
 
@@ -171,7 +174,56 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
                     u32 vfCount = ReadU32(data, off); off += 4;
                     if (vfCount < 100000000) off += vfCount * 2;
 
+                    // Sanity filter: a minority of baked SDF sections in the
+                    // shipped pipeline model carry garbage bounds (observed
+                    // sdim 365..104460, e.g. ±14933) — their AABBs blanket
+                    // the whole scene and poison every merged voxel with a
+                    // constant ~900 distance field (all rays instantly miss).
+                    // Sponza-scale geometry tops out ~75 units; anything past
+                    // 150 or non-finite is a broken bake, not real geometry.
+                    // (data/voxels/vf bytes are already consumed above.)
+                    const bool boundsFinite =
+                        std::isfinite(sbmin[0]) && std::isfinite(sbmin[1]) &&
+                        std::isfinite(sbmin[2]) && std::isfinite(sbmax[0]) &&
+                        std::isfinite(sbmax[1]) && std::isfinite(sbmax[2]);
+                    const bool layoutConsistent =
+                        (u64)sdf.resolution[0] * sdf.resolution[1] * sdf.resolution[2] ==
+                        (u64)sdf.data.size();
+                    if (!boundsFinite || sdim > 150.0f || !layoutConsistent) {
+                        std::cerr << "[OfflineSDFMerger] Rejected broken SDF bake"
+                                  << " (sdim=" << sdim
+                                  << " finite=" << boundsFinite
+                                  << " consistent=" << layoutConsistent << ")" << std::endl;
+                        continue;
+                    }
+
                     if (!sdf.data.empty()) {
+                        // Per-mesh parse diagnostics: decode a few samples to
+                        // verify the section layout (bad offset/scale shows up
+                        // here as implausible distances immediately).
+                        if (mesh_sdfs_.size() < 3 || sdim > 100.0f ||
+                            (sdf.resolution[0] * sdf.resolution[1] * sdf.resolution[2]) !=
+                                (u32)sdf.data.size()) {
+                            u32 vmin = 0xFFFFFFFFu, vmax = 0;
+                            for (u32 i = 0; i < sdf.data.size(); i += std::max<u32>(1u, sdf.data.size() / 4096u)) {
+                                vmin = std::min(vmin, (u32)sdf.data[i]);
+                                vmax = std::max(vmax, (u32)sdf.data[i]);
+                            }
+                            u32 voxNZ = 0;
+                            for (u32 i = 0; i < sdf.voxels.size(); ++i) voxNZ += sdf.voxels[i] ? 1 : 0;
+                            std::cerr << "[SDFParse] mesh#" << mesh_sdfs_.size()
+                                      << " res=" << sdf.resolution[0] << "x" << sdf.resolution[1]
+                                      << "x" << sdf.resolution[2]
+                                      << " data=" << sdf.data.size()
+                                      << " (res3=" << (u64)sdf.resolution[0] * sdf.resolution[1] * sdf.resolution[2] << ")"
+                                      << " vox=" << sdf.voxels.size() << " nz=" << voxNZ
+                                      << " sdim=" << sdim
+                                      << " bounds=[" << sbmin[0] << "," << sbmin[1] << "," << sbmin[2]
+                                      << "]-[" << sbmax[0] << "," << sbmax[1] << "," << sbmax[2] << "]"
+                                      << " u16min=" << vmin << " u16max=" << vmax
+                                      << " dmax=" << (f32)vmax / 65535.0f * sdim
+                                      << std::endl;
+                        }
                         mesh_sdfs_.push_back(std::move(sdf));
                         sdfFound++;
                     }
@@ -239,6 +291,18 @@ f32 OfflineSDFMerger::SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) 
     f32 fy = (ly - sdf.bounds_min[1]) / stepY - 0.5f;
     f32 fz = (lz - sdf.bounds_min[2]) / stepZ - 0.5f;
 
+    // T8.10b: OUT-OF-RANGE GUARD — a voxel center outside this mesh's grid
+    // [0,res) must be treated as unoccupied positive distance, never clamped.
+    // The old clamp made occupied() hit the border texel and sampleData() its
+    // 1e10 sentinel, so min() over meshes wrote -1e10 into EMPTY-AIR voxels
+    // wherever a mesh's AABB marginally covered them (poisoned air = instant
+    // inside-hits for every SDF tracer).
+    if (!(fx >= 0.0f && fx <= (f32)sdf.resolution[0] - 1.0f &&
+          fy >= 0.0f && fy <= (f32)sdf.resolution[1] - 1.0f &&
+          fz >= 0.0f && fz <= (f32)sdf.resolution[2] - 1.0f)) {
+        return 1.0e10f;   // outside grid: positive far distance, NOT occupiable
+    }
+
     int32_t x0 = (int32_t)std::floor(fx), x1 = x0 + 1;
     int32_t y0 = (int32_t)std::floor(fy), y1 = y0 + 1;
     int32_t z0 = (int32_t)std::floor(fz), z1 = z0 + 1;
@@ -251,6 +315,23 @@ f32 OfflineSDFMerger::SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) 
     x0 = clampCoord(x0, sdf.resolution[0]); x1 = clampCoord(x1, sdf.resolution[0]);
     y0 = clampCoord(y0, sdf.resolution[1]); y1 = clampCoord(y1, sdf.resolution[1]);
     z0 = clampCoord(z0, sdf.resolution[2]); z1 = clampCoord(z1, sdf.resolution[2]);
+
+    // Sign via the bake's occupancy voxels (design documented in the header,
+    // never wired before): cells the bake marked inside/near-surface return a
+    // NEGATIVE distance, so the merged global field is properly signed and
+    // sphere tracing cannot step over thin/grazing surfaces — unsigned fields
+    // let relaxed marches pass straight through walls into the environment.
+    auto occupied = [&](int32_t x, int32_t y, int32_t z) -> bool {
+        if (sdf.voxels.empty()) return false;
+        const u32 idx = (u32)z * sdf.resolution[0] * sdf.resolution[1]
+                      + (u32)y * sdf.resolution[0]
+                      + (u32)x;
+        return idx < sdf.voxels.size() && sdf.voxels[idx] != 0;
+    };
+    const bool inside = occupied(
+        clampCoord((int32_t)std::lround(fx), sdf.resolution[0]),
+        clampCoord((int32_t)std::lround(fy), sdf.resolution[1]),
+        clampCoord((int32_t)std::lround(fz), sdf.resolution[2]));
 
     auto sampleData = [&](int32_t x, int32_t y, int32_t z, f32 wx, f32 wy, f32 wz) -> f32 {
         u32 idx = (u32)z * sdf.resolution[0] * sdf.resolution[1]
@@ -275,10 +356,18 @@ f32 OfflineSDFMerger::SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) 
     f32 c0 = c00 * (1 - ty) + c10 * ty;
     f32 c1 = c01 * (1 - ty) + c11 * ty;
 
-    return c0 * (1 - tz) + c1 * tz;
+    f32 d = c0 * (1 - tz) + c1 * tz;
+    // T8.10b FINAL SEMANTICS: UNSIGNED distance only. The occupancy-signed
+    // variant (inside → −d) filled hollow architecture: Sponza's atrium cavity
+    // was marked solid, so every interior probe ray insta-hit at d≈0 and the
+    // whole inner scene traced as one black block (measured: nave-air probe
+    // samples returned −2.7/−0.38/−3.5 m). Unsigned fields are what relaxed
+    // sphere-tracers (DDGITraceSDF / ScreenProbeTraceSDF) are designed for;
+    // the cross-nave transport now lives in SC-cached radiance on hit.
+    return d;
 }
 
-bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device) {
+bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* cachePath) {
     device_ = device;
     if (mesh_sdfs_.empty() || !device_) return false;
 
@@ -320,39 +409,123 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device) {
     };
 
     std::cerr << "[OfflineSDFMerger] Merging " << mesh_sdfs_.size()
-              << " mesh SDFs into " << res << "³ global volume..." << std::endl;
+              << " mesh SDFs into " << res << "³ global volume (per-mesh AABB, threaded)..."
+              << std::endl;
 
-    for (u32 gz = 0; gz < res; ++gz) {
-        for (u32 gy = 0; gy < res; ++gy) {
-            for (u32 gx = 0; gx < res; ++gx) {
-                f32 wx = origin_[0] + ((f32)gx + 0.5f) * stepX;
-                f32 wy = origin_[1] + ((f32)gy + 0.5f) * stepY;
-                f32 wz = origin_[2] + ((f32)gz + 0.5f) * stepZ;
+    // Per-mesh AABB sweep instead of per-voxel × all-meshes: empty space (most
+    // of the volume) is never touched by any mesh, and z slices are disjoint
+    // so workers need no locking. Semantics match the old loop exactly —
+    // min over meshes containing the voxel center (±0.01 margin), empty
+    // voxels get voxel_size*4.
+    {
+        std::atomic<u32> nextSlice{0};
+        std::atomic<u32> doneSlices{0};
+        const f32 emptyDist = voxel_size_ * 4.0f;
 
-                f32 bestDist = 1e10f;
+        auto worker = [&]() {
+            std::vector<f32> best((size_t)res * res, 1e10f);
+            for (;;) {
+                const u32 gz = nextSlice.fetch_add(1);
+                if (gz >= res) break;
+                const f32 wz = origin_[2] + ((f32)gz + 0.5f) * stepZ;
+                std::fill(best.begin(), best.end(), 1e10f);
+
                 for (const auto& sdf : mesh_sdfs_) {
-                    // Bounds check (with small margin for trilinear sampling)
-                    if (wx < sdf.bounds_min[0] - 0.01f || wx > sdf.bounds_max[0] + 0.01f ||
-                        wy < sdf.bounds_min[1] - 0.01f || wy > sdf.bounds_max[1] + 0.01f ||
-                        wz < sdf.bounds_min[2] - 0.01f || wz > sdf.bounds_max[2] + 0.01f)
+                    if (wz < sdf.bounds_min[2] - 0.01f || wz > sdf.bounds_max[2] + 0.01f)
                         continue;
+                    const f32 wy0 = (sdf.bounds_min[1] - 0.01f - origin_[1]) / stepY - 0.5f;
+                    const f32 wy1 = (sdf.bounds_max[1] + 0.01f - origin_[1]) / stepY - 0.5f;
+                    const f32 wx0 = (sdf.bounds_min[0] - 0.01f - origin_[0]) / stepX - 0.5f;
+                    const f32 wx1 = (sdf.bounds_max[0] + 0.01f - origin_[0]) / stepX - 0.5f;
+                    const int32_t gy0 = std::max(0, (int32_t)std::floor(wy0));
+                    const int32_t gy1 = std::min((int32_t)res - 1, (int32_t)std::ceil(wy1));
+                    const int32_t gx0 = std::max(0, (int32_t)std::floor(wx0));
+                    const int32_t gx1 = std::min((int32_t)res - 1, (int32_t)std::ceil(wx1));
 
-                    f32 d = SampleMeshSDF(sdf, wx, wy, wz);
-                    bestDist = std::min(bestDist, d);
+                    for (int32_t gy = gy0; gy <= gy1; ++gy) {
+                        const f32 wy = origin_[1] + ((f32)gy + 0.5f) * stepY;
+                        for (int32_t gx = gx0; gx <= gx1; ++gx) {
+                            const f32 wx = origin_[0] + ((f32)gx + 0.5f) * stepX;
+                            const f32 d = SampleMeshSDF(sdf, wx, wy, wz);
+                            // T8.10b: reject sentinel/garbage candidates —
+                            // anything beyond ±1e4 (the 1e10 out-of-grid
+                            // sentinel or a NaN/inf reinterpretation) must
+                            // never enter the min() reduction.
+                            if (!(d >= -1.0e4f && d <= 1.0e4f)) continue;
+                            f32& b = best[(size_t)gy * res + gx];
+                            if (d < b) b = d;
+                        }
+                    }
                 }
 
-                // If no mesh contains this voxel, set a large positive distance.
-                if (bestDist > 1e9f) bestDist = voxel_size_ * 4.0f;
+                const u64 zBase = (u64)gz * res * res;
+                for (u32 gy = 0; gy < res; ++gy) {
+                    for (u32 gx = 0; gx < res; ++gx) {
+                        f32 bd = best[(size_t)gy * res + gx];
+                        if (bd > 1e9f) bd = emptyDist;
+                        globalData[zBase + (u64)gy * res + gx] = f32toF16(bd);
+                    }
+                }
+                const u32 done = doneSlices.fetch_add(1) + 1;
+                if (done % 96 == 0) {
+                    std::cerr << "  Merged slice " << done << "/" << res << std::endl;
+                }
+            }
+        };
 
-                u64 idx = (u64)gz * res * res + (u64)gy * res + (u64)gx;
-                globalData[idx] = f32toF16(bestDist);
+        u32 hw = std::thread::hardware_concurrency();
+        if (hw == 0) hw = 4;
+        hw = std::min(hw, 12u);
+        std::vector<std::thread> pool;
+        for (u32 t = 1; t < hw; ++t) pool.emplace_back(worker);
+        worker();
+        for (auto& t : pool) t.join();
+    }
+    std::cerr << "[OfflineSDFMerger] Merge complete. Uploading to GPU..." << std::endl;
+
+    // T8.10d: SEAM SEAL — the merge is a union of per-mesh boxes; adjacent
+    // wall segments leave ≤1-voxel cracks where the field reads emptyDist.
+    // Tracer rays slip through the cracks and register sky (F6 horizontal
+    // gray stripes; probes lose wall-hit shading). One 6-neighbor closing
+    // pass: any voxel with a surface-band texel (d < 2×voxel) in its
+    // 6-neighborhood is clamped to 2×voxel. In-place scan; the directional
+    // bias of in-place closing is harmless at this scale.
+    // DISABLED BY DEFAULT — T8.10d experiment verdict: sealing paints a
+    // 1-voxel skin over EVERY surface (38.8M voxels = 69% of the volume, the
+    // crack set and the surface skin are indistinguishable at voxel
+    // granularity), flattening the field to ≈sealDist and collapsing
+    // L_2F 39.2→19.3. Set OFFLINE_SDF_SEAL=1 to reproduce. The real fix is
+    // asset-side: ContentTools must bake segment-gap-free SDFs (or emit
+    // combined watertight geometry).
+    if (std::getenv("OFFLINE_SDF_SEAL")) {
+        const f32 sealDist = voxel_size_ * 1.0f;
+        u64 sealed = 0;
+        auto at = [&](int32_t x, int32_t y, int32_t z) -> f32 {
+            if (x < 0 || y < 0 || z < 0 || x >= (int32_t)res || y >= (int32_t)res || z >= (int32_t)res)
+                return 1e30f;
+            const u16 h = globalData[(u64)z * res * res + (u64)y * res + x];
+            u32 sign = (h >> 15) & 1, ex = (h >> 10) & 0x1F, m = h & 0x3FF;
+            if (ex == 0) return sign ? -0.f : 0.f;
+            u32 bits = (sign << 31) | ((ex + 112) << 23) | (m << 13);
+            f32 f; std::memcpy(&f, &bits, 4); return f;
+        };
+        for (u32 z = 0; z < res; ++z)
+        for (u32 y = 0; y < res; ++y)
+        for (u32 x = 0; x < res; ++x) {
+            const u64 i = (u64)z * res * res + (u64)y * res + x;
+            f32 d = at((int32_t)x, (int32_t)y, (int32_t)z);
+            if (d <= sealDist) continue;
+            const f32 n = std::min(std::min(at((int32_t)x-1,(int32_t)y,(int32_t)z), at((int32_t)x+1,(int32_t)y,(int32_t)z)),
+                                   std::min(at((int32_t)x,(int32_t)y-1,(int32_t)z), at((int32_t)x,(int32_t)y+1,(int32_t)z)));
+            const f32 f = at((int32_t)x, (int32_t)y, (int32_t)z-1), bk = at((int32_t)x, (int32_t)y, (int32_t)z+1);
+            if (std::min(std::min(n, f), bk) <= sealDist) {
+                globalData[i] = f32toF16(sealDist);
+                ++sealed;
             }
         }
-        if (gz % 64 == 0) {
-            std::cerr << "\r  Merging slice " << gz << "/" << res << std::flush;
-        }
+        std::cerr << "[OfflineSDFMerger] Seam seal: " << sealed << " voxels clamped to "
+                  << sealDist << std::endl;
     }
-    std::cerr << "\n[OfflineSDFMerger] Merge complete. Uploading to GPU..." << std::endl;
 
     // Dump SDF statistics to verify data has both positive and negative values.
     {
@@ -382,6 +555,84 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device) {
                   << " pos=" << posCount << " zero=" << zeroCount
                   << " min=" << minVal << " max=" << maxVal << std::endl;
     }
+
+    // Optional disk cache — the merge is a multi-minute one-shot for a static
+    // scene; later runs LoadFromCache instead of re-parsing the pipeline model.
+    if (cachePath) {
+        struct CacheHeader {
+            char magic[8];   // "PGSDFC01"
+            u32  res;
+            f32  origin[3];
+            f32  extent[3];
+            f32  voxel;
+            u64  texelCount;
+        };
+        CacheHeader hdr{};
+        std::memcpy(hdr.magic, "PGSDFC01", 8);
+        hdr.res = res;
+        hdr.origin[0] = origin_[0]; hdr.origin[1] = origin_[1]; hdr.origin[2] = origin_[2];
+        hdr.extent[0] = extent_[0]; hdr.extent[1] = extent_[1]; hdr.extent[2] = extent_[2];
+        hdr.voxel = voxel_size_;
+        hdr.texelCount = totalVoxels;
+        std::ofstream out(cachePath, std::ios::binary | std::ios::trunc);
+        if (out) {
+            out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+            out.write(reinterpret_cast<const char*>(globalData.data()),
+                      (std::streamsize)(totalVoxels * sizeof(u16)));
+            out.close();
+            std::cerr << "[OfflineSDFMerger] Cache written: " << cachePath << " ("
+                      << (totalVoxels * sizeof(u16)) / (1024 * 1024) << " MB)" << std::endl;
+        } else {
+            std::cerr << "[OfflineSDFMerger] WARNING: cache write failed: " << cachePath << std::endl;
+        }
+    }
+
+    return UploadGlobal(device_, globalData.data());
+}
+
+bool OfflineSDFMerger::LoadFromCache(rhi::RHIDeviceBase* device, const char* cachePath) {
+    device_ = device;
+    if (!device_ || !cachePath) return false;
+
+    struct CacheHeader {
+        char magic[8];
+        u32  res;
+        f32  origin[3];
+        f32  extent[3];
+        f32  voxel;
+        u64  texelCount;
+    };
+    std::ifstream in(cachePath, std::ios::binary);
+    if (!in) return false;
+
+    CacheHeader hdr{};
+    in.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+    if (!in || std::memcmp(hdr.magic, "PGSDFC01", 8) != 0 ||
+        hdr.res != GLOBAL_RES || hdr.texelCount != (u64)GLOBAL_RES * GLOBAL_RES * GLOBAL_RES) {
+        std::cerr << "[OfflineSDFMerger] Cache stale/invalid: " << cachePath << std::endl;
+        return false;
+    }
+
+    std::vector<u16> globalData(hdr.texelCount);
+    in.read(reinterpret_cast<char*>(globalData.data()),
+            (std::streamsize)(hdr.texelCount * sizeof(u16)));
+    if (!in) {
+        std::cerr << "[OfflineSDFMerger] Cache truncated: " << cachePath << std::endl;
+        return false;
+    }
+
+    origin_[0] = hdr.origin[0]; origin_[1] = hdr.origin[1]; origin_[2] = hdr.origin[2];
+    extent_[0] = hdr.extent[0]; extent_[1] = hdr.extent[1]; extent_[2] = hdr.extent[2];
+    voxel_size_ = hdr.voxel;
+
+    std::cerr << "[OfflineSDFMerger] Loaded cache: " << cachePath << " ("
+              << (hdr.texelCount * sizeof(u16)) / (1024 * 1024) << " MB)" << std::endl;
+    return UploadGlobal(device_, globalData.data());
+}
+
+bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globalData) {
+    const u32 res = GLOBAL_RES;
+    const u64 totalVoxels = (u64)res * res * res;
 
     // Create Texture3D and upload.
     rhi::TextureDesc desc{};
@@ -476,6 +727,113 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device) {
     device_->DestroyBuffer(staging);
 
     std::cerr << "[OfflineSDFMerger] Upload complete (" << totalSize / (1024*1024) << " MB)" << std::endl;
+
+    // T8.10b self-check (OFFLINE_SDF_VERIFY=1): read the texture back and
+    // bit-compare against the CPU-side source. A clean pass proves the upload
+    // path; any row/slice drift or format reinterpretation shows up as
+    // mismatches with coordinates that fingerprint the bug class.
+    if (std::getenv("OFFLINE_SDF_VERIFY")) {
+        rhi::BufferDesc vDesc{};
+        vDesc.size = totalSize;
+        vDesc.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
+        vDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+        vDesc.usage = rhi::GPUMemoryUsage::Readback;
+        vDesc.name = "OfflineSDF_VerifyStaging";
+        rhi::ResourceHandle vStage = device_->CreateBuffer(vDesc);
+        bool ok = vStage != rhi::handles::INVALID_RESOURCE;
+        if (ok) {
+            auto vcHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+            ok = vcHandle != rhi::handles::INVALID_COMMAND_BUFFER;
+            if (ok) {
+#if OFFLINE_SDF_VULKAN_PATH
+                auto* vc = dynamic_cast<rhi::VulkanDevice*>(device_)
+                               ? static_cast<rhi::VulkanDevice*>(device_)->GetCommandBuffer(vcHandle)
+                               : nullptr;
+                if (!vc) { ok = false; }
+                else {
+                    rhi::BufferTextureCopyRegion vr{};
+                    vr.bufferOffset = 0;
+                    vr.bufferRowLength = alignedRowPitch / bytesPerTexel;
+                    vr.bufferImageHeight = res;
+                    vr.imageSubresource.mipLevel = 0;
+                    vr.imageSubresource.baseArrayLayer = 0;
+                    vr.imageSubresource.layerCount = 1;
+                    vr.imageOffset = {0, 0, 0};
+                    vr.imageExtent = {res, res, res};
+                    vc->Begin();
+                    rhi::ResourceBarrier toRd{};
+                    toRd.resource = global_sdf_texture_;
+                    toRd.beforeState = rhi::ResourceState::ShaderResource;
+                    toRd.afterState = rhi::ResourceState::CopySource;
+                    toRd.subresource = 0xFFFFFFFF;
+                    vc->InsertBarrier(&toRd, 1);
+                    vc->CopyTextureToBuffer(global_sdf_texture_, vStage, &vr, 1);
+                    rhi::ResourceBarrier back{};
+                    back.resource = global_sdf_texture_;
+                    back.beforeState = rhi::ResourceState::CopySource;
+                    back.afterState = rhi::ResourceState::ShaderResource;
+                    back.subresource = 0xFFFFFFFF;
+                    vc->InsertBarrier(&back, 1);
+                    vc->End();
+                    vc->Submit();
+                    vc->WaitForCompletion();
+                }
+#endif
+            }
+            if (ok && std::getenv("OFFLINE_SDF_VERIFY")) {
+                if (void* vm = device_->MapBuffer(vStage, 0, totalSize)) {
+                    const u16* gpu = static_cast<const u16*>(vm);
+                    u64 mismatch = 0; f32 maxAbs = 0.f;
+                    int shown = 0;
+                    for (u32 gz = 0; gz < res && shown < 8; ++gz)
+                    for (u32 gy = 0; gy < res && shown < 8; ++gy)
+                    for (u32 gx = 0; gx < res; ++gx) {
+                        const u64 li = (u64)gz * res * res + (u64)gy * res + gx;
+                        const u64 gi = (u64)gz * slicePitch / sizeof(u16)
+                                     + (u64)gy * alignedRowPitch / sizeof(u16) + gx;
+                        u16 c = globalData[li], g = gpu[gi];
+                        if (c != g) {
+                            ++mismatch;
+                            if (shown < 8) {
+                                auto dec = [](u16 h) -> f32 {
+                                    u32 sign = (h >> 15) & 1, ex = (h >> 10) & 0x1F, m = h & 0x3FF;
+                                    if (ex == 0) return sign ? -0.f : 0.f;
+                                    u32 b = (sign << 31) | ((ex + 112) << 23) | (m << 13);
+                                    f32 f; std::memcpy(&f, &b, 4); return f;
+                                };
+                                std::cerr << "[OfflineSDFVerify] first diffs (x,y,z cpu gpu): "
+                                          << gx << "," << gy << "," << gz << " "
+                                          << dec(c) << " vs " << dec(g) << "\n";
+                                ++shown;
+                            }
+                        }
+                        if (li == totalVoxels - 1 || gi >= totalVoxels) break;
+                    }
+                    // Full-count pass without early-exit cap.
+                    if (shown == 8) {
+                        mismatch = 0;
+                        for (u64 li = 0; li < totalVoxels; ++li) {
+                            u32 gz = u32(li / ((u64)res * res));
+                            u32 rem = u32(li % ((u64)res * res));
+                            u32 gy = rem / res, gx = rem % res;
+                            u64 gi = (u64)gz * slicePitch / sizeof(u16)
+                                   + (u64)gy * alignedRowPitch / sizeof(u16) + gx;
+                            if (globalData[li] != gpu[gi]) ++mismatch;
+                        }
+                    }
+                    std::cerr << "[OfflineSDFVerify] texels=" << totalVoxels
+                              << " mismatched=" << mismatch
+                              << " (" << (100.0 * double(mismatch) / double(totalVoxels)) << "%)"
+                              << (mismatch ? "  => UPLOAD PATH CORRUPT" : "  => upload bit-exact")
+                              << std::endl;
+                    device_->UnmapBuffer(vStage);
+                } else ok = false;
+            } else if (!ok) {
+                std::cerr << "[OfflineSDFVerify] readback setup failed" << std::endl;
+            }
+            device_->DestroyBuffer(vStage);
+        }
+    }
     return true;
 }
 

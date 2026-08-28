@@ -554,12 +554,25 @@ fragment float4 fragmentFusionIndirect(
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     float4 ssgi4   = ssgiColor.sample(s, in.uv);
-    float3 ddgi    = ddgiColor.sample(s, in.uv).rgb;
     float4 spgi4   = spgiColor.sample(s, in.uv);
     float3 albedo  = albedoTex.sample(s, in.uv).rgb;
     float  ssao    = ssaoTex.sample(s, in.uv).r;
     if (ssao <= 0.0f) ssao = 1.0f;
     float ao = pow(ssao, 1.5f);
+
+    // 3×3 blur on ddgi to smooth probe cell boundaries (parity with Vulkan
+    // FusionIndirect.frag — FusionIndirect runs half-res, 1 texel = 2 px).
+    float2 texelSize = 1.0f / float2(ddgiColor.get_width(), ddgiColor.get_height());
+    float3 ddgiBlur = float3(0.0f);
+    float totalWeight = 0.0f;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float2 offset = float2(float(x), float(y)) * texelSize;
+            ddgiBlur += ddgiColor.sample(s, in.uv + offset).rgb;
+            totalWeight += 1.0f;
+        }
+    }
+    ddgiBlur /= totalWeight;
 
     float3 ssgi_irr = ssgi4.rgb;
     float  ssgi_hit = ssgi4.a;
@@ -572,7 +585,7 @@ fragment float4 fragmentFusionIndirect(
 
     // Unified three-source blend (T2.3 — matches Vulkan FusionIndirect.frag)
     float3 indirect = albedo *
-        (ddgi * 0.8f * (1.0f - spgi_w)
+        (ddgiBlur * 0.8f * (1.0f - spgi_w)
        + ssgi_irr * ssgi_conf * 0.2f * (1.0f - spgi_w)
        + spgi4.rgb * spgi_w * 1.25f) * 0.7f;
     indirect *= ao;
@@ -658,8 +671,19 @@ kernel void computeFusionIndirect(
     uint2 ddgiCoord = gid / 2u;
     uint ddgiW = ddgiColor.get_width();
     uint ddgiH = ddgiColor.get_height();
-    float3 ddgi = (ddgiCoord.x < ddgiW && ddgiCoord.y < ddgiH)
-        ? ddgiColor.read(ddgiCoord).rgb : float3(0.0f);
+    // 3×3 blur at half-res coords to smooth probe cell boundaries (parity
+    // with Vulkan FusionIndirect.frag).
+    float3 ddgiBlur = float3(0.0f);
+    float ddgiWsum = 0.0f;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            int2 sc = int2(ddgiCoord) + int2(x, y);
+            if (sc.x < 0 || sc.y < 0 || sc.x >= int(ddgiW) || sc.y >= int(ddgiH)) continue;
+            ddgiBlur += ddgiColor.read(uint2(sc)).rgb;
+            ddgiWsum += 1.0f;
+        }
+    }
+    float3 ddgi = (ddgiWsum > 0.0f) ? ddgiBlur / ddgiWsum : float3(0.0f);
 
     float3 ssgi_irr = ssgi4.rgb;
     float  ssgi_hit = ssgi4.a;

@@ -55,8 +55,10 @@ struct DDGIVolumeView {
 // 当前各模块映射：
 //   - LumenDDGIPass:  EMA → 现有 irradiance/depth EMA（默认，行为不变）；
 //                     EMAVarianceClamp / Reprojection → 暂映射为 EMA（TODO X3）
-//   - ScreenProbeGIPass: EMA → 现有 temporal accumulation alpha 路径（默认）；
-//                     其余值暂存不生效（TODO X3）
+//   - ScreenProbeGIPass: F3 (M7) 已实装 — EMA → 现有重投影+双线性+相对钳制
+//                     路径（默认）；EMAVarianceClamp → +邻域 AABB 方差钳制
+//                     （TemporalLib::varianceClampAABB，L1 随 L0 等比收缩）；
+//                     Reprojection → 纯双线性历史复用（跳过钳制/梯度限幅）
 //   - SurfaceCachePass:  枚举存储占位（SC 自身无 probe 时域链，X3 归并）
 // ============================================================================
 enum class GITemporalStrategy {

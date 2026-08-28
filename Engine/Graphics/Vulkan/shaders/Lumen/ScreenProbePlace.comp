@@ -20,6 +20,10 @@
 // depth=0, normal=1, positions=2, normals=3, global=4.
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+// F5 (M7): per-probe jitter helpers (spgiJitterOffset01).
+#include "ShaderLib/EncodeLib.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -49,7 +53,9 @@ layout(set = 0, binding = 4, std140) uniform GlobalBlock {
     vec4 sdf_voxel_sizes[3];
     vec4 sdf_extents[3];
     uvec4 sdf_resolutions;       // xyz=res0/1/2, w=cascadeCount
-    vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=unused
+    vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=jitter_max_world (F5)
+    vec4 hzb_params;             // declared for offset parity (unused here)
+    vec4 cache_params;           // F4: z = adaptive_pos_error threshold (0 → legacy variance test)
 } global;
 
 // --------------------------------------------------------------------------------
@@ -90,8 +96,25 @@ void screen_probe_place() {
     vec2 pixelCenter = vec2(gx * downsample + downsample * 0.5,
                             gy * downsample + downsample * 0.5);
 
+    // ------------------------------------------------------------------
+    // F5 (M7) per-frame position jitter: quarter-cell screen offset,
+    // world-space clamped so the Temporal pass's position-consistency gate
+    // (posThreshold) never rejects a probe solely because it moved by the
+    // jitter. camera_position.w = frame seed (< 0 disables);
+    // surface_cache_params.w = jitter_max_world (<= 0 disables).
+    // Read budget: +1 depth (center) + up to +1 resampled depth on the rare
+    // clamp path — worst case 13 device reads/thread, within the 32 cap.
+    // ------------------------------------------------------------------
+    float frameSeed = global.camera_position.w;
+    float jitterMaxWorld = global.surface_cache_params.w;
+    vec2 jitterPx = (frameSeed >= 0.0 && jitterMaxWorld > 0.0)
+        ? spgiJitterOffset01(probeIdx, frameSeed) * (downsample * 0.25)
+        : vec2(0.0);
+
+    vec2 pixel = pixelCenter + jitterPx;
+
     // UV coordinates [0, 1]
-    vec2 uv = pixelCenter / vec2(renderW, renderH);
+    vec2 uv = pixel / vec2(renderW, renderH);
 
     // Sample depth with POINT filtering — linear interpolation on depth
     // produces ghost values at object edges, creating floating probes.
@@ -99,37 +122,98 @@ void screen_probe_place() {
                                    vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
     float depth = texelFetch(depthTexture, depthTexel, 0).r;
 
+    // World-space amplitude clamp: nearby surfaces turn a few pixels of
+    // screen offset into a large world offset — shrink the jitter (and
+    // re-sample) so it stays under the temporal gate budget.
+    if (jitterPx != vec2(0.0)) {
+        ivec2 centerTexel = ivec2(clamp(pixelCenter,
+                                        vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
+        float depthC = texelFetch(depthTexture, centerTexel, 0).r;
+        vec3 worldC = reconstructWorldPos(pixelCenter / vec2(renderW, renderH),
+                                          depthC, global.inv_view_projection);
+        vec3 worldJ = reconstructWorldPos(uv, depth, global.inv_view_projection);
+        float delta = distance(worldC, worldJ);
+        if (delta > jitterMaxWorld) {
+            pixel = pixelCenter + jitterPx * (jitterMaxWorld / max(delta, 1e-5));
+            uv = pixel / vec2(renderW, renderH);
+            depthTexel = ivec2(clamp(pixel,
+                                     vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
+            depth = texelFetch(depthTexture, depthTexel, 0).r;
+        }
+    }
+
     // Check for sky / far plane ('active' is a GLSL reserved word -> use isActive)
     bool isActive = (depth > 0.0001 && depth < 0.999);
 
     // ------------------------------------------------------------------
-    // T5.3 two-level adaptive grid: checkerboard coarse tier always active;
-    // fine-tier cells activate only where the local block has depth/normal
-    // variance. Gather/SpatialFilter use a cross pattern whose neighbors of
-    // any (x+y odd) cell are all coarse — inactive fine cells stay covered.
+    // T5.3 two-level adaptive grid + F4 (M7) refinement: checkerboard
+    // coarse tier always active; fine-tier activation driven by the UE-style
+    // interpolation-failure test — reconstruct the center's world position
+    // by bilinear blend of the 4 edge-neighbor COARSE probes' depth-
+    // reprojected positions; a large error means the bilinear Gather
+    // reconstruction would be wrong here. cache_params.z <= 0 falls back to
+    // the T5.3 depth/normal variance heuristic.
+    // Read budget: F4 path 4 depth fetches (legacy path: 8) — worst case
+    // with jitter 13 device reads/thread, within the 32 cap.
     // ------------------------------------------------------------------
     if (isActive && ((gx + gy) & 1u) != 0u) {
-        vec3 nC = texelFetch(normalTexture, depthTexel, 0).rgb;
-        nC = normalize(nC * 2.0 - 1.0);
-        float dMin = depth, dMax = depth;
-        float minNDot = 1.0;
-        ivec2 halfBlock = ivec2(int(downsample) / 2);
-        ivec2 cardinals[4] = ivec2[4](
-            depthTexel + ivec2(halfBlock.x, 0),
-            depthTexel - ivec2(halfBlock.x, 0),
-            depthTexel + ivec2(0, halfBlock.y),
-            depthTexel - ivec2(0, halfBlock.y));
-        ivec2 maxTexel = ivec2(int(renderW) - 1, int(renderH) - 1);
-        for (int i = 0; i < 4; ++i) {
-            ivec2 t = clamp(cardinals[i], ivec2(0), maxTexel);
-            float d = texelFetch(depthTexture, t, 0).r;
-            dMin = min(dMin, d); dMax = max(dMax, d);
-            vec3 n = texelFetch(normalTexture, t, 0).rgb;
-            n = normalize(n * 2.0 - 1.0);
-            minNDot = min(minNDot, dot(nC, n));
+        bool highVariance;
+        float posErrThresh = global.cache_params.z;
+        if (posErrThresh > 0.0) {
+            vec3 posC = reconstructWorldPos(uv, depth, global.inv_view_projection);
+            ivec2 maxTexel = ivec2(int(renderW) - 1, int(renderH) - 1);
+            ivec2 ncell[4] = ivec2[4](ivec2(gx - 1, gy), ivec2(gx + 1, gy),
+                                      ivec2(gx, gy - 1), ivec2(gx, gy + 1));
+            bool interpFailed = false;
+            vec3 acc = vec3(0.0);
+            float wsum = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                ivec2 cc = ncell[i];
+                if (cc.x < 0 || cc.y < 0 || cc.x >= int(gridW) || cc.y >= int(gridH)) continue;
+                ivec2 tex = clamp(ivec2(cc.x * int(downsample) + int(downsample) / 2,
+                                        cc.y * int(downsample) + int(downsample) / 2),
+                                  ivec2(0), maxTexel);
+                float d = texelFetch(depthTexture, tex, 0).r;
+                if (d <= 0.0001 || d >= 0.999) {
+                    // Sky/invalid coarse neighbor — interpolation cannot be
+                    // trusted across a depth discontinuity: activate.
+                    interpFailed = true;
+                    break;
+                }
+                vec2 uvN = (vec2(tex) + 0.5) / vec2(renderW, renderH);
+                acc += reconstructWorldPos(uvN, d, global.inv_view_projection) * 0.25;
+                wsum += 0.25;
+            }
+            if (!interpFailed && wsum > 0.0) {
+                // Partial neighborhoods (screen edge) loosen the threshold
+                // proportionally to the missing weight.
+                float scale = 1.0 + (1.0 - wsum);
+                interpFailed = distance(acc / wsum, posC) > posErrThresh * scale;
+            }
+            highVariance = interpFailed || (wsum <= 0.0);
+        } else {
+            vec3 nC = texelFetch(normalTexture, depthTexel, 0).rgb;
+            nC = normalize(nC * 2.0 - 1.0);
+            float dMin = depth, dMax = depth;
+            float minNDot = 1.0;
+            ivec2 halfBlock = ivec2(int(downsample) / 2);
+            ivec2 cardinals[4] = ivec2[4](
+                depthTexel + ivec2(halfBlock.x, 0),
+                depthTexel - ivec2(halfBlock.x, 0),
+                depthTexel + ivec2(0, halfBlock.y),
+                depthTexel - ivec2(0, halfBlock.y));
+            ivec2 maxTexel = ivec2(int(renderW) - 1, int(renderH) - 1);
+            for (int i = 0; i < 4; ++i) {
+                ivec2 t = clamp(cardinals[i], ivec2(0), maxTexel);
+                float d = texelFetch(depthTexture, t, 0).r;
+                dMin = min(dMin, d); dMax = max(dMax, d);
+                vec3 n = texelFetch(normalTexture, t, 0).rgb;
+                n = normalize(n * 2.0 - 1.0);
+                minNDot = min(minNDot, dot(nC, n));
+            }
+            // Depth range in [0,1] NDC + normal deviation drive the fine tier.
+            highVariance = (dMax - dMin > 0.0015) || (minNDot < 0.8);
         }
-        // Depth range in [0,1] NDC + normal deviation drive the fine tier.
-        bool highVariance = (dMax - dMin > 0.0015) || (minNDot < 0.8);
         if (!highVariance) isActive = false;
     }
 

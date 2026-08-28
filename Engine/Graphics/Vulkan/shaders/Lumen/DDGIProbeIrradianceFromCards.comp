@@ -9,24 +9,23 @@
 // indices and SH projection weights, then multiplies by per-card radiance (from
 // DDGICardRadianceAvg) to produce updated probe irradiance SH coefficients.
 //
-// Confidence-based blending with Path A (SDF Ray Trace):
-//   - Reads convergenceAge from confidence buffer
-//   - Young probes (age < 0.33): SC projection dominates (bootstrap)
-//   - Mature probes (age >= 0.33): Path A result preserved, B contribution = 0
+// SC-first hierarchy (Lumen-like sparse cache): the surface-cache projection
+// is the PRIMARY feed for probe irradiance; the SDF ray trace result (Path A,
+// already in the output buffer) fills in proportionally to how thin the SC
+// coverage is. Coverage = assigned-card count × per-card atlas validity.
 //
-// Uses only L0+L1 (4 SH bands) — L2 coefficients (4-8) preserved from Path A.
+// All 9 SH bands (L0-L2) are projected and written; projection signs match
+// DDGIUpdateIrradiance's basis.
 //
-// Dispatch: (ProbeUpdateCount, 1, 1), threadGroupSize = (64, 1, 1)
+// Dispatch: (ProbeCountTotal, 1, 1), threadGroupSize = (64, 1, 1)
 //
 // Flat bindings (Vulkan forbids Metal's overlapping texture/buffer namespaces):
 //   binding 0 = UniformBuffer       DDGIVolumeData (336 bytes, inline)
 //   binding 1 = readonly buffer     ProbeContribRange ranges[]
 //   binding 2 = readonly buffer     ProbeCardContrib contribs[]
-//   binding 3 = readonly buffer     vec4 card_radiance[] (9 vec4/probe? no — per card)
+//   binding 3 = readonly buffer     vec4 card_radiance[] (per card)
 //   binding 4 = readonly buffer     vec4 irradiance_history[] (9 vec4/probe)
 //   binding 5 = buffer vec4         irradiance_output[] (9 vec4/probe, write)
-//   binding 6 = readonly buffer     uint probeUpdateList[]
-//   binding 7 = readonly buffer     float confidenceBuffer[]
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -84,20 +83,13 @@ struct ProbeContribRange {
     uint _pad1;
 };
 
-// ProbeCardContrib — 32 bytes. Metal had { uint card_index; float sh_weights[4]; }
-// (20 bytes). std430 rounds the struct to 16B alignment for array elements and
-// the 4 trailing floats would make the struct 20B, so the array stride becomes
-// 32B; pad explicitly to make the contract explicit (4 floats weights + 3 pad
-// + card_index at offset 0, trailing pad to 32B).
+// ProbeCardContrib — 40 bytes tight: card_index + 9 SH weights, all scalars so
+// the std430 array stride is exactly 40B. This matches the C++
+// SCProbeCardContrib byte-for-byte (the previous 32B-padded declaration
+// desynced from the 20B C++ struct and misread every element after the first).
 struct ProbeCardContrib {
     uint  card_index;   //  0
-    float w0;           //  4
-    float w1;           //  8
-    float w2;           // 12
-    float w3;           // 16
-    float _pad0;        // 20
-    float _pad1;        // 24
-    float _pad2;        // 28
+    float w[9];         //  4..39  (4 + 36 = 40 bytes total, no tail pad)
 };
 
 layout(set = 0, binding = 1, std430) readonly buffer RangeBuffer {
@@ -124,80 +116,77 @@ layout(set = 0, binding = 5, std430) buffer IrradianceOutputBuffer {
     vec4 irradiance_output[];
 };
 
-layout(set = 0, binding = 6, std430) readonly buffer ProbeUpdateListBuffer {
-    uint probeUpdateList[];
-};
-
-// confidenceBuffer[probeIdx*4 + 3] = convergenceAge (ramps 0->1 over ~30 frames).
-layout(set = 0, binding = 7, std430) readonly buffer ConfidenceBuffer {
-    float confidenceBuffer[];
-};
-
 // --------------------------------------------------------------------------------
 // Main
 // --------------------------------------------------------------------------------
 void ddgi_probe_irradiance_from_cards() {
-    uint gid = gl_GlobalInvocationID.x;
-    if (gid >= volume.ProbeUpdateCount) return;
+    uint probeIdx = gl_GlobalInvocationID.x;
+    if (probeIdx >= volume.ProbeCountTotal) return;
 
-    uint probeIdx = probeUpdateList[gid];
     ProbeContribRange range = ranges[probeIdx];
 
-    // Accumulate SH from card contributions (up to 6 contributions per probe).
-    vec3 sh[4];
-    for (uint i = 0u; i < 4u; ++i) sh[i] = vec3(0.0);
+    // Accumulate full L0-L2 SH from card contributions.
+    vec3 sh[9];
+    for (uint i = 0u; i < 9u; ++i) sh[i] = vec3(0.0);
 
-    uint n = min(range.count, 6u);
+    uint n = min(range.count, 12u);
+    float validSum = 0.0;
     for (uint i = 0u; i < n; ++i) {
         ProbeCardContrib c = contribs[range.start + i];
-        vec3 radiance = card_radiance[c.card_index].xyz;
-        sh[0] += c.w0 * radiance;
-        sh[1] += c.w1 * radiance;
-        sh[2] += c.w2 * radiance;
-        sh[3] += c.w3 * radiance;
+        vec4 cr = card_radiance[c.card_index];
+        vec3 radiance = cr.xyz;
+        validSum += cr.w;   // per-card atlas coverage (0..1, from CardRadianceAvg)
+        for (uint b = 0u; b < 9u; ++b)
+            sh[b] += c.w[b] * radiance;
     }
 
     uint base = probeIdx * 9u;
     float alpha = volume.ProbeHysteresis;
     vec3 sh0 = sh[0];
     float l1Limit = max(length(sh0) * 3.0, 0.1);
+    float l2Limit = max(length(sh0) * 2.0, 0.1);
 
-    // Step 1: Compute SC-filtered results (temporal blend with history + energy clamp).
-    vec3 scResult[4];
-    for (uint i = 0u; i < 4u; ++i) {
+    // Step 1: SC-filtered results — temporal blend with history + energy
+    // clamps mirroring DDGIUpdateIrradiance (L0 <= 10, L1 <= 3|L0|, L2 <= 2|L0|).
+    vec3 scResult[9];
+    for (uint i = 0u; i < 9u; ++i) {
         vec3 history = irradiance_history[base + i].xyz;
         uvec3 bits = floatBitsToUint(history);
         if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
             history = vec3(0.0);
 
         vec3 filtered = mix(history, sh[i], alpha);
-        if (i == 0u) {
-            float mag = length(filtered);
-            if (mag > 10.0) filtered *= 10.0 / mag;
-        } else {
-            float mag = length(filtered);
-            if (mag > l1Limit) filtered *= l1Limit / mag;
-        }
+        float limit = (i == 0u) ? 10.0 : ((i < 4u) ? l1Limit : l2Limit);
+        float mag = length(filtered);
+        if (mag > limit) filtered *= limit / mag;
         scResult[i] = filtered;
     }
 
-    // Step 2: Read Path A result (SDF ray trace already wrote to output this frame).
-    vec3 pathA[4];
-    for (uint i = 0u; i < 4u; ++i) {
+    // Step 2: Path A result (SDF ray trace already wrote to output this frame).
+    vec3 pathA[9];
+    for (uint i = 0u; i < 9u; ++i) {
         pathA[i] = irradiance_output[base + i].xyz;
     }
 
-    // Step 3: Confidence-based blend.
-    // convergenceAge ramps 0->1 over ~30 frames; young probes get SC bootstrap.
-    float convergenceAge = confidenceBuffer[probeIdx * 4u + 3u];
-    float bootstrapWeight = clamp(1.0 - convergenceAge * 3.0, 0.0, 1.0);
+    // Step 3: trace-first blend. The card-average path is occlusion-unaware
+    // and low-frequency (one radiance per whole card, solid-angle weighted
+    // with no visibility) — at the old 0.85 takeover it washed the field
+    // flat (measured: 326/407 cards converging to a uniform ~1.0, killing
+    // the sun-patch/shade contrast). Path A samples the SC lighting atlas
+    // per hit texel through the high-res offline SDF, so it keeps authority;
+    // the card average now only stabilizes the low-frequency floor (cap 0.45)
+    // and still fills where SC coverage is thin (countCoverage).
+    float countCoverage = clamp(float(n) / 6.0, 0.0, 1.0);
+    float validCoverage = (n > 0u) ? clamp(validSum / float(n), 0.0, 1.0) : 0.0;
+    float scLum = dot(scResult[0], vec3(0.2126, 0.7152, 0.0722));
+    float pathLum = max(dot(pathA[0], vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+    float agree = smoothstep(0.0, 1.0, scLum / pathLum);
+    const float SC_TAKEOVER_MAX = 0.45;
+    float scWeight = countCoverage * validCoverage * SC_TAKEOVER_MAX * agree;
 
-    // Write blended L0 + L1. Preserve output w component (history reads use .xyz).
-    for (uint i = 0u; i < 4u; ++i) {
-        vec3 blended = mix(pathA[i], scResult[i], bootstrapWeight);
+    for (uint i = 0u; i < 9u; ++i) {
+        vec3 blended = mix(pathA[i], scResult[i], scWeight);
         vec4 prev = irradiance_output[base + i];
         irradiance_output[base + i] = vec4(blended, prev.w);
     }
-
-    // L2 bands (4-8): preserve Path A values (already in output from SDF ray trace).
 }

@@ -362,14 +362,16 @@ namespace primal::tools
 					{
 						vertex& v{ m.vertices[i] };
 #if defined(_MSC_VER)
-						t_signs[i] = (u8)((v.tangent.w > 0.f) && (v.tangent.z > 0.f));
+						t_signs[i] |= (u8)((v.tangent.w < 0.f) ? 0x01 : 0x00);
+						t_signs[i] |= (u8)((v.tangent.z > 0.f) ? 0x04 : 0x00);
 						tangents[i] = { (u16)pack_float<16>(clamp(v.tangent.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(clamp(v.tangent.y, -1.f, 1.f), -1.f, 1.f) };
 #elif defined(__clang__)
 						if (!std::isfinite(v.tangent.x) || !std::isfinite(v.tangent.y) || !std::isfinite(v.tangent.z))
 						{
 							v.tangent = { 0.f, 1.f, 0.f, 1.f };
 						}
-						t_signs[i] = (u8)((v.tangent.w > 0.f) && (v.tangent.z > 0.f));
+						t_signs[i] |= (u8)((v.tangent.w < 0.f) ? 0x01 : 0x00);
+						t_signs[i] |= (u8)((v.tangent.z > 0.f) ? 0x04 : 0x00);
 						tangents[i] = { (u16)pack_float<16>(math::clamp(v.tangent.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(math::clamp(v.tangent.y, -1.f, 1.f), -1.f, 1.f) };
 #endif	
 					}

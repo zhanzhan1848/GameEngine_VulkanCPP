@@ -42,7 +42,12 @@ const float PI = 3.14159265358979;
 //   - SHADOW_AMBIENT_SCALE: ambient is multiplied by
 //     mix(SHADOW_AMBIENT_SCALE, 1.0, shadowVisibility), so shadowed pixels
 //     get only SHADOW_AMBIENT_SCALE × IBL_INTENSITY → shadows read darker.
-const float DIRECT_INTENSITY   = 2.5;
+// T8.10h: 2.5→3.125 (+25%). User-audit: sunlit p95 ≈153/255 read as
+// overcast; sunlit-region indirect share measured 32% (physical 15-25%).
+// This knob scales SCREEN direct only — camera light_color also drives
+// probe rays (×3.0 into the SC↔probe loop), so raising that instead would
+// shift the loop equilibrium (T8.4 lesson).
+const float DIRECT_INTENSITY   = 3.125;
 const float IBL_INTENSITY      = 0.15;   // lowered: IBL was too bright (wrong cube view binding makes samples unpredictable)
 const float SHADOW_AMBIENT_SCALE = 0.05; // crushed: shadowed pixels get very little ambient for darker shadows
 

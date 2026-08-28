@@ -2,8 +2,9 @@
 // Vulkan Lumen FusionIndirect — GLSL port of DeferredLighting.metal::fragmentFusionIndirect.
 // Entry point: fusion_indirect  (glslangValidator --source-entrypoint main -e fusion_indirect)
 //
-// Half-res pass: pre-combine GI sources + albedo + ssao -> indirect contribution.
-// Includes 3×3 blur on DDGI to smooth probe cell boundaries.
+// Full-res pass: pre-combine GI sources + albedo + ssao -> indirect contribution.
+// DDGI remains a half-res low-frequency input, while full-res SPGI/albedo are
+// preserved at receiver edges instead of being destructively downsampled.
 
 #extension GL_EXT_samplerless_texture_functions : enable
 //
@@ -30,13 +31,29 @@ void fusion_indirect() {
     vec4 ssgi4   = texture(sampler2D(ssgiColor, defaultSampler), inUv);
     vec3 ddgi    = texture(sampler2D(ddgiColor, defaultSampler), inUv).rgb;
     vec4 spgi4   = texture(sampler2D(spgiColor, defaultSampler), inUv);
+#ifdef GI_NO_DDGI
+    ddgi = vec3(0.0);
+#endif
+#ifdef GI_NO_SPGI
+    spgi4 = vec4(0.0);
+#endif
     vec3 albedo  = texture(sampler2D(albedoTex, defaultSampler), inUv).rgb;
     float ssao   = texture(sampler2D(ssaoTex, defaultSampler), inUv).r;
     if (ssao <= 0.0) ssao = 1.0;
-    float ao = pow(ssao, 1.5);
+    // SSAO is a local contact-shadow approximation, not a validity mask for
+    // probe lighting.  Let it shape DDGI without erasing the low-frequency
+    // coloured bounce in the heavily occluded second-floor arcades.
+    float ao = mix(0.4, 1.0, pow(ssao, 1.5));
 
     vec3 ssgi_irr  = ssgi4.rgb;
     float ssgi_hit  = ssgi4.a;
+
+    // GI_ISOLATE A/B (M8/T8.7): compile-time variants that zero one GI source
+    // each — identifies which path actually feeds a pixel region.
+#ifdef GI_NO_SSGI
+    ssgi_irr = vec3(0.0);
+    ssgi_hit = 0.0;
+#endif
 
     // SSGI confidence: alpha stores average hit distance in world units
     // (max_trace_distance = 30). Normalize against the trace cap, not a
@@ -46,38 +63,71 @@ void fusion_indirect() {
     float ssgi_hit_norm = clamp(ssgi_hit, 0.0, 30.0) / 30.0;
     float ssgi_conf = clamp(1.0 - ssgi_hit_norm * 0.7, 0.3, 1.0);
 
-    // SPGI confidence gate (T2.3): gather output alpha = probe confidence.
-    // The dummy 1x1 black texture bound when SPGI is disabled has alpha 0 →
-    // weight 0 → formula degrades exactly to the DDGI+SSGI-only blend.
-    float spgi_w = clamp(spgi4.a * 2.0, 0.0, 1.0);
+    // SPGI weight (T2.3): gather output alpha = probe confidence. The dummy
+    // 1x1 black texture bound when SPGI is disabled has alpha 0, and the
+    // formula below then degrades to the legacy DDGI+SSGI blend.
+    // Capped at 0.9 so the world-probe layer always keeps a floor, AND scaled
+    // by the result luminance: in enclosed interiors every SPGI ray hits
+    // geometry (hitRatio ≈ 1 → high confidence) but the geometry is unlit, so
+    // SPGI is confidently black — exactly where the accumulated world-probe
+    // ambient must take over instead of being suppressed to 10%.
+    float spgiLum = dot(spgi4.rgb, vec3(0.2126, 0.7152, 0.0722));
+    // T8.7: SPGI may only suppress the DDGI/ambient layers when it carries
+    // REAL light. The old 0.002 lower bound let "confidently near-black"
+    // arcade probes through (hitRatio≈1 on unlit corridor geometry), which
+    // halved the sky-leak ambient and net-darkened the region by ~1.9/255
+    // (measured, GI_ISOLATE=spgi A/B). Meaningful indirect in this scene's
+    // linear scale is ≥0.02; full suppression rights at ≥0.15.
+    float radianceValidity = smoothstep(0.02, 0.15, spgiLum);
+    float spgi_w = clamp(spgi4.a * 2.0, 0.0, 0.9) * radianceValidity;
 
     albedo = clamp(albedo, vec3(0.0), vec3(1.0));
 
-    // 3×3 bilateral blur on ddgi to smooth probe cell boundaries.
-    // FusionIndirect runs at half-res, so a 1-texel offset = 2 full-res pixels.
-    vec2 texelSize = vec2(1.0) / vec2(textureSize(ddgiColor, 0));
-    vec3 ddgiBlur = vec3(0.0);
-    float totalWeight = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            vec2 offset = vec2(float(x), float(y)) * texelSize;
-            vec3 sampleColor = texture(sampler2D(ddgiColor, defaultSampler), inUv + offset).rgb;
-            // Depth-aware weight: skip samples that are very different brightness
-            float w = 1.0;
-            ddgiBlur += sampleColor * w;
-            totalWeight += w;
-        }
-    }
-    ddgiBlur /= totalWeight;
+    // DDGI is the stable low-frequency field. SPGI may replace it only where
+    // the screen-probe estimate carries at least as much energy; confidence
+    // alone must never turn the DDGI floor down. The old cross-fade reduced
+    // DDGI to 10% at high confidence and created dark troughs precisely beside
+    // bright direct-light samples when a sparse SPGI lobe underestimated them.
+    vec3 ddgiBase = ddgi * 0.7;
+    vec3 spgiTarget = spgi4.rgb * 1.25;
+    // T8.8: replacement needs a real brightness ADVANTAGE. At parity the
+    // componentwise max() still swapped chroma (SPGI's tint over DDGI's),
+    // which measured as a net darkening in the left-2F arcades vs the
+    // no-SPGI ceiling (GI_ISOLATE=spgi A/B). Gate the merge on the luminance
+    // ratio: ≤ +10% keeps pure ddgiBase, ≥ +35% takes the full max(); the ramp
+    // avoids iso-luminance contouring on the low-frequency field. Confidence
+    // stays a multiplier — bright-but-sparse SPGI must not hard-replace.
+    float ddgiLum  = dot(ddgiBase,   vec3(0.2126, 0.7152, 0.0722));
+    float spgiLumT = dot(spgiTarget, vec3(0.2126, 0.7152, 0.0722));
+    float replaceW = smoothstep(1.10, 1.35, spgiLumT / max(ddgiLum, 1e-5));
+    vec3 gi = mix(ddgiBase, max(ddgiBase, spgiTarget), spgi_w * replaceW)
+            + ssgi_irr * ssgi_conf * mix(0.25, 0.15, spgi_w * replaceW);
 
-    // Unified three-source blend (T2.3, matches Metal ports):
-    // DDGI low-freq global + SSGI high-freq screen-space, jointly scaled by
-    // (1 - spgi_w); SPGI takes over where its probes have confidence.
-    // Overall scaled to 0.7 to avoid washing out direct lighting.
-    vec3 indirect = albedo *
-        (ddgiBlur * 0.8 * (1.0 - spgi_w)
-       + ssgi_irr * ssgi_conf * 0.2 * (1.0 - spgi_w)
-       + spgi4.rgb * spgi_w * 1.25) * 0.7;
+    // Sky-leak ambient (Lumen far-field): deep interiors only reach via 2nd+
+    // bounces whose geometric gain (~0.3^k) leaves them physically near-black;
+    // every real building leaks sky bounce. Small hemispheric floor, albedo-
+    // tinted, scaled down where SPGI already sees real light.
+    // T8.7: the sky-leak floor is a FAR-FIELD path — additive with the
+    // near-field SPGI estimate, and the max(ddgiBase, spgiTarget) replacement
+    // already handles near-field redundancy. Measured (GI_ISOLATE=spgi):
+    // suppressing the floor by SPGI confidence was a pure net-darkening
+    // (-1.9/255 in the left-2F band, SPGI's real light there ≈ ddgiBase).
+    // T8.9: source decomposition in the left-2F band (GI_ISOLATE=all/spgi/ddgi
+    // steady-state) put the whole zone at direct+floor ≈ 28.6/255 with DDGI
+    // delivering < 1/255 — probe/screen GI physically starves behind the thick
+    // arcade walls until card coverage reaches the interior (separate task).
+    // The floor IS the far-field representation here, so it must stand in for
+    // the missing 2nd+ bounces off the sunlit hall, not just a whisper of sky:
+    // ~1.7x up, warmed toward stone bounce colour. Direct-lit regions barely
+    // register it next to their own term; shadow interiors carry the lift.
+    // T8.10c: occlusion-modulated far field. The flat constant (T8.9) was a
+    // crutch for a broken transport; with real probe light flowing it reads as
+    // uniform wash in shadow pockets beside lit zones (user report: surfaces
+    // that should be darker than the outer colonnade stay bright). SSAO keys
+    // the floor down to ~half in crevices while open bounce areas keep it.
+    gi += vec3(0.17, 0.18, 0.21) * mix(0.45, 1.0, pow(ssao, 1.1));
+
+    vec3 indirect = albedo * gi;
     indirect *= ao;
     outColor = vec4(indirect, 1.0);
 }

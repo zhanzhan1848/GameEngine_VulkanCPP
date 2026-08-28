@@ -81,21 +81,17 @@ ProcessableMesh make_static_normal_texture_mesh() {
     m.colors.emplace_back(v3{1.f, 0.f, 0.f});
     m.colors.emplace_back(v3{0.f, 1.f, 0.f});
     m.colors.emplace_back(v3{0.f, 0.f, 1.f});
-    // Normals all have nz=0 (unit length on the xy equator). For
-    // static_normal_texture the encoder's latent bug drops the nz sign bit,
-    // so the decoder can't recover it. nz=0 round-trips regardless of sign;
-    // the nx/xy precision recovery is what we actually verify here. Using
+    // Normals all have nz=0 (unit length on the xy equator). Using
     // exact-representable unit vectors (|nx|+|ny|=1) keeps nz=sqrt(0)=0
     // after quantization — approximate values like 0.707 drift and produce
     // non-zero nz outside tolerance.
     m.normals.emplace_back(v3{1.f,  0.f, 0.f});
     m.normals.emplace_back(v3{0.f,  1.f, 0.f});
     m.normals.emplace_back(v3{-1.f, 0.f, 0.f});
-    // Tangent.w > 0 && tangent.z > 0 → t_sign bit 0 set
-    // Tangent.w > 0 && tangent.z < 0 → bit 0 clear
-    m.tangents.emplace_back(v4{1.f, 0.f, 1.f, 1.f});  // bit 0 set
-    m.tangents.emplace_back(v4{1.f, 0.f, -1.f, 1.f}); // bit 0 clear
-    m.tangents.emplace_back(v4{0.f, 1.f, 1.f, 1.f});  // bit 0 set
+    // Tangent.z uses bit 2; negative handedness uses bit 0.
+    m.tangents.emplace_back(v4{1.f, 0.f, 1.f, 1.f});   // bit 2
+    m.tangents.emplace_back(v4{1.f, 0.f, -1.f, 1.f});  // no sign bits
+    m.tangents.emplace_back(v4{0.f, 1.f, 1.f, -1.f});  // bits 2 + 0
     UVSet uvs;
     uvs.purpose = UVSetPurpose::Texture;
     uvs.coords.emplace_back(v2{0.f, 0.f});
@@ -227,11 +223,8 @@ bool test_static_normal_texture_round_trip() {
     if (m.tangents.size() != src.tangents.size()) return false;
     if (m.uv_sets.size() != 1 || m.uv_sets[0].coords.size() != src.uv_sets[0].coords.size()) return false;
 
-    // normals: nz is rebuilt from t_sign bit 1, but for static_normal_texture
-    // the encoder's latent bug drops bit 1 → decoder always reads bit 1 = 0
-    // and returns -sqrt. The test fixture uses normals with z=0 (so
-    // nx²+ny²=1, nz=sqrt(0)=0) — sign doesn't matter. nz sign correctness
-    // for the static_normal path is exercised in test_static_normal_round_trip.
+    // normals: nz is rebuilt from t_sign bit 1. This fixture has z=0, while
+    // positive/negative sign coverage is exercised by SceneBlobWriter tests.
     for (u32 i = 0; i < (u32)src.normals.size(); ++i) {
         if (!v3_approx(m.normals[i], src.normals[i], 5e-3f)) {
             std::cout << "  normal[" << i << "] expected ("
@@ -241,7 +234,7 @@ bool test_static_normal_texture_round_trip() {
             return false;
         }
     }
-    // tangents: tx, ty exact; tz rebuilt from bit 0 (sign); w = ±1.
+    // tangents: tx, ty exact; tz and handedness are rebuilt independently.
     for (u32 i = 0; i < (u32)src.tangents.size(); ++i) {
         const v4& exp = src.tangents[i];
         const v4& got = m.tangents[i];
@@ -249,16 +242,13 @@ bool test_static_normal_texture_round_trip() {
             std::cout << "  tangent[" << i << "].xy mismatch\n";
             return false;
         }
-        // tz rebuild: sign depends on whether (tw>0 && tz>0).
-        const bool exp_sign_pos = (exp.w > 0.f) && (exp.z > 0.f);
-        const f32 exp_tz = exp_sign_pos ? std::sqrt(1.f - exp.x*exp.x - exp.y*exp.y)
-                                        : -std::sqrt(1.f - exp.x*exp.x - exp.y*exp.y);
+        const f32 exp_tz = (exp.z > 0.f) ? std::sqrt(1.f - exp.x*exp.x - exp.y*exp.y)
+                                         : -std::sqrt(1.f - exp.x*exp.x - exp.y*exp.y);
         if (!approx(got.z, exp_tz, 5e-3f)) {
             std::cout << "  tangent[" << i << "].z expected " << exp_tz << " got " << got.z << "\n";
             return false;
         }
-        // w: lossy single bit. Positive sign → 1.f, negative → -1.f.
-        const f32 exp_w = exp_sign_pos ? 1.f : -1.f;
+        const f32 exp_w = (exp.w < 0.f) ? -1.f : 1.f;
         if (!approx(got.w, exp_w, 1e-6f)) return false;
     }
     // UVs: exact f32 round-trip.

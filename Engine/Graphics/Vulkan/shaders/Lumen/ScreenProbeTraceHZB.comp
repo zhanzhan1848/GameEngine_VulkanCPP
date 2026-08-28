@@ -54,7 +54,13 @@ layout(set = 0, binding = 4, std140) uniform GlobalData {
     vec4 surface_cache_params;   // offset 336
     vec4 ddgi_fb[2];             // offset 352
     vec4 hzb_params;             // offset 368: near, far, mip_levels, max_distance
+    vec4 cache_params;           // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
 } global;
+
+// F2 (M7): previous frame's final probe SH — importance-resampling proposal.
+layout(set = 0, binding = 5, std430) readonly buffer ImportanceSHBlock {
+    vec4 data[];
+} importanceSH;
 
 #define MAX_HZB_STEPS 32u
 
@@ -84,8 +90,26 @@ void screen_probe_trace_hzb() {
     vec3 probeNormal = normalize(probeNormals.data[global_id / raysPerProbe].xyz);
     vec3 probePos = posData.xyz;
 
+    uint probeIdx = global_id / raysPerProbe;
     uint rayIdx = global_id % raysPerProbe;
-    vec3 rayDir = orientAroundNormalTBN(fibonacciDirection(rayIdx, raysPerProbe), probeNormal);
+    vec3 rayDir;
+    float invNq;   // unused here; Finalize owns the importance weight
+    if (global.cache_params.y > 0.5) {
+        // F2 (M7) 形态 c: importance resampling (see ScreenProbeTraceSDF.comp).
+        uint hb = probeIdx * 4u;
+        vec4 h0 = importanceSH.data[hb + 0u];
+        vec4 h1 = importanceSH.data[hb + 1u];
+        vec4 h2 = importanceSH.data[hb + 2u];
+        vec4 h3 = importanceSH.data[hb + 3u];
+        rayDir = spgiImportanceDirection(rayIdx, raysPerProbe, probeIdx,
+                                         global.camera_position.w, probeNormal,
+                                         h0.rgb, h1.rgb, h2.rgb, h3.rgb, invNq);
+        rayDir = orientAroundNormalTBN(rayDir, probeNormal);
+    } else {
+        rayDir = fibonacciDirection(rayIdx, raysPerProbe);
+        rayDir = spgiJitterRotation(probeIdx, global.camera_position.w) * rayDir;
+        rayDir = orientAroundNormalTBN(rayDir, probeNormal);
+    }
     vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
 
     float near = global.hzb_params.x;
@@ -98,6 +122,22 @@ void screen_probe_trace_hzb() {
     float t = 0.0;
     uint mip = 1u;
     float thickness = 0.3;
+
+    // Screen-parallel early-out: grazing rays traverse a long screen-space
+    // path, ping-pong between HZB mips behind nearer geometry, exhaust all
+    // steps and resolve as miss anyway. With the far-field SDF now
+    // high-precision (offline 384³), hand such rays to the SDF kernel
+    // immediately — the ray's screen path over its world budget exceeding
+    // ~1.5 UV units (> 1 screen diagonal) marks it as grazing. Rays that
+    // cross the camera plane (either endpoint behind the eye) defer too.
+    {
+        vec4 clip0 = global.view_projection * vec4(origin, 1.0);
+        vec4 clip1 = global.view_projection * vec4(origin + rayDir * maxDist, 1.0);
+        if (clip0.w <= 0.0 || clip1.w <= 0.0) return;
+        vec2 uv0 = (clip0.xy / clip0.w) * 0.5 + 0.5;
+        vec2 uv1 = (clip1.xy / clip1.w) * 0.5 + 0.5;
+        if (distance(uv0, uv1) > 1.5) return;
+    }
 
     for (uint step = 0u; step < MAX_HZB_STEPS; ++step) {
         float mipScale = float(1u << mip);

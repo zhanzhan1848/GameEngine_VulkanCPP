@@ -82,8 +82,8 @@ static const ParamDescriptor kGIDebugParams[] = {
     // --- freeze frame（A/B 对比） ---
     {"Freeze Probe Updates", "GI Debug: Freeze", ParamType::Bool, {0, 1, 1},       GOFF(freeze_probe_updates), GSZ(freeze_probe_updates), nullptr},
 
-    // --- probe 调试可视化（数据面预留：Off 默认零开销；接线点 =
-    //     DDGIProbeAtlas 占位升级，见 GIDebugParams.h probe_vis 注释） ---
+    // --- probe 调试可视化（T6.3 sub-A 已接线 Vulkan gather kernel 数据面：
+    //     Off 默认零开销/零输出变化，见 GIDebugParams.h probe_vis 注释） ---
     {"Probe Visualization", "GI Debug: Vis", ParamType::Enum, {0, 3, 1},           GOFF(probe_vis),            GSZ(probe_vis),            "Off,IrradianceAtlas,DepthAtlas,Confidence"},
 };
 

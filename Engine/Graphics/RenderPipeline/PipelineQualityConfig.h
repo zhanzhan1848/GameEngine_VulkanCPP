@@ -45,6 +45,11 @@ const RenderPassInfo& GetRenderPassInfo(RenderPassID id);
 struct SceneLightingParams {
     math::v3  light_direction  = {0.707f, -1.0f, 0.408f};
     math::v4  light_color      = {5.0f, 5.0f, 5.0f, 1.0f};
+    // NOTE: the Vulkan Lumen chain pairs ddgi_light_color with the screen-side
+    // gather ×π correction (DDGIGIGather.comp PROBE_SH_RAD_TO_IRRAD); scenes
+    // feeding that path divide this by π explicitly for now
+    // (TestVulkanSponzaRenderGraph.cpp). Default folds in once M3 归一轮
+    // aligns Metal/Dawn gathers with the Vulkan semantics.
     math::v4  ddgi_light_color = {20.0f, 20.0f, 20.0f, 1.0f};
     math::v4  cascade_splits   = {600.0f, 2000.0f, 0.0f, 0.0f};
 };

@@ -1,0 +1,190 @@
+#version 450 core
+// Vulkan Lumen Surface Cache Shadow Trace (T3.3).
+// Entry point: surface_cache_shadow  (glslangValidator -e surface_cache_shadow)
+//
+// Per card texel: reconstruct the world position from the depth atlas,
+// march the GlobalSDF toward the directional light (relaxed sphere tracing,
+// 16 steps), and write a per-texel visibility value into an atlas-space
+// float buffer. LightEval consumes it in a separate buffer-only dispatch —
+// the two passes split by read type (texture3D-heavy vs buffer/image),
+// mirroring the proven ddgi_trace_sdf / ddgi_trace_finalize recipe.
+//
+// Hit threshold scales with the receiver's own cascade voxel and requires
+// the march to halve the origin's SDF distance (adjacency guard) — plain
+// nearest-fetch unsigned SDF otherwise false-shadows texels next to
+// unrelated geometry (cloth against walls, columns against arches).
+//
+// Visibility is indexed by ATLAS position (atlas_uv.x + atlas_size * uv.y),
+// stable under the T1.4 round-robin dispatch rebasing. The buffer is CPU-
+// initialized to 1.0, so texels never traced (or when SDF is unavailable
+// and this pass is skipped) stay fully lit.
+//
+// Dispatch: 1D over the budget-selected flattened texel range.
+// ThreadGroupSize: (256, 1, 1)
+//
+// Flat descriptor bindings:
+//   binding 0 = texture3D  sdf_cascade_0     (samplerless texelFetch)
+//   binding 1 = texture3D  sdf_cascade_1
+//   binding 2 = texture3D  sdf_cascade_2
+//   binding 3 = StorageImage(r32f) depth_atlas (readonly, imageLoad)
+//   binding 4 = StorageImage(rg16f) normal_atlas (readonly, imageLoad)
+//   binding 5 = UniformBuffer  ShadowParams
+//   binding 6 = StorageBuffer  card_dispatch[]
+//   binding 7 = StorageBuffer  cards[]
+//   binding 8 = StorageBuffer  visibility[] (write, float per atlas texel)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture3D sdf_cascade_0;
+layout(set = 0, binding = 1) uniform texture3D sdf_cascade_1;
+layout(set = 0, binding = 2) uniform texture3D sdf_cascade_2;
+layout(set = 0, binding = 3, r32f)  readonly uniform image2D depth_atlas;
+layout(set = 0, binding = 4, rg16f) readonly uniform image2D normal_atlas;
+
+layout(set = 0, binding = 5, std140) uniform ShadowParamsBlock {
+    vec4  sdf_origins[3];          // xyz = cascade origin, w unused
+    vec4  sdf_extents[3];          // xyz = cascade extent, w unused
+    vec4  sdf_resolutions_count;   // xyz = res0/1/2, w = cascade count
+    vec4  light_direction;         // xyz = dir TOWARD the light (normalized), w unused
+    vec4  shadow_params;           // x = max_distance, y = normal_bias (voxels), z = atlas_size, w unused
+    vec4  counts;                  // x = total_texels, y = card_count, z/u unused
+} sp;
+
+layout(set = 0, binding = 6, std430) readonly buffer CardDispatchBlock {
+    CardDispatchInfo data[];
+} card_dispatch;
+
+layout(set = 0, binding = 7, std430) readonly buffer CardsBlock {
+    SurfaceCacheCard data[];
+} cards;
+
+layout(set = 0, binding = 8, std430) writeonly buffer VisibilityBlock {
+    float visibility[];
+} vis;
+
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    return all(greaterThanEqual(pos, origin)) && all(lessThan(pos, origin + extent));
+}
+
+float sampleSDF(texture3D tex, vec3 pos, vec3 origin, vec3 extent, uint res) {
+    vec3 uvw = (pos - origin) / extent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) return 1.0e10;
+    int r = int(res);
+    ivec3 t = clamp(ivec3(uvw * float(r)), ivec3(0), ivec3(r - 1));
+    return texelFetch(tex, t, 0).r;
+}
+
+float sampleBestSDF(vec3 pos) {
+    uint cc = uint(sp.sdf_resolutions_count.w);
+    if (cc > 0u && isInsideCascade(pos, sp.sdf_origins[0].xyz, sp.sdf_extents[0].xyz))
+        return sampleSDF(sdf_cascade_0, pos, sp.sdf_origins[0].xyz,
+                         sp.sdf_extents[0].xyz, uint(sp.sdf_resolutions_count.x));
+    if (cc > 1u && isInsideCascade(pos, sp.sdf_origins[1].xyz, sp.sdf_extents[1].xyz))
+        return sampleSDF(sdf_cascade_1, pos, sp.sdf_origins[1].xyz,
+                         sp.sdf_extents[1].xyz, uint(sp.sdf_resolutions_count.y));
+    if (cc > 2u && isInsideCascade(pos, sp.sdf_origins[2].xyz, sp.sdf_extents[2].xyz))
+        return sampleSDF(sdf_cascade_2, pos, sp.sdf_origins[2].xyz,
+                         sp.sdf_extents[2].xyz, uint(sp.sdf_resolutions_count.z));
+    return 1.0e10;
+}
+
+float finestVoxelSize() {
+    uint cc = uint(sp.sdf_resolutions_count.w);
+    if (cc == 0u) return 1.0;
+    float extent = sp.sdf_extents[0].x;
+    float res = sp.sdf_resolutions_count.x;
+    return max(extent / max(res, 1.0), 0.01);
+}
+
+// Voxel size of the cascade that actually contains the receiver. Bias,
+// threshold and step floor must scale with it — using cascade 0's voxel for a
+// texel only covered by a coarse cascade massively over-shadows (nearest-fetch
+// quantization there is ±half a coarse voxel). Falls back to the finest voxel
+// for receivers outside every cascade (they march toward lit anyway).
+float voxelAt(vec3 pos) {
+    uint cc = uint(sp.sdf_resolutions_count.w);
+    for (uint c = 0u; c < cc && c < 3u; ++c) {
+        vec3 origin = sp.sdf_origins[c].xyz;
+        if (isInsideCascade(pos, origin, sp.sdf_extents[c].xyz)) {
+            float res = sp.sdf_resolutions_count[c];
+            return max(sp.sdf_extents[c].x / max(res, 1.0), 0.01);
+        }
+    }
+    return finestVoxelSize();
+}
+
+void surface_cache_shadow()
+{
+    uint global_tid = gl_GlobalInvocationID.x;
+    if (global_tid >= uint(sp.counts.x)) return;
+
+    // Same binary search as LightEval: thread → card → atlas texel.
+    uint lo = 0u;
+    uint hi = uint(sp.counts.y);
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        if (card_dispatch.data[mid].texel_offset + card_dispatch.data[mid].texel_count <= global_tid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo >= uint(sp.counts.y)) return;
+
+    uint local_texel = global_tid - card_dispatch.data[lo].texel_offset;
+    uint res = card_dispatch.data[lo].resolution;
+    uint local_x = local_texel % res;
+    uint local_y = local_texel / res;
+    uvec2 atlas_uv = uvec2(
+        card_dispatch.data[lo].atlas_offset_x + local_x,
+        card_dispatch.data[lo].atlas_offset_y + local_y);
+    uint card_idx = card_dispatch.data[lo].card_index;
+
+    uint atlas_size = uint(sp.shadow_params.z);
+    uint vis_index = atlas_uv.x + atlas_size * atlas_uv.y;
+
+    float depth = imageLoad(depth_atlas, ivec2(atlas_uv)).r;
+    if (depth <= 0.0) {
+        vis.visibility[vis_index] = 1.0;   // never captured — stay lit
+        return;
+    }
+
+    vec2 enc_n = imageLoad(normal_atlas, ivec2(atlas_uv)).rg;
+    vec3 normal = octDecode(enc_n);
+
+    vec3 world = cardTexelToWorld(atlas_uv, depth, cards.data[card_idx]);
+    float voxel = voxelAt(world);
+    vec3 origin = world + normal * (voxel * sp.shadow_params.y);   // self-hit bias
+
+    // Unsigned-SDF adjacency guard: a receiver sitting close to unrelated
+    // geometry (cloth against a wall, column against an arch) starts with a
+    // small SDF value, and the plain `d < threshold` test instantly calls it
+    // occluded even for rays grazing away from that geometry. Only count a
+    // hit when the march got substantially CLOSER to geometry than the
+    // origin was (d halved) — grazing stays lit, real blockers still converge.
+    float d0 = sampleBestSDF(origin);
+
+    vec3 L = sp.light_direction.xyz;   // toward the light
+    float maxDist = sp.shadow_params.x;
+    float t = voxel;
+    float hitThreshold = min(voxel * 0.5, max(d0 * 0.5, 0.0));
+    float shadow = 1.0;
+
+    for (int step = 0; step < 16; ++step) {
+        vec3 pos = origin + L * t;
+        float d = sampleBestSDF(pos);
+        if (d > 1.0e9) break;            // left all cascades → unoccluded
+        if (d < hitThreshold) { shadow = 0.0; break; }
+        // Relaxed step: overstep when far from surfaces.
+        float advance = (d > hitThreshold * 4.0) ? d * 1.2 : max(d, voxel * 0.25);
+        t += advance;
+        if (t >= maxDist) break;
+    }
+
+    vis.visibility[vis_index] = shadow;
+}

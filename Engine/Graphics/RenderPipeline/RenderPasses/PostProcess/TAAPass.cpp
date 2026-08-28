@@ -79,7 +79,7 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, bool* outIsBinary) 
         const std::string relPath = "Engine/Graphics/Vulkan/shaders/Lumen/TAA.comp.spv";
         const std::vector<std::string> candidates = {
             relPath,
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+            utils::ShaderRegistry::ResolveShaderPath(relPath),
         };
         for (const auto& path : candidates) {
             std::ifstream file(path, std::ios::binary | std::ios::ate);

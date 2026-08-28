@@ -40,6 +40,12 @@ struct GIGatherInputs {
     math::m4x4 view_matrix{};
     math::m4x4 proj_matrix{};
     u32 current_buffer_index = 0;
+    // Irradiance triple-buffer slot source. DDGI/SC-DDGI writers rotate on
+    // the frame counter (slot = frame_index % 3); current_buffer_index is a
+    // swapchain index that can drift out of phase with it. Callers that leave
+    // this at the sentinel keep the legacy (cbIdx + 2) % 3 read slot.
+    static constexpr u32 kFrameIndexUnset = 0xFFFFFFFFu;
+    u32 frame_index = kFrameIndexUnset;
     rhi::ResourceHandle fallback_texture{rhi::handles::INVALID_RESOURCE};  // when ORM missing
 };
 
@@ -85,6 +91,13 @@ private:
     // PartiallyBound 标志、CB meta.x 恒 0 → shader 走 legacy 两槽路径。
     rhi::ResourceHandle nvolumes_cb_{rhi::handles::INVALID_RESOURCE};
     bool nvolume_supported_ = false;
+
+    // Debug (SC_DUMP_CARDS=1): staging copy of the gather output + dump frame
+    // (deferred print >=3 frames later — correlates probe health with what
+    // Fusion actually receives).
+    rhi::ResourceHandle out_staging_{rhi::handles::INVALID_RESOURCE};
+    u64  out_staging_size_ = 0;
+    u32  out_dump_frame_ = 0xFFFFFFFFu;
 };
 
 } // namespace primal::graphics

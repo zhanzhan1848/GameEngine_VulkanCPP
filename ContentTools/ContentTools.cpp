@@ -244,6 +244,8 @@ bool run_pipeline_and_reencode(ai_asset_pipeline_params* p) {
 
 }  // namespace
 
+EDITOR_INTERFACE void ProcessSceneData(ai_asset_pipeline_params* p);
+
 EDITOR_INTERFACE void ProcessAIAsset(ai_asset_pipeline_params* p)
 {
     using namespace primal::tools;
@@ -264,7 +266,17 @@ EDITOR_INTERFACE void ProcessAIAsset(ai_asset_pipeline_params* p)
 
     if (!p->out_data->buffer || p->out_data->buffer_size == 0) return;
 
-    // Step 2 (Phase 2 M12.4): if any opt-in module is on, decode →
+    ProcessSceneData(p);
+}
+
+// Process an already serialized scene_data blob. This is used to repair old
+// .model/.bin assets whose source FBX is unavailable.
+EDITOR_INTERFACE void ProcessSceneData(ai_asset_pipeline_params* p)
+{
+    using namespace primal::tools;
+    assert(p && p->out_data && p->out_data->buffer && p->out_data->buffer_size > 0);
+
+    // If any opt-in module is on, decode →
     // pipeline::Run → re-encode. Default path (no opt-in flags) keeps the
     // legacy byte-identical buffer.
     if (any_opt_in_module_on(*p)) {
@@ -272,7 +284,7 @@ EDITOR_INTERFACE void ProcessAIAsset(ai_asset_pipeline_params* p)
         // On failure: legacy buffer is preserved; we still validate below.
     }
 
-    // Step 3: validate the produced blob round-trips through the new
+    // Validate the produced blob round-trips through the new
     // pipeline's SceneBlobReader.
     primal::utl::vector<ErrorReport> errs;
     pipeline::ValidationReport report;

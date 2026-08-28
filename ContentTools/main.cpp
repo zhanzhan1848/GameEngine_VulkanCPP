@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 // ProcessAIAsset is defined in ContentTools.cpp. This local mirror must
 // match the canonical layout in ContentTools.cpp exactly — both are kept
@@ -50,6 +51,7 @@ struct ai_asset_pipeline_params {
     u32                         remesh_iterations;
 };
 extern "C" void ProcessAIAsset(ai_asset_pipeline_params*);
+extern "C" void ProcessSceneData(ai_asset_pipeline_params*);
 
 // Legacy importers (used by the default 2-arg path).
 extern "C" void ImportFbx(const char* file, primal::tools::scene_data* data, void(*cb)(s32, s32));
@@ -96,6 +98,144 @@ bool read_file(const char* path, primal::tools::scene_data& data) {
     return true;
 }
 
+bool repair_normal_z_signs(primal::tools::scene_data& data) {
+    struct Vec3 { f32 x, y, z; };
+    struct Vec2 { f32 x, y; };
+    auto sub = [](const Vec3& a, const Vec3& b) {
+        return Vec3{a.x - b.x, a.y - b.y, a.z - b.z};
+    };
+    auto cross = [](const Vec3& a, const Vec3& b) {
+        return Vec3{a.y * b.z - a.z * b.y,
+                    a.z * b.x - a.x * b.z,
+                    a.x * b.y - a.y * b.x};
+    };
+    auto dot = [](const Vec3& a, const Vec3& b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    };
+
+    u64 positive = 0;
+    u64 negative = 0;
+    u64 changed = 0;
+    u64 tangentPositive = 0;
+    u64 negativeHandedness = 0;
+    primal::utl::vector<primal::tools::ErrorReport> errors;
+    const u32 meshes = primal::tools::pipeline::WalkSceneBlob(
+        data,
+        [&](u32, const primal::tools::pipeline::PackedMeshView& view) {
+            using primal::tools::elements::elements_type;
+            if (view.elements_type != elements_type::static_normal &&
+                view.elements_type != elements_type::static_normal_texture) {
+                return;
+            }
+
+            std::vector<Vec3> positions(view.num_vertices);
+            std::vector<Vec3> areaNormals(view.num_vertices, Vec3{0.f, 0.f, 0.f});
+            std::vector<Vec3> areaTangents(view.num_vertices, Vec3{0.f, 0.f, 0.f});
+            std::vector<Vec3> areaBitangents(view.num_vertices, Vec3{0.f, 0.f, 0.f});
+            std::vector<Vec2> uvs(view.num_vertices, Vec2{0.f, 0.f});
+            for (u32 i = 0; i < view.num_vertices; ++i) {
+                std::memcpy(&positions[i], view.position_buffer + (size_t)i * 12, 12);
+                if (view.elements_type == elements_type::static_normal_texture) {
+                    const size_t uvOffset = (size_t)view.elements_size - sizeof(Vec2);
+                    std::memcpy(&uvs[i], view.element_buffer + (size_t)i * view.elements_size + uvOffset,
+                                sizeof(Vec2));
+                }
+            }
+            auto indexAt = [&](u32 i) -> u32 {
+                if (view.index_size == 2) {
+                    u16 value;
+                    std::memcpy(&value, view.index_buffer + (size_t)i * 2, 2);
+                    return value;
+                }
+                u32 value;
+                std::memcpy(&value, view.index_buffer + (size_t)i * 4, 4);
+                return value;
+            };
+            for (u32 i = 0; i + 2 < view.num_indices; i += 3) {
+                const u32 ia = indexAt(i);
+                const u32 ib = indexAt(i + 1);
+                const u32 ic = indexAt(i + 2);
+                if (ia >= view.num_vertices || ib >= view.num_vertices || ic >= view.num_vertices) continue;
+                const Vec3 face = cross(sub(positions[ib], positions[ia]),
+                                        sub(positions[ic], positions[ia]));
+                Vec3 tangent{0.f, 0.f, 0.f};
+                Vec3 bitangent{0.f, 0.f, 0.f};
+                if (view.elements_type == elements_type::static_normal_texture) {
+                    const Vec3 e1 = sub(positions[ib], positions[ia]);
+                    const Vec3 e2 = sub(positions[ic], positions[ia]);
+                    const f32 du1 = uvs[ib].x - uvs[ia].x;
+                    const f32 dv1 = uvs[ib].y - uvs[ia].y;
+                    const f32 du2 = uvs[ic].x - uvs[ia].x;
+                    const f32 dv2 = uvs[ic].y - uvs[ia].y;
+                    const f32 det = du1 * dv2 - dv1 * du2;
+                    if (std::abs(det) > 1e-12f) {
+                        const f32 inv = 1.f / det;
+                        tangent = Vec3{(e1.x * dv2 - e2.x * dv1) * inv,
+                                       (e1.y * dv2 - e2.y * dv1) * inv,
+                                       (e1.z * dv2 - e2.z * dv1) * inv};
+                        bitangent = Vec3{(e2.x * du1 - e1.x * du2) * inv,
+                                         (e2.y * du1 - e1.y * du2) * inv,
+                                         (e2.z * du1 - e1.z * du2) * inv};
+                    }
+                }
+                for (const u32 vertex : {ia, ib, ic}) {
+                    areaNormals[vertex].x += face.x;
+                    areaNormals[vertex].y += face.y;
+                    areaNormals[vertex].z += face.z;
+                    areaTangents[vertex].x += tangent.x;
+                    areaTangents[vertex].y += tangent.y;
+                    areaTangents[vertex].z += tangent.z;
+                    areaBitangents[vertex].x += bitangent.x;
+                    areaBitangents[vertex].y += bitangent.y;
+                    areaBitangents[vertex].z += bitangent.z;
+                }
+            }
+
+            u8* elements = const_cast<u8*>(view.element_buffer);
+            for (u32 i = 0; i < view.num_vertices; ++i) {
+                u8& tSign = elements[(size_t)i * view.elements_size + 3];
+                const u8 before = tSign;
+                if (areaNormals[i].z > 0.f) {
+                    tSign |= 0x02;
+                    ++positive;
+                } else {
+                    tSign &= (u8)~0x02;
+                    ++negative;
+                }
+                if (view.elements_type == elements_type::static_normal_texture) {
+                    if (areaTangents[i].z > 0.f) {
+                        tSign |= 0x04;
+                        ++tangentPositive;
+                    } else {
+                        tSign &= (u8)~0x04;
+                    }
+                    const Vec3 crossNT = cross(areaNormals[i], areaTangents[i]);
+                    if (dot(crossNT, areaBitangents[i]) < 0.f) {
+                        tSign |= 0x01;
+                        ++negativeHandedness;
+                    } else {
+                        tSign &= (u8)~0x01;
+                    }
+                }
+                if (tSign != before) ++changed;
+            }
+        },
+        errors);
+
+    if (!errors.empty()) {
+        for (const auto& error : errors) {
+            std::cerr << error.code << ": " << error.message << "\n";
+        }
+        return false;
+    }
+    std::cout << "Repaired normal.z signs: meshes=" << meshes
+              << ", positive=" << positive << ", negative=" << negative
+              << ", tangent_z_positive=" << tangentPositive
+              << ", negative_handedness=" << negativeHandedness
+              << ", changed=" << changed << "\n";
+    return meshes > 0;
+}
+
 int run_legacy_default(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: ContentToolsCLI <input_fbx> <output_bin>\n";
@@ -132,7 +272,7 @@ int run_pipeline(int argc, char* argv[]) {
     if (argc < 4) {
         std::cerr << "Usage: ContentToolsCLI --pipeline <input> <output> "
                      "[--repair] [--remesh] [--subdivide] [--uvatlas] "
-                     "[--no-lod] [--no-meshlet] [--collision] "
+                     "[--repair-normal-signs] [--no-lod] [--no-meshlet] [--collision] "
                      "[--lod-ratio <f>]\n"
                      "  Subdivide:    --subdivide-levels N (default 1)\n"
                      "                --subdivide-scheme loop|catmull (default loop)\n"
@@ -167,10 +307,12 @@ int run_pipeline(int argc, char* argv[]) {
     params.derive_normal_mode = 2;  // AreaWeighted (matches derive::Params default)
     params.derive_tangent_mode = 2;  // MikkTSpace (matches derive::Params default)
     params.derive_faceted_angle_deg = 60.f;
+    bool repairNormalSigns = false;
 
     for (int i = 4; i < argc; ++i) {
         const std::string arg = argv[i];
         if      (arg == "--repair")     params.enable_repair = 1;
+        else if (arg == "--repair-normal-signs") repairNormalSigns = true;
         else if (arg == "--remesh")     params.enable_remesh = 1;
         else if (arg == "--no-remesh")  params.enable_remesh = 0;
         else if (arg == "--subdivide")  params.enable_subdivide = 1;
@@ -230,8 +372,27 @@ int run_pipeline(int argc, char* argv[]) {
     configure_defaults(data);
     params.out_data = &data;
 
-    std::cout << "ProcessAIAsset: " << input_file << " → " << output_file << "\n";
-    ProcessAIAsset(&params);
+    const std::string inputPath = input_file;
+    const auto hasSuffix = [](const std::string& value, const char* suffix) {
+        const size_t suffixSize = std::strlen(suffix);
+        return value.size() >= suffixSize &&
+               value.compare(value.size() - suffixSize, suffixSize, suffix) == 0;
+    };
+    const bool serializedInput =
+        hasSuffix(inputPath, ".model") || hasSuffix(inputPath, ".bin");
+
+    if (serializedInput) {
+        if (!read_file(input_file, data)) return 1;
+        if (repairNormalSigns && !repair_normal_z_signs(data)) {
+            std::free(data.buffer);
+            return 1;
+        }
+        std::cout << "ProcessSceneData: " << input_file << " → " << output_file << "\n";
+        ProcessSceneData(&params);
+    } else {
+        std::cout << "ProcessAIAsset: " << input_file << " → " << output_file << "\n";
+        ProcessAIAsset(&params);
+    }
 
     if (!data.buffer || data.buffer_size == 0) {
         std::cerr << "ProcessAIAsset produced empty result.\n";

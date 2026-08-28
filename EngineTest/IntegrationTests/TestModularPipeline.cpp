@@ -5,12 +5,33 @@
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
+#include "Engine/Graphics/RHI/Core/RHICommand.h"
+#include "Engine/Graphics/PCG/PCGSDFReadbackManager.h"  // HalfToFloat (GI verify)
 #include "Engine/Utilities/IOStream.h"
 #include "stb_image.h"
 #include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+
+#ifdef TEST_METAL_GI_FUSION
+// ============================================================================
+// TestMetalGIFusion — GI full-composite alignment verification (Metal).
+//
+// Same StandardRenderPipeline / RHI code path as the Vulkan smoke test; the
+// ONLY Metal-specific piece is the shader set (engine Metal Lumen shaders).
+// After a warmup sequence it measures the GI chain quantitatively and checks
+// alignment bands (recalibrated for the SC-first hierarchy — surface cache →
+// world probes → screen probes; the old bands encoded the flat-blend look):
+//   probe sh0 lum ∈ [0.08, 1.5]     (SC-projected energy; L0 clamp = 10)
+//   gather variation max/avg ≥ 1.2  (smoother by design: 8-probe trilinear)
+//   final dynamic range ≥ 0.1
+//   final avg ∈ [0.005, 0.65]       (hierarchical fusion lifts brightness)
+// ============================================================================
+#define GI_VERIFY_FRAME 90
+#endif
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -249,7 +270,25 @@ bool TestModularPipeline::CompileShaders() {
     auto bv = Get(kBlitVS);           check(bv, "blit_vs");
     auto bp = Get(kBlitPS);           check(bp, "blit_ps");
     auto sf = Get(kShadowFilter);     check(sf, "shadow_filter");
+#ifdef TEST_METAL_GI_FUSION
+    // Compile the gather from the ENGINE Metal Lumen tree — this test exists
+    // to validate that shader's alignment with the Vulkan gather path.
+    ShaderHandle gg = handles::INVALID_SHADER;
+    {
+        const std::string engineLumenDir =
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Lumen/";
+        primal::utl::vector<std::wstring> noArgs;
+        auto compiled = compile_shader(kGIGather, engineLumenDir.c_str(), noArgs);
+        if (compiled) {
+            u64 sz = *reinterpret_cast<u64*>(compiled.get());
+            const u8* ptr = compiled.get() + sizeof(u64) + 16;
+            gg = device_->CreateShader(ptr, sz, ShaderStage::Compute, kGIGather.function);
+        }
+    }
+    check(gg, "gi_gather(engine Metal)");
+#else
     auto gg = Get(kGIGather);         check(gg, "gi_gather");
+#endif
     auto fi = Get(kFusionIndirect);   check(fi, "fusion_indirect");
     auto fc = Get(kFusionComposite);  check(fc, "fusion_composite");
     auto cr = Get(kSCCardRadiance);   check(cr, "sc_card_radiance");
@@ -289,7 +328,10 @@ bool TestModularPipeline::InitializePipeline() {
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
     pipeline_->SetLumenConfig(lumenConfig);
-    // Enable SPGI + Surface Cache (matching TestNaniteStreamingPipeline which initializes all passes)
+#ifndef TEST_METAL_GI_FUSION
+    // GI-fusion verification matches the Vulkan smoke test's config exactly
+    // (Medium preset, no extra quality overrides) so measured differences are
+    // shader-side only.
     pipeline_->SetQualityOverride(true /*enable_screen_probes*/, true /*enable_surface_cache*/);
 
     // Enable Froxel Fog
@@ -298,6 +340,7 @@ bool TestModularPipeline::InitializePipeline() {
         settings.quality.enable_froxel_fog = true;
         pipeline_->UpdateSettings(settings);
     }
+#endif
 
     // Load Sponza scene (populates scene_ and wires materials to GPUDrivenDrawPipeline)
     if (!LoadSponzaScene()) {
@@ -405,7 +448,17 @@ bool TestModularPipeline::LoadMaterialTextures() {
 
 bool TestModularPipeline::LoadSponzaScene() {
     std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
+#ifdef TEST_METAL_GI_FUSION
+    // Signed-v3 asset — the repaired encoding (t_sign low bits) the Vulkan
+    // smoke test uses. Alignment requires the same asset on both backends.
+    std::string modelPath = baseDir + "Sponza_pipeline_signed_v3.model";
+    {
+        std::ifstream probe(modelPath, std::ios::binary);
+        if (!probe.good()) modelPath = baseDir + "Sponza_process_rebuild.model";
+    }
+#else
     std::string modelPath = baseDir + "Sponza_process_rebuild.model";
+#endif
 
     // Load .model file
     {
@@ -561,12 +614,31 @@ bool TestModularPipeline::LoadSponzaScene() {
 void TestModularPipeline::Run() {
     if (!pipeline_ || isShutdown_) return;
 
+#ifdef TEST_METAL_GI_FUSION
+    // Fixed camera pose identical to the Vulkan smoke test — visual and
+    // quantitative comparability between backends.
+    {
+        using primal::math::v3;
+        using primal::math::v4;
+        const v3 camPos{0.0f, 5.0f, -10.0f};
+        const float yaw = 3.14159265f, pitch = -0.291f;
+        const float cosP = std::cos(pitch);
+        const v3 forward{-std::sin(yaw) * cosP, std::sin(pitch), -std::cos(yaw) * cosP};
+        const v3 target = camPos + forward;
+        const v3 up{0.0f, 1.0f, 0.0f};
+        cameraView_ = CreateLookAtMatrix(camPos, target, up);
+        cameraProj_ = CreatePerspectiveMatrix(
+            60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD,
+            (float)renderWidth_ / (float)renderHeight_, 0.1f, 1000.0f);
+    }
+#else
     // Update camera
     camera_.Update(0.016f);
     cameraView_ = camera_.GetViewMatrix();
     float fov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
     float aspect = (float)renderWidth_ / (float)renderHeight_;
     cameraProj_ = CreatePerspectiveMatrix(fov, aspect, 0.1f, 1000.0f);
+#endif
 
     view_.SetViewMatrix(cameraView_);
     view_.SetProjectionMatrix(cameraProj_);
@@ -617,7 +689,145 @@ void TestModularPipeline::Run() {
                   << ": CPU=" << stats.cpuFrameTimeMs << "ms"
                   << ", Draws=" << stats.drawCallCount << std::endl;
     }
+
+#ifdef TEST_METAL_GI_FUSION
+    if (frameCount_ == GI_VERIFY_FRAME) {
+        RunGIFusionVerification(backBuffer);
+    }
+#endif
 }
+
+#ifdef TEST_METAL_GI_FUSION
+void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
+    using primal::graphics::rhi::BufferDesc;
+    using primal::graphics::rhi::BufferType;
+    using primal::graphics::rhi::CommandBufferHandle;
+    using primal::graphics::rhi::CommandQueueType;
+    using primal::graphics::rhi::ResourceBarrier;
+    using primal::graphics::rhi::ResourceState;
+    using primal::graphics::rhi::BufferTextureCopyRegion;
+    using primal::graphics::rhi::handles::INVALID_RESOURCE;
+    auto h2f = primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat;
+
+    bool pass = true;
+    auto lum = [](float r, float g, float b) {
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+
+    // Generic RHI texture readback (Metal path — same RHI calls as Vulkan).
+    auto readTextureStats = [&](const char* tag, ResourceHandle tex, u32 tw, u32 th,
+                                bool halfFloat, u32 strideBytes,
+                                double* outAvg, double* outMin, double* outMax) -> bool {
+        if (tex == INVALID_RESOURCE) {
+            std::cout << "[GIFusionVerify] " << tag << " INVALID" << std::endl;
+            return false;
+        }
+        BufferDesc bd{};
+        bd.size = (u64)tw * th * strideBytes;
+        bd.type = BufferType::Raw;
+        bd.memoryUsage = primal::graphics::rhi::GPUMemoryUsage::Readback;
+        auto buf = device_->CreateBuffer(bd);
+        if (buf == INVALID_RESOURCE) return false;
+        auto cmdH = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        auto* cmd = primal::graphics::rhi::GetCommandBuffer(cmdH);
+        if (!cmd || !cmd->Begin()) { device_->DestroyBuffer(buf); return false; }
+        ResourceBarrier bk{};
+        bk.resource = tex; bk.beforeState = ResourceState::ShaderResource;
+        bk.afterState = ResourceState::CopySource;
+        bk.subresource = 0xFFFFFFFF; bk.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&bk, 1);
+        BufferTextureCopyRegion gn{};
+        gn.imageSubresource = {0, 0, 1};
+        gn.imageExtent = {tw, th, 1};
+        cmd->CopyTextureToBuffer(tex, buf, &gn, 1);
+        cmd->End();
+        primal::graphics::rhi::QueueSubmitInfo si{};
+        si.cmdBuffer = cmdH;
+        device_->Submit(si);
+        cmd->WaitForCompletion();
+        device_->DestroyCommandBuffer(cmdH);
+        auto* m = static_cast<u8*>(device_->MapBuffer(buf, 0, bd.size));
+        if (!m) { device_->DestroyBuffer(buf); return false; }
+        double sum = 0, mn = 1e30, mx = -1e30; u64 n = 0;
+        for (u32 y = 0; y < th; y += 4) {
+            for (u32 x = 0; x < tw; x += 4) {
+                float r, g, b;
+                if (halfFloat) {
+                    const u16* px = reinterpret_cast<const u16*>(&m[((u64)y * tw + x) * strideBytes]);
+                    r = h2f(px[0]); g = h2f(px[1]); b = h2f(px[2]);
+                } else {
+                    const u8* px = &m[((u64)y * tw + x) * strideBytes];
+                    r = px[2] / 255.0f; g = px[1] / 255.0f; b = px[0] / 255.0f;
+                }
+                double l = lum(r, g, b);
+                sum += l; if (l < mn) mn = l; if (l > mx) mx = l; ++n;
+            }
+        }
+        device_->UnmapBuffer(buf);
+        device_->DestroyBuffer(buf);
+        *outAvg = sum / n; *outMin = mn; *outMax = mx;
+        std::cout << "[GIFusionVerify] " << tag << " avg=" << *outAvg
+                  << " min=" << *outMin << " max=" << *outMax << std::endl;
+        return true;
+    };
+
+    // --- 1. Probe irradiance (host-visible buffer, direct map) ---------------
+    double sh0Lum = -1.0;
+    if (auto* ddgi = pipeline_->GetDDGIPass()) {
+        auto irr = ddgi->GetIrradianceBuffer(0);
+        if (irr != INVALID_RESOURCE) {
+            if (float* m = static_cast<float*>(device_->MapBuffer(irr, 0, 36 * sizeof(float)))) {
+                sh0Lum = lum(m[0], m[1], m[2]);
+                device_->UnmapBuffer(irr);
+            }
+        }
+    }
+    std::cout << "[GIFusionVerify] probe sh0 lum=" << sh0Lum << " (Vulkan ref 0.355)" << std::endl;
+
+    // --- 2. Gather output variation ------------------------------------------
+    double gAvg = 0, gMin = 0, gMax = 0;
+    bool gatherOk = false;
+    if (auto* gm = pipeline_->GetGIGatherModule())
+        gatherOk = readTextureStats("gather(GI,half)", gm->GetOutputTexture(),
+                                    renderWidth_ / 2, renderHeight_ / 2, true, 8,
+                                    &gAvg, &gMin, &gMax);
+
+    // --- 3. Final composite ----------------------------------------------------
+    double fAvg = 0, fMin = 0, fMax = 0;
+    bool finalOk = readTextureStats("final(backbuffer)", backBuffer,
+                                    renderWidth_, renderHeight_, false, 4,
+                                    &fAvg, &fMin, &fMax);
+
+    // --- Alignment assertions (bands from the fixed Vulkan reference) --------
+    // Recalibrated for the SC-first hierarchy (surface cache → world probes →
+    // screen probes): probes now carry SC-projected energy (previously the
+    // 20B/32B struct mismatch left the Metal SC feed near-black), the gather
+    // is deliberately smoother (old ≥3 variation band encoded the spiky
+    // single-probe-fallback look), and the hierarchical fusion lifts the
+    // composite brightness versus the old flat blend.
+    auto checkBand = [&](const char* what, double v, double lo, double hi) {
+        bool ok = (v >= lo && v <= hi);
+        std::cout << "[GIFusionVerify] " << (ok ? "PASS" : "FAIL") << " " << what
+                  << "=" << v << " ∈ [" << lo << ", " << hi << "]" << std::endl;
+        if (!ok) pass = false;
+    };
+    checkBand("probe_sh0_lum", sh0Lum, 0.08, 1.5);
+    if (gatherOk) {
+        double variation = (gAvg > 1e-6) ? (gMax / gAvg) : 0.0;
+        checkBand("gather_variation(max/avg)", variation, 1.2, 1e9);
+        checkBand("gather_avg", gAvg, 0.005, 0.8);
+    } else { pass = false; }
+    if (finalOk) {
+        checkBand("final_dynamic_range(max-min)", fMax - fMin, 0.1, 1e9);
+        checkBand("final_avg", fAvg, 0.005, 0.65);
+    } else { pass = false; }
+
+    std::cout << "[GIFusionVerify] " << (pass ? "ALL ALIGNED ✔" : "MISALIGNED ✘")
+              << " — Metal GI composite vs Vulkan reference" << std::endl;
+    std::cout.flush(); std::cerr.flush();
+    std::exit(pass ? 0 : 1);
+}
+#endif
 
 // ============================================================================
 // Resize & Shutdown

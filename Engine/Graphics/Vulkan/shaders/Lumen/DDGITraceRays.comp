@@ -27,6 +27,11 @@
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
+// Shared probe ray sampler (mode 0 = legacy Fibonacci, bit-identical to the
+// former local ddgiRayDirection; 1 = per-frame golden-angle jitter;
+// 2 = cosine-lobe mixture around the light). See ShaderLib/ProbeSampleLib.glsl.
+#include "ShaderLib/ProbeSampleLib.glsl"
+
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 // ----------------------------------------------------------------------------
@@ -78,7 +83,7 @@ layout(set = 0, binding = 5, std140) uniform DDGIVolumeData {
     int   ProbeRelocationShiftX;    //  96
     int   ProbeRelocationShiftY;    // 100
     int   ProbeRelocationShiftZ;    // 104
-    float _pad_to_sdf;              // 108
+    int   RaySampleMode;            // 108 — ray sampler mode (ProbeSampleLib), fills the old padding slot
     vec4  SdfOrigins[3];            // 112
     vec4  SdfVoxelSizes[3];         // 160
     vec4  SdfExtents[3];            // 208
@@ -133,16 +138,8 @@ uvec3 ddgiGetProbeCounts() {
     return volume.ProbeCounts.xyz;
 }
 
-vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
-    const float INV_PHI = 0.6180339887498948482;
-    const float PI_VAL  = 3.14159265358979323846;
-    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
-    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
-    float theta = 2.0 * PI_VAL * u;
-    float phi   = acos(1.0 - 2.0 * v);
-    float sinPhi = sin(phi);
-    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
-}
+// ddgiRayDirection moved to ShaderLib/ProbeSampleLib.glsl (ddgiSampleRayDirection)
+// — single source shared with DDGIUpdateIrradiance's SH projection.
 
 uvec3 ddgiProbeGridCoord(uint probeIdx, uvec3 counts) {
     uint pz  = probeIdx / (counts.x * counts.y);
@@ -443,6 +440,65 @@ vec3 sampleHitAlbedo(vec3 hitPos) {
 }
 
 // ----------------------------------------------------------------------------
+// Probe relocation (ray-origin only). A 3 m grid inevitably places probes on
+// or inside masonry: rays starting inside solid rock hit on their first step
+// and bake wall-interior black into the probe SH. The burial gate in GIGather
+// then rejects those probes, so second-floor arcade surfaces facing the sunlit
+// hall receive no probe GI at all. Push the ray origin out along the local SDF
+// gradient until it clears the hit-bias skin. Deterministic (static scene), so
+// the octahedral depth maps written from the same origin stay frame-stable.
+// Displacement caps at 0.45 × spacing: gather visibility weights compare
+// grid-position distances against those depth maps, and a sub-cell offset
+// keeps that comparison meaningful. Outside every cascade sampleBestSDF
+// returns 1e10 → open-space probes exit after one read.
+// ----------------------------------------------------------------------------
+vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
+    // Classic DDGI relocation (multi-axis deepest-free-point). The old
+    // single-gradient push parked probes ON the nearest surface — useless for
+    // probes inside thick walls or the floor slab. This searches 6 axes + 8
+    // diagonals per round and keeps the candidate with the LARGEST SDF
+    // distance, i.e. actual free-air volume (corridor interiors, rooms).
+    // Free probes exit after a single read; buried probes pay ~3x14x6 reads,
+    // bounded and only for the buried minority.
+    float voxel = volume.SdfVoxelSizes[0].x;
+    float skin = max(voxel * 1.5, spacing * 0.05);
+    const float maxPush = spacing * 0.45;
+    float d0 = sampleBestSDF(probePos);
+    if (d0 > skin) return probePos;
+    vec3 best = probePos;
+    float bestD = d0;
+    vec3 dirs[14] = vec3[14](
+        vec3( 1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0),
+        vec3( 0.0, 1.0, 0.0), vec3( 0.0,-1.0, 0.0),
+        vec3( 0.0, 0.0, 1.0), vec3( 0.0, 0.0,-1.0),
+        normalize(vec3( 1.0, 1.0, 1.0)), normalize(vec3(-1.0, 1.0, 1.0)),
+        normalize(vec3( 1.0,-1.0, 1.0)), normalize(vec3(-1.0,-1.0, 1.0)),
+        normalize(vec3( 1.0, 1.0,-1.0)), normalize(vec3(-1.0, 1.0,-1.0)),
+        normalize(vec3( 1.0,-1.0,-1.0)), normalize(vec3(-1.0,-1.0,-1.0)));
+    const float stepLen = max(voxel, spacing * 0.1);
+    for (int round = 0; round < 3; ++round) {
+        vec3 roundBest = best;
+        float roundBestD = bestD;
+        for (int k = 0; k < 14; ++k) {
+            vec3 p = best;
+            for (int st = 0; st < 6; ++st) {
+                p += dirs[k] * stepLen;
+                vec3 delta = p - probePos;
+                if (dot(delta, delta) > maxPush * maxPush) break;
+                float d = sampleBestSDF(p);
+                if (d > roundBestD) { roundBestD = d; roundBest = p; }
+                if (d > skin) break;
+            }
+        }
+        if (roundBestD <= bestD) break;
+        best = roundBest;
+        bestD = roundBestD;
+        if (bestD > skin) break;
+    }
+    return best;
+}
+
+// ----------------------------------------------------------------------------
 // Main Kernel: ddgi_trace_rays
 // ----------------------------------------------------------------------------
 void ddgi_trace_rays() {
@@ -460,8 +516,14 @@ void ddgi_trace_rays() {
     uvec3 counts = ddgiGetProbeCounts();
     uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
     vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
+    // Relocate buried ray origins (see ddgiRelocateProbeOrigin); SH storage
+    // and gathers stay grid-indexed — only the tracing origin moves.
+    probePos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing);
 
-    vec3 rayDir = ddgiRayDirection(localRayIdx, volume.RaysPerProbe, volume.FrameIndex);
+    vec3 toLight = normalize(-volume.LightDirection.xyz);
+    vec3 rayDir = ddgiSampleRayDirection(localRayIdx, volume.RaysPerProbe,
+                                         volume.FrameIndex,
+                                         uint(volume.RaySampleMode), toLight).xyz;
 
     SDFHitResult hit = traceSDF(
         probePos, rayDir, volume.RayMaxDistance);

@@ -25,7 +25,31 @@ struct ScreenProbeParams {
     u32   rays_per_probe    = 64;    // Rays per probe (64 for better directional coverage)
     float max_ray_distance  = 50.0f; // Maximum ray travel distance (world units)
     float gather_radius     = 2.0f;  // Bilateral filter radius in probe grid cells
-    float hzb_max_distance  = 12.0f; // T5.1: near-field HZB trace range (world units)
+    float hzb_max_distance  = 25.0f; // T5.1: near-field HZB trace range (world units; 25 lets second-floor probes reach the sunlit nave floor)
+    // F5 (M7): per-frame jitter of probe placement + ray direction set. UE
+    // Lumen jitters every frame and lets the temporal filter average over
+    // frames; a fixed grid + fixed Fibonacci set leaves banding EMA cannot
+    // smooth. World-space position amplitude is clamped (jitter_max_world)
+    // so the Temporal pass's position gate (posThreshold = 0.5) never
+    // rejects a probe solely because of jitter.
+    bool  enable_jitter     = true;
+    float jitter_max_world  = 0.2f;  // < posThreshold / 2
+    // F1 (M7): far-field radiance-cache early-out. SDF rays march only this
+    // far, then unresolved rays query the DDGI volume at the stop point
+    // (UE Lumen's world-probe distance-threshold semantics). Should sit
+    // above hzb_max_distance and below max_ray_distance. 0 disables.
+    float far_cache_start_distance = 30.0f;
+    // F2 (M7): importance resampling of the Fibonacci direction set against
+    // the previous frame's final probe SH (UE lighting-pdf × BRDF-pdf
+    // semantics without a radiance map). Rays are re-allocated by inverse-CDF
+    // over cosine × SH-luminance; the SH projection weight carries the
+    // 1/(N·q) correction so the estimator stays unbiased.
+    bool  enable_importance = true;
+    // F4 (M7): fine-tier adaptive activation threshold — UE interpolation-
+    // failure test (bilinear reconstruction error from the 4 coarse
+    // neighbors, world units). 0 falls back to the T5.3 depth/normal
+    // variance heuristic.
+    float adaptive_pos_threshold = 0.35f;
 };
 
 /// Per-frame camera data.
@@ -76,6 +100,12 @@ struct ScreenProbeGlobalData {
     // T5.1 hybrid trace: near-field HZB march parameters
     // (near/far match the SSGI/SSR convention: 0.1/1000)
     math::v4   hzb_params;             // offset 368: x=near, y=far, z=mip_levels, w=hzb_max_distance
+
+    // F1 (M7): far-field cache query. x = far_cache_start_distance (world
+    // units) — SDF rays stop there and query the DDGI radiance cache at the
+    // stop point (UE world-probe semantics); 0 disables (legacy miss chain).
+    // F2 (M7): y = importance resampling on/off (1/0).
+    math::v4   cache_params;           // offset 400: x=far_cache_start, y=importance, zw reserved
 };
 
 // ============================================================================
@@ -173,6 +203,21 @@ public:
         ddgi_fb_spacing_ = view.spacing;
         ddgi_fallback_available_ = (view.irradiance != rhi::handles::INVALID_RESOURCE);
     }
+
+    // Offline high-res SDF (single volume, e.g. OfflineSDFMerger's 384³ field).
+    // When set, the SDF far-field trace uses it instead of the runtime
+    // GlobalSDF cascades — same semantics as LumenDDGIPass::SetOfflineSDFSource
+    // (single cascade, count=1; outside the volume sampleBestSDF returns the
+    // 1e10 empty sentinel and the ray resolves as miss).
+    void SetOfflineSDFSource(rhi::ResourceHandle texture,
+                             math::v3 origin, math::v3 extent, u32 resolution) {
+        offline_sdf_texture_ = texture;
+        offline_sdf_origin_ = origin;
+        offline_sdf_extent_ = extent;
+        offline_sdf_resolution_ = resolution;
+        has_offline_sdf_ = (texture != rhi::handles::INVALID_RESOURCE && resolution > 0);
+    }
+    bool HasOfflineSDF() const { return has_offline_sdf_; }
 
     // DEPRECATED (X2/A3): 旧签名保留为转发适配器。
     void SetDDGIFallbackData(
@@ -335,6 +380,13 @@ private:
     // T5.1: HZB near-field input
     rhi::ResourceHandle hzb_texture_{ rhi::handles::INVALID_RESOURCE };
     u32 hzb_mip_levels_ = 0;
+
+    // Offline high-res SDF override for the far-field trace
+    bool has_offline_sdf_ = false;
+    rhi::ResourceHandle offline_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
+    math::v3 offline_sdf_origin_{ 0.0f };
+    math::v3 offline_sdf_extent_{ 0.0f };
+    u32 offline_sdf_resolution_ = 0;
 
     // X2/A3 时域策略枚举存储（EMA = 现有 temporal accumulation，行为不变）
     GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;

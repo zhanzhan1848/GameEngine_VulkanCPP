@@ -116,18 +116,15 @@ void screen_probe_denoise() {
         return;
     }
 
-    // Early out for zero GI — pass through without filtering
-    float centerLum = dot(centerGI.rgb, vec3(0.2126, 0.7152, 0.0722));
-    if (centerLum < 0.0001) {
-        imageStore(giOutput, ivec2(pixel_pos), centerGI);
-        return;
-    }
-
-    // Light bilateral filter — geometry weights only, no confidence influence
+    // Low/zero-radiance pixels must still enter the bilateral pass.  They are
+    // exactly the holes produced when a sparse probe does not match a curved
+    // column or cloth fold; returning early made those holes permanent.
     uint radius = min(params.kernel_radius, 2u);
 
     vec3 filteredGI = vec3(0.0);
+    float filteredConfidence = 0.0;
     float totalWeight = 0.0;
+    float centerConfidence = clamp(centerGI.a, 0.0, 1.0);
 
     for (int dy = -int(radius); dy <= int(radius); dy++) {
         for (int dx = -int(radius); dx <= int(radius); dx++) {
@@ -156,19 +153,29 @@ void screen_probe_denoise() {
             float spatialDist2 = float(dx * dx + dy * dy);
             float w_spatial = exp(-spatialDist2 / (2.0 * params.sigma_spatial * params.sigma_spatial));
 
-            float weight = w_depth * w_normal * w_spatial;
+            // When the center is uncertain, prefer valid neighboring probes;
+            // when it is confident, preserve the original geometry-only
+            // bilateral behavior.  A small floor lets freshly placed probes
+            // converge without making the filter singular.
+            float sampleConfidence = clamp(sampleGI.a, 0.0, 1.0);
+            float confidenceWeight = mix(max(sampleConfidence, 0.05), 1.0,
+                                         centerConfidence);
+            float weight = w_depth * w_normal * w_spatial * confidenceWeight;
 
             filteredGI += sampleGI.rgb * weight;
+            filteredConfidence += sampleConfidence * weight;
             totalWeight += weight;
         }
     }
 
     if (totalWeight > 1e-6) {
         filteredGI /= totalWeight;
+        filteredConfidence /= totalWeight;
     } else {
         filteredGI = centerGI.rgb;
+        filteredConfidence = centerConfidence;
     }
 
-    // Pass through confidence from input (for temporal use downstream)
-    imageStore(giOutput, ivec2(pixel_pos), vec4(filteredGI, centerGI.a));
+    imageStore(giOutput, ivec2(pixel_pos),
+               vec4(filteredGI, max(centerConfidence, filteredConfidence)));
 }

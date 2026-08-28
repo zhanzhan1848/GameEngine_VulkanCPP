@@ -141,6 +141,10 @@ void main() {
         // But cap to avoid overshooting.
         float step = min(d * 0.9, stepSize * 4.0);
         step = max(step, stepSize);
+        // T8.10f: same stride-cap rationale as DDGITraceSDF — uncapped 0.38
+        // steps skip the ±0.14 hit band of thin slabs and render them as
+        // gray miss holes. Cap = 2×stepSize (0.19) so every band is sampled.
+        step = min(step, stepSize * 2.0);
         t += step;
     }
 

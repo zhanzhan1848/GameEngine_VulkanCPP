@@ -29,7 +29,19 @@ struct TemporalConstants {
     float maxGradient;      // maximum SH change per frame (gradient limiter)
     uint  gridW;            // T5.2: probe grid dims for prev-cell lookup
     uint  gridH;
+    float mode;             // F3 (M7): 0=EMA (default), 1=EMAVarianceClamp, 2=Reprojection
+    float _pad0;
 };
+
+// F3 (M7): neighborhood variance clamp — byte-equivalent to
+// TemporalLib.glsl::varianceClampAABB (Metal SSGITemporal.metal lineage).
+static inline float3 varianceClampAABB(float3 history, float3 mean, float3 sigma,
+                                       float scale) {
+    float3 sigmaFloor = max(abs(mean) * 0.1f, float3(0.01f));
+    float3 aabbMin = mean - sigma * scale - sigmaFloor;
+    float3 aabbMax = mean + sigma * scale + sigmaFloor;
+    return clamp(history, aabbMin, aabbMax);
+}
 
 kernel void screen_probe_temporal(
     device const float4* currentSH       [[buffer(0)]],  // from Average pass (4 per probe)
@@ -140,6 +152,37 @@ kernel void screen_probe_temporal(
     }
 
     // =================================================================
+    // F3 (M7) EMAVarianceClamp (mode 1): clamp the reprojected history L0
+    // into the current frame's neighborhood statistics AABB, then shrink
+    // the L1 bands by the same per-channel factor (sign preserved).
+    // Stats over self + horizontal neighbors' L0: 2 extra reads — budget
+    // 31/32 worst case.
+    // =================================================================
+    if (params.mode > 0.5f && params.mode < 1.5f) {
+        float3 sum = curSH0.rgb;
+        float3 sumSq = curSH0.rgb * curSH0.rgb;
+        float n = 1.0f;
+        uint gx = global_id % params.gridW;
+        if (gx > 0u) {
+            float4 v = currentSH[(global_id - 1u) * 4u];
+            if (v.w > 0.0f) { sum += v.rgb; sumSq += v.rgb * v.rgb; n += 1.0f; }
+        }
+        if (gx + 1u < params.gridW) {
+            float4 v = currentSH[(global_id + 1u) * 4u];
+            if (v.w > 0.0f) { sum += v.rgb; sumSq += v.rgb * v.rgb; n += 1.0f; }
+        }
+        float3 mean = sum / n;
+        float3 sigma = sqrt(max(sumSq / n - mean * mean, float3(0.0f)));
+        float3 cl0 = varianceClampAABB(histSH[0].rgb, mean, sigma, params.clampScale);
+        float3 shrink = clamp(abs(cl0) / max(abs(histSH[0].rgb), float3(1e-4f)),
+                              float3(0.0f), float3(1.0f));
+        histSH[0].rgb = cl0;
+        histSH[1].rgb *= shrink;
+        histSH[2].rgb *= shrink;
+        histSH[3].rgb *= shrink;
+    }
+
+    // =================================================================
     // Compute per-probe gradient (how much SH changed)
     // =================================================================
     float3 diff0 = curSH0.rgb - histSH[0].rgb;
@@ -160,17 +203,22 @@ kernel void screen_probe_temporal(
         float4 cur = currentSH[base + b];
         float4 hist = histSH[b];
 
-        // Clamp history to prevent energy drift
-        float3 curAbs = max(abs(cur.rgb), float3(0.1f));
-        float3 lo = cur.rgb - params.clampScale * curAbs;
-        float3 hi = cur.rgb + params.clampScale * curAbs;
-        float3 clampedHist = clamp(hist.rgb, lo, hi);
+        // F3 mode 2 (Reprojection): pure bilinear history reuse — skip the
+        // relative clamp and gradient limiter to isolate reprojection quality.
+        float3 clampedHist = hist.rgb;
+        if (params.mode < 1.5f) {
+            // Clamp history to prevent energy drift
+            float3 curAbs = max(abs(cur.rgb), float3(0.1f));
+            float3 lo = cur.rgb - params.clampScale * curAbs;
+            float3 hi = cur.rgb + params.clampScale * curAbs;
+            clampedHist = clamp(hist.rgb, lo, hi);
 
-        // Gradient limiter: cap per-frame change
-        float3 diff = cur.rgb - clampedHist;
-        float diffLen = length(diff);
-        if (diffLen > params.maxGradient && diffLen > 0.001f) {
-            cur.rgb = clampedHist + normalize(diff) * params.maxGradient;
+            // Gradient limiter: cap per-frame change
+            float3 diff = cur.rgb - clampedHist;
+            float diffLen = length(diff);
+            if (diffLen > params.maxGradient && diffLen > 0.001f) {
+                cur.rgb = clampedHist + normalize(diff) * params.maxGradient;
+            }
         }
 
         // Blend

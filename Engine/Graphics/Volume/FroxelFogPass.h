@@ -46,6 +46,11 @@ public:
     FroxelOutput AddPass(rendergraph::RenderGraph& graph, const FroxelInputs& inputs);
     bool IsInitialized() const { return initialized_; }
 
+    // Debug/testing: resolved screen-space scatter texture (RGB=scatter, A=transmittance).
+    rhi::ResourceHandle GetScatterTexture(u32 buffer_index) const {
+        return scatter_texture_[buffer_index % 3];
+    }
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();

@@ -2,10 +2,16 @@
 #include "Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanTexture.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <iostream>
 
 namespace primal::graphics {
@@ -178,7 +184,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
     outputs.gi_specular_tex = gi_specular_texture_;
     outputs.gi_specular_rg = graph.ImportResource("DDGIHalfResGlossy", gi_specular_texture_);
 
-    u32 ddgiReadIdx = (inputs.current_buffer_index + 2) % 3;
+    // Read the slot DDGI trace + SC-DDGI integration wrote this frame
+    // (frame_index % 3). The old (cbIdx + 2) % 3 derived from the swapchain
+    // index and could phase-shift against the writers' frame counter.
+    u32 ddgiReadIdx = (inputs.frame_index != GIGatherInputs::kFrameIndexUnset)
+                          ? (inputs.frame_index % 3)
+                          : ((inputs.current_buffer_index + 2) % 3);
 
     // Import DDGI buffers
     auto irrHandle = graph.ImportResource("DDGIIrrRead", inputs.ddgi_pass->GetIrradianceBuffer(ddgiReadIdx));
@@ -587,6 +598,98 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 outBarriers[1].afterState = ResourceState::ShaderResource;
                 outBarriers[1].subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(outBarriers, 2);
+            }
+
+            // SC_DUMP_CARDS=1 — deferred luminance stats of the gather output
+            // (Fusion's DDGI input). Localizes a "screen went black" drain to
+            // before/after this stage; probes vs output vs screen.
+            static const bool dumpOut = [] {
+                const char* e = std::getenv("SC_DUMP_CARDS");
+                return e && atoi(e) != 0;
+            }();
+            static u32 tick = 0;
+            ++tick;
+            if (dumpOut) {
+                const u32 dHalfW = render_width_ / 2;
+                const u32 dHalfH = render_height_ / 2;
+                if (out_dump_frame_ != 0xFFFFFFFFu && tick > out_dump_frame_ + 3u) {
+                    if (auto* texels = static_cast<const u16*>(
+                            device_->MapBuffer(out_staging_))) {
+                        auto f16 = [](u16 h) -> float {
+                            u32 sign = (h >> 15) & 1u, exp = (h >> 10) & 0x1Fu,
+                                mant = h & 0x3FFu;
+                            if (exp == 0u) return 0.0f;
+                            u32 bits = (sign << 31) | ((exp + 112u) << 23) | (mant << 13);
+                            float f; std::memcpy(&f, &bits, 4);
+                            return f;
+                        };
+                        std::vector<float> lums;
+                        lums.reserve((size_t)dHalfW * dHalfH / 8);
+                        for (u32 y = 0; y < dHalfH; y += 3)
+                            for (u32 x = 0; x < dHalfW; x += 3) {
+                                const u16* t = texels + ((size_t)y * dHalfW + x) * 4;
+                                float r = f16(t[0]), g = f16(t[1]), b = f16(t[2]);
+                                if (std::isnan(r) || std::isnan(g) || std::isnan(b)) continue;
+                                lums.push_back(0.2126f * r + 0.7152f * g + 0.0722f * b);
+                            }
+                        if (!lums.empty()) {
+                            std::sort(lums.begin(), lums.end());
+                            auto pct = [&](float q) {
+                                return lums[std::min(lums.size() - 1,
+                                                     (size_t)(q * (lums.size() - 1)))];
+                            };
+                            std::cerr << "[GIGather] out lum p10=" << pct(0.10f)
+                                      << " p50=" << pct(0.50f)
+                                      << " p90=" << pct(0.90f)
+                                      << " max=" << lums.back() << std::endl;
+                        }
+                        device_->UnmapBuffer(out_staging_);
+                    }
+                    out_dump_frame_ = 0xFFFFFFFFu;
+                }
+                if (tick % 90u == 0u && out_dump_frame_ == 0xFFFFFFFFu) {
+                    const u64 size = (u64)dHalfW * dHalfH * 8u;   // RGBA16F
+                    if (out_staging_ == rhi::handles::INVALID_RESOURCE ||
+                        out_staging_size_ < size) {
+                        if (out_staging_ != rhi::handles::INVALID_RESOURCE)
+                            device_->DestroyBuffer(out_staging_);
+                        rhi::BufferDesc d{};
+                        d.size = size;
+                        d.usage = rhi::GPUMemoryUsage::Readback;
+                        d.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                        d.name = "GIGather_OutDump";
+                        out_staging_ = device_->CreateBuffer(d);
+                        out_staging_size_ = size;
+                    }
+                    if (out_staging_ != rhi::handles::INVALID_RESOURCE) {
+                        ResourceBarrier toCopy{};
+                        toCopy.resource = gi_halfres_texture_;
+                        toCopy.beforeState = ResourceState::ShaderResource;
+                        toCopy.afterState = ResourceState::CopySource;
+                        toCopy.subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&toCopy, 1);
+
+                        rhi::BufferTextureCopyRegion region{};
+                        region.bufferOffset = 0;
+                        region.bufferRowLength = dHalfW;
+                        region.bufferImageHeight = dHalfH;
+                        region.imageSubresource.mipLevel = 0;
+                        region.imageSubresource.baseArrayLayer = 0;
+                        region.imageSubresource.layerCount = 1;
+                        region.imageOffset = {0, 0, 0};
+                        region.imageExtent = {dHalfW, dHalfH, 1};
+                        cmd->CopyTextureToBuffer(gi_halfres_texture_, out_staging_,
+                                                 &region, 1);
+
+                        ResourceBarrier toSrv{};
+                        toSrv.resource = gi_halfres_texture_;
+                        toSrv.beforeState = ResourceState::CopySource;
+                        toSrv.afterState = ResourceState::ShaderResource;
+                        toSrv.subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&toSrv, 1);
+                        out_dump_frame_ = tick;
+                    }
+                }
             }
         }
     );

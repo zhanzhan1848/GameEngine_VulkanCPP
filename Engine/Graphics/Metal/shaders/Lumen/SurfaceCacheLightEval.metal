@@ -54,6 +54,7 @@ kernel void surfaceCacheLightEval(
     uint2 atlas_uv = uint2(
         card_dispatch[lo].atlas_offset_x + local_x,
         card_dispatch[lo].atlas_offset_y + local_y);
+    uint card_idx = card_dispatch[lo].card_index;
 
     // Read material data
     float4 albedo = albedo_atlas.read(atlas_uv);
@@ -82,7 +83,7 @@ kernel void surfaceCacheLightEval(
             attenuation = dir_visibility;
         } else {
             // Point/spot light: per-texel distance check
-            float3 world_pos = cardTexelToWorld(atlas_uv, 0.0, cards[lo]);
+            float3 world_pos = cardTexelToWorld(atlas_uv, 0.0, cards[card_idx]);
             float3 to_light = lights[li].position.xyz - world_pos;
             float dist = length(to_light);
             float radius = lights[li].position.w;

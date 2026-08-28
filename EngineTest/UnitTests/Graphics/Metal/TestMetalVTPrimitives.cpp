@@ -66,6 +66,22 @@ kernel void vtFetchCS(constant uint4& params [[buffer(0)]],   // x=width, y=heig
 }
 )";
 
+const char* kArrayFetchCS = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void arrayFetchCS(constant uint4& params [[buffer(0)]], // x=width, y=height, z=layer
+                         device uint* outBuf [[buffer(1)]],
+                         texture2d_array<float, access::sample> srcTex [[texture(2)]],
+                         uint2 xy [[thread_position_in_grid]])
+{
+    if (xy.x >= params.x || xy.y >= params.y) return;
+    float4 sample = srcTex.read(ushort2(xy), params.z, 0);
+    uint4 rgba = uint4(round(clamp(sample, 0.0f, 1.0f) * 255.0f));
+    outBuf[xy.y * params.x + xy.x] = rgba.x | (rgba.y << 8) | (rgba.z << 16) | (rgba.w << 24);
+}
+)";
+
 struct MetalFixture {
     DeviceDesc desc{};
     MetalDevice* device{nullptr};
@@ -411,6 +427,156 @@ TestResult TestVT_RegionUploadTexelFetch_Metal() {
 }
 
 // =====================================================================================
+// Material texture path: deferred private uploads -> 2D-to-array blits -> shader read
+// =====================================================================================
+TestResult TestVT_DeferredUploadTextureArray_Metal() {
+    MetalFixture fx;
+    TEST_ASSERT(fx.Init(), "Metal device init");
+
+    constexpr u32 width = 8, height = 8, layers = 2;
+    constexpr u32 layerPixels[2] = {0xFF1E140A, 0xFF3C2D96};
+
+    TextureDesc srcDesc{};
+    srcDesc.size = {width, height, 1};
+    srcDesc.mipLevels = 1;
+    srcDesc.arraySize = 1;
+    srcDesc.format = DataFormat::RGBA8_UNorm;
+    srcDesc.type = TextureType::Texture2D;
+    srcDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopySource;
+    srcDesc.memoryUsage = GPUMemoryUsage::Static;
+
+    ResourceHandle sources[layers]{};
+    for (u32 layer = 0; layer < layers; ++layer) {
+        srcDesc.name = layer == 0 ? "ArrayCopySource0" : "ArrayCopySource1";
+        sources[layer] = fx.device->CreateTexture(srcDesc);
+        TEST_ASSERT(sources[layer] != handles::INVALID_RESOURCE, "CreateTexture source");
+        std::vector<u32> pixels(width * height, layerPixels[layer]);
+        TextureRegionUpdate region{};
+        region.width = width;
+        region.height = height;
+        TEST_ASSERT(fx.device->UpdateTextureRegion(sources[layer], pixels.data(),
+                                                   pixels.size() * sizeof(u32), region),
+                    "queue private source upload");
+    }
+
+    TextureDesc arrayDesc = srcDesc;
+    arrayDesc.name = "DeferredUploadTextureArray";
+    arrayDesc.type = TextureType::Texture2DArray;
+    arrayDesc.arraySize = layers;
+    arrayDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    ResourceHandle arrayTex = fx.device->CreateTexture(arrayDesc);
+    TEST_ASSERT(arrayTex != handles::INVALID_RESOURCE, "CreateTexture array");
+
+    ShaderHandle cs = fx.device->CreateShader(kArrayFetchCS, std::strlen(kArrayFetchCS),
+                                               ShaderStage::Compute, "arrayFetchCS");
+    TEST_ASSERT(cs != handles::INVALID_SHADER, "CreateShader arrayFetchCS");
+
+    DescriptorSetLayoutBinding bindings[3]{};
+    bindings[0] = {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};
+    bindings[1] = {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute};
+    bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Compute};
+    DescriptorSetLayoutDesc layoutDesc{};
+    layoutDesc.bindingCount = 3;
+    layoutDesc.bindings = bindings;
+    DescriptorSetLayoutHandle layout = fx.device->CreateDescriptorSetLayout(layoutDesc);
+    TEST_ASSERT(layout != handles::INVALID_DESCRIPTOR_SET_LAYOUT, "CreateDescriptorSetLayout");
+
+    PipelineLayoutDesc plDesc{};
+    plDesc.setLayoutCount = 1;
+    plDesc.setLayouts = &layout;
+    PipelineLayoutHandle pl = fx.device->CreatePipelineLayout(plDesc);
+    ComputePipelineDesc cpd{};
+    cpd.computeShader = cs;
+    cpd.layout = pl;
+    cpd.threadGroupSize = {8, 8, 1};
+    PipelineHandle pipe = fx.device->CreateComputePipeline(cpd);
+    TEST_ASSERT(pipe != handles::INVALID_PIPELINE, "CreateComputePipeline");
+
+    BufferDesc uboDesc{};
+    uboDesc.size = 16;
+    uboDesc.type = BufferType::Constant;
+    uboDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    ResourceHandle ubo = fx.device->CreateBuffer(uboDesc);
+    BufferDesc outDesc{};
+    outDesc.size = u64(width) * height * sizeof(u32);
+    outDesc.type = BufferType::Raw;
+    outDesc.memoryUsage = GPUMemoryUsage::Static;
+    ResourceHandle out = fx.device->CreateBuffer(outDesc);
+    TEST_ASSERT(ubo != handles::INVALID_RESOURCE && out != handles::INVALID_RESOURCE, "Create buffers");
+
+    DescriptorSetDesc dsDesc{};
+    dsDesc.layout = layout;
+    DescriptorSetHandle ds = fx.device->CreateDescriptorSet(dsDesc);
+    DescriptorBufferInfo uboInfo{ubo, 0, 16};
+    DescriptorBufferInfo outInfo{out, 0, outDesc.size};
+    DescriptorImageInfo imageInfo{};
+    imageInfo.imageView = arrayTex;
+    imageInfo.imageLayout = ResourceState::ShaderResource;
+    WriteDescriptorSet writes[3]{};
+    writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
+    writes[0].descriptorType = DescriptorType::UniformBuffer; writes[0].bufferInfo = &uboInfo;
+    writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
+    writes[1].descriptorType = DescriptorType::StorageBuffer; writes[1].bufferInfo = &outInfo;
+    writes[2].dstSet = ds; writes[2].dstBinding = 2; writes[2].descriptorCount = 1;
+    writes[2].descriptorType = DescriptorType::SampledImage; writes[2].imageInfo = &imageInfo;
+    fx.device->UpdateDescriptorSets(3, writes);
+
+    rhi_readback_ring ring;
+    TEST_ASSERT(ring.initialize(fx.device, outDesc.size, 1), "readback ring initialize");
+
+    for (u32 layer = 0; layer < layers; ++layer) {
+        u32 params[4] = {width, height, layer, 0};
+        TEST_ASSERT(fx.device->UpdateBufferData(ubo, params, sizeof(params), 0), "update layer params");
+
+        CommandBufferHandle cmd = fx.device->CreateCommandBuffer(CommandQueueType::Graphics);
+        MetalCommandBuffer* mcmd = fx.device->GetCommandBuffer(cmd);
+        TEST_ASSERT(mcmd->Reset() && mcmd->Begin(), "Begin cmd");
+
+        if (layer == 0) {
+            for (u32 dstLayer = 0; dstLayer < layers; ++dstLayer) {
+                TextureBlitRegion region{};
+                region.srcSubresource = {0, 0, 1};
+                region.dstSubresource = {0, dstLayer, 1};
+                region.srcOffsets[1] = {s32(width), s32(height), 1};
+                region.dstOffsets[1] = {s32(width), s32(height), 1};
+                mcmd->BlitTexture(sources[dstLayer], arrayTex, &region, 1, FilterMode::Nearest);
+            }
+        }
+
+        mcmd->BindComputePipeline(pipe);
+        mcmd->BindDescriptorSets(PipelineBindPoint::Compute, pl, 0, 1, &ds, 0, nullptr);
+        mcmd->Dispatch(1, 1, 1);
+        mcmd->CopyBuffer(out, ring.buffer(0), 0, 0, outDesc.size);
+        TEST_ASSERT(mcmd->End(), "End cmd");
+        QueueSubmitInfo submit{};
+        submit.cmdBuffer = cmd;
+        ring.attach_fence(submit, 0);
+        TEST_ASSERT(fx.device->Submit(submit) && ring.wait(fx.device, 0, 5000), "Submit and wait");
+
+        const u32* mapped = static_cast<const u32*>(ring.map(fx.device, 0));
+        TEST_ASSERT(mapped != nullptr, "map readback");
+        u32 mismatches = 0;
+        for (u32 i = 0; i < width * height; ++i) mismatches += mapped[i] != layerPixels[layer];
+        ring.unmap(fx.device, 0);
+        fx.device->DestroyCommandBuffer(cmd);
+        std::cout << "[VTArray/Metal] layer=" << layer << " mismatches=" << mismatches << std::endl;
+        TEST_ASSERT(mismatches == 0, "texture array layer matches deferred source upload");
+    }
+
+    ring.shutdown(fx.device);
+    fx.device->DestroyDescriptorSet(ds);
+    fx.device->DestroyDescriptorSetLayout(layout);
+    fx.device->DestroyPipelineLayout(pl);
+    fx.device->DestroyPipeline(pipe);
+    fx.device->DestroyBuffer(out);
+    fx.device->DestroyBuffer(ubo);
+    fx.device->DestroyTexture(arrayTex);
+    for (ResourceHandle source : sources) fx.device->DestroyTexture(source);
+    fx.device->DestroyShader(cs);
+    return TestResult::Passed;
+}
+
+// =====================================================================================
 // M0.8: ASTC 能力查询(Apple GPU 硬断言 true)
 // =====================================================================================
 TestResult TestVT_ASTCCapability_Metal() {
@@ -428,6 +594,7 @@ void RegisterMetalVTPrimitivesTests() {
     auto suite = std::make_shared<TestSuite>("MetalVTPrimitivesTests");
     suite->AddTestCase(TestCase("ReadbackRing", TestVT_ReadbackRing_Metal));
     suite->AddTestCase(TestCase("RegionUploadTexelFetch", TestVT_RegionUploadTexelFetch_Metal));
+    suite->AddTestCase(TestCase("DeferredUploadTextureArray", TestVT_DeferredUploadTextureArray_Metal));
     suite->AddTestCase(TestCase("ASTCCapability", TestVT_ASTCCapability_Metal));
     TestRunner::RegisterTestSuite(suite);
 }

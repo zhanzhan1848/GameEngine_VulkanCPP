@@ -20,7 +20,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "BlurPass");
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
-        shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + shaderPath;
+        shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
         file.open(shaderPath, std::ios::ate | std::ios::binary);
     }
 

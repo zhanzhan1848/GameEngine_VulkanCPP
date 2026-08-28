@@ -12,12 +12,13 @@ namespace lumen { class LumenDDGIPass; class SurfaceCachePass; }
 // ============================================================================
 // SC → DDGI card→probe projection data (T2.1).
 // Layouts must match DDGIProbeIrradianceFromCards.metal / .comp byte-for-byte:
-// ProbeCardContrib = 20B tight, ProbeContribRange = 8B tight.
+// ProbeCardContrib = 40B tight (card_index + 9 SH weights),
+// ProbeContribRange = 8B tight.
 // ============================================================================
 
 struct SCProbeCardContrib {
     u32  card_index;
-    float sh_weights[4];   // pre-computed L0+L1 SH projection weights
+    float sh_weights[9];   // pre-computed L0-L2 (9-band) SH projection weights
 };
 
 struct SCProbeContribRange {
@@ -25,13 +26,21 @@ struct SCProbeContribRange {
     u32 count;
 };
 
-constexpr u32 SC_MAX_CONTRIBS_PER_PROBE = 6;
+// L2 projection from discrete card samples needs more than 6 directions to
+// stay well-conditioned; 12 top-weight cards per probe keeps it stable.
+constexpr u32 SC_MAX_CONTRIBS_PER_PROBE = 12;
 
 struct SCDDGIInputs {
     lumen::LumenDDGIPass* ddgi_pass = nullptr;
     lumen::SurfaceCachePass* surface_cache_pass = nullptr;
 
-    u32 current_buffer_index = 0;
+    // Slot base for triple-buffered GPU resources (lighting atlas, DDGI
+    // irradiance/confidence/update-list). Must be the SAME counter passed to
+    // LumenDDGIPass::AddPass / SurfaceCachePass::AddPass (the render frame
+    // count) — the swapchain buffer index can phase-shift against it and
+    // would bind slots that were never written this frame.
+    u32 frame_index = 0;
+    u32 current_buffer_index = 0;  // descriptor-set rotation only
     rendergraph::RGResourceHandle sc_lighting_rg;        // SC lighting atlas dependency
     rendergraph::RGResourceHandle ddgi_irradiance;       // ordering guard: DDGI writes first
     rendergraph::RGResourceHandle ddgi_irradiance_hist;  // (this pass read+modifies both)
@@ -81,6 +90,18 @@ private:
     u32  total_probes_ = 0;
     u32  max_cards_ = 0;
     bool assignment_built_ = false;
+
+    // Debug (SC_DUMP_CARDS=1): staging copy of card_radiance_buf_ + the frame
+    // its copy was enqueued; the print happens >=3 frames later so the copy
+    // is guaranteed retired (static-scene diagnostics only).
+    rhi::ResourceHandle card_radiance_staging_{rhi::handles::INVALID_RESOURCE};
+    u32  dump_pending_frame_ = 0xFFFFFFFFu;
+    u32  dump_card_count_ = 0;
+
+    // Debug (same env): staging copy of the DDGI irradiance output (probe L0
+    // time series — distinguishes "cards drained" from "probes drained").
+    rhi::ResourceHandle ddgi_irr_staging_{rhi::handles::INVALID_RESOURCE};
+    u32  dump_probe_count_ = 0;
 };
 
 } // namespace primal::graphics

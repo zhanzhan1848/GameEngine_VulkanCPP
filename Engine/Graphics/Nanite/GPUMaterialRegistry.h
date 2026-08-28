@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_map>
 #include <memory>
+#include <cstddef>
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
@@ -37,6 +38,10 @@ public:
         uint32_t flags;               // bit0 = VT 材质;bits[4:8) = vtId(M4;
                                      // 单尺寸 Texture2DArray 限制随 VT 化解除)
     };
+    static_assert(sizeof(MaterialData) == 48, "MaterialData GPU stride changed");
+    static_assert(offsetof(MaterialData, albedo_tint) == 12, "MaterialData tint offset changed");
+    static_assert(offsetof(MaterialData, uv_scale) == 36, "MaterialData UV offset changed");
+    static_assert(offsetof(MaterialData, flags) == 44, "MaterialData flags offset changed");
 
     // M4:flags 编码 — VT 材质标志 + vtId(feedback 编码上限 15)
     static constexpr uint32_t kMaterialVTFlag = 0x1u;
@@ -126,11 +131,11 @@ private:
     std::vector<MaterialInstance*> registeredInstances_;  // 🔥 NEW: Preserve registration order
 
     // GPU resources
-    ResourceHandle materialIDBuffer_;
-    ResourceHandle materialDataBuffer_;
-    ResourceHandle albedoTextureArray_;
-    ResourceHandle normalTextureArray_;
-    ResourceHandle ormTextureArray_;
+    ResourceHandle materialIDBuffer_{rhi::handles::INVALID_RESOURCE};
+    ResourceHandle materialDataBuffer_{rhi::handles::INVALID_RESOURCE};
+    ResourceHandle albedoTextureArray_{rhi::handles::INVALID_RESOURCE};
+    ResourceHandle normalTextureArray_{rhi::handles::INVALID_RESOURCE};
+    ResourceHandle ormTextureArray_{rhi::handles::INVALID_RESOURCE};
 
     // Build state
     JobHandle buildJob_;

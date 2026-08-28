@@ -99,9 +99,10 @@ namespace {
     }
 
     primal::graphics::rhi::ResourceHandle CreateTextureFromData(RHIDeviceBase* /*device*/, uint32_t width, uint32_t height, const unsigned char* data, bool isSRGB) {
-        // Use correct DataFormat enums instead of hardcoded values
-        // RGBA8_UNorm = 36, RGBA8_sRGB = 40
-        DataFormat format = isSRGB ? DataFormat::RGBA8_sRGB : DataFormat::RGBA8_UNorm;
+        // Content texture blobs use DXGI format IDs, not the engine DataFormat enum.
+        constexpr uint32_t DXGI_RGBA8_UNORM = 28;
+        constexpr uint32_t DXGI_RGBA8_UNORM_SRGB = 29;
+        const uint32_t format = isSRGB ? DXGI_RGBA8_UNORM_SRGB : DXGI_RGBA8_UNORM;
         uint32_t row_pitch = width * 4;
         uint32_t slice_pitch = height * row_pitch;
         size_t blob_size = (6 * sizeof(uint32_t)) + (2 * sizeof(uint32_t) + slice_pitch);
@@ -114,7 +115,7 @@ namespace {
         writer.write((uint32_t)1); // array_size
         writer.write((uint32_t)0); // flags
         writer.write((uint32_t)1); // mip_levels
-        writer.write((uint32_t)format); // Write enum value as uint32_t
+        writer.write(format);
         writer.write(row_pitch);
         writer.write(slice_pitch);
         writer.write(data, slice_pitch);
@@ -175,7 +176,7 @@ namespace {
         return dst_data;
     }
 
-    primal::graphics::rhi::ResourceHandle LoadTextureFromFile(RHIDeviceBase* device, const std::string& path, bool isNormalMap, bool isSRGB = true) {
+    primal::graphics::rhi::ResourceHandle LoadTextureFromFile(RHIDeviceBase* device, const std::string& path, bool isSRGB) {
         int width, height, channels;
         unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
         if (!data) {
@@ -1102,10 +1103,12 @@ bool TestNaniteStreamingPipeline::InitializeShadowFilterPipeline() {
     visDesc.size = {(renderWidth_ / 2), (renderHeight_ / 2), 1};
     visDesc.format = DataFormat::R8_UNorm;
     visDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
-    shadow_visibility_tex_ = device_->CreateTexture(visDesc);
-    if (shadow_visibility_tex_ == handles::INVALID_RESOURCE) {
-        std::cerr << "[ShadowFilter] Failed to create visibility texture" << std::endl;
-        return false;
+    for (u32 i = 0; i < 3; ++i) {
+        shadow_visibility_tex_[i] = device_->CreateTexture(visDesc);
+        if (shadow_visibility_tex_[i] == handles::INVALID_RESOURCE) {
+            std::cerr << "[ShadowFilter] Failed to create visibility texture " << i << std::endl;
+            return false;
+        }
     }
 
     // Triple-buffered constant buffers
@@ -2364,12 +2367,23 @@ bool TestNaniteStreamingPipeline::LoadSponzaScene() {
         return !sceneMeshes_.empty();
     };
 
-    // Try to load Sponza.model (same priority as TestParticleSponza)
-    std::string modelPath = baseDir + "Sponza_process_rebuild.model";
+    // Prefer the ContentTools-rebuilt asset. It preserves the packed normal-Z
+    // sign that is missing from the legacy static_normal_texture encoding.
+    // Keep the old blob only as a compatibility fallback for checkouts that do
+    // not contain the locally generated pipeline asset.
+    std::string modelPath = baseDir + "Sponza_pipeline_signed_v3.model";
     if (!TryLoad(modelPath)) {
-        std::cerr << "Failed to load Sponza.model from: " << modelPath << std::endl;
-        return false;
+        const std::string legacyPath = baseDir + "Sponza_process_rebuild.model";
+        std::cerr << "[TestNanite] Failed to load repaired model: " << modelPath
+                  << "; falling back to legacy model: " << legacyPath << std::endl;
+        modelPath = legacyPath;
+        if (!TryLoad(modelPath)) {
+            std::cerr << "Failed to load Sponza model from: " << modelPath << std::endl;
+            return false;
+        }
     }
+    std::cout << "[TestNanite] Loaded Sponza model: " << modelPath
+              << " (meshes=" << sceneMeshes_.size() << ")" << std::endl;
 
     //std::cout << "Successfully loaded Sponza scene with " << sceneMeshes_.size() << " meshes." << std::endl;
 
@@ -2561,18 +2575,22 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
 
     // Create default 1024x1024 white texture (for missing textures)
     // 🎨 CRITICAL: Must match Texture2DArray size (1024x1024)
-    rhi::ResourceHandle whiteTexture = rhi::handles::INVALID_RESOURCE;
+    rhi::ResourceHandle whiteAlbedoTexture = rhi::handles::INVALID_RESOURCE;
+    rhi::ResourceHandle whiteORMTexture = rhi::handles::INVALID_RESOURCE;
     {
         constexpr u32 WHITE_SIZE = 1024;
         constexpr u32 WHITE_PIXEL_COUNT = WHITE_SIZE * WHITE_SIZE;
 
         // Create 1024x1024 filled with white
         std::vector<u32> whiteData(WHITE_PIXEL_COUNT, 0xFFFFFFFF);  // RGBA white
-        whiteTexture = CreateTextureFromData(device_, WHITE_SIZE, WHITE_SIZE,
+        whiteAlbedoTexture = CreateTextureFromData(device_, WHITE_SIZE, WHITE_SIZE,
             reinterpret_cast<unsigned char*>(whiteData.data()), true);
+        whiteORMTexture = CreateTextureFromData(device_, WHITE_SIZE, WHITE_SIZE,
+            reinterpret_cast<unsigned char*>(whiteData.data()), false);
 
-        if (whiteTexture == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[TestNanite] Failed to create white texture" << std::endl;
+        if (whiteAlbedoTexture == rhi::handles::INVALID_RESOURCE ||
+            whiteORMTexture == rhi::handles::INVALID_RESOURCE) {
+            std::cerr << "[TestNanite] Failed to create white material textures" << std::endl;
             return false;
         }
     }
@@ -2602,14 +2620,14 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
                         loadedCount++;
                         // [TextureMapping] albedo debug — commented out
                     } else {
-                        texture = whiteTexture;  // Fallback to white
+                        texture = whiteAlbedoTexture;  // Fallback to white
                     }
                 }
 
                 meshInfo.materialInstance->SetTexture(0, texture);  // Albedo binding = 0
             }
         } else {
-            meshInfo.materialInstance->SetTexture(0, whiteTexture);  // No path, use white
+            meshInfo.materialInstance->SetTexture(0, whiteAlbedoTexture);  // No path, use white
         }
 
         // Infer normal texture path from diffuse if missing (binary files store empty normal paths)
@@ -2667,7 +2685,7 @@ bool TestNaniteStreamingPipeline::LoadMaterialTextures() {
         // No normal texture path — leave as INVALID so shader uses vertex normal
 
         // ORM texture (use white for now - would need separate loading logic)
-        meshInfo.materialInstance->SetTexture(2, whiteTexture);  // ORM binding = 2
+        meshInfo.materialInstance->SetTexture(2, whiteORMTexture);  // ORM binding = 2
     }
 
     //std::cout << "[TestNanite] Texture loading complete: "
@@ -2740,8 +2758,19 @@ void TestNaniteStreamingPipeline::Run() {
     bool f4_current = val.current.x > 0.0f;
     if (f4_current && !keyState_.f4_prev) {
         ssgiVisMode_ = (ssgiVisMode_ + 1) % 10;
-        const char* modeNames[] = { "Composite (Scene+SSGI)", "SSGI Only", "Scene Only", "DDGI Composite", "Albedo Only", "Screen Probe GI", "Full GI Fusion", "Surface Cache", "SC Albedo Atlas", "SC Depth Atlas" };
-        //std::cout << "[SSGI Vis] Mode: " << modeNames[ssgiVisMode_] << std::endl;
+        const char* modeNames[] = {
+            "0: Deferred + SSGI",
+            "1: SSGI Only",
+            "2: Deferred Lighting Only",
+            "3: Deferred + DDGI",
+            "4: Albedo Debug (No Lighting)",
+            "5: Screen Probe GI",
+            "6: Full GI Fusion",
+            "7: Surface Cache Lighting",
+            "8: Surface Cache Albedo Atlas",
+            "9: Surface Cache Depth Atlas"
+        };
+        std::cout << "[Lighting Vis] " << modeNames[ssgiVisMode_] << std::endl;
     }
     keyState_.f4_prev = f4_current;
 
@@ -3403,11 +3432,20 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     // === SHADOW FILTER PASS (half-res compute — avoids Apple Silicon texture bandwidth limits) ===
     u32 cbIdx = currentBufferIndex % 3;
     rendergraph::RGResourceHandle shadowVisibilityRG;
+    rendergraph::RGResourceHandle shadowFilterDepthRG;
+    if (gpuDrawPipeline_->GetGBufferDepthSampleable() != rhi::handles::INVALID_RESOURCE) {
+        // DepthCopy leaves this texture in CopySource. ShadowFilter samples it,
+        // so model the transition explicitly instead of relying on pass order.
+        shadowFilterDepthRG = graph.ImportResource(
+            "GBufferDepth_ShadowFilter",
+            gpuDrawPipeline_->GetGBufferDepthSampleable(),
+            rhi::ResourceState::CopySource);
+    }
     if (shadow_filter_pipeline_ != rhi::handles::INVALID_PIPELINE &&
-        shadow_visibility_tex_ != rhi::handles::INVALID_RESOURCE &&
+        shadow_visibility_tex_[cbIdx] != rhi::handles::INVALID_RESOURCE &&
         frameCount_ > 0) {
 
-        shadowVisibilityRG = graph.ImportResource("ShadowVisibility", shadow_visibility_tex_);
+        shadowVisibilityRG = graph.ImportResource("ShadowVisibility", shadow_visibility_tex_[cbIdx]);
 
         struct ShadowFilterData {
             rendergraph::RGResourceHandle output;
@@ -3416,8 +3454,16 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         graph.AddPass<ShadowFilterData>("ShadowFilter",
             graphics::rendergraph::RGPassType::Compute,
             graphics::rendergraph::RGPassCategory::Copy,
-            [shadowVisibilityRG, shadowMapRG](ShadowFilterData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+            [shadowVisibilityRG, shadowMapRG, shadowFilterDepthRG, gpuOutputHandle](ShadowFilterData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
                 data.output = builder.Write(shadowVisibilityRG, rhi::ResourceState::UnorderedAccess);
+
+                // The GPU-driven scene pass owns the GBuffer writes internally.
+                // Reading its declared output establishes SceneRender -> ShadowFilter
+                // ordering; the depth read below establishes CopySource -> SR state.
+                builder.Read(gpuOutputHandle, rhi::ResourceState::ShaderResource);
+                if (shadowFilterDepthRG.IsValid()) {
+                    builder.Read(shadowFilterDepthRG, rhi::ResourceState::ShaderResource);
+                }
 
                 // Read shadow maps from ShadowBlit pass
                 for (u32 c = 0; c < 2; ++c) {
@@ -3479,7 +3525,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     {0, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferDepthSampleable()},
                     {1, DescriptorType::SampledImage, shadowMap0},
                     {2, DescriptorType::SampledImage, shadowMap1},
-                    {3, DescriptorType::StorageImage, shadow_visibility_tex_},
+                    {3, DescriptorType::StorageImage, shadow_visibility_tex_[cbIdx]},
                 };
                 UpdateDescriptorSet(device_, shadow_filter_ds_[cbIdx], params, 5);
 
@@ -3674,7 +3720,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                     {3, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferNormal()},
                     {4, DescriptorType::SampledImage, gpuDrawPipeline_->GetGBufferORM()},
                     {5, DescriptorType::SampledImage, depthSampleable},
-                    {6, DescriptorType::SampledImage, shadow_visibility_tex_},
+                    {6, DescriptorType::SampledImage, shadow_visibility_tex_[cbIdx]},
                     {8, DescriptorType::Sampler, static_cast<ResourceHandle>(deferred_sampler_handle_)},
                     {9, DescriptorType::SampledImage, ssaoTex},
                 };
@@ -3938,7 +3984,12 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         }
         ddgiCameraData.frame_index = frameCount_;
         ddgiCameraData.delta_time = 0.016f;
-        ddgiCameraData.light_direction = primal::math::v3{sharedLightPos.x, sharedLightPos.y, sharedLightPos.z};
+        // DDGI trace shaders store the directional light's travel/emission
+        // direction and negate it when evaluating NdotL. Deferred lighting,
+        // by contrast, consumes sharedLightPos (surface -> light) directly.
+        // Passing sharedLightPos here inverted DDGI's direct injection and made
+        // its bright side mirror the deferred result across the scene.
+        ddgiCameraData.light_direction = sharedLightDir;
         ddgiCameraData.light_color = primal::math::v3{20.0f, 20.0f, 20.0f};
 
         ddgiOutput = ddgiPass_->AddPass(graph, ddgiRadianceHandle,
@@ -5081,6 +5132,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     // === Fusion Render Passes (2-pass fragment for Apple Silicon TBDR) ===
     // Pass 1 (half-res): 5 texture reads → pre-combined indirect
     // Pass 2 (full-res): 2 texture reads → tonemapped output
+    rendergraph::RGResourceHandle fusionOutputRG;
     if (ssgiVisMode_ == 6 && mode_diag_ == 1 &&
         fusion_indirect_pipeline_ != rhi::handles::INVALID_PIPELINE &&
         fusion_fragment_pipeline_ != rhi::handles::INVALID_PIPELINE) {
@@ -5163,7 +5215,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         fusionOutputDesc.size = {renderWidth_, renderHeight_, 1};
         fusionOutputDesc.format = DataFormat::BGRA8_UNorm;
         fusionOutputDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
-        auto fusionOutputRG = graph.ImportTexture("FusionOutput", fusion_output_[fusionCbIdx], fusionOutputDesc);
+        fusionOutputRG = graph.ImportTexture("FusionOutput", fusion_output_[fusionCbIdx], fusionOutputDesc);
 
         // Pass 2: scene + pre-combined indirect → output (full-res)
         graph.AddPass<BlitPassData>("FusionComposite",
@@ -5231,7 +5283,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
-        [this, backBufferHandle, primaryInputHandle, delayedOutputRG, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle, screenProbeGIOutputHandle, ssaoOutputHandle, scLightingH](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+        [this, backBufferHandle, primaryInputHandle, delayedOutputRG, ssgiOutputHandle, depthBlitHandle, giOutputHandle, gbufferAlbedoHandle, gbufferNormalHandle, screenProbeGIOutputHandle, ssaoOutputHandle, scLightingH, fusionOutputRG](BlitPassData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
             // Read lit scene color (deferred output or raw GBuffer albedo)
             data.input = builder.Read(primaryInputHandle, rhi::ResourceState::ShaderResource);
 
@@ -5278,6 +5330,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
                 data.spgi_input = builder.Read(screenProbeGIOutputHandle, rhi::ResourceState::ShaderResource);
             } else {
                 data.spgi_input = rendergraph::RGResourceHandle{};
+            }
+
+            // Mode 6 diag 1 displays the output written by FusionComposite in
+            // this frame. Declare the read so RenderGraph orders both passes
+            // and performs the RenderTarget -> ShaderResource transition.
+            if (ssgiVisMode_ == 6 && mode_diag_ == 1 && fusionOutputRG.IsValid()) {
+                data.fusion_output = builder.Read(fusionOutputRG, rhi::ResourceState::ShaderResource);
             }
 
             // SSAO dependency: ensure SSAO compute finishes before FinalBlit reads it.
@@ -5457,7 +5516,13 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
                 // Mode 1: Blit from FusionRender output
                 if (mode_diag_ == 1) {
-                    ResourceHandle fusionOut = fusion_output_[cbIdx];
+                    ResourceHandle fusionOut = rhi::handles::INVALID_RESOURCE;
+                    if (data.fusion_output.IsValid()) {
+                        auto* fusionResource = context.graph->GetResource(data.fusion_output);
+                        if (fusionResource) {
+                            fusionOut = fusionResource->GetPhysicalHandle();
+                        }
+                    }
                     if (fusionOut == rhi::handles::INVALID_RESOURCE) {
                         fusionOut = inputHandle;
                     }

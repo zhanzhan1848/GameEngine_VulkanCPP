@@ -62,7 +62,7 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         }
     }
 
-    // --- Pass 1: FusionIndirect (half-res, 5 texture reads + 1 sampler on Vulkan) ---
+    // --- Pass 1: FusionIndirect (full-res, 5 texture reads + 1 sampler on Vulkan) ---
     {
         const u32 indirectBindingCount = isVk ? 6 : 5;
         DescriptorSetLayoutBinding bindings[6];
@@ -80,9 +80,12 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         for (int i = 0; i < 3; ++i)
             indirect_ds_[i] = device->CreateDescriptorSet({indirect_set_layout_});
 
-        // Half-res indirect output (RGBA16_Float)
+        // Full-res indirect output.  SPGI and material data contain thin
+        // receiver geometry that cannot survive an unguided half-res resolve.
+        // DDGI itself remains half-res and is linearly sampled as low-frequency
+        // lighting by the fragment shader.
         TextureDesc indDesc{};
-        indDesc.size = {render_width / 2, render_height / 2, 1};
+        indDesc.size = {render_width, render_height, 1};
         indDesc.format = DataFormat::RGBA16_Float;
         indDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
         for (int i = 0; i < 3; ++i)
@@ -230,7 +233,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         return res ? res->GetPhysicalHandle() : inputs.black_texture;
     };
 
-    // --- Pass 1: FusionIndirect (half-res) ---
+    // --- Pass 1: FusionIndirect (full-res) ---
     struct IndirectData {
         rendergraph::RGResourceHandle output;
     };
@@ -254,11 +257,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             auto cmd = context.cmdBuffer;
             static int s_fusion_diag = 0;
             if (s_fusion_diag < 3) { std::cerr << "[FUSION_INDIRECT] exec " << s_fusion_diag << std::endl; s_fusion_diag++; }
-            u32 halfW = render_width_ / 2;
-            u32 halfH = render_height_ / 2;
-
-            cmd->SetViewport({{0, 0}, {static_cast<float>(halfW), static_cast<float>(halfH)}, 0, 1});
-            cmd->SetScissor({{0, 0}, {halfW, halfH}});
+            cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
+            cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
             const u32 paramCount = isVk ? 6 : 5;

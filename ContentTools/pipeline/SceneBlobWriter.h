@@ -11,11 +11,8 @@
 // skeletal fields. skeletal_* types are reachable only via the legacy
 // ImportFbx path that still uses the mesh struct directly.
 //
-// IMPORTANT byte-for-byte contract: pack_vertices (Geometry.cpp:339-377)
-// has a latent bug where the static_normal_texture branch OVERWRITES
-// t_signs that the static_normal branch set above, dropping the normal.z
-// bit. SceneBlobWriter replicates this bug intentionally — fixing it would
-// invalidate the 4 downstream readers' deserialization expectations.
+// t_sign stores tangent handedness in bit 0, normal.z sign in bit 1, and
+// tangent.z sign in bit 2. This changes vertex values but not the binary layout.
 
 #include "ToolsCommon.h"
 #include "../Engine/Utilities/IOStream.h"  // utl::blob_stream_writer

@@ -206,6 +206,26 @@ if(APPLE)
     setup_test_target(TestModularPipeline)
     target_compile_definitions(TestModularPipeline PRIVATE "TEST_MODULAR_PIPELINE=1" "TEST_RENDERER=0")
 
+    # 5b. TestMetalGIFusion — GI full-composite alignment verification (Metal).
+    # Same sources as TestModularPipeline; TEST_METAL_GI_FUSION switches to the
+    # signed-v3 asset, the fixed Vulkan-comparable camera, the ENGINE Metal
+    # gather shader, and auto-verifies/exits at frame 90 (GI_VERIFY_FRAME).
+    add_executable(TestMetalGIFusion
+        "Main.cpp"
+        "TestModularPipeline.cpp"
+        "ShaderCompilation.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/ShadowMapModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/DeferredLightingModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/FinalBlitModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/GIGatherModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/FusionCompositeModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.cpp"
+    )
+    setup_test_target(TestMetalGIFusion)
+    target_compile_definitions(TestMetalGIFusion PRIVATE "TEST_METAL_GI_FUSION=1" "TEST_RENDERER=0")
+
     # 6. TestCSMIntegrationRenderGraph
     add_executable(TestCSMIntegrationRenderGraph
         "Main.cpp"

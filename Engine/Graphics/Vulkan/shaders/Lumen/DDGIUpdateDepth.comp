@@ -7,6 +7,11 @@
 // computes mean + variance per texel, applies a temporal EMA with a
 // history buffer, and writes the result.
 //
+// The octahedral binning re-derives each ray's direction from its index, so it
+// MUST use the same sampler as DDGITraceRays/SDF or hit distances land in
+// wrong texels (especially under jitter/cosine modes).
+#include "ShaderLib/ProbeSampleLib.glsl"
+//
 // Buffer layout per probe: 128 floats
 //   Indices [0..63]:   mean distance per octahedral texel
 //   Indices [64..127]: variance per octahedral texel
@@ -75,7 +80,7 @@ layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
     int   ProbeRelocationShiftX;    //  96
     int   ProbeRelocationShiftY;    // 100
     int   ProbeRelocationShiftZ;    // 104
-    float _pad_to_sdf;              // 108
+    int   RaySampleMode;            // 108 — ray sampler mode (ProbeSampleLib)
     vec4  SdfOrigins[3];            // 112
     vec4  SdfVoxelSizes[3];         // 160
     vec4  SdfExtents[3];            // 208
@@ -113,16 +118,8 @@ const uint DDGI_DEPTH_TEXELS = 64u;  // DDGI_DEPTH_RES * DDGI_DEPTH_RES
 // ----------------------------------------------------------------------------
 
 // Fibonacci sphere ray direction
-vec3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex) {
-    const float INV_PHI = 0.6180339887498948482;
-    const float PI_VAL  = 3.14159265358979323846;
-    float u = fract((float(rayIndex) + 0.5) * INV_PHI);
-    float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
-    float theta = 2.0 * PI_VAL * u;
-    float phi   = acos(1.0 - 2.0 * v);
-    float sinPhi = sin(phi);
-    return vec3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
-}
+// ddgiRayDirection moved to ShaderLib/ProbeSampleLib.glsl (ddgiSampleRayDirection)
+// — single source shared with the trace shaders and UpdateIrradiance.
 
 // Sphere direction -> octahedral UV in [0,1]^2.
 // WGSL select(a, b, c) returns (c ? b : a) — same as GLSL mix(a, b, float(c)).
@@ -173,8 +170,12 @@ void ddgi_update_depth() {
             continue;
         }
 
-        // Compute ray direction and map to octahedral texel
-        vec3 rayDir = ddgiRayDirection(r, volume.RaysPerProbe, volume.FrameIndex);
+        // Compute ray direction and map to octahedral texel — same sampler the
+        // trace side used for this ray index.
+        vec3 rayDir = ddgiSampleRayDirection(r, volume.RaysPerProbe,
+                                             volume.FrameIndex,
+                                             uint(volume.RaySampleMode),
+                                             normalize(-volume.LightDirection.xyz)).xyz;
         vec2 uv = octahedralEncode(rayDir);
         uvec2 texel = uvec2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
                             clamp(uint(uv.y * float(res)), 0u, res - 1u));

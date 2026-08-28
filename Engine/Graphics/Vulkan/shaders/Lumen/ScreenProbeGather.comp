@@ -150,6 +150,13 @@ void screen_probe_gather() {
     vec3 irradianceSum = vec3(0.0);
     float confidenceOut = 0.0;
     float weightSum     = 0.0;
+    // Keep an un-rejected fallback for curved/thin geometry.  A screen probe
+    // represents incident radiance around its placement point; disagreement
+    // between the placement normal and the receiver normal should reduce its
+    // influence, not turn an otherwise valid probe into a black validity hole.
+    vec3 fallbackIrradianceSum = vec3(0.0);
+    float fallbackConfidenceOut = 0.0;
+    float fallbackWeightSum = 0.0;
 
     for (int i = 0; i < 5; ++i) {
         ivec2 npc = centerProbe + offsets[i];
@@ -176,24 +183,36 @@ void screen_probe_gather() {
         vec3 irr = evalSH(sh0, sh1, sh2, sh3, surfaceNormal);
         irr = max(irr, vec3(0.0));
 
-        // Reject probes whose normal faces away from the pixel's surface.
+        float baseWeight = spatialW[i] * sh0w;
+        fallbackIrradianceSum += irr * baseWeight;
+        fallbackConfidenceOut += sh0w * baseWeight;
+        fallbackWeightSum += baseWeight;
+
+        // Attenuate probes whose placement normal faces away from the pixel's
+        // surface, but retain a small continuous floor.  Hard max(dot, 0)^2
+        // rejected all five probes on columns, folds and two-sided cloth.
         float normalWeight = 1.0;
         vec4 probeNormData = probeNormals.data[probeIdx];
         if (probeNormData.w > 0.0) {
             vec3 probeN = normalize(probeNormData.xyz);
-            float nDot = max(dot(surfaceNormal, probeN), 0.0);
-            // Gentle falloff: similar-facing probes contribute fully, orthogonal
-            // contribute half, opposite contribute ~0.
-            normalWeight = pow(nDot, 2.0);
+            float nDot = dot(surfaceNormal, probeN);
+            normalWeight = mix(0.15, 1.0,
+                               smoothstep(-0.25, 0.8, nDot));
         }
 
-        float w = spatialW[i] * normalWeight * sh0w;
+        float w = baseWeight * normalWeight;
         irradianceSum += irr * w;
         confidenceOut += sh0w * w;
         weightSum += w;
     }
 
-    if (weightSum <= 0.0) {
+    if (weightSum <= 1e-6 && fallbackWeightSum > 1e-6) {
+        irradianceSum = fallbackIrradianceSum;
+        confidenceOut = fallbackConfidenceOut;
+        weightSum = fallbackWeightSum;
+    }
+
+    if (weightSum <= 1e-6) {
         imageStore(outputTexture, ivec2(tid), vec4(0.0, 0.0, 0.0, 0.0));
         return;
     }

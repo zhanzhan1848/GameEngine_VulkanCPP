@@ -118,7 +118,9 @@ layout(set = 0, binding = 16) readonly buffer FarIrradianceBuf {
 // 数组槽位 0 = near(ddgi_volumes_[0]),1..3 = 附加 volume;binding 15/16 的
 // legacy 槽在 N-volume 路径下仍写描述符但 nvolMeta.x>0 时不再读取。
 layout(set = 0, binding = 17) readonly buffer NVolumeIrradianceBuf {
-    vec4 nvolSh9[9];
+    // Unsized: indexed as pIdx * 9 + i (whole-volume buffer, 9 vec4/probe).
+    // A fixed [9] declaration is formally out-of-bounds at pIdx > 0.
+    vec4 nvolSh9[];
 } nvolIrradiance[4];
 layout(set = 0, binding = 18, std140) uniform NVolumeCB {
     vec4 nvolOriginSpacing[4];  // xyz = origin, w = spacing
@@ -135,6 +137,20 @@ layout(set = 0, binding = 18, std140) uniform NVolumeCB {
 #define DEPTH_RES 8
 #define DEPTH_TEXELS 64
 #define DEPTH_FLOATS_PER_PROBE 128u
+
+// DDGIVolumeData stores RADIANCE SH (mcWeight = 4π/N, no cosine projection), so
+// the plain SH9 evaluation below reconstructs directional mean radiance L̄(N).
+// Screen consumers need cosine-weighted irradiance E(N) = π·L̄ for the isotropic
+// term — this constant supplies the missing factor at the diffuse output only.
+//
+// PAIRED CHANGE (keep both in sync): the probe trace chain shades hits with
+// ddgi_light_color, which the CPU divides by π in the same commit. That keeps
+// the SC↔probe feedback loop's absolute drive unchanged, so only the screen-end
+// scale is corrected. NEVER apply this factor inside
+// SurfaceCacheLightEval.comp::gatherProbeIrradiance — its loop gain budget
+// (collection ≤ 0.85 × albedo < 1) was calibrated without it and a boost there
+// diverges high-albedo walls within minutes (see that file, gather clamp note).
+const float PROBE_SH_RAD_TO_IRRAD = 3.14159265;
 
 // --------------------------------------------------------------------------------
 // Shared memory (threadgroup)
@@ -174,6 +190,20 @@ vec2 sampleOctDepthTG(int probeOffset, vec3 dir) {
                 tg_depth_map[base + int(DEPTH_TEXELS) + idx]);
 }
 
+// N-volume selection cannot use the tile-shared depth cache because each
+// pixel may select a different volume/cell.  Volume 0 is the canonical near
+// volume and its depth atlas is bound at binding 12, so sample it directly to
+// retain DDGI visibility and normal weighting on the descriptor-indexed path.
+vec2 sampleNearProbeDepth(uint probeIdx, vec3 dir) {
+    vec2 uv = gatherOctEncode(dir);
+    uvec2 texel = uvec2(clamp(uint(uv.x * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)),
+                        clamp(uint(uv.y * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)));
+    uint octIdx = texel.y * uint(DEPTH_RES) + texel.x;
+    uint base = probeIdx * DEPTH_FLOATS_PER_PROBE;
+    return vec2(ddgiDepthBuffer[base + octIdx],
+                ddgiDepthBuffer[base + uint(DEPTH_TEXELS) + octIdx]);
+}
+
 vec3 evalSH9Shared(int probeIdx, vec3 d) {
     vec3 sh[9];
     for (int i = 0; i < 9; ++i) sh[i] = tg_probes[probeIdx].sh[i];
@@ -191,6 +221,109 @@ float visibilityWeight(float distToProbe, float mean, float variance, float spac
     if (variance < 0.0001) return 1.0;
     float cheb = variance / (variance + dist * dist);
     return clamp(max(cheb * 2.0, 0.2), 0.0, 1.0);
+}
+
+// Probe-position spheres (ProbeVisMode 4, SPGI_PROBE_VIS=4): DDA the near
+// grid along the camera ray and ray-sphere test each probe center
+// (r = 0.4×spacing). Colour = SH L0 luminance heat ramp; probes whose
+// octahedral depth map reads ≈0 toward all sampled directions (sitting inside
+// geometry, tracing nothing but wall interior) get the red burial tint.
+// Scene occlusion is intentionally OFF — seeing probes through walls is the
+// diagnostic point. Bounded at 96 DDA cells.
+vec3 visProbePositions(vec2 uv) {
+    mat4 invVP = mat4(viewRows[0], viewRows[1], viewRows[2], viewRows[3]);
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec4 farH = invVP * vec4(ndc, 0.999, 1.0);
+    vec3 ro = cameraPos.xyz;
+    vec3 rd = farH.xyz / farH.w - ro;
+    float rdLen = length(rd);
+    if (rdLen < 1e-5) return vec3(0.03, 0.03, 0.035);
+    rd /= rdLen;
+
+    vec3 vorg = probeOriginSpacing.xyz;
+    float sp = max(probeOriginSpacing.w, 0.01);
+    vec3 counts = vec3(probeCounts.xyz);
+    float rad = 0.4 * sp;  // 0.4×spacing: ~40% solid-angle coverage per shell so
+                           // the lattice reads at hallway distances (0.2 was too
+                           // sparse — most rays slipped between spheres)
+
+    // Bounding slab over all probe spheres
+    vec3 bmin = vorg - vec3(rad);
+    vec3 bmax = vorg + (counts - 1.0) * sp + vec3(rad);
+    vec3 inv = 1.0 / rd;
+    vec3 t0s = (bmin - ro) * inv;
+    vec3 t1s = (bmax - ro) * inv;
+    vec3 tsm = min(t0s, t1s), tbg = max(t0s, t1s);
+    float tEnter = max(max(tsm.x, tsm.y), tsm.z);
+    float tExit = min(min(min(tbg.x, tbg.y), tbg.z), rdLen);
+    if (tExit < max(tEnter, 0.0)) return vec3(0.03, 0.03, 0.035);
+    float t = max(tEnter, 0.0) + 1e-4;
+
+    // Amanatides & Woo over the probe lattice (cell = probe index)
+    ivec3 cell = clamp(ivec3(floor((ro + rd * t - vorg) / sp)), ivec3(0), ivec3(counts) - ivec3(1));
+    ivec3 stp = ivec3(sign(rd));
+    vec3 tDelta = abs(inv) * sp;
+    vec3 nextB = vorg + (vec3(cell) + max(vec3(stp), 0.0)) * sp;
+    vec3 tMax = (nextB - ro) * inv;
+    for (int a = 0; a < 3; ++a)
+        if (stp[a] == 0) tMax[a] = 1e30;
+
+    float bestT = -1.0;
+    ivec3 bestCell = ivec3(0);
+    for (int it = 0; it < 96; ++it) {
+        if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(vec3(cell), counts))) break;
+        vec3 center = vorg + vec3(cell) * sp;
+        vec3 oc = ro - center;
+        float b = dot(oc, rd);
+        float c = dot(oc, oc) - rad * rad;
+        float disc = b * b - c;
+        if (disc > 0.0) {
+            float th = -b - sqrt(disc);
+            if (th > 0.0 && th <= tExit && (bestT < 0.0 || th < bestT)) {
+                bestT = th;
+                bestCell = cell;
+            }
+        }
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) { t = tMax.x; cell.x += stp.x; tMax.x += tDelta.x; }
+            else                 { t = tMax.z; cell.z += stp.z; tMax.z += tDelta.z; }
+        } else {
+            if (tMax.y < tMax.z) { t = tMax.y; cell.y += stp.y; tMax.y += tDelta.y; }
+            else                 { t = tMax.z; cell.z += stp.z; tMax.z += tDelta.z; }
+        }
+        if (t > tExit || (bestT > 0.0 && t > bestT)) break;
+    }
+    if (bestT < 0.0) {
+        // Canary backplate: dim magenta wash proves the mode-4 path reached the
+        // shader (fusion suppresses ~1.0-level debug colors via
+        // max(ddgiBase, spgiTarget) — a flat change here is still visible).
+        return vec3(0.10, 0.02, 0.10);
+    }
+
+    uint pIdx = uint(bestCell.x) + uint(bestCell.y) * uint(counts.x)
+              + uint(bestCell.z) * uint(counts.x) * uint(counts.y);
+    vec3 L0 = irradianceBuffer[pIdx * 9u].xyz;
+    float lum = dot(L0, vec3(0.2126, 0.7152, 0.0722));
+
+    // Burial probe: 4 octahedral taps — a probe inside solid geometry records
+    // ≈0 mean depth toward every direction.
+    vec3 tapDirs[4] = vec3[4](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+    float meanD = 0.0;
+    for (int k = 0; k < 4; ++k) meanD += sampleNearProbeDepth(pIdx, tapDirs[k]).x;
+    meanD *= 0.25;
+    bool buried = meanD < 0.25 * sp;
+
+    float e = clamp(log2(1.0 + lum) / 6.0, 0.0, 1.0);
+    vec3 heat = mix(vec3(0.02, 0.08, 0.20), vec3(0.10, 0.85, 0.35), e);
+    heat = mix(heat, vec3(1.0, 0.95, 0.45), smoothstep(0.55, 1.0, e));
+    if (buried) heat = mix(heat, vec3(1.0, 0.12, 0.08), 0.85);
+
+    vec3 n = (ro + rd * bestT - (vorg + vec3(bestCell) * sp)) / rad;
+    float shade = 0.35 + 0.65 * max(dot(n, normalize(vec3(0.4, 0.8, 0.3))), 0.0);
+    // ×6 punch-through: fusion computes indirect = albedo × (0.7·ddgi mixed
+    // against SPGI by max()) × ao — at ~1.0 the spheres ghost. At ~6 they
+    // survive as saturated (still hue-distinct) markers on tone-mapped output.
+    return heat * shade * 6.0;
 }
 
 // --------------------------------------------------------------------------------
@@ -318,9 +451,14 @@ void ddgi_gi_gather() {
         // 输出替换 gather 结果:近场网格内按模式可视化;网格外 mode 1 用远场
         // volume 的 L0;其余 dim 背板。spec 输出清零(调试模式无光泽意义)。
         // ====================================================================
-        int visMode = int(debugVis.x + 0.5);  // 1/2/3
+        int visMode = int(debugVis.x + 0.5);  // 1/2/3/4
         vec3 vis = vec3(0.03, 0.03, 0.035);
-        if (depth < 1.0) {
+        if (visMode == 4) {
+            // ProbePositions (M8/T8.3): probe 格点球体位置可视化 —— 绿→黄 =
+            // L0 能量, 红染 = 埋没(全向平均深度≈0)。穿墙可见, 用于定位
+            // 3m 网格下埋进拱廊墙体的 probe。
+            vis = visProbePositions(uv);
+        } else if (depth < 1.0) {
             uvec3 countsV = uvec3(probeCounts.xyz);
             if (isActive) {
                 uvec3 b0 = clamp(uvec3(floor(gp)), uvec3(0u), countsV - 1u);
@@ -371,7 +509,10 @@ void ddgi_gi_gather() {
                     for (int p = 0; p < 8; ++p) {
                         if (tw[p] < 0.01) continue;
                         uint pIdx = pc[p].x + pc[p].y * countsV.x + pc[p].z * countsV.x * countsV.y;
-                        conf += confidenceBuffer[pIdx] * tw[p];
+                        // 4 floats/probe (rayHitRatio, ?, ?, convergence);
+                        // slot 3 is the same convergence DDGIUpdateIrradiance
+                        // publishes and the SC bootstrap gates on.
+                        conf += confidenceBuffer[pIdx * 4u + 3u] * tw[p];
                         wsum += tw[p];
                     }
                     vis = vec3(clamp(conf / max(wsum, 1e-4), 0.0, 1.0));
@@ -484,52 +625,146 @@ void ddgi_gi_gather() {
 
                 vec3 result = vec3(0.0);
                 float totalW = 0.0;
+                vec3 lowFrequencyGI = vec3(0.0);
+                float lowFrequencyW = 0.0;
                 vec3 reflResult = vec3(0.0);
+                vec3 bestIrr = vec3(0.0);
+                vec3 bestRefl = vec3(0.0);
+                float bestBaseWeight = -1.0;
+                vec3 biasedPos = worldPos + normal * selSpacing * 0.05;
 
                 for (int p = 0; p < 8; ++p) {
                     if (tw[p] < 0.01) continue;
                     uint pIdx = pc[p].x + pc[p].y * ncounts.x + pc[p].z * ncounts.x * ncounts.y;
                     vec3 sh[9];
+                    // Index by pIdx: 9 SH coefficients per probe. Using the loop
+                    // index alone reads probe 0's SH for every pixel, turning the
+                    // whole screen into one flat irradiance (sky-init probe 0).
                     for (int i = 0; i < 9; ++i)
-                        sh[i] = nvolIrradiance[nonuniformEXT(sel)].nvolSh9[uint(i)].xyz;
+                        sh[i] = nvolIrradiance[nonuniformEXT(sel)].nvolSh9[pIdx * 9u + uint(i)].xyz;
+                    // Must exactly match DDGIUpdateIrradiance's real-SH basis.
+                    // The previous Vulkan N-volume path swapped coefficients
+                    // 6/7 and omitted four signs, cancelling directional GI.
                     vec3 irr = sh[0] * SH_C0
-                             + sh[1] * (SH_C1 * ny)
-                             + sh[2] * (SH_C1 * nz)
-                             + sh[3] * (SH_C1 * nx)
-                             + sh[4] * (SH_C2_0 * nxy)
-                             + sh[5] * (SH_C2_0 * nyz)
-                             + sh[6] * (SH_C2_0 * nzx)
-                             + sh[7] * (SH_C2_1 * (3.0*nzz - 1.0))
+                             + sh[1] * (-SH_C1 * ny)
+                             + sh[2] * ( SH_C1 * nz)
+                             + sh[3] * (-SH_C1 * nx)
+                             + sh[4] * ( SH_C2_0 * nxy)
+                             + sh[5] * (-SH_C2_0 * nyz)
+                             + sh[6] * ( SH_C2_1 * (3.0*nzz - 1.0))
+                             + sh[7] * (-SH_C2_0 * nzx)
                              + sh[8] * (SH_C2_2 * (nxx - nyy));
-                    result += irr * tw[p];
-                    totalW += tw[p];
+
+                    float w = tw[p];
+                    // Buried-probe gate for the low-frequency average (near
+                    // volume only). A probe inside the wall records near-zero
+                    // octahedral mean depth toward every direction; at raw
+                    // trilinear weight its black SH diluted lit texels through
+                    // the 55% low-frequency blend (the patchy dark bands next
+                    // to walls/columns). The continuous ramp keeps the
+                    // anti-black-cell role on thin geometry intact.
+                    float burial = 1.0;
+                    // Only the near volume currently exposes a depth atlas.
+                    // Restore the visibility/normal terms used by the original
+                    // Metal/Dawn gather so irradiance cannot leak through walls
+                    // as probe-sized white cells.
+                    if (sel == 0) {
+                        vec3 probePos = nvolOriginSpacing[sel].xyz
+                                      + vec3(pc[p]) * selSpacing;
+                        vec3 toProbeVec = probePos - biasedPos;
+                        float distToProbe = length(toProbeVec);
+                        vec3 toProbe = toProbeVec / max(distToProbe, 1e-5);
+                        // Keep the visibility test continuous.  A zero normal
+                        // term rejects all eight probes near thin/two-sided
+                        // geometry and produces probe-sized unlit cells.
+                        float normalWeight = mix(
+                            0.2, 1.0,
+                            clamp((dot(normal, toProbe) + 0.5) / 0.7, 0.0, 1.0));
+                        vec3 fromProbe = -toProbe;
+                        vec2 depthMV = sampleNearProbeDepth(pIdx, fromProbe);
+                        float insidePenalty = 1.0;
+                        if (depthMV.x < selSpacing * 0.2) {
+                            insidePenalty = mix(
+                                0.2, 1.0,
+                                smoothstep(0.0, 0.2, depthMV.x / selSpacing));
+                            burial = mix(
+                                0.1, 1.0,
+                                smoothstep(0.0, 0.2, depthMV.x / selSpacing));
+                        }
+                        // T8.10: bounded rejection — visibility floors raised
+                        // (cheby 0.2→0.45, normal 0.2→0.5). Full rejection ate
+                        // real cross-nave lobes on hall-facing receivers (+1.2
+                        // A/B with a healthy field); leak safety stays via the
+                        // gates plus the 55% low-frequency mix.
+                        float nwSoft = max(normalWeight, 0.40); // T8.10c leak tighten
+                        float vw = visibilityWeight(distToProbe, depthMV.x, depthMV.y, selSpacing);
+                        vw = max(vw, 0.38); // T8.10c leak tighten
+                        w *= nwSoft * vw * insidePenalty;
+                    }
+
+                    // Preserve a low-frequency trilinear component before
+                    // depth/normal rejection. Thin cloth, railings and arches
+                    // otherwise reject the neighbouring probes that carry
+                    // their coloured bounce and collapse to black. The
+                    // visibility-filtered result remains dominant below.
+                    // Buried probes are excluded from this component — their
+                    // SH is wall interior, not a legitimate low-frequency
+                    // source.
+                    lowFrequencyGI += irr * tw[p] * burial;
+                    lowFrequencyW += tw[p] * burial;
+
+                    if (tw[p] > bestBaseWeight) {
+                        bestBaseWeight = tw[p];
+                        bestIrr = irr;
+                    }
+                    result += irr * w;
+                    totalW += w;
 
                     if (sel == 0) {
                         // Same coefficients along R — no extra device reads.
-                        reflResult += sh[0] * SH_C0
-                                    + sh[1] * (SH_C1 * ry)
-                                    + sh[2] * (SH_C1 * rz)
-                                    + sh[3] * (SH_C1 * rx)
-                                    + sh[4] * (SH_C2_0 * rxy)
-                                    + sh[5] * (SH_C2_0 * ryz)
-                                    + sh[6] * (SH_C2_0 * rzx)
-                                    + sh[7] * (SH_C2_1 * (3.0*rzz - 1.0))
-                                    + sh[8] * (SH_C2_2 * (rxx - ryy));
+                        vec3 reflIrr = sh[0] * SH_C0
+                                     + sh[1] * (-SH_C1 * ry)
+                                     + sh[2] * ( SH_C1 * rz)
+                                     + sh[3] * (-SH_C1 * rx)
+                                     + sh[4] * ( SH_C2_0 * rxy)
+                                     + sh[5] * (-SH_C2_0 * ryz)
+                                     + sh[6] * ( SH_C2_1 * (3.0*rzz - 1.0))
+                                     + sh[7] * (-SH_C2_0 * rzx)
+                                     + sh[8] * (SH_C2_2 * (rxx - ryy));
+                        reflResult += reflIrr * w;
+                        if (tw[p] >= bestBaseWeight) bestRefl = reflIrr;
                     }
                 }
                 if (totalW > 0.0) {
                     result /= totalW;
                     reflResult /= totalW;
+                } else {
+                    // Defensive fallback for malformed depth data.  Normal
+                    // operation uses the non-zero continuous weights above.
+                    result = bestIrr;
+                    reflResult = bestRefl;
                 }
-                result = max(result, vec3(0.02, 0.02, 0.025));
-                imageStore(output_tex, ivec2(tid), vec4(result, 1.0));
+                if (lowFrequencyW > 0.0) {
+                    lowFrequencyGI /= lowFrequencyW;
+                    // 65% leak-resistant visibility gather + 35% smooth
+                    // low-frequency colour bleeding. Correct vec4 probe
+                    // strides and the removed screen-space box blur prevent
+                    // this component from recreating the former white grid.
+                    result = mix(lowFrequencyGI, result, 0.45);  // thin-geometry probes get Chebyshev-rejected; 55% low-freq keeps near-light bounce
+                }
+                // Specular keeps RADIANCE units (reflection lobe sampling is not
+                // cosine-projected) and blends against the uncorrected result,
+                // preserving the pre-fix scale of the glossy chain.
+                vec3 radBase = max(result, vec3(0.05, 0.05, 0.06));  // sky-leak ambient floor
+                vec3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, vec3(0.05, 0.05, 0.06));
+                imageStore(output_tex, ivec2(tid), vec4(diffOut, 1.0));
 
                 if (sel == 0) {
                     // Glossy output(与 legacy 近场一致):RGB = lobe radiance,
                     // A = NdotV(DFG 在 FusionComposite)。
                     ivec2 fullOrmTexel = ivec2(vec2(textureSize(gbuffer_orm, 0)) * uv);
                     float roughness = clamp(texelFetch(gbuffer_orm, fullOrmTexel, 0).g, 0.04, 1.0);
-                    vec3 specIrr = mix(reflResult, result, roughness * roughness);
+                    vec3 specIrr = mix(reflResult, radBase, roughness * roughness);
                     imageStore(spec_output_tex, ivec2(tid), vec4(specIrr, NdotV));
                 } else {
                     imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
@@ -597,21 +832,27 @@ void ddgi_gi_gather() {
                     vec3 sh[9];
                     for (int i = 0; i < 9; ++i)
                         sh[i] = farIrradianceBuffer[pIdx * 9u + uint(i)].xyz;
+                    // Must match DDGIUpdateIrradiance's projection basis:
+                    // L1 x/y and L2 yz/xz carry minus signs, and band-6 is
+                    // the C2_1 zonal term (the old form swapped 6/7 and
+                    // dropped four signs, cancelling directional GI).
                     vec3 irr = sh[0] * SH_C0
-                             + sh[1] * (SH_C1 * ny)
-                             + sh[2] * (SH_C1 * nz)
-                             + sh[3] * (SH_C1 * nx)
-                             + sh[4] * (SH_C2_0 * nxy)
-                             + sh[5] * (SH_C2_0 * nyz)
-                             + sh[6] * (SH_C2_0 * nzx)
-                             + sh[7] * (SH_C2_1 * (3.0*nzz - 1.0))
-                             + sh[8] * (SH_C2_2 * (nxx - nyy));
+                             + sh[1] * (-SH_C1 * ny)
+                             + sh[2] * ( SH_C1 * nz)
+                             + sh[3] * (-SH_C1 * nx)
+                             + sh[4] * ( SH_C2_0 * nxy)
+                             + sh[5] * (-SH_C2_0 * nyz)
+                             + sh[6] * ( SH_C2_1 * (3.0*nzz - 1.0))
+                             + sh[7] * (-SH_C2_0 * nzx)
+                             + sh[8] * ( SH_C2_2 * (nxx - nyy));
                     fresult += irr * ftw[p];
                     ftotalW += ftw[p];
                 }
                 if (ftotalW > 0.0) {
                     fresult /= ftotalW;
-                    fresult = max(fresult, vec3(0.02, 0.02, 0.025));
+                    // Same radiance→irradiance correction as the near path;
+                    // floor stays absolute.
+                    fresult = max(fresult * PROBE_SH_RAD_TO_IRRAD, vec3(0.02, 0.02, 0.025));
                     imageStore(output_tex, ivec2(tid), vec4(fresult, 1.0));
                     imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
                     farHit = true;
@@ -685,41 +926,45 @@ void ddgi_gi_gather() {
             vec3 sh[9];
             for (int i = 0; i < 9; ++i)
                 sh[i] = irradianceBuffer[pIdx * 9u + uint(i)].xyz;
-            // SH9 reconstruction with cosine-lobe convolution
+            // SH9 reconstruction — canonical basis, see far-path note above.
             vec3 irr = sh[0] * SH_C0
-                     + sh[1] * (SH_C1 * ny)
-                     + sh[2] * (SH_C1 * nz)
-                     + sh[3] * (SH_C1 * nx)
-                     + sh[4] * (SH_C2_0 * nxy)
-                     + sh[5] * (SH_C2_0 * nyz)
-                     + sh[6] * (SH_C2_0 * nzx)
-                     + sh[7] * (SH_C2_1 * (3.0*nzz - 1.0))
-                     + sh[8] * (SH_C2_2 * (nxx - nyy));
+                     + sh[1] * (-SH_C1 * ny)
+                     + sh[2] * ( SH_C1 * nz)
+                     + sh[3] * (-SH_C1 * nx)
+                     + sh[4] * ( SH_C2_0 * nxy)
+                     + sh[5] * (-SH_C2_0 * nyz)
+                     + sh[6] * ( SH_C2_1 * (3.0*nzz - 1.0))
+                     + sh[7] * (-SH_C2_0 * nzx)
+                     + sh[8] * ( SH_C2_2 * (nxx - nyy));
             result += irr * tw[p];
             totalW += tw[p];
 
             // Same coefficients along R — no extra device reads.
             reflResult += sh[0] * SH_C0
-                        + sh[1] * (SH_C1 * ry)
-                        + sh[2] * (SH_C1 * rz)
-                        + sh[3] * (SH_C1 * rx)
-                        + sh[4] * (SH_C2_0 * rxy)
-                        + sh[5] * (SH_C2_0 * ryz)
-                        + sh[6] * (SH_C2_0 * rzx)
-                        + sh[7] * (SH_C2_1 * (3.0*rzz - 1.0))
-                        + sh[8] * (SH_C2_2 * (rxx - ryy));
+                        + sh[1] * (-SH_C1 * ry)
+                        + sh[2] * ( SH_C1 * rz)
+                        + sh[3] * (-SH_C1 * rx)
+                        + sh[4] * ( SH_C2_0 * rxy)
+                        + sh[5] * (-SH_C2_0 * ryz)
+                        + sh[6] * ( SH_C2_1 * (3.0*rzz - 1.0))
+                        + sh[7] * (-SH_C2_0 * rzx)
+                        + sh[8] * ( SH_C2_2 * (rxx - ryy));
         }
         if (totalW > 0.0) {
             result /= totalW;
             reflResult /= totalW;
         }
-        result = max(result, vec3(0.02, 0.02, 0.025));
-        imageStore(output_tex, ivec2(tid), vec4(result, 1.0));
+        // Radiance-unit base for the specular blend (pre-correction scale);
+        // the diffuse output gets the radiance→irradiance factor instead.
+        vec3 radBase = max(result, vec3(0.05, 0.05, 0.06));  // sky-leak ambient floor
 
         // Glossy output: RGB = lobe radiance, A = NdotV (DFG happens in
         // FusionComposite where albedo/metallic are available).
-        vec3 specIrr = mix(reflResult, result, roughness * roughness);
+        vec3 specIrr = mix(reflResult, radBase, roughness * roughness);
         imageStore(spec_output_tex, ivec2(tid), vec4(specIrr, NdotV));
+
+        vec3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, vec3(0.05, 0.05, 0.06));
+        imageStore(output_tex, ivec2(tid), vec4(diffOut, 1.0));
     }
     }  // end legacy route (C)
 }

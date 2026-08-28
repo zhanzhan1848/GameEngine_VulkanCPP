@@ -26,6 +26,7 @@
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
 #include "Graphics/RenderPipeline/Modules/SDFVisualizationModule.h"
+#include "Graphics/RenderPipeline/Modules/DebugProbeSphereModule.h"
 #include "Graphics/RenderPipeline/Modules/GIGatherModule.h"
 #include "Graphics/RenderPipeline/Modules/FusionCompositeModule.h"
 #include "Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.h"
@@ -110,6 +111,8 @@ public:
         rhi::ShaderHandle sc_card_radiance{rhi::handles::INVALID_SHADER};
         rhi::ShaderHandle sc_probe_irradiance{rhi::handles::INVALID_SHADER};
         rhi::ShaderHandle sdf_viz_ps{rhi::handles::INVALID_SHADER};
+        rhi::ShaderHandle probe_sphere_vs{rhi::handles::INVALID_SHADER};
+        rhi::ShaderHandle probe_sphere_ps{rhi::handles::INVALID_SHADER};
     };
 
     void SetShaderHandles(const ShaderHandles& handles) {
@@ -124,6 +127,8 @@ public:
         sc_card_radiance_shader_ = handles.sc_card_radiance;
         sc_probe_irradiance_shader_ = handles.sc_probe_irradiance;
         sdf_viz_ps_ = handles.sdf_viz_ps;
+        probe_sphere_vs_ = handles.probe_sphere_vs;
+        probe_sphere_ps_ = handles.probe_sphere_ps;
     }
 
     /// T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). Pass output of
@@ -150,6 +155,31 @@ public:
         return deferred_module_ ? deferred_module_.get() : nullptr;
     }
 
+    // Debug/testing: DDGI half-res gather output texture access.
+    GIGatherModule* GetGIGatherModule() const {
+        return gi_gather_module_ ? gi_gather_module_.get() : nullptr;
+    }
+
+    // Debug/testing: shadow visibility texture access.
+    ShadowMapModule* GetShadowMapModule() const {
+        return shadow_module_ ? shadow_module_.get() : nullptr;
+    }
+
+    // Debug/testing: froxel fog scatter texture access.
+    volume::FroxelFogPass* GetFroxelFogPass() const {
+        return froxel_fog_pass_ ? froxel_fog_pass_.get() : nullptr;
+    }
+
+    // Debug/testing: fusion composite module access.
+    FusionCompositeModule* GetFusionCompositeModule() const {
+        return fusion_module_ ? fusion_module_.get() : nullptr;
+    }
+
+    // Debug/testing: primary DDGI volume access.
+    lumen::LumenDDGIPass* GetDDGIPass() const {
+        return ddgi_volumes_[0] ? ddgi_volumes_[0].get() : nullptr;
+    }
+
     rhi::RHIDeviceBase* GetDevice() const { return device_; }
 
     // --- Editor mode (lightweight forward rendering) ---
@@ -165,6 +195,11 @@ public:
     /// Cheap per-frame bool — does NOT trigger pipeline re-initialization.
     void SetSDFVisualization(bool enabled) { sdf_visualization_enabled_ = enabled; }
     bool IsSDFVisualizationEnabled() const { return sdf_visualization_enabled_; }
+    // M8/T8.5: real-mesh DDGI probe spheres overlaid on the final LDR image,
+    // depth-occluded by the scene. Requires probe_sphere_vs/ps shader handles
+    // and an initialized DDGI pass (SPGI_PROBE_SPHERES=1 in the Sponza test).
+    void SetProbeSphereDebug(bool enabled) { probe_sphere_debug_ = enabled; }
+    bool IsProbeSphereDebugEnabled() const { return probe_sphere_debug_; }
 
     /// Geometry debug overlay (meshlets / SDF slices / vector fields / voxels).
     /// Drawn on the tone-mapped frame before FinalBlit. Cheap per-frame
@@ -394,6 +429,7 @@ private:
     std::unique_ptr<FusionCompositeModule> fusion_module_;
     std::unique_ptr<SCDDGIIntegrationModule> sc_ddgi_module_;
     std::unique_ptr<SDFVisualizationModule> sdf_viz_module_;
+    std::unique_ptr<DebugProbeSphereModule> probe_sphere_module_;
 
     // --- Shader compilation cache ---
     rhi::ShaderHandle shadow_filter_shader_{rhi::handles::INVALID_SHADER};
@@ -407,10 +443,14 @@ private:
     rhi::ShaderHandle sc_card_radiance_shader_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle sc_probe_irradiance_shader_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle sdf_viz_ps_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle probe_sphere_vs_{rhi::handles::INVALID_SHADER};
+    rhi::ShaderHandle probe_sphere_ps_{rhi::handles::INVALID_SHADER};
 
     /// When true, the pipeline outputs a fullscreen GlobalSDF ray-march view
     /// instead of the normal FinalBlit scene.  Cheap per-frame toggle.
     bool sdf_visualization_enabled_{false};
+    /// M8/T8.5: overlay real-mesh DDGI probe spheres on the final image.
+    bool probe_sphere_debug_{false};
 
     // Geometry debug overlay settings + the frame's view (needed by
     // AddGeometryDebugPass; set at the top of Render/RenderWithCommandBuffer).

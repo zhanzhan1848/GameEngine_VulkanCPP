@@ -13,6 +13,7 @@
 #include "Graphics/RHI/Core/RHIRenderPass.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RenderView.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
 #include <vector>
 #include <iostream>
@@ -97,9 +98,7 @@ struct GeometryDebugContext {
 
     static bool ReadShaderFile(const std::string& relPath, utl::vector<char>& out) {
         if (ReadFileBytes(relPath, out)) return true;
-        static const std::string fallbackRoot =
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/";
-        return ReadFileBytes(fallbackRoot + relPath, out);
+        return ReadFileBytes(utils::ShaderRegistry::ResolveShaderPath(relPath), out);
     }
 
     // Loads one debug shader (VS or FS). vsEntry/fsEntry are the Metal entry

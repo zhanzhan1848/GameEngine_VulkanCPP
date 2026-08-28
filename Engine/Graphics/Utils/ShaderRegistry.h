@@ -44,6 +44,17 @@ public:
     static std::string GetNaniteShaderPath(rhi::RHIPlatform platform, const std::string& shaderName) {
         return GetShaderBaseDir(platform) + "Nanite/" + shaderName + GetShaderExtension(platform);
     }
+
+    // Resolve a repo-relative shader path (e.g. "Engine/Graphics/Metal/shaders/
+    // BlurPass.metal") to an existing absolute/relative file path, independent
+    // of the process CWD. Search order:
+    //   1. $PRIMAL_SHADER_ROOT/<relPath>   (explicit deployment override)
+    //   2. <relPath> as-is                 (CWD-relative, existing behavior)
+    //   3. walk up from CWD                (launched from a build subdirectory)
+    //   4. walk up from the executable dir (arbitrary CWD)
+    // If nothing matches, relPath is returned unchanged so the caller's
+    // "failed to open" error still names the expected location.
+    static std::string ResolveShaderPath(const std::string& relPath);
 };
 
 } // namespace primal::graphics::utils

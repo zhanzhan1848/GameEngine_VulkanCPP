@@ -42,9 +42,7 @@ bool ReadShaderBytes(const std::string& relPath, std::vector<u8>& out) {
             return true;
         }
     }
-    static const std::string fallbackRoot =
-        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/";
-    std::ifstream f(fallbackRoot + relPath, std::ios::binary | std::ios::ate);
+    std::ifstream f(utils::ShaderRegistry::ResolveShaderPath(relPath), std::ios::binary | std::ios::ate);
     if (!f.is_open()) return false;
     std::streamsize sz = f.tellg();
     f.seekg(0, std::ios::beg);

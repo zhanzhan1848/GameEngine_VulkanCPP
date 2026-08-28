@@ -244,7 +244,6 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
                       << " tint=(" << m.albedo_tint[0] << "," << m.albedo_tint[1] << "," << m.albedo_tint[2] << ")"
                       << std::endl;
         }
-
         // 🎨 Phase 6: Wait for GPU operations to complete
 //        std::cout << "[GPUMaterialRegistry] [Worker Thread] Phase 6: Waiting for GPU completion..." << std::endl;
 
@@ -310,8 +309,16 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
     // Create storage buffer for material data
     rhi::BufferDesc materialBufferDesc{};
     materialBufferDesc.size = materials_.size() * sizeof(MaterialData);
+    materialBufferDesc.type = rhi::BufferType::Structured;
     materialBufferDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage | rhi::BufferUsageFlags::TransferDst);
-    materialBufferDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    // Metal's Dynamic buffers come from the transient shared placement heap;
+    // this long-lived table must use a standalone Shared allocation. Unknown
+    // maps to standalone Shared on Metal. Other backends keep the established
+    // Dynamic host-visible path.
+    materialBufferDesc.memoryUsage = device->GetPlatform() == rhi::RHIPlatform::Metal
+        ? rhi::GPUMemoryUsage::Unknown
+        : rhi::GPUMemoryUsage::Dynamic;
+    materialBufferDesc.name = "NaniteMaterialData";
     materialDataBuffer_ = device->CreateBuffer(materialBufferDesc);
 
     if (materialDataBuffer_ == rhi::handles::INVALID_RESOURCE) {
@@ -320,13 +327,12 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
         return false;
     }
 
-    // Upload material data to buffer
-    // TODO: Use staging buffer and copy for efficiency
+    // Upload the complete table directly into the persistent host-visible buffer.
+    const u64 uploadSize = materials_.size() * sizeof(MaterialData);
     void* mappedData = device->MapBuffer(materialDataBuffer_);
     if (mappedData) {
-        memcpy(mappedData, materials_.data(), materials_.size() * sizeof(MaterialData));
+        memcpy(mappedData, materials_.data(), uploadSize);
         device->UnmapBuffer(materialDataBuffer_);
-
         // Diagnostic: verify what was uploaded
         std::cout << "[GPUMaterialRegistry] UploadToGPU: " << materials_.size()
                   << " materials, sizeof(MaterialData)=" << sizeof(MaterialData) << std::endl;
@@ -337,7 +343,7 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
                       << std::endl;
         }
     } else {
-        buildError_ = "Failed to map material data buffer";
+        buildError_ = "Failed to upload material data buffer";
         std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
         return false;
     }

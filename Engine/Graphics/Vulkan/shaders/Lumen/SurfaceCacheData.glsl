@@ -59,18 +59,21 @@ struct CardDispatchInfo {
     uint resolution;
     uint atlas_offset_x;
     uint atlas_offset_y;
-    uint _pad0;
+    uint card_index;
     uint _pad1;
     uint _pad2;
 };
 
-// Matches C++ FlattenedLightingParams (64 bytes).
+// Matches C++ FlattenedLightingParams (96 bytes; the trailing 32B probe-feed
+// block is optional — shaders that ignore it still read the first 64B fine).
 struct FlattenedLightingParams {
     SurfaceCacheParams sc_params;
     uint total_texels;
     uint card_count;
     uint light_count;
     uint _pad;
+    vec4 ddgi_origin_spacing;   // xyz origin, w spacing
+    uvec4 ddgi_counts_valid;    // xyz counts, w valid flag
 };
 
 // Reconstruct world position from card atlas UV + depth.

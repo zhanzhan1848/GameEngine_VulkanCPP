@@ -16,6 +16,10 @@ namespace primal::graphics::rendergraph {
     class RenderGraph;
 }
 
+namespace primal::graphics {
+class RenderSceneSnapshot;
+}
+
 namespace primal::graphics::lumen {
 
 // ============================================================================
@@ -50,6 +54,16 @@ public:
         rhi::ResourceHandle light_data_buffer,
         const SurfaceCacheFrameData& frame_data,
         u32 current_frame_index);
+
+    // T8.12: card-view capture — renders a rotating batch of cards from their
+    // own orthographic views straight into the atlas pages (albedo/normal/
+    // axis-depth), replacing the camera-bound screen-space re-projection.
+    // Enabled via env SC_CARDVIEW=1; when on, AddPass skips the screen-space
+    // capture_gather dispatch (the two paths are mutually exclusive).
+    bool IsCardViewEnabled() const { return card_view_enabled_; }
+    void AddCardCapturePasses(rendergraph::RenderGraph& graph,
+                              const RenderSceneSnapshot& scene_snapshot,
+                              u32 current_frame_index);
 
     rhi::ResourceHandle GetLightingAtlas(u32 frame_index) const {
         return lighting_atlas_[frame_index % 3];
@@ -124,6 +138,13 @@ private:
     rhi::ResourceHandle lighting_atlas_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+
+    // T8.12 card-view capture state
+    bool card_view_enabled_{ false };
+    u32  card_view_cursor_{ 0 };          // face cursor over card indices
+    bool card_view_seeded_{ false };      // all faces captured at least once
+    u32  card_view_faces_total_{ 0 };
+    rhi::ResourceHandle card_view_depth_{ rhi::handles::INVALID_RESOURCE };  // scratch D32 (atlas-sized)
 
     // Constant buffers (triple-buffered)
     rhi::ResourceHandle global_cb_[3]{
@@ -215,6 +236,7 @@ private:
     u32 atlas_size_ = 0;
     u32 page_size_ = 0;
     u32 light_eval_rr_cursor_ = 0;   // T1.4: round-robin card cursor for page-budget LightEval
+    u32 lighting_atlas_seed_mask_ = 0; // one bit per triple-buffered lighting slot
     GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;   // X2/A3 枚举存储（暂不改变行为）
 
     // GBuffer-gather capture state

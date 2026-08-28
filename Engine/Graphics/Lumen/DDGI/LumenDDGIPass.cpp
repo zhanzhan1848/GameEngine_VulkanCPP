@@ -20,6 +20,7 @@
 #include <sstream>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <set>
 #include <algorithm>
 
@@ -81,7 +82,8 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
 // We manually inline local includes before passing to CreateShader.
 // ============================================================================
 
-static const std::string SHADER_BASE_DIR = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/";
+static const std::string SHADER_BASE_DIR =
+    utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/") + "/";
 static const std::string DDGI_SHADER_DIR = SHADER_BASE_DIR + "Lumen/";
 
 static std::string ReadFileToString(const std::string& path) {
@@ -177,7 +179,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
             utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
         const std::vector<std::string> candidates = {
             relPath,
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+            utils::ShaderRegistry::ResolveShaderPath(relPath),
         };
         for (const auto& path : candidates) {
             std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -257,12 +259,76 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     device_ = device;
     params_ = params;
 
+    // Probe ray sampler mode (M8/T8.4): DEFAULT 1 (per-frame golden-angle
+    // jitter) — uniform pdf, so the SH estimator is unchanged; the EMA simply
+    // integrates ALL directions over time instead of a fixed set's blind
+    // spots (corridor probes missing arch openings forever). 0 = legacy
+    // (fixed Fibonacci), 2 = cosine mixture (EXPERIMENTAL — measured 2.4x
+    // SC↔probe equilibrium shift, see T8.4). Env override for A/B runs.
+    ray_sample_mode_ = 1;
+    if (const char* env = std::getenv("DDGI_RAY_SAMPLE")) {
+        int m = atoi(env);
+        if (m >= 0 && m <= 2) {
+            ray_sample_mode_ = (u32)m;
+        } else {
+            std::cerr << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0/1/2), keeping default" << std::endl;
+        }
+    }
+    std::cerr << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
+              << (ray_sample_mode_ == 0 ? " (legacy uniform Fibonacci)"
+                  : ray_sample_mode_ == 1 ? " (per-frame golden-angle jitter)"
+                                          : " (cosine mixture around light)")
+              << std::endl;
+
     // Pre-compute probe origin at the center of the grid
     probe_origin_ = {
         -(float)(params_.probe_count_x - 1) * params_.probe_spacing * 0.5f,
         -(float)(params_.probe_count_y - 1) * params_.probe_spacing * 0.5f,
         -(float)(params_.probe_count_z - 1) * params_.probe_spacing * 0.5f,
     };
+
+    // First-class probe position buffer — the DEFINITION of probe placement,
+    // written once here before the render loop (static grid). Trace, gather
+    // and the debug sphere visualization all consume this same buffer so the
+    // notion of "probe position" cannot drift between them. Layout matches
+    // ddgiProbeGridCoord: idx = x + y*cx + z*cx*cy.
+    {
+        const u32 total =
+            params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+        BufferDesc pdesc{};
+        pdesc.size = (u64)total * sizeof(math::v4);
+        pdesc.type = BufferType::Structured;
+        pdesc.usage = GPUMemoryUsage::Dynamic;
+        pdesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        pdesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        probe_positions_ = device_->CreateBuffer(pdesc);
+        if (probe_positions_ != handles::INVALID_RESOURCE) {
+            if (auto* mapped =
+                    static_cast<math::v4*>(device_->MapBuffer(probe_positions_))) {
+                for (u32 z = 0; z < params_.probe_count_z; ++z)
+                    for (u32 y = 0; y < params_.probe_count_y; ++y)
+                        for (u32 x = 0; x < params_.probe_count_x; ++x) {
+                            mapped[x + y * params_.probe_count_x +
+                                   z * params_.probe_count_x * params_.probe_count_y] =
+                                math::v4{probe_origin_.x + (float)x * params_.probe_spacing,
+                                         probe_origin_.y + (float)y * params_.probe_spacing,
+                                         probe_origin_.z + (float)z * params_.probe_spacing,
+                                         0.0f};
+                        }
+                device_->UnmapBuffer(probe_positions_);
+            }
+            std::cerr << "[LumenDDGI] ProbePositionBuffer filled: " << total
+                      << " probes @ spacing " << params_.probe_spacing << std::endl;
+        }
+    }
+
+    // Sync into volume_data_ up front: UpdateProbeOrigin is disabled for static
+    // scenes and the static-bake sync below only runs when a bake exists, so
+    // without this the GPU-side origin stays (0,0,0) and the whole probe grid
+    // covers the positive octant — scenes centered elsewhere (e.g. Sponza at
+    // z<0) fall entirely outside every volume and gather collapses to the dim
+    // ambient constant.
+    volume_data_.ProbeOrigin = math::v4{probe_origin_.x, probe_origin_.y, probe_origin_.z, 0.0f};
 
     // Create descriptor set layouts
     CreateDescriptorSetLayouts();
@@ -533,7 +599,15 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
 
 void LumenDDGIPass::CreatePipelines() {
     auto CompileShader = [&](const char* name, const char* entry) -> ShaderHandle {
-        auto code = LoadShaderBytecode(name, device_);
+        // T8.9b diagnostic override: DDGI_PATH_DEBUG=1 prefers the *_pathdbg
+        // bytecode (path-id tags baked via -DDGI_PATH_DEBUG) for the finalize
+        // kernel so ray-path A/B never races the POST_BUILD shader staging
+        // copy. Repository keeps both .comp.spv files side by side.
+        std::string effectiveName = name;
+        if (std::getenv("DDGI_PATH_DEBUG") && std::string(name) == "DDGITraceFinalize") {
+            effectiveName = "DDGITraceFinalize_pathdbg";
+        }
+        auto code = LoadShaderBytecode(effectiveName.c_str(), device_);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
@@ -772,7 +846,11 @@ void LumenDDGIPass::CreateProbeTextures() {
         }
     }
 
-    // Confidence buffers: triple-buffered (4 floats per probe)
+    // Confidence buffer (single-buffered). convergenceAge is a monotonic
+    // per-probe counter (+1/30 per update); the previous triple-buffered
+    // array rotated the written slot each frame, so every slot only advanced
+    // every 3rd frame and GIGather (reading frame%3) saw probes that never
+    // settled. One buffer keeps the counter monotonic for all consumers.
     {
         u64 confSize = (u64)totalProbes * 4 * sizeof(float);
         BufferDesc desc{};
@@ -785,19 +863,17 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.structured.elementStride = sizeof(float);
 
         float initAge = (static_volume_ && static_volume_->IsLoaded()) ? 0.5f : 0.0f;
-        for (int i = 0; i < 3; i++) {
-            confidence_buffers_[i] = device_->CreateBuffer(desc);
+        confidence_buffer_ = device_->CreateBuffer(desc);
 
-            float* mapped = static_cast<float*>(device_->MapBuffer(confidence_buffers_[i]));
-            if (mapped) {
-                for (u32 p = 0; p < totalProbes; p++) {
-                    mapped[p * 4 + 0] = 0.0f;     // rayHitRatio
-                    mapped[p * 4 + 1] = 0.0f;     // temporalStability
-                    mapped[p * 4 + 2] = 1.0f;     // visibilityConf (optimistic)
-                    mapped[p * 4 + 3] = initAge;  // convergenceAge
-                }
-                device_->UnmapBuffer(confidence_buffers_[i]);
+        float* mapped = static_cast<float*>(device_->MapBuffer(confidence_buffer_));
+        if (mapped) {
+            for (u32 p = 0; p < totalProbes; p++) {
+                mapped[p * 4 + 0] = 0.0f;     // rayHitRatio
+                mapped[p * 4 + 1] = 0.0f;     // temporalStability
+                mapped[p * 4 + 2] = 1.0f;     // visibilityConf (optimistic)
+                mapped[p * 4 + 3] = initAge;  // convergenceAge
             }
+            device_->UnmapBuffer(confidence_buffer_);
         }
     }
 
@@ -1009,12 +1085,24 @@ sky_estimate:
 void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
 {
     sc_lighting_atlas_ = view.lighting_atlas;
-    sc_card_lookup_buffer_ = view.card_lookup;
-    sc_card_data_buffer_ = view.card_data;
     sc_atlas_size_ = view.atlas_size;
     sc_lookup_count_ = view.lookup_count;
-    sc_grid_offsets_buffer_ = view.grid_offsets;
-    sc_grid_cards_buffer_ = view.grid_cards;
+
+    // The pass pre-creates dummy zero/empty-grid buffers (Initialize, "Dummy
+    // Surface Cache buffers" / "Dummy card-grid buffers") precisely so the
+    // trace/finalize descriptor sets stay valid when SC data is absent.
+    // Optional view fields (notably the T1.3 grid pair) arrive INVALID in
+    // that case — keep the dummies instead of clobbering them, otherwise the
+    // passes bind INVALID handles (Vulkan: VK_NULL_HANDLE descriptor writes,
+    // Metal: nil buffer arguments).
+    sc_card_lookup_buffer_ = view.card_lookup != handles::INVALID_RESOURCE
+        ? view.card_lookup : sc_card_lookup_buffer_;
+    sc_card_data_buffer_ = view.card_data != handles::INVALID_RESOURCE
+        ? view.card_data : sc_card_data_buffer_;
+    sc_grid_offsets_buffer_ = view.grid_offsets != handles::INVALID_RESOURCE
+        ? view.grid_offsets : sc_grid_offsets_buffer_;
+    sc_grid_cards_buffer_ = view.grid_cards != handles::INVALID_RESOURCE
+        ? view.grid_cards : sc_grid_cards_buffer_;
 
     // Store SC params in DDGIVolumeData (triple-buffered, confirmed working)
     // instead of a separate sc_params buffer (binding 6 was not working).
@@ -1472,6 +1560,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.ProbeRelocationShift[0] = relocation_shift_[0];
                     vd.ProbeRelocationShift[1] = relocation_shift_[1];
                     vd.ProbeRelocationShift[2] = relocation_shift_[2];
+                    vd.RaySampleMode = (int)ray_sample_mode_;
 
                     // Preserve Surface Cache params (set by SetSurfaceCacheResources)
                     // These are lost when vd{} zero-initializes. Must copy from members.
@@ -1706,6 +1795,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, sets, 0, nullptr);
 
                     cmd->Dispatch(updateCount, 1, 1);
+                    {
+                        static bool splitOnce = false;
+                        if (!splitOnce) {
+                            splitOnce = true;
+                            std::fprintf(stderr, "[DDGI-TracePath] SPLIT (TraceSDF+Finalize) dispatched\n");
+                        }
+                    }
                     }
                 }
             } else if (sdfAvailable &&
@@ -1812,7 +1908,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {3, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                     {4, DescriptorType::StorageBuffer, irradiance_buffers_[outIdx]},
                     {5, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
-                    {6, DescriptorType::StorageBuffer, confidence_buffers_[outIdx]},
+                    {6, DescriptorType::StorageBuffer, confidence_buffer_},
                 };
                 UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 7);
 

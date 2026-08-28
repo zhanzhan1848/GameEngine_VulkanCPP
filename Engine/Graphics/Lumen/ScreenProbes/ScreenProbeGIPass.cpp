@@ -73,7 +73,8 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
 // Shader source loader with #include resolution
 // ============================================================================
 
-static const std::string SHADER_BASE_DIR = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/";
+static const std::string SHADER_BASE_DIR =
+    utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/") + "/";
 static const std::string SCREEN_PROBE_SHADER_DIR = SHADER_BASE_DIR + "Lumen/";
 
 static std::string ReadFileToString(const std::string& path) {
@@ -155,7 +156,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
             utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
         const std::vector<std::string> candidates = {
             relPath,
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath,
+            utils::ShaderRegistry::ResolveShaderPath(relPath),
         };
         for (const auto& path : candidates) {
             std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -206,14 +207,15 @@ ScreenProbeGIPass::~ScreenProbeGIPass() {
     Shutdown();
 }
 
-// X2/A3: 时域策略映射 —— EMA 即现有 temporal accumulation alpha 路径（默认，
-// 行为不变）；EMAVarianceClamp/Reprojection 暂存枚举（TODO X3 完整实现）。
+// F3 (M7): 时域策略已实装 — EMA=现有路径（默认，行为不变）；
+// EMAVarianceClamp=+邻域 AABB 方差钳制；Reprojection=纯双线性历史复用。
 void ScreenProbeGIPass::SetTemporalStrategy(GITemporalStrategy strategy) {
     if (temporal_strategy_ == strategy) return;
     temporal_strategy_ = strategy;
     std::cout << "[ScreenProbeGI] Temporal strategy -> "
               << GITemporalStrategyName(strategy)
-              << " (EMA path unchanged; full mapping lands in X3)" << std::endl;
+              << " (EMA=0 / EMAVarianceClamp=1 / Reprojection=2, effective next frame)"
+              << std::endl;
 }
 
 bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
@@ -300,6 +302,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_offsets (T1.3)
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_cards (T1.3)
             {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi_irradiance (T2.2)
+            {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
         };
         // Mark SDF textures as 3D view dimension
         bindings[0].is3D = true;
@@ -313,7 +316,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[11].readonly = true; // sc_grid_offsets
         bindings[12].readonly = true; // sc_grid_cards
         bindings[13].readonly = true; // ddgi_irradiance
-        trace_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
+        bindings[14].readonly = true; // importanceSH (F2)
+        trace_set_layout_ = device_->CreateDescriptorSetLayout({15, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             // Textures (SDF cascades + prev frame color + surface cache lighting atlas)
@@ -332,8 +336,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi_irradiance (T2.2)
+            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
         };
-        DescriptorSetLayoutDesc layoutDesc{14, bindings};
+        DescriptorSetLayoutDesc layoutDesc{15, bindings};
         trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -345,10 +350,12 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (out)
             {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
         };
         bindings[1].readonly = true;
         bindings[2].readonly = true;
-        hzb_trace_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
+        bindings[5].readonly = true;  // importanceSH (F2)
+        hzb_trace_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // hzb_texture
@@ -356,8 +363,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (out)
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
         };
-        hzb_trace_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
+        hzb_trace_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
     }
 
     // --- T5.1 2b: SDF far-field trace — 3 textures (SDF) + 2 SSBO (positions, normals) + 1 SSBO (hit_distance rw) + 1 UBO ---
@@ -371,13 +379,15 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (rw)
             {6, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
         };
         bindings[0].is3D = true;
         bindings[1].is3D = true;
         bindings[2].is3D = true;
         bindings[3].readonly = true;
         bindings[4].readonly = true;
-        sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
+        bindings[7].readonly = true;  // importanceSH (F2)
+        sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout({8, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 0
@@ -387,8 +397,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (rw)
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
         };
-        DescriptorSetLayoutDesc layoutDesc{7, bindings};
+        DescriptorSetLayoutDesc layoutDesc{8, bindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -408,6 +419,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_cards (T1.3)
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi_irradiance (T2.2)
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
         };
         bindings[2].readonly = true;
         bindings[3].readonly = true;
@@ -417,7 +429,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[9].readonly = true;
         bindings[10].readonly = true;
         bindings[11].readonly = true;
-        finalize_set_layout_ = device_->CreateDescriptorSetLayout({12, bindings});
+        bindings[12].readonly = true; // importanceSH (F2)
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev frame color
@@ -432,8 +445,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi_irradiance (T2.2)
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
         };
-        DescriptorSetLayoutDesc layoutDesc{12, bindings};
+        DescriptorSetLayoutDesc layoutDesc{13, bindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -476,19 +490,22 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeSHOut (read-write)
             {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // {totalProbes, raysPerProbe} (16 bytes)
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probeNormals (readonly)
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
         };
         // Mark read-only SSBOs
         bindings[0].readonly = true;  // rayRadiance
         bindings[3].readonly = true;  // probeNormals
-        avg_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+        bindings[4].readonly = true;  // importanceSH (F2)
+        avg_set_layout_ = device_->CreateDescriptorSetLayout({5, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray radiance (read)
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe SH output (write)
             {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // totalProbes + raysPerProbe
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals (read, for ray direction)
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
         };
-        DescriptorSetLayoutDesc layoutDesc{4, bindings};
+        DescriptorSetLayoutDesc layoutDesc{5, bindings};
         avg_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -878,7 +895,7 @@ void ScreenProbeGIPass::CreateBuffers() {
 
     // Hit buffer (single, GPU-only intermediate for the T5.1 hybrid split):
     // vec4 per ray — x = hit distance, yz = HZB hit UV, w = source flag
-    // (0 miss, 1 HZB near, 2 SDF far).
+    // (0 miss, 1 HZB near, 2 SDF far, 3 far-cache early-out [F1]).
     {
         u64 hitDistSize = (u64)totalProbes * params_.rays_per_probe * sizeof(float) * 4;
         BufferDesc desc{};
@@ -930,7 +947,7 @@ void ScreenProbeGIPass::CreateBuffers() {
     // Temporal accumulation constant buffers (triple-buffered)
     for (int i = 0; i < 3; ++i) {
         BufferDesc desc{};
-        desc.size = 96;  // T5.2: prev_view_projection (mat4) + 8 scalars
+        desc.size = 112;  // F3: prevVP (64B) + 10 scalars (mode + pad appended)
         desc.type = BufferType::Constant;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -1112,15 +1129,26 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 return;
             }
 
-            // Resolve SDF cascade textures from GlobalSDF
-            auto& sdf = nanite::GlobalSDF::Get();
-            bool sdfAvailable = sdf.IsInitialized();
+            // Resolve SDF cascade textures — offline high-res volume (single
+            // cascade, aliased to keep descriptor slots valid) or runtime
+            // GlobalSDF. The offline field traces at ~0.17m voxels vs the
+            // runtime 1m/2m/4m unsigned cascades.
+            bool sdfAvailable = false;
             ResourceHandle sdfTextures[3] = {
                 handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE
             };
-            if (sdfAvailable) {
-                for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
-                    sdfTextures[c] = sdf.GetCascade(c).sdf_texture;
+            if (has_offline_sdf_) {
+                sdfTextures[0] = offline_sdf_texture_;
+                sdfTextures[1] = offline_sdf_texture_;   // alias (cascadeCount=1)
+                sdfTextures[2] = offline_sdf_texture_;
+                sdfAvailable = (offline_sdf_texture_ != handles::INVALID_RESOURCE);
+            } else {
+                auto& sdf = nanite::GlobalSDF::Get();
+                sdfAvailable = sdf.IsInitialized();
+                if (sdfAvailable) {
+                    for (u32 c = 0; c < std::min(3u, sdf.GetConfig().cascade_count); ++c) {
+                        sdfTextures[c] = sdf.GetCascade(c).sdf_texture;
+                    }
                 }
             }
 
@@ -1154,15 +1182,35 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 math::m4x4 vp = camera_data.proj_matrix * camera_data.view_matrix;
                 gd.view_projection = vp;
                 gd.inv_view_projection = rhi::math::Inverse(vp);
+                // F5 (M7): camera_position.w carries the jitter seed (frame
+                // index; negative disables). The Average kernel receives the
+                // same value through its AvgConstants pad slot.
+                const float jitterSeed = params_.enable_jitter
+                    ? static_cast<float>(camera_data.frame_index) : -1.0f;
                 gd.camera_position = {camera_data.camera_position.x,
                                       camera_data.camera_position.y,
-                                      camera_data.camera_position.z, 0.0f};
+                                      camera_data.camera_position.z, jitterSeed};
                 gd.grid_params = {(float)grid_width_, (float)grid_height_,
                                   (float)params_.downsample_factor, (float)params_.rays_per_probe};
                 gd.trace_params = {params_.max_ray_distance, params_.gather_radius,
                                    (float)render_width_, (float)render_height_};
 
-                if (sdfAvailable) {
+                if (sdfAvailable && has_offline_sdf_) {
+                    // Offline single-volume fill (mirrors LumenDDGIPass): one
+                    // cascade, voxel = maxExtent/res; sampleBestSDF's
+                    // cascadeCount=1 path handles the rest.
+                    const float maxExt = std::max({offline_sdf_extent_.x,
+                                                   offline_sdf_extent_.y,
+                                                   offline_sdf_extent_.z});
+                    const float vs = maxExt / static_cast<float>(offline_sdf_resolution_);
+                    gd.sdf_origins[0] = {offline_sdf_origin_.x, offline_sdf_origin_.y,
+                                         offline_sdf_origin_.z, 0.0f};
+                    gd.sdf_voxel_sizes[0] = {vs, vs, vs, 0.0f};
+                    gd.sdf_extents[0] = {offline_sdf_extent_.x, offline_sdf_extent_.y,
+                                         offline_sdf_extent_.z, 0.0f};
+                    gd.sdf_resolutions = {static_cast<float>(offline_sdf_resolution_),
+                                          0.0f, 0.0f, 1.0f};
+                } else if (sdfAvailable) {
                     field::FieldDescriptor sdf_cascades[4];
                     u32 cascadeCount = field::FieldRegistry::Get().FindCascaded(
                         field::FieldSemantic::GlobalSDF, sdf_cascades, 4);
@@ -1175,7 +1223,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     surface_cache_available_ ? static_cast<float>(surface_cache_atlas_size_) : 0.0f,
                     static_cast<float>(surface_cache_card_count_),
                     surface_cache_available_ ? 1.0f : 0.0f,
-                    0.0f
+                    // F5: jitter world-space amplitude clamp (read by Place;
+                    // 0 disables together with a negative seed).
+                    params_.enable_jitter ? params_.jitter_max_world : 0.0f
                 };
 
                 // T2.2: DDGI probe fallback params for miss rays
@@ -1189,6 +1239,12 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                  (hzb_texture_ != handles::INVALID_RESOURCE && hzb_mip_levels_ > 0)
                                      ? (float)hzb_mip_levels_ : 0.0f,
                                  params_.hzb_max_distance};
+
+                // F1: far-cache early-out distance (0 disables); F2: y = importance;
+                // F4: z = adaptive interpolation-error threshold (0 → legacy).
+                gd.cache_params = {params_.far_cache_start_distance,
+                                   params_.enable_importance ? 1.0f : 0.0f,
+                                   params_.adaptive_pos_threshold, 0.0f};
             }
 
             // Split kernels take the global data through the pool UBO
@@ -1202,19 +1258,35 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Sub-pass 1: ScreenProbePlace
             // ==================================================================
             {
-                DescriptorData params[] = {
-                    {0, DescriptorType::SampledImage,  depthTex},
-                    {1, DescriptorType::SampledImage,  normalTex},
-                    {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                    {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
-                    {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                };
+                // Vulkan: flat bindings (images 0-1, SSBO 2-3, UBO 4) matching
+                // ScreenProbePlace.comp; Metal: overlapping texture/buffer(0,1)
+                // namespaces with setBytes(3).
+                DescriptorData params[5];
+                if (splitIsVk) {
+                    DescriptorData p[] = {
+                        {0, DescriptorType::SampledImage,  depthTex},
+                        {1, DescriptorType::SampledImage,  normalTex},
+                        {2, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                        {3, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                        {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    };
+                    memcpy(params, p, sizeof(p));
+                } else {
+                    DescriptorData p[] = {
+                        {0, DescriptorType::SampledImage,  depthTex},
+                        {1, DescriptorType::SampledImage,  normalTex},
+                        {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                        {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                        {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                    };
+                    memcpy(params, p, sizeof(p));
+                }
                 UpdateDescriptorSet(device_, place_ds_[frameIdx], params, 5);
 
                 cmd->BindComputePipeline(place_pipeline_);
                 const DescriptorSetHandle sets[] = { place_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, place_layout_, 0, 1, sets, 0, nullptr);
-                cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
+                if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
@@ -1269,25 +1341,27 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     if (hzbReady) {
                         DescriptorData hzbParams[5];
                         if (splitIsVk) {
-                            DescriptorData p[] = {
-                                {0, DescriptorType::SampledImage,  hzb_texture_},
-                                {1, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                                {2, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
-                                {3, DescriptorType::StorageBuffer, hit_distance_buffer_},
-                                {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                            };
-                            memcpy(hzbParams, p, sizeof(p));
-                        } else {
-                            DescriptorData p[] = {
-                                {0, DescriptorType::SampledImage,  hzb_texture_},
-                                {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                                {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
-                                {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
-                                {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                            };
-                            memcpy(hzbParams, p, sizeof(p));
-                        }
-                        UpdateDescriptorSet(device_, hzb_trace_ds_[frameIdx], hzbParams, 5);
+                        DescriptorData p[] = {
+                            {0, DescriptorType::SampledImage,  hzb_texture_},
+                            {1, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                            {2, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                            {3, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                            {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                            {5, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
+                        };
+                        memcpy(hzbParams, p, sizeof(p));
+                    } else {
+                        DescriptorData p[] = {
+                            {0, DescriptorType::SampledImage,  hzb_texture_},
+                            {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                            {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                            {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                            {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                            {4, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
+                        };
+                        memcpy(hzbParams, p, sizeof(p));
+                    }
+                    UpdateDescriptorSet(device_, hzb_trace_ds_[frameIdx], hzbParams, 6);
                         cmd->BindComputePipeline(hzb_trace_pipeline_);
                         const DescriptorSetHandle sets[] = { hzb_trace_ds_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, hzb_trace_layout_, 0, 1, sets, 0, nullptr);
@@ -1318,8 +1392,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {4, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                             {5, DescriptorType::StorageBuffer, hit_distance_buffer_},
                             {6, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                            {7, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                         };
-                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 7);
+                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 8);
                     } else {
                         DescriptorData sdfParams[] = {
                             {0, DescriptorType::SampledImage,  sdfTextures[0]},
@@ -1329,8 +1404,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                             {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
                             {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                            {4, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                         };
-                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 7);
+                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 8);
                     }
                     cmd->BindComputePipeline(sdf_trace_pipeline_);
                     const DescriptorSetHandle sdfSets[] = { sdf_trace_ds_[frameIdx] };
@@ -1355,8 +1431,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {9, DescriptorType::StorageBuffer, scGridOffsets},
                             {10, DescriptorType::StorageBuffer, scGridCards},
                             {11, DescriptorType::StorageBuffer, ddgiIrr},
+                            {12, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 12);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 13);
                     } else {
                         DescriptorData finParams[] = {
                             {0, DescriptorType::SampledImage,  prevColorTex},
@@ -1371,8 +1448,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {7, DescriptorType::StorageBuffer, scGridOffsets},
                             {8, DescriptorType::StorageBuffer, scGridCards},
                             {9, DescriptorType::StorageBuffer, ddgiIrr},
+                            {10, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 12);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 13);
                     }
                     cmd->BindComputePipeline(finalize_pipeline_);
                     const DescriptorSetHandle finSets[] = { finalize_ds_[frameIdx] };
@@ -1398,8 +1476,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {11, DescriptorType::StorageBuffer, scGridOffsets},
                             {12, DescriptorType::StorageBuffer, scGridCards},
                             {13, DescriptorType::StorageBuffer, ddgiIrr},
+                            {14, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                         };
-                        UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 14);
+                        UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 15);
                     } else {
                         DescriptorData params[] = {
                             {0, DescriptorType::SampledImage,  sdfTextures[0]},
@@ -1416,8 +1495,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {6, DescriptorType::StorageBuffer, scGridOffsets},
                             {7, DescriptorType::StorageBuffer, scGridCards},
                             {8, DescriptorType::StorageBuffer, ddgiIrr},
+                            {9, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                         };
-                        UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 14);
+                        UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 15);
                     }
                     cmd->BindComputePipeline(trace_pipeline_);
                     const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
@@ -1442,15 +1522,22 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             {
                 struct AvgCB { u32 totalProbes; u32 raysPerProbe; float pad[2]; };
-                AvgCB acb{grid_width_ * grid_height_, params_.rays_per_probe, 0.0f, 0.0f};
+                // pad[0] = F5 jitter seed — MUST equal camera_position.w so the
+                // SH projection regenerates the same rotated ray directions as
+                // the trace kernels. pad[1] = F2 importance mode (cache_params.y).
+                const float avgSeed = params_.enable_jitter
+                    ? static_cast<float>(camera_data.frame_index) : -1.0f;
+                const float avgIsMode = params_.enable_importance ? 1.0f : 0.0f;
+                AvgCB acb{grid_width_ * grid_height_, params_.rays_per_probe, avgSeed, avgIsMode};
 
                 DescriptorData params[] = {
                     {0, DescriptorType::StorageBuffer, probe_radiance_buffer_[frameIdx]},
                     {1, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},
                     {2, DescriptorType::UniformBuffer, avg_constants_[frameIdx]},
                     {3, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                    {4, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                 };
-                UpdateDescriptorSet(device_, avg_ds_[frameIdx], params, 4);
+                UpdateDescriptorSet(device_, avg_ds_[frameIdx], params, 5);
 
                 cmd->BindComputePipeline(avg_pipeline_);
                 const DescriptorSetHandle sets[] = { avg_ds_[frameIdx] };
@@ -1475,16 +1562,26 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Sub-pass 2.75: Probe Temporal Accumulation (T5.2 reprojection)
             // ==================================================================
             if (temporal_pipeline_ != handles::INVALID_PIPELINE) {
-                // std140 layout: mat4 prevVP (64B) + 8 scalars (32B) = 96B
+                // std140 layout: mat4 prevVP (64B) + 10 scalars (48B) = 112B
                 struct alignas(16) TemporalCB {
                     math::m4x4 prev_view_projection;
                     u32 totalProbes; float alpha; float posThreshold; float normalThreshold;
                     float clampScale; float maxGradient; u32 gridW; u32 gridH;
+                    float mode; float pad_;
                 };
+                // F3 (M7): strategy → shader mode. EMA=0 (default, behavior
+                // unchanged), EMAVarianceClamp=1 (+ neighborhood AABB clamp),
+                // Reprojection=2 (pure bilinear history reuse, no clamps).
+                float temporalMode = 0.0f;
+                switch (temporal_strategy_) {
+                    case GITemporalStrategy::EMAVarianceClamp: temporalMode = 1.0f; break;
+                    case GITemporalStrategy::Reprojection:     temporalMode = 2.0f; break;
+                    default: break;
+                }
                 TemporalCB tcb{
                     camera_data.prev_proj_matrix * camera_data.prev_view_matrix,
                     grid_width_ * grid_height_, 0.1f, 0.5f, 0.5f, 2.0f, 2.0f,
-                    grid_width_, grid_height_};
+                    grid_width_, grid_height_, temporalMode, 0.0f};
 
                 // Vulkan reads the pool UBO (binding 5); Metal uses setBytes below.
                 {
@@ -1561,21 +1658,39 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Sub-pass 3: ScreenProbeGather
             // ==================================================================
             {
-                DescriptorData params[] = {
-                    {0, DescriptorType::SampledImage,  depthTex},
-                    {1, DescriptorType::SampledImage,  normalTex},
-                    {2, DescriptorType::StorageImage,  outputTex},
-                    {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                    {2, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
-                    {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                    {4, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
-                };
+                // Vulkan: flat bindings (images 0-2, SSBO 3/4/6, UBO 5) matching
+                // ScreenProbeGather.comp; Metal: texture(0,1,2) + buffer(0,2,4)
+                // with setBytes(3).
+                DescriptorData params[7];
+                if (splitIsVk) {
+                    DescriptorData p[] = {
+                        {0, DescriptorType::SampledImage,  depthTex},
+                        {1, DescriptorType::SampledImage,  normalTex},
+                        {2, DescriptorType::StorageImage,  outputTex},
+                        {3, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                        {4, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
+                        {5, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                        {6, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                    };
+                    memcpy(params, p, sizeof(p));
+                } else {
+                    DescriptorData p[] = {
+                        {0, DescriptorType::SampledImage,  depthTex},
+                        {1, DescriptorType::SampledImage,  normalTex},
+                        {2, DescriptorType::StorageImage,  outputTex},
+                        {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                        {2, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
+                        {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                        {4, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                    };
+                    memcpy(params, p, sizeof(p));
+                }
                 UpdateDescriptorSet(device_, gather_ds_[frameIdx], params, 7);
 
                 cmd->BindComputePipeline(gather_pipeline_);
                 const DescriptorSetHandle sets[] = { gather_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, gather_layout_, 0, 1, sets, 0, nullptr);
-                cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
+                if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
 
                 u32 dispatchX = (render_width_ + 7) / 8;
                 u32 dispatchY = (render_height_ + 7) / 8;

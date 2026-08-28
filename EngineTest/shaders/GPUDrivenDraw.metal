@@ -115,9 +115,10 @@ struct VertexOut {
     float3 normal;   // World-space normal
     float3 tangent;  // World-space tangent
     float3 bitangent;// World-space bitangent (calculated)
+    float3 worldPosition; // Used to derive a winding-independent visible-face normal
 
     // 🎨 Material ID (for material sampling)
-    uint materialID; // Will be used to index material data
+    uint materialID [[flat]]; // Will be used to index material data
 
     // Velocity buffer: current and previous clip-space positions
     float4 currentPos;    // Current frame clip-space position
@@ -193,14 +194,18 @@ vertex VertexOut gpu_driven_vertex_shader(
     float3 tangent = UnpackNormal(element.tangent);
 
     // t_sign byte (high byte of colorTSign):
-    //   bit 0 = tangent handedness (1 = left-handed)
+    //   bit 0 = tangent handedness (1 = negative)
     //   bit 1 = normal Z-sign (1 = positive Z)
+    //   bit 2 = tangent Z-sign (1 = positive Z)
     uint t_sign = (element.colorTSign >> 24) & 0xFF;
     float tangentSign = (t_sign & 0x01) ? -1.0 : 1.0;
 
     // Recover normal Z-sign (UnpackNormal always returns positive Z)
     if (!(t_sign & 0x02)) {
         normal.z = -normal.z;
+    }
+    if (!(t_sign & 0x04)) {
+        tangent.z = -tangent.z;
     }
 
     // UV coordinates (flip Y axis for Metal texture coordinate system)
@@ -252,6 +257,7 @@ vertex VertexOut gpu_driven_vertex_shader(
     out.normal = worldNormal;
     out.tangent = worldTangent;
     out.bitangent = worldBitangent;
+    out.worldPosition = worldPos.xyz;
     out.color = float3(1.0, 1.0, 1.0);
 
     return out;
@@ -261,7 +267,7 @@ vertex VertexOut gpu_driven_vertex_shader(
 fragment GBufferOutput gpu_driven_fragment_shader(
     VertexOut in [[stage_in]],
     constant DrawConstants& uniforms [[buffer(0)]],
-    constant ClusterMaterial* material_data [[buffer(9)]],      // Material data buffer (binding 9)
+    constant uint* material_words [[buffer(9)]],                // 12 words/material (48-byte CPU stride)
     texture2d_array<float> albedo_textures [[texture(10)]],     // Albedo texture array (binding 10)
     texture2d_array<float> normal_textures [[texture(11)]],     // Normal texture array (binding 11)
     texture2d_array<float> orm_textures [[texture(12)]],        // ORM texture array (binding 12)
@@ -269,7 +275,23 @@ fragment GBufferOutput gpu_driven_fragment_shader(
 {
     GBufferOutput out;
 
-    ClusterMaterial mat = material_data[in.materialID];
+    // Decode the fixed CPU layout explicitly. MSL gives structures containing
+    // C arrays a different stride, so typed ClusterMaterial indexing corrupts
+    // every record after material 0 on Metal.
+    const uint material_base = in.materialID * 12u;
+    const uint albedo_texture_idx = material_words[material_base + 0u];
+    const uint normal_texture_idx = material_words[material_base + 1u];
+    const uint orm_texture_idx = material_words[material_base + 2u];
+    const float3 albedo_tint = float3(
+        as_type<float>(material_words[material_base + 3u]),
+        as_type<float>(material_words[material_base + 4u]),
+        as_type<float>(material_words[material_base + 5u]));
+    const float metallic_factor = as_type<float>(material_words[material_base + 6u]);
+    const float roughness_factor = as_type<float>(material_words[material_base + 7u]);
+    const float normal_scale = as_type<float>(material_words[material_base + 8u]);
+    const float2 uv_scale = float2(
+        as_type<float>(material_words[material_base + 9u]),
+        as_type<float>(material_words[material_base + 10u]));
 
     // Sample textures
     constexpr sampler linear_sampler(mip_filter::linear, mag_filter::linear, min_filter::linear, address::repeat);
@@ -278,25 +300,37 @@ fragment GBufferOutput gpu_driven_fragment_shader(
     uint albedo_array_size = albedo_textures.get_array_size();
 
     // 🔥 NEW: Apply UV scaling for texture repetition
-    float2 scaled_uv = in.uv * float2(mat.uv_scale[0], mat.uv_scale[1]);
+    float2 scaled_uv = in.uv * uv_scale;
 
     // Sample albedo texture
     float4 albedo_sample = float4(1.0, 1.0, 1.0, 1.0);
 
-    if (mat.albedo_texture_idx != 0xFFFFFFFF && mat.albedo_texture_idx < albedo_array_size) {
-        albedo_sample = albedo_textures.sample(linear_sampler, scaled_uv, mat.albedo_texture_idx);
+    if (albedo_texture_idx != 0xFFFFFFFF && albedo_texture_idx < albedo_array_size) {
+        albedo_sample = albedo_textures.sample(linear_sampler, scaled_uv, albedo_texture_idx);
     }
 
     // Apply albedo tint
-    float3 baseColor = albedo_sample.rgb * float3(mat.albedo_tint[0], mat.albedo_tint[1], mat.albedo_tint[2]);
+    float3 baseColor = albedo_sample.rgb * albedo_tint;
 
     out.albedo = float4(baseColor, 1.0);
+
+    // Keep the shading frame tied to the asset normal. Do not face-forward it
+    // with screen-space derivatives: doing so makes a wall's lighting change
+    // when the camera crosses the wall and turns the back side into the lit
+    // side. The repaired ContentTools model supplies the stable normal sign.
+    float3 sourceN = normalize(in.normal);
+    float3 T = normalize(in.tangent);
+    float3 sourceB = normalize(in.bitangent);
+    float handedness = dot(cross(sourceN, T), sourceB) < 0.0f ? -1.0f : 1.0f;
+    float3 N = sourceN;
+    T = normalize(T - dot(T, N) * N);
+    float3 B = normalize(cross(N, T)) * handedness;
 
     // Normal mapping: sample normal texture if available, otherwise use vertex normal
     uint normal_array_size = normal_textures.get_array_size();
 
-    if (mat.normal_texture_idx != 0xFFFFFFFF && mat.normal_texture_idx < normal_array_size) {
-        float3 normalSample = normal_textures.sample(linear_sampler, scaled_uv, mat.normal_texture_idx).rgb;
+    if (normal_texture_idx != 0xFFFFFFFF && normal_texture_idx < normal_array_size) {
+        float3 normalSample = normal_textures.sample(linear_sampler, scaled_uv, normal_texture_idx).rgb;
 
         // Check if normal map has actual data (not flat/black default)
         if (length(normalSample) > 0.1) {
@@ -304,30 +338,27 @@ fragment GBufferOutput gpu_driven_fragment_shader(
             float3 tangentNormal = normalSample * 2.0 - 1.0;
 
             // Build TBN matrix from vertex tangent frame
-            float3 N = normalize(in.normal);
-            float3 T = normalize(in.tangent);
-            float3 B = normalize(in.bitangent);
             float3x3 TBN = float3x3(T, B, N);
 
             // Transform to world space and encode to [0,1] for GBuffer
             out.normal = float4(normalize(TBN * tangentNormal) * 0.5 + 0.5, 1.0);
         } else {
             // Normal map exists but is flat/default — use vertex normal
-            out.normal = float4(normalize(in.normal) * 0.5 + 0.5, 1.0);
+            out.normal = float4(N * 0.5 + 0.5, 1.0);
         }
     } else {
         // No normal texture — use vertex normal
-        out.normal = float4(normalize(in.normal) * 0.5 + 0.5, 1.0);
+        out.normal = float4(N * 0.5 + 0.5, 1.0);
     }
 
     // ORM: Sample texture if available, otherwise use material scalar factors
     float occlusion = 1.0;
-    float roughness = mat.roughness_factor;
-    float metallic = mat.metallic_factor;
+    float roughness = roughness_factor;
+    float metallic = metallic_factor;
 
     uint orm_array_size = orm_textures.get_array_size();
-    if (mat.orm_texture_idx != 0xFFFFFFFF && mat.orm_texture_idx < orm_array_size) {
-        float4 orm_sample = orm_textures.sample(linear_sampler, scaled_uv, mat.orm_texture_idx);
+    if (orm_texture_idx != 0xFFFFFFFF && orm_texture_idx < orm_array_size) {
+        float4 orm_sample = orm_textures.sample(linear_sampler, scaled_uv, orm_texture_idx);
         occlusion = orm_sample.r;
         roughness = orm_sample.g;
         metallic = orm_sample.b;

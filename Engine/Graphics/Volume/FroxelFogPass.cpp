@@ -1,4 +1,5 @@
 #include "FroxelFogPass.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderGraph/RenderGraphPass.h"
@@ -56,7 +57,8 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
     device->UpdateDescriptorSets(count, writes.data());
 }
 
-static const std::string SHADER_BASE_DIR = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/";
+static const std::string SHADER_BASE_DIR =
+    utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/") + "/";
 static const std::string VOLUME_SHADER_DIR = SHADER_BASE_DIR + "Volume/";
 
 static std::string ReadFileToString(const std::string& path) {

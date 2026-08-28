@@ -23,6 +23,9 @@
 #include "Engine/Content/AsyncResourceLoader.h"
 #include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
+#include "Engine/Graphics/Lumen/GIDebugParams.h"
+
+#include <cstdlib>
 
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
@@ -34,6 +37,8 @@
 #include <cstring>
 #include <fstream>
 #include <vector>
+#include <cmath>
+#include <cstdio>
 #include <algorithm>
 
 using namespace primal::graphics;
@@ -378,6 +383,20 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     // GI shaders: Fusion (indirect + composite pixel shaders) + GIGather (compute).
     auto fusionIndirectBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect.frag.spv");
     auto fusionCompositeBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/FusionComposite.frag.spv");
+    // M8/T8.7: GI_ISOLATE=ssgi|ddgi|spgi selects a FusionIndirect variant
+    // with one source zeroed (compile-time -D) for per-source A/B.
+    {
+        const char* iso = std::getenv("GI_ISOLATE");
+        std::string fiPath = "Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect.frag.spv";
+        if (iso && std::string(iso) == "ssgi") fiPath = "Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect_noSsgi.frag.spv";
+        if (iso && std::string(iso) == "ddgi") fiPath = "Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect_noDdgi.frag.spv";
+        if (iso && std::string(iso) == "spgi") fiPath = "Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect_noSpgi.frag.spv";
+        if (iso && std::string(iso) == "all") fiPath = "Engine/Graphics/Vulkan/shaders/Lumen/FusionIndirect_noAll.frag.spv";
+        std::cerr << "[GI-isolate] FusionIndirect variant: " << fiPath << std::endl;
+        auto fusionIndirectBytes = loadSpv(fiPath.c_str());
+        handles.fusion_indirect_ps = device_->CreateShader(
+            fusionIndirectBytes.data(), fusionIndirectBytes.size(), ShaderStage::Pixel, "fusion_indirect");
+    }
     auto giGatherBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather.comp.spv");
     if (!fusionIndirectBytes.empty())
         handles.fusion_indirect_ps = device_->CreateShader(
@@ -389,24 +408,74 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         handles.gi_gather = device_->CreateShader(
             giGatherBytes.data(), giGatherBytes.size(), ShaderStage::Compute, "ddgi_gi_gather");
 
+    // SC→DDGI integration (card radiance avg → probe irradiance projection).
+    // Without these the SCDDGIIntegrationModule pipelines stay INVALID and its
+    // AddPass early-outs every frame — the world-space card→probe bounce layer
+    // silently never runs (probes fall back to their own SDF trace only).
+    auto scCardRadianceBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/DDGICardRadianceAvg.comp.spv");
+    auto scProbeIrradianceBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/DDGIProbeIrradianceFromCards.comp.spv");
+    if (!scCardRadianceBytes.empty())
+        handles.sc_card_radiance = device_->CreateShader(
+            scCardRadianceBytes.data(), scCardRadianceBytes.size(),
+            ShaderStage::Compute, "ddgi_card_radiance_avg");
+    if (!scProbeIrradianceBytes.empty())
+        handles.sc_probe_irradiance = device_->CreateShader(
+            scProbeIrradianceBytes.data(), scProbeIrradianceBytes.size(),
+            ShaderStage::Compute, "ddgi_probe_irradiance_from_cards");
+
     // SDF visualization fullscreen shader (toggled at runtime via F6).
     auto sdfVizBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Debug/SDFVisualization.frag.spv");
     if (!sdfVizBytes.empty())
         handles.sdf_viz_ps = device_->CreateShader(
             sdfVizBytes.data(), sdfVizBytes.size(), ShaderStage::Pixel, "main");
 
+    // M8/T8.5: real-mesh DDGI probe spheres (SPGI_PROBE_SPHERES=1).
+    auto probeSphereVs = loadSpv("Engine/Graphics/Vulkan/shaders/Debug/ProbeSphere.vert.spv");
+    auto probeSpherePs = loadSpv("Engine/Graphics/Vulkan/shaders/Debug/ProbeSphere.frag.spv");
+    if (!probeSphereVs.empty())
+        handles.probe_sphere_vs = device_->CreateShader(
+            probeSphereVs.data(), probeSphereVs.size(), ShaderStage::Vertex, "main");
+    if (!probeSpherePs.empty())
+        handles.probe_sphere_ps = device_->CreateShader(
+            probeSpherePs.data(), probeSpherePs.size(), ShaderStage::Pixel, "main");
+
     pipeline_->SetShaderHandles(handles);
 
-    // Medium preset: SSAO + DDGI + Fusion. Fusion now outputs HDR (no tonemap),
-    // FinalBlit does the single tonemap pass.
+    // High preset: SSAO + SC + DDGI + SPGI (screen probes) + Fusion. Fusion
+    // outputs HDR; ToneMappingPass performs the single HDR -> LDR conversion
+    // and FinalBlit only copies that LDR result to the swapchain.
+    // Axis-1 defaults mirror Medium (use_screen_probes=false) and override the
+    // preset in SetLumenConfig, so flip the axis explicitly for SPGI.
     lumen::LumenConfig lumenConfig{};
-    lumenConfig.quality = lumen::LumenQualityPreset::Medium;
+    lumenConfig.quality = lumen::LumenQualityPreset::High;
+    lumenConfig.axes.use_screen_probes = true;
     pipeline_->SetLumenConfig(lumenConfig);
 
-    // Enable SSR (Screen-Space Reflections) — traces reflection rays through the
-    // HZB, temporally accumulates, upsamples with roughness attenuation, then
-    // FusionComposite blends the reflection color additively into the scene.
-    pipeline_->SetPassEnabled(RenderPassID::SSR, true);
+    // Keep direct and probe lighting in the same physical scale. The DDGI
+    // uploader stores a separate intensity of 3.0 in LightColor.w, so feeding
+    // the legacy default RGB value of 20 here produced an effective intensity
+    // of 60 and drove GI-lit surfaces into the white shoulder of ACES.
+    auto renderSettings = pipeline_->GetSettings();
+    renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
+    // DeferredLighting applies its calibrated 2.5 multiplier, so RGB=2 gives
+    // a visible effective direct intensity of 5 without returning to the old
+    // clipped value of 12.5 (legacy RGB=5).
+    renderSettings.lighting.light_color = {2.0f, 1.9f, 1.8f, 1.0f};
+    // PAIRED with DDGIGIGather.comp PROBE_SH_RAD_TO_IRRAD (×π at the diffuse
+    // gather output): probes are traced under this light, so halving it again
+    // by π keeps the SC↔probe feedback loop's drive identical while only the
+    // screen-end GI scale is corrected. Regression guard: right half of frame
+    // = direct sun must not overexpose; left half (arcade) carries the change.
+    renderSettings.lighting.ddgi_light_color = {0.31831f, 0.30239f, 0.28648f, 1.0f};
+    pipeline_->UpdateSettings(renderSettings);
+
+    // Reflections and all volume paths are intentionally out of scope for this
+    // test. Keep these explicit so future preset changes cannot enable them.
+    pipeline_->SetPassEnabled(RenderPassID::SSR, false);
+    pipeline_->SetMirrorEnabled(false);
+    pipeline_->SetPassEnabled(RenderPassID::VolumePass, false);
+    pipeline_->SetPassEnabled(RenderPassID::VolumeRenderer, false);
+    pipeline_->SetPassEnabled(RenderPassID::FroxelFog, false);
 
     // Mirror plane: cover the whole Sponza floor (the camera starts at
     // {0,5,0} looking horizontally — a small mirror at the origin sits
@@ -683,25 +752,38 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     // redundant call keeps the diagnostic log clean.
     (void)texSampler_;
 
-    // Load offline per-mesh SDF from pipeline model for SDF visualization.
-    // TEMPORARILY DISABLED: SDF merge is very slow (~5 min). SSR/SSGI don't need it.
-    if (false) {
+    // Load offline per-mesh SDF from the pipeline model and merge into the
+    // global 384³ volume. DDGI's SDF trace needs this precision — the runtime
+    // GlobalSDF (1m/2m/4m unsigned voxels, nearest fetch) misplaces hits and
+    // skews the GI spatial distribution (back wall out-bouncing the shaded
+    // arcade). First run merges (~5 min) and writes a cache beside the assets;
+    // later runs load it in ~1s. Delete the .cache to force a re-merge.
+    {
+        const std::string sdfCache = baseDir + "Sponza_global_sdf.v1.cache";
+        const std::string pipeModelPath = baseDir + "Sponza_pipeline.model";
         offlineSDFMerger_ = new primal::graphics::nanite::OfflineSDFMerger();
-        std::string pipeModelPath = baseDir + "Sponza_pipeline.model";
-        u32 sdfCount = offlineSDFMerger_->LoadFromPipelineModel(pipeModelPath.c_str());
-        if (sdfCount > 0) {
-            offlineSDFMerger_->BuildAndUpload(device_);
-            std::cerr << "[Part30.4] Offline SDF loaded: " << sdfCount
-                      << " meshes, texture=" << offlineSDFMerger_->IsValid() << std::endl;
-        } else {
-            std::cerr << "[Part30.4] No offline SDF data found (pipeline model missing?)" << std::endl;
+        if (!offlineSDFMerger_->LoadFromCache(device_, sdfCache.c_str())) {
+            u32 sdfCount = offlineSDFMerger_->LoadFromPipelineModel(pipeModelPath.c_str());
+            if (sdfCount > 0) {
+                std::cerr << "[Part30.4] Offline SDF loaded: " << sdfCount
+                          << " meshes, merging..." << std::endl;
+                if (!offlineSDFMerger_->BuildAndUpload(device_, sdfCache.c_str())) {
+                    std::cerr << "[Part30.4] Offline SDF merge/upload failed" << std::endl;
+                }
+            } else {
+                std::cerr << "[Part30.4] No offline SDF data found (pipeline model missing?)"
+                          << std::endl;
+            }
+        }
+        if (!offlineSDFMerger_->IsValid()) {
             delete offlineSDFMerger_;
             offlineSDFMerger_ = nullptr;
         }
     }
 
     // Wire offline SDF into the render pipeline for F6 visualization.
-    if (offlineSDFMerger_ && offlineSDFMerger_->IsValid()) {
+    if (offlineSDFMerger_ && offlineSDFMerger_->IsValid() &&
+        !std::getenv("SPGI_NO_OFFLINE_SDF")) {   // A/B: runtime GlobalSDF path
         pipeline_->SetOfflineSDFSource(
             offlineSDFMerger_->GetTexture(),
             offlineSDFMerger_->GetOrigin(),
@@ -1095,7 +1177,14 @@ void TestVulkanSponzaRenderGraph::Run() {
     // 1/60 since RenderTestRunner fires Run() at 60 FPS via CFRunLoopTimer.
     if (!cameraInitialized_) {
         // Match Metal TestSponzaRenderGraph init: position {0,5,0}, rotation {0,0,0}.
-        camera_.Initialize({0.0f, 5.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+        // SPGI_CAM="x,y,z,pitch,yaw" (degrees) overrides for framed captures.
+        float cx = 0.0f, cy = 5.0f, cz = 0.0f, cpitch = 0.0f, cyaw = 0.0f;
+        if (const char* camEnv = std::getenv("SPGI_CAM")) {
+            if (sscanf(camEnv, "%f,%f,%f,%f,%f", &cx, &cy, &cz, &cpitch, &cyaw) == 5) {
+                std::cerr << "[Cam] override " << camEnv << std::endl;
+            }
+        }
+        camera_.Initialize({cx, cy, cz}, {cpitch, cyaw, 0.0f});
         camera_.SetSpeed(10.0f, 0.1f);
         cameraInitialized_ = true;
         lastFrameTime_ = std::chrono::steady_clock::now();
@@ -1235,7 +1324,14 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
 
-    camera_.Update(dt);
+    // T8.12 measurement integrity: SPGI_CAM_LOCK=1 freezes the camera — the
+    // input source reads GLOBAL keyboard state, so a human playing with any
+    // open instance leaks WASD into automated capture runs (measured: frame
+    // viewpoint drifting mid-A/B). Capture runs set the lock; interactive
+    // runs leave it unset.
+    if (!std::getenv("SPGI_CAM_LOCK")) {
+        camera_.Update(dt);
+    }
     view_.SetViewMatrix(camera_.GetViewMatrix());
     view_.UpdateFrustum();
     view_.Cull(scene_);
@@ -1397,8 +1493,338 @@ void TestVulkanSponzaRenderGraph::Run() {
         device_->DestroyBuffer(stagingBuf);
     };
 
+    // Probe diagnostics: set SPGI_PROBE_VIS=1/2/3 at launch to replace the
+    // gather output with probe L0/depth/confidence grayscale (IrradianceAtlas
+    // / DepthAtlas / Confidence).
+    if (const char* visEnv = std::getenv("SPGI_PROBE_VIS")) {
+        lumen::GIDebug().probe_vis =
+            static_cast<lumen::GIDebugParams::ProbeVisMode>(atoi(visEnv));
+        std::cerr << "[ProbeVis] mode=" << visEnv << std::endl;
+    }
+
+    // M8/T8.5: real-mesh probe spheres — SPGI_PROBE_SPHERES=1 renders one
+    // instanced mesh sphere per DDGI probe on the final image, depth-occluded
+    // by the scene (unlike SPGI_PROBE_VIS=4's screen-space ray-march ghosts).
+    if (std::getenv("SPGI_PROBE_SPHERES")) {
+        pipeline_->SetProbeSphereDebug(true);
+        std::cerr << "[ProbeSpheres] enabled at startup" << std::endl;
+    }
+
+    // SPGI_SDFVIZ=1 — enable the F6 SDF visualization at startup (offline
+    // 384³ volume when set) for framed captures of the field itself.
+    if (const char* sdfViz = std::getenv("SPGI_SDFVIZ")) {
+        pipeline_->SetSDFVisualization(true);
+        std::cerr << "[SDF_VIZ] enabled at startup" << std::endl;
+    }
+
+    // GI_ALL_OFF=1 — flip every GIDebug pass toggle off (DDGI trace, SC
+    // capture/lighting/shadow, gather, fusion). A/B for draining bugs: if the
+    // direct-only image still decays, the drain is in the post chain.
+    if (std::getenv("GI_ALL_OFF")) {
+        auto& dbg = lumen::GIDebug();
+        dbg.ddgi_trace = false;
+        dbg.ddgi_far_volume = false;
+        dbg.sc_capture = false;
+        dbg.sc_lighting = false;
+        dbg.sc_shadow = false;
+        dbg.gi_gather = false;
+        dbg.fusion = false;
+        std::cerr << "[GI] ALL GI passes disabled (direct-only A/B)" << std::endl;
+    }
+
     if (frameCount_ == 60 || frameCount_ == 61) {
         capturePPM("jit_on");
+    }
+    // SC↔probe feedback loop needs ~150+ frames to build real multi-bounce
+    // (probe EMA is 0.02); capture the converged steady state as well.
+    if (frameCount_ == 360 || frameCount_ == 361) {
+        capturePPM("steady");
+    }
+
+    // T8.9b diagnostic: DDGI_DUMP=1 reads back the near-volume probe SH at
+    // frame 350 and prints, per probe row, the L0 luminance and the L1 lobe
+    // projection toward +x/-x — answers "do hall-edge probes actually carry
+    // cross-nave energy" without guessing from screen pixels.
+    // DDGI_DUMP=2 (requires a DDGI_PATH_DEBUG-compiled finalize kernel) reads
+    // back the full probe×ray buffer instead and aggregates which hit-radiance
+    // path fired: distance fraction 1=SC atlas, 2=prev-screen, 3=analytic.
+    static bool ddgiDumped = false;
+    const char* dumpEnv = std::getenv("DDGI_DUMP");
+    if (!ddgiDumped && dumpEnv && frameCount_ == 350) {
+        ddgiDumped = true;
+        auto* pass = pipeline_->GetDDGIPass();
+        if (!pass) return;
+        u32 fidx = renderSystem_.GetCurrentFrameIndex();
+        auto vol = pass->GetVolumeView(fidx);
+        std::cerr << "[DDGI_DUMP] valid=" << vol.IsValid()
+                  << " origin=(" << vol.origin.x << "," << vol.origin.y << "," << vol.origin.z << ")"
+                  << " counts=(" << vol.counts.x << "," << vol.counts.y << "," << vol.counts.z << ")"
+                  << " spacing=" << vol.spacing << std::endl;
+        if (!vol.IsValid()) return;
+        if (dumpEnv[0] == '3') {
+            // ---- GIGather half-res output readback (DDGI_DUMP=3) ----
+            // RGBA16F, backbuffer/2. Dumps linear RGB as a scaled PPM plus
+            // band statistics — proves whether the fused ddgiColor input
+            // actually carries the healthy probe field.
+            auto* gather = pipeline_->GetGIGatherModule();
+            if (!gather) return;
+            const u32 hw = 640, hh = 360;
+            const u64 bytes = u64(hw) * hh * 8;
+            BufferDesc rbDesc{};
+            rbDesc.size = bytes;
+            rbDesc.usage = GPUMemoryUsage::Readback;
+            rbDesc.memoryUsage = GPUMemoryUsage::Readback;
+            ResourceHandle staging = device_->CreateBuffer(rbDesc);
+            auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
+                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                capCmd->Begin();
+                BufferTextureCopyRegion region{};
+                region.bufferOffset = 0;
+                region.bufferRowLength = hw;
+                region.imageSubresource = {0, 0, 1};
+                region.imageExtent = {hw, hh, 1};
+                capCmd->CopyTextureToBuffer(gather->GetOutputTexture(), staging, &region, 1);
+                capCmd->End();
+                capCmd->Submit();
+                capCmd->WaitForCompletion();
+                device_->DestroyCommandBuffer(capCmdHandle);
+                if (u16* hdata = static_cast<u16*>(device_->MapBuffer(staging))) {
+                    auto f16 = [](u16 h) -> float {
+                        u32 sign = (h >> 15) & 1, exp = (h >> 10) & 0x1F, mant = h & 0x3FF;
+                        if (exp == 0) return sign ? -0.0f : 0.0f;
+                        u32 bits = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
+                        float f; std::memcpy(&f, &bits, 4); return f;
+                    };
+                    FILE* out = fopen("/tmp/ddgi_halfres.ppm", "wb");
+                    fprintf(out, "P6\n%u %u\n255\n", hw, hh);
+                    // T8.10g: arbitrary full-res stat windows via
+                    // DDGI_RECT="name:x0,y0,x1,y1;..." (comma-separated list).
+                    struct Win { const char* name; u32 x0,y0,x1,y1; double sum; u32 n; float mx, mn; double r,g,b; };
+                    Win wins[8]; u32 winCount = 0;
+                    if (const char* rs = std::getenv("DDGI_RECT")) {
+                        const char* q = rs;
+                        while (*q && winCount < 8) {
+                            char nm[32]; u32 a,b,c,d;
+                            if (sscanf(q, "%31[^:]:%u,%u,%u,%u", nm, &a,&b,&c,&d) == 5) {
+                                Win& w = wins[winCount++];
+                                w.name = strdup(nm); w.x0=a/2; w.y0=b/2; w.x1=c/2; w.y1=d/2;
+                                w.sum=0; w.n=0; w.mx=-1e30f; w.mn=1e30f;
+                                w.r=0; w.g=0; w.b=0;
+                            }
+                            while (*q && *q != ';') ++q;
+                            if (*q == ';') ++q;
+                        }
+                    }
+                    double sum = 0; float mx = -1e30f, mn = 1e30f;
+                    for (u32 y = 0; y < hh; ++y)
+                    for (u32 x = 0; x < hw; ++x) {
+                        const u16* px = hdata + ((size_t)y * hw + x) * 4;
+                        float r = f16(px[0]), g = f16(px[1]), b = f16(px[2]);
+                        float lum = 0.2126f*r + 0.7152f*g + 0.0722f*b;
+                        for (u32 wi = 0; wi < winCount; ++wi) {
+                            Win& w = wins[wi];
+                            if (y>=w.y0 && y<w.y1 && x>=w.x0 && x<w.x1) {
+                                w.sum += lum; w.n++;
+                                w.r += r; w.g += g; w.b += b;
+                                w.mx = std::max(w.mx, lum); w.mn = std::min(w.mn, lum);
+                            }
+                        }
+                        if (y>=45 && y<115 && x>=50 && x<135) { sum += lum;
+                            mn = std::min(mn, lum); mx = std::max(mx, lum); }
+                        u8 R = (u8)std::min(255.0f, r * 60.0f);
+                        u8 G = (u8)std::min(255.0f, g * 60.0f);
+                        u8 B = (u8)std::min(255.0f, b * 60.0f);
+                        fwrite(&R,1,1,out); fwrite(&G,1,1,out); fwrite(&B,1,1,out);
+                    }
+                    fclose(out);
+                    device_->UnmapBuffer(staging);
+                    std::cerr << "[DDGI_DUMP3] half-res GI: L_OUTER(halfrect 50-135x45-115) mean="
+                              << (sum / (85 * 70)) << " min=" << mn << " max=" << mx
+                              << " -> /tmp/ddgi_halfres.ppm" << std::endl;
+                    for (u32 wi = 0; wi < winCount; ++wi)
+                        std::cerr << "[DDGI_DUMP3] win '" << wins[wi].name << "' mean="
+                                  << (wins[wi].n ? wins[wi].sum / wins[wi].n : 0.0)
+                                  << " min=" << wins[wi].mn << " max=" << wins[wi].mx
+                                  << " n=" << wins[wi].n
+                                  << " meanRGB=(" << (wins[wi].n ? wins[wi].r/wins[wi].n : 0)
+                                  << "," << (wins[wi].n ? wins[wi].g/wins[wi].n : 0)
+                                  << "," << (wins[wi].n ? wins[wi].b/wins[wi].n : 0) << ")" << std::endl;
+                }
+            }
+            if (staging != handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);
+            return;
+        }
+        const u32 cx = (u32)vol.counts.x, cy = (u32)vol.counts.y, cz = (u32)vol.counts.z;
+        if (dumpEnv[0] == '2') {
+            // ---- ray-level path histogram ----
+            const u64 probeFloats = 4u; // DDGIRayData vec4
+            const u64 totalRays = (u64)cx * cy * cz * 64u; // RaysPerProbe=64
+            const u64 copyBytes = totalRays * probeFloats * sizeof(float);
+            BufferDesc rbDesc{};
+            rbDesc.size = copyBytes;
+            rbDesc.usage = GPUMemoryUsage::Readback;
+            rbDesc.memoryUsage = GPUMemoryUsage::Readback;
+            ResourceHandle staging = device_->CreateBuffer(rbDesc);
+            auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
+                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                capCmd->Begin();
+                ResourceBarrier toCopy{};
+                toCopy.resource = pass->GetRayDataBuffer();
+                toCopy.beforeState = ResourceState::UnorderedAccess;
+                toCopy.afterState = ResourceState::CopySource;
+                capCmd->InsertBarrier(&toCopy, 1);
+                capCmd->CopyBuffer(pass->GetRayDataBuffer(), staging, 0, 0, copyBytes);
+                ResourceBarrier back{};
+                back.resource = pass->GetRayDataBuffer();
+                back.beforeState = ResourceState::CopySource;
+                back.afterState = ResourceState::UnorderedAccess;
+                capCmd->InsertBarrier(&back, 1);
+                capCmd->End();
+                capCmd->Submit();
+                capCmd->WaitForCompletion();
+                device_->DestroyCommandBuffer(capCmdHandle);
+                if (float* data = static_cast<float*>(device_->MapBuffer(staging))) {
+                    // Only probes the latest trace refreshed carry valid ray
+                    // data — everything else in ray_data_buffer_ is stale or
+                    // never written. Read the update list (same slot) first.
+                    u32 updateCount = pass->GetLastUpdateCount();
+                    const u32 cx3 = cx, cy3 = cy, cz3 = cz;
+                    BufferDesc ulDesc{};
+                    ulDesc.size = size_t(std::max(updateCount, 1u)) * sizeof(u32);
+                    ulDesc.usage = GPUMemoryUsage::Readback;
+                    ulDesc.memoryUsage = GPUMemoryUsage::Readback;
+                    ResourceHandle ulStaging = device_->CreateBuffer(ulDesc);
+                    auto ulCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    std::vector<u32> listed;
+                    if (ulCmdHandle != handles::INVALID_COMMAND_BUFFER && ulStaging != handles::INVALID_RESOURCE) {
+                        auto* ulCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(ulCmdHandle);
+                        ulCmd->Begin();
+                        ResourceBarrier ub{};
+                        ub.resource = pass->GetProbeUpdateListBuffer(fidx);
+                        ub.beforeState = ResourceState::UnorderedAccess;
+                        ub.afterState = ResourceState::CopySource;
+                        ulCmd->InsertBarrier(&ub, 1);
+                        ulCmd->CopyBuffer(pass->GetProbeUpdateListBuffer(fidx), ulStaging, 0, 0,
+                                          size_t(updateCount) * sizeof(u32));
+                        ResourceBarrier ub2{};
+                        ub2.resource = pass->GetProbeUpdateListBuffer(fidx);
+                        ub2.beforeState = ResourceState::CopySource;
+                        ub2.afterState = ResourceState::UnorderedAccess;
+                        ulCmd->InsertBarrier(&ub2, 1);
+                        ulCmd->End();
+                        ulCmd->Submit();
+                        ulCmd->WaitForCompletion();
+                        device_->DestroyCommandBuffer(ulCmdHandle);
+                        if (u32* l = static_cast<u32*>(device_->MapBuffer(ulStaging))) {
+                            listed.assign(l, l + updateCount);
+                            device_->UnmapBuffer(ulStaging);
+                        }
+                    }
+                    if (ulStaging != handles::INVALID_RESOURCE) device_->DestroyBuffer(ulStaging);
+
+                    FILE* out = fopen("/tmp/ddgi_ray_paths.csv", "w");
+                    fprintf(out, "wx,wy,wz,hits,miss,p_scatlas,p_screen,p_analytic,p_unknown,wmin,wmax\n");
+                    for (u32 idx : listed) {
+                        u32 x = idx % cx3;
+                        u32 y = (idx / cx3) % cy3;
+                        u32 z = idx / (cx3 * cy3);
+                        const float* base = data + ((u64)x + y * cx + z * cx * cy) * 64u * 4u;
+                        uint32_t path[4] = {0,0,0,0}; uint32_t miss = 0;
+                        float wmin = 1e30f, wmax = -1e30f;
+                        for (u32 r = 0; r < 64u; ++r) {
+                            float dist = base[r*4+3];
+                            if (dist < 0.0f) { ++miss; continue; }
+                            wmin = dist < wmin ? dist : wmin;
+                            wmax = dist > wmax ? dist : wmax;
+                            // DDGI_PATH_DEBUG encode: w = 40 + pathId·0.001
+                            float tag = dist - 40.0f;
+                            uint32_t p = (tag >= 0.0f) ? (uint32_t)(tag * 1000.0f + 0.5f) : 999u;
+                            if (p <= 3u) path[p]++; else path[0]++;
+                        }
+                        fprintf(out, "%.2f,%.2f,%.2f,%u,%u,%u,%u,%u,%u,%.3f,%.3f\n",
+                                vol.origin.x + x*vol.spacing, vol.origin.y + y*vol.spacing,
+                                vol.origin.z + z*vol.spacing,
+                                64u-miss, miss, path[1], path[2], path[3],
+                                64u-miss-path[1]-path[2]-path[3], wmin, wmax);
+                    }
+                    fclose(out);
+                    device_->UnmapBuffer(staging);
+                    std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_ray_paths.csv" << std::endl;
+                }
+            }
+            if (staging != handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);
+            return;
+        }
+        // ---- SH dump (DDGI_DUMP=1) ----
+        {
+                const u64 probeFloats = 36u; // 9 vec4 per probe
+                const u64 total = (u64)cx * cy * cz * probeFloats;
+                BufferDesc rbDesc{};
+                rbDesc.size = total * sizeof(float);
+                rbDesc.usage = GPUMemoryUsage::Readback;
+                rbDesc.memoryUsage = GPUMemoryUsage::Readback;
+                ResourceHandle staging = device_->CreateBuffer(rbDesc);
+                auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
+                    auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                    capCmd->Begin();
+                    ResourceBarrier toCopy{};
+                    toCopy.resource = vol.irradiance;
+                    toCopy.beforeState = ResourceState::UnorderedAccess;
+                    toCopy.afterState = ResourceState::CopySource;
+                    capCmd->InsertBarrier(&toCopy, 1);
+                    capCmd->CopyBuffer(vol.irradiance, staging, 0, 0, total * sizeof(float));
+                    ResourceBarrier back{};
+                    back.resource = vol.irradiance;
+                    back.beforeState = ResourceState::CopySource;
+                    back.afterState = ResourceState::UnorderedAccess;
+                    capCmd->InsertBarrier(&back, 1);
+                    capCmd->End();
+                    capCmd->Submit();
+                    capCmd->WaitForCompletion();
+                    device_->DestroyCommandBuffer(capCmdHandle);
+                    if (float* data = static_cast<float*>(device_->MapBuffer(staging))) {
+                        // Row: world pos + luminance of directional irradiance
+                        // evaluated on the same canonical basis/signs GIGather
+                        // uses: irr(d) = C0*L0 - C1*dy*L1x + C1*dz*L1y - C1*dx*L1z
+                        // (per RGB channel; layout = 9 vec4 per probe).
+                        FILE* out = fopen("/tmp/ddgi_probe_dump.csv", "w");
+                        fprintf(out, "wx,wy,wz,lumL0,lpx,lnx,lpz,lnz,lpy\n");
+                        const float C0 = 0.28209479f, C1 = 0.48860251f;
+                        for (u32 z = 0; z < cz; ++z)
+                        for (u32 y = 0; y < cy; ++y)
+                        for (u32 x = 0; x < cx; ++x) {
+                            const float* f = data + ((u64)x + y * cx + z * cx * cy) * probeFloats;
+                            auto lumAt = [&](float dx, float dy, float dz) {
+                                float r = C0*f[0] - C1*dy*f[4]  + C1*dz*f[8]  - C1*dx*f[12];
+                                float g = C0*f[1] - C1*dy*f[5]  + C1*dz*f[9]  - C1*dx*f[13];
+                                float b = C0*f[2] - C1*dy*f[6]  + C1*dz*f[10] - C1*dx*f[14];
+                                return 0.2126f*r + 0.7152f*g + 0.0722f*b;
+                            };
+                            float wx = vol.origin.x + x * vol.spacing;
+                            float wy = vol.origin.y + y * vol.spacing;
+                            float wz = vol.origin.z + z * vol.spacing;
+                            float l0lum = C0 * (0.2126f*f[0] + 0.7152f*f[1] + 0.0722f*f[2]);
+                            fprintf(out, "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                                    wx, wy, wz, l0lum,
+                                    lumAt(1,0,0), lumAt(-1,0,0),
+                                    lumAt(0,0,1), lumAt(0,0,-1),
+                                    lumAt(0,1,0));
+                        }
+                        fclose(out);
+                        device_->UnmapBuffer(staging);
+                        std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_probe_dump.csv" << std::endl;
+                    }
+                }
+                if (staging != handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);
+        }
+    }
+    // Decay diagnostics: the backbuffer every ~30s after convergence —
+    // "starts lit, converges black" regressions live past frame 361.
+    if (frameCount_ > 400 && frameCount_ % 1800 == 0) {
+        capturePPM("late");
     }
 
 

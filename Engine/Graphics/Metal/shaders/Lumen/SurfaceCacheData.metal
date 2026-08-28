@@ -57,7 +57,8 @@ struct CardDispatchInfo {
     uint resolution;       // card texel resolution (square)
     uint atlas_offset_x;   // atlas pixel origin X
     uint atlas_offset_y;   // atlas pixel origin Y
-    uint _pad[3];
+    uint card_index;       // original index in the full SurfaceCacheCard buffer
+    uint _pad[2];
 };
 
 // Params for merged lighting pass (matches C++ FlattenedLightingParams).

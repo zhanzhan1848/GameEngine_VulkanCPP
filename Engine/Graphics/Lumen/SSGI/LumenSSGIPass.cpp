@@ -71,7 +71,8 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
 // We manually inline local includes before passing to CreateShader.
 // ============================================================================
 
-static const std::string SHADER_BASE_DIR = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/";
+static const std::string SHADER_BASE_DIR =
+    utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/") + "/";
 static const std::string LUMEN_SHADER_DIR = SHADER_BASE_DIR + "Lumen/";
 
 static std::string ReadFileToString(const std::string& path) {

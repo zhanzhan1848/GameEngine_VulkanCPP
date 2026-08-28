@@ -57,6 +57,10 @@ struct GIDebugParams {
         IrradianceAtlas = 1,
         DepthAtlas = 2,
         Confidence = 3,
+        // 逐像素视线 DDA + 探针位置球体（半径 ≈0.2×spacing）。颜色 = L0 能量
+        // 热力阶 + 埋没红染（octahedral 平均深度 < 0.25×spacing）。不做场景
+        // 遮挡（穿墙可见——埋墙诊断正是目的）。Vulkan GIGather 独有。
+        ProbePositions = 4,
     };
     ProbeVisMode probe_vis = ProbeVisMode::Off;
 

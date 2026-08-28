@@ -73,6 +73,7 @@ kernel void surfaceCacheShadow(
     uint2 atlas_uv = uint2(
         card_dispatch[lo].atlas_offset_x + local_x,
         card_dispatch[lo].atlas_offset_y + local_y);
+    uint card_idx = card_dispatch[lo].card_index;
 
     uint atlas_size = uint(sp.shadow_params.z);
     uint vis_index = atlas_uv.x + atlas_size * atlas_uv.y;
@@ -86,7 +87,7 @@ kernel void surfaceCacheShadow(
     float2 enc_n = normal_atlas.read(atlas_uv).rg;
     float3 normal = octDecode(enc_n);
 
-    float3 world = cardTexelToWorld(atlas_uv, depth, cards[lo]);
+    float3 world = cardTexelToWorld(atlas_uv, depth, cards[card_idx]);
 
     uint cc = uint(sp.sdf_resolutions_count.w);
     float voxel = cc > 0u

@@ -425,7 +425,7 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
         std::vector<std::string> candidates;
         candidates.push_back(relPath);
-        candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/vulkan-rhi/" + relPath);
+        candidates.push_back(utils::ShaderRegistry::ResolveShaderPath(relPath));
 
         std::ifstream file;
         std::string openedPath;
@@ -673,6 +673,24 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
     }
 
     if (!voxelization_ready_) return;
+
+    // The legacy Nanite voxelization path reads scene geometry from
+    // vox_resources_ (SetVoxelizationResources). When no source ever
+    // registered (e.g. offscreen smoke tests), all six SSBOs are INVALID:
+    // dispatching anyway writes VK_NULL_HANDLE descriptors on Vulkan and
+    // nil buffer arguments on Metal. num_instances is 0, so the dispatch
+    // would be a no-op anyway — skip it entirely.
+    if (vox_resources_.vertex_buffer == rhi::handles::INVALID_RESOURCE ||
+        vox_resources_.meshlet_buffer == rhi::handles::INVALID_RESOURCE ||
+        vox_resources_.instance_data_buffer == rhi::handles::INVALID_RESOURCE) {
+        static bool s_log_skip = false;
+        if (!s_log_skip) {
+            std::cerr << "[GlobalSDF] Skip voxelization: no geometry resources "
+                         "(SetVoxelizationResources never called)" << std::endl;
+            s_log_skip = true;
+        }
+        return;
+    }
 
     // Determine frame index for triple-buffered resources
     u32 frameIdx = cascade_index % 3;

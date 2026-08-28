@@ -3,16 +3,18 @@
 // Entry point: ddgi_card_radiance_avg
 //   (glslangValidator --source-entrypoint main -e ddgi_card_radiance_avg)
 //
-// Reads the Surface Cache Lighting Atlas at each card's center texel and
-// writes a per-card float3 average radiance to a compact buffer.
+// Samples a 4x4 texel grid across each card's area in the Surface Cache
+// Lighting Atlas and writes a coverage-weighted average radiance. The w
+// component carries the fraction of sampled texels that held any energy —
+// downstream DDGIProbeIrradianceFromCards uses it as per-card SC validity.
 //
 // Dispatch: (CardCount, 1, 1), threadGroupSize = (64, 1, 1)
 //
 // Flat bindings (Vulkan forbids Metal's overlapping texture/buffer namespaces):
-//   binding 0 = SampledImage lighting_atlas (texture2D, texelFetch at center)
+//   binding 0 = SampledImage lighting_atlas (texture2D, texelFetch)
 //   binding 1 = UniformBuffer   SurfaceCacheParams (via SurfaceCacheData.glsl)
 //   binding 2 = readonly buffer SurfaceCacheCard cards[] (std430 SSBO)
-//   binding 3 = buffer vec4     card_radiance[] (write, xyz=radiance, w=1.0)
+//   binding 3 = buffer vec4     card_radiance[] (xyz=avg radiance, w=coverage)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
@@ -33,10 +35,9 @@ layout(set = 0, binding = 2, std430) readonly buffer CardBuffer {
     SurfaceCacheCard cards[];
 };
 
-// One vec4 per card: xyz = radiance, w = 1.0. Matches Metal float3 output, but
-// padded to vec4 for SSBO 16-byte stride (Vulkan std430 scalar vec3 stores are
-// 16-byte aligned in arrays; vec4 keeps the contract explicit and matches the
-// downstream DDGIProbeIrradianceFromCards reader).
+// One vec4 per card: xyz = average radiance, w = coverage fraction (0..1) of
+// sampled texels that held energy. Matches the downstream
+// DDGIProbeIrradianceFromCards reader contract.
 layout(set = 0, binding = 3, std430) buffer CardRadianceBuffer {
     vec4 card_radiance[];
 };
@@ -50,21 +51,31 @@ void ddgi_card_radiance_avg() {
 
     SurfaceCacheCard card = cards[gid];
     if (card.resolution == 0u) {
-        card_radiance[gid] = vec4(0.0, 0.0, 0.0, 1.0);
+        card_radiance[gid] = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
-    // Center texel of this card in atlas space.
-    float center = float(card.resolution) * 0.5;
-    ivec2 atlas_uv = ivec2(
-        int(float(card.atlas_offset_x) + center),
-        int(float(card.atlas_offset_y) + center)
-    );
+    // 4x4 grid across the card area (never-captured atlas texels read as the
+    // init default zero, so "any energy" doubles as a captured-validity test).
+    float res = float(card.resolution);
+    vec3 sum = vec3(0.0);
+    float valid = 0.0;
+    for (int j = 0; j < 4; ++j) {
+        for (int i = 0; i < 4; ++i) {
+            ivec2 uv = ivec2(
+                int(float(card.atlas_offset_x) + res * (float(i) + 0.5) / 4.0),
+                int(float(card.atlas_offset_y) + res * (float(j) + 0.5) / 4.0));
+            vec3 r = texelFetch(lighting_atlas, uv, 0).xyz;
+            if (dot(r, r) > 1e-6) {
+                sum += r;
+                valid += 1.0;
+            }
+        }
+    }
 
-    // Fetch lighting atlas at card center texel. The Metal original used a
-    // normalized linear sample; texelFetch at the rounded center texel is the
-    // samplerless equivalent (samplerless_texture_functions required).
-    vec3 radiance = texelFetch(lighting_atlas, atlas_uv, 0).xyz;
-
-    card_radiance[gid] = vec4(radiance, 1.0);
+    if (valid > 0.0) {
+        card_radiance[gid] = vec4(sum / valid, valid / 16.0);
+    } else {
+        card_radiance[gid] = vec4(0.0, 0.0, 0.0, 0.0);
+    }
 }

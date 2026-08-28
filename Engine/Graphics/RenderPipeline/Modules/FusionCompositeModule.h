@@ -60,6 +60,11 @@ public:
                     u32 render_width, u32 render_height);
     void Shutdown();
 
+    // Debug/testing: resolved fusion intermediate outputs.
+    rhi::ResourceHandle GetIndirectOutput(u32 cb) const { return indirect_output_[cb % 3]; }
+    rhi::ResourceHandle GetFusionOutput(u32 cb) const { return fusion_output_[cb % 3]; }
+
+
     FusionOutputs AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs);
 
 private:

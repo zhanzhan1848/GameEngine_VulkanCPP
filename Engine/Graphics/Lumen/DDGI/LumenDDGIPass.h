@@ -102,6 +102,14 @@ struct DDGIVolumeData {
 
     // Probe grid relocation (camera-following grid shift, in probe cells)
     int      ProbeRelocationShift[3]; // offset 96, 12 bytes — fills padding before SdfOrigins
+    // Probe ray sampler mode (offset 108 — the LAST padding slot before
+    // SdfOrigins; struct size unchanged, so the unaligned Metal/Dawn mirrors,
+    // which never read this slot, stay prefix-compatible).
+    // 0 = legacy fixed Fibonacci (bit-identical), 1 = per-frame golden-angle
+    // jitter, 2 = cosine-lobe mixture around the light. Semantics live in the
+    // canonical Vulkan shader include ShaderLib/ProbeSampleLib.glsl; selected
+    // via the DDGI_RAY_SAMPLE env var (see LumenDDGIPass.cpp Initialize).
+    int      RaySampleMode = 0;
 
     // GlobalSDF cascade data — v4 matches Metal's float4 alignment
     // C++ inserts implicit padding 104→112 for v4 16-byte alignment
@@ -169,6 +177,22 @@ public:
     }
     const DDGIRuntimeParams& GetParams() const { return params_; }
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
+    // First-class probe position buffer (float4 xyz = world pos, one per
+    // probe, grid lattice order) — filled ONCE in Initialize, before the
+    // render loop (the grid is static; UpdateProbeOrigin early-returns).
+    // Single source for the debug sphere visualization; per-probe relocation
+    // results will be cached here instead of re-derived per ray.
+    rhi::ResourceHandle GetProbePositionBuffer() const { return probe_positions_; }
+
+    // T8.9b diagnostic: full probe×ray radiance buffer for CPU-side A/B of
+    // which hit-radiance path (SC atlas / prev-screen / analytic) actually
+    // fires per ray (DDGI_PATH_DEBUG build tags the path in the distance
+    // fraction). Read-only handle; consumers stage-copy off the render queue.
+    rhi::ResourceHandle GetRayDataBuffer() const { return ray_data_buffer_; }
+
+    // T8.9b diagnostic: probes refreshed by the latest trace dispatch, so
+    // CPU-side ray-buffer reads can skip stale/unwritten slots.
+    u32 GetLastUpdateCount() const { return volume_data_.ProbeUpdateCount; }
 
     // X2/A3: 统一 Cache View —— 消费者（SPGI 回退、GIGather 远场）从这里取
     // volume 数据快照，不再逐个摸 pass 内部 getter。irradiance 取
@@ -233,9 +257,15 @@ public:
         GIDebug().ApplyLegacy(params);
     }
 
-    // Accessor for confidence buffer (for Task 5 later)
+    // Accessor for confidence buffer (for Task 5 later).
+    // Single buffer: convergenceAge is a monotonic counter accumulated by
+    // read-modify-write in DDGIUpdateIrradiance. The old triple-buffered
+    // array rotated the written slot per frame, so each slot only advanced
+    // every 3rd frame (3x slower ramp) while GIGather read frame%3 —
+    // effectively never seeing a settled probe.
     rhi::ResourceHandle GetConfidenceBuffer(u32 frame_idx = 0) const {
-        return confidence_buffers_[frame_idx % 3];
+        (void)frame_idx;
+        return confidence_buffer_;
     }
 
     // Set Surface Cache resources for view-independent radiance in TraceRays.
@@ -300,6 +330,8 @@ private:
     math::v3          probe_origin_{ 0.0f };
     math::v3          last_snapped_cam_{ 0.0f };  // last camera position snapped to grid
     int               relocation_shift_[3]{ 0, 0, 0 };  // current frame grid shift (probe cells)
+    u32               ray_sample_mode_{ 0 };            // DDGI_RAY_SAMPLE env: 0 uniform / 1 jitter / 2 cosine
+    rhi::ResourceHandle probe_positions_{ rhi::handles::INVALID_RESOURCE };  // float4 per probe, filled once at Initialize
     GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;   // X2/A3 枚举存储（EMA=现状）
 
     // Compute pipelines (3 sub-passes)
@@ -398,9 +430,12 @@ private:
     // in AddPass when uploading DDGIVolumeData.
     DawnDebugParams dawnDebugParams_{};
 
-    // Confidence buffers (triple-buffered to avoid read-write race with GI Gather)
-    rhi::ResourceHandle confidence_buffers_[3]{
-        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    // Confidence buffer (single-buffered — see GetConfidenceBuffer note).
+    // Written read-modify-write by DDGIUpdateIrradiance, read by GIGather
+    // later the same frame; the pre-existing same-frame write→read ordering
+    // through separate passes applies unchanged.
+    rhi::ResourceHandle confidence_buffer_{
+        rhi::handles::INVALID_RESOURCE
     };
 
     // Surface Cache resources (set externally before AddPass)
