@@ -1279,6 +1279,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         shadowIn.light_direction = lightDir;
         shadowIn.current_buffer_index = cbIdx;
         shadowIn.shadow_quality = settings_.quality.shadow_quality;
+        // T8.13: shadow softness knobs (Hard=0 / PCF=1 / PCSS=2).
+        if (const char* e = std::getenv("SHADOW_QUALITY")) {
+            shadowIn.shadow_quality = (lumen::ShadowQuality)atoi(e);
+        }
         shadowOut = shadow_module_->AddPasses(graph, shadowIn);
     }
 
@@ -2180,6 +2184,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             shadowIn.light_direction = lightDir;
             shadowIn.current_buffer_index = cbIdx;
             shadowIn.shadow_quality = settings_.quality.shadow_quality;
+        // T8.13: shadow softness knobs (Hard=0 / PCF=1 / PCSS=2).
+        if (const char* e = std::getenv("SHADOW_QUALITY")) {
+            shadowIn.shadow_quality = (lumen::ShadowQuality)atoi(e);
+        }
             shadowOut = shadow_module_->AddPasses(graph, shadowIn);
         }
 

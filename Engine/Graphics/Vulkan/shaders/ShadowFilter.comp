@@ -138,7 +138,9 @@ float sampleShadowMap(texture2D<float> sm, vec3 sc, vec2 screenPos,
     } else if (quality == 1u) {
         return pcfShadow(sm, sc, screenPos, 2.0 * texSize.x, bias);
     } else {
-        return pcssShadow(sm, sc, screenPos, texSize, bias, 0.005);
+        // T8.13: light size 0.005 → 0.012 — penumbra widening was too
+        // conservative (shadow edges read near-hard at nave distances).
+        return pcssShadow(sm, sc, screenPos, texSize, bias, 0.05);
     }
 }
 

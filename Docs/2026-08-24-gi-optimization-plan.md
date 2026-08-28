@@ -220,6 +220,12 @@ struct GIPlatformProfile {
 ### T8.13 P2 交付：探针射线 64→128（✅ 2026-08-28，lane-striding 落地）
 ### T8.13 P0+ 交付：SSGI 降级策略（✅ 2026-08-28，FPS 翻倍）
 ### T8.13 60FPS 冲刺交付：GTAO 2×1 默认（✅ 2026-08-28）
+### T8.13 60FPS 达成（✅ 2026-08-28）：SPGI 64→48 + Release 稳态 53.9 FPS
+### T8.13 补充：阴影硬化诊断 + VSM 模糊半径旋钮（✅ 2026-08-28）
+
+用户反馈 Release 阴影过硬。三层排查：① `shadow_quality`（Hard/PCF/PCSS）**整条 ShadowFilter 分支是死代码**——`vsm_enabled_` 默认 true 时函数在 VSM 分支提前 return，实际阴影走 VSM moments 路径（Hard/PCSS A/B 像素级一致即此，env SHADOW_QUALITY 保留但仅在关 VSM 时生效）；② 30s 窗口 FPS 法被首启 PSO 编译污染，改用**帧戳差分法**（frame 61→361 恰 300 帧，sub-second 轮询）；③ 硬度真旋钮 = ShadowMomentsBlur 半径（2048 moments 图 ≈34 texel/m，半径 3 ≈ 0.3m 半影）。**半径 3→8**：半影 ~1m，目检边界出现自然渐变；env `SHADOW_BLUR` 可调（=3 回旧观感）。VSM light-bleed 风险随半径增大，8 为安全上界。
+
+SCREEN_PROBE_RAYS env 覆盖 + 默认 screen_probes_rays 64→48（重要性采样+空间滤波+denoise 吸收，质量中性实测 L_2F 52.5 vs 52.7）。GPU ~16ms 达 vsync 满速：**Release + SPGI_CAM_LOCK 稳态 53.9 FPS**（帧戳差分法：frame 61→361 恰 300 帧）。**方法学定案**：30s 窗口计数被首启 PSO 编译污染（Release 30.2/50.0 两次矛盾即此），帧戳差分为标准测法；Debug/Release 稳态一致（三缓冲重叠吸收 CPU 差异，44ms"CPU 开销"假说作废——SSGI 降级后 CPU 已非瓶颈）。**session 终账**：L_2F 17.54 → **52.5**（+199%）、FPS 20.3 → **53.9**、REDBOX ~9 → **24.7**、彩色反弹可测（+0.03）、双稳态根除。
 
 SSAO（LumenSSAO GTAO）4 方向×2 采样 ≈3.2ms → 2 方向×1 采样 ≈0.8ms，GPU 总 **18 → 15.6ms，进入 60FPS 预算（16.7ms）**。目检缝隙区质量可接受（5×5 滤波兜底）；env `SSAO_DIRS`/`SSAO_SAMPLES` 可调回。**实测 30s 帧计数：43.2 FPS**（20.3 → 43.2，+113%）。注：墙钟已呈 CPU/Debug 构建瓶颈（GPU 15.6ms 达标后 wall 24ms 的其余为 CPU 提交开销）——**60FPS 的最后一公里是 Release 构建**，排下次验证。
 

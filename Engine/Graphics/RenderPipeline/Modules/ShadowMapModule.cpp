@@ -367,9 +367,11 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     shadow_cache_globally_valid_ = true;
 
     if (vsm) {
-        // VSM moments blur — H+V Gaussian ping-pong per cascade (radius 3 /
-        // sigma 1.0, matching Metal's ForwardRenderer VSM parameters). Runs
-        // after both cascades rasterized; BlurPass leaves the output in
+        // VSM moments blur — H+V Gaussian ping-pong per cascade. T8.13:
+        // radius 3 (≈0.3 m penumbra at this cascade coverage) read as hard
+        // edges across the nave; 8 gives ~1 m soft penumbra. Env
+        // SHADOW_BLUR overrides (set 3 to restore the old look).
+        // Runs after both cascades rasterized; BlurPass leaves the output in
         // ShaderResource for DeferredLighting's Chebyshev sampling.
         graph.AddPass<ShadowPassData>("ShadowMomentsBlur",
             rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
@@ -387,6 +389,8 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     // VP-cache hit: moments unchanged since last frame —
                     // re-blurring would soften them progressively.
                     if (!rastered[c]) continue;
+                    u32 blurRadius = 8u;
+                    if (const char* e = std::getenv("SHADOW_BLUR")) blurRadius = (u32)std::max(1, atoi(e));
                     ResourceHandle mom = gpu_draw_pipeline_->GetShadowMoments(c, bufIdx);
                     if (mom == handles::INVALID_RESOURCE) continue;
 
@@ -400,7 +404,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     cmd->InsertBarrier(&b, 1);
 
                     moments_blur_->Execute(cmd, mom, mom, moments_temp_,
-                                           2048, 2048, 1, frameIdx, 3, 1.0f);
+                                           2048, 2048, 1, frameIdx, blurRadius, 1.0f);
                 }
             }
         );
