@@ -1530,7 +1530,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // tint ratio; Albedo.xyz are set uniformly.
                     float sky = GIDebug().sky_color_intensity;
                     float alb = GIDebug().albedo_intensity;
-                    vd.SkyColor = {sky * 0.85f, sky * 0.85f, sky * 1.0f, 0.0f};
+                    // T8.13 P4: fully neutral sky tint — the old
+                    // (0.85,0.85,1.0) blue bias accumulated in every probe
+                    // via miss rays (measured B-R = +0.03..0.06 across all
+                    // gather windows), washing out colored bounce. The blue
+                    // cast belongs to the sky VISUAL, not the ambient
+                    // integration constant.
+                    vd.SkyColor = {sky * 1.0f, sky * 1.0f, sky * 1.0f, 0.0f};
                     vd.Albedo   = {alb, alb, alb, 0.0f};
 
                     // Fill SDF cascade data — offline SDF or runtime GlobalSDF.
