@@ -1553,7 +1553,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     lumen::LumenSSGIOutput ssgiOut;
-    if (ssgi_pass_ && ssgi_pass_->IsInitialized()) {  // TEMP: removed frameCount_ > 0 for SSGI diagnosis
+    // T8.13: SSGI/SPGI are alternative screen-space GI solutions — running
+    // both costs 31ms GPU (18.3+12.6, 85% of frame) with overlapping
+    // contribution (T8.7 A/B: SSGI ≈ 0 where SPGI exists). Policy: SPGI
+    // active ⇒ SSGI passes skipped; SSGI_FORCE=1 keeps both for A/B.
+    const bool spgiActive = screen_probe_pass_ && screen_probe_pass_->IsInitialized();
+    const bool ssgiSuppressed = spgiActive && !std::getenv("SSGI_FORCE");
+    if (ssgi_pass_ && ssgi_pass_->IsInitialized() && !ssgiSuppressed) {
         auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
         auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
         auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -1933,6 +1939,52 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 // RenderWithCommandBuffer (uses caller's pre-allocated CB — matches working pattern)
 // ============================================================================
 
+
+// ============================================================================
+// T8.13 P0: GPU per-pass profiler (RG_PROF=1). The RenderGraph already records
+// per-pass GPU timestamps (RenderPass desc bracketing for graphics passes,
+// WriteTimestamp for compute) and resolves them at the next Execute entry;
+// this only aggregates passExecutionTimes_ over a window and prints the
+// Top-N by average GPU ms.
+// ============================================================================
+static void ReportGraphPassTimes(RenderGraph& graph) {
+    static bool enabled = std::getenv("RG_PROF") != nullptr;
+    static bool checked = false;
+    if (!checked) { checked = true; enabled = enabled || false; }
+    if (!enabled) return;
+
+    static std::unordered_map<std::string, double> sumMs;
+    static std::unordered_map<std::string, u32> cnt;
+    static u32 frames = 0;
+
+    for (const auto& [name, ms] : graph.GetPassExecutionTimes()) {
+        sumMs[name] += ms;
+        cnt[name] += 1;
+    }
+    if (++frames < 120) return;
+
+    std::vector<std::pair<std::string, double>> rows;
+    double total = 0.0;
+    for (const auto& [n, s] : sumMs) {
+        rows.push_back({n, s / frames});
+        total += s / frames;
+    }
+    std::sort(rows.begin(), rows.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::cerr << "[RG-Perf] === GPU ms/frame over last " << frames << " frames ===" << std::endl;
+    u32 shown = 0;
+    for (const auto& [n, avg] : rows) {
+        if (shown++ >= 24) break;
+        std::cerr << "  " << avg << "  " << n << std::endl;
+    }
+    std::cerr << "[RG-Perf] TOTAL(sum of passes) = " << total << " ms/frame" << std::endl;
+
+    sumMs.clear();
+    cnt.clear();
+    frames = 0;
+}
+
 void StandardRenderPipeline::RenderWithCommandBuffer(
     RenderScene& scene, RenderView& view,
     ResourceHandle target, const TextureDesc& targetDesc,
@@ -2089,6 +2141,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         graph.Compile();
         graph.Execute(cmd);
+        ReportGraphPassTimes(graph);
         return;
     }
 
@@ -2291,7 +2344,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- SSGI (Screen Space GI) ---
         lumen::LumenSSGIOutput ssgiOut;
-        if (ssgi_pass_ && ssgi_pass_->IsInitialized()) {  // TEMP: removed frameCount_ > 0 for SSGI diagnosis
+        // T8.13: SSGI/SPGI are alternative screen-space GI solutions — running
+    // both costs 31ms GPU (18.3+12.6, 85% of frame) with overlapping
+    // contribution (T8.7 A/B: SSGI ≈ 0 where SPGI exists). Policy: SPGI
+    // active ⇒ SSGI passes skipped; SSGI_FORCE=1 keeps both for A/B.
+    const bool spgiActive = screen_probe_pass_ && screen_probe_pass_->IsInitialized();
+    const bool ssgiSuppressed = spgiActive && !std::getenv("SSGI_FORCE");
+    if (ssgi_pass_ && ssgi_pass_->IsInitialized() && !ssgiSuppressed) {
             auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
             auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
             auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -2679,6 +2738,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         graph.Compile();
         graph.Execute(cmd);
+        ReportGraphPassTimes(graph);
 
         // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
         // store. RWCB's command buffer is caller-owned; the store only records
@@ -2709,6 +2769,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         graph.Compile();
         graph.Execute(cmd);
+        ReportGraphPassTimes(graph);
 
         // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
         // store. RWCB's command buffer is caller-owned; the store only records

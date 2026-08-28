@@ -559,7 +559,7 @@ void ddgi_trace_rays() {
         // probes never accumulate bounced direct light.
         // FusionIndirect then scales this down so it supplements (not replaces)
         // DeferredLighting's direct result.
-        vec3 L_out = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.85);
+        vec3 L_out = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70);
         result.radiance_and_dist = vec4(L_out, hit.distance);
     } else {
         // Miss: ray escaped to sky.

@@ -89,7 +89,7 @@ struct LumenConfig {
     u32 ddgi_probe_count_x = 32;
     u32 ddgi_probe_count_y = 16;
     u32 ddgi_probe_count_z = 32;
-    u32 ddgi_rays_per_probe = 64;    // T4.2 note: 128 blocked — ddgi_trace_sdf/finalize kernels are 64-rays-per-probe (8x8 groups); striding required before re-bump
+    u32 ddgi_rays_per_probe = 128;   // T8.13 P2: 64→128 — lane-strided kernels (r += 64) landed in TraceSDF/Finalize/TraceRays. P0 实测 DDGI 全子过程 1.6ms，翻倍预算充裕
     // 3.0 covers ±46×±22×±46 around the origin — Sponza's side arcades extend
     // past the old ±31 box, and out-of-box pixels fall to the far volume whose
     // probes have no SC feed (near-black in enclosed areas), which read as

@@ -214,6 +214,72 @@ struct GIPlatformProfile {
 | T8.11 SC 捕获架构审计：屏幕空间重投影是彩色反弹缺失与红框区欠亮的共同根因 **（✅ 2026-08-28 诊断完成——修复为多会话工程，未动）** | 三连审计闭环：① 卡生成器健康（393 实例→407 卡，"4 卡"实为 capture_budget=64 页轮换：64×32²=65536 texel=恰 4 张 128² 卡/帧，其余 403 卡靠 seed 保持——非覆盖 bug）；② LightEval 图集写的是 albedo×光照 ✓；③ **SurfaceCacheCapture 是主相机 GBuffer 的屏幕空间重投影**：逐主相机像素取 albedo/normal/depth 散射进所有正交框住该点的卡——**不可见于当前相机的表面（离屏/被遮挡/背面）永远 alpha=0 → LightEval 早退 → 卡永久黑**；且捕获无逐卡遮挡测试，近景会错误染入远景卡框。推论链：探针射线命中未捕获表面=黑 → 彩色反弹（布料/彩墙）缺失 + 红框区接收欠亮（其来向射线打中的内墙面多为主相机看不见的面）全部同源；轻微偏蓝=sky-miss（另一主题） | **正解路线**（工程量大，立项待批）：a) 真·卡视角正交捕获（每帧预算内渲染 N 张卡的 6 面深度+albedo，替代屏幕空间重投影——Lumen 同款）；b) 过渡方案：主相机多锚点（前后左右四次重投影）扩大覆盖；c) 捕获时逐卡 axisDepth 遮挡比较防错染。临时缓解：无（屏幕空间捕获的相机绑定是架构性的） |
 | T8.12 卡视角捕获落地 **（✅ 2026-08-28 完成并转默认——本 session 决定性修复之二）** | 按 T8.11 立项实施：① 新 shader `Nanite/CardCapture.vert/.frag`——几何解码与 PipelineDraw 逐位一致（cib→cmap→meshlet/instance/material），只换 binding0 为卡参数 UBO（正交 view/proj + card center/fwd），PS 材质采样同款 + 输出改三页（albedo a=1 / normal oct rg16f / axisDepth r32f，语义=projectToCard 的 dot(local,fwd)）；② GPUDriven 新增 `InitializeCardCaptureResources/ExecuteCardCapturePass`（克隆 ExecuteReflectionPass 骨架：CPU ExtractFrustumPlanes 球剔除 → 可见簇表 → 间接绘制；32 个 face scratch 槽）；③ SurfaceCachePass 新增 `AddCardCapturePasses`（批次调度：seed 64 面/帧至全覆盖 → 稳态 8 面/帧；基向量按 axis/dir 表构造，v 轴取 −v_world 对齐 texel 行向）+ env 门控；④ 屏幕空间 gather 与卡视角互斥。**工程勘误**：T8.5 的"gl_InstanceIndex 恒 0"仅限 Draw() 实例化；DrawIndirect 路径（instanceCount=可见簇数）工作正常——本实现与其依赖的 GBuffer 主路径同模式 | **3 跑中位：L_2F 39.4→46.6（p95 92.9→108.3）、L_OUTER 33.3→39.3、REDBOX p50 9.4→16.6（+77%）、R_DIR 77.6（直射 +25% 独立效应）；clip 0.011% 可忽略。全 session 累计：17.54 → 46.6（**+166%**）。目检：双侧柱廊整体受光、对面布料全可读、彩色反弹上墙、日影方向保留。默认 ON（SC_CARDVIEW=0 回退旧路径）。**性能**：Debug 构建 30s 帧计数实测卡视角 20.3 FPS vs 旧屏幕空间 19.5 FPS——非回归且略优（8 卡正交面批 < 全屏 gather），帧耗时 ~49ms 由其他 pass 主导（DDGI 子过程仅 5.25ms）；批大小 2~8 在噪声内 |
 | T8.12b 测量完整性：全局键盘泄漏 + 相机锁定 **（✅ 2026-08-28 发现并修复）** | 定位"跑帧间视点漂移"（两帧 luma 相关性仅 0.30）：测试的 input source 读取**全局键盘状态**，自动化跑帧期间用户在交互窗口的 WASD 会泄漏进跑帧进程，移动跑帧相机——此前所有区域读数都可能带视点污染（含部分跨配置对比）。修复：`SPGI_CAM_LOCK=1` 冻结相机（跳过 `camera_.Update(dt)`），**测量纪律再升级**：自动化读数一律 SPGI_CAM_LOCK=1 + ≥2 跑；锁定后双跑 luma 相关性 0.9998 | **锁定相机最终基线（默认机位，2 跑中位）**：L_2F mean **46.2** / p95 108.5、L_OUTER **40.2**、R_DIRECT **77.7**、REDBOX p50 **17.2**、clipped≈0。全 session：17.54 → 46.2（**+163%**） |
+## T8.13+ 路线图（2026-08-28 排定，按依赖×收益排序）
+### T8.13 P0 交付：GPU pass 级分解（2026-08-28，RG-Perf 实测）
+### T8.13 P1 交付：反馈环增益核算 0.85→0.70（✅ 2026-08-28，双稳态消除）
+### T8.13 P2 交付：探针射线 64→128（✅ 2026-08-28，lane-striding 落地）
+
+**实施**：T4.2 遗留的 striding 改造——TraceSDF/Finalize 加 `for (rayId = tid; rayId < RaysPerProbe; rayId += 64)` 循环（64 lane 服务任意 64 倍数射线数），单体的 TraceRays 用 `gid % RaysPerProbe` 天然跨步零改动；UpdateIrradiance/UpdateDepth 本就按 `RaysPerProbe` 全量循环零改动。默认 64→128（LumenTypes），配置缓冲全参数化自动扩容。
+
+**实测（锁定相机 2 跑）**：
+
+| 指标 | 128 射线前 | **128 射线后** |
+|---|---|---|
+| L_2F / L_OUTER | 45.9 / 39.8 | **46.9 / 41.1** |
+| REDBOX p50 | 17.1 | **18.7** |
+| R_DIRECT | 77.7 | **95.4**（受光区间接大幅回归） |
+| DDGI 辐亮度（暗区石头） | 0.36 | **0.50（+39%）**；nave_floor +62% |
+| DDGI-Perf（CPU 子过程） | 5.25ms | 5.01ms（GPU +~0.8ms） |
+
+**机理确认**：64 射线时代的系统性偏暗不是平衡点问题，而是**非线性可见性门（cheby/埋没/混合权重）对高噪估计的不对称截断**——射线翻倍噪声减半，全场景 GI 场回升 39-62%。
+
+**彩色染验收**：受光红布正旁石头 **R−G = +0.030**（达标 ≥0.03，64 射线时代 ~+0.01）——红色反弹首次可测。**残余**：全场仍系统性偏蓝（B 最高），=sky-miss 份额签名（tunneling 漏光把 (0.85,0.85,1.0) 天空色混进所有探针）——稀释了彩色染，根治在 P4 有符号/封缝烘焙。绿色布料旁绿染未现（绿布位置较低较暗，立体角与亮度双重劣势）——列入 P4 后复测。
+
+**环路审计**（三个乘法点全定位）：探针内反馈（Finalize SC 路径 `albedo×L_i_prev×0.85`、解析路径 `π×L_i_prev×0.85`）∘ SC 侧反馈（LightEval `SC_FEEDBACK=0.85`×albedo）∘ 注入帽 0.45。双环乘积对高反照率表面贴近临界 1.0——瞬态落盆即 101/39 双稳态（实证）。
+
+**修复**：四处同步 0.85→0.70（Finalize 两处 + SC_FEEDBACK + 单体 TraceRays 平行路径），注入帽 0.45 不动（非环路主项）。
+
+**6 跑发散验证（SPGI_CAM_LOCK=1）**：
+
+| 指标 | 0.85（2 跑） | **0.70（6 跑中位）** | 极差 |
+|---|---|---|---|
+| L_2F mean | 46.2 | **45.85** | 0.20 |
+| L_OUTER | 40.2 | **39.81** | 0.27 |
+| REDBOX p50 | 17.2 | **17.1** | 0.05 |
+| R_DIRECT | 77.7 | **77.66** | 0.03 |
+| p95 | 108.5 | **107.6** | 0.07 |
+
+**裁决**：双稳态消除（6/6 同支，极差从 ±0.5 → 0.2），亮度代价 <1%（REDBOX 17.2→17.1）——稳定性免费。后续所有 A/B 以此为基线。
+
+RenderGraph 内建 GPU 时间戳系统补全读回（MoltenVK 怪癖：vkGetQueryPoolResults 返回 VK_NOT_READY 但数据已暂存——改为逐对有效性过滤；`RG_PROF=1` 启用 Top-24 打印）。
+
+**GPU 分解（默认机位，窗口均值 36.3ms/帧）**：
+
+| pass | GPU ms | 占比 |
+|---|---|---|
+| LumenSSGI | 18.31 | 50.5% |
+| ScreenProbeGI | 12.56 | 34.6% |
+| LumenSSAO | 3.18 | 8.8% |
+| LumenDDGI | 0.66 | 1.8% |
+| ShadowMomentsBlur | 0.59 | 1.6% |
+| DDGIGIGather | 0.46 | 1.3% |
+| SC_DDGI_Integration | 0.30 | 0.8% |
+| 其余（DDGI_Far/SC 等） | 0.20 | 0.6% |
+
+**结论**：① 两个屏幕空间 GI（SSGI+SPGI）占 **85%**；② 本 session 全部 DDGI/SC 工作合计 <2ms；③ 60FPS 预算 16.7ms，需削 19.6ms——**SSGI 与 SPGI 功能重叠**（T8.7 实测 SSGI 在暗带贡献=0），"SPGI 启用时降级/关闭 SSGI"是唯一的 18ms 级杠杆，剩余 1.7ms 缺口由 SSAO/半分辨率策略补齐。墙钟 49ms vs GPU 36ms 的 13ms 为 CPU 提交/等待开销（Debug 构建放大）。
+
+| 序 | 项 | 为什么排这里 | 主要工作 | 验收 | 预估 |
+|---|---|---|---|---|---|
+| P0 | **非 DDGI 44ms pass 级 profiler**（→60FPS 的前置） | 射线翻倍/卡分辨率都要加成本，先拿到预算地图才不会盲加；DDGI-Perf 模式照搬（std::chrono 采样线，按 pass 名聚合每 60 帧打印） | RenderGraph 执行层加按名计时聚合；输出 Top-15 pass 耗时表；顺带验证卡视角批次的真实成本 | Top-15 表 + 60FPS 差距结论（哪些 pass 可救、哪些放弃） | 0.5-1 天 |
+| P1 | **反馈环 0.85 增益核算（双稳态正解）** | 双稳态污染一切测量（101/39 两支实证）；先修它，P2/P3 的 A/B 才可信。改动是常数级（0.85→稳定界内，或 UpdateIrradiance 加历史钳制），帧成本零 | 审计 SC LightEval ×DDGI gather×0.85 的环路增益推导；重设系数；6 跑发散测试（101 支不得复现） | 6 跑全部落正常支（±1 内）；`TestVulkanSponzaRenderGraph` 双稳态标记关闭 | 0.5 天 |
+| P2 | **修稀释：探针射线 64→128 或重要性采样** | 彩色反弹可见性第一瓶颈（T8.10i：信号 1-3%）。两条路线在 P0 后择一：64→128 需 kernel striding 改造（T4.2 遗留）；重要性采样（SPGI F2 先例移植）成本/收益更优 | 路线择一实施；ProbeSampleLib 单源扩展 | `DDGI_RECT` RGB：红布旁石头 R−G ≥ +0.03（当前 +0.01）；目检布料色染上墙 | 1-2 天 |
+| P3 | **混合分辨率 + 装箱**（含原"32→64"） | P2 让颜色可见后，分辨率才轮到"纹理细节"。按卡重要性分配 32/64/128（布料/受光高频卡高分，次要卡 32），评估 2048² 装箱率；装不下再谈 4096²（显存 ~740MB） | 重要性分类（LightEval 热度/包围盒/材质饱和度）；CardGenerator 分辨率分配改造；装箱率评估报告 | 布料卡 ≥64px；反弹出现纹理细节；2048² 装箱率报告与决策 | 1-2 天 |
+| P4 | **ContentTools 有符号烘焙** | 独立离线项，修 F6 接缝漏光的资产根源；零运行时成本。放后面因为不阻塞任何在线项，且需要先读懂 ContentTools 烘焙管线 | 空腔不标 occupied（flood-fill/壳检测）；重烘 cache；F6 复验 | F6 灰条纹显著减少；DDGI_DUMP=2 miss 率下降；探针彩色瓣增强 | 1-2 天 |
+| P5 | 薄板 z-fighting 观察 | 无独立工作，并入 P2/P4 验收截图检查 | — | 目检无新增伪影 | 0 |
+| — | **60FPS 推进** | P0 出分解后：快赢项（冗余 pass/错分辨率）随手修；深水项单独立项；同时做一次 Release 构建对照（Debug -O0 是 20FPS 的第一成因） | — | — | — |
+
+依赖链：P0 →（P2 路线决策、P3 成本评估）；P1 →（P2/P3 全部 A/B 可信度）；P4 独立可并行。
+总计 ≈ 4-7 个工作日。测量纪律不变：SPGI_CAM_LOCK=1 + ≥2 跑中位。
 
 遗留与边界：
 - `DDGIVolumeData.ProbeRelocationShift[3]` 是 **volume 级网格 shift**（`UpdateProbeOrigin` 早期 return，恒 0，shader 侧从未消费）——与本任务的 per-probe 射线起点重定位不同物。若未来需要真正 per-probe 偏移参与 gather 权重（可见性/法线项用重定位后位置），应立独立任务：GPU init-pass 写 per-probe offset SSBO + gather 权重一致消费；当前 0.45-cell 射线起点方案是它的低配近似。T8.3 首跑判读出的下一步：重定位升级为经典 DDGI 多轴+角点"最深自由点"搜索（楼板内整排 probe、墙体两倍厚处的 probe 当前推不进房间，只会贴到最近表面）；真 mesh sphere 场景注入（遮挡正确、可点选）归 M6 调试工具线。

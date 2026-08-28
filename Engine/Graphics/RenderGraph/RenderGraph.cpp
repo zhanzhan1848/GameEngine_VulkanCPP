@@ -705,7 +705,18 @@ void RenderGraph::ResolveTimestamps() {
     utl::vector<u64> results(passCount * 2);
     // 使用 0 作为 offset (假设 RHI 实现正确处理)
     // 注意：GetQueryPoolResults 是我们刚添加到 RHIDevice 的接口
-    if (device_.GetQueryPoolResults(frameData.queryPool, 0, passCount * 2, results.data(), sizeof(u64))) {
+    bool readOk = device_.GetQueryPoolResults(frameData.queryPool, 0, passCount * 2, results.data(), sizeof(u64));
+    static u32 dbgCount = 0;
+    if ((dbgCount++ % 120) == 0) {
+        std::cerr << "[RG-TSdbg] readOk=" << readOk << " passes=" << passCount
+                  << " t[0]=" << results[0] << " t[1]=" << results[1] << std::endl;
+    }
+    // T8.13/P0: MoltenVK quirk — vkGetQueryPoolResults can return
+    // VK_NOT_READY even when WAIT_BIT was set, while the results buffer
+    // already holds valid staged timestamps. Trust the per-pair validity
+    // filter below instead of the boolean.
+    (void)readOk;
+    {
         passExecutionTimes_.clear();
         
         // 假设 1 tick = 1 nanosecond (Apple Silicon Metal)

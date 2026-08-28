@@ -205,10 +205,12 @@ void ddgi_trace_sdf() {
     // Relocate buried ray origins (see ddgiRelocateProbeOrigin).
     probePos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing);
     vec3 toLight = normalize(-volume.LightDirection.xyz);
-    vec3 rayDir = ddgiSampleRayDirection(tid, volume.RaysPerProbe,
+    // T8.13 P2: lane-strided ray loop — 64 lanes serve any RaysPerProbe
+    // multiple of 64 (128 = two strided rays per lane).
+    for (uint rayId = tid; rayId < volume.RaysPerProbe; rayId += 64u) {
+    vec3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
                                          volume.FrameIndex,
                                          uint(volume.RaySampleMode), toLight).xyz;
-
     float t = 0.0;
     float hitDistance = -1.0;  // -1 = miss
 
@@ -256,6 +258,7 @@ void ddgi_trace_sdf() {
     }
 
     // Indexed by update-slot (group) — finalize re-maps to absolute probe index.
-    uint globalRayIdx = group_id * volume.RaysPerProbe + tid;
+    uint globalRayIdx = group_id * volume.RaysPerProbe + rayId;
     hd.hit_distance[globalRayIdx] = hitDistance;
+    } // T8.13 P2 stride loop
 }

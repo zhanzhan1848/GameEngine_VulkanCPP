@@ -336,13 +336,15 @@ void ddgi_trace_finalize() {
     uint probeIdx = pul.probe_update_list[group_id];
     if (probeIdx >= volume.ProbeCountTotal) return;
 
-    uint globalRayIdx = group_id * volume.RaysPerProbe + tid;
+    // T8.13 P2: lane-strided ray loop (mirrors DDGITraceSDF).
+    for (uint rayId = tid; rayId < volume.RaysPerProbe; rayId += 64u) {
+    uint globalRayIdx = group_id * volume.RaysPerProbe + rayId;
     float hitDistance = hd.hit_distance[globalRayIdx];
 
     uvec3 counts = volume.ProbeCounts.xyz;
     uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
     vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
-    vec3 rayDir = ddgiSampleRayDirection(tid, volume.RaysPerProbe,
+    vec3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
                                          volume.FrameIndex,
                                          uint(volume.RaySampleMode),
                                          normalize(-volume.LightDirection.xyz)).xyz;
@@ -355,7 +357,7 @@ void ddgi_trace_finalize() {
     if (hitDistance >= 0.0) {
         // ---- Hit: SC-first radiance hierarchy ----
         // 1. Surface Cache lighting atlas — the cached final lighting; its own
-        //    0.85 feedback already accumulates multi-bounce light, so no extra
+        //    feedback already accumulates multi-bounce light, so no extra
         //    albedo × L_i_prev term is added on this path (that would count
         //    the same bounce twice).
         // 2. Prev-frame screen color (real rendered color) + one
@@ -411,7 +413,7 @@ void ddgi_trace_finalize() {
                 float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3);
                 float materialWeight = mix(0.15, 0.85, saturation);
                 vec3 materialBounce = albedo * max(sourceLum, 0.12) * materialWeight;
-                result.xyz = prevRadiance + materialBounce + albedo * L_i_prev * 0.85;
+                result.xyz = prevRadiance + materialBounce + albedo * L_i_prev * 0.70;
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 2u;
 #endif
@@ -423,7 +425,7 @@ void ddgi_trace_finalize() {
                 float NdotUp = max(0.0, N.y);
                 vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp);
                 const float PI_VAL = 3.14159265358979;
-                result.xyz = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.85);
+                result.xyz = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70);
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 3u;
 #endif
@@ -471,5 +473,6 @@ void ddgi_trace_finalize() {
     // identical while making the tag decodable on CPU.
     if (result.w >= 0.0) result.w = 40.0 + float(dbgPath) * 0.001;
 #endif
-    rb.ray_buffer[probeIdx * volume.RaysPerProbe + tid] = result;
+    rb.ray_buffer[probeIdx * volume.RaysPerProbe + rayId] = result;
+    } // T8.13 P2 stride loop
 }

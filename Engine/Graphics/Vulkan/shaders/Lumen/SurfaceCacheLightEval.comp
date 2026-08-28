@@ -227,7 +227,13 @@ void surface_cache_light_eval()
     // multi-bounce feedback cannot latch a poisoned value into the atlas.
     if (any(isnan(prev_light)) || any(isinf(prev_light))) prev_light = vec3(0.0);
     prev_light = clamp(prev_light, vec3(0.0), vec3(256.0));
-    const float SC_FEEDBACK = 0.85;
+    // T8.13 P1: 0.85 → 0.70. Gain audit found the two coupled loops
+    // (probe-internal 0.85 feedback ∘ SC 0.85×albedo) sitting at marginal
+    // stability for bright albedo — small transients flipped the SC↔probe
+    // equilibrium between a normal and a runaway-bright branch (measured
+    // 101 vs 39 mean bistability). 0.70 restores margin; equilibrium
+    // brightness cost measured at a few percent.
+    const float SC_FEEDBACK = 0.70;
 
     bool probeInVolume = false;
     vec3 E_indirect = gatherProbeIrradiance(world_pos, normal, probeInVolume);
