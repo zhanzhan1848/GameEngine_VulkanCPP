@@ -670,6 +670,12 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         lumen::ScreenProbeParams probeParams{};
         probeParams.downsample_factor = config.screen_probes_spacing;
         probeParams.rays_per_probe = config.screen_probes_rays;
+        // T8.13 60FPS: env override — SPGI trace is the top GPU pass (12.6ms);
+        // 64→32 rays halves it (F2 importance + spatial filter + denoise
+        // absorb the noise; adaptive/bilateral path per M7).
+        if (const char* e = std::getenv("SCREEN_PROBE_RAYS")) {
+            probeParams.rays_per_probe = std::max(8u, (u32)atoi(e));
+        }
         probeParams.enable_jitter = config.screen_probes_jitter;   // F5 (M7)
         probeParams.far_cache_start_distance = config.screen_probes_far_cache_start;  // F1 (M7)
         probeParams.enable_importance = config.screen_probes_importance;  // F2 (M7)

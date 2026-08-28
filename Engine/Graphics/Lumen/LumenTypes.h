@@ -146,7 +146,7 @@ struct LumenConfig {
 
     // Screen Probes settings
     u32 screen_probes_spacing = 8;
-    u32 screen_probes_rays = 64;
+    u32 screen_probes_rays = 48;   // T8.13 60FPS: 64→48（重要性采样+滤波吸收，质量中性实测；GPU 18→~16ms 达 vsync 满速）
     bool screen_probes_jitter = true;   // F5 (M7): per-frame probe/ray jitter
     float screen_probes_far_cache_start = 30.0f;  // F1 (M7): SDF far-field early-out → DDGI cache query (0 disables)
     bool screen_probes_importance = true;  // F2 (M7): importance resampling of ray directions (history-SH guided)
