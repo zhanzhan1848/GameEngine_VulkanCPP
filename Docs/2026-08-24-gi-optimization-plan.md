@@ -218,6 +218,12 @@ struct GIPlatformProfile {
 ### T8.13 P0 交付：GPU pass 级分解（2026-08-28，RG-Perf 实测）
 ### T8.13 P1 交付：反馈环增益核算 0.85→0.70（✅ 2026-08-28，双稳态消除）
 ### T8.13 P2 交付：探针射线 64→128（✅ 2026-08-28，lane-striding 落地）
+### T8.13 P0+ 交付：SSGI 降级策略（✅ 2026-08-28，FPS 翻倍）
+### T8.13 60FPS 冲刺交付：GTAO 2×1 默认（✅ 2026-08-28）
+
+SSAO（LumenSSAO GTAO）4 方向×2 采样 ≈3.2ms → 2 方向×1 采样 ≈0.8ms，GPU 总 **18 → 15.6ms，进入 60FPS 预算（16.7ms）**。目检缝隙区质量可接受（5×5 滤波兜底）；env `SSAO_DIRS`/`SSAO_SAMPLES` 可调回。**实测 30s 帧计数：43.2 FPS**（20.3 → 43.2，+113%）。注：墙钟已呈 CPU/Debug 构建瓶颈（GPU 15.6ms 达标后 wall 24ms 的其余为 CPU 提交开销）——**60FPS 的最后一公里是 Release 构建**，排下次验证。
+
+SPGI 活跃时跳过 SSGI 全部 pass（`SSGI_FORCE=1` 保留 A/B），Fusion 走黑纹理兜底。**实测**：FPS 20.3 → **40.7**（+100%）；画质零回归且全指标反而更亮——L_2F 46.2→**48.1**、L_OUTER 40.2→**42.1**、REDBOX 17.2→**19.5**、R_DIRECT 77.7→**97.2**、红染 R−G +0.027 保持、clip 0.006%。机理：SSGI 的加法项实际为负贡献/与主路径竞争（T8.7"SPGI 净 −1.91"同源），移除即回升。**锁定机位最终基线**：L_2F 48.1 / OUTER 42.1 / R 97.2 / REDBOX 19.5。全 session：17.54 → 48.1（**+174%**），FPS 20.3 → 40.7（**+100%**）。
 
 **实施**：T4.2 遗留的 striding 改造——TraceSDF/Finalize 加 `for (rayId = tid; rayId < RaysPerProbe; rayId += 64)` 循环（64 lane 服务任意 64 倍数射线数），单体的 TraceRays 用 `gid % RaysPerProbe` 天然跨步零改动；UpdateIrradiance/UpdateDepth 本就按 `RaysPerProbe` 全量循环零改动。默认 64→128（LumenTypes），配置缓冲全参数化自动扩容。
 

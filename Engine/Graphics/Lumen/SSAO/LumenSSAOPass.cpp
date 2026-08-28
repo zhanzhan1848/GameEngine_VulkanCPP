@@ -209,6 +209,15 @@ bool LumenSSAOPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
     render_width_ = render_width;
     render_height_ = render_height;
     params_ = params;
+    // T8.13 60FPS: env overrides for the GTAO slice budget (SSAO_DIRS /
+    // SSAO_SAMPLES). 4×2 ≈ 3.2ms GPU; 2×1 ≈ 0.8ms — the cheapest lever
+    // toward the 16.7ms/60FPS budget after SSGI suppression.
+    if (const char* e = std::getenv("SSAO_DIRS")) {
+        params_.direction_count = std::max(1u, (u32)atoi(e));
+    }
+    if (const char* e = std::getenv("SSAO_SAMPLES")) {
+        params_.sample_count = std::max(1u, (u32)atoi(e));
+    }
 
     u32 half_w = render_width / 2;
     u32 half_h = render_height / 2;

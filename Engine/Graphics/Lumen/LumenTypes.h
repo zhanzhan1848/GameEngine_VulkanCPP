@@ -124,8 +124,10 @@ struct LumenConfig {
     // GTAO settings
     float gtao_radius = 1.0f;
     float gtao_power = 1.5f;
-    u32 gtao_direction_count = 4;
-    u32 gtao_sample_count = 2;
+    // T8.13 60FPS: 4×2 → 2×1 (SSAO 3.2→0.8ms GPU，GPU 总 15.6ms < 60FPS 预算
+    // 16.7ms)。目检缝隙区质量可接受；env SSAO_DIRS/SSAO_SAMPLES 可调回。
+    u32 gtao_direction_count = 2;
+    u32 gtao_sample_count = 1;
     float gtao_temporal_weight = 0.85f;
 
     // SSDO settings
