@@ -311,6 +311,8 @@ T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改�
 - **重大流程教训（CWD/shaders 陈旧副本陷阱）**：TestModularPipeline 的 shader 编译路径优先取 `$(cwd)/shaders/`，而构建系统 `IntegrationTestsAssetsCopy` 是 **stamp 门控的一次性 copy_directory**（构建目录首次配置时拷一次，此后源目录改动永不刷新）——EngineTest/shaders 的修改对已存在的构建目录**不可见**。本轮"float4 修复无效""条带版与正常版矛盾"均由此起。已 `rsync EngineTest/shaders → Darwin/Debug/shaders` 临时解决；长期应在 CMake 里改 per-file copy_if_different 或去掉 CWD 优先。
 - **下一 session 主线（白爆最后一环）**：定位覆写 gi_halfres_texture_ 的 pass——嫌疑：SSAO/SSGI/HZB/velocity 等 half-res RT 在 TextureAllocator 中的堆偏移碰撞（多次 InitializeLumenPasses 重建周期的 free-list 状态可疑）。武器已备齐：Xcode GPU capture（两处启动断言已修）、IND_STATS/IRR_DUMP/钳制二分法。判据：capture 里看 gi_halfres_texture_ 的 draw/write 序列；或按堆偏移打印所有 half-res RT 的分配区间找重叠。
 
+**红色写入探针判决 + 根因再修正（同日第五轮）**：在 gather kernel 里写入常量红 (0.5,0,0) → 屏幕 **82.2% 红色主导、0% clip**——① gather 写入端到端直达最终画面（fusion 公式/后处理链全部无辜，白爆修复后整链畅通）；② 白爆 = kernel 算出的 diffOut 自身巨大（半屏 ~8+ 线性）。追加 L0 探针（kernel 直出 `tg_probes[0].sh[0]`，CPU 视图应为 sky≈0.03）→ dump 出 **-87 / 26873**——**kernel 的 threadgroup 视图与探针缓冲的 CPU raw-copy 视图（≤1.9、SH eval≤0.006）矛盾**。CB 上传已验证正确（counts 32×16×32=16384、spacing 3、cam 合理，binding 1/2 偏移 64/80 与结构体对齐）。**结论修正**：上一轮"分配器别名外部覆写"结论作废（newTexture 独立分配不可能别名；gdump 的 27000 是 kernel 自己的垃圾写入——threadgroup 读到的探针数据即垃圾）。真正待解：**为什么 gather kernel 在 GPU 上读 buffer(7) 得到的内容与 CPU raw-copy 不同**——嫌疑集中：① slot 7 绑定未生效/被同 encoder 内其它 setBuffer 覆盖；② MetalDescriptorSet 的 (binding,type) 匹配在纹理+缓冲混合 15-binding 布局下的行为；③ descriptor_set_ 复用 cbIdx 轮换中的脏状态。判决手段：Xcode GPU capture（已解锁）看 ddgi_gi_gather 派发的 buffer(7) 实际内容；或临时把 probe 缓冲同时绑到 slot 9 并让 kernel 双读对比（同数据不同槽=绑定问题实锤）。诊断探针（红色写入/L0 直出/钳制）已回退，保留结论入档。
+
 
 
 ## T8.13+ 路线图（2026-08-28 排定，按依赖×收益排序）
