@@ -915,6 +915,20 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                             if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                                 computeEncoder->setBuffer(buffer->GetNativeBuffer(), offset, slot);
                         }
+                        // TEMP diagnosis: one-shot log of compute buffer bindings
+                        // at slots 6-8 (DDGI conf/irradiance/depth) — verify the
+                        // native pointer + length the kernel will actually see.
+                        if (computeEncoder && slot == 7) {
+                            // Log the first bindings of a >=1MB buffer at slot 7
+                            // (the probe irradiance buffer the gather reads).
+                            static int s_b7big = 0;
+                            if (buffer->GetNativeBuffer()->length() > (1ull << 20) && s_b7big < 6) {
+                                ++s_b7big;
+                                std::cerr << "[BIND7BIG] slot=7 native=" << (const void*)buffer->GetNativeBuffer()
+                                          << " length=" << buffer->GetNativeBuffer()->length()
+                                          << " handle=" << binding.resources[0] << std::endl;
+                            }
+                        }
                     } else {
                         if (!buffer) {
                             std::cerr << "[MetalCommandBuffer] Buffer binding slot " << slot

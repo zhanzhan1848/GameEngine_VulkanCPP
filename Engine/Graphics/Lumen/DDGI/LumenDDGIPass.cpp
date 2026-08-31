@@ -806,6 +806,12 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.structured.elementCount = totalProbes * 9;
         desc.structured.elementStride = sizeof(math::v4);
         irradiance_buffers_[i] = device_->CreateBuffer(desc);
+        // TEMP diagnosis: allocation audit — BIND7 caught a 20-byte buffer at
+        // compute slot 7; verify what the DDGI pass actually got.
+        std::cerr << "[DDGI_ALLOC] irradiance_buffers_[" << i << "] handle="
+                  << irradiance_buffers_[i] << " size=" << desc.size
+                  << (irradiance_buffers_[i] == rhi::handles::INVALID_RESOURCE
+                      ? " INVALID!" : "") << std::endl;
 
         // NOTE: No zero-init here — InitializeProbesFromStatic() will fill
         // with static bake data or sky estimate after all buffers are created.

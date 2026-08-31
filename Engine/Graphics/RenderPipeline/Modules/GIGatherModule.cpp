@@ -286,6 +286,16 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     // x=0，gather 输出零变化。
                     cb->debug_vis = math::v4{static_cast<float>(
                         static_cast<u32>(lumen::GIDebug().probe_vis)), 0.0f, 0.0f, 0.0f};
+                    // TEMP diagnosis: verify the CB the gather will read.
+                    static bool s_cbDbg = false;
+                    if (!s_cbDbg) { s_cbDbg = true;
+                        std::cerr << "[GATHER_CB] origin_spacing=("
+                                  << cb->probe_origin_spacing.x << "," << cb->probe_origin_spacing.y
+                                  << "," << cb->probe_origin_spacing.z << "," << cb->probe_origin_spacing.w
+                                  << ") counts=(" << cb->probe_counts.x << "," << cb->probe_counts.y
+                                  << "," << cb->probe_counts.z << "," << cb->probe_counts.w
+                                  << ") cam=(" << cb->camera_pos.x << "," << cb->camera_pos.y
+                                  << "," << cb->camera_pos.z << ")" << std::endl; }
                     device_->UnmapBuffer(probe_cb_);
                 }
             }
@@ -571,6 +581,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 bufInfos[6].buffer = ddgi->GetConfidenceBuffer(ddgiReadIdx); bufInfos[6].offset = 0; bufInfos[6].range = ~0ull;
                 bufWrites[7].dstBinding = bufBase + 7; bufWrites[7].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[7].buffer = ddgi->GetIrradianceBuffer(ddgiReadIdx); bufInfos[7].offset = 0; bufInfos[7].range = ~0ull;
+                // TEMP diagnosis: what handle does GetIrradianceBuffer return?
+                static bool s_irrHandleDbg = false;
+                if (!s_irrHandleDbg) { s_irrHandleDbg = true;
+                    std::cerr << "[GATHER_IRR] ddgi=" << (const void*)ddgi
+                              << " readIdx=" << ddgiReadIdx
+                              << " irrHandle=" << bufInfos[7].buffer << std::endl; }
                 bufWrites[8].dstBinding = bufBase + 8; bufWrites[8].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[8].buffer = ddgi->GetDepthBuffer(ddgiReadIdx); bufInfos[8].offset = 0; bufInfos[8].range = ~0ull;
                 device_->UpdateDescriptorSets(9, bufWrites);
