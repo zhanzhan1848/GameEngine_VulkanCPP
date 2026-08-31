@@ -48,16 +48,31 @@ public interface ITextureSliceDecoder
 /// <summary>
 /// Default Avalonia decoder: opens the asset via
 /// <see cref="Bitmap"/> and copies the top-level RGBA into memory.
-/// This is the v1 behaviour: it exposes one array slice, one mip,
-/// one depth plane — the sidecar's "array/mip/depth" fields are
-/// surfaced as available indices so the editor can still navigate
-/// them, but only index 0 contains real pixels.
+/// Engine-cooked .texture containers (TEXR) are routed through
+/// <see cref="Import.TextureTexrReader"/> instead — Skia cannot open
+/// them, and only its mip-0 slice is shown (the editor's mip/array
+/// navigation still reflects the container's counts, but only index 0
+/// holds real pixels).
 /// </summary>
 public sealed class AvaloniaTextureSliceDecoder : ITextureSliceDecoder
 {
     public TextureDecoded? TryDecode(string assetPath)
     {
         if (string.IsNullOrEmpty(assetPath) || !File.Exists(assetPath)) return null;
+
+        if (Path.GetExtension(assetPath).Equals(".texture", StringComparison.OrdinalIgnoreCase))
+        {
+            var texr = Import.TextureTexrReader.TryDecodeRgba(assetPath, out var texrError);
+            if (texr == null)
+            {
+                Common.Logger.Warning(
+                    $"Texture editor: TEXR decode failed for {assetPath}: {texrError ?? "unknown error"}");
+                return null;
+            }
+            return new TextureDecoded(
+                texr.Width, texr.Height, texr.ArraySize, texr.MipLevels, 1, texr.Rgba);
+        }
+
         try
         {
             using var fs = File.OpenRead(assetPath);

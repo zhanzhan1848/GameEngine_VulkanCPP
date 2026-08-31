@@ -403,17 +403,9 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
     }
 
     internal static string SiblingMeshPath(string sidecarPath)
-    {
-        // Inverse of ContentTools/ContentTools.cpp::derive_sidecar_path:
-        // given a "<name>.model.json" sidecar, return the sibling
-        // "<name>.mesh" cooked file. We must strip the ".model.json"
-        // suffix as a whole — splitting on Path.GetExtension will not
-        // work because the engine's name uses two extensions.
-        const string suffix = ".model.json";
-        if (sidecarPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-            return sidecarPath.Substring(0, sidecarPath.Length - suffix.Length) + ".mesh";
-        return Path.ChangeExtension(sidecarPath, ".mesh");
-    }
+        // Implementation lives with the sidecar model so the mesh
+        // inspector window resolves the same sibling mapping.
+        => ModelSidecar.SiblingMeshPath(sidecarPath);
 
     private void LoadMaterial(AssetInfo info)
     {

@@ -33,6 +33,22 @@ public sealed class ModelSidecar
     public string Mesh { get; set; } = string.Empty;
     public List<ModelSubmeshEntry> Submeshes { get; set; } = new();
 
+    /// <summary>
+    /// Inverse of ContentTools/ContentTools.cpp::derive_sidecar_path:
+    /// given a "&lt;name&gt;.model.json" sidecar, return the sibling
+    /// "&lt;name&gt;.mesh" cooked file. We must strip the ".model.json"
+    /// suffix as a whole — splitting on Path.GetExtension will not work
+    /// because the engine's name uses two extensions (ChangeExtension
+    /// would yield "foo.model.mesh").
+    /// </summary>
+    public static string SiblingMeshPath(string sidecarPath)
+    {
+        const string suffix = ".model.json";
+        if (sidecarPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            return sidecarPath.Substring(0, sidecarPath.Length - suffix.Length) + ".mesh";
+        return Path.ChangeExtension(sidecarPath, ".mesh");
+    }
+
     public static ModelSidecar? Load(string sidecarPath)
     {
         if (string.IsNullOrEmpty(sidecarPath) || !File.Exists(sidecarPath)) return null;

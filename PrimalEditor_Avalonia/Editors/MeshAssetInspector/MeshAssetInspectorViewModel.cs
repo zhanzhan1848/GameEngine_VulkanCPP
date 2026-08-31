@@ -98,6 +98,25 @@ public sealed class MeshAssetInspectorViewModel : AssetInspectorViewModel
     private AssetNodeKind _selectedKind = AssetNodeKind.Model;
     private int _selectedSubmeshIndex = -1;
 
+    /// <summary>
+    /// Index of the currently selected submesh, or null when the
+    /// selection is the root/LOD node. The wireframe preview reads this
+    /// to highlight a single submesh instead of the whole LOD.
+    /// </summary>
+    public int? SelectedSubmeshIndex
+    {
+        get
+        {
+            if (_selectedKind != AssetNodeKind.Submesh) return null;
+            if (_selectedSubmeshIndex < 0) return null;
+            return _selectedSubmeshIndex;
+        }
+    }
+
+    /// <summary>True once a cooked mesh parsed successfully and the
+    /// wireframe preview has something to draw.</summary>
+    public bool HasGeometry => _geometry.LODs.Count > 0;
+
     protected override void OnNodeSelected(AssetNode? node)
     {
         if (node == null)
@@ -111,6 +130,7 @@ public sealed class MeshAssetInspectorViewModel : AssetInspectorViewModel
             _selectedSubmeshIndex = node.Kind == AssetNodeKind.Submesh ? node.Index : -1;
         }
         OnPropertyChanged(nameof(InspectorSections));
+        OnPropertyChanged(nameof(SelectedSubmeshIndex));
     }
 
     private void Reload()
@@ -122,11 +142,13 @@ public sealed class MeshAssetInspectorViewModel : AssetInspectorViewModel
             _roots = Array.Empty<AssetNode>();
             OnPropertyChanged(nameof(TreeRoots));
             OnPropertyChanged(nameof(InspectorSections));
+            OnPropertyChanged(nameof(HasGeometry));
             return;
         }
         if (!_geometry.Load(meshPath))
         {
             StatusMessage = "Could not parse .mesh binary";
+            OnPropertyChanged(nameof(HasGeometry));
             return;
         }
 
@@ -168,6 +190,7 @@ public sealed class MeshAssetInspectorViewModel : AssetInspectorViewModel
         OnPropertyChanged(nameof(LodCount));
         OnPropertyChanged(nameof(LodIndices));
         OnPropertyChanged(nameof(InspectorSections));
+        OnPropertyChanged(nameof(HasGeometry));
     }
 
     private static string? ResolveCookedMeshPath(AssetInfo? info)
@@ -178,7 +201,9 @@ public sealed class MeshAssetInspectorViewModel : AssetInspectorViewModel
             var sidecar = ModelSidecar.Load(info.FullPath);
             if (sidecar != null && !string.IsNullOrEmpty(sidecar.Mesh) && File.Exists(sidecar.Mesh))
                 return sidecar.Mesh;
-            var sibling = Path.ChangeExtension(info.FullPath, ".mesh");
+            // "foo.model.json" → "foo.mesh"; ChangeExtension alone would
+            // yield the wrong "foo.model.mesh".
+            var sibling = ModelSidecar.SiblingMeshPath(info.FullPath);
             return File.Exists(sibling) ? sibling : null;
         }
         if (info.Type == AssetType.Mesh)
@@ -230,8 +255,9 @@ public sealed class MeshAssetInspectorViewModel : AssetInspectorViewModel
                 : null;
             if (clipboard != null && inspector.Asset != null)
             {
+                // Avalonia 12: SetTextAsync is now an extension method on IClipboard.
                 Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
-                    await clipboard.SetTextAsync(inspector.Asset.Guid.ToString()));
+                    await Avalonia.Input.Platform.ClipboardExtensions.SetTextAsync(clipboard, inspector.Asset.Guid.ToString()));
             }
         }
     }

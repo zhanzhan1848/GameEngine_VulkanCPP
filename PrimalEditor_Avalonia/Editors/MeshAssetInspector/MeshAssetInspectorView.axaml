@@ -3,6 +3,7 @@
              xmlns:vm="using:PrimalEditor_Avalonia.Editors"
              xmlns:meshvm="using:PrimalEditor_Avalonia.Editors.MeshAssetInspector"
              xmlns:content="using:PrimalEditor_Avalonia.Content"
+             xmlns:views="using:PrimalEditor_Avalonia.Views"
              x:Class="PrimalEditor_Avalonia.Editors.MeshAssetInspector.MeshAssetInspectorView"
              x:DataType="meshvm:MeshAssetInspectorViewModel"
              Background="{StaticResource VoidBrush}">
@@ -63,9 +64,12 @@
                 <!-- CENTER: preview -->
                 <Border Grid.Column="1" Classes="floating" Margin="2,2,2,2">
                     <Panel Background="{StaticResource VoidBrush}">
+                        <views:MeshInspectorPreviewCanvas
+                            IsVisible="{Binding HasGeometry}"/>
                         <StackPanel HorizontalAlignment="Center"
-                                    VerticalAlignment="Center" Spacing="8">
-                            <TextBlock Text="3D preview"
+                                    VerticalAlignment="Center" Spacing="8"
+                                    IsVisible="{Binding !HasGeometry}">
+                            <TextBlock Text="3D preview unavailable"
                                        FontFamily="{StaticResource FontDisplay}"
                                        FontWeight="SemiBold" FontSize="14"
                                        Foreground="{StaticResource MutedTextBrush}"/>
