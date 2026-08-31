@@ -87,7 +87,8 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         TextureDesc indDesc{};
         indDesc.size = {render_width, render_height, 1};
         indDesc.format = DataFormat::RGBA16_Float;
-        indDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
+        indDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget |
+                        TextureUsage::CopySource;  // TEMP: IND_STATS readback
         for (int i = 0; i < 3; ++i)
             indirect_output_[i] = device->CreateTexture(indDesc);
 
@@ -298,11 +299,119 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 {4, DescriptorType::SampledImage, inputs.ssao_tex != handles::INVALID_RESOURCE ? inputs.ssao_tex : inputs.black_texture},
                 {5, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
             };
+            // TEMP diagnosis: what really lands in each GI texture slot.
+            static int s_fusion_slots = 0;
+            if (s_fusion_slots < 3) {
+                ++s_fusion_slots;
+                ResourceHandle spgiTex = inputs.spgi_tex != handles::INVALID_RESOURCE
+                    ? inputs.spgi_tex : inputs.black_texture;
+                std::cerr << "[FUSION_SLOTS] black=" << inputs.black_texture
+                          << " ssgi=" << ssgiTex
+                          << " ddgi=" << (inputs.ddgi_tex != handles::INVALID_RESOURCE ? inputs.ddgi_tex : inputs.black_texture)
+                          << " spgi_in=" << inputs.spgi_tex
+                          << " spgi_rg_valid=" << inputs.spgi_rg.IsValid()
+                          << " spgi_bound=" << spgiTex
+                          << " albedo=" << inputs.gbuffer_albedo
+                          << " ssao=" << inputs.ssao_tex << std::endl;
+            }
             UpdateDesc(device_, indirect_ds_[cbIdx], params, paramCount);
             cmd->BindGraphicsPipeline(indirect_pipeline_);
             const DescriptorSetHandle sets[] = { indirect_ds_[cbIdx] };
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, indirect_layout_, 0, 1, sets, 0, nullptr);
             cmd->Draw(3, 0, 1, 0);
+
+            // TEMP diagnosis: one-shot per-strip stats of the indirect output
+            // (RGBA16F full-res). Strips when GI_DEBUG_STRIP=1: ddgi|ssgi|spgi|full.
+            static const bool s_stripDump = std::getenv("GI_DEBUG_STRIP") != nullptr;
+            static u32 s_stripTick = 0;
+            static bool s_stripDumped = false;
+            const u32 stripTickNow = ++s_stripTick;
+            if (s_stripDump && !s_stripDumped && stripTickNow > 120) {
+                s_stripDumped = true;
+                const u32 w = render_width_, h = render_height_;
+                // Read LAST frame's output (triple-buffered, GPU-complete —
+                // this frame's [cbIdx] hasn't been submitted yet).
+                const u32 readIdx = (cbIdx + 2) % 3;
+                BufferDesc bd{}; bd.size = (u64)w * h * 8;
+                bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                auto stage = device_->CreateBuffer(bd);
+                if (stage != handles::INVALID_RESOURCE) {
+                    auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    auto* c2 = rhi::GetCommandBuffer(ch);
+                    if (c2) {
+                        c2->Begin();
+                        BufferTextureCopyRegion rr{};
+                        rr.imageSubresource.mipLevel = 0;
+                        rr.imageSubresource.layerCount = 1;
+                        rr.imageExtent = {w, h, 1};
+                        c2->CopyTextureToBuffer(indirect_output_[readIdx], stage, &rr, 1);
+                        c2->End(); c2->Submit(); c2->WaitForCompletion();
+                        device_->DestroyCommandBuffer(ch);
+                        if (auto* p = static_cast<const u16*>(device_->MapBuffer(stage, 0, bd.size))) {
+                            auto f16 = [](u16 h16) -> float {
+                                u32 sign = (h16 >> 15) & 1u, exp = (h16 >> 10) & 0x1Fu, mant = h16 & 0x3FFu;
+                                if (exp == 0u) return 0.0f;
+                                u32 bits = (sign << 31) | ((exp + 112u) << 23) | (mant << 13);
+                                float f; std::memcpy(&f, &bits, 4); return f;
+                            };
+                            const char* names[4] = { "ddgi-strip", "ssgi-strip", "spgi-strip", "full-strip" };
+                            for (int q = 0; q < 4; ++q) {
+                                u32 x0 = w * q / 4, x1 = w * (q + 1) / 4;
+                                double sum = 0.0; float mx = 0.0f; u64 n = 0;
+                                for (u32 y = 0; y < h; y += 4)
+                                    for (u32 x = x0; x < x1; x += 4) {
+                                        const u16* t = p + ((size_t)y * w + x) * 4;
+                                        float r = f16(t[0]), g = f16(t[1]), b = f16(t[2]);
+                                        if (std::isnan(r)) continue;
+                                        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                                        sum += lum; mx = std::max(mx, lum); ++n;
+                                    }
+                                if (n) std::cerr << "[IND_STATS] " << names[q]
+                                                 << " mean=" << (sum / n) << " max=" << mx << std::endl;
+                            }
+                            device_->UnmapBuffer(stage);
+                        }
+                    }
+                    device_->DestroyBuffer(stage);
+                }
+            }
+
+            // TEMP diagnosis: readback the "black" texture — if the heap-
+            // recycled contents are non-zero, the SPGI/AO fallback slots
+            // sample recycled scene data instead of black.
+            static bool s_blackDumped = false;
+            if (!s_blackDumped && inputs.black_texture != handles::INVALID_RESOURCE) {
+                s_blackDumped = true;
+                auto ch2 = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* c3 = rhi::GetCommandBuffer(ch2);
+                if (c3) {
+                    c3->Begin();
+                    BufferTextureCopyRegion br{};
+                    br.imageSubresource.mipLevel = 0;
+                    br.imageSubresource.layerCount = 1;
+                    br.imageExtent = {1, 1, 1};
+                    auto bsDesc = BufferDesc{};
+                    bsDesc.size = 512;
+                    bsDesc.bindFlags = (u32)BufferUsageFlags::TransferDst;
+                    bsDesc.memoryUsage = GPUMemoryUsage::Readback;
+                    auto bs = device_->CreateBuffer(bsDesc);
+                    if (bs != handles::INVALID_RESOURCE) {
+                        c3->CopyTextureToBuffer(inputs.black_texture, bs, &br, 1);
+                        c3->End(); c3->Submit(); c3->WaitForCompletion();
+                        device_->DestroyCommandBuffer(ch2);
+                        if (auto* q = static_cast<const u16*>(device_->MapBuffer(bs, 0, 512))) {
+                            std::cerr << "[BLACK_TEX] first 8 texels rgba16:";
+                            for (int k = 0; k < 32; ++k) std::cerr << " " << q[k];
+                            std::cerr << std::endl;
+                            device_->UnmapBuffer(bs);
+                        }
+                    } else {
+                        device_->DestroyCommandBuffer(ch2);
+                    }
+                    device_->DestroyBuffer(bs);
+                }
+            }
         }
     );
 

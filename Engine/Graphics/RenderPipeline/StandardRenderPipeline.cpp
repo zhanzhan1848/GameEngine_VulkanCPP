@@ -135,38 +135,56 @@ bool StandardRenderPipeline::Initialize(RHIDeviceBase* device) {
     }
 
     // Create utility black texture
-    // Apple Silicon zero-initializes new textures (RGBA=0,0,0,0)
+    // NOTE: Metal heap textures are NOT zero-initialized (contents undefined —
+    // the allocator recycles freed memory). The "black" fallback MUST be
+    // explicitly cleared or the SPGI/AO/SSGI fallback slots sample recycled
+    // garbage. Same proven upload pattern as the FusionCompositeModule volume
+    // identity texture.
     {
         TextureDesc desc{};
         desc.size = {1, 1, 1};
         desc.format = DataFormat::RGBA16_Float;
-        desc.usage = TextureUsage::ShaderResource;
+        desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
         black_texture_ = device->CreateTexture(desc);
 
-        // T4.6.5 part 24.12 (B7 fix): one-time transition UNDEFINED → ShaderResource.
-        // FusionComposite samples black_texture_ as fallback when SSGI/DDGI/SPGI/AO
-        // aren't populated; without this, validation fires VUID-vkCmdDraw-None-09600
-        // on every FusionComposite draw. Apple Silicon's zero-init masks the visual
-        // bug (samples zeros) but Vulkan validation still tracks the layout.
         if (black_texture_ != handles::INVALID_RESOURCE) {
-            CommandBufferHandle cmdH = device->CreateCommandBuffer(CommandQueueType::Graphics);
-            if (cmdH != handles::INVALID_COMMAND_BUFFER) {
-                RHICommandBuffer* cmd = GetCommandBuffer(cmdH);
-                if (cmd && cmd->Begin()) {
-                    ResourceBarrier b{};
-                    b.resource = black_texture_;
-                    b.beforeState = ResourceState::Unknown;
-                    b.afterState = ResourceState::ShaderResource;
-                    b.subresource = RHI_ALL_SUBRESOURCES;
-                    b.queueFamily = 0xFFFFFFFF;
-                    cmd->InsertBarrier(&b, 1);
-                    cmd->End();
-                    QueueSubmitInfo si{};
-                    si.cmdBuffer = cmdH;
-                    device->Submit(si);
-                    cmd->WaitForCompletion();
+            BufferDesc zDesc{};
+            zDesc.size = 256;  // Metal minimum buffer allocation
+            zDesc.memoryUsage = GPUMemoryUsage::Staging;
+            auto staging = device->CreateBuffer(zDesc);
+            if (staging != handles::INVALID_RESOURCE) {
+                if (void* mapped = device->MapBuffer(staging)) {
+                    memset(mapped, 0, 256);
+                    device->UnmapBuffer(staging);
                 }
-                device->DestroyCommandBuffer(cmdH);
+                CommandBufferHandle cmdH = device->CreateCommandBuffer(CommandQueueType::Graphics);
+                if (cmdH != handles::INVALID_COMMAND_BUFFER) {
+                    RHICommandBuffer* cmd = GetCommandBuffer(cmdH);
+                    if (cmd && cmd->Begin()) {
+                        BufferTextureCopyRegion cr{};
+                        cr.imageSubresource = {0, 0, 1};
+                        cr.imageExtent = {1, 1, 1};
+                        cmd->CopyBufferToTexture(staging, black_texture_, &cr, 1);
+                        // One-time transition UNDEFINED → ShaderResource.
+                        // FusionComposite samples black_texture_ as fallback
+                        // when SSGI/DDGI/SPGI/AO aren't populated; without
+                        // this, validation fires VUID-vkCmdDraw-None-09600.
+                        ResourceBarrier b{};
+                        b.resource = black_texture_;
+                        b.beforeState = ResourceState::UnorderedAccess;
+                        b.afterState = ResourceState::ShaderResource;
+                        b.subresource = RHI_ALL_SUBRESOURCES;
+                        b.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&b, 1);
+                        cmd->End();
+                        QueueSubmitInfo si{};
+                        si.cmdBuffer = cmdH;
+                        device->Submit(si);
+                        cmd->WaitForCompletion();
+                    }
+                    device->DestroyCommandBuffer(cmdH);
+                }
+                device->DestroyBuffer(staging);
             }
         }
     }
@@ -2592,7 +2610,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
-            fusionIn.ssgi_rg = ssgiOut.ssgi_output;
+            // TEMP diagnosis: SSGI_SILENCE=1 mutes SSGI into fusion (black)
+            // while keeping the fusion path itself alive — isolates the SSGI
+            // prevColor feedback loop without disabling fusion.
+            fusionIn.ssgi_rg = std::getenv("SSGI_SILENCE")
+                ? rendergraph::RGResourceHandle{} : ssgiOut.ssgi_output;
             fusionIn.ssgi_tex = handles::INVALID_RESOURCE;
             fusionIn.ddgi_rg = giOut.gi_output_rg;
             fusionIn.ddgi_tex = giOut.gi_output_tex;
@@ -2663,9 +2685,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     taaDepthRWCBPtr = &taaDepthRWCB;
                 }
             }
-            auto taaRWCB = PostProcess::AddTAAPass(graph, ppInputRG, velRWCB,
-                render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthRWCBPtr);
-            RGResourceHandle hdrCleanRWCB = taaRWCB.output;
+            // TEMP diagnosis: TAA_OFF=1 bypasses the temporal accumulation.
+            RGResourceHandle hdrCleanRWCB;
+            if (std::getenv("TAA_OFF")) {
+                hdrCleanRWCB = ppInputRG;
+            } else {
+                auto taaRWCB = PostProcess::AddTAAPass(graph, ppInputRG, velRWCB,
+                    render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthRWCBPtr);
+                hdrCleanRWCB = taaRWCB.output;
+            }
 
             auto bloomRWCB = PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
             // FusionIndirect already owns AO/GI composition. ToneMapping only

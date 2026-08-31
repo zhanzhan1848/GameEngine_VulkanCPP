@@ -543,6 +543,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                     return {sh[i * 3], sh[i * 3 + 1], sh[i * 3 + 2]};
                                 };
                                 float worst = 1e30f;
+                                float best = -1e30f;
                                 for (int a = 0; a < 6; ++a) {
                                     const math::v3 N = axes[a];
                                     math::v3 e = band(0) * 0.282095f
@@ -556,6 +557,8 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                         + band(8) * (0.546274f * (N.x * N.x - N.y * N.y));
                                     worst = std::min(worst, 0.2126f * e.x +
                                                      0.7152f * e.y + 0.0722f * e.z);
+                                    best = std::max(best, 0.2126f * e.x +
+                                                    0.7152f * e.y + 0.0722f * e.z);
                                 }
                                 evals.push_back(worst);
                             }
@@ -566,6 +569,13 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                           << evals[evals.size() / 10]
                                           << " p50=" << evals[mid]
                                           << " p90=" << evals[evals.size() - 1 - evals.size() / 10]
+                                          << std::endl;
+                                // TEMP: max OVER axes (positive lobe ceiling) —
+                                // huge values here = spikes gather feeds pixels.
+                                float maxOverAll = -1e30f;
+                                for (float v : evals) maxOverAll = std::max(maxOverAll, v);
+                                std::cerr << "  SHeval(axis-max top) p50="
+                                          << evals[mid] << " max=" << maxOverAll
                                           << std::endl;
                             }
                         } else {

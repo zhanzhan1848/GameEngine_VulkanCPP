@@ -40,8 +40,9 @@ kernel void ddgi_probe_irradiance_from_cards(
     device const ProbeContribRange* ranges       [[buffer(1)]],
     device const ProbeCardContrib* contribs      [[buffer(2)]],
     device const float4* card_radiance           [[buffer(3)]],
-    device const float3* irradiance_history      [[buffer(4)]],
-    device float3* irradiance_output             [[buffer(5)]]
+    // vec4[9]/probe layout (144B): index float4, take xyz (MSL float3* strides 12B).
+    device const float4* irradiance_history      [[buffer(4)]],
+    device float4* irradiance_output             [[buffer(5)]]
 ) {
     if (probeIdx >= vol.ProbeCountTotal) return;
 
@@ -71,7 +72,7 @@ kernel void ddgi_probe_irradiance_from_cards(
     // clamps mirroring DDGIUpdateIrradiance (L0 <= 10, L1 <= 3|L0|, L2 <= 2|L0|).
     float3 scResult[9];
     for (uint i = 0; i < 9u; ++i) {
-        float3 history = irradiance_history[base + i];
+        float3 history = irradiance_history[base + i].xyz;
         uint3 bits = as_type<uint3>(history);
         if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
             history = float3(0.0);
@@ -86,7 +87,7 @@ kernel void ddgi_probe_irradiance_from_cards(
     // Step 2: Path A result (SDF ray trace already wrote to output this frame).
     float3 pathA[9];
     for (uint i = 0; i < 9u; ++i) {
-        pathA[i] = irradiance_output[base + i];
+        pathA[i] = irradiance_output[base + i].xyz;
     }
 
     // Step 3: SC-first continuous blend (see header). The 0.85 cap leaves a
@@ -102,6 +103,6 @@ kernel void ddgi_probe_irradiance_from_cards(
     float scWeight = countCoverage * validCoverage * 0.85f * agree;
 
     for (uint i = 0; i < 9u; ++i) {
-        irradiance_output[base + i] = mix(pathA[i], scResult[i], scWeight);
+        irradiance_output[base + i] = float4(mix(pathA[i], scResult[i], scWeight), 1.0f);
     }
 }

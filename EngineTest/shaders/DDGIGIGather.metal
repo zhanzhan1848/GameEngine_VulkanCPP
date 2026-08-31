@@ -83,7 +83,10 @@ kernel void ddgi_gi_gather(
     device const float* staticSkyFactor    [[buffer(4)]],         // unused
     constant StaticProbeData& staticProbe  [[buffer(5)]],         // unused
     device const float* confidenceBuffer   [[buffer(6)]],         // unused
-    device const float3* irradianceBuffer  [[buffer(7)]],
+    // Buffer layout is vec4[9] per probe (144B — see LumenDDGIPass.cpp).
+    // MSL float3* strides 12B (sizeof) while GLSL std430 vec3 strides 16B —
+    // index via float4 to match the writers' layout.
+    device const float4* irradianceBuffer  [[buffer(7)]],
     device const float* ddgiDepthBuffer    [[buffer(8)]]
 ) {
     uint width = outputTex.get_width();
@@ -162,7 +165,7 @@ kernel void ddgi_gi_gather(
         uint probe = localIdx / 9u;
         uint shIdx = localIdx % 9u;
         if (probe < TG_PROBE_COUNT) {
-            tg_probes[probe].sh[shIdx] = irradianceBuffer[tg_probe_idx[probe] * 9u + shIdx];
+            tg_probes[probe].sh[shIdx] = irradianceBuffer[tg_probe_idx[probe] * 9u + shIdx].xyz;
         }
     }
     if (localIdx < 8u) {
@@ -170,7 +173,7 @@ kernel void ddgi_gi_gather(
         uint probe = idx / 9u;
         uint shIdx = idx % 9u;
         if (probe < TG_PROBE_COUNT && shIdx < SH_COEFF_COUNT) {
-            tg_probes[probe].sh[shIdx] = irradianceBuffer[tg_probe_idx[probe] * 9u + shIdx];
+            tg_probes[probe].sh[shIdx] = irradianceBuffer[tg_probe_idx[probe] * 9u + shIdx].xyz;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -206,7 +209,11 @@ kernel void ddgi_gi_gather(
 
         // T4.3 glossy: reflection-vector SH9 with the same plain trilinear
         // weights; roughness widens the lobe towards the diffuse limit.
-        float3 camPos = viewCB[4].xyz;
+        // GIGatherCB field order: invVP(64B) | probe_origin_spacing(16) |
+        // probe_counts(16) | camera_pos(16) | debug_vis(16) — camera_pos is
+        // the 7th vec4 (offset 96). viewCB[4] was probe_origin_spacing, which
+        // fed garbage into V/R and the specular lobe.
+        float3 camPos = viewCB[6].xyz;
         float3 V = normalize(camPos - worldPos);
         float NdotV = clamp(dot(normal, V), 0.05f, 1.0f);
         float3 R = reflect(-V, normal);
@@ -245,9 +252,14 @@ kernel void ddgi_gi_gather(
 
         // Glossy output: RGB = lobe radiance, A = NdotV (DFG in FusionComposite).
         float3 specIrr = mix(reflResult, radBase, roughness * roughness);
+        // TEMP diagnosis: same sanity clamp as the diffuse output.
+        specIrr = clamp(specIrr, float3(0.0f), float3(10.0f));
         specularTex.write(float4(specIrr, NdotV), tid);
 
         float3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, float3(0.05f, 0.05f, 0.06f));
+        // TEMP diagnosis: sanity clamp — if the washout persists with this in
+        // place, the huge values enter the texture outside this kernel.
+        diffOut = clamp(diffOut, float3(0.0f), float3(10.0f));
         outputTex.write(float4(diffOut, 1.0f), tid);
     }
 

@@ -29,8 +29,9 @@ kernel void ddgi_update_irradiance(
     constant GlobalShaderData& gd [[buffer(0)]],
     constant DDGIVolumeData& vol [[buffer(1)]],
     device const DDGIRayData* rayData [[buffer(2)]],
-    device const float3* irradianceHistory [[buffer(3)]],
-    device float3* irradianceOutput [[buffer(4)]],
+    // vec4[9]/probe layout (144B): index float4, take xyz (MSL float3* strides 12B).
+    device const float4* irradianceHistory [[buffer(3)]],
+    device float4* irradianceOutput [[buffer(4)]],
     device const uint* probeUpdateList [[buffer(5)]],
     device float* confidenceBuffer [[buffer(6)]]
 )
@@ -143,7 +144,7 @@ kernel void ddgi_update_irradiance(
     float3 cachedOut[DDGI_SH_COEFF_COUNT];
 
     for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
-        float3 history = irradianceHistory[probeBase + i];
+        float3 history = irradianceHistory[probeBase + i].xyz;
         uint3 bits = as_type<uint3>(history);
         if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
             history = float3(0.0f);
@@ -164,7 +165,7 @@ kernel void ddgi_update_irradiance(
         }
 
         cachedOut[i] = filtered;
-        irradianceOutput[probeBase + i] = filtered;
+        irradianceOutput[probeBase + i] = float4(filtered, 1.0f);
     }
 
     // --- Confidence computation (uses cached values, 0 extra device reads) ---

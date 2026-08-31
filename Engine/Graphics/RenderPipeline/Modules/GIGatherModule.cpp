@@ -655,6 +655,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                             device_->DestroyBuffer(out_staging_);
                         rhi::BufferDesc d{};
                         d.size = size;
+                        d.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
                         d.usage = rhi::GPUMemoryUsage::Readback;
                         d.memoryUsage = rhi::GPUMemoryUsage::Readback;
                         d.name = "GIGather_OutDump";
@@ -662,6 +663,60 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         out_staging_size_ = size;
                     }
                     if (out_staging_ != rhi::handles::INVALID_RESOURCE) {
+                        // TEMP diagnosis: raw dump of the probe irradiance
+                        // buffer AS THE GATHER READS IT (same slot, buffer
+                        // copy — bypasses every sampling/stride question).
+                        {
+                            auto irrHandle = ddgi->GetIrradianceBuffer(ddgiReadIdx);
+                            if (irrHandle != rhi::handles::INVALID_RESOURCE) {
+                                const u64 irrBytes = 16384ull * 9u * 16u;
+                                static rhi::ResourceHandle irrStaging = rhi::handles::INVALID_RESOURCE;
+                                static u64 irrStagingSize = 0;
+                                if (irrStaging == rhi::handles::INVALID_RESOURCE ||
+                                    irrStagingSize < irrBytes) {
+                                    if (irrStaging != rhi::handles::INVALID_RESOURCE)
+                                        device_->DestroyBuffer(irrStaging);
+                                    rhi::BufferDesc id{};
+                                    id.size = irrBytes;
+                                    id.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
+                                    id.usage = rhi::GPUMemoryUsage::Readback;
+                                    id.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                                    id.name = "GIGather_IrrDump";
+                                    irrStaging = device_->CreateBuffer(id);
+                                    irrStagingSize = irrBytes;
+                                }
+                                if (irrStaging != rhi::handles::INVALID_RESOURCE) {
+                                    cmd->CopyBuffer(irrHandle, irrStaging, 0, 0, irrBytes);
+                                    static u64 s_irrDumpTickBase = 0;
+                                    s_irrDumpTickBase = tick; (void)s_irrDumpTickBase;
+                                    // Read next frame's stats print (delayed) —
+                                    // reuse out_staging deferred pattern via a
+                                    // simple 2-tick delayed map is complex; do
+                                    // an immediate Wait+Map on a throwaway CB.
+                                    auto chI = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+                                    auto* cI = rhi::GetCommandBuffer(chI);
+                                    if (cI) {
+                                        cI->Begin();
+                                        cI->CopyBuffer(irrHandle, irrStaging, 0, 0, irrBytes);
+                                        cI->End(); cI->Submit(); cI->WaitForCompletion();
+                                        device_->DestroyCommandBuffer(chI);
+                                        if (auto* q = static_cast<const float*>(
+                                                device_->MapBuffer(irrStaging, 0, irrBytes))) {
+                                            float maxAbs = 0.0f; u64 bad = 0;
+                                            for (u64 k = 0; k < irrBytes / 4; ++k) {
+                                                float v = q[k];
+                                                if (std::isnan(v) || std::isinf(v)) { ++bad; continue; }
+                                                maxAbs = std::max(maxAbs, std::abs(v));
+                                            }
+                                            std::cerr << "[IRR_DUMP] slot=" << ddgiReadIdx
+                                                      << " maxAbs=" << maxAbs
+                                                      << " nanInf=" << bad << std::endl;
+                                            device_->UnmapBuffer(irrStaging);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         ResourceBarrier toCopy{};
                         toCopy.resource = gi_halfres_texture_;
                         toCopy.beforeState = ResourceState::ShaderResource;
