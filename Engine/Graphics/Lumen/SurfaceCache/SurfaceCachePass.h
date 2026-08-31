@@ -245,6 +245,8 @@ private:
     // T3.3: atlas-space directional visibility (float per atlas texel,
     // CPU-initialized to 1.0) + triple-buffered shadow params CB.
     rhi::ResourceHandle shadow_visibility_buffer_{ rhi::handles::INVALID_RESOURCE };
+    bool s_ab_readback_done_ = false;
+    bool s_albedo_readback_done_ = false;
     rhi::ResourceHandle sc_offline_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
     math::v3 sc_offline_sdf_origin_{};
     math::v3 sc_offline_sdf_extent_{};

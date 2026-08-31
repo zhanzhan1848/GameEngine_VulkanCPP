@@ -144,6 +144,44 @@
           }
         }
       ]
+    },
+    {
+      "EntityGuid": "bc294f48-0ed4-4b7d-b44b-17702f77fb7d",
+      "Name": "Sun_1",
+      "ParentEntityGuid": null,
+      "IsEnabled": true,
+      "Components": [
+        {
+          "$type": "transform",
+          "Data": {
+            "PositionX": 0.6437582,
+            "PositionY": 0,
+            "PositionZ": 0,
+            "RotationX": 0,
+            "RotationY": 0,
+            "RotationZ": 0,
+            "ScaleX": 1,
+            "ScaleY": 1,
+            "ScaleZ": 1,
+            "IsEnabled": true
+          }
+        },
+        {
+          "$type": "light",
+          "Data": {
+            "LightType": 0,
+            "ColorR": 1,
+            "ColorG": 1,
+            "ColorB": 1,
+            "Intensity": 20,
+            "Range": 10,
+            "UmbraAngle": 0,
+            "PenumbraAngle": 0,
+            "CastShadow": true,
+            "IsEnabled": true
+          }
+        }
+      ]
     }
   ],
   "Environment": {
@@ -168,11 +206,11 @@
     "EnvMapPath": ""
   },
   "EditorCamera": {
-    "TargetX": 0.936504,
-    "TargetY": 0.103548124,
-    "TargetZ": -2.0474,
-    "Distance": 16.749071,
-    "Yaw": 2.4731278,
-    "Pitch": -0.55343795
+    "TargetX": 0,
+    "TargetY": 0,
+    "TargetZ": 0,
+    "Distance": 12,
+    "Yaw": -2.5272663,
+    "Pitch": -0.64910567
   }
 }

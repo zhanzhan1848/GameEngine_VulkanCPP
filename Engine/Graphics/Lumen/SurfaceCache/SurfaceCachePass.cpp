@@ -1750,6 +1750,56 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 std::cerr << "[SurfaceCache] LightEval dispatch: " << total_texels
                           << " texels, " << card_count << " cards, "
                           << groups << " groups" << std::endl;
+
+                // TEMP diagnosis: one-shot readback of albedo alpha + lighting
+                // luminance — splits "seed/capture never wrote" from
+                // "LightEval wrote black".
+                if (std::getenv("SC_DUMP_CARDS") && current_frame_index == 60 &&
+                    !s_albedo_readback_done_) {
+                    s_albedo_readback_done_ = true;
+                    struct RB { u64 size; rhi::ResourceHandle tex; const char* name; u32 bpp; };
+                    RB rbs[2] = {
+                        { (u64)atlas_size_ * atlas_size_ * 4, albedo_atlas_, "albedo(rgba8)", 4 },
+                        { (u64)atlas_size_ * atlas_size_ * 8, lighting_atlas_[outIdx], "lighting(rgba16f)", 8 },
+                    };
+                    for (auto& rb : rbs) {
+                        rhi::BufferDesc d{};
+                        d.size = rb.size;
+                        d.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
+                        d.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                        d.name = "SC_RB";
+                        auto stage = device_->CreateBuffer(d);
+                        if (stage == handles::INVALID_RESOURCE) continue;
+                        auto ch = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+                        auto* c2 = rhi::GetCommandBuffer(ch);
+                        if (!c2) { device_->DestroyBuffer(stage); continue; }
+                        c2->Begin();
+                        rhi::BufferTextureCopyRegion rr{};
+                        rr.imageSubresource.mipLevel = 0;
+                        rr.imageSubresource.layerCount = 1;
+                        rr.imageExtent = {atlas_size_, atlas_size_, 1};
+                        c2->CopyTextureToBuffer(rb.tex, stage, &rr, 1);
+                        c2->End(); c2->Submit(); c2->WaitForCompletion();
+                        device_->DestroyCommandBuffer(ch);
+                        if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage, 0, rb.size))) {
+                            u64 z = 0, nz = 0;
+                            if (rb.bpp == 4) {
+                                for (u64 i = 3; i < rb.size; i += 4) {
+                                    u8 a = p[i];
+                                    if (a == 0) ++z; else ++nz;
+                                }
+                            } else {
+                                for (u64 i = 0; i < rb.size; i += 8)
+                                    if (p[i]==0 && p[i+1]==0 && p[i+2]==0) ++z; else ++nz;
+                            }
+                            std::cerr << "[SC_RB] " << rb.name << ": zero=" << z
+                                      << " nonzero=" << nz << " (of "
+                                      << atlas_size_*atlas_size_ << ")" << std::endl;
+                            device_->UnmapBuffer(stage);
+                        }
+                        device_->DestroyBuffer(stage);
+                    }
+                }
             }
 
             // ================================================================
