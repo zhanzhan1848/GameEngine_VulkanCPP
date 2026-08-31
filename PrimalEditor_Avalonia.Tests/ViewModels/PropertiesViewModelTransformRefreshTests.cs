@@ -9,6 +9,50 @@ namespace PrimalEditor_Avalonia.Tests.ViewModels;
 public sealed class PropertiesViewModelTransformRefreshTests
 {
     [Fact]
+    public void Selection_ExposesOnlyComponentsOwnedBySelectedEntity()
+    {
+        var lightEntity = new GameEntity("Light");
+        lightEntity.Components.Add(new Transform());
+        lightEntity.Components.Add(new LightComponent());
+        var cameraEntity = new GameEntity("Camera");
+        cameraEntity.Components.Add(new Transform());
+        cameraEntity.Components.Add(new CameraComponent());
+        var properties = new PropertiesViewModel();
+
+        properties.Entities = new[] { lightEntity };
+
+        Assert.NotNull(properties.Transform);
+        Assert.True(properties.HasLightComponent);
+        Assert.False(properties.HasCameraComponent);
+        Assert.False(properties.HasMeshRendererComponent);
+
+        properties.Entities = new[] { cameraEntity };
+
+        Assert.NotNull(properties.Transform);
+        Assert.False(properties.HasLightComponent);
+        Assert.True(properties.HasCameraComponent);
+        Assert.False(properties.HasMeshRendererComponent);
+    }
+
+    [Fact]
+    public void MixedSelection_ExposesOnlyComponentsCommonToEveryEntity()
+    {
+        var lightEntity = new GameEntity("Light");
+        lightEntity.Components.Add(new Transform());
+        lightEntity.Components.Add(new LightComponent());
+        var plainEntity = new GameEntity("Plain");
+        plainEntity.Components.Add(new Transform());
+        var properties = new PropertiesViewModel
+        {
+            Entities = new[] { lightEntity, plainEntity },
+        };
+
+        Assert.NotNull(properties.Transform);
+        Assert.False(properties.HasLightComponent);
+        Assert.Null(properties.Light);
+    }
+
+    [Fact]
     public void InspectorEdit_UsesOwnerWritebackCallbackWithoutMainWindowLookup()
     {
         var entity = new GameEntity("Cube");

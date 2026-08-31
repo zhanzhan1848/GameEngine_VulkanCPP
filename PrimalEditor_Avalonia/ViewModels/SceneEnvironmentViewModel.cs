@@ -38,7 +38,7 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
         if (_env != null)
         {
             _env.PropertyChanged += OnEnvChanged;
-            PushToNative();
+            ApplyToNative();
         }
         OnPropertyChanged(nameof(HasScene));
         OnPropertyChanged(nameof(StatusMessage));
@@ -49,7 +49,7 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
                 nameof(FogEnabled), nameof(FogR), nameof(FogG), nameof(FogB),
                 nameof(FogNear), nameof(FogFar), nameof(FogDensity),
                 nameof(SkyboxEnabled), nameof(SkyR), nameof(SkyG), nameof(SkyB),
-                nameof(ToneMapping), nameof(Exposure),
+                nameof(ToneMapping), nameof(Exposure), nameof(EnvMapPath),
             })
         {
             OnPropertyChanged(p);
@@ -59,10 +59,16 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
     private void OnEnvChanged(object? sender, PropertyChangedEventArgs e)
     {
         OnPropertyChanged(e.PropertyName);
-        PushToNative();
+        ApplyToNative();
     }
 
-    private void PushToNative()
+    /// <summary>
+    /// Re-applies the complete scene environment after the native render
+    /// pipeline is created or recreated. Scene attachment can happen before
+    /// the Render Surface exists, so the initial best-effort push is not
+    /// sufficient on its own.
+    /// </summary>
+    public void ApplyToNative()
     {
         if (_env == null) return;
         var p = new float[24];
@@ -85,6 +91,19 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
         p[16] = _env.Exposure;
         // 17..23 reserved (left at 0).
         _lastPushOk = NativeEngineBridge.UpdateSceneEnvironment(p);
+        // HDR environment + skybox toggle go through their dedicated
+        // pipeline APIs (UpdateSceneEnvironment is still a stub). The sky
+        // only renders when there is an env map to show.
+        var hasEnv = !string.IsNullOrWhiteSpace(_env.EnvMapPath);
+        if (hasEnv)
+        {
+            var envApplied = NativeEngineBridge.PipelineSetEnvironmentMap(_env.EnvMapPath);
+            if (!envApplied && NativeEngineBridge.IsLoaded)
+            {
+                Logger.Warning($"Failed to apply HDR environment map: {_env.EnvMapPath}");
+            }
+        }
+        NativeEngineBridge.PipelineSetSkyboxEnabled(_env.SkyboxEnabled && hasEnv);
         _env.MarkDirty();
         OnPropertyChanged(nameof(StatusMessage));
     }
@@ -106,6 +125,25 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
     public float SkyR { get => _env?.SkyR ?? 0; set { if (_env != null) _env.SkyR = value; } }
     public float SkyG { get => _env?.SkyG ?? 0; set { if (_env != null) _env.SkyG = value; } }
     public float SkyB { get => _env?.SkyB ?? 0; set { if (_env != null) _env.SkyB = value; } }
+
+    public string EnvMapPath
+    {
+        get => _env?.EnvMapPath ?? string.Empty;
+        set
+        {
+            if (_env == null) return;
+            // Assigning an environment map implies the user wants to see it.
+            // Auto-enable BEFORE the same-value early return: re-dropping the
+            // same asset (e.g. after loading a scene saved with the skybox
+            // off) must still turn the skybox on.
+            if (!string.IsNullOrWhiteSpace(value) && !_env.SkyboxEnabled)
+            {
+                _env.SkyboxEnabled = true;
+            }
+            if (_env.EnvMapPath == value) return;
+            _env.EnvMapPath = value;
+        }
+    }
 
     public ToneMappingMode ToneMapping
     {

@@ -38,6 +38,8 @@ public static class EntityFactory
         var boxCount = 0;
         var planeCount = 0;
         var lightCount = 0;
+        var sunLightCount = 0;
+        var envLightCount = 0;
         var cameraCount = 0;
 
         return new[]
@@ -102,6 +104,61 @@ public static class EntityFactory
                     var entity = new GameEntity($"Light_{n}");
                     entity.Components.Add(new Transform());
                     entity.Components.Add(new LightComponent());
+                    return entity;
+                }),
+
+            new EntityFactoryDescriptor(
+                EntityKind.DirectionalLight,
+                "Sun Light",
+                "☀",
+                "Directional sun light (drives lighting + shadows)",
+                new[] { "transform", "light" },
+                () =>
+                {
+                    var n = System.Threading.Interlocked.Increment(ref sunLightCount);
+                    var entity = new GameEntity($"Sun_{n}");
+                    // Start tilted like the scene-default sun — identity
+                    // rotation shines horizontally along -Z and leaves
+                    // upward-facing ground geometry unlit.
+                    entity.Components.Add(new Transform
+                    {
+                        RotationX = SceneDefaults.SunRotationX,
+                        RotationY = SceneDefaults.SunRotationY,
+                        RotationZ = SceneDefaults.SunRotationZ,
+                    });
+                    var light = new LightComponent();
+                    SceneDefaults.ConfigureSunLight(light);
+                    entity.Components.Add(light);
+                    return entity;
+                }),
+
+            new EntityFactoryDescriptor(
+                EntityKind.EnvironmentLight,
+                "Env Light",
+                "🌍",
+                "Environment light — edit HDR sky / IBL settings by selecting it",
+                new[] { "transform", "environment" },
+                () =>
+                {
+                    var n = System.Threading.Interlocked.Increment(ref envLightCount);
+                    var entity = new GameEntity($"Env_{n}");
+                    entity.Components.Add(new Transform());
+                    entity.Components.Add(new EnvironmentComponent());
+                    return entity;
+                }),
+
+            new EntityFactoryDescriptor(
+                EntityKind.EnvironmentLight,
+                "Env Light",
+                "🌍",
+                "Environment light — edit HDR sky / IBL settings by selecting it",
+                new[] { "transform", "environment" },
+                () =>
+                {
+                    var n = System.Threading.Interlocked.Increment(ref envLightCount);
+                    var entity = new GameEntity($"Env_{n}");
+                    entity.Components.Add(new Transform());
+                    entity.Components.Add(new EnvironmentComponent());
                     return entity;
                 }),
 

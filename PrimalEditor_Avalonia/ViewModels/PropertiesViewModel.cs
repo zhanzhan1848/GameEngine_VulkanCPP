@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Native;
 using PrimalEditor_Avalonia.ViewModels;
 
@@ -44,13 +46,37 @@ public class PropertiesViewModel : ViewModelBase
     }
 
     public MSTransform? Transform { get; private set; }
-    public MSLight? Light { get; private set; }
+
+    private MSLight? _light;
+    public MSLight? Light
+    {
+        get => _light;
+        private set
+        {
+            if (_light != null) _light.PropertyChanged -= OnLightPropertyChanged;
+            _light = value;
+            if (_light != null) _light.PropertyChanged += OnLightPropertyChanged;
+        }
+    }
+
     public MSCamera? Camera { get; private set; }
     public MSMeshRenderer? MeshRenderer { get; private set; }
 
-    /// <summary>True when the selected entity has a CameraComponent — the
-    /// "Look Through This Camera" button is visible iff true.</summary>
+    /// <summary>
+    /// Component sections are visible only when every selected entity owns
+    /// that component. This keeps multi-editing predictable: a component edit
+    /// is never silently applied to just a subset of the selection.
+    /// </summary>
+    public bool HasLightComponent => Light != null;
+
+    /// <summary>True when every selected entity carries an
+    /// EnvironmentComponent — the inspector then shows the scene
+    /// environment panel in place of light parameters.</summary>
+    public bool HasEnvironmentComponent => _msEntity.SelectedEntities.Count > 0
+        && _msEntity.SelectedEntities.All(e => e.GetComponent<EnvironmentComponent>() != null);
     public bool HasCameraComponent => Camera != null;
+    public bool HasMeshRendererComponent => MeshRenderer != null;
+    public bool HasMaterialOverrideComponent { get; private set; }
 
     /// <summary>"Look Through This Camera" or "Restore Editor Camera"
     /// depending on whether the viewport is currently rendering through
@@ -64,6 +90,8 @@ public class PropertiesViewModel : ViewModelBase
     public uint SelectedEntityNativeId { get; private set; }
 
     public System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel> MaterialOverrides { get; } = new System.Collections.ObjectModel.ObservableCollection<MaterialOverrideViewModel>();
+    public ObservableCollection<MeshMaterialSlotViewModel> MeshMaterials { get; } = new();
+    public MeshAssetReferenceViewModel? MeshAsset { get; private set; }
 
     /// <summary>Called by the view after constructing this VM so it can
     /// route LookThroughCamera requests back to the viewport. Set via
@@ -82,6 +110,9 @@ public class PropertiesViewModel : ViewModelBase
     // not depend on finding a particular TopLevel/DataContext while docking
     // or window teardown is changing the visual tree.
     public System.Action<System.Collections.Generic.IEnumerable<GameEntity>>? PushTransformsToNativeCallback { get; set; }
+    public System.Action<System.Collections.Generic.IEnumerable<GameEntity>>? PushMaterialsToNativeCallback { get; set; }
+    public System.Action<System.Collections.Generic.IEnumerable<GameEntity>>? PushMeshesToNativeCallback { get; set; }
+    public System.Action<AssetInfo>? RevealAssetCallback { get; set; }
     public System.Action? MarkProjectDirtyCallback { get; set; }
     public System.Func<UndoRedo?>? UndoRedoQuery { get; set; }
 
@@ -175,19 +206,29 @@ public class PropertiesViewModel : ViewModelBase
                 Light = null;
                 Camera = null;
                 MeshRenderer = null;
+                MeshAsset = null;
+                HasMaterialOverrideComponent = false;
                 MaterialOverrides.Clear();
+                MeshMaterials.Clear();
             }
             else
             {
                 Transform = new MSTransform(ms);
-                Light = new MSLight(ms);
-                Camera = new MSCamera(ms);
-                MeshRenderer = new MSMeshRenderer(ms);
+                Light = HasCommonComponent<LightComponent>(ms) ? new MSLight(ms) : null;
+                Camera = HasCommonComponent<CameraComponent>(ms) ? new MSCamera(ms) : null;
+                MeshRenderer = HasCommonComponent<MeshRendererComponent>(ms) ? new MSMeshRenderer(ms) : null;
+                RebuildMeshAsset(ms.SelectedEntities);
+                HasMaterialOverrideComponent = HasCommonComponent<MaterialOverrideComponent>(ms);
                 RebuildMaterialOverrides(ms.SelectedEntities);
+                RebuildMeshMaterials(ms.SelectedEntities);
             }
             UpdateFromEntities();
         }
     }
+
+    private static bool HasCommonComponent<T>(MSEntity entities) where T : Component =>
+        entities.SelectedEntities.Count > 0
+        && entities.SelectedEntities.All(entity => entity.GetComponent<T>() != null);
 
     private void RebuildMaterialOverrides(System.Collections.Generic.IList<Components.GameEntity> entities)
     {
@@ -200,6 +241,130 @@ public class PropertiesViewModel : ViewModelBase
         {
             MaterialOverrides.Add(new MaterialOverrideViewModel(firstOverride.Slots[i], i));
         }
+    }
+
+    private void RebuildMeshMaterials(System.Collections.Generic.IList<GameEntity> entities)
+    {
+        MeshMaterials.Clear();
+        var renderer = entities.FirstOrDefault()?.GetComponent<MeshRendererComponent>();
+        if (renderer == null) return;
+
+        // Every renderable mesh has at least one editable material element,
+        // even before a material has been assigned. Imported multi-submesh
+        // assets retain all of their existing persisted slots.
+        var count = System.Math.Max(1, renderer.MaterialGuids.Count);
+        for (var index = 0; index < count; index++)
+        {
+            var guid = index < renderer.MaterialGuids.Count
+                ? renderer.MaterialGuids[index]
+                : new AssetGuid(Guid.Empty);
+            MeshMaterials.Add(new MeshMaterialSlotViewModel(index, guid));
+        }
+    }
+
+    private void RebuildMeshAsset(System.Collections.Generic.IList<GameEntity> entities)
+    {
+        var renderer = entities.FirstOrDefault()?.GetComponent<MeshRendererComponent>();
+        MeshAsset = renderer == null
+            ? null
+            : new MeshAssetReferenceViewModel(renderer.MeshGuid, renderer.BuiltinMesh);
+        OnPropertyChanged(nameof(MeshAsset));
+    }
+
+    public bool AssignMeshAsset(AssetInfo asset)
+    {
+        if (asset == null || _msEntity.SelectedEntities.Count == 0) return false;
+        var type = asset.Type != AssetType.Unknown
+            ? asset.Type
+            : ContentHelper.GetAssetType(asset.FullPath);
+        if (type != AssetType.Mesh && type != AssetType.Model) return false;
+
+        if (asset.Guid == Guid.Empty && !string.IsNullOrWhiteSpace(asset.FullPath))
+        {
+            AssetRegistry.Register(asset.FullPath);
+            asset = AssetRegistry.Get(asset.FullPath) ?? asset;
+        }
+        if (asset.Guid == Guid.Empty) return false;
+
+        var next = new AssetGuid(asset.Guid);
+        var changed = new List<GameEntity>();
+        foreach (var entity in _msEntity.SelectedEntities)
+        {
+            var renderer = entity.GetComponent<MeshRendererComponent>();
+            if (renderer == null) continue;
+            if (renderer.MeshGuid == next && renderer.BuiltinMesh == BuiltinMeshKind.None) continue;
+            renderer.MeshGuid = next;
+            renderer.BuiltinMesh = BuiltinMeshKind.None;
+            changed.Add(entity);
+        }
+        if (changed.Count == 0) return false;
+
+        RebuildMeshAsset(_msEntity.SelectedEntities);
+        MeshRenderer?.Refresh();
+        MarkProjectDirty();
+        PushMeshesToNativeCallback?.Invoke(changed);
+        return true;
+    }
+
+    public bool ClearMeshAsset()
+    {
+        var changed = new List<GameEntity>();
+        foreach (var entity in _msEntity.SelectedEntities)
+        {
+            var renderer = entity.GetComponent<MeshRendererComponent>();
+            if (renderer == null) continue;
+            if (renderer.MeshGuid.Value == Guid.Empty && renderer.BuiltinMesh == BuiltinMeshKind.None) continue;
+            renderer.MeshGuid = new AssetGuid(Guid.Empty);
+            renderer.BuiltinMesh = BuiltinMeshKind.None;
+            changed.Add(entity);
+        }
+        if (changed.Count == 0) return false;
+
+        RebuildMeshAsset(_msEntity.SelectedEntities);
+        MeshRenderer?.Refresh();
+        MarkProjectDirty();
+        PushMeshesToNativeCallback?.Invoke(changed);
+        return true;
+    }
+
+    public void RevealMeshAsset()
+    {
+        if (MeshAsset?.Asset is { } asset) RevealAssetCallback?.Invoke(asset);
+    }
+
+    public bool AssignMeshMaterial(int slotIndex, AssetInfo asset)
+    {
+        if (slotIndex < 0 || asset == null || _msEntity.SelectedEntities.Count == 0) return false;
+        var type = asset.Type != AssetType.Unknown
+            ? asset.Type
+            : ContentHelper.GetAssetType(asset.FullPath);
+        if (type != AssetType.Material) return false;
+
+        if (asset.Guid == Guid.Empty && !string.IsNullOrWhiteSpace(asset.FullPath))
+        {
+            AssetRegistry.Register(asset.FullPath);
+            asset = AssetRegistry.Get(asset.FullPath) ?? asset;
+        }
+        if (asset.Guid == Guid.Empty) return false;
+
+        var changedEntities = new List<GameEntity>();
+        foreach (var entity in _msEntity.SelectedEntities)
+        {
+            var renderer = entity.GetComponent<MeshRendererComponent>();
+            if (renderer == null) continue;
+            while (renderer.MaterialGuids.Count <= slotIndex)
+                renderer.MaterialGuids.Add(new AssetGuid(Guid.Empty));
+            var next = new AssetGuid(asset.Guid);
+            if (renderer.MaterialGuids[slotIndex] == next) continue;
+            renderer.MaterialGuids[slotIndex] = next;
+            changedEntities.Add(entity);
+        }
+
+        if (changedEntities.Count == 0) return false;
+        RebuildMeshMaterials(_msEntity.SelectedEntities);
+        MarkProjectDirty();
+        PushMaterialsToNativeCallback?.Invoke(changedEntities);
+        return true;
     }
 
     public string EntityName
@@ -287,6 +452,108 @@ public class PropertiesViewModel : ViewModelBase
             float[] rot = { t.RotationX, t.RotationY, t.RotationZ };
             float[] scl = { t.ScaleX, t.ScaleY, t.ScaleZ };
             NativeEngineBridge.SetEntityTransform(nativeId, pos, rot, scl);
+        }
+    }
+
+    // Live-push light edits to the engine so the viewport reflects color /
+    // intensity / type / range changes without a scene resync. Same native
+    // lookup pattern as PushTransformsToNative. Refresh()-driven events
+    // (selection changes) re-push identical state, which is harmless.
+    private void OnLightPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        PushLightsToNative();
+    }
+
+    // ---- Scene environment (HDR sky + IBL), surfaced in the LIGHT section
+    // of the inspector so the sun light's env map is editable in place.
+    // Values delegate to the active scene's SceneEnvironmentViewModel; the
+    // native push happens in its PushToNative (PipelineSetEnvironmentMap).
+    /// <summary>
+    /// The environment VM owned by the same WorldEditor as this inspector.
+    /// Injected by WorldEditorViewModel so HDR edits do not depend on finding
+    /// a particular top-level Avalonia window or docking configuration.
+    /// </summary>
+    public SceneEnvironmentViewModel? SceneEnvironment { get; set; }
+
+    /// <summary>Scene environment settings VM — the data source for the
+    /// ENVIRONMENT LIGHT inspector section. Stable singleton once the main
+    /// window exists.</summary>
+    public SceneEnvironmentViewModel? EnvironmentVM => ResolveEnvironmentViewModel();
+
+    private SceneEnvironmentViewModel? ResolveEnvironmentViewModel()
+    {
+        if (SceneEnvironment != null) return SceneEnvironment;
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        return lifetime?.MainWindow?.DataContext is MainWindowViewModel mainVm
+            ? mainVm.WorldEditor.SceneEnvironmentViewModel
+            : null;
+    }
+
+    private string? _envMapPath;
+    public string? EnvMapPath
+    {
+        get
+        {
+            var value = ResolveEnvironmentViewModel()?.EnvMapPath ?? _envMapPath;
+            // Empty → null so the drop-slot watermark (TargetNullValue) shows.
+            return string.IsNullOrEmpty(value) ? null : value;
+        }
+        set
+        {
+            _envMapPath = value;
+            if (value != null && ResolveEnvironmentViewModel() is { } env)
+            {
+                env.EnvMapPath = value;
+            }
+            // Notify after updating the delegated VM. The binding getter
+            // reads that VM, so firing first made a successful drop re-read
+            // the old empty value and look as if the drop had been rejected.
+            OnPropertyChanged(nameof(EnvMapPath));
+        }
+    }
+
+    private bool _skyboxEnabled;
+    public bool SkyboxEnabled
+    {
+        get => ResolveEnvironmentViewModel()?.SkyboxEnabled ?? _skyboxEnabled;
+        set
+        {
+            _skyboxEnabled = value;
+            if (ResolveEnvironmentViewModel() is { } env)
+            {
+                env.SkyboxEnabled = value;
+            }
+            OnPropertyChanged(nameof(SkyboxEnabled));
+        }
+    }
+
+    private void PushLightsToNative()
+    {
+        var selected = _msEntity.SelectedEntities;
+        if (selected.Count == 0 || Light == null) return;
+        if (!NativeEngineBridge.IsLoaded) return;
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        var worldEditor = lifetime?.MainWindow?.DataContext is MainWindowViewModel mainVm
+            ? mainVm.WorldEditor
+            : null;
+        if (worldEditor == null) return;
+
+        foreach (var entity in selected)
+        {
+            var light = entity.GetComponent<LightComponent>();
+            if (light == null) continue;
+            var nativeId = worldEditor.GetNativeEntityId(entity);
+            if (nativeId == 0) continue;
+            NativeEngineBridge.SetEntityLight(nativeId,
+                (uint)light.LightType,
+                light.Intensity,
+                new[] { light.ColorR, light.ColorG, light.ColorB },
+                light.Range,
+                light.UmbraAngle,
+                light.PenumbraAngle,
+                light.IsEnabled);
         }
     }
 
@@ -398,7 +665,13 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(Light));
         OnPropertyChanged(nameof(Camera));
         OnPropertyChanged(nameof(MeshRenderer));
+        OnPropertyChanged(nameof(MeshAsset));
+        OnPropertyChanged(nameof(HasLightComponent));
+        OnPropertyChanged(nameof(HasEnvironmentComponent));
+        OnPropertyChanged(nameof(EnvironmentVM));
         OnPropertyChanged(nameof(HasCameraComponent));
+        OnPropertyChanged(nameof(HasMeshRendererComponent));
+        OnPropertyChanged(nameof(HasMaterialOverrideComponent));
 
         MixedValueMessage = _msEntity.SelectedEntities.Count > 1
             ? "Multiple entities selected - showing first value or '-' for mixed"

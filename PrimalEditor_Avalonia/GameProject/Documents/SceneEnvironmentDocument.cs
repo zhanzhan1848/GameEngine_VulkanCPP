@@ -35,4 +35,7 @@ public sealed class SceneEnvironmentDocument
 
     [JsonPropertyName("MainCameraEntityGuid")]
     public string? MainCameraEntityGuid { get; set; }
+
+    [JsonPropertyName("EnvMapPath")]
+    public string EnvMapPath { get; set; } = string.Empty;
 }

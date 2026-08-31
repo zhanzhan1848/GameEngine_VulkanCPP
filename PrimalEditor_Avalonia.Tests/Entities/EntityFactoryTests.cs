@@ -38,6 +38,35 @@ public sealed class EntityFactoryTests
     }
 
     [Fact]
+    public void DirectionalLight_AttachesDirectionalSunLight()
+    {
+        var descriptor = EntityFactory.Find(EntityKind.DirectionalLight);
+        Assert.NotNull(descriptor);
+        Assert.False(descriptor!.RequiresAssetSelection);
+
+        var entity = descriptor.CreateEntity();
+        Assert.IsType<Transform>(entity.Components[0]);
+        var light = entity.GetComponent<LightComponent>();
+        Assert.NotNull(light);
+        Assert.Equal(LightType.Directional, light!.LightType);
+        // Toolbar sun matches the scene-default sun (SceneDefaults.ConfigureSunLight).
+        Assert.Equal(20f, light.Intensity);
+        Assert.True(light.CastShadow);
+        Assert.StartsWith("Sun_", entity.Name);
+    }
+
+    [Fact]
+    public void DirectionalLightNaming_AutoIncrements()
+    {
+        var descriptor = EntityFactory.Find(EntityKind.DirectionalLight)!;
+        var a = descriptor.CreateEntity();
+        var b = descriptor.CreateEntity();
+        Assert.StartsWith("Sun_", a.Name);
+        Assert.StartsWith("Sun_", b.Name);
+        Assert.NotEqual(a.Name, b.Name);
+    }
+
+    [Fact]
     public void Camera_AttachesCameraComponent()
     {
         var entity = EntityFactory.Find(EntityKind.Camera)!.CreateEntity();

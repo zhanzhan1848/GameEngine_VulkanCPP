@@ -32,6 +32,13 @@ public enum EntityKind
     /// <summary>Point light with default params, editable in Inspector.</summary>
     Light,
 
+    /// <summary>Directional sun light — drives viewport lighting and cascade shadows.</summary>
+    DirectionalLight,
+
+    /// <summary>Environment light — selecting it edits the scene's HDR environment settings.</summary>
+    EnvironmentLight,
+
+
     /// <summary>Perspective camera with default params, editable in Inspector.</summary>
     Camera,
 }

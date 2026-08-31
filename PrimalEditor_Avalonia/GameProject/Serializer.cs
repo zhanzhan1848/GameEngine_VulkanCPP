@@ -232,6 +232,7 @@ public static class Serializer
             ToneMapping = env.ToneMapping.ToString(),
             Exposure = env.Exposure,
             MainCameraEntityGuid = env.MainCameraEntityGuid?.ToString("D"),
+            EnvMapPath = env.EnvMapPath,
         };
     }
 
@@ -261,6 +262,7 @@ public static class Serializer
                     MeshRendererComponent renderer => JsonSerializer.SerializeToElement(renderer, SceneDocument.JsonOptions),
                     MaterialOverrideComponent overrideComp => JsonSerializer.SerializeToElement(overrideComp, SceneDocument.JsonOptions),
                     LightComponent light => JsonSerializer.SerializeToElement(light, SceneDocument.JsonOptions),
+                    EnvironmentComponent environment => JsonSerializer.SerializeToElement(environment, SceneDocument.JsonOptions),
                     CameraComponent camera => JsonSerializer.SerializeToElement(camera, SceneDocument.JsonOptions),
                     EntityMetadata metadata => JsonSerializer.SerializeToElement(metadata, SceneDocument.JsonOptions),
                     RotateScriptComponent rotate => JsonSerializer.SerializeToElement(rotate, SceneDocument.JsonOptions),
@@ -294,6 +296,7 @@ public static class Serializer
             MeshRendererComponent => "meshRenderer",
             MaterialOverrideComponent => "materialOverride",
             LightComponent => "light",
+            EnvironmentComponent => "environment",
             CameraComponent => "camera",
             EntityMetadata => "metadata",
             RotateScriptComponent => "scriptRotate",
@@ -371,6 +374,7 @@ public static class Serializer
         target.MainCameraEntityGuid = Guid.TryParse(source.MainCameraEntityGuid, out var mainCameraGuid)
             ? mainCameraGuid
             : null;
+        target.EnvMapPath = source.EnvMapPath ?? string.Empty;
     }
 
     private static void CopyEnvironment(SceneEnvironment source, SceneEnvironment target)
@@ -395,6 +399,7 @@ public static class Serializer
             "meshrenderer" => JsonSerializer.Deserialize<MeshRendererComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "materialoverride" => JsonSerializer.Deserialize<MaterialOverrideComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "light" => JsonSerializer.Deserialize<LightComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "environment" => JsonSerializer.Deserialize<EnvironmentComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "camera" => JsonSerializer.Deserialize<CameraComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "metadata" => JsonSerializer.Deserialize<EntityMetadata>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "scriptrotate" => JsonSerializer.Deserialize<RotateScriptComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),

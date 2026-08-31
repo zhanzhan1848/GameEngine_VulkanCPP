@@ -33,6 +33,7 @@ public sealed class SceneEnvironment : ViewModelBase, IDirtyTrackable
     private float _exposure = 1.0f;
 
     private System.Guid? _mainCameraEntityGuid;
+    private string _envMapPath = string.Empty;
 
     public float AmbientR { get => _ambientR; set => Set(ref _ambientR, value); }
     public float AmbientG { get => _ambientG; set => Set(ref _ambientG, value); }
@@ -61,11 +62,28 @@ public sealed class SceneEnvironment : ViewModelBase, IDirtyTrackable
         set => Set(ref _mainCameraEntityGuid, value);
     }
 
-    private void Set<T>(ref T field, T value)
+    /// <summary>
+    /// Absolute path to an equirectangular .hdr environment map. Drives the
+    /// viewport skybox and the baked IBL ambient. Empty = no environment.
+    /// </summary>
+    public string EnvMapPath
+    {
+        get => _envMapPath;
+        set => Set(ref _envMapPath, value ?? string.Empty);
+    }
+
+    private void Set<T>(ref T field, T value,
+        [System.Runtime.CompilerServices.CallerMemberName] string? propertyName = null)
     {
         if (!System.Collections.Generic.EqualityComparer<T>.Default.Equals(field, value))
         {
             field = value;
+            // SceneEnvironmentViewModel listens for the concrete environment
+            // property names and pushes each change to the native renderer.
+            // Previously only IsDirty was raised (and only on the first edit),
+            // so setting SkyboxEnabled followed by EnvMapPath left native state
+            // with an empty environment path while the inspector showed one.
+            OnPropertyChanged(propertyName);
             MarkDirty();
         }
     }

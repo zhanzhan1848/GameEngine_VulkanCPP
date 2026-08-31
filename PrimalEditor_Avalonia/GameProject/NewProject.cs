@@ -89,6 +89,8 @@ public static class NewProject
             {
                 IsActive = true,
             };
+            // Default sun light, persisted with the scene on SaveScene below.
+            scene.Entities.Add(PrimalEditor_Avalonia.Entities.SceneDefaults.CreateSunLight());
             project.Scenes.Add(scene);
             project.ActiveScene = scene;
 
