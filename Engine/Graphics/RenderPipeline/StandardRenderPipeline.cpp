@@ -2281,6 +2281,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 frameData.ddgi_valid = 1;
             }
             ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
+            // T8.12: card-view capture — this path never had the wiring (the
+            // BuildRenderGraph twin site has it). With card view enabled the
+            // screen-space gather inside AddPass is disabled, so without this
+            // the atlas keeps AtlasInit seed values (flat gray albedo / +Z
+            // normals) forever.
+            if (surface_cache_pass_->IsCardViewEnabled() && scene_snapshot_) {
+                surface_cache_pass_->AddCardCapturePasses(graph, *scene_snapshot_,
+                                                          static_cast<u32>(frameCount_));
+            }
             surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
             scLightingRG = graph.ImportResource("SCLightingAtlas", surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {

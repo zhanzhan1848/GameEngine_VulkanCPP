@@ -19,7 +19,7 @@ float gaussianWeight(float x, float sigma) {
 kernel void blurCS(
     texture2d_array<float, access::read> inputTexture [[texture(0)]],
     texture2d_array<float, access::write> outputTexture [[texture(1)]],
-    constant BlurParams& params [[buffer(0)]],
+    constant BlurParams& params [[buffer(2)]],  // C++/layout binding 2 (matches SPIR-V/WGSL; buffer(0) here was never bound on Metal)
     uint3 gid [[thread_position_in_grid]])
 {
     if (gid.x >= params.textureWidth || gid.y >= params.textureHeight) return;
@@ -60,7 +60,7 @@ kernel void blurCS(
 kernel void blurCS2D(
     texture2d<float, access::read> inputTexture [[texture(0)]],
     texture2d<float, access::write> outputTexture [[texture(1)]],
-    constant BlurParams& params [[buffer(0)]],
+    constant BlurParams& params [[buffer(2)]],  // C++/layout binding 2 (matches SPIR-V/WGSL; buffer(0) here was never bound on Metal)
     uint3 gid [[thread_position_in_grid]])
 {
     if (gid.x >= params.textureWidth || gid.y >= params.textureHeight) return;

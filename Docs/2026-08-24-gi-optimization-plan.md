@@ -298,6 +298,14 @@ T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改�
 - **验证（6540 帧，SPGI_CAM_LOCK=1，0 GPU fault、0 UPDATE SKIP）**：[ATLAS_INIT] 正常派发；SC dump 从第 2 轮起 **24/24 卡全亮**（此前 7,920 帧恒全零），值域有界（top 卡 0.67–2.0 无发散）、cov 稳定 0.44–1.0；CPU ~11ms/帧。SC↔probe 反馈环供能链恢复。
 - **新状态（下一 session 主线）**：SC 供能恢复后画面**稳定过曝**（锁相机三时点 mean luma 179 恒定、~49% 像素 ≥250、非两态振荡）——即挂账多时的 **SC 卡亮度标度问题（Metal 卡值 ~1.0–2.0 vs Vulkan 收敛 0.88，及 SC 阴影可见度标度）**浮出为主要矛盾；此前所有 GI 调平均在 SC 实效死亡态下进行。下一步：对卡 dump 做 Vulkan↔Metal 同字段对照（直射进卡项 / SDF shadow visibility / SC_FEEDBACK 环增益逐项），必要时先用 SC_INJECT_OFF/权重旋钮做阻尼 A/B 定位过曝能量入口。
 
+**CardCapture 零落地定位 + 三连修复（2026-08-31 第三轮，用户目检驱动）**：用户目检图集发现 albedo 全灰 / normal 全黄——恰为 AtlasInit 种子精确值（灰 (128,128,128) / oct 法线 (0.5,0.5) 裸看即黄），即 T8.12 卡视角捕获从未覆盖图集，SeedLightEval 在用假种子法线（全 +Z）/假深度评估全部卡 texel。
+- **根因 A（结构性缺线）**：`AddCardCapturePasses` 的调用只接在 `StandardRenderPipeline::BuildRenderGraph`，而 **TestModularPipeline 实际走 `RenderWithCommandBuffer`**——该路径的 SurfaceCache 段没有捕获接线。卡视图启用（默认 ON）时 AddPass 内的屏幕空间 gather 被 `!card_view_enabled_` 禁用 → **Metal 上两种捕获都不存在**，图集永远停在种子值。取证：f1200 图集回读 `seed_exact=3,995,648/4,194,304`（100% 精确种子）。修复：RenderWithCommandBuffer 的 SC 段补同款调用（IsCardViewEnabled && scene_snapshot 门控，先于 AddPass）。
+- **根因 B（接上后 GPU 挂死）**：捕获 scratch（visible/indirect/params buffer + 描述符集）只有 32 份**不分帧**，CPU 在编码期写、GPU 在执行期读，跨帧飞行（三缓冲）下 frame N+2 的写会撞 frame N 的读 → 撕裂 indirect args → 野 instanceCount → **GPU 挂死**（fence 30s 超时、100 帧内必现）。二分证据链：`CC_NO_DRAW`（跳过 draw）零超时 2700 帧（render pass 无辜）；`CC_MAX_INST` 1/128/512 干净、1024/1536/2278 挂死（实例越多读窗口越长）；`MTL_SHADER_VALIDATION=1`（时序大幅拖慢）下 1024 实例也能跑完 1200 帧 → **时序敏感竞争而非越界访问**（validation 零断言佐证）。修复：三件套+ds 按三帧飞行复制（96 份，`slot=(frame%3)*32+face_slot%32`，与引擎 `params_cb_[frameIdx]` 惯例一致）；seed batch 64→32（≤kCardCaptureSlots，防帧内编码期写覆盖已编码 draw 的数据）。注：Vulkan 路径同款竞争仅因 52FPS+短执行窗口未暴露。
+- **顺带修复 C（潜伏 validation 断言 + VSM blur 静默失效）**：`BlurPass.metal` 两 kernel 的 `params [[buffer(0)]]` 与 C++ 布局/描述符写入的 binding 2 错配（同 AtlasInit 病）——API validation 下硬断言（挡捕获诊断），无 validation 时 params 读 0 → **VSM blur 半径恒 0，blur 在 Metal 上从未实际生效**（82ed01ed 的"radius 8 得以生效"只验证了不崩；此前的双断言修复均未动绑定）。已改 `[[buffer(2)]]` 对齐三端。
+- **验证**：5400 帧 **0 fence 超时**（修复前 ~100 帧挂死）、0 GPU fault；f1200 回读非种子 texel **1,248,114**（albedo/normal 两图集 1,248,156 逐 texel 一致，捕获自洽）；每面可见簇 1000-1571、覆盖按 8 卡/帧轮转推进。诊断设施保留：`SC_RB` f60/f1200 种子匹配回读（随 SC_DUMP_CARDS）、CC 系列 TEMP 插桩已全部移除。
+- **状态不变项**：整体过曝与捕获修复前完全一致（mean luma 179、~48% 像素 ≥250）→ 实证过曝源**不是**捕获缺失，而在 SC 照明/探针环能量标度（遗留②）——现在两类"假输入"（种子法线/假标度）已排除其一，②的对照可以建立在真实捕获内容上了。
+
+
 
 ## T8.13+ 路线图（2026-08-28 排定，按依赖×收益排序）
 ### T8.13 P0 交付：GPU pass 级分解（2026-08-28，RG-Perf 实测）

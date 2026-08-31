@@ -995,7 +995,6 @@ void SurfaceCachePass::AddCardCapturePasses(
     RenderGraph& graph,
     const RenderSceneSnapshot& scene_snapshot,
     u32 current_frame_index) {
-    (void)current_frame_index;
     if (!card_view_enabled_ || !initialized_) return;
 
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
@@ -1013,11 +1012,14 @@ void SurfaceCachePass::AddCardCapturePasses(
         [](CapPassData&, RenderGraphBuilder& builder) {
             builder.SideEffect();  // atlases are manually barriered module RTs
         },
-        [this, &scene_snapshot, &gpuDraw, total](const CapPassData&, RenderGraphContext& ctx) {
+        [this, &scene_snapshot, &gpuDraw, total, current_frame_index](const CapPassData&, RenderGraphContext& ctx) {
             auto* cmd = ctx.cmdBuffer;
             const auto& cards = card_generator_.GetCards();
 
-            u32 batch = card_view_seeded_ ? 8u : 64u;
+            // Seed batch must stay ≤ kCardCaptureSlots (32): scratch slots are
+            // CPU-uploaded at encode time, so folding >32 faces per frame onto
+            // 32 slots overwrites data for draws earlier in the same buffer.
+            u32 batch = card_view_seeded_ ? 8u : 32u;
             if (const char* b = std::getenv("SC_CARDVIEW_BATCH"))
                 batch = (u32)std::max(1, atoi(b));
 
@@ -1069,7 +1071,8 @@ void SurfaceCachePass::AddCardCapturePasses(
                     math::v4{center.x, center.y, center.z, 1.0f},
                     math::v4{fwd.x, fwd.y, fwd.z, 0.0f},
                     0.05f, 2.0f * halfAxis + 0.5f,
-                    faces,  // face_slot — unique within this frame
+                    faces,          // face_slot — unique within this frame
+                    current_frame_index,
                     card.atlas_offset_x, card.atlas_offset_y, card.resolution,
                     albedo_atlas_, normal_atlas_, depth_atlas_, card_view_depth_);
                 if (ok) ++faces;
@@ -1759,53 +1762,65 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                           << " texels, " << card_count << " cards, "
                           << groups << " groups" << std::endl;
 
-                // TEMP diagnosis: one-shot readback of albedo alpha + lighting
-                // luminance — splits "seed/capture never wrote" from
-                // "LightEval wrote black".
-                if (std::getenv("SC_DUMP_CARDS") && current_frame_index == 60 &&
-                    !s_albedo_readback_done_) {
-                    s_albedo_readback_done_ = true;
-                    struct RB { u64 size; rhi::ResourceHandle tex; const char* name; u32 bpp; };
-                    RB rbs[2] = {
-                        { (u64)atlas_size_ * atlas_size_ * 4, albedo_atlas_, "albedo(rgba8)", 4 },
-                        { (u64)atlas_size_ * atlas_size_ * 8, lighting_atlas_[outIdx], "lighting(rgba16f)", 8 },
-                    };
-                    for (auto& rb : rbs) {
-                        rhi::BufferDesc d{};
-                        d.size = rb.size;
-                        d.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
-                        d.memoryUsage = rhi::GPUMemoryUsage::Readback;
-                        d.name = "SC_RB";
-                        auto stage = device_->CreateBuffer(d);
-                        if (stage == handles::INVALID_RESOURCE) continue;
-                        auto ch = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
-                        auto* c2 = rhi::GetCommandBuffer(ch);
-                        if (!c2) { device_->DestroyBuffer(stage); continue; }
-                        c2->Begin();
-                        rhi::BufferTextureCopyRegion rr{};
-                        rr.imageSubresource.mipLevel = 0;
-                        rr.imageSubresource.layerCount = 1;
-                        rr.imageExtent = {atlas_size_, atlas_size_, 1};
-                        c2->CopyTextureToBuffer(rb.tex, stage, &rr, 1);
-                        c2->End(); c2->Submit(); c2->WaitForCompletion();
-                        device_->DestroyCommandBuffer(ch);
-                        if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage, 0, rb.size))) {
-                            u64 z = 0, nz = 0;
-                            if (rb.bpp == 4) {
-                                for (u64 i = 3; i < rb.size; i += 4) {
-                                    u8 a = p[i];
-                                    if (a == 0) ++z; else ++nz;
+                // TEMP diagnosis: two-shot readback — albedo/normal seed-match
+                // rate at an early and a late frame splits "capture never
+                // wrote" (seed stays 100%) from "capture progresses".
+                {
+                    static const u32 rbFrames[2] = { 60, 1200 };
+                    for (u32 rbI = 0; rbI < 2; ++rbI) {
+                        if (std::getenv("SC_DUMP_CARDS") && current_frame_index == rbFrames[rbI] &&
+                            s_albedo_readback_done_ == (rbI == 0)) {
+                            s_albedo_readback_done_ = true;
+                            struct RB { u64 size; rhi::ResourceHandle tex; const char* name; u32 bpp; };
+                            RB rbs[2] = {
+                                { (u64)atlas_size_ * atlas_size_ * 4, albedo_atlas_, "albedo(rgba8)", 4 },
+                                { (u64)atlas_size_ * atlas_size_ * 4, normal_atlas_, "normal(rg16f)", 4 },
+                            };
+                            for (auto& rb : rbs) {
+                                rhi::BufferDesc d{};
+                                d.size = rb.size;
+                                d.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
+                                d.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                                d.name = "SC_RB";
+                                auto stage = device_->CreateBuffer(d);
+                                if (stage == handles::INVALID_RESOURCE) continue;
+                                auto ch = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+                                auto* c2 = rhi::GetCommandBuffer(ch);
+                                if (!c2) { device_->DestroyBuffer(stage); continue; }
+                                c2->Begin();
+                                rhi::BufferTextureCopyRegion rr{};
+                                rr.imageSubresource.mipLevel = 0;
+                                rr.imageSubresource.layerCount = 1;
+                                rr.imageExtent = {atlas_size_, atlas_size_, 1};
+                                c2->CopyTextureToBuffer(rb.tex, stage, &rr, 1);
+                                c2->End(); c2->Submit(); c2->WaitForCompletion();
+                                device_->DestroyCommandBuffer(ch);
+                                if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage, 0, rb.size))) {
+                                    u64 alpha0 = 0, seed = 0, total = (u64)atlas_size_ * atlas_size_;
+                                    for (u64 i = 0; i < total; ++i) {
+                                        const u8* t = p + i * 4;
+                                        if (rb.bpp == 4 && rb.name[0] == 'a') {
+                                            // albedo rgba8: alpha gate + exact seed match
+                                            if (t[3] == 0) ++alpha0;
+                                            if (t[0] == 128 && t[1] == 128 && t[2] == 128 && t[3] == 255) ++seed;
+                                        } else {
+                                            // normal rg16f: seed = half 0.5 = 0x3800 both channels
+                                            u16 r, g;
+                                            std::memcpy(&r, t, 2);
+                                            std::memcpy(&g, t + 2, 2);
+                                            if (r == 0x3800 && g == 0x3800) ++seed;
+                                        }
+                                    }
+                                    std::cerr << "[SC_RB] f" << rbFrames[rbI] << " " << rb.name
+                                              << ": alpha0=" << alpha0
+                                              << " seed_exact=" << seed
+                                              << " non_seed=" << (total - seed)
+                                              << " (of " << total << ")" << std::endl;
+                                    device_->UnmapBuffer(stage);
                                 }
-                            } else {
-                                for (u64 i = 0; i < rb.size; i += 8)
-                                    if (p[i]==0 && p[i+1]==0 && p[i+2]==0) ++z; else ++nz;
+                                device_->DestroyBuffer(stage);
                             }
-                            std::cerr << "[SC_RB] " << rb.name << ": zero=" << z
-                                      << " nonzero=" << nz << " (of "
-                                      << atlas_size_*atlas_size_ << ")" << std::endl;
-                            device_->UnmapBuffer(stage);
                         }
-                        device_->DestroyBuffer(stage);
                     }
                 }
             }

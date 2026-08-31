@@ -4093,7 +4093,7 @@ bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
         }
     }
 
-    for (u32 f = 0; f < kCardCaptureSlots; ++f) {
+    for (u32 f = 0; f < kCardCaptureFrameCopies * kCardCaptureSlots; ++f) {
         rhi::BufferDesc visDesc{};
         visDesc.size = (u64)max_clusters * 4;  // u32 per visible cluster
         visDesc.type = rhi::BufferType::Structured;
@@ -4137,7 +4137,7 @@ bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
 
 void GPUDrivenDrawPipeline::ShutdownCardCaptureResources() {
     if (!card_capture_initialized_ || !device_) return;
-    for (u32 f = 0; f < kCardCaptureSlots; ++f) {
+    for (u32 f = 0; f < kCardCaptureFrameCopies * kCardCaptureSlots; ++f) {
         if (card_capture_visible_buffer_[f] != rhi::handles::INVALID_RESOURCE)
             device_->DestroyBuffer(card_capture_visible_buffer_[f]);
         if (card_capture_indirect_buffer_[f] != rhi::handles::INVALID_RESOURCE)
@@ -4170,7 +4170,7 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
                                                    const math::v4& card_center,
                                                    const math::v4& card_fwd,
                                                    float depth_near, float depth_far,
-                                                   u32 face_slot,
+                                                   u32 face_slot, u32 frame_index,
                                                    u32 viewport_x, u32 viewport_y, u32 resolution,
                                                    rhi::ResourceHandle albedo_rt,
                                                    rhi::ResourceHandle normal_rt,
@@ -4197,7 +4197,10 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
         return true;
     }
 
-    u32 slot = face_slot % kCardCaptureSlots;
+    // Triple-buffered scratch: (frame%3) selects the per-frame copy so the
+    // CPU upload for a future frame never races this frame's GPU reads.
+    u32 slot = (frame_index % kCardCaptureFrameCopies) * kCardCaptureSlots
+             + (face_slot % kCardCaptureSlots);
 
     // --- CPU cull: meshlet world spheres vs the card's view frustum
     // (ortho box encoded in view*proj — ExtractFrustumPlanes works for both).
@@ -4249,7 +4252,7 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
             device_->UnmapBuffer(card_capture_visible_buffer_[slot]);
         }
     }
-    {
+    if (totalVisible > 0) {
         void* args = device_->MapBuffer(card_capture_indirect_buffer_[slot], 0, sizeof(u32) * 4);
         if (args) {
             u32* p = static_cast<u32*>(args);

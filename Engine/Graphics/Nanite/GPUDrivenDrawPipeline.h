@@ -261,7 +261,7 @@ public:
                                 const math::v4& card_center,
                                 const math::v4& card_fwd,
                                 float depth_near, float depth_far,
-                                u32 face_slot,
+                                u32 face_slot, u32 frame_index,
                                 u32 viewport_x, u32 viewport_y, u32 resolution,
                                 rhi::ResourceHandle albedo_rt,
                                 rhi::ResourceHandle normal_rt,
@@ -496,20 +496,27 @@ private:
     // ---- T8.12 Card-View Capture Resources ----
     // 32 face slots so a multi-face batch can coexist in flight; visible list
     // = u32 cluster ids, indirect = 4×u32, params = CardCaptureParams (176B).
+    // The three buffer sets (and their descriptor sets) are TRIPLE-buffered by
+    // frame-in-flight: slot = (frame%3)*kCardCaptureSlots + face_slot%32.
+    // Metal managed buffers are read at GPU execute time — without per-frame
+    // copies the CPU rewrite for frame N+2 races frame N's read (torn indirect
+    // args → wild instanceCount → GPU hang). Vulkan's same-code path tolerates
+    // the race only by timing luck (52FPS, short execute windows).
     static constexpr u32 kCardCaptureSlots = 32;
+    static constexpr u32 kCardCaptureFrameCopies = 3;
     bool card_capture_initialized_{false};
     u32 card_capture_max_clusters_{0};
     rhi::PipelineHandle card_capture_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineLayoutHandle card_capture_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::DescriptorSetLayoutHandle card_capture_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
-    rhi::ResourceHandle card_capture_visible_buffer_[kCardCaptureSlots]{
-        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
-    rhi::ResourceHandle card_capture_indirect_buffer_[kCardCaptureSlots]{
-        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
-    rhi::ResourceHandle card_capture_params_buffer_[kCardCaptureSlots]{
-        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
-    rhi::DescriptorSetHandle card_capture_ds_[kCardCaptureSlots]{
-        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
+    rhi::ResourceHandle card_capture_visible_buffer_[kCardCaptureFrameCopies * kCardCaptureSlots]{
+        rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle card_capture_indirect_buffer_[kCardCaptureFrameCopies * kCardCaptureSlots]{
+        rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle card_capture_params_buffer_[kCardCaptureFrameCopies * kCardCaptureSlots]{
+        rhi::handles::INVALID_RESOURCE};
+    rhi::DescriptorSetHandle card_capture_ds_[kCardCaptureFrameCopies * kCardCaptureSlots]{
+        rhi::handles::INVALID_DESCRIPTOR_SET};
 
     rhi::PipelineHandle shadow_cull_pipeline_{ rhi::handles::INVALID_PIPELINE };    // Compute: cluster culling
     rhi::PipelineHandle shadow_depth_pipeline_{ rhi::handles::INVALID_PIPELINE };   // Graphics: depth-only raster
