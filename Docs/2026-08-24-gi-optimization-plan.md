@@ -305,6 +305,12 @@ T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改�
 - **验证**：5400 帧 **0 fence 超时**（修复前 ~100 帧挂死）、0 GPU fault；f1200 回读非种子 texel **1,248,114**（albedo/normal 两图集 1,248,156 逐 texel 一致，捕获自洽）；每面可见簇 1000-1571、覆盖按 8 卡/帧轮转推进。诊断设施保留：`SC_RB` f60/f1200 种子匹配回读（随 SC_DUMP_CARDS）、CC 系列 TEMP 插桩已全部移除。
 - **状态不变项**：整体过曝与捕获修复前完全一致（mean luma 179、~48% 像素 ≥250）→ 实证过曝源**不是**捕获缺失，而在 SC 照明/探针环能量标度（遗留②）——现在两类"假输入"（种子法线/假标度）已排除其一，②的对照可以建立在真实捕获内容上了。
 
+**白爆源分解 + GIGather 输出纹理覆写实锤（2026-08-31 第四轮，仪器驱动）**：用户目检三图（albedo 图集真实内容 ✓ / normal 图集真实内容 ✓ / 最终渲染仍白爆）。A/B 分解（锁相机 + 窗口 luma 统计）：SC_INJECT_OFF=1 → mean 179→80、clip 0%（白能量走 SC→probe 注入路）；SSGI_OFF → fusion 整体被门控跳过 → mean 28（直射-only 基线）；BLOOM_OFF（临时开关）→ 无变化 ✗；TAA_OFF（临时开关）→ 无变化 ✗；SSGI_SILENCE（静音 SSGI 但保留 fusion）→ 无变化 ✗。GI_DEBUG_STRIP 四条带 + 新仪器 IND_STATS（indirect_output_ 全量回读，需 CopySource+TransferDst+延迟 120 帧才可信）测得 fusion 的 ddgi 输入 **mean=72 线性、max≈1390**。可信化后逐级测量收窄：① IRR_DUMP（gather 槽位探针缓冲 raw BufferCopy）maxAbs=1.2-1.9、无 NaN——**探针数据正常**；② SHeval axis-max=0.006——SH 正向瓣上限 0.006，kernel 数学上输出不可能超 ~2.5×π；③ kernel 内加 [0,10] 钳制后输出纹理仍实测 **25227-27731 + 负值 + p50=0**——**巨值/负值/零全部来自 kernel 之外 = gi_halfres_texture_ 被其它 pass 覆写（Metal 纹理分配器别名/复用 bug）**。半分辨率白噪斑纹（用户截图布料区绿白 speckle）即该污染的上采样特征。奇数尺寸（+3）打破别名对齐测试无效（34.2% vs 35.4%，非同尺寸别名）。
+- **本轮顺带修复**：a) `black_texture_` 显式清零（Metal 堆纹理**非零初始化**，原代码注释 "Apple Silicon zero-initializes" 是错误假设——回收残留曾被 SPGI/AO 回退槽采样，GI_DEBUG_STRIP 下修后条带版画面 239→88 即证明）；b) GIGather `camPos` CB 错位（`viewCB[4]` 实为 probe_origin_spacing，camera_pos 在 `viewCB[6]`——garbage V/R 污染 specular 瓣）；c) 探针 irradiance 索引 float3→float4（MSL float3 数组步长 16B 与 GLSL std430 一致，等价变换；修正早前"12B 步长"误判）。
+- **重大仪器教训**：staging 回读缓冲**必须**设 `bindFlags = TransferDst`，否则 CopyTextureToBuffer 静默无效、读回的是分配垃圾——GIGather 自带 out-lum dump 一直缺此标志，**此前所有"56.6 尖峰→2.07"读数全部无效**（垃圾内存模式，且随堆状态"变化"造成假因果）。修复后真值：gather 输出 p50=0 / p90=1.4 / max≈27000。
+- **重大流程教训（CWD/shaders 陈旧副本陷阱）**：TestModularPipeline 的 shader 编译路径优先取 `$(cwd)/shaders/`，而构建系统 `IntegrationTestsAssetsCopy` 是 **stamp 门控的一次性 copy_directory**（构建目录首次配置时拷一次，此后源目录改动永不刷新）——EngineTest/shaders 的修改对已存在的构建目录**不可见**。本轮"float4 修复无效""条带版与正常版矛盾"均由此起。已 `rsync EngineTest/shaders → Darwin/Debug/shaders` 临时解决；长期应在 CMake 里改 per-file copy_if_different 或去掉 CWD 优先。
+- **下一 session 主线（白爆最后一环）**：定位覆写 gi_halfres_texture_ 的 pass——嫌疑：SSAO/SSGI/HZB/velocity 等 half-res RT 在 TextureAllocator 中的堆偏移碰撞（多次 InitializeLumenPasses 重建周期的 free-list 状态可疑）。武器已备齐：Xcode GPU capture（两处启动断言已修）、IND_STATS/IRR_DUMP/钳制二分法。判据：capture 里看 gi_halfres_texture_ 的 draw/write 序列；或按堆偏移打印所有 half-res RT 的分配区间找重叠。
+
 
 
 ## T8.13+ 路线图（2026-08-28 排定，按依赖×收益排序）
