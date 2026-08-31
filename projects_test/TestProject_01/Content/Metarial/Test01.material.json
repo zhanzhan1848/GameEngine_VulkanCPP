@@ -1,0 +1,14 @@
+{
+  "SchemaVersion": 2,
+  "Name": "Test01",
+  "ShaderGuid": "00000000-0000-0000-0000-000000000000",
+  "RenderState": {
+    "Surface": "Opaque",
+    "CullMode": "Back",
+    "DepthWrite": true,
+    "DepthTest": true
+  },
+  "Parameters": {},
+  "Textures": {},
+  "GraphFile": null
+}

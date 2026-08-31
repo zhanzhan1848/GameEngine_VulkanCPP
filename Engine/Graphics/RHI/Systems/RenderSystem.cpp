@@ -180,8 +180,31 @@ void RenderSystem::Wait(u32 frameIndex) {
     rhi::SyncHandle fence = frameFences_[idx];
     if (fence != rhi::handles::INVALID_SYNC) {
         auto waitStart = std::chrono::high_resolution_clock::now();
-        if (!device_->WaitForSync(fence, 1000)) {
-            std::cerr << "RenderSystem: Wait timeout for frame " << frameIndex << std::endl;
+        // T8.13 fix (Metal two-state GI flip): the old single 1s wait TIMED
+        // OUT AND PROCEEDED whenever a frame took >1s GPU (High preset at
+        // render_scale 2.0 on Debug) — the CPU then rewrote the triple-
+        // buffered CBs/UBOs of a slot the GPU was still executing, and the
+        // GI chain read transient garbage (SDF extents, light color, volume
+        // params), flipping the whole frame between two illumination states.
+        // Retry until signaled OR a 30s safety bound — a wedged Metal command
+        // buffer must not wedge this process while it holds its full GPU
+        // allocation pool (08-30/31 overnight system instability). High-preset
+        // Debug frames take 1-2s GPU, so 30s is generous; on timeout proceed
+        // with the stale-slot warning (degrade, don't wedge).
+        u32 waitRetries = 0;
+        while (!device_->WaitForSync(fence, 1000)) {
+            ++waitRetries;
+            if (waitRetries == 1 || waitRetries % 5 == 0) {
+                std::cerr << "RenderSystem: frame fence not signaled after "
+                          << waitRetries << "s (frame " << frameIndex
+                          << ") — GPU-bound, still waiting" << std::endl;
+            }
+            if (waitRetries >= 30) {
+                std::cerr << "RenderSystem: frame fence unsignaled after 30s "
+                          << "(frame " << frameIndex << ") — proceeding (stale "
+                          << "triple-buffered params possible this frame)" << std::endl;
+                break;
+            }
         }
         auto waitEnd = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> waitTime = waitEnd - waitStart;

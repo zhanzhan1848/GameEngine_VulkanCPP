@@ -299,8 +299,12 @@ fragment float4 fragmentLighting_v3(
 
     float3 diffuse = kD * albedo / PI;
 
-    // Direct light contribution
-    float3 Lo = (diffuse + specBRDF) * sceneData.lightColor.rgb * NdotL;
+    // Direct light contribution.
+    // T8.10h sync: DIRECT_INTENSITY 2.5→3.125 (+25%), the Vulkan
+    // DeferredLighting.frag knob (sunlit p95 read as overcast). Scales SCREEN
+    // direct only — camera light_color also drives probe rays.
+    constexpr float DIRECT_INTENSITY = 3.125f;
+    float3 Lo = (diffuse + specBRDF) * sceneData.lightColor.rgb * NdotL * DIRECT_INTENSITY;
 
     // Shadow — VSM moments + Chebyshev, or the legacy depth-compare path.
     float shadow = 1.0;
@@ -589,7 +593,13 @@ fragment float4 fragmentBlitComposite(
 // Reads multiple textures in fragment shader where tile cache handles bandwidth efficiently.
 // ================================================================================================
 
-// Fusion Pass 1 (half-res): pre-combine GI sources + albedo + ssao → indirect contribution
+// Fusion Pass 1 (full-res): pre-combine GI sources + albedo + ssao → indirect contribution.
+// T8.7–T8.13 sync: replaces the T2.3 cross-fade with the current Vulkan
+// FusionIndirect.frag formula — radiance-validity gate on SPGI (T8.7),
+// luminance-advantage merge gate (T8.8), sky-leak far-field floor (T8.9),
+// occlusion-modulated floor (T8.10c), SSGI degradation linkage.
+// DDGI is a half-res low-frequency input sampled directly (no blur —
+// matches the Vulkan baseline the 52.5/46.9/97.2/24.7 numbers came from).
 fragment float4 fragmentFusionIndirect(
     VertexOut in [[stage_in]],
     texture2d<float> ssgiColor   [[texture(0)]],
@@ -605,22 +615,39 @@ fragment float4 fragmentFusionIndirect(
     float3 albedo  = albedoTex.sample(s, in.uv).rgb;
     float  ssao    = ssaoTex.sample(s, in.uv).r;
     if (ssao <= 0.0f) ssao = 1.0f;
-    float ao = pow(ssao, 1.5f);
+    // SSAO is a local contact-shadow approximation, not a validity mask for
+    // probe lighting — it shapes DDGI without erasing low-frequency bounce.
+    float ao = mix(0.4f, 1.0f, pow(ssao, 1.5f));
 
     float3 ssgi_irr  = ssgi4.rgb;
     float  ssgi_hit  = ssgi4.a;
-    // SSGI confidence normalized against the 30-unit trace cap (Vulkan parity)
+    // SSGI confidence normalized against the 30-unit trace cap; ≥0.3 floor.
     float  ssgi_hit_norm = clamp(ssgi_hit, 0.0f, 30.0f) / 30.0f;
-    float  ssgi_conf = saturate(1.0f - ssgi_hit_norm * 0.7f);
-    // SPGI confidence gate (T2.3): dummy black texture has alpha 0 → weight 0
-    float  spgi_w = saturate(spgi4.a * 2.0f);
+    float  ssgi_conf = clamp(1.0f - ssgi_hit_norm * 0.7f, 0.3f, 1.0f);
+    // T8.7: SPGI confidence × luminance validity — confidently-black SPGI
+    // must not suppress the accumulated world-probe ambient.
+    float  spgiLum = dot(spgi4.rgb, float3(0.2126f, 0.7152f, 0.0722f));
+    float  radianceValidity = smoothstep(0.02f, 0.15f, spgiLum);
+    float  spgi_w = clamp(spgi4.a * 2.0f, 0.0f, 0.9f) * radianceValidity;
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    // Unified three-source blend (T2.3 — matches Vulkan FusionIndirect.frag)
-    float3 indirect = albedo *
-        (ddgi * 0.8f * (1.0f - spgi_w)
-       + ssgi_irr * ssgi_conf * 0.2f * (1.0f - spgi_w)
-       + spgi4.rgb * spgi_w * 1.25f) * 0.7f;
+    // DDGI is the stable low-frequency field; SPGI may replace it only where
+    // the screen-probe estimate carries at least as much energy.
+    float3 ddgiBase   = ddgi * 0.7f;
+    float3 spgiTarget = spgi4.rgb * 1.25f;
+    // T8.8: replacement needs a real brightness ADVANTAGE — luminance-ratio
+    // ramp 1.10→1.35 gates the max() merge; confidence stays a multiplier.
+    float ddgiLum  = dot(ddgiBase,   float3(0.2126f, 0.7152f, 0.0722f));
+    float spgiLumT = dot(spgiTarget, float3(0.2126f, 0.7152f, 0.0722f));
+    float replaceW = smoothstep(1.10f, 1.35f, spgiLumT / max(ddgiLum, 1e-5f));
+    float3 gi = mix(ddgiBase, max(ddgiBase, spgiTarget), spgi_w * replaceW)
+              + ssgi_irr * ssgi_conf * mix(0.25f, 0.15f, spgi_w * replaceW);
+
+    // T8.9 + T8.10c: sky-leak ambient (Lumen far-field) — additive with the
+    // near-field estimate, occlusion-modulated so shadow pockets key it down.
+    gi += float3(0.17f, 0.18f, 0.21f) * mix(0.45f, 1.0f, pow(ssao, 1.1f));
+
+    float3 indirect = albedo * gi;
     indirect *= ao;
 
     return float4(indirect, 1.0f);
@@ -662,10 +689,12 @@ fragment float4 fragmentFusion(
     // the widened lobe converges to E(N) which FusionIndirect already adds.
     reflection *= (1.0f - roughness * roughness) * 0.75f;
 
-    // Beer-Lambert: attenuate scene by transmittance, add scattered light
+    // Beer-Lambert: attenuate scene by transmittance, add scattered light.
+    // T8.13 sync: output HDR linear — Vulkan FusionComposite.frag parity
+    // ("tonemap is handled by FinalBlit to avoid double tonemap"). The chain
+    // continues through TAA → Bloom → ToneMappingPass (the single ACES+gamma).
     float3 result = (scene + indirect + reflection) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));
-    result = toneMap(result);
 
     return float4(result, 1.0f);
 }

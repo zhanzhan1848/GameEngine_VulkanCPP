@@ -100,6 +100,10 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, bool* outIsBinary) 
     return std::vector<u8>(src.begin(), src.end());
 #else
     std::string path = utils::ShaderRegistry::GetShaderPath(platform, "TAA");
+    // T8.13 sync: resolve repo-relative path independently of process CWD —
+    // the bare CWD-relative open failed whenever the app launched from the
+    // build dir (Darwin/Debug), silently disabling TAA on Metal.
+    path = utils::ShaderRegistry::ResolveShaderPath(path);
     std::string src = LoadShaderSource(path);
     return std::vector<u8>(src.begin(), src.end());
 #endif

@@ -14,7 +14,9 @@
 #include <filesystem>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #ifdef TEST_METAL_GI_FUSION
 // ============================================================================
@@ -48,6 +50,78 @@ Engine_Test::Engine_Test()
 // Texture loading helpers (from TestNaniteStreamingPipeline)
 // ============================================================================
 namespace {
+    uint16_t FloatToHalf(float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+        const int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xffu) - 127 + 15;
+        const uint32_t mantissa = (bits >> 13) & 0x3ffu;
+        if (exponent <= 0) return sign;
+        if (exponent >= 31) return static_cast<uint16_t>(sign | 0x7c00u);
+        return static_cast<uint16_t>(sign | (exponent << 10) | mantissa);
+    }
+
+    bool UploadTextureLayers(RHIDeviceBase* device, ResourceHandle texture,
+                             const void* data, u64 bytesPerLayer,
+                             u32 width, u32 height, u32 layerCount) {
+        BufferDesc stagingDesc{};
+        stagingDesc.size = bytesPerLayer * layerCount;
+        stagingDesc.type = BufferType::Raw;
+        stagingDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        stagingDesc.name = "ModularPipelineTextureStaging";
+        const ResourceHandle staging = device->CreateBuffer(stagingDesc);
+        if (staging == handles::INVALID_RESOURCE ||
+            !device->UpdateBufferData(staging, data, stagingDesc.size, 0)) {
+            if (staging != handles::INVALID_RESOURCE) device->DestroyBuffer(staging);
+            return false;
+        }
+
+        const CommandBufferHandle commandHandle =
+            device->CreateCommandBuffer(CommandQueueType::Graphics);
+        RHICommandBuffer* command = rhi::GetCommandBuffer(commandHandle);
+        if (!command || !command->Begin()) {
+            device->DestroyCommandBuffer(commandHandle);
+            device->DestroyBuffer(staging);
+            return false;
+        }
+
+        std::vector<BufferTextureCopyRegion> regions(layerCount);
+        for (u32 layer = 0; layer < layerCount; ++layer) {
+            auto& region = regions[layer];
+            region.bufferOffset = bytesPerLayer * layer;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource = {0, layer, 1};
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {width, height, 1};
+        }
+        command->CopyBufferToTexture(staging, texture, regions.data(), layerCount);
+
+        ResourceBarrier toShaderResource{};
+        toShaderResource.resource = texture;
+        toShaderResource.beforeState = ResourceState::CopyDest;
+        toShaderResource.afterState = ResourceState::ShaderResource;
+        toShaderResource.subresource = 0xffffffffu;
+        toShaderResource.queueFamily = 0xffffffffu;
+        command->InsertBarrier(&toShaderResource, 1);
+        if (!command->End()) {
+            device->DestroyCommandBuffer(commandHandle);
+            device->DestroyBuffer(staging);
+            return false;
+        }
+
+        const SyncHandle fence = device->CreateSync();
+        QueueSubmitInfo submit{};
+        submit.cmdBuffer = commandHandle;
+        submit.signalFence = fence;
+        const bool submitted = device->Submit(submit);
+        const bool completed = submitted && device->WaitForSync(fence, UINT32_MAX);
+        device->DestroySync(fence);
+        device->DestroyCommandBuffer(commandHandle);
+        device->DestroyBuffer(staging);
+        return completed;
+    }
+
     ResourceHandle CreateTextureFromData(RHIDeviceBase* device, uint32_t width, uint32_t height, const unsigned char* data, bool isSRGB) {
         DataFormat format = isSRGB ? DataFormat::RGBA8_sRGB : DataFormat::RGBA8_UNorm;
         uint32_t row_pitch = width * 4;
@@ -143,7 +217,12 @@ namespace {
     const shader_file_info kDeferredVS     { "DeferredLighting.metal", "vertexMain",                    ::shader_type::vertex };
     const shader_file_info kDeferredPS     { "DeferredLighting.metal", "fragmentLighting_gpuDriven",     ::shader_type::pixel  };
     const shader_file_info kBlitVS         { "DeferredLighting.metal", "vertexMain",                    ::shader_type::vertex };
-    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlit",                  ::shader_type::pixel  };
+    // T8.13 sync: FinalBlit samples the FUSION module's already-tone-mapped
+    // LDR output (postToonColor / fusionOut) — the tonemapping fragmentBlit
+    // applied a SECOND ACES+gamma pass on top and pinned the whole frame to
+    // the white shoulder. fragmentBlitNoTonemap is the correct final blit
+    // (same entry the Engine copy's mode-6 path uses).
+    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlitNoTonemap",      ::shader_type::pixel  };
     const shader_file_info kShadowFilter   { "ShadowFilter.metal",     "shadow_filter_compute",          ::shader_type::compute };
     const shader_file_info kGIGather       { "DDGIGIGather.metal",     "ddgi_gi_gather",                 ::shader_type::compute };
     const shader_file_info kFusionIndirect { "DeferredLighting.metal", "fragmentFusionIndirect",         ::shader_type::pixel  };
@@ -166,6 +245,12 @@ bool TestModularPipeline::Initialize() {
     if (!InitializeDevice()) return false;
     if (!CompileShaders()) return false;
     if (!InitializePipeline()) return false;
+
+    // Match the Vulkan reference's sunset HDR environment. Keep the test
+    // usable on machines without the optional HDR asset or IBL shader support.
+    if (!InitializeIBL()) {
+        std::cerr << "[TestModularPipeline] IBL unavailable; using pipeline fallback ambient" << std::endl;
+    }
 
     SetupCamera();
 
@@ -227,6 +312,12 @@ bool TestModularPipeline::CompileShaders() {
 
     auto CompileOne = [&](const shader_file_info& info) -> ShaderHandle {
         primal::utl::vector<std::wstring> extraArgs;
+        // GI_DEBUG_STRIP=1: fusion indirect outputs each GI input in vertical
+        // strips (ddgi/ssgi/spgi/full) for washout diagnosis. Temp knob.
+        if (std::getenv("GI_DEBUG_STRIP"))
+            extraArgs.push_back(L"-DGI_DEBUG_STRIP=1");
+        if (std::getenv("DDGI_DBG_PATH"))
+            extraArgs.push_back(L"-DDDGI_DBG_PATH=1");
         auto compiled = compile_shader(info, testShaderPath.c_str(), extraArgs);
         if (!compiled) {
             std::cerr << "[TestModularPipeline] Failed to compile " << info.file_name << ":" << info.function << std::endl;
@@ -319,27 +410,94 @@ bool TestModularPipeline::InitializePipeline() {
     }
 
     pipeline_->SetOutputResource(handles::INVALID_RESOURCE, {});
+    // T8.13 note: SetViewportSize triggers InitializeSubsystems() with the
+    // pipeline DEFAULT quality (screen probes off, render_scale 1.0) — the
+    // proven-stable configuration (0 GPU faults in 640+ frames). The lighting
+    // calibration below flows through the per-frame CB upload, so it takes
+    // effect without re-initialization.
     pipeline_->SetViewportSize(renderWidth_, renderHeight_);
     pipeline_->SetShaderHandles(shaderHandles_);
 
-    // Configure Lumen — Medium preset: SSGI + SSAO + DDGI + PCF shadows
-    // Probe grid matches TestNaniteStreamingPipeline defaults: 16x8x16 = 2048 probes, 4.0 spacing
-    // Coverage: 60x28x60 units — large enough for Sponza (~30 units)
+    // T8.13 sync: offline merged SDF — same wiring as TestVulkanSponzaRenderGraph.
+    // First run merges (~5 min) and writes the cache; later runs load in ~1s.
+    {
+        const std::string sdfCache =
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Sponza_global_sdf.v1.cache";
+        const std::string pipeModelPath =
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Sponza_pipeline.model";
+        offline_sdf_merger_ = new primal::graphics::nanite::OfflineSDFMerger();
+        if (!offline_sdf_merger_->LoadFromCache(device_.get(), sdfCache.c_str())) {
+            u32 sdfCount = offline_sdf_merger_->LoadFromPipelineModel(pipeModelPath.c_str());
+            if (sdfCount > 0) {
+                std::cerr << "[TestModularPipeline] Offline SDF loaded: " << sdfCount
+                          << " meshes, merging..." << std::endl;
+                if (!offline_sdf_merger_->BuildAndUpload(device_.get(), sdfCache.c_str())) {
+                    std::cerr << "[TestModularPipeline] Offline SDF merge/upload failed" << std::endl;
+                }
+            } else {
+                std::cerr << "[TestModularPipeline] No offline SDF data found" << std::endl;
+            }
+        }
+        if (offline_sdf_merger_->IsValid()) {
+            pipeline_->SetOfflineSDFSource(
+                offline_sdf_merger_->GetTexture(),
+                offline_sdf_merger_->GetOrigin(),
+                offline_sdf_merger_->GetExtent(),
+                offline_sdf_merger_->GetResolution());
+            const auto so = offline_sdf_merger_->GetOrigin();
+            const auto se = offline_sdf_merger_->GetExtent();
+            const float maxExt = std::max({se.x, se.y, se.z});
+            std::cerr << "[TestModularPipeline] Offline SDF wired: origin=("
+                      << so.x << "," << so.y << "," << so.z << ") extent=("
+                      << se.x << "," << se.y << "," << se.z << ") res="
+                      << offline_sdf_merger_->GetResolution()
+                      << " voxel=" << maxExt / offline_sdf_merger_->GetResolution()
+                      << " traceThreshold=1.25x voxel=" << maxExt / offline_sdf_merger_->GetResolution()
+                      << std::endl;
+        } else {
+            delete offline_sdf_merger_;
+            offline_sdf_merger_ = nullptr;
+        }
+    }
+
+    // T8.13 stability revert: the High-preset experiment (SPGI WIP shaders +
+    // render_scale 2.0 + post-init Lumen rebuild) produced GPU Address Page
+    // Faults (~8% of frames) that stall every GPU client system-wide, plus a
+    // card-registration collapse (374 -> 8 placeholder cards) after the
+    // settings-driven Lumen rebuild. The DEFAULT quality configuration
+    // (screen probes off, 1x scale, SSGI on) is the proven-stable baseline;
+    // SPGI_ON=1 re-enables for diagnosis once the Metal SPGI shaders are
+    // audited. (The Vulkan reference keeps SPGI via its shipped .comp chain.)
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
     pipeline_->SetLumenConfig(lumenConfig);
-#ifndef TEST_METAL_GI_FUSION
-    // GI-fusion verification matches the Vulkan smoke test's config exactly
-    // (Medium preset, no extra quality overrides) so measured differences are
-    // shader-side only.
-    pipeline_->SetQualityOverride(true /*enable_screen_probes*/, true /*enable_surface_cache*/);
 
-    // Enable Froxel Fog
+    // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
+    // TestVulkanSponzaRenderGraph (the measurement reference). Without this
+    // the pipeline defaults (light_color 5.0, ddgi_light_color 20.0) put the
+    // probe analytic drive at ~60x the Vulkan reference and pinned every
+    // GI-lit surface to the white ACES shoulder.
     {
-        auto settings = pipeline_->GetSettings();
-        settings.quality.enable_froxel_fog = true;
-        pipeline_->UpdateSettings(settings);
+        auto renderSettings = pipeline_->GetSettings();
+        renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
+        renderSettings.lighting.light_color = {2.0f, 1.9f, 1.8f, 1.0f};
+        renderSettings.lighting.ddgi_light_color = {0.31831f, 0.30239f, 0.28648f, 1.0f};
+        pipeline_->UpdateSettings(renderSettings);
     }
+
+    // T8.13 sync: match the Vulkan reference app's pass scope — volume paths
+    // are explicitly out of scope there; fragmentFusion adds vol.rgb (fog
+    // scatter) additively, so a Metal fog difference reads as a full-screen
+    // white wash.
+    pipeline_->SetPassEnabled(RenderPassID::SSR, false);
+    pipeline_->SetPassEnabled(RenderPassID::VolumePass, false);
+    pipeline_->SetPassEnabled(RenderPassID::VolumeRenderer, false);
+    pipeline_->SetPassEnabled(RenderPassID::FroxelFog, false);
+#ifndef TEST_METAL_GI_FUSION
+    // Screen probes are enabled explicitly through the axis configuration
+    // above; no late quality override is needed.
+    // Froxel fog stays off — the Vulkan reference explicitly disables the
+    // volume paths and fragmentFusion adds vol.rgb additively.
 #endif
 
     // Load Sponza scene (populates scene_ and wires materials to GPUDrivenDrawPipeline)
@@ -352,8 +510,139 @@ bool TestModularPipeline::InitializePipeline() {
 }
 
 void TestModularPipeline::SetupCamera() {
-    camera_.Initialize({0.0f, 5.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+    float x = 0.0f, y = 5.0f, z = 0.0f, pitch = 0.0f, yaw = 0.0f;
+    if (const char* cameraOverride = std::getenv("SPGI_CAM")) {
+        if (std::sscanf(cameraOverride, "%f,%f,%f,%f,%f",
+                        &x, &y, &z, &pitch, &yaw) == 5) {
+            std::cout << "[TestModularPipeline] Camera override: " << cameraOverride << std::endl;
+        }
+    }
+    camera_.Initialize({x, y, z}, {pitch, yaw, 0.0f});
     camera_.SetSpeed(10.0f, 0.1f);
+}
+
+bool TestModularPipeline::InitializeIBL() {
+    const std::string hdrPath =
+        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/textures/hdr/sunset.hdr";
+    int hdrWidth = 0;
+    int hdrHeight = 0;
+    int hdrChannels = 0;
+    float* hdr = stbi_loadf(hdrPath.c_str(), &hdrWidth, &hdrHeight, &hdrChannels, 4);
+    if (!hdr || hdrWidth < 4 || hdrHeight < 2) {
+        if (hdr) stbi_image_free(hdr);
+        std::cerr << "[TestModularPipeline] Failed to load HDR: " << hdrPath << std::endl;
+        return false;
+    }
+
+    // Generate the same +X/-X/+Y/-Y/+Z/-Z cube convention used by the Metal
+    // EquirectangularToCube shader. Doing this conversion on the CPU keeps this
+    // integration test independent of an extra one-shot compute pipeline while
+    // feeding IBLPrecomputer the same RGBA16F environment as Vulkan.
+    const u32 faceSize = static_cast<u32>(hdrWidth / 4);
+    const u64 pixelsPerFace = static_cast<u64>(faceSize) * faceSize;
+    std::vector<uint16_t> cubePixels(pixelsPerFace * 6 * 4);
+    constexpr float kPi = 3.14159265358979323846f;
+
+    auto sampleHDR = [&](float u, float v, int channel) {
+        u -= std::floor(u);
+        v = std::clamp(v, 0.0f, 1.0f);
+        const float fx = u * hdrWidth - 0.5f;
+        const float fy = v * hdrHeight - 0.5f;
+        const int x0Raw = static_cast<int>(std::floor(fx));
+        const int y0 = std::clamp(static_cast<int>(std::floor(fy)), 0, hdrHeight - 1);
+        const int y1 = std::min(y0 + 1, hdrHeight - 1);
+        const int x0 = (x0Raw % hdrWidth + hdrWidth) % hdrWidth;
+        const int x1 = (x0 + 1) % hdrWidth;
+        const float tx = fx - std::floor(fx);
+        const float ty = fy - std::floor(fy);
+        const float a = hdr[(static_cast<size_t>(y0) * hdrWidth + x0) * 4 + channel];
+        const float b = hdr[(static_cast<size_t>(y0) * hdrWidth + x1) * 4 + channel];
+        const float c = hdr[(static_cast<size_t>(y1) * hdrWidth + x0) * 4 + channel];
+        const float d = hdr[(static_cast<size_t>(y1) * hdrWidth + x1) * 4 + channel];
+        return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
+    };
+
+    for (u32 face = 0; face < 6; ++face) {
+        for (u32 y = 0; y < faceSize; ++y) {
+            for (u32 x = 0; x < faceSize; ++x) {
+                const float faceU = 2.0f * (static_cast<float>(x) + 0.5f) / faceSize - 1.0f;
+                const float faceV = -(2.0f * (static_cast<float>(y) + 0.5f) / faceSize - 1.0f);
+                float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+                switch (face) {
+                    case 0: dx =  1.0f; dy = faceV; dz = -faceU; break;
+                    case 1: dx = -1.0f; dy = faceV; dz =  faceU; break;
+                    case 2: dx = faceU; dy =  1.0f; dz = -faceV; break;
+                    case 3: dx = faceU; dy = -1.0f; dz =  faceV; break;
+                    case 4: dx = faceU; dy = faceV; dz =  1.0f; break;
+                    default: dx = -faceU; dy = faceV; dz = -1.0f; break;
+                }
+                const float inverseLength = 1.0f / std::sqrt(dx * dx + dy * dy + dz * dz);
+                dx *= inverseLength;
+                dy *= inverseLength;
+                dz *= inverseLength;
+                const float sphereU = std::atan2(dz, dx) / (2.0f * kPi) + 0.5f;
+                const float sphereV = std::asin(dy) / kPi + 0.5f;
+                const size_t destination =
+                    (static_cast<size_t>(face) * pixelsPerFace +
+                     static_cast<size_t>(y) * faceSize + x) * 4;
+                for (int channel = 0; channel < 4; ++channel) {
+                    cubePixels[destination + channel] =
+                        FloatToHalf(sampleHDR(sphereU, sphereV, channel));
+                }
+            }
+        }
+    }
+    stbi_image_free(hdr);
+
+    TextureDesc cubeDesc{};
+    cubeDesc.size = {faceSize, faceSize, 1};
+    cubeDesc.arraySize = 1;
+    cubeDesc.mipLevels = 1;
+    cubeDesc.type = TextureType::TextureCube;
+    cubeDesc.format = DataFormat::RGBA16_Float;
+    cubeDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    cubeDesc.memoryUsage = GPUMemoryUsage::Static;
+    cubeDesc.name = "IBL_EnvCube_Metal";
+    envCube_ = device_->CreateTexture(cubeDesc);
+    const u64 bytesPerFace = pixelsPerFace * 4 * sizeof(uint16_t);
+    if (envCube_ == handles::INVALID_RESOURCE ||
+        !UploadTextureLayers(device_.get(), envCube_, cubePixels.data(),
+                             bytesPerFace, faceSize, faceSize, 6)) {
+        if (envCube_ != handles::INVALID_RESOURCE) device_->DestroyTexture(envCube_);
+        envCube_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+
+    iblPrecomputer_ = std::make_unique<IBLPrecomputer>(device_.get());
+    if (!iblPrecomputer_->Initialize()) {
+        iblPrecomputer_.reset();
+        device_->DestroyTexture(envCube_);
+        envCube_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+
+    iblIrradiance_ = iblPrecomputer_->ComputeIrradianceMap(envCube_, 32);
+    iblPrefilter_ = iblPrecomputer_->ComputePrefilteredEnvironmentMap(envCube_, 128);
+    iblBrdfLUT_ = iblPrecomputer_->ComputeBRDFIntegrationMap(512);
+    if (iblIrradiance_ == handles::INVALID_RESOURCE ||
+        iblPrefilter_ == handles::INVALID_RESOURCE ||
+        iblBrdfLUT_ == handles::INVALID_RESOURCE) {
+        auto destroy = [&](ResourceHandle& texture) {
+            if (texture != handles::INVALID_RESOURCE) device_->DestroyTexture(texture);
+            texture = handles::INVALID_RESOURCE;
+        };
+        destroy(iblIrradiance_);
+        destroy(iblPrefilter_);
+        destroy(iblBrdfLUT_);
+        destroy(envCube_);
+        iblPrecomputer_->Shutdown();
+        iblPrecomputer_.reset();
+        return false;
+    }
+
+    pipeline_->SetIBLResources(iblIrradiance_, iblPrefilter_, iblBrdfLUT_);
+    std::cout << "[TestModularPipeline] Vulkan-reference sunset IBL wired" << std::endl;
+    return true;
 }
 
 // ============================================================================
@@ -363,15 +652,36 @@ void TestModularPipeline::SetupCamera() {
 bool TestModularPipeline::LoadMaterialTextures() {
     std::string assetBaseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
 
-    // Create 1024x1024 white fallback texture
+    // Texture arrays require equal dimensions. Match Vulkan's fallback
+    // semantics while retaining this test's established 1024x1024 array size.
     ResourceHandle whiteTexture;
+    ResourceHandle flatNormalTexture;
+    ResourceHandle defaultORMTexture;
     {
         constexpr u32 WHITE_SIZE = 1024;
         std::vector<u32> whiteData(WHITE_SIZE * WHITE_SIZE, 0xFFFFFFFF);
+        std::vector<u8> normalData(WHITE_SIZE * WHITE_SIZE * 4);
+        std::vector<u8> ormData(WHITE_SIZE * WHITE_SIZE * 4);
+        for (u32 pixel = 0; pixel < WHITE_SIZE * WHITE_SIZE; ++pixel) {
+            normalData[pixel * 4 + 0] = 128;
+            normalData[pixel * 4 + 1] = 128;
+            normalData[pixel * 4 + 2] = 255;
+            normalData[pixel * 4 + 3] = 255;
+            ormData[pixel * 4 + 0] = 255;
+            ormData[pixel * 4 + 1] = 128;
+            ormData[pixel * 4 + 2] = 0;
+            ormData[pixel * 4 + 3] = 255;
+        }
         whiteTexture = CreateTextureFromData(device_.get(), WHITE_SIZE, WHITE_SIZE,
             reinterpret_cast<unsigned char*>(whiteData.data()), true);
-        if (whiteTexture == handles::INVALID_RESOURCE) {
-            std::cerr << "[TestModularPipeline] Failed to create white texture" << std::endl;
+        flatNormalTexture = CreateTextureFromData(
+            device_.get(), WHITE_SIZE, WHITE_SIZE, normalData.data(), false);
+        defaultORMTexture = CreateTextureFromData(
+            device_.get(), WHITE_SIZE, WHITE_SIZE, ormData.data(), false);
+        if (whiteTexture == handles::INVALID_RESOURCE ||
+            flatNormalTexture == handles::INVALID_RESOURCE ||
+            defaultORMTexture == handles::INVALID_RESOURCE) {
+            std::cerr << "[TestModularPipeline] Failed to create fallback textures" << std::endl;
             return false;
         }
     }
@@ -422,43 +732,99 @@ bool TestModularPipeline::LoadMaterialTextures() {
         }
 
         // Load normal
+        ResourceHandle normalTexture = flatNormalTexture;
         if (!meshInfo.normalTexturePath.empty()) {
             std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath);
             if (!fullPath.empty()) {
                 auto it = textureCache.find(fullPath);
-                ResourceHandle texture;
                 if (it != textureCache.end()) {
-                    texture = it->second;
+                    normalTexture = it->second;
                 } else {
-                    texture = LoadTextureFromFile(device_.get(), fullPath, false);
-                    if (texture != handles::INVALID_RESOURCE)
-                        textureCache[fullPath] = texture;
+                    ResourceHandle loaded = LoadTextureFromFile(device_.get(), fullPath, false);
+                    if (loaded != handles::INVALID_RESOURCE) {
+                        normalTexture = loaded;
+                        textureCache[fullPath] = loaded;
+                    }
                 }
-                if (texture != handles::INVALID_RESOURCE)
-                    meshInfo.materialInstance->SetTexture(1, texture);
             }
         }
+        meshInfo.materialInstance->SetTexture(1, normalTexture);
 
-        // ORM — white fallback
-        meshInfo.materialInstance->SetTexture(2, whiteTexture);
+        ResourceHandle ormTexture = defaultORMTexture;
+        if (!meshInfo.ormTexturePath.empty()) {
+            const std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.ormTexturePath);
+            auto it = textureCache.find(fullPath);
+            if (it != textureCache.end()) {
+                ormTexture = it->second;
+            } else {
+                ResourceHandle loaded = LoadTextureFromFile(device_.get(), fullPath, false);
+                if (loaded != handles::INVALID_RESOURCE) {
+                    ormTexture = loaded;
+                    textureCache[fullPath] = loaded;
+                }
+            }
+        }
+        meshInfo.materialInstance->SetTexture(2, ormTexture);
     }
 
     return true;
 }
 
+// T8.13 fix (card-registration loss): ApplyConfigChanges-driven Lumen
+// rebuilds re-initialize SurfaceCachePass and wipe the card-generator's
+// scene registrations (374 scene cards -> placeholder cards, SC goes and
+// stays black). Registration is re-runnable, so the Run loop re-invokes
+// this whenever the lookup count drops below the scene mesh count.
+void TestModularPipeline::RegisterSceneCardsWithSurfaceCache() {
+    if (!pipeline_ || sceneMeshes_.empty()) return;
+    auto* scPass = pipeline_->GetSurfaceCachePass();
+    if (!scPass || !scPass->IsInitialized()) return;
+    auto& cardGen = scPass->GetCardGenerator();
+    if (cardGen.GetLookupCount() >= sceneMeshes_.size()) return;  // intact
+
+    u32 scRegistered = 0;
+            for (u32 i = 0; i < sceneMeshes_.size(); ++i) {
+                const auto& meshInfo = sceneMeshes_[i];
+                if (!meshInfo.mesh) continue;
+
+                const auto& localAABB = meshInfo.mesh->GetLocalAABB();
+                m4x4 worldMat = MatrixIdentity(); // all proxies use identity transform
+
+                primal::math::v3 corners[8] = {
+                    {localAABB.min.x, localAABB.min.y, localAABB.min.z},
+                    {localAABB.max.x, localAABB.min.y, localAABB.min.z},
+                    {localAABB.min.x, localAABB.max.y, localAABB.min.z},
+                    {localAABB.max.x, localAABB.max.y, localAABB.min.z},
+                    {localAABB.min.x, localAABB.min.y, localAABB.max.z},
+                    {localAABB.max.x, localAABB.min.y, localAABB.max.z},
+                    {localAABB.min.x, localAABB.max.y, localAABB.max.z},
+                    {localAABB.max.x, localAABB.max.y, localAABB.max.z},
+                };
+                primal::math::v3 worldMin{FLT_MAX, FLT_MAX, FLT_MAX};
+                primal::math::v3 worldMax{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+                for (int c = 0; c < 8; ++c) {
+                    v4 worldPt = worldMat * v4{corners[c].x, corners[c].y, corners[c].z, 1.0f};
+                    worldMin.x = std::min(worldMin.x, worldPt.x);
+                    worldMin.y = std::min(worldMin.y, worldPt.y);
+                    worldMin.z = std::min(worldMin.z, worldPt.z);
+                    worldMax.x = std::max(worldMax.x, worldPt.x);
+                    worldMax.y = std::max(worldMax.y, worldPt.y);
+                    worldMax.z = std::max(worldMax.z, worldPt.z);
+                }
+                cardGen.RegisterMesh(worldMin, worldMax, i);
+                scRegistered++;
+            }
+            cardGen.RebuildCardAllocation();
+            std::cout << "[TestModularPipeline] SurfaceCache registered " << scRegistered << " cards" << std::endl;
+    std::cout << "[TestModularPipeline] SC cards re-registered: " << scRegistered
+              << " meshes (lookups " << cardGen.GetLookupCount() << ")" << std::endl;
+}
+
 bool TestModularPipeline::LoadSponzaScene() {
     std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
-#ifdef TEST_METAL_GI_FUSION
-    // Signed-v3 asset — the repaired encoding (t_sign low bits) the Vulkan
-    // smoke test uses. Alignment requires the same asset on both backends.
-    std::string modelPath = baseDir + "Sponza_pipeline_signed_v3.model";
-    {
-        std::ifstream probe(modelPath, std::ios::binary);
-        if (!probe.good()) modelPath = baseDir + "Sponza_process_rebuild.model";
-    }
-#else
-    std::string modelPath = baseDir + "Sponza_process_rebuild.model";
-#endif
+    // Render the exact same scene payload as TestVulkanSponzaRenderGraph. The
+    // much larger pipeline model remains the offline-SDF source only.
+    std::string modelPath = baseDir + "Sponza.model";
 
     // Load .model file
     {
@@ -560,49 +926,14 @@ bool TestModularPipeline::LoadSponzaScene() {
     std::cout << "[TestModularPipeline] Added " << scene_.GetProxies().size()
               << " proxies, " << registeredCount << " materials" << std::endl;
 
-    // Register scene meshes with Surface Cache CardGenerator
-    // Without this, SC passes read from uninitialized atlas textures,
-    // producing garbage that propagates through DDGI → GIGather → FusionComposite → flickering
-    if (pipeline_) {
-        auto* scPass = pipeline_->GetSurfaceCachePass();
-        if (scPass && scPass->IsInitialized()) {
-            auto& cardGen = scPass->GetCardGenerator();
-            u32 scRegistered = 0;
-            for (u32 i = 0; i < sceneMeshes_.size(); ++i) {
-                const auto& meshInfo = sceneMeshes_[i];
-                if (!meshInfo.mesh) continue;
+    RenderLight sunLight;
+    sunLight.type = LightType::Directional;
+    sunLight.direction = {0.5f, -0.7f, 0.3f};
+    sunLight.color = {1.0f, 0.95f, 0.9f};
+    sunLight.intensity = 3.0f;
+    scene_.AddLight(sunLight);
 
-                const auto& localAABB = meshInfo.mesh->GetLocalAABB();
-                m4x4 worldMat = MatrixIdentity(); // all proxies use identity transform
-
-                primal::math::v3 corners[8] = {
-                    {localAABB.min.x, localAABB.min.y, localAABB.min.z},
-                    {localAABB.max.x, localAABB.min.y, localAABB.min.z},
-                    {localAABB.min.x, localAABB.max.y, localAABB.min.z},
-                    {localAABB.max.x, localAABB.max.y, localAABB.min.z},
-                    {localAABB.min.x, localAABB.min.y, localAABB.max.z},
-                    {localAABB.max.x, localAABB.min.y, localAABB.max.z},
-                    {localAABB.min.x, localAABB.max.y, localAABB.max.z},
-                    {localAABB.max.x, localAABB.max.y, localAABB.max.z},
-                };
-                primal::math::v3 worldMin{FLT_MAX, FLT_MAX, FLT_MAX};
-                primal::math::v3 worldMax{-FLT_MAX, -FLT_MAX, -FLT_MAX};
-                for (int c = 0; c < 8; ++c) {
-                    v4 worldPt = worldMat * v4{corners[c].x, corners[c].y, corners[c].z, 1.0f};
-                    worldMin.x = std::min(worldMin.x, worldPt.x);
-                    worldMin.y = std::min(worldMin.y, worldPt.y);
-                    worldMin.z = std::min(worldMin.z, worldPt.z);
-                    worldMax.x = std::max(worldMax.x, worldPt.x);
-                    worldMax.y = std::max(worldMax.y, worldPt.y);
-                    worldMax.z = std::max(worldMax.z, worldPt.z);
-                }
-                cardGen.RegisterMesh(worldMin, worldMax, i);
-                scRegistered++;
-            }
-            cardGen.RebuildCardAllocation();
-            std::cout << "[TestModularPipeline] SurfaceCache registered " << scRegistered << " cards" << std::endl;
-        }
-    }
+        RegisterSceneCardsWithSurfaceCache();
 
     return true;
 }
@@ -614,31 +945,27 @@ bool TestModularPipeline::LoadSponzaScene() {
 void TestModularPipeline::Run() {
     if (!pipeline_ || isShutdown_) return;
 
-#ifdef TEST_METAL_GI_FUSION
-    // Fixed camera pose identical to the Vulkan smoke test — visual and
-    // quantitative comparability between backends.
-    {
-        using primal::math::v3;
-        using primal::math::v4;
-        const v3 camPos{0.0f, 5.0f, -10.0f};
-        const float yaw = 3.14159265f, pitch = -0.291f;
-        const float cosP = std::cos(pitch);
-        const v3 forward{-std::sin(yaw) * cosP, std::sin(pitch), -std::cos(yaw) * cosP};
-        const v3 target = camPos + forward;
-        const v3 up{0.0f, 1.0f, 0.0f};
-        cameraView_ = CreateLookAtMatrix(camPos, target, up);
-        cameraProj_ = CreatePerspectiveMatrix(
-            60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD,
-            (float)renderWidth_ / (float)renderHeight_, 0.1f, 1000.0f);
+    // T8.13 fix: re-register SC cards if a settings-driven Lumen rebuild
+    // wiped the card-generator registrations (cheap count check per frame).
+    if (pipeline_) {
+        auto* scPass = pipeline_->GetSurfaceCachePass();
+        if (scPass && scPass->IsInitialized() &&
+            scPass->GetCardGenerator().GetLookupCount() < sceneMeshes_.size()) {
+            RegisterSceneCardsWithSurfaceCache();
+        }
     }
-#else
-    // Update camera
-    camera_.Update(0.016f);
+
+    // Update camera. T8.12b/T8.13 sync: SPGI_CAM_LOCK=1 freezes the camera —
+    // the input source reads GLOBAL keyboard state, so a human using the
+    // desktop leaks WASD into automated measurement runs (observed: strip
+    // captures landing at drifted viewpoints). Match TestVulkanSponzaRenderGraph.
+    if (!std::getenv("SPGI_CAM_LOCK")) {
+        camera_.Update(0.016f);
+    }
     cameraView_ = camera_.GetViewMatrix();
     float fov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
     float aspect = (float)renderWidth_ / (float)renderHeight_;
     cameraProj_ = CreatePerspectiveMatrix(fov, aspect, 0.1f, 1000.0f);
-#endif
 
     view_.SetViewMatrix(cameraView_);
     view_.SetProjectionMatrix(cameraProj_);
@@ -647,6 +974,7 @@ void TestModularPipeline::Run() {
     viewport.size.y = renderHeight_;
     view_.SetViewport(viewport);
     view_.UpdateFrustum();
+    view_.Cull(scene_);
 
     ResourceHandle backBuffer;
     SyncHandle signalFence;
@@ -863,6 +1191,26 @@ void TestModularPipeline::Shutdown() {
     }
     gpuMaterialRegistry_.reset();
     pipeline_.reset();
+
+    if (iblPrecomputer_) {
+        iblPrecomputer_->Shutdown();
+        iblPrecomputer_.reset();
+    }
+    auto destroyIBLTexture = [&](ResourceHandle& texture) {
+        if (texture != handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(texture);
+            texture = handles::INVALID_RESOURCE;
+        }
+    };
+    destroyIBLTexture(iblIrradiance_);
+    destroyIBLTexture(iblPrefilter_);
+    destroyIBLTexture(iblBrdfLUT_);
+    destroyIBLTexture(envCube_);
+
+    if (offline_sdf_merger_) {
+        delete offline_sdf_merger_;
+        offline_sdf_merger_ = nullptr;
+    }
     renderSystem_.Shutdown();
 
     if (window_.is_valid()) {

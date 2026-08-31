@@ -185,6 +185,15 @@ struct SurfaceCacheRGData {
 // SurfaceCachePass Implementation
 // ============================================================================
 
+float SurfaceCachePass::DebugShadowVisibilityAt(u32 index) const {
+    if (shadow_visibility_buffer_ == handles::INVALID_RESOURCE || !device_) return -1.0f;
+    auto* p = static_cast<const float*>(device_->MapBuffer(shadow_visibility_buffer_));
+    if (!p) return -2.0f;
+    float v = p[index];
+    device_->UnmapBuffer(shadow_visibility_buffer_);
+    return v;
+}
+
 SurfaceCachePass::~SurfaceCachePass() {
     Shutdown();
 }
@@ -450,10 +459,16 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lights        [[buffer(3)]]
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch [[buffer(4)]]
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // shadow_visibility [[buffer(5)]] (T3.3)
+            // T8.13 Vulkan↔Metal sync: probe-fed indirect + multi-bounce feedback
+            // + surface-point depth — same resources as the Vulkan layout.
+            {4, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(4)]] (multi-bounce)
+            {5, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_atlas   [[texture(5)]]
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance [[buffer(6)]] (probe-fed indirect)
         };
         DescriptorSetLayoutBinding* bm = bindings;
         bm[5].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{9, bindings};
+        bm[8].readonly = true;  // ddgi irradiance
+        DescriptorSetLayoutDesc layoutDesc{12, bindings};
         light_eval_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -540,9 +555,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- AtlasInit (Vulkan-only): 4 write images + 1 UBO + 1 SSBO ---
-    // Populates card atlas regions with default material data until a real
-    // Capture graphics pipeline exists on Vulkan.
+    // --- AtlasInit: 4 write images + 1 UBO + 1 SSBO ---
+    // Populates card atlas regions with default material data. T8.13 sync:
+    // enabled on Metal too — heap-allocated Metal atlases start as garbage and
+    // the SC↔probe feedback loop latches it (SC collapsed to black in ~90
+    // frames without this seed).
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
@@ -551,6 +568,18 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // emissive_atlas
             {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FlattenedLightingParams
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch
+        };
+        DescriptorSetLayoutBinding* b = bindings;
+        b[5].readonly = true;
+        atlas_init_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
+    } else {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas   [[texture(0)]]
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas   [[texture(1)]]
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas    [[texture(2)]]
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // emissive_atlas [[texture(3)]]
+            {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params         [[buffer(1)]]
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch  [[buffer(2)]]
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[5].readonly = true;
@@ -693,10 +722,12 @@ void SurfaceCachePass::CreatePipelines() {
         isVk ? "surface_cache_indirect_trace" : "surfaceCacheIndirectTrace");
     auto indirectResolveShader = CompileComputeShader("SurfaceCacheIndirectResolve",
         isVk ? "surface_cache_indirect_resolve" : "surfaceCacheIndirectResolve");
-    // Vulkan-only: atlas default-content init (stands in for Capture graphics pass)
+    // Atlas default-content init (stands in for Capture coverage gaps).
+    // T8.13 sync: compiled on Metal too — heap atlases need the seed.
     ShaderHandle atlasInitShader = handles::INVALID_SHADER;
-    if (isVk) {
-        atlasInitShader = CompileComputeShader("SurfaceCacheAtlasInit", "surface_cache_atlas_init");
+    {
+        atlasInitShader = CompileComputeShader("SurfaceCacheAtlasInit",
+            isVk ? "surface_cache_atlas_init" : "surfaceCacheAtlasInit");
     }
     // Vulkan-only: GBuffer-gather capture (real rendered surfaces → card atlas)
     ShaderHandle captureGatherShader = handles::INVALID_SHADER;
@@ -807,8 +838,9 @@ void SurfaceCachePass::CreatePipelines() {
         pipeDesc.threadGroupSize = {8, 8, 1};
         indirect_resolve_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
-    // AtlasInit (Vulkan-only): (256,1,1) — same flattened texel dispatch as LightEval
-    if (isVk && atlasInitShader != handles::INVALID_SHADER) {
+    // AtlasInit: (256,1,1) — same flattened texel dispatch as LightEval.
+    // T8.13 sync: also built on Metal (see layout note above).
+    if (atlasInitShader != handles::INVALID_SHADER) {
         {
             PipelineLayoutDesc plDesc;
             plDesc.setLayoutCount = 1;
@@ -907,7 +939,10 @@ void SurfaceCachePass::CreatePipelines() {
 
     // --- Create triple-buffered descriptor sets ---
     for (int i = 0; i < 3; i++) {
-        if (isVk && atlas_init_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        // T8.13 fix: Metal also creates these sets now (AtlasInit runs on
+        // Metal — previously the isVk gate left atlas_init_set_ INVALID on
+        // Metal, so the seed never dispatched and the SC stayed black).
+        if (atlas_init_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             DescriptorSetDesc dsDesc{atlas_init_set_layout_};
             atlas_init_set_[i] = device_->CreateDescriptorSet(dsDesc);
         }
@@ -1283,6 +1318,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             //     alpha=1 albedo to process even before Capture covers texels.
             // ================================================================
             if (atlas_init_pipeline_ != handles::INVALID_PIPELINE && !atlas_seeded_) {
+                static bool s_ai_once = false;
+                if (!s_ai_once) {
+                    s_ai_once = true;
+                    std::cerr << "[ATLAS_INIT] dispatching, pipeline valid" << std::endl;
+                }
                 DescriptorData initParams[] = {
                     {0, DescriptorType::StorageImage,  albedo_atlas_},
                     {1, DescriptorType::StorageImage,  normal_atlas_},
@@ -1299,7 +1339,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                 u32 groups = (total_texels + 255) / 256;
                 cmd->Dispatch(groups, 1, 1);
-                atlas_seeded_ = true;
+                // T8.13 fix: only mark seeded when there was something to
+                // seed. The reordered init creates SurfaceCache before the
+                // scene registers cards — the first dispatch then runs with
+                // total_texels == 0, and marking seeded there left the atlas
+                // unseeded (albedo alpha 0) permanently black.
+                if (total_texels > 0) atlas_seeded_ = true;
 
                 // Compute→compute memory barrier (storage images stay in
                 // GENERAL layout; LightEval reads via imageLoad).
@@ -1510,15 +1555,28 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 if (shadow_pipeline_ != handles::INVALID_PIPELINE &&
                     shadow_visibility_buffer_ != handles::INVALID_RESOURCE &&
                     globalSDF.IsInitialized()) {
+                    static bool s_scshadow_once = false;
+                    if (!s_scshadow_once) {
+                        s_scshadow_once = true;
+                        std::cerr << "[SC_SHADOW] dispatching" << std::endl;
+                    }
 
                     ResourceHandle sdfTex[3] = {
                         handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
                     u32 cascadeCount = 0;
-                    for (u32 c = 0; c < 3; ++c) {
-                        const auto& cascade = globalSDF.GetCascade(c);
-                        if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
-                            sdfTex[c] = cascade.sdf_texture;
-                            ++cascadeCount;
+                    // T8.13: prefer the offline merged SDF (384^3, sharp) —
+                    // same source as the DDGI trace; runtime cascades stay as
+                    // the fallback when no offline bake is wired.
+                    if (sc_offline_sdf_texture_ != handles::INVALID_RESOURCE) {
+                        sdfTex[0] = sc_offline_sdf_texture_;
+                        cascadeCount = 1;
+                    } else {
+                        for (u32 c = 0; c < 3; ++c) {
+                            const auto& cascade = globalSDF.GetCascade(c);
+                            if (cascade.sdf_texture != handles::INVALID_RESOURCE) {
+                                sdfTex[c] = cascade.sdf_texture;
+                                ++cascadeCount;
+                            }
                         }
                     }
 
@@ -1539,11 +1597,20 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         if (sp) {
                             memset(sp, 0, sizeof(ShadowParamsGPU));
                             float resArr[3] = {0.0f, 0.0f, 0.0f};
-                            for (u32 c = 0; c < cascadeCount; ++c) {
-                                const auto& cascade = globalSDF.GetCascade(c);
-                                sp->sdf_origins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
-                                sp->sdf_extents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
-                                resArr[c] = (float)cascade.resolution;
+                            if (cascadeCount == 1 &&
+                                sc_offline_sdf_texture_ != handles::INVALID_RESOURCE) {
+                                sp->sdf_origins[0] = {sc_offline_sdf_origin_.x, sc_offline_sdf_origin_.y,
+                                                      sc_offline_sdf_origin_.z, 0.0f};
+                                sp->sdf_extents[0] = {sc_offline_sdf_extent_.x, sc_offline_sdf_extent_.y,
+                                                      sc_offline_sdf_extent_.z, 0.0f};
+                                resArr[0] = (float)sc_offline_sdf_resolution_;
+                            } else {
+                                for (u32 c = 0; c < cascadeCount; ++c) {
+                                    const auto& cascade = globalSDF.GetCascade(c);
+                                    sp->sdf_origins[c] = {cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
+                                    sp->sdf_extents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
+                                    resArr[c] = (float)cascade.resolution;
+                                }
                             }
                             sp->sdf_res_count = {resArr[0], resArr[1], resArr[2], (float)cascadeCount};
                             math::v3 ld = frame_data.light_direction;
@@ -1617,6 +1684,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     };
                     memcpy(evalParams, p, sizeof(p));
                 } else {
+                    // T8.13 Vulkan↔Metal sync: same 12-resource set as the
+                    // Vulkan branch — Metal slot indices differ only by
+                    // namespace (textures 0-5, buffers 1-6).
                     DescriptorData p[] = {
                         {0, DescriptorType::StorageImage,  albedo_atlas_},
                         {1, DescriptorType::StorageImage,  normal_atlas_},
@@ -1627,10 +1697,18 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {3, DescriptorType::StorageBuffer, light_info_buffer_},
                         {4, DescriptorType::StorageBuffer, card_dispatch_buffer_},
                         {5, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
+                        {4, DescriptorType::StorageImage,  lighting_atlas_[histIdx]},   // prev for multi-bounce
+                        {5, DescriptorType::StorageImage,  depth_atlas_},               // surface-point probe gather
+                        // Probe-fed indirect: bind the previous-frame slot even
+                        // when invalid (CB flag gates the shader term).
+                        {6, DescriptorType::StorageBuffer,
+                         frame_data.ddgi_irradiance != handles::INVALID_RESOURCE
+                             ? frame_data.ddgi_irradiance
+                             : card_dispatch_buffer_},
                     };
                     memcpy(evalParams, p, sizeof(p));
                 }
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, isVk ? 12 : 9);
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 12);
 
                 // Explicit GENERAL transition for the lighting atlases — do not
                 // rely on the render graph's Write declaration having put them

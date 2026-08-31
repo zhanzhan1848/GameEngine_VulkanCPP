@@ -69,7 +69,14 @@ kernel void ddgi_update_irradiance(
             tg_hitFlags[tid] = 1u;
         }
 
-        float3 d = ddgiRayDirection(r, vol.RaysPerProbe, vol.FrameIndex);
+        // T8.13 sync: same sampler the trace side used for this ray index —
+        // the projection must reproduce the exact direction the radiance came
+        // from (ProbeSampleLib port; ddgiRayDirection == mode 0 subset).
+        float3 toLight = normalize(-vol.LightDirection.xyz);
+        float4 raySample = ddgiSampleRayDirection(r, vol.RaysPerProbe,
+                                                  vol.FrameIndex,
+                                                  uint(vol.RaySampleMode), toLight);
+        float3 d = raySample.xyz;
         float x = d.x, y = d.y, z = d.z;
         float x2 = x*x, y2 = y*y, z2 = z*z;
 
@@ -84,7 +91,12 @@ kernel void ddgi_update_irradiance(
         basis[7] = -DDGI_SH_C2_0 * x * z;
         basis[8] =  DDGI_SH_C2_2 * (x2 - y2);
 
-        float mcWeight = 4.0f * 3.14159265f / float(vol.RaysPerProbe);
+        // T8.13 sync: PDF-correct Monte Carlo weight for the radiance-SH
+        // integral. Mode 0 keeps the legacy uniform expression bit-for-bit;
+        // importance-sampled modes divide by the sampler's pdf instead.
+        float mcWeight = (uint(vol.RaySampleMode) == 0u)
+            ? (4.0f * 3.14159265f / float(vol.RaysPerProbe))
+            : 1.0f / (float(vol.RaysPerProbe) * max(raySample.w, 1e-5f));
 
         for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
             tg_partial[tid].sh[i] += radiance * basis[i] * mcWeight;
@@ -109,14 +121,19 @@ kernel void ddgi_update_irradiance(
         hitCount += tg_hitFlags[t];
     }
 
-    // Temporal blend with history
-    // Cache history and output in registers to avoid redundant device reads
-    // (was 18 extra reads for confidence — now 0 extra reads)
+    // T8.13 sync: temporal blend with history — Vulkan DDGIUpdateIrradiance
+    // scheme. A probe that never converged must not EMA-blend against the
+    // cleared buffer (first update publishes directly); young probes blend
+    // aggressively (alpha 0.35, τ≈3 frames) so the multi-bounce SC↔probe loop
+    // becomes visible within seconds; alpha settles to the configured
+    // TemporalAlpha once the convergence ramp passes 0.5 (~15 updates).
     uint probeBase = probeIdx * 9u;
 
-    float rampFrames = 60.0f;
-    float rampT = saturate(float(max(vol.FrameIndex, 1u) - 1u) / rampFrames);
-    float alpha = mix(1.0f, vol.ProbeHysteresis, rampT);
+    uint confidenceBase = probeIdx * 4u;
+    float conv = confidenceBuffer[confidenceBase + 3u];
+    bool firstUpdate = conv < 0.5f;
+    float settledAlpha = clamp(vol.TemporalAlpha, 0.0f, 1.0f);
+    float alpha = firstUpdate ? 1.0f : mix(0.35f, settledAlpha, min(conv * 2.0f, 1.0f));
 
     float3 sh0 = shAccum[0];
     float l1Limit = max(length(sh0) * 3.0f, 0.1f);
@@ -163,5 +180,7 @@ kernel void ddgi_update_irradiance(
     confidenceBuffer[probeIdx * 4 + 1] = clamp(stability, 0.0f, 1.0f);
 
     float age = confidenceBuffer[probeIdx * 4 + 3];
+    // T8.13 sync: convergence ramp climbs 1/30 per update (Vulkan parity) —
+    // also the SC bootstrap and the confidence debug view's signal.
     confidenceBuffer[probeIdx * 4 + 3] = min(age + 1.0f / 30.0f, 1.0f);
 }

@@ -10,6 +10,7 @@
 #endif
 #include <fstream>
 #include <cstring>
+#include "Graphics/RHI/Core/RHICommand.h"
 #include <cmath>
 #include <algorithm>
 #include <atomic>
@@ -689,23 +690,19 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
     device_->UnmapBuffer(staging);
 
     // Copy staging → texture (mirrors RHIGpuMesh::CreateAndUploadTexture3D).
-    auto cmdHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
-#if OFFLINE_SDF_VULKAN_PATH
-    // GetCommandBuffer is platform-specific; cast to VulkanDevice.
-    rhi::VulkanCommandBuffer* cmd;
-    {
-        auto* vkDev = dynamic_cast<rhi::VulkanDevice*>(device_);
-        if (vkDev) {
-            cmd = vkDev->GetCommandBuffer(cmdHandle);
-        } else {
-            std::cerr << "[OfflineSDFMerger] Unsupported device for texture upload" << std::endl;
-            device_->DestroyCommandBuffer(cmdHandle);
-            device_->DestroyBuffer(staging);
-            return false;
-        }
+    // T8.13 Vulkan↔Metal sync: use the platform-generic RHI command buffer —
+    // the old Vulkan-only cast left the Metal texture UNINITIALIZED (the
+    // "Upload complete" log printed unconditionally), so the Metal DDGI/SPGI
+    // probes traced garbage instead of the merged field.
+    rhi::CommandBufferHandle cmdHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+    rhi::RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmdHandle);
+    if (!cmd) {
+        std::cerr << "[OfflineSDFMerger] Unsupported device for texture upload" << std::endl;
+        device_->DestroyCommandBuffer(cmdHandle);
+        device_->DestroyBuffer(staging);
+        return false;
     }
     cmd->Begin();
-#endif
 
     rhi::BufferTextureCopyRegion region{};
     region.bufferOffset = 0;
@@ -717,12 +714,10 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {res, res, res};
 
-#if OFFLINE_SDF_VULKAN_PATH
     cmd->CopyBufferToTexture(staging, global_sdf_texture_, &region, 1);
     cmd->End();
     cmd->Submit();
     cmd->WaitForCompletion();
-#endif
     device_->DestroyCommandBuffer(cmdHandle);
     device_->DestroyBuffer(staging);
 

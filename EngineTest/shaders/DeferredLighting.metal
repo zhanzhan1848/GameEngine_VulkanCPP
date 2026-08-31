@@ -99,7 +99,9 @@ struct SceneData {
     float4x4 shadowMatrix1;
     float2 jitter;
     float2 previousJitter;
-    float2 padding;
+    // T8.13 sync: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
+    // y = cascade 0 split distance — matches the C++ SceneData offset 368.
+    float4 shadowParams;
 };
 
 struct ViewData {
@@ -159,6 +161,49 @@ float GetShadowVisibility(float2 uv, texture2d<float> shadowVisibility, sampler 
 // Fragment Shader (PBR Lighting)
 // ================================================================================================
 
+// T8.13 sync: VSM moments + Chebyshev (port of fragmentLighting_v3 /
+// DeferredLighting.frag). Bounds-based cascade selection with fallback
+// (0 → 1 → lit); NDC→UV flips Y.
+static float GetVSMShadowVisibilityGpuDriven(constant SceneData& sceneData,
+                                             float3 worldPos,
+                                             texture2d<float> moments0,
+                                             texture2d<float> moments1) {
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
+
+    float4 clip0 = sceneData.shadowMatrix0 * float4(worldPos, 1.0f);
+    float3 sc0 = clip0.xyz / clip0.w;
+    float2 uv0 = float2(sc0.x * 0.5f + 0.5f, 0.5f - sc0.y * 0.5f);
+    bool inCascade0 = uv0.x >= 0.0f && uv0.x <= 1.0f && uv0.y >= 0.0f && uv0.y <= 1.0f &&
+                      sc0.z >= 0.0f && sc0.z <= 1.0f;
+    if (inCascade0) {
+        float2 moments = moments0.sample(s, uv0).xy;
+        const float minVariance = 0.00002f;
+        if (sc0.z <= moments.x) return 1.0f;
+        float variance = moments.y - (moments.x * moments.x);
+        variance = max(variance, minVariance);
+        float d = sc0.z - moments.x;
+        float pMax = variance / (variance + d * d);
+        return smoothstep(0.05f, 1.0f, pMax);
+    }
+
+    float4 clip1 = sceneData.shadowMatrix1 * float4(worldPos, 1.0f);
+    float3 sc1 = clip1.xyz / clip1.w;
+    float2 uv1 = float2(sc1.x * 0.5f + 0.5f, 0.5f - sc1.y * 0.5f);
+    bool inCascade1 = uv1.x >= 0.0f && uv1.x <= 1.0f && uv1.y >= 0.0f && uv1.y <= 1.0f &&
+                      sc1.z >= 0.0f && sc1.z <= 1.0f;
+    if (inCascade1) {
+        float2 moments = moments1.sample(s, uv1).xy;
+        const float minVariance = 0.00002f;
+        if (sc1.z <= moments.x) return 1.0f;
+        float variance = moments.y - (moments.x * moments.x);
+        variance = max(variance, minVariance);
+        float d = sc1.z - moments.x;
+        float pMax = variance / (variance + d * d);
+        return smoothstep(0.05f, 1.0f, pMax);
+    }
+    return 1.0f;  // outside both shadow maps — lit
+}
+
 fragment float4 fragmentLighting_v3(
     VertexOut in [[stage_in]],
     constant ViewData& viewData [[buffer(0)]],
@@ -169,10 +214,12 @@ fragment float4 fragmentLighting_v3(
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
     texture2d<float> shadowVisibility [[texture(6)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]],
     texturecube<float> irradianceMap [[texture(8)]],
     texturecube<float> prefilterMap [[texture(9)]],
     texture2d<float> brdfLUT [[texture(10)]],
-    texture2d<float> ssaoTex [[texture(13)]],
+    texture2d<float> ssaoTex [[texture(7)]],
 
     sampler defaultSampler [[sampler(11)]],
     sampler brdfSampler [[sampler(12)]]
@@ -226,8 +273,15 @@ fragment float4 fragmentLighting_v3(
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
     float3 R = reflect(-V, N);
 
-    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
-    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    // 3. Shadow — T8.13 sync: mode 1 (VSM moments + Chebyshev, the shared
+    // ShadowMapModule default) or mode 0 (pre-filtered R8 visibility).
+    float shadow;
+    if (sceneData.shadowParams.x > 0.5f) {
+        shadow = GetVSMShadowVisibilityGpuDriven(sceneData, worldPos,
+                                                 shadowMoments0, shadowMoments1);
+    } else {
+        shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    }
 
     // F0 for Fresnel
     float3 F0 = float3(0.04);
@@ -426,6 +480,8 @@ fragment float4 fragmentLighting_gpuDriven(
     texture2d<float> ormTex [[texture(4)]],
     depth2d<float> depthTex [[texture(5)]],
     texture2d<float> shadowVisibility [[texture(6)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]],
 
     sampler defaultSampler [[sampler(8)]]
 ) {
@@ -458,8 +514,15 @@ fragment float4 fragmentLighting_gpuDriven(
     float4 worldPos4 = viewData.invViewProjection * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // 3. Shadow — read pre-filtered visibility texture (half-res, bilinear upsample)
-    float shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    // 3. Shadow — T8.13 sync: mode 1 (VSM moments + Chebyshev, the shared
+    // ShadowMapModule default) or mode 0 (pre-filtered R8 visibility).
+    float shadow;
+    if (sceneData.shadowParams.x > 0.5f) {
+        shadow = GetVSMShadowVisibilityGpuDriven(sceneData, worldPos,
+                                                 shadowMoments0, shadowMoments1);
+    } else {
+        shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
+    }
 
     // 4. Direct Lighting (Cook-Torrance PBR + shadow)
     float3 N = normalize(normal);
@@ -474,6 +537,10 @@ fragment float4 fragmentLighting_gpuDriven(
 
     // --- Direct Light (Directional) ---
     {
+        // T8.10h sync: 2.5→3.125 (+25%) — the Vulkan DeferredLighting.frag
+        // knob. Sunlit p95 ≈153/255 read as overcast; sunlit-region indirect
+        // share measured 32% (physical 15-25%). Scales SCREEN direct only.
+        constexpr float DIRECT_INTENSITY = 3.125f;
         float3 H = normalize(V + L);
         float3 radiance = sceneData.lightColor.rgb * shadow;
 
@@ -491,7 +558,7 @@ fragment float4 fragmentLighting_gpuDriven(
         kD *= 1.0 - metallic;
 
         float NdotL = max(dot(N, L), 0.0);
-        Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL;
+        Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL * DIRECT_INTENSITY;
     }
 
     // 5. Ambient + SSAO + Shadow
@@ -543,7 +610,19 @@ fragment float4 fragmentBlitComposite(
 // Reads multiple textures in fragment shader where tile cache handles bandwidth efficiently.
 // ================================================================================================
 
-// Fusion Pass 1 (half-res): pre-combine GI sources + albedo + ssao → indirect contribution
+// Fusion Pass 1 (full-res): pre-combine GI sources + albedo + ssao → indirect contribution.
+// T8.7–T8.13 sync: replaces the T2.3 cross-fade with the current Vulkan
+// FusionIndirect.frag formula —
+//   T8.7  radianceValidity gate: SPGI may only suppress DDGI/ambient when it
+//         carries real light (lum smoothstep 0.02→0.15);
+//   T8.8  replacement needs a real brightness ADVANTAGE: luminance-ratio ramp
+//         1.10→1.35 gates the max() merge (kills iso-luminance chroma swap);
+//   T8.9  sky-leak far-field floor, albedo-independent warm constant, additive
+//         with the near-field SPGI estimate;
+//   T8.10c occlusion-modulated floor: SSAO keys the floor down in crevices;
+//   SSGI  degradation linkage: SSGI term × mix(0.25, 0.15, spgi_w·replaceW).
+// DDGI remains a half-res low-frequency input sampled directly (no blur —
+// matches the Vulkan baseline the 52.5/46.9/97.2/24.7 numbers came from).
 fragment float4 fragmentFusionIndirect(
     VertexOut in [[stage_in]],
     texture2d<float> ssgiColor   [[texture(0)]],
@@ -554,41 +633,62 @@ fragment float4 fragmentFusionIndirect(
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     float4 ssgi4   = ssgiColor.sample(s, in.uv);
+    float3 ddgi    = ddgiColor.sample(s, in.uv).rgb;
     float4 spgi4   = spgiColor.sample(s, in.uv);
     float3 albedo  = albedoTex.sample(s, in.uv).rgb;
     float  ssao    = ssaoTex.sample(s, in.uv).r;
     if (ssao <= 0.0f) ssao = 1.0f;
-    float ao = pow(ssao, 1.5f);
+    // SSAO is a local contact-shadow approximation, not a validity mask for
+    // probe lighting — it shapes DDGI without erasing low-frequency bounce.
+    float ao = mix(0.4f, 1.0f, pow(ssao, 1.5f));
 
-    // 3×3 blur on ddgi to smooth probe cell boundaries (parity with Vulkan
-    // FusionIndirect.frag — FusionIndirect runs half-res, 1 texel = 2 px).
-    float2 texelSize = 1.0f / float2(ddgiColor.get_width(), ddgiColor.get_height());
-    float3 ddgiBlur = float3(0.0f);
-    float totalWeight = 0.0f;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            float2 offset = float2(float(x), float(y)) * texelSize;
-            ddgiBlur += ddgiColor.sample(s, in.uv + offset).rgb;
-            totalWeight += 1.0f;
-        }
-    }
-    ddgiBlur /= totalWeight;
+    float3 ssgi_irr  = ssgi4.rgb;
+    float  ssgi_hit  = ssgi4.a;
 
-    float3 ssgi_irr = ssgi4.rgb;
-    float  ssgi_hit = ssgi4.a;
+    // SSGI confidence: alpha = average hit distance (30-unit trace cap);
+    // clamped to ≥0.3 so distant-hit SSGI keeps a floor.
     float  ssgi_hit_norm = clamp(ssgi_hit, 0.0f, 30.0f) / 30.0f;
-    float  ssgi_conf = saturate(1.0f - ssgi_hit_norm * 0.7f);
-    // SPGI confidence gate (T2.3): dummy black texture has alpha 0 → weight 0
-    float  spgi_w = saturate(spgi4.a * 2.0f);
+    float  ssgi_conf = clamp(1.0f - ssgi_hit_norm * 0.7f, 0.3f, 1.0f);
+
+    // SPGI weight (T2.3): alpha = probe confidence; capped 0.9 so the world-
+    // probe layer keeps a floor. T8.7: scaled by result luminance validity —
+    // in enclosed interiors SPGI is confidently black (hitRatio≈1 on unlit
+    // geometry) and must not suppress the accumulated ambient there.
+    float spgiLum = dot(spgi4.rgb, float3(0.2126f, 0.7152f, 0.0722f));
+    float radianceValidity = smoothstep(0.02f, 0.15f, spgiLum);
+    float spgi_w = clamp(spgi4.a * 2.0f, 0.0f, 0.9f) * radianceValidity;
 
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    // Unified three-source blend (T2.3 — matches Vulkan FusionIndirect.frag)
-    float3 indirect = albedo *
-        (ddgiBlur * 0.8f * (1.0f - spgi_w)
-       + ssgi_irr * ssgi_conf * 0.2f * (1.0f - spgi_w)
-       + spgi4.rgb * spgi_w * 1.25f) * 0.7f;
+    // DDGI is the stable low-frequency field; SPGI may replace it only where
+    // the screen-probe estimate carries at least as much energy.
+    float3 ddgiBase   = ddgi * 0.7f;
+    float3 spgiTarget = spgi4.rgb * 1.25f;
+    // T8.8: gate the merge on the luminance ratio — ≤+10% keeps pure ddgiBase,
+    // ≥+35% takes the full max(); confidence stays a multiplier.
+    float ddgiLum  = dot(ddgiBase,   float3(0.2126f, 0.7152f, 0.0722f));
+    float spgiLumT = dot(spgiTarget, float3(0.2126f, 0.7152f, 0.0722f));
+    float replaceW = smoothstep(1.10f, 1.35f, spgiLumT / max(ddgiLum, 1e-5f));
+    float3 gi = mix(ddgiBase, max(ddgiBase, spgiTarget), spgi_w * replaceW)
+              + ssgi_irr * ssgi_conf * mix(0.25f, 0.15f, spgi_w * replaceW);
+
+    // T8.9 + T8.10c: sky-leak ambient (Lumen far-field) — additive with the
+    // near-field estimate, occlusion-modulated so shadow pockets key it down.
+    gi += float3(0.17f, 0.18f, 0.21f) * mix(0.45f, 1.0f, pow(ssao, 1.1f));
+
+    float3 indirect = albedo * gi;
     indirect *= ao;
+
+#ifdef GI_DEBUG_STRIP
+    // Washout diagnosis: 0.25× strips — left→right: ddgi / ssgi / spgi / full.
+    // A pure-white strip means that input is ≥4 linear before tonemap.
+    {
+        float x = in.uv.x;
+        if (x < 0.25f)      return float4(ddgi * 0.25f, 1.0f);
+        else if (x < 0.5f)  return float4(ssgi4.rgb * 0.25f, 1.0f);
+        else if (x < 0.75f) return float4(spgi4.rgb * 0.25f, 1.0f);
+    }
+#endif
 
     return float4(indirect, 1.0f);
 }
@@ -631,9 +731,13 @@ fragment float4 fragmentFusion(
     // the widened lobe converges to E(N) which FusionIndirect already adds.
     reflection *= (1.0f - roughness * roughness) * 0.75f;
 
+    // T8.13 sync: output HDR linear — Vulkan FusionComposite.frag parity
+    // ("tonemap is handled by FinalBlit to avoid double tonemap"). Metal's
+    // chain continues through TAA → Bloom → ToneMappingPass (the single
+    // ACES+gamma); an internal tonemap here doubled it and pinned the frame
+    // to the ACES white shoulder.
     float3 result = (scene + indirect + reflection) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));
-    result = toneMap(result);
 
     return float4(result, 1.0f);
 }

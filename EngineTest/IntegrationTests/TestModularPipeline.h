@@ -5,6 +5,8 @@
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
 #include "Engine/Graphics/RHI/Components/RHICamera.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
+#include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
+#include "Engine/Graphics/RHI/Utils/IBLPrecomputer.h"
 #include "Engine/Graphics/RenderScene.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
@@ -35,6 +37,10 @@ private:
 
     // Modular pipeline
     std::unique_ptr<primal::graphics::StandardRenderPipeline> pipeline_;
+    // T8.13 Vulkan↔Metal sync: the Vulkan reference app traces DDGI/SPGI probes
+    // against the precomputed 384³ offline merged SDF — the runtime cascades
+    // (1m/2m/4m) misplace hits and skew the GI distribution. Same source here.
+    primal::graphics::nanite::OfflineSDFMerger* offline_sdf_merger_ = nullptr;
 
     // Scene
     primal::graphics::RenderScene scene_;
@@ -72,9 +78,20 @@ private:
     bool InitializeDevice();
     bool CompileShaders();
     bool InitializePipeline();
+    bool InitializeIBL();
     void SetupCamera();
     bool LoadSponzaScene();
+    void RegisterSceneCardsWithSurfaceCache();
     bool LoadMaterialTextures();
+
+    // Vulkan-reference IBL resources (sunset.hdr -> cubemap -> irradiance /
+    // prefilter / BRDF LUT). The generated maps remain alive while the pipeline
+    // samples them and are released before the Metal device is destroyed.
+    std::unique_ptr<primal::graphics::rhi::IBLPrecomputer> iblPrecomputer_;
+    primal::graphics::rhi::ResourceHandle envCube_ = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle iblIrradiance_ = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle iblPrefilter_ = primal::graphics::rhi::handles::INVALID_RESOURCE;
+    primal::graphics::rhi::ResourceHandle iblBrdfLUT_ = primal::graphics::rhi::handles::INVALID_RESOURCE;
 
 #ifdef TEST_METAL_GI_FUSION
     // GI composite alignment verification (frame GI_VERIFY_FRAME).

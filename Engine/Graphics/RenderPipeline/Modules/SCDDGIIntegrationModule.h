@@ -90,6 +90,12 @@ private:
     u32  total_probes_ = 0;
     u32  max_cards_ = 0;
     bool assignment_built_ = false;
+    // T8.13 fix (Metal two-state GI flip): the SC card set is rebuilt at
+    // runtime (placeholder cards -> streamed scene cards), which shuffles
+    // card indices. The per-probe contribution assignment baked card indices
+    // ONCE, so after a rebuild the injection aggregated WRONG cards'
+    // radiance — intermittent probe corruption. Track the count and rebuild.
+    u32 assignment_card_count_ = 0;
 
     // Debug (SC_DUMP_CARDS=1): staging copy of card_radiance_buf_ + the frame
     // its copy was enqueued; the print happens >=3 frames later so the copy

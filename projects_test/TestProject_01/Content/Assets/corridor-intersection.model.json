@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "source": "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Raw/kenney_dungeon_tiles/corridor-intersection.fbx",
+  "mesh": "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/projects_test/TestProject_01/Content/Assets/corridor-intersection.mesh",
+  "submeshes": [
+    {"name": "corridor-intersection", "lod_id": 4294967295, "lod_index": 0, "mesh_index": 0, "material_index": 0, "vertex_count": 1780, "index_count": 3936},
+    {"name": "corridor-intersection", "lod_id": 1, "lod_index": 0, "mesh_index": 1, "material_index": 0, "vertex_count": 1654, "index_count": 3198}
+  ]
+}

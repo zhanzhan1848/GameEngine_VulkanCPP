@@ -1,0 +1,22 @@
+{
+  "status": "complete",
+  "root_causes": [
+    "The serialized Sponza model encoded t_sign low bits as zero for all 161407 vertices, losing normal.z signs.",
+    "Tangent.z and tangent handedness were collapsed into one bit but decoded as different meanings on GPU.",
+    "ShadowFilter sampled GBuffer depth without a RenderGraph read dependency/state transition and declared an unused unbound texture."
+  ],
+  "artifact": "EngineTest/assets/Sponza_pipeline_signed_v3.model",
+  "verification": {
+    "build": "cmake --build build --target TestNaniteStreamingPipeline -j8",
+    "tests": [
+      "TestSceneBlobWriter: 13/13",
+      "TestPackedMeshDecoder: 9/9",
+      "git diff --check"
+    ],
+    "visuals": [
+      "/tmp/sponza_v3_window.png",
+      "/tmp/sponza_v3_mode3.png",
+      "/tmp/sponza_v3_mode6_diag1.png"
+    ]
+  }
+}

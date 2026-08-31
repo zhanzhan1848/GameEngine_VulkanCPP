@@ -660,11 +660,26 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         surface_cache_pass_ = std::make_unique<lumen::SurfaceCachePass>();
         if (!surface_cache_pass_->Initialize(device_, config)) {
             std::cerr << "[Lumen] Surface Cache init failed" << std::endl;
+        // T8.13: re-apply the offline SDF to the SC shadow march after a
+        // Lumen rebuild (surface_cache was just re-created).
+        if (has_offline_sdf_) {
+            surface_cache_pass_->SetOfflineSDFSource(offline_sdf_texture_,
+                offline_sdf_origin_, offline_sdf_extent_, offline_sdf_resolution_);
+        }
             surface_cache_pass_.reset();
         }
     }
 
     // Screen Probes
+    // TEMP diagnosis: SPGI_OFF=1 disables the screen-probe chain for A/B
+    // isolation of the two-state GI flip.
+    if (std::getenv("SPGI_OFF")) {
+        settings_.quality.enable_screen_probes = false;
+    }
+    // TEMP diagnosis: SSGI_OFF=1 disables SSGI the same way.
+    if (std::getenv("SSGI_OFF")) {
+        settings_.quality.enable_ssgi = false;
+    }
     if (settings_.quality.enable_screen_probes) {
         screen_probe_pass_ = std::make_unique<lumen::ScreenProbeGIPass>();
         lumen::ScreenProbeParams probeParams{};

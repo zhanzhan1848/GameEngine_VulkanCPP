@@ -4013,14 +4013,23 @@ bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
     if (!device_) return false;
     card_capture_max_clusters_ = max_clusters;
 
-    auto vsCode = LoadShaderBytecode("CardCapture.vert", "main", device_);
-    auto fsCode = LoadShaderBytecode("CardCapture.frag", "main", device_);
+    // T8.13 Vulkan↔Metal sync: Metal hosts both entries in one
+    // EngineTest/shaders/CardCapture.metal (a single MSL library cannot carry
+    // two functions named "main"), resolved by name. Vulkan keeps the
+    // two-file GLSL pair CardCapture.vert/.frag with entry "main".
+    const bool isMetal = (device_->GetPlatform() == rhi::RHIPlatform::Metal);
+    const char* vsName  = isMetal ? "CardCapture" : "CardCapture.vert";
+    const char* fsName  = isMetal ? "CardCapture" : "CardCapture.frag";
+    const char* vsEntry = isMetal ? "card_capture_vertex" : "main";
+    const char* fsEntry = isMetal ? "card_capture_fragment" : "main";
+    auto vsCode = LoadShaderBytecode(vsName, "main", device_);
+    auto fsCode = LoadShaderBytecode(fsName, "main", device_);
     if (vsCode.empty() || fsCode.empty()) {
         std::cerr << "[CardCapture] Failed to load CardCapture shaders" << std::endl;
         return false;
     }
-    auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex, "main");
-    auto fs = device_->CreateShader(fsCode.data(), fsCode.size(), rhi::ShaderStage::Pixel, "main");
+    auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex, vsEntry);
+    auto fs = device_->CreateShader(fsCode.data(), fsCode.size(), rhi::ShaderStage::Pixel, fsEntry);
     if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) return false;
 
     // 12 bindings — matches CardCapture.vert/.frag:

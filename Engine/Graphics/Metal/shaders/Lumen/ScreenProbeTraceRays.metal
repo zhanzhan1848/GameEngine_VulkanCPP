@@ -132,7 +132,7 @@ static float3x3 spgiJitterRotation(uint probeIdx, float frameSeed) {
 // Fibonacci candidates: q ∝ max(cosθ, 0.02) × (SH-luminance + 0.05);
 // inverse-CDF at (rayIdx + 0.5)/N; invNq = 1/(N·q_c) keeps the
 // cosine-weighted SH projection unbiased (importance resampling).
-static const uint SPGI_IS_MAX_RAYS = 64u;
+constant uint SPGI_IS_MAX_RAYS = 64u; /* MSL: program scope needs constant address space */
 
 static float3 spgiImportanceDirection(uint rayIdx, uint raysPerProbe,
                                       uint probeIdx, float frameSeed,

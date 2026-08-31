@@ -48,6 +48,69 @@ static SDFHitResult ddgiTraceSDF(
 }
 
 // ============================================================================
+// Probe ray sampler: ddgiSampleRayDirection lives in DDGIVolumeData.metal
+// (T8.13 sync) — single source shared with the SH projection side.
+// ============================================================================
+
+// ============================================================================
+// Probe relocation (ray-origin only) — port of DDGITraceSDF.comp
+// ddgiRelocateProbeOrigin. Pushes a buried ray origin out along the SDF until
+// it clears the hit-bias skin, capped at 0.45 × spacing so gather-side grid-
+// distance visibility tests stay valid. Searches 6 axes + 8 diagonals per
+// round and keeps the candidate with the LARGEST SDF distance (actual
+// free-air volume). Without this, probes sitting inside arcade masonry bake
+// wall-interior black and starve the second-floor GI.
+// ============================================================================
+static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
+                                      constant DDGIVolumeData& volume,
+                                      texture3d<float, access::sample> sdf0,
+                                      texture3d<float, access::sample> sdf1,
+                                      texture3d<float, access::sample> sdf2) {
+    float voxel = volume.SdfVoxelSizes[0].x;
+    float skin = max(voxel * 1.5f, spacing * 0.05f);
+    const float maxPush = spacing * 0.45f;
+    float d0 = sampleBestSDF_elseIf(probePos, sdf0, sdf1, sdf2,
+                                    volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
+                                    volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
+                                    volume.SdfCascadeCount);
+    if (d0 > skin) return probePos;
+    float3 best = probePos;
+    float bestD = d0;
+    const float3 dirs[14] = {
+        float3( 1.0f, 0.0f, 0.0f), float3(-1.0f, 0.0f, 0.0f),
+        float3( 0.0f, 1.0f, 0.0f), float3( 0.0f,-1.0f, 0.0f),
+        float3( 0.0f, 0.0f, 1.0f), float3( 0.0f, 0.0f,-1.0f),
+        normalize(float3( 1.0f, 1.0f, 1.0f)), normalize(float3(-1.0f, 1.0f, 1.0f)),
+        normalize(float3( 1.0f,-1.0f, 1.0f)), normalize(float3(-1.0f,-1.0f, 1.0f)),
+        normalize(float3( 1.0f, 1.0f,-1.0f)), normalize(float3(-1.0f, 1.0f,-1.0f)),
+        normalize(float3( 1.0f,-1.0f,-1.0f)), normalize(float3(-1.0f,-1.0f,-1.0f))};
+    const float stepLen = max(voxel, spacing * 0.1f);
+    for (uint round = 0u; round < 3u; ++round) {
+        float3 roundBest = best;
+        float roundBestD = bestD;
+        for (uint k = 0u; k < 14u; ++k) {
+            float3 p = best;
+            for (uint st = 0u; st < 6u; ++st) {
+                p += dirs[k] * stepLen;
+                float3 delta = p - probePos;
+                if (dot(delta, delta) > maxPush * maxPush) break;
+                float d = sampleBestSDF_elseIf(p, sdf0, sdf1, sdf2,
+                                               volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
+                                               volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
+                                               volume.SdfCascadeCount);
+                if (d > roundBestD) { roundBestD = d; roundBest = p; }
+                if (d > skin) break;
+            }
+        }
+        if (roundBestD <= bestD) break;
+        best = roundBest;
+        bestD = roundBestD;
+        if (bestD > skin) break;
+    }
+    return best;
+}
+
+// ============================================================================
 // Main Kernel
 // ============================================================================
 
@@ -179,9 +242,10 @@ kernel void ddgi_trace_rays(
 // reads with buffer reads in the same dispatch causes flickering.
 //
 // Solution: split into two dispatches:
-//   1. ddgi_trace_sdf: texture3D-only (4 SDF steps) → writes hit_distance_buffer
+//   1. ddgi_trace_sdf: texture3D-only (64 relaxed steps, 1.25×voxel hit
+//      band, probe relocation) → writes hit_distance_buffer
 //   2. ddgi_trace_finalize: buffer-only + texture2D → reads hit_distance_buffer,
-//      looks up Surface Cache radiance, writes ray_buffer
+//      looks up Surface Cache radiance (SC-first hierarchy), writes ray_buffer
 //
 // Both use (8,8,1) threadgroups, one group per probe.
 // ============================================================================
@@ -207,22 +271,53 @@ kernel void ddgi_trace_sdf(
 
     uint probeIdx = probeUpdateList[group_id];
     if (probeIdx >= volume.ProbeCountTotal) return;
-    uint globalRayIdx = group_id * volume.RaysPerProbe + tid;
 
     uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
     float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
-    float3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+    // TEMP diagnosis: record the raw SDF value at the grid origin on ray 0.
+    float d0_dbg = sampleBestSDF_elseIf(probePos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
+                                        volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
+                                        volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
+                                        volume.SdfCascadeCount);
+    // T8.13 sync: relocate buried ray origins (multi-axis deepest-free-point,
+    // same policy as DDGITraceSDF.comp::ddgiRelocateProbeOrigin).
+    float3 relocatedPos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing, volume,
+                                       sdf_cascade_0, sdf_cascade_1, sdf_cascade_2);
+    // TEMP diagnosis: also record the relocated origin's SDF value on ray 1.
+    float d1_dbg = sampleBestSDF_elseIf(relocatedPos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
+                                        volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
+                                        volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
+                                        volume.SdfCascadeCount);
+    float3 probePosRel = relocatedPos;
+    probePos = probePosRel;
+    float3 toLight = normalize(-volume.LightDirection.xyz);
+
+    // T8.13 P2 sync: lane-strided ray loop — 64 lanes serve any RaysPerProbe
+    // multiple of 64 (128 = two strided rays per lane).
+    for (uint rayId = tid; rayId < volume.RaysPerProbe; rayId += 64u) {
+    float3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
+                                           volume.FrameIndex,
+                                           uint(volume.RaySampleMode), toLight).xyz;
 
     // Relaxed sphere tracing (texture3D reads only)
     float t = 0.0f;
     float hitDistance = -1.0f;
 
-    float hitThreshold = volume.SdfVoxelSizes[0].x * 0.5f;
+    // T8.10b sync: hit band widened for the UNSIGNED shallow merged field
+    // (voxel*0.5 let most rays march past surfaces → step exhaustion →
+    // miss→sky; 1.25×voxel inflates surfaces by ~half a step-band —
+    // invisible at GI frequencies).
+    float hitThreshold = volume.SdfVoxelSizes[0].x * 1.25f;
     float minStep = volume.SdfVoxelSizes[0].x * 0.25f;
     uint coarsest = min(2u, volume.SdfCascadeCount - 1u);
     float fallbackStride = volume.SdfExtents[coarsest].x * 0.1f;
 
-    for (uint step = 0; step < DDGI_MAX_SDF_STEPS; ++step) {
+    // T8.13 sync: 64 relaxed steps (was 4 — the old march could not cross a
+    // full atrium; deep-shadow arcades never reached sunlit geometry). The
+    // shared DDGI_MAX_SDF_STEPS=4 stays untouched (other consumers); the
+    // Vulkan port defines the same 64 locally in DDGITraceSDF.comp.
+    const uint DDGI_SPLIT_MAX_SDF_STEPS = 64u;
+    for (uint step = 0; step < DDGI_SPLIT_MAX_SDF_STEPS; ++step) {
         float3 pos = probePos + rayDir * t;
 
         // else-if cascade selection — 1 texture3D read
@@ -243,10 +338,11 @@ kernel void ddgi_trace_sdf(
             break;
         }
 
-        // Relaxed advancement: overstep when far, conservative when close
+        // Relaxed advancement: overstep when far, conservative when close.
+        // T8.13 sync: far-field overstep 1.2 → 1.5 (matches Vulkan).
         float advance;
         if (d > hitThreshold * 4.0f) {
-            advance = d * 1.2f;
+            advance = d * 1.5f;
         } else {
             advance = max(d, minStep);
         }
@@ -254,13 +350,23 @@ kernel void ddgi_trace_sdf(
         if (t > volume.RayMaxDistance) break;
     }
 
-    hit_distance_buffer[globalRayIdx] = hitDistance;
+    // Indexed by update-slot (group) — finalize re-maps to absolute probe index.
+    uint globalRayIdx = group_id * volume.RaysPerProbe + rayId;
+    if (rayId == 0u && group_id < volume.ProbeUpdateCount) {
+        hit_distance_buffer[group_id * volume.RaysPerProbe + 0u] =
+            (d0_dbg >= 1e9f) ? 5555.0f : d0_dbg;               // ray0 = raw origin d
+    } else if (rayId == 1u && group_id < volume.ProbeUpdateCount) {
+        hit_distance_buffer[group_id * volume.RaysPerProbe + 1u] =
+            (d1_dbg >= 1e9f) ? 5555.0f : d1_dbg;               // ray1 = relocated d
+    } else {
+        hit_distance_buffer[globalRayIdx] = hitDistance;
+    }
+    } // T8.13 P2 stride loop
 }
 
 // ============================================================================
 // Canonical radiance chain helpers (T3.1) — ported from DDGITraceFinalize.comp.
-// Chain: prev_frame_color (screen) → SC atlas (grid) → analytic (direct+sky),
-// plus the self-circulating multi-bounce term albedo × L_i_prev × 0.85.
+// T8.13 sync: SC-first hierarchy with 0.70 self-circulating feedback.
 // ============================================================================
 
 static float3 scSamplePrevColor(float3 hitPos, float4x4 vp,
@@ -348,6 +454,28 @@ static float3 scShDot4(float3 c0, float3 c1, float3 c2, float3 c3, float3 d) {
     constexpr float C1 = 0.488603f;
     return c0 * C0 + c1 * (-C1 * d.y) + c2 * (C1 * d.z) + c3 * (-C1 * d.x);
 }
+// (scShDot4 kept for reference; the finalize path now evaluates the full
+// 9-coefficient basis via scShDot9 — see T8.13 sync note above.)
+
+// T8.13 sync: full L0-L2 evaluation with the canonical basis — the old
+// 4-coefficient evaluation left the directional colour detail the SC path
+// projects into bands 4-8 unread (matches DDGITraceFinalize.comp shDot9).
+static float3 scShDot9(thread const float3* c, float3 d) {
+    constexpr float _C0   = 0.282095f;
+    constexpr float _C1   = 0.488603f;
+    constexpr float _C2_0 = 1.092548f;
+    constexpr float _C2_1 = 0.315392f;
+    constexpr float _C2_2 = 0.546274f;
+    return c[0] * _C0
+         + c[1] * (-_C1 * d.y)
+         + c[2] * ( _C1 * d.z)
+         + c[3] * (-_C1 * d.x)
+         + c[4] * ( _C2_0 * d.y * d.x)
+         + c[5] * (-_C2_0 * d.y * d.z)
+         + c[6] * ( _C2_1 * (3.0f * d.z * d.z - 1.0f))
+         + c[7] * (-_C2_0 * d.x * d.z)
+         + c[8] * ( _C2_2 * (d.x * d.x - d.y * d.y));
+}
 
 // Previous-frame probe irradiance at a world position (multi-bounce feedback).
 // irradiance_history is the vec4-strided SH3 buffer: 9 coefficients per probe.
@@ -367,11 +495,9 @@ static float3 scSamplePrevProbeGrid(float3 pos, float3 N,
     for (uint p = 0u; p < 4u; ++p) {
         if (tet.bw[p] < 0.001f) continue;
         uint base = tet.pi[p] * 9u;
-        float3 sh0 = irradiance_history[base + 0u].xyz;
-        float3 sh1 = irradiance_history[base + 1u].xyz;
-        float3 sh2 = irradiance_history[base + 2u].xyz;
-        float3 sh3 = irradiance_history[base + 3u].xyz;
-        result += scShDot4(sh0, sh1, sh2, sh3, N) * tet.bw[p];
+        float3 sh[9];
+        for (uint i = 0u; i < 9u; ++i) sh[i] = irradiance_history[base + i].xyz;
+        result += scShDot9(sh, N) * tet.bw[p];
         totalWeight += tet.bw[p];
     }
     if (totalWeight > 0.0f) return result / totalWeight;
@@ -410,31 +536,40 @@ kernel void ddgi_trace_finalize(
 
     uint probeIdx = probeUpdateList[group_id];
     if (probeIdx >= volume.ProbeCountTotal) return;
-    uint globalRayIdx = group_id * volume.RaysPerProbe + tid;
+
+    uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
+    float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
+    float3 toLight = normalize(-volume.LightDirection.xyz);
+
+    // T8.13 P2 sync: lane-strided ray loop (mirrors ddgi_trace_sdf).
+    for (uint rayId = tid; rayId < volume.RaysPerProbe; rayId += 64u) {
+    uint globalRayIdx = group_id * volume.RaysPerProbe + rayId;
     float hitDistance = hit_distance_buffer[globalRayIdx];
+
+    float3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
+                                           volume.FrameIndex,
+                                           uint(volume.RaySampleMode), toLight).xyz;
 
     DDGIRayData result;
 
     if (hitDistance >= 0.0f) {
         result.radiance_and_dist.w = hitDistance;
-
-        // Recompute hit position from probe data + distance
-        uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
-        float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
-        float3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+        // Recompute hit position (same recipe as DDGITraceFinalize.comp:
+        // probePos is the UN-relocated grid position here).
         float3 hitPos = probePos + rayDir * hitDistance;
 
-        // ---- Canonical radiance chain (T3.1, mirrors DDGITraceFinalize.comp):
-        // base = prev_frame_color (screen) → SC atlas (grid) → analytic
-        // (direct + sky); multi-bounce = albedo × L_i_prev × 0.85. ----
+        // ---- T8.13 sync: SC-FIRST radiance hierarchy (mirrors
+        // DDGITraceFinalize.comp). 1. SC lighting atlas — its own feedback
+        // already accumulates multi-bounce, so no extra albedo × L_i_prev
+        // term here. 2. Prev-frame screen color + material bounce + one
+        // self-circulating term. 3. Analytic direct + sky + multi-bounce. ----
         float3 N = -rayDir;
         float3 albedo = scSampleHitAlbedo(hitPos, view_projection, volume.Albedo.xyz, gbuffer_albedo);
         float3 L_i_prev = scSamplePrevProbeGrid(hitPos, N, volume, irradiance_history);
 
-        float3 base = scSamplePrevColor(hitPos, view_projection, prev_frame_color);
-        if (dot(base, base) <= 0.0001f) {
-            // Off-screen: SC atlas via uniform grid (T1.3)
-            base = DDGI_SKY_COLOR;   // provisional; analytic below is the true fallback
+        float3 radiance;
+        bool scUsed = false;
+        {
             float atlasSize = float(volume.SCAtlasSize);
             uint deviceReads = 0u;
             constexpr uint kMaxDeviceReads = 16u;
@@ -446,7 +581,6 @@ kernel void ddgi_trace_finalize(
                               sc_grid_offsets[10], sc_grid_offsets[11]);
             SCGridParams gp = scGridDecode(gh0, gh1, gh2);
             uint cell = scGridCellIndex(gp, hitPos);
-            bool scHit = false;
             if (cell != 0xFFFFFFFFu) {
                 uint begin = sc_grid_offsets[16u + cell];
                 uint end   = sc_grid_offsets[17u + cell];
@@ -459,32 +593,62 @@ kernel void ddgi_trace_finalize(
                     if (worldToCardUVDevice(hitPos, card, atlasUV)) {
                         float2 normUV = atlasUV / atlasSize;
                         sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
-                        base = lighting_atlas.sample(samp, normUV).xyz;
-                        scHit = true;
+                        float3 scRadiance = lighting_atlas.sample(samp, normUV).xyz;
+                        // Energy gate — a converging/black card must not
+                        // override the lower hierarchy.
+                        if (dot(scRadiance, scRadiance) > 0.0001f) {
+                            radiance = scRadiance;
+                            scUsed = true;
+#ifdef DDGI_DBG_PATH
+                            radiance = float3(0.0f, 1.0f, 0.0f) * 0.5f; // SC = green
+#endif
+                        }
                         break;
                     }
                 }
             }
-            if (!scHit) {
-                // Analytic: self-computed direct + sky (GLSL-parity formula)
+        }
+        if (!scUsed) {
+            float3 prevRadiance = scSamplePrevColor(hitPos, view_projection, prev_frame_color);
+            if (dot(prevRadiance, prevRadiance) > 0.0001f) {
+                // On-screen: real rendered color + albedo-driven diffuse
+                // source (saturated fabrics must tint incoming ambient even
+                // when shadowed/back-facing in prevRadiance) + multi-bounce.
+                float sourceLum = dot(prevRadiance, float3(0.2126f, 0.7152f, 0.0722f));
+                float albedoMax = max(max(albedo.r, albedo.g), albedo.b);
+                float albedoMin = min(min(albedo.r, albedo.g), albedo.b);
+                float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3f);
+                float materialWeight = mix(0.15f, 0.85f, saturation);
+                float3 materialBounce = albedo * max(sourceLum, 0.12f) * materialWeight;
+                // T8.13 P1 sync: self-circulating feedback 0.85 → 0.70
+                // (coupled-loop gain audit — bistability elimination).
+                radiance = prevRadiance + materialBounce + albedo * L_i_prev * 0.70f;
+#ifdef DDGI_DBG_PATH
+                radiance = float3(1.0f, 1.0f, 0.0f) * 0.5f; // prev-screen = yellow
+#endif
+            } else {
+                // Analytic: self-computed direct + sky + multi-bounce
                 float3 L = normalize(-volume.LightDirection.xyz);
                 float NdotL = max(0.0f, dot(N, L));
                 float3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
                 float NdotUp = max(0.0f, N.y);
                 float3 E_sky = volume.SkyColor.xyz * (0.5f + 0.5f * NdotUp);
                 constexpr float PI_VAL = 3.14159265358979f;
-                base = (albedo / PI_VAL) * (E_direct + E_sky);
+                radiance = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70f);
+#ifdef DDGI_DBG_PATH
+                radiance = float3(1.0f, 0.0f, 0.0f) * 0.5f; // analytic = red
+#endif
             }
         }
-
-        result.radiance_and_dist.xyz = base + albedo * L_i_prev * 0.85f;
+        result.radiance_and_dist.xyz = radiance;
     } else {
         result.radiance_and_dist.w = -1.0f;
 
-        // Miss fallback: search for nearby SC cards centered on probe position
+        // Miss fallback: nearby SC cards centered on the PROBE (not hit).
+        // T8.13 sync: only accept card light that actually has energy — in
+        // shadowed arcades the atlas is still converging and a black card
+        // must not override the sky term; try the next covering card instead.
         float3 fallbackRadiance = DDGI_SKY_COLOR;
-        uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
-        float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
         float atlasSize = float(volume.SCAtlasSize);
 
         bool missFound = false;
@@ -510,14 +674,20 @@ kernel void ddgi_trace_finalize(
                 if (worldToCardUVDevice(probePos, card, atlasUV)) {
                     float2 normUV = atlasUV / atlasSize;
                     sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
-                    fallbackRadiance = lighting_atlas.sample(samp, normUV).xyz;
-                    missFound = true;
-                    break;
+                    float3 missRadiance = lighting_atlas.sample(samp, normUV).xyz;
+                    if (dot(missRadiance, missRadiance) > 0.0001f) {
+                        fallbackRadiance = missRadiance;
+                        missFound = true;
+                        break;
+                    }
                 }
             }
         }
+        (void)missFound;
         result.radiance_and_dist.xyz = fallbackRadiance;
     }
 
-    ray_buffer[probeIdx * volume.RaysPerProbe + tid] = result;
+    // Write at ABSOLUTE probe index (remap from update-slot is intentional).
+    ray_buffer[probeIdx * volume.RaysPerProbe + rayId] = result;
+    } // T8.13 P2 stride loop
 }

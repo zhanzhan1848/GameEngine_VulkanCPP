@@ -1,0 +1,5 @@
+iteration	variant	result	key_metric	notes
+0	original	failed	t_sign_low2_nonzero=0/161407	serialized model lost every normal.z sign; mode 6 diag 1 nearly black
+1	normal-sign-v2	partial	avg_normal_dot=0.568656	normal.z repaired, but tangent.z and handedness still shared one bit
+2	independent-tbn-v3	passed	validation_errors=0; lit_vertices=108303/161407	independent normal.z, tangent.z, and handedness bits; Metal mode 0/3/6 visually verified
+3	rendergraph-shadow-dependency	passed	build_and_tests=passed	declared GBuffer depth read/order and removed unbound ShadowFilter normal texture

@@ -1,0 +1,145 @@
+{
+  "SchemaVersion": 2,
+  "$id": "26462178-8a50-4f26-a9fc-cb6703ea350c",
+  "Name": "Default Scene",
+  "Entities": [
+    {
+      "EntityGuid": "9320ff9b-2d21-4d84-94f4-9c5cab947ada",
+      "Name": "Light_1",
+      "ParentEntityGuid": null,
+      "IsEnabled": true,
+      "Components": [
+        {
+          "$type": "transform",
+          "Data": {
+            "PositionX": 3.54375,
+            "PositionY": 0,
+            "PositionZ": 4.950468,
+            "RotationX": 0,
+            "RotationY": 0,
+            "RotationZ": 0,
+            "ScaleX": 1,
+            "ScaleY": 1,
+            "ScaleZ": 1,
+            "IsEnabled": true
+          }
+        },
+        {
+          "$type": "light",
+          "Data": {
+            "LightType": 1,
+            "ColorR": 1,
+            "ColorG": 1,
+            "ColorB": 1,
+            "Intensity": 1,
+            "Range": 10,
+            "UmbraAngle": 0,
+            "PenumbraAngle": 0,
+            "CastShadow": true,
+            "IsEnabled": true
+          }
+        }
+      ]
+    },
+    {
+      "EntityGuid": "92277a5b-41af-441c-8db8-4ea1096f33d5",
+      "Name": "Camera_1",
+      "ParentEntityGuid": null,
+      "IsEnabled": true,
+      "Components": [
+        {
+          "$type": "transform",
+          "Data": {
+            "PositionX": 0,
+            "PositionY": 5.839219,
+            "PositionZ": 0,
+            "RotationX": 0,
+            "RotationY": 0,
+            "RotationZ": 0,
+            "ScaleX": 1,
+            "ScaleY": 1,
+            "ScaleZ": 1,
+            "IsEnabled": true
+          }
+        },
+        {
+          "$type": "camera",
+          "Data": {
+            "Projection": 0,
+            "FieldOfViewDegrees": 60,
+            "OrthographicSize": 5,
+            "NearPlane": 0.1,
+            "FarPlane": 1000,
+            "ClearColorR": 0,
+            "ClearColorG": 0,
+            "ClearColorB": 0,
+            "ClearColorA": 1,
+            "IsEnabled": true
+          }
+        }
+      ]
+    },
+    {
+      "EntityGuid": "7e11c514-fa0c-4b6b-abf0-042f18aa81e4",
+      "Name": "Sphere_1",
+      "ParentEntityGuid": null,
+      "IsEnabled": true,
+      "Components": [
+        {
+          "$type": "transform",
+          "Data": {
+            "PositionX": 5,
+            "PositionY": 0,
+            "PositionZ": 0,
+            "RotationX": 0,
+            "RotationY": 0,
+            "RotationZ": 0,
+            "ScaleX": 1,
+            "ScaleY": 1,
+            "ScaleZ": 1,
+            "IsEnabled": true
+          }
+        },
+        {
+          "$type": "meshRenderer",
+          "Data": {
+            "MeshGuid": "00000000-0000-0000-0000-000000000000",
+            "BuiltinMesh": 1,
+            "MaterialGuids": [],
+            "CastShadow": true,
+            "ReceiveShadow": true,
+            "IsEnabled": true
+          }
+        }
+      ]
+    }
+  ],
+  "Environment": {
+    "AmbientR": 0.05,
+    "AmbientG": 0.05,
+    "AmbientB": 0.05,
+    "AmbientIntensity": 1,
+    "FogEnabled": false,
+    "FogR": 0.7,
+    "FogG": 0.75,
+    "FogB": 0.8,
+    "FogNear": 10,
+    "FogFar": 200,
+    "FogDensity": 0.01,
+    "SkyboxEnabled": false,
+    "SkyR": 0.2,
+    "SkyG": 0.4,
+    "SkyB": 0.8,
+    "ToneMapping": "ACES",
+    "Exposure": 1,
+    "MainCameraEntityGuid": "92277a5b-41af-441c-8db8-4ea1096f33d5"
+  },
+  "EditorCamera": {
+    "TargetX": -0.1952211,
+    "TargetY": 3.1598818,
+    "TargetZ": 0.10979472,
+    "Distance": 7.5624275,
+    "Yaw": 0.78451884,
+    "Pitch": -0.24540327
+  }
+}

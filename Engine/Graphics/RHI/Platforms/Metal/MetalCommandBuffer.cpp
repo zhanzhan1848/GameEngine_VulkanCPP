@@ -239,6 +239,23 @@ bool MetalCommandBuffer::submitImpl(u32 waitFlags) {
      }
     */
 
+    // TEMP diagnosis (T8.13 two-state flip / system instability): log any
+    // command buffer that does NOT complete cleanly. An errored buffer never
+    // executes its encoded event signals, which would leave the frame fence
+    // target permanently unreachable (every later frame times out). No 'this'
+    // capture — safe against the pooled-command-buffer use-after-free noted
+    // above.
+    mtlCommandBuffer_->addCompletedHandler([](MTL::CommandBuffer* buffer) {
+        MTL::CommandBufferStatus st = buffer->status();
+        if (st != MTL::CommandBufferStatusCompleted) {
+            NS::Error* err = buffer->error();
+            std::cerr << "[MetalCB] buffer finished status=" << (int)st
+                      << " error="
+                      << (err ? err->localizedDescription()->utf8String() : "none")
+                      << std::endl;
+        }
+    });
+
     mtlCommandBuffer_->commit();
     
     return true;

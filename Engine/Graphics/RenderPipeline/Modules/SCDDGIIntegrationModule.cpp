@@ -345,6 +345,7 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
         }
     }
 
+    assignment_card_count_ = sc->GetCardGenerator().GetCardCount();
     assignment_built_ = true;
     std::cout << "[SC→DDGI] Card→Probe assignment built: " << cardCount << " cards, "
               << total_probes_ << " probes, " << flat.size() << " contributions" << std::endl;
@@ -402,6 +403,19 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
             const u32 cardCount = sc->GetCardGenerator().GetCardCount();
             if (cardCount == 0) return;
             if (!EnsureResources(ddgi, sc)) return;
+            // T8.13 fix: rebuild the per-probe card assignment whenever the
+            // SC card set was regenerated (count changed) — the baked card
+            // indices go stale otherwise (see header note).
+            if (assignment_card_count_ != cardCount) {
+                // Rate-limit: card counts can oscillate while streaming
+                // registers meshes; a rebuild is heavy CPU (probes x cards).
+                static u32 lastRebuildFrame = 0;
+                if (inputs.frame_index - lastRebuildFrame >= 90u) {
+                    lastRebuildFrame = inputs.frame_index;
+                    assignment_built_ = false;
+                    if (!EnsureResources(ddgi, sc)) return;
+                }
+            }
 
             // SC_DUMP_CARDS=1 — deferred print of the previous dump's copy.
             if (dump_pending_frame_ != 0xFFFFFFFFu &&
@@ -456,6 +470,27 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                   << " cov=" << rad[i * 4 + 3] << std::endl;
                     }
                     device_->UnmapBuffer(card_radiance_staging_);
+                }
+                // TEMP: direct map of the live card radiance buffer (staging
+                // copy above can lag / hit uninitialized heap on frame 0).
+                if (auto* rad = static_cast<const float*>(
+                        device_->MapBuffer(card_radiance_buf_))) {
+                    u32 n2 = dump_card_count_;
+                    std::vector<float> lums2;
+                    for (u32 i = 0; i < n2; ++i) {
+                        float l = 0.2126f*rad[i*4+0] + 0.7152f*rad[i*4+1] + 0.0722f*rad[i*4+2];
+                        if (!std::isnan(l)) lums2.push_back(l);
+                    }
+                    if (!lums2.empty()) {
+                        std::sort(lums2.begin(), lums2.end());
+                        std::cerr << "  [live] cards lit(p50>0.05)="
+                                  << std::count_if(lums2.begin(), lums2.end(),
+                                                   [](float v){ return v > 0.05f; })
+                                  << "/" << n2
+                                  << " p50=" << lums2[n2/2] << " p90=" << lums2[(n2*9)/10]
+                                  << " max=" << lums2.back() << std::endl;
+                    }
+                    device_->UnmapBuffer(card_radiance_buf_);
                 }
 
                 // Probe L0 series (same dump frame): luminance percentiles +
@@ -538,6 +573,72 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                         }
                         device_->UnmapBuffer(ddgi_irr_staging_);
                     }
+
+                    // TEMP diagnosis: SC shadow visibility samples (was the
+                    // SC direct light unshadowed on Metal?).
+                    {
+                        const u32 asz = sc->GetAtlasSize();
+                        if (asz > 0) {
+                            u32 idx = (asz / 2) * asz + (asz / 2);
+                            std::cerr << "  scShadowVis: pipelineReady="
+                                      << sc->DebugShadowPipelineReady()
+                                      << " center=" << sc->DebugShadowVisibilityAt(idx)
+                                      << " texel0=" << sc->DebugShadowVisibilityAt(0)
+                                      << " last=" << sc->DebugShadowVisibilityAt(asz * asz - 1)
+                                      << std::endl;
+                        }
+                    }
+
+                    // TEMP diagnosis: direct map of the (Dynamic/shared) ray
+                    // buffer — hit/miss split + radiance & distance percentiles.
+                    if (ddgi->GetRayDataBuffer() != handles::INVALID_RESOURCE) {
+                        if (auto* rays = static_cast<const float*>(
+                                device_->MapBuffer(ddgi->GetRayDataBuffer()))) {
+                            const u64 rpp = 64u;
+                            const u64 nRays = (u64)dump_probe_count_ * rpp;
+                            u64 miss = 0, hit = 0, nanCount = 0;
+                            std::vector<float> hitLum, hitDist;
+                            std::vector<float> d0v, d1v;
+                            for (u64 r = 0; r < nRays; ++r) {
+                                const float* e = rays + r * 4;
+                                if (std::isnan(e[0]) || std::isnan(e[1]) ||
+                                    std::isnan(e[2]) || std::isnan(e[3])) { ++nanCount; continue; }
+                                const u64 probe = r / rpp, lane = r % rpp;
+                                if (lane == 0 && e[3] > -900.0f) { d0v.push_back(e[3]); continue; }
+                                if (lane == 1 && e[3] > -900.0f) { d1v.push_back(e[3]); continue; }
+                                if (lane <= 1u) continue;
+                                if (e[3] < 0.0f) { ++miss; continue; }
+                                ++hit;
+                                hitLum.push_back(0.2126f*e[0] + 0.7152f*e[1] + 0.0722f*e[2]);
+                                hitDist.push_back(e[3]);
+                            }
+                            auto qfn2 = [](std::vector<float>& v, float f) {
+                                if (v.empty()) return 0.0f;
+                                std::sort(v.begin(), v.end());
+                                return v[std::min(v.size()-1, (size_t)(f*(v.size()-1)))];
+                            };
+                            if (!d0v.empty())
+                                std::cerr << "  sdf@origin(d0): n=" << d0v.size()
+                                          << " p10=" << qfn2(d0v,0.1f) << " p50=" << qfn2(d0v,0.5f)
+                                          << " p90=" << qfn2(d0v,0.9f)
+                                          << " | sdf@relocated(d1): p50=" << qfn2(d1v,0.5f)
+                                          << " p90=" << qfn2(d1v,0.9f) << std::endl;
+                            auto qfn = [](std::vector<float>& v, float f) {
+                                if (v.empty()) return 0.0f;
+                                std::sort(v.begin(), v.end());
+                                return v[std::min(v.size()-1, (size_t)(f*(v.size()-1)))];
+                            };
+                            std::cerr << "  rays: n=" << nRays << " miss=" << miss
+                                      << " hit=" << hit << " nan=" << nanCount
+                                      << " hitLum p10=" << qfn(hitLum,0.1f)
+                                      << " p50=" << qfn(hitLum,0.5f)
+                                      << " p90=" << qfn(hitLum,0.9f)
+                                      << " | hitDist p10=" << qfn(hitDist,0.1f)
+                                      << " p50=" << qfn(hitDist,0.5f)
+                                      << " p90=" << qfn(hitDist,0.9f) << std::endl;
+                            device_->UnmapBuffer(ddgi->GetRayDataBuffer());
+                        }
+                    }
                 }
                 dump_pending_frame_ = 0xFFFFFFFFu;
             }
@@ -593,7 +694,10 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 const char* e = std::getenv("SC_DUMP_CARDS");
                 return e && atoi(e) != 0;
             }();
-            if (dumpCards && inputs.frame_index % 90u == 0u &&
+            u32 dumpInterval = 90u;
+            if (const char* iv = std::getenv("SC_DUMP_INTERVAL"))
+                dumpInterval = (u32)std::max(1, atoi(iv));
+            if (dumpCards && inputs.frame_index % dumpInterval == 0u &&
                 dump_pending_frame_ == 0xFFFFFFFFu) {
                 if (card_radiance_staging_ == handles::INVALID_RESOURCE) {
                     BufferDesc d{};
@@ -611,6 +715,20 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
             }
 
             // --- Sub-pass 2: ProbeIrradianceFromCards ---
+            // TEMP diagnosis: SC_INJECT_OFF=1 mutes the injection to bisect
+            // the two-state oscillation (probes then carry only the DDGI
+            // trace/update result).
+            const u32 totalProbes = ddgi->GetVolumeData().ProbeCountTotal;
+            if (std::getenv("SC_INJECT_OFF")) {
+                // Still service the staging dump so the numeric series stays
+                // comparable (copy current probe state).
+                if (dumpCards && dump_pending_frame_ == inputs.frame_index &&
+                    ddgi_irr_staging_ != handles::INVALID_RESOURCE) {
+                    cmd->CopyBuffer(ddgi->GetIrradianceBuffer(frameIdx),
+                                    ddgi_irr_staging_, 0, 0,
+                                    (u64)totalProbes * 9u * 16u);
+                }
+            } else
             {
                 const auto& ddgiVol = ddgi->GetVolumeData();
                 auto* vol = static_cast<lumen::DDGIVolumeData*>(device_->MapBuffer(ddgi_vol_cb_[frameIdx]));
@@ -636,7 +754,6 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 // SC-first: every probe collects from the atlas every frame
                 // (≤ SC_MAX_CONTRIBS_PER_PROBE card reads each); the SDF trace
                 // fills in where SC coverage is thin instead of vice versa.
-                const u32 totalProbes = ddgiVol.ProbeCountTotal;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
 
                 // Same debug dump frame: copy the just-updated probe L0s so

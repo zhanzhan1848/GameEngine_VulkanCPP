@@ -259,6 +259,11 @@ public:
         if (ddgi_pass_) {
             ddgi_pass_->SetOfflineSDFSource(texture, origin, extent, resolution);
         }
+        // T8.13: forward to the SC shadow march as well (runtime cascades
+        // misplace SC shadow hits just like they did for the DDGI trace).
+        if (surface_cache_pass_) {
+            surface_cache_pass_->SetOfflineSDFSource(texture, origin, extent, resolution);
+        }
     }
 
     // --- PCG Entity integration (Phase 3c/3d) ---

@@ -1,0 +1,29 @@
+{
+  "status": "complete",
+  "root_causes": [
+    "The Metal Nanite GBuffer used front_facing even though meshlet winding is inconsistent under CullMode::None.",
+    "TestNaniteStreamingPipeline passed the surface-to-light vector to DDGI, whose trace shader expects and negates the light travel direction.",
+    "DDGIGIGather decoded dynamic SH with opposite L1 signs and swapped L2 slots relative to DDGIUpdateIrradiance.",
+    "Visualization mode 4 is albedo-only, not deferred plus DDGI, which made the comparison misleading."
+  ],
+  "changed_files": [
+    "EngineTest/shaders/GPUDrivenDraw.metal",
+    "EngineTest/shaders/DDGIGIGather.metal",
+    "EngineTest/IntegrationTests/TestNaniteStreamingPipeline.cpp"
+  ],
+  "verification": {
+    "build": "cmake --build build --target TestNaniteStreamingPipeline -j8",
+    "metal_runtime": [
+      "mode 2 deferred-only render loop",
+      "mode 3 deferred+DDGI render loop",
+      "DDGIGIGather.metal compilation succeeded"
+    ],
+    "directional_metric": {
+      "old_same": 0.001985,
+      "old_opposite": 0.314273,
+      "fixed_same": 0.716197,
+      "fixed_opposite": 0.238732
+    },
+    "diff_check": "passed"
+  }
+}

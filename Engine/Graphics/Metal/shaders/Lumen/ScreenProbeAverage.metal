@@ -79,7 +79,7 @@ static float3x3 spgiJitterRotation(uint probeIdx, float frameSeed) {
 // F2 (M7) 形态 c: importance resampling — byte-equivalent to
 // EncodeLib.glsl::spgiImportanceDirection (see TraceRays.metal's copy for
 // the full contract; Average regenerates directions to match the traces).
-static const uint SPGI_IS_MAX_RAYS = 64u;
+constant uint SPGI_IS_MAX_RAYS = 64u; /* MSL: program scope needs constant address space */
 
 static float3 spgiImportanceDirection(uint rayIdx, uint raysPerProbe,
                                       uint probeIdx, float frameSeed,
@@ -255,8 +255,8 @@ kernel void screen_probe_average(
             // The reduced coefficients are cosine-weighted hemispherical
             // expectations. Convert to the normalization expected by the
             // standard SH evaluator (L0 * 2pi, L1 * pi).
-            constant float L0_HEMISPHERE_SCALE = 6.28318530718f;
-            constant float L1_HEMISPHERE_SCALE = 3.14159265359f;
+            constexpr float L0_HEMISPHERE_SCALE = 6.28318530718f; /* MSL: no constant-address locals */
+            constexpr float L1_HEMISPHERE_SCALE = 3.14159265359f;
 
             // Hit ratio: how many rays hit geometry
             float hitRatio = hitCount / float(constants.raysPerProbe);

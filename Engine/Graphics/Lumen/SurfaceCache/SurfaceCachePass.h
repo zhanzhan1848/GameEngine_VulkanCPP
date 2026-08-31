@@ -45,6 +45,22 @@ public:
     SurfaceCachePass() = default;
     ~SurfaceCachePass();
 
+    // TEMP diagnosis (T8.13 Metal sync): direct CPU read of the SC shadow
+    // visibility buffer (Dynamic/shared memory). Returns -1 when unavailable.
+    float DebugShadowVisibilityAt(u32 index) const;
+    bool DebugShadowPipelineReady() const { return shadow_pipeline_ != rhi::handles::INVALID_PIPELINE; }
+
+    // T8.13: offline merged SDF (384^3) for the per-texel shadow march —
+    // the runtime cascades (1m/2m/4m) misplace SC shadow hits the same way
+    // they do for the DDGI trace.
+    void SetOfflineSDFSource(rhi::ResourceHandle texture,
+                             math::v3 origin, math::v3 extent, u32 resolution) {
+        sc_offline_sdf_texture_ = texture;
+        sc_offline_sdf_origin_ = origin;
+        sc_offline_sdf_extent_ = extent;
+        sc_offline_sdf_resolution_ = resolution;
+    }
+
     bool Initialize(rhi::RHIDeviceBase* device, const LumenConfig& config);
     void Shutdown();
 
@@ -229,6 +245,10 @@ private:
     // T3.3: atlas-space directional visibility (float per atlas texel,
     // CPU-initialized to 1.0) + triple-buffered shadow params CB.
     rhi::ResourceHandle shadow_visibility_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle sc_offline_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
+    math::v3 sc_offline_sdf_origin_{};
+    math::v3 sc_offline_sdf_extent_{};
+    u32 sc_offline_sdf_resolution_ = 0;
     rhi::ResourceHandle shadow_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "source": "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Raw/kenney_dungeon_tiles/corridor-corner.fbx",
+  "mesh": "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/projects_test/TestProject_01/Content/Assets/corridor-corner.mesh",
+  "submeshes": [
+    {"name": "corridor-corner", "lod_id": 0, "lod_index": 0, "mesh_index": 0, "material_index": 0, "vertex_count": 2574, "index_count": 2574}
+  ]
+}

@@ -66,7 +66,10 @@ set(_SKIP_NAMES
     PostProcess.metal
     # WIP (auto& address space, struct mismatch)
     DDGICardRadianceAvg.metal DDGIProbeIrradianceFromCards.metal
-    SurfaceCacheLightCull.metal SurfaceCacheLightEval.metal
+    SurfaceCacheLightCull.metal
+    # SurfaceCacheLightEval.metal removed from skip list: T8.13 Vulkan↔Metal
+    # sync rewrote it (probe-fed indirect + 0.70 feedback) and it now compiles
+    # clean on both the engine and EngineTest copies.
 )
 
 # ---------------------------------------------------------------------------

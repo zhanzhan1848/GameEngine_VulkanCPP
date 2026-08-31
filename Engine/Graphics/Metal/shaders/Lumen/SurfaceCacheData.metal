@@ -68,6 +68,12 @@ struct FlattenedLightingParams {
     uint card_count;
     uint light_count;
     uint _pad;
+    // T8.13 sync: probe-fed indirect (Lumen hierarchy) — near-volume grid so
+    // LightEval can gather incoming irradiance from the DDGI probes. Appended
+    // at the end exactly like the C++/GLSL structs; Metal shaders predating
+    // this field kept reading the first 64B.
+    float4 ddgi_origin_spacing;    // xyz origin, w spacing
+    uint4  ddgi_counts_valid;      // xyz counts, w valid flag
 };
 
 // Reconstruct world position from card atlas UV + depth

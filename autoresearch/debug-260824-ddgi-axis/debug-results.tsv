@@ -1,0 +1,7 @@
+iteration	variant	result	metric	notes
+0	baseline	failed	old_same=0.001985; old_opposite=0.314273	DDGI SH decode responds more strongly in the opposite direction; CPU also passes toward-light into a shader expecting emission direction
+1	visible-face-normal	passed	Metal shader compilation=passed	derive visible geometric normal from world-position derivatives and rebuild handed TBN instead of trusting meshlet winding/front_facing
+2	ddgi-light-direction	passed	deferred_L == -DDGI_emission	pass sharedLightDir to DDGI while deferred continues using sharedLightPos
+3	ddgi-sh-convention	passed	fixed_same=0.716197; fixed_opposite=0.238732	gather SH basis now exactly matches update SH basis signs and coefficient order
+4	metal-runtime	passed	mode2_frames>13000; mode3_frames>1100	GPUDriven, deferred, DDGIGIGather and DDGI shaders compiled; mode 2 and mode 3 render loops completed
+5	final-build	passed	build_exit=0; diff_check=0	default visualization restored to mode 0
