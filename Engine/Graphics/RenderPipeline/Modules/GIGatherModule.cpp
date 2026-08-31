@@ -111,8 +111,9 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // confidenceBuffer
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradianceBuffer
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // depthBuffer
+            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // TEMP dual-slot: same irradiance buffer
         };
-        set_layout_ = device->CreateDescriptorSetLayout({15, bindings});
+        set_layout_ = device->CreateDescriptorSetLayout({16, bindings});
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
@@ -549,10 +550,10 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             }
 
             // Buffer bindings with sub-allocation from probe_cb_
-            WriteDescriptorSet bufWrites[9];
-            DescriptorBufferInfo bufInfos[9];
+            WriteDescriptorSet bufWrites[10];
+            DescriptorBufferInfo bufInfos[10];
             {
-                for (int i = 0; i < 9; ++i) {
+                for (int i = 0; i < 10; ++i) {
                     bufWrites[i].dstSet = descriptor_set_;
                     bufWrites[i].dstArrayElement = 0;
                     bufWrites[i].descriptorCount = 1;
@@ -589,7 +590,10 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                               << " irrHandle=" << bufInfos[7].buffer << std::endl; }
                 bufWrites[8].dstBinding = bufBase + 8; bufWrites[8].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[8].buffer = ddgi->GetDepthBuffer(ddgiReadIdx); bufInfos[8].offset = 0; bufInfos[8].range = ~0ull;
-                device_->UpdateDescriptorSets(9, bufWrites);
+                // TEMP dual-slot: same irradiance buffer at slot 9.
+                bufWrites[9].dstBinding = bufBase + 9; bufWrites[9].descriptorType = DescriptorType::StorageBuffer;
+                bufInfos[9].buffer = ddgi->GetIrradianceBuffer(ddgiReadIdx); bufInfos[9].offset = 0; bufInfos[9].range = ~0ull;
+                device_->UpdateDescriptorSets(10, bufWrites);
             }
 
             // Dispatch
