@@ -16,15 +16,15 @@ struct PrefilterParams {
 };
 
 kernel void CS_SpecularPrefilter(
-    uint2 gid [[thread_position_in_grid]],
+    uint3 gid [[thread_position_in_grid]],
     texturecube<float, access::sample> envMap [[texture(0)]],
-    texture2d<float, access::write> output [[texture(1)]],
+    texture2d_array<float, access::write> output [[texture(1)]],
     sampler smp [[sampler(2)]],
     constant PrefilterParams& params [[buffer(3)]]
 ) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
 
-    float2 uv = (float2(gid) + 0.5) / float2(output.get_width(), output.get_height());
+    float2 uv = (float2(gid.xy) + 0.5) / float2(output.get_width(), output.get_height());
     
     // Calculate direction (same as Irradiance)
     float u = 2.0 * uv.x - 1.0;
@@ -32,7 +32,7 @@ kernel void CS_SpecularPrefilter(
     v = -v; // Flip Y
     
     float3 N;
-    switch(params.faceIndex) {
+    switch(gid.z) {
         case 0: N = float3(1.0,  v, -u); break;
         case 1: N = float3(-1.0, v,  u); break;
         case 2: N = float3(u, 1.0, -v); break;
@@ -94,5 +94,5 @@ kernel void CS_SpecularPrefilter(
     
     prefilteredColor = prefilteredColor / totalWeight;
 
-    output.write(float4(prefilteredColor, 1.0), gid);
+    output.write(float4(prefilteredColor, 1.0), gid.xy, gid.z);
 }

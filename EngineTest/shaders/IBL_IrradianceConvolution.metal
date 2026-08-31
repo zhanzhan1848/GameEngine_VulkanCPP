@@ -38,16 +38,16 @@ struct IrradianceParams {
 };
 
 kernel void CS_IrradianceConvolution(
-    uint2 gid [[thread_position_in_grid]],
+    uint3 gid [[thread_position_in_grid]],
     texturecube<float, access::sample> envMap [[texture(0)]],
-    texture2d<float, access::write> output [[texture(1)]],
+    texture2d_array<float, access::write> output [[texture(1)]],
     sampler smp [[sampler(2)]],
     constant IrradianceParams& params [[buffer(3)]]
 ) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
 
     // Center of the texel
-    float2 uv = (float2(gid) + 0.5) / float2(output.get_width(), output.get_height());
+    float2 uv = (float2(gid.xy) + 0.5) / float2(output.get_width(), output.get_height());
     
     // ...
     
@@ -56,7 +56,7 @@ kernel void CS_IrradianceConvolution(
     float v = 2.0 * uv.y - 1.0; 
     v = -v; // Flip Y
     
-    switch(params.faceIndex) {
+    switch(gid.z) {
         case 0: N = float3(1.0,  v, -u); break;
         case 1: N = float3(-1.0, v,  u); break;
         case 2: N = float3(u, 1.0, -v); break;
@@ -95,5 +95,5 @@ kernel void CS_IrradianceConvolution(
     
     irradiance = PI * irradiance * (1.0 / float(nrSamples));
 
-    output.write(float4(irradiance, 1.0), gid);
+    output.write(float4(irradiance, 1.0), gid.xy, gid.z);
 }
