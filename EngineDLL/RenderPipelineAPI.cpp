@@ -7,6 +7,9 @@
 #include "Graphics/RenderPipeline/PipelineQualityConfig.h"
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
+#include "Content/ContentToEngine.h"
+#include <fstream>
+#include <vector>
 #include <cstring>
 
 #pragma comment(lib, "Engine.lib")
@@ -33,11 +36,14 @@
 #include "Graphics/RenderTexture.h"      // for RenderTexture::GetDesc/GetHandle
 #include "Graphics/Renderer.h"           // for graphics::render_surface definition
 #include "EngineAPIInternal.h"           // for engine_dll::GetRenderTarget/GetSurface
+#include "Content/ContentToEngine.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <unordered_map>
+#include <vector>
 
 #endif
 
@@ -229,6 +235,42 @@ EDITOR_INTERFACE u32 ReloadPipelineShader(u64 shader_handle, const void* data, u
 // Mesh Entity Registration (content_id → ECS entity → render pipeline)
 // ============================================================================
 
+// Import a cooked texture on the exact RHI device owned by the World Editor's
+// StandardRenderPipeline. The generic content import path cannot infer this
+// device because editor-created devices are not registered in the legacy
+// global device manager; importing there produces a content id without an RHI
+// handle and ForwardSceneRenderer consequently falls back to white.
+EDITOR_INTERFACE u64 PipelineImportCookedTexture(const char* path) {
+    auto* p = GetStdPipeline();
+    if (!p || !p->GetDevice() || !path) {
+        return static_cast<u64>(id::invalid_id);
+    }
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return static_cast<u64>(id::invalid_id);
+    const auto size = file.tellg();
+    if (size <= 0) return static_cast<u64>(id::invalid_id);
+    file.seekg(0, std::ios::beg);
+    std::vector<u8> bytes(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+        return static_cast<u64>(id::invalid_id);
+    }
+
+    const auto texture_id = content::create_resource(
+        bytes.data(), content::asset_type::texture,
+        content::GraphicsAPI::RHI, p->GetDevice());
+    if (texture_id == id::invalid_id) {
+        return static_cast<u64>(id::invalid_id);
+    }
+    if (content::get_rhi_texture_handle(texture_id) == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[PipelineImportCookedTexture] texture has no RHI handle: "
+                  << path << std::endl;
+        content::destroy_resource(texture_id, content::asset_type::texture);
+        return static_cast<u64>(id::invalid_id);
+    }
+    return static_cast<u64>(texture_id);
+}
+
 // Register a mesh resource with the pipeline and create an ECS entity that
 // participates in rendering. geometry_content_id from ProceduralMeshCreate or
 // ImportSceneBinary; texture_content_ids is typically [albedo, normal, orm]
@@ -270,6 +312,33 @@ EDITOR_INTERFACE void PipelineUnregisterMeshEntity(u64 entity_id) {
     constexpr u64 kInvalidId = static_cast<u64>(0xffffffffu);
     if (!p || entity_id == kInvalidId) return;
     p->UnregisterMeshEntity(static_cast<id::id_type>(entity_id));
+}
+
+// ============================================================================
+// Material-graph compiled variants (editor world-material path)
+// ============================================================================
+
+// Compile the graph JSON (editor serialization with absolute texture paths,
+// the same expansion the preview pane uses) and attach the resulting
+// generated-shader pipeline as the entity's material. Returns 1 on success.
+// On failure nothing changes — the entity keeps rendering through the fixed
+// three-slot material path, and the reason is logged to stderr.
+EDITOR_INTERFACE u32 PipelineSetEntityMaterialGraph(u32 entity_id, const char* utf8_json) {
+    auto* p = GetStdPipeline();
+    auto* fwd = p ? p->GetForwardRenderer() : nullptr;
+    if (!fwd || !utf8_json) return 0;
+    return fwd->SetEntityGraphMaterial(static_cast<id::id_type>(entity_id), utf8_json)
+               != ForwardSceneRenderer::kInvalidGraphVariant
+               ? 1u : 0u;
+}
+
+// Detach a previously registered graph material from an entity (e.g. when
+// the inspector replaces the material with one that has no graph).
+EDITOR_INTERFACE void PipelineClearEntityMaterialGraph(u32 entity_id) {
+    auto* p = GetStdPipeline();
+    auto* fwd = p ? p->GetForwardRenderer() : nullptr;
+    if (!fwd) return;
+    fwd->ClearEntityGraphMaterial(static_cast<id::id_type>(entity_id));
 }
 
 // ============================================================================
@@ -717,6 +786,32 @@ EDITOR_INTERFACE u32 UpdateSceneEnvironment(const f32* params)
     // values will flow into the deferred lighting and tone-mapping
     // passes without a C ABI change.
     return 1;
+}
+
+// ============================================================================
+// HDR Environment / Skybox
+// ============================================================================
+
+// Load an equirectangular .hdr as the viewport environment: visible skybox
+// plus baked IBL (irradiance / prefilter / BRDF LUT). The bake runs
+// synchronously once per unique path; later calls with the same path are
+// cached no-ops. Returns 1 on success.
+EDITOR_INTERFACE u32 PipelineSetEnvironmentMap(const char* path) {
+    auto* p = GetStdPipeline();
+    if (!p || !path || !*path) return 0;
+    auto* fwd = p->GetForwardRenderer();
+    if (!fwd) return 0;
+    return fwd->SetEnvironmentMap(path) ? 1u : 0u;
+}
+
+// Toggle the visible skybox pass. IBL ambient from a previously baked
+// environment stays active regardless of this flag.
+EDITOR_INTERFACE void PipelineSetSkyboxEnabled(u32 enable) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    auto* fwd = p->GetForwardRenderer();
+    if (!fwd) return;
+    fwd->SetSkyboxEnabled(enable != 0);
 }
 
 } // extern "C"

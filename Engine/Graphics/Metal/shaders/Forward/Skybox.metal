@@ -6,6 +6,8 @@ struct SkyboxVertexOut {
     float3 uv;
 };
 
+// Must byte-match the ViewData/SceneData structs in ForwardSceneRenderer.cpp
+// (buffer 0/1 of the global set), so the skybox pass can reuse those CBs.
 struct SceneData {
     float4x4 model;
     float4 lightPos;
@@ -16,7 +18,8 @@ struct SceneData {
     float4x4 previousModel;
     float2 jitter;
     float2 previousJitter;
-    float2 padding;
+    float  time;
+    float  _timePad;
     float4 viewPos;
     float4x4 shadowMatrix0;
     float4x4 shadowMatrix1;
@@ -24,8 +27,8 @@ struct SceneData {
 
 struct ViewData {
     float4x4 viewProjection;
-    float4x4 previousViewProjection;
     float4x4 invViewProjection;
+    float4x4 previousViewProjection;
 };
 
 constant float3 cubeVertices[] = {

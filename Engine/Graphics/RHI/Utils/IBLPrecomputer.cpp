@@ -161,12 +161,36 @@ bool IBLPrecomputer::CreatePipelines() {
     DescriptorSetLayoutDesc brdfDesc;
     brdfDesc.bindingCount = static_cast<u32>(brdfBindings.size());
     brdfDesc.bindings = brdfBindings.data();
-    
+
     brdfDescLayout_ = device_->CreateDescriptorSetLayout(brdfDesc);
-    
+
+    // Equirect→Cube layout: 0 = equirect (sampled), 1 = cube (storage write),
+    // 2 = sampler — matches CS_EquirectangularToCube's texture(0)/texture(1)/sampler(2).
+    utl::vector<DescriptorSetLayoutBinding> eqBindings;
+    eqBindings.resize(3);
+    eqBindings[0].binding = 0;
+    eqBindings[0].descriptorType = DescriptorType::SampledImage;
+    eqBindings[0].descriptorCount = 1;
+    eqBindings[0].stageFlags = ShaderStage::Compute;
+    eqBindings[1].binding = 1;
+    eqBindings[1].descriptorType = DescriptorType::StorageImage;
+    eqBindings[1].descriptorCount = 1;
+    eqBindings[1].stageFlags = ShaderStage::Compute;
+    eqBindings[2].binding = 2;
+    eqBindings[2].descriptorType = DescriptorType::CombinedImageSampler;
+    eqBindings[2].descriptorCount = 1;
+    eqBindings[2].stageFlags = ShaderStage::Compute;
+
+    DescriptorSetLayoutDesc eqDesc;
+    eqDesc.bindingCount = static_cast<u32>(eqBindings.size());
+    eqDesc.bindings = eqBindings.data();
+
+    equirectToCubeDescLayout_ = device_->CreateDescriptorSetLayout(eqDesc);
+
     if (irradianceDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
         prefilterDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
-        brdfDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        brdfDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
+        equirectToCubeDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
         std::cerr << "[IBLPrecomputer] Failed to create descriptor set layouts" << std::endl;
         return false;
     }
@@ -190,14 +214,22 @@ bool IBLPrecomputer::CreatePipelines() {
     brdfPipeLayoutDesc.setLayouts = brdfSetLayouts.data();
     brdfPipelineLayout_ = device_->CreatePipelineLayout(brdfPipeLayoutDesc);
 
+    utl::vector<DescriptorSetLayoutHandle> eqSetLayouts; eqSetLayouts.push_back(equirectToCubeDescLayout_);
+    PipelineLayoutDesc eqPipeLayoutDesc;
+    eqPipeLayoutDesc.setLayoutCount = static_cast<u32>(eqSetLayouts.size());
+    eqPipeLayoutDesc.setLayouts = eqSetLayouts.data();
+    equirectToCubePipelineLayout_ = device_->CreatePipelineLayout(eqPipeLayoutDesc);
+
     // 3. Create Shaders
     ShaderHandle irradianceShader = CreateComputeShader("IBL_IrradianceConvolution.metal", "CS_IrradianceConvolution");
     ShaderHandle prefilterShader = CreateComputeShader("IBL_SpecularPrefilter.metal", "CS_SpecularPrefilter");
     ShaderHandle brdfShader = CreateComputeShader("IBL_BRDFIntegration.metal", "CS_BRDFIntegration");
+    ShaderHandle equirectToCubeShader = CreateComputeShader("EquirectangularToCube.metal", "CS_EquirectangularToCube");
 
     if (irradianceShader == handles::INVALID_SHADER ||
         prefilterShader == handles::INVALID_SHADER ||
-        brdfShader == handles::INVALID_SHADER) {
+        brdfShader == handles::INVALID_SHADER ||
+        equirectToCubeShader == handles::INVALID_SHADER) {
         std::cerr << "[IBLPrecomputer] Failed to create shaders" << std::endl;
         return false;
     }
@@ -218,14 +250,115 @@ bool IBLPrecomputer::CreatePipelines() {
     pipeDesc.layout = brdfPipelineLayout_;
     brdfPipeline_ = device_->CreateComputePipeline(pipeDesc);
 
+    pipeDesc.computeShader = equirectToCubeShader;
+    pipeDesc.layout = equirectToCubePipelineLayout_;
+    equirectToCubePipeline_ = device_->CreateComputePipeline(pipeDesc);
+
     return (irradiancePipeline_ != handles::INVALID_PIPELINE &&
             prefilterPipeline_ != handles::INVALID_PIPELINE &&
-            brdfPipeline_ != handles::INVALID_PIPELINE);
+            brdfPipeline_ != handles::INVALID_PIPELINE &&
+            equirectToCubePipeline_ != handles::INVALID_PIPELINE);
 }
 
 void IBLPrecomputer::DestroyPipelines() {
     // In a real implementation, we should destroy resources.
     // Assuming device shutdown handles it for now as per previous context.
+}
+
+ResourceHandle IBLPrecomputer::ComputeEnvironmentCube(ResourceHandle equirectMap, u32 outputSize) {
+    if (equirectToCubePipeline_ == handles::INVALID_PIPELINE) return handles::INVALID_RESOURCE;
+
+    // Output cubemap — writeable (UnorderedAccess) so CS_EquirectangularToCube
+    // can write via texturecube<float, access::write>, face = gid.z.
+    TextureDesc desc;
+    desc.type = TextureType::TextureCube;
+    desc.format = DataFormat::RGBA16_Float;
+    desc.size = {outputSize, outputSize, 1};
+    desc.arraySize = 1;
+    desc.mipLevels = 1;
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+    desc.memoryUsage = GPUMemoryUsage::Static;
+    desc.name = "IBL_EnvironmentCube";
+
+    ResourceHandle outputTexture = device_->CreateTexture(desc);
+    if (outputTexture == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
+
+    SamplerDesc samplerDesc;
+    samplerDesc.minFilter = FilterMode::Linear;
+    samplerDesc.magFilter = FilterMode::Linear;
+    samplerDesc.addressU = TextureAddressMode::Clamp;
+    samplerDesc.addressV = TextureAddressMode::Clamp;
+    samplerDesc.addressW = TextureAddressMode::Clamp;
+    SamplerHandle sampler = device_->CreateSampler(samplerDesc);
+
+    CommandBufferHandle cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+    RHICommandBuffer* cmd = GetCommandBuffer(cmdHandle);
+    if (!cmd) {
+        device_->DestroySampler(sampler);
+        device_->DestroyCommandBuffer(cmdHandle);
+        return handles::INVALID_RESOURCE;
+    }
+
+    cmd->Begin();
+    cmd->BindComputePipeline(equirectToCubePipeline_);
+
+    DescriptorSetDesc dsDesc;
+    dsDesc.layout = equirectToCubeDescLayout_;
+    DescriptorSetHandle ds = device_->CreateDescriptorSet(dsDesc);
+
+    DescriptorImageInfo inputInfo;
+    inputInfo.imageView = equirectMap;
+    inputInfo.imageLayout = ResourceState::ShaderResource;
+    inputInfo.sampler = handles::INVALID_SAMPLER;
+
+    DescriptorImageInfo outputInfo;
+    outputInfo.imageView = outputTexture;
+    outputInfo.imageLayout = ResourceState::UnorderedAccess;
+    outputInfo.sampler = handles::INVALID_SAMPLER;
+
+    DescriptorImageInfo samplerInfo;
+    samplerInfo.sampler = sampler;
+    samplerInfo.imageView = handles::INVALID_RESOURCE;
+    samplerInfo.imageLayout = ResourceState::Unknown;
+
+    WriteDescriptorSet writes[3];
+    writes[0] = {};
+    writes[0].dstSet = ds;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorType = DescriptorType::SampledImage;
+    writes[0].descriptorCount = 1;
+    writes[0].imageInfo = &inputInfo;
+    writes[1] = {};
+    writes[1].dstSet = ds;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorType = DescriptorType::StorageImage;
+    writes[1].descriptorCount = 1;
+    writes[1].imageInfo = &outputInfo;
+    writes[2] = {};
+    writes[2].dstSet = ds;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorType = DescriptorType::CombinedImageSampler;
+    writes[2].descriptorCount = 1;
+    writes[2].imageInfo = &samplerInfo;
+
+    device_->UpdateDescriptorSets(3, writes);
+    cmd->BindDescriptorSets(PipelineBindPoint::Compute, equirectToCubePipelineLayout_, 0, 1, &ds, 0, nullptr);
+
+    u32 groups = (outputSize + 7) / 8;
+    cmd->Dispatch(groups, groups, 6); // gid.z = face
+
+    cmd->End();
+
+    QueueSubmitInfo submitInfo;
+    submitInfo.cmdBuffer = cmdHandle;
+    device_->Submit(submitInfo);
+    device_->WaitIdle();
+
+    device_->DestroyDescriptorSet(ds);
+    device_->DestroySampler(sampler);
+    device_->DestroyCommandBuffer(cmdHandle);
+
+    return outputTexture;
 }
 
 ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, u32 outputSize) {

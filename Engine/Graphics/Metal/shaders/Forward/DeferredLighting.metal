@@ -108,6 +108,9 @@ struct ViewData {
     float4x4 invViewProjection;
 };
 
+// LightParameters / DirectionalLightParameters / ForwardLightBuffer come from
+// RHIShaderCommon.metal (included above) and byte-match rhi::ForwardLightBuffer.
+
 // ================================================================================================
 // Vertex Shader
 // ================================================================================================
@@ -198,6 +201,7 @@ fragment float4 fragmentLighting_v3(
     VertexOut in [[stage_in]],
     constant ViewData& viewData [[buffer(0)]],
     constant SceneData& sceneData [[buffer(1)]],
+    constant ForwardLightBuffer& lightBuffer [[buffer(13)]],
 
     texture2d<float> albedoTex [[texture(2)]],
     texture2d<float> normalTex [[texture(3)]],
@@ -228,44 +232,98 @@ fragment float4 fragmentLighting_v3(
     float roughness = max(orm.g, 0.04);
     float metallic = orm.b;
 
-    // View and light directions
+    // View direction
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
-    float3 L = normalize(sceneData.lightPos.xyz);
-    float3 H = normalize(V + L);
 
     // PBR: F0 (base reflectivity)
     float3 F0 = float3(0.04);
     F0 = mix(F0, albedo, metallic);
 
-    // Direct lighting — Cook-Torrance BRDF
-    float NdotL = max(dot(N, L), 0.0);
+    // ---------------------------------------------------------------------------
+    // Direct lighting — all scene lights (directionals + point/spot).
+    // ---------------------------------------------------------------------------
+    float3 Lo = float3(0.0);
 
-    // Specular
-    float3 specBRDF = SpecularBRDF(N, V, L, roughness, F0);
-
-    // Diffuse (Lambertian, energy-conserving)
-    float3 kS = FresnelSchlick(max(dot(H, V), 0.0), F0);
-    float3 kD = float3(1.0) - kS;
-    kD *= (1.0 - metallic);
-
-    float3 diffuse = kD * albedo / PI;
-
-    // Direct light contribution
-    float3 Lo = (diffuse + specBRDF) * sceneData.lightColor.rgb * NdotL;
-
-    // Shadow: simple depth comparison from shadow map
-    float shadow = 1.0;
-    float4 shadowClip = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
-    float3 shadowCoord = shadowClip.xyz / shadowClip.w;
-    shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
-    shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
-    if (shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 &&
-        shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
-        shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
-        float shadowDepth = SampleShadow(shadowCoord.xy, shadowVisibility);
-        shadow = (shadowCoord.z - 0.005) > shadowDepth ? 0.3 : 1.0;
+    // Shadow: computed once from cascade 0, applies to the sun (directional 0)
+    // only — additional directionals and punctual lights don't cast shadows.
+    // Unconditional, matching the legacy single-light path.
+    float sunShadow = 1.0;
+    {
+        float4 shadowClip = sceneData.shadowMatrix0 * float4(worldPos, 1.0);
+        float3 shadowCoord = shadowClip.xyz / shadowClip.w;
+        shadowCoord.x = shadowCoord.x * 0.5 + 0.5;
+        shadowCoord.y = shadowCoord.y * -0.5 + 0.5;
+        if (shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 &&
+            shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
+            shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
+            float shadowDepth = SampleShadow(shadowCoord.xy, shadowVisibility);
+            sunShadow = (shadowCoord.z - 0.005) > shadowDepth ? 0.3 : 1.0;
+        }
     }
-    Lo *= shadow;
+
+    for (uint di = 0u; di < lightBuffer.directionalLightCount && di < 4u; ++di) {
+        constant DirectionalLightParameters& dl = lightBuffer.directionalLights[di];
+        float3 L = normalize(-dl.directionAndIntensity.xyz);
+        float3 H = normalize(V + L);
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0) continue;
+
+        float3 specBRDF = SpecularBRDF(N, V, L, roughness, F0);
+        float3 kS = FresnelSchlick(max(dot(H, V), 0.0), F0);
+        float3 kD = (float3(1.0) - kS) * (1.0 - metallic);
+        float3 diffuse = kD * albedo / PI;
+
+        float shadow = (di == 0u) ? sunShadow : 1.0;
+        float3 radiance = dl.colorAndShadow.rgb * dl.directionAndIntensity.w;
+        Lo += (diffuse + specBRDF) * radiance * NdotL * shadow;
+    }
+
+    // Point + spot lights (ported from Dawn DeferredLighting.wgsl punctual loop)
+    for (uint li = 0u; li < lightBuffer.punctualLightCount && li < 128u; ++li) {
+        constant LightParameters& pl = lightBuffer.lights[li];
+        float3 toLight = pl.position - worldPos;
+        float distance = length(toLight);
+        if (distance > pl.range || distance < 0.0001) continue;
+
+        float rangeFade = 1.0 - smoothstep(pl.range * 0.6, pl.range, distance);
+        float3 L = toLight / distance;
+        float3 H = normalize(V + L);
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0) continue;
+
+        float3 att = pl.attenuation;
+        float attenuation = 1.0 / (att.x + att.y * distance + att.z * distance * distance) * rangeFade;
+
+        float spotAtt = 1.0;
+        if (pl.lightType == 2) {
+            float theta = dot(L, normalize(-pl.direction));
+            float epsilon = pl.cosUmbra - pl.cosPenumbra;
+            spotAtt = clamp((theta - pl.cosPenumbra) / max(epsilon, 0.001), 0.0, 1.0);
+        }
+
+        float3 specBRDF = SpecularBRDF(N, V, L, roughness, F0);
+        float3 kS = FresnelSchlick(max(dot(H, V), 0.0), F0);
+        float3 kD = (float3(1.0) - kS) * (1.0 - metallic);
+        float3 diffuse = kD * albedo / PI;
+
+        float3 radiance = pl.color * pl.intensity * attenuation * spotAtt;
+        Lo += (diffuse + specBRDF) * radiance * NdotL;
+    }
+
+    // Legacy fallback: when no lights reached the GPU buffer (e.g. headless
+    // tools that only populate SceneData), keep the old single-light term.
+    if (lightBuffer.directionalLightCount == 0u && lightBuffer.punctualLightCount == 0u) {
+        float3 L = normalize(sceneData.lightPos.xyz);
+        float3 H = normalize(V + L);
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL > 0.0) {
+            float3 specBRDF = SpecularBRDF(N, V, L, roughness, F0);
+            float3 kS = FresnelSchlick(max(dot(H, V), 0.0), F0);
+            float3 kD = (float3(1.0) - kS) * (1.0 - metallic);
+            float3 diffuse = kD * albedo / PI;
+            Lo += (diffuse + specBRDF) * sceneData.lightColor.rgb * NdotL * sunShadow;
+        }
+    }
 
     // IBL ambient
     float3 F_ibl = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);

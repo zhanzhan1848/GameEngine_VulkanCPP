@@ -639,6 +639,9 @@ void StandardRenderPipeline::SyncEntitiesToRenderScene(RenderScene& scene) {
                 proxy.metallic  = material::get_metallic(mc);
                 material::get_base_color(mc, proxy.base_color);
             }
+            // Editor world-material path: entities with a successfully
+            // registered compiled graph render through the generated shader.
+            proxy.graphVariant = forward_renderer_->GetEntityGraphVariant(eid);
 
             scene.UpdateProxy(eid, proxy);
         }
@@ -666,15 +669,20 @@ id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_cont
     game_entity::entity_info info{};
     info.transform = &tf;
 
+    id::id_type albedo_id = (texture_count > 0) ? texture_content_ids[0] : id::invalid_id;
+    id::id_type normal_id = (texture_count > 1) ? texture_content_ids[1] : id::invalid_id;
+    id::id_type orm_id    = (texture_count > 2) ? texture_content_ids[2] : id::invalid_id;
+    material::init_info material_info{};
+    material_info.albedo_texture = albedo_id;
+    material_info.normal_texture = normal_id;
+    material_info.orm_texture = orm_id;
+    info.material = &material_info;
+
     game_entity::entity entity = game_entity::create(info);
     if (!entity.is_valid()) {
         return id::invalid_id;
     }
     const id::id_type eid = entity.get_id();
-
-    id::id_type albedo_id = (texture_count > 0) ? texture_content_ids[0] : id::invalid_id;
-    id::id_type normal_id = (texture_count > 1) ? texture_content_ids[1] : id::invalid_id;
-    id::id_type orm_id    = (texture_count > 2) ? texture_content_ids[2] : id::invalid_id;
 
     u32 slot = forward_renderer_->RegisterMeshResource(
         geometry_content_id, albedo_id, normal_id, orm_id, eid);
@@ -693,6 +701,8 @@ id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_cont
 }
 
 void StandardRenderPipeline::UnregisterMeshEntity(id::id_type entity_id) {
+    if (forward_renderer_) forward_renderer_->ClearEntityGraphMaterial(entity_id);
+
     // Find and remove from static entity lists
     for (size_t i = 0; i < static_entity_ids_.size(); i++) {
         if (static_entity_ids_[i] == entity_id) {

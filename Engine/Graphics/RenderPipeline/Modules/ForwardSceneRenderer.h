@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RHI/Core/RHIShaderCommon.h"
 #include "Graphics/SceneDataAdapter.h"
 #include "Graphics/Passes/ParticlePass.h"
 #include "Graphics/RenderPipeline/Modules/LineBatchRenderer.h"
@@ -8,14 +9,17 @@
 #include "Graphics/Material/ShaderTechnique.h"
 #include "Utilities/Math.h"
 #include <unordered_map>
+#include <memory>
+#include <string>
 
 namespace primal::graphics {
 
 class RenderScene;
+namespace rhi { class IBLPrecomputer; }
 
 class ForwardSceneRenderer {
 public:
-    ForwardSceneRenderer() = default;
+    ForwardSceneRenderer();
     ~ForwardSceneRenderer();
 
     bool Initialize(rhi::RHIDeviceBase* device, u32 render_width, u32 render_height,
@@ -32,6 +36,13 @@ public:
     // IBL environment setup
     void SetIBLMaps(rhi::ResourceHandle irradiance, rhi::ResourceHandle prefiltered,
                     rhi::ResourceHandle brdf_lut);
+
+    // HDR environment map (equirect .hdr): loads, converts to a cube and
+    // bakes the IBL triple (irradiance / prefilter / BRDF LUT). The cube is
+    // also used by the skybox pass. Returns false on load/bake failure.
+    bool SetEnvironmentMap(const std::string& hdr_path);
+    void SetSkyboxEnabled(bool enabled) { skybox_enabled_ = enabled; }
+    const std::string& GetEnvironmentMapPath() const { return env_map_path_; }
 
     // Main render entry point
     void Render(rhi::RHICommandBuffer* cmd,
@@ -87,6 +98,26 @@ public:
                              id::id_type orm_texture_id,
                              id::id_type entity_id = id::invalid_id);
     void UnregisterMeshResource(u32 slot_index);
+
+    // === Material-graph compiled variants (editor world-material path) ===
+    //
+    // Compile a material graph (editor-serialized JSON with absolute texture
+    // paths) into a GBuffer fragment via ShaderIR, pair it with
+    // MaterialGraphVertex.metal, and remember the pipeline/textures as a
+    // shared variant keyed by a content hash. Entities reference variants by
+    // hash through RenderProxy::graphVariant. Compilation failure returns 0
+    // and leaves the entity's previous binding untouched — the caller keeps
+    // rendering through the fixed 3-slot material path.
+    //
+    // v1 limitations (documented in MetalEmitter.h / the generated source):
+    // opaque technique only, ≤8 textures per graph, Time nodes evaluate to 0.
+    static constexpr u64 kInvalidGraphVariant = 0;
+    u64 SetEntityGraphMaterial(id::id_type entity_id, const char* utf8_json);
+    void ClearEntityGraphMaterial(id::id_type entity_id);
+    u64 GetEntityGraphVariant(id::id_type entity_id) const {
+        auto it = entity_graph_variant_.find(entity_id);
+        return (it != entity_graph_variant_.end()) ? it->second : kInvalidGraphVariant;
+    }
 
     // Push constant with instance buffer flag
     struct PCGPushConsts {
@@ -157,6 +188,12 @@ private:
     rhi::ResourceHandle brdf_lut_{rhi::handles::INVALID_RESOURCE};
     bool ibl_ready_ = false;
 
+    // HDR environment (skybox + IBL source)
+    rhi::ResourceHandle env_cube_{rhi::handles::INVALID_RESOURCE};
+    std::string env_map_path_;
+    bool skybox_enabled_ = false;
+    std::unique_ptr<rhi::IBLPrecomputer> ibl_precomputer_;
+
     // Shaders
     rhi::ShaderHandle gbuffer_vs_{rhi::handles::INVALID_SHADER};
     rhi::ShaderHandle gbuffer_ps_{rhi::handles::INVALID_SHADER};
@@ -219,6 +256,26 @@ private:
     // Default material DS for streaming meshes (white albedo, flat normal)
     rhi::DescriptorSetHandle streaming_material_ds_{rhi::handles::INVALID_DESCRIPTOR_SET};
 
+    // === Material-graph compiled variants ===
+    // One compiled pixel shader + PSO + texture descriptor set per distinct
+    // material graph content hash; entities share variants via refcount.
+    struct GraphVariant {
+        rhi::ShaderHandle pixelShader{rhi::handles::INVALID_SHADER};
+        rhi::PipelineHandle pipeline{rhi::handles::INVALID_PIPELINE};
+        rhi::DescriptorSetHandle materialSet{rhi::handles::INVALID_DESCRIPTOR_SET};
+        utl::vector<id::id_type> texture_ids;   // imported cooked textures, size ≤ 8
+        u32 refcount{0};
+    };
+    rhi::ShaderHandle material_graph_vs_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineLayoutHandle graph_material_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::DescriptorSetLayoutHandle graph_material_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    std::unordered_map<u64, GraphVariant> graph_variants_;
+    std::unordered_map<id::id_type, u64> entity_graph_variant_;
+    static constexpr u32 kMaxGraphTextures = 8;
+
+    void ReleaseGraphVariant(u64 variant_hash);
+    void PurgeGraphMaterials();
+
     // Pipeline layouts
     rhi::PipelineLayoutHandle gbuffer_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::PipelineLayoutHandle shadow_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
@@ -269,6 +326,11 @@ private:
     rhi::ResourceHandle view_cb_[3]{rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
                                      rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle scene_cb_[3]{rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+                                      rhi::handles::INVALID_RESOURCE};
+
+    // GPU light array (all scene lights) — consumed by fragmentLighting_v3
+    // via global set binding 2. Layout mirrors rhi::ForwardLightBuffer.
+    rhi::ResourceHandle light_cb_[3]{rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
                                       rhi::handles::INVALID_RESOURCE};
 
     // Backbuffer format that drives the blit pipeline's renderTargetFormats[0].
