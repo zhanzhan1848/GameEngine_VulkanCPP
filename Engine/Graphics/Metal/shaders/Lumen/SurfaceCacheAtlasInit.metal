@@ -32,6 +32,12 @@ kernel void surfaceCacheAtlasInit(
     constant CardDispatchInfo* cd    [[buffer(2)]])
 {
     uint tid = global_tid;
+    // TEMP diagnosis: one-shot kernel-side view of the bound params.
+    if (tid == 0u) {
+        printf("[AI_KERNEL] total_texels=%u card_count=%u cd0.off=%u cd0.count=%u cd0.res=%u\n",
+               params.params.total_texels, params.params.card_count,
+               cd[0].texel_offset, cd[0].texel_count, cd[0].resolution);
+    }
     if (tid >= params.params.total_texels) return;
 
     // Binary search: find card whose [texel_offset, texel_offset+texel_count)
@@ -56,7 +62,7 @@ kernel void surfaceCacheAtlasInit(
 
     // Default material: gray albedo (alpha=1 passes the LightEval gate),
     // +Z normal (oct-encoded (0.5, 0.5)), depth=0.5, zero emissive.
-    albedo_atlas.write(float4(0.5f, 0.5f, 0.5f, 1.0f), atlas_uv);
+    albedo_atlas.write(float4(1.0f, 0.0f, 0.0f, 1.0f), atlas_uv);  // TEMP sentinel red
     normal_atlas.write(float4(0.5f, 0.5f, 0.0f, 1.0f), atlas_uv);
     depth_atlas.write(float4(0.5f, 0.0f, 0.0f, 1.0f), atlas_uv);
     emissive_atlas.write(float4(0.0f, 0.0f, 0.0f, 1.0f), atlas_uv);

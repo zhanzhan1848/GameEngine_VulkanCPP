@@ -14,7 +14,7 @@
           "Data": {
             "PositionX": -2.517123,
             "PositionY": 1.0048333,
-            "PositionZ": 0.33056462,
+            "PositionZ": 3.1494777,
             "RotationX": 0,
             "RotationY": -0.89445305,
             "RotationZ": 0.5687502,
@@ -29,7 +29,9 @@
           "Data": {
             "MeshGuid": "00000000-0000-0000-0000-000000000000",
             "BuiltinMesh": 3,
-            "MaterialGuids": [],
+            "MaterialGuids": [
+              "3311f87a-0888-4b04-b344-1eed466c7676"
+            ],
             "CastShadow": true,
             "ReceiveShadow": true,
             "IsEnabled": true
@@ -48,7 +50,7 @@
           "Data": {
             "PositionX": -1.0196832,
             "PositionY": 2.0023775,
-            "PositionZ": -3.111402,
+            "PositionZ": 4.3869367,
             "RotationX": 0,
             "RotationY": -1.1260936,
             "RotationZ": 0,
@@ -65,7 +67,7 @@
             "ColorR": 1,
             "ColorG": 1,
             "ColorB": 1,
-            "Intensity": 1,
+            "Intensity": 5,
             "Range": 10,
             "UmbraAngle": 0,
             "PenumbraAngle": 0,
@@ -86,7 +88,7 @@
           "Data": {
             "PositionX": 0,
             "PositionY": 0,
-            "PositionZ": -7.0387483,
+            "PositionZ": -8.333005,
             "RotationX": 0,
             "RotationY": 0,
             "RotationZ": 0,
@@ -100,6 +102,40 @@
           "$type": "meshRenderer",
           "Data": {
             "MeshGuid": "4284caf3-c91b-41c0-85eb-d39ed7937d38",
+            "BuiltinMesh": 0,
+            "MaterialGuids": [],
+            "CastShadow": true,
+            "ReceiveShadow": true,
+            "IsEnabled": true
+          }
+        }
+      ]
+    },
+    {
+      "EntityGuid": "a34b0683-05dc-4635-bfb7-876af7164d3d",
+      "Name": "corridor-intersection",
+      "ParentEntityGuid": null,
+      "IsEnabled": true,
+      "Components": [
+        {
+          "$type": "transform",
+          "Data": {
+            "PositionX": -0.14194411,
+            "PositionY": 0,
+            "PositionZ": -6.519409,
+            "RotationX": 0,
+            "RotationY": 0,
+            "RotationZ": 0,
+            "ScaleX": 1,
+            "ScaleY": 1,
+            "ScaleZ": 1,
+            "IsEnabled": true
+          }
+        },
+        {
+          "$type": "meshRenderer",
+          "Data": {
+            "MeshGuid": "23c050ec-c985-4846-8831-3452612ee17e",
             "BuiltinMesh": 0,
             "MaterialGuids": [],
             "CastShadow": true,
@@ -128,14 +164,15 @@
     "SkyB": 0.8,
     "ToneMapping": "ACES",
     "Exposure": 1,
-    "MainCameraEntityGuid": null
+    "MainCameraEntityGuid": null,
+    "EnvMapPath": ""
   },
   "EditorCamera": {
-    "TargetX": 0.32822174,
-    "TargetY": 0.06236519,
-    "TargetZ": 0.50229675,
-    "Distance": 18.627697,
-    "Yaw": 0.6420318,
-    "Pitch": -0.48406652
+    "TargetX": 0.936504,
+    "TargetY": 0.103548124,
+    "TargetZ": -2.0474,
+    "Distance": 16.749071,
+    "Yaw": 2.4731278,
+    "Pitch": -0.55343795
   }
 }

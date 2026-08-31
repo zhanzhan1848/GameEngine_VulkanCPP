@@ -50,7 +50,7 @@
           "Data": {
             "PositionX": -1.0196832,
             "PositionY": 2.0023775,
-            "PositionZ": -3.111402,
+            "PositionZ": 4.3869367,
             "RotationX": 0,
             "RotationY": -1.1260936,
             "RotationZ": 0,
@@ -67,7 +67,7 @@
             "ColorR": 1,
             "ColorG": 1,
             "ColorB": 1,
-            "Intensity": 1,
+            "Intensity": 5,
             "Range": 10,
             "UmbraAngle": 0,
             "PenumbraAngle": 0,
@@ -164,7 +164,8 @@
     "SkyB": 0.8,
     "ToneMapping": "ACES",
     "Exposure": 1,
-    "MainCameraEntityGuid": null
+    "MainCameraEntityGuid": null,
+    "EnvMapPath": ""
   },
   "EditorCamera": {
     "TargetX": 0.936504,

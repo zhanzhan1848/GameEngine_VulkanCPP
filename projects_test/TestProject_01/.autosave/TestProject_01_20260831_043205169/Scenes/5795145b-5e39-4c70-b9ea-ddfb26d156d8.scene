@@ -67,7 +67,7 @@
             "ColorR": 1,
             "ColorG": 1,
             "ColorB": 1,
-            "Intensity": 3,
+            "Intensity": 5,
             "Range": 10,
             "UmbraAngle": 0,
             "PenumbraAngle": 0,
@@ -140,6 +140,44 @@
             "MaterialGuids": [],
             "CastShadow": true,
             "ReceiveShadow": true,
+            "IsEnabled": true
+          }
+        }
+      ]
+    },
+    {
+      "EntityGuid": "bc294f48-0ed4-4b7d-b44b-17702f77fb7d",
+      "Name": "Sun_1",
+      "ParentEntityGuid": null,
+      "IsEnabled": true,
+      "Components": [
+        {
+          "$type": "transform",
+          "Data": {
+            "PositionX": 0.6437582,
+            "PositionY": 0,
+            "PositionZ": 0,
+            "RotationX": 0,
+            "RotationY": 0,
+            "RotationZ": 0,
+            "ScaleX": 1,
+            "ScaleY": 1,
+            "ScaleZ": 1,
+            "IsEnabled": true
+          }
+        },
+        {
+          "$type": "light",
+          "Data": {
+            "LightType": 0,
+            "ColorR": 1,
+            "ColorG": 1,
+            "ColorB": 1,
+            "Intensity": 20,
+            "Range": 10,
+            "UmbraAngle": 0,
+            "PenumbraAngle": 0,
+            "CastShadow": true,
             "IsEnabled": true
           }
         }

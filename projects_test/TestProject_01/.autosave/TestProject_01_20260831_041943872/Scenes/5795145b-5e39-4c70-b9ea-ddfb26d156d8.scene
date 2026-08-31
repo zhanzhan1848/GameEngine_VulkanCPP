@@ -14,7 +14,7 @@
           "Data": {
             "PositionX": -2.517123,
             "PositionY": 1.0048333,
-            "PositionZ": 0.33056462,
+            "PositionZ": 3.1494777,
             "RotationX": 0,
             "RotationY": -0.89445305,
             "RotationZ": 0.5687502,
@@ -29,7 +29,9 @@
           "Data": {
             "MeshGuid": "00000000-0000-0000-0000-000000000000",
             "BuiltinMesh": 3,
-            "MaterialGuids": [],
+            "MaterialGuids": [
+              "3311f87a-0888-4b04-b344-1eed466c7676"
+            ],
             "CastShadow": true,
             "ReceiveShadow": true,
             "IsEnabled": true
@@ -48,7 +50,7 @@
           "Data": {
             "PositionX": -1.0196832,
             "PositionY": 2.0023775,
-            "PositionZ": -3.111402,
+            "PositionZ": 4.3869367,
             "RotationX": 0,
             "RotationY": -1.1260936,
             "RotationZ": 0,
@@ -65,7 +67,7 @@
             "ColorR": 1,
             "ColorG": 1,
             "ColorB": 1,
-            "Intensity": 1,
+            "Intensity": 5,
             "Range": 10,
             "UmbraAngle": 0,
             "PenumbraAngle": 0,
@@ -120,7 +122,7 @@
           "Data": {
             "PositionX": -0.14194411,
             "PositionY": 0,
-            "PositionZ": -5.0437584,
+            "PositionZ": -6.519409,
             "RotationX": 0,
             "RotationY": 0,
             "RotationZ": 0,
@@ -162,14 +164,15 @@
     "SkyB": 0.8,
     "ToneMapping": "ACES",
     "Exposure": 1,
-    "MainCameraEntityGuid": null
+    "MainCameraEntityGuid": null,
+    "EnvMapPath": ""
   },
   "EditorCamera": {
-    "TargetX": 0.32822174,
-    "TargetY": 0.06236519,
-    "TargetZ": 0.50229675,
-    "Distance": 22.647194,
-    "Yaw": -0.099215865,
-    "Pitch": -0.8812931
+    "TargetX": 0.936504,
+    "TargetY": 0.103548124,
+    "TargetZ": -2.0474,
+    "Distance": 16.749071,
+    "Yaw": 2.4731278,
+    "Pitch": -0.55343795
   }
 }
