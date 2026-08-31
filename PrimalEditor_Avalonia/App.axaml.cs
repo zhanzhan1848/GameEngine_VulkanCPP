@@ -2,7 +2,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Data.Core;
-using Avalonia.Data.Core.Plugins;
 using System.Linq;
 using Avalonia.Markup.Xaml;
 using PrimalEditor_Avalonia.Common;
@@ -21,6 +20,26 @@ public partial class App : Application
         AvaloniaXamlLoader.Load(this);
 
         Logger.Current = new ConsoleLogger();
+
+        // Catch-all for managed exceptions that escape our async void event
+        // handlers (palette drag, OnNodeDoubleTapped, etc.). Avalonia does
+        // not wrap event dispatch in try/catch, so a single throw from an
+        // event handler reaches RunMain and aborts the process. We log
+        // here so the next crash has something actionable in the log instead
+        // of just a SIGABRT stack ending in a JIT trampoline.
+        System.AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+        {
+            var ex = e.ExceptionObject as System.Exception;
+            var callerStack = new System.Diagnostics.StackTrace(1, true).ToString();
+            Logger.Error($"AppDomain unhandled exception (terminating={e.IsTerminating}): {ex?.Message}\n  CallerStack:\n{callerStack}", ex);
+        };
+        Avalonia.Threading.Dispatcher.UIThread.UnhandledException += (s, e) =>
+        {
+            var callerStack = new System.Diagnostics.StackTrace(1, true).ToString();
+            Logger.Error($"Dispatcher unhandled exception: {e.Exception?.Message}\n  CallerStack:\n{callerStack}", e.Exception);
+            e.Handled = true;
+        };
+
         NativeEngineBridge.LoadEngine();
         if (NativeEngineBridge.IsLoaded)
         {
@@ -111,6 +130,27 @@ public partial class App : Application
         MainWindowViewModel vm,
         MainWindow mainWindow)
     {
+        // async void: an unhandled exception here kills the process
+        // (observed as SIGABRT inside the engine's exit-time free_list
+        // assert, which masks the real error). Guard everything so a
+        // failure degrades to a log line + the browser reopening.
+        try
+        {
+            await OnProjectBrowserClosedCore(desktop, browser, vm, mainWindow);
+        }
+        catch (System.Exception ex)
+        {
+            Logger.Error("Project browser: open flow failed", ex);
+            ShowMain(desktop, mainWindow, vm);
+        }
+    }
+
+    private static async System.Threading.Tasks.Task OnProjectBrowserClosedCore(
+        IClassicDesktopStyleApplicationLifetime desktop,
+        ProjectBrowserView browser,
+        MainWindowViewModel vm,
+        MainWindow mainWindow)
+    {
         switch (browser.Result)
         {
             case ProjectBrowserView.BrowserResult.OpenProject:
@@ -144,6 +184,11 @@ public partial class App : Application
                 }
                 else
                 {
+                    // Show the main window BEFORE prompting: the recovery
+                    // dialog is owned by it, and ShowDialog on a never-shown
+                    // owner throws. Showing first also means a recovery
+                    // failure still leaves the editor UI open.
+                    ShowMain(desktop, mainWindow, vm);
                     await mainWindow.PromptAndApplyRecoveryAsync(
                         new AutoSaveRecoveryCoordinator.RecoveryCandidate(candidate, path));
                 }
@@ -244,11 +289,9 @@ public partial class App : Application
 
     private void DisableAvaloniaDataAnnotationValidation()
     {
-        var dataValidationPluginsToRemove =
-            BindingPlugins.DataValidators.OfType<DataAnnotationsValidationPlugin>().ToArray();
-        foreach (var plugin in dataValidationPluginsToRemove)
-        {
-            BindingPlugins.DataValidators.Remove(plugin);
-        }
+        // Avalonia 12 removed the Avalonia.Data.Core.Plugins.DataAnnotationsValidationPlugin
+        // binding pipeline; data annotation validation is no longer active, so the
+        // Avalonia 11 disable hook is now a no-op. Keep the method (called from
+        // OnFrameworkInitializationCompleted) for API stability with downstream tooling.
     }
 }

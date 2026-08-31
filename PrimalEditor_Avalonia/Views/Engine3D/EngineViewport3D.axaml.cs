@@ -2,11 +2,14 @@ using System;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.Native;
+using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.Views.Engine3D;
 
@@ -495,6 +498,10 @@ public partial class EngineViewport3D : UserControl
         var weVm = mainVm.WorldEditor;
         if (weVm?.ActiveScene == null) return;
         weVm.SceneSynchronizer.Sync(weVm.ActiveScene);
+        // ActiveScene is commonly attached before this control creates the
+        // StandardRenderPipeline. Re-apply HDR/skybox state now that the
+        // ForwardSceneRenderer exists; otherwise the first push was a no-op.
+        weVm.SceneEnvironmentViewModel.ApplyToNative();
         Logger.Info("Active scene re-synced after render pipeline creation");
     }
 
@@ -1026,6 +1033,14 @@ public partial class EngineViewport3D : UserControl
 
     private void OnKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
     {
+		if (e.Key == Avalonia.Input.Key.Delete || e.Key == Avalonia.Input.Key.Back)
+		{
+			if (ResolveWorldEditorViewModel()?.DeleteSelectedEntities() > 0)
+			{
+				e.Handled = true;
+			}
+			return;
+		}
         // F = reset orbit state to default view. Only fires when this
         // control is focused (e.g. user clicked into the viewport and
         // pressed F with no entity selected). The outer WorldEditorView
@@ -1176,5 +1191,44 @@ public partial class EngineViewport3D : UserControl
         float dy = forward[1] * depth + right[1] * ux + screenUp[1] * vy;
         float dz = forward[2] * depth + right[2] * ux + screenUp[2] * vy;
         return (camX, camY, camZ, dx, dy, dz);
+    }
+
+    private void OnAssetDragOver(object? sender, Avalonia.Input.DragEventArgs e)
+    {
+        var vm = ResolveWorldEditorViewModel();
+        var effects = AssetDropHandler.EffectsFor(e, vm);
+        e.DragEffects = effects;
+        e.Handled = true;
+        // DragOver fires for every pointer move during the drag, so log
+        // at Debug level to avoid spamming the editor console. The user
+        // can raise the level to see it.
+        Logger.Debug($"EngineViewport3D.OnAssetDragOver: effects={effects} scene={vm?.ActiveScene?.Name ?? "<null>"}");
+    }
+
+    private async void OnAssetDrop(object? sender, Avalonia.Input.DragEventArgs e)
+    {
+        // Routed-event dispatch does not await async-void handlers. Mark the
+        // event handled before the first await so it cannot bubble to the
+        // WorldEditorView drop target and create the same entity twice.
+        e.Handled = true;
+        Logger.Info($"EngineViewport3D.OnAssetDrop: invoked");
+        await AssetDropHandler.RunAsync(e, ResolveWorldEditorViewModel(), 0f, 0f, 0f);
+    }
+
+    /// <summary>
+    /// Walk the visual tree to the MainWindow to find the active
+    /// <see cref="WorldEditorViewModel"/>. The viewport sits inside the
+    /// MainWindow's data-context chain but has no DataContext of its own;
+    /// this matches the pattern used by <see cref="LightIconRenderer"/>
+    /// and <see cref="ResyncActiveScene"/>.
+    /// </summary>
+    private WorldEditorViewModel? ResolveWorldEditorViewModel()
+    {
+        if (DataContext is WorldEditorViewModel inherited) return inherited;
+
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        var main = lifetime?.MainWindow?.DataContext as MainWindowViewModel;
+        return main?.WorldEditor;
     }
 }

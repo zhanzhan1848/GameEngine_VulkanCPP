@@ -15,6 +15,12 @@ public class ContentBrowserFilterTests
     [InlineData("foo.texture", true)]
     [InlineData("FOO.MODEL.JSON", true)]   // case insensitive
     [InlineData("path/to/foo.model.json", true)]
+    // Material files are engine-format too — they live next to the
+    // cooked graph sidecar and are first-class editable assets.
+    [InlineData("foo.material", true)]
+    [InlineData("foo.material.json", true)]
+    [InlineData("path/to/Metarial/Test01.material.json", true)]
+    [InlineData("foo.shader", true)]
     [InlineData("foo.fbx", false)]
     [InlineData("foo.obj", false)]
     [InlineData("foo.gltf", false)]

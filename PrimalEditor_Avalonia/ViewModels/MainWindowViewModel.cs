@@ -291,6 +291,7 @@ public class MainWindowViewModel : ViewModelBase
 
     public MainWindowViewModel()
     {
+        WorldEditor.Properties.RevealAssetCallback = ContentBrowser.RevealAsset;
         Factory = new MainWindowDockFactory(this);
         Layout = Factory.CreateLayout();
         Factory.InitLayout(Layout!);
@@ -487,17 +488,7 @@ public class MainWindowViewModel : ViewModelBase
 
     public void DeleteEntityExecute()
     {
-        if (WorldEditor.SelectedEntities.Length == 0) return;
-        using (WorldEditor.UndoRedo.BeginTransaction($"Delete {WorldEditor.SelectedEntities.Length} entity(ies)"))
-        {
-            foreach (var entity in WorldEditor.SelectedEntities)
-            {
-                var action = new RemoveEntityAction(WorldEditor, entity);
-                WorldEditor.UndoRedo.Add(action);
-                action.Redo();
-            }
-        }
-        MarkProjectDirty();
+		if (WorldEditor.DeleteSelectedEntities() > 0) MarkProjectDirty();
     }
 
     public async void RenameEntityExecute()

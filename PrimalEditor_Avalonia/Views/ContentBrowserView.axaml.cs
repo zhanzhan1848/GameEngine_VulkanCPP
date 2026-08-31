@@ -21,6 +21,10 @@ public partial class ContentBrowserView : UserControl
     private Point _dragStart;
     private bool _toggleContainerOnRelease;
     private bool _dragInProgress;
+    // Avalonia 12's DoDragDropAsync requires the original PointerPressedEventArgs,
+    // not the PointerEventArgs we get from PointerMoved. Cache the press args
+    // until the drag actually starts so we can pass them through.
+    private Avalonia.Input.PointerPressedEventArgs? _dragPressedArgs;
 
     public ContentBrowserView()
     {
@@ -274,6 +278,7 @@ public partial class ContentBrowserView : UserControl
         _dragCandidateParentGuid = parentGuid;
         _dragStart = e.GetPosition(this);
         _toggleContainerOnRelease = toggleContainerOnRelease;
+        _dragPressedArgs = e;
     }
 
     private async void OnAssetPointerMoved(object? sender, Avalonia.Input.PointerEventArgs e)
@@ -290,16 +295,18 @@ public partial class ContentBrowserView : UserControl
 
         var info = _dragCandidate;
         var parentGuid = _dragCandidateParentGuid;
+        var pressedArgs = _dragPressedArgs;
         ClearPotentialAssetDrag();
         _dragInProgress = true;
 
         try
         {
+            if (pressedArgs == null) return;
             var payload = new AssetDragPayload(info.Guid, info.FullPath, info.IsContainer, parentGuid);
             var format = Avalonia.Input.DataFormat.CreateStringApplicationFormat(AssetDragPayload.DataFormat);
             var drag = new Avalonia.Input.DataTransfer();
             drag.Add(Avalonia.Input.DataTransferItem.Create(format, payload.Serialize()));
-            await Avalonia.Input.DragDrop.DoDragDropAsync(e, drag, Avalonia.Input.DragDropEffects.Copy);
+            await Avalonia.Input.DragDrop.DoDragDropAsync(pressedArgs, drag, Avalonia.Input.DragDropEffects.Copy);
         }
         catch (Exception ex)
         {
@@ -327,6 +334,7 @@ public partial class ContentBrowserView : UserControl
         _dragCandidate = null;
         _dragCandidateParentGuid = null;
         _toggleContainerOnRelease = false;
+        _dragPressedArgs = null;
     }
 
     private void OnContainerToggleClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -438,6 +446,14 @@ public partial class ContentBrowserView : UserControl
         if (DataContext is ContentBrowserViewModel vm)
         {
             await vm.ImportAssetAsync();
+        }
+    }
+
+    private async void OnNewMaterialClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is ContentBrowserViewModel vm)
+        {
+            await vm.CreateMaterialAsync();
         }
     }
 

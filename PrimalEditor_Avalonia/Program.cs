@@ -119,13 +119,17 @@ sealed class Program
         Logger.Info("Engine initialized (Metal)");
 
         var deviceHandle = NativeEngineBridge.GetEngineDeviceHandle();
+        // Viewport size must be known BEFORE pipeline creation — the C++ side
+        // applies it while constructing ForwardSceneRenderer's fixed-size
+        // render targets (a late resize left GBuffers at 1280x720 while the
+        // caller's target differed, rendering black).
+        NativeEngineBridge.SetPipelineViewportSize(width, height);
         if (deviceHandle == 0UL || !NativeEngineBridge.CreateStandardRenderPipeline(deviceHandle))
         {
             Logger.Error("CreateStandardRenderPipeline failed");
             return 1;
         }
         NativeEngineBridge.PipelineSetEditorMode(true);
-        NativeEngineBridge.SetPipelineViewportSize(width, height);
         Logger.Info("StandardRenderPipeline created (editor mode)");
 
         // Camera setup: gfx.camera slot id (Path A — editor's actual path).
@@ -190,13 +194,54 @@ sealed class Program
         }
         Logger.Info($"Registered {xs.Length} sphere entities");
 
+        // --graph <sidecar.json> [--project-root dir]: replace the spheres with
+        // ONE plane whose material is a compiled material graph. Exercises the
+        // full world-material chain (CompileSync → variant registry →
+        // generated-shader GBuffer draw) without any GUI.
+        string? graphSidecar = null, projectRootArg = null;
+        for (int ai = 0; ai < args.Length - 1; ++ai)
+        {
+            if (args[ai] == "--graph") graphSidecar = args[ai + 1];
+            else if (args[ai] == "--project-root") projectRootArg = args[ai + 1];
+        }
+        if (graphSidecar != null)
+        {
+            // Keep sphere[0] on screen as a fixed-path control while the
+            // graph plane renders beside it.
+            for (int i = 1; i < meshEntities.Length; i++)
+                NativeEngineBridge.PipelineUnregisterMeshEntity(meshEntities[i]);
+
+            // Expand portable texture refs exactly like the editor's preview
+            // push, so the engine can import ConstantTexture assets directly.
+            var contentRoot = Path.Combine(projectRootArg ?? ".", "Content");
+            PrimalEditor_Avalonia.Content.AssetRegistry.Initialize(contentRoot, projectRootArg ?? ".");
+            var raw = File.ReadAllText(graphSidecar);
+            var expanded = PrimalEditor_Avalonia.Editors.Material.MaterialGraphSessionLocator
+                .PreparePreviewJson(raw);
+
+            NativeEngineBridge.ProceduralMeshDestroy(sphereGeom);
+            var planeGeom = NativeEngineBridge.ProceduralMeshCreate(9, new float[] { 2f, 2f, 1f, 1f });
+            var graphEntity = NativeEngineBridge.PipelineRegisterMeshEntity(planeGeom, null);
+            // Stand the XZ plane upright and scale it so the camera sees it,
+            // positioned right of the control sphere.
+            NativeEngineBridge.SetEntityTransform((uint)graphEntity,
+                new float[] { 3f, 0.2f, -4f }, new float[] { 90f, 0f, 0f }, new float[] { 3f, 3f, 1f });
+            var attached = NativeEngineBridge.PipelineSetEntityMaterialGraph(
+                (uint)graphEntity, expanded);
+            Logger.Info($"PipelineSetEntityMaterialGraph → attached={attached} " +
+                        $"(json={expanded.Length} chars, entity={graphEntity})");
+
+            meshEntities = new ulong[] { meshEntities[0], graphEntity };
+            sphereGeom = planeGeom;
+        }
+
         // Add one directional-style point light (matches EngineViewport3D test scene).
         // PipelineLightDesc layout (see EngineDLL/PipelineLightDesc.h):
         //   type(u32) | color[3](3*4) | intensity(f32) |
         //   position[3](3*4) | direction[3](3*4) | range(f32) | umbra(f32) | penumbra(f32) | is_enabled(u32)
         // Total = 60 bytes; we allocate 64 for safety.
         var lightDesc = new byte[64];
-        BitConverter.GetBytes(1u).CopyTo(lightDesc, 0);                // type=Directional
+        BitConverter.GetBytes(0u).CopyTo(lightDesc, 0);                // type=Directional (graphics::light::type: 0=dir, 1=point, 2=spot)
         BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 4);                // color.r
         BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 8);                // color.g
         BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 12);               // color.b
@@ -207,9 +252,92 @@ sealed class Program
         BitConverter.GetBytes(0.0f).CopyTo(lightDesc, 40);                // direction.z
         BitConverter.GetBytes(0.0f).CopyTo(lightDesc, 44);                // range (unused)
         BitConverter.GetBytes(1.0f).CopyTo(lightDesc, 56);                // is_enabled = 1.0f
-        BitConverter.GetBytes(1u).CopyTo(lightDesc, 60);                  // is_enabled (u32, copies as 1)
+        BitConverter.GetBytes(0u).CopyTo(lightDesc, 60);                  // is_enabled=0 (fallback-path probe)
         var lightId = NativeEngineBridge.PipelineRegisterLightEntity(lightDesc);
         if (lightId != 0UL) Logger.Info($"Registered light {lightId}");
+
+        // --point-light: additionally create a Point light through the
+        // EDITOR chain (ECS AddEntityLight → LightSyncSystem → RenderScene →
+        // ForwardSceneRenderer light buffer). Sphere #3 (x=2, closest to the
+        // light) should pick up a red tint in the saved PNG — visible proof
+        // that multi-light lighting works in the editor viewport path.
+        for (int ai = 0; ai < args.Length; ++ai)
+        {
+            if (args[ai] != "--point-light") continue;
+            var plEntity = NativeEngineBridge.CreateEntity(2f, 3f, 0f);
+            if (plEntity == 0xFFFFFFFFu) { Logger.Error("--point-light: CreateEntity failed"); break; }
+            var added = NativeEngineBridge.AddEntityLight(plEntity,
+                1,             // LightType.Point (editor enum: 0=Dir, 1=Point, 2=Spot)
+                8f,            // intensity
+                new[] { 1.0f, 0.15f, 0.1f }, // warm red
+                30f,           // range
+                0f, 0f,        // cone angles (unused for point)
+                true);
+            Logger.Info($"--point-light: entity {plEntity}, AddEntityLight → {added}");
+            break;
+        }
+
+        // --ecs-sun: add a second Directional light through the editor chain
+        // (ECS AddEntityLight), from a different angle than the registered one.
+        // If the render changes vs the single-sun run, multi-directional
+        // lighting works in the viewport path.
+        for (int ai = 0; ai < args.Length; ++ai)
+        {
+            if (args[ai] != "--ecs-sun") continue;
+            var sunEntity = NativeEngineBridge.CreateEntity(0f, 0f, 0f);
+            if (sunEntity == 0xFFFFFFFFu) { Logger.Error("--ecs-sun: CreateEntity failed"); break; }
+            var rot = new float[] { 0f, 0f, 0f };
+            var scl = new float[] { 1f, 1f, 1f };
+            var pos = new float[] { 0f, 0f, 0f };
+            NativeEngineBridge.SetEntityTransform(sunEntity, pos, rot, scl);
+            var added = NativeEngineBridge.AddEntityLight(sunEntity,
+                0,             // LightType.Directional
+                50f,
+                new[] { 0.2f, 0.4f, 1.0f }, // blue tint — unmistakable vs the white sun
+                0f, 0f, 0f,
+                true);
+            Logger.Info($"--ecs-sun: entity {sunEntity}, AddEntityLight -> {added}");
+            break;
+        }
+
+        // --open-project <path>: run the REAL editor open chain headlessly —
+        // OpenProject.Open → WorldEditorViewModel (ActiveScene → Sync, which
+        // pushes every light via AddEntityLight) → toolbar-equivalent
+        // CreateEntityFromFactory(Sun Light). Reproduces the user's crash
+        // flow without the GUI.
+        for (int ai = 0; ai < args.Length - 1; ++ai)
+        {
+            if (args[ai] != "--open-project") continue;
+            var opened = PrimalEditor_Avalonia.GameProject.OpenProject.Open(args[ai + 1]);
+            if (opened == null)
+            {
+                Logger.Error($"--open-project: OpenProject.Open returned null for {args[ai + 1]}");
+                break;
+            }
+            Logger.Info($"--open-project: loaded '{opened.Name}', scenes={opened.Scenes.Count}");
+            var wm = new PrimalEditor_Avalonia.ViewModels.WorldEditorViewModel
+            {
+                Project = opened,
+                ActiveScene = opened.ActiveScene ?? opened.Scenes.FirstOrDefault(),
+            };
+            Logger.Info($"--open-project: scene synced, entities={wm.ActiveScene?.Entities.Count}");
+            var sunDesc = PrimalEditor_Avalonia.Entities.EntityFactory.Find(
+                PrimalEditor_Avalonia.Entities.EntityKind.DirectionalLight);
+            var newSun = wm.CreateEntityFromFactory(sunDesc!);
+            Logger.Info($"--open-project: toolbar Sun Light → {(newSun != null ? newSun.Name : "FAILED")}");
+            break;
+        }
+
+        // --env-map <path>: load an equirect .hdr through the editor chain
+        // (PipelineSetEnvironmentMap -> IBL bake) and enable the skybox pass.
+        for (int ai = 0; ai < args.Length - 1; ++ai)
+        {
+            if (args[ai] != "--env-map") continue;
+            var okEnv = NativeEngineBridge.PipelineSetEnvironmentMap(args[ai + 1]);
+            NativeEngineBridge.PipelineSetSkyboxEnabled(true);
+            Logger.Info($"--env-map: SetEnvironmentMap({args[ai + 1]}) -> {okEnv}, skybox on");
+            break;
+        }
 
         var target = NativeEngineBridge.CreateRenderTarget(
             width, height, NativeEngineBridge.RenderTargetFormat.RGBA16F);

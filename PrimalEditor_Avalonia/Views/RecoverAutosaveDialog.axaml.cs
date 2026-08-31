@@ -14,6 +14,11 @@ public partial class RecoverAutosaveDialog : Window
 
     public RecoverAutosaveDialog()
     {
+        // Calls the source-generated InitializeComponent(bool, bool) — which
+        // loads the XAML AND assigns the named-control fields below. Do NOT
+        // reintroduce a hand-written parameterless InitializeComponent here:
+        // it shadows the generated one and leaves ProjectNameText etc. null
+        // (NullReferenceException in the 4-arg constructor).
         InitializeComponent();
         ProjectName = string.Empty;
         BackupTimestampDisplay = string.Empty;
@@ -34,11 +39,6 @@ public partial class RecoverAutosaveDialog : Window
         BackupTimeText.Text = BackupTimestampDisplay;
         BundlePathText.Text = bundlePath;
         OriginalPathText.Text = originalProjectPath;
-    }
-
-    private void InitializeComponent()
-    {
-        AvaloniaXamlLoader.Load(this);
     }
 
     private void OnRecoverClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

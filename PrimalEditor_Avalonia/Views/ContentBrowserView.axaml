@@ -70,7 +70,7 @@
 
                     <!-- Compact toolbar: current path | collapsible search | actions -->
                     <Border DockPanel.Dock="Top" Padding="4,4,4,2">
-                        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
                             <TextBlock Grid.Column="0" Text="FILES"
                                        FontFamily="{StaticResource FontDisplay}"
                                        FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
@@ -107,20 +107,23 @@
                             <Button Grid.Column="4" Content="+" Click="OnNewFolderClick"
                                     ToolTip.Tip="New folder"
                                     Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
-                            <Button Grid.Column="5" Content="R" Click="OnRenameClick"
+                            <Button Grid.Column="5" Content="M" Click="OnNewMaterialClick"
+                                    ToolTip.Tip="New material"
+                                    Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
+                            <Button Grid.Column="6" Content="R" Click="OnRenameClick"
                                     ToolTip.Tip="Rename"
                                     Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
-                            <Button Grid.Column="6" Content="D" Click="OnDeleteClick"
+                            <Button Grid.Column="7" Content="D" Click="OnDeleteClick"
                                     ToolTip.Tip="Delete"
                                     Width="22" Height="22" Margin="0,0,4,0" Padding="0"
                                     Classes="danger"/>
-                            <ToggleButton Grid.Column="7"
+                            <ToggleButton Grid.Column="8"
                                           IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
                                           ToolTip.Tip="Toggle thumbnails view"
                                           Width="22" Height="22" Margin="0,0,2,0" Padding="0">
                                 <TextBlock Text="▦" FontSize="11"/>
                             </ToggleButton>
-                            <Button Grid.Column="8" Content="⬇" Click="OnImportClick"
+                            <Button Grid.Column="9" Content="⬇" Click="OnImportClick"
                                     ToolTip.Tip="Import asset"
                                     Width="22" Height="22" Padding="0"/>
                         </Grid>

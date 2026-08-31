@@ -20,6 +20,8 @@ public sealed class ContentHelperTests
     [InlineData("foo.mesh", AssetType.Unknown)]
     [InlineData("foo.wav", AssetType.Audio)]
     [InlineData("foo.material", AssetType.Material)]
+    [InlineData("foo.material.json", AssetType.Material)]
+    [InlineData("path/to/Robot.material.json", AssetType.Material)]
     [InlineData("foo.shader", AssetType.Shader)]
     [InlineData("foo.model", AssetType.Model)]
     // Multi-extension sidecar that ContentTools actually writes.

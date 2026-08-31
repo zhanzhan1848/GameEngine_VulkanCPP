@@ -27,8 +27,11 @@ public static class AssetDependencyExtractor
     public static IEnumerable<Guid> ExtractByExtension(string assetPath)
     {
         if (!File.Exists(assetPath)) yield break;
+        var fileName = Path.GetFileName(assetPath).ToLowerInvariant();
         var ext = Path.GetExtension(assetPath).ToLowerInvariant();
-        if (ext == ".material")
+        // Match both the legacy single-extension (.material) and the current
+        // JSON sidecar (.material.json) — same convention as ContentHelper.
+        if (ext == ".material" || fileName.EndsWith(".material.json", StringComparison.Ordinal))
         {
             foreach (var guid in ExtractMaterialDependencies(assetPath)) yield return guid;
         }

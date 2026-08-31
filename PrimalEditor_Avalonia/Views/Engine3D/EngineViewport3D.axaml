@@ -16,7 +16,18 @@
          PointerPressed/Moved/Released never fire and the user can't
          orbit/pan/zoom or drag gizmos. Background=Transparent makes
          the Border participate in hit-testing while being visually
-         invisible. -->
-    <Border Name="InputCapture" Background="Transparent" />
+         invisible.
+         AllowDrop + Drop/DragOver route Content Browser drops through
+         the inner-most hit-test target instead of relying on the outer
+         WorldEditorView Border — NativeControlHost does not
+         consistently forward Avalonia's drag routed events on macOS,
+         and the inner-most hit-test target is the only reliable sink.
+         Dropped entities spawn at (0, 0, 0); the user repositions via
+         the gizmo. -->
+    <Border Name="InputCapture"
+            Background="Transparent"
+            DragDrop.AllowDrop="True"
+            DragDrop.DragOver="OnAssetDragOver"
+            DragDrop.Drop="OnAssetDrop" />
   </Grid>
 </UserControl>

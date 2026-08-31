@@ -473,6 +473,34 @@ public static class NativeEngineBridge
 
     // Mesh entity registration. texture_content_ids is u64 array of
     // content::add_texture handles; pass null/0 for untextured mesh.
+    [DllImport("PrimalEngine", EntryPoint = "PipelineImportCookedTexture", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern UInt64 _PipelineImportCookedTexture(IntPtr path);
+    public static UInt64 PipelineImportCookedTexture(string path)
+    {
+        if (!_isLoaded || string.IsNullOrWhiteSpace(path)) return InvalidContentId;
+        try { return _PipelineImportCookedTexture(MarshalUtf8(path)); }
+        catch (Exception ex) { Logger.Error("PipelineImportCookedTexture failed", ex); return InvalidContentId; }
+    }
+
+    // HDR environment map (equirect .hdr): skybox + baked IBL. Returns true
+    // when the map was loaded and baked (or was already cached).
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetEnvironmentMap", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern uint _PipelineSetEnvironmentMap(IntPtr path);
+    public static bool PipelineSetEnvironmentMap(string path)
+    {
+        if (!_isLoaded || string.IsNullOrWhiteSpace(path)) return false;
+        try { return _PipelineSetEnvironmentMap(MarshalUtf8(path)) != 0; }
+        catch (Exception ex) { Logger.Error("PipelineSetEnvironmentMap failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetSkyboxEnabled", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineSetSkyboxEnabled(uint enabled);
+    public static void PipelineSetSkyboxEnabled(bool enabled)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineSetSkyboxEnabled(enabled ? 1u : 0u); } catch (Exception ex) { Logger.Error("PipelineSetSkyboxEnabled failed", ex); }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "PipelineRegisterMeshEntity", CallingConvention = CallingConvention.Cdecl)]
     private static extern UInt64 _PipelineRegisterMeshEntity(UInt64 geometryContentId, IntPtr textureContentIds, uint textureCount);
     public static UInt64 PipelineRegisterMeshEntity(UInt64 geometryContentId, UInt64[] textureContentIds)
@@ -496,6 +524,31 @@ public static class NativeEngineBridge
         if (!_isLoaded) return;
         try { _PipelineUnregisterMeshEntity(entityId); }
         catch (Exception ex) { Logger.Error("PipelineUnregisterMeshEntity failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetEntityMaterialGraph", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern UInt32 _PipelineSetEntityMaterialGraph(UInt32 entityId, IntPtr utf8Json);
+    /// <summary>
+    /// Compile the material graph JSON (absolute texture paths — the
+    /// PreparePreviewJson expansion; the disk sidecar stays portable) and
+    /// attach the generated-shader pipeline to the entity's world rendering.
+    /// Returns false when compilation fails; the entity then keeps rendering
+    /// through the fixed three-slot material path.
+    /// </summary>
+    public static bool PipelineSetEntityMaterialGraph(uint entityId, string graphJsonUtf8)
+    {
+        if (!_isLoaded || string.IsNullOrWhiteSpace(graphJsonUtf8)) return false;
+        try { return _PipelineSetEntityMaterialGraph(entityId, MarshalUtf8(graphJsonUtf8)) != 0; }
+        catch (Exception ex) { Logger.Error("PipelineSetEntityMaterialGraph failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineClearEntityMaterialGraph", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineClearEntityMaterialGraph(UInt32 entityId);
+    public static void PipelineClearEntityMaterialGraph(uint entityId)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineClearEntityMaterialGraph(entityId); }
+        catch (Exception ex) { Logger.Error("PipelineClearEntityMaterialGraph failed", ex); }
     }
 
     // ECS Camera component attach. Path B renderer wires
@@ -674,6 +727,86 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("CreateDefaultMaterial failed", ex); return InvalidContentId; }
     }
 
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialTechnique", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialTechnique(UInt32 entityId, UInt32 technique);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialRoughness", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialRoughness(UInt32 entityId, float value);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialMetallic", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialMetallic(UInt32 entityId, float value);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialAlphaCutoff", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialAlphaCutoff(UInt32 entityId, float value);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialBaseColor", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialBaseColor(UInt32 entityId, float[] rgba);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialAlbedoTexture", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialAlbedoTexture(UInt32 entityId, UInt64 textureId);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialNormalTexture", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialNormalTexture(UInt32 entityId, UInt64 textureId);
+
+    [DllImport("PrimalEngine", EntryPoint = "SetMaterialOrmTexture", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetMaterialOrmTexture(UInt32 entityId, UInt64 textureId);
+
+    public static void SetMaterialTechnique(uint entityId, uint technique)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialTechnique(entityId, technique); }
+        catch (Exception ex) { Logger.Error($"SetMaterialTechnique({entityId}) failed", ex); }
+    }
+
+    public static void SetMaterialRoughness(uint entityId, float value)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialRoughness(entityId, value); }
+        catch (Exception ex) { Logger.Error($"SetMaterialRoughness({entityId}) failed", ex); }
+    }
+
+    public static void SetMaterialMetallic(uint entityId, float value)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialMetallic(entityId, value); }
+        catch (Exception ex) { Logger.Error($"SetMaterialMetallic({entityId}) failed", ex); }
+    }
+
+    public static void SetMaterialAlphaCutoff(uint entityId, float value)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialAlphaCutoff(entityId, value); }
+        catch (Exception ex) { Logger.Error($"SetMaterialAlphaCutoff({entityId}) failed", ex); }
+    }
+
+    public static void SetMaterialBaseColor(uint entityId, float r, float g, float b, float a)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialBaseColor(entityId, new[] { r, g, b, a }); }
+        catch (Exception ex) { Logger.Error($"SetMaterialBaseColor({entityId}) failed", ex); }
+    }
+
+    public static void SetMaterialAlbedoTexture(uint entityId, ulong textureId)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialAlbedoTexture(entityId, textureId); }
+        catch (Exception ex) { Logger.Error($"SetMaterialAlbedoTexture({entityId}) failed", ex); }
+    }
+
+    public static void SetMaterialNormalTexture(uint entityId, ulong textureId)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialNormalTexture(entityId, textureId); }
+        catch (Exception ex) { Logger.Error($"SetMaterialNormalTexture({entityId}) failed", ex); }
+    }
+
+    public static void SetMaterialOrmTexture(uint entityId, ulong textureId)
+    {
+        if (!_isLoaded) return;
+        try { _SetMaterialOrmTexture(entityId, textureId); }
+        catch (Exception ex) { Logger.Error($"SetMaterialOrmTexture({entityId}) failed", ex); }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "GetEntityTransform", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _GetEntityTransform(UInt32 entityId,
         [Out] float[] position, [Out] float[] rotation, [Out] float[] scale);
@@ -831,6 +964,70 @@ public static class NativeEngineBridge
     {
         if (!_isLoaded) return;
         try { _RemoveEntityLight(entityId); } catch (Exception ex) { Logger.Error("RemoveEntityLight failed", ex); }
+    }
+
+    // Live light-edit setters (LightAPI.cpp) — let Inspector changes reach
+    // the renderer without a full scene resync. light_type: 0=directional,
+    // 1=point, 2=spot (mirrors the C# LightType enum).
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityLightType", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityLightType(uint entityId, uint lightType);
+    public static void SetEntityLightType(uint entityId, uint lightType)
+    {
+        if (!_isLoaded) return;
+        try { _SetEntityLightType(entityId, lightType); } catch (Exception ex) { Logger.Error("SetEntityLightType failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityLightIntensity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityLightIntensity(uint entityId, float intensity);
+    public static void SetEntityLightIntensity(uint entityId, float intensity)
+    {
+        if (!_isLoaded) return;
+        try { _SetEntityLightIntensity(entityId, intensity); } catch (Exception ex) { Logger.Error("SetEntityLightIntensity failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityLightColor", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityLightColor(uint entityId, float[] colorRgb);
+    public static void SetEntityLightColor(uint entityId, float[] colorRgb)
+    {
+        if (!_isLoaded || colorRgb == null) return;
+        try { _SetEntityLightColor(entityId, colorRgb); } catch (Exception ex) { Logger.Error("SetEntityLightColor failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityLightRange", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityLightRange(uint entityId, float range);
+    public static void SetEntityLightRange(uint entityId, float range)
+    {
+        if (!_isLoaded) return;
+        try { _SetEntityLightRange(entityId, range); } catch (Exception ex) { Logger.Error("SetEntityLightRange failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityLightConeAngles", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityLightConeAngles(uint entityId, float umbraRad, float penumbraRad);
+    public static void SetEntityLightConeAngles(uint entityId, float umbraRad, float penumbraRad)
+    {
+        if (!_isLoaded) return;
+        try { _SetEntityLightConeAngles(entityId, umbraRad, penumbraRad); } catch (Exception ex) { Logger.Error("SetEntityLightConeAngles failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "SetEntityLightEnabled", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _SetEntityLightEnabled(uint entityId, uint isEnabled);
+    public static void SetEntityLightEnabled(uint entityId, bool isEnabled)
+    {
+        if (!_isLoaded) return;
+        try { _SetEntityLightEnabled(entityId, isEnabled ? 1u : 0u); } catch (Exception ex) { Logger.Error("SetEntityLightEnabled failed", ex); }
+    }
+
+    // Full-state convenience push used by live Inspector edits — writes every
+    // light parameter so callers don't need to track which field changed.
+    public static void SetEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled)
+    {
+        if (!_isLoaded) return;
+        SetEntityLightType(entityId, lightType);
+        SetEntityLightIntensity(entityId, intensity);
+        SetEntityLightColor(entityId, colorRgb);
+        SetEntityLightRange(entityId, range);
+        SetEntityLightConeAngles(entityId, umbraRad, penumbraRad);
+        SetEntityLightEnabled(entityId, isEnabled);
     }
 
 [DllImport("PrimalEngine", EntryPoint = "CreateEmbeddedRenderView", CallingConvention = CallingConvention.Cdecl)]
@@ -1464,6 +1661,9 @@ public static class NativeEngineBridge
     [DllImport("PrimalEngine", EntryPoint = "ImportTexture", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern uint _ImportTexture(IntPtr path, out TextureImportResult result);
 
+    [DllImport("PrimalEngine", EntryPoint = "ImportCookedTexture", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern ulong _ImportCookedTexture(IntPtr path);
+
     [DllImport("PrimalEngine", EntryPoint = "ImportMeshAsync", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern ulong _ImportMeshAsync(IntPtr path);
 
@@ -1569,6 +1769,13 @@ public static class NativeEngineBridge
             return result;
         }
         catch (Exception ex) { Logger.Error("ImportTexture failed", ex); return null; }
+    }
+
+    public static ulong ImportCookedTexture(string path)
+    {
+        if (!_isLoaded || string.IsNullOrWhiteSpace(path)) return InvalidContentId;
+        try { return _ImportCookedTexture(MarshalUtf8(path)); }
+        catch (Exception ex) { Logger.Error("ImportCookedTexture failed", ex); return InvalidContentId; }
     }
 
     public static ulong ImportMesh(string path)

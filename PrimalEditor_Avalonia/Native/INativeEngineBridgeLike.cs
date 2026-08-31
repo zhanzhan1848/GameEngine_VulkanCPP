@@ -5,6 +5,7 @@ using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject.Identifiers;
 using PrimalEditor_Avalonia.Native;
+using PrimalEditor_Avalonia.Native.MaterialGraph;
 
 namespace PrimalEditor_Avalonia.Native;
 
@@ -21,15 +22,26 @@ public interface INativeEngineBridgeLike
     void DestroyEntity(uint entityId);
     void SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale);
     uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled);
+
+    /// <summary>
+    /// Push the full light state for live Inspector edits (no scene resync).
+    /// Default no-op preserves compatibility with test bridges.
+    /// </summary>
+    void SetEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) { }
+
     uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector);
 
     /// <summary>
     /// Synchronously resolve a mesh import. Returns the native geometry
-    /// content id on success or 0 on failure / timeout. Implementations
+	/// content id on success or <see cref="NativeEngineBridge.InvalidContentId"/>
+	/// on failure / timeout. Content id zero is valid. Implementations
     /// may poll the engine's async import pipeline until the request
     /// completes.
     /// </summary>
     ulong ImportMesh(string cookedPath);
+
+    /// <summary>Load an engine-cooked .texture/TEXR artifact.</summary>
+    ulong ImportCookedTexture(string cookedPath) => NativeEngineBridge.InvalidContentId;
 
     /// <summary>
     /// Allocate a runtime material handle for the given shader Guid.
@@ -47,12 +59,50 @@ public interface INativeEngineBridgeLike
     void SetEntityMesh(uint entityId, ulong geometryContentId, uint[] materialRuntimeIds, uint materialCount);
 
     /// <summary>
+    /// Bind real texture content ids in Albedo/Normal/ORM order. The default
+    /// implementation preserves compatibility with test bridges.
+    /// </summary>
+    void SetEntityMeshTextures(uint entityId, ulong geometryContentId, ulong[] textureContentIds)
+    {
+        var narrowed = new uint[textureContentIds.Length];
+        for (var i = 0; i < textureContentIds.Length; i++) narrowed[i] = (uint)textureContentIds[i];
+        SetEntityMesh(entityId, geometryContentId, narrowed, (uint)narrowed.Length);
+    }
+
+    /// <summary>Remove only the render-pipeline mesh bound to an editor entity.</summary>
+    void UnbindEntityMesh(uint entityId) { }
+
+    /// <summary>
     /// Allocate the engine's built-in default white PBR material. Used
     /// as a fallback when the user hasn't picked a shader — the editor
     /// has no Material system yet, so every unbound mesh renders with
     /// this. Returns 0 / invalid id when the engine cannot satisfy.
     /// </summary>
     ulong CreateDefaultMaterial();
+
+    /// <summary>
+    /// Apply the evaluated outputs of a material graph to the material
+    /// already attached to <paramref name="entityId"/>. The graph is
+    /// evaluated server-side; the resulting technique, scalars, base
+    /// colour and texture bindings are pushed through the
+    /// <c>SetMaterial*</c> setters exposed by the engine's
+    /// <c>MaterialAPI</c>. No-op when the engine isn't loaded, when the
+    /// graph id is invalid, or when evaluation fails.
+    /// </summary>
+    void ApplyMaterialGraph(uint entityId, uint graphId);
+
+    /// <summary>
+    /// Compile <paramref name="expandedGraphJson"/> (editor serialization with
+    /// absolute texture paths) into a GBuffer fragment shader and attach it to
+    /// the entity's world rendering. Returns false when compilation fails or
+    /// the backend does not support graph materials; callers keep rendering
+    /// through the fixed three-slot path in that case.
+    /// Default implementation preserves compatibility with test bridges.
+    /// </summary>
+    bool SetEntityMaterialGraph(uint entityId, string expandedGraphJson) => false;
+
+    /// <summary>Detach any previously registered compiled graph material.</summary>
+    void ClearEntityMaterialGraph(uint entityId) { }
 
     /// <summary>
     /// Procedurally cook a primitive mesh (sphere, cube, capsule, …)
@@ -98,18 +148,21 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
     public uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) =>
         NativeEngineBridge.AddEntityLight(entityId, lightType, intensity, colorRgb, range, umbraRad, penumbraRad, isEnabled);
 
+    public void SetEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) =>
+        NativeEngineBridge.SetEntityLight(entityId, lightType, intensity, colorRgb, range, umbraRad, penumbraRad, isEnabled);
+
     public uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector) =>
         NativeEngineBridge.AddEntityCamera(entityId, projectionType, fieldOfView, aspectRatio, nearZ, farZ, upVector);
 
     public ulong ImportMesh(string cookedPath)
     {
-        if (!NativeEngineBridge.IsLoaded) return 0;
+		if (!NativeEngineBridge.IsLoaded) return NativeEngineBridge.InvalidContentId;
         // The native ImportMesh path is asynchronous: it returns a
         // request id and the geometry content id lands later via
         // TryGetMeshImportResult. SceneRuntimeSynchronizer expects a
         // synchronous content id, so we drive the pump here.
         var requestId = NativeEngineBridge.ImportMesh(cookedPath);
-        if (requestId == 0) return 0;
+		if (requestId == 0) return NativeEngineBridge.InvalidContentId;
         var deadline = DateTime.UtcNow + ImportMeshTimeout;
         while (DateTime.UtcNow < deadline)
         {
@@ -117,13 +170,18 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
             var (meshId, status) = NativeEngineBridge.TryGetMeshImportResult(requestId);
             if (status != NativeEngineBridge.MeshImportResultStatus.Pending)
             {
-                return status == NativeEngineBridge.MeshImportResultStatus.Success ? meshId : 0UL;
+				return status == NativeEngineBridge.MeshImportResultStatus.Success
+					? meshId
+					: NativeEngineBridge.InvalidContentId;
             }
             Thread.Sleep(ImportMeshPollInterval);
         }
         Logger.Warning($"NativeEngineBridgeAdapter: ImportMesh timed out for {cookedPath}");
-        return 0;
+		return NativeEngineBridge.InvalidContentId;
     }
+
+    public ulong ImportCookedTexture(string cookedPath) =>
+        NativeEngineBridge.PipelineImportCookedTexture(cookedPath);
 
     public uint CreateMaterial(AssetGuid shaderGuid)
     {
@@ -177,11 +235,91 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
         _pipelineMeshEntities[entityId] = meshEntityId;
     }
 
+    public void SetEntityMeshTextures(uint entityId, ulong geometryContentId, ulong[] textureContentIds)
+    {
+        if (!NativeEngineBridge.IsLoaded) return;
+        if (entityId == NativeEngineBridge.InvalidEntityId ||
+            geometryContentId == NativeEngineBridge.InvalidContentId) return;
+
+        if (_pipelineMeshEntities.Remove(entityId, out var oldMeshEntityId))
+            NativeEngineBridge.PipelineUnregisterMeshEntity(oldMeshEntityId);
+
+        var meshEntityId = NativeEngineBridge.PipelineRegisterMeshEntity(
+            geometryContentId,
+            textureContentIds.Length == 0 ? null : textureContentIds);
+        if (meshEntityId == NativeEngineBridge.InvalidEntityId) return;
+        _pipelineMeshEntities[entityId] = meshEntityId;
+    }
+
+    public void UnbindEntityMesh(uint entityId)
+    {
+        if (_pipelineMeshEntities.Remove(entityId, out var meshEntityId))
+            NativeEngineBridge.PipelineUnregisterMeshEntity(meshEntityId);
+    }
+
     public ulong CreateDefaultMaterial()
     {
         if (!NativeEngineBridge.IsLoaded) return 0;
         return NativeEngineBridge.CreateDefaultMaterial();
     }
+
+    public void ApplyMaterialGraph(uint entityId, uint graphId)
+    {
+        if (!NativeEngineBridge.IsLoaded) return;
+        if (entityId == 0 || graphId == 0) return;
+
+        // Evaluate the graph to a populated material_init_info struct.
+        // The session is adopted (not owned) so we don't double-free.
+        using var session = MaterialGraphSession.Adopt(graphId);
+
+        var materialEntityId = _pipelineMeshEntities.TryGetValue(entityId, out var pipelineEntityId)
+            ? (uint)pipelineEntityId
+            : entityId;
+
+        // World-material path: compile the full graph (arbitrary topology,
+        // up to 8 textures) into a GBuffer fragment shader and attach it to
+        // this entity. The serialized JSON gets absolute texture paths via
+        // the same expansion the preview pane uses; the disk sidecar stays
+        // portable. On failure the scalar snapshot below still applies and
+        // the entity keeps the fixed three-slot material.
+        try
+        {
+            var json = session.SerializeJson();
+            var expanded = PrimalEditor_Avalonia.Editors.Material.MaterialGraphSessionLocator
+                .PreparePreviewJson(json ?? string.Empty);
+            if (!string.IsNullOrEmpty(expanded) &&
+                !NativeEngineBridge.PipelineSetEntityMaterialGraph(materialEntityId, expanded))
+            {
+                Logger.Warning($"ApplyMaterialGraph: entity {entityId} keeps fixed material (graph compile failed)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warning($"ApplyMaterialGraph: world push skipped ({ex.Message})");
+        }
+
+        if (!session.TryEvaluate(out var info)) return;
+
+        if (info.Technique != 0)
+            NativeEngineBridge.SetMaterialTechnique(materialEntityId, info.Technique);
+        NativeEngineBridge.SetMaterialRoughness(materialEntityId, info.Roughness);
+        NativeEngineBridge.SetMaterialMetallic(materialEntityId, info.Metallic);
+        NativeEngineBridge.SetMaterialAlphaCutoff(materialEntityId, info.AlphaCutoff);
+        NativeEngineBridge.SetMaterialBaseColor(materialEntityId,
+            info.BaseColorR, info.BaseColorG, info.BaseColorB, info.BaseColorA);
+        if (info.AlbedoTexture != 0)
+            NativeEngineBridge.SetMaterialAlbedoTexture(materialEntityId, info.AlbedoTexture);
+        if (info.NormalTexture != 0)
+            NativeEngineBridge.SetMaterialNormalTexture(materialEntityId, info.NormalTexture);
+        if (info.OrmTexture != 0)
+            NativeEngineBridge.SetMaterialOrmTexture(materialEntityId, info.OrmTexture);
+    }
+
+    public bool SetEntityMaterialGraph(uint entityId, string expandedGraphJson) =>
+        NativeEngineBridge.PipelineSetEntityMaterialGraph(entityId, expandedGraphJson);
+
+    public void ClearEntityMaterialGraph(uint entityId) =>
+        NativeEngineBridge.PipelineClearEntityMaterialGraph(entityId);
 
     public ulong ProceduralMeshCreate(uint meshType, float[] parameters)
     {

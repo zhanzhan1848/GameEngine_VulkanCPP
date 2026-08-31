@@ -30,6 +30,11 @@ public static class ContentHelper
     private static readonly string[] MaterialExts = {
         ".material"
     };
+    // ".material.json" is the multi-extension sidecar MaterialSerializer
+    // writes. Path.GetExtension only returns the last suffix (`.json`),
+    // so we need a second-hand check by file name — same trick as
+    // ModelSidecarSuffix above.
+    private const string MaterialSidecarSuffix = ".material.json";
     private static readonly string[] ShaderExts = {
         ".shader"
     };
@@ -56,6 +61,7 @@ public static class ContentHelper
         if (Array.IndexOf(AudioExts,  ext) >= 0) return AssetType.Audio;
         if (Array.IndexOf(ScriptExts, ext) >= 0) return AssetType.Script;
         if (Array.IndexOf(MaterialExts, ext) >= 0) return AssetType.Material;
+        if (fileName.EndsWith(MaterialSidecarSuffix, StringComparison.Ordinal)) return AssetType.Material;
         if (Array.IndexOf(ShaderExts,  ext) >= 0) return AssetType.Shader;
         if (Array.IndexOf(PrefabExts,  ext) >= 0) return AssetType.Prefab;
         return AssetType.Unknown;

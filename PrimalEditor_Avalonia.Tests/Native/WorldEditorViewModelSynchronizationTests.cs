@@ -67,5 +67,6 @@ public sealed class WorldEditorViewModelSynchronizationTests
         public ulong CreateDefaultMaterial() => 0xABCDEFUL;
         public ulong ProceduralMeshCreate(uint meshType, float[] parameters) => 0xCAFEUL;
         public void ProceduralMeshDestroy(ulong contentId) { }
+        public void ApplyMaterialGraph(uint entityId, uint graphId) { }
     }
 }

@@ -8,16 +8,32 @@ using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.GameProject.Identifiers;
 using PrimalEditor_Avalonia.Native;
+using PrimalEditor_Avalonia.Native.MaterialGraph;
 
 namespace PrimalEditor_Avalonia.Native;
 
 public sealed class SceneRuntimeSynchronizer
 {
+    /// <summary>
+    /// Raised when an asset editor persists new content for a material
+    /// asset (sidecar rewritten on disk). The owning world editor
+    /// subscribes so entities that already reference the material pick up
+    /// the change without an app restart. Static because asset editors
+    /// are free-floating windows with no path back to their
+    /// <see cref="ViewModels.WorldEditorViewModel"/>.
+    /// </summary>
+    public static event Action<AssetGuid>? MaterialSavedOnDisk;
+
+    /// <summary>Publish a "material file was re-saved on disk" notification.</summary>
+    public static void NotifyMaterialSaved(AssetGuid guid) => MaterialSavedOnDisk?.Invoke(guid);
+
     private readonly INativeEngineBridgeLike _bridge;
     private readonly RuntimeEntityMap _entities;
     private readonly RuntimeAssetMap _assets;
     private readonly RuntimeMaterialMap _materials;
     private readonly List<GameEntity> _live = new();
+    private readonly Dictionary<AssetGuid, uint> _materialGraphIds = new();
+    private readonly Dictionary<string, ulong> _worldTextureIds = new(StringComparer.OrdinalIgnoreCase);
     private ulong _defaultMaterialId;
     private readonly Dictionary<BuiltinMeshKind, ulong> _builtinGeometryIds = new();
     private readonly Dictionary<EditorHelperKind, ulong> _editorHelperGeometryIds = new();
@@ -89,6 +105,14 @@ public sealed class SceneRuntimeSynchronizer
         _live.Clear();
         _assets.Clear();
         _materials.Clear();
+        foreach (var graphId in _materialGraphIds.Values)
+        {
+            if (graphId == 0) continue;
+            try { MaterialGraphNative.Destroy(graphId); }
+            catch { /* engine might be torn down already */ }
+        }
+        _materialGraphIds.Clear();
+        _worldTextureIds.Clear();
         _defaultMaterialId = 0;
         foreach (var geometryId in _builtinGeometryIds.Values)
         {
@@ -105,6 +129,24 @@ public sealed class SceneRuntimeSynchronizer
         }
         _editorHelperGeometryIds.Clear();
     }
+
+	/// <summary>
+	/// Remove one managed entity and its descendants from the live native
+	/// scene. The production bridge also unregisters the pipeline mesh that
+	/// belongs to each source entity.
+	/// </summary>
+	public void RemoveEntity(GameEntity entity)
+	{
+		ArgumentNullException.ThrowIfNull(entity);
+		foreach (var child in entity.Children.ToArray()) RemoveEntity(child);
+
+		if (_entities.GetEntityId(entity.EntityGuid) is { } runtimeId)
+		{
+			_bridge.DestroyEntity(runtimeId);
+			_entities.Unregister(entity.EntityGuid);
+		}
+		_live.Remove(entity);
+	}
 
     public void Sync(Scene scene)
     {
@@ -175,7 +217,8 @@ public sealed class SceneRuntimeSynchronizer
                     continue;
                 }
                 var contentId = _bridge.ImportMesh(cookedPath!);
-                if (contentId != 0) _assets.Register(meshRenderer.MeshGuid, contentId);
+				if (contentId != NativeEngineBridge.InvalidContentId)
+					_assets.Register(meshRenderer.MeshGuid, contentId);
             }
 
             if (_entities.GetEntityId(entity.EntityGuid) is not { } runtimeId) continue;
@@ -195,15 +238,28 @@ public sealed class SceneRuntimeSynchronizer
             if (!finalMeshContentId.HasValue ||
                 finalMeshContentId.Value == NativeEngineBridge.InvalidContentId) continue;
 
-            var materialIds = meshRenderer.MaterialGuids
-                .Select(EnsureMaterial)
-                .Where(id => id != 0)
-                .ToArray();
-            if (materialIds.Length == 0 && _defaultMaterialId != 0)
+            // Keep the editor-side material runtime map populated for
+            // material lifecycle/state tracking. Forward rendering binds the
+            // resolved texture content IDs below; these runtime IDs must not
+            // be passed as texture IDs.
+            foreach (var materialGuid in meshRenderer.MaterialGuids)
+                EnsureMaterial(materialGuid);
+
+            var textureIds = ResolveWorldTextureIds(meshRenderer);
+            _bridge.SetEntityMeshTextures(runtimeId, finalMeshContentId.Value, textureIds);
+
+            // Apply per-material node graphs (Unreal-style material editor).
+            // We push graphs by material-GUID → sidecar resolution so the
+            // engine re-evaluates each graph with its own topology.
+            if (meshRenderer.MaterialGuids.Count > 0)
             {
-                materialIds = new uint[] { (uint)_defaultMaterialId };
+                for (int i = 0; i < meshRenderer.MaterialGuids.Count; i++)
+                {
+                    var graphId = EnsureMaterialGraph(meshRenderer.MaterialGuids[i]);
+                    if (graphId != 0)
+                        _bridge.ApplyMaterialGraph(runtimeId, graphId);
+                }
             }
-            _bridge.SetEntityMesh(runtimeId, finalMeshContentId.Value, materialIds, (uint)materialIds.Length);
         }
 
         foreach (var entity in _live)
@@ -263,6 +319,105 @@ public sealed class SceneRuntimeSynchronizer
         }
     }
 
+    /// <summary>
+    /// If <paramref name="materialGuid"/> resolves to a material file with
+    /// a sibling <c>.material.graph.json</c> sidecar, load it into a fresh
+    /// native graph and remember the handle. Returns the cached handle on
+    /// repeat calls; returns 0 when no sidecar is present or the engine
+    /// isn't loaded.
+    /// </summary>
+    private uint EnsureMaterialGraph(AssetGuid materialGuid)
+    {
+        if (materialGuid.Value == Guid.Empty) return 0;
+        if (!_bridge.IsLoaded) return 0;
+
+        if (_materialGraphIds.TryGetValue(materialGuid, out var cached))
+            return cached;
+
+        var info = AssetRegistry.GetByGuid(materialGuid.Value);
+        if (info is null) return 0;
+
+        var sidecar = Path.ChangeExtension(info.FullPath, ".material.graph.json");
+        if (!File.Exists(sidecar)) return 0;
+
+        var graphId = MaterialGraphLoaderHook?.Invoke(sidecar) ?? MaterialGraphNative.LoadFromFile(sidecar);
+        if (graphId == 0) return 0;
+
+        _materialGraphIds[materialGuid] = graphId;
+        return graphId;
+    }
+
+    /// <summary>
+    /// Test seam over <see cref="MaterialGraphNative.LoadFromFile"/> so
+    /// graph-cache invalidation can be exercised without the engine dylib.
+    /// Null in production; only tests assign it.
+    /// </summary>
+    internal Func<string, uint>? MaterialGraphLoaderHook { get; set; }
+
+    /// <summary>
+    /// Drop the cached native graph for an already-referenced material and
+    /// re-apply it to every live entity that uses it. Called after the
+    /// material editor rewrites the sidecar so open scenes render the new
+    /// graph without the app restart a full <see cref="Sync"/> used to
+    /// require. Eviction must happen before any reload:
+    /// <see cref="EnsureMaterialGraph"/> would otherwise hand back the
+    /// pre-save topology still held by the cached native handle.
+    /// </summary>
+    public void ReloadMaterial(AssetGuid materialGuid)
+    {
+        if (materialGuid.Value == Guid.Empty) return;
+        if (!_bridge.IsLoaded) return;
+
+        if (_materialGraphIds.Remove(materialGuid, out var stale) && stale != 0)
+        {
+            try { MaterialGraphNative.Destroy(stale); }
+            catch { /* engine might be torn down already */ }
+        }
+
+        foreach (var entity in _live)
+        {
+            var renderer = entity.GetComponent<MeshRendererComponent>();
+            if (renderer == null || !renderer.MaterialGuids.Contains(materialGuid)) continue;
+            RefreshEntityMaterials(entity);
+        }
+    }
+
+    private ulong[] ResolveWorldTextureIds(MeshRendererComponent renderer)
+    {
+        if (renderer.MaterialGuids.Count == 0) return Array.Empty<ulong>();
+        var material = AssetRegistry.GetByGuid(renderer.MaterialGuids[0].Value);
+        if (material == null) return Array.Empty<ulong>();
+
+        var paths = MaterialWorldTextureResolver.Resolve(material.FullPath);
+        var last = -1;
+        for (var i = 0; i < paths.Length; i++)
+            if (!string.IsNullOrWhiteSpace(paths[i])) last = i;
+        if (last < 0) return Array.Empty<ulong>();
+
+        var ids = new ulong[last + 1];
+        Array.Fill(ids, NativeEngineBridge.InvalidContentId);
+        for (var i = 0; i <= last; i++)
+        {
+            var path = paths[i];
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            if (!_worldTextureIds.TryGetValue(path, out var id))
+            {
+                id = _bridge.ImportCookedTexture(path);
+                if (id != NativeEngineBridge.InvalidContentId)
+                {
+                    _worldTextureIds[path] = id;
+                    Logger.Info($"SceneRuntimeSynchronizer: bound world texture '{path}' (content={id})");
+                }
+                else
+                {
+                    Logger.Warning($"SceneRuntimeSynchronizer: failed to import world texture '{path}'");
+                }
+            }
+            ids[i] = id;
+        }
+        return ids;
+    }
+
     private string? ResolveCookedArtifactPath(AssetInfo info)
     {
         var relative = AssetRegistry.GetRelativePath(info.FullPath);
@@ -271,12 +426,26 @@ public sealed class SceneRuntimeSynchronizer
         var projectRoot = AssetRegistry.ProjectRoot;
         if (string.IsNullOrEmpty(projectRoot)) return UseSourceAsFallback ? info.FullPath : null;
 
+		var artifactRelativePath = rel.Value;
+		string? sourceArtifactPath = info.FullPath;
+		const string modelSidecarSuffix = ".model.json";
+		if (artifactRelativePath.EndsWith(modelSidecarSuffix, StringComparison.OrdinalIgnoreCase))
+		{
+			artifactRelativePath = artifactRelativePath[..^modelSidecarSuffix.Length] + ".mesh";
+			sourceArtifactPath = info.FullPath[..^modelSidecarSuffix.Length] + ".mesh";
+		}
+		else if (Path.GetExtension(artifactRelativePath).Equals(".model", StringComparison.OrdinalIgnoreCase))
+		{
+			artifactRelativePath = Path.ChangeExtension(artifactRelativePath, ".mesh");
+			sourceArtifactPath = Path.ChangeExtension(info.FullPath, ".mesh");
+		}
+
         var cookedAbsolute = Path.Combine(
             projectRoot, ".Primal", "Cooked", CookedPlatform, CookedConfiguration,
-            rel.Value.Replace('/', Path.DirectorySeparatorChar));
+			artifactRelativePath.Replace('/', Path.DirectorySeparatorChar));
 
         if (File.Exists(cookedAbsolute)) return cookedAbsolute;
-        if (UseSourceAsFallback) return info.FullPath;
+		if (UseSourceAsFallback && File.Exists(sourceArtifactPath)) return sourceArtifactPath;
         return null;
     }
 
@@ -322,7 +491,7 @@ public sealed class SceneRuntimeSynchronizer
 
         EditorHelperKind? kind = entity.GetComponent<CameraComponent>() != null
             ? EditorHelperKind.Camera
-            : entity.GetComponent<LightComponent>() != null
+            : entity.GetComponent<LightComponent>() != null || entity.GetComponent<EnvironmentComponent>() != null
                 ? EditorHelperKind.Light
                 : null;
         if (!kind.HasValue) return;
@@ -347,6 +516,100 @@ public sealed class SceneRuntimeSynchronizer
             ? new uint[] { (uint)_defaultMaterialId }
             : System.Array.Empty<uint>();
         _bridge.SetEntityMesh(runtimeId, geometryId, materials, (uint)materials.Length);
+    }
+
+    /// <summary>
+    /// Rebind the selected mesh's persisted material slots without rebuilding
+    /// the scene. The production bridge replaces the pipeline render entity,
+    /// so its transform and material graph are restored immediately.
+    /// </summary>
+    public void RefreshEntityMaterials(GameEntity entity)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        if (!_bridge.IsLoaded) return;
+        if (_entities.GetEntityId(entity.EntityGuid) is not { } runtimeId) return;
+        var renderer = entity.GetComponent<MeshRendererComponent>();
+        if (renderer == null) return;
+
+        ulong geometryId;
+        if (_assets.GetContentId(renderer.MeshGuid) is { } imported
+            && imported != NativeEngineBridge.InvalidContentId)
+        {
+            geometryId = imported;
+        }
+        else if (renderer.MeshGuid.Value == Guid.Empty
+                 && renderer.BuiltinMesh != BuiltinMeshKind.None)
+        {
+            geometryId = EnsureBuiltinGeometry(renderer.BuiltinMesh);
+        }
+        else
+        {
+            return;
+        }
+        if (geometryId == NativeEngineBridge.InvalidContentId) return;
+
+        var textureIds = ResolveWorldTextureIds(renderer);
+        _bridge.SetEntityMeshTextures(runtimeId, geometryId, textureIds);
+
+        var transform = entity.GetTransform();
+        if (transform != null)
+        {
+            _bridge.SetEntityTransform(runtimeId,
+                new[] { transform.PositionX, transform.PositionY, transform.PositionZ },
+                new[] { transform.RotationX, transform.RotationY, transform.RotationZ },
+                new[] { transform.ScaleX, transform.ScaleY, transform.ScaleZ });
+        }
+
+        var appliedAnyGraph = false;
+        foreach (var materialGuid in renderer.MaterialGuids)
+        {
+            var graphId = EnsureMaterialGraph(materialGuid);
+            if (graphId != 0)
+            {
+                _bridge.ApplyMaterialGraph(runtimeId, graphId);
+                appliedAnyGraph = true;
+            }
+        }
+        // All slots lost their graphs (e.g. the inspector swapped to a
+        // material without a sidecar) — drop a previously compiled variant so
+        // the entity falls back to the fixed material path immediately.
+        if (!appliedAnyGraph)
+        {
+            try { _bridge.ClearEntityMaterialGraph(runtimeId); }
+            catch (NotSupportedException) { /* older bridge without graph support */ }
+        }
+    }
+
+    /// <summary>Import and rebind geometry after the Inspector replaces a Mesh asset.</summary>
+    public void RefreshEntityMesh(GameEntity entity)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        if (!_bridge.IsLoaded) return;
+        if (_entities.GetEntityId(entity.EntityGuid) is not { } runtimeId) return;
+        var renderer = entity.GetComponent<MeshRendererComponent>();
+        if (renderer == null) return;
+
+        if (renderer.MeshGuid.Value == Guid.Empty && renderer.BuiltinMesh == BuiltinMeshKind.None)
+        {
+            _bridge.UnbindEntityMesh(runtimeId);
+            return;
+        }
+
+        if (renderer.MeshGuid.Value != Guid.Empty && _assets.GetContentId(renderer.MeshGuid) is null)
+        {
+            var info = AssetRegistry.GetByGuid(renderer.MeshGuid.Value);
+            var path = info == null ? null : ResolveCookedArtifactPath(info);
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                Logger.Warning($"SceneRuntimeSynchronizer: cannot resolve replacement mesh {renderer.MeshGuid}");
+                return;
+            }
+            var contentId = _bridge.ImportMesh(path);
+            if (contentId == NativeEngineBridge.InvalidContentId) return;
+            _assets.Register(renderer.MeshGuid, contentId);
+        }
+
+        RefreshEntityMaterials(entity);
     }
 
     /// <summary>
@@ -388,37 +651,15 @@ public sealed class SceneRuntimeSynchronizer
                 if (!string.IsNullOrEmpty(cookedPath))
                 {
                     var contentId = _bridge.ImportMesh(cookedPath!);
-                    if (contentId != 0) _assets.Register(meshRenderer.MeshGuid, contentId);
+					if (contentId != NativeEngineBridge.InvalidContentId)
+						_assets.Register(meshRenderer.MeshGuid, contentId);
                 }
             }
         }
 
         if (_entities.GetEntityId(entity.EntityGuid) is { } runtimeId)
         {
-            if (meshRenderer != null
-                && _assets.GetContentId(meshRenderer.MeshGuid) is { } meshContentId
-                && meshContentId != NativeEngineBridge.InvalidContentId)
-            {
-                var materials = _defaultMaterialId != 0
-                    ? new uint[] { (uint)_defaultMaterialId }
-                    : System.Array.Empty<uint>();
-                _bridge.SetEntityMesh(runtimeId, meshContentId, materials, (uint)materials.Length);
-            }
-            else if (meshRenderer != null
-                && meshRenderer.MeshGuid.Value == Guid.Empty
-                && meshRenderer.BuiltinMesh != BuiltinMeshKind.None)
-            {
-                // A persisted built-in kind takes the procedural path when
-                // no disk-backed mesh asset is assigned.
-                var geometryId = EnsureBuiltinGeometry(meshRenderer.BuiltinMesh);
-                if (geometryId != NativeEngineBridge.InvalidContentId)
-                {
-                    var materials = _defaultMaterialId != 0
-                        ? new uint[] { (uint)_defaultMaterialId }
-                        : System.Array.Empty<uint>();
-                    _bridge.SetEntityMesh(runtimeId, geometryId, materials, (uint)materials.Length);
-                }
-            }
+            RefreshEntityMaterials(entity);
 
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
@@ -463,7 +704,7 @@ public sealed class SceneRuntimeSynchronizer
     /// </summary>
     public void RegisterPreImportedMesh(AssetGuid guid, ulong contentId)
     {
-        if (guid.Value == Guid.Empty || contentId == 0) return;
+		if (guid.Value == Guid.Empty) return;
         if (contentId == NativeEngineBridge.InvalidContentId) return;
         _assets.Register(guid, contentId);
     }

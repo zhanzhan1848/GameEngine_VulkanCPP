@@ -11,6 +11,10 @@ public partial class MeshAssetInspectorView : UserControl
     private const double DragThreshold = 5.0;
     private AssetNode? _dragCandidate;
     private Avalonia.Point _dragStartPoint;
+    // Avalonia 12's DoDragDropAsync requires the original PointerPressedEventArgs,
+    // not the PointerEventArgs we get from PointerMoved. Cache the press args
+    // until the drag actually starts so we can pass them through.
+    private Avalonia.Input.PointerPressedEventArgs? _dragPressedArgs;
 
     public MeshAssetInspectorView()
     {
@@ -43,6 +47,7 @@ public partial class MeshAssetInspectorView : UserControl
         if (!vm.IsDraggable(node)) return;
         _dragCandidate = node;
         _dragStartPoint = point.Position;
+        _dragPressedArgs = e;
     }
 
     private void OnTreePointerMoved(object? sender, Avalonia.Input.PointerEventArgs e)
@@ -54,11 +59,14 @@ public partial class MeshAssetInspectorView : UserControl
         if (Math.Sqrt(dx * dx + dy * dy) < DragThreshold) return;
         if (DataContext is not AssetInspectorViewModel vm) return;
         var node = _dragCandidate;
+        var pressedArgs = _dragPressedArgs;
         _dragCandidate = null;
-        BeginDrag(vm, node, e);
+        _dragPressedArgs = null;
+        if (pressedArgs == null) return;
+        BeginDrag(vm, node, pressedArgs);
     }
 
-    private void BeginDrag(AssetInspectorViewModel vm, AssetNode node, Avalonia.Input.PointerEventArgs e)
+    private void BeginDrag(AssetInspectorViewModel vm, AssetNode node, Avalonia.Input.PointerPressedEventArgs e)
     {
         var asset = vm.Asset;
         if (asset == null) return;

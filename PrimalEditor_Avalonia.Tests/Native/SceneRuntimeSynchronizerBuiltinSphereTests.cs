@@ -166,6 +166,17 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         Assert.True(bridge.Calls.Any(c => c.StartsWith("setMesh(")));
     }
 
+	[Fact]
+	public void RegisterPreImportedMesh_AcceptsFirstValidContentSlotZero()
+	{
+		var (sync, _, assets, _, _) = Build();
+		var guid = new AssetGuid(System.Guid.NewGuid());
+
+		sync.RegisterPreImportedMesh(guid, 0);
+
+		Assert.Equal(0UL, assets.GetContentId(guid));
+	}
+
     private static (SceneRuntimeSynchronizer sync, RuntimeEntityMap entities, RuntimeAssetMap assets, RuntimeMaterialMap materials, FakeBridge bridge) Build()
     {
         var bridge = new FakeBridge { IsLoaded = true };
@@ -202,5 +213,6 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         public ulong CreateDefaultMaterial() { Calls.Add("createDefaultMaterial"); return 0xFEEDFACEUL; }
         public ulong ProceduralMeshCreate(uint meshType, float[] parameters) { Calls.Add($"proceduralCreate({meshType})"); return ProceduralResult; }
         public void ProceduralMeshDestroy(ulong contentId) { Calls.Add($"proceduralDestroy({contentId})"); }
+        public void ApplyMaterialGraph(uint entityId, uint graphId) { Calls.Add($"applyMaterialGraph({entityId},{graphId})"); }
     }
 }

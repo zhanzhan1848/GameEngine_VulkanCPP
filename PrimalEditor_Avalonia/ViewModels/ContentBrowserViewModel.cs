@@ -5,9 +5,12 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Controls;
 using Dock.Model.Mvvm.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Content.Materials;
+using PrimalEditor_Avalonia.Editors;
 using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.Import;
 using PrimalEditor_Avalonia.Native;
@@ -328,6 +331,24 @@ public class ContentBrowserViewModel : Document
             if (nested != null) return nested;
         }
         return null;
+    }
+
+    /// <summary>Navigate to and select an asset referenced by another editor panel.</summary>
+    public void RevealAsset(AssetInfo asset)
+    {
+        if (asset == null || string.IsNullOrWhiteSpace(asset.FullPath)) return;
+        var directory = Path.GetDirectoryName(asset.FullPath);
+        if (string.IsNullOrWhiteSpace(directory)) return;
+        var folder = FindFolderByPath(Folders, directory);
+        if (folder == null)
+        {
+            RefreshFolders();
+            folder = FindFolderByPath(Folders, directory);
+        }
+        if (folder == null) return;
+        SelectedFolder = folder;
+        SelectedFile = Files.FirstOrDefault(item => item.Guid == asset.Guid)
+            ?? Files.FirstOrDefault(item => string.Equals(item.FullPath, asset.FullPath, StringComparison.OrdinalIgnoreCase));
     }
 
     private void RebuildFilteredFiles()
@@ -658,5 +679,75 @@ public class ContentBrowserViewModel : Document
             ? $"Imported: {imported}, Failed: {failed}. First error: {firstError}"
             : $"Imported: {imported}, Failed: {failed}";
         RefreshFolders();
+    }
+
+    /// <summary>
+    /// Prompt the user for a material name, write a fresh material file
+    /// into the currently selected folder (or Content root), register
+    /// it with the AssetRegistry, and pop open the material editor
+    /// pointed at the new asset. The asset starts empty — no shader
+    /// bound — so the editor opens immediately and the user fills in
+    /// the shader and parameters on first save.
+    /// </summary>
+    public async Task CreateMaterialAsync()
+    {
+        if (_project == null)
+        {
+            Logger.Warning("Cannot create material: no project loaded");
+            return;
+        }
+
+        var topLevel = Avalonia.Application.Current?.ApplicationLifetime is
+            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+            ? desktop.MainWindow : null;
+        if (topLevel == null) return;
+
+        var parent = SelectedFolder != null && SelectedFolder.FullPath != _project.ContentPath
+            ? SelectedFolder.FullPath
+            : _project.ContentPath;
+
+        var name = await PromptForTextAsync(topLevel, "New Material", "Material name:", "NewMaterial");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        name = name.Trim();
+
+        var materialPath = Path.Combine(parent, name + ".material.json");
+        if (File.Exists(materialPath))
+        {
+            Logger.Warning($"CreateMaterial: '{materialPath}' already exists");
+            StatusMessage = $"Material '{name}' already exists";
+            return;
+        }
+
+        try
+        {
+            MaterialSerializer.WriteNew(materialPath, name);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("CreateMaterial: write failed", ex);
+            StatusMessage = $"Failed to write material: {ex.Message}";
+            return;
+        }
+
+        var info = AssetRegistry.Register(materialPath);
+        RefreshFolders();
+
+        if (info != null)
+        {
+            // Open the editor immediately so the user can bind a
+            // shader and author parameters. AssetEditorRegistry.Open
+            // handles re-use of existing editors for the same path.
+            AssetEditorRegistry.Open(info);
+        }
+    }
+
+    private static Task<string?> PromptForTextAsync(Window owner, string title, string prompt, string initial)
+    {
+        var tcs = new TaskCompletionSource<string?>();
+        var dlg = new Views.TextInputDialog(title, prompt, initial);
+        dlg.ShowDialogAsync(owner).ContinueWith(
+            t => tcs.SetResult(t.Result),
+            TaskScheduler.FromCurrentSynchronizationContext());
+        return tcs.Task;
     }
 }

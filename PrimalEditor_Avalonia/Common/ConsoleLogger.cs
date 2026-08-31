@@ -27,7 +27,25 @@ public class ConsoleLogger : ILogger
         Console.WriteLine($"[{timestamp}] [ERROR] {message}");
         if (ex != null)
         {
-            Console.WriteLine($"  Exception: {ex.Message}");
+            Console.WriteLine($"  Exception: {ex.GetType().FullName}: {ex.Message}");
+            if (!string.IsNullOrEmpty(ex.StackTrace))
+            {
+                Console.WriteLine($"  StackTrace:");
+                foreach (var line in ex.StackTrace.Split('\n'))
+                    Console.WriteLine($"    {line.TrimEnd()}");
+            }
+            var inner = ex.InnerException;
+            while (inner != null)
+            {
+                Console.WriteLine($"  Inner: {inner.GetType().FullName}: {inner.Message}");
+                if (!string.IsNullOrEmpty(inner.StackTrace))
+                {
+                    Console.WriteLine($"    InnerStackTrace:");
+                    foreach (var line in inner.StackTrace.Split('\n'))
+                        Console.WriteLine($"      {line.TrimEnd()}");
+                }
+                inner = inner.InnerException;
+            }
         }
         Console.ResetColor();
     }

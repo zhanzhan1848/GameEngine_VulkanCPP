@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.GameProject;
 
 namespace PrimalEditor_Avalonia.Common;
 
@@ -31,6 +32,8 @@ public class RemoveEntityAction : IUndoRedoAction
 {
     private readonly ISceneEntityContext _context;
     private readonly GameEntity _entity;
+	private readonly GameEntity? _parent;
+	private readonly Scene? _parentScene;
 
     public string Name => "Remove Entity";
 
@@ -38,10 +41,14 @@ public class RemoveEntityAction : IUndoRedoAction
     {
         _context = context;
         _entity = entity;
+		_parent = entity.Parent;
+		_parentScene = entity.ParentScene;
     }
 
     public void Undo()
     {
+		_entity.Parent = _parent;
+		_entity.ParentScene = _parentScene;
         _context.AddEntity(_entity);
     }
 

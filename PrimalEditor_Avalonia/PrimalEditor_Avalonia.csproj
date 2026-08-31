@@ -30,22 +30,19 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.17" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.17" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.0" />
-    <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.0" />
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.0">
-      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
-      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
-    </PackageReference>
+    <PackageReference Include="Avalonia" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <!-- P1.d: Dock.Avalonia integration for docking layout (POC validated in /tmp/dock_poc) -->
-    <PackageReference Include="Dock.Avalonia" Version="11.3.11.22" />
-    <PackageReference Include="Dock.Model.Mvvm" Version="11.3.11.22" />
-    <PackageReference Include="Dock.Serializer.SystemTextJson" Version="11.3.11.22" />
-    <PackageReference Include="Dock.Avalonia.Themes.Fluent" Version="11.3.11.22" />
-    <PackageReference Include="Dock.Settings" Version="11.3.11.22" />
+    <PackageReference Include="Dock.Avalonia" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Model.Mvvm" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Serializer.SystemTextJson" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Avalonia.Themes.Fluent" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Settings" Version="12.1.0.1" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <!-- Phase 4-5: Unreal-style node graph editor (requires Avalonia 12) -->
+    <PackageReference Include="NodifyM.Avalonia" Version="12.0.0" />
   </ItemGroup>
 
   <ItemGroup>

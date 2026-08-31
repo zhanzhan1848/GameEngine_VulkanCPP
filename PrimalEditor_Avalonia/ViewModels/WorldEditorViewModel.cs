@@ -194,15 +194,29 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
 
     public WorldEditorViewModel()
     {
+        Properties.SceneEnvironment = SceneEnvironmentViewModel;
         SceneSynchronizer = new SceneRuntimeSynchronizer(
             new NativeEngineBridgeAdapter(),
             RuntimeEntityMap,
             RuntimeAssetMap,
             RuntimeMaterialMap);
         Properties.PushTransformsToNativeCallback = PushTransformsToNative;
+        Properties.PushMaterialsToNativeCallback = entities =>
+        {
+            foreach (var entity in entities) SceneSynchronizer.RefreshEntityMaterials(entity);
+        };
+        Properties.PushMeshesToNativeCallback = entities =>
+        {
+            foreach (var entity in entities) SceneSynchronizer.RefreshEntityMesh(entity);
+        };
         Properties.MarkProjectDirtyCallback = MarkProjectDirty;
         Properties.UndoRedoQuery = () => UndoRedo;
+        // Material editors are free-floating windows; their saves reach
+        // the live scene through this static event.
+        SceneRuntimeSynchronizer.MaterialSavedOnDisk += OnMaterialSavedOnDisk;
     }
+
+    private void OnMaterialSavedOnDisk(AssetGuid guid) => SceneSynchronizer.ReloadMaterial(guid);
 
     /// <summary>
     /// Create a new entity from the given factory descriptor, parent
@@ -255,22 +269,27 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
 
     public void AddEntity(GameEntity entity)
     {
+		var wasAdded = false;
         if (entity.Parent == null && _activeScene != null && !_activeScene.Entities.Contains(entity))
         {
             _activeScene.Entities.Add(entity);
             entity.ParentScene = _activeScene;
             if (!_allEntities.Contains(entity)) _allEntities.Add(entity);
             if (!Entities.Contains(entity)) Entities.Add(entity);
+			wasAdded = true;
         }
         else if (entity.Parent != null && !entity.Parent.Children.Contains(entity))
         {
             entity.Parent.Children.Add(entity);
+			wasAdded = true;
         }
+		if (wasAdded && NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
         MarkProjectDirty();
     }
 
     public void RemoveEntity(GameEntity entity)
     {
+		SceneSynchronizer.RemoveEntity(entity);
         if (entity.Parent != null)
         {
             entity.Parent.Children.Remove(entity);
@@ -286,10 +305,38 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
         MarkProjectDirty();
     }
 
+	/// <summary>
+	/// Delete the current hierarchy selection as one undoable operation.
+	/// Toolbar, menu and keyboard entry points all route through this method.
+	/// </summary>
+	public int DeleteSelectedEntities()
+	{
+		var selected = SelectedEntities
+			.Where(entity => entity != null)
+			.Distinct()
+			.ToArray();
+		if (selected.Length == 0) return 0;
+
+		using (UndoRedo.BeginTransaction($"Delete {selected.Length} entity(ies)"))
+		{
+			foreach (var entity in selected)
+			{
+				var action = new RemoveEntityAction(this, entity);
+				UndoRedo.Add(action);
+				action.Redo();
+			}
+		}
+		SelectedEntities = System.Array.Empty<GameEntity>();
+		return selected.Length;
+	}
+
     public void AddScene(string name = "New Scene")
     {
         if (_project == null) return;
         var scene = new Scene(name);
+        // Default sun light so new scenes are lit without manual setup;
+        // ActiveScene = scene below pushes it to the engine via Sync().
+        scene.Entities.Add(SceneDefaults.CreateSunLight());
         _project.Scenes.Add(scene);
         Scenes.Add(scene);
         ActiveScene = scene;
@@ -476,8 +523,19 @@ public uint GetNativeEntityId(GameEntity? entity)
         return entity;
     }
 
-    private static (string? nativePath, string entityName) ResolveDropTarget(AssetInfo info)
+    internal static (string? nativePath, string entityName) ResolveDropTarget(AssetInfo info)
     {
+        const string modelSidecarSuffix = ".model.json";
+        if (info.FullPath.EndsWith(modelSidecarSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            var basePath = info.FullPath[..^modelSidecarSuffix.Length];
+            var cookedMesh = basePath + ".mesh";
+            var sidecarEntityName = System.IO.Path.GetFileName(basePath);
+            return System.IO.File.Exists(cookedMesh)
+                ? (cookedMesh, sidecarEntityName)
+                : (null, sidecarEntityName);
+        }
+
         var ext = System.IO.Path.GetExtension(info.FullPath).ToLowerInvariant();
         var entityName = System.IO.Path.GetFileNameWithoutExtension(info.FullPath);
         switch (ext)
@@ -488,7 +546,6 @@ public uint GetNativeEntityId(GameEntity? entity)
             case ".glb":
             case ".mesh":
                 return (info.FullPath, entityName);
-            case ".model.json":
             case ".model":
             {
                 var cookedMesh = System.IO.Path.ChangeExtension(info.FullPath, ".mesh");

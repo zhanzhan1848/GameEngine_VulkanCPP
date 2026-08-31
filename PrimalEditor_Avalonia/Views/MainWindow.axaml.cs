@@ -13,6 +13,11 @@ public partial class MainWindow : Window
 {
     private bool _reopenAttempted;
     private bool _recoveryScanned;
+    // Set once the user answered the unsaved-changes prompt with
+    // save/discard so the follow-up Close() skips the dirty check.
+    // Without it, Close() from inside OnClosing re-enters this
+    // handler and re-prompts forever.
+    private bool _confirmedClose;
     private readonly System.Threading.SemaphoreSlim _recoveryPromptGate = new(1, 1);
 
     public MainWindow()
@@ -37,7 +42,7 @@ public partial class MainWindow : Window
         }
         catch (System.Exception ex)
         {
-            Logger.Error("MainWindow: failed to reopen last session", ex);
+            Logger.Error($"MainWindow: failed to reopen last session: {ex.Message}\n{ex.StackTrace}", ex);
         }
         await ScanForRecoveryOnceAsync();
     }
@@ -130,7 +135,14 @@ public partial class MainWindow : Window
                 }
                 case AutoSaveRecoveryDecision.Later:
                 default:
+                {
+                    // Deferred: still open the live project so the editor
+                    // isn't left project-less; the bundle stays eligible
+                    // for a later recovery prompt.
+                    var loadedLive = OpenProject.Open(candidate.OriginalProjectFilePath);
+                    if (loadedLive != null) vm.Project = loadedLive;
                     break;
+                }
             }
         }
         finally
@@ -234,7 +246,7 @@ public partial class MainWindow : Window
         // a workspace preference, not a project artifact.
         SaveDockLayout();
 
-        if (vm.Project is not { IsDirty: true } project) return;
+        if (_confirmedClose || vm.Project is not { IsDirty: true } project) return;
 
         e.Cancel = true;
         var dlg = ConfirmDialog.Create(
@@ -246,7 +258,7 @@ public partial class MainWindow : Window
             case ConfirmResult.Save:
                 if (PrimalEditor_Avalonia.Common.EditorSaveService.Instance.SaveAll(project))
                 {
-                    e.Cancel = false;
+                    _confirmedClose = true;
                     Close();
                 }
                 else
@@ -264,14 +276,14 @@ public partial class MainWindow : Window
                     var follow = await failDlg.ShowDialogAsync(this);
                     if (follow == ConfirmResult.Discard)
                     {
-                        e.Cancel = false;
+                        _confirmedClose = true;
                         Close();
                     }
                     // else: stay open, project remains dirty.
                 }
                 break;
             case ConfirmResult.Discard:
-                e.Cancel = false;
+                _confirmedClose = true;
                 Close();
                 break;
             case ConfirmResult.Cancel:

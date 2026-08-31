@@ -17,6 +17,9 @@ public class AssetEditorHost : Window
     private readonly AssetEditorStatusBar _statusBar = new();
     private L? _initialWindowState;
     private DispatcherTimer? _saveLayoutTimer;
+    // Bypass the dirty prompt on the follow-up Close() after the user
+    // picked save/discard; otherwise OnClosing re-prompts forever.
+    private bool _confirmedClose;
 
     public AssetEditorHost(AssetEditorViewModel vm, L? initialState = null)
     {
@@ -66,6 +69,7 @@ public class AssetEditorHost : Window
         Geometry.GeometryEditorViewModel => new Geometry.GeometryEditorView { DataContext = vm },
         PrimitiveMesh.PrimitiveMeshViewModel => new PrimitiveMesh.PrimitiveMeshView { DataContext = vm },
         MeshAssetInspector.MeshAssetInspectorViewModel => new MeshAssetInspector.MeshAssetInspectorView { DataContext = vm },
+        Material.MaterialEditorViewModel => new Material.MaterialEditorView { DataContext = vm },
         _ => null,
     };
 
@@ -139,7 +143,7 @@ public class AssetEditorHost : Window
     protected override async void OnClosing(WindowClosingEventArgs e)
     {
         base.OnClosing(e);
-        if (ViewModel == null || !ViewModel.IsDirty) return;
+        if (_confirmedClose || ViewModel == null || !ViewModel.IsDirty) return;
 
         e.Cancel = true;
         var dlg = ConfirmDialog.Create(
@@ -150,9 +154,11 @@ public class AssetEditorHost : Window
         {
             case ConfirmResult.Save:
                 ViewModel.Save();
+                _confirmedClose = true;
                 Close();
                 break;
             case ConfirmResult.Discard:
+                _confirmedClose = true;
                 Close();
                 break;
             case ConfirmResult.Cancel:

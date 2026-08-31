@@ -47,6 +47,20 @@ public sealed class RuntimeMapTests
         Assert.Null(map.GetContentId(guid));
     }
 
+	[Fact]
+	public void AssetMap_AcceptsFirstNativeContentSlotAndRejectsInvalidId()
+	{
+		var map = new RuntimeAssetMap();
+		var firstGuid = new PrimalEditor_Avalonia.Content.AssetGuid(Guid.NewGuid());
+		var invalidGuid = new PrimalEditor_Avalonia.Content.AssetGuid(Guid.NewGuid());
+
+		map.Register(firstGuid, 0);
+		map.Register(invalidGuid, NativeEngineBridge.InvalidContentId);
+
+		Assert.Equal(0UL, map.GetContentId(firstGuid));
+		Assert.Null(map.GetContentId(invalidGuid));
+	}
+
     [Fact]
     public void MaterialMap_RejectsZeroAndInvalidIds()
     {

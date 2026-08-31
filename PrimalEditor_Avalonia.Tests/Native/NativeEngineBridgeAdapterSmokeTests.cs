@@ -80,11 +80,11 @@ public sealed class NativeEngineBridgeAdapterSmokeTests
 
         if (!adapter.IsLoaded)
         {
-            // Without the engine, ImportMesh returns 0 immediately and
+			// Without the engine, ImportMesh returns invalid_id immediately and
             // the timeout setting is unused; that's fine for this
             // contract test, which only asserts that *some* terminal
             // value is produced.
-            Assert.Equal(0UL, adapter.ImportMesh("/does/not/exist"));
+			Assert.Equal(NativeEngineBridge.InvalidContentId, adapter.ImportMesh("/does/not/exist"));
             return;
         }
 
