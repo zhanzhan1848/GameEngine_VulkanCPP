@@ -280,6 +280,8 @@ T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改�
 
 **哨兵实验结果（同日）**：AtlasInit 写纯红 albedo 哨兵后 SC_CARDS 仍 lit=0/cov=0 → kernel 写入确实未落地（非读取/聚合问题）。且 Metal API+shader 双验证层全程 0 报错 → 排除非法用法，指向：① MetalDescriptorSet/MetalCommandBuffer 对 storage image 写绑定的静默处理（image 0-3 与 buffer 1-2 重号布局），或 ② heap 纹理 write 路径在本管线布局下的静默失效。下一 session 工具：Xcode GPU frame capture（CLI 无法做）直接看 AtlasInit dispatch 的绑定面板与 texture 写入——一次 capture 即裁决。另：SC_CARDS dump 的 top 卡排序在全零时任意（按 radiance 排序），勿误读。
 
+**离线 SDF 内容裁决（2026-08-31）**：T8.10b 自检的回读拷贝同样被 `#if OFFLINE_SDF_VULKAN_PATH` 门控（Metal 上 vStage 从未写入，"cpu=50.59 gpu=0" 全是假象）。改通用路径后重跑：**`[OfflineSDFVerify] texels=56623104 mismatched=0 (0%) => upload bit-exact`——离线 SDF 纹理上传逐位精确，内容完全正确**。此前"纹理为空/未生效"假设被推翻。剩余的"探针=纯天空"根因收窄到：DDGI trace 的**采样/阈值路径**（离线场地板 0.19-0.38 vs trace 阈值 1.25×voxel=0.238 的相互作用——地板高于阈值的区域全 miss，需对照 Vulkan 同字段确认行为一致）与 SC 卡照明（AtlasInit Metal 写入落地问题，见上）。
+
 **收敛性长跑结论（2026-08-31，1x 渲染 + Medium + SPGI off，21,500+ 帧）**：系统稳定性指标全绿（0 GPU fault、RSS 488MB 恒定、fence 0 次触 30s 上界），**但 SC 卡亮度恒 0**（374 卡全暗，非收敛慢）且**探针 L0 恒等于天空 0.30361**（15,600 帧钉死）= SDF 追踪对所有射线全 miss → 探针场=纯天空 → SC 无输入 → GI 贡献消失。结合 offline SDF 阈值链（field 地板 0.3 vs trace 阈值 0.238 → 全 miss 的边界特征），剩余根因收敛为：**offline SDF 纹理内容在 Metal 上未正确生效**（上传路径已修但内容待验证——需 staging readback 对照 cache 文件字节），或 offline 纹理虽写入但 cascade 绑定/格式（r16 half vs cache 编码）在 Metal 采样路径上错位。下一步：readback offline 纹理前 1KB 与 cache 文件比对 + 打印 DDGI trace 一次采样的 d 值分布。注意：All-sky 探针恰好解释用户最初的"泛白但结构可见"画面（GI=均匀天空 wash），也与 Vulkan"拱廊 46/255 暗"形成对照——Vulkan 同配置探针命中表面（hitDist 0.3-2）。诊断开关保留：SPGI_OFF/SPGI_ON、SSGI_OFF/SSGI_ON、SC_INJECT_OFF、RENDER_SCALE、SC_DUMP_CARDS/SC_DUMP_INTERVAL。
 
 | # | 缺口 | 修复 | 证据 |

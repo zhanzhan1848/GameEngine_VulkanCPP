@@ -642,7 +642,8 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
     desc.arraySize = 1;
     desc.format = rhi::DataFormat::R16_Float;
     desc.type = rhi::TextureType::Texture3D;
-    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
+    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest |
+                 rhi::TextureUsage::CopySource;
     desc.memoryUsage = rhi::GPUMemoryUsage::Static;
     desc.name = "OfflineSDFMerger_GlobalSDF";
 
@@ -721,8 +722,6 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
     device_->DestroyCommandBuffer(cmdHandle);
     device_->DestroyBuffer(staging);
 
-    std::cerr << "[OfflineSDFMerger] Upload complete (" << totalSize / (1024*1024) << " MB)" << std::endl;
-
     // T8.10b self-check (OFFLINE_SDF_VERIFY=1): read the texture back and
     // bit-compare against the CPU-side source. A clean pass proves the upload
     // path; any row/slice drift or format reinterpretation shows up as
@@ -736,44 +735,34 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
         vDesc.name = "OfflineSDF_VerifyStaging";
         rhi::ResourceHandle vStage = device_->CreateBuffer(vDesc);
         bool ok = vStage != rhi::handles::INVALID_RESOURCE;
+        rhi::CommandBufferHandle vcHandle = rhi::handles::INVALID_COMMAND_BUFFER;
         if (ok) {
-            auto vcHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+            vcHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
             ok = vcHandle != rhi::handles::INVALID_COMMAND_BUFFER;
-            if (ok) {
-#if OFFLINE_SDF_VULKAN_PATH
-                auto* vc = dynamic_cast<rhi::VulkanDevice*>(device_)
-                               ? static_cast<rhi::VulkanDevice*>(device_)->GetCommandBuffer(vcHandle)
-                               : nullptr;
-                if (!vc) { ok = false; }
-                else {
-                    rhi::BufferTextureCopyRegion vr{};
-                    vr.bufferOffset = 0;
-                    vr.bufferRowLength = alignedRowPitch / bytesPerTexel;
-                    vr.bufferImageHeight = res;
-                    vr.imageSubresource.mipLevel = 0;
-                    vr.imageSubresource.baseArrayLayer = 0;
-                    vr.imageSubresource.layerCount = 1;
-                    vr.imageOffset = {0, 0, 0};
-                    vr.imageExtent = {res, res, res};
-                    vc->Begin();
-                    rhi::ResourceBarrier toRd{};
-                    toRd.resource = global_sdf_texture_;
-                    toRd.beforeState = rhi::ResourceState::ShaderResource;
-                    toRd.afterState = rhi::ResourceState::CopySource;
-                    toRd.subresource = 0xFFFFFFFF;
-                    vc->InsertBarrier(&toRd, 1);
-                    vc->CopyTextureToBuffer(global_sdf_texture_, vStage, &vr, 1);
-                    rhi::ResourceBarrier back{};
-                    back.resource = global_sdf_texture_;
-                    back.beforeState = rhi::ResourceState::CopySource;
-                    back.afterState = rhi::ResourceState::ShaderResource;
-                    back.subresource = 0xFFFFFFFF;
-                    vc->InsertBarrier(&back, 1);
-                    vc->End();
-                    vc->Submit();
-                    vc->WaitForCompletion();
-                }
-#endif
+        }
+        if (ok) {
+            // T8.13 fix: platform-generic readback (the old Vulkan-only
+            // cast left vStage unwritten on Metal — the verify then compared
+            // against a zeroed buffer and reported bogus mismatches).
+            rhi::RHICommandBuffer* vc = rhi::GetCommandBuffer(vcHandle);
+            if (!vc) {
+                ok = false;
+                std::cerr << "[OfflineSDFVerify] no command buffer for readback" << std::endl;
+            } else {
+                vc->Begin();
+                rhi::BufferTextureCopyRegion vr{};
+                vr.bufferOffset = 0;
+                vr.bufferRowLength = alignedRowPitch / bytesPerTexel;
+                vr.bufferImageHeight = res;
+                vr.imageSubresource.mipLevel = 0;
+                vr.imageSubresource.baseArrayLayer = 0;
+                vr.imageSubresource.layerCount = 1;
+                vr.imageOffset = {0, 0, 0};
+                vr.imageExtent = {res, res, res};
+                vc->CopyTextureToBuffer(global_sdf_texture_, vStage, &vr, 1);
+                vc->End();
+                vc->Submit();
+                vc->WaitForCompletion();
             }
             if (ok && std::getenv("OFFLINE_SDF_VERIFY")) {
                 if (void* vm = device_->MapBuffer(vStage, 0, totalSize)) {
