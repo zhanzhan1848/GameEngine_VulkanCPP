@@ -322,7 +322,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
 
             // TEMP diagnosis: one-shot per-strip stats of the indirect output
             // (RGBA16F full-res). Strips when GI_DEBUG_STRIP=1: ddgi|ssgi|spgi|full.
-            static const bool s_stripDump = std::getenv("GI_DEBUG_STRIP") != nullptr;
+            static const bool s_stripDump = std::getenv("SC_DUMP_CARDS") != nullptr;  // TEMP: decouple from strip env
             static u32 s_stripTick = 0;
             static bool s_stripDumped = false;
             const u32 stripTickNow = ++s_stripTick;
