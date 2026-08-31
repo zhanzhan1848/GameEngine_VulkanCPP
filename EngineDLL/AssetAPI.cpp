@@ -92,6 +92,21 @@ extern "C" {
         return 1u;
     }
 
+    EDITOR_INTERFACE u64 ImportCookedTexture(const char* path)
+    {
+        if (!path) return static_cast<u64>(primal::id::invalid_id);
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file) return static_cast<u64>(primal::id::invalid_id);
+        const auto size = file.tellg();
+        if (size <= 0) return static_cast<u64>(primal::id::invalid_id);
+        file.seekg(0, std::ios::beg);
+        std::vector<u8> bytes(static_cast<size_t>(size));
+        if (!file.read(reinterpret_cast<char*>(bytes.data()), size))
+            return static_cast<u64>(primal::id::invalid_id);
+        return static_cast<u64>(primal::content::create_resource(
+            bytes.data(), primal::content::asset_type::texture));
+    }
+
     EDITOR_INTERFACE u64 ImportMeshAsync(const char* path)
     {
         if (!path) return 0u;
@@ -289,6 +304,21 @@ extern "C" {
         out_result->height = r.height;
         out_result->success = 1u;
         return 1u;
+    }
+
+    EDITOR_INTERFACE u64 ImportCookedTexture(const char* path)
+    {
+        if (!path) return static_cast<u64>(primal::id::invalid_id);
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file) return static_cast<u64>(primal::id::invalid_id);
+        const auto size = file.tellg();
+        if (size <= 0) return static_cast<u64>(primal::id::invalid_id);
+        file.seekg(0, std::ios::beg);
+        std::vector<u8> bytes(static_cast<size_t>(size));
+        if (!file.read(reinterpret_cast<char*>(bytes.data()), size))
+            return static_cast<u64>(primal::id::invalid_id);
+        return static_cast<u64>(primal::content::create_resource(
+            bytes.data(), primal::content::asset_type::texture));
     }
 
     EDITOR_INTERFACE u64 ImportMeshAsync(const char* path)

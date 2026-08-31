@@ -1009,7 +1009,11 @@ namespace primal::tools
 
 	void obj_context::generate_shader()
 	{
-		assert(_materials.size());
+		// Material-less OBJ files (e.g. meshes exported with usemtl/mtllib
+		// stripped) have no per-material shaders to cook. Bail out instead of
+		// tripping the debug assert — that used to abort the whole host
+		// process (editor or test runner) whenever such a file was imported.
+		if (_materials.empty()) return;
 		std::string shader_file_package{ "C:/Users/zy/Desktop/PrimalMerge/PrimalEngine/x64" };
 		copy_shader_header(shader_file_package.c_str());
 		for (auto m : _materials)

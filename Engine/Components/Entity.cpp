@@ -176,6 +176,18 @@ namespace primal::game_entity {
 		return generations[index] == id::generation(id);
 	}
 
+	// Non-asserting validity probe for editor/DLL boundary calls: returns
+	// false instead of aborting when the id was never allocated or is dead.
+	// Editor tooling passes user-influenced ids; a stale id must degrade to
+	// "not found", never to a crashed process.
+	bool entity_exists(entity_id id)
+	{
+		if (!id::is_valid(id)) return false;
+		const id::id_type index{ id::index(id) };
+		if (index >= generations.size()) return false;
+		return generations[index] == id::generation(id);
+	}
+
 	component_mask get_component_mask(entity_id id)
 	{
 		assert(is_alive(id));

@@ -19,6 +19,7 @@ namespace primal {
 		component_mask get_component_mask(entity_id id);
 		void set_component_bit(entity_id id, u8 bit);
 		void clear_component_bit(entity_id id, u8 bit);
+		bool entity_exists(entity_id id);
 
 	} // namespace game_entity
 

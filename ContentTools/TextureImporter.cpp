@@ -903,6 +903,8 @@ namespace primal::tools
 #include <Foundation/Foundation.hpp>
 #include <CoreServices/CoreServices.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 #include "NormalMapIdentification.h"
 
@@ -1713,6 +1715,57 @@ namespace primal::tools
 
 			// 创建一个ScratchImage对象来存储加载的图像数据
 			ScratchImage scratch;
+
+			// ImageIO/CoreGraphics draws into an 8-bit bitmap context even when
+			// the source is Radiance HDR.  Labelling those bytes RGBA32Float
+			// produced a cooked texture whose metadata and payload disagreed and
+			// permanently discarded values above 1.0. Decode .hdr sources as
+			// actual floats before entering the generic ImageIO path.
+			const std::string sourcePath{file_name};
+			const bool hasHdrExtension = sourcePath.size() >= 4 &&
+				(sourcePath.compare(sourcePath.size() - 4, 4, ".hdr") == 0 ||
+				 sourcePath.compare(sourcePath.size() - 4, 4, ".HDR") == 0);
+			if (hasHdrExtension)
+			{
+				int width = 0, height = 0, channels = 0;
+				float* pixels = stbi_loadf(file_name, &width, &height, &channels, 4);
+				if (!pixels || width <= 0 || height <= 0)
+				{
+					if (pixels) stbi_image_free(pixels);
+					return {};
+				}
+
+				const u64 rowPitch = static_cast<u64>(width) * 4 * sizeof(float);
+				const u64 slicePitch = rowPitch * static_cast<u64>(height);
+				scratch.pixels.resize(slicePitch);
+				std::memcpy(scratch.pixels.data(), pixels, slicePitch);
+				stbi_image_free(pixels);
+
+				scratch.metadata.width = static_cast<u64>(width);
+				scratch.metadata.height = static_cast<u64>(height);
+				scratch.metadata.depth = 1;
+				scratch.metadata.arraySize = 1;
+				scratch.metadata.mipLevels = 1;
+				scratch.metadata.bitsPerPixel = 128;
+				scratch.metadata.bitsPerComponent = 32;
+				scratch.metadata.format = tools::MTLPixelFormatRGBA32Float;
+				scratch.metadata.dimension = MTL::TextureType2D;
+				scratch.metadata.hasAlpha = true;
+				scratch.metadata.isPMAlpha = false;
+				scratch.metadata.isSRGB = false;
+				scratch.m_nimages = 1;
+				scratch.m_images.resize(1);
+				scratch.m_images[0].width = static_cast<u64>(width);
+				scratch.m_images[0].height = static_cast<u64>(height);
+				scratch.m_images[0].format = tools::MTLPixelFormatRGBA32Float;
+				scratch.m_images[0].rowPitch = rowPitch;
+				scratch.m_images[0].slicePitch = slicePitch;
+				scratch.m_images[0].pixels = scratch.pixels.data();
+				data->info.flags |= texture_flags::is_hdr | texture_flags::has_alpha;
+				data->info.flags &= ~texture_flags::is_srgb;
+				data->info.import_error = import_error::succeeded;
+				return scratch;
+			}
 
 			// 创建文件URL
 			CFStringRef cfPath = CFStringCreateWithCString(kCFAllocatorDefault, file_name, kCFStringEncodingUTF8);
@@ -2735,7 +2788,15 @@ namespace primal::tools
 			ScratchImage scratch{ initialize_from_images(data, images) };
 			if(data->info.import_error) return;
 
-			if(settings.compress)
+			// The macOS compressor only emits ASTC LDR. Feeding an HDR source
+			// through it clips the radiance range even though the source was
+			// decoded as RGBA32Float, so preserve HDR textures uncompressed.
+			if ((data->info.flags & primal::content::texture_flags::is_hdr) != 0)
+			{
+				data->import_settings.compress = 0;
+			}
+
+			if(data->import_settings.compress)
 			{
 				ScratchImage bc_scratch{ compress_image_metal(data, scratch) };
 				

@@ -22,6 +22,9 @@ extern "C" {
     EDITOR_INTERFACE u32 InitializeAssetSystem();
     EDITOR_INTERFACE void ShutdownAssetSystem();
     EDITOR_INTERFACE u32 ImportTexture(const char* path, primal::content::TextureImportResult* out_result);
+    // Load an engine-cooked TEXR/.texture file directly into the active
+    // world-renderer RHI device and return its content-system id.
+    EDITOR_INTERFACE u64 ImportCookedTexture(const char* path);
 
     EDITOR_INTERFACE u64 ImportMeshAsync(const char* path);
 

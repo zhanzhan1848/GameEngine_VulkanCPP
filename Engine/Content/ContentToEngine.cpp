@@ -106,8 +106,13 @@ namespace primal::content
             return m;
         }
 
-        std::unordered_map<id::id_type, graphics::rhi::ResourceHandle>& rhi_texture_map() {
-            static std::unordered_map<id::id_type, graphics::rhi::ResourceHandle> m;
+        struct rhi_texture_resource {
+            graphics::rhi::ResourceHandle handle{graphics::rhi::handles::INVALID_RESOURCE};
+            graphics::rhi::RHIDeviceBase* device{nullptr};
+        };
+
+        std::unordered_map<id::id_type, rhi_texture_resource>& rhi_texture_map() {
+            static std::unordered_map<id::id_type, rhi_texture_resource> m;
             return m;
         }
 
@@ -137,8 +142,24 @@ namespace primal::content
 			const u32 num_indices{ blob.read<u32>() };
 			blob.skip(sizeof(f32)); // threshold
 
+			blob.skip(sizeof(f32) * 3 * num_vertices);
+			blob.skip(elem_size * num_vertices);
+			blob.skip(index_size * num_indices);
+
+			constexpr u32 meshlet_magic{ 0x4C48534D };
+			assert(blob.read<u32>() == meshlet_magic);
+			const u32 meshlet_count{ blob.read<u32>() };
+			// ContentTools::mesh::meshlet is the 60-byte on-disk form;
+			// RHIMeshlet adds a 4-byte in-memory padding field.
+			blob.skip(meshlet_count * 60u);
+			const u32 meshlet_vertex_count{ blob.read<u32>() };
+			blob.skip(meshlet_vertex_count * sizeof(u32));
+			const u32 meshlet_triangle_count{ blob.read<u32>() };
+			blob.skip(meshlet_triangle_count * sizeof(u8));
+
 			// SDF
-			blob.skip(sizeof(u32)); // magic_sdf
+			constexpr u32 sdf_magic{ 0x20464453 };
+			assert(blob.read<u32>() == sdf_magic);
 			blob.skip(sizeof(u32) * 3); // Res
 			blob.skip(sizeof(f32) * 6); // Bounds
 			const u32 sdf_data_size{ blob.read<u32>() };
@@ -195,10 +216,11 @@ namespace primal::content
 #endif
 
 			asset.meshlets.resize(meshlet_count);
-			if (meshlet_count > 0)
+			for (u32 i = 0; i < meshlet_count; ++i)
 			{
-				memcpy(asset.meshlets.data(), blob.position(), meshlet_count * sizeof(graphics::rhi::RHIMeshlet));
-				blob.skip(meshlet_count * sizeof(graphics::rhi::RHIMeshlet));
+				memcpy(&asset.meshlets[i], blob.position(), 60u);
+				asset.meshlets[i].padding = 0;
+				blob.skip(60u);
 			}
 
 			const u32 meshlet_vert_count{ blob.read<u32>() };
@@ -217,17 +239,9 @@ namespace primal::content
 				blob.skip(meshlet_tri_count * sizeof(u8));
 			}
 
-#ifdef _DEBUG
-            // Validate Meshlet Data
-            if (meshlet_count > 0) {
-                // Check 1: Triangle count consistency
-                // Each u8 represents a triangle index, so total u8s is simply the count.
-                // But wait, meshlet_triangles are packed 3 indices per triangle or just indices?
-                // Usually meshlet indices are u8 indices into the meshlet_vertices array.
-                // If it's a triangle list, it should be divisible by 3.
-                assert(meshlet_tri_count % 3 == 0 && "Meshlet triangle indices must be a multiple of 3");
-            }
-#endif
+			// meshoptimizer may align the final triangle byte range to four
+			// bytes. The per-meshlet triangle_count fields, not divisibility of
+			// the aggregate byte array, are the validity authority.
 
 			// SDF
 			const u32 magic_sdf{ blob.read<u32>() };
@@ -653,7 +667,8 @@ namespace primal::content
 		//             u8 image[mip_level][slice_pitch * mip_per_depth],
 		//         } images[]
 		// } texture
-		[[nodiscard]] id::id_type create_texture_resource(const void *const data)
+		[[nodiscard]] id::id_type create_texture_resource(
+			const void *const data, graphics::rhi::RHIDeviceBase* preferred_device)
 		{
 			assert(data);
 
@@ -745,8 +760,10 @@ namespace primal::content
 			}
 
 			// Try RHI first
-			if (graphics::rhi::g_deviceManager.GetDeviceCount() > 0) {
-				auto* device = graphics::rhi::g_deviceManager.GetDevice(1);
+			if (preferred_device || graphics::rhi::g_deviceManager.GetDeviceCount() > 0) {
+				auto* device = preferred_device
+					? preferred_device
+					: graphics::rhi::g_deviceManager.GetDevice(1);
 				if (device && device->GetDesc().platform == graphics::rhi::RHIPlatform::Metal) {
 #ifdef __APPLE__
 					utl::blob_stream_reader blob(raw_ptr);					const u32 width{ blob.read<u32>() };
@@ -774,6 +791,12 @@ namespace primal::content
 			else if (format_u32 == 72) desc.format = graphics::rhi::DataFormat::BC1_sRGB;
 			else if (format_u32 == 98) desc.format = graphics::rhi::DataFormat::BC7_UNorm;
 			else if (format_u32 == 99) desc.format = graphics::rhi::DataFormat::BC7_sRGB;
+			else if (format_u32 == 186) desc.format = graphics::rhi::DataFormat::ASTC_4x4_sRGB;
+			else if (format_u32 == 190) desc.format = graphics::rhi::DataFormat::ASTC_6x6_sRGB;
+			else if (format_u32 == 194) desc.format = graphics::rhi::DataFormat::ASTC_8x8_sRGB;
+			else if (format_u32 == 204) desc.format = graphics::rhi::DataFormat::ASTC_4x4_UNorm;
+			else if (format_u32 == 208) desc.format = graphics::rhi::DataFormat::ASTC_6x6_UNorm;
+			else if (format_u32 == 212) desc.format = graphics::rhi::DataFormat::ASTC_8x8_UNorm;
 			else desc.format = graphics::rhi::DataFormat::RGBA8_UNorm; // Fallback
 					
 					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest | graphics::rhi::TextureUsage::CopySource;
@@ -870,7 +893,7 @@ namespace primal::content
 					id::id_type new_id = rhi_texture_id_counter++;
                     {
                         std::lock_guard lock(rhi_texture_mutex());
-                        rhi_texture_map()[new_id] = handle;
+                        rhi_texture_map()[new_id] = {handle, device};
                     }
                     return new_id;
 #endif
@@ -936,7 +959,7 @@ namespace primal::content
 					id::id_type new_id = rhi_texture_id_counter++;
 					{
 						std::lock_guard lock(rhi_texture_mutex());
-						rhi_texture_map()[new_id] = handle;
+						rhi_texture_map()[new_id] = {handle, device};
 					}
 					std::cerr << "[CTE/Dawn] create_texture_resource done id=" << new_id << std::endl;
 					return new_id;
@@ -947,17 +970,38 @@ namespace primal::content
 			}
 
 
-			return graphics::add_texture((const u8 *const)data);
+			// TEXR containers are expanded into converted_buffer above. The legacy
+			// Metal path must consume that raw texture blob as well; passing the
+			// original TEXR header made MetalContent interpret "TEXR" as width and
+			// the following fields as mip metadata, tripping its max-mip assertion.
+			return graphics::add_texture(raw_ptr);
 		}
 
 		void destory_texture_resource(id::id_type id)
 		{
+			graphics::rhi::ResourceHandle rhi_handle = graphics::rhi::handles::INVALID_RESOURCE;
+			graphics::rhi::RHIDeviceBase* owner_device = nullptr;
+			{
+				std::lock_guard lock(rhi_texture_mutex());
+				auto& map = rhi_texture_map();
+				auto it = map.find(id);
+				if (it != map.end()) {
+					rhi_handle = it->second.handle;
+					owner_device = it->second.device;
+					map.erase(it);
+				}
+			}
+			if (rhi_handle != graphics::rhi::handles::INVALID_RESOURCE && owner_device) {
+				owner_device->DestroyTexture(rhi_handle);
+				return;
+			}
 			graphics::remove_texture(id);
 		}
 
 	} // anonymous namespace
 
-	id::id_type create_resource(const void * const data, asset_type::type type, GraphicsAPI api)
+	id::id_type create_resource(const void * const data, asset_type::type type, GraphicsAPI api,
+		graphics::rhi::RHIDeviceBase* preferred_device)
 	{
 		assert(data);
 		id::id_type id{ id::invalid_id };
@@ -974,7 +1018,7 @@ namespace primal::content
 				id = create_rhi_geometry_resource(data);
 			break;
 		case asset_type::skeleton:																		break;
-		case asset_type::texture:			id = create_texture_resource(data);							break;
+		case asset_type::texture:			id = create_texture_resource(data, preferred_device);				break;
 		case asset_type::unkonwn:																		break;
 		case asset_type::count:																			break;
 		}
@@ -990,7 +1034,7 @@ namespace primal::content
         auto& map = rhi_texture_map();
         auto it = map.find(id);
         if (it != map.end()) {
-            return it->second;
+            return it->second.handle;
         }
         return graphics::rhi::handles::INVALID_RESOURCE;
     }

@@ -154,6 +154,13 @@ static MTL::PixelFormat ToMTLPixelFormat(DataFormat format) {
         case DataFormat::RGBA8_UInt: return MTL::PixelFormatRGBA8Uint;
         case DataFormat::RGBA8_SInt: return MTL::PixelFormatRGBA8Sint;
         case DataFormat::RGBA8_sRGB: return MTL::PixelFormatRGBA8Unorm_sRGB;
+
+        case DataFormat::ASTC_4x4_UNorm: return MTL::PixelFormatASTC_4x4_LDR;
+        case DataFormat::ASTC_4x4_sRGB: return MTL::PixelFormatASTC_4x4_sRGB;
+        case DataFormat::ASTC_6x6_UNorm: return MTL::PixelFormatASTC_6x6_LDR;
+        case DataFormat::ASTC_6x6_sRGB: return MTL::PixelFormatASTC_6x6_sRGB;
+        case DataFormat::ASTC_8x8_UNorm: return MTL::PixelFormatASTC_8x8_LDR;
+        case DataFormat::ASTC_8x8_sRGB: return MTL::PixelFormatASTC_8x8_sRGB;
         
         case DataFormat::RG32_UNorm: return MTL::PixelFormatRG32Float; // Fallback
         case DataFormat::RG32_SNorm: return MTL::PixelFormatRG32Float;
@@ -405,4 +412,3 @@ bool MetalTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
 }
 
 } // namespace primal::graphics::rhi
-

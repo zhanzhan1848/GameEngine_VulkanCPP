@@ -5,6 +5,7 @@
 
 namespace primal::graphics::rhi {
     class RHIGpuMesh;
+    class RHIDeviceBase;
 }
 
 namespace primal::content
@@ -66,7 +67,9 @@ namespace primal::content
     };
 
     // --- Unified resource import: one call per resource ---
-[[nodiscard]] id::id_type create_resource(const void *const data, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
+[[nodiscard]] id::id_type create_resource(const void *const data, asset_type::type type,
+                                          GraphicsAPI api = GraphicsAPI::RHI,
+                                          graphics::rhi::RHIDeviceBase* preferred_device = nullptr);
     void destroy_resource(id::id_type id, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
     void shutdown();
 

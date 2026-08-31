@@ -464,7 +464,15 @@ enum class DataFormat : u16 {
     D16_UNorm = 76,
     D24_UNorm_S8_UInt = 77,
     D32_Float = 78,
-    D32_Float_S8X24_UInt = 79
+    D32_Float_S8X24_UInt = 79,
+
+    // ASTC formats emitted by the macOS texture cooker.
+    ASTC_4x4_UNorm = 80,
+    ASTC_4x4_sRGB = 81,
+    ASTC_6x6_UNorm = 82,
+    ASTC_6x6_sRGB = 83,
+    ASTC_8x8_UNorm = 84,
+    ASTC_8x8_sRGB = 85
 };
 
 /**
