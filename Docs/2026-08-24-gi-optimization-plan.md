@@ -274,6 +274,10 @@ T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改�
 - **D16b AtlasInit Metal 种子仍不落地**：管线有效、已派发（[ATLAS_INIT] 日志实证），但卡亮度仍全零 + cov=0（albedo alpha 从未变 1）。剩余嫌疑：① Metal 描述符布局里 image 0-3 与 buffer 1-2 的 binding 号重叠在 SetLayout 内部的处理；② AtlasInit kernel 的 Metal 编译产物本身。需专用 session 用 Metal API validation 抓 AtlasInit 派发的实际绑定/写入。
 - **当前默认配置（稳定态）**：Medium 预设 + SPGI off（fault 源）+ SSGI on + 1x 渲染 + 离线 SDF（DDGI trace/SC shadow）+ 卡注册自动恢复 + fence 30s 上界。0 GPU fault 长跑确认。
 
+**SC 全黑最终定位（同日深挖，下一 session 第一步照做）**：AtlasInit 派发确认执行（[ATLAS_INIT] 日志 + 管线有效），但 7,920 帧后全部 374 卡 radiance/cov 仍 0。决定性实验（下一 session 第一步）：在 SurfaceCacheAtlasInit kernel 内 tid==0 打印 `params.total_texels` 与 `cd[0].texel_count`——
+- 若 total_texels 是垃圾 → **Metal 描述符布局重号 binding（image 0-3 与 buffer 1-2 同号）在 MetalDescriptorSet::GetBindings/MetalCommandBuffer 绑定循环中互相覆盖**（LightEval 同构布局但工作，需比对差异——疑点在 SetLayout 存储/去重路径）。修法：kernel binding 改非重叠号（buffer→5,6）+ C++ 布局同步。
+- 若 total_texels=374×1024 正常 → 写路径问题：texture write 被后续 pass 覆盖（CardCapture 每 64 卡/帧重写页）或 storage write 静默失败（用 MTL_SHADER_VALIDATION + API validation 双开跑至 fault）。
+
 **收敛性长跑结论（2026-08-31，1x 渲染 + Medium + SPGI off，21,500+ 帧）**：系统稳定性指标全绿（0 GPU fault、RSS 488MB 恒定、fence 0 次触 30s 上界），**但 SC 卡亮度恒 0**（374 卡全暗，非收敛慢）且**探针 L0 恒等于天空 0.30361**（15,600 帧钉死）= SDF 追踪对所有射线全 miss → 探针场=纯天空 → SC 无输入 → GI 贡献消失。结合 offline SDF 阈值链（field 地板 0.3 vs trace 阈值 0.238 → 全 miss 的边界特征），剩余根因收敛为：**offline SDF 纹理内容在 Metal 上未正确生效**（上传路径已修但内容待验证——需 staging readback 对照 cache 文件字节），或 offline 纹理虽写入但 cascade 绑定/格式（r16 half vs cache 编码）在 Metal 采样路径上错位。下一步：readback offline 纹理前 1KB 与 cache 文件比对 + 打印 DDGI trace 一次采样的 d 值分布。注意：All-sky 探针恰好解释用户最初的"泛白但结构可见"画面（GI=均匀天空 wash），也与 Vulkan"拱廊 46/255 暗"形成对照——Vulkan 同配置探针命中表面（hitDist 0.3-2）。诊断开关保留：SPGI_OFF/SPGI_ON、SSGI_OFF/SSGI_ON、SC_INJECT_OFF、RENDER_SCALE、SC_DUMP_CARDS/SC_DUMP_INTERVAL。
 
 | # | 缺口 | 修复 | 证据 |
