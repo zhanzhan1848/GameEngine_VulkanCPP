@@ -71,7 +71,7 @@ public sealed class MaterialDocumentTests
     }
 
     [Fact]
-    public void Material_WriteRejectsEmptyShaderGuid()
+    public void Material_WriteAcceptsBlankMaterialWithoutShaderBinding()
     {
         using var temp = new TemporaryProject();
         var path = Path.Combine(temp.Path, "Broken.material");
@@ -79,6 +79,43 @@ public sealed class MaterialDocumentTests
         {
             Name = "Broken"
         };
-        Assert.Throws<InvalidDataException>(() => MaterialSerializer.Write(path, material));
+        // Write succeeds for a blank material — the editor's Save button
+        // must work before the user picks a shader binding. Validation
+        // (shader compilation) happens at Apply time, not Write time.
+        MaterialSerializer.Write(path, material);
+        Assert.True(File.Exists(path));
+    }
+
+    [Fact]
+    public void Material_WriteNewCreatesBlankMaterialWithoutShaderBinding()
+    {
+        using var temp = new TemporaryProject();
+        var path = Path.Combine(temp.Path, "Fresh.material.json");
+
+        MaterialSerializer.WriteNew(path, "Fresh");
+        // MaterialSerializer.Read gates on IsValid and returns null
+        // for invalid documents. The fresh-blank material is IsValid
+        // (schema + name only — no ShaderGuid requirement) so Read
+        // round-trips it back to the same struct the editor holds.
+        var doc = MaterialSerializer.Read(path);
+
+        Assert.NotNull(doc);
+        Assert.Equal("Fresh", doc!.Name);
+        Assert.Equal(Guid.Empty, doc.ShaderGuid.Value);
+        Assert.True(doc.IsValid, "Blank material is IsValid (schema+name only); shader binding is a later editor step");
+    }
+
+    [Fact]
+    public void Material_WriteNewDefaultsNameToFileStemWhenBlank()
+    {
+        using var temp = new TemporaryProject();
+        // .material is the single-extension variant; Path.GetFileNameWithoutExtension
+        // strips the trailing extension only, so the stem is "ShinyMetal".
+        var path = Path.Combine(temp.Path, "ShinyMetal.material");
+
+        MaterialSerializer.WriteNew(path, name: "   ");
+
+        var raw = File.ReadAllText(path);
+        Assert.Contains("\"ShinyMetal\"", raw);
     }
 }

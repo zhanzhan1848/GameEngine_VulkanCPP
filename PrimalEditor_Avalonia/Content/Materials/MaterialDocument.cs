@@ -33,7 +33,7 @@ public sealed class MaterialRenderState
 
 public sealed class MaterialDocument
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public string Name { get; set; } = "Material";
@@ -45,10 +45,21 @@ public sealed class MaterialDocument
     public Dictionary<string, MaterialParameterValue> Parameters { get; set; } = new();
     public Dictionary<string, AssetGuid> Textures { get; set; } = new();
 
+    /// <summary>
+    /// Optional relative path to the sidecar graph JSON that lives next to
+    /// this material file (e.g. <c>foo.material.graph.json</c>). Null/empty
+    /// means this material has no node graph — fall back to the v1 path
+    /// that maps <see cref="Parameters"/> / <see cref="Textures"/> straight
+    /// onto the engine material.
+    /// </summary>
+    public string? GraphFile { get; set; }
+
+    [JsonIgnore]
+    public bool HasGraph => !string.IsNullOrWhiteSpace(GraphFile);
+
     [JsonIgnore]
     public bool IsValid =>
-        SchemaVersion == CurrentSchemaVersion &&
-        ShaderGuid.Value != System.Guid.Empty &&
+        SchemaVersion >= 1 && SchemaVersion <= CurrentSchemaVersion &&
         !string.IsNullOrWhiteSpace(Name);
 
     public float GetScalar(string name, float fallback = 0f) =>

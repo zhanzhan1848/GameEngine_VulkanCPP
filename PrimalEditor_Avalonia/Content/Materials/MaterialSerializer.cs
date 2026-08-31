@@ -23,6 +23,30 @@ public static class MaterialSerializer
         if (document is not { IsValid: true })
             throw new InvalidDataException($"Material document is invalid: {materialPath}");
 
+        WriteInternal(materialPath, document);
+    }
+
+    /// <summary>
+    /// Create a brand-new material file with sensible defaults and no
+    /// shader binding. Bypasses <see cref="MaterialDocument.IsValid"/>'s
+    /// ShaderGuid check because the user hasn't picked one yet — the
+    /// editor opens immediately and the user fills it in.
+    /// </summary>
+    public static void WriteNew(string materialPath, string name)
+    {
+        var doc = new MaterialDocument
+        {
+            Name = string.IsNullOrWhiteSpace(name)
+                ? Path.GetFileNameWithoutExtension(materialPath)
+                : name.Trim(),
+            // ShaderGuid deliberately left at Guid.Empty — editor must
+            // bind a shader before the renderer can apply the material.
+        };
+        WriteInternal(materialPath, doc, validateShaderBinding: false);
+    }
+
+    private static void WriteInternal(string materialPath, MaterialDocument document, bool validateShaderBinding = true)
+    {
         var partialPath = materialPath + ".partial";
         try
         {
@@ -36,8 +60,16 @@ public static class MaterialSerializer
                 writer.Flush();
                 stream.Flush(flushToDisk: true);
             }
+            // Re-read the just-written bytes so we catch any
+            // serializer round-trip anomaly (e.g. an enum string that
+            // the next deserialize would refuse). When the caller has
+            // explicitly opted out of the shader-binding check
+            // (WriteNew), we still want the round-trip to succeed —
+            // a malformed schema is still a hard error.
             var validation = JsonSerializer.Deserialize<MaterialDocument>(File.ReadAllText(partialPath), Options);
-            if (validation is not { IsValid: true })
+            if (validation is null)
+                throw new InvalidDataException($"Material document validation failed: {materialPath}");
+            if (validateShaderBinding && !validation.IsValid)
                 throw new InvalidDataException($"Material document validation failed: {materialPath}");
             File.Move(partialPath, materialPath, overwrite: true);
         }
