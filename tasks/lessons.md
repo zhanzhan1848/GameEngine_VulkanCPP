@@ -1,5 +1,26 @@
 # Project Lessons
 
+## Drag/drop verification must cross the native cooked-asset boundary
+
+**Date:** 2026-08-18
+
+When enabling `.model.json` drag/drop, path-resolution unit tests and a managed
+build are insufficient. The sibling `.mesh` is a full cooked scene wrapper
+(`scene name + materials + LOD groups + packed meshes`), while
+`content::create_resource(asset_type::mesh)` accepts a normalized geometry blob
+beginning directly with `lod_count`. Passing the file bytes straight through
+`AsyncResourceLoader::LoadMeshAsync` makes the scene-name length look like an
+LOD count; an empty scene name triggers `ContentToEngine.cpp::is_single_mesh`
+at `assert(lod_count)` and aborts the whole editor from a worker thread.
+
+**Rule:** Any editor feature that invokes a native asset loader must be tested
+with a real artifact produced by the current cooker and must reach the native
+completion callback. Before calling assert-heavy legacy parsers, validate and
+adapt the outer file container at the native boundary; malformed input must
+return `invalid_id`, never terminate the process.
+
+---
+
 ## Avalonia Editor — Metal shader blob not loading
 
 **Date:** 2026-06-24
@@ -3797,3 +3818,220 @@ $ grep -rn 'RHIPlatformMetal' PrimalEditor_Avalonia --include='*.cs' | grep -v N
 8. **P-M1 "只建库不集成"是正确决策**：DockingManager 与 WorldEditorView 的集成需重新设计工具栏 + 拖动交互（拖到 grid zone 高亮），单次 PR 不易完整完成。**先建库**让后续 P 任务接入。
 9. **`Path.GetDirectoryName(OldPath) == Path.GetDirectoryName(NewPath)` 在 Windows 上大小写不敏感问题**：`string.Equals(..., StringComparison.OrdinalIgnoreCase)` 更安全。但 macOS HFS+/APFS 默认 case-insensitive 也可。`OrdinalIgnoreCase` 是保守选择。
 10. **删除基类的 `virtual` 关键字 + 子类 `new` 隐藏是 P0-P2 阶段常见冲突源**：本轮再次出现（基类新增 `MarkDirty/ClearDirty` 后，子类需 `override`）。**lesson**：基类 API 演进时检查所有子类的 `new` vs `override` 一致性。
+
+## Avalonia Editor — Drag-Drop must reach the inner hit-test target, not bubble from NativeControlHost
+
+**Date:** 2026-08-18
+**Worktree:** `avalonia-migration`
+**Symptom:** Dragging a `.model.json` from the Content Browser onto the
+3D viewport does **nothing**. The outer `WorldEditorView` floating Border
+(`PrimalEditor_Avalonia/Views/WorldEditorView.axaml:143-150`) had
+`DragDrop.AllowDrop=True` + `Drop=OnAssetDrop` + `DragOver=OnDragOver`,
+and `OnAssetDrop` already routed `.model.json` correctly through
+`DropAssetAsync(info, 0, 0, 0)` — yet drops onto the render surface were
+silently rejected.
+
+**Root cause:** The topmost hit-test element under the cursor when
+hovering the render surface is **not** the outer `WorldEditorView` Border.
+Inside `EngineViewport3D.axaml` there's a transparent `<Border
+Name="InputCapture" Background="Transparent" />` placed on top of
+`MTKViewHost` to compensate for `NativeControlHost`'s `NSView` eating
+pointer events on macOS (see the comment block at
+`EngineViewport3D.axaml:13-19`). `InputCapture` is the actual hit-test
+target for any pointer / drag in the viewport region, and **it had no
+`DragDrop.AllowDrop` attribute**. Avalonia's DragDrop events are
+`Bubble`-routed, but `AllowDrop` is what makes a control a "real" drop
+target — without it on the hit-test target AND any ancestor, the
+routed-event dispatcher may not surface `DragOver`/`Drop` reliably. On
+macOS in particular the `NativeControlHost` wrapper NSView can suppress
+Avalonia's synthetic drag events before they bubble out.
+
+**Fix (chosen):**
+1. `EngineViewport3D.axaml:13-26` — added `DragDrop.AllowDrop="True"`,
+   `DragDrop.DragOver="OnAssetDragOver"`, `DragDrop.Drop="OnAssetDrop"`
+   to the `InputCapture` Border so the **inner** hit-test target is its
+   own drop sink.
+2. `EngineViewport3D.axaml.cs:119-120` — subscribed
+   `DragDrop.DragOverEvent` and `DragDrop.DropEvent` on `_inputCapture`
+   alongside the existing Pointer handlers (single hit-test target owns
+   both).
+3. `EngineViewport3D.axaml.cs:1186-1211` — added
+   `OnAssetDragOver` / `OnAssetDrop` handlers plus a
+   `ResolveWorldEditorViewModel` helper. Both call sites pass
+   `(0, 0, 0)` for the drop position so every freshly dropped entity
+   starts at the world origin (consistent with the historical
+   `WorldEditorView.OnAssetDrop` behaviour). The user repositions via
+   the gizmo afterwards.
+4. `Content/AssetDropHandler.cs` (new) — extracted the previously
+   inline `ReadAssetDragPayload` / `ResolveFromPayload` /
+   `FirstDroppedFilePath` / drop-routing logic into a shared static
+   helper used by both `WorldEditorView` and `EngineViewport3D`.
+5. `WorldEditorView.axaml.cs:436-446` — collapsed the duplicated
+   `OnAssetDrop` / `OnDragOver` bodies into single calls to
+   `AssetDropHandler.RunAsync` / `EffectsFor`. The outer Border is
+   kept wired as a fallback for drops outside the render surface.
+
+**Why this design, not the alternative:**
+- **Inner hit-test target, not outer Border**: Avalonia's `Bubble`
+  routing should in theory forward DragDrop to the outer Border, but
+  the `InputCapture` Border exists precisely because pointer routing
+  through `NativeControlHost` is unreliable on macOS. Drag routing has
+  the same constraint; subscribing at the inner target is the
+  load-bearing fix.
+- **Outer Border kept as fallback**: drops in the 2-px margin region
+  between the viewport and the inspector / hierarchy panels still work,
+  and `e.Handled = true` in the inner handler prevents the outer
+  handler from running twice for the same drop.
+- **Drop position is always `(0, 0, 0)`** — the historical behaviour
+  and what the gizmo-on-the-origin UX assumes. A cursor-raycast variant
+  was prototyped but rolled back at user request; this keeps the
+  snapshot-deterministic drop position so scene files serialise the
+  same regardless of where on the viewport the user happened to drop.
+- **Shared `AssetDropHandler` static class**: the original inline
+  helpers in `WorldEditorView.axaml.cs` were ~75 lines of payload
+  decoding that any future drop target (outliner, inspector) would
+  have to duplicate. Centralising now keeps both call sites in sync
+  when the payload format or `DropAssetAsync` signature changes.
+
+**Verification:**
+- `dotnet build PrimalEditor_Avalonia/PrimalEditor_Avalonia.csproj -c
+  DebugEditor`: **0 errors, 0 warnings** (the pre-existing
+  `ErrorDialog.cs` CS8524 enum-exhaustiveness warnings are unrelated to
+  this change and were present before).
+- Net diff: +1 file (`AssetDropHandler.cs`, 109 lines), -103 lines in
+  `WorldEditorView.axaml.cs`, +24 lines in `EngineViewport3D.axaml` /
+  `.axaml.cs`. Codebase net -94 lines while gaining the inner drop
+  target.
+
+**Anti-pattern to avoid:** Wiring drag-drop on the outer visual tree
+parent while leaving the topmost transparent hit-test overlay
+untouched. The `InputCapture` overlay is invisible to the user but
+**is** what Avalonia hit-tests against; every input handler — Pointer,
+Wheel, **and** DragDrop — must subscribe there to receive events.
+
+**Lesson:** On Avalonia, every transparent overlay Border added to
+compensate for native view input quirks becomes a load-bearing element
+of the input pipeline. Treat it as such and route all input event
+families through it in one pass; otherwise you get "X works on Linux
+but not macOS" or "drag-drop works on the margin but not on the
+canvas" type reports.
+# Entity deletion must update both document and runtime scene
+
+- An entity disappearing from the managed hierarchy is not sufficient: deletion must unregister/destroy its runtime entity and pipeline mesh, while Undo must recreate the runtime binding.
+- Route both Avalonia `Key.Delete` and `Key.Back` on macOS, including from the focused native-backed render surface. Do not handle these keys when a text editor owns focus.
+- Keep one deletion entry point for toolbar, menu, and keyboard paths so selection clearing, transactions, native teardown, and Undo/Redo cannot drift apart.
+# Native content id zero is valid
+
+- Primal's FreeList allocates slot `0` first. For geometry/content handles, only `id::invalid_id` (`0xffffffff`) means failure; never use zero as a null sentinel.
+- Keep async request ids and returned content ids conceptually separate: request id `0` is rejected, while a successful request may return geometry content id `0`.
+- Restart tests must exercise the first allocation in a fresh native process; same-session retries often allocate id `1` and accidentally hide zero-sentinel bugs.
+
+## Material editor: empty canvas feels broken; auto-seed a terminal node
+
+**Date:** 2026-08-20
+**Worktree:** `avalonia-migration`
+
+A NodifyEditor with no `ItemsSource` entries renders as a flat dark area —
+visually indistinguishable from a panel that's "missing" or "off-screen".
+Users reported "I can't tell if the canvas is on screen" even though
+NodifyEditor's chrome (grid, pan/zoom) was rendering correctly.
+
+**Rule:** Any node-graph editor that opens a document must pre-populate at
+least the required terminal(s) on `SetAsset`. A material graph without a
+`MaterialOutput` is structurally invalid; an empty UI communicates "nothing
+to connect to". A single seeded node gives the user:
+1. visible confirmation the canvas is rendering,
+2. an obvious connection target for nodes they add,
+3. a "fresh document" state that's self-explanatory.
+
+`EnsureDefaultOutputNode()` belongs at the end of `SetAsset` after
+`ReloadGraphFromSidecar` and before `ClearDirty`, so the seeded node does
+not register as a user edit.
+
+**Why:** Node-graph editors without seeded terminals look broken even when
+they're working correctly. The user doesn't know what to add or where to
+connect.
+
+---
+
+## Material editor: swallow DoubleTapped on Node template
+
+**Date:** 2026-08-20
+**Worktree:** `avalonia-migration`
+
+NodifyM doesn't define a node-double-click action (only connection-split on
+double-click), but the unhandled event was bubbling out of the Node
+DataTemplate and crashing the editor on every double-click of an existing
+node.
+
+**Rule:** For third-party node-graph controls where the framework
+documentation doesn't list a node-double-click handler, attach a
+`DoubleTapped` handler at the Node template level that sets
+`e.Handled = true`. Selection still works via single click; this only
+suppresses the crash-prone double-click gesture. Document the choice in
+the handler XML doc so future readers know it's deliberate, not a TODO.
+
+## NodifyM.Avalonia 12.0.0 — required theme + Node template structure
+
+**Date:** 2026-08-20
+**Worktree:** `avalonia-migration`
+
+A NodifyEditor rendered as a flat empty area (no chrome, no grid, no
+scrollbars) until `<StyleInclude Source="avares://NodifyM.Avalonia/Styles/ControlStyles.axaml" />`
+was added to `App.axaml`. The library ships its control styles in a separate
+.axaml that the host application must opt into — without it NodifyM controls
+silently render unstyled.
+
+**Rule 1 — Always include the NodifyM theme.** Add this line to App.axaml's
+`<Application.Styles>` block alongside FluentTheme:
+```xml
+<StyleInclude Source="avares://NodifyM.Avalonia/Styles/ControlStyles.axaml" />
+```
+
+**Rule 2 — Node template structure is wrong if it puts ItemsControl inside n:Node.**
+NodifyM expects connector collections to be passed *directly* to n:Node
+via its `Input` and `Output` properties (typed `IEnumerable`). Connectors
+are then rendered through `InputConnectorTemplate`/`OutputConnectorTemplate`
+applied per-item. Putting `<ItemsControl ItemsSource="{Binding Input}">`
+inside the Node body produces no visible connectors.
+
+Correct pattern:
+```xml
+<n:Node Input="{Binding Input}" Output="{Binding Output}"
+        Location="{Binding Location, Mode=TwoWay}">
+  <n:Node.InputConnectorTemplate>
+    <DataTemplate DataType="vm:MyPinViewModel">
+      <n:NodeInput Header="{Binding Title}"
+                   Anchor="{Binding Anchor, Mode=OneWayToSource}"
+                   IsConnected="{Binding IsConnected}"/>
+    </DataTemplate>
+  </n:Node.InputConnectorTemplate>
+  ...
+</n:Node>
+```
+
+The `Anchor="{Binding Anchor, Mode=OneWayToSource}"` binding is required —
+NodifyM pushes the connector's measured position back into the VM via this
+property so it can compute bezier endpoints. Without it the connection
+draws nothing.
+
+**Rule 3 — Connection template binds Source.Anchor/Target.Anchor, not Source/Target.**
+`n:Connection` Source/Target are `Avalonia.Point` (the connector Anchor),
+not the connector VM. The VM's `Source` is a `ConnectorViewModelBase`;
+the example binds `{Binding Source.Anchor}` to extract the Point.
+
+```xml
+<DataTemplate DataType="vm:MyConnectionViewModel">
+  <n:Connection Source="{Binding Source.Anchor}" Target="{Binding Target.Anchor}"/>
+</DataTemplate>
+```
+
+**Rule 4 — Set `Flow` on each connector.** `ConnectorViewModelBase.Flow`
+(Nullable<ConnectorFlow>) drives which side of the node the connector
+renders on. Setting only `IsInput`/`IsOutput` data fields isn't enough —
+NodifyM uses Flow for layout.
+
+**Why:** all four points are silent failure modes. The editor opens, palette
+loads, palette→canvas drag works, but the canvas visually looks broken
+because nothing renders. Verify by checking that `nodes` appear at their
+declared Location after an AddNode call.
