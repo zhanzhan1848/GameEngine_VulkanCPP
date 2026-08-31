@@ -1323,13 +1323,21 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     s_ai_once = true;
                     std::cerr << "[ATLAS_INIT] dispatching, pipeline valid" << std::endl;
                 }
+                // Buffer bindings are platform-numbered (same convention as the
+                // Shadow/LightEval dispatch sites): Vulkan layout declares 4/5
+                // (flat), Metal layout declares 1/2 to match the kernel's
+                // [[buffer(1)]]/[[buffer(2)]]. Writing the wrong numbering
+                // silently skips the update (MetalDescriptorSet::Update matches
+                // binding+type) — the kernel then reads an unbound buffer
+                // (total_texels=0 → every thread early-outs → atlas stays zero).
+                const bool aiIsVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
                 DescriptorData initParams[] = {
                     {0, DescriptorType::StorageImage,  albedo_atlas_},
                     {1, DescriptorType::StorageImage,  normal_atlas_},
                     {2, DescriptorType::StorageImage,  depth_atlas_},
                     {3, DescriptorType::StorageImage,  emissive_atlas_},
-                    {4, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
-                    {5, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                    {aiIsVk ? 4u : 1u, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
+                    {aiIsVk ? 5u : 2u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
                 };
                 UpdateDescriptorSet(device_, atlas_init_set_[frameIdx], initParams, 6);
 

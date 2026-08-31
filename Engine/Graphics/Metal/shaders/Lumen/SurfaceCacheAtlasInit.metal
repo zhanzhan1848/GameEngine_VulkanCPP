@@ -32,12 +32,6 @@ kernel void surfaceCacheAtlasInit(
     constant CardDispatchInfo* cd    [[buffer(2)]])
 {
     uint tid = global_tid;
-    // TEMP diagnosis: one-shot kernel-side view of the bound params.
-    if (tid == 0u) {
-        printf("[AI_KERNEL] total_texels=%u card_count=%u cd0.off=%u cd0.count=%u cd0.res=%u\n",
-               params.params.total_texels, params.params.card_count,
-               cd[0].texel_offset, cd[0].texel_count, cd[0].resolution);
-    }
     if (tid >= params.params.total_texels) return;
 
     // Binary search: find card whose [texel_offset, texel_offset+texel_count)

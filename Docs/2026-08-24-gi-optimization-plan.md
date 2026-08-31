@@ -293,6 +293,12 @@ T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改�
 
 **已知平台差异坑**（同步时注意）：Metal CommandBuffer 的 WriteTimestamp 在 RenderPassEncoder 内被禁用（Apple Silicon）——RG 时间戳对图形 pass 走 desc 括号、compute 走显式 WriteTimestamp 的现有分工即是为此，勿混；D32 不要加 RenderTarget usage（Vulkan VUID）；Dynamic 内存才可 Map。
 
+**SC 全黑根因终审 + 修复（2026-08-31 第二轮，决定性修复之三）**：「重号 binding 互相覆盖」假设被证伪——代码级比对证明 `MetalDescriptorSet::Update` 按 **(binding 号, 描述符类型) 双键**匹配（重号可共存）、`MetalCommandBuffer::BindDescriptorSets` 按类型分派到独立命名空间（buffer→setBuffer / image→setTextures）。**真根因是派发点的 binding 编号错配**：AtlasInit 派发点（SurfaceCachePass.cpp）用单一份共享 `DescriptorData` 数组写 Vulkan 编号 `{4,UBO}/{5,SSBO}`，而 Metal 布局声明 `{1,UBO}/{2,SSBO}`（对应 kernel `[[buffer(1)]]/[[buffer(2)]]`）→ Update 双键匹配失败**静默跳过**（"[MetalDescSet] UPDATE SKIP" 日志有打印但被淹没）→ params/card_dispatch 在 Metal 上从未绑定 → kernel 读未绑定 buffer 得 total_texels=0 → 全部线程早退 → 零写入。哨兵实验的"写入未落地"由此完全解释。佐证链：LightEval 派发点有 Metal 专属 else 分支写 1/2/3/4/5/6（所以工作）；Shadow 派发点有 `shIsVk ? 5u : 0u` 分支；AtlasInit 是唯一漏掉平台分支的派发点。**叠加坑**：上一轮埋的 kernel 内 `printf` 诊断在引擎运行时 `newLibrary(source)` 编译路径下**编译失败**（printf 未声明——`xcrun metal` CLI 默认带语言版本标志可过、运行时编译不带），导致 AtlasInit 管线 INVALID 从未派发，本轮首次运行即暴露（无 [ATLAS_INIT] 日志 + 编译源回显报错）。已移除该 printf（教训：MSL kernel 诊断勿用 printf 走运行时源码编译，改 storage 写入+host 回读）。
+- **修复**：AtlasInit 派发点补平台分支 `{aiIsVk ? 4u : 1u, UBO}, {aiIsVk ? 5u : 2u, SSBO}`，与 Shadow/LightEval 惯例一致；移除 kernel printf。
+- **验证（6540 帧，SPGI_CAM_LOCK=1，0 GPU fault、0 UPDATE SKIP）**：[ATLAS_INIT] 正常派发；SC dump 从第 2 轮起 **24/24 卡全亮**（此前 7,920 帧恒全零），值域有界（top 卡 0.67–2.0 无发散）、cov 稳定 0.44–1.0；CPU ~11ms/帧。SC↔probe 反馈环供能链恢复。
+- **新状态（下一 session 主线）**：SC 供能恢复后画面**稳定过曝**（锁相机三时点 mean luma 179 恒定、~49% 像素 ≥250、非两态振荡）——即挂账多时的 **SC 卡亮度标度问题（Metal 卡值 ~1.0–2.0 vs Vulkan 收敛 0.88，及 SC 阴影可见度标度）**浮出为主要矛盾；此前所有 GI 调平均在 SC 实效死亡态下进行。下一步：对卡 dump 做 Vulkan↔Metal 同字段对照（直射进卡项 / SDF shadow visibility / SC_FEEDBACK 环增益逐项），必要时先用 SC_INJECT_OFF/权重旋钮做阻尼 A/B 定位过曝能量入口。
+
+
 ## T8.13+ 路线图（2026-08-28 排定，按依赖×收益排序）
 ### T8.13 P0 交付：GPU pass 级分解（2026-08-28，RG-Perf 实测）
 ### T8.13 P1 交付：反馈环增益核算 0.85→0.70（✅ 2026-08-28，双稳态消除）
