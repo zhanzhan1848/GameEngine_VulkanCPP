@@ -278,6 +278,8 @@ T8.7–T8.13 全部落在 Vulkan 端；Metal 侧待同步。**引擎 C++ 层改�
 - 若 total_texels 是垃圾 → **Metal 描述符布局重号 binding（image 0-3 与 buffer 1-2 同号）在 MetalDescriptorSet::GetBindings/MetalCommandBuffer 绑定循环中互相覆盖**（LightEval 同构布局但工作，需比对差异——疑点在 SetLayout 存储/去重路径）。修法：kernel binding 改非重叠号（buffer→5,6）+ C++ 布局同步。
 - 若 total_texels=374×1024 正常 → 写路径问题：texture write 被后续 pass 覆盖（CardCapture 每 64 卡/帧重写页）或 storage write 静默失败（用 MTL_SHADER_VALIDATION + API validation 双开跑至 fault）。
 
+**哨兵实验结果（同日）**：AtlasInit 写纯红 albedo 哨兵后 SC_CARDS 仍 lit=0/cov=0 → kernel 写入确实未落地（非读取/聚合问题）。且 Metal API+shader 双验证层全程 0 报错 → 排除非法用法，指向：① MetalDescriptorSet/MetalCommandBuffer 对 storage image 写绑定的静默处理（image 0-3 与 buffer 1-2 重号布局），或 ② heap 纹理 write 路径在本管线布局下的静默失效。下一 session 工具：Xcode GPU frame capture（CLI 无法做）直接看 AtlasInit dispatch 的绑定面板与 texture 写入——一次 capture 即裁决。另：SC_CARDS dump 的 top 卡排序在全零时任意（按 radiance 排序），勿误读。
+
 **收敛性长跑结论（2026-08-31，1x 渲染 + Medium + SPGI off，21,500+ 帧）**：系统稳定性指标全绿（0 GPU fault、RSS 488MB 恒定、fence 0 次触 30s 上界），**但 SC 卡亮度恒 0**（374 卡全暗，非收敛慢）且**探针 L0 恒等于天空 0.30361**（15,600 帧钉死）= SDF 追踪对所有射线全 miss → 探针场=纯天空 → SC 无输入 → GI 贡献消失。结合 offline SDF 阈值链（field 地板 0.3 vs trace 阈值 0.238 → 全 miss 的边界特征），剩余根因收敛为：**offline SDF 纹理内容在 Metal 上未正确生效**（上传路径已修但内容待验证——需 staging readback 对照 cache 文件字节），或 offline 纹理虽写入但 cascade 绑定/格式（r16 half vs cache 编码）在 Metal 采样路径上错位。下一步：readback offline 纹理前 1KB 与 cache 文件比对 + 打印 DDGI trace 一次采样的 d 值分布。注意：All-sky 探针恰好解释用户最初的"泛白但结构可见"画面（GI=均匀天空 wash），也与 Vulkan"拱廊 46/255 暗"形成对照——Vulkan 同配置探针命中表面（hitDist 0.3-2）。诊断开关保留：SPGI_OFF/SPGI_ON、SSGI_OFF/SSGI_ON、SC_INJECT_OFF、RENDER_SCALE、SC_DUMP_CARDS/SC_DUMP_INTERVAL。
 
 | # | 缺口 | 修复 | 证据 |

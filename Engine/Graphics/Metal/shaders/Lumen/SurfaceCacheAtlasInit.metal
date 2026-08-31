@@ -62,7 +62,7 @@ kernel void surfaceCacheAtlasInit(
 
     // Default material: gray albedo (alpha=1 passes the LightEval gate),
     // +Z normal (oct-encoded (0.5, 0.5)), depth=0.5, zero emissive.
-    albedo_atlas.write(float4(1.0f, 0.0f, 0.0f, 1.0f), atlas_uv);  // TEMP sentinel red
+    albedo_atlas.write(float4(0.5f, 0.5f, 0.5f, 1.0f), atlas_uv);
     normal_atlas.write(float4(0.5f, 0.5f, 0.0f, 1.0f), atlas_uv);
     depth_atlas.write(float4(0.5f, 0.0f, 0.0f, 1.0f), atlas_uv);
     emissive_atlas.write(float4(0.0f, 0.0f, 0.0f, 1.0f), atlas_uv);
