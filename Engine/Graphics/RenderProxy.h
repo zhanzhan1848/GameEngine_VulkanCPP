@@ -21,6 +21,7 @@ struct RenderProxy {
     f32 roughness{0.5f};                     ///< PBR roughness
     f32 metallic{0.0f};                      ///< PBR metallic
     f32 alpha_cutoff{0.5f};                  ///< alpha clip threshold
+    u64 graphVariant{0};                     ///< compiled material-graph content hash (0 = fixed material path)
 
     RenderProxy();
     RenderProxy(id::id_type entity, id::id_type mesh, id::id_type material);

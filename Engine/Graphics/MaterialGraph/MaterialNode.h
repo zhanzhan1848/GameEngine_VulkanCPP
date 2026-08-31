@@ -25,6 +25,16 @@ public:
     std::vector<MaterialPin> inputs;
     std::vector<MaterialPin> outputs;
 
+    /// <summary>
+    /// Editor canvas position. Persisted by MaterialGraphSerializer so the
+    /// layout reloads exactly where the user left it. Defaults to (0, 0);
+    /// the editor's first-open convention places MaterialOutput at a
+    /// visible origin so the open-with-defaultOutput flow doesn't pile
+    /// the node off-screen.
+    /// </summary>
+    struct Position { f32 x{0.0f}; f32 y{0.0f}; };
+    Position position;
+
     virtual const MaterialParamDescriptor* GetParamDescriptors(u32& out_count) const {
         out_count = 0; return nullptr;
     }
@@ -32,6 +42,9 @@ public:
         out_count = 0; return nullptr;
     }
     virtual bool SetParamByName(const char* name, f32 value) {
+        (void)name; (void)value; return false;
+    }
+    virtual bool SetParamByName(const char* name, math::v2 value) {
         (void)name; (void)value; return false;
     }
     virtual bool SetParamByName(const char* name, math::v3 value) {

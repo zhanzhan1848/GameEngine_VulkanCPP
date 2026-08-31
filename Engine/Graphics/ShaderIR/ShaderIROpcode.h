@@ -31,6 +31,8 @@ enum class ShaderIROpcode : u8 {
 
     SWIZZLE      = 0x40,
     CURVE_EVAL   = 0x50,
+    FLOAT3_TO_FLOAT4 = 0x60, // dst = float4(src.xyz, 1.0); pads alpha
+    FLOAT2_TO_FLOAT4 = 0x61, // dst = float4(src.xy, 0.0, 1.0); UV preview
     STORE_OUTPUT = 0xFF,
 };
 

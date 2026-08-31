@@ -35,17 +35,24 @@ public:
     }
 
     const MaterialParamDescriptor* GetParamDescriptors(u32& c) const override { c = 1; return kParams; }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 3; return kPins; }
     bool SetParamByName(const char* n, f32 v) override {
         if (std::strcmp(n, "power") == 0) { power = v; return true; }
         return false;
     }
 private:
     static const MaterialParamDescriptor kParams[];
+    static const MaterialPinDescriptor kPins[];
 };
 
 inline const MaterialParamDescriptor FresnelNode::kParams[] = {
     {"power", "Fresnel", MaterialParamType::Float, {0.0f, 20.0f, 0.1f},
      MAT_OFFSETOF(FresnelNode, power), sizeof(power), nullptr},
+};
+inline const MaterialPinDescriptor FresnelNode::kPins[] = {
+    {"N",      0, MaterialDataType::Float3, true},
+    {"V",      1, MaterialDataType::Float3, true},
+    {"result", 0, MaterialDataType::Float,  false},
 };
 
 // NormalBlend: UDN blend formula — normalize(Base.xy + Detail.xy, Base.z * Detail.z)
@@ -75,6 +82,15 @@ public:
             out->value = {x, y, z};
         }
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 3; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialPinDescriptor NormalBlendNode::kPins[] = {
+    {"base",   0, MaterialDataType::Float3, true},
+    {"detail", 1, MaterialDataType::Float3, true},
+    {"result", 0, MaterialDataType::Float3, false},
 };
 
 } // namespace primal::graphics::material_graph

@@ -25,8 +25,27 @@ void MaterialGraph::RemoveNode(u32 node_id) {
     }
 }
 
-void MaterialGraph::Connect(u32 from_node, u32 from_pin, u32 to_node, u32 to_pin) {
+bool MaterialGraph::Connect(u32 from_node, u32 from_pin, u32 to_node, u32 to_pin) {
+    if (from_node >= nodes_.size() || to_node >= nodes_.size()) return false;
+
+    const auto* source = nodes_[from_node].get();
+    const auto* target = nodes_[to_node].get();
+    if (!source || !target ||
+        from_pin >= source->outputs.size() || to_pin >= target->inputs.size()) {
+        return false;
+    }
+
+    // An input pin represents one value. Reconnecting it replaces its old
+    // source so the native graph, serialized JSON and editor canvas cannot
+    // disagree about which edge wins.
+    connections_.erase(
+        std::remove_if(connections_.begin(), connections_.end(),
+            [&](const Connection& c) {
+                return c.to_node == to_node && c.to_pin == to_pin;
+            }),
+        connections_.end());
     connections_.push_back({from_node, from_pin, to_node, to_pin});
+    return true;
 }
 
 void MaterialGraph::Disconnect(u32 from_node, u32 from_pin, u32 to_node, u32 to_pin) {

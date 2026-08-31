@@ -8,6 +8,8 @@
 #include "Graphics/RHI/Core/RHIPipelineLayout.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Content/ProceduralMesh.h"
+#include "Content/ContentToEngine.h"
+#include "Graphics/MaterialGraph/Nodes/ConstantNode.h"
 
 #include <fstream>
 #include <iostream>
@@ -40,6 +42,10 @@ bool MaterialPreviewRenderer::Initialize(rhi::RHIDeviceBase* device, u32 width, 
     device_ = device;
     width_ = width;
     height_ = height;
+    for (u32 i = 0; i < MAX_MATERIAL_TEXTURES; ++i) {
+        material_texture_ids_[i] = id::invalid_id;
+        material_textures_[i] = rhi::handles::INVALID_RESOURCE;
+    }
 
     if (!CreateSamplers()) return false;
     if (!CreateDescriptorLayouts()) return false;
@@ -51,6 +57,8 @@ bool MaterialPreviewRenderer::Initialize(rhi::RHIDeviceBase* device, u32 width, 
     if (!CreateMeshes()) return false;
 
     UpdateGlobalDescriptorSets();
+    if (!EnsureFallbackTexture()) return false;
+    UpdateMaterialDescriptorSet();
     UpdateBlitDescriptorSet();
     return true;
 }
@@ -366,6 +374,9 @@ bool MaterialPreviewRenderer::SetMaterialGraph(const material_graph::MaterialGra
     auto ir = translator.Translate(graph);
     if (!ir.success) {
         std::cerr << "[MaterialPreview] MaterialGraph translation failed\n";
+        for (const auto& error : ir.errors) {
+            std::cerr << "  node " << error.node_id << ": " << error.message << "\n";
+        }
         return false;
     }
 
@@ -380,8 +391,109 @@ bool MaterialPreviewRenderer::SetMaterialGraph(const material_graph::MaterialGra
         std::cerr << "[MaterialPreview] Material pipeline creation failed\n";
         return false;
     }
+
+    ReleaseMaterialTextures();
+    u32 slot = 0;
+    for (const auto& node : graph.GetNodes()) {
+        if (slot >= MAX_MATERIAL_TEXTURES) break;
+        if (!node || std::strcmp(node->TypeName(), "ConstantTexture") != 0) continue;
+        const auto& path = static_cast<const material_graph::ConstantTextureNode&>(*node).asset_path;
+        if (!path.empty()) {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (file.is_open()) {
+                const auto size = file.tellg();
+                if (size > 0) {
+                    utl::vector<u8> bytes(static_cast<size_t>(size));
+                    file.seekg(0);
+                    file.read(reinterpret_cast<char*>(bytes.data()), size);
+                    if (file && bytes.size() >= 4 &&
+                        bytes[0] == 'T' && bytes[1] == 'E' && bytes[2] == 'X' && bytes[3] == 'R') {
+                        // Resource handles are device-local. The editor may own
+                        // both a world renderer and this isolated preview, so the
+                        // texture must be created on the preview's device.
+                        const auto id = content::create_resource(
+                            bytes.data(), content::asset_type::texture,
+                            content::GraphicsAPI::RHI, device_);
+                        const auto handle = content::get_rhi_texture_handle(id);
+                        if (id::is_valid(id) && handle != rhi::handles::INVALID_RESOURCE) {
+                            material_texture_ids_[slot] = id;
+                            material_textures_[slot] = handle;
+                        }
+                    }
+                }
+            }
+        }
+        ++slot;
+    }
+    UpdateMaterialDescriptorSet();
     material_graph_set_ = true;
     return true;
+}
+
+bool MaterialPreviewRenderer::EnsureFallbackTexture() {
+    if (fallback_texture_ != rhi::handles::INVALID_RESOURCE) return true;
+    // The preview already owns the exact device it renders with. Creating the
+    // fallback through ContentToEngine can select a different device-manager
+    // slot while the world viewport is active, causing preview initialization
+    // to fail even though the RHI itself is ready.
+    rhi::TextureDesc desc{};
+    desc.size = {1, 1, 1};
+    desc.mipLevels = 1;
+    desc.arraySize = 1;
+    desc.format = rhi::DataFormat::RGBA8_UNorm;
+    desc.type = rhi::TextureType::Texture2D;
+    desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
+    fallback_texture_ = device_->CreateTexture(desc);
+    if (fallback_texture_ == rhi::handles::INVALID_RESOURCE) return false;
+
+    constexpr u32 white = 0xFFFFFFFFu;
+    if (auto* resource = rhi::ResourceManager::Instance().GetResource(fallback_texture_)) {
+        resource->UpdateData(&white, sizeof(white));
+    }
+    return true;
+}
+
+void MaterialPreviewRenderer::ReleaseMaterialTextures() {
+    for (u32 i = 0; i < MAX_MATERIAL_TEXTURES; ++i) {
+        if (id::is_valid(material_texture_ids_[i])) {
+            content::destroy_resource(material_texture_ids_[i], content::asset_type::texture);
+        }
+        material_texture_ids_[i] = id::invalid_id;
+        material_textures_[i] = rhi::handles::INVALID_RESOURCE;
+    }
+}
+
+void MaterialPreviewRenderer::UpdateMaterialDescriptorSet() {
+    if (material_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+        device_->DestroyDescriptorSet(material_set_);
+        material_set_ = rhi::handles::INVALID_DESCRIPTOR_SET;
+    }
+    if (!EnsureFallbackTexture()) return;
+
+    rhi::DescriptorSetDesc desc{};
+    desc.layout = material_layout_;
+    material_set_ = device_->CreateDescriptorSet(desc);
+    if (material_set_ == rhi::handles::INVALID_DESCRIPTOR_SET) return;
+
+    rhi::DescriptorImageInfo image_infos[MAX_MATERIAL_TEXTURES + 1]{};
+    rhi::WriteDescriptorSet writes[MAX_MATERIAL_TEXTURES + 1]{};
+    for (u32 i = 0; i < MAX_MATERIAL_TEXTURES; ++i) {
+        image_infos[i].imageView = material_textures_[i] != rhi::handles::INVALID_RESOURCE
+            ? material_textures_[i] : fallback_texture_;
+        image_infos[i].imageLayout = rhi::ResourceState::ShaderResource;
+        writes[i].dstSet = material_set_;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = rhi::DescriptorType::SampledImage;
+        writes[i].imageInfo = &image_infos[i];
+    }
+    image_infos[MAX_MATERIAL_TEXTURES].sampler = linear_sampler_;
+    writes[MAX_MATERIAL_TEXTURES].dstSet = material_set_;
+    writes[MAX_MATERIAL_TEXTURES].dstBinding = MAX_MATERIAL_TEXTURES;
+    writes[MAX_MATERIAL_TEXTURES].descriptorCount = 1;
+    writes[MAX_MATERIAL_TEXTURES].descriptorType = rhi::DescriptorType::Sampler;
+    writes[MAX_MATERIAL_TEXTURES].imageInfo = &image_infos[MAX_MATERIAL_TEXTURES];
+    device_->UpdateDescriptorSets(MAX_MATERIAL_TEXTURES + 1, writes);
 }
 
 void MaterialPreviewRenderer::SetPreviewModel(PreviewModelType model) {
@@ -627,9 +739,10 @@ rhi::ResourceHandle MaterialPreviewRenderer::Render(rhi::RHICommandBuffer* cmd, 
         cmd->SetScissor(scissor);
         cmd->BindGraphicsPipeline(material_pipeline_);
 
-        rhi::DescriptorSetHandle sets[1] = {global_set_[fi]};
+        rhi::DescriptorSetHandle sets[2] = {global_set_[fi], material_set_};
         cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, material_pipeline_layout_,
-                                 0, 1, sets, 0, nullptr);
+                                 0, material_set_ != rhi::handles::INVALID_DESCRIPTOR_SET ? 2u : 1u,
+                                 sets, 0, nullptr);
 
         RenderMesh* mesh = override_mesh_ ? override_mesh_
                          : mode_2d_       ? quad_xy_mesh_
@@ -700,6 +813,20 @@ void MaterialPreviewRenderer::Resize(u32 w, u32 h) {
 
 void MaterialPreviewRenderer::Shutdown() {
     if (!device_) return;
+
+    if (material_set_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+        device_->DestroyDescriptorSet(material_set_);
+        material_set_ = rhi::handles::INVALID_DESCRIPTOR_SET;
+    }
+    ReleaseMaterialTextures();
+    if (id::is_valid(fallback_texture_id_)) {
+        content::destroy_resource(fallback_texture_id_, content::asset_type::texture);
+        fallback_texture_id_ = id::invalid_id;
+        fallback_texture_ = rhi::handles::INVALID_RESOURCE;
+    } else if (fallback_texture_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyTexture(fallback_texture_);
+        fallback_texture_ = rhi::handles::INVALID_RESOURCE;
+    }
 
     if (override_mesh_) {
         override_mesh_->Destroy(device_);

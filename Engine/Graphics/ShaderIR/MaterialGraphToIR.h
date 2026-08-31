@@ -13,6 +13,7 @@
 #include "Graphics/MaterialGraph/Nodes/UtilityNodes.h"
 #include "Graphics/MaterialGraph/Nodes/MaterialOutputNode.h"
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 
@@ -27,6 +28,10 @@ struct TranslateResult {
     ShaderIRFunction function;
     bool success{false};
     utl::vector<TranslateError> errors;
+    // slot i → the asset_path of the ConstantTexture assigned texture
+    // binding i. Lets binders import descriptors in exactly the order the
+    // emitted texN arguments expect, instead of guessing node visitation.
+    utl::vector<std::string> texture_slots;
 };
 
 class MaterialGraphToIR {
@@ -39,6 +44,7 @@ public:
         node_output_reg_.clear();
         node_output_type_.clear();
         errors_ = &result.errors;
+        texture_slots_ = &result.texture_slots;
         next_texture_slot_ = 0;
 
         // Build connection map: (to_node, to_pin) → (from_node, from_pin)
@@ -53,13 +59,47 @@ public:
         node_output_reg_.resize(n, 0xFFFF);
         node_output_type_.resize(n, 0);
 
+        // Only nodes that contribute to a MaterialOutput participate in the
+        // shader. Editors deliberately allow unfinished/disconnected nodes on
+        // the canvas; validating those as if they were live made an unrelated
+        // empty Add/Curve node disable the whole material preview.
+        utl::vector<u8> active(n, 0);
+        bool has_material_output = false;
+        for (u32 i = 0; i < n; ++i) {
+            if (std::strcmp(graph.GetNodes()[i]->TypeName(), "MaterialOutput") == 0) {
+                active[i] = 1;
+                has_material_output = true;
+            }
+        }
+        if (!has_material_output) {
+            // Standalone translator/compiler tests intentionally build graph
+            // fragments without a terminal node; retain their prior behavior.
+            std::fill(active.begin(), active.end(), static_cast<u8>(1));
+        } else {
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                for (const auto& conn : graph.GetConnections()) {
+                    if (active[conn.to_node] && !active[conn.from_node]) {
+                        active[conn.from_node] = 1;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
         for (u32 node_id : order) {
             const auto& node = graph.GetNodes()[node_id];
+            // Preserve IR generation for disconnected leaf/value nodes (UV,
+            // Time, constants), which is useful to graph tooling, while
+            // ignoring unfinished disconnected operators with required inputs.
+            if (!active[node_id] && !node->inputs.empty()) continue;
             TranslateNode(node_id, node.get(), builder);
         }
 
         result.success = result.errors.empty();
         errors_ = nullptr;
+        texture_slots_ = nullptr;
         return result;
     }
 
@@ -80,6 +120,7 @@ private:
     utl::vector<u16> node_output_reg_;
     utl::vector<u8>  node_output_type_;
     utl::vector<TranslateError>* errors_{nullptr};
+    utl::vector<std::string>* texture_slots_{nullptr};
     u16 next_texture_slot_{0};
 
     void Error(u32 node_id, const char* msg) {
@@ -164,9 +205,23 @@ private:
             node_output_type_[node_id] = DT(material_graph::MaterialDataType::Float4);
 
         } else if (std::strcmp(type, "ConstantTexture") == 0) {
+            // The world graph-material descriptor layout carries 8 image
+            // bindings (ForwardSceneRenderer graph_material_set_layout_); the
+            // preview layout is 4 but the translator only needs one cap —
+            // graphs beyond it fail translation and the caller falls back to
+            // the fixed material path.
+            constexpr u16 kMaxTextureSlots = 8;
+            if (next_texture_slot_ >= kMaxTextureSlots) {
+                Error(node_id, "material uses more than 8 textures");
+                return;
+            }
             u16 slot = next_texture_slot_++;
             reg = builder.TextureHandle(slot);
             node_output_type_[node_id] = DT(material_graph::MaterialDataType::Texture2D);
+            if (texture_slots_) {
+                if ((size_t)slot >= texture_slots_->size()) texture_slots_->resize((size_t)slot + 1);
+                (*texture_slots_)[slot] = static_cast<material_graph::ConstantTextureNode*>(node)->asset_path;
+            }
 
         } else if (std::strcmp(type, "Time") == 0) {
             reg = builder.LoadTime();
@@ -190,6 +245,23 @@ private:
             if (a == 0xFFFF || b == 0xFFFF) return;
             u8 dt_a = GetInputType(node_id, 0);
             u8 dt_b = GetInputType(node_id, 1);
+            const u8 f = DT(material_graph::MaterialDataType::Float);
+            const u8 f2 = DT(material_graph::MaterialDataType::Float2);
+            const u8 f3 = DT(material_graph::MaterialDataType::Float3);
+            const u8 f4 = DT(material_graph::MaterialDataType::Float4);
+            const bool same_vector_width = dt_a == dt_b && dt_a >= f2 && dt_a <= f4;
+            const bool scalar_broadcast = (dt_a == f && dt_b >= f && dt_b <= f4) ||
+                                          (dt_b == f && dt_a >= f && dt_a <= f4);
+            const bool float3_float4 = (dt_a == f3 && dt_b == f4) ||
+                                       (dt_a == f4 && dt_b == f3);
+            if (!same_vector_width && !scalar_broadcast && !float3_float4) {
+                Error(node_id, "Multiply inputs have incompatible types");
+                return;
+            }
+            // A sampled texture is Float4. Multiplying it by a Float3 tint
+            // promotes the tint to Float4(..., 1), preserving texture alpha.
+            if (dt_a == f3 && dt_b == f4) a = builder.Float3ToFloat4(a);
+            if (dt_a == f4 && dt_b == f3) b = builder.Float3ToFloat4(b);
             u8 dt = (dt_a > dt_b) ? dt_a : dt_b;
             reg = builder.Mul(dt, a, b);
             node_output_type_[node_id] = dt;
@@ -291,9 +363,23 @@ private:
         } else if (std::strcmp(type, "MaterialOutput") == 0) {
             for (u32 pin = 0; pin < node->inputs.size(); pin++) {
                 u16 src = GetInputReg(node_id, pin);
-                if (src != 0xFFFF) {
-                    builder.StoreOutput(src, (u8)pin);
+                if (src == 0xFFFF) continue;
+                // Pin 0 (BaseColor) is a Float4 output. If the upstream is
+                // a Float3 (e.g. ConstantFloat3, a 3-component math
+                // expression), pad alpha to 1.0 so the emitted shader
+                // matches the Float4 return type. Without this Metal
+                // fails to type-check (return type mismatch) and the
+                // preview silently falls back to the background
+                // gradient. Float4 sources and unconnected pins pass
+                // through unchanged.
+                if (pin == 0 && GetInputType(node_id, pin) ==
+                    DT(material_graph::MaterialDataType::Float3)) {
+                    src = builder.Float3ToFloat4(src);
+                } else if (pin == 0 && GetInputType(node_id, pin) ==
+                    DT(material_graph::MaterialDataType::Float2)) {
+                    src = builder.Float2ToFloat4(src);
                 }
+                builder.StoreOutput(src, (u8)pin);
             }
             return;
         } else {

@@ -5,6 +5,7 @@
 #include "Common.h"
 #include "CommonHeaders.h"
 #include "../Engine/Graphics/RHI/Core/RHIDevice.h"
+#include "../Engine/Graphics/RHI/Core/RHIResource.h"
 #include "../Engine/Graphics/RHI/Core/RHICommand.h"
 #include "../Engine/Graphics/MaterialPreview/MaterialPreviewRenderer.h"
 #include "../Engine/Graphics/MaterialGraph/MaterialGraph.h"
@@ -173,6 +174,124 @@ EDITOR_INTERFACE u32 GetMaterialPreviewWidth(u32 preview_id) {
 EDITOR_INTERFACE u32 GetMaterialPreviewHeight(u32 preview_id) {
     u32 idx = slot_to_index(preview_id);
     return (idx == UINT32_MAX) ? 0u : previews[idx]->GetHeight();
+}
+
+// One-shot synchronous render: caller passes the RHI device handle (obtained
+// via GetEngineDeviceHandle) and a pre-allocated RGBA8 buffer of width*height*4
+// bytes. Creates a Graphics cmd buffer, renders preview into color_target, then
+// uses a Transfer cmd buffer to copy color_target → Readback buffer, submits,
+// waits, maps, swaps BGRA→RGBA per pixel into the caller's buffer.
+//
+// Returns bytes written (= width*height*4) on success, 0 on failure.
+//
+// Caller does not own any RHI resource. Intended for ~30Hz editor previews, not
+// per-frame gameplay use.
+EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_handle,
+                                                 u8* out_rgba, u64 buffer_size) {
+    u32 idx = slot_to_index(preview_id);
+    if (idx == UINT32_MAX) return 0;
+    auto* renderer = previews[idx];
+    if (!out_rgba || buffer_size == 0) return 0;
+
+    auto* device = reinterpret_cast<rhi::RHIDeviceBase*>(device_handle);
+    if (!device) {
+        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: null device_handle\n";
+        return 0;
+    }
+
+    const u32 w = renderer->GetWidth();
+    const u32 h = renderer->GetHeight();
+    const u64 expected = static_cast<u64>(w) * h * 4;
+    if (buffer_size < expected) {
+        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: buffer too small ("
+                  << buffer_size << " < " << expected << ")\n";
+        return 0;
+    }
+
+    // 1) Render preview into color_target on a Graphics cmd buffer.
+    auto cmd_handle = device->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+    auto* cmd = rhi::GetCommandBuffer(cmd_handle);
+    if (!cmd) {
+        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: CreateCommandBuffer failed\n";
+        return 0;
+    }
+    cmd->Begin();
+    // Rotate through the triple-buffered view/scene constant buffers.
+    static std::atomic<u32> s_frame_idx{0};
+    u32 fi = s_frame_idx.fetch_add(1) % rhi::MAX_FRAMES_IN_FLIGHT;
+    rhi::ResourceHandle color_tex = renderer->Render(cmd, fi, 1.0f / 30.0f);
+    if (color_tex == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: Render failed\n";
+        return 0;
+    }
+    cmd->End();
+
+    rhi::QueueSubmitInfo submit{};
+    submit.cmdBuffer = cmd_handle;
+    device->Submit(submit);
+    cmd->WaitForCompletion();
+
+    // 2) Copy color_target → readback buffer on a Transfer cmd buffer.
+    rhi::BufferDesc bufDesc{
+        expected,
+        rhi::BufferType::Unknown,
+        rhi::GPUMemoryUsage::Readback,
+        rhi::GPUMemoryUsage::Readback,
+        0,
+    };
+    auto readback = device->CreateBuffer(bufDesc);
+    if (readback == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: CreateBuffer failed\n";
+        return 0;
+    }
+
+    auto copy_handle = device->CreateCommandBuffer(rhi::CommandQueueType::Transfer);
+    auto* copy_cmd = rhi::GetCommandBuffer(copy_handle);
+    if (!copy_cmd) {
+        device->DestroyBuffer(readback);
+        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: copy cmd buffer failed\n";
+        return 0;
+    }
+    copy_cmd->Begin();
+    rhi::BufferTextureCopyRegion region{
+        0, 0, 0,
+        { 0, 0, 1 },
+        rhi::Offset3D{0, 0, 0},
+        rhi::Extent3D{w, h, 1u},
+    };
+    copy_cmd->CopyTextureToBuffer(color_tex, readback, &region, 1);
+    copy_cmd->End();
+
+    rhi::QueueSubmitInfo copy_submit{};
+    copy_submit.cmdBuffer = copy_handle;
+    device->Submit(copy_submit);
+    copy_cmd->WaitForCompletion();
+
+    // 3) Map readback buffer, swap BGRA→RGBA per pixel, copy to caller.
+    auto* buf_res = rhi::ResourceManager::Instance().GetResource(readback);
+    u64 bytes_written = 0;
+    if (buf_res) {
+        void* mapped = buf_res->Map(0, expected);
+        if (mapped) {
+            const u8* src = static_cast<const u8*>(mapped);
+            for (u64 i = 0; i < expected; i += 4) {
+                // Metal BGRA8_UNorm → Avalonia WriteableBitmap Rgba8888
+                out_rgba[i + 0] = src[i + 2];  // R
+                out_rgba[i + 1] = src[i + 1];  // G
+                out_rgba[i + 2] = src[i + 0];  // B
+                out_rgba[i + 3] = src[i + 3];  // A
+            }
+            bytes_written = expected;
+            buf_res->Unmap();
+        } else {
+            std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: Map returned null\n";
+        }
+    } else {
+        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: GetResource returned null\n";
+    }
+
+    device->DestroyBuffer(readback);
+    return bytes_written;
 }
 
 // --- Camera configuration ---

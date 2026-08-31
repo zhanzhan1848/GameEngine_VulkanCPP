@@ -21,6 +21,13 @@ public:
         auto* out = CreateOutput<MaterialFloat2Data>(0);
         out->value = default_uv;
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 1; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialPinDescriptor UVNode::kPins[] = {
+    {"uv", 0, MaterialDataType::Float2, false},
 };
 
 } // namespace primal::graphics::material_graph

@@ -7,6 +7,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 设置测试输出目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
 
+add_executable(TestCookedMeshAdapter
+    Content/TestCookedMeshAdapter.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Content/CookedMeshAdapter.cpp
+)
+target_include_directories(TestCookedMeshAdapter PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME TestCookedMeshAdapter COMMAND TestCookedMeshAdapter)
+set_target_properties(TestCookedMeshAdapter PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+add_executable(TestCookedMeshImport Content/TestCookedMeshImport.cpp)
+target_include_directories(TestCookedMeshImport PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(TestCookedMeshImport PRIVATE EngineDLL)
+set_target_properties(TestCookedMeshImport PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # ======================
 # 独立RHI测试目标 - 不依赖任何外部库
 # ======================
@@ -2279,4 +2296,3 @@ set_target_properties(TestWFCCandidateLayout PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCCandidateLayout PRIVATE DEBUG _DEBUG)
-

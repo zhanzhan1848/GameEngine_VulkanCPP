@@ -49,9 +49,19 @@ public:
             }
         }
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 3; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
 };
 
-// Multiply: A * B (supports Float * Float, Float * Float3, Float * Float4)
+inline const MaterialPinDescriptor AddNode::kPins[] = {
+    {"A",      0, MaterialDataType::Float, true},
+    {"B",      1, MaterialDataType::Float, true},
+    {"result", 0, MaterialDataType::Float, false},
+};
+
+// Multiply: component-wise multiplication with scalar broadcasting. Mixing
+// Float3 and Float4 preserves the Float4 alpha and multiplies RGB.
 class MultiplyNode : public MaterialNode {
 public:
     MultiplyNode() {
@@ -70,36 +80,70 @@ public:
     }
     void Execute() override {
         if (!inputs[0].data || !inputs[1].data) return;
+        const auto ta = inputs[0].data->type;
+        const auto tb = inputs[1].data->type;
+
+        if (ta == MaterialDataType::Float3 && tb == MaterialDataType::Float3) {
+            auto* a = inputs[0].AsFloat3();
+            auto* b = inputs[1].AsFloat3();
+            auto* out = CreateOutput<MaterialFloat3Data>(0);
+            out->value = {a->value.x * b->value.x, a->value.y * b->value.y, a->value.z * b->value.z};
+            return;
+        }
+        if (ta == MaterialDataType::Float4 && tb == MaterialDataType::Float4) {
+            auto* a = inputs[0].AsFloat4();
+            auto* b = inputs[1].AsFloat4();
+            auto* out = CreateOutput<MaterialFloat4Data>(0);
+            out->value = {a->value.x * b->value.x, a->value.y * b->value.y,
+                          a->value.z * b->value.z, a->value.w * b->value.w};
+            return;
+        }
+        if (ta == MaterialDataType::Float4 && tb == MaterialDataType::Float3) {
+            auto* a = inputs[0].AsFloat4();
+            auto* b = inputs[1].AsFloat3();
+            auto* out = CreateOutput<MaterialFloat4Data>(0);
+            out->value = {a->value.x * b->value.x, a->value.y * b->value.y,
+                          a->value.z * b->value.z, a->value.w};
+            return;
+        }
+        if (ta == MaterialDataType::Float3 && tb == MaterialDataType::Float4) {
+            auto* a = inputs[0].AsFloat3();
+            auto* b = inputs[1].AsFloat4();
+            auto* out = CreateOutput<MaterialFloat4Data>(0);
+            out->value = {a->value.x * b->value.x, a->value.y * b->value.y,
+                          a->value.z * b->value.z, b->value.w};
+            return;
+        }
         // Float * Float3/Float4: scalar * vector
-        if (inputs[0].data->type == MaterialDataType::Float && inputs[1].data->type == MaterialDataType::Float3) {
+        if (ta == MaterialDataType::Float && tb == MaterialDataType::Float3) {
             auto* s = inputs[0].AsFloat();
             auto* v = inputs[1].AsFloat3();
             if (s && v) {
                 auto* out = CreateOutput<MaterialFloat3Data>(0);
                 out->value = {s->value * v->value.x, s->value * v->value.y, s->value * v->value.z};
             }
-        } else if (inputs[0].data->type == MaterialDataType::Float3 && inputs[1].data->type == MaterialDataType::Float) {
+        } else if (ta == MaterialDataType::Float3 && tb == MaterialDataType::Float) {
             auto* v = inputs[0].AsFloat3();
             auto* s = inputs[1].AsFloat();
             if (v && s) {
                 auto* out = CreateOutput<MaterialFloat3Data>(0);
                 out->value = {s->value * v->value.x, s->value * v->value.y, s->value * v->value.z};
             }
-        } else if (inputs[0].data->type == MaterialDataType::Float && inputs[1].data->type == MaterialDataType::Float4) {
+        } else if (ta == MaterialDataType::Float && tb == MaterialDataType::Float4) {
             auto* s = inputs[0].AsFloat();
             auto* v = inputs[1].AsFloat4();
             if (s && v) {
                 auto* out = CreateOutput<MaterialFloat4Data>(0);
                 out->value = {s->value * v->value.x, s->value * v->value.y, s->value * v->value.z, s->value * v->value.w};
             }
-        } else if (inputs[0].data->type == MaterialDataType::Float4 && inputs[1].data->type == MaterialDataType::Float) {
+        } else if (ta == MaterialDataType::Float4 && tb == MaterialDataType::Float) {
             auto* v = inputs[0].AsFloat4();
             auto* s = inputs[1].AsFloat();
             if (v && s) {
                 auto* out = CreateOutput<MaterialFloat4Data>(0);
                 out->value = {s->value * v->value.x, s->value * v->value.y, s->value * v->value.z, s->value * v->value.w};
             }
-        } else {
+        } else if (ta == MaterialDataType::Float && tb == MaterialDataType::Float) {
             auto* a = inputs[0].AsFloat();
             auto* b = inputs[1].AsFloat();
             if (a && b) {
@@ -108,6 +152,15 @@ public:
             }
         }
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 3; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialPinDescriptor MultiplyNode::kPins[] = {
+    {"A",      0, MaterialDataType::Float, true},
+    {"B",      1, MaterialDataType::Float, true},
+    {"result", 0, MaterialDataType::Float, false},
 };
 
 // Lerp: A + (B - A) * Alpha
@@ -163,6 +216,16 @@ public:
             }
         }
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 4; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialPinDescriptor LerpNode::kPins[] = {
+    {"A",      0, MaterialDataType::Float, true},
+    {"B",      1, MaterialDataType::Float, true},
+    {"Alpha",  2, MaterialDataType::Float, true},
+    {"result", 0, MaterialDataType::Float, false},
 };
 
 // Clamp: clamp(Value, Min, Max)
@@ -190,6 +253,7 @@ public:
         }
     }
     const MaterialParamDescriptor* GetParamDescriptors(u32& c) const override { c = 2; return kParams; }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 2; return kPins; }
     bool SetParamByName(const char* n, f32 v) override {
         if (std::strcmp(n, "min_val") == 0) { min_val = v; return true; }
         if (std::strcmp(n, "max_val") == 0) { max_val = v; return true; }
@@ -197,6 +261,7 @@ public:
     }
 private:
     static const MaterialParamDescriptor kParams[];
+    static const MaterialPinDescriptor kPins[];
 };
 
 inline const MaterialParamDescriptor ClampNode::kParams[] = {
@@ -204,6 +269,10 @@ inline const MaterialParamDescriptor ClampNode::kParams[] = {
      MAT_OFFSETOF(ClampNode, min_val), sizeof(min_val), nullptr},
     {"max_val", "Clamp", MaterialParamType::Float, {-1e6f, 1e6f, 0.01f},
      MAT_OFFSETOF(ClampNode, max_val), sizeof(max_val), nullptr},
+};
+inline const MaterialPinDescriptor ClampNode::kPins[] = {
+    {"value",  0, MaterialDataType::Float, true},
+    {"result", 0, MaterialDataType::Float, false},
 };
 
 // Pow: pow(Base, Exponent)
@@ -228,6 +297,15 @@ public:
             out->value = std::pow(base->value, exp->value);
         }
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 3; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialPinDescriptor PowNode::kPins[] = {
+    {"base",     0, MaterialDataType::Float, true},
+    {"exponent", 1, MaterialDataType::Float, true},
+    {"result",   0, MaterialDataType::Float, false},
 };
 
 // Saturate: clamp(Value, 0, 1)
@@ -250,6 +328,14 @@ public:
             out->value = std::clamp(v->value, 0.0f, 1.0f);
         }
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 2; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialPinDescriptor SaturateNode::kPins[] = {
+    {"value",  0, MaterialDataType::Float, true},
+    {"result", 0, MaterialDataType::Float, false},
 };
 
 // Remap: maps Value from [in_min, in_max] to [out_min, out_max]
@@ -293,7 +379,7 @@ public:
         if (std::strcmp(n, "out_max") == 0) { out_max = v; return true; }
         return false;
     }
-    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 1; return kPins; }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 2; return kPins; }
 
 private:
     static const MaterialParamDescriptor kParams[];
@@ -307,7 +393,8 @@ inline const MaterialParamDescriptor RemapNode::kParams[] = {
     {"out_max", "Remap", MaterialParamType::Float, {-1e6f, 1e6f, 0.01f}, MAT_OFFSETOF(RemapNode, out_max), sizeof(out_max), nullptr},
 };
 inline const MaterialPinDescriptor RemapNode::kPins[] = {
-    {"value", 0, MaterialDataType::Float, true},
+    {"value",  0, MaterialDataType::Float, true},
+    {"result", 0, MaterialDataType::Float, false},
 };
 
 } // namespace primal::graphics::material_graph
