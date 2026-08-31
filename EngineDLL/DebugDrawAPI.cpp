@@ -212,3 +212,46 @@ EDITOR_INTERFACE void FlushDebugDraw()
 {
 }
 
+// --- Billboard quad + light-bulb gizmo icons ---
+//
+// Two helpers added for the editor's "always-face-camera" icons:
+//  - DrawDebugWorldQuad emits the 4 world-space corners of a quad the
+//    caller has already computed (and projected to face the camera).
+//    Used by the SpriteRenderer for billboard sprites that have to track
+//    the editor camera.
+//  - DrawDebugLightBulb draws the classic light-bulb icon: small sphere
+//    wireframe plus 6 axis-aligned rays. Directional lights have the
+//    sphere suppressed (just the rays); point/spot lights get the sphere
+//    too.
+//
+// Both go through the same debug_draw queue as DrawDebugLine so they
+// participate in the same per-frame drain in Pass 6.
+EDITOR_INTERFACE void DrawDebugWorldQuad(
+    f32 x0, f32 y0, f32 z0,
+    f32 x1, f32 y1, f32 z1,
+    f32 x2, f32 y2, f32 z2,
+    f32 x3, f32 y3, f32 z3,
+    u32 rgb)
+{
+    push_line(x0, y0, z0, x1, y1, z1, rgb);
+    push_line(x1, y1, z1, x2, y2, z2, rgb);
+    push_line(x2, y2, z2, x3, y3, z3, rgb);
+    push_line(x3, y3, z3, x0, y0, z0, rgb);
+    push_line(x0, y0, z0, x2, y2, z2, rgb);
+    push_line(x1, y1, z1, x3, y3, z3, rgb);
+}
+
+EDITOR_INTERFACE void DrawDebugLightBulb(
+    f32 cx, f32 cy, f32 cz,
+    f32 radius, f32 ray_length,
+    u32 rgb)
+{
+    DrawDebugSphereWireframe(cx, cy, cz, radius, /*segments=*/12, rgb);
+    push_line(cx, cy, cz, cx, cy + ray_length, cz, rgb);
+    push_line(cx, cy, cz, cx, cy - ray_length * 0.5f, cz, rgb);
+    push_line(cx, cy, cz, cx + ray_length, cy, cz, rgb);
+    push_line(cx, cy, cz, cx - ray_length * 0.5f, cy, cz, rgb);
+    push_line(cx, cy, cz, cx, cy, cz + ray_length, rgb);
+    push_line(cx, cy, cz, cx, cy, cz - ray_length * 0.5f, rgb);
+}
+

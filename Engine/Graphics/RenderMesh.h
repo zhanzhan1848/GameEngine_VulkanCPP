@@ -158,6 +158,7 @@ private:
     rhi::ResourceHandle CreateBuffer(rhi::RHIDeviceBase* device, const void* data, u64 size, rhi::BufferType type);
 
     friend class RenderMeshTestHelper;
+    friend class ForwardSceneRenderer;  // needs Register/Unregister to re-tag entity id
 
     rhi::ResourceHandle vertexBuffer_;      ///< 顶点缓冲区句柄
     rhi::ResourceHandle indexBuffer_;       ///< 索引缓冲区句柄

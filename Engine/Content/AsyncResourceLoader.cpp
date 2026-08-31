@@ -1,5 +1,7 @@
 #include "AsyncResourceLoader.h"
+#include "CookedMeshAdapter.h"
 #include "ContentToEngine.h"
+#include "../JobSystem/JobSystem.h"
 
 // STB image implementation - must be defined in exactly one translation unit
 #define STB_IMAGE_IMPLEMENTATION
@@ -8,6 +10,8 @@
 #include "Utilities/IOStream.h"
 #include <future>
 #include <fstream>
+#include <iostream>
+#include <vector>
 
 namespace primal::content {
 
@@ -24,11 +28,19 @@ AsyncResourceLoader* AsyncResourceLoader::Get()
 
 bool AsyncResourceLoader::Initialize()
 {
+    if (!jobsystem::JobSystem::IsRunning())
+    {
+        if (!jobsystem::JobSystem::Initialize())
+        {
+            return false;
+        }
+    }
+
     if (s_instance)
     {
         return true;
     }
-    
+
     s_instance = new AsyncResourceLoader();
     return true;
 }
@@ -275,8 +287,18 @@ jobsystem::JobHandle AsyncResourceLoader::LoadMeshAsync(
             return;
         }
         
-        asset_type::type type = asset_type::mesh;
-        id::id_type mesh_id = create_resource(buffer.data(), type);
+        std::vector<u8> geometry_blob;
+        std::string parse_error;
+        id::id_type mesh_id = id::invalid_id;
+        if (normalize_cooked_mesh_scene(buffer.data(), buffer.size(), geometry_blob, &parse_error))
+        {
+            mesh_id = create_resource(geometry_blob.data(), asset_type::mesh);
+        }
+        else
+        {
+            std::cerr << "[AsyncResourceLoader] Invalid cooked mesh '" << path
+                      << "': " << parse_error << std::endl;
+        }
         
         if (complete_callback)
         {

@@ -41,7 +41,9 @@ public:
 
     static std::string SerializeNode(const MaterialNode& node) {
         std::ostringstream ss;
-        ss << "\"type\": \"" << node.TypeName() << "\"";
+        ss << "\"type\": \"" << node.TypeName() << "\""
+           << ", \"x\": " << node.position.x
+           << ", \"y\": " << node.position.y;
         std::string params = SerializeParams(node);
         if (!params.empty()) {
             ss << ", \"params\": {" << params << "}";
@@ -159,6 +161,11 @@ private:
                 ss << "\"" << d.name << "\": " << (val ? "true" : "false");
                 break;
             }
+            case MaterialParamType::Float2: {
+                auto* v = reinterpret_cast<const math::v2*>(base + d.offset);
+                ss << "\"" << d.name << "\": [" << v->x << ", " << v->y << "]";
+                break;
+            }
             case MaterialParamType::Float3: {
                 auto* v = reinterpret_cast<const math::v3*>(base + d.offset);
                 ss << "\"" << d.name << "\": [" << v->x << ", " << v->y << ", " << v->z << "]";
@@ -241,6 +248,21 @@ private:
         return val.empty() ? 0 : static_cast<u32>(std::stoi(val));
     }
 
+    static f32 ExtractFloatValue(const std::string& obj, const std::string& key) {
+        auto pos = obj.find("\"" + key + "\"");
+        if (pos == std::string::npos) return 0.0f;
+        auto colon = obj.find(':', pos);
+        if (colon == std::string::npos) return 0.0f;
+        std::string val;
+        for (size_t i = colon + 1; i < obj.size(); ++i) {
+            char c = obj[i];
+            if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == 'e' || c == 'E' || c == '+')
+                val += c;
+            else if (!val.empty()) break;
+        }
+        return val.empty() ? 0.0f : std::stof(val);
+    }
+
     static void ParseNodesArray(const std::string& arr,
                                  std::vector<std::unique_ptr<MaterialNode>>& out_nodes) {
         size_t pos = 1;
@@ -255,6 +277,8 @@ private:
 
             auto node = CreateNode(type.c_str());
             if (node) {
+                node->position.x = ExtractFloatValue(obj, "x");
+                node->position.y = ExtractFloatValue(obj, "y");
                 auto params_start = obj.find("\"params\"");
                 if (params_start != std::string::npos) {
                     auto p_open = obj.find('{', params_start);
@@ -342,6 +366,8 @@ private:
                         node->SetParamByName(key.c_str(), math::v4{arr_vals[0], arr_vals[1], arr_vals[2], arr_vals[3]});
                     } else if (arr_vals.size() == 3) {
                         node->SetParamByName(key.c_str(), math::v3{arr_vals[0], arr_vals[1], arr_vals[2]});
+                    } else if (arr_vals.size() == 2) {
+                        node->SetParamByName(key.c_str(), math::v2{arr_vals[0], arr_vals[1]});
                     } else if (arr_vals.size() == 1) {
                         node->SetParamByName(key.c_str(), arr_vals[0]);
                     }

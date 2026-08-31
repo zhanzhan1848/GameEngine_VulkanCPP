@@ -38,4 +38,6 @@ namespace primal::transform {
 	void get_transform_matrices(const game_entity::entity_id id, math::m4x4& world, math::m4x4& inverse_world);
 	void get_updated_components_flags(const game_entity::entity_id *const ids, u32 count, u8 *const flags);
 	void update(const component_cache *const cache, u32 count);
+	void set_position(component c, const math::v3& position);
+	void set_orientation(component c, const math::v3& orientation);
 }

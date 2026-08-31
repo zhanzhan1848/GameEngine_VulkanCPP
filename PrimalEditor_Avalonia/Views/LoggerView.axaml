@@ -1,0 +1,47 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             x:Class="PrimalEditor_Avalonia.Views.LoggerView"
+             x:DataType="vm:LoggerViewModel">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto" Margin="8,6">
+            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                <TextBlock Text="▮ LOGGER"
+                           FontFamily="{StaticResource FontDisplay}"
+                           FontWeight="SemiBold" FontSize="13" LetterSpacing="1"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+            <CheckBox Grid.Column="1" Content="Auto-scroll" IsChecked="{Binding AutoScroll}" Margin="8,0"
+                      Foreground="{StaticResource PrimaryTextBrush}"/>
+            <ComboBox Grid.Column="2" SelectedIndex="{Binding MinLevelIndex}" Margin="8,0" Width="110">
+                <ComboBoxItem Content="Debug"/>
+                <ComboBoxItem Content="Info"/>
+                <ComboBoxItem Content="Warning"/>
+                <ComboBoxItem Content="Error"/>
+            </ComboBox>
+            <Button Grid.Column="3" Content="Clear" Click="OnClearClick" Margin="8,0,0,0" Width="70"/>
+        </Grid>
+
+        <Border Grid.Row="1" Background="{StaticResource VoidBrush}" BorderBrush="{StaticResource ElectricBlueBrush}"
+                BorderThickness="0,1,0,0" Margin="0">
+            <ListBox x:Name="LogList"
+                     ItemsSource="{Binding FilteredEntries}"
+                     FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
+                     FontSize="11"
+                     Background="Transparent"
+                     Foreground="{StaticResource PrimaryTextBrush}"
+                     BorderThickness="0"
+                     Padding="6,4">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding FormattedMessage}"
+                                   Foreground="{Binding Level, Converter={x:Static vm:LogLevelToColorConverter.Instance}}"/>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Border>
+    </Grid>
+</UserControl>

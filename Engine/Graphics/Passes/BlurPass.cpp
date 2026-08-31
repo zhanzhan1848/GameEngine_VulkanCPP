@@ -22,6 +22,10 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     if (!file.is_open()) {
         shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
         file.open(shaderPath, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + shaderPath;
+            file.open(shaderPath, std::ios::ate | std::ios::binary);
+        }
     }
 
     if (!file.is_open()) {

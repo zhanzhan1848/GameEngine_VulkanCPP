@@ -621,6 +621,59 @@ void test_translate_all_output_pins() {
     PASS();
 }
 
+void test_translate_ignores_disconnected_nodes() {
+    TEST("Translate: disconnected unfinished nodes do not invalidate output");
+    MaterialGraph graph;
+
+    auto color = std::make_unique<ConstantFloat3Node>();
+    color->value = {0.8f, 0.2f, 0.1f};
+    graph.AddNode(std::move(color));
+    graph.AddNode(std::make_unique<AddNode>()); // intentionally unconnected
+    graph.AddNode(std::make_unique<CurveNode>()); // default curve is invalid, but inactive
+    graph.AddNode(std::make_unique<MaterialOutputNode>());
+    graph.Connect(0, 0, 3, 0);
+
+    MaterialGraphToIR translator;
+    auto result = translator.Translate(graph);
+
+    assert(result.success);
+    assert(result.errors.empty());
+    bool stored_base_color = false;
+    for (const auto& inst : result.function.Instructions()) {
+        if (inst.opcode == ShaderIROpcode::STORE_OUTPUT && inst.flags == 0) {
+            stored_base_color = true;
+        }
+        assert(inst.opcode != ShaderIROpcode::ADD);
+        assert(inst.opcode != ShaderIROpcode::CURVE_EVAL);
+    }
+    assert(stored_base_color);
+    PASS();
+}
+
+void test_translate_uv_to_base_color() {
+    TEST("Translate: UV to BaseColor expands Float2 to Float4");
+    MaterialGraph graph;
+    graph.AddNode(std::make_unique<UVNode>());
+    graph.AddNode(std::make_unique<MaterialOutputNode>());
+    graph.Connect(0, 0, 1, 0);
+
+    MaterialGraphToIR translator;
+    auto result = translator.Translate(graph);
+    assert(result.success);
+
+    bool converted = false;
+    for (const auto& inst : result.function.Instructions()) {
+        if (inst.opcode == ShaderIROpcode::FLOAT2_TO_FLOAT4) converted = true;
+    }
+    assert(converted);
+
+    MetalEmitter emitter;
+    auto metal = emitter.Emit(result.function, true);
+    assert(metal.success);
+    assert(metal.source.find("float4(r0, 0.0f, 1.0f)") != std::string::npos);
+    PASS();
+}
+
 // ============================================================================
 // Phase 6: MetalEmitter
 // ============================================================================
@@ -943,16 +996,24 @@ void test_emitter_full_material_graph() {
 }
 
 void test_emitter_load_time() {
-    TEST("Emitter: LoadTime → sceneData.time");
+    TEST("Emitter: LoadTime — preview reads sceneData, world freezes to 0");
     ShaderIRFunction func;
     ShaderIRBuilder builder(func);
     auto t = builder.LoadTime();
 
     MetalEmitter emitter;
-    auto result = emitter.Emit(func);
+    // World mode: the emitted {float time} struct would misread the real
+    // SceneData layout (model matrix at offset 0), so time is frozen until
+    // per-material uniform streaming lands.
+    auto world = emitter.Emit(func);
+    assert(world.success);
+    assert(world.source.find("sceneData.time") == std::string::npos);
+    assert(world.source.find("= 0.0f;") != std::string::npos);
 
-    assert(result.success);
-    assert(result.source.find("sceneData.time") != std::string::npos);
+    // Preview mode owns its own SceneData declaration and runs the clock.
+    auto preview = emitter.Emit(func, /*preview_mode=*/true);
+    assert(preview.success);
+    assert(preview.source.find("sceneData.time") != std::string::npos);
     PASS();
 }
 
@@ -1327,6 +1388,68 @@ void test_compiler_sync_compile_verify() {
 
     auto result = primal::graphics::shader_ir::ShaderCompiler::CompileSync(graph);
     assert(result.success);
+
+    std::string err;
+    bool compiled = metal_compile_verify(result.source, err);
+    if (!compiled) {
+        std::cerr << "\n  COMPILE ERROR: " << err << "\n";
+        std::cerr << "  SOURCE:\n" << result.source << "\n";
+    }
+    assert(compiled);
+    PASS();
+}
+
+// The exact topology from the editor's lion+flag world-material regression:
+// two ConstantTextures sampled and summed into BaseColor. World-mode output
+// must target the GBuffer FragmentOut contract with the sampler bound where
+// ForwardSceneRenderer's graph_material_set_layout_ places it (8), and the
+// emitted source must survive runtime Metal compilation.
+void test_compiler_sync_world_graph_material() {
+    TEST("ShaderCompiler: world-mode Add(Sample,Sample) → GBuffer source + Metal compile");
+    using namespace primal::graphics::material_graph;
+
+    MaterialGraph graph;
+    auto tex_a = std::make_unique<ConstantTextureNode>();
+    tex_a->asset_path = "Assets/A.texture";
+    graph.AddNode(std::move(tex_a));     // 0
+
+    auto sample_a = std::make_unique<SampleTextureNode>();
+    graph.AddNode(std::move(sample_a));  // 1
+
+    auto tex_b = std::make_unique<ConstantTextureNode>();
+    tex_b->asset_path = "Assets/B.texture";
+    graph.AddNode(std::move(tex_b));     // 2
+
+    auto sample_b = std::make_unique<SampleTextureNode>();
+    graph.AddNode(std::move(sample_b));  // 3
+
+    auto add = std::make_unique<AddNode>();
+    graph.AddNode(std::move(add));       // 4
+
+    auto uv = std::make_unique<UVNode>();
+    graph.AddNode(std::move(uv));        // 5
+
+    auto output = std::make_unique<MaterialOutputNode>();
+    graph.AddNode(std::move(output));    // 6
+
+    graph.Connect(0, 0, 1, 0);  // texA → sampleA.texture
+    graph.Connect(5, 0, 1, 1);  // uv   → sampleA.uv
+    graph.Connect(2, 0, 3, 0);  // texB → sampleB.texture
+    graph.Connect(5, 0, 3, 1);  // uv   → sampleB.uv
+    graph.Connect(1, 0, 4, 0);  // rgbaA → add.A
+    graph.Connect(3, 0, 4, 1);  // rgbaB → add.B
+    graph.Connect(4, 0, 6, 0);  // add  → BaseColor
+
+    auto result = primal::graphics::shader_ir::ShaderCompiler::CompileSync(graph);
+    assert(result.success);
+    assert(result.source.find("FragmentOut") != std::string::npos);
+    assert(result.source.find("[[color(3)]]") != std::string::npos);   // velocity RT present
+    assert(result.source.find("sampler(8)") != std::string::npos);     // world layout slot
+    assert(result.source.find("tex0 [[texture(0)]]") != std::string::npos);
+    assert(result.source.find("tex1 [[texture(1)]]") != std::string::npos);
+    // Deferred lighting reads N·L from the normal RT — an unwritten normal
+    // made graph materials render black.
+    assert(result.source.find("out.normal = float4(normalize(in.worldNormal)") != std::string::npos);
 
     std::string err;
     bool compiled = metal_compile_verify(result.source, err);
@@ -1989,6 +2112,8 @@ int main() {
     test_translate_type_inference_across_nodes();
     test_translate_ir_encoding_correctness();
     test_translate_all_output_pins();
+    test_translate_ignores_disconnected_nodes();
+    test_translate_uv_to_base_color();
 
     // Phase 6: MetalEmitter
     test_emitter_empty_ir();
@@ -2031,6 +2156,7 @@ int main() {
     test_compiler_sync_texture_material();
 #ifdef __APPLE__
     test_compiler_sync_compile_verify();
+    test_compiler_sync_world_graph_material();
 #endif
 
     // Phase 9: New Nodes

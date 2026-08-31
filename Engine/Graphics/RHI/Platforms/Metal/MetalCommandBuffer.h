@@ -101,6 +101,8 @@ public:
 
     MTL::RenderCommandEncoder* GetCurrentRenderEncoder() const { return (MTL::RenderCommandEncoder*)currentEncoder_; }
 
+    MTL::CommandBuffer* GetNative() const { return mtlCommandBuffer_; }
+
     // === 资源命令 ===
     void CopyBuffer(ResourceHandle src, ResourceHandle dst, u64 srcOffset, u64 dstOffset, u64 size) override;
     void CopyBufferToTexture(ResourceHandle srcBuffer, ResourceHandle dstTexture, const BufferTextureCopyRegion* regions, u32 regionCount) override;

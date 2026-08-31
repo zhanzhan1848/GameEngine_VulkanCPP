@@ -61,13 +61,13 @@ struct VertexInput {
     VertexElement element;
 };
 
-float3 UnpackNormal(packed_ushort2 p) {
+float3 UnpackNormal(packed_ushort2 p, float normalZSign) {
     float2 f = float2(p);
     f = f * InvIntervals - 1.0f;
     float d = dot(f, f);
-    if (d > 1.0f) return float3(0.0f, 0.0f, 1.0f);
+    if (d > 1.0f) return float3(0.0f, 0.0f, normalZSign);
     float z = sqrt(max(0.0f, 1.0f - d));
-    return float3(f.x, f.y, z);
+    return float3(f.x, f.y, z * normalZSign); // Z sign from ColorTSign bit 25
 }
 
 // === Water Forward ===
@@ -100,7 +100,8 @@ vertex VertexOut forwardWaterVS(
     float4 worldPos = model * float4(rawPos, 1.0);
     out.worldPos = worldPos.xyz;
 
-    float3 rawNormal = UnpackNormal(vertices[vertexId].element.Normal);
+    float normalZSign = (((vertices[vertexId].element).ColorTSign >> 25u) & 1u) != 0u ? 1.0f : -1.0f;
+    float3 rawNormal = UnpackNormal(vertices[vertexId].element.Normal, normalZSign);
     float3x3 normalMatrix = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
     out.worldNormal = normalize(normalMatrix * rawNormal);
 
@@ -202,7 +203,8 @@ vertex VertexOut forwardTransparentVS(
     float4 worldPos = model * float4(rawPos, 1.0);
     out.worldPos = worldPos.xyz;
 
-    float3 rawNormal = UnpackNormal(vertices[vertexId].element.Normal);
+    float normalZSign = (((vertices[vertexId].element).ColorTSign >> 25u) & 1u) != 0u ? 1.0f : -1.0f;
+    float3 rawNormal = UnpackNormal(vertices[vertexId].element.Normal, normalZSign);
     float3x3 normalMatrix = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
     out.worldNormal = normalize(normalMatrix * rawNormal);
 

@@ -337,6 +337,11 @@ bool StandardRenderPipeline::ApplyConfigChanges() {
 // Subsystem Init / Shutdown
 // ============================================================================
 
+void StandardRenderPipeline::SetEditorMode(bool enabled) {
+    editor_mode_ = enabled;
+    if (forward_renderer_) forward_renderer_->SetEditorMode(enabled);
+}
+
 void StandardRenderPipeline::InitializeSubsystems() {
 #ifndef __EMSCRIPTEN__
     // --- Meshlet/Nanite subsystems (not yet ported to WASM/Dawn WGSL) ---
@@ -816,7 +821,13 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     // 在读 view.GetViewMatrix() 之前先让 ECS Camera 组件覆盖 RenderView 的矩阵。
     // 如果场景里没有 Camera entity，SyncCamerasFromECS no-op，view 保留上游 caller
     // 设置的矩阵（保持旧行为兼容）。
-    scene_sync::SyncCamerasFromECS(view);
+    //
+    // Editor camera 旁路：当 view.IsEditorCamera() 为 true 时，跳过 ECS 同步，
+    // 否则场景里的 Camera entity 会每帧把 Editor Camera 的 view/projection
+    // 覆盖掉，导致 orbit/pan/zoom 在画面上完全不可见。
+    if (!view.IsEditorCamera()) {
+        scene_sync::SyncCamerasFromECS(view, view.GetSceneCameraEntityId());
+    }
 
     // T5.2: retain last frame's matrices for SPGI probe reprojection before
     // overwriting with the current camera.
@@ -828,6 +839,8 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     static u32 viewDiag = 0;
     if (viewDiag < 3) {
         std::cout << "[Diag] View: col0=(" << view_matrix_.columns[0][0] << "," << view_matrix_.columns[0][1] << "," << view_matrix_.columns[0][2] << ")"
+                  << " col1=(" << view_matrix_.columns[1][0] << "," << view_matrix_.columns[1][1] << "," << view_matrix_.columns[1][2] << ")"
+                  << " col2=(" << view_matrix_.columns[2][0] << "," << view_matrix_.columns[2][1] << "," << view_matrix_.columns[2][2] << ")"
                   << " col3=(" << view_matrix_.columns[3][0] << "," << view_matrix_.columns[3][1] << "," << view_matrix_.columns[3][2] << ")"
                   << " Proj11=" << proj_matrix_.columns[1][1] << " Proj22=" << proj_matrix_.columns[2][2]
                   << std::endl;
@@ -938,6 +951,9 @@ void StandardRenderPipeline::SyncEntitiesToRenderScene(RenderScene& scene) {
                 proxy.metallic  = material::get_metallic(mc);
                 material::get_base_color(mc, proxy.base_color);
             }
+            // Editor world-material path: entities with a successfully
+            // registered compiled graph render through the generated shader.
+            proxy.graphVariant = forward_renderer_->GetEntityGraphVariant(eid);
 
             scene.UpdateProxy(eid, proxy);
         }
@@ -952,22 +968,10 @@ id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_cont
                                                          u32 texture_count) {
     if (!forward_renderer_ || geometry_content_id == id::invalid_id) return id::invalid_id;
 
-    // Extract texture IDs (with fallback to invalid_id)
-    id::id_type albedo_id = (texture_count > 0) ? texture_content_ids[0] : id::invalid_id;
-    id::id_type normal_id = (texture_count > 1) ? texture_content_ids[1] : id::invalid_id;
-    id::id_type orm_id    = (texture_count > 2) ? texture_content_ids[2] : id::invalid_id;
-
-    // Register mesh resource with ForwardSceneRenderer
-    u32 slot = forward_renderer_->RegisterMeshResource(
-        geometry_content_id, albedo_id, normal_id, orm_id);
-
-    if (slot == (u32)-1) {
-        std::cerr << "[StandardRenderPipeline] RegisterMeshEntity: failed for geometry "
-                  << geometry_content_id << std::endl;
-        return id::invalid_id;
-    }
-
-    // Create ECS entity with identity transform
+    // Create ECS entity FIRST so we have a unique id to pass to
+    // RegisterMeshResource. The mesh's entity_id is what mesh_id_to_index_
+    // is keyed by — if multiple entities share the same geometry asset we
+    // must NOT collide, so each entity gets its own mesh registration.
     transform::init_info tf{};
     tf.position[0] = 0.f; tf.position[1] = 0.f; tf.position[2] = 0.f;
     tf.rotation[0] = 0.f; tf.rotation[1] = 0.f;
@@ -977,13 +981,31 @@ id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_cont
     game_entity::entity_info info{};
     info.transform = &tf;
 
+    id::id_type albedo_id = (texture_count > 0) ? texture_content_ids[0] : id::invalid_id;
+    id::id_type normal_id = (texture_count > 1) ? texture_content_ids[1] : id::invalid_id;
+    id::id_type orm_id    = (texture_count > 2) ? texture_content_ids[2] : id::invalid_id;
+    material::init_info material_info{};
+    material_info.albedo_texture = albedo_id;
+    material_info.normal_texture = normal_id;
+    material_info.orm_texture = orm_id;
+    info.material = &material_info;
+
     game_entity::entity entity = game_entity::create(info);
     if (!entity.is_valid()) {
-        forward_renderer_->UnregisterMeshResource(slot);
+        return id::invalid_id;
+    }
+    const id::id_type eid = entity.get_id();
+
+    u32 slot = forward_renderer_->RegisterMeshResource(
+        geometry_content_id, albedo_id, normal_id, orm_id, eid);
+
+    if (slot == (u32)-1) {
+        std::cerr << "[StandardRenderPipeline] RegisterMeshEntity: failed for geometry "
+                  << geometry_content_id << std::endl;
+        game_entity::remove(game_entity::entity_id{eid});
         return id::invalid_id;
     }
 
-    id::id_type eid = entity.get_id();
     static_entity_ids_.push_back(eid);
     static_mesh_slot_indices_.push_back(slot);
 
@@ -991,6 +1013,8 @@ id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_cont
 }
 
 void StandardRenderPipeline::UnregisterMeshEntity(id::id_type entity_id) {
+    if (forward_renderer_) forward_renderer_->ClearEntityGraphMaterial(entity_id);
+
     // Find and remove from static entity lists
     for (size_t i = 0; i < static_entity_ids_.size(); i++) {
         if (static_entity_ids_[i] == entity_id) {
@@ -2073,7 +2097,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             forward_renderer_->SetGeometryEntities(geometry_entity_ids_);
         }
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
-                                   target, cbIdx % 3);
+                                   target, cbIdx % 3, targetDesc.format);
 
         // PCG SDF: dispatch voxelization via data_provider_ when set (Strategy
         // pattern). This mirrors the path in Render() at line ~1644 but for
@@ -2951,7 +2975,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
         }
 
         forward_renderer_->Render(cmd, view_matrix_, proj_matrix_, camera_position_,
-                                   target, cbIdx % 3);
+                                   target, cbIdx % 3, targetDesc.format);
 
         // PCG SDF: dispatch voxelization + issue readback after scene render
         auto& gsdf = nanite::GlobalSDF::Get();

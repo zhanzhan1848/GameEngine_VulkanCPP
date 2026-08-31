@@ -3,6 +3,7 @@
 #include "MetalCore.h"
 #include "MetalResource.h"
 #include "MetalCamera.h"
+#include <iostream>
 #include "MetalShader.h"
 #include "MetalGPass.h"
 #include "MetalLight.h"
@@ -132,7 +133,14 @@ namespace primal::graphics::metal::ssao
 
     bool initialize()
     {
-        return create_ssao_texture(initial_dimensions) && create_pipeline_state();
+        // Avalonia editor / contexts without the precompiled engine shaders
+        // blob will fail create_pipeline_state (no shader available). Treat
+        // that as a soft failure — the SSAO pass just won't run, but the rest
+        // of graphics::initialize should still succeed.
+        if (!create_pipeline_state()) {
+            std::cerr << "[MetalSSAO] pipeline state unavailable; SSAO pass disabled." << std::endl;
+        }
+        return create_ssao_texture(initial_dimensions);
     }   
 
     void shutdown()
@@ -166,6 +174,7 @@ namespace primal::graphics::metal::ssao
 
     void ssao_pass(MTL::CommandBuffer* buffer, const metal_frame_info& metal_info)
     {
+        if (!ssao_pipeline_state) return;
         const u32 frame_index{ metal_info.frame_index };
 		MTL::Buffer* current_non_cullable_light_buffer{ light::non_cullable_light_buffer(frame_index) };
 
@@ -190,6 +199,7 @@ namespace primal::graphics::metal::ssao
 
     void ssao_blur(MTL::CommandBuffer* buffer, const metal_frame_info& metal_info)
     {
+        if (!ssao_blur_pipeline_state) return;
         if (metal_info.surface_width != ssao_params.view_width &&
 			metal_info.surface_height != ssao_params.view_height &&
 			math::is_equal(metal_info.camera->field_of_view(), ssao_params.camera_fov))

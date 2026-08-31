@@ -975,4 +975,100 @@ namespace primal::tools
 
 		return true;
 	}
+
+	// Walks a single mesh entry inside a cooked scene_data blob and reads only
+	// the metadata the editor needs (name, lod_id, material_idx, vertex/index
+	// counts). Buffers after the headers are skipped in their entirety.
+	// Mirrors the field order in pack_mesh_data (Geometry.cpp pack_mesh_data).
+	void skip_mesh_metadata_only(utl::blob_stream_reader& blob, submesh_meta& meta)
+	{
+		// Name
+		const u32 name_len{ blob.read<u32>() };
+		if (name_len > 0)
+		{
+			std::string name(name_len, '\0');
+			blob.read(reinterpret_cast<u8*>(name.data()), name_len);
+			meta.name = std::move(name);
+		}
+
+		meta.lod_id        = blob.read<u32>();
+		meta.material_idx  = blob.read<u32>();
+		const u32 elem_size{ blob.read<u32>() };
+		blob.skip(sizeof(u32)); // elements_type
+		const u32 num_vertices{ blob.read<u32>() };
+		const u32 index_size{ blob.read<u32>() };
+		const u32 num_indices{ blob.read<u32>() };
+		blob.skip(sizeof(f32)); // lod_threshold
+
+		meta.num_vertices = num_vertices;
+		meta.num_indices  = num_indices;
+
+		blob.skip(12 * num_vertices);                  // position_buffer
+		blob.skip((size_t)elem_size * num_vertices);   // element_buffer
+		blob.skip((size_t)index_size * num_indices);   // index_buffer
+
+		// Meshlets (MSHL magic + counts + payloads)
+		const u32 magic_mshl{ blob.read<u32>() };
+		(void)magic_mshl;
+		const u32 meshlet_count{ blob.read<u32>() };
+		blob.skip((size_t)meshlet_count * sizeof(mesh::meshlet));
+		const u32 meshlet_vert_count{ blob.read<u32>() };
+		blob.skip((size_t)meshlet_vert_count * sizeof(u32));
+		const u32 meshlet_tri_count{ blob.read<u32>() };
+		blob.skip((size_t)meshlet_tri_count * sizeof(u8));
+
+		// SDF block
+		const u32 magic_sdf{ blob.read<u32>() };
+		(void)magic_sdf;
+		blob.skip(sizeof(u32) * 3); // resolution
+		blob.skip(sizeof(f32) * 6); // bounds_min, bounds_max
+		const u32 sdf_data_size{ blob.read<u32>() };
+		blob.skip((size_t)sdf_data_size * sizeof(u16));
+		const u32 voxel_size{ blob.read<u32>() };
+		blob.skip((size_t)voxel_size * sizeof(u8));
+		const u32 vector_field_size{ blob.read<u32>() };
+		blob.skip((size_t)vector_field_size * sizeof(u16));
+	}
+
+	bool extract_submesh_metadata(const u8* buffer, u32 buffer_size, utl::vector<submesh_meta>& out)
+	{
+		out.clear();
+		if (!buffer || buffer_size == 0) return false;
+
+		utl::blob_stream_reader blob{ buffer };
+
+		// scene name
+		const u32 scene_name_len{ blob.read<u32>() };
+		blob.skip(scene_name_len);
+
+		// materials (skip the whole block)
+		const u32 material_count{ blob.read<u32>() };
+		for (u32 i{ 0 }; i < material_count; ++i)
+		{
+			blob.skip(blob.read<u32>());  // name
+			blob.skip(blob.read<u32>());  // diffuse_texture
+			blob.skip(blob.read<u32>());  // normal_texture
+		}
+
+		// LOD groups
+		const u32 lod_count{ blob.read<u32>() };
+		u32 running_mesh_index{ 0 };
+		for (u32 lod_idx{ 0 }; lod_idx < lod_count; ++lod_idx)
+		{
+			// LOD name
+			blob.skip(blob.read<u32>());
+
+			const u32 mesh_count{ blob.read<u32>() };
+			for (u32 mesh_idx{ 0 }; mesh_idx < mesh_count; ++mesh_idx)
+			{
+				submesh_meta meta{};
+				meta.lod_index  = lod_idx;
+				meta.mesh_index = running_mesh_index++;
+				skip_mesh_metadata_only(blob, meta);
+				out.emplace_back(std::move(meta));
+			}
+		}
+
+		return true;
+	}
 }

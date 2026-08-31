@@ -1,0 +1,63 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+  <!-- COLOR TOKENS
+       "Quiet Neon Deck" — calmer cousin of the cyberpunk theme.
+       Deep blue navy base + soft electric blue + warm coral accent.
+       Lower saturation, more contrast on neutrals, no harsh floods. -->
+  <Color x:Key="VoidColor">#0B0E1A</Color>
+  <Color x:Key="SlateColor">#131726</Color>
+  <Color x:Key="PanelColor">#1A2030</Color>
+  <Color x:Key="PanelHoverColor">#222838</Color>
+  <Color x:Key="ElectricBlueColor">#6FA8FF</Color>
+  <Color x:Key="ElectricBlueDeepColor">#3D7BD9</Color>
+  <Color x:Key="CoralColor">#FF7B7B</Color>
+  <Color x:Key="CoralDeepColor">#D85858</Color>
+  <Color x:Key="MintColor">#7BC9A6</Color>
+  <Color x:Key="AmberColor">#E6B25F</Color>
+  <Color x:Key="PrimaryTextColor">#E6E9F2</Color>
+  <Color x:Key="SecondaryTextColor">#A8B0C6</Color>
+  <Color x:Key="MutedTextColor">#6C7491</Color>
+  <Color x:Key="HairlineColor">#2C3349</Color>
+
+  <!-- BRUSHES -->
+  <SolidColorBrush x:Key="VoidBrush"           Color="{StaticResource VoidColor}"/>
+  <SolidColorBrush x:Key="SlateBrush"          Color="{StaticResource SlateColor}"/>
+  <SolidColorBrush x:Key="PanelBrush"          Color="{StaticResource PanelColor}"/>
+  <SolidColorBrush x:Key="PanelHoverBrush"     Color="{StaticResource PanelHoverColor}"/>
+  <SolidColorBrush x:Key="ElectricBlueBrush"   Color="{StaticResource ElectricBlueColor}"/>
+  <SolidColorBrush x:Key="ElectricBlueDeepBrush" Color="{StaticResource ElectricBlueDeepColor}"/>
+  <SolidColorBrush x:Key="CoralBrush"          Color="{StaticResource CoralColor}"/>
+  <SolidColorBrush x:Key="CoralDeepBrush"      Color="{StaticResource CoralDeepColor}"/>
+  <SolidColorBrush x:Key="MintBrush"           Color="{StaticResource MintColor}"/>
+  <SolidColorBrush x:Key="AmberBrush"          Color="{StaticResource AmberColor}"/>
+  <SolidColorBrush x:Key="PrimaryTextBrush"    Color="{StaticResource PrimaryTextColor}"/>
+  <SolidColorBrush x:Key="SecondaryTextBrush"  Color="{StaticResource SecondaryTextColor}"/>
+  <SolidColorBrush x:Key="MutedTextBrush"      Color="{StaticResource MutedTextColor}"/>
+  <SolidColorBrush x:Key="HairlineBrush"       Color="{StaticResource HairlineColor}"/>
+
+  <!-- Translucent overlays -->
+  <SolidColorBrush x:Key="BlueTint12"          Color="#1F6FA8FF"/>
+  <SolidColorBrush x:Key="BlueTint25"          Color="#406FA8FF"/>
+  <SolidColorBrush x:Key="CoralTint12"         Color="#1FFF7B7B"/>
+
+  <!-- SHADOW PRESETS — soft 2-layer, no harsh flood glow -->
+  <sys:String x:Key="SoftShadow">0 2 6 0 #66000018,0 8 18 0 #33000018</sys:String>
+  <sys:String x:Key="LiftShadow">0 1 2 0 #33000018,0 6 14 0 #22000018</sys:String>
+  <sys:String x:Key="SoftBlueGlow">0 0 10 2 #406FA8FF</sys:String>
+  <sys:String x:Key="SoftCoralGlow">0 0 10 2 #40FF7B7B</sys:String>
+
+  <!-- FONT FAMILIES (kept from previous theme; OFL licensed) -->
+  <FontFamily x:Key="FontDisplay">avares://PrimalEditor_Avalonia/Assets/Fonts/Rajdhani-SemiBold.ttf#Rajdhani SemiBold</FontFamily>
+  <FontFamily x:Key="FontUI">avares://PrimalEditor_Avalonia/Assets/Fonts/Rajdhani-Regular.ttf#Rajdhani</FontFamily>
+  <FontFamily x:Key="FontMono">avares://PrimalEditor_Avalonia/Assets/Fonts/JetBrainsMono-Regular.ttf#JetBrains Mono</FontFamily>
+
+  <!-- =========================================================== -->
+  <!-- (Transition presets are inlined into each style below;       -->
+  <!-- Avalonia XAML cannot resolve transition target properties     -->
+  <!-- when the <Transitions> resource is detached from a Control    -->
+  <!-- scope, so we keep them next to the controls that use them.)   -->
+  <!-- =========================================================== -->
+
+</ResourceDictionary>

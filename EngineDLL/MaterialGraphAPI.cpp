@@ -168,8 +168,7 @@ EDITOR_INTERFACE u32 GraphConnect(u32 graph_id, u32 from_node, u32 from_pin,
 
     if (from_node == 0 || to_node == 0) return 1;
     // Convert 1-based API ids to 0-based internal ids.
-    graphs[idx]->Connect(from_node - 1, from_pin, to_node - 1, to_pin);
-    return 0;
+    return graphs[idx]->Connect(from_node - 1, from_pin, to_node - 1, to_pin) ? 0 : 1;
 }
 
 EDITOR_INTERFACE u32 GraphDisconnect(u32 graph_id, u32 from_node, u32 from_pin,
@@ -345,6 +344,42 @@ EDITOR_INTERFACE u32 GraphEvaluateToMaterialInfo(u32 graph_id,
     out->albedo_texture  = static_cast<u64>(result.info.albedo_texture);
     out->normal_texture  = static_cast<u64>(result.info.normal_texture);
     out->orm_texture     = static_cast<u64>(result.info.orm_texture);
+    return 0;
+}
+
+// Raw pointer accessor for callers that need to pass a const void* into
+// other ABIs (currently ShaderCompilerAPI::CompileMaterialShader, which
+// takes const void* graph_ptr). Returns nullptr if graph_id is invalid;
+// callers must check before dereferencing.
+EDITOR_INTERFACE void* GetMaterialGraphRawPtr(u32 graph_id) {
+    return GetMaterialGraphById(graph_id);
+}
+
+// --- Editor canvas position (persisted to sidecar JSON) ---
+
+EDITOR_INTERFACE u32 GraphGetNodePosition(u32 graph_id, u32 node_id,
+                                          f32* out_x, f32* out_y) {
+    u32 idx = slot_to_index(graph_id);
+    if (idx == UINT32_MAX || !out_x || !out_y) return 1;
+    if (node_id == 0) return 1;
+    const auto& nodes = graphs[idx]->GetNodes();
+    u32 internal_id = node_id - 1;
+    if (internal_id >= nodes.size()) return 1;
+    *out_x = nodes[internal_id]->position.x;
+    *out_y = nodes[internal_id]->position.y;
+    return 0;
+}
+
+EDITOR_INTERFACE u32 GraphSetNodePosition(u32 graph_id, u32 node_id,
+                                          f32 x, f32 y) {
+    u32 idx = slot_to_index(graph_id);
+    if (idx == UINT32_MAX) return 1;
+    if (node_id == 0) return 1;
+    const auto& nodes = graphs[idx]->GetNodes();
+    u32 internal_id = node_id - 1;
+    if (internal_id >= nodes.size()) return 1;
+    nodes[internal_id]->position.x = x;
+    nodes[internal_id]->position.y = y;
     return 0;
 }
 

@@ -102,13 +102,20 @@ public:
         }
         ss << "    VertexOut in [[stage_in]],\n";
         ss << "    constant SceneData& sceneData [[buffer(1)]]";
-        if (has_textures) {
-            for (u16 slot = 0; slot <= max_tex_slot; slot++) {
-                ss << ",\n    texture2d<float> tex" << slot
-                   << " [[texture(" << slot << ")]]";
+            if (has_textures) {
+                for (u16 slot = 0; slot <= max_tex_slot; slot++) {
+                    ss << ",\n    texture2d<float> tex" << slot
+                       << " [[texture(" << slot << ")]]";
+                }
+                // Metal has separate texture/sampler namespaces, but the RHI
+                // maps descriptor binding numbers directly to native argument
+                // indices. The preview material layout reserves bindings 0..3
+                // for textures and binding 4 for the sampler; the world graph
+                // material layout reserves 0..7 for textures with the sampler
+                // at binding 8 (see ForwardSceneRenderer's graph_material_set_layout_).
+                ss << ",\n    sampler defaultSampler [[sampler("
+                   << (preview_mode ? 4 : 8) << ")]]";
             }
-            ss << ",\n    sampler defaultSampler [[sampler(0)]]";
-        }
         ss << "\n) {\n";
         if (preview_mode) {
             // No output struct needed — direct return
@@ -125,7 +132,7 @@ public:
 
         // --- Pass 3: Emit instructions ---
         for (auto& inst : instructions) {
-            EmitInstruction(ss, inst, constants, reg_types, tex_param_names);
+            EmitInstruction(ss, inst, constants, reg_types, tex_param_names, preview_mode);
         }
 
         // --- Pass 4: Output assignments ---
@@ -166,6 +173,9 @@ public:
             if (!wrote_albedo) {
                 ss << "    out.albedo = float4(1.0f, 1.0f, 1.0f, 1.0f);\n";
             }
+            // The deferred lighting pass reconstructs N·L from this RT;
+            // leaving it unwritten made graph materials render black.
+            ss << "    out.normal = float4(normalize(in.worldNormal) * 0.5f + 0.5f, 1.0f);\n";
             if (!wrote_orm_component && !has_output[0]) {
                 // Only set default ORM if nothing was written at all
                 ss << "    out.orm = float4(1.0f, 0.5f, 0.0f, 1.0f);\n";
@@ -232,7 +242,8 @@ private:
                          const ShaderIRInstruction& inst,
                          const utl::vector<f32>& constants,
                          const utl::vector<u8>& reg_types,
-                         const std::unordered_map<u16, std::string>& tex_names) {
+                         const std::unordered_map<u16, std::string>& tex_names,
+                         bool preview_mode) {
         switch (inst.opcode) {
             case ShaderIROpcode::NOP:
             case ShaderIROpcode::STORE_OUTPUT:
@@ -265,7 +276,13 @@ private:
                 break;
 
             case ShaderIROpcode::LOAD_TIME:
-                ss << "    r" << inst.dst << " = sceneData.time;\n";
+                // Preview runs the real clock through its own SceneData whose
+                // layout this emission owns. The world SceneData is a different
+                // struct (model matrix first), so a bare {float time} at
+                // buffer(1) would read model.m00 — freeze to a constant until
+                // per-material time streaming lands (phase 2).
+                ss << "    r" << inst.dst << " = "
+                   << (preview_mode ? "sceneData.time" : "0.0f") << ";\n";
                 break;
 
             case ShaderIROpcode::LOAD_UV:
@@ -389,6 +406,20 @@ private:
                    << "." << comps[cx] << comps[cy] << comps[cz] << comps[cw] << ";\n";
                 break;
             }
+
+            case ShaderIROpcode::FLOAT3_TO_FLOAT4:
+                // Upcast a Float3 to Float4 by padding alpha = 1.0f. Used
+                // when a Float3 source (e.g. ConstantFloat3) is wired into
+                // the MaterialOutput BaseColor pin (which is Float4).
+                ss << "    r" << inst.dst << " = float4(r"
+                   << inst.src0 << ", 1.0f);\n";
+                break;
+
+            case ShaderIROpcode::FLOAT2_TO_FLOAT4:
+                // UV/Float2 wired to BaseColor is visualized as RG.
+                ss << "    r" << inst.dst << " = float4(r"
+                   << inst.src0 << ", 0.0f, 1.0f);\n";
+                break;
         }
     }
 };

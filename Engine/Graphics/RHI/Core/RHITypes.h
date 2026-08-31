@@ -1034,6 +1034,7 @@ struct TextureViewDesc {
  */
 struct SwapChainDesc {
     platform::window_handle window{ nullptr };  ///< 窗口句柄
+    void* external_mtk_view{ nullptr };         ///< 可选的外部 MTKView(Metal-only);提供时跳过自创建 MTKView,直接挂载
     u32 width{ 0 };                  ///< 宽度
     u32 height{ 0 };                 ///< 高度
     DataFormat format{ DataFormat::BGRA8_UNorm };               ///< 颜色格式

@@ -2,14 +2,29 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="PrimalEditor_Avalonia.App"
              xmlns:local="using:PrimalEditor_Avalonia"
-             RequestedThemeVariant="Default">
-             <!-- "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options. -->
+             xmlns:dockTheme="using:Dock.Avalonia.Themes.Fluent"
+             xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
+             xmlns:th="using:Avalonia.Styling"
+             RequestedThemeVariant="{x:Static th:ThemeVariant.Dark}">
 
     <Application.DataTemplates>
         <local:ViewLocator/>
     </Application.DataTemplates>
-  
+
+    <!-- Global token resources (colors/brushes/fonts/shadow presets). -->
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceInclude Source="avares://PrimalEditor_Avalonia/Themes/CyberpunkTheme.axaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+
     <Application.Styles>
         <FluentTheme />
+        <dockTheme:DockFluentTheme />
+        <StyleInclude Source="avares://NodifyM.Avalonia/Styles/ControlStyles.axaml" />
+        <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/CyberpunkTheme.Styles.axaml" />
+        <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/Controls/CyberCorner.axaml" />
     </Application.Styles>
 </Application>

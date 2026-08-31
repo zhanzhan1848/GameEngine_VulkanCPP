@@ -70,15 +70,15 @@ struct VertexInput {
     VertexElement element;
 };
 
-float3 UnpackNormal(packed_ushort2 p) {
+float3 UnpackNormal(packed_ushort2 p, float normalZSign) {
     float2 f = float2(p);
     f = f * InvIntervals - 1.0f;
     float d = dot(f, f);
     if (d > 1.0f) {
-        return float3(0.0f, 0.0f, 1.0f);
+        return float3(0.0f, 0.0f, normalZSign);
     }
     float z = sqrt(max(0.0f, 1.0f - d));
-    return float3(f.x, f.y, z);
+    return float3(f.x, f.y, z * normalZSign); // Z sign from ColorTSign bit 25
 }
 
 vertex VertexOut vertexMain(
@@ -109,8 +109,9 @@ vertex VertexOut vertexMain(
     float3 rawPos = vertices[vertexId].position;
     VertexElement element = vertices[vertexId].element;
 
-    float3 rawNormal = UnpackNormal(element.Normal);
-    float3 rawTangent = UnpackNormal(element.Tangent);
+    float normalZSign = (((element).ColorTSign >> 25u) & 1u) != 0u ? 1.0f : -1.0f;
+    float3 rawNormal = UnpackNormal(element.Normal, normalZSign);
+    float3 rawTangent = UnpackNormal(element.Tangent, 1.0f);
     float2 rawUV = element.UV;
 
     float4 worldPos = model * float4(rawPos, 1.0);

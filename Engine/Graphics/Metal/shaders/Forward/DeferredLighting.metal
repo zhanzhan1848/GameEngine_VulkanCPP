@@ -111,6 +111,9 @@ struct ViewData {
     float4x4 invViewProjection;
 };
 
+// LightParameters / DirectionalLightParameters / ForwardLightBuffer come from
+// RHIShaderCommon.metal (included above) and byte-match rhi::ForwardLightBuffer.
+
 // ================================================================================================
 // Vertex Shader
 // ================================================================================================
@@ -245,6 +248,7 @@ fragment float4 fragmentLighting_v3(
     VertexOut in [[stage_in]],
     constant ViewData& viewData [[buffer(0)]],
     constant SceneData& sceneData [[buffer(1)]],
+    constant ForwardLightBuffer& lightBuffer [[buffer(13)]],
 
     texture2d<float> albedoTex [[texture(2)]],
     texture2d<float> normalTex [[texture(3)]],
@@ -277,17 +281,17 @@ fragment float4 fragmentLighting_v3(
     float roughness = max(orm.g, 0.04);
     float metallic = orm.b;
 
-    // View and light directions
+    // View direction
     float3 V = normalize(sceneData.viewPos.xyz - worldPos);
-    float3 L = normalize(sceneData.lightPos.xyz);
-    float3 H = normalize(V + L);
 
     // PBR: F0 (base reflectivity)
     float3 F0 = float3(0.04);
     F0 = mix(F0, albedo, metallic);
 
-    // Direct lighting — Cook-Torrance BRDF
-    float NdotL = max(dot(N, L), 0.0);
+    // ---------------------------------------------------------------------------
+    // Direct lighting — all scene lights (directionals + point/spot).
+    // ---------------------------------------------------------------------------
+    float3 Lo = float3(0.0);
 
     // Specular
     float3 specBRDF = SpecularBRDF(N, V, L, roughness, F0);
@@ -322,7 +326,6 @@ fragment float4 fragmentLighting_v3(
             shadow = (shadowCoord.z - 0.005) > shadowDepth ? 0.3 : 1.0;
         }
     }
-    Lo *= shadow;
 
     // IBL ambient
     float3 F_ibl = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);

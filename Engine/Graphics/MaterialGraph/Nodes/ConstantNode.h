@@ -102,6 +102,11 @@ public:
     const MaterialParamDescriptor* GetParamDescriptors(u32& c) const override { c = 1; return kParams; }
     const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 1; return kPins; }
 
+    bool SetParamByName(const char* n, math::v2 v) override {
+        if (std::strcmp(n, "value") == 0) { value = v; return true; }
+        return false;
+    }
+
 private:
     static const MaterialParamDescriptor kParams[];
     static const MaterialPinDescriptor kPins[];

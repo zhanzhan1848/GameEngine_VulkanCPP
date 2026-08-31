@@ -63,46 +63,28 @@ struct MaterialPin {
     u32 index{0};
 
     MaterialFloatData* AsFloat() const {
-        if (data) {
-            assert(data->type == MaterialDataType::Float && "Pin type mismatch: expected Float");
-            return static_cast<MaterialFloatData*>(data);
-        }
-        return nullptr;
+        return data && data->type == MaterialDataType::Float
+            ? static_cast<MaterialFloatData*>(data) : nullptr;
     }
     MaterialFloat2Data* AsFloat2() const {
-        if (data) {
-            assert(data->type == MaterialDataType::Float2 && "Pin type mismatch: expected Float2");
-            return static_cast<MaterialFloat2Data*>(data);
-        }
-        return nullptr;
+        return data && data->type == MaterialDataType::Float2
+            ? static_cast<MaterialFloat2Data*>(data) : nullptr;
     }
     MaterialFloat3Data* AsFloat3() const {
-        if (data) {
-            assert(data->type == MaterialDataType::Float3 && "Pin type mismatch: expected Float3");
-            return static_cast<MaterialFloat3Data*>(data);
-        }
-        return nullptr;
+        return data && data->type == MaterialDataType::Float3
+            ? static_cast<MaterialFloat3Data*>(data) : nullptr;
     }
     MaterialFloat4Data* AsFloat4() const {
-        if (data) {
-            assert(data->type == MaterialDataType::Float4 && "Pin type mismatch: expected Float4");
-            return static_cast<MaterialFloat4Data*>(data);
-        }
-        return nullptr;
+        return data && data->type == MaterialDataType::Float4
+            ? static_cast<MaterialFloat4Data*>(data) : nullptr;
     }
     MaterialTextureData* AsTexture() const {
-        if (data) {
-            assert(data->type == MaterialDataType::Texture2D && "Pin type mismatch: expected Texture2D");
-            return static_cast<MaterialTextureData*>(data);
-        }
-        return nullptr;
+        return data && data->type == MaterialDataType::Texture2D
+            ? static_cast<MaterialTextureData*>(data) : nullptr;
     }
     MaterialBoolData* AsBool() const {
-        if (data) {
-            assert(data->type == MaterialDataType::Bool && "Pin type mismatch: expected Bool");
-            return static_cast<MaterialBoolData*>(data);
-        }
-        return nullptr;
+        return data && data->type == MaterialDataType::Bool
+            ? static_cast<MaterialBoolData*>(data) : nullptr;
     }
 };
 

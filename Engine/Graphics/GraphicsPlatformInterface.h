@@ -27,6 +27,8 @@ namespace primal::graphics {
 		struct
 		{
 			surface(*create)(platform::window);
+			surface(*create_external)(platform::window);
+			void*(*get_native_view)(surface_id);
 			void(*remove)(surface_id);
 			void(*resize)(surface_id, u32, u32);
 			u32(*width)(surface_id);
@@ -39,7 +41,7 @@ namespace primal::graphics {
 			// rhi::ResourceHandle) to keep this deprecated header decoupled
 			// from the RHI layer.
 			u32(*blit_and_present)(surface_id, u64);
-		} surface_ops;
+		} surface;
 
 		struct
 		{
@@ -61,7 +63,15 @@ namespace primal::graphics {
 			void(*remove)(camera_id);
 			void(*set_parameter)(camera_id, camera_parameter::parameter, const void *const, u32);
 			void(*get_parameter)(camera_id, camera_parameter::parameter, void *const, u32);
-		} camera_ops;
+			// Refresh the platform camera's view/projection matrices from the
+			// camera entity's current world transform. Required by callers that
+			// do not go through the legacy `end_frame` path (e.g. the
+			// StandardRenderPipeline/Path B) — without it, view()/projection()
+			// keep returning the values cached at construction time and any
+			// subsequent SetEntityTransform on the camera entity is silently
+			// ignored.
+			void(*update)(camera_id);
+		} camera;
 
 		struct {
 			id::id_type(*add_submesh)(const u8*&);

@@ -722,6 +722,173 @@ namespace primal::tools
 			texture_info_from_metadata(scratch.GetMetadata(), data->info);
 		}
 	}
+
+	/// ABI-visible cooked result written into caller-supplied buffers.
+	struct cook_result
+	{
+		u32 info_width{ 0 };
+		u32 info_height{ 0 };
+		u32 info_array_size{ 0 };
+		u32 info_mip_levels{ 0 };
+		u32 info_format{ 0 };
+		u32 info_flags{ 0 };
+		u32 import_error{ 0 };
+		u32 sources_len{ 0 };
+		u32 source_count{ 0 };
+		u32 settings_dimension{ 0 };
+		u32 settings_mip_levels{ 0 };
+		f32 settings_alpha_threshold{ 0.0f };
+		u32 settings_prefer_bc7{ 0 };
+		u32 settings_output_format{ 0 };
+		u32 settings_compress{ 0 };
+		u32 slices_size{ 0 };
+		u32 icon_size{ 0 };
+		u32 import_succeeded{ 0 };
+	};
+
+	// Maps the managed editor TextureFormat enum (0=R8G8B8A8_UNORM,1=BC7,
+	// 2=BC1,3=BC3,4=BC5) to the native DXGI_FORMAT the cook pipeline expects.
+	static inline u32 map_managed_output_format(u32 managed)
+	{
+		static constexpr u32 map[] = {
+			DXGI_FORMAT_R8G8B8A8_UNORM,
+			DXGI_FORMAT_BC7_UNORM,
+			DXGI_FORMAT_BC1_UNORM,
+			DXGI_FORMAT_BC3_UNORM,
+			DXGI_FORMAT_BC5_UNORM,
+		};
+		return managed < 5 ? map[managed] : DXGI_FORMAT_UNKNOWN;
+	}
+
+	/// Reads `input` (PNG / TGA / HDR / DDS), runs the full settings-driven
+	/// cook pipeline, and writes the cooked slices + icon into caller-
+	/// supplied buffers. Returns 1 on success, 0 on any failure.
+	EDITOR_INTERFACE u32 CookTexture(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		u8* slices_buffer, u32 slices_capacity, u32* out_slices_size,
+		u8* icon_buffer,   u32 icon_capacity,   u32* out_icon_size,
+		cook_result* out_info)
+	{
+		if (!input || !slices_buffer || !out_slices_size || !out_icon_size || !out_info)
+			return 0;
+
+		*out_slices_size = 0;
+		*out_icon_size = 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = map_managed_output_format(output_format);
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		if (data.info.import_error != 0) return 0;
+		if (!data.subresource_data || data.subresource_size == 0) return 0;
+		if (data.subresource_size > slices_capacity) return 0;
+
+		std::memcpy(slices_buffer, data.subresource_data, data.subresource_size);
+		*out_slices_size = data.subresource_size;
+
+		if (data.icon && data.icon_size > 0)
+		{
+			if (!icon_buffer) return 0;
+			if (data.icon_size > icon_capacity)
+			{
+				CoTaskMemFree(data.subresource_data);
+				CoTaskMemFree(data.icon);
+				return 0;
+			}
+			std::memcpy(icon_buffer, data.icon, data.icon_size);
+			*out_icon_size = data.icon_size;
+		}
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->import_succeeded    = 1;
+
+		CoTaskMemFree(data.subresource_data);
+		CoTaskMemFree(data.icon);
+		return 1;
+	}
+
+	/// Probe how many bytes the cook pipeline will produce for the given
+	/// `input` and `settings`. Runs the full cook and discards the buffer,
+	/// reporting only the produced sizes via `out_info`. Call this before
+	/// CookTexture() to size the caller's destination buffers correctly.
+	EDITOR_INTERFACE u32 CookTextureQuery(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		cook_result* out_info)
+	{
+		if (!input || !out_info) return 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = map_managed_output_format(output_format);
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->slices_size         = data.subresource_size;
+		out_info->icon_size           = data.icon_size;
+
+		if (data.info.import_error != 0)
+		{
+			CoTaskMemFree(data.subresource_data);
+			CoTaskMemFree(data.icon);
+			return 0;
+		}
+
+		out_info->import_succeeded = 1;
+		CoTaskMemFree(data.subresource_data);
+		CoTaskMemFree(data.icon);
+		return 1;
+	}
 }
 #elif defined(__clang__)
 
@@ -736,6 +903,8 @@ namespace primal::tools
 #include <Foundation/Foundation.hpp>
 #include <CoreServices/CoreServices.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 #include "NormalMapIdentification.h"
 
@@ -1547,6 +1716,57 @@ namespace primal::tools
 			// 创建一个ScratchImage对象来存储加载的图像数据
 			ScratchImage scratch;
 
+			// ImageIO/CoreGraphics draws into an 8-bit bitmap context even when
+			// the source is Radiance HDR.  Labelling those bytes RGBA32Float
+			// produced a cooked texture whose metadata and payload disagreed and
+			// permanently discarded values above 1.0. Decode .hdr sources as
+			// actual floats before entering the generic ImageIO path.
+			const std::string sourcePath{file_name};
+			const bool hasHdrExtension = sourcePath.size() >= 4 &&
+				(sourcePath.compare(sourcePath.size() - 4, 4, ".hdr") == 0 ||
+				 sourcePath.compare(sourcePath.size() - 4, 4, ".HDR") == 0);
+			if (hasHdrExtension)
+			{
+				int width = 0, height = 0, channels = 0;
+				float* pixels = stbi_loadf(file_name, &width, &height, &channels, 4);
+				if (!pixels || width <= 0 || height <= 0)
+				{
+					if (pixels) stbi_image_free(pixels);
+					return {};
+				}
+
+				const u64 rowPitch = static_cast<u64>(width) * 4 * sizeof(float);
+				const u64 slicePitch = rowPitch * static_cast<u64>(height);
+				scratch.pixels.resize(slicePitch);
+				std::memcpy(scratch.pixels.data(), pixels, slicePitch);
+				stbi_image_free(pixels);
+
+				scratch.metadata.width = static_cast<u64>(width);
+				scratch.metadata.height = static_cast<u64>(height);
+				scratch.metadata.depth = 1;
+				scratch.metadata.arraySize = 1;
+				scratch.metadata.mipLevels = 1;
+				scratch.metadata.bitsPerPixel = 128;
+				scratch.metadata.bitsPerComponent = 32;
+				scratch.metadata.format = tools::MTLPixelFormatRGBA32Float;
+				scratch.metadata.dimension = MTL::TextureType2D;
+				scratch.metadata.hasAlpha = true;
+				scratch.metadata.isPMAlpha = false;
+				scratch.metadata.isSRGB = false;
+				scratch.m_nimages = 1;
+				scratch.m_images.resize(1);
+				scratch.m_images[0].width = static_cast<u64>(width);
+				scratch.m_images[0].height = static_cast<u64>(height);
+				scratch.m_images[0].format = tools::MTLPixelFormatRGBA32Float;
+				scratch.m_images[0].rowPitch = rowPitch;
+				scratch.m_images[0].slicePitch = slicePitch;
+				scratch.m_images[0].pixels = scratch.pixels.data();
+				data->info.flags |= texture_flags::is_hdr | texture_flags::has_alpha;
+				data->info.flags &= ~texture_flags::is_srgb;
+				data->info.import_error = import_error::succeeded;
+				return scratch;
+			}
+
 			// 创建文件URL
 			CFStringRef cfPath = CFStringCreateWithCString(kCFAllocatorDefault, file_name, kCFStringEncodingUTF8);
 			CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, cfPath, kCFURLPOSIXPathStyle, false);
@@ -1580,16 +1800,17 @@ namespace primal::tools
 			CGImageRef image = CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
 			CFRelease(imageSource);
 
-			u64 bpp = CGImageGetBitsPerPixel(image);
-			if (bpp != 32) {
-				data->info.import_error = import_error::size_mismatch;
-				return {};
-			}
-			
 			if (!image) {
 				data->info.import_error = import_error::load;
 				return {};
 			}
+
+			// CGContextDrawImage normalizes any source pixel format (8-bit
+			// grayscale, 16-bit RGBA, etc.) into the destination buffer
+			// we create below (8-bit per component, 4 channels = 32bpp),
+			// so we accept any source bitsPerPixel here.
+			u64 bpp = CGImageGetBitsPerPixel(image);
+			(void)bpp;
 
 			// 获取图像尺寸和属性
 			u64 width = CGImageGetWidth(image);
@@ -1884,86 +2105,83 @@ namespace primal::tools
 			return scratch;
 		}
 
-		/**
-		 * @brief 确定Metal纹理的输出格式（对应DirectXTex的determine_output_format）
-		 * @param data 纹理数据指针
-		 * @param scratch 临时图像数据
-		 * @param image 源图像指针
-		 * @return 确定的Metal像素格式
-		 */
-		tools::MTLPixelFormat determine_output_format_metal(texture_data *const data, ScratchImage& scratch, const tools::Image *const image)
+	/**
+	 * @brief 确定Metal纹理的输出格式
+	 *
+	 * macOS 上唯一的块压缩器是 astcenc（仅支持 ASTC 4x4 / 6x6 / 8x8）。
+	 * 因此当 compress=true 时，本函数必须始终返回一个 ASTC 格式。
+	 * 如果调用方传入的 output_format 不是 ASTC（例如 RGBA8Unorm 或 BC*），
+	 * 则自动回退到 ASTC_4x4_LDR，并按需升级为 sRGB 变体。
+	 *
+	 * @param data 纹理数据指针
+	 * @param scratch 临时图像数据
+	 * @param image 源图像指针
+	 * @return 确定的Metal像素格式（始终为 ASTC）
+	 */
+	tools::MTLPixelFormat determine_output_format_metal(texture_data *const data, ScratchImage& scratch, const tools::Image *const image)
+	{
+		assert(data && data->import_settings.compress);
+		using namespace primal::content;
+		tools::MTLPixelFormat output_format{ (tools::MTLPixelFormat)data->import_settings.output_format };
+
+		// compress_with_astcenc 仅支持以下 ASTC 块大小
+		auto is_supported_astc = [](tools::MTLPixelFormat f)
 		{
-			assert(data && data->import_settings.compress);
-			using namespace primal::content;
-			const tools::MTLPixelFormat image_format{ image->format };
-			tools::MTLPixelFormat output_format{ (tools::MTLPixelFormat)data->import_settings.output_format };
+			switch (f)
+			{
+			case tools::MTLPixelFormatASTC_4x4_LDR:
+			case tools::MTLPixelFormatASTC_4x4_sRGB:
+			case tools::MTLPixelFormatASTC_6x6_LDR:
+			case tools::MTLPixelFormatASTC_6x6_sRGB:
+			case tools::MTLPixelFormatASTC_8x8_LDR:
+			case tools::MTLPixelFormatASTC_8x8_sRGB:
+				return true;
+			default:
+				return false;
+			}
+		};
 
-			// 如果导入设置明确指定了格式，则使用该格式
-			if (output_format != tools::MTLPixelFormatInvalid)
-			{
-				goto _done;
-			}
-
-			// 如果是HDR纹理，使用BC6H等效的Metal格式
-			if ((data->info.flags & texture_flags::is_hdr) ||
-				image_format == tools::MTLPixelFormatRGBA32Float)
-			{
-				// Metal没有直接的BC6H等效格式，使用RGBA32Float
-				output_format = tools::MTLPixelFormatRGBA32Float;
-			}
-			// 如果源图像是灰度或单通道格式，使用R8格式
-			else if (image_format == tools::MTLPixelFormatR8Unorm)
-			{
-				output_format = tools::MTLPixelFormatR8Unorm;
-			}
-			// 测试是否为法线贴图，如果是则使用RG格式
-			else if (is_normal_map(image))
+		// 如果调用方显式指定了一个受支持的 ASTC 格式，直接使用。
+		// 否则（RGBA8Unorm、BC*、Invalid 等非 ASTC 格式），回退到 ASTC_4x4_LDR，
+		// 因为这是 macOS 上唯一可用的块压缩器。
+		if (!is_supported_astc(output_format))
+		{
+			// 检测法线贴图并设置引擎标志（格式仍用 ASTC）
+			if (is_normal_map(image))
 			{
 				data->info.flags |= texture_flags::is_imported_as_normal_map;
-				output_format = tools::MTLPixelFormatBC5_RGUnorm;
 			}
-			// 默认使用RGBA格式
-			else
+			output_format = tools::MTLPixelFormatASTC_4x4_LDR;
+		}
+
+		// ASTC 格式始终支持 alpha 通道
+		data->info.flags |= texture_flags::has_alpha;
+
+		// 如果源内容是 sRGB，升级到对应的 sRGB ASTC 变体
+		if (scratch.metadata.isSRGB)
+		{
+			switch (output_format)
 			{
-				// Metal的压缩格式选择
-				if (data->import_settings.prefer_bc7)
-				{
-					output_format = tools::MTLPixelFormatBC7_RGBAUnorm_sRGB;
-				}
-				else
-				{
-					// 检查是否有Alpha通道
-					bool hasAlpha = HasAlphaChannel(image_format);
-					if (hasAlpha)
-					{
-						output_format = tools::MTLPixelFormatBC3_RGBA_sRGB;
-					}
-					else
-					{
-						// 无Alpha通道，可以使用压缩格式
-						output_format = tools::MTLPixelFormatASTC_4x4_LDR;
-					}
-				}
+			case tools::MTLPixelFormatASTC_4x4_LDR: return tools::MTLPixelFormatASTC_4x4_sRGB;
+			case tools::MTLPixelFormatASTC_6x6_LDR: return tools::MTLPixelFormatASTC_6x6_sRGB;
+			case tools::MTLPixelFormatASTC_8x8_LDR: return tools::MTLPixelFormatASTC_8x8_sRGB;
+			default: break;
 			}
+		}
 
-		_done:
-			if (HasAlphaChannel(output_format)) data->info.flags |= texture_flags::has_alpha;
+		return output_format;
+	}
 
-			// 处理sRGB格式
-			if (scratch.metadata.isSRGB)
+		// Resolves the astcenc CLI binary. Prefers the PRIMAL_ASTCENC_PATH
+		// env var (set it to the built binary), then falls back to a bare
+		// "astcenc-neon" so the shell PATH lookup applies.
+		std::string get_astcenc_path()
+		{
+			if (const char* env = std::getenv("PRIMAL_ASTCENC_PATH"))
 			{
-				switch (output_format)
-				{
-				case tools::MTLPixelFormatRGBA8Unorm:
-					return tools::MTLPixelFormatRGBA8Unorm_sRGB;
-				case tools::MTLPixelFormatASTC_4x4_LDR:
-					return tools::MTLPixelFormatASTC_4x4_sRGB;
-				default:
-					return output_format;
-				}
+				if (env && *env) return std::string(env);
 			}
-
-			return output_format;
+			return "astcenc-neon";
 		}
 
 		/**
@@ -2068,8 +2286,8 @@ namespace primal::tools
 				colorProfile = " -cl";
 			}
 			
-			std::string cmd = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCP/third_party/astc-encoder/build/Source/astcenc-neon "  + colorProfile + " " 
-				+ tempInputPath + " " + tempOutputPath + " " + 
+			std::string cmd = get_astcenc_path() + " " + colorProfile + " "
+				+ tempInputPath + " " + tempOutputPath + " " +
 				blockSize + " " + quality;
 			
 			// 执行命令
@@ -2151,44 +2369,70 @@ namespace primal::tools
 		 * @param scratch 临时图像数据
 		 * @return 压缩后的图像数据
 		 */
-		[[nodiscard]] ScratchImage compress_image_metal(texture_data *const data, ScratchImage& scratch)
+	[[nodiscard]] ScratchImage compress_image_metal(texture_data *const data, ScratchImage& scratch)
+	{
+		assert(data && data->import_settings.compress && !scratch.m_images.empty());
+
+		const tools::Image *const image{ &scratch.m_images[0] };
+		if (!image)
 		{
-			assert(data && data->import_settings.compress && !scratch.m_images.empty());
-
-			const tools::Image *const image{ &scratch.m_images[0] };
-			if (!image)
-			{
-				data->info.import_error = import_error::unknown;
-				return {};
-			}
-
-			const tools::MTLPixelFormat output_format{ determine_output_format_metal(data, scratch, image) };
-			bool success = false;
-			ScratchImage compressed_scratch;
-			
-			// 初始化压缩后的ScratchImage
-			compressed_scratch.metadata = scratch.metadata;
-			compressed_scratch.metadata.format = output_format;
-			compressed_scratch.m_nimages = scratch.m_nimages;
-			compressed_scratch.m_images.resize(scratch.m_nimages);
-			
-			// 直接使用texturetool进行压缩，不再尝试GPU或CPU压缩
-			for (u64 img = 0; img < scratch.m_nimages; ++img)
-			{
-				success = compress_with_astcenc(scratch.m_images[img], 
-					compressed_scratch.m_images[img], output_format);
-				if (!success) break;
-			}
-
-			if (!success)
-			{
-				data->info.import_error = import_error::compress;
-				return {};
-			}
-
-			data->info.import_error = import_error::succeeded;
-			return compressed_scratch;
+			data->info.import_error = import_error::unknown;
+			return {};
 		}
+
+		const tools::MTLPixelFormat output_format{ determine_output_format_metal(data, scratch, image) };
+		bool success = false;
+		ScratchImage compressed_scratch;
+
+		compressed_scratch.metadata = scratch.metadata;
+		compressed_scratch.metadata.format = output_format;
+		compressed_scratch.m_nimages = scratch.m_nimages;
+		compressed_scratch.m_images.resize(scratch.m_nimages);
+
+		for (u64 img = 0; img < scratch.m_nimages; ++img)
+		{
+			success = compress_with_astcenc(scratch.m_images[img],
+				compressed_scratch.m_images[img], output_format);
+			if (!success) break;
+		}
+
+		if (!success)
+		{
+			for (u64 img = 0; img < compressed_scratch.m_nimages; ++img)
+			{
+				delete[] compressed_scratch.m_images[img].pixels;
+				compressed_scratch.m_images[img].pixels = nullptr;
+			}
+			data->info.import_error = import_error::compress;
+			return {};
+		}
+
+		// compress_with_astcenc allocates each image's pixels via new[].
+		// Consolidate them into compressed_scratch.pixels so the ScratchImage
+		// owns the data and frees it on destruction.
+		{
+			u64 total_size = 0;
+			for (u64 img = 0; img < compressed_scratch.m_nimages; ++img)
+				total_size += compressed_scratch.m_images[img].slicePitch;
+
+			compressed_scratch.pixels.resize(total_size);
+			u64 offset = 0;
+			for (u64 img = 0; img < compressed_scratch.m_nimages; ++img)
+			{
+				tools::Image& ref = compressed_scratch.m_images[img];
+				if (ref.pixels && ref.slicePitch > 0)
+				{
+					std::memcpy(compressed_scratch.pixels.data() + offset, ref.pixels, ref.slicePitch);
+					delete[] ref.pixels;
+				}
+				ref.pixels = compressed_scratch.pixels.data() + offset;
+				offset += ref.slicePitch;
+			}
+		}
+
+		data->info.import_error = import_error::succeeded;
+		return compressed_scratch;
+	}
 
 		/**
 		 * @brief 使用astcenc解压缩纹理
@@ -2287,7 +2531,7 @@ namespace primal::tools
 			}
 			
 			// astcenc解压缩命令
-			std::string cmd = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/astc-encoder/build/Source/astcenc-neon "  + colorProfile + " " + tempInputPath + " " + tempOutputPath;
+			std::string cmd = get_astcenc_path() + " " + colorProfile + " " + tempInputPath + " " + tempOutputPath;
 			
 			// 执行命令
 			int result = system(cmd.c_str());
@@ -2544,7 +2788,15 @@ namespace primal::tools
 			ScratchImage scratch{ initialize_from_images(data, images) };
 			if(data->info.import_error) return;
 
-			if(settings.compress)
+			// The macOS compressor only emits ASTC LDR. Feeding an HDR source
+			// through it clips the radiance range even though the source was
+			// decoded as RGBA32Float, so preserve HDR textures uncompressed.
+			if ((data->info.flags & primal::content::texture_flags::is_hdr) != 0)
+			{
+				data->import_settings.compress = 0;
+			}
+
+			if(data->import_settings.compress)
 			{
 				ScratchImage bc_scratch{ compress_image_metal(data, scratch) };
 				
@@ -2558,6 +2810,175 @@ namespace primal::tools
 			copy_subresources(scratch, data);
 			texture_info_from_metadata(scratch.metadata, data->info);
 		}
+	}
+
+	/// ABI-visible cooked result written into caller-supplied buffers.
+	struct cook_result
+	{
+		u32 info_width{ 0 };
+		u32 info_height{ 0 };
+		u32 info_array_size{ 0 };
+		u32 info_mip_levels{ 0 };
+		u32 info_format{ 0 };
+		u32 info_flags{ 0 };
+		u32 import_error{ 0 };
+		u32 sources_len{ 0 };
+		u32 source_count{ 0 };
+		u32 settings_dimension{ 0 };
+		u32 settings_mip_levels{ 0 };
+		f32 settings_alpha_threshold{ 0.0f };
+		u32 settings_prefer_bc7{ 0 };
+		u32 settings_output_format{ 0 };
+		u32 settings_compress{ 0 };
+		u32 slices_size{ 0 };
+		u32 icon_size{ 0 };
+		u32 import_succeeded{ 0 };
+	};
+
+	// Maps the managed editor TextureFormat enum (0=R8G8B8A8_UNORM,1=BC7,
+	// 2=BC1,3=BC3,4=BC5) to the native MTLPixelFormat the cook pipeline
+	// expects. Metal has no BC block-compression; astcenc handles ASTC,
+	// so every block-compressed request maps to ASTC_4x4_LDR.
+	static inline u32 map_managed_output_format(u32 managed)
+	{
+		static constexpr u32 map[] = {
+			tools::MTLPixelFormatRGBA8Unorm,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+			tools::MTLPixelFormatASTC_4x4_LDR,
+		};
+		return managed < 5 ? map[managed] : 0;
+	}
+
+	/// Reads `input` (PNG / TGA / HDR / DDS), runs the full settings-driven
+	/// cook pipeline, and writes the cooked slices + icon into caller-
+	/// supplied buffers. Returns 1 on success, 0 on any failure.
+	EDITOR_INTERFACE u32 CookTexture(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		u8* slices_buffer, u32 slices_capacity, u32* out_slices_size,
+		u8* icon_buffer,   u32 icon_capacity,   u32* out_icon_size,
+		cook_result* out_info)
+	{
+		if (!input || !slices_buffer || !out_slices_size || !out_icon_size || !out_info)
+			return 0;
+
+		*out_slices_size = 0;
+		*out_icon_size = 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = map_managed_output_format(output_format);
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		if (data.info.import_error != 0) { return 0; }
+		if (!data.subresource_data || data.subresource_size == 0) { return 0; }
+		if (data.subresource_size > slices_capacity) { return 0; }
+
+		std::memcpy(slices_buffer, data.subresource_data, data.subresource_size);
+		*out_slices_size = data.subresource_size;
+
+		if (data.icon && data.icon_size > 0)
+		{
+			if (!icon_buffer) return 0;
+			if (data.icon_size > icon_capacity)
+			{
+				std::free(data.subresource_data);
+				std::free(data.icon);
+				return 0;
+			}
+			std::memcpy(icon_buffer, data.icon, data.icon_size);
+			*out_icon_size = data.icon_size;
+		}
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->import_succeeded    = 1;
+
+		std::free(data.subresource_data);
+		std::free(data.icon);
+		return 1;
+	}
+
+	/// Probe how many bytes the cook pipeline will produce for the given
+	/// `input` and `settings`. Runs the full cook and discards the buffer,
+	/// reporting only the produced sizes via `out_info`. Call this before
+	/// CookTexture() to size the caller's destination buffers correctly.
+	EDITOR_INTERFACE u32 CookTextureQuery(
+		const char* input,
+		u32 dimension, f32 alpha_threshold,
+		u32 mip_levels_setting, u32 prefer_bc7,
+		u32 output_format, u32 compress,
+		cook_result* out_info)
+	{
+		if (!input || !out_info) return 0;
+		std::memset(out_info, 0, sizeof(cook_result));
+
+		texture_data data{};
+		data.import_settings.dimension = dimension;
+		data.import_settings.mip_levels = mip_levels_setting;
+		data.import_settings.alpha_threshold = alpha_threshold;
+		data.import_settings.prefer_bc7 = prefer_bc7;
+		data.import_settings.output_format = map_managed_output_format(output_format);
+		data.import_settings.compress = compress;
+		data.import_settings.sources = const_cast<char*>(input);
+		data.import_settings.source_count = 1;
+
+		Import(&data);
+
+		out_info->info_width          = data.info.width;
+		out_info->info_height         = data.info.height;
+		out_info->info_array_size     = data.info.array_size;
+		out_info->info_mip_levels     = data.info.mip_levels;
+		out_info->info_format         = data.info.format;
+		out_info->info_flags          = data.info.flags;
+		out_info->import_error        = data.info.import_error;
+		out_info->sources_len         = data.import_settings.sources ? (u32)std::strlen(data.import_settings.sources) : 0;
+		out_info->source_count        = data.import_settings.source_count;
+		out_info->settings_dimension  = data.import_settings.dimension;
+		out_info->settings_mip_levels = data.import_settings.mip_levels;
+		out_info->settings_alpha_threshold = data.import_settings.alpha_threshold;
+		out_info->settings_prefer_bc7 = data.import_settings.prefer_bc7;
+		out_info->settings_output_format = data.import_settings.output_format;
+		out_info->settings_compress   = data.import_settings.compress;
+		out_info->slices_size         = data.subresource_size;
+		out_info->icon_size           = data.icon_size;
+
+		if (data.info.import_error != 0)
+		{
+			std::free(data.subresource_data);
+			std::free(data.icon);
+			return 0;
+		}
+
+		out_info->import_succeeded = 1;
+		std::free(data.subresource_data);
+		std::free(data.icon);
+		return 1;
 	}
 }
 #endif

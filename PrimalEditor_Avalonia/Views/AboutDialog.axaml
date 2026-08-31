@@ -1,0 +1,89 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PrimalEditor_Avalonia.Views.AboutDialog"
+        Title="About PrimalEditor"
+        Width="460" Height="380"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False"
+        Background="{StaticResource VoidBrush}">
+
+    <Border Classes="floating" Margin="10">
+        <StackPanel Margin="22" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock Text="PRIMAL EDITOR"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="18" LetterSpacing="1"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       HorizontalAlignment="Center">
+            </TextBlock>
+            <TextBlock Text="AVALONIA · PHASE 1 · PURE C# BACKEND"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="10" LetterSpacing="1"
+                       Foreground="{StaticResource CoralBrush}"
+                       HorizontalAlignment="Center" Margin="0,0,0,12"/>
+            <Border Background="{StaticResource ElectricBlueBrush}" Height="1" Opacity="0.5" Margin="0,0,0,12"/>
+
+            <TextBlock Text="A cross-platform game editor built with Avalonia 11 and C#."
+                       TextWrapping="Wrap" HorizontalAlignment="Center" Classes="dim"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                <TextBlock Text=".NET Runtime: " Classes="dim" Foreground="{StaticResource SecondaryTextBrush}"/>
+                <TextBlock x:Name="RuntimeVersion" FontFamily="{StaticResource FontMono}"
+                           Foreground="{StaticResource ElectricBlueBrush}" FontWeight="SemiBold"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                <TextBlock Text="Avalonia: " Classes="dim" Foreground="{StaticResource SecondaryTextBrush}"/>
+                <TextBlock Text="11.3.0" FontFamily="{StaticResource FontMono}"
+                           Foreground="{StaticResource ElectricBlueBrush}" FontWeight="SemiBold"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                <TextBlock Text="C# Version: " Classes="dim" Foreground="{StaticResource SecondaryTextBrush}"/>
+                <TextBlock Text="12.0" FontFamily="{StaticResource FontMono}"
+                           Foreground="{StaticResource ElectricBlueBrush}" FontWeight="SemiBold"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                <TextBlock Text="OS: " Classes="dim" Foreground="{StaticResource SecondaryTextBrush}"/>
+                <TextBlock x:Name="OsVersion" FontFamily="{StaticResource FontMono}"
+                           Foreground="{StaticResource ElectricBlueBrush}" FontWeight="SemiBold"/>
+            </StackPanel>
+
+            <TextBlock Text="FEATURES"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="11" LetterSpacing="1"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,16,0,6" HorizontalAlignment="Center"/>
+            <TextBlock Text="• Project / Scene / Entity management"
+                       FontFamily="{StaticResource FontMono}"
+                       HorizontalAlignment="Center" FontSize="11"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+            <TextBlock Text="• JSON serialization with schema versioning"
+                       FontFamily="{StaticResource FontMono}"
+                       HorizontalAlignment="Center" FontSize="11"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+            <TextBlock Text="• Undo / Redo for all entity operations"
+                       FontFamily="{StaticResource FontMono}"
+                       HorizontalAlignment="Center" FontSize="11"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+            <TextBlock Text="• Properties panel with multi-select"
+                       FontFamily="{StaticResource FontMono}"
+                       HorizontalAlignment="Center" FontSize="11"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+            <TextBlock Text="• Content browser with file system navigation"
+                       FontFamily="{StaticResource FontMono}"
+                       HorizontalAlignment="Center" FontSize="11"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+            <TextBlock Text="• 5 project templates"
+                       FontFamily="{StaticResource FontMono}"
+                       HorizontalAlignment="Center" FontSize="11"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+
+            <TextBlock Text="Deferred to Phase 2/3: 3D rendering, asset import, C++ engine integration"
+                       FontSize="10" Classes="mono muted"
+                       Foreground="{StaticResource MutedTextBrush}"
+                       HorizontalAlignment="Center" Margin="0,10,0,0" TextWrapping="Wrap"/>
+
+            <Button Content="OK" Click="OnOkClick" Width="90" HorizontalAlignment="Center"
+                    Classes="accent" Margin="0,16,0,0"/>
+        </StackPanel>
+    </Border>
+</Window>

@@ -1,0 +1,68 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PrimalEditor_Avalonia.Views.RecoverAutosaveDialog"
+        Title="Recover Autosave"
+        Width="560" Height="380"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False"
+        Background="{StaticResource VoidBrush}">
+
+    <Border Classes="floating" Margin="10">
+        <StackPanel Margin="24" Spacing="10">
+            <TextBlock Text="⚠ AUTOSAVE RECOVERY"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="13" LetterSpacing="1"
+                       Foreground="{StaticResource AmberBrush}"
+                       TextWrapping="Wrap">
+            </TextBlock>
+            <TextBlock Text="An autosave backup was found for this project."
+                       FontFamily="{StaticResource FontUI}"
+                       Classes="dim" TextWrapping="Wrap"
+                       Foreground="{StaticResource SecondaryTextBrush}"/>
+
+            <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto"
+                  Margin="0,10,0,0">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Project:" Margin="0,0,10,6"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                           FontSize="11" LetterSpacing="2"
+                           Foreground="{StaticResource ElectricBlueBrush}"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="ProjectNameText"
+                           Classes="mono" TextWrapping="Wrap"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Backup time:" Margin="0,0,10,6"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                           FontSize="11" LetterSpacing="2"
+                           Foreground="{StaticResource ElectricBlueBrush}"/>
+                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="BackupTimeText"
+                           Classes="mono" TextWrapping="Wrap"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Original project:" Margin="0,0,10,6"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                           FontSize="11" LetterSpacing="2"
+                           Foreground="{StaticResource ElectricBlueBrush}"/>
+                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="OriginalPathText"
+                           Classes="mono" TextWrapping="Wrap"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Bundle:" Margin="0,0,10,6"
+                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                           FontSize="11" LetterSpacing="2"
+                           Foreground="{StaticResource ElectricBlueBrush}"/>
+                <TextBlock Grid.Row="3" Grid.Column="1" x:Name="BundlePathText"
+                           Classes="mono" TextWrapping="Wrap"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+            </Grid>
+
+            <TextBlock Text="CHOOSE HOW TO PROCEED:"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Margin="0,18,0,0"/>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,12,0,0">
+                <Button Content="Later" Click="OnLaterClick" Width="100"/>
+                <Button Content="Open Saved Version" Click="OnOpenSavedClick" Width="160"/>
+                <Button Content="Recover Autosave" Click="OnRecoverClick" Width="160" IsDefault="True" Classes="accent"/>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

@@ -106,6 +106,13 @@ u32 GetFormatSize(DataFormat format) {
         case DataFormat::BC7_UNorm:
         case DataFormat::BC7_sRGB:
             return 16; // 每个块4x4像素，每像素1字节
+        case DataFormat::ASTC_4x4_UNorm:
+        case DataFormat::ASTC_4x4_sRGB:
+        case DataFormat::ASTC_6x6_UNorm:
+        case DataFormat::ASTC_6x6_sRGB:
+        case DataFormat::ASTC_8x8_UNorm:
+        case DataFormat::ASTC_8x8_sRGB:
+            return 16; // bytes per compressed block
         default:
             return 0;
     }

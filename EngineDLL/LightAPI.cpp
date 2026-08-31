@@ -46,7 +46,9 @@ EDITOR_INTERFACE u32 AddEntityLight(id::id_type entity_id,
                                     u32 is_enabled)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     if (light_type > static_cast<u32>(graphics::light::spot)) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || e.Has<Light>()) return 0;
 
@@ -68,6 +70,7 @@ EDITOR_INTERFACE u32 AddEntityLight(id::id_type entity_id,
 EDITOR_INTERFACE void RemoveEntityLight(id::id_type entity_id)
 {
     if (!id::is_valid(entity_id)) return;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return;
     e.Remove<Light>();
@@ -76,6 +79,7 @@ EDITOR_INTERFACE void RemoveEntityLight(id::id_type entity_id)
 EDITOR_INTERFACE u32 HasEntityLight(id::id_type entity_id)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid()) return 0;
     return e.Has<Light>() ? 1u : 0u;
@@ -86,6 +90,7 @@ EDITOR_INTERFACE u32 HasEntityLight(id::id_type entity_id)
 EDITOR_INTERFACE u32 GetEntityLightType(id::id_type entity_id, u32* out_type)
 {
     if (!id::is_valid(entity_id) || !out_type) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     auto lc = e.Get<Light>();
@@ -96,6 +101,7 @@ EDITOR_INTERFACE u32 GetEntityLightType(id::id_type entity_id, u32* out_type)
 EDITOR_INTERFACE u32 GetEntityLightIntensity(id::id_type entity_id, f32* out)
 {
     if (!id::is_valid(entity_id) || !out) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     *out = e.Get<Light>().intensity();
@@ -105,6 +111,7 @@ EDITOR_INTERFACE u32 GetEntityLightIntensity(id::id_type entity_id, f32* out)
 EDITOR_INTERFACE u32 GetEntityLightColor(id::id_type entity_id, f32* out_rgb)
 {
     if (!id::is_valid(entity_id) || !out_rgb) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     math::v3 c = e.Get<Light>().color();
@@ -115,6 +122,7 @@ EDITOR_INTERFACE u32 GetEntityLightColor(id::id_type entity_id, f32* out_rgb)
 EDITOR_INTERFACE u32 GetEntityLightRange(id::id_type entity_id, f32* out)
 {
     if (!id::is_valid(entity_id) || !out) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     *out = e.Get<Light>().range();
@@ -124,6 +132,7 @@ EDITOR_INTERFACE u32 GetEntityLightRange(id::id_type entity_id, f32* out)
 EDITOR_INTERFACE u32 GetEntityLightConeAngles(id::id_type entity_id, f32* out_umbra, f32* out_penumbra)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     auto lc = e.Get<Light>();
@@ -135,6 +144,7 @@ EDITOR_INTERFACE u32 GetEntityLightConeAngles(id::id_type entity_id, f32* out_um
 EDITOR_INTERFACE u32 IsEntityLightEnabled(id::id_type entity_id, u32* out_enabled)
 {
     if (!id::is_valid(entity_id) || !out_enabled) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     *out_enabled = e.Get<Light>().is_enabled() ? 1u : 0u;
@@ -146,7 +156,9 @@ EDITOR_INTERFACE u32 IsEntityLightEnabled(id::id_type entity_id, u32* out_enable
 EDITOR_INTERFACE u32 SetEntityLightType(id::id_type entity_id, u32 light_type)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     if (light_type > static_cast<u32>(graphics::light::spot)) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     e.Get<Light>().set_light_type(static_cast<graphics::light::type>(light_type));
@@ -156,6 +168,7 @@ EDITOR_INTERFACE u32 SetEntityLightType(id::id_type entity_id, u32 light_type)
 EDITOR_INTERFACE u32 SetEntityLightIntensity(id::id_type entity_id, f32 value)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     e.Get<Light>().set_intensity(value);
@@ -165,6 +178,7 @@ EDITOR_INTERFACE u32 SetEntityLightIntensity(id::id_type entity_id, f32 value)
 EDITOR_INTERFACE u32 SetEntityLightColor(id::id_type entity_id, const f32* rgb)
 {
     if (!id::is_valid(entity_id) || !rgb) return 0;
+    if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     e.Get<Light>().set_color(math::v3{rgb[0], rgb[1], rgb[2]});
@@ -174,6 +188,7 @@ EDITOR_INTERFACE u32 SetEntityLightColor(id::id_type entity_id, const f32* rgb)
 EDITOR_INTERFACE u32 SetEntityLightRange(id::id_type entity_id, f32 value)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     e.Get<Light>().set_range(value);
@@ -183,6 +198,7 @@ EDITOR_INTERFACE u32 SetEntityLightRange(id::id_type entity_id, f32 value)
 EDITOR_INTERFACE u32 SetEntityLightConeAngles(id::id_type entity_id, f32 umbra_rad, f32 penumbra_rad)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     e.Get<Light>().set_cone_angles(umbra_rad, penumbra_rad);
@@ -192,6 +208,7 @@ EDITOR_INTERFACE u32 SetEntityLightConeAngles(id::id_type entity_id, f32 umbra_r
 EDITOR_INTERFACE u32 SetEntityLightEnabled(id::id_type entity_id, u32 enabled)
 {
     if (!id::is_valid(entity_id)) return 0;
+	if (!game_entity::entity_exists(game_entity::entity_id{ entity_id })) return 0;
     game_entity::entity e = entity_from_id(entity_id);
     if (!e.is_valid() || !e.Has<Light>()) return 0;
     e.Get<Light>().set_enabled(enabled != 0);

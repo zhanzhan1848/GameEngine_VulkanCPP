@@ -42,12 +42,16 @@ public:
         result.info = {};
 
         // Pin 0: BaseColor (Float4)
-        auto* base_color = output->inputs[0].AsFloat4();
-        if (base_color) {
+        if (auto* base_color = output->inputs[0].AsFloat4()) {
             result.info.base_color[0] = base_color->value.x;
             result.info.base_color[1] = base_color->value.y;
             result.info.base_color[2] = base_color->value.z;
             result.info.base_color[3] = base_color->value.w;
+        } else if (auto* base_color3 = output->inputs[0].AsFloat3()) {
+            result.info.base_color[0] = base_color3->value.x;
+            result.info.base_color[1] = base_color3->value.y;
+            result.info.base_color[2] = base_color3->value.z;
+            result.info.base_color[3] = 1.0f;
         }
 
         // Pin 1: Roughness (Float)

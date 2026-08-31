@@ -119,6 +119,18 @@ TestResult TestConnect() {
     TEST_ASSERT_EQ(n2, c.to_node, "to_node mismatch");
     TEST_ASSERT_EQ(0u, c.to_pin, "to_pin mismatch");
 
+    // A second source targeting the same input replaces the first edge.
+    u32 n3 = GraphAddNode(g, "ConstantFloat4");
+    TEST_ASSERT(n3 != 0, "Third AddNode failed");
+    TEST_ASSERT_EQ(0u, GraphConnect(g, n3, 0, n2, 0), "Replacement connect should succeed");
+    TEST_ASSERT_EQ(1u, GraphGetConnectionCount(g), "An input pin must have one incoming edge");
+    TEST_ASSERT_EQ(0u, GraphGetConnectionByIndex(g, 0, &c), "Replacement edge should be readable");
+    TEST_ASSERT_EQ(n3, c.from_node, "Replacement source mismatch");
+
+    // Reject malformed endpoints before serialization.
+    TEST_ASSERT_EQ(1u, GraphConnect(g, n2, 0, n2, 0), "Output node has no output pin");
+    TEST_ASSERT_EQ(1u, GraphGetConnectionCount(g), "Rejected edges must not mutate the graph");
+
     DestroyMaterialGraph(g);
     return TestResult::Passed;
 }

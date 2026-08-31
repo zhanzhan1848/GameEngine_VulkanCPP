@@ -295,6 +295,15 @@ namespace primal::graphics::metal::camera
 		return graphics::camera{ camera_id{ cameras.add(info) } };
 	}
 
+	void shutdown()
+	{
+		for (u32 i = 0; i < cameras.capacity(); ++i)
+		{
+			if (cameras.is_valid(i)) cameras.remove(i);
+		}
+		cameras.clear();
+	}
+
 	void remove(camera_id id)
 	{
 		assert(id::is_valid(id));
@@ -307,6 +316,13 @@ namespace primal::graphics::metal::camera
 		assert(parameter < camera_parameter::count);
 		metal_camera& camera{ get(id) };
 		set_functions[parameter](camera, data, data_size);
+	}
+
+	void update(camera_id id)
+	{
+		assert(id::is_valid(id));
+		metal_camera& camera{ get(id) };
+		camera.update();
 	}
 
 	void get_parameter(camera_id id, camera_parameter::parameter parameter, void * const data, u32 data_size)

@@ -105,6 +105,9 @@ elseif(APPLE AND NOT EMSCRIPTEN)
 
     # Metal shader validation (xcrun compile check)
     include(CMake/MetalShaderValidation.cmake)
+    # Build engine shaders metallib and legacy packed blob for
+    # Engine/Graphics/Metal/MetalShader.cpp::load_engine_shaders.
+    include(CMake/EngineShaderBlob.cmake)
 
     # FBX SDK 自动检测和安装
     set(FBX_SDK_VERSION "2020.3.7")
@@ -567,6 +570,12 @@ if(NOT EMSCRIPTEN)
     if(BUILD_CONTENT_TOOLS)
         add_dependencies(ContentTools Engine)
         add_dependencies(EngineDLL Engine ContentTools)
+        if(APPLE)
+            # EngineDLL hosts the editor render/present path. Keep its runtime Metal
+            # shader blob in step with shader source changes so a normal native build
+            # cannot leave the Avalonia app presenting through a stale metallib.
+            add_dependencies(EngineDLL BuildEngineShaderBlob)
+        endif()
 
         # 配置安装规则
         install(TARGETS Engine EngineDLL ContentTools
@@ -576,6 +585,9 @@ if(NOT EMSCRIPTEN)
         )
     else()
         add_dependencies(EngineDLL Engine)
+        if(APPLE)
+            add_dependencies(EngineDLL BuildEngineShaderBlob)
+        endif()
         message(STATUS "ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
 
         install(TARGETS Engine EngineDLL

@@ -1,0 +1,194 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+             xmlns:views="using:PrimalEditor_Avalonia.Views"
+             xmlns:views3d="using:PrimalEditor_Avalonia.Views.Engine3D"
+             xmlns:entities="using:PrimalEditor_Avalonia.Entities"
+             xmlns:conv="using:PrimalEditor_Avalonia.Converters"
+             xmlns:self="using:PrimalEditor_Avalonia.Views"
+             xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
+             x:Class="PrimalEditor_Avalonia.Views.WorldEditorView"
+             x:DataType="vm:WorldEditorViewModel"
+             Background="{StaticResource VoidBrush}">
+
+    <Grid Background="{StaticResource VoidBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="280"/>
+        </Grid.RowDefinitions>
+
+        <!-- =========== ROW 0: Toolbar (floating glass) =========== -->
+        <Border Grid.Row="0" Classes="floating" Margin="6,6,6,2">
+            <StackPanel Orientation="Horizontal" Spacing="6" Margin="8,4">
+                <TextBlock Text="BUILD" FontFamily="{StaticResource FontDisplay}"
+                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                           Foreground="{StaticResource ElectricBlueBrush}"
+                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <ComboBox Width="140"
+                          ItemsSource="{Binding BuildConfigurations}"
+                          SelectedItem="{Binding Project.BuildConfigName}"/>
+                <Button Content="Build" Click="OnBuildClick" Padding="10,2"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                <Button Content="Rebuild" Click="OnRebuildClick" Padding="10,2"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                <Button Content="Run" Click="OnRunClick" Padding="10,2" Classes="accent"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                <Button Name="StopBuild" Content="Stop" Click="OnBuildStopClick" Padding="10,2" Classes="danger"
+                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}}"/>
+                <Separator Margin="6,0"/>
+                <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
+                <Separator Margin="6,0"/>
+                <Button Content="W Move" Click="OnTranslateModeClick" Padding="8,2" ToolTip.Tip="Translate gizmo (W)"/>
+                <Button Content="E Rotate" Click="OnRotateModeClick" Padding="8,2" ToolTip.Tip="Rotate gizmo (R)"/>
+                <Button Content="R Scale" Click="OnScaleModeClick" Padding="8,2" ToolTip.Tip="Scale gizmo (R)"/>
+                <Separator Margin="6,0"/>
+                <CheckBox Name="OrthoToggle" Content="Ortho" VerticalAlignment="Center"
+                          Click="OnOrthoToggleClick"/>
+            </StackPanel>
+        </Border>
+
+        <!-- =========== ROW 1: Hierarchy | Viewport | Inspector =========== -->
+        <Grid Grid.Row="1" ColumnDefinitions="260,*,320" Background="Transparent">
+
+            <!-- Hierarchy panel (single, no TabControl) -->
+            <Border Grid.Column="0" Classes="floating" Margin="6,2,4,2">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" Padding="8,8,8,4">
+                        <StackPanel Spacing="6">
+                            <Grid ColumnDefinitions="*,Auto,Auto">
+                                <TextBlock Grid.Column="0" Text="SCENES"
+                                           FontFamily="{StaticResource FontDisplay}"
+                                           FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                                           Foreground="{StaticResource ElectricBlueBrush}"
+                                           VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Content="+" Click="OnAddSceneClick"
+                                        Width="24" Height="20" Padding="0" Margin="2,0"
+                                        ToolTip.Tip="Add Scene"/>
+                                <Button Grid.Column="2" Content="×" Click="OnDeleteSceneClick"
+                                        Width="24" Height="20" Padding="0" Margin="2,0,0,0"
+                                        ToolTip.Tip="Remove Scene"/>
+                            </Grid>
+                            <ComboBox ItemsSource="{Binding Scenes}"
+                                      SelectedItem="{Binding ActiveScene}"
+                                      HorizontalAlignment="Stretch">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Name}"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                          VerticalScrollBarVisibility="Disabled">
+                                <ItemsControl ItemsSource="{Binding EntityFactoryItems}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="4"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate DataType="entities:EntityFactoryDescriptor">
+                                            <Button Tag="{Binding}"
+                                                    Click="OnAddEntityKindClick"
+                                                    ToolTip.Tip="{Binding Tooltip}"
+                                                    Padding="8,2">
+                                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                                    <TextBlock Text="{Binding IconGlyph}"/>
+                                                    <TextBlock Text="{Binding DisplayName}"/>
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+
+                            <Grid ColumnDefinitions="*,Auto,Auto">
+                                <TextBlock Grid.Column="0" Text="HIERARCHY"
+                                           FontFamily="{StaticResource FontDisplay}"
+                                           FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                                           Foreground="{StaticResource ElectricBlueBrush}"
+                                           VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Content="+" Click="OnAddEntityClick"
+                                        Width="28" Height="22" Padding="0" Margin="2,0"
+                                        ToolTip.Tip="Add Entity"/>
+                                <Button Grid.Column="2" Content="×" Click="OnDeleteEntityClick"
+                                        Width="28" Height="22" Padding="0" Margin="2,0,0,0"
+                                        ToolTip.Tip="Delete Selected"/>
+                            </Grid>
+                            <TextBox x:Name="HierarchyFilter"
+                                     Watermark="Filter entities..."
+                                     TextChanged="OnHierarchyFilterChanged"/>
+                        </StackPanel>
+                    </Border>
+
+                    <TreeView x:Name="HierarchyTree"
+                              ItemsSource="{Binding Entities}"
+                              SelectionMode="Multiple"
+                              SelectionChanged="OnTreeSelectionChanged"
+                              DoubleTapped="OnEntityDoubleClick"
+                              Margin="4,0,4,8"
+                              Background="Transparent"
+                              BorderThickness="0">
+                        <TreeView.ItemTemplate>
+                            <TreeDataTemplate ItemsSource="{Binding Children}">
+                                <TextBlock Text="{Binding Name}"/>
+                            </TreeDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </DockPanel>
+            </Border>
+
+            <!-- Viewport panel -->
+            <Border Grid.Column="1" Classes="floating" Margin="2,2,2,2"
+                    DragDrop.AllowDrop="True"
+                    DragDrop.Drop="OnAssetDrop"
+                    DragDrop.DragOver="OnDragOver">
+                <views3d:EngineViewport3D Name="WorldViewport" MinHeight="200" MinWidth="200"
+                                          HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                          Background="#FF000000"/>
+            </Border>
+
+            <!-- Inspector panel -->
+            <Border Grid.Column="2" Classes="floating" Margin="4,2,6,2">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="INSPECTOR"
+                               FontFamily="{StaticResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                               Foreground="{StaticResource ElectricBlueBrush}"
+                               Padding="10,10,8,4"/>
+                    <views:PropertiesView DataContext="{Binding Properties}" Margin="4,0,4,8"/>
+                </DockPanel>
+            </Border>
+        </Grid>
+
+        <!-- =========== ROW 2: Content Browser | Build Log / Logger tab =========== -->
+        <Grid Grid.Row="2" ColumnDefinitions="*,*" Margin="6,2,6,6">
+            <!-- LEFT: Content Browser -->
+            <Border Grid.Column="0" Classes="floating" Margin="0,0,3,0">
+                <views:ContentBrowserView Name="ContentBrowserBottomView"/>
+            </Border>
+            <!-- RIGHT: Build Log + Logger tab -->
+            <Border Grid.Column="1" Classes="floating" Margin="3,0,0,0">
+                <TabControl SelectedIndex="0" Background="Transparent" Padding="0">
+                    <TabItem>
+                        <TabItem.Header>
+                            <TextBlock Text="BUILD LOG" FontFamily="{StaticResource FontDisplay}"
+                                       FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                                       Margin="6,0"/>
+                        </TabItem.Header>
+                        <views:BuildLogView/>
+                    </TabItem>
+                    <TabItem>
+                        <TabItem.Header>
+                            <TextBlock Text="LOGGER" FontFamily="{StaticResource FontDisplay}"
+                                       FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                                       Margin="6,0"/>
+                        </TabItem.Header>
+                        <views:LoggerView Name="LoggerTabView"/>
+                    </TabItem>
+                </TabControl>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

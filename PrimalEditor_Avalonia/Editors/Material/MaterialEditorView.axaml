@@ -1,0 +1,361 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors.Material"
+             xmlns:content="using:PrimalEditor_Avalonia.Content"
+             xmlns:n="using:NodifyM.Avalonia.Controls"
+             xmlns:nconv="using:NodifyM.Avalonia.Converters"
+             xmlns:cv="using:PrimalEditor_Avalonia.Common.Converters"
+             xmlns:conv="using:PrimalEditor_Avalonia.Converters"
+             x:Class="PrimalEditor_Avalonia.Editors.Material.MaterialEditorView"
+             x:DataType="vm:MaterialEditorViewModel"
+             Background="{StaticResource VoidBrush}">
+
+  <UserControl.Resources>
+
+    <!-- Inline string↔float converter used by the per-component TextBoxes.
+         Lives as a resource so we can reuse it across the node-body and the
+        // right-hand panel DataTemplates without duplication. -->
+    <cv:StringToFloatConverter x:Key="FloatConv" />
+    <conv:AssetThumbnailConverter x:Key="AssetThumbnailConv" />
+    <nconv:FlowToDirectionConverter x:Key="FlowToDirectionConverter" />
+
+    <!-- Node template: one material node with input pins, parameters, output pins.
+         NodifyM 12.0.0 expects the node's Input/Output collections to be passed
+         directly to <n:Node Input="..." Output="...">, with per-connector visuals
+         provided via InputConnectorTemplate/OutputConnectorTemplate. Putting an
+         ItemsControl inside the Node body does NOT render connectors — they only
+        // render through these dedicated template properties. -->
+    <DataTemplate DataType="vm:MaterialNodeViewModel" x:Key="MaterialNodeTemplate">
+      <n:Node Header="{Binding Title}"
+              HeaderBrush="{StaticResource ElectricBlueDeepBrush}"
+              BorderBrush="{StaticResource HairlineBrush}"
+              Background="{StaticResource PanelBrush}"
+              Input="{Binding Input}"
+              Output="{Binding Output}"
+              Location="{Binding Location, Mode=TwoWay}"
+              PointerPressed="OnNodePointerPressed"
+              DoubleTapped="OnNodeDoubleTapped">
+        <n:Node.InputConnectorTemplate>
+          <DataTemplate DataType="vm:MaterialPinViewModel">
+            <n:NodeInput Header="{Binding Title}"
+                         Anchor="{Binding Anchor, Mode=OneWayToSource}"
+                         IsConnected="{Binding IsConnected}">
+              <n:NodeInput.HeaderTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding}" FontFamily="{StaticResource FontMono}"
+                             FontSize="11" Foreground="{StaticResource MintBrush}"/>
+                </DataTemplate>
+              </n:NodeInput.HeaderTemplate>
+            </n:NodeInput>
+          </DataTemplate>
+        </n:Node.InputConnectorTemplate>
+        <n:Node.OutputConnectorTemplate>
+          <DataTemplate DataType="vm:MaterialPinViewModel">
+            <n:NodeOutput Header="{Binding Title}"
+                          Anchor="{Binding Anchor, Mode=OneWayToSource}"
+                          IsConnected="{Binding IsConnected}">
+              <n:NodeOutput.HeaderTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding}" FontFamily="{StaticResource FontMono}"
+                             FontSize="11" Foreground="{StaticResource AmberBrush}"/>
+                </DataTemplate>
+              </n:NodeOutput.HeaderTemplate>
+            </n:NodeOutput>
+          </DataTemplate>
+        </n:Node.OutputConnectorTemplate>
+        <!-- Body content: per-component input rows. ShowX/ShowY/ShowZ/ShowW on
+             MaterialParamViewModel hide unused TextBoxes; for a Float3 only
+             X/Y/Z rows appear, for a Float param only X shows. TextBoxes give
+             flat text input (no NumericUpDown up/down arrows). -->
+        <ItemsControl ItemsSource="{Binding Parameters}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="vm:MaterialParamViewModel">
+              <StackPanel Orientation="Horizontal" Spacing="2" Margin="0,1">
+                <TextBlock Text="{Binding Name}" Width="72"
+                           FontFamily="{StaticResource FontMono}" FontSize="11"
+                           VerticalAlignment="Center"
+                           Foreground="{StaticResource MutedTextBrush}"/>
+                <TextBox Width="48" FontSize="11"
+                         Text="{Binding X, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                         IsVisible="{Binding ShowX}"
+                         PointerPressed="OnNodeInputPointerPressed"
+                         KeyDown="OnNodeInputKeyDown"/>
+                <TextBox Width="48" FontSize="11"
+                         Text="{Binding Y, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                         IsVisible="{Binding ShowY}"
+                         PointerPressed="OnNodeInputPointerPressed"
+                         KeyDown="OnNodeInputKeyDown"/>
+                <TextBox Width="48" FontSize="11"
+                         Text="{Binding Z, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                         IsVisible="{Binding ShowZ}"
+                         PointerPressed="OnNodeInputPointerPressed"
+                         KeyDown="OnNodeInputKeyDown"/>
+                <TextBox Width="48" FontSize="11"
+                         Text="{Binding W, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                         IsVisible="{Binding ShowW}"
+                         PointerPressed="OnNodeInputPointerPressed"
+                         KeyDown="OnNodeInputKeyDown"/>
+                <StackPanel Width="180" Spacing="3" IsVisible="{Binding IsTexture}">
+                  <Border Height="72" CornerRadius="3"
+                          Background="{StaticResource VoidBrush}"
+                          BorderBrush="{StaticResource HairlineBrush}" BorderThickness="1">
+                    <Image Source="{Binding SelectedTextureAsset, Converter={StaticResource AssetThumbnailConv}}"
+                           Stretch="Uniform"/>
+                  </Border>
+                  <ComboBox ItemsSource="{Binding TextureAssets}"
+                            SelectedItem="{Binding SelectedTextureAsset, Mode=TwoWay}"
+                            FontSize="10">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate DataType="content:AssetInfo">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                          <Image Width="28" Height="28"
+                                 Source="{Binding ., Converter={StaticResource AssetThumbnailConv}}"
+                                 Stretch="UniformToFill"/>
+                          <TextBlock Text="{Binding FileName}" VerticalAlignment="Center"/>
+                        </StackPanel>
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                  <Button Content="Choose .texture…" Click="OnPickTexture"
+                          HorizontalAlignment="Stretch" FontSize="10"/>
+                  <TextBlock Text="{Binding TexturePath}" FontSize="9"
+                             TextTrimming="CharacterEllipsis"
+                             Foreground="{StaticResource MutedTextBrush}"/>
+                </StackPanel>
+              </StackPanel>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </n:Node>
+    </DataTemplate>
+
+    <!-- Connection template: bezier line between pins. NodifyM binds the
+         visual connector's Anchor (a OneWayToSource point) so it knows where
+         to draw the bezier endpoints; binding Source/Target directly to the
+         connector VM produces an empty connection.
+
+         Right-clicking the line, or holding the right button and cutting
+         across it, is handled by MaterialEditorView and removes the link. -->
+    <DataTemplate DataType="vm:MaterialConnectionViewModel" x:Key="MaterialConnectionTemplate">
+      <!-- Keep the same root layout and direction binding as NodifyM's
+           Avalonia 12 reference template.  A bare Connection inherits no
+           visible stroke from our application theme, so the graph data was
+           intact while every edge rendered transparent. -->
+      <Grid>
+        <n:Connection Source="{Binding Source.Anchor}"
+                      Target="{Binding Target.Anchor}"
+                      Direction="{Binding ., Converter={StaticResource FlowToDirectionConverter}}"
+                      Stroke="{StaticResource ElectricBlueBrush}"
+                      StrokeThickness="2"
+                      Focusable="True"
+                      ToolTip.Tip="Right-click or right-drag across to disconnect"/>
+      </Grid>
+    </DataTemplate>
+
+  </UserControl.Resources>
+
+  <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="220,*,280" Background="{StaticResource VoidBrush}">
+
+    <!-- TOP: Save/Discard toolbar. The host's Ctrl+S already calls
+         MaterialEditorViewModel.Save() — this row gives the same
+         affordance on screen for users who don't reach for the
+         keyboard. Discard is Ctrl+Shift+S by convention. -->
+    <Border Grid.Row="0" Grid.ColumnSpan="3" Classes="floating"
+            Margin="6,6,6,2" Padding="8,4">
+      <Grid ColumnDefinitions="*,Auto,Auto,Auto">
+        <TextBlock Grid.Column="0"
+                   Text="{Binding Asset.FileName, FallbackValue='(no asset)'}"
+                   FontFamily="{StaticResource FontMono}"
+                   FontSize="11"
+                   Foreground="{StaticResource SecondaryTextBrush}"
+                   VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="0" Margin="180,0,0,0"
+                   Text="{Binding DirtyMarker, FallbackValue=''}"
+                   FontFamily="{StaticResource FontMono}"
+                   FontSize="11"
+                   Foreground="{StaticResource AmberBrush}"
+                   VerticalAlignment="Center"/>
+        <Button Grid.Column="1" Content="Discard" Margin="4,0"
+                Click="OnDiscardClick"
+                IsEnabled="{Binding IsDirty}"/>
+        <Button Grid.Column="2" Content="Save" Classes="accent"
+                Click="OnSaveClick"
+                IsEnabled="{Binding IsDirty}"/>
+      </Grid>
+    </Border>
+
+    <!-- LEFT: node palette -->
+    <Border Grid.Row="1" Grid.Column="0" Classes="floating" Margin="6,2,2,6">
+      <DockPanel>
+        <Border DockPanel.Dock="Top" Padding="8,6">
+          <TextBlock Text="NODE PALETTE"
+                     FontFamily="{StaticResource FontDisplay}"
+                     FontWeight="SemiBold" FontSize="11"
+                     LetterSpacing="2"
+                     Foreground="{StaticResource ElectricBlueBrush}"/>
+        </Border>
+        <ListBox x:Name="PaletteListBox"
+                 ItemsSource="{Binding NodePalette}"
+                 Padding="4"
+                 DoubleTapped="OnPaletteDoubleTapped">
+          <ListBox.ItemTemplate>
+            <DataTemplate DataType="vm:MaterialNodeTemplateViewModel">
+              <!-- PointerPressed is wired on the ListBox itself (bubbles up
+                   from any hit-testable child), but the Border root fills
+                   the entire ListBoxItem cell with a hit-testable
+                   Background so clicks anywhere in the row — including
+                   gaps between text lines — bubble to the ListBox handler.
+                   Without this the StackPanel is hit-test transparent
+                   between TextBlocks and the press falls through to
+                   ListBoxItem (which doesn't bubble handler-invoked events
+                   to the ListBox reliably in Avalonia 12). -->
+              <Border Margin="2" Padding="4,2"
+                      Background="Transparent">
+                <StackPanel>
+                  <TextBlock Text="{Binding DisplayName}"
+                             FontFamily="{StaticResource FontMono}"
+                             FontSize="11"
+                             Foreground="{StaticResource FontBrush}"/>
+                  <TextBlock Text="{Binding TypeName}"
+                             FontFamily="{StaticResource FontMono}"
+                             FontSize="9"
+                             Foreground="{StaticResource MutedTextBrush}"/>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </DockPanel>
+    </Border>
+
+    <!-- CENTER: graph editor -->
+    <Border Grid.Row="1" Grid.Column="1" Classes="floating" Margin="2,2,2,2"
+            BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+            BorderThickness="1">
+      <n:NodifyEditor x:Name="NodifyEditor"
+                      ItemsSource="{Binding Nodes}"
+                      ItemTemplate="{StaticResource MaterialNodeTemplate}"
+                      Connections="{Binding Connections}"
+                      ConnectionTemplate="{StaticResource MaterialConnectionTemplate}"
+                      ConnectionCompletedCommand="{Binding ConnectionCompletedCommand}"
+                      Focusable="True"
+                      DragDrop.AllowDrop="True"
+                      Background="{StaticResource SlateBrush}"/>
+    </Border>
+
+    <!-- RIGHT: preview + parameter panel -->
+    <Grid Grid.Row="1" Grid.Column="2" RowDefinitions="*,Auto,*">
+
+      <!-- 3D preview surface. Owns its own VM that drives a
+           MaterialPreviewNative render at 30Hz and exposes a WriteableBitmap
+           bound to the Image control's Source. -->
+      <vm:MaterialPreviewView Grid.Row="0" Margin="2,2,6,2"
+                              DataContext="{Binding Preview}" />
+
+      <!-- Selected node title bar -->
+      <Border Grid.Row="1" Classes="floating" Margin="2,2,6,2" Padding="8,4">
+        <TextBlock Text="{Binding SelectedNode.Title, FallbackValue='(no node selected)'}"
+                   FontFamily="{StaticResource FontMono}"
+                   FontSize="11"
+                   Foreground="{StaticResource FontBrush}"/>
+      </Border>
+
+      <!-- Parameter panel for the selected node -->
+      <Border Grid.Row="2" Classes="floating" Margin="2,2,6,6">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <ItemsControl ItemsSource="{Binding SelectedNode.Parameters}" Padding="8">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:MaterialParamViewModel">
+                <StackPanel Orientation="Horizontal" Spacing="2" Margin="0,2">
+                  <TextBlock Text="{Binding Name}" Width="72"
+                             FontFamily="{StaticResource FontMono}" FontSize="11"
+                             VerticalAlignment="Center"
+                             Foreground="{StaticResource MutedTextBrush}"/>
+                  <TextBox Width="48" FontSize="11"
+                           Text="{Binding X, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                           IsVisible="{Binding ShowX}"
+                           PointerPressed="OnNodeInputPointerPressed"
+                           KeyDown="OnNodeInputKeyDown"/>
+                  <TextBox Width="48" FontSize="11"
+                           Text="{Binding Y, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                           IsVisible="{Binding ShowY}"
+                           PointerPressed="OnNodeInputPointerPressed"
+                           KeyDown="OnNodeInputKeyDown"/>
+                  <TextBox Width="48" FontSize="11"
+                           Text="{Binding Z, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                           IsVisible="{Binding ShowZ}"
+                           PointerPressed="OnNodeInputPointerPressed"
+                           KeyDown="OnNodeInputKeyDown"/>
+                  <TextBox Width="48" FontSize="11"
+                           Text="{Binding W, Mode=TwoWay, Converter={StaticResource FloatConv}}"
+                           IsVisible="{Binding ShowW}"
+                           PointerPressed="OnNodeInputPointerPressed"
+                           KeyDown="OnNodeInputKeyDown"/>
+                  <StackPanel Width="180" Spacing="4" IsVisible="{Binding IsTexture}">
+                    <Border Height="96" CornerRadius="3"
+                            Background="{StaticResource VoidBrush}"
+                            BorderBrush="{StaticResource HairlineBrush}" BorderThickness="1">
+                      <Image Source="{Binding SelectedTextureAsset, Converter={StaticResource AssetThumbnailConv}}"
+                             Stretch="Uniform"/>
+                    </Border>
+                    <ComboBox ItemsSource="{Binding TextureAssets}"
+                              SelectedItem="{Binding SelectedTextureAsset, Mode=TwoWay}"
+                              FontSize="10">
+                      <ComboBox.ItemTemplate>
+                        <DataTemplate DataType="content:AssetInfo">
+                          <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Image Width="28" Height="28"
+                                   Source="{Binding ., Converter={StaticResource AssetThumbnailConv}}"
+                                   Stretch="UniformToFill"/>
+                            <TextBlock Text="{Binding FileName}" VerticalAlignment="Center"/>
+                          </StackPanel>
+                        </DataTemplate>
+                      </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <Button Content="Choose .texture…" Click="OnPickTexture"
+                            HorizontalAlignment="Stretch" FontSize="10"/>
+                    <TextBlock Text="{Binding TexturePath}" FontSize="9"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{StaticResource MutedTextBrush}"/>
+                  </StackPanel>
+                </StackPanel>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </Border>
+
+    </Grid>
+
+    <!-- BOTTOM: status / diagnostics -->
+    <Border Grid.Row="2" Grid.ColumnSpan="3" Classes="floating"
+            Margin="6,2,6,6" Padding="8,4">
+      <TextBlock Text="{Binding StatusLine, FallbackValue='Ready'}"
+                 FontFamily="{StaticResource FontMono}"
+                 FontSize="10"
+                 Foreground="{StaticResource MutedTextBrush}"/>
+    </Border>
+
+    <!-- Pointer-driven palette drag adornment. It lives above all three
+         columns and is hit-test transparent, so the canvas still receives
+         the release position while the user can see exactly which node is
+         being dragged. -->
+    <Canvas Grid.RowSpan="3" Grid.ColumnSpan="3"
+            IsHitTestVisible="False" ClipToBounds="True" ZIndex="1000">
+      <Border x:Name="PaletteDragGhost" IsVisible="False"
+              Width="180" Opacity="0.82" Padding="10,7" CornerRadius="4"
+              Background="{StaticResource PanelBrush}"
+              BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1">
+        <StackPanel>
+          <TextBlock x:Name="PaletteDragGhostTitle"
+                     FontFamily="{StaticResource FontMono}" FontSize="11"
+                     Foreground="{StaticResource FontBrush}"/>
+          <TextBlock x:Name="PaletteDragGhostType"
+                     FontFamily="{StaticResource FontMono}" FontSize="9"
+                     Foreground="{StaticResource MutedTextBrush}"/>
+        </StackPanel>
+      </Border>
+    </Canvas>
+
+  </Grid>
+</UserControl>

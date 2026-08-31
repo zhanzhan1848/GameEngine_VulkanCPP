@@ -158,6 +158,25 @@ public:
         return reg;
     }
 
+    /// <summary>
+    /// Upcast a Float3 register to a Float4 by appending alpha = 1.0f.
+    /// Used by the MaterialOutput handler when a Float3 source (e.g.
+    /// ConstantFloat3) is wired into BaseColor (Float4 pin) — Metal
+    /// won't auto-promote and the shader would fail to type-check.
+    /// </summary>
+    u16 Float3ToFloat4(u16 src) {
+        u16 reg = AllocReg();
+        func_.Emit(ShaderIROpcode::FLOAT3_TO_FLOAT4, 3, reg, src);
+        return reg;
+    }
+
+    /// <summary>Visualize a Float2 (normally UV) as RG with B=0, A=1.</summary>
+    u16 Float2ToFloat4(u16 src) {
+        u16 reg = AllocReg();
+        func_.Emit(ShaderIROpcode::FLOAT2_TO_FLOAT4, 3, reg, src);
+        return reg;
+    }
+
     void StoreOutput(u16 src, u8 pin_index) {
         func_.Emit(ShaderIROpcode::STORE_OUTPUT, 0, 0, src, 0, 0, (u16)pin_index);
     }

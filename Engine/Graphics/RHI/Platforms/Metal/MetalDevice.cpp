@@ -23,8 +23,11 @@
 
 namespace primal::graphics::rhi {
 
-MetalDevice::MetalDevice(const DeviceDesc& desc)
-    : RHIDevice(desc) {
+MetalDevice::MetalDevice(const DeviceDesc& desc, MTL::Device* external_device)
+    : RHIDevice(desc), mtlDevice_(nullptr) {
+    if (external_device) {
+        mtlDevice_ = external_device->retain();
+    }
 }
 
 MetalDevice::~MetalDevice() {
@@ -32,18 +35,22 @@ MetalDevice::~MetalDevice() {
 }
 
 bool MetalDevice::initializeImpl() {
-    // 1. 创建 Metal 设备
-    mtlDevice_ = MTL::CreateSystemDefaultDevice();
     if (!mtlDevice_) {
-        std::cerr << "[Metal] Failed to create system default device." << std::endl;
-        return false;
+        mtlDevice_ = MTL::CreateSystemDefaultDevice();
+        if (!mtlDevice_) {
+            std::cerr << "[Metal] Failed to create system default device." << std::endl;
+            return false;
+        }
+        ownsNativeDevice_ = true;
     }
 
-    // 2. 创建命令队列
     graphicsQueue_ = mtlDevice_->newCommandQueue();
     if (!graphicsQueue_) {
         std::cerr << "[Metal] Failed to create graphics command queue." << std::endl;
-        mtlDevice_->release();
+        if (ownsNativeDevice_) {
+            mtlDevice_->release();
+            ownsNativeDevice_ = false;
+        }
         mtlDevice_ = nullptr;
         return false;
     }
@@ -121,9 +128,12 @@ void MetalDevice::shutdownImpl() {
         graphicsQueue_ = nullptr;
     }
     if (mtlDevice_) {
-        mtlDevice_->release();
+        if (ownsNativeDevice_) {
+            mtlDevice_->release();
+        }
         mtlDevice_ = nullptr;
     }
+    ownsNativeDevice_ = false;
 }
 
 // 辅助函数：将 DataFormat 转换为 MTLPixelFormat
@@ -169,6 +179,7 @@ static MTL::PixelFormat ToMTLPixelFormat(DataFormat format) {
         case DataFormat::RGBA8_UInt: return MTL::PixelFormatRGBA8Uint;
         case DataFormat::RGBA8_SInt: return MTL::PixelFormatRGBA8Sint;
         case DataFormat::RGBA8_sRGB: return MTL::PixelFormatRGBA8Unorm_sRGB;
+
         
         case DataFormat::RG32_UNorm: return MTL::PixelFormatRG32Float;
         case DataFormat::RG32_SNorm: return MTL::PixelFormatRG32Float;

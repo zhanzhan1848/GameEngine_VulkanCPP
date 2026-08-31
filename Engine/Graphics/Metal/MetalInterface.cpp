@@ -22,14 +22,19 @@ namespace primal::graphics::metal
         pi.shutdown = core::shutdown;
 
         // Basic
-        pi.surface_ops.create = core::create_surface;
-        pi.surface_ops.remove = core::remove_surface;
-        pi.surface_ops.resize = core::resize_surface;
-        pi.surface_ops.width = core::surface_width;
-        pi.surface_ops.height = core::surface_height;
-        pi.surface_ops.render = core::render_surface;
+        pi.surface.create = core::create_surface;
+        // create_external_surface now takes a pre-registered platform::window
+        // (caller is responsible for platform::register_external_window so the
+        // C ABI's render_surface struct has a valid window_id for resize).
+        pi.surface.create_external = core::create_external_surface;
+        pi.surface.get_native_view = core::external_surface_view;
+        pi.surface.remove = core::remove_surface;
+        pi.surface.resize = core::resize_surface;
+        pi.surface.width = core::surface_width;
+        pi.surface.height = core::surface_height;
+        pi.surface.render = core::render_surface;
         // Path B: offscreen render → blit to drawable → present.
-        pi.surface_ops.blit_and_present = core::blit_surface_and_present;
+        pi.surface.blit_and_present = core::blit_surface_and_present;
 
         // Light
         pi.light.create_light_set = light::create_light_set;
@@ -40,10 +45,11 @@ namespace primal::graphics::metal
 		pi.light.get_parameter = light::get_parameter;
 
         // Camera
-        pi.camera_ops.create = camera::create;
-		pi.camera_ops.remove = camera::remove;
-		pi.camera_ops.set_parameter = camera::set_parameter;
-		pi.camera_ops.get_parameter = camera::get_parameter;
+        pi.camera.create = camera::create;
+		pi.camera.remove = camera::remove;
+		pi.camera.set_parameter = camera::set_parameter;
+		pi.camera.get_parameter = camera::get_parameter;
+		pi.camera.update = camera::update;
 
         // Resources
         pi.resources.add_submesh = content::submesh::add;

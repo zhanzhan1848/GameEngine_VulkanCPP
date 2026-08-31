@@ -4,6 +4,8 @@
 #include "MetalCore.h"
 #include "MetalShader.h"
 #include "MetalSurface.h"
+
+#include <iostream>
 #include "MetalResource.h"
 #include "MetalGPass.h"
 #include "MetalLight.h"
@@ -23,6 +25,7 @@ namespace primal::graphics::metal::fx
         MTL::SamplerState*                      compose_sampler{ nullptr };
 
         metal_render_texture                    compose_texture{};
+        editor_draw_hook                       g_editor_draw_hook{ nullptr };
 
         bool create_post_process_pipeline()
         {
@@ -33,8 +36,12 @@ namespace primal::graphics::metal::fx
             // 获取着色器函数并检查有效性
             auto vertex_shader = shader::get_engine_shader( shader::engine_shader::fullscreen_triangle_vs );
             auto fragment_shader = shader::get_engine_shader( shader::engine_shader::post_process_ps );
-            
+
             if (!vertex_shader.get() || !fragment_shader.get()) {
+                std::cerr << "[MetalPostProcess] post_process_pipeline: missing shader (vs="
+                          << (vertex_shader.get() ? "ok" : "NULL")
+                          << " fs=" << (fragment_shader.get() ? "ok" : "NULL") << ")"
+                          << std::endl;
                 info->release();
                 return false;
             }
@@ -43,6 +50,20 @@ namespace primal::graphics::metal::fx
             info->setFragmentFunction( fragment_shader.get() );
             info->colorAttachments()->object(0)->setPixelFormat( MTL::PixelFormat::PixelFormatRGBA16Float );
             post_process_pipeline = device->newRenderPipelineState( info, &pError );
+            if (pError) {
+                std::fprintf(stderr, "[MetalPostProcess] post_process_pipeline PSO error: %s\n",
+                          pError->localizedDescription()->utf8String());
+                std::fflush(stderr);
+                std::cerr << "[MetalPostProcess] post_process_pipeline PSO error: "
+                          << pError->localizedDescription()->utf8String() << std::endl;
+                // pError is an NS::Error** out-parameter; Metal owns the
+                // NSError* it writes. Calling ->release() over-released an
+                // autoreleased NSError that the per-callout autorelease
+                // pool later dereferenced, producing the objc_release
+                // SIGSEGV documented in MetalBlitToDrawable.cpp.
+            } else if (!post_process_pipeline) {
+                std::cerr << "[MetalPostProcess] post_process_pipeline: newRenderPipelineState returned null without error" << std::endl;
+            }
             MTL_CHECK_ERROR(pError)
 
             NAME_METAL_OBJECT(post_process_pipeline, "post_process_pipeline");
@@ -176,11 +197,36 @@ namespace primal::graphics::metal::fx
 		}
     }
 
-    void post_process(MTL::CommandBuffer* buffer, metal_surface* surface, const constant_buffer& cbuffer)
+    void post_process(MTL::CommandBuffer* buffer, metal_surface* surface, const constant_buffer& cbuffer, f32 delta_time)
     {
-        assert(post_process_pipeline);
-        MTK::View* view{ surface->view() };
+        MTK::View* view{ static_cast<MTK::View*>(surface->view()) };
         CA::MetalDrawable* drawable{ view->currentDrawable() };
+        if (!drawable) return;
+
+        // Fallback: if the post-process pipeline wasn't built (missing
+        // shader blob in the editor preview), just clear the drawable to
+        // a known color so the user sees the surface is alive. This
+        // matches the behavior of the legacy inline-clear path that
+        // shipped before shaders.metallib was available.
+        if (!post_process_pipeline)
+        {
+            MTL::RenderPassDescriptor* clearRpd = view->currentRenderPassDescriptor();
+            if (!clearRpd) return;
+            clearRpd->colorAttachments()->object(0)->setTexture(drawable->texture());
+            clearRpd->colorAttachments()->object(0)->setClearColor(
+                MTL::ClearColor::Make(0.05f, 0.05f, 0.08f, 1.0f));
+            clearRpd->colorAttachments()->object(0)->setLoadAction(
+                MTL::LoadAction::LoadActionClear);
+            clearRpd->colorAttachments()->object(0)->setStoreAction(
+                MTL::StoreAction::StoreActionStore);
+            MTL::RenderCommandEncoder* clearEnc = buffer->renderCommandEncoder(clearRpd);
+            if (clearEnc) {
+                clearEnc->endEncoding();
+                if (g_editor_draw_hook) g_editor_draw_hook(buffer, drawable, delta_time);
+            }
+            return;
+        }
+
         MTL::RenderPassDescriptor* postRpd = view->currentRenderPassDescriptor();
         postRpd->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(0.0f, 0.0f, 0.0f, 1.0f));
         postRpd->colorAttachments()->object(0)->setLoadAction(MTL::LoadAction::LoadActionClear);
@@ -191,7 +237,7 @@ namespace primal::graphics::metal::fx
         postEnc->setFragmentBuffer( cbuffer.buffer(), 0, 0 );
         postEnc->setFragmentSamplerState( sampler, 0 );
         postEnc->setFragmentTexture( gpass::get_depth_buffer().texture(), 0 );
-        postEnc->setFragmentTexture( taa::get_taa_texture().texture(), 1 );
+        postEnc->setFragmentTexture( gpass::get_albedo_buffer().texture(), 1 );
         postEnc->setFragmentTexture( ssao::get_ssao_blur_texture().texture(), 2 );
         postEnc->setFragmentTexture( ssgi::get_ssgi_blur_texture().texture(), 3 );
         postEnc->drawPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6) );
@@ -200,7 +246,7 @@ namespace primal::graphics::metal::fx
 
     void compose_pass(MTL::CommandBuffer* buffer, const metal_frame_info& metal_info)
     {
-        assert(compose_pipeline);
+        if (!compose_pipeline) return;
         auto current_non_cullable_light_buffer{ light::non_cullable_light_buffer(metal_info.frame_index) };
 
         MTL::RenderPassDescriptor* composeRpd = MTL::RenderPassDescriptor::alloc()->init();
@@ -222,4 +268,6 @@ namespace primal::graphics::metal::fx
 
         if(composeRpd) composeRpd->release();
     }
+
+    void set_editor_draw_hook(editor_draw_hook hook) { g_editor_draw_hook = hook; }
 }

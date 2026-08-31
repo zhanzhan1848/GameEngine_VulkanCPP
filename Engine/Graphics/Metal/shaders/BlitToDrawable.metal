@@ -21,10 +21,12 @@ vertex BlitVSOut blit_to_drawable_vs(uint vid [[vertex_id]]) {
     BlitVSOut out;
     float2 p = float2((vid << 1) & 2, vid & 2);
     out.position = float4(p * 2.0f - 1.0f, 0.0f, 1.0f);
-    out.uv = p;
-    // NOTE: do NOT flip Y here. The engine's fullscreen_triangle_vs leaves
-    // uv = p (top-left origin), and Metal's framebufferOnly drawables are
-    // also top-left. Flipping would mirror the image vertically.
+    // Metal viewport coordinates map clip-space +Y to the top of the
+    // drawable, while texture coordinates use v=0 at the top. The generated
+    // triangle has p.y=0 at clip-space -Y (the bottom), so sampling p
+    // directly mirrors the complete editor viewport vertically. Map the
+    // bottom vertices to v=1 and the top vertex to v=0 instead.
+    out.uv = float2(p.x, 1.0f - p.y);
     return out;
 }
 

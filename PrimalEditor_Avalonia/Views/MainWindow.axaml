@@ -1,20 +1,112 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+        xmlns:views="using:PrimalEditor_Avalonia.Views"
+        xmlns:common="using:PrimalEditor_Avalonia.Common"
+        xmlns:dock="using:Dock.Avalonia.Controls"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        mc:Ignorable="d" d:DesignWidth="1400" d:DesignHeight="900"
         x:Class="PrimalEditor_Avalonia.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Icon="/Assets/avalonia-logo.ico"
-        Title="PrimalEditor_Avalonia">
+        Title="{Binding WindowTitle}"
+        MinWidth="900" MinHeight="600"
+        Width="1400" Height="900"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource VoidBrush}">
 
-    <Design.DataContext>
-        <!-- This only sets the DataContext for the previewer in an IDE,
-             to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
-        <vm:MainWindowViewModel/>
-    </Design.DataContext>
+    <DockPanel LastChildFill="True">
 
-    <TextBlock Text="{Binding Greeting}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        <!-- =========== TOP MENU BAR =========== -->
+        <Border DockPanel.Dock="Top" Classes="floating">
+            <Menu Background="Transparent" BorderThickness="0">
+                <MenuItem Header="_File">
+                    <MenuItem Header="_New Project" Command="{Binding NewProjectCommand}"
+                              InputGesture="Ctrl+N"/>
+                    <MenuItem Header="_Open Project" Command="{Binding OpenProjectCommand}"
+                              InputGesture="Ctrl+O"/>
+                    <MenuItem Header="_Save" Command="{Binding SaveProjectCommand}"
+                              InputGesture="Ctrl+S"/>
+                    <Separator/>
+                    <MenuItem Header="_Import _Asset..." Click="OnImportAssetClick"
+                              InputGesture="Ctrl+I"/>
+                    <MenuItem Header="_New Script..." Click="OnNewScriptClick"
+                              IsEnabled="False" ToolTip.Tip="VS integration skipped per user request"/>
+                    <Separator/>
+                    <MenuItem Header="E_xit" Command="{Binding ExitCommand}"/>
+                </MenuItem>
+                <MenuItem Header="_Edit">
+                    <MenuItem Header="_Undo" Command="{Binding UndoCommand}"
+                              InputGesture="Ctrl+Z"/>
+                    <MenuItem Header="_Redo" Command="{Binding RedoCommand}"
+                              InputGesture="Ctrl+Y"/>
+                    <Separator/>
+                    <MenuItem Header="Cu_t" Command="{Binding CutCommand}"
+                              InputGesture="Ctrl+X"/>
+                    <MenuItem Header="_Copy" Command="{Binding CopyCommand}"
+                              InputGesture="Ctrl+C"/>
+                    <MenuItem Header="_Paste" Command="{Binding PasteCommand}"
+                              InputGesture="Ctrl+V"/>
+                    <Separator/>
+                    <MenuItem Header="_Delete Entity" Command="{Binding DeleteEntityCommand}"
+                              InputGesture="Delete"/>
+                    <MenuItem Header="_Duplicate Entity" Command="{Binding DuplicateEntityCommand}"
+                              InputGesture="Ctrl+D"/>
+                    <MenuItem Header="_Rename Entity..." Command="{Binding RenameEntityCommand}"
+                              InputGesture="F2"/>
+                </MenuItem>
+                <MenuItem Header="_View">
+                    <MenuItem Header="Toggle _World Editor" Command="{Binding ToggleWorldEditorTabCommand}" InputGesture="F4">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding IsWorldEditorVisible}" IsHitTestVisible="False"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="Toggle _Content Browser" Command="{Binding ToggleContentBrowserTabCommand}" InputGesture="F5">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding IsContentBrowserVisible}" IsHitTestVisible="False"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="Toggle _Logger" Click="OnToggleLogger" InputGesture="F6"/>
+                </MenuItem>
+                <MenuItem Header="_Help">
+                    <MenuItem Header="_About..." Command="{Binding AboutCommand}"/>
+                </MenuItem>
+            </Menu>
+        </Border>
 
+        <!-- =========== BOTTOM STATUS BAR (glass floating) =========== -->
+        <Grid DockPanel.Dock="Bottom"
+              ColumnDefinitions="*,Auto,Auto,Auto"
+              Margin="6,2,6,6">
+            <Border Grid.Column="0" Classes="floating">
+                <StackPanel Orientation="Horizontal" Margin="8,4">
+                    <Rectangle Width="10" Height="10"
+                               Fill="{StaticResource MintBrush}"
+                               Margin="0,0,6,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="{Binding ProjectPathDisplay}" Classes="mono"/>
+                </StackPanel>
+            </Border>
+            <Border Grid.Column="1" Classes="floating" Margin="4,0,0,0">
+                <TextBlock Text="{Binding SceneCountDisplay}" Classes="mono" Margin="8,4"/>
+            </Border>
+            <Border Grid.Column="2" Classes="floating" Margin="4,0,0,0">
+                <TextBlock Text="{Binding EntityCountDisplay}" Classes="mono" Margin="8,4"/>
+            </Border>
+            <Border Grid.Column="3" Classes="floating" Margin="4,0,0,0">
+                <StackPanel Orientation="Horizontal" Margin="8,4">
+                    <TextBlock Text="READY" FontFamily="{StaticResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                               Foreground="{StaticResource MintBrush}"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- =========== MAIN DOCK AREA =========== -->
+        <dock:DockControl InitializeLayout="True"
+                          InitializeFactory="True"
+                          Factory="{Binding Factory}"
+                          Layout="{Binding Layout}"/>
+
+    </DockPanel>
 </Window>

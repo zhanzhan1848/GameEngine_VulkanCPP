@@ -1,4 +1,5 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -22,21 +23,67 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Folder Include="Models\" />
     <AvaloniaResource Include="Assets\**" />
+    <AvaloniaResource Include="Controls\*.axaml" />
+    <AvaloniaResource Include="Themes\*.axaml" />
+    <AvaloniaResource Include="Themes\Controls\*.axaml" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.0" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.0" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.0" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.0" />
-    <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.0" />
-    <!--Condition below is needed to remove Avalonia.Diagnostics package from build output in Release configuration.-->
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.0">
-      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
-      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
-    </PackageReference>
-    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1" />
+    <PackageReference Include="Avalonia" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <!-- P1.d: Dock.Avalonia integration for docking layout (POC validated in /tmp/dock_poc) -->
+    <PackageReference Include="Dock.Avalonia" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Model.Mvvm" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Serializer.SystemTextJson" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Avalonia.Themes.Fluent" Version="12.1.0.1" />
+    <PackageReference Include="Dock.Settings" Version="12.1.0.1" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <!-- Phase 4-5: Unreal-style node graph editor (requires Avalonia 12) -->
+    <PackageReference Include="NodifyM.Avalonia" Version="12.0.0" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PrimalEditor_Avalonia.Tests" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <PostBuildEvent Condition="'$(OS)' == 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)..\..\Darwin\$(Configuration)\PrimalEngine.dll')">copy /Y "$(MSBuildThisFileDirectory)..\..\Darwin\$(Configuration)\PrimalEngine.dll" "$(BaseOutputPath)\$(Configuration)"</PostBuildEvent>
+  </PropertyGroup>
+
+  <!--
+    Avalonia's NativeEngineBridge.LoadEngine() resolves libPrimalEngine.dylib
+    via NativeLibrary.Load (a sandboxed path search). The build output
+    directory is $(BaseOutputPath)/$(Configuration) but the real dylib
+    is named libEngineDLL.dylib and lives in
+    $(MSBuildThisFileDirectory)/../../Darwin/$(Configuration). Without a
+    symlink in the output directory, loading the engine silently fails
+    on macOS + Linux, and any subsequent DllImport on a function added
+    in this branch (DrawDebugWorldQuad, DrawDebugLightBulb,
+    UpdateSceneEnvironment) throws EntryPointNotFoundException at the
+    first call site — which Avalonia's default unhandled-exception
+    handler turns into a process exit. The full build/symlink/package
+    flow lives in build/build_app.sh; this Target covers the case
+    where the user runs `dotnet run` directly from the build output
+    without going through build_app.sh.
+  -->
+  <Target Name="CreatePrimalEngineSymlink"
+          AfterTargets="Build"
+          Condition="'$(OS)' != 'Windows_NT' AND Exists('$(MSBuildThisFileDirectory)/../../Darwin/$(Configuration)/libEngineDLL.dylib') AND Exists('$(BaseOutputPath)/$(Configuration)')">
+    <Exec Condition="!Exists('$(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib')"
+          Command="ln -sf libEngineDLL.dylib &quot;$(BaseOutputPath)/$(Configuration)/libPrimalEngine.dylib&quot;" />
+    <Exec Condition="!Exists('$(BaseOutputPath)/$(Configuration)/libPrimalEngine.so') AND Exists('$(MSBuildThisFileDirectory)/../../Darwin/$(Configuration)/libPrimalEngine.so')"
+          Command="ln -sf libPrimalEngine.so &quot;$(BaseOutputPath)/$(Configuration)/libPrimalEngine.so&quot;" />
+  </Target>
+
+  <!--
+    The macOS .app wrap and native dylib copy happen in
+    Directory.Build.targets (sibling of this file) — see the comment
+    there for why. Attempting to do it from the csproj is unreliable
+    because the .NET SDK silently drops AfterTargets hooks on
+    incremental builds, and its BuildDependsOn element declaration
+    overrides any property assignment in this file.
+  -->
 </Project>

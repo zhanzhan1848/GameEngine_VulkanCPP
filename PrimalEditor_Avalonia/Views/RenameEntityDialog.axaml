@@ -1,0 +1,25 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PrimalEditor_Avalonia.Views.RenameEntityDialog"
+        Title="Rename Entity"
+        Width="420" Height="170"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource VoidBrush}">
+
+    <Border Classes="floating" Margin="10">
+        <Grid Margin="24" RowDefinitions="Auto,*,Auto" ColumnDefinitions="*">
+            <TextBlock Grid.Row="0" Text="NEW ENTITY NAME"
+                       FontFamily="{StaticResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
+                       Foreground="{StaticResource ElectricBlueBrush}"
+                       VerticalAlignment="Center"/>
+            <TextBox Grid.Row="1" x:Name="NameTextBox" Margin="0,10"/>
+
+            <StackPanel Grid.Row="2" Orientation="Horizontal"
+                        HorizontalAlignment="Right" Margin="0,16,0,0">
+                <Button Content="Cancel" Click="OnCancel" Width="90" Margin="0,0,10,0"/>
+                <Button Content="OK" Click="OnOK" Width="90" IsDefault="True" Classes="accent"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

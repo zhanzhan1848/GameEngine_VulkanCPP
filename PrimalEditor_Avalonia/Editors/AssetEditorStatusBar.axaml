@@ -1,0 +1,30 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="PrimalEditor_Avalonia.Editors.AssetEditorStatusBar"
+             x:DataType="vm:AssetEditorViewModel"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors">
+  <Border Background="{StaticResource VoidBrush}"
+          BorderBrush="{StaticResource ElectricBlueBrush}"
+          BorderThickness="0,1,0,0" Padding="10,5">
+    <Grid ColumnDefinitions="*,Auto,Auto">
+      <TextBlock Grid.Column="0" Name="AssetPathText"
+                 FontFamily="{StaticResource FontMono}" FontSize="11"
+                 Foreground="{StaticResource SecondaryTextBrush}"
+                 VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      <Border Grid.Column="1" Margin="8,0" Padding="10,3" CornerRadius="0"
+              BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
+              Background="{StaticResource BlueTint12}"
+              VerticalAlignment="Center">
+        <TextBlock Name="StateText"
+                   FontFamily="{StaticResource FontDisplay}"
+                   FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                   Foreground="{StaticResource ElectricBlueBrush}"/>
+      </Border>
+      <TextBlock Grid.Column="2" Margin="10,0,0,0" Name="DirtyText"
+                 FontFamily="{StaticResource FontDisplay}"
+                 FontWeight="SemiBold" FontSize="12"
+                 Foreground="{StaticResource AmberBrush}"
+                 VerticalAlignment="Center"/>
+    </Grid>
+  </Border>
+</UserControl>

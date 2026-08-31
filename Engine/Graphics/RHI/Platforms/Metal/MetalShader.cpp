@@ -9,6 +9,7 @@
 #include "MetalShader.h"
 #include "MetalDevice.h"
 #include <iostream>
+#include <cstring>
 
 namespace primal::graphics::rhi {
 
@@ -23,10 +24,18 @@ bool MetalShader::Initialize() {
     if (!data_ || size_ == 0) return false;
 
     NS::Error* error = nullptr;
-    
+
+    // Detect binary input: a metallib starts with the "MTLB" magic at
+    // offset 0. If the data is binary, the source-compile fallback
+    // below would fail too (compiling metallib bytes as if they were
+    // .metal source text produces a null library silently). Detect
+    // binary up front and skip the source fallback to avoid the wasted
+    // work + a confusing "Compiling from source..." log line.
+    const bool is_binary = (size_ >= 4 && std::memcmp(data_, "MTLB", 4) == 0);
+
     // Create dispatch data to hold the source/binary
     dispatch_data_t dispatchData = dispatch_data_create(data_, size_, nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-    
+
     // Try to create library from data (assuming binary/metallib)
     library_ = device_.GetNativeDevice()->newLibrary(dispatchData, &error);
 
@@ -34,10 +43,13 @@ bool MetalShader::Initialize() {
         dispatch_release(dispatchData);
     }
 
-    // If binary creation failed, try as source code
-    if (!library_) {
+    // If binary creation failed, try as source code (only for non-binary data).
+    // Binary input is already a valid metallib; if newLibrary rejected it,
+    // it's a different problem (corrupt, wrong version, GPU-incompatible) and
+    // the source fallback would only make things worse.
+    if (!library_ && !is_binary) {
         if (error) {
-            std::cerr << "[MetalShader] Failed to create library from binary: " 
+            std::cerr << "[MetalShader] Failed to create library from binary: "
                       << error->localizedDescription()->utf8String() << std::endl;
             // Error is autoreleased, do not release manually
             error = nullptr;
@@ -62,6 +74,18 @@ bool MetalShader::Initialize() {
         library_ = device_.GetNativeDevice()->newLibrary(source, options, &error);
         source->release();
         options->release();
+    } else if (!library_ && is_binary) {
+        // Binary metallib failed to load. The source-compile fallback
+        // would only waste time on binary input. Log the error and let
+        // the function return false with library_ = nullptr.
+        if (error) {
+            std::cerr << "[MetalShader] Failed to load metallib (size=" << size_
+                      << "): " << error->localizedDescription()->utf8String() << std::endl;
+            // Error is autoreleased, do not release manually
+            error = nullptr;
+        } else {
+            std::cerr << "[MetalShader] Failed to load metallib (size=" << size_ << ")" << std::endl;
+        }
     }
 
     if (!library_) {

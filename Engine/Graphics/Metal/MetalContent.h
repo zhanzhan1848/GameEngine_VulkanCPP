@@ -16,6 +16,24 @@ namespace primal::graphics::metal::content
 	bool initialize();
 	void shutdown();
 
+	/**
+	 * @brief Convert a DXGI-style format code to the corresponding Metal pixel format.
+	 *
+	 * The texture importer writes the raw DXGI value into the resource blob
+	 * (see AsyncResourceLoader::LoadTexturesParallel — 28 = RGBA8 UNORM,
+	 * 29 = RGBA8 sRGB, 71/72 = BC1, 98/99 = BC7). Several of those values
+	 * — including 29 — sit in gaps of Apple's MTL::PixelFormat enum and
+	 * would crash Metal's validation layer when passed to
+	 * MTL::TextureDescriptor::setPixelFormat.
+	 *
+	 * @param format_u32  DXGI-format code as it appears in the resource blob.
+	 * @return A valid MTL::PixelFormat. Unknown values fall back to
+	 *         MTL::PixelFormatRGBA8Unorm (matching ContentToEngine's
+	 *         create_texture_resource fallback) so we never return
+	 *         PixelFormatInvalid.
+	 */
+	MTL::PixelFormat mtl_pixel_format_from_dxgi(u32 format_u32);
+
     namespace submesh
 	{
 		struct views_cache

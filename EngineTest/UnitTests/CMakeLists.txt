@@ -27,6 +27,23 @@ add_custom_command(OUTPUT ${UNITTEST_ASSETS_STAMP}
 )
 add_custom_target(UnitTestAssetsCopy DEPENDS ${UNITTEST_ASSETS_STAMP})
 
+add_executable(TestCookedMeshAdapter
+    Content/TestCookedMeshAdapter.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Content/CookedMeshAdapter.cpp
+)
+target_include_directories(TestCookedMeshAdapter PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME TestCookedMeshAdapter COMMAND TestCookedMeshAdapter)
+set_target_properties(TestCookedMeshAdapter PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+add_executable(TestCookedMeshImport Content/TestCookedMeshImport.cpp)
+target_include_directories(TestCookedMeshImport PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(TestCookedMeshImport PRIVATE EngineDLL)
+set_target_properties(TestCookedMeshImport PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # ======================
 # 独立RHI测试目标 - 不依赖任何外部库
 # ======================
@@ -1159,13 +1176,13 @@ if(APPLE)
 
     # 创建Metal纹理测试
     add_executable(TestMetalTexture Graphics/Metal/TestMetalTexture.cpp)
-    target_include_directories(TestMetalTexture PRIVATE 
+    target_include_directories(TestMetalTexture PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/Engine
         ${CMAKE_SOURCE_DIR}/Engine/Common
         ${CMAKE_SOURCE_DIR}/OSAPI/MAC
     )
-    target_link_libraries(TestMetalTexture PRIVATE 
+    target_link_libraries(TestMetalTexture PRIVATE
         Engine
         "-framework Foundation"
         "-framework Metal"
@@ -1174,6 +1191,26 @@ if(APPLE)
     )
     add_test(NAME TestMetalTexture COMMAND TestMetalTexture)
     set_target_properties(TestMetalTexture PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    )
+
+    # DXGI→Metal 格式转换回归测试 (PNG 导入崩溃 bug)
+    add_executable(TestMetalContentFormatConversion Graphics/Metal/TestMetalContentFormatConversion.cpp)
+    target_include_directories(TestMetalContentFormatConversion PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Engine
+        ${CMAKE_SOURCE_DIR}/Engine/Common
+        ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+    )
+    target_link_libraries(TestMetalContentFormatConversion PRIVATE
+        Engine
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+    )
+    add_test(NAME TestMetalContentFormatConversion COMMAND TestMetalContentFormatConversion)
+    set_target_properties(TestMetalContentFormatConversion PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
 

@@ -34,7 +34,7 @@ public:
     }
 
     const MaterialParamDescriptor* GetParamDescriptors(u32& c) const override { c = 1; return kParams; }
-    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 1; return kPins; }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 2; return kPins; }
 
 private:
     static const MaterialParamDescriptor kParams[];
@@ -46,7 +46,8 @@ inline const MaterialParamDescriptor CurveNode::kParams[] = {
      MAT_OFFSETOF(CurveNode, curve), sizeof(CurveData), nullptr},
 };
 inline const MaterialPinDescriptor CurveNode::kPins[] = {
-    {"x", 0, MaterialDataType::Float, true},
+    {"x",      0, MaterialDataType::Float, true},
+    {"result", 0, MaterialDataType::Float, false},
 };
 
 } // namespace primal::graphics::material_graph

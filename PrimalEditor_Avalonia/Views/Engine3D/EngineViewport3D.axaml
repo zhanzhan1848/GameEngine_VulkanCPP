@@ -1,0 +1,33 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="using:PrimalEditor_Avalonia.Views.Engine3D"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="600"
+             x:Class="PrimalEditor_Avalonia.Views.Engine3D.EngineViewport3D"
+             Background="#FF202020">
+  <Grid>
+    <views:MTKViewHost Name="MTKHostView" />
+    <views:ViewportOverlay Name="Overlay" IsHitTestVisible="False" />
+    <views:GizmoOverlay Name="Gizmo" IsHitTestVisible="False" />
+    <!-- Transparent Border on top to capture pointer events. The
+         NativeControlHost's wrapper NSView eats mouse events at the
+         AppKit level on macOS; without this overlay Border, Avalonia's
+         PointerPressed/Moved/Released never fire and the user can't
+         orbit/pan/zoom or drag gizmos. Background=Transparent makes
+         the Border participate in hit-testing while being visually
+         invisible.
+         AllowDrop + Drop/DragOver route Content Browser drops through
+         the inner-most hit-test target instead of relying on the outer
+         WorldEditorView Border — NativeControlHost does not
+         consistently forward Avalonia's drag routed events on macOS,
+         and the inner-most hit-test target is the only reliable sink.
+         Dropped entities spawn at (0, 0, 0); the user repositions via
+         the gizmo. -->
+    <Border Name="InputCapture"
+            Background="Transparent"
+            DragDrop.AllowDrop="True"
+            DragDrop.DragOver="OnAssetDragOver"
+            DragDrop.Drop="OnAssetDrop" />
+  </Grid>
+</UserControl>

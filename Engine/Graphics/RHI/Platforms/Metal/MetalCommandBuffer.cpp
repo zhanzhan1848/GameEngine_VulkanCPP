@@ -1087,6 +1087,19 @@ void MetalCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCoun
 }
 
 void MetalCommandBuffer::DrawIndexed(u32 indexCount, u32 startIndex, u32 baseVertex, u32 instanceCount, u32 startInstance) {
+    static int indexedDrawCount = 0;
+    indexedDrawCount++;
+    if (indexedDrawCount <= 20) {
+        std::cout << "[Metal] DRAW_IDX #" << indexedDrawCount
+                  << ": indexCount=" << indexCount
+                  << " startIndex=" << startIndex
+                  << " baseVertex=" << baseVertex
+                  << " instanceCount=" << instanceCount
+                  << " startInstance=" << startInstance
+                  << " idxBufBound=" << (currentIndexBuffer_ ? "yes" : "no")
+                  << " encoderType=" << (int)currentEncoderType_
+                  << std::endl;
+    }
     if (currentEncoderType_ == EncoderType::Render && currentIndexBuffer_) {
         NS::UInteger indexStride = (currentIndexType_ == MTL::IndexTypeUInt16) ? 2 : 4;
         NS::UInteger offset = currentIndexBufferOffset_ + startIndex * indexStride;

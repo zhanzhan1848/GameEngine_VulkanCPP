@@ -22,6 +22,13 @@ public:
         auto* out = CreateOutput<MaterialFloatData>(0);
         out->value = t;
     }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 1; return kPins; }
+private:
+    static const MaterialPinDescriptor kPins[];
+};
+
+inline const MaterialPinDescriptor TimeNode::kPins[] = {
+    {"time", 0, MaterialDataType::Float, false},
 };
 
 } // namespace primal::graphics::material_graph

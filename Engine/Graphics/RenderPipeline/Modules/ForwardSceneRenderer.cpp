@@ -23,6 +23,7 @@
 #include "Graphics/RenderMesh.h"
 #include "Graphics/MaterialInstance.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/RHI/Utils/IBLPrecomputer.h"
 #include "Graphics/Scene/LightSyncSystem.h"
 #include "Graphics/DebugDraw/DebugDrawQueue.h"
 #include "Content/ContentToEngine.h"
@@ -31,6 +32,11 @@
 #include "Components/Geometry.h"
 #include "Graphics/Material/ShaderTechnique.h"
 #include "Graphics/Material/InstanceData.h"
+#include "Graphics/MaterialGraph/MaterialGraph.h"
+#include "Graphics/MaterialGraph/MaterialGraphSerializer.h"
+#include "Graphics/ShaderIR/ShaderCompiler.h"
+#include "Graphics/ShaderIR/MaterialGraphToIR.h"
+#include "Graphics/ShaderIR/MetalEmitter.h"
 
 #include <fstream>
 #include <sstream>
@@ -44,6 +50,7 @@
 
 // For texture loading
 #include "stb_image.h"
+#include <zlib.h>
 
 namespace primal::graphics {
 
@@ -152,6 +159,12 @@ static std::string ResolveShaderPath(const std::string& relPath) {
     if (std::ifstream(fb).is_open()) return fb;
     return relPath;  // let the caller's open() produce the error
 }
+
+static const std::string SHADER_DIR_WT =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/Engine/Graphics/Metal/shaders/Forward/";
+
+static const std::string RHI_SHADER_DIR_WT =
+    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/Engine/Graphics/RHI/Shaders/";
 
 static std::string ReadFileToString(const std::string& path) {
     std::ifstream file(path);
@@ -378,15 +391,127 @@ std::string ResolveTexturePath(const std::string& baseDir, const std::string& fi
     return baseDir + cleanName;
 }
 
+// f32 → f16 for RGBA16_Float texture upload (HDR equirect).
+static inline u16 f32_to_f16(f32 f) {
+    u32 x;
+    std::memcpy(&x, &f, sizeof(x));
+    const u32 sign = (x >> 16) & 0x8000;
+    const int e = static_cast<int>((x >> 23) & 0xFF) - 127 + 15;
+    const u32 m = x & 0x7FFFFF;
+    if (e <= 0) return static_cast<u16>(sign);
+    if (e >= 31) return static_cast<u16>(sign | 0x7C00);
+    return static_cast<u16>(sign | (e << 10) | (m >> 13));
+}
+
+// Parse a cooked .texture (TEXR container, Apple layout — same encoding as
+// ContentToEngine.cpp create_texture_resource) and return mip 0 as RGBA16
+// (f16) pixels for equirect upload. Bytes-per-pixel is derived from
+// row_pitch/width (4 = RGBA8, 8 = RGBA16, 16 = RGBA32F); the container's
+// format field is unreliable for editor-imported HDR files.
+static bool LoadTexrEquirect(const std::string& path, u32& out_w, u32& out_h,
+                             DataFormat& out_format, std::vector<u8>& out_pixels) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    std::vector<u8> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (data.size() < 64 || data[0] != 'T' || data[1] != 'E' || data[2] != 'X' || data[3] != 'R') return false;
+
+    u64 off = 8;
+    u32 srcLen = 0;
+    std::memcpy(&srcLen, data.data() + off, 4); off += 4 + srcLen;
+    off += 7 * 4;
+    if (off + 28 > data.size()) return false;
+
+    u32 w = 0, h = 0, arraySz = 0, flags = 0, mips = 0, format = 0;
+    std::memcpy(&w, data.data() + off, 4);
+    std::memcpy(&h, data.data() + off + 4, 4);
+    std::memcpy(&arraySz, data.data() + off + 8, 4);
+    std::memcpy(&flags, data.data() + off + 12, 4);
+    std::memcpy(&mips, data.data() + off + 16, 4);
+    std::memcpy(&format, data.data() + off + 20, 4);
+    off += 24;
+    u32 compLen = 0;
+    std::memcpy(&compLen, data.data() + off, 4); off += 4;
+    if (arraySz == 0 || mips == 0 || compLen == 0 || off + compLen > data.size()) return false;
+
+    uLongf decSize = (data.size() * 8 + 1) << 4; // generous upper bound
+    std::vector<u8> dec(decSize);
+    if (uncompress(dec.data(), &decSize, data.data() + off, compLen) != Z_OK) return false;
+    dec.resize(decSize);
+
+    // Walk slices to mip 0 / face 0: per slice {u64 skip, u32 row_pitch,
+    // u32 slice_pitch, bytes[slice_pitch]}.
+    u64 pos = 0;
+    auto read_u32 = [&](u32& v) { if (pos + 4 > dec.size()) return false; std::memcpy(&v, dec.data() + pos, 4); pos += 4; return true; };
+    for (u32 a = 0; a < arraySz; ++a) {
+        for (u32 m = 0; m < mips; ++m) {
+            u32 rp = 0, sp = 0;
+            if (pos + 16 > dec.size()) return false;
+            pos += 8; // unknown u64 header per slice
+            if (!read_u32(rp) || !read_u32(sp)) return false;
+            if (pos + sp > dec.size()) return false;
+            if (a == 0 && m == 0) {
+                if (w == 0 || h == 0 || rp == 0 || sp == 0) return false;
+                out_w = w; out_h = h;
+                const u64 blocksX = (w + 3) / 4, blocksY = (h + 3) / 4;
+                if (rp == blocksX * 16 && sp == blocksX * blocksY * 16) {
+                    // ASTC_4x4 — upload block data as-is, hardware decodes.
+                    // sRGB variant: importer output is sRGB-encoded LDR;
+                    // sampling decodes to linear so sky + IBL bake agree.
+                    out_format = DataFormat::ASTC_4x4_sRGB;
+                    out_pixels.assign(dec.data() + pos, dec.data() + pos + sp);
+                    return true;
+                }
+                // Uncompressed rows may be padded by the cooker.  Derive the
+                // texel size from the row pitch, but address source pixels by
+                // row so that padding never leaks into the next scanline.
+                const u64 bpp = rp / w;
+                if (bpp != 4 && bpp != 8 && bpp != 16) return false;
+                if (sp < rp * h) return false;
+                out_format = DataFormat::RGBA16_Float;
+                out_pixels.resize((size_t)w * h * 8);
+                const u8* src = dec.data() + pos;
+                for (u32 y = 0; y < h; ++y) {
+                    const u8* srcRow = src + static_cast<size_t>(y) * rp;
+                    for (u32 x = 0; x < w; ++x) {
+                        const size_t px = static_cast<size_t>(y) * w + x;
+                        const u8* srcPixel = srcRow + static_cast<size_t>(x) * bpp;
+                        u8* dstPixel = out_pixels.data() + px * 8;
+                        if (bpp == 4) {
+                            for (int c = 0; c < 4; ++c) {
+                                const u16 half = f32_to_f16(srcPixel[c] / 255.0f);
+                                std::memcpy(dstPixel + c * 2, &half, sizeof(half));
+                            }
+                        } else if (bpp == 8) {
+                            std::memcpy(dstPixel, srcPixel, 8);
+                        } else {
+                            for (int c = 0; c < 4; ++c) {
+                                f32 v;
+                                std::memcpy(&v, srcPixel + c * 4, sizeof(v));
+                                const u16 half = f32_to_f16(v);
+                                std::memcpy(dstPixel + c * 2, &half, sizeof(half));
+                            }
+                        }
+                    }
+                }
+                return true;
+            }
+            pos += sp;
+        }
+    }
+    return false;
+}
+
 } // anonymous namespace
 
 // ============================================================================
 // ForwardSceneRenderer Implementation
 // ============================================================================
 
+ForwardSceneRenderer::ForwardSceneRenderer() = default;
 ForwardSceneRenderer::~ForwardSceneRenderer() { Shutdown(); }
 
-bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height) {
+bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_height,
+                                       DataFormat backbuffer_format) {
     if (initialized_) return true;
 
     // T4.6.5 complete: all 11 ForwardSceneRenderer shaders ported to SPIR-V
@@ -402,6 +527,7 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     device_ = device;
     render_width_ = render_width;
     render_height_ = render_height;
+    blit_target_format_ = backbuffer_format;
 
     CreateSamplers();
     CreateDescriptorLayouts();
@@ -421,6 +547,9 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
 
         desc.size = sizeof(SceneData);
         scene_cb_[i] = device_->CreateBuffer(desc);
+
+        desc.size = sizeof(rhi::ForwardLightBuffer);
+        light_cb_[i] = device_->CreateBuffer(desc);
     }
 
     // Shadow VP constant buffers (one per cascade)
@@ -511,6 +640,12 @@ void ForwardSceneRenderer::Shutdown() {
     particle_pass_.shutdown();
 #endif
 
+    // Compiled graph-material variants reference the fallback textures and
+    // default sampler below, so release them first.
+    PurgeGraphMaterials();
+    if (material_graph_vs_ != handles::INVALID_SHADER) { device_->DestroyShader(material_graph_vs_); material_graph_vs_ = handles::INVALID_SHADER; }
+    if (graph_material_layout_ != handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(graph_material_layout_); graph_material_layout_ = handles::INVALID_PIPELINE_LAYOUT; }
+    if (graph_material_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device_->DestroyDescriptorSetLayout(graph_material_set_layout_); graph_material_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
     // VT mesh 路径资源
     for (auto& ds : vt_material_ds_)
         if (ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(ds);
@@ -565,6 +700,7 @@ void ForwardSceneRenderer::Shutdown() {
             lighting_light_ubos_[i] = handles::INVALID_RESOURCE;
             lighting_light_mapped_[i] = nullptr;
         }
+        if (light_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(light_cb_[i]); light_cb_[i] = handles::INVALID_RESOURCE; }
     }
     for (int i = 0; i < 2; i++) {
         if (shadow_view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(shadow_view_cb_[i]); shadow_view_cb_[i] = handles::INVALID_RESOURCE; }
@@ -573,6 +709,12 @@ void ForwardSceneRenderer::Shutdown() {
     if (white_texture_ != handles::INVALID_RESOURCE) { device_->DestroyTexture(white_texture_); white_texture_ = handles::INVALID_RESOURCE; }
     if (flat_normal_texture_ != handles::INVALID_RESOURCE) { device_->DestroyTexture(flat_normal_texture_); flat_normal_texture_ = handles::INVALID_RESOURCE; }
     if (black_cube_texture_ != handles::INVALID_RESOURCE) { device_->DestroyTexture(black_cube_texture_); black_cube_texture_ = handles::INVALID_RESOURCE; }
+    // Destroy environment/IBL maps (owned when created via SetEnvironmentMap)
+    for (auto* t : {&env_cube_, &irradiance_map_, &prefiltered_map_, &brdf_lut_}) {
+        if (*t != handles::INVALID_RESOURCE) { device_->DestroyTexture(*t); *t = handles::INVALID_RESOURCE; }
+    }
+    env_map_path_.clear();
+    if (ibl_precomputer_) { ibl_precomputer_->Shutdown(); ibl_precomputer_.reset(); }
     // Destroy samplers
     if (default_sampler_ != handles::INVALID_SAMPLER) { device_->DestroySampler(default_sampler_); default_sampler_ = handles::INVALID_SAMPLER; }
     if (brdf_sampler_ != handles::INVALID_SAMPLER) { device_->DestroySampler(brdf_sampler_); brdf_sampler_ = handles::INVALID_SAMPLER; }
@@ -689,8 +831,9 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
             {10, DescriptorType::SampledImage, 1, ShaderStage::Pixel},
             {11, DescriptorType::Sampler, 1, ShaderStage::Pixel},
             {12, DescriptorType::Sampler, 1, ShaderStage::Pixel},
+            {13, DescriptorType::StorageBuffer, 1, ShaderStage::Pixel},
         };
-        lighting_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
+        lighting_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
     }
     // T4.6.5 part 4 Path B: Vulkan-only compute lighting set (matches existing
     // Engine/Graphics/Vulkan/shaders/DeferredLighting.spv bindings).
@@ -849,7 +992,26 @@ void ForwardSceneRenderer::CreateShaders() {
     // Streaming mesh shaders (Phase 9.3b Task 12) — SoA vertex pulling
     streaming_vs_ = load("StreamingGBuffer", "streamingVertexMain", ShaderStage::Vertex);
     streaming_ps_ = load("StreamingGBuffer", "streamingFragmentMain", ShaderStage::Pixel);
+
+    // Companion VS for material-graph generated fragments. Pairs with any
+    // emitter-produced pixel shader (strict six-member VertexOut contract).
+    material_graph_vs_ = load("MaterialGraphVertex", "vertexMainMaterialGraph", ShaderStage::Vertex);
 #endif
+}
+
+// Configure vertex layout for geometry-rendering pipelines. Matches GBuffer.metal
+// VertexInput struct: position at offset 0 (12B), ColorTSign 12 (4B),
+// Normal 16 (4B), Tangent 20 (4B), UV 24 (8B). Stride 32B, bound at slot 20
+// by RenderMesh::Draw(cmd, count, 0, 20). Without this, Metal sees no vertex
+// attributes and the vertex shader reads garbage → spheres don't transform →
+// no depth writes → black viewport.
+static void ConfigureGeometryVertexLayout(GraphicsPipelineDesc& desc) {
+    desc.vertexAttributes.push_back({0, 20, DataFormat::RGB32_Float, 0});
+    desc.vertexAttributes.push_back({1, 20, DataFormat::R32_UInt,    12});
+    desc.vertexAttributes.push_back({2, 20, DataFormat::RG16_UInt,   16});
+    desc.vertexAttributes.push_back({3, 20, DataFormat::RG16_UInt,   20});
+    desc.vertexAttributes.push_back({4, 20, DataFormat::RG32_Float,  24});
+    desc.vertexBindings.push_back({20, 32, true});
 }
 
 void ForwardSceneRenderer::CreatePipelines() {
@@ -984,6 +1146,26 @@ void ForwardSceneRenderer::CreatePipelines() {
         }
         gbuffer_vt_pipeline_ = device_->CreateGraphicsPipeline(desc);
     }
+
+
+    // Material-graph variants: same GBuffer render state, but the material
+    // set carries kMaxGraphTextures images (bindings 0..7) + sampler at 8 —
+    // the binding convention MetalEmitter's world mode emits.
+    {
+        std::vector<DescriptorSetLayoutBinding> graphBindings;
+        graphBindings.reserve(kMaxGraphTextures + 1);
+        for (u32 i = 0; i < kMaxGraphTextures; ++i) {
+            graphBindings.push_back({i, DescriptorType::SampledImage, 1, ShaderStage::Pixel});
+        }
+        graphBindings.push_back({kMaxGraphTextures, DescriptorType::Sampler, 1, ShaderStage::Pixel});
+        graph_material_set_layout_ =
+            device_->CreateDescriptorSetLayout({(u32)graphBindings.size(), graphBindings.data()});
+
+        DescriptorSetLayoutHandle graphSets[] = {global_set_layout_, graph_material_set_layout_};
+        PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
+        graph_material_layout_ = device_->CreatePipelineLayout({2, graphSets, 1, &modelPush});
+    }
+
     // Shadow
     {
         DescriptorSetLayoutHandle sets[] = {global_set_layout_, material_set_layout_};
@@ -1066,7 +1248,7 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.layout = blit_layout_;
         desc.vertexShader = blit_vs_;
         desc.pixelShader = blit_ps_;
-        desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+        desc.renderTargetFormats[0] = blit_target_format_;
         desc.renderTargetCount = 1;
         desc.depthStencilFormat = DataFormat::Unknown;
         desc.enableDepthTest = false;
@@ -1542,6 +1724,104 @@ void ForwardSceneRenderer::SetIBLMaps(ResourceHandle irradiance, ResourceHandle 
                   brdf_lut != handles::INVALID_RESOURCE);
 }
 
+bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
+    if (hdr_path.empty() || !device_) return false;
+    if (env_map_path_ == hdr_path && env_cube_ != handles::INVALID_RESOURCE) return true;
+
+    if (!ibl_precomputer_) {
+        ibl_precomputer_ = std::make_unique<rhi::IBLPrecomputer>(device_);
+        if (!ibl_precomputer_->Initialize()) {
+            std::cerr << "[ForwardSceneRenderer] IBLPrecomputer init failed" << std::endl;
+            ibl_precomputer_.reset();
+            return false;
+        }
+    }
+
+    // Decode equirect pixels — .hdr via stb (f32→f16), .texture (TEXR) via
+    // container parse (ASTC blocks uploaded as-is, RGBA converted to f16).
+    int w = 0, h = 0;
+    DataFormat equirectFormat = DataFormat::RGBA16_Float;
+    std::vector<u8> pixels;
+    std::string ext = std::filesystem::path(hdr_path).extension().string();
+    for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+
+    if (ext == ".texture") {
+        u32 tw = 0, th = 0;
+        if (!LoadTexrEquirect(hdr_path, tw, th, equirectFormat, pixels)) {
+            std::cerr << "[ForwardSceneRenderer] Failed to load TEXR: " << hdr_path << std::endl;
+            return false;
+        }
+        w = (int)tw; h = (int)th;
+        std::cout << "[ForwardSceneRenderer] TEXR equirect: " << w << "x" << h << std::endl;
+    } else {
+        stbi_set_flip_vertically_on_load(1);
+        int comp = 0;
+        float* hdr = stbi_loadf(hdr_path.c_str(), &w, &h, &comp, 4);
+        stbi_set_flip_vertically_on_load(0);
+        if (!hdr || w <= 0 || h <= 0) {
+            std::cerr << "[ForwardSceneRenderer] Failed to load HDR: " << hdr_path << std::endl;
+            if (hdr) stbi_image_free(hdr);
+            return false;
+        }
+        pixels.resize((size_t)w * h * 8);
+        for (size_t i = 0; i < (size_t)w * h * 4; ++i) {
+            u16 v = f32_to_f16(hdr[i]);
+            std::memcpy(pixels.data() + i * 2, &v, 2);
+        }
+        stbi_image_free(hdr);
+    }
+
+    // Upload equirect
+    TextureDesc eqDesc{};
+    eqDesc.size = {(u32)w, (u32)h, 1};
+    eqDesc.format = equirectFormat;
+    eqDesc.type = TextureType::Texture2D;
+    eqDesc.mipLevels = 1;
+    eqDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    ResourceHandle equirect = device_->CreateTexture(eqDesc);
+    if (equirect == handles::INVALID_RESOURCE) {
+        return false;
+    }
+    WriteTextureImmediate(device_, equirect, pixels.data(),
+                          (u64)pixels.size(), (u32)w, (u32)h, 0);
+
+    // Bake: equirect → cube → IBL triple
+    ResourceHandle newCube = ibl_precomputer_->ComputeEnvironmentCube(equirect, 256);
+    device_->DestroyTexture(equirect);
+    if (newCube == handles::INVALID_RESOURCE) {
+        std::cerr << "[ForwardSceneRenderer] Equirect→cube bake failed" << std::endl;
+        return false;
+    }
+    ResourceHandle newIrr = ibl_precomputer_->ComputeIrradianceMap(newCube, 32);
+    ResourceHandle newPre = ibl_precomputer_->ComputePrefilteredEnvironmentMap(newCube, 128);
+    ResourceHandle newLut = ibl_precomputer_->ComputeBRDFIntegrationMap(512);
+    if (newIrr == handles::INVALID_RESOURCE ||
+        newPre == handles::INVALID_RESOURCE ||
+        newLut == handles::INVALID_RESOURCE) {
+        std::cerr << "[ForwardSceneRenderer] IBL bake failed" << std::endl;
+        for (auto h2 : {newCube, newIrr, newPre, newLut}) {
+            if (h2 != handles::INVALID_RESOURCE) device_->DestroyTexture(h2);
+        }
+        return false;
+    }
+
+    // Swap in the new maps, release previous ones
+    ResourceHandle oldCube = env_cube_;
+    ResourceHandle oldIrr = irradiance_map_;
+    ResourceHandle oldPre = prefiltered_map_;
+    ResourceHandle oldLut = brdf_lut_;
+    env_cube_ = newCube;
+    SetIBLMaps(newIrr, newPre, newLut);
+    env_map_path_ = hdr_path;
+    for (auto h2 : {oldCube, oldIrr, oldPre, oldLut}) {
+        if (h2 != handles::INVALID_RESOURCE) device_->DestroyTexture(h2);
+    }
+    std::cout << "[ForwardSceneRenderer] Environment map set: " << hdr_path
+              << " (" << w << "x" << h << ")" << std::endl;
+    return true;
+}
+
+
 void ForwardSceneRenderer::SetLightDirection(math::v3 dir) { light_dir_ = dir; }
 void ForwardSceneRenderer::SetLightColor(math::v4 color) { light_color_ = color; }
 ParticlePass* ForwardSceneRenderer::GetParticlePass() { return &particle_pass_; }
@@ -1781,20 +2061,30 @@ void ForwardSceneRenderer::DestroyStaticEntities() {
 u32 ForwardSceneRenderer::RegisterMeshResource(id::id_type geometry_content_id,
                                                 id::id_type albedo_texture_id,
                                                 id::id_type normal_texture_id,
-                                                id::id_type orm_texture_id) {
-    // Create RenderMesh from content system asset
+                                                id::id_type orm_texture_id,
+                                                id::id_type entity_id) {
+    // Create RenderMesh from content system asset. Caller may pass a
+    // distinct entity_id (StandardRenderPipeline::RegisterMeshEntity does
+    // this) so multiple ECS entities can share the same geometry asset
+    // without colliding in mesh_id_to_index_ (keyed by mesh.GetEntityId).
+    const id::id_type mesh_entity_id = (entity_id != id::invalid_id) ? entity_id : geometry_content_id;
     RenderMesh* mesh = RenderMesh::CreateFromAsset(device_, geometry_content_id);
     if (!mesh) {
         std::cerr << "[ForwardSceneRenderer] RegisterMeshResource: CreateFromAsset failed for id "
                   << geometry_content_id << std::endl;
         return (u32)-1;
     }
+    if (mesh_entity_id != geometry_content_id) {
+        mesh->Unregister();
+        mesh->SetEntityId(mesh_entity_id);
+        mesh->Register();
+    }
 
     // Create SceneDataMeshInfo
     SceneDataMeshInfo info{};
     info.mesh = mesh;
-    info.meshEntityId = geometry_content_id;
-    info.name = "Imported_" + std::to_string(geometry_content_id);
+    info.meshEntityId = mesh_entity_id;
+    info.name = "Imported_" + std::to_string(mesh_entity_id);
 
     // Get texture handles from content system
     ResourceHandle albedo = white_texture_;
@@ -1835,7 +2125,7 @@ u32 ForwardSceneRenderer::RegisterMeshResource(id::id_type geometry_content_id,
 
     u32 slot = (u32)mesh_infos_.size();
     mesh_infos_.push_back(info);
-    mesh_id_to_index_[geometry_content_id] = slot;
+    mesh_id_to_index_[mesh_entity_id] = slot;
 
     scene_loaded_ = true;
     return slot;
@@ -1856,6 +2146,175 @@ void ForwardSceneRenderer::UnregisterMeshResource(u32 slot_index) {
         device_->DestroyDescriptorSet(material_ds_[slot_index]);
         material_ds_[slot_index] = handles::INVALID_DESCRIPTOR_SET;
     }
+}
+
+// ============================================================================
+// Material-graph compiled variants (editor world-material path)
+// ============================================================================
+
+u64 ForwardSceneRenderer::SetEntityGraphMaterial(id::id_type entity_id, const char* utf8_json) {
+    if (!utf8_json || !*utf8_json || !device_ ||
+        material_graph_vs_ == handles::INVALID_SHADER ||
+        graph_material_layout_ == handles::INVALID_PIPELINE_LAYOUT) {
+        return kInvalidGraphVariant;
+    }
+    const u64 hash = std::hash<std::string>{}(std::string(utf8_json));
+
+    // Same content as the entity's current binding — nothing to do.
+    auto existingBinding = entity_graph_variant_.find(entity_id);
+    if (existingBinding != entity_graph_variant_.end() && existingBinding->second == hash &&
+        graph_variants_.count(hash)) {
+        return hash;
+    }
+    if (existingBinding != entity_graph_variant_.end()) {
+        ReleaseGraphVariant(existingBinding->second);
+        existingBinding->second = hash;
+    } else {
+        entity_graph_variant_.emplace(entity_id, hash);
+    }
+
+    auto vit = graph_variants_.find(hash);
+    if (vit != graph_variants_.end()) {
+        ++vit->second.refcount;
+        return hash;
+    }
+
+    GraphVariant variant;
+
+    // Translate → emit (world/GBuffer mode). texture_slots gives slot i →
+    // asset_path exactly as the emitted texN arguments expect.
+    material_graph::MaterialGraph graph;
+    if (!material_graph::MaterialGraphSerializer::DeserializeIntoGraph(std::string(utf8_json), graph)) {
+        std::cerr << "[ForwardSceneRenderer] GraphMaterial: JSON deserialize failed for entity "
+                  << entity_id << std::endl;
+        entity_graph_variant_.erase(entity_id);
+        return kInvalidGraphVariant;
+    }
+    shader_ir::MaterialGraphToIR translator;
+    auto ir = translator.Translate(graph);
+    shader_ir::MetalEmitter emitter;
+    auto emitted = emitter.Emit(ir.function, /*preview_mode=*/false);
+    if (!ir.success || !emitted.success || ir.texture_slots.size() > kMaxGraphTextures) {
+        std::cerr << "[ForwardSceneRenderer] GraphMaterial: compile failed for entity "
+                  << entity_id << " (textures=" << ir.texture_slots.size()
+                  << ", translated=" << (ir.success ? 1 : 0)
+                  << ", emitted=" << (emitted.success ? 1 : 0) << ")" << std::endl;
+        entity_graph_variant_.erase(entity_id);
+        return kInvalidGraphVariant;
+    }
+
+    variant.pixelShader = device_->CreateShader(emitted.source.data(), emitted.source.size(),
+                                                ShaderStage::Pixel, "fragmentMain");
+    if (variant.pixelShader == handles::INVALID_SHADER) {
+        std::cerr << "[ForwardSceneRenderer] GraphMaterial: pixel shader creation failed for entity "
+                  << entity_id << std::endl;
+        entity_graph_variant_.erase(entity_id);
+        return kInvalidGraphVariant;
+    }
+    // Diagnostics: PRIMAL_DUMP_GRAPH_MSL=<path> writes the emitted fragment
+    // source next to the registration log.
+    if (const char* dump = std::getenv("PRIMAL_DUMP_GRAPH_MSL")) {
+        std::ofstream df(dump, std::ios::binary);
+        if (df) { df.write(emitted.source.data(), (std::streamsize)emitted.source.size()); }
+        std::cerr << "[ForwardSceneRenderer] GraphMaterial MSL dumped to " << dump << std::endl;
+    }
+
+    // Import the graph's textures on THIS pipeline's device (same rationale
+    // as PipelineImportCookedTexture / MaterialPreviewRenderer: editor-owned
+    // devices are not registered in the legacy global device manager).
+    // Slots that fail to import fall back to the white texture instead of
+    // dropping the whole compiled path.
+    variant.texture_ids.resize(ir.texture_slots.size(), id::invalid_id);
+    utl::vector<ResourceHandle> slot_handles(kMaxGraphTextures, white_texture_);
+    for (u32 i = 0; i < ir.texture_slots.size(); ++i) {
+        const std::string& path = ir.texture_slots[i];
+        if (path.empty()) continue;
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file) continue;
+        const auto size = file.tellg();
+        if (size <= 0) continue;
+        file.seekg(0, std::ios::beg);
+        std::vector<u8> bytes((size_t)size);
+        if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) continue;
+        const auto tex_id = content::create_resource(bytes.data(), content::asset_type::texture,
+                                                     content::GraphicsAPI::RHI, device_);
+        if (tex_id == id::invalid_id || content::get_rhi_texture_handle(tex_id) == handles::INVALID_RESOURCE) {
+            std::cerr << "[ForwardSceneRenderer] GraphMaterial: texture import failed '" << path << "'" << std::endl;
+            continue;
+        }
+        variant.texture_ids[i] = tex_id;
+        slot_handles[i] = content::get_rhi_texture_handle(tex_id);
+    }
+
+    DescriptorSetDesc dsDesc{};
+    dsDesc.layout = graph_material_set_layout_;
+    variant.materialSet = device_->CreateDescriptorSet(dsDesc);
+    DescData params[kMaxGraphTextures + 1];
+    for (u32 i = 0; i < kMaxGraphTextures; ++i) {
+        params[i] = {i, DescriptorType::SampledImage, slot_handles[i]};
+    }
+    params[kMaxGraphTextures] = {kMaxGraphTextures, DescriptorType::Sampler,
+                                 static_cast<ResourceHandle>(default_sampler_)};
+    UpdateDesc(device_, variant.materialSet, params, kMaxGraphTextures + 1);
+
+    GraphicsPipelineDesc desc{};
+    desc.layout = graph_material_layout_;
+    desc.vertexShader = material_graph_vs_;
+    desc.pixelShader = variant.pixelShader;
+    desc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
+    desc.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+    desc.renderTargetFormats[2] = DataFormat::BGRA8_UNorm;
+    desc.renderTargetFormats[3] = DataFormat::RG16_Float;
+    desc.renderTargetCount = 4;
+    desc.depthStencilFormat = DataFormat::D32_Float;
+    desc.enableDepthTest = true;
+    desc.enableDepthWrite = true;
+    desc.depthFunc = ComparisonFunc::Less;
+    desc.cullMode = CullMode::None;
+    ConfigureGeometryVertexLayout(desc);
+    variant.pipeline = device_->CreateGraphicsPipeline(desc);
+
+    variant.refcount = 1;
+    graph_variants_.emplace(hash, std::move(variant));
+    std::cout << "[ForwardSceneRenderer] GraphMaterial registered for entity " << entity_id
+              << " (hash=" << std::hex << hash << std::dec
+              << ", textures=" << ir.texture_slots.size() << ")" << std::endl;
+    return hash;
+}
+
+void ForwardSceneRenderer::ReleaseGraphVariant(u64 variant_hash) {
+    auto vit = graph_variants_.find(variant_hash);
+    if (vit == graph_variants_.end()) return;
+    if (--vit->second.refcount > 0) return;
+
+    GraphVariant& v = vit->second;
+    if (v.materialSet != handles::INVALID_DESCRIPTOR_SET) { device_->DestroyDescriptorSet(v.materialSet); }
+    if (v.pipeline != handles::INVALID_PIPELINE) { device_->DestroyPipeline(v.pipeline); }
+    if (v.pixelShader != handles::INVALID_SHADER) { device_->DestroyShader(v.pixelShader); }
+    for (auto tex_id : v.texture_ids) {
+        if (tex_id != id::invalid_id) content::destroy_resource(tex_id, content::asset_type::texture);
+    }
+    graph_variants_.erase(vit);
+}
+
+void ForwardSceneRenderer::ClearEntityGraphMaterial(id::id_type entity_id) {
+    auto it = entity_graph_variant_.find(entity_id);
+    if (it == entity_graph_variant_.end()) return;
+    ReleaseGraphVariant(it->second);
+    entity_graph_variant_.erase(it);
+}
+
+void ForwardSceneRenderer::PurgeGraphMaterials() {
+    for (auto& [_, v] : graph_variants_) {
+        if (v.materialSet != handles::INVALID_DESCRIPTOR_SET && device_) { device_->DestroyDescriptorSet(v.materialSet); }
+        if (v.pipeline != handles::INVALID_PIPELINE && device_) { device_->DestroyPipeline(v.pipeline); }
+        if (v.pixelShader != handles::INVALID_SHADER && device_) { device_->DestroyShader(v.pixelShader); }
+        for (auto tex_id : v.texture_ids) {
+            if (tex_id != id::invalid_id) content::destroy_resource(tex_id, content::asset_type::texture);
+        }
+    }
+    graph_variants_.clear();
+    entity_graph_variant_.clear();
 }
 
 void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
@@ -1905,11 +2364,31 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     // Group visible proxies by technique then by mesh_infos_ index
     u32 mesh_count = static_cast<u32>(mesh_infos_.size());
     std::array<std::unordered_map<u32, std::vector<graphics::InstanceData>>, TechniqueCount> technique_groups;
+    // Compiled material-graph proxies (editor world-material path). Only the
+    // opaque GBuffer pass consumes them; shadow and forward-blended passes
+    // fall through to the fixed technique path.
+    std::unordered_map<u64, std::unordered_map<u32, std::vector<graphics::InstanceData>>> graph_groups;
     for (auto* proxy : visible) {
         auto it = mesh_id_to_index_.find(proxy->meshId);
         if (it == mesh_id_to_index_.end()) continue;
         u32 meshIdx = it->second;
         if (meshIdx >= mesh_count || !mesh_infos_[meshIdx].mesh) continue;
+
+        if (!shadow_pass && !forward_pass &&
+            proxy->graphVariant != kInvalidGraphVariant &&
+            proxy->graphVariant != 0 &&
+            static_cast<u32>(proxy->technique) == 0 /* opaque */ &&
+            graph_variants_.count(proxy->graphVariant)) {
+            graphics::InstanceData inst{};
+            inst.transform = proxy->transform;
+            memcpy(inst.base_color, proxy->base_color, sizeof(f32) * 4);
+            inst.roughness    = proxy->roughness;
+            inst.metallic     = proxy->metallic;
+            inst.alpha_cutoff = proxy->alpha_cutoff;
+            graph_groups[proxy->graphVariant][meshIdx].push_back(inst);
+            continue;
+        }
+
         u32 t = static_cast<u32>(proxy->technique);
         if (t >= TechniqueCount) t = 0;
         graphics::InstanceData inst{};
@@ -1922,9 +2401,11 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     }
 
     // Check if any groups exist
-    bool has_any = false;
-    for (u32 t = 0; t < TechniqueCount; ++t) {
-        if (!technique_groups[t].empty()) { has_any = true; break; }
+    bool has_any = !graph_groups.empty();
+    if (!has_any) {
+        for (u32 t = 0; t < TechniqueCount && !has_any; ++t) {
+            if (!technique_groups[t].empty()) { has_any = true; break; }
+        }
     }
     if (!has_any) return;
 
@@ -1932,6 +2413,9 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     u32 total = 0;
     for (u32 t = 0; t < TechniqueCount; ++t)
         for (auto& [_, transforms] : technique_groups[t])
+            total += (u32)transforms.size();
+    for (auto& [_, meshMap] : graph_groups)
+        for (auto& [_, transforms] : meshMap)
             total += (u32)transforms.size();
     u32 required_size = total * sizeof(graphics::InstanceData);
     if (pcg_instance_buffer_capacity_ < required_size) {
@@ -1954,10 +2438,20 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     // Compute group offsets per technique
     struct GroupRange { u32 offset; u32 count; };
     std::array<std::unordered_map<u32, GroupRange>, TechniqueCount> all_ranges;
+    std::unordered_map<u64, std::unordered_map<u32, GroupRange>> graph_ranges;
     u32 off = 0;
     for (u32 t = 0; t < TechniqueCount; ++t) {
         for (auto& [meshIdx, instances] : technique_groups[t]) {
             all_ranges[t][meshIdx] = {off, (u32)instances.size()};
+            for (u32 j = 0; j < instances.size(); j++) {
+                ((graphics::InstanceData*)buf)[off + j] = instances[j];
+            }
+            off += (u32)instances.size();
+        }
+    }
+    for (auto& [hash, meshMap] : graph_groups) {
+        for (auto& [meshIdx, instances] : meshMap) {
+            graph_ranges[hash][meshIdx] = {off, (u32)instances.size()};
             for (u32 j = 0; j < instances.size(); j++) {
                 ((graphics::InstanceData*)buf)[off + j] = instances[j];
             }
@@ -1974,10 +2468,13 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     for (u32 t = 0; t < TechniqueCount; ++t) {
         if (all_ranges[t].empty()) continue;
 
-        // Forward pass: only render Water(3) and Transparent(4)
-        if (forward_pass && t != 3 && t != 4) continue;
-        // GBuffer pass: skip Water(3) and Transparent(4) — they render in forward pass
-        if (!shadow_pass && !forward_pass && (t == 3 || t == 4)) continue;
+        // Editor forward path: render everything (Opaque, AlphaClip,
+        // Foliage, Water, Transparent) so the editor preview matches what
+        // the production pipeline would composite.
+        if (!editor_mode_) {
+            if (forward_pass && t != 3 && t != 4) continue;
+            if (!shadow_pass && !forward_pass && (t == 3 || t == 4)) continue;
+        }
 
         // Bind technique-specific pipeline for GBuffer or forward pass
         if (!shadow_pass) {
@@ -2034,6 +2531,36 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
                 mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
             }
 #endif
+        }
+    }
+
+    // Compiled material-graph entities (editor world-material path). Same
+    // GBuffer attachments/push constants as the fixed path; only the
+    // pipeline and the texture set differ (per-variant, sampler at binding 8).
+    static const bool kGraphDrawDisabled = std::getenv("PRIMAL_DISABLE_GRAPH_DRAW") != nullptr;
+    if (!shadow_pass && !forward_pass && !kGraphDrawDisabled && !graph_ranges.empty() &&
+        material_graph_vs_ != handles::INVALID_SHADER) {
+        const DescriptorSetHandle globalSets[] = {global_ds_[frame_index]};
+        cmd->BindDescriptorSets(PipelineBindPoint::Graphics, graph_material_layout_, 0, 1, globalSets, 0, nullptr);
+
+        for (auto& [hash, meshMap] : graph_ranges) {
+            auto vit = graph_variants_.find(hash);
+            if (vit == graph_variants_.end()) continue;
+            GraphVariant& variant = vit->second;
+
+            cmd->BindGraphicsPipeline(variant.pipeline);
+            const DescriptorSetHandle matSets[] = {variant.materialSet};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, graph_material_layout_, 1, 1, matSets, 0, nullptr);
+            PCGPushConsts pc{};
+            pc.transform = MatrixIdentity();
+            pc.use_instances = 1;
+            cmd->PushConstants(graph_material_layout_, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+
+            for (auto& [meshIdx, range] : meshMap) {
+                u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
+                cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+                mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
+            }
         }
     }
 }
@@ -2190,14 +2717,34 @@ void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 fram
 // ============================================================================
 
 void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
-                                   const math::m4x4& view_matrix,
-                                   const math::m4x4& proj_matrix,
-                                   const math::v3& camera_position,
-                                   ResourceHandle backbuffer,
-                                   u32 frame_index) {
+                                    const math::m4x4& view_matrix,
+                                    const math::m4x4& proj_matrix,
+                                    const math::v3& camera_position,
+                                    ResourceHandle backbuffer,
+                                    u32 frame_index,
+                                    DataFormat backbuffer_format) {
     if (!initialized_ || !scene_loaded_) return;
 
     u32 idx = frame_index % 3;
+
+    // Lazily recreate the blit pipeline if the caller changed target format
+    // (e.g., headless creates RGBA16F, editor's MTKView backbuffer is BGRA8).
+    if (backbuffer_format != blit_target_format_) {
+        blit_target_format_ = backbuffer_format;
+        GraphicsPipelineDesc desc{};
+        desc.layout = blit_layout_;
+        desc.vertexShader = blit_vs_;
+        desc.pixelShader = blit_ps_;
+        desc.renderTargetFormats[0] = backbuffer_format;
+        desc.renderTargetCount = 1;
+        desc.depthStencilFormat = DataFormat::Unknown;
+        desc.enableDepthTest = false;
+        desc.enableDepthWrite = false;
+        desc.cullMode = CullMode::None;
+        desc.vertexAttributes.clear();
+        desc.vertexBindings.clear();
+        blit_pipeline_ = device_->CreateGraphicsPipeline(desc);
+    }
 
     // Debug: first frame only
     static bool first_frame = true;
@@ -2291,6 +2838,63 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
         DescData instParam = {2, DescriptorType::StorageBuffer, pcg_instance_buffer_};
         UpdateDesc(device_, global_ds_[idx], &instParam, 1);
+    }
+    // Fill the GPU light array with ALL scene lights (multi-light lighting).
+    // fragmentLighting_v3 loops directionals (sun = [0], the only caster with
+    // cascade shadows) + punctual lights. Count/attenuation mapping mirrors
+    // ForwardRenderer::SetupLights so both paths agree on semantics.
+    {
+        auto* lb = static_cast<rhi::ForwardLightBuffer*>(device_->MapBuffer(light_cb_[idx]));
+        if (lb) {
+            std::memset(lb, 0, sizeof(rhi::ForwardLightBuffer));
+            if (render_scene_) {
+                const auto& allLights = render_scene_->GetLights();
+                for (const auto& rl : allLights) {
+                    if (rl.type == LightType::Directional) {
+                        if (lb->directionalLightCount >= 4) continue;
+                        auto& dl = lb->directionalLights[lb->directionalLightCount++];
+                        dl.directionAndIntensity = { rl.direction.x, rl.direction.y, rl.direction.z, rl.intensity };
+                        dl.colorAndShadow = { rl.color.x, rl.color.y, rl.color.z, 1.0f };
+                    } else {
+                        if (lb->punctualLightCount >= 128) continue;
+                        auto& pl = lb->lights[lb->punctualLightCount++];
+                        pl.position = rl.position;
+                        pl.intensity = rl.intensity;
+                        pl.direction = rl.direction;
+                        pl.range = rl.range;
+                        pl.color = rl.color;
+                        pl.cosUmbra = rl.outerCone;
+                        pl.cosPenumbra = rl.innerCone;
+                        pl.attenuation = { 1.0f, 0.0f, 0.0f };
+                        pl.lightType = (rl.type == LightType::Point) ? 1 : 2;
+                        pl.shadowIndex = -1;
+                        pl.viewProjection = MatrixIdentity();
+                    }
+                }
+            }
+            device_->UnmapBuffer(light_cb_[idx]);
+        }
+        {
+            static int s_dbg = 0;
+            if (s_dbg < 2) {
+                auto* lb = static_cast<const rhi::ForwardLightBuffer*>(device_->MapBuffer(light_cb_[idx], 0, 0));
+                if (lb) {
+                    std::cout << "[LightBuf] dir=" << lb->directionalLightCount
+                              << " punc=" << lb->punctualLightCount;
+                    for (u32 d = 0; d < lb->directionalLightCount && d < 4; ++d)
+                        std::cout << " | dir" << d << " col=(" << lb->directionalLights[d].colorAndShadow.x
+                                  << "," << lb->directionalLights[d].colorAndShadow.y
+                                  << "," << lb->directionalLights[d].colorAndShadow.z
+                                  << ") i=" << lb->directionalLights[d].directionAndIntensity.w
+                                  << " dirV=(" << lb->directionalLights[d].directionAndIntensity.x
+                                  << "," << lb->directionalLights[d].directionAndIntensity.y
+                                  << "," << lb->directionalLights[d].directionAndIntensity.z << ")";
+                    std::cout << std::endl;
+                    device_->UnmapBuffer(light_cb_[idx]);
+                    ++s_dbg;
+                }
+            }
+        }
     }
 
     // --- Direct rendering (bypass render graph for reliability) ---
@@ -2572,8 +3176,9 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             {10, DescriptorType::SampledImage, ibl_ready_ ? brdf_lut_ : white_texture_},
             {11, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
             {12, DescriptorType::Sampler, static_cast<ResourceHandle>(brdf_sampler_)},
+            {13, DescriptorType::StorageBuffer, light_cb_[idx]},
         };
-        UpdateDesc(device_, lighting_ds_[idx], params, 13);
+        UpdateDesc(device_, lighting_ds_[idx], params, 14);
 
         RenderPassDesc rpDesc{};
         rpDesc.colorAttachments.resize(1);
@@ -2589,6 +3194,39 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         const DescriptorSetHandle sets[] = {lighting_ds_[idx]};
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, lighting_layout_, 0, 1, sets, 0, nullptr);
         cmd->Draw(3, 0, 1, 0);
+        cmd->EndRenderPass();
+    }
+
+    // Pass 4a: Skybox — fills background pixels (depth == 1) with the HDR
+    // environment cube. Runs after deferred lighting (which clears the sky to
+    // black) and before forward transparency. Sky fragments sit exactly on
+    // the far plane, so the pipeline's LessEqual test passes only where no
+    // geometry was drawn; depth write is disabled.
+    if (skybox_enabled_ && env_cube_ != handles::INVALID_RESOURCE && skybox_pipeline_ != handles::INVALID_PIPELINE) {
+        DescData skyParams[] = {
+            {0, DescriptorType::UniformBuffer, view_cb_[idx]},
+            {1, DescriptorType::UniformBuffer, scene_cb_[idx]},
+            {2, DescriptorType::SampledImage, env_cube_},
+            {3, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
+        };
+        UpdateDesc(device_, skybox_ds_[idx], skyParams, 4);
+
+        RenderPassDesc rpDesc{};
+        rpDesc.colorAttachments.resize(1);
+        rpDesc.colorAttachments[0].texture = lighting_output_[idx];
+        rpDesc.colorAttachments[0].loadOp = LoadAction::Load;
+        rpDesc.colorAttachments[0].storeOp = StoreAction::Store;
+        rpDesc.depthAttachment.texture = gbuffer_depth_[idx];
+        rpDesc.depthAttachment.loadOp = LoadAction::Load;
+        rpDesc.depthAttachment.storeOp = StoreAction::DontCare;
+        cmd->BeginRenderPass(rpDesc);
+
+        cmd->BindGraphicsPipeline(skybox_pipeline_);
+        cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
+        cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
+        const DescriptorSetHandle skySets[] = {skybox_ds_[idx]};
+        cmd->BindDescriptorSets(PipelineBindPoint::Graphics, skybox_layout_, 0, 1, skySets, 0, nullptr);
+        cmd->Draw(36, 0, 1, 0); // cube vertices generated from vertexID
         cmd->EndRenderPass();
     }
 
@@ -2671,18 +3309,12 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             if (!geom.is_valid()) continue;
             const auto& pts = geom.tessellate();
             if (pts.size() < 2) continue;
-            line_renderer_.AddLines(pts.data(), static_cast<u32>(pts.size()));
+            line_renderer_.AddLines(pts.data(), static_cast<u32>(pts.size()), 0x33FF66u);
         }
         if (has_debug_lines) {
-            // 转成紧凑 position 数组 —— color (rgb) 暂时不传。
-            frame_debug_positions_.clear();
-            frame_debug_positions_.reserve(frame_local_debug_lines_.size() * 2);
             for (const auto& l : frame_local_debug_lines_) {
-                frame_debug_positions_.push_back(l.a);
-                frame_debug_positions_.push_back(l.b);
+                line_renderer_.AddLine(l.a, l.b, l.rgb);
             }
-            line_renderer_.AddLines(frame_debug_positions_.data(),
-                                    static_cast<u32>(frame_debug_positions_.size()));
         }
 
         RenderPassDesc rpDesc{};
@@ -2699,7 +3331,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
         math::m4x4 viewProj = proj_matrix * view_matrix;
-        line_renderer_.Render(cmd, viewProj);
+        line_renderer_.Render(cmd, viewProj, backbuffer_format);
 
         cmd->EndRenderPass();
     }

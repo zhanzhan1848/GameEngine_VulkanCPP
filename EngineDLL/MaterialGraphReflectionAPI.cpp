@@ -30,6 +30,7 @@ using namespace primal::graphics::material_graph;
 typedef struct material_pin_desc_c {
     u32 data_type;     // MaterialDataType enum value
     u32 is_input;
+    u32 index;
 } material_pin_desc_c;
 
 typedef struct material_param_desc_c {
@@ -119,6 +120,10 @@ EDITOR_INTERFACE u32 GraphNodeGetPinDescriptor(u32 graph_id, u32 node_id, u32 pi
     const auto& p = pins[pin_index];
     out->data_type = static_cast<u32>(p.data_type);
     out->is_input  = p.is_input ? 1u : 0u;
+    // Descriptor enumeration order is not the native pin index: inputs and
+    // outputs use independent index spaces (for example SampleTexture's
+    // output is descriptor 2 but native output 0).
+    out->index     = p.index;
 
     if (out_name && buf_size > 0) {
         std::strncpy(out_name, p.name, buf_size - 1);
@@ -200,10 +205,7 @@ EDITOR_INTERFACE u32 GraphNodeSetParamFloat2(u32 g, u32 n, const char* name, con
     auto& nodes = graph->GetNodes();
     u32 idx = node_id_to_index(n, nodes.size());
     if (idx == UINT32_MAX) return 0;
-    // No v2 overload exists on MaterialNode. Float2 params (ConstantFloat2Node)
-    // don't have a SetParamByName override, so this will return 0 for them.
-    // We use v3 with z=0 as a best-effort fallback.
-    math::v3 val{v[0], v[1], 0.0f};
+    math::v2 val{v[0], v[1]};
     return nodes[idx]->SetParamByName(name, val) ? 1u : 0u;
 }
 
@@ -268,10 +270,22 @@ EDITOR_INTERFACE u32 GraphNodeGetParamFloat4(u32 g, u32 n, const char* name, f32
     auto* descs = nodes[idx]->GetParamDescriptors(count);
     for (u32 i = 0; i < count; ++i) {
         if (std::strcmp(descs[i].name, name) == 0) {
-            if (descs[i].type != MaterialParamType::Float4) return 0;
             const auto* base = reinterpret_cast<const char*>(nodes[idx].get());
             const auto* ptr = reinterpret_cast<const f32*>(base + descs[i].offset);
-            out[0] = ptr[0]; out[1] = ptr[1]; out[2] = ptr[2]; out[3] = ptr[3];
+            out[0] = out[1] = out[2] = out[3] = 0.0f;
+            switch (descs[i].type) {
+            case MaterialParamType::Float2:
+                out[0] = ptr[0]; out[1] = ptr[1];
+                break;
+            case MaterialParamType::Float3:
+                out[0] = ptr[0]; out[1] = ptr[1]; out[2] = ptr[2];
+                break;
+            case MaterialParamType::Float4:
+                out[0] = ptr[0]; out[1] = ptr[1]; out[2] = ptr[2]; out[3] = ptr[3];
+                break;
+            default:
+                return 0;
+            }
             return 1u;
         }
     }

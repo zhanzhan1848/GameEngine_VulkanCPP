@@ -226,6 +226,53 @@ static void TestAllTypeInfo() {
     TEST(total == 20, "All 20 nodes have valid type info");
 }
 
+static void TestFloat2SerializationRoundTrip() {
+    printf("\n=== Test 8: ConstantFloat2 Serialization Round-Trip ===\n");
+
+    MaterialGraph source;
+    auto node = MaterialGraphSerializer::CreateNode("ConstantFloat2");
+    TEST(node != nullptr, "CreateNode(\"ConstantFloat2\") succeeds");
+    if (!node) return;
+
+    TEST(node->SetParamByName("value", math::v2{0.25f, 0.75f}),
+         "ConstantFloat2 accepts a v2 parameter update");
+    source.AddNode(std::move(node));
+
+    const std::string json = MaterialGraphSerializer::Serialize(source);
+    TEST(json.find("[0.25, 0.75]") != std::string::npos,
+         "Serialized JSON contains both Float2 components");
+
+    MaterialGraph restored;
+    TEST(MaterialGraphSerializer::DeserializeIntoGraph(json, restored),
+         "Float2 graph deserializes successfully");
+    TEST(restored.GetNodes().size() == 1, "Restored graph has one node");
+    if (restored.GetNodes().size() != 1) return;
+
+    const auto* restored_node = static_cast<const ConstantFloat2Node*>(restored.GetNodes()[0].get());
+    TEST(std::abs(restored_node->value.x - 0.25f) < 1e-5f &&
+         std::abs(restored_node->value.y - 0.75f) < 1e-5f,
+         "Float2 values survive JSON round-trip");
+}
+
+static void TestSampleTexturePins() {
+    printf("\n=== Test 9: SampleTexture Pin Structure ===\n");
+    auto node = MaterialGraphSerializer::CreateNode("SampleTexture");
+    TEST(node != nullptr, "CreateNode(\"SampleTexture\") succeeds");
+    if (!node) return;
+
+    u32 count = 0;
+    const auto* pins = node->GetPinDescriptors(count);
+    TEST(count == 3, "SampleTexture exposes two inputs and one output");
+    if (!pins || count != 3) return;
+    TEST(pins[0].is_input && pins[0].data_type == MaterialDataType::Texture2D,
+         "SampleTexture.texture is a Texture2D input");
+    TEST(pins[1].is_input && pins[1].data_type == MaterialDataType::Float2,
+         "SampleTexture.uv is a Float2 input");
+    TEST(!pins[2].is_input && pins[2].index == 0 &&
+         pins[2].data_type == MaterialDataType::Float4,
+         "SampleTexture.rgba is a Float4 output");
+}
+
 int main() {
     printf("========================================\n");
     printf("  TestMaterialReflection\n");
@@ -238,6 +285,8 @@ int main() {
     TestMaterialOutputPins();
     TestParamRoundTrip();
     TestAllTypeInfo();
+    TestFloat2SerializationRoundTrip();
+    TestSampleTexturePins();
 
     printf("\n========================================\n");
     printf("  Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

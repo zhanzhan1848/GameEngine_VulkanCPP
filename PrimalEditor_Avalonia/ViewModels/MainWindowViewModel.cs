@@ -1,6 +1,541 @@
-﻿namespace PrimalEditor_Avalonia.ViewModels;
+﻿using System.Collections.Generic;
+using System.Linq;
+using System.Windows.Input;
+using Dock.Model.Controls;
+using Dock.Model.Core;
+using Dock.Model.Mvvm.Core;
+using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.GameProject;
+using PrimalEditor_Avalonia.Views;
 
-public partial class MainWindowViewModel : ViewModelBase
+namespace PrimalEditor_Avalonia.ViewModels;
+
+public class MainWindowViewModel : ViewModelBase
 {
-    public string Greeting { get; } = "Welcome to Avalonia!";
+    private Project? _project;
+    private string _windowTitle = "PrimalEditor Avalonia";
+    private bool _isLoggerVisible = true;
+    private bool _isWorldEditorVisible = true;
+    private bool _isContentBrowserVisible = true;
+
+    public WorldEditorViewModel WorldEditor { get; } = new WorldEditorViewModel();
+
+    public ContentBrowserViewModel ContentBrowser { get; } = new ContentBrowserViewModel();
+
+    public LoggerViewModel Logger { get; } = new LoggerViewModel();
+
+    private IRootDock? _layout;
+    public IRootDock? Layout
+    {
+        get => _layout;
+        private set
+        {
+            if (_layout != value)
+            {
+                _layout = value;
+                OnPropertyChanged(nameof(Layout));
+            }
+        }
+    }
+
+    /// <summary>
+    /// The factory that built <see cref="Layout"/>. DockControl's
+    /// <c>Factory</c> property binds here so the control can call
+    /// back into the factory for floating-window creation, dock
+    /// state tracking, etc. Without this binding, DockControl shows
+    /// an empty canvas even when <see cref="Layout"/> is populated.
+    /// </summary>
+    public IFactory Factory { get; }
+
+    public bool IsLoggerVisible
+    {
+        get => _isLoggerVisible;
+        set
+        {
+            if (_isLoggerVisible != value)
+            {
+                _isLoggerVisible = value;
+                OnPropertyChanged(nameof(IsLoggerVisible));
+            }
+        }
+    }
+
+    public bool IsWorldEditorVisible
+    {
+        get => _isWorldEditorVisible;
+        set
+        {
+            if (_isWorldEditorVisible != value)
+            {
+                _isWorldEditorVisible = value;
+                OnPropertyChanged(nameof(IsWorldEditorVisible));
+                ApplyDockableVisibility(WorldEditor, value);
+            }
+        }
+    }
+
+    public bool IsContentBrowserVisible
+    {
+        get => _isContentBrowserVisible;
+        set
+        {
+            if (_isContentBrowserVisible != value)
+            {
+                _isContentBrowserVisible = value;
+                OnPropertyChanged(nameof(IsContentBrowserVisible));
+                ApplyDockableVisibility(ContentBrowser, value);
+            }
+        }
+    }
+
+    public void ToggleLogger() => IsLoggerVisible = !IsLoggerVisible;
+    public void ToggleWorldEditorTab() => IsWorldEditorVisible = !IsWorldEditorVisible;
+    public void ToggleContentBrowserTab() => IsContentBrowserVisible = !IsContentBrowserVisible;
+
+    /// <summary>
+    /// Add or remove a dockable from the dock that hosts it. WorldEditor
+    /// lives in the center DocumentDock; ContentBrowser lives in the
+    /// left ToolDock. When the target is hidden we walk the tree to
+    /// find its owning dock; when re-shown we add it back to that same
+    /// dock. Layout docks may be nested (RootDock → ProportionalDock →
+    /// DocumentDock/ToolDock), so the lookup has to descend.
+    /// </summary>
+    private void ApplyDockableVisibility(Dock.Model.Core.IDockable dockable, bool visible)
+    {
+        if (Layout == null || dockable == null) return;
+        if (visible)
+            ShowDockable(dockable);
+        else
+            HideDockable(dockable);
+    }
+
+    private void HideDockable(Dock.Model.Core.IDockable target)
+    {
+        var owner = FindOwningDock(Layout, target);
+        if (owner != null)
+        {
+            owner.VisibleDockables.Remove(target);
+        }
+    }
+
+    private void ShowDockable(Dock.Model.Core.IDockable target)
+    {
+        // Find any dock that already contains this dockable — covers the
+        // case where a previous hide-and-show cycle must restore it.
+        var owner = FindOwningDock(Layout, target);
+        if (owner != null && !owner.VisibleDockables.Contains(target))
+        {
+            owner.VisibleDockables.Add(target);
+            return;
+        }
+        // First-time show: fall back to the default host. DocumentDock
+        // for tabs (WorldEditor), ToolDock for tool windows (ContentBrowser).
+        var fallback = ResolveDefaultHost(Layout, target);
+        fallback?.VisibleDockables.Add(target);
+    }
+
+    private static Dock.Model.Core.IDock? FindOwningDock(
+        Dock.Model.Core.IDockable? node,
+        Dock.Model.Core.IDockable target)
+    {
+        if (node is Dock.Model.Core.IDock dock)
+        {
+            if (dock.VisibleDockables.Contains(target)) return dock;
+            foreach (var child in dock.VisibleDockables)
+            {
+                var found = FindOwningDock(child, target);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private Dock.Model.Core.IDock? ResolveDefaultHost(
+        Dock.Model.Core.IDockable? node,
+        Dock.Model.Core.IDockable target)
+    {
+        // WorldEditor goes to the first DocumentDock; ContentBrowser goes
+        // to the first ToolDock. The factory always provides exactly one
+        // of each, so picking the first match is deterministic.
+        var wantDocument = target is Dock.Model.Mvvm.Controls.Document;
+        if (node is Dock.Model.Mvvm.Controls.DocumentDock docs && wantDocument)
+            return docs;
+        if (node is Dock.Model.Mvvm.Controls.ToolDock tool && !wantDocument)
+            return tool;
+        if (node is Dock.Model.Core.IDock dock)
+        {
+            foreach (var child in dock.VisibleDockables)
+            {
+                var found = ResolveDefaultHost(child, target);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    public Project? Project
+    {
+        get => _project;
+        set => AssignProject(value, markRecoveredDirty: false);
+    }
+
+    /// <summary>
+    /// Assign <paramref name="project"/> to <see cref="Project"/> and
+    /// optionally mark it dirty along with every scene. The dirty
+    /// flag is cleared during normal assignment so the editor's
+    /// baseline reflects the on-disk state; recovered autosaves are
+    /// marked dirty after that clear so the editor surfaces them as
+    /// unsaved work until the user explicitly saves.
+    /// </summary>
+    public void AssignProject(Project? project, bool markRecoveredDirty)
+    {
+        if (_project == project && !markRecoveredDirty) return;
+        if (_project != null) _project.PropertyChanged -= OnProjectPropertyChanged;
+        _project = project;
+        PrimalEditor_Avalonia.Common.ProjectContextLocator.SetCurrent(project);
+        OnPropertyChanged(nameof(Project));
+        OnPropertyChanged(nameof(ProjectPathDisplay));
+        OnPropertyChanged(nameof(SceneCountDisplay));
+        OnPropertyChanged(nameof(EntityCountDisplay));
+        WorldEditor.Project = project;
+        ContentBrowser.Project = project;
+        if (project != null)
+        {
+            project.PropertyChanged += OnProjectPropertyChanged;
+            project.ClearDirty();
+            if (project.ActiveScene != null) project.ActiveScene.ClearDirty();
+            if (markRecoveredDirty)
+            {
+                PrimalEditor_Avalonia.Common.AutoSaveRecoveryService.MarkRecoveredDirty(project);
+            }
+            WindowTitle = $"{project.Name} - PrimalEditor Avalonia";
+            PrimalEditor_Avalonia.Content.ContentWatcher.Initialize(project.ContentPath);
+
+            var sqlitePath = System.IO.Path.Combine(project.Path, ".Primal", "AssetDatabase.sqlite");
+            PrimalEditor_Avalonia.Content.AssetRegistry.ConfigureSqliteBackend(sqlitePath);
+            PrimalEditor_Avalonia.Content.AssetRegistry.Initialize(project.ContentPath, project.Path);
+            WorldEditor.ActiveScene = project.ActiveScene;
+        }
+        else
+        {
+            WindowTitle = "PrimalEditor Avalonia";
+            PrimalEditor_Avalonia.Content.ContentWatcher.Reset();
+        }
+        PrimalEditor_Avalonia.Common.AutoSaveService.Track(project);
+    }
+
+    private void OnProjectPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(GameProject.Project.IsDirty))
+        {
+            OnPropertyChanged(nameof(WindowTitle));
+        }
+    }
+
+    public string WindowTitle
+    {
+        get => _windowTitle;
+        set
+        {
+            var newTitle = value + (_project?.IsDirty == true ? " *" : string.Empty);
+            if (_windowTitle != newTitle)
+            {
+                _windowTitle = newTitle;
+                OnPropertyChanged(nameof(WindowTitle));
+            }
+        }
+    }
+
+    private void OnProjectDirtyChanged()
+    {
+        OnPropertyChanged(nameof(WindowTitle));
+    }
+
+    public string ProjectPathDisplay => _project?.FullPath ?? "No project loaded";
+    public string SceneCountDisplay => _project != null ? $"{_project.Scenes.Count} scene(s)" : "0 scenes";
+    public string EntityCountDisplay
+    {
+        get
+        {
+            var count = 0;
+            if (_project != null)
+            {
+                foreach (var scene in _project.Scenes)
+                {
+                    count += scene.Entities.Count;
+                }
+            }
+            return $"{count} entities";
+        }
+    }
+
+    public ICommand NewProjectCommand { get; }
+    public ICommand OpenProjectCommand { get; }
+    public ICommand SaveProjectCommand { get; }
+    public ICommand ExitCommand { get; }
+    public ICommand UndoCommand { get; }
+    public ICommand RedoCommand { get; }
+    public ICommand AddEntityCommand { get; }
+    public ICommand DeleteEntityCommand { get; }
+    public ICommand RenameEntityCommand { get; }
+    public ICommand DuplicateEntityCommand { get; }
+    public ICommand CutCommand { get; }
+    public ICommand CopyCommand { get; }
+    public ICommand PasteCommand { get; }
+    public ICommand AboutCommand { get; }
+    public ICommand ToggleWorldEditorTabCommand { get; }
+    public ICommand ToggleContentBrowserTabCommand { get; }
+
+    private List<GameEntity> _clipboard = new();
+
+    public MainWindowViewModel()
+    {
+        WorldEditor.Properties.RevealAssetCallback = ContentBrowser.RevealAsset;
+        Factory = new MainWindowDockFactory(this);
+        Layout = Factory.CreateLayout();
+        Factory.InitLayout(Layout!);
+
+        NewProjectCommand = new RelayCommand(_ => NewProjectExecute());
+        OpenProjectCommand = new RelayCommand(_ => OpenProjectExecute());
+        SaveProjectCommand = new RelayCommand(_ => SaveProjectExecute(), _ => _project != null);
+        ExitCommand = new RelayCommand(_ => ExitExecute());
+        UndoCommand = new RelayCommand(_ => WorldEditor.UndoRedo.Undo(), _ => WorldEditor.UndoRedo.UndoStack.Count > 0);
+        RedoCommand = new RelayCommand(_ => WorldEditor.UndoRedo.Redo(), _ => WorldEditor.UndoRedo.RedoStack.Count > 0);
+        AddEntityCommand = new RelayCommand(_ => AddEntityExecute());
+        DeleteEntityCommand = new RelayCommand(_ => DeleteEntityExecute());
+        RenameEntityCommand = new RelayCommand(_ => RenameEntityExecute());
+        DuplicateEntityCommand = new RelayCommand(_ => DuplicateEntityExecute());
+        CutCommand = new RelayCommand(_ => CutExecute(), _ => WorldEditor.SelectedEntities.Length > 0);
+        ToggleWorldEditorTabCommand = new RelayCommand(_ => ToggleWorldEditorTab());
+        ToggleContentBrowserTabCommand = new RelayCommand(_ => ToggleContentBrowserTab());
+        CopyCommand = new RelayCommand(_ => CopyExecute(), _ => WorldEditor.SelectedEntities.Length > 0);
+        PasteCommand = new RelayCommand(_ => PasteExecute(), _ => _clipboard.Count > 0 && WorldEditor.ActiveScene != null);
+        AboutCommand = new RelayCommand(_ => AboutExecute());
+    }
+
+    /// <summary>
+    /// Replace the current <see cref="Layout"/> with one built
+    /// from a previously-saved <see cref="DockingLayout"/>. No-op
+    /// if <paramref name="saved"/> is null (first run / older
+    /// editor-layout.json without the dock field). The same VM
+    /// instances (<see cref="WorldEditor"/>,
+    /// <see cref="ContentBrowser"/>) are reused as Dockables, so
+    /// Edit-menu commands still operate on the same view models
+    /// that DockControl renders as tabs.
+    /// </summary>
+    public void ApplyLayout(DockingLayout? saved)
+    {
+        // The dock tree no longer represents ContentBrowser/BuildLog/Logger
+        // — they live inside WorldEditorView's XAML now. Any persisted
+        // dock snapshot from before that refactor would recreate a
+        // separate ToolDock/Document tab for those surfaces and hide
+        // them outside the world editor. Always skip the restore and
+        // rely on the factory's default (single-document) layout.
+    }
+
+    /// <summary>
+    /// Snapshot the current <see cref="Layout"/> to a flat
+    /// <see cref="DockingLayout"/> for persistence. Caller writes
+    /// the result to <c>EditorLayout.DockLayout</c> and saves
+    /// through <see cref="EditorLayoutSettings"/>.
+    /// </summary>
+    public DockingLayout CaptureLayoutForSave() => DockingLayoutBridge.FromDockTree(Layout!);
+
+    public void CutExecute()
+    {
+        CopyExecute();
+        DeleteEntityExecute();
+        PrimalEditor_Avalonia.Common.Logger.Info($"Cut {_clipboard.Count} entity(ies)");
+    }
+
+    public void CopyExecute()
+    {
+        _clipboard.Clear();
+        foreach (var entity in WorldEditor.SelectedEntities)
+        {
+            _clipboard.Add(entity);
+        }
+        PrimalEditor_Avalonia.Common.Logger.Info($"Copied {_clipboard.Count} entity(ies) to clipboard");
+    }
+
+    public void PasteExecute()
+    {
+        if (WorldEditor.ActiveScene == null || _clipboard.Count == 0) return;
+        using (WorldEditor.UndoRedo.BeginTransaction($"Paste {_clipboard.Count} entity(ies)"))
+        {
+            foreach (var source in _clipboard)
+            {
+                var clone = new Components.GameEntity(source.Name + "_Copy")
+                {
+                    IsEnabled = source.IsEnabled,
+                    IsActive = source.IsActive,
+                };
+                foreach (var component in source.Components)
+                {
+                    if (component is Components.Transform t)
+                    {
+                        clone.Components.Add(new Components.Transform
+                        {
+                            PositionX = t.PositionX,
+                            PositionY = t.PositionY,
+                            PositionZ = t.PositionZ,
+                            RotationX = t.RotationX,
+                            RotationY = t.RotationY,
+                            RotationZ = t.RotationZ,
+                            ScaleX = t.ScaleX,
+                            ScaleY = t.ScaleY,
+                            ScaleZ = t.ScaleZ,
+                        });
+                    }
+                }
+                var action = new Common.AddEntityAction(WorldEditor, clone);
+                WorldEditor.UndoRedo.Add(action);
+                action.Redo();
+            }
+        }
+        PrimalEditor_Avalonia.Common.Logger.Info($"Pasted {_clipboard.Count} entity(ies)");
+    }
+
+    public async void AboutExecute()
+    {
+        var topLevel = Avalonia.Application.Current?.ApplicationLifetime is
+            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+            ? desktop.MainWindow : null;
+        if (topLevel != null)
+        {
+            var dialog = new Views.AboutDialog();
+            await dialog.ShowDialog(topLevel);
+        }
+    }
+
+    public async void NewProjectExecute()
+    {
+        var dialog = new NewProjectDialogWindow(new NewProjectViewModel());
+        var window = GetMainWindow();
+        if (window != null)
+        {
+            var result = await dialog.ShowDialog<Project?>(window);
+            if (result != null)
+            {
+                Project = result;
+            }
+        }
+    }
+
+    public async void OpenProjectExecute()
+    {
+        var openVm = new OpenProjectViewModel();
+        var dialog = new OpenProjectDialogWindow(openVm);
+        var window = GetMainWindow();
+        if (window == null) return;
+        var selectedPath = await dialog.ShowDialog<string?>(window);
+        if (selectedPath == null) return;
+
+        var projectDir = System.IO.Path.GetDirectoryName(selectedPath) ?? string.Empty;
+        var bundles = PrimalEditor_Avalonia.Common.AutoSaveRecoveryService
+            .DiscoverBundles(projectDir);
+        var candidate = PrimalEditor_Avalonia.Common.AutoSaveRecoveryService
+            .SelectNewestEligible(selectedPath, bundles);
+        if (candidate == null)
+        {
+            var opened = openVm.OpenSelectedProject();
+            if (opened != null) Project = opened;
+            return;
+        }
+
+        if (window is PrimalEditor_Avalonia.Views.MainWindow mainWindow)
+        {
+            await mainWindow.PromptAndApplyRecoveryAsync(
+                        new PrimalEditor_Avalonia.Common.AutoSaveRecoveryCoordinator.RecoveryCandidate(
+                    candidate, selectedPath));
+        }
+        else
+        {
+            var opened = openVm.OpenSelectedProject();
+            if (opened != null) Project = opened;
+        }
+    }
+
+    public void SaveProjectExecute()
+    {
+        if (_project == null) return;
+        PrimalEditor_Avalonia.Common.EditorSaveService.Instance.SaveAll(_project);
+    }
+
+    public void ExitExecute()
+    {
+        if (Avalonia.Application.Current?.ApplicationLifetime is
+            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.Shutdown();
+        }
+    }
+
+    public void AddEntityExecute()
+    {
+        if (WorldEditor.ActiveScene == null) return;
+        var entity = new Components.GameEntity("NewEntity");
+        entity.Components.Add(new Components.Transform());
+        using (WorldEditor.UndoRedo.BeginTransaction("Add Entity"))
+        {
+            var action = new AddEntityAction(WorldEditor, entity);
+            WorldEditor.UndoRedo.Add(action);
+            action.Redo();
+        }
+        MarkProjectDirty();
+    }
+
+    public void DeleteEntityExecute()
+    {
+		if (WorldEditor.DeleteSelectedEntities() > 0) MarkProjectDirty();
+    }
+
+    public async void RenameEntityExecute()
+    {
+        if (WorldEditor.SelectedEntities.Length != 1) return;
+        var entity = WorldEditor.SelectedEntities[0];
+        var dialog = new RenameEntityDialog(entity.Name);
+        var window = GetMainWindow();
+        if (window != null)
+        {
+            var result = await dialog.ShowDialog<string?>(window);
+            if (!string.IsNullOrEmpty(result))
+            {
+                var action = new RenameEntityAction(entity, result);
+                WorldEditor.UndoRedo.Add(action);
+                action.Redo();
+                MarkProjectDirty();
+            }
+        }
+    }
+
+    public void DuplicateEntityExecute()
+    {
+        if (WorldEditor.SelectedEntities.Length == 0) return;
+        using (WorldEditor.UndoRedo.BeginTransaction($"Duplicate {WorldEditor.SelectedEntities.Length} entity(ies)"))
+        {
+            foreach (var entity in WorldEditor.SelectedEntities)
+            {
+                var action = new DuplicateEntityAction(WorldEditor, entity);
+                WorldEditor.UndoRedo.Add(action);
+                action.Redo();
+            }
+        }
+        MarkProjectDirty();
+    }
+
+    private void MarkProjectDirty()
+    {
+        if (_project == null) return;
+        _project.MarkDirty();
+        WorldEditor.ActiveScene?.MarkDirty();
+    }
+
+    private Avalonia.Controls.Window? GetMainWindow()
+    {
+        return Avalonia.Application.Current?.ApplicationLifetime is
+            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+            ? desktop.MainWindow : null;
+    }
 }

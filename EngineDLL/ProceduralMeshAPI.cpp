@@ -51,9 +51,9 @@ constexpr u32 kMinParams[kMeshTypeCount] = {
 extern "C" {
 
 EDITOR_INTERFACE u64 ProceduralMeshCreate(u32 mesh_type, const f32* params, u32 param_count) {
-    if (mesh_type >= kMeshTypeCount) return 0;
-    if (!params && param_count > 0) return 0;
-    if (param_count < kMinParams[mesh_type]) return 0;
+    if (mesh_type >= kMeshTypeCount) return (u64)id::invalid_id;
+    if (!params && param_count > 0) return (u64)id::invalid_id;
+    if (param_count < kMinParams[mesh_type]) return (u64)id::invalid_id;
 
     id::id_type content_id = id::invalid_id;
     switch (mesh_type) {
@@ -94,7 +94,7 @@ EDITOR_INTERFACE u64 ProceduralMeshCreate(u32 mesh_type, const f32* params, u32 
             content_id = content::create_teapot_mesh(params[0], (u32)params[1]);
             break;
         default:
-            return 0;
+            return (u64)id::invalid_id;
     }
     return static_cast<u64>(content_id);
 }

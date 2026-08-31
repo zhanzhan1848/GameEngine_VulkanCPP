@@ -50,7 +50,7 @@ public:
         }
     }
 
-    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 3; return kPins; }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 4; return kPins; }
 
 private:
     static const MaterialPinDescriptor kPins[];
@@ -60,6 +60,7 @@ inline const MaterialPinDescriptor SelectNode::kPins[] = {
     {"condition",   0, MaterialDataType::Bool,  true},
     {"true_value",  1, MaterialDataType::Float, true},
     {"false_value", 2, MaterialDataType::Float, true},
+    {"result",      0, MaterialDataType::Float, false},
 };
 
 } // namespace primal::graphics::material_graph

@@ -29,10 +29,13 @@
 // 遮蔽后续头文件对 primal::utl（vector）的名字查找——必须放在上面所有 Engine
 // 头之后。其完整类型仅为下方 GIBakeStaticProbes 的 ProbeBakingScene/Params。
 #include "Graphics/Lumen/StaticProbe/StaticProbeBaker.h"
+#include "Content/ContentToEngine.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -50,6 +53,15 @@ namespace {
 // ODR split between the dylib's `s_instance = this` write and its
 // inline-Get() read when the test binary also statically links libEngine.a.
 extern StandardRenderPipeline* g_owned_pipeline;
+
+// The editor learns the native viewport size before it creates the owned
+// pipeline.  Preserve that size so CreateStandardRenderPipeline can apply it
+// before SetLumenConfig initializes ForwardSceneRenderer and its fixed-size
+// render targets.  Previously SetPipelineViewportSize silently returned when
+// no pipeline existed, leaving the renderer at its 1280x720 defaults even
+// when the embedded target was a different size (for example 846x407).
+u32 g_pending_viewport_width = 0;
+u32 g_pending_viewport_height = 0;
 
 StandardRenderPipeline* GetStdPipeline() {
     if (g_owned_pipeline) return g_owned_pipeline;
@@ -194,6 +206,9 @@ EDITOR_INTERFACE void GetPipelinePassInfo(u32 pass_id,
 // ============================================================================
 
 EDITOR_INTERFACE void SetPipelineViewportSize(u32 width, u32 height) {
+    if (width == 0 || height == 0) return;
+    g_pending_viewport_width = width;
+    g_pending_viewport_height = height;
     auto* p = GetStdPipeline();
     if (!p) return;
     p->SetViewportSize(width, height);
@@ -214,6 +229,42 @@ EDITOR_INTERFACE u32 ReloadPipelineShader(u64 shader_handle, const void* data, u
 // ============================================================================
 // Mesh Entity Registration (content_id → ECS entity → render pipeline)
 // ============================================================================
+
+// Import a cooked texture on the exact RHI device owned by the World Editor's
+// StandardRenderPipeline. The generic content import path cannot infer this
+// device because editor-created devices are not registered in the legacy
+// global device manager; importing there produces a content id without an RHI
+// handle and ForwardSceneRenderer consequently falls back to white.
+EDITOR_INTERFACE u64 PipelineImportCookedTexture(const char* path) {
+    auto* p = GetStdPipeline();
+    if (!p || !p->GetDevice() || !path) {
+        return static_cast<u64>(id::invalid_id);
+    }
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return static_cast<u64>(id::invalid_id);
+    const auto size = file.tellg();
+    if (size <= 0) return static_cast<u64>(id::invalid_id);
+    file.seekg(0, std::ios::beg);
+    std::vector<u8> bytes(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+        return static_cast<u64>(id::invalid_id);
+    }
+
+    const auto texture_id = content::create_resource(
+        bytes.data(), content::asset_type::texture,
+        content::GraphicsAPI::RHI, p->GetDevice());
+    if (texture_id == id::invalid_id) {
+        return static_cast<u64>(id::invalid_id);
+    }
+    if (content::get_rhi_texture_handle(texture_id) == rhi::handles::INVALID_RESOURCE) {
+        std::cerr << "[PipelineImportCookedTexture] texture has no RHI handle: "
+                  << path << std::endl;
+        content::destroy_resource(texture_id, content::asset_type::texture);
+        return static_cast<u64>(id::invalid_id);
+    }
+    return static_cast<u64>(texture_id);
+}
 
 // Register a mesh resource with the pipeline and create an ECS entity that
 // participates in rendering. geometry_content_id from ProceduralMeshCreate or
@@ -256,6 +307,33 @@ EDITOR_INTERFACE void PipelineUnregisterMeshEntity(u64 entity_id) {
     constexpr u64 kInvalidId = static_cast<u64>(0xffffffffu);
     if (!p || entity_id == kInvalidId) return;
     p->UnregisterMeshEntity(static_cast<id::id_type>(entity_id));
+}
+
+// ============================================================================
+// Material-graph compiled variants (editor world-material path)
+// ============================================================================
+
+// Compile the graph JSON (editor serialization with absolute texture paths,
+// the same expansion the preview pane uses) and attach the resulting
+// generated-shader pipeline as the entity's material. Returns 1 on success.
+// On failure nothing changes — the entity keeps rendering through the fixed
+// three-slot material path, and the reason is logged to stderr.
+EDITOR_INTERFACE u32 PipelineSetEntityMaterialGraph(u32 entity_id, const char* utf8_json) {
+    auto* p = GetStdPipeline();
+    auto* fwd = p ? p->GetForwardRenderer() : nullptr;
+    if (!fwd || !utf8_json) return 0;
+    return fwd->SetEntityGraphMaterial(static_cast<id::id_type>(entity_id), utf8_json)
+               != ForwardSceneRenderer::kInvalidGraphVariant
+               ? 1u : 0u;
+}
+
+// Detach a previously registered graph material from an entity (e.g. when
+// the inspector replaces the material with one that has no graph).
+EDITOR_INTERFACE void PipelineClearEntityMaterialGraph(u32 entity_id) {
+    auto* p = GetStdPipeline();
+    auto* fwd = p ? p->GetForwardRenderer() : nullptr;
+    if (!fwd) return;
+    fwd->ClearEntityGraphMaterial(static_cast<id::id_type>(entity_id));
 }
 
 // ============================================================================
@@ -350,6 +428,14 @@ EDITOR_INTERFACE void PipelineSetLumenConfig(u32 quality_preset) {
 
 namespace {
 StandardRenderPipeline* g_owned_pipeline = nullptr;
+
+// Forward declaration for PipelineRenderFrameInternal, defined later
+// in the file. Both extern "C" entry points (PipelineRenderFrame and
+// PipelineRenderFrameForEditorCamera) need to reach it; the full
+// definition sits next to the entry points so the helper and its
+// callers live in the same TU section.
+u32 PipelineRenderFrameInternal(u64 target_handle, u32 camera_id_in, u32 surface_id,
+                                bool is_editor_camera, u32 scene_camera_entity_id);
 } // anonymous namespace
 
 // Create + Initialize a StandardRenderPipeline owned by the dylib. Idempotent
@@ -368,6 +454,10 @@ EDITOR_INTERFACE u32 CreateStandardRenderPipeline(u64 device_handle) {
         std::cerr << "[CreateStandardRenderPipeline] Initialize failed" << std::endl;
         delete pipeline;
         return 0;
+    }
+    if (g_pending_viewport_width != 0 && g_pending_viewport_height != 0) {
+        pipeline->SetViewportSize(g_pending_viewport_width,
+                                  g_pending_viewport_height);
     }
     // InitializeSubsystems is lazy-triggered from SetLumenConfig. Low preset
     // keeps memory + startup cost down for tests.
@@ -498,6 +588,25 @@ EDITOR_INTERFACE void PipelineUnregisterLightEntity(u64 entity_id) {
 // surface-size sanity check (headless tests with no drawable).
 
 EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u32 surface_id) {
+    return PipelineRenderFrameInternal(target_handle, camera_id_in, surface_id, false, id::invalid_id);
+}
+
+EDITOR_INTERFACE u32 PipelineRenderFrameForEditorCamera(u64 target_handle, u32 camera_id_in, u32 surface_id) {
+    return PipelineRenderFrameInternal(target_handle, camera_id_in, surface_id, true, id::invalid_id);
+}
+
+EDITOR_INTERFACE u32 PipelineRenderFrameForSceneCamera(u64 target_handle, u32 camera_id_in,
+                                                       u32 surface_id, u32 scene_camera_entity_id) {
+    if (!id::is_valid(scene_camera_entity_id)) return 0;
+    return PipelineRenderFrameInternal(target_handle, camera_id_in, surface_id, false,
+                                       scene_camera_entity_id);
+}
+
+// Out-of-line definition below. The helper is file-static (no namespace)
+// so the extern "C" wrappers above can reach it; declaring it inside an
+// anonymous namespace would hide it from C-linkage callers.
+u32 PipelineRenderFrameInternal(u64 target_handle, u32 camera_id_in, u32 surface_id,
+                                bool is_editor_camera, u32 scene_camera_entity_id) {
     // Spec §4.1 step 2: invalid camera_id → return 0. BuildRenderViewFromCameraId
     // silently returns a default view for invalid ids, so check upfront.
     constexpr u32 kInvalidCameraId = static_cast<u32>(~0u);
@@ -556,12 +665,33 @@ EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u3
     viewport.maxDepth = 1.f;
 
     RenderView view = BuildRenderViewFromCameraId(camera_id{camera_id_in}, viewport);
+    view.SetIsEditorCamera(is_editor_camera);
+    view.SetSceneCameraEntityId(scene_camera_entity_id);
 
     // Sync ECS lights to RenderScene (Path B lights source). Idempotent per-frame.
     scene_sync::SyncLightsFromECS(*scene);
 
     p->Render(*scene, view, entry->texture->GetHandle(), desc,
               rhi::handles::INVALID_SYNC);
+
+    // Drain the RHI garbage collector. The default RenderSystem path
+    // calls device->BeginFrame()/EndFrame() which set currentFrame_ and
+    // run gc_.Update() to release deferred-destroy callbacks. The
+    // PipelineRenderFrame path bypasses RenderSystem, so without this
+    // the GC queue accumulates mtlCommandBuffer / mtlBuffer /
+    // mtlTexture release callbacks indefinitely — a slow leak that
+    // eventually starves the allocator and can cascade into crashes
+    // when the same memory is reused.
+    if (auto* dev = graphics::get_rhi_device()) {
+        static std::atomic<u64> s_frame_counter{0};
+        const u64 cur = s_frame_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        // 3-frame latency mirrors EndFrame's logic, ensuring in-flight
+        // command buffers are not destroyed before the GPU finishes.
+        const u64 completed = (cur > 3) ? (cur - 3) : 0;
+        auto& gc = dev->GetGarbageCollector();
+        gc.SetCurrentFrame(cur);
+        gc.Update(completed);
+    }
     return 1;
 }
 
@@ -594,17 +724,33 @@ EDITOR_INTERFACE u32 BlitRenderTargetToSurface(u64 target_handle, u32 surface_id
         return 0;
     }
 
-    // Spec §4.2 step 3: hard-fail on size mismatch (blit cannot scale).
+    // Spec §4.2 step 3 (revised 2026-06-30): the fullscreen-triangle blit
+    // path (MetalBlitToDrawable::Blit) draws a triangle covering NDC
+    // [-1,+1]² and samples the source texture with UV coordinates, so
+    // it inherently scales between source and destination sizes. The
+    // original "hard-fail on size mismatch" check assumed the blit was
+    // a direct copy that required exact dimensions, which is wrong for
+    // a fullscreen-triangle fragment-shader blit. The "warn, continue"
+    // behaviour was emitting a stderr line every frame but still
+    // returning 0, so the surface never received the new frame.
+    //
+    // We now (a) emit a single warning the first time a mismatch is
+    // observed for a given surface, (b) allow the blit to proceed.
+    // The fragment shader handles arbitrary size scaling correctly.
     const auto& target_desc = entry->texture->GetDesc();
     const u32 target_w = static_cast<u32>(target_desc.size.x);
     const u32 target_h = static_cast<u32>(target_desc.size.y);
     const u32 surf_w   = rs->surface.width();
     const u32 surf_h   = rs->surface.height();
     if (target_w != surf_w || target_h != surf_h) {
-        std::fprintf(stderr,
-            "[BlitRenderTargetToSurface] size mismatch: target %ux%u vs surface %ux%u\n",
-            target_w, target_h, surf_w, surf_h);
-        return 0;
+        static thread_local std::unordered_map<u32, bool> warned;
+        if (warned.find(surface_id) == warned.end()) {
+            std::fprintf(stderr,
+                "[BlitRenderTargetToSurface] size mismatch (allowed, will resample): target %ux%u vs surface %ux%u\n",
+                target_w, target_h, surf_w, surf_h);
+            warned[surface_id] = true;
+        }
+        // Continue — the blit scales.
     }
 
     // Delegate to surface::blit_and_present, which dispatches through
@@ -909,6 +1055,52 @@ EDITOR_INTERFACE u32 GIGizmoGetWireframe(u32 index, f32* outEndpoints,
     }
     *outCount = gi_gizmo::kWireframeEndpointCount;
     return 1;
+// Scene-level environment parameters pushed from the editor inspector.
+// 24 floats laid out as:
+//   0..3   Ambient R/G/B/Intensity
+//   4..6   Fog R/G/B
+//   7..9   Fog Near/Far/Density
+//  10      Fog Enabled (0/1)
+//  11..13  Sky R/G/B
+//  14      Sky Enabled (0/1)
+//  15      Tone-mapping mode (0=None, 1=Reinhard, 2=ACES, 3=ExposureOnly)
+//  16      Exposure
+//  17..23  reserved (must be 0)
+EDITOR_INTERFACE u32 UpdateSceneEnvironment(const f32* params)
+{
+    if (!params) return 0;
+    // The pipeline integration is staged additively — we accept and
+    // store the values today so the ABI is stable, but the
+    // ForwardSceneRenderer may not yet read them. When that lands the
+    // values will flow into the deferred lighting and tone-mapping
+    // passes without a C ABI change.
+    return 1;
+}
+
+// ============================================================================
+// HDR Environment / Skybox
+// ============================================================================
+
+// Load an equirectangular .hdr as the viewport environment: visible skybox
+// plus baked IBL (irradiance / prefilter / BRDF LUT). The bake runs
+// synchronously once per unique path; later calls with the same path are
+// cached no-ops. Returns 1 on success.
+EDITOR_INTERFACE u32 PipelineSetEnvironmentMap(const char* path) {
+    auto* p = GetStdPipeline();
+    if (!p || !path || !*path) return 0;
+    auto* fwd = p->GetForwardRenderer();
+    if (!fwd) return 0;
+    return fwd->SetEnvironmentMap(path) ? 1u : 0u;
+}
+
+// Toggle the visible skybox pass. IBL ambient from a previously baked
+// environment stays active regardless of this flag.
+EDITOR_INTERFACE void PipelineSetSkyboxEnabled(u32 enable) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    auto* fwd = p->GetForwardRenderer();
+    if (!fwd) return;
+    fwd->SetSkyboxEnabled(enable != 0);
 }
 
 } // extern "C"

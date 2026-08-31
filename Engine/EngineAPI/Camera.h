@@ -26,6 +26,17 @@ namespace primal::graphics
 		void view_height(f32 height) const;
 		void range(f32 near_z, f32 far_z) const;
 
+		// Refresh the platform camera's internal view/projection matrices
+		// from the camera entity's current transform. Without this call,
+		// `view()`/`projection()` return the values cached at the camera's
+		// last update (which on Metal happens at construction), so any
+		// subsequent `SetEntityTransform` on the camera entity is silently
+		// ignored by callers that go through this public API. Callers that
+		// use the legacy `end_frame` path get the update for free (see
+		// MetalCore::get_metal_frame_info); StandardRenderPipeline (Path B)
+		// must call this explicitly.
+		void update() const;
+
 		math::m4x4 view() const;
 		math::m4x4 projection() const;
 		math::m4x4 inverse_projection() const;

@@ -85,7 +85,7 @@ public:
         out->value = math::v4{1.0f, 1.0f, 1.0f, 1.0f};
     }
 
-    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 2; return kPins; }
+    const MaterialPinDescriptor* GetPinDescriptors(u32& c) const override { c = 3; return kPins; }
 
 private:
     static const MaterialPinDescriptor kPins[];
@@ -94,6 +94,7 @@ private:
 inline const MaterialPinDescriptor SampleTextureNode::kPins[] = {
     {"texture", 0, MaterialDataType::Texture2D, true},
     {"uv", 1, MaterialDataType::Float2, true},
+    {"rgba", 0, MaterialDataType::Float4, false},
 };
 
 } // namespace primal::graphics::material_graph

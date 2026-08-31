@@ -158,6 +158,8 @@ _APPKIT_PRIVATE_DEF_SEL( windows,
 
 
 // 以下为自定义方法
+_APPKIT_PRIVATE_DEF_SEL( setFrame_,
+						"setFrame:" );
 _APPKIT_PRIVATE_DEF_SEL( setFrame_display_,
 						"setFrame:display:" );
 
@@ -166,6 +168,21 @@ _APPKIT_PRIVATE_DEF_SEL( toggleFullScreen_,
 
 _APPKIT_PRIVATE_DEF_SEL( frame,
 						"frame" );
+
+_APPKIT_PRIVATE_DEF_SEL( addSubview_,
+						"addSubview:" );
+
+_APPKIT_PRIVATE_DEF_SEL( bounds,
+						"bounds" );
+
+_APPKIT_PRIVATE_DEF_SEL( setAutoresizingMask_,
+						"setAutoresizingMask:" );
+
+_APPKIT_PRIVATE_DEF_SEL( setNeedsDisplay_,
+						"setNeedsDisplay:" );
+
+_APPKIT_PRIVATE_DEF_SEL( isKindOfClass_,
+						"isKindOfClass:" );
 
 }
 

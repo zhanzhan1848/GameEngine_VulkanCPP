@@ -260,7 +260,11 @@ bool MetalPipeline::Initialize(const GraphicsPipelineDesc& desc) {
         if (error) {
             std::cerr << "[MetalPipeline] Failed to create render pipeline state: " 
                       << error->localizedDescription()->utf8String() << std::endl;
-            error->release();
+            // error is an NS::Error** out-parameter; Metal owns it. Do NOT
+            // release — over-releasing an autoreleased NSError was the
+            // documented root cause of the objc_release SIGSEGV in the
+            // timer's per-callout autorelease pool drain (see
+            // MetalBlitToDrawable.cpp for the canonical pattern).
         }
         return false;
     }
@@ -293,7 +297,9 @@ bool MetalPipeline::Initialize(const ComputePipelineDesc& desc) {
         if (error) {
             std::cerr << "[MetalPipeline] Failed to create compute pipeline state: " 
                       << error->localizedDescription()->utf8String() << std::endl;
-            error->release();
+            // error is an NS::Error** out-parameter; Metal owns it. Do NOT
+            // release — see MetalBlitToDrawable.cpp for the canonical
+            // pattern and root-cause analysis.
         }
         return false;
     }

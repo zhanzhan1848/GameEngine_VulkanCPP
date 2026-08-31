@@ -124,7 +124,10 @@ private:
     bool CreateMaterialPipeline(const std::string& metal_source);
     bool CreateBlitPipeline();
     void UpdateGlobalDescriptorSets();
+    void UpdateMaterialDescriptorSet();
     void UpdateBlitDescriptorSet();
+    void ReleaseMaterialTextures();
+    bool EnsureFallbackTexture();
 
     rhi::RHIDeviceBase* device_{nullptr};
 
@@ -182,6 +185,11 @@ private:
     f32 rotation_angle_{0.0f};
 
     bool material_graph_set_{false};
+    static constexpr u32 MAX_MATERIAL_TEXTURES = 4;
+    id::id_type material_texture_ids_[MAX_MATERIAL_TEXTURES]{};
+    rhi::ResourceHandle material_textures_[MAX_MATERIAL_TEXTURES]{};
+    id::id_type fallback_texture_id_{id::invalid_id};
+    rhi::ResourceHandle fallback_texture_{rhi::handles::INVALID_RESOURCE};
     bool mode_2d_{false};
 
     // --- Configurable camera/light/background state ---

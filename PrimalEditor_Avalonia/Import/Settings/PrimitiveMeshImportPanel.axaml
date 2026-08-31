@@ -1,0 +1,30 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Import.Settings"
+             x:Class="PrimalEditor_Avalonia.Import.Settings.PrimitiveMeshImportPanel"
+             x:DataType="vm:PrimitiveMeshImportPanelViewModel">
+  <StackPanel Spacing="6">
+    <TextBlock Text="Type"/>
+    <ComboBox ItemsSource="{Binding AvailableTypes}"
+              SelectedItem="{Binding Type}"
+              HorizontalAlignment="Stretch"/>
+    <TextBlock Text="Segments (X/Y/Z)"/>
+    <Grid ColumnDefinitions="*,*,*">
+      <TextBox Grid.Column="0" Watermark="X" Text="{Binding SegmentsX}"/>
+      <TextBox Grid.Column="1" Watermark="Y" Text="{Binding SegmentsY}"/>
+      <TextBox Grid.Column="2" Watermark="Z" Text="{Binding SegmentsZ}"/>
+    </Grid>
+    <TextBlock Text="Size (X/Y/Z)"/>
+    <Grid ColumnDefinitions="*,*,*">
+      <TextBox Grid.Column="0" Watermark="X" Text="{Binding SizeX}"/>
+      <TextBox Grid.Column="1" Watermark="Y" Text="{Binding SizeY}"/>
+      <TextBox Grid.Column="2" Watermark="Z" Text="{Binding SizeZ}"/>
+    </Grid>
+    <TextBlock Text="LOD"/>
+    <TextBox Text="{Binding LOD}"/>
+    <TextBlock Text="Smoothing Angle (degrees)"/>
+    <TextBox Text="{Binding SmoothingAngle}"/>
+    <TextBlock Text="Output Name"/>
+    <TextBox Text="{Binding OutputName}"/>
+  </StackPanel>
+</UserControl>

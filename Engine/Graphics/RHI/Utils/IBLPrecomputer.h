@@ -44,6 +44,14 @@ public:
     void Shutdown();
 
     /**
+     * @brief 将等距柱状投影 (equirectangular) HDR 贴图转换为立方体贴图
+     * @param equirectMap 输入的 2D equirect 贴图 (RGBA16_Float)
+     * @param outputSize 输出立方体贴图每面尺寸 (默认 256)
+     * @return 生成的环境立方体贴图句柄 (RGBA16_Float TextureCube)
+     */
+    ResourceHandle ComputeEnvironmentCube(ResourceHandle equirectMap, u32 outputSize = 256);
+
+    /**
      * @brief 生成漫反射辐照度贴图 (Irradiance Map)
      * @param envMap 输入的环境贴图 (Cubemap)，必须是 ShaderResource 状态
      * @param outputSize 输出贴图尺寸 (默认 32x32)
@@ -73,16 +81,19 @@ private:
     PipelineHandle irradiancePipeline_{handles::INVALID_PIPELINE};
     PipelineHandle prefilterPipeline_{handles::INVALID_PIPELINE};
     PipelineHandle brdfPipeline_{handles::INVALID_PIPELINE};
-    
+    PipelineHandle equirectToCubePipeline_{handles::INVALID_PIPELINE};
+
     // 管线布局
     PipelineLayoutHandle irradiancePipelineLayout_{handles::INVALID_PIPELINE_LAYOUT};
     PipelineLayoutHandle prefilterPipelineLayout_{handles::INVALID_PIPELINE_LAYOUT};
     PipelineLayoutHandle brdfPipelineLayout_{handles::INVALID_PIPELINE_LAYOUT};
+    PipelineLayoutHandle equirectToCubePipelineLayout_{handles::INVALID_PIPELINE_LAYOUT};
 
     // 描述符集布局
     DescriptorSetLayoutHandle irradianceDescLayout_{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     DescriptorSetLayoutHandle prefilterDescLayout_{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     DescriptorSetLayoutHandle brdfDescLayout_{handles::INVALID_DESCRIPTOR_SET_LAYOUT}; // BRDF 可能不需要输入纹理，或者需要采样器
+    DescriptorSetLayoutHandle equirectToCubeDescLayout_{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
 
     // 内部辅助函数
     bool CreatePipelines();

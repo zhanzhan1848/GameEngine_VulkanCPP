@@ -1,0 +1,420 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- =========================================================== -->
+  <!-- TRANSITION INFRA                                            -->
+  <!-- Avalonia XAML resolves transition target properties (e.g.   -->
+  <!-- "Background") against the parent style's TargetType. We      -->
+  <!-- can't define <Transitions> as a detached resource, so each   -->
+  <!-- control's <Transitions> is inlined right where it's used.    -->
+  <!-- Timing stays in the 120–220ms band — anything longer feels   -->
+  <!-- sluggish in a tool.                                          -->
+  <!-- =========================================================== -->
+
+  <!-- =========================================================== -->
+  <!-- GLOBAL TEXT — calm, no aggressive letter-spacing             -->
+  <!-- =========================================================== -->
+  <Style Selector="TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontSize" Value="12"/>
+  </Style>
+  <Style Selector="TextBlock.sectionTitle">
+    <Setter Property="FontFamily" Value="{StaticResource FontDisplay}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="LetterSpacing" Value="1"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="{StaticResource FontMono}"/>
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+  </Style>
+  <Style Selector="TextBlock.dim">
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}"/>
+  </Style>
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}"/>
+  </Style>
+  <Style Selector="TextBlock.accent">
+    <Setter Property="Foreground" Value="{StaticResource CoralBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- WINDOW                                                       -->
+  <!-- =========================================================== -->
+  <Style Selector="Window">
+    <Setter Property="Background" Value="{StaticResource VoidBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- BUTTON — soft rounded corners, gentle hover lift             -->
+  <!-- =========================================================== -->
+  <Style Selector="Button">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Padding" Value="14,6"/>
+    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button:pointerover">
+    <Setter Property="Background" Value="{StaticResource PanelHoverBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueDeepBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+  <Style Selector="Button:pressed">
+    <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
+  </Style>
+  <Style Selector="Button.accent">
+    <Setter Property="Background" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="Foreground" Value="#FFFFFF"/>
+  </Style>
+  <Style Selector="Button.accent:pointerover">
+    <Setter Property="Background" Value="{StaticResource ElectricBlueDeepBrush}"/>
+  </Style>
+  <Style Selector="Button.danger">
+    <Setter Property="BorderBrush" Value="{StaticResource CoralBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource CoralBrush}"/>
+  </Style>
+  <Style Selector="Button:disabled">
+    <Setter Property="Opacity" Value="0.5"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- TOGGLE BUTTON                                                -->
+  <!-- =========================================================== -->
+  <Style Selector="ToggleButton">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Padding" Value="14,6"/>
+    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ToggleButton:pointerover">
+    <Setter Property="Background" Value="{StaticResource PanelHoverBrush}"/>
+  </Style>
+  <Style Selector="ToggleButton:checked">
+    <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- TEXTBOX                                                      -->
+  <!-- =========================================================== -->
+  <Style Selector="TextBox">
+    <Setter Property="Background" Value="{StaticResource VoidBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="CaretBrush" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="SelectionBrush" Value="{StaticResource BlueTint25}"/>
+    <Setter Property="SelectionForegroundBrush" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontMono}"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Padding" Value="8,5"/>
+    <Setter Property="MinHeight" Value="26"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="TextBox:focus">
+    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+  <Style Selector="TextBox:pointerover">
+    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueDeepBrush}"/>
+  </Style>
+  <Style Selector="TextBox:disabled">
+    <Setter Property="Opacity" Value="0.4"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- COMBOBOX                                                     -->
+  <!-- =========================================================== -->
+  <Style Selector="ComboBox">
+    <Setter Property="Background"     Value="{StaticResource VoidBrush}"/>
+    <Setter Property="Foreground"     Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="BorderBrush"    Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius"   Value="4"/>
+    <Setter Property="FontFamily"     Value="{StaticResource FontUI}"/>
+    <Setter Property="FontSize"       Value="12"/>
+    <Setter Property="MinHeight"      Value="26"/>
+    <Setter Property="Padding"        Value="8,2"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ComboBox:focus">
+    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+  <Style Selector="ComboBox:pointerover">
+    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueDeepBrush}"/>
+  </Style>
+  <Style Selector="ComboBoxItem">
+    <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="Padding" Value="8,4"/>
+  </Style>
+  <Style Selector="ComboBoxItem:pointerover">
+    <Setter Property="Background" Value="{StaticResource BlueTint12}"/>
+  </Style>
+  <Style Selector="ComboBoxItem:selected">
+    <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- CHECKBOX                                                     -->
+  <!-- =========================================================== -->
+  <Style Selector="CheckBox">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.15"/>
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- LISTBOX                                                      -->
+  <!-- =========================================================== -->
+  <Style Selector="ListBox">
+    <Setter Property="Background"      Value="{StaticResource SlateBrush}"/>
+    <Setter Property="Foreground"      Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="BorderBrush"     Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius"    Value="4"/>
+    <Setter Property="Padding"         Value="2"/>
+  </Style>
+  <Style Selector="ListBoxItem">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontSize"   Value="12"/>
+    <Setter Property="Padding"    Value="10,5"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="CornerRadius" Value="3"/>
+  </Style>
+  <Style Selector="ListBoxItem:pointerover">
+    <Setter Property="Background" Value="{StaticResource BlueTint12}"/>
+  </Style>
+  <Style Selector="ListBoxItem:selected">
+    <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- TREEVIEW                                                     -->
+  <!-- =========================================================== -->
+  <Style Selector="TreeView">
+    <Setter Property="Background"  Value="{StaticResource SlateBrush}"/>
+    <Setter Property="Foreground"  Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="BorderBrush" Value="Transparent"/>
+    <Setter Property="Padding"     Value="2"/>
+  </Style>
+  <Style Selector="TreeViewItem">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontSize"   Value="11"/>
+    <Setter Property="Padding"    Value="2,1"/>
+  </Style>
+  <Style Selector="TreeViewItem:pointerover">
+    <Setter Property="Background" Value="{StaticResource BlueTint12}"/>
+  </Style>
+  <Style Selector="TreeViewItem:selected">
+    <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- MENU / MENUITEM                                              -->
+  <!-- =========================================================== -->
+  <Style Selector="Menu">
+    <Setter Property="Background"  Value="{StaticResource SlateBrush}"/>
+    <Setter Property="Foreground"  Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="0,0,0,1"/>
+  </Style>
+  <Style Selector="MenuItem">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize"   Value="12"/>
+    <Setter Property="Padding"    Value="12,6"/>
+  </Style>
+  <Style Selector="MenuItem:pointerover">
+    <Setter Property="Background" Value="{StaticResource BlueTint12}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- GRIDSPLITTER — thin soft line                                 -->
+  <!-- =========================================================== -->
+  <Style Selector="GridSplitter">
+    <Setter Property="Background" Value="{StaticResource HairlineBrush}"/>
+  </Style>
+  <Style Selector="GridSplitter:pointerover">
+    <Setter Property="Background" Value="{StaticResource ElectricBlueDeepBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- PROGRESSBAR                                                  -->
+  <!-- =========================================================== -->
+  <Style Selector="ProgressBar">
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="Background" Value="{StaticResource VoidBrush}"/>
+    <Setter Property="BorderThickness" Value="0"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- SCROLLBAR                                                    -->
+  <!-- =========================================================== -->
+  <Style Selector="ScrollBar">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Foreground" Value="{StaticResource HairlineBrush}"/>
+  </Style>
+  <Style Selector="ScrollBar:vertical">
+    <Setter Property="Width" Value="10"/>
+  </Style>
+  <Style Selector="ScrollBar:horizontal">
+    <Setter Property="Height" Value="10"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- SEPARATOR                                                    -->
+  <!-- =========================================================== -->
+  <Style Selector="Separator">
+    <Setter Property="Background" Value="{StaticResource HairlineBrush}"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- BORDER helper classes                                        -->
+  <!-- .glass     — translucent blue-tinted glass surface             -->
+  <!-- .panel     — standard dark panel with hairline border          -->
+  <!-- .floating  — lifted card with soft shadow                      -->
+  <!-- =========================================================== -->
+  <Style Selector="Border.glass">
+    <Setter Property="Background" Value="{StaticResource BlueTint12}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.panel">
+    <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.floating">
+    <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- EXPANDER                                                     -->
+  <!-- Calm expand/collapse; chevron rotation animation is provided  -->
+  <!-- by the Fluent theme, here we just restyle the header and      -->
+  <!-- the content card to match the cyberpunk palette.             -->
+  <!-- =========================================================== -->
+  <Style Selector="Expander">
+    <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="Padding" Value="10,8,10,8"/>
+    <Setter Property="Margin" Value="0,4,0,0"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="HorizontalAlignment" Value="Stretch"/>
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+  </Style>
+  <Style Selector="Expander /template/ ToggleButton#ExpanderHeader">
+    <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="Padding" Value="10,8"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Expander /template/ ToggleButton#ExpanderHeader:pointerover">
+    <Setter Property="Background" Value="{StaticResource PanelHoverBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+  </Style>
+  <Style Selector="Expander /template/ Border#ExpanderContent">
+    <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1,0,1,1"/>
+    <Setter Property="CornerRadius" Value="0,0,6,6"/>
+  </Style>
+
+</Styles>

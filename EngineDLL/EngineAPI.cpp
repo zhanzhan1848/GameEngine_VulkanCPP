@@ -85,10 +85,16 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id)
 #include "EngineAPIInternal.h"
 #include "../Graphics/Renderer.h"
 #include "../Graphics/RHI/Core/RHIDevice.h"
+#include "../Graphics/Metal/MetalCore.h"
 #include "../Platform/PlatformTypes.h"
 #include "../Platform/Platform.h"
 #include <dlfcn.h>
 #include <cstdio>
+#include <iostream>
+#if defined(__APPLE__)
+#include <objc/runtime.h>
+#include <objc/message.h>
+#endif
 
 using namespace primal;
 
@@ -158,6 +164,166 @@ EDITOR_INTERFACE void* GetWindowHandle(u32 id)
 {
 	assert(id < surfaces.size());
 	return surfaces[id].window.handle();
+}
+
+// === Phase 1 Sub-step 1.2.7': Embedded render surface ===
+// Embeds the engine's forward pipeline into a host NSView owned by the
+// editor (Avalonia). Unlike CreateRenderSurface which creates a new
+// standalone NSWindow, this path attaches an MTKView as a subview of
+// host_view so the render target lives inside the host's contentView.
+//
+// Returns a surface id suitable for RenderFrame(surface_id, ...).
+EDITOR_INTERFACE u32 CreateEmbeddedRenderSurface(void* host_view, s32 width, s32 height)
+{
+	assert(host_view);
+	graphics::render_surface rs{};
+	// Register the external host view as a platform window FIRST so the
+	// render_surface has a valid window_id for later ResizeRenderSurface
+	// calls. create_external_surface takes the pre-registered window instead
+	// of registering it itself — the previous design had both sites calling
+	// platform::register_external_window, which leaked one slot per embed
+	// and left rs.window invalid (a default-constructed window_id) so any
+	// resize from C# dereferenced out-of-bounds memory and SIGBUS'd.
+	rs.window = platform::register_external_window(host_view, (u32)width, (u32)height);
+	rs.surface = graphics::create_external_surface(rs.window);
+	if (!rs.surface.is_valid()) {
+		std::cerr << "[EngineAPI] CreateEmbeddedRenderSurface failed: host view "
+		          << host_view << " rejected by graphics::create_external_surface "
+		          << "(likely 0x0 bounds or MTKView alloc failed)" << std::endl;
+		// Roll back the window slot too so it doesn't leak.
+		platform::remove_window(rs.window.get_id());
+		return (u32)-1;
+	}
+	surfaces.emplace_back(rs);
+	return (u32)surfaces.size() - 1;
+}
+
+// Returns the engine-side NSWindow* that hosts the MTKView for this
+// surface. For embedded surfaces (CreateEmbeddedRenderSurface) this is
+// typically a separate child NSWindow the platform layer created. For
+// standard surfaces (CreateRenderSurface) it is the NSWindow that owns
+// the MTKView directly. May return NULL on platforms that do not use
+// NSWindow for surface presentation.
+EDITOR_INTERFACE void* GetSurfaceView(u32 id)
+{
+	assert(id < surfaces.size());
+	return graphics::metal::core::external_surface_view(surfaces[id].surface.get_id());
+}
+
+// Reposition an embedded surface's MTKView within its host. Used by the
+// editor to keep the MTKView aligned with the host UI control's bounds.
+// Coordinates are in the host's coordinate space (top-left origin on
+// macOS NSView).
+EDITOR_INTERFACE void SetEmbeddedSurfaceFrame(u32 id, s32 x, s32 y, u32 w, u32 h)
+{
+	assert(id < surfaces.size());
+	graphics::metal::core::external_surface_view_frame(
+		surfaces[id].surface.get_id(), x, y, w, h);
+}
+
+// Register a C function pointer as the per-frame render callback for an
+// embedded surface's MTKView, and switch the MTKView to AppKit-driven
+// automatic draw mode (CVDisplayLink drives drawRect: at the display's
+// refresh rate, ~60Hz on macOS). The callback runs INSIDE AppKit's
+// per-callout autoreleasepool (the same one that drains MTKView's own
+// drawable references), so any autoreleased ObjC refs the editor creates
+// (MTLCommandBuffer, currentDrawable, etc.) are drained by THIS pool —
+// no cross-thread pool contamination with LaunchServices' _LSExceptions
+// shared singleton, which was the root cause of the previous
+// GCD-worker-driven fire_timer SIGSEGV at DRAW #N.
+//
+// The callback signature is void(*)(void* mtk_view, float dt). mtk_view
+// is the same pointer that GetSurfaceView returns. dt is a nominal 1/60s
+// — the editor's test scene has no animated uniforms, but the value is
+// passed for completeness.
+//
+// Mac only. Other platforms are a no-op (return 0). The previous
+// GCD-worker fire_timer path in EngineAPI_mac.mm is now obsolete but
+// kept for engine test harnesses that don't use the editor's pipeline.
+EDITOR_INTERFACE u32 EnableSurfaceAutoDraw(u32 id, void(*cb)(void*, float))
+{
+#if defined(__APPLE__)
+	assert(id < surfaces.size());
+	void* view = graphics::metal::core::external_surface_view(
+		surfaces[id].surface.get_id());
+	if (!view || !cb) return 0;
+	extern void PassThroughMTKView_RegisterRenderCallback(void* view, void(*cb)(void*, float));
+	extern void PassThroughMTKView_EnableAutoDraw(void* view);
+	PassThroughMTKView_RegisterRenderCallback(view, cb);
+	PassThroughMTKView_EnableAutoDraw(view);
+	return 1;
+#else
+	(void)id; (void)cb;
+	return 0;
+#endif
+}
+
+// Disable AppKit-driven automatic draw for an embedded surface's MTKView
+// and unregister its render callback. Mac only.
+EDITOR_INTERFACE void DisableSurfaceAutoDraw(u32 id)
+{
+#if defined(__APPLE__)
+	assert(id < surfaces.size());
+	void* view = graphics::metal::core::external_surface_view(
+		surfaces[id].surface.get_id());
+	if (!view) return;
+	extern void PassThroughMTKView_DisableAutoDraw(void* view);
+	extern void PassThroughMTKView_UnregisterRenderCallback(void* view);
+	PassThroughMTKView_UnregisterRenderCallback(view);
+	PassThroughMTKView_DisableAutoDraw(view);
+#else
+	(void)id;
+#endif
+}
+
+// Returns the contentView (NSView*) of the first visible NSWindow, suitable
+// for use as the host argument to CreateEmbeddedRenderSurface. Returns NULL
+// if no visible window is found. macOS only.
+//
+// DEPRECATED 2026-07-03 — DO NOT USE. This function uses
+// `NS::Application::sharedApplication()->windows()[0]->contentView()`, which
+// is unreliable for three reasons documented by the editor maintainer:
+//
+//   1. `windows()[0]` is not guaranteed to be the editor's MainWindow.
+//      Avalonia (and many other frameworks) registers hidden windows at
+//      index 0 (splash, transient, accessibility), so the first window is
+//      often NOT the window containing the 3D viewport.
+//
+//   2. The returned contentView is the AvaloniaRootView, not a
+//      NativeControlHost's child NSView. Attaching the MTKView to it puts
+//      the engine outside Avalonia's managed native subtree, which on
+//      macOS 26.5.1 / Apple Silicon triggers
+//      com.apple.FramePacing.LayerStateSyncQueue to invoke an
+//      MTKView __initCommon deferred block that crashes with a NULL
+//      function pointer jump inside objc_release. The 10-frame-then-
+//      deadlock pattern in the editor was this exact crash.
+//
+//   3. Even if `windows()[0]` happens to be the right window, the
+//      contentView's bounds may be 0×0 at the time the engine first tries
+//      to acquire a drawable (Avalonia's Measure/Arrange/Loaded sequence
+//      is not yet complete). `currentDrawable` returns nil, the engine
+//      logs a "first draw too early" warning, and the surface never
+//      receives the first frame.
+//
+// The supported path is to obtain the host view from a NativeControlHost
+// subclass (see `PrimalEditor_Avalonia/Views/Engine3D/MTKViewHost.cs`).
+// That NSView is positioned by Avalonia's layout system, parented inside
+// Avalonia's managed native subtree, and has non-zero bounds at the
+// time TryInitializeFromLayout runs (gated by LayoutUpdated).
+//
+// This function is preserved as a deprecation stub that always returns
+// nullptr, so any legacy caller fails fast instead of attaching the
+// MTKView to the wrong NSView. The symbol remains exported for ABI
+// compatibility with already-built editor binaries.
+EDITOR_INTERFACE void* GetAvaloniaContentView()
+{
+#if defined(__APPLE__)
+    // Intentionally return nullptr. See deprecation comment above.
+    (void)NS::Application::sharedApplication();  // suppress unused-warning
+    return nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 EDITOR_INTERFACE void ResizeRenderSurface(u32 id, u32 width, u32 height)
@@ -233,6 +399,16 @@ EDITOR_INTERFACE void ShutdownEngine()
 	graphics::shutdown();
 #pragma GCC diagnostic pop
 	graphics::shutdown_rhi();
+}
+
+EDITOR_INTERFACE void FlushGPU()
+{
+	// Force GPU→CPU sync so subsequent DebugReadRenderTarget / SaveRenderTargetAsPng
+	// observes the finished frame. Without this the transfer-queue copy can run
+	// before the graphics queue's render-pass writes complete.
+	if (auto* device = graphics::get_rhi_device()) {
+		device->WaitIdle();
+	}
 }
 
 EDITOR_INTERFACE u32 IsEngineInitialized()

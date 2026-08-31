@@ -5,6 +5,7 @@
 
 namespace primal::graphics::rhi {
     class RHIGpuMesh;
+    class RHIDeviceBase;
 }
 
 namespace primal::content
@@ -66,7 +67,9 @@ namespace primal::content
     };
 
     // --- Unified resource import: one call per resource ---
-[[nodiscard]] id::id_type create_resource(const void *const data, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
+[[nodiscard]] id::id_type create_resource(const void *const data, asset_type::type type,
+                                          GraphicsAPI api = GraphicsAPI::RHI,
+                                          graphics::rhi::RHIDeviceBase* preferred_device = nullptr);
     void destroy_resource(id::id_type id, asset_type::type type, GraphicsAPI api = GraphicsAPI::RHI);
 
     // 释放 register_mesh_asset 返回的裸 rhi_mesh_assets id(destroy_resource
@@ -85,6 +88,12 @@ namespace primal::content
 
     // Extract the internal rhi_mesh_assets ID from a geometry_hierarchies ID
     id::id_type get_rhi_mesh_id(id::id_type geometry_id);
+
+    // Insert a pre-encoded fake_pointer (single_mesh_marker | submesh_view_id
+    // in the high bits) into geometry_hierarchies and return the new
+    // geometry_content_id. Bridges RHI-registered meshes into the legacy
+    // add_render_item path.
+    id::id_type add_legacy_geometry_hierarchy(uint8_t* fake_pointer);
 
     using GpuMeshCallback = std::function<void(id::id_type, graphics::rhi::RHIGpuMesh*)>;
     void foreach_gpu_mesh(GpuMeshCallback callback);

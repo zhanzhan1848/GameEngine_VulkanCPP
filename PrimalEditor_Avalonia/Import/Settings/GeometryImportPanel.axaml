@@ -1,0 +1,491 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Import.Settings"
+             xmlns:conv="using:PrimalEditor_Avalonia.Converters"
+             x:Class="PrimalEditor_Avalonia.Import.Settings.GeometryImportPanel"
+             x:DataType="vm:GeometryImportPanelViewModel">
+
+  <!--
+    Geometry import panel.
+    Layout (top-to-bottom):
+      Stage 1 card  -  parser-side settings (always applies)
+      Stage 2 card  -  asset-pipeline modules (gated by PipelineAvailable)
+    Each module expander inside Stage 2 gets:
+      * a geometric glyph as a visual marker
+      * an On/Off pill bound to its EnableX checkbox (no VM changes needed)
+  -->
+
+  <UserControl.Resources>
+    <conv:BoolToOnOffConverter x:Key="BoolToOnOffText"/>
+    <conv:BoolToOnOffBrushConverter x:Key="BoolToOnOffBrush"/>
+  </UserControl.Resources>
+
+  <UserControl.Styles>
+    <!-- Compact, evenly-aligned label/textbox columns inside each card.
+         Keeps the parser-section readable without a heavyweight Grid per row. -->
+    <Style Selector="StackPanel.fieldRow">
+      <Setter Property="Spacing" Value="6"/>
+      <Setter Property="Margin" Value="0,4,0,0"/>
+    </Style>
+    <Style Selector="TextBlock.fieldLabel">
+      <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Margin" Value="0,6,0,2"/>
+    </Style>
+
+    <!-- Tiny pill that sits in the expander header (On/Off). -->
+    <Style Selector="Border.moduleBadge">
+      <Setter Property="Padding" Value="8,2"/>
+      <Setter Property="CornerRadius" Value="9"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.18"/>
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBlock.moduleBadgeText">
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="HorizontalAlignment" Value="Center"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="FontFamily" Value="{StaticResource FontMono}"/>
+      <Setter Property="FontSize" Value="10"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <!-- Glyph rendered next to the module title. -->
+    <Style Selector="TextBlock.moduleGlyph">
+      <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Width" Value="20"/>
+      <Setter Property="TextAlignment" Value="Center"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+    </Style>
+
+    <!-- Subtle hairline used between sections inside a card. -->
+    <Style Selector="Rectangle.sectionDivider">
+      <Setter Property="Height" Value="1"/>
+      <Setter Property="Fill" Value="{StaticResource HairlineBrush}"/>
+      <Setter Property="Margin" Value="0,10,0,8"/>
+    </Style>
+
+    <!-- Inline warning card used for the "pipeline not supported" notice. -->
+    <Style Selector="Border.warningCard">
+      <Setter Property="Background" Value="#33E6B25F"/>
+      <Setter Property="BorderBrush" Value="{StaticResource AmberBrush}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="4"/>
+      <Setter Property="Padding" Value="10,8"/>
+      <Setter Property="Margin" Value="0,6,0,8"/>
+    </Style>
+  </UserControl.Styles>
+
+  <ScrollViewer>
+    <StackPanel Spacing="14" Margin="0,4,0,12">
+
+      <!-- ============================================================= -->
+      <!-- STAGE 1 CARD : parser-side settings (FBX / OBJ Import)          -->
+      <!-- Always applies regardless of source format.                    -->
+      <!-- ============================================================= -->
+      <Border Classes="floating" Padding="14,12,14,14">
+        <StackPanel Spacing="6">
+          <!-- Card header -->
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <TextBlock Grid.Column="0" Text="⬢"
+                       Classes="moduleGlyph"/>
+            <TextBlock Grid.Column="1" Text="FBX / OBJ Import"
+                       Classes="sectionTitle" Margin="6,0,0,0"
+                       VerticalAlignment="Center"/>
+            <Border Grid.Column="2" Classes="moduleBadge"
+                    Background="{StaticResource BlueTint25}"
+                    BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+                    BorderThickness="1">
+              <TextBlock Text="ALWAYS" Classes="moduleBadgeText"/>
+            </Border>
+          </Grid>
+          <Rectangle Classes="sectionDivider"/>
+
+          <!-- LOD Mode -->
+          <TextBlock Text="LOD Mode (runtime distance thresholds)" Classes="fieldLabel"/>
+          <ComboBox ItemsSource="{Binding AvailableLodModes}"
+                    SelectedItem="{Binding LodMode}"
+                    HorizontalAlignment="Stretch"/>
+          <Grid ColumnDefinitions="*,*" Margin="0,2,0,0">
+            <TextBox Grid.Column="0" Watermark="LOD 0 distance" Text="{Binding Lod0Threshold}" Margin="0,0,2,0"/>
+            <TextBox Grid.Column="1" Watermark="LOD 1 distance" Text="{Binding Lod1Threshold}" Margin="2,0,0,0"/>
+          </Grid>
+          <TextBox Watermark="LOD 2 distance" Text="{Binding Lod2Threshold}"/>
+
+          <!-- Geometry options -->
+          <StackPanel Classes="fieldRow">
+            <CheckBox Content="Generate Tangent Space" IsChecked="{Binding GenerateTangentSpace}"/>
+            <CheckBox Content="Recalculate Normals"     IsChecked="{Binding RecalculateNormals}"/>
+            <CheckBox Content="Force Single LOD"        IsChecked="{Binding ForceSingleLod}"/>
+          </StackPanel>
+
+          <!-- Compression -->
+          <TextBlock Text="Compression" Classes="fieldLabel"/>
+          <ComboBox ItemsSource="{Binding AvailableCompressions}"
+                    SelectedItem="{Binding Compression}"
+                    HorizontalAlignment="Stretch"/>
+
+          <Rectangle Classes="sectionDivider"/>
+
+          <!-- Sub-section: CookMesh parameters -->
+          <TextBlock Text="Cook Mesh With Settings — parser-side parameters"
+                     Classes="sectionTitle" Margin="0,0,0,4"/>
+          <TextBlock Text="Smoothing Angle (degrees)" Classes="fieldLabel"/>
+          <TextBox Text="{Binding SmoothingAngle}"/>
+          <StackPanel Classes="fieldRow">
+            <CheckBox Content="Calculate Normals"        IsChecked="{Binding CalculateNormals}"/>
+            <CheckBox Content="Calculate Tangents"       IsChecked="{Binding CalculateTangents}"/>
+            <CheckBox Content="Reverse Handedness"       IsChecked="{Binding ReverseHandedness}"/>
+            <CheckBox Content="Import Embedded Textures" IsChecked="{Binding ImportEmbeddedTextures}"/>
+            <CheckBox Content="Import Animations"        IsChecked="{Binding ImportAnimations}"/>
+            <CheckBox Content="Coalesce Meshes"          IsChecked="{Binding CoalesceMeshes}"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- ============================================================= -->
+      <!-- STAGE 2 CARD : Asset Pipeline (FBX/OBJ only)                    -->
+      <!-- Gated by PipelineAvailable; controls disable when format       -->
+      <!-- unsupported (theme greys disabled controls uniformly).         -->
+      <!-- ============================================================= -->
+      <Border Classes="floating" Padding="14,12,14,14"
+              IsEnabled="{Binding PipelineAvailable}">
+        <StackPanel Spacing="6">
+
+          <!-- Card header -->
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <TextBlock Grid.Column="0" Text="◆"
+                       Classes="moduleGlyph"/>
+            <StackPanel Grid.Column="1" Margin="6,0,0,0">
+              <TextBlock Text="Asset Pipeline" Classes="sectionTitle"/>
+              <TextBlock Text="Modular post-processing (PMP · meshopt · xatlas · VHACD)"
+                         FontSize="11" Foreground="{StaticResource SecondaryTextBrush}"/>
+            </StackPanel>
+            <Border Grid.Column="2" Classes="moduleBadge"
+                    IsVisible="{Binding PipelineAvailable}"
+                    Background="{StaticResource BlueTint25}"
+                    BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+                    BorderThickness="1">
+              <TextBlock Text="FBX / OBJ ONLY" Classes="moduleBadgeText"/>
+            </Border>
+          </Grid>
+          <Rectangle Classes="sectionDivider"/>
+
+          <!-- Pipeline description -->
+          <TextBlock TextWrapping="Wrap"
+                     Foreground="{StaticResource SecondaryTextBrush}"
+                     Text="Post-process the parsed mesh through ContentTools' modular pipeline. With all flags OFF, output is byte-identical to legacy import. Defaults below match pipeline::Config: LOD, Meshlet, Remesh, UV Atlas, and SDF are ON."/>
+
+          <!-- Format-not-supported warning -->
+          <Border Classes="warningCard"
+                  IsVisible="{Binding !PipelineAvailable}">
+            <StackPanel Spacing="4">
+              <TextBlock Text="⚠  Pipeline modules not available for this format"
+                         FontWeight="SemiBold"
+                         Foreground="{StaticResource AmberBrush}"/>
+              <TextBlock TextWrapping="Wrap" FontSize="11"
+                         Foreground="{StaticResource PrimaryTextBrush}"
+                         Text="Pipeline modules only run on .fbx and .obj source files. Other formats (.gltf, .glb, .dae, .blend) use the legacy import path and ignore the flags below."/>
+            </StackPanel>
+          </Border>
+
+          <!-- Toggle for advanced fields inside each module expander -->
+          <CheckBox Content="Show advanced per-module parameters"
+                    IsChecked="{Binding ShowAdvanced}"
+                    Margin="0,8,0,0"/>
+
+          <!-- ============== Pipeline modules (each as an Expander) ============== -->
+
+          <!-- Repair -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="✦" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="Repair (PMP mesh cleanup)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableRepair, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableRepair, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable Repair" IsChecked="{Binding EnableRepair}"/>
+              <TextBlock Text="Operations bitfield (0x0F = All: degenerate/stitch/holes/orient-outward)"
+                         IsVisible="{Binding ShowAdvanced}" FontSize="11"
+                         Classes="muted"/>
+              <TextBox Watermark="Ops bitfield (0-255)" Text="{Binding RepairOps}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Stitch distance (model units)" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding RepairStitchDistance}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Max hole size (skip holes larger than N edges)"
+                         IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding RepairMaxHoleSize}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Orient Outward" IsChecked="{Binding RepairOrientOutward}" IsVisible="{Binding ShowAdvanced}"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- Remesh -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="◇" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="Remesh (uniform / adaptive / decimate)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableRemesh, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableRemesh, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable Remesh" IsChecked="{Binding EnableRemesh}"/>
+              <TextBlock Text="Mode" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <ComboBox ItemsSource="{Binding AvailableRemeshModes}"
+                        SelectedItem="{Binding RemeshMode}"
+                        IsVisible="{Binding ShowAdvanced}"
+                        HorizontalAlignment="Stretch"/>
+              <TextBlock Text="Target edge length (0 = AUTO from bbox diagonal)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding TargetEdgeLength}"/>
+              <TextBlock Text="Iterations" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding RemeshIterations}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="AUTO mode subdivisor (1=keep density, 2=double density)"
+                         IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding RemeshAutoSubdiv}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Adaptive approx error" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding RemeshAdaptiveApproxError}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Decimate ratio (target = source * ratio)"
+                         IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding RemeshRatio}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Use projection (back-project to original surface)"
+                        IsChecked="{Binding RemeshUseProjection}"
+                        IsVisible="{Binding ShowAdvanced}"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- Subdivide -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="⊕" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="Subdivide (Loop / CatmullClark)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableSubdivide, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableSubdivide, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable Subdivide" IsChecked="{Binding EnableSubdivide}"/>
+              <TextBlock Text="Scheme" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <ComboBox ItemsSource="{Binding AvailableSubdivideSchemes}"
+                        SelectedItem="{Binding SubdivideScheme}"
+                        IsVisible="{Binding ShowAdvanced}"
+                        HorizontalAlignment="Stretch"/>
+              <TextBlock Text="Levels (each level ~4× triangle count for Loop)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding SubdivideLevels}"/>
+              <CheckBox Content="Auto-derive normals/tangents after subdivide"
+                        IsChecked="{Binding AutoDeriveAfterSubdivide}"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- Derive -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="∇" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="Derive (recompute normals / tangents)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableDerive, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableDerive, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable Derive (standalone, independent of subdivide)"
+                        IsChecked="{Binding EnableDerive}"/>
+              <TextBlock Text="Normal Mode" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <ComboBox ItemsSource="{Binding AvailableDeriveNormalModes}"
+                        SelectedItem="{Binding DeriveNormalMode}"
+                        IsVisible="{Binding ShowAdvanced}"
+                        HorizontalAlignment="Stretch"/>
+              <TextBlock Text="Faceted angle (degrees) — only used by Faceted mode" Classes="fieldLabel"/>
+              <TextBox Text="{Binding DeriveFacetedAngleDeg}"/>
+              <TextBlock Text="Tangent Mode" Classes="fieldLabel"/>
+              <ComboBox ItemsSource="{Binding AvailableDeriveTangentModes}"
+                        SelectedItem="{Binding DeriveTangentMode}"
+                        HorizontalAlignment="Stretch"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- UV Atlas -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="⊞" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="UV Atlas (xatlas UV generation)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableUvatlas, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableUvatlas, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable UV Atlas" IsChecked="{Binding EnableUvatlas}"/>
+              <TextBlock Text="Target UV set purpose" Classes="fieldLabel"/>
+              <ComboBox ItemsSource="{Binding AvailableUvatlasPurposes}"
+                        SelectedItem="{Binding UvatlasTargetPurpose}"
+                        HorizontalAlignment="Stretch"/>
+              <TextBlock Text="Max chart count (0 = unlimited)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding UvatlasMaxChartCount}"/>
+              <TextBlock Text="Gutter (texels between charts)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding UvatlasGutter}"/>
+              <TextBlock Text="Resolution hint (0 = let xatlas estimate from texels/unit)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding UvatlasResolutionHint}"/>
+              <TextBlock Text="Texels per unit" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding UvatlasTexelsPerUnit}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Stretch optimization" IsChecked="{Binding UvatlasStretchOptimization}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Strict unique pack (required for Lightmap UVs)"
+                        IsChecked="{Binding UvatlasStrictUniquePack}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Use input UVs as chart hint"
+                        IsChecked="{Binding UvatlasUseInputUvsAsHint}" IsVisible="{Binding ShowAdvanced}"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- LOD -->
+          <Expander IsExpanded="True">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="⫶" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="LOD (level-of-detail generation)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableLod, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableLod, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable LOD" IsChecked="{Binding EnableLod}"/>
+              <TextBlock Text="Simplify ratio (each level = ratio × previous index count)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding LodRatio}"/>
+              <TextBlock Text="Min vertices for LOD generation (smaller meshes skip LOD)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding MinVerticesForLod}"/>
+              <TextBlock Text="Target error (meshopt_simplify normalized deviation)"
+                         IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding LodTargetError}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Max levels" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding LodMaxLevels}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Lock borders (prevent edge seam movement)"
+                        IsChecked="{Binding LodLockBorders}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Optimize vertex cache after each level"
+                        IsChecked="{Binding LodOptimizeVcache}" IsVisible="{Binding ShowAdvanced}"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- Meshlet -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="▦" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="Meshlet (meshopt_buildMeshlets)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableMeshlet, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableMeshlet, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable Meshlet" IsChecked="{Binding EnableMeshlet}"/>
+              <TextBlock Text="Max vertices per meshlet (runtime cap is 256)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding MeshletMaxVertices}"/>
+              <TextBlock Text="Max triangles per meshlet (runtime cap is 128)" Classes="fieldLabel"/>
+              <TextBox Text="{Binding MeshletMaxTriangles}"/>
+              <TextBlock Text="Cone weight (0=no culling opt, 1=aggressive)"
+                         IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding MeshletConeWeight}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Optimize vertex cache before build"
+                        IsChecked="{Binding MeshletOptimizeVcache}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Compute bounds (needed for GPU culling)"
+                        IsChecked="{Binding MeshletComputeBounds}" IsVisible="{Binding ShowAdvanced}"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- Collision -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="⬡" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="Collision (VHACD convex decomposition)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableCollision, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableCollision, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable Collision" IsChecked="{Binding EnableCollision}"/>
+              <TextBlock Text="Max convex hulls" Classes="fieldLabel"/>
+              <TextBox Text="{Binding CollisionMaxHulls}"/>
+              <TextBlock Text="Voxel resolution" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding CollisionVoxelResolution}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="Auto resolution (scale voxel grid by triangle count)"
+                        IsChecked="{Binding CollisionAutoResolution}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Max concavity (lower = more aggressive splitting)"
+                         IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding CollisionMaxConcavity}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Max vertices per hull" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding CollisionMaxVerticesPerHull}" IsVisible="{Binding ShowAdvanced}"/>
+              <CheckBox Content="PCA preprocessing" IsChecked="{Binding CollisionPca}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Plane downsampling" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding CollisionPlaneDownsampling}" IsVisible="{Binding ShowAdvanced}"/>
+              <TextBlock Text="Convex hull downsampling" IsVisible="{Binding ShowAdvanced}" FontSize="11" Classes="muted"/>
+              <TextBox Text="{Binding CollisionConvexhullDownsampling}" IsVisible="{Binding ShowAdvanced}"/>
+            </StackPanel>
+          </Expander>
+
+          <!-- SDF -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <TextBlock Grid.Column="0" Text="◉" Classes="moduleGlyph"/>
+                <TextBlock Grid.Column="1" Text="SDF (signed distance field, baked into .mesh)" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <Border Grid.Column="2" Classes="moduleBadge"
+                        Background="{Binding EnableSdf, Converter={StaticResource BoolToOnOffBrush}}">
+                  <TextBlock Text="{Binding EnableSdf, Converter={StaticResource BoolToOnOffText}}"
+                             Classes="moduleBadgeText"/>
+                </Border>
+              </Grid>
+            </Expander.Header>
+            <StackPanel Spacing="4">
+              <CheckBox Content="Enable SDF" IsChecked="{Binding EnableSdf}"/>
+              <!-- Voxel grid resolution is a primary knob (controls output size ~O(N^3)),
+                   not a debugging tweak. Keep it visible regardless of ShowAdvanced
+                   so artists don't silently bake at the default 32. Free-form text
+                   input is clamped/snapped in the VM setter to [4..256] step 8. -->
+              <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,4,0,0">
+                <TextBlock VerticalAlignment="Center" Text="Grid resolution (per axis):" Classes="muted"/>
+                <TextBox Text="{Binding SdfGridResolution}"
+                         Watermark="4..256, multiple of 8"
+                         Width="140"
+                         ToolTip.Tip="Voxel grid is resolution^3 cells. Memory and cost scale cubically: 32 to ~400KB, 128 to ~25MB, 256 to ~190MB per mesh. Values are clamped to 4..256 and snapped to multiples of 8."/>
+              </StackPanel>
+              <TextBlock TextWrapping="Wrap" Classes="muted" FontSize="11" Margin="0,2,0,0"
+                         Text="Slow path for large meshes. SDF data is consumed by GPU-side surface cache / Nanite. Disable for prototype iteration."/>
+            </StackPanel>
+          </Expander>
+
+        </StackPanel>
+      </Border>
+
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

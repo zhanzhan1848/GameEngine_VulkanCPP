@@ -1,0 +1,81 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors.Material"
+             x:Class="PrimalEditor_Avalonia.Editors.Material.MaterialPreviewView"
+             x:DataType="vm:MaterialPreviewViewModel"
+             Background="{StaticResource VoidBrush}">
+
+  <Border Classes="floating" Margin="2,2,6,2">
+    <Panel>
+      <!-- The 3D preview bitmap. Source is set by MaterialPreviewViewModel
+           each tick. Stretch=UniformFill so the BGRA8 readback fills the
+           available area without distortion. -->
+      <Image Source="{Binding PreviewBitmap}"
+             Stretch="Uniform"
+             StretchDirection="Both"
+             ClipToBounds="True"
+             PointerPressed="OnImagePointerPressed"
+             PointerMoved="OnImagePointerMoved"
+             PointerReleased="OnImagePointerReleased" />
+
+      <!-- Unreal-style material preview primitive selector. The native
+           renderer already owns all meshes; changing this selection takes
+           effect on the next preview frame. -->
+      <Border HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              Margin="8"
+              Padding="6,4"
+              CornerRadius="4"
+              Background="#DD0A1120"
+              BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+              BorderThickness="1">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="MESH"
+                     VerticalAlignment="Center"
+                     FontFamily="{StaticResource FontDisplay}"
+                     FontSize="9"
+                     LetterSpacing="1"
+                     Foreground="{StaticResource MutedTextBrush}"/>
+          <ComboBox Width="126"
+                    MinHeight="26"
+                    ItemsSource="{Binding AvailablePreviewMeshes}"
+                    SelectedItem="{Binding SelectedPreviewMesh, Mode=TwoWay}">
+            <ComboBox.ItemTemplate>
+              <DataTemplate DataType="vm:MaterialPreviewMeshOption">
+                <StackPanel Orientation="Horizontal" Spacing="7"
+                            ToolTip.Tip="{Binding Description}">
+                  <TextBlock Text="{Binding Glyph}"
+                             Width="14"
+                             HorizontalAlignment="Center"
+                             Foreground="{StaticResource ElectricBlueBrush}"/>
+                  <TextBlock Text="{Binding DisplayName}"
+                             FontFamily="{StaticResource FontMono}"
+                             FontSize="10"/>
+                </StackPanel>
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
+        </StackPanel>
+      </Border>
+
+      <!-- Status overlay: shown while the engine is loading or before the
+           first frame arrives. Fades out once the bitmap has data. -->
+      <Panel IsVisible="{Binding ShowPlaceholder}">
+        <StackPanel HorizontalAlignment="Center"
+                    VerticalAlignment="Center" Spacing="6">
+          <TextBlock Text="PREVIEW"
+                     FontFamily="{StaticResource FontDisplay}"
+                     FontWeight="SemiBold" FontSize="11"
+                     LetterSpacing="2"
+                     Foreground="{StaticResource ElectricBlueBrush}"
+                     HorizontalAlignment="Center"/>
+          <TextBlock Text="{Binding PlaceholderText}"
+                     FontFamily="{StaticResource FontMono}"
+                     FontSize="10"
+                     Foreground="{StaticResource MutedTextBrush}"
+                     HorizontalAlignment="Center"/>
+        </StackPanel>
+      </Panel>
+    </Panel>
+  </Border>
+</UserControl>

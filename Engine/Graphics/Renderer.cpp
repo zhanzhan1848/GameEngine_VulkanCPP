@@ -12,7 +12,7 @@
 #endif
 
 // === Phase 1 Sub-step 1.2.6': Renderer.cpp = 旧 platform_interface 转发层 ===
-// 整个 Renderer.cpp 的 forwarding 逻辑（gfx.surface_ops.create / gfx.light.set_parameter / ...）
+// 整个 Renderer.cpp 的 forwarding 逻辑（gfx.surface.create / gfx.light.set_parameter / ...）
 // 都通过静态 platform_interface gfx{} 变量做后端分发。这条路径已被 RHI device path
 // （initialize_with_device + bind_rhi_device_to_legacy + initialize(metal)）替代，
 // 但 forwarding API 本身还是 public surface（Editor 和集成测试在用）。
@@ -27,13 +27,15 @@ namespace primal::graphics
 	{
 
 		// Defines where the compiled engine shaders file is located for each one of the supported APIs.
+		// Paths are resolved relative to the executable's directory at runtime by ContentLoader
+		// (see ContentLoaderMac.cpp read_file). Keep the bare filenames stable so the same
+		// compilation pipeline (TestPCGScatter / EngineTest) can produce the blob and have
+		// both standalone test executables and the Avalonia editor find it.
 		constexpr const char* engine_shader_paths[]
 		{
 			"./shaders/d3d12/shaders.bin",
-			"./shaders/vulkan/shaders.bin", 
-			"/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Darwin/Debug/shaders/metal/shaders.metallib", // "./shaders/metal/shaders.metallib"
-			// "./shaders/vulkan/shaders.bin", 
-			//etc
+			"./shaders/vulkan/shaders.bin",
+			"./shaders/metal/shaders.metallib",
 		};
 
 		platform_interface gfx{};
@@ -97,47 +99,57 @@ namespace primal::graphics
 
 	surface create_surface(platform::window window)
 	{
-		return gfx.surface_ops.create(window);
+		return gfx.surface.create(window);
+	}
+
+	surface create_external_surface(platform::window window)
+	{
+		return gfx.surface.create_external ? gfx.surface.create_external(window) : surface{};
+	}
+
+	void* get_surface_native_view(surface_id id)
+	{
+		return gfx.surface.get_native_view ? gfx.surface.get_native_view(id) : nullptr;
 	}
 
 	void remove_surface(surface_id id)
 	{
 		assert(id::is_valid(id));
-		gfx.surface_ops.remove(id);
+		gfx.surface.remove(id);
 	}
 
 	void surface::resize(u32 width, u32 height) const
 	{
 		assert(is_valid());
-		gfx.surface_ops.resize(_id, width, height);
+		gfx.surface.resize(_id, width, height);
 	}
 
 	u32 surface::width() const
 	{
 		assert(is_valid());
-		return gfx.surface_ops.width(_id);
+		return gfx.surface.width(_id);
 	}
 
 	u32 surface::height() const
 	{
 		assert(is_valid());
-		return gfx.surface_ops.height(_id);
+		return gfx.surface.height(_id);
 	}
 
 	void surface::render(frame_info info) const
 	{
 		assert(is_valid());
-		gfx.surface_ops.render(_id, info);
+		gfx.surface.render(_id, info);
 	}
 
 	u32 surface::blit_and_present(rhi::ResourceHandle src) const
 	{
 		assert(is_valid());
-		// gfx.surface_ops.blit_and_present may be null on backends that don't
+		// gfx.surface.blit_and_present may be null on backends that don't
 		// implement Path B (e.g. D3D12/Vulkan stubs). Guard the deref so a
 		// missing impl degrades to a no-op return 0 instead of crashing.
-		if (!gfx.surface_ops.blit_and_present) return 0;
-		return gfx.surface_ops.blit_and_present(_id, src);
+		if (!gfx.surface.blit_and_present) return 0;
+		return gfx.surface.blit_and_present(_id, src);
 	}
 
 	void create_light_set(u64 light_set_key)
@@ -278,56 +290,62 @@ namespace primal::graphics
 
 	camera create_camera(camera_init_info info)
 	{
-		return gfx.camera_ops.create(info);
+		return gfx.camera.create(info);
 	}
 
 	void remove_camera(camera_id id)
 	{
-		gfx.camera_ops.remove(id);
+		gfx.camera.remove(id);
 	}
 
 	void camera::up(math::v3 up) const
 	{
 		assert(is_valid());
-		gfx.camera_ops.set_parameter(_id, camera_parameter::up_vector, &up, sizeof(up));
+		gfx.camera.set_parameter(_id, camera_parameter::up_vector, &up, sizeof(up));
 	}
 
 	void camera::field_of_view(f32 fov) const
 	{
 		assert(is_valid());
-		gfx.camera_ops.set_parameter(_id, camera_parameter::field_of_view, &fov, sizeof(fov));
+		gfx.camera.set_parameter(_id, camera_parameter::field_of_view, &fov, sizeof(fov));
 	}
 
 	void camera::aspect_ratio(f32 aspect_ratio) const
 	{
 		assert(is_valid());
-		gfx.camera_ops.set_parameter(_id, camera_parameter::aspect_ratio, &aspect_ratio, sizeof(aspect_ratio));
+		gfx.camera.set_parameter(_id, camera_parameter::aspect_ratio, &aspect_ratio, sizeof(aspect_ratio));
 	}
 
 	void camera::view_width(f32 width) const
 	{
 		assert(is_valid());
-		gfx.camera_ops.set_parameter(_id, camera_parameter::view_width, &width, sizeof(width));
+		gfx.camera.set_parameter(_id, camera_parameter::view_width, &width, sizeof(width));
 	}
 
 	void camera::view_height(f32 height) const
 	{
 		assert(is_valid());
-		gfx.camera_ops.set_parameter(_id, camera_parameter::view_height, &height, sizeof(height));
+		gfx.camera.set_parameter(_id, camera_parameter::view_height, &height, sizeof(height));
 	}
 
 	void camera::range(f32 near_z, f32 far_z) const
 	{
 		assert(is_valid());
-		gfx.camera_ops.set_parameter(_id, camera_parameter::near_z, &near_z, sizeof(near_z));
-		gfx.camera_ops.set_parameter(_id, camera_parameter::far_z, &far_z, sizeof(far_z));
+		gfx.camera.set_parameter(_id, camera_parameter::near_z, &near_z, sizeof(near_z));
+		gfx.camera.set_parameter(_id, camera_parameter::far_z, &far_z, sizeof(far_z));
+	}
+
+	void camera::update() const
+	{
+		assert(is_valid());
+		gfx.camera.update(_id);
 	}
 
 	math::m4x4 camera::view() const
 	{
 		assert(is_valid());
 		math::m4x4 matrix;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::view, &matrix, sizeof(matrix));
+		gfx.camera.get_parameter(_id, camera_parameter::view, &matrix, sizeof(matrix));
 		return matrix;
 	}
 
@@ -335,7 +353,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		math::m4x4 matrix;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::projection, &matrix, sizeof(matrix));
+		gfx.camera.get_parameter(_id, camera_parameter::projection, &matrix, sizeof(matrix));
 		return matrix;
 	}
 
@@ -343,7 +361,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		math::m4x4 matrix;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::inverse_projection, &matrix, sizeof(matrix));
+		gfx.camera.get_parameter(_id, camera_parameter::inverse_projection, &matrix, sizeof(matrix));
 		return matrix;
 	}
 
@@ -351,7 +369,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		math::m4x4 matrix;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::view_projection, &matrix, sizeof(matrix));
+		gfx.camera.get_parameter(_id, camera_parameter::view_projection, &matrix, sizeof(matrix));
 		return matrix;
 	}
 
@@ -359,7 +377,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		math::m4x4 matrix;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::inverse_view_projection, &matrix, sizeof(matrix));
+		gfx.camera.get_parameter(_id, camera_parameter::inverse_view_projection, &matrix, sizeof(matrix));
 		return matrix;
 	}
 
@@ -367,7 +385,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		math::v3 up_vector;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::up_vector, &up_vector, sizeof(up_vector));
+		gfx.camera.get_parameter(_id, camera_parameter::up_vector, &up_vector, sizeof(up_vector));
 		return up_vector;
 	}
 
@@ -375,7 +393,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		f32 near_z;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::near_z, &near_z, sizeof(near_z));
+		gfx.camera.get_parameter(_id, camera_parameter::near_z, &near_z, sizeof(near_z));
 		return near_z;
 	}
 
@@ -383,7 +401,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		f32 far_z;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::far_z, &far_z, sizeof(far_z));
+		gfx.camera.get_parameter(_id, camera_parameter::far_z, &far_z, sizeof(far_z));
 		return far_z;
 	}
 
@@ -391,7 +409,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		f32 field_of_view;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::field_of_view, &field_of_view, sizeof(field_of_view));
+		gfx.camera.get_parameter(_id, camera_parameter::field_of_view, &field_of_view, sizeof(field_of_view));
 		return field_of_view;
 	}
 
@@ -399,7 +417,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		f32 aspect_ratio;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::aspect_ratio, &aspect_ratio, sizeof(aspect_ratio));
+		gfx.camera.get_parameter(_id, camera_parameter::aspect_ratio, &aspect_ratio, sizeof(aspect_ratio));
 		return aspect_ratio;
 	}
 
@@ -407,7 +425,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		f32 view_width;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::view_width, &view_width, sizeof(view_width));
+		gfx.camera.get_parameter(_id, camera_parameter::view_width, &view_width, sizeof(view_width));
 		return view_width;
 	}
 
@@ -415,7 +433,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		f32 view_height;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::view_height, &view_height, sizeof(view_height));
+		gfx.camera.get_parameter(_id, camera_parameter::view_height, &view_height, sizeof(view_height));
 		return view_height;
 	}
 
@@ -423,7 +441,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		camera::type type;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::type, &type, sizeof(type));
+		gfx.camera.get_parameter(_id, camera_parameter::type, &type, sizeof(type));
 		return type;
 	}
 
@@ -431,7 +449,7 @@ namespace primal::graphics
 	{
 		assert(is_valid());
 		id::id_type entity_id;
-		gfx.camera_ops.get_parameter(_id, camera_parameter::entity_id, &entity_id, sizeof(entity_id));
+		gfx.camera.get_parameter(_id, camera_parameter::entity_id, &entity_id, sizeof(entity_id));
 		return entity_id;
 	}
 
@@ -461,7 +479,10 @@ namespace primal::graphics
 
 	id::id_type add_material(material_init_info info)
 	{
-		assert(gfx.resources.add_material);
+		// Editor windows can finish dispatching close callbacks while the
+		// graphics backend is already tearing down. Material creation is a
+		// fallible resource operation (callers handle invalid_id), so do not
+		// turn that lifecycle race into a process-wide SIGABRT in debug builds.
 		if (!gfx.resources.add_material) return id::invalid_id;
 		return gfx.resources.add_material(info);
 	}

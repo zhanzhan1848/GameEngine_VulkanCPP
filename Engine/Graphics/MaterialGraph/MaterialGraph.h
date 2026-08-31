@@ -16,7 +16,7 @@ class MaterialGraph {
 public:
     u32 AddNode(std::unique_ptr<MaterialNode> node);
     void RemoveNode(u32 node_id);
-    void Connect(u32 from_node, u32 from_pin, u32 to_node, u32 to_pin);
+    bool Connect(u32 from_node, u32 from_pin, u32 to_node, u32 to_pin);
     void Disconnect(u32 from_node, u32 from_pin, u32 to_node, u32 to_pin);
     void Clear();
     void Execute();

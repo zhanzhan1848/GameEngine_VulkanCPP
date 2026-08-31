@@ -1,0 +1,616 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Dock.Model.Mvvm.Controls;
+using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.Components;
+using PrimalEditor_Avalonia.Content;
+using PrimalEditor_Avalonia.Entities;
+using PrimalEditor_Avalonia.GameProject;
+using PrimalEditor_Avalonia.GameProject.Identifiers;
+using PrimalEditor_Avalonia.Native;
+using PrimalEditor_Avalonia.ViewModels;
+
+namespace PrimalEditor_Avalonia.ViewModels;
+
+public class WorldEditorViewModel : Document, ISceneEntityContext
+{
+    private Project? _project;
+    private Scene? _activeScene;
+    private GameEntity? _selectedEntity;
+    private string _debugMessage = string.Empty;
+
+    public UndoRedo UndoRedo { get; } = new UndoRedo();
+
+    public PropertiesViewModel Properties { get; } = new PropertiesViewModel();
+
+    public ObservableCollection<GameEntity> Entities { get; } = new();
+
+    private string _filterText = string.Empty;
+    public string FilterText
+    {
+        get => _filterText;
+        set
+        {
+            if (_filterText != value)
+            {
+                _filterText = value;
+                OnPropertyChanged(nameof(FilterText));
+                ApplyFilter(value);
+            }
+        }
+    }
+
+    private System.Collections.Generic.List<GameEntity> _allEntities = new();
+    public ObservableCollection<GameEntity> FilteredEntities { get; } = new();
+
+    public void ApplyFilter(string filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter))
+        {
+            Entities.Clear();
+            foreach (var e in _allEntities) Entities.Add(e);
+        }
+        else
+        {
+            var lower = filter.ToLowerInvariant();
+            Entities.Clear();
+            foreach (var e in _allEntities)
+            {
+                if (e.Name.ToLowerInvariant().Contains(lower))
+                    Entities.Add(e);
+            }
+        }
+    }
+
+    private GameEntity[] _selectedEntities = System.Array.Empty<GameEntity>();
+    public GameEntity[] SelectedEntities
+    {
+        get => _selectedEntities;
+        set
+        {
+            if (_selectedEntities != value)
+            {
+                _selectedEntities = value;
+                OnPropertyChanged(nameof(SelectedEntities));
+                SelectedEntity = value.FirstOrDefault();
+                Properties.Entities = value;
+            }
+        }
+    }
+
+    public GameEntity? SelectedEntity
+    {
+        get => _selectedEntity;
+        set
+        {
+            if (_selectedEntity != value)
+            {
+                _selectedEntity = value;
+                OnPropertyChanged(nameof(SelectedEntity));
+            }
+        }
+    }
+
+    public Project? Project
+    {
+        get => _project;
+        set
+        {
+            if (_project != value)
+            {
+                _project = value;
+                Scenes.Clear();
+                Entities.Clear();
+                if (_project != null)
+                {
+                    foreach (var scene in _project.Scenes)
+                    {
+                        Scenes.Add(scene);
+                    }
+                }
+                OnPropertyChanged(nameof(Project));
+                OnPropertyChanged(nameof(IsProjectLoaded));
+            }
+        }
+    }
+
+    public bool IsProjectLoaded => _project != null;
+
+    public ObservableCollection<Scene> Scenes { get; } = new();
+
+    public System.Collections.Generic.IReadOnlyList<string> BuildConfigurations { get; } =
+        GameProject.Project.BuildConfigurationNames;
+
+    public System.Windows.Input.ICommand BuildProjectCommand { get; } =
+        new Common.RelayCommand(_ => BuildProjectStatic());
+
+    public Scene? ActiveScene
+    {
+        get => _activeScene;
+        set
+        {
+            if (_activeScene != value)
+            {
+                // Single sync path: SceneRuntimeSynchronizer. Earlier
+                // iterations also called EngineSync.PushScene and
+                // LoadEntitiesAsync here, but those duplicated the
+                // creation of native entities (one engine entity per
+                // C# GameEntity x2) and left ghost IDs behind on
+                // teardown. Anything that needs the legacy
+                // CreateGameEntity path should call those APIs
+                // explicitly during creation, never from a scene-swap.
+                SceneSynchronizer.Teardown();
+                _activeScene = value;
+                SelectedEntities = System.Array.Empty<GameEntity>();
+                _allEntities.Clear();
+                Entities.Clear();
+                if (_activeScene != null)
+                {
+                    foreach (var entity in _activeScene.Entities)
+                    {
+                        _allEntities.Add(entity);
+                        Entities.Add(entity);
+                    }
+                    if (NativeEngineBridge.IsLoaded)
+                    {
+                        SceneSynchronizer.Sync(_activeScene);
+                    }
+                    SceneEnvironmentViewModel.Attach(_activeScene.Environment);
+                }
+                else
+                {
+                    SceneEnvironmentViewModel.Attach(null);
+                }
+                OnPropertyChanged(nameof(ActiveScene));
+            }
+        }
+    }
+
+    internal RuntimeEntityMap RuntimeEntityMap { get; } = new();
+    internal RuntimeAssetMap RuntimeAssetMap { get; } = new();
+    internal RuntimeMaterialMap RuntimeMaterialMap { get; } = new();
+    internal SceneRuntimeSynchronizer SceneSynchronizer { get; }
+
+    /// <summary>
+    /// Toolbar data source. Bound by <c>WorldEditorView.axaml</c>'s
+    /// <c>ItemsControl</c> so each entry renders one toolbar button.
+    /// Adding a new entity kind = one row in <see cref="EntityFactory"/>;
+    /// no view edits required.
+    /// </summary>
+    public IReadOnlyList<EntityFactoryDescriptor> EntityFactoryItems => EntityFactory.All;
+
+    /// <summary>
+    /// Inspector-side view model for scene environment (ambient / fog /
+    /// skybox / tone mapping). Bound by <c>EnvironmentView.axaml</c>;
+    /// forwards every property change to the native engine via
+    /// <see cref="NativeEngineBridge.UpdateSceneEnvironment"/>.
+    /// </summary>
+    public SceneEnvironmentViewModel SceneEnvironmentViewModel { get; } = new();
+
+    public WorldEditorViewModel()
+    {
+        Properties.SceneEnvironment = SceneEnvironmentViewModel;
+        SceneSynchronizer = new SceneRuntimeSynchronizer(
+            new NativeEngineBridgeAdapter(),
+            RuntimeEntityMap,
+            RuntimeAssetMap,
+            RuntimeMaterialMap);
+        Properties.PushTransformsToNativeCallback = PushTransformsToNative;
+        Properties.PushMaterialsToNativeCallback = entities =>
+        {
+            foreach (var entity in entities) SceneSynchronizer.RefreshEntityMaterials(entity);
+        };
+        Properties.PushMeshesToNativeCallback = entities =>
+        {
+            foreach (var entity in entities) SceneSynchronizer.RefreshEntityMesh(entity);
+        };
+        Properties.MarkProjectDirtyCallback = MarkProjectDirty;
+        Properties.UndoRedoQuery = () => UndoRedo;
+        // Material editors are free-floating windows; their saves reach
+        // the live scene through this static event.
+        SceneRuntimeSynchronizer.MaterialSavedOnDisk += OnMaterialSavedOnDisk;
+    }
+
+    private void OnMaterialSavedOnDisk(AssetGuid guid) => SceneSynchronizer.ReloadMaterial(guid);
+
+    /// <summary>
+    /// Create a new entity from the given factory descriptor, parent
+    /// it at the scene root, register
+    /// undo, and push the entity to the native engine. Returns the
+    /// new entity on success, null if the scene is missing.
+    /// </summary>
+    public GameEntity? CreateEntityFromFactory(EntityFactoryDescriptor descriptor)
+    {
+        if (descriptor == null) return null;
+        if (ActiveScene == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"Cannot add {descriptor.DisplayName}: no active scene. Open a project first.");
+            return null;
+        }
+
+        var entity = descriptor.CreateEntity();
+        // Creation buttons always add a root entity. Using the current
+        // selection as an implicit parent made every subsequent creation a
+        // child of the object created immediately before it (because creation
+        // also selects the new object). Parenting must be an explicit hierarchy
+        // operation, never a side effect of selection.
+        AddEntity(entity);
+        UndoRedo.Add(new AddEntityAction(this, entity));
+        SelectedEntities = new[] { entity };
+        MarkProjectDirty();
+
+        if (NativeEngineBridge.IsLoaded)
+        {
+            SceneSynchronizer.SyncEntity(entity);
+        }
+
+        PrimalEditor_Avalonia.Common.Logger.Info($"Added {descriptor.DisplayName}: {entity.Name}");
+        return entity;
+    }
+
+    public string DebugMessage
+    {
+        get => _debugMessage;
+        set
+        {
+            if (_debugMessage != value)
+            {
+                _debugMessage = value;
+                OnPropertyChanged(nameof(DebugMessage));
+            }
+        }
+    }
+
+    public void AddEntity(GameEntity entity)
+    {
+		var wasAdded = false;
+        if (entity.Parent == null && _activeScene != null && !_activeScene.Entities.Contains(entity))
+        {
+            _activeScene.Entities.Add(entity);
+            entity.ParentScene = _activeScene;
+            if (!_allEntities.Contains(entity)) _allEntities.Add(entity);
+            if (!Entities.Contains(entity)) Entities.Add(entity);
+			wasAdded = true;
+        }
+        else if (entity.Parent != null && !entity.Parent.Children.Contains(entity))
+        {
+            entity.Parent.Children.Add(entity);
+			wasAdded = true;
+        }
+		if (wasAdded && NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
+        MarkProjectDirty();
+    }
+
+    public void RemoveEntity(GameEntity entity)
+    {
+		SceneSynchronizer.RemoveEntity(entity);
+        if (entity.Parent != null)
+        {
+            entity.Parent.Children.Remove(entity);
+        }
+        else if (entity.ParentScene != null)
+        {
+            entity.ParentScene.Entities.Remove(entity);
+            Entities.Remove(entity);
+            _allEntities.Remove(entity);
+        }
+        entity.Parent = null;
+        entity.ParentScene = null;
+        MarkProjectDirty();
+    }
+
+	/// <summary>
+	/// Delete the current hierarchy selection as one undoable operation.
+	/// Toolbar, menu and keyboard entry points all route through this method.
+	/// </summary>
+	public int DeleteSelectedEntities()
+	{
+		var selected = SelectedEntities
+			.Where(entity => entity != null)
+			.Distinct()
+			.ToArray();
+		if (selected.Length == 0) return 0;
+
+		using (UndoRedo.BeginTransaction($"Delete {selected.Length} entity(ies)"))
+		{
+			foreach (var entity in selected)
+			{
+				var action = new RemoveEntityAction(this, entity);
+				UndoRedo.Add(action);
+				action.Redo();
+			}
+		}
+		SelectedEntities = System.Array.Empty<GameEntity>();
+		return selected.Length;
+	}
+
+    public void AddScene(string name = "New Scene")
+    {
+        if (_project == null) return;
+        var scene = new Scene(name);
+        // Default sun light so new scenes are lit without manual setup;
+        // ActiveScene = scene below pushes it to the engine via Sync().
+        scene.Entities.Add(SceneDefaults.CreateSunLight());
+        _project.Scenes.Add(scene);
+        Scenes.Add(scene);
+        ActiveScene = scene;
+        MarkProjectDirty();
+        PrimalEditor_Avalonia.Common.Logger.Info($"Added scene: {name}");
+    }
+
+    private static void BuildProjectStatic()
+    {
+        var current = ProjectContextLocator.Current;
+        if (current == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning("[Build] No active project; skipping.");
+            return;
+        }
+        BuildPipeline.ExecuteRebuild(current);
+    }
+
+    private void BuildProject()
+    {
+        var config = _project?.BuildConfigName ?? "(no project)";
+        PrimalEditor_Avalonia.Common.Logger.Info($"[Build] Starting rebuild in '{config}'.");
+        BuildPipeline.ExecuteRebuild(_project!);
+    }
+
+    public void RemoveScene(Scene? scene)
+    {
+        if (scene == null || _project == null || _project.Scenes.Count <= 1) return;
+        _project.Scenes.Remove(scene);
+        Scenes.Remove(scene);
+        if (ActiveScene == scene)
+        {
+            ActiveScene = _project.Scenes.FirstOrDefault();
+        }
+        MarkProjectDirty();
+        PrimalEditor_Avalonia.Common.Logger.Info($"Removed scene: {scene.Name}");
+    }
+
+    public void MarkProjectDirty()
+    {
+        if (_project == null) return;
+        _project.MarkDirty();
+        _activeScene?.MarkDirty();
+    }
+
+    /// <summary>
+    /// Push the current Transform values of the given entities into
+    /// the native engine. Called by the gizmo drag handler and the
+    /// inspector after they mutate the C# source of truth.
+    /// </summary>
+    public void PushTransformsToNative(IEnumerable<GameEntity> entities)
+    {
+        SceneSynchronizer.PushTransforms(entities);
+    }
+
+    // Native entity id <-> C# GameEntity mapping. RuntimeEntityMap is the
+// single source of truth — both SceneRuntimeSynchronizer and the legacy
+// async LoadEntityAsync path write into it, so GetPickerCandidates and
+// the write-back paths (gizmo, inspector) can never drift on different
+// dictionaries.
+public void RegisterNativeEntityId(GameEntity entity, uint nativeId)
+{
+    if (entity == null || nativeId == 0 || nativeId == ulong.MaxValue) return;
+    RuntimeEntityMap.Register(entity.EntityGuid, nativeId);
+    NotifyPickerChanged();
+}
+
+public uint GetNativeEntityId(GameEntity? entity)
+{
+    if (entity == null) return 0u;
+    if (entity.EntityGuid.Value == Guid.Empty) return 0u;
+    return RuntimeEntityMap.GetEntityId(entity.EntityGuid) ?? 0u;
+}
+
+    public System.Collections.Generic.IReadOnlyList<(uint id, PrimalEditor_Avalonia.Views.Engine3D.ViewportPicker.AABB bounds)>? GetPickerCandidates()
+    {
+        if (_activeScene == null) return null;
+        if (!NativeEngineBridge.IsLoaded) return null;
+        var list = new System.Collections.Generic.List<(uint, PrimalEditor_Avalonia.Views.Engine3D.ViewportPicker.AABB)>();
+        foreach (var entity in EnumerateSceneEntities(_activeScene.Entities))
+        {
+            var id = GetNativeEntityId(entity);
+            if (id == 0) continue;
+            var pos = NativeEngineBridge.GetEntityPosition(id);
+            // Default AABB: 1m cube around the entity's position. We do
+            // not query the engine for actual mesh bounds here — that
+            // requires a per-entity AABB API the engine currently does
+            // not expose. The 1m cube is wide enough to be pickable for
+            // the editor's small scenes.
+            var half = 0.5f;
+            list.Add((id, new PrimalEditor_Avalonia.Views.Engine3D.ViewportPicker.AABB(
+                pos.x - half, pos.y - half, pos.z - half,
+                pos.x + half, pos.y + half, pos.z + half)));
+        }
+        return list;
+    }
+
+    private static IEnumerable<GameEntity> EnumerateSceneEntities(IEnumerable<GameEntity> roots)
+    {
+        foreach (var entity in roots)
+        {
+            yield return entity;
+            foreach (var child in EnumerateSceneEntities(entity.Children))
+                yield return child;
+        }
+    }
+
+    public event System.EventHandler? PickerCandidatesChanged;
+
+    private void NotifyPickerChanged() => PickerCandidatesChanged?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>
+    /// Drop an asset from the Content Browser into the active scene.
+    /// Supports .mesh / .fbx / .obj / .gltf / .glb / .model.json: imports
+    /// the geometry, creates an ECS entity bound to the resulting content
+    /// id, and adds it to the scene. Model containers (.model.json) drop
+    /// their cooked .mesh companion so a single entity renders the whole
+    /// model. Returns the created entity or null on failure.
+    /// </summary>
+    public async Task<GameEntity?> DropAssetAsync(AssetInfo info, float posX = 0f, float posY = 0f, float posZ = 0f)
+    {
+        if (info == null) return null;
+        if (_activeScene == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning("DropAsset: no active scene");
+            return null;
+        }
+        var (nativeMeshPath, entityName) = ResolveDropTarget(info);
+        if (nativeMeshPath == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning($"DropAsset: unsupported asset type {info.FullPath}");
+            return null;
+        }
+
+        var entity = new GameEntity(entityName);
+        entity.Components.Add(new Transform { PositionX = posX, PositionY = posY, PositionZ = posZ });
+        entity.Components.Add(new MeshRendererComponent { MeshGuid = new AssetGuid(info.Guid) });
+
+        if (NativeEngineBridge.IsLoaded)
+        {
+            var requestId = NativeEngineBridge.ImportMesh(nativeMeshPath);
+            if (requestId == 0)
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning("DropAsset: native import rejected the request");
+                return null;
+            }
+            var deadline = System.DateTime.UtcNow.AddSeconds(60);
+            while (System.DateTime.UtcNow < deadline)
+            {
+                NativeEngineBridge.TickMainThreadJobs();
+                var (meshId, status) = NativeEngineBridge.TryGetMeshImportResult(requestId);
+                if (status != NativeEngineBridge.MeshImportResultStatus.Pending) break;
+                await Task.Delay(50);
+            }
+            var (finalMeshId, finalStatus) = NativeEngineBridge.TryGetMeshImportResult(requestId);
+            if (finalStatus != NativeEngineBridge.MeshImportResultStatus.Success)
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning($"DropAsset: import failed (status={finalStatus})");
+                return null;
+            }
+            // Pre-register the cooked content id so SceneSynchronizer.SyncEntity
+            // can pick it up without re-importing the asset. The import above
+            // already paid the cost; reusing the result here keeps a single
+            // mesh registered against the AssetGuid.
+            SceneSynchronizer.RegisterPreImportedMesh(
+                new AssetGuid(info.Guid), finalMeshId);
+        }
+        else
+        {
+            PrimalEditor_Avalonia.Common.Logger.Info("DropAsset: engine not loaded, entity added without native binding");
+        }
+
+        AddEntity(entity);
+        var action = new AddEntityAction(this, entity);
+        UndoRedo.Add(action);
+        action.Redo();
+        SelectedEntities = new[] { entity };
+        // SyncEntity does the actual native push (entity, mesh bind with
+        // the default white PBR material, picker registration). Replacing
+        // the old direct PipelineRegisterMeshEntity call closes the gap
+        // where dropped assets rendered with no material.
+        if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
+        PrimalEditor_Avalonia.Common.Logger.Info($"Dropped asset: {info.FileName} → entity {entity.Name}");
+        return entity;
+    }
+
+    internal static (string? nativePath, string entityName) ResolveDropTarget(AssetInfo info)
+    {
+        const string modelSidecarSuffix = ".model.json";
+        if (info.FullPath.EndsWith(modelSidecarSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            var basePath = info.FullPath[..^modelSidecarSuffix.Length];
+            var cookedMesh = basePath + ".mesh";
+            var sidecarEntityName = System.IO.Path.GetFileName(basePath);
+            return System.IO.File.Exists(cookedMesh)
+                ? (cookedMesh, sidecarEntityName)
+                : (null, sidecarEntityName);
+        }
+
+        var ext = System.IO.Path.GetExtension(info.FullPath).ToLowerInvariant();
+        var entityName = System.IO.Path.GetFileNameWithoutExtension(info.FullPath);
+        switch (ext)
+        {
+            case ".fbx":
+            case ".obj":
+            case ".gltf":
+            case ".glb":
+            case ".mesh":
+                return (info.FullPath, entityName);
+            case ".model":
+            {
+                var cookedMesh = System.IO.Path.ChangeExtension(info.FullPath, ".mesh");
+                if (!System.IO.File.Exists(cookedMesh)) return (null, entityName);
+                return (cookedMesh, entityName);
+            }
+            default:
+                return (null, entityName);
+        }
+    }
+
+    /// <summary>
+    /// Re-import every entity in the active scene whose AssetPath is
+    /// non-empty. Each successful import produces a fresh native
+    /// mesh content id which is registered against the C# entity in
+    /// <see cref="RuntimeEntityMap"/>. The editor's transform gizmo
+    /// can then write back to the engine without the user having to
+    /// re-drag the asset.
+    /// </summary>
+    [Obsolete("Reads the v1 AssetPath field; v2 scenes use MeshRendererComponent.MeshGuid and are now driven by SceneRuntimeSynchronizer. Retained only for migration tooling.")]
+    public async Task LoadEntitiesAsync()
+    {
+        if (_activeScene == null) return;
+        if (!NativeEngineBridge.IsLoaded) return;
+        foreach (var entity in _activeScene.Entities)
+        {
+            if (string.IsNullOrEmpty(entity.AssetPath)) continue;
+            if (!System.IO.File.Exists(entity.AssetPath))
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning($"LoadEntities: asset missing '{entity.AssetPath}'");
+                continue;
+            }
+            await LoadEntityAsync(entity);
+        }
+    }
+
+    private async Task LoadEntityAsync(GameEntity entity)
+    {
+        if (!NativeEngineBridge.IsLoaded) return;
+        var path = entity.AssetPath;
+        var requestId = NativeEngineBridge.ImportMesh(path);
+        if (requestId == 0) return;
+        var deadline = System.DateTime.UtcNow.AddSeconds(60);
+        while (System.DateTime.UtcNow < deadline)
+        {
+            NativeEngineBridge.TickMainThreadJobs();
+            var (meshId, status) = NativeEngineBridge.TryGetMeshImportResult(requestId);
+            if (status != NativeEngineBridge.MeshImportResultStatus.Pending) break;
+            await System.Threading.Tasks.Task.Delay(50);
+        }
+        var (finalMeshId, finalStatus) = NativeEngineBridge.TryGetMeshImportResult(requestId);
+        if (finalStatus != NativeEngineBridge.MeshImportResultStatus.Success) return;
+        var meshEntityId = NativeEngineBridge.PipelineRegisterMeshEntity(finalMeshId, null);
+        if (meshEntityId == 0 || meshEntityId == ulong.MaxValue) return;
+        RegisterNativeEntityId(entity, (uint)meshEntityId);
+        // Apply the entity's current transform (so the user sees the
+        // mesh at the location they saved it at).
+        var t = entity.GetTransform();
+        if (t != null)
+        {
+            float[] pos = { t.PositionX, t.PositionY, t.PositionZ };
+            float[] rot = { t.RotationX, t.RotationY, t.RotationZ };
+            float[] scl = { t.ScaleX, t.ScaleY, t.ScaleZ };
+            NativeEngineBridge.SetEntityTransform((uint)meshEntityId, pos, rot, scl);
+        }
+        NotifyPickerChanged();
+    }
+}

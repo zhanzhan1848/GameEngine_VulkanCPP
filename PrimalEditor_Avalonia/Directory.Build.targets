@@ -1,0 +1,23 @@
+<Project>
+  <!--
+    Wraps the dotnet apphost into a .app bundle (and copies native
+    engine dylibs into the dotnet output dir) after every successful
+    build on macOS. The work is done by build_app.sh (see that file
+    for the rationale — dylib copy is required because the .NET SDK
+    drops AfterTargets hooks on incremental builds, and the .app
+    wrap is required so Avalonia gets a foreground Aqua session).
+
+    We hook via $(BuildDependsOn) using the element form here (not
+    a property assignment) because Directory.Build.targets is
+    imported AFTER the SDK's element declaration, so our value
+    takes precedence.
+  -->
+  <PropertyGroup Condition="'$(OS)' != 'Windows_NT' AND '$(_PrimalEditorAvaloniaWrapDone)' != 'true'">
+    <_PrimalEditorAvaloniaWrapDone>true</_PrimalEditorAvaloniaWrapDone>
+    <BuildDependsOn>$(BuildDependsOn);_PrimalEditorAvaloniaWrap</BuildDependsOn>
+  </PropertyGroup>
+
+  <Target Name="_PrimalEditorAvaloniaWrap" Condition="'$(OS)' != 'Windows_NT' AND Exists('$(BaseOutputPath)/$(Configuration)/PrimalEditor_Avalonia')">
+    <Exec Command="bash &quot;$(MSBuildThisFileDirectory)build/build_app.sh&quot; &quot;$(Configuration)&quot;" IgnoreExitCode="true" />
+  </Target>
+</Project>

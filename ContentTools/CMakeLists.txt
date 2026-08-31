@@ -184,27 +184,36 @@ elseif(APPLE)
     find_library(COCOA_LIBRARY Cocoa)
 
     # 动态查找 FBX SDK 库
+    # FBX SDK 2020.x on macOS ships libs at lib/clang/{debug,release}/fbxsdk.dylib
+    # (the clang/ tier was introduced in 2020.2+). Older builds and the .pkg
+    # installer-only layout use lib/{debug,release}/ directly, so we probe
+    # both. PATH_SUFFIXES order matters — clang/ first matches 2020.2+
+    # installs, the bare fallback catches everything else.
     find_library(FBX_LIB_DEBUG
         NAMES fbxsdk
         HINTS ${FBX_SDK_ROOT}/lib
-        PATH_SUFFIXES debug debug
+        PATH_SUFFIXES clang/debug clang/release debug release
         NO_DEFAULT_PATH
     )
-    
+
     find_library(FBX_LIB_RELEASE
         NAMES fbxsdk
         HINTS ${FBX_SDK_ROOT}/lib
-        PATH_SUFFIXES release release
+        PATH_SUFFIXES clang/release clang/debug release debug
         NO_DEFAULT_PATH
     )
 
     if (NOT FBX_LIB_DEBUG OR NOT FBX_LIB_RELEASE)
-        message(FATAL_ERROR "Could not find FBX SDK libraries in ${FBX_SDK_ROOT}/lib. Checked debug/clang/debug and release/clang/release.")
+        message(FATAL_ERROR "Could not find FBX SDK libraries under ${FBX_SDK_ROOT}/lib. "
+            "Tried lib/{clang/debug,clang/release,debug,release}.")
     endif()
 
     # 链接 FBX SDK
     if(FBX_SDK_FOUND)
-        target_link_libraries(${PROJECT_NAME} PRIVATE fbxsdk)
+        # Use the resolved paths from find_library (which point at the actual
+        # libfbxsdk.dylib in clang/debug/clang/release) instead of -lfbxsdk,
+        # which the linker can't find without LIBRARY_PATH set.
+        target_link_libraries(${PROJECT_NAME} PRIVATE "${FBX_LIB_DEBUG}" "${FBX_LIB_RELEASE}")
     endif()
     find_library(METAL_LIBRARY Metal)
     find_library(METALKIT_LIBRARY MetalKit)

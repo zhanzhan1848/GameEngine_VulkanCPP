@@ -8,6 +8,7 @@ cmake_minimum_required(VERSION 3.20)
 set(SOURCE_FILES
     "DllMain.cpp"
     "EngineAPI.cpp"
+    "EngineAPI_win32.cpp"
     "EntityAPI.cpp"
     "AssetAPI.cpp"
     "RenderPipelineAPI.cpp"
@@ -27,13 +28,20 @@ set(SOURCE_FILES
     "LightAPI.cpp"
     "CameraAPI.cpp"
     "ProceduralMeshAPI.cpp"
+    "HeadlessRender.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Graphics/EditorShaderManager.cpp"
 )
+
+if(APPLE)
+    list(APPEND SOURCE_FILES "EngineAPI_mac.mm")
+endif()
 
 set(HEADER_FILES
     "Common.h"
     "EngineAPIInternal.h"
     "FrameAPI.h"
     "PipelineLightDesc.h"
+    "AssetAPI.h"
 )
 
 # 添加共享库目标
@@ -115,7 +123,7 @@ elseif(APPLE)
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall
         # -fno-rtti              # 禁用RTTI
-        -ffast-math            # 快速浮点运算
+        -ffast-math            # 快速浮数运算
         -fno-exceptions        # 禁用异常处理
         $<$<CONFIG:Debug>:-O0 -g>
         $<$<CONFIG:Release>:-O3>
@@ -161,7 +169,7 @@ endif()
 # 链接依赖项
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Engine
-    # ContentTools
+    ContentTools
 )
 
 # EngineDLL.dll 部署到测试输出目录：TestMaterialGraphAPI / TestParticleMaterialAPI /

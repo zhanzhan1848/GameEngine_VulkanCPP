@@ -1,0 +1,28 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Import.Settings"
+             x:Class="PrimalEditor_Avalonia.Import.Settings.TextureImportPanel"
+             x:DataType="vm:TextureImportPanelViewModel">
+  <StackPanel Spacing="6">
+    <TextBlock Text="Dimension"/>
+    <ComboBox ItemsSource="{Binding AvailableDimensions}"
+              SelectedItem="{Binding Dimension}"
+              HorizontalAlignment="Stretch"/>
+    <TextBlock Text="Output Format"/>
+    <ComboBox ItemsSource="{Binding AvailableFormats}"
+              SelectedItem="{Binding OutputFormat}"
+              HorizontalAlignment="Stretch"/>
+    <CheckBox Content="Compress" IsChecked="{Binding Compress}"/>
+    <CheckBox Content="Prefer BC7" IsChecked="{Binding PreferBC7}" IsEnabled="{Binding Compress}"/>
+    <CheckBox Content="sRGB" IsChecked="{Binding IsSRGB}"/>
+    <CheckBox Content="Normal Map" IsChecked="{Binding IsNormalMap}"/>
+    <TextBlock Text="Mip Levels (0 = auto)"/>
+    <TextBox Text="{Binding MipLevels}"/>
+    <TextBlock Text="Alpha Threshold"/>
+    <TextBox Text="{Binding AlphaThreshold}"/>
+    <TextBlock Text="Array Size"/>
+    <TextBox Text="{Binding ArraySize}"/>
+    <TextBlock Text="Depth"/>
+    <TextBox Text="{Binding Depth}"/>
+  </StackPanel>
+</UserControl>

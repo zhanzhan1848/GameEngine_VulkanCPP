@@ -1,0 +1,44 @@
+using System;
+
+namespace PrimalEditor_Avalonia.Entities;
+
+/// <summary>
+/// High-level classification of an entity the user can drop into a
+/// scene. <see cref="EntityFactory"/> uses this to decide which
+/// components to attach and what default values to use. Adding a new
+/// entity type = one new enum value + one
+/// <see cref="EntityFactoryDescriptor"/> row, no view changes.
+/// </summary>
+public enum EntityKind
+{
+    /// <summary>Blank entity with only a Transform (legacy "Add Entity").</summary>
+    Empty,
+
+    /// <summary>Placeholder character: capsule primitive + Transform.</summary>
+    Character,
+
+    /// <summary>Prop: chosen-from-browser mesh + Transform + MeshRenderer.</summary>
+    Prop,
+
+    /// <summary>Built-in procedural sphere.</summary>
+    Sphere,
+
+    /// <summary>Built-in procedural box.</summary>
+    Box,
+
+    /// <summary>Built-in procedural ground plane.</summary>
+    Plane,
+
+    /// <summary>Point light with default params, editable in Inspector.</summary>
+    Light,
+
+    /// <summary>Directional sun light — drives viewport lighting and cascade shadows.</summary>
+    DirectionalLight,
+
+    /// <summary>Environment light — selecting it edits the scene's HDR environment settings.</summary>
+    EnvironmentLight,
+
+
+    /// <summary>Perspective camera with default params, editable in Inspector.</summary>
+    Camera,
+}

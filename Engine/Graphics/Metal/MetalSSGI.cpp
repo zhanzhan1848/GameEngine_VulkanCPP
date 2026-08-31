@@ -166,6 +166,7 @@ namespace primal::graphics::metal::ssgi
 
     void ssgi_pass(MTL::CommandBuffer* buffer, const metal_frame_info& metal_info)
     {
+        if (!ssgi_pipeline_state) return;
         const u32 frame_index{ metal_info.frame_index };
 		MTL::Buffer* current_non_cullable_light_buffer{ light::non_cullable_light_buffer(frame_index) };
 
@@ -191,6 +192,7 @@ namespace primal::graphics::metal::ssgi
 
     void ssgi_blur(MTL::CommandBuffer* buffer, const metal_frame_info& metal_info)
     {
+        if (!ssgi_blur_pipeline_state) return;
         if (metal_info.surface_width != ssgi_params.view_width &&
 			metal_info.surface_height != ssgi_params.view_height &&
 			math::is_equal(metal_info.camera->field_of_view(), ssgi_params.camera_fov))
