@@ -43,8 +43,13 @@ private:
 
     rhi::RHIDeviceBase* device_ = nullptr;
     rhi::ShaderHandle computeShader_ = rhi::handles::INVALID_SHADER;
+    rhi::ShaderHandle computeShader2D_ = rhi::handles::INVALID_SHADER;
     rhi::PipelineLayoutHandle pipelineLayout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
     rhi::PipelineHandle pipeline_ = rhi::handles::INVALID_PIPELINE;
+    // T8.13: 2D-texture variant of the blur kernel — the VSM moments blur
+    // passes plain 2D textures; binding them to the texture2d_array kernel
+    // trips Metal validation (MTLTextureType2D vs 2DArray) and drops the blur.
+    rhi::PipelineHandle pipeline2D_ = rhi::handles::INVALID_PIPELINE;
     rhi::DescriptorSetLayoutHandle descriptorSetLayout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     
     // Resource Management

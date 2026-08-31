@@ -46,6 +46,12 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
         std::cerr << "BlurPass: Failed to create compute shader" << std::endl;
         return false;
     }
+    // T8.13: 2D-texture variant (VSM moments blur passes plain 2D textures).
+    computeShader2D_ = device_->CreateShader(buffer.data(), codeSize, rhi::ShaderStage::Compute, "blurCS2D");
+    if (computeShader2D_ == rhi::handles::INVALID_SHADER) {
+        std::cerr << "BlurPass: Failed to create 2D compute shader" << std::endl;
+        return false;
+    }
     
     // 2. Create DescriptorSetLayout
     utl::vector<rhi::DescriptorSetLayoutBinding> bindings;
@@ -103,6 +109,11 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     if (pipeline_ == rhi::handles::INVALID_PIPELINE) {
         return false;
     }
+
+    // T8.13: 2D variant pipeline (same layout — the 2D kernel's bindings
+    // match the array kernel's slots).
+    pDesc.computeShader = computeShader2D_;
+    pipeline2D_ = device_->CreateComputePipeline(pDesc);
     
     // 5. Create Param Buffers
     rhi::BufferDesc bufferDesc{
@@ -146,6 +157,7 @@ void BlurPass::Shutdown() {
     
     if (pipeline_ != rhi::handles::INVALID_PIPELINE) {
         device_->DestroyPipeline(pipeline_);
+        if (pipeline2D_ != rhi::handles::INVALID_PIPELINE) device_->DestroyPipeline(pipeline2D_);
     }
     if (pipelineLayout_ != rhi::handles::INVALID_PIPELINE_LAYOUT) {
         device_->DestroyPipelineLayout(pipelineLayout_);
@@ -241,7 +253,7 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         lastFrameIndex = frameIndex;
     }
 
-    cmdBuffer->BindComputePipeline(pipeline_);
+    cmdBuffer->BindComputePipeline(layers == 1 ? pipeline2D_ : pipeline_);
     
     // Barrier: Prepare Temp for writing (ShaderResource -> UnorderedAccess)
     // Assuming Temp was ShaderResource from previous frame or Undefined
