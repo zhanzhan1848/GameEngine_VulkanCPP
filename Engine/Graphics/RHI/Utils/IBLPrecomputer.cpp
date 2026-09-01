@@ -274,12 +274,23 @@ bool IBLPrecomputer::CreatePipelines() {
     ShaderHandle irradianceShader = CreateComputeShader(std::string("IBL_IrradianceConvolution") + ext, irradianceEntry);
     ShaderHandle prefilterShader = CreateComputeShader(std::string("IBL_SpecularPrefilter") + ext, prefilterEntry);
     ShaderHandle brdfShader = CreateComputeShader(std::string("IBL_BRDFIntegration") + ext, brdfEntry);
-    ShaderHandle equirectToCubeShader = CreateComputeShader(std::string("EquirectangularToCube") + ext, isVulkan ? "cs_main" : "CS_EquirectangularToCube");
+
+    // Optional equirect→cube helper (env-map convenience path). Only the Metal
+    // runtime-compile source exists today — there is no EquirectangularToCube
+    // .spv, so on Vulkan this stays INVALID and CreatePipelines must NOT fail:
+    // the core irradiance/prefilter/BRDF maps are what every IBL consumer needs
+    // (TestVulkanSponzaRenderGraph regressed to IBL-less rendering when this
+    // was fatal). The bake entry (EquirectToCube) self-guards on the pipeline
+    // handle and returns INVALID_RESOURCE.
+    ShaderHandle equirectToCubeShader = handles::INVALID_SHADER;
+    if (platform == rhi::RHIPlatform::Metal) {
+        equirectToCubeShader = CreateComputeShader(std::string("EquirectangularToCube") + ext,
+                                                   "CS_EquirectangularToCube");
+    }
 
     if (irradianceShader == handles::INVALID_SHADER ||
         prefilterShader == handles::INVALID_SHADER ||
-        brdfShader == handles::INVALID_SHADER ||
-        equirectToCubeShader == handles::INVALID_SHADER) {
+        brdfShader == handles::INVALID_SHADER) {
         std::cerr << "[IBLPrecomputer] Failed to create shaders" << std::endl;
         return false;
     }
@@ -287,7 +298,7 @@ bool IBLPrecomputer::CreatePipelines() {
     // 4. Create Pipelines
     ComputePipelineDesc pipeDesc;
     pipeDesc.threadGroupSize = {8, 8, 1}; // Standard group size
-    
+
     pipeDesc.computeShader = irradianceShader;
     pipeDesc.layout = irradiancePipelineLayout_;
     irradiancePipeline_ = device_->CreateComputePipeline(pipeDesc);
@@ -300,14 +311,15 @@ bool IBLPrecomputer::CreatePipelines() {
     pipeDesc.layout = brdfPipelineLayout_;
     brdfPipeline_ = device_->CreateComputePipeline(pipeDesc);
 
-    pipeDesc.computeShader = equirectToCubeShader;
-    pipeDesc.layout = equirectToCubePipelineLayout_;
-    equirectToCubePipeline_ = device_->CreateComputePipeline(pipeDesc);
+    if (equirectToCubeShader != handles::INVALID_SHADER) {
+        pipeDesc.computeShader = equirectToCubeShader;
+        pipeDesc.layout = equirectToCubePipelineLayout_;
+        equirectToCubePipeline_ = device_->CreateComputePipeline(pipeDesc);
+    }
 
     return (irradiancePipeline_ != handles::INVALID_PIPELINE &&
             prefilterPipeline_ != handles::INVALID_PIPELINE &&
-            brdfPipeline_ != handles::INVALID_PIPELINE &&
-            equirectToCubePipeline_ != handles::INVALID_PIPELINE);
+            brdfPipeline_ != handles::INVALID_PIPELINE);
 }
 
 void IBLPrecomputer::DestroyPipelines() {
