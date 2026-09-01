@@ -995,7 +995,12 @@ void ForwardSceneRenderer::CreateShaders() {
 
     // Companion VS for material-graph generated fragments. Pairs with any
     // emitter-produced pixel shader (strict six-member VertexOut contract).
-    material_graph_vs_ = load("MaterialGraphVertex", "vertexMainMaterialGraph", ShaderStage::Vertex);
+    // Metal-only for now: MaterialGraphVertex.metal is the runtime-compile
+    // source; no Vulkan .vert/.spv variant exists, and loading it there would
+    // just log a failure every run (graph materials are an editor/Metal path).
+    if (platform == RHIPlatform::Metal) {
+        material_graph_vs_ = load("MaterialGraphVertex", "vertexMainMaterialGraph", ShaderStage::Vertex);
+    }
 #endif
 }
 

@@ -62,7 +62,8 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     return true;
 #else
     // T4.6.5 part 16.4: Load SPIR-V (Vulkan) or .metal (Metal) shaders.
-    ShaderHandle vs, fs;
+    vertex_shader_ = handles::INVALID_SHADER;
+    pixel_shader_ = handles::INVALID_SHADER;
     if (isVulkan) {
         // SPIR-V path: try relative, then dev-machine fallback.
         auto loadSpv = [](const char* relPath) -> std::vector<u8> {
@@ -94,9 +95,9 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
             std::cerr << "[LineBatchRenderer] Failed to load Vulkan Line SPIR-V." << std::endl;
             return false;
         }
-        vs = device_->CreateShader(vertBytes.data(), vertBytes.size(),
+        vertex_shader_ = device_->CreateShader(vertBytes.data(), vertBytes.size(),
                                     ShaderStage::Vertex, "main");
-        fs = device_->CreateShader(fragBytes.data(), fragBytes.size(),
+        pixel_shader_ = device_->CreateShader(fragBytes.data(), fragBytes.size(),
                                     ShaderStage::Pixel, "main");
     } else {
         // Metal path — read .metal text, use named entry points.
@@ -113,9 +114,9 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
         file.seekg(0);
         file.read(shader_data.data(), file_size);
         file.close();
-        vs = device_->CreateShader(shader_data.data(), shader_data.size(),
+        vertex_shader_ = device_->CreateShader(shader_data.data(), shader_data.size(),
                                     ShaderStage::Vertex, "line_vs");
-        fs = device_->CreateShader(shader_data.data(), shader_data.size(),
+        pixel_shader_ = device_->CreateShader(shader_data.data(), shader_data.size(),
                                     ShaderStage::Pixel, "line_fs");
     }
 
