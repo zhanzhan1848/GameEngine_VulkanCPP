@@ -137,6 +137,21 @@ elseif(APPLE AND NOT EMSCRIPTEN)
         endif()
     endforeach()
 
+    # Vendored 副本缺失时，从系统 Autodesk 安装自动落到 third_party/FBX_SDK/Mac，
+    # 让新 checkout / worktree 无需手工拷贝即可配置构建。只拷 include/ 与两份
+    # dylib 树（约 50MB）。该副本不进版本库（专有 SDK），丢失时由此自动重建。
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/FBX_SDK/Mac/lib/debug/libfbxsdk.dylib"
+       AND EXISTS "${FBX_SDK_ROOT}/include/fbxsdk.h"
+       AND EXISTS "${FBX_SDK_ROOT}/lib/clang/debug/libfbxsdk.dylib")
+        set(_FBX_VENDOR "${CMAKE_SOURCE_DIR}/third_party/FBX_SDK/Mac")
+        file(COPY "${FBX_SDK_ROOT}/include/" DESTINATION "${_FBX_VENDOR}/include")
+        file(COPY "${FBX_SDK_ROOT}/lib/clang/debug/" DESTINATION "${_FBX_VENDOR}/lib/debug")
+        file(COPY "${FBX_SDK_ROOT}/lib/clang/release/" DESTINATION "${_FBX_VENDOR}/lib/release")
+        message(STATUS "FBX SDK: vendored ${FBX_SDK_VERSION} into third_party/FBX_SDK/Mac (from ${FBX_SDK_ROOT})")
+        # 之后统一以 vendored 副本为唯一解析位置，探测/链接路径保持一致。
+        set(FBX_SDK_ROOT "${_FBX_VENDOR}")
+    endif()
+
     # 检查 submodule 是否已初始化
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/src/meshoptimizer.h")
         message(FATAL_ERROR
