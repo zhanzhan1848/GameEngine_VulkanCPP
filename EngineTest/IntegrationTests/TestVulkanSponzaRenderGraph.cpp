@@ -455,18 +455,14 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     // uploader stores a separate intensity of 3.0 in LightColor.w, so feeding
     // the legacy default RGB value of 20 here produced an effective intensity
     // of 60 and drove GI-lit surfaces into the white shoulder of ACES.
+    // 2026-09-01 GI-观感恢复：按 8/28 直射校准（975d1f86）之前的历史栈复原
+    // —— light 5.0（×shader DIRECT 2.5 = 12.5 屏幕直射）+ ddgi 20（×上传器
+    // 内部 3.0 = 有效 60 的火热探针驱动）。这就是"暖亮 GI 弹射"观感的来源。
+    // 用户实测 5.0/20.0 偏强，折中取 3.0 / 5.0。
     auto renderSettings = pipeline_->GetSettings();
     renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
-    // DeferredLighting applies its calibrated 2.5 multiplier, so RGB=2 gives
-    // a visible effective direct intensity of 5 without returning to the old
-    // clipped value of 12.5 (legacy RGB=5).
-    renderSettings.lighting.light_color = {2.0f, 1.9f, 1.8f, 1.0f};
-    // PAIRED with DDGIGIGather.comp PROBE_SH_RAD_TO_IRRAD (×π at the diffuse
-    // gather output): probes are traced under this light, so halving it again
-    // by π keeps the SC↔probe feedback loop's drive identical while only the
-    // screen-end GI scale is corrected. Regression guard: right half of frame
-    // = direct sun must not overexpose; left half (arcade) carries the change.
-    renderSettings.lighting.ddgi_light_color = {0.31831f, 0.30239f, 0.28648f, 1.0f};
+    renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f};
+    renderSettings.lighting.ddgi_light_color = {5.0f, 5.0f, 5.0f, 1.0f};
     pipeline_->UpdateSettings(renderSettings);
 
     // Reflections and all volume paths are intentionally out of scope for this

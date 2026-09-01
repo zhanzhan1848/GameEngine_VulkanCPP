@@ -47,9 +47,13 @@ const float PI = 3.14159265358979;
 // This knob scales SCREEN direct only — camera light_color also drives
 // probe rays (×3.0 into the SC↔probe loop), so raising that instead would
 // shift the loop equilibrium (T8.4 lesson).
-const float DIRECT_INTENSITY   = 3.125;
-const float IBL_INTENSITY      = 0.15;   // lowered: IBL was too bright (wrong cube view binding makes samples unpredictable)
-const float SHADOW_AMBIENT_SCALE = 0.05; // crushed: shadowed pixels get very little ambient for darker shadows
+// 2026-09-01 GI-观感恢复：按 8/14–8/28（直射校准前）的历史栈复原——
+// DIRECT 2.5 × light_color 5.0 = 12.5 屏幕直射；IBL/阴影 ambient 维持
+// part 40.3 压制值（该时代的阴影暖填充来自 ddgi_light_color=20 的探针
+// 弹射，不是 skycolor 洗涤）。
+const float DIRECT_INTENSITY   = 2.5;
+const float IBL_INTENSITY      = 0.15;
+const float SHADOW_AMBIENT_SCALE = 0.05;
 
 layout(set = 0, binding = 0) uniform ViewData {
     mat4 viewProjection;
