@@ -51,10 +51,17 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
         return false;
     }
     // T8.13: 2D-texture variant (VSM moments blur passes plain 2D textures).
-    computeShader2D_ = device_->CreateShader(buffer.data(), codeSize, rhi::ShaderStage::Compute, "blurCS2D");
-    if (computeShader2D_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "BlurPass: Failed to create 2D compute shader" << std::endl;
-        return false;
+    // Metal-only: the Vulkan blur SPIR-V predates blurCS2D and only exposes
+    // "blurCS" — creating the 2D pipeline there aborts MoltenVK (validation
+    // kills the process on the missing OpEntryPoint). On Vulkan the Execute
+    // path falls back to the array pipeline; SPIR-V doesn't type-check the
+    // texture dimension the way Metal validation does.
+    if (platform == rhi::RHIPlatform::Metal) {
+        computeShader2D_ = device_->CreateShader(buffer.data(), codeSize, rhi::ShaderStage::Compute, "blurCS2D");
+        if (computeShader2D_ == rhi::handles::INVALID_SHADER) {
+            std::cerr << "BlurPass: Failed to create 2D compute shader" << std::endl;
+            return false;
+        }
     }
     
     // 2. Create DescriptorSetLayout
@@ -115,9 +122,12 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     }
 
     // T8.13: 2D variant pipeline (same layout — the 2D kernel's bindings
-    // match the array kernel's slots).
-    pDesc.computeShader = computeShader2D_;
-    pipeline2D_ = device_->CreateComputePipeline(pDesc);
+    // match the array kernel's slots). Metal-only, see the shader note above;
+    // Execute() falls back to pipeline_ where pipeline2D_ is invalid.
+    if (platform == rhi::RHIPlatform::Metal) {
+        pDesc.computeShader = computeShader2D_;
+        pipeline2D_ = device_->CreateComputePipeline(pDesc);
+    }
     
     // 5. Create Param Buffers
     rhi::BufferDesc bufferDesc{
@@ -257,7 +267,8 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         lastFrameIndex = frameIndex;
     }
 
-    cmdBuffer->BindComputePipeline(layers == 1 ? pipeline2D_ : pipeline_);
+    cmdBuffer->BindComputePipeline(
+        (layers == 1 && pipeline2D_ != rhi::handles::INVALID_PIPELINE) ? pipeline2D_ : pipeline_);
     
     // Barrier: Prepare Temp for writing (ShaderResource -> UnorderedAccess)
     // Assuming Temp was ShaderResource from previous frame or Undefined
