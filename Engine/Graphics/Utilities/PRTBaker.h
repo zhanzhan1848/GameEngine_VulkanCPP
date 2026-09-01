@@ -4,6 +4,9 @@
 
 namespace primal::graphics::utl
 {
+    // 同 BVH.hpp:命名空间打开会遮蔽 primal::utl,显式引入 vector 使遮蔽无害化。
+    using primal::utl::vector;
+
     struct PRTBakingDesc
     {
         const math::v3* positions;

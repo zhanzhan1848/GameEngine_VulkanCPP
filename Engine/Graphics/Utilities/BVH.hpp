@@ -5,6 +5,11 @@
 
 namespace primal::graphics::utl
 {
+	// 本命名空间的打开会在名字查找时遮蔽 primal::utl（C++ 限定名规则）：
+	// 任何 TU 在包含 RHI 头之前包含本头，RHITypes.h / RHIMeshAsset.h 中的
+	// utl::vector 即解析到此处而失败。显式引入 vector 模板使遮蔽无害化。
+	using primal::utl::vector;
+
 	constexpr float INF_FLOAT{ 3.4E38f };
 
 	struct AABB

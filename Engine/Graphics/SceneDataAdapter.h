@@ -29,6 +29,9 @@ struct SceneDataMeshInfo {
 
     // Meshlet/Debug support - content system entity ID
     primal::id::id_type meshEntityId{primal::id::invalid_id};
+    // True only when this scene adapter registered meshEntityId in the content
+    // system and owns the corresponding geometry hierarchy slot.
+    bool ownsMeshContentResource{false};
 
     // 🔥 NEW: GPU Material Registry MaterialID (for GPU-driven rendering)
     primal::id::id_type gpuMaterialId{primal::id::invalid_id};

@@ -41,6 +41,8 @@ public:
     // bakes the IBL triple (irradiance / prefilter / BRDF LUT). The cube is
     // also used by the skybox pass. Returns false on load/bake failure.
     bool SetEnvironmentMap(const std::string& hdr_path);
+    void ClearEnvironmentMap();
+    void SetAmbientLight(math::v3 color, float intensity);
     void SetSkyboxEnabled(bool enabled) { skybox_enabled_ = enabled; }
     const std::string& GetEnvironmentMapPath() const { return env_map_path_; }
 
@@ -204,6 +206,7 @@ private:
     rhi::ResourceHandle prefiltered_map_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle brdf_lut_{rhi::handles::INVALID_RESOURCE};
     bool ibl_ready_ = false;
+    math::v4 ambient_light_{0.05f, 0.05f, 0.05f, 1.0f};
 
     // HDR environment (skybox + IBL source)
     rhi::ResourceHandle env_cube_{rhi::handles::INVALID_RESOURCE};

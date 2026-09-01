@@ -725,10 +725,11 @@ public partial class EngineViewport3D : UserControl
     {
         if (!_viewportInitialized) return;
         var point = e.GetCurrentPoint(this);
-        if (!point.Properties.IsLeftButtonPressed && !point.Properties.IsRightButtonPressed) return;
-        _activeButton = point.Properties.IsLeftButtonPressed
-            ? Avalonia.Input.MouseButton.Left
-            : Avalonia.Input.MouseButton.Right;
+        _activeButton = ResolvePressedMouseButton(
+            point.Properties.IsLeftButtonPressed,
+            point.Properties.IsMiddleButtonPressed,
+            point.Properties.IsRightButtonPressed);
+        if (_activeButton == Avalonia.Input.MouseButton.None) return;
 
         // Left click on the gizmo takes precedence over entity picking.
         if (_activeButton == Avalonia.Input.MouseButton.Left
@@ -822,7 +823,7 @@ public partial class EngineViewport3D : UserControl
         e.Handled = true;
     }
 
-    /// <summary>Editor-camera drag (LMB orbit, RMB pan). The editor camera
+    /// <summary>Editor-camera drag (LMB orbit, MMB/RMB pan). The editor camera
     /// is a private Track A camera used when no scene Camera is selected.
     /// Its orbit state (_cameraYaw/_cameraPitch/_cameraTarget/_cameraDistance)
     /// lives on this viewport and is independent of any scene entity.</summary>
@@ -836,7 +837,7 @@ public partial class EngineViewport3D : UserControl
             if (_cameraPitch < kMinPitch) _cameraPitch = kMinPitch;
             if (_cameraPitch > kMaxPitch) _cameraPitch = kMaxPitch;
         }
-        else if (_activeButton == Avalonia.Input.MouseButton.Right)
+        else if (IsTranslationDragButton(_activeButton))
         {
             // Pan: translate target and camera in the camera's local screen
             // plane. Right vector is camera-right, up vector is world up
@@ -863,7 +864,7 @@ public partial class EngineViewport3D : UserControl
     }
 
     /// <summary>Look-through-scene-camera drag (LMB orbit around the
-    /// scene camera's current view, RMB dolly). The scene Camera
+    /// scene camera's current view, MMB/RMB dolly). The scene Camera
     /// entity's transform is mutated in place. The editor's orbit
     /// state continues to update in the background so switching back
     /// to editor mode is seamless.</summary>
@@ -897,7 +898,7 @@ public partial class EngineViewport3D : UserControl
                 _lookThroughSceneEntityId, new[] { sy * cp, sp, cy * cp });
             _ = pos; // suppress unused
         }
-        else if (_activeButton == Avalonia.Input.MouseButton.Right)
+        else if (IsTranslationDragButton(_activeButton))
         {
             // Dolly: move the scene camera along its forward direction.
             // Distance is approximated by the length of the forward
@@ -944,6 +945,18 @@ public partial class EngineViewport3D : UserControl
             e.Handled = true;
         }
     }
+
+    internal static Avalonia.Input.MouseButton ResolvePressedMouseButton(
+        bool leftPressed, bool middlePressed, bool rightPressed)
+    {
+        if (leftPressed) return Avalonia.Input.MouseButton.Left;
+        if (middlePressed) return Avalonia.Input.MouseButton.Middle;
+        if (rightPressed) return Avalonia.Input.MouseButton.Right;
+        return Avalonia.Input.MouseButton.None;
+    }
+
+    internal static bool IsTranslationDragButton(Avalonia.Input.MouseButton button) =>
+        button is Avalonia.Input.MouseButton.Middle or Avalonia.Input.MouseButton.Right;
 
     private void OnPointerWheelChanged(object? sender, Avalonia.Input.PointerWheelEventArgs e)
     {

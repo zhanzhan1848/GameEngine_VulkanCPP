@@ -103,6 +103,13 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
                 Logger.Warning($"Failed to apply HDR environment map: {_env.EnvMapPath}");
             }
         }
+        else
+        {
+            // Clearing the path must also clear the native IBL bake. Previously
+            // only the visible skybox was disabled, so the last HDR continued
+            // lighting materials until the editor process was restarted.
+            NativeEngineBridge.PipelineClearEnvironmentMap();
+        }
         NativeEngineBridge.PipelineSetSkyboxEnabled(_env.SkyboxEnabled && hasEnv);
         _env.MarkDirty();
         OnPropertyChanged(nameof(StatusMessage));

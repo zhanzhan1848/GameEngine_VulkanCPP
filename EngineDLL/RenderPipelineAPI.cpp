@@ -1055,6 +1055,8 @@ EDITOR_INTERFACE u32 GIGizmoGetWireframe(u32 index, f32* outEndpoints,
     }
     *outCount = gi_gizmo::kWireframeEndpointCount;
     return 1;
+}
+
 // Scene-level environment parameters pushed from the editor inspector.
 // 24 floats laid out as:
 //   0..3   Ambient R/G/B/Intensity
@@ -1069,11 +1071,10 @@ EDITOR_INTERFACE u32 GIGizmoGetWireframe(u32 index, f32* outEndpoints,
 EDITOR_INTERFACE u32 UpdateSceneEnvironment(const f32* params)
 {
     if (!params) return 0;
-    // The pipeline integration is staged additively — we accept and
-    // store the values today so the ABI is stable, but the
-    // ForwardSceneRenderer may not yet read them. When that lands the
-    // values will flow into the deferred lighting and tone-mapping
-    // passes without a C ABI change.
+    auto* p = GetStdPipeline();
+    auto* fwd = p ? p->GetForwardRenderer() : nullptr;
+    if (!fwd) return 0;
+    fwd->SetAmbientLight({params[0], params[1], params[2]}, params[3]);
     return 1;
 }
 
@@ -1091,6 +1092,16 @@ EDITOR_INTERFACE u32 PipelineSetEnvironmentMap(const char* path) {
     auto* fwd = p->GetForwardRenderer();
     if (!fwd) return 0;
     return fwd->SetEnvironmentMap(path) ? 1u : 0u;
+}
+
+// Remove both the visible environment cube and its baked IBL resources.
+// Merely disabling the skybox must not leave stale HDR lighting active.
+EDITOR_INTERFACE void PipelineClearEnvironmentMap() {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    auto* fwd = p->GetForwardRenderer();
+    if (!fwd) return;
+    fwd->ClearEnvironmentMap();
 }
 
 // Toggle the visible skybox pass. IBL ambient from a previously baked

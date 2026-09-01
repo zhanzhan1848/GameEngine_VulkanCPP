@@ -82,6 +82,8 @@ struct SceneData {
     math::v4 viewPos;
     math::m4x4 shadowMatrix0;
     math::m4x4 shadowMatrix1;
+    math::v4 shadowParams;
+    math::v4 ambientLight;
 };
 
 // RG pass data structs
@@ -1473,7 +1475,7 @@ void ForwardSceneRenderer::CreatePersistentResources() {
     }
 
     // Cube fallback for IBL slots — shader expects texturecube<float> at bindings 8/9.
-    // Zero RGBA16F = no IBL contribution, which is the correct default when SetIBLMaps() is not called.
+    // Scene ambient is passed separately in SceneData, so this stays black.
     {
         TextureDesc desc{};
         desc.size = {1, 1, 1};
@@ -1487,6 +1489,7 @@ void ForwardSceneRenderer::CreatePersistentResources() {
         for (u32 face = 0; face < 6; face++) {
             WriteTextureImmediate(device_, black_cube_texture_, &zero, 8, 1, 1, face);
         }
+
     }
 
     // Shadow maps (shared, not triple-buffered)
@@ -1702,7 +1705,8 @@ void ForwardSceneRenderer::UnloadScene() {
         if (mi.mesh) mi.mesh->Destroy(device_);
         // 释放 content 侧注册的 RHIMeshAsset(SceneDataAdapter 注册,
         // 不释放则 rhi_mesh_assets free_list 在进程退出时 assert)
-        if (mi.meshEntityId != primal::id::invalid_id) {
+        if (mi.ownsMeshContentResource &&
+            mi.meshEntityId != primal::id::invalid_id) {
             // meshEntityId 是 register_mesh_asset 返回的 geometry_hierarchies
             // 包装 id(内含 single_mesh_marker 假指针)— 走 destroy_resource
             content::destroy_resource(mi.meshEntityId, content::asset_type::mesh,
@@ -1727,6 +1731,28 @@ void ForwardSceneRenderer::SetIBLMaps(ResourceHandle irradiance, ResourceHandle 
     ibl_ready_ = (irradiance != handles::INVALID_RESOURCE &&
                   prefiltered != handles::INVALID_RESOURCE &&
                   brdf_lut != handles::INVALID_RESOURCE);
+}
+
+void ForwardSceneRenderer::SetAmbientLight(math::v3 color, float intensity) {
+    ambient_light_ = {
+        std::max(color.x, 0.0f),
+        std::max(color.y, 0.0f),
+        std::max(color.z, 0.0f),
+        std::max(intensity, 0.0f),
+    };
+}
+
+void ForwardSceneRenderer::ClearEnvironmentMap() {
+    if (!device_) return;
+    for (auto* texture : {&env_cube_, &irradiance_map_, &prefiltered_map_, &brdf_lut_}) {
+        if (*texture != handles::INVALID_RESOURCE) {
+            device_->DestroyTexture(*texture);
+            *texture = handles::INVALID_RESOURCE;
+        }
+    }
+    ibl_ready_ = false;
+    env_map_path_.clear();
+    skybox_enabled_ = false;
 }
 
 bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
@@ -2088,7 +2114,11 @@ u32 ForwardSceneRenderer::RegisterMeshResource(id::id_type geometry_content_id,
     // Create SceneDataMeshInfo
     SceneDataMeshInfo info{};
     info.mesh = mesh;
-    info.meshEntityId = mesh_entity_id;
+    // meshEntityId is a content-system geometry ID, not the ECS entity ID.
+    // Editor-registered scene entities borrow this asset from the content
+    // system; the asset system releases it after the pipeline is gone.
+    info.meshEntityId = geometry_content_id;
+    info.ownsMeshContentResource = false;
     info.name = "Imported_" + std::to_string(mesh_entity_id);
 
     // Get texture handles from content system
@@ -2823,6 +2853,8 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         sd.viewPos = {camera_position.x, camera_position.y, camera_position.z, 1.0f};
         sd.shadowMatrix0 = cached_shadow_vp_[0];
         sd.shadowMatrix1 = cached_shadow_vp_[1];
+        sd.shadowParams = {0.0f, 50.0f, 0.0f, 0.0f};
+        sd.ambientLight = ambient_light_;
         auto* mapped = static_cast<SceneData*>(device_->MapBuffer(scene_cb_[idx]));
         if (mapped) { *mapped = sd; device_->UnmapBuffer(scene_cb_[idx]); }
     }

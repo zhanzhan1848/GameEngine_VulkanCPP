@@ -493,6 +493,15 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("PipelineSetEnvironmentMap failed", ex); return false; }
     }
 
+    [DllImport("PrimalEngine", EntryPoint = "PipelineClearEnvironmentMap", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineClearEnvironmentMap();
+    public static void PipelineClearEnvironmentMap()
+    {
+        if (!IsLoaded) return;
+        try { _PipelineClearEnvironmentMap(); }
+        catch (Exception ex) { Logger.Error("PipelineClearEnvironmentMap failed", ex); }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "PipelineSetSkyboxEnabled", CallingConvention = CallingConvention.Cdecl)]
     private static extern void _PipelineSetSkyboxEnabled(uint enabled);
     public static void PipelineSetSkyboxEnabled(bool enabled)

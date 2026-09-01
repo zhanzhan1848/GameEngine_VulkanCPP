@@ -73,12 +73,12 @@ namespace PrimalEditor_Avalonia.ViewModels
         public string PoolSummary
         {
             get => _poolSummary;
-            private set => RaiseAndSetIfChanged(ref _poolSummary, value);
+            private set => SetProperty(ref _poolSummary, value);
         }
         public string HitRateSummary
         {
             get => _hitRateSummary;
-            private set => RaiseAndSetIfChanged(ref _hitRateSummary, value);
+            private set => SetProperty(ref _hitRateSummary, value);
         }
 
         /// <summary>引擎侧每帧(或定时器)推送快照</summary>

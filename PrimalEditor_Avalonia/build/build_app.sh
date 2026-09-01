@@ -68,6 +68,18 @@ elif [[ -d "$REPO_ROOT/Darwin/$CONFIG" ]] && ! [[ -d "$WT_DEBUG_DIR" ]]; then
   echo "[build_app]   build it inside the worktree with: cmake --build build-wt --config $CONFIG" >&2
 fi
 
+# 合并后（910ffdfe 起）CMake 不再强制 CMAKE_BUILD_TYPE=Debug：build-wt 以
+# DebugEditor 配置配置时，编辑器原生库真实落点是 Darwin/DebugEditor/
+# （本脚本 $WT_NATIVE_DIR）。此时它才是与 .app 配置一致的产物；
+# Darwin/Debug/ 是测试配置（可含 ENABLE_VULKAN，符号集也可能因构建时序
+# 而陈旧——曾把缺 UpdateSceneEnvironment 的旧库拷进 .app 导致
+# EntryPointNotFound 连环失败）。因此：DebugEditor/ 存在即优先；
+# 仅当其缺锚点符号而 Debug/ 有时，才回退 Debug/（沿用下方锚点检查）。
+if [[ -z "$NATIVE_LIB_DIR" && -d "$WT_NATIVE_DIR" ]]; then
+  NATIVE_LIB_DIR="$WT_NATIVE_DIR"
+  LIB_SRC_LABEL="worktree"
+fi
+
 # When Darwin/Debug/ exists alongside Darwin/<Config>/, it almost
 # certainly contains the real build output (single-config generator,
 # CMAKE_BUILD_TYPE=Debug). Prefer it. The symbol-presence check

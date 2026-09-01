@@ -142,8 +142,20 @@ def artifacts_present(config: str) -> tuple[bool, list[Path]]:
 
 def run_cmake_build(config: str) -> None:
     if not BUILD_DIR.exists():
-        log("build", f"build dir missing: {BUILD_DIR} — run cmake configure first")
-        sys.exit(1)
+        # 自动 configure：编辑器原生库需要 DebugEditor 配置（csproj 从
+        # Darwin/DebugEditor/ 取 libEngineDLL.dylib 等产物），单配置生成器
+        # 下与测试用的 build/（Debug→Darwin/Debug）无法共用同一目录。
+        log("build", f"build dir missing: {BUILD_DIR} — configuring ({config})")
+        cfg_cmd = [
+            "cmake", "-S", str(REPO_ROOT), "-B", str(BUILD_DIR),
+            "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=" + config,
+        ]
+        log("build", f"$ {' '.join(cfg_cmd)}")
+        rc = subprocess.call(cfg_cmd, cwd=str(REPO_ROOT))
+        if rc != 0:
+            log("error", f"CMake configure failed with exit code {rc}")
+            sys.exit(rc)
     # `--config` is ignored on single-config generators (Makefile/Ninja) and
     # honored by multi-config generators (MSBuild/Xcode) — safe to always pass.
     cmd = [

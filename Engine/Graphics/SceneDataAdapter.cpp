@@ -712,6 +712,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  SceneDataMeshInfo info;
                  info.mesh = mesh;
                  info.meshEntityId = meshEntityId;
+                 info.ownsMeshContentResource = true;
                  info.lodId = lod;
                  info.lodThreshold = thresholds[lod];
                  info.materialIndex = materialIndex;
@@ -948,6 +949,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
                 info.material = assignedMaterial;
                 info.materialInstance = assignedMatInst;
                 info.meshEntityId = meshId;
+                info.ownsMeshContentResource = false;
                 result.push_back(info);
             } else {
                 delete mesh;
@@ -1497,6 +1499,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
                 SceneDataMeshInfo info;
                 info.mesh = mesh;
                 info.meshEntityId = meshEntityId;
+                info.ownsMeshContentResource = true;
                 info.lodId = lodId;
                 info.lodThreshold = lodThreshold;
                 info.materialIndex = matIdx;

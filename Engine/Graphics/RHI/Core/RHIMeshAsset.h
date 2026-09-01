@@ -1,6 +1,9 @@
 #pragma once
 #include "CommonHeaders.h"
 #include "RHITypes.h"
+// IWYU：本头直接使用 utl::vector——此前依赖其他 TU 的传递包含，
+// EngineDLL/RenderPipelineAPI.cpp 的包含顺序触发编译失败。
+#include "Utilities/Vector.h"
 
 namespace primal::graphics::rhi
 {

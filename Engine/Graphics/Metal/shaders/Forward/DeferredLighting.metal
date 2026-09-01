@@ -104,6 +104,9 @@ struct SceneData {
     // x = shadow mode (0 = pre-filtered R8 visibility, 1 = VSM moments +
     // Chebyshev), y = cascade 0 split distance, zw unused.
     float4 shadowParams;
+    // rgb = scene ambient color, a = intensity. This remains active without
+    // an HDR environment so base-color textures do not disappear in shadow.
+    float4 ambientLight;
 };
 
 struct ViewData {
@@ -344,7 +347,9 @@ fragment float4 fragmentLighting_v3(
     float2 brdf = SampleBRDFLUT(float2(max(dot(N, V), 0.0), roughness), brdfLUT);
     float3 specular_ibl = prefilteredColor * (F_ibl * brdf.x + brdf.y);
 
-    float3 ambient = (diffuse_ibl + specular_ibl) * ao;
+    float3 scene_ambient = kD_ibl * albedo * sceneData.ambientLight.rgb
+                         * sceneData.ambientLight.a * ao;
+    float3 ambient = (diffuse_ibl + specular_ibl) * ao + scene_ambient;
     float3 color = Lo + ambient;
 
     return float4(color, 1.0);

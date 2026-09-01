@@ -183,7 +183,13 @@ namespace primal::content
 
 			// SDF
 			constexpr u32 sdf_magic{ 0x20464453 };
-			assert(blob.read<u32>() == sdf_magic);
+			// Keep the cursor advance outside assert: DebugEditor/ReleaseEditor
+			// define NDEBUG, so an assert expression must never perform parsing.
+			// Losing this four-byte read misaligns every following count and makes
+			// multi-submesh assets crash while sizing the second mesh.
+			const u32 magic_sdf{ blob.read<u32>() };
+			assert(magic_sdf == sdf_magic);
+			(void)magic_sdf;
 			blob.skip(sizeof(u32) * 3); // Res
 			blob.skip(sizeof(f32) * 6); // Bounds
 			const u32 sdf_data_size{ blob.read<u32>() };
@@ -240,25 +246,26 @@ namespace primal::content
 #endif
 
 			asset.meshlets.resize(meshlet_count);
-			for (u32 i = 0; i < meshlet_count; ++i)
+			// 注意：此处必须是单层循环 + 一次整体 skip。合并拼接曾把 skip 嵌进
+			// 外层循环（总位移 meshlet_count² × 60 字节），光标冲出 blob 后
+			// 读到垃圾尺寸触发 SIGBUS——真实资产 meshlet_count>0 必现，
+			// 合成单测（count=0）无法暴露。
+			const meshlet_wire* const wire{ (const meshlet_wire*)blob.position() };
+			for (u32 i{ 0 }; i < meshlet_count; ++i)
 			{
-				const meshlet_wire* const wire{ (const meshlet_wire*)blob.position() };
-				for (u32 i{ 0 }; i < meshlet_count; ++i)
-				{
-					graphics::rhi::RHIMeshlet& ml{ asset.meshlets[i] };
-					ml.vertex_offset = wire[i].vertex_offset;
-					ml.triangle_offset = wire[i].triangle_offset;
-					ml.vertex_count = wire[i].vertex_count;
-					ml.triangle_count = wire[i].triangle_count;
-					memcpy(ml.cone_apex, wire[i].cone_apex, sizeof(f32) * 3);
-					memcpy(ml.cone_axis, wire[i].cone_axis, sizeof(f32) * 3);
-					ml.cone_cutoff = wire[i].cone_cutoff;
-					memcpy(ml.center, wire[i].center, sizeof(f32) * 3);
-					ml.radius = wire[i].radius;
-					ml.padding = 0;
-				}
-				blob.skip(meshlet_count * sizeof(meshlet_wire));
+				graphics::rhi::RHIMeshlet& ml{ asset.meshlets[i] };
+				ml.vertex_offset = wire[i].vertex_offset;
+				ml.triangle_offset = wire[i].triangle_offset;
+				ml.vertex_count = wire[i].vertex_count;
+				ml.triangle_count = wire[i].triangle_count;
+				memcpy(ml.cone_apex, wire[i].cone_apex, sizeof(f32) * 3);
+				memcpy(ml.cone_axis, wire[i].cone_axis, sizeof(f32) * 3);
+				ml.cone_cutoff = wire[i].cone_cutoff;
+				memcpy(ml.center, wire[i].center, sizeof(f32) * 3);
+				ml.radius = wire[i].radius;
+				ml.padding = 0;
 			}
+			blob.skip(meshlet_count * sizeof(meshlet_wire));
 
 			const u32 meshlet_vert_count{ blob.read<u32>() };
 			asset.meshlet_vertices.resize(meshlet_vert_count);
@@ -622,6 +629,9 @@ namespace primal::content
 		void destroy_rhi_geometry_resource(id::id_type id)
 		{
 			std::lock_guard lock{ geometry_mutex };
+			// Editor teardown may converge here after an entity/resource was
+			// already unregistered. Never index an empty or freed free-list slot.
+			if (!geometry_hierarchies.is_valid(id)) return;
 			u8* const pointer{ geometry_hierarchies[id] };
 			if ((uintptr_t)pointer & single_mesh_marker)
 			{
