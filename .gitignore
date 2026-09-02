@@ -417,6 +417,11 @@ EngineTest/assets/*
 !EngineTest/assets/Processed/kenney_dungeon_tiles/
 !EngineTest/assets/Raw/kenney_dungeon_tiles/Textures/colormap.png
 
+# Testing/Baselines/ 离线渲染基线 PNG（primal-mcp compare 默认引用）；
+# Testing/Temporary/ 是 CTest 运行时输出，不跟踪。
+!Testing/Baselines/*.png
+Testing/Temporary/
+
 .trae/
 .venv/
 .sisyphus/

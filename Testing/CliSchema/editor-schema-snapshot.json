@@ -1,0 +1,317 @@
+{
+  "$version": "b116f715f73651fd",
+  "protocol": "primal.cli.v1",
+  "commands": [
+    {
+      "verb": "editor.diff",
+      "channel": "editor",
+      "description": "逐像素对比两张 PNG（RGB 通道差），输出 meanAbsDelta/maxAbsDelta/changedPixelRatio（任一通道差 > threshold 的像素占比，threshold 默认 8/255）。out 可选：写出差异热图（黑=相同，亮度=差异，红黄白=幅度递增），把「哪里在变」直接可视化。尺寸不同时 sameSize=false。自动测试的基线对比与 agent 改前/改后对比共用本命令。",
+      "example": "{\"a\":\"/tmp/before.png\",\"b\":\"/tmp/after.png\",\"out\":\"/tmp/diff.png\",\"threshold\":8}",
+      "params": [
+        {
+          "name": "a",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "b",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "out",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "threshold",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "editor.metrics",
+      "channel": "editor",
+      "description": "连续渲染 N 帧并输出每帧标量遥测（Rec.709 均亮度/方差/min/max/通道均值，HDR 原值不截断）。排查闪烁/过曝/渐黑的首选入口——标量序列成本比图像回读低几个量级，先看它异常再 editor.record 拉帧序列。frames ≤ 240，耗时约 frames×(渲染+回读)。3D 视口未初始化返回 NOT_READY。",
+      "example": "{\"frames\":60}",
+      "params": [
+        {
+          "name": "frames",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "editor.ping",
+      "channel": "editor",
+      "description": "编辑器命令通道存活检查。返回进程信息、引擎加载状态、当前打开的项目与场景名。任何通道排障都从这里开始：连不上它等价于 exit code 5（编辑器未运行）。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "editor.record",
+      "channel": "editor",
+      "description": "连续渲染 N 帧并逐帧存 PNG 到目录（frame_0000.png 起）。用于多帧故障取证（闪烁/撕裂/渐黑）与「看→改→验证」的时域证据。帧间引擎由渲染 tick 正常推进，每帧真实耗时在 frameMs 中。frames ≤ 240；out 必须为绝对路径（目录自动创建）。可选 video=xx.mp4：录后用外部 ffmpeg 编码（可选依赖，缺失时 videoEncoded=false 并保留 PNG 序列，不影响成功）。3D 视口未初始化返回 NOT_READY。",
+      "example": "{\"frames\":30,\"out\":\"/tmp/record\"}",
+      "params": [
+        {
+          "name": "frames",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "out",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "video",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "editor.redo",
+      "channel": "editor",
+      "description": "重做上一次被撤销的编辑（与编辑器 Ctrl+Y/Ctrl+Shift+Z 同一栈）。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "editor.schema",
+      "channel": "editor",
+      "description": "返回全部命令的 JSON schema（含 $version 内容哈希、每条命令的参数表/示例/通道标注）。MCP tool 定义与 CI 快照门禁都以它为准。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "editor.screenshot",
+      "channel": "editor",
+      "description": "以编辑器视口相机渲染一帧并存为 PNG（复用视口现有离屏渲染目标，视口画面不受影响）。这是 Agent 的'眼睛'：修改后调用它做可视化验证。path 必须是绝对路径（相对路径按编辑器进程 cwd=可执行目录解析）；目录不存在会自动创建。3D 视口未初始化（无打开项目/窗口最小化前未渲染过）返回 NOT_READY。PNG 与视口同分辨率、RGBA16F → 8bit 色深转换，逐帧调用可构成看→改→验证闭环。",
+      "example": "{\"path\":\"/tmp/viewport.png\"}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "editor.undo",
+      "channel": "editor",
+      "description": "撤销最近一次编辑（与编辑器 Ctrl+Z 同一 undo 栈，含 UI 与 CLI 的全部操作）。栈空时 ok=true 且 undone=false（不算错误）。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "engine.flush",
+      "channel": "editor",
+      "description": "阻塞直到 GPU 队列排空（WaitIdle）。截图/读回前需要严格时序时使用；editor.screenshot 内部已自带 flush。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "engine.tick",
+      "channel": "editor",
+      "description": "泵动编辑器的引擎作业（异步资产上传等）N 次，返回剩余待上传数。编辑器的渲染是连续的（无需手动 tick 推进画面）；本命令用于加速后台作业消化或在截图前确保资产就位。frames 上限 240。",
+      "example": "{\"frames\":10}",
+      "params": [
+        {
+          "name": "frames",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "entity.create",
+      "channel": "editor",
+      "description": "从工厂创建实体并放入当前场景根。kind 取值见 EntityKind：Empty/Character/Prop/Sphere/Box/Plane/Light/DirectionalLight/EnvironmentLight/Camera。name/position/rotationEuler/scale 可选，创建前注入（一次 undo 即整体撤销）。单位米、旋转为欧拉角（度）、右手系 +Y 向上。创建后视口立即可见。返回新实体（含 entityGuid）。无激活场景返回 NOT_READY。",
+      "example": "{\"kind\":\"Sphere\",\"name\":\"我的球\",\"position\":[0,1,0]}",
+      "params": [
+        {
+          "name": "kind",
+          "type": "enum(Empty|Character|Prop|Sphere|Box|Plane|Light|DirectionalLight|EnvironmentLight|Camera)",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "position",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "rotationEuler",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "scale",
+          "type": "vec3",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "entity.delete",
+      "channel": "editor",
+      "description": "按 guid 删除实体（含其组件的原生同步移除），记入 undo 栈。删除选中实体会同步清空选择。guid 无效返回 NOT_FOUND。",
+      "example": "{\"entityGuid\":\"0c9e6c9a-2e5f-4a5b-8b1e-3f2a4d5c6b7a\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "entity.duplicate",
+      "channel": "editor",
+      "description": "按 guid 复制实体（命名追加 _Copy），复制体与本体同位置，返回新实体。与编辑器 Ctrl+D 走同一动作类：目前克隆 Transform 与启用状态，灯光/网格组件的克隆与 UI 行为一致地逐步补齐。",
+      "example": "{\"entityGuid\":\"0c9e6c9a-2e5f-4a5b-8b1e-3f2a4d5c6b7a\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "entity.get",
+      "channel": "editor",
+      "description": "按 guid 查询单个实体：名称、启用状态、父级、组件明细（同 scene.tree 的实体条目形态）。修改类命令的前置查询。实体不存在返回 NOT_FOUND。",
+      "example": "{\"entityGuid\":\"0c9e6c9a-2e5f-4a5b-8b1e-3f2a4d5c6b7a\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "entity.set-name",
+      "channel": "editor",
+      "description": "按 guid 重命名实体。名字只存在于编辑器文档（不进引擎）。记入 undo。空名字返回 INVALID_PARAMS。",
+      "example": "{\"entityGuid\":\"…\",\"name\":\"主门\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "entity.set-transform",
+      "channel": "editor",
+      "description": "按 guid 设置实体变换。position/rotationEuler/scale 均为可选——只传的字段生效（每个字段是完整的三元组，不支持单分量修改）。单位米/度，右手系 +Y 向上。修改后视口即时刷新并推送到引擎。记入 undo。scale 分量必须 > 0。",
+      "example": "{\"entityGuid\":\"…\",\"position\":[1,0,3],\"rotationEuler\":[0,90,0]}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "position",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "rotationEuler",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "scale",
+          "type": "vec3",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "light.set",
+      "channel": "editor",
+      "description": "按 guid 修改实体上的 Light 组件参数。所有字段可选——只传的字段生效。lightType 取值 Directional/Point/Spot；intensity/range 必须 ≥ 0；color 为 RGB 线性值 0..1。修改后立即推送引擎（与 Inspector 编辑同路径），记入 undo。实体没有 Light 组件返回 NOT_FOUND（先 entity.create kind=Light/DirectionalLight）。",
+      "example": "{\"entityGuid\":\"…\",\"intensity\":8,\"color\":[1,0.5,0.2]}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "lightType",
+          "type": "enum(Directional|Point|Spot)",
+          "required": false
+        },
+        {
+          "name": "intensity",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "color",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "range",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "castShadow",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "isEnabled",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "scene.tree",
+      "channel": "editor",
+      "description": "序列化当前激活场景：场景 guid/名称 + 全部实体的 guid、名称、启用状态、组件清单。Transform 汇总为 position/rotation/scale（单位米/度，右手系，+Y 向上）。这是修改类命令的前置查询：先拿到 entityGuid 再调用实体/组件命令。无打开项目时返回 NOT_READY。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    }
+  ]
+}
