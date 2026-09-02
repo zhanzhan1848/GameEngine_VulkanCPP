@@ -19,6 +19,8 @@ using namespace rhi;
 
 static PipelineHandle s_ToneMapPipeline = handles::INVALID_PIPELINE;
 static PipelineHandle s_ToneMapPassthroughPipeline = handles::INVALID_PIPELINE;
+// PRIMAL_TONE_ACES=1：强制走完整 ACES+gamma 展示管线（默认透传，匹配基准）
+static const bool s_ForceACES = std::getenv("PRIMAL_TONE_ACES") != nullptr;
 static PipelineLayoutHandle s_ToneMapLayout = handles::INVALID_PIPELINE_LAYOUT;
 static DescriptorSetLayoutHandle s_ToneMapDSL = handles::INVALID_RESOURCE;
 static SamplerHandle s_ToneMapSampler = handles::INVALID_SAMPLER;
@@ -221,9 +223,10 @@ static void EnsurePipeline(RHIDeviceBase& device) {
 
     s_ToneMapPipeline = device.CreateGraphicsPipeline(pipelineDesc);
 
-    // Metal 透传管线：上游已是 LDR（fragmentLighting/FusionComposite 内联
-    // tonemap），见 tonemap_fs_passthrough 的注释。
-    if (device.GetPlatform() == RHIPlatform::Metal) {
+    // 透传管线（仅 bloom 合成，全平台）：两平台的 fusion 上游输出都是线性
+    // HDR，legacy 基准观感 = 直通显示（无 ACES）。ACES 完整管线保留为
+    // PRIMAL_TONE_ACES=1 的可选展示路径（见 exec 的选择逻辑）。
+    {
         ShaderHandle fsPT = device.CreateShader(shaderSource.data(), shaderSource.size(),
                                                 ShaderStage::Pixel, "tonemap_fs_passthrough");
         if (fsPT != handles::INVALID_SHADER) {
@@ -232,7 +235,7 @@ static void EnsurePipeline(RHIDeviceBase& device) {
             s_ToneMapPassthroughPipeline = device.CreateGraphicsPipeline(ptDesc);
         }
         if (s_ToneMapPassthroughPipeline == handles::INVALID_PIPELINE) {
-            std::cerr << "[ToneMapping] passthrough pipeline failed — falling back to ACES" << std::endl;
+            std::cerr << "[ToneMapping] passthrough pipeline unavailable — using ACES" << std::endl;
         }
     }
 
@@ -452,7 +455,9 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             cmd->SetViewport(viewport);
             cmd->SetScissor({ { 0, 0 }, { (u32)viewport.size.x, (u32)viewport.size.y } });
             // Metal：上游已 LDR，走透传（仅 bloom 合成）；Vulkan/Dawn：ACES。
-            const bool usePassthrough = s_ToneMapPassthroughPipeline != handles::INVALID_PIPELINE;
+            const bool forceACES = s_ForceACES;
+            const bool usePassthrough = !forceACES &&
+                s_ToneMapPassthroughPipeline != handles::INVALID_PIPELINE;
             cmd->BindGraphicsPipeline(usePassthrough ? s_ToneMapPassthroughPipeline
                                                      : s_ToneMapPipeline);
 

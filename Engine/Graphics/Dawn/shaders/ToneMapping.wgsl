@@ -36,6 +36,17 @@ fn tonemap_vs(@builtin(vertex_index) vertexID: u32) -> VertexOutput {
     return out;
 }
 
+// 2026-09-02: 两平台基准观感是 fusion 线性 HDR 的直通显示（legacy 无 ACES）。
+// tonemap_fs（ACES+gamma）保留为 PRIMAL_TONE_ACES=1 的可选 HDR 展示路径；
+// 默认走 tonemap_fs_passthrough（仅 bloom 合成），与 Metal MSL 的
+// tonemap_fs_passthrough 对齐——见 ToneMappingPass.cpp 的选择逻辑。
+@fragment
+fn tonemap_fs_passthrough(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    let color = textureSample(sceneTexture, texSampler, uv).rgb;
+    let bloom = textureSample(bloomTexture, texSampler, uv).rgb;
+    return vec4<f32>(color + bloom, 1.0);
+}
+
 // ACES Tone Mapping
 fn ACESFilm(x: vec3<f32>) -> vec3<f32> {
     let a = 2.51;
