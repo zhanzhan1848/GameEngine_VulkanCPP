@@ -196,3 +196,25 @@ fusionIn.ddgi_tex 误置 INVALID（照抄 SSGI 模式），DDGI 的 tex/rg 双�
 修复：DDGI_SILENCE 才同时置空 rg+tex，非静音恢复 giOut.gi_output_tex /
 giOut.gi_specular_tex。教训：fusion 输入的 tex 字段不是死的回退槽，
 置空前必须核对上游是否真实产出。
+
+## 伪影1 坐实：VSM light bleeding（2026-09-02 第六轮，8d46109a）
+
+阴影有双路径：`sceneData.shadowParams.x > 0.5` → **VSM moments+Chebyshev
+（激活路径）**；否则半分辨率 R8 vis（GetShadowVisibility，注释明示
+"half-res, bilinear upsample"）。
+
+探针两连：
+1. PRIMAL_SHADOW_WHITE=1（mode-0 vis 全白）→ **画面零变化**（差分
+   0.64≈噪声）——mode-0 路径根本没在跑，第一刀打空。
+2. EngineTest/shaders/DeferredLighting.metal 的 DEBUG_SHADOW_WHITE=1
+   （VSM 分支强制 shadow=1）→ 阴影全消、**楔形亮斑同步消失**——
+   伪影1 坐实 VSM moments 链：Chebyshev light bleeding（暗区渗光）
+   + moments blur/上采样（楔形的楼梯状边缘）。
+
+**同源推论**：伪影2（阴影边界楼梯）与两平台"直射阳光覆盖差异"
+（Metal 渗光更多→阴影区偏亮）都是 VSM 链的平台差异，一次对齐解决三个。
+
+**下一刀**：对比两侧 VSM 参数与实现——moments blit（D32→moments）的
+半分辨率、BlurPass 的 radius/sigma（Metal=blurCS2D）、Chebyshev 的
+minVariance/bleeding 校正系数。修复方向候选：降低 blur sigma、
+edge-aware moments、提高 Chebyshev 衰减截断。
