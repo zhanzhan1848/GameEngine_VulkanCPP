@@ -2655,10 +2655,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.ssgi_tex = handles::INVALID_RESOURCE;
             fusionIn.ddgi_rg = std::getenv("DDGI_SILENCE")
                 ? rendergraph::RGResourceHandle{} : giOut.gi_output_rg;
-            fusionIn.ddgi_tex = handles::INVALID_RESOURCE;
+            // 注意：ddgi_tex 承载真实物理句柄（与 ssgi 不同，DDGI 的 tex/rg
+            // 双路径都是活的）——曾误置 INVALID 掐断 DDGI 纹理路径，GI 退化
+            // 为解析 sky fallback（2026-09-02 回归，同日修复）。
+            fusionIn.ddgi_tex = std::getenv("DDGI_SILENCE")
+                ? handles::INVALID_RESOURCE : giOut.gi_output_tex;
             fusionIn.ddgi_specular_rg = std::getenv("DDGI_SILENCE")
                 ? rendergraph::RGResourceHandle{} : giOut.gi_specular_rg;
-            fusionIn.ddgi_specular_tex = handles::INVALID_RESOURCE;
+            fusionIn.ddgi_specular_tex = std::getenv("DDGI_SILENCE")
+                ? handles::INVALID_RESOURCE : giOut.gi_specular_tex;
             fusionIn.spgi_rg = std::getenv("SPGI_SILENCE")
                 ? rendergraph::RGResourceHandle{} : spgiOut.gi_output;
             fusionIn.spgi_tex = handles::INVALID_RESOURCE;
