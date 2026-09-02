@@ -1041,8 +1041,17 @@ void TestModularPipeline::Run() {
     }
 
 #ifdef TEST_METAL_GI_FUSION
-    if (frameCount_ == GI_VERIFY_FRAME) {
-        RunGIFusionVerification(backBuffer);
+    // GI_VERIFY_FRAME 环境变量可调（默认 90）：探针收敛时间序列 A/B——
+    // GI_VERIFY_FRAME=90 vs 3600 对比同探针 L0，判定探针更新回路是否生效
+    // （"GI 区和第一秒没区别"的直接量化手段，2026-09-03）。
+    {
+        static u32 verifyFrame = [] {
+            const char* e = std::getenv("GI_VERIFY_FRAME");
+            return e ? (u32)std::atoi(e) : (u32)GI_VERIFY_FRAME;
+        }();
+        if (frameCount_ == verifyFrame) {
+            RunGIFusionVerification(backBuffer);
+        }
     }
 #endif
 }
@@ -1141,6 +1150,46 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                 // 意味着 SC/prev-screen 弹射未进入探针。
                 std::cout << "[GIFusionVerify] probe sh0 rgb=(" << m[0] << "," << m[1]
                           << "," << m[2] << ")" << std::endl;
+
+                // 相机附近探针 L0 时间序列（2026-09-03）：buffer 开头的 probe
+                // 0..7 是网格角落——优先级按相机距离排序时它们会被永久饿死
+                // （ageScore 封顶 0.3 竞争不过近距 ~1.0），读它们恒=种子。
+                // 改读相机所在网格单元的 2×2×2 邻域，才能反映"可见 GI 区"
+                // 的探针是否真的在更新。
+                if (auto* ddgi2 = pipeline_->GetDDGIPass()) {
+                    const auto vol = ddgi2->GetVolumeData();
+                    if (vol.ProbeCountTotal > 0 && vol.ProbeSpacing > 0.0f &&
+                        vol.ProbeCounts[0] > 0 && vol.ProbeCounts[1] > 0 && vol.ProbeCounts[2] > 0) {
+                        const math::v3 campos = camera_.GetPosition();
+                        auto gcoord = [&](float w, u32 axis) -> int {
+                            float rel = (axis == 0 ? w - vol.ProbeOrigin.x
+                                       : axis == 1 ? w - vol.ProbeOrigin.y
+                                                   : w - vol.ProbeOrigin.z) / vol.ProbeSpacing;
+                            int c = (int)std::lround(rel);
+                            u32 n = vol.ProbeCounts[axis];
+                            return std::min(std::max(c, 0), (int)n - 1);
+                        };
+                        int cx = gcoord(campos.x, 0);
+                        int cy = gcoord(campos.y, 1);
+                        int cz = gcoord(campos.z, 2);
+                        auto idx = [&](int x, int y, int z) -> u32 {
+                            return (u32)(x + vol.ProbeCounts[0] * (y + vol.ProbeCounts[1] * z));
+                        };
+                        std::cout << "[GIFusionVerify] camera-cell probes (gc="
+                                  << cx << "," << cy << "," << cz << "):" << std::endl;
+                        for (int dz = 0; dz <= 1; ++dz)
+                            for (int dy = 0; dy <= 1; ++dy)
+                                for (int dx = 0; dx <= 1; ++dx) {
+                                    u32 pi = idx(cx + dx, cy + dy, cz + dz);
+                                    if (pi >= vol.ProbeCountTotal) continue;
+                                    const float* sh = m + pi * 9;
+                                    std::cout << "  probe[" << pi << "] L0 rgb=("
+                                              << sh[0] << "," << sh[1] << "," << sh[2] << ")"
+                                              << " L1=(" << sh[3] << "," << sh[4] << "," << sh[5] << ")"
+                                              << std::endl;
+                                }
+                    }
+                }
                 device_->UnmapBuffer(irr);
             }
         }
