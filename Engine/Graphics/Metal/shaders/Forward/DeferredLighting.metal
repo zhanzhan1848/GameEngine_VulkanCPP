@@ -499,8 +499,11 @@ fragment float4 fragmentLighting_gpuDriven(
     }
 
     float4 orm = ormTex.sample(linearSampler, uv);
-    float roughness = 0.5;
-    float metallic = 0.0;
+    // 2026-09-02: 读取真实 ORM——此前硬编码 roughness=0.5/metallic=0，高光
+    // 按统一中等粗糙度计算，直射区大面积过曝死白（vs Vulkan frag 直射区
+    // 有完整纹理层次）。与 DeferredLighting.frag 的 max(g,0.04) 约定一致。
+    float roughness = max(orm.g, 0.04);
+    float metallic = orm.b;
 
     // 2. Reconstruct World Position
     float2 ndc;

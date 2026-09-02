@@ -502,7 +502,7 @@ bool TestModularPipeline::InitializePipeline() {
                           << lx << "," << ly << "," << lz << std::endl;
             }
         }
-        renderSettings.lighting.light_color = {7.5f, 7.5f, 7.5f, 1.0f}; // Vulkan 等效: 3.0 x frag DIRECT 2.5
+        renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f}; // 直射峰值对齐: 3.0 x albedo/pi 峰值 ~1.4 = Vulkan 实测 1.38 (7.5 档会到 ~3.6 死白)
         renderSettings.lighting.ddgi_light_color = {2.0f, 2.0f, 2.0f, 1.0f};
         pipeline_->UpdateSettings(renderSettings);
     }
