@@ -24,32 +24,8 @@
 // match the canonical layout in ContentTools.cpp exactly — both are kept
 // in sync manually (Phase 1 has no shared header for the POD). The C#
 // Editor mirror is the third copy at PrimalEditor/ContentToolsAPI.cs.
-struct ai_asset_pipeline_params {
-    const char*                 input_path;
-    primal::tools::scene_data*  out_data;
-    u8                          enable_repair;
-    u8                          enable_remesh;
-    u8                          enable_subdivide;
-    u8                          enable_uvatlas;
-    u8                          enable_lod;
-    u8                          enable_meshlet;
-    u8                          enable_collision;
-    u8                          enable_derive;
-    u8                          auto_derive_after_subdivide;
-    u8                          subdivide_scheme;     // 0=Loop, 1=CatmullClark
-    u8                          derive_normal_mode;   // 0=Faceted, 1=Smooth, 2=AreaWeighted, 3=AngleWeighted
-    u8                          derive_tangent_mode;  // 0=None, 1=AreaWeighted, 2=MikkTSpace
-    u32                         subdivide_levels;
-    f32                         lod_ratio;
-    f32                         derive_faceted_angle_deg;
-    u32                         mesh_count;
-    u32                         meshlet_count;
-    u32                         validation_errors;
-    u32                         validation_warnings;
-    // Remesh params (must match ContentTools.cpp's POD layout exactly).
-    f32                         target_edge_length;
-    u32                         remesh_iterations;
-};
+#include "AIAssetPipelineParams.h"
+
 extern "C" void ProcessAIAsset(ai_asset_pipeline_params*);
 extern "C" void ProcessSceneData(ai_asset_pipeline_params*);
 
