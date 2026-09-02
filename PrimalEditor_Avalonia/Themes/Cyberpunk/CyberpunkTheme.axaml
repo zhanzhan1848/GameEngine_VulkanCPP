@@ -56,6 +56,9 @@
   <sys:String x:Key="SoftBlueGlow">0 0 10 2 #406FA8FF</sys:String>
   <sys:String x:Key="SoftCoralGlow">0 0 10 2 #40FF7B7B</sys:String>
 
+  <!-- 节点标题条头像徽章开关(非 Warcraft 主题关闭) -->
+  <sys:Boolean x:Key="NodeAvatarVisible">False</sys:Boolean>
+
   <!-- FONT FAMILIES (kept from previous theme; OFL licensed) -->
   <FontFamily x:Key="FontDisplay">avares://PrimalEditor_Avalonia/Assets/Fonts/Rajdhani-SemiBold.ttf#Rajdhani SemiBold</FontFamily>
   <FontFamily x:Key="FontUI">avares://PrimalEditor_Avalonia/Assets/Fonts/Rajdhani-Regular.ttf#Rajdhani</FontFamily>

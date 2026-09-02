@@ -58,6 +58,31 @@
   <sys:String x:Key="SoftBlueGlow">0 0 10 2 #40E8B54A</sys:String>
   <sys:String x:Key="SoftCoralGlow">0 0 10 2 #40D25A3A</sys:String>
 
+  <!-- NodifyM.Avalonia 节点画布(材质编辑器)换肤:键名来自
+       NodifyM ControlStyles, 令牌字典里覆写即可全局生效。
+       Cyberpunk 不定义这些键 → 节点画布保持 NodifyM 默认外观。 -->
+  <SolidColorBrush x:Key="BackgroundBrush"              Color="#171310"/>
+  <SolidColorBrush x:Key="NodeBrush"                    Color="#2E2618"/>
+  <SolidColorBrush x:Key="NodeBorderBrush"              Color="#6B5A38"/>
+  <SolidColorBrush x:Key="HeaderBrush"                  Color="#B98A2E"/>
+  <SolidColorBrush x:Key="HeaderForegroundBrush"        Color="#2A1F0D"/>
+  <SolidColorBrush x:Key="ContentBrush"                 Color="#211B13"/>
+  <SolidColorBrush x:Key="FooterBrush"                  Color="#1F1912"/>
+  <SolidColorBrush x:Key="StrokeBrush"                  Color="#C99B36"/>
+  <SolidColorBrush x:Key="TextBrush"                    Color="#E8DCC0"/>
+  <SolidColorBrush x:Key="SelectedBrush"                Color="#33E8B54A"/>
+  <SolidColorBrush x:Key="HighlightBrush"               Color="#E8B54A"/>
+  <SolidColorBrush x:Key="SelectionRectangleBackgroundBrush" Color="#1FE8B54A"/>
+  <SolidColorBrush x:Key="SelectionRectangleColor"      Color="#E8B54A"/>
+  <SolidColorBrush x:Key="SelectionRectangleStrokeBrush" Color="#E8B54A"/>
+  <SolidColorBrush x:Key="AlignmentLineBrush"           Color="#66E8B54A"/>
+  <SolidColorBrush x:Key="MapBorderBrush"               Color="#6B5A38"/>
+  <SolidColorBrush x:Key="ViewportBrush"                Color="#33E8B54A"/>
+  <SolidColorBrush x:Key="ViewportBorderBrush"          Color="#E8B54A"/>
+  <Color x:Key="GridLinesColor">#2A231A</Color>
+  <!-- 节点标题条头像徽章开关(仅 Warcraft 展示阵营徽章) -->
+  <sys:Boolean x:Key="NodeAvatarVisible">True</sys:Boolean>
+
   <!-- FONT FAMILIES — Cinzel (OFL) carries the fantasy display voice;
        body text stays on a neutral system sans for tool readability. -->
   <FontFamily x:Key="FontDisplay">avares://PrimalEditor_Avalonia/Assets/Fonts/Cinzel-Regular.ttf#Cinzel</FontFamily>

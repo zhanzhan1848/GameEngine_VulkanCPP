@@ -36,6 +36,9 @@ public class TextureFrame : Decorator
     public static readonly StyledProperty<CornerRadius> CornerRadiusProperty =
         AvaloniaProperty.Register<TextureFrame, CornerRadius>(nameof(CornerRadius));
 
+    public static readonly StyledProperty<BoxShadows> BoxShadowProperty =
+        AvaloniaProperty.Register<TextureFrame, BoxShadows>(nameof(BoxShadow));
+
     public string? Source
     {
         get => GetValue(SourceProperty);
@@ -78,11 +81,19 @@ public class TextureFrame : Decorator
         set => SetValue(CornerRadiusProperty, value);
     }
 
+    /// <summary>Drop shadow for the fallback (no art) rendering; ignored when
+    /// 9-slice art is active since frame art carries its own depth.</summary>
+    public BoxShadows BoxShadow
+    {
+        get => GetValue(BoxShadowProperty);
+        set => SetValue(BoxShadowProperty, value);
+    }
+
     static TextureFrame()
     {
         AffectsRender<TextureFrame>(SourceProperty, SliceProperty, ScaleProperty,
             BackgroundProperty, BorderBrushProperty, BorderThicknessProperty, CornerRadiusProperty);
-        AffectsMeasure<TextureFrame>(BorderThicknessProperty);
+        AffectsArrange<TextureFrame>(BoxShadowProperty);
     }
 
     public override void Render(DrawingContext context)
@@ -104,12 +115,12 @@ public class TextureFrame : Decorator
         if (Background != null)
         {
             var fillRect = new Rect(0, 0, width, height).Deflate(thickness / 2);
-            context.FillRectangle(Background, fillRect, (float)radius);
+            context.DrawRectangle(Background, null, new RoundedRect(fillRect, new CornerRadius(radius)), BoxShadow);
         }
         if (BorderBrush != null && thickness > 0)
         {
             var strokeRect = new Rect(0, 0, width, height).Deflate(thickness / 2);
-            context.DrawRectangle(null, new Pen(BorderBrush, thickness), strokeRect, radius, 0);
+            context.DrawRectangle(null, new Pen(BorderBrush, thickness), new RoundedRect(strokeRect, new CornerRadius(radius)), BoxShadow);
         }
     }
 }

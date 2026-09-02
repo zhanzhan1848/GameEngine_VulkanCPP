@@ -1,6 +1,7 @@
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls">
+        xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
+        xmlns:n="using:NodifyM.Avalonia.Controls">
 
   <!-- =========================================================== -->
   <!-- "Iron & Gold of Azeroth" — Warcraft skin, palette adapted    -->
@@ -459,6 +460,14 @@
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
   </Style>
+  <!-- 材质编辑器节点(NodifyM Node): 叠加铁轨九宫格外框(附加行为,
+       见 Themes/Controls/Frame.cs)。Cyberpunk 不设 Frame.Source → 无框。 -->
+  <Style Selector="n|Node">
+    <Setter Property="ctrl:Frame.Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-strip.png"/>
+    <Setter Property="ctrl:Frame.Slice" Value="7.5"/>
+    <Setter Property="ctrl:Frame.Scale" Value="5"/>
+  </Style>
+
   <Style Selector="ctrl|TextureFrame.tex-panel">
     <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-panel.png"/>
     <Setter Property="Slice" Value="13"/>

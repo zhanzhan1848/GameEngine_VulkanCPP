@@ -92,6 +92,11 @@ public static class ThemeManager
         appStyles.Add(styles);
         _attachedStyles = styles;
 
+        // 3. Fluent variant: light skins need Fluent's popup/menu/checkbox
+        //    templates re-resolved as Light (App.axaml boots pinned Dark).
+        if (theme.Variant != ThemeVariant.Default)
+            app.RequestedThemeVariant = theme.Variant;
+
         _current = theme;
         EditorThemeSettings.Save(new EditorThemeConfig(theme.Id));
         Logger.Info($"ThemeManager: applied theme '{theme.Id}'");
