@@ -124,3 +124,33 @@ Bloom/TAA/Tone 全部执行，但**画面全黑**。validation 报告（40s 采�
 - push constant offset 非对齐（vkCreatePipelineLayout offset=2）。
 
 优先序：layout 追踪（黑屏根因）→ descriptor set 池 → 杂项 VUID。
+
+## Vulkan 黑屏修复（2026-09-02 第四轮，提交 497ef4a7）
+
+**PRIMAL_FULL_POST=1 全链 90s 稳定，画面完整正确**（TAA/Bloom/ToneMapping
+全链，[BLOOM-EXEC] ok、TAA 深度重投影 active）。真正的黑屏根因不在
+layout 追踪（那些 VUID 与 legacy 同量级、预存于 GI pass），而是：
+
+**tonemap_fs 的旧版全合成语义**：`color *= ao.r`（binding 3 AO）+
+`color += ssgi * 0.4`（binding 4）。C++ 传的 1x1 AO dummy 只在
+ENABLE_WEBGPU 分支填充白色——Vulkan 上从未写入，采样 0 → 整帧乘黑。
+ToneMapping.spv 由 Dawn/shaders/ToneMapping.wgsl 经 naga 编译（多入口），
+Metal MSL 无此合成所以 Metal 从未复现。
+
+定位方法（可复用）：窗口级截图（Quartz CGWindowList + screencapture -l，
+不抢前台）+ TONE_SOLID 红屏探针（红屏可达=写入/采样/Blit 路径通；真
+draw 黑=fragment 内部乘黑）+ TONE_OFF 对照（FinalBlit 直读 TAA 正常）。
+
+修复：WGSL 去除 AO/SSGI 合成（对齐 Metal；FusionIndirect 负责 AO/GI），
+naga 重编 spv。注意 binding 3/4/5 的 DSL 与描述符写入保留——写未用绑定
+无害，但未来若启用非 fusion 的 AO/SSGI 合成路径，dummy 必须全平台上传。
+
+**遗留平台差异（下一轮标定项）**：Vulkan 上游 fusion 输出为线性 HDR，
+全链 ToneMapping 做 ACES+gamma（T4.6.5 设计：ToneMapping 是唯一 HDR→LDR）；
+Metal 上游已 LDR，全链走 passthrough。两平台全链的色调映射路径不同，
+亮度观感差异需 SPGI_CAM+SPGI_CAM_LOCK 同机位定量后统一。
+
+validation 预存问题（不阻塞全链，逐项清单见上轮）：GI pass push constant
+无 range/offset 非对齐、descriptor set pending 改写（03047）、
+STORAGE_BUFFER 误写 binding 13、CopyImageToBuffer 缺 TRANSFER_SRC usage、
+depthTexture imageView 0x0（某 compute pass 未绑定）。
