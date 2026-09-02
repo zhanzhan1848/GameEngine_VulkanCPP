@@ -2648,21 +2648,27 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // TEMP diagnosis: SSGI_SILENCE=1 mutes SSGI into fusion (black)
             // while keeping the fusion path itself alive — isolates the SSGI
             // prevColor feedback loop without disabling fusion.
+            // 伪影1（楔形加性亮斑）二分：SSAO_SILENCE / DDGI_SILENCE /
+            // SPGI_SILENCE 逐项静音（与 SSGI_SILENCE 同模式）。
             fusionIn.ssgi_rg = std::getenv("SSGI_SILENCE")
                 ? rendergraph::RGResourceHandle{} : ssgiOut.ssgi_output;
             fusionIn.ssgi_tex = handles::INVALID_RESOURCE;
-            fusionIn.ddgi_rg = giOut.gi_output_rg;
-            fusionIn.ddgi_tex = giOut.gi_output_tex;
-            fusionIn.spgi_rg = spgiOut.gi_output;
+            fusionIn.ddgi_rg = std::getenv("DDGI_SILENCE")
+                ? rendergraph::RGResourceHandle{} : giOut.gi_output_rg;
+            fusionIn.ddgi_tex = handles::INVALID_RESOURCE;
+            fusionIn.ddgi_specular_rg = std::getenv("DDGI_SILENCE")
+                ? rendergraph::RGResourceHandle{} : giOut.gi_specular_rg;
+            fusionIn.ddgi_specular_tex = handles::INVALID_RESOURCE;
+            fusionIn.spgi_rg = std::getenv("SPGI_SILENCE")
+                ? rendergraph::RGResourceHandle{} : spgiOut.gi_output;
             fusionIn.spgi_tex = handles::INVALID_RESOURCE;
             fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
-            fusionIn.ssao_rg = ssaoOut.ssao_output;
+            fusionIn.ssao_rg = std::getenv("SSAO_SILENCE")
+                ? rendergraph::RGResourceHandle{} : ssaoOut.ssao_output;
             fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
             fusionIn.ssr_rg = ssrOutRWCB.outputColor;
             fusionIn.ssr_tex = handles::INVALID_RESOURCE;
             fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
-            fusionIn.ddgi_specular_rg = giOut.gi_specular_rg;
-            fusionIn.ddgi_specular_tex = giOut.gi_specular_tex;
             fusionIn.current_buffer_index = cbIdx;
             fusionIn.render_width = render_width_;
             fusionIn.render_height = render_height_;
