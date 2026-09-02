@@ -16,6 +16,7 @@
 #include "Engine/Common/CoreDiag.h"
 #include <iostream>
 #include <thread>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -70,7 +71,7 @@ void MetalCommandBuffer::destroyImpl() {
         if (std::this_thread::get_id() == recordingThreadId_) {
             pool_->release();
         } else {
-            std::cerr << "[MetalCommandBuffer] Warning: destroyImpl called on wrong thread (" 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Warning: destroyImpl called on wrong thread (" 
                       << std::this_thread::get_id() << "), expected " << recordingThreadId_ 
                       << ". Leaking pool." << std::endl;
         }
@@ -116,7 +117,7 @@ bool MetalCommandBuffer::resetImpl() {
         if (std::this_thread::get_id() == recordingThreadId_) {
             pool_->release();
         } else {
-            std::cerr << "[MetalCommandBuffer] Warning: resetImpl called on wrong thread (" 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Warning: resetImpl called on wrong thread (" 
                       << std::this_thread::get_id() << "), expected " << recordingThreadId_ 
                       << ". Leaking pool." << std::endl;
         }
@@ -156,13 +157,13 @@ bool MetalCommandBuffer::beginImpl() {
     }
     
     if (!queue) {
-        std::cerr << "[MetalCommandBuffer] Queue not found for type " << (int)type_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Queue not found for type " << (int)type_ << std::endl;
         return false;
     }
 
     mtlCommandBuffer_ = queue->commandBuffer();
     if (!mtlCommandBuffer_) {
-        std::cerr << "[MetalCommandBuffer] Failed to create command buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to create command buffer" << std::endl;
         return false;
     }
 
@@ -189,7 +190,7 @@ bool MetalCommandBuffer::endImpl() {
         if (std::this_thread::get_id() == recordingThreadId_) {
             pool_->release();
         } else {
-            std::cerr << "[MetalCommandBuffer] Error: EndImpl called on wrong thread (" 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Error: EndImpl called on wrong thread (" 
                       << std::this_thread::get_id() << "), expected " << recordingThreadId_ 
                       << ". Leaking pool." << std::endl;
         }
@@ -256,7 +257,7 @@ bool MetalCommandBuffer::submitImpl(u32 waitFlags) {
             std::string msg = std::string("[MetalCB] buffer finished status=") + std::to_string((int)st)
                 + " error=" + (err ? err->localizedDescription()->utf8String() : "none");
             primal::diag::Emit(primal::diag::kLevelError, "RHI", msg.c_str());
-            std::cerr << msg << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << msg << std::endl;
         }
     });
 
@@ -326,12 +327,12 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     
     // Log first 5 render passes with texture details
     if (passCount <= 5) {
-        std::cout << "[Metal] BeginRenderPass #" << passCount << ": colorAttachments=" << desc.colorAttachments.size();
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[Metal] BeginRenderPass #" << passCount << ": colorAttachments=" << desc.colorAttachments.size();
         if (!desc.colorAttachments.empty()) {
-            std::cout << " texture[0]=" << desc.colorAttachments[0].texture
+            PRIMAL_LOG_STREAM(Info, "RHI") << " texture[0]=" << desc.colorAttachments[0].texture
                       << " loadOp=" << (int)desc.colorAttachments[0].loadOp;
         }
-        std::cout << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << std::endl;
     }
     
     if (isSecondary_) return;
@@ -379,7 +380,7 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
                     ));
                 }
             } else {
-                 std::cerr << "[MetalCommandBuffer] Failed to bind color attachment " << i << ": Texture or NativeTexture is null" << std::endl;
+                 PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to bind color attachment " << i << ": Texture or NativeTexture is null" << std::endl;
             }
         }
     }
@@ -437,9 +438,9 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     if (mtlCommandBuffer_) {
                 MTL::RenderCommandEncoder* encoder = mtlCommandBuffer_->renderCommandEncoder(passDesc);
                 if (!encoder) {
-                    std::cerr << "[MetalCommandBuffer] Failed to create render command encoder!" << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to create render command encoder!" << std::endl;
                     if (passDesc->colorAttachments()->object(0)->texture() == nullptr) {
-                         std::cerr << "  Color Attachment 0 texture is null" << std::endl;
+                         PRIMAL_LOG_STREAM(Error, "RHI") << "  Color Attachment 0 texture is null" << std::endl;
                     }
                 }
                 currentEncoder_ = encoder;
@@ -449,7 +450,7 @@ void MetalCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
                 SetViewport(desc.viewport);
                 SetScissor(desc.scissor);
             } else {
-                std::cerr << "[MetalCommandBuffer] mtlCommandBuffer_ is null in BeginRenderPass!" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] mtlCommandBuffer_ is null in BeginRenderPass!" << std::endl;
             }
     
     // Descriptor is autoreleased
@@ -463,13 +464,13 @@ void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MetalRenderPass* pass = metalDevice.GetRenderPass(renderPass);
     if (!pass) {
-        std::cerr << "[MetalCommandBuffer] Invalid RenderPass handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Invalid RenderPass handle" << std::endl;
         return;
     }
 
     MTL::RenderPassDescriptor* passDesc = pass->GetNativeRenderPassDescriptor();
     if (!passDesc) {
-        std::cerr << "[MetalCommandBuffer] Failed to get native RenderPass descriptor" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to get native RenderPass descriptor" << std::endl;
         return;
     }
 
@@ -482,8 +483,8 @@ void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
             static int nullEncoderCount = 0;
             nullEncoderCount++;
             if (nullEncoderCount <= 3) {
-                std::cerr << "[MetalCommandBuffer] CRITICAL: renderCommandEncoder returned nilULL!" << std::endl;
-                std::cerr << "  This means the render pass will be completely silent (no draws, no depth writes)." << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] CRITICAL: renderCommandEncoder returned nilULL!" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "  This means the render pass will be completely silent (no draws, no depth writes)." << std::endl;
             }
         } else {
             // DIAGNOSTIC: Check ALL attachments in the descriptor
@@ -497,7 +498,7 @@ void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
                     if (ca && ca->texture()) colorCount++;
                 }
                 auto* depthDesc = passDesc->depthAttachment();
-                std::cout << "[MetalCMD] BeginRenderPass OK: colorAttachments=" << colorCount
+                PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalCMD] BeginRenderPass OK: colorAttachments=" << colorCount
                           << " depthTex=" << (void*)(depthDesc ? depthDesc->texture() : nullptr)
                           << " depthLoad=" << (depthDesc ? (int)depthDesc->loadAction() : -1)
                           << " descColors=" << pass->GetDesc().colorAttachments.size()
@@ -505,7 +506,7 @@ void MetalCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
                 // Print each color attachment texture pointer
                 for (size_t i = 0; i < pass->GetDesc().colorAttachments.size() && i < 4; ++i) {
                     auto* ca = colorAttachments->object(i);
-                    std::cout << "  color[" << i << "] tex=" << (void*)(ca ? ca->texture() : nullptr)
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "  color[" << i << "] tex=" << (void*)(ca ? ca->texture() : nullptr)
                               << " loadAction=" << (ca ? (int)ca->loadAction() : -1)
                               << " storeAction=" << (ca ? (int)ca->storeAction() : -1) << std::endl;
                 }
@@ -612,13 +613,13 @@ void MetalCommandBuffer::BeginParallelRenderPass(RenderPassHandle renderPass) {
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MetalRenderPass* pass = metalDevice.GetRenderPass(renderPass);
     if (!pass) {
-        std::cerr << "[MetalCommandBuffer] Invalid RenderPass handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Invalid RenderPass handle" << std::endl;
         return;
     }
 
     MTL::RenderPassDescriptor* passDesc = pass->GetNativeRenderPassDescriptor();
     if (!passDesc) {
-        std::cerr << "[MetalCommandBuffer] Failed to get native RenderPass descriptor" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to get native RenderPass descriptor" << std::endl;
         return;
     }
 
@@ -636,7 +637,7 @@ CommandBufferHandle MetalCommandBuffer::BeginSecondaryCommandBuffer(
     const SecondaryCommandBufferDesc& desc) {
     (void)desc;  // Metal parallel 子 encoder 自动继承 parallel encoder 的目标
     if (isSecondary_ || !parallelRenderEncoder_) {
-        std::cerr << "[MetalCommandBuffer] BeginSecondaryCommandBuffer requires an "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] BeginSecondaryCommandBuffer requires an "
                      "active parallel render pass on a primary" << std::endl;
         return handles::INVALID_COMMAND_BUFFER;
     }
@@ -695,7 +696,7 @@ void MetalCommandBuffer::SetViewport(const ViewportDesc& viewport) {
     static int viewportCount = 0;
     viewportCount++;
     if (viewportCount > 100 && viewportCount <= 105) {
-        std::cout << "[Metal] SetViewport #" << viewportCount 
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[Metal] SetViewport #" << viewportCount 
                   << " x=" << viewport.topLeft.x 
                   << " y=" << viewport.topLeft.y
                   << " w=" << viewport.size.x 
@@ -729,7 +730,7 @@ void MetalCommandBuffer::SetScissor(const Rect& scissor) {
 
 void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
     if (currentEncoderType_ != EncoderType::Render) {
-        std::cerr << "BindGraphicsPipeline: Not in render pass!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "BindGraphicsPipeline: Not in render pass!" << std::endl;
         return;
     }
     
@@ -740,7 +741,7 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
     static int bindCount = 0;
     bindCount++;
     if (bindCount > 10000 && bindCount <= 10010) {
-        std::cout << "[Metal] BindGraphicsPipeline #" << bindCount 
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[Metal] BindGraphicsPipeline #" << bindCount 
                   << " pipeline=" << (mtlPipeline ? "valid" : "NULL")
                   << " encoder=" << (currentEncoder_ ? "valid" : "NULL") << std::endl;
     }
@@ -777,7 +778,7 @@ void MetalCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
         // Depth Clip Mode (Default to Clip)
         // encoder->setDepthClipMode(MTL::DepthClipModeClip);
     } else {
-        std::cerr << "BindGraphicsPipeline: Failed to get PSO! Pipeline: " << pipeline << " Ptr: " << mtlPipeline << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "BindGraphicsPipeline: Failed to get PSO! Pipeline: " << pipeline << " Ptr: " << mtlPipeline << std::endl;
     }
 }
 
@@ -800,7 +801,7 @@ void MetalCommandBuffer::BindVertexBuffers(u32 firstSlot, u32 slotCount, const R
                 );
     // std::cout << "[MetalCommandBuffer] Bound vertex buffer " << (firstSlot + i) << " (Size: " << buffer->GetDesc().size << ")" << std::endl;
             } else {
-                 std::cerr << "[MetalCommandBuffer] Failed to bind vertex buffer " << (firstSlot + i) << ": Buffer is null" << std::endl;
+                 PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to bind vertex buffer " << (firstSlot + i) << ": Buffer is null" << std::endl;
             }
         }
     }
@@ -818,7 +819,7 @@ void MetalCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat forma
         currentIndexType_ = (format == DataFormat::R16_UInt) ? MTL::IndexTypeUInt16 : MTL::IndexTypeUInt32;
     // std::cout << "[MetalCommandBuffer] Bound index buffer (Offset: " << offset << ")" << std::endl;
     } else {
-         std::cerr << "[MetalCommandBuffer] Failed to bind index buffer: Buffer is null" << std::endl;
+         PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to bind index buffer: Buffer is null" << std::endl;
          currentIndexBuffer_ = nullptr;
     }
 }
@@ -833,7 +834,7 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
     if (setCount == 0 || !descriptorSets) return;
 
     if (std::this_thread::get_id() != recordingThreadId_) {
-         std::cerr << "[MetalCommandBuffer] Error: BindDescriptorSets called on wrong thread (" 
+         PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Error: BindDescriptorSets called on wrong thread (" 
                    << std::this_thread::get_id() << "), expected " << recordingThreadId_ << std::endl;
     }
 
@@ -928,18 +929,18 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                             static int s_b7big = 0;
                             if (buffer->GetNativeBuffer()->length() > (1ull << 20) && s_b7big < 6) {
                                 ++s_b7big;
-                                std::cerr << "[BIND7BIG] slot=7 native=" << (const void*)buffer->GetNativeBuffer()
+                                PRIMAL_LOG_STREAM(Error, "RHI") << "[BIND7BIG] slot=7 native=" << (const void*)buffer->GetNativeBuffer()
                                           << " length=" << buffer->GetNativeBuffer()->length()
                                           << " handle=" << binding.resources[0] << std::endl;
                             }
                         }
                     } else {
                         if (!buffer) {
-                            std::cerr << "[MetalCommandBuffer] Buffer binding slot " << slot
+                            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Buffer binding slot " << slot
                                       << " resolves to no MetalBuffer (handle=" << binding.resources[0]
                                       << ", type=" << (int)binding.type << ")" << std::endl;
                         } else if (!buffer->GetNativeBuffer()) {
-                            std::cerr << "[MetalCommandBuffer] Buffer binding slot " << slot
+                            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Buffer binding slot " << slot
                                       << " has null native buffer (handle=" << binding.resources[0]
                                       << ", type=" << (int)binding.type << ")" << std::endl;
                         }
@@ -1072,7 +1073,7 @@ void MetalCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCoun
     static int totalDrawCount = 0;
     totalDrawCount++;
     if (totalDrawCount <= 10) {
-        std::cout << "[Metal] DRAW #" << totalDrawCount << ": vertexCount=" << vertexCount 
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[Metal] DRAW #" << totalDrawCount << ": vertexCount=" << vertexCount 
                   << " instanceCount=" << instanceCount 
                   << " encoderType=" << (int)currentEncoderType_ << std::endl;
     }
@@ -1086,7 +1087,7 @@ void MetalCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCoun
                 (NS::UInteger)startInstance
             );
     } else {
-        std::cerr << "MetalCommandBuffer::Draw: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "MetalCommandBuffer::Draw: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
     }
 }
 
@@ -1094,7 +1095,7 @@ void MetalCommandBuffer::DrawIndexed(u32 indexCount, u32 startIndex, u32 baseVer
     static int indexedDrawCount = 0;
     indexedDrawCount++;
     if (indexedDrawCount <= 20) {
-        std::cout << "[Metal] DRAW_IDX #" << indexedDrawCount
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[Metal] DRAW_IDX #" << indexedDrawCount
                   << ": indexCount=" << indexCount
                   << " startIndex=" << startIndex
                   << " baseVertex=" << baseVertex
@@ -1120,9 +1121,9 @@ void MetalCommandBuffer::DrawIndexed(u32 indexCount, u32 startIndex, u32 baseVer
         );
     } else {
         if (currentEncoderType_ != EncoderType::Render) {
-             std::cerr << "MetalCommandBuffer::DrawIndexed: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "MetalCommandBuffer::DrawIndexed: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
         } else if (!currentIndexBuffer_) {
-             std::cerr << "MetalCommandBuffer::DrawIndexed: No Index Buffer Bound!" << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "MetalCommandBuffer::DrawIndexed: No Index Buffer Bound!" << std::endl;
         }
     }
 }
@@ -1140,7 +1141,7 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
                 static int nullEncoderDrawCount = 0;
                 nullEncoderDrawCount++;
                 if (nullEncoderDrawCount <= 3) {
-                    std::cerr << "[MetalCMD] DrawIndirect ERROR: encoder is NULL! Draws will be silently dropped." << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCMD] DrawIndirect ERROR: encoder is NULL! Draws will be silently dropped." << std::endl;
                 }
                 return;
             }
@@ -1165,7 +1166,7 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
                     void* mapped = nativeBuffer->contents();
                     if (mapped) {
                         u32* args = reinterpret_cast<u32*>((u8*)mapped + offset);
-                        std::cout << "[MetalCMD] DrawIndirect #" << drawDiagCount
+                        PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalCMD] DrawIndirect #" << drawDiagCount
                                   << " vertexStart=" << args[0]
                                   << " vertexCount=" << args[1]
                                   << " instanceCount=" << args[2]
@@ -1176,13 +1177,13 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
         } else {
             // std::cerr << "[Metal] DrawIndirect ERROR: Invalid buffer or native buffer is null!" << std::endl;
             if (!mtlBuffer) {
-                std::cerr << "  MetalBuffer is null" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "  MetalBuffer is null" << std::endl;
             } else {
-                std::cerr << "  NativeBuffer is null" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "  NativeBuffer is null" << std::endl;
             }
         }
     } else {
-        std::cerr << "[Metal] DrawIndirect ERROR: Not in render encoder! Current encoder type: " << (int)currentEncoderType_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[Metal] DrawIndirect ERROR: Not in render encoder! Current encoder type: " << (int)currentEncoderType_ << std::endl;
     }
 }
 
@@ -1214,7 +1215,7 @@ void MetalCommandBuffer::PushConstants(PipelineLayoutHandle layout, ShaderStage 
     
     // Only support max 4KB as per Metal set*Bytes limit
     if (size > 4096) {
-        std::cerr << "MetalCommandBuffer::PushConstants: Size too large (" << size << ")" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "MetalCommandBuffer::PushConstants: Size too large (" << size << ")" << std::endl;
         return;
     }
     
@@ -1367,7 +1368,7 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
 
         static int barrierCount = 0;
         if (barrierCount < 30) {
-            std::cerr << "[MetalBarrier] Compute memoryBarrier(scope) #" << barrierCount
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBarrier] Compute memoryBarrier(scope) #" << barrierCount
                       << std::endl;
             ++barrierCount;
         }
@@ -1385,7 +1386,7 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
 
         if (!srcIsComputeOnly || !dstIsComputeOnly || srcFromOtherEncoder) {
             if (barrierCount <= 30) {
-                std::cerr << "[MetalBarrier] END encoder: src=0x" << std::hex
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBarrier] END encoder: src=0x" << std::hex
                           << static_cast<u32>(srcStageMask)
                           << " dst=0x" << static_cast<u32>(dstStageMask)
                           << std::dec << std::endl;
@@ -1539,7 +1540,7 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
 
         PixelFormatInfo info = GetPixelFormatInfo(texture->GetNativeTexture()->pixelFormat());
         if (info.bytesPerBlock == 0) {
-            std::cerr << "[MetalCommandBuffer] SUPER UNIQUE ERROR: Unsupported pixel format for copy: " 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] SUPER UNIQUE ERROR: Unsupported pixel format for copy: " 
                       << (u64)texture->GetNativeTexture()->pixelFormat() << std::endl;
             return;
         }
@@ -1588,7 +1589,7 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
 
         PixelFormatInfo info = GetPixelFormatInfo(texture->GetNativeTexture()->pixelFormat());
         if (info.bytesPerBlock == 0) {
-            std::cerr << "[MetalCommandBuffer] Unsupported pixel format for copy: " 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Unsupported pixel format for copy: " 
                       << (u64)texture->GetNativeTexture()->pixelFormat() << std::endl;
             return;
         }
@@ -1636,7 +1637,7 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
     MetalTexture* dstTex = metalDevice.GetTexture(dst);
 
     if (!srcTex || !dstTex || !srcTex->GetNativeTexture() || !dstTex->GetNativeTexture()) {
-        std::cerr << "[MetalCommandBuffer] BlitTexture: Invalid textures" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] BlitTexture: Invalid textures" << std::endl;
         return;
     }
 
@@ -1681,7 +1682,7 @@ void MetalCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
             // CRITICAL: Metal blit encoder does NOT support depth<->color format copies
             // even when byte sizes match (D32_Float <-> R32_Float).
             // Use ExecuteGBufferDepthBlit() compute shader instead.
-            std::cerr << "[MetalCommandBuffer] BlitTexture: Incompatible formats src="
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] BlitTexture: Incompatible formats src="
                       << (int)srcFmt << " dst=" << (int)dstFmt
                       << " — Metal does not support depth<->color copies via blit encoder. "
                       << "Use compute shader (ShadowBlit.metal) instead." << std::endl;

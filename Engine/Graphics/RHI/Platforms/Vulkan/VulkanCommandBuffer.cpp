@@ -863,7 +863,19 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     for (u32 i = 0; i < colorCount; ++i) {
         const auto& a = desc.colorAttachments[i];
         VulkanTexture* tex = vk.GetTexture(a.texture);
-        if (!tex) continue;
+        if (!tex) {
+            // 物理纹理缺失：跳过附件但 subpass.colorAttachmentCount 仍按
+            // colorCount 声明，refs 数不匹配会构造畸形 VkRenderPass——
+            // validation 层 AttachmentTracker 崩溃 / 无验证时渲染未定义
+            // （ToneMapping 瞬态纹理句柄无效黑屏，2026-09-02 排查记录）。
+            static bool s_attachSkipLogged = false;
+            if (!s_attachSkipLogged) {
+                s_attachSkipLogged = true;
+                std::cerr << "[VK] BeginRenderPass: color attachment " << i
+                          << " physical texture missing (handle=" << a.texture << ")" << std::endl;
+            }
+            continue;
+        }
 
         // 隐式 transition 到 COLOR_ATTACHMENT_OPTIMAL(若还没在)
         if (tex->GetCurrentLayout() != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {

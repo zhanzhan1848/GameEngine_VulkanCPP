@@ -19,9 +19,11 @@
 #include "CoreDiag.h"
 
 #include <cstdio>
+#include <ios>
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace primal::log {
 
@@ -41,6 +43,13 @@ public:
 
     // bool：与 ostream 一致输出 true/false（std::to_string 会给 "1"/"0"）
     LogStream& operator<<(bool v) { buffer_ += v ? "true" : "false"; return *this; }
+
+    // std::thread::id：与事件表 fields.thread_id 同一 hash 形态
+    LogStream& operator<<(std::thread::id v)
+    {
+        buffer_ += std::to_string(std::hash<std::thread::id>{}(v));
+        return *this;
+    }
 
     // 指针：与 ostream 一致输出 0x… 形态
     LogStream& operator<<(const void* v)
@@ -65,9 +74,25 @@ public:
     LogStream& operator<<(T v)
     {
         if constexpr (std::is_enum_v<T>)
-            buffer_ += std::to_string(static_cast<long long>(v));
+            appendInteger(static_cast<long long>(v));
+        else if constexpr (std::is_integral_v<T>)
+        {
+            if constexpr (std::is_signed_v<T>)
+                appendInteger(static_cast<long long>(v));
+            else
+                appendInteger(static_cast<unsigned long long>(v));
+        }
         else
             buffer_ += std::to_string(v);
+        return *this;
+    }
+
+    // ios_base 级操纵符：std::hex / std::dec / std::oct（粘性，与 ostream 一致）。
+    LogStream& operator<<(std::ios_base& (*manip)(std::ios_base&))
+    {
+        if (manip == &std::hex) base_ = 16;
+        else if (manip == &std::dec) base_ = 10;
+        else if (manip == &std::oct) base_ = 8;
         return *this;
     }
 
@@ -96,11 +121,45 @@ private:
         return *this;
     }
 
+    void appendInteger(long long v)
+    {
+        char text[32];
+        switch (base_)
+        {
+        case 16: std::snprintf(text, sizeof(text), "%llx", static_cast<unsigned long long>(v)); break;
+        case 8:  std::snprintf(text, sizeof(text), "%llo", static_cast<unsigned long long>(v)); break;
+        default: std::snprintf(text, sizeof(text), "%lld", v); break;
+        }
+        buffer_ += text;
+    }
+
+    void appendInteger(unsigned long long v)
+    {
+        char text[32];
+        switch (base_)
+        {
+        case 16: std::snprintf(text, sizeof(text), "%llx", v); break;
+        case 8:  std::snprintf(text, sizeof(text), "%llo", v); break;
+        default: std::snprintf(text, sizeof(text), "%llu", v); break;
+        }
+        buffer_ += text;
+    }
+
     std::uint32_t level_;
     const char* category_;
     std::string buffer_;
+    int base_ = 10;      // std::hex/dec/oct 粘性基数
     bool flushed_ = false;
 };
+
+// std::fixed + std::setprecision(n) 的等价格式化（%.*f）。
+// 迁移人工批次用：`<< std::fixed << std::setprecision(2) << v` → `<< primal::log::Fixed(2, v)`。
+inline std::string Fixed(int precision, double v)
+{
+    char text[128];
+    std::snprintf(text, sizeof(text), "%.*f", precision, v);
+    return std::string(text);
+}
 
 } // namespace primal::log
 

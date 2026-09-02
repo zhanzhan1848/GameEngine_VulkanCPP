@@ -325,7 +325,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
          useDepthBindings = graph.GetDevice().GetPlatform() != RHIPlatform::Dawn]
          (const TAAPassData& data, RenderGraphContext& context) {
             if (s_Pipeline == handles::INVALID_PIPELINE) {
-                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: pipeline INVALID" << std::endl;
+                std::cerr << "[TAA] Execute abort: pipeline INVALID" << std::endl;
                 return;
             }
 
@@ -353,16 +353,16 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             if (inHandle == handles::INVALID_RESOURCE ||
                 velHandle == handles::INVALID_RESOURCE ||
                 outHandle == handles::INVALID_RESOURCE) {
-                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: invalid input resource" << std::endl;
+                std::cerr << "[TAA] Execute abort: invalid input resource" << std::endl;
                 return;
             }
 
             if (histHandle == handles::INVALID_RESOURCE) {
-                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: invalid history texture" << std::endl;
+                std::cerr << "[TAA] Execute abort: invalid history texture" << std::endl;
                 return;
             }
             if (histWriteHandle == handles::INVALID_RESOURCE) {
-                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: invalid history write texture" << std::endl;
+                std::cerr << "[TAA] Execute abort: invalid history write texture" << std::endl;
                 return;
             }
 

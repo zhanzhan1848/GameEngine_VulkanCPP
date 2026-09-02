@@ -54,7 +54,7 @@ inline void Emit(std::uint32_t level, const char* category, const char* message)
 {
     if (auto* fn = detail::g_emitFn.load(std::memory_order_acquire))
         fn(detail::g_emitUserdata.load(std::memory_order_relaxed), level, category, message);
-    else if (false) // 二分实验：暂时禁用 stderr 回退
+    else if (message != nullptr)
         std::fprintf(stderr, "%s\n", message);
 }
 

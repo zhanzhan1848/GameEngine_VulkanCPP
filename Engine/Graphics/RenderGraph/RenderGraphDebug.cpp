@@ -11,6 +11,7 @@
 #include <map>
 #include <chrono>
 #include <iomanip>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rendergraph {
 
@@ -88,7 +89,7 @@ RenderGraphDebug::~RenderGraphDebug() {
 void RenderGraphDebug::CreatePipeline() {
     using namespace primal::graphics::utils;
     
-    std::cout << "Loading shader from: " << shaderPath_ << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "Loading shader from: " << shaderPath_ << std::endl;
     std::string source = ShaderLoader::LoadShaderSource(shaderPath_);
     if (source.empty() && shaderPath_.rfind("../", 0) == 0) {
         // shaderPath_ 以 "../" 开头时假定 CWD 为构建根目录；从其他目录运行
@@ -97,16 +98,16 @@ void RenderGraphDebug::CreatePipeline() {
         // root + "../Engine/..." 会逃出仓库，永远指向不存在的位置。
 #ifdef PROJECT_ROOT
         std::string absolutePath = std::string{PROJECT_ROOT} + "/" + shaderPath_.substr(3);
-        std::cout << "Retrying with absolute path: " << absolutePath << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "Retrying with absolute path: " << absolutePath << std::endl;
         source = ShaderLoader::LoadShaderSource(absolutePath);
 #endif
     }
     
     if (source.empty()) {
-        std::cerr << "Failed to load shader source!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "Failed to load shader source!" << std::endl;
         return;
     }
-    std::cout << "Shader loaded successfully. Size: " << source.size() << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "Shader loaded successfully. Size: " << source.size() << std::endl;
 
     // 1. Graph Pipeline
     {
@@ -471,7 +472,7 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
         return;
     }
     if (pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "RenderGraphDebug: Invalid pipeline!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "RenderGraphDebug: Invalid pipeline!" << std::endl;
         return;
     }
     
@@ -488,27 +489,35 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
         const auto& times = graph.GetPassExecutionTimes();
         if (!times.empty()) {
             double total = 0.0;
-            std::cout << "\n=== GPU Frame Profiler (ms) ===" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << "\n=== GPU Frame Profiler (ms) ===" << std::endl;
             
             // Sort by order in passes list for consistent output
             const auto& passes = graph.GetPasses();
             for (auto* pass : passes) {
                 if (times.count(pass->GetName())) {
                     double t = times.at(pass->GetName());
-                    std::cout << std::left << std::setw(30) << pass->GetName() << ": " 
-                              << std::fixed << std::setprecision(3) << t << " ms" << std::endl;
+                    {
+                        std::string name = pass->GetName();
+                        if (name.size() < 30) name += std::string(30 - name.size(), ' ');
+                        PRIMAL_LOG_STREAM(Error, "Render") << name << ": " << primal::log::Fixed(3, t) << " ms" << std::endl;
+                    }
                     total += t;
                 }
             }
-            std::cout << "-----------------------------------" << std::endl;
-            std::cout << std::left << std::setw(30) << "Total GPU Time" << ": " 
-                      << std::fixed << std::setprecision(3) << total << " ms" 
-                      << " (" << std::setprecision(1) << (total > 0.0 ? 1000.0 / total : 0.0) << " FPS)" << std::endl;
-            std::cout << "===================================" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << "-----------------------------------" << std::endl;
+            {
+                std::string label = "Total GPU Time";
+                if (label.size() < 30) label += std::string(30 - label.size(), ' ');
+                char fps[32];
+                std::snprintf(fps, sizeof(fps), "%.1g", total > 0.0 ? 1000.0 / total : 0.0);
+                PRIMAL_LOG_STREAM(Error, "Render") << label << ": " << primal::log::Fixed(3, total) << " ms"
+                          << " (" << fps << " FPS)" << std::endl;
+            }
+            PRIMAL_LOG_STREAM(Info, "Render") << "===================================" << std::endl;
         }
     }
 
-    std::cout << "RenderGraphDebug: Drawing " << vertices_.size() << " vertices. Passes: " << graph.GetPasses().size() 
+    PRIMAL_LOG_STREAM(Info, "Render") << "RenderGraphDebug: Drawing " << vertices_.size() << " vertices. Passes: " << graph.GetPasses().size() 
               << " Screen: " << width << "x" << height 
               << " Scale: " << scale_ << " Offset: " << offset_.x << "," << offset_.y << std::endl;
 
@@ -740,7 +749,7 @@ void RenderGraphDebug::Draw(rhi::RHICommandBuffer* cmdBuffer, const RenderGraph&
             
             // Draw Calls
             int vertexOffset = 0;
-            std::cout << "[RenderGraphDebug] Drawing " << validIndices.size() << " texture previews." << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << "[RenderGraphDebug] Drawing " << validIndices.size() << " texture previews." << std::endl;
             for (size_t idx : validIndices) {
                 // Bind Descriptor Set
                 rhi::DescriptorSetHandle sets[] = {textureSets_[idx]};

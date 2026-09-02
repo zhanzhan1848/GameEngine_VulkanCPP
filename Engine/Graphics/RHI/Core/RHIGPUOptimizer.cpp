@@ -16,6 +16,7 @@
 #include <sstream>
 #include <fstream>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -226,7 +227,7 @@ bool RHIGPUOptimizer::SubmitOptimizedCommandBuffer(CommandBufferHandle commandBu
                                                    u32 priority) {
     // 检查设备有效性
     if (!device_.IsValid()) {
-        std::cout << "Debug: SubmitOptimizedCommandBuffer - Device is invalid, rejecting submission" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: SubmitOptimizedCommandBuffer - Device is invalid, rejecting submission" << std::endl;
         return false;
     }
     
@@ -254,10 +255,10 @@ bool RHIGPUOptimizer::SubmitOptimizedCommandBuffer(CommandBufferHandle commandBu
                 std::lock_guard<std::mutex> cacheLock(cacheMutex_);
                 pendingCommandBuffers_.push_back(commandBuffer);
                 
-                std::cout << "Debug: Batched strategy - pending buffers: " << pendingCommandBuffers_.size() << ", batch size: " << config_.commandBufferBatchSize << std::endl;
+                PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Batched strategy - pending buffers: " << pendingCommandBuffers_.size() << ", batch size: " << config_.commandBufferBatchSize << std::endl;
                 
                 if (pendingCommandBuffers_.size() >= config_.commandBufferBatchSize) {
-                    std::cout << "Debug: Triggering batch submission" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Triggering batch submission" << std::endl;
                     return SubmitCommandBuffersBatchInternal(pendingCommandBuffers_.data(), 
                                                            static_cast<u32>(pendingCommandBuffers_.size()),
                                                            queueType) > 0;
@@ -277,17 +278,17 @@ bool RHIGPUOptimizer::SubmitOptimizedCommandBuffer(CommandBufferHandle commandBu
                 bool shouldSubmit = false;
                 if (currentMetrics_.gpuUtilization > config_.gpuUtilizationThreshold) {
                     shouldSubmit = true;
-                    std::cout << "Debug: Adaptive strategy - high GPU utilization, submitting early" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Adaptive strategy - high GPU utilization, submitting early" << std::endl;
                 } else if (currentMetrics_.frameTime > config_.targetFrameTime * 1.1f) {
                     shouldSubmit = true;
-                    std::cout << "Debug: Adaptive strategy - high frame time, submitting early" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Adaptive strategy - high frame time, submitting early" << std::endl;
                 } else if (pendingCommandBuffers_.size() >= config_.commandBufferBatchSize) {
                     shouldSubmit = true;
-                    std::cout << "Debug: Adaptive strategy - batch size reached, submitting" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Adaptive strategy - batch size reached, submitting" << std::endl;
                 }
                 
                 if (shouldSubmit) {
-                    std::cout << "Debug: Adaptive strategy - submitting " << pendingCommandBuffers_.size() << " buffers" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Adaptive strategy - submitting " << pendingCommandBuffers_.size() << " buffers" << std::endl;
                     return SubmitCommandBuffersBatchInternal(pendingCommandBuffers_.data(), 
                                                            static_cast<u32>(pendingCommandBuffers_.size()),
                                                            queueType) > 0;
@@ -307,19 +308,19 @@ bool RHIGPUOptimizer::SubmitOptimizedCommandBuffer(CommandBufferHandle commandBu
                 // 如果预测执行时间较长，立即提交以避免延迟
                 if (predictedExecTime > config_.targetFrameTime * 0.5f) {
                     shouldSubmit = true;
-                    std::cout << "Debug: Predictive strategy - long execution time predicted, submitting immediately" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Predictive strategy - long execution time predicted, submitting immediately" << std::endl;
                 } else if (pendingCommandBuffers_.size() >= config_.commandBufferBatchSize / 2) {
                     // 预测策略使用更小的批处理阈值以提高响应性
                     shouldSubmit = true;
-                    std::cout << "Debug: Predictive strategy - predictive batch threshold reached, submitting" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Predictive strategy - predictive batch threshold reached, submitting" << std::endl;
                 } else if (currentMetrics_.cpuToGpuLatency > config_.targetFrameTime * 0.3f) {
                     // 如果CPU到GPU延迟较高，提前提交
                     shouldSubmit = true;
-                    std::cout << "Debug: Predictive strategy - high CPU-GPU latency, submitting early" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Predictive strategy - high CPU-GPU latency, submitting early" << std::endl;
                 }
                 
                 if (shouldSubmit) {
-                    std::cout << "Debug: Predictive strategy - submitting " << pendingCommandBuffers_.size() << " buffers" << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Predictive strategy - submitting " << pendingCommandBuffers_.size() << " buffers" << std::endl;
                     return SubmitCommandBuffersBatchInternal(pendingCommandBuffers_.data(), 
                                                            static_cast<u32>(pendingCommandBuffers_.size()),
                                                            queueType) > 0;
@@ -342,29 +343,29 @@ u32 RHIGPUOptimizer::SubmitCommandBuffersBatchInternal(const CommandBufferHandle
     
     // 检查设备有效性
     if (!device_.IsValid()) {
-        std::cout << "Debug: Device is invalid, rejecting batch submission" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Device is invalid, rejecting batch submission" << std::endl;
         return 0;
     }
     
     // 批量提交命令缓冲区到设备
-    std::cout << "Debug: SubmitCommandBuffersBatchInternal - count: " << count << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: SubmitCommandBuffersBatchInternal - count: " << count << std::endl;
     for (u32 i = 0; i < count; ++i) {
-        std::cout << "Debug: Submitting buffer " << i << "/" << count << " with handle " << commandBuffers[i] << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Submitting buffer " << i << "/" << count << " with handle " << commandBuffers[i] << std::endl;
         QueueSubmitInfo submitInfo{};
         submitInfo.cmdBuffer = commandBuffers[i];
         bool submitResult = device_.Submit(submitInfo);
-        std::cout << "Debug: SubmitCommandBuffer returned " << (submitResult ? "true" : "false") << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: SubmitCommandBuffer returned " << (submitResult ? "true" : "false") << std::endl;
         if (submitResult) {
-            std::cout << "Debug: Adding to queue (no lock needed)..." << std::endl;
+            PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Adding to queue (no lock needed)..." << std::endl;
             commandBufferQueue_.push(commandBuffers[i]);
             submittedCount++;
-            std::cout << "Debug: Buffer " << i << "/" << count << " submitted successfully (" << submittedCount << "/" << count << " total)" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Buffer " << i << "/" << count << " submitted successfully (" << submittedCount << "/" << count << " total)" << std::endl;
         } else {
-            std::cout << "Debug: Buffer " << i << "/" << count << " submission failed" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Buffer " << i << "/" << count << " submission failed" << std::endl;
         }
-        std::cout << "Debug: Loop iteration " << i << " completed" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Loop iteration " << i << " completed" << std::endl;
     }
-    std::cout << "Debug: Batch submission complete - " << submittedCount << "/" << count << " buffers submitted" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Batch submission complete - " << submittedCount << "/" << count << " buffers submitted" << std::endl;
     
     // 创建同步点
     if (submittedCount > 0) {
@@ -453,7 +454,7 @@ bool RHIGPUOptimizer::WaitForSyncPoint(SyncHandle syncHandle, u32 timeoutMs) {
 bool RHIGPUOptimizer::SubmitCommandBuffer(CommandBufferHandle commandBuffer) {
     // 检查设备有效性
     if (!device_.IsValid()) {
-        std::cout << "Debug: Device is invalid, rejecting single command submission" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "Debug: Device is invalid, rejecting single command submission" << std::endl;
         return false;
     }
     

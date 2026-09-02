@@ -10,6 +10,7 @@
 #include "MaterialInstance.h"
 #include "Content/ContentToEngine.h"
 #include "Graphics/RHI/Core/RHIMeshAsset.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -112,7 +113,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
             if (!pipelineResult.empty()) {
                 return pipelineResult;
             }
-            std::cerr << "[SceneData] Pipeline-format parse failed; trying legacy parser" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Scene") << "[SceneData] Pipeline-format parse failed; trying legacy parser" << std::endl;
         }
     }
 
@@ -200,7 +201,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              if (reader.Remaining() < 4) break;
              u32 nameLen = reader.Read<u32>();
              if (nameLen > 1000) {
-                 std::cerr << "SceneDataAdapter: Material Name too long (" << nameLen << "), possible format mismatch." << std::endl;
+                 PRIMAL_LOG_STREAM(Error, "Scene") << "SceneDataAdapter: Material Name too long (" << nameLen << "), possible format mismatch." << std::endl;
                  break;
              }
              std::string name = reader.ReadString(nameLen);
@@ -234,7 +235,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // std::cout << "  Mat " << i << ": " << name << " (Diff: " << diffuse << ")" << std::endl;
         }
     } else {
-         std::cerr << "SceneDataAdapter: numMaterials suspiciously large, assuming Old Format or Error." << std::endl;
+         PRIMAL_LOG_STREAM(Error, "Scene") << "SceneDataAdapter: numMaterials suspiciously large, assuming Old Format or Error." << std::endl;
          // Rewind? We can't rewind BlobReader easily without creating new one or hacking offset.
          // But we made BlobReader private.
          // Let's just hope we are using the new format.
@@ -286,13 +287,13 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
 
         for (u32 i = 0; i < submeshCount; ++i) {
              if (reader.Remaining() < 4) {
-                 std::cerr << "[SceneData] Stopping at mesh " << i << "/" << submeshCount
+                 PRIMAL_LOG_STREAM(Error, "Scene") << "[SceneData] Stopping at mesh " << i << "/" << submeshCount
                            << " — insufficient remaining data (" << reader.Remaining() << ")" << std::endl;
                  break;
              }
              // Progress log for large meshes
              if (submeshCount > 100 && (i % 200 == 0)) {
-                 std::cerr << "[SceneData] Processing mesh " << i << "/" << submeshCount
+                 PRIMAL_LOG_STREAM(Error, "Scene") << "[SceneData] Processing mesh " << i << "/" << submeshCount
                            << " remaining=" << reader.Remaining() << std::endl;
              }
              
@@ -317,7 +318,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
 
              // Debug: log first mesh header for pipeline format diagnosis.
              if (lod == 0 && i == 0) {
-                 std::cerr << "[SceneData] First mesh: firstVal=" << firstVal
+                 PRIMAL_LOG_STREAM(Error, "Scene") << "[SceneData] First mesh: firstVal=" << firstVal
                            << " remaining=" << reader.Remaining() << std::endl;
              }
              // Debug: peek at first 3 mesh headers WITHOUT advancing reader.
@@ -327,7 +328,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  if (rem >= firstVal + 36) {
                      std::string dbgName(reinterpret_cast<const char*>(peek), firstVal);
                      const u32* u32p = reinterpret_cast<const u32*>(peek + firstVal);
-                     std::cerr << "[SceneData] mesh " << i << ": name=\"" << dbgName
+                     PRIMAL_LOG_STREAM(Error, "Scene") << "[SceneData] mesh " << i << ": name=\"" << dbgName
                                << "\" lodId=" << u32p[0] << " matIdx=" << (s32)u32p[1]
                                << " elemSize=" << u32p[2] << " elemType=" << u32p[3]
                                << " verts=" << u32p[4] << " idxSize=" << u32p[5]
@@ -407,7 +408,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                      materialIndex = (s32)firstVal;
                      
                      if (reader.Remaining() < 16) {  // 4 remaining fields * 4 bytes (ElemSize already read)
-                         std::cerr << "ERROR: Incomplete submesh header at LOD " << lod << ", submesh " << i << std::endl;
+                         PRIMAL_LOG_STREAM(Error, "Scene") << "ERROR: Incomplete submesh header at LOD " << lod << ", submesh " << i << std::endl;
                          failedCount++;
                          continue;
                      }
@@ -467,7 +468,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // Skip data in reader
             u32 totalSize = positionSize + posPadding + elementBufferSize + elemPadding + indexBufferSize;
             if (reader.Remaining() < totalSize) {
-                std::cerr << "Incomplete submesh data at LOD " << lod << " mesh " << i
+                PRIMAL_LOG_STREAM(Error, "Scene") << "Incomplete submesh data at LOD " << lod << " mesh " << i
                           << ": need " << totalSize << " (pos=" << positionSize
                           << "+pad=" << posPadding << "+elem=" << elementBufferSize
                           << "+epad=" << elemPadding << "+idx=" << indexBufferSize
@@ -762,7 +763,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
     if (reader.Remaining() < sizeof(u32)) return result;
     u32 numMaterials = reader.Read<u32>();
     if (numMaterials > 100000) { // Sanity check
-        std::cerr << "Invalid NumMaterials: " << numMaterials << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Scene") << "Invalid NumMaterials: " << numMaterials << std::endl;
         return result;
     }
     // std::cout << "Num Materials: " << numMaterials << std::endl;
@@ -800,7 +801,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::Load(rhi::RHIDeviceBase* device
     if (reader.Remaining() < sizeof(u32)) return result;
     u32 numLodGroups = reader.Read<u32>();
     if (numLodGroups > 1000) { // Sanity check
-        std::cerr << "Invalid NumLodGroups: " << numLodGroups << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Scene") << "Invalid NumLodGroups: " << numLodGroups << std::endl;
         return result;
     }
     // std::cout << "Num LOD Groups: " << numLodGroups << std::endl;
@@ -1278,7 +1279,7 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
         }
     }
 
-    std::cout << "[SceneDataAdapter::ImportResources] Imported " << result.meshes.size()
+    PRIMAL_LOG_STREAM(Info, "Scene") << "[SceneDataAdapter::ImportResources] Imported " << result.meshes.size()
               << " mesh resources" << std::endl;
     return result;
 }
@@ -1335,7 +1336,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
     // 2. Materials (3 fields each: name, diffuse, normal)
     u32 numMaterials = readU32();
     if (numMaterials > 10000) {
-        std::cerr << "[Pipeline] Invalid material count: " << numMaterials << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] Invalid material count: " << numMaterials << std::endl;
         return {};
     }
 
@@ -1362,7 +1363,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
     // 3. LOD groups
     u32 numLods = readU32();
     if (numLods > 100000 || numLods == 0) {
-        std::cerr << "[Pipeline] Invalid LOD group count: " << numLods
+        PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] Invalid LOD group count: " << numLods
                   << " after " << numMaterials << " materials" << std::endl;
         return {};
     }
@@ -1374,7 +1375,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
         std::string lodName = readString();
         u32 meshCount = readU32();
         if (meshCount > 100000) {
-            std::cerr << "[Pipeline] Invalid mesh count: " << meshCount
+            PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] Invalid mesh count: " << meshCount
                       << " at LOD group " << lod << std::endl;
             return {};
         }
@@ -1394,7 +1395,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             float lodThreshold = readF32();
 
             if (lod == 0 && m == 0) {
-                std::cerr << "[Pipeline] LOD " << lod << ": meshes=" << meshCount
+                PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] LOD " << lod << ": meshes=" << meshCount
                           << ", first=\"" << meshName << "\", verts=" << vertCount
                           << ", indices=" << idxCount << ", elemSize=" << elemSize
                           << std::endl;
@@ -1404,7 +1405,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             if (vertCount == 0 || vertCount > 10000000 ||
                 idxCount == 0 || idxCount > 30000000 ||
                 (idxSize != 2 && idxSize != 4)) {
-                std::cerr << "[Pipeline] Bad mesh header at LOD " << lod
+                PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] Bad mesh header at LOD " << lod
                           << " mesh " << m << std::endl;
                 return result; // partial result
             }
@@ -1416,7 +1417,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
 
             // SceneBlobWriter serializes all three buffers tightly packed.
             if (reader.Remaining() < posSize + elemBufSize + idxBufSize) {
-                std::cerr << "[Pipeline] Insufficient data for mesh buffers at LOD "
+                PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] Insufficient data for mesh buffers at LOD "
                           << lod << " mesh " << m << std::endl;
                 return result;
             }
@@ -1514,7 +1515,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
                 }
                 result.push_back(info);
             } else {
-                std::cerr << "[Pipeline] Failed to create RenderMesh for \""
+                PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] Failed to create RenderMesh for \""
                           << meshName << "\"" << std::endl;
                 delete mesh;
             }

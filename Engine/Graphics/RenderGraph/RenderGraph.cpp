@@ -379,6 +379,16 @@ void RenderGraph::AllocateResources() {
                 } else {
                     // Create new
                     rhi::ResourceHandle handle = device_.CreateTexture(tex->GetDesc());
+                    if (handle == rhi::handles::INVALID_RESOURCE) {
+                        // 分配失败若静默，下游 BeginRenderPass 会拿到 INVALID
+                        // 物理句柄构造出畸形 render pass（Vulkan validation 崩溃
+                        // / 黑屏，2026-09-02 排查记录）。
+                        static bool s_allocFailLogged = false;
+                        if (!s_allocFailLogged) {
+                            s_allocFailLogged = true;
+                            std::cerr << "[RG] texture alloc FAILED: " << tex->GetName() << std::endl;
+                        }
+                    }
                     
                     PooledResource pooled{
                         handle,

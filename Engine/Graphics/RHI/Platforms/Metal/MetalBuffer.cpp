@@ -9,6 +9,7 @@
 #include "MetalBuffer.h"
 #include "MetalDevice.h"
 #include "../../Core/RHIAdaptiveMemoryPool.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -95,7 +96,7 @@ MetalBuffer::~MetalBuffer() {
 
 bool MetalBuffer::Initialize() {
     if (desc_.size == 0) {
-        std::cerr << "[MetalBuffer] Initialize failed: size is 0" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] Initialize failed: size is 0" << std::endl;
         return false;
     }
 
@@ -104,7 +105,7 @@ bool MetalBuffer::Initialize() {
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MTL::Device* mtlDevice = metalDevice.GetNativeDevice();
     if (!mtlDevice) {
-        std::cerr << "[MetalBuffer] Initialize failed: Native device is null" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] Initialize failed: Native device is null" << std::endl;
         return false;
     }
 
@@ -116,7 +117,7 @@ bool MetalBuffer::Initialize() {
     }
     
     if (!mtlBuffer_) {
-        std::cerr << "[MetalBuffer] Failed to create buffer: " << GetName() 
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] Failed to create buffer: " << GetName() 
                   << " Size: " << desc_.size 
                   << " Options: " << options 
                   << (heap_ ? " (From Heap)" : "") << std::endl;
@@ -182,13 +183,13 @@ void MetalBuffer::SetHeapAllocation(MTL::Heap* heap, u64 offset, RHIAdaptiveMemo
 
 void* MetalBuffer::mapImpl(u64 offset, u64 size) {
     if (!mtlBuffer_) {
-        std::cerr << "[MetalBuffer] mapImpl failed: mtlBuffer_ is null" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] mapImpl failed: mtlBuffer_ is null" << std::endl;
         return nullptr;
     }
     
     // 检查缓冲区是否可映射
     if (mtlBuffer_->storageMode() == MTL::StorageModePrivate) {
-        std::cerr << "[MetalBuffer] Cannot map private buffer: " << GetName() << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] Cannot map private buffer: " << GetName() << std::endl;
         return nullptr;
     }
     
@@ -196,7 +197,7 @@ void* MetalBuffer::mapImpl(u64 offset, u64 size) {
     if (!bufferContents) {
          static bool loggedMapFail = false;
          if (!loggedMapFail) {
-             std::cerr << "[MetalBuffer] mapImpl failed: contents() returned null. StorageMode: " 
+             PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] mapImpl failed: contents() returned null. StorageMode: " 
                        << (int)mtlBuffer_->storageMode() 
                        << " Size: " << desc_.size
                        << " Name: " << GetName() << std::endl;
@@ -238,7 +239,7 @@ bool MetalBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
             static bool loggedFastPath = false;
                     if (!loggedFastPath) {
                         // Safe log: avoid calling GetName() if potential risk, just log address or skip name
-                        std::cerr << "[MetalBuffer] updateDataImpl used Fast Path (Map) for buffer at " << this << std::endl;
+                        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] updateDataImpl used Fast Path (Map) for buffer at " << this << std::endl;
                         loggedFastPath = true;
                     }
                     return true;
@@ -252,7 +253,7 @@ bool MetalBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
             //         (调用方在 frame 外调用,如 asset load)
             static bool loggedSlowPath = false;
             if (!loggedSlowPath) {
-                std::cerr << "[MetalBuffer] updateDataImpl used SLOW Path (Staging) for buffer at " << this
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] updateDataImpl used SLOW Path (Staging) for buffer at " << this
                           << " CanMap: " << CanMap()
                           << " MemoryUsage: " << (int)desc_.memoryUsage
                           << std::endl;
@@ -263,14 +264,14 @@ bool MetalBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
     MetalStagingAllocator& allocator = metalDevice.GetStagingAllocator();
 
     if (!allocator.IsInitialized()) {
-        std::cerr << "[MetalBuffer] updateDataImpl: staging allocator not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] updateDataImpl: staging allocator not initialized" << std::endl;
         return false;
     }
 
     // 1. 从 per-frame pool 分配 CPU 可写 staging
     MetalStagingAllocator::Allocation alloc = allocator.Allocate(size, 256);
     if (alloc.overflow) {
-        std::cerr << "[MetalBuffer] updateDataImpl: staging pool overflow, size=" << size << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] updateDataImpl: staging pool overflow, size=" << size << std::endl;
         return false;
     }
 
@@ -331,7 +332,7 @@ MTL::ResourceOptions MetalBuffer::getResourceOptions() const {
 
     static int s_tracked_buf_count = 0;
     if (s_tracked_buf_count < 30) {
-        std::cerr << "[MetalBuffer] Tracked buf opts=0x" << std::hex << options
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBuffer] Tracked buf opts=0x" << std::hex << options
                   << " size=" << std::dec << desc_.size
                   << " mem=" << static_cast<int>(desc_.memoryUsage) << std::endl;
         ++s_tracked_buf_count;

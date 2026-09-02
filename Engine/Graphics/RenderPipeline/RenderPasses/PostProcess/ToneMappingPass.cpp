@@ -257,7 +257,16 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             EnsurePipeline(builder.GetGraph().GetDevice());
         },
         [inputHDR, bloomTexture, aoTexture, ssgiTexture, velocityTexture, fi](const ToneMappingPassData& data, RenderGraphContext& context) {
-            if (s_ToneMapPipeline == handles::INVALID_PIPELINE) return;
+            if (s_ToneMapPipeline == handles::INVALID_PIPELINE) {
+                // 管线 INVALID 时 ToneMapping_Output 成为从未被写入的瞬态，
+                // FinalBlit 采样池化垃圾（stderr 直写——diag 通道在纯测试进程静默）。
+                static bool s_abort = false;
+                if (!s_abort) {
+                    s_abort = true;
+                    std::cerr << "[TONE-EXEC] abort: pipeline INVALID" << std::endl;
+                }
+                return;
+            }
 
             auto& device = context.graph->GetDevice();
             auto* cmd = context.cmdBuffer;

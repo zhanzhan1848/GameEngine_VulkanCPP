@@ -2687,7 +2687,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         PostProcess::ToneMappingPassData toneOutRWCB;
-        if (ppInputRG.IsValid()) {
+        // 后处理链启用策略（2026-09-02）：TAA/Bloom/ToneMapping 曾因 FinalBlit
+        // 句柄预解析 bug 在两平台同时被 RG 裁剪（从未真正执行）。链路启用后：
+        //   Metal —— 全链实测可用（TAA/Bloom/ToneMap 均验证）；
+        //   Vulkan —— 首次执行即暴露存量问题（Bloom 管线 INVALID、ToneMapping
+        //   render pass 附件异常 → validation 崩溃/黑屏），默认回退 legacy
+        //   （FinalBlit 直读 fusion），PRIMAL_FULL_POST=1 显式启用以供调试。
+        const bool legacyPostRWCB = std::getenv("PRIMAL_LEGACY_POST") != nullptr ||
+            (device_->GetPlatform() == RHIPlatform::Vulkan &&
+             !std::getenv("PRIMAL_FULL_POST"));
+        if (ppInputRG.IsValid() && !legacyPostRWCB) {
             // TAA resolve active on Vulkan + Metal — jitter is safe (see
             // BuildRenderGraph Step 10.5).
             gpuDraw.SetJitterEnabled(taa_jitter_enabled_);

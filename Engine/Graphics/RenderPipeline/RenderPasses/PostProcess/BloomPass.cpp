@@ -144,7 +144,23 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
             }
         },
         [inputColor, fi](const BloomSetupData& data, RenderGraphContext& context) {
-            if (s_BrightPassPipeline == handles::INVALID_PIPELINE) return;
+            if (s_BrightPassPipeline == handles::INVALID_PIPELINE) {
+                // TEMP 判定：Bloom 管线 INVALID 会让 Bloom_Output 成为从未
+                // 被写入的瞬态纹理，下游读到池化垃圾（Vulkan 黑屏排查）。
+                static bool s_bloomAbort = false;
+                if (!s_bloomAbort) {
+                    s_bloomAbort = true;
+                    std::cerr << "[BLOOM-EXEC] abort: bright pipeline INVALID" << std::endl;
+                }
+                return;
+            }
+            {
+                static bool s_bloomExec = false;
+                if (!s_bloomExec) {
+                    s_bloomExec = true;
+                    std::cerr << "[BLOOM-EXEC] ok" << std::endl;
+                }
+            }
             auto& device = context.graph->GetDevice();
             auto* cmd = context.cmdBuffer;
 

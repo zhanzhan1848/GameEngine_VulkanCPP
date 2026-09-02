@@ -51,6 +51,7 @@
 // For texture loading
 #include "stb_image.h"
 #include <zlib.h>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -261,7 +262,7 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
             std::string path = ResolveShaderPath(relPath);
             auto bytes = ReadFileToBytes(path);
             if (bytes.empty()) {
-                std::cerr << "[ForwardSceneRenderer] Failed to load compute SPIR-V: " << path << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load compute SPIR-V: " << path << std::endl;
                 return {};
             }
             return bytes;
@@ -271,7 +272,7 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
         std::string path = ResolveShaderPath(relPath);
         auto bytes = ReadFileToBytes(path);
         if (bytes.empty()) {
-            std::cerr << "[ForwardSceneRenderer] Failed to load SPIR-V: " << path << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load SPIR-V: " << path << std::endl;
             return {};
         }
         return bytes;
@@ -280,7 +281,7 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
     std::string path = ResolveShaderPath(SHADER_DIR + filename + std::string(".metal"));
     std::string source = ReadFileToString(path);
     if (source.empty()) {
-        std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << filename << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load shader: " << filename << std::endl;
         return {};
     }
     std::set<std::string> included;
@@ -351,7 +352,7 @@ ResourceHandle LoadTextureFromFile(RHIDeviceBase* dev, const std::string& path, 
     int width, height, channels;
     unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
     if (!data) {
-        std::cerr << "[ForwardSceneRenderer] stbi_load failed: " << path << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] stbi_load failed: " << path << std::endl;
         return handles::INVALID_RESOURCE;
     }
 
@@ -522,7 +523,7 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     // Initialize() skip lifted (part 15.5), Editor render smoke passing
     // (part 15.6). Runs end-to-end on Vulkan via StandardRenderPipeline.
     if (device && device->GetPlatform() == RHIPlatform::Vulkan) {
-        std::cout << "[ForwardSceneRenderer] Initializing on Vulkan (T4.6.5 parts 1-15 complete)"
+        PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer] Initializing on Vulkan (T4.6.5 parts 1-15 complete)"
                   << std::endl;
     }
 
@@ -623,7 +624,7 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
     line_renderer_.Initialize(device_);
 
     initialized_ = true;
-    std::cout << "[ForwardSceneRenderer] Initialized (" << render_width << "x" << render_height << ")" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer] Initialized (" << render_width << "x" << render_height << ")" << std::endl;
     return true;
 }
 
@@ -887,13 +888,13 @@ void ForwardSceneRenderer::CreateShaders() {
     auto loadWgsl = [this](const char* name, const char* entry, ShaderStage stage) -> ShaderHandle {
         std::string src = dawn::LoadWGSL(name);
         if (src.empty()) {
-            std::cerr << "[ForwardSceneRenderer] WASM: failed to load WGSL: "
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] WASM: failed to load WGSL: "
                       << name << "/" << entry << std::endl;
             return handles::INVALID_SHADER;
         }
         auto handle = device_->CreateShader(src.data(), src.size(), stage, entry);
         if (handle == handles::INVALID_SHADER) {
-            std::cerr << "[ForwardSceneRenderer] WASM: failed to compile WGSL: "
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] WASM: failed to compile WGSL: "
                       << name << "/" << entry << std::endl;
         }
         return handle;
@@ -914,7 +915,7 @@ void ForwardSceneRenderer::CreateShaders() {
     auto load = [this, platform](const char* file, const char* entry, ShaderStage stage) -> ShaderHandle {
         auto src = LoadShaderSource(file, platform, stage);
         if (src.empty()) {
-            std::cerr << "[ForwardSceneRenderer] Failed to load shader: " << file << "/" << entry << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load shader: " << file << "/" << entry << std::endl;
             return handles::INVALID_SHADER;
         }
         // Vulkan SPIR-V files use "main" entry point by convention; Metal uses
@@ -929,7 +930,7 @@ void ForwardSceneRenderer::CreateShaders() {
         }
         auto handle = device_->CreateShader(src.data(), src.size(), stage, useEntry);
         if (handle == handles::INVALID_SHADER) {
-            std::cerr << "[ForwardSceneRenderer] Failed to compile shader: " << file << "/" << entry << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to compile shader: " << file << "/" << entry << std::endl;
         }
         return handle;
     };
@@ -1570,19 +1571,19 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
 
     std::ifstream file(model_path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        std::cerr << "[ForwardSceneRenderer] Failed to open file: " << model_path << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to open file: " << model_path << std::endl;
         return false;
     }
     std::streamsize file_size = file.tellg();
     file.seekg(0, std::ios::beg);
     std::vector<char> buffer(file_size);
     if (!file.read(buffer.data(), file_size)) {
-        std::cerr << "[ForwardSceneRenderer] Failed to read file: " << model_path << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to read file: " << model_path << std::endl;
         return false;
     }
     mesh_infos_ = scene_adapter_.LoadRenderItemData(device_, buffer.data(), (u32)buffer.size());
     if (mesh_infos_.empty()) {
-        std::cerr << "[ForwardSceneRenderer] Failed to load scene: " << model_path << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load scene: " << model_path << std::endl;
         return false;
     }
 
@@ -1613,7 +1614,7 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
                     if (albedo != handles::INVALID_RESOURCE) {
                         textureCache[fullPath] = albedo;
                     } else {
-                        std::cerr << "[ForwardSceneRenderer] Failed to load albedo: "
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load albedo: "
                                   << fullPath << std::endl;
                         albedo = white_texture_;
                     }
@@ -1680,7 +1681,7 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
         }
     }
 
-    std::cout << "[ForwardSceneRenderer] Loaded scene: " << model_path
+    PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer] Loaded scene: " << model_path
               << " (" << mesh_infos_.size() << " meshes, " << textureCache.size()
               << " textures)" << std::endl;
 
@@ -1762,7 +1763,7 @@ bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
     if (!ibl_precomputer_) {
         ibl_precomputer_ = std::make_unique<rhi::IBLPrecomputer>(device_);
         if (!ibl_precomputer_->Initialize()) {
-            std::cerr << "[ForwardSceneRenderer] IBLPrecomputer init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] IBLPrecomputer init failed" << std::endl;
             ibl_precomputer_.reset();
             return false;
         }
@@ -1779,18 +1780,18 @@ bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
     if (ext == ".texture") {
         u32 tw = 0, th = 0;
         if (!LoadTexrEquirect(hdr_path, tw, th, equirectFormat, pixels)) {
-            std::cerr << "[ForwardSceneRenderer] Failed to load TEXR: " << hdr_path << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load TEXR: " << hdr_path << std::endl;
             return false;
         }
         w = (int)tw; h = (int)th;
-        std::cout << "[ForwardSceneRenderer] TEXR equirect: " << w << "x" << h << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer] TEXR equirect: " << w << "x" << h << std::endl;
     } else {
         stbi_set_flip_vertically_on_load(1);
         int comp = 0;
         float* hdr = stbi_loadf(hdr_path.c_str(), &w, &h, &comp, 4);
         stbi_set_flip_vertically_on_load(0);
         if (!hdr || w <= 0 || h <= 0) {
-            std::cerr << "[ForwardSceneRenderer] Failed to load HDR: " << hdr_path << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load HDR: " << hdr_path << std::endl;
             if (hdr) stbi_image_free(hdr);
             return false;
         }
@@ -1820,7 +1821,7 @@ bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
     ResourceHandle newCube = ibl_precomputer_->ComputeEnvironmentCube(equirect, 256);
     device_->DestroyTexture(equirect);
     if (newCube == handles::INVALID_RESOURCE) {
-        std::cerr << "[ForwardSceneRenderer] Equirect→cube bake failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Equirect→cube bake failed" << std::endl;
         return false;
     }
     ResourceHandle newIrr = ibl_precomputer_->ComputeIrradianceMap(newCube, 32);
@@ -1829,7 +1830,7 @@ bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
     if (newIrr == handles::INVALID_RESOURCE ||
         newPre == handles::INVALID_RESOURCE ||
         newLut == handles::INVALID_RESOURCE) {
-        std::cerr << "[ForwardSceneRenderer] IBL bake failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] IBL bake failed" << std::endl;
         for (auto h2 : {newCube, newIrr, newPre, newLut}) {
             if (h2 != handles::INVALID_RESOURCE) device_->DestroyTexture(h2);
         }
@@ -1847,7 +1848,7 @@ bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
     for (auto h2 : {oldCube, oldIrr, oldPre, oldLut}) {
         if (h2 != handles::INVALID_RESOURCE) device_->DestroyTexture(h2);
     }
-    std::cout << "[ForwardSceneRenderer] Environment map set: " << hdr_path
+    PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer] Environment map set: " << hdr_path
               << " (" << w << "x" << h << ")" << std::endl;
     return true;
 }
@@ -2080,7 +2081,7 @@ ForwardSceneRenderer::CreateStaticEntities() {
         result.mesh_slot_indices.push_back(i);
     }
 
-    std::cout << "[ForwardSceneRenderer] Created " << result.entity_ids.size()
+    PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer] Created " << result.entity_ids.size()
               << " static ECS entities" << std::endl;
     return result;
 }
@@ -2101,7 +2102,7 @@ u32 ForwardSceneRenderer::RegisterMeshResource(id::id_type geometry_content_id,
     const id::id_type mesh_entity_id = (entity_id != id::invalid_id) ? entity_id : geometry_content_id;
     RenderMesh* mesh = RenderMesh::CreateFromAsset(device_, geometry_content_id);
     if (!mesh) {
-        std::cerr << "[ForwardSceneRenderer] RegisterMeshResource: CreateFromAsset failed for id "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] RegisterMeshResource: CreateFromAsset failed for id "
                   << geometry_content_id << std::endl;
         return (u32)-1;
     }
@@ -2220,7 +2221,7 @@ u64 ForwardSceneRenderer::SetEntityGraphMaterial(id::id_type entity_id, const ch
     // asset_path exactly as the emitted texN arguments expect.
     material_graph::MaterialGraph graph;
     if (!material_graph::MaterialGraphSerializer::DeserializeIntoGraph(std::string(utf8_json), graph)) {
-        std::cerr << "[ForwardSceneRenderer] GraphMaterial: JSON deserialize failed for entity "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] GraphMaterial: JSON deserialize failed for entity "
                   << entity_id << std::endl;
         entity_graph_variant_.erase(entity_id);
         return kInvalidGraphVariant;
@@ -2230,7 +2231,7 @@ u64 ForwardSceneRenderer::SetEntityGraphMaterial(id::id_type entity_id, const ch
     shader_ir::MetalEmitter emitter;
     auto emitted = emitter.Emit(ir.function, /*preview_mode=*/false);
     if (!ir.success || !emitted.success || ir.texture_slots.size() > kMaxGraphTextures) {
-        std::cerr << "[ForwardSceneRenderer] GraphMaterial: compile failed for entity "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] GraphMaterial: compile failed for entity "
                   << entity_id << " (textures=" << ir.texture_slots.size()
                   << ", translated=" << (ir.success ? 1 : 0)
                   << ", emitted=" << (emitted.success ? 1 : 0) << ")" << std::endl;
@@ -2241,7 +2242,7 @@ u64 ForwardSceneRenderer::SetEntityGraphMaterial(id::id_type entity_id, const ch
     variant.pixelShader = device_->CreateShader(emitted.source.data(), emitted.source.size(),
                                                 ShaderStage::Pixel, "fragmentMain");
     if (variant.pixelShader == handles::INVALID_SHADER) {
-        std::cerr << "[ForwardSceneRenderer] GraphMaterial: pixel shader creation failed for entity "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] GraphMaterial: pixel shader creation failed for entity "
                   << entity_id << std::endl;
         entity_graph_variant_.erase(entity_id);
         return kInvalidGraphVariant;
@@ -2251,7 +2252,7 @@ u64 ForwardSceneRenderer::SetEntityGraphMaterial(id::id_type entity_id, const ch
     if (const char* dump = std::getenv("PRIMAL_DUMP_GRAPH_MSL")) {
         std::ofstream df(dump, std::ios::binary);
         if (df) { df.write(emitted.source.data(), (std::streamsize)emitted.source.size()); }
-        std::cerr << "[ForwardSceneRenderer] GraphMaterial MSL dumped to " << dump << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] GraphMaterial MSL dumped to " << dump << std::endl;
     }
 
     // Import the graph's textures on THIS pipeline's device (same rationale
@@ -2274,7 +2275,7 @@ u64 ForwardSceneRenderer::SetEntityGraphMaterial(id::id_type entity_id, const ch
         const auto tex_id = content::create_resource(bytes.data(), content::asset_type::texture,
                                                      content::GraphicsAPI::RHI, device_);
         if (tex_id == id::invalid_id || content::get_rhi_texture_handle(tex_id) == handles::INVALID_RESOURCE) {
-            std::cerr << "[ForwardSceneRenderer] GraphMaterial: texture import failed '" << path << "'" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] GraphMaterial: texture import failed '" << path << "'" << std::endl;
             continue;
         }
         variant.texture_ids[i] = tex_id;
@@ -2311,7 +2312,7 @@ u64 ForwardSceneRenderer::SetEntityGraphMaterial(id::id_type entity_id, const ch
 
     variant.refcount = 1;
     graph_variants_.emplace(hash, std::move(variant));
-    std::cout << "[ForwardSceneRenderer] GraphMaterial registered for entity " << entity_id
+    PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer] GraphMaterial registered for entity " << entity_id
               << " (hash=" << std::hex << hash << std::dec
               << ", textures=" << ir.texture_slots.size() << ")" << std::endl;
     return hash;
@@ -2368,12 +2369,12 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         if (visible.empty() && !render_scene_->GetProxies().empty()) {
             static bool warned = false;
             if (!warned) {
-                std::cerr << "[ForwardSceneRenderer] Shadow cull: 0/" << render_scene_->GetProxies().size()
+                PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Shadow cull: 0/" << render_scene_->GetProxies().size()
                           << " proxies visible. AABB issue?" << std::endl;
                 auto& proxies = render_scene_->GetProxies();
                 if (!proxies.empty()) {
                     auto& p = proxies[0];
-                    std::cerr << "  Proxy 0 AABB: min=(" << p.worldAABB.min.x << "," << p.worldAABB.min.y << "," << p.worldAABB.min.z
+                    PRIMAL_LOG_STREAM(Error, "Render") << "  Proxy 0 AABB: min=(" << p.worldAABB.min.x << "," << p.worldAABB.min.y << "," << p.worldAABB.min.z
                               << ") max=(" << p.worldAABB.max.x << "," << p.worldAABB.max.y << "," << p.worldAABB.max.z
                               << ") valid=" << p.worldAABB.IsValid() << std::endl;
                 }
@@ -2390,7 +2391,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     // Debug: first frame shadow pass stats
     static bool shadowDebug = true;
     if (shadowDebug && shadow_pass) {
-        std::cout << "[ShadowPass] visible=" << visible.size()
+        PRIMAL_LOG_STREAM(Info, "Render") << "[ShadowPass] visible=" << visible.size()
                   << " total_proxies=" << (render_scene_ ? render_scene_->GetProxies().size() : 0)
                   << " mesh_map=" << mesh_id_to_index_.size() << std::endl;
         shadowDebug = false;
@@ -2706,7 +2707,7 @@ void ForwardSceneRenderer::RenderStreamingMeshes(RHICommandBuffer* cmd, u32 fram
             auto* args = static_cast<u32*>(device_->MapBuffer(sm.mesh->indirect_args));
             auto* cnt  = static_cast<u32*>(device_->MapBuffer(sm.mesh->counters));
             if (args && cnt) {
-                std::cout << "[RenderStream] frame_idx=" << frame_index
+                PRIMAL_LOG_STREAM(Info, "Render") << "[RenderStream] frame_idx=" << frame_index
                           << " slot=" << sm.slot
                           << " args=(vc=" << args[0]
                           << " ic=" << args[1]
@@ -2785,7 +2786,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     static bool first_frame = true;
     if (first_frame) {
         size_t proxyCount = render_scene_ ? render_scene_->GetProxies().size() : 0;
-        std::cout << "[ForwardSceneRenderer::Render] scene_loaded_=" << scene_loaded_
+        PRIMAL_LOG_STREAM(Info, "Render") << "[ForwardSceneRenderer::Render] scene_loaded_=" << scene_loaded_
                   << " proxies=" << proxyCount << " mesh_infos=" << mesh_infos_.size()
                   << " mesh_id_map=" << mesh_id_to_index_.size() << std::endl;
         first_frame = false;
@@ -2916,17 +2917,17 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
             if (s_dbg < 2) {
                 auto* lb = static_cast<const rhi::ForwardLightBuffer*>(device_->MapBuffer(light_cb_[idx], 0, 0));
                 if (lb) {
-                    std::cout << "[LightBuf] dir=" << lb->directionalLightCount
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[LightBuf] dir=" << lb->directionalLightCount
                               << " punc=" << lb->punctualLightCount;
                     for (u32 d = 0; d < lb->directionalLightCount && d < 4; ++d)
-                        std::cout << " | dir" << d << " col=(" << lb->directionalLights[d].colorAndShadow.x
+                        PRIMAL_LOG_STREAM(Info, "Render") << " | dir" << d << " col=(" << lb->directionalLights[d].colorAndShadow.x
                                   << "," << lb->directionalLights[d].colorAndShadow.y
                                   << "," << lb->directionalLights[d].colorAndShadow.z
                                   << ") i=" << lb->directionalLights[d].directionAndIntensity.w
                                   << " dirV=(" << lb->directionalLights[d].directionAndIntensity.x
                                   << "," << lb->directionalLights[d].directionAndIntensity.y
                                   << "," << lb->directionalLights[d].directionAndIntensity.z << ")";
-                    std::cout << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "Render") << std::endl;
                     device_->UnmapBuffer(light_cb_[idx]);
                     ++s_dbg;
                 }
