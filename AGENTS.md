@@ -21,6 +21,8 @@
 cmake -S . -B Darwin/Debug -DCMAKE_BUILD_TYPE=Debug && cmake --build Darwin/Debug -j8
 # Vulkan 后端（TestVulkanSponzaRenderGraph 等）需要独立目录：
 cmake -S . -B Darwin/DebugVulkan -DCMAKE_BUILD_TYPE=Debug -DENABLE_VULKAN=ON
+# 注意：两棵构建树共用 Darwin/Debug/libEngine.a，交叉构建会混入对方对象集
+# （症状：GI 收敛变黑/链接符号缺失）。切换树后先 rm Darwin/Debug/libEngine.a 再构建。
 
 # C#（CLI 框架 + 编辑器 + 测试；DebugEditor 是开发配置）
 dotnet build PrimalEditor_Avalonia/PrimalEditor_Avalonia.csproj -c DebugEditor
