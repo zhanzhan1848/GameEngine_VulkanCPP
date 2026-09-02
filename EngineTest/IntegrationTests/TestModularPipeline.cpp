@@ -1171,7 +1171,10 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
     std::cout << "[GIFusionVerify] " << (pass ? "ALL ALIGNED ✔" : "MISALIGNED ✘")
               << " — Metal GI composite vs Vulkan reference" << std::endl;
     std::cout.flush(); std::cerr.flush();
-    std::exit(pass ? 0 : 1);
+    // _Exit 而非 std::exit：验证在帧回调中途结束进程，std::exit 会跑静态
+    // 析构——window_info free_list 析构 assert（窗口未走正常 Shutdown 路径）
+    // 必然触发 abort(134)。输出已 flush，_Exit 跳过析构直接退出。
+    _Exit(pass ? 0 : 1);
 }
 #endif
 
