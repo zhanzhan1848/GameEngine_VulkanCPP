@@ -10,6 +10,7 @@
 
 #include <fstream>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::vt {
 
@@ -68,7 +69,7 @@ bool runtime_vt_volume::build_pipelines(RHIDeviceBase* device) {
     auto compressBytes = readSpv("Assets/Shaders/RVTCompress.comp.spv");
     auto finalizeBytes = readSpv("Assets/Shaders/RVTFinalize.comp.spv");
     if (vsBytes.empty() || fsBytes.empty() || compressBytes.empty() || finalizeBytes.empty()) {
-        std::cerr << "[RVT] 缺少 RVTCapture/RVTCompress/RVTFinalize spv" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[RVT] 缺少 RVTCapture/RVTCompress/RVTFinalize spv" << std::endl;
         return false;
     }
     capture_vs_ = device->CreateShader(vsBytes.data(), vsBytes.size(), ShaderStage::Vertex, "main");
@@ -101,7 +102,7 @@ bool runtime_vt_volume::build_pipelines(RHIDeviceBase* device) {
         gpd.cullMode = CullMode::None;
         capture_pipeline_ = device->CreateGraphicsPipeline(gpd);
         if (capture_pipeline_ == handles::INVALID_PIPELINE) {
-        std::cerr << "[RVT] capture pipeline failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[RVT] capture pipeline failed" << std::endl;
         return false;
     }
     }
@@ -162,9 +163,9 @@ bool runtime_vt_volume::build_pipelines(RHIDeviceBase* device) {
         finalize_ds_ = device->CreateDescriptorSet(dd);
     }
     if (compress_pipeline_ == handles::INVALID_PIPELINE)
-        std::cerr << "[RVT] compress pipeline failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[RVT] compress pipeline failed" << std::endl;
     if (finalize_pipeline_ == handles::INVALID_PIPELINE)
-        std::cerr << "[RVT] finalize pipeline failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[RVT] finalize pipeline failed" << std::endl;
     return capture_pipeline_ != handles::INVALID_PIPELINE &&
            compress_pipeline_ != handles::INVALID_PIPELINE &&
            finalize_pipeline_ != handles::INVALID_PIPELINE;

@@ -16,6 +16,7 @@
 #include <Metal/Metal.hpp>
 
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -70,12 +71,12 @@ bool MetalNeuralWrapper::Initialize(MTL::Device* device) {
     available_  = Detect(device);
 
     if (available_.mtl4Available) {
-        std::cout << "[MetalNeuralWrapper] MTL4 available."
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalNeuralWrapper] MTL4 available."
                   << " macOS=" << available_.macOSMajor
                   << " apiVersion=" << available_.apiVersion
                   << std::endl;
     } else {
-        std::cout << "[MetalNeuralWrapper] MTL4 NOT available."
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalNeuralWrapper] MTL4 NOT available."
                   << " macOS=" << available_.macOSMajor
                   << " (requires macOS 26 + Metal 4 GPU)"
                   << std::endl;

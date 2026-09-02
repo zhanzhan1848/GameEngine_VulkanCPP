@@ -11,6 +11,7 @@
 #include <sstream>
 #include <cstring>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::fluid {
 
@@ -69,7 +70,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, const char* en
     std::string path = SHADER_DIR + shaderName + std::string(".metal");
     std::string source = ReadFileToString(path);
     if (source.empty()) {
-        std::cerr << "[FluidRenderPass] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[FluidRenderPass] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
     return std::vector<u8>(source.begin(), source.end());
@@ -102,7 +103,7 @@ bool FluidRenderPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 re
 
     initialized_ = true;
 
-    std::cout << "[FluidRenderPass] Initialized ("
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[FluidRenderPass] Initialized ("
               << render_width << "x" << render_height << ")" << std::endl;
     return true;
 }

@@ -48,6 +48,10 @@ public partial class App : Application
         }
         PrimalEditor_Avalonia.Common.AutoSaveService.Start();
 
+        // CLI / Agent 命令通道（Phase 0）。内部全捕获：通道失败只记日志，
+        // 编辑器照常启动。PRIMAL_CLI_DISABLE=1 可整体关闭。
+        Cli.CliHost.Start();
+
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(TextureImporterPlugin).TypeHandle);
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(MeshImporterPlugin).TypeHandle);
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(PrimitiveMeshImporterPlugin).TypeHandle);
@@ -78,6 +82,10 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             DisableAvaloniaDataAnnotationValidation();
+
+            // Apply the persisted UI theme (default = App.axaml boot theme)
+            // before any window is created so the first frame already has it.
+            Themes.ThemeManager.Initialize();
 
             // Avalonia's StartCore auto-shows whatever is assigned to
             // desktop.MainWindow. To delay the main window until the
@@ -118,6 +126,31 @@ public partial class App : Application
         {
             DataContext = vm,
         };
+        Cli.EditorServices.Attach(mainWindow, vm);
+
+        // CI / Agent 冒烟通道（CLI 规划 §8）：PRIMAL_OPEN_PROJECT 指向 .primal 文件
+        // 时跳过项目浏览器直接打开——无 GUI 交互的编辑器闭环冒烟靠它。失败时降级
+        // 回浏览器流程，不影响人工启动。
+        var envProject = System.Environment.GetEnvironmentVariable("PRIMAL_OPEN_PROJECT");
+        if (!string.IsNullOrWhiteSpace(envProject))
+        {
+            try
+            {
+                var opened = OpenProject.Open(envProject);
+                if (opened != null)
+                {
+                    vm.Project = opened;
+                    Logger.Info($"PRIMAL_OPEN_PROJECT: opened {envProject}");
+                    ShowMain(desktop, mainWindow, vm);
+                    return;
+                }
+                Logger.Warning($"PRIMAL_OPEN_PROJECT: open failed ({envProject}); falling back to project browser.");
+            }
+            catch (System.Exception ex)
+            {
+                Logger.Warning($"PRIMAL_OPEN_PROJECT: {ex.Message}; falling back to project browser.");
+            }
+        }
 
         var browser = new ProjectBrowserView(new ProjectBrowserViewModel());
         browser.Closed += (_, _) => OnProjectBrowserClosed(desktop, browser, vm, mainWindow);
@@ -262,6 +295,7 @@ public partial class App : Application
         // calling UnloadEngine synchronously while they run causes a
         // pthread mutex deadlock (SIGABRT). A small delay lets the
         // workers drain before the library is freed.
+        Cli.CliHost.Stop(); // 先关命令通道：退出期间不再接受新命令
         PrimalEditor_Avalonia.Common.AutoSaveService.Stop();
         EngineTick.Stop();
         if (NativeEngineBridge.IsLoaded)

@@ -3,7 +3,7 @@
              xmlns:vm="using:PrimalEditor_Avalonia.Editors.Material"
              x:Class="PrimalEditor_Avalonia.Editors.Material.MaterialPreviewView"
              x:DataType="vm:MaterialPreviewViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
   <Border Classes="floating" Margin="2,2,6,2">
     <Panel>
@@ -27,15 +27,15 @@
               Padding="6,4"
               CornerRadius="4"
               Background="#DD0A1120"
-              BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+              BorderBrush="{DynamicResource ElectricBlueDeepBrush}"
               BorderThickness="1">
         <StackPanel Orientation="Horizontal" Spacing="6">
           <TextBlock Text="MESH"
                      VerticalAlignment="Center"
-                     FontFamily="{StaticResource FontDisplay}"
+                     FontFamily="{DynamicResource FontDisplay}"
                      FontSize="9"
                      LetterSpacing="1"
-                     Foreground="{StaticResource MutedTextBrush}"/>
+                     Foreground="{DynamicResource MutedTextBrush}"/>
           <ComboBox Width="126"
                     MinHeight="26"
                     ItemsSource="{Binding AvailablePreviewMeshes}"
@@ -47,9 +47,9 @@
                   <TextBlock Text="{Binding Glyph}"
                              Width="14"
                              HorizontalAlignment="Center"
-                             Foreground="{StaticResource ElectricBlueBrush}"/>
+                             Foreground="{DynamicResource ElectricBlueBrush}"/>
                   <TextBlock Text="{Binding DisplayName}"
-                             FontFamily="{StaticResource FontMono}"
+                             FontFamily="{DynamicResource FontMono}"
                              FontSize="10"/>
                 </StackPanel>
               </DataTemplate>
@@ -64,15 +64,15 @@
         <StackPanel HorizontalAlignment="Center"
                     VerticalAlignment="Center" Spacing="6">
           <TextBlock Text="PREVIEW"
-                     FontFamily="{StaticResource FontDisplay}"
+                     FontFamily="{DynamicResource FontDisplay}"
                      FontWeight="SemiBold" FontSize="11"
                      LetterSpacing="2"
-                     Foreground="{StaticResource ElectricBlueBrush}"
+                     Foreground="{DynamicResource ElectricBlueBrush}"
                      HorizontalAlignment="Center"/>
           <TextBlock Text="{Binding PlaceholderText}"
-                     FontFamily="{StaticResource FontMono}"
+                     FontFamily="{DynamicResource FontMono}"
                      FontSize="10"
-                     Foreground="{StaticResource MutedTextBrush}"
+                     Foreground="{DynamicResource MutedTextBrush}"
                      HorizontalAlignment="Center"/>
         </StackPanel>
       </Panel>

@@ -2,6 +2,7 @@
 #include "../RHI/Core/RHIDevice.h"
 #include "../RHI/Core/RHICommand.h"
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -11,12 +12,12 @@ ColorHistoryManager::~ColorHistoryManager() {
 
 bool ColorHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
     if (initialized_) {
-        std::cerr << "[ColorHistoryManager] Already initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Already initialized" << std::endl;
         return false;
     }
 
     if (!device) {
-        std::cerr << "[ColorHistoryManager] Invalid device pointer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Invalid device pointer" << std::endl;
         return false;
     }
 
@@ -25,7 +26,7 @@ bool ColorHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
 
     // Validate configuration
     if (config_.buffer_count < 2 || config_.buffer_count > 4) {
-        std::cerr << "[ColorHistoryManager] Invalid buffer count: " << config_.buffer_count
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Invalid buffer count: " << config_.buffer_count
                   << " (must be 2-4)" << std::endl;
         return false;
     }
@@ -36,7 +37,7 @@ bool ColorHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
 //    std::cout << "  Buffer Count: " << config_.buffer_count << std::endl;
 
     if (!CreateColorResources()) {
-        std::cerr << "[ColorHistoryManager] Failed to create color resources" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Failed to create color resources" << std::endl;
         return false;
     }
 
@@ -83,7 +84,7 @@ bool ColorHistoryManager::CreateColorResources() {
 
         color_buffers_[i].texture = device_->CreateTexture(colorDesc);
         if (color_buffers_[i].texture == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[ColorHistoryManager] Failed to create color texture " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Failed to create color texture " << i << std::endl;
             return false;
         }
 
@@ -100,12 +101,12 @@ bool ColorHistoryManager::StoreCurrentFrameColor(rhi::ResourceHandle color_textu
                                                 rhi::RHICommandBuffer* cmd_buffer,
                                                 u32 frame_index) {
     if (!initialized_ || !cmd_buffer) {
-        std::cerr << "[ColorHistoryManager] Not initialized or invalid command buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Not initialized or invalid command buffer" << std::endl;
         return false;
     }
 
     if (color_texture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[ColorHistoryManager] Invalid source color texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Invalid source color texture" << std::endl;
         return false;
     }
 
@@ -116,7 +117,7 @@ bool ColorHistoryManager::StoreCurrentFrameColor(rhi::ResourceHandle color_textu
 
     // Copy current color to history buffer
     if (!CopyColorTexture(color_texture, color_buffers_[write_index].texture, cmd_buffer)) {
-        std::cerr << "[ColorHistoryManager] Failed to copy color texture to buffer " << write_index << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Failed to copy color texture to buffer " << write_index << std::endl;
         return false;
     }
 
@@ -132,7 +133,7 @@ ColorHistoryManager::ColorBuffer ColorHistoryManager::GetPreviousFrameColor(u32 
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
-        std::cerr << "[ColorHistoryManager] Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Not initialized" << std::endl;
         return {};
     }
 
@@ -166,7 +167,7 @@ ColorHistoryManager::ColorBuffer ColorHistoryManager::GetCurrentFrameColor(u32 f
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
-        std::cerr << "[ColorHistoryManager] Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] Not initialized" << std::endl;
         return {};
     }
 
@@ -187,7 +188,7 @@ bool ColorHistoryManager::CopyColorTexture(rhi::ResourceHandle source,
     }
 
     if (source == rhi::handles::INVALID_RESOURCE || destination == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[ColorHistoryManager] CopyColorTexture: invalid texture handles" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ColorHistoryManager] CopyColorTexture: invalid texture handles" << std::endl;
         return false;
     }
 

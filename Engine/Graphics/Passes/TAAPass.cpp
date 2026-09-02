@@ -1,6 +1,7 @@
 #include "TAAPass.h"
 #include <fstream>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 
 namespace primal::graphics {
@@ -106,7 +107,7 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, u32 width, u32 height, rhi:
     fragmentShader_ = loadShader("EngineTest/shaders/TAA.metal", rhi::ShaderStage::Pixel, "fragmentMain");
 
     if (vertexShader_ == rhi::handles::INVALID_SHADER || fragmentShader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "TAAPass: Failed to load shaders." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "TAAPass: Failed to load shaders." << std::endl;
         return false;
     }
 
@@ -165,7 +166,7 @@ void TAAPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     
     // Debug: Verify dimensions
     if (width == 0 || height == 0) {
-        std::cout << "TAAPass::Execute - Invalid Dimensions: " << width << "x" << height << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Engine") << "TAAPass::Execute - Invalid Dimensions: " << width << "x" << height << std::endl;
         return;
     }
     

@@ -5,13 +5,13 @@
         Width="440" Height="200"
         WindowStartupLocation="CenterOwner"
         CanResize="False"
-        Background="{StaticResource VoidBrush}">
+        Background="{DynamicResource VoidBrush}">
 
     <Border Classes="floating" Margin="10">
         <StackPanel Margin="24" Spacing="10">
             <TextBlock x:Name="MessageText" TextWrapping="Wrap" FontSize="13"
-                       FontFamily="{StaticResource FontUI}"
-                       Foreground="{StaticResource PrimaryTextBrush}"/>
+                       FontFamily="{DynamicResource FontUI}"
+                       Foreground="{DynamicResource PrimaryTextBrush}"/>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
                 <Button x:Name="CancelButton" Content="Cancel" Click="OnCancelClick" Width="90" IsCancel="True"/>
                 <Button x:Name="DiscardButton" Content="Don't Save" Click="OnDiscardClick" Width="110" Classes="danger"/>

@@ -14,6 +14,7 @@
 #include <sstream>
 #include <cstring>
 #include <set>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
 
@@ -119,7 +120,7 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
                             fullPath.substr(0, fullPath.find_last_of('/') + 1), included);
                         out << resolved << "\n";
                     } else {
-                        std::cerr << "[SurfaceCache] Warning: Failed to read include: " << fullPath << std::endl;
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] Warning: Failed to read include: " << fullPath << std::endl;
                         out << line << "\n";
                     }
                 }
@@ -151,7 +152,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
             return bytecode;
         }
-        std::cerr << "[SurfaceCache] Failed to load SPIR-V: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] Failed to load SPIR-V: " << shaderName << std::endl;
         return {};
     }
 
@@ -163,7 +164,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
         source = ReadFileToString(shaderPath);
     }
     if (source.empty()) {
-        std::cerr << "[SurfaceCache] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
     std::set<std::string> included;
@@ -203,7 +204,7 @@ SurfaceCachePass::~SurfaceCachePass() {
 void SurfaceCachePass::SetTemporalStrategy(GITemporalStrategy strategy) {
     if (temporal_strategy_ == strategy) return;
     temporal_strategy_ = strategy;
-    std::cout << "[SurfaceCache] Temporal strategy -> "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[SurfaceCache] Temporal strategy -> "
               << GITemporalStrategyName(strategy) << " (stored; takes effect in X3)" << std::endl;
 }
 
@@ -240,7 +241,7 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
         dv.usage = TextureUsage::DepthStencil;
         dv.name = "SurfaceCache_CardViewDepth";
         card_view_depth_ = device_->CreateTexture(dv);
-        std::cerr << "[SurfaceCache] T8.12 card-view capture ENABLED (depth "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] T8.12 card-view capture ENABLED (depth "
                   << (card_view_depth_ != rhi::handles::INVALID_RESOURCE ? "ok" : "FAILED")
                   << ")" << std::endl;
     }
@@ -256,7 +257,7 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     initialized_ = true;
 
-    std::cout << "[SurfaceCache] Initialized (atlas: "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[SurfaceCache] Initialized (atlas: "
               << atlas_size_ << "x" << atlas_size_
               << ", page: " << page_size_
               << ", max_cards: " << config.surface_cache_max_cards << ")" << std::endl;
@@ -755,7 +756,7 @@ void SurfaceCachePass::CreatePipelines() {
         indirectResolveShader == handles::INVALID_SHADER ||
         (!isVk && (captureVS == handles::INVALID_SHADER ||
                    captureFS == handles::INVALID_SHADER))) {
-        std::cerr << "[SurfaceCache] Shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] Shader compilation failed" << std::endl;
         return;
     }
 
@@ -900,7 +901,7 @@ void SurfaceCachePass::CreatePipelines() {
             for (int i = 0; i < 3; ++i)
                 shadow_set_[i] = device_->CreateDescriptorSet({shadow_set_layout_});
         } else {
-            std::cerr << "[SurfaceCache] Shadow shader compilation failed (shadows disabled)" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] Shadow shader compilation failed (shadows disabled)" << std::endl;
         }
     }
 
@@ -1324,7 +1325,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 static bool s_ai_once = false;
                 if (!s_ai_once) {
                     s_ai_once = true;
-                    std::cerr << "[ATLAS_INIT] dispatching, pipeline valid" << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[ATLAS_INIT] dispatching, pipeline valid" << std::endl;
                 }
                 // Buffer bindings are platform-numbered (same convention as the
                 // Shadow/LightEval dispatch sites): Vulkan layout declares 4/5
@@ -1569,7 +1570,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     static bool s_scshadow_once = false;
                     if (!s_scshadow_once) {
                         s_scshadow_once = true;
-                        std::cerr << "[SC_SHADOW] dispatching" << std::endl;
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[SC_SHADOW] dispatching" << std::endl;
                     }
 
                     ResourceHandle sdfTex[3] = {
@@ -1758,7 +1759,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // DEBUG: immediate post-dispatch memory barrier + inline readback
                 // to prove/disprove whether the imageStore landed in this very
                 // command buffer (rules out later-pass overwrite).
-                std::cerr << "[SurfaceCache] LightEval dispatch: " << total_texels
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] LightEval dispatch: " << total_texels
                           << " texels, " << card_count << " cards, "
                           << groups << " groups" << std::endl;
 
@@ -1811,7 +1812,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                             if (r == 0x3800 && g == 0x3800) ++seed;
                                         }
                                     }
-                                    std::cerr << "[SC_RB] f" << rbFrames[rbI] << " " << rb.name
+                                    PRIMAL_LOG_STREAM(Error, "Render") << "[SC_RB] f" << rbFrames[rbI] << " " << rb.name
                                               << ": alpha0=" << alpha0
                                               << " seed_exact=" << seed
                                               << " non_seed=" << (total - seed)

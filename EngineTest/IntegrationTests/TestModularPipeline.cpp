@@ -271,7 +271,10 @@ bool TestModularPipeline::InitializeDevice() {
 
     DeviceDesc desc;
     desc.platform = RHIPlatform::Metal;
-    desc.enableDebug = true;
+    // Metal validation 层默认关（2026-09-02）：长时调试运行叠加 validation +
+    // 全 GI 链曾把系统推向 WindowServer watchdog 超时（GPU 驱动级停顿）。
+    // 需要校验时 PRIMAL_METAL_VALIDATE=1 显式打开。
+    desc.enableDebug = (std::getenv("PRIMAL_METAL_VALIDATE") != nullptr);
 
     auto* metalDevice = new MetalDevice(desc);
     if (!metalDevice || !metalDevice->Initialize()) {
@@ -477,11 +480,16 @@ bool TestModularPipeline::InitializePipeline() {
     // the pipeline defaults (light_color 5.0, ddgi_light_color 20.0) put the
     // probe analytic drive at ~60x the Vulkan reference and pinned every
     // GI-lit surface to the white ACES shoulder.
+    // 2026-09-02 再对齐：跟随 Vulkan 62c609bd 方向复原暖弹射，但 Metal 的
+    // SC↔probe 环路增益高于 Vulkan（同 5.0 档 gather_avg=1.107 vs Vulkan
+    // ~0.3-0.5，GIFusionVerify 上限 0.8），实测折中取 2.0：亮度回带内，
+    // 弹射色保留（旧值 0.318 时探针场全中性 rgb(0.215,0.212,0.209)，
+    // Vulkan 基准是暖色 (0.234,0.193,0.145)）。
     {
         auto renderSettings = pipeline_->GetSettings();
         renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
-        renderSettings.lighting.light_color = {2.0f, 1.9f, 1.8f, 1.0f};
-        renderSettings.lighting.ddgi_light_color = {0.31831f, 0.30239f, 0.28648f, 1.0f};
+        renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f};
+        renderSettings.lighting.ddgi_light_color = {2.0f, 2.0f, 2.0f, 1.0f};
         pipeline_->UpdateSettings(renderSettings);
     }
 
@@ -1116,8 +1124,9 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
     double gAvg = 0, gMin = 0, gMax = 0;
     bool gatherOk = false;
     if (auto* gm = pipeline_->GetGIGatherModule())
+        // Metal gather 已升全分辨率——按模块实际输出尺寸读回。
         gatherOk = readTextureStats("gather(GI,half)", gm->GetOutputTexture(),
-                                    renderWidth_ / 2, renderHeight_ / 2, true, 8,
+                                    gm->GetGatherWidth(), gm->GetGatherHeight(), true, 8,
                                     &gAvg, &gMin, &gMax);
 
     // --- 3. Final composite ----------------------------------------------------

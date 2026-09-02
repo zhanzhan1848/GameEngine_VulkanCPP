@@ -11,11 +11,14 @@
         <local:ViewLocator/>
     </Application.DataTemplates>
 
-    <!-- Global token resources (colors/brushes/fonts/shadow presets). -->
+    <!-- Global token resources (colors/brushes/fonts/shadow presets).
+         App boots with the default theme; ThemeManager.Initialize()
+         swaps in the persisted theme and the View menu can switch
+         at runtime (see Themes/ThemeManager.cs). -->
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <ResourceInclude Source="avares://PrimalEditor_Avalonia/Themes/CyberpunkTheme.axaml" />
+                <ResourceInclude Source="avares://PrimalEditor_Avalonia/Themes/Cyberpunk/CyberpunkTheme.axaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>
@@ -24,7 +27,7 @@
         <FluentTheme />
         <dockTheme:DockFluentTheme />
         <StyleInclude Source="avares://NodifyM.Avalonia/Styles/ControlStyles.axaml" />
-        <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/CyberpunkTheme.Styles.axaml" />
+        <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/Cyberpunk/CyberpunkTheme.Styles.axaml" />
         <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/Controls/CyberCorner.axaml" />
     </Application.Styles>
 </Application>

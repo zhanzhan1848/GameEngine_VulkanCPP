@@ -9,9 +9,9 @@
              xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
              x:Class="PrimalEditor_Avalonia.Views.WorldEditorView"
              x:DataType="vm:WorldEditorViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
-    <Grid Background="{StaticResource VoidBrush}">
+    <Grid Background="{DynamicResource VoidBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -19,11 +19,11 @@
         </Grid.RowDefinitions>
 
         <!-- =========== ROW 0: Toolbar (floating glass) =========== -->
-        <Border Grid.Row="0" Classes="floating" Margin="6,6,6,2">
+        <ctrl:TextureFrame Grid.Row="0" Classes="floating tex-strip" Margin="6,6,6,2">
             <StackPanel Orientation="Horizontal" Spacing="6" Margin="8,4">
-                <TextBlock Text="BUILD" FontFamily="{StaticResource FontDisplay}"
+                <TextBlock Text="BUILD" FontFamily="{DynamicResource FontDisplay}"
                            FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{StaticResource ElectricBlueBrush}"
+                           Foreground="{DynamicResource ElectricBlueBrush}"
                            VerticalAlignment="Center" Margin="0,0,4,0"/>
                 <ComboBox Width="140"
                           ItemsSource="{Binding BuildConfigurations}"
@@ -46,21 +46,21 @@
                 <CheckBox Name="OrthoToggle" Content="Ortho" VerticalAlignment="Center"
                           Click="OnOrthoToggleClick"/>
             </StackPanel>
-        </Border>
+        </ctrl:TextureFrame>
 
         <!-- =========== ROW 1: Hierarchy | Viewport | Inspector =========== -->
         <Grid Grid.Row="1" ColumnDefinitions="260,*,320" Background="Transparent">
 
             <!-- Hierarchy panel (single, no TabControl) -->
-            <Border Grid.Column="0" Classes="floating" Margin="6,2,4,2">
+            <ctrl:TextureFrame Grid.Column="0" Classes="floating tex-panel" Margin="6,2,4,2">
                 <DockPanel>
                     <Border DockPanel.Dock="Top" Padding="8,8,8,4">
                         <StackPanel Spacing="6">
                             <Grid ColumnDefinitions="*,Auto,Auto">
                                 <TextBlock Grid.Column="0" Text="SCENES"
-                                           FontFamily="{StaticResource FontDisplay}"
+                                           FontFamily="{DynamicResource FontDisplay}"
                                            FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                                           Foreground="{StaticResource ElectricBlueBrush}"
+                                           Foreground="{DynamicResource ElectricBlueBrush}"
                                            VerticalAlignment="Center"/>
                                 <Button Grid.Column="1" Content="+" Click="OnAddSceneClick"
                                         Width="24" Height="20" Padding="0" Margin="2,0"
@@ -105,9 +105,9 @@
 
                             <Grid ColumnDefinitions="*,Auto,Auto">
                                 <TextBlock Grid.Column="0" Text="HIERARCHY"
-                                           FontFamily="{StaticResource FontDisplay}"
+                                           FontFamily="{DynamicResource FontDisplay}"
                                            FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                                           Foreground="{StaticResource ElectricBlueBrush}"
+                                           Foreground="{DynamicResource ElectricBlueBrush}"
                                            VerticalAlignment="Center"/>
                                 <Button Grid.Column="1" Content="+" Click="OnAddEntityClick"
                                         Width="28" Height="22" Padding="0" Margin="2,0"
@@ -137,7 +137,7 @@
                         </TreeView.ItemTemplate>
                     </TreeView>
                 </DockPanel>
-            </Border>
+            </ctrl:TextureFrame>
 
             <!-- Viewport panel -->
             <Border Grid.Column="1" Classes="floating" Margin="2,2,2,2"
@@ -150,30 +150,30 @@
             </Border>
 
             <!-- Inspector panel -->
-            <Border Grid.Column="2" Classes="floating" Margin="4,2,6,2">
+            <ctrl:TextureFrame Grid.Column="2" Classes="floating tex-panel" Margin="4,2,6,2">
                 <DockPanel>
                     <TextBlock DockPanel.Dock="Top" Text="INSPECTOR"
-                               FontFamily="{StaticResource FontDisplay}"
+                               FontFamily="{DynamicResource FontDisplay}"
                                FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                               Foreground="{StaticResource ElectricBlueBrush}"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
                                Padding="10,10,8,4"/>
                     <views:PropertiesView DataContext="{Binding Properties}" Margin="4,0,4,8"/>
                 </DockPanel>
-            </Border>
+            </ctrl:TextureFrame>
         </Grid>
 
         <!-- =========== ROW 2: Content Browser | Build Log / Logger tab =========== -->
         <Grid Grid.Row="2" ColumnDefinitions="*,*" Margin="6,2,6,6">
             <!-- LEFT: Content Browser -->
-            <Border Grid.Column="0" Classes="floating" Margin="0,0,3,0">
+            <ctrl:TextureFrame Grid.Column="0" Classes="floating tex-panel" Margin="0,0,3,0">
                 <views:ContentBrowserView Name="ContentBrowserBottomView"/>
-            </Border>
+            </ctrl:TextureFrame>
             <!-- RIGHT: Build Log + Logger tab -->
-            <Border Grid.Column="1" Classes="floating" Margin="3,0,0,0">
+            <ctrl:TextureFrame Grid.Column="1" Classes="floating tex-panel" Margin="3,0,0,0">
                 <TabControl SelectedIndex="0" Background="Transparent" Padding="0">
                     <TabItem>
                         <TabItem.Header>
-                            <TextBlock Text="BUILD LOG" FontFamily="{StaticResource FontDisplay}"
+                            <TextBlock Text="BUILD LOG" FontFamily="{DynamicResource FontDisplay}"
                                        FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
                                        Margin="6,0"/>
                         </TabItem.Header>
@@ -181,14 +181,14 @@
                     </TabItem>
                     <TabItem>
                         <TabItem.Header>
-                            <TextBlock Text="LOGGER" FontFamily="{StaticResource FontDisplay}"
+                            <TextBlock Text="LOGGER" FontFamily="{DynamicResource FontDisplay}"
                                        FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
                                        Margin="6,0"/>
                         </TabItem.Header>
                         <views:LoggerView Name="LoggerTabView"/>
                     </TabItem>
                 </TabControl>
-            </Border>
+            </ctrl:TextureFrame>
         </Grid>
     </Grid>
 </UserControl>

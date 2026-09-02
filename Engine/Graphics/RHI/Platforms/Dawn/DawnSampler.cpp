@@ -1,4 +1,5 @@
 #include "DawnSampler.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -41,7 +42,7 @@ bool DawnSampler::Initialize(const SamplerDesc& desc) {
 
     wgpuSampler_ = wgpuDeviceCreateSampler(device_.GetNativeDevice(), &wgpuDesc);
     if (!wgpuSampler_) {
-        std::cerr << "[DawnSampler] Failed to create sampler" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnSampler] Failed to create sampler" << std::endl;
         return false;
     }
     return true;

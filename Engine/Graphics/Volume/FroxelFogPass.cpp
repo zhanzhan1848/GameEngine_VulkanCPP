@@ -15,6 +15,7 @@
 #include <cstring>
 #include <set>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::volume {
 
@@ -114,7 +115,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
         source = ReadFileToString(shaderPath);
     }
     if (source.empty()) {
-        std::cerr << "[FroxelFogPass] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[FroxelFogPass] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
     std::set<std::string> included;
@@ -186,7 +187,7 @@ bool FroxelFogPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
 
     initialized_ = true;
 
-    std::cout << "[FroxelFogPass] Initialized ("
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] Initialized ("
               << render_width << "x" << render_height
               << ", froxel: " << config_.grid_width << "x"
               << config_.grid_height << "x" << config_.grid_depth << ")"
@@ -255,7 +256,7 @@ void FroxelFogPass::CreatePipelines() {
     if (densityShader == handles::INVALID_SHADER ||
         lightShader   == handles::INVALID_SHADER ||
         resolveShader == handles::INVALID_SHADER) {
-        std::cerr << "[FroxelFogPass] Shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[FroxelFogPass] Shader compilation failed" << std::endl;
         return;
     }
 
@@ -375,7 +376,7 @@ void FroxelFogPass::CreateNoiseTexture() {
     device_->DestroyCommandBuffer(cmdHandle);
     device_->DestroyBuffer(staging);
 
-    std::cout << "[FroxelFogPass] Noise texture created (128^3)" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] Noise texture created (128^3)" << std::endl;
 }
 
 void FroxelFogPass::CreateFroxelTextures() {

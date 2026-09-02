@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
 
@@ -55,10 +56,10 @@ static bool EnsurePipeline(RHIDeviceBase& device) {
     auto platform = device.GetPlatform();
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "Velocity");
     std::string source = LoadShaderSource(shaderPath);
-    if (source.empty()) { std::cerr << "[Velocity] Shader source empty: " << shaderPath << std::endl; return false; }
+    if (source.empty()) { PRIMAL_LOG_STREAM(Error, "Render") << "[Velocity] Shader source empty: " << shaderPath << std::endl; return false; }
 
     ShaderHandle cs = device.CreateShader(source.data(), source.size(), ShaderStage::Compute, "main");
-    if (cs == handles::INVALID_SHADER) { std::cerr << "[Velocity] Shader creation failed" << std::endl; return false; }
+    if (cs == handles::INVALID_SHADER) { PRIMAL_LOG_STREAM(Error, "Render") << "[Velocity] Shader creation failed" << std::endl; return false; }
 
     DescriptorSetLayoutBinding bindings[3]{};
     bindings[0] = {0, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute};

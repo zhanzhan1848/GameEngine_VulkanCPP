@@ -8,6 +8,7 @@
 #include "VulkanRenderPass.h"
 #include "VulkanDevice.h"
 #include "VulkanMath.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -110,7 +111,7 @@ bool VulkanRenderPass::Initialize() {
     ci.pSubpasses      = &subpass;
 
     if (vkCreateRenderPass(dev, &ci, nullptr, &renderPass_) != VK_SUCCESS) {
-        std::cerr << "[VulkanRenderPass] vkCreateRenderPass failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanRenderPass] vkCreateRenderPass failed" << std::endl;
         return false;
     }
 

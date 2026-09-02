@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -71,7 +72,7 @@ bool PlanarReflectionModule::Initialize(RHIDeviceBase* device,
     if (!device_ || !gpu_draw_) return false;
 
     if (!gpu_draw_->InitializeReflectionResources(max_clusters)) {
-        std::cerr << "[PlanarReflection] reflection resources init failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[PlanarReflection] reflection resources init failed" << std::endl;
         return false;
     }
 
@@ -109,7 +110,7 @@ bool PlanarReflectionModule::LoadCompositeShaders() {
         std::vector<u8> vsBytes, fsBytes;
         if (!ReadShaderBytes("Engine/Graphics/Vulkan/shaders/PostProcess/MirrorComposite.vert.spv", vsBytes) ||
             !ReadShaderBytes("Engine/Graphics/Vulkan/shaders/PostProcess/MirrorComposite.frag.spv", fsBytes)) {
-            std::cerr << "[PlanarReflection] Failed to load MirrorComposite SPIR-V" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[PlanarReflection] Failed to load MirrorComposite SPIR-V" << std::endl;
             return false;
         }
         vs = device_->CreateShader(vsBytes.data(), vsBytes.size(), ShaderStage::Vertex, "main");
@@ -118,7 +119,7 @@ bool PlanarReflectionModule::LoadCompositeShaders() {
         std::string path = utils::ShaderRegistry::GetShaderPath(device_->GetPlatform(), "MirrorComposite");
         std::ifstream file(path);
         if (!file.is_open()) {
-            std::cerr << "[PlanarReflection] Failed to open " << path << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[PlanarReflection] Failed to open " << path << std::endl;
             return false;
         }
         std::stringstream buf;
@@ -128,7 +129,7 @@ bool PlanarReflectionModule::LoadCompositeShaders() {
         fs = device_->CreateShader(src.data(), src.size(), ShaderStage::Pixel, "mirror_composite_fs");
     }
     if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) {
-        std::cerr << "[PlanarReflection] Composite shader creation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[PlanarReflection] Composite shader creation failed" << std::endl;
         return false;
     }
 
@@ -162,7 +163,7 @@ bool PlanarReflectionModule::LoadCompositeShaders() {
     pd.vertexBindings.clear();
     composite_pipeline_ = device_->CreateGraphicsPipeline(pd);
     if (composite_pipeline_ == handles::INVALID_PIPELINE) {
-        std::cerr << "[PlanarReflection] Composite pipeline creation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[PlanarReflection] Composite pipeline creation failed" << std::endl;
         return false;
     }
 

@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stack>
 #include <unordered_set>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rendergraph {
 
@@ -708,7 +709,7 @@ void RenderGraph::ResolveTimestamps() {
     bool readOk = device_.GetQueryPoolResults(frameData.queryPool, 0, passCount * 2, results.data(), sizeof(u64));
     static u32 dbgCount = 0;
     if ((dbgCount++ % 120) == 0) {
-        std::cerr << "[RG-TSdbg] readOk=" << readOk << " passes=" << passCount
+        PRIMAL_LOG_STREAM(Error, "Render") << "[RG-TSdbg] readOk=" << readOk << " passes=" << passCount
                   << " t[0]=" << results[0] << " t[1]=" << results[1] << std::endl;
     }
     // T8.13/P0: MoltenVK quirk — vkGetQueryPoolResults can return

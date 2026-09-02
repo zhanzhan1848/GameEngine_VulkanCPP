@@ -3,12 +3,12 @@
         xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls">
 
   <Design.PreviewWith>
-    <Border Padding="20" Background="{StaticResource VoidBrush}">
+    <Border Padding="20" Background="{DynamicResource VoidBrush}">
       <StackPanel Spacing="12">
         <ctrl:CyberCorner Width="280" Height="80">
           <TextBlock Text="CHAMFERED PANEL"
-                     FontFamily="{StaticResource FontDisplay}"
-                     Foreground="{StaticResource ElectricBlueBrush}"
+                     FontFamily="{DynamicResource FontDisplay}"
+                     Foreground="{DynamicResource ElectricBlueBrush}"
                      FontWeight="SemiBold"
                      HorizontalAlignment="Center"
                      VerticalAlignment="Center"/>

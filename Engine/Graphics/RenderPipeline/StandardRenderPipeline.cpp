@@ -33,6 +33,7 @@
 #include "Components/Material.h"
 #include <iostream>
 #include <chrono>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -131,7 +132,7 @@ bool StandardRenderPipeline::Initialize(RHIDeviceBase* device) {
 
     gpuOptimizer_ = std::make_unique<rhi::RHIGPUOptimizer>(*device);
     if (!gpuOptimizer_->Initialize()) {
-        std::cerr << "[StandardPipeline] GPU Optimizer init failed (non-critical)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[StandardPipeline] GPU Optimizer init failed (non-critical)" << std::endl;
     }
 
     // Create utility black texture
@@ -238,7 +239,7 @@ void StandardRenderPipeline::SetLumenConfig(const lumen::LumenConfig& config) {
     render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale);
     render_height_ = static_cast<u32>(logical_height_ * settings_.quality.render_scale);
 
-    std::cout << "[Pipeline] Render scale=" << settings_.quality.render_scale
+    PRIMAL_LOG_STREAM(Info, "Render") << "[Pipeline] Render scale=" << settings_.quality.render_scale
               << " logical=" << logical_width_ << "x" << logical_height_
               << " render=" << render_width_ << "x" << render_height_ << std::endl;
 
@@ -263,7 +264,7 @@ void StandardRenderPipeline::SetPassEnabled(RenderPassID pass, bool enabled) {
     settings_.quality.SetPassEnabled(pass, enabled);
     if (was_enabled != settings_.quality.IsPassEnabled(pass)) {
         settings_dirty_ = true;
-        std::cout << "[Pipeline] Pass '" << GetRenderPassInfo(pass).name
+        PRIMAL_LOG_STREAM(Info, "Render") << "[Pipeline] Pass '" << GetRenderPassInfo(pass).name
                   << "' " << (enabled ? "enabled" : "disabled") << std::endl;
     }
 }
@@ -432,12 +433,12 @@ void StandardRenderPipeline::InitializeSubsystems() {
         voxResources.cluster_map_buffer = gpuDraw.GetClusterMapBuffer();
         voxResources.instance_data_buffer = gpuDraw.GetGlobalInstanceDataBuffer();
         voxResources.num_instances = 0;
-        std::cerr << "[SDF_INIT] vb=" << voxResources.vertex_buffer
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SDF_INIT] vb=" << voxResources.vertex_buffer
                   << " mb=" << voxResources.meshlet_buffer
                   << " cmb=" << voxResources.cluster_map_buffer
                   << " ready_before=" << globalSDF.IsVoxelizationReady() << std::endl;
         globalSDF.InitVoxelization(voxResources);
-        std::cerr << "[SDF_INIT] ready_after=" << globalSDF.IsVoxelizationReady() << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SDF_INIT] ready_after=" << globalSDF.IsVoxelizationReady() << std::endl;
     }
 
     // PCG SDF readback — matches cascade 0 resolution
@@ -464,7 +465,7 @@ void StandardRenderPipeline::InitializeSubsystems() {
     // module stays invalid and the frame simply skips the mirror passes.
     reflection_module_ = std::make_unique<PlanarReflectionModule>();
     if (!reflection_module_->Initialize(device_, &gpuDraw, 10000)) {
-        std::cerr << "[StandardRenderPipeline] PlanarReflection init failed — mirror disabled" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[StandardRenderPipeline] PlanarReflection init failed — mirror disabled" << std::endl;
         reflection_module_.reset();
     }
 
@@ -629,13 +630,13 @@ void StandardRenderPipeline::InitializeLumenPasses() {
                 vp.max_probes_per_frame = 16384u / vc.update_budget_divisor;
             auto vol = std::make_unique<lumen::LumenDDGIPass>();
             if (!vol->Initialize(device_, vp)) {
-                std::cerr << "[Lumen] DDGI volume " << vi << " init failed (skipping)" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] DDGI volume " << vi << " init failed (skipping)" << std::endl;
                 continue;
             }
             vol->SetDynamicMode(true);   // Mode 11: runtime SDF trace
             if (vi > 0) vol->SetRGNamePrefix(kPrefixes[vi]);
             ddgi_volumes_[ddgi_volume_count_++] = std::move(vol);
-            std::cout << "[Lumen] DDGI volume " << vi << " initialized ("
+            PRIMAL_LOG_STREAM(Info, "Render") << "[Lumen] DDGI volume " << vi << " initialized ("
                       << vp.probe_count_x << "x" << vp.probe_count_y
                       << "x" << vp.probe_count_z << " @ spacing "
                       << vp.probe_spacing << ")" << std::endl;
@@ -650,7 +651,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (ddgi_pass_ && offline_sdf_texture_ != handles::INVALID_RESOURCE) {
         ddgi_pass_->SetOfflineSDFSource(offline_sdf_texture_, offline_sdf_origin_,
                                         offline_sdf_extent_, offline_sdf_resolution_);
-        std::cerr << "[Lumen] Offline SDF re-applied to DDGI trace ("
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] Offline SDF re-applied to DDGI trace ("
                   << offline_sdf_resolution_ << "³)" << std::endl;
     }
 
@@ -663,7 +664,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         ssaoParams.direction_count = config.gtao_direction_count;
         ssaoParams.sample_count = config.gtao_sample_count;
         if (!ssao_pass_->Initialize(device_, render_width_, render_height_, ssaoParams)) {
-            std::cerr << "[Lumen] SSAO init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] SSAO init failed" << std::endl;
             ssao_pass_.reset();
         }
     }
@@ -673,7 +674,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         ssgi_pass_ = std::make_unique<lumen::LumenSSGIPass>();
         lumen::SSGIParams ssgiParams{};
         if (!ssgi_pass_->Initialize(device_, render_width_, render_height_, ssgiParams)) {
-            std::cerr << "[Lumen] SSGI init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] SSGI init failed" << std::endl;
             ssgi_pass_.reset();
         }
     }
@@ -682,7 +683,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (settings_.quality.enable_surface_cache) {
         surface_cache_pass_ = std::make_unique<lumen::SurfaceCachePass>();
         if (!surface_cache_pass_->Initialize(device_, config)) {
-            std::cerr << "[Lumen] Surface Cache init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] Surface Cache init failed" << std::endl;
         // T8.13: re-apply the offline SDF to the SC shadow march after a
         // Lumen rebuild (surface_cache was just re-created).
         if (has_offline_sdf_) {
@@ -719,7 +720,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         probeParams.enable_importance = config.screen_probes_importance;  // F2 (M7)
         probeParams.adaptive_pos_threshold = config.screen_probes_adaptive_pos_error;  // F4 (M7)
         if (!screen_probe_pass_->Initialize(device_, render_width_, render_height_, probeParams)) {
-            std::cerr << "[Lumen] Screen Probes init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] Screen Probes init failed" << std::endl;
             screen_probe_pass_.reset();
         } else if (offline_sdf_texture_ != handles::INVALID_RESOURCE) {
             // Same rebuild-survival concern as the DDGI forward above: the
@@ -728,7 +729,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
                                                     offline_sdf_origin_,
                                                     offline_sdf_extent_,
                                                     offline_sdf_resolution_);
-            std::cerr << "[Lumen] Offline SDF re-applied to SPGI trace ("
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] Offline SDF re-applied to SPGI trace ("
                       << offline_sdf_resolution_ << "³)" << std::endl;
         }
     }
@@ -744,7 +745,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         const char* probeCachePath = "scene.probe_cache";
         if (static_probe_volume_->LoadFromFile(probeCachePath)) {
             static_probe_volume_->UploadToGPU();
-            std::cout << "[Lumen] Loaded static probe cache: " << probeCachePath << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << "[Lumen] Loaded static probe cache: " << probeCachePath << std::endl;
         }
     }
 
@@ -753,7 +754,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         volume_pass_ = std::make_unique<volume::VolumePass>();
         volume::VolumeRuntimeParams volumeParams{};
         if (!volume_pass_->Initialize(device_, render_width_, render_height_, volumeParams)) {
-            std::cerr << "[Volume] VolumePass init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Volume] VolumePass init failed" << std::endl;
             volume_pass_.reset();
         }
     }
@@ -762,7 +763,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (settings_.quality.enable_volume_renderer) {
         volume_renderer_ = std::make_unique<volume::VolumeRenderer>();
         if (!volume_renderer_->Initialize(device_, render_width_, render_height_)) {
-            std::cerr << "[Volume] VolumeRenderer init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Volume] VolumeRenderer init failed" << std::endl;
             volume_renderer_.reset();
         }
     }
@@ -771,7 +772,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (settings_.quality.enable_froxel_fog) {
         froxel_fog_pass_ = std::make_unique<volume::FroxelFogPass>();
         if (!froxel_fog_pass_->Initialize(device_, render_width_, render_height_, settings_.froxel)) {
-            std::cerr << "[FroxelFog] Init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[FroxelFog] Init failed" << std::endl;
             froxel_fog_pass_.reset();
         }
     }
@@ -780,7 +781,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (settings_.quality.enable_fluid_render) {
         fluid_render_pass_ = std::make_unique<fluid::FluidRenderPass>();
         if (!fluid_render_pass_->Initialize(device_, render_width_, render_height_, settings_.fluid)) {
-            std::cerr << "[FluidRender] Init failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[FluidRender] Init failed" << std::endl;
             fluid_render_pass_.reset();
         }
     }
@@ -838,7 +839,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
 
     static u32 viewDiag = 0;
     if (viewDiag < 3) {
-        std::cout << "[Diag] View: col0=(" << view_matrix_.columns[0][0] << "," << view_matrix_.columns[0][1] << "," << view_matrix_.columns[0][2] << ")"
+        PRIMAL_LOG_STREAM(Info, "Render") << "[Diag] View: col0=(" << view_matrix_.columns[0][0] << "," << view_matrix_.columns[0][1] << "," << view_matrix_.columns[0][2] << ")"
                   << " col1=(" << view_matrix_.columns[1][0] << "," << view_matrix_.columns[1][1] << "," << view_matrix_.columns[1][2] << ")"
                   << " col2=(" << view_matrix_.columns[2][0] << "," << view_matrix_.columns[2][1] << "," << view_matrix_.columns[2][2] << ")"
                   << " col3=(" << view_matrix_.columns[3][0] << "," << view_matrix_.columns[3][1] << "," << view_matrix_.columns[3][2] << ")"
@@ -874,7 +875,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                     cardGen.RegisterMesh(aabbMin, aabbMax, i);
                 }
                 cardGen.RebuildCardAllocation();
-                std::cout << "[LumenSC] Registered " << instances.size()
+                PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSC] Registered " << instances.size()
                           << " scene instances with CardGenerator → "
                           << cardGen.GetCardCount() << " cards" << std::endl;
             }
@@ -1000,7 +1001,7 @@ id::id_type StandardRenderPipeline::RegisterMeshEntity(id::id_type geometry_cont
         geometry_content_id, albedo_id, normal_id, orm_id, eid);
 
     if (slot == (u32)-1) {
-        std::cerr << "[StandardRenderPipeline] RegisterMeshEntity: failed for geometry "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[StandardRenderPipeline] RegisterMeshEntity: failed for geometry "
                   << geometry_content_id << std::endl;
         game_entity::remove(game_entity::entity_id{eid});
         return id::invalid_id;
@@ -1227,7 +1228,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                     static int s_vox_check = 0;
                     if (s_vox_check < 3) {
                         auto& gsdf = nanite::GlobalSDF::Get();
-                        std::cout << "[VOX_CHECK] sceneRender done, sdfInit=" << gsdf.IsInitialized()
+                        PRIMAL_LOG_STREAM(Info, "Render") << "[VOX_CHECK] sceneRender done, sdfInit=" << gsdf.IsInitialized()
                                   << " voxReady=" << gsdf.IsVoxelizationReady()
                                   << " cascade0Needs=" << (gsdf.GetConfig().cascade_count > 0 ? "check" : "n/a")
                                   << std::endl;
@@ -1292,7 +1293,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
                         static int s_vox_diag = 0;
                         if (s_vox_diag < 5) {
-                            std::cerr << "[SDF_VOX] pass executing, ready=" << globalSDF.IsVoxelizationReady()
+                            PRIMAL_LOG_STREAM(Error, "Render") << "[SDF_VOX] pass executing, ready=" << globalSDF.IsVoxelizationReady()
                                       << " instances=" << (scene_snapshot_ ? scene_snapshot_->GetInstanceCount() : 0)
                                       << std::endl;
                             s_vox_diag++;
@@ -1862,7 +1863,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthPtr);
         RGResourceHandle hdrClean = taaOut.output;
 
-        auto bloomOut = PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
+        // BLOOM_OFF=1 诊断开关：跳过 bright/blur，ToneMapping 走 dummy 黑纹理。
+        const bool bloomOff = std::getenv("BLOOM_OFF") != nullptr;
+        auto bloomOut = bloomOff
+            ? PostProcess::BloomPassData{}
+            : PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
 
         // FusionIndirect has already applied AO and blended SSGI/DDGI/SPGI.
         // Do not feed AO/SSGI to ToneMapping again or the legacy post-process
@@ -1944,21 +1949,17 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         FinalBlitInputs blitIn;
         // Prefer the tone-mapped LDR output (Toon-processed when enabled);
         // fall back to HDR composite if PostProcess was skipped (e.g. no valid
-        // input texture this frame). FinalBlit binds the PHYSICAL texture
-        // directly (no RG-side resolution), so resolve the physical handle here.
+        // input texture this frame). 只决定 RG 句柄，物理句柄由 FinalBlit 在
+        // exec 时解析（同 RWCB 路径的说明）。
         if (postToonColor.IsValid()) {
-            auto* toneRes = graph.GetResource(postToonColor);
-            if (toneRes) {
-                blitIn.input_rg = postToonColor;
-                blitIn.input_tex = toneRes->GetPhysicalHandle();
-            }
+            blitIn.input_rg = postToonColor;
         }
-        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+        if (!blitIn.input_rg.IsValid() &&
             fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
             blitIn.input_tex = fusionOut.output_tex;
         }
-        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+        if (!blitIn.input_rg.IsValid() &&
             deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
@@ -2039,13 +2040,13 @@ static void ReportGraphPassTimes(RenderGraph& graph) {
     std::sort(rows.begin(), rows.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
 
-    std::cerr << "[RG-Perf] === GPU ms/frame over last " << frames << " frames ===" << std::endl;
+    PRIMAL_LOG_STREAM(Error, "Render") << "[RG-Perf] === GPU ms/frame over last " << frames << " frames ===" << std::endl;
     u32 shown = 0;
     for (const auto& [n, avg] : rows) {
         if (shown++ >= 24) break;
-        std::cerr << "  " << avg << "  " << n << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  " << avg << "  " << n << std::endl;
     }
-    std::cerr << "[RG-Perf] TOTAL(sum of passes) = " << total << " ms/frame" << std::endl;
+    PRIMAL_LOG_STREAM(Error, "Render") << "[RG-Perf] TOTAL(sum of passes) = " << total << " ms/frame" << std::endl;
 
     sumMs.clear();
     cnt.clear();
@@ -2719,7 +2720,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 hdrCleanRWCB = taaRWCB.output;
             }
 
-            auto bloomRWCB = PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
+            auto bloomRWCB = std::getenv("BLOOM_OFF")
+                ? PostProcess::BloomPassData{}
+                : PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
             // FusionIndirect already owns AO/GI composition. ToneMapping only
             // receives those legacy inputs when Fusion was unavailable.
             const bool giAlreadyCompositedRWCB =
@@ -2756,20 +2759,19 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- Final Blit → backbuffer ---
         FinalBlitInputs blitIn;
-        // Prefer the Toon-processed frame (== toneOutRWCB.output when toon is off).
+        // Prefer the Toon-processed frame (== toneOutRWCB.output when toon is off);
+        // fall back to HDR composite if PostProcess was skipped. 注意：这里只决定
+        // RG 句柄——物理句柄由 FinalBlit 在 exec 时解析（瞬态纹理 AddPass 时
+        // 尚未分配，预解析拿到 INVALID 曾令后处理链整体被裁剪，见 FinalBlitModule）。
         if (postToonColorRWCB.IsValid()) {
-            auto* toneResRWCB = graph.GetResource(postToonColorRWCB);
-            if (toneResRWCB) {
-                blitIn.input_rg = postToonColorRWCB;
-                blitIn.input_tex = toneResRWCB->GetPhysicalHandle();
-            }
+            blitIn.input_rg = postToonColorRWCB;
         }
-        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+        if (!blitIn.input_rg.IsValid() &&
             fusionOut.output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = fusionOut.output_rg;
             blitIn.input_tex = fusionOut.output_tex;
         }
-        if (blitIn.input_tex == handles::INVALID_RESOURCE &&
+        if (!blitIn.input_rg.IsValid() &&
             deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
@@ -2789,7 +2791,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 psLogged = true;
                 const bool modOk = probe_sphere_module_ && probe_sphere_module_->IsInitialized();
                 const bool ddgiOk = ddgi_pass_ && ddgi_pass_->IsInitialized();
-                std::cerr << "[ProbeSpheres] RWCB injection: enabled=" << probe_sphere_debug_
+                PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] RWCB injection: enabled=" << probe_sphere_debug_
                           << " module=" << (modOk ? "ok" : "missing")
                           << " ddgi=" << (ddgiOk ? "ok" : "missing")
                           << " probes=" << (ddgiOk ? ddgi_pass_->GetVolumeData().ProbeCountTotal : 0u)
@@ -2981,7 +2983,7 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
         auto& gsdf = nanite::GlobalSDF::Get();
         static int s_guard_checks = 0;
         if (s_guard_checks < 3) {
-            std::cout << "[StdPipeline] DispatchVoxelization guard #" << s_guard_checks
+            PRIMAL_LOG_STREAM(Info, "Render") << "[StdPipeline] DispatchVoxelization guard #" << s_guard_checks
                       << " readback_init=" << pcg_sdf_readback_initialized_
                       << " sdf_init=" << gsdf.IsInitialized()
                       << " vox_ready=" << gsdf.IsVoxelizationReady()

@@ -5,12 +5,12 @@
         Width="420" Height="190"
         WindowStartupLocation="CenterOwner"
         CanResize="False"
-        Background="{StaticResource VoidBrush}">
+        Background="{DynamicResource VoidBrush}">
   <Border Classes="floating" Margin="10">
     <StackPanel Margin="24" Spacing="10">
       <TextBlock Name="PromptText"
-                 FontFamily="{StaticResource FontUI}"
-                 Foreground="{StaticResource PrimaryTextBrush}" FontSize="12"/>
+                 FontFamily="{DynamicResource FontUI}"
+                 Foreground="{DynamicResource PrimaryTextBrush}" FontSize="12"/>
       <TextBox Name="InputBox"/>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,12,0,0">
         <Button Content="Cancel" Click="OnCancelClick" Width="90"/>

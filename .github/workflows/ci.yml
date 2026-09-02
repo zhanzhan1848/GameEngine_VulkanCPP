@@ -34,6 +34,7 @@ on:
           - windows
           - linux
           - wasm
+          - macos-engine-smoke
       clean_build:
         description: '深度清理 runner 工作区（git clean -ffdx，全量重编）'
         required: false
@@ -295,6 +296,32 @@ jobs:
           # --timeout guards against windowed graphics tests hanging in a
           # non-interactive session.
           ctest --test-dir build -C Release --output-on-failure --timeout 600 --no-tests=error
+
+      - name: 离线 CLI 冒烟（primal-engine 平台矩阵守卫）
+        shell: powershell
+        run: |
+          # CLI/Agent 接口（Docs/CLI_Agent_Interface_Plan.md §9 风险 #6）：平台矩阵
+          # 按"各自可用子集"放开——Windows 当前没有 InitializeEngine 导出，因此：
+          #   schema      必须可用（纯 JSON，不初始化引擎）
+          #   render      必须以 exit 4 + NOT_SUPPORTED 显式拒绝（而不是假成功/崩溃）
+          # 本步骤同时守住 primal-engine 的 MSVC 编译与 DLL 部署（POST_BUILD copy）。
+          $exe = "Windows/Release/primal-engine.exe"
+          if (-not (Test-Path $exe)) { Write-Host "::error::primal-engine.exe 未产出（目标是否被编译？）"; exit 1 }
+
+          $lastLine = (& $exe schema 2>$null | Select-Object -Last 1)
+          $schema = $lastLine | ConvertFrom-Json
+          if (-not $schema.ok) { Write-Host "::error::schema verb 失败: $lastLine"; exit 1 }
+          $verbs = @($schema.data.commands | ForEach-Object { $_.verb })
+          if ($verbs -notcontains "render") { Write-Host "::error::offline schema 缺 render: $verbs"; exit 1 }
+          if ($verbs -notcontains "cook-mesh") { Write-Host "::error::offline schema 缺 cook-mesh: $verbs"; exit 1 }
+          Write-Host "offline schema OK: $verbs"
+
+          & $exe render --out ci_smoke.png 2>$null
+          if ($LASTEXITCODE -ne 4) {
+            Write-Host "::error::render 应以 exit 4 (NOT_SUPPORTED) 拒绝，实际 exit $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "render 正确拒绝（Windows 平台矩阵，符合 §9 风险 #6 预期）"
 
       - name: 上传编译错误制品（失败时）
         # 供 compile-error-report job 聚合跨平台报告
@@ -710,4 +737,134 @@ jobs:
         with:
           name: compile-error-report-${{ github.run_id }}
           path: compile-error-report.md
+          retention-days: 14
+
+  # ============================================================
+  # CLI / Agent 框架门禁（CLI_Agent_Interface_Plan.md §13 DoD）
+  #   · primal selftest —— 框架往返（协议/绑定/schema/错误映射）
+  #   · dotnet test Cli —— 含 editor schema 快照 diff 门禁（§3.2/§13）
+  #   · primal schema  —— 聚合表在无编辑器环境下可产出（offline 半张可空）
+  # 全部 CPU-only，无 GUI / 无引擎依赖，任何平台的 CI 都能跑。
+  # ============================================================
+  cli-framework:
+    name: CLI Framework (dotnet / ubuntu)
+    needs: preflight
+    if: github.event_name == 'push' || inputs.platform == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 安装 .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: 构建（CliFramework + PrimalCli + Tests）
+        run: |
+          dotnet build Primal.CliFramework/Primal.CliFramework.csproj -c Debug --nologo -v q
+          dotnet build PrimalCli/PrimalCli.csproj -c Debug --nologo -v q
+          dotnet build PrimalEditor_Avalonia.Tests/PrimalEditor_Avalonia.Tests.csproj -c Debug --nologo -v q
+
+      - name: primal selftest（框架自测）
+        run: |
+          dotnet run --project PrimalCli -c Debug --no-build -- selftest | tee selftest.log
+          grep -q "all passed" selftest.log
+
+      - name: xUnit Cli 测试（含 schema 快照门禁）
+        run: |
+          dotnet test PrimalEditor_Avalonia.Tests -c Debug --no-build \
+            --filter "FullyQualifiedName~Cli" --logger "console;verbosity=normal"
+
+      - name: primal schema 冒烟（无编辑器：editor 半张可空）
+        run: |
+          dotnet run --project PrimalCli -c Debug --no-build -- schema | tee schema.log
+          grep -q '"protocol": "primal.cli.v1"' schema.log
+
+      - name: 上传 CLI 日志制品（L3 归档，§11.4）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-logs-${{ github.run_id }}
+          path: |
+            selftest.log
+            schema.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ============================================================
+  # macOS 自托管引擎冒烟（CLI_Agent_Interface_Plan.md §8/§13 DoD #4/#5）
+  #   编辑器闭环（PRIMAL_OPEN_PROJECT）+ 编辑器日志文件 + 渲染基线门禁。
+  #   需要 GPU + GUI，只能跑在自托管 macOS runner 上——仓库当前未常驻该
+  #   runner，故仅 workflow_dispatch(macos-engine-smoke) 手动触发；接入
+  #   常驻 runner 后把 if 改为 `github.event_name == 'push' || …` 即可。
+  # ============================================================
+  macos-engine-smoke:
+    name: Engine Smoke (macOS self-hosted)
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch' && inputs.platform == 'macos-engine-smoke'
+    runs-on: [self-hosted, macOS, arm64]
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: false          # 自托管 runner 复用工作区，保留构建缓存
+
+      - name: 初始化 submodule
+        run: |
+          git submodule update --init third_party/meshoptimizer third_party/stb \
+            third_party/moodycamel-ConcurrentQueue third_party/lua third_party/VHACD
+
+      - name: C++ 构建（Engine + EngineDLL + PrimalEngineCli + vtbake）
+        run: |
+          cmake -S . -B build-wt >/dev/null   # CMAKE_SUPPRESS_REGENERATION ON：手动 configure
+          cmake --build build-wt --target Engine EngineDLL PrimalEngineCli vtbake --parallel
+
+      - name: C# 构建
+        run: |
+          dotnet build PrimalCli/PrimalCli.csproj -c DebugEditor --nologo -v q
+          dotnet build PrimalEditor_Avalonia/PrimalEditor_Avalonia.csproj -c DebugEditor --nologo -v q
+          dotnet build PrimalEditor_Avalonia.Tests/PrimalEditor_Avalonia.Tests.csproj -c DebugEditor --nologo -v q
+
+      - name: 离线链路（selftest / engine info / render / cook-mesh / bake-vt / 基线门禁）
+        run: |
+          Darwin/PrimalCli/DebugEditor/primal selftest | tee selftest.log
+          grep -q "all passed" selftest.log
+          Darwin/DebugEditor/primal-engine engine info >/dev/null 2>&1
+          python3 -c "import zlib,struct;w=h=8;raw=b''.join(b'\x00'+bytes([200,30,40]*w) for _ in range(h));chunk=lambda t,d:struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff);open('/tmp/ci_src.png','wb').write(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))"
+          Darwin/DebugEditor/primal-engine bake-vt --in /tmp/ci_src.png --out /tmp/ci.vtex >/dev/null 2>&1
+          test -s /tmp/ci.vtex || { echo "::error::bake-vt 未产出"; exit 1; }
+          Darwin/PrimalCli/DebugEditor/primal test render | tee testrender.log
+          grep -qE '"verdict": "(identical|within-threshold|baseline-created)"' testrender.log
+
+      - name: 编辑器闭环冒烟（PRIMAL_OPEN_PROJECT）
+        run: |
+          PRIMAL_OPEN_PROJECT="$PWD/projects_test/TestProject_01/TestProject_01.primal" \
+            nohup Darwin/PrimalEditor_Avalonia/DebugEditor/PrimalEditor_Avalonia > editor.log 2>&1 &
+          for i in $(seq 1 48); do
+            Darwin/PrimalCli/DebugEditor/primal editor.ping >/dev/null 2>&1 && break
+            sleep 5
+          done
+          ./scripts/primal_smoke.sh /tmp/primal_ci_smoke
+          test -s projects_test/TestProject_01/.Primal/logs/engine.log || {
+            echo "::error::引擎日志文件未落盘（FileSink）"; exit 1; }
+
+      - name: 上传冒烟产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-smoke-logs-${{ github.run_id }}
+          path: |
+            selftest.log
+            testrender.log
+            editor.log
+            projects_test/TestProject_01/.Primal/logs/engine.log
+          if-no-files-found: ignore
           retention-days: 14

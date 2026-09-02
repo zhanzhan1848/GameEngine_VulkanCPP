@@ -1,5 +1,6 @@
 #include "GPUParticleSystem.h"
 #include "GPUParticleEmitter.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
@@ -211,7 +212,7 @@ namespace {
 
 bool gpu_particle_system::initialize(rhi::RHIDeviceBase* device, const gpu_system_config& config) {
     if (!device) {
-        std::cerr << "[GPUParticleSystem] Invalid device" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Invalid device" << std::endl;
         return false;
     }
     
@@ -224,24 +225,24 @@ bool gpu_particle_system::initialize(rhi::RHIDeviceBase* device, const gpu_syste
     
     // Create shaders
     if (!create_shaders()) {
-        std::cerr << "[GPUParticleSystem] Failed to create shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create shaders" << std::endl;
         return false;
     }
     
     // Create buffers
     if (!create_buffers()) {
-        std::cerr << "[GPUParticleSystem] Failed to create buffers" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create buffers" << std::endl;
         return false;
     }
     
     // Create pipelines
     if (!create_pipelines()) {
-        std::cerr << "[GPUParticleSystem] Failed to create pipelines" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create pipelines" << std::endl;
         return false;
     }
     
     initialized_ = true;
-    std::cout << "[GPUParticleSystem] Initialized successfully" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Particles") << "[GPUParticleSystem] Initialized successfully" << std::endl;
     return true;
 }
 
@@ -282,7 +283,7 @@ bool gpu_particle_system::create_shaders() {
     );
     
     if (update_shader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[GPUParticleSystem] Failed to create update shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create update shader" << std::endl;
         return false;
     }
     
@@ -295,7 +296,7 @@ bool gpu_particle_system::create_shaders() {
     );
     
     if (culling_shader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[GPUParticleSystem] Failed to create culling shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create culling shader" << std::endl;
         return false;
     }
     
@@ -353,7 +354,7 @@ bool gpu_particle_system::create_buffers() {
             indirect_buffers_[i] == rhi::handles::INVALID_RESOURCE ||
             emitter_buffers_[i] == rhi::handles::INVALID_RESOURCE ||
             counter_buffers_[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[GPUParticleSystem] Failed to create buffers for frame " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create buffers for frame " << i << std::endl;
             return false;
         }
     }
@@ -403,7 +404,7 @@ bool gpu_particle_system::create_pipelines() {
         update_pipeline_ = device_->CreateComputePipeline(desc);
         
         if (update_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[GPUParticleSystem] Failed to create update pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create update pipeline" << std::endl;
             return false;
         }
     }
@@ -416,7 +417,7 @@ bool gpu_particle_system::create_pipelines() {
         culling_pipeline_ = device_->CreateComputePipeline(desc);
         
         if (culling_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[GPUParticleSystem] Failed to create culling pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticleSystem] Failed to create culling pipeline" << std::endl;
             return false;
         }
     }

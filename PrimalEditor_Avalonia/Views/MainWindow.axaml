@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+        xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
         xmlns:views="using:PrimalEditor_Avalonia.Views"
         xmlns:common="using:PrimalEditor_Avalonia.Common"
         xmlns:dock="using:Dock.Avalonia.Controls"
@@ -14,12 +15,12 @@
         MinWidth="900" MinHeight="600"
         Width="1400" Height="900"
         WindowStartupLocation="CenterScreen"
-        Background="{StaticResource VoidBrush}">
+        Background="{DynamicResource VoidBrush}">
 
     <DockPanel LastChildFill="True">
 
         <!-- =========== TOP MENU BAR =========== -->
-        <Border DockPanel.Dock="Top" Classes="floating">
+        <ctrl:TextureFrame DockPanel.Dock="Top" Classes="floating tex-strip">
             <Menu Background="Transparent" BorderThickness="0">
                 <MenuItem Header="_File">
                     <MenuItem Header="_New Project" Command="{Binding NewProjectCommand}"
@@ -68,38 +69,42 @@
                         </MenuItem.Icon>
                     </MenuItem>
                     <MenuItem Header="Toggle _Logger" Click="OnToggleLogger" InputGesture="F6"/>
+                    <Separator/>
+                    <!-- Editor UI skin (frontend only). Items are populated
+                         from EditorThemeRegistry in code-behind. -->
+                    <MenuItem Header="_Theme" x:Name="ThemeMenu"/>
                 </MenuItem>
                 <MenuItem Header="_Help">
                     <MenuItem Header="_About..." Command="{Binding AboutCommand}"/>
                 </MenuItem>
             </Menu>
-        </Border>
+        </ctrl:TextureFrame>
 
         <!-- =========== BOTTOM STATUS BAR (glass floating) =========== -->
         <Grid DockPanel.Dock="Bottom"
               ColumnDefinitions="*,Auto,Auto,Auto"
               Margin="6,2,6,6">
-            <Border Grid.Column="0" Classes="floating">
+            <ctrl:TextureFrame Grid.Column="0" Classes="floating tex-chip">
                 <StackPanel Orientation="Horizontal" Margin="8,4">
                     <Rectangle Width="10" Height="10"
-                               Fill="{StaticResource MintBrush}"
+                               Fill="{DynamicResource MintBrush}"
                                Margin="0,0,6,0" VerticalAlignment="Center"/>
                     <TextBlock Text="{Binding ProjectPathDisplay}" Classes="mono"/>
                 </StackPanel>
-            </Border>
-            <Border Grid.Column="1" Classes="floating" Margin="4,0,0,0">
+            </ctrl:TextureFrame>
+            <ctrl:TextureFrame Grid.Column="1" Classes="floating tex-chip" Margin="4,0,0,0">
                 <TextBlock Text="{Binding SceneCountDisplay}" Classes="mono" Margin="8,4"/>
-            </Border>
-            <Border Grid.Column="2" Classes="floating" Margin="4,0,0,0">
+            </ctrl:TextureFrame>
+            <ctrl:TextureFrame Grid.Column="2" Classes="floating tex-chip" Margin="4,0,0,0">
                 <TextBlock Text="{Binding EntityCountDisplay}" Classes="mono" Margin="8,4"/>
-            </Border>
-            <Border Grid.Column="3" Classes="floating" Margin="4,0,0,0">
+            </ctrl:TextureFrame>
+            <ctrl:TextureFrame Grid.Column="3" Classes="floating tex-chip" Margin="4,0,0,0">
                 <StackPanel Orientation="Horizontal" Margin="8,4">
-                    <TextBlock Text="READY" FontFamily="{StaticResource FontDisplay}"
+                    <TextBlock Text="READY" FontFamily="{DynamicResource FontDisplay}"
                                FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                               Foreground="{StaticResource MintBrush}"/>
+                               Foreground="{DynamicResource MintBrush}"/>
                 </StackPanel>
-            </Border>
+            </ctrl:TextureFrame>
         </Grid>
 
         <!-- =========== MAIN DOCK AREA =========== -->

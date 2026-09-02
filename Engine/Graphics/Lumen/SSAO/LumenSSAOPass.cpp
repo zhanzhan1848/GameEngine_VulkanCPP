@@ -11,6 +11,7 @@
 #include <sstream>
 #include <cstring>
 #include <set>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
 
@@ -148,12 +149,12 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
             file.seekg(0, std::ios::beg);
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[LumenSSAO] Failed to read SPIR-V: " << path << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSAO] Failed to read SPIR-V: " << path << std::endl;
                 return {};
             }
             return bytecode;
         }
-        std::cerr << "[LumenSSAO] Failed to load SPIR-V shader: " << shaderName
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSAO] Failed to load SPIR-V shader: " << shaderName
                   << "\n  tried: " << candidates[0]
                   << "\n  tried: " << candidates[1] << std::endl;
         return {};
@@ -169,7 +170,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
     }
 
     if (source.empty()) {
-        std::cerr << "[LumenSSAO] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSAO] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
 
@@ -229,7 +230,7 @@ bool LumenSSAOPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
 
     initialized_ = true;
 
-    std::cout << "[LumenSSAO] Initialized (" << render_width << "x" << render_height
+    PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSSAO] Initialized (" << render_width << "x" << render_height
               << ", half-res: " << half_w << "x" << half_h << ")" << std::endl;
     return true;
 }
@@ -307,7 +308,7 @@ void LumenSSAOPass::CreatePipelines() {
 
     if (traceShader == handles::INVALID_SHADER ||
         filterShader == handles::INVALID_SHADER) {
-        std::cerr << "[LumenSSAO] Shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSAO] Shader compilation failed" << std::endl;
         return;
     }
 

@@ -8,6 +8,7 @@
 #include "MetalGPass.h"
 #include "MetalLight.h"
 #include "shaders/ShaderType.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::metal::ssao
 {
@@ -138,7 +139,7 @@ namespace primal::graphics::metal::ssao
         // that as a soft failure — the SSAO pass just won't run, but the rest
         // of graphics::initialize should still succeed.
         if (!create_pipeline_state()) {
-            std::cerr << "[MetalSSAO] pipeline state unavailable; SSAO pass disabled." << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalSSAO] pipeline state unavailable; SSAO pass disabled." << std::endl;
         }
         return create_ssao_texture(initial_dimensions);
     }   

@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -27,7 +28,7 @@ void MetalStagingAllocator::Initialize(MTL::Device* device,
         pools_[i].buffer = device_->newBuffer(poolSize, MTL::ResourceStorageModeShared);
         if (!pools_[i].buffer) {
             // Allocation failure — abort with partial state
-            std::cerr << "[MetalStagingAllocator] Failed to allocate pool " << i
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalStagingAllocator] Failed to allocate pool " << i
                       << " (size=" << poolSize << ")" << std::endl;
             Shutdown();
             return;
@@ -84,7 +85,7 @@ MetalStagingAllocator::Allocate(u64 size, u64 alignment) {
     // Align offset
     u64 alignedOffset = (pool.offset + alignment - 1) & ~(alignment - 1);
     if (alignedOffset + size > pool.capacity) {
-        std::cerr << "[MetalStagingAllocator] Frame " << currentFrame_
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalStagingAllocator] Frame " << currentFrame_
                   << " pool exhausted: requested=" << size
                   << " aligned=" << alignedOffset
                   << " capacity=" << pool.capacity << std::endl;
@@ -152,7 +153,7 @@ void MetalStagingAllocator::EncodePendingBlits(MTL::CommandBuffer* cmd) {
 
     MTL::BlitCommandEncoder* enc = cmd->blitCommandEncoder();
     if (!enc) {
-        std::cerr << "[MetalStagingAllocator] Failed to create blit encoder" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalStagingAllocator] Failed to create blit encoder" << std::endl;
         return;
     }
 
@@ -182,7 +183,7 @@ void MetalStagingAllocator::EncodePendingBlits(MTL::CommandBuffer* cmd) {
 void MetalStagingAllocator::FlushBlocking() {
     if (!initialized_) return;
     if (!transferQueue_) {
-        std::cerr << "[MetalStagingAllocator] FlushBlocking: no transfer queue" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalStagingAllocator] FlushBlocking: no transfer queue" << std::endl;
         return;
     }
 
@@ -191,7 +192,7 @@ void MetalStagingAllocator::FlushBlocking() {
 
     MTL::CommandBuffer* cmd = transferQueue_->commandBuffer();
     if (!cmd) {
-        std::cerr << "[MetalStagingAllocator] FlushBlocking: commandBuffer() failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalStagingAllocator] FlushBlocking: commandBuffer() failed" << std::endl;
         return;
     }
 

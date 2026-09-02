@@ -11,6 +11,7 @@
 #include <cmath>
 #include "Utilities/Vector.h"
 #include <set>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -81,7 +82,7 @@ namespace {
         }
 
         if (!found) {
-            std::cerr << "[IBLPrecomputer] Failed to open shader file: " << filename << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[IBLPrecomputer] Failed to open shader file: " << filename << std::endl;
             return "";
         }
         
@@ -142,7 +143,7 @@ ShaderHandle IBLPrecomputer::CreateComputeShader(const std::string& filename, co
             file.read(bytes.data(), size);
             return device_->CreateShader(bytes.data(), bytes.size(), ShaderStage::Compute, entryPoint);
         }
-        std::cerr << "[IBLPrecomputer] Failed to open SPIR-V shader file: " << filename << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[IBLPrecomputer] Failed to open SPIR-V shader file: " << filename << std::endl;
         return handles::INVALID_SHADER;
     }
 
@@ -232,7 +233,7 @@ bool IBLPrecomputer::CreatePipelines() {
         prefilterDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
         brdfDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
         equirectToCubeDescLayout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-        std::cerr << "[IBLPrecomputer] Failed to create descriptor set layouts" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[IBLPrecomputer] Failed to create descriptor set layouts" << std::endl;
         return false;
     }
 
@@ -291,7 +292,7 @@ bool IBLPrecomputer::CreatePipelines() {
     if (irradianceShader == handles::INVALID_SHADER ||
         prefilterShader == handles::INVALID_SHADER ||
         brdfShader == handles::INVALID_SHADER) {
-        std::cerr << "[IBLPrecomputer] Failed to create shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[IBLPrecomputer] Failed to create shaders" << std::endl;
         return false;
     }
 

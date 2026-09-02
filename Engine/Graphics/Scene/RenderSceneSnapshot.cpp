@@ -18,6 +18,7 @@
 #include <limits>
 #include <mutex>
 #include <unordered_map>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -123,7 +124,7 @@ LocalBounds ComputeLocalBounds(nanite::NaniteRuntimeResource* resource,
             result.center = { 0, 0, 0 };
             result.extent = { 1, 1, 1 };
             result.valid = false;
-            std::cerr << "[BOUNDS_FALLBACK] geometry_id=" << geometry_id
+            PRIMAL_LOG_STREAM(Error, "Scene") << "[BOUNDS_FALLBACK] geometry_id=" << geometry_id
                       << " no gpu_mesh AND no position_buffer — using (0,0,0)/1.0" << std::endl;
         }
     }
@@ -591,7 +592,7 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
             instance.bounds_radius = maxLocalExtent * maxScale;
 
             // DEBUG: Print cluster index assignment
-            std::cout << "[RenderSceneSnapshot] Instance " << instances.size()
+            PRIMAL_LOG_STREAM(Info, "Scene") << "[RenderSceneSnapshot] Instance " << instances.size()
                       << " geometry_id=" << instance.geometry_id
                       << " cluster_map_base=" << instance.cluster_map_base
                       << " cluster_count=" << instance.cluster_count
@@ -632,12 +633,12 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
 
 bool RenderSceneSnapshot::UploadToGPUBuffers(rhi::RHICommandBuffer* cmd_buffer) {
     if (!cmd_buffer) {
-        std::cerr << "[RenderSceneSnapshot] UploadToGPUBuffers failed: null command buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Scene") << "[RenderSceneSnapshot] UploadToGPUBuffers failed: null command buffer" << std::endl;
         return false;
     }
 
     if (!initialized_) {
-        std::cerr << "[RenderSceneSnapshot] UploadToGPUBuffers failed: not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Scene") << "[RenderSceneSnapshot] UploadToGPUBuffers failed: not initialized" << std::endl;
         return false;
     }
 
@@ -650,14 +651,14 @@ bool RenderSceneSnapshot::UploadToGPUBuffers(rhi::RHICommandBuffer* cmd_buffer) 
         u64 instance_buffer_capacity = instance_capacity_ * sizeof(InstanceData);
 
         /*
-        std::cout << "[RenderSceneSnapshot] Buffer Check: count=" << instance_count_
+        PRIMAL_LOG_STREAM(Info, "Scene") << "[RenderSceneSnapshot] Buffer Check: count=" << instance_count_
                   << " capacity=" << instance_capacity_
                   << " needed=" << instance_data_size
                   << " available=" << instance_buffer_capacity << std::endl;
         */
 
         if (instance_data_size > instance_buffer_capacity) {
-            std::cerr << "[RenderSceneSnapshot] ERROR: Instance buffer too small! "
+            PRIMAL_LOG_STREAM(Error, "Scene") << "[RenderSceneSnapshot] ERROR: Instance buffer too small! "
                       << "Need " << instance_data_size << " bytes but only have "
                       << instance_buffer_capacity << " bytes" << std::endl;
             return false;

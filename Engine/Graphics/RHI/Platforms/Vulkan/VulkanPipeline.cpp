@@ -16,6 +16,7 @@
 #include "VulkanShader.h"
 #include "VulkanPipelineLayout.h"
 #include "VulkanMath.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -195,7 +196,7 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
     addStage(desc.domainShader,  VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
 
     if (stages.empty()) {
-        std::cerr << "[VulkanPipeline] No valid shader stages" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipeline] No valid shader stages" << std::endl;
         return false;
     }
 
@@ -337,7 +338,7 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
         VkPipelineLayoutCreateInfo plci{};
         plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         if (vkCreatePipelineLayout(dev, &plci, nullptr, &pipelineLayout) != VK_SUCCESS) {
-            std::cerr << "[VulkanPipeline] fallback vkCreatePipelineLayout failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipeline] fallback vkCreatePipelineLayout failed" << std::endl;
             return false;
         }
         ownedLayout_ = pipelineLayout;  // 析构时需销毁
@@ -399,7 +400,7 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
 
     VkRenderPass renderPass = VK_NULL_HANDLE;
     if (vkCreateRenderPass(dev, &rpci, nullptr, &renderPass) != VK_SUCCESS) {
-        std::cerr << "[VulkanPipeline] vkCreateRenderPass (compat) failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipeline] vkCreateRenderPass (compat) failed" << std::endl;
         return false;
     }
 
@@ -430,7 +431,7 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
     });
 
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanPipeline] vkCreateGraphicsPipelines failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipeline] vkCreateGraphicsPipelines failed: " << res << std::endl;
         pipeline_ = VK_NULL_HANDLE;
         return false;
     }
@@ -450,7 +451,7 @@ bool VulkanPipeline::Initialize(const ComputePipelineDesc& desc) {
 
     VulkanShader* sh = (desc.computeShader != handles::INVALID_SHADER) ? vk.GetShader(desc.computeShader) : nullptr;
     if (!sh || !sh->GetNativeModule()) {
-        std::cerr << "[VulkanPipeline] Compute: invalid shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipeline] Compute: invalid shader" << std::endl;
         return false;
     }
 
@@ -463,7 +464,7 @@ bool VulkanPipeline::Initialize(const ComputePipelineDesc& desc) {
         VkPipelineLayoutCreateInfo plci{};
         plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         if (vkCreatePipelineLayout(dev, &plci, nullptr, &pipelineLayout) != VK_SUCCESS) {
-            std::cerr << "[VulkanPipeline] compute fallback vkCreatePipelineLayout failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipeline] compute fallback vkCreatePipelineLayout failed" << std::endl;
             return false;
         }
         ownedLayout_ = pipelineLayout;
@@ -482,7 +483,7 @@ bool VulkanPipeline::Initialize(const ComputePipelineDesc& desc) {
 
     VkResult res = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cci, nullptr, &pipeline_);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanPipeline] vkCreateComputePipelines failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipeline] vkCreateComputePipelines failed: " << res << std::endl;
         pipeline_ = VK_NULL_HANDLE;
         return false;
     }

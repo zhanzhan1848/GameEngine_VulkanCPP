@@ -15,6 +15,7 @@
 #include "VulkanSurface.h"
 #include "VulkanDevice.h"
 #include "VulkanSync.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -141,7 +142,7 @@ bool VulkanSwapChain::createSwapchain(VkSwapchainKHR oldSwapchain) {
     // === 查询 surface capabilities ===
     VkSurfaceCapabilitiesKHR caps{};
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surface_, &caps) != VK_SUCCESS) {
-        std::cerr << "[VulkanSwapChain] vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed" << std::endl;
         return false;
     }
 
@@ -194,7 +195,7 @@ bool VulkanSwapChain::createSwapchain(VkSwapchainKHR oldSwapchain) {
     ci.oldSwapchain = oldSwapchain;
 
     if (vkCreateSwapchainKHR(vk.GetNativeDevice(), &ci, nullptr, &swapchain_) != VK_SUCCESS) {
-        std::cerr << "[VulkanSwapChain] vkCreateSwapchainKHR failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] vkCreateSwapchainKHR failed" << std::endl;
         return false;
     }
 
@@ -245,7 +246,7 @@ bool VulkanSwapChain::createBackBufferTextures() {
         u32 id = vk.GetTextureAllocator().Allocate(vk, td, nativeImages_[i]);
         VulkanTexture* wrapper = vk.GetTextureAllocator().Get(id);
         if (!wrapper || !wrapper->Initialize()) {
-            std::cerr << "[VulkanSwapChain] backbuffer wrap Initialize failed at index " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] backbuffer wrap Initialize failed at index " << i << std::endl;
             if (wrapper) vk.GetTextureAllocator().Free(id);
             return false;
         }
@@ -285,7 +286,7 @@ bool VulkanSwapChain::recreateSurface() {
     device_.GetGarbageCollector().Flush();
     destroySurface();
     if (!createSurface()) {
-        std::cerr << "[VulkanSwapChain] recreateSurface: createSurface failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] recreateSurface: createSurface failed" << std::endl;
         return false;
     }
     return true;
@@ -305,7 +306,7 @@ bool VulkanSwapChain::Recreate() {
     VkSwapchainKHR old = swapchain_;
     swapchain_ = VK_NULL_HANDLE;
     if (!createSwapchain(old)) {
-        std::cerr << "[VulkanSwapChain] Recreate: createSwapchain failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] Recreate: createSwapchain failed" << std::endl;
         if (old != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(vk.GetNativeDevice(), old, nullptr);
         }
@@ -316,10 +317,10 @@ bool VulkanSwapChain::Recreate() {
         vkDestroySwapchainKHR(vk.GetNativeDevice(), old, nullptr);
     }
     if (!createBackBufferTextures()) {
-        std::cerr << "[VulkanSwapChain] Recreate: createBackBufferTextures failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] Recreate: createBackBufferTextures failed" << std::endl;
         return false;
     }
-    std::cout << "[VulkanSwapChain] Recreate: "
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanSwapChain] Recreate: "
               << swapChainDesc_.width << "x" << swapChainDesc_.height << std::endl;
     return true;
 }
@@ -366,21 +367,21 @@ bool VulkanSwapChain::AcquireNextImage(u32* imageIndex, SyncHandle semaphore,
             return true;
         }
         if (res == VK_ERROR_OUT_OF_DATE_KHR) {
-            std::cerr << "[VulkanSwapChain] AcquireNextImage OUT_OF_DATE — recreating (attempt "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] AcquireNextImage OUT_OF_DATE — recreating (attempt "
                       << attempt + 1 << "/" << kMaxAcquireRetries << ")" << std::endl;
             if (!Recreate()) return false;
             continue;
         }
         if (res == VK_ERROR_SURFACE_LOST_KHR) {
-            std::cerr << "[VulkanSwapChain] AcquireNextImage SURFACE_LOST — recreating surface"
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] AcquireNextImage SURFACE_LOST — recreating surface"
                       << std::endl;
             if (!recreateSurface() || !Recreate()) return false;
             continue;
         }
-        std::cerr << "[VulkanSwapChain] vkAcquireNextImageKHR failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] vkAcquireNextImageKHR failed: " << res << std::endl;
         return false;
     }
-    std::cerr << "[VulkanSwapChain] AcquireNextImage: swapchain kept being out-of-date after "
+    PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] AcquireNextImage: swapchain kept being out-of-date after "
               << kMaxAcquireRetries << " recreates — skipping this frame" << std::endl;
     return false;
 }
@@ -409,15 +410,15 @@ void VulkanSwapChain::Present(SyncHandle semaphore) {
     if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
         // P4c-F2: 置标志,下一帧 Acquire 入口重建 — 不在 present 返回
         // 路径里同步重建(避免打断当前帧的收尾)。
-        std::cerr << "[VulkanSwapChain] Present out-of-date/suboptimal — will recreate next frame"
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] Present out-of-date/suboptimal — will recreate next frame"
                   << std::endl;
         needsRecreate_ = true;
     } else if (res == VK_ERROR_SURFACE_LOST_KHR) {
-        std::cerr << "[VulkanSwapChain] Present SURFACE_LOST — recreating surface" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] Present SURFACE_LOST — recreating surface" << std::endl;
         needsRecreate_ = true;
         recreateSurface();
     } else if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanSwapChain] vkQueuePresentKHR failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSwapChain] vkQueuePresentKHR failed: " << res << std::endl;
     }
 
     currentIndex_ = (currentIndex_ + 1) % static_cast<u32>(backBufferHandles_.size());

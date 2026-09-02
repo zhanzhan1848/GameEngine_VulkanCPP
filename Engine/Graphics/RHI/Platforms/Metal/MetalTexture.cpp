@@ -10,6 +10,7 @@
 #include "MetalDevice.h"
 #include <algorithm>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -298,7 +299,7 @@ bool MetalTexture::Initialize() {
         descriptor->setHazardTrackingMode(MTL::HazardTrackingModeTracked);
         static int s_tracked_count = 0;
         if (s_tracked_count < 30) {
-            std::cerr << "[MetalTexture] UAV texture tracked: " << desc_.name
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] UAV texture tracked: " << desc_.name
                       << " size=" << textureDesc_.size.x << "x" << textureDesc_.size.y << "x" << textureDesc_.size.z
                       << " fmt=" << static_cast<int>(textureDesc_.format) << std::endl;
             ++s_tracked_count;
@@ -312,7 +313,7 @@ bool MetalTexture::Initialize() {
     descriptor->release();
     
     if (!mtlTexture_) {
-        std::cerr << "[MetalTexture] Failed to create texture: " << desc_.name << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] Failed to create texture: " << desc_.name << std::endl;
         return false;
     }
     
@@ -386,13 +387,13 @@ bool MetalTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
         MetalStagingAllocator& allocator = metalDevice.GetStagingAllocator();
 
         if (!allocator.IsInitialized()) {
-            std::cerr << "[MetalTexture] Staging allocator not initialized" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] Staging allocator not initialized" << std::endl;
             return false;
         }
 
         MetalStagingAllocator::Allocation alloc = allocator.Allocate(size, 256);
         if (alloc.overflow) {
-            std::cerr << "[MetalTexture] Staging pool overflow, size=" << size << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] Staging pool overflow, size=" << size << std::endl;
             return false;
         }
 
@@ -419,7 +420,7 @@ bool MetalTexture::updateRegion(const void* data, u64 size, const TextureRegionU
     if (!mtlTexture_ || !data || size == 0) return false;
     if (textureDesc_.type != TextureType::Texture2D || textureDesc_.size.z > 1 ||
         textureDesc_.arraySize > 1) {
-        std::cerr << "[MetalTexture] updateRegion: only 2D single-slice supported (M0 scope)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: only 2D single-slice supported (M0 scope)" << std::endl;
         return false;
     }
     // 块压缩格式(BC/ASTC)不支持紧密行主序线性布局
@@ -434,31 +435,31 @@ bool MetalTexture::updateRegion(const void* data, u64 size, const TextureRegionU
         case DataFormat::ASTC_4x4_UNorm: case DataFormat::ASTC_4x4_sRGB:
         case DataFormat::ASTC_6x6_UNorm: case DataFormat::ASTC_6x6_sRGB:
         case DataFormat::ASTC_8x8_UNorm: case DataFormat::ASTC_8x8_sRGB:
-            std::cerr << "[MetalTexture] updateRegion: block-compressed formats unsupported — "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: block-compressed formats unsupported — "
                          "use CopyBufferToTexture" << std::endl;
             return false;
         default: break;
     }
     const u32 bytesPerPixel = GetBytePerPixel(textureDesc_.format);
     if (bytesPerPixel == 0) {
-        std::cerr << "[MetalTexture] updateRegion: unknown texel size for format "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: unknown texel size for format "
                   << static_cast<int>(textureDesc_.format) << std::endl;
         return false;
     }
     if (region.mipLevel >= textureDesc_.mipLevels) {
-        std::cerr << "[MetalTexture] updateRegion: mip " << region.mipLevel
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: mip " << region.mipLevel
                   << " >= mipLevels " << textureDesc_.mipLevels << std::endl;
         return false;
     }
     if (region.offsetZ != 0 || region.depth != 1) {
-        std::cerr << "[MetalTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
         return false;
     }
     const u32 mipW = std::max<u32>(1u, textureDesc_.size.x >> region.mipLevel);
     const u32 mipH = std::max<u32>(1u, textureDesc_.size.y >> region.mipLevel);
     if (region.width == 0 || region.height == 0 ||
         region.offsetX + region.width > mipW || region.offsetY + region.height > mipH) {
-        std::cerr << "[MetalTexture] updateRegion: region [" << region.offsetX << ","
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: region [" << region.offsetX << ","
                   << region.offsetY << " " << region.width << "x" << region.height
                   << ") exceeds mip " << region.mipLevel << " dims "
                   << mipW << "x" << mipH << std::endl;
@@ -467,7 +468,7 @@ bool MetalTexture::updateRegion(const void* data, u64 size, const TextureRegionU
     const NS::UInteger bytesPerRow = NS::UInteger(region.width) * bytesPerPixel;
     const NS::UInteger bytesPerImage = bytesPerRow * region.height;
     if (size != u64(bytesPerImage)) {
-        std::cerr << "[MetalTexture] updateRegion: size " << size << " != tightly-packed "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: size " << size << " != tightly-packed "
                   << bytesPerImage << std::endl;
         return false;
     }
@@ -477,7 +478,7 @@ bool MetalTexture::updateRegion(const void* data, u64 size, const TextureRegionU
         MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
         MetalStagingAllocator& allocator = metalDevice.GetStagingAllocator();
         if (!allocator.IsInitialized()) {
-            std::cerr << "[MetalTexture] updateRegion: staging allocator not initialized" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: staging allocator not initialized" << std::endl;
             return false;
         }
         MetalStagingAllocator::Allocation alloc = allocator.Allocate(size, 256);
@@ -486,7 +487,7 @@ bool MetalTexture::updateRegion(const void* data, u64 size, const TextureRegionU
             allocator.FlushBlocking();
             alloc = allocator.Allocate(size, 256);
             if (alloc.overflow) {
-                std::cerr << "[MetalTexture] updateRegion: staging pool overflow, size="
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalTexture] updateRegion: staging pool overflow, size="
                           << size << std::endl;
                 return false;
             }

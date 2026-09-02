@@ -78,6 +78,8 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
                 auto& device = builder.GetGraph().GetDevice();
                 auto platform = device.GetPlatform();
                 std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "Bloom");
+                // Resolve independently of process CWD（同 TAA/ToneMapping 修复）。
+                shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
                 std::string shaderSource = LoadShaderSource(shaderPath);
 
                 if (!shaderSource.empty()) {

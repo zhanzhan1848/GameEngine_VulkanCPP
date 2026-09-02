@@ -18,6 +18,7 @@
 
 #include <iostream>
 #include <cstring>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -198,11 +199,11 @@ bool VulkanTexture::Initialize() {
     VulkanDevice& vkDevice = static_cast<VulkanDevice&>(device_);
     VkDevice dev = vkDevice.GetNativeDevice();
     if (dev == VK_NULL_HANDLE) {
-        std::cerr << "[VulkanTexture] device not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] device not initialized" << std::endl;
         return false;
     }
     if (vkFormat_ == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[VulkanTexture] DataFormat not mapped to VkFormat" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] DataFormat not mapped to VkFormat" << std::endl;
         return false;
     }
 
@@ -210,7 +211,7 @@ bool VulkanTexture::Initialize() {
     // 不拥有 VkImage(viewSrc_ 拥有),只创建+拥有 VkImageView。
     if (isView_) {
         if (!viewSrc_ || viewSrc_->vkImage_ == VK_NULL_HANDLE) {
-            std::cerr << "[VulkanTexture] view mode but source image is null" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] view mode but source image is null" << std::endl;
             return false;
         }
         vkImage_ = viewSrc_->vkImage_;  // 别名,不拥有
@@ -249,7 +250,7 @@ bool VulkanTexture::Initialize() {
         vci.subresourceRange.layerCount   = std::max<u32>(1u, viewDesc_.arraySize);
 
         if (vkCreateImageView(dev, &vci, nullptr, &vkView_) != VK_SUCCESS) {
-            std::cerr << "[VulkanTexture] view: vkCreateImageView failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] view: vkCreateImageView failed" << std::endl;
             vkImage_ = VK_NULL_HANDLE;
             return false;
         }
@@ -262,7 +263,7 @@ bool VulkanTexture::Initialize() {
     // === wrap 模式:跳过 VMA 分配,直接用外部 image(swapchain image) ===
     if (!ownsImage_) {
         if (wrappedImage_ == VK_NULL_HANDLE) {
-            std::cerr << "[VulkanTexture] wrap mode but wrappedImage_ is null" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] wrap mode but wrappedImage_ is null" << std::endl;
             return false;
         }
         vkImage_ = wrappedImage_;  // 借用,不拥有
@@ -283,7 +284,7 @@ bool VulkanTexture::Initialize() {
         vci.subresourceRange.layerCount = 1;
 
         if (vkCreateImageView(dev, &vci, nullptr, &vkView_) != VK_SUCCESS) {
-            std::cerr << "[VulkanTexture] wrap: vkCreateImageView failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] wrap: vkCreateImageView failed" << std::endl;
             vkImage_ = VK_NULL_HANDLE;
             return false;
         }
@@ -294,11 +295,11 @@ bool VulkanTexture::Initialize() {
     // === 常规模式:VMA 分配 VkImage ===
     VmaAllocator allocator = vkDevice.GetVmaAllocator();
     if (!allocator) {
-        std::cerr << "[VulkanTexture] VMA allocator not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] VMA allocator not initialized" << std::endl;
         return false;
     }
     if (vkUsageFlags_ == 0) {
-        std::cerr << "[VulkanTexture] usage=Unknown rejected" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] usage=Unknown rejected" << std::endl;
         return false;
     }
 
@@ -328,7 +329,7 @@ bool VulkanTexture::Initialize() {
         for (const auto& c : checks) {
             if ((vkUsageFlags_ & c.usage) == 0) continue;
             if ((fp.optimalTilingFeatures & c.required) == 0) {
-                std::cerr << "[VulkanTexture] format " << static_cast<int>(texDesc_.format)
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] format " << static_cast<int>(texDesc_.format)
                           << " (VkFormat " << static_cast<int>(vkFormat_) << ") lacks optimalTiling "
                           << c.name << " support required by usage — "
                           << ((c.usage == VK_IMAGE_USAGE_TRANSFER_SRC_BIT ||
@@ -391,7 +392,7 @@ bool VulkanTexture::Initialize() {
     VmaAllocationInfo info{};
     VkResult res = vmaCreateImage(allocator, &ici, &aci, &vkImage_, &allocation_, &info);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanTexture] vmaCreateImage failed: " << res
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] vmaCreateImage failed: " << res
                   << " w=" << ici.extent.width << " h=" << ici.extent.height
                   << " fmt=" << static_cast<int>(vkFormat_) << std::endl;
         return false;
@@ -445,7 +446,7 @@ bool VulkanTexture::Initialize() {
     vci.subresourceRange.layerCount = viewLayerCount;
 
     if (vkCreateImageView(dev, &vci, nullptr, &vkView_) != VK_SUCCESS) {
-        std::cerr << "[VulkanTexture] vkCreateImageView failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] vkCreateImageView failed" << std::endl;
         vmaDestroyImage(allocator, vkImage_, allocation_);
         vkImage_ = VK_NULL_HANDLE;
         allocation_ = nullptr;
@@ -493,7 +494,7 @@ VkImageView VulkanTexture::GetLayerView(u32 layer) {
 
     VkImageView view = VK_NULL_HANDLE;
     if (vkCreateImageView(dev, &vci, nullptr, &view) != VK_SUCCESS) {
-        std::cerr << "[VulkanTexture] GetLayerView vkCreateImageView failed for layer "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] GetLayerView vkCreateImageView failed for layer "
                   << layer << std::endl;
         return VK_NULL_HANDLE;
     }
@@ -510,7 +511,7 @@ void* VulkanTexture::mapImpl(u64 offset, u64 size) {
         return static_cast<u8*>(mappedPtr_) + offset;
     }
     if (!warnedMapUnsupported_) {
-        std::cerr << "[VulkanTexture] map on DEVICE_LOCAL texture unsupported — use "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] map on DEVICE_LOCAL texture unsupported — use "
                      "updateData (staging upload) or create with GPUMemoryUsage::Staging/"
                      "Readback. Further map attempts will fail silently." << std::endl;
         warnedMapUnsupported_ = true;
@@ -525,7 +526,7 @@ void VulkanTexture::unmapImpl() {
 bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     if (!data || size == 0) return false;
     if (!ownsImage_ || isView_) {
-        std::cerr << "[VulkanTexture] updateData on wrap/view texture unsupported" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateData on wrap/view texture unsupported" << std::endl;
         return false;
     }
     if (vkImage_ == VK_NULL_HANDLE || state_ != ResourceState::Ready) return false;
@@ -533,18 +534,18 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     // P4c-F3 范围:2D 单 slice mip0;3D/cube/array/BC 留给命令路径。
     if (texDesc_.size.z > 1 || texDesc_.type == TextureType::TextureCube ||
         texDesc_.arraySize > 1) {
-        std::cerr << "[VulkanTexture] updateData: only 2D single-slice supported (F3 scope), "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateData: only 2D single-slice supported (F3 scope), "
                      "use CopyBufferToTexture for 3D/cube/array" << std::endl;
         return false;
     }
     if (vulkan::IsBlockCompressedFormat(texDesc_.format)) {
-        std::cerr << "[VulkanTexture] updateData: BC formats unsupported (block layout) — "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateData: BC formats unsupported (block layout) — "
                      "use CopyBufferToTexture" << std::endl;
         return false;
     }
     const u64 bpt = vulkan::BytesPerTexel(texDesc_.format);
     if (bpt == 0) {
-        std::cerr << "[VulkanTexture] updateData: unknown texel size for format "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateData: unknown texel size for format "
                   << static_cast<int>(texDesc_.format) << std::endl;
         return false;
     }
@@ -553,7 +554,7 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     const u32 height = std::max<u32>(1u, texDesc_.size.y);
     const u64 bytesPerRow = u64(width) * bpt;
     if (offset % bytesPerRow != 0 || size % bytesPerRow != 0) {
-        std::cerr << "[VulkanTexture] updateData: offset/size must be row-aligned ("
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateData: offset/size must be row-aligned ("
                   << "bytesPerRow=" << bytesPerRow << ", offset=" << offset
                   << ", size=" << size << ")" << std::endl;
         return false;
@@ -561,7 +562,7 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     const u32 y0 = static_cast<u32>(offset / bytesPerRow);
     const u32 rows = static_cast<u32>(size / bytesPerRow);
     if (y0 + rows > height) {
-        std::cerr << "[VulkanTexture] updateData: rows [" << y0 << ", " << y0 + rows
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateData: rows [" << y0 << ", " << y0 + rows
                   << ") exceed height " << height << std::endl;
         return false;
     }
@@ -620,7 +621,7 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     VmaAllocationInfo stagingInfo{};
     if (vmaCreateBuffer(allocator, &stagingCI, &stagingACI,
                         &stagingBuf, &stagingAlloc, &stagingInfo) != VK_SUCCESS) {
-        std::cerr << "[VulkanTexture] updateData: staging vmaCreateBuffer failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateData: staging vmaCreateBuffer failed" << std::endl;
         return false;
     }
     std::memcpy(stagingInfo.pMappedData, data, size);
@@ -741,34 +742,34 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
 bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegionUpdate& region) {
     if (!data || size == 0) return false;
     if (!ownsImage_ || isView_) {
-        std::cerr << "[VulkanTexture] updateRegion on wrap/view texture unsupported" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion on wrap/view texture unsupported" << std::endl;
         return false;
     }
     if (vkImage_ == VK_NULL_HANDLE || state_ != ResourceState::Ready) return false;
 
     if (texDesc_.type != TextureType::Texture2D || texDesc_.size.z > 1 ||
         texDesc_.arraySize > 1) {
-        std::cerr << "[VulkanTexture] updateRegion: only 2D single-slice supported (M0 scope)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: only 2D single-slice supported (M0 scope)" << std::endl;
         return false;
     }
     if (vulkan::IsBlockCompressedFormat(texDesc_.format)) {
-        std::cerr << "[VulkanTexture] updateRegion: block-compressed formats unsupported — "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: block-compressed formats unsupported — "
                      "use CopyBufferToTexture" << std::endl;
         return false;
     }
     const u64 bpt = vulkan::BytesPerTexel(texDesc_.format);
     if (bpt == 0) {
-        std::cerr << "[VulkanTexture] updateRegion: unknown texel size for format "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: unknown texel size for format "
                   << static_cast<int>(texDesc_.format) << std::endl;
         return false;
     }
     if (region.mipLevel >= texDesc_.mipLevels) {
-        std::cerr << "[VulkanTexture] updateRegion: mip " << region.mipLevel
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: mip " << region.mipLevel
                   << " >= mipLevels " << texDesc_.mipLevels << std::endl;
         return false;
     }
     if (region.offsetZ != 0 || region.depth != 1) {
-        std::cerr << "[VulkanTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
         return false;
     }
 
@@ -776,7 +777,7 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
     const u32 mipH = std::max<u32>(1u, texDesc_.size.y >> region.mipLevel);
     if (region.width == 0 || region.height == 0 ||
         region.offsetX + region.width > mipW || region.offsetY + region.height > mipH) {
-        std::cerr << "[VulkanTexture] updateRegion: region [" << region.offsetX << ","
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: region [" << region.offsetX << ","
                   << region.offsetY << " " << region.width << "x" << region.height
                   << ") exceeds mip " << region.mipLevel << " dims "
                   << mipW << "x" << mipH << std::endl;
@@ -784,7 +785,7 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
     }
     const u64 bytesPerRow = u64(region.width) * bpt;
     if (size != bytesPerRow * region.height) {
-        std::cerr << "[VulkanTexture] updateRegion: size " << size << " != tightly-packed "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: size " << size << " != tightly-packed "
                   << bytesPerRow * region.height << " (bytesPerRow=" << bytesPerRow
                   << " x rows=" << region.height << ")" << std::endl;
         return false;
@@ -846,7 +847,7 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
     VmaAllocationInfo stagingInfo{};
     if (vmaCreateBuffer(allocator, &stagingCI, &stagingACI,
                         &stagingBuf, &stagingAlloc, &stagingInfo) != VK_SUCCESS) {
-        std::cerr << "[VulkanTexture] updateRegion: staging vmaCreateBuffer failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: staging vmaCreateBuffer failed" << std::endl;
         return false;
     }
     std::memcpy(stagingInfo.pMappedData, data, size);
@@ -974,7 +975,7 @@ VkImageView VulkanTexture::GetArrayView() {
     vci.subresourceRange.layerCount = std::max<u32>(texDesc_.arraySize, 1u);
 
     if (vkCreateImageView(dev, &vci, nullptr, &arrayView_) != VK_SUCCESS) {
-        std::cerr << "[VulkanTexture] GetArrayView vkCreateImageView failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] GetArrayView vkCreateImageView failed" << std::endl;
         arrayView_ = VK_NULL_HANDLE;
         return VK_NULL_HANDLE;
     }

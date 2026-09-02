@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The editor builds with DebugEditor/ReleaseEditor; keep the standard
+         configs too so the CLI client and test harnesses can build alone. -->
+    <Configurations>Debug;Release;DebugEditor;ReleaseEditor</Configurations>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <BaseOutputPath>../Darwin/Primal.CliFramework</BaseOutputPath>
+    <Description>Command registry + JSON protocol + Unix socket transport for the engine CLI / Agent interface. Host-agnostic: no Avalonia, no engine dependency.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 单测直接覆盖 internal 基础设施（半浮点解码等）。 -->
+    <InternalsVisibleTo Include="PrimalEditor_Avalonia.Tests" />
+  </ItemGroup>
+
+</Project>

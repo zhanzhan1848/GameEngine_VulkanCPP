@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -56,7 +57,7 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
     device_ = device;
     if (vertex_shader == handles::INVALID_SHADER ||
         pixel_shader == handles::INVALID_SHADER) {
-        std::cerr << "[ProbeSpheres] shaders not provided — debug viz disabled" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] shaders not provided — debug viz disabled" << std::endl;
         return false;
     }
 
@@ -122,7 +123,7 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
     pd.vertexBindings.assign(std::begin(binds), std::end(binds));
 
     pipeline_ = device_->CreateGraphicsPipeline(pd);
-    std::cerr << "[ProbeSpheres] initialized (pipeline=" << pipeline_ << ")" << std::endl;
+    PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] initialized (pipeline=" << pipeline_ << ")" << std::endl;
     return pipeline_ != handles::INVALID_PIPELINE;
 }
 
@@ -212,7 +213,7 @@ bool DebugProbeSphereModule::BuildMeshAndInstances(const math::v3& origin,
     static bool logged = false;
     if (!logged) {
         logged = true;
-        std::cerr << "[ProbeSpheres] expanded vb=" << sphere_vb_
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] expanded vb=" << sphere_vb_
                   << " verts=" << instance_count_
                   << " bytes=" << vdesc.size << std::endl;
     }
@@ -253,7 +254,7 @@ void DebugProbeSphereModule::AddPass(RenderGraph& graph,
         [this, inputs, cbIdx](const SphereData&, RenderGraphContext& ctx) {
             static u32 execN = 0;
             if (++execN == 1u || execN % 60u == 0u)
-                std::cerr << "[ProbeSpheres] execute #" << execN
+                PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] execute #" << execN
                           << " instances=" << instance_count_ << std::endl;
             auto cmd = ctx.cmdBuffer;
 

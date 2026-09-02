@@ -5,22 +5,22 @@
              xmlns:components="using:PrimalEditor_Avalonia.Components"
              x:Class="PrimalEditor_Avalonia.Views.PropertiesView"
              x:DataType="vm:PropertiesViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
     <ScrollViewer>
         <StackPanel Margin="12" Spacing="6" IsEnabled="{Binding HasSelection}">
 
             <TextBlock Text="PROPERTIES"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="13" LetterSpacing="1"
-                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Foreground="{DynamicResource ElectricBlueBrush}"
                        Margin="0,0,0,12">
             </TextBlock>
 
             <TextBlock Text="NAME"
-                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                        FontSize="11" LetterSpacing="2"
-                       Foreground="{StaticResource ElectricBlueBrush}"/>
+                       Foreground="{DynamicResource ElectricBlueBrush}"/>
             <TextBox Text="{Binding EntityName, Mode=TwoWay}" Margin="0,2,0,4"/>
 
             <CheckBox Content="Is Enabled"
@@ -30,68 +30,68 @@
             <Separator Margin="0,8"/>
 
             <TextBlock Text="TRANSFORM"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
-                       Foreground="{StaticResource CoralBrush}"
+                       Foreground="{DynamicResource CoralBrush}"
                        Margin="0,0,0,6"/>
 
             <TextBlock Text="Position"
-                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                        FontSize="10" LetterSpacing="2"
-                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Foreground="{DynamicResource SecondaryTextBrush}"
                        Margin="0,4,0,0"/>
             <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto,Auto" Margin="0,3">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="1" Grid.Column="0" Text="{Binding PosX, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="0,0,2,0"/>
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding PosY, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="2,0"/>
                 <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding PosZ, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="2,0,0,0"/>
             </Grid>
 
             <TextBlock Text="Rotation"
-                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                        FontSize="10" LetterSpacing="2"
-                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Foreground="{DynamicResource SecondaryTextBrush}"
                        Margin="0,4,0,0"/>
             <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto" Margin="0,3">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="0" Text="{Binding RotX, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="0,0,2,0"/>
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding RotY, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="2,0"/>
                 <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="2" Text="{Binding RotZ, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="2,0,0,0"/>
             </Grid>
 
             <TextBlock Text="Scale"
-                       FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                       FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                        FontSize="10" LetterSpacing="2"
-                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Foreground="{DynamicResource SecondaryTextBrush}"
                        Margin="0,4,0,0"/>
             <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto" Margin="0,3">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="X" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="0" Text="{Binding ScaleX, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="0,0,2,0"/>
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="Y" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ScaleY, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="2,0"/>
                 <TextBlock Grid.Row="0" Grid.Column="2" Text="Z" VerticalAlignment="Center"
-                           Foreground="{StaticResource ElectricBlueBrush}"
-                           FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"/>
                 <TextBox Grid.Row="0" Grid.Column="2" Text="{Binding ScaleZ, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="2,0,0,0"/>
             </Grid>
 
@@ -99,35 +99,35 @@
                 <Separator Margin="0,12"/>
 
                 <TextBlock Text="LIGHT"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
-                       Foreground="{StaticResource CoralBrush}"
+                       Foreground="{DynamicResource CoralBrush}"
                        Margin="0,0,0,6"/>
                 <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" Margin="0,3">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Type" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <ComboBox Grid.Row="0" Grid.Column="1"
                           ItemsSource="{Binding LightTypeOptions}"
                           SelectedItem="{Binding Light.LightType, Mode=TwoWay}"/>
 
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="Intensity" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding Light.Intensity, Mode=TwoWay}"/>
 
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Range" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="2" Grid.Column="1" Text="{Binding Light.Range, Mode=TwoWay}"/>
 
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="Umbra" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="3" Grid.Column="1" Text="{Binding Light.UmbraAngle, Mode=TwoWay}"/>
 
                 <TextBlock Grid.Row="4" Grid.Column="0" Text="Penumbra" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="4" Grid.Column="1" Text="{Binding Light.PenumbraAngle, Mode=TwoWay}"/>
 
                 <TextBlock Grid.Row="5" Grid.Column="0" Text="Color RGB" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Spacing="2">
                     <TextBox Text="{Binding Light.ColorR, Mode=TwoWay}" Width="60"/>
                     <TextBox Text="{Binding Light.ColorG, Mode=TwoWay}" Width="60"/>
@@ -140,7 +140,7 @@
                           Margin="0,4,0,0"/>
 
                 <TextBlock Grid.Row="7" Grid.Column="0" Text="HDR Env Map" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <Border Grid.Row="7" Grid.Column="1" x:Name="LightEnvMapDropZone"
                         Background="#1A000000" BorderBrush="#3A3F4B" BorderThickness="1"
                         CornerRadius="4" Padding="8,5"
@@ -150,10 +150,10 @@
                         DragDrop.Drop="OnLightEnvMapDrop">
                     <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="6">
                         <TextBlock Grid.Column="0" Text="☁" VerticalAlignment="Center"
-                                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                                   Foreground="{DynamicResource SecondaryTextBrush}"/>
                         <TextBlock Grid.Column="1" VerticalAlignment="Center"
                                    TextTrimming="CharacterEllipsis"
-                                   Foreground="{StaticResource SecondaryTextBrush}">
+                                   Foreground="{DynamicResource SecondaryTextBrush}">
                             <TextBlock.Text>
                                 <Binding Path="EnvMapPath" Mode="OneWay"
                                          TargetNullValue="Drop .hdr / .texture here, or browse"/>
@@ -176,9 +176,9 @@
                      inspector to the scene environment panel. -->
                 <StackPanel IsVisible="{Binding HasEnvironmentComponent}" Margin="0,10,0,0">
                     <TextBlock Text="ENVIRONMENT"
-                               FontFamily="{StaticResource FontDisplay}"
+                               FontFamily="{DynamicResource FontDisplay}"
                                FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
-                               Foreground="{StaticResource CoralBrush}"
+                               Foreground="{DynamicResource CoralBrush}"
                                Margin="0,0,0,6"/>
                     <views:EnvironmentView DataContext="{Binding EnvironmentVM}"/>
                 </StackPanel>
@@ -188,9 +188,9 @@
                 <Separator Margin="0,12"/>
 
                 <TextBlock Text="CAMERA"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
-                       Foreground="{StaticResource CoralBrush}"
+                       Foreground="{DynamicResource CoralBrush}"
                        Margin="0,0,0,6"/>
             <!-- Look-through-this-camera button. Visible only when a Camera
                  entity is selected. Clicking routes the viewport to render
@@ -213,7 +213,7 @@
                     HorizontalContentAlignment="Center"/>
                 <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" Margin="0,3">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Projection" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <ComboBox Grid.Row="0" Grid.Column="1"
                           SelectedItem="{Binding Camera.Projection, Mode=TwoWay}">
                     <ComboBoxItem>Perspective</ComboBoxItem>
@@ -221,18 +221,18 @@
                 </ComboBox>
 
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="FOV (°)" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding Camera.Fov, Mode=TwoWay}"/>
 
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Near / Far" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Spacing="2">
                     <TextBox Text="{Binding Camera.NearPlane, Mode=TwoWay}" Width="80"/>
                     <TextBox Text="{Binding Camera.FarPlane, Mode=TwoWay}" Width="80"/>
                 </StackPanel>
 
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="Clear Color" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Spacing="2">
                     <TextBox Text="{Binding Camera.ClearColorR, Mode=TwoWay}" Width="50"/>
                     <TextBox Text="{Binding Camera.ClearColorG, Mode=TwoWay}" Width="50"/>
@@ -241,7 +241,7 @@
                 </StackPanel>
 
                 <TextBlock Grid.Row="4" Grid.Column="0" Text="Ortho Size" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="4" Grid.Column="1" Text="{Binding Camera.OrthoSize, Mode=TwoWay}"/>
                 </Grid>
             </StackPanel>
@@ -250,24 +250,24 @@
                 <Separator Margin="0,12"/>
 
                 <TextBlock Text="MESH RENDERER"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
-                       Foreground="{StaticResource CoralBrush}"
+                       Foreground="{DynamicResource CoralBrush}"
                        Margin="0,0,0,6"/>
                 <Grid ColumnDefinitions="80,*,30,30" RowDefinitions="Auto,Auto,Auto,Auto" Margin="0,3">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Mesh" VerticalAlignment="Center"
-                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <Border Grid.Row="0" Grid.Column="1"
                         MinHeight="42" Padding="9,5" CornerRadius="4"
-                        BorderThickness="1" BorderBrush="{StaticResource HairlineBrush}"
-                        Background="{StaticResource PanelBrush}"
+                        BorderThickness="1" BorderBrush="{DynamicResource HairlineBrush}"
+                        Background="{DynamicResource PanelBrush}"
                         DragDrop.AllowDrop="True"
                         DragDrop.DragOver="OnMeshAssetDragOver"
                         DragDrop.Drop="OnMeshAssetDrop">
                     <StackPanel Spacing="1">
                         <TextBlock Text="{Binding MeshAsset.DisplayName}" TextTrimming="CharacterEllipsis"/>
                         <TextBlock Text="{Binding MeshAsset.PathDisplay}"
-                                   FontSize="9" Foreground="{StaticResource SecondaryTextBrush}"
+                                   FontSize="9" Foreground="{DynamicResource SecondaryTextBrush}"
                                    TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                 </Border>
@@ -292,16 +292,16 @@
                 <Expander Header="Debug asset reference" Margin="80,2,0,2">
                     <Grid ColumnDefinitions="55,*" RowDefinitions="Auto">
                         <TextBlock Grid.Column="0" Text="GUID" FontSize="9"
-                                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                                   Foreground="{DynamicResource SecondaryTextBrush}"/>
                         <TextBox Grid.Column="1" Text="{Binding MeshAsset.GuidDisplay}"
                                  IsReadOnly="True" FontSize="9"/>
                     </Grid>
                 </Expander>
 
                 <TextBlock Text="MATERIALS"
-                           FontFamily="{StaticResource FontDisplay}"
+                           FontFamily="{DynamicResource FontDisplay}"
                            FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{StaticResource SecondaryTextBrush}"
+                           Foreground="{DynamicResource SecondaryTextBrush}"
                            Margin="0,8,0,0"/>
                 <ItemsControl ItemsSource="{Binding MeshMaterials}">
                     <ItemsControl.ItemTemplate>
@@ -309,13 +309,13 @@
                             <Grid ColumnDefinitions="80,*,30" Margin="0,3">
                                 <TextBlock Grid.Column="0" Text="{Binding SlotName}"
                                            VerticalAlignment="Center"
-                                           Foreground="{StaticResource SecondaryTextBrush}"/>
+                                           Foreground="{DynamicResource SecondaryTextBrush}"/>
                                 <Border Grid.Column="1"
                                         MinHeight="38" Padding="9,5"
                                         CornerRadius="4"
                                         BorderThickness="1"
-                                        BorderBrush="{StaticResource HairlineBrush}"
-                                        Background="{StaticResource PanelBrush}"
+                                        BorderBrush="{DynamicResource HairlineBrush}"
+                                        Background="{DynamicResource PanelBrush}"
                                         DragDrop.AllowDrop="True"
                                         DragDrop.DragOver="OnMeshMaterialDragOver"
                                         DragDrop.Drop="OnMeshMaterialDrop">
@@ -324,7 +324,7 @@
                                                    TextTrimming="CharacterEllipsis"/>
                                         <TextBlock Text="Drag a Material asset here"
                                                    FontSize="9"
-                                                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                                                   Foreground="{DynamicResource SecondaryTextBrush}"/>
                                     </StackPanel>
                                 </Border>
                                 <Button Grid.Column="2" Content="…" Margin="3,0,0,0"
@@ -337,16 +337,16 @@
 
             <StackPanel IsVisible="{Binding HasMaterialOverrideComponent}" Spacing="6">
                 <TextBlock Text="MATERIAL OVERRIDE"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
-                       Foreground="{StaticResource CoralBrush}"
+                       Foreground="{DynamicResource CoralBrush}"
                        Margin="0,12,0,6"/>
                 <ItemsControl ItemsSource="{Binding MaterialOverrides}" Margin="4,3,0,0">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="components:MaterialOverrideViewModel">
                         <Grid ColumnDefinitions="120,*" RowDefinitions="Auto" Margin="0,3">
                             <TextBlock Grid.Column="0" Text="{Binding SlotName}" VerticalAlignment="Center"
-                                       Foreground="{StaticResource SecondaryTextBrush}"/>
+                                       Foreground="{DynamicResource SecondaryTextBrush}"/>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
                                 <TextBox Text="{Binding MaterialGuid, Mode=TwoWay}" Width="220"/>
                                 <Button Content="…" Width="28" Click="OnPickMaterial"/>
@@ -358,9 +358,9 @@
             </StackPanel>
 
             <TextBlock Text="{Binding MixedValueMessage}"
-                       FontFamily="{StaticResource FontMono}"
+                       FontFamily="{DynamicResource FontMono}"
                        FontStyle="Italic"
-                       Foreground="{StaticResource AmberBrush}"
+                       Foreground="{DynamicResource AmberBrush}"
                        IsVisible="{Binding HasMixedValues}"
                        Margin="0,12,0,0"/>
         </StackPanel>

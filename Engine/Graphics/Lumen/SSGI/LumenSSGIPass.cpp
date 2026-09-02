@@ -11,6 +11,7 @@
 #include <sstream>
 #include <cstring>
 #include <set>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
 
@@ -118,7 +119,7 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
                             fullPath.substr(0, fullPath.find_last_of('/') + 1), included);
                         out << resolved << "\n";
                     } else {
-                        std::cerr << "[LumenSSGI] Warning: Failed to read include: " << fullPath << std::endl;
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSGI] Warning: Failed to read include: " << fullPath << std::endl;
                         out << line << "\n";
                     }
                 }
@@ -149,12 +150,12 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
             file.seekg(0, std::ios::beg);
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[LumenSSGI] Failed to read SPIR-V: " << path << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSGI] Failed to read SPIR-V: " << path << std::endl;
                 return {};
             }
             return bytecode;
         }
-        std::cerr << "[LumenSSGI] Failed to load SPIR-V: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSGI] Failed to load SPIR-V: " << shaderName << std::endl;
         return {};
     }
 
@@ -168,7 +169,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
     }
 
     if (source.empty()) {
-        std::cerr << "[LumenSSGI] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSGI] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
 
@@ -229,7 +230,7 @@ bool LumenSSGIPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
 
     initialized_ = true;
 
-    std::cout << "[LumenSSGI] Initialized (" << render_width << "x" << render_height
+    PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSSGI] Initialized (" << render_width << "x" << render_height
               << ", half-res: " << half_w << "x" << half_h << ")" << std::endl;
     return true;
 }
@@ -364,7 +365,7 @@ void LumenSSGIPass::CreatePipelines() {
         temporalShader == handles::INVALID_SHADER ||
         filterShader == handles::INVALID_SHADER ||
         halfresDenoiseShader == handles::INVALID_SHADER) {
-        std::cerr << "[LumenSSGI] Shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSGI] Shader compilation failed" << std::endl;
         return;
     }
 
@@ -542,7 +543,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
 
     static int s_out = 0;
     if (s_out < 3) {
-        std::cerr << "[SSGI_OUT] temporalOutHandle_valid=" << temporalOutHandle.IsValid()
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSGI_OUT] temporalOutHandle_valid=" << temporalOutHandle.IsValid()
                   << " output_valid=" << output.ssgi_output.IsValid()
                   << " trace_texture=" << trace_texture_ << std::endl;
         s_out++;
@@ -583,7 +584,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             auto cmd = context.cmdBuffer;
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
             static int s_ssgi_exec = 0;
-            if (s_ssgi_exec < 3) { std::cerr << "[SSGI_EXEC] frame " << s_ssgi_exec
+            if (s_ssgi_exec < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSGI_EXEC] frame " << s_ssgi_exec
                 << " trace=" << (trace_pipeline_ != handles::INVALID_PIPELINE ? "OK" : "INVALID")
                 << " filter=" << (filter_pipeline_ != handles::INVALID_PIPELINE ? "OK" : "INVALID")
                 << " temporal=" << (temporal_pipeline_ != handles::INVALID_PIPELINE ? "OK" : "INVALID")
@@ -623,7 +624,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
             // DEBUG: Log SSGI dimensions and resource validity (every 120 frames)
             static u32 dbgFrame = 0;
             if (dbgFrame < 3) {
-                std::cout << "[LumenSSGI] Frame " << dbgFrame
+                PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSSGI] Frame " << dbgFrame
                           << " render=" << render_width_ << "x" << render_height_
                           << " half=" << half_w << "x" << half_h
                           << " frameIdx=" << frameIdx
@@ -756,7 +757,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                 // DEBUG: Log first 3 frames
                 static u32 traceFrame = 0;
                 if (traceFrame < 3) {
-                    std::cout << "[LumenSSGI] TRACE dispatch: gx=" << gx << " gy=" << gy
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSSGI] TRACE dispatch: gx=" << gx << " gy=" << gy
                               << " half=" << half_w << "x" << half_h
                               << " total_threads=" << (gx*TG) << "x" << (gy*TG)
                               << std::endl;

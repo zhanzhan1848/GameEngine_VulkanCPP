@@ -9,6 +9,7 @@
 
 #include "VulkanShader.h"
 #include "VulkanDevice.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -61,12 +62,12 @@ VulkanShader::~VulkanShader() {
 bool VulkanShader::Initialize() {
     if (module_ != VK_NULL_HANDLE) return true;  // 已初始化
     if (spirv_.empty()) {
-        std::cerr << "[VulkanShader] No SPIR-V data" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanShader] No SPIR-V data" << std::endl;
         return false;
     }
     // SPIR-V 必须按 4 字节对齐(size 必须是 4 的倍数)
     if (spirv_.size() % 4 != 0) {
-        std::cerr << "[VulkanShader] SPIR-V size " << spirv_.size()
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanShader] SPIR-V size " << spirv_.size()
                   << " not multiple of 4" << std::endl;
         return false;
     }
@@ -78,7 +79,7 @@ bool VulkanShader::Initialize() {
 
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
     if (vkCreateShaderModule(dev, &ci, nullptr, &module_) != VK_SUCCESS) {
-        std::cerr << "[VulkanShader] vkCreateShaderModule failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanShader] vkCreateShaderModule failed" << std::endl;
         return false;
     }
 

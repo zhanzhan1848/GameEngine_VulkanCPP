@@ -9,6 +9,7 @@
 #include <cstdlib>
 
 #include <dispatch/dispatch.h>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::metal
 {
@@ -132,13 +133,13 @@ namespace primal::graphics::metal
         //   xcrun -sdk macosx metallib    BlitToDrawable.air    -o BlitToDrawable.metallib
         const std::string path = resolve_metallib_path();
         if (path.empty()) {
-            std::cerr << "[MetalBlitToDrawable] BlitToDrawable.metallib not found\n";
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] BlitToDrawable.metallib not found\n";
             return nullptr;
         }
 
         std::vector<u8> bytes;
         if (!read_metallib_bytes(path, bytes)) {
-            std::cerr << "[MetalBlitToDrawable] failed to read " << path << "\n";
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] failed to read " << path << "\n";
             return nullptr;
         }
 
@@ -147,14 +148,14 @@ namespace primal::graphics::metal
         std::string tmp{ "/tmp/primal_blit_to_drawable_XXXXXX.metallib" };
         int fd = mkstemps(tmp.data(), 9);  // 9 = strlen(".metallib")
         if (fd < 0) {
-            std::cerr << "[MetalBlitToDrawable] mkstemps failed\n";
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] mkstemps failed\n";
             return nullptr;
         }
         const ssize_t written = ::write(fd, bytes.data(), bytes.size());
         ::close(fd);
         if (written != static_cast<ssize_t>(bytes.size())) {
             ::unlink(tmp.c_str());
-            std::cerr << "[MetalBlitToDrawable] short write to tmp file\n";
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] short write to tmp file\n";
             return nullptr;
         }
 
@@ -173,7 +174,7 @@ namespace primal::graphics::metal
         MTL::Library* lib = device_->newLibrary(url, &err);
         ::unlink(tmp.c_str());
         if (!lib) {
-            std::cerr << "[MetalBlitToDrawable] newLibraryWithURL failed for " << path
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] newLibraryWithURL failed for " << path
                       << ": " << (err ? err->localizedDescription()->utf8String() : "null library") << "\n";
             return nullptr;
         }
@@ -203,7 +204,7 @@ namespace primal::graphics::metal
             release_ns
         };
         if (!vs || !fs) {
-            std::cerr << "[MetalBlitToDrawable] function lookup failed\n";
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] function lookup failed\n";
             return nullptr;
         }
 
@@ -225,10 +226,10 @@ namespace primal::graphics::metal
         MTL::RenderPipelineState* pso = device_->newRenderPipelineState(desc, &psoErr);
         desc->release();
         if (!pso) {
-            std::cerr << "[MetalBlitToDrawable] PSO create failed for format "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] PSO create failed for format "
                       << static_cast<int>(format);
-            if (psoErr) std::cerr << ": " << psoErr->localizedDescription()->utf8String();
-            std::cerr << "\n";
+            if (psoErr) PRIMAL_LOG_STREAM(Error, "RHI") << ": " << psoErr->localizedDescription()->utf8String();
+            PRIMAL_LOG_STREAM(Error, "RHI") << "\n";
             return nullptr;
         }
         return pso;
@@ -258,7 +259,7 @@ namespace primal::graphics::metal
         if (!pso) {
             pso = create_pipeline_for_format(fmt);
             if (!pso) {
-                std::cerr << "[MetalBlitToDrawable] no PSO for drawable format "
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBlitToDrawable] no PSO for drawable format "
                           << static_cast<int>(fmt) << "; skipping blit\n";
                 return;
             }

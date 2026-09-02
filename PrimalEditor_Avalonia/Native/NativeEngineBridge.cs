@@ -1028,6 +1028,67 @@ public static class NativeEngineBridge
 
     // Full-state convenience push used by live Inspector edits — writes every
     // light parameter so callers don't need to track which field changed.
+    // ===== 诊断（CLI 规划 §11/§12 L2/L3）=====
+
+    [DllImport("PrimalEngine", EntryPoint = "SetLogFile", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetLogFile(string? path, uint maxBytes, uint maxFiles);
+
+    /// <summary>启用引擎 FileSink（8MiB × maxFiles 轮转）。path=null 关闭。</summary>
+    public static void SetLogFile(string? path, uint maxBytes = 0, uint maxFiles = 0)
+    {
+        if (!_isLoaded) return;
+        try { _SetLogFile(path, maxBytes, maxFiles); } catch { /* 旧 dylib 无导出 */ }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "CopyRecentLogs", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _CopyRecentLogs(IntPtr buffer, uint bufferSize);
+
+    /// <summary>读取引擎黑匣子（最近 2048 条，每行 "HH:MM:SS.mmm [LEVEL][category] message"）。
+    /// 空返回 null（引擎未加载或缓冲为空）。</summary>
+    public static string? CopyRecentLogs()
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            uint needed = _CopyRecentLogs(IntPtr.Zero, 0);
+            if (needed <= 1) return string.Empty;
+            var buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal((int)needed);
+            try
+            {
+                if (_CopyRecentLogs(buffer, needed) == 0) return string.Empty;
+                return System.Runtime.InteropServices.Marshal.PtrToStringUTF8(buffer);
+            }
+            finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer); }
+        }
+        catch (Exception ex)
+        {
+            // 桥接失败必须可见（旧 dylib 缺导出只是其中一种原因），不再静默吞掉。
+            Console.Error.WriteLine($"[NativeEngineBridge] CopyRecentLogs failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "FlushLogQueue", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _FlushLogQueue();
+
+    [DllImport("PrimalEngine", EntryPoint = "SetCategoryFilter", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _SetCategoryFilter(string? commaSeparatedCategories);
+
+    /// <summary>设置日志类别白名单（逗号分隔，如 "RHI,Asset"）；null/空 = 不过滤。
+    /// 对全部 sink 生效（stderr/文件/黑匣子/事件表）。</summary>
+    public static void SetCategoryFilter(string? commaSeparatedCategories)
+    {
+        if (!_isLoaded) return;
+        try { _SetCategoryFilter(commaSeparatedCategories); } catch { }
+    }
+
+    /// <summary>同步排空后台日志队列（FileSink/回调/事件表送达保证）。</summary>
+    public static void FlushLogQueue()
+    {
+        if (!_isLoaded) return;
+        try { _FlushLogQueue(); } catch { }
+    }
+
     public static void SetEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled)
     {
         if (!_isLoaded) return;
@@ -1088,6 +1149,10 @@ public static class NativeEngineBridge
             {
                 Logger.Warning("CreateRenderSurface: engine returned -1 (window creation failed)");
             }
+            else
+            {
+                TrackSurface(result);
+            }
             return result;
         }
         catch (Exception ex)
@@ -1110,6 +1175,10 @@ public static class NativeEngineBridge
             {
                 Logger.Warning("CreateEmbeddedRenderSurface: engine returned -1");
             }
+            else
+            {
+                TrackSurface(result);
+            }
             return result;
         }
         catch (Exception ex)
@@ -1119,11 +1188,28 @@ public static class NativeEngineBridge
         }
     }
 
+    // 引擎侧失败值约定 (uint.MaxValue)。见 CreateRenderSurface 等的返回契约。
+    public const uint InvalidRenderSurfaceId = uint.MaxValue;
+    private static readonly HashSet<uint> LiveRenderSurfaces = new();
+
     public static void RemoveRenderSurface(uint id)
     {
         if (!_isLoaded) return;
+        // 引擎侧 RemoveRenderSurface 对失效 id 会 assert(id < surfaces.size())
+        // 直接 SIGABRT。登记表保证同一 id 只会真正下发一次:重复销毁
+        // (视口重试路径 + 窗口关闭 + 退出清理的竞态)在托管侧拦下并记日志。
+        if (id == InvalidRenderSurfaceId || !LiveRenderSurfaces.Remove(id))
+        {
+            Logger.Warning($"RemoveRenderSurface: id {id} is not a live surface (double-remove?); skipped");
+            return;
+        }
         try { _RemoveRenderSurface(id); }
         catch (Exception ex) { Logger.Error("RemoveRenderSurface failed", ex); }
+    }
+
+    private static void TrackSurface(uint id)
+    {
+        if (id != InvalidRenderSurfaceId) LiveRenderSurfaces.Add(id);
     }
 
     public static IntPtr GetWindowHandle(uint id)

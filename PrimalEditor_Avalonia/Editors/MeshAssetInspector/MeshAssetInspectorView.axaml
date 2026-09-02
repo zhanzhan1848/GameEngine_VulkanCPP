@@ -6,7 +6,7 @@
              xmlns:views="using:PrimalEditor_Avalonia.Views"
              x:Class="PrimalEditor_Avalonia.Editors.MeshAssetInspector.MeshAssetInspectorView"
              x:DataType="meshvm:MeshAssetInspectorViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
     <Border Classes="floating" Margin="3,6,6,6">
         <DockPanel>
@@ -14,9 +14,9 @@
             <Border DockPanel.Dock="Top" Padding="10,8,8,4">
                 <DockPanel>
                     <TextBlock DockPanel.Dock="Left" Text="{Binding Title}"
-                               FontFamily="{StaticResource FontDisplay}"
+                               FontFamily="{DynamicResource FontDisplay}"
                                FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                               Foreground="{StaticResource ElectricBlueBrush}"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
                                VerticalAlignment="Center"/>
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
                                 HorizontalAlignment="Right" Spacing="6">
@@ -27,7 +27,7 @@
                             <ComboBox.ItemTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding StringFormat=LOD {0}}"
-                                               FontFamily="{StaticResource FontMono}"/>
+                                               FontFamily="{DynamicResource FontMono}"/>
                                 </DataTemplate>
                             </ComboBox.ItemTemplate>
                         </ComboBox>
@@ -38,8 +38,8 @@
             <!-- Status -->
             <TextBlock DockPanel.Dock="Bottom"
                        Text="{Binding StatusMessage}"
-                       FontFamily="{StaticResource FontMono}"
-                       Foreground="{StaticResource AmberBrush}"
+                       FontFamily="{DynamicResource FontMono}"
+                       Foreground="{DynamicResource AmberBrush}"
                        Padding="10,4"/>
 
             <!-- Three-column body -->
@@ -54,7 +54,7 @@
                             <TreeDataTemplate ItemsSource="{Binding Children}"
                                               DataType="content:AssetNode">
                                 <TextBlock Text="{Binding Name}"
-                                           FontFamily="{StaticResource FontMono}"
+                                           FontFamily="{DynamicResource FontMono}"
                                            FontSize="11"/>
                             </TreeDataTemplate>
                         </TreeView.ItemTemplate>
@@ -63,20 +63,20 @@
 
                 <!-- CENTER: preview -->
                 <Border Grid.Column="1" Classes="floating" Margin="2,2,2,2">
-                    <Panel Background="{StaticResource VoidBrush}">
+                    <Panel Background="{DynamicResource VoidBrush}">
                         <views:MeshInspectorPreviewCanvas
                             IsVisible="{Binding HasGeometry}"/>
                         <StackPanel HorizontalAlignment="Center"
                                     VerticalAlignment="Center" Spacing="8"
                                     IsVisible="{Binding !HasGeometry}">
                             <TextBlock Text="3D preview unavailable"
-                                       FontFamily="{StaticResource FontDisplay}"
+                                       FontFamily="{DynamicResource FontDisplay}"
                                        FontWeight="SemiBold" FontSize="14"
-                                       Foreground="{StaticResource MutedTextBrush}"/>
+                                       Foreground="{DynamicResource MutedTextBrush}"/>
                             <TextBlock Text="{Binding StatusMessage}"
-                                       FontFamily="{StaticResource FontMono}"
+                                       FontFamily="{DynamicResource FontMono}"
                                        FontSize="11"
-                                       Foreground="{StaticResource MutedTextBrush}"
+                                       Foreground="{DynamicResource MutedTextBrush}"
                                        TextWrapping="Wrap"
                                        MaxWidth="320"
                                        TextAlignment="Center"/>
@@ -92,10 +92,10 @@
                                 <DataTemplate DataType="vm:InspectorSection">
                                     <StackPanel Margin="0,0,0,12">
                                         <TextBlock Text="{Binding Title}"
-                                                   FontFamily="{StaticResource FontDisplay}"
+                                                   FontFamily="{DynamicResource FontDisplay}"
                                                    FontWeight="SemiBold" FontSize="10"
                                                    LetterSpacing="2"
-                                                   Foreground="{StaticResource ElectricBlueBrush}"
+                                                   Foreground="{DynamicResource ElectricBlueBrush}"
                                                    Margin="0,0,0,6"/>
                                         <ItemsControl ItemsSource="{Binding Rows}">
                                             <ItemsControl.ItemTemplate>
@@ -103,12 +103,12 @@
                                                     <Grid ColumnDefinitions="100,*" Margin="0,2">
                                                         <TextBlock Grid.Column="0"
                                                                    Text="{Binding Label}"
-                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   FontFamily="{DynamicResource FontMono}"
                                                                    FontSize="11"
-                                                                   Foreground="{StaticResource MutedTextBrush}"/>
+                                                                   Foreground="{DynamicResource MutedTextBrush}"/>
                                                         <TextBlock Grid.Column="1"
                                                                    Text="{Binding Value}"
-                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   FontFamily="{DynamicResource FontMono}"
                                                                    FontSize="11"
                                                                    Foreground="{StaticResource FontBrush}"
                                                                    TextWrapping="Wrap"/>

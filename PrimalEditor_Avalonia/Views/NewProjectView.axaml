@@ -7,9 +7,9 @@
     <Grid Margin="20" RowDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnDefinitions="*,*">
 
         <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="CREATE NEW PROJECT"
-                   FontFamily="{StaticResource FontDisplay}"
+                   FontFamily="{DynamicResource FontDisplay}"
                    FontWeight="SemiBold" FontSize="16" LetterSpacing="1"
-                   Foreground="{StaticResource ElectricBlueBrush}"
+                   Foreground="{DynamicResource ElectricBlueBrush}"
                    Margin="0,0,0,20">
         </TextBlock>
 
@@ -17,35 +17,35 @@
                  ItemsSource="{Binding Templates}"
                  SelectedItem="{Binding SelectedTemplate}"
                  Margin="0,0,0,20"
-                 Background="{StaticResource VoidBrush}"
-                 BorderBrush="{StaticResource ElectricBlueBrush}"
+                 Background="{DynamicResource VoidBrush}"
+                 BorderBrush="{DynamicResource ElectricBlueBrush}"
                  BorderThickness="1">
             <ListBox.ItemTemplate>
                 <DataTemplate>
                     <StackPanel>
                         <TextBlock Text="{Binding Name}"
-                                   FontFamily="{StaticResource FontDisplay}"
+                                   FontFamily="{DynamicResource FontDisplay}"
                                    FontWeight="SemiBold" FontSize="14" LetterSpacing="2"
-                                   Foreground="{StaticResource ElectricBlueBrush}"/>
+                                   Foreground="{DynamicResource ElectricBlueBrush}"/>
                         <TextBlock Text="{Binding Description}" FontSize="11"
                                    Classes="mono dim"
-                                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                                   Foreground="{DynamicResource SecondaryTextBrush}"/>
                     </StackPanel>
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>
 
         <TextBlock Grid.Row="2" Grid.Column="0" Text="Project Name:"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource ElectricBlueBrush}"
+                   Foreground="{DynamicResource ElectricBlueBrush}"
                    VerticalAlignment="Center"/>
         <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding ProjectName}" Margin="0,5"/>
 
         <TextBlock Grid.Row="3" Grid.Column="0" Text="Project Path:"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource ElectricBlueBrush}"
+                   Foreground="{DynamicResource ElectricBlueBrush}"
                    VerticalAlignment="Center"/>
         <Grid Grid.Row="3" Grid.Column="1" ColumnDefinitions="*,Auto" Margin="0,5">
             <TextBox Grid.Column="0" Text="{Binding ProjectPath}"/>
@@ -54,8 +54,8 @@
 
         <TextBlock Grid.Row="4" Grid.ColumnSpan="2"
                    Text="{Binding ErrorMessage}"
-                   FontFamily="{StaticResource FontMono}"
-                   Foreground="{StaticResource CoralDeepBrush}"
+                   FontFamily="{DynamicResource FontMono}"
+                   Foreground="{DynamicResource CoralDeepBrush}"
                    IsVisible="{Binding HasError}" Margin="0,10"/>
 
         <StackPanel Grid.Row="5" Grid.ColumnSpan="2"

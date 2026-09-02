@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
 
@@ -35,6 +36,14 @@ static ResourceHandle s_HistoryTex[MAX_FRAMES] = {
 static bool s_HistoryInit[MAX_FRAMES] = {}; // false until first write to this slot
 static u32 s_TexWidth = 0;                  // dimensions the history textures were
 static u32 s_TexHeight = 0;                 // created with — recreate on resize
+
+// 模块持有的输出纹理（2026-09-02）：TAA 输出曾用 builder.CreateTexture（RG
+// 瞬态池）。RG 的帧内池化会把它与其它同尺寸瞬态（如 fusion 输出）复用同一
+// 物理纹理且 Metal 上无别名屏障——实测（TAA 输出减半、fusion 输出减半两个
+// 判定实验）屏幕消费的不是 TAA 写入的内容，TAA 形同旁路，全屏保留原始噪点
+// 与几何锯齿。改为模块持有 + ImportResource 进图，与 history 同生命周期管理。
+static ResourceHandle s_OutputTex[MAX_FRAMES] = {
+    handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
 
 // Persistent params buffer per frame slot
 struct TAAGlobalsCPU {
@@ -90,7 +99,7 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, bool* outIsBinary) 
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
             return bytecode;
         }
-        std::cerr << "[TAA] Failed to load SPIR-V: Lumen/TAA.comp.spv" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Failed to load SPIR-V: Lumen/TAA.comp.spv" << std::endl;
         return {};
     }
 
@@ -133,10 +142,10 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     auto platform = device.GetPlatform();
     bool isBinary = false;
     std::vector<u8> shaderBytes = LoadShaderBytes(platform, &isBinary);
-    if (shaderBytes.empty()) { std::cerr << "[TAA] Shader load failed" << std::endl; return false; }
+    if (shaderBytes.empty()) { PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Shader load failed" << std::endl; return false; }
 
     ShaderHandle cs = device.CreateShader(shaderBytes.data(), shaderBytes.size(), ShaderStage::Compute, "taa_main");
-    if (cs == handles::INVALID_SHADER) { std::cerr << "[TAA] Shader creation failed" << std::endl; return false; }
+    if (cs == handles::INVALID_SHADER) { PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Shader creation failed" << std::endl; return false; }
 
     // Bindings 0..2 = sampled images (curr, hist, vel), 3 = storage image (output),
     //             4 = uniform buffer (globals).
@@ -188,6 +197,12 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     for (u32 i = 0; i < MAX_FRAMES; ++i) {
         if (needHistory) {
             s_HistoryTex[i] = device.CreateTexture(histDesc);
+            // 输出纹理与 history 同尺寸同生命周期（见 s_OutputTex 注释）。
+            TextureDesc outTexDesc = histDesc;
+            outTexDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource | TextureUsage::CopySource;
+            if (s_OutputTex[i] != handles::INVALID_RESOURCE)
+                device.DestroyTexture(s_OutputTex[i]);
+            s_OutputTex[i] = device.CreateTexture(outTexDesc);
         }
 
         if (s_ParamsBuf[i] == handles::INVALID_RESOURCE) {
@@ -234,16 +249,16 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     static bool s_DiagDepthFallback = false;
     if (depthActive && !s_DiagDepthActive) {
         s_DiagDepthActive = true;
-        std::cerr << "[TAA] depth reprojection active (matrix reprojection + "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] depth reprojection active (matrix reprojection + "
                      "prev-depth disocclusion)" << std::endl;
     } else if (!depthActive && !s_DiagDepthFallback && s_Pipeline != handles::INVALID_PIPELINE &&
                graph.GetDevice().GetPlatform() != RHIPlatform::Dawn) {
         s_DiagDepthFallback = true;
-        std::cerr << "[TAA] depth reprojection inactive — ";
-        if (depth == nullptr) std::cerr << "no depth inputs (first frame or Render()-path only)";
-        else if (depth->currDepth == handles::INVALID_RESOURCE) std::cerr << "currDepth invalid";
-        else std::cerr << "prevDepth invalid";
-        std::cerr << "; using velocity fallback" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] depth reprojection inactive — ";
+        if (depth == nullptr) PRIMAL_LOG_STREAM(Error, "Render") << "no depth inputs (first frame or Render()-path only)";
+        else if (depth->currDepth == handles::INVALID_RESOURCE) PRIMAL_LOG_STREAM(Error, "Render") << "currDepth invalid";
+        else PRIMAL_LOG_STREAM(Error, "Render") << "prevDepth invalid";
+        PRIMAL_LOG_STREAM(Error, "Render") << "; using velocity fallback" << std::endl;
     }
 
     // currDepth is RG-external (GPUDrivenDrawPipeline's GBuffer depth): import
@@ -283,20 +298,26 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     }
 
     return graph.AddPass<TAAPassData>("TAAPass", RGPassType::Compute, RGPassCategory::PostProcess,
-        [&](TAAPassData& data, RenderGraphBuilder& builder) {
+        [&, inputHDR, velocityTexture](TAAPassData& data, RenderGraphBuilder& builder) {
             builder.Read(inputHDR, ResourceState::ShaderResource);
             builder.Read(velocityTexture, ResourceState::ShaderResource);
             if (currDepthRG.IsValid()) {
                 builder.Read(currDepthRG, ResourceState::ShaderResource);
             }
 
+            // 模块持有的输出以 ImportTexture 进图（绕开 RG 瞬态池的帧内
+            // 复用——见 s_OutputTex 注释）。desc 必须携带：ToneMapping 用
+            // inputHDR 的 desc 决定自己的输出尺寸。
             TextureDesc outDesc;
             outDesc.size = {width, height, 1};
             outDesc.format = DataFormat::RGBA16_Float;
             outDesc.type = TextureType::Texture2D;
             outDesc.mipLevels = 1;
             outDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource | TextureUsage::CopySource;
-            data.output = builder.CreateTexture("TAA_Output", outDesc, ResourceState::UnorderedAccess);
+            data.output = builder.Write(
+                graph.ImportTexture("TAA_Output", s_OutputTex[fi], outDesc,
+                                    ResourceState::UnorderedAccess),
+                ResourceState::UnorderedAccess);
         },
         [inputHDR, velocityTexture, width, height, fi, histReadIdx, histValid, depthActive,
          currDepthTex = depthActive ? depth->currDepth : handles::INVALID_RESOURCE,
@@ -304,7 +325,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
          useDepthBindings = graph.GetDevice().GetPlatform() != RHIPlatform::Dawn]
          (const TAAPassData& data, RenderGraphContext& context) {
             if (s_Pipeline == handles::INVALID_PIPELINE) {
-                std::cerr << "[TAA] Execute abort: pipeline INVALID" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: pipeline INVALID" << std::endl;
                 return;
             }
 
@@ -332,16 +353,16 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             if (inHandle == handles::INVALID_RESOURCE ||
                 velHandle == handles::INVALID_RESOURCE ||
                 outHandle == handles::INVALID_RESOURCE) {
-                std::cerr << "[TAA] Execute abort: invalid input resource" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: invalid input resource" << std::endl;
                 return;
             }
 
             if (histHandle == handles::INVALID_RESOURCE) {
-                std::cerr << "[TAA] Execute abort: invalid history texture" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: invalid history texture" << std::endl;
                 return;
             }
             if (histWriteHandle == handles::INVALID_RESOURCE) {
-                std::cerr << "[TAA] Execute abort: invalid history write texture" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Execute abort: invalid history write texture" << std::endl;
                 return;
             }
 

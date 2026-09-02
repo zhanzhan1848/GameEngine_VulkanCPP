@@ -4,6 +4,7 @@
 #include "DawnBuffer.h"
 #include "DawnTexture.h"
 #include "DawnSampler.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -21,7 +22,7 @@ DawnDescriptorSet::~DawnDescriptorSet() {
 
 bool DawnDescriptorSet::Initialize(const DescriptorSetDesc& desc) {
     if (desc.layout == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-        std::cerr << "[DawnDescriptorSet] Invalid layout handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDescriptorSet] Invalid layout handle" << std::endl;
         return false;
     }
 
@@ -31,7 +32,7 @@ bool DawnDescriptorSet::Initialize(const DescriptorSetDesc& desc) {
     // Pre-allocate pending bindings from the layout's bindings
     DawnDescriptorSetLayout* layout = device_.GetDescriptorSetLayout(desc.layout);
     if (!layout) {
-        std::cerr << "[DawnDescriptorSet] Failed to resolve layout handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDescriptorSet] Failed to resolve layout handle" << std::endl;
         return false;
     }
 
@@ -116,7 +117,7 @@ WGPUBindGroup DawnDescriptorSet::GetBindGroup() {
 bool DawnDescriptorSet::BuildBindGroup() {
     DawnDescriptorSetLayout* layout = device_.GetDescriptorSetLayout(layoutHandle_);
     if (!layout || !layout->GetNativeLayout()) {
-        std::cerr << "[DawnDS] Cannot build: invalid layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDS] Cannot build: invalid layout" << std::endl;
         return false;
     }
 
@@ -267,7 +268,7 @@ bool DawnDescriptorSet::BuildBindGroup() {
 
     wgpuGroup_ = wgpuDeviceCreateBindGroup(device_.GetNativeDevice(), &groupDesc);
     if (!wgpuGroup_) {
-        std::cerr << "[DawnDescriptorSet] Failed to create WGPUBindGroup" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDescriptorSet] Failed to create WGPUBindGroup" << std::endl;
         return false;
     }
 

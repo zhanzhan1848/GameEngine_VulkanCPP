@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -18,7 +19,7 @@ HZBSystem::~HZBSystem() {
 
 bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
     if (initialized_) {
-        std::cerr << "[HZBSystem] Already initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Already initialized" << std::endl;
         return false;
     }
 
@@ -31,12 +32,12 @@ bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
 //    std::cout << "  GPU Generation: " << (config_.generate_on_gpu ? "Enabled" : "Disabled") << std::endl;
 
     if (!CreateHZBResources()) {
-        std::cerr << "[HZBSystem] Failed to create HZB resources" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB resources" << std::endl;
         return false;
     }
 
     if (!CreateHZBSampler()) {
-        std::cerr << "[HZBSystem] Failed to create HZB sampler" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB sampler" << std::endl;
         return false;
     }
 
@@ -102,7 +103,7 @@ bool HZBSystem::CreateHZBTexture() {
 
     hzb_texture_ = device_->CreateTexture(hzbDesc);
     if (hzb_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[HZBSystem] Failed to create HZB texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB texture" << std::endl;
         return false;
     }
 
@@ -127,7 +128,7 @@ bool HZBSystem::CreateHZBSampler() {
 
     hzb_sampler_ = device_->CreateSampler(samplerDesc);
     if (hzb_sampler_ == rhi::handles::INVALID_SAMPLER) {
-        std::cerr << "[HZBSystem] Failed to create HZB sampler" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB sampler" << std::endl;
         return false;
     }
 
@@ -160,14 +161,14 @@ bool HZBSystem::CreateHZBComputePipeline() {
         rhi::DescriptorSetLayoutDesc mipLayoutDesc{ 2, mipBindings };
         hzb_descriptor_layout_ = device_->CreateDescriptorSetLayout(mipLayoutDesc);
         if (hzb_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-            std::cerr << "[HZBSystem] Failed to create HZB mip descriptor layout" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB mip descriptor layout" << std::endl;
             return false;
         }
 
         rhi::PipelineLayoutDesc mipPLDesc{ 1, &hzb_descriptor_layout_, 0, nullptr };
         hzb_pipeline_layout_ = device_->CreatePipelineLayout(mipPLDesc);
         if (hzb_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
-            std::cerr << "[HZBSystem] Failed to create HZB mip pipeline layout" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB mip pipeline layout" << std::endl;
             return false;
         }
 
@@ -180,14 +181,14 @@ bool HZBSystem::CreateHZBComputePipeline() {
         rhi::DescriptorSetLayoutDesc copyLayoutDesc{ 2, copyBindings };
         hzb_copy_descriptor_layout_ = device_->CreateDescriptorSetLayout(copyLayoutDesc);
         if (hzb_copy_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-            std::cerr << "[HZBSystem] Failed to create HZB copy descriptor layout" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB copy descriptor layout" << std::endl;
             return false;
         }
 
         rhi::PipelineLayoutDesc copyPLDesc{ 1, &hzb_copy_descriptor_layout_, 0, nullptr };
         hzb_copy_pipeline_layout_ = device_->CreatePipelineLayout(copyPLDesc);
         if (hzb_copy_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
-            std::cerr << "[HZBSystem] Failed to create HZB copy pipeline layout" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB copy pipeline layout" << std::endl;
             return false;
         }
 
@@ -218,7 +219,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
                 }
             }
             if (!file.is_open()) {
-                std::cerr << "[HZBSystem] Failed to open shader: " << name
+                PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to open shader: " << name
                           << "\n  tried: " << candidates[0]
                           << "\n  tried: " << candidates[1] << std::endl;
                 return {};
@@ -230,7 +231,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
             size_t pad = (platform == rhi::RHIPlatform::Vulkan) ? 0 : 1;
             std::vector<u8> bytecode(static_cast<size_t>(size) + pad, 0);
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[HZBSystem] Failed to read shader: " << openedPath << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to read shader: " << openedPath << std::endl;
                 return {};
             }
             return bytecode;
@@ -239,30 +240,30 @@ bool HZBSystem::CreateHZBComputePipeline() {
 
         std::vector<u8> copySrc = loadShader("HZBCopy");
         if (copySrc.empty()) {
-            std::cerr << "[HZBSystem] Failed to load HZBCopy shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to load HZBCopy shader" << std::endl;
             return false;
         }
         std::vector<u8> mipSrc = loadShader("HZBMip");
         if (mipSrc.empty()) {
-            std::cerr << "[HZBSystem] Failed to load HZBMip shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to load HZBMip shader" << std::endl;
             return false;
         }
-        std::cerr << "[HZB] Loaded shaders: HZBCopy=" << copySrc.size()
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZB] Loaded shaders: HZBCopy=" << copySrc.size()
                   << " HZBMip=" << mipSrc.size() << std::endl;
 
         rhi::ShaderHandle copyShader = device_->CreateShader(
             copySrc.data(), copySrc.size(), rhi::ShaderStage::Compute, "copy_depth_to_hzb_mip0");
-        std::cerr << "[HZB] copyShader handle: " << copyShader << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZB] copyShader handle: " << copyShader << std::endl;
         if (copyShader == rhi::handles::INVALID_SHADER) {
-            std::cerr << "[HZBSystem] Failed to compile HZB copy shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to compile HZB copy shader" << std::endl;
             return false;
         }
 
         rhi::ShaderHandle mipShader = device_->CreateShader(
             mipSrc.data(), mipSrc.size(), rhi::ShaderStage::Compute, "generate_hzb_mip_level");
-        std::cerr << "[HZB] mipShader handle: " << mipShader << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZB] mipShader handle: " << mipShader << std::endl;
         if (mipShader == rhi::handles::INVALID_SHADER) {
-            std::cerr << "[HZBSystem] Failed to compile HZB mip shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to compile HZB mip shader" << std::endl;
             return false;
         }
 
@@ -270,12 +271,12 @@ bool HZBSystem::CreateHZBComputePipeline() {
         copyPipeDesc.layout = hzb_copy_pipeline_layout_;
         copyPipeDesc.threadGroupSize = {16, 16, 1};
         copyPipeDesc.computeShader = copyShader;
-        std::cerr << "[HZB] Creating copy pipeline (shader=" << copyShader
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZB] Creating copy pipeline (shader=" << copyShader
                   << ", layout=" << hzb_copy_pipeline_layout_ << ")" << std::endl;
         hzb_copy_pipeline_ = device_->CreateComputePipeline(copyPipeDesc);
-        std::cerr << "[HZB] Copy pipeline result: " << hzb_copy_pipeline_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZB] Copy pipeline result: " << hzb_copy_pipeline_ << std::endl;
         if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[HZBSystem] Failed to create HZB copy pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB copy pipeline" << std::endl;
             return false;
         }
 
@@ -285,7 +286,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
         mipPipeDesc.computeShader = mipShader;
         hzb_downsample_pipeline_ = device_->CreateComputePipeline(mipPipeDesc);
         if (hzb_downsample_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[HZBSystem] Failed to create HZB mip pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB mip pipeline" << std::endl;
             return false;
         }
 
@@ -306,7 +307,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
 
     hzb_descriptor_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     if (hzb_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-        std::cerr << "[HZBSystem] ❌ Failed to create HZB descriptor layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ Failed to create HZB descriptor layout" << std::endl;
         return false;
     }
 //    std::cout << "[HZBSystem] ✅ HZB descriptor layout created" << std::endl;
@@ -321,7 +322,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
 
     hzb_pipeline_layout_ = device_->CreatePipelineLayout(pipelineLayoutDesc);
     if (hzb_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
-        std::cerr << "[HZBSystem] Failed to create HZB pipeline layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB pipeline layout" << std::endl;
         return false;
     }
 
@@ -331,7 +332,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
 
     std::ifstream shaderFile(shaderPath);
     if (!shaderFile.is_open()) {
-        std::cerr << "[HZBSystem] ❌ Failed to open shader file: " << shaderPath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ Failed to open shader file: " << shaderPath << std::endl;
         return false;
     }
 //    std::cout << "[HZBSystem] ✅ Shader file opened successfully" << std::endl;
@@ -349,7 +350,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
         "copy_depth_to_hzb_mip0"
     );
     if (copyShader == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[HZBSystem] ❌ Failed to create HZB base copy shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ Failed to create HZB base copy shader" << std::endl;
         return false;
     }
 
@@ -360,7 +361,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
         "generate_hzb_mip_level_basic"
     );
     if (downsampleShader == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[HZBSystem] ❌ Failed to create HZB downsample shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ Failed to create HZB downsample shader" << std::endl;
         return false;
     }
 
@@ -371,14 +372,14 @@ bool HZBSystem::CreateHZBComputePipeline() {
     pipelineDesc.computeShader = copyShader;
     hzb_copy_pipeline_ = device_->CreateComputePipeline(pipelineDesc);
     if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[HZBSystem] ❌ Failed to create HZB copy pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ Failed to create HZB copy pipeline" << std::endl;
         return false;
     }
 
     pipelineDesc.computeShader = downsampleShader;
     hzb_downsample_pipeline_ = device_->CreateComputePipeline(pipelineDesc);
     if (hzb_downsample_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[HZBSystem] ❌ Failed to create HZB downsample pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ Failed to create HZB downsample pipeline" << std::endl;
         return false;
     }
 
@@ -390,7 +391,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
 HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
                                           rhi::RHICommandBuffer* cmd_buffer) {
     if (!initialized_) {
-        std::cerr << "[HZBSystem] Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Not initialized" << std::endl;
         return {};
     }
 
@@ -406,7 +407,7 @@ HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
     if (config_.generate_on_gpu && cmd_buffer) {
 //        std::cout << "[HZBSystem] Attempting GPU HZB generation..." << std::endl;
         if (!GenerateHZBOnGPU(cmd_buffer, depth_texture)) {
-            std::cerr << "[HZBSystem] ❌ GPU HZB generation failed, falling back to CPU" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ GPU HZB generation failed, falling back to CPU" << std::endl;
             GenerateHZBOnCPU(depth_texture);
         }
     } else {
@@ -442,19 +443,19 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE ||
         hzb_downsample_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[HZBSystem] ❌ HZB compute pipelines not available" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ HZB compute pipelines not available" << std::endl;
         return false;
     }
 //    std::cout << "[HZBSystem] ✅ HZB compute pipelines are valid" << std::endl;
 
     if (depth_texture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[HZBSystem] ❌ Invalid depth texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ Invalid depth texture" << std::endl;
         return false;
     }
 //    std::cout << "[HZBSystem] ✅ Depth texture is valid: " << depth_texture << std::endl;
 
     if (hzb_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[HZBSystem] ❌ HZB texture is invalid" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ HZB texture is invalid" << std::endl;
         return false;
     }
 //    std::cout << "[HZBSystem] ✅ HZB texture is valid: " << hzb_texture_ << std::endl;
@@ -494,7 +495,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     if (!isDawn) {
         descriptorSet = device_->CreateDescriptorSet(descriptorDesc);
         if (descriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-            std::cerr << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB descriptor set" << std::endl;
             return false;
         }
     }
@@ -505,7 +506,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         copyDesc.layout = hzb_copy_descriptor_layout_;
         copyDescriptorSet = device_->CreateDescriptorSet(copyDesc);
         if (copyDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-            std::cerr << "[HZBSystem] Failed to create HZB copy descriptor set" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB copy descriptor set" << std::endl;
             return false;
         }
         temporaryDescriptorSets.push_back(copyDescriptorSet);
@@ -524,7 +525,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     baseTargetViewDesc.arraySize = 1;
     rhi::ResourceHandle hzbMip0View = device_->CreateTextureView(baseTargetViewDesc);
     if (hzbMip0View == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[HZBSystem] Failed to create HZB mip0 view" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB mip0 view" << std::endl;
         if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
         for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
         return false;
@@ -603,7 +604,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         sourceViewDesc.arraySize = 1;
         rhi::ResourceHandle sourceView = device_->CreateTextureView(sourceViewDesc);
         if (sourceView == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[HZBSystem] Failed to create source mip view" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create source mip view" << std::endl;
             for (auto view : temporaryViews) device_->DestroyTexture(view);
             for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
             if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
@@ -621,7 +622,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         targetViewDesc.arraySize = 1;
         rhi::ResourceHandle targetView = device_->CreateTextureView(targetViewDesc);
         if (targetView == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[HZBSystem] Failed to create target mip view" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create target mip view" << std::endl;
             for (auto view : temporaryViews) device_->DestroyTexture(view);
             for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
             if (!isDawn) device_->DestroyDescriptorSet(descriptorSet);
@@ -639,7 +640,7 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
             iterDesc.layout = hzb_descriptor_layout_;
             iterDescriptorSet = device_->CreateDescriptorSet(iterDesc);
             if (iterDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-                std::cerr << "[HZBSystem] Failed to create HZB mip descriptor set" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB mip descriptor set" << std::endl;
                 for (auto view : temporaryViews) device_->DestroyTexture(view);
                 for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
                 return false;

@@ -1,6 +1,9 @@
 #include "DawnDevice.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
+
+#include "Engine/Common/CoreDiag.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -66,7 +69,7 @@ bool DawnDevice::initializeImpl() {
     instanceDesc.requiredLimits = nullptr;
     wgpuInstance_ = wgpuCreateInstance(&instanceDesc);
     if (!wgpuInstance_) {
-        std::cerr << "[DawnDevice] Failed to create WGPU instance" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Failed to create WGPU instance" << std::endl;
         return false;
     }
 
@@ -93,7 +96,7 @@ bool DawnDevice::initializeImpl() {
                     data->adapter = adapter;
                     data->success = true;
                 } else {
-                    std::cerr << "[DawnDevice] Adapter request failed: "
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Adapter request failed: "
                               << (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "unknown error") << std::endl;
                 }
                 data->done = true;
@@ -114,7 +117,7 @@ bool DawnDevice::initializeImpl() {
     }
 
     if (!adapterData.success || !adapterData.adapter) {
-        std::cerr << "[DawnDevice] Failed to get adapter" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Failed to get adapter" << std::endl;
         return false;
     }
     wgpuAdapter_ = adapterData.adapter;
@@ -171,8 +174,11 @@ bool DawnDevice::initializeImpl() {
                 case WGPUDeviceLostReason_FailedCreation:     reasonStr = "FailedCreation"; break;
                 default: break;
             }
-            std::cout << "[DawnDevice] Device lost (" << reasonStr << "): "
-                      << (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "no message") << std::endl;
+            // 单点汇聚重定向（CLI 规划 §11.3 轨道 B / L1 device-lost 结构化事件）。
+            std::string msg = std::string("[DawnDevice] Device lost (") + reasonStr + "): "
+                + (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "no message");
+            primal::diag::Emit(primal::diag::kLevelError, "RHI", msg.c_str());
+            PRIMAL_LOG_STREAM(Info, "RHI") << msg << std::endl;
         },
         .userdata1 = nullptr,
         .userdata2 = nullptr,
@@ -192,8 +198,10 @@ bool DawnDevice::initializeImpl() {
                 case WGPUErrorType_Unknown:     typeStr = "Unknown"; break;
                 default: break;
             }
-            std::cout << "[DawnDevice] Device error (" << typeStr << "): "
-                      << (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "no message") << std::endl;
+            std::string msg = std::string("[DawnDevice] Device error (") + typeStr + "): "
+                + (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "no message");
+            primal::diag::Emit(primal::diag::kLevelError, "RHI", msg.c_str());
+            PRIMAL_LOG_STREAM(Info, "RHI") << msg << std::endl;
         },
         .userdata1 = nullptr,
         .userdata2 = nullptr,
@@ -213,7 +221,7 @@ bool DawnDevice::initializeImpl() {
                     data->device = device;
                     data->success = true;
                 } else {
-                    std::cerr << "[DawnDevice] Device request failed: "
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Device request failed: "
                               << (message.data ? std::string(message.data, message.length == WGPU_STRLEN ? std::strlen(message.data) : message.length) : "unknown error") << std::endl;
                 }
                 data->done = true;
@@ -231,7 +239,7 @@ bool DawnDevice::initializeImpl() {
     }
 
     if (!deviceData.success || !deviceData.device) {
-        std::cerr << "[DawnDevice] Failed to get device" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Failed to get device" << std::endl;
         return false;
     }
     wgpuDevice_ = deviceData.device;
@@ -257,7 +265,7 @@ bool DawnDevice::initializeImpl() {
             default: break;
         }
         std::string msg(message.data, message.length);
-        std::cerr << "[Dawn][" << tag << "] " << msg << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[Dawn][" << tag << "] " << msg << std::endl;
     };
     wgpuDeviceSetLoggingCallback(wgpuDevice_, logCbInfo);
 #endif
@@ -265,7 +273,7 @@ bool DawnDevice::initializeImpl() {
     // 4. Get Queue
     wgpuQueue_ = wgpuDeviceGetQueue(wgpuDevice_);
     if (!wgpuQueue_) {
-        std::cerr << "[DawnDevice] Failed to get queue" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Failed to get queue" << std::endl;
         return false;
     }
 
@@ -279,7 +287,7 @@ bool DawnDevice::initializeImpl() {
 
     pushConstantBuffer_ = wgpuDeviceCreateBuffer(wgpuDevice_, &pushConstantDesc);
     if (!pushConstantBuffer_) {
-        std::cerr << "[DawnDevice] Failed to create push constant ring buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Failed to create push constant ring buffer" << std::endl;
         return false;
     }
 
@@ -408,7 +416,7 @@ void DawnDevice::waitIdleImpl() const {
 
         auto elapsed = std::chrono::steady_clock::now() - startTime;
         if (elapsed > timeout) {
-            std::cerr << "[DawnDevice] waitIdle timed out after 5 seconds" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] waitIdle timed out after 5 seconds" << std::endl;
             break;
         }
 
@@ -502,12 +510,12 @@ ResourceHandle DawnDevice::createBufferImpl(const BufferDesc& desc) {
     u32 id = bufferAllocator_.Allocate(*this, desc);
     auto* buf = bufferAllocator_.Get(id);
     if (!buf) {
-        std::cerr << "[DawnDevice] Buffer allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Buffer allocation failed" << std::endl;
         bufferAllocator_.Free(id);
         return handles::INVALID_RESOURCE;
     }
     if (!buf->Initialize()) {
-        std::cerr << "[DawnDevice] Buffer Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Buffer Initialize failed for id: " << id << std::endl;
         bufferAllocator_.Free(id);
         return handles::INVALID_RESOURCE;
     }
@@ -520,12 +528,12 @@ ResourceHandle DawnDevice::createTextureImpl(const TextureDesc& desc) {
     u32 id = textureAllocator_.Allocate(*this, desc);
     auto* tex = textureAllocator_.Get(id);
     if (!tex) {
-        std::cerr << "[DawnDevice] Texture allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Texture allocation failed" << std::endl;
         textureAllocator_.Free(id);
         return handles::INVALID_RESOURCE;
     }
     if (!tex->Initialize()) {
-        std::cerr << "[DawnDevice] Texture Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Texture Initialize failed for id: " << id << std::endl;
         textureAllocator_.Free(id);
         return handles::INVALID_RESOURCE;
     }
@@ -540,14 +548,14 @@ ResourceHandle DawnDevice::createTextureViewImpl(const TextureViewDesc& desc) {
     auto srcId = static_cast<u32>(desc.texture);
     auto* srcTex = textureAllocator_.Get(srcId);
     if (!srcTex) {
-        std::cerr << "[DawnDevice] Invalid source texture for view creation" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Invalid source texture for view creation" << std::endl;
         return handles::INVALID_RESOURCE;
     }
 
     // Create the view on the source texture
     WGPUTextureView view = srcTex->CreateView(desc);
     if (!view) {
-        std::cerr << "[DawnDevice] Failed to create WGPUTextureView" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Failed to create WGPUTextureView" << std::endl;
         return handles::INVALID_RESOURCE;
     }
 
@@ -566,7 +574,7 @@ ResourceHandle DawnDevice::createTextureViewImpl(const TextureViewDesc& desc) {
     u32 id = textureAllocator_.Allocate(*this, viewDesc);
     auto* viewTex = textureAllocator_.Get(id);
     if (!viewTex) {
-        std::cerr << "[DawnDevice] Texture view allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Texture view allocation failed" << std::endl;
         wgpuTextureViewRelease(view);
         textureAllocator_.Free(id);
         return handles::INVALID_RESOURCE;
@@ -582,12 +590,12 @@ ShaderHandle DawnDevice::createShaderImpl(const void* data, size_t size, ShaderS
     u32 id = shaderAllocator_.Allocate(*this);
     auto* shader = shaderAllocator_.Get(id);
     if (!shader) {
-        std::cerr << "[DawnDevice] Shader allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Shader allocation failed" << std::endl;
         shaderAllocator_.Free(id);
         return handles::INVALID_SHADER;
     }
     if (!shader->Initialize(data, size, stage, entryPoint)) {
-        std::cerr << "[DawnDevice] Shader Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Shader Initialize failed for id: " << id << std::endl;
         shaderAllocator_.Free(id);
         return handles::INVALID_SHADER;
     }
@@ -598,12 +606,12 @@ PipelineHandle DawnDevice::createGraphicsPipelineImpl(const GraphicsPipelineDesc
     u32 id = pipelineAllocator_.Allocate(*this);
     auto* pipeline = pipelineAllocator_.Get(id);
     if (!pipeline) {
-        std::cerr << "[DawnDevice] Pipeline allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Pipeline allocation failed" << std::endl;
         pipelineAllocator_.Free(id);
         return handles::INVALID_PIPELINE;
     }
     if (!pipeline->InitializeGraphics(desc)) {
-        std::cerr << "[DawnDevice] Graphics Pipeline InitializeGraphics failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Graphics Pipeline InitializeGraphics failed for id: " << id << std::endl;
         pipelineAllocator_.Free(id);
         return handles::INVALID_PIPELINE;
     }
@@ -614,12 +622,12 @@ PipelineHandle DawnDevice::createComputePipelineImpl(const ComputePipelineDesc& 
     u32 id = pipelineAllocator_.Allocate(*this);
     auto* pipeline = pipelineAllocator_.Get(id);
     if (!pipeline) {
-        std::cerr << "[DawnDevice] Pipeline allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Pipeline allocation failed" << std::endl;
         pipelineAllocator_.Free(id);
         return handles::INVALID_PIPELINE;
     }
     if (!pipeline->InitializeCompute(desc)) {
-        std::cerr << "[DawnDevice] Compute Pipeline InitializeCompute failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Compute Pipeline InitializeCompute failed for id: " << id << std::endl;
         pipelineAllocator_.Free(id);
         return handles::INVALID_PIPELINE;
     }
@@ -630,12 +638,12 @@ CommandBufferHandle DawnDevice::createCommandBufferImpl(CommandQueueType type) {
     u32 id = commandBufferAllocator_.Allocate(*this, type);
     auto* cmdBuf = commandBufferAllocator_.Get(id);
     if (!cmdBuf) {
-        std::cerr << "[DawnDevice] CommandBuffer allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] CommandBuffer allocation failed" << std::endl;
         commandBufferAllocator_.Free(id);
         return handles::INVALID_COMMAND_BUFFER;
     }
     if (!cmdBuf->Initialize()) {
-        std::cerr << "[DawnDevice] CommandBuffer Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] CommandBuffer Initialize failed for id: " << id << std::endl;
         commandBufferAllocator_.Free(id);
         return handles::INVALID_COMMAND_BUFFER;
     }
@@ -650,12 +658,12 @@ SamplerHandle DawnDevice::createSamplerImpl(const SamplerDesc& desc) {
     u32 id = samplerAllocator_.Allocate(*this);
     auto* sampler = samplerAllocator_.Get(id);
     if (!sampler) {
-        std::cerr << "[DawnDevice] Sampler allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Sampler allocation failed" << std::endl;
         samplerAllocator_.Free(id);
         return handles::INVALID_SAMPLER;
     }
     if (!sampler->Initialize(desc)) {
-        std::cerr << "[DawnDevice] Sampler Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Sampler Initialize failed for id: " << id << std::endl;
         samplerAllocator_.Free(id);
         return handles::INVALID_SAMPLER;
     }
@@ -666,12 +674,12 @@ DescriptorSetLayoutHandle DawnDevice::createDescriptorSetLayoutImpl(const Descri
     u32 id = descriptorSetLayoutAllocator_.Allocate(*this);
     auto* layout = descriptorSetLayoutAllocator_.Get(id);
     if (!layout) {
-        std::cerr << "[DawnDevice] DescriptorSetLayout allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] DescriptorSetLayout allocation failed" << std::endl;
         descriptorSetLayoutAllocator_.Free(id);
         return static_cast<DescriptorSetLayoutHandle>(handles::INVALID_RESOURCE);
     }
     if (!layout->Initialize(desc)) {
-        std::cerr << "[DawnDevice] DescriptorSetLayout Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] DescriptorSetLayout Initialize failed for id: " << id << std::endl;
         descriptorSetLayoutAllocator_.Free(id);
         return static_cast<DescriptorSetLayoutHandle>(handles::INVALID_RESOURCE);
     }
@@ -682,12 +690,12 @@ PipelineLayoutHandle DawnDevice::createPipelineLayoutImpl(const PipelineLayoutDe
     u32 id = pipelineLayoutAllocator_.Allocate(*this);
     auto* layout = pipelineLayoutAllocator_.Get(id);
     if (!layout) {
-        std::cerr << "[DawnDevice] PipelineLayout allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] PipelineLayout allocation failed" << std::endl;
         pipelineLayoutAllocator_.Free(id);
         return handles::INVALID_PIPELINE_LAYOUT;
     }
     if (!layout->Initialize(desc)) {
-        std::cerr << "[DawnDevice] PipelineLayout Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] PipelineLayout Initialize failed for id: " << id << std::endl;
         pipelineLayoutAllocator_.Free(id);
         return handles::INVALID_PIPELINE_LAYOUT;
     }
@@ -698,12 +706,12 @@ DescriptorSetHandle DawnDevice::createDescriptorSetImpl(const DescriptorSetDesc&
     u32 id = descriptorSetAllocator_.Allocate(*this);
     auto* set = descriptorSetAllocator_.Get(id);
     if (!set) {
-        std::cerr << "[DawnDevice] DescriptorSet allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] DescriptorSet allocation failed" << std::endl;
         descriptorSetAllocator_.Free(id);
         return static_cast<DescriptorSetHandle>(handles::INVALID_RESOURCE);
     }
     if (!set->Initialize(desc)) {
-        std::cerr << "[DawnDevice] DescriptorSet Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] DescriptorSet Initialize failed for id: " << id << std::endl;
         descriptorSetAllocator_.Free(id);
         return static_cast<DescriptorSetHandle>(handles::INVALID_RESOURCE);
     }
@@ -826,12 +834,12 @@ RenderPassHandle DawnDevice::createRenderPassImpl(const RenderPassDesc& desc) {
     u32 id = renderPassAllocator_.Allocate(*this);
     auto* pass = renderPassAllocator_.Get(id);
     if (!pass) {
-        std::cerr << "[DawnDevice] RenderPass allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] RenderPass allocation failed" << std::endl;
         renderPassAllocator_.Free(id);
         return static_cast<RenderPassHandle>(handles::INVALID_RESOURCE);
     }
     if (!pass->Initialize(desc)) {
-        std::cerr << "[DawnDevice] RenderPass Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] RenderPass Initialize failed for id: " << id << std::endl;
         renderPassAllocator_.Free(id);
         return static_cast<RenderPassHandle>(handles::INVALID_RESOURCE);
     }
@@ -841,11 +849,11 @@ RenderPassHandle DawnDevice::createRenderPassImpl(const RenderPassDesc& desc) {
 RHISwapChain* DawnDevice::createSwapChainImpl(const SwapChainDesc& desc) {
     auto* swapChain = new DawnSwapChain(*this, desc);
     if (!swapChain) {
-        std::cerr << "[DawnDevice] SwapChain allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] SwapChain allocation failed" << std::endl;
         return nullptr;
     }
     if (!swapChain->Initialize()) {
-        std::cerr << "[DawnDevice] SwapChain Initialize failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] SwapChain Initialize failed" << std::endl;
         delete swapChain;
         return nullptr;
     }
@@ -863,7 +871,7 @@ SyncHandle DawnDevice::createSyncImpl() {
     u32 id = syncAllocator_.Allocate(*this);
     auto* sync = syncAllocator_.Get(id);
     if (!sync) {
-        std::cerr << "[DawnDevice] Sync allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Sync allocation failed" << std::endl;
         syncAllocator_.Free(id);
         return handles::INVALID_SYNC;
     }
@@ -873,7 +881,7 @@ SyncHandle DawnDevice::createSyncImpl() {
 bool DawnDevice::waitForSyncImpl(SyncHandle handle, u32 timeoutMs) {
     auto* sync = GetSync(handle);
     if (!sync) {
-        std::cerr << "[DawnDevice] waitForSync: invalid handle " << handle << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] waitForSync: invalid handle " << handle << std::endl;
         return false;
     }
     // submitImpl signals synchronously (Signal is called before Submit returns),
@@ -891,12 +899,12 @@ QueryPoolHandle DawnDevice::createQueryPoolImpl(const QueryPoolDesc& desc) {
     u32 id = queryPoolAllocator_.Allocate(*this);
     auto* pool = queryPoolAllocator_.Get(id);
     if (!pool) {
-        std::cerr << "[DawnDevice] QueryPool allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] QueryPool allocation failed" << std::endl;
         queryPoolAllocator_.Free(id);
         return static_cast<QueryPoolHandle>(handles::INVALID_RESOURCE);
     }
     if (!pool->Initialize(desc)) {
-        std::cerr << "[DawnDevice] QueryPool Initialize failed for id: " << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] QueryPool Initialize failed for id: " << id << std::endl;
         queryPoolAllocator_.Free(id);
         return static_cast<QueryPoolHandle>(handles::INVALID_RESOURCE);
     }
@@ -915,7 +923,7 @@ void DawnDevice::destroyQueryPoolImpl(QueryPoolHandle handle) {
 bool DawnDevice::getQueryPoolResultsImpl(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride) {
     auto* pool = GetQueryPool(handle);
     if (!pool) {
-        std::cerr << "[DawnDevice] getQueryPoolResults: invalid handle " << handle << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] getQueryPoolResults: invalid handle " << handle << std::endl;
         return false;
     }
 
@@ -924,7 +932,7 @@ bool DawnDevice::getQueryPoolResultsImpl(QueryPoolHandle handle, u32 firstQuery,
     // For now, return zeros. A full implementation would require an async resolve-and-readback pipeline.
     static bool loggedOnce = false;
     if (!loggedOnce) {
-        std::cerr << "[DawnDevice] getQueryPoolResults: synchronous query readback not fully supported in WebGPU" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] getQueryPoolResults: synchronous query readback not fully supported in WebGPU" << std::endl;
         loggedOnce = true;
     }
 
@@ -1050,7 +1058,7 @@ void DawnDevice::FlushStagingBuffers() {
 bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
     auto* cmdBuf = GetCommandBuffer(info.cmdBuffer);
     if (!cmdBuf) {
-        std::cerr << "[DawnDevice] submitImpl: invalid command buffer handle " << info.cmdBuffer << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] submitImpl: invalid command buffer handle " << info.cmdBuffer << std::endl;
         return false;
     }
 
@@ -1060,7 +1068,7 @@ bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
     if (state == CommandBufferState::Recording) {
         // Currently recording — end it.
         if (!cmdBuf->End()) {
-            std::cerr << "[DawnDevice] submitImpl: failed to end command buffer" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] submitImpl: failed to end command buffer" << std::endl;
             return false;
         }
     } else if (state == CommandBufferState::Reset || state == CommandBufferState::Executed) {
@@ -1075,7 +1083,7 @@ bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
         // Empty command buffer (no operations recorded) — not an error.
         static bool loggedNullCb = false;
         if (!loggedNullCb) {
-            std::cerr << "[DawnDevice] submitImpl: WGPU command buffer is NULL (empty?) state="
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] submitImpl: WGPU command buffer is NULL (empty?) state="
                       << static_cast<int>(state) << std::endl;
             loggedNullCb = true;
         }
@@ -1121,7 +1129,7 @@ bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
 void* DawnDevice::mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) {
     auto* buf = GetBuffer(handle);
     if (!buf) {
-        std::cerr << "[DawnDevice] mapBuffer: invalid handle " << handle << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] mapBuffer: invalid handle " << handle << std::endl;
         return nullptr;
     }
     return buf->mapImpl(offset, size);
@@ -1130,7 +1138,7 @@ void* DawnDevice::mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) {
 void DawnDevice::unmapBufferImpl(ResourceHandle handle) {
     auto* buf = GetBuffer(handle);
     if (!buf) {
-        std::cerr << "[DawnDevice] unmapBuffer: invalid handle " << handle << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] unmapBuffer: invalid handle " << handle << std::endl;
         return;
     }
     buf->unmapImpl();
@@ -1204,7 +1212,7 @@ bool DawnDevice::EnsureBlitPipeline() {
 #endif
     }
     if (!file.is_open()) {
-        std::cerr << "[DawnDevice] Blit shader not found: " << shaderPath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Blit shader not found: " << shaderPath << std::endl;
         return false;
     }
     std::stringstream buf;
@@ -1222,7 +1230,7 @@ bool DawnDevice::EnsureBlitPipeline() {
 
     WGPUShaderModule module = wgpuDeviceCreateShaderModule(wgpuDevice_, &moduleDesc);
     if (!module) {
-        std::cerr << "[DawnDevice] Failed to compile blit shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDevice] Failed to compile blit shader" << std::endl;
         return false;
     }
 
@@ -1315,7 +1323,7 @@ void DawnCommandBuffer::GenerateMipmaps(ResourceHandle texture) {
     if (desc.mipLevels <= 1) return;
 
     if (!device_.EnsureBlitPipeline()) {
-        std::cerr << "[DawnCommandBuffer] GenerateMipmaps: blit pipeline not available" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] GenerateMipmaps: blit pipeline not available" << std::endl;
         return;
     }
 

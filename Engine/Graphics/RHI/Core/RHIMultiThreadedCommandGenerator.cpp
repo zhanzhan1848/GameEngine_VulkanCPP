@@ -17,6 +17,7 @@
 #include "RHIDevice.h"
 #include "RHIMemoryPool.h"
 #include "RHIMpscQueue.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -87,12 +88,12 @@ public:
         // 创建任务队列
         taskQueue_ = std::make_unique<DefaultMpscQueue>(device_, queueConfig);
         if (!taskQueue_->Initialize()) {
-            std::cerr << "Failed to initialize task queue" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to initialize task queue" << std::endl;
             return false;
         }
         
         if (!taskQueue_->Start()) {
-            std::cerr << "Failed to start task queue" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to start task queue" << std::endl;
             return false;
         }
         
@@ -480,7 +481,7 @@ public:
         // 验证所有任务都成功完成
         for (const auto& result : sortedResults) {
             if (!result.success) {
-                std::cerr << "Task " << result.taskId << " failed on thread " << result.threadId << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "Task " << result.taskId << " failed on thread " << result.threadId << std::endl;
                 return false;
             }
         }
@@ -796,7 +797,7 @@ bool RHIMultiThreadedCommandGenerator::GenerateCommandsParallel(const RenderScen
         // 验证结果数量
         if (results.size() != tasks.size()) {
              // 处理结果丢失的情况
-             std::cerr << "Warning: Expected " << tasks.size() << " results, got " << results.size() << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "Warning: Expected " << tasks.size() << " results, got " << results.size() << std::endl;
         }
         
         // 合并结果

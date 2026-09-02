@@ -1,0 +1,67 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+  <!-- COLOR TOKENS
+       "Iron & Gold of Azeroth" — palette adapted from warcraftcn-ui
+       (MIT, https://github.com/TheOrcDev/warcraftcn-ui): warm dark iron
+       browns, parchment text, forged-gold accents, orc-red danger.
+       Key schema is identical to CyberpunkTheme (every key here must
+       exist there too) so views can stay theme-agnostic. -->
+  <Color x:Key="VoidColor">#191410</Color>
+  <Color x:Key="SlateColor">#211B13</Color>
+  <Color x:Key="PanelColor">#2E2618</Color>
+  <Color x:Key="PanelHoverColor">#3B3020</Color>
+  <Color x:Key="ElectricBlueColor">#E8B54A</Color>
+  <Color x:Key="ElectricBlueDeepColor">#B98A2E</Color>
+  <Color x:Key="CoralColor">#D25A3A</Color>
+  <Color x:Key="CoralDeepColor">#A8432A</Color>
+  <Color x:Key="MintColor">#7FA65A</Color>
+  <Color x:Key="AmberColor">#E6C068</Color>
+  <Color x:Key="PrimaryTextColor">#E8DCC0</Color>
+  <Color x:Key="SecondaryTextColor">#B3A488</Color>
+  <Color x:Key="MutedTextColor">#82745E</Color>
+  <Color x:Key="HairlineColor">#6B5A38</Color>
+
+  <!-- BRUSHES -->
+  <SolidColorBrush x:Key="VoidBrush"           Color="{StaticResource VoidColor}"/>
+  <SolidColorBrush x:Key="SlateBrush"          Color="{StaticResource SlateColor}"/>
+  <SolidColorBrush x:Key="PanelBrush"          Color="{StaticResource PanelColor}"/>
+  <SolidColorBrush x:Key="PanelHoverBrush"     Color="{StaticResource PanelHoverColor}"/>
+  <SolidColorBrush x:Key="ElectricBlueBrush"   Color="{StaticResource ElectricBlueColor}"/>
+  <SolidColorBrush x:Key="ElectricBlueDeepBrush" Color="{StaticResource ElectricBlueDeepColor}"/>
+  <SolidColorBrush x:Key="CoralBrush"          Color="{StaticResource CoralColor}"/>
+  <SolidColorBrush x:Key="CoralDeepBrush"      Color="{StaticResource CoralDeepColor}"/>
+  <SolidColorBrush x:Key="MintBrush"           Color="{StaticResource MintColor}"/>
+  <SolidColorBrush x:Key="AmberBrush"          Color="{StaticResource AmberColor}"/>
+  <SolidColorBrush x:Key="PrimaryTextBrush"    Color="{StaticResource PrimaryTextColor}"/>
+  <SolidColorBrush x:Key="SecondaryTextBrush"  Color="{StaticResource SecondaryTextColor}"/>
+  <SolidColorBrush x:Key="MutedTextBrush"      Color="{StaticResource MutedTextColor}"/>
+  <SolidColorBrush x:Key="HairlineBrush"       Color="{StaticResource HairlineColor}"/>
+
+  <!-- Translucent overlays (selection/hover tints in forged gold + orc red) -->
+  <SolidColorBrush x:Key="BlueTint12"          Color="#1FE8B54A"/>
+  <SolidColorBrush x:Key="BlueTint25"          Color="#40E8B54A"/>
+  <SolidColorBrush x:Key="CoralTint12"         Color="#1FD25A3A"/>
+
+  <!-- FluentTheme system accent, retinted per skin. FluentTheme's nested
+       control-theme styles (Buttons with Classes="accent", check ticks,
+       selection handles...) consume these directly and beat app-level
+       style setters, so retinting the accent look has to go through them. -->
+  <Color x:Key="SystemAccentColor">#E8B54A</Color>
+  <Color x:Key="SystemAccentColorDark">#B98A2E</Color>
+  <Color x:Key="SystemAccentColorLight">#FFE9A0</Color>
+
+  <!-- SHADOW PRESETS — warm black drop, gold glow where cyberpunk glowed blue -->
+  <sys:String x:Key="SoftShadow">0 2 8 0 #59000000,0 8 20 0 #33000000</sys:String>
+  <sys:String x:Key="LiftShadow">0 1 3 0 #40000000,0 6 14 0 #2E000000</sys:String>
+  <sys:String x:Key="SoftBlueGlow">0 0 10 2 #40E8B54A</sys:String>
+  <sys:String x:Key="SoftCoralGlow">0 0 10 2 #40D25A3A</sys:String>
+
+  <!-- FONT FAMILIES — Cinzel (OFL) carries the fantasy display voice;
+       body text stays on a neutral system sans for tool readability. -->
+  <FontFamily x:Key="FontDisplay">avares://PrimalEditor_Avalonia/Assets/Fonts/Cinzel-Regular.ttf#Cinzel</FontFamily>
+  <FontFamily x:Key="FontUI">Segoe UI, Helvetica Neue, PingFang SC, Microsoft YaHei, Arial</FontFamily>
+  <FontFamily x:Key="FontMono">avares://PrimalEditor_Avalonia/Assets/Fonts/JetBrainsMono-Regular.ttf#JetBrains Mono</FontFamily>
+
+</ResourceDictionary>

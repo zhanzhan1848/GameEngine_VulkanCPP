@@ -8,6 +8,7 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -20,7 +21,7 @@ std::vector<u8> LoadShaderSource(const char* name) {
     std::string path = SHADER_DIR + std::string(name) + ".metal";
     std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[AnalyticSDFProvider] Failed to load shader: " << path << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[AnalyticSDFProvider] Failed to load shader: " << path << std::endl;
         return {};
     }
     std::stringstream ss;
@@ -100,7 +101,7 @@ bool AnalyticSDFProvider::Initialize(rhi::RHIDeviceBase* device) {
     shader_ = device_->CreateShader(code.data(), code.size(),
                                      rhi::ShaderStage::Compute, "analytic_sdf_fill");
     if (shader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[AnalyticSDFProvider] Shader compile failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[AnalyticSDFProvider] Shader compile failed" << std::endl;
         return false;
     }
 
@@ -129,7 +130,7 @@ bool AnalyticSDFProvider::Initialize(rhi::RHIDeviceBase* device) {
     }
 
     if (pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[AnalyticSDFProvider] Pipeline creation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[AnalyticSDFProvider] Pipeline creation failed" << std::endl;
         return false;
     }
 
@@ -145,7 +146,7 @@ bool AnalyticSDFProvider::Initialize(rhi::RHIDeviceBase* device) {
         ds_[i] = device_->CreateDescriptorSet(dsDesc);
     }
 
-    std::cout << "[AnalyticSDFProvider] Initialized (sphere center="
+    PRIMAL_LOG_STREAM(Info, "Render") << "[AnalyticSDFProvider] Initialized (sphere center="
               << sphere_.center.x << "," << sphere_.center.y << "," << sphere_.center.z
               << " radius=" << sphere_.radius << ")" << std::endl;
     return true;
@@ -177,7 +178,7 @@ void AnalyticSDFProvider::DispatchCascade(rhi::RHICommandBuffer* cmd,
 
     static int s_call_count = 0;
     if (s_call_count < 3) {
-        std::cout << "[AnalyticSDFProvider] Dispatch #" << s_call_count
+        PRIMAL_LOG_STREAM(Info, "Render") << "[AnalyticSDFProvider] Dispatch #" << s_call_count
                   << " frame=" << frame_index
                   << " cascade.origin=(" << cascade.origin.x << "," << cascade.origin.y << "," << cascade.origin.z << ")"
                   << " res=" << cascade.resolution

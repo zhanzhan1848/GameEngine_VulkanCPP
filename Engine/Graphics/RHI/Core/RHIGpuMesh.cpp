@@ -2,6 +2,7 @@
 #include "RHICommand.h"
 #include <cstring>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi
 {
@@ -157,7 +158,7 @@ namespace primal::graphics::rhi
             // std::cout << "RHIGpuMesh: Creating element buffer, size=" << asset.element_buffer.size() << std::endl;
             if (!CreateAndUploadBuffer(asset.element_buffer.data(), asset.element_buffer.size(), element_buffer_, BufferUsageFlags::Vertex, "MeshElementBuffer")) return false;
         } else {
-            std::cout << "RHIGpuMesh: WARNING - element_buffer is EMPTY! num_vertices=" << asset.num_vertices << ", elements_type=" << asset.elements_type << std::endl;
+            PRIMAL_LOG_STREAM(Info, "RHI") << "RHIGpuMesh: WARNING - element_buffer is EMPTY! num_vertices=" << asset.num_vertices << ", elements_type=" << asset.elements_type << std::endl;
         }
 
         // Index Buffer
@@ -203,7 +204,7 @@ namespace primal::graphics::rhi
                 sdf_resolution_[2] = asset.sdf.resolution[2];
                 // std::cout << "RHIGpuMesh: SDF Texture uploaded successfully. Res: " << sdf_resolution_[0] << "x" << sdf_resolution_[1] << "x" << sdf_resolution_[2] << std::endl;
             } else {
-                 std::cerr << "RHIGpuMesh: Failed to upload SDF Texture." << std::endl;
+                 PRIMAL_LOG_STREAM(Error, "RHI") << "RHIGpuMesh: Failed to upload SDF Texture." << std::endl;
                  return false;
             }
         }
@@ -250,7 +251,7 @@ namespace primal::graphics::rhi
             }
             else
             {
-                std::cerr << "Unsupported vector field channel count: " << channels << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "Unsupported vector field channel count: " << channels << std::endl;
             }
         }
 
@@ -271,7 +272,7 @@ namespace primal::graphics::rhi
         out_buffer = device_->CreateBuffer(desc);
         if (out_buffer == handles::INVALID_RESOURCE)
         {
-            std::cerr << "Failed to create GPU buffer: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to create GPU buffer: " << name << std::endl;
             return false;
         }
 
@@ -286,7 +287,7 @@ namespace primal::graphics::rhi
         ResourceHandle stagingBuffer = device_->CreateBuffer(stagingDesc);
         if (stagingBuffer == handles::INVALID_RESOURCE)
         {
-            std::cerr << "Failed to create Staging buffer for: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to create Staging buffer for: " << name << std::endl;
             return false;
         }
 
@@ -299,7 +300,7 @@ namespace primal::graphics::rhi
         }
         else
         {
-            std::cerr << "Failed to map Staging buffer for: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to map Staging buffer for: " << name << std::endl;
             device_->DestroyBuffer(stagingBuffer);
             return false;
         }
@@ -308,7 +309,7 @@ namespace primal::graphics::rhi
         CommandBufferHandle cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics); // Use Graphics queue for simplicity, should use Transfer if available and distinct
         if (cmdHandle == handles::INVALID_COMMAND_BUFFER)
         {
-            std::cerr << "Failed to create Command Buffer for upload: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to create Command Buffer for upload: " << name << std::endl;
             device_->DestroyBuffer(stagingBuffer);
             return false;
         }
@@ -354,7 +355,7 @@ namespace primal::graphics::rhi
         out_texture = device_->CreateTexture(desc);
         if (out_texture == handles::INVALID_RESOURCE)
         {
-            std::cerr << "Failed to create GPU Texture3D: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to create GPU Texture3D: " << name << std::endl;
             return false;
         }
 
@@ -374,7 +375,7 @@ namespace primal::graphics::rhi
         case DataFormat::RGBA16_Float:
             bytesPerPixel = 8; break;
         default:
-            std::cerr << "Unsupported texture format for upload: " << (int)format << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Unsupported texture format for upload: " << (int)format << std::endl;
             return false;
         }
 
@@ -400,7 +401,7 @@ namespace primal::graphics::rhi
         ResourceHandle stagingBuffer = device_->CreateBuffer(stagingDesc);
         if (stagingBuffer == handles::INVALID_RESOURCE)
         {
-             std::cerr << "Failed to create Staging buffer for texture: " << name << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to create Staging buffer for texture: " << name << std::endl;
              return false;
         }
 
@@ -426,7 +427,7 @@ namespace primal::graphics::rhi
         }
         else
         {
-            std::cerr << "Failed to map Staging buffer for texture: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to map Staging buffer for texture: " << name << std::endl;
             device_->DestroyBuffer(stagingBuffer);
             return false;
         }

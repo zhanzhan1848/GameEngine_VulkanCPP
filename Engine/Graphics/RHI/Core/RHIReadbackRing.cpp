@@ -9,13 +9,14 @@
 #include "RHIDevice.h"
 
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
 bool rhi_readback_ring::initialize(RHIDeviceBase* device, u64 bufferSize, u32 ringSize) {
     if (!device || bufferSize == 0) return false;
     if (ringSize == 0 || ringSize > MAX_FRAMES_IN_FLIGHT) {
-        std::cerr << "[rhi_readback_ring] ringSize must be in [1, "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[rhi_readback_ring] ringSize must be in [1, "
                   << MAX_FRAMES_IN_FLIGHT << "] (got " << ringSize << ")" << std::endl;
         return false;
     }
@@ -29,13 +30,13 @@ bool rhi_readback_ring::initialize(RHIDeviceBase* device, u64 bufferSize, u32 ri
         bufDesc.name = "ReadbackRing_Slot";
         buffers_[i] = device->CreateBuffer(bufDesc);
         if (buffers_[i] == handles::INVALID_RESOURCE) {
-            std::cerr << "[rhi_readback_ring] CreateBuffer slot " << i << " failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[rhi_readback_ring] CreateBuffer slot " << i << " failed" << std::endl;
             shutdown(device);
             return false;
         }
         fences_[i] = device->CreateSync();
         if (fences_[i] == handles::INVALID_SYNC) {
-            std::cerr << "[rhi_readback_ring] CreateSync slot " << i << " failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[rhi_readback_ring] CreateSync slot " << i << " failed" << std::endl;
             shutdown(device);
             return false;
         }

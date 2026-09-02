@@ -11,6 +11,7 @@
 #include "VulkanBuffer.h"
 #include "VulkanTexture.h"
 #include "VulkanSampler.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -48,7 +49,7 @@ bool VulkanDescriptorSet::Initialize() {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VulkanDescriptorSetLayout* layout = vk.GetDescriptorSetLayout(layoutHandle_);
     if (!layout) {
-        std::cerr << "[VulkanDescriptorSet] Invalid layout handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDescriptorSet] Invalid layout handle" << std::endl;
         return false;
     }
     set_ = layout->AllocateSet();

@@ -16,6 +16,7 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -24,7 +25,7 @@ RenderSystem::~RenderSystem() = default;
 
 bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
     if (!info.device) {
-        std::cerr << "RenderSystem::Initialize failed: Device is null." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Device is null." << std::endl;
         return false;
     }
     device_ = info.device;
@@ -40,12 +41,12 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
 
     swapChain_ = device_->CreateSwapChain(swapChainDesc);
     if (!swapChain_) {
-        std::cerr << "RenderSystem::Initialize failed: Could not create swap chain." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Could not create swap chain." << std::endl;
         return false;
     }
     
     if (!swapChain_->Initialize()) {
-         std::cerr << "RenderSystem::Initialize failed: Could not initialize swap chain." << std::endl;
+         PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Could not initialize swap chain." << std::endl;
          return false;
     }
 
@@ -66,7 +67,7 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
     
     depthStencilTexture_ = device_->CreateTexture(depthDesc);
     if (depthStencilTexture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "RenderSystem::Initialize failed: Could not create depth stencil texture." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Could not create depth stencil texture." << std::endl;
         return false;
     }
 
@@ -79,18 +80,18 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         cmdBufferHandles_[i] = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
         if (cmdBufferHandles_[i] == rhi::handles::INVALID_COMMAND_BUFFER) {
-            std::cerr << "RenderSystem::Initialize failed: Could not create command buffer " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Could not create command buffer " << i << std::endl;
             return false;
         }
         cmdBuffers_[i] = rhi::GetCommandBuffer(cmdBufferHandles_[i]);
         if (!cmdBuffers_[i]) {
-            std::cerr << "RenderSystem::Initialize failed: Could not retrieve command buffer pointer for " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Could not retrieve command buffer pointer for " << i << std::endl;
             return false;
         }
 
         frameFences_[i] = device_->CreateSync();
         if (frameFences_[i] == rhi::handles::INVALID_SYNC) {
-             std::cerr << "RenderSystem::Initialize failed: Could not create fence " << i << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Could not create fence " << i << std::endl;
              return false;
         }
         // T4.6.5 part 30.5 (Bug A): per-frame acquire semaphore. Vulkan spec
@@ -101,13 +102,13 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
         // GPU blocks on semaphore until acquire completes.
         imageSemaphores_[i] = device_->CreateSync();
         if (imageSemaphores_[i] == rhi::handles::INVALID_SYNC) {
-             std::cerr << "RenderSystem::Initialize failed: Could not create image semaphore " << i << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: Could not create image semaphore " << i << std::endl;
              return false;
         }
     }
 
     if (!forwardRenderer_.Initialize(device_)) {
-        std::cerr << "RenderSystem::Initialize failed: ForwardRenderer initialization failed." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem::Initialize failed: ForwardRenderer initialization failed." << std::endl;
         return false;
     }
 
@@ -117,23 +118,23 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
 }
 
 void RenderSystem::Shutdown() {
-    std::cout << "[RenderSystem] Shutdown Start" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Shutdown Start" << std::endl;
     forwardRenderer_.Shutdown();
-    std::cout << "[RenderSystem] ForwardRenderer Shutdown Done" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] ForwardRenderer Shutdown Done" << std::endl;
 
     if (depthStencilTexture_ != rhi::handles::INVALID_RESOURCE) {
-        std::cout << "[RenderSystem] Destroying DepthStencilTexture" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Destroying DepthStencilTexture" << std::endl;
         device_->DestroyTexture(depthStencilTexture_);
         depthStencilTexture_ = rhi::handles::INVALID_RESOURCE;
     }
 
     if (swapChain_) {
-        std::cout << "[RenderSystem] Destroying SwapChain" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Destroying SwapChain" << std::endl;
         device_->DestroySwapChain(swapChain_);
         swapChain_ = nullptr;
     }
     
-    std::cout << "[RenderSystem] Destroying CommandBuffers" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Destroying CommandBuffers" << std::endl;
     for (u32 i = 0; i < cmdBuffers_.size(); ++i) {
         if (cmdBuffers_[i]) {
             cmdBuffers_[i]->Destroy();
@@ -144,7 +145,7 @@ void RenderSystem::Shutdown() {
     cmdBufferHandles_.clear();
     cmdBuffers_.clear();
 
-    std::cout << "[RenderSystem] Destroying Fences" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Destroying Fences" << std::endl;
     for (auto fence : frameFences_) {
         device_->DestroySync(fence);
     }
@@ -156,7 +157,7 @@ void RenderSystem::Shutdown() {
     imageSemaphores_.clear();
 
     device_ = nullptr;
-    std::cout << "[RenderSystem] Shutdown End" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Shutdown End" << std::endl;
 }
 
 void RenderSystem::RegisterMaterialInstance(id::id_type id, std::shared_ptr<MaterialInstance> materialInstance) {
@@ -195,12 +196,12 @@ void RenderSystem::Wait(u32 frameIndex) {
         while (!device_->WaitForSync(fence, 1000)) {
             ++waitRetries;
             if (waitRetries == 1 || waitRetries % 5 == 0) {
-                std::cerr << "RenderSystem: frame fence not signaled after "
+                PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: frame fence not signaled after "
                           << waitRetries << "s (frame " << frameIndex
                           << ") — GPU-bound, still waiting" << std::endl;
             }
             if (waitRetries >= 30) {
-                std::cerr << "RenderSystem: frame fence unsignaled after 30s "
+                PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: frame fence unsignaled after 30s "
                           << "(frame " << frameIndex << ") — proceeding (stale "
                           << "triple-buffered params possible this frame)" << std::endl;
                 break;
@@ -209,7 +210,7 @@ void RenderSystem::Wait(u32 frameIndex) {
         auto waitEnd = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> waitTime = waitEnd - waitStart;
         if (waitTime.count() > 5.0) {
-            std::cout << "[Performance] RenderSystem::Wait blocked: " << waitTime.count() << " ms (Frame " << frameIndex << ")" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "RHI") << "[Performance] RenderSystem::Wait blocked: " << waitTime.count() << " ms (Frame " << frameIndex << ")" << std::endl;
         }
     }
 }
@@ -258,7 +259,7 @@ bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandl
     // cascades into "image has not been acquired" errors on Submit/Present).
     const rhi::SyncHandle imageSem = imageSemaphores_[currentFrameIndex_];
     if (!swapChain_->AcquireNextImage(&currentImageIndex_, imageSem)) {
-        std::cerr << "RenderSystem: Failed to acquire next image." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: Failed to acquire next image." << std::endl;
         return false;
     }
 
@@ -326,7 +327,7 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view) {
     }
 
     if (cmdBuffers_.empty() || !cmdBuffers_[currentFrameIndex_]) {
-        std::cerr << "RenderSystem: Invalid command buffer state." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: Invalid command buffer state." << std::endl;
         return;
     }
 
@@ -355,12 +356,12 @@ void RenderSystem::Render(RenderScene& scene, RenderView& view) {
     auto recordStart = std::chrono::high_resolution_clock::now();
     
     if (!cmdBuffer->Reset()) {
-        std::cerr << "RenderSystem: Failed to reset command buffer." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: Failed to reset command buffer." << std::endl;
         return;
     }
 
     if (!cmdBuffer->Begin()) {
-        std::cerr << "RenderSystem: Failed to begin command buffer." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: Failed to begin command buffer." << std::endl;
         return;
     }
 

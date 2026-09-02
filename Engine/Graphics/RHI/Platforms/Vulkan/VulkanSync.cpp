@@ -6,6 +6,7 @@
  */
 
 #include "VulkanSync.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -21,7 +22,7 @@ VulkanSync::VulkanSync(VkDevice device, bool signaled)
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fci.flags = signaled ? VK_FENCE_CREATE_SIGNALED_BIT : 0;
     if (vkCreateFence(device_, &fci, nullptr, &fence_) != VK_SUCCESS) {
-        std::cerr << "[VulkanSync] vkCreateFence failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSync] vkCreateFence failed" << std::endl;
         fence_ = VK_NULL_HANDLE;
     }
 
@@ -29,7 +30,7 @@ VulkanSync::VulkanSync(VkDevice device, bool signaled)
     sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     sci.flags = 0;
     if (vkCreateSemaphore(device_, &sci, nullptr, &semaphore_) != VK_SUCCESS) {
-        std::cerr << "[VulkanSync] vkCreateSemaphore failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSync] vkCreateSemaphore failed" << std::endl;
         semaphore_ = VK_NULL_HANDLE;
     }
 }
@@ -55,7 +56,7 @@ bool VulkanSync::WaitFence(u64 timeoutNs) const {
     if (res == VK_TIMEOUT) {
         return false;
     }
-    std::cerr << "[VulkanSync] vkWaitForFences failed: " << res << std::endl;
+    PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSync] vkWaitForFences failed: " << res << std::endl;
     return false;
 }
 

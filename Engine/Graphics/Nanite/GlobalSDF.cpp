@@ -22,6 +22,7 @@
 #include <sstream>
 #include <set>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -413,7 +414,7 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         src = dawn::LoadWGSL(path);
 #endif
         if (src.empty()) {
-            std::cerr << "[GlobalSDF] Failed to load WGSL shader: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Failed to load WGSL shader: " << name << std::endl;
             return {};
         }
         return std::vector<u8>(src.begin(), src.end());
@@ -437,7 +438,7 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
             }
         }
         if (!file.is_open()) {
-            std::cerr << "[GlobalSDF] Failed to open SPIR-V: " << name
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Failed to open SPIR-V: " << name
                       << "\n  tried: " << candidates[0]
                       << "\n  tried: " << candidates[1] << std::endl;
             return {};
@@ -446,7 +447,7 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         file.seekg(0, std::ios::beg);
         std::vector<u8> bytecode(static_cast<size_t>(size));
         if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-            std::cerr << "[GlobalSDF] Failed to read SPIR-V: " << openedPath << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Failed to read SPIR-V: " << openedPath << std::endl;
             return {};
         }
         return bytecode;
@@ -454,7 +455,7 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
     std::string path = SDF_SHADER_DIR + std::string(name) + ".metal";
     std::string source = ReadFileToString(path);
     if (source.empty()) {
-        std::cerr << "[GlobalSDF] Failed to load shader: " << path << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Failed to load shader: " << path << std::endl;
         return {};
     }
     return std::vector<u8>(source.begin(), source.end());
@@ -509,7 +510,7 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     // Load shader source
     auto code = LoadShaderSource("GlobalSDFVoxelization", device_);
     if (code.empty()) {
-        std::cerr << "[GlobalSDF] Failed to load voxelization shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Failed to load voxelization shader" << std::endl;
         // F4: shader/pipeline creation failed — IsInitialized() must return false
         // so consumers don't proceed with corrupt state. Shutdown() releases the
         // partial texture resources (already created in Initialize()), then we
@@ -522,7 +523,7 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     auto shader = device_->CreateShader(code.data(), code.size(),
                                          rhi::ShaderStage::Compute, "voxelize_sdf");
     if (shader == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[GlobalSDF] Failed to compile voxelization shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Failed to compile voxelization shader" << std::endl;
         Shutdown();
         init_resources_valid_ = false;
         return false;
@@ -594,7 +595,7 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     }
 
     if (vox_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[GlobalSDF] Failed to create voxelization pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Failed to create voxelization pipeline" << std::endl;
         Shutdown();
         init_resources_valid_ = false;
         return false;
@@ -616,7 +617,7 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     }
 
     voxelization_ready_ = true;
-    std::cout << "[GlobalSDF] Voxelization pipeline ready (" << resources.num_instances
+    PRIMAL_LOG_STREAM(Info, "Render") << "[GlobalSDF] Voxelization pipeline ready (" << resources.num_instances
               << " instances)" << std::endl;
     return true;
 }
@@ -629,7 +630,7 @@ bool GlobalSDF::IsVoxelizationReady() const {
     const bool provider_ready = (data_provider_ && data_provider_->IsReady());
     static int s_checks = 0;
     if (s_checks < 3) {
-        std::cout << "[GlobalSDF] IsVoxelizationReady check #" << s_checks
+        PRIMAL_LOG_STREAM(Info, "Render") << "[GlobalSDF] IsVoxelizationReady check #" << s_checks
                   << " vox_pipe=" << voxelization_ready_
                   << " provider=" << (data_provider_ ? "set" : "null")
                   << " provider_ready=" << (provider_ready ? "yes" : "no")
@@ -646,7 +647,7 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
 
     static int s_dv_calls = 0;
     if (s_dv_calls < 3) {
-        std::cout << "[GlobalSDF] DispatchVoxelization #" << s_dv_calls
+        PRIMAL_LOG_STREAM(Info, "Render") << "[GlobalSDF] DispatchVoxelization #" << s_dv_calls
                   << " cascade=" << cascade_index
                   << " provider_set=" << (data_provider_ ? "yes" : "no")
                   << " provider_ready=" << (data_provider_ && data_provider_->IsReady() ? "yes" : "no")
@@ -685,7 +686,7 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         vox_resources_.instance_data_buffer == rhi::handles::INVALID_RESOURCE) {
         static bool s_log_skip = false;
         if (!s_log_skip) {
-            std::cerr << "[GlobalSDF] Skip voxelization: no geometry resources "
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] Skip voxelization: no geometry resources "
                          "(SetVoxelizationResources never called)" << std::endl;
             s_log_skip = true;
         }
@@ -723,7 +724,7 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         } else {
             static bool logMapFail = false;
             if (!logMapFail) {
-                std::cerr << "[GlobalSDF] ERROR: MapBuffer failed for cascade CB!" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GlobalSDF] ERROR: MapBuffer failed for cascade CB!" << std::endl;
                 logMapFail = true;
             }
         }

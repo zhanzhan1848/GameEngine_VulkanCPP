@@ -7,6 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <tuple>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::vulkan
 {
@@ -465,7 +466,7 @@ namespace primal::graphics::vulkan
 				}
 				else
 				{
-					std::cerr << "Error: Could not open shader file \"" << fileName << "\"" << "\n";
+					PRIMAL_LOG_STREAM(Error, "RHI") << "Error: Could not open shader file \"" << fileName << "\"" << "\n";
 					return VK_NULL_HANDLE;
 				}
 			}

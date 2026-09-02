@@ -17,6 +17,7 @@
 #include "Utilities/IOStream.h"
 #include "VulkanCompute.h"
 #include "Shaders/ShaderTypes.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::vulkan
 {
@@ -299,7 +300,7 @@ namespace primal::graphics::vulkan
 			assert(type < shader_type::count);
 			if (type > shader_type::count)
 			{
-				std::cerr << "Type is error" << std::endl;
+				PRIMAL_LOG_STREAM(Error, "RHI") << "Type is error" << std::endl;
 				return;
 			}
 
@@ -311,7 +312,7 @@ namespace primal::graphics::vulkan
 
 		void vulkan_material::remove_shader(id::id_type id, shader_type::type type)
 		{
-			if (id != _shader_ids.at(type)) std::cerr << "Shader id  error!" << std::endl;
+			if (id != _shader_ids.at(type)) PRIMAL_LOG_STREAM(Error, "RHI") << "Shader id  error!" << std::endl;
 			material_shaders.remove(id & 0xFFFF);
 			_shader_ids.at(type) = id::invalid_id;
 		}

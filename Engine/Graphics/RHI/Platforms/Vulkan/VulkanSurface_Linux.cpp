@@ -5,6 +5,7 @@
  */
 
 #include "VulkanSurface.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN && defined(__linux__) && !defined(__APPLE__)
 
@@ -24,7 +25,7 @@ bool CreateVulkanSurface(VkInstance instance, void* window, VkSurfaceKHR* outSur
     auto vkCreateXcbSurfaceKHR = reinterpret_cast<PFN_vkCreateXcbSurfaceKHR>(
         vkGetInstanceProcAddr(instance, "vkCreateXcbSurfaceKHR"));
     if (!vkCreateXcbSurfaceKHR) {
-        std::cerr << "[VulkanSurface_Linux] vkCreateXcbSurfaceKHR not loaded" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSurface_Linux] vkCreateXcbSurfaceKHR not loaded" << std::endl;
         return false;
     }
 
@@ -37,7 +38,7 @@ bool CreateVulkanSurface(VkInstance instance, void* window, VkSurfaceKHR* outSur
 
     VkResult res = vkCreateXcbSurfaceKHR(instance, &ci, nullptr, outSurface);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanSurface_Linux] vkCreateXcbSurfaceKHR failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSurface_Linux] vkCreateXcbSurfaceKHR failed: " << res << std::endl;
         return false;
     }
     return true;

@@ -3,53 +3,53 @@
              xmlns:vm="using:PrimalEditor_Avalonia.Editors.Geometry"
              x:Class="PrimalEditor_Avalonia.Editors.Geometry.GeometryEditorView"
              x:DataType="vm:GeometryEditorViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
-  <Grid RowDefinitions="Auto,*,Auto" Background="{StaticResource VoidBrush}">
+  <Grid RowDefinitions="Auto,*,Auto" Background="{DynamicResource VoidBrush}">
 
     <Border Grid.Row="0" Classes="floating" Margin="6,6,6,2">
       <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="8,4">
         <TextBlock Text="LOD:"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource ElectricBlueBrush}"
+                   Foreground="{DynamicResource ElectricBlueBrush}"
                    VerticalAlignment="Center"/>
         <ComboBox ItemsSource="{Binding LODList}" SelectedItem="{Binding LODIndex}"/>
         <CheckBox Content="Auto LOD" IsChecked="{Binding AutoLOD}"
-                  Foreground="{StaticResource PrimaryTextBrush}"/>
+                  Foreground="{DynamicResource PrimaryTextBrush}"/>
         <Separator Margin="6,0"/>
         <TextBlock Text="Verts:" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                   Foreground="{DynamicResource SecondaryTextBrush}"/>
         <TextBlock Text="{Binding VertexCount}" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontMono}"/>
+                   FontFamily="{DynamicResource FontMono}"/>
         <TextBlock Text="Tris:" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                   Foreground="{DynamicResource SecondaryTextBrush}"/>
         <TextBlock Text="{Binding TriangleCount}" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontMono}"/>
+                   FontFamily="{DynamicResource FontMono}"/>
         <TextBlock Text="Submeshes:" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                   Foreground="{DynamicResource SecondaryTextBrush}"/>
         <TextBlock Text="{Binding SubmeshCount}" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontMono}"/>
+                   FontFamily="{DynamicResource FontMono}"/>
         <Separator Margin="6,0"/>
         <TextBlock Text="{Binding BoundsSummary}" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontMono}"
-                   Foreground="{StaticResource MutedTextBrush}"/>
+                   FontFamily="{DynamicResource FontMono}"
+                   Foreground="{DynamicResource MutedTextBrush}"/>
         <Separator Margin="6,0"/>
         <TextBlock Text="(drag to orbit)" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource SecondaryTextBrush}"/>
+                   Foreground="{DynamicResource SecondaryTextBrush}"/>
       </StackPanel>
     </Border>
 
     <Border Grid.Row="1" Classes="floating" Margin="6,2">
-      <Panel x:Name="RenderPanel" Background="{StaticResource VoidBrush}"
+      <Panel x:Name="RenderPanel" Background="{DynamicResource VoidBrush}"
              PointerPressed="OnPointerPressed"
              PointerMoved="OnPointerMoved"
              PointerReleased="OnPointerReleased"/>

@@ -1,4 +1,5 @@
 #include "ParticlePreset.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
@@ -597,7 +598,7 @@ bool save_to_file(const std::string& filepath, const particle_preset& preset) {
     
     std::ofstream file(filepath);
     if (!file.is_open()) {
-        std::cerr << "[ParticlePreset] Failed to open file for writing: " << filepath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[ParticlePreset] Failed to open file for writing: " << filepath << std::endl;
         return false;
     }
     
@@ -608,7 +609,7 @@ bool save_to_file(const std::string& filepath, const particle_preset& preset) {
 bool load_from_file(const std::string& filepath, particle_preset& preset) {
     std::ifstream file(filepath);
     if (!file.is_open()) {
-        std::cerr << "[ParticlePreset] Failed to open file for reading: " << filepath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[ParticlePreset] Failed to open file for reading: " << filepath << std::endl;
         return false;
     }
     
@@ -992,7 +993,7 @@ bool initialize() {
     // Register default presets
     default_presets::register_defaults(*g_preset_manager);
     
-    std::cout << "[PresetSystem] Initialized with " 
+    PRIMAL_LOG_STREAM(Info, "Particles") << "[PresetSystem] Initialized with " 
               << g_preset_manager->preset_count() << " default presets" << std::endl;
     
     return true;

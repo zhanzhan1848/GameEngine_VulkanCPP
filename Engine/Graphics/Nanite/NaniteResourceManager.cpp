@@ -5,6 +5,7 @@
 #include "../../Content/ContentToEngine.h"
 #include <iostream>
 #include <cassert>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -71,7 +72,7 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
     // std::cout << "[NaniteResourceManager] GetOrCreateResource called for geometry_id: " << geometry_id << std::endl;
 
     if (!device_) {
-        std::cerr << "[NaniteResourceManager] ERROR: ResourceManager not initialized! device_ is null" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[NaniteResourceManager] ERROR: ResourceManager not initialized! device_ is null" << std::endl;
         return nullptr;
     }
 
@@ -90,7 +91,7 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
 
     auto resource = NaniteRuntimeResource::Create(geometry_id);
     if (!resource) {
-        std::cerr << "[NaniteResourceManager]   Failed to create resource object!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[NaniteResourceManager]   Failed to create resource object!" << std::endl;
         return nullptr;
     }
 

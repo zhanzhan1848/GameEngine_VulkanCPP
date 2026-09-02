@@ -3,6 +3,8 @@
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include <iostream>
+#include <cstdlib>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -35,6 +37,37 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const Des
     device->UpdateDescriptorSets(count, writes.data());
 }
 
+// RGBA16F 输出按四竖条统计亮度 mean/max + RGB 分量 mean（颜色对齐用），与
+// SC_DUMP_CARDS 的 IND_STATS 同一数据面（ddgi|ssgi|spgi|full），供异步路径复用。
+static void PrintIndirectStripStats(const u16* p, u32 w, u32 h, const char* prefix, u32 tick) {
+    auto f16 = [](u16 h16) -> float {
+        u32 sign = (h16 >> 15) & 1u, exp = (h16 >> 10) & 0x1Fu, mant = h16 & 0x3FFu;
+        if (exp == 0u) return 0.0f;
+        u32 bits = (sign << 31) | ((exp + 112u) << 23) | (mant << 13);
+        float f; std::memcpy(&f, &bits, 4); return f;
+    };
+    const char* names[4] = { "ddgi-strip", "ssgi-strip", "spgi-strip", "full-strip" };
+    for (int q = 0; q < 4; ++q) {
+        u32 x0 = w * q / 4, x1 = w * (q + 1) / 4;
+        double sum = 0.0, sr = 0.0, sg = 0.0, sb = 0.0;
+        float mx = 0.0f; u64 n = 0;
+        for (u32 y = 0; y < h; y += 4)
+            for (u32 x = x0; x < x1; x += 4) {
+                const u16* t = p + ((size_t)y * w + x) * 4;
+                float r = f16(t[0]), g = f16(t[1]), b = f16(t[2]);
+                if (std::isnan(r)) continue;
+                sum += 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                sr += r; sg += g; sb += b;
+                mx = std::max(mx, std::max(r, std::max(g, b)));
+                ++n;
+            }
+        if (n) PRIMAL_LOG_STREAM(Error, "Render") << "[" << prefix << "] tick=" << tick << " " << names[q]
+                         << " mean=" << (sum / n)
+                         << " rgb=(" << (sr / n) << "," << (sg / n) << "," << (sb / n) << ")"
+                         << " max=" << mx << std::endl;
+    }
+}
+
 bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
                                          ShaderHandle indirect_ps, ShaderHandle composite_vs,
                                          ShaderHandle composite_ps,
@@ -58,7 +91,7 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         sDesc.comparisonFunc = ComparisonFunc::Never;
         default_sampler_ = device->CreateSampler(sDesc);
         if (default_sampler_ == handles::INVALID_SAMPLER) {
-            std::cerr << "[FusionComposite] Failed to create default_sampler_" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[FusionComposite] Failed to create default_sampler_" << std::endl;
         }
     }
 
@@ -211,6 +244,20 @@ void FusionCompositeModule::Shutdown() {
         device_->DestroyTexture(volume_identity_tex_);
         volume_identity_tex_ = handles::INVALID_RESOURCE;
     }
+    for (auto& staging : async_stats_staging_) {
+        if (device_ && staging != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(staging);
+            staging = handles::INVALID_RESOURCE;
+        }
+    }
+    for (auto* ring : {&primary_stats_staging_, &fusion_stats_staging_, &ddgi_stats_staging_}) {
+        for (auto& staging : *ring) {
+            if (device_ && staging != handles::INVALID_RESOURCE) {
+                device_->DestroyBuffer(staging);
+                staging = handles::INVALID_RESOURCE;
+            }
+        }
+    }
 }
 
 FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs) {
@@ -257,7 +304,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         [this, inputs, cbIdx, resolve](const IndirectData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             static int s_fusion_diag = 0;
-            if (s_fusion_diag < 3) { std::cerr << "[FUSION_INDIRECT] exec " << s_fusion_diag << std::endl; s_fusion_diag++; }
+            if (s_fusion_diag < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_INDIRECT] exec " << s_fusion_diag << std::endl; s_fusion_diag++; }
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
@@ -272,7 +319,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
 
             static int s_ssgi_resolve = 0;
             if (s_ssgi_resolve < 5) {
-                std::cerr << "[FUSION_SSGI] ssgi_tex=" << inputs.ssgi_tex
+                PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_SSGI] ssgi_tex=" << inputs.ssgi_tex
                           << " ssgi_rg_valid=" << inputs.ssgi_rg.IsValid()
                           << " resolved=" << ssgiTex
                           << " black=" << inputs.black_texture << std::endl;
@@ -305,7 +352,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 ++s_fusion_slots;
                 ResourceHandle spgiTex = inputs.spgi_tex != handles::INVALID_RESOURCE
                     ? inputs.spgi_tex : inputs.black_texture;
-                std::cerr << "[FUSION_SLOTS] black=" << inputs.black_texture
+                PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_SLOTS] black=" << inputs.black_texture
                           << " ssgi=" << ssgiTex
                           << " ddgi=" << (inputs.ddgi_tex != handles::INVALID_RESOURCE ? inputs.ddgi_tex : inputs.black_texture)
                           << " spgi_in=" << inputs.spgi_tex
@@ -367,7 +414,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                                         float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
                                         sum += lum; mx = std::max(mx, lum); ++n;
                                     }
-                                if (n) std::cerr << "[IND_STATS] " << names[q]
+                                if (n) PRIMAL_LOG_STREAM(Error, "Render") << "[IND_STATS] " << names[q]
                                                  << " mean=" << (sum / n) << " max=" << mx << std::endl;
                             }
                             device_->UnmapBuffer(stage);
@@ -401,9 +448,9 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                         c3->End(); c3->Submit(); c3->WaitForCompletion();
                         device_->DestroyCommandBuffer(ch2);
                         if (auto* q = static_cast<const u16*>(device_->MapBuffer(bs, 0, 512))) {
-                            std::cerr << "[BLACK_TEX] first 8 texels rgba16:";
-                            for (int k = 0; k < 32; ++k) std::cerr << " " << q[k];
-                            std::cerr << std::endl;
+                            PRIMAL_LOG_STREAM(Error, "Render") << "[BLACK_TEX] first 8 texels rgba16:";
+                            for (int k = 0; k < 32; ++k) PRIMAL_LOG_STREAM(Error, "Render") << " " << q[k];
+                            PRIMAL_LOG_STREAM(Error, "Render") << std::endl;
                             device_->UnmapBuffer(bs);
                         }
                     } else {
@@ -440,7 +487,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx], resolve](const ComposeData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             static int s_composite_diag = 0;
-            if (s_composite_diag < 3) { std::cerr << "[FUSION_COMPOSITE] exec " << s_composite_diag << std::endl; s_composite_diag++; }
+            if (s_composite_diag < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_COMPOSITE] exec " << s_composite_diag << std::endl; s_composite_diag++; }
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
@@ -496,6 +543,134 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             cmd->Draw(3, 0, 1, 0);
         }
     );
+
+    // --- Pass 3: GI 可见性 flush（生产修复）+ PRIMAL_IND_ASYNC 多路条带统计（诊断）---
+    //
+    // 生产修复（Metal 白爆，2026-09-02）：DDGI gather 的 compute 写纹理对后续
+    // render encoder 的采样不可见（fragmentFusion 读到堆回收垃圾，条带 mean 高达
+    // 199/1724 → 直射区+GI 区全屏爆白+噪点）。UAV 纹理已是 HazardTrackingModeTracked、
+    // RG 也已声明 ShaderResource 读边，但只有对本纹理的一次全幅 blit 读能强制
+    // 可见化（部分区域拷贝无效、仅声明 RG 边无效——已按位掩码逐项实测）。
+    // 故 Metal 平台默认执行 ddgi 全幅 CopyTextureToBuffer（半res RGBA16F ≈1.4MB/帧，
+    // Apple Silicon 带宽下可忽略）。Vulkan 无此问题，保持零改动。
+    //
+    // 诊断门 PRIMAL_IND_ASYNC（位掩码，覆盖默认行为，用于回归定位）：
+    //   1 = 全部边（ddgi|primary|indirect|fusion）  2 = 仅 ddgi（=生产默认）
+    //   4 = 仅 primary   8 = 仅 indirect            16 = 仅 fusion
+    //  32 = 仅 ddgi 边声明、不发拷贝命令           64 = 仅 ddgi 拷 256×256 角落
+    // 设了该环境变量时同时打印 [*_ASYNC] 条带统计（读回环：拷贝挂本帧 CB，
+    // 3 帧后同槽映射，零额外同步——SC_DUMP_CARDS 的帧中 WaitForCompletion 会
+    // 掩盖时序问题，不可用于此类定位）。
+    {
+        static const u32 s_envMask = [] {
+            const char* e = std::getenv("PRIMAL_IND_ASYNC");
+            if (!e) return 0u;
+            u32 m = (u32)std::atoi(e);
+            return m == 1u ? 15u : m;
+        }();
+        static const bool s_printStats = [] {
+            return std::getenv("PRIMAL_IND_ASYNC") != nullptr;
+        }();
+        const bool isMetal = device_->GetPlatform() == RHIPlatform::Metal;
+        // Vulkan 的 DDGI gather 是半分辨率纹理，全幅 extent 拷贝会越界——
+        // 非 Metal 平台强制清掉 ddgi 位（间接/合成输出都是全分辨率，安全）。
+        u32 maskEff = s_envMask ? s_envMask : (isMetal ? 2u : 0u);
+        if (!isMetal) maskEff &= ~(2u | 64u);
+        const u32 s_asyncMask = maskEff;
+        static u32 s_asyncTick = 0;
+        if (s_asyncMask) {
+            struct AsyncStatsData {
+                rendergraph::RGResourceHandle source;
+                rendergraph::RGResourceHandle primary;
+            };
+            graph.AddPass<AsyncStatsData>("FusionIndirectAsyncStats",
+                rendergraph::RGPassType::Compute,
+                rendergraph::RGPassCategory::PostProcess,
+                [inputs, indirectRG, fusionOutRG, s_asyncMask](AsyncStatsData& data, rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect(); // 诊断 pass，禁止被 RG 裁剪
+                    if (s_asyncMask & 8u) data.source = builder.Read(indirectRG, ResourceState::CopySource);
+                    if ((s_asyncMask & 4u) && inputs.primary_input_rg.IsValid())
+                        data.primary = builder.Read(inputs.primary_input_rg, ResourceState::CopySource);
+                    // fusion 输出在 composite pass 里写入；ddgi 来自 GIGather。
+                    // 声明 CopySource 读依赖，保证拷贝排在写入之后。
+                    if ((s_asyncMask & 16u) && fusionOutRG.IsValid())
+                        builder.Read(fusionOutRG, ResourceState::CopySource);
+                    if ((s_asyncMask & 2u) && inputs.ddgi_rg.IsValid())
+                        builder.Read(inputs.ddgi_rg, ResourceState::CopySource);
+                },
+                [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx],
+                 fusionTex = fusion_output_[cbIdx], s_asyncMask,
+                 printStats = s_printStats](const AsyncStatsData&, rendergraph::RenderGraphContext& context) {
+                    auto cmd = context.cmdBuffer;
+                    const u32 tick = ++s_asyncTick;
+                    const u32 w = render_width_, h = render_height_;
+                    if (w == 0 || h == 0) return;
+
+                    struct StatTarget {
+                        const char* tag;
+                        rhi::ResourceHandle tex;
+                        rhi::ResourceHandle* ring;
+                    };
+                    // ddgi = GIGather 原始输出；primary = deferred 直射；
+                    // indirect = FusionIndirect 合并结果；fusion = 合成帧（进 TAA 前）。
+                    rhi::ResourceHandle ddgiTex = inputs.ddgi_tex != handles::INVALID_RESOURCE
+                        ? inputs.ddgi_tex : inputs.black_texture;
+                    StatTarget targets[4] = {
+                        {"DDGI_ASYNC",   ddgiTex,     ddgi_stats_staging_},
+                        {"PRIMARY_ASYNC", inputs.primary_input_tex, primary_stats_staging_},
+                        {"IND_STATS_ASYNC", indirectTex, async_stats_staging_},
+                        {"FUSION_ASYNC",  fusionTex,   fusion_stats_staging_},
+                    };
+
+                    // 1) 映射 3 帧前同槽拷贝的成果并出数（该帧 fence 已等过）。
+                    //    统计打印只随显式诊断门开启，生产 flush 静默。
+                    if (printStats) {
+                        for (auto& t : targets) {
+                            if (t.tex == handles::INVALID_RESOURCE) continue;
+                            if (t.ring[cbIdx] != handles::INVALID_RESOURCE && tick > 8) {
+                                if (auto* p = static_cast<const u16*>(
+                                        device_->MapBuffer(t.ring[cbIdx], 0, (u64)w * h * 8))) {
+                                    PrintIndirectStripStats(p, w, h, t.tag, tick);
+                                    device_->UnmapBuffer(t.ring[cbIdx]);
+                                }
+                            }
+                        }
+                    }
+
+                    // 2) 惰性建本槽 readback 缓冲（尺寸固定——诊断门不做 resize 跟踪）。
+                    auto ensureStaging = [&](rhi::ResourceHandle& slot) {
+                        if (slot == handles::INVALID_RESOURCE) {
+                            BufferDesc bd{};
+                            bd.size = (u64)w * h * 8;
+                            bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+                            bd.memoryUsage = GPUMemoryUsage::Readback;
+                            slot = device_->CreateBuffer(bd);
+                        }
+                        return slot != handles::INVALID_RESOURCE;
+                    };
+
+                    // 3) 把本帧输出拷进本槽，3 帧后由本 pass 读出（按掩码选边）。
+                    // mask 64：ddgi 只拷 256×256 角落——验证可见性 flush 不需要
+                    // 全幅拷贝（同步点是访问本身而非数据量），以便低代价上生产。
+                    BufferTextureCopyRegion rr{};
+                    rr.imageSubresource.mipLevel = 0;
+                    rr.imageSubresource.layerCount = 1;
+                    rr.imageExtent = {w, h, 1};
+                    if (s_asyncMask & 64u) rr.imageExtent = {std::min(256u, w), std::min(256u, h), 1};
+                    const u32 targetBits[4] = {2u, 4u, 8u, 16u};
+                    for (u32 i = 0; i < 4; ++i) {
+                        auto& t = targets[i];
+                        const bool copyThis = (s_asyncMask & targetBits[i]) ||
+                                              ((s_asyncMask & 64u) && targetBits[i] == 2u);
+                        if (!copyThis) continue;
+                        if (t.tex == handles::INVALID_RESOURCE) continue;
+                        if (!ensureStaging(t.ring[cbIdx])) continue;
+                        cmd->CopyTextureToBuffer(t.tex, t.ring[cbIdx], &rr, 1);
+                    }
+                    // mask 32：仅声明 RG 读边（setup），不执行任何拷贝命令。
+                });
+        }
+    }
 
     return outputs;
 }

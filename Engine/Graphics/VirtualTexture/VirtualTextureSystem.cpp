@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <zlib.h>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::vt {
 
@@ -284,7 +285,7 @@ u32 virtual_texture_system::register_texture(const u8* vtex_data, u64 vtex_size)
 
     const auto& h = e.asset.header();
     if (h.tile_size != cfg_.tile_size || h.border != cfg_.border) {
-        std::cerr << "[VTSys] tile/border 与系统配置不一致(t=" << h.tile_size
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VTSys] tile/border 与系统配置不一致(t=" << h.tile_size
                   << " b=" << h.border << ")" << std::endl;
         return ~0u;
     }
@@ -300,7 +301,7 @@ u32 virtual_texture_system::register_texture(const u8* vtex_data, u64 vtex_size)
     e.page_layer_bits.assign(total_page_count(e.pages_top), 0);
     e.page_layer_origins.assign(total_page_count(e.pages_top) * 4, 0);
     if (!allocate_page_table_subrect(e.pages_top, e.pt_origin_x, e.pt_origin_y)) {
-        std::cerr << "[VTSys] 页表空间不足(pages_top=" << e.pages_top << ")" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VTSys] 页表空间不足(pages_top=" << e.pages_top << ")" << std::endl;
         return ~0u;
     }
     // feedback 编码 vtId 为 4 位:并发上限 15。直接扫描空闲 id
@@ -310,7 +311,7 @@ u32 virtual_texture_system::register_texture(const u8* vtex_data, u64 vtex_size)
         if (vts_.find(candidate) == vts_.end()) { newId = candidate; break; }
     }
     if (newId == 0) {
-        std::cerr << "[VTSys] 并发 VT 数达 feedback 编码上限 15,拒绝注册" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VTSys] 并发 VT 数达 feedback 编码上限 15,拒绝注册" << std::endl;
         free_page_table_subrect(e.pages_top, e.pt_origin_x, e.pt_origin_y);
         return ~0u;
     }
@@ -896,13 +897,13 @@ void virtual_texture_system::update(u32 frame_index) {
                     cpd.threadGroupSize = {64, 1, 1};
                     pt_update_pipeline_ = device_->CreateComputePipeline(cpd);
                     if (pt_update_pipeline_ == handles::INVALID_PIPELINE) {
-                        std::cerr << "[VTSys] 页表更新管线创建失败(shader/格式不匹配?)"
+                        PRIMAL_LOG_STREAM(Error, "Engine") << "[VTSys] 页表更新管线创建失败(shader/格式不匹配?)"
                                   << std::endl;
                     }
                 }
             }
             if (pt_update_pipeline_ == handles::INVALID_PIPELINE) {
-                std::cerr << "[VTSys] 页表更新被跳过(管线无效)— 条目数 "
+                PRIMAL_LOG_STREAM(Error, "Engine") << "[VTSys] 页表更新被跳过(管线无效)— 条目数 "
                           << pt_entries_.size() / 6 << std::endl;
             }
             if (pt_update_pipeline_) {

@@ -3,16 +3,16 @@
              xmlns:vm="using:PrimalEditor_Avalonia.Editors.Texture"
              x:Class="PrimalEditor_Avalonia.Editors.Texture.TextureEditorView"
              x:DataType="vm:TextureEditorViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
-  <Grid RowDefinitions="Auto,*,Auto" Background="{StaticResource VoidBrush}">
+  <Grid RowDefinitions="Auto,*,Auto" Background="{DynamicResource VoidBrush}">
 
     <Border Grid.Row="0" Classes="floating" Margin="6,6,6,2">
       <StackPanel Orientation="Horizontal" Spacing="10" Margin="8,4">
         <TextBlock Text="CHANNELS"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource ElectricBlueBrush}"
+                   Foreground="{DynamicResource ElectricBlueBrush}"
                    VerticalAlignment="Center"/>
         <CheckBox Content="R" IsChecked="{Binding ShowR}"/>
         <CheckBox Content="G" IsChecked="{Binding ShowG}"/>
@@ -23,16 +23,16 @@
         <CheckBox Content="Normal Map" IsChecked="{Binding IsNormalMap, Mode=TwoWay}"/>
         <Separator Margin="6,0"/>
         <TextBlock Text="{Binding MipDisplay}" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontMono}"/>
+                   FontFamily="{DynamicResource FontMono}"/>
         <TextBlock Text="{Binding ArrayDisplay}" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontMono}"/>
+                   FontFamily="{DynamicResource FontMono}"/>
         <TextBlock Text="{Binding DepthDisplay}" VerticalAlignment="Center"
-                   FontFamily="{StaticResource FontMono}"/>
+                   FontFamily="{DynamicResource FontMono}"/>
         <Separator Margin="6,0"/>
         <TextBlock Text="FORMAT"
-                   FontFamily="{StaticResource FontDisplay}" FontWeight="SemiBold"
+                   FontFamily="{DynamicResource FontDisplay}" FontWeight="SemiBold"
                    FontSize="11" LetterSpacing="2"
-                   Foreground="{StaticResource ElectricBlueBrush}"
+                   Foreground="{DynamicResource ElectricBlueBrush}"
                    VerticalAlignment="Center"/>
         <ComboBox ItemsSource="{Binding AllFormats}" SelectedItem="{Binding OutputFormat}" Width="140"/>
       </StackPanel>
@@ -43,8 +43,8 @@
         <Image Source="{Binding Preview}" Stretch="Uniform"
                IsVisible="{Binding HasPreview}"/>
         <TextBlock Text="(no preview — decoder unavailable)"
-                   FontFamily="{StaticResource FontMono}"
-                   Foreground="{StaticResource MutedTextBrush}"
+                   FontFamily="{DynamicResource FontMono}"
+                   Foreground="{DynamicResource MutedTextBrush}"
                    HorizontalAlignment="Center" VerticalAlignment="Center"
                    IsVisible="{Binding !HasPreview}"/>
       </Grid>
@@ -54,8 +54,8 @@
       <Grid ColumnDefinitions="*,Auto,Auto,Auto" Margin="8,4">
         <TextBlock Grid.Column="0"
                    Text="{Binding Info.Summary}"
-                   FontFamily="{StaticResource FontMono}"
-                   Foreground="{StaticResource SecondaryTextBrush}"
+                   FontFamily="{DynamicResource FontMono}"
+                   Foreground="{DynamicResource SecondaryTextBrush}"
                    VerticalAlignment="Center"/>
         <Button Grid.Column="1" Content="Discard" Margin="4,0"
                 Click="OnDiscardClick"

@@ -1,4 +1,5 @@
 #include "DawnPipelineLayout.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -28,7 +29,7 @@ bool DawnPipelineLayout::Initialize(const PipelineLayoutDesc& desc) {
         if (setLayout) {
             bindGroupLayouts.push_back(setLayout->GetNativeLayout());
         } else {
-            std::cerr << "[DawnPipelineLayout] Failed to get descriptor set layout at index " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipelineLayout] Failed to get descriptor set layout at index " << i << std::endl;
             return false;
         }
     }
@@ -60,7 +61,7 @@ bool DawnPipelineLayout::Initialize(const PipelineLayoutDesc& desc) {
             device_.GetNativeDevice(), &pushConstantBGLDesc);
 
         if (!pushConstantBindGroupLayout_) {
-            std::cerr << "[DawnPipelineLayout] Failed to create push constant bind group layout" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipelineLayout] Failed to create push constant bind group layout" << std::endl;
             return false;
         }
 
@@ -76,7 +77,7 @@ bool DawnPipelineLayout::Initialize(const PipelineLayoutDesc& desc) {
 
     wgpuLayout_ = wgpuDeviceCreatePipelineLayout(device_.GetNativeDevice(), &layoutDesc);
     if (!wgpuLayout_) {
-        std::cerr << "[DawnPipelineLayout] Failed to create pipeline layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipelineLayout] Failed to create pipeline layout" << std::endl;
         return false;
     }
 

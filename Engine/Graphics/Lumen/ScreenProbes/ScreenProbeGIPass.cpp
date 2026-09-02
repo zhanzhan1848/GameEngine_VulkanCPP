@@ -17,6 +17,7 @@
 #include <cstring>
 #include <set>
 #include <algorithm>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
 
@@ -144,7 +145,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
         src = dawn::LoadWGSL(path);
 #endif
         if (src.empty()) {
-            std::cerr << "[ScreenProbeGI] Failed to load WGSL shader: " << shaderName << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Failed to load WGSL shader: " << shaderName << std::endl;
             return {};
         }
         return std::vector<u8>(src.begin(), src.end());
@@ -167,7 +168,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
             return bytecode;
         }
-        std::cerr << "[ScreenProbeGI] Failed to load SPIR-V: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Failed to load SPIR-V: " << shaderName << std::endl;
         return {};
     }
 
@@ -176,7 +177,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
     std::string source = ReadFileToString(shaderPath);
 
     if (source.empty()) {
-        std::cerr << "[ScreenProbeGI] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
 
@@ -212,7 +213,7 @@ ScreenProbeGIPass::~ScreenProbeGIPass() {
 void ScreenProbeGIPass::SetTemporalStrategy(GITemporalStrategy strategy) {
     if (temporal_strategy_ == strategy) return;
     temporal_strategy_ = strategy;
-    std::cout << "[ScreenProbeGI] Temporal strategy -> "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[ScreenProbeGI] Temporal strategy -> "
               << GITemporalStrategyName(strategy)
               << " (EMA=0 / EMAVarianceClamp=1 / Reprojection=2, effective next frame)"
               << std::endl;
@@ -240,7 +241,7 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
     initialized_ = true;
 
     u32 totalProbes = grid_width_ * grid_height_;
-    std::cout << "[ScreenProbeGI] Initialized (grid: "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[ScreenProbeGI] Initialized (grid: "
               << grid_width_ << "x" << grid_height_
               << " = " << totalProbes << " probes, "
               << params_.rays_per_probe << " rays/probe, "
@@ -601,7 +602,7 @@ void ScreenProbeGIPass::CreatePipelines() {
     auto traceShader = CompileShader("ScreenProbeTraceRays", "screen_probe_trace_rays");
     auto avgShader = CompileShader("ScreenProbeAverage", "screen_probe_average");
     if (avgShader == handles::INVALID_SHADER) {
-        std::cerr << "[ScreenProbeGI] Average shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Average shader compilation failed" << std::endl;
         return;
     }
     auto gatherShader = CompileShader("ScreenProbeGather", "screen_probe_gather");
@@ -632,12 +633,12 @@ void ScreenProbeGIPass::CreatePipelines() {
         temporalShader == handles::INVALID_SHADER ||
         spatialShader == handles::INVALID_SHADER ||
         denoiseShader == handles::INVALID_SHADER) {
-        std::cerr << "[ScreenProbeGI] Shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Shader compilation failed" << std::endl;
         return;
     }
     // Split shaders are optional — missing ones route through the monolith.
     if (sdfTraceShader == handles::INVALID_SHADER || finalizeShader == handles::INVALID_SHADER) {
-        std::cerr << "[ScreenProbeGI] Split-trace shaders unavailable — "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Split-trace shaders unavailable — "
                      "falling back to monolithic trace" << std::endl;
     }
 
@@ -1155,7 +1156,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // DEBUG: log first 5 frames
             static u32 dbgSpFrame = 0;
             if (dbgSpFrame < 20) {
-                std::cout << "[ScreenProbeGI] Frame " << dbgSpFrame
+                PRIMAL_LOG_STREAM(Info, "Render") << "[ScreenProbeGI] Frame " << dbgSpFrame
                           << " sdf=" << (sdfAvailable ? "YES" : "NO")
                           << " prevColor=" << prevColorTex
                           << " scAvail=" << (surface_cache_available_ ? "YES" : "NO")

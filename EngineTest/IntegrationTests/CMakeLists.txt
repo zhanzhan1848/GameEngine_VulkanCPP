@@ -33,6 +33,13 @@ function(setup_test_target target_name)
     
     if(APPLE)
         set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS")
+        # Xcode 15+ 的 SDK sysroot 不再默认搜索 /usr/local/include，而 Vulkan
+        # （MoltenVK）头文件装在那里；显式补上，Vulkan 后端测试才能编译。
+        if(EXISTS "$ENV{VULKAN_SDK}/Include/vulkan/vulkan.h")
+            target_include_directories(${target_name} PRIVATE "$ENV{VULKAN_SDK}/Include")
+        elseif(EXISTS "/usr/local/include/vulkan/vulkan.h")
+            target_include_directories(${target_name} PRIVATE "/usr/local/include")
+        endif()
         target_compile_definitions(${target_name} PRIVATE
             "$<$<CONFIG:Debug>:DEBUG>"
             "$<$<CONFIG:Release>:NDEBUG>"

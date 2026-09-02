@@ -1,4 +1,5 @@
 #include "ParticlePass.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
@@ -73,13 +74,13 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
         vertex_shader_ = device->CreateShader(
             vertBytes.data(), vertBytes.size(), rhi::ShaderStage::Vertex, "main");
         if (vertex_shader_ == rhi::handles::INVALID_SHADER) {
-            std::cerr << "ParticlePass: Failed to create vertex shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create vertex shader" << std::endl;
             return false;
         }
         fragment_shader_ = device->CreateShader(
             fragBytes.data(), fragBytes.size(), rhi::ShaderStage::Pixel, "main");
         if (fragment_shader_ == rhi::handles::INVALID_SHADER) {
-            std::cerr << "ParticlePass: Failed to create fragment shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create fragment shader" << std::endl;
             return false;
         }
     } else {
@@ -91,7 +92,7 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
             shader_file.open(shader_path);
         }
         if (!shader_file.is_open()) {
-            std::cerr << "ParticlePass: Failed to open shader file: " << shader_path << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to open shader file: " << shader_path << std::endl;
             return false;
         }
         std::string shader_code((std::istreambuf_iterator<char>(shader_file)),
@@ -102,14 +103,14 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
             shader_code.c_str(), shader_code.size(),
             rhi::ShaderStage::Vertex, "particle_vertex_instanced");
         if (vertex_shader_ == rhi::handles::INVALID_SHADER) {
-            std::cerr << "ParticlePass: Failed to create vertex shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create vertex shader" << std::endl;
             return false;
         }
         fragment_shader_ = device->CreateShader(
             shader_code.c_str(), shader_code.size(),
             rhi::ShaderStage::Pixel, "particle_fragment");
         if (fragment_shader_ == rhi::handles::INVALID_SHADER) {
-            std::cerr << "ParticlePass: Failed to create fragment shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create fragment shader" << std::endl;
             return false;
         }
     }
@@ -220,21 +221,21 @@ bool ParticlePass::create_buffers() {
         if (uniform_buffers_[i] == rhi::handles::INVALID_RESOURCE ||
             particle_buffers_[i] == rhi::handles::INVALID_RESOURCE ||
             count_buffers_[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "ParticlePass: Failed to create buffers for frame " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create buffers for frame " << i << std::endl;
             return false;
         }
         
         // Map uniform buffer for persistent mapping
         uniform_buffer_mapped_[i] = device_->MapBuffer(uniform_buffers_[i]);
         if (!uniform_buffer_mapped_[i]) {
-            std::cerr << "ParticlePass: Failed to map uniform buffer for frame " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to map uniform buffer for frame " << i << std::endl;
             return false;
         }
         
         // Create index buffer for sorted indices
         index_buffers_[i] = device_->CreateBuffer(count_desc);  // Same size as count buffer
         if (index_buffers_[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "ParticlePass: Failed to create index buffer for frame " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create index buffer for frame " << i << std::endl;
             return false;
         }
     }
@@ -343,13 +344,13 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     u32 blend_idx = static_cast<u32>(current_blend_mode_);
     rhi::PipelineHandle pipeline = pipelines_[blend_idx];
     
-    std::cout << "[ParticlePass::execute] frame=" << frame_index 
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[ParticlePass::execute] frame=" << frame_index 
               << ", active_count=" << active_count 
               << ", pipeline=" << (pipeline == rhi::handles::INVALID_PIPELINE ? "INVALID" : "VALID") 
               << std::endl;
     
     if (pipeline == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[ParticlePass::execute] ERROR: Pipeline is INVALID!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[ParticlePass::execute] ERROR: Pipeline is INVALID!" << std::endl;
         return;
     }
     
@@ -503,7 +504,7 @@ bool ParticlePass::create_pipelines() {
         pipelines_[0] = device_->CreateGraphicsPipeline(desc);
         
         if (pipelines_[0] == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "ParticlePass: Failed to create additive blend pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create additive blend pipeline" << std::endl;
         }
     }
     
@@ -538,7 +539,7 @@ bool ParticlePass::create_pipelines() {
         pipelines_[1] = device_->CreateGraphicsPipeline(desc);
         
         if (pipelines_[1] == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "ParticlePass: Failed to create alpha blend pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create alpha blend pipeline" << std::endl;
         }
     }
     
@@ -630,7 +631,7 @@ void ParticlePass::create_default_texture() {
 
     particle_texture_ = device_->CreateTexture(desc);
     if (particle_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "ParticlePass: Failed to create default texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to create default texture" << std::endl;
         return;
     }
 
@@ -651,7 +652,7 @@ void ParticlePass::create_default_texture() {
             u8 white_pixel[4] = { 255, 255, 255, 255 };
             MTL::Region region = MTL::Region::Make2D(0, 0, 1, 1);
             metalTex->GetNativeTexture()->replaceRegion(region, 0, white_pixel, 4);
-            std::cout << "ParticlePass: Created default white texture" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Engine") << "ParticlePass: Created default white texture" << std::endl;
         }
     }
 #endif
@@ -688,7 +689,7 @@ void ParticlePass::create_default_texture() {
             device_->DestroySync(fence);
             device_->DestroyCommandBuffer(cmdHandle);
             device_->DestroyBuffer(stagingHandle);
-            std::cout << "ParticlePass: Created default white texture (Vulkan)" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Engine") << "ParticlePass: Created default white texture (Vulkan)" << std::endl;
         }
     }
 }

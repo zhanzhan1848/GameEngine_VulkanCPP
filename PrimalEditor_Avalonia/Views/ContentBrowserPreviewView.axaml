@@ -6,7 +6,7 @@
              xmlns:ed="using:PrimalEditor_Avalonia.Editors"
              x:Class="PrimalEditor_Avalonia.Views.ContentBrowserPreviewView"
              x:DataType="vm:ContentBrowserPreviewViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
     <UserControl.Resources>
         <DataTemplate x:Key="TexturePreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
@@ -17,11 +17,11 @@
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
                             IsVisible="{Binding !HasTextureBitmap}">
                     <TextBlock Text="(no texture preview)"
-                               FontFamily="{StaticResource FontMono}"
-                               Foreground="{StaticResource MutedTextBrush}"/>
+                               FontFamily="{DynamicResource FontMono}"
+                               Foreground="{DynamicResource MutedTextBrush}"/>
                     <TextBlock Text="{Binding StatusMessage}"
-                               FontFamily="{StaticResource FontMono}"
-                               Foreground="{StaticResource AmberBrush}"
+                               FontFamily="{DynamicResource FontMono}"
+                               Foreground="{DynamicResource AmberBrush}"
                                Margin="0,4,0,0"/>
                 </StackPanel>
             </Panel>
@@ -34,8 +34,8 @@
                                          ViewModel="{Binding .}"/>
                 <Border Grid.Row="1" Padding="8,4">
                     <TextBlock Text="{Binding MeshSummary}"
-                               FontFamily="{StaticResource FontMono}"
-                               Foreground="{StaticResource SecondaryTextBrush}"/>
+                               FontFamily="{DynamicResource FontMono}"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
                 </Border>
             </Grid>
         </DataTemplate>
@@ -43,12 +43,12 @@
         <DataTemplate x:Key="MaterialPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
             <Grid RowDefinitions="*,Auto">
                 <Border Grid.Row="0" Margin="12" CornerRadius="4"
-                        BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1">
+                        BorderBrush="{DynamicResource ElectricBlueBrush}" BorderThickness="1">
                     <Rectangle Fill="{Binding MaterialSwatch}"/>
                 </Border>
                 <TextBlock Grid.Row="1" Margin="12,0,12,12"
                            Text="{Binding MaterialSummary}"
-                           FontFamily="{StaticResource FontMono}"
+                           FontFamily="{DynamicResource FontMono}"
                            Foreground="{StaticResource FontBrush}"
                            TextWrapping="Wrap"/>
             </Grid>
@@ -60,8 +60,8 @@
                          IsReadOnly="True"
                          FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
                          FontSize="11"
-                         Background="{StaticResource VoidBrush}"
-                         Foreground="{StaticResource MintBrush}"
+                         Background="{DynamicResource VoidBrush}"
+                         Foreground="{DynamicResource MintBrush}"
                          BorderThickness="0"
                          AcceptsReturn="True" TextWrapping="NoWrap"
                          Padding="10"/>
@@ -74,8 +74,8 @@
                          IsReadOnly="True"
                          FontFamily="avares://PrimalEditor_Avalonia/Assets/Fonts/#JetBrains Mono"
                          FontSize="11"
-                         Background="{StaticResource VoidBrush}"
-                         Foreground="{StaticResource MintBrush}"
+                         Background="{DynamicResource VoidBrush}"
+                         Foreground="{DynamicResource MintBrush}"
                          BorderThickness="0"
                          AcceptsReturn="True" TextWrapping="NoWrap"
                          Padding="10"/>
@@ -84,8 +84,8 @@
 
         <DataTemplate x:Key="AudioPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
             <TextBlock Text="{Binding AudioSummary}"
-                       FontFamily="{StaticResource FontMono}"
-                       Foreground="{StaticResource SecondaryTextBrush}"
+                       FontFamily="{DynamicResource FontMono}"
+                       Foreground="{DynamicResource SecondaryTextBrush}"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center"
                        TextAlignment="Center"
@@ -95,8 +95,8 @@
 
         <DataTemplate x:Key="EmptyPreviewTemplate" DataType="vm:ContentBrowserPreviewViewModel">
             <TextBlock Text="(select an asset to preview)"
-                       FontFamily="{StaticResource FontMono}"
-                       Foreground="{StaticResource MutedTextBrush}"
+                       FontFamily="{DynamicResource FontMono}"
+                       Foreground="{DynamicResource MutedTextBrush}"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center"/>
         </DataTemplate>
@@ -106,15 +106,15 @@
         <DockPanel>
             <Border DockPanel.Dock="Top" Padding="8,8,8,4">
                 <TextBlock Text="PREVIEW"
-                           FontFamily="{StaticResource FontDisplay}"
+                           FontFamily="{DynamicResource FontDisplay}"
                            FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                           Foreground="{StaticResource ElectricBlueBrush}"/>
+                           Foreground="{DynamicResource ElectricBlueBrush}"/>
             </Border>
 
             <TextBlock DockPanel.Dock="Bottom"
                        Text="{Binding StatusMessage}"
-                       FontFamily="{StaticResource FontMono}"
-                       Foreground="{StaticResource SecondaryTextBrush}"
+                       FontFamily="{DynamicResource FontMono}"
+                       Foreground="{DynamicResource SecondaryTextBrush}"
                        IsVisible="{Binding HasStatus}"
                        Padding="8,4"/>
 

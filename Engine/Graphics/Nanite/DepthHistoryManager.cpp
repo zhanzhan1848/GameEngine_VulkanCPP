@@ -6,6 +6,7 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -15,12 +16,12 @@ DepthHistoryManager::~DepthHistoryManager() {
 
 bool DepthHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
     if (initialized_) {
-        std::cerr << "[DepthHistoryManager] Already initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Already initialized" << std::endl;
         return false;
     }
 
     if (!device) {
-        std::cerr << "[DepthHistoryManager] Invalid device pointer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Invalid device pointer" << std::endl;
         return false;
     }
 
@@ -28,18 +29,18 @@ bool DepthHistoryManager::Initialize(rhi::RHIDeviceBase* device, const Config& c
     config_ = config;
 
     if (config_.buffer_count < 2 || config_.buffer_count > 4) {
-        std::cerr << "[DepthHistoryManager] Invalid buffer count: " << config_.buffer_count
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Invalid buffer count: " << config_.buffer_count
                   << " (must be 2-4)" << std::endl;
         return false;
     }
 
     if (!CreateDepthResources()) {
-        std::cerr << "[DepthHistoryManager] Failed to create depth resources" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to create depth resources" << std::endl;
         return false;
     }
 
     if (!CreateCopyPipeline()) {
-        std::cerr << "[DepthHistoryManager] Failed to create depth copy pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to create depth copy pipeline" << std::endl;
         return false;
     }
 
@@ -95,7 +96,7 @@ bool DepthHistoryManager::CreateDepthResources() {
 
         depth_buffers_[i].texture = device_->CreateTexture(depthDesc);
         if (depth_buffers_[i].texture == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[DepthHistoryManager] Failed to create depth texture " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to create depth texture " << i << std::endl;
             return false;
         }
 
@@ -112,12 +113,12 @@ bool DepthHistoryManager::StoreCurrentFrameDepth(rhi::ResourceHandle depth_textu
                                                 rhi::RHICommandBuffer* cmd_buffer,
                                                 u32 frame_index) {
     if (!initialized_ || !cmd_buffer) {
-        std::cerr << "[DepthHistoryManager] Not initialized or invalid command buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Not initialized or invalid command buffer" << std::endl;
         return false;
     }
 
     if (depth_texture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[DepthHistoryManager] Invalid source depth texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Invalid source depth texture" << std::endl;
         return false;
     }
 
@@ -128,7 +129,7 @@ bool DepthHistoryManager::StoreCurrentFrameDepth(rhi::ResourceHandle depth_textu
 
     // Copy current depth to history buffer
     if (!CopyDepthTexture(depth_texture, depth_buffers_[write_index].texture, cmd_buffer)) {
-        std::cerr << "[DepthHistoryManager] Failed to copy depth texture to buffer " << write_index << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to copy depth texture to buffer " << write_index << std::endl;
         return false;
     }
 
@@ -147,7 +148,7 @@ DepthHistoryManager::DepthBuffer DepthHistoryManager::GetPreviousFrameDepth(u32 
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
-        std::cerr << "[DepthHistoryManager] Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Not initialized" << std::endl;
         return {};
     }
 
@@ -175,7 +176,7 @@ DepthHistoryManager::DepthBuffer DepthHistoryManager::GetCurrentFrameDepth(u32 f
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
-        std::cerr << "[DepthHistoryManager] Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Not initialized" << std::endl;
         return {};
     }
 
@@ -299,13 +300,13 @@ bool DepthHistoryManager::CreateCopyPipeline() {
             file.seekg(0, std::ios::beg);
             bytecode.resize(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[DepthHistoryManager] Failed to read SPIR-V: " << path << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to read SPIR-V: " << path << std::endl;
                 return false;
             }
             break;
         }
         if (bytecode.empty()) {
-            std::cerr << "[DepthHistoryManager] Failed to load HZBCopy SPIR-V\n"
+            PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to load HZBCopy SPIR-V\n"
                       << "  tried: " << candidates[0] << "\n"
                       << "  tried: " << candidates[1] << std::endl;
             return false;
@@ -316,7 +317,7 @@ bool DepthHistoryManager::CreateCopyPipeline() {
 #ifdef __EMSCRIPTEN__
         std::string code = primal::graphics::dawn::LoadWGSL("HZBGeneration");
         if (code.empty()) {
-            std::cerr << "[DepthHistoryManager] Failed to load HZBGeneration.wgsl from MEMFS" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to load HZBGeneration.wgsl from MEMFS" << std::endl;
             return false;
         }
 #else
@@ -324,7 +325,7 @@ bool DepthHistoryManager::CreateCopyPipeline() {
         std::string shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/HZBGeneration.metal";
         std::ifstream file(shaderPath);
         if (!file.is_open()) {
-            std::cerr << "[DepthHistoryManager] Failed to open shader: " << shaderPath << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to open shader: " << shaderPath << std::endl;
             return false;
         }
         std::string code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -334,7 +335,7 @@ bool DepthHistoryManager::CreateCopyPipeline() {
         shader = device_->CreateShader(code.data(), code.size(), rhi::ShaderStage::Compute, "copy_depth_to_hzb_mip0");
     }
     if (shader == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[DepthHistoryManager] Failed to create depth copy shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to create depth copy shader" << std::endl;
         return false;
     }
 

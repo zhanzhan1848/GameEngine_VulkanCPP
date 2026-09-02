@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::renderpass {
 
@@ -52,14 +53,14 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform) {
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
             return bytecode;
         }
-        std::cerr << "[Toon] Failed to load SPIR-V: PostProcess/Toon.comp.spv" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Toon] Failed to load SPIR-V: PostProcess/Toon.comp.spv" << std::endl;
         return {};
     }
 
     std::string path = utils::ShaderRegistry::GetShaderPath(platform, "ToonShader");
     std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[Toon] Failed to open Metal source: " << path << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Toon] Failed to open Metal source: " << path << std::endl;
         return {};
     }
     std::stringstream buffer;
@@ -78,14 +79,14 @@ static bool EnsurePipeline(RHIDeviceBase& device) {
     auto platform = device.GetPlatform();
     std::vector<u8> shaderBytes = LoadShaderBytes(platform);
     if (shaderBytes.empty()) {
-        std::cerr << "[Toon] Shader load failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Toon] Shader load failed" << std::endl;
         return false;
     }
 
     ShaderHandle cs = device.CreateShader(shaderBytes.data(), shaderBytes.size(),
                                           ShaderStage::Compute, ShaderEntryPoint(platform));
     if (cs == handles::INVALID_SHADER) {
-        std::cerr << "[Toon] Shader creation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Toon] Shader creation failed" << std::endl;
         return false;
     }
 
@@ -169,7 +170,7 @@ const ToonPassData& AddToonPass(RenderGraph& graph, RGResourceHandle inputColor,
         [inputColor, depth, normal, width, height, fi]
          (const ToonPassData& data, RenderGraphContext& context) {
             if (s_Pipeline == handles::INVALID_PIPELINE || width == 0 || height == 0) {
-                std::cerr << "[Toon] Execute abort: pipeline INVALID or zero size" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[Toon] Execute abort: pipeline INVALID or zero size" << std::endl;
                 return;
             }
 
@@ -187,7 +188,7 @@ const ToonPassData& AddToonPass(RenderGraph& graph, RGResourceHandle inputColor,
 
             if (inHandle == handles::INVALID_RESOURCE || depthHandle == handles::INVALID_RESOURCE ||
                 normalHandle == handles::INVALID_RESOURCE || outHandle == handles::INVALID_RESOURCE) {
-                std::cerr << "[Toon] Execute abort: invalid input resource" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[Toon] Execute abort: invalid input resource" << std::endl;
                 return;
             }
 

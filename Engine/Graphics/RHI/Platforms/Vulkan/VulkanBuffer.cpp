@@ -11,6 +11,7 @@
 
 #include "VulkanBuffer.h"
 #include "VulkanDevice.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 // VMA_IMPLEMENTATION 定义在 VulkanDevice.cpp 单 TU 内,这里仅引用声明
@@ -133,14 +134,14 @@ VulkanBuffer::~VulkanBuffer() {
 
 bool VulkanBuffer::Initialize() {
     if (desc_.size == 0) {
-        std::cerr << "[VulkanBuffer] Initialize failed: size is 0" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanBuffer] Initialize failed: size is 0" << std::endl;
         return false;
     }
 
     VulkanDevice& vkDevice = static_cast<VulkanDevice&>(device_);
     VmaAllocator allocator = vkDevice.GetVmaAllocator();
     if (!allocator) {
-        std::cerr << "[VulkanBuffer] VMA allocator not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanBuffer] VMA allocator not initialized" << std::endl;
         return false;
     }
 
@@ -191,7 +192,7 @@ bool VulkanBuffer::Initialize() {
     VmaAllocationInfo allocInfo{};
     VkResult res = vmaCreateBuffer(allocator, &ci, &allocCI, &vkBuffer_, &allocation_, &allocInfo);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanBuffer] vmaCreateBuffer failed: " << res
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanBuffer] vmaCreateBuffer failed: " << res
                   << " size=" << desc_.size << " name='" << (desc_.name ? desc_.name : "") << "'" << std::endl;
         return false;
     }
@@ -254,7 +255,7 @@ void* VulkanBuffer::mapImpl(u64 offset, u64 /*size*/) {
     void* ptr = nullptr;
     VkResult res = vmaMapMemory(allocator, allocation_, &ptr);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanBuffer] vmaMapMemory failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanBuffer] vmaMapMemory failed: " << res << std::endl;
         return nullptr;
     }
     return static_cast<u8*>(ptr) + offset;
@@ -307,7 +308,7 @@ bool VulkanBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
     VmaAllocationInfo stagingInfo{};
     if (vmaCreateBuffer(allocator, &stagingCI, &stagingACI,
                         &stagingBuf, &stagingAlloc, &stagingInfo) != VK_SUCCESS) {
-        std::cerr << "[VulkanBuffer] updateDataImpl: staging vmaCreateBuffer failed"
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanBuffer] updateDataImpl: staging vmaCreateBuffer failed"
                   << " size=" << size << std::endl;
         return false;
     }

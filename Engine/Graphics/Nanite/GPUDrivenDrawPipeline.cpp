@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <set>
 #include <map>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -42,7 +43,7 @@ namespace {
             std::string fullName = std::string("Nanite/") + shaderName;
             std::string src = dawn::LoadWGSL(fullName.c_str());
             if (src.empty()) {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to load WGSL shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to load WGSL shader: "
                           << shaderName << " (entry: " << entryPoint << ")" << std::endl;
                 return {};
             }
@@ -59,7 +60,7 @@ namespace {
                 file.open(path, std::ios::binary | std::ios::ate);
             }
             if (!file.is_open()) {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to load WGSL shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to load WGSL shader: "
                           << shaderName << " (entry: " << entryPoint << ")" << std::endl;
                 return {};
             }
@@ -70,7 +71,7 @@ namespace {
             // parser reads into adjacent memory and reports phantom errors.
             std::vector<u8> bytecode(static_cast<size_t>(size) + 1, 0);
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to read WGSL shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to read WGSL shader: "
                           << shaderName << std::endl;
                 return {};
             }
@@ -98,7 +99,7 @@ namespace {
                 }
             }
             if (!file.is_open()) {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to load SPIR-V shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to load SPIR-V shader: "
                           << shaderName << " (entry: " << entryPoint << ")"
                           << "\n  tried: " << candidates[0]
                           << "\n  tried: " << candidates[1] << std::endl;
@@ -109,7 +110,7 @@ namespace {
             // Exact byte count — VulkanShader rejects SPIR-V whose size % 4 != 0.
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to read SPIR-V shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to read SPIR-V shader: "
                           << shaderName << " from " << openedPath << std::endl;
                 return {};
             }
@@ -126,7 +127,7 @@ namespace {
         }
 
         if (!file.is_open()) {
-            std::cerr << "Failed to load shader: " << shaderName << " (entry point: " << entryPoint << ")" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to load shader: " << shaderName << " (entry point: " << entryPoint << ")" << std::endl;
             return {};
         }
 
@@ -135,7 +136,7 @@ namespace {
 
         std::vector<u8> bytecode(size);
         if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-            std::cerr << "Failed to read shader file: " << shaderPath << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to read shader file: " << shaderPath << std::endl;
             return {};
         }
         /*
@@ -159,7 +160,7 @@ bool GPUDrivenDrawPipeline::Initialize(rhi::RHIDeviceBase* device,
                                      const BinningConfig& binning_config,
                                      const VisibilityBufferConfig& visibility_config) {
     if (initialized_) {
-        std::cerr << "[GPUDrivenDrawPipeline] Already initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Already initialized" << std::endl;
         return false;
     }
 
@@ -173,17 +174,17 @@ bool GPUDrivenDrawPipeline::Initialize(rhi::RHIDeviceBase* device,
     // std::cout << "  Visibility Buffer: " << visibility_config_.width << "x" << visibility_config_.height << std::endl;
 
     if (!CreateResources()) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create resources" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create resources" << std::endl;
         return false;
     }
 
     if (!CreateRenderPasses()) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create render passes" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create render passes" << std::endl;
         return false;
     }
 
     if (!CreatePipelines()) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create pipelines" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create pipelines" << std::endl;
         return false;
     }
 
@@ -191,7 +192,7 @@ bool GPUDrivenDrawPipeline::Initialize(rhi::RHIDeviceBase* device,
 //              << draw_pipeline_layout_ << std::endl;
 
     if (!CreateDescriptorSets()) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create descriptor sets" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create descriptor sets" << std::endl;
         return false;
     }
 
@@ -314,7 +315,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
 
     bin_data_buffer_ = device_->CreateBuffer(binBufferDesc);
     if (bin_data_buffer_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create bin data buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create bin data buffer" << std::endl;
         return false;
     }
 
@@ -326,7 +327,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
 
     bin_counter_buffer_ = device_->CreateBuffer(binCounterDesc);
     if (bin_counter_buffer_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create bin counter buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create bin counter buffer" << std::endl;
         return false;
     }
 
@@ -344,7 +345,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
         // bypassed in the meshlet-draw path (mirrors Metal test, which also
         // disables it). On Dawn the R32_UInt storage texture format isn't always
         // available, so log + continue rather than failing the whole pipeline.
-        std::cerr << "[GPUDrivenDrawPipeline] Visibility buffer unavailable (skipped — "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Visibility buffer unavailable (skipped — "
                      "Stage2 is bypassed in this path)" << std::endl;
     }
 
@@ -356,7 +357,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
 
     indirect_draw_buffer_ = device_->CreateBuffer(indirectDesc);
     if (indirect_draw_buffer_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create indirect draw buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create indirect draw buffer" << std::endl;
         return false;
     }
 
@@ -370,7 +371,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
 
         frame_resources_[i].camera_constants_buffer = device_->CreateBuffer(constantsDesc);
         if (frame_resources_[i].camera_constants_buffer == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[GPUDrivenDrawPipeline] Failed to create camera constants buffer for frame " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create camera constants buffer for frame " << i << std::endl;
             return false;
         }
         
@@ -391,7 +392,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     texture_sampler_ = device_->CreateSampler(samplerDesc);
 
     if (texture_sampler_ == rhi::handles::INVALID_SAMPLER) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create texture sampler" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create texture sampler" << std::endl;
         return false;
     }
 
@@ -409,21 +410,21 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     // Create albedo texture array
     albedo_texture_array_ = device_->CreateTexture(textureArrayDesc);
     if (albedo_texture_array_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create albedo texture array" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create albedo texture array" << std::endl;
         return false;
     }
 
     // Create normal texture array
     normal_texture_array_ = device_->CreateTexture(textureArrayDesc);
     if (normal_texture_array_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create normal texture array" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create normal texture array" << std::endl;
         return false;
     }
 
     // Create ORM texture array
     orm_texture_array_ = device_->CreateTexture(textureArrayDesc);
     if (orm_texture_array_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create ORM texture array" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create ORM texture array" << std::endl;
         return false;
     }
 
@@ -448,7 +449,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
         if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
             owns_material_data_buffer_ = true;
         } else {
-            std::cerr << "[GPUDrivenDrawPipeline] Failed to create dummy material data buffer" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create dummy material data buffer" << std::endl;
             return false;
         }
     }
@@ -476,7 +477,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
     final_depth_texture_ = device_->CreateTexture(finalDepthDesc);
     if (final_depth_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create final depth texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create final depth texture" << std::endl;
         return false;
     }
 
@@ -517,7 +518,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
         visibility_render_pass_ = device_->CreateRenderPass(visibilityPassDesc);
         if (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS) {
-            std::cerr << "[GPUDrivenDrawPipeline] Failed to create visibility render pass" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create visibility render pass" << std::endl;
             return false;
         }
     }
@@ -537,7 +538,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
     gbuffer_albedo_texture_ = device_->CreateTexture(gbufferDesc);
     if (gbuffer_albedo_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Albedo texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GBuffer Albedo texture" << std::endl;
         return false;
     }
 
@@ -545,7 +546,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
     gbuffer_normal_texture_ = device_->CreateTexture(gbufferDesc);
     if (gbuffer_normal_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Normal texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GBuffer Normal texture" << std::endl;
         return false;
     }
 
@@ -553,7 +554,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     gbufferDesc.format = rhi::DataFormat::BGRA8_UNorm;
     gbuffer_orm_texture_ = device_->CreateTexture(gbufferDesc);
     if (gbuffer_orm_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer ORM texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GBuffer ORM texture" << std::endl;
         return false;
     }
 
@@ -563,7 +564,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
     gbufferDesc.format = rhi::DataFormat::RG16_Float;
     gbuffer_velocity_texture_ = device_->CreateTexture(gbufferDesc);
     if (gbuffer_velocity_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create GBuffer Velocity texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GBuffer Velocity texture" << std::endl;
         return false;
     }
 
@@ -631,7 +632,7 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 
     final_render_pass_ = device_->CreateRenderPass(finalPassDesc);
     if (final_render_pass_ == rhi::handles::INVALID_RENDER_PASS) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create final render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create final render pass" << std::endl;
         return false;
     }
 
@@ -705,16 +706,16 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
                     draw_pipeline_ = minimalPipeline;
                     draw_pipeline_layout_ = minimalLayout;
                 } else {
-                    std::cerr << "[GPUDrivenDrawPipeline] Failed to create minimal test pipeline" << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create minimal test pipeline" << std::endl;
                 }
             } else {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to create minimal pipeline layout" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create minimal pipeline layout" << std::endl;
             }
         } else {
-            std::cerr << "[GPUDrivenDrawPipeline] Failed to create minimal test shaders" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create minimal test shaders" << std::endl;
         }
     } else {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to load minimal test shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to load minimal test shaders" << std::endl;
     }
     */
 
@@ -777,7 +778,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             if (binning_pipeline_ != rhi::handles::INVALID_PIPELINE) {
                 // std::cout << "[GPUDrivenDrawPipeline] Cluster Binning pipeline created successfully" << std::endl;
             } else {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to create Cluster Binning pipeline" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create Cluster Binning pipeline" << std::endl;
             }
             if (isVulkan) device_->DestroyPipelineLayout(binningLayout);
         }
@@ -902,13 +903,13 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
                             frame_resources_[i].visibility_descriptor_set =
                                 device_->CreateDescriptorSet({ visibility_descriptor_set_layout_ });
                             if (frame_resources_[i].visibility_descriptor_set == rhi::handles::INVALID_DESCRIPTOR_SET) {
-                                std::cerr << "[GPUDrivenDrawPipeline] Failed to allocate visibility descriptor set " << i << std::endl;
+                                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to allocate visibility descriptor set " << i << std::endl;
                             }
                         }
                     }
                     // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer pipeline created successfully" << std::endl;
                 } else {
-                    std::cerr << "[GPUDrivenDrawPipeline] Failed to create Visibility Buffer pipeline" << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create Visibility Buffer pipeline" << std::endl;
                 }
             }
         }
@@ -1032,7 +1033,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
             draw_descriptor_layout_ = device_->CreateDescriptorSetLayout(gpuDrawLayoutDesc);
             if (draw_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to create GPU Draw descriptor layout" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GPU Draw descriptor layout" << std::endl;
             } else {
                 // std::cout << "[GPUDrivenDrawPipeline] GPU Draw descriptor layout created successfully" << std::endl;
             }
@@ -1043,7 +1044,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
             draw_pipeline_layout_ = device_->CreatePipelineLayout(gpuDrawPipelineLayoutDesc);
             if (draw_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to create GPU Draw pipeline layout" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GPU Draw pipeline layout" << std::endl;
             } else {
                 // std::cout << "[GPUDrivenDrawPipeline] Pipeline layout created successfully" << std::endl;
             }
@@ -1084,13 +1085,13 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
                 // std::cout << "[GPUDrivenDrawPipeline] GPU Driven Draw pipeline created successfully!" << std::endl;
                 // std::cout << "[GPUDrivenDrawPipeline] Pipeline will render meshlets with proper depth testing" << std::endl;
             } else {
-                std::cerr << "[GPUDrivenDrawPipeline] Failed to create GPU Driven Draw pipeline" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GPU Driven Draw pipeline" << std::endl;
             }
         } else {
-            std::cerr << "[GPUDrivenDrawPipeline] Failed to create GPU Draw shaders" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GPU Draw shaders" << std::endl;
         }
     } else {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to load GPU Draw shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to load GPU Draw shaders" << std::endl;
     }
 
     auto resolveShaderCode = LoadShaderBytecode("VisibilityBufferResolve", "ComputeMain", device_);
@@ -1138,7 +1139,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     resolveLayoutDesc.bindings = resolveBindings;
     resolve_descriptor_layout_ = device_->CreateDescriptorSetLayout(resolveLayoutDesc);
     if (resolve_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create resolve descriptor layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create resolve descriptor layout" << std::endl;
         return true;
     }
     
@@ -1147,7 +1148,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     resolvePipelineLayoutDesc.setLayouts = &resolve_descriptor_layout_;
     resolve_pipeline_layout_ = device_->CreatePipelineLayout(resolvePipelineLayoutDesc);
     if (resolve_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create resolve pipeline layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create resolve pipeline layout" << std::endl;
         return true;
     }
     
@@ -1158,7 +1159,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         "ComputeMain"
     );
     if (resolveShader == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create resolve shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create resolve shader" << std::endl;
         return true;
     }
     
@@ -1168,7 +1169,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     resolvePipelineDesc.threadGroupSize = {8, 8, 1};
     resolve_pipeline_ = device_->CreateComputePipeline(resolvePipelineDesc);
     if (resolve_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Failed to create resolve compute pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create resolve compute pipeline" << std::endl;
         return true;
     }
     
@@ -1268,7 +1269,7 @@ bool GPUDrivenDrawPipeline::CreateDescriptorSets() {
                 frame_resources_[i].global_draw_descriptor_set = device_->CreateDescriptorSet({draw_descriptor_layout_});
 //                std::cout << "  Frame " << i << " descriptor set: " << frame_resources_[i].global_draw_descriptor_set << std::endl;
                 if (frame_resources_[i].global_draw_descriptor_set == rhi::handles::INVALID_DESCRIPTOR_SET) {
-                    std::cerr << "[GPUDrivenDrawPipeline] Failed to create descriptor set for frame " << i << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create descriptor set for frame " << i << std::endl;
                     return false;
                 }
 //                std::cout << "  Frame " << i << " camera buffer: " << frame_resources_[i].camera_constants_buffer << std::endl;
@@ -1344,12 +1345,12 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
         return;
     }
 
-    std::cout << "[GPUDrivenDrawPipeline] Building Global Buffers:" << std::endl;
-    std::cout << "  Meshlets: " << totalMeshlets << std::endl;
-    std::cout << "  Vertices: " << totalVertices << std::endl;
-    std::cout << "  Triangles: " << totalTriangles << std::endl;
-    std::cout << "  Positions: " << totalPositions << std::endl;
-    std::cout << "  Elements: " << totalElements << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[GPUDrivenDrawPipeline] Building Global Buffers:" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Meshlets: " << totalMeshlets << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Vertices: " << totalVertices << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Triangles: " << totalTriangles << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Positions: " << totalPositions << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Elements: " << totalElements << std::endl;
 
     // 2. Allocate Global Buffers
     // Meshlets
@@ -1645,7 +1646,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             memcpy(ptr, data, size);
             device_->UnmapBuffer(buffer);
         } else {
-             std::cerr << "Failed to map buffer for upload!" << std::endl;
+             PRIMAL_LOG_STREAM(Error, "Render") << "Failed to map buffer for upload!" << std::endl;
         }
     };
     
@@ -1756,7 +1757,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     global_instance_data_buffer_ = device_->CreateBuffer(instDesc);
     UploadBuffer(global_instance_data_buffer_, instanceDataFull.data(), instanceDataFull.size() * sizeof(graphics::InstanceData));
 
-    std::cout << "[GPUDraw] Global buffers built: totalMeshlets=" << totalMeshlets
+    PRIMAL_LOG_STREAM(Info, "Render") << "[GPUDraw] Global buffers built: totalMeshlets=" << totalMeshlets
               << " totalPositions=" << totalPositions
               << " totalElements=" << totalElements
               << " totalInstances=" << instanceData.size() << std::endl;
@@ -1844,7 +1845,7 @@ bool GPUDrivenDrawPipeline::CreateGeometryBuffers(u32 vertex_count, u32 index_co
     if (success) {
 //        std::cout << "[GPUDrivenDrawPipeline]   All geometry buffers created successfully" << std::endl;
     } else {
-        std::cerr << "[GPUDrivenDrawPipeline]   Failed to create some geometry buffers" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline]   Failed to create some geometry buffers" << std::endl;
     }
 
     return success;
@@ -1947,7 +1948,7 @@ void GPUDrivenDrawPipeline::UploadGeometryData(const RenderSceneSnapshot& scene_
 
 //        std::cout << "[GPUDrivenDrawPipeline]   Test geometry data upload complete!" << std::endl;
     } else {
-        std::cerr << "[GPUDrivenDrawPipeline]   Failed to create test geometry!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline]   Failed to create test geometry!" << std::endl;
     }
 }
 
@@ -1991,7 +1992,7 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
                                    u32 frame_index,
                                    u32 buffer_index) {
     if (!initialized_) {
-        std::cerr << "[GPUDrivenDrawPipeline] Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Not initialized" << std::endl;
         return false;
     }
 
@@ -2071,14 +2072,14 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
 
     // Stage 1: Cluster Binning
     if (!Stage1_ClusterBinning(cmd_buffer, scene_snapshot, culling_results, frame_index)) {
-        std::cerr << "[GPUDrivenDrawPipeline] Cluster Binning failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Cluster Binning failed" << std::endl;
         return false;
     }
 
     // Stage 2: Visibility Buffer
     if (!Stage2_VisibilityBuffer(cmd_buffer, scene_snapshot, view_matrix, projection_matrix,
                                   culling_results, frame_index, buffer_index)) {
-        std::cerr << "[GPUDrivenDrawPipeline] Visibility Buffer failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Visibility Buffer failed" << std::endl;
         return false;
     }
 
@@ -2091,7 +2092,7 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
     if (render_mode_ != GPURenderMode::VisibilityBufferOnly) {
         // Stage 3: GPU Draw Calls
         if (!Stage3_GPUDrawCalls(cmd_buffer, scene_snapshot, culling_results, results_, frame_index, buffer_index)) {
-            std::cerr << "[GPUDrivenDrawPipeline] GPU Draw Calls failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] GPU Draw Calls failed" << std::endl;
             return false;
         }
     }
@@ -2257,7 +2258,7 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
         indirectBuffer = culling_results.indirect_args_buffer;
     }
     if (indirectBuffer == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[Stage2] No valid indirect buffer — skipping visibility raster" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Stage2] No valid indirect buffer — skipping visibility raster" << std::endl;
         return false;
     }
     rhi::ResourceHandle correctVisibleClusterBuffer = culling_results.visible_cluster_list_buffer;
@@ -2389,14 +2390,14 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
         global_meshlet_vertices_buffer_  == rhi::handles::INVALID_RESOURCE ||
         global_meshlet_triangles_buffer_ == rhi::handles::INVALID_RESOURCE ||
         global_vertex_buffer_            == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDraw] Frame " << frame_index << " ERROR: Invalid resources:" << std::endl;
-        std::cerr << "  cluster_map_buffer_: " << cluster_map_buffer_ << std::endl;
-        std::cerr << "  global_instance_data_buffer_: " << global_instance_data_buffer_ << std::endl;
-        std::cerr << "  final_color_texture_: " << final_color_texture_ << std::endl;
-        std::cerr << "  global_meshlet_buffer_: " << global_meshlet_buffer_ << std::endl;
-        std::cerr << "  global_meshlet_vertices_buffer_: " << global_meshlet_vertices_buffer_ << std::endl;
-        std::cerr << "  global_meshlet_triangles_buffer_: " << global_meshlet_triangles_buffer_ << std::endl;
-        std::cerr << "  global_vertex_buffer_: " << global_vertex_buffer_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDraw] Frame " << frame_index << " ERROR: Invalid resources:" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  cluster_map_buffer_: " << cluster_map_buffer_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  global_instance_data_buffer_: " << global_instance_data_buffer_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  final_color_texture_: " << final_color_texture_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  global_meshlet_buffer_: " << global_meshlet_buffer_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  global_meshlet_vertices_buffer_: " << global_meshlet_vertices_buffer_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  global_meshlet_triangles_buffer_: " << global_meshlet_triangles_buffer_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  global_vertex_buffer_: " << global_vertex_buffer_ << std::endl;
         cmd_buffer->EndRenderPass();
         return false;
     }
@@ -2423,9 +2424,9 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     rhi::ResourceHandle cameraConstBuffer = currentFrame.camera_constants_buffer;
 
     if (globalDrawDS == rhi::handles::INVALID_DESCRIPTOR_SET || cameraConstBuffer == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUDraw] Frame " << frame_index << " ERROR: Invalid frame resources:" << std::endl;
-        std::cerr << "  global_draw_descriptor_set: " << globalDrawDS << std::endl;
-        std::cerr << "  camera_constants_buffer: " << cameraConstBuffer << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDraw] Frame " << frame_index << " ERROR: Invalid frame resources:" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  global_draw_descriptor_set: " << globalDrawDS << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "  camera_constants_buffer: " << cameraConstBuffer << std::endl;
         cmd_buffer->EndRenderPass();
         return false;
     }
@@ -2634,7 +2635,7 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
         cmd_buffer->DrawIndirect(indirectBuffer, 0, 1);
         results_.total_draw_calls = 1;
     } else {
-        std::cerr << "[GPUDraw] ERROR: No valid indirect buffer available!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDraw] ERROR: No valid indirect buffer available!" << std::endl;
     }
 
     cmd_buffer->EndRenderPass();
@@ -2660,7 +2661,7 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
 
 void GPUDrivenDrawPipeline::SetupVisibilityBufferPipeline(rhi::RHICommandBuffer* cmd_buffer) {
     if (visibility_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[GPUDrivenDrawPipeline] Invalid visibility buffer pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Invalid visibility buffer pipeline" << std::endl;
         return;
     }
 
@@ -2816,7 +2817,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     auto blitCode = LoadShaderBytecode("ShadowBlit", "shadow_depth_blit", device_);
 
     if (cullCode.empty() || finalizeCode.empty() || depthVSCode.empty() || blitCode.empty()) {
-        std::cerr << "[Shadow] Failed to load shadow shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to load shadow shaders" << std::endl;
         return false;
     }
 
@@ -2827,7 +2828,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
 
     if (cullShader == rhi::handles::INVALID_SHADER || finalizeShader == rhi::handles::INVALID_SHADER ||
         depthVS == rhi::handles::INVALID_SHADER || blitShader == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[Shadow] Failed to create shadow shader handles" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create shadow shader handles" << std::endl;
         return false;
     }
 
@@ -2922,7 +2923,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
 
         shadow_depth_pipeline_ = device_->CreateGraphicsPipeline(desc);
         if (shadow_depth_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[Shadow] Failed to create shadow depth graphics pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create shadow depth graphics pipeline" << std::endl;
             return false;
         }
     }
@@ -2940,14 +2941,14 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         auto momentsCode = LoadShaderBytecode(isVulkan ? "ShadowMoments.frag" : "ShadowMoments",
                                               "shadow_moments_fs", device_);
         if (momentsCode.empty()) {
-            std::cerr << "[Shadow] Failed to load ShadowMoments fragment shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to load ShadowMoments fragment shader" << std::endl;
             return false;
         }
         auto momentsFS = device_->CreateShader(momentsCode.data(), momentsCode.size(),
                                                rhi::ShaderStage::Pixel,
                                                isVulkan ? "main" : "shadow_moments_fs");
         if (momentsFS == rhi::handles::INVALID_SHADER) {
-            std::cerr << "[Shadow] Failed to create ShadowMoments fragment shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create ShadowMoments fragment shader" << std::endl;
             return false;
         }
 
@@ -2967,7 +2968,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
 
         shadow_moments_pipeline_ = device_->CreateGraphicsPipeline(desc);
         if (shadow_moments_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[Shadow] Failed to create shadow moments graphics pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create shadow moments graphics pipeline" << std::endl;
             return false;
         }
     }
@@ -3348,7 +3349,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
             // TEMP DIAGNOSTIC
             static u32 cullDiag = 0;
             if (cullDiag < 6) {
-                std::cout << "[CullDiag] cascade=" << cascade_index << " instances=" << instances.size()
+                PRIMAL_LOG_STREAM(Info, "Render") << "[CullDiag] cascade=" << cascade_index << " instances=" << instances.size()
                           << " visibleClusters=" << totalMeshlets << std::endl;
                 cullDiag++;
             }
@@ -3389,7 +3390,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
     // TEMP DIAGNOSTIC
     static u32 rasterDiag = 0;
     if (rasterDiag < 4) {
-        std::cout << "[RasterDiag] cascade=" << cascade_index
+        PRIMAL_LOG_STREAM(Info, "Render") << "[RasterDiag] cascade=" << cascade_index
                   << " pipeline=" << shadow_depth_pipeline_
                   << " layout=" << shadow_depth_layout_ << std::endl;
         rasterDiag++;
@@ -3672,7 +3673,7 @@ bool GPUDrivenDrawPipeline::InitializeReflectionResources(u32 max_clusters) {
     auto fsCode = LoadShaderBytecode(isVulkan ? "MirrorReflection.frag" : "MirrorReflection",
                                      "mirror_reflection_fs", device_);
     if (vsCode.empty() || fsCode.empty()) {
-        std::cerr << "[Mirror] Failed to load MirrorReflection shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Mirror] Failed to load MirrorReflection shaders" << std::endl;
         return false;
     }
     auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex,
@@ -3680,7 +3681,7 @@ bool GPUDrivenDrawPipeline::InitializeReflectionResources(u32 max_clusters) {
     auto fs = device_->CreateShader(fsCode.data(), fsCode.size(), rhi::ShaderStage::Pixel,
                                     isVulkan ? "main" : "mirror_reflection_fs");
     if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[Mirror] Failed to create MirrorReflection shader handles" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Mirror] Failed to create MirrorReflection shader handles" << std::endl;
         return false;
     }
 
@@ -3742,7 +3743,7 @@ bool GPUDrivenDrawPipeline::InitializeReflectionResources(u32 max_clusters) {
         desc.vertexBindings.clear();
         reflection_pipeline_ = device_->CreateGraphicsPipeline(desc);
         if (reflection_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[Mirror] Failed to create reflection graphics pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Mirror] Failed to create reflection graphics pipeline" << std::endl;
             return false;
         }
     }
@@ -4025,7 +4026,7 @@ bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
     auto vsCode = LoadShaderBytecode(vsName, "main", device_);
     auto fsCode = LoadShaderBytecode(fsName, "main", device_);
     if (vsCode.empty() || fsCode.empty()) {
-        std::cerr << "[CardCapture] Failed to load CardCapture shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[CardCapture] Failed to load CardCapture shaders" << std::endl;
         return false;
     }
     auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex, vsEntry);
@@ -4088,7 +4089,7 @@ bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
         desc.vertexBindings.clear();
         card_capture_pipeline_ = device_->CreateGraphicsPipeline(desc);
         if (card_capture_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "[CardCapture] Failed to create card capture graphics pipeline" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[CardCapture] Failed to create card capture graphics pipeline" << std::endl;
             return false;
         }
     }

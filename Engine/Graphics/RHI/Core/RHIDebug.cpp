@@ -8,6 +8,8 @@
  */
 
 #include "RHIDebug.h"
+#include "CoreDiag.h"
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 
@@ -79,6 +81,17 @@ void OutputDebugMessage(DebugLevel level, const char* file, u32 line,
         return;
     }
     
+    // L1 轨道 B（CLI 规划 §11.4）：现成的单点汇聚点重定向到核心发射器。
+    // EngineDLL 注入分发器后，RHI 日志直达宿主（stderr/黑匣子/C# 回调），
+    // 不再受 RHI_DEBUG_TARGET 编译期常量钳制；下方遗留路径原样保留，
+    // 特殊调试配置（target 2/3）下同一消息会双写，属预期兼容行为。
+    {
+        char withLocation[1100];
+        std::snprintf(withLocation, sizeof(withLocation), "%s:%u %s: %s",
+                      ExtractFileName(file), static_cast<unsigned>(line), function, message);
+        primal::diag::Emit(static_cast<std::uint32_t>(level), "RHI", withLocation);
+    }
+
     // 根据输出目标进行处理
     switch (RHI_DEBUG_TARGET) {
         case 1: // 系统日志

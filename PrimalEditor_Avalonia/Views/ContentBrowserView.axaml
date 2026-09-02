@@ -4,6 +4,7 @@
              xmlns:content="using:PrimalEditor_Avalonia.Content"
              xmlns:conv="using:PrimalEditor_Avalonia.Converters"
              xmlns:views="using:PrimalEditor_Avalonia.Views"
+             xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
              x:Class="PrimalEditor_Avalonia.Views.ContentBrowserView"
              x:DataType="vm:ContentBrowserViewModel"
              Background="{StaticResource VoidBrush}">
@@ -206,13 +207,11 @@
                             <DataTemplate x:DataType="content:AssetInfo">
                                 <Panel>
                                     <!-- Ordinary asset (texture, .fbx, material, etc.): single tile -->
-                                    <Border IsVisible="{Binding !IsContainer}"
+                                    <ctrl:TextureFrame Classes="floating tex-chip" IsVisible="{Binding !IsContainer}"
                                             Width="68" Height="52"
-                                            BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
-                                            Background="{StaticResource VoidBrush}"
                                             ClipToBounds="True"
                                             PointerPressed="OnAssetItemPointerPressed">
-                                        <StackPanel HorizontalAlignment="Center">
+                                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                                             <Panel Width="20" Height="20" Margin="0,2,0,0">
                                                 <Image Source="{Binding, Converter={x:Static conv:FileTypeConverters.ToThumbnailSource}}" Stretch="Uniform"/>
                                                 <Path Width="14" Height="14" Stretch="Uniform"
@@ -228,20 +227,19 @@
                                                        HorizontalAlignment="Center" Margin="0,2,0,0"
                                                        ToolTip.Tip="{Binding FullPath}"/>
                                         </StackPanel>
-                                    </Border>
+                                    </ctrl:TextureFrame>
 
                                     <StackPanel IsVisible="{Binding IsContainer}">
-                                        <Border Width="68" Height="52"
-                                                BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1"
-                                                Background="{StaticResource VoidBrush}"
+                                        <ctrl:TextureFrame Classes="floating tex-chip"
+                                                Width="68" Height="52"
                                                 ClipToBounds="True"
                                                 HorizontalAlignment="Left"
                                                 PointerPressed="OnContainerTilePointerPressed">
-                                            <Border.RenderTransform>
+                                            <ctrl:TextureFrame.RenderTransform>
                                                 <TranslateTransform X="{Binding ThumbnailColumnOffset}"/>
-                                            </Border.RenderTransform>
+                                            </ctrl:TextureFrame.RenderTransform>
                                             <Grid>
-                                                <StackPanel HorizontalAlignment="Center">
+                                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                                                     <Panel Width="20" Height="20" Margin="0,2,0,0">
                                                         <Path Width="14" Height="14" Stretch="Uniform"
                                                               Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
@@ -267,7 +265,7 @@
                                                     </Panel>
                                                 </Button>
                                             </Grid>
-                                        </Border>
+                                        </ctrl:TextureFrame>
                                         <Border Margin="0,2,0,0" Padding="3"
                                                 IsVisible="{Binding IsExpanded}"
                                                 Background="#090D17"

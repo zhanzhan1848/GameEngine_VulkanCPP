@@ -8,6 +8,7 @@
 #include "VulkanPipelineLayout.h"
 #include "VulkanDevice.h"
 #include "VulkanDescriptorSetLayout.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -81,7 +82,7 @@ bool VulkanPipelineLayout::Initialize() {
     ci.pPushConstantRanges    = vkPush.data();
 
     if (vkCreatePipelineLayout(dev, &ci, nullptr, &layout_) != VK_SUCCESS) {
-        std::cerr << "[VulkanPipelineLayout] vkCreatePipelineLayout failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanPipelineLayout] vkCreatePipelineLayout failed" << std::endl;
         return false;
     }
 

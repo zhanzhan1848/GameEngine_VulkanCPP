@@ -5,10 +5,12 @@
  */
 
 #include "VulkanDevice.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
 #include "Engine/Common/CommonHeaders.h"
+#include "Engine/Common/CoreDiag.h"
 
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "VulkanTexture.h"
@@ -60,27 +62,27 @@ bool VulkanDevice::initializeImpl() {
     validationEnabled_ = desc_.enableValidation || desc_.enableDebug;
 
     if (!createInstance()) {
-        std::cerr << "[VulkanDevice] createInstance failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createInstance failed" << std::endl;
         return false;
     }
 
     if (validationEnabled_ && !setupDebugMessenger()) {
-        std::cerr << "[VulkanDevice] Warning: debug messenger setup failed (non-fatal)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Warning: debug messenger setup failed (non-fatal)" << std::endl;
     }
 
     if (!pickPhysicalDevice()) {
-        std::cerr << "[VulkanDevice] pickPhysicalDevice failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] pickPhysicalDevice failed" << std::endl;
         return false;
     }
 
     if (!createLogicalDevice()) {
-        std::cerr << "[VulkanDevice] createLogicalDevice failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createLogicalDevice failed" << std::endl;
         return false;
     }
 
     // === Phase 2: VMA allocator ===
     if (!createVmaAllocator()) {
-        std::cerr << "[VulkanDevice] createVmaAllocator failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createVmaAllocator failed" << std::endl;
         return false;
     }
 
@@ -185,16 +187,16 @@ bool VulkanDevice::initializeImpl() {
                 vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
             }
         } else {
-            std::cerr << "[VulkanDevice] implicit compute UBO creation failed — "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] implicit compute UBO creation failed — "
                          "SetComputeBytes >maxPushConstants will be dropped" << std::endl;
             implicitComputeUBO_ = VK_NULL_HANDLE;
         }
     }
 
     if (validationEnabled_) {
-        std::cout << "[VulkanDevice] Initialized with validation layers enabled." << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Initialized with validation layers enabled." << std::endl;
     } else {
-        std::cout << "[VulkanDevice] Initialized (validation disabled)." << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Initialized (validation disabled)." << std::endl;
     }
     return true;
 }
@@ -417,7 +419,7 @@ QueryPoolHandle VulkanDevice::createQueryPoolImpl(const QueryPoolDesc& desc) {
     u32 id = queryPoolAllocator_.Allocate(device_, desc.type, desc.queryCount);
     VulkanQueryPool* pool = queryPoolAllocator_.Get(id);
     if (!pool || pool->GetNativePool() == VK_NULL_HANDLE) {
-        std::cerr << "[VulkanDevice] VulkanQueryPool creation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanQueryPool creation failed" << std::endl;
         queryPoolAllocator_.Free(id);
         return handles::INVALID_QUERY_POOL;
     }
@@ -448,18 +450,18 @@ bool VulkanDevice::getQueryPoolResultsImpl(QueryPoolHandle handle, u32 firstQuer
 
 ResourceHandle VulkanDevice::createBufferImpl(const BufferDesc& desc) {
     if (desc.size == 0) {
-        std::cerr << "[VulkanDevice] createBufferImpl: size=0 rejected" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createBufferImpl: size=0 rejected" << std::endl;
         return handles::INVALID_RESOURCE;
     }
     u32 id = bufferAllocator_.Allocate(*this, desc);
     VulkanBuffer* buffer = bufferAllocator_.Get(id);
     if (!buffer) {
-        std::cerr << "[VulkanDevice] VulkanBuffer free_list allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanBuffer free_list allocation failed" << std::endl;
         return handles::INVALID_RESOURCE;
     }
 
     if (!buffer->Initialize()) {
-        std::cerr << "[VulkanDevice] VulkanBuffer::Initialize failed for id=" << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanBuffer::Initialize failed for id=" << id << std::endl;
         bufferAllocator_.Free(id);
         return handles::INVALID_RESOURCE;
     }
@@ -473,7 +475,7 @@ void VulkanDevice::destroyBufferImpl(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
     VulkanBuffer* buffer = GetBuffer(handle);
     if (!buffer) {
-        std::cerr << "[VulkanDevice] Double-free buffer handle=" << static_cast<u32>(handle)
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Double-free buffer handle=" << static_cast<u32>(handle)
                   << " — skipping" << std::endl;
         return;
     }
@@ -550,7 +552,7 @@ bool VulkanDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, siz
 
     // 1) 重新上传 SPIR-V 字节码 → 新 VkShaderModule
     if (!shader->Reload(data, size)) {
-        std::cerr << "[VulkanDevice] Failed to reload shader " << shaderHandle << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Failed to reload shader " << shaderHandle << std::endl;
         return false;
     }
 
@@ -562,10 +564,10 @@ bool VulkanDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, siz
             VulkanPipeline* pipeline = GetPipeline(pipelineHandle);
             if (pipeline) {
                 if (!pipeline->Recreate()) {
-                    std::cerr << "[VulkanDevice] Failed to recreate pipeline " << pipelineHandle
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Failed to recreate pipeline " << pipelineHandle
                               << " during shader reload" << std::endl;
                 } else {
-                    std::cout << "[VulkanDevice] Recreated pipeline " << pipelineHandle
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Recreated pipeline " << pipelineHandle
                               << " after shader " << shaderHandle << " reload" << std::endl;
                 }
             }
@@ -590,17 +592,17 @@ VulkanCommandBuffer* VulkanDevice::GetCommandBuffer(CommandBufferHandle handle) 
 
 ResourceHandle VulkanDevice::createTextureImpl(const TextureDesc& desc) {
     if (desc.size.x == 0 || desc.size.y == 0 || desc.format == DataFormat::Unknown) {
-        std::cerr << "[VulkanDevice] createTextureImpl: invalid desc (size or format)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createTextureImpl: invalid desc (size or format)" << std::endl;
         return handles::INVALID_RESOURCE;
     }
     u32 id = textureAllocator_->Allocate(*this, desc);
     VulkanTexture* tex = textureAllocator_->Get(id);
     if (!tex) {
-        std::cerr << "[VulkanDevice] VulkanTexture free_list allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanTexture free_list allocation failed" << std::endl;
         return handles::INVALID_RESOURCE;
     }
     if (!tex->Initialize()) {
-        std::cerr << "[VulkanDevice] VulkanTexture::Initialize failed for id=" << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanTexture::Initialize failed for id=" << id << std::endl;
         textureAllocator_->Free(id);
         return handles::INVALID_RESOURCE;
     }
@@ -612,7 +614,7 @@ void VulkanDevice::destroyTextureImpl(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
     VulkanTexture* tex = GetTexture(handle);
     if (!tex) {
-        std::cerr << "[VulkanDevice] Double-free texture handle=" << static_cast<u32>(handle)
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Double-free texture handle=" << static_cast<u32>(handle)
                   << " — skipping" << std::endl;
         return;
     }
@@ -624,11 +626,11 @@ CommandBufferHandle VulkanDevice::createCommandBufferImpl(CommandQueueType type)
     u32 id = commandBufferAllocator_->Allocate(*this, type);
     VulkanCommandBuffer* cmd = commandBufferAllocator_->Get(id);
     if (!cmd) {
-        std::cerr << "[VulkanDevice] VulkanCommandBuffer free_list allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanCommandBuffer free_list allocation failed" << std::endl;
         return handles::INVALID_COMMAND_BUFFER;
     }
     if (!cmd->Initialize()) {
-        std::cerr << "[VulkanDevice] VulkanCommandBuffer::Initialize failed for id=" << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanCommandBuffer::Initialize failed for id=" << id << std::endl;
         commandBufferAllocator_->Free(id);
         return handles::INVALID_COMMAND_BUFFER;
     }
@@ -644,7 +646,7 @@ void VulkanDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
     if (handle == handles::INVALID_COMMAND_BUFFER) return;
     VulkanCommandBuffer* cmd = GetCommandBuffer(handle);
     if (!cmd) {
-        std::cerr << "[VulkanDevice] Double-free command buffer handle=" << static_cast<u32>(handle)
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Double-free command buffer handle=" << static_cast<u32>(handle)
                   << " — skipping" << std::endl;
         return;
     }
@@ -727,7 +729,7 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
 
     VkResult res = vkQueueSubmit(graphicsQueue_, 1, &si, signalFence);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanDevice] submitImpl vkQueueSubmit failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] submitImpl vkQueueSubmit failed: " << res << std::endl;
         return false;
     }
     // T4.6.5 part 24.7 (B8 root cause): mark cmd buffer state as Submitted so
@@ -743,7 +745,7 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
 RHISwapChain* VulkanDevice::createSwapChainImpl(const SwapChainDesc& desc) {
     auto* sc = new VulkanSwapChain(*this, desc);
     if (!sc->Initialize()) {
-        std::cerr << "[VulkanDevice] VulkanSwapChain::Initialize failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanSwapChain::Initialize failed" << std::endl;
         delete sc;
         return nullptr;
     }
@@ -758,12 +760,12 @@ void VulkanDevice::destroySwapChainImpl(RHISwapChain* swapChain) {
 
 ResourceHandle VulkanDevice::createTextureViewImpl(const TextureViewDesc& desc) {
     if (desc.texture == handles::INVALID_RESOURCE || !textureAllocator_) {
-        std::cerr << "[VulkanDevice] createTextureViewImpl: invalid source texture handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createTextureViewImpl: invalid source texture handle" << std::endl;
         return handles::INVALID_RESOURCE;
     }
     auto* srcTex = textureAllocator_->Get(static_cast<u32>(desc.texture));
     if (!srcTex || srcTex->GetNativeImage() == VK_NULL_HANDLE) {
-        std::cerr << "[VulkanDevice] createTextureViewImpl: source texture not found or null image" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createTextureViewImpl: source texture not found or null image" << std::endl;
         return handles::INVALID_RESOURCE;
     }
 
@@ -771,11 +773,11 @@ ResourceHandle VulkanDevice::createTextureViewImpl(const TextureViewDesc& desc) 
     u32 id = textureAllocator_->Allocate(*this, desc, *srcTex);
     VulkanTexture* viewTex = textureAllocator_->Get(id);
     if (!viewTex) {
-        std::cerr << "[VulkanDevice] Texture view free-list allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Texture view free-list allocation failed" << std::endl;
         return handles::INVALID_RESOURCE;
     }
     if (!viewTex->Initialize()) {
-        std::cerr << "[VulkanDevice] VulkanTexture::Initialize (view mode) failed for id=" << id << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] VulkanTexture::Initialize (view mode) failed for id=" << id << std::endl;
         textureAllocator_->Free(id);
         return handles::INVALID_RESOURCE;
     }
@@ -790,7 +792,7 @@ VulkanShader* VulkanDevice::GetShader(ShaderHandle handle) {
 
 ShaderHandle VulkanDevice::createShaderImpl(const void* data, size_t size, ShaderStage stage, const char* entryPoint) {
     if ((!data && size > 0) || stage == ShaderStage::Unknown) {
-        std::cerr << "[VulkanDevice] createShaderImpl: invalid args" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createShaderImpl: invalid args" << std::endl;
         return handles::INVALID_SHADER;
     }
     u32 id = shaderAllocator_->Allocate(*this, data, size, stage, entryPoint);
@@ -838,7 +840,7 @@ void VulkanDevice::destroySamplerImpl(SamplerHandle handle) {
         // pipeline destroys texture_sampler_ on Shutdown, then the caller
         // also destroys its own handle that was the same sampler passed
         // via SetTextureArrays).
-        std::cerr << "[VulkanDevice] Double-free sampler handle=" << static_cast<u32>(handle)
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Double-free sampler handle=" << static_cast<u32>(handle)
                   << " — skipping" << std::endl;
         return;
     }
@@ -1016,7 +1018,7 @@ bool VulkanDevice::createVmaAllocator() {
 
     VkResult res = vmaCreateAllocator(&ci, &vmaAllocator_);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanDevice] vmaCreateAllocator failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] vmaCreateAllocator failed: " << res << std::endl;
         vmaAllocator_ = nullptr;
         return false;
     }
@@ -1042,10 +1044,16 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     const VkDebugUtilsMessengerCallbackDataEXT* data,
     void*) {
     const char* tag = "[Vulkan validation]";
+    // 单点汇聚重定向（CLI 规划 §11.3 轨道 B）：验证层消息同步进 diag 通道，
+    // EngineDLL 注入发射器后宿主（编辑器面板/CLI/黑匣子）可达；未注入时空操作。
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        std::cerr << tag << " ERROR: " << data->pMessage << std::endl;
+        std::string msg = std::string(tag) + " ERROR: " + (data->pMessage ? data->pMessage : "");
+        primal::diag::Emit(primal::diag::kLevelError, "RHI", msg.c_str());
+        PRIMAL_LOG_STREAM(Error, "RHI") << msg << std::endl;
     } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        std::cerr << tag << " WARN:  " << data->pMessage << std::endl;
+        std::string msg = std::string(tag) + " WARN:  " + (data->pMessage ? data->pMessage : "");
+        primal::diag::Emit(primal::diag::kLevelWarn, "RHI", msg.c_str());
+        PRIMAL_LOG_STREAM(Error, "RHI") << msg << std::endl;
     } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
         // Info is noisy; route to cout at verbose level only.
     }
@@ -1082,7 +1090,7 @@ bool VulkanDevice::createInstance() {
         if (supportsLayer(VK_NULL_HANDLE, "VK_LAYER_KHRONOS_validation")) {
             enabledLayers.push_back("VK_LAYER_KHRONOS_validation");
         } else {
-            std::cerr << "[VulkanDevice] Validation requested but VK_LAYER_KHRONOS_validation not present" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Validation requested but VK_LAYER_KHRONOS_validation not present" << std::endl;
             validationEnabled_ = false;
         }
     }
@@ -1121,7 +1129,7 @@ bool VulkanDevice::createInstance() {
 
     VkResult result = vkCreateInstance(&createInfo, nullptr, &instance_);
     if (result != VK_SUCCESS) {
-        std::cerr << "[VulkanDevice] vkCreateInstance failed: " << result << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] vkCreateInstance failed: " << result << std::endl;
         instance_ = VK_NULL_HANDLE;
         return false;
     }
@@ -1139,7 +1147,7 @@ bool VulkanDevice::setupDebugMessenger() {
     auto fn = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
         vkGetInstanceProcAddr(instance_, "vkCreateDebugUtilsMessengerEXT"));
     if (!fn) {
-        std::cerr << "[VulkanDevice] vkCreateDebugUtilsMessengerEXT not loaded" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] vkCreateDebugUtilsMessengerEXT not loaded" << std::endl;
         return false;
     }
 
@@ -1164,7 +1172,7 @@ bool VulkanDevice::setupDebugMessenger() {
     vkSetDebugUtilsObjectName_ = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
         vkGetInstanceProcAddr(instance_, "vkSetDebugUtilsObjectNameEXT"));
 
-    std::cout << "[VulkanDevice] Debug messenger initialized." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Debug messenger initialized." << std::endl;
     return true;
 }
 
@@ -1203,7 +1211,7 @@ bool VulkanDevice::pickPhysicalDevice() {
     u32 count = 0;
     vkEnumeratePhysicalDevices(instance_, &count, nullptr);
     if (count == 0) {
-        std::cerr << "[VulkanDevice] No Vulkan-capable physical devices" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] No Vulkan-capable physical devices" << std::endl;
         return false;
     }
     std::vector<VkPhysicalDevice> devices(count);
@@ -1222,20 +1230,20 @@ bool VulkanDevice::pickPhysicalDevice() {
     }
     physicalDevice_ = discrete != VK_NULL_HANDLE ? discrete : (integrated != VK_NULL_HANDLE ? integrated : any);
     if (physicalDevice_ == VK_NULL_HANDLE) {
-        std::cerr << "[VulkanDevice] No suitable physical device" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] No suitable physical device" << std::endl;
         return false;
     }
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physicalDevice_, &props);
-    std::cout << "[VulkanDevice] Picked physical device: " << props.deviceName << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Picked physical device: " << props.deviceName << std::endl;
     return true;
 }
 
 bool VulkanDevice::createLogicalDevice() {
     graphicsQueueFamily_ = findQueueFamily(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
     if (graphicsQueueFamily_ == UINT32_MAX) {
-        std::cerr << "[VulkanDevice] No graphics/compute queue family found" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] No graphics/compute queue family found" << std::endl;
         return false;
     }
     // Phase 1: 复用 graphics queue 作为 compute / transfer；Phase 3+ 找专用 async queue。
@@ -1372,7 +1380,7 @@ bool VulkanDevice::createLogicalDevice() {
                 indexingFeaturesEXT.descriptorBindingPartiallyBound = VK_TRUE;
                 descriptorIndexingSupported_ = true;
             }
-            std::cerr << "[VulkanDevice] descriptor indexing enabled ("
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] descriptor indexing enabled ("
                       << (api12 ? "Vulkan 1.2+ core" : "VK_EXT_descriptor_indexing")
                       << ") — N-volume GI gather available" << std::endl;
         }
@@ -1401,7 +1409,7 @@ bool VulkanDevice::createLogicalDevice() {
     }
 
     if (vkCreateDevice(physicalDevice_, &ci, nullptr, &device_) != VK_SUCCESS) {
-        std::cerr << "[VulkanDevice] vkCreateDevice failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] vkCreateDevice failed" << std::endl;
         device_ = VK_NULL_HANDLE;
         return false;
     }

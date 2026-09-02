@@ -391,6 +391,8 @@ add_subdirectory(Engine)
 if(NOT EMSCRIPTEN)
     add_subdirectory(EngineDLL)
     add_subdirectory(EngineTest)
+    # 离线通道 one-shot CLI（CLI 规划 §10 Phase 2）：engine info / render / schema
+    add_subdirectory(Tools/PrimalEngineCli)
 else()
     # Emscripten WASM test executable
     if(ENABLE_WEBGPU)

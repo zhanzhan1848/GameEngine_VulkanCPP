@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
 
@@ -536,13 +537,13 @@ static inline float Dot3(v3 a, v3 b)
     // without resorting to a debugger. A well-built BVH has max_leaf_size
     // in the single digits and max_depth ~log2(triangles).
     auto stats = bvh->GetStats();
-    std::cout << "[Bake] BVH build: " << bvh_seconds << "s   nodes=" << stats.node_count
+    PRIMAL_LOG_STREAM(Info, "Render") << "[Bake] BVH build: " << bvh_seconds << "s   nodes=" << stats.node_count
               << " leaves=" << stats.leaf_count
               << " max_leaf=" << stats.max_leaf_size
               << " max_depth=" << stats.max_depth
               << " tris=" << stats.total_prims << std::endl;
     if (scene.vertex_count >= 3) {
-        std::cout << "[Bake] First 3 vertices: v0=("
+        PRIMAL_LOG_STREAM(Info, "Render") << "[Bake] First 3 vertices: v0=("
                   << scene.vertices[0].x << "," << scene.vertices[0].y << "," << scene.vertices[0].z << ") v1=("
                   << scene.vertices[1].x << "," << scene.vertices[1].y << "," << scene.vertices[1].z << ") v2=("
                   << scene.vertices[2].x << "," << scene.vertices[2].y << "," << scene.vertices[2].z << ")"
@@ -560,7 +561,7 @@ static inline float Dot3(v3 a, v3 b)
     // pass nullptr and still benefit from ParallelFor's worker pool inside
     // each chunk.
     auto bvh_ref = bvh;
-    std::cout << "[Bake] Phase 1: BakeProbeRadiance over " << probe_count
+    PRIMAL_LOG_STREAM(Info, "Render") << "[Bake] Phase 1: BakeProbeRadiance over " << probe_count
               << " probes (" << params.rays_per_probe << " rays each)..." << std::flush;
     auto t1_start = std::chrono::steady_clock::now();
     constexpr u32 kProbeChunk = 32;
@@ -574,7 +575,7 @@ static inline float Dot3(v3 a, v3 b)
         if (on_progress) on_progress(progress_user_data, "radiance", end, probe_count);
     }
     auto t1_end = std::chrono::steady_clock::now();
-    std::cout << " done in " << std::chrono::duration<double>(t1_end - t1_start).count() << "s" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << " done in " << std::chrono::duration<double>(t1_end - t1_start).count() << "s" << std::endl;
 
     // --- Phase 2: Visibility + Sky Factor (parallel per probe) ---
     // Octahedral depth + sky factor — still consumed at runtime by GIGather.
@@ -582,7 +583,7 @@ static inline float Dot3(v3 a, v3 b)
     // overwrites these buffers before they're read and the 5x ray cost would
     // make the bake take tens of minutes on single-threaded JS.
     if (!params.skip_visibility) {
-        std::cout << "[Bake] Phase 2: BakeVisibility over " << probe_count
+        PRIMAL_LOG_STREAM(Info, "Render") << "[Bake] Phase 2: BakeVisibility over " << probe_count
                   << " probes (64+256 rays each)..." << std::flush;
         auto t3_start = std::chrono::steady_clock::now();
         for (u32 base = 0; base < probe_count; base += kProbeChunk) {
@@ -595,9 +596,9 @@ static inline float Dot3(v3 a, v3 b)
             if (on_progress) on_progress(progress_user_data, "visibility", end, probe_count);
         }
         auto t3_end = std::chrono::steady_clock::now();
-        std::cout << " done in " << std::chrono::duration<double>(t3_end - t3_start).count() << "s" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << " done in " << std::chrono::duration<double>(t3_end - t3_start).count() << "s" << std::endl;
     } else {
-        std::cout << "[Bake] Phase 2: BakeVisibility SKIPPED (params.skip_visibility=true)" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[Bake] Phase 2: BakeVisibility SKIPPED (params.skip_visibility=true)" << std::endl;
     }
 
     volume.MarkLoaded();

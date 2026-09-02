@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -347,7 +348,7 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
 
     assignment_card_count_ = sc->GetCardGenerator().GetCardCount();
     assignment_built_ = true;
-    std::cout << "[SC→DDGI] Card→Probe assignment built: " << cardCount << " cards, "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[SC→DDGI] Card→Probe assignment built: " << cardCount << " cards, "
               << total_probes_ << " probes, " << flat.size() << " contributions" << std::endl;
     return true;
 }
@@ -367,7 +368,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
 
     static const bool traceOnce = [] {
         if (std::getenv("SC_DUMP_CARDS")) {
-            std::cerr << "[SCDDGI] AddPass active (dump enabled)" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SCDDGI] AddPass active (dump enabled)" << std::endl;
             return true;
         }
         return false;
@@ -449,19 +450,19 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                 return lums[std::min(lums.size() - 1,
                                                      (size_t)(p * (lums.size() - 1)))];
                             };
-                            std::cerr << "  spread: p10=" << pct(0.10f)
+                            PRIMAL_LOG_STREAM(Error, "Render") << "  spread: p10=" << pct(0.10f)
                                       << " p50=" << pct(0.50f)
                                       << " p90=" << pct(0.90f)
                                       << " max=" << lums.back() << std::endl;
                         }
                     }
-                    std::cerr << "[SC_CARDS] frame=" << dump_pending_frame_
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[SC_CARDS] frame=" << dump_pending_frame_
                               << " cards=" << n << " lit(lum>0.05)=" << litCount
                               << " — top 24 by radiance:" << std::endl;
                     for (u32 k = 0; k < n && k < 24; ++k) {
                         const u32 i = order[k];
                         const auto& c = cards[i];
-                        std::cerr << "  #" << k << " card=" << i
+                        PRIMAL_LOG_STREAM(Error, "Render") << "  #" << k << " card=" << i
                                   << " center=(" << (int)c.center.x << "," << (int)c.center.y
                                   << "," << (int)c.center.z << ")"
                                   << " axis=" << (c.axis_direction & 0xFF)
@@ -483,7 +484,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     }
                     if (!lums2.empty()) {
                         std::sort(lums2.begin(), lums2.end());
-                        std::cerr << "  [live] cards lit(p50>0.05)="
+                        PRIMAL_LOG_STREAM(Error, "Render") << "  [live] cards lit(p50>0.05)="
                                   << std::count_if(lums2.begin(), lums2.end(),
                                                    [](float v){ return v > 0.05f; })
                                   << "/" << n2
@@ -517,7 +518,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                 return l0[std::min(l0.size() - 1,
                                                    (size_t)(q * (l0.size() - 1)))];
                             };
-                            std::cerr << "  probes: n=" << l0.size()
+                            PRIMAL_LOG_STREAM(Error, "Render") << "  probes: n=" << l0.size()
                                       << " nan=" << badCount
                                       << " L0lum p10=" << pct(0.10f)
                                       << " p50=" << pct(0.50f)
@@ -565,7 +566,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                             if (!evals.empty()) {
                                 std::sort(evals.begin(), evals.end());
                                 size_t mid = evals.size() / 2;
-                                std::cerr << "  SHeval(worst axis) p10="
+                                PRIMAL_LOG_STREAM(Error, "Render") << "  SHeval(worst axis) p10="
                                           << evals[evals.size() / 10]
                                           << " p50=" << evals[mid]
                                           << " p90=" << evals[evals.size() - 1 - evals.size() / 10]
@@ -574,12 +575,12 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                 // huge values here = spikes gather feeds pixels.
                                 float maxOverAll = -1e30f;
                                 for (float v : evals) maxOverAll = std::max(maxOverAll, v);
-                                std::cerr << "  SHeval(axis-max top) p50="
+                                PRIMAL_LOG_STREAM(Error, "Render") << "  SHeval(axis-max top) p50="
                                           << evals[mid] << " max=" << maxOverAll
                                           << std::endl;
                             }
                         } else {
-                            std::cerr << "  probes: ALL " << badCount << " NaN/Inf" << std::endl;
+                            PRIMAL_LOG_STREAM(Error, "Render") << "  probes: ALL " << badCount << " NaN/Inf" << std::endl;
                         }
                         device_->UnmapBuffer(ddgi_irr_staging_);
                     }
@@ -590,7 +591,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                         const u32 asz = sc->GetAtlasSize();
                         if (asz > 0) {
                             u32 idx = (asz / 2) * asz + (asz / 2);
-                            std::cerr << "  scShadowVis: pipelineReady="
+                            PRIMAL_LOG_STREAM(Error, "Render") << "  scShadowVis: pipelineReady="
                                       << sc->DebugShadowPipelineReady()
                                       << " center=" << sc->DebugShadowVisibilityAt(idx)
                                       << " texel0=" << sc->DebugShadowVisibilityAt(0)
@@ -628,7 +629,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                 return v[std::min(v.size()-1, (size_t)(f*(v.size()-1)))];
                             };
                             if (!d0v.empty())
-                                std::cerr << "  sdf@origin(d0): n=" << d0v.size()
+                                PRIMAL_LOG_STREAM(Error, "Render") << "  sdf@origin(d0): n=" << d0v.size()
                                           << " p10=" << qfn2(d0v,0.1f) << " p50=" << qfn2(d0v,0.5f)
                                           << " p90=" << qfn2(d0v,0.9f)
                                           << " | sdf@relocated(d1): p50=" << qfn2(d1v,0.5f)
@@ -638,7 +639,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                 std::sort(v.begin(), v.end());
                                 return v[std::min(v.size()-1, (size_t)(f*(v.size()-1)))];
                             };
-                            std::cerr << "  rays: n=" << nRays << " miss=" << miss
+                            PRIMAL_LOG_STREAM(Error, "Render") << "  rays: n=" << nRays << " miss=" << miss
                                       << " hit=" << hit << " nan=" << nanCount
                                       << " hitLum p10=" << qfn(hitLum,0.1f)
                                       << " p50=" << qfn(hitLum,0.5f)

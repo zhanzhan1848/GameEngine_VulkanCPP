@@ -10,6 +10,7 @@
 #include <fstream>
 #include <vector>
 #include <cstring>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -24,7 +25,7 @@ namespace {
         }
 
         if (!file.is_open()) {
-            std::cerr << "Failed to load shader: " << shaderName << " (entry point: " << entryPoint << ")" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to load shader: " << shaderName << " (entry point: " << entryPoint << ")" << std::endl;
             return {};
         }
 
@@ -33,7 +34,7 @@ namespace {
 
         std::vector<u8> bytecode(size);
         if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-            std::cerr << "Failed to read shader file: " << shaderPath << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to read shader file: " << shaderPath << std::endl;
             return {};
         }
 
@@ -47,40 +48,40 @@ VisibilityBufferSystem::~VisibilityBufferSystem() {
 
 bool VisibilityBufferSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
     if (initialized_) {
-        std::cerr << "[VisibilityBufferSystem] Already initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Already initialized" << std::endl;
         return false;
     }
 
     device_ = device;
     config_ = config;
 
-    std::cout << "[VisibilityBufferSystem] Initializing..." << std::endl;
-    std::cout << "  Resolution: " << config_.width << "x" << config_.height << std::endl;
-    std::cout << "  Format: " << static_cast<u32>(config_.format) << std::endl;
-    std::cout << "  Depth: " << (config_.enable_depth ? "Enabled" : "Disabled") << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Initializing..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Resolution: " << config_.width << "x" << config_.height << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Format: " << static_cast<u32>(config_.format) << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Depth: " << (config_.enable_depth ? "Enabled" : "Disabled") << std::endl;
 
     if (!CreateVisibilityResources()) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create visibility resources" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create visibility resources" << std::endl;
         return false;
     }
 
     if (!CreateVisibilityRenderPass()) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create visibility render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create visibility render pass" << std::endl;
         return false;
     }
 
     if (!CreateVisibilityPipeline()) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create visibility pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create visibility pipeline" << std::endl;
         return false;
     }
 
     if (!CreateDescriptorSets()) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create descriptor sets" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create descriptor sets" << std::endl;
         return false;
     }
 
     initialized_ = true;
-    std::cout << "[VisibilityBufferSystem] Initialized successfully" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Initialized successfully" << std::endl;
 
     return true;
 }
@@ -88,7 +89,7 @@ bool VisibilityBufferSystem::Initialize(rhi::RHIDeviceBase* device, const Config
 void VisibilityBufferSystem::Shutdown() {
     if (!initialized_) return;
 
-    std::cout << "[VisibilityBufferSystem] Shutting down..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Shutting down..." << std::endl;
 
     // Cleanup resources
     if (device_) {
@@ -106,7 +107,7 @@ void VisibilityBufferSystem::Shutdown() {
 }
 
 bool VisibilityBufferSystem::CreateVisibilityResources() {
-    std::cout << "[VisibilityBufferSystem] Creating visibility resources..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Creating visibility resources..." << std::endl;
 
     // Create visibility buffer texture
     rhi::TextureDesc visibilityDesc{};
@@ -117,11 +118,11 @@ bool VisibilityBufferSystem::CreateVisibilityResources() {
 
     visibility_buffer_ = device_->CreateTexture(visibilityDesc);
     if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create visibility buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create visibility buffer" << std::endl;
         return false;
     }
 
-    std::cout << "[VisibilityBufferSystem] Visibility buffer created: "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Visibility buffer created: "
               << config_.width << "x" << config_.height << std::endl;
 
     // Create depth buffer texture
@@ -134,18 +135,18 @@ bool VisibilityBufferSystem::CreateVisibilityResources() {
 
         depth_buffer_ = device_->CreateTexture(depthDesc);
         if (depth_buffer_ == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[VisibilityBufferSystem] Failed to create depth buffer" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create depth buffer" << std::endl;
             return false;
         }
 
-        std::cout << "[VisibilityBufferSystem] Depth buffer created" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Depth buffer created" << std::endl;
     }
 
     return true;
 }
 
 bool VisibilityBufferSystem::CreateVisibilityRenderPass() {
-    std::cout << "[VisibilityBufferSystem] Creating visibility render pass..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Creating visibility render pass..." << std::endl;
 
     rhi::RenderPassDesc passDesc{};
 
@@ -180,23 +181,23 @@ bool VisibilityBufferSystem::CreateVisibilityRenderPass() {
 
     visibility_render_pass_ = device_->CreateRenderPass(passDesc);
     if (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create visibility render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create visibility render pass" << std::endl;
         return false;
     }
 
-    std::cout << "[VisibilityBufferSystem] Visibility render pass created" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Visibility render pass created" << std::endl;
     return true;
 }
 
 bool VisibilityBufferSystem::CreateVisibilityPipeline() {
-    std::cout << "[VisibilityBufferSystem] Creating visibility pipeline..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Creating visibility pipeline..." << std::endl;
 
     // Load visibility buffer shaders
     auto vertexShaderCode = LoadShaderBytecode("VisibilityBuffer", "visibility_vertex_shader");
     auto fragmentShaderCode = LoadShaderBytecode("VisibilityBuffer", "visibility_fragment_shader");
 
     if (vertexShaderCode.empty() || fragmentShaderCode.empty()) {
-        std::cout << "[VisibilityBufferSystem] Visibility buffer shaders not found, skipping pipeline creation" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Visibility buffer shaders not found, skipping pipeline creation" << std::endl;
         return false;
     }
 
@@ -216,7 +217,7 @@ bool VisibilityBufferSystem::CreateVisibilityPipeline() {
 
     if (vertexShader == rhi::handles::INVALID_SHADER ||
         fragmentShader == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create visibility shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create visibility shaders" << std::endl;
         return false;
     }
 
@@ -227,7 +228,7 @@ bool VisibilityBufferSystem::CreateVisibilityPipeline() {
 
     visibility_pipeline_layout_ = device_->CreatePipelineLayout(layoutDesc);
     if (visibility_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create pipeline layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create pipeline layout" << std::endl;
         return false;
     }
 
@@ -258,16 +259,16 @@ bool VisibilityBufferSystem::CreateVisibilityPipeline() {
 
     visibility_pipeline_ = device_->CreateGraphicsPipeline(pipelineDesc);
     if (visibility_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[VisibilityBufferSystem] Failed to create visibility pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Failed to create visibility pipeline" << std::endl;
         return false;
     }
 
-    std::cout << "[VisibilityBufferSystem] Visibility pipeline created successfully" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Visibility pipeline created successfully" << std::endl;
     return true;
 }
 
 bool VisibilityBufferSystem::CreateDescriptorSets() {
-    std::cout << "[VisibilityBufferSystem] Creating descriptor sets..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Creating descriptor sets..." << std::endl;
 
     // TODO: Implement descriptor set creation for visibility buffer resources
     // For now, return true as placeholder
@@ -284,7 +285,7 @@ VisibilityBufferSystem::RenderResult VisibilityBufferSystem::RenderVisibilityBuf
     u32 frame_index) {
 
     if (!initialized_) {
-        std::cerr << "[VisibilityBufferSystem] Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Not initialized" << std::endl;
         return {};
     }
 
@@ -294,10 +295,10 @@ VisibilityBufferSystem::RenderResult VisibilityBufferSystem::RenderVisibilityBuf
     result.visibility_buffer = visibility_buffer_;
     result.depth_buffer = depth_buffer_;
 
-    std::cout << "[VisibilityBufferSystem] Rendering visibility buffer - Frame " << frame_index << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Rendering visibility buffer - Frame " << frame_index << std::endl;
 
     if (!RenderToVisibilityBuffer(cmd_buffer, scene_snapshot, view_matrix, projection_matrix, culling_results)) {
-        std::cerr << "[VisibilityBufferSystem] Visibility buffer rendering failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VisibilityBufferSystem] Visibility buffer rendering failed" << std::endl;
         return result;
     }
 
@@ -306,9 +307,9 @@ VisibilityBufferSystem::RenderResult VisibilityBufferSystem::RenderVisibilityBuf
 
     last_result_ = result;
 
-    std::cout << "[VisibilityBufferSystem] Visibility buffer rendered in " << result.render_time_ms << " ms" << std::endl;
-    std::cout << "  Visible triangles: " << result.visible_triangles << std::endl;
-    std::cout << "  Visible clusters: " << result.visible_clusters << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Visibility buffer rendered in " << result.render_time_ms << " ms" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Visible triangles: " << result.visible_triangles << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "  Visible clusters: " << result.visible_clusters << std::endl;
 
     return result;
 }
@@ -320,7 +321,7 @@ bool VisibilityBufferSystem::RenderToVisibilityBuffer(
     const math::m4x4& projection_matrix,
     const CullingResults& culling_results) {
 
-    std::cout << "[VisibilityBufferSystem] Rendering to visibility buffer..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Rendering to visibility buffer..." << std::endl;
 
     // TODO: Implement proper visibility buffer rendering
     // For now, this is a placeholder that shows the structure
@@ -337,9 +338,9 @@ bool VisibilityBufferSystem::RenderToVisibilityBuffer(
         // TODO: Render visible clusters from culling results
 
         // Placeholder: Render nothing for now
-        std::cout << "[VisibilityBufferSystem] TODO: Implement actual visibility buffer rendering" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] TODO: Implement actual visibility buffer rendering" << std::endl;
     } else {
-        std::cout << "[VisibilityBufferSystem] Visibility pipeline not available" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Visibility pipeline not available" << std::endl;
     }
 
     // End visibility render pass
@@ -354,7 +355,7 @@ bool VisibilityBufferSystem::RenderToVisibilityBuffer(
 }
 
 bool VisibilityBufferSystem::UpdateConfig(const Config& new_config) {
-    std::cout << "[VisibilityBufferSystem] Updating configuration..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferSystem] Updating configuration..." << std::endl;
 
     // Check if dimensions changed
     if (new_config.width != config_.width ||
@@ -387,7 +388,7 @@ bool VisibilityBufferReader::ResolveVisibilityBuffer(
 
     // TODO: Implement visibility buffer resolve pass
     // This should read the visibility buffer and render actual geometry with materials
-    std::cout << "[VisibilityBufferReader] Resolve - PLACEHOLDER" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[VisibilityBufferReader] Resolve - PLACEHOLDER" << std::endl;
 
     return false;
 }

@@ -17,6 +17,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -43,14 +44,14 @@ OfflineSDFMerger::~OfflineSDFMerger() {
 u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        std::cerr << "[OfflineSDFMerger] Failed to open: " << filePath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Failed to open: " << filePath << std::endl;
         return 0;
     }
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
     std::vector<u8> buffer(size);
     if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        std::cerr << "[OfflineSDFMerger] Failed to read: " << filePath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Failed to read: " << filePath << std::endl;
         return 0;
     }
 
@@ -67,14 +68,14 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
     // num_materials
     u32 numMat = ReadU32(data, off); off += 4;
     if (numMat > 10000) {
-        std::cerr << "[OfflineSDFMerger] Implausible material count: " << numMat << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Implausible material count: " << numMat << std::endl;
         return 0;
     }
     // Skip materials (3 fields each: name, diffuse, normal — all length-prefixed strings)
     for (u32 mi = 0; mi < numMat; ++mi) {
         for (u32 fi = 0; fi < 3; ++fi) {
             u32 slen = ReadU32(data, off); off += 4;
-            if (slen > 10000) { std::cerr << "[OfflineSDFMerger] Bad string len" << std::endl; return 0; }
+            if (slen > 10000) { PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Bad string len" << std::endl; return 0; }
             off += slen;
         }
     }
@@ -92,14 +93,14 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
 
     for (u32 i = 0; i < meshCount; ++i) {
         if (off + 32 > (size_t)size) {
-            std::cerr << "[OfflineSDFMerger] Stop at mesh " << i << ": off=" << off << " size=" << size << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Stop at mesh " << i << ": off=" << off << " size=" << size << std::endl;
             break;
         }
 
         // Mesh header (Compact format)
         u32 nameLen = ReadU32(data, off); off += 4;
         if (nameLen > 200) {
-            std::cerr << "[OfflineSDFMerger] Bad nameLen=" << nameLen << " at mesh " << i << " off=" << off-4 << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Bad nameLen=" << nameLen << " at mesh " << i << " off=" << off-4 << std::endl;
             break;
         }
         off += nameLen;
@@ -191,7 +192,7 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
                         (u64)sdf.resolution[0] * sdf.resolution[1] * sdf.resolution[2] ==
                         (u64)sdf.data.size();
                     if (!boundsFinite || sdim > 150.0f || !layoutConsistent) {
-                        std::cerr << "[OfflineSDFMerger] Rejected broken SDF bake"
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Rejected broken SDF bake"
                                   << " (sdim=" << sdim
                                   << " finite=" << boundsFinite
                                   << " consistent=" << layoutConsistent << ")" << std::endl;
@@ -212,7 +213,7 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
                             }
                             u32 voxNZ = 0;
                             for (u32 i = 0; i < sdf.voxels.size(); ++i) voxNZ += sdf.voxels[i] ? 1 : 0;
-                            std::cerr << "[SDFParse] mesh#" << mesh_sdfs_.size()
+                            PRIMAL_LOG_STREAM(Error, "Render") << "[SDFParse] mesh#" << mesh_sdfs_.size()
                                       << " res=" << sdf.resolution[0] << "x" << sdf.resolution[1]
                                       << "x" << sdf.resolution[2]
                                       << " data=" << sdf.data.size()
@@ -242,7 +243,7 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
 
     // Compute global bounds
     if (mesh_sdfs_.empty()) {
-        std::cerr << "[OfflineSDFMerger] No SDF data found in " << filePath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] No SDF data found in " << filePath << std::endl;
         return 0;
     }
 
@@ -274,7 +275,7 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
     extent_ = maxPt - origin_;
     voxel_size_ = std::max({extent_[0], extent_[1], extent_[2]}) / (f32)GLOBAL_RES;
 
-    std::cerr << "[OfflineSDFMerger] Loaded " << sdfFound << " mesh SDFs"
+    PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Loaded " << sdfFound << " mesh SDFs"
               << ", global bounds: (" << origin_[0] << "," << origin_[1] << "," << origin_[2]
               << ") extent=(" << extent_[0] << "," << extent_[1] << "," << extent_[2] << ")"
               << " voxel_size=" << voxel_size_ << std::endl;
@@ -409,7 +410,7 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
         return (u16)(sign | (exp << 10) | (mant >> 13));
     };
 
-    std::cerr << "[OfflineSDFMerger] Merging " << mesh_sdfs_.size()
+    PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Merging " << mesh_sdfs_.size()
               << " mesh SDFs into " << res << "³ global volume (per-mesh AABB, threaded)..."
               << std::endl;
 
@@ -469,7 +470,7 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
                 }
                 const u32 done = doneSlices.fetch_add(1) + 1;
                 if (done % 96 == 0) {
-                    std::cerr << "  Merged slice " << done << "/" << res << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "  Merged slice " << done << "/" << res << std::endl;
                 }
             }
         };
@@ -482,7 +483,7 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
         worker();
         for (auto& t : pool) t.join();
     }
-    std::cerr << "[OfflineSDFMerger] Merge complete. Uploading to GPU..." << std::endl;
+    PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Merge complete. Uploading to GPU..." << std::endl;
 
     // T8.10d: SEAM SEAL — the merge is a union of per-mesh boxes; adjacent
     // wall segments leave ≤1-voxel cracks where the field reads emptyDist.
@@ -524,7 +525,7 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
                 ++sealed;
             }
         }
-        std::cerr << "[OfflineSDFMerger] Seam seal: " << sealed << " voxels clamped to "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Seam seal: " << sealed << " voxels clamped to "
                   << sealDist << std::endl;
     }
 
@@ -552,7 +553,7 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
             minVal = std::min(minVal, f);
             maxVal = std::max(maxVal, f);
         }
-        std::cerr << "[OfflineSDFMerger] SDF stats: neg=" << negCount
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] SDF stats: neg=" << negCount
                   << " pos=" << posCount << " zero=" << zeroCount
                   << " min=" << minVal << " max=" << maxVal << std::endl;
     }
@@ -581,10 +582,10 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
             out.write(reinterpret_cast<const char*>(globalData.data()),
                       (std::streamsize)(totalVoxels * sizeof(u16)));
             out.close();
-            std::cerr << "[OfflineSDFMerger] Cache written: " << cachePath << " ("
+            PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Cache written: " << cachePath << " ("
                       << (totalVoxels * sizeof(u16)) / (1024 * 1024) << " MB)" << std::endl;
         } else {
-            std::cerr << "[OfflineSDFMerger] WARNING: cache write failed: " << cachePath << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] WARNING: cache write failed: " << cachePath << std::endl;
         }
     }
 
@@ -610,7 +611,7 @@ bool OfflineSDFMerger::LoadFromCache(rhi::RHIDeviceBase* device, const char* cac
     in.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
     if (!in || std::memcmp(hdr.magic, "PGSDFC01", 8) != 0 ||
         hdr.res != GLOBAL_RES || hdr.texelCount != (u64)GLOBAL_RES * GLOBAL_RES * GLOBAL_RES) {
-        std::cerr << "[OfflineSDFMerger] Cache stale/invalid: " << cachePath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Cache stale/invalid: " << cachePath << std::endl;
         return false;
     }
 
@@ -618,7 +619,7 @@ bool OfflineSDFMerger::LoadFromCache(rhi::RHIDeviceBase* device, const char* cac
     in.read(reinterpret_cast<char*>(globalData.data()),
             (std::streamsize)(hdr.texelCount * sizeof(u16)));
     if (!in) {
-        std::cerr << "[OfflineSDFMerger] Cache truncated: " << cachePath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Cache truncated: " << cachePath << std::endl;
         return false;
     }
 
@@ -626,7 +627,7 @@ bool OfflineSDFMerger::LoadFromCache(rhi::RHIDeviceBase* device, const char* cac
     extent_[0] = hdr.extent[0]; extent_[1] = hdr.extent[1]; extent_[2] = hdr.extent[2];
     voxel_size_ = hdr.voxel;
 
-    std::cerr << "[OfflineSDFMerger] Loaded cache: " << cachePath << " ("
+    PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Loaded cache: " << cachePath << " ("
               << (hdr.texelCount * sizeof(u16)) / (1024 * 1024) << " MB)" << std::endl;
     return UploadGlobal(device_, globalData.data());
 }
@@ -649,7 +650,7 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
 
     global_sdf_texture_ = device_->CreateTexture(desc);
     if (global_sdf_texture_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[OfflineSDFMerger] Failed to create Texture3D" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Failed to create Texture3D" << std::endl;
         return false;
     }
 
@@ -669,7 +670,7 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
 
     rhi::ResourceHandle staging = device_->CreateBuffer(stagingDesc);
     if (staging == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[OfflineSDFMerger] Failed to create staging buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Failed to create staging buffer" << std::endl;
         return false;
     }
 
@@ -698,7 +699,7 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
     rhi::CommandBufferHandle cmdHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
     rhi::RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmdHandle);
     if (!cmd) {
-        std::cerr << "[OfflineSDFMerger] Unsupported device for texture upload" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Unsupported device for texture upload" << std::endl;
         device_->DestroyCommandBuffer(cmdHandle);
         device_->DestroyBuffer(staging);
         return false;
@@ -747,7 +748,7 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
             rhi::RHICommandBuffer* vc = rhi::GetCommandBuffer(vcHandle);
             if (!vc) {
                 ok = false;
-                std::cerr << "[OfflineSDFVerify] no command buffer for readback" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFVerify] no command buffer for readback" << std::endl;
             } else {
                 vc->Begin();
                 rhi::BufferTextureCopyRegion vr{};
@@ -785,7 +786,7 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
                                     u32 b = (sign << 31) | ((ex + 112) << 23) | (m << 13);
                                     f32 f; std::memcpy(&f, &b, 4); return f;
                                 };
-                                std::cerr << "[OfflineSDFVerify] first diffs (x,y,z cpu gpu): "
+                                PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFVerify] first diffs (x,y,z cpu gpu): "
                                           << gx << "," << gy << "," << gz << " "
                                           << dec(c) << " vs " << dec(g) << "\n";
                                 ++shown;
@@ -805,7 +806,7 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
                             if (globalData[li] != gpu[gi]) ++mismatch;
                         }
                     }
-                    std::cerr << "[OfflineSDFVerify] texels=" << totalVoxels
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFVerify] texels=" << totalVoxels
                               << " mismatched=" << mismatch
                               << " (" << (100.0 * double(mismatch) / double(totalVoxels)) << "%)"
                               << (mismatch ? "  => UPLOAD PATH CORRUPT" : "  => upload bit-exact")
@@ -813,7 +814,7 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
                     device_->UnmapBuffer(vStage);
                 } else ok = false;
             } else if (!ok) {
-                std::cerr << "[OfflineSDFVerify] readback setup failed" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFVerify] readback setup failed" << std::endl;
             }
             device_->DestroyBuffer(vStage);
         }

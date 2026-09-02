@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <iostream>
 #include <fstream>
+#include "Engine/Common/CoreLogStream.h"
 #ifdef __EMSCRIPTEN__
 #include "Graphics/Dawn/ShaderLoader.h"
 #endif
@@ -605,10 +606,10 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
                 pipeDesc.threadGroupSize = {8, 8, 1};
                 dawnDeferredPipeline_ = device->CreateComputePipeline(pipeDesc);
             } else {
-                std::cerr << "[Deferred] Compute shader creation failed" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Engine") << "[Deferred] Compute shader creation failed" << std::endl;
             }
         } else {
-            std::cerr << "[Deferred] Shader source empty" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[Deferred] Shader source empty" << std::endl;
         }
 
         // Per-frame descriptor sets. Textures are written at dispatch time
@@ -707,10 +708,10 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
                 pipeDesc.threadGroupSize = {8, 8, 1};
                 dawnMeshletDeferredPipeline_ = device->CreateComputePipeline(pipeDesc);
             } else {
-                std::cerr << "[MeshletDeferred] Compute shader creation failed" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Engine") << "[MeshletDeferred] Compute shader creation failed" << std::endl;
             }
         } else {
-            std::cerr << "[MeshletDeferred] Shader source empty" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[MeshletDeferred] Shader source empty" << std::endl;
         }
 
         for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -832,15 +833,15 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
 
     if (!blurPass_.Initialize(device_)) {
         if (!bypassProd) {
-            std::cerr << "ForwardRenderer: Failed to initialize BlurPass" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ForwardRenderer: Failed to initialize BlurPass" << std::endl;
             return false;
         }
-        std::cerr << "ForwardRenderer: BlurPass skipped (bypass)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "ForwardRenderer: BlurPass skipped (bypass)" << std::endl;
     }
 
     // Initialize SSR Pass
     if (!ssrPass_.Initialize(device_)) {
-            std::cerr << "ForwardRenderer: Failed to initialize SSRPass" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ForwardRenderer: Failed to initialize SSRPass" << std::endl;
             return false;
     }
     } // !bypassProd
@@ -849,16 +850,16 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
     // Initialize Particle Pass (bypass platforms skip — no WGSL/GLSL particle shaders)
     if (!particlePass_.initialize(device_)) {
         if (!bypassProd) {
-            std::cerr << "ForwardRenderer: Failed to initialize ParticlePass" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "ForwardRenderer: Failed to initialize ParticlePass" << std::endl;
             return false;
         }
-        std::cerr << "ForwardRenderer: ParticlePass skipped (bypass)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "ForwardRenderer: ParticlePass skipped (bypass)" << std::endl;
     }
 #endif
 
     // Initialize Scene Extraction System
     if (!sceneExtractionSystem_.Initialize(device_, 10000, 100000)) {
-        std::cerr << "ForwardRenderer: Failed to initialize SceneExtractionSystem" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "ForwardRenderer: Failed to initialize SceneExtractionSystem" << std::endl;
         return false;
     }
 
@@ -1490,7 +1491,7 @@ bool ForwardRenderer::EnsureDawnGBufferPipeline() {
     if (dawnGBufferPipeline_ != rhi::handles::INVALID_PIPELINE) return true;
     if (!device_) return false;
     if (dawnGBufferMaterialDSL_ == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GBuffer] Cannot create pipeline — material DSL not set" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GBuffer] Cannot create pipeline — material DSL not set" << std::endl;
         return false;
     }
 
@@ -1526,14 +1527,14 @@ bool ForwardRenderer::EnsureDawnGBufferPipeline() {
     }
 #endif
     if (shaderSrc.empty()) {
-        std::cerr << "[GBuffer] Shader source empty" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GBuffer] Shader source empty" << std::endl;
         return false;
     }
 
     rhi::ShaderHandle vs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Vertex, "gbuffer_vs");
     rhi::ShaderHandle fs = device_->CreateShader(shaderSrc.data(), shaderSrc.size(), rhi::ShaderStage::Pixel, "gbuffer_fs");
     if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
-        std::cerr << "[GBuffer] Shader creation failed (vs=" << vs << " fs=" << fs << ")" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GBuffer] Shader creation failed (vs=" << vs << " fs=" << fs << ")" << std::endl;
         return false;
     }
 
@@ -1580,12 +1581,12 @@ void ForwardRenderer::RenderDawnGBuffer(rhi::RHICommandBuffer* cmdBuffer,
     // Validate all 5 G-Buffer RTs are present.
     for (u32 i = 0; i < DAWN_GBUFFER_RT_COUNT; ++i) {
         if (gbufferTextures[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[GBuffer] Execute abort: RT" << i << " invalid" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[GBuffer] Execute abort: RT" << i << " invalid" << std::endl;
             return;
         }
     }
     if (depthTexture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GBuffer] Execute abort: depth invalid" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GBuffer] Execute abort: depth invalid" << std::endl;
         return;
     }
 
@@ -1647,7 +1648,7 @@ void ForwardRenderer::RenderDawnGBuffer(rhi::RHICommandBuffer* cmdBuffer,
     cmdBuffer->SetScissor({{0, 0}, {width, height}});
 
     if (dawnGBufferPipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[GBuffer] Pipeline not initialized — clearing only" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GBuffer] Pipeline not initialized — clearing only" << std::endl;
         cmdBuffer->EndRenderPass();
     } else {
         cmdBuffer->BindGraphicsPipeline(dawnGBufferPipeline_);
@@ -1740,17 +1741,17 @@ void ForwardRenderer::RenderDawnDeferredLighting(rhi::RHICommandBuffer* cmdBuffe
                                                   u32 height) {
     if (!device_ || !cmdBuffer) return;
     if (dawnDeferredPipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[Deferred] Pipeline not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[Deferred] Pipeline not initialized" << std::endl;
         return;
     }
     for (u32 i = 0; i < DAWN_GBUFFER_RT_COUNT; ++i) {
         if (gbufferTextures[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[Deferred] RT" << i << " invalid" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[Deferred] RT" << i << " invalid" << std::endl;
             return;
         }
     }
     if (hdrTexture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[Deferred] HDR output invalid" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[Deferred] HDR output invalid" << std::endl;
         return;
     }
 
@@ -1883,21 +1884,21 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
                                                        rhi::ResourceHandle gi_indirect_texture) {
     if (!device_ || !cmdBuffer) return;
     if (dawnMeshletDeferredPipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[MeshletDeferred] Pipeline not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MeshletDeferred] Pipeline not initialized" << std::endl;
         return;
     }
     for (u32 i = 0; i < DAWN_MESHLET_GBUFFER_RT_COUNT; ++i) {
         if (gbufferTextures[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[MeshletDeferred] RT" << i << " invalid" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[MeshletDeferred] RT" << i << " invalid" << std::endl;
             return;
         }
     }
     if (depthTexture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[MeshletDeferred] depth texture invalid" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MeshletDeferred] depth texture invalid" << std::endl;
         return;
     }
     if (hdrTexture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[MeshletDeferred] HDR output invalid" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MeshletDeferred] HDR output invalid" << std::endl;
         return;
     }
 
@@ -2247,7 +2248,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
             sceneExtractionSystem_.ExtractScene(scene);
         } else {
             if (!sceneExtractionSystem_.ExtractScene(scene)) {
-                std::cerr << "ForwardRenderer: Partial scene update failed" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Engine") << "ForwardRenderer: Partial scene update failed" << std::endl;
             }
         }
     }

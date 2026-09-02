@@ -8,7 +8,7 @@
              xmlns:conv="using:PrimalEditor_Avalonia.Converters"
              x:Class="PrimalEditor_Avalonia.Editors.Material.MaterialEditorView"
              x:DataType="vm:MaterialEditorViewModel"
-             Background="{StaticResource VoidBrush}">
+             Background="{DynamicResource VoidBrush}">
 
   <UserControl.Resources>
 
@@ -27,9 +27,9 @@
         // render through these dedicated template properties. -->
     <DataTemplate DataType="vm:MaterialNodeViewModel" x:Key="MaterialNodeTemplate">
       <n:Node Header="{Binding Title}"
-              HeaderBrush="{StaticResource ElectricBlueDeepBrush}"
-              BorderBrush="{StaticResource HairlineBrush}"
-              Background="{StaticResource PanelBrush}"
+              HeaderBrush="{DynamicResource ElectricBlueDeepBrush}"
+              BorderBrush="{DynamicResource HairlineBrush}"
+              Background="{DynamicResource PanelBrush}"
               Input="{Binding Input}"
               Output="{Binding Output}"
               Location="{Binding Location, Mode=TwoWay}"
@@ -42,8 +42,8 @@
                          IsConnected="{Binding IsConnected}">
               <n:NodeInput.HeaderTemplate>
                 <DataTemplate>
-                  <TextBlock Text="{Binding}" FontFamily="{StaticResource FontMono}"
-                             FontSize="11" Foreground="{StaticResource MintBrush}"/>
+                  <TextBlock Text="{Binding}" FontFamily="{DynamicResource FontMono}"
+                             FontSize="11" Foreground="{DynamicResource MintBrush}"/>
                 </DataTemplate>
               </n:NodeInput.HeaderTemplate>
             </n:NodeInput>
@@ -56,8 +56,8 @@
                           IsConnected="{Binding IsConnected}">
               <n:NodeOutput.HeaderTemplate>
                 <DataTemplate>
-                  <TextBlock Text="{Binding}" FontFamily="{StaticResource FontMono}"
-                             FontSize="11" Foreground="{StaticResource AmberBrush}"/>
+                  <TextBlock Text="{Binding}" FontFamily="{DynamicResource FontMono}"
+                             FontSize="11" Foreground="{DynamicResource AmberBrush}"/>
                 </DataTemplate>
               </n:NodeOutput.HeaderTemplate>
             </n:NodeOutput>
@@ -72,9 +72,9 @@
             <DataTemplate DataType="vm:MaterialParamViewModel">
               <StackPanel Orientation="Horizontal" Spacing="2" Margin="0,1">
                 <TextBlock Text="{Binding Name}" Width="72"
-                           FontFamily="{StaticResource FontMono}" FontSize="11"
+                           FontFamily="{DynamicResource FontMono}" FontSize="11"
                            VerticalAlignment="Center"
-                           Foreground="{StaticResource MutedTextBrush}"/>
+                           Foreground="{DynamicResource MutedTextBrush}"/>
                 <TextBox Width="48" FontSize="11"
                          Text="{Binding X, Mode=TwoWay, Converter={StaticResource FloatConv}}"
                          IsVisible="{Binding ShowX}"
@@ -97,8 +97,8 @@
                          KeyDown="OnNodeInputKeyDown"/>
                 <StackPanel Width="180" Spacing="3" IsVisible="{Binding IsTexture}">
                   <Border Height="72" CornerRadius="3"
-                          Background="{StaticResource VoidBrush}"
-                          BorderBrush="{StaticResource HairlineBrush}" BorderThickness="1">
+                          Background="{DynamicResource VoidBrush}"
+                          BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1">
                     <Image Source="{Binding SelectedTextureAsset, Converter={StaticResource AssetThumbnailConv}}"
                            Stretch="Uniform"/>
                   </Border>
@@ -120,7 +120,7 @@
                           HorizontalAlignment="Stretch" FontSize="10"/>
                   <TextBlock Text="{Binding TexturePath}" FontSize="9"
                              TextTrimming="CharacterEllipsis"
-                             Foreground="{StaticResource MutedTextBrush}"/>
+                             Foreground="{DynamicResource MutedTextBrush}"/>
                 </StackPanel>
               </StackPanel>
             </DataTemplate>
@@ -145,7 +145,7 @@
         <n:Connection Source="{Binding Source.Anchor}"
                       Target="{Binding Target.Anchor}"
                       Direction="{Binding ., Converter={StaticResource FlowToDirectionConverter}}"
-                      Stroke="{StaticResource ElectricBlueBrush}"
+                      Stroke="{DynamicResource ElectricBlueBrush}"
                       StrokeThickness="2"
                       Focusable="True"
                       ToolTip.Tip="Right-click or right-drag across to disconnect"/>
@@ -154,7 +154,7 @@
 
   </UserControl.Resources>
 
-  <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="220,*,280" Background="{StaticResource VoidBrush}">
+  <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="220,*,280" Background="{DynamicResource VoidBrush}">
 
     <!-- TOP: Save/Discard toolbar. The host's Ctrl+S already calls
          MaterialEditorViewModel.Save() — this row gives the same
@@ -165,15 +165,15 @@
       <Grid ColumnDefinitions="*,Auto,Auto,Auto">
         <TextBlock Grid.Column="0"
                    Text="{Binding Asset.FileName, FallbackValue='(no asset)'}"
-                   FontFamily="{StaticResource FontMono}"
+                   FontFamily="{DynamicResource FontMono}"
                    FontSize="11"
-                   Foreground="{StaticResource SecondaryTextBrush}"
+                   Foreground="{DynamicResource SecondaryTextBrush}"
                    VerticalAlignment="Center"/>
         <TextBlock Grid.Column="0" Margin="180,0,0,0"
                    Text="{Binding DirtyMarker, FallbackValue=''}"
-                   FontFamily="{StaticResource FontMono}"
+                   FontFamily="{DynamicResource FontMono}"
                    FontSize="11"
-                   Foreground="{StaticResource AmberBrush}"
+                   Foreground="{DynamicResource AmberBrush}"
                    VerticalAlignment="Center"/>
         <Button Grid.Column="1" Content="Discard" Margin="4,0"
                 Click="OnDiscardClick"
@@ -189,10 +189,10 @@
       <DockPanel>
         <Border DockPanel.Dock="Top" Padding="8,6">
           <TextBlock Text="NODE PALETTE"
-                     FontFamily="{StaticResource FontDisplay}"
+                     FontFamily="{DynamicResource FontDisplay}"
                      FontWeight="SemiBold" FontSize="11"
                      LetterSpacing="2"
-                     Foreground="{StaticResource ElectricBlueBrush}"/>
+                     Foreground="{DynamicResource ElectricBlueBrush}"/>
         </Border>
         <ListBox x:Name="PaletteListBox"
                  ItemsSource="{Binding NodePalette}"
@@ -213,13 +213,13 @@
                       Background="Transparent">
                 <StackPanel>
                   <TextBlock Text="{Binding DisplayName}"
-                             FontFamily="{StaticResource FontMono}"
+                             FontFamily="{DynamicResource FontMono}"
                              FontSize="11"
                              Foreground="{StaticResource FontBrush}"/>
                   <TextBlock Text="{Binding TypeName}"
-                             FontFamily="{StaticResource FontMono}"
+                             FontFamily="{DynamicResource FontMono}"
                              FontSize="9"
-                             Foreground="{StaticResource MutedTextBrush}"/>
+                             Foreground="{DynamicResource MutedTextBrush}"/>
                 </StackPanel>
               </Border>
             </DataTemplate>
@@ -230,7 +230,7 @@
 
     <!-- CENTER: graph editor -->
     <Border Grid.Row="1" Grid.Column="1" Classes="floating" Margin="2,2,2,2"
-            BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+            BorderBrush="{DynamicResource ElectricBlueDeepBrush}"
             BorderThickness="1">
       <n:NodifyEditor x:Name="NodifyEditor"
                       ItemsSource="{Binding Nodes}"
@@ -240,7 +240,7 @@
                       ConnectionCompletedCommand="{Binding ConnectionCompletedCommand}"
                       Focusable="True"
                       DragDrop.AllowDrop="True"
-                      Background="{StaticResource SlateBrush}"/>
+                      Background="{DynamicResource SlateBrush}"/>
     </Border>
 
     <!-- RIGHT: preview + parameter panel -->
@@ -255,7 +255,7 @@
       <!-- Selected node title bar -->
       <Border Grid.Row="1" Classes="floating" Margin="2,2,6,2" Padding="8,4">
         <TextBlock Text="{Binding SelectedNode.Title, FallbackValue='(no node selected)'}"
-                   FontFamily="{StaticResource FontMono}"
+                   FontFamily="{DynamicResource FontMono}"
                    FontSize="11"
                    Foreground="{StaticResource FontBrush}"/>
       </Border>
@@ -268,9 +268,9 @@
               <DataTemplate DataType="vm:MaterialParamViewModel">
                 <StackPanel Orientation="Horizontal" Spacing="2" Margin="0,2">
                   <TextBlock Text="{Binding Name}" Width="72"
-                             FontFamily="{StaticResource FontMono}" FontSize="11"
+                             FontFamily="{DynamicResource FontMono}" FontSize="11"
                              VerticalAlignment="Center"
-                             Foreground="{StaticResource MutedTextBrush}"/>
+                             Foreground="{DynamicResource MutedTextBrush}"/>
                   <TextBox Width="48" FontSize="11"
                            Text="{Binding X, Mode=TwoWay, Converter={StaticResource FloatConv}}"
                            IsVisible="{Binding ShowX}"
@@ -293,8 +293,8 @@
                            KeyDown="OnNodeInputKeyDown"/>
                   <StackPanel Width="180" Spacing="4" IsVisible="{Binding IsTexture}">
                     <Border Height="96" CornerRadius="3"
-                            Background="{StaticResource VoidBrush}"
-                            BorderBrush="{StaticResource HairlineBrush}" BorderThickness="1">
+                            Background="{DynamicResource VoidBrush}"
+                            BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1">
                       <Image Source="{Binding SelectedTextureAsset, Converter={StaticResource AssetThumbnailConv}}"
                              Stretch="Uniform"/>
                     </Border>
@@ -316,7 +316,7 @@
                             HorizontalAlignment="Stretch" FontSize="10"/>
                     <TextBlock Text="{Binding TexturePath}" FontSize="9"
                                TextTrimming="CharacterEllipsis"
-                               Foreground="{StaticResource MutedTextBrush}"/>
+                               Foreground="{DynamicResource MutedTextBrush}"/>
                   </StackPanel>
                 </StackPanel>
               </DataTemplate>
@@ -331,9 +331,9 @@
     <Border Grid.Row="2" Grid.ColumnSpan="3" Classes="floating"
             Margin="6,2,6,6" Padding="8,4">
       <TextBlock Text="{Binding StatusLine, FallbackValue='Ready'}"
-                 FontFamily="{StaticResource FontMono}"
+                 FontFamily="{DynamicResource FontMono}"
                  FontSize="10"
-                 Foreground="{StaticResource MutedTextBrush}"/>
+                 Foreground="{DynamicResource MutedTextBrush}"/>
     </Border>
 
     <!-- Pointer-driven palette drag adornment. It lives above all three
@@ -344,15 +344,15 @@
             IsHitTestVisible="False" ClipToBounds="True" ZIndex="1000">
       <Border x:Name="PaletteDragGhost" IsVisible="False"
               Width="180" Opacity="0.82" Padding="10,7" CornerRadius="4"
-              Background="{StaticResource PanelBrush}"
-              BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="1">
+              Background="{DynamicResource PanelBrush}"
+              BorderBrush="{DynamicResource ElectricBlueBrush}" BorderThickness="1">
         <StackPanel>
           <TextBlock x:Name="PaletteDragGhostTitle"
-                     FontFamily="{StaticResource FontMono}" FontSize="11"
+                     FontFamily="{DynamicResource FontMono}" FontSize="11"
                      Foreground="{StaticResource FontBrush}"/>
           <TextBlock x:Name="PaletteDragGhostType"
-                     FontFamily="{StaticResource FontMono}" FontSize="9"
-                     Foreground="{StaticResource MutedTextBrush}"/>
+                     FontFamily="{DynamicResource FontMono}" FontSize="9"
+                     Foreground="{DynamicResource MutedTextBrush}"/>
         </StackPanel>
       </Border>
     </Canvas>

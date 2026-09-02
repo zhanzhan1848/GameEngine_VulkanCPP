@@ -120,8 +120,19 @@ void FinalBlitModule::AddPass(rendergraph::RenderGraph& graph, const FinalBlitIn
             auto cmd = context.cmdBuffer;
             u32 cbIdx = inputs.current_buffer_index % 3;
 
+            // 输入物理句柄必须在 exec 时解析：RG 瞬态纹理（如 ToneMapping_Output）
+            // 在 Compile/AllocateResources 之后才有 physical handle——在 AddPass
+            // 时预解析会拿到 INVALID，曾使 FinalBlit 永久回退到 fusion 原始帧，
+            // TAA→Bloom→ToneMapping 整条后处理链被 RG 裁剪（两侧平台同样中招），
+            // 屏幕显示未经 TAA 解析的原始帧（噪点+几何锯齿）。
+            ResourceHandle inputTex = inputs.input_tex;
+            if (inputs.input_rg.IsValid()) {
+                auto* res = context.graph->GetResource(inputs.input_rg);
+                if (res) inputTex = res->GetPhysicalHandle();
+            }
+
             DescData params[] = {
-                {0, DescriptorType::SampledImage, inputs.input_tex, handles::INVALID_SAMPLER},
+                {0, DescriptorType::SampledImage, inputTex, handles::INVALID_SAMPLER},
                 {1, DescriptorType::Sampler,      handles::INVALID_RESOURCE, default_sampler_},
             };
             UpdateDesc(device_, descriptor_sets_[cbIdx], params, 2);

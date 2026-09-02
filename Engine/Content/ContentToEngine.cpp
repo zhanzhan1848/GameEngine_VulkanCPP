@@ -8,6 +8,7 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RHI/Core/RHIMeshAsset.h"
 #include "Graphics/RHI/Core/RHIGpuMesh.h"
+#include "Engine/Common/CoreLogStream.h"
 #ifdef __APPLE__
 #if defined(__APPLE__)
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
@@ -747,7 +748,7 @@ namespace primal::content
 				utl::vector<u8> decBuf(decSize);
 				int zret = uncompress(decBuf.data(), &decSize, compData, compLen);
 				if (zret != Z_OK) {
-					std::cerr << "TEXR: zlib decompress failed (" << zret
+					PRIMAL_LOG_STREAM(Error, "Asset") << "TEXR: zlib decompress failed (" << zret
 					          << ") compLen=" << compLen << " decSize=" << decSize << std::endl;
 					return id::invalid_id;
 				}
@@ -789,7 +790,7 @@ namespace primal::content
 				}
 				raw_ptr = converted_buffer.data();
 #else
-				std::cerr << "TEXR: not supported on this platform" << std::endl;
+				PRIMAL_LOG_STREAM(Error, "Asset") << "TEXR: not supported on this platform" << std::endl;
 				return id::invalid_id;
 #endif
 			}
@@ -838,7 +839,7 @@ namespace primal::content
 
 					auto handle = device->CreateTexture(desc);
 					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
-                        std::cerr << "Failed to create RHI texture." << std::endl;
+                        PRIMAL_LOG_STREAM(Error, "Asset") << "Failed to create RHI texture." << std::endl;
 						return id::invalid_id;
 					}
 
@@ -847,7 +848,7 @@ namespace primal::content
 					if (texture) {
 						auto* mtlTexture = texture->GetNativeTexture();
                         if (!mtlTexture) {
-                            std::cerr << "Failed to get native Metal texture." << std::endl;
+                            PRIMAL_LOG_STREAM(Error, "Asset") << "Failed to get native Metal texture." << std::endl;
                         } else {
                             // std::cout << "Got native Metal texture: " << mtlTexture << std::endl;
                         }
@@ -874,7 +875,7 @@ namespace primal::content
                                           // std::cout << "Texture is Private. Using Staging Buffer." << std::endl;
                                           // For Private textures, we must use a Staging Buffer and BlitEncoder
                                           auto* device = metalDevice->GetNativeDevice();
-                                          if (!device) std::cerr << "Native Device is NULL!" << std::endl;
+                                          if (!device) PRIMAL_LOG_STREAM(Error, "Asset") << "Native Device is NULL!" << std::endl;
                                           
                                           MTL::Buffer* stagingBuffer = device->newBuffer(slice_pitch, MTL::ResourceStorageModeShared);
                                           if (stagingBuffer) {
@@ -883,13 +884,13 @@ namespace primal::content
                                               memcpy(stagingBuffer->contents(), blob.position(), slice_pitch);
                                               
                                               auto* queue = metalDevice->GetTransferQueue();
-                                              if (!queue) std::cerr << "Transfer Queue is NULL!" << std::endl;
+                                              if (!queue) PRIMAL_LOG_STREAM(Error, "Asset") << "Transfer Queue is NULL!" << std::endl;
                                               
                                               auto* cmdBuffer = queue->commandBuffer();
-                                              if (!cmdBuffer) std::cerr << "Command Buffer creation failed!" << std::endl;
+                                              if (!cmdBuffer) PRIMAL_LOG_STREAM(Error, "Asset") << "Command Buffer creation failed!" << std::endl;
                                               
                                               auto* blitEncoder = cmdBuffer->blitCommandEncoder();
-                                              if (!blitEncoder) std::cerr << "Blit Encoder creation failed!" << std::endl;
+                                              if (!blitEncoder) PRIMAL_LOG_STREAM(Error, "Asset") << "Blit Encoder creation failed!" << std::endl;
                                               
                                               // std::cout << "Encoding Blit..." << std::endl;
                                               blitEncoder->copyFromBuffer(
@@ -912,7 +913,7 @@ namespace primal::content
                                               
                                               stagingBuffer->release();
                                           } else {
-                                              std::cerr << "Failed to create staging buffer for texture upload." << std::endl;
+                                              PRIMAL_LOG_STREAM(Error, "Asset") << "Failed to create staging buffer for texture upload." << std::endl;
                                           }
                                       } else {
                                          // For Managed/Shared textures, we can use replaceRegion
@@ -943,7 +944,7 @@ namespace primal::content
 					const u32 mip_levels{ blob.read<u32>() };
 					const u32 format_u32{ blob.read<u32>() };
 
-					std::cerr << "[CTE/Dawn] create_texture_resource w=" << width << " h=" << height
+					PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Dawn] create_texture_resource w=" << width << " h=" << height
 					          << " arr=" << array_size << " mips=" << mip_levels
 					          << " fmt_u32=" << format_u32 << std::endl;
 
@@ -963,11 +964,11 @@ namespace primal::content
 
 					desc.usage = graphics::rhi::TextureUsage::ShaderResource | graphics::rhi::TextureUsage::CopyDest | graphics::rhi::TextureUsage::CopySource;
 
-					std::cerr << "[CTE/Dawn] Calling CreateTexture..." << std::endl;
+					PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Dawn] Calling CreateTexture..." << std::endl;
 					auto handle = device->CreateTexture(desc);
-					std::cerr << "[CTE/Dawn] CreateTexture result: " << handle << std::endl;
+					PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Dawn] CreateTexture result: " << handle << std::endl;
 					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
-						std::cerr << "[ContentToEngine] Failed to create Dawn texture." << std::endl;
+						PRIMAL_LOG_STREAM(Error, "Asset") << "[ContentToEngine] Failed to create Dawn texture." << std::endl;
 						return id::invalid_id;
 					}
 
@@ -980,12 +981,12 @@ namespace primal::content
 							u32 mipWidth = std::max(1u, width >> j);
 							u32 mipHeight = std::max(1u, height >> j);
 
-							std::cerr << "[CTE/Dawn] UpdateTextureData mip=" << j << " slice=" << i
+							PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Dawn] UpdateTextureData mip=" << j << " slice=" << i
 							          << " " << mipWidth << "x" << mipHeight
 							          << " row_pitch=" << row_pitch << std::endl;
 							dawnDevice->UpdateTextureData(handle, blob.position(),
 								0, 0, i, mipWidth, mipHeight, 1, row_pitch, j);
-							std::cerr << "[CTE/Dawn] UpdateTextureData done" << std::endl;
+							PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Dawn] UpdateTextureData done" << std::endl;
 
 							blob.skip(slice_pitch);
 						}
@@ -996,7 +997,7 @@ namespace primal::content
 						std::lock_guard lock(rhi_texture_mutex());
 						rhi_texture_map()[new_id] = {handle, device};
 					}
-					std::cerr << "[CTE/Dawn] create_texture_resource done id=" << new_id << std::endl;
+					PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Dawn] create_texture_resource done id=" << new_id << std::endl;
 					return new_id;
 #else
 					return id::invalid_id;
@@ -1035,7 +1036,7 @@ namespace primal::content
 
 					auto handle = device->CreateTexture(desc);
 					if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
-						std::cerr << "[CTE/Vulkan] Failed to create texture." << std::endl;
+						PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Vulkan] Failed to create texture." << std::endl;
 						return id::invalid_id;
 					}
 
@@ -1078,9 +1079,9 @@ namespace primal::content
 						sdesc.name = "CTE_TexStaging";
 						ResourceHandle staging = device->CreateBuffer(sdesc);
 						if (staging == handles::INVALID_RESOURCE) {
-							std::cerr << "[CTE/Vulkan] Failed to create staging buffer" << std::endl;
+							PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Vulkan] Failed to create staging buffer" << std::endl;
 						} else if (!device->UpdateBufferData(staging, pixels.data(), pixels.size(), 0)) {
-							std::cerr << "[CTE/Vulkan] UpdateBufferData failed for texture staging" << std::endl;
+							PRIMAL_LOG_STREAM(Error, "Asset") << "[CTE/Vulkan] UpdateBufferData failed for texture staging" << std::endl;
 							device->DestroyBuffer(staging);
 						} else {
 							CommandBufferHandle cmd = device->CreateCommandBuffer(CommandQueueType::Graphics);

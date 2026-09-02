@@ -24,6 +24,45 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         Opened += OnMainWindowOpened;
+        InitializeThemeMenu();
+    }
+
+    /// <summary>
+    /// Build the View ▸ Theme submenu from <see cref="Themes.EditorThemeRegistry.All"/>
+    /// (radio items) and keep the checks in sync with <see cref="Themes.ThemeManager"/>.
+    /// </summary>
+    private void InitializeThemeMenu()
+    {
+        foreach (var theme in Themes.EditorThemeRegistry.All)
+        {
+            var item = new MenuItem
+            {
+                Header = "_" + theme.DisplayName,
+                Tag = theme.Id,
+                ToggleType = MenuItemToggleType.Radio,
+                IsChecked = Themes.ThemeManager.Current.Id == theme.Id,
+            };
+            item.Click += OnThemeMenuItemClick;
+            ThemeMenu.Items.Add(item);
+        }
+        Themes.ThemeManager.ThemeChanged += OnThemeManagerChanged;
+        Closed += (_, _) => Themes.ThemeManager.ThemeChanged -= OnThemeManagerChanged;
+    }
+
+    private void OnThemeMenuItemClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: string themeId })
+        {
+            Themes.ThemeManager.Apply(themeId);
+        }
+    }
+
+    private void OnThemeManagerChanged(Themes.EditorTheme theme)
+    {
+        foreach (var item in ThemeMenu.Items.OfType<MenuItem>())
+        {
+            item.IsChecked = item.Tag as string == theme.Id;
+        }
     }
 
     /// <summary>

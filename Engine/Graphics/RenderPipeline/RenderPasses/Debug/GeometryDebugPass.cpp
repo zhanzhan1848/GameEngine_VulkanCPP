@@ -18,6 +18,7 @@
 #include <vector>
 #include <iostream>
 #include <set>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -112,7 +113,7 @@ struct GeometryDebugContext {
             if (!ReadShaderFile(std::string("Engine/Graphics/Vulkan/shaders/Debug/") +
                                 name + "." + stage + ".spv", data) ||
                 data.empty()) {
-                std::cerr << "[GeometryDebug] Failed to load SPIR-V: Debug/" << name
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GeometryDebug] Failed to load SPIR-V: Debug/" << name
                           << "." << stage << ".spv" << std::endl;
                 return handles::INVALID_SHADER;
             }
@@ -123,7 +124,7 @@ struct GeometryDebugContext {
         if (!ReadShaderFile(std::string("Engine/Graphics/RHI/Shaders/Debug/") +
                             std::string(name) + ".metal", data) ||
             data.empty()) {
-            std::cerr << "[GeometryDebug] Failed to load Metal source: Debug/" << name
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GeometryDebug] Failed to load Metal source: Debug/" << name
                       << ".metal" << std::endl;
             return handles::INVALID_SHADER;
         }
@@ -188,7 +189,7 @@ struct GeometryDebugContext {
             ShaderHandle fs = LoadDebugShader(device, isVulkan, "MeshletDebug", false, "meshlet_debug_fs");
             
             if (vs != handles::INVALID_SHADER && fs != handles::INVALID_SHADER) {
-                std::cout << "Meshlet Debug Pipeline Created Successfully." << std::endl;
+                PRIMAL_LOG_STREAM(Info, "Render") << "Meshlet Debug Pipeline Created Successfully." << std::endl;
                 
                 DescriptorSetLayoutBinding bindings[] = {
                     { 0, DescriptorType::UniformBufferDynamic, 1, ShaderStage::Vertex | ShaderStage::Pixel }, // DebugUniforms
@@ -239,7 +240,7 @@ struct GeometryDebugContext {
 
                 meshlet_pipeline = device.CreateGraphicsPipeline(p_desc);
             } else {
-                std::cerr << "Failed to create Meshlet Shaders." << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create Meshlet Shaders." << std::endl;
             }
         }
         
@@ -291,9 +292,9 @@ struct GeometryDebugContext {
                 
                 sdf_pipeline = device.CreateGraphicsPipeline(p_desc);
                 if (sdf_pipeline != handles::INVALID_PIPELINE) {
-                    std::cout << "SDF Debug Pipeline Created Successfully." << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "Render") << "SDF Debug Pipeline Created Successfully." << std::endl;
                 } else {
-                    std::cerr << "Failed to create SDF Pipeline." << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create SDF Pipeline." << std::endl;
                 }
             }
         }
@@ -339,9 +340,9 @@ struct GeometryDebugContext {
                 
                 vector_field_pipeline = device.CreateGraphicsPipeline(p_desc);
                 if (vector_field_pipeline != handles::INVALID_PIPELINE) {
-                    std::cout << "VectorField Debug Pipeline Created Successfully." << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "Render") << "VectorField Debug Pipeline Created Successfully." << std::endl;
                 } else {
-                    std::cerr << "Failed to create VectorField Pipeline." << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create VectorField Pipeline." << std::endl;
                 }
             }
         }
@@ -392,15 +393,15 @@ struct GeometryDebugContext {
                 
                 voxel_pipeline = device.CreateGraphicsPipeline(p_desc);
                 if (voxel_pipeline != handles::INVALID_PIPELINE) {
-                    std::cout << "Voxel Debug Pipeline Created Successfully." << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "Render") << "Voxel Debug Pipeline Created Successfully." << std::endl;
                 } else {
-                    std::cerr << "Failed to create Voxel Pipeline." << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create Voxel Pipeline." << std::endl;
                 }
             }
         }
 
         initialized = true;
-        std::cout << "GeometryDebugPass Initialized." << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "GeometryDebugPass Initialized." << std::endl;
     }
 
     void BeginFrame(RHIDeviceBase& device) {
@@ -699,7 +700,7 @@ static void ExecuteGeometryDebug(
     const RenderView& view,
     const GeometryDebugSettings& settings)
 {
-    std::cout << "[GeometryDebug] ExecuteGeometryDebug START - visualize_meshlets=" << settings.visualize_meshlets << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] ExecuteGeometryDebug START - visualize_meshlets=" << settings.visualize_meshlets << std::endl;
     
     g_debugContext.BeginFrame(device);
     
@@ -709,7 +710,7 @@ static void ExecuteGeometryDebug(
     
     void* mappedData = g_debugContext.GetMappedPtr();
     if (!mappedData) {
-        std::cerr << "Failed to map debug uniform buffer." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "Failed to map debug uniform buffer." << std::endl;
         return;
     }
     
@@ -761,7 +762,7 @@ static void ExecuteGeometryDebug(
         if (logged_mesh_ids.find(id) == logged_mesh_ids.end()) {
             const float* c = mesh->GetBoundsMin();
             const float* cx = mesh->GetBoundsMax();
-            std::cout << "[GeometryDebug] Mesh " << id 
+            PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] Mesh " << id 
                       << " MeshletCount=" << mesh->GetMeshletCount() 
                       << " BoundsMin=(" << c[0] << "," << c[1] << "," << c[2] << ")"
                       << " BoundsMax=(" << cx[0] << "," << cx[1] << "," << cx[2] << ")"
@@ -787,7 +788,7 @@ static void ExecuteGeometryDebug(
                 // DEBUG: Log if descriptor set is invalid
                 static bool logged_invalid_ds = false;
                 if (ds == handles::INVALID_DESCRIPTOR_SET && !logged_invalid_ds) {
-                    std::cerr << "[GeometryDebug] MESHLET: Descriptor set is INVALID!" << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[GeometryDebug] MESHLET: Descriptor set is INVALID!" << std::endl;
                     logged_invalid_ds = true;
                 }
                 
@@ -800,7 +801,7 @@ static void ExecuteGeometryDebug(
                     // DEBUG: Log first draw call
                     static bool logged_first_draw = false;
                     if (!logged_first_draw) {
-                        std::cout << "[GeometryDebug] MESHLET: Issuing Draw(3, " << mesh->GetMeshletCount() << ")" << std::endl;
+                        PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] MESHLET: Issuing Draw(3, " << mesh->GetMeshletCount() << ")" << std::endl;
                         logged_first_draw = true;
                     }
                     
@@ -811,7 +812,7 @@ static void ExecuteGeometryDebug(
                     drawCount++;
                 }
             } else {
-                std::cerr << "Failed to allocate debug uniforms for mesh: " << id << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "Failed to allocate debug uniforms for mesh: " << id << std::endl;
             }
         }
         
@@ -821,14 +822,14 @@ static void ExecuteGeometryDebug(
                  // Only log once per mesh to avoid spam
                  static std::set<id::id_type> logged_meshes;
                  if (logged_meshes.find(id) == logged_meshes.end()) {
-                     std::cout << "[GeometryDebug] Mesh " << id << " has invalid SDF texture." << std::endl;
+                     PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] Mesh " << id << " has invalid SDF texture." << std::endl;
                      logged_meshes.insert(id);
                  }
              }
              if (g_debugContext.sdf_pipeline == handles::INVALID_PIPELINE) {
                  static bool logged_pipeline = false;
                  if (!logged_pipeline) {
-                     std::cout << "[GeometryDebug] SDF Pipeline is invalid." << std::endl;
+                     PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] SDF Pipeline is invalid." << std::endl;
                      logged_pipeline = true;
                  }
              }
@@ -838,7 +839,7 @@ static void ExecuteGeometryDebug(
             // Log valid SDF texture for debugging
             static std::set<id::id_type> valid_logged_meshes;
             if (valid_logged_meshes.find(id) == valid_logged_meshes.end()) {
-                std::cout << "[GeometryDebug] Mesh " << id << " has valid SDF texture. Slice Depth: " << settings.slice_depth << std::endl;
+                PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] Mesh " << id << " has valid SDF texture. Slice Depth: " << settings.slice_depth << std::endl;
                 valid_logged_meshes.insert(id);
             }
 
@@ -906,7 +907,7 @@ static void ExecuteGeometryDebug(
                 if (draw_count > 0) {
                      static bool logged_vf_size = false;
                      if (!logged_vf_size && step > 1) {
-                         std::cout << "[GeometryDebug] VectorField too large: " << total_voxels << " voxels. Throttling with step " << step << " (" << draw_count << " lines)" << std::endl;
+                         PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] VectorField too large: " << total_voxels << " voxels. Throttling with step " << step << " (" << draw_count << " lines)" << std::endl;
                          logged_vf_size = true;
                      }
                      cmdList->Draw(draw_count * 2, 0, 1, 0);
@@ -929,7 +930,7 @@ static void ExecuteGeometryDebug(
                 
                 static std::set<id::id_type> logged_voxels;
                 if (logged_voxels.find(id) == logged_voxels.end()) {
-                    std::cout << "[GeometryDebug] Mesh " << id << " Voxel Res: " << res[0] << "x" << res[1] << "x" << res[2] 
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] Mesh " << id << " Voxel Res: " << res[0] << "x" << res[1] << "x" << res[2] 
                               << " Texture: " << (mesh->GetVoxelTexture() != handles::INVALID_RESOURCE ? "Valid" : "Invalid") << std::endl;
                     logged_voxels.insert(id);
                 }
@@ -959,7 +960,7 @@ static void ExecuteGeometryDebug(
                 if (draw_count > 0) {
                      static bool logged_voxel_size = false;
                      if (!logged_voxel_size && step > 1) {
-                         std::cout << "[GeometryDebug] Voxel too large: " << total_voxels << " instances. Throttling with step " << step << " (" << draw_count << " instances)" << std::endl;
+                         PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] Voxel too large: " << total_voxels << " instances. Throttling with step " << step << " (" << draw_count << " instances)" << std::endl;
                          logged_voxel_size = true;
                      }
                      cmdList->Draw(36, 0, draw_count, 0);
@@ -973,7 +974,7 @@ static void ExecuteGeometryDebug(
     static int frameCounter = 0;
     if (frameCounter++ % 60 == 0) {
         if (settings.enable) {
-            std::cout << "[GeometryDebug] Frame " << frameCounter << ": Meshes: " << meshCount << ", Draws: " << drawCount << ", Mode: " << (int)settings.mode << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] Frame " << frameCounter << ": Meshes: " << meshCount << ", Draws: " << drawCount << ", Mode: " << (int)settings.mode << std::endl;
         }
     }
 }
@@ -1012,7 +1013,7 @@ const GeometryDebugData& AddGeometryDebugPass(
             auto* cmdList = context.cmdBuffer;
             
             // DEBUG: Check if render pass is active
-            std::cout << "[GeometryDebug] Execute lambda called" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << "[GeometryDebug] Execute lambda called" << std::endl;
             
             if (!g_debugContext.initialized) {
                 if (g_debugContext.compatibleRenderPass == handles::INVALID_RESOURCE) {

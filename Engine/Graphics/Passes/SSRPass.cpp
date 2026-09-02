@@ -9,6 +9,7 @@
 #include "Graphics/Utils/ShaderRegistry.h"
 #include <iostream>
 #include <fstream>
+#include "Engine/Common/CoreLogStream.h"
 
 
 namespace primal::graphics {
@@ -70,7 +71,7 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     }
 
     if (!file.is_open()) {
-        std::cerr << "SSRPass: Failed to open shader file: " << shaderPath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "SSRPass: Failed to open shader file: " << shaderPath << std::endl;
         return false;
     }
     
@@ -84,7 +85,7 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     computeShader_ = device_->CreateShader(buffer.data(), buffer.size(), rhi::ShaderStage::Compute, "kernelMain");
     
     if (computeShader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "SSRPass: Failed to create compute shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "SSRPass: Failed to create compute shader" << std::endl;
         return false;
     }
 

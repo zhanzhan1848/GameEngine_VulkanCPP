@@ -5,6 +5,7 @@
  */
 
 #include "VulkanSurface.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN && defined(_WIN32)
 
@@ -25,7 +26,7 @@ bool CreateVulkanSurface(VkInstance instance, void* window, VkSurfaceKHR* outSur
     auto vkCreateWin32SurfaceKHR = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
         vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR"));
     if (!vkCreateWin32SurfaceKHR) {
-        std::cerr << "[VulkanSurface_Win32] vkCreateWin32SurfaceKHR not loaded" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSurface_Win32] vkCreateWin32SurfaceKHR not loaded" << std::endl;
         return false;
     }
 
@@ -38,7 +39,7 @@ bool CreateVulkanSurface(VkInstance instance, void* window, VkSurfaceKHR* outSur
 
     VkResult res = vkCreateWin32SurfaceKHR(instance, &ci, nullptr, outSurface);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanSurface_Win32] vkCreateWin32SurfaceKHR failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSurface_Win32] vkCreateWin32SurfaceKHR failed: " << res << std::endl;
         return false;
     }
     return true;

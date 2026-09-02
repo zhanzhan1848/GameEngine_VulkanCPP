@@ -1,4 +1,5 @@
 #include "DawnCommandBuffer.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -149,7 +150,7 @@ bool DawnCommandBuffer::beginImpl() {
 
     wgpuEncoder_ = wgpuDeviceCreateCommandEncoder(device_.GetNativeDevice(), &encoderDesc);
     if (!wgpuEncoder_) {
-        std::cerr << "[DawnCommandBuffer] Failed to create command encoder" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] Failed to create command encoder" << std::endl;
         return false;
     }
 
@@ -162,7 +163,7 @@ bool DawnCommandBuffer::endImpl() {
     EndCurrentEncoder();
 
     if (!wgpuEncoder_) {
-        std::cerr << "[DawnCommandBuffer] End() called without encoder" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] End() called without encoder" << std::endl;
         return false;
     }
 
@@ -172,7 +173,7 @@ bool DawnCommandBuffer::endImpl() {
 
     wgpuCommandBuffer_ = wgpuCommandEncoderFinish(wgpuEncoder_, &cbDesc);
     if (!wgpuCommandBuffer_) {
-        std::cerr << "[DawnCommandBuffer] Failed to finish command encoder" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] Failed to finish command encoder" << std::endl;
         return false;
     }
 
@@ -187,7 +188,7 @@ bool DawnCommandBuffer::submitImpl(u32 waitFlags) {
     (void)waitFlags;
 
     if (!wgpuCommandBuffer_) {
-        std::cerr << "[DawnCommandBuffer] Submit() called without command buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] Submit() called without command buffer" << std::endl;
         return false;
     }
 
@@ -211,7 +212,7 @@ bool DawnCommandBuffer::waitForCompletionImpl() {
 
         auto elapsed = std::chrono::steady_clock::now() - startTime;
         if (elapsed > timeout) {
-            std::cerr << "[DawnCommandBuffer] WaitForCompletion timed out" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] WaitForCompletion timed out" << std::endl;
             return false;
         }
 
@@ -232,7 +233,7 @@ void DawnCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     // Ensure we have a command encoder
     EnsureCommandEncoder();
     if (!wgpuEncoder_) {
-        std::cerr << "[DawnCommandBuffer] BeginRenderPass: no command encoder" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BeginRenderPass: no command encoder" << std::endl;
         return;
     }
 
@@ -246,13 +247,13 @@ void DawnCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
 
         DawnTexture* tex = device_.GetTexture(src.texture);
         if (!tex) {
-            std::cerr << "[DawnCommandBuffer] BeginRenderPass: invalid color attachment " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BeginRenderPass: invalid color attachment " << i << std::endl;
             continue;
         }
 
         WGPUTextureView view = tex->GetDefaultView();
         if (!view) {
-            std::cerr << "[DawnCommandBuffer] BeginRenderPass: no texture view for attachment " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BeginRenderPass: no texture view for attachment " << i << std::endl;
             continue;
         }
 
@@ -338,7 +339,7 @@ void DawnCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
 
     wgpuRenderPass_ = wgpuCommandEncoderBeginRenderPass(wgpuEncoder_, &rpDesc);
     if (!wgpuRenderPass_) {
-        std::cerr << "[DawnCommandBuffer] Failed to begin render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] Failed to begin render pass" << std::endl;
         return;
     }
 
@@ -360,7 +361,7 @@ void DawnCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
     // is encoded inline.
     auto* pass = device_.GetRenderPass(renderPass);
     if (!pass) {
-        std::cerr << "[DawnCommandBuffer] BeginRenderPass(handle): invalid handle " << renderPass << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BeginRenderPass(handle): invalid handle " << renderPass << std::endl;
         return;
     }
     BeginRenderPass(pass->GetDesc());
@@ -405,19 +406,19 @@ void DawnCommandBuffer::SetScissor(const Rect& scissor) {
 
 void DawnCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
     if (!wgpuRenderPass_) {
-        std::cerr << "[DawnCommandBuffer] BindGraphicsPipeline called outside render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindGraphicsPipeline called outside render pass" << std::endl;
         return;
     }
 
     DawnPipeline* dawnPipeline = device_.GetPipeline(pipeline);
     if (!dawnPipeline) {
-        std::cerr << "[DawnCommandBuffer] BindGraphicsPipeline: invalid pipeline handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindGraphicsPipeline: invalid pipeline handle" << std::endl;
         return;
     }
 
     WGPURenderPipeline renderPipeline = dawnPipeline->GetRenderPipeline();
     if (!renderPipeline) {
-        std::cerr << "[DawnCommandBuffer] BindGraphicsPipeline: null render pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindGraphicsPipeline: null render pipeline" << std::endl;
         return;
     }
 
@@ -428,13 +429,13 @@ void DawnCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
 void DawnCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
     DawnPipeline* dawnPipeline = device_.GetPipeline(pipeline);
     if (!dawnPipeline) {
-        std::cerr << "[DawnCommandBuffer] BindComputePipeline: invalid pipeline handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindComputePipeline: invalid pipeline handle" << std::endl;
         return;
     }
 
     WGPUComputePipeline computePipeline = dawnPipeline->GetComputePipeline();
     if (!computePipeline) {
-        std::cerr << "[DawnCommandBuffer] BindComputePipeline: null compute pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindComputePipeline: null compute pipeline" << std::endl;
         return;
     }
 
@@ -451,7 +452,7 @@ void DawnCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
 
     wgpuComputePass_ = wgpuCommandEncoderBeginComputePass(wgpuEncoder_, &cpDesc);
     if (!wgpuComputePass_) {
-        std::cerr << "[DawnCommandBuffer] Failed to begin compute pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] Failed to begin compute pass" << std::endl;
         return;
     }
     currentEncoderType_ = EncoderType::Compute;
@@ -466,7 +467,7 @@ void DawnCommandBuffer::BindVertexBuffers(u32 firstSlot, u32 slotCount,
                                            const ResourceHandle* buffers,
                                            const u64* offsets) {
     if (!wgpuRenderPass_) {
-        std::cerr << "[DawnCommandBuffer] BindVertexBuffers called outside render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindVertexBuffers called outside render pass" << std::endl;
         return;
     }
 
@@ -488,13 +489,13 @@ void DawnCommandBuffer::BindVertexBuffers(u32 firstSlot, u32 slotCount,
 
 void DawnCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat format, u64 offset) {
     if (!wgpuRenderPass_) {
-        std::cerr << "[DawnCommandBuffer] BindIndexBuffer called outside render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindIndexBuffer called outside render pass" << std::endl;
         return;
     }
 
     DawnBuffer* buf = device_.GetBuffer(buffer);
     if (!buf) {
-        std::cerr << "[DawnCommandBuffer] BindIndexBuffer: invalid buffer handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BindIndexBuffer: invalid buffer handle" << std::endl;
         return;
     }
 
@@ -584,7 +585,7 @@ void DawnCommandBuffer::PushConstants(PipelineLayoutHandle layout,
     // 2. Write data to the push constant buffer via the queue
     WGPUBuffer pushConstantBuf = device_.GetPushConstantBuffer();
     if (!pushConstantBuf) {
-        std::cerr << "[DawnCommandBuffer] PushConstants: no push constant buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] PushConstants: no push constant buffer" << std::endl;
         return;
     }
 
@@ -607,7 +608,7 @@ void DawnCommandBuffer::PushConstants(PipelineLayoutHandle layout,
 
     WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device_.GetNativeDevice(), &bgDesc);
     if (!bg) {
-        std::cerr << "[DawnCommandBuffer] PushConstants: failed to create bind group" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] PushConstants: failed to create bind group" << std::endl;
         return;
     }
 
@@ -628,7 +629,7 @@ void DawnCommandBuffer::PushConstants(PipelineLayoutHandle layout,
 void DawnCommandBuffer::Draw(u32 vertexCount, u32 startVertex,
                               u32 instanceCount, u32 startInstance) {
     if (!wgpuRenderPass_) {
-        std::cerr << "[DawnCommandBuffer] Draw called outside render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] Draw called outside render pass" << std::endl;
         return;
     }
 
@@ -640,7 +641,7 @@ void DawnCommandBuffer::DrawIndexed(u32 indexCount, u32 startIndex,
                                      u32 baseVertex,
                                      u32 instanceCount, u32 startInstance) {
     if (!wgpuRenderPass_) {
-        std::cerr << "[DawnCommandBuffer] DrawIndexed called outside render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] DrawIndexed called outside render pass" << std::endl;
         return;
     }
 
@@ -653,13 +654,13 @@ void DawnCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 draw
     (void)drawCount;
 
     if (!wgpuRenderPass_) {
-        std::cerr << "[DawnCommandBuffer] DrawIndirect called outside render pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] DrawIndirect called outside render pass" << std::endl;
         return;
     }
 
     DawnBuffer* buf = device_.GetBuffer(buffer);
     if (!buf) {
-        std::cerr << "[DawnCommandBuffer] DrawIndirect: invalid buffer handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] DrawIndirect: invalid buffer handle" << std::endl;
         return;
     }
 
@@ -685,7 +686,7 @@ void DawnCommandBuffer::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCoun
 
         wgpuComputePass_ = wgpuCommandEncoderBeginComputePass(wgpuEncoder_, &cpDesc);
         if (!wgpuComputePass_) {
-            std::cerr << "[DawnCommandBuffer] Failed to begin compute pass for Dispatch" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] Failed to begin compute pass for Dispatch" << std::endl;
             return;
         }
         currentEncoderType_ = EncoderType::Compute;
@@ -697,13 +698,13 @@ void DawnCommandBuffer::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCoun
 
 void DawnCommandBuffer::DispatchIndirect(ResourceHandle buffer, u64 offset) {
     if (currentEncoderType_ != EncoderType::Compute || !wgpuComputePass_) {
-        std::cerr << "[DawnCommandBuffer] DispatchIndirect called without compute pass" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] DispatchIndirect called without compute pass" << std::endl;
         return;
     }
 
     DawnBuffer* buf = device_.GetBuffer(buffer);
     if (!buf) {
-        std::cerr << "[DawnCommandBuffer] DispatchIndirect: invalid buffer handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] DispatchIndirect: invalid buffer handle" << std::endl;
         return;
     }
 
@@ -722,7 +723,7 @@ void DawnCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size) {
     // per-frame scratch uniform buffer instead.
     static bool warned = false;
     if (!warned) {
-        std::cerr << "[DawnCommandBuffer] SetComputeBytes(" << index << ", " << size
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] SetComputeBytes(" << index << ", " << size
                   << "B) called — WebGPU stub, data ignored. (future callers need a uniform buffer)"
                   << std::endl;
         warned = true;
@@ -766,7 +767,7 @@ void DawnCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst,
     DawnBuffer* srcBuf = device_.GetBuffer(src);
     DawnBuffer* dstBuf = device_.GetBuffer(dst);
     if (!srcBuf || !dstBuf) {
-        std::cerr << "[DawnCommandBuffer] CopyBuffer: invalid buffer handles" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] CopyBuffer: invalid buffer handles" << std::endl;
         return;
     }
 
@@ -800,7 +801,7 @@ void DawnCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer,
     DawnBuffer* srcBuf = device_.GetBuffer(srcBuffer);
     DawnTexture* dstTex = device_.GetTexture(dstTexture);
     if (!srcBuf || !dstTex) {
-        std::cerr << "[DawnCommandBuffer] CopyBufferToTexture: invalid handles" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] CopyBufferToTexture: invalid handles" << std::endl;
         return;
     }
 
@@ -851,7 +852,7 @@ void DawnCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture,
     DawnTexture* srcTex = device_.GetTexture(srcTexture);
     DawnBuffer* dstBuf = device_.GetBuffer(dstBuffer);
     if (!srcTex || !dstBuf) {
-        std::cerr << "[DawnCommandBuffer] CopyTextureToBuffer: invalid handles" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] CopyTextureToBuffer: invalid handles" << std::endl;
         return;
     }
 
@@ -917,7 +918,7 @@ void DawnCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
 
         // Scaled blits need a shader pass — only handle 1:1 copies here.
         if (srcW != dstW || srcH != dstH) {
-            std::cerr << "[DawnCommandBuffer] BlitTexture: scaled blits unsupported ("
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] BlitTexture: scaled blits unsupported ("
                       << srcW << "x" << srcH << " → " << dstW << "x" << dstH
                       << "). Skipping." << std::endl;
             continue;

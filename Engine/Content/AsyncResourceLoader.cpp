@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::content {
 
@@ -296,7 +297,7 @@ jobsystem::JobHandle AsyncResourceLoader::LoadMeshAsync(
         }
         else
         {
-            std::cerr << "[AsyncResourceLoader] Invalid cooked mesh '" << path
+            PRIMAL_LOG_STREAM(Error, "Asset") << "[AsyncResourceLoader] Invalid cooked mesh '" << path
                       << "': " << parse_error << std::endl;
         }
         

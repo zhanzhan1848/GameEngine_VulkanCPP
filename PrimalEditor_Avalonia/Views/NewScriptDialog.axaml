@@ -5,18 +5,18 @@
         Width="400" Height="260"
         WindowStartupLocation="CenterOwner"
         CanResize="False"
-        Background="{StaticResource VoidBrush}">
+        Background="{DynamicResource VoidBrush}">
   <Border Classes="floating" Margin="10">
     <StackPanel Margin="24" Spacing="10">
       <TextBlock Text="SCRIPT NAME"
-                 FontFamily="{StaticResource FontDisplay}"
+                 FontFamily="{DynamicResource FontDisplay}"
                  FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                 Foreground="{StaticResource ElectricBlueBrush}"/>
+                 Foreground="{DynamicResource ElectricBlueBrush}"/>
       <TextBox Name="NameBox" Text="NewScript"/>
       <TextBlock Text="LANGUAGE"
-                 FontFamily="{StaticResource FontDisplay}"
+                 FontFamily="{DynamicResource FontDisplay}"
                  FontWeight="SemiBold" FontSize="11" LetterSpacing="2"
-                 Foreground="{StaticResource ElectricBlueBrush}"/>
+                 Foreground="{DynamicResource ElectricBlueBrush}"/>
       <ComboBox Name="LanguageBox" SelectedIndex="0" HorizontalAlignment="Stretch">
         <ComboBoxItem Content="Python (.py)"/>
         <ComboBoxItem Content="Lua (.lua)"/>

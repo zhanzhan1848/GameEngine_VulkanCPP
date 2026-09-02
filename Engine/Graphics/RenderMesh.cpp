@@ -14,6 +14,7 @@
 
 #include <iostream>
 #include <cstring>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -47,13 +48,13 @@ RenderMesh* RenderMesh::CreateFromAsset(rhi::RHIDeviceBase* device,
     // Fetch RHIMeshAsset from content system
     rhi::RHIMeshAsset asset;
     if (!content::get_rhi_mesh_asset(rhi_id, asset)) {
-        std::cerr << "RenderMesh::CreateFromAsset: Failed to get RHIMeshAsset for geometry_id "
+        PRIMAL_LOG_STREAM(Error, "Engine") << "RenderMesh::CreateFromAsset: Failed to get RHIMeshAsset for geometry_id "
                   << geometry_content_id << " (rhi_id=" << rhi_id << ")" << std::endl;
         return nullptr;
     }
 
     if (asset.num_vertices == 0 || asset.position_buffer.empty()) {
-        std::cerr << "RenderMesh::CreateFromAsset: Empty asset for geometry_id "
+        PRIMAL_LOG_STREAM(Error, "Engine") << "RenderMesh::CreateFromAsset: Empty asset for geometry_id "
                   << geometry_content_id << std::endl;
         return nullptr;
     }
@@ -249,7 +250,7 @@ void RenderMesh::SetEntityId(primal::id::id_type id) {
 void RenderMesh::Draw(rhi::RHICommandBuffer* cmdBuffer, u32 instanceCount, u32 startInstance, u32 bindingSlot) {
     if (!cmdBuffer || !IsValid()) {
         if (!IsValid()) {
-            std::cerr << "RenderMesh::Draw Error: Mesh is invalid! VBuffer: " << vertexBuffer_ << ", Count: " << vertexCount_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "RenderMesh::Draw Error: Mesh is invalid! VBuffer: " << vertexBuffer_ << ", Count: " << vertexCount_ << std::endl;
         }
         return;
     }

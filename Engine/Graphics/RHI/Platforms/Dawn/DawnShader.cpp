@@ -1,4 +1,5 @@
 #include "DawnShader.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -18,7 +19,7 @@ DawnShader::~DawnShader() {
 
 bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, const char* entryPoint) {
     if (!data || size == 0 || !entryPoint) {
-        std::cerr << "[DawnShader] Invalid initialization parameters" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnShader] Invalid initialization parameters" << std::endl;
         return false;
     }
 
@@ -43,7 +44,7 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
 
     wgpuModule_ = wgpuDeviceCreateShaderModule(device_.GetNativeDevice(), &moduleDesc);
     if (!wgpuModule_) {
-        std::cerr << "[DawnShader] Failed to create shader module" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnShader] Failed to create shader module" << std::endl;
         return false;
     }
 
@@ -76,12 +77,12 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
                     messageStr = "unknown";
                 }
                 if (msg.type == WGPUCompilationMessageType_Error) {
-                    std::cerr << "[DawnShader] Compilation error: "
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnShader] Compilation error: "
                               << messageStr
                               << " at line " << msg.lineNum << std::endl;
                     data->hasErrors = true;
                 } else if (msg.type == WGPUCompilationMessageType_Warning) {
-                    std::cerr << "[DawnShader] Compilation warning: "
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnShader] Compilation warning: "
                               << messageStr
                               << " at line " << msg.lineNum << std::endl;
                 }
@@ -125,7 +126,7 @@ bool DawnShader::Initialize(const void* data, size_t size, ShaderStage stage, co
 #endif
 
     if (hasErrors) {
-        std::cerr << "[DawnShader] Shader has compilation errors" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnShader] Shader has compilation errors" << std::endl;
         wgpuShaderModuleRelease(wgpuModule_);
         wgpuModule_ = nullptr;
         return false;

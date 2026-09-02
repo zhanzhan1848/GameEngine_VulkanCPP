@@ -5,6 +5,7 @@
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/Passes/BlurPass.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -66,7 +67,7 @@ bool ShadowMapModule::Initialize(RHIDeviceBase* device, nanite::GPUDrivenDrawPip
     if (!moments_blur_) {
         moments_blur_ = std::make_unique<BlurPass>();
         if (!moments_blur_->Initialize(device_)) {
-            std::cerr << "[ShadowMapModule] BlurPass init failed — VSM unavailable" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ShadowMapModule] BlurPass init failed — VSM unavailable" << std::endl;
             moments_blur_.reset();
         }
     }
@@ -110,11 +111,11 @@ void ShadowMapModule::Shutdown() {
 
 bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) {
     if (!device_) {
-        std::cerr << "[ShadowMapModule] InitializeShadowFilter: device is null" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ShadowMapModule] InitializeShadowFilter: device is null" << std::endl;
         return false;
     }
     if (shadow_filter_shader == handles::INVALID_SHADER) {
-        std::cerr << "[ShadowMapModule] InitializeShadowFilter: shadow_filter_shader is INVALID_SHADER "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ShadowMapModule] InitializeShadowFilter: shadow_filter_shader is INVALID_SHADER "
                   << "(real shadows disabled — DeferredLighting binding 6 falls back to 1x1 white)"
                   << std::endl;
         return false;
@@ -172,7 +173,7 @@ bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) 
     samplerDesc.comparisonFunc = ComparisonFunc::Never;
     shadow_filter_sampler_ = device_->CreateSampler(samplerDesc);
     if (shadow_filter_sampler_ == handles::INVALID_SAMPLER) {
-        std::cerr << "[ShadowMapModule] CreateSampler failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ShadowMapModule] CreateSampler failed" << std::endl;
         return false;
     }
     return true;

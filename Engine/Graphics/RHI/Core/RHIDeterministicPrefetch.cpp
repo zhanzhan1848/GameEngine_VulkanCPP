@@ -20,6 +20,7 @@
 #include "RHIDeterministicPrefetch.h"
 #include "RHIDevice.h"
 #include "RHIMpscQueue.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -119,7 +120,7 @@ bool HardwareCapabilityAnalyzer::Initialize() {
     
     isInitialized_ = true;
     
-    std::cout << "[INFO] Hardware Profile: GPU=" << hardwareProfile_.totalGPUMemoryMB 
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[INFO] Hardware Profile: GPU=" << hardwareProfile_.totalGPUMemoryMB 
            << "MB, System=" << hardwareProfile_.systemMemoryMB 
            << "MB, Bandwidth=" << hardwareProfile_.memoryBandwidthGBps 
            << "GB/s, Class=" << static_cast<int>(hardwareProfile_.hardwareClass) << std::endl;
@@ -483,7 +484,7 @@ void StaticRuleEngine::InitializeDefaultRules() {
     highEndRule.enabled = true;
     rules_.push_back(highEndRule);
     
-    std::cout << "[INFO] Initialized " << rules_.size() << " default prefetch rules" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[INFO] Initialized " << rules_.size() << " default prefetch rules" << std::endl;
 }
 
 utl::vector<u64> StaticRuleEngine::GenerateCandidates(
@@ -556,14 +557,14 @@ bool RHIDeterministicPrefetchManager::Initialize() {
     
     // 检查确定性预取是否启用
     if (!config_.enableDeterministic) {
-        std::cout << "[WARNING] Deterministic prefetch is disabled" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[WARNING] Deterministic prefetch is disabled" << std::endl;
         return false;
     }
     
     // 初始化硬件分析器
     hardwareAnalyzer_ = std::make_unique<HardwareCapabilityAnalyzer>();
     if (!hardwareAnalyzer_->Initialize()) {
-        std::cout << "[ERROR] Failed to initialize hardware capability analyzer" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[ERROR] Failed to initialize hardware capability analyzer" << std::endl;
         return false;
     }
     
@@ -573,12 +574,12 @@ bool RHIDeterministicPrefetchManager::Initialize() {
     // 初始化规则引擎
     ruleEngine_ = std::make_unique<StaticRuleEngine>();
     if (!ruleEngine_->Initialize()) {
-        std::cout << "[ERROR] Failed to initialize static rule engine" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[ERROR] Failed to initialize static rule engine" << std::endl;
         return false;
     }
     
     isInitialized_ = true;
-    std::cout << "[INFO] RHIDeterministicPrefetchManager initialized successfully" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[INFO] RHIDeterministicPrefetchManager initialized successfully" << std::endl;
     
     return true;
 }
@@ -612,7 +613,7 @@ void RHIDeterministicPrefetchManager::Shutdown() {
     ruleEngine_.reset();
     
     isInitialized_ = false;
-    std::cout << "[INFO] RHIDeterministicPrefetchManager shutdown" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[INFO] RHIDeterministicPrefetchManager shutdown" << std::endl;
 }
 
 utl::vector<PrefetchDecision> RHIDeterministicPrefetchManager::GeneratePrefetchDecisions(
@@ -692,7 +693,7 @@ void RHIDeterministicPrefetchManager::MonitorAndAdjust() {
     
     // 如果内存使用超过预算，降低预取优先级
     if (currentUsage > config_.maxMemoryBudgetMB * 1024 * 1024) {
-        std::cout << "[WARNING] Memory usage exceeds budget: " 
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[WARNING] Memory usage exceeds budget: " 
                   << (currentUsage / (1024 * 1024)) << " MB > " 
                   << config_.maxMemoryBudgetMB << " MB" << std::endl;
         
@@ -755,7 +756,7 @@ bool RHIDeterministicPrefetchManager::ScheduleAsyncLoad(
     // 这里应该与实际的资源加载系统集成
     // 简化实现，只记录日志
     if (config_.enableLogging) {
-        std::cout << "[INFO] Scheduling async load: Resource=" << resourceId
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[INFO] Scheduling async load: Resource=" << resourceId
                   << ", Type=" << static_cast<int>(resourceType)
                   << ", Priority=" << priority << std::endl;
     }

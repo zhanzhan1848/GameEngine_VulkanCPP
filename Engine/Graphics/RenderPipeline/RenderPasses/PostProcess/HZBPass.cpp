@@ -9,6 +9,7 @@
 #include <sstream>
 #include <cmath>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
 
@@ -61,7 +62,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "HZBGeneration");
     std::string source = LoadShaderSource(shaderPath);
     if (source.empty()) {
-        std::cerr << "[HZB] Shader source empty: " << shaderPath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZB] Shader source empty: " << shaderPath << std::endl;
         return false;
     }
 
@@ -69,7 +70,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     ShaderHandle mipCS = device.CreateShader(source.data(), source.size(), ShaderStage::Compute, "generate_hzb_mip_level");
 
     if (copyCS == handles::INVALID_SHADER || mipCS == handles::INVALID_SHADER) {
-        std::cerr << "[HZB] Shader creation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[HZB] Shader creation failed" << std::endl;
         return false;
     }
 

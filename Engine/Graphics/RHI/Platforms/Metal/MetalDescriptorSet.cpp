@@ -2,6 +2,7 @@
 #include "MetalDevice.h"
 #include "MetalDescriptorSetLayout.h"
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -80,13 +81,13 @@ void MetalDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCount
             // DEBUG: Log the mismatch for shadow pipeline debugging
             static int logCount = 0;
             if (logCount < 20) {
-                std::cerr << "[MetalDescSet] UPDATE SKIP: write binding=" << write.dstBinding
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDescSet] UPDATE SKIP: write binding=" << write.dstBinding
                           << " type=" << (int)write.descriptorType
                           << " — no match in layout bindings:";
                 for (const auto& b : bindings_) {
-                    std::cerr << " [" << b.binding << "/t=" << (int)b.type << "]";
+                    PRIMAL_LOG_STREAM(Error, "RHI") << " [" << b.binding << "/t=" << (int)b.type << "]";
                 }
-                std::cerr << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << std::endl;
                 logCount++;
             }
             continue;

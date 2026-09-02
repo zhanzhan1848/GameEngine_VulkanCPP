@@ -7,6 +7,7 @@
 
 #include "VulkanSampler.h"
 #include "VulkanDevice.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -101,7 +102,7 @@ bool VulkanSampler::Initialize(const SamplerDesc& desc) {
 
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
     if (vkCreateSampler(dev, &ci, nullptr, &sampler_) != VK_SUCCESS) {
-        std::cerr << "[VulkanSampler] vkCreateSampler failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSampler] vkCreateSampler failed" << std::endl;
         return false;
     }
     return true;

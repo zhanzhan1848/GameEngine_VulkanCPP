@@ -5,6 +5,7 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/Dawn/ShaderLoader.h"
+#include <iostream>
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 #include "Graphics/RHI/Platforms/Dawn/DawnDevice.h"
@@ -57,8 +58,14 @@ static void EnsurePipeline(RHIDeviceBase& device) {
 
     auto platform = device.GetPlatform();
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "ToneMapping");
+    // Resolve independently of process CWD（同 T8.13 对 TAA 的修复——从构建
+    // 目录启动时裸 CWD 相对路径打不开文件，管线静默 INVALID，ToneMapping 整体旁路）。
+    shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
     std::string shaderSource = LoadShaderSource(shaderPath);
-    if (shaderSource.empty()) return;
+    if (shaderSource.empty()) {
+        std::cerr << "[ToneMapping] Shader source not found: " << shaderPath << std::endl;
+        return;
+    }
 
     ShaderHandle vs = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Vertex, "tonemap_vs");
     ShaderHandle fs = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Pixel, "tonemap_fs");

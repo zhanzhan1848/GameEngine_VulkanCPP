@@ -7,6 +7,7 @@
 #include "MetalCore.h"
 #include "MetalHelper.h"
 #include "MetalGPass.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::metal::content
 {
@@ -390,7 +391,7 @@ namespace primal::graphics::metal::content
 						library->release();
 					}
 					else {
-						std::cerr << error->localizedDescription()->utf8String() << std::endl;
+						PRIMAL_LOG_STREAM(Error, "RHI") << error->localizedDescription()->utf8String() << std::endl;
 					}
 
 					++shader_index;

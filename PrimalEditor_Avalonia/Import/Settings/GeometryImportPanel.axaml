@@ -28,7 +28,7 @@
       <Setter Property="Margin" Value="0,4,0,0"/>
     </Style>
     <Style Selector="TextBlock.fieldLabel">
-      <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}"/>
       <Setter Property="FontSize" Value="11"/>
       <Setter Property="Margin" Value="0,6,0,2"/>
     </Style>
@@ -48,31 +48,31 @@
       <Setter Property="Foreground" Value="#FFFFFF"/>
       <Setter Property="HorizontalAlignment" Value="Center"/>
       <Setter Property="VerticalAlignment" Value="Center"/>
-      <Setter Property="FontFamily" Value="{StaticResource FontMono}"/>
+      <Setter Property="FontFamily" Value="{DynamicResource FontMono}"/>
       <Setter Property="FontSize" Value="10"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
     <!-- Glyph rendered next to the module title. -->
     <Style Selector="TextBlock.moduleGlyph">
-      <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
+      <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
       <Setter Property="FontSize" Value="14"/>
       <Setter Property="Width" Value="20"/>
       <Setter Property="TextAlignment" Value="Center"/>
       <Setter Property="VerticalAlignment" Value="Center"/>
-      <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource ElectricBlueBrush}"/>
     </Style>
 
     <!-- Subtle hairline used between sections inside a card. -->
     <Style Selector="Rectangle.sectionDivider">
       <Setter Property="Height" Value="1"/>
-      <Setter Property="Fill" Value="{StaticResource HairlineBrush}"/>
+      <Setter Property="Fill" Value="{DynamicResource HairlineBrush}"/>
       <Setter Property="Margin" Value="0,10,0,8"/>
     </Style>
 
     <!-- Inline warning card used for the "pipeline not supported" notice. -->
     <Style Selector="Border.warningCard">
       <Setter Property="Background" Value="#33E6B25F"/>
-      <Setter Property="BorderBrush" Value="{StaticResource AmberBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource AmberBrush}"/>
       <Setter Property="BorderThickness" Value="1"/>
       <Setter Property="CornerRadius" Value="4"/>
       <Setter Property="Padding" Value="10,8"/>
@@ -97,8 +97,8 @@
                        Classes="sectionTitle" Margin="6,0,0,0"
                        VerticalAlignment="Center"/>
             <Border Grid.Column="2" Classes="moduleBadge"
-                    Background="{StaticResource BlueTint25}"
-                    BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+                    Background="{DynamicResource BlueTint25}"
+                    BorderBrush="{DynamicResource ElectricBlueDeepBrush}"
                     BorderThickness="1">
               <TextBlock Text="ALWAYS" Classes="moduleBadgeText"/>
             </Border>
@@ -163,12 +163,12 @@
             <StackPanel Grid.Column="1" Margin="6,0,0,0">
               <TextBlock Text="Asset Pipeline" Classes="sectionTitle"/>
               <TextBlock Text="Modular post-processing (PMP · meshopt · xatlas · VHACD)"
-                         FontSize="11" Foreground="{StaticResource SecondaryTextBrush}"/>
+                         FontSize="11" Foreground="{DynamicResource SecondaryTextBrush}"/>
             </StackPanel>
             <Border Grid.Column="2" Classes="moduleBadge"
                     IsVisible="{Binding PipelineAvailable}"
-                    Background="{StaticResource BlueTint25}"
-                    BorderBrush="{StaticResource ElectricBlueDeepBrush}"
+                    Background="{DynamicResource BlueTint25}"
+                    BorderBrush="{DynamicResource ElectricBlueDeepBrush}"
                     BorderThickness="1">
               <TextBlock Text="FBX / OBJ ONLY" Classes="moduleBadgeText"/>
             </Border>
@@ -177,7 +177,7 @@
 
           <!-- Pipeline description -->
           <TextBlock TextWrapping="Wrap"
-                     Foreground="{StaticResource SecondaryTextBrush}"
+                     Foreground="{DynamicResource SecondaryTextBrush}"
                      Text="Post-process the parsed mesh through ContentTools' modular pipeline. With all flags OFF, output is byte-identical to legacy import. Defaults below match pipeline::Config: LOD, Meshlet, Remesh, UV Atlas, and SDF are ON."/>
 
           <!-- Format-not-supported warning -->
@@ -186,9 +186,9 @@
             <StackPanel Spacing="4">
               <TextBlock Text="⚠  Pipeline modules not available for this format"
                          FontWeight="SemiBold"
-                         Foreground="{StaticResource AmberBrush}"/>
+                         Foreground="{DynamicResource AmberBrush}"/>
               <TextBlock TextWrapping="Wrap" FontSize="11"
-                         Foreground="{StaticResource PrimaryTextBrush}"
+                         Foreground="{DynamicResource PrimaryTextBrush}"
                          Text="Pipeline modules only run on .fbx and .obj source files. Other formats (.gltf, .glb, .dae, .blend) use the legacy import path and ignore the flags below."/>
             </StackPanel>
           </Border>

@@ -19,6 +19,7 @@
 #endif
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/RenderPipeline/StreamingMesh.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::pcg {
 
@@ -114,7 +115,7 @@ std::vector<u8> LoadShaderSource(const char* shader_name) {
         p = p.parent_path();
     }
 
-    std::cerr << "[GPUMesher] Failed to load shader '" << shader_name
+    PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] Failed to load shader '" << shader_name
               << "' (searched: " << rel_path << " and CWD ancestors)" << std::endl;
     return {};
 }
@@ -236,7 +237,7 @@ void GPUMesher::CreatePipelines() {
     // ---- Shader source + pipelines ----
     auto src = LoadShaderSource("SurfaceNetsGPU");
     if (src.empty()) {
-        std::cerr << "[GPUMesher] SurfaceNetsGPU.metal not found\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] SurfaceNetsGPU.metal not found\n";
         return;
     }
 
@@ -280,7 +281,7 @@ void GPUMesher::CreatePipelines() {
         write_indirect_pipeline_    != handles::INVALID_PIPELINE;
 
     if (!pipelines_created_) {
-        std::cerr << "[GPUMesher] Pipeline creation partially failed; destroying\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] Pipeline creation partially failed; destroying\n";
         DestroyPipelines();
     }
 }
@@ -371,7 +372,7 @@ void GPUMesher::CreateSDFPipelines() {
 
     auto src = LoadShaderSource("SurfaceNetsGPUSDF");
     if (src.empty()) {
-        std::cerr << "[GPUMesher] SurfaceNetsGPUSDF.metal not found\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] SurfaceNetsGPUSDF.metal not found\n";
         DestroySDFPipelines();
         return;
     }
@@ -379,7 +380,7 @@ void GPUMesher::CreateSDFPipelines() {
     fill_scalar_shader_ = device_->CreateShader(
         src.data(), src.size(), ShaderStage::Compute, "fill_scalar_from_sdf");
     if (fill_scalar_shader_ == handles::INVALID_SHADER) {
-        std::cerr << "[GPUMesher] fill_scalar_from_sdf compile failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] fill_scalar_from_sdf compile failed\n";
         DestroySDFPipelines();
         return;
     }
@@ -391,7 +392,7 @@ void GPUMesher::CreateSDFPipelines() {
     fill_scalar_pipeline_ = device_->CreateComputePipeline(cp_desc);
 
     if (fill_scalar_pipeline_ == handles::INVALID_PIPELINE) {
-        std::cerr << "[GPUMesher] fill_scalar_from_sdf pipeline creation failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] fill_scalar_from_sdf pipeline creation failed\n";
         DestroySDFPipelines();
         return;
     }
@@ -756,7 +757,7 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
         std::memcpy(result.positions.data(), mapped, sizeof(f32) * 3 * vert_count);
         device_->UnmapBuffer(scratch.positions);
     } else {
-        std::cerr << "[GPUMesher] MapBuffer failed for positions\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] MapBuffer failed for positions\n";
         readback_ok = false;
     }
 
@@ -768,7 +769,7 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
             std::memcpy(elems.data(), mapped, 20u * vert_count);
             device_->UnmapBuffer(scratch.elements);
         } else {
-            std::cerr << "[GPUMesher] MapBuffer failed for elements\n";
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] MapBuffer failed for elements\n";
             readback_ok = false;
         }
         for (u32 v = 0; v < vert_count; ++v) {
@@ -795,12 +796,12 @@ MarchingCubesResult GPUMesher::GenerateSurfaceNets(
         std::memcpy(result.indices.data(), mapped, sizeof(u32) * idx_count);
         device_->UnmapBuffer(scratch.indices);
     } else {
-        std::cerr << "[GPUMesher] MapBuffer failed for indices\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] MapBuffer failed for indices\n";
         readback_ok = false;
     }
 
     if (!readback_ok) {
-        std::cerr << "[GPUMesher] GPU readback partially failed; returning empty result\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[GPUMesher] GPU readback partially failed; returning empty result\n";
         device_->DestroyDescriptorSet(classify_ds);
         device_->DestroyDescriptorSet(emit_vertices_ds);
         device_->DestroyDescriptorSet(emit_faces_ds);

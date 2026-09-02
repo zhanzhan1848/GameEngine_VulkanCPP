@@ -1,18 +1,17 @@
 <Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls">
 
   <!-- =========================================================== -->
-  <!-- TRANSITION INFRA                                            -->
-  <!-- Avalonia XAML resolves transition target properties (e.g.   -->
-  <!-- "Background") against the parent style's TargetType. We      -->
-  <!-- can't define <Transitions> as a detached resource, so each   -->
-  <!-- control's <Transitions> is inlined right where it's used.    -->
-  <!-- Timing stays in the 120–220ms band — anything longer feels   -->
-  <!-- sluggish in a tool.                                          -->
+  <!-- "Iron & Gold of Azeroth" — Warcraft skin, palette adapted    -->
+  <!-- from warcraftcn-ui (MIT). Selector set mirrors               -->
+  <!-- CyberpunkTheme.Styles.axaml 1:1 so both skins style the      -->
+  <!-- same UI surface; only the look differs. Transitions stay in  -->
+  <!-- the 120-220ms band.                                          -->
   <!-- =========================================================== -->
 
   <!-- =========================================================== -->
-  <!-- GLOBAL TEXT — calm, no aggressive letter-spacing             -->
+  <!-- GLOBAL TEXT — parchment on iron                              -->
   <!-- =========================================================== -->
   <Style Selector="TextBlock">
     <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
@@ -50,50 +49,74 @@
   </Style>
 
   <!-- =========================================================== -->
-  <!-- BUTTON — soft rounded corners, gentle hover lift             -->
+  <!-- BUTTON — forged metal plate (9-slice texture, warcraftcn     -->
+  <!-- button-bg, hue-shifted to brass). States swap the frame      -->
+  <!-- source; text recolors come from the setters below.           -->
   <!-- =========================================================== -->
   <Style Selector="Button">
     <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
-    <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
-    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
-    <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
     <Setter Property="FontWeight" Value="SemiBold"/>
     <Setter Property="FontSize" Value="12"/>
+    <Setter Property="LetterSpacing" Value="0.4"/>
     <Setter Property="Padding" Value="14,6"/>
-    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="MinHeight" Value="24"/>
     <Setter Property="HorizontalContentAlignment" Value="Center"/>
     <Setter Property="VerticalContentAlignment" Value="Center"/>
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.18"/>
-        <BrushTransition Property="Foreground" Duration="0:0:0.18"/>
-        <BrushTransition Property="BorderBrush" Duration="0:0:0.18"/>
-      </Transitions>
+    <!-- FluentTheme 的默认焦点框是亮色实心块,与金属按钮不搭;焦点视觉
+         由下面 :focus-visible 的九宫格贴图承担 -->
+    <Setter Property="FocusAdorner" Value="{x:Null}"/>
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Panel>
+          <ctrl:NineSliceImage Name="PART_Frame"
+                               Source="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/button-normal.png"
+                               Slice="5" Scale="4.4"/>
+          <ContentPresenter Name="PART_WcContent"
+                            Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}"
+                            Foreground="{TemplateBinding Foreground}"
+                            Margin="{TemplateBinding Padding}"
+                            HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+        </Panel>
+      </ControlTemplate>
     </Setter>
   </Style>
   <Style Selector="Button:pointerover">
-    <Setter Property="Background" Value="{StaticResource PanelHoverBrush}"/>
-    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueDeepBrush}"/>
-    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource AmberBrush}"/>
   </Style>
-  <Style Selector="Button:pressed">
-    <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
+  <Style Selector="Button:pointerover /template/ ctrl|NineSliceImage#PART_Frame">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/button-hover.png"/>
   </Style>
-  <Style Selector="Button.accent">
-    <Setter Property="Background" Value="{StaticResource ElectricBlueBrush}"/>
-    <Setter Property="BorderBrush" Value="{StaticResource ElectricBlueBrush}"/>
-    <Setter Property="Foreground" Value="#FFFFFF"/>
+  <Style Selector="Button:pressed /template/ ctrl|NineSliceImage#PART_Frame">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/button-pressed.png"/>
   </Style>
-  <Style Selector="Button.accent:pointerover">
-    <Setter Property="Background" Value="{StaticResource ElectricBlueDeepBrush}"/>
-  </Style>
-  <Style Selector="Button.danger">
-    <Setter Property="BorderBrush" Value="{StaticResource CoralBrush}"/>
-    <Setter Property="Foreground" Value="{StaticResource CoralBrush}"/>
+  <Style Selector="Button:focus-visible /template/ ctrl|NineSliceImage#PART_Frame">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/button-focus.png"/>
+    <Setter Property="Slice" Value="8"/>
+    <Setter Property="Scale" Value="4.4"/>
   </Style>
   <Style Selector="Button:disabled">
     <Setter Property="Opacity" Value="0.5"/>
+  </Style>
+  <!-- Buttons with Classes="accent" wear the ornate notched frame;
+       FluentTheme's :accent setters can't reach them, the art IS the look. -->
+  <Style Selector="Button.accent /template/ ctrl|NineSliceImage#PART_Frame">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/button-accent.png"/>
+    <Setter Property="Slice" Value="14"/>
+    <Setter Property="Scale" Value="8.5"/>
+  </Style>
+  <Style Selector="Button.accent:focus-visible /template/ ctrl|NineSliceImage#PART_Frame">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/button-accent-focus.png"/>
+    <Setter Property="Slice" Value="10"/>
+    <Setter Property="Scale" Value="8.5"/>
+  </Style>
+  <Style Selector="Button.accent:pointerover /template/ ctrl|NineSliceImage#PART_Frame">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/button-accent-hover.png"/>
+  </Style>
+  <Style Selector="Button.danger">
+    <Setter Property="Foreground" Value="{StaticResource CoralBrush}"/>
   </Style>
 
   <!-- =========================================================== -->
@@ -108,7 +131,7 @@
     <Setter Property="FontWeight" Value="SemiBold"/>
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="Padding" Value="14,6"/>
-    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="CornerRadius" Value="2"/>
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background" Duration="0:0:0.18"/>
@@ -127,19 +150,19 @@
   </Style>
 
   <!-- =========================================================== -->
-  <!-- TEXTBOX                                                      -->
+  <!-- TEXTBOX — sunken dark well, gold focus ring                  -->
   <!-- =========================================================== -->
   <Style Selector="TextBox">
-    <Setter Property="Background" Value="{StaticResource VoidBrush}"/>
+    <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
     <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
     <Setter Property="CaretBrush" Value="{StaticResource ElectricBlueBrush}"/>
     <Setter Property="SelectionBrush" Value="{StaticResource BlueTint25}"/>
-    <Setter Property="SelectionForegroundBrush" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="SelectionForegroundBrush" Value="{StaticResource AmberBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="FontFamily" Value="{StaticResource FontMono}"/>
     <Setter Property="FontSize" Value="12"/>
-    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="CornerRadius" Value="2"/>
     <Setter Property="Padding" Value="8,5"/>
     <Setter Property="MinHeight" Value="26"/>
     <Setter Property="Transitions">
@@ -164,11 +187,11 @@
   <!-- COMBOBOX                                                     -->
   <!-- =========================================================== -->
   <Style Selector="ComboBox">
-    <Setter Property="Background"     Value="{StaticResource VoidBrush}"/>
+    <Setter Property="Background"     Value="{StaticResource SlateBrush}"/>
     <Setter Property="Foreground"     Value="{StaticResource PrimaryTextBrush}"/>
     <Setter Property="BorderBrush"    Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="CornerRadius"   Value="4"/>
+    <Setter Property="CornerRadius"   Value="2"/>
     <Setter Property="FontFamily"     Value="{StaticResource FontUI}"/>
     <Setter Property="FontSize"       Value="12"/>
     <Setter Property="MinHeight"      Value="26"/>
@@ -198,7 +221,7 @@
   </Style>
   <Style Selector="ComboBoxItem:selected">
     <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
-    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource AmberBrush}"/>
   </Style>
 
   <!-- =========================================================== -->
@@ -216,14 +239,15 @@
   </Style>
 
   <!-- =========================================================== -->
-  <!-- LISTBOX                                                      -->
+  <!-- LISTBOX — transparent wells so the wood panel grain of the   -->
+  <!-- surrounding TextureFrame shows through                       -->
   <!-- =========================================================== -->
   <Style Selector="ListBox">
-    <Setter Property="Background"      Value="{StaticResource SlateBrush}"/>
+    <Setter Property="Background"      Value="Transparent"/>
     <Setter Property="Foreground"      Value="{StaticResource PrimaryTextBrush}"/>
-    <Setter Property="BorderBrush"     Value="{StaticResource HairlineBrush}"/>
-    <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="CornerRadius"    Value="4"/>
+    <Setter Property="BorderBrush"     Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="CornerRadius"    Value="2"/>
     <Setter Property="Padding"         Value="2"/>
   </Style>
   <Style Selector="ListBoxItem">
@@ -233,21 +257,21 @@
     <Setter Property="FontSize"   Value="12"/>
     <Setter Property="Padding"    Value="10,5"/>
     <Setter Property="BorderThickness" Value="0"/>
-    <Setter Property="CornerRadius" Value="3"/>
+    <Setter Property="CornerRadius" Value="2"/>
   </Style>
   <Style Selector="ListBoxItem:pointerover">
     <Setter Property="Background" Value="{StaticResource BlueTint12}"/>
   </Style>
   <Style Selector="ListBoxItem:selected">
     <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
-    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource AmberBrush}"/>
   </Style>
 
   <!-- =========================================================== -->
   <!-- TREEVIEW                                                     -->
   <!-- =========================================================== -->
   <Style Selector="TreeView">
-    <Setter Property="Background"  Value="{StaticResource SlateBrush}"/>
+    <Setter Property="Background"  Value="Transparent"/>
     <Setter Property="Foreground"  Value="{StaticResource PrimaryTextBrush}"/>
     <Setter Property="BorderBrush" Value="Transparent"/>
     <Setter Property="Padding"     Value="2"/>
@@ -263,7 +287,7 @@
   </Style>
   <Style Selector="TreeViewItem:selected">
     <Setter Property="Background" Value="{StaticResource BlueTint25}"/>
-    <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource AmberBrush}"/>
   </Style>
 
   <!-- =========================================================== -->
@@ -271,7 +295,7 @@
   <!-- =========================================================== -->
   <Style Selector="Menu">
     <Setter Property="Background"  Value="{StaticResource SlateBrush}"/>
-    <Setter Property="Foreground"  Value="{StaticResource PrimaryTextBrush}"/>
+    <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="0,0,0,1"/>
   </Style>
@@ -289,22 +313,23 @@
   </Style>
 
   <!-- =========================================================== -->
-  <!-- GRIDSPLITTER — thin soft line                                 -->
+  <!-- GRIDSPLITTER — thin bronze line                              -->
   <!-- =========================================================== -->
   <Style Selector="GridSplitter">
     <Setter Property="Background" Value="{StaticResource HairlineBrush}"/>
   </Style>
   <Style Selector="GridSplitter:pointerover">
-    <Setter Property="Background" Value="{StaticResource ElectricBlueDeepBrush}"/>
+    <Setter Property="Background" Value="{StaticResource ElectricBlueBrush}"/>
   </Style>
 
   <!-- =========================================================== -->
-  <!-- PROGRESSBAR                                                  -->
+  <!-- PROGRESSBAR — molten gold fill                               -->
   <!-- =========================================================== -->
   <Style Selector="ProgressBar">
     <Setter Property="Foreground" Value="{StaticResource ElectricBlueBrush}"/>
-    <Setter Property="Background" Value="{StaticResource VoidBrush}"/>
-    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
   </Style>
 
   <!-- =========================================================== -->
@@ -329,16 +354,16 @@
   </Style>
 
   <!-- =========================================================== -->
-  <!-- BORDER helper classes                                        -->
-  <!-- .glass     — translucent blue-tinted glass surface             -->
-  <!-- .panel     — standard dark panel with hairline border          -->
-  <!-- .floating  — lifted card with soft shadow                      -->
+  <!-- BORDER helper classes — squarer WC frames with bronze rims   -->
+  <!-- .glass     — translucent gold-tinted surface                 -->
+  <!-- .panel     — iron panel with bronze hairline                 -->
+  <!-- .floating  — lifted iron card                                -->
   <!-- =========================================================== -->
   <Style Selector="Border.glass">
     <Setter Property="Background" Value="{StaticResource BlueTint12}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="CornerRadius" Value="3"/>
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background" Duration="0:0:0.18"/>
@@ -350,7 +375,7 @@
     <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="CornerRadius" Value="2"/>
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background" Duration="0:0:0.18"/>
@@ -362,7 +387,7 @@
     <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="CornerRadius" Value="3"/>
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background" Duration="0:0:0.18"/>
@@ -372,16 +397,13 @@
   </Style>
 
   <!-- =========================================================== -->
-  <!-- EXPANDER                                                     -->
-  <!-- Calm expand/collapse; chevron rotation animation is provided  -->
-  <!-- by the Fluent theme, here we just restyle the header and      -->
-  <!-- the content card to match the cyberpunk palette.             -->
+  <!-- EXPANDER — iron header, gold hover                           -->
   <!-- =========================================================== -->
   <Style Selector="Expander">
     <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="CornerRadius" Value="2"/>
     <Setter Property="Padding" Value="10,8,10,8"/>
     <Setter Property="Margin" Value="0,4,0,0"/>
     <Setter Property="FontFamily" Value="{StaticResource FontUI}"/>
@@ -414,7 +436,37 @@
     <Setter Property="Background" Value="{StaticResource SlateBrush}"/>
     <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}"/>
     <Setter Property="BorderThickness" Value="1,0,1,1"/>
-    <Setter Property="CornerRadius" Value="0,0,6,6"/>
+    <Setter Property="CornerRadius" Value="0,0,2,2"/>
+  </Style>
+
+  <!-- =========================================================== -->
+  <!-- TEXTURE FRAMES — 9-slice art (warcraftcn assets, regraded).  -->
+  <!-- Views keep the theme-neutral Classes="floating" hook; the    -->
+  <!-- tex-* class picks the artwork. Under themes that ship no     -->
+  <!-- art (Cyberpunk) the elements render as plain Borders.        -->
+  <!-- =========================================================== -->
+  <Style Selector="ctrl|TextureFrame.tex-strip">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-strip.png"/>
+    <Setter Property="Slice" Value="7.5"/>
+    <Setter Property="Scale" Value="5"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+  </Style>
+  <Style Selector="ctrl|TextureFrame.tex-chip">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-strip.png"/>
+    <Setter Property="Slice" Value="4.6"/>
+    <Setter Property="Scale" Value="8"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+  </Style>
+  <Style Selector="ctrl|TextureFrame.tex-panel">
+    <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-panel.png"/>
+    <Setter Property="Slice" Value="13"/>
+    <Setter Property="Scale" Value="2.5"/>
+    <!-- Keep content inside the art's frame: padding >= frame thickness. -->
+    <Setter Property="Padding" Value="15,15,15,15"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
   </Style>
 
 </Styles>

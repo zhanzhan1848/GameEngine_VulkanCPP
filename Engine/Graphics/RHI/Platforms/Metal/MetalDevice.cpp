@@ -20,6 +20,7 @@
 #include "MetalRenderPass.h"
 #include <iostream>
 #include <dispatch/dispatch.h>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -38,7 +39,7 @@ bool MetalDevice::initializeImpl() {
     if (!mtlDevice_) {
         mtlDevice_ = MTL::CreateSystemDefaultDevice();
         if (!mtlDevice_) {
-            std::cerr << "[Metal] Failed to create system default device." << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[Metal] Failed to create system default device." << std::endl;
             return false;
         }
         ownsNativeDevice_ = true;
@@ -46,7 +47,7 @@ bool MetalDevice::initializeImpl() {
 
     graphicsQueue_ = mtlDevice_->newCommandQueue();
     if (!graphicsQueue_) {
-        std::cerr << "[Metal] Failed to create graphics command queue." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[Metal] Failed to create graphics command queue." << std::endl;
         if (ownsNativeDevice_) {
             mtlDevice_->release();
             ownsNativeDevice_ = false;
@@ -84,7 +85,7 @@ bool MetalDevice::initializeImpl() {
     syncAllocator_.Reserve(64);
     queryPoolAllocator_.Reserve(16);
 
-    std::cout << "[MetalDevice] Allocators reserved. Buffers: 1024, Textures: 512" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalDevice] Allocators reserved. Buffers: 1024, Textures: 512" << std::endl;
 
     return true;
 }
@@ -374,7 +375,7 @@ bool MetalDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, size
     
     // Reload shader module
     if (!shader->Reload(data, size)) {
-        std::cerr << "[MetalDevice] Failed to reload shader: " << shaderHandle << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Failed to reload shader: " << shaderHandle << std::endl;
         return false;
     }
     
@@ -386,10 +387,10 @@ bool MetalDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, size
             MetalPipeline* pipeline = GetPipeline(pipelineHandle);
             if (pipeline) {
                 if (!pipeline->Recreate()) {
-                    std::cerr << "[MetalDevice] Failed to recreate pipeline: " << pipelineHandle 
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Failed to recreate pipeline: " << pipelineHandle 
                               << " during shader reload." << std::endl;
                 } else {
-                    std::cout << "[MetalDevice] Recreated pipeline: " << pipelineHandle << std::endl;
+                    PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalDevice] Recreated pipeline: " << pipelineHandle << std::endl;
                 }
             }
         }
@@ -494,12 +495,12 @@ void MetalDevice::initializeMemoryPool() {
         
         memoryPool_ = new RHIAdaptiveMemoryPool(*this, poolDesc);
         if (memoryPool_->Initialize()) {
-            std::cout << "[MetalDevice] Memory Pool Initialized (256MB Shared)" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalDevice] Memory Pool Initialized (256MB Shared)" << std::endl;
         } else {
-            std::cerr << "[MetalDevice] Failed to initialize Memory Pool" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Failed to initialize Memory Pool" << std::endl;
         }
     } else {
-        std::cerr << "[MetalDevice] Failed to create MTLHeap" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Failed to create MTLHeap" << std::endl;
     }
 }
 
@@ -545,17 +546,17 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
             ResourceManager::Instance().RegisterResource(buffer);
             static bool loggedRM = false;
             if (!loggedRM) {
-                std::cerr << "[MetalDevice] RM addr=" << &ResourceManager::Instance()
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] RM addr=" << &ResourceManager::Instance()
                           << " registered buffer id=" << id
                           << " handle=" << ResourceHandle(id) << std::endl;
                 loggedRM = true;
             }
             return ResourceHandle(id);
         } else {
-             std::cerr << "[MetalDevice] Buffer Initialize failed for id: " << id << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Buffer Initialize failed for id: " << id << std::endl;
         }
     } else {
-        std::cerr << "[MetalDevice] Buffer allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Buffer allocation failed" << std::endl;
     }
     bufferAllocator_.Free(id);
     return handles::INVALID_RESOURCE;
@@ -569,10 +570,10 @@ ResourceHandle MetalDevice::createTextureImpl(const TextureDesc& desc) {
             texture->SetHandle(ResourceHandle(id));
             return ResourceHandle(id);
         } else {
-            std::cerr << "[MetalDevice] Texture Initialize failed for id: " << id << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Texture Initialize failed for id: " << id << std::endl;
         }
     } else {
-        std::cerr << "[MetalDevice] Texture allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Texture allocation failed" << std::endl;
     }
     textureAllocator_.Free(id);
     return handles::INVALID_RESOURCE; 
@@ -582,13 +583,13 @@ ResourceHandle MetalDevice::createTextureViewImpl(const TextureViewDesc& desc) {
     // 1. 获取源纹理
     MetalTexture* sourceTexture = textureAllocator_.Get(u32(desc.texture));
     if (!sourceTexture) {
-        std::cerr << "[MetalDevice] Invalid source texture for view creation" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Invalid source texture for view creation" << std::endl;
         return handles::INVALID_RESOURCE;
     }
     
     MTL::Texture* mtlSource = sourceTexture->GetNativeTexture();
     if (!mtlSource) {
-        std::cerr << "[MetalDevice] Source texture has no native object" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Source texture has no native object" << std::endl;
         return handles::INVALID_RESOURCE;
     }
 
@@ -636,11 +637,11 @@ ResourceHandle MetalDevice::createTextureViewImpl(const TextureViewDesc& desc) {
             
             return ResourceHandle(id);
         } else {
-             std::cerr << "[MetalDevice] Failed to create MTLTexture view" << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Failed to create MTLTexture view" << std::endl;
              textureAllocator_.Free(id);
         }
     } else {
-        std::cerr << "[MetalDevice] Texture view allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Texture view allocation failed" << std::endl;
     }
     
     return handles::INVALID_RESOURCE;
@@ -765,10 +766,10 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
             RegisterCommandBuffer(cmdBuf);
             return CommandBufferHandle(id);
         } else {
-            std::cerr << "[MetalDevice] CommandBuffer Initialize failed for id: " << id << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] CommandBuffer Initialize failed for id: " << id << std::endl;
         }
     } else {
-        std::cerr << "[MetalDevice] CommandBuffer allocation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] CommandBuffer allocation failed" << std::endl;
     }
     commandBufferAllocator_.Free(id);
     return handles::INVALID_COMMAND_BUFFER; 
@@ -777,7 +778,7 @@ CommandBufferHandle MetalDevice::createCommandBufferImpl(CommandQueueType type) 
 void MetalDevice::destroyBufferImpl(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
     if (!bufferAllocator_.Get(static_cast<u32>(handle))) {
-        std::cerr << "[MetalDevice] Double-free buffer handle=" << (u32)handle << " — skipping" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Double-free buffer handle=" << (u32)handle << " — skipping" << std::endl;
         return;
     }
     ResourceManager::Instance().UnregisterResource(handle);
@@ -822,7 +823,7 @@ void MetalDevice::unmapBufferImpl(ResourceHandle handle) {
 void MetalDevice::destroyTextureImpl(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
     if (!textureAllocator_.Get(static_cast<u32>(handle))) {
-        std::cerr << "[MetalDevice] Double-free texture handle=" << (u32)handle << " — skipping" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalDevice] Double-free texture handle=" << (u32)handle << " — skipping" << std::endl;
         return;
     }
     ResourceManager::Instance().UnregisterResource(handle);

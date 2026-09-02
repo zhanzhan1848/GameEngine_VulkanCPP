@@ -13,6 +13,7 @@
 #include "MetalDescriptorSet.h"
 #include "MetalTexture.h"
 #include "MetalQuery.h"
+#include "Engine/Common/CoreDiag.h"
 #include <iostream>
 #include <thread>
 
@@ -249,10 +250,13 @@ bool MetalCommandBuffer::submitImpl(u32 waitFlags) {
         MTL::CommandBufferStatus st = buffer->status();
         if (st != MTL::CommandBufferStatusCompleted) {
             NS::Error* err = buffer->error();
-            std::cerr << "[MetalCB] buffer finished status=" << (int)st
-                      << " error="
-                      << (err ? err->localizedDescription()->utf8String() : "none")
-                      << std::endl;
+            // 命令缓冲失败重定向进 diag 通道（CLI 规划 §11.3 轨道 B）——历史 Metal
+            // 取证（fence 超时/indirect args 撕裂）全靠这行 cerr，装了回调后
+            // 宿主面板与黑匣子也能看到。
+            std::string msg = std::string("[MetalCB] buffer finished status=") + std::to_string((int)st)
+                + " error=" + (err ? err->localizedDescription()->utf8String() : "none");
+            primal::diag::Emit(primal::diag::kLevelError, "RHI", msg.c_str());
+            std::cerr << msg << std::endl;
         }
     });
 

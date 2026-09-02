@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
 
@@ -87,7 +88,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     auto loadShader = [&](const char* name, const char* entry) -> ShaderHandle {
         std::string path = utils::ShaderRegistry::GetShaderPath(platform, name);
         std::string src = LoadShaderSource(path);
-        if (src.empty()) { std::cerr << "[SSGI] Shader empty: " << name << std::endl; return handles::INVALID_SHADER; }
+        if (src.empty()) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSGI] Shader empty: " << name << std::endl; return handles::INVALID_SHADER; }
         return device.CreateShader(src.data(), src.size(), ShaderStage::Compute, entry);
     };
 
@@ -98,7 +99,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
 
     if (traceCS == handles::INVALID_SHADER || denoiseCS == handles::INVALID_SHADER ||
         filterCS == handles::INVALID_SHADER || temporalCS == handles::INVALID_SHADER) {
-        std::cerr << "[SSGI] Shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSGI] Shader compilation failed" << std::endl;
         return false;
     }
 

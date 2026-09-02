@@ -1,4 +1,5 @@
 #include "DawnBuffer.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -145,7 +146,7 @@ bool DawnBuffer::Initialize() {
 
     wgpuBuffer_ = wgpuDeviceCreateBuffer(device_.GetNativeDevice(), &wgpuDesc);
     if (!wgpuBuffer_) {
-        std::cerr << "[DawnBuffer] Failed to create buffer"
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnBuffer] Failed to create buffer"
                   << (bufferDesc_.name.empty() ? "" : (" '" + bufferDesc_.name + "'").c_str())
                   << " size=" << bufferDesc_.size << std::endl;
         return false;
@@ -231,7 +232,7 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
 
     stagingData_ = malloc(alignedSize);
     if (!stagingData_) {
-        std::cerr << "[DawnBuffer] Failed to allocate staging memory" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnBuffer] Failed to allocate staging memory" << std::endl;
         return nullptr;
     }
     memset(stagingData_, 0, alignedSize);

@@ -10,6 +10,7 @@
 #include "MetalGPass.h"
 #include "MetalLight.h"
 #include "MetalPreProcess.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::metal::fx
 {
@@ -38,7 +39,7 @@ namespace primal::graphics::metal::fx
             auto fragment_shader = shader::get_engine_shader( shader::engine_shader::post_process_ps );
 
             if (!vertex_shader.get() || !fragment_shader.get()) {
-                std::cerr << "[MetalPostProcess] post_process_pipeline: missing shader (vs="
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalPostProcess] post_process_pipeline: missing shader (vs="
                           << (vertex_shader.get() ? "ok" : "NULL")
                           << " fs=" << (fragment_shader.get() ? "ok" : "NULL") << ")"
                           << std::endl;
@@ -54,7 +55,7 @@ namespace primal::graphics::metal::fx
                 std::fprintf(stderr, "[MetalPostProcess] post_process_pipeline PSO error: %s\n",
                           pError->localizedDescription()->utf8String());
                 std::fflush(stderr);
-                std::cerr << "[MetalPostProcess] post_process_pipeline PSO error: "
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalPostProcess] post_process_pipeline PSO error: "
                           << pError->localizedDescription()->utf8String() << std::endl;
                 // pError is an NS::Error** out-parameter; Metal owns the
                 // NSError* it writes. Calling ->release() over-released an
@@ -62,7 +63,7 @@ namespace primal::graphics::metal::fx
                 // pool later dereferenced, producing the objc_release
                 // SIGSEGV documented in MetalBlitToDrawable.cpp.
             } else if (!post_process_pipeline) {
-                std::cerr << "[MetalPostProcess] post_process_pipeline: newRenderPipelineState returned null without error" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalPostProcess] post_process_pipeline: newRenderPipelineState returned null without error" << std::endl;
             }
             MTL_CHECK_ERROR(pError)
 

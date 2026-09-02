@@ -2,6 +2,7 @@
 #include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -29,7 +30,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     }
 
     if (!file.is_open()) {
-        std::cerr << "BlurPass: Failed to open shader file: " << shaderPath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "BlurPass: Failed to open shader file: " << shaderPath << std::endl;
         return false;
     }
     
@@ -47,7 +48,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
 
     computeShader_ = device_->CreateShader(buffer.data(), codeSize, rhi::ShaderStage::Compute, "blurCS");
     if (computeShader_ == rhi::handles::INVALID_SHADER) {
-        std::cerr << "BlurPass: Failed to create compute shader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "BlurPass: Failed to create compute shader" << std::endl;
         return false;
     }
     // T8.13: 2D-texture variant (VSM moments blur passes plain 2D textures).
@@ -59,7 +60,7 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     if (platform == rhi::RHIPlatform::Metal) {
         computeShader2D_ = device_->CreateShader(buffer.data(), codeSize, rhi::ShaderStage::Compute, "blurCS2D");
         if (computeShader2D_ == rhi::handles::INVALID_SHADER) {
-            std::cerr << "BlurPass: Failed to create 2D compute shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "BlurPass: Failed to create 2D compute shader" << std::endl;
             return false;
         }
     }
@@ -285,7 +286,7 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         offset = (offset + 255) & ~255; // Alignment
         
         if (offset + sizeof(BlurParams) > MAX_PARAM_BUFFER_SIZE) {
-            std::cerr << "BlurPass: Param buffer full!" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "BlurPass: Param buffer full!" << std::endl;
             return;
         }
         

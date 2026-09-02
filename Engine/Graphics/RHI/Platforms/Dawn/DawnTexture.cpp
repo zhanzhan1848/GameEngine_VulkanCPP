@@ -1,4 +1,5 @@
 #include "DawnTexture.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -74,7 +75,7 @@ bool DawnTexture::Initialize() {
     // Format
     texDesc.format = ToWGPUTextureFormat(textureDesc_.format);
     if (texDesc.format == WGPUTextureFormat_Undefined) {
-        std::cerr << "[DawnTexture] Unsupported texture format: "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnTexture] Unsupported texture format: "
                   << static_cast<int>(textureDesc_.format) << std::endl;
         return false;
     }
@@ -118,7 +119,7 @@ bool DawnTexture::Initialize() {
 
     wgpuTexture_ = wgpuDeviceCreateTexture(device_.GetNativeDevice(), &texDesc);
     if (!wgpuTexture_) {
-        std::cerr << "[DawnTexture] Failed to create texture"
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnTexture] Failed to create texture"
                   << (textureDesc_.name.empty() ? "" : (" '" + textureDesc_.name + "'").c_str())
                   << std::endl;
         return false;
@@ -161,7 +162,7 @@ bool DawnTexture::Initialize() {
         wgpuTextureView_ = wgpuTextureCreateView(wgpuTexture_, nullptr);
     }
     if (!wgpuTextureView_) {
-        std::cerr << "[DawnTexture] Failed to create default view for texture"
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnTexture] Failed to create default view for texture"
                   << (textureDesc_.name.empty() ? "" : (" '" + textureDesc_.name + "'").c_str())
                   << std::endl;
         // Texture itself was created successfully; view failure is non-fatal.
@@ -178,7 +179,7 @@ bool DawnTexture::Initialize() {
 
 WGPUTextureView DawnTexture::CreateView(const TextureViewDesc& viewDesc) {
     if (!wgpuTexture_) {
-        std::cerr << "[DawnTexture] Cannot create view: texture not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnTexture] Cannot create view: texture not initialized" << std::endl;
         return nullptr;
     }
 
@@ -247,7 +248,7 @@ WGPUTextureView DawnTexture::CreateView(const TextureViewDesc& viewDesc) {
 
     WGPUTextureView view = wgpuTextureCreateView(wgpuTexture_, &wgpuViewDesc);
     if (!view) {
-        std::cerr << "[DawnTexture] Failed to create custom texture view" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnTexture] Failed to create custom texture view" << std::endl;
     }
 
     return view;

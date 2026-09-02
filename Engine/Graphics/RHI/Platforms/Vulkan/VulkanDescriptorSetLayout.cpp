@@ -8,6 +8,7 @@
 #include "VulkanDescriptorSetLayout.h"
 #include "VulkanDevice.h"
 #include "VulkanSampler.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -82,7 +83,7 @@ bool VulkanDescriptorSetLayout::Initialize() {
             for (u32 i = 0; i < vk.descriptorCount; ++i) {
                 VulkanSampler* s = vkDev.GetSampler(b.immutableSamplers[i]);
                 if (!s || s->GetNativeSampler() == VK_NULL_HANDLE) {
-                    std::cerr << "[VulkanDescriptorSetLayout] immutable sampler "
+                    PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDescriptorSetLayout] immutable sampler "
                               << i << " invalid at binding " << b.binding
                               << " — falling back to mutable" << std::endl;
                     samplers.clear();
@@ -121,7 +122,7 @@ bool VulkanDescriptorSetLayout::Initialize() {
         if ((raw & static_cast<u32>(DescriptorBindingFlags::UpdateAfterBind)) ||
             (raw & static_cast<u32>(DescriptorBindingFlags::UpdateUnusedWhilePending)) ||
             (raw & static_cast<u32>(DescriptorBindingFlags::VariableDescriptorCount))) {
-            std::cerr << "[VulkanDescriptorSetLayout] binding " << b.binding
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDescriptorSetLayout] binding " << b.binding
                       << " requests unsupported binding flag (UpdateAfterBind/"
                          "UpdateUnusedWhilePending/VariableDescriptorCount) — ignored"
                       << std::endl;
@@ -138,7 +139,7 @@ bool VulkanDescriptorSetLayout::Initialize() {
     }
 
     if (vkCreateDescriptorSetLayout(dev, &lci, nullptr, &layout_) != VK_SUCCESS) {
-        std::cerr << "[VulkanDescriptorSetLayout] vkCreateDescriptorSetLayout failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDescriptorSetLayout] vkCreateDescriptorSetLayout failed" << std::endl;
         return false;
     }
 
@@ -169,7 +170,7 @@ bool VulkanDescriptorSetLayout::Initialize() {
     pci.pPoolSizes    = sizes.data();
 
     if (vkCreateDescriptorPool(dev, &pci, nullptr, &pool_) != VK_SUCCESS) {
-        std::cerr << "[VulkanDescriptorSetLayout] vkCreateDescriptorPool failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDescriptorSetLayout] vkCreateDescriptorPool failed" << std::endl;
         vkDestroyDescriptorSetLayout(dev, layout_, nullptr);
         layout_ = VK_NULL_HANDLE;
         return false;
@@ -206,7 +207,7 @@ VkDescriptorSet VulkanDescriptorSetLayout::AllocateSet() {
     VkDescriptorSet set;
     if (vkAllocateDescriptorSets(dev, &ai, &set) != VK_SUCCESS) {
         // 尝试 reset pool(可能满了)— Phase 4 简化:不 reset,直接失败
-        std::cerr << "[VulkanDescriptorSetLayout] vkAllocateDescriptorSets failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDescriptorSetLayout] vkAllocateDescriptorSets failed" << std::endl;
         return VK_NULL_HANDLE;
     }
     return set;

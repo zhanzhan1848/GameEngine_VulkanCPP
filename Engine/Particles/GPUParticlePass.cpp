@@ -1,4 +1,5 @@
 #include "GPUParticlePass.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #ifndef DISABLE_PARTICLE_SYSTEM
 
@@ -134,13 +135,13 @@ bool gpu_particle_pass::initialize(rhi::RHIDeviceBase* device) {
     
     // Create shaders
     if (!create_shaders()) {
-        std::cerr << "[GPUParticlePass] Failed to create shaders" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticlePass] Failed to create shaders" << std::endl;
         return false;
     }
     
     // Create pipelines
     if (!create_pipelines()) {
-        std::cerr << "[GPUParticlePass] Failed to create pipelines" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticlePass] Failed to create pipelines" << std::endl;
         return false;
     }
     
@@ -153,18 +154,18 @@ bool gpu_particle_pass::initialize(rhi::RHIDeviceBase* device) {
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         uniform_buffers_[i] = device_->CreateBuffer(uniform_desc);
         if (uniform_buffers_[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[GPUParticlePass] Failed to create uniform buffer " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticlePass] Failed to create uniform buffer " << i << std::endl;
             return false;
         }
         
         uniform_mapped_[i] = device_->MapBuffer(uniform_buffers_[i]);
         if (!uniform_mapped_[i]) {
-            std::cerr << "[GPUParticlePass] Failed to map uniform buffer " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Particles") << "[GPUParticlePass] Failed to map uniform buffer " << i << std::endl;
             return false;
         }
     }
     
-    std::cout << "[GPUParticlePass] Initialized successfully" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Particles") << "[GPUParticlePass] Initialized successfully" << std::endl;
     return true;
 }
 

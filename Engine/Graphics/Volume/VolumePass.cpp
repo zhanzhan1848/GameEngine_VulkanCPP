@@ -15,6 +15,7 @@
 #include <cstring>
 #include <set>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::volume {
 
@@ -133,7 +134,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
     }
 
     if (source.empty()) {
-        std::cerr << "[VolumePass] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumePass] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
 
@@ -227,7 +228,7 @@ bool VolumePass::Initialize(RHIDeviceBase* device, u32 render_width, u32 render_
 
     u32 half_w = render_width / 2;
     u32 half_h = render_height / 2;
-    std::cout << "[VolumePass] Initialized (" << render_width << "x" << render_height
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[VolumePass] Initialized (" << render_width << "x" << render_height
               << ", half-res: " << half_w << "x" << half_h << ")" << std::endl;
     return true;
 }
@@ -296,7 +297,7 @@ void VolumePass::CreatePipelines() {
 
     if (densityShader == handles::INVALID_SHADER ||
         lightingShader == handles::INVALID_SHADER) {
-        std::cerr << "[VolumePass] Shader compilation failed: density="
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumePass] Shader compilation failed: density="
                   << (densityShader == handles::INVALID_SHADER ? "FAIL" : "OK")
                   << " lighting=" << (lightingShader == handles::INVALID_SHADER ? "FAIL" : "OK")
                   << std::endl;
@@ -375,7 +376,7 @@ void VolumePass::CreateNoiseTexture() {
     noise_texture_ = device_->CreateTexture(texDesc);
 
     if (noise_texture_ == handles::INVALID_RESOURCE) {
-        std::cerr << "[VolumePass] Failed to create noise texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumePass] Failed to create noise texture" << std::endl;
         return;
     }
 
@@ -403,13 +404,13 @@ void VolumePass::CreateNoiseTexture() {
     auto stagingBuffer = device_->CreateBuffer(stagingDesc);
 
     if (stagingBuffer == handles::INVALID_RESOURCE) {
-        std::cerr << "[VolumePass] Failed to create noise staging buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumePass] Failed to create noise staging buffer" << std::endl;
         return;
     }
 
     float* mapped = static_cast<float*>(device_->MapBuffer(stagingBuffer));
     if (!mapped) {
-        std::cerr << "[VolumePass] Failed to map noise staging buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumePass] Failed to map noise staging buffer" << std::endl;
         device_->DestroyBuffer(stagingBuffer);
         return;
     }
@@ -420,7 +421,7 @@ void VolumePass::CreateNoiseTexture() {
     // 4. Copy staging buffer → texture via command buffer
     auto cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
     if (cmdHandle == handles::INVALID_COMMAND_BUFFER) {
-        std::cerr << "[VolumePass] Failed to create noise upload command buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumePass] Failed to create noise upload command buffer" << std::endl;
         device_->DestroyBuffer(stagingBuffer);
         return;
     }
@@ -441,7 +442,7 @@ void VolumePass::CreateNoiseTexture() {
     // 5. Destroy staging buffer
     device_->DestroyBuffer(stagingBuffer);
 
-    std::cout << "[VolumePass] Noise texture created and uploaded (128^3, FBM Worley)" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[VolumePass] Noise texture created and uploaded (128^3, FBM Worley)" << std::endl;
 }
 
 void VolumePass::CreatePersistentBuffers() {

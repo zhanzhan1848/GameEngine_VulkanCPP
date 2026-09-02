@@ -19,6 +19,7 @@
 #include <iostream>
 #include <objc/runtime.h>
 #include <objc/message.h>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -43,7 +44,7 @@ MetalSwapChain::~MetalSwapChain() {
 bool MetalSwapChain::Initialize() {
     // 1. 获取窗口句柄
     if (!swapChainDesc_.window) {
-        std::cerr << "[MetalSwapChain] Invalid window handle." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalSwapChain] Invalid window handle." << std::endl;
         return false;
     }
 
@@ -67,7 +68,7 @@ bool MetalSwapChain::Initialize() {
     }
 
     if (!mtkView_) {
-        std::cerr << "[MetalSwapChain] Failed to create MTKView." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalSwapChain] Failed to create MTKView." << std::endl;
         return false;
     }
     
@@ -105,7 +106,7 @@ bool MetalSwapChain::Initialize() {
     swapChainDesc_.height = static_cast<u32>(drawableSize.height);
     
     CGRect windowFrame = window->frame();
-    std::cout << "[MetalSwapChain] Window Logical Size: " << windowFrame.size.width << "x" << windowFrame.size.height 
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalSwapChain] Window Logical Size: " << windowFrame.size.width << "x" << windowFrame.size.height 
               << ", Scale: " << scale 
               << ", Drawable Size: " << drawableSize.width << "x" << drawableSize.height << std::endl;
     
@@ -178,7 +179,7 @@ bool MetalSwapChain::AcquireNextImage(u32* imageIndex, SyncHandle semaphore, Syn
             MTL::Texture* mtlTex = metalDrawable->texture();
             texture->SetNativeTexture(mtlTex);
         } else {
-            std::cerr << "[MetalSwapChain] Failed to get texture for handle " << handle << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalSwapChain] Failed to get texture for handle " << handle << std::endl;
         }
     }
 
@@ -200,13 +201,13 @@ void MetalSwapChain::Present(SyncHandle semaphore) {
     
     MTL::CommandQueue* queue = metalDevice_.GetGraphicsQueue();
     if (!queue) {
-        std::cerr << "[MetalSwapChain] Graphics queue is null!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalSwapChain] Graphics queue is null!" << std::endl;
         return;
     }
     
     MTL::CommandBuffer* cmdBuffer = queue->commandBuffer();
     if (!cmdBuffer) {
-        std::cerr << "[MetalSwapChain] Failed to create command buffer!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalSwapChain] Failed to create command buffer!" << std::endl;
         return;
     }
     

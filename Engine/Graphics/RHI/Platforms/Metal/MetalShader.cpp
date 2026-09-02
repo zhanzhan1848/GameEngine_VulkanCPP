@@ -8,8 +8,10 @@
 
 #include "MetalShader.h"
 #include "MetalDevice.h"
+#include "Engine/Common/CoreDiag.h"
 #include <iostream>
 #include <cstring>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -49,25 +51,25 @@ bool MetalShader::Initialize() {
     // the source fallback would only make things worse.
     if (!library_ && !is_binary) {
         if (error) {
-            std::cerr << "[MetalShader] Failed to create library from binary: "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to create library from binary: "
                       << error->localizedDescription()->utf8String() << std::endl;
             // Error is autoreleased, do not release manually
             error = nullptr;
         }
 
-        std::cout << "[MetalShader] Compiling from source... (size: " << size_ << " bytes)" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalShader] Compiling from source... (size: " << size_ << " bytes)" << std::endl;
         std::string sourceStr(static_cast<const char*>(data_), size_);
         NS::String* source = NS::String::alloc()->init(sourceStr.c_str(), NS::UTF8StringEncoding);
         if (!source) {
-             std::cerr << "[MetalShader] Failed to create NS::String from source data (UTF8). Trying ASCII..." << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to create NS::String from source data (UTF8). Trying ASCII..." << std::endl;
              source = NS::String::alloc()->init(sourceStr.c_str(), NS::ASCIIStringEncoding);
         }
         if (!source) {
-             std::cerr << "[MetalShader] Failed to create NS::String from source data (ASCII). Trying MacOSRoman..." << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to create NS::String from source data (ASCII). Trying MacOSRoman..." << std::endl;
              source = NS::String::alloc()->init(sourceStr.c_str(), NS::MacOSRomanStringEncoding);
         }
         if (!source) {
-             std::cerr << "[MetalShader] Failed to create NS::String from source data (All encodings failed)." << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to create NS::String from source data (All encodings failed)." << std::endl;
              return false;
         }
         MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
@@ -79,23 +81,28 @@ bool MetalShader::Initialize() {
         // would only waste time on binary input. Log the error and let
         // the function return false with library_ = nullptr.
         if (error) {
-            std::cerr << "[MetalShader] Failed to load metallib (size=" << size_
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to load metallib (size=" << size_
                       << "): " << error->localizedDescription()->utf8String() << std::endl;
             // Error is autoreleased, do not release manually
             error = nullptr;
         } else {
-            std::cerr << "[MetalShader] Failed to load metallib (size=" << size_ << ")" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to load metallib (size=" << size_ << ")" << std::endl;
         }
     }
 
     if (!library_) {
-        std::cerr << "[MetalShader] Library creation failed." << std::endl;
+        // 着色器编译失败重定向进 diag 通道（CLI 规划 §11.3 轨道 B）：
+        // 源码 dump 只留 stderr（太长且低频），结构化错误进黑匣子/宿主面板。
+        std::string diagMsg = std::string("[MetalShader] Library creation failed: ")
+            + (error ? error->localizedDescription()->utf8String() : "unknown error (error object is null)");
+        primal::diag::Emit(primal::diag::kLevelError, "RHI", diagMsg.c_str());
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Library creation failed." << std::endl;
         if (error) {
-            std::cerr << "[MetalShader] Error: " 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Error: " 
                       << error->localizedDescription()->utf8String() << std::endl;
             
             // Print source code for debugging
-            std::cerr << "[MetalShader] Source Code (First 200 lines):" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Source Code (First 200 lines):" << std::endl;
             const char* sourceStr = static_cast<const char*>(data_);
             std::string sourceString(sourceStr, std::min(size_, (size_t)10000)); // Limit output
             
@@ -103,18 +110,18 @@ bool MetalShader::Initialize() {
             size_t start = 0;
             size_t end = sourceString.find('\n');
             while (end != std::string::npos && lineNum <= 200) {
-                std::cerr << lineNum << ": " << sourceString.substr(start, end - start) << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << lineNum << ": " << sourceString.substr(start, end - start) << std::endl;
                 start = end + 1;
                 end = sourceString.find('\n', start);
                 lineNum++;
             }
             if (lineNum <= 200) {
-                std::cerr << lineNum << ": " << sourceString.substr(start) << std::endl;
+                PRIMAL_LOG_STREAM(Error, "RHI") << lineNum << ": " << sourceString.substr(start) << std::endl;
             }
-            std::cerr << "[MetalShader] End of Source Code" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] End of Source Code" << std::endl;
 
         } else {
-             std::cerr << "[MetalShader] Unknown error (error object is null)" << std::endl;
+             PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Unknown error (error object is null)" << std::endl;
         }
         return false;
     }
@@ -125,17 +132,17 @@ bool MetalShader::Initialize() {
     nsEntryPoint->release();
     
     if (!function_) {
-        std::cerr << "[MetalShader] Failed to find entry point: " << entryPoint_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to find entry point: " << entryPoint_ << std::endl;
         
         // List all function names in the library for debugging
         NS::Array* functionNames = library_->functionNames();
         if (functionNames) {
-            std::cerr << "[MetalShader] Available functions: ";
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Available functions: ";
             for (int i = 0; i < functionNames->count(); ++i) {
                 NS::String* name = reinterpret_cast<NS::String*>(functionNames->object(i));
-                std::cerr << name->utf8String() << " ";
+                PRIMAL_LOG_STREAM(Error, "RHI") << name->utf8String() << " ";
             }
-            std::cerr << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << std::endl;
         }
         return false;
     }

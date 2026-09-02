@@ -23,6 +23,7 @@
 #endif
 
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -34,7 +35,7 @@ void VulkanStagingAllocator::Initialize(VkDevice device, VmaAllocator allocator,
                                         VkQueue queue, u32 queueFamily, u64 poolSize) {
     if (initialized_) return;
     if (!device || !allocator) {
-        std::cerr << "[VulkanStagingAllocator] Initialize: null device or allocator" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanStagingAllocator] Initialize: null device or allocator" << std::endl;
         return;
     }
 
@@ -61,7 +62,7 @@ void VulkanStagingAllocator::Initialize(VkDevice device, VmaAllocator allocator,
         VkResult res = vmaCreateBuffer(allocator_, &bci, &aci,
                                         &pool.buffer, &pool.allocation, &info);
         if (res != VK_SUCCESS) {
-            std::cerr << "[VulkanStagingAllocator] vmaCreateBuffer failed for pool " << i
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanStagingAllocator] vmaCreateBuffer failed for pool " << i
                       << ": " << res << std::endl;
             pool.buffer = VK_NULL_HANDLE;
             pool.allocation = nullptr;
@@ -105,7 +106,7 @@ void VulkanStagingAllocator::BeginFrame() {
     // cmdbuf Begin(极端情况),残留 pending 丢弃前无法恢复 — FlushBlocking
     // 是调用方责任。debug 下留 assert 级日志。
     if (!pools_[currentFrame_].pending.empty()) {
-        std::cerr << "[VulkanStagingAllocator] BeginFrame: dropping "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanStagingAllocator] BeginFrame: dropping "
                   << pools_[currentFrame_].pending.size()
                   << " pending blits from an un-encoded frame" << std::endl;
         pools_[currentFrame_].pending.clear();
@@ -257,7 +258,7 @@ void VulkanStagingAllocator::FlushBlocking() {
     if (!initialized_) return;
     if (pools_[currentFrame_].pending.empty()) return;
     if (queue_ == VK_NULL_HANDLE || device_ == VK_NULL_HANDLE) {
-        std::cerr << "[VulkanStagingAllocator] FlushBlocking: no queue available" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanStagingAllocator] FlushBlocking: no queue available" << std::endl;
         pools_[currentFrame_].pending.clear();
         return;
     }
@@ -269,7 +270,7 @@ void VulkanStagingAllocator::FlushBlocking() {
     pci.queueFamilyIndex = queueFamily_;
     VkCommandPool pool = VK_NULL_HANDLE;
     if (vkCreateCommandPool(device_, &pci, nullptr, &pool) != VK_SUCCESS) {
-        std::cerr << "[VulkanStagingAllocator] FlushBlocking: vkCreateCommandPool failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanStagingAllocator] FlushBlocking: vkCreateCommandPool failed" << std::endl;
         return;
     }
     VkCommandBufferAllocateInfo ai{};

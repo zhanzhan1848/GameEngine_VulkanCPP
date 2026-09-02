@@ -21,6 +21,12 @@ set(_ENGINE_METALLIB      "${_ENGINE_BLOB_OUT_DIR}/shaders.metallib")
 set(_ENGINE_BLIT_METALLIB "${_ENGINE_BLOB_OUT_DIR}/BlitToDrawable.metallib")
 set(_ENGINE_PACKED_BLOB   "${_ENGINE_BLOB_OUT_DIR}/shaders.metallib.packed")
 
+# EditorShaders.metal includes shaders from nested directories. Track every
+# Metal source so changing an included lighting/pass file rebuilds the packed
+# blob instead of silently continuing to run stale shader code.
+file(GLOB_RECURSE _ENGINE_METAL_SHADER_SOURCES CONFIGURE_DEPENDS
+    "${_ENGINE_SHADERS_DIR}/*.metal")
+
 file(MAKE_DIRECTORY ${_ENGINE_BLOB_OUT_DIR})
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -37,8 +43,7 @@ add_custom_command(
         "${_ENGINE_METALLIB}" "${_ENGINE_BLIT_METALLIB}"
     DEPENDS
         "${CMAKE_SOURCE_DIR}/CMake/build_engine_shader_blob.py"
-        "${_ENGINE_SHADERS_DIR}/EditorShaders.metal"
-        "${_ENGINE_SHADERS_DIR}/BlitToDrawable.metal"
+        ${_ENGINE_METAL_SHADER_SOURCES}
     COMMENT "Building engine shaders metallib and packed legacy blob"
     VERBATIM
 )

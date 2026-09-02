@@ -20,6 +20,7 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Graphics/RHI/Platforms/Metal/MetalTexture.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::metal::core
 {
@@ -302,7 +303,7 @@ namespace primal::graphics::metal::core
         // fallback) can still run. Log a warning and continue.
         const bool shaders_ok = shader::initialize();
         if (!shaders_ok) {
-            std::cerr << "[MetalCore] shader::initialize failed; continuing without legacy engine shaders." << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCore] shader::initialize failed; continuing without legacy engine shaders." << std::endl;
         }
 
         // Each pass init may fail when its shader is unavailable (Avalonia editor
@@ -312,7 +313,7 @@ namespace primal::graphics::metal::core
         // a clear-color frame.
         auto soft_init = [](const char* name, bool (*fn)()) {
             if (!fn()) {
-                std::cerr << "[MetalCore] " << name << "::initialize failed; pass disabled."
+                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCore] " << name << "::initialize failed; pass disabled."
                           << " (shader blob missing function or PSO descriptor invalid)"
                           << std::endl;
             }

@@ -6,6 +6,7 @@
 #include <objc/message.h>
 #include <OSAPI/MAC/AppKit/NSView.hpp>
 #include "MetalCore.h"
+#include "Engine/Common/CoreLogStream.h"
 
 // C entry point into PassThroughMTKView.mm. The editor's embedded
 // (create_external) path uses this to allocate a PassThroughMTKView
@@ -36,7 +37,7 @@ bool metal_surface::create()
 
         if(!_mtk_view)
         {
-            std::cerr << "Failed to create MTKView" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to create MTKView" << std::endl;
             return false;
         }
 
@@ -54,7 +55,7 @@ bool metal_surface::create()
 
         NS::Window* window = static_cast<NS::Window*>(_window.handle());
         if (!window) {
-            std::cerr << "[metal_surface::create] window handle is null, skipping contentView attach" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[metal_surface::create] window handle is null, skipping contentView attach" << std::endl;
             return false;
         }
         window->setContentView( _mtk_view );
@@ -101,7 +102,7 @@ bool metal_surface::create()
         // renders into the Avalonia-owned contentView.
         _host_view = reinterpret_cast<NS::View*>(_window.handle());
         if (!_host_view) {
-            std::cerr << "[metal_surface::create_external] host view is null" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[metal_surface::create_external] host view is null" << std::endl;
             return false;
         }
         _is_external = true;
@@ -122,7 +123,7 @@ bool metal_surface::create()
         // layout pass when the host is actually laid out.
         const CGRect hostBounds = _host_view->bounds();
         if (hostBounds.size.width <= 0.0 || hostBounds.size.height <= 0.0) {
-            std::cerr << "[metal_surface::create_external] host view has zero-size "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[metal_surface::create_external] host view has zero-size "
                          "bounds (" << hostBounds.size.width << "x"
                       << hostBounds.size.height << "); deferring until layout pass" << std::endl;
             _is_external = false;
@@ -140,7 +141,7 @@ bool metal_surface::create()
             core::get_device(), 0.0, 0.0,
             static_cast<double>(width), static_cast<double>(height));
         if (!raw_view) {
-            std::cerr << "[metal_surface::create_external] PassThroughMTKView alloc failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[metal_surface::create_external] PassThroughMTKView alloc failed" << std::endl;
             return false;
         }
         _mtk_view = reinterpret_cast<MTK::View*>(raw_view);

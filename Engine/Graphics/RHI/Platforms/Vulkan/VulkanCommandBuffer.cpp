@@ -18,6 +18,7 @@
 #include "VulkanPipeline.h"
 #include "VulkanDescriptorSet.h"
 #include "VulkanMath.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
@@ -86,7 +87,7 @@ bool VulkanCommandBuffer::Initialize() {
     // Phase 1-3 都用 graphics queue family
     queueFamily_ = vk.GetGraphicsQueueFamily();
     if (queueFamily_ == UINT32_MAX) {
-        std::cerr << "[VulkanCommandBuffer] No graphics queue family" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] No graphics queue family" << std::endl;
         return false;
     }
 
@@ -95,7 +96,7 @@ bool VulkanCommandBuffer::Initialize() {
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;  // 允许 vkResetCommandBuffer
     pci.queueFamilyIndex = queueFamily_;
     if (vkCreateCommandPool(dev, &pci, nullptr, &cmdPool_) != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkCreateCommandPool failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkCreateCommandPool failed" << std::endl;
         return false;
     }
 
@@ -107,7 +108,7 @@ bool VulkanCommandBuffer::Initialize() {
                             : VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
     if (vkAllocateCommandBuffers(dev, &ai, &cmdBuffer_) != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkAllocateCommandBuffers failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkAllocateCommandBuffers failed" << std::endl;
         vkDestroyCommandPool(dev, cmdPool_, nullptr);
         cmdPool_ = VK_NULL_HANDLE;
         return false;
@@ -123,7 +124,7 @@ bool VulkanCommandBuffer::Initialize() {
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fci.flags = 0;
     if (vkCreateFence(dev, &fci, nullptr, &submitFence_) != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkCreateFence failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkCreateFence failed" << std::endl;
         vkFreeCommandBuffers(dev, cmdPool_, 1, &cmdBuffer_);
         vkDestroyCommandPool(dev, cmdPool_, nullptr);
         cmdBuffer_ = VK_NULL_HANDLE;
@@ -165,7 +166,7 @@ bool VulkanCommandBuffer::resetImpl() {
     // Reset command buffer (commands cleared, ready to begin)
     VkResult res = vkResetCommandBuffer(cmdBuffer_, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkResetCommandBuffer failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkResetCommandBuffer failed: " << res << std::endl;
         return false;
     }
 
@@ -200,7 +201,7 @@ bool VulkanCommandBuffer::beginImpl() {
     }
     VkResult res = vkBeginCommandBuffer(cmdBuffer_, &bi);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkBeginCommandBuffer failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkBeginCommandBuffer failed: " << res << std::endl;
         return false;
     }
     // P4c-F7: secondary 的录制期整体处于"继承的 render pass 内"(其执行
@@ -222,7 +223,7 @@ bool VulkanCommandBuffer::beginImpl() {
 bool VulkanCommandBuffer::endImpl() {
     VkResult res = vkEndCommandBuffer(cmdBuffer_);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkEndCommandBuffer failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkEndCommandBuffer failed: " << res << std::endl;
         return false;
     }
     if (isRecording_) {
@@ -240,7 +241,7 @@ bool VulkanCommandBuffer::submitImpl(u32 /*waitFlags*/) {
     // P4c-F7 契约:secondary 不拥有 fence,不能独立提交 — 由 primary 的
     // ExecuteSecondaryCommandBuffers + 提交统一执行
     if (isSecondary_) {
-        std::cerr << "[VulkanCommandBuffer] Submit rejected on secondary command "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] Submit rejected on secondary command "
                      "buffer (execute via primary)" << std::endl;
         return false;
     }
@@ -257,7 +258,7 @@ bool VulkanCommandBuffer::submitImpl(u32 /*waitFlags*/) {
 
     VkResult res = vkQueueSubmit(queue, 1, &si, submitFence_);
     if (res != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkQueueSubmit failed: " << res << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkQueueSubmit failed: " << res << std::endl;
         return false;
     }
     return true;
@@ -275,10 +276,10 @@ bool VulkanCommandBuffer::waitForCompletionImpl() {
     VkResult res = vkWaitForFences(dev, 1, &submitFence_, VK_TRUE, 5ULL * 1000ULL * 1000ULL * 1000ULL);
     if (res == VK_SUCCESS) return true;
     if (res == VK_TIMEOUT) {
-        std::cerr << "[VulkanCommandBuffer] WaitForCompletion TIMEOUT (5s)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] WaitForCompletion TIMEOUT (5s)" << std::endl;
         return false;
     }
-    std::cerr << "[VulkanCommandBuffer] vkWaitForFences failed: " << res << std::endl;
+    PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkWaitForFences failed: " << res << std::endl;
     return false;
 }
 
@@ -660,7 +661,7 @@ void VulkanCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 bar
 CommandBufferHandle VulkanCommandBuffer::BeginSecondaryCommandBuffer(
     const SecondaryCommandBufferDesc& desc) {
     if (isSecondary_) {
-        std::cerr << "[VulkanCommandBuffer] secondary cannot nest another secondary" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] secondary cannot nest another secondary" << std::endl;
         return handles::INVALID_COMMAND_BUFFER;
     }
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
@@ -681,7 +682,7 @@ CommandBufferHandle VulkanCommandBuffer::BeginSecondaryCommandBuffer(
     sec->inheritSubpass_ = desc.subpass;
     pendingSecondaryMode_ = true;
     if (!sec->Initialize() || !sec->Begin()) {
-        std::cerr << "[VulkanCommandBuffer] secondary Initialize/Begin failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] secondary Initialize/Begin failed" << std::endl;
         vk.commandBufferAllocator_->Free(id);
         return handles::INVALID_COMMAND_BUFFER;
     }
@@ -692,7 +693,7 @@ void VulkanCommandBuffer::ExecuteSecondaryCommandBuffers(u32 count,
                                                           CommandBufferHandle* secondaries) {
     if (isSecondary_ || count == 0 || !secondaries) return;
     if (scope_ != Scope::RenderPass) {
-        std::cerr << "[VulkanCommandBuffer] ExecuteSecondaryCommandBuffers must be "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] ExecuteSecondaryCommandBuffers must be "
                      "called inside a render pass instance" << std::endl;
         return;
     }
@@ -840,7 +841,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     // P4c-F7 契约:secondary 内 BeginRenderPass 被拒绝(继承式二级缓冲,
     // 非嵌套 pass;见 RHICommand.h 注释)
     if (isSecondary_) {
-        std::cerr << "[VulkanCommandBuffer] BeginRenderPass rejected on secondary "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] BeginRenderPass rejected on secondary "
                      "command buffer (inherited render pass)" << std::endl;
         return;
     }
@@ -953,7 +954,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     rpci.pSubpasses = &subpass;
     VkRenderPass rp;
     if (vkCreateRenderPass(dev, &rpci, nullptr, &rp) != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] BeginRenderPass vkCreateRenderPass failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] BeginRenderPass vkCreateRenderPass failed" << std::endl;
         return;
     }
 
@@ -995,7 +996,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             }
         }
         if (desc.renderTargetArrayLength > maxLayers) {
-            std::cerr << "[VulkanCommandBuffer] renderTargetArrayLength "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] renderTargetArrayLength "
                       << desc.renderTargetArrayLength << " > attachment layers "
                       << maxLayers << " — clamping" << std::endl;
         }
@@ -1003,7 +1004,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     }
     VkFramebuffer fb;
     if (vkCreateFramebuffer(dev, &fbci, nullptr, &fb) != VK_SUCCESS) {
-        std::cerr << "[VulkanCommandBuffer] vkCreateFramebuffer failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkCreateFramebuffer failed" << std::endl;
         vkDestroyRenderPass(dev, rp, nullptr);
         return;
     }
@@ -1061,7 +1062,7 @@ void VulkanCommandBuffer::BeginRenderPass(RenderPassHandle renderPass) {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VulkanRenderPass* rp = vk.GetRenderPass(renderPass);
     if (!rp) {
-        std::cerr << "[VulkanCommandBuffer] BeginRenderPass(handle): invalid handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] BeginRenderPass(handle): invalid handle" << std::endl;
         return;
     }
     // Phase 4 简化:RenderPassHandle 重载用 desc 版本走一遍
@@ -1233,7 +1234,7 @@ void VulkanCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size)
         // DYNAMIC + 动态偏移)。shader 布局约定见 RHIShaderCommon.glsl。
         VulkanDevice::ImplicitUBOAlloc a = vk.AllocImplicitComputeUBO(size);
         if (!a.valid) {
-            std::cerr << "[VulkanCommandBuffer] SetComputeBytes: implicit UBO exhausted "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] SetComputeBytes: implicit UBO exhausted "
                          "(size=" << size << ") — constants dropped" << std::endl;
             return;
         }

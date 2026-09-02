@@ -10,6 +10,7 @@
 #include "MetalDevice.h"
 #include "MetalShader.h"
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -258,7 +259,7 @@ bool MetalPipeline::Initialize(const GraphicsPipelineDesc& desc) {
 
     if (!renderPipelineState_) {
         if (error) {
-            std::cerr << "[MetalPipeline] Failed to create render pipeline state: " 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalPipeline] Failed to create render pipeline state: " 
                       << error->localizedDescription()->utf8String() << std::endl;
             // error is an NS::Error** out-parameter; Metal owns it. Do NOT
             // release — over-releasing an autoreleased NSError was the
@@ -269,7 +270,7 @@ bool MetalPipeline::Initialize(const GraphicsPipelineDesc& desc) {
         return false;
     }
 
-    std::cout << "[MetalPipeline] Render pipeline state created successfully." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalPipeline] Render pipeline state created successfully." << std::endl;
 
     return true;
 }
@@ -281,7 +282,7 @@ bool MetalPipeline::Initialize(const ComputePipelineDesc& desc) {
 
     MetalShader* computeShader = device_.GetShader(desc.computeShader);
     if (!computeShader) {
-        std::cerr << "[MetalPipeline] Invalid compute shader handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalPipeline] Invalid compute shader handle" << std::endl;
         return false;
     }
 
@@ -295,7 +296,7 @@ bool MetalPipeline::Initialize(const ComputePipelineDesc& desc) {
 
     if (!computePipelineState_) {
         if (error) {
-            std::cerr << "[MetalPipeline] Failed to create compute pipeline state: " 
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalPipeline] Failed to create compute pipeline state: " 
                       << error->localizedDescription()->utf8String() << std::endl;
             // error is an NS::Error** out-parameter; Metal owns it. Do NOT
             // release — see MetalBlitToDrawable.cpp for the canonical
@@ -391,14 +392,14 @@ MTL::RenderPipelineDescriptor* MetalPipeline::CreateRenderPipelineDescriptor(con
 
     // Diagnostic: detect silent shader creation failure
     if (!vs) {
-        std::cerr << "[PIPELINE_DIAG] VERTEX shader is NULL! handle=" << (u32)desc.vertexShader << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[PIPELINE_DIAG] VERTEX shader is NULL! handle=" << (u32)desc.vertexShader << std::endl;
     } else if (!vs->GetFunction()) {
-        std::cerr << "[PIPELINE_DIAG] VERTEX shader function is NULL!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[PIPELINE_DIAG] VERTEX shader function is NULL!" << std::endl;
     }
     if (!ps) {
-        std::cerr << "[PIPELINE_DIAG] FRAGMENT shader is NULL! handle=" << (u32)desc.pixelShader << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[PIPELINE_DIAG] FRAGMENT shader is NULL! handle=" << (u32)desc.pixelShader << std::endl;
     } else if (!ps->GetFunction()) {
-        std::cerr << "[PIPELINE_DIAG] FRAGMENT shader function is NULL!" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[PIPELINE_DIAG] FRAGMENT shader function is NULL!" << std::endl;
     }
 
     if (vs) pipelineDesc->setVertexFunction(vs->GetFunction());

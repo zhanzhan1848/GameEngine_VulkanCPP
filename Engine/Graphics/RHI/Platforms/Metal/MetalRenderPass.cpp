@@ -1,6 +1,7 @@
 #include "MetalRenderPass.h"
 #include "MetalDevice.h"
 #include "MetalTexture.h"
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -151,8 +152,8 @@ void MetalRenderPass::buildDescriptor() {
             da->setStoreAction(metalStoreAction);
         } else {
             // CRITICAL DIAGNOSTIC: Depth attachment setup FAILED
-            std::cerr << "[MetalRenderPass] WARNING: Depth attachment setup FAILED!" << std::endl;
-            std::cerr << "  handle=" << desc_.depthAttachment.texture
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalRenderPass] WARNING: Depth attachment setup FAILED!" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "  handle=" << desc_.depthAttachment.texture
                       << " texture=" << (void*)texture
                       << " nativeTex=" << (void*)(texture ? texture->GetNativeTexture() : nullptr)
                       << std::endl;
@@ -202,7 +203,7 @@ MTL::RenderPassDescriptor* MetalRenderPass::GetNativeRenderPassDescriptor() {
         cachedDepthAttachment_.nativeTexture == nullptr) {
         static bool loggedOnce = false;
         if (!loggedOnce) {
-            std::cerr << "[MetalRenderPass] RETRY: Depth attachment was null, rebuilding descriptor" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalRenderPass] RETRY: Depth attachment was null, rebuilding descriptor" << std::endl;
             loggedOnce = true;
         }
         buildDescriptor();
@@ -214,7 +215,7 @@ MTL::RenderPassDescriptor* MetalRenderPass::GetNativeRenderPassDescriptor() {
         u32& count = callCount[this];
         if (count < 3 && desc_.depthAttachment.texture != handles::INVALID_RESOURCE) {
             auto* da = mtlPassDesc_->depthAttachment();
-            std::cout << "[MetalRenderPass DIAG] " << (void*)this
+            PRIMAL_LOG_STREAM(Info, "RHI") << "[MetalRenderPass DIAG] " << (void*)this
                       << " depthTex=" << (void*)(da ? da->texture() : nullptr)
                       << " loadAction=" << (da ? (int)da->loadAction() : -1)
                       << " storeAction=" << (da ? (int)da->storeAction() : -1)

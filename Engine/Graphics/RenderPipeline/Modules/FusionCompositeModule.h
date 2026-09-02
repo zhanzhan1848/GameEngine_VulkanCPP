@@ -102,6 +102,27 @@ private:
 
     // 1x1 identity texture for volume scatter fallback: RGBA = (0,0,0,1)
     rhi::ResourceHandle volume_identity_tex_{rhi::handles::INVALID_RESOURCE};
+
+    // PRIMAL_IND_ASYNC=1 诊断：无同步污染的 indirect 条带统计读回环。
+    // 拷贝挂进本帧命令缓冲，槽位随 cbIdx 三轮转——帧 N 映射槽 N%3 时其内容
+    // 来自帧 N-3（该槽 fence 已在 BeginFrame 等过），全程零额外 GPU 同步。
+    // 第八轮结论：SC_DUMP_CARDS 一次性读回的帧中途 WaitForCompletion 会意外
+    // 掩盖跨命令缓冲竞态，此环即为在不受污染的时序下观测同一数据面。
+    rhi::ResourceHandle async_stats_staging_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    // 同一诊断门的 primary（deferred 直射）输入读回环——直射区与 GI 区同时
+    // 爆白时，用它区分爆白源在 deferred 输出还是 fusion 合成。
+    rhi::ResourceHandle primary_stats_staging_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    // fusion 输出（合成结果，进 TAA 前）与 ddgi（GIGather 原始输出）读回环。
+    rhi::ResourceHandle fusion_stats_staging_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    rhi::ResourceHandle ddgi_stats_staging_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
 };
 
 } // namespace primal::graphics

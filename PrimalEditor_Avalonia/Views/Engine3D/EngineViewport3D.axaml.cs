@@ -490,6 +490,142 @@ public partial class EngineViewport3D : UserControl
         }
     }
 
+    /// <summary>
+    /// CLI/Agent 验证用（Docs/CLI_Agent_Interface_Plan.md Phase 0）：以编辑器
+    /// 当前相机渲染一帧进现有离屏 RT 并存为 PNG。与 OnRenderFrameCore 共用
+    /// <see cref="_renderInProgress"/> 互锁，绝不与渲染 tick 重入；跳过
+    /// BlitRenderTargetToSurface，所以视口画面不受影响（下个 tick 正常刷新）。
+    ///
+    /// 必须在 UI 线程调用（调用方 CliHost 的编组保证这一点）。视口未初始化
+    /// 或引擎忙时返回 false，成功返回 true 并带回实际分辨率。
+    /// </summary>
+    public bool TryCaptureScreenshot(string absolutePath, out int width, out int height)
+    {
+        width = _renderTargetWidth;
+        height = _renderTargetHeight;
+        if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return false;
+        if (_renderTarget == 0 || _host == null || !_host.IsReady) return false;
+        if (!NativeEngineBridge.IsValidCamera(_cameraId)) return false;
+        if (System.Threading.Interlocked.CompareExchange(ref _renderInProgress, 1, 0) != 0) return false;
+        try
+        {
+            var surfaceId = (uint)_host.SurfaceId;
+            if (IsLookingThroughSceneCamera)
+            {
+                NativeEngineBridge.PipelineRenderFrameForSceneCamera(
+                    _renderTarget, _cameraId, surfaceId, _lookThroughSceneEntityId);
+            }
+            else
+            {
+                NativeEngineBridge.PipelineRenderFrameForEditorCamera(_renderTarget, _cameraId, surfaceId);
+            }
+
+            // SaveRenderTargetAsPng 内部先 FlushGPU（WaitIdle）再离线读回编码，
+            // 与 OnRenderTick 的连续帧路径互不干扰。
+            if (!NativeEngineBridge.SaveRenderTargetAsPng(_renderTarget, absolutePath)) return false;
+            width = _renderTargetWidth;
+            height = _renderTargetHeight;
+            return true;
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _renderInProgress, 0);
+        }
+    }
+
+    /// <summary>
+    /// CLI/Agent 帧捕获（Phase 2，规划 §5.3）：渲染一帧进现有离屏 RT 并读回
+    /// RGBA16F 原始像素（不写盘），供 editor.metrics 的标量遥测在托管侧统计。
+    /// 渲染与回读整体持有互锁，绝不与渲染 tick 重入；UI 线程专用。
+    /// </summary>
+    public bool TryReadFramePixels(out byte[] rgba16f, out int width, out int height)
+    {
+        width = _renderTargetWidth;
+        height = _renderTargetHeight;
+        rgba16f = Array.Empty<byte>();
+        if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return false;
+        if (_renderTarget == 0 || _host == null || !_host.IsReady) return false;
+        if (!NativeEngineBridge.IsValidCamera(_cameraId)) return false;
+        if (System.Threading.Interlocked.CompareExchange(ref _renderInProgress, 1, 0) != 0) return false;
+        try
+        {
+            if (!RenderFrameWhileLocked((uint)_host.SurfaceId)) return false;
+
+            long pixelBytes = (long)_renderTargetWidth * _renderTargetHeight * 8;
+            var buffer = new byte[pixelBytes];
+            // DebugReadRenderTarget 包装内部用 GCHandle 固定缓冲，无 unsafe。
+            if (!NativeEngineBridge.DebugReadRenderTarget(_renderTarget, buffer))
+                return false;
+            rgba16f = buffer;
+            width = _renderTargetWidth;
+            height = _renderTargetHeight;
+            return true;
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _renderInProgress, 0);
+        }
+    }
+
+    /// <summary>
+    /// CLI/Agent 帧序列捕获（editor.record 的底层）：连续渲染 count 帧并逐帧
+    /// 存 PNG 到目录。整段持有互锁保证绝不与渲染 tick 重入；帧间引擎照常
+    /// 由渲染 tick 推进，每帧真实耗时记录在 capturedMs。
+    /// 任何一帧失败即中止并返回 false（已写出的帧保留供取证）。
+    /// </summary>
+    public bool TryRecordFrames(int count, string directory, out System.Collections.Generic.List<string> files,
+        out int width, out int height, out System.Collections.Generic.List<double> capturedMs)
+    {
+        files = new System.Collections.Generic.List<string>();
+        capturedMs = new System.Collections.Generic.List<double>();
+        width = _renderTargetWidth;
+        height = _renderTargetHeight;
+        if (count < 1) return false;
+        if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return false;
+        if (_renderTarget == 0 || _host == null || !_host.IsReady) return false;
+        if (!NativeEngineBridge.IsValidCamera(_cameraId)) return false;
+        if (!System.IO.Directory.Exists(directory))
+            System.IO.Directory.CreateDirectory(directory);
+
+        if (System.Threading.Interlocked.CompareExchange(ref _renderInProgress, 1, 0) != 0) return false;
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                if (!RenderFrameWhileLocked((uint)_host.SurfaceId))
+                    return false;
+                var path = System.IO.Path.Combine(directory, $"frame_{i:D4}.png");
+                if (!NativeEngineBridge.SaveRenderTargetAsPng(_renderTarget, path))
+                    return false;
+                capturedMs.Add(sw.Elapsed.TotalMilliseconds);
+                files.Add(path);
+                width = _renderTargetWidth;
+                height = _renderTargetHeight;
+            }
+            return true;
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _renderInProgress, 0);
+        }
+    }
+
+    /// <summary>调用方已持有 _renderInProgress 互锁时渲染一帧（不读回不写盘）。</summary>
+    private bool RenderFrameWhileLocked(uint surfaceId)
+    {
+        if (IsLookingThroughSceneCamera)
+        {
+            NativeEngineBridge.PipelineRenderFrameForSceneCamera(
+                _renderTarget, _cameraId, surfaceId, _lookThroughSceneEntityId);
+        }
+        else
+        {
+            NativeEngineBridge.PipelineRenderFrameForEditorCamera(_renderTarget, _cameraId, surfaceId);
+        }
+        return true;
+    }
+
     private void ResyncActiveScene()
     {
         var lifetime = Avalonia.Application.Current?.ApplicationLifetime

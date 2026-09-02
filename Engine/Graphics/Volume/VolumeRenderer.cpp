@@ -9,6 +9,7 @@
 #include <cstring>
 #include <set>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::volume {
 
@@ -126,7 +127,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
     }
 
     if (source.empty()) {
-        std::cerr << "[VolumeRenderer] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumeRenderer] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
 
@@ -202,7 +203,7 @@ bool VolumeRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 ren
 
     CreatePipeline();
     if (pipeline_ == handles::INVALID_PIPELINE) {
-        std::cerr << "[VolumeRenderer] Pipeline creation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumeRenderer] Pipeline creation failed" << std::endl;
         return false;
     }
 
@@ -212,7 +213,7 @@ bool VolumeRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u32 ren
     CreateOutputTextures();
 
     initialized_ = true;
-    std::cout << "[VolumeRenderer] Initialized (" << render_width << "x" << render_height << ")"
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[VolumeRenderer] Initialized (" << render_width << "x" << render_height << ")"
               << " pipeline=" << (pipeline_ != handles::INVALID_PIPELINE ? "OK" : "FAIL")
               << " noise=" << (noise_texture_ != handles::INVALID_RESOURCE ? "OK" : "FAIL")
               << std::endl;
@@ -229,7 +230,7 @@ void VolumeRenderer::CreatePipeline() {
     // Load shader source with #include resolution
     auto code = LoadShaderBytecode("VolumeObjectShader");
     if (code.empty()) {
-        std::cerr << "[VolumeRenderer] Failed to load VolumeObjectShader" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumeRenderer] Failed to load VolumeObjectShader" << std::endl;
         return;
     }
 
@@ -237,7 +238,7 @@ void VolumeRenderer::CreatePipeline() {
     auto fs = device_->CreateShader(code.data(), code.size(), ShaderStage::Pixel, "volume_object_fragment");
 
     if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) {
-        std::cerr << "[VolumeRenderer] Shader compilation failed: vs="
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumeRenderer] Shader compilation failed: vs="
                   << (vs == handles::INVALID_SHADER ? "FAIL" : "OK")
                   << " fs=" << (fs == handles::INVALID_SHADER ? "FAIL" : "OK")
                   << std::endl;
@@ -350,7 +351,7 @@ void VolumeRenderer::CreateNoiseTexture() {
     noise_texture_ = device_->CreateTexture(texDesc);
 
     if (noise_texture_ == handles::INVALID_RESOURCE) {
-        std::cerr << "[VolumeRenderer] Failed to create noise texture" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumeRenderer] Failed to create noise texture" << std::endl;
         return;
     }
 
@@ -375,13 +376,13 @@ void VolumeRenderer::CreateNoiseTexture() {
     auto stagingBuffer = device_->CreateBuffer(stagingDesc);
 
     if (stagingBuffer == handles::INVALID_RESOURCE) {
-        std::cerr << "[VolumeRenderer] Failed to create noise staging buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumeRenderer] Failed to create noise staging buffer" << std::endl;
         return;
     }
 
     float* mapped = static_cast<float*>(device_->MapBuffer(stagingBuffer));
     if (!mapped) {
-        std::cerr << "[VolumeRenderer] Failed to map noise staging buffer" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[VolumeRenderer] Failed to map noise staging buffer" << std::endl;
         device_->DestroyBuffer(stagingBuffer);
         return;
     }
@@ -409,7 +410,7 @@ void VolumeRenderer::CreateNoiseTexture() {
     device_->DestroyCommandBuffer(cmdHandle);
     device_->DestroyBuffer(stagingBuffer);
 
-    std::cout << "[VolumeRenderer] Noise texture created (128³ FBM Worley)" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Engine") << "[VolumeRenderer] Noise texture created (128³ FBM Worley)" << std::endl;
 }
 
 void VolumeRenderer::CreateOutputTextures() {

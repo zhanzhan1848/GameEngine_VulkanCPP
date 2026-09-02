@@ -27,6 +27,17 @@ public static class OpenProject
             return null;
         }
 
+        // 引擎日志文件落地（CLI 规划 §11.2 L2 FileSink）：<项目>/.Primal/logs/engine.log，
+        // 8MiB × 3 轮转。旧 dylib 无导出时静默跳过。
+        try
+        {
+            var engineLogDir = Path.Combine(Path.GetDirectoryName(filePath) ?? ".", ".Primal", "logs");
+            Directory.CreateDirectory(engineLogDir);
+            PrimalEditor_Avalonia.Native.NativeEngineBridge.SetLogFile(
+                Path.Combine(engineLogDir, "engine.log"), 8 * 1024 * 1024, 3);
+        }
+        catch { /* 日志文件不可用不影响项目打开 */ }
+
         if (!string.IsNullOrEmpty(project.Path))
         {
             Directory.CreateDirectory(project.ContentPath);

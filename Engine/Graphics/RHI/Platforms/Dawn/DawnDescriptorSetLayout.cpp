@@ -1,6 +1,7 @@
 #include "DawnDescriptorSetLayout.h"
 #include "DawnDevice.h"
 #include "DawnCommon.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -68,7 +69,7 @@ u32 DawnDescriptorSetLayout::GetCombinedSamplerWGPUBinding(u32 engineBinding) co
 
 bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
     if (!desc.bindings || desc.bindingCount == 0) {
-        std::cerr << "[DawnDescriptorSetLayout] No bindings provided" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDescriptorSetLayout] No bindings provided" << std::endl;
         return false;
     }
 
@@ -361,7 +362,7 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
             break;
         }
         default:
-            std::cerr << "[DawnDescriptorSetLayout] Unsupported descriptor type: "
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDescriptorSetLayout] Unsupported descriptor type: "
                       << static_cast<u32>(binding.descriptorType) << std::endl;
             break;
         }
@@ -376,7 +377,7 @@ bool DawnDescriptorSetLayout::Initialize(const DescriptorSetLayoutDesc& desc) {
 
     wgpuLayout_ = wgpuDeviceCreateBindGroupLayout(device_.GetNativeDevice(), &layoutDesc);
     if (!wgpuLayout_) {
-        std::cerr << "[DawnDescriptorSetLayout] Failed to create WGPUBindGroupLayout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnDescriptorSetLayout] Failed to create WGPUBindGroupLayout" << std::endl;
         return false;
     }
 

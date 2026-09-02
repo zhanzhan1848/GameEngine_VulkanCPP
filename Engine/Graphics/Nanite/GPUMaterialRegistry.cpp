@@ -6,6 +6,7 @@
 #include "JobSystem/JobSystem.h"
 #include <iostream>
 #include <algorithm>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -43,7 +44,7 @@ void GPUMaterialRegistry::Shutdown(RHIDeviceBase* device) {
 
 GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::MaterialInstance* instance) {
     if (!instance) {
-        std::cerr << "[GPUMaterialRegistry] ERROR: Cannot register null material instance" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Cannot register null material instance" << std::endl;
         return INVALID_MATERIAL_ID;
     }
 
@@ -88,7 +89,7 @@ GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterVTMaterial(
     data.flags = EncodeVTFlags(vt_id);
     materials_.push_back(data);
     registeredInstances_.push_back(nullptr);   // VT 材质无 MaterialInstance
-    std::cout << "[GPUMaterialRegistry] VT material id=" << newID
+    PRIMAL_LOG_STREAM(Info, "Render") << "[GPUMaterialRegistry] VT material id=" << newID
               << " vtId=" << vt_id << std::endl;
     return newID;
 }
@@ -116,21 +117,21 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         rhi::CommandBufferHandle cmdBufHandle = device->CreateCommandBuffer(rhi::CommandQueueType::Transfer);
         if (cmdBufHandle == rhi::handles::INVALID_COMMAND_BUFFER) {
             buildError_ = "Failed to create command buffer for texture operations";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             return;
         }
 
         rhi::RHICommandBuffer* cmdBuffer = rhi::GetCommandBuffer(cmdBufHandle);
         if (!cmdBuffer) {
             buildError_ = "Failed to get command buffer object";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             return;
         }
 
         // Begin command buffer recording
         if (!cmdBuffer->Begin()) {
             buildError_ = "Failed to begin command buffer recording";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             return;
         }
 
@@ -144,7 +145,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
                 device, cmdBuffer, texCtx.uniqueAlbedo,
                 "AlbedoTextureArray", albedoTextureArray_
             )) {
-                std::cerr << "[GPUMaterialRegistry] ERROR: Failed to create albedo texture array" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Failed to create albedo texture array" << std::endl;
                 success = false;
             }
         }
@@ -154,7 +155,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
                 device, cmdBuffer, texCtx.uniqueNormal,
                 "NormalTextureArray", normalTextureArray_
             )) {
-                std::cerr << "[GPUMaterialRegistry] ERROR: Failed to create normal texture array" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Failed to create normal texture array" << std::endl;
                 success = false;
             }
         }
@@ -164,14 +165,14 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
                 device, cmdBuffer, texCtx.uniqueORM,
                 "ORMTextureArray", ormTextureArray_
             )) {
-                std::cerr << "[GPUMaterialRegistry] ERROR: Failed to create ORM texture array" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Failed to create ORM texture array" << std::endl;
                 success = false;
             }
         }
 
         if (!success) {
             buildError_ = "Failed to create texture arrays";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             return;
         }
 
@@ -180,7 +181,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
 
         if (!cmdBuffer->End()) {
             buildError_ = "Failed to end command buffer recording";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             return;
         }
 
@@ -192,20 +193,20 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         rhi::SyncHandle fence = device->CreateSync();
         if (fence == rhi::handles::INVALID_SYNC) {
             buildError_ = "Failed to create synchronization fence";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             return;
         }
         submitInfo.signalFence = fence;
 
         if (!device->Submit(submitInfo)) {
             buildError_ = "Failed to submit command buffer";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             device->DestroySync(fence);
             return;
         }
 
         // 🎨 Phase 5: Update material data with texture indices
-        std::cout << "[GPUMaterialRegistry] Phase 5: Rebuilding " << instances.size()
+        PRIMAL_LOG_STREAM(Info, "Render") << "[GPUMaterialRegistry] Phase 5: Rebuilding " << instances.size()
                   << " materials with texture context ("
                   << texCtx.albedoToIndex.size() << " albedo, "
                   << texCtx.normalToIndex.size() << " normal, "
@@ -237,7 +238,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         // Diagnostic: print first 3 materials' key fields
         for (size_t i = 0; i < std::min(materials_.size(), (size_t)3); ++i) {
             const auto& m = materials_[i];
-            std::cout << "  [MaterialID=" << i << "] albedo_idx=" << m.albedo_texture_idx
+            PRIMAL_LOG_STREAM(Info, "Render") << "  [MaterialID=" << i << "] albedo_idx=" << m.albedo_texture_idx
                       << " normal_idx=" << m.normal_texture_idx
                       << " orm_idx=" << m.orm_texture_idx
                       << " uv_scale=(" << m.uv_scale[0] << "," << m.uv_scale[1] << ")"
@@ -250,7 +251,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         constexpr u32 SYNC_TIMEOUT_MS = 5000;  // 5 second timeout
         if (!device->WaitForSync(fence, SYNC_TIMEOUT_MS)) {
             buildError_ = "Timeout waiting for texture operations to complete";
-            std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
             device->DestroySync(fence);
             return;
         }
@@ -287,12 +288,12 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
 
 bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
     if (!buildComplete_) {
-        std::cerr << "[GPUMaterialRegistry] ERROR: Cannot upload, build not complete" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Cannot upload, build not complete" << std::endl;
         return false;
     }
 
     if (!buildError_.empty()) {
-        std::cerr << "[GPUMaterialRegistry] ERROR: Cannot upload, build had errors: "
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Cannot upload, build had errors: "
                   << buildError_ << std::endl;
         return false;
     }
@@ -302,7 +303,7 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
     // Create material data buffer
     // Reference: TestParticleSponza.cpp texture creation pattern
     if (materials_.empty()) {
-        std::cerr << "[GPUMaterialRegistry] WARNING: No materials to upload" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] WARNING: No materials to upload" << std::endl;
         return true;  // Not an error, just nothing to do
     }
 
@@ -323,7 +324,7 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
 
     if (materialDataBuffer_ == rhi::handles::INVALID_RESOURCE) {
         buildError_ = "Failed to create material data buffer";
-        std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
         return false;
     }
 
@@ -334,26 +335,26 @@ bool GPUMaterialRegistry::UploadToGPU(RHIDeviceBase* device) {
         memcpy(mappedData, materials_.data(), uploadSize);
         device->UnmapBuffer(materialDataBuffer_);
         // Diagnostic: verify what was uploaded
-        std::cout << "[GPUMaterialRegistry] UploadToGPU: " << materials_.size()
+        PRIMAL_LOG_STREAM(Info, "Render") << "[GPUMaterialRegistry] UploadToGPU: " << materials_.size()
                   << " materials, sizeof(MaterialData)=" << sizeof(MaterialData) << std::endl;
         for (size_t i = 0; i < std::min(materials_.size(), (size_t)3); ++i) {
             const auto& m = materials_[i];
-            std::cout << "  [MaterialID=" << i << "] UPLOAD: albedo_idx=" << m.albedo_texture_idx
+            PRIMAL_LOG_STREAM(Info, "Render") << "  [MaterialID=" << i << "] UPLOAD: albedo_idx=" << m.albedo_texture_idx
                       << " uv_scale=(" << m.uv_scale[0] << "," << m.uv_scale[1] << ")"
                       << std::endl;
         }
     } else {
         buildError_ = "Failed to upload material data buffer";
-        std::cerr << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: " << buildError_ << std::endl;
         return false;
     }
 
     // DIAGNOSTIC: dump first 5 materials to verify texture indices.
-    std::cerr << "[MaterialDataDBG] Uploaded " << materials_.size()
+    PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataDBG] Uploaded " << materials_.size()
               << " materials (sizeof=" << sizeof(MaterialData) << ")" << std::endl;
     for (size_t i = 0; i < std::min<size_t>(5, materials_.size()); ++i) {
         const auto& m = materials_[i];
-        std::cerr << "[MaterialDataDBG]   [" << i
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataDBG]   [" << i
                   << "] albedo_idx=" << m.albedo_texture_idx
                   << " normal_idx=" << m.normal_texture_idx
                   << " orm_idx=" << m.orm_texture_idx

@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <set>
 #include <algorithm>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
 
@@ -129,7 +130,7 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
                             fullPath.substr(0, fullPath.find_last_of('/') + 1), included);
                         out << resolved << "\n";
                     } else {
-                        std::cerr << "[LumenDDGI] Warning: Failed to read include: " << fullPath << std::endl;
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] Warning: Failed to read include: " << fullPath << std::endl;
                         out << line << "\n";
                     }
                 }
@@ -164,7 +165,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
         src = dawn::LoadWGSL(path);
 #endif
         if (src.empty()) {
-            std::cerr << "[LumenDDGI] Failed to load WGSL shader: " << shaderName << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] Failed to load WGSL shader: " << shaderName << std::endl;
             return {};
         }
         return std::vector<u8>(src.begin(), src.end());
@@ -188,12 +189,12 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
             file.seekg(0, std::ios::beg);
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[LumenDDGI] Failed to read SPIR-V: " << path << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] Failed to read SPIR-V: " << path << std::endl;
                 return {};
             }
             return bytecode;
         }
-        std::cerr << "[LumenDDGI] Failed to load SPIR-V: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] Failed to load SPIR-V: " << shaderName << std::endl;
         return {};
     }
 
@@ -207,7 +208,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
     }
 
     if (source.empty()) {
-        std::cerr << "[LumenDDGI] Failed to load shader: " << shaderName << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] Failed to load shader: " << shaderName << std::endl;
         return {};
     }
 
@@ -222,7 +223,7 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
         if (dumpFile.is_open()) {
             dumpFile << resolved;
             dumpFile.close();
-            std::cerr << "[LumenDDGI] Dumped resolved source to " << dumpPath << " (" << resolved.size() << " bytes)" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] Dumped resolved source to " << dumpPath << " (" << resolved.size() << " bytes)" << std::endl;
         }
     }
 
@@ -271,10 +272,10 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         if (m >= 0 && m <= 2) {
             ray_sample_mode_ = (u32)m;
         } else {
-            std::cerr << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0/1/2), keeping default" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0/1/2), keeping default" << std::endl;
         }
     }
-    std::cerr << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
+    PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
               << (ray_sample_mode_ == 0 ? " (legacy uniform Fibonacci)"
                   : ray_sample_mode_ == 1 ? " (per-frame golden-angle jitter)"
                                           : " (cosine mixture around light)")
@@ -317,7 +318,7 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
                         }
                 device_->UnmapBuffer(probe_positions_);
             }
-            std::cerr << "[LumenDDGI] ProbePositionBuffer filled: " << total
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] ProbePositionBuffer filled: " << total
                       << " probes @ spacing " << params_.probe_spacing << std::endl;
         }
     }
@@ -375,7 +376,7 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
 
     initialized_ = true;
 
-    std::cout << "[LumenDDGI] Initialized (grid: "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Initialized (grid: "
               << params_.probe_count_x << "x" << params_.probe_count_y << "x" << params_.probe_count_z
               << " = " << totalProbes << " probes, "
               << params_.rays_per_probe << " rays/probe)" << std::endl;
@@ -637,7 +638,7 @@ void LumenDDGIPass::CreatePipelines() {
     if (traceShader == handles::INVALID_SHADER ||
         irradianceShader == handles::INVALID_SHADER ||
         depthShader == handles::INVALID_SHADER) {
-        std::cerr << "[LumenDDGI] Shader compilation failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] Shader compilation failed" << std::endl;
         return;
     }
 
@@ -684,7 +685,7 @@ void LumenDDGIPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {64, 1, 1};
         trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
         if (trace_pipeline_ == handles::INVALID_PIPELINE) {
-            std::cerr << "[LumenDDGI] trace_pipeline_ creation FAILED (shader compile or layout mismatch)" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] trace_pipeline_ creation FAILED (shader compile or layout mismatch)" << std::endl;
         }
     }
     // SDF trace (split pass 1) + Finalize (split pass 2) — Apple Silicon optimization
@@ -808,7 +809,7 @@ void LumenDDGIPass::CreateProbeTextures() {
         irradiance_buffers_[i] = device_->CreateBuffer(desc);
         // TEMP diagnosis: allocation audit — BIND7 caught a 20-byte buffer at
         // compute slot 7; verify what the DDGI pass actually got.
-        std::cerr << "[DDGI_ALLOC] irradiance_buffers_[" << i << "] handle="
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI_ALLOC] irradiance_buffers_[" << i << "] handle="
                   << irradiance_buffers_[i] << " size=" << desc.size
                   << (irradiance_buffers_[i] == rhi::handles::INVALID_RESOURCE
                       ? " INVALID!" : "") << std::endl;
@@ -1011,7 +1012,7 @@ void LumenDDGIPass::InitializeProbesFromStatic() {
         const math::v3& staticOrigin = static_volume_->GetParams().origin;
         probe_origin_ = staticOrigin;
         volume_data_.ProbeOrigin = math::v4{staticOrigin.x, staticOrigin.y, staticOrigin.z, 0.0f};
-        std::cout << "[LumenDDGI] Synced probe_origin_ to static bake: ("
+        PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Synced probe_origin_ to static bake: ("
                   << staticOrigin.x << ", " << staticOrigin.y << ", " << staticOrigin.z << ")" << std::endl;
 
         // Copy static → ALL THREE dynamic frame buffers
@@ -1049,7 +1050,7 @@ void LumenDDGIPass::InitializeProbesFromStatic() {
             }
         }
 
-        std::cout << "[LumenDDGI] Initialized probes from static bake data ("
+        PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Initialized probes from static bake data ("
                   << probeCount << " probes)" << std::endl;
         return;
     }
@@ -1078,7 +1079,7 @@ sky_estimate:
         }
     }
 
-    std::cout << "[LumenDDGI] Initialized probes with sky estimate fallback" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Initialized probes with sky estimate fallback" << std::endl;
 }
 
 // ============================================================================
@@ -1121,7 +1122,7 @@ void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
                    view.lookup_count > 0);
 
     if (sc_enabled_) {
-        std::cout << "[LumenDDGI] Surface Cache enabled: atlas_size=" << view.atlas_size
+        PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Surface Cache enabled: atlas_size=" << view.atlas_size
                   << ", lookup_count=" << view.lookup_count << std::endl;
     }
 }
@@ -1131,7 +1132,7 @@ void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
 void LumenDDGIPass::SetTemporalStrategy(GITemporalStrategy strategy) {
     if (temporal_strategy_ == strategy) return;
     temporal_strategy_ = strategy;
-    std::cout << "[LumenDDGI] Temporal strategy -> "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Temporal strategy -> "
               << GITemporalStrategyName(strategy)
               << " (EMA path unchanged; full mapping lands in X3)" << std::endl;
 }
@@ -1275,7 +1276,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
             static int s_ddgi_exec = 0;
             if (s_ddgi_exec < 3) {
-                std::cerr << "[DDGI_EXEC] frame " << s_ddgi_exec
+                PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI_EXEC] frame " << s_ddgi_exec
                           << " dynamic=" << dynamic_mode_
                           << " initialized=" << initialized_ << std::endl;
                 s_ddgi_exec++;
@@ -1400,7 +1401,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             if (dynamic_mode_ && !sdfAvailable) {
                 static bool warned = false;
                 if (!warned) {
-                    std::cerr << "[Mode11] GlobalSDF unavailable — falling back to static seed\n";
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[Mode11] GlobalSDF unavailable — falling back to static seed\n";
                     warned = true;
                 }
                 return;
@@ -1408,7 +1409,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             if (dynamic_mode_) {
                 static bool traced = false;
                 if (!traced) {
-                    std::cerr << "[Mode11] GlobalSDF available — runtime trace active\n";
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[Mode11] GlobalSDF available — runtime trace active\n";
                     traced = true;
                 }
             }
@@ -1911,7 +1912,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             if (irradiance_pipeline_ != handles::INVALID_PIPELINE &&
                 irradiance_buffers_[outIdx] != handles::INVALID_RESOURCE) {
                 static int s_irr_diag = 0;
-                if (s_irr_diag < 3) { std::cerr << "[DDGI_IRR] exec " << s_irr_diag << std::endl; s_irr_diag++; }
+                if (s_irr_diag < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI_IRR] exec " << s_irr_diag << std::endl; s_irr_diag++; }
                 // Update irradiance descriptor set
                 DescriptorData irradianceParams[] = {
                     {0, DescriptorType::UniformBuffer, global_cb_[frameIdx]},

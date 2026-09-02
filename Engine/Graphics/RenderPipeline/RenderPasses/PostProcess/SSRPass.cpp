@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
 
@@ -80,7 +81,7 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, const char* shaderN
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
             return bytecode;
         }
-        std::cerr << "[SSR] Failed to load SPIR-V: " << shaderName
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Failed to load SPIR-V: " << shaderName
                   << " (tried " << relPath << ")" << std::endl;
         return {};
     }
@@ -97,7 +98,7 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, const char* shaderN
     path = utils::ShaderRegistry::GetShaderPath(platform, shaderName);
     std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[SSR] Shader empty: " << shaderName << " (path=" << path << ")" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Shader empty: " << shaderName << " (path=" << path << ")" << std::endl;
         return {};
     }
     std::stringstream buffer;
@@ -120,12 +121,12 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
         bool isBinary = false;
         auto bytes = LoadShaderBytes(platform, name, lumenDir, &isBinary);
         if (bytes.empty()) {
-            std::cerr << "[SSR] Shader empty: " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Shader empty: " << name << std::endl;
             return handles::INVALID_SHADER;
         }
         ShaderHandle h = device.CreateShader(bytes.data(), bytes.size(),
                                              ShaderStage::Compute, entry);
-        std::cerr << "[SSR] LoadShader " << name << " -> handle=" << static_cast<u64>(h)
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] LoadShader " << name << " -> handle=" << static_cast<u64>(h)
                   << " (size=" << bytes.size() << " binary=" << isBinary << ")" << std::endl;
         return h;
     };
@@ -146,7 +147,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
 
     if (traceCS == handles::INVALID_SHADER || temporalCS == handles::INVALID_SHADER ||
         upsampleCS == handles::INVALID_SHADER) {
-        std::cerr << "[SSR] Shader compilation failed — aborting pipeline creation" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Shader compilation failed — aborting pipeline creation" << std::endl;
         return false;
     }
 
@@ -250,7 +251,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     createSets(s_TemporalSets, s_TemporalDSL);
     createSets(s_UpsampleSets, s_UpsampleDSL);
 
-    std::cerr << "[SSR] Pipelines created — trace=" << static_cast<u64>(s_TracePipeline)
+    PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Pipelines created — trace=" << static_cast<u64>(s_TracePipeline)
               << " temporal=" << static_cast<u64>(s_TemporalPipeline)
               << " upsample=" << static_cast<u64>(s_UpsamplePipeline) << std::endl;
 
@@ -297,7 +298,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
     static bool s_firstAddCall = true;
     if (s_firstAddCall) {
         s_firstAddCall = false;
-        std::cerr << "[SSR] AddSSRPass first call — frame=" << frameIndex
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] AddSSRPass first call — frame=" << frameIndex
                   << " w=" << width << " h=" << height
                   << " hdrValid=" << (hdrTexture != kInvalidRGResourceHandle)
                   << " depthValid=" << (depthTexture != kInvalidRGResourceHandle)
@@ -342,14 +343,14 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             ++s_execCount;
 
             if (logThisFrame) {
-                std::cerr << "[SSR] Execute frame=" << frameIndex
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Execute frame=" << frameIndex
                           << " tracePipe=" << static_cast<u64>(s_TracePipeline)
                           << " temporalPipe=" << static_cast<u64>(s_TemporalPipeline)
                           << " upsamplePipe=" << static_cast<u64>(s_UpsamplePipeline) << std::endl;
             }
 
             if (s_TracePipeline == handles::INVALID_PIPELINE) {
-                if (logThisFrame) std::cerr << "[SSR] Execute abort: trace pipeline INVALID" << std::endl;
+                if (logThisFrame) PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Execute abort: trace pipeline INVALID" << std::endl;
                 return;
             }
 
@@ -371,7 +372,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             ResourceHandle outPhys = outRes ? outRes->GetPhysicalHandle() : handles::INVALID_RESOURCE;
 
             if (logThisFrame) {
-                std::cerr << "[SSR] Resolved — hdr=" << static_cast<u64>(hdrHandle)
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Resolved — hdr=" << static_cast<u64>(hdrHandle)
                           << " depth=" << static_cast<u64>(depthHandle)
                           << " hzb=" << static_cast<u64>(hzbHandle)
                           << " vel=" << static_cast<u64>(velocityHandle)
@@ -384,7 +385,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
 
             if (hdrHandle == handles::INVALID_RESOURCE || depthHandle == handles::INVALID_RESOURCE ||
                 outPhys == handles::INVALID_RESOURCE) {
-                if (logThisFrame) std::cerr << "[SSR] Execute abort: invalid resource handle" << std::endl;
+                if (logThisFrame) PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Execute abort: invalid resource handle" << std::endl;
                 return;
             }
 
@@ -615,7 +616,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
             }
 
             if (logThisFrame) {
-                std::cerr << "[SSR] Execute complete frame=" << frameIndex
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Execute complete frame=" << frameIndex
                           << " dispatched trace+temporal+upsample+blit" << std::endl;
             }
         }

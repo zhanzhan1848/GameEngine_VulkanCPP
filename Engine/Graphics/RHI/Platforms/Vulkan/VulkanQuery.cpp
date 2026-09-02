@@ -7,6 +7,9 @@
 
 #include "VulkanQuery.h"
 
+#include "Engine/Common/CoreDiag.h"
+#include "Engine/Common/CoreLogStream.h"
+
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
 #include <iostream>
@@ -44,12 +47,12 @@ VulkanQueryPool::VulkanQueryPool(VkDevice device, QueryType type, u32 count)
                 | VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
             break;
         default:
-            std::cerr << "[VulkanQueryPool] Unknown query type" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanQueryPool] Unknown query type" << std::endl;
             return;
     }
 
     if (vkCreateQueryPool(device_, &ci, nullptr, &pool_) != VK_SUCCESS) {
-        std::cerr << "[VulkanQueryPool] vkCreateQueryPool failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanQueryPool] vkCreateQueryPool failed" << std::endl;
         pool_ = VK_NULL_HANDLE;
         return;
     }
@@ -93,10 +96,14 @@ bool VulkanQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, siz
         return false;
     }
     if (res == VK_ERROR_DEVICE_LOST) {
-        std::cerr << "[VulkanQueryPool] DEVICE_LOST during GetResults" << std::endl;
+        // L1 device-lost 结构化事件（CLI 规划 §11.4/§12）：前缀被 DiagnosticsAPI
+        // 标记表识别，转成事件表 on_device_lost("Vulkan", …)。
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanQueryPool] DEVICE_LOST during GetResults" << std::endl;
+        primal::diag::Emit(primal::diag::kLevelFatal, "RHI",
+                           "[VulkanQueryPool] DEVICE_LOST during GetResults");
         return false;
     }
-    std::cerr << "[VulkanQueryPool] vkGetQueryPoolResults returned " << res << std::endl;
+    PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanQueryPool] vkGetQueryPoolResults returned " << res << std::endl;
     return false;
 }
 

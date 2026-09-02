@@ -1,4 +1,5 @@
 #include "DawnPipeline.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -23,7 +24,7 @@ bool DawnPipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     // 1. Get vertex shader module
     DawnShader* vertexShader = device_.GetShader(desc.vertexShader);
     if (!vertexShader || !vertexShader->GetModule()) {
-        std::cerr << "[DawnPipeline] Invalid vertex shader handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipeline] Invalid vertex shader handle" << std::endl;
         return false;
     }
 
@@ -34,7 +35,7 @@ bool DawnPipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     if (hasFragmentShader) {
         fragmentShader = device_.GetShader(desc.pixelShader);
         if (!fragmentShader || !fragmentShader->GetModule()) {
-            std::cerr << "[DawnPipeline] Invalid fragment shader handle" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipeline] Invalid fragment shader handle" << std::endl;
             return false;
         }
     }
@@ -213,7 +214,7 @@ bool DawnPipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
 
     wgpuRenderPipeline_ = wgpuDeviceCreateRenderPipeline(device_.GetNativeDevice(), &pipelineDesc);
     if (!wgpuRenderPipeline_) {
-        std::cerr << "[DawnPipeline] Failed to create graphics pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipeline] Failed to create graphics pipeline" << std::endl;
         return false;
     }
 
@@ -225,7 +226,7 @@ bool DawnPipeline::InitializeCompute(const ComputePipelineDesc& desc) {
     // 1. Get compute shader module
     DawnShader* computeShader = device_.GetShader(desc.computeShader);
     if (!computeShader || !computeShader->GetModule()) {
-        std::cerr << "[DawnPipeline] Invalid compute shader handle" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipeline] Invalid compute shader handle" << std::endl;
         return false;
     }
 
@@ -253,7 +254,7 @@ bool DawnPipeline::InitializeCompute(const ComputePipelineDesc& desc) {
 
     wgpuComputePipeline_ = wgpuDeviceCreateComputePipeline(device_.GetNativeDevice(), &pipelineDesc);
     if (!wgpuComputePipeline_) {
-        std::cerr << "[DawnPipeline] Failed to create compute pipeline: " << pipelineLabel << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnPipeline] Failed to create compute pipeline: " << pipelineLabel << std::endl;
         return false;
     }
 

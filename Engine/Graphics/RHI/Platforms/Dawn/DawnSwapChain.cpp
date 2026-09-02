@@ -1,4 +1,5 @@
 #include "DawnSwapChain.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -96,14 +97,14 @@ DawnSwapChain::~DawnSwapChain() {
 bool DawnSwapChain::Initialize() {
 #ifdef __APPLE__
     if (!windowHandle_) {
-        std::cerr << "[DawnSwapChain] No window handle provided" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnSwapChain] No window handle provided" << std::endl;
         return false;
     }
 
     // Get content view from NSWindow
     void* contentView = GetContentView(windowHandle_);
     if (!contentView) {
-        std::cerr << "[DawnSwapChain] No content view" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnSwapChain] No content view" << std::endl;
         return false;
     }
 
@@ -156,7 +157,7 @@ bool DawnSwapChain::Initialize() {
 #endif
 
     if (!wgpuSurface_) {
-        std::cerr << "[DawnSwapChain] Failed to create surface" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnSwapChain] Failed to create surface" << std::endl;
         return false;
     }
 
@@ -206,7 +207,7 @@ bool DawnSwapChain::AcquireNextImage(u32* imageIndex, SyncHandle semaphore, Sync
 
     if (surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal &&
         surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal) {
-        std::cerr << "[DawnSwapChain] Failed to acquire surface texture, status: "
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnSwapChain] Failed to acquire surface texture, status: "
                   << static_cast<int>(surfaceTexture.status) << std::endl;
         return false;
     }

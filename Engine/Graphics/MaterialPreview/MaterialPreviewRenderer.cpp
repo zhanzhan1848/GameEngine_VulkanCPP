@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -164,7 +165,7 @@ bool MaterialPreviewRenderer::CreateDescriptorLayouts() {
 bool MaterialPreviewRenderer::CreateShaders() {
     std::string src;
     if (!ReadShaderFile("Preview/PreviewVertex.metal", src)) {
-        std::cerr << "[MaterialPreview] Failed to load PreviewVertex.metal\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreview] Failed to load PreviewVertex.metal\n";
         return false;
     }
 
@@ -327,12 +328,12 @@ bool MaterialPreviewRenderer::CreateMeshes() {
 
     for (u8 i = 0; i < static_cast<u8>(PreviewModelType::Count); ++i) {
         if (!meshes_[i] || !meshes_[i]->IsValid()) {
-            std::cerr << "[MaterialPreview] Failed to create preview mesh " << i << "\n";
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreview] Failed to create preview mesh " << i << "\n";
             return false;
         }
     }
     if (!quad_xy_mesh_ || !quad_xy_mesh_->IsValid()) {
-        std::cerr << "[MaterialPreview] Failed to create 2D quad mesh\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreview] Failed to create 2D quad mesh\n";
         return false;
     }
     return true;
@@ -373,9 +374,9 @@ bool MaterialPreviewRenderer::SetMaterialGraph(const material_graph::MaterialGra
     shader_ir::MaterialGraphToIR translator;
     auto ir = translator.Translate(graph);
     if (!ir.success) {
-        std::cerr << "[MaterialPreview] MaterialGraph translation failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreview] MaterialGraph translation failed\n";
         for (const auto& error : ir.errors) {
-            std::cerr << "  node " << error.node_id << ": " << error.message << "\n";
+            PRIMAL_LOG_STREAM(Error, "Engine") << "  node " << error.node_id << ": " << error.message << "\n";
         }
         return false;
     }
@@ -383,12 +384,12 @@ bool MaterialPreviewRenderer::SetMaterialGraph(const material_graph::MaterialGra
     shader_ir::MetalEmitter emitter;
     auto output = emitter.Emit(ir.function, /*preview_mode=*/true);
     if (!output.success) {
-        std::cerr << "[MaterialPreview] Metal emission failed: " << output.log << "\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreview] Metal emission failed: " << output.log << "\n";
         return false;
     }
 
     if (!CreateMaterialPipeline(output.source)) {
-        std::cerr << "[MaterialPreview] Material pipeline creation failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreview] Material pipeline creation failed\n";
         return false;
     }
 
@@ -549,7 +550,7 @@ void MaterialPreviewRenderer::SetBackgroundColors(f32 top_r, f32 top_g, f32 top_
 bool MaterialPreviewRenderer::SetPreviewMeshFromAsset(id::id_type geometry_content_id) {
     auto* new_mesh = RenderMesh::CreateFromAsset(device_, geometry_content_id);
     if (!new_mesh || !new_mesh->IsValid()) {
-        std::cerr << "[MaterialPreview] SetPreviewMeshFromAsset: failed to load geometry id "
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreview] SetPreviewMeshFromAsset: failed to load geometry id "
                   << geometry_content_id << "\n";
         delete new_mesh;
         return false;

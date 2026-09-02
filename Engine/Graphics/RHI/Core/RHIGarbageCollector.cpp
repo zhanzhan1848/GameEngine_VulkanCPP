@@ -9,6 +9,7 @@
 #include "RHIGarbageCollector.h"
 #include <iostream>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -92,7 +93,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
         auto vertBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Line.vert.spv");
         auto fragBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/Line.frag.spv");
         if (vertBytes.empty() || fragBytes.empty()) {
-            std::cerr << "[LineBatchRenderer] Failed to load Vulkan Line SPIR-V." << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to load Vulkan Line SPIR-V." << std::endl;
             return false;
         }
         vertex_shader_ = device_->CreateShader(vertBytes.data(), vertBytes.size(),
@@ -106,7 +107,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
 
         std::ifstream file(shader_path, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
-            std::cerr << "[LineBatchRenderer] Failed to open shader: " << shader_path << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to open shader: " << shader_path << std::endl;
             return false;
         }
         const size_t file_size = static_cast<size_t>(file.tellg());
@@ -121,7 +122,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     }
 
     if (vertex_shader_ == handles::INVALID_SHADER || pixel_shader_ == handles::INVALID_SHADER) {
-        std::cerr << "[LineBatchRenderer] Failed to create shaders." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to create shaders." << std::endl;
         return false;
     }
 
@@ -141,7 +142,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
         ds_desc.bindings = &ssbo_binding;
         set_layout = device_->CreateDescriptorSetLayout(ds_desc);
         if (set_layout == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-            std::cerr << "[LineBatchRenderer] Failed to create descriptor set layout." << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to create descriptor set layout." << std::endl;
             return false;
         }
         set_layout_ = set_layout;
@@ -149,7 +150,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
         // Allocate persistent descriptor set; the SSBO is rebound per-frame.
         DescriptorSetHandle ds = device_->CreateDescriptorSet({set_layout});
         if (ds == handles::INVALID_DESCRIPTOR_SET) {
-            std::cerr << "[LineBatchRenderer] Failed to allocate descriptor set." << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to allocate descriptor set." << std::endl;
             return false;
         }
         descriptor_set_ = ds;
@@ -173,7 +174,7 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
 
     layout_ = device_->CreatePipelineLayout(pl_desc);
     if (layout_ == handles::INVALID_PIPELINE_LAYOUT) {
-        std::cerr << "[LineBatchRenderer] Failed to create pipeline layout." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to create pipeline layout." << std::endl;
         return false;
     }
 
@@ -197,11 +198,11 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
 
     pipeline_ = device_->CreateGraphicsPipeline(p_desc);
     if (pipeline_ == handles::INVALID_PIPELINE) {
-        std::cerr << "[LineBatchRenderer] Failed to create pipeline." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to create pipeline." << std::endl;
         return false;
     }
 
-    std::cout << "[LineBatchRenderer] Initialized successfully."
+    PRIMAL_LOG_STREAM(Info, "Render") << "[LineBatchRenderer] Initialized successfully."
               << (isVulkan ? " (Vulkan)" : "") << std::endl;
     initialized_ = true;
     return true;
@@ -238,7 +239,7 @@ bool LineBatchRenderer::create_pipeline(DataFormat target_format) {
 
     pipeline_ = device_->CreateGraphicsPipeline(p_desc);
     if (pipeline_ == handles::INVALID_PIPELINE) {
-        std::cerr << "[LineBatchRenderer] Failed to create pipeline." << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LineBatchRenderer] Failed to create pipeline." << std::endl;
         return false;
     }
 

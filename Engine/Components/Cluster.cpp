@@ -2,11 +2,12 @@
 #include "Entity.h"
 #include "Graphics/Nanite/NaniteResourceManager.h"
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 // Debug logging for reference counting operations
 // Enable with -DCLUSTER_DEBUG_LOGGING compiler flag
 #ifdef CLUSTER_DEBUG_LOGGING
-#define CLUSTER_LOG(msg) std::cout << "[Cluster] " << msg << std::endl
+#define CLUSTER_LOG(msg) PRIMAL_LOG_STREAM(Info, "Scene") << "[Cluster] " << msg << std::endl
 #else
 #define CLUSTER_LOG(msg) ((void)0)
 #endif

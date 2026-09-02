@@ -13,6 +13,7 @@
 #include <cstring>
 #include <vector>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -126,11 +127,18 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
 
     descriptor_set_ = device->CreateDescriptorSet({set_layout_});
 
-    // Half-res output textures (RGBA16_Float)
-    u32 halfW = render_width / 2;
-    u32 halfH = render_height / 2;
+    // Gather 输出分辨率：Metal 走全分辨率（用户对齐要求——半分辨率下边缘像素
+    // 深度/法线取错探针，GI 呈块状锯齿），Vulkan 维持半分辨率基线不动。
+    // 命名 gi_halfres_* 沿用历史，实际尺寸以 gather_width_/gather_height_ 为准。
+    if (device->GetPlatform() == RHIPlatform::Metal) {
+        gather_width_ = render_width;
+        gather_height_ = render_height;
+    } else {
+        gather_width_ = render_width / 2;
+        gather_height_ = render_height / 2;
+    }
     TextureDesc texDesc{};
-    texDesc.size = {halfW, halfH, 1};
+    texDesc.size = {gather_width_, gather_height_, 1};
     texDesc.format = DataFormat::RGBA16_Float;
     texDesc.type = TextureType::Texture2D;
     texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
@@ -263,7 +271,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             static bool loggedGatherPath = false;
             if (!loggedGatherPath) {
                 loggedGatherPath = true;
-                std::cerr << "[GIGather] path = "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GIGather] path = "
                           << (nvolumeActive ? "N-volume (descriptor indexing, "
                                              : "legacy two-slot (")
                           << (nvolume_supported_ ? "capability on" : "capability off")
@@ -290,7 +298,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     // TEMP diagnosis: verify the CB the gather will read.
                     static bool s_cbDbg = false;
                     if (!s_cbDbg) { s_cbDbg = true;
-                        std::cerr << "[GATHER_CB] origin_spacing=("
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[GATHER_CB] origin_spacing=("
                                   << cb->probe_origin_spacing.x << "," << cb->probe_origin_spacing.y
                                   << "," << cb->probe_origin_spacing.z << "," << cb->probe_origin_spacing.w
                                   << ") counts=(" << cb->probe_counts.x << "," << cb->probe_counts.y
@@ -585,7 +593,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // TEMP diagnosis: what handle does GetIrradianceBuffer return?
                 static bool s_irrHandleDbg = false;
                 if (!s_irrHandleDbg) { s_irrHandleDbg = true;
-                    std::cerr << "[GATHER_IRR] ddgi=" << (const void*)ddgi
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[GATHER_IRR] ddgi=" << (const void*)ddgi
                               << " readIdx=" << ddgiReadIdx
                               << " irrHandle=" << bufInfos[7].buffer << std::endl; }
                 bufWrites[8].dstBinding = bufBase + 8; bufWrites[8].descriptorType = DescriptorType::StorageBuffer;
@@ -600,9 +608,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             cmd->BindComputePipeline(pipeline_);
             const DescriptorSetHandle sets[] = { descriptor_set_ };
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, layout_, 0, 1, sets, 0, nullptr);
-            u32 halfW = render_width_ / 2;
-            u32 halfH = render_height_ / 2;
-            cmd->Dispatch((halfW + 7) / 8, (halfH + 7) / 8, 1);
+            cmd->Dispatch((gather_width_ + 7) / 8, (gather_height_ + 7) / 8, 1);
 
             // Barrier output UAV → SRV for downstream Fusion pass.
             // History blit disabled (temporal accumulation not used — causes
@@ -630,8 +636,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             static u32 tick = 0;
             ++tick;
             if (dumpOut) {
-                const u32 dHalfW = render_width_ / 2;
-                const u32 dHalfH = render_height_ / 2;
+                const u32 dHalfW = gather_width_;
+                const u32 dHalfH = gather_height_;
                 if (out_dump_frame_ != 0xFFFFFFFFu && tick > out_dump_frame_ + 3u) {
                     if (auto* texels = static_cast<const u16*>(
                             device_->MapBuffer(out_staging_))) {
@@ -658,7 +664,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                 return lums[std::min(lums.size() - 1,
                                                      (size_t)(q * (lums.size() - 1)))];
                             };
-                            std::cerr << "[GIGather] out lum p10=" << pct(0.10f)
+                            PRIMAL_LOG_STREAM(Error, "Render") << "[GIGather] out lum p10=" << pct(0.10f)
                                       << " p50=" << pct(0.50f)
                                       << " p90=" << pct(0.90f)
                                       << " max=" << lums.back() << std::endl;
@@ -728,7 +734,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                                 if (std::isnan(v) || std::isinf(v)) { ++bad; continue; }
                                                 maxAbs = std::max(maxAbs, std::abs(v));
                                             }
-                                            std::cerr << "[IRR_DUMP] slot=" << ddgiReadIdx
+                                            PRIMAL_LOG_STREAM(Error, "Render") << "[IRR_DUMP] slot=" << ddgiReadIdx
                                                       << " maxAbs=" << maxAbs
                                                       << " nanInf=" << bad << std::endl;
                                             device_->UnmapBuffer(irrStaging);

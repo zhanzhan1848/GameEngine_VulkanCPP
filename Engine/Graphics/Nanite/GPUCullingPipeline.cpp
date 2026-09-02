@@ -15,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -39,7 +40,7 @@ namespace {
             std::string fullName = std::string("Nanite/") + shaderName;
             std::string src = dawn::LoadWGSL(fullName.c_str());
             if (src.empty()) {
-                std::cerr << "[GPUCullingPipeline] Failed to load WGSL shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCullingPipeline] Failed to load WGSL shader: "
                           << shaderName << " (entry: " << entryPoint << ")" << std::endl;
                 return {};
             }
@@ -56,7 +57,7 @@ namespace {
                 file.open(path, std::ios::binary | std::ios::ate);
             }
             if (!file.is_open()) {
-                std::cerr << "[GPUCullingPipeline] Failed to load WGSL shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCullingPipeline] Failed to load WGSL shader: "
                           << shaderName << " (entry: " << entryPoint << ")" << std::endl;
                 return {};
             }
@@ -94,7 +95,7 @@ namespace {
                 }
             }
             if (!file.is_open()) {
-                std::cerr << "[GPUCullingPipeline] Failed to load SPIR-V shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCullingPipeline] Failed to load SPIR-V shader: "
                           << shaderName << " (entry: " << entryPoint << ")"
                           << "\n  tried: " << candidates[0]
                           << "\n  tried: " << candidates[1] << std::endl;
@@ -105,7 +106,7 @@ namespace {
             // Exact byte count — VulkanShader rejects SPIR-V whose size % 4 != 0.
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                std::cerr << "[GPUCullingPipeline] Failed to read SPIR-V shader: "
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCullingPipeline] Failed to read SPIR-V shader: "
                           << shaderName << " from " << openedPath << std::endl;
                 return {};
             }
@@ -122,7 +123,7 @@ namespace {
         }
 
         if (!file.is_open()) {
-            std::cerr << "Failed to load shader: " << shaderName << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to load shader: " << shaderName << std::endl;
             return {};
         }
 
@@ -152,12 +153,12 @@ bool GPUCullingPipeline::Initialize(rhi::RHIDeviceBase* device, const CullingCon
     // threshold and skip HZB entirely.
 
     if (!CreatePipelines()) {
-        std::cerr << "Failed to create pipelines" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create pipelines" << std::endl;
         return false;
     }
     
     if (!CreateBuffers()) {
-        std::cerr << "Failed to create buffers" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create buffers" << std::endl;
         return false;
     }
     
@@ -219,7 +220,7 @@ bool GPUCullingPipeline::CreatePipelines() {
 
     culling_descriptor_layout_ = device_->CreateDescriptorSetLayout(cullingLayoutDesc);
     if (culling_descriptor_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
-        std::cerr << "Failed to create culling descriptor layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create culling descriptor layout" << std::endl;
         return false;
     }
 
@@ -232,7 +233,7 @@ bool GPUCullingPipeline::CreatePipelines() {
 
     culling_pipeline_layout_ = device_->CreatePipelineLayout(cullingPipelineLayoutDesc);
     if (culling_pipeline_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) {
-        std::cerr << "Failed to create culling pipeline layout" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create culling pipeline layout" << std::endl;
         return false;
     }
 
@@ -252,7 +253,7 @@ bool GPUCullingPipeline::CreatePipelines() {
         );
 
         if (shader == rhi::handles::INVALID_SHADER) {
-            std::cerr << "Failed to create shader: " << shaderName << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create shader: " << shaderName << std::endl;
             return rhi::handles::INVALID_PIPELINE;
         }
 
@@ -298,7 +299,7 @@ bool GPUCullingPipeline::CreatePipelines() {
 
         rhi::PipelineHandle pipeline = device_->CreateComputePipeline(pipelineDesc);
         if (pipeline == rhi::handles::INVALID_PIPELINE) {
-            std::cerr << "Failed to create pipeline: " << shaderName << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create pipeline: " << shaderName << std::endl;
         } else {
 //            std::cout << "Created GPU culling pipeline: " << shaderName
 //                      << " (ThreadGroupSize: " << pipelineDesc.threadGroupSize.x
@@ -321,7 +322,7 @@ bool GPUCullingPipeline::CreatePipelines() {
 
     // Check if we have at least the basic GPU pipelines
     if (frustum_culling_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "Critical: Failed to create frustum culling pipeline" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "Critical: Failed to create frustum culling pipeline" << std::endl;
         return false;
     }
 
@@ -438,7 +439,7 @@ bool GPUCullingPipeline::CreateBuffers() {
         cullingDebugDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst) | static_cast<u32>(rhi::ResourceUsage::UnorderedAccess);
         culling_debug_buffers_[i] = device_->CreateBuffer(cullingDebugDesc);
         if (culling_debug_buffers_[i] == rhi::handles::INVALID_RESOURCE) {
-            std::cerr << "[GPUCulling] Failed to create debug buffer " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] Failed to create debug buffer " << i << std::endl;
             return false;
         }
     }
@@ -624,7 +625,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     callCount = execute_call_count_;  // mirror for any debug-log reads; remove after Part 30 cleanup.
 
     if (!initialized_) {
-        std::cerr << "GPUCullingPipeline: Not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Not initialized" << std::endl;
         return false;
     }
 
@@ -647,7 +648,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
             hzb_bindings_updated_ = true;
 //            std::cout << "[GPUCulling] HZB bindings updated successfully!" << std::endl;
         } else {
-            std::cerr << "[GPUCulling] Failed to update HZB bindings" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] Failed to update HZB bindings" << std::endl;
         }
     }
 
@@ -683,7 +684,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
         if ((diagCounter++ % 30) == 0) {
             const u32 totalMeshlets = gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0u;
             const bool hzbReady = hzb_system_ ? hzb_system_->IsReady() : false;
-            std::cerr << "[CullDiag] frame=" << execute_call_count_
+            PRIMAL_LOG_STREAM(Error, "Render") << "[CullDiag] frame=" << execute_call_count_
                       << " inst=" << safeInstanceCount << "/" << instanceCount
                       << " cluster=" << safeClusterCount << "/" << clusterCount
                       << " occ=" << (config_.enable_occlusion_culling ? 1 : 0)
@@ -708,7 +709,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                 // Layout: [vertex_count, instance_count, first_vertex, first_instance]
                 static u32 visibleCounter = 0;
                 if ((visibleCounter++ % 30) == 0) {
-                    std::cerr << "[CullDiag] gpu_post_cull visible=" << mapped[1]
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[CullDiag] gpu_post_cull visible=" << mapped[1]
                               << "/" << safeClusterCount
                               << " vertex_count=" << mapped[0] << std::endl;
                 }
@@ -859,7 +860,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // This fixes the fundamental issue where data was stuck in staging buffers
     // Note: We need const_cast because UploadToGPUBuffers is not const (it performs GPU operations)
     if (!const_cast<RenderSceneSnapshot&>(snapshot).UploadToGPUBuffers(cmdBuffer)) {
-        std::cerr << "GPUCullingPipeline: Failed to upload snapshot data to GPU" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Failed to upload snapshot data to GPU" << std::endl;
         return false;
     }
 
@@ -880,7 +881,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     if (!basic_descriptor_sets_created_ && callCount == 1) {
 //        std::cout << "[GPUCulling] Frame " << bufferIndex << ": Creating basic descriptor sets (backface culling disabled until frame 3)..." << std::endl;
         if (!CreateDescriptorSets(snapshot)) {
-            std::cerr << "Failed to create basic descriptor sets" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create basic descriptor sets" << std::endl;
             return false;
         }
         basic_descriptor_sets_created_ = true;
@@ -904,7 +905,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
                 // Recreate descriptor sets with meshlet buffer binding
                 if (!CreateDescriptorSets(snapshot)) {
-                    std::cerr << "Failed to recreate descriptor sets with meshlet buffer" << std::endl;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "Failed to recreate descriptor sets with meshlet buffer" << std::endl;
                     return false;
                 }
                 backface_descriptor_sets_created_ = true;
@@ -919,7 +920,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     // Update culling constants data
     if (!UpdateCullingDescriptorSet(snapshot, viewMatrix, projectionMatrix, viewProjection, cameraPos, bufferIndex)) {
-        std::cerr << "GPUCullingPipeline: Failed to update culling constants" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Failed to update culling constants" << std::endl;
         return false;
     }
 
@@ -930,7 +931,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     //     std::cout << "[GPUCulling] Stage0: GPU Buffer Reset (EVERY FRAME)" << std::endl;
     // }
     if (!Stage0_ResetBuffers(cmdBuffer, snapshot, bufferIndex)) {
-        std::cerr << "GPUCullingPipeline: Stage 0 failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 0 failed" << std::endl;
         return false;
     }
 
@@ -941,13 +942,13 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     
     // Safety check for instance count
     if (safeInstanceCount > config_.max_instances_per_dispatch) {
-        std::cerr << "[GPUCulling] CRITICAL ERROR: Instance count (" << safeInstanceCount 
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] CRITICAL ERROR: Instance count (" << safeInstanceCount 
                   << ") exceeds max buffer capacity (" << config_.max_instances_per_dispatch << ")" << std::endl;
         return false;
     }
     
     if (!Stage1_FrustumCulling(cmdBuffer, snapshot, viewProjection, bufferIndex)) {
-        std::cerr << "GPUCullingPipeline: Stage 1 failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 1 failed" << std::endl;
         return false;
     }
 
@@ -956,7 +957,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     {
         if (config_.enable_small_object_culling) {
             if (!Stage2_DistanceCulling(cmdBuffer, snapshot, bufferIndex)) {
-                std::cerr << "GPUCullingPipeline: Stage 2 failed" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 2 failed" << std::endl;
                 return false;
             }
         }
@@ -967,7 +968,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     {
         if (config_.enable_lod_selection) {
             if (!Stage3_LODSelection(cmdBuffer, snapshot, viewMatrix, cameraPos, bufferIndex)) {
-                std::cerr << "GPUCullingPipeline: Stage 3 failed" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 3 failed" << std::endl;
                 return false;
             }
         }
@@ -975,14 +976,14 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     // === STAGE 4: Cluster Expansion ===
     if (!Stage4_ClusterExpansion(cmdBuffer, snapshot, bufferIndex)) {
-        std::cerr << "GPUCullingPipeline: Stage 4 failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 4 failed" << std::endl;
         return false;
     }
 
     // === STAGE 5: Occlusion Culling (HZB) ===
     if (config_.enable_occlusion_culling) {
         if (!Stage5_OcclusionCulling(cmdBuffer, snapshot, bufferIndex)) {
-            std::cerr << "GPUCullingPipeline: Stage 5 failed" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 5 failed" << std::endl;
             return false;
         }
     }
@@ -992,7 +993,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     //     std::cout << "[GPUCulling] Stage6: GPU Visible List Compaction" << std::endl;
     // }
     if (!Stage6_Compaction(cmdBuffer, snapshot, bufferIndex)) {
-        std::cerr << "GPUCullingPipeline: Stage 6 failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 6 failed" << std::endl;
         return false;
     }
 
@@ -1001,7 +1002,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     //     std::cout << "[GPUCulling] Stage7: GPU Build Indirect Commands" << std::endl;
     // }
     if (!Stage7_BuildIndirectCommands(cmdBuffer, snapshot, bufferIndex)) {
-        std::cerr << "GPUCullingPipeline: Stage 7 failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 7 failed" << std::endl;
         return false;
     }
 
@@ -1074,7 +1075,7 @@ bool GPUCullingPipeline::Stage0_ResetBuffers(rhi::RHICommandBuffer* cmdBuffer,
                                              const RenderSceneSnapshot& snapshot,
                                              u32 bufferIndex) {
     if (reset_buffers_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[GPUCulling] Reset buffers pipeline not available" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] Reset buffers pipeline not available" << std::endl;
         return false;
     }
 
@@ -1129,7 +1130,7 @@ bool GPUCullingPipeline::Stage1_FrustumCulling(rhi::RHICommandBuffer* cmdBuffer,
                                                const math::m4x4& viewProjection,
                                                u32 bufferIndex) {
     if (frustum_culling_pipeline_ == rhi::handles::INVALID_PIPELINE) {
-        std::cerr << "[GPUCulling] Frustum culling pipeline not available" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] Frustum culling pipeline not available" << std::endl;
         return false;
     }
 
@@ -1485,7 +1486,7 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
     for (u32 i = 0; i < 3; i++) {
         culling_descriptor_sets_[i] = device_->CreateDescriptorSet(desc);
         if (culling_descriptor_sets_[i] == rhi::handles::INVALID_DESCRIPTOR_SET) {
-            std::cerr << "Failed to create culling descriptor set for frame " << i << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create culling descriptor set for frame " << i << std::endl;
             return false;
         }
 
@@ -1822,11 +1823,11 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
 
     // Additional validation to prevent corrupted data
     if (constants.instance_count > 100000) {
-        std::cerr << "[GPUCulling] WARNING: Instance count suspiciously high: " << constants.instance_count << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] WARNING: Instance count suspiciously high: " << constants.instance_count << std::endl;
         constants.instance_count = std::min(constants.instance_count, 10000u);
     }
     if (constants.cluster_count > 1000000) {
-        std::cerr << "[GPUCulling] WARNING: Cluster count suspiciously high: " << constants.cluster_count << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] WARNING: Cluster count suspiciously high: " << constants.cluster_count << std::endl;
         constants.cluster_count = std::min(constants.cluster_count, 100000u);
     }
 
@@ -2048,7 +2049,7 @@ bool GPUCullingPipeline::Stage7_BuildIndirectCommands(rhi::RHICommandBuffer* cmd
     if (indirect_command_pipeline_ == rhi::handles::INVALID_PIPELINE) {
         static bool warned = false;
         if (!warned) {
-            std::cerr << "[GPUCulling] Stage7: indirect_command_pipeline_ is INVALID! Skipping." << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] Stage7: indirect_command_pipeline_ is INVALID! Skipping." << std::endl;
             warned = true;
         }
         return true;
@@ -2139,14 +2140,14 @@ bool GPUCullingPipeline::ReadDebugData(utl::vector<primal::graphics::nanite::Cul
     u32 read_frame_index = (current_frame_resource_ + 2) % 3;
 
     if (culling_debug_buffers_[read_frame_index] == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUCulling] Debug buffer for frame " << read_frame_index << " not initialized" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] Debug buffer for frame " << read_frame_index << " not initialized" << std::endl;
         return false;
     }
 
     // Map the debug buffer for reading
     void* mapped_data = device_->MapBuffer(culling_debug_buffers_[read_frame_index]);
     if (!mapped_data) {
-        std::cerr << "[GPUCulling] Failed to map debug buffer for frame " << read_frame_index << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] Failed to map debug buffer for frame " << read_frame_index << std::endl;
         return false;
     }
 
@@ -2214,7 +2215,7 @@ bool GPUCullingPipeline::UpdateHZBBindings() {
 
     rhi::ResourceHandle hzbTexture = hzb_system_->GetHZBTexture();
     if (hzbTexture == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[GPUCulling] HZB texture is invalid" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUCulling] HZB texture is invalid" << std::endl;
         return false;
     }
 

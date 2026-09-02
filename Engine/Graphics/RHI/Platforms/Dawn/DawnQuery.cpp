@@ -1,4 +1,5 @@
 #include "DawnQuery.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
 
@@ -47,7 +48,7 @@ bool DawnQueryPool::Initialize(const QueryPoolDesc& desc) {
 
     wgpuQuerySet_ = wgpuDeviceCreateQuerySet(device_.GetNativeDevice(), &wgpuDesc);
     if (!wgpuQuerySet_) {
-        std::cerr << "[DawnQueryPool] Failed to create query set" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnQueryPool] Failed to create query set" << std::endl;
         return false;
     }
     return true;

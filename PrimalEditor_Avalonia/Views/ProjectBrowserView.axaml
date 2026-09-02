@@ -8,24 +8,24 @@
         Width="900" Height="600"
         WindowStartupLocation="CenterScreen"
         CanResize="False"
-        Background="{StaticResource VoidBrush}">
+        Background="{DynamicResource VoidBrush}">
 
     <DockPanel Margin="24">
 
         <!-- HEADER -->
         <StackPanel DockPanel.Dock="Top" Margin="0,0,0,30" HorizontalAlignment="Center">
             <TextBlock Text="PRIMAL EDITOR"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="24" LetterSpacing="1"
-                       Foreground="{StaticResource ElectricBlueBrush}"
+                       Foreground="{DynamicResource ElectricBlueBrush}"
                        HorizontalAlignment="Center">
             </TextBlock>
             <TextBlock Text="A GAME EDITOR · AVALONIA 11 · C# 12"
-                       FontFamily="{StaticResource FontDisplay}"
+                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="10" LetterSpacing="1"
-                       Foreground="{StaticResource CoralBrush}"
+                       Foreground="{DynamicResource CoralBrush}"
                        HorizontalAlignment="Center" Margin="0,8,0,0"/>
-            <Border Background="{StaticResource ElectricBlueBrush}" Height="1" Opacity="0.45"
+            <Border Background="{DynamicResource ElectricBlueBrush}" Height="1" Opacity="0.45"
                     Width="320" Margin="0,12,0,0"/>
         </StackPanel>
 
@@ -39,16 +39,16 @@
                           Margin="0,0,32,0"
                           IsChecked="True"
                           Click="OnOpenTabClick"
-                          FontFamily="{StaticResource FontDisplay}"
+                          FontFamily="{DynamicResource FontDisplay}"
                           FontSize="12"/>
             <ToggleButton Content="CREATE PROJECT"
                           x:Name="createProjectButton"
                           Click="OnCreateTabClick"
-                          FontFamily="{StaticResource FontDisplay}"
+                          FontFamily="{DynamicResource FontDisplay}"
                           FontSize="12"/>
         </StackPanel>
 
-        <Border BorderBrush="{StaticResource ElectricBlueBrush}" BorderThickness="0,1,0,0"
+        <Border BorderBrush="{DynamicResource ElectricBlueBrush}" BorderThickness="0,1,0,0"
                 Padding="0,10,0,0">
             <Grid>
                 <views:OpenProjectView x:Name="openPanel"/>

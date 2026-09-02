@@ -66,12 +66,17 @@ public:
     GIGatherOutputs AddPasses(rendergraph::RenderGraph& graph, const GIGatherInputs& inputs);
 
     rhi::ResourceHandle GetOutputTexture() const { return gi_halfres_texture_; }
+    // gather 实际输出分辨率（Metal 全分辨率，Vulkan 维持半分辨率基线）。
+    u32 GetGatherWidth() const { return gather_width_; }
+    u32 GetGatherHeight() const { return gather_height_; }
     bool IsInitialized() const { return pipeline_ != rhi::handles::INVALID_PIPELINE; }
 
 private:
     rhi::RHIDeviceBase* device_ = nullptr;
     u32 render_width_ = 0;
     u32 render_height_ = 0;
+    u32 gather_width_ = 0;
+    u32 gather_height_ = 0;
 
     rhi::PipelineHandle pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineLayoutHandle layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};

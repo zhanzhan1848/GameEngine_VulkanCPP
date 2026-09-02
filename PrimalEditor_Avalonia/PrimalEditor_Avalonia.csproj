@@ -25,8 +25,7 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
     <AvaloniaResource Include="Controls\*.axaml" />
-    <AvaloniaResource Include="Themes\*.axaml" />
-    <AvaloniaResource Include="Themes\Controls\*.axaml" />
+    <AvaloniaResource Include="Themes\**\*.axaml" />
   </ItemGroup>
 
   <ItemGroup>
@@ -47,6 +46,11 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PrimalEditor_Avalonia.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- CLI / Agent 接口：命令注册表 + socket 协议层（Docs/CLI_Agent_Interface_Plan.md Phase 0） -->
+    <ProjectReference Include="..\Primal.CliFramework\Primal.CliFramework.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

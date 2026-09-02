@@ -1,3 +1,4 @@
+#include "Engine/Common/CoreLogStream.h"
 // Stubs + side-table implementations for content APIs excluded from the
 // Emscripten build (ContentToEngine.cpp uses a fake_pointer encoding that
 // assumes sizeof(uintptr_t) > sizeof(id::id_type), which fails on wasm32).
@@ -129,7 +130,7 @@ id::id_type create_resource(const void* data, asset_type::type type, GraphicsAPI
 
     auto* device = first_device();
     if (!device) {
-        std::cerr << "[StubsEmscripten] create_resource: no device registered" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[StubsEmscripten] create_resource: no device registered" << std::endl;
         return id::invalid_id;
     }
 
@@ -163,7 +164,7 @@ id::id_type create_resource(const void* data, asset_type::type type, GraphicsAPI
 
     auto handle = device->CreateTexture(desc);
     if (handle == graphics::rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[StubsEmscripten] CreateTexture failed w=" << width << " h=" << height
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[StubsEmscripten] CreateTexture failed w=" << width << " h=" << height
                   << " fmt=" << format_u32 << std::endl;
         return id::invalid_id;
     }

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <string>
 #include <functional>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
 
@@ -32,7 +33,7 @@ GPUMaterialRegistry::MaterialData MaterialDataBuilder::ExtractMaterialData(
     GPUMaterialRegistry::MaterialData data{};
 
     if (!instance) {
-        std::cerr << "[MaterialDataBuilder] Null material instance" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Null material instance" << std::endl;
         return data;
     }
 
@@ -66,7 +67,7 @@ GPUMaterialRegistry::MaterialData MaterialDataBuilder::ExtractMaterialData(
     GPUMaterialRegistry::MaterialData data{};
 
     if (!instance) {
-        std::cerr << "[MaterialDataBuilder] Null material instance" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Null material instance" << std::endl;
         return data;
     }
 
@@ -155,11 +156,11 @@ bool MaterialDataBuilder::BuildTextureArrays(
     rhi::ResourceHandle& outORMArray
 ) {
     if (instances.empty()) {
-        std::cerr << "[MaterialDataBuilder] WARNING: No material instances to build" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: No material instances to build" << std::endl;
         return true;  // Not an error, just nothing to do
     }
 
-    std::cout << "[MaterialDataBuilder] Building texture arrays for "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Building texture arrays for "
               << instances.size() << " materials..." << std::endl;
 
     // 🎨 Phase 2: Real texture array implementation
@@ -177,26 +178,26 @@ bool MaterialDataBuilder::BuildTextureArrays(
     if (!ctx.uniqueAlbedo.empty()) {
         // TODO: Pass actual command buffer
         if (!CreateTextureArray(device, nullptr, ctx.uniqueAlbedo, "AlbedoTextureArray", outAlbedoArray)) {
-            std::cerr << "[MaterialDataBuilder] Failed to create albedo texture array" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create albedo texture array" << std::endl;
             success = false;
         }
     }
 
     if (!ctx.uniqueNormal.empty()) {
         if (!CreateTextureArray(device, nullptr, ctx.uniqueNormal, "NormalTextureArray", outNormalArray)) {
-            std::cerr << "[MaterialDataBuilder] Failed to create normal texture array" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create normal texture array" << std::endl;
             success = false;
         }
     }
 
     if (!ctx.uniqueORM.empty()) {
         if (!CreateTextureArray(device, nullptr, ctx.uniqueORM, "ORMTextureArray", outORMArray)) {
-            std::cerr << "[MaterialDataBuilder] Failed to create ORM texture array" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create ORM texture array" << std::endl;
             success = false;
         }
     }
 
-    std::cout << "[MaterialDataBuilder] Texture array build complete (Phase 2: mapping created, copying TODO)" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Texture array build complete (Phase 2: mapping created, copying TODO)" << std::endl;
     return success;
 }
 
@@ -206,7 +207,7 @@ jobsystem::JobHandle MaterialDataBuilder::BuildAsync(
     GPUMaterialRegistry* registry
 ) {
     // TODO: Implement async build
-    std::cout << "[MaterialDataBuilder] BuildAsync not yet implemented" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] BuildAsync not yet implemented" << std::endl;
     return jobsystem::JobHandle();
 }
 
@@ -239,7 +240,7 @@ namespace {
         using namespace rhi;
 
         if (!device || texture == handles::INVALID_RESOURCE) {
-            std::cerr << "[MaterialDataBuilder] WARNING: Null device/texture in GetTextureSize, defaulting to 512x512" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: Null device/texture in GetTextureSize, defaulting to 512x512" << std::endl;
             return {512, 512};
         }
 
@@ -277,7 +278,7 @@ namespace {
         }
 #endif
 
-        std::cerr << "[MaterialDataBuilder] WARNING: Could not get texture size, using default 512x512" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: Could not get texture size, using default 512x512" << std::endl;
         return {512, 512};
     }
 
@@ -286,7 +287,7 @@ namespace {
         using namespace rhi;
 
         if (!device || texture == handles::INVALID_RESOURCE) {
-            std::cerr << "[MaterialDataBuilder] WARNING: Null device/texture in GetTextureFormat, defaulting to RGBA8_UNorm" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: Null device/texture in GetTextureFormat, defaulting to RGBA8_UNorm" << std::endl;
             return rhi::DataFormat::RGBA8_UNorm;
         }
 
@@ -306,7 +307,7 @@ namespace {
                     case MTL::PixelFormatBGRA8Unorm_sRGB:
                         return rhi::DataFormat::RGBA8_UNorm;
                     default:
-                        std::cerr << "[MaterialDataBuilder] WARNING: Unknown Metal pixel format " << static_cast<u32>(mtlTex->pixelFormat()) << ", using RGBA8_UNorm" << std::endl;
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: Unknown Metal pixel format " << static_cast<u32>(mtlTex->pixelFormat()) << ", using RGBA8_UNorm" << std::endl;
                         return rhi::DataFormat::RGBA8_UNorm;
                 }
             }
@@ -331,7 +332,7 @@ namespace {
         }
 #endif
 
-        std::cerr << "[MaterialDataBuilder] WARNING: Could not get texture format, using RGBA8_UNorm" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: Could not get texture format, using RGBA8_UNorm" << std::endl;
         return rhi::DataFormat::RGBA8_UNorm;
     }
 }
@@ -344,7 +345,7 @@ void MaterialDataBuilder::CreatePlaceholderTextures(
     rhi::DataFormat normal_fmt,
     rhi::DataFormat orm_fmt
 ) {
-    std::cout << "[MaterialDataBuilder] Creating 1024x1024 placeholder textures "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Creating 1024x1024 placeholder textures "
               << "(albedo fmt=" << static_cast<u32>(albedo_fmt)
               << ", normal fmt=" << static_cast<u32>(normal_fmt)
               << ", orm fmt=" << static_cast<u32>(orm_fmt) << ")..." << std::endl;
@@ -357,7 +358,7 @@ void MaterialDataBuilder::CreatePlaceholderTextures(
 
     // Helper to create texture from pixel data using content system
     auto CreateTextureFromPixels = [device](const std::vector<u32>& pixels, rhi::DataFormat format, const char* name) -> rhi::ResourceHandle {
-        std::cerr << "[MDB] CreateTextureFromPixels start: " << name << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MDB] CreateTextureFromPixels start: " << name << std::endl;
         // Build blob data (matches TestNaniteStreamingPipeline format)
         u32 row_pitch = TARGET_SIZE * 4;
         u32 slice_pitch = DATA_SIZE;
@@ -384,12 +385,12 @@ void MaterialDataBuilder::CreatePlaceholderTextures(
         writer.write(slice_pitch);
         writer.write(reinterpret_cast<const char*>(pixels.data()), slice_pitch);
 
-        std::cerr << "[MDB] Calling create_resource for " << name << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MDB] Calling create_resource for " << name << std::endl;
         primal::id::id_type id = primal::content::create_resource(blob.data(), primal::content::asset_type::texture);
-        std::cerr << "[MDB] create_resource returned: id=" << id << " for " << name << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MDB] create_resource returned: id=" << id << " for " << name << std::endl;
         if (primal::id::is_valid(id)) {
             auto handle = primal::content::get_rhi_texture_handle(id);
-            std::cerr << "[MDB] RHI handle=" << handle << " for " << name << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MDB] RHI handle=" << handle << " for " << name << std::endl;
             return handle;
         }
         return rhi::handles::INVALID_RESOURCE;
@@ -417,7 +418,7 @@ void MaterialDataBuilder::CreatePlaceholderTextures(
         ctx.placeholderORM = CreateTextureFromPixels(ormData, orm_fmt, "PlaceholderORM");
     }
 
-    std::cout << "[MaterialDataBuilder] 1024x1024 placeholder textures created" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] 1024x1024 placeholder textures created" << std::endl;
 }
 
 // 🎨 NEW: Build texture mapping from material instances
@@ -426,7 +427,7 @@ void MaterialDataBuilder::BuildTextureMapping(
     TextureArrayBuildContext& ctx,
     rhi::RHIDeviceBase* device
 ) {
-    std::cout << "[MaterialDataBuilder] Building texture mapping..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Building texture mapping..." << std::endl;
 
     // 1. Pre-scan source textures to find the canonical format per channel.
     //    WebGPU requires all layers of a texture_2d_array to share the exact
@@ -459,7 +460,7 @@ void MaterialDataBuilder::BuildTextureMapping(
     const rhi::DataFormat canonical_albedo_fmt = detect_canonical_format(get_albedo, rhi::DataFormat::RGBA8_sRGB);
     const rhi::DataFormat canonical_normal_fmt = detect_canonical_format(get_normal, rhi::DataFormat::RGBA8_UNorm);
     const rhi::DataFormat canonical_orm_fmt    = detect_canonical_format(get_orm,    rhi::DataFormat::RGBA8_UNorm);
-    std::cout << "[MaterialDataBuilder] Canonical formats: albedo=" << static_cast<u32>(canonical_albedo_fmt)
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Canonical formats: albedo=" << static_cast<u32>(canonical_albedo_fmt)
               << ", normal=" << static_cast<u32>(canonical_normal_fmt)
               << ", orm=" << static_cast<u32>(canonical_orm_fmt) << std::endl;
 
@@ -482,14 +483,14 @@ void MaterialDataBuilder::BuildTextureMapping(
     // 2. Collect unique textures from all material instances.
     // Skip textures whose size < 16x16 OR format != canonical — they'd be
     // rejected by BlitTexture anyway, leaving the assigned layer uninitialized.
-    std::cout << "[MaterialDataBuilder] Processing " << instances.size() << " material instances..." << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Processing " << instances.size() << " material instances..." << std::endl;
     u32 skipped_small_albedo = 0, skipped_small_normal = 0, skipped_small_orm = 0;
     u32 skipped_fmt_albedo = 0, skipped_fmt_normal = 0, skipped_fmt_orm = 0;
 
     for (size_t i = 0; i < instances.size(); ++i) {
         const auto* instance = instances[i];
         if (!instance) {
-            std::cout << "  [" << i << "] NULL instance, skipping" << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << "  [" << i << "] NULL instance, skipping" << std::endl;
             continue;
         }
 
@@ -516,14 +517,14 @@ void MaterialDataBuilder::BuildTextureMapping(
         }
 
         // Debug output for ALL materials (critical!)
-        std::cout << "  [MaterialID=" << i << "] Texture indices BEFORE: "
+        PRIMAL_LOG_STREAM(Info, "Render") << "  [MaterialID=" << i << "] Texture indices BEFORE: "
                   << "albedo_idx=" << albedoIdx << ", "
                   << "normal_idx=" << normalIdx << ", "
                   << "orm_idx=" << ormIdx << std::endl;
 
         // Debug output for first few materials (texture handles)
         if (i < 5) {
-            std::cout << "    Texture handles: "
+            PRIMAL_LOG_STREAM(Info, "Render") << "    Texture handles: "
                       << "albedo=" << albedo << ", "
                       << "normal=" << normal << ", "
                       << "orm=" << orm;
@@ -532,11 +533,11 @@ void MaterialDataBuilder::BuildTextureMapping(
             if (albedo == rhi::handles::INVALID_RESOURCE &&
                 normal == rhi::handles::INVALID_RESOURCE &&
                 orm == rhi::handles::INVALID_RESOURCE) {
-                std::cout << " ❌ ALL INVALID";
+                PRIMAL_LOG_STREAM(Info, "Render") << " ❌ ALL INVALID";
             } else {
-                std::cout << " ✓";
+                PRIMAL_LOG_STREAM(Info, "Render") << " ✓";
             }
-            std::cout << std::endl;
+            PRIMAL_LOG_STREAM(Info, "Render") << std::endl;
         }
 
         // Add to mapping with deduplication. Skip textures that would be
@@ -583,13 +584,13 @@ void MaterialDataBuilder::BuildTextureMapping(
             auto it = m.find(h);
             return (it != m.end()) ? std::to_string(it->second) : std::string("placeholder(0)");
         };
-        std::cout << "  [MaterialID=" << i << "] Texture indices AFTER: "
+        PRIMAL_LOG_STREAM(Info, "Render") << "  [MaterialID=" << i << "] Texture indices AFTER: "
                   << "albedo_idx=" << idx_or_dash(ctx.albedoToIndex, albedo) << ", "
                   << "normal_idx=" << idx_or_dash(ctx.normalToIndex, normal) << ", "
                   << "orm_idx=" << idx_or_dash(ctx.ormToIndex, orm) << std::endl;
     }
 
-    std::cout << "[MaterialDataBuilder] Texture mapping complete. Total unique textures: "
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Texture mapping complete. Total unique textures: "
               << ctx.uniqueAlbedo.size() << " albedo (skipped " << skipped_small_albedo
               << " small, " << skipped_fmt_albedo << " fmt), "
               << ctx.uniqueNormal.size() << " normal (skipped " << skipped_small_normal
@@ -599,7 +600,7 @@ void MaterialDataBuilder::BuildTextureMapping(
               << std::endl;
 
     // 🔥 CRITICAL DEBUG: Print final mapping for all materials
-    std::cout << "[MaterialDataBuilder] FINAL TEXTURE INDEX MAPPING:" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] FINAL TEXTURE INDEX MAPPING:" << std::endl;
     for (size_t i = 0; i < instances.size(); ++i) {
         const auto* instance = instances[i];
         if (!instance) continue;
@@ -617,7 +618,7 @@ void MaterialDataBuilder::BuildTextureMapping(
         uint32_t normalIdx = idx_or_default(ctx.normalToIndex, normal);
         uint32_t ormIdx = idx_or_default(ctx.ormToIndex, orm);
 
-        std::cout << "  MaterialID=" << i << " → "
+        PRIMAL_LOG_STREAM(Info, "Render") << "  MaterialID=" << i << " → "
                   << "albedo_layer=" << albedoIdx << ", "
                   << "normal_layer=" << normalIdx << ", "
                   << "orm_layer=" << ormIdx << std::endl;
@@ -633,11 +634,11 @@ bool MaterialDataBuilder::CreateTextureArray(
     rhi::ResourceHandle& outArray
 ) {
     if (sources.empty()) {
-        std::cerr << "[MaterialDataBuilder] No source textures for " << name << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] No source textures for " << name << std::endl;
         return false;
     }
 
-    std::cout << "[MaterialDataBuilder] Creating texture array '" << name
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Creating texture array '" << name
               << "' with " << sources.size() << " layers..." << std::endl;
 
     // Get texture info from first NON-placeholder source.
@@ -664,7 +665,7 @@ bool MaterialDataBuilder::CreateTextureArray(
     }
 
     if (firstValidTex == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[MaterialDataBuilder] No valid textures for " << name << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] No valid textures for " << name << std::endl;
         return false;
     }
 
@@ -694,7 +695,7 @@ bool MaterialDataBuilder::CreateTextureArray(
     }
     rhi::DataFormat format = static_cast<rhi::DataFormat>(bestFormat);
 
-    std::cout << "[MaterialDataBuilder] Texture info: " << size.x << "x" << size.y
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Texture info: " << size.x << "x" << size.y
               << ", format=" << static_cast<u32>(format)
               << " (picked from " << formatHistogram.size() << " unique formats"
               << ", best count=" << bestCount << ")" << std::endl;
@@ -712,7 +713,7 @@ bool MaterialDataBuilder::CreateTextureArray(
 
     outArray = device->CreateTexture(arrayDesc);
     if (outArray == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[MaterialDataBuilder] Failed to create texture array '" << name << "'" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create texture array '" << name << "'" << std::endl;
         return false;
     }
 
@@ -727,7 +728,7 @@ bool MaterialDataBuilder::CreateTextureArray(
         ownedCmdHandle = device->CreateCommandBuffer(queueType);
         activeCmd = rhi::GetCommandBuffer(ownedCmdHandle);
         if (!activeCmd) {
-            std::cerr << "[MaterialDataBuilder] Failed to acquire command buffer for "
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to acquire command buffer for "
                       << name << std::endl;
             return false;
         }
@@ -744,7 +745,7 @@ bool MaterialDataBuilder::CreateTextureArray(
         // Verify texture compatibility
         math::u32v2 texSize = GetTextureSize(device, sources[layer]);
         if (texSize.x != size.x || texSize.y != size.y) {
-            std::cerr << "[MaterialDataBuilder] WARNING: '" << name << "' layer "
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: '" << name << "' layer "
                       << layer << " size " << texSize.x << "x" << texSize.y
                       << " != array " << size.x << "x" << size.y << ", skipping"
                       << std::endl;
@@ -754,7 +755,7 @@ bool MaterialDataBuilder::CreateTextureArray(
 
         rhi::DataFormat srcFormat = GetTextureFormat(device, sources[layer]);
         if (srcFormat != format) {
-            std::cerr << "[MaterialDataBuilder] WARNING: '" << name << "' layer "
+            PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: '" << name << "' layer "
                       << layer << " format " << static_cast<u32>(srcFormat)
                       << " != array format " << static_cast<u32>(format)
                       << ", skipping (WebGPU requires exact match)" << std::endl;
@@ -781,7 +782,7 @@ bool MaterialDataBuilder::CreateTextureArray(
         ++copiedLayers;
     }
 
-    std::cout << "[MaterialDataBuilder] '" << name << "' copied " << copiedLayers
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] '" << name << "' copied " << copiedLayers
               << " layers, skipped " << skippedLayers << std::endl;
 
     // If we owned the command buffer, submit and wait now.
@@ -807,7 +808,7 @@ bool MaterialDataBuilder::CreateTextureArray(
         activeCmd->WaitForCompletion();
     }
 
-    std::cout << "[MaterialDataBuilder] Texture array '" << name << "' created successfully" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] Texture array '" << name << "' created successfully" << std::endl;
     return true;
 }
 
@@ -821,7 +822,7 @@ rhi::ResourceHandle MaterialDataBuilder::GetTextureSafe(
 
     rhi::ResourceHandle handle = instance->GetTextureHandle(binding);
     if (handle == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[MaterialDataBuilder] Missing texture at binding " << binding << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Missing texture at binding " << binding << std::endl;
     }
 
     return handle;

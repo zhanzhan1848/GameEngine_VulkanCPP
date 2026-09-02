@@ -8,6 +8,7 @@
 
 #include "MetalQuery.h"
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -37,7 +38,7 @@ MetalQueryPool::MetalQueryPool(MTL::Device* device, MetalQueryType type, u32 cou
         NS::Error* error = nullptr;
         buffer_ = device->newCounterSampleBuffer(desc, &error);
         if (error) {
-            std::cerr << "Failed to create timestamp query pool: " << error->localizedDescription()->utf8String() << std::endl;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to create timestamp query pool: " << error->localizedDescription()->utf8String() << std::endl;
         }
         
         desc->release();

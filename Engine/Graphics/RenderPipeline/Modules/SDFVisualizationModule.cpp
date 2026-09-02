@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
 
@@ -38,7 +39,7 @@ bool SDFVisualizationModule::Initialize(RHIDeviceBase* device,
                                          ShaderHandle sdf_viz_pixel_shader) {
     (void)sdf_viz_pixel_shader; // unused — compute shader loaded from .spv
     device_ = device;
-    std::cerr << "[SDFViz] Initialize() called" << std::endl;
+    PRIMAL_LOG_STREAM(Error, "Render") << "[SDFViz] Initialize() called" << std::endl;
 
     // Triple-buffered UBO.
     for (int i = 0; i < 3; ++i) {
@@ -108,7 +109,7 @@ bool SDFVisualizationModule::Initialize(RHIDeviceBase* device,
         offlineCompBytes = tryPath(pfx + offlineCompPath);
     }
     if (!offlineCompBytes.empty()) {
-        std::cerr << "[SDFViz] OfflineSDFViz.comp.spv loaded (" << offlineCompBytes.size() << " bytes)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SDFViz] OfflineSDFViz.comp.spv loaded (" << offlineCompBytes.size() << " bytes)" << std::endl;
         ShaderHandle offlineShader = device->CreateShader(
             offlineCompBytes.data(), offlineCompBytes.size(),
             ShaderStage::Compute, "main");
@@ -118,12 +119,12 @@ bool SDFVisualizationModule::Initialize(RHIDeviceBase* device,
             cpd2.layout = compute_layout_;
             cpd2.threadGroupSize = {8, 8, 1};
             offline_compute_pipeline_ = device->CreateComputePipeline(cpd2);
-            std::cerr << "[SDFViz] Offline compute pipeline: " << offline_compute_pipeline_ << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SDFViz] Offline compute pipeline: " << offline_compute_pipeline_ << std::endl;
         } else {
-            std::cerr << "[SDFViz] Failed to create offline shader" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SDFViz] Failed to create offline shader" << std::endl;
         }
     } else {
-        std::cerr << "[SDFViz] OfflineSDFViz.comp.spv NOT FOUND" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SDFViz] OfflineSDFViz.comp.spv NOT FOUND" << std::endl;
     }
 
     // ---- Blit pipeline (SampledImage + Sampler → backbuffer) ----
@@ -433,7 +434,7 @@ void SDFVisualizationModule::AddPass(RenderGraph& graph,
             static bool loggedViz = false;
             if (!loggedViz) {
                 loggedViz = true;
-                std::cerr << "[SDFViz] Dispatch: use_offline=" << inputs.use_offline_sdf
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SDFViz] Dispatch: use_offline=" << inputs.use_offline_sdf
                           << " hasOffline=" << HasOfflinePipeline()
                           << " pipeline=" << activePipeline
                           << " sdfTex=" << sdfTex[0]

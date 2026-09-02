@@ -10,6 +10,7 @@
 #include <sstream>
 #include <cstring>
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
 
@@ -74,11 +75,11 @@ static bool EnsureTracePipeline(RHIDeviceBase& device) {
     auto platform = device.GetPlatform();
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "SSAO");
     std::string shaderSource = LoadShaderSource(shaderPath);
-    if (shaderSource.empty()) { std::cerr << "[SSAO] Trace shader source empty: " << shaderPath << std::endl; return false; }
+    if (shaderSource.empty()) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSAO] Trace shader source empty: " << shaderPath << std::endl; return false; }
 
     ShaderHandle cs = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Compute, "ssao_trace");
 
-    if (cs == handles::INVALID_SHADER) { std::cerr << "[SSAO] Trace shader creation failed" << std::endl; return false; }
+    if (cs == handles::INVALID_SHADER) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSAO] Trace shader creation failed" << std::endl; return false; }
 
     DescriptorSetLayoutBinding bindings[3]{};
     bindings[0] = {0, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute};
@@ -129,10 +130,10 @@ static bool EnsureBlurPipeline(RHIDeviceBase& device) {
     auto platform = device.GetPlatform();
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "SSAOBlur");
     std::string shaderSource = LoadShaderSource(shaderPath);
-    if (shaderSource.empty()) { std::cerr << "[SSAO] Blur shader source empty: " << shaderPath << std::endl; return false; }
+    if (shaderSource.empty()) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSAO] Blur shader source empty: " << shaderPath << std::endl; return false; }
 
     ShaderHandle cs = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Compute, "main");
-    if (cs == handles::INVALID_SHADER) { std::cerr << "[SSAO] Blur shader creation failed" << std::endl; return false; }
+    if (cs == handles::INVALID_SHADER) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSAO] Blur shader creation failed" << std::endl; return false; }
 
     // Binding 0: AO input, 1: depth, 2: blurred output, 3: blur params uniform
     DescriptorSetLayoutBinding bindings[4]{};
