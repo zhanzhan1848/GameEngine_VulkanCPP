@@ -1180,8 +1180,17 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // or budget ≥ total keeps the legacy full update.
             // ================================================================
             {
-                const u32 texel_budget =
-                    config_.surface_cache_capture_budget * page_size_ * page_size_;
+                // PRIMAL_SC_BUDGET：页预算覆盖（页/帧）。0 = 全量更新——
+                // Vulkan 基准行为（实测 374 卡/帧 vs Metal 预算后 8 卡/帧）。
+                // SC atlas 覆盖不足曾是 Metal finalize 的 SC-first 层级退化
+                // 为"黑+解析蓝"的根因（0c2e34d9 因此错误地改用 prev-first）。
+                static const u32 s_budgetOverride = [] {
+                    const char* e = std::getenv("PRIMAL_SC_BUDGET");
+                    return e ? (u32)std::atoi(e) : 0xFFFFFFFFu;
+                }();
+                u32 budgetPages = (s_budgetOverride != 0xFFFFFFFFu)
+                    ? s_budgetOverride : config_.surface_cache_capture_budget;
+                const u32 texel_budget = budgetPages * page_size_ * page_size_;
                 // Lighting is triple-buffered and partial updates preserve the
                 // untouched texels in each slot. Seed every slot with one full
                 // evaluation before page budgeting starts; otherwise each

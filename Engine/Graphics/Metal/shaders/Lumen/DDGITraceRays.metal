@@ -558,16 +558,17 @@ kernel void ddgi_trace_finalize(
         // probePos is the UN-relocated grid position here).
         float3 hitPos = probePos + rayDir * hitDistance;
 
-        // ---- 2026-09-02 对齐 Vulkan：PREV-FIRST 辐射层级（与
-        // DDGITraceFinalize.comp 一致）。原先的 SC-FIRST 在 Metal 上失效：
-        // SC LightEval 每帧只处理 ~8 张可见卡（393 张注册），atlas 绝大多数
-        // 区域为黑——SC 分支能量门失败后落到解析项（中性白+蓝天空），探针
-        // 场 sh0 实测 (1.05,1.05,1.23) 蓝偏且无暖弹射。Vulkan 之所以正常，
-        // 是其 finalize 以 prev_frame_color（屏幕空间，覆盖全部可见表面、
-        // 带真实材质暖色）为主、SC 仅作 off-screen fallback。
-        // 1. Prev-frame screen color + material bounce + self-circulating.
-        // 2. SC lighting atlas fallback.
-        // 3. Analytic direct + sky + multi-bounce. ----
+        // ---- 2026-09-02：SC-FIRST 曾因 SC atlas 覆盖不足被改为 prev-first。
+        //
+        // 2026-09-03 与 Vulkan DDGITraceFinalize.comp 逐行核对后确认 Vulkan
+        // 的真实层级是 **SC-first**（0c2e34d9 注释"Vulkan 以 prev 为主"有
+        // 误）。当年 SC-first 失败的根因是 SC atlas 覆盖不足（T1.4 页预算
+        // + seed 未生效），现已由 seed+轮转修复，故回迁 Vulkan 的真实顺序：
+        // 1. SC lighting atlas（能量门，首个覆盖卡即停；自身反馈已含多
+        //    弹射，不再叠加 albedo×L_i_prev 项）。
+        // 2. Prev-frame screen color + material bounce + self-circulating
+        //    （isfinite 门防 NaN 静默失效）。
+        // 3. Analytic direct + sky + multi-bounce 兜底。
         float3 N = -rayDir;
         float3 albedo = scSampleHitAlbedo(hitPos, view_projection, volume.Albedo.xyz, gbuffer_albedo);
         float3 L_i_prev = scSamplePrevProbeGrid(hitPos, N, volume, irradiance_history);
@@ -575,63 +576,61 @@ kernel void ddgi_trace_finalize(
         float3 radiance;
         bool radianceFound = false;
         {
-            // 1) Prev-frame screen color first（Vulkan 主路径）。
-            // 门用 isfinite 收紧：屏幕颜色里若有 NaN（specular 除零等），
-            // NaN 参与任何比较恒为 false——能量门会静默失效率致整条 prev
-            // 路径旁路（2026-09-02 探针排查实录，Vulkan 同式门同样建议加）。
-            float3 prevRadiance = scSamplePrevColor(hitPos, view_projection, prev_frame_color);
-            if (all(isfinite(prevRadiance)) && dot(prevRadiance, prevRadiance) > 0.0001f) {
-                float sourceLum = dot(prevRadiance, float3(0.2126f, 0.7152f, 0.0722f));
-                float albedoMax = max(max(albedo.r, albedo.g), albedo.b);
-                float albedoMin = min(min(albedo.r, albedo.g), albedo.b);
-                float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3f);
-                float materialWeight = mix(0.15f, 0.85f, saturation);
-                float3 materialBounce = albedo * max(sourceLum, 0.12f) * materialWeight;
-                // T8.13 P1: self-circulating feedback 0.70.
-                radiance = prevRadiance + materialBounce + albedo * L_i_prev * 0.70f;
-                radianceFound = true;
+            // 1) SC-first（与 DDGITraceFinalize.comp 相同：首个覆盖卡采完
+            //    即 break，黑卡/未写入卡能量门失败则落下一层）。
+            float atlasSize = float(volume.SCAtlasSize);
+            uint deviceReads = 0u;
+            constexpr uint kMaxDeviceReads = 16u;
+            uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
+                              sc_grid_offsets[2], sc_grid_offsets[3]);
+            uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
+                              sc_grid_offsets[6], sc_grid_offsets[7]);
+            uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
+                              sc_grid_offsets[10], sc_grid_offsets[11]);
+            SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+            uint cell = scGridCellIndex(gp, hitPos);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = sc_grid_offsets[16u + cell];
+                uint end   = sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && deviceReads < kMaxDeviceReads; ++gi) {
+                    uint cardIdx = sc_grid_cards[gi];
+                    if (cardIdx >= 4096u) continue;
+                    device const SurfaceCacheCard& card = card_data[cardIdx];
+                    ++deviceReads;
+                    float2 atlasUV;
+                    if (worldToCardUVDevice(hitPos, card, atlasUV)) {
+                        float2 normUV = atlasUV / atlasSize;
+                        sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
+                        float3 scRadiance = lighting_atlas.sample(samp, normUV).xyz;
+                        if (dot(scRadiance, scRadiance) > 0.0001f) {
+                            radiance = scRadiance;
+                            radianceFound = true;
 #ifdef DDGI_DBG_PATH
-                radiance = float3(1.0f, 1.0f, 0.0f) * 0.5f; // prev-screen = yellow
+                            radiance = float3(0.0f, 1.0f, 0.0f) * 0.5f; // SC = green
 #endif
+                        }
+                        break;
+                    }
+                }
             }
             if (!radianceFound) {
-                // 2) SC lighting atlas fallback（off-screen hits）。
-                float atlasSize = float(volume.SCAtlasSize);
-                uint deviceReads = 0u;
-                constexpr uint kMaxDeviceReads = 16u;
-                uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
-                                  sc_grid_offsets[2], sc_grid_offsets[3]);
-                uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
-                                  sc_grid_offsets[6], sc_grid_offsets[7]);
-                uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
-                                  sc_grid_offsets[10], sc_grid_offsets[11]);
-                SCGridParams gp = scGridDecode(gh0, gh1, gh2);
-                uint cell = scGridCellIndex(gp, hitPos);
-                if (cell != 0xFFFFFFFFu) {
-                    uint begin = sc_grid_offsets[16u + cell];
-                    uint end   = sc_grid_offsets[17u + cell];
-                    for (uint gi = begin; gi < end && deviceReads < kMaxDeviceReads; ++gi) {
-                        uint cardIdx = sc_grid_cards[gi];
-                        if (cardIdx >= 4096u) continue;
-                        device const SurfaceCacheCard& card = card_data[cardIdx];
-                        ++deviceReads;
-                        float2 atlasUV;
-                        if (worldToCardUVDevice(hitPos, card, atlasUV)) {
-                            float2 normUV = atlasUV / atlasSize;
-                            sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
-                            float3 scRadiance = lighting_atlas.sample(samp, normUV).xyz;
-                            // Energy gate — a converging/black card must not
-                            // override the lower hierarchy.
-                            if (dot(scRadiance, scRadiance) > 0.0001f) {
-                                radiance = scRadiance;
-                                radianceFound = true;
+                // 2) Prev-frame screen color（off-screen 或 SC 黑时）。
+                // 门用 isfinite 收紧：屏幕颜色里若有 NaN（specular 除零等），
+                // NaN 参与任何比较恒为 false——能量门会静默失效。
+                float3 prevRadiance = scSamplePrevColor(hitPos, view_projection, prev_frame_color);
+                if (all(isfinite(prevRadiance)) && dot(prevRadiance, prevRadiance) > 0.0001f) {
+                    float sourceLum = dot(prevRadiance, float3(0.2126f, 0.7152f, 0.0722f));
+                    float albedoMax = max(max(albedo.r, albedo.g), albedo.b);
+                    float albedoMin = min(min(albedo.r, albedo.g), albedo.b);
+                    float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3f);
+                    float materialWeight = mix(0.15f, 0.85f, saturation);
+                    float3 materialBounce = albedo * max(sourceLum, 0.12f) * materialWeight;
+                    // T8.13 P1: self-circulating feedback 0.70.
+                    radiance = prevRadiance + materialBounce + albedo * L_i_prev * 0.70f;
+                    radianceFound = true;
 #ifdef DDGI_DBG_PATH
-                                radiance = float3(0.0f, 1.0f, 0.0f) * 0.5f; // SC = green
+                    radiance = float3(1.0f, 1.0f, 0.0f) * 0.5f; // prev-screen = yellow
 #endif
-                            }
-                            break;
-                        }
-                    }
                 }
             }
             if (!radianceFound) {
