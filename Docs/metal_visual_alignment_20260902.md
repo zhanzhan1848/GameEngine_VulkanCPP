@@ -154,3 +154,30 @@ validation 预存问题（不阻塞全链，逐项清单见上轮）：GI pass p
 无 range/offset 非对齐、descriptor set pending 改写（03047）、
 STORAGE_BUFFER 误写 binding 13、CopyImageToBuffer 缺 TRANSFER_SRC usage、
 depthTexture imageView 0x0（某 compute pass 未绑定）。
+
+## 色调管线统一 + 伪影1二分开局（2026-09-02 第五轮，8be5a3e7 + 4a160e0d）
+
+**同机位对比方法**：SPGI_CAM="0,5,0,0,0" + SPGI_CAM_LOCK=1 锁相机，
+窗口级截图（Quartz CGWindowList 找窗口 id + screencapture -l<id>，
+不抢前台、不受其他窗口遮挡影响；熄屏状态下截屏返回全黑——本方向发展
+出的教训是尽量用进程内回读做数值对比）。
+
+**关键事实厘清**：两平台 fusion 上游都输出线性 HDR
+（fragmentLighting_gpuDriven 注释明示 "RGB = direct lighting (HDR
+linear)"，fragmentFusion 无内联 tonemap）。legacy 基准观感 = 线性直通。
+据此统一：ToneMapping 默认走透传（仅 bloom 合成），ACES+gamma 降级为
+PRIMAL_TONE_ACES=1 可选路径。统一后两平台观感一致（直射阳光/暗部对比
+恢复），提交 8be5a3e7。
+
+**同机位剩余差异清单**（Metal vs Vulkan，全链、锁相机）：
+1. 直射阳光覆盖不同：Metal 顶部大片阳光斜切区，Vulkan 直射区域明显更小
+   ——疑两侧 ShadowMapModule cascade 覆盖/阴影过滤差异（与伪影2 同源）。
+2. 伪影1 楔形亮斑：Metal 左中暗墙白色楔形条纹，Vulkan 无——Metal 特有。
+3. Vulkan 整体略偏暖黄，Metal 偏中性——GI/IBL 色温差（待标定）。
+4. TAA 柔和度接近，几何锯齿两侧均消除——伪影3 随 TAA 上线解决 ✓。
+
+**伪影1 二分进展**：
+- SSAO_SILENCE=1：亮斑仍在 → **SSAO 排除**。注意静音同时压暗整个 GI
+  合成（fusion 把 ssao 当 GI 调制系数而非纯遮蔽），此开关只用于来源排除。
+- 剩余候选：DDGI 探针泄漏、SPGI、shadow vis 上采样。开关已入库
+  （DDGI_SILENCE / SPGI_SILENCE），待显示器恢复补拍两组截图。
