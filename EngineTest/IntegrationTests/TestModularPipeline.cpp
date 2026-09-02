@@ -271,10 +271,14 @@ bool TestModularPipeline::InitializeDevice() {
 
     DeviceDesc desc;
     desc.platform = RHIPlatform::Metal;
-    // Metal validation 层默认关（2026-09-02）：长时调试运行叠加 validation +
-    // 全 GI 链曾把系统推向 WindowServer watchdog 超时（GPU 驱动级停顿）。
-    // 需要校验时 PRIMAL_METAL_VALIDATE=1 显式打开。
-    desc.enableDebug = (std::getenv("PRIMAL_METAL_VALIDATE") != nullptr);
+    // Metal validation 恢复默认开（2026-09-02 二次修正）：后处理链启用后
+    // 出现启动即楔死 GPU 驱动、连带 WindowServer 崩溃的问题——validation
+    // 关闭时非法用法直通驱动无法定位，先恢复拦截抓证据。
+    // 确认链路干净后可用 PRIMAL_METAL_VALIDATE=0 关闭以降负载。
+    {
+        const char* v = std::getenv("PRIMAL_METAL_VALIDATE");
+        desc.enableDebug = (v == nullptr) || v[0] != '0';
+    }
 
     auto* metalDevice = new MetalDevice(desc);
     if (!metalDevice || !metalDevice->Initialize()) {
