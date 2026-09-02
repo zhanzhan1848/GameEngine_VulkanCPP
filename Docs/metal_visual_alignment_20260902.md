@@ -285,3 +285,25 @@ PRIMAL_TONE_ACES / SHADOW_BLUR。
 工具：GI_VERIFY_FRAME=<帧>（dump 时机）+ 相机邻域 L0/L1 dump 已入库；
 DDGI_DUMP=2（DDGI_PATH_DEBUG 编译的 finalize，ray 路径聚合）在
 TestVulkanSponzaRenderGraph，Metal 侧可移植。
+
+## SC-first 回迁 + 冻结挖掘点定位到 update pass（2026-09-03 续，3ca98663）
+
+用户方向确认："逻辑应参考 Vulkan，条件都已具备"。逐行核对
+DDGITraceFinalize.comp 后：
+
+1. **Vulkan 真实层级 = SC-first**（能量门 → prev+材质弹射 → 解析项；
+   miss 探针中心搜卡带门 + 暗灰天光 (0.3,0.3,0.35)）。0c2e34d9 把 Metal
+   改成 prev-first 的理由（"Vulkan 以 prev 为主"）与参考实现不符。
+2. **SC 覆盖差异实证**：Vulkan LightEval 全量 374 卡/帧；Metal 因 T1.4
+   页预算 + governor FPS 缩放长期只有 2-8 卡/帧 → atlas 长期欠点亮 →
+   当年 SC-first 采到黑 → 被误判为"SC 路径坏"。
+   新增 PRIMAL_SC_BUDGET=<页>（0=全量），实测 Metal 374 卡/帧达成。
+3. Engine 副本 finalize 回迁 SC-first；EngineTest 副本（旧版 378 行纯 SC
+   无门）整体替换为完整层级版并补齐 4 个缺失绑定。
+
+**未决（下一轮第一件事）**：全量预算 + SC-first 下，相机邻域探针 L0 仍
+逐位恒为 (0.03,0.03,0.035)=DDGI_SKY_COLOR×0.1 与 (0,0,1)——说明写探针
+的 `ddgi_update_irradiance`（DDGIUpdateIrradiance.metal）没有消费新
+finalize 的 ray_buffer，或其自身有 (0,0,1) 硬编码 sky/绑定缺失。审计点：
+update pass 的 Metal 描述符绑定 vs 派发参数、ray_buffer 槽位索引、
+miss/sky 分支的常量。
