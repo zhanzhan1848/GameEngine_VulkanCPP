@@ -179,5 +179,20 @@ PRIMAL_TONE_ACES=1 可选路径。统一后两平台观感一致（直射阳光/
 **伪影1 二分进展**：
 - SSAO_SILENCE=1：亮斑仍在 → **SSAO 排除**。注意静音同时压暗整个 GI
   合成（fusion 把 ssao 当 GI 调制系数而非纯遮蔽），此开关只用于来源排除。
-- 剩余候选：DDGI 探针泄漏、SPGI、shadow vis 上采样。开关已入库
-  （DDGI_SILENCE / SPGI_SILENCE），待显示器恢复补拍两组截图。
+- DDGI_SILENCE=1：亮斑仍在 → **DDGI 排除**（场景整体变暗属预期，DDGI
+  是主要间接光）。
+- SPGI_SILENCE=1：亮斑仍在 → **SPGI 排除**。
+- 加上此前已排除的 SSGI/阴影泄漏（光向翻转）/SC atlas fallback，
+  GI 侧候选全部排除。**收敛：亮斑源自直接光照路径，归档里最后一个
+  候选 shadow visibility 半分辨率上采样（ShadowFilter，half-res compute，
+  ShadowMapModule.cpp:421）成为头号嫌疑**。
+- 下一步实验：加 PRIMAL_SHADOW_WHITE=1（强制 shadow vis=1，无阴影）
+  ——亮斑消失则坐实 shadow vis 路径，再做 vis 直连/上采样修正；
+  亮斑仍在则直接查 DeferredLighting 的直射合成。
+
+**回归教训（同日修复 581a25f0）**：加二分开关时把 RWCB 的
+fusionIn.ddgi_tex 误置 INVALID（照抄 SSGI 模式），DDGI 的 tex/rg 双路径
+都是活的——GI 整体退化为解析 sky fallback（用户实拍暗部无 GI）。
+修复：DDGI_SILENCE 才同时置空 rg+tex，非静音恢复 giOut.gi_output_tex /
+giOut.gi_specular_tex。教训：fusion 输入的 tex 字段不是死的回退槽，
+置空前必须核对上游是否真实产出。
