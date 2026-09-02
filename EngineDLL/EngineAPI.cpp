@@ -1,3 +1,4 @@
+﻿#include "Engine/Common/CoreLogStream.h"
 #if defined(_MSC_VER)
 #include "Common.h"
 #include "CommonHeaders.h"
@@ -82,6 +83,7 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id)
 #elif defined(__clang__)
 #include "Common.h"
 #include "CommonHeaders.h"
+#include "DiagnosticsAPI.h"
 #include "EngineAPIInternal.h"
 #include "../Graphics/Renderer.h"
 #include "../Graphics/RHI/Core/RHIDevice.h"
@@ -187,7 +189,7 @@ EDITOR_INTERFACE u32 CreateEmbeddedRenderSurface(void* host_view, s32 width, s32
 	rs.window = platform::register_external_window(host_view, (u32)width, (u32)height);
 	rs.surface = graphics::create_external_surface(rs.window);
 	if (!rs.surface.is_valid()) {
-		std::cerr << "[EngineAPI] CreateEmbeddedRenderSurface failed: host view "
+		PRIMAL_LOG_STREAM(Error, "Engine") << "[EngineAPI] CreateEmbeddedRenderSurface failed: host view "
 		          << host_view << " rejected by graphics::create_external_surface "
 		          << "(likely 0x0 bounds or MTKView alloc failed)" << std::endl;
 		// Roll back the window slot too so it doesn't leak.
@@ -361,13 +363,18 @@ EDITOR_INTERFACE u32 InitializeEngine(u32 rhiPlatform, u32 enableDebug)
 	desc.platform = static_cast<graphics::rhi::RHIPlatform>(rhiPlatform);
 	desc.enableDebug = (enableDebug != 0);
 
+	// 日志 L0：初始化失败细节经 diag::Emit 发射（ConsoleSink → stderr +
+	// RingBuffer 黑匣子 + 宿主回调），fprintf 直出的旧行为由 ConsoleSink 承接。
+	using primal::engine_dll::diag::Emit;
+	using primal::engine_dll::diag::kLevelError;
+
 	if (!graphics::initialize_with_device(desc)) {
-		std::fprintf(stderr, "[InitializeEngine] initialize_with_device failed\n");
+		Emit(kLevelError, "Engine", "[InitializeEngine] initialize_with_device failed");
 		return 0;
 	}
 
 	if (!graphics::bind_rhi_device_to_legacy()) {
-		std::fprintf(stderr, "[InitializeEngine] bind_rhi_device_to_legacy failed\n");
+		Emit(kLevelError, "Engine", "[InitializeEngine] bind_rhi_device_to_legacy failed");
 		graphics::shutdown_rhi();
 		return 0;
 	}
@@ -381,7 +388,7 @@ EDITOR_INTERFACE u32 InitializeEngine(u32 rhiPlatform, u32 enableDebug)
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 		if (!graphics::initialize(legacyPlatform)) {
 #pragma GCC diagnostic pop
-			std::fprintf(stderr, "[InitializeEngine] graphics::initialize(metal) failed (often shader blob path issue)\n");
+			Emit(kLevelError, "Engine", "[InitializeEngine] graphics::initialize(metal) failed (often shader blob path issue)");
 			graphics::shutdown_rhi();
 			return 0;
 		}

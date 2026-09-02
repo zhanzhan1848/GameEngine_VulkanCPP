@@ -40,7 +40,9 @@ CATEGORY_BY_DIR = [
     ("EngineDLL", "Engine"),
 ]
 
-EXOTIC_PATTERN = re.compile(r"std::(hex|dec|oct|setw|setfill|setprecision|fixed|scientific|left|right|internal)\b")
+# hex/dec/oct 已由 shim 原生支持（基数状态机）；setw/setfill/setprecision/fixed 等
+# 仍需人工迁移（shim 无宽度/精度状态）。
+EXOTIC_PATTERN = re.compile(r"std::(setw|setfill|setprecision|fixed|scientific|left|right|internal)\b")
 RAW_START = re.compile(r'R"([^()\\ \t\n]*)\(')  # R"delim(  — delim 不含括号/空白
 
 
@@ -158,9 +160,9 @@ def rewrite_line(line: str, state: dict, macro_out: str, macro_err: str) -> str:
     return "".join(out)
 
 
-def migrate(path: Path) -> str:
+def migrate(path: Path, allow_exotic: bool = False) -> str:
     text = path.read_text()
-    if EXOTIC_PATTERN.search(text):
+    if EXOTIC_PATTERN.search(text) and not allow_exotic:
         return "skip:exotic-manipulators"
     if "std::cout" not in text and "std::cerr" not in text:
         return "skip:no-sites"
@@ -212,7 +214,7 @@ def main() -> int:
         path = Path(arg)
         if not path.is_file():
             continue
-        result = migrate(path)
+        result = migrate(path, allow_exotic="--allow-exotic" in sys.argv)
         key = result.split(":")[0]
         summary[key] = summary.get(key, 0) + 1
         if key == "migrated":

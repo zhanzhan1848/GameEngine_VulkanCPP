@@ -14,6 +14,7 @@
 
 #include <iostream>
 #include <new>
+#include "Engine/Common/CoreLogStream.h"
 
 using namespace primal;
 using namespace primal::graphics;
@@ -38,17 +39,17 @@ extern "C" {
 EDITOR_INTERFACE u32 CreateMaterialPreview(u64 device_handle, u32 width, u32 height) {
     auto* device = reinterpret_cast<rhi::RHIDeviceBase*>(device_handle);
     if (!device) {
-        std::cerr << "[MaterialPreviewAPI] CreateMaterialPreview: null device_handle\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] CreateMaterialPreview: null device_handle\n";
         return 0;
     }
 
     auto* renderer = new (std::nothrow) MaterialPreviewRenderer();
     if (!renderer) {
-        std::cerr << "[MaterialPreviewAPI] CreateMaterialPreview: allocation failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] CreateMaterialPreview: allocation failed\n";
         return 0;
     }
     if (!renderer->Initialize(device, width, height)) {
-        std::cerr << "[MaterialPreviewAPI] CreateMaterialPreview: Initialize failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] CreateMaterialPreview: Initialize failed\n";
         delete renderer;
         return 0;
     }
@@ -90,7 +91,7 @@ EDITOR_INTERFACE u32 SetMaterialPreviewGraph(u32 preview_id, const char* graph_j
     material_graph::MaterialGraph graph;
     if (!material_graph::MaterialGraphSerializer::DeserializeIntoGraph(
             std::string(graph_json), graph)) {
-        std::cerr << "[MaterialPreviewAPI] SetMaterialPreviewGraph: JSON parse failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] SetMaterialPreviewGraph: JSON parse failed\n";
         return 0;
     }
     return previews[idx]->SetMaterialGraph(graph) ? 1u : 0u;
@@ -195,7 +196,7 @@ EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_hand
 
     auto* device = reinterpret_cast<rhi::RHIDeviceBase*>(device_handle);
     if (!device) {
-        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: null device_handle\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: null device_handle\n";
         return 0;
     }
 
@@ -203,7 +204,7 @@ EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_hand
     const u32 h = renderer->GetHeight();
     const u64 expected = static_cast<u64>(w) * h * 4;
     if (buffer_size < expected) {
-        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: buffer too small ("
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: buffer too small ("
                   << buffer_size << " < " << expected << ")\n";
         return 0;
     }
@@ -212,7 +213,7 @@ EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_hand
     auto cmd_handle = device->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
     auto* cmd = rhi::GetCommandBuffer(cmd_handle);
     if (!cmd) {
-        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: CreateCommandBuffer failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: CreateCommandBuffer failed\n";
         return 0;
     }
     cmd->Begin();
@@ -221,7 +222,7 @@ EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_hand
     u32 fi = s_frame_idx.fetch_add(1) % rhi::MAX_FRAMES_IN_FLIGHT;
     rhi::ResourceHandle color_tex = renderer->Render(cmd, fi, 1.0f / 30.0f);
     if (color_tex == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: Render failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: Render failed\n";
         return 0;
     }
     cmd->End();
@@ -241,7 +242,7 @@ EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_hand
     };
     auto readback = device->CreateBuffer(bufDesc);
     if (readback == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: CreateBuffer failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: CreateBuffer failed\n";
         return 0;
     }
 
@@ -249,7 +250,7 @@ EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_hand
     auto* copy_cmd = rhi::GetCommandBuffer(copy_handle);
     if (!copy_cmd) {
         device->DestroyBuffer(readback);
-        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: copy cmd buffer failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: copy cmd buffer failed\n";
         return 0;
     }
     copy_cmd->Begin();
@@ -284,10 +285,10 @@ EDITOR_INTERFACE u64 RenderMaterialPreviewToRGBA(u32 preview_id, u64 device_hand
             bytes_written = expected;
             buf_res->Unmap();
         } else {
-            std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: Map returned null\n";
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: Map returned null\n";
         }
     } else {
-        std::cerr << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: GetResource returned null\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialPreviewAPI] RenderMaterialPreviewToRGBA: GetResource returned null\n";
     }
 
     device->DestroyBuffer(readback);

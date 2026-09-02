@@ -13,6 +13,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include "Engine/Common/CoreLogStream.h"
 
 using namespace primal;
 using namespace primal::graphics;
@@ -58,7 +59,7 @@ extern "C" {
 EDITOR_INTERFACE u32 CreateMaterialGraph() {
     auto* graph = new (std::nothrow) material_graph::MaterialGraph();
     if (!graph) {
-        std::cerr << "[MaterialGraphAPI] CreateMaterialGraph: allocation failed\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialGraphAPI] CreateMaterialGraph: allocation failed\n";
         return 0;
     }
     graphs.push_back(graph);
@@ -109,7 +110,7 @@ EDITOR_INTERFACE u32 GraphAddNode(u32 graph_id, const char* type_name) {
 
     auto node = material_graph::MaterialGraphSerializer::CreateNode(type_name);
     if (!node) {
-        std::cerr << "[MaterialGraphAPI] GraphAddNode: unknown type \"" << type_name << "\"\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialGraphAPI] GraphAddNode: unknown type \"" << type_name << "\"\n";
         return 0;
     }
     // AddNode returns the 0-based node_id; shift to 1-based so 0 = failure sentinel.
@@ -289,7 +290,7 @@ EDITOR_INTERFACE u32 LoadMaterialGraphFromFile(const char* path) {
 
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "[MaterialGraphAPI] LoadMaterialGraphFromFile: cannot open \"" << path << "\"\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialGraphAPI] LoadMaterialGraphFromFile: cannot open \"" << path << "\"\n";
         return 0;
     }
     std::stringstream ss;
@@ -316,7 +317,7 @@ EDITOR_INTERFACE u32 SaveMaterialGraphToFile(u32 graph_id, const char* path) {
 
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "[MaterialGraphAPI] SaveMaterialGraphToFile: cannot open \"" << path << "\"\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[MaterialGraphAPI] SaveMaterialGraphToFile: cannot open \"" << path << "\"\n";
         return 1;
     }
     file.write(json.data(), static_cast<std::streamsize>(json.size()));

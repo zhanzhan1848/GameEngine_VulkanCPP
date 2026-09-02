@@ -13,6 +13,7 @@
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "PipelineLightDesc.h"
+#include "DiagnosticsAPI.h"
 #include "Components/Transform.h"
 #include "EngineAPI/Light.h"
 #include "Components/Light.h"
@@ -37,6 +38,7 @@
 #include <iostream>
 #include <unordered_map>
 #include <vector>
+#include "Engine/Common/CoreLogStream.h"
 
 #if defined(_MSC_VER)
 #pragma comment(lib, "Engine.lib")
@@ -258,7 +260,7 @@ EDITOR_INTERFACE u64 PipelineImportCookedTexture(const char* path) {
         return static_cast<u64>(id::invalid_id);
     }
     if (content::get_rhi_texture_handle(texture_id) == rhi::handles::INVALID_RESOURCE) {
-        std::cerr << "[PipelineImportCookedTexture] texture has no RHI handle: "
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[PipelineImportCookedTexture] texture has no RHI handle: "
                   << path << std::endl;
         content::destroy_resource(texture_id, content::asset_type::texture);
         return static_cast<u64>(id::invalid_id);
@@ -451,7 +453,7 @@ EDITOR_INTERFACE u32 CreateStandardRenderPipeline(u64 device_handle) {
 
     auto* pipeline = new StandardRenderPipeline();
     if (!pipeline->Initialize(device)) {
-        std::cerr << "[CreateStandardRenderPipeline] Initialize failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[CreateStandardRenderPipeline] Initialize failed" << std::endl;
         delete pipeline;
         return 0;
     }
@@ -588,6 +590,7 @@ EDITOR_INTERFACE void PipelineUnregisterLightEntity(u64 entity_id) {
 // surface-size sanity check (headless tests with no drawable).
 
 EDITOR_INTERFACE u32 PipelineRenderFrame(u64 target_handle, u32 camera_id_in, u32 surface_id) {
+    primal::engine_dll::diag::AdvanceFrameCounter();
     return PipelineRenderFrameInternal(target_handle, camera_id_in, surface_id, false, id::invalid_id);
 }
 

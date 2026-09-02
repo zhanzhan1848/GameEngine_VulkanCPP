@@ -43,7 +43,9 @@ CATEGORY_BY_DIR = [
 ]
 
 # 含特殊流操纵符的文件需人工迁移（机械替换会把 std::hex 变成 shim 不认识的类型）
-EXOTIC_PATTERN = re.compile(r"std::(hex|dec|oct|setw|setfill|setprecision|fixed|scientific|left|right|internal)\b")
+# hex/dec/oct 已由 shim 原生支持（基数状态机）；setw/setfill/setprecision/fixed 等
+# 仍需人工迁移（shim 无宽度/精度状态）。
+EXOTIC_PATTERN = re.compile(r"std::(setw|setfill|setprecision|fixed|scientific|left|right|internal)\b")
 
 # 语句起始：行首空白 + std::cout/cerr + 空格 + <<
 STATEMENT = re.compile(r"^(\s*)(std::cerr|std::cout)\s*<<")

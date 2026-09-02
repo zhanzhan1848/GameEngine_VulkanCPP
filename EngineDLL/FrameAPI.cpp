@@ -4,6 +4,7 @@
 #include "EngineAPIInternal.h"
 #include "../Graphics/Renderer.h"
 #include "FrameAPI.h"
+#include "DiagnosticsAPI.h"
 
 #include <cstdio>
 
@@ -20,6 +21,7 @@ extern "C" u32 RenderFrame(const RenderFrameParams* params)
 EDITOR_INTERFACE u32 RenderFrame(const RenderFrameParams* params)
 #endif
 {
+    primal::engine_dll::diag::AdvanceFrameCounter();
     if (!params) {
         std::fprintf(stderr, "[RenderFrame] null params\n");
         return 0;

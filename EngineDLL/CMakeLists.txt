@@ -9,6 +9,9 @@ set(SOURCE_FILES
     "DllMain.cpp"
     "EngineAPI.cpp"
     "EngineAPI_win32.cpp"
+    "DiagnosticsAPI.cpp"
+    "EngineEventsAPI.cpp"
+    "CrashHandler.cpp"
     "EntityAPI.cpp"
     "AssetAPI.cpp"
     "RenderPipelineAPI.cpp"
@@ -38,6 +41,9 @@ endif()
 
 set(HEADER_FILES
     "Common.h"
+    "DiagnosticsAPI.h"
+    "EngineEventsAPI.h"
+    "CrashHandler.h"
     "EngineAPIInternal.h"
     "FrameAPI.h"
     "PipelineLightDesc.h"

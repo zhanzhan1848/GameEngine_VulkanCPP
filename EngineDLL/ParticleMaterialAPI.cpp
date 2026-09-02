@@ -8,6 +8,7 @@
 #include "../Engine/Graphics/ParticleMaterial.h"
 
 #include <iostream>
+#include "Engine/Common/CoreLogStream.h"
 
 using namespace primal;
 using namespace primal::graphics;
@@ -22,7 +23,7 @@ EDITOR_INTERFACE u32 CreateParticleMaterial() {
     particles::emitter_config config{};
     particle_material::material_id id = particle_material::create(config);
     if (id == 0) {
-        std::cerr << "[ParticleMaterialAPI] CreateParticleMaterial: create returned 0\n";
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[ParticleMaterialAPI] CreateParticleMaterial: create returned 0\n";
     }
     return id;
 #else
