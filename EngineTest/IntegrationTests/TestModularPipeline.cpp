@@ -492,7 +492,17 @@ bool TestModularPipeline::InitializePipeline() {
     {
         auto renderSettings = pipeline_->GetSettings();
         renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
-        renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f};
+        // PRIMAL_LIGHT_DIR="x,y,z"：GI 响应 A/B——翻转直射方向后对比 gather
+        // 条带分布，验证 GI 场是否真的跟随直射光（"GI 区是平的"排查）。
+        if (const char* ld = std::getenv("PRIMAL_LIGHT_DIR")) {
+            float lx, ly, lz;
+            if (std::sscanf(ld, "%f,%f,%f", &lx, &ly, &lz) == 3) {
+                renderSettings.lighting.light_direction = {lx, ly, lz};
+                std::cerr << "[TestModularPipeline] light_direction overridden: "
+                          << lx << "," << ly << "," << lz << std::endl;
+            }
+        }
+        renderSettings.lighting.light_color = {7.5f, 7.5f, 7.5f, 1.0f}; // Vulkan 等效: 3.0 x frag DIRECT 2.5
         renderSettings.lighting.ddgi_light_color = {2.0f, 2.0f, 2.0f, 1.0f};
         pipeline_->UpdateSettings(renderSettings);
     }
@@ -1116,7 +1126,15 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
     if (auto* ddgi = pipeline_->GetDDGIPass()) {
         auto irr = ddgi->GetIrradianceBuffer(0);
         if (irr != INVALID_RESOURCE) {
-            if (float* m = static_cast<float*>(device_->MapBuffer(irr, 0, 36 * sizeof(float)))) {
+            // 读前 8 个探针的 L0：探针场是否真的被 trace/update 驱动。
+            // 若全部等于静态种子（~1.05,1.05,1.23）→ update 未生效 →
+            // GI 均匀灰、与直射光无关联（"GI 区是平的"的直测证据）。
+            if (float* m = static_cast<float*>(device_->MapBuffer(irr, 0, 9 * 8 * sizeof(float)))) {
+                for (u32 p = 0; p < 8; ++p) {
+                    const float* sh0 = m + p * 9;
+                    std::cout << "[GIFusionVerify] probe[" << p << "] L0 rgb=("
+                              << sh0[0] << "," << sh0[1] << "," << sh0[2] << ")" << std::endl;
+                }
                 sh0Lum = lum(m[0], m[1], m[2]);
                 // sh0 RGB 分量（暖色温差排查）：Vulkan 基准探针场为暖色
                 // (0.234,0.193,0.145) R/B≈1.6，Metal 中性 (0.215,0.212,0.209)
