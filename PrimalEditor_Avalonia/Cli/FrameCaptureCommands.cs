@@ -22,9 +22,10 @@ public sealed class FrameCaptureCommands
         Description = "连续渲染 N 帧并逐帧存 PNG 到目录（frame_0000.png 起）。用于多帧故障取证" +
                       "（闪烁/撕裂/渐黑）与「看→改→验证」的时域证据。帧间引擎由渲染 tick 正常推进，" +
                       "每帧真实耗时在 frameMs 中。frames ≤ 240；out 必须为绝对路径（目录自动创建）。" +
-                      "3D 视口未初始化返回 NOT_READY。",
+                      "可选 video=xx.mp4：录后用外部 ffmpeg 编码（可选依赖，缺失时 videoEncoded=false " +
+                      "并保留 PNG 序列，不影响成功）。3D 视口未初始化返回 NOT_READY。",
         Example = """{"frames":30,"out":"/tmp/record"}""")]
-    public object Record(int frames = 30, string @out = "")
+    public object Record(int frames = 30, string @out = "", string? video = null)
     {
         if (frames is < 1 or > MaxFrames)
             throw CliError.InvalidParams($"frames 取值 1..{MaxFrames}", "诊断场景 30 帧通常足够定位闪烁");
@@ -38,6 +39,17 @@ public sealed class FrameCaptureCommands
                 "帧序列捕获失败（视口未完成首次渲染或引擎忙）",
                 "稍候重试；已写出的帧保留在输出目录可供取证");
 
+        string? videoPath = null;
+        bool videoEncoded = false;
+        string? videoHint = null;
+        if (!string.IsNullOrWhiteSpace(video))
+        {
+            videoPath = Path.IsPathRooted(video!) ? video : Path.GetFullPath(video!);
+            var videoDir = Path.GetDirectoryName(videoPath);
+            if (!string.IsNullOrEmpty(videoDir)) Directory.CreateDirectory(videoDir);
+            (videoEncoded, videoHint) = EncodeVideo(dir, videoPath, width, height);
+        }
+
         return new
         {
             dir = dir,
@@ -45,8 +57,66 @@ public sealed class FrameCaptureCommands
             width,
             height,
             avgFrameMs = Math.Round(frameMs.Count == 0 ? 0 : frameMs.Average(), 2),
+            video = videoPath,
+            videoEncoded,
+            videoHint,
             files,
         };
+    }
+
+    /// <summary>
+    /// 用外部 ffmpeg 把 PNG 帧序列编码成视频（规划 §5.3 第 2 层：视频是 record 的
+    /// 输出选项，不是独立能力）。ffmpeg 是可选依赖——缺失/失败都不影响 PNG 序列
+    /// 这一主产物，只在 videoHint 里给出下一步。
+    /// </summary>
+    private static (bool encoded, string? hint) EncodeVideo(string framesDir, string videoPath, int width, int height)
+    {
+        var ffmpeg = new[] { "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg" }
+            .FirstOrDefault(Findable);
+        if (ffmpeg == null)
+            return (false, "ffmpeg 未安装——PNG 序列已保留，安装 ffmpeg 后可用 editor.diff 逐帧比对");
+
+        // 宽高需为偶数（H.264 yuv420p 约束）。
+        var evenW = width - (width % 2);
+        var evenH = height - (height % 2);
+        var args = "-y -framerate 30 -i " +quotes(framesDir + "/frame_%04d.png") +
+                   " -vf scale=" + evenW + ":" + evenH +
+                   " -c:v libx264 -pix_fmt yuv420p -crf 20 " + quotes(videoPath);
+
+        static string quotes(string p) => "\"" + p + "\"";
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = ffmpeg,
+            Arguments = args,
+            UseShellExecute = false,
+            RedirectStandardError = true,
+        };
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(psi);
+            if (process == null) return (false, "ffmpeg 进程启动失败");
+            var stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0 || !File.Exists(videoPath))
+            {
+                var lastLine = stderr.Split('\n').LastOrDefault(l => l.Trim().Length > 0) ?? "";
+                return (false, $"ffmpeg 退出码 {process.ExitCode}：{lastLine[..Math.Min(160, lastLine.Length)]}");
+            }
+            return (true, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+
+        static bool Findable(string candidate)
+        {
+            if (candidate.Contains('/')) return File.Exists(candidate);
+            var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+            foreach (var dir in path.Split(':'))
+                if (File.Exists(Path.Combine(dir, candidate))) return true;
+            return false;
+        }
     }
 
     [CliCommand("editor.metrics",
