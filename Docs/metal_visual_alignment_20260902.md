@@ -80,3 +80,47 @@ API 误用。之后禁止再直接跑全链，先修后分环验证。
 新增诊断开关：TONE_OFF=1（同 TAA_OFF/BLOOM_OFF，FinalBlit 回退直读
 TAA 解析帧）。分环验证顺序（每环短窗口）：TAA_OFF+BLOOM_OFF（仅
 ToneMapping）→ +BLOOM → 全链。
+
+## 全链修复落地（2026-09-02 第三轮，提交 bf468210 + 798bc172）
+
+**Metal 全链已可用**（TAA/Bloom/ToneMapping 稳定运行，观感对齐 legacy，
+TAA 深度重投影 active）。三个真根因：
+
+1. **进程 assert（Texture Descriptor Validation, 0 尺寸/pixelFormat 0）**：
+   FusionOutput/DeferredOutput 用 ImportResource 注册（Unknown 类型），
+   ToneMapping/Bloom 的输出 desc 类型守卫失败 → 空 desc 创建瞬态。
+   修复：ImportTexture 携带真实 desc + desc 解析失败回退 1x1 并打日志。
+   **Vulkan Bloom 管线 INVALID 同根因**（brightDesc 空 → 管线 Unknown
+   格式创建失败），修复后 [BLOOM-EXEC] ok。
+2. **GPU 楔死（Bloom blur）**：同 compute encoder 内
+   memoryBarrier(Textures) 在本代 AGX 不保证跨 dispatch texture 写-读
+   排序（spindump：主线程 dispatch_semaphore 永久等待）。修复：
+   InsertBarrier 遇 afterState==UnorderedAccess 在 compute encoder 上
+   endCurrentEncoder（编码器边界自动 hazard tracking，严格更强）。
+   BLUR_OFF=1 开关入库辅助定位。
+3. **画面洗白**：Metal 上游 fragmentLighting/FusionComposite 已内联
+   exposure+ACES+gamma（LDR），ToneMappingPass 再做一次 = 双重 tonemap。
+   新增 tonemap_fs_passthrough（Metal 自动选用，仅 bloom 合成）；
+   Vulkan/Dawn 保持 ACES（上游线性 HDR）。注意测试用的是
+   EngineTest/shaders/DeferredLighting.metal 独立副本
+   （fragmentBlitNoTonemap 透传），与 Engine/Graphics/Metal/shaders/Forward/
+   的 fragmentBlit（带 tonemap）不是同一文件。
+
+## Vulkan 全链现状（下一轮主线）
+
+PRIMAL_FULL_POST=1 不再崩溃（此前 AttachmentTracker 崩溃/黑屏），
+Bloom/TAA/Tone 全部执行，但**画面全黑**。validation 报告（40s 采样）：
+
+- 大量 vkQueueSubmit layout 期望错位：期望 SHADER_READ_ONLY_OPTIMAL，
+  实际 UNDEFINED / TRANSFER_DST / TRANSFER_SRC——导入纹理初始状态与
+  RG InsertBarriers 的状态追踪不一致（RG resourceStates 每帧从
+  Unknown 起、跨帧池化复用时初始转换在 Metal 是 no-op 掩盖了问题）。
+- vkCmdPipelineBarrier oldLayout 与实际不符（GENERAL vs SHADER_READ_ONLY）。
+- descriptor set 在 pending CB 上被改写（无 UPDATE_AFTER_BIND）——
+  TAA/ToneMapping/Bloom 的 MAX_SETS=2/帧 × 3 帧池，set 三帧轮转但
+  CB 可能仍 in-flight，需加大池或按 CB 绑定。
+- SampledImage 写入 pImageInfo NULL（某处 INVALID 句柄直写）。
+- descriptorType 错配（STORAGE_BUFFER 写到 SAMPLED_IMAGE binding 13）。
+- push constant offset 非对齐（vkCreatePipelineLayout offset=2）。
+
+优先序：layout 追踪（黑屏根因）→ descriptor set 池 → 杂项 VUID。
