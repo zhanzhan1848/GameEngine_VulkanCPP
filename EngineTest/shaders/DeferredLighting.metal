@@ -11,6 +11,10 @@ constant float _DDGI_SH_C2_0 = 1.092548f;
 constant float _DDGI_SH_C2_1 = 0.315392f;
 constant float _DDGI_SH_C2_2 = 0.546274f;
 
+// 伪影1 探针（编译期）：1 = VSM 阴影强制为 1（无阴影）。用于定位暗区楔形
+// 白色渗光块是否来自 VSM Chebyshev light bleeding。验证完置回 0。
+constant uint DEBUG_SHADOW_WHITE = 0u;
+
 static void _ddgiShEvaluate(float3 d, thread float* out) {
     float x=d.x, y=d.y, z=d.z;
     float x2=x*x, y2=y*y, z2=z*z;
@@ -516,8 +520,13 @@ fragment float4 fragmentLighting_gpuDriven(
 
     // 3. Shadow — T8.13 sync: mode 1 (VSM moments + Chebyshev, the shared
     // ShadowMapModule default) or mode 0 (pre-filtered R8 visibility).
+    // 伪影1 探针：DEBUG_SHADOW_WHITE=1 强制 VSM 阴影=1（无阴影）。楔形亮斑
+    // （暗区白色渗光块）形态与 VSM Chebyshev light bleeding 吻合——若置 1
+    // 后亮斑消失即坐实 VSM moments 路径（moments blit/blur/上采样链）。
     float shadow;
-    if (sceneData.shadowParams.x > 0.5f) {
+    if (DEBUG_SHADOW_WHITE == 1u) {
+        shadow = 1.0f;
+    } else if (sceneData.shadowParams.x > 0.5f) {
         shadow = GetVSMShadowVisibilityGpuDriven(sceneData, worldPos,
                                                  shadowMoments0, shadowMoments1);
     } else {

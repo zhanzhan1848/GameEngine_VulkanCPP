@@ -102,6 +102,13 @@ kernel void shadow_filter_compute(
     uint2 outSize = uint2(visibilityOut.get_width(), visibilityOut.get_height());
     if (any(gid >= outSize)) return;
 
+    // 伪影1 探针（PRIMAL_SHADOW_WHITE=1 → C++ 置 shadow_quality=255）：
+    // 全白 visibility（无阴影）。楔形亮斑消失 = 坐实 shadow vis 路径。
+    if (params.shadow_quality == 255u) {
+        visibilityOut.write(float4(1.0), gid);
+        return;
+    }
+
     float2 fullUV = (float2(gid) * 2.0 + 1.0) / float2(params.render_width, params.render_height);
 
     constexpr sampler depthSmp(coord::normalized, filter::nearest, address::clamp_to_edge);

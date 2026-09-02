@@ -462,7 +462,10 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     p->light_dir = math::v4{L.x, L.y, L.z, 0.0f};
                     p->texel_size = math::v2{1.0f / 2048.0f, 1.0f / 2048.0f};
                     p->depth_texel_size = math::v2{1.0f / (float)render_width_, 1.0f / (float)render_height_};
-                    p->shadow_quality = static_cast<u32>(inputs.shadow_quality);
+                    // 伪影1 探针：PRIMAL_SHADOW_WHITE=1 → shadow_quality=255 哨兵，
+                    // ShadowFilter.metal kernel 直接写全白 vis（无阴影）。
+                    p->shadow_quality = std::getenv("PRIMAL_SHADOW_WHITE")
+                        ? 255u : static_cast<u32>(inputs.shadow_quality);
                     p->render_width = render_width_;
                     p->render_height = render_height_;
                     p->_pad0 = 0.0f;
