@@ -14,6 +14,9 @@ constant float _DDGI_SH_C2_2 = 0.546274f;
 // 伪影1 探针（编译期）：1 = VSM 阴影强制为 1（无阴影）。用于定位暗区楔形
 // 白色渗光块是否来自 VSM Chebyshev light bleeding。验证完置回 0。
 constant uint DEBUG_SHADOW_WHITE = 0u;
+// 伪影1 探针（编译期）：1 = VSM moments 采样 V 翻转（0.5 + y*0.5）——验证 Metal
+// shadow raster 与消费端 V 约定是否镜像（naga 对 Vulkan 自动插入 Y 取反）。
+constant uint DEBUG_SHADOW_VFLIP = 0u;
 
 static void _ddgiShEvaluate(float3 d, thread float* out) {
     float x=d.x, y=d.y, z=d.z;
@@ -176,7 +179,8 @@ static float GetVSMShadowVisibilityGpuDriven(constant SceneData& sceneData,
 
     float4 clip0 = sceneData.shadowMatrix0 * float4(worldPos, 1.0f);
     float3 sc0 = clip0.xyz / clip0.w;
-    float2 uv0 = float2(sc0.x * 0.5f + 0.5f, 0.5f - sc0.y * 0.5f);
+    float2 uv0 = float2(sc0.x * 0.5f + 0.5f,
+        DEBUG_SHADOW_VFLIP == 1u ? 0.5f + sc0.y * 0.5f : 0.5f - sc0.y * 0.5f);
     bool inCascade0 = uv0.x >= 0.0f && uv0.x <= 1.0f && uv0.y >= 0.0f && uv0.y <= 1.0f &&
                       sc0.z >= 0.0f && sc0.z <= 1.0f;
     if (inCascade0) {
@@ -192,7 +196,8 @@ static float GetVSMShadowVisibilityGpuDriven(constant SceneData& sceneData,
 
     float4 clip1 = sceneData.shadowMatrix1 * float4(worldPos, 1.0f);
     float3 sc1 = clip1.xyz / clip1.w;
-    float2 uv1 = float2(sc1.x * 0.5f + 0.5f, 0.5f - sc1.y * 0.5f);
+    float2 uv1 = float2(sc1.x * 0.5f + 0.5f,
+        DEBUG_SHADOW_VFLIP == 1u ? 0.5f + sc1.y * 0.5f : 0.5f - sc1.y * 0.5f);
     bool inCascade1 = uv1.x >= 0.0f && uv1.x <= 1.0f && uv1.y >= 0.0f && uv1.y <= 1.0f &&
                       sc1.z >= 0.0f && sc1.z <= 1.0f;
     if (inCascade1) {

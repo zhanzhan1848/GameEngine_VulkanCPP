@@ -2962,7 +2962,13 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         desc.depthFunc = rhi::ComparisonFunc::Less;
         desc.renderTargetCount = 1;
         desc.renderTargetFormats[0] = rhi::DataFormat::RG32_Float;
-        desc.cullMode = rhi::CullMode::Back;
+        // 2026-09-02 伪影1 修复：CullMode::Back → None。meshlet 缠绕方向不一致
+        // （见 3728/4073 的同类注释——投影 det=-1 时 Back 会剔错面），被剔的
+        // 三角形在 moments raster 里成为孔洞：该区域保持 ClearValue (1,1)=
+        // "全亮 z=1"，Chebyshev 直接判 lit → 暗区三角形楔状亮斑（SPGI_CAM
+        // 锁相机 + PRIMAL_SHADOW_CULLNONE 探针实证：None 后亮斑全部消失）。
+        // VSM moments 捕获双面（薄几何厚度）本就是标准做法。
+        desc.cullMode = rhi::CullMode::None;
         desc.vertexAttributes.clear();
         desc.vertexBindings.clear();
 
