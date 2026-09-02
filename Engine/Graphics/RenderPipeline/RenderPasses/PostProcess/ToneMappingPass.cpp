@@ -37,6 +37,16 @@ static constexpr u32 MAX_SETS = 2;
 static DescriptorSetHandle s_ToneMapSets[MAX_FRAMES][MAX_SETS] = {};
 static u32 s_ToneMapSetIdx[MAX_FRAMES] = {};
 
+// 模块持有的输出纹理（2026-09-02 Vulkan 黑屏二分定位）：输出曾用 RG 瞬态，
+// FinalBlit 采样全黑；FinalBlit 直读 TAA 的模块自有 ImportTexture 输出则
+// 完全正常（TONE_OFF 对照实验）。瞬态池生命周期/状态追踪与裸 BeginRenderPass
+// 的组合在 Vulkan 上产生黑帧。与 TAAPass s_OutputTex 同方案：模块持有 +
+// ImportTexture 进图，三帧环随 render 尺寸重建。
+static ResourceHandle s_OutputTex[MAX_FRAMES] = {
+    handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
+static u32 s_OutTexWidth = 0;
+static u32 s_OutTexHeight = 0;
+
 static std::string LoadShaderSource(const std::string& path) {
 #ifdef __EMSCRIPTEN__
     auto lastSlash = path.find_last_of('/');
@@ -235,6 +245,22 @@ static void EnsurePipeline(RHIDeviceBase& device) {
         }
 }
 
+static void EnsureOutputTextures(RHIDeviceBase& device, u32 width, u32 height) {
+    if (s_OutputTex[0] != handles::INVALID_RESOURCE &&
+        s_OutTexWidth == width && s_OutTexHeight == height) {
+        return;
+    }
+    // 尺寸变化或首帧：全部重建（destroyTexture 是 GC 延迟的，上一帧 in-flight 安全）
+    for (u32 i = 0; i < MAX_FRAMES; ++i) {
+        if (s_OutputTex[i] != handles::INVALID_RESOURCE) {
+            device.DestroyTexture(s_OutputTex[i]);
+            s_OutputTex[i] = handles::INVALID_RESOURCE;
+        }
+    }
+    s_OutTexWidth = width;
+    s_OutTexHeight = height;
+}
+
 const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture, RGResourceHandle aoTexture, RGResourceHandle ssgiTexture, RGResourceHandle velocityTexture, u32 frameIndex) {
     u32 fi = frameIndex % MAX_FRAMES;
     s_ToneMapSetIdx[fi] = 0;
@@ -278,7 +304,21 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
                 outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
             }
 
-            data.output = builder.CreateTexture("ToneMapping_Output", outputDesc, ResourceState::RenderTarget);
+            // 模块自有输出（见 s_OutputTex 注释）——绕开 RG 瞬态池。
+            auto& dev = builder.GetGraph().GetDevice();
+            EnsureOutputTextures(dev, outputDesc.size.x, outputDesc.size.y);
+            if (s_OutputTex[fi] == handles::INVALID_RESOURCE) {
+                outputDesc.mipLevels = 1;
+                s_OutputTex[fi] = dev.CreateTexture(outputDesc);
+            }
+            if (s_OutputTex[fi] == handles::INVALID_RESOURCE) {
+                std::cerr << "[TONE] module output texture creation failed — pass will render nothing" << std::endl;
+            }
+
+            data.output = builder.Write(
+                graph.ImportTexture("ToneMapping_Output", s_OutputTex[fi], outputDesc,
+                                    ResourceState::RenderTarget),
+                ResourceState::RenderTarget);
 
             EnsurePipeline(builder.GetGraph().GetDevice());
         },

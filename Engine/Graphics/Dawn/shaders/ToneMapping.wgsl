@@ -1,13 +1,8 @@
-// ToneMapping.wgsl — ACES tone mapping with optional bloom, AO, and SSGI
+// ToneMapping.wgsl — ACES tone mapping with additive bloom.
+// (AO/SSGI legacy compositing removed 2026-09-02 — see note in tonemap_fs.)
 
 // Set to 1 to visualize velocity buffer (debug only). Set to 0 for normal rendering.
 const DEBUG_VELOCITY: u32 = 0u;
-
-// SSGI intensity = albedo proxy. Trace outputs <Li>_cosine_weighted which
-// assumes albedo=1. Real diffuse surfaces have albedo 0.3-0.5, so we scale
-// down here. Critical to keep SSGI values < ~1.5 so ACES preserves the
-// warm color ratio — values >2 get crushed to white regardless of hue.
-const SSGI_INTENSITY: f32 = 0.4;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -75,13 +70,14 @@ fn tonemap_fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         color = vec3<f32>(0.0);
     }
 
-    // SSAO: darken occluded areas
-    let ao = textureSample(aoTexture, texSampler, uv);
-    color *= ao.r;
-
-    // SSGI: add indirect lighting (additive, intensity-tuned)
-    let ssgi = textureSample(ssgiTexture, texSampler, uv).rgb;
-    color += ssgi * SSGI_INTENSITY;
+    // 2026-09-02: AO/SSGI legacy compositing REMOVED (was: color *= ao.r;
+    // color += ssgi * 0.4). FusionIndirect owns AO/GI composition now, and the
+    // neutral dummies bound for bindings 3/4 were never initialized off-Dawn —
+    // ao.r sampled 0 on Vulkan → whole frame multiplied to black (Vulkan 全链
+    // 黑屏根因，二分实证：TONE_SOLID 红屏可达、真 draw 全黑)。Metal MSL
+    // (ToneMapping.metal) 已经只有 scene+bloom+ACES —— 本修改对齐两平台。
+    // If a non-fusion path ever needs AO/SSGI here again, the dummies must be
+    // properly uploaded (white / black) on ALL platforms first.
 
     // Add bloom (simple additive)
     let bloom = textureSample(bloomTexture, texSampler, uv).rgb;
