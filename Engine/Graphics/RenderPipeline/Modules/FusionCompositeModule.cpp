@@ -269,7 +269,17 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
 
     // Import textures into render graph
     auto indirectRG = graph.ImportResource("FusionIndirect", indirect_output_[cbIdx]);
-    auto fusionOutRG = graph.ImportResource("FusionOutput", fusion_output_[cbIdx]);
+    // FusionOutput 必须用 ImportTexture（携带 desc、RGResourceType::Texture）：
+    // ImportResource 注册的是 Unknown 类型，下游（ToneMapping 的输出 desc
+    // 拷贝、FinalBlit 等）按类型守卫解析会失败并回退空 desc——曾致
+    // ToneMapping_Output 以 0 尺寸/pixelFormat 0 创建，Metal validation
+    // 直接 assert（MTLTextureDescriptor validateWithDevice）。
+    TextureDesc fusionOutDesc{};
+    fusionOutDesc.size = {inputs.render_width, inputs.render_height, 1};
+    fusionOutDesc.format = DataFormat::RGBA16_Float;
+    fusionOutDesc.type = TextureType::Texture2D;
+    fusionOutDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
+    auto fusionOutRG = graph.ImportTexture("FusionOutput", fusion_output_[cbIdx], fusionOutDesc);
 
     outputs.output_rg = fusionOutRG;
     outputs.output_tex = fusion_output_[cbIdx];

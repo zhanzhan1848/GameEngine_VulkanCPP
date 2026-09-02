@@ -1332,6 +1332,19 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
             }
 
             computeEncoder->memoryBarrier(scope);
+
+            // 写准备（SRV→UAV 类转移）必须拆 encoder：实测（2026-09-02 Bloom
+            // blur H/V 二分）本代 AGX 上 encoder 内 memoryBarrier(Textures)
+            // 不能保证跨 dispatch 的 texture 写-读排序，第二个 dispatch 读到
+            // 未完成写入 → GPU 挂死（dispatch_semaphore 永不返回、WindowServer
+            // 连带崩溃）。拆 encoder 后由 Metal 编码器边界 + 自动 hazard
+            // tracking 保证顺序——严格更强的同步。
+            for (u32 i = 0; i < barrierCount; ++i) {
+                if (barriers[i].afterState == ResourceState::UnorderedAccess) {
+                    endCurrentEncoder();
+                    break;
+                }
+            }
             break;
         }
         case EncoderType::Render: {

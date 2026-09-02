@@ -41,9 +41,9 @@ fragment float4 tonemap_fs(VertexOut in [[stage_in]],
                            texture2d<float> bloomTexture [[texture(1)]]) // Optional
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    
+
     float3 color = sceneTexture.sample(s, in.uv).rgb;
-    
+
     // Add Bloom if available (simple addition)
     // Check if texture is bound by checking dimensions or assuming it is valid if passed
     // Metal doesn't allow checking for null texture easily in shader without flags
@@ -58,4 +58,19 @@ fragment float4 tonemap_fs(VertexOut in [[stage_in]],
     color = pow(color, float3(1.0/2.2));
 
     return float4(color, 1.0);
+}
+
+// Passthrough variant: bloom composite only, NO ACES/gamma.
+// Metal 的上游（DeferredLighting.metal fragmentLighting / FusionComposite）
+// 已经做过 exposure+ACES+gamma（LDR 输出）；全链再过一次 tonemap 是双重
+// 转换，暗部被抬到近白（2026-09-02 同机位截图实证）。Vulkan 上游输出线性
+// HDR，仍走 tonemap_fs。
+fragment float4 tonemap_fs_passthrough(VertexOut in [[stage_in]],
+                                       texture2d<float> sceneTexture [[texture(0)]],
+                                       texture2d<float> bloomTexture [[texture(1)]])
+{
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float3 color = sceneTexture.sample(s, in.uv).rgb;
+    float3 bloom = bloomTexture.sample(s, in.uv).rgb;
+    return float4(color + bloom, 1.0);
 }

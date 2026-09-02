@@ -71,6 +71,14 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
                 brightDesc.format = desc.format;
                 brightDesc.type = TextureType::Texture2D;
                 brightDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            } else {
+                // 同 ToneMapping：desc 解析失败不允许落回空 desc（0 尺寸创建
+                // 在 Metal validateWithDevice assert）。
+                std::cerr << "[BLOOM] bright desc unresolved (input not Texture-typed) — 1x1 fallback" << std::endl;
+                brightDesc.size = {1, 1, 1};
+                brightDesc.format = DataFormat::RGBA16_Float;
+                brightDesc.type = TextureType::Texture2D;
+                brightDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
             }
             data.brightTexture = builder.CreateTexture("Bloom_Bright", brightDesc, ResourceState::RenderTarget);
 
@@ -238,6 +246,12 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
             auto* inputRes = builder.GetGraph().GetResource(setupData.brightTexture);
             if (inputRes && inputRes->GetType() == RGResourceType::Texture) {
                 desc = static_cast<RenderGraphTexture*>(inputRes)->GetDesc();
+            } else {
+                // 同上：desc 解析失败不允许空 desc 创建（Metal assert）。
+                std::cerr << "[BLOOM] blur desc unresolved (bright not Texture-typed) — 1x1 fallback" << std::endl;
+                desc.size = {1, 1, 1};
+                desc.format = DataFormat::RGBA16_Float;
+                desc.type = TextureType::Texture2D;
             }
 
             desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
@@ -252,6 +266,9 @@ const BloomPassData& AddBloomPass(RenderGraph& graph, RGResourceHandle inputColo
         },
         [&setupData, frameIndex](const BloomBlurData& data, RenderGraphContext& context) {
             if (!s_BlurPass) return;
+            // BLUR_OFF=1 内层二分开关：跳过 H/V blur compute，bloomOutput
+            // 不会被写入（仅诊断用，画面等于无 bloom）。
+            if (std::getenv("BLUR_OFF")) return;
 
             auto* inputRes = context.graph->GetResource(setupData.brightTexture);
             auto* outputRes = context.graph->GetResource(data.bloomOutput);

@@ -259,7 +259,15 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
     if (pipeline_ == handles::INVALID_PIPELINE || currentTex == handles::INVALID_RESOURCE)
         return outputs;
 
-    auto deferredRG = graph.ImportResource("DeferredOutput", currentTex);
+    // ImportTexture（非 ImportResource）：携带 desc、注册为 Texture 类型，
+    // 下游按类型守卫解析 desc 才不会回退空 desc（同 FusionOutput 修复）。
+    TextureDesc deferredOutDesc{};
+    deferredOutDesc.size = {render_width_, render_height_, 1};
+    deferredOutDesc.format = DataFormat::RGBA16_Float;
+    deferredOutDesc.type = TextureType::Texture2D;
+    deferredOutDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource | TextureUsage::CopySource;
+    deferredOutDesc.memoryUsage = GPUMemoryUsage::Static;
+    auto deferredRG = graph.ImportTexture("DeferredOutput", currentTex, deferredOutDesc);
     outputs.deferred_output_rg = deferredRG;
     outputs.deferred_output_tex = currentTex;
 

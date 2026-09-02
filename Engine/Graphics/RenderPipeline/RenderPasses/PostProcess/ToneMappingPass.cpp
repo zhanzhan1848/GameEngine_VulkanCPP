@@ -18,6 +18,7 @@ namespace primal::graphics::PostProcess {
 using namespace rhi;
 
 static PipelineHandle s_ToneMapPipeline = handles::INVALID_PIPELINE;
+static PipelineHandle s_ToneMapPassthroughPipeline = handles::INVALID_PIPELINE;
 static PipelineLayoutHandle s_ToneMapLayout = handles::INVALID_PIPELINE_LAYOUT;
 static DescriptorSetLayoutHandle s_ToneMapDSL = handles::INVALID_RESOURCE;
 static SamplerHandle s_ToneMapSampler = handles::INVALID_SAMPLER;
@@ -210,6 +211,21 @@ static void EnsurePipeline(RHIDeviceBase& device) {
 
     s_ToneMapPipeline = device.CreateGraphicsPipeline(pipelineDesc);
 
+    // Metal 透传管线：上游已是 LDR（fragmentLighting/FusionComposite 内联
+    // tonemap），见 tonemap_fs_passthrough 的注释。
+    if (device.GetPlatform() == RHIPlatform::Metal) {
+        ShaderHandle fsPT = device.CreateShader(shaderSource.data(), shaderSource.size(),
+                                                ShaderStage::Pixel, "tonemap_fs_passthrough");
+        if (fsPT != handles::INVALID_SHADER) {
+            GraphicsPipelineDesc ptDesc = pipelineDesc;
+            ptDesc.pixelShader = fsPT;
+            s_ToneMapPassthroughPipeline = device.CreateGraphicsPipeline(ptDesc);
+        }
+        if (s_ToneMapPassthroughPipeline == handles::INVALID_PIPELINE) {
+            std::cerr << "[ToneMapping] passthrough pipeline failed — falling back to ACES" << std::endl;
+        }
+    }
+
     // Pre-allocate descriptor set pool
     for (u32 f = 0; f < MAX_FRAMES; ++f)
         for (u32 s = 0; s < MAX_SETS; ++s) {
@@ -247,6 +263,16 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
                 outputDesc.size.x = desc.size.x;
                 outputDesc.size.y = desc.size.y;
                 outputDesc.size.z = 1;
+                outputDesc.format = DataFormat::RGBA8_UNorm;
+                outputDesc.type = TextureType::Texture2D;
+                outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+            } else {
+                // desc 解析失败绝不能落回默认空 desc——0 尺寸/pixelFormat 0
+                // 会在 Metal validateWithDevice assert（2026-09-02 现场实证）。
+                // FusionOutput 曾以 ImportResource（Unknown 类型）注册而触发。
+                std::cerr << "[TONE] output desc unresolved (input not Texture-typed) — "
+                             "fallback 0-size texture will be skipped" << std::endl;
+                outputDesc.size = {1, 1, 1};
                 outputDesc.format = DataFormat::RGBA8_UNorm;
                 outputDesc.type = TextureType::Texture2D;
                 outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
@@ -385,7 +411,10 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             cmd->BeginRenderPass(passDesc);
             cmd->SetViewport(viewport);
             cmd->SetScissor({ { 0, 0 }, { (u32)viewport.size.x, (u32)viewport.size.y } });
-            cmd->BindGraphicsPipeline(s_ToneMapPipeline);
+            // Metal：上游已 LDR，走透传（仅 bloom 合成）；Vulkan/Dawn：ACES。
+            const bool usePassthrough = s_ToneMapPassthroughPipeline != handles::INVALID_PIPELINE;
+            cmd->BindGraphicsPipeline(usePassthrough ? s_ToneMapPassthroughPipeline
+                                                     : s_ToneMapPipeline);
 
             if (ds != handles::INVALID_RESOURCE) {
                 cmd->BindDescriptorSets(PipelineBindPoint::Graphics, s_ToneMapLayout, 0, 1, &ds, 0, nullptr);
