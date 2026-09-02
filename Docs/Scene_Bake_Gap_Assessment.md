@@ -1,6 +1,6 @@
 # 场景烘焙断链评估（CLI 规划 Phase 3）
 
-> 状态：评估结论（2026-09-02）
+> 状态：评估结论 + 路线 A 已实施（2026-09-02）
 > 规划出处：Docs/CLI_Agent_Interface_Plan.md §10 Phase 3 "场景烘焙断链评估：先 C# dotnet tool 打通，再评估下沉 C++"
 
 ## 1. 什么是"断链"
@@ -20,7 +20,7 @@ cook 已经由 C++ 侧覆盖（本轮 `import-texture`/`cook-mesh` 落地），�
 
 ## 2. 评估：三条路线
 
-### 路线 A：C# dotnet tool（规划的推荐路径）✅ 推荐先行
+### 路线 A：C# dotnet tool（规划的推荐路径）✅ **已实施**
 把编辑器的 `Serializer` + `BuildPipeline` 薄包装成 dotnet tool
 （`dotnet primal-build <project.primal>`）。
 - 优点：逻辑零搬迁（直接引用编辑器程序集）；与编辑器同源零漂移；工作量 ~1-2 天。
@@ -47,5 +47,8 @@ cook 已经由 C++ 侧覆盖（本轮 `import-texture`/`cook-mesh` 落地），�
 2. CLI 侧已完成的单资产 cook（`cook-mesh`/`import-texture`/`bake-vt`）覆盖了
    规划 §5.1 离线通道的资产级部分；场景级打包按上述结论走 C# tool，不进
    primal-engine。
-3. 本评估同时关闭规划 Phase 3 的"评估"子项；实施子项（dotnet tool 本体）
-   按触发条件另行立项。
+3. 规划 Phase 3 的"评估"子项与本子项均已关闭：路线 A 已实现为
+   `Tools/PrimalBuild`（`dotnet run --project Tools/PrimalBuild -- <project.primal>`，
+   无 GUI 进程走 OpenProject → AssetRegistry 重扫 → BuildManifestGenerator →
+   SaveAll 全链，stdout=JSON/退出码 0/2/4，实测 TestProject_01 打包 3 条目）。
+   `--save-only` 提供轻量校验路径。

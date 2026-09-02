@@ -11,6 +11,7 @@
   - `PrimalCli/` — `primal` 客户端（stdout=JSON，stderr=日志，退出码 0/2/3/4/5）
   - `Tools/PrimalEngineCli/` — `primal-engine` 离线执行器（render/cook-mesh/schema）
   - `Tools/primal-mcp/` — MCP 桥（stdio，任意 MCP harness 零适配接入）
+  - `Tools/PrimalBuild/` — `primal-build` 场景/项目离线打包（dotnet tool，断链路线 A）
   - `PrimalEditor_Avalonia/Cli/` — 编辑器内命令宿主（CliHost + 各命令类）
 
 ## 构建
@@ -51,6 +52,7 @@ Darwin/PrimalCli/DebugEditor/primal selftest
 ./scripts/primal_smoke.sh
 
 # 3. 离线通道 + 基线门禁（无需编辑器）
+dotnet run --project Tools/PrimalBuild -c DebugEditor -- <project.primal>  # 离线打包
 Darwin/DebugEditor/primal-engine engine info
 Darwin/PrimalCli/DebugEditor/primal test render
 
