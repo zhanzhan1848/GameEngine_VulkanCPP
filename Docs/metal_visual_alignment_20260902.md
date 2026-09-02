@@ -263,3 +263,25 @@ PRIMAL_TONE_ACES / SHADOW_BLUR。
 （楔子曾给场景注入假光，修复后平衡点真实但更显眼）。非 bug、非失控。
 可选改善（若收敛闪光碍眼）：探针初始化改暗中性色（从暗往亮收敛比从亮
 往暗观感好），或前 N 帧提高探针混合速率加速收敛。
+
+## GI 冻结真相（2026-09-03，3e97d0ea）：探针在更新，但辐照≈0
+
+用户观察"GI 区和第一秒没区别（等 100s）"。GI_VERIFY_FRAME 环境变量化 +
+探针 dump 升级为相机邻域 2×2×2（原 dump 读网格角落 probe 0..7，在按距离
+优先级的调度下被永久饿死——ageScore 封顶 0.3 竞争不过近距 ~1.0，读数
+恒=种子 (1.05,1.05,1.23)，误导了两轮排查）。
+
+相机邻域实测（frame 120，gc=16,9,16）：
+- 半数探针 L0=(0.03,0.03,0.035)——在更新但辐照近黑；
+- 半数 L0=(0,0,1)、L1=0——射线全 miss，纯蓝天。
+
+两个挖掘点（下一轮）：
+1. **prev-screen 重投影采样返回暗**：finalize 的 prev 主导路径按 hitPos
+   重投影到上一帧合成图取色，Metal 上疑似 UV/矩阵约定错位（采样到
+   黑/边界），radiance≈0.03；
+2. **室内射线全 miss 率过高**：封闭 Sponza 内部探针的射线应大量命中
+   墙体，(0,0,1) 纯蓝天占比 ~50% 说明 SDF trace 穿墙（GlobalSDF 体素
+   内容/级联覆盖可疑）。
+工具：GI_VERIFY_FRAME=<帧>（dump 时机）+ 相机邻域 L0/L1 dump 已入库；
+DDGI_DUMP=2（DDGI_PATH_DEBUG 编译的 finalize，ray 路径聚合）在
+TestVulkanSponzaRenderGraph，Metal 侧可移植。
