@@ -51,3 +51,32 @@
 3. 伪影 1/2 的二分定位（各加静音开关）。
 4. GI 弹射幅度档位（FusionIndirect ddgiBase 0.7 与 Vulkan 7.5 直射的
    配比差异——待同机位定量）。
+
+## 全链楔死审计（2026-09-02 第二轮，静态分析）
+
+复现一次（PRIMAL_FULL_POST=1，validation 开）仍楔死 WindowServer——
+说明非法用法通过 Metal API validation，是语义/资源竞争级问题，不是
+API 误用。之后禁止再直接跑全链，先修后分环验证。
+
+审计结论（pass 本体、编码器状态机、着色器循环均有界）：
+
+1. **TAA dispatch→blit 零屏障（已修）**：compute storage 写 s_OutputTex
+   后同 command buffer 内 BlitTexture 读，中间无任何屏障。Vulkan 是
+   sync violation；Metal 靠隐式 hazard tracking 兜底——blit encoder
+   切换时驱动介入，正是 validation 静默、驱动级 wedge 的形态。修复：
+   dispatch 后插 outHandle UnorderedAccess→CopySource 显式屏障。
+2. **ToneMapping render pass loadOp=Clear 无 clearValue（已修）**：
+   Vulkan 附件畸形/AttachmentTracker 崩溃的确定嫌疑；Metal 未定义清屏。
+3. **RG 屏障体系在 Metal 上形同虚设**（结构问题，未动）：RG Execute
+   在 BeginRenderPass 前发屏障，此时 Metal currentEncoder_ 为空直接
+   return；Render encoder 分支也无操作。同步完全依赖 encoder 边界隐式
+   顺序 + 自动 hazard tracking。
+4. RG 瞬态池判据严格（尺寸+格式+usage 全等、生命周期区间不重叠才复用、
+   Imported 纹理已隔离），后处理链各 pass 的 Read/Write 声明齐全，
+   静态构造不出同 pass 反馈环。
+5. TAA currDepth（final_depth_texture_）usage 带 ShaderResource，合法；
+   jitter 只改常量；各 MSL 循环有界。
+
+新增诊断开关：TONE_OFF=1（同 TAA_OFF/BLOOM_OFF，FinalBlit 回退直读
+TAA 解析帧）。分环验证顺序（每环短窗口）：TAA_OFF+BLOOM_OFF（仅
+ToneMapping）→ +BLOOM → 全链。

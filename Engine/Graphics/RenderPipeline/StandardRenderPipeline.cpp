@@ -1831,6 +1831,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     PostProcess::ToneMappingPassData toneOut;
+    RGResourceHandle taaResolvedColor; // TONE_OFF 时 FinalBlit 的回退输入
     if (postProcessInputRG.IsValid()) {
         // TAA will resolve the frame — enable the sub-pixel jitter injection.
         // T4.6.5 followup: TAAPass now has working SPIR-V (Vulkan) + MSL (Metal)
@@ -1862,6 +1863,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
             render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthPtr);
         RGResourceHandle hdrClean = taaOut.output;
+        taaResolvedColor = hdrClean;
 
         // BLOOM_OFF=1 诊断开关：跳过 bright/blur，ToneMapping 走 dummy 黑纹理。
         const bool bloomOff = std::getenv("BLOOM_OFF") != nullptr;
@@ -1873,14 +1875,18 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // Do not feed AO/SSGI to ToneMapping again or the legacy post-process
         // composition path will count them a second time.
         const bool giAlreadyComposited = fusionOut.output_tex != handles::INVALID_RESOURCE;
-        toneOut = PostProcess::AddToneMappingPass(
-            graph,
-            hdrClean,                 // TAA-resolved HDR scene color
-            bloomOut.bloomOutput,     // Bloom blur result
-            giAlreadyComposited ? RGResourceHandle{} : ssaoOut.ssao_output,
-            giAlreadyComposited ? RGResourceHandle{} : ssgiOut.ssgi_output,
-            velTAA,                   // velocity
-            cbIdx);
+        // TONE_OFF=1 诊断开关（同 TAA_OFF/BLOOM_OFF）：跳过 ToneMapping，
+        // FinalBlit 回退直读 hdrClean。
+        toneOut = std::getenv("TONE_OFF")
+            ? PostProcess::ToneMappingPassData{}
+            : PostProcess::AddToneMappingPass(
+                graph,
+                hdrClean,                 // TAA-resolved HDR scene color
+                bloomOut.bloomOutput,     // Bloom blur result
+                giAlreadyComposited ? RGResourceHandle{} : ssaoOut.ssao_output,
+                giAlreadyComposited ? RGResourceHandle{} : ssgiOut.ssgi_output,
+                velTAA,                   // velocity
+                cbIdx);
     }
 
     // ========================================================================
@@ -1953,6 +1959,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // exec 时解析（同 RWCB 路径的说明）。
         if (postToonColor.IsValid()) {
             blitIn.input_rg = postToonColor;
+        }
+        // TONE_OFF 诊断路径：ToneMapping 被跳过时直读 TAA 解析后的 HDR。
+        if (!blitIn.input_rg.IsValid() && taaResolvedColor.IsValid()) {
+            blitIn.input_rg = taaResolvedColor;
         }
         if (!blitIn.input_rg.IsValid() &&
             fusionOut.output_tex != handles::INVALID_RESOURCE) {
@@ -2687,6 +2697,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         PostProcess::ToneMappingPassData toneOutRWCB;
+        RGResourceHandle taaResolvedColorRWCB; // TONE_OFF 时 FinalBlit 的回退输入
         // 后处理链启用策略（2026-09-02 二次修正）：链路启用后 Metal 出现
         // 启动即楔死 GPU 驱动（连带 WindowServer 崩溃、关闭进程后系统仍不
         // 恢复）的问题，根因待查（validation 已恢复默认开以抓证据）。两平台
@@ -2725,6 +2736,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthRWCBPtr);
                 hdrCleanRWCB = taaRWCB.output;
             }
+            taaResolvedColorRWCB = hdrCleanRWCB;
 
             auto bloomRWCB = std::getenv("BLOOM_OFF")
                 ? PostProcess::BloomPassData{}
@@ -2733,11 +2745,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // receives those legacy inputs when Fusion was unavailable.
             const bool giAlreadyCompositedRWCB =
                 fusionOut.output_tex != handles::INVALID_RESOURCE;
-            toneOutRWCB = PostProcess::AddToneMappingPass(
-                graph, hdrCleanRWCB, bloomRWCB.bloomOutput,
-                giAlreadyCompositedRWCB ? RGResourceHandle{} : ssaoOut.ssao_output,
-                giAlreadyCompositedRWCB ? RGResourceHandle{} : ssgiOut.ssgi_output,
-                velRWCB, cbIdx);
+            // TONE_OFF=1 诊断开关（同 TAA_OFF/BLOOM_OFF）。
+            toneOutRWCB = std::getenv("TONE_OFF")
+                ? PostProcess::ToneMappingPassData{}
+                : PostProcess::AddToneMappingPass(
+                    graph, hdrCleanRWCB, bloomRWCB.bloomOutput,
+                    giAlreadyCompositedRWCB ? RGResourceHandle{} : ssaoOut.ssao_output,
+                    giAlreadyCompositedRWCB ? RGResourceHandle{} : ssgiOut.ssgi_output,
+                    velRWCB, cbIdx);
         }
 
         // Toon post process — mirrors BuildRenderGraph Step 10.6.
@@ -2771,6 +2786,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // 尚未分配，预解析拿到 INVALID 曾令后处理链整体被裁剪，见 FinalBlitModule）。
         if (postToonColorRWCB.IsValid()) {
             blitIn.input_rg = postToonColorRWCB;
+        }
+        // TONE_OFF 诊断路径：ToneMapping 被跳过时直读 TAA 解析后的 HDR。
+        if (!blitIn.input_rg.IsValid() && taaResolvedColorRWCB.IsValid()) {
+            blitIn.input_rg = taaResolvedColorRWCB;
         }
         if (!blitIn.input_rg.IsValid() &&
             fusionOut.output_tex != handles::INVALID_RESOURCE) {

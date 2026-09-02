@@ -371,6 +371,10 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             passDesc.colorAttachments[0].texture = texture->GetPhysicalHandle();
             passDesc.colorAttachments[0].loadOp = LoadAction::Clear;
             passDesc.colorAttachments[0].storeOp = StoreAction::Store;
+            // loadOp=Clear 必须带 clearValue——未初始化的 VkClearValue 在
+            // Vulkan 动态渲染/AttachmentTracker 上是附件畸形（曾致 validation
+            // 崩溃），Metal 上则是未定义的清屏值。
+            passDesc.colorAttachments[0].clearValue = ClearValue{ math::v4{ 0.0f, 0.0f, 0.0f, 1.0f } };
 
             ViewportDesc viewport;
             viewport.size.x = texture->GetDesc().size.x;

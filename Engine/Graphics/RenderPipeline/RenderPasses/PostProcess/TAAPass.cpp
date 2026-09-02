@@ -414,6 +414,19 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, s_Layout, 0, 1, &ds, 0, nullptr);
             cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 
+            // Storage 写（dispatch）→ 同 command buffer 内 blit 读之间必须显式
+            // 屏障。此前零屏障：Vulkan 是 sync2 WRITE_AFTER_READ violation；
+            // Metal 上只能靠隐式 hazard tracking 兜底（blit encoder 切换时驱动
+            // 介入），全链启用时的启动 GPU 楔死（WindowServer 连带崩溃、
+            // validation 无报告）与此形态吻合。
+            ResourceBarrier outWriteBarrier{};
+            outWriteBarrier.resource = outHandle;
+            outWriteBarrier.beforeState = ResourceState::UnorderedAccess;
+            outWriteBarrier.afterState = ResourceState::CopySource;
+            outWriteBarrier.subresource = 0xFFFFFFFF;
+            outWriteBarrier.queueFamily = 0xFFFFFFFF;
+            cmd->InsertBarrier(&outWriteBarrier, 1);
+
             // Copy output → current frame's history slot so next frame reads resolved color.
             // BlitTexture is a full-screen copy with no scaling. Destination is
             // the current frame's slot (fi), source is the RG-managed output.
