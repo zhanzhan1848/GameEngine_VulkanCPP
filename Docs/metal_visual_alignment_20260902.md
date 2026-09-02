@@ -218,3 +218,31 @@ giOut.gi_specular_tex。教训：fusion 输入的 tex 字段不是死的回退�
 半分辨率、BlurPass 的 radius/sigma（Metal=blurCS2D）、Chebyshev 的
 minVariance/bleeding 校正系数。修复方向候选：降低 blur sigma、
 edge-aware moments、提高 Chebyshev 衰减截断。
+
+## 伪影1 根因修复（2026-09-02 第七轮，225314b0）
+
+探针四连最终坐实（每步同机位截图差分）：
+1. PRIMAL_SHADOW_WHITE（mode-0 R8 vis 全白）→ 零变化，该路径未激活；
+2. DEBUG_SHADOW_VFLIP=1（V 翻转采样）→ 阴影图案大改但偏离 Vulkan
+   基准 → moments 方向假设否掉（原始方向正确）；
+3. blurCS2D 对齐 Vulkan 5-tap（σ1.0 真高斯 → 0.227/0.316/0.070，含
+   WGSL textureLoad 越界零语义）→ 变化甚微，blur 非主因（但作为
+   跨平台一致性修复保留）；
+4. **PRIMAL_SHADOW_CULLNONE=1（moments raster CullMode::Back→None）→
+   楔形亮斑全部消失，阴影本体不变——根因坐实**。
+
+**根因**：moments raster（GPU-culled meshlet indirect draw）用
+CullMode::Back；meshlet 缠绕方向不一致（光投影 det=-1，代码库 3728/
+4073 已有同类先例注释）时剔错面 → 被剔三角形区域保持 moments
+ClearValue (1,1) = "全亮 z=1" → Chebyshev 的 `sc.z <= moments.x` 直接
+判 lit → 暗区三角形楔状亮斑。修复：moments pipeline cullMode 默认 None
+（VSM moments 捕获双面是标准做法）。
+
+**修复后两平台观感**（SPGI_CAM="0,5,0,0,0" 锁相机）：楔形亮斑消失、
+阴影结构一致。残余差异（标定项，量级小）：Metal 左上阳光覆盖略大、
+Vulkan 整体略偏暖（GI/IBL 色温）。
+
+**诊断开关全表**：PRIMAL_SHADOW_WHITE / DEBUG_SHADOW_WHITE（VSM 强制
+shadow=1）/ DEBUG_SHADOW_VFLIP / PRIMAL_SHADOW_CULLNONE（已转正为默认）/
+TONE_OFF / TAA_OFF / BLOOM_OFF / BLUR_OFF / SSGI·SSAO·DDGI·SPGI_SILENCE /
+PRIMAL_TONE_ACES / SHADOW_BLUR。
