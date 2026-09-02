@@ -1118,6 +1118,11 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
         if (irr != INVALID_RESOURCE) {
             if (float* m = static_cast<float*>(device_->MapBuffer(irr, 0, 36 * sizeof(float)))) {
                 sh0Lum = lum(m[0], m[1], m[2]);
+                // sh0 RGB 分量（暖色温差排查）：Vulkan 基准探针场为暖色
+                // (0.234,0.193,0.145) R/B≈1.6，Metal 中性 (0.215,0.212,0.209)
+                // 意味着 SC/prev-screen 弹射未进入探针。
+                std::cout << "[GIFusionVerify] probe sh0 rgb=(" << m[0] << "," << m[1]
+                          << "," << m[2] << ")" << std::endl;
                 device_->UnmapBuffer(irr);
             }
         }
