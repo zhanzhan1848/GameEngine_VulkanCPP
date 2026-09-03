@@ -484,9 +484,8 @@ bool TestModularPipeline::InitializePipeline() {
     // 2026-09-04 启用 SPGI（Screen Probe GI）——Vulkan High 档混合方案
     // = SPGI（主力高频 GI）+ DDGI（低频环境）+ SSGI。Metal 之前缺 SPGI
     // → GI 只有 DDGI 低频 → "很平"无彩色弹射细节。
-    // SPGI Metal 实测全黑（shader WIP），暂不启用。
-    // use_screen_probes=true 待 Metal SPGI shader 审计完成后再开。
-    // use_screen_probes = true;
+    // SPGI 启用——Metal SPGI shader xcrun 编译通过（单个 .metal 文件无错误）
+    // lumenConfig.axes.use_screen_probes = true;  // SPGI Metal shader 产生黑屏，待修复
     pipeline_->SetLumenConfig(lumenConfig);
 
     // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
