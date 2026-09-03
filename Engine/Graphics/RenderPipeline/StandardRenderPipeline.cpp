@@ -2864,6 +2864,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             }
         }
 
+        // DDGI dispatch（trace/finalize/update，裸 compute）→ render graph
+        // （GIGather/Fusion 等读 DDGI 输出）：必须隔 encoder 边界保证
+        // 写读有序——同一 encoder 内无 barrier 则 Metal 可能并发调度，
+        // 表现为 GI 闪烁。MoltenVK 自动插 barrier 所以 Vulkan 不闪。
+        cmd->MemoryBarrier(
+            PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+            AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+
         graph.Compile();
         graph.Execute(cmd);
         ReportGraphPassTimes(graph);
