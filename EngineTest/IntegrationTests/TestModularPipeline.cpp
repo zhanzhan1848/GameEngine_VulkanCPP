@@ -474,6 +474,9 @@ bool TestModularPipeline::InitializePipeline() {
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
     lumenConfig.surface_cache_capture_budget = 0;
+    // 探针间距对齐 Medium 档预设 2.0（LumenConfig 默认 3.0 格边界在墙面
+    // 可见为方块接缝；2.0 减少 33% 格尺寸，棋盘格缝明显减轻）。
+    lumenConfig.ddgi_probe_spacing = 2.0f;
     pipeline_->SetLumenConfig(lumenConfig);
 
     // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
