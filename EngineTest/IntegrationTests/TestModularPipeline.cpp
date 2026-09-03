@@ -509,7 +509,11 @@ bool TestModularPipeline::InitializePipeline() {
             }
         }
         renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f}; // 直射峰值对齐: 3.0 x albedo/pi 峰值 ~1.4 = Vulkan 实测 1.38 (7.5 档会到 ~3.6 死白)
-        renderSettings.lighting.ddgi_light_color = {2.0f, 2.0f, 2.0f, 1.0f};
+        // 2026-09-04 对齐：SC 全量（capture_budget=0）+ moments CullMode::None
+        // 修复后，环路结构已与 Vulkan 一致——ddgi_light_color 恢复 Vulkan
+        // 同档 5.0（此前 2.0 是 SC 覆盖不足+诊断 stride 错误时期的折中值，
+        // 导致探针场中性化、GI 无彩色弹射）。
+        renderSettings.lighting.ddgi_light_color = {5.0f, 5.0f, 5.0f, 1.0f};
         pipeline_->UpdateSettings(renderSettings);
     }
 
