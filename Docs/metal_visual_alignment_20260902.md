@@ -466,6 +466,19 @@ finalize SC-first、SC capture_budget=0、重定位哨兵加固——全部无�
 **High 档重测**：页故障仍在（与结构性修复无关），Metal 安全上限为
 Medium + capture_budget=0 + spacing 2.0。High 需先审计 SPGI Metal shader。
 
+## GI 闪烁修复（2026-09-04，c251769e）
+
+用户报告 GI 区闪烁。根因：DDGI dispatch（裸 compute）与 render graph
+（GIGather 读 DDGI 输出）可能在同一 compute encoder 内并发调度——
+MoltenVK 自动插隐式 barrier 所以 Vulkan 不闪；原生 Metal 需手动保证。
+修复：RWCB 路径 graph.Compile() 前加 MemoryBarrier 强制边界。
+实测帧间差分 6-7（噪声级别），三帧连续稳定。
+
+**Vulkan 不闪 vs Metal 闪的本质**：MoltenVK 翻译层自动在 dispatch 间
+插入保守的隐式 barrier；原生 Metal 后端需手动维护——任何一个 gap
+就是读写竞争。这不是"Metal 有问题"而是"自研后端需要补齐 MoltenVK
+免费提供的安全网"。
+
 ## High 档重测：页故障仍在（2026-09-04，dea46f67）
 
 尝试 Metal 也回档 High（与 Vulkan 参考一致）→ **洋红画面**（GPU Address
