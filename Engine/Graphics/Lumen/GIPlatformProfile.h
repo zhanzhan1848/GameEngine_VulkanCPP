@@ -39,7 +39,12 @@ struct GIPlatformProfile {
     // ------------------------------------------------------------------
     // 预设档
     // ------------------------------------------------------------------
-    // Apple Silicon（Metal）：读预算紧、split dispatch 是常态
+    // Apple Silicon（Metal）：split dispatch 是常态
+    // 2026-09-04 探针预算修正：4096→16384（全量更新）。
+    // 4096/16384 = 25%/帧 → 75% 探针持有旧值 → 更新/未更新探针混插
+    // → gather 插值空间不连续（棋盘格）+ 逐帧轮转子集（闪烁）。
+    // Vulkan 全量更新无此问题。性能：16384 探针 × 128 射线 = 2M ray march，
+    // Apple Silicon M4 实测可接受。
     static GIPlatformProfile AppleSilicon() {
         GIPlatformProfile p{};
         p.texture_array_dynamic_indexing = false;
@@ -48,8 +53,8 @@ struct GIPlatformProfile {
         p.storage_texture_budget = 8;
         p.split_dispatch_preferred = true;
         p.rays_per_probe = 64;
-        p.max_probes_per_frame = 4096;   // 分帧收敛，预算留给 split kernel
-        p.page_budget = 128;             // 页轮转慢一档换帧时
+        p.max_probes_per_frame = 16384;  // 全量更新（与 Vulkan 一致）
+        p.page_budget = 128;
         p.spgi_enabled = false;
         p.ssgi_enabled = true;
         return p;
