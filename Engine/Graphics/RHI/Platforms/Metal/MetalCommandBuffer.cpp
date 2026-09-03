@@ -1386,27 +1386,12 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
             ++barrierCount;
         }
 
-        // Exact Compute→Compute (no other bits)? Keep encoder open.
-        constexpr u32 kComputeOnly = static_cast<u32>(PipelineStage::ComputeShader);
-        bool srcIsComputeOnly = static_cast<u32>(srcStageMask) == kComputeOnly;
-        bool dstIsComputeOnly = static_cast<u32>(dstStageMask) == kComputeOnly;
-
-        // src includes Host/Transfer? Producer was a different encoder type — end.
-        u32 srcNonComputeBits = static_cast<u32>(srcStageMask) &
-            (static_cast<u32>(PipelineStage::Host) |
-             static_cast<u32>(PipelineStage::Transfer));
-        bool srcFromOtherEncoder = srcNonComputeBits != 0;
-
-        if (!srcIsComputeOnly || !dstIsComputeOnly || srcFromOtherEncoder) {
-            if (barrierCount <= 30) {
-                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalBarrier] END encoder: src=0x" << std::hex
-                          << static_cast<u32>(srcStageMask)
-                          << " dst=0x" << static_cast<u32>(dstStageMask)
-                          << std::dec << std::endl;
-            }
-            endCurrentEncoder();
-        }
-        // else: pure Compute→Compute on same encoder — keep open (spike validated)
+        // 2026-09-04 闪烁修复：ALWAYS end encoder。旧逻辑 compute→compute 时
+        // 不结束 encoder，依赖 memoryBarrier(scope)——但 Apple Silicon 上
+        // memoryBarrier 可能不刷 GPU L2 cache（line 1744 自己的注释），
+        // 导致后续 dispatch 读到旧数据 → GI 闪烁/不稳定。
+        // encoder 边界是硬件级同步点，保证全部写入对后续 dispatch 可见。
+        endCurrentEncoder();
     }
     else {
         // Render / Blit / other: end encoder to switch types
