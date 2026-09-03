@@ -517,6 +517,22 @@ MoltenVK 自动插隐式 barrier 所以 Vulkan 不闪；原生 Metal 需手动�
 
 **High 档重测**：页故障仍在（非 GI 层），后续需逐项审计 SPGI Metal shader。
 
+## 数值稳定性修复（2026-09-04，084532ea）
+
+按用户分析框架排查"亮区高频闪烁"：
+
+| 排查项 | 结果 |
+|--------|------|
+| half 精度 | 未使用（全 float）✓ |
+| -ffast-math | **Metal 默认 fastMathEnabled=YES 未覆盖** → 已禁用 |
+| VSM variance clamp | minVariance 0.00002→0.001（加强下限） |
+| atlas UV / border | gather 用 structured buffer 而非 atlas → 排除 |
+| DDGI 冻结测试 | 冻结后仍闪 → 问题不在 update 在 sampling ✓ |
+
+**Vulkan 不闪的原因**：MoltenVK 编译 SPIR-V→MSL 时不开 fast-math，
+浮点精度更高 → VSM variance 计算稳定。原生 Metal 默认 fast-math
+导致 E[x²]-E[x]² 灾难性消去 → 阴影 visibility 亮暗边界翻转。
+
 **Vulkan 不闪 vs Metal 闪的本质**：MoltenVK 自动屏障消除了同步噪声源，
 但 Metal 的 SC↔probe 环路增益高于 Vulkan（可能因 SC LightEval 实现
 差异或 albedo 采样路径不同）→ 同参数下 Metal 先到达不稳态。
