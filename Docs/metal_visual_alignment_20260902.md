@@ -307,3 +307,21 @@ DDGITraceFinalize.comp 后：
 finalize 的 ray_buffer，或其自身有 (0,0,1) 硬编码 sky/绑定缺失。审计点：
 update pass 的 Metal 描述符绑定 vs 派发参数、ray_buffer 槽位索引、
 miss/sky 分支的常量。
+
+## GI 冻结根因坐实：SDF trace miss 率 97%（2026-09-03，05cd5db3）
+
+DDGI_PATH_DEBUG 移植到 Metal（宏注入 + finalize 路径标签 + GIFusionVerify
+ray_buffer 直方图读回）。相机邻域 8 探针全部射线实测：
+
+  **miss=995 SC=10 prev=0 analytic=19（miss 率 97%）**
+
+GI 冻结的完整因果链：SDF trace 穿墙（室内射线不命中）→ 97% 射线按 miss
+填充（暗灰天光×距离权重）→ 探针场 = 死灰平光 + 无方向细节 → gather 插值
+在探针格边界产生棋盘格亮条 → 用户观察的"GI 无变化 + 棋盘亮条"。
+（update kernel 索引经核对为绝对探针号，与 finalize 一致，排除。）
+
+**下一轮主线：GlobalSDF 在 Metal 上的体素化内容/绑定/覆盖**——
+线索：日志 `IsVoxelizationReady: vox_pipe=true provider=null
+provider_ready=no`（provider 为空可疑）；对比 Vulkan DDGITraceSDF.comp
+与其 Metal 对应实现的 trace 步长/级联选择/SDF 纹理绑定。
+诊断工具已入库：DDGI_PATH_DEBUG=1 + GI_VERIFY_FRAME + ray-path 直方图。
