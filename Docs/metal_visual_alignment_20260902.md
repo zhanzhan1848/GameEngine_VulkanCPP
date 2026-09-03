@@ -368,6 +368,18 @@ GPU 可见性 → update kernel 消费）在 Metal 上没有实际生效。
 2. dump frame 1-2 vs frame 120 的探针 buffer 对照（确认 init 图案假设）；
 3. update kernel 的 [DDGI_IRR] exec 已确认派发，重点在输入数据而非派发。
 
+## 探针链路端到端验证通过（2026-09-04，54ae0b34）
+
+camSlot 配对 dump（同帧同探针：hd=trace 槽位写入 vs ray_buffer=finalize
+绝对探针写入）完全一致——rb.w 标签 40.001/40.003 对应 analytic/prev 路径，
+rb.missN == hd.miss，march 命中率 59-100%。探针链路
+（trace→finalize→update→irradiance buffer）端到端健康。
+
+**剩余问题：gather→fusion 的强度/色温标定**
+- 探针 L1 近中性（Sponza 石墙本身无彩色，符合预期）
+- ddgi_light_color：Metal 2.0 vs Vulkan 5.0（环路增益折中史见测试注释）
+- 下一步：与 Vulkan 同帧对齐 gather 输出亮度/色温，标定环路增益
+
 ## 探针场实为健康（2026-09-04，9aaf9789）：dump stride 错误的连环误诊
 
 GIFusionVerify 探针 dump 按 p×9 floats 寻址，实际 buffer 每探针
