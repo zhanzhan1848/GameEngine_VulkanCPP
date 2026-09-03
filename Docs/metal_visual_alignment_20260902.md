@@ -474,23 +474,37 @@ MoltenVK 自动插隐式 barrier 所以 Vulkan 不闪；原生 Metal 需手动�
 修复：RWCB 路径 graph.Compile() 前加 MemoryBarrier 强制边界。
 实测帧间差分 6-7（噪声级别），三帧连续稳定。
 
-**Vulkan 不闪 vs Metal 闪的本质**：MoltenVK 翻译层自动在 dispatch 间
-插入保守的隐式 barrier；原生 Metal 后端需手动维护——任何一个 gap
-就是读写竞争。这不是"Metal 有问题"而是"自研后端需要补齐 MoltenVK
-免费提供的安全网"。
+## GI 稳定基线确认（2026-09-04，ea2f9d47）
 
-## 闪烁根因修复（2026-09-04，9df09146）：MemoryBarrier 不刷 L2 cache
+闪烁根因 = **SC↔probe 正反馈环增益超稳态阈值**（ddgi_light_color=5.0 时
+环路增益 >1 → 探针辐射逐帧振荡）。定量：
 
-`MemoryBarrier` 在 Compute→Compute 时不结束 encoder，依赖
-`memoryBarrier(BarrierScopeBuffers)`。但 Apple Silicon 上 memoryBarrier
-可能不刷 GPU L2 cache（代码 line 1744 自己承认"Ending the encoder
-guarantees visibility"），后续 dispatch 读到旧数据。
+| ddgi_light_color | 帧间差分 | 状态 |
+|------------------|---------|------|
+| 5.0 | 0.6, **8.06, 7.76, 7.94** | 振荡 |
+| **3.0** | **0.21, 0.15, 1.56** | **稳定** |
+| DDGI off | 0.12, 0.12, 0.12 | 基线 |
 
-修复：MemoryBarrier 无条件 `endCurrentEncoder()`——encoder 边界是硬件
-级同步点。实测帧间差分从 6.46 降至 0.49（改善 13 倍）。
+**Metal 稳定基线**：Medium 档 + capture_budget=0 + ddgi_light_color=3.0
++ probe_spacing=2.0。GI 弹射清晰可见，与 Vulkan 差异仅色温微调。
 
-**注意**：此修复影响所有使用 MemoryBarrier 的 compute pass（不仅 GI），
-性能可能有轻微开销（更多 encoder 切换），但保证了全链正确同步。
+**High 档重测**：页故障仍在（非 GI 层），后续需逐项审计 SPGI Metal shader。
+
+**Vulkan 不闪 vs Metal 闪的本质**：MoltenVK 自动屏障消除了同步噪声源，
+但 Metal 的 SC↔probe 环路增益高于 Vulkan（可能因 SC LightEval 实现
+差异或 albedo 采样路径不同）→ 同参数下 Metal 先到达不稳态。
+
+**修复链完整清单**（本 session）：
+1. moments raster CullMode::None（楔形亮斑）→ 225314b0
+2. finalize 回迁 SC-first → 3ca98663
+3. SC capture_budget=0 全量 → c4f67da8
+4. ddgi_light_color 5.0 → a45bdb25 → **3.0** → ea2f9d47
+5. 探针间距 3.0→2.0 → 014ce074
+6. ToneMapping 色温统一 → 8e823e30
+7. TAA/Bloom/ToneMapping 全链 → 798bc172
+8. MemoryBarrier always-end-encoder → 9df09146
+9. DDGI dispatch 间补全 barrier → 919d5db5
+10. 探针采样 mode 1→0（消除逐帧抖动闪烁）→ dccff6f7
 
 ## High 档重测：页故障仍在（2026-09-04，dea46f67）
 
