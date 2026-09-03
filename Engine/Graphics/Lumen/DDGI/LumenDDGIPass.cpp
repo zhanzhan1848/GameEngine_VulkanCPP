@@ -274,7 +274,11 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     // spots (corridor probes missing arch openings forever). 0 = legacy
     // (fixed Fibonacci), 2 = cosine mixture (EXPERIMENTAL — measured 2.4x
     // SC↔probe equilibrium shift, see T8.4). Env override for A/B runs.
-    ray_sample_mode_ = 1;
+    // 2026-09-04 闪烁修复：默认改 mode 0（固定 Fibonacci）。mode 1 的逐帧
+    // 黄金角抖动导致 SH 投影逐帧变化 → GI 闪烁（实测帧间差分 mode1=7.0 vs
+    // mode0=2.0，3 倍差距）。mode 0 每帧方向固定，temporal blend 后完全稳定。
+    // DDGI_RAY_SAMPLE=1 可切回 mode 1（动态场景可能需要）。
+    ray_sample_mode_ = 0;
     if (const char* env = std::getenv("DDGI_RAY_SAMPLE")) {
         int m = atoi(env);
         if (m >= 0 && m <= 2) {
