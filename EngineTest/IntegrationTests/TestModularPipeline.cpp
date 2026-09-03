@@ -467,21 +467,12 @@ bool TestModularPipeline::InitializePipeline() {
         }
     }
 
-    // T8.13 stability revert: the High-preset experiment (SPGI WIP shaders +
-    // render_scale 2.0 + post-init Lumen rebuild) produced GPU Address Page
-    // Faults (~8% of frames) that stall every GPU client system-wide, plus a
-    // card-registration collapse (374 -> 8 placeholder cards) after the
-    // settings-driven Lumen rebuild. The DEFAULT quality configuration
-    // (screen probes off, 1x scale, SSGI on) is the proven-stable baseline;
-    // SPGI_ON=1 re-enables for diagnosis once the Metal SPGI shaders are
-    // audited. (The Vulkan reference keeps SPGI via its shipped .comp chain.)
+    // T8.13 stability revert 确认仍然有效（2026-09-04 重测：High 档
+    // 在 Metal 上出现洋红画面 = GPU 页故障，与历史记录一致）。
+    // Medium + capture_budget=0（全量更新）是已验证的稳定基线，
+    // GI 质量（弹射/亮度/对比度）已与 Vulkan 对齐。
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
-    // 2026-09-04 GI 对齐：SC LightEval 全量更新（capture_budget=0）——
-    // Vulkan 参考档（High）实际全量 374 卡/帧；Metal Medium + governor
-    // 只轮 2-8 卡/帧 → SC atlas 长期欠点亮 → SC-first finalize 采到黑 →
-    // GI 区死灰（零场/直方图实验链，见 Docs 20260902）。Medium 其余配置
-    // 保留（High 的 SPGI/render_scale 在 Metal 有页故障史，见上注）。
     lumenConfig.surface_cache_capture_budget = 0;
     pipeline_->SetLumenConfig(lumenConfig);
 
