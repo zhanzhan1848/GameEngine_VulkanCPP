@@ -73,6 +73,7 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
                                     volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
                                     volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
                                     volume.SdfCascadeCount);
+    if (d0 >= 1e9f) return probePos;  // 原点越界（哨兵）——不重定位，就地 march
     if (d0 > skin) return probePos;
     float3 best = probePos;
     float bestD = d0;
@@ -98,7 +99,12 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
                                                volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
                                                volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
                                                volume.SdfCascadeCount);
-                if (d > roundBestD) { roundBestD = d; roundBest = p; }
+                // 2026-09-04 伪影1/GI冻结根因修复：越界哨兵（>=1e9，采样点
+                // 在级联覆盖外）恒大于任何真实 SDF 距离——旧逻辑把"最大距离"
+                // 当作最开阔候选，探针会被重定位到场外 → 所有射线从场外
+                // fallbackStride 空走 → 97% miss（ray-path 直方图实测）。
+                // 只接受覆盖内的真实距离作为重定位候选。
+                if (d < 1e9f && d > roundBestD) { roundBestD = d; roundBest = p; }
                 if (d > skin) break;
             }
         }
