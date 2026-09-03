@@ -348,3 +348,22 @@ ray-path 直方图从 miss=97% 变为命中 → 纹理链路通、问题在体�
 另注意：ddgi_trace_sdf 尾部把每探针 ray0/ray1 覆盖为调试值
 （origin/reloc 距离，级联外=5555）——这些调试值会被 finalize 当真实
 命中距离消费，是既有行为，读数时需区分。
+
+## 零场判定实验结果（2026-09-03 深夜续）
+
+PRIMAL_OFFLINE_SDF_ZERO=1（离线场整体填 0.0，d=0 < 命中阈值 → 每根射线
+必然 t≈0 瞬时命中）后，**相机邻域探针 L0 逐位不变**（仍 (0.03…)/(0,0,1)
+棋盘）。
+
+推断链：若 trace→finalize→update 链路活着，零场下所有射线应变成命中、
+radiance 走 SC/prev/解析（相机锁定、场景静止时数值可以逐位稳定，但取值
+应是 prev 场景色/解析项，而非维持 init 图案）。恒定的暗/纯蓝二值图案 =
+**初始化"天空估计"的原始分布**——探针更新链（probe_update_list 填充 →
+GPU 可见性 → update kernel 消费）在 Metal 上没有实际生效。
+
+下一轮审计顺序：
+1. probe_update_list_buffers_ 的 CPU 填充是否到达 GPU（Map/Unmap 门控、
+   dynamic_mode_ 分支）；kernel 读到的 probeUpdateList 是否全 0/garbage
+   （probeIdx >= ProbeCountTotal 时 kernel 直接 return——静默无更新）；
+2. dump frame 1-2 vs frame 120 的探针 buffer 对照（确认 init 图案假设）；
+3. update kernel 的 [DDGI_IRR] exec 已确认派发，重点在输入数据而非派发。

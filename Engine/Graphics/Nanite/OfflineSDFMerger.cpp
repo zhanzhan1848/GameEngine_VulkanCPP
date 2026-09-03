@@ -681,12 +681,21 @@ bool OfflineSDFMerger::UploadGlobal(rhi::RHIDeviceBase* device, const u16* globa
     }
 
     // Copy row-by-row with alignment padding.
+    // PRIMAL_OFFLINE_SDF_ZERO=1：判定实验——整场填 0.0（d=0 < 命中阈值，
+    // 每根 trace 射线必然瞬时命中）。若 ray-path 直方图 miss 仍 ~97%，
+    // 说明 DDGI trace 采样的不是这块纹理（绑定/解析断链）。
+    const bool debugZeroField = std::getenv("PRIMAL_OFFLINE_SDF_ZERO") != nullptr;
     u8* dst = static_cast<u8*>(mapped);
-    for (u32 z = 0; z < res; ++z) {
-        for (u32 y = 0; y < res; ++y) {
-            const u16* srcRow = &globalData[(u64)z * res * res + (u64)y * res];
-            std::memcpy(dst, srcRow, srcRowPitch);
-            dst += alignedRowPitch;
+    if (debugZeroField) {
+        std::memset(dst, 0, totalSize);
+        std::cerr << "[OfflineSDFMerger] DEBUG zero field uploaded (PRIMAL_OFFLINE_SDF_ZERO=1)" << std::endl;
+    } else {
+        for (u32 z = 0; z < res; ++z) {
+            for (u32 y = 0; y < res; ++y) {
+                const u16* srcRow = &globalData[(u64)z * res * res + (u64)y * res];
+                std::memcpy(dst, srcRow, srcRowPitch);
+                dst += alignedRowPitch;
+            }
         }
     }
     device_->UnmapBuffer(staging);
