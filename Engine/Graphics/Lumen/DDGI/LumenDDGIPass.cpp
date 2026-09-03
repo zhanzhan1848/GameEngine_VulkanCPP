@@ -1737,6 +1737,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     };
                     UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 6);
 
+                    // barrier: 上一帧 irradiance/depth 写入对本帧 trace 可见
+                    cmd->MemoryBarrier(
+                        PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
                     cmd->BindComputePipeline(sdf_trace_pipeline_);
                     const DescriptorSetHandle sets[] = { sdf_trace_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, sdf_trace_layout_, 0, 1, sets, 0, nullptr);
@@ -1943,6 +1947,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                 cmd->Dispatch((updateCount + 63) / 64, 1, 1);
             }
+            // barrier: irradiance 写完后才开始 depth update
+            cmd->MemoryBarrier(
+                PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
             // ================================================================
             if (depth_pipeline_ != handles::INVALID_PIPELINE &&
                 depth_buffers_[outIdx] != handles::INVALID_RESOURCE) {
