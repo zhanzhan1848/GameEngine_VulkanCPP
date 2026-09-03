@@ -424,3 +424,20 @@ GIFusionVerify 探针 dump 按 p×9 floats 寻址，实际 buffer 每探针
 **残余标定项**：Metal GI 整体偏亮（SC↔probe 环路增益高于 Vulkan，见
 TestModularPipeline 注释 ddgi_light_color 2.0 vs Vulkan 5.0 的折中史）；
 Vulkan 偏暖。→ 曝光/环路增益标定留待 GI 稳定后统一做。
+
+## Vulkan 树回归 + 标定差异定量（2026-09-04）
+
+**Vulkan 树重建回归通过**：moments cull（CullMode::None）、5-tap blur、
+finalize SC-first、SC capture_budget=0、重定位哨兵加固——全部无退化
+（0 error/0 assert/374 卡全量/画面正常暖色弹射）。
+
+**同机位标定差异定量**（SPGI_CAM="0,5,0,0,0" 锁相机，capture_budget=0）：
+
+| 维度 | Vulkan | Metal | 差异原因 |
+|------|--------|-------|----------|
+| GI 色温 | 暖金色（R/B≈1.4） | 冷白中性（R/B≈1.0） | ddgi_light_color 5.0 vs 2.0 |
+| 直射强度 | 正常对比度 | 太阳区过曝 | tonemap/exposure 链差异 |
+| 暗区 GI | 暖色弹射填满 | 偏冷偏弱 | 环路增益+色温联动 |
+
+均为标定级调整，结构性问题（楔子/棋盘/死 GI/SDF 空）已全部修复。
+标定路径：调 ddgi_light_color → 观察探针 L0 R/B 比 → gather 亮度对齐。

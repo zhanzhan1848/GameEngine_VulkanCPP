@@ -652,6 +652,8 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
                   << " provider_set=" << (data_provider_ ? "yes" : "no")
                   << " provider_ready=" << (data_provider_ && data_provider_->IsReady() ? "yes" : "no")
                   << " vox_ready=" << voxelization_ready_
+                  << " num_instances=" << vox_resources_.num_instances
+                  << " res=" << cascades_[cascade_index].resolution
                   << std::endl;
         ++s_dv_calls;
     }
