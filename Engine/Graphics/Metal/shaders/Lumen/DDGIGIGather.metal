@@ -71,7 +71,7 @@ kernel void ddgi_gi_gather(
 
     depth2d<float, access::sample> depthTex [[texture(0)]],
     texture2d<float, access::sample> normalTex [[texture(1)]],
-    texture2d<float, access::write> outputTex [[texture(2)]],
+    texture2d<float, access::read_write> outputTex [[texture(2)]],
     texture2d<float, access::sample> historyTex [[texture(3)]],   // unused (Vulkan legacy: temporal disabled)
     texture2d<float, access::sample> ormTex [[texture(4)]],
     texture2d<float, access::write> specularTex [[texture(5)]],
@@ -248,7 +248,15 @@ kernel void ddgi_gi_gather(
         specularTex.write(float4(specIrr, NdotV), tid);
 
         float3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, float3(0.05f, 0.05f, 0.06f));
-        outputTex.write(float4(diffOut, 1.0f), tid);
+
+        // 2026-09-04 闪烁修复：时域累积——读上一帧 output（同一纹理未清除，
+        // 内容即上一帧 GI），做 EMA 混合消除逐帧噪声。
+        // 首帧 history≈0 → alpha 自动升到 1（直接输出新值）。
+        float3 prevGI = outputTex.read(tid).rgb;
+        float prevLum = dot(prevGI, float3(0.333f));
+        float tAlpha = prevLum < 0.005f ? 1.0f : 0.15f;
+        float3 finalGI = mix(prevGI, diffOut, tAlpha);
+        outputTex.write(float4(finalGI, 1.0f), tid);
     }
 
     (void)groupSize;
