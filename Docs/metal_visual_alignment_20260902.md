@@ -402,6 +402,29 @@ GIFusionVerify 探针 dump 按 p×9 floats 寻址，实际 buffer 每探针
 下一轮：离线场填线性梯度 d=(x-origin.x)/extent×10 → d0 读数直接揭示
 轴向/原点是否对齐（预期 ~3.2；镜像则 ~9.7）。
 
+## SC grid 验证通过 + 探针实际命中数据（2026-09-04 续，4456c260）
+
+SC grid header 直读（GetSCGridOffsetsBuffer 新增访问器）：
+- grid min=(-15.5,-10.7,-14.0) max=(13.0,21.4,13.3) cellSize=1
+- dims=(29,33,28) cards=374
+- 相机(0,5,0) → cell=(15,15,14) inside=YES cards=8
+**SC grid 覆盖和卡片分配完全正确** → SC 查找链路的 grid 部分排除。
+
+相机探针槽位配对 march 实测（hd 按更新槽位读取，配对 probe_update_list）：
+- camSlot 探针 march 命中率 59-100%（真实 SDF 距离 0.15-2.0）
+- **SDF trace 正常工作**——之前的 "97% miss" 判断有误（hd 按绝对探针号
+  读取但 trace 按更新槽位写入，读到的是无关槽位的数据）
+
+**修正后的真正问题**：SC lookup 在 finalize 中只有 SC=10/1024——
+但 march 显示 59-100% 命中。差异 = finalize 读取 hit_distance 和
+SC 查找之间的断层，或 SC 能量门卡控。下一步：配对 dump 同帧同槽位的
+hd 值和 ray_buffer 路径标签，逐射线验证。
+
+**当前真正的头号问题**：高频闪烁。探针链路端到端健康、SC grid 正确，
+但屏幕上 GI 输出仍有高频变化。已做：gather temporal accumulation
+(tAlpha=0.05)、SC temporal EMA (0.2)、MemoryBarrier always-end。
+下一轮：提高 tAlpha 平滑力度或加空间去噪。
+
 ## GI 复活（2026-09-04，c4f67da8）：根因 = SC LightEval 覆盖 + 诊断 stride 错误
 
 **两个叠加问题：**
