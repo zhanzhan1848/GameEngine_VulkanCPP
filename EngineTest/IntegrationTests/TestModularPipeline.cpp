@@ -1250,19 +1250,65 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                                     device_->MapBuffer(ulBuf, 0, u64(listCap) * 4u))) {
                                 u32 mn = 0xFFFFFFFFu, mx = 0;
                                 u32 inCell = 0;
+                                u32 camSlot[8]; u32 camSlotN = 0;
                                 for (u32 k = 0; k < vol.ProbeUpdateCount && k < listCap; ++k) {
                                     mn = std::min(mn, ul[k]);
                                     mx = std::max(mx, ul[k]);
                                     for (int dz = 0; dz <= 1; ++dz)
                                         for (int dy = 0; dy <= 1; ++dy)
                                             for (int dx = 0; dx <= 1; ++dx)
-                                                if (ul[k] == idx(cx + dx, cy + dy, cz + dz)) inCell++;
+                                                if (ul[k] == idx(cx + dx, cy + dy, cz + dz)) {
+                                                    inCell++;
+                                                    if (camSlotN < 8) camSlot[camSlotN++] = k;
+                                                }
                                 }
                                 device_->UnmapBuffer(ulBuf);
                                 std::cout << "[GIFusionVerify] update-list: n="
                                           << vol.ProbeUpdateCount << " idxRange=["
                                           << mn << "," << mx << "] cameraCellInList="
                                           << inCell << "/8" << std::endl;
+
+                                // hit_distance 直读（按更新槽位！trace 以槽位写入，
+                                // finalize 消费同槽位——这是相机探针的真实 march 数据）
+                                if (auto hdf2 = ddgi2->GetHitDistanceBuffer();
+                                    hdf2 != rhi::handles::INVALID_RESOURCE && vol.RaysPerProbe >= 2) {
+                                    const u64 hdBytes = u64(vol.ProbeCountTotal) * vol.RaysPerProbe * 4u;
+                                    if (float* hd = static_cast<float*>(
+                                            device_->MapBuffer(hdf2, 0, hdBytes))) {
+                                        // 同帧配对：hd（trace 写，槽位索引）vs
+                                        // ray_buffer（finalize 写，绝对探针索引）
+                                        float* rb2 = nullptr;
+                                        rhi::ResourceHandle rbBuf2 = ddgi2->GetRayDataBuffer();
+                                        if (rbBuf2 != rhi::handles::INVALID_RESOURCE)
+                                            rb2 = static_cast<float*>(
+                                                device_->MapBuffer(rbBuf2, 0, hdBytes * 4u));
+                                        for (u32 s = 0; s < camSlotN; ++s) {
+                                            u64 o = u64(camSlot[s]) * vol.RaysPerProbe;
+                                            u32 probeIdx = ul[camSlot[s]];
+                                            u64 po = u64(probeIdx) * vol.RaysPerProbe * 4u;
+                                            u32 missN = 0, hitN = 0;
+                                            for (u32 r = 0; r < vol.RaysPerProbe; ++r) {
+                                                if (hd[o + r] < 0.0f) missN++; else hitN++;
+                                            }
+                                            std::cout << "[GIFusionVerify] camSlot[" << camSlot[s]
+                                                      << "] probe=" << probeIdx
+                                                      << " hd.ray0=" << hd[o]
+                                                      << " hd.ray1=" << hd[o + 1]
+                                                      << " hd.hits=" << hitN << "/128"
+                                                      << " hd.miss=" << missN
+                                                      << " | rb.w[0..3]="
+                                                      << rb2[po + 3] << ","
+                                                      << rb2[po + 7] << ","
+                                                      << rb2[po + 11] << ","
+                                                      << rb2[po + 15]
+                                                      << " rb.missN="
+                                                      << [&]{u32 n=0; for(u32 r=0;r<vol.RaysPerProbe;++r) if (rb2[po + r*4u+3u] < 0.0f) ++n; return n;}()
+                                                      << "/128" << std::endl;
+                                        }
+                                        if (rb2) device_->UnmapBuffer(rbBuf2);
+                                        device_->UnmapBuffer(hdf2);
+                                    }
+                                }
                             }
                         }
 
