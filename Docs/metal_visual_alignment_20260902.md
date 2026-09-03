@@ -441,3 +441,16 @@ finalize SC-first、SC capture_budget=0、重定位哨兵加固——全部无�
 
 均为标定级调整，结构性问题（楔子/棋盘/死 GI/SDF 空）已全部修复。
 标定路径：调 ddgi_light_color → 观察探针 L0 R/B 比 → gather 亮度对齐。
+
+## High 档重测：页故障仍在（2026-09-04，dea46f67）
+
+尝试 Metal 也回档 High（与 Vulkan 参考一致）→ **洋红画面**（GPU Address
+Page Fault），与 T8.13 历史记录完全一致。结构性修复后仍触发，说明
+页故障不在 SC/cull/finalize 层，而在 High 档独有的组合上：
+- SPGI（Screen Probe GI，Metal SPGI shader 未审计）
+- render_scale 2.0
+- far volume update_budget_divisor=4
+
+回退 Medium + capture_budget=0——已验证的稳定配置基线，GI 质量已与
+Vulkan 对齐。后续如需 High：先单独启用 SPGI Metal shader 审计（排除
+SPGI shader 的 Metal 编译/绑定问题），再逐项开启其余 High 独有配置。
