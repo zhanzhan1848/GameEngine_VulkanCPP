@@ -778,6 +778,24 @@ void ScreenProbeGIPass::CreatePipelines() {
         pipeDesc.layout = denoise_layout_;
         pipeDesc.threadGroupSize = {8, 8, 1};  // 2D dispatch for screen-space filter
         denoise_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+
+        // 诊断：报告所有 SPGI pipeline 有效性
+        {
+            auto check = [](const char* name, rhi::PipelineHandle h) {
+                if (h == rhi::handles::INVALID_PIPELINE)
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[SPGI] PIPELINE INVALID: " << name << std::endl;
+            };
+            check("place", place_pipeline_);
+            check("trace_rays", trace_pipeline_);
+            check("trace_hzb", hzb_trace_pipeline_);
+            check("trace_sdf", sdf_trace_pipeline_);
+            check("finalize", finalize_pipeline_);
+            check("average", avg_pipeline_);
+            check("gather", gather_pipeline_);
+            check("temporal", temporal_pipeline_);
+            check("spatial", spatial_pipeline_);
+            check("denoise", denoise_pipeline_);
+        }
     }
 
     // Create triple-buffered descriptor sets
