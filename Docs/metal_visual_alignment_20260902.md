@@ -367,3 +367,26 @@ GPU 可见性 → update kernel 消费）在 Metal 上没有实际生效。
    （probeIdx >= ProbeCountTotal 时 kernel 直接 return——静默无更新）；
 2. dump frame 1-2 vs frame 120 的探针 buffer 对照（确认 init 图案假设）；
 3. update kernel 的 [DDGI_IRR] exec 已确认派发，重点在输入数据而非派发。
+
+## GI 复活（2026-09-04，c4f67da8）：根因 = SC LightEval 覆盖 + 诊断 stride 错误
+
+**两个叠加问题：**
+
+1. **诊断工具 stride 错误**：GIFusionVerify 探针 dump 按 p*9 floats 寻址，
+   实际 buffer 每探针 9×float4（144B）——此前所有"探针冻结/棋盘"读数
+   混杂了错位碎片与真实值。修正后探针场实测健康（L0 0.21-0.73 有空间
+   结构、L1 方向性正常、probe 8496 强制 9.0 写读回一致=写路径全通）。
+   "探针冻结"是误诊；真实问题是探针场虽活但 SC radiance 黑。
+
+2. **SC LightEval 覆盖**：Vulkan 参考档（High）全量 374 卡/帧；Metal 测试
+   （Medium 档，因 High 有页故障史而降档）+ governor FPS 节流 → 2-8 卡/帧
+   → SC atlas 欠点亮 → SC-first 采到黑。修复：Metal 测试
+   `lumenConfig.surface_cache_capture_budget = 0`（全量更新，等效 Vulkan；
+   Medium 其余保留）。
+
+**修复后**：Metal 全链 GI 区出现真实弹射光（横幅饱和、阴影边界正常、
+墙面反弹），与 Vulkan 同机位对比成立。探针场 L0 0.21-0.73 + 方向性 L1。
+
+**残余标定项**：Metal GI 整体偏亮（SC↔probe 环路增益高于 Vulkan，见
+TestModularPipeline 注释 ddgi_light_color 2.0 vs Vulkan 5.0 的折中史）；
+Vulkan 偏暖。→ 曝光/环路增益标定留待 GI 稳定后统一做。
