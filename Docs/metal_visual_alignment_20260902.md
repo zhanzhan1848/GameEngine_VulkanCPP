@@ -368,6 +368,28 @@ GPU 可见性 → update kernel 消费）在 Metal 上没有实际生效。
 2. dump frame 1-2 vs frame 120 的探针 buffer 对照（确认 init 图案假设）；
 3. update kernel 的 [DDGI_IRR] exec 已确认派发，重点在输入数据而非派发。
 
+## 探针场实为健康（2026-09-04，9aaf9789）：dump stride 错误的连环误诊
+
+GIFusionVerify 探针 dump 按 p×9 floats 寻址，实际 buffer 每探针
+9×float4（144B）——读的一直是错误位置的碎片。修正 stride 后：
+- probe 8496 强制写 9.0 读回一致 → update 写路径端到端全通；
+- 相机邻域探针场实测健康：L0 0.21-0.73 有空间结构、L1 有方向性。
+"探针冻结"是误诊。真实问题是探针场**无色**（L1 近中性灰，Vulkan 基准
+为暖色 R/B≈1.6）且 ray-path 直方图 miss 97-84%。
+
+另三项核对结论：
+- update kernel 索引 = 绝对探针号，与 finalize 一致（排除）；
+- update 列表 = 全量 16384，相机探针 8/8 在列（排除饿死）；
+- PRIMAL_SC_BUDGET=0 已让 LightEval 全量 374 卡（预算修复生效）；
+- ddgiRelocateProbeOrigin 越界哨兵追逐已加固（hist 无变化——march 不用
+  重定位结果，作为正确性修复保留）。
+
+**当前头号嫌疑：离线 SDF 场内容与几何错位**（轴翻转/烘焙原点/比例）。
+证据：相机邻域探针（世界 (1.5,4.5,1.5)±1.5，庭院中央）march miss 84-97%，
+而正确的场在此处最近墙面应 2-8 单位；某槽位探针读数 46.4 = 场的远区值。
+下一轮：离线场填线性梯度 d=(x-origin.x)/extent×10 → d0 读数直接揭示
+轴向/原点是否对齐（预期 ~3.2；镜像则 ~9.7）。
+
 ## GI 复活（2026-09-04，c4f67da8）：根因 = SC LightEval 覆盖 + 诊断 stride 错误
 
 **两个叠加问题：**
