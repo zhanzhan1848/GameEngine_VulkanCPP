@@ -507,7 +507,7 @@ bool TestModularPipeline::InitializePipeline() {
         // 修复后，环路结构已与 Vulkan 一致——ddgi_light_color 恢复 Vulkan
         // 同档 5.0（此前 2.0 是 SC 覆盖不足+诊断 stride 错误时期的折中值，
         // 导致探针场中性化、GI 无彩色弹射）。
-        renderSettings.lighting.ddgi_light_color = {5.0f, 5.0f, 5.0f, 1.0f};
+        renderSettings.lighting.ddgi_light_color = {3.0f, 3.0f, 3.0f, 1.0f};
         pipeline_->UpdateSettings(renderSettings);
     }
 
