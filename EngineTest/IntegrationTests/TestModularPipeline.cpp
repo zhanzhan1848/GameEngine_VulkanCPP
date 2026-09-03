@@ -481,6 +481,12 @@ bool TestModularPipeline::InitializePipeline() {
     // 探针间距对齐 Medium 档预设 2.0（LumenConfig 默认 3.0 格边界在墙面
     // 可见为方块接缝；2.0 减少 33% 格尺寸，棋盘格缝明显减轻）。
     lumenConfig.ddgi_probe_spacing = 2.0f;
+    // 2026-09-04 启用 SPGI（Screen Probe GI）——Vulkan High 档混合方案
+    // = SPGI（主力高频 GI）+ DDGI（低频环境）+ SSGI。Metal 之前缺 SPGI
+    // → GI 只有 DDGI 低频 → "很平"无彩色弹射细节。
+    // SPGI Metal 实测全黑（shader WIP），暂不启用。
+    // use_screen_probes=true 待 Metal SPGI shader 审计完成后再开。
+    // use_screen_probes = true;
     pipeline_->SetLumenConfig(lumenConfig);
 
     // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
