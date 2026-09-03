@@ -474,6 +474,10 @@ bool TestModularPipeline::InitializePipeline() {
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
     lumenConfig.surface_cache_capture_budget = 0;
+    // 2026-09-04 闪烁修复：temporal weight 0.02→0.005——增加时域平滑。
+    // SC 全量更新后每帧 atlas 微变 → 探针 SH 微变 → 屏幕高频闪烁。
+    // 降低 alpha 使探针更"黏"历史值，消除高频抖动。
+    lumenConfig.ddgi_irradiance_temporal_weight = 0.02f;
     // 探针间距对齐 Medium 档预设 2.0（LumenConfig 默认 3.0 格边界在墙面
     // 可见为方块接缝；2.0 减少 33% 格尺寸，棋盘格缝明显减轻）。
     lumenConfig.ddgi_probe_spacing = 2.0f;
