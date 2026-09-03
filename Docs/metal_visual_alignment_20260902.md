@@ -325,3 +325,26 @@ GI 冻结的完整因果链：SDF trace 穿墙（室内射线不命中）→ 97%
 provider_ready=no`（provider 为空可疑）；对比 Vulkan DDGITraceSDF.comp
 与其 Metal 对应实现的 trace 步长/级联选择/SDF 纹理绑定。
 诊断工具已入库：DDGI_PATH_DEBUG=1 + GI_VERIFY_FRAME + ray-path 直方图。
+
+## SDF 场为空坐实（2026-09-03 深夜，2b24ea3d）
+
+hit_distance_buffer 直读（GetHitDistanceBuffer 诊断 + GI_VERIFY_FRAME）：
+相机邻域探针的 ray0（探针原点原始 SDF 距离）/ray1（重定位后）实测
+**origin=5555（"级联外"哨兵）/ 46.4375（空场距离）**——封闭 Sponza 室内
+的最近表面距离不可能是 46 个世界单位。体素化 dispatch 本身有跑且带几何
+（num_instances=393、res=80 已验证），矛盾收窄为二选一：
+
+A. 体素化 kernel（GlobalSDFVoxelization.metal voxelize_sdf）在 Metal 上
+   写不进纹理——检查 kernel 内 ClusterMap/meshlet buffer 的数据有效性
+   （GPU-driven 缓冲在体素化时刻是否已填充）、binding 0 双写
+   （StorageImage sdf + UniformBuffer cb，Metal 分命名空间应合法）；
+B. DDGI 读的级联纹理 ≠ 体素化写的纹理——LumenDDGIPass 的 sdfTextures
+   Resolve（GetSDFTexture(c)）是否解析到
+   GlobalSDF::cascades_[c].sdf_texture 同一资源，或三级联槽位/顺序错位。
+
+判定实验（下一轮直接做）：DebugFill 一个恒定 SDF（如 d=2.0 球面）→ 若
+ray-path 直方图从 miss=97% 变为命中 → 纹理链路通、问题在体素化写入；
+仍 miss → 纹理绑定/解析断链。
+另注意：ddgi_trace_sdf 尾部把每探针 ray0/ray1 覆盖为调试值
+（origin/reloc 距离，级联外=5555）——这些调试值会被 finalize 当真实
+命中距离消费，是既有行为，读数时需区分。
