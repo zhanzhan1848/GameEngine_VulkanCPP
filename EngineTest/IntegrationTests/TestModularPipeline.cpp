@@ -477,6 +477,12 @@ bool TestModularPipeline::InitializePipeline() {
     // audited. (The Vulkan reference keeps SPGI via its shipped .comp chain.)
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
+    // 2026-09-04 GI 对齐：SC LightEval 全量更新（capture_budget=0）——
+    // Vulkan 参考档（High）实际全量 374 卡/帧；Metal Medium + governor
+    // 只轮 2-8 卡/帧 → SC atlas 长期欠点亮 → SC-first finalize 采到黑 →
+    // GI 区死灰（零场/直方图实验链，见 Docs 20260902）。Medium 其余配置
+    // 保留（High 的 SPGI/render_scale 在 Metal 有页故障史，见上注）。
+    lumenConfig.surface_cache_capture_budget = 0;
     pipeline_->SetLumenConfig(lumenConfig);
 
     // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
@@ -1139,8 +1145,10 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
             // 若全部等于静态种子（~1.05,1.05,1.23）→ update 未生效 →
             // GI 均匀灰、与直射光无关联（"GI 区是平的"的直测证据）。
             if (float* m = static_cast<float*>(device_->MapBuffer(irr, 0, 9 * 8 * sizeof(float)))) {
+                // stride 修正：irradiance buffer 每探针存 9×float4（144B），
+                // 旧读法 p*9 floats 读到的是错误位置的碎片。
                 for (u32 p = 0; p < 8; ++p) {
-                    const float* sh0 = m + p * 9;
+                    const float* sh0 = m + p * 36;
                     std::cout << "[GIFusionVerify] probe[" << p << "] L0 rgb=("
                               << sh0[0] << "," << sh0[1] << "," << sh0[2] << ")" << std::endl;
                 }
@@ -1175,6 +1183,18 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                         auto idx = [&](int x, int y, int z) -> u32 {
                             return (u32)(x + vol.ProbeCounts[0] * (y + vol.ProbeCounts[1] * z));
                         };
+                        std::cout << "[GIFusionVerify] vol: ProbeOrigin=("
+                                  << vol.ProbeOrigin.x << "," << vol.ProbeOrigin.y << ","
+                                  << vol.ProbeOrigin.z << ") SdfCascadeCount="
+                                  << vol.SdfCascadeCount
+                                  << " SdfOrigin0=(" << vol.SdfOrigins[0].x << ","
+                                  << vol.SdfOrigins[0].y << "," << vol.SdfOrigins[0].z << ")"
+                                  << " SdfExtent0=(" << vol.SdfExtents[0].x << ","
+                                  << vol.SdfExtents[0].y << "," << vol.SdfExtents[0].z << ")"
+                                  << " SdfVoxel0=" << vol.SdfVoxelSizes[0].x
+                                  << " RayMaxDist=" << vol.RayMaxDistance
+                                  << " RaySampleMode=" << vol.RaySampleMode
+                                  << std::endl;
                         std::cout << "[GIFusionVerify] camera-cell probes (gc="
                                   << cx << "," << cy << "," << cz << "):" << std::endl;
                         for (int dz = 0; dz <= 1; ++dz)
@@ -1182,10 +1202,10 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                                 for (int dx = 0; dx <= 1; ++dx) {
                                     u32 pi = idx(cx + dx, cy + dy, cz + dz);
                                     if (pi >= vol.ProbeCountTotal) continue;
-                                    const float* sh = m + pi * 9;
+                                    const float* sh = m + pi * 36;
                                     std::cout << "  probe[" << pi << "] L0 rgb=("
                                               << sh[0] << "," << sh[1] << "," << sh[2] << ")"
-                                              << " L1=(" << sh[3] << "," << sh[4] << "," << sh[5] << ")"
+                                              << " L1=(" << sh[4] << "," << sh[5] << "," << sh[6] << ")"
                                               << std::endl;
                                 }
 
@@ -1219,6 +1239,30 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                                               << " prev=" << hist[2]
                                               << " analytic=" << hist[3] << std::endl;
                                 }
+                            }
+                        }
+
+                        // update list 直读：相机邻域 8 探针是否在列表内
+                        if (auto ulBuf = ddgi2->GetProbeUpdateListBuffer(frameCount_ % 3);
+                            ulBuf != rhi::handles::INVALID_RESOURCE) {
+                            u32 listCap = vol.ProbeCountTotal;
+                            if (u32* ul = static_cast<u32*>(
+                                    device_->MapBuffer(ulBuf, 0, u64(listCap) * 4u))) {
+                                u32 mn = 0xFFFFFFFFu, mx = 0;
+                                u32 inCell = 0;
+                                for (u32 k = 0; k < vol.ProbeUpdateCount && k < listCap; ++k) {
+                                    mn = std::min(mn, ul[k]);
+                                    mx = std::max(mx, ul[k]);
+                                    for (int dz = 0; dz <= 1; ++dz)
+                                        for (int dy = 0; dy <= 1; ++dy)
+                                            for (int dx = 0; dx <= 1; ++dx)
+                                                if (ul[k] == idx(cx + dx, cy + dy, cz + dz)) inCell++;
+                                }
+                                device_->UnmapBuffer(ulBuf);
+                                std::cout << "[GIFusionVerify] update-list: n="
+                                          << vol.ProbeUpdateCount << " idxRange=["
+                                          << mn << "," << mx << "] cameraCellInList="
+                                          << inCell << "/8" << std::endl;
                             }
                         }
 
