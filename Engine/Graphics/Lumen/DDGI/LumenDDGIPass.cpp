@@ -216,6 +216,14 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
     std::set<std::string> included;
     std::string resolved = ResolveIncludes(source, DDGI_SHADER_DIR, included);
 
+    // DDGI_PATH_DEBUG=1：注入路径标签编译宏——finalize 把辐射来源 id
+    // （0=miss 1=SC 2=prev-screen 3=analytic）编码进 ray_buffer 的距离
+    // 字段（40+k·0.001，UpdateIrradiance 权重平面区），配合
+    // GIFusionVerify 的 ray-path 直方图读回定位辐射来源。
+    if (std::getenv("DDGI_PATH_DEBUG")) {
+        resolved = "#define DDGI_PATH_DEBUG 1\n" + resolved;
+    }
+
     // DEBUG: Dump resolved source to file
     {
         std::string dumpPath = "/tmp/ddgi_" + std::string(shaderName) + ".resolved.metal";

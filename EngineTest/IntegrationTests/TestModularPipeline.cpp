@@ -1188,6 +1188,39 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                                               << " L1=(" << sh[3] << "," << sh[4] << "," << sh[5] << ")"
                                               << std::endl;
                                 }
+
+                        // DDGI_PATH_DEBUG 构建下：解码 ray_buffer 的路径标签
+                        // （w = 40 + path*0.001，path: 0=miss 1=SC 2=prev 3=analytic），
+                        // 聚合相机邻域 8 探针 × 全部射线的路径直方图。
+                        if (std::getenv("DDGI_PATH_DEBUG")) {
+                            if (auto rayBuf = ddgi2->GetRayDataBuffer();
+                                rayBuf != rhi::handles::INVALID_RESOURCE &&
+                                vol.RaysPerProbe > 0) {
+                                const u64 raysBytes = u64(vol.ProbeCountTotal) * vol.RaysPerProbe * 16u;
+                                if (float* rb = static_cast<float*>(
+                                        device_->MapBuffer(rayBuf, 0, raysBytes))) {
+                                    u32 hist[4] = {0, 0, 0, 0};
+                                    for (int dz = 0; dz <= 1; ++dz)
+                                        for (int dy = 0; dy <= 1; ++dy)
+                                            for (int dx = 0; dx <= 1; ++dx) {
+                                                u32 pi = idx(cx + dx, cy + dy, cz + dz);
+                                                if (pi >= vol.ProbeCountTotal) continue;
+                                                for (u32 r = 0; r < vol.RaysPerProbe; ++r) {
+                                                    float w = rb[u64(pi) * vol.RaysPerProbe + r * 4u + 3u];
+                                                    if (w < 0.0f) { hist[0]++; continue; }
+                                                    u32 path = (u32)std::lround((w - 40.0f) * 1000.0f);
+                                                    if (path < 4u) hist[path]++;
+                                                }
+                                            }
+                                    device_->UnmapBuffer(rayBuf);
+                                    std::cout << "[GIFusionVerify] ray-path hist:"
+                                              << " miss=" << hist[0]
+                                              << " SC=" << hist[1]
+                                              << " prev=" << hist[2]
+                                              << " analytic=" << hist[3] << std::endl;
+                                }
+                            }
+                        }
                     }
                 }
                 device_->UnmapBuffer(irr);

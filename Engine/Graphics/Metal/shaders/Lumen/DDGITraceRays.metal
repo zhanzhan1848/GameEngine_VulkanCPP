@@ -551,6 +551,9 @@ kernel void ddgi_trace_finalize(
                                            uint(volume.RaySampleMode), toLight).xyz;
 
     DDGIRayData result;
+#ifdef DDGI_PATH_DEBUG
+    uint dbgPath = 0u;  // 1=SC atlas 2=prev-screen 3=analytic (miss stays 0)
+#endif
 
     if (hitDistance >= 0.0f) {
         result.radiance_and_dist.w = hitDistance;
@@ -605,8 +608,8 @@ kernel void ddgi_trace_finalize(
                         if (dot(scRadiance, scRadiance) > 0.0001f) {
                             radiance = scRadiance;
                             radianceFound = true;
-#ifdef DDGI_DBG_PATH
-                            radiance = float3(0.0f, 1.0f, 0.0f) * 0.5f; // SC = green
+#ifdef DDGI_PATH_DEBUG
+                            dbgPath = 1u;
 #endif
                         }
                         break;
@@ -628,8 +631,8 @@ kernel void ddgi_trace_finalize(
                     // T8.13 P1: self-circulating feedback 0.70.
                     radiance = prevRadiance + materialBounce + albedo * L_i_prev * 0.70f;
                     radianceFound = true;
-#ifdef DDGI_DBG_PATH
-                    radiance = float3(1.0f, 1.0f, 0.0f) * 0.5f; // prev-screen = yellow
+#ifdef DDGI_PATH_DEBUG
+                    dbgPath = 2u;
 #endif
                 }
             }
@@ -642,8 +645,8 @@ kernel void ddgi_trace_finalize(
                 float3 E_sky = volume.SkyColor.xyz * (0.5f + 0.5f * NdotUp);
                 constexpr float PI_VAL = 3.14159265358979f;
                 radiance = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70f);
-#ifdef DDGI_DBG_PATH
-                radiance = float3(1.0f, 0.0f, 0.0f) * 0.5f; // analytic = red
+#ifdef DDGI_PATH_DEBUG
+                dbgPath = 3u;
 #endif
             }
         }
@@ -695,6 +698,13 @@ kernel void ddgi_trace_finalize(
     }
 
     // Write at ABSOLUTE probe index (remap from update-slot is intentional).
+#ifdef DDGI_PATH_DEBUG
+    // 路径标签停到 d=40+k·0.001——UpdateIrradiance 的距离衰减
+    // 1-smoothstep(40,50,d) 在 d>=40 恒为 1，替换真实命中距离不影响
+    // 辐射权重，同时让标签在 CPU 端可解码（Vulkan comp 同款方案）。
+    if (result.radiance_and_dist.w >= 0.0f)
+        result.radiance_and_dist.w = 40.0f + float(dbgPath) * 0.001f;
+#endif
     ray_buffer[probeIdx * volume.RaysPerProbe + rayId] = result;
     } // T8.13 P2 stride loop
 }
