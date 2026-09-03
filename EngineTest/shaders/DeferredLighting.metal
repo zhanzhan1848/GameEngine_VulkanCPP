@@ -185,7 +185,7 @@ static float GetVSMShadowVisibilityGpuDriven(constant SceneData& sceneData,
                       sc0.z >= 0.0f && sc0.z <= 1.0f;
     if (inCascade0) {
         float2 moments = moments0.sample(s, uv0).xy;
-        const float minVariance = 0.00002f;
+        const float minVariance = 0.001f;  // 2026-09-04 闪烁修复：加强方差下限
         if (sc0.z <= moments.x) return 1.0f;
         float variance = moments.y - (moments.x * moments.x);
         variance = max(variance, minVariance);
@@ -202,7 +202,7 @@ static float GetVSMShadowVisibilityGpuDriven(constant SceneData& sceneData,
                       sc1.z >= 0.0f && sc1.z <= 1.0f;
     if (inCascade1) {
         float2 moments = moments1.sample(s, uv1).xy;
-        const float minVariance = 0.00002f;
+        const float minVariance = 0.001f;  // 2026-09-04 闪烁修复：加强方差下限
         if (sc1.z <= moments.x) return 1.0f;
         float variance = moments.y - (moments.x * moments.x);
         variance = max(variance, minVariance);

@@ -73,6 +73,11 @@ bool MetalShader::Initialize() {
              return false;
         }
         MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
+        // 2026-09-04 闪烁修复：禁用 fast-math。Metal 默认 fastMathEnabled=YES
+        // 会导致 VSM Chebyshev 方差计算（E[x²]-E[x]²）精度不稳定 → 阴影
+        // visibility 在亮暗边界高频翻转。MoltenVK 编译 SPIR-V 时不开
+        // fast-math，所以 Vulkan 路径没有此问题。
+        options->setFastMathEnabled(false);
         library_ = device_.GetNativeDevice()->newLibrary(source, options, &error);
         source->release();
         options->release();

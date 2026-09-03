@@ -171,7 +171,9 @@ kernel void ddgi_update_irradiance(
     float conv = confidenceBuffer[confidenceBase + 3u];
     bool firstUpdate = conv < 0.5f;
     float settledAlpha = clamp(vol.TemporalAlpha, 0.0f, 1.0f);
+    // DDGI_FREEZE=1 通过 TemporalAlpha=1.0 传入：alpha=0 → 100% history → 探针冻结
     float alpha = firstUpdate ? 1.0f : mix(0.35f, settledAlpha, min(conv * 2.0f, 1.0f));
+    if (settledAlpha >= 1.0f) alpha = 0.0f;  // freeze mode
 
     float3 sh0 = shAccum[0];
     float l1Limit = max(length(sh0) * 3.0f, 0.1f);
