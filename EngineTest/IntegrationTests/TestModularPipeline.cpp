@@ -1221,6 +1221,29 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                                 }
                             }
                         }
+
+                        // hit_distance 直读：ray0=探针原点原始 SDF 距离
+                        // （5555=级联外哨兵）、ray1=重定位后距离、ray2+=march 结果。
+                        if (auto hdf = ddgi2->GetHitDistanceBuffer();
+                            hdf != rhi::handles::INVALID_RESOURCE && vol.RaysPerProbe >= 3) {
+                            const u64 hdBytes = u64(vol.ProbeCountTotal) * vol.RaysPerProbe * 4u;
+                            if (float* hd = static_cast<float*>(
+                                    device_->MapBuffer(hdf, 0, hdBytes))) {
+                                for (int dz = 0; dz <= 1; ++dz)
+                                    for (int dy = 0; dy <= 1; ++dy)
+                                        for (int dx = 0; dx <= 1; ++dx) {
+                                            u32 pi = idx(cx + dx, cy + dy, cz + dz);
+                                            if (pi >= vol.ProbeCountTotal) continue;
+                                            u64 o = u64(pi) * vol.RaysPerProbe;
+                                            std::cout << "[GIFusionVerify] hd[" << pi
+                                                      << "] origin=" << hd[o]
+                                                      << " reloc=" << hd[o + 1]
+                                                      << " ray2=" << hd[o + 2]
+                                                      << " ray3=" << hd[o + 3] << std::endl;
+                                        }
+                                device_->UnmapBuffer(hdf);
+                            }
+                        }
                     }
                 }
                 device_->UnmapBuffer(irr);
