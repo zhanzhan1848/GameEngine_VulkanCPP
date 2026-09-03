@@ -253,8 +253,8 @@ kernel void ddgi_gi_gather(
         // 内容即上一帧 GI），做 EMA 混合消除逐帧噪声。
         // 首帧 history≈0 → alpha 自动升到 1（直接输出新值）。
         // 2026-09-04 闪烁修复：读上一帧 output（同一纹理未清除），
-        // EMA 混合消除逐帧噪声。alpha=0.05 → 95% 历史（20 帧收敛），
-        // 高频闪烁基本消除（代价：相机移动时轻微 ghosting）。
+        // EMA 混合消除逐帧噪声。alpha=0.02 → 98% 历史（50 帧收敛），
+        // 高频闪烁消除（代价：相机移动时 ghosting 更明显）。
         float3 prevGI = outputTex.read(tid).rgb;
         float prevLum = dot(prevGI, float3(0.333f));
         float tAlpha = prevLum < 0.005f ? 1.0f : 0.05f;
