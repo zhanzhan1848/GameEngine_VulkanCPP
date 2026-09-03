@@ -453,10 +453,14 @@ finalize SC-first、SC capture_budget=0、重定位哨兵加固——全部无�
 1. moments raster CullMode::None（楔形亮斑根因）→ 225314b0
 2. finalize 回迁 SC-first → 3ca98663
 3. SC capture_budget=0 全量更新 → c4f67da8
-4. ddgi_light_color 2.0→5.0 → a45bdb25
+4. ddgi_light_color 恢复 5.0 → a45bdb25 → **3.0 稳态** → ea2f9d47
 5. 探针间距 3.0→2.0 → 014ce074
 6. ToneMapping 色温统一（passthrough）→ 8e823e30
 7. TAA/Bloom/ToneMapping 全链稳定 → 798bc172
+8. MemoryBarrier always-end-encoder → 9df09146
+9. DDGI dispatch 间补全 barrier → 919d5db5
+10. 探针采样 mode 1→0（消除逐帧抖动闪烁）→ dccff6f7
+11. **GIGather 时域累积（outputTex read_write + EMA）→ bdcf05fd**
 
 **残余标定项**（参数级，非 bug）：
 - 色温微调：Metal 略偏冷 vs Vulkan 偏暖
