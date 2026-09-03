@@ -199,5 +199,12 @@ kernel void surfaceCacheLightEval(
                                                : prev_light * albedo.rgb * SC_FEEDBACK)
                   + emissive;
     result = min(result, float3(64.0f));
+
+    // 2026-09-04 闪烁修复：SC atlas 时域 EMA——全量 LightEval 每帧从零重写，
+    // 阴影采样/探针采样的逐帧噪声直通 atlas → 探针 → GI 屏幕闪烁。
+    // 20% 新 + 80% 历史（~5 帧收敛）抑制高频抖动。
+    constexpr float SC_TEMPORAL_ALPHA = 0.2f;
+    result = mix(prev_light, result, SC_TEMPORAL_ALPHA);
+
     lighting_out.write(float4(result, 1.0), atlas_uv);
 }
