@@ -442,6 +442,30 @@ finalize SC-first、SC capture_budget=0、重定位哨兵加固——全部无�
 均为标定级调整，结构性问题（楔子/棋盘/死 GI/SDF 空）已全部修复。
 标定路径：调 ddgi_light_color → 观察探针 L0 R/B 比 → gather 亮度对齐。
 
+## 探针间距修复 + 标定完成（2026-09-04，014ce074 + a45bdb25）
+
+**GI 质量总结**：Metal 全链 GI 已恢复——探针场健康（L0 0.21-0.73 +
+方向性 L1）、SC atlas 全量点亮（374 卡）、彩色弹射正常（ddgi_light_color
+5.0）、探针间距 2.0（格边界减少 33%）。画面质量与 Vulkan 参考对比：
+结构/亮度/弹射均对齐，残余仅色温微调。
+
+**修复链完整清单**（本 session 全部提交）：
+1. moments raster CullMode::None（楔形亮斑根因）→ 225314b0
+2. finalize 回迁 SC-first → 3ca98663
+3. SC capture_budget=0 全量更新 → c4f67da8
+4. ddgi_light_color 2.0→5.0 → a45bdb25
+5. 探针间距 3.0→2.0 → 014ce074
+6. ToneMapping 色温统一（passthrough）→ 8e823e30
+7. TAA/Bloom/ToneMapping 全链稳定 → 798bc172
+
+**残余标定项**（参数级，非 bug）：
+- 色温微调：Metal 略偏冷 vs Vulkan 偏暖
+- 直射曝光：Metal 略过曝
+- 伪影2 阴影楼梯：cull 修复后应已减轻，待确认
+
+**High 档重测**：页故障仍在（与结构性修复无关），Metal 安全上限为
+Medium + capture_budget=0 + spacing 2.0。High 需先审计 SPGI Metal shader。
+
 ## High 档重测：页故障仍在（2026-09-04，dea46f67）
 
 尝试 Metal 也回档 High（与 Vulkan 参考一致）→ **洋红画面**（GPU Address
