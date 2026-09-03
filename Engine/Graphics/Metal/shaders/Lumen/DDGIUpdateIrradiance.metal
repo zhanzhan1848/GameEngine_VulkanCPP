@@ -122,6 +122,43 @@ kernel void ddgi_update_irradiance(
         hitCount += tg_hitFlags[t];
     }
 
+    // =====================================================================
+    // 2026-09-04 棋盘格/闪烁修复：探针空间平滑（irradiance blur）
+    //
+    // 每帧只更新 256/16384 探针（优先级调度），不同子集在不同帧更新。
+    // SC atlas 辐射的逐帧微小变化 + 探针更新批次差异 → 相邻探针 SH 值
+    // 不连续 → gather 插值在格边界产生可见的方块/棋盘格图案 + 高频闪烁。
+    //
+    // 修复：对每个探针的 SH 结果与其 +x/+y/+z 邻居的历史值混合。
+    // 负方向邻居在下一帧作为正方向邻居来平滑当前探针——渐进收敛。
+    // 标准 DDGI irradiance blur 的简化实现（只混合正方向，不协调权重）。
+    // =====================================================================
+    {
+        constexpr float SPATIAL_W = 0.04f;  // 每个正轴邻居的混合权重
+        uint3 counts = uint3(vol.ProbeCounts[0], vol.ProbeCounts[1], vol.ProbeCounts[2]);
+        uint pz = probeIdx / (counts.x * counts.y);
+        uint rem = probeIdx % (counts.x * counts.y);
+        uint py = rem / counts.x;
+        uint px = rem % counts.x;
+        uint3 gc = uint3(px, py, pz);
+
+        for (uint axis = 0u; axis < 3u; ++axis) {
+            uint3 nc = gc;
+            if (nc[axis] + 1u >= counts[axis]) continue;  // 边界跳过
+            nc[axis] += 1u;
+            uint nIdx = nc.x + counts.x * (nc.y + counts.y * nc.z);
+            uint nBase = nIdx * 9u;
+            // 跳过 NaN/Inf 邻居
+            float3 n0 = irradianceHistory[nBase + 0u].xyz;
+            uint3 nb = as_type<uint3>(n0);
+            if (((nb.x | nb.y | nb.z) & 0x7F800000u) == 0x7F800000u) continue;
+            for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
+                float3 nSH = irradianceHistory[nBase + i].xyz;
+                shAccum[i] = mix(shAccum[i], nSH, SPATIAL_W);
+            }
+        }
+    }
+
     // T8.13 sync: temporal blend with history — Vulkan DDGIUpdateIrradiance
     // scheme. A probe that never converged must not EMA-blend against the
     // cleared buffer (first update publishes directly); young probes blend

@@ -1377,7 +1377,8 @@ void MetalCommandBuffer::MemoryBarrier(PipelineStage srcStageMask, PipelineStage
 
     if (currentEncoderType_ == EncoderType::Compute) {
         auto computeEncoder = static_cast<MTL::ComputeCommandEncoder*>(currentEncoder_);
-        computeEncoder->memoryBarrier(MTL::BarrierScopeBuffers);
+        computeEncoder->memoryBarrier(
+            MTL::BarrierScopeBuffers | MTL::BarrierScopeTextures);
 
         static int barrierCount = 0;
         if (barrierCount < 30) {

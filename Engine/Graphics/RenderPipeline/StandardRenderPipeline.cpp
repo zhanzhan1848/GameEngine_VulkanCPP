@@ -331,6 +331,22 @@ bool StandardRenderPipeline::ApplyConfigChanges() {
         ShutdownLumenPasses();
         InitializeLumenPasses();
     }
+
+    // B2（plan §6.2）：froxel fog 运行时开关/生命周期。Initialize 只在创建时
+    // 读一次 grid config——参数编辑后需开关一次（off→on）重建以生效；
+    // Lumen-only 的 dirty 不重建已存在的 froxel pass（避免每 tick 重建）。
+    if (subsystems_initialized_) {
+        if (settings_.quality.enable_froxel_fog && !froxel_fog_pass_) {
+            froxel_fog_pass_ = std::make_unique<volume::FroxelFogPass>();
+            if (!froxel_fog_pass_->Initialize(device_, render_width_, render_height_, settings_.froxel)) {
+                PRIMAL_LOG_STREAM(Error, "Render") << "[FroxelFog] runtime re-init failed" << std::endl;
+                froxel_fog_pass_.reset();
+            }
+        } else if (!settings_.quality.enable_froxel_fog && froxel_fog_pass_) {
+            froxel_fog_pass_->Shutdown();
+            froxel_fog_pass_.reset();
+        }
+    }
     return true;
 }
 
