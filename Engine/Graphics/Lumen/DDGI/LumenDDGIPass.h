@@ -192,6 +192,10 @@ public:
     // 诊断：hit_distance_buffer 直读（ray0/1 被 ddgi_trace_sdf 写入
     // 探针原点/重定位后的原始 SDF 距离——级联外为 5555 哨兵）。
     rhi::ResourceHandle GetHitDistanceBuffer() const { return hit_distance_buffer_; }
+    // 诊断：SC grid header 读回（验证 grid 覆盖范围/卡片数）
+    rhi::ResourceHandle GetSCGridOffsetsBuffer() const { return sc_grid_offsets_buffer_; }
+    rhi::ResourceHandle GetSCGridCardsBuffer() const { return sc_grid_cards_buffer_; }
+    rhi::ResourceHandle GetSCCardDataBuffer() const { return sc_card_data_buffer_; }
 
     // T8.9b diagnostic: probes refreshed by the latest trace dispatch, so
     // CPU-side ray-buffer reads can skip stale/unwritten slots.

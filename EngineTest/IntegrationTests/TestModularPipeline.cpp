@@ -1244,6 +1244,46 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                             }
                         }
 
+                        // SC grid header 直读：验证 grid 覆盖/卡片数
+                        if (auto sgo = ddgi2->GetSCGridOffsetsBuffer();
+                            sgo != rhi::handles::INVALID_RESOURCE) {
+                            if (u32* gh = static_cast<u32*>(
+                                    device_->MapBuffer(sgo, 0, 16 * sizeof(u32)))) {
+                                auto u2f = [](u32 v) { float f; memcpy(&f, &v, 4); return f; };
+                                std::cout << "[GIFusionVerify] SC grid: min=("
+                                          << u2f(gh[0]) << "," << u2f(gh[1]) << "," << u2f(gh[2]) << ")"
+                                          << " cards=" << gh[3]
+                                          << " max=(" << u2f(gh[4]) << "," << u2f(gh[5]) << "," << u2f(gh[6]) << ")"
+                                          << " cellSize=" << u2f(gh[7])
+                                          << " dims=(" << gh[8] << "," << gh[9] << "," << gh[10] << ")"
+                                          << std::endl;
+                                // 检查相机位置处的 cell
+                                float cs = u2f(gh[7]);
+                                float gminx = u2f(gh[0]), gminy = u2f(gh[1]), gminz = u2f(gh[2]);
+                                u32 gdx = gh[8], gdy = gh[9], gdz = gh[10];
+                                auto campos = camera_.GetPosition();
+                                int cx2 = int((campos.x - gminx) / cs);
+                                int cy2 = int((campos.y - gminy) / cs);
+                                int cz2 = int((campos.z - gminz) / cs);
+                                bool inside = cx2 >= 0 && cy2 >= 0 && cz2 >= 0 &&
+                                              cx2 < int(gdx) && cy2 < int(gdy) && cz2 < int(gdz);
+                                std::cout << "[GIFusionVerify] SC camera cell: pos=("
+                                          << campos.x << "," << campos.y << "," << campos.z << ")"
+                                          << " cell=(" << cx2 << "," << cy2 << "," << cz2 << ")"
+                                          << " inside=" << (inside ? "YES" : "NO")
+                                          << std::endl;
+                                if (inside) {
+                                    u32 ci = cx2 + gdx * (cy2 + gdy * cz2);
+                                    u32 begin = gh[16 + ci];
+                                    u32 end = gh[17 + ci];
+                                    std::cout << "[GIFusionVerify] SC cell[" << ci << "] cards="
+                                              << (end - begin) << " (range [" << begin << "," << end << "))"
+                                              << std::endl;
+                                }
+                                device_->UnmapBuffer(sgo);
+                            }
+                        }
+
                         // update list 直读：相机邻域 8 探针是否在列表内
                         if (auto ulBuf = ddgi2->GetProbeUpdateListBuffer(frameCount_ % 3);
                             ulBuf != rhi::handles::INVALID_RESOURCE) {
