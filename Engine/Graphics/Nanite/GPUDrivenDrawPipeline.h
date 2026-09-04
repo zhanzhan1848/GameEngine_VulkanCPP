@@ -120,6 +120,14 @@ public:
     void SetRenderMode(GPURenderMode mode) { render_mode_ = mode; }
     GPURenderMode GetRenderMode() const { return render_mode_; }
 
+    // A7 视图模式: 0=Shaded (default), 1=Wireframe. Wireframe binds a twin
+    // GBuffer pipeline created with rhi::FillMode::Wireframe (Metal
+    // TriangleFillModeLines / Vulkan VK_POLYGON_MODE_LINE). Dawn/WebGPU has
+    // no fill-mode concept — there the wireframe request falls back to the
+    // solid pipeline (twin creation is skipped when unsupported).
+    void SetViewMode(u32 mode) { view_mode_ = mode; }
+    u32 GetViewMode() const { return view_mode_; }
+
     // Phase 9.3b: Streaming terrain — RenderScene accessor for iterating
     // GetStreamingMeshes() and issuing one DrawIndirect per visible mesh.
     void SetRenderScene(RenderScene* scene) { render_scene_ = scene; }
@@ -367,6 +375,11 @@ private:
 
     rhi::PipelineLayoutHandle draw_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineHandle draw_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    // A7: fill-mode twin of draw_pipeline_ (Wireframe). Created alongside the
+    // solid pipeline; INVALID when creation failed or the backend has no
+    // fill-mode support (then view_mode_ == 1 renders solid).
+    rhi::PipelineHandle draw_pipeline_wireframe_{ rhi::handles::INVALID_PIPELINE };
+    u32 view_mode_{ 0 };
 
     struct FrameResource {
         rhi::ResourceHandle camera_constants_buffer{ rhi::handles::INVALID_RESOURCE };

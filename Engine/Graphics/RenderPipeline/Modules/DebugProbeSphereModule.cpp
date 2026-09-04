@@ -3,6 +3,7 @@
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include "Engine/Common/CoreLogStream.h"
 
@@ -10,6 +11,50 @@ namespace primal::graphics {
 
 using namespace rhi;
 using namespace rendergraph;
+
+namespace {
+// B1 L3: 自加载着色器字节码（GPUDrivenDrawPipeline::LoadShaderBytecode 同款
+// 双候选路径风格）。Metal 读 MSL 源（device 运行时编译）；Vulkan 读 Debug/
+// ProbeSphere.{vert,frag}.spv（精确字节数）。其它平台返回空——probe 球
+// overlay 在无填充后端上禁用。
+std::vector<u8> LoadProbeSphereBytecode(rhi::RHIDeviceBase* device, const char* name) {
+    const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
+    std::vector<std::string> candidates;
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        std::string file = std::string(name) + ".spv";
+        candidates.push_back("Engine/Graphics/Vulkan/shaders/Debug/" + file);
+        candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/Debug/" + file);
+    } else if (platform == rhi::RHIPlatform::Metal) {
+        // MSL 是单文件双入口（probe_sphere_vs/_fs）：剥掉 .vert/.frag 后缀。
+        std::string stem(name);
+        for (const char* suffix : {".vert", ".frag"}) {
+            auto pos = stem.rfind(suffix);
+            if (pos != std::string::npos && pos + std::strlen(suffix) == stem.size())
+                stem.erase(pos);
+        }
+        std::string file = stem + ".metal";
+        candidates.push_back("EngineTest/shaders/" + file);
+        candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/" + file);
+    } else {
+        return {};
+    }
+
+    for (const auto& path : candidates) {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) continue;
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        std::vector<u8> bytes(static_cast<size_t>(size));
+        if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) continue;
+        if (platform == rhi::RHIPlatform::Metal) return bytes;           // MSL 源
+        if (size % 4 != 0) continue;                                      // SPIR-V 4B 对齐
+        return bytes;
+    }
+    PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] shader bytecode not found for '"
+              << name << "' (tried " << candidates.size() << " paths)" << std::endl;
+    return {};
+}
+} // namespace
 
 namespace {
 // Unit icosphere: 12 verts, 20 faces; subdivided 1-to-4 on the CPU (42 verts,
@@ -55,9 +100,36 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
                                         ShaderHandle vertex_shader,
                                         ShaderHandle pixel_shader) {
     device_ = device;
+    // B1 L3: 句柄未注入时自加载（编辑器路径无 SetShaderHandles 引导——
+    // 生产管线逐模块自加载字节码，本模块对齐该模式）。
+    if (vertex_shader == handles::INVALID_SHADER) {
+        // Metal: single MSL file both entries ("ProbeSphere.metal").
+        // Vulkan: keep .vert/.frag two files (bytecode is pre-built).
+        const char* vsName = (device->GetPlatform() == rhi::RHIPlatform::Metal)
+                                 ? "ProbeSphere" : "ProbeSphere.vert";
+        auto vs = LoadProbeSphereBytecode(device, vsName);
+        if (!vs.empty())
+            vertex_shader = device_->CreateShader(vs.data(), vs.size(),
+                                                  ShaderStage::Vertex, "probe_sphere_vs");
+    }
+    ShaderHandle irradiance_ps = handles::INVALID_SHADER;
+    if (pixel_shader == handles::INVALID_SHADER) {
+        const bool metal = device->GetPlatform() == rhi::RHIPlatform::Metal;
+        const char* psName = metal ? "ProbeSphere" : "ProbeSphere.frag";
+        auto ps = LoadProbeSphereBytecode(device, psName);
+        if (!ps.empty())
+            pixel_shader = device_->CreateShader(ps.data(), ps.size(),
+                                                 ShaderStage::Pixel, "probe_sphere_fs");
+        if (metal) {
+            auto psIrr = LoadProbeSphereBytecode(device, psName);
+            if (!psIrr.empty())
+                irradiance_ps = device_->CreateShader(psIrr.data(), psIrr.size(),
+                                                      ShaderStage::Pixel, "probe_sphere_irradiance_fs");
+        }
+    }
     if (vertex_shader == handles::INVALID_SHADER ||
         pixel_shader == handles::INVALID_SHADER) {
-        PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] shaders not provided — debug viz disabled" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] shaders unavailable — debug viz disabled" << std::endl;
         return false;
     }
 
@@ -69,9 +141,16 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
     ubo_binding.descriptorType = DescriptorType::UniformBuffer;
     ubo_binding.descriptorCount = 1;
     ubo_binding.stageFlags = ShaderStage::Vertex;
+    // B1 L3.2: FS storage buffer carrying the SH9 irradiance coefficients.
+    DescriptorSetLayoutBinding irr_binding{};
+    irr_binding.binding = 1;
+    irr_binding.descriptorType = DescriptorType::StorageBuffer;
+    irr_binding.descriptorCount = 1;
+    irr_binding.stageFlags = ShaderStage::Pixel;
+    DescriptorSetLayoutBinding layoutBindings[2] = { ubo_binding, irr_binding };
     DescriptorSetLayoutDesc ds_desc{};
-    ds_desc.bindingCount = 1;
-    ds_desc.bindings = &ubo_binding;
+    ds_desc.bindingCount = 2;
+    ds_desc.bindings = layoutBindings;
     set_layout_ = device_->CreateDescriptorSetLayout(ds_desc);
     // Set 0 (UBO) + VS push-constant range (view_proj) — BOTH must be
     // declared or the shader's push block reads an unbacked zero matrix.
@@ -123,7 +202,12 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
     pd.vertexBindings.assign(std::begin(binds), std::end(binds));
 
     pipeline_ = device_->CreateGraphicsPipeline(pd);
-    PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] initialized (pipeline=" << pipeline_ << ")" << std::endl;
+    if (irradiance_ps != handles::INVALID_SHADER) {
+        pd.pixelShader = irradiance_ps;
+        irradiance_pipeline_ = device_->CreateGraphicsPipeline(pd);
+    }
+    PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] initialized (pipeline=" << pipeline_
+              << " irradiance=" << irradiance_pipeline_ << ")" << std::endl;
     return pipeline_ != handles::INVALID_PIPELINE;
 }
 
@@ -258,6 +342,10 @@ void DebugProbeSphereModule::AddPass(RenderGraph& graph,
                           << " instances=" << instance_count_ << std::endl;
             auto cmd = ctx.cmdBuffer;
 
+            const bool useIrradiance =
+                inputs.irradiance_buffer != handles::INVALID_RESOURCE &&
+                irradiance_pipeline_ != handles::INVALID_PIPELINE;
+
             math::m4x4 vp = inputs.proj_matrix * inputs.view_matrix;
             if (auto* u = static_cast<math::m4x4*>(device_->MapBuffer(ubo_[cbIdx]))) {
                 *u = vp;
@@ -269,20 +357,27 @@ void DebugProbeSphereModule::AddPass(RenderGraph& graph,
                 math::v4 cam_pos;
             } pcData{vp, inputs.sun_dir, inputs.camera_position};
             DescriptorBufferInfo binfo{ubo_[cbIdx], 0, 128};
-            WriteDescriptorSet w{};
-            w.dstSet = sets_[cbIdx];
-            w.dstBinding = 0;
-            w.dstArrayElement = 0;
-            w.descriptorCount = 1;
-            w.descriptorType = DescriptorType::UniformBuffer;
-            w.bufferInfo = &binfo;
-            device_->UpdateDescriptorSets(1, &w);
+            DescriptorBufferInfo irrInfo{inputs.irradiance_buffer, 0, ~0ULL};
+            WriteDescriptorSet w[2]{};
+            w[0].dstSet = sets_[cbIdx];
+            w[0].dstBinding = 0;
+            w[0].dstArrayElement = 0;
+            w[0].descriptorCount = 1;
+            w[0].descriptorType = DescriptorType::UniformBuffer;
+            w[0].bufferInfo = &binfo;
+            w[1].dstSet = sets_[cbIdx];
+            w[1].dstBinding = 1;
+            w[1].dstArrayElement = 0;
+            w[1].descriptorCount = 1;
+            w[1].descriptorType = DescriptorType::StorageBuffer;
+            w[1].bufferInfo = &irrInfo;
+            device_->UpdateDescriptorSets(2, w);
 
             cmd->SetViewport({{0, 0},
                               {(float)inputs.render_width, (float)inputs.render_height},
                               0, 1});
             cmd->SetScissor({{0, 0}, {inputs.render_width, inputs.render_height}});
-            cmd->BindGraphicsPipeline(pipeline_);
+            cmd->BindGraphicsPipeline(useIrradiance ? irradiance_pipeline_ : pipeline_);
             cmd->PushConstants(layout_, ShaderStage::Vertex,
                                0, sizeof(PCData), &pcData);
             ResourceHandle vbs[1] = {sphere_vb_};

@@ -1087,6 +1087,17 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             } else {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GPU Driven Draw pipeline" << std::endl;
             }
+
+            // A7: wireframe twin of the GBuffer pipeline (same shaders, same
+            // state, fill mode = lines). Failure is non-fatal — view mode 1
+            // falls back to the solid pipeline.
+            if (draw_pipeline_ != rhi::handles::INVALID_PIPELINE) {
+                gpuDrawPipelineDesc.fillMode = rhi::FillMode::Wireframe;
+                draw_pipeline_wireframe_ = device_->CreateGraphicsPipeline(gpuDrawPipelineDesc);
+                if (draw_pipeline_wireframe_ == rhi::handles::INVALID_PIPELINE) {
+                    PRIMAL_LOG_STREAM(Warn, "Render") << "[GPUDrivenDrawPipeline] Wireframe pipeline unavailable — view mode 1 falls back to shaded" << std::endl;
+                }
+            }
         } else {
             PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create GPU Draw shaders" << std::endl;
         }
@@ -2606,7 +2617,12 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     // Bind Pipeline and Descriptor Set
     // NOTE: No memory barrier needed here - Metal automatically handles encoder transitions
     // The GPU culling work is guaranteed to be complete by the Metal driver
-    cmd_buffer->BindGraphicsPipeline(draw_pipeline_);
+    // A7: view mode 1 (wireframe) binds the fill-mode twin when available.
+    const rhi::PipelineHandle gbufferPipeline =
+        (view_mode_ == 1 && draw_pipeline_wireframe_ != rhi::handles::INVALID_PIPELINE)
+            ? draw_pipeline_wireframe_
+            : draw_pipeline_;
+    cmd_buffer->BindGraphicsPipeline(gbufferPipeline);
 
     rhi::DescriptorSetHandle dsHandles[1] = { globalDrawDS };
     u32 dynOffsets[1] = { 0 };

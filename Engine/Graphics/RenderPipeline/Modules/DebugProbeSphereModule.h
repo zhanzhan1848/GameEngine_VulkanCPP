@@ -26,6 +26,11 @@ struct DebugProbeSphereInputs {
     u32 probe_count = 0;
     f32  probe_spacing = 3.0f;
     f32  sphere_radius = 0.0f;   // 0 → spacing * 0.4
+
+    // B1 L3.2: DDGI SH9 irradiance buffer (probeIdx×9 float4, triple-buffered
+    // triple index = current_buffer_index). When valid, spheres sample real
+    // probe irradiance by direction instead of the hue fallback.
+    rhi::ResourceHandle irradiance_buffer{ rhi::handles::INVALID_RESOURCE };
 };
 
 /// Renders one real mesh sphere per DDGI probe on top of the tonemapped
@@ -43,6 +48,8 @@ public:
     void AddPass(rendergraph::RenderGraph& graph, const DebugProbeSphereInputs& inputs);
 
     bool IsInitialized() const { return pipeline_ != rhi::handles::INVALID_PIPELINE; }
+    /// True when the SH9 irradiance-sampling pixel pipeline compiled (Metal).
+    bool HasIrradiancePipeline() const { return irradiance_pipeline_ != rhi::handles::INVALID_PIPELINE; }
 
 private:
     bool BuildMeshAndInstances(const math::v3& origin, const u32 counts[3],
@@ -51,6 +58,9 @@ private:
     rhi::RHIDeviceBase* device_ = nullptr;
 
     rhi::PipelineHandle pipeline_{ rhi::handles::INVALID_PIPELINE };
+    // B1 L3.2: same VS, irradiance-sampling FS. INVALID on Vulkan (no spv yet)
+    // and when the MSL entry fails — then the hue pipeline is used.
+    rhi::PipelineHandle irradiance_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineLayoutHandle layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetHandle sets_[3]{

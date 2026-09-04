@@ -508,11 +508,10 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     // M8/T8.5: real-mesh DDGI probe sphere overlay (SetProbeSphereDebug /
     // SPGI_PROBE_SPHERES=1 in the Sponza test).
-    if (probe_sphere_vs_ != handles::INVALID_SHADER &&
-        probe_sphere_ps_ != handles::INVALID_SHADER) {
-        probe_sphere_module_ = std::make_unique<DebugProbeSphereModule>();
-        probe_sphere_module_->Initialize(device_, probe_sphere_vs_, probe_sphere_ps_);
-    }
+    // B1 L3: probe 球 overlay——句柄未注入时模块自加载字节码（编辑器路径），
+    // 测试注入路径不变。
+    probe_sphere_module_ = std::make_unique<DebugProbeSphereModule>();
+    probe_sphere_module_->Initialize(device_, probe_sphere_vs_, probe_sphere_ps_);
 
     if (settings_.quality.enable_ssgi || settings_.quality.enable_ddgi) {
         fusion_module_ = std::make_unique<FusionCompositeModule>();
@@ -1230,6 +1229,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
                 auto* cmd = ctx.cmdBuffer;
                 if (!gpuDraw.IsInitialized() || !data.scene_snapshot) return;
+
+                // A7: forward the editor view mode (0=shaded, 1=wireframe).
+                gpuDraw.SetViewMode(view_mode_);
 
                 auto cullingResults = data.culling_pipeline
                     ? data.culling_pipeline->GetResults()
@@ -2024,6 +2026,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             psIn.probe_counts[2] = ddgi_pass_->GetParams().probe_count_z;
             psIn.probe_count = probeCount;
             psIn.probe_spacing = ddgi_pass_->GetParams().probe_spacing;
+            psIn.irradiance_buffer = ddgi_pass_->GetIrradianceBuffer(cbIdx);
             probe_sphere_module_->AddPass(graph, psIn);
         }
     }

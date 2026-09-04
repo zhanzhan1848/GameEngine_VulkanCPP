@@ -201,6 +201,13 @@ public:
     void SetProbeSphereDebug(bool enabled) { probe_sphere_debug_ = enabled; }
     bool IsProbeSphereDebugEnabled() const { return probe_sphere_debug_; }
 
+    /// A7 视图模式: 0=Shaded, 1=Wireframe (deferred GBuffer path). Cheap
+    /// per-frame field — the wireframe twin pipeline is created at GPUDriven
+    /// init; switching only changes which handle the draw pass binds.
+    /// (2=Unlit reserved; needs a deferred-shader variant, see plan A7.)
+    void SetViewMode(u32 mode) { view_mode_ = mode; }
+    u32 GetViewMode() const { return view_mode_; }
+
     /// Geometry debug overlay (meshlets / SDF slices / vector fields / voxels).
     /// Drawn on the tone-mapped frame before FinalBlit. Cheap per-frame
     /// settings copy — the debug pipelines lazy-init on first enabled frame.
@@ -456,6 +463,9 @@ private:
     bool sdf_visualization_enabled_{false};
     /// M8/T8.5: overlay real-mesh DDGI probe spheres on the final image.
     bool probe_sphere_debug_{false};
+    /// A7 视图模式: 0=Shaded, 1=Wireframe (forwarded to GPUDrivenDrawPipeline
+    /// in the NaniteSceneRender pass; 2=Unlit reserved).
+    u32 view_mode_{0};
 
     // Geometry debug overlay settings + the frame's view (needed by
     // AddGeometryDebugPass; set at the top of Render/RenderWithCommandBuffer).
