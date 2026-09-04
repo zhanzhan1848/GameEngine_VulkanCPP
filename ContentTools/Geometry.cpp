@@ -994,7 +994,7 @@ namespace primal::tools
 		meta.lod_id        = blob.read<u32>();
 		meta.material_idx  = blob.read<u32>();
 		const u32 elem_size{ blob.read<u32>() };
-		blob.skip(sizeof(u32)); // elements_type
+		const u32 elements_type{ blob.read<u32>() };
 		const u32 num_vertices{ blob.read<u32>() };
 		const u32 index_size{ blob.read<u32>() };
 		const u32 num_indices{ blob.read<u32>() };
@@ -1028,6 +1028,18 @@ namespace primal::tools
 		blob.skip((size_t)voxel_size * sizeof(u8));
 		const u32 vector_field_size{ blob.read<u32>() };
 		blob.skip((size_t)vector_field_size * sizeof(u16));
+
+		// A9 Lightmap UV sidecar: flagged in the header (0x10), the UVLM
+		// section (magic | uv_count | uv_count * f32 u,v) trails the SDF
+		// block. Without this skip, walking the NEXT mesh reads the UVLM
+		// bytes as header fields and the walk runs past the buffer.
+		if (elements_type & 0x10) // elements_type::lightmap_uv_flag
+		{
+			const u32 magic_uvlm{ blob.read<u32>() };
+			(void)magic_uvlm; // "UVLM" — flag bit already guarantees presence
+			const u32 uv_count{ blob.read<u32>() };
+			blob.skip((size_t)uv_count * sizeof(f32) * 2);
+		}
 	}
 
 	bool extract_submesh_metadata(const u8* buffer, u32 buffer_size, utl::vector<submesh_meta>& out)

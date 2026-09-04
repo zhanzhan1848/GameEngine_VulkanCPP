@@ -43,6 +43,12 @@ struct PackedMeshView {
     u32                         meshlet_triangle_count{0};
     const u8*                   meshlet_triangles{nullptr};
 
+    // A9 Lightmap UV sidecar (elements_type::lightmap_uv_flag in the blob
+    // header). Zero/none when the mesh has no lightmap UVs. `lightmap_uvs`
+    // points into the source buffer: uv_count × (f32 u, v).
+    u32                         lightmap_uv_count{0};
+    const f32*                  lightmap_uvs{nullptr};
+
     // SDF data is shallow-copied; reader does NOT walk into sdf.data/voxels/
     // vector_field arrays because Phase 1 validation doesn't need them.
     // Future Phase 2 readers can extend PackedMeshView with SDF pointers.

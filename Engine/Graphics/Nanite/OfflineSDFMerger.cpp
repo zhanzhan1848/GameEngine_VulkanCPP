@@ -238,6 +238,15 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
                 }
             }
         }
+
+        // A9 Lightmap UV sidecar: flagged by bit 0x10 in elemType, a "UVLM"
+        // section (magic | uv_count | uv_count * f32 u,v) trails the SDF
+        // block. Must be consumed or the next mesh header misparses.
+        if ((elemType & 0x10) && off + 8 <= (size_t)size) {
+            off += 4; // UVLM magic
+            u32 uvlmCount = ReadU32(data, off); off += 4;
+            off += (size_t)uvlmCount * 8;
+        }
         continue;
     } // end mesh loop
 

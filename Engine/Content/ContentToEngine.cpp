@@ -151,6 +151,22 @@ namespace primal::content
 		};
 		static_assert(sizeof(meshlet_wire) == 60, "must match ContentTools mesh::meshlet");
 
+		// A9 Lightmap UV sidecar: mirrors ContentTools Geometry.h
+		// elements_type::lightmap_uv_flag and the "UVLM" trailing section
+		// (u32 magic | u32 uv_count | uv_count * f32 u,v). Presence is
+		// flagged in the mesh header, so parsing is deterministic — old
+		// blobs (flag clear) end at the SDF section and never reach here.
+		constexpr u32 lightmap_uv_flag{ 0x10 };
+		constexpr u32 lightmap_uv_magic{ 0x4D4C5655 };  // "UVLM"
+
+		void skip_lightmap_uv_section(utl::blob_stream_reader& blob)
+		{
+			const u32 magic{ blob.read<u32>() };
+			assert(magic == lightmap_uv_magic);
+			const u32 uv_count{ blob.read<u32>() };
+			blob.skip((size_t)uv_count * sizeof(f32) * 2);
+		}
+
 		void skip_mesh_in_blob(utl::blob_stream_reader& blob)
 		{
 			// Name
@@ -161,7 +177,7 @@ namespace primal::content
 			blob.skip(sizeof(u32)); // lod_id
 			blob.skip(sizeof(u32)); // material_idx
 			const u32 elem_size{ blob.read<u32>() };
-			blob.skip(sizeof(u32)); // elem_type
+			const u32 elem_type{ blob.read<u32>() };
 			const u32 num_vertices{ blob.read<u32>() };
 			const u32 index_size{ blob.read<u32>() };
 			const u32 num_indices{ blob.read<u32>() };
@@ -201,6 +217,12 @@ namespace primal::content
 			
 			const u32 vector_field_size{ blob.read<u32>() };
 			blob.skip(vector_field_size * sizeof(u16));
+
+			// A9: lightmap UV sidecar, only when flagged in the header.
+			if (elem_type & lightmap_uv_flag)
+			{
+				skip_lightmap_uv_section(blob);
+			}
 		}
 
 		void parse_mesh_to_asset(utl::blob_stream_reader& blob, graphics::rhi::RHIMeshAsset& asset)
@@ -213,7 +235,11 @@ namespace primal::content
 			asset.lod_id = blob.read<u32>();
 			asset.material_idx = blob.read<u32>();
 			const u32 elem_size{ blob.read<u32>() };
-			asset.elements_type = blob.read<u32>();
+			const u32 raw_elem_type{ blob.read<u32>() };
+			// A9: strip the lightmap sidecar flag — the in-memory asset
+			// keeps the canonical elements_type.
+			asset.elements_type = raw_elem_type & ~lightmap_uv_flag;
+			const bool has_lightmap_uvs{ (raw_elem_type & lightmap_uv_flag) != 0 };
 			asset.num_vertices = blob.read<u32>();
 			asset.index_size = blob.read<u32>();
 			asset.num_indices = blob.read<u32>();
@@ -344,6 +370,21 @@ namespace primal::content
 			{
 				memcpy(asset.sdf.vector_field.data(), blob.position(), vector_field_size * sizeof(u16));
 				blob.skip(vector_field_size * sizeof(u16));
+			}
+
+			// A9: Lightmap UV sidecar section — read into the asset's
+			// sidecar buffer (f32 u,v pairs; no GPU consumer yet).
+			if (has_lightmap_uvs)
+			{
+				const u32 magic{ blob.read<u32>() };
+				assert(magic == lightmap_uv_magic);
+				const u32 uv_count{ blob.read<u32>() };
+				asset.lightmap_uv_buffer.resize((size_t)uv_count * sizeof(f32) * 2);
+				if (!asset.lightmap_uv_buffer.empty())
+				{
+					memcpy(asset.lightmap_uv_buffer.data(), blob.position(), asset.lightmap_uv_buffer.size());
+					blob.skip(asset.lightmap_uv_buffer.size());
+				}
 			}
 		}
 

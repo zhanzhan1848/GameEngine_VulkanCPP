@@ -83,6 +83,12 @@ bool ValidateSceneBlob(const scene_data& data,
         ++report.mesh_count;
         report.meshlet_count += view.meshlet_count;
 
+        // A9: lightmap UV sidecar stats (0 for legacy blobs).
+        if (view.lightmap_uv_count > 0) {
+            ++report.lightmap_uv_mesh_count;
+            report.lightmap_uv_coord_count += view.lightmap_uv_count;
+        }
+
         for (u32 i = 0; i < view.meshlet_count; ++i) {
             validate_meshlet(view.meshlets[i],
                              view.meshlet_vertex_count,

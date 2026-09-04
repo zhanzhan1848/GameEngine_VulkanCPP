@@ -96,6 +96,28 @@ PackedMesh BuildPackedMesh(const ProcessableMesh& m,
 
     const UVSet* tex_uv = find_uv_set(m, UVSetPurpose::Texture);
 
+    // A9 Lightmap UV sidecar: pass the first Lightmap-purpose UVSet through
+    // as a trailing UVLM section instead of dropping it. Only full-coverage
+    // sets are serialized — a partial set would misindex per-vertex lightmap
+    // fetches downstream, so it is reported and dropped.
+    pm.lightmap_uvs.clear();
+    if (const UVSet* lm_uv = find_uv_set(m, UVSetPurpose::Lightmap);
+        lm_uv && !lm_uv->coords.empty()) {
+        if (lm_uv->coords.size() == m.positions.size()) {
+            pm.lightmap_uvs.reserve(lm_uv->coords.size() * 2);
+            for (const math::v2& c : lm_uv->coords) {
+                pm.lightmap_uvs.push_back(c.x);
+                pm.lightmap_uvs.push_back(c.y);
+            }
+        } else {
+            errors.emplace_back(ErrorReport{
+                Severity::Warning, "blob.lightmap_uv_partial",
+                "blob: Lightmap UVSet coverage (" + std::to_string(lm_uv->coords.size()) +
+                    ") != vertex count (" + std::to_string(m.positions.size()) +
+                    "); lightmap UVs dropped", "blob"});
+        }
+    }
+
     switch (pm.elements_type) {
     case elements_type::static_color: {
         auto* eb = reinterpret_cast<elements::static_color*>(pm.element_buffer.data());
@@ -191,6 +213,12 @@ size_t GetPackedMeshSize(const PackedMesh& pm) {
     size += sizeof(u32) + pm.sdf.data.size()        * sizeof(u16);
     size += sizeof(u32) + pm.sdf.voxels.size()      * sizeof(u8);
     size += sizeof(u32) + pm.sdf.vector_field.size() * sizeof(u16);
+    // A9 Lightmap UV sidecar section (only when present).
+    if (!pm.lightmap_uvs.empty()) {
+        size += sizeof(u32);                              // UVLM magic
+        size += sizeof(u32);                              // uv_count
+        size += pm.lightmap_uvs.size() * sizeof(f32);     // uv pairs
+    }
     return size;
 }
 
@@ -204,7 +232,11 @@ void Serialize(const PackedMesh& pm, utl::blob_stream_writer& blob) {
     blob.write(pm.material_idx);
     const u32 elements_size = (u32)get_vertex_element_size(pm.elements_type);
     blob.write(elements_size);
-    blob.write((u32)pm.elements_type);
+    // A9: lightmap_uv_flag tells readers a UVLM section follows the SDF
+    // section. pm.elements_type itself stays canonical.
+    const u32 blob_elements_type = (u32)pm.elements_type |
+        (pm.lightmap_uvs.empty() ? 0u : (u32)elements::elements_type::lightmap_uv_flag);
+    blob.write(blob_elements_type);
     const u32 num_vertices = (u32)(pm.position_buffer.size() / 12);
     blob.write(num_vertices);
     const u32 index_size = (num_vertices < (1u << 16)) ? (u32)sizeof(u16) : (u32)sizeof(u32);
@@ -268,6 +300,16 @@ void Serialize(const PackedMesh& pm, utl::blob_stream_writer& blob) {
     if (!pm.sdf.vector_field.empty()) {
         blob.write((const u8*)pm.sdf.vector_field.data(),
                    pm.sdf.vector_field.size() * sizeof(u16));
+    }
+
+    // A9 Lightmap UV sidecar: written only when present, so meshes without
+    // lightmap UVs serialize byte-identically to the pre-A9 layout.
+    if (!pm.lightmap_uvs.empty()) {
+        constexpr u32 magic_uvlm = 0x4D4C5655;  // "UVLM"
+        blob.write(magic_uvlm);
+        blob.write((u32)(pm.lightmap_uvs.size() / 2));
+        blob.write((const u8*)pm.lightmap_uvs.data(),
+                   pm.lightmap_uvs.size() * sizeof(f32));
     }
 }
 

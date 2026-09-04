@@ -10,6 +10,7 @@
 //   - static_normal + static_color element layouts match Geometry.cpp
 
 #include "pipeline/SceneBlobWriter.h"
+#include "pipeline/SceneBlobReader.h"
 #include "common/ProcessableMesh.h"
 #include "common/PipelineTypes.h"
 #include "common/ErrorReport.h"
@@ -323,6 +324,91 @@ bool test_meshlet_section_round_trip() {
     return mlt_count == 6;
 }
 
+// ---- A9 Lightmap UV sidecar ---------------------------------------------
+
+bool test_lightmap_uv_absent_by_default() {
+    ProcessableMesh m = make_textured_cube();
+    primal::utl::vector<ErrorReport> errs;
+    PackedMesh pm = BuildPackedMesh(m, {}, u32_invalid_id, -1.f, errs);
+    if (!pm.lightmap_uvs.empty()) return false;
+
+    // Serialized blob must be byte-identical to the pre-A9 layout: no UVLM
+    // magic anywhere, header elements_type without the sidecar flag.
+    const size_t sz = GetPackedMeshSize(pm);
+    utl::vector<u8> buf(sz);
+    utl::blob_stream_writer blob{buf.data(), sz};
+    Serialize(pm, blob);
+
+    for (size_t i = 0; i + 4 <= sz; ++i) {
+        if (read_u32(buf.data() + i) == 0x4D4C5655) return false;  // "UVLM"
+    }
+    // header: name_size(4) + name + lod_id(4) + material_idx(4)
+    //         + elements_size(4) + elements_type(4)
+    const size_t type_off = 4 + m.name.size() + 4 + 4 + 4;
+    const u32 type = read_u32(buf.data() + type_off);
+    return type == (u32)elements::elements_type::static_normal_texture;
+}
+
+bool test_lightmap_uv_sidecar_round_trip() {
+    ProcessableMesh m = make_textured_cube();
+    UVSet lm;
+    lm.purpose = UVSetPurpose::Lightmap;
+    for (u32 i = 0; i < 8; ++i) {
+        lm.coords.emplace_back(v2{0.1f * f32(i), 1.f - 0.1f * f32(i)});
+    }
+    m.uv_sets.emplace_back(std::move(lm));
+
+    primal::utl::vector<ErrorReport> errs;
+    PackedMesh pm = BuildPackedMesh(m, {}, u32_invalid_id, -1.f, errs);
+    if (pm.lightmap_uvs.size() != 8 * 2) return false;
+
+    const size_t sz = GetPackedMeshSize(pm);
+    utl::vector<u8> buf(sz);
+    utl::blob_stream_writer blob{buf.data(), sz};
+    Serialize(pm, blob);
+    if (blob.position() != buf.data() + sz) return false;
+
+    // Header elements_type must carry the sidecar flag.
+    const size_t type_off = 4 + m.name.size() + 4 + 4 + 4;
+    const u32 type = read_u32(buf.data() + type_off);
+    if (type != ((u32)elements::elements_type::static_normal_texture |
+                 (u32)elements::elements_type::lightmap_uv_flag)) return false;
+
+    // Read back through SceneBlobReader: canonical type + full UV payload.
+    const u8* cursor = buf.data();
+    const u8* end = buf.data() + sz;
+    PackedMeshView view;
+    if (!ReadNextPackedMesh(cursor, end, view, errs)) return false;
+    if (cursor != end) return false;
+    if (view.elements_type != elements::elements_type::static_normal_texture) return false;
+    if (view.lightmap_uv_count != 8 || !view.lightmap_uvs) return false;
+    for (u32 i = 0; i < 8; ++i) {
+        const f32 u = view.lightmap_uvs[i * 2 + 0];
+        const f32 v = view.lightmap_uvs[i * 2 + 1];
+        if (std::abs(u - 0.1f * f32(i)) > 1e-6f) return false;
+        if (std::abs(v - (1.f - 0.1f * f32(i))) > 1e-6f) return false;
+    }
+    return true;
+}
+
+bool test_lightmap_uv_partial_coverage_dropped() {
+    ProcessableMesh m = make_textured_cube();
+    UVSet lm;
+    lm.purpose = UVSetPurpose::Lightmap;
+    for (u32 i = 0; i < 5; ++i) lm.coords.emplace_back(v2{0.f, 0.f});  // 5 of 8
+    m.uv_sets.emplace_back(std::move(lm));
+
+    primal::utl::vector<ErrorReport> errs;
+    PackedMesh pm = BuildPackedMesh(m, {}, u32_invalid_id, -1.f, errs);
+
+    if (!pm.lightmap_uvs.empty()) return false;
+    bool warned = false;
+    for (const auto& e : errs) {
+        if (e.code == "blob.lightmap_uv_partial") warned = true;
+    }
+    return warned;
+}
+
 // ---- Test runner --------------------------------------------------------
 
 struct Case { const char* name; bool (*fn)(); };
@@ -343,6 +429,9 @@ int main() {
         CASE(test_t_sign_static_normal_texture_keeps_normal_z_bit),
         CASE(test_index_size_u32_above_65536_verts),
         CASE(test_meshlet_section_round_trip),
+        CASE(test_lightmap_uv_absent_by_default),
+        CASE(test_lightmap_uv_sidecar_round_trip),
+        CASE(test_lightmap_uv_partial_coverage_dropped),
     };
 
     int passed = 0, failed = 0;

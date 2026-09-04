@@ -32,6 +32,15 @@ namespace primal::tools {
 				skeletal_normal_color			= skeletal_normal | static_color,
 				skeletal_normal_texture			= skeletal | static_normal_texture,
 				skeletal_normal_texture_color	= skeletal_normal_texture | static_color,
+
+				// A9 Lightmap UV sidecar: blob-format flag only. When set, a
+				// trailing section follows the SDF section of that mesh:
+				//   u32 magic 0x4D4C5655 ("UVLM") | u32 uv_count | uv_count * (f32 u, v)
+				// with uv_count == num_vertices (full coverage). The in-memory
+				// elements_type stays canonical — readers mask this bit off
+				// after consuming the section. Old blobs (bit clear) parse
+				// byte-identically; meshes without lightmap UVs never set it.
+				lightmap_uv_flag				= 0x10,
 			};
 		};
 

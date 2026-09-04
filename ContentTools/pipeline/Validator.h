@@ -28,6 +28,11 @@ struct ValidationReport {
     u32                         meshlets_invalid_offsets{0};
     u32                         total_errors{0};
     u32                         total_warnings{0};
+
+    // A9 Lightmap UV sidecar: how many meshes carry the UVLM section and
+    // the total lightmap UV vertex count across them. Zero for legacy blobs.
+    u32                         lightmap_uv_mesh_count{0};
+    u32                         lightmap_uv_coord_count{0};
 };
 
 // Validate a scene_data.buffer. Returns true if no errors (warnings allowed).

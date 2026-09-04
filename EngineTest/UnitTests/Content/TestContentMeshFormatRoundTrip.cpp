@@ -9,6 +9,7 @@
 #include "TestFramework.h"
 #include "Content/ContentToEngine.h"
 #include "Common/CommonHeaders.h"
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -113,6 +114,24 @@ std::vector<u8> MakeSubmesh(const char* name, u32 v, u32 i, u32 es, u32 et, u32 
     return g_buf;
 }
 
+// A9: same as MakeSubmesh plus the trailing lightmap UV sidecar section
+// ("UVLM"). `et` must carry the 0x10 sidecar flag for the section to exist.
+// Full-coverage invariant: uv_count == vertex count.
+std::vector<u8> MakeSubmeshWithLightmapUVs(const char* name, u32 v, u32 i,
+                                           u32 es, u32 et, u32 ml) {
+    g_buf.clear();
+    WriteSubmesh(name, v, i, es, et, ml);
+    w32(0x4D4C5655);                            // "UVLM"
+    w32(v);                                     // uv_count
+    std::vector<f32> uvs((size_t)v * 2);
+    for (u32 k = 0; k < v; ++k) {
+        uvs[(size_t)k * 2 + 0] = 0.25f * (f32)k;
+        uvs[(size_t)k * 2 + 1] = 0.75f - 0.25f * (f32)k;
+    }
+    wbytes(uvs.data(), uvs.size() * 4);
+    return g_buf;
+}
+
 } // namespace
 
 class TestContentMeshFormatRoundTrip {
@@ -165,7 +184,6 @@ public:
     // Single submesh: exercises create_rhi_single_submesh (fake-pointer path).
     TestResult SingleSubmesh_Parse() {
         std::vector<u8> blob = WrapGeometry({MakeSubmesh("single", 6, 18, 20, 3, 1)});
-
         id::id_type geom = content::create_resource(blob.data(), content::asset_type::mesh);
         if (!id::is_valid(geom)) return TestResult::Failed;
 
@@ -175,6 +193,43 @@ public:
         if (!content::get_rhi_mesh_asset(sub[0], a)) return TestResult::Failed;
         if (a.num_vertices != 6 || a.meshlets.size() != 1) return TestResult::Failed;
         if (a.meshlets[0].cone_apex[0] != 1.5f) return TestResult::Failed;
+
+        content::destroy_resource(geom, content::asset_type::mesh);
+        return TestResult::Passed;
+    }
+
+    // A9: lightmap UV sidecar — header flag routes parse_mesh_to_asset and
+    // skip_mesh_in_blob through the UVLM section; in-memory elements_type is
+    // masked back to canonical and the sidecar buffer round-trips. The
+    // flagged submesh comes FIRST so a desynced body walk corrupts the
+    // second submesh's parse (proves skip stays in sync).
+    TestResult LightmapUVSidecar_Parse() {
+        std::vector<u8> blob = WrapGeometry({
+            MakeSubmeshWithLightmapUVs("lmMesh", 6, 18, 20, 3 | 0x10, 1),
+            MakeSubmesh("plainMesh", 4, 12, 20, 3, 1),
+        });
+
+        id::id_type geom = content::create_resource(blob.data(), content::asset_type::mesh);
+        if (!id::is_valid(geom)) return TestResult::Failed;
+
+        id::id_type subs[2] = {id::invalid_id, id::invalid_id};
+        content::get_submesh_gpu_ids(geom, 2, subs);
+        if (!id::is_valid(subs[0]) || !id::is_valid(subs[1])) return TestResult::Failed;
+
+        graphics::rhi::RHIMeshAsset a{};
+        if (!content::get_rhi_mesh_asset(subs[0], a)) return TestResult::Failed;
+        if (a.elements_type != 3) return TestResult::Failed;  // flag stripped
+        if (a.num_vertices != 6) return TestResult::Failed;
+        if (a.lightmap_uv_buffer.size() != (size_t)6 * 8) return TestResult::Failed;
+        const f32* uvs = (const f32*)a.lightmap_uv_buffer.data();
+        if (std::abs(uvs[0] - 0.00f) > 1e-6f || std::abs(uvs[1] - 0.75f) > 1e-6f) return TestResult::Failed;
+        if (std::abs(uvs[10] - 1.25f) > 1e-5f || std::abs(uvs[11] + 0.5f) > 1e-5f) return TestResult::Failed;
+
+        // Second (unflagged) submesh: no sidecar, walk stays in sync.
+        graphics::rhi::RHIMeshAsset b{};
+        if (!content::get_rhi_mesh_asset(subs[1], b)) return TestResult::Failed;
+        if (b.elements_type != 3 || !b.lightmap_uv_buffer.empty()) return TestResult::Failed;
+        if (b.num_vertices != 4) return TestResult::Failed;
 
         content::destroy_resource(geom, content::asset_type::mesh);
         return TestResult::Passed;
@@ -196,6 +251,12 @@ int main() {
         result = 1;
     } else {
         std::cout << "PASS SingleSubmesh_Parse" << std::endl;
+    }
+    if (test.LightmapUVSidecar_Parse() == TestResult::Failed) {
+        std::cerr << "LightmapUVSidecar_Parse Failed" << std::endl;
+        result = 1;
+    } else {
+        std::cout << "PASS LightmapUVSidecar_Parse" << std::endl;
     }
 
     // create_resource registers meshes in the Content-layer static free_list

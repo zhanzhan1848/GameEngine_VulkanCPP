@@ -426,6 +426,11 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  }
              }
              
+             // A9: bit 0x10 in elements_type flags the lightmap UV sidecar
+             // section; strip it so downstream type handling sees the
+             // canonical format (mirrors ContentTools lightmap_uv_flag).
+             const bool hasLightmapUV = (elementsType & 0x10) != 0;
+             elementsType &= ~0x10u;
              (void)elementsType;
              (void)primitiveTopology;
 
@@ -614,7 +619,31 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  }
                  // If not SDF, don't consume - it might be next submesh data
              }
-             
+
+             // A9: lightmap UV sidecar section. Flagged in the header; the
+             // pipeline writer always emits MSHL+SDF before it. Full-coverage
+             // invariant: uv_count == vertexCount.
+             if (hasLightmapUV) {
+                 bool sidecarConsumed = false;
+                 if (reader.Remaining() >= 8) {
+                     const u8* uvlmPeek = static_cast<const u8*>(reader.GetCurrentPtr());
+                     u32 uvlmMagic = *reinterpret_cast<const u32*>(uvlmPeek);
+                     if (uvlmMagic == 0x4D4C5655) { // "UVLM"
+                         reader.Skip(4);
+                         u32 uvlmCount = reader.Read<u32>();
+                         if (uvlmCount == vertexCount && reader.Remaining() >= uvlmCount * 8) {
+                             meshAsset.lightmap_uv_buffer.resize((size_t)uvlmCount * 8);
+                             reader.Read(meshAsset.lightmap_uv_buffer.data(), uvlmCount * 8);
+                             sidecarConsumed = true;
+                         }
+                     }
+                 }
+                 if (!sidecarConsumed) {
+                     PRIMAL_LOG_STREAM(Warn, "Scene") << "A9: flagged lightmap UV section missing/invalid for submesh '"
+                               << meshName << "'; continuing without sidecar" << std::endl;
+                 }
+             }
+
              // Pipeline format LOD filtering: the pipeline model contains
              // multiple LODs per mesh (lodId 0xFFFFFFFF=LOD0, 1=LOD1, etc).
              // Only create RenderMesh for LOD 0 to avoid memory exhaustion
@@ -1161,6 +1190,11 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
                 }
             }
 
+            // A9: bit 0x10 in elements_type flags the lightmap UV sidecar
+            // section; strip it so downstream type handling sees the
+            // canonical format (mirrors ContentTools lightmap_uv_flag).
+            const bool hasLightmapUV = (elementsType & 0x10) != 0;
+            elementsType &= ~0x10u;
             (void)elementsType;
 
             u32 positionSize = 12 * vertexCount;
@@ -1262,6 +1296,30 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
                             reader.Read(meshAsset.sdf.vector_field.data(), vfSize * 2);
                         }
                     }
+                }
+            }
+
+            // A9: lightmap UV sidecar section (flagged in the header; the
+            // pipeline writer always emits MSHL+SDF before it). Full-coverage
+            // invariant: uv_count == vertexCount.
+            if (hasLightmapUV) {
+                bool sidecarConsumed = false;
+                if (reader.Remaining() >= 8) {
+                    const u8* uvlmPeek = static_cast<const u8*>(reader.GetCurrentPtr());
+                    u32 uvlmMagic = *reinterpret_cast<const u32*>(uvlmPeek);
+                    if (uvlmMagic == 0x4D4C5655) { // "UVLM"
+                        reader.Skip(4);
+                        u32 uvlmCount = reader.Read<u32>();
+                        if (uvlmCount == vertexCount && reader.Remaining() >= uvlmCount * 8) {
+                            meshAsset.lightmap_uv_buffer.resize((size_t)uvlmCount * 8);
+                            reader.Read(meshAsset.lightmap_uv_buffer.data(), uvlmCount * 8);
+                            sidecarConsumed = true;
+                        }
+                    }
+                }
+                if (!sidecarConsumed) {
+                    PRIMAL_LOG_STREAM(Warn, "Scene") << "A9: flagged lightmap UV section missing/invalid for submesh '"
+                              << meshName << "'; continuing without sidecar" << std::endl;
                 }
             }
 
@@ -1389,6 +1447,10 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             s32 matIdx = (s32)readU32();
             u32 elemSize = readU32();
             u32 elemType = readU32();
+            // A9: bit 0x10 flags the lightmap UV sidecar section; strip it so
+            // canonical type handling is unaffected (ContentTools flag).
+            const bool hasLightmapUV = (elemType & 0x10) != 0;
+            elemType &= ~0x10u;
             u32 vertCount = readU32();
             u32 idxSize = readU32();
             u32 idxCount = readU32();
@@ -1452,6 +1514,25 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
                 if (vfSize > 0) skipBytes(vfSize * 2);
             }
 
+            // A9: lightmap UV sidecar (flagged in the header; the pipeline
+            // writer always emits MSHL+SDF before it). Full-coverage
+            // invariant: uv_count == vertCount.
+            utl::vector<u8> lightmapUVs;
+            if (hasLightmapUV) {
+                u32 magicUvlm = readU32();
+                if (magicUvlm == 0x4D4C5655) { // "UVLM"
+                    u32 uvlmCount = readU32();
+                    if (uvlmCount == vertCount && reader.Remaining() >= uvlmCount * 8) {
+                        lightmapUVs.resize((size_t)uvlmCount * 8);
+                        reader.Read(lightmapUVs.data(), uvlmCount * 8);
+                    }
+                }
+                if (lightmapUVs.empty()) {
+                    PRIMAL_LOG_STREAM(Warn, "Scene") << "[Pipeline] flagged lightmap UV section missing/invalid for \""
+                              << meshName << "\"; continuing without sidecar" << std::endl;
+                }
+            }
+
             // --- Create RenderMesh (same as old parser) ---
             // Interleave position + element data into TARGET_VERTEX_STRIDE.
             utl::vector<u8> interleaved(vertCount * TARGET_VERTEX_STRIDE, 0);
@@ -1487,6 +1568,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             memcpy(meshAsset.element_buffer.data(), elemPtr, elemBufSize);
             meshAsset.index_buffer.resize(idxBufSize);
             memcpy(meshAsset.index_buffer.data(), idxPtr, idxBufSize);
+            meshAsset.lightmap_uv_buffer = std::move(lightmapUVs);
 
             id::id_type meshEntityId = content::register_mesh_asset(meshAsset);
 

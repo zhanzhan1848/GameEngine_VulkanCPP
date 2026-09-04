@@ -331,6 +331,22 @@ bool DecodeScene(const scene_data& src, ProcessableScene& dst,
             ProcessableMesh pm;
             if (!DecodePackedMesh(view, pm, errors)) return false;
 
+            // A9: rehydrate the Lightmap UV sidecar as a Lightmap-purpose
+            // UVSet so decode → re-encode round trips preserve it and the
+            // CLI validation path can assert on it. ReadNextPackedMesh
+            // already enforced uv_count == num_vertices.
+            if (view.lightmap_uv_count > 0 && view.lightmap_uvs) {
+                UVSet lm;
+                lm.purpose = UVSetPurpose::Lightmap;
+                lm.coords.reserve(view.lightmap_uv_count);
+                for (u32 i = 0; i < view.lightmap_uv_count; ++i) {
+                    lm.coords.emplace_back(math::v2{
+                        view.lightmap_uvs[i * 2 + 0],
+                        view.lightmap_uvs[i * 2 + 1]});
+                }
+                pm.uv_sets.emplace_back(std::move(lm));
+            }
+
             // Determine which LOD level this mesh belongs to.
             // lod_id == u32_invalid_id or 0 → LOD 0 (original).
             const u32 effective_lod = (view.lod_id == u32_invalid_id) ? 0 : view.lod_id;

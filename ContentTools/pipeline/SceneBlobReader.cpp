@@ -273,6 +273,13 @@ bool ReadNextPackedMesh(const u8*& cursor_in, const u8* end, PackedMeshView& out
         return false;
     }
 
+    // A9: the blob header may carry lightmap_uv_flag; the in-memory view
+    // keeps the canonical type and the flag drives the section read below.
+    const bool has_lightmap_uvs =
+        (out.elements_type & elements::elements_type::lightmap_uv_flag) != 0;
+    out.elements_type = (elements::elements_type::type)
+        (out.elements_type & ~elements::elements_type::lightmap_uv_flag);
+
     // Buffers
     if (!c.read_bytes(out.position_buffer, (size_t)12 * out.num_vertices)) {
         errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_position",
@@ -393,6 +400,34 @@ bool ReadNextPackedMesh(const u8*& cursor_in, const u8* end, PackedMeshView& out
                 "blob_read: truncated at SDF vector_field", "blob_read"});
             return false;
         }
+    }
+
+    // A9 Lightmap UV sidecar: presence is flagged in the header
+    // (lightmap_uv_flag), so this read is deterministic — no peeking. Old
+    // blobs never set the flag and end at the SDF section.
+    out.lightmap_uv_count = 0;
+    out.lightmap_uvs = nullptr;
+    if (has_lightmap_uvs) {
+        constexpr u32 magic_uvlm = 0x4D4C5655u;  // "UVLM"
+        if (!c.expect_magic(magic_uvlm)) {
+            errors.emplace_back(ErrorReport{Severity::Error, "blob_read.missing_uvlm",
+                "blob_read: lightmap_uv_flag set but UVLM magic missing", "blob_read"});
+            return false;
+        }
+        u32 uv_count;
+        if (!c.read_u32(uv_count) || uv_count != out.num_vertices) {
+            errors.emplace_back(ErrorReport{Severity::Error, "blob_read.bad_uvlm_count",
+                "blob_read: UVLM uv_count missing or != num_vertices", "blob_read"});
+            return false;
+        }
+        const u8* uv_bytes;
+        if (!c.read_bytes(uv_bytes, (size_t)uv_count * sizeof(f32) * 2)) {
+            errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_uvlm",
+                "blob_read: truncated at UVLM uv pairs", "blob_read"});
+            return false;
+        }
+        out.lightmap_uv_count = uv_count;
+        out.lightmap_uvs = reinterpret_cast<const f32*>(uv_bytes);
     }
 
     cursor_in = c.p;

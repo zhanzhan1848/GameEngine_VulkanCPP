@@ -53,5 +53,13 @@ namespace primal::graphics::rhi
 
         // SDF
         RHISDFData sdf;
+
+        // A9 Lightmap UV sidecar (A9 地基段): raw f32 (u, v) pairs, 8 bytes
+        // per vertex, uv_count = size / 8. Carried from the blob's UVLM
+        // section (elements_type lightmap_uv_flag); empty for meshes without
+        // lightmap UVs. No GPU consumer yet — future lightmap sampling binds
+        // this as its own vertex-pulling buffer (per-backend, zero impact on
+        // the existing 20B element format).
+        utl::vector<u8> lightmap_uv_buffer;
     };
 }

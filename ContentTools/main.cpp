@@ -248,6 +248,7 @@ int run_pipeline(int argc, char* argv[]) {
     if (argc < 4) {
         std::cerr << "Usage: ContentToolsCLI --pipeline <input> <output> "
                      "[--repair] [--remesh] [--subdivide] [--uvatlas] "
+                     "[--uvatlas-lightmap] "
                      "[--repair-normal-signs] [--no-lod] [--no-meshlet] [--collision] "
                      "[--lod-ratio <f>]\n"
                      "  Subdivide:    --subdivide-levels N (default 1)\n"
@@ -293,6 +294,16 @@ int run_pipeline(int argc, char* argv[]) {
         else if (arg == "--no-remesh")  params.enable_remesh = 0;
         else if (arg == "--subdivide")  params.enable_subdivide = 1;
         else if (arg == "--uvatlas")    params.enable_uvatlas = 1;
+        else if (arg == "--uvatlas-lightmap") {
+            // A9: second unwrap with Lightmap purpose (strict unique pack,
+            // gutter=4). Its output lands in the blob's UVLM sidecar
+            // section instead of being dropped. The POD fields mirror the
+            // uvatlas::ForLightmap() preset via the ContentTools.cpp bridge.
+            params.enable_uvatlas = 1;
+            params.uvatlas_target_purpose = 1;      // UVSetPurpose::Lightmap
+            params.uvatlas_gutter = 4.0f;
+            params.uvatlas_strict_unique_pack = 1;
+        }
         else if (arg == "--no-lod")     params.enable_lod = 0;
         else if (arg == "--no-meshlet") params.enable_meshlet = 0;
         else if (arg == "--collision")  params.enable_collision = 1;
@@ -407,6 +418,9 @@ int run_validate(int argc, char* argv[]) {
     std::cout << "Over triangle cap:" << report.meshlets_over_triangle_cap << "\n";
     std::cout << "Zero bounds:      " << report.meshlets_zero_bounds << "\n";
     std::cout << "Invalid offsets:  " << report.meshlets_invalid_offsets << "\n";
+    // A9 Lightmap UV sidecar (0/0 for legacy blobs).
+    std::cout << "Lightmap meshes:  " << report.lightmap_uv_mesh_count << "\n";
+    std::cout << "Lightmap UVs:     " << report.lightmap_uv_coord_count << "\n";
     std::cout << "Total errors:     " << report.total_errors << "\n";
     std::cout << "Total warnings:   " << report.total_warnings << "\n";
 

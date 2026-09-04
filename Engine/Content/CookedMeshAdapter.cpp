@@ -11,6 +11,11 @@ namespace primal::content
     {
         constexpr std::uint32_t meshlet_magic = 0x4C48534D; // "MSHL"
         constexpr std::uint32_t sdf_magic = 0x20464453;     // "SDF "
+        // A9 Lightmap UV sidecar ("UVLM"), flagged by bit 0x10 in the mesh
+        // header's elements_type (ContentTools Geometry.h
+        // elements_type::lightmap_uv_flag).
+        constexpr std::uint32_t lightmap_uv_flag = 0x10;
+        constexpr std::uint32_t lightmap_uv_magic = 0x4D4C5655; // "UVLM"
         constexpr std::size_t serialized_meshlet_size = 60;
         constexpr std::uint32_t max_collection_count = 1u << 20;
 
@@ -99,7 +104,8 @@ namespace primal::content
                 return false;
 
             (void)material_index;
-            (void)element_type;
+            // element_type: low 4 bits are the canonical format; bit 0x10
+            // flags the A9 lightmap UV sidecar section and is consumed below.
             if (element_size > 256 || vertex_count == 0 || vertex_count > 10000000 ||
                 (index_size != 2 && index_size != 4) ||
                 index_count == 0 || index_count > 30000000 ||
@@ -134,6 +140,18 @@ namespace primal::content
                 !skip_counted_bytes(input, sizeof(std::uint8_t)) ||
                 !skip_counted_bytes(input, sizeof(std::uint16_t)))
                 return false;
+
+            // A9: lightmap UV sidecar, only when flagged in the header.
+            // Full-coverage invariant: uv_count == vertex_count.
+            if (element_type & lightmap_uv_flag)
+            {
+                std::uint32_t uv_magic{};
+                std::uint32_t uv_count{};
+                if (!input.read_u32(uv_magic) || uv_magic != lightmap_uv_magic ||
+                    !input.read_u32(uv_count) || uv_count != vertex_count ||
+                    !input.skip(static_cast<std::size_t>(uv_count) * 2 * sizeof(float)))
+                    return false;
+            }
 
             record.end = input.offset;
             return true;

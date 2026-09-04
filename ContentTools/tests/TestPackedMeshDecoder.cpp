@@ -262,6 +262,34 @@ bool test_static_normal_texture_round_trip() {
 
 // ---- Edge cases ------------------------------------------------------------
 
+// A9: Lightmap UV sidecar rehydrates as a Lightmap-purpose UVSet, so a
+// decode → re-encode round trip preserves the second channel.
+bool test_lightmap_uv_sidecar_rehydrated_as_uvset() {
+    ProcessableMesh src = make_static_normal_texture_mesh();
+    UVSet lm;
+    lm.purpose = UVSetPurpose::Lightmap;
+    lm.coords.emplace_back(v2{0.25f, 0.5f});
+    lm.coords.emplace_back(v2{0.5f, 0.75f});
+    lm.coords.emplace_back(v2{0.75f, 1.f});
+    src.uv_sets.emplace_back(std::move(lm));
+
+    scene_buffer buf = build_single_mesh_scene(src);
+    ProcessableScene dst;
+    utl::vector<ErrorReport> errs;
+    if (!DecodeScene(buf.sd, dst, errs)) return false;
+    const ProcessableMesh& m = dst.lods[0].meshes[0];
+    if (m.uv_sets.size() != 2) return false;
+    if (m.uv_sets[0].purpose != UVSetPurpose::Texture) return false;
+    if (m.uv_sets[1].purpose != UVSetPurpose::Lightmap) return false;
+    if (m.uv_sets[1].coords.size() != 3) return false;
+    for (u32 i = 0; i < 3; ++i) {
+        const v2& exp = src.uv_sets[1].coords[i];
+        const v2& got = m.uv_sets[1].coords[i];
+        if (!approx(got.x, exp.x, 1e-6f) || !approx(got.y, exp.y, 1e-6f)) return false;
+    }
+    return true;
+}
+
 bool test_index_widening_large_vertex_count() {
     ProcessableMesh src;
     src.name = "big";
@@ -392,6 +420,7 @@ int main() {
         CASE(test_static_color_round_trip),
         CASE(test_static_normal_round_trip),
         CASE(test_static_normal_texture_round_trip),
+        CASE(test_lightmap_uv_sidecar_rehydrated_as_uvset),
         CASE(test_index_widening_large_vertex_count),
         CASE(test_empty_mesh_returns_success),
         CASE(test_multi_mesh_mixed_elements_types),

@@ -52,6 +52,12 @@ struct PackedMesh {
     utl::vector<u8>                 element_buffer;
     utl::vector<u32>                indices;
 
+    // A9 Lightmap UV sidecar: 2 floats per vertex (u, v), empty when the
+    // mesh has no full-coverage Lightmap-purpose UVSet. Serialized as a
+    // trailing UVLM section (see elements_type::lightmap_uv_flag) — the
+    // packed element layout itself is unchanged.
+    utl::vector<f32>                lightmap_uvs;
+
     MeshletData                     meshlets;
     mesh::sdf_data                  sdf;
 };
