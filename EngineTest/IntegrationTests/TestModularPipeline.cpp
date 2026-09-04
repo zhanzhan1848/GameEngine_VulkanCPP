@@ -511,6 +511,16 @@ bool TestModularPipeline::InitializePipeline() {
     // SPGI Metal still has a known GPU page fault and remains disabled.
     pipeline_->SetLumenConfig(lumenConfig);
 
+    // PRIMAL_SPGI=1: enable the Screen Probe GI chain on Metal for stage-by-
+    // stage bring-up. Must run AFTER SetLumenConfig — SetQualityOverride is a
+    // user override that wins over the axis defaults (see the ordering note on
+    // ApplyGIAxis1_SpaceCaches in StandardRenderPipeline.cpp); SPGI_OFF=1 still
+    // disables afterwards for A/B isolation.
+    if (std::getenv("PRIMAL_SPGI")) {
+        pipeline_->SetQualityOverride(true, true);
+        std::cout << "[TestModularPipeline] SPGI enabled via PRIMAL_SPGI" << std::endl;
+    }
+
     // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
     // TestVulkanSponzaRenderGraph (the measurement reference). Without this
     // the pipeline defaults (light_color 5.0, ddgi_light_color 20.0) put the

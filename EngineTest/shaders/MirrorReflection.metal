@@ -119,7 +119,10 @@ fragment float4 mirror_reflection_fs(
     texture2d_array<float> albedoTextures [[texture(9)]],
     sampler albedoSampler [[sampler(10)]]
 ) {
-    float3 albedo = albedoTextures.sample(albedoSampler, float3(in.uv, float(in.albedoIdx))).rgb
+    // MSL texture2d_array takes the array index as a separate uint argument
+    // (the GLSL-style float3(uv, idx) form matches no sample() overload and
+    // left this pass with an invalid shader → dispatch → GPU page fault).
+    float3 albedo = albedoTextures.sample(albedoSampler, in.uv, in.albedoIdx).rgb
                   * in.albedoTint;
     float NdotL = max(dot(normalize(in.normalW), normalize(params.light_dir.xyz)), 0.0);
     float3 color = albedo * (params.ambient.rgb + params.light_color.rgb * NdotL);

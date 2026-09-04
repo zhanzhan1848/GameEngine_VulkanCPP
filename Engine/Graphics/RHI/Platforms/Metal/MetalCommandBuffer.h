@@ -162,6 +162,10 @@ private:
     
     // 计算状态跟踪
     MTL::Size currentThreadGroupSize_{1, 1, 1};
+    // Set true by BindComputePipeline after a successful setComputePipelineState;
+    // Dispatch refuses to encode when false. Binding used to fail silently, and
+    // the unguarded dispatch then faulted the GPU (the "洋红" device hangs).
+    bool computePipelineBoundValid_{false};
 
     // 线程调试
     std::thread::id recordingThreadId_;

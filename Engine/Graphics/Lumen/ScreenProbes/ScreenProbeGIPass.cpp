@@ -594,7 +594,13 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
 void ScreenProbeGIPass::CreatePipelines() {
     auto CompileShader = [&](const char* name, const char* entry) -> ShaderHandle {
         auto code = LoadShaderBytecode(device_, name);
-        if (code.empty()) return handles::INVALID_SHADER;
+        if (code.empty()) {
+            PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Failed to load shader source: " << name << std::endl;
+            return handles::INVALID_SHADER;
+        }
+        // Bring-up aid: MetalShader's compile-error log carries no shader name,
+        // so print one line before CreateShader to attribute failures.
+        PRIMAL_LOG_STREAM(Info, "Render") << "[ScreenProbeGI] compiling " << name << " : " << entry << std::endl;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
 
