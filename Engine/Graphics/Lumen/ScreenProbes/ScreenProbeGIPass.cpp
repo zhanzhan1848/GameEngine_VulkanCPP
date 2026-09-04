@@ -860,6 +860,15 @@ void ScreenProbeGIPass::CreateConstantBuffers() {
     }
 }
 
+// SPGI bring-up bisect (TEMP): PRIMAL_SPGI_SKIP="trace,post,gather" — comma/
+// substring list of dispatch groups to skip, so a device hang can be attributed
+// to a single stage in one run. Used together with PRIMAL_SPGI=1.
+static bool SpgiStageSkipped(const char* stage) {
+    static const char* skipList = std::getenv("PRIMAL_SPGI_SKIP");
+    if (!skipList) return false;
+    return std::strstr(skipList, stage) != nullptr;
+}
+
 void ScreenProbeGIPass::CreateBuffers() {
     u32 totalProbes = grid_width_ * grid_height_;
 
@@ -1361,7 +1370,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 const bool hzbReady = (hzb_trace_pipeline_ != handles::INVALID_PIPELINE &&
                                       hzb_texture_ != handles::INVALID_RESOURCE && hzb_mip_levels_ > 0);
 
-                if (splitReady) {
+                if (splitReady && !SpgiStageSkipped("trace")) {
                     // --- 2a: HZB near-field (optional first stage) ---
                     if (hzbReady) {
                         DescriptorData hzbParams[5];
@@ -1482,7 +1491,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, finSets, 0, nullptr);
                     if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                     cmd->Dispatch(dispatchX, 1, 1);
-                } else {
+                } else if (!SpgiStageSkipped("trace")) {
                     // Monolithic fallback — Vulkan flat bindings 0..13 (fixed:
                     // previously wrote Metal overlapping numbers on both platforms).
                     if (splitIsVk) {
@@ -1545,7 +1554,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             // Sub-pass 2.5: ScreenProbeAverage (SH2 accumulation)
             // ==================================================================
-            {
+            if (!SpgiStageSkipped("post")) {
                 struct AvgCB { u32 totalProbes; u32 raysPerProbe; float pad[2]; };
                 // pad[0] = F5 jitter seed — MUST equal camera_position.w so the
                 // SH projection regenerates the same rotated ray directions as
@@ -1586,7 +1595,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             // Sub-pass 2.75: Probe Temporal Accumulation (T5.2 reprojection)
             // ==================================================================
-            if (temporal_pipeline_ != handles::INVALID_PIPELINE) {
+            if (temporal_pipeline_ != handles::INVALID_PIPELINE && !SpgiStageSkipped("post")) {
                 // std140 layout: mat4 prevVP (64B) + 10 scalars (48B) = 112B
                 struct alignas(16) TemporalCB {
                     math::m4x4 prev_view_projection;
@@ -1648,7 +1657,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             // Sub-pass 2.9: Probe Spatial Filter
             // ==================================================================
-            if (spatial_pipeline_ != handles::INVALID_PIPELINE) {
+            if (spatial_pipeline_ != handles::INVALID_PIPELINE && !SpgiStageSkipped("post")) {
                 struct SpatialCB { u32 totalProbes; u32 gridW; float sigma; float pad; };
                 SpatialCB scb{grid_width_ * grid_height_, grid_width_, 2.0f, 0.0f};
 
@@ -1682,7 +1691,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             // Sub-pass 3: ScreenProbeGather
             // ==================================================================
-            {
+            if (!SpgiStageSkipped("gather")) {
                 // Vulkan: flat bindings (images 0-2, SSBO 3/4/6, UBO 5) matching
                 // ScreenProbeGather.comp; Metal: texture(0,1,2) + buffer(0,2,4)
                 // with setBytes(3).
@@ -1736,6 +1745,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Sub-pass 4: ScreenProbeDenoise
             // ==================================================================
             if (denoise_pipeline_ != handles::INVALID_PIPELINE &&
+                !SpgiStageSkipped("post") &&
                 filteredTex != handles::INVALID_RESOURCE) {
                 struct DenoiseCB {
                     float sigma_depth; float sigma_normal; float sigma_spatial; float pad1;
