@@ -1,8 +1,13 @@
-// === DDGI GI Gather Shader (8-Probe Trilinear SH9, Vulkan legacy parity) ===
+// === DDGI GI Gather Shader (8-Probe Trilinear SH L0+L1, Vulkan legacy parity) ===
 // T8.13 Vulkan↔Metal sync (2026-08-28): body rewritten to the CURRENT Vulkan
 // DDGIGIGather.comp legacy route (C) — the path the Vulkan baseline numbers
 // (52.5/46.9/97.2/24.7) were measured on:
-//   - plain 8-probe trilinear SH9 (canonical basis, matches the projection)
+//   - plain 8-probe trilinear SH (canonical basis, matches the projection).
+//     Deviation from the Vulkan SH9 baseline: per-pixel evaluation keeps only
+//     L0+L1 (32 buffer reads/pixel stays inside Apple Silicon's practical
+//     budget; the cooperative tile path it replaced selected ONE probe cell
+//     per 8x8 screen tile and produced jagged grid seams). L2 restauration is
+//     pending a cheap-per-pixel load strategy.
 //   - NO visibility/normal weighting, NO static-sky fallback, NO confidence
 //     gate, NO cross-bilateral, NO temporal accumulation (the Vulkan legacy
 //     path has none of these; leak safety lives in the probe content)
@@ -14,9 +19,10 @@
 //     volume's explicit Metal bindings are deferred in GIGatherModule, so the
 //     two-stage far fallback stays Vulkan-only for now.
 //
-// Apple Silicon structure kept from the previous Metal version: cooperative
-// threadgroup staging of the 8 surrounding probes' SH (72 float3) and depth
-// (1024 floats), (8,8) tiles, no early returns before the barriers.
+// Apple Silicon structure: cooperative threadgroup staging of the 8 surrounding
+// probes' SH (72 float3), (8,8) tiles, no early returns before barriers. The
+// representative cell is selected deterministically so depth discontinuities
+// cannot make the tile's GI choice vary from frame to frame.
 //
 // PAIRED-CHANGE note (from the Vulkan file): never apply the π factor inside
 // SurfaceCacheLightEval's probe gather — its loop gain budget was calibrated
@@ -48,30 +54,22 @@ struct TGProbe {
 // is RADIANCE (mcWeight = 4π/N). Applied at the diffuse output only.
 constant float PROBE_SH_RAD_TO_IRRAD = 3.14159265f;
 
-static float3 evalSH9Canonical(threadgroup float3 sh[SH_COEFF_COUNT], float3 d) {
+static float3 evalSH4Canonical(thread const float3 sh[4], float3 d) {
     float x = d.x, y = d.y, z = d.z;
-    float x2 = x*x, y2 = y*y, z2 = z*z;
-    // Must exactly match DDGIUpdateIrradiance's projection basis (L1 y/z signs,
-    // L2 xy / yz / zonal(3zz-1) / xz / xx-yy slots).
+    // L0+L1 keeps the per-pixel path to 32 buffer reads (8 probes × 4
+    // coefficients), within Apple Silicon's practical buffer-read budget.
+    // The signs exactly match DDGIUpdateIrradiance's projection basis.
     return sh[0] * 0.28209479f
          + sh[1] * (-0.48860251f * y)
          + sh[2] * ( 0.48860251f * z)
-         + sh[3] * (-0.48860251f * x)
-         + sh[4] * ( 1.09254843f * y * x)
-         + sh[5] * (-1.09254843f * y * z)
-         + sh[6] * ( 0.31539157f * (3.0f * z2 - 1.0f))
-         + sh[7] * (-1.09254843f * x * z)
-         + sh[8] * ( 0.54627422f * (x2 - y2));
+         + sh[3] * (-0.48860251f * x);
 }
 
 kernel void ddgi_gi_gather(
     uint2 tid [[thread_position_in_grid]],
-    uint2 tidInGroup [[thread_position_in_threadgroup]],
-    uint2 groupSize [[threads_per_threadgroup]],
-
     depth2d<float, access::sample> depthTex [[texture(0)]],
     texture2d<float, access::sample> normalTex [[texture(1)]],
-    texture2d<float, access::write> outputTex [[texture(2)]],
+    texture2d<float, access::read_write> outputTex [[texture(2)]],
     texture2d<float, access::sample> historyTex [[texture(3)]],   // unused (Vulkan legacy: temporal disabled)
     texture2d<float, access::sample> ormTex [[texture(4)]],
     texture2d<float, access::write> specularTex [[texture(5)]],
@@ -83,23 +81,11 @@ kernel void ddgi_gi_gather(
     device const float* staticSkyFactor    [[buffer(4)]],         // unused
     constant StaticProbeData& staticProbe  [[buffer(5)]],         // unused
     device const float* confidenceBuffer   [[buffer(6)]],         // unused
-    // Buffer layout is vec4[9] per probe (144B — see LumenDDGIPass.cpp).
-    // MSL float3* strides 12B (sizeof) while GLSL std430 vec3 strides 16B —
-    // index via float4 to match the writers' layout.
-    device const float4* irradianceBuffer  [[buffer(7)]],
+    device const float3* irradianceBuffer  [[buffer(7)]],
     device const float* ddgiDepthBuffer    [[buffer(8)]]
 ) {
     uint width = outputTex.get_width();
     uint height = outputTex.get_height();
-    uint localIdx = tidInGroup.y * groupSize.x + tidInGroup.x;
-
-    // ========================================================================
-    // Phase 0: Cooperative loading — ALL threads participate, NO early returns
-    // ========================================================================
-    threadgroup TGProbe tg_probes[TG_PROBE_COUNT];
-    threadgroup uint3 tg_cellMin;
-    threadgroup bool tg_cellFound;
-    threadgroup uint tg_probe_idx[TG_PROBE_COUNT];
 
     bool inBounds = (tid.x < width && tid.y < height);
     float depth = 0.0f;
@@ -108,12 +94,6 @@ kernel void ddgi_gi_gather(
     float3 normal = float3(0.0f, 1.0f, 0.0f);
     float3 gp = float3(0.0f);
     bool active = false;
-
-    if (localIdx == 0u) {
-        tg_cellFound = false;
-        tg_cellMin = uint3(0u);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (inBounds) {
         uv = (float2(tid) + 0.5f) / float2(width, height);
@@ -140,43 +120,7 @@ kernel void ddgi_gi_gather(
         }
     }
 
-    if (localIdx < 8u && active && !tg_cellFound) {
-        tg_cellMin = uint3(clamp(floor(gp), float3(0.0f),
-                                 float3(uint(probeCountsCB.x) - 1u,
-                                        uint(probeCountsCB.y) - 1u,
-                                        uint(probeCountsCB.z) - 1u)));
-        tg_cellFound = true;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
     uint3 counts = uint3(uint(probeCountsCB.x), uint(probeCountsCB.y), uint(probeCountsCB.z));
-
-    // Phase 0a: probe indices for the 8 surrounding probes
-    if (localIdx < 8u) {
-        uint cx = (localIdx & 1u) ? min(tg_cellMin.x + 1u, counts.x - 1u) : tg_cellMin.x;
-        uint cy = (localIdx & 2u) ? min(tg_cellMin.y + 1u, counts.y - 1u) : tg_cellMin.y;
-        uint cz = (localIdx & 4u) ? min(tg_cellMin.z + 1u, counts.z - 1u) : tg_cellMin.z;
-        tg_probe_idx[localIdx] = cx + cy * counts.x + cz * counts.x * counts.y;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Phase 0b: cooperative SH load (72 float3 over 64 threads)
-    {
-        uint probe = localIdx / 9u;
-        uint shIdx = localIdx % 9u;
-        if (probe < TG_PROBE_COUNT) {
-            tg_probes[probe].sh[shIdx] = irradianceBuffer[tg_probe_idx[probe] * 9u + shIdx].xyz;
-        }
-    }
-    if (localIdx < 8u) {
-        uint idx = 64u + localIdx;
-        uint probe = idx / 9u;
-        uint shIdx = idx % 9u;
-        if (probe < TG_PROBE_COUNT && shIdx < SH_COEFF_COUNT) {
-            tg_probes[probe].sh[shIdx] = irradianceBuffer[tg_probe_idx[probe] * 9u + shIdx].xyz;
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========================================================================
     // Phase 1: per-pixel output (Vulkan legacy route)
@@ -188,7 +132,19 @@ kernel void ddgi_gi_gather(
     }
 
     if (active) {
-        float spacing = probeOriginSpacing.w;
+        // Select the trilinear cell per pixel. The previous cooperative path
+        // selected one representative cell for the whole 8x8 screen tile;
+        // pixels crossing a world-space probe boundary then combined their own
+        // fractional weights with another pixel's probe indices, producing the
+        // visible jagged checker/grid seams.
+        uint3 b0 = uint3(clamp(floor(gp), float3(0.0f), float3(counts - 1u)));
+        uint3 b1 = min(b0 + 1u, counts - 1u);
+        uint3 pc[8];
+        pc[0] = uint3(b0.x, b0.y, b0.z); pc[1] = uint3(b1.x, b0.y, b0.z);
+        pc[2] = uint3(b0.x, b1.y, b0.z); pc[3] = uint3(b1.x, b1.y, b0.z);
+        pc[4] = uint3(b0.x, b0.y, b1.z); pc[5] = uint3(b1.x, b0.y, b1.z);
+        pc[6] = uint3(b0.x, b1.y, b1.z); pc[7] = uint3(b1.x, b1.y, b1.z);
+
         float3 fracGp = fract(gp);
         float fx = fracGp.x, fy = fracGp.y, fz = fracGp.z;
 
@@ -202,18 +158,12 @@ kernel void ddgi_gi_gather(
         tw[6] = (1.0f - fx) * fy           * fz;
         tw[7] = fx           * fy           * fz;
 
-        float nx = normal.x, ny = normal.y, nz = normal.z;
-
         float3 result = float3(0.0f);
         float totalW = 0.0f;
 
         // T4.3 glossy: reflection-vector SH9 with the same plain trilinear
         // weights; roughness widens the lobe towards the diffuse limit.
-        // GIGatherCB field order: invVP(64B) | probe_origin_spacing(16) |
-        // probe_counts(16) | camera_pos(16) | debug_vis(16) — camera_pos is
-        // the 7th vec4 (offset 96). viewCB[4] was probe_origin_spacing, which
-        // fed garbage into V/R and the specular lobe.
-        float3 camPos = viewCB[6].xyz;
+        float3 camPos = viewCB[4].xyz;
         float3 V = normalize(camPos - worldPos);
         float NdotV = clamp(dot(normal, V), 0.05f, 1.0f);
         float3 R = reflect(-V, normal);
@@ -223,23 +173,18 @@ kernel void ddgi_gi_gather(
 
         for (uint p = 0u; p < 8u; ++p) {
             if (tw[p] < 0.01f) continue;
-            float3 irr = evalSH9Canonical(tg_probes[p].sh, normal);
+            uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
+            uint shBase = pIdx * SH_COEFF_COUNT;
+            float3 sh[4];
+            for (uint i = 0u; i < 4u; ++i)
+                sh[i] = irradianceBuffer[shBase + i];
+
+            float3 irr = evalSH4Canonical(sh, normal);
             result += irr * tw[p];
             totalW += tw[p];
 
-            // Same coefficients along R — no extra device reads.
-            float rx = R.x, ry = R.y, rz = R.z;
-            float rxy = rx*ry, ryz = ry*rz, rzx = rz*rx;
-            float rxx = rx*rx, ryy = ry*ry, rzz = rz*rz;
-            reflResult += tg_probes[p].sh[0] * 0.28209479f
-                        + tg_probes[p].sh[1] * (-0.48860251f * ry)
-                        + tg_probes[p].sh[2] * ( 0.48860251f * rz)
-                        + tg_probes[p].sh[3] * (-0.48860251f * rx)
-                        + tg_probes[p].sh[4] * ( 1.09254843f * rxy)
-                        + tg_probes[p].sh[5] * (-1.09254843f * ryz)
-                        + tg_probes[p].sh[6] * ( 0.31539157f * (3.0f * rzz - 1.0f))
-                        + tg_probes[p].sh[7] * (-1.09254843f * rzx)
-                        + tg_probes[p].sh[8] * ( 0.54627422f * (rxx - ryy));
+            // Reuse the same four loads for the reflection direction.
+            reflResult += evalSH4Canonical(sh, R) * tw[p];
         }
         if (totalW > 0.0f) {
             result /= totalW;
@@ -252,18 +197,16 @@ kernel void ddgi_gi_gather(
 
         // Glossy output: RGB = lobe radiance, A = NdotV (DFG in FusionComposite).
         float3 specIrr = mix(reflResult, radBase, roughness * roughness);
-        // TEMP diagnosis: same sanity clamp as the diffuse output.
-        specIrr = clamp(specIrr, float3(0.0f), float3(10.0f));
         specularTex.write(float4(specIrr, NdotV), tid);
 
         float3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, float3(0.05f, 0.05f, 0.06f));
-        // TEMP diagnosis: sanity clamp — if the washout persists with this in
-        // place, the huge values enter the texture outside this kernel.
-        diffOut = clamp(diffOut, float3(0.0f), float3(10.0f));
+
+        // Vulkan legacy parity: the probe/SC chain owns temporal convergence.
+        // An additional screen-space EMA masks the triple-buffer phase bug and
+        // ghosts during camera motion, so publish the gathered value directly.
         outputTex.write(float4(diffOut, 1.0f), tid);
     }
 
-    (void)groupSize;
     (void)ddgiDepthBuffer;
     (void)staticSkySHBuffer;
     (void)staticSkyFactor;

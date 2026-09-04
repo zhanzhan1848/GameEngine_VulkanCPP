@@ -200,11 +200,8 @@ kernel void surfaceCacheLightEval(
                   + emissive;
     result = min(result, float3(64.0f));
 
-    // 2026-09-04 闪烁修复：SC atlas 时域 EMA——全量 LightEval 每帧从零重写，
-    // 阴影采样/探针采样的逐帧噪声直通 atlas → 探针 → GI 屏幕闪烁。
-    // 20% 新 + 80% 历史（~5 帧收敛）抑制高频抖动。
-    constexpr float SC_TEMPORAL_ALPHA = 0.2f;
-    result = mix(prev_light, result, SC_TEMPORAL_ALPHA);
-
+    // Match Vulkan: publish this frame's evaluation directly. Blending with
+    // prev_lighting_atlas here creates three independent temporal states because
+    // the atlas is triple-buffered, observed as an A/B/C brightness cycle.
     lighting_out.write(float4(result, 1.0), atlas_uv);
 }

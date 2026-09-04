@@ -90,17 +90,16 @@ kernel void ddgi_probe_irradiance_from_cards(
         pathA[i] = irradiance_output[base + i].xyz;
     }
 
-    // Step 3: SC-first continuous blend (see header). The 0.85 cap leaves a
-    // trace floor so dynamic geometry still perturbs the probes. The
-    // luminance-agreement factor keeps a still-converging (EMA-from-zero) or
-    // genuinely dim SC estimate from dragging probes black — SC takes over
-    // only once it carries comparable energy.
+    // Step 3: match Vulkan's trace-first blend. Card averages are low-frequency
+    // and occlusion-unaware, so cap them at 0.45 and leave the SDF trace in
+    // control of the sun-patch/shade contrast.
     float countCoverage = saturate(float(n) / 6.0f);
     float validCoverage = (n > 0u) ? saturate(validSum / float(n)) : 0.0f;
     float scLum = dot(scResult[0], float3(0.2126f, 0.7152f, 0.0722f));
     float pathLum = max(dot(pathA[0], float3(0.2126f, 0.7152f, 0.0722f)), 1e-4f);
     float agree = smoothstep(0.0f, 1.0f, scLum / pathLum);
-    float scWeight = countCoverage * validCoverage * 0.85f * agree;
+    constexpr float SC_TAKEOVER_MAX = 0.45f;
+    float scWeight = countCoverage * validCoverage * SC_TAKEOVER_MAX * agree;
 
     for (uint i = 0; i < 9u; ++i) {
         irradiance_output[base + i] = float4(mix(pathA[i], scResult[i], scWeight), 1.0f);

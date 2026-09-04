@@ -200,8 +200,24 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
 
     // Metal path (unchanged): file read + #include resolution + /tmp/ dump
     std::string shaderPath = DDGI_SHADER_DIR + shaderName + ".metal";
-
     std::string source = ReadFileToString(shaderPath);
+
+    // T8.13 parity track: PRIMAL_DDGI_PARITY=1 prefers <name>Parity.metal —
+    // faithful ports of the Vulkan .comp math — per stage, falling back to the
+    // engine shader whenever the port doesn't exist yet. Lets the DDGI chain
+    // be walked stage-by-stage onto Vulkan math without touching the engine
+    // defaults.
+    if (std::getenv("PRIMAL_DDGI_PARITY")) {
+        const std::string parityPath = DDGI_SHADER_DIR + shaderName + "Parity.metal";
+        std::string paritySource = ReadFileToString(parityPath);
+        if (!paritySource.empty()) {
+            shaderPath = parityPath;
+            source = std::move(paritySource);
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[LumenDDGI] Parity port in effect: " << shaderName << "Parity.metal" << std::endl;
+        }
+    }
+
     if (source.empty()) {
         shaderPath = std::string("Engine/Graphics/Metal/shaders/Lumen/") + shaderName + ".metal";
         source = ReadFileToString(shaderPath);
@@ -1711,6 +1727,25 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 }
             }
 
+            // Sparse updates must begin from the complete previous probe field.
+            // The update kernels only overwrite probes in probeUpdateList; without
+            // this inheritance, untouched probes retain whatever happened to be
+            // in outIdx three frames ago and the rotating buffers develop three
+            // different brightness states.
+            if (updateCount < probeCountTotal) {
+                const u64 irradianceBytes = (u64)probeCountTotal * 9u * sizeof(math::v4);
+                static constexpr u32 kDepthFloatsPerProbe = 64u * 2u;
+                const u64 depthBytes = (u64)probeCountTotal * kDepthFloatsPerProbe * sizeof(float);
+                cmd->CopyBuffer(irradiance_buffers_[histIdx], irradiance_buffers_[outIdx],
+                                0, 0, irradianceBytes);
+                cmd->CopyBuffer(depth_buffers_[histIdx], depth_buffers_[outIdx],
+                                0, 0, depthBytes);
+                cmd->MemoryBarrier(
+                    PipelineStage::Transfer, PipelineStage::ComputeShader,
+                    AccessFlag::TransferWrite,
+                    AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+            }
+
             _t3 = chr::steady_clock::now();
             // ================================================================
             // Sub-pass 1: TraceRays — split into SDF trace + finalize
@@ -1945,7 +1980,14 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 const DescriptorSetHandle sets[] = { irradiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiance_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
+                // Metal's 8x8 cooperative kernel assigns one whole
+                // threadgroup to one probe. Vulkan/Dawn assign one probe to
+                // each invocation in a 64-thread group.
+                const u32 irradianceGroups =
+                    (device_->GetPlatform() == RHIPlatform::Metal)
+                        ? updateCount
+                        : ((updateCount + 63) / 64);
+                cmd->Dispatch(irradianceGroups, 1, 1);
             }
             // barrier: irradiance 写完后才开始 depth update
             cmd->MemoryBarrier(
@@ -1968,7 +2010,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 const DescriptorSetHandle sets[] = { depth_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, depth_layout_, 0, 1, sets, 0, nullptr);
 
-                cmd->Dispatch((updateCount + 63) / 64, 1, 1);
+                const u32 depthGroups =
+                    (device_->GetPlatform() == RHIPlatform::Metal)
+                        ? updateCount
+                        : ((updateCount + 63) / 64);
+                cmd->Dispatch(depthGroups, 1, 1);
             }
             cmd->MemoryBarrier(
                 PipelineStage::ComputeShader, PipelineStage::ComputeShader,

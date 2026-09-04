@@ -125,7 +125,8 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     pipeline_ = device->CreateComputePipeline(pd);
     if (pipeline_ == handles::INVALID_PIPELINE) return false;
 
-    descriptor_set_ = device->CreateDescriptorSet({set_layout_});
+    for (u32 i = 0; i < 3; ++i)
+        descriptor_sets_[i] = device->CreateDescriptorSet({set_layout_});
 
     // Gather 输出分辨率：Metal 走全分辨率（用户对齐要求——半分辨率下边缘像素
     // 深度/法线取错探针，GI 呈块状锯齿），Vulkan 维持半分辨率基线不动。
@@ -156,11 +157,13 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
     cbDesc.usage = GPUMemoryUsage::Dynamic;
     cbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Uniform);
-    probe_cb_ = device->CreateBuffer(cbDesc);
-    // T4.4: far-volume params (origin+spacing, counts) — same 256B shape.
-    far_cb_ = device->CreateBuffer(cbDesc);
-    // T6.3 sub-B: N-volume 参数 CB（144B 实际用量，256B 槽位与 far_cb_ 同形）。
-    nvolumes_cb_ = device->CreateBuffer(cbDesc);
+    for (u32 i = 0; i < 3; ++i) {
+        probe_cb_[i] = device->CreateBuffer(cbDesc);
+        // T4.4: far-volume params (origin+spacing, counts).
+        far_cb_[i] = device->CreateBuffer(cbDesc);
+        // T6.3 sub-B: N-volume params (144B used in a 256B slot).
+        nvolumes_cb_[i] = device->CreateBuffer(cbDesc);
+    }
 
     BufferDesc spCbDesc{};
     spCbDesc.size = 512;
@@ -168,7 +171,8 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     spCbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
     spCbDesc.usage = GPUMemoryUsage::Dynamic;
     spCbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Uniform);
-    static_probe_cb_ = device->CreateBuffer(spCbDesc);
+    for (u32 i = 0; i < 3; ++i)
+        static_probe_cb_[i] = device->CreateBuffer(spCbDesc);
 
     // Dummy buffer for missing static probe bindings — used as SSBO.
     BufferDesc dummyDesc{};
@@ -238,6 +242,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
         [this, inputs, ddgiReadIdx](const PassData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             auto ddgi = inputs.ddgi_pass;
+            const u32 bindingIdx = inputs.current_buffer_index % 3;
+            const DescriptorSetHandle descriptorSet = descriptor_sets_[bindingIdx];
+            const ResourceHandle probeCB = probe_cb_[bindingIdx];
+            const ResourceHandle farCB = far_cb_[bindingIdx];
+            const ResourceHandle staticProbeCB = static_probe_cb_[bindingIdx];
+            const ResourceHandle nvolumesCB = nvolumes_cb_[bindingIdx];
 
             // X2/A3: 远场 volume 数据优先走 view；view 未填时回退旧 pass 指针
             // 路径。两条来源字段一致（origin/counts/spacing/irradiance 同源同
@@ -282,7 +292,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             {
                 math::m4x4 vp = inputs.proj_matrix * inputs.view_matrix;
                 math::m4x4 invView = Inverse(inputs.view_matrix);
-                auto* cb = static_cast<GIGatherCB*>(device_->MapBuffer(probe_cb_));
+                auto* cb = static_cast<GIGatherCB*>(device_->MapBuffer(probeCB));
                 if (cb) {
                     cb->inv_view_projection = Inverse(vp);
                     const auto& vol = ddgi->GetVolumeData();
@@ -305,21 +315,21 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                   << "," << cb->probe_counts.z << "," << cb->probe_counts.w
                                   << ") cam=(" << cb->camera_pos.x << "," << cb->camera_pos.y
                                   << "," << cb->camera_pos.z << ")" << std::endl; }
-                    device_->UnmapBuffer(probe_cb_);
+                    device_->UnmapBuffer(probeCB);
                 }
             }
 
             // T4.4: upload far-volume params (origin+spacing / counts / flags)
             // X2/A3: 数据源改为 farView（view 优先、pass 兜底），上传值不变。
             {
-                auto* fb = static_cast<math::v4*>(device_->MapBuffer(far_cb_));
+                auto* fb = static_cast<math::v4*>(device_->MapBuffer(farCB));
                 if (fb) {
                     memset(fb, 0, 64);
                     if (farView.IsValid()) {
                         fb[0] = math::v4{farView.origin.x, farView.origin.y, farView.origin.z, farView.spacing};
                         fb[1] = math::v4{farView.counts.x, farView.counts.y, farView.counts.z, 1.0f}; // w = enabled
                     }
-                    device_->UnmapBuffer(far_cb_);
+                    device_->UnmapBuffer(farCB);
                 }
             }
 
@@ -328,7 +338,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // + meta.x = nvolCount；否则整块清零（meta.x=0 → legacy 路径）。
             // 无效中段槽位（counts=0/w=0）被 shader 的 enabled 检查跳过。
             {
-                auto* nv = static_cast<NVolumeCB*>(device_->MapBuffer(nvolumes_cb_));
+                auto* nv = static_cast<NVolumeCB*>(device_->MapBuffer(nvolumesCB));
                 if (nv) {
                     memset(nv, 0, sizeof(NVolumeCB));
                     if (nvolumeActive) {
@@ -339,13 +349,13 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         }
                         nv->meta = math::v4{(float)nvolCount, 0.0f, 0.0f, 0.0f};
                     }
-                    device_->UnmapBuffer(nvolumes_cb_);
+                    device_->UnmapBuffer(nvolumesCB);
                 }
             }
 
             // Upload static probe params
             {
-                auto* sp = static_cast<GPUStaticProbeData*>(device_->MapBuffer(static_probe_cb_));
+                auto* sp = static_cast<GPUStaticProbeData*>(device_->MapBuffer(staticProbeCB));
                 if (sp) {
                     memset(sp, 0, sizeof(GPUStaticProbeData));
                     if (inputs.static_probe_volume) {
@@ -353,7 +363,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         sp->ProbeOrigin = math::v4{vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z, 0.0f};
                         sp->ProbeSpacing = ddgi->GetParams().probe_spacing;
                     }
-                    device_->UnmapBuffer(static_probe_cb_);
+                    device_->UnmapBuffer(staticProbeCB);
                 }
             }
 
@@ -430,7 +440,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             const u32 specBinding = isVk ? 14u : 5u;
             {
                 // texture(0): depth (SampledDepthImage on Vulkan/Dawn, SampledImage on Metal)
-                texWrites[0].dstSet = descriptor_set_;
+                texWrites[0].dstSet = descriptorSet;
                 texWrites[0].dstBinding = 0;
                 texWrites[0].dstArrayElement = 0;
                 texWrites[0].descriptorCount = 1;
@@ -440,7 +450,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[0].imageView = inputs.gbuffer_depth;
                 imgInfos[0].imageLayout = ResourceState::ShaderResource;
                 // texture(1): normal
-                texWrites[1].dstSet = descriptor_set_;
+                texWrites[1].dstSet = descriptorSet;
                 texWrites[1].dstBinding = 1;
                 texWrites[1].dstArrayElement = 0;
                 texWrites[1].descriptorCount = 1;
@@ -450,7 +460,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[1].imageView = inputs.gbuffer_normal;
                 imgInfos[1].imageLayout = ResourceState::ShaderResource;
                 // texture(2): output (UAV)
-                texWrites[2].dstSet = descriptor_set_;
+                texWrites[2].dstSet = descriptorSet;
                 texWrites[2].dstBinding = 2;
                 texWrites[2].dstArrayElement = 0;
                 texWrites[2].descriptorCount = 1;
@@ -460,7 +470,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[2].imageView = gi_halfres_texture_;
                 imgInfos[2].imageLayout = ResourceState::UnorderedAccess;
                 // texture(3): history
-                texWrites[3].dstSet = descriptor_set_;
+                texWrites[3].dstSet = descriptorSet;
                 texWrites[3].dstBinding = 3;
                 texWrites[3].dstArrayElement = 0;
                 texWrites[3].descriptorCount = 1;
@@ -473,7 +483,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 ResourceHandle ormTex = inputs.gbuffer_orm;
                 if (ormTex == handles::INVALID_RESOURCE) ormTex = inputs.fallback_texture;
                 if (ormTex == handles::INVALID_RESOURCE) ormTex = gi_halfres_history_;
-                texWrites[4].dstSet = descriptor_set_;
+                texWrites[4].dstSet = descriptorSet;
                 texWrites[4].dstBinding = ormBinding;
                 texWrites[4].dstArrayElement = 0;
                 texWrites[4].descriptorCount = 1;
@@ -483,7 +493,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[4].imageView = ormTex;
                 imgInfos[4].imageLayout = ResourceState::ShaderResource;
                 // texture(5/14): glossy specular output (T4.3, UAV)
-                texWrites[5].dstSet = descriptor_set_;
+                texWrites[5].dstSet = descriptorSet;
                 texWrites[5].dstBinding = specBinding;
                 texWrites[5].dstArrayElement = 0;
                 texWrites[5].descriptorCount = 1;
@@ -500,14 +510,14 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             if (isVk) {
                 WriteDescriptorSet farWrites[2];
                 DescriptorBufferInfo farInfos[2];
-                farWrites[0].dstSet = descriptor_set_;
+                farWrites[0].dstSet = descriptorSet;
                 farWrites[0].dstBinding = 15;
                 farWrites[0].dstArrayElement = 0;
                 farWrites[0].descriptorCount = 1;
                 farWrites[0].descriptorType = DescriptorType::UniformBuffer;
                 farWrites[0].bufferInfo = &farInfos[0];
-                farInfos[0].buffer = far_cb_; farInfos[0].offset = 0; farInfos[0].range = 64;
-                farWrites[1].dstSet = descriptor_set_;
+                farInfos[0].buffer = farCB; farInfos[0].offset = 0; farInfos[0].range = 64;
+                farWrites[1].dstSet = descriptorSet;
                 farWrites[1].dstBinding = 16;
                 farWrites[1].dstArrayElement = 0;
                 farWrites[1].descriptorCount = 1;
@@ -531,7 +541,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 WriteDescriptorSet nvolWrites[5];
                 DescriptorBufferInfo nvolInfos[5];
                 for (u32 i = 0; i < 4; ++i) {
-                    nvolWrites[i].dstSet = descriptor_set_;
+                    nvolWrites[i].dstSet = descriptorSet;
                     nvolWrites[i].dstBinding = 17;
                     nvolWrites[i].dstArrayElement = i;
                     nvolWrites[i].descriptorCount = 1;
@@ -545,14 +555,14 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     nvolInfos[i].buffer = irr; nvolInfos[i].offset = 0; nvolInfos[i].range = ~0ull;
                 }
                 // binding 18: 参数 CB。
-                nvolWrites[4].dstSet = descriptor_set_;
+                nvolWrites[4].dstSet = descriptorSet;
                 nvolWrites[4].dstBinding = 18;
                 nvolWrites[4].dstArrayElement = 0;
                 nvolWrites[4].descriptorCount = 1;
                 nvolWrites[4].descriptorType = DescriptorType::UniformBuffer;
                 nvolWrites[4].imageInfo = nullptr;
                 nvolWrites[4].bufferInfo = &nvolInfos[4];
-                nvolInfos[4].buffer = nvolumes_cb_; nvolInfos[4].offset = 0;
+                nvolInfos[4].buffer = nvolumesCB; nvolInfos[4].offset = 0;
                 nvolInfos[4].range = sizeof(NVolumeCB);
                 device_->UpdateDescriptorSets(5, nvolWrites);
             }
@@ -562,7 +572,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             DescriptorBufferInfo bufInfos[10];
             {
                 for (int i = 0; i < 10; ++i) {
-                    bufWrites[i].dstSet = descriptor_set_;
+                    bufWrites[i].dstSet = descriptorSet;
                     bufWrites[i].dstArrayElement = 0;
                     bufWrites[i].descriptorCount = 1;
                     bufWrites[i].descriptorType = DescriptorType::UniformBuffer;
@@ -573,11 +583,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // Metal: overlapping buffer namespace 0..8.
                 const u32 bufBase = isVk ? 4u : 0u;
                 bufWrites[0].dstBinding = bufBase + 0;
-                bufInfos[0].buffer = probe_cb_; bufInfos[0].offset = 0; bufInfos[0].range = 80;
+                bufInfos[0].buffer = probeCB; bufInfos[0].offset = 0; bufInfos[0].range = 80;
                 bufWrites[1].dstBinding = bufBase + 1;
-                bufInfos[1].buffer = probe_cb_; bufInfos[1].offset = 64; bufInfos[1].range = 16;
+                bufInfos[1].buffer = probeCB; bufInfos[1].offset = 64; bufInfos[1].range = 16;
                 bufWrites[2].dstBinding = bufBase + 2;
-                bufInfos[2].buffer = probe_cb_; bufInfos[2].offset = 80; bufInfos[2].range = 48;  // T6.3 sub-A: +debugVis(48B)
+                bufInfos[2].buffer = probeCB; bufInfos[2].offset = 80; bufInfos[2].range = 48;  // T6.3 sub-A: +debugVis(48B)
                 bufWrites[3].dstBinding = bufBase + 3; bufWrites[3].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[3].buffer = (skySH != handles::INVALID_RESOURCE) ? skySH : dummy_buffer_;
                 bufInfos[3].offset = 0; bufInfos[3].range = ~0ull;
@@ -585,7 +595,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 bufInfos[4].buffer = (skyFactor != handles::INVALID_RESOURCE) ? skyFactor : dummy_buffer_;
                 bufInfos[4].offset = 0; bufInfos[4].range = ~0ull;
                 bufWrites[5].dstBinding = bufBase + 5;
-                bufInfos[5].buffer = static_probe_cb_; bufInfos[5].offset = 0; bufInfos[5].range = ~0ull;
+                bufInfos[5].buffer = staticProbeCB; bufInfos[5].offset = 0; bufInfos[5].range = ~0ull;
                 bufWrites[6].dstBinding = bufBase + 6; bufWrites[6].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[6].buffer = ddgi->GetConfidenceBuffer(ddgiReadIdx); bufInfos[6].offset = 0; bufInfos[6].range = ~0ull;
                 bufWrites[7].dstBinding = bufBase + 7; bufWrites[7].descriptorType = DescriptorType::StorageBuffer;
@@ -606,7 +616,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
 
             // Dispatch
             cmd->BindComputePipeline(pipeline_);
-            const DescriptorSetHandle sets[] = { descriptor_set_ };
+            const DescriptorSetHandle sets[] = { descriptorSet };
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, layout_, 0, 1, sets, 0, nullptr);
             cmd->Dispatch((gather_width_ + 7) / 8, (gather_height_ + 7) / 8, 1);
 

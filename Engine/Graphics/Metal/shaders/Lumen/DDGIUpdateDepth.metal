@@ -46,26 +46,30 @@ kernel void ddgi_update_depth(
     uint rayOffset = probeIdx * volume.RaysPerProbe;
 
     // =====================================================================
-    // Phase 1: Each thread reads one ray and stores in threadgroup
+    // Phase 1: Lanes cooperatively load all rays. Keep enough shared entries
+    // for the runtime-configurable upper bound; the old 64-entry array was
+    // indexed up to RaysPerProbe and went out of bounds above 64 rays.
     // =====================================================================
-    threadgroup RayInfo tg_rays[64];
+    constexpr uint MAX_RAYS_PER_PROBE = 256u;
+    threadgroup RayInfo tg_rays[MAX_RAYS_PER_PROBE];
+    uint rayLimit = min(volume.RaysPerProbe, MAX_RAYS_PER_PROBE);
 
-    tg_rays[tid].distance = 0.0f;
-    tg_rays[tid].texelIdx = 0u;
-    tg_rays[tid].hit = 0u;
+    for (uint r = tid; r < rayLimit; r += 64u) {
+        tg_rays[r].distance = 0.0f;
+        tg_rays[r].texelIdx = 0u;
+        tg_rays[r].hit = 0u;
 
-    if (tid < volume.RaysPerProbe) {
-        DDGIRayData ray = ray_buffer[rayOffset + tid];
+        DDGIRayData ray = ray_buffer[rayOffset + r];
 
         if (ray.radiance_and_dist.w >= 0.0f) {
-            float3 rayDir = ddgiRayDirection(tid, volume.RaysPerProbe, volume.FrameIndex);
+            float3 rayDir = ddgiRayDirection(r, volume.RaysPerProbe, volume.FrameIndex);
             float2 uv = octahedralEncode(rayDir);
             uint2 texel = uint2(clamp(uint(uv.x * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u),
                                 clamp(uint(uv.y * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u));
 
-            tg_rays[tid].distance = ray.radiance_and_dist.w;
-            tg_rays[tid].texelIdx = texel.y * DDGI_DEPTH_RES + texel.x;
-            tg_rays[tid].hit = 1u;
+            tg_rays[r].distance = ray.radiance_and_dist.w;
+            tg_rays[r].texelIdx = texel.y * DDGI_DEPTH_RES + texel.x;
+            tg_rays[r].hit = 1u;
         }
     }
 
@@ -84,7 +88,7 @@ kernel void ddgi_update_depth(
     float sumDistSq = 0.0f;
     uint rayCount = 0u;
 
-    for (uint r = 0; r < volume.RaysPerProbe; ++r) {
+    for (uint r = 0; r < rayLimit; ++r) {
         if (tg_rays[r].hit && tg_rays[r].texelIdx == texelIdx) {
             float d = tg_rays[r].distance;
             sumDist += d;

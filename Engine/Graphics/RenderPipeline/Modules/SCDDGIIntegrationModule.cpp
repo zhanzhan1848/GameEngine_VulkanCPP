@@ -785,6 +785,32 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     }
                 }
             }
+
+            // Metal publishes one canonical probe field after SC injection.
+            //
+            // The renderer rotates three physical DDGI buffers.  Leaving only
+            // frameIdx updated allows each slot to retain a different temporal
+            // trajectory (especially after sparse updates or a frame hitch), so
+            // Gather displays three distinct brightness levels in an A/B/C
+            // cycle.  Vulkan does not exhibit the issue; keep its established
+            // path unchanged and mirror the completed Metal result into the two
+            // idle slots.  The next frame therefore starts from the exact prior
+            // result regardless of which physical slot it selects.
+            if (device_->GetPlatform() == RHIPlatform::Metal) {
+                const u64 irradianceBytes = (u64)totalProbes * 9u * 16u;
+                cmd->MemoryBarrier(
+                    PipelineStage::ComputeShader, PipelineStage::Transfer,
+                    AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+                for (u32 slot = 0; slot < 3; ++slot) {
+                    if (slot == frameIdx) continue;
+                    cmd->CopyBuffer(ddgi->GetIrradianceBuffer(frameIdx),
+                                    ddgi->GetIrradianceBuffer(slot),
+                                    0, 0, irradianceBytes);
+                }
+                cmd->MemoryBarrier(
+                    PipelineStage::Transfer, PipelineStage::ComputeShader,
+                    AccessFlag::TransferWrite, AccessFlag::ShaderRead);
+            }
         }
     );
 }

@@ -767,6 +767,50 @@ fragment float4 fragmentBlitNoTonemap(
     return float4(color, 1.0);
 }
 
+// The stable Metal DDGI profile renders at 1x (the Vulkan High preset's 2x
+// working set page-faults on Apple Silicon). Apply a compact FXAA resolve in
+// the final copy so silhouettes and high-contrast floor detail get comparable
+// spatial edge cleanup without increasing GI resource sizes.
+fragment float4 fragmentBlitFXAA(
+    VertexOut in [[stage_in]],
+    texture2d<float> inputTex [[texture(0)]])
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none,
+                        address::clamp_to_edge);
+    float2 texel = 1.0f / float2(inputTex.get_width(), inputTex.get_height());
+    float3 rgbM  = inputTex.sample(s, in.uv).rgb;
+    float3 rgbNW = inputTex.sample(s, in.uv + texel * float2(-1.0f, -1.0f)).rgb;
+    float3 rgbNE = inputTex.sample(s, in.uv + texel * float2( 1.0f, -1.0f)).rgb;
+    float3 rgbSW = inputTex.sample(s, in.uv + texel * float2(-1.0f,  1.0f)).rgb;
+    float3 rgbSE = inputTex.sample(s, in.uv + texel * float2( 1.0f,  1.0f)).rgb;
+
+    constexpr float3 lumaWeights(0.299f, 0.587f, 0.114f);
+    float lumaM  = dot(rgbM,  lumaWeights);
+    float lumaNW = dot(rgbNW, lumaWeights);
+    float lumaNE = dot(rgbNE, lumaWeights);
+    float lumaSW = dot(rgbSW, lumaWeights);
+    float lumaSE = dot(rgbSE, lumaWeights);
+    float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+    float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+
+    float2 dir;
+    dir.x = -((lumaNW + lumaNE) - (lumaSW + lumaSE));
+    dir.y =  ((lumaNW + lumaSW) - (lumaNE + lumaSE));
+    float dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) *
+                          (0.25f / 8.0f), 1.0f / 128.0f);
+    float rcpDirMin = 1.0f / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+    dir = clamp(dir * rcpDirMin, float2(-8.0f), float2(8.0f)) * texel;
+
+    float3 rgbA = 0.5f * (
+        inputTex.sample(s, in.uv + dir * (1.0f / 3.0f - 0.5f)).rgb +
+        inputTex.sample(s, in.uv + dir * (2.0f / 3.0f - 0.5f)).rgb);
+    float3 rgbB = rgbA * 0.5f + 0.25f * (
+        inputTex.sample(s, in.uv + dir * -0.5f).rgb +
+        inputTex.sample(s, in.uv + dir *  0.5f).rgb);
+    float lumaB = dot(rgbB, lumaWeights);
+    return float4((lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB, 1.0f);
+}
+
 // Pass 1: compute indirect lighting from GI sources (DDGI + SPGI + SSGI)
 // Uses access::read + read() matching SSGI's stable pattern (not access::sample)
 kernel void computeFusionIndirect(

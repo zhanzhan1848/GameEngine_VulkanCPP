@@ -67,7 +67,9 @@ kernel void ddgi_update_irradiance(
         } else {
             float distWeight = 1.0f - smoothstep(vol.RayMaxDistance * 0.8f, vol.RayMaxDistance, hitDist);
             radiance *= max(distWeight, 0.2f);
-            tg_hitFlags[tid] = 1u;
+            // One lane can process multiple rays when RaysPerProbe > 64.
+            // Count every hit rather than recording only a boolean.
+            tg_hitFlags[tid] += 1u;
         }
 
         // T8.13 sync: same sampler the trace side used for this ray index —
@@ -115,7 +117,11 @@ kernel void ddgi_update_irradiance(
     for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) shAccum[i] = float3(0.0f);
 
     uint hitCount = 0u;
-    for (uint t = 0; t < vol.RaysPerProbe; ++t) {
+    // tg_partial/tg_hitFlags contain one aggregate per physical lane, not one
+    // entry per ray.  Iterating RaysPerProbe here read past the 64-entry
+    // threadgroup arrays at the 128-ray setting, producing unstable SH energy
+    // and, on Apple GPUs, occasional address faults.
+    for (uint t = 0; t < 64u; ++t) {
         for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
             shAccum[i] += tg_partial[t].sh[i];
         }

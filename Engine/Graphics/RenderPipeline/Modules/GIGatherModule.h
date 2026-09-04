@@ -81,20 +81,34 @@ private:
     rhi::PipelineHandle pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineLayoutHandle layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::DescriptorSetLayoutHandle set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
-    rhi::DescriptorSetHandle descriptor_set_{rhi::handles::INVALID_DESCRIPTOR_SET};
+    // Rotate CPU-updated bindings with the in-flight command buffers.  This is
+    // ordinary resource-lifetime isolation; DDGI probe-state consistency is
+    // handled separately by the update/integration passes.
+    rhi::DescriptorSetHandle descriptor_sets_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET};
 
     rhi::ResourceHandle gi_halfres_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle gi_halfres_history_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle gi_specular_texture_{rhi::handles::INVALID_RESOURCE};
-    rhi::ResourceHandle probe_cb_{rhi::handles::INVALID_RESOURCE};
-    rhi::ResourceHandle far_cb_{rhi::handles::INVALID_RESOURCE};      // T4.4 far volume params
-    rhi::ResourceHandle static_probe_cb_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle probe_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle far_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};      // T4.4 far volume params
+    rhi::ResourceHandle static_probe_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle dummy_buffer_{rhi::handles::INVALID_RESOURCE};
     // T6.3 sub-B: N-volume 参数 CB（binding 18，144B std140）+ 能力位。
     // nvolume_supported_ = Vulkan 且设备开启 descriptor indexing
     // （VulkanDevice::SupportsDescriptorIndexing）。不可用时 DSL 不带
     // PartiallyBound 标志、CB meta.x 恒 0 → shader 走 legacy 两槽路径。
-    rhi::ResourceHandle nvolumes_cb_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle nvolumes_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
     bool nvolume_supported_ = false;
 
     // Debug (SC_DUMP_CARDS=1): staging copy of the gather output + dump frame

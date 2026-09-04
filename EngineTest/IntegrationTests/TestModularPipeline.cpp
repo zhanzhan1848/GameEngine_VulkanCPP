@@ -220,9 +220,9 @@ namespace {
     // T8.13 sync: FinalBlit samples the FUSION module's already-tone-mapped
     // LDR output (postToonColor / fusionOut) — the tonemapping fragmentBlit
     // applied a SECOND ACES+gamma pass on top and pinned the whole frame to
-    // the white shoulder. fragmentBlitNoTonemap is the correct final blit
-    // (same entry the Engine copy's mode-6 path uses).
-    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlitNoTonemap",      ::shader_type::pixel  };
+    // the white shoulder. fragmentBlitFXAA keeps the required no-tonemap copy
+    // semantics while resolving 1x Metal silhouette and floor-edge aliasing.
+    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlitFXAA",           ::shader_type::pixel  };
     const shader_file_info kShadowFilter   { "ShadowFilter.metal",     "shadow_filter_compute",          ::shader_type::compute };
     const shader_file_info kGIGather       { "DDGIGIGather.metal",     "ddgi_gi_gather",                 ::shader_type::compute };
     const shader_file_info kFusionIndirect { "DeferredLighting.metal", "fragmentFusionIndirect",         ::shader_type::pixel  };
@@ -385,7 +385,31 @@ bool TestModularPipeline::CompileShaders() {
     }
     check(gg, "gi_gather(engine Metal)");
 #else
-    auto gg = Get(kGIGather);         check(gg, "gi_gather");
+    // T8.13 Vulkan↔Metal parity track: PRIMAL_GATHER=<file.metal> compiles the
+    // GI gather from the ENGINE Metal Lumen dir instead of the EngineTest
+    // copy — used to A/B separate-version gather shaders (e.g. the Vulkan
+    // route-C port DDGIGIGatherParity.metal, or the engine's own
+    // DDGIGIGather.metal) without touching either default. Unset = existing
+    // behaviour (EngineTest/shaders/DDGIGIGather.metal).
+    ShaderHandle gg = handles::INVALID_SHADER;
+    if (const char* gatherOverride = std::getenv("PRIMAL_GATHER")) {
+        const std::string engineLumenDir =
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Metal/shaders/Lumen/";
+        shader_file_info info = kGIGather;
+        info.file_name = gatherOverride;
+        primal::utl::vector<std::wstring> noArgs;
+        auto compiled = compile_shader(info, engineLumenDir.c_str(), noArgs);
+        if (compiled) {
+            u64 sz = *reinterpret_cast<u64*>(compiled.get());
+            const u8* ptr = compiled.get() + sizeof(u64) + 16;
+            gg = device_->CreateShader(ptr, sz, ShaderStage::Compute, info.function);
+            std::cout << "[TestModularPipeline] GI gather override: " << gatherOverride
+                      << " (engine Lumen dir)" << std::endl;
+        }
+    } else {
+        gg = Get(kGIGather);
+    }
+    check(gg, "gi_gather");
 #endif
     auto fi = Get(kFusionIndirect);   check(fi, "fusion_indirect");
     auto fc = Get(kFusionComposite);  check(fc, "fusion_composite");
@@ -467,10 +491,10 @@ bool TestModularPipeline::InitializePipeline() {
         }
     }
 
-    // T8.13 stability revert 确认仍然有效（2026-09-04 重测：High 档
-    // 在 Metal 上出现洋红画面 = GPU 页故障，与历史记录一致）。
-    // Medium + capture_budget=0（全量更新）是已验证的稳定基线，
-    // GI 质量（弹射/亮度/对比度）已与 Vulkan 对齐。
+    // Metal must keep the proven 1x Medium resource budget: the Vulkan High
+    // preset's 2x working set still causes an Apple GPU address fault even
+    // with SPGI disabled. FinalBlit uses a lightweight FXAA resolve below to
+    // provide edge cleanup without increasing the GI resource sizes.
     lumen::LumenConfig lumenConfig;
     lumenConfig.quality = lumen::LumenQualityPreset::Medium;
     lumenConfig.surface_cache_capture_budget = 0;
@@ -484,8 +508,7 @@ bool TestModularPipeline::InitializePipeline() {
     // 2026-09-04 启用 SPGI（Screen Probe GI）——Vulkan High 档混合方案
     // = SPGI（主力高频 GI）+ DDGI（低频环境）+ SSGI。Metal 之前缺 SPGI
     // → GI 只有 DDGI 低频 → "很平"无彩色弹射细节。
-    // SPGI 启用——Metal SPGI shader xcrun 编译通过（单个 .metal 文件无错误）
-    // lumenConfig.axes.use_screen_probes = true;  // SPGI Metal: GPU 页故障致 WindowServer 崩溃，待专项修复
+    // SPGI Metal still has a known GPU page fault and remains disabled.
     pipeline_->SetLumenConfig(lumenConfig);
 
     // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
