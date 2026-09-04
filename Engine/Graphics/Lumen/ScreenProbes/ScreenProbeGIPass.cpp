@@ -1388,14 +1388,18 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalRays = grid_width_ * grid_height_ * params_.rays_per_probe;
                 u32 dispatchX = (totalRays + 63) / 64;
-                // Bring-up: dump the actual trace-bound resources for the first frames.
+                // Bring-up: per-frame trace dispatch params + bound resources.
+                // The device hang reproduces at the pass's frame 2 (render
+                // frame 1) — frame-over-frame deltas are the diagnostic.
                 {
                     static u32 resDumps = 0;
-                    if (resDumps < 3) {
+                    if (resDumps < 6) {
                         ++resDumps;
                         PRIMAL_LOG_STREAM(Info, "Render")
-                            << "[SPGI-RES] grid=" << grid_width_ << "x" << grid_height_
-                            << " rays=" << params_.rays_per_probe
+                            << "[SPGI-RES] frameIdx=" << frameIdx << " histIdx=" << histIdx
+                            << " dispatchX=" << dispatchX << " totalRays=" << totalRays
+                            << " hitBuf=" << hit_distance_buffer_
+                            << " radBuf[" << frameIdx << "]=" << probe_radiance_buffer_[frameIdx]
                             << " sdfTex=" << sdfTextures[0] << "," << sdfTextures[1] << "," << sdfTextures[2]
                             << " hzbTex=" << hzb_texture_ << " hzbMips=" << hzb_mip_levels_
                             << " prevColor=" << prevColorTex
