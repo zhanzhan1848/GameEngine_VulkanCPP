@@ -21,6 +21,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
     ${CMAKE_SOURCE_DIR}/EngineDLL
+    # A9 PR2: AIAssetPipelineParams.h（权威 POD 头）+ pipeline/SceneBlobReader.h
+    # （cook 产物读回校验）。
+    ${CMAKE_SOURCE_DIR}/ContentTools
 )
 
 if(WIN32)
@@ -43,9 +46,10 @@ else()
 endif()
 
 # C ABI 消费者：只依赖 EngineDLL 的导出面（与编辑器/脚本宿主平级，规划 §12.1）。
-# ContentTools 提供 cook-mesh 等资产离线 verb。
+# ContentTools 提供 cook-mesh 等资产离线 verb；contenttools_pipeline 提供
+# A9 PR2 的产物读回（SceneBlobReader WalkSceneBlob）。
 find_package(ZLIB REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL ContentTools ZLIB::ZLIB)
+target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL ContentTools contenttools_pipeline ZLIB::ZLIB)
 
 # 运行时依赖部署：本 exe 的输出目录与两个 DLL 的输出目录在 Windows 的多配置
 # 生成器下不同目录（EngineDLL→Windows/<cfg>，ContentTools→build/bin/<cfg>），

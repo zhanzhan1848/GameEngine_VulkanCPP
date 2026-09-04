@@ -17,6 +17,11 @@
 #include "PipelineLightDesc.h"
 #include "CoreDiag.h"
 
+// A9 PR2: ai_asset_pipeline_params 的权威定义（§9 风险 #2 禁止 POD 手工镜像，
+// 调用方一律 include 本头）+ 产物读回校验（SceneBlobReader 认 UVLM 段）。
+#include "AIAssetPipelineParams.h"
+#include "pipeline/SceneBlobReader.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -184,6 +189,8 @@ int  SaveRenderTargetAsPng(u64 targetHandle, const char* path);
 
 // 资产（libContentTools）
 u32 CookMesh(const char* inputPath, const char* outputPath);
+u32 CookMeshWithPipeline(const char* inputPath, const char* outputPath,
+                         ai_asset_pipeline_params* params);
 
 // ContentTools/TextureImporter.cpp 内部类型（未公开头文件；字段序即 ABI，
 // 与 ContentTools/TextureImporter.cpp:727 的 cook_result 定义逐字段对齐——
@@ -398,30 +405,129 @@ int VerbRender(int argc, char** argv)
 #endif
 }
 
+// A9 PR2: 产物读回校验——把写盘后的 blob 按 SceneBlob 布局重新走一遍解析，
+// 统计 mesh 总数与带 UVLM（Lightmap UV sidecar）段的 mesh 数。这是
+// "cook → 磁盘 → 引擎读回" 闭环的校验端；读取失败不否定 cook 本身，
+// 但会体现在返回的统计里（mesh_count=0 即异常）。
+static bool CountMeshStats(const char* path, u32* out_mesh_count,
+                           u32* out_lightmap_uv_meshes)
+{
+    *out_mesh_count = 0;
+    *out_lightmap_uv_meshes = 0;
+
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    long size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (size <= 0) { std::fclose(f); return false; }
+    std::vector<u8> bytes(static_cast<size_t>(size));
+    const size_t got = std::fread(bytes.data(), 1, bytes.size(), f);
+    std::fclose(f);
+    if (got != bytes.size()) return false;
+
+    primal::tools::scene_data sd{};
+    sd.buffer = bytes.data();
+    sd.buffer_size = static_cast<u32>(bytes.size());
+    primal::utl::vector<primal::tools::ErrorReport> errs;
+    primal::tools::pipeline::WalkSceneBlob(
+        sd,
+        [&](u32, const primal::tools::pipeline::PackedMeshView& view) {
+            ++(*out_mesh_count);
+            if (view.lightmap_uv_count > 0) ++(*out_lightmap_uv_meshes);
+        },
+        errs);
+    return true;
+}
+
+// A9 PR2: 资产管线 cook（ProcessAIAsset）。uvatlas 开启时按 ContentToolsCLI
+// --pipeline 的默认组合装配 POD；lightmap 再把 uvatlas 切到 Lightmap 预设
+// （purpose=Lightmap、gutter=4、strict unique pack），生成的第二套 UV 落入
+// blob 的 UVLM sidecar 段而非被丢弃。
+static bool CookMeshPipeline(const char* inPath, const char* outPath,
+                             bool uvatlas, bool uvatlasLightmap,
+                             u32* out_mesh_count, u32* out_lightmap_uv_meshes)
+{
+    ai_asset_pipeline_params p{};
+    // 解析侧 legacy settings——与 legacy CookMesh 短格式默认一致
+    // （AIAssetPipelineParams.h: "Defaults match the legacy CookMesh
+    // short-form (178.0f, 1, 1, 0, 0, 0, 1)"）。
+    p.legacy_smoothing_angle = 178.0f;
+    p.legacy_calculate_normals = 1;
+    p.legacy_calculate_tangents = 1;
+    p.legacy_coalesce_meshes = 1;
+    // 管线模块开关（镜像 ContentToolsCLI --pipeline 默认值）。
+    p.enable_lod = 1;
+    p.enable_meshlet = 1;
+    p.enable_remesh = 1;
+    p.lod_ratio = 0.5f;
+    p.auto_derive_after_subdivide = 1;
+    p.subdivide_levels = 1;
+    p.subdivide_scheme = 0;      // Loop
+    p.derive_normal_mode = 2;    // AreaWeighted
+    p.derive_tangent_mode = 2;   // MikkTSpace
+    p.derive_faceted_angle_deg = 60.0f;
+    if (uvatlas)
+    {
+        p.enable_uvatlas = 1;
+        if (uvatlasLightmap)
+        {
+            p.uvatlas_target_purpose = 1;  // UVSetPurpose::Lightmap
+            p.uvatlas_gutter = 4.0f;
+            p.uvatlas_strict_unique_pack = 1;
+        }
+    }
+
+    if (CookMeshWithPipeline(inPath, outPath, &p) == 0) return false;
+    CountMeshStats(outPath, out_mesh_count, out_lightmap_uv_meshes);
+    return true;
+}
+
 int VerbCookMesh(int argc, char** argv)
 {
     const char* inPath = nullptr;
     const char* outPath = nullptr;
+    bool uvatlas = false;
+    bool uvatlasLightmap = false;
     for (int i = 0; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--in") == 0 && i + 1 < argc) inPath = argv[++i];
         else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
+        else if (std::strcmp(argv[i], "--uvatlas") == 0) uvatlas = true;
+        else if (std::strcmp(argv[i], "--uvatlas-lightmap") == 0)
+        {
+            uvatlas = true;
+            uvatlasLightmap = true;
+        }
         else
         {
             PrintError("INVALID_PARAMS", (std::string("未知参数: ") + argv[i]).c_str(),
-                       "支持 --in/--out");
+                       "支持 --in/--out/--uvatlas/--uvatlas-lightmap");
             return kExitUsage;
         }
     }
     if (!inPath || !outPath)
     {
         PrintError("INVALID_PARAMS", "需要 --in <源网格> 与 --out <.mesh 输出>",
-                   "示例: primal-engine cook-mesh --in mesh.obj --out mesh.mesh");
+                   "示例: primal-engine cook-mesh --in mesh.obj --out mesh.mesh [--uvatlas-lightmap]");
         return kExitUsage;
     }
 
     // cook 走 ContentTools 离线管线，不需要初始化渲染引擎。
-    if (CookMesh(inPath, outPath) == 0)
+    u32 mesh_count = 0;
+    u32 lightmap_uv_meshes = 0;
+    bool cooked = false;
+    if (uvatlas)
+    {
+        cooked = CookMeshPipeline(inPath, outPath, true, uvatlasLightmap,
+                                  &mesh_count, &lightmap_uv_meshes);
+    }
+    else
+    {
+        cooked = CookMesh(inPath, outPath) != 0;
+        if (cooked) CountMeshStats(outPath, &mesh_count, &lightmap_uv_meshes);
+    }
+    if (!cooked)
     {
         PrintError("ENGINE_ERROR", "CookMesh 失败（源格式不支持或内容管线报错）",
                    "确认输入是受支持的网格格式；详情见 stderr 日志");
@@ -438,8 +544,10 @@ int VerbCookMesh(int argc, char** argv)
 
     char data[1024];
     std::snprintf(data, sizeof(data),
-                  "{\"input\":%s,\"path\":%s,\"bytes\":%lld}",
-                  JsonEscape(inPath).c_str(), JsonEscape(outPath).c_str(), bytes);
+                  "{\"input\":%s,\"path\":%s,\"bytes\":%lld,"
+                  "\"meshes\":%u,\"lightmap_uv_meshes\":%u}",
+                  JsonEscape(inPath).c_str(), JsonEscape(outPath).c_str(), bytes,
+                  mesh_count, lightmap_uv_meshes);
     PrintOk(data);
     return kExitOk;
 }
@@ -458,7 +566,9 @@ int VerbSchema()
         "{\"name\":\"--frames\",\"type\":\"integer\",\"required\":false}],\"returns\":\"object\"},"
         "{\"verb\":\"cook-mesh\",\"description\":\"源网格离线 cook 为引擎 .mesh\",\"params\":["
         "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
-        "{\"name\":\"--out\",\"type\":\"string\",\"required\":true}],\"returns\":\"object\"},"
+        "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
+        "{\"name\":\"--uvatlas\",\"type\":\"boolean\",\"required\":false},"
+        "{\"name\":\"--uvatlas-lightmap\",\"type\":\"boolean\",\"required\":false}],\"returns\":\"object\"},"
         "{\"verb\":\"import-texture\",\"description\":\"源纹理离线 cook 为引擎 .texture（TEXR 容器）\",\"params\":["
         "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
         "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
@@ -933,7 +1043,7 @@ int Run(int argc, char** argv)
                      "用法:\n"
                      "  primal-engine engine info\n"
                      "  primal-engine render --out f.png [--width W] [--height H] [--frames N]\n"
-                     "  primal-engine cook-mesh --in m.obj --out m.mesh\n"
+                     "  primal-engine cook-mesh --in m.obj --out m.mesh [--uvatlas|--uvatlas-lightmap]\n"
                      "  primal-engine import-texture --in t.png --out t.texture [--format bc7]\n"
                      "  primal-engine bake-vt --in t.png --out t.vtex [--kind color|normal|scalar|auto]\n"
                      "  primal-engine build-shaders [--build-dir DIR]\n"
