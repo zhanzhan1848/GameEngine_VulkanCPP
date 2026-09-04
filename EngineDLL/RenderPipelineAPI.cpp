@@ -420,6 +420,129 @@ EDITOR_INTERFACE void PipelineSetLumenConfig(u32 quality_preset) {
 }
 
 // ============================================================================
+// Editor Render Mode Preset (plan §6.1 B3)
+// ============================================================================
+// Atomically apply one of the editor toolbar's viewport render modes. One call
+// instead of N x SetRenderPassEnabled avoids rendering frames with partially
+// applied pass sets (UpdateSettings rebuild happens once, next frame).
+//   0 Forward               — deferred lighting off, no shadow/AO/GI (lightweight preview)
+//   1 Deferred              — deferred lighting, no shadow/AO/GI
+//   2 DeferredShadowAO      — deferred + shadow + SSAO
+//   3 DeferredShadowAOGI    — deferred + shadow + SSAO + GI (editor default; pins Lumen Medium)
+EDITOR_INTERFACE void PipelineApplyModePreset(u32 mode) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+
+    bool deferred = false, shadow = false, ssao = false, gi = false;
+    switch (mode) {
+        case 0: break;
+        case 1: deferred = true; break;
+        case 2: deferred = true; shadow = true; ssao = true; break;
+        case 3: default:
+            deferred = true; shadow = true; ssao = true; gi = true; break;
+    }
+
+    // Order matters only for logging; SetPassEnabled flags settings_dirty_ once
+    // per actual change and the rebuild consumes the final state next frame.
+    p->SetPassEnabled(RenderPassID::DeferredLighting, deferred);
+    p->SetPassEnabled(RenderPassID::Shadow, shadow);
+    p->SetPassEnabled(RenderPassID::SSAO, ssao);
+    // GI chain = DDGI + SSGI (FusionComposite/GIGather derive from enable_ddgi).
+    p->SetPassEnabled(RenderPassID::DDGI, gi);
+    p->SetPassEnabled(RenderPassID::SSGI, gi);
+
+    if (gi && p->GetSettings().quality.preset == lumen::LumenQualityPreset::Off) {
+        lumen::LumenConfig config{};
+        config.quality = lumen::LumenQualityPreset::Medium;
+        p->SetLumenConfig(config);
+    }
+}
+
+// ============================================================================
+// Editor View Mode (plan §6.3 A7)
+// ============================================================================
+// Viewport view mode for the deferred GBuffer path. Orthogonal to
+// PipelineApplyModePreset (which selects pass combos); this selects how
+// geometry is drawn. Cheap per-frame value — no pipeline rebuild.
+//   0 Shaded     — normal lit output (default)
+//   1 Wireframe  — GBuffer pipeline's FillMode::Wireframe twin (Metal
+//                  TriangleFillModeLines / Vulkan VK_POLYGON_MODE_LINE);
+//                  falls back to shaded on backends without fill modes
+//                  (WebGPU/Dawn) or if twin creation failed.
+//   2 Unlit      — reserved (needs a deferred-shader variant; not implemented)
+EDITOR_INTERFACE void PipelineSetViewMode(u32 mode) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    p->SetViewMode(mode);
+}
+
+EDITOR_INTERFACE u32 PipelineGetViewMode() {
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    return p->GetViewMode();
+}
+
+// ============================================================================
+// B1 L3: DDGI Probe Sphere Overlay (Editor toggle)
+// ============================================================================
+// Renders one icosphere per DDGI probe on top of the tonemapped frame
+// (per-probe stable hue + sun diffuse). Module self-loads its shader
+// bytecode; the toggle is a cheap per-frame bool.
+EDITOR_INTERFACE void PipelineSetProbeSphereDebug(u32 enabled) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    p->SetProbeSphereDebug(enabled != 0);
+}
+
+EDITOR_INTERFACE u32 PipelineGetProbeSphereDebug() {
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    return p->IsProbeSphereDebugEnabled() ? 1u : 0u;
+}
+
+// ============================================================================
+// Editor Entity World AABB (plan §6.1 A1)
+// ============================================================================
+// Per-entity world-space bounds for editor picking / selection outline.
+// Mesh-bearing entities read RenderProxy::worldAABB (kept current by
+// UpdateTransform). Entities without a render proxy (lights, empties, cameras)
+// fall back to a half-meter cube around the transform position so they stay
+// clickable — this replaces the editor's previous fixed 1m cube approximation.
+EDITOR_INTERFACE u32 EntityGetWorldAABB(id::id_type id, f32* out_min, f32* out_max) {
+    if (!id::is_valid(id) || !out_min || !out_max) return 0;
+
+    auto* p = GetStdPipeline();
+    if (p) {
+        if (RenderScene* scene = p->GetCurrentScene()) {
+            for (const RenderProxy& proxy : scene->GetProxies()) {
+                if (proxy.entityId == id) {
+                    // Skip proxies whose AABB was never computed (default
+                    // min/max are +FLT_MAX / -FLT_MAX sentinels).
+                    if (proxy.worldAABB.min.x <= proxy.worldAABB.max.x) {
+                        out_min[0] = proxy.worldAABB.min.x;
+                        out_min[1] = proxy.worldAABB.min.y;
+                        out_min[2] = proxy.worldAABB.min.z;
+                        out_max[0] = proxy.worldAABB.max.x;
+                        out_max[1] = proxy.worldAABB.max.y;
+                        out_max[2] = proxy.worldAABB.max.z;
+                        return 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // No proxy (or invalid bounds): small cube around the entity position.
+    game_entity::entity entity{ game_entity::entity_id{id} };
+    if (!entity.is_valid()) return 0;
+    const primal::math::v3 pos{ entity.position() };
+    out_min[0] = pos.x - 0.5f; out_min[1] = pos.y - 0.5f; out_min[2] = pos.z - 0.5f;
+    out_max[0] = pos.x + 0.5f; out_max[1] = pos.y + 0.5f; out_max[2] = pos.z + 0.5f;
+    return 1;
+}
+
+// ============================================================================
 // Pipeline Lifecycle (Phase 9.3b unblock)
 // ============================================================================
 // Headless integration tests need a StandardRenderPipeline owned by the dylib
@@ -807,6 +930,21 @@ EDITOR_INTERFACE void GISetDebugParams(const lumen::GIDebugParams* params) {
     lumen::GIDebug() = *params;
 }
 
+// Editor "static scene" toggle (plan §2 A10): freeze DDGI probe updates so
+// a static scene skips the per-frame trace/update chain after convergence.
+// Bake (warm-start quality) stays on the GIEditorPanel side.
+EDITOR_INTERFACE void GISetProbeFreeze(u32 enabled) {
+    lumen::GIDebug().freeze_probe_updates = enabled != 0;
+}
+
+// Probe debug visualization mode (plan §6.2 B1 L1): 0=Off, 1=IrradianceAtlas,
+// 2=DepthAtlas, 3=Confidence, 4=ProbePositions. Data path currently wired on
+// Vulkan GIGather only (GIDebugParams.h:52 note) — other backends accept and
+// hold the value.
+EDITOR_INTERFACE void GISetProbeVisMode(u32 mode) {
+    lumen::GIDebug().probe_vis = static_cast<lumen::GIDebugParams::ProbeVisMode>(mode);
+}
+
 // --- 五轴热重载（SetLumenConfig 路径，勿绕行 UpdateRenderPipelineSettings） ---
 
 EDITOR_INTERFACE u32 GIApplyAxesConfig(const lumen::GIFiveAxisConfig* axes) {
@@ -1078,6 +1216,35 @@ EDITOR_INTERFACE u32 UpdateSceneEnvironment(const f32* params)
     auto* fwd = p ? p->GetForwardRenderer() : nullptr;
     if (!fwd) return 0;
     fwd->SetAmbientLight({params[0], params[1], params[2]}, params[3]);
+
+    // B2（plan §6.2）：消费 24-float 布局的雾段——p[4..6] Fog RGB、p[7..9]
+    // Near/Far/Density、p[10] FogEnabled——映射到 Froxel 体积雾（完整系统，
+    // 默认关闭；FroxelTypes.h FroxelGridConfig）。映射刻意最小化：
+    //   Density → extinction_scale（×10 进入可感知区间）
+    //   Fog RGB → scattering_albedo（亮度）
+    //   Far-Near → density_fade_range（过渡带）
+    // UpdateSettings 置 settings_dirty_；ApplyConfigChanges 依据开关创建/
+    // 销毁 froxel pass（运行时开关可用，不必重启管线）。开关未变化时跳过
+    // UpdateSettings，避免面板拖动参数导致每 tick 重建。
+    const auto& current = p->GetSettings();
+    const bool fog_enabled = params[10] != 0.f;
+    const float albedo = std::clamp((params[4] + params[5] + params[6]) / 3.f, 0.f, 1.f);
+    const float extinction = std::clamp(params[9] * 10.f, 0.f, 10.f);
+    const float fade = std::clamp(params[8] - params[7], 1.f, 500.f);
+
+    const bool fog_changed =
+        current.quality.enable_froxel_fog != fog_enabled ||
+        std::fabs(current.froxel.scattering_albedo - albedo) > 1e-4f ||
+        std::fabs(current.froxel.extinction_scale - extinction) > 1e-4f ||
+        std::fabs(current.froxel.density_fade_range - fade) > 1e-3f;
+    if (fog_changed) {
+        auto settings = current;  // 值拷贝——不污染其它设置面
+        settings.quality.enable_froxel_fog = fog_enabled;
+        settings.froxel.scattering_albedo = albedo;
+        settings.froxel.extinction_scale = extinction;
+        settings.froxel.density_fade_range = fade;
+        p->UpdateSettings(settings);
+    }
     return 1;
 }
 

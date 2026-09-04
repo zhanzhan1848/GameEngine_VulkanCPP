@@ -389,4 +389,54 @@ EDITOR_INTERFACE const char* PCGGetRegisteredNodeTypeName(u32 index) {
     return PCGSerializer::GetRegisteredNodeTypeName(index);
 }
 
+// ============================================================================
+// A6: Flat descriptor readers — avoid struct marshaling across the C ABI.
+// Fields mirror PCGParamDescriptor / PCGPinDescriptor (PCGReflection.h);
+// strings are returned as pointers to static data (valid while the node
+// lives). Returns 1 on success, 0 on out-of-range.
+// ============================================================================
+
+// A6 Apply: mesh library slot as flat out-params (PCGMeshSlot carries two
+// std::string members — not marshalable). Pointers reference the graph's
+// slots; valid until the next mesh-slot mutation. Returns 1 on success.
+EDITOR_INTERFACE u32 PCGGetMeshSlotFlat(u32 index, const char** out_path, const char** out_name) {
+    if (!g_pcg_graph || index >= g_pcg_graph->GetMeshSlotCount()) return 0;
+    const auto& slot = g_pcg_graph->GetMeshSlot(index);
+    if (out_path) *out_path = slot.path.c_str();
+    if (out_name) *out_name = slot.name.c_str();
+    return 1;
+}
+
+EDITOR_INTERFACE u32 PCGGetNodeParamDescriptorFlat(u32 node_id, u32 param_idx,
+    const char** out_name, const char** out_group, u8* out_type,
+    f32* out_min, f32* out_max, f32* out_step, const char** out_enum_names) {
+    if (!g_pcg_graph || node_id >= g_pcg_graph->GetNodes().size()) return 0;
+    u32 count;
+    auto* descs = g_pcg_graph->GetNodes()[node_id]->GetParamDescriptors(count);
+    if (param_idx >= count) return 0;
+    const auto& d = descs[param_idx];
+    if (out_name) *out_name = d.name;
+    if (out_group) *out_group = d.group;
+    if (out_type) *out_type = static_cast<u8>(d.type);
+    if (out_min) *out_min = d.range.min_val;
+    if (out_max) *out_max = d.range.max_val;
+    if (out_step) *out_step = d.range.step;
+    if (out_enum_names) *out_enum_names = d.enum_names;
+    return 1;
+}
+
+EDITOR_INTERFACE u32 PCGGetNodePinDescriptorFlat(u32 node_id, u32 pin_idx,
+    const char** out_name, u32* out_index, u8* out_type, u8* out_is_input) {
+    if (!g_pcg_graph || node_id >= g_pcg_graph->GetNodes().size()) return 0;
+    u32 count;
+    auto* descs = g_pcg_graph->GetNodes()[node_id]->GetPinDescriptors(count);
+    if (pin_idx >= count) return 0;
+    const auto& d = descs[pin_idx];
+    if (out_name) *out_name = d.name;
+    if (out_index) *out_index = d.index;
+    if (out_type) *out_type = static_cast<u8>(d.data_type);
+    if (out_is_input) *out_is_input = d.is_input ? 1u : 0u;
+    return 1;
+}
+
 } // extern "C"

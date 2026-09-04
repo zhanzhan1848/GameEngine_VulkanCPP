@@ -393,6 +393,8 @@ if(NOT EMSCRIPTEN)
     add_subdirectory(EngineTest)
     # 离线通道 one-shot CLI（CLI 规划 §10 Phase 2）：engine info / render / schema
     add_subdirectory(Tools/PrimalEngineCli)
+    # 运行时宿主（编辑器 Run 按钮启动目标，规划 §Run/Stop 2026-09-03）
+    add_subdirectory(Tools/PrimalPlayer)
 else()
     # Emscripten WASM test executable
     if(ENABLE_WEBGPU)
