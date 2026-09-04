@@ -539,7 +539,16 @@ bool TestModularPipeline::InitializePipeline() {
         // 修复后，环路结构已与 Vulkan 一致——ddgi_light_color 恢复 Vulkan
         // 同档 5.0（此前 2.0 是 SC 覆盖不足+诊断 stride 错误时期的折中值，
         // 导致探针场中性化、GI 无彩色弹射）。
+        // PRIMAL_DDGI_LIGHT="r,g,b"：跨后端同机位 A/B——Vulkan 参考用 5.0，
+        // 这里默认 3.0，可在不改代码的情况下对齐/对照两档探针驱动强度。
         renderSettings.lighting.ddgi_light_color = {3.0f, 3.0f, 3.0f, 1.0f};
+        if (const char* dl = std::getenv("PRIMAL_DDGI_LIGHT")) {
+            float lr, lg, lb;
+            if (std::sscanf(dl, "%f,%f,%f", &lr, &lg, &lb) == 3) {
+                renderSettings.lighting.ddgi_light_color = {lr, lg, lb, 1.0f};
+                std::cerr << "[TestModularPipeline] ddgi_light_color overridden: " << dl << std::endl;
+            }
+        }
         pipeline_->UpdateSettings(renderSettings);
     }
 
