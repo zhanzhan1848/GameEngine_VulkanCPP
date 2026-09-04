@@ -162,10 +162,12 @@ private:
     
     // 计算状态跟踪
     MTL::Size currentThreadGroupSize_{1, 1, 1};
-    // Set true by BindComputePipeline after a successful setComputePipelineState;
-    // Dispatch refuses to encode when false. Binding used to fail silently, and
-    // the unguarded dispatch then faulted the GPU (the "洋红" device hangs).
-    bool computePipelineBoundValid_{false};
+    // The encoder instance BindComputePipeline last bound a pipeline on.
+    // Dispatch refuses to encode unless this STILL equals the current encoder:
+    // a plain bool leaked stale "bound" state across encoder/buffer transitions
+    // and let unguarded dispatches fault the GPU ("洋红" device hangs that
+    // starved WindowServer into a kernel panic).
+    MTL::ComputeCommandEncoder* computePipelineBoundEncoder_{nullptr};
 
     // 线程调试
     std::thread::id recordingThreadId_;

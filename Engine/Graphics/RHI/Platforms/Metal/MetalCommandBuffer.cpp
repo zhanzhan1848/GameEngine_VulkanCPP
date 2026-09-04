@@ -318,7 +318,7 @@ MTL::ComputeCommandEncoder* MetalCommandBuffer::getComputeEncoder() {
     currentEncoderType_ = EncoderType::Compute;
     // Metal pipeline state is per-encoder: a bind that succeeded on a previous
     // encoder must not validate this one's dispatches.
-    computePipelineBoundValid_ = false;
+    computePipelineBoundEncoder_ = nullptr;
     return encoder;
 }
 
@@ -1194,7 +1194,12 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
 
 void MetalCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
     MTL::ComputeCommandEncoder* encoder = getComputeEncoder();
-    if (!encoder) return;
+    if (!encoder) {
+        // No encoder available: a later Dispatch on THIS buffer must not trust
+        // a bind flag from some earlier encoder instance.
+        computePipelineBoundEncoder_ = nullptr;
+        return;
+    }
 
     MetalDevice& metalDevice = static_cast<MetalDevice&>(device_);
     MetalPipeline* mtlPipeline = metalDevice.GetPipeline(pipeline);
@@ -1202,13 +1207,14 @@ void MetalCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
     if (mtlPipeline && mtlPipeline->GetComputePipelineState()) {
         encoder->setComputePipelineState(mtlPipeline->GetComputePipelineState());
         currentThreadGroupSize_ = mtlPipeline->GetThreadGroupSize();
-        computePipelineBoundValid_ = true;
+        computePipelineBoundEncoder_ = encoder;
     } else {
         // Binding used to fail SILENTLY here: the following Dispatch then
         // encoded with no pipeline bound — a GPU page fault in release builds
         // (magenta screen / device-wide hang) and a validation assert in
-        // debug. Fail loudly instead; Dispatch skips while this flag is false.
-        computePipelineBoundValid_ = false;
+        // debug. Fail loudly instead; Dispatch skips while this encoder has
+        // no verified bind.
+        computePipelineBoundEncoder_ = nullptr;
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[MetalCommandBuffer] BindComputePipeline: handle " << (unsigned long long)pipeline
             << " resolves to no valid compute pipeline state — subsequent Dispatch"
@@ -1258,12 +1264,14 @@ void MetalCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size) 
 void MetalCommandBuffer::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     MTL::ComputeCommandEncoder* encoder = getComputeEncoder();
     if (!encoder) return;
-    if (!computePipelineBoundValid_) {
-        // A failed BindComputePipeline preceded this call. Encoding a dispatch
-        // with no pipeline bound faults the GPU (magenta device hang); skipping
-        // keeps the frame alive and the log already names the failed bind.
+    if (computePipelineBoundEncoder_ != encoder) {
+        // The current encoder has no verified BindComputePipeline (never bound,
+        // or the bind failed, or the encoder was recreated after the last
+        // bind). Encoding a dispatch with no pipeline bound faults the GPU
+        // (magenta device hang); skipping keeps the frame alive — the failed
+        // bind, if any, is already named in the log.
         PRIMAL_LOG_STREAM(Error, "RHI")
-            << "[MetalCommandBuffer] Dispatch skipped — no compute pipeline bound ("
+            << "[MetalCommandBuffer] Dispatch skipped — no verified compute pipeline bind on this encoder ("
             << groupCountX << "," << groupCountY << "," << groupCountZ << ")" << std::endl;
         return;
     }
