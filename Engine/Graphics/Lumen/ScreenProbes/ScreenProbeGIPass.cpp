@@ -176,6 +176,23 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
     std::string shaderPath = SCREEN_PROBE_SHADER_DIR + shaderName + ".metal";
     std::string source = ReadFileToString(shaderPath);
 
+    // T8.13 SPGI parity track: PRIMAL_SPGI_PARITY=1 prefers <name>Parity.metal
+    // — faithful Metal ports of the Vulkan ScreenProbe*.comp kernels — per
+    // stage, falling back to the engine shader whenever the port doesn't
+    // exist yet. Mirrors the LumenDDGIPass PRIMAL_DDGI_PARITY mechanism.
+    // WARNING: the SPGI chain still has an unresolved frame-2 GPU fault; run
+    // only with Metal validation layers until fixed.
+    if (std::getenv("PRIMAL_SPGI_PARITY")) {
+        const std::string parityPath = SCREEN_PROBE_SHADER_DIR + shaderName + "Parity.metal";
+        std::string paritySource = ReadFileToString(parityPath);
+        if (!paritySource.empty()) {
+            shaderPath = parityPath;
+            source = std::move(paritySource);
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[ScreenProbeGI] Parity port in effect: " << shaderName << "Parity.metal" << std::endl;
+        }
+    }
+
     if (source.empty()) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Failed to load shader: " << shaderName << std::endl;
         return {};
