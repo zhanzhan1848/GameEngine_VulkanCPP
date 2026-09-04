@@ -868,6 +868,13 @@ static bool SpgiStageSkipped(const char* stage) {
     if (!skipList) return false;
     return std::strstr(skipList, stage) != nullptr;
 }
+static void SpgiStageMark(u32 frameIdx, const char* stage) {
+    static u32 marks = 0;
+    if (marks < 30) {  // bring-up: first frames only
+        ++marks;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[SPGI-MARK] f" << frameIdx << " " << stage << " done" << std::endl;
+    }
+}
 
 void ScreenProbeGIPass::CreateBuffers() {
     u32 totalProbes = grid_width_ * grid_height_;
@@ -1324,6 +1331,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
+                SpgiStageMark(frameIdx, "place");
             }
 
             // Barrier: probe buffers written
@@ -1363,6 +1371,21 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalRays = grid_width_ * grid_height_ * params_.rays_per_probe;
                 u32 dispatchX = (totalRays + 63) / 64;
+                // Bring-up: dump the actual trace-bound resources for the first frames.
+                {
+                    static u32 resDumps = 0;
+                    if (resDumps < 3) {
+                        ++resDumps;
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[SPGI-RES] grid=" << grid_width_ << "x" << grid_height_
+                            << " rays=" << params_.rays_per_probe
+                            << " sdfTex=" << sdfTextures[0] << "," << sdfTextures[1] << "," << sdfTextures[2]
+                            << " hzbTex=" << hzb_texture_ << " hzbMips=" << hzb_mip_levels_
+                            << " prevColor=" << prevColorTex
+                            << " gridOff=" << scGridOffsets << " gridCards=" << scGridCards
+                            << " ddgiIrr=" << ddgiIrr << std::endl;
+                    }
+                }
 
                 const bool splitReady = (sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
                                          finalize_pipeline_ != handles::INVALID_PIPELINE &&
@@ -1401,6 +1424,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, hzb_trace_layout_, 0, 1, sets, 0, nullptr);
                         if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                         cmd->Dispatch(dispatchX, 1, 1);
+                        SpgiStageMark(frameIdx, "hzb");
                         // L2 visibility before the SDF kernel reads the hit buffer.
                         cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                            AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
@@ -1447,6 +1471,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, sdf_trace_layout_, 0, 1, sdfSets, 0, nullptr);
                     if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                     cmd->Dispatch(dispatchX, 1, 1);
+                    SpgiStageMark(frameIdx, "sdf");
                     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
 
@@ -1491,6 +1516,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, finSets, 0, nullptr);
                     if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                     cmd->Dispatch(dispatchX, 1, 1);
+                    SpgiStageMark(frameIdx, "finalize");
                 } else if (!SpgiStageSkipped("trace")) {
                     // Monolithic fallback — Vulkan flat bindings 0..13 (fixed:
                     // previously wrote Metal overlapping numbers on both platforms).
@@ -1538,6 +1564,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
                     cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                     cmd->Dispatch(dispatchX, 1, 1);
+                    SpgiStageMark(frameIdx, "monolith");
                 }
             }
 
@@ -1580,6 +1607,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch(totalProbes, 1, 1);
+                SpgiStageMark(frameIdx, "avg");
             }
 
             // Barrier: avg radiance written
@@ -1642,6 +1670,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
+                SpgiStageMark(frameIdx, "temporal");
             }
 
             // Barrier: temporal output written
@@ -1676,6 +1705,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
+                SpgiStageMark(frameIdx, "spatial");
             }
 
             // Barrier: spatial filter output written (histIdx)
@@ -1729,6 +1759,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 u32 dispatchX = (render_width_ + 7) / 8;
                 u32 dispatchY = (render_height_ + 7) / 8;
                 cmd->Dispatch(dispatchX, dispatchY, 1);
+                SpgiStageMark(frameIdx, "gather");
             }
 
             // Barrier: Gather output written
@@ -1786,6 +1817,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 u32 dispatchX = (render_width_ + 7) / 8;
                 u32 dispatchY = (render_height_ + 7) / 8;
                 cmd->Dispatch(dispatchX, dispatchY, 1);
+                SpgiStageMark(frameIdx, "denoise");
             }
         }
     );
