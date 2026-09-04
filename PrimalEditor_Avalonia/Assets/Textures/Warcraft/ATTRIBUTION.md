@@ -21,4 +21,5 @@
 | button-normal / hover / pressed.png | button-bg.webp | 普通按钮九宫格（三态） |
 | button-accent.png / button-accent-hover.png | button-bg-with-frame.webp | 强调按钮（`Classes="accent"`）九宫格 |
 | frame-strip.png | input-frame.webp | 细铁边条：菜单栏、工具条、状态条 |
+| node-frame-orc/human/elf/undead/default.png | button-bg-with-frame.webp | 材质编辑器节点外框(按阵营色相偏移：兽人红/人类蓝/精灵青/亡灵紫/中立金；内环挖空,叠加于节点边界之外) |
 | frame-panel.png | card-bg.webp | 木纹大面板：层级/检查器/文件/日志等 |

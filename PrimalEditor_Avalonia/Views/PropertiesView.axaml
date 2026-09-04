@@ -246,11 +246,30 @@
                 </Grid>
             </StackPanel>
 
+            <!-- 粒子发射器（plan §6.3 B4 P2） -->
+            <StackPanel IsVisible="{Binding HasParticleComponent}" Spacing="6">
+                <Separator Margin="0,12"/>
+                <TextBlock Text="PARTICLE EMITTER" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <Grid ColumnDefinitions="90,*" RowDefinitions="Auto,Auto,Auto">
+                    <TextBlock Grid.Row="0" Text="Preset" VerticalAlignment="Center"/>
+                    <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding ParticlePresetOptions}"
+                              SelectedItem="{Binding ParticlePresetName}"/>
+                    <Button Grid.Row="0" Grid.Column="2" Content="Save…" Command="{Binding ParticleSavePresetCommand}"
+                            Margin="6,0,0,0" Padding="8,2"
+                            ToolTip.Tip="把当前预设另存为项目根下的 .particle.json"/>
+                    <TextBlock Grid.Row="1" Text="Spawn Rate" VerticalAlignment="Center" Margin="0,4,0,0"/>
+                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ParticleSpawnRate, Mode=TwoWay}" Margin="0,4,0,0"/>
+                    <CheckBox Grid.Row="2" Grid.Column="1" Content="Enabled" IsChecked="{Binding ParticleEnabled, Mode=TwoWay}" Margin="0,4,0,0"/>
+                </Grid>
+                <Button Content="Curves…" Click="OnOpenCurveEditorClick" HorizontalAlignment="Left"
+                        Padding="8,2" Margin="0,6,0,0"
+                        ToolTip.Tip="B4 P3: 编辑 Scale/Alpha/Color/Velocity/Force/Rotation 六条 over-life 曲线"/>
+            </StackPanel>
+
             <StackPanel IsVisible="{Binding HasMeshRendererComponent}" Spacing="6">
                 <Separator Margin="0,12"/>
 
-                <TextBlock Text="MESH RENDERER"
-                       FontFamily="{DynamicResource FontDisplay}"
+                <TextBlock Text="MESH RENDERER"                       FontFamily="{DynamicResource FontDisplay}"
                        FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
                        Foreground="{DynamicResource CoralBrush}"
                        Margin="0,0,0,6"/>

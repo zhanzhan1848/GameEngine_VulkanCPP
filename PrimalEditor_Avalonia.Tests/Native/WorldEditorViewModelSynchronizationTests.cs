@@ -44,6 +44,14 @@ public sealed class WorldEditorViewModelSynchronizationTests
 
     private sealed class RecordingBridge : INativeEngineBridgeLike
     {
+        public bool ParticleEnsureSystems() { return true; }
+        public uint ParticleEmitterConfigSize() { return 304; }
+        public uint EmitterCreateForEntity(uint entityId, byte[] config) { return 7; }
+        public bool EmitterRemoveFromEntity(uint entityId) { return true; }
+        public bool EmitterSetSpawnRate(uint entityId, float rate) { return true; }
+        public string? ParticlePresetList() { return "fire"; }
+        public bool ParticlePresetApplyToConfig(string name, byte[] config) { return true; }
+
         public bool IsLoaded => true;
         public uint CreatedEntities { get; private set; }
         public bool ImportMeshCalled { get; private set; }

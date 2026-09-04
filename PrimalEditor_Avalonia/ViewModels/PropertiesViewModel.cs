@@ -78,6 +78,109 @@ public class PropertiesViewModel : ViewModelBase
     public bool HasMeshRendererComponent => MeshRenderer != null;
     public bool HasMaterialOverrideComponent { get; private set; }
 
+    // ---- 粒子发射器（plan §6.3 B4 P2）----
+    private System.Collections.Generic.IReadOnlyList<PrimalEditor_Avalonia.Components.GameEntity> SingleSelection
+        => _msEntity.SelectedEntities.Count == 1
+            ? new[] { _msEntity.SelectedEntities[0] }
+            : System.Array.Empty<PrimalEditor_Avalonia.Components.GameEntity>();
+
+    public bool HasParticleComponent => SingleSelection.Count == 1 &&
+        SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.ParticleEmitterComponent>() != null;
+
+    public PrimalEditor_Avalonia.Components.ParticleEmitterComponent? Particle
+    {
+        get
+        {
+            var c = SingleSelection.Count == 1
+                ? SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.ParticleEmitterComponent>()
+                : null;
+            ParticlePresetNameStatic = c?.PresetName;
+            return c;
+        }
+    }
+
+    private System.Collections.Generic.IReadOnlyList<string>? _particlePresets;
+    public System.Collections.Generic.IReadOnlyList<string> ParticlePresetOptions
+        => _particlePresets ??= PrimalEditor_Avalonia.Native.NativeEngineBridge.ParticlePresetList()?
+               .Split('\n') ?? new[] { "fire", "smoke", "explosion", "rain", "snow" };
+
+    /// <summary>B4 P4: drop the cached preset list so the next read re-queries
+    /// the engine (after Save/Load adds a custom .particle.json).</summary>
+    public void RefreshParticlePresetOptions()
+    {
+        _particlePresets = null;
+        OnPropertyChanged(nameof(ParticlePresetOptions));
+    }
+
+    public string ParticlePresetName
+    {
+        get => Particle?.PresetName ?? "";
+        set
+        {
+            if (Particle == null || Particle.PresetName == value) return;
+            Particle.PresetName = value;
+            RebuildParticleEmitter();
+        }
+    }
+
+    public float ParticleSpawnRate
+    {
+        get => Particle?.SpawnRate ?? 0f;
+        set
+        {
+            if (Particle == null) return;
+            Particle.SpawnRate = value;
+            if (SelectedEntityNativeId != 0)
+                PrimalEditor_Avalonia.Native.NativeEngineBridge.EmitterSetSpawnRate(SelectedEntityNativeId, value);
+            MarkProjectDirtyCallback?.Invoke();
+        }
+    }
+
+    public bool ParticleEnabled
+    {
+        get => Particle?.IsEnabled ?? false;
+        set
+        {
+            if (Particle == null) return;
+            Particle.IsEnabled = value;
+            if (SelectedEntityNativeId != 0)
+                PrimalEditor_Avalonia.Native.NativeEngineBridge.EmitterSetSpawnRate(SelectedEntityNativeId,
+                    value ? Particle.SpawnRate : 0f);
+            MarkProjectDirtyCallback?.Invoke();
+        }
+    }
+
+    private void RebuildParticleEmitter()
+    {
+        // 预设切换 = 拆掉旧发射器重建（PresetApplyToConfig 只在新实体创建路径
+        // 被 Synchronizer 调用）。文档已标脏，保存后往返一致。
+        PushParticlesRebuildCallback?.Invoke(_msEntity.SelectedEntities[0]);
+        MarkProjectDirtyCallback?.Invoke();
+    }
+
+    /// <summary>WorldEditorViewModel 注入：移除旧发射器并按当前组件重建。</summary>
+    public System.Action<PrimalEditor_Avalonia.Components.GameEntity>? PushParticlesRebuildCallback { get; set; }
+
+    /// <summary>WorldEditorViewModel 注入：把当前预设存为项目内 .particle.json。
+    /// 静态中转供 RelayCommand 闭包使用（编辑器单实例语义）。</summary>
+    public System.Action<string>? ParticleSavePresetCallback
+    {
+        get => ParticleSavePresetCallbackStatic;
+        set => ParticleSavePresetCallbackStatic = value;
+    }
+
+    public System.Windows.Input.ICommand ParticleSavePresetCommand { get; } =
+        new PrimalEditor_Avalonia.Common.RelayCommand(_ =>
+        {
+            var name = ParticlePresetNameStatic;
+            if (!string.IsNullOrEmpty(name)) ParticleSavePresetCallbackStatic?.Invoke(name);
+        });
+
+    // RelayCommand 闭包无法捕获实例——经静态中转（编辑器单实例语义）。
+    private static string? ParticlePresetNameStatic;
+    private static System.Action<string>? ParticleSavePresetCallbackStatic;
+
+
     /// <summary>"Look Through This Camera" or "Restore Editor Camera"
     /// depending on whether the viewport is currently rendering through
     /// this entity. Bound to the Properties panel button.</summary>
@@ -672,6 +775,8 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(HasCameraComponent));
         OnPropertyChanged(nameof(HasMeshRendererComponent));
         OnPropertyChanged(nameof(HasMaterialOverrideComponent));
+        OnPropertyChanged(nameof(HasParticleComponent));
+        OnPropertyChanged(nameof(Particle));
 
         MixedValueMessage = _msEntity.SelectedEntities.Count > 1
             ? "Multiple entities selected - showing first value or '-' for mixed"

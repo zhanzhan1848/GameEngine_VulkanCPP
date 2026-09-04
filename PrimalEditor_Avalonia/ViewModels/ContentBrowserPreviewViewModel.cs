@@ -266,6 +266,17 @@ public class ContentBrowserPreviewViewModel : ViewModelBase, IDisposable
                 case AssetType.Shader:
                     LoadShader(info);
                     break;
+                case AssetType.Prefab:
+                    // v1：无缩略图渲染，只给状态行（双击打开只读检查器）。
+                    StatusMessage = $"Prefab — drag into the scene to instantiate ({info.FileName})";
+                    break;
+                case AssetType.ParticlePreset:
+                    StatusMessage = $"Particle preset — right-click an entity with an emitter to apply ({info.FileName})";
+                    break;
+                case AssetType.Pcg:
+                    // A6：双击打开 PCG 图编辑器。
+                    StatusMessage = $"PCG graph — double-click to open the graph editor ({info.FileName})";
+                    break;
                 case AssetType.Audio:
                     LoadAudio(info);
                     break;

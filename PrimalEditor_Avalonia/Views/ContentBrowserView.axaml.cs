@@ -344,6 +344,26 @@ public partial class ContentBrowserView : UserControl
         e.Handled = true;
     }
 
+    /// <summary>
+    /// B4 P4: context-menu "Apply to Selected Particle Entity" — load the
+    /// .particle.json into the preset system and switch the selected
+    /// entity's emitter to it (via WorldEditorViewModel, same path as the
+    /// inspector's preset dropdown).
+    /// </summary>
+    private void OnApplyPresetToSelectedClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not Avalonia.Controls.MenuItem mi || mi.DataContext is not AssetInfo info) return;
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        if (lifetime?.MainWindow?.DataContext is not MainWindowViewModel mainVm)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning("[Particle] apply preset: no main view model");
+            return;
+        }
+        mainVm.WorldEditor.ApplyPresetToSelectedParticleEntity(info);
+        e.Handled = true;
+    }
+
     private void ToggleContainer(AssetInfo info)
     {
         if (DataContext is not ContentBrowserViewModel vm) return;

@@ -34,14 +34,14 @@ internal sealed class ThemeTestApp : Application
             Source = new Uri("avares://PrimalEditor_Avalonia/Themes/Warcraft/WarcraftTheme.axaml")
         });
         Styles.Add(new FluentTheme());
-        Styles.Add(new StyleInclude(new Uri("avares://PrimalEditor_Avalonia/"))
-        {
-            Source = new Uri("avares://PrimalEditor_Avalonia/Themes/Warcraft/WarcraftTheme.Styles.axaml")
-        });
-        // 与 App.axaml 一致: 节点编辑器(材质画布)样式
+        // 与 App.axaml 一致: NodifyM 在前, 主题样式在后(后者覆写前者模板)
         Styles.Add(new StyleInclude(new Uri("avares://PrimalEditor_Avalonia/"))
         {
             Source = new Uri("avares://NodifyM.Avalonia/Styles/ControlStyles.axaml")
+        });
+        Styles.Add(new StyleInclude(new Uri("avares://PrimalEditor_Avalonia/"))
+        {
+            Source = new Uri("avares://PrimalEditor_Avalonia/Themes/Warcraft/WarcraftTheme.Styles.axaml")
         });
     }
 }
@@ -121,7 +121,8 @@ public class ThemeManagerHeadlessTests
             foreach (var name in new[] { "button-normal", "button-hover", "button-pressed",
                                          "button-accent", "button-accent-hover", "button-focus", "button-accent-focus",
                                          "frame-strip", "frame-panel",
-                                         "avatar-orc", "avatar-human", "avatar-elf", "avatar-undead", "avatar-default" })
+                                         "avatar-orc", "avatar-human", "avatar-elf", "avatar-undead", "avatar-default",
+                                         "node-frame-orc", "node-frame-human", "node-frame-elf", "node-frame-undead", "node-frame-default" })
             {
                 var uri = $"avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/{name}.png";
                 Assert.NotNull(NineSliceImage.LoadSource(uri));

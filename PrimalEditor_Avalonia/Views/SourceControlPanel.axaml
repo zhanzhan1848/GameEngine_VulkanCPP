@@ -1,0 +1,46 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
+        x:Class="PrimalEditor_Avalonia.Views.SourceControlPanel"
+        x:DataType="vm:SourceControlViewModel"
+        Title="Source Control" Width="560" Height="420" CanResize="True"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="12" RowDefinitions="Auto,Auto,*,Auto,Auto" >
+        <!-- Repo state line -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+            <Button Content="Refresh" Command="{Binding RefreshCommand}" Padding="10,2"/>
+            <TextBlock Text="{Binding RepoRoot}" VerticalAlignment="Center"
+                       Classes="mono" FontSize="11"
+                       Foreground="{DynamicResource SecondaryTextBrush}"/>
+        </StackPanel>
+
+        <!-- Changed files -->
+        <ListBox Grid.Row="1" ItemsSource="{Binding Files}" Height="220">
+            <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:ScmFileEntry">
+                    <CheckBox IsChecked="{Binding IsSelected}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="{Binding StatusDisplay}" Width="16"
+                                       Classes="mono" FontWeight="Bold"
+                                       Foreground="{DynamicResource ElectricBlueBrush}"/>
+                            <TextBlock Text="{Binding RepoRelativePath}" Classes="mono" FontSize="11"/>
+                        </StackPanel>
+                    </CheckBox>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <!-- Commit message -->
+        <TextBox Grid.Row="2" Text="{Binding CommitMessage}" Watermark="Commit message…"
+                 AcceptsReturn="True" TextWrapping="Wrap" Margin="0,8,0,0"/>
+
+        <!-- Status line -->
+        <TextBlock Grid.Row="3" Text="{Binding StatusText}"
+                   Foreground="{DynamicResource SecondaryTextBrush}" Margin="0,6,0,0"/>
+
+        <!-- Commit -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,8,0,0">
+            <Button Content="Commit Selected" Command="{Binding CommitCommand}" Classes="accent" Padding="16,2"/>
+        </StackPanel>
+    </Grid>
+</Window>

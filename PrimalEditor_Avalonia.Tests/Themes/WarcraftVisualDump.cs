@@ -72,31 +72,34 @@ public class WarcraftVisualDump
                 Header = "Constant Float3",
                 Width = 220, Height = 90,
                 Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x26, 0x18)),
-                Content = new StackPanel
+                Content = new Panel
                 {
-                    // 与 MaterialEditorView 一致: 阵营头像行 + 参数行
+                    // 与 MaterialEditorView 一致: 参数行 + 左上角阵营徽章铭牌
                     Children =
                     {
-                        new StackPanel
-                        {
-                            Orientation = Avalonia.Layout.Orientation.Horizontal,
-                            Margin = new Thickness(12, 8, 12, 2),
-                            IsVisible = true,
-                            Children =
-                            {
-                                new Image
-                                {
-                                    Width = 18, Height = 18, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                                    Source = PrimalEditor_Avalonia.Themes.Controls.NineSliceImage.LoadSource(
-                                        "avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/avatar-orc.png"),
-                                },
-                                new TextBlock { Text = "orc / Add", FontSize = 10, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) },
-                            }
-                        },
                         new TextBlock { Text = "value   1    0    0", Margin = new Thickness(16, 10, 16, 10) },
+                        new Image
+                        {
+                            Width = 30, Height = 30, Margin = new Thickness(-10, -22, 0, 0),
+                            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
+                            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top,
+                            Source = PrimalEditor_Avalonia.Themes.Controls.NineSliceImage.LoadSource(
+                                "avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/avatar-orc.png"),
+                        },
                     }
                 },
             };
+
+            // 与 MaterialEditorView 完全一致: Frame.Source 经绑定赋值
+            node.DataContext = new { TypeName = "Add" };
+            node.Bind(Frame.SourceProperty,
+                new Avalonia.Data.Binding("TypeName")
+                {
+                    Source = node.DataContext,
+                    Converter = PrimalEditor_Avalonia.Converters.MaterialAvatarConverters.FrameForNode,
+                });
+            Frame.SetSlice(node, 8);
+            Frame.SetScale(node, 8);
 
             var focusRun = new Button { Content = "Run", Classes = { "accent" }, Width = 90, Height = 30, Margin = new Thickness(0, 8, 0, 0) };
             var normal = new Button { Content = "Build", Width = 90, Height = 30, Margin = new Thickness(0, 8, 0, 0) };
@@ -118,6 +121,14 @@ public class WarcraftVisualDump
             focusRun.Focus();
             Dispatcher.UIThread.RunJobs();
             window.UpdateLayout();
+
+            var frameImg = node.GetVisualDescendants().OfType<NineSliceImage>().FirstOrDefault();
+            var src = frameImg?.Source;
+            var bmp = src != null ? NineSliceImage.LoadSource(src) : null;
+            if (frameImg == null || src == null || bmp == null)
+                throw new Exception(
+                    $"frameImg={frameImg != null} src={src ?? "null"} bmp={bmp != null} " +
+                    $"attached={(Frame.GetSource(node) ?? "null")} current={ThemeManager.Current.Id}");
 
             using var rtb = new RenderTargetBitmap(new PixelSize(880, 1040), new Vector(192, 192));
             rtb.Render(window);

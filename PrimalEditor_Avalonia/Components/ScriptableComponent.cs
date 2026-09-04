@@ -18,6 +18,8 @@ public abstract class ScriptableComponent : Component
     public abstract string ScriptTypeId { get; }
 
     [JsonPropertyName("Parameters")]
+    [System.Text.Json.Serialization.JsonConverter(
+        typeof(PrimalEditor_Avalonia.GameProject.Documents.SortedStringKeysConverter<string>))]
     public Dictionary<string, string> Parameters { get; set; } = new();
 
     public override IMSComponent GetMultiselectionComponent(MSEntity msEntity)

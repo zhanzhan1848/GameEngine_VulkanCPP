@@ -58,6 +58,7 @@ public:
 
     // Accessors
     const curve_keyframe<f32>& get_keyframe(size_t index) const { return keyframes_[index]; }
+    size_t keyframe_count() const { return keyframes_.size(); }
     void set_interpolation(curve_interpolation mode) { interpolation_ = mode; }
     curve_interpolation get_interpolation() const { return interpolation_; }
 
@@ -171,6 +172,7 @@ public:
     size_t key_count() const { return keys_.size(); }
     const vector_key& get_key(size_t index) const { return keys_[index]; }
     void set_interpolation(curve_interpolation mode) { interpolation_ = mode; }
+    curve_interpolation get_interpolation() const { return interpolation_; }
 
     // Utility
     bool empty() const { return keys_.empty(); }

@@ -64,6 +64,77 @@
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="Density" VerticalAlignment="Center"
                            Foreground="{DynamicResource SecondaryTextBrush}"/>
                 <TextBox  Grid.Row="3" Grid.Column="1" Text="{Binding FogDensity, Mode=TwoWay}"/>
+                <!-- 静态场景 GI 冻结（plan §2 A10）：烘焙 warm-start 后冻结 probe 更新。 -->
+                <CheckBox Grid.Row="4" Grid.Column="1" Content="Static scene (freeze GI)"
+                          IsChecked="{Binding StaticGIFrozen, Mode=TwoWay}"
+                          ToolTip.Tip="烘焙 GI 并冻结 probe 更新；冻结期动态光/移动物体的 GI 不更新"
+                          Margin="0,4,0,0"/>
+            </Grid>
+
+            <!-- ======== GI VOLUMES (plan §6.2 B1 L1)：管线级 DDGI 体积编辑 ======== -->
+            <TextBlock Text="GI VOLUMES"
+                       FontFamily="{DynamicResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{DynamicResource CoralBrush}"
+                       Margin="0,14,0,4"/>
+            <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2">
+                <ComboBox Width="150" ItemsSource="{Binding GiVolumes.VolumeOptions}"
+                          SelectedIndex="{Binding GiVolumes.SelectedIndexOption}"
+                          IsEnabled="{Binding GiVolumes.HasVolumes}"/>
+                <Button Content="Refresh" Click="OnGiVolumesRefreshClick" Padding="8,2"/>
+                <Button Content="Append" Click="OnGiVolumesAppendClick" Padding="8,2"/>
+                <Button Content="Remove" Click="OnGiVolumesRemoveClick" Padding="8,2"/>
+                <Button Content="Materialize" Click="OnGiVolumesMaterializeClick" Padding="8,2"
+                        ToolTip.Tip="把派生的近场/远场体积物化为可编辑条目"/>
+            </StackPanel>
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" Margin="0,4"
+                  IsEnabled="{Binding GiVolumes.HasVolumes}">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Counts X/Y/Z" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
+                <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding GiVolumes.CountX, Mode=TwoWay}" Width="50"/>
+                    <TextBox Text="{Binding GiVolumes.CountY, Mode=TwoWay}" Width="50"/>
+                    <TextBox Text="{Binding GiVolumes.CountZ, Mode=TwoWay}" Width="50"/>
+                </StackPanel>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Spacing (m)" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
+                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding GiVolumes.Spacing, Mode=TwoWay}"/>
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Rays / Probe" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
+                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding GiVolumes.RaysPerProbe, Mode=TwoWay}"/>
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Ray Max Dist" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
+                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding GiVolumes.MaxDistance, Mode=TwoWay}"/>
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Origin X/Y/Z" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
+                <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                    <TextBox Text="{Binding GiVolumes.OriginX, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding GiVolumes.OriginY, Mode=TwoWay}" Width="60"/>
+                    <TextBox Text="{Binding GiVolumes.OriginZ, Mode=TwoWay}" Width="60"/>
+                    <CheckBox Content="Use" IsChecked="{Binding GiVolumes.UseOriginOverride, Mode=TwoWay}"
+                              VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Spacing="6" Margin="0,4,0,0">
+                    <Button Content="Apply" Click="OnGiVolumesApplyClick" Padding="12,2" Classes="accent"/>
+                    <TextBlock Text="Apply 触发下帧管线重建" VerticalAlignment="Center" FontSize="10"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                </StackPanel>
+            </Grid>
+
+            <Grid ColumnDefinitions="120,*" Margin="0,8,0,0">
+                <TextBlock Grid.Column="0" Text="PROBE DEBUG" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10">
+                    <ComboBox Width="180" ItemsSource="{Binding GiVolumes.ProbeVisOptions}"
+                              SelectedIndex="{Binding GiVolumes.ProbeVisIndex}"
+                              ToolTip.Tip="probe 调试可视化（数据面当前接线 Vulkan GIGather）"/>
+                    <CheckBox Content="Show Probes" IsChecked="{Binding GiVolumes.ShowProbes, Mode=TwoWay}"
+                              VerticalAlignment="Center"
+                              ToolTip.Tip="视口绘制 DDGI probe 格点（CPU 解析计算，编辑 Applies 后生效）"/>
+                    <CheckBox Content="Probe Spheres" IsChecked="{Binding GiVolumes.ShowProbeSpheres, Mode=TwoWay}"
+                              VerticalAlignment="Center"
+                              ToolTip.Tip="B1 L3: GPU probe 球 overlay（icosphere + 稳定色相）"/>
+                </StackPanel>
             </Grid>
 
             <TextBlock Text="SKYBOX"

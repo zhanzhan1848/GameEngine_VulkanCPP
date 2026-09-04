@@ -49,6 +49,30 @@ public sealed class AssetInfo : INotifyPropertyChanged
     [JsonIgnore]
     public bool IsContainer => Type == AssetType.Model;
 
+    /// <summary>B4 P4: particle-preset asset (.particle.json). Drives the
+    /// content browser's "Apply to Selected Particle Entity" context menu.</summary>
+    [JsonIgnore]
+    public bool IsParticlePreset =>
+        Type == AssetType.ParticlePreset ||
+        Extension == ".particle.json";
+
+    /// <summary>A8 源码控制: git working-tree status of this asset's file,
+    /// refreshed by the source-control panel (None = untracked-by-git or
+    /// unchanged). Drives the content browser status dot.</summary>
+    [JsonIgnore]
+    public Common.GitService.FileStatus GitStatus { get; private set; }
+        = Common.GitService.FileStatus.None;
+
+    /// <summary>Called by <see cref="ViewModels.SourceControlViewModel"/>
+    /// after each status sweep; raises change notifications so the tile
+    /// bindings re-evaluate.</summary>
+    public void SetGitStatus(Common.GitService.FileStatus status)
+    {
+        if (GitStatus == status) return;
+        GitStatus = status;
+        OnPropertyChanged(nameof(GitStatus));
+    }
+
     /// <summary>True when the entry is a folder on disk.</summary>
     [JsonIgnore]
     public bool IsFolder => Type == AssetType.Folder;

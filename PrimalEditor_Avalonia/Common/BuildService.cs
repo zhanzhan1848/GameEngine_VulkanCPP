@@ -70,6 +70,47 @@ public static class BuildService
         return RunAction(BuildAction.Run, config);
     }
 
+    /// <summary>
+    /// Launch the PrimalPlayer runtime host directly (plan §Run/Stop
+    /// 2026-09-03). Unlike the script-based verbs this builds its own
+    /// <see cref="BuildCommand"/> — the caller resolves the host binary
+    /// and passes absolute arguments. Stop/IsRunning/OnOutput semantics
+    /// are identical to the other verbs.
+    /// </summary>
+    public static bool StartPlayer(string executable, System.Collections.Generic.IReadOnlyList<string> arguments, string workingDirectory)
+    {
+        if (IsRunning) return false;
+        if (string.IsNullOrEmpty(executable))
+        {
+            Logger.Error("BuildService: StartPlayer requires an executable path");
+            return false;
+        }
+        try
+        {
+            _currentExitCode = 0;
+            _currentExited = false;
+            _currentHandle = _runner.Start(
+                new BuildCommand(executable, arguments, workingDirectory),
+                line => OnOutput?.Invoke(line));
+            _currentHandle.SubscribeExit(code =>
+            {
+                _currentExited = true;
+                _currentExitCode = code;
+                var ok = code == 0;
+                Logger.Info($"BuildService: player exited (code={code}, success={ok})");
+                OnCompleted?.Invoke(code, ok);
+            });
+            Logger.Info($"BuildService: player started ({executable})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"BuildService: StartPlayer failed — {ex.Message}", ex);
+            _currentHandle = null;
+            return false;
+        }
+    }
+
     public static void Stop()
     {
         if (_currentHandle == null) return;

@@ -36,7 +36,9 @@ public sealed class MaterialOverrideSlot
 
     /// <summary>Scalars/colors overridden on this material. Keyed by
     /// the shader's parameter name. Last write wins on duplicate
-    /// keys.</summary>
+    /// keys. A8: serialized with sorted keys (deterministic git diffs).</summary>
+    [System.Text.Json.Serialization.JsonConverter(
+        typeof(PrimalEditor_Avalonia.GameProject.Documents.SortedStringKeysConverter<MaterialParameterOverride>))]
     public Dictionary<string, MaterialParameterOverride> Parameters { get; set; } = new();
 }
 

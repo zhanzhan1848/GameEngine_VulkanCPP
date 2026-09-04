@@ -199,6 +199,66 @@ public static class Serializer
         };
     }
 
+    /// <summary>
+    /// Serialize entity subtrees to <see cref="EntityDocument"/>s without a
+    /// wrapping Scene — the prefab creation path (plan §6.2 A4). Children
+    /// are flattened depth-first exactly like <see cref="ToSceneDocument"/>.
+    /// </summary>
+    public static List<EntityDocument> ToEntityDocuments(IEnumerable<GameEntity> roots)
+    {
+        var entities = new List<EntityDocument>();
+        FlattenEntities(roots, null, new HashSet<EntityGuid>(), entities);
+        return entities;
+    }
+
+    /// <summary>
+    /// Create live entities from <see cref="EntityDocument"/>s (the prefab
+    /// instantiation path). With <paramref name="reassignGuids"/> every
+    /// entity gets a fresh EntityGuid — two instances of the same prefab
+    /// must never share identity in one scene. Returns the root entities
+    /// (ParentEntityGuid == null) in document order; children are attached
+    /// via Parent/Children but the caller must add roots to the scene.
+    /// </summary>
+    public static List<GameEntity> InstantiateEntityDocuments(
+        IReadOnlyList<EntityDocument> documents, bool reassignGuids = false)
+    {
+        var map = new Dictionary<EntityGuid, GameEntity>();
+        var roots = new List<GameEntity>();
+
+        foreach (var doc in documents)
+        {
+            var entity = new GameEntity(doc.Name)
+            {
+                // Fresh guid per instance (property initializer generates one);
+                // only scene loads keep the original identity.
+                EntityGuid = reassignGuids ? new EntityGuid(Guid.NewGuid()) : doc.EntityGuid,
+                IsEnabled = doc.IsEnabled,
+            };
+            map[doc.EntityGuid] = entity;
+        }
+
+        foreach (var doc in documents)
+        {
+            var entity = map[doc.EntityGuid];
+            foreach (var componentDoc in doc.Components)
+            {
+                var component = DeserializeComponent(componentDoc);
+                if (component != null) entity.Components.Add(component);
+            }
+            if (doc.ParentEntityGuid is { } parentGuid && map.TryGetValue(parentGuid, out var parent))
+            {
+                entity.Parent = parent;
+                parent.Children.Add(entity);
+            }
+            else
+            {
+                roots.Add(entity);
+            }
+        }
+        return roots;
+    }
+
+
     private static EditorCameraDocument ToEditorCameraDocument(EditorCameraState camera) => new()
     {
         TargetX = camera.TargetX,
@@ -233,6 +293,7 @@ public static class Serializer
             Exposure = env.Exposure,
             MainCameraEntityGuid = env.MainCameraEntityGuid?.ToString("D"),
             EnvMapPath = env.EnvMapPath,
+            StaticGIFrozen = env.StaticGIFrozen,
         };
     }
 
@@ -268,6 +329,7 @@ public static class Serializer
                     RotateScriptComponent rotate => JsonSerializer.SerializeToElement(rotate, SceneDocument.JsonOptions),
                     PatrolScriptComponent patrol => JsonSerializer.SerializeToElement(patrol, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.PrefabInstanceComponent prefabInstance => JsonSerializer.SerializeToElement(prefabInstance, SceneDocument.JsonOptions),
+                    PrimalEditor_Avalonia.Components.ParticleEmitterComponent particleEmitter => JsonSerializer.SerializeToElement(particleEmitter, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent crossScene => JsonSerializer.SerializeToElement(crossScene, SceneDocument.JsonOptions),
                     _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
                 };
@@ -302,6 +364,7 @@ public static class Serializer
             RotateScriptComponent => "scriptRotate",
             PatrolScriptComponent => "scriptPatrol",
             PrimalEditor_Avalonia.Components.PrefabInstanceComponent => "prefabInstance",
+            PrimalEditor_Avalonia.Components.ParticleEmitterComponent => "particleEmitter",
             PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent => "crossSceneReference",
             _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
         };
@@ -375,6 +438,7 @@ public static class Serializer
             ? mainCameraGuid
             : null;
         target.EnvMapPath = source.EnvMapPath ?? string.Empty;
+        target.StaticGIFrozen = source.StaticGIFrozen;
     }
 
     private static void CopyEnvironment(SceneEnvironment source, SceneEnvironment target)
@@ -405,6 +469,7 @@ public static class Serializer
             "scriptrotate" => JsonSerializer.Deserialize<RotateScriptComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "scriptpatrol" => JsonSerializer.Deserialize<PatrolScriptComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "prefabinstance" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.PrefabInstanceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "particleemitter" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.ParticleEmitterComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "crossscenereference" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             _ => throw new NotSupportedException($"Unknown component type discriminator: '{componentDoc.Type}'")
         };

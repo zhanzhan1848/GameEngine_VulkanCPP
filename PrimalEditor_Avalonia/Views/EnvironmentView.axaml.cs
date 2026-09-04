@@ -10,6 +10,10 @@ public partial class EnvironmentView : UserControl
     public EnvironmentView()
     {
         InitializeComponent();
+        // GI 体积列表（plan §6.2 B1）随数据上下文就绪刷新一次，
+        // 免去手动点 Refresh。
+        DataContextChanged += (_, _) =>
+            (DataContext as SceneEnvironmentViewModel)?.GiVolumes.Refresh();
     }
 
     private void InitializeComponent()
@@ -103,5 +107,31 @@ public partial class EnvironmentView : UserControl
     {
         if (DataContext is not SceneEnvironmentViewModel vm) return;
         vm.EnvMapPath = string.Empty;
+    }
+
+    // GI VOLUMES（plan §6.2 B1 L1）：转发到 GiVolumeViewModel。
+    private void OnGiVolumesRefreshClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is SceneEnvironmentViewModel vm) vm.GiVolumes.Refresh();
+    }
+
+    private void OnGiVolumesAppendClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is SceneEnvironmentViewModel vm) vm.GiVolumes.Append();
+    }
+
+    private void OnGiVolumesRemoveClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is SceneEnvironmentViewModel vm) vm.GiVolumes.Remove();
+    }
+
+    private void OnGiVolumesMaterializeClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is SceneEnvironmentViewModel vm) vm.GiVolumes.MaterializeDerived();
+    }
+
+    private void OnGiVolumesApplyClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is SceneEnvironmentViewModel vm) vm.GiVolumes.Apply();
     }
 }

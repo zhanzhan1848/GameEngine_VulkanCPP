@@ -19,6 +19,8 @@ public enum AssetType
     Material,
     Shader,
     Prefab,
+    ParticlePreset,
+    Pcg,
 }
 
 public class ImportedAsset

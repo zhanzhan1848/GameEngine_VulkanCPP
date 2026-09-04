@@ -331,4 +331,21 @@ public partial class PropertiesView : UserControl
     {
         if (DataContext is PropertiesViewModel vm) vm.OnSetMainCameraClicked();
     }
+
+    /// <summary>
+    /// B4 P3: open the (singleton) particle curve editor bound to the
+    /// selected entity's emitter.
+    /// </summary>
+    private void OnOpenCurveEditorClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not PropertiesViewModel vm || vm.SelectedEntityNativeId == 0)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Info("[Particle] curve editor: no emitter selected");
+            return;
+        }
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        PrimalEditor_Avalonia.Editors.Particle.ParticleCurveEditorWindow.ShowFor(
+            lifetime?.MainWindow, vm.SelectedEntityNativeId);
+    }
 }

@@ -6,6 +6,7 @@
              xmlns:nconv="using:NodifyM.Avalonia.Converters"
              xmlns:cv="using:PrimalEditor_Avalonia.Common.Converters"
              xmlns:conv="using:PrimalEditor_Avalonia.Converters"
+             xmlns:wc="using:PrimalEditor_Avalonia.Themes.Controls"
              x:Class="PrimalEditor_Avalonia.Editors.Material.MaterialEditorView"
              x:DataType="vm:MaterialEditorViewModel"
              Background="{DynamicResource VoidBrush}">
@@ -27,6 +28,7 @@
         // render through these dedicated template properties. -->
     <DataTemplate DataType="vm:MaterialNodeViewModel" x:Key="MaterialNodeTemplate">
       <n:Node Header="{Binding Title}"
+              wc:Frame.Source="{Binding TypeName, Converter={x:Static conv:MaterialAvatarConverters.FrameForNode}}"
               HeaderBrush="{DynamicResource ElectricBlueDeepBrush}"
               BorderBrush="{DynamicResource HairlineBrush}"
               Background="{DynamicResource PanelBrush}"
@@ -68,17 +70,7 @@
              MaterialParamViewModel hide unused TextBoxes; for a Float3 only
              X/Y/Z rows appear, for a Float param only X shows. TextBoxes give
              flat text input (no NumericUpDown up/down arrows). -->
-        <StackPanel>
-          <!-- Warcraft 主题: 阵营徽章头像 + 类型名标签行(其它主题隐藏) -->
-          <StackPanel Orientation="Horizontal" Margin="12,8,12,2"
-                      IsVisible="{DynamicResource NodeAvatarVisible}">
-            <Image Width="18" Height="18" VerticalAlignment="Center"
-                   Source="{Binding TypeName, Converter={x:Static conv:MaterialAvatarConverters.ForNode}}"/>
-            <TextBlock Text="{Binding TypeName}" Classes="mono" FontSize="10"
-                       VerticalAlignment="Center" Margin="6,0,0,0"
-                       Foreground="{DynamicResource SecondaryTextBrush}"/>
-          </StackPanel>
-          <ItemsControl ItemsSource="{Binding Parameters}">
+        <ItemsControl ItemsSource="{Binding Parameters}">
           <ItemsControl.ItemTemplate>
             <DataTemplate DataType="vm:MaterialParamViewModel">
               <StackPanel Orientation="Horizontal" Spacing="2" Margin="0,1">
@@ -137,8 +129,7 @@
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
-          </StackPanel>
-      </n:Node>
+              </n:Node>
     </DataTemplate>
 
     <!-- Connection template: bezier line between pins. NodifyM binds the

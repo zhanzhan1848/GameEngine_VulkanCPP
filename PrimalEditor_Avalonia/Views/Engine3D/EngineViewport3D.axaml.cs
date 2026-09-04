@@ -47,6 +47,10 @@ public partial class EngineViewport3D : UserControl
     private float _cameraDistance = 12f;
     private float _cameraYaw = 0f;       // radians; 0 = looking down +Z (camera at -Z relative to target)
     private float _cameraPitch = EditorCameraState.DefaultPitch;
+
+    // A7 相机书签：5 个 orbit 位姿槽（yaw/pitch/distance/target），Ctrl+Shift+数字存、数字取。
+    private readonly (float yaw, float pitch, float distance, float[] target)?[] _cameraBookmarks =
+        new (float, float, float, float[])?[5];
     private const float kMinPitch = -1.4f;  // ~-80°, prevent gimbal flip
     private const float kMaxPitch =  1.4f;  // ~+80°
     private const float kMinDistance = 0.5f;
@@ -762,6 +766,22 @@ public partial class EngineViewport3D : UserControl
             overlay.CameraDistance = _cameraDistance;
             overlay.CameraTarget = (_cameraTarget[0], _cameraTarget[1], _cameraTarget[2]);
             overlay.Scene = _scene ?? GetActiveSceneForIconRenderer();
+            // Selection outline (plan §6.1 A1): re-query per frame so the
+            // boxes follow gizmo drags. Only the selection is queried
+            // (a handful of AABB reads), not the whole scene.
+            overlay.SelectionBounds = SelectionBoundsProvider?.Invoke()
+                ?? System.Array.Empty<ViewportPicker.AABB>();
+            // GI volume wireframe (plan §6.2 B1 L1).
+            overlay.VolumeBoxes = VolumeBoxProvider?.Invoke()
+                ?? System.Array.Empty<ViewportPicker.AABB>();
+            // DDGI probe lattice dots (plan §6.2 B1 L1.5).
+            overlay.ProbePoints = ProbePointsProvider?.Invoke()
+                ?? System.Array.Empty<(float, float, float)>();
+            // A7 视图模式: all-entity bounds wireframes (provider returns
+            // null while the toggle is off — no per-frame AABB storm).
+            overlay.AllBounds = AllBoundsProvider?.Invoke()
+                ?? System.Array.Empty<ViewportPicker.AABB>();
+            overlay.InvalidateVisual();
         }
         if (this.FindControl<GizmoOverlay>("Gizmo") is GizmoOverlay gizmo)
         {
@@ -877,6 +897,9 @@ public partial class EngineViewport3D : UserControl
                 // remain armed after release, otherwise the next plain pointer
                 // movement can rotate the view without a button held.
                 _activeButton = Avalonia.Input.MouseButton.None;
+                // Let subscribers (WorldEditorView) snapshot the pre-drag
+                // transforms before the first delta arrives.
+                GizmoDragStart?.Invoke(this, EventArgs.Empty);
                 // Capture the pointer so that PointerMoved / PointerReleased
                 // keep firing even when the cursor leaves the viewport bounds
                 // (e.g. user drags past the edge of the render surface).
@@ -930,8 +953,37 @@ public partial class EngineViewport3D : UserControl
 
     private System.Collections.Generic.IReadOnlyList<(uint id, ViewportPicker.AABB bounds)>? _entityCandidates;
 
+    /// <summary>
+    /// Provides the world-space AABBs of the selected entities for the
+    /// selection outline overlay; invoked once per rendered frame by
+    /// <see cref="SyncOverlay"/>. Wired by WorldEditorView.
+    /// </summary>
+    public Func<System.Collections.Generic.IReadOnlyList<ViewportPicker.AABB>>? SelectionBoundsProvider { get; set; }
+
+    /// <summary>GI 体积线框（plan §6.2 B1 L1）：每帧取选中体积的 AABB。</summary>
+    public Func<System.Collections.Generic.IReadOnlyList<ViewportPicker.AABB>>? VolumeBoxProvider { get; set; }
+
+    /// <summary>DDGI probe 格点（plan §6.2 B1 L1.5）：每帧取格点世界坐标。</summary>
+    public Func<System.Collections.Generic.IReadOnlyList<(float, float, float)>>? ProbePointsProvider { get; set; }
+
+    /// <summary>
+    /// A7 视图模式: AABBs of every mesh-bearing entity for the "Bounds"
+    /// show-all overlay; invoked once per rendered frame by
+    /// <see cref="SyncOverlay"/> only while enabled. Return null (or wire
+    /// the provider to null) to disable the query.
+    /// </summary>
+    public Func<System.Collections.Generic.IReadOnlyList<ViewportPicker.AABB>>? AllBoundsProvider { get; set; }
+
     /// <summary>Fires when the user left-clicks an entity in the viewport.</summary>
     public event EventHandler<uint>? EntityPicked;
+
+    /// <summary>Fires after a gizmo drag begins (pointer captured by the
+    /// gizmo). WorldEditorView captures pre-drag transforms here for undo.</summary>
+    public event EventHandler? GizmoDragStart;
+
+    /// <summary>Fires when a gizmo drag ends (pointer released). Subscribers
+    /// commit their captured transforms as an undo action here.</summary>
+    public event EventHandler? GizmoDragEnd;
 
     private void OnPointerMoved(object? sender, Avalonia.Input.PointerEventArgs e)
     {
@@ -1067,6 +1119,9 @@ public partial class EngineViewport3D : UserControl
         {
             gizmo.EndDrag();
             _activeButton = Avalonia.Input.MouseButton.None;
+            // Subscribers commit their captured pre-drag transforms as an
+            // undo action now that the final state is known.
+            GizmoDragEnd?.Invoke(this, EventArgs.Empty);
             // Release the pointer capture acquired in OnPointerPressed so
             // normal event routing resumes after the drag ends.
             e.Pointer.Capture(null);
@@ -1190,6 +1245,46 @@ public partial class EngineViewport3D : UserControl
 			}
 			return;
 		}
+
+        // A7 相机书签: Ctrl+Shift+D1..D5 保存当前 orbit 位姿，D1..D5 恢复。
+        // 空槽恢复为 no-op（不消费按键）。书签仅存于编辑器会话内存。
+        int? bookmarkIndex = e.Key switch
+        {
+            Avalonia.Input.Key.D1 => 0,
+            Avalonia.Input.Key.D2 => 1,
+            Avalonia.Input.Key.D3 => 2,
+            Avalonia.Input.Key.D4 => 3,
+            Avalonia.Input.Key.D5 => 4,
+            _ => null,
+        };
+        if (bookmarkIndex.HasValue)
+        {
+            if (e.KeyModifiers.HasFlag(Avalonia.Input.KeyModifiers.Control) &&
+                e.KeyModifiers.HasFlag(Avalonia.Input.KeyModifiers.Shift))
+            {
+                _cameraBookmarks[bookmarkIndex.Value] =
+                    (_cameraYaw, _cameraPitch, _cameraDistance, (float[])_cameraTarget.Clone());
+                Logger.Info($"Camera bookmark {bookmarkIndex.Value + 1} saved");
+                e.Handled = true;
+                return;
+            }
+            if (e.KeyModifiers == Avalonia.Input.KeyModifiers.None)
+            {
+                var bm = _cameraBookmarks[bookmarkIndex.Value];
+                if (bm.HasValue)
+                {
+                    _cameraYaw = bm.Value.yaw;
+                    _cameraPitch = bm.Value.pitch;
+                    _cameraDistance = bm.Value.distance;
+                    _cameraTarget = (float[])bm.Value.target.Clone();
+                    ApplyCameraTransform();
+                    Logger.Info($"Camera bookmark {bookmarkIndex.Value + 1} restored");
+                    e.Handled = true;
+                }
+                return;
+            }
+        }
+
         // F = reset orbit state to default view. Only fires when this
         // control is focused (e.g. user clicked into the viewport and
         // pressed F with no entity selected). The outer WorldEditorView

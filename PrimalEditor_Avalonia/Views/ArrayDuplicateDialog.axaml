@@ -1,0 +1,29 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PrimalEditor_Avalonia.Views.ArrayDuplicateDialog"
+        Title="Array Duplicate" Width="320" Height="200" CanResize="False"
+        WindowStartupLocation="CenterOwner">
+    <StackPanel Margin="14" Spacing="10">
+        <TextBlock Text="Duplicate the selection N times along an axis,"
+                   TextWrapping="Wrap" Foreground="{DynamicResource SecondaryTextBrush}"/>
+        <Grid ColumnDefinitions="90,*" RowDefinitions="Auto,Auto,Auto">
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Axis" VerticalAlignment="Center"/>
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="AxisCombo" SelectedIndex="0" Width="120"
+                      HorizontalAlignment="Left">
+                <ComboBoxItem Content="X"/>
+                <ComboBoxItem Content="Y"/>
+                <ComboBoxItem Content="Z"/>
+            </ComboBox>
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Count" VerticalAlignment="Center"/>
+            <TextBox Grid.Row="1" Grid.Column="1" x:Name="CountBox" Text="4" Width="120"
+                     HorizontalAlignment="Left"/>
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Offset (m)" VerticalAlignment="Center"/>
+            <TextBox Grid.Row="2" Grid.Column="1" x:Name="OffsetBox" Text="1" Width="120"
+                     HorizontalAlignment="Left"/>
+        </Grid>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,4,0,0">
+            <Button Content="OK" Click="OnOk" Classes="accent" Padding="16,2"/>
+            <Button Content="Cancel" Click="OnCancel" Padding="12,2"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

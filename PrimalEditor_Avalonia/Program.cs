@@ -432,6 +432,12 @@ sealed class Program
         Editors.AssetEditorRegistry.Register(
             Native.AssetType.Shader,
             info => new Editors.Shaders.ShaderEditorViewModel());
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.Prefab,
+            info => new Editors.Prefab.PrefabInspectorViewModel());
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.Pcg,
+            info => new Editors.Pcg.PcgEditorViewModel());
     }
 
     private static int RunSerializationVerification()

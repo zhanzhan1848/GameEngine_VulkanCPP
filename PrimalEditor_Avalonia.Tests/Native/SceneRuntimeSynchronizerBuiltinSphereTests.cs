@@ -188,6 +188,14 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
 
     private sealed class FakeBridge : PrimalEditor_Avalonia.Native.INativeEngineBridgeLike
     {
+        public bool ParticleEnsureSystems() { return true; }
+        public uint ParticleEmitterConfigSize() { return 304; }
+        public uint EmitterCreateForEntity(uint entityId, byte[] config) { return 7; }
+        public bool EmitterRemoveFromEntity(uint entityId) { return true; }
+        public bool EmitterSetSpawnRate(uint entityId, float rate) { return true; }
+        public string? ParticlePresetList() { return "fire"; }
+        public bool ParticlePresetApplyToConfig(string name, byte[] config) { return true; }
+
         public bool IsLoaded { get; init; }
         public uint NextEntityId { get; set; } = 1;
         public uint NextMaterialId { get; set; } = 100;

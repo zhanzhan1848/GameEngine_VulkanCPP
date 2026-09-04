@@ -37,7 +37,45 @@
                 <Button Name="StopBuild" Content="Stop" Click="OnBuildStopClick" Padding="10,2" Classes="danger"
                         IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}}"/>
                 <Separator Margin="6,0"/>
+                <!-- Viewport render mode (plan §6.1 B3): Forward / Deferred /
+                     +Shadow+AO / +Shadow+AO+GI. Runs live in the render surface. -->
+                <TextBlock Text="RENDER" FontFamily="{DynamicResource FontDisplay}"
+                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <ComboBox Width="190"
+                          ItemsSource="{Binding RenderModeOptions}"
+                          SelectedIndex="{Binding EditorRenderModeIndex}"
+                          ToolTip.Tip="Viewport pipeline mode (applies live to the render surface)"/>
+                <!-- Run target graphics API (plan §Run/Stop): Metal → Darwin/Debug|Release,
+                     Vulkan → Darwin/DebugVulkan tree. -->
+                <TextBlock Text="API" FontFamily="{DynamicResource FontDisplay}"
+                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <ComboBox Width="90"
+                          ItemsSource="{Binding TargetGraphicsApis}"
+                          SelectedIndex="{Binding TargetGraphicsApiIndex}"
+                          ToolTip.Tip="Graphics API for the Run button's PrimalPlayer host"/>
+                <!-- Viewport view mode (plan §6.3 A7): Shaded / Wireframe.
+                     Orthogonal to RENDER (pass combos); applies per-frame. -->
+                <TextBlock Text="VIEW" FontFamily="{DynamicResource FontDisplay}"
+                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <ComboBox Width="110"
+                          ItemsSource="{Binding ViewModeOptions}"
+                          SelectedIndex="{Binding ViewModeIndex}"
+                          ToolTip.Tip="Viewport shading mode (Shaded / Wireframe; Unlit 预留)"/>
+                <CheckBox Content="Bounds" VerticalAlignment="Center" Margin="8,0,0,0"
+                          IsChecked="{Binding ShowAllBounds}"
+                          ToolTip.Tip="A7: 显示全部带网格实体的 AABB 线框"/>
+                <Separator Margin="6,0"/>
                 <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
+                <Button Content="Array…" Click="OnArrayDuplicateClick" Padding="10,2"
+                        ToolTip.Tip="把选中实体沿轴深拷 N 份（A5 批量布设）"/>
+                <Button Content="SCM…" Click="OnSourceControlClick" Padding="10,2"
+                        ToolTip.Tip="A8 源码控制：git 状态列表 + 提交面板"/>
                 <Separator Margin="6,0"/>
                 <Button Content="W Move" Click="OnTranslateModeClick" Padding="8,2" ToolTip.Tip="Translate gizmo (W)"/>
                 <Button Content="E Rotate" Click="OnRotateModeClick" Padding="8,2" ToolTip.Tip="Rotate gizmo (R)"/>
@@ -127,9 +165,22 @@
                               SelectionMode="Multiple"
                               SelectionChanged="OnTreeSelectionChanged"
                               DoubleTapped="OnEntityDoubleClick"
+                              DragDrop.AllowDrop="True"
+                              DragDrop.Drop="OnHierarchyDrop"
+                              DragDrop.DragOver="OnHierarchyDragOver"
                               Margin="4,0,4,8"
                               Background="Transparent"
                               BorderThickness="0">
+                        <TreeView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Create Prefab…" Click="OnCreatePrefabClick"
+                                          ToolTip.Tip="把选中实体（含子级）存为 .prefab 资产"/>
+                                <MenuItem Header="Array Duplicate…" Click="OnArrayDuplicateClick"
+                                          ToolTip.Tip="把选中实体沿轴深拷 N 份"/>
+                                <MenuItem Header="Add Particle Emitter" Click="OnAddParticleEmitterClick"
+                                          ToolTip.Tip="给选中实体挂粒子发射器（内置 fire 预设起步）"/>
+                            </ContextMenu>
+                        </TreeView.ContextMenu>
                         <TreeView.ItemTemplate>
                             <TreeDataTemplate ItemsSource="{Binding Children}">
                                 <TextBlock Text="{Binding Name}"/>

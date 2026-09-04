@@ -118,9 +118,6 @@
   <SolidColorBrush x:Key="ViewportBorderBrush"          Color="#7C5CFF"/>
   <Color x:Key="GridLinesColor">#DEE6F6</Color>
 
-  <!-- 节点标题条头像徽章开关(非 Warcraft 主题关闭) -->
-  <sys:Boolean x:Key="NodeAvatarVisible">False</sys:Boolean>
-
   <!-- FONT FAMILIES — 液态玻璃走 iOS 式的中性无衬线(系统栈,含中文回退),
        等宽保留 JetBrains Mono(OFL)。 -->
   <FontFamily x:Key="FontDisplay">Helvetica Neue, Segoe UI, PingFang SC, Hiragino Sans GB, Microsoft YaHei, Arial</FontFamily>

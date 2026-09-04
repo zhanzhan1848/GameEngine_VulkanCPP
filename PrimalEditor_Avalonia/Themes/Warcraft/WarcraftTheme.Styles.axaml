@@ -446,6 +446,87 @@
   <!-- tex-* class picks the artwork. Under themes that ship no     -->
   <!-- art (Cyberpunk) the elements render as plain Borders.        -->
   <!-- =========================================================== -->
+  <!-- =========================================================== -->
+  <!-- 材质编辑器节点(NodifyM Node)重模板:                           -->
+  <!--   底层 = 阵营九宫格外框(node-frame-*), 上层 = 复刻 NodifyM    -->
+  <!--   原模板结构(Header/Body 三列/Footer/四角 Resize Thumb),      -->
+  <!--   内容经 Frame.Inset 内缩, 不被框环遮挡。                     -->
+  <!--   框是节点自身视觉: 随画布缩放平移、被画布裁剪。              -->
+  <!--   Cyberpunk/LiquidGlass 不设 Frame.Source → 框图为空,         -->
+  <!--   Inset 默认 0 → 外观与 NodifyM 原生一致。                    -->
+  <!-- =========================================================== -->
+  <Style Selector="n|Node">
+    <Setter Property="ctrl:Frame.Slice" Value="8"/>
+    <Setter Property="ctrl:Frame.Scale" Value="8"/>
+    <Setter Property="ctrl:Frame.Inset" Value="10"/>
+    <Setter Property="Template">
+      <ControlTemplate x:CompileBindings="False">
+        <Panel>
+          <ctrl:NineSliceImage
+              Source="{TemplateBinding ctrl:Frame.Source}"
+              Slice="{TemplateBinding ctrl:Frame.Slice}"
+              Scale="{TemplateBinding ctrl:Frame.Scale}"/>
+          <Border Margin="{TemplateBinding ctrl:Frame.Inset}"
+                  CornerRadius="3"
+                  BorderThickness="2"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}">
+            <Grid RowDefinitions="Auto,*,Auto">
+              <Grid.Styles>
+                <Style Selector="Thumb">
+                  <Setter Property="Width" Value="12"/>
+                  <Setter Property="Height" Value="12"/>
+                  <Setter Property="IsVisible" Value="False"/>
+                  <Setter Property="Template">
+                    <ControlTemplate>
+                      <Ellipse Fill="{TemplateBinding Background}"/>
+                    </ControlTemplate>
+                  </Setter>
+                </Style>
+              </Grid.Styles>
+              <Border Grid.Row="0" Padding="6,4,6,4"
+                      IsVisible="{Binding HasHeader, RelativeSource={RelativeSource TemplatedParent}}"
+                      Background="{TemplateBinding HeaderBrush}"
+                      CornerRadius="3,3,0,0">
+                <ContentPresenter Name="PART_HeaderContentPresenter"
+                                  Content="{TemplateBinding Header}"
+                                  HorizontalAlignment="Center"/>
+              </Border>
+              <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto">
+                <ItemsControl Grid.Column="0" Focusable="False"
+                              ItemsSource="{TemplateBinding Input}"
+                              ItemTemplate="{TemplateBinding InputConnectorTemplate}"/>
+                <Border Grid.Column="1" Padding="16,0,16,0"
+                        Background="{TemplateBinding ContentBrush}">
+                  <ContentPresenter Content="{TemplateBinding Content}"/>
+                </Border>
+                <ItemsControl Grid.Column="2" Focusable="False"
+                              ItemsSource="{TemplateBinding Output}"
+                              ItemTemplate="{TemplateBinding OutputConnectorTemplate}"/>
+              </Grid>
+              <Border Grid.Row="2"
+                      IsVisible="{Binding HasFooter, RelativeSource={RelativeSource TemplatedParent}}"
+                      Background="{TemplateBinding FooterBrush}"
+                      CornerRadius="0,0,3,3">
+                <ContentPresenter Name="PART_FooterContentPresenter"
+                                  Content="{TemplateBinding Footer}"
+                                  HorizontalAlignment="Center"/>
+              </Border>
+            </Grid>
+          </Border>
+          <Thumb Name="PART_TopLeft" Background="{TemplateBinding BorderBrush}"
+                 HorizontalAlignment="Left" VerticalAlignment="Top" Margin="-6" Cursor="TopLeftCorner"/>
+          <Thumb Name="PART_TopRight" Background="{TemplateBinding BorderBrush}"
+                 HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-6,-6,0" Cursor="TopRightCorner"/>
+          <Thumb Name="PART_BottomLeft" Background="{TemplateBinding BorderBrush}"
+                 HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="-6,0,0,-6" Cursor="BottomLeftCorner"/>
+          <Thumb Name="PART_BottomRight" Background="{TemplateBinding BorderBrush}"
+                 HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-6,-6" Cursor="BottomRightCorner"/>
+        </Panel>
+      </ControlTemplate>
+    </Setter>
+  </Style>
+
   <Style Selector="ctrl|TextureFrame.tex-strip">
     <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-strip.png"/>
     <Setter Property="Slice" Value="7.5"/>
@@ -460,14 +541,6 @@
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
   </Style>
-  <!-- 材质编辑器节点(NodifyM Node): 叠加铁轨九宫格外框(附加行为,
-       见 Themes/Controls/Frame.cs)。Cyberpunk 不设 Frame.Source → 无框。 -->
-  <Style Selector="n|Node">
-    <Setter Property="ctrl:Frame.Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-strip.png"/>
-    <Setter Property="ctrl:Frame.Slice" Value="7.5"/>
-    <Setter Property="ctrl:Frame.Scale" Value="5"/>
-  </Style>
-
   <Style Selector="ctrl|TextureFrame.tex-panel">
     <Setter Property="Source" Value="avares://PrimalEditor_Avalonia/Assets/Textures/Warcraft/frame-panel.png"/>
     <Setter Property="Slice" Value="13"/>

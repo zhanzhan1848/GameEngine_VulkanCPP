@@ -356,6 +356,57 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("IsRenderPassEnabled failed", ex); return false; }
     }
 
+    // Viewport render mode preset (plan §6.1 B3): atomically apply one of
+    // the toolbar's Forward / Deferred / +Shadow+AO / +Shadow+AO+GI modes.
+    // mode: 0=Forward, 1=Deferred, 2=DeferredShadowAO, 3=DeferredShadowAOGI.
+    [DllImport("PrimalEngine", EntryPoint = "PipelineApplyModePreset", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineApplyModePreset(uint mode);
+    public static void PipelineApplyModePreset(uint mode)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineApplyModePreset(mode); }
+        catch (Exception ex) { Logger.Error("PipelineApplyModePreset failed", ex); }
+    }
+
+    // Viewport view mode (plan §6.3 A7): 0=Shaded, 1=Wireframe, 2=Unlit
+    // (reserved). Cheap per-frame value; orthogonal to the pass-combo
+    // presets above.
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetViewMode", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineSetViewMode(uint mode);
+    public static void PipelineSetViewMode(uint mode)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineSetViewMode(mode); }
+        catch (Exception ex) { Logger.Error("PipelineSetViewMode failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetProbeSphereDebug", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineSetProbeSphereDebug(uint enabled);
+    public static void PipelineSetProbeSphereDebug(bool enabled)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineSetProbeSphereDebug(enabled ? 1u : 0u); }
+        catch (Exception ex) { Logger.Error("PipelineSetProbeSphereDebug failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineGetProbeSphereDebug", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineGetProbeSphereDebug();
+    public static bool PipelineGetProbeSphereDebug()
+    {
+        if (!_isLoaded) return false;
+        try { return _PipelineGetProbeSphereDebug() != 0; }
+        catch (Exception ex) { Logger.Error("PipelineGetProbeSphereDebug failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineGetViewMode", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineGetViewMode();
+    public static uint PipelineGetViewMode()
+    {
+        if (!_isLoaded) return 0;
+        try { return _PipelineGetViewMode(); }
+        catch (Exception ex) { Logger.Error("PipelineGetViewMode failed", ex); return 0; }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "IsRenderPassActive", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _IsRenderPassActive(uint passId);
     public static bool IsRenderPassActive(RenderPassId passId)
@@ -652,6 +703,292 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("PipelineIsEditorMode failed", ex); return false; }
     }
 
+    // GI probe freeze (plan §2 A10): freeze DDGI probe updates so a static
+    // scene skips the per-frame trace/update chain after convergence.
+    [DllImport("PrimalEngine", EntryPoint = "GISetProbeFreeze", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _GISetProbeFreeze(uint enabled);
+    public static void GISetProbeFreeze(bool enabled)
+    {
+        if (!_isLoaded) return;
+        try { _GISetProbeFreeze(enabled ? 1u : 0u); }
+        catch (Exception ex) { Logger.Error("GISetProbeFreeze failed", ex); }
+    }
+
+    // Probe debug visualization mode (plan §6.2 B1 L1): 0=Off, 1=IrradianceAtlas,
+    // 2=DepthAtlas, 3=Confidence, 4=ProbePositions (data path: Vulkan GIGather).
+    [DllImport("PrimalEngine", EntryPoint = "GISetProbeVisMode", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _GISetProbeVisMode(uint mode);
+    public static void GISetProbeVisMode(uint mode)
+    {
+        if (!_isLoaded) return;
+        try { _GISetProbeVisMode(mode); }
+        catch (Exception ex) { Logger.Error("GISetProbeVisMode failed", ex); }
+    }
+
+    // -----------------------------------------------------------------------
+    // GI volume CRUD (plan §6.2 B1 L1). LumenVolumeConfig
+    // (Engine/Graphics/Lumen/LumenTypes.h:31-41) is marshaled as an opaque
+    // 64-byte buffer with the fixed field offsets below; sizeof on the C++
+    // side is 44 (one trailing bool + padding). If LumenTypes.h adds fields,
+    // update the offsets AND GIVolumeConfigCapacity guard.
+    // -----------------------------------------------------------------------
+    public const int GIVolumeConfigCapacity = 64;
+    public const int GIOffCountX = 0;
+    public const int GIOffCountY = 4;
+    public const int GIOffCountZ = 8;
+    public const int GIOffSpacing = 12;
+    public const int GIOffRaysPerProbe = 16;
+    public const int GIOffMaxDistance = 20;
+    public const int GIOffBudgetDivisor = 24;
+    public const int GIOffOriginX = 28;
+    public const int GIOffOriginY = 32;
+    public const int GIOffOriginZ = 36;
+    public const int GIOffUseOrigin = 40; // bool (1 byte)
+
+    [DllImport("PrimalEngine", EntryPoint = "GIGetVolumeOverrideCount", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIGetVolumeOverrideCount();
+
+    [DllImport("PrimalEngine", EntryPoint = "GIGetVolumeOverride", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIGetVolumeOverride(uint index, [Out] byte[] outConfig);
+
+    [DllImport("PrimalEngine", EntryPoint = "GISetVolumeOverride", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GISetVolumeOverride(uint index, byte[] config);
+
+    [DllImport("PrimalEngine", EntryPoint = "GIAppendVolumeOverride", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIAppendVolumeOverride();
+
+    [DllImport("PrimalEngine", EntryPoint = "GIRemoveVolumeOverride", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIRemoveVolumeOverride(uint index);
+
+    [DllImport("PrimalEngine", EntryPoint = "GIMaterializeDerivedVolumes", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIMaterializeDerivedVolumes();
+
+    // -----------------------------------------------------------------------
+    // Particle emitter editing channel (plan §6.3 B4 P1).
+    // -----------------------------------------------------------------------
+    [DllImport("PrimalEngine", EntryPoint = "ParticleEnsureSystems", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _ParticleEnsureSystems();
+    public static bool ParticleEnsureSystems()
+    {
+        if (!_isLoaded) return false;
+        try { return _ParticleEnsureSystems() != 0; }
+        catch (Exception ex) { Logger.Error("ParticleEnsureSystems failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ParticleEmitterConfigSize", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _ParticleEmitterConfigSize();
+    public static uint ParticleEmitterConfigSize()
+    {
+        if (!_isLoaded) return 0;
+        try { return _ParticleEmitterConfigSize(); }
+        catch (Exception ex) { Logger.Error("ParticleEmitterConfigSize failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "EmitterCreateForEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EmitterCreateForEntity(uint entityId, byte[] config, uint size);
+    /// <summary>Attach a Particle component + create the emitter. Returns the
+    /// emitter id (0 = failure). config must come from ParticlePresetApplyToConfig
+    /// (engine fills defaults + preset scalars; curve pointers stay null).</summary>
+    public static uint EmitterCreateForEntity(uint entityId, byte[] config)
+    {
+        if (!_isLoaded || config == null) return 0;
+        try { return _EmitterCreateForEntity(entityId, config, (uint)config.Length); }
+        catch (Exception ex) { Logger.Error($"EmitterCreateForEntity({entityId:X}) failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "EmitterRemoveFromEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EmitterRemoveFromEntity(uint entityId);
+    public static bool EmitterRemoveFromEntity(uint entityId)
+    {
+        if (!_isLoaded) return false;
+        try { return _EmitterRemoveFromEntity(entityId) != 0; }
+        catch (Exception ex) { Logger.Error($"EmitterRemoveFromEntity({entityId:X}) failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "EmitterSetSpawnRate", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EmitterSetSpawnRate(uint entityId, float rate);
+    public static bool EmitterSetSpawnRate(uint entityId, float rate)
+    {
+        if (!_isLoaded) return false;
+        try { return _EmitterSetSpawnRate(entityId, rate) != 0; }
+        catch (Exception ex) { Logger.Error("EmitterSetSpawnRate failed", ex); return false; }
+    }
+
+    // B4 P3: per-slot curve editing. Wire format (mirrors
+    // EngineDLL/ParticleEmitterAPI.cpp): u32 interpolation + u32 keyCount +
+    // keys — float slots (0 scale / 1 alpha / 3 velocity / 5 rotation) carry
+    // 16B keys {t, v, inTan, outTan}; color slot (2) 20B keys {t, r,g,b,a};
+    // vector slot (4) 16B keys {t, x,y,z}.
+
+    [DllImport("PrimalEngine", EntryPoint = "EmitterGetCurveData", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EmitterGetCurveData(uint entityId, uint slot, byte[] outBuffer, uint cap, out uint outLen);
+    /// <summary>Wire bytes for the slot's curve, or null when the slot has
+    /// no curve enabled.</summary>
+    public static byte[]? EmitterGetCurveData(uint entityId, uint slot)
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            var buf = new byte[64 * 1024];
+            if (_EmitterGetCurveData(entityId, slot, buf, (uint)buf.Length, out var len) == 0)
+                return null;
+            if (len == 0) return null;
+            var result = new byte[len];
+            Array.Copy(buf, result, len);
+            return result;
+        }
+        catch (Exception ex) { Logger.Error("EmitterGetCurveData failed", ex); return null; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "EmitterSetCurveData", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EmitterSetCurveData(uint entityId, uint slot, byte[] data, uint size);
+    public static bool EmitterSetCurveData(uint entityId, uint slot, byte[] data)
+    {
+        if (!_isLoaded || data == null) return false;
+        try { return _EmitterSetCurveData(entityId, slot, data, (uint)data.Length) != 0; }
+        catch (Exception ex) { Logger.Error("EmitterSetCurveData failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "EmitterDisableCurve", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EmitterDisableCurve(uint entityId, uint slot);
+    public static bool EmitterDisableCurve(uint entityId, uint slot)
+    {
+        if (!_isLoaded) return false;
+        try { return _EmitterDisableCurve(entityId, slot) != 0; }
+        catch (Exception ex) { Logger.Error("EmitterDisableCurve failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ParticlePresetList", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _ParticlePresetList(byte[] outBuffer, uint cap, out uint outLen);
+    /// <summary>Preset names joined by '\n' (includes the 8 built-ins once
+    /// systems are ensured). Returns null when the buffer needs to grow.</summary>
+    public static string? ParticlePresetList()
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            var buf = new byte[4096];
+            if (_ParticlePresetList(buf, (uint)buf.Length, out var len) == 0) return null;
+            return System.Text.Encoding.UTF8.GetString(buf, 0, (int)len - 1);
+        }
+        catch (Exception ex) { Logger.Error("ParticlePresetList failed", ex); return null; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ParticlePresetSaveToFile", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _ParticlePresetSaveToFile(
+        [MarshalAs(UnmanagedType.LPStr)] string name, [MarshalAs(UnmanagedType.LPStr)] string path);
+    public static bool ParticlePresetSaveToFile(string name, string path)
+    {
+        if (!_isLoaded) return false;
+        try { return _ParticlePresetSaveToFile(name, path) != 0; }
+        catch (Exception ex) { Logger.Error($"ParticlePresetSaveToFile({name}) failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ParticlePresetLoadFromFile", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _ParticlePresetLoadFromFile([MarshalAs(UnmanagedType.LPStr)] string path);
+    /// <summary>Load a .particle.json into the preset system so its name
+    /// becomes resolvable by PresetList / PresetApplyToConfig.</summary>
+    public static bool ParticlePresetLoadFromFile(string path)
+    {
+        if (!_isLoaded) return false;
+        try { return _ParticlePresetLoadFromFile(path) != 0; }
+        catch (Exception ex) { Logger.Error($"ParticlePresetLoadFromFile({path}) failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ParticlePresetApplyToConfig", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _ParticlePresetApplyToConfig(
+        [MarshalAs(UnmanagedType.LPStr)] string name, byte[] config, uint size);
+    /// <summary>Fill a fresh emitter-config blob with the named preset's
+    /// scalar fields (defaults + preset). Returns false for unknown names.</summary>
+    public static bool ParticlePresetApplyToConfig(string name, byte[] config)
+    {
+        if (!_isLoaded || config == null) return false;
+        try { return _ParticlePresetApplyToConfig(name, config, (uint)config.Length) != 0; }
+        catch (Exception ex) { Logger.Error($"ParticlePresetApplyToConfig({name}) failed", ex); return false; }
+    }
+
+    public static uint GIVolumeOverrideCount()
+    {
+        if (!_isLoaded) return 0;
+        try { return _GIGetVolumeOverrideCount(); }
+        catch (Exception ex) { Logger.Error("GIGetVolumeOverrideCount failed", ex); return 0; }
+    }
+
+    public static bool GIGetVolumeOverride(uint index, byte[] buffer)
+    {
+        if (!_isLoaded || buffer == null || buffer.Length < GIVolumeConfigCapacity) return false;
+        try { return _GIGetVolumeOverride(index, buffer) != 0; }
+        catch (Exception ex) { Logger.Error($"GIGetVolumeOverride({index}) failed", ex); return false; }
+    }
+
+    public static bool GISetVolumeOverride(uint index, byte[] buffer)
+    {
+        if (!_isLoaded || buffer == null || buffer.Length < GIVolumeConfigCapacity) return false;
+        try { return _GISetVolumeOverride(index, buffer) != 0; }
+        catch (Exception ex) { Logger.Error($"GISetVolumeOverride({index}) failed", ex); return false; }
+    }
+
+    public static bool GIAppendVolumeOverride()
+    {
+        if (!_isLoaded) return false;
+        try { return _GIAppendVolumeOverride() != 0; }
+        catch (Exception ex) { Logger.Error("GIAppendVolumeOverride failed", ex); return false; }
+    }
+
+    public static bool GIRemoveVolumeOverride(uint index)
+    {
+        if (!_isLoaded) return false;
+        try { return _GIRemoveVolumeOverride(index) != 0; }
+        catch (Exception ex) { Logger.Error($"GIRemoveVolumeOverride({index}) failed", ex); return false; }
+    }
+
+    public static bool GIMaterializeDerivedVolumes()
+    {
+        if (!_isLoaded) return false;
+        try { return _GIMaterializeDerivedVolumes() != 0; }
+        catch (Exception ex) { Logger.Error("GIMaterializeDerivedVolumes failed", ex); return false; }
+    }
+
+    // GI gizmo (volume select/translate/scale). Modes: 1=Select, 2=Translate,
+    // 3=Scale. Translate writes origin_override (+use flag); Scale writes
+    // probe_count[axis] clamped to 4..128 — both flip settings_dirty_ and the
+    // pipeline rebuilds Lumen passes next frame.
+    [DllImport("PrimalEngine", EntryPoint = "GIGizmoSetMode", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _GIGizmoSetMode(uint mode);
+    public static void GIGizmoSetMode(uint mode)
+    {
+        if (!_isLoaded) return;
+        try { _GIGizmoSetMode(mode); }
+        catch (Exception ex) { Logger.Error("GIGizmoSetMode failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GIGizmoGetSelectedVolume", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIGizmoGetSelectedVolume();
+    public static uint GIGizmoGetSelectedVolume()
+    {
+        if (!_isLoaded) return 0xFFFFFFFFu;
+        try { return _GIGizmoGetSelectedVolume(); }
+        catch (Exception ex) { Logger.Error("GIGizmoGetSelectedVolume failed", ex); return 0xFFFFFFFFu; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GIGizmoTranslate", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIGizmoTranslate(uint index, float[] delta);
+    public static bool GIGizmoTranslate(uint index, float dx, float dy, float dz)
+    {
+        if (!_isLoaded) return false;
+        try { return _GIGizmoTranslate(index, new[] { dx, dy, dz }) != 0; }
+        catch (Exception ex) { Logger.Error("GIGizmoTranslate failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GIGizmoScale", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIGizmoScale(uint index, float factor, uint axis);
+    public static bool GIGizmoScale(uint index, float factor, uint axis)
+    {
+        if (!_isLoaded) return false;
+        try { return _GIGizmoScale(index, factor, axis) != 0; }
+        catch (Exception ex) { Logger.Error("GIGizmoScale failed", ex); return false; }
+    }
+
     // Lumen GI quality preset (0=Off .. 5=UltraRT). Triggers Lumen
     // subsystem re-init — do not call per-frame.
     [DllImport("PrimalEngine", EntryPoint = "PipelineSetLumenConfig", CallingConvention = CallingConvention.Cdecl)]
@@ -871,6 +1208,27 @@ public static class NativeEngineBridge
         if (xyz == null || xyz.Length < 3) return false;
         try { return _SetEntityOrientation(entityId, xyz) != 0; }
         catch (Exception ex) { Logger.Error("SetEntityOrientation failed", ex); return false; }
+    }
+
+    /// <summary>Per-entity world-space AABB (plan §6.1 A1). Mesh-bearing
+    /// entities return the render proxy's worldAABB; entities without a
+    /// render proxy (lights, empties) get a half-meter cube around their
+    /// position so they stay clickable.</summary>
+    [DllImport("PrimalEngine", EntryPoint = "EntityGetWorldAABB", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EntityGetWorldAABB(uint entityId, [Out] float[] outMin, [Out] float[] outMax);
+    public static bool TryGetEntityWorldAABB(uint entityId,
+        out (float minX, float minY, float minZ, float maxX, float maxY, float maxZ) bounds)
+    {
+        bounds = default;
+        if (!_isLoaded || entityId == 0 || entityId == InvalidEntityId) return false;
+        try
+        {
+            float[] min = new float[3], max = new float[3];
+            if (_EntityGetWorldAABB(entityId, min, max) == 0) return false;
+            bounds = (min[0], min[1], min[2], max[0], max[1], max[2]);
+            return true;
+        }
+        catch (Exception ex) { Logger.Error($"EntityGetWorldAABB({entityId:X}) failed", ex); return false; }
     }
 
     // Create a translated copy of an RHI-registered mesh, register it as a
@@ -2192,5 +2550,327 @@ public static class NativeEngineBridge
             Stop(loopId);
             try { _EditorDestroyRenderLoop(loopId); } catch { }
         }
+    }
+
+    // =======================================================================
+    // A6 PCG 图编辑器绑定（EngineDLL/PCGAPI.cpp，单全局图实例）。
+    // =======================================================================
+    public static class Pcg
+    {
+        public sealed class ParamInfo
+        {
+            public string Name = "";
+            public string Group = "";
+            public byte Type;          // PCGParamType
+            public float Min, Max, Step;
+            public string? EnumNames;  // comma-separated labels or null
+        }
+
+        public sealed class PinInfo
+        {
+            public string Name = "";
+            public uint Index;
+            public byte Type;          // PCGDataType
+            public bool IsInput;
+        }
+
+        private static bool _ready;
+
+        // 单全局图：编辑器打开时 Create+Deserialize；打开另一个 .pcg 前 Destroy。
+        public static void CreateGraph()
+        {
+            if (!_isLoaded) return;
+            try { _PcgCreateGraph(); _ready = true; }
+            catch (Exception ex) { Logger.Error("PCGCreateGraph failed", ex); }
+        }
+
+        public static void DestroyGraph()
+        {
+            if (!_isLoaded) return;
+            try { _PcgDestroyGraph(); _ready = false; }
+            catch (Exception ex) { Logger.Error("PCGDestroyGraph failed", ex); }
+        }
+
+        /// <returns>node id (index), 0xFFFFFFFF on failure.</returns>
+        public static uint AddNode(string typeName)
+        {
+            if (!_isLoaded || !_ready) return 0xFFFFFFFF;
+            try { return _PcgAddNode(typeName); }
+            catch (Exception ex) { Logger.Error("PCGAddNode failed", ex); return 0xFFFFFFFF; }
+        }
+
+        public static void RemoveNode(uint nodeId)
+        {
+            if (!_isLoaded) return;
+            try { _PcgRemoveNode(nodeId); }
+            catch (Exception ex) { Logger.Error("PCGRemoveNode failed", ex); }
+        }
+
+        public static void Connect(uint fromNode, uint fromPin, uint toNode, uint toPin)
+        {
+            if (!_isLoaded) return;
+            try { _PcgConnect(fromNode, fromPin, toNode, toPin); }
+            catch (Exception ex) { Logger.Error("PCGConnect failed", ex); }
+        }
+
+        public static void Disconnect(uint fromNode, uint fromPin, uint toNode, uint toPin)
+        {
+            if (!_isLoaded) return;
+            try { _PcgDisconnect(fromNode, fromPin, toNode, toPin); }
+            catch (Exception ex) { Logger.Error("PCGDisconnect failed", ex); }
+        }
+
+        public static bool DeserializeGraph(string json)
+        {
+            if (!_isLoaded || !_ready) return false;
+            try { return _PcgDeserializeGraph(json) != 0; }
+            catch (Exception ex) { Logger.Error("PCGDeserializeGraph failed", ex); return false; }
+        }
+
+        public static string? SerializeGraph()
+        {
+            if (!_isLoaded || !_ready) return null;
+            try
+            {
+                var need = _PcgSerializeGraph(null, 0);
+                if (need == 0) return null;
+                var buf = new byte[need];
+                _PcgSerializeGraph(buf, (uint)need);
+                return System.Text.Encoding.UTF8.GetString(buf, 0, (int)need - 1);
+            }
+            catch (Exception ex) { Logger.Error("PCGSerializeGraph failed", ex); return null; }
+        }
+
+        public static uint GetRegisteredNodeTypeCount()
+        {
+            if (!_isLoaded) return 0;
+            try { return _PcgGetRegisteredNodeTypeCount(); }
+            catch { return 0; }
+        }
+
+        public static string? GetRegisteredNodeTypeName(uint index)
+        {
+            if (!_isLoaded) return null;
+            try { return MarshalString(_PcgGetRegisteredNodeTypeName(index)); }
+            catch { return null; }
+        }
+
+        public static ParamInfo? GetParamInfo(uint nodeId, uint paramIdx)
+        {
+            if (!_isLoaded) return null;
+            try
+            {
+                var ok = _PcgGetNodeParamDescriptorFlat(nodeId, paramIdx,
+                    out var name, out var group, out var type,
+                    out var min, out var max, out var step, out var enums);
+                return ok == 0 ? null : new ParamInfo
+                {
+                    Name = MarshalString(name) ?? "",
+                    Group = MarshalString(group) ?? "",
+                    Type = type,
+                    Min = min, Max = max, Step = step,
+                    EnumNames = MarshalString(enums),
+                };
+            }
+            catch (Exception ex) { Logger.Error("PCGGetNodeParamDescriptorFlat failed", ex); return null; }
+        }
+
+        public static PinInfo? GetPinInfo(uint nodeId, uint pinIdx)
+        {
+            if (!_isLoaded) return null;
+            try
+            {
+                var ok = _PcgGetNodePinDescriptorFlat(nodeId, pinIdx,
+                    out var name, out var index, out var type, out var isInput);
+                return ok == 0 ? null : new PinInfo
+                {
+                    Name = MarshalString(name) ?? "",
+                    Index = index,
+                    Type = type,
+                    IsInput = isInput != 0,
+                };
+            }
+            catch (Exception ex) { Logger.Error("PCGGetNodePinDescriptorFlat failed", ex); return null; }
+        }
+
+        public static bool SetParamFloat(uint nodeId, string name, float value)
+        {
+            if (!_isLoaded) return false;
+            try { return _PcgSetNodeParamFloat(nodeId, name, value) != 0; }
+            catch (Exception ex) { Logger.Error("PCGSetNodeParamFloat failed", ex); return false; }
+        }
+
+        public static bool SetParamVec3(uint nodeId, string name, float x, float y, float z)
+        {
+            if (!_isLoaded) return false;
+            try { return _PcgSetNodeParamVec3(nodeId, name, x, y, z) != 0; }
+            catch (Exception ex) { Logger.Error("PCGSetParamVec3 failed", ex); return false; }
+        }
+
+        public static bool SetParamArray(uint nodeId, string name, float[] values)
+        {
+            if (!_isLoaded || values.Length == 0) return false;
+            try { return _PcgSetNodeParamArray(nodeId, name, values, (uint)values.Length) != 0; }
+            catch (Exception ex) { Logger.Error("PCGSetParamArray failed", ex); return false; }
+        }
+
+        public static void Execute()
+        {
+            if (!_isLoaded || !_ready) return;
+            try { _PcgExecute(); }
+            catch (Exception ex) { Logger.Error("PCGExecute failed", ex); }
+        }
+
+        public static uint GetOutputPointCount(uint nodeId)
+        {
+            if (!_isLoaded) return 0;
+            try { return _PcgGetOutputPointCount(nodeId); }
+            catch { return 0; }
+        }
+
+        public static uint GetErrorCount()
+        {
+            if (!_isLoaded) return 0;
+            try { return _PcgGetErrorCount(); }
+            catch { return 0; }
+        }
+
+        public static string? GetErrorMessage(uint index)
+        {
+            if (!_isLoaded) return null;
+            try { return MarshalString(_PcgGetErrorMessage(index)); }
+            catch { return null; }
+        }
+
+        private static string? MarshalString(IntPtr ptr)
+        {
+            if (ptr == IntPtr.Zero) return null;
+            return System.Runtime.InteropServices.Marshal.PtrToStringAnsi(ptr);
+        }
+
+        // ---- A6 Apply: output readback + mesh library -------------------
+
+        /// <summary>Output point count of the node (0 when none).</summary>
+        public static uint GetNodeOutputPointCount(uint nodeId) => GetOutputPointCount(nodeId);
+
+        /// <summary>XYZ triples (3 floats per point). Returns empty on failure.</summary>
+        public static float[] GetOutputPositions(uint nodeId, uint maxCount)
+        {
+            if (!_isLoaded || maxCount == 0) return Array.Empty<float>();
+            try
+            {
+                var buf = new float[maxCount * 3];
+                var n = _PcgGetOutputPositions(nodeId, buf, maxCount);
+                if (n == 0) return Array.Empty<float>();
+                var result = new float[n * 3];
+                Array.Copy(buf, result, n * 3);
+                return result;
+            }
+            catch (Exception ex) { Logger.Error("PCGGetOutputPositions failed", ex); return Array.Empty<float>(); }
+        }
+
+        /// <summary>Per-point mesh slot index (u32 each).</summary>
+        public static uint[] GetOutputMeshSlots(uint nodeId, uint maxCount)
+        {
+            if (!_isLoaded || maxCount == 0) return Array.Empty<uint>();
+            try
+            {
+                var buf = new uint[maxCount];
+                var n = _PcgGetOutputMeshSlots(nodeId, buf, maxCount);
+                if (n == 0) return Array.Empty<uint>();
+                var result = new uint[n];
+                Array.Copy(buf, result, n);
+                return result;
+            }
+            catch (Exception ex) { Logger.Error("PCGGetOutputMeshSlots failed", ex); return Array.Empty<uint>(); }
+        }
+
+        /// <summary>Per-point {scaleX, scaleY, scaleZ, rotY} (4 floats each).</summary>
+        public static float[] GetOutputTransforms(uint nodeId, uint maxCount)
+        {
+            if (!_isLoaded || maxCount == 0) return Array.Empty<float>();
+            try
+            {
+                var buf = new float[maxCount * 4];
+                var n = _PcgGetOutputTransforms(nodeId, buf, maxCount);
+                if (n == 0) return Array.Empty<float>();
+                var result = new float[n * 4];
+                Array.Copy(buf, result, n * 4);
+                return result;
+            }
+            catch (Exception ex) { Logger.Error("PCGGetOutputTransforms failed", ex); return Array.Empty<float>(); }
+        }
+
+        public static uint GetMeshSlotCount()
+        {
+            if (!_isLoaded) return 0;
+            try { return _PcgGetMeshSlotCount(); }
+            catch { return 0; }
+        }
+
+        /// <summary>Mesh library slot (path, display name).</summary>
+        public static (string Path, string Name)? GetMeshSlot(uint index)
+        {
+            if (!_isLoaded) return null;
+            try
+            {
+                if (_PcgGetMeshSlotFlat(index, out var path, out var name) == 0) return null;
+                return (MarshalString(path) ?? "", MarshalString(name) ?? "");
+            }
+            catch (Exception ex) { Logger.Error("PCGGetMeshSlotFlat failed", ex); return null; }
+        }
+
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetOutputPositions", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetOutputPositions(uint nodeId, float[] outPositionsXyz, uint maxCount);
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetOutputMeshSlots", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetOutputMeshSlots(uint nodeId, uint[] outMeshSlots, uint maxCount);
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetOutputTransforms", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetOutputTransforms(uint nodeId, float[] outScaleXyzRotY, uint maxCount);
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetMeshSlotCount", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetMeshSlotCount();
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetMeshSlotFlat", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetMeshSlotFlat(uint index, out IntPtr path, out IntPtr name);
+
+        [DllImport("PrimalEngine", EntryPoint = "PCGCreateGraph", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void _PcgCreateGraph();
+        [DllImport("PrimalEngine", EntryPoint = "PCGDestroyGraph", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void _PcgDestroyGraph();
+        [DllImport("PrimalEngine", EntryPoint = "PCGAddNode", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgAddNode([MarshalAs(UnmanagedType.LPStr)] string typeName);
+        [DllImport("PrimalEngine", EntryPoint = "PCGRemoveNode", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void _PcgRemoveNode(uint nodeId);
+        [DllImport("PrimalEngine", EntryPoint = "PCGConnect", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void _PcgConnect(uint fromNode, uint fromPin, uint toNode, uint toPin);
+        [DllImport("PrimalEngine", EntryPoint = "PCGDisconnect", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void _PcgDisconnect(uint fromNode, uint fromPin, uint toNode, uint toPin);
+        [DllImport("PrimalEngine", EntryPoint = "PCGDeserializeGraph", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgDeserializeGraph([MarshalAs(UnmanagedType.LPStr)] string json);
+        [DllImport("PrimalEngine", EntryPoint = "PCGSerializeGraph", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgSerializeGraph(byte[]? buf, uint bufSize);
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetRegisteredNodeTypeCount", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetRegisteredNodeTypeCount();
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetRegisteredNodeTypeName", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr _PcgGetRegisteredNodeTypeName(uint index);
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetNodeParamDescriptorFlat", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetNodeParamDescriptorFlat(uint nodeId, uint paramIdx,
+            out IntPtr name, out IntPtr group, out byte type,
+            out float min, out float max, out float step, out IntPtr enumNames);
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetNodePinDescriptorFlat", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetNodePinDescriptorFlat(uint nodeId, uint pinIdx,
+            out IntPtr name, out uint index, out byte type, out byte isInput);
+        [DllImport("PrimalEngine", EntryPoint = "PCGSetNodeParamFloat", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgSetNodeParamFloat(uint nodeId, [MarshalAs(UnmanagedType.LPStr)] string name, float value);
+        [DllImport("PrimalEngine", EntryPoint = "PCGSetNodeParamVec3", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgSetNodeParamVec3(uint nodeId, [MarshalAs(UnmanagedType.LPStr)] string name, float x, float y, float z);
+        [DllImport("PrimalEngine", EntryPoint = "PCGSetNodeParamArray", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgSetNodeParamArray(uint nodeId, [MarshalAs(UnmanagedType.LPStr)] string name, float[] values, uint count);
+        [DllImport("PrimalEngine", EntryPoint = "PCGExecute", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void _PcgExecute();
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetOutputPointCount", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetOutputPointCount(uint nodeId);
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetErrorCount", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint _PcgGetErrorCount();
+        [DllImport("PrimalEngine", EntryPoint = "PCGGetErrorMessage", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr _PcgGetErrorMessage(uint index);
     }
 }

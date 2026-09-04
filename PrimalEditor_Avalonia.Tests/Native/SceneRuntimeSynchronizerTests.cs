@@ -47,6 +47,13 @@ public sealed class SceneRuntimeSynchronizerTests
             Calls.Add($"light({entityId},{lightType})");
             return entityId;
         }
+        public bool ParticleEnsureSystems() { Calls.Add("particle.ensure"); return true; }
+        public uint ParticleEmitterConfigSize() { return 304; }
+        public uint EmitterCreateForEntity(uint entityId, byte[] config) { Calls.Add($"particle.create({entityId})"); return 7; }
+        public bool EmitterRemoveFromEntity(uint entityId) { Calls.Add($"particle.remove({entityId})"); return true; }
+        public bool EmitterSetSpawnRate(uint entityId, float rate) { Calls.Add($"particle.spawn({entityId},{rate})"); return true; }
+        public string? ParticlePresetList() { return "fire"; }
+        public bool ParticlePresetApplyToConfig(string name, byte[] config) { Calls.Add($"particle.preset({name})"); return true; }
 
         public uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector)
         {

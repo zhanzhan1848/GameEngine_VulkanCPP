@@ -22,6 +22,13 @@ public interface INativeEngineBridgeLike
     void DestroyEntity(uint entityId);
     void SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale);
     uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled);
+    bool ParticleEnsureSystems();
+    uint ParticleEmitterConfigSize();
+    uint EmitterCreateForEntity(uint entityId, byte[] config);
+    bool EmitterRemoveFromEntity(uint entityId);
+    bool EmitterSetSpawnRate(uint entityId, float rate);
+    string? ParticlePresetList();
+    bool ParticlePresetApplyToConfig(string name, byte[] config);
 
     /// <summary>
     /// Push the full light state for live Inspector edits (no scene resync).
@@ -147,6 +154,13 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
 
     public uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) =>
         NativeEngineBridge.AddEntityLight(entityId, lightType, intensity, colorRgb, range, umbraRad, penumbraRad, isEnabled);
+    public bool ParticleEnsureSystems() => NativeEngineBridge.ParticleEnsureSystems();
+    public uint ParticleEmitterConfigSize() => NativeEngineBridge.ParticleEmitterConfigSize();
+    public uint EmitterCreateForEntity(uint entityId, byte[] config) => NativeEngineBridge.EmitterCreateForEntity(entityId, config);
+    public bool EmitterRemoveFromEntity(uint entityId) => NativeEngineBridge.EmitterRemoveFromEntity(entityId);
+    public bool EmitterSetSpawnRate(uint entityId, float rate) => NativeEngineBridge.EmitterSetSpawnRate(entityId, rate);
+    public string? ParticlePresetList() => NativeEngineBridge.ParticlePresetList();
+    public bool ParticlePresetApplyToConfig(string name, byte[] config) => NativeEngineBridge.ParticlePresetApplyToConfig(name, config);
 
     public void SetEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) =>
         NativeEngineBridge.SetEntityLight(entityId, lightType, intensity, colorRgb, range, umbraRad, penumbraRad, isEnabled);

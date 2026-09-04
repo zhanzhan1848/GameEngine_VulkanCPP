@@ -41,6 +41,12 @@ public static class ContentHelper
     private static readonly string[] PrefabExts = {
         ".prefab"
     };
+    private static readonly string[] ParticlePresetExts = {
+        ".particle.json"
+    };
+    private static readonly string[] PcgExts = {
+        ".pcg"
+    };
 
     // Cooked .mesh files are not user-facing assets; they're managed
     // by the model container and never appear directly in the Content Browser.
@@ -64,6 +70,8 @@ public static class ContentHelper
         if (fileName.EndsWith(MaterialSidecarSuffix, StringComparison.Ordinal)) return AssetType.Material;
         if (Array.IndexOf(ShaderExts,  ext) >= 0) return AssetType.Shader;
         if (Array.IndexOf(PrefabExts,  ext) >= 0) return AssetType.Prefab;
+        if (fileName.EndsWith(".particle.json", StringComparison.Ordinal)) return AssetType.ParticlePreset;
+        if (Array.IndexOf(PcgExts, ext) >= 0) return AssetType.Pcg;
         return AssetType.Unknown;
     }
 

@@ -153,10 +153,23 @@
                             <DataTemplate x:DataType="content:AssetInfo">
                                 <Grid ColumnDefinitions="24,*,70" Margin="1"
                                       PointerPressed="OnAssetItemPointerPressed">
+                                    <Grid.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Apply to Selected Particle Entity"
+                                                      IsVisible="{Binding IsParticlePreset}"
+                                                      Click="OnApplyPresetToSelectedClick"
+                                                      ToolTip.Tip="B4 P4: 把该预设应用到当前选中的粒子实体"/>
+                                        </ContextMenu>
+                                    </Grid.ContextMenu>
                                     <Path Grid.Column="0" Width="14" Height="14" Stretch="Uniform"
                                           Data="{Binding Type, Converter={x:Static conv:FileTypeConverters.ToIcon}}"
                                           Fill="{StaticResource ElectricBlueBrush}"
                                           VerticalAlignment="Center"/>
+                                    <!-- A8 源码控制: git status dot -->
+                                    <Ellipse Grid.Column="0" Width="6" Height="6"
+                                             HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                             IsVisible="{Binding GitStatus, Converter={x:Static conv:GitStatusConverters.IsVisible}}"
+                                             Fill="{Binding GitStatus, Converter={x:Static conv:GitStatusConverters.ToBrush}}"/>
                                     <TextBlock Grid.Column="1" Text="{Binding FileName}"
                                                VerticalAlignment="Center" Margin="4,0"
                                                FontSize="11" Classes="mono"
@@ -211,6 +224,14 @@
                                             Width="68" Height="52"
                                             ClipToBounds="True"
                                             PointerPressed="OnAssetItemPointerPressed">
+                                    <ctrl:TextureFrame.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Apply to Selected Particle Entity"
+                                                      IsVisible="{Binding IsParticlePreset}"
+                                                      Click="OnApplyPresetToSelectedClick"
+                                                      ToolTip.Tip="B4 P4: 把该预设应用到当前选中的粒子实体"/>
+                                        </ContextMenu>
+                                    </ctrl:TextureFrame.ContextMenu>
                                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                                             <Panel Width="20" Height="20" Margin="0,2,0,0">
                                                 <Image Source="{Binding, Converter={x:Static conv:FileTypeConverters.ToThumbnailSource}}" Stretch="Uniform"/>
@@ -220,6 +241,11 @@
                                                       IsVisible="{Binding !IsImage}"
                                                       HorizontalAlignment="Center"
                                                       VerticalAlignment="Center"/>
+                                                <!-- A8 源码控制: git status dot -->
+                                                <Ellipse Width="7" Height="7"
+                                                         HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                                         IsVisible="{Binding GitStatus, Converter={x:Static conv:GitStatusConverters.IsVisible}}"
+                                                         Fill="{Binding GitStatus, Converter={x:Static conv:GitStatusConverters.ToBrush}}"/>
                                             </Panel>
                                             <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis"
                                                        MaxWidth="62" TextAlignment="Center"

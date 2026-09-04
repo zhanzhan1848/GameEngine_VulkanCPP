@@ -16,7 +16,10 @@ public sealed class PrefabInstanceComponent : Component
     /// <summary>GUID of the source Prefab asset.</summary>
     public AssetGuid PrefabGuid { get; set; }
 
-    /// <summary>Map of { entity-name → override JSON }.</summary>
+    /// <summary>Map of { entity-name → override JSON }. A8: serialized with
+    /// sorted keys (deterministic git diffs).</summary>
+    [System.Text.Json.Serialization.JsonConverter(
+        typeof(PrimalEditor_Avalonia.GameProject.Documents.SortedStringKeysConverter<string>))]
     public Dictionary<string, string> Overrides { get; set; } = new();
 
     /// <summary>True when the editor has unsaved edits that diverge

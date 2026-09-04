@@ -70,6 +70,8 @@ public class AssetEditorHost : Window
         PrimitiveMesh.PrimitiveMeshViewModel => new PrimitiveMesh.PrimitiveMeshView { DataContext = vm },
         MeshAssetInspector.MeshAssetInspectorViewModel => new MeshAssetInspector.MeshAssetInspectorView { DataContext = vm },
         Material.MaterialEditorViewModel => new Material.MaterialEditorView { DataContext = vm },
+        Prefab.PrefabInspectorViewModel => new Prefab.PrefabInspectorView { DataContext = vm },
+        Pcg.PcgEditorViewModel => new Pcg.PcgEditorView { DataContext = vm },
         _ => null,
     };
 

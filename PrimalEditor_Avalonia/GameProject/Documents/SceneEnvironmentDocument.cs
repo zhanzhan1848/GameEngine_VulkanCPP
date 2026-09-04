@@ -38,4 +38,8 @@ public sealed class SceneEnvironmentDocument
 
     [JsonPropertyName("EnvMapPath")]
     public string EnvMapPath { get; set; } = string.Empty;
+
+    /// <summary>静态场景：冻结 DDGI probe 更新（plan §2 A10）。烘焙走 GIEditorPanel。</summary>
+    [JsonPropertyName("StaticGIFrozen")]
+    public bool StaticGIFrozen { get; set; }
 }

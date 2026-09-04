@@ -31,6 +31,10 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
 
     private bool _lastPushOk;
 
+    /// <summary>GI 体积编辑（plan §6.2 B1 L1）：管线级配置，非场景数据；
+    /// 挂在这里只为 EnvironmentView 提供绑定上下文。</summary>
+    public GiVolumeViewModel GiVolumes { get; } = new();
+
     public void Attach(SceneEnvironment? env)
     {
         if (_env != null) _env.PropertyChanged -= OnEnvChanged;
@@ -49,7 +53,7 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
                 nameof(FogEnabled), nameof(FogR), nameof(FogG), nameof(FogB),
                 nameof(FogNear), nameof(FogFar), nameof(FogDensity),
                 nameof(SkyboxEnabled), nameof(SkyR), nameof(SkyG), nameof(SkyB),
-                nameof(ToneMapping), nameof(Exposure), nameof(EnvMapPath),
+                nameof(ToneMapping), nameof(Exposure), nameof(EnvMapPath), nameof(StaticGIFrozen),
             })
         {
             OnPropertyChanged(p);
@@ -111,6 +115,9 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
             NativeEngineBridge.PipelineClearEnvironmentMap();
         }
         NativeEngineBridge.PipelineSetSkyboxEnabled(_env.SkyboxEnabled && hasEnv);
+        // 静态场景冻结开关（plan §2 A10）：随任意环境推送一并同步，
+        // 场景切换/管线重建后 freeze 状态也自动恢复。
+        NativeEngineBridge.GISetProbeFreeze(_env.StaticGIFrozen);
         _env.MarkDirty();
         OnPropertyChanged(nameof(StatusMessage));
     }
@@ -149,6 +156,19 @@ public sealed class SceneEnvironmentViewModel : ViewModelBase
             }
             if (_env.EnvMapPath == value) return;
             _env.EnvMapPath = value;
+        }
+    }
+
+    /// <summary>静态场景（plan §2 A10）：切换即推送 freeze 开关到引擎。
+    /// 冻结期动态光/移动物体的 GI 不更新——面板文案已注明。</summary>
+    public bool StaticGIFrozen
+    {
+        get => _env?.StaticGIFrozen ?? false;
+        set
+        {
+            if (_env == null) return;
+            if (_env.StaticGIFrozen == value) return;
+            _env.StaticGIFrozen = value;
         }
     }
 

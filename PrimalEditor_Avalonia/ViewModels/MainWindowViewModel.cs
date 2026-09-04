@@ -366,32 +366,17 @@ public class MainWindowViewModel : ViewModelBase
         {
             foreach (var source in _clipboard)
             {
-                var clone = new Components.GameEntity(source.Name + "_Copy")
+                // 全组件深拷：经 EntityDocument 序列化往返（Serializer 的组件
+                // switch 是唯一类型清单），替代旧的只拷 Transform 版本。
+                var documents = PrimalEditor_Avalonia.GameProject.Serializer.ToEntityDocuments(new[] { source });
+                var clones = PrimalEditor_Avalonia.GameProject.Serializer.InstantiateEntityDocuments(documents, reassignGuids: true);
+                foreach (var clone in clones)
                 {
-                    IsEnabled = source.IsEnabled,
-                    IsActive = source.IsActive,
-                };
-                foreach (var component in source.Components)
-                {
-                    if (component is Components.Transform t)
-                    {
-                        clone.Components.Add(new Components.Transform
-                        {
-                            PositionX = t.PositionX,
-                            PositionY = t.PositionY,
-                            PositionZ = t.PositionZ,
-                            RotationX = t.RotationX,
-                            RotationY = t.RotationY,
-                            RotationZ = t.RotationZ,
-                            ScaleX = t.ScaleX,
-                            ScaleY = t.ScaleY,
-                            ScaleZ = t.ScaleZ,
-                        });
-                    }
+                    clone.Name = source.Name + "_Copy";
+                    var action = new Common.AddEntityAction(WorldEditor, clone);
+                    WorldEditor.UndoRedo.Add(action);
+                    action.Redo();
                 }
-                var action = new Common.AddEntityAction(WorldEditor, clone);
-                WorldEditor.UndoRedo.Add(action);
-                action.Redo();
             }
         }
         PrimalEditor_Avalonia.Common.Logger.Info($"Pasted {_clipboard.Count} entity(ies)");

@@ -290,6 +290,31 @@ public sealed class SceneRuntimeSynchronizer
                     upVector: new[] { 0f, 1f, 0f });
             }
 
+            // 粒子发射器（plan §6.3 B4 P1）：预设标量场填默认 config，
+            // 覆盖 SpawnRate（blob offset 8 = emitter_config.spawn_rate），
+            // 再为实体创建发射器。曲线字段由引擎侧 SanitizeConfig 置空。
+            foreach (var emitter in entity.Components.OfType<ParticleEmitterComponent>())
+            {
+                if (!emitter.IsEnabled) continue;
+                if (!_bridge.ParticleEnsureSystems()) break;
+                var size = (int)_bridge.ParticleEmitterConfigSize();
+                if (size <= 0) break;
+                var config = new byte[size];
+                var presetName = string.IsNullOrWhiteSpace(emitter.PresetName) ? "fire" : emitter.PresetName;
+                if (!_bridge.ParticlePresetApplyToConfig(presetName, config) &&
+                    !_bridge.ParticlePresetApplyToConfig("fire", config))
+                {
+                    Logger.Warning($"[Particle] preset '{presetName}' unavailable, entity '{entity.Name}' skipped");
+                    break;
+                }
+                BitConverter.GetBytes(emitter.SpawnRate).CopyTo(config, 8);
+                var emitterId = _bridge.EmitterCreateForEntity(runtimeId, config);
+                if (emitterId == 0)
+                    Logger.Warning($"[Particle] emitter creation failed for '{entity.Name}'");
+                else
+                    Logger.Info($"[Particle] emitter {emitterId} created for '{entity.Name}' (preset={presetName})");
+            }
+
             BindEditorHelperMesh(entity, runtimeId);
 
             var transform = entity.GetTransform();

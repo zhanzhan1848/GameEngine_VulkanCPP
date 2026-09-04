@@ -1,0 +1,160 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors.Pcg"
+             xmlns:n="using:NodifyM.Avalonia.Controls"
+             xmlns:common="using:PrimalEditor_Avalonia.Common"
+             x:Class="PrimalEditor_Avalonia.Editors.Pcg.PcgEditorView"
+             x:DataType="vm:PcgEditorViewModel"
+             Background="{DynamicResource VoidBrush}">
+
+  <UserControl.Resources>
+    <!-- A6 PCG node template. Same NodifyM contract as the material editor:
+         Input/Output connector collections go through the dedicated
+         InputConnectorTemplate/OutputConnectorTemplate properties. -->
+    <DataTemplate DataType="vm:PcgNodeViewModel" x:Key="PcgNodeTemplate">
+      <n:Node Header="{Binding Title}"
+              HeaderBrush="{DynamicResource ElectricBlueDeepBrush}"
+              BorderBrush="{DynamicResource HairlineBrush}"
+              Background="{DynamicResource PanelBrush}"
+              Input="{Binding Input}"
+              Output="{Binding Output}"
+              Location="{Binding Location, Mode=TwoWay}"
+              PointerPressed="OnNodePointerPressed">
+        <n:Node.InputConnectorTemplate>
+          <DataTemplate DataType="vm:PcgPinViewModel">
+            <n:NodeInput Header="{Binding Title}"
+                         Anchor="{Binding Anchor, Mode=OneWayToSource}">
+              <n:NodeInput.HeaderTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding}" FontFamily="{DynamicResource FontMono}"
+                             FontSize="11" Foreground="{DynamicResource MintBrush}"/>
+                </DataTemplate>
+              </n:NodeInput.HeaderTemplate>
+            </n:NodeInput>
+          </DataTemplate>
+        </n:Node.InputConnectorTemplate>
+        <n:Node.OutputConnectorTemplate>
+          <DataTemplate DataType="vm:PcgPinViewModel">
+            <n:NodeOutput Header="{Binding Title}"
+                          Anchor="{Binding Anchor, Mode=OneWayToSource}">
+              <n:NodeOutput.HeaderTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding}" FontFamily="{DynamicResource FontMono}"
+                             FontSize="11" Foreground="{DynamicResource AmberBrush}"/>
+                </DataTemplate>
+              </n:NodeOutput.HeaderTemplate>
+            </n:NodeOutput>
+          </DataTemplate>
+        </n:Node.OutputConnectorTemplate>
+        <StackPanel Margin="4,2">
+          <TextBlock Text="{Binding OutputPoints, StringFormat='{}{0} points'}"
+                     FontFamily="{DynamicResource FontMono}" FontSize="10"
+                     Foreground="{DynamicResource MutedTextBrush}"/>
+        </StackPanel>
+      </n:Node>
+    </DataTemplate>
+
+    <DataTemplate DataType="vm:PcgConnectionViewModel" x:Key="PcgConnectionTemplate">
+      <Grid>
+        <n:Connection Source="{Binding Source.Anchor}"
+                      Target="{Binding Target.Anchor}"
+                      Stroke="{DynamicResource ElectricBlueBrush}"
+                      StrokeThickness="2"
+                      Focusable="True"
+                      ToolTip.Tip="Right-click to disconnect"/>
+      </Grid>
+    </DataTemplate>
+  </UserControl.Resources>
+
+  <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="200,*,300">
+    <!-- LEFT: node palette -->
+    <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="0" Classes="floating" Margin="6,2,2,2"
+            Padding="6">
+      <StackPanel Spacing="4">
+        <TextBlock Text="NODE PALETTE" FontSize="10" FontWeight="SemiBold"
+                   Foreground="{DynamicResource ElectricBlueBrush}"/>
+        <ItemsControl ItemsSource="{Binding PaletteTypes}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Button Content="{Binding}" HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Left" Padding="6,3" FontSize="11"
+                      Click="OnPaletteAddClick" ToolTip.Tip="Add to graph"/>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <Button Content="Delete Selected" Command="{Binding DeleteSelectedCommand}"
+                Margin="0,10,0,0" Padding="6,3"/>
+      </StackPanel>
+    </Border>
+
+    <!-- CENTER: graph canvas -->
+    <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="1" Classes="floating" Margin="2"
+            BorderBrush="{DynamicResource ElectricBlueDeepBrush}" BorderThickness="1">
+      <n:NodifyEditor x:Name="GraphEditor"
+                      ItemsSource="{Binding Nodes}"
+                      ItemTemplate="{StaticResource PcgNodeTemplate}"
+                      Connections="{Binding Connections}"
+                      ConnectionTemplate="{StaticResource PcgConnectionTemplate}"
+                      ConnectionCompletedCommand="{Binding ConnectionCompletedCommand}"
+                      Background="{DynamicResource SlateBrush}"/>
+    </Border>
+
+    <!-- RIGHT: inspector -->
+    <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="2" Classes="floating" Margin="2,2,6,2"
+            Padding="8">
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="6" DataContext="{Binding SelectedNode}">
+          <TextBlock Text="INSPECTOR" FontSize="10" FontWeight="SemiBold"
+                     Foreground="{DynamicResource ElectricBlueBrush}"/>
+          <TextBlock Text="{Binding TypeName, FallbackValue='(no node selected)'}"
+                     FontFamily="{DynamicResource FontMono}" FontSize="12"/>
+          <ItemsControl ItemsSource="{Binding Parameters}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:PcgParamViewModel">
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2">
+                  <TextBlock Text="{Binding Name}" Width="96"
+                             FontFamily="{DynamicResource FontMono}" FontSize="11"
+                             VerticalAlignment="Center"
+                             Foreground="{DynamicResource MutedTextBrush}"/>
+                  <!-- Bool -->
+                  <CheckBox IsChecked="{Binding BoolValue, Mode=TwoWay}"
+                            IsVisible="{Binding IsBool}"/>
+                  <!-- Enum -->
+                  <ComboBox ItemsSource="{Binding EnumOptions}" SelectedIndex="{Binding EnumIndex, Mode=TwoWay}"
+                            MinWidth="110" FontSize="11" IsVisible="{Binding IsEnum}"/>
+                  <!-- Float/Int/UInt -->
+                  <TextBox Width="70" FontSize="11" IsVisible="{Binding IsFloat}"
+                           Text="{Binding X, Mode=TwoWay}"/>
+                  <!-- Vec3 -->
+                  <StackPanel Orientation="Horizontal" Spacing="2" IsVisible="{Binding IsVec3}">
+                    <TextBox Width="54" FontSize="11" Text="{Binding X, Mode=TwoWay}"/>
+                    <TextBox Width="54" FontSize="11" Text="{Binding Y, Mode=TwoWay}"/>
+                    <TextBox Width="54" FontSize="11" Text="{Binding Z, Mode=TwoWay}"/>
+                  </StackPanel>
+                  <TextBlock Text="(array — edit via JSON)" FontSize="10" IsVisible="{Binding IsFloatArray}"
+                             Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                </StackPanel>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+
+    <!-- BOTTOM: status -->
+    <Border Grid.Row="2" Grid.ColumnSpan="3" Classes="floating" Margin="6,2,6,6" Padding="8,4">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Grid.Column="0" Text="{Binding StatusLine, FallbackValue='Ready'}"
+                   FontFamily="{DynamicResource FontMono}" FontSize="10"
+                   Foreground="{DynamicResource MutedTextBrush}"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+            <Button Content="Execute" Command="{Binding ExecuteCommand}"
+                    Classes="accent" Padding="14,2"/>
+            <Button Content="Apply to Scene" Command="{Binding ApplyToSceneCommand}"
+                    Padding="14,2"
+                    ToolTip.Tip="把输出点批量创建为场景实体（可一次 Undo）"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+  </Grid>
+</UserControl>

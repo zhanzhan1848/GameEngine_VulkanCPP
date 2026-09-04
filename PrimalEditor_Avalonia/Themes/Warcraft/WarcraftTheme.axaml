@@ -80,8 +80,6 @@
   <SolidColorBrush x:Key="ViewportBrush"                Color="#33E8B54A"/>
   <SolidColorBrush x:Key="ViewportBorderBrush"          Color="#E8B54A"/>
   <Color x:Key="GridLinesColor">#2A231A</Color>
-  <!-- 节点标题条头像徽章开关(仅 Warcraft 展示阵营徽章) -->
-  <sys:Boolean x:Key="NodeAvatarVisible">True</sys:Boolean>
 
   <!-- FONT FAMILIES — Cinzel (OFL) carries the fantasy display voice;
        body text stays on a neutral system sans for tool readability. -->

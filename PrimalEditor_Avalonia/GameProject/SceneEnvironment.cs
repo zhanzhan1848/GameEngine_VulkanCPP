@@ -11,6 +11,14 @@ namespace PrimalEditor_Avalonia.GameProject;
 /// </summary>
 public sealed class SceneEnvironment : ViewModelBase, IDirtyTrackable
 {
+    private bool _staticGiFrozen;
+    /// <summary>静态场景（plan §2 A10）：冻结 DDGI probe 更新，烘焙后跳过逐帧 trace/update。</summary>
+    public bool StaticGIFrozen
+    {
+        get => _staticGiFrozen;
+        set => Set(ref _staticGiFrozen, value);
+    }
+
     private float _ambientR = 0.05f;
     private float _ambientG = 0.05f;
     private float _ambientB = 0.05f;
