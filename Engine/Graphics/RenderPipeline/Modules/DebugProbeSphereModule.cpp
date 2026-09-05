@@ -125,6 +125,12 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
             if (!psIrr.empty())
                 irradiance_ps = device_->CreateShader(psIrr.data(), psIrr.size(),
                                                       ShaderStage::Pixel, "probe_sphere_irradiance_fs");
+        } else if (device->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+            // B1 L3.2: Vulkan 用独立 spv（ProbeSphereIrradiance.frag.spv）。
+            auto psIrr = LoadProbeSphereBytecode(device, "ProbeSphereIrradiance.frag");
+            if (!psIrr.empty())
+                irradiance_ps = device_->CreateShader(psIrr.data(), psIrr.size(),
+                                                      ShaderStage::Pixel, "main");
         }
     }
     if (vertex_shader == handles::INVALID_SHADER ||
@@ -185,9 +191,6 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
     pd.cullMode = CullMode::None;
     pd.renderTargetCount = 1;
     pd.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
-    pd.depthStencilFormat = DataFormat::Unknown;   // overlay; occlusion step 2
-    pd.enableDepthTest = false;
-    pd.enableDepthWrite = false;
     pd.enableBlend = false;
     // Flat stream: pos(3f) + normal(3f) + probeIdx(1f) = 28B, one binding.
     VertexInputAttribute attrs[] = {
@@ -201,13 +204,35 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
     pd.vertexAttributes.assign(std::begin(attrs), std::end(attrs));
     pd.vertexBindings.assign(std::begin(binds), std::end(binds));
 
-    pipeline_ = device_->CreateGraphicsPipeline(pd);
+    // B1 L3 遮挡: depth-on 变体挂 GBuffer 深度附件（Load/Don'tCare 只读），
+    // 球体被场景几何遮挡处深度测试失败；depth-off 变体与 L3 之前行为一致
+    //（Vulkan 测试路径不传 depth_rg 时使用）。
+    auto makePipeline = [&](ShaderHandle ps, bool depth) {
+        GraphicsPipelineDesc d = pd;
+        d.pixelShader = ps;
+        if (depth) {
+            d.depthStencilFormat = DataFormat::D32_Float;
+            d.enableDepthTest = true;
+            d.depthFunc = ComparisonFunc::Less;
+            d.enableDepthWrite = false;
+        } else {
+            d.depthStencilFormat = DataFormat::Unknown;
+            d.enableDepthTest = false;
+            d.enableDepthWrite = false;
+        }
+        return device_->CreateGraphicsPipeline(d);
+    };
+
+    pipeline_ = makePipeline(pixel_shader, /*depth=*/true);
+    pipeline_nodepth_ = makePipeline(pixel_shader, /*depth=*/false);
     if (irradiance_ps != handles::INVALID_SHADER) {
-        pd.pixelShader = irradiance_ps;
-        irradiance_pipeline_ = device_->CreateGraphicsPipeline(pd);
+        irradiance_pipeline_ = makePipeline(irradiance_ps, /*depth=*/true);
+        irradiance_nodepth_pipeline_ = makePipeline(irradiance_ps, /*depth=*/false);
     }
     PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] initialized (pipeline=" << pipeline_
-              << " irradiance=" << irradiance_pipeline_ << ")" << std::endl;
+              << " nodepth=" << pipeline_nodepth_
+              << " irradiance=" << irradiance_pipeline_
+              << " irradiance_nodepth=" << irradiance_nodepth_pipeline_ << ")" << std::endl;
     return pipeline_ != handles::INVALID_PIPELINE;
 }
 
@@ -315,17 +340,25 @@ void DebugProbeSphereModule::AddPass(RenderGraph& graph,
         return;
     const u32 cbIdx = inputs.current_buffer_index % 3;
 
+    const bool occlusion = inputs.depth_rg.IsValid() &&
+                           inputs.depth_width == inputs.render_width &&
+                           inputs.depth_height == inputs.render_height;
+
     struct SphereData {
         RGResourceHandle output;
     };
 
+    // 尺寸匹配才挂深度附件（render_scale != 1 时 GBuffer 深度与 overlay
+    // 目标尺寸不一致 → 退回无遮挡 overlay）。
     graph.AddPass<SphereData>(
         "DebugProbeSpheres",
         RGPassType::Graphics,
         RGPassCategory::PostProcess,
-        [inputs](SphereData& data, RenderGraphBuilder& builder) {
+        [inputs, occlusion](SphereData& data, RenderGraphBuilder& builder) {
             if (inputs.blit_output_rg.IsValid())
                 builder.Read(inputs.blit_output_rg, ResourceState::RenderTarget);
+            if (occlusion)
+                builder.Read(inputs.depth_rg, ResourceState::DepthStencilReadOnly);
             data.output = builder.Write(inputs.backbuffer_rg,
                                         ResourceState::RenderTarget);
             RGRenderPassDesc rp;
@@ -333,9 +366,16 @@ void DebugProbeSphereModule::AddPass(RenderGraph& graph,
                                  .loadOp = LoadAction::Load,  // overlay on blit result
                                  .storeOp = StoreAction::Store,
                                  .clearColor = {math::v4{0, 0, 0, 1}}});
+            if (occlusion) {
+                rp.depthStencil.texture = inputs.depth_rg;
+                rp.depthStencil.loadOp = LoadAction::Load;          // 保留场景深度
+                rp.depthStencil.storeOp = StoreAction::DontCare;    // 只读——不回写
+                rp.depthStencil.depthLoadOp = LoadAction::Load;
+                rp.depthStencil.depthStoreOp = StoreAction::DontCare;
+            }
             builder.DeclareRenderPass(rp);
         },
-        [this, inputs, cbIdx](const SphereData&, RenderGraphContext& ctx) {
+        [this, inputs, cbIdx, occlusion](const SphereData&, RenderGraphContext& ctx) {
             static u32 execN = 0;
             if (++execN == 1u || execN % 60u == 0u)
                 PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] execute #" << execN
@@ -357,27 +397,38 @@ void DebugProbeSphereModule::AddPass(RenderGraph& graph,
                 math::v4 cam_pos;
             } pcData{vp, inputs.sun_dir, inputs.camera_position};
             DescriptorBufferInfo binfo{ubo_[cbIdx], 0, 128};
-            DescriptorBufferInfo irrInfo{inputs.irradiance_buffer, 0, ~0ULL};
             WriteDescriptorSet w[2]{};
+            u32 writeCount = 1;
             w[0].dstSet = sets_[cbIdx];
             w[0].dstBinding = 0;
             w[0].dstArrayElement = 0;
             w[0].descriptorCount = 1;
             w[0].descriptorType = DescriptorType::UniformBuffer;
             w[0].bufferInfo = &binfo;
-            w[1].dstSet = sets_[cbIdx];
-            w[1].dstBinding = 1;
-            w[1].dstArrayElement = 0;
-            w[1].descriptorCount = 1;
-            w[1].descriptorType = DescriptorType::StorageBuffer;
-            w[1].bufferInfo = &irrInfo;
-            device_->UpdateDescriptorSets(2, w);
+            // B1 L3.2: 只在 irradiance 缓冲有效时写 binding 1——空句柄写入
+            // 会在 Vulkan validation 报 NULL storage buffer。
+            if (inputs.irradiance_buffer != handles::INVALID_RESOURCE) {
+                DescriptorBufferInfo irrInfo{inputs.irradiance_buffer, 0, ~0ULL};
+                w[1].dstSet = sets_[cbIdx];
+                w[1].dstBinding = 1;
+                w[1].dstArrayElement = 0;
+                w[1].descriptorCount = 1;
+                w[1].descriptorType = DescriptorType::StorageBuffer;
+                w[1].bufferInfo = &irrInfo;
+                writeCount = 2;
+            }
+            device_->UpdateDescriptorSets(writeCount, w);
 
             cmd->SetViewport({{0, 0},
                               {(float)inputs.render_width, (float)inputs.render_height},
                               0, 1});
             cmd->SetScissor({{0, 0}, {inputs.render_width, inputs.render_height}});
-            cmd->BindGraphicsPipeline(useIrradiance ? irradiance_pipeline_ : pipeline_);
+            const rhi::PipelineHandle psPipeline = useIrradiance
+                ? (occlusion ? irradiance_pipeline_ : irradiance_nodepth_pipeline_)
+                : (occlusion ? pipeline_ : pipeline_nodepth_);
+            cmd->BindGraphicsPipeline(psPipeline != handles::INVALID_PIPELINE
+                                          ? psPipeline
+                                          : pipeline_);
             cmd->PushConstants(layout_, ShaderStage::Vertex,
                                0, sizeof(PCData), &pcData);
             ResourceHandle vbs[1] = {sphere_vb_};

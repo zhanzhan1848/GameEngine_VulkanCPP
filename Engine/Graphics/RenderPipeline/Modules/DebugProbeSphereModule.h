@@ -31,6 +31,15 @@ struct DebugProbeSphereInputs {
     // triple index = current_buffer_index). When valid, spheres sample real
     // probe irradiance by direction instead of the hue fallback.
     rhi::ResourceHandle irradiance_buffer{ rhi::handles::INVALID_RESOURCE };
+
+    // B1 L3 遮挡: GBuffer depth (D32_Float, already imported into the graph by
+    // the caller). Attached as the overlay pass's depth attachment (Load/Don't-
+    // Care) so spheres behind scene geometry fail the depth test. Only used
+    // when depth_width/height match the render target (render_scale != 1 falls
+    // back to the no-occlusion overlay).
+    rendergraph::RGResourceHandle depth_rg{};
+    u32 depth_width = 0;
+    u32 depth_height = 0;
 };
 
 /// Renders one real mesh sphere per DDGI probe on top of the tonemapped
@@ -57,10 +66,13 @@ private:
 
     rhi::RHIDeviceBase* device_ = nullptr;
 
-    rhi::PipelineHandle pipeline_{ rhi::handles::INVALID_PIPELINE };
-    // B1 L3.2: same VS, irradiance-sampling FS. INVALID on Vulkan (no spv yet)
-    // and when the MSL entry fails — then the hue pipeline is used.
-    rhi::PipelineHandle irradiance_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    // B1 L3 遮挡 + L3.2: pipeline family selected per AddPass —
+    //   [irradiance?] × [depth attachment?]. The no-depth variants reproduce
+    // the pre-L3 behavior exactly (Vulkan test path passes no depth_rg).
+    rhi::PipelineHandle pipeline_{ rhi::handles::INVALID_PIPELINE };                  // hue + depth
+    rhi::PipelineHandle pipeline_nodepth_{ rhi::handles::INVALID_PIPELINE };          // hue, no depth
+    rhi::PipelineHandle irradiance_pipeline_{ rhi::handles::INVALID_PIPELINE };       // SH9 + depth
+    rhi::PipelineHandle irradiance_nodepth_pipeline_{ rhi::handles::INVALID_PIPELINE };// SH9, no depth
     rhi::PipelineLayoutHandle layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetHandle sets_[3]{

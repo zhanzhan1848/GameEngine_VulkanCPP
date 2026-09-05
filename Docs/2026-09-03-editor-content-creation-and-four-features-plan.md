@@ -223,6 +223,37 @@
 > - A10：引擎新增 `GISetProbeFreeze(u32)`（`GIDebugParams.freeze_probe_updates` 的单字段开关，规避 C# 侧结构体偏移硬编码）+ `SceneEnvironment.StaticGIFrozen`（文档字段，序列化接线）+ EnvironmentView 勾选框，`ApplyToNative` 统一推送（场景切换/管线重建后状态自动恢复）。烘焙 warm-start 仍走 GIEditorPanel。
 > - 测试基线：CLI+Prefab 45/45 ✅；全量 609 中 11 失败均为**既有**问题——8 个主题/可视化失败源于工作区未提交的主题 WIP（WarcraftTheme.Styles.axaml / MaterialEditorView.axaml / WarcraftVisualDump.cs，stash 对照实验证实），3 个纹理烘焙端到端在干净 HEAD 上同样失败（环境依赖）。
 
+> **实施状态（2026-09-04 续 22）**：B1 L3 遮挡阶段已实施。
+> - probe 球 overlay 原为无深度测试（墙后也画）。实现：模块管线开深度测试（D32_Float/Less/不写深度），overlay pass 经 `RGRenderPassDesc.depthStencil` 挂 GBuffer 深度附件（`graph.ImportResource("GBufferDepth_ProbeSpheres", GetGBufferDepthSampleable())`，Load/Don'tCare 只读）；render_scale != 1 时 GBuffer 深度与 overlay 目标尺寸不一致，自动退回无遮挡 overlay（尺寸守卫）。零 shader 改动——硬件深度测试完成遮挡。
+> - 活体验证路径：选中带 Environment 组件的实体 → 属性面板 ENVIRONMENT → PROBE DEBUG → 勾 "Probe Spheres"（编辑器已留运行，dylib 已同步新构建）。
+
+> **实施状态（2026-09-04 续 25）**：B2 增量——雾着色器编辑器已实施（规划内最后一项增量收口）。
+> - **实现**：`Editors/Shaders/FogShaderEditorWindow`（非模态单例）——下拉选择 4 个 Froxel MSL 文件（DensityInject/LightIntegrate/Resolve/Common）、monospace 文本编辑、**Save + Hot Reload**：写盘后 `SetRenderPassEnabled(FroxelFog)` off→on 触发 pass 重建，`CreatePipelines` 从盘上重读 MSL 完成热更（重建路径为 B2 v1 已验证的既有机制）；雾未开启时仅写盘并提示"下次开启时生效"。目录定位：cwd 相对 → 可执行位置上溯 → 仓库绝对兜底（引擎 LoadShaderBytecode 双候选同款）。入口：Environment 面板 FOG 区块 "Fog Shader…" 按钮。
+> - **设计取舍**：未走 ShaderDocument 资产系统（雾 MSL 是引擎源文件而非工程资产，沿用计划"B2 v1 未新增资产类型"的取向）；Vulkan 端无 .comp，编辑以 MSL 为源（计划 §B2 既定）。
+> - 门禁：C# 0 错误 ✅。**活体 UI 验证挂起**：会话 GUI 再次间歇失效（Avalonia RenderTimer -6661，同续 15 模式——该故障历史上会自愈，恢复后打开 Environment 面板 FOG 区 "Fog Shader…" 即可目验：改 MSL 保存 → 视口雾变化 + 状态行 "hot reloaded"）。
+
+> **实施状态（2026-09-04 续 24）**：L3 遮挡稳健化 + Vulkan 验证 + 交叉树污染处置。
+> - **遮挡稳健化（管线族）**：遮挡改动引入一个隐患——Vulkan 测试（TestVulkanSponzaRenderGraph 也调本模块 AddPass）不传 depth_rg，会出现"管线要深度、pass 无深度附件"错配。重构为**管线族四变体**（色相/SH9 × 深度/无深度，`makePipeline` lambda），AddPass 按 `occlusion` 选择；无深度变体与 L3 之前行为逐字节一致 → 测试路径零变化，编辑器路径获得遮挡。
+> - **Vulkan 活体验证**：DebugVulkan 树构建通过；窗口式运行 100s——probe 球模块在 Vulkan 上跑 1800 帧（98 万展开顶点，nodepth 变体正确选中）、无 fault；发现并修复一个自引入问题：AddPass 无条件写 binding 1 会在 irradiance 缓冲为空的会话（Vulkan 测试）产生 NULL storage buffer validation 错误——已改为**条件写入**（干净 HEAD 对照基线 0 错误确认为本会话引入）。Vulkan irradiance 采样入口（独立 spv）在"句柄未注入"会话才激活，注入句柄的测试路径保持色相。
+> - **交叉构建树污染（AGENTS.md 警告的坑实战命中）**：DebugVulkan 构建把共享 `Darwin/Debug/libEngine.a` 覆盖为 Vulkan 对象（时间戳证据）。已按规程处置：`rm libEngine.a` → 重建 Darwin/Debug Engine+EngineDLL → nm 确认 archive 无 Vulkan 符号 → 重同步编辑器 dylib → 重启 + 冒烟 PASSED（管线族 25/26/27/28 重建 ✅）。
+> - **流程留痕**：编辑器运行时 dylib 真实加载点 = `Darwin/PrimalEditor_Avalonia/DebugEditor/`（见续 19）；跨树构建后必须 `rm Darwin/Debug/libEngine.a` 再重建 Debug 目标——本次是该文档警告的首次实战命中与处置记录。
+
+> **实施状态（2026-09-04 续 23）**：B1 L2 探针检查器已实施（**B1 功能 L1–L3 全部完成**）。
+> - **工作量大降级**：续 4 曾估 M（帧内 stage-copy hook）——本轮确认 DDGI 缓冲是 Metal **Dynamic = 共享内存可 Map**（仓内 :871/:903/:1054 既有直读先例），readback 退化为 `MapBuffer→memcpy`，**零帧内 hook**。
+> - **导出（只增）**：`GIGetProbeDebugMeta`（格参数+总数+最新帧槽 `FrameIndex%3`）、`GIProbeConfidenceReadback`（probeIdx×4：rayHitRatio/temporalStability/visibilityConf/convergenceAge）、`GIProbeIrradianceReadback`（probeIdx×9 float4，最新写槽）。配套只增 getter：`LumenDDGIPass::GetDevice/GetConfidenceBuffer/GetIrradianceBufferLatest`（首个 GetConfidenceBuffer 与 ：280 既有签名撞名，已去重）。
+> - **检查器**：`Editors/Gi/ProbeInspectorWindow`（非模态单例）——每 probe 行 = convergenceAge 色条（绿→红）+ 6 方向（±X±Y±Z）SH9 CPU 评估色板（逐行镜像 EvalSH9Irradiance + 同款 tone map）。入口：Environment 面板 PROBE DEBUG 行 "Inspector…" 按钮。512 probe 显示上限（大格只看前 512）。
+> - 门禁：Engine/EngineDLL 构建 ✅、C# 0 错误 ✅、编辑器带新构建启动稳定 + 冒烟 PASSED ✅。**活体目验**：编辑器留运行——Environment 面板 PROBE DEBUG → "Inspector…" 打开检查器（需先有 GI 渲染帧写入数据；纯启动未跑 GI 帧时显示空/提示）。
+
+> **实施状态（2026-09-04 续 21）**：B1 L3 Vulkan 端 irradiance 路径补齐（跨后端对齐完成）。
+> - 新增独立 `ProbeSphereIrradiance.frag`（合法单入口 GLSL：与 ProbeSphere.vert 输出接口对齐 + set0/binding1 SSBO + SH9 评估同 Metal 数学），`glslc --target-env=vulkan1.2` 编译为同目录 `.spv`（4256B）✓；模块 Vulkan 分支 irradiance FS 加载名指向该 spv（入口名 main）。加载失败仍自动回退色相管线。
+> - Vulkan 运行目验待切 API 下拉的 Vulkan 会话（MoltenVK）；spv 编译成功 + 加载路径对齐即本轮闭环。
+> - 顺手修正：A6 保存路径的 `ApplyPcgPointsToScene` 在无 Project 引用时不再越界（slotGuids 循环加了 Project 空保护——此前轮次已含）。
+
+> **实施状态（2026-09-04 续 20）**：B1 L3 step 2——probe 球 SH9 irradiance 采样已实施。
+> - **关键勘察**：运行时 DDGI 的 irradiance 缓冲**不是**经典 octahedral atlas，而是 **SH9 表示**（`DDGIUpdateIrradiance.metal` 写入 `irradianceOutput[probeIdx×9 + i]`，9 个 float4 系数/probe）——probe 球采样因此退化为按片元法线评估 SH9（数学逐行镜像 `CommonFunction.metal::EvalSH9Irradiance`），无需 atlas 常量。球面法线天然等于"probe 中心→片元"方向。
+> - **实现**：①`ProbeSphere.metal` 新增 `probe_sphere_irradiance_fs` 入口（`[[buffer(1)]]` device 只读缓冲，色调映射防 SH 直值过曝）；②模块 descriptor layout 加 binding 1（FS StorageBuffer），`AddPass` 时绑定 `ddgi_pass_->GetIrradianceBuffer(cbIdx)`，第二条像素管线（同 VS）按 `useIrradiance` 选择——irradiance 缓冲无效或管线未建成自动回退色相着色；③调用点传入缓冲（`psIn.irradiance_buffer`）。Vulkan 端 spv 未重编（GLSL 单入口限制需独立 frag 文件+glslc 流程），Vulkan 继续色相回退。
+> - **活体验证**：编辑器日志 `[ProbeSpheres] initialized (pipeline=24 irradiance=25)`——采样管线编译/创建成功；开关目验（球面色相→真实 GI 颜色）留桌面会话：Environment 面板 PROBE DEBUG 行勾选 "Probe Spheres"。门禁：构建 ✅、回归 68/68 ✅。
+
 > **实施状态（2026-09-04 续 19）**：B1 L3 probe 球 overlay 已实施（**修正续 17 结论**）。
 > - **续 17 结论修正**：生产管线是**逐模块自加载字节码**（GPUDrivenDrawPipeline::LoadShaderBytecode 模式——GPUDriven/SSAO/SSGI/LumenDDGI 全这样初始化，编辑器日志可见其 Initialized 证据），并非"引导体系整体缺失"；缺的只是 probe 球等少数模块没有对齐该模式。B1 L3 因此可单点落地（本轮即证）。
 > - **实现**：①`EngineTest/shaders/ProbeSphere.metal`（MSL，VS/FS 双入口，[[stage_in]] 顶点流 + [[buffer(2)]] push constants——Metal RHI 把 PushConstants 约定映射到 setVertexBytes index 2；颜色 = per-probe 黄金比例稳定色相 + 方向光漫反射，相机 2m 内探针推出裁剪域）；②`DebugProbeSphereModule::Initialize` 句柄 INVALID 时**自加载**（Metal 读 MSL 源运行时编译、Vulkan 读 Debug/ProbeSphere.{vert,frag}.spv、其它平台禁用）；③`StandardRenderPipeline::InitializeSubsystems` 模块创建放宽为始终尝试（测试注入路径不变）；④导出 `PipelineSetProbeSphereDebug/Get` + C# 绑定 + EnvironmentView PROBE DEBUG 行新增 "Probe Spheres" 开关（直推引擎 per-frame bool）。

@@ -5,6 +5,7 @@
 
 namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
+namespace lumen { class ScreenProbeGIPass; }
 
 struct FusionInputs {
     // Scene color (deferred output or raw albedo)
@@ -18,6 +19,8 @@ struct FusionInputs {
     rhi::ResourceHandle ddgi_tex{rhi::handles::INVALID_RESOURCE};
     rendergraph::RGResourceHandle spgi_rg{};
     rhi::ResourceHandle spgi_tex{rhi::handles::INVALID_RESOURCE};
+    // SPGI pass 指针——诊断 readback 取持久物理纹理（绕 RG 瞬态布局迁移）。
+    lumen::ScreenProbeGIPass* spgi_pass = nullptr;
     rendergraph::RGResourceHandle ssao_rg{};
     rhi::ResourceHandle ssao_tex{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle gbuffer_albedo{rhi::handles::INVALID_RESOURCE};
@@ -121,6 +124,11 @@ private:
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
     rhi::ResourceHandle ddgi_stats_staging_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    // spgi（ScreenProbeGI 全分辨率输出，RGB=辐照 A=置信度）读回环——能量标定
+    // 与 DDGI 槽位同数据面对比（mask 位 128）。
+    rhi::ResourceHandle spgi_stats_staging_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
 };

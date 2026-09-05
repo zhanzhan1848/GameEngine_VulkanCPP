@@ -739,14 +739,37 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                         if (auto* q = static_cast<const float*>(
                                                 device_->MapBuffer(irrStaging, 0, irrBytes))) {
                                             float maxAbs = 0.0f; u64 bad = 0;
-                                            for (u64 k = 0; k < irrBytes / 4; ++k) {
-                                                float v = q[k];
-                                                if (std::isnan(v) || std::isinf(v)) { ++bad; continue; }
-                                                maxAbs = std::max(maxAbs, std::abs(v));
+                                            // 逐波段 maxAbs（band0=L0, 1-3=L1, 4-8=L2）
+                                            // + 全局 argmax 探针——把怪物值定位到具体波段。
+                                            float bandMax[9] = {};
+                                            float worst[4] = {}; u32 worstProbe = 0;
+                                            for (u64 p = 0; p < 16384ull; ++p) {
+                                                const float* c = q + p * 36;
+                                                float pAbs = 0.0f;
+                                                for (u32 k = 0; k < 36; ++k) {
+                                                    float v = c[k];
+                                                    if (std::isnan(v) || std::isinf(v)) { ++bad; continue; }
+                                                    float a = std::abs(v);
+                                                    pAbs = std::max(pAbs, a);
+                                                    maxAbs = std::max(maxAbs, a);
+                                                    u32 band = k / 4;
+                                                    bandMax[band] = std::max(bandMax[band], a);
+                                                }
+                                                if (pAbs > worst[0]) {
+                                                    worst[0] = pAbs; worstProbe = (u32)p;
+                                                    for (int k = 0; k < 3; ++k) worst[1 + k] = c[k];
+                                                }
                                             }
                                             PRIMAL_LOG_STREAM(Error, "Render") << "[IRR_DUMP] slot=" << ddgiReadIdx
                                                       << " maxAbs=" << maxAbs
                                                       << " nanInf=" << bad << std::endl;
+                                            PRIMAL_LOG_STREAM(Error, "Render") << "  bands maxAbs: L0=" << bandMax[0]
+                                                      << " L1=(" << bandMax[1] << "," << bandMax[2] << "," << bandMax[3] << ")"
+                                                      << " L2=(" << bandMax[4] << "," << bandMax[5] << "," << bandMax[6]
+                                                      << "," << bandMax[7] << "," << bandMax[8] << ")" << std::endl;
+                                            PRIMAL_LOG_STREAM(Error, "Render") << "  worstProbe=" << worstProbe
+                                                      << " abs=" << worst[0]
+                                                      << " L0rgb=(" << worst[1] << "," << worst[2] << "," << worst[3] << ")" << std::endl;
                                             device_->UnmapBuffer(irrStaging);
                                         }
                                     }

@@ -132,9 +132,15 @@ bool MetalShader::Initialize() {
     }
 
     // Get entry point function
-    NS::String* nsEntryPoint = NS::String::alloc()->init(entryPoint_.c_str(), NS::UTF8StringEncoding);
+    // Short NSStrings may be tagged pointers. The autoreleased factory avoids
+    // metal-cpp's derived-to-base release() upcast, which UBSan diagnoses as
+    // misaligned for those valid Objective-C pointers. The caller owns the pool.
+    NS::String* nsEntryPoint = NS::String::string(entryPoint_.c_str(), NS::UTF8StringEncoding);
+    if (!nsEntryPoint) {
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Invalid UTF-8 entry point" << std::endl;
+        return false;
+    }
     function_ = library_->newFunction(nsEntryPoint);
-    nsEntryPoint->release();
     
     if (!function_) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalShader] Failed to find entry point: " << entryPoint_ << std::endl;

@@ -17,7 +17,7 @@
 // Output: 4 vec4 per probe (interleaved [sh0, sh1, sh2, sh3]).
 //   sh[0].w = confidence,  sh[1..3].w = 1.0 (validity flag)
 //
-// REQUIREMENT: ThreadGroupSize must equal raysPerProbe (64).
+// REQUIREMENT: ThreadGroupSize is 64; raysPerProbe is in [1, 64].
 // Dispatch: totalProbes, 1, 1  (one threadgroup per probe).
 //
 // Flat descriptor bindings:
@@ -105,7 +105,9 @@ void screen_probe_average() {
 
     // Each thread reads exactly 1 ray
     uint rayIdx = group_id * constants.raysPerProbe + tid;
-    vec4 rayData = rayRadiance.data[rayIdx];
+    // Keep all lanes in the reduction without reading beyond this probe.
+    vec4 rayData = vec4(0.0, 0.0, 0.0, -1.0);
+    if (tid < constants.raysPerProbe) rayData = rayRadiance.data[rayIdx];
 
     if (rayData.w >= 0.0) {
         // Hit: clamp radiance at source to prevent firefly propagation

@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "CommonTypes.metal"
+#include "Lumen/../CommonTypes.metal"
 #include "Lumen/SurfaceCacheData.metal"
 
 struct ProbeRayHit {
@@ -75,7 +75,7 @@ kernel void surfaceCacheIndirectResolve(
                 radiance = float3(0.02, 0.02, 0.03);
             }
         } else if (hit_type == 1) {
-            // Far hit: DDGI placeholder
+            // Far hit: DDGI placeholder (Phase A)
             radiance = float3(0.02, 0.02, 0.03);
         } else {
             // Sky

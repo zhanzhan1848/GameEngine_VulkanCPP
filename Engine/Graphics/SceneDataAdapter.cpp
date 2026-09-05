@@ -5,6 +5,7 @@
 #include "SceneDataAdapter.h"
 #include <cassert>
 #include <cstring>
+#include <type_traits>
 #include <iostream>
 #include "Material.h"
 #include "MaterialInstance.h"
@@ -16,6 +17,15 @@ namespace primal::graphics {
 
 namespace {
 
+// Serialized fields may start at any byte offset after variable-length strings.
+template<typename T>
+T ReadPackedValue(const void* source) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    T value;
+    std::memcpy(&value, source, sizeof(value));
+    return value;
+}
+
 class BlobReader {
 public:
     BlobReader(const u8* buffer, size_t size) : buffer_(buffer), size_(size), offset_(0) {}
@@ -23,7 +33,7 @@ public:
     template<typename T>
     T Read() {
         assert(offset_ + sizeof(T) <= size_);
-        T value = *reinterpret_cast<const T*>(buffer_ + offset_);
+        T value = ReadPackedValue<T>(buffer_ + offset_);
         offset_ += sizeof(T);
         return value;
     }
@@ -95,7 +105,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
     const u8* parseData = static_cast<const u8*>(data);
     u32 parseSize = size;
     if (size >= 8) {
-        u32 firstU32 = *reinterpret_cast<const u32*>(parseData);
+        u32 firstU32 = ReadPackedValue<u32>(parseData);
         bool isPipelineFormat = firstU32 == 0;
         if (!isPipelineFormat && firstU32 <= 200 && size >= 4 + firstU32 + 4) {
             isPipelineFormat = true;
@@ -182,13 +192,13 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
             size_t probe = reader.GetOffset();
             for (int s = 0; s < (int)numMaterials * fieldsCount; ++s) {
                 if (probe + 4 > size) return false;
-                u32 sLen = *reinterpret_cast<const u32*>(static_cast<const u8*>(data) + probe);
+                u32 sLen = ReadPackedValue<u32>(static_cast<const u8*>(data) + probe);
                 if (sLen > 500) return false; // implausible string length
                 probe += 4 + sLen;
                 if (probe > size) return false;
             }
             if (probe + 4 > size) return false;
-            u32 maybeLodCount = *reinterpret_cast<const u32*>(static_cast<const u8*>(data) + probe);
+            u32 maybeLodCount = ReadPackedValue<u32>(static_cast<const u8*>(data) + probe);
             return maybeLodCount > 0 && maybeLodCount < 100000;
         };
         if (tryFieldCount(5)) {
@@ -255,7 +265,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
     // Only pipeline models have lodCount==1; old Sponza has lodCount==381+.
     bool isPipelineFormat = false;
     if (lodCount == 1 && reader.Remaining() >= 4) {
-        u32 peekVal = *reinterpret_cast<const u32*>(
+        u32 peekVal = ReadPackedValue<u32>(
             static_cast<const u8*>(data) + reader.GetOffset());
         if (peekVal > 50 && peekVal < 500000) {
             isPipelineFormat = true;
@@ -327,7 +337,8 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  size_t rem = reader.Remaining();
                  if (rem >= firstVal + 36) {
                      std::string dbgName(reinterpret_cast<const char*>(peek), firstVal);
-                     const u32* u32p = reinterpret_cast<const u32*>(peek + firstVal);
+                     u32 u32p[7];
+                     std::memcpy(u32p, peek + firstVal, sizeof(u32p));
                      PRIMAL_LOG_STREAM(Error, "Scene") << "[SceneData] mesh " << i << ": name=\"" << dbgName
                                << "\" lodId=" << u32p[0] << " matIdx=" << (s32)u32p[1]
                                << " elemSize=" << u32p[2] << " elemType=" << u32p[3]
@@ -515,7 +526,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // NOTE: We need to peek at the magic without advancing if it doesn't match
              if (reader.Remaining() >= 8) {
                  const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
-                 u32 meshletMagic = *reinterpret_cast<const u32*>(peekPtr);
+                 u32 meshletMagic = ReadPackedValue<u32>(peekPtr);
                  
                  if (meshletMagic == 0x4C48534D) { // 'MSHL'
                      reader.Skip(4); // Consume the magic
@@ -575,7 +586,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // Parse SDF section
              if (reader.Remaining() >= 8) {
                  const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
-                 u32 sdfMagic = *reinterpret_cast<const u32*>(peekPtr);
+                 u32 sdfMagic = ReadPackedValue<u32>(peekPtr);
                  
                  if (sdfMagic == 0x20464453) { // 'SDF '
                      reader.Skip(4); // Consume the magic
@@ -627,7 +638,7 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  bool sidecarConsumed = false;
                  if (reader.Remaining() >= 8) {
                      const u8* uvlmPeek = static_cast<const u8*>(reader.GetCurrentPtr());
-                     u32 uvlmMagic = *reinterpret_cast<const u32*>(uvlmPeek);
+                     u32 uvlmMagic = ReadPackedValue<u32>(uvlmPeek);
                      if (uvlmMagic == 0x4D4C5655) { // "UVLM"
                          reader.Skip(4);
                          u32 uvlmCount = reader.Read<u32>();
@@ -1241,7 +1252,7 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
             // Skip meshlets + SDF (same as LoadRenderItemData)
             if (reader.Remaining() >= 8) {
                 const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
-                u32 meshletMagic = *reinterpret_cast<const u32*>(peekPtr);
+                u32 meshletMagic = ReadPackedValue<u32>(peekPtr);
                 if (meshletMagic == 0x4C48534D) {
                     reader.Skip(4);
                     u32 meshletCount = reader.Read<u32>();
@@ -1271,7 +1282,7 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
             }
             if (reader.Remaining() >= 8) {
                 const u8* peekPtr = static_cast<const u8*>(reader.GetCurrentPtr());
-                u32 sdfMagic = *reinterpret_cast<const u32*>(peekPtr);
+                u32 sdfMagic = ReadPackedValue<u32>(peekPtr);
                 if (sdfMagic == 0x20464453) {
                     reader.Skip(4);
                     reader.Read(meshAsset.sdf.resolution, 12);
@@ -1306,7 +1317,7 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
                 bool sidecarConsumed = false;
                 if (reader.Remaining() >= 8) {
                     const u8* uvlmPeek = static_cast<const u8*>(reader.GetCurrentPtr());
-                    u32 uvlmMagic = *reinterpret_cast<const u32*>(uvlmPeek);
+                    u32 uvlmMagic = ReadPackedValue<u32>(uvlmPeek);
                     if (uvlmMagic == 0x4D4C5655) { // "UVLM"
                         reader.Skip(4);
                         u32 uvlmCount = reader.Read<u32>();

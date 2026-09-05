@@ -57,7 +57,12 @@ static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
             writes[i].bufferInfo = &bufferInfos[i];
         } else if (params[i].type == DescriptorType::SampledImage ||
                    params[i].type == DescriptorType::StorageImage ||
-                   params[i].type == DescriptorType::Sampler) {
+                   params[i].type == DescriptorType::Sampler ||
+                   params[i].type == DescriptorType::SampledDepthImage) {
+            // 2026-09-05：补 SampledDepthImage——此前 Vulkan denoise 的深度
+            // 绑定（binding 2）不写 imageInfo，描述符为空 → 深度永远读 0 →
+            // 全像素走天空早退 → filtered 输出全零（fusion 的 SPGI 贡献
+            // 实际为黑）。Metal 走隐式描述符不受影响。
             if (params[i].type == DescriptorType::Sampler) {
                 imageInfos[i].sampler = static_cast<SamplerHandle>(params[i].resource);
             } else {
@@ -240,6 +245,13 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
                                     u32 render_width, u32 render_height,
                                     const ScreenProbeParams& params) {
     if (initialized_) return true;
+
+    if (!device || params.downsample_factor == 0 ||
+        params.rays_per_probe == 0 || params.rays_per_probe > 64) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[ScreenProbeGI] Requires a device, nonzero downsample and 1..64 rays/probe" << std::endl;
+        return false;
+    }
 
     device_ = device;
     params_ = params;
@@ -770,8 +782,8 @@ void ScreenProbeGIPass::CreatePipelines() {
         ComputePipelineDesc pipeDesc{};
         pipeDesc.computeShader = avgShader;
         pipeDesc.layout = avg_layout_;
-        // ThreadGroup size must match raysPerProbe for cooperative reduction
-        pipeDesc.threadGroupSize = {params_.rays_per_probe, 1, 1};
+        // All 64 lanes initialize shared reduction storage, including inactive rays.
+        pipeDesc.threadGroupSize = {64, 1, 1};
         avg_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
     {
@@ -889,7 +901,7 @@ static void SpgiStageMark(u32 frameIdx, const char* stage) {
     static u32 marks = 0;
     if (marks < 30) {  // bring-up: first frames only
         ++marks;
-        PRIMAL_LOG_STREAM(Info, "Render") << "[SPGI-MARK] f" << frameIdx << " " << stage << " done" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[SPGI-MARK] f" << frameIdx << " " << stage << " encoded (CPU)" << std::endl;
     }
 }
 
@@ -976,6 +988,7 @@ void ScreenProbeGIPass::CreateBuffers() {
         desc.structured.elementCount = totalProbes * 4;
         desc.structured.elementStride = sizeof(float) * 4;
         probe_avg_radiance_[i] = device_->CreateBuffer(desc);
+        probe_temporal_radiance_[i] = device_->CreateBuffer(desc);
 
         void* mapped = device_->MapBuffer(probe_avg_radiance_[i]);
         if (mapped) {
@@ -1294,7 +1307,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 // T5.1: HZB near-field march params (SSGI/SSR near-far convention).
                 gd.hzb_params = {0.1f, 1000.0f,
-                                 (hzb_texture_ != handles::INVALID_RESOURCE && hzb_mip_levels_ > 0)
+                                 (hzb_trace_pipeline_ != handles::INVALID_PIPELINE &&
+                                  hzb_texture_ != handles::INVALID_RESOURCE && hzb_mip_levels_ > 0)
                                      ? (float)hzb_mip_levels_ : 0.0f,
                                  params_.hzb_max_distance};
 
@@ -1417,29 +1431,18 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 if (splitReady && !SpgiStageSkipped("trace")) {
                     // --- 2a: HZB near-field (optional first stage) ---
                     if (hzbReady) {
-                        DescriptorData hzbParams[5];
-                        if (splitIsVk) {
-                        DescriptorData p[] = {
-                            {0, DescriptorType::SampledImage,  hzb_texture_},
-                            {1, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                            {2, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
-                            {3, DescriptorType::StorageBuffer, hit_distance_buffer_},
-                            {4, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                            {5, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
+                        // Infer the descriptor count: importance sampling adds a
+                        // sixth binding after the original five HZB resources.
+                        const DescriptorData hzbParams[] = {
+                            {0, DescriptorType::SampledImage, hzb_texture_},
+                            {splitIsVk ? 1u : 0u, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
+                            {splitIsVk ? 2u : 1u, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
+                            {splitIsVk ? 3u : 2u, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                            {splitIsVk ? 4u : 3u, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
+                            {splitIsVk ? 5u : 4u, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
                         };
-                        memcpy(hzbParams, p, sizeof(p));
-                    } else {
-                        DescriptorData p[] = {
-                            {0, DescriptorType::SampledImage,  hzb_texture_},
-                            {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                            {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
-                            {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
-                            {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
-                            {4, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
-                        };
-                        memcpy(hzbParams, p, sizeof(p));
-                    }
-                    UpdateDescriptorSet(device_, hzb_trace_ds_[frameIdx], hzbParams, 6);
+                        UpdateDescriptorSet(device_, hzb_trace_ds_[frameIdx], hzbParams,
+                                            static_cast<uint32_t>(std::size(hzbParams)));
                         cmd->BindComputePipeline(hzb_trace_pipeline_);
                         const DescriptorSetHandle sets[] = { hzb_trace_ds_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, hzb_trace_layout_, 0, 1, sets, 0, nullptr);
@@ -1449,17 +1452,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         // L2 visibility before the SDF kernel reads the hit buffer.
                         cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                            AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
-                    } else {
-                        // No HZB stage: zero the source flags so 2b processes all rays.
-                        // The SDF kernel treats w != 1.0 as unresolved — garbage in the
-                        // freshly (re)allocated buffer could alias 1.0f bit patterns.
-                        // First frame only: ClearBuffer-like memset via MapBuffer.
-                        void* mapped = device_->MapBuffer(hit_distance_buffer_);
-                        if (mapped) {
-                            memset(mapped, 0, (u64)totalRays * sizeof(float) * 4);
-                            device_->UnmapBuffer(hit_distance_buffer_);
-                        }
                     }
+                    // Without HZB, SDF overwrites every ray on the GPU. Never
+                    // memset this shared intermediate while earlier frames may
+                    // still be using it.
 
                     // --- 2b: SDF far-field (pure texture3D + probe buffers) ---
                     if (splitIsVk) {
@@ -1644,6 +1640,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             // Sub-pass 2.75: Probe Temporal Accumulation (T5.2 reprojection)
             // ==================================================================
+            ResourceHandle filteredSH = probe_avg_radiance_[frameIdx];
             if (temporal_pipeline_ != handles::INVALID_PIPELINE && !SpgiStageSkipped("post")) {
                 // std140 layout: mat4 prevVP (64B) + 10 scalars (48B) = 112B
                 struct alignas(16) TemporalCB {
@@ -1677,7 +1674,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     {1, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
                     {2, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
                     {3, DescriptorType::StorageBuffer, probe_positions_buffer_[histIdx]},
-                    {4, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},
+                    {4, DescriptorType::StorageBuffer, probe_temporal_radiance_[frameIdx]},
                     {5, DescriptorType::UniformBuffer, temporal_cb_[frameIdx]},
                     {6, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                     {7, DescriptorType::StorageBuffer, probe_normals_buffer_[histIdx]},
@@ -1691,13 +1688,14 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
+                filteredSH = probe_temporal_radiance_[frameIdx];
                 SpgiStageMark(frameIdx, "temporal");
             }
 
             // Barrier: temporal output written
             {
                 ResourceBarrier barrier{};
-                barrier.resource = probe_avg_radiance_[frameIdx];
+                barrier.resource = filteredSH;
                 barrier.beforeState = ResourceState::UnorderedAccess;
                 barrier.afterState = ResourceState::ShaderResource;
                 barrier.subresource = 0xFFFFFFFF;
@@ -1709,11 +1707,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             if (spatial_pipeline_ != handles::INVALID_PIPELINE && !SpgiStageSkipped("post")) {
                 struct SpatialCB { u32 totalProbes; u32 gridW; float sigma; float pad; };
+                const ResourceHandle spatialOutput = filteredSH == probe_avg_radiance_[frameIdx]
+                    ? probe_temporal_radiance_[frameIdx] : probe_avg_radiance_[frameIdx];
                 SpatialCB scb{grid_width_ * grid_height_, grid_width_, 2.0f, 0.0f};
 
                 DescriptorData params[] = {
-                    {0, DescriptorType::StorageBuffer, probe_avg_radiance_[frameIdx]},
-                    {1, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
+                    {0, DescriptorType::StorageBuffer, filteredSH},
+                    {1, DescriptorType::StorageBuffer, spatialOutput},
                     {2, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
                     {3, DescriptorType::UniformBuffer, spatial_cb_[frameIdx]},
                 };
@@ -1726,13 +1726,35 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
+                filteredSH = spatialOutput;
                 SpgiStageMark(frameIdx, "spatial");
             }
 
-            // Barrier: spatial filter output written (histIdx)
+            // If either optional filter is unavailable, preserve its last valid
+            // output in the current history slot too (never overwrite histIdx).
+            if (filteredSH != probe_avg_radiance_[frameIdx]) {
+                ResourceBarrier copies[2]{};
+                copies[0].resource = filteredSH;
+                copies[0].beforeState = ResourceState::UnorderedAccess;
+                copies[0].afterState = ResourceState::CopySource;
+                copies[0].subresource = 0xFFFFFFFF;
+                copies[1].resource = probe_avg_radiance_[frameIdx];
+                copies[1].beforeState = ResourceState::ShaderResource;
+                copies[1].afterState = ResourceState::CopyDest;
+                copies[1].subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(copies, 2);
+                cmd->CopyBuffer(filteredSH, probe_avg_radiance_[frameIdx], 0, 0,
+                                static_cast<u64>(grid_width_) * grid_height_ * 4 * sizeof(math::v4));
+                copies[1].beforeState = ResourceState::CopyDest;
+                copies[1].afterState = ResourceState::ShaderResource;
+                cmd->InsertBarrier(&copies[1], 1);
+                filteredSH = probe_avg_radiance_[frameIdx];
+            }
+
+            // Barrier: spatial output written; previous-frame SH stays read-only.
             {
                 ResourceBarrier barrier{};
-                barrier.resource = probe_avg_radiance_[histIdx];
+                barrier.resource = filteredSH;
                 barrier.beforeState = ResourceState::UnorderedAccess;
                 barrier.afterState = ResourceState::ShaderResource;
                 barrier.subresource = 0xFFFFFFFF;
@@ -1753,7 +1775,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         {1, DescriptorType::SampledImage,  normalTex},
                         {2, DescriptorType::StorageImage,  outputTex},
                         {3, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                        {4, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
+                        {4, DescriptorType::StorageBuffer, filteredSH},
                         {5, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                         {6, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                     };
@@ -1764,7 +1786,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         {1, DescriptorType::SampledImage,  normalTex},
                         {2, DescriptorType::StorageImage,  outputTex},
                         {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
-                        {2, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},
+                        {2, DescriptorType::StorageBuffer, filteredSH},
                         {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                         {4, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                     };

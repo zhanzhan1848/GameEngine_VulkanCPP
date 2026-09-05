@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/Lumen/GICacheView.h"
+#include "ScreenProbeCacheValidation.h"
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
@@ -99,7 +100,7 @@ struct ScreenProbeGlobalData {
 
     // T5.1 hybrid trace: near-field HZB march parameters
     // (near/far match the SSGI/SSR convention: 0.1/1000)
-    math::v4   hzb_params;             // offset 368: x=near, y=far, z=mip_levels, w=hzb_max_distance
+    math::v4   hzb_params;             // offset 384: x=near, y=far, z=mip_levels, w=hzb_max_distance
 
     // F1 (M7): far-field cache query. x = far_cache_start_distance (world
     // units) — SDF rays stop there and query the DDGI radiance cache at the
@@ -107,6 +108,11 @@ struct ScreenProbeGlobalData {
     // F2 (M7): y = importance resampling on/off (1/0).
     math::v4   cache_params;           // offset 400: x=far_cache_start, y=importance, zw reserved
 };
+
+static_assert(sizeof(ScreenProbeGlobalData) == 416, "ScreenProbe shader constants must stay 416 bytes");
+static_assert(offsetof(ScreenProbeGlobalData, ddgi_fb) == 352, "DDGI constants offset mismatch");
+static_assert(offsetof(ScreenProbeGlobalData, hzb_params) == 384, "HZB constants offset mismatch");
+static_assert(offsetof(ScreenProbeGlobalData, cache_params) == 400, "Cache constants offset mismatch");
 
 // ============================================================================
 // ScreenProbeGIPass
@@ -147,6 +153,9 @@ public:
 
     /// Get the output GI texture for direct sampling in other passes.
     rhi::ResourceHandle GetOutputTexture() const { return output_texture_; }  // DEBUG: bypass denoise
+    // 滤波后输出（fusion 实际消费的纹理）——诊断 readback 用持久物理句柄，
+    // 绕开 RG 瞬态资源的 CopySource 布局迁移（Vulkan 下拷贝回零）。
+    rhi::ResourceHandle GetFilteredOutputTexture() const { return output_texture_filtered_; }
 
     const ScreenProbeParams& GetParams() const { return params_; }
 
@@ -170,7 +179,7 @@ public:
         surface_cache_card_count_ = view.max_card_count;
         surface_cache_grid_offsets_buffer_ = view.grid_offsets;
         surface_cache_grid_cards_buffer_ = view.grid_cards;
-        surface_cache_available_ = true;
+        surface_cache_available_ = IsScreenProbeSurfaceCacheValid(view);
     }
 
     // DEPRECATED (X2/A3): 旧签名保留为转发适配器（等价映射进视图签名）。
@@ -201,7 +210,7 @@ public:
         ddgi_fb_origin_ = view.origin;
         ddgi_fb_counts_ = view.counts;
         ddgi_fb_spacing_ = view.spacing;
-        ddgi_fallback_available_ = (view.irradiance != rhi::handles::INVALID_RESOURCE);
+        ddgi_fallback_available_ = IsScreenProbeDDGIValid(view);
     }
 
     // Offline high-res SDF (single volume, e.g. OfflineSDFMerger's 384³ field).
@@ -339,6 +348,10 @@ private:
     rhi::ResourceHandle probe_avg_radiance_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // gridW * gridH * 4 * float4 (SH2: L0+L1 coefficients per probe)
+    // Temporal output must not alias current SH: variance clamp reads neighbors.
+    rhi::ResourceHandle probe_temporal_radiance_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
     rhi::ResourceHandle avg_constants_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // 2 * uint32 = totalProbes + raysPerProbe

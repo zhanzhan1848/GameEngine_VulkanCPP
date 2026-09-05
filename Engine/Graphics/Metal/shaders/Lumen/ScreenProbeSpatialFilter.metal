@@ -6,8 +6,8 @@
  * Smooths probe grid boundaries while preserving edges at depth discontinuities.
  *
  * Buffer strategy:
- *   Reads from inputSH (temporal output at frameIdx)
- *   Writes to outputSH (repurposed histIdx buffer)
+ *   Reads from inputSH (independent temporal scratch)
+ *   Writes to outputSH (current frame history slot)
  *   Gather subsequently reads from outputSH
  *
  * Per-thread reads: 5 positions + 5×4 SH = 25 (within Apple Silicon ~32 limit)

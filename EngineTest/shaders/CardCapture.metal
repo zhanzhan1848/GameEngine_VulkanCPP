@@ -39,7 +39,7 @@ struct CardParams {
     float4   misc;     // x = depth_near, y = depth_far
 };
 
-// Matches the Vulkan Meshlet struct (80 bytes).
+// Matches RHIMeshlet and the Vulkan Meshlet struct (64 bytes).
 struct CardMeshlet {
     uint4  header;   // x=vertex_offset, y=triangle_offset, z=vert_count, w=tri_count
     float4 cone0;
@@ -88,7 +88,7 @@ vertex CardCaptureVSOut card_capture_vertex(
     constant CardParams&         cb   [[buffer(0)]],
     device const CardMeshlet*    mls  [[buffer(1)]],
     device const uint*           mvs  [[buffer(2)]],
-    device const uint*           mts  [[buffer(3)]],
+    device const uchar*          mts  [[buffer(3)]], // byte-packed local indices
     device const float*          pos  [[buffer(4)]],
     device const uint*           cids [[buffer(5)]],
     device const uint4*          cmap [[buffer(6)]],

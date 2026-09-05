@@ -12,6 +12,7 @@
 #include "MetalSync.h"
 #include "MetalDescriptorSet.h"
 #include "MetalTexture.h"
+#include "MetalShader.h"
 #include "MetalQuery.h"
 #include "Engine/Common/CoreDiag.h"
 #include <iostream>
@@ -161,7 +162,15 @@ bool MetalCommandBuffer::beginImpl() {
         return false;
     }
 
-    mtlCommandBuffer_ = queue->commandBuffer();
+    if (metalDevice.GetDesc().enableDebug) {
+        auto* desc = MTL::CommandBufferDescriptor::alloc()->init();
+        desc->setRetainedReferences(true);
+        desc->setErrorOptions(MTL::CommandBufferErrorOptionEncoderExecutionStatus);
+        mtlCommandBuffer_ = queue->commandBuffer(desc);
+        desc->release();
+    } else {
+        mtlCommandBuffer_ = queue->commandBuffer();
+    }
     if (!mtlCommandBuffer_) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalCommandBuffer] Failed to create command buffer" << std::endl;
         return false;
@@ -258,6 +267,24 @@ bool MetalCommandBuffer::submitImpl(u32 waitFlags) {
                 + " error=" + (err ? err->localizedDescription()->utf8String() : "none");
             primal::diag::Emit(primal::diag::kLevelError, "RHI", msg.c_str());
             PRIMAL_LOG_STREAM(Error, "RHI") << msg << std::endl;
+            if (err && err->userInfo()) {
+                auto* infos = err->userInfo()->object<NS::Array>(MTL::CommandBufferEncoderInfoErrorKey);
+                if (infos) {
+                    for (NS::UInteger i = 0; i < infos->count(); ++i) {
+                        auto* info = infos->object<MTL::CommandBufferEncoderInfo>(i);
+                        auto* label = info->label();
+                        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalEncoderError] label="
+                            << (label ? label->utf8String() : "<unlabeled>")
+                            << " state=" << static_cast<int>(info->errorState()) << std::endl;
+                        auto* signs = info->debugSignposts();
+                        if (signs) {
+                            for (NS::UInteger j = 0; j < signs->count(); ++j)
+                                PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalEncoderSignpost] "
+                                    << signs->object<NS::String>(j)->utf8String() << std::endl;
+                        }
+                    }
+                }
+            }
         }
     });
 
@@ -1206,6 +1233,14 @@ void MetalCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
 
     if (mtlPipeline && mtlPipeline->GetComputePipelineState()) {
         encoder->setComputePipelineState(mtlPipeline->GetComputePipelineState());
+        if (metalDevice.GetDesc().enableDebug) {
+            auto* shader = metalDevice.GetShader(mtlPipeline->GetComputeDesc().computeShader);
+            if (shader && shader->GetFunction()) {
+                auto* name = shader->GetFunction()->name();
+                encoder->setLabel(name);
+                encoder->insertDebugSignpost(name);
+            }
+        }
         currentThreadGroupSize_ = mtlPipeline->GetThreadGroupSize();
         computePipelineBoundEncoder_ = encoder;
     } else {
@@ -1348,10 +1383,12 @@ void MetalCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 barr
             for (u32 i = 0; i < barrierCount; ++i) {
                 auto handle = barriers[i].resource;
                 if (handle == handles::INVALID_RESOURCE) continue;
-                // Distinguish texture vs buffer by trying both allocators
+                // ResourceHandle has no type tag. The independent allocators
+                // can both contain this numeric ID, so include both matches.
                 if (metalDevice.GetTexture(handle) != nullptr) {
                     scope |= MTL::BarrierScopeTextures;
-                } else if (metalDevice.GetBuffer(handle) != nullptr) {
+                }
+                if (metalDevice.GetBuffer(handle) != nullptr) {
                     scope |= MTL::BarrierScopeBuffers;
                 }
             }

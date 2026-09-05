@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "CommonTypes.metal"
+#include "Lumen/../CommonTypes.metal"
 #include "Lumen/SurfaceCacheData.metal"
 
 struct LightCullParams {
@@ -31,6 +31,9 @@ kernel void surfaceCacheLightCull(
     // Full 8x8 scan = 64 depth reads/thread × 65K threads = 4.2M pixel reads (over ~2M limit).
     // Instead, use sparse 4×4 subsampling (16 reads) for occupancy check,
     // then full scan only for occupied tiles that need normal data for point lights.
+    // Total worst case: 65K × 16 (depth subsample) + ~6.5K × 128 (full scan, 10% occupied)
+    //   = 1.05M + 0.83M = 1.88M — within ~2M limit.
+
     float min_depth = 1e10;
     float max_depth = 0.0;
 
@@ -54,9 +57,9 @@ kernel void surfaceCacheLightCull(
     }
 
     // Phase 2: Sparse normal scan for occupied tiles (point/spot light culling).
-    // Use same 4×4 sparse pattern instead of full 8×8 to keep bandwidth bounded.
-    // Full scan at high occupancy: 65K × 128 reads = 8.3M pixel reads (way over ~2M limit).
-    // Sparse scan: 65K × 16 reads = 1.05M (within limit).
+    // Same 4×4 sparse pattern as Phase 1 to keep bandwidth bounded.
+    // Full 8×8 scan at high occupancy = 8.3M reads (over ~2M limit).
+    // Sparse: 65K tiles × 16 reads = 1.05M (within limit).
     float3 avg_normal = float3(0.0);
     uint valid_count = 0;
 
@@ -80,8 +83,7 @@ kernel void surfaceCacheLightCull(
         avg_normal = normalize(avg_normal);
         for (uint li = 0; li < params.light_count && assign_count < 4; ++li) {
             bool visible = false;
-            uint lightType = uint(lights[li].direction.w);
-            if (lightType == 1) {
+            if (uint(lights[li].direction.w) == 1) {
                 visible = true;
             } else {
                 float light_range = lights[li].position.w;

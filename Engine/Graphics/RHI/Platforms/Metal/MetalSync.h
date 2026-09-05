@@ -94,9 +94,15 @@ public:
     /// 当前应等待的目标值(0 = 从未提交过 signalFence,视为已完成)
     u64 GetWaitTarget() const { return waitTarget_; }
 
+    // Keep the native submission alive for timeout diagnostics even when the
+    // RHI command-buffer wrapper is recycled. No ownership of the wrapper.
+    void TrackFenceSubmission(MTL::CommandBuffer* buffer);
+
 private:
     MTL::SharedEvent* event_{nullptr}; ///< Metal 共享事件对象
     u64 waitTarget_{0};                ///< signalFence 提交的递增目标值
+    MTL::CommandBuffer* fenceSubmission_{nullptr};
+    u64 reportedTimeoutTarget_{0};
 };
 
 } // namespace primal::graphics::rhi

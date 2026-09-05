@@ -3485,3 +3485,22 @@ set_target_properties(TestWFCCandidateLayout PROPERTIES
     FOLDER "EngineTest/UnitTests")
 target_compile_definitions(TestWFCCandidateLayout PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
+
+# Pure CPU validation of the cache metadata consumed by SPGI shaders.
+add_executable(TestScreenProbeCacheValidation TestScreenProbeCacheValidation.cpp)
+target_include_directories(TestScreenProbeCacheValidation PRIVATE
+    ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+target_link_libraries(TestScreenProbeCacheValidation PRIVATE Engine)
+add_test(NAME UnitScreenProbeCacheValidation COMMAND TestScreenProbeCacheValidation)
+
+# Exercise SPGI validation with the same fast-math assumption as Engine, even in Debug.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(TestScreenProbeCacheValidation PRIVATE -O2 -ffast-math)
+endif()
+
+# Packed scene fields follow variable-length strings; catch unaligned typed loads.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(StandaloneGraphics_SceneDataAdapter_Test PRIVATE
+        -fsanitize=alignment -fno-sanitize-recover=alignment)
+    target_link_options(StandaloneGraphics_SceneDataAdapter_Test PRIVATE -fsanitize=alignment)
+endif()

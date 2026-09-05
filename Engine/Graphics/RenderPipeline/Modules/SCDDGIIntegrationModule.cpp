@@ -796,7 +796,8 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
             // path unchanged and mirror the completed Metal result into the two
             // idle slots.  The next frame therefore starts from the exact prior
             // result regardless of which physical slot it selects.
-            if (device_->GetPlatform() == RHIPlatform::Metal) {
+            if (device_->GetPlatform() == RHIPlatform::Metal &&
+                !std::getenv("SC_MIRROR_OFF")) {
                 const u64 irradianceBytes = (u64)totalProbes * 9u * 16u;
                 cmd->MemoryBarrier(
                     PipelineStage::ComputeShader, PipelineStage::Transfer,

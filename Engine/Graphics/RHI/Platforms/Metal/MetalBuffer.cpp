@@ -138,7 +138,8 @@ bool MetalBuffer::Initialize() {
     // varies between program runs due to ASLR affecting heap address layout.
     // Only zero Shared-mode buffers (CPU/GPU coherent) since Private buffers
     // are not CPU-accessible and must be written via GPU commands.
-    if (options & MTL::ResourceStorageModeShared) {
+    // Shared is encoded as zero, so a bitwise AND can never detect it.
+    if (mtlBuffer_->storageMode() == MTL::StorageModeShared) {
         void* contents = mtlBuffer_->contents();
         if (contents) {
             memset(contents, 0, desc_.size);

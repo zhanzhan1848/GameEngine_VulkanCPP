@@ -502,9 +502,11 @@ bool TestModularPipeline::InitializePipeline() {
     // SC 全量更新后每帧 atlas 微变 → 探针 SH 微变 → 屏幕高频闪烁。
     // 降低 alpha 使探针更"黏"历史值，消除高频抖动。
     lumenConfig.ddgi_irradiance_temporal_weight = 0.02f;
-    // 探针间距对齐 Medium 档预设 2.0（LumenConfig 默认 3.0 格边界在墙面
-    // 可见为方块接缝；2.0 减少 33% 格尺寸，棋盘格缝明显减轻）。
-    lumenConfig.ddgi_probe_spacing = 2.0f;
+    // 2026-09-05 裁决：探针间距以 Vulkan 参照为准（3.0 = LumenConfig 默认，
+    // TestVulkanSponzaRenderGraph 未覆盖此字段）。014ce074 的 2.0 覆盖移除
+    // ——其接缝动因已由 a9e2d7a6 的 gather 逐像素选 cell 修复另行解决。
+    // 此前两平台 2.0/3.0 分歧使跨平台能量对数失去基线（网格覆盖 ±31 vs
+    // ±46.5）。若 3.0 下接缝复现，回 gather 侧修，不再动间距。
     // 2026-09-04 启用 SPGI（Screen Probe GI）——Vulkan High 档混合方案
     // = SPGI（主力高频 GI）+ DDGI（低频环境）+ SSGI。Metal 之前缺 SPGI
     // → GI 只有 DDGI 低频 → "很平"无彩色弹射细节。
@@ -545,12 +547,12 @@ bool TestModularPipeline::InitializePipeline() {
             }
         }
         renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f}; // 直射峰值对齐: 3.0 x albedo/pi 峰值 ~1.4 = Vulkan 实测 1.38 (7.5 档会到 ~3.6 死白)
-        // 2026-09-04 对齐：SC 全量（capture_budget=0）+ moments CullMode::None
-        // 修复后，环路结构已与 Vulkan 一致——ddgi_light_color 恢复 Vulkan
-        // 同档 5.0（此前 2.0 是 SC 覆盖不足+诊断 stride 错误时期的折中值，
-        // 导致探针场中性化、GI 无彩色弹射）。
-        // PRIMAL_DDGI_LIGHT="r,g,b"：跨后端同机位 A/B——Vulkan 参考用 5.0，
-        // 这里默认 3.0，可在不改代码的情况下对齐/对照两档探针驱动强度。
+        // 2026-09-05 裁决：默认 3.0。曾短暂对齐 Vulkan 参照档 5.0，但实测
+        // 5.0 加重直射区过曝（用户可视验收），且 Vulkan 自身被判断"压得过
+        // 暗"——数值对齐不等于感知对齐，驱动档位随 Metal 感知标定走。
+        // 探针场对驱动不敏感（SC-first 下由卡片辐射主导，3.0→5.0 仅 +2%），
+        // 档位只影响 SC 薄覆盖区。
+        // PRIMAL_DDGI_LIGHT="r,g,b"：跨后端同机位 A/B 旋钮。
         renderSettings.lighting.ddgi_light_color = {3.0f, 3.0f, 3.0f, 1.0f};
         if (const char* dl = std::getenv("PRIMAL_DDGI_LIGHT")) {
             float lr, lg, lb;

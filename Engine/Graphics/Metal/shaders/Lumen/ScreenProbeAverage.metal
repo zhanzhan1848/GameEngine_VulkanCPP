@@ -17,7 +17,7 @@
  *   sh[0].w = confidence (multi-factor)
  *   sh[1..3].w = 1.0 (validity flag)
  *
- * REQUIREMENT: ThreadGroupSize must equal raysPerProbe.
+ * REQUIREMENT: ThreadGroupSize is 64; raysPerProbe is in [1, 64].
  * Dispatch: totalProbes, 1, 1  (one threadgroup per probe)
  */
 
@@ -168,7 +168,9 @@ kernel void screen_probe_average(
 
     // Each thread reads exactly 1 ray
     uint rayIdx = group_id * constants.raysPerProbe + tid;
-    float4 rayData = rayRadiance[rayIdx];
+    // Inactive lanes must reach every barrier and contribute zero.
+    float4 rayData = float4(0.0f, 0.0f, 0.0f, -1.0f);
+    if (tid < constants.raysPerProbe) rayData = rayRadiance[rayIdx];
 
     if (rayData.w >= 0.0f) {
         // Hit: clamp radiance at source to prevent firefly propagation

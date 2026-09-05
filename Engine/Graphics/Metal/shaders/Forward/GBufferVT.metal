@@ -11,7 +11,7 @@ using namespace metal;
 #define RHI_ENABLE_PBR
 #include "RHIShaderCommon.metal"
 
-const float InvIntervals = 2.f / ((1 << 16) - 1);
+constant float InvIntervals = 2.f / ((1 << 16) - 1);
 
 struct VertexOut {
     float4 position [[position]];

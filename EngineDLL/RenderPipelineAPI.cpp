@@ -501,6 +501,74 @@ EDITOR_INTERFACE u32 PipelineGetProbeSphereDebug() {
 }
 
 // ============================================================================
+// B1 L2: DDGI Probe Readback (Inspector data source)
+// ============================================================================
+// The DDGI buffers live in shared memory on Metal (Dynamic usage = mappable),
+// so the inspector maps them directly — no frame-hook stage-copy needed.
+// Layouts (see DDGIUpdateIrradiance.metal / LumenDDGIPass.cpp):
+//   irradiance : probeIdx × 9 float4 (SH9 coefficients, latest-written slot)
+//   confidence : probeIdx × float4 (rayHitRatio, temporalStability,
+//                visibilityConf, convergenceAge)
+
+EDITOR_INTERFACE u32 GIGetProbeDebugMeta(u32* out_counts_xyz, u32* out_total,
+    f32* out_spacing, f32* out_origin_xyz, u32* out_frame_slot) {
+    auto* p = GetStdPipeline();
+    auto* ddgi = p ? p->GetDDGIPass() : nullptr;
+    if (!ddgi || !ddgi->IsInitialized() || !out_counts_xyz || !out_total ||
+        !out_spacing || !out_origin_xyz || !out_frame_slot) return 0;
+    const auto& vol = ddgi->GetVolumeData();
+    out_counts_xyz[0] = ddgi->GetParams().probe_count_x;
+    out_counts_xyz[1] = ddgi->GetParams().probe_count_y;
+    out_counts_xyz[2] = ddgi->GetParams().probe_count_z;
+    *out_total = vol.ProbeCountTotal;
+    *out_spacing = ddgi->GetParams().probe_spacing;
+    out_origin_xyz[0] = vol.ProbeOrigin.x;
+    out_origin_xyz[1] = vol.ProbeOrigin.y;
+    out_origin_xyz[2] = vol.ProbeOrigin.z;
+    *out_frame_slot = vol.FrameIndex % 3;
+    return 1;
+}
+
+EDITOR_INTERFACE u32 GIProbeConfidenceReadback(f32* out, u32 cap_floats, u32* out_written) {
+    auto* p = GetStdPipeline();
+    auto* ddgi = p ? p->GetDDGIPass() : nullptr;
+    if (!ddgi || !ddgi->IsInitialized() || !out_written) return 0;
+    *out_written = 0;
+    auto* device = ddgi->GetDevice();
+    auto buf = ddgi->GetConfidenceBuffer();
+    if (buf == rhi::handles::INVALID_RESOURCE || !out || cap_floats == 0) return 0;
+    if (auto* mapped = static_cast<const f32*>(device->MapBuffer(buf))) {
+        // probeCount × 4 floats; the total comes from the volume data.
+        const u32 total4 = ddgi->GetVolumeData().ProbeCountTotal * 4u;
+        const u32 n = (cap_floats < total4) ? cap_floats : total4;
+        std::memcpy(out, mapped, n * sizeof(f32));
+        *out_written = n;
+        device->UnmapBuffer(buf);
+        return 1;
+    }
+    return 0;
+}
+
+EDITOR_INTERFACE u32 GIProbeIrradianceReadback(f32* out, u32 cap_floats, u32* out_written) {
+    auto* p = GetStdPipeline();
+    auto* ddgi = p ? p->GetDDGIPass() : nullptr;
+    if (!ddgi || !ddgi->IsInitialized() || !out_written) return 0;
+    *out_written = 0;
+    auto* device = ddgi->GetDevice();
+    auto buf = ddgi->GetIrradianceBufferLatest();
+    if (buf == rhi::handles::INVALID_RESOURCE || !out || cap_floats == 0) return 0;
+    if (auto* mapped = static_cast<const f32*>(device->MapBuffer(buf))) {
+        const u32 total4 = ddgi->GetVolumeData().ProbeCountTotal * 9u;
+        const u32 n = (cap_floats < total4) ? cap_floats : total4;
+        std::memcpy(out, mapped, n * sizeof(f32));
+        *out_written = n;
+        device->UnmapBuffer(buf);
+        return 1;
+    }
+    return 0;
+}
+
+// ============================================================================
 // Editor Entity World AABB (plan §6.1 A1)
 // ============================================================================
 // Per-entity world-space bounds for editor picking / selection outline.

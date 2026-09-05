@@ -182,8 +182,11 @@ kernel void ddgi_update_irradiance(
     if (settledAlpha >= 1.0f) alpha = 0.0f;  // freeze mode
 
     float3 sh0 = shAccum[0];
-    float l1Limit = max(length(sh0) * 3.0f, 0.1f);
-    float l2Limit = max(length(sh0) * 2.0f, 0.05f);
+    // 硬上界：l1/l2Limit 由未钳位的原始 sh0 推导时，prev-screen 反馈环的
+    // 辐射尖峰会同步抬高上限（实测 L1=1661 = 3×原始L0 553.6），钳位失效。
+    // L0 本身有 10 上界 → L1/L2 上界随之封顶。
+    float l1Limit = max(min(length(sh0) * 3.0f, 30.0f), 0.1f);
+    float l2Limit = max(min(length(sh0) * 2.0f, 20.0f), 0.05f);
 
     float3 cachedHist[DDGI_SH_COEFF_COUNT];
     float3 cachedOut[DDGI_SH_COEFF_COUNT];

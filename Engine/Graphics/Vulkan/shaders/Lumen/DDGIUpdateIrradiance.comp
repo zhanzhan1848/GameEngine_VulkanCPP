@@ -215,8 +215,11 @@ void ddgi_update_irradiance() {
     float alpha = firstUpdate ? 1.0 : mix(0.35, settledAlpha, min(conv * 2.0, 1.0));
 
     vec3 sh0 = shAccum[0];
-    float l1Limit = max(length(sh0) * 3.0, 0.1);
-    float l2Limit = max(length(sh0) * 2.0, 0.05);
+    // 2026-09-05 对齐 Metal 修复：上限随未钳位 sh0 无界放大时，prev-screen
+    // 辐射尖峰同步抬高 l1/l2 上限（Metal 实测 L1=1661=3×553.6），钳位失效。
+    // L0 本身有 10 上界 → L1/L2 上限随之封顶（30/20）。
+    float l1Limit = max(min(length(sh0) * 3.0, 30.0), 0.1);
+    float l2Limit = max(min(length(sh0) * 2.0, 20.0), 0.05);
 
     for (uint i = 0u; i < 9u; i++) {
         vec3 history = irradiance_history[probeBase + i].xyz;

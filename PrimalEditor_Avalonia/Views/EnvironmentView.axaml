@@ -63,7 +63,12 @@
                 </StackPanel>
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="Density" VerticalAlignment="Center"
                            Foreground="{DynamicResource SecondaryTextBrush}"/>
-                <TextBox  Grid.Row="3" Grid.Column="1" Text="{Binding FogDensity, Mode=TwoWay}"/>
+                <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                    <TextBox Text="{Binding FogDensity, Mode=TwoWay}" Width="80"/>
+                    <Button Content="Fog Shader…" Click="OnFogShaderClick" Padding="8,2"
+                            VerticalAlignment="Center"
+                            ToolTip.Tip="B2: 编辑 Froxel 雾 MSL 源，保存即 off→on 热更"/>
+                </StackPanel>
                 <!-- 静态场景 GI 冻结（plan §2 A10）：烘焙 warm-start 后冻结 probe 更新。 -->
                 <CheckBox Grid.Row="4" Grid.Column="1" Content="Static scene (freeze GI)"
                           IsChecked="{Binding StaticGIFrozen, Mode=TwoWay}"
@@ -133,7 +138,9 @@
                               ToolTip.Tip="视口绘制 DDGI probe 格点（CPU 解析计算，编辑 Applies 后生效）"/>
                     <CheckBox Content="Probe Spheres" IsChecked="{Binding GiVolumes.ShowProbeSpheres, Mode=TwoWay}"
                               VerticalAlignment="Center"
-                              ToolTip.Tip="B1 L3: GPU probe 球 overlay（icosphere + 稳定色相）"/>
+                              ToolTip.Tip="B1 L3: GPU probe 球 overlay（SH9 irradiance 采样 + 遮挡）"/>
+                    <Button Content="Inspector…" Click="OnProbeInspectorClick" Padding="8,2"
+                            ToolTip.Tip="B1 L2: probe 数值检查器（SH9 色板 + confidence）"/>
                 </StackPanel>
             </Grid>
 

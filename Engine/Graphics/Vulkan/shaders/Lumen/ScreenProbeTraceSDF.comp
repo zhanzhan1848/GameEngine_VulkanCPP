@@ -81,7 +81,7 @@ void screen_probe_trace_sdf() {
     if (global_id >= totalRays) return;
 
     // HZB kernel already resolved this ray — keep its result.
-    if (hit_buffer.data[global_id].w == 1.0) return;
+    if (global.hzb_params.z > 0.0 && hit_buffer.data[global_id].w == 1.0) return;
 
     vec4 posData = probePositions.data[global_id / raysPerProbe];
     if (posData.w <= 0.0) {

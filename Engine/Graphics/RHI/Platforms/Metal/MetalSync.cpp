@@ -9,6 +9,7 @@
 #include "MetalSync.h"
 
 #include <dispatch/dispatch.h>
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
 
@@ -19,10 +20,17 @@ MetalSync::MetalSync(MTL::Device* device) {
 }
 
 MetalSync::~MetalSync() {
+    if (fenceSubmission_) fenceSubmission_->release();
     if (event_) {
         event_->release();
         event_ = nullptr;
     }
+}
+
+void MetalSync::TrackFenceSubmission(MTL::CommandBuffer* buffer) {
+    if (buffer) buffer->retain();
+    if (fenceSubmission_) fenceSubmission_->release();
+    fenceSubmission_ = buffer;
 }
 
 u64 MetalSync::GetValue() const {
@@ -58,6 +66,7 @@ bool MetalSync::Wait(u64 value, u32 timeoutMs) {
     MTL::SharedEventListener* listener = MTL::SharedEventListener::alloc()->init();
     if (!listener) {
         dispatch_release(sema);
+        dispatch_release(sema);
         return false;
     }
 
@@ -76,6 +85,27 @@ bool MetalSync::Wait(u64 value, u32 timeoutMs) {
     }
 
     listener->release();
+
+    dispatch_release(sema); // release the caller's ownership on every wait
+
+    if (result != 0 && fenceSubmission_ && reportedTimeoutTarget_ != value) {
+        reportedTimeoutTarget_ = value;
+        const auto status = fenceSubmission_->status();
+        const char* name = "unknown";
+        switch (status) {
+            case MTL::CommandBufferStatusNotEnqueued: name = "not-enqueued"; break;
+            case MTL::CommandBufferStatusEnqueued: name = "enqueued"; break;
+            case MTL::CommandBufferStatusCommitted: name = "committed"; break;
+            case MTL::CommandBufferStatusScheduled: name = "scheduled"; break;
+            case MTL::CommandBufferStatusCompleted: name = "completed"; break;
+            case MTL::CommandBufferStatusError: name = "error"; break;
+        }
+        auto* error = fenceSubmission_->error();
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[MetalFenceTimeout] target=" << value
+            << " signaled=" << event_->signaledValue() << " commandBuffer=" << name
+            << " error=" << (error ? error->localizedDescription()->utf8String() : "none")
+            << std::endl;
+    }
 
     // If we timed out, the block is still pending and will fire later — but the
     // semaphore was retained by both dispatch_semaphore_create (our handle) and

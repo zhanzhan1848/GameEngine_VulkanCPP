@@ -35,6 +35,12 @@ float3 ACESFilm(float3 x) {
     return saturate((x*(a*x+b))/(x*(c*x+d)+e));
 }
 
+// Metal 曝光标定系数（2026-09-05）。上游 GI/直射能量对齐完成前的整体
+// 标定：同机位实测 Metal LDR 均值 131/255（贴白率 27.5%）vs Vulkan
+// 40/255（0.7%）——用户判定 Metal 过曝、Vulkan 偏暗，取中点迭代。
+// 上游 parity bisect 落地后本系数应回归 1.0。
+constant float CAL_EXPOSURE = 0.45f;
+
 // Fragment Shader
 fragment float4 tonemap_fs(VertexOut in [[stage_in]],
                            texture2d<float> sceneTexture [[texture(0)]],
@@ -50,6 +56,9 @@ fragment float4 tonemap_fs(VertexOut in [[stage_in]],
     // Assuming bloomTexture is bound (can be black 1x1 if disabled)
     float3 bloom = bloomTexture.sample(s, in.uv).rgb;
     color += bloom;
+
+    // 曝光标定（见 CAL_EXPOSURE 注释）
+    color *= CAL_EXPOSURE;
 
     // Tone Mapping
     color = ACESFilm(color);
@@ -72,5 +81,8 @@ fragment float4 tonemap_fs_passthrough(VertexOut in [[stage_in]],
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 color = sceneTexture.sample(s, in.uv).rgb;
     float3 bloom = bloomTexture.sample(s, in.uv).rgb;
-    return float4(color + bloom, 1.0);
+    // 曝光标定（见 CAL_EXPOSURE 注释）——passthrough 直出下线性值 ≥1.0
+    // 全部贴白，Metal GI 场均值 ~1.0 曾致 27.5% 贴白率。
+    color = (color + bloom) * CAL_EXPOSURE;
+    return float4(color, 1.0);
 }

@@ -1,5 +1,6 @@
 #include "FusionCompositeModule.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
+#include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include <iostream>
@@ -49,7 +50,7 @@ static void PrintIndirectStripStats(const u16* p, u32 w, u32 h, const char* pref
     const char* names[4] = { "ddgi-strip", "ssgi-strip", "spgi-strip", "full-strip" };
     for (int q = 0; q < 4; ++q) {
         u32 x0 = w * q / 4, x1 = w * (q + 1) / 4;
-        double sum = 0.0, sr = 0.0, sg = 0.0, sb = 0.0;
+        double sum = 0.0, sr = 0.0, sg = 0.0, sb = 0.0, sa = 0.0;
         float mx = 0.0f; u64 n = 0;
         for (u32 y = 0; y < h; y += 4)
             for (u32 x = x0; x < x1; x += 4) {
@@ -57,13 +58,14 @@ static void PrintIndirectStripStats(const u16* p, u32 w, u32 h, const char* pref
                 float r = f16(t[0]), g = f16(t[1]), b = f16(t[2]);
                 if (std::isnan(r)) continue;
                 sum += 0.2126f * r + 0.7152f * g + 0.0722f * b;
-                sr += r; sg += g; sb += b;
+                sr += r; sg += g; sb += b; sa += f16(t[3]);
                 mx = std::max(mx, std::max(r, std::max(g, b)));
                 ++n;
             }
         if (n) PRIMAL_LOG_STREAM(Error, "Render") << "[" << prefix << "] tick=" << tick << " " << names[q]
                          << " mean=" << (sum / n)
                          << " rgb=(" << (sr / n) << "," << (sg / n) << "," << (sb / n) << ")"
+                         << " a=" << (sa / n)
                          << " max=" << mx << std::endl;
     }
 }
@@ -327,6 +329,12 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 ssgiTex = resolve(inputs.ssgi_rg);
             if (ssgiTex == handles::INVALID_RESOURCE) ssgiTex = inputs.black_texture;
 
+            ResourceHandle spgiTex = inputs.spgi_tex;
+            if (spgiTex == handles::INVALID_RESOURCE && inputs.spgi_rg.IsValid())
+                spgiTex = resolve(inputs.spgi_rg);
+            if (spgiTex == handles::INVALID_RESOURCE) spgiTex = inputs.black_texture;
+
+
             static int s_ssgi_resolve = 0;
             if (s_ssgi_resolve < 5) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_SSGI] ssgi_tex=" << inputs.ssgi_tex
@@ -351,7 +359,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             DescData params[6] = {
                 {0, DescriptorType::SampledImage, ssgiTex},
                 {1, DescriptorType::SampledImage, inputs.ddgi_tex != handles::INVALID_RESOURCE ? inputs.ddgi_tex : inputs.black_texture},
-                {2, DescriptorType::SampledImage, inputs.spgi_tex != handles::INVALID_RESOURCE ? inputs.spgi_tex : inputs.black_texture},
+                {2, DescriptorType::SampledImage, spgiTex},
                 {3, DescriptorType::SampledImage, inputs.gbuffer_albedo != handles::INVALID_RESOURCE ? inputs.gbuffer_albedo : inputs.black_texture},
                 {4, DescriptorType::SampledImage, inputs.ssao_tex != handles::INVALID_RESOURCE ? inputs.ssao_tex : inputs.black_texture},
                 {5, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
@@ -360,8 +368,6 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             static int s_fusion_slots = 0;
             if (s_fusion_slots < 3) {
                 ++s_fusion_slots;
-                ResourceHandle spgiTex = inputs.spgi_tex != handles::INVALID_RESOURCE
-                    ? inputs.spgi_tex : inputs.black_texture;
                 PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_SLOTS] black=" << inputs.black_texture
                           << " ssgi=" << ssgiTex
                           << " ddgi=" << (inputs.ddgi_tex != handles::INVALID_RESOURCE ? inputs.ddgi_tex : inputs.black_texture)
@@ -564,10 +570,11 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
     // 故 Metal 平台默认执行 ddgi 全幅 CopyTextureToBuffer（半res RGBA16F ≈1.4MB/帧，
     // Apple Silicon 带宽下可忽略）。Vulkan 无此问题，保持零改动。
     //
-    // 诊断门 PRIMAL_IND_ASYNC（位掩码，覆盖默认行为，用于回归定位）：
-    //   1 = 全部边（ddgi|primary|indirect|fusion）  2 = 仅 ddgi（=生产默认）
-    //   4 = 仅 primary   8 = 仅 indirect            16 = 仅 fusion
-    //  32 = 仅 ddgi 边声明、不发拷贝命令           64 = 仅 ddgi 拷 256×256 角落
+// 诊断门 PRIMAL_IND_ASYNC（位掩码，覆盖默认行为，用于回归定位）：
+//   1 = 全部边（ddgi|primary|indirect|fusion）  2 = 仅 ddgi（=生产默认）
+//   4 = 仅 primary   8 = 仅 indirect           16 = 仅 fusion
+//  32 = 仅 ddgi 边声明、不发拷贝命令           64 = 仅 ddgi 拷 256×256 角落
+// 128 = 仅 spgi（ScreenProbeGI 输出，能量标定与 DDGI 槽位对比）
     // 设了该环境变量时同时打印 [*_ASYNC] 条带统计（读回环：拷贝挂本帧 CB，
     // 3 帧后同槽映射，零额外同步——SC_DUMP_CARDS 的帧中 WaitForCompletion 会
     // 掩盖时序问题，不可用于此类定位）。
@@ -607,8 +614,11 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                         builder.Read(fusionOutRG, ResourceState::CopySource);
                     if ((s_asyncMask & 2u) && inputs.ddgi_rg.IsValid())
                         builder.Read(inputs.ddgi_rg, ResourceState::CopySource);
+                    if ((s_asyncMask & 128u) && inputs.spgi_rg.IsValid())
+                        builder.Read(inputs.spgi_rg, ResourceState::CopySource);
                 },
-                [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx],
+                [this, inputs, cbIdx, resolve,
+                 indirectTex = indirect_output_[cbIdx],
                  fusionTex = fusion_output_[cbIdx], s_asyncMask,
                  printStats = s_printStats](const AsyncStatsData&, rendergraph::RenderGraphContext& context) {
                     auto cmd = context.cmdBuffer;
@@ -625,11 +635,19 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                     // indirect = FusionIndirect 合并结果；fusion = 合成帧（进 TAA 前）。
                     rhi::ResourceHandle ddgiTex = inputs.ddgi_tex != handles::INVALID_RESOURCE
                         ? inputs.ddgi_tex : inputs.black_texture;
-                    StatTarget targets[4] = {
+                    // SPGI 槽位：物理纹理在模块内从 RG 解析（fusion 同路径）；
+                    // 解析不出（SPGI 未启用）→ INVALID，跳过该目标的拷/印。
+                    rhi::ResourceHandle spgiTex = inputs.spgi_tex;
+                    if (spgiTex == handles::INVALID_RESOURCE && inputs.spgi_pass)
+                        spgiTex = inputs.spgi_pass->GetFilteredOutputTexture();
+                    if (spgiTex == handles::INVALID_RESOURCE && inputs.spgi_rg.IsValid())
+                        spgiTex = resolve(inputs.spgi_rg);
+                    StatTarget targets[5] = {
                         {"DDGI_ASYNC",   ddgiTex,     ddgi_stats_staging_},
                         {"PRIMARY_ASYNC", inputs.primary_input_tex, primary_stats_staging_},
                         {"IND_STATS_ASYNC", indirectTex, async_stats_staging_},
                         {"FUSION_ASYNC",  fusionTex,   fusion_stats_staging_},
+                        {"SPGI_ASYNC",    spgiTex,     spgi_stats_staging_},
                     };
 
                     // 1) 映射 3 帧前同槽拷贝的成果并出数（该帧 fence 已等过）。
@@ -667,8 +685,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                     rr.imageSubresource.layerCount = 1;
                     rr.imageExtent = {w, h, 1};
                     if (s_asyncMask & 64u) rr.imageExtent = {std::min(256u, w), std::min(256u, h), 1};
-                    const u32 targetBits[4] = {2u, 4u, 8u, 16u};
-                    for (u32 i = 0; i < 4; ++i) {
+                    const u32 targetBits[5] = {2u, 4u, 8u, 16u, 128u};
+                    for (u32 i = 0; i < 5; ++i) {
                         auto& t = targets[i];
                         const bool copyThis = (s_asyncMask & targetBits[i]) ||
                                               ((s_asyncMask & 64u) && targetBits[i] == 2u);

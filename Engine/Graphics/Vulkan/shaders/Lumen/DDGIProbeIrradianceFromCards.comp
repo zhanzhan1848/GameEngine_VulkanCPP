@@ -142,6 +142,17 @@ void ddgi_probe_irradiance_from_cards() {
 
     uint base = probeIdx * 9u;
     float alpha = volume.ProbeHysteresis;
+    // 2026-09-05 对齐 Metal 能量门：卡片立体角权重（CPU 侧 Ω×NdotL×4π，Ω
+    // 不饱和）在近距探针上把原始投影 L0 抬到 trace 尺度的百倍以上，且下方
+    // l1/l2Limit 由它推导随垃圾膨胀。先门 L0 到 trace 工作点再派生上限。
+    const float SC_L0_GATE = 1.5;
+    {
+        float l0mag = length(sh[0]);
+        if (l0mag > SC_L0_GATE) {
+            float s = SC_L0_GATE / l0mag;
+            for (uint i = 0u; i < 9u; ++i) sh[i] *= s;
+        }
+    }
     vec3 sh0 = sh[0];
     float l1Limit = max(length(sh0) * 3.0, 0.1);
     float l2Limit = max(length(sh0) * 2.0, 0.1);

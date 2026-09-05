@@ -65,6 +65,33 @@ static float3 evalSH4Canonical(thread const float3 sh[4], float3 d) {
          + sh[3] * (-0.48860251f * x);
 }
 
+// 2026-09-05：移植 Vulkan route-A 的可见性/法线加权（DDGIGIGather.comp
+// sampleNearProbeDepth + visibilityWeight）。此前 Metal gather 无可见性
+// 测试——墙后探针漏光，跨平台对比偏亮且 GI 出现在不该亮的区域。
+float2 gatherOctEncode(float3 d) {
+    float l1norm = abs(d.x) + abs(d.y) + abs(d.z);
+    float2 u = d.xy / l1norm;
+    float2 s = float2(u.x >= 0.0f ? 1.0f : -1.0f, u.y >= 0.0f ? 1.0f : -1.0f);
+    if (d.z < 0.0f) u = (1.0f - abs(float2(u.y, u.x))) * s;
+    return u * 0.5f + 0.5f;
+}
+
+float2 sampleNearProbeDepth(uint probeIdx, float3 dir, device const float* depthBuf) {
+    float2 uv = gatherOctEncode(dir);
+    uint2 texel = uint2(clamp(uint(uv.x * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1u)),
+                        clamp(uint(uv.y * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1u)));
+    uint octIdx = texel.y * uint(DEPTH_RES) + texel.x;
+    uint base = probeIdx * DEPTH_FLOATS_PER_PROBE;
+    return float2(depthBuf[base + octIdx], depthBuf[base + uint(DEPTH_TEXELS) + octIdx]);
+}
+
+float visibilityWeight(float distToProbe, float mean, float variance, float spacing) {
+    float dist = max(distToProbe - mean, 0.0f);
+    if (variance < 0.0001f) return 1.0f;
+    float cheb = variance / (variance + dist * dist);
+    return clamp(max(cheb * 2.0f, 0.2f), 0.0f, 1.0f);
+}
+
 kernel void ddgi_gi_gather(
     uint2 tid [[thread_position_in_grid]],
     depth2d<float, access::sample> depthTex [[texture(0)]],
@@ -171,6 +198,15 @@ kernel void ddgi_gi_gather(
 
         float3 reflResult = float3(0.0f);
 
+        // 可见性/法线加权的低频保底分量（burial 掩埋探针不参与）——
+        // 细薄几何（布料/栏杆）否则会把携带彩色反弹的邻居探针拒掉塌成黑。
+        float3 lowFrequencyGI = float3(0.0f);
+        float lowFrequencyW = 0.0f;
+        float bestBaseWeight = 0.0f;
+        float3 bestIrr = float3(0.0f);
+        // 探针选择偏置：沿法线推 5% 间距，避免表面像素选中墙内探针。
+        float3 biasedPos = worldPos + normal * probeOriginSpacing.w * 0.05f;
+
         for (uint p = 0u; p < 8u; ++p) {
             if (tw[p] < 0.01f) continue;
             uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
@@ -179,16 +215,56 @@ kernel void ddgi_gi_gather(
             for (uint i = 0u; i < 4u; ++i)
                 sh[i] = irradianceBuffer[shBase + i];
 
+            // Proper SH evaluation at the pixel's surface normal.
             float3 irr = evalSH4Canonical(sh, normal);
-            result += irr * tw[p];
-            totalW += tw[p];
+
+            float w = tw[p];
+            float insidePenalty = 1.0f;
+            float burial = 1.0f;
+            {
+                float3 probePos = probeOriginSpacing.xyz + float3(pc[p]) * probeOriginSpacing.w;
+                float3 toProbeVec = probePos - biasedPos;
+                float distToProbe = length(toProbeVec);
+                float3 toProbe = toProbeVec / max(distToProbe, 1e-5f);
+                // 法线项连续保留（0.2 底）——全拒会在薄/双面几何处产生
+                // 探针尺寸的未点亮格。
+                float normalWeight = mix(0.2f, 1.0f,
+                    clamp((dot(normal, toProbe) + 0.5f) / 0.7f, 0.0f, 1.0f));
+                float2 depthMV = sampleNearProbeDepth(pIdx, -toProbe, ddgiDepthBuffer);
+                if (depthMV.x < probeOriginSpacing.w * 0.2f) {
+                    insidePenalty = mix(0.2f, 1.0f,
+                        smoothstep(0.0f, 0.2f, depthMV.x / probeOriginSpacing.w));
+                    burial = mix(0.1f, 1.0f,
+                        smoothstep(0.0f, 0.2f, depthMV.x / probeOriginSpacing.w));
+                }
+                float nwSoft = max(normalWeight, 0.40f);
+                float vw = max(visibilityWeight(distToProbe, depthMV.x, depthMV.y,
+                                                probeOriginSpacing.w), 0.38f);
+                w *= nwSoft * vw * insidePenalty;
+            }
+
+            lowFrequencyGI += irr * tw[p] * burial;
+            lowFrequencyW += tw[p] * burial;
+            if (tw[p] > bestBaseWeight) { bestBaseWeight = tw[p]; bestIrr = irr; }
+
+            result += irr * w;
+            totalW += w;
 
             // Reuse the same four loads for the reflection direction.
-            reflResult += evalSH4Canonical(sh, R) * tw[p];
+            reflResult += evalSH4Canonical(sh, R) * w;
         }
         if (totalW > 0.0f) {
             result /= totalW;
             reflResult /= totalW;
+        } else {
+            // 深度数据异常时的防御回退：正常路径权重连续非零。
+            result = bestIrr;
+        }
+        if (lowFrequencyW > 0.0f) {
+            lowFrequencyGI /= lowFrequencyW;
+            // 45% 可见性抗拒漏光 + 55% 低频保底（细薄几何的探针被
+            // Chebyshev 拒掉时近距反弹仍保留）。
+            result = mix(lowFrequencyGI, result, 0.45f);
         }
 
         // Radiance-unit base for the specular blend (pre-correction scale);
@@ -207,7 +283,6 @@ kernel void ddgi_gi_gather(
         outputTex.write(float4(diffOut, 1.0f), tid);
     }
 
-    (void)ddgiDepthBuffer;
     (void)staticSkySHBuffer;
     (void)staticSkyFactor;
     (void)staticProbe;

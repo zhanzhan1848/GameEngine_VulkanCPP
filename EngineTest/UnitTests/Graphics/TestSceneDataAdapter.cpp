@@ -334,7 +334,10 @@ public:
         Write<int32_t>(data, -1);
 
         // Execute
-        auto results = adapter.Load(&device, data.data(), (uint32_t)data.size());
+        // The blob API accepts byte buffers, including a deliberately unaligned base.
+        std::vector<uint8_t> packed(data.size() + 1);
+        std::memcpy(packed.data() + 1, data.data(), data.size());
+        auto results = adapter.Load(&device, packed.data() + 1, (uint32_t)data.size());
 
         // Verify
         if (results.size() != 1) {

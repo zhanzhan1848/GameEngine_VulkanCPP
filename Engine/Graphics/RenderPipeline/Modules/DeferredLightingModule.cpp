@@ -11,7 +11,10 @@ namespace primal::graphics {
 using namespace rhi;
 using namespace rhi::math;
 
-// SceneData struct — MUST match Metal DeferredLighting.metal SceneData layout exactly
+// SceneData struct — MUST match Metal DeferredLighting.metal SceneData layout exactly.
+// 2026-09-05：对齐引擎 shader 新布局（字段重排 + time/ambientLight，416B）。
+// 旧 384B 布局下 viewPos/jitter/shadowMatrix 全部错位读取——直射、阴影、
+// 高光整体漂移（Metal validation: "argument has a length(416)" 抓到）。
 struct SceneData {
     math::m4x4 model;           // offset 0
     math::v4 lightPos;          // offset 64
@@ -20,15 +23,21 @@ struct SceneData {
     math::v4 reflectionPlane2;  // offset 112
     math::v4 reflectionPlane3;  // offset 128
     math::m4x4 previousModel;   // offset 144
-    math::v4 viewPos;           // offset 208
-    math::m4x4 shadowMatrix0;   // offset 224
-    math::m4x4 shadowMatrix1;   // offset 288
-    math::v2 jitter;            // offset 352
-    math::v2 previousJitter;    // offset 360
+    math::v2 jitter;            // offset 208
+    math::v2 previousJitter;    // offset 216
+    float time;                 // offset 224
+    float _timePad;             // offset 228
+    math::v4 viewPos;           // offset 232
+    math::m4x4 shadowMatrix0;   // offset 240
+    math::m4x4 shadowMatrix1;   // offset 304
     // offset 368: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
     // y = cascade 0 split distance (world units from camera), zw unused.
     math::v4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
+    // offset 384: rgb = scene ambient color, a = intensity. 0 = 无环境抬升
+    // （与旧行为一致；接 ForwardSceneRenderer::ambient_light_ 待接线）。
+    math::v4 ambientLight{0.0f, 0.0f, 0.0f, 0.0f};
 };
+static_assert(sizeof(SceneData) == 416, "SceneData must match DeferredLighting.metal (416B)");
 
 // ViewData struct
 struct ViewData {

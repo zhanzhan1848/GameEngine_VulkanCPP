@@ -134,4 +134,26 @@ public partial class EnvironmentView : UserControl
     {
         if (DataContext is SceneEnvironmentViewModel vm) vm.GiVolumes.Apply();
     }
+
+    /// <summary>
+    /// B1 L2: open the (singleton) DDGI probe inspector — SH9 swatches and
+    /// confidence per probe, read back from the shared-memory DDGI buffers.
+    /// </summary>
+    private void OnProbeInspectorClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        PrimalEditor_Avalonia.Editors.Gi.ProbeInspectorWindow.ShowFor(lifetime?.MainWindow);
+    }
+
+    /// <summary>
+    /// B2 增量: open the (singleton) fog shader editor — edit the Froxel MSL
+    /// sources and hot-reload via the pass off→on rebuild.
+    /// </summary>
+    private void OnFogShaderClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        PrimalEditor_Avalonia.Editors.Shaders.FogShaderEditorWindow.ShowFor(lifetime?.MainWindow);
+    }
 }

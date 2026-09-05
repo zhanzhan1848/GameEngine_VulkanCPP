@@ -14,7 +14,7 @@
 // Output: 4 vec4 per probe (interleaved [sh0, sh1, sh2, sh3]).
 //   sh[0].w = confidence,  sh[1..3].w = 1.0 (validity flag)
 //
-// REQUIREMENT: workgroup size must equal raysPerProbe (64).
+// REQUIREMENT: workgroup size is 64; raysPerProbe is in [1, 64].
 // Dispatch: totalProbes, 1, 1  (one workgroup per probe).
 //
 // === Binding layout (flat Vulkan numbering, textures + buffers share the
@@ -111,7 +111,8 @@ fn screen_probe_average(@builtin(local_invocation_id) lid_vec: vec3<u32>,
 
     // Each thread reads exactly 1 ray
     let rayIdx: u32 = group_id * constants.raysPerProbe + tid;
-    var rayData = rayRadiance[rayIdx];
+    var rayData = vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    if (tid < constants.raysPerProbe) { rayData = rayRadiance[rayIdx]; }
 
     if (rayData.w >= 0.0) {
         // Hit: clamp radiance at source to prevent firefly propagation

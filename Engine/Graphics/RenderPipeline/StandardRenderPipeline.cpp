@@ -1797,6 +1797,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionIn.ddgi_tex = giOut.gi_output_tex;
         fusionIn.spgi_rg = spgiOut.gi_output;
         fusionIn.spgi_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
+        fusionIn.spgi_pass = screen_probe_pass_.get();
         fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
         fusionIn.ssao_rg = ssaoOut.ssao_output;
         fusionIn.ssao_tex = ssao_pass_ ? ssao_pass_->GetFilterTexture() : black_texture_;
@@ -2027,6 +2028,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             psIn.probe_count = probeCount;
             psIn.probe_spacing = ddgi_pass_->GetParams().probe_spacing;
             psIn.irradiance_buffer = ddgi_pass_->GetIrradianceBuffer(cbIdx);
+            // B1 L3 遮挡：GBuffer 深度导入（唯一名——物理纹理与 Nanite 写入
+            // 的同一张，RG 不感知复用；Metal 编码器边界同步处理转移）。
+            auto& gpuDrawForDepth = nanite::GPUDrivenDrawPipeline::Get();
+            psIn.depth_rg = graph.ImportResource("GBufferDepth_ProbeSpheres",
+                                                 gpuDrawForDepth.GetGBufferDepthSampleable());
+            psIn.depth_width = render_width_;
+            psIn.depth_height = render_height_;
             probe_sphere_module_->AddPass(graph, psIn);
         }
     }
@@ -2686,6 +2694,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.spgi_rg = std::getenv("SPGI_SILENCE")
                 ? rendergraph::RGResourceHandle{} : spgiOut.gi_output;
             fusionIn.spgi_tex = handles::INVALID_RESOURCE;
+            fusionIn.spgi_pass = screen_probe_pass_.get();
             fusionIn.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
             fusionIn.ssao_rg = std::getenv("SSAO_SILENCE")
                 ? rendergraph::RGResourceHandle{} : ssaoOut.ssao_output;
@@ -2728,12 +2737,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         PostProcess::ToneMappingPassData toneOutRWCB;
         RGResourceHandle taaResolvedColorRWCB; // TONE_OFF 时 FinalBlit 的回退输入
-        // 后处理链启用策略（2026-09-02 二次修正）：链路启用后 Metal 出现
-        // 启动即楔死 GPU 驱动（连带 WindowServer 崩溃、关闭进程后系统仍不
-        // 恢复）的问题，根因待查（validation 已恢复默认开以抓证据）。两平台
-        // 统一默认走 legacy（FinalBlit 直读 fusion，稳定态）；
-        // PRIMAL_FULL_POST=1 在任一平台显式启用全链。
-        const bool legacyPostRWCB = std::getenv("PRIMAL_FULL_POST") == nullptr;
+        // 后处理链启用策略（2026-09-05 三次修正）：legacy（FinalBlit 直读
+        // fusion 线性 HDR）使 ≥1.0 的像素全部贴白——同机位实测 Metal 贴白率
+        // 27.5%/均值 131，Vulkan 0.7%/40（用户判定 Metal 过曝、Vulkan 偏暗，
+        // 两者都是 raw 线性直出显示器的伪像）。2026-09-02 的全链楔死已无法
+        // 复现（本日绑定守卫/围栏追踪/SceneData 对齐等修复后，全链 60s+
+        // 稳定×2，贴白率 0.0%/2.2%）→ 默认启用全链（TAA+Bloom+ACES），
+        // PRIMAL_LEGACY_POST=1 保留旧直出路径作逃生门。
+        const bool legacyPostRWCB = std::getenv("PRIMAL_LEGACY_POST") != nullptr;
         if (ppInputRG.IsValid() && !legacyPostRWCB) {
             // TAA resolve active on Vulkan + Metal — jitter is safe (see
             // BuildRenderGraph Step 10.5).

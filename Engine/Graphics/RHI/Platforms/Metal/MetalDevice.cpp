@@ -19,6 +19,7 @@
 #include "MetalSync.h"
 #include "MetalRenderPass.h"
 #include <iostream>
+#include <cstdlib>
 #include <dispatch/dispatch.h>
 #include "Engine/Common/CoreLogStream.h"
 
@@ -422,6 +423,7 @@ bool MetalDevice::submitImpl(const QueueSubmitInfo& info) {
                  u64 nextVal = sync->AcquireNextSignalValue();
                  // 直接访问 MetalCommandBuffer 的私有成员，因为是 friend
                  if (cmdBuf->mtlCommandBuffer_) {
+                     sync->TrackFenceSubmission(cmdBuf->mtlCommandBuffer_);
                      cmdBuf->mtlCommandBuffer_->encodeSignalEvent(sync->GetNativeEvent(), nextVal);
                  }
             }
@@ -522,8 +524,9 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
     if (buffer) {
         // 尝试从内存池分配 (仅针对 Shared/Dynamic/Staging 内存)
         // Static 内存通常使用 Private 模式，需要单独的 Heap 或者独立分配
-        if (memoryPool_ && heap_) {
-             bool usePool = false;
+        // TEMP CAL: 池隔离实验——强制全部独立分配，验证 heap 池放置是否
+        // 腐蚀 DDGI 数据（PRIMAL_NO_HEAP_POOL=1 启用）。
+        if (memoryPool_ && heap_ && !std::getenv("PRIMAL_NO_HEAP_POOL")) {
              // 根据 MetalBuffer::getResourceOptions 的逻辑，Dynamic, Staging, Readback 都是 Shared
              if (desc.memoryUsage == GPUMemoryUsage::Dynamic || 
                  desc.memoryUsage == GPUMemoryUsage::Staging || 
@@ -532,10 +535,13 @@ ResourceHandle MetalDevice::createBufferImpl(const BufferDesc& desc) {
                  // 检查大小是否适合池分配 (留一点余量或者限制最大分配)
                  if (desc.size <= memoryPool_->GetDesc().poolSize) {
                      u32 handle = memoryPool_->Allocate(desc.size, 256, desc.memoryUsage);
-                     if (handle != 0) {
+                     // Allocate returns u32_invalid_id on exhaustion, not 0.
+                     // Treating it as a valid handle yields an empty block at
+                     // offset 0 and aliases every failed allocation with live
+                     // buffers. Leave heap_ unset to use a standalone buffer.
+                     if (handle != u32_invalid_id && memoryPool_->IsValidBlock(handle)) {
                          MemoryBlock block = memoryPool_->GetMemoryBlock(handle);
                          buffer->SetHeapAllocation(heap_, block.offset, memoryPool_, handle);
-                         usePool = true;
                      }
                  }
              }

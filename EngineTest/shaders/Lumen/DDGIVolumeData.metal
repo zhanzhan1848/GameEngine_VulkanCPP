@@ -61,10 +61,13 @@ struct DDGIVolumeData {
     float    TemporalAlpha;           //  80
     uint     ProbeUpdateCount;        //  84
 
-    uint     SCLookupCount;           //  88 - Surface Cache card lookup count
-    uint     SCAtlasSize;             //  92 - Surface Cache lighting atlas size
+    uint     SCLookupCount;           //  88 — Surface Cache card lookup count
+    uint     SCAtlasSize;             //  92 — Surface Cache lighting atlas size
     int      ProbeRelocationShift[3]; //  96: grid shift in probe cells
-    float    _pad_to_sdf[1];          // 108: padding to reach 112 (float4 align)
+    // T8.13 sync: probe ray sampler mode (Vulkan UBO offset 108). 0 = legacy
+    // fixed spiral, 1 = per-frame golden-angle jitter, 2 = cosine mixture.
+    // Semantics: ProbeSampleLib (ddgiSampleRayDirection below).
+    int      RaySampleMode;           // 108
 
     // GlobalSDF cascade data (3 cascades)
     float4   SdfOrigins[3];           // 112
@@ -75,6 +78,11 @@ struct DDGIVolumeData {
 
     float4   LightDirection;          // 272: xyz = light dir, w unused (C++: math::v4)
     float4   LightColor;              // 288: xyz = light color, w unused (C++: math::v4)
+
+    // Mode 11 (MeshletDynamicDDGI) canonical radiance inputs — mirror of the
+    // C++ tail (offsets 304/320). Struct grows 304→336B, byte-matched.
+    float4   SkyColor;                // 304: xyz = sky color, w unused
+    float4   Albedo;                  // 320: xyz = uniform albedo, w unused
 };
 
 // ============================================================================
@@ -129,12 +137,77 @@ static float3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex)
 {
     const float INV_PHI = 0.6180339887498948482f;
     const float PI = 3.14159265358979323846f;
+    // Fixed directions — no frame rotation.
+    // Rotating ray directions each frame destabilizes SH projection with 64 rays,
+    // causing flickering. Fixed directions give stable per-probe results that
+    // converge smoothly via temporal EMA.
     float u = fract((float(rayIndex) + 0.5f) * INV_PHI);
     float v = fract((float(rayIndex) + 0.5f) * INV_PHI * INV_PHI);
     float theta = 2.0f * PI * u;
     float phi   = acos(1.0f - 2.0f * v);
     float sinPhi = sin(phi);
     return float3(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi));
+}
+
+// ============================================================================
+// Probe ray sampler — Metal port of Vulkan ShaderLib/ProbeSampleLib.glsl
+// (T8.13 sync). Single source for the trace side AND the SH projection: the
+// projection re-derives directions from ray indices, so every direction change
+// must go through this function or SH desynchronizes from traced radiance.
+// Modes (vol.RaySampleMode, UBO offset 108; DDGI_RAY_SAMPLE env):
+//   0 UNIFORM — legacy fixed spiral, bit-identical to ddgiRayDirection.
+//   1 JITTER  — golden-angle rotation per frame.
+//   2 COSINE  — 50% cosine lobe around the light + 50% uniform mixture.
+// Returns float4(dir, pdf).
+// ============================================================================
+static float4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameIndex,
+                                     uint mode, float3 toLight)
+{
+    const float INV_PHI = 0.6180339887498948482f;
+    const float TWO_PI  = 6.28318530717958647692f;
+
+    float u = fract((float(rayIndex) + 0.5f) * INV_PHI);
+    float v = fract((float(rayIndex) + 0.5f) * INV_PHI * INV_PHI);
+
+    if (mode != 0u) {
+        u = fract(u + float(frameIndex) * INV_PHI);
+        v = fract(v + float(frameIndex) * INV_PHI * INV_PHI);
+    }
+
+    if (mode == 2u) {
+        float3 w = normalize(toLight);
+        // Minimal-rotation ONB from +Z to w (Duff et al. 2017).
+        float s = w.z >= 0.0f ? 1.0f : -1.0f;
+        float a = -1.0f / (s + w.z);
+        float b = w.x * w.y * a;
+        float3 tangent   = float3(1.0f + s * w.x * w.x * a, s * b, -s * w.x);
+        float3 bitangent = float3(b, s + w.y * w.y * a, -w.y);
+
+        float3 dir;
+        if (v < 0.5f) {
+            float xi   = v * 2.0f;
+            float cosT = sqrt(max(1.0f - xi, 0.0f));
+            float sinT = sqrt(max(1.0f - cosT * cosT, 0.0f));
+            float th   = TWO_PI * u;
+            dir = w * cosT + tangent * (sinT * cos(th)) + bitangent * (sinT * sin(th));
+        } else {
+            float vu  = (v - 0.5f) * 2.0f;
+            float ph  = acos(clamp(1.0f - 2.0f * vu, -1.0f, 1.0f));
+            float sp  = sin(ph);
+            float th  = TWO_PI * u;
+            dir = float3(sp * cos(th), sp * sin(th), cos(ph));
+        }
+        float cosL = max(dot(dir, w), 0.0f);
+        float pdf = max(0.5f * cosL / M_PI_F + 0.5f / (4.0f * M_PI_F), 1e-5f);
+        return float4(dir, pdf);
+    }
+
+    // Modes 0 and 1: uniform on the sphere, pdf = 1/(4π).
+    float theta = TWO_PI * u;
+    float phi   = acos(clamp(1.0f - 2.0f * v, -1.0f, 1.0f));
+    float sinPhi = sin(phi);
+    return float4(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi),
+                  0.25f / M_PI_F);
 }
 
 static uint3 ddgiProbeGridCoord(uint probeIdx, uint3 counts)

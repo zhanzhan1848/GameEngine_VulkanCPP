@@ -183,6 +183,12 @@ public:
     // Single source for the debug sphere visualization; per-probe relocation
     // results will be cached here instead of re-derived per ray.
     rhi::ResourceHandle GetProbePositionBuffer() const { return probe_positions_; }
+    // B1 L2: confidence buffer (per probe float4 = rayHitRatio, temporalStability,
+    // visibilityConf, convergenceAge) — CPU readback for the probe inspector.
+    rhi::RHIDeviceBase* GetDevice() const { return device_; }
+    rhi::ResourceHandle GetIrradianceBufferLatest() const {
+        return irradiance_buffers_[volume_data_.FrameIndex % 3];
+    }
 
     // T8.9b diagnostic: full probe×ray radiance buffer for CPU-side A/B of
     // which hit-radiance path (SC atlas / prev-screen / analytic) actually

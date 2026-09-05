@@ -663,6 +663,33 @@ private EngineViewport3D? _viewport;
         vm.ArrayDuplicateSelected(dialog.Axis, dialog.Count, dialog.Offset);
     }
 
+    /// <summary>
+    /// 给选中实体挂 Environment 组件——属性面板的 ENVIRONMENT 区块
+    /// （雾 / probe 调试 / GI 体积 / Skybox）仅对该实体显示。
+    /// </summary>
+    private void OnAddEnvironmentClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not WorldEditorViewModel vm) return;
+        if (vm.SelectedEntities.Length == 0)
+        {
+            Logger.Info("[Environment] select an entity first");
+            return;
+        }
+        var target = vm.SelectedEntities[0];
+        if (target.GetComponent<Components.EnvironmentComponent>() != null)
+        {
+            Logger.Info($"[Environment] '{target.Name}' already has an environment component");
+            return;
+        }
+        target.Components.Add(new Components.EnvironmentComponent());
+        if (vm.GetNativeEntityId(target) is var nativeId && nativeId != 0)
+        {
+            vm.SceneSynchronizer.SyncEntity(target);
+        }
+        vm.MarkProjectDirty();
+        Logger.Info($"[Environment] component added to '{target.Name}'");
+    }
+
     private void OnAddParticleEmitterClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not WorldEditorViewModel vm) return;

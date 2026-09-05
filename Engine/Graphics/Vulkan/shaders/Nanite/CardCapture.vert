@@ -97,7 +97,9 @@ void main() {
     }
 
     uint tri_offset = meshlet.header.y;
-    uint local_vertex_idx = mtb.mts[tri_offset + vid];
+    // CPU uploads one byte per local index; SSBO uint words contain four.
+    uint byte_index = tri_offset + vid;
+    uint local_vertex_idx = (mtb.mts[byte_index >> 2u] >> ((byte_index & 3u) * 8u)) & 0xFFu;
     uint vert_offset = meshlet.header.x;
     uint vert_idx = mvb.mvs[vert_offset + local_vertex_idx];
 

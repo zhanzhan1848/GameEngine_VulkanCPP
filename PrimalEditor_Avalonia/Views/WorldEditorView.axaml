@@ -177,6 +177,8 @@
                                           ToolTip.Tip="把选中实体（含子级）存为 .prefab 资产"/>
                                 <MenuItem Header="Array Duplicate…" Click="OnArrayDuplicateClick"
                                           ToolTip.Tip="把选中实体沿轴深拷 N 份"/>
+                                <MenuItem Header="Add Environment" Click="OnAddEnvironmentClick"
+                                          ToolTip.Tip="挂 Environment 组件——属性面板由此显示雾/probe/GI 环境控制"/>
                                 <MenuItem Header="Add Particle Emitter" Click="OnAddParticleEmitterClick"
                                           ToolTip.Tip="给选中实体挂粒子发射器（内置 fire 预设起步）"/>
                             </ContextMenu>

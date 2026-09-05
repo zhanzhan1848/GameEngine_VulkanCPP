@@ -1,0 +1,14 @@
+{
+  "SchemaVersion": 2,
+  "ProjectGuid": "4ca5f4b0-ce8a-4a78-bee1-ee528294c557",
+  "Name": "TestProject_01",
+  "BuildConfig": "Debug",
+  "DefaultScene": "5795145b-5e39-4c70-b9ea-ddfb26d156d8",
+  "Scenes": [
+    "5795145b-5e39-4c70-b9ea-ddfb26d156d8"
+  ],
+  "RenderSettings": {
+    "Pipeline": "Standard",
+    "ColorSpace": "Linear"
+  }
+}

@@ -553,7 +553,12 @@ fragment float4 fragmentLighting_gpuDriven(
         kD *= 1.0 - metallic;
 
         float NdotL = max(dot(N, L), 0.0);
-        Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL;
+        // 2026-09-05 校准参数：屏幕直射增益，与 Vulkan DeferredLighting.frag
+        // 的同名旋钮同值（2.5）。GPU 驱动路径此前无此乘数——FULL_POST 的
+        // ACES 下直射峰值 ~0.48 过不了感知门槛（画面呈纯环境光观感）。
+        // legacy 直出时代该旋钮曾以 3.125 存在于测试副本（未同步入引擎）。
+        constexpr float DIRECT_INTENSITY = 2.5f;
+        Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL * DIRECT_INTENSITY;
     }
 
     // 5. Ambient + SSAO + Shadow
@@ -780,4 +785,46 @@ kernel void computeFusionComposite(
     result = toneMap(result);
 
     outputTex.write(float4(result, 1.0f), gid);
+}
+
+// FinalBlit pass-through blit with FXAA (1x budget anti-aliasing). Samples the
+// fusion module's already-tone-mapped LDR output — no second tonemap here.
+fragment float4 fragmentBlitFXAA(
+    VertexOut in [[stage_in]],
+    texture2d<float> inputTex [[texture(0)]])
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none,
+                        address::clamp_to_edge);
+    float2 texel = 1.0f / float2(inputTex.get_width(), inputTex.get_height());
+    float3 rgbM  = inputTex.sample(s, in.uv).rgb;
+    float3 rgbNW = inputTex.sample(s, in.uv + texel * float2(-1.0f, -1.0f)).rgb;
+    float3 rgbNE = inputTex.sample(s, in.uv + texel * float2( 1.0f, -1.0f)).rgb;
+    float3 rgbSW = inputTex.sample(s, in.uv + texel * float2(-1.0f,  1.0f)).rgb;
+    float3 rgbSE = inputTex.sample(s, in.uv + texel * float2( 1.0f,  1.0f)).rgb;
+
+    constexpr float3 lumaWeights(0.299f, 0.587f, 0.114f);
+    float lumaM  = dot(rgbM,  lumaWeights);
+    float lumaNW = dot(rgbNW, lumaWeights);
+    float lumaNE = dot(rgbNE, lumaWeights);
+    float lumaSW = dot(rgbSW, lumaWeights);
+    float lumaSE = dot(rgbSE, lumaWeights);
+    float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+    float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+
+    float2 dir;
+    dir.x = -((lumaNW + lumaNE) - (lumaSW + lumaSE));
+    dir.y =  ((lumaNW + lumaSW) - (lumaNE + lumaSE));
+    float dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) *
+                          (0.25f / 8.0f), 1.0f / 128.0f);
+    float rcpDirMin = 1.0f / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+    dir = clamp(dir * rcpDirMin, float2(-8.0f), float2(8.0f)) * texel;
+
+    float3 rgbA = 0.5f * (
+        inputTex.sample(s, in.uv + dir * (1.0f / 3.0f - 0.5f)).rgb +
+        inputTex.sample(s, in.uv + dir * (2.0f / 3.0f - 0.5f)).rgb);
+    float3 rgbB = rgbA * 0.5f + 0.25f * (
+        inputTex.sample(s, in.uv + dir * -0.5f).rgb +
+        inputTex.sample(s, in.uv + dir *  0.5f).rgb);
+    float lumaB = dot(rgbB, lumaWeights);
+    return float4((lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB, 1.0f);
 }

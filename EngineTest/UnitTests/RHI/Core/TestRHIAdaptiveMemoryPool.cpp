@@ -203,6 +203,27 @@ TestResult TestDefragmentation() {
     return TestResult::Passed;
 }
 
+TestResult TestPoolExhaustion() {
+    MockRHIDevice device;
+    MemoryPoolDesc desc;
+    desc.poolSize = 1024;
+    RHIAdaptiveMemoryPool pool(device, desc);
+    TEST_ASSERT_TRUE(pool.Initialize(), "Pool initialization should succeed");
+    const u32 live = pool.Allocate(1024, 256, GPUMemoryUsage::Dynamic);
+    TEST_ASSERT_TRUE(pool.IsValidBlock(live), "Full pool allocation must be valid");
+    const auto before = pool.GetMemoryBlock(live);
+    const u32 failed = pool.Allocate(256, 256, GPUMemoryUsage::Dynamic);
+    TEST_ASSERT_EQ(failed, u32_invalid_id, "Exhaustion returns the invalid sentinel, not zero");
+    TEST_ASSERT_FALSE(pool.IsValidBlock(failed), "Failed allocation must not be used as a heap block");
+    TEST_ASSERT_EQ(pool.GetMemoryBlock(live).offset, before.offset, "Failure must preserve live offsets");
+    TEST_ASSERT_EQ(pool.GetMemoryBlock(live).size, before.size, "Failure must preserve live sizes");
+    pool.Deallocate(live);
+    const u32 reused = pool.Allocate(256, 256, GPUMemoryUsage::Dynamic);
+    TEST_ASSERT_TRUE(pool.IsValidBlock(reused), "Allocation must recover after freeing capacity");
+    pool.Deallocate(reused);
+    return TestResult::Passed;
+}
+
 int main() {
     std::cout << "Running TestRHIAdaptiveMemoryPool..." << std::endl;
     
@@ -212,6 +233,7 @@ int main() {
     if (TestAllocationAndHandleMapping() != TestResult::Passed) allPassed = false;
     if (TestDeallocation() != TestResult::Passed) allPassed = false;
     if (TestDefragmentation() != TestResult::Passed) allPassed = false;
+    if (TestPoolExhaustion() != TestResult::Passed) allPassed = false;
     
     if (allPassed) {
         std::cout << "All tests passed!" << std::endl;

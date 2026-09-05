@@ -171,6 +171,7 @@ int main(int argc, char* argv[])
 
 #elif __APPLE__
 #include <iostream>
+#include <cstdlib>
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
@@ -179,6 +180,24 @@ int main(int argc, char* argv[])
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[])
 {
+#if TEST_MODULAR_PIPELINE || TEST_METAL_GI_FUSION
+    // DeviceDesc::enableDebug does not load Apple's validation layers.
+    // Configure them before Cocoa or the test creates its first Metal device.
+    const char* validate = std::getenv("PRIMAL_METAL_VALIDATE");
+    if (!validate || validate[0] != '0') {
+        setenv("MTL_DEBUG_LAYER", "1", 1);
+        setenv("MTL_DEBUG_LAYER_ERROR_MODE", "assert", 1);
+        if (std::getenv("PRIMAL_SPGI")) {
+            setenv("MTL_SHADER_VALIDATION", "1", 1);
+            setenv("MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING", "1", 1);
+            setenv("MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1", 1);
+            setenv("MTL_SHADER_VALIDATION_FAIL_MODE", "zerofill", 1);
+            setenv("MTL_SHADER_VALIDATION_ABORT_ON_FAULT", "1", 1);
+        }
+        std::cerr << "[MetalValidation] API validation requested; shader validation="
+                  << (std::getenv("PRIMAL_SPGI") ? "1" : "external/default") << std::endl;
+    }
+#endif
     std::cout << "Hello, World!" << std::endl;
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     try

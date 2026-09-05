@@ -389,6 +389,76 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("PipelineSetProbeSphereDebug failed", ex); }
     }
 
+    // ---- B1 L2: DDGI probe readback (inspector data source) ----------------
+
+    public sealed class PcgProbeMeta
+    {
+        public uint CountX, CountY, CountZ, Total, FrameSlot;
+        public float Spacing;
+        public float OriginX, OriginY, OriginZ;
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GIGetProbeDebugMeta", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIGetProbeDebugMeta(
+        uint[] countsXyz, out uint total, out float spacing,
+        float[] originXyz, out uint frameSlot);
+    /// <summary>Probe grid meta + latest-write frame slot; null when DDGI is off.</summary>
+    public static PcgProbeMeta? GIGetProbeDebugMeta()
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            var counts = new uint[3];
+            var origin = new float[3];
+            if (_GIGetProbeDebugMeta(counts, out var total, out var spacing,
+                                     origin, out var slot) == 0) return null;
+            return new PcgProbeMeta
+            {
+                CountX = counts[0], CountY = counts[1], CountZ = counts[2],
+                Total = total, Spacing = spacing,
+                OriginX = origin[0], OriginY = origin[1], OriginZ = origin[2],
+                FrameSlot = slot,
+            };
+        }
+        catch (Exception ex) { Logger.Error("GIGetProbeDebugMeta failed", ex); return null; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GIProbeConfidenceReadback", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIProbeConfidenceReadback(float[] outFloats, uint capFloats, out uint written);
+    /// <summary>4 floats per probe (rayHitRatio, temporalStability, visibilityConf, convergenceAge).</summary>
+    public static float[] GIProbeConfidenceReadback(int probeCount)
+    {
+        if (!_isLoaded || probeCount <= 0) return Array.Empty<float>();
+        try
+        {
+            var buf = new float[probeCount * 4];
+            if (_GIProbeConfidenceReadback(buf, (uint)buf.Length, out var written) == 0)
+                return Array.Empty<float>();
+            var result = new float[written];
+            Array.Copy(buf, result, written);
+            return result;
+        }
+        catch (Exception ex) { Logger.Error("GIProbeConfidenceReadback failed", ex); return Array.Empty<float>(); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "GIProbeIrradianceReadback", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _GIProbeIrradianceReadback(float[] outFloats, uint capFloats, out uint written);
+    /// <summary>9 float4 SH9 coefficients per probe (latest-written frame slot).</summary>
+    public static float[] GIProbeIrradianceReadback(int probeCount)
+    {
+        if (!_isLoaded || probeCount <= 0) return Array.Empty<float>();
+        try
+        {
+            var buf = new float[probeCount * 9 * 4];
+            if (_GIProbeIrradianceReadback(buf, (uint)buf.Length, out var written) == 0)
+                return Array.Empty<float>();
+            var result = new float[written];
+            Array.Copy(buf, result, written);
+            return result;
+        }
+        catch (Exception ex) { Logger.Error("GIProbeIrradianceReadback failed", ex); return Array.Empty<float>(); }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "PipelineGetProbeSphereDebug", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _PipelineGetProbeSphereDebug();
     public static bool PipelineGetProbeSphereDebug()

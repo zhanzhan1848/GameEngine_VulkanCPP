@@ -563,7 +563,7 @@ kernel void screen_probe_trace_sdf(
     if (global_id >= totalRays) return;
 
     // HZB kernel already resolved this ray — keep its result.
-    if (hit_buffer[global_id].w == 1.0f) return;
+    if (global.hzb_params.z > 0.0f && hit_buffer[global_id].w == 1.0f) return;
 
     uint probeIdx = global_id / raysPerProbe;
     uint rayIdx   = global_id % raysPerProbe;
