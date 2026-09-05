@@ -1,5 +1,5 @@
 {
-  "$version": "184e48ee9540450c",
+  "$version": "748bc4b7e16b1fd8",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -299,6 +299,30 @@
         },
         {
           "name": "isEnabled",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "run.launch",
+      "channel": "editor",
+      "description": "导出运行时场景包并启动 PrimalPlayer 外部宿主（与工具栏 Run 按钮同一 RuntimeLauncher 路径）。record=true 时附带逐帧录制：渲染帧与捕获帧 1:1 落 PNG（frame_%04d.png），录满 recordFrames 帧后 player 自动退出（0 = 跟随窗口关闭）；recordMetrics=true 同时写逐帧亮度 CSV（口径同 editor.metrics）。产物目录 <project>/Captures/<scene>-<时间戳>/。无项目/无激活场景返回 NOT_READY；player 二进制缺失返回 ENGINE_ERROR。本命令立即返回启动结果，不等待 player 退出（用 pgrep 或 Captures 目录判断录制完成）。",
+      "example": "{\"record\":true,\"recordFrames\":60,\"recordMetrics\":true}",
+      "params": [
+        {
+          "name": "record",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "recordFrames",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "recordMetrics",
           "type": "boolean",
           "required": false
         }

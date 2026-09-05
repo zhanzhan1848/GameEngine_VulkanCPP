@@ -30,7 +30,9 @@ public partial class BuildLogView : UserControl
     private void AppendLine(string line)
     {
         if (this.FindControl<TextBox>("BuildLogText") is not TextBox textBox) return;
-        textBox.Text += (textBox.Text.Length > 0 ? "\n" : string.Empty) + line;
+        // Text 可能为 null（AXAML 未设初值时实测）——player 每帧多行输出都会走到这里。
+        var current = textBox.Text ?? string.Empty;
+        textBox.Text = current.Length > 0 ? current + "\n" + line : line;
     }
 
     private void OnBuildLogDoubleClick(object? sender, Avalonia.Input.TappedEventArgs e)

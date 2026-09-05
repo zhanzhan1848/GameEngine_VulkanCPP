@@ -523,7 +523,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                             // L1 方向能量（band1-3 幅度均值）——场角向特征标定量。
                             float l1m = 0.0f;
                             for (int b = 1; b <= 3; ++b) {
-                                const float* bb = irr + (size_t)p * 36 + b * 3;
+                                const float* bb = irr + (size_t)p * 36 + b * 4;
                                 l1m += std::sqrt(bb[0]*bb[0] + bb[1]*bb[1] + bb[2]*bb[2]);
                             }
                             l1.push_back(l1m / 3.0f);

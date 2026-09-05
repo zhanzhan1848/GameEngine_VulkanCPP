@@ -1,5 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
+using Avalonia.Threading;
 
 namespace PrimalEditor_Avalonia.Common;
 
@@ -45,6 +46,22 @@ public class UiLogger : ILogger
     private static void AddEntry(LogLevel level, string message)
     {
         var entry = new LogEntry(DateTime.Now, level, message);
+        // Entries 绑定到 Logger 面板（LoggerViewModel 订阅 CollectionChanged 改
+        // 另一个 UI 集合），必须只在 UI 线程变更——Logger 会从任意线程被调用
+        // （进程退出回调/引擎日志桥等线程池路径），直接改集合会以未捕获异常
+        // 杀死整个编辑器（实测：player 退出事件 → CollectionChanged 重入 → abort）。
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            Append(entry);
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(() => Append(entry));
+        }
+    }
+
+    private static void Append(LogEntry entry)
+    {
         Entries.Add(entry);
         while (Entries.Count > 500)
         {
@@ -53,5 +70,9 @@ public class UiLogger : ILogger
         EntryAdded?.Invoke(null, entry);
     }
 
-    public static void Clear() => Entries.Clear();
+    public static void Clear()
+    {
+        if (Dispatcher.UIThread.CheckAccess()) Entries.Clear();
+        else Dispatcher.UIThread.Post(Entries.Clear);
+    }
 }
