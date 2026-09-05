@@ -444,3 +444,18 @@ Vulkan 偏平的精确位置。Vulkan 亮侧探针 L1 富集 = 下轮主线
 
 待办：RG 瞬态槽位别名根修（SSGI blur 恢复）；CAL_EXPOSURE 复测；
 DIRECT_INTENSITY 2.5 观感微调。
+
+
+## 第十四轮：SC 制度对齐实验——负例与新靶子（2026-09-05）
+
+Vulkan 测试对齐 Metal 的 SC 全量捕获（capture_budget=0，cdb2f671）：
+LightEval 从 4 卡/帧（稀疏）变 374 卡/帧（全量）✓ 生效。
+
+判决：探针 L1 尾部**不变**（p90 0.31 vs 0.33）——SC 稀疏/陈旧不是
+Vulkan 探针 L1 匮乏的驱动，排除。
+
+新靶子（定量）：全量捕获后 Vulkan 卡片辐射 p50 = 0.128 vs Metal
+0.378——**LightEval/CardRadianceAvg 链的世代差使 Vulkan 卡片辐射暗
+3×**。这同时解释 Vulkan 整体偏暗（卡片→探针→gather 全链按比例暗）。
+下轮开题：SurfaceCacheLightEval.comp vs .metal 逐行 diff +
+DDGICardRadianceAvg 对比，定位 3× 增益差的精确位置。
