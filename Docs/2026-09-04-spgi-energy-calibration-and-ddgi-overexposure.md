@@ -480,3 +480,20 @@ NaN 净化与自反馈回退全部相同）。shader 层洗清。
 
 输入数据逐项 dump 对比（lights 数组直读、albedo 采样对比、阴影
 可见性统计）→ 定位后决定对齐方向（Vulkan 抬升 or 共享公式统一）。
+
+
+### 输入数据排查进展（同日续）
+
+- lights[] 上传：两平台一致（单方向光，color=settings.lighting.light_color
+  =3.0；RWCB 路径喂 ddgi_light_color——注意 Vulkan 测试该值为 5.0）。
+- 阴影可见性链：shadow_visibility_buffer_ CPU 初始化 1.0（全亮），
+  逐帧由 SurfaceCacheShadow（两平台各有 .metal/.comp）计算写入。
+  **未验证项**：Vulkan 可见性 compute 的输出数值是否正常（若全 0 →
+  Vulkan 卡片直射项归零 → 完全解释卡片暗 3×）——下轮第一项 dump。
+
+### 下轮开题顺序
+
+1. Dump Vulkan shadow_visibility_buffer_ 统计（均值/零值占比）vs Metal
+   —— 若 Vulkan 全零 → 直射项归零实锤 → 查 SurfaceCacheShadow.comp。
+2. L1 亮度尾差（0.33 vs 1.39）随直射项修复自然复测。
+3. RG 瞬态槽位别名根修（SSGI blur 写交换链）。
