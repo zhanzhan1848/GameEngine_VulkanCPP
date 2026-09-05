@@ -459,3 +459,24 @@ Vulkan 探针 L1 匮乏的驱动，排除。
 3×**。这同时解释 Vulkan 整体偏暗（卡片→探针→gather 全链按比例暗）。
 下轮开题：SurfaceCacheLightEval.comp vs .metal 逐行 diff +
 DDGICardRadianceAvg 对比，定位 3× 增益差的精确位置。
+
+
+## 第十五轮：LightEval 公式一致——3× 差锁定在输入数据（2026-09-06）
+
+SurfaceCacheLightEval.comp vs .metal 逐段对比：**核心求值公式完全一致**
+（(direct + E_indirect)×albedo + 自反馈 0.70 + emissive，min 64；
+SC_FEEDBACK 0.70；gatherProbeIrradiance SH9 三线性 + clamp 4.0；
+NaN 净化与自反馈回退全部相同）。shader 层洗清。
+
+3× 卡片辐射差（Vulkan 0.128 vs Metal 0.378）锁定在 **LightEval 的输入
+数据**，候选按嫌疑序：
+1. lights[] 上传（数量/颜色/衰减/可见性数据）
+2. 探针场 L1 形状差的传导（Vulkan 0.18 vs 0.40 → E_indirect 的方向
+   项弱 → 但 L0 同为 1.07，只解释部分）
+3. albedo atlas 内容（平台渲染管线差异）
+4. 阴影可见性（T3.3 directional visibility）
+
+### 下轮
+
+输入数据逐项 dump 对比（lights 数组直读、albedo 采样对比、阴影
+可见性统计）→ 定位后决定对齐方向（Vulkan 抬升 or 共享公式统一）。
