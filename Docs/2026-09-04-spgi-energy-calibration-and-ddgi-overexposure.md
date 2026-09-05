@@ -376,3 +376,24 @@ ShaderResource）的全屏 1280×720 纹理；同句柄跨帧 usage 3→1 漂移
 问题在绑定时的句柄生命周期）、RG_TEX（名字→句柄映射）、SHADOW_TEX。
 blurCS2D 消费方排查：ShadowMap(mom=37/40 usage 7 ✓)、Bloom(已关)、
 LumenSSAO(不用 BlurPass)——剩余候选在 RG 瞬态生命周期审查中定位。
+
+## 第十一轮：bisect 中断与现状（2026-09-05 收尾）
+
+Metal 测试当前被 blurCS2D 陈旧句柄 assert 阻塞（validation 下 frame ~20
+中止；无 validation ~27 帧设备丢失）。已固化的定位证据：
+
+- 同句柄 199 跨帧 usage 3→1 漂移（分配器复用，blur 持陈旧句柄）
+- 纹理 1280×720（渲染分辨率），SR-only usage
+- 创建侧 usage 正确的纹理（moments 37/40 usage 7）不受影响
+
+**临时恢复手段**：`git checkout b5bd33fb -- . && 重建`可回到无 assert 的
+状态（但保留 dispatch skip 的暗部漂移）；或下轮修复 RG 瞬态生命周期后
+回到 HEAD。
+
+### 待办（优先级序）
+
+1. blurCS2D 陈旧句柄修复：审查 RG 瞬态纹理的分配/回收与 BlurPass
+   描述符集缓存的交互（setPool_ 按 frameIndex 复用，句柄跨帧失效）。
+2. 解锁后继续 DDGI parity bisect：Vulkan 半数探针 L1≈0 的成因
+   （稀疏 update 制度 vs Metal 全量）与 gather L2 处理对齐。
+3. CAL_EXPOSURE=0.45 复测回归；DIRECT_INTENSITY 2.5 双平台观感微调。
