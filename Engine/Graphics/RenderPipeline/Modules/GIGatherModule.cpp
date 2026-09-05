@@ -769,9 +769,15 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                             PRIMAL_LOG_STREAM(Error, "Render") << "  band means: L0=" << l0Mean
                                                       << " L1=" << l1Mean << " L2=" << l2Mean
                                                       << " |L1|/|L0|=" << (l0Mean > 1e-6f ? l1Mean / l0Mean : 0.0f) << std::endl;
+                                            double checksum = 0.0;
+                                            for (u64 k = 0; k < irrBytes / 4; ++k) {
+                                                float v = q[k];
+                                                if (!std::isnan(v) && !std::isinf(v)) checksum += std::abs(v);
+                                            }
                                             PRIMAL_LOG_STREAM(Error, "Render") << "[IRR_DUMP] slot=" << ddgiReadIdx
                                                       << " maxAbs=" << maxAbs
-                                                      << " nanInf=" << bad << std::endl;
+                                                      << " nanInf=" << bad
+                                                      << " chk=" << (long long)checksum << std::endl;
                                             PRIMAL_LOG_STREAM(Error, "Render") << "  bands maxAbs: L0=" << bandMax[0]
                                                       << " L1=(" << bandMax[1] << "," << bandMax[2] << "," << bandMax[3] << ")"
                                                       << " L2=(" << bandMax[4] << "," << bandMax[5] << "," << bandMax[6]

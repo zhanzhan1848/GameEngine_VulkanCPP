@@ -1884,8 +1884,12 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         RGResourceHandle hdrClean = taaOut.output;
         taaResolvedColor = hdrClean;
 
-        // BLOOM_OFF=1 诊断开关：跳过 bright/blur，ToneMapping 走 dummy 黑纹理。
-        const bool bloomOff = std::getenv("BLOOM_OFF") != nullptr;
+        // 2026-09-05：bloom blur 的 RG 瞬态 temp 解析存在槽位别名
+        // （Bloom_Temp 解析到 fusion_output，usage 0x05 缺 ShaderWrite →
+        // blurCS2D validation assert）。曾被 bind-guard 的 dispatch skip
+        // 掩盖（blur 从未真正执行）。别名修复前 bloom 默认关闭，
+        // PRIMAL_BLOOM=1 显式启用。
+        const bool bloomOff = std::getenv("PRIMAL_BLOOM") == nullptr;
         auto bloomOut = bloomOff
             ? PostProcess::BloomPassData{}
             : PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
@@ -2779,7 +2783,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             }
             taaResolvedColorRWCB = hdrCleanRWCB;
 
-            auto bloomRWCB = std::getenv("BLOOM_OFF")
+            auto bloomRWCB = std::getenv("PRIMAL_BLOOM") == nullptr
                 ? PostProcess::BloomPassData{}
                 : PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
             // FusionIndirect already owns AO/GI composition. ToneMapping only

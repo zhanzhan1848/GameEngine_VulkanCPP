@@ -344,8 +344,23 @@ MTL::ComputeCommandEncoder* MetalCommandBuffer::getComputeEncoder() {
     currentEncoder_ = encoder;
     currentEncoderType_ = EncoderType::Compute;
     // Metal pipeline state is per-encoder: a bind that succeeded on a previous
-    // encoder must not validate this one's dispatches.
-    computePipelineBoundEncoder_ = nullptr;
+    // encoder must not validate this one's dispatches — BUT re-bind the last
+    // compute pipeline so "bind → encoder-ending barrier → dispatch" passes
+    // keep working (否则每个 barrier 后的新 encoder 上 Dispatch 全被跳过，
+    // 表现为整条 pass 的帧间丢失/暗部移动)。
+    if (lastComputePipelineState_) {
+        encoder->setComputePipelineState(lastComputePipelineState_);
+        computePipelineBoundEncoder_ = encoder;
+        // 重放最后一个 descriptor set——只重放 pipeline 会让 Dispatch 以
+        // 缺绑定执行（blurCS2D "missing Buffer binding at index 2" 实证）。
+        if (lastComputeSetHandle_ != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            BindDescriptorSets(PipelineBindPoint::Compute,
+                               rhi::handles::INVALID_PIPELINE_LAYOUT, 0, 1,
+                               &lastComputeSetHandle_, 0, nullptr);
+        }
+    } else {
+        computePipelineBoundEncoder_ = nullptr;
+    }
     return encoder;
 }
 
@@ -887,6 +902,7 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
     for (u32 i = 0; i < setCount; ++i) {
         MetalDescriptorSet* set = metalDevice.GetDescriptorSet(descriptorSets[i]);
         if (!set) continue;
+        if (computeEncoder) lastComputeSetHandle_ = descriptorSets[i];
         
         const auto& bindings = set->GetBindings();
         for (const auto& binding : bindings) {
@@ -1242,6 +1258,7 @@ void MetalCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
             }
         }
         currentThreadGroupSize_ = mtlPipeline->GetThreadGroupSize();
+        lastComputePipelineState_ = mtlPipeline->GetComputePipelineState();
         computePipelineBoundEncoder_ = encoder;
     } else {
         // Binding used to fail SILENTLY here: the following Dispatch then

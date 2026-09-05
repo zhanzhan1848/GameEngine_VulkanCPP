@@ -162,6 +162,13 @@ private:
     
     // 计算状态跟踪
     MTL::Size currentThreadGroupSize_{1, 1, 1};
+    // 最后一次成功绑定的 compute pipeline state——新 compute encoder 创建时
+    // 自动重绑（encoder-per-barrier 语义下，"bind→barrier→dispatch"的遗留
+    // pass 模式才能跨 encoder 存活；否则 Dispatch 被守卫静默跳过）。
+    MTL::ComputePipelineState* lastComputePipelineState_{nullptr};
+    // 与 pipeline 同步缓存的 descriptor set——barrier 结束 encoder 会同时
+    // 丢 pipeline 与 set 绑定，两者必须一起重放。
+    DescriptorSetHandle lastComputeSetHandle_{rhi::handles::INVALID_DESCRIPTOR_SET};
     // The encoder instance BindComputePipeline last bound a pipeline on.
     // Dispatch refuses to encode unless this STILL equals the current encoder:
     // a plain bool leaked stale "bound" state across encoder/buffer transitions
