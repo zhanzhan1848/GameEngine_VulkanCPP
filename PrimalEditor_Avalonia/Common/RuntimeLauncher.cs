@@ -14,6 +14,30 @@ namespace PrimalEditor_Avalonia.Common;
 /// </summary>
 public static class RuntimeLauncher
 {
+    /// <summary>
+    /// Run 的三条路线（RunModeIndex 与工具栏 ComboBox 一一对应）：
+    ///   PlayerWindow      —— 原路线：导出运行时包 → 外部 PrimalPlayer 默认窗口；
+    ///   FixedResolution   —— 同样导出 + 外部 PrimalPlayer，但 --width/--height/--fixed
+    ///                        强制窗口内容恰为指定分辨率且不可拖拽缩放（录制/像素比对
+    ///                        需要确定性输出时用）；
+    ///   RenderSurface     —— 不开外部进程：编辑器内嵌 render surface 切到 runtime
+    ///                        渲染路径（PipelineSetEditorMode(false)）并透过场景相机取景，
+    ///                        由 EngineViewport3D.BeginRuntimePreview 实现。
+    /// </summary>
+    public enum RunMode
+    {
+        PlayerWindow = 0,
+        FixedResolution = 1,
+        RenderSurface = 2,
+    }
+
+    /// <summary>VM 的 RunModeIndex（0..2）→ RunMode；越界值收敛到 PlayerWindow。</summary>
+    public static RunMode ResolveMode(int runModeIndex)
+    {
+        var clamped = Math.Clamp(runModeIndex, 0, 2);
+        return (RunMode)clamped;
+    }
+
     /// <summary>(graphicsApi, buildConfig) → 构建树目录（repo 相对）。
     /// Vulkan 树目前只有 Debug 配置产物（Darwin/DebugVulkan）。</summary>
     public static string? ResolvePlayerDir(string graphicsApi, string config)
@@ -33,7 +57,9 @@ public static class RuntimeLauncher
     /// <summary>
     /// 拼装录制参数（纯函数，供单测）。语义与 PrimalPlayer main.cpp 对齐：
     /// --record 目录（frame_%04d.png）、--record-frames 捕获帧上限
-    /// （0 = 跟随窗口关闭）、--record-every 步长、--record-metrics CSV。
+    /// （0 = 跟随窗口关闭）、--record-every 步长、--record-metrics &lt;file&gt;
+    /// （player 的行式解析器要求带显式路径——无值时 next() 返回 null，
+    /// 该 token 会落入 unknown-arg 分支导致进程 exit 2）。
     /// </summary>
     public static void AppendRecordArguments(List<string> arguments, string recordDir, PlayerRecordOptions options)
     {
@@ -42,7 +68,7 @@ public static class RuntimeLauncher
         if (options.Every > 1)
             arguments.AddRange(new[] { "--record-every", options.Every.ToString() });
         if (options.Metrics)
-            arguments.Add("--record-metrics");
+            arguments.AddRange(new[] { "--record-metrics", Path.Combine(recordDir, "metrics.csv") });
     }
 
     /// <summary>录制产物目录约定：&lt;project&gt;/Captures/&lt;scene&gt;-&lt;yyyyMMdd-HHmmss&gt;。
@@ -73,9 +99,23 @@ public static class RuntimeLauncher
     }
 
     /// <summary>
+    /// 拼装固定分辨率参数（纯函数，供单测）。语义与 PrimalPlayer main.cpp 对齐：
+    /// --width/--height 指定离屏 RT 与窗口内容尺寸；--fixed 去掉 NSWindow 的
+    /// Resizable 样式，保证显示分辨率与渲染分辨率严格一致。
+    /// </summary>
+    public static void AppendResolutionArguments(List<string> arguments, int width, int height)
+    {
+        arguments.AddRange(new[] { "--width", Math.Clamp(width, 16, 8192).ToString() });
+        arguments.AddRange(new[] { "--height", Math.Clamp(height, 16, 8192).ToString() });
+        arguments.Add("--fixed");
+    }
+
+    /// <summary>
     /// Export the live scene and launch PrimalPlayer. Returns false (with a
     /// logged reason) when there is no scene, the host binary is missing,
-    /// or the process refused to start.
+    /// or the process refused to start. RenderSurface mode never reaches the
+    /// player — the caller (WorldEditorView / RunCommands) routes it to
+    /// EngineViewport3D.BeginRuntimePreview instead.
     /// </summary>
     public static bool Run(ViewModels.WorldEditorViewModel vm, string config)
     {
@@ -87,6 +127,11 @@ public static class RuntimeLauncher
         if (vm.ActiveScene == null)
         {
             Logger.Warning("[Run] no active scene to run.");
+            return false;
+        }
+        if (ResolveMode(vm.RunModeIndex) == RunMode.RenderSurface)
+        {
+            Logger.Warning("[Run] RenderSurface 模式不开 PrimalPlayer —— 应走编辑器视口 runtime 预览。");
             return false;
         }
 
@@ -116,6 +161,10 @@ public static class RuntimeLauncher
         }
 
         var arguments = new List<string> { "--scene", package };
+
+        // 固定分辨率模式：窗口内容恰为 WxH 且不可缩放（确定性录制/比对前置）。
+        if (ResolveMode(vm.RunModeIndex) == RunMode.FixedResolution)
+            AppendResolutionArguments(arguments, vm.RunWidth, vm.RunHeight);
 
         // Run 录制（Part B）：VM 的录制开关 → player 参数。录满帧数后 player
         // 自动退出，stderr 的 record summary 会经 BuildService.OnOutput 流入

@@ -825,10 +825,37 @@ private EngineViewport3D? _viewport;
     {
         if (DataContext is not WorldEditorViewModel vm) return;
         var config = vm.Project?.BuildConfigName ?? "Debug";
-        AppendBuildLog($"[run] launching PrimalPlayer (api={vm.TargetGraphicsApi}, config={config})");
+        var mode = RuntimeLauncher.ResolveMode(vm.RunModeIndex);
+
+        // Run 模式三选一（§Run）：Render Surface 不开外部进程 —— 内嵌视口切
+        // runtime 渲染路径（PipelineSetEditorMode(false)）+ 场景相机取景；
+        // Stop 同一按钮退出并恢复编辑器状态。
+        if (mode == RuntimeLauncher.RunMode.RenderSurface)
+        {
+            if (_viewport == null || !_viewport.BeginRuntimePreview(vm))
+            {
+                AppendBuildLog("[run] render-surface runtime preview failed — check log (no scene camera?)");
+                return;
+            }
+            AppendBuildLog($"[run] runtime preview in render surface (scene='{vm.ActiveScene?.Name}', api=editor viewport)");
+            IsBuilding = true;  // 启用 Stop 按钮；Stop 分支先查预览再查进程
+
+            // Rec：Render Surface 模式没有 player 进程，录制由编辑器侧
+            // DispatcherTimer 驱动（TryCaptureScreenshot 逐帧落 PNG）。
+            if (vm.RecordOnRun && vm.Project != null && vm.ActiveScene != null)
+            {
+                var recordDir = RuntimeLauncher.ResolveRecordDirectory(vm.Project.Path, vm.ActiveScene.Name);
+                if (_viewport.StartPreviewFrameCapture(recordDir, vm.RecordFrames))
+                    AppendBuildLog($"[run] preview capture → {recordDir} (frames={vm.RecordFrames})");
+            }
+            return;
+        }
+
+        AppendBuildLog($"[run] launching PrimalPlayer (api={vm.TargetGraphicsApi}, config={config}, mode={mode})");
         IsBuilding = true;
         // Run 的新语义（规划 §Run/Stop 2026-09-03）：导出运行时场景包并启动
         // PrimalPlayer 外部宿主（不再是"重启编辑器自己"）。Stop 复用同一进程句柄。
+        // 固定分辨率模式由 RuntimeLauncher 追加 --width/--height/--fixed。
         if (!RuntimeLauncher.Run(vm, config))
         {
             AppendBuildLog("[run] launch failed — check log (missing player binary or no scene)");
@@ -838,6 +865,15 @@ private EngineViewport3D? _viewport;
 
     private void OnBuildStopClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
+        // Runtime 预览（Render Surface 模式）优先：没有外部进程可停，
+        // 退出预览并恢复编辑器渲染状态。
+        if (_viewport is { IsRuntimePreview: true })
+        {
+            _viewport.EndRuntimePreview();
+            IsBuilding = false;
+            AppendBuildLog("[run] render-surface runtime preview stopped");
+            return;
+        }
         AppendBuildLog("[build] stop requested");
         BuildService.Stop();
     }

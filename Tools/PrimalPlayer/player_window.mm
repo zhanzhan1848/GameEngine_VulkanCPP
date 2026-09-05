@@ -26,7 +26,7 @@ void SetShouldClose() { g_shouldClose = true; }
 }
 @end
 
-void* PlayerWindowCreate(int width, int height, const char* title)
+void* PlayerWindowCreate(int width, int height, const char* title, int resizable)
 {
     @autoreleasepool {
         g_app = [NSApplication sharedApplication];
@@ -35,14 +35,15 @@ void* PlayerWindowCreate(int width, int height, const char* title)
 
         NSRect frame = NSMakeRect(0, 0, width, height);
         NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                           NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+                           NSWindowStyleMaskMiniaturizable;
+        if (resizable) style |= NSWindowStyleMaskResizable;
         g_window = [[NSWindow alloc] initWithContentRect:frame
                                                styleMask:style
                                                  backing:NSBackingStoreBuffered
                                                    defer:NO];
         NSString* nsTitle = [NSString stringWithUTF8String: title ? title : "Primal Player"];
         [g_window setTitle:nsTitle];
-        [g_window setContentMinSize:NSMakeSize(320, 240)];
+        if (resizable) [g_window setContentMinSize:NSMakeSize(320, 240)];
         [g_window center];
 
         g_content = [[NSView alloc] initWithFrame:frame];

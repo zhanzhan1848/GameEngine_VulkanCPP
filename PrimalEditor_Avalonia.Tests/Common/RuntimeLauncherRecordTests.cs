@@ -26,7 +26,8 @@ public sealed class RuntimeLauncherRecordTests
             "--scene", "/tmp/x.primalrun",
             "--record", "/tmp/rec",
             "--record-frames", "300",
-            "--record-metrics",
+            // player 的行式解析器要求 --record-metrics 带显式路径（无值即 unknown arg）。
+            "--record-metrics", Path.Combine("/tmp/rec", "metrics.csv"),
         }, args);
     }
 

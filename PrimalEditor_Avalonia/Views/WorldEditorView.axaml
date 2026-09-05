@@ -59,6 +59,25 @@
                           ItemsSource="{Binding TargetGraphicsApis}"
                           SelectedIndex="{Binding TargetGraphicsApiIndex}"
                           ToolTip.Tip="Graphics API for the Run button's PrimalPlayer host"/>
+                <!-- Run 模式三选一：独立窗口（原路线 PrimalPlayer）/ 固定分辨率
+                     （PrimalPlayer width/height/fixed 参数）/ 渲染表面（不开外部
+                     进程，内嵌 surface 切 runtime 渲染路径 + 场景相机取景）。 -->
+                <TextBlock Text="RUN" FontFamily="{DynamicResource FontDisplay}"
+                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                           Foreground="{DynamicResource ElectricBlueBrush}"
+                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <ComboBox Width="130"
+                          ItemsSource="{Binding RunModeOptions}"
+                          SelectedIndex="{Binding RunModeIndex}"
+                          ToolTip.Tip="Run 路线：Player Window=外部 PrimalPlayer 默认窗口；Fixed Resolution=固定分辨率窗口（确定性录制）；Render Surface=编辑器内嵌渲染表面直接跑 runtime 渲染路径（Stop 退出）"/>
+                <TextBox Width="56" Height="24" Text="{Binding RunWidth}"
+                         IsVisible="{Binding IsFixedResolutionMode}"
+                         VerticalAlignment="Center" VerticalContentAlignment="Center"
+                         ToolTip.Tip="固定分辨率宽度（像素）"/>
+                <TextBox Width="56" Height="24" Text="{Binding RunHeight}"
+                         IsVisible="{Binding IsFixedResolutionMode}"
+                         VerticalAlignment="Center" VerticalContentAlignment="Center"
+                         ToolTip.Tip="固定分辨率高度（像素）"/>
                 <!-- Run 录制（Part B）：player 进程内逐帧 PNG 捕获（渲染帧与捕获帧
                      1:1，无丢帧），录满帧数自动退出；产物在 <project>/Captures/。 -->
                 <CheckBox Content="Rec" VerticalAlignment="Center" Margin="8,0,0,0"

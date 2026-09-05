@@ -1,5 +1,5 @@
 {
-  "$version": "748bc4b7e16b1fd8",
+  "$version": "93acaa9fb41a4d21",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -214,6 +214,35 @@
       "returns": "object"
     },
     {
+      "verb": "entity.set-material",
+      "channel": "editor",
+      "description": "把材质资产赋给实体 MeshRendererComponent 的材质槽（与 Inspector 编辑同路径：先落文档模型记入 undo，再 SceneSynchronizer.RefreshEntityMaterials 热推引擎——若该材质带图 sidecar 会立即编译并应用）。slot 为 0-based 槽位，缺省 0；slot == 当前槽数 = 追加新槽，超出则 INVALID_PARAMS。材质 guid/path 二选一（path 为 .material.json 的项目相对或绝对路径）。实体没有 MeshRenderer 组件或材质不存在返回 NOT_FOUND。撤销走 editor.undo（与 Inspector 一致）。",
+      "example": "{\"entityGuid\":\"…\",\"path\":\"Content/Materials/Brass.material.json\",\"slot\":0}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "guid",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "slot",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
       "verb": "entity.set-name",
       "channel": "editor",
       "description": "按 guid 重命名实体。名字只存在于编辑器文档（不进引擎）。记入 undo。空名字返回 INVALID_PARAMS。",
@@ -306,11 +335,228 @@
       "returns": "object"
     },
     {
+      "verb": "material.create",
+      "channel": "editor",
+      "description": "创建材质资产（与内容浏览器“新建材质”同路径）：写 <folder>/<name>.material.json 并注册 AssetRegistry（.meta 落 GUID）。graph=true 同时创建最小合法图 sidecar（单个 MaterialOutput 节点，1-based 节点 id=1），后续用 material.graph.* 连线。folder 为项目相对目录，默认项目 Content 根。name 只允许字母/数字/下划线/连字符（防止路径注入）；目标文件已存在返回 ALREADY_EXISTS。",
+      "example": "{\"name\":\"Brass\",\"folder\":\"Content/Materials\",\"graph\":true}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "folder",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "graph",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "material.graph.add-node",
+      "channel": "editor",
+      "description": "向材质图 sidecar 追加一个节点并保存。type 为注册节点类型名（material.graph.node-types 可枚举，如 ConstantFloat3/Add/Multiply/SampleTexture/MaterialOutput）。x/y 为编辑器画布坐标（可选，缺省按现有节点数网格排布）。返回 1-based nodeId（0 表示失败；后续 connect/set-param 用它寻址）。材质无 sidecar 返回 NOT_FOUND；type 未注册返回 INVALID_PARAMS。",
+      "example": "{\"path\":\"Content/Materials/Brass.material.json\",\"type\":\"ConstantFloat3\"}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "guid",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "type",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "x",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "y",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "material.graph.connect",
+      "channel": "editor",
+      "description": "在材质图两点间连一条边并保存。fromNode/toNode 为 1-based nodeId，fromPin/toPin 为 0-based 管脚序号（输出脚→输入脚方向）。同一输入脚重连会替换旧边（与编辑器画布一致）。节点/管脚越界或方向非法返回 INVALID_PARAMS。连线后图的编译错误随响应 errors 返回（空数组 = 通过）。",
+      "example": "{\"path\":\"Content/Materials/Brass.material.json\",\"fromNode\":2,\"fromPin\":0,\"toNode\":1,\"toPin\":0}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "guid",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "fromNode",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "fromPin",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "toNode",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "toPin",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "material.graph.disconnect",
+      "channel": "editor",
+      "description": "移除材质图中一条边并保存。寻址参数与 material.graph.connect 完全一致；边不存在时视为成功（幂等），响应 removed=false。",
+      "example": "{\"path\":\"Content/Materials/Brass.material.json\",\"fromNode\":2,\"fromPin\":0,\"toNode\":1,\"toPin\":0}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "guid",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "fromNode",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "fromPin",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "toNode",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "toPin",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "material.graph.get",
+      "channel": "editor",
+      "description": "读取材质图当前拓扑：nodes（1-based id + 类型 + 画布坐标）、connections（1-based 端点）、executeErrors（编译错误）与原始 JSON（params 明细在内）。材质没有 sidecar 时返回 hasGraph=false（不是错误）。LLM 修改图前先读本命令建立寻址。",
+      "example": "{\"path\":\"Content/Materials/Brass.material.json\"}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "guid",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "material.graph.node-types",
+      "channel": "editor",
+      "description": "枚举引擎注册的全部材质图节点类型（含显示名/分类/是否输出节点），以及每个类型的输入/输出管脚名与参数描述符（名称/类型/取值范围）。批创建连线前先调用本命令确定 type 名、pin 序号与 param 名。引擎未加载返回 NOT_READY。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "material.graph.set-param",
+      "channel": "editor",
+      "description": "设置材质图中某节点的参数并保存。node 为 1-based nodeId（material.graph.get 查询）。param 为参数名（如 ConstantFloat3.value / ConstantTexture.asset_path / SampleTexture.srgb）。floats 与 text 二选一：floats 长度 1/2/3/4 分别落 Float/Float2/Float3/Float4；text 落 String（如贴图相对路径）。参数名或类型不匹配时该参数静默失败——响应里 paramApplied=false 即未生效，用 material.graph.node-types 查描述符。",
+      "example": "{\"path\":\"Content/Materials/Brass.material.json\",\"node\":2,\"param\":\"value\",\"floats\":[0.8,0.6,0.2]}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "guid",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "node",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "param",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "floats",
+          "type": "array<number>",
+          "required": false
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
       "verb": "run.launch",
       "channel": "editor",
-      "description": "导出运行时场景包并启动 PrimalPlayer 外部宿主（与工具栏 Run 按钮同一 RuntimeLauncher 路径）。record=true 时附带逐帧录制：渲染帧与捕获帧 1:1 落 PNG（frame_%04d.png），录满 recordFrames 帧后 player 自动退出（0 = 跟随窗口关闭）；recordMetrics=true 同时写逐帧亮度 CSV（口径同 editor.metrics）。产物目录 <project>/Captures/<scene>-<时间戳>/。无项目/无激活场景返回 NOT_READY；player 二进制缺失返回 ENGINE_ERROR。本命令立即返回启动结果，不等待 player 退出（用 pgrep 或 Captures 目录判断录制完成）。",
-      "example": "{\"record\":true,\"recordFrames\":60,\"recordMetrics\":true}",
+      "description": "按 mode 启动运行：window=导出运行时场景包并启动外部 PrimalPlayer（与工具栏 Run 按钮原路线相同）；fixed=同样外部 PrimalPlayer，但按 width/height 固定窗口分辨率且不可缩放（width/height 像素，16..8192，默认 1280x720）；surface=不开外部进程，编辑器内嵌渲染表面直接跑 runtime 渲染路径（deferred/RenderGraph，受 RENDER 组合框 pass 开关控制），透过场景 Camera 实体取景，场景无 Camera 实体返回 ENGINE_ERROR；再次 run.launch 幂等。record=true 时录制逐帧 PNG（frame_%04d.png）：window/fixed 由 player 进程内捕获（渲染帧与捕获帧 1:1，录满 recordFrames 自动退出，0=跟随窗口关闭）；surface 由编辑器侧逐帧捕获（PNG 编码含 GPU WaitIdle，捕获率低于帧率，立即返回）。recordMetrics=true 同时写逐帧亮度 CSV。产物目录 <project>/Captures/<scene>-<时间戳>/。无项目/无激活场景返回 NOT_READY；player 二进制缺失返回 ENGINE_ERROR。window/fixed 模式本命令立即返回启动结果，不等待 player 退出（用 pgrep 或 Captures 目录判断录制完成）；surface 模式用 run.stop 结束。",
+      "example": "{\"mode\":\"surface\",\"record\":true,\"recordFrames\":60,\"recordMetrics\":true}",
       "params": [
+        {
+          "name": "mode",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "width",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "height",
+          "type": "integer",
+          "required": false
+        },
         {
           "name": "record",
           "type": "boolean",
@@ -327,6 +573,14 @@
           "required": false
         }
       ],
+      "returns": "object"
+    },
+    {
+      "verb": "run.stop",
+      "channel": "editor",
+      "description": "结束运行：surface 模式的 runtime 预览先于外部进程——预览激活时退出预览并恢复编辑器渲染路径（PipelineSetEditorMode(true) + 编辑器相机 + 叠层）；否则停止 window/fixed 模式启动的 PrimalPlayer 进程（若有）。幂等：两者都不活跃时返回 stopped=false 而非错误。",
+      "example": "{}",
+      "params": [],
       "returns": "object"
     },
     {

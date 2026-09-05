@@ -237,6 +237,75 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
     public string TargetGraphicsApi => TargetGraphicsApis[_targetGraphicsApiIndex];
 
     // =======================================================================
+    // Run 模式（§Run 三选一）：独立窗口（原路线 PrimalPlayer）/ 固定分辨率
+    // （PrimalPlayer --width/--height/--fixed，确定性录制用）/ 渲染表面
+    // （不开外部进程，编辑器内嵌 surface 切 runtime 渲染路径）。
+    // =======================================================================
+
+    /// <summary>工具栏 Run 模式标签；index 1:1 映射 RuntimeLauncher.RunMode。</summary>
+    public System.Collections.Generic.IReadOnlyList<string> RunModeOptions { get; } = new[]
+    {
+        "Player Window",
+        "Fixed Resolution",
+        "Render Surface",
+    };
+
+    private int _runModeIndex;
+
+    /// <summary>当前 Run 模式。默认 0 = 原路线（外部 PrimalPlayer 默认窗口）。</summary>
+    public int RunModeIndex
+    {
+        get => _runModeIndex;
+        set
+        {
+            var clamped = Math.Clamp(value, 0, RunModeOptions.Count - 1);
+            if (_runModeIndex != clamped)
+            {
+                _runModeIndex = clamped;
+                OnPropertyChanged(nameof(RunModeIndex));
+                OnPropertyChanged(nameof(IsFixedResolutionMode));
+            }
+        }
+    }
+
+    /// <summary>固定分辨率模式的 W/H 输入框只在该模式下可见（AXAML IsVisible 绑定）。</summary>
+    public bool IsFixedResolutionMode => _runModeIndex == 1;
+
+    private int _runWidth = 1280;
+
+    /// <summary>固定分辨率模式的渲染/窗口宽度（像素，16..8192）。</summary>
+    public int RunWidth
+    {
+        get => _runWidth;
+        set
+        {
+            var clamped = Math.Clamp(value, 16, 8192);
+            if (_runWidth != clamped)
+            {
+                _runWidth = clamped;
+                OnPropertyChanged(nameof(RunWidth));
+            }
+        }
+    }
+
+    private int _runHeight = 720;
+
+    /// <summary>固定分辨率模式的渲染/窗口高度（像素，16..8192）。</summary>
+    public int RunHeight
+    {
+        get => _runHeight;
+        set
+        {
+            var clamped = Math.Clamp(value, 16, 8192);
+            if (_runHeight != clamped)
+            {
+                _runHeight = clamped;
+                OnPropertyChanged(nameof(RunHeight));
+            }
+        }
+    }
+
+    // =======================================================================
     // Run 录制（Part B，Docs/2026-09-05）：Run 启动 PrimalPlayer 时附带逐帧
     // 录制参数。录制本体在 player 进程（渲染帧与捕获帧 1:1，无丢帧），编辑器
     // 只拼参数；产物目录约定见 RuntimeLauncher.ResolveRecordDirectory。

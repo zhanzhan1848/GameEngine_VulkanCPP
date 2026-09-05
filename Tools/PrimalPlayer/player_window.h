@@ -12,8 +12,10 @@ extern "C" {
 
 // Creates the application, a titled window and its content view.
 // Returns the content NSView pointer (for CreateRenderSurface's host),
-// or null on failure. w/h are the initial content size.
-void* PlayerWindowCreate(int width, int height, const char* title);
+// or null on failure. w/h are the initial content size. resizable=false
+// 去掉窗口的 Resizable 样式（--fixed：固定分辨率录制/比对要求显示
+// 分辨率与渲染分辨率严格一致）。
+void* PlayerWindowCreate(int width, int height, const char* title, int resizable);
 
 // Pumps NSApp events. Returns 0 once the user asked to close (close box),
 // non-zero while the window should stay up. (Esc handling 相位 1 暂缺。)

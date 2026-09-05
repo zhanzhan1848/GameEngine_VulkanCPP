@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using PrimalEditor_Avalonia.Common;
+using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject;
 using PrimalEditor_Avalonia.Native;
@@ -460,14 +461,22 @@ public partial class EngineViewport3D : UserControl
         {
             _animTime += dt;
 
-            // The render loop is UI-thread-only and the native debug queue
-            // is mutex-protected, so helpers can safely be submitted just
-            // before this frame drains the queue.
-            _sceneIconRenderer.DrawEditorVisuals(
-                _scene ?? GetActiveSceneForIconRenderer(),
-                _gizmoVisible,
-                _gizmoTarget,
-                _gizmoMode);
+            // Runtime 预览（Run 模式 Render Surface）下不画编辑器视觉
+            // （网格 / 世界轴 / 光源图标 / gizmo 线）——与 PrimalPlayer 的画面
+            // 口径一致。调试线队列是持久的（编辑器路径每帧 Clear+重提交），
+            // 预览中必须每帧清空，否则上一帧残留的网格线会一直画。
+            if (_runtimePreview)
+            {
+                NativeEngineBridge.ClearDebugLines();
+            }
+            else
+            {
+                _sceneIconRenderer.DrawEditorVisuals(
+                    _scene ?? GetActiveSceneForIconRenderer(),
+                    _gizmoVisible,
+                    _gizmoTarget,
+                    _gizmoMode);
+            }
 
             var surfaceId = (uint)_host.SurfaceId;
             // Render through the editor's Track A camera by default
@@ -702,6 +711,7 @@ public partial class EngineViewport3D : UserControl
         _pendingInit = false;
         _retryTimer?.Stop();
         _retryTimer = null;
+        StopPreviewFrameCapture();
         StopRenderLoop();
         LayoutUpdated -= OnLayoutUpdated;
         if (_renderTarget != 0)
@@ -1381,10 +1391,208 @@ public partial class EngineViewport3D : UserControl
         }
     }
 
+    // =======================================================================
+    // Runtime 预览（Run 模式 "Render Surface"，§Run 三选一）：不开外部进程，
+    // 在编辑器内嵌 render surface 上跑真正的 runtime 渲染路径。与 PrimalPlayer
+    // 的两个对齐点：
+    //   1. PipelineSetEditorMode(false) —— 管线从"编辑器轻量前向"切到 runtime
+    //      （deferred/RenderGraph）路径，与 player main.cpp 的 PipelineSetEditorMode(0)
+    //      同一语义；
+    //   2. LookThroughCamera(场景相机实体) —— SyncCamerasFromECS 读该实体的
+    //      CameraComponent + Transform 作为视矩阵，与 player 用场景相机取景一致。
+    // 管线功能开关（RENDER 组合框的 pass 预设 / GI 面板）在 runtime 路径下同样
+    // 生效，所以"按图形功能跑实际渲染"在本模式下完整成立。Stop 退出并恢复
+    // 编辑器状态（PipelineSetEditorMode(true) + 编辑器相机 + 叠层显示）。
+    // =======================================================================
+
+    private bool _runtimePreview;
+
+    /// <summary>当前是否处于 runtime 预览（Run 模式 Render Surface 进行中）。</summary>
+    public bool IsRuntimePreview => _runtimePreview;
+
+    /// <summary>
+    /// 进入 runtime 预览：切 runtime 渲染路径 + 透过场景相机取景 + 隐藏编辑器
+    /// 叠层。要求场景中存在 Camera 实体且已同步到引擎（与 player 的取景约束
+    /// 相同）。已在预览中时幂等返回 true。
+    /// </summary>
+    public bool BeginRuntimePreview(ViewModels.WorldEditorViewModel vm)
+    {
+        if (_runtimePreview) return true;
+        if (!NativeEngineBridge.IsLoaded || !_viewportInitialized || _renderTarget == 0)
+        {
+            Logger.Warning("[Run] render surface 未就绪，无法进入 runtime 预览");
+            return false;
+        }
+        var scene = _scene ?? vm.ActiveScene;
+        if (scene == null)
+        {
+            Logger.Warning("[Run] 没有激活场景，无法进入 runtime 预览");
+            return false;
+        }
+        var cameraEntity = FindCameraEntity(scene.Entities);
+        if (cameraEntity == null)
+        {
+            Logger.Warning($"[Run] 场景 '{scene.Name}' 没有 Camera 实体 —— runtime 预览需要至少一个相机" +
+                           "（entity.create kind=Camera 或 Inspector 添加）");
+            return false;
+        }
+        var nativeId = vm.GetNativeEntityId(cameraEntity);
+        if (nativeId == 0)
+        {
+            Logger.Warning($"[Run] 相机实体 '{cameraEntity.Name}' 尚未同步到引擎（engine.tick 后重试）");
+            return false;
+        }
+
+        // 场景相机纵横比跟随内嵌 surface，避免拉伸（与 player 的窗口纵横比同步对应）。
+        if (Bounds.Width > 0 && Bounds.Height > 0)
+            NativeEngineBridge.SetEntityCameraAspectRatio(nativeId, (float)Bounds.Width / (float)Bounds.Height);
+
+        // 先以场景相机取景（仍处编辑器模式），渲染一帧"干净底图"：前向路径每帧
+        // LoadAction::Clear 会清掉 RT 里残留的编辑器画面（网格/图标），而 runtime
+        // （deferred/RenderGraph）路径对既有 RT 内容做合成、从不清背景——不清底
+        // 的话旧画面会在背景像素上永久残留。清空调试线队列保证底图无网格/图标；
+        // RT 身份不变（重建会让 deferred 路径输出全黑，见 2026-09-06 实验）。
+        LookThroughCamera(nativeId);
+        NativeEngineBridge.ClearDebugLines();
+        if (System.Threading.Interlocked.CompareExchange(ref _renderInProgress, 1, 0) == 0)
+        {
+            try
+            {
+                NativeEngineBridge.PipelineRenderFrameForSceneCamera(
+                    _renderTarget, _cameraId, (uint)_host.SurfaceId, nativeId);
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _renderInProgress, 0);
+            }
+        }
+
+        NativeEngineBridge.PipelineSetEditorMode(false);
+        SetEditorOverlaysVisible(false);
+        _runtimePreview = true;
+        Logger.Info($"[Run] runtime 预览开始：editor mode=false (pipeline readback={NativeEngineBridge.PipelineIsEditorMode()}), " +
+                    $"camera='{cameraEntity.Name}' (native {nativeId})");
+        // 已知引擎侧缺口（2026-09-06 实验）：runtime（deferred/GPUDriven）路径消费
+        // RenderSceneSnapshot（runtime 注册链），编辑器 SceneRuntimeSynchronizer
+        // 喂的是前向路径的 RenderScene——预览画面因此不含场景实体（仅环境/后处理）。
+        // 实体进 runtime 链属引擎集成项，落地后本模式即为完整的"内嵌 runtime 画面"。
+        Logger.Info("[Run] runtime 预览限制：编辑器同步链尚未接入 runtime 实体注册（RenderSceneSnapshot），画面暂不含场景实体");
+        return true;
+    }
+
+    /// <summary>退出 runtime 预览并恢复编辑器状态。未在预览中时为 no-op。</summary>
+    public void EndRuntimePreview()
+    {
+        if (!_runtimePreview) return;
+        StopPreviewFrameCapture();
+        if (NativeEngineBridge.IsLoaded)
+            NativeEngineBridge.PipelineSetEditorMode(true);
+        LookThroughCamera(0);
+        SetEditorOverlaysVisible(true);
+        _runtimePreview = false;
+        Logger.Info("[Run] runtime 预览结束：editor mode=true, 编辑器相机恢复");
+    }
+
+    private void SetEditorOverlaysVisible(bool visible)
+    {
+        if (this.FindControl<ViewportOverlay>("Overlay") is { } overlay) overlay.IsVisible = visible;
+        if (this.FindControl<GizmoOverlay>("Gizmo") is { } gizmo) gizmo.IsVisible = visible;
+    }
+
+    private static GameEntity? FindCameraEntity(System.Collections.Generic.IEnumerable<GameEntity> entities)
+    {
+        foreach (var entity in entities)
+        {
+            if (entity.GetComponent<CameraComponent>() != null) return entity;
+            var inChildren = FindCameraEntity(entity.Children);
+            if (inChildren != null) return inChildren;
+        }
+        return null;
+    }
+
+    // --- Runtime 预览期间的逐帧捕获（Rec）---
+    // PrimalPlayer 的录制在 player 进程内逐帧落盘；Render Surface 模式没有
+    // player 进程，改由编辑器侧 DispatcherTimer 驱动：每 tick 以当前（场景）
+    // 相机渲染一帧 → SaveRenderTargetAsPng。走 TryCaptureScreenshot 的
+    // _renderInProgress 互锁，绝不与渲染 tick 重入。PNG 编码含 GPU WaitIdle，
+    // 实际捕获率低于 30fps（与 editor.record 的"每帧真实耗时"口径一致）。
+
+    private DispatcherTimer? _captureTimer;
+    private string? _captureDir;
+    private int _captureTotal;
+    private int _captureIndex;
+
+    /// <summary>预览帧捕获进行中（Run+Rec 的 Render Surface 路线）。</summary>
+    public bool IsPreviewCapturing => _captureTimer != null;
+
+    /// <summary>
+    /// 开始对 runtime 预览逐帧捕获 PNG（frame_%04d.png）。要求已处于
+    /// runtime 预览；返回 false 表示未能启动（参数/状态无效）。
+    /// </summary>
+    public bool StartPreviewFrameCapture(string directory, int frames)
+    {
+        if (!_runtimePreview)
+        {
+            Logger.Warning("[Run] 帧捕获只在 runtime 预览（Render Surface 模式）下可用");
+            return false;
+        }
+        if (frames < 1)
+        {
+            Logger.Warning("[Run] 录制帧数必须 ≥ 1");
+            return false;
+        }
+        StopPreviewFrameCapture();
+        try { System.IO.Directory.CreateDirectory(directory); }
+        catch (Exception ex)
+        {
+            Logger.Error($"[Run] 录制目录创建失败: {directory}", ex);
+            return false;
+        }
+        _captureDir = directory;
+        _captureTotal = frames;
+        _captureIndex = 0;
+        _captureTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(33)
+        };
+        _captureTimer.Tick += OnPreviewCaptureTick;
+        _captureTimer.Start();
+        Logger.Info($"[Run] 预览帧捕获启动 → {directory} (frames={frames})");
+        return true;
+    }
+
+    public void StopPreviewFrameCapture()
+    {
+        if (_captureTimer == null) return;
+        _captureTimer.Stop();
+        _captureTimer.Tick -= OnPreviewCaptureTick;
+        _captureTimer = null;
+        Logger.Info($"[Run] 预览帧捕获结束：captured={_captureIndex}/{_captureTotal} → {_captureDir}");
+        _captureDir = null;
+        _captureTotal = 0;
+        _captureIndex = 0;
+    }
+
+    private void OnPreviewCaptureTick(object? sender, EventArgs e)
+    {
+        if (_captureDir == null || _captureIndex >= _captureTotal)
+        {
+            StopPreviewFrameCapture();
+            return;
+        }
+        var path = System.IO.Path.Combine(_captureDir, $"frame_{_captureIndex:D4}.png");
+        if (TryCaptureScreenshot(path, out _, out _))
+            _captureIndex++;
+        if (_captureIndex >= _captureTotal)
+            StopPreviewFrameCapture();
+    }
+
     /// <summary>Attach the scene whose editor camera this viewport edits.</summary>
     public void SetScene(Scene? scene)
     {
         if (ReferenceEquals(_scene, scene)) return;
+        // 换场景时 runtime 预览的原生相机 id 已失效，先退回编辑器模式。
+        if (_runtimePreview) EndRuntimePreview();
         SaveEditorCameraState();
         _scene = scene;
         _lookThroughSceneEntityId = 0;

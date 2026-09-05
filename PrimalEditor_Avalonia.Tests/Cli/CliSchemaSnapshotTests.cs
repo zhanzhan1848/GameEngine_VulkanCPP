@@ -21,6 +21,7 @@ public sealed class CliSchemaSnapshotTests
         var registry = new CliCommandRegistry();
         registry.Register(new EditorCommands());
         registry.Register(new EntityCommands());
+        registry.Register(new MaterialCommands());
         registry.Register(new FrameCaptureCommands());
         registry.Register(new SequenceCommands());
         registry.Register(new RunCommands());

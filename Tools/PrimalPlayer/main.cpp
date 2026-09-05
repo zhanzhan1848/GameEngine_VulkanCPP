@@ -1,8 +1,8 @@
 // =============================================================================
 // PrimalPlayer — 运行时宿主（规划 §Run/Stop，2026-09-03）
 //
-//   PrimalPlayer --scene <active.primalrun> [--width W] [--height H] [--debug]
-//                 [--record <dir>] [--record-frames N] [--record-every N]
+//   PrimalPlayer --scene <active.primalrun> [--width W] [--height H] [--fixed]
+//                 [--debug] [--record <dir>] [--record-frames N] [--record-every N]
 //                 [--record-metrics <file.csv>]
 //
 // 编辑器 Run 按钮导出运行时场景包（Content/RuntimeSceneExporter.cs，行式
@@ -433,6 +433,7 @@ int main(int argc, char** argv)
     std::string scene_path;
     std::uint32_t width = 1280, height = 720;
     bool debug_backend = false;
+    bool fixed_size = false; // --fixed：窗口不可缩放（显示分辨率=渲染分辨率）
     std::uint32_t render_mode = 3; // Deferred+Shadow+AO+GI（编辑器默认档一致）
     RecordConfig record;
 
@@ -442,6 +443,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--width") == 0 && next()) width = static_cast<std::uint32_t>(std::atoi(argv[i]));
         else if (std::strcmp(argv[i], "--height") == 0 && next()) height = static_cast<std::uint32_t>(std::atoi(argv[i]));
         else if (std::strcmp(argv[i], "--debug") == 0) debug_backend = true;
+        else if (std::strcmp(argv[i], "--fixed") == 0) fixed_size = true;
         else if (std::strcmp(argv[i], "--mode") == 0 && next()) render_mode = static_cast<std::uint32_t>(std::atoi(argv[i]));
         else if (std::strcmp(argv[i], "--record") == 0 && next()) {
             record.enabled = true;
@@ -452,7 +454,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--record-metrics") == 0 && next()) record.metrics_path = argv[i];
         else {
             std::fprintf(stderr, "[player] unknown arg: %s\n", argv[i]);
-            std::fprintf(stderr, "usage: PrimalPlayer --scene <pkg> [--width W] [--height H] [--debug] [--mode 0..3]\n");
+            std::fprintf(stderr, "usage: PrimalPlayer --scene <pkg> [--width W] [--height H] [--fixed] [--debug] [--mode 0..3]\n");
             std::fprintf(stderr, "                   [--record <dir>] [--record-frames N] [--record-every N] [--record-metrics <file.csv>]\n");
             return 2;
         }
@@ -494,7 +496,8 @@ int main(int argc, char** argv)
     void* host_view = nullptr;
 #if defined(PRIMAL_PLAYER_WINDOW)
     host_view = PlayerWindowCreate(static_cast<int>(width), static_cast<int>(height),
-                                   ("Primal Player — " + scene.scene_name).c_str());
+                                   ("Primal Player — " + scene.scene_name).c_str(),
+                                   fixed_size ? 0 : 1);
     if (!host_view) { std::fprintf(stderr, "[player] window create failed\n"); return 3; }
 #endif
 
