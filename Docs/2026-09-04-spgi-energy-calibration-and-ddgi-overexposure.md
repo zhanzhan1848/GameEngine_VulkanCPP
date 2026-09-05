@@ -497,3 +497,18 @@ NaN 净化与自反馈回退全部相同）。shader 层洗清。
    —— 若 Vulkan 全零 → 直射项归零实锤 → 查 SurfaceCacheShadow.comp。
 2. L1 亮度尾差（0.33 vs 1.39）随直射项修复自然复测。
 3. RG 瞬态槽位别名根修（SSGI blur 写交换链）。
+
+
+### 同时代 A/B 终测（本轮）
+
+| 量 | Metal | Vulkan |
+|---|---|---|
+| 卡片 lit / p50 | 332 / **0.344** | 266 / **0.128** |
+| 探针 L0 p50 | 1.066 | 1.073 |
+| 探针 L1 p50 / p90 | 0.172 / **1.45** | 0.164 / **0.33** |
+| gather p50 | 2.60 | 0.28 |
+
+卡片差 2.7× 为真（同代码时代）。已排除：shader 公式、lights、可见性、
+SC 制度、探针 L0。剩余收敛点 = SC atlas 内容（E_indirect 方向形状 +
+反馈平衡点 + 捕获 albedo/normal 内容）。定位需 Metal GPU capture 或
+atlas 逐通道 dump，留待下轮专项。
