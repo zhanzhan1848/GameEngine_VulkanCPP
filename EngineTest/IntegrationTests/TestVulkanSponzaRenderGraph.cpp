@@ -449,6 +449,11 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     lumen::LumenConfig lumenConfig{};
     lumenConfig.quality = lumen::LumenQualityPreset::High;
     lumenConfig.axes.use_screen_probes = true;
+    // 2026-09-05 跨平台 SC 制度对齐：全量捕获（capture_budget=0）与 Metal
+    // TestModularPipeline 同配置。稀疏更新（默认 256 页/帧）下 SC atlas 长
+    // 期陈旧 → 探针 trace 采样到均匀化辐射 → 探针场 L1 方向能量只有
+    // Metal 的一半（|L1|/|L0| 0.18 vs 0.40），画面偏平偏暗。
+    lumenConfig.surface_cache_capture_budget = 0;
     pipeline_->SetLumenConfig(lumenConfig);
 
     // Keep direct and probe lighting in the same physical scale. The DDGI
