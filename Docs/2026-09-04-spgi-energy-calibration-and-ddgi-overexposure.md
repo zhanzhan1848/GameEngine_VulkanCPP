@@ -421,3 +421,26 @@ Metal 测试当前被 blurCS2D 陈旧句柄 assert 阻塞（validation 下 frame
 2. 解锁后继续 DDGI parity bisect：Vulkan 半数探针 L1≈0 的成因
    （稀疏 update 制度 vs Metal 全量）与 gather L2 处理对齐。
 3. CAL_EXPOSURE=0.45 复测回归；DIRECT_INTENSITY 2.5 双平台观感微调。
+
+
+## 第十三轮：L1mag 仪器修正 + 跨平台角向特征精测（2026-09-05）
+
+SCDDGI 探针 dump 的 L1mag 索引修正（b*3 → b*4，vec4 布局步进）——
+此前双平台 L1mag 对比均基于错位读取，作废。
+
+修正后同机位探针场对比：
+
+| 量 | Metal | Vulkan |
+|---|---|---|
+| L0 p50 | 1.066 | 1.073（一致）|
+| L1mag p50 | 0.172 | 0.164（**一致**）|
+| **L1mag p90** | **1.39** | **0.33（4×）** |
+| gather p50 | 2.60 | 0.28 |
+
+结论修正：两平台探针场中位性质相同；差异集中在 p90 尾部——亮侧探针
+的方向性能量（Metal 强 4×）。这正是 Metal 画面直射邻区 GI 有结构、
+Vulkan 偏平的精确位置。Vulkan 亮侧探针 L1 富集 = 下轮主线
+（SC 制度对齐或 trace 方向内容增强）。
+
+待办：RG 瞬态槽位别名根修（SSGI blur 恢复）；CAL_EXPOSURE 复测；
+DIRECT_INTENSITY 2.5 观感微调。
