@@ -557,7 +557,7 @@ fragment float4 fragmentLighting_gpuDriven(
         // 的同名旋钮同值（2.5）。GPU 驱动路径此前无此乘数——FULL_POST 的
         // ACES 下直射峰值 ~0.48 过不了感知门槛（画面呈纯环境光观感）。
         // legacy 直出时代该旋钮曾以 3.125 存在于测试副本（未同步入引擎）。
-        constexpr float DIRECT_INTENSITY = 2.5f;
+        constexpr float DIRECT_INTENSITY = 5.0f; // 2026-09-05 对齐 UE 参考（阳光光斑亮度）
         Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL * DIRECT_INTENSITY;
     }
 
@@ -634,7 +634,8 @@ fragment float4 fragmentFusionIndirect(
     if (ssao <= 0.0f) ssao = 1.0f;
     // SSAO is a local contact-shadow approximation, not a validity mask for
     // probe lighting — it shapes DDGI without erasing low-frequency bounce.
-    float ao = mix(0.4f, 1.0f, pow(ssao, 1.5f));
+    // 2026-09-05 对齐 UE 参考：遮挡区 AO 压制加强（暗拱 93→UE 22 的差距）
+    float ao = mix(0.12f, 1.0f, pow(ssao, 1.2f));
 
     float3 ssgi_irr  = ssgi4.rgb;
     float  ssgi_hit  = ssgi4.a;
@@ -650,7 +651,7 @@ fragment float4 fragmentFusionIndirect(
 
     // DDGI is the stable low-frequency field; SPGI may replace it only where
     // the screen-probe estimate carries at least as much energy.
-    float3 ddgiBase   = ddgi * 0.7f;
+    float3 ddgiBase   = ddgi * 0.5f;  // 2026-09-05 对齐 UE 参考：GI 水平校准
     float3 spgiTarget = spgi4.rgb * 1.25f;
     // T8.8: replacement needs a real brightness ADVANTAGE — luminance-ratio
     // ramp 1.10→1.35 gates the max() merge; confidence stays a multiplier.
@@ -662,14 +663,13 @@ fragment float4 fragmentFusionIndirect(
 
     // T8.9 + T8.10c: sky-leak ambient (Lumen far-field) — additive with the
     // near-field estimate, occlusion-modulated so shadow pockets key it down.
-    gi += float3(0.17f, 0.18f, 0.21f) * mix(0.45f, 1.0f, pow(ssao, 1.1f));
+    gi += float3(0.085f, 0.09f, 0.105f) * mix(0.45f, 1.0f, pow(ssao, 1.1f)); // 对齐 UE 暗部（减半档）
 
     float3 indirect = albedo * gi;
     indirect *= ao;
 
 #ifdef GI_DEBUG_STRIP
     // Washout diagnosis: 0.25× strips — left→right: ddgi / ssgi / spgi / full.
-    // A pure-white strip means that input is ≥4 linear before tonemap.
     {
         float x = in.uv.x;
         if (x < 0.25f)      return float4(ddgi * 0.25f, 1.0f);
