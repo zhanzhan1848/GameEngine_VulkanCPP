@@ -348,3 +348,31 @@ descriptor set 句柄；新 compute encoder 创建时自动重绑二者。守卫
 
 DDGI 逐探针 parity bisect：压探针场慢呼吸 + 场角向特征对齐
 （Metal 全图仍亮 ~1.5×、暗区更黑 vs Vulkan 场偏平）。
+
+## 第十轮：L1 角向特征量化 + blurCS2D 陈旧句柄取证（2026-09-05 深夜）
+
+### 探针场角向特征（同机位，SCDDGI 探针 dump 扩展 L1mag）
+
+| | Metal | Vulkan |
+|---|---|---|
+| L0lum p50 | 1.07 | 1.07 |
+| L1mag p50 | （Metal 待测） | **0.0027** |
+| L1mag p90 | （Metal 待测） | 0.17 |
+| gather p50 | 1.94 | 0.31 |
+
+**Vulkan 半数探针 L1≈0**（完全无方向性）——场平坦化的微观结构实证。
+卡片辐射已一致（Metal 0.378 vs Vulkan 0.29-0.38），差异收敛到
+trace/update 链的 L1 投影与稀疏更新制度。
+
+### 新阻塞项：blurCS2D 陈旧句柄（取证完成，修复待下轮）
+
+自动重绑让 blurCS2D 首次真正执行后暴露：写一张 usage=0x01（仅
+ShaderResource）的全屏 1280×720 纹理；同句柄跨帧 usage 3→1 漂移
+（句柄被分配器复用，blur 持有陈旧句柄）。validation 下 assert 中止，
+无 validation 下 ~27 帧设备丢失（GPU 页 fault）。
+
+已固化取证仪器：TEXBIND（slot/handle/usage/size）、BLUR_EXEC
+（output 句柄）、MTLUSAGE（创建映射，已证实创建侧 usage=7 正确——
+问题在绑定时的句柄生命周期）、RG_TEX（名字→句柄映射）、SHADOW_TEX。
+blurCS2D 消费方排查：ShadowMap(mom=37/40 usage 7 ✓)、Bloom(已关)、
+LumenSSAO(不用 BlurPass)——剩余候选在 RG 瞬态生命周期审查中定位。
