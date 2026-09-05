@@ -186,6 +186,9 @@ public:
     virtual SyncHandle CreateSync() = 0;
     virtual bool WaitForSync(SyncHandle handle, u32 timeoutMs) = 0;
     virtual void DestroySync(SyncHandle handle) = 0;
+    // 诊断查询：纹理的平台 usage 位（Metal=MTLTextureUsage）。非纯虚——
+    // 不支持的后端返回 0（调用方按"不可写"处理）。
+    virtual u32 QueryTextureUsage(ResourceHandle handle) { return 0; }
     virtual QueryPoolHandle CreateQueryPool(const QueryPoolDesc& desc) = 0;
     virtual void DestroyQueryPool(QueryPoolHandle handle) = 0;
     // T4.6.5 part 24.2 (B6 fix): non-pure virtual — backends without query pool

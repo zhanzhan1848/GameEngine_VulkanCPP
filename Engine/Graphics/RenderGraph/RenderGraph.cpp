@@ -128,7 +128,7 @@ RGResourceHandle RenderGraph::CreateTexture(const std::string& name, const rhi::
     if (desc.size.x >= 1000 && desc.size.y >= 500) {
         static int rgTexDbg = 0;
         if (rgTexDbg < 40) { ++rgTexDbg;
-            std::cout << "[RG_TEX] handle=" << handle.index << " name=" << name
+            PRIMAL_LOG_STREAM(Error, "RG") << "[RG_TEX] handle=" << handle.index << " name=" << name
                       << " usage=" << (int)desc.usage << " " << desc.size.x << "x" << desc.size.y << std::endl;
         }
     }

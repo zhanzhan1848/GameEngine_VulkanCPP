@@ -274,11 +274,12 @@ bool MetalTexture::Initialize() {
     if (HasUsage(desc_.usage, ResourceUsage::UnorderedAccess)) usage |= MTL::TextureUsageShaderWrite; // Or ShaderReadWrite
     if (HasUsage(desc_.usage, ResourceUsage::DepthStencil)) usage |= MTL::TextureUsageRenderTarget; // Metal uses RenderTarget for depth too
     descriptor->setUsage(usage);
-    if (textureDesc_.format == DataFormat::RG32_Float && textureDesc_.size.x == 2048) {
-        static int usageDbg = 0;
-        if (usageDbg < 8) { ++usageDbg;
-            PRIMAL_LOG_STREAM(Error, "RHI") << "[MTLUSAGE] RG32F 2048 desc.usage=" << (int)textureDesc_.usage
-                      << " mtl.usage=" << (int)usage << std::endl;
+    if (usage == MTL::TextureUsageShaderRead && textureDesc_.size.x >= 512 && textureDesc_.size.y >= 512) {
+        static int srOnlyDbg = 0;
+        if (srOnlyDbg < 20) { ++srOnlyDbg;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[SR_ONLY] name=" << (desc_.name ? desc_.name : "?")
+                      << " " << textureDesc_.size.x << "x" << textureDesc_.size.y
+                      << " desc.usage=" << (int)textureDesc_.usage << std::endl;
         }
     }
     

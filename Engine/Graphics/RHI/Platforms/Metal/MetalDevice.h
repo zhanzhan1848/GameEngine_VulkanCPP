@@ -232,6 +232,17 @@ protected:
      */
     bool waitForSyncImpl(SyncHandle handle, u32 timeoutMs);
 
+    u32 QueryTextureUsage(ResourceHandle handle) override {
+        return queryTextureUsageImpl(handle);
+    }
+
+    // 诊断查询：纹理的平台 usage 位（MTLTextureUsage）。
+    u32 queryTextureUsageImpl(ResourceHandle handle) {
+        auto* tex = GetTexture(handle);
+        auto* native = tex ? tex->GetNativeTexture() : nullptr;
+        return native ? static_cast<u32>(native->usage()) : 0u;
+    }
+
     /**
      * @brief 销毁同步对象实现
      */

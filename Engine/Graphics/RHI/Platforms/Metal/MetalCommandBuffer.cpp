@@ -1028,7 +1028,7 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                         if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                             computeEncoder->setTextures(mtlTextures.data(), range);
                         static int texBindDbg = 0;
-                        if (texBindDbg < 400 && mtlTextures.size() == 1 && mtlTextures[0]) {
+                        if (texBindDbg < 4000 && slot == 1 && mtlTextures.size() == 1 && mtlTextures[0]) {
                             ++texBindDbg;
                             auto lbl = computeEncoder->label();
                             PRIMAL_LOG_STREAM(Error, "RHI") << "[TEXBIND] slot=" << slot

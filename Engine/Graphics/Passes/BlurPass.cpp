@@ -262,12 +262,27 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         !paramBufferMapped_[frameIndex] || !cmdBuffer) return;
     // TEMP usage 审计：blurCS2D 写 output 需 UnorderedAccess；0x01 纹理会
     // 触发 validation assert（开）/ 设备丢失（关）。句柄供反查创建点。
-    {
+    // Metal：blurCS2D 以 storage 写 output——output 纹理若创建时缺
+    // UnorderedAccess（usage 仅 ShaderResource），写入会触发 validation
+    // assert（开）/ GPU 页 fault 设备丢失（关）。跳过并告警一次。
+    if (device_->GetPlatform() == rhi::RHIPlatform::Metal) {
+        static bool writeWarned = false;
+        const u32 usageBits = device_->QueryTextureUsage(output);
+        if (!(usageBits & 2u)) {
+            if (!writeWarned) {
+                writeWarned = true;
+                PRIMAL_LOG_STREAM(Error, "Engine") << "[BlurPass] output texture (handle=" << output
+                          << ") lacks ShaderWrite usage — blur skipped, usageBits=" << usageBits << std::endl;
+            }
+            return;
+        }
         static int usageDbg = 0;
-        if (usageDbg < 16) {
+        if (usageDbg < 30) {
             ++usageDbg;
-            PRIMAL_LOG_STREAM(Error, "Engine") << "[BLUR_EXEC] output handle=" << output
-                      << " frameIdx=" << frameIndex << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[BLUR_USE] output=" << output
+                      << " outUsage=" << usageBits
+                      << " temp=" << temp << " tempUsage=" << device_->QueryTextureUsage(temp)
+                      << " w=" << width << " frameIdx=" << frameIndex << std::endl;
         }
     }
 
