@@ -68,7 +68,7 @@ kernel void ddgi_probe_irradiance_from_cards(
     // 近距探针上把原始投影 L0 抬到 trace 尺度的百倍以上（实测 ~1230 vs
     // ~1.2），且下方 l1/l2Limit 由它推导，随垃圾同步膨胀（实测 L1=1661）。
     // 先把 L0 门到 trace 工作点，再派生波段上限——全波段硬上界。
-    constexpr float SC_L0_GATE = 1.5f;
+    constexpr float SC_L0_GATE = 4.0f;
     {
         float l0mag = length(sh[0]);
         if (l0mag > SC_L0_GATE) {

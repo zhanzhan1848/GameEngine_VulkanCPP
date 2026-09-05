@@ -741,7 +741,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                             float maxAbs = 0.0f; u64 bad = 0;
                                             // 逐波段 maxAbs（band0=L0, 1-3=L1, 4-8=L2）
                                             // + 全局 argmax 探针——把怪物值定位到具体波段。
-                                            float bandMax[9] = {};
+                                            float bandMax[9] = {}; double bandSum[9] = {};
                                             float worst[4] = {}; u32 worstProbe = 0;
                                             for (u64 p = 0; p < 16384ull; ++p) {
                                                 const float* c = q + p * 36;
@@ -754,12 +754,21 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                                     maxAbs = std::max(maxAbs, a);
                                                     u32 band = k / 4;
                                                     bandMax[band] = std::max(bandMax[band], a);
+                                                    bandSum[band] += a;
                                                 }
                                                 if (pAbs > worst[0]) {
                                                     worst[0] = pAbs; worstProbe = (u32)p;
                                                     for (int k = 0; k < 3; ++k) worst[1 + k] = c[k];
                                                 }
                                             }
+                                            float l0Mean = bandSum[0] / 16384.0f;
+                                            float l1Mean = 0.0f, l2Mean = 0.0f;
+                                            for (int b = 1; b < 4; ++b) l1Mean += bandSum[b];
+                                            for (int b = 4; b < 9; ++b) l2Mean += bandSum[b];
+                                            l1Mean /= 3.0f * 16384.0f; l2Mean /= 5.0f * 16384.0f;
+                                            PRIMAL_LOG_STREAM(Error, "Render") << "  band means: L0=" << l0Mean
+                                                      << " L1=" << l1Mean << " L2=" << l2Mean
+                                                      << " |L1|/|L0|=" << (l0Mean > 1e-6f ? l1Mean / l0Mean : 0.0f) << std::endl;
                                             PRIMAL_LOG_STREAM(Error, "Render") << "[IRR_DUMP] slot=" << ddgiReadIdx
                                                       << " maxAbs=" << maxAbs
                                                       << " nanInf=" << bad << std::endl;
@@ -767,6 +776,25 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                                       << " L1=(" << bandMax[1] << "," << bandMax[2] << "," << bandMax[3] << ")"
                                                       << " L2=(" << bandMax[4] << "," << bandMax[5] << "," << bandMax[6]
                                                       << "," << bandMax[7] << "," << bandMax[8] << ")" << std::endl;
+                                            // 深度图健康检查：可见性加权的输入。
+                                            // 全零/全 1 → UpdateDepth 未生效。
+                                            if (auto* dp = static_cast<const float*>(
+                                                    device_->MapBuffer(ddgi->GetDepthBuffer(ddgiReadIdx), 0, 16384ull * 128u * 4u))) {
+                                                u64 zeroMean = 0; float meanSum = 0.0f, varSum = 0.0f;
+                                                for (u64 pr = 0; pr < 16384ull; ++pr) {
+                                                    const float* dm = dp + pr * 128u;
+                                                    float m = dm[0]; // 取 64 mean 中首个代表
+                                                    for (int k = 1; k < 64; ++k) m += dm[k];
+                                                    m /= 64.0f;
+                                                    if (m <= 1e-6f) ++zeroMean;
+                                                    meanSum += m;
+                                                    for (int k = 64; k < 128; ++k) varSum += dm[k];
+                                                }
+                                                PRIMAL_LOG_STREAM(Error, "Render") << "  [DEPTH_DUMP] zeroMeanProbes=" << zeroMean
+                                                          << "/16384 meanOfMeans=" << meanSum / 16384.0f
+                                                          << " avgVar=" << varSum / (16384.0f * 64.0f) << std::endl;
+                                                device_->UnmapBuffer(ddgi->GetDepthBuffer(ddgiReadIdx));
+                                            }
                                             PRIMAL_LOG_STREAM(Error, "Render") << "  worstProbe=" << worstProbe
                                                       << " abs=" << worst[0]
                                                       << " L0rgb=(" << worst[1] << "," << worst[2] << "," << worst[3] << ")" << std::endl;

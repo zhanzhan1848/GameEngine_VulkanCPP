@@ -273,7 +273,14 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
             if (cardArea < 0.001f) continue;
 
             const float solidAngle = cardArea / (dist2 + 1.0f);
-            const float totalWeight = solidAngle * NdotL * FOUR_PI;
+            // 2026-09-05 物理化归一化（修"GI 平了"）：辐射度投影本形
+            // C_j = Σ Ω_i·L_i·Y_j(dir_i)——不带 4π（Y0 基已归一化；旧
+            // ×FOUR_PI 在 Ω 过冲时把近距探针的原始 L0 放大 ~1000×，
+            // 迫使 shader 侧用平顶门压平，牺牲全部空间对比）。Ω 物理封顶
+            // π：探针位于卡片包围盒内时 area/(d²+1) 可非物理地超 4π。
+            // NdotL 保留——掠射角下卡片有效投影面积收缩。
+            const float solidAngleCapped = std::min(solidAngle, 3.14159265f);
+            const float totalWeight = solidAngleCapped * NdotL;
 
             // Full L0-L2 basis, signs/order matching DDGIUpdateIrradiance's
             // projection (band 6 is the C2_1 zonal term; x/y L1 and yz/xz L2

@@ -145,7 +145,7 @@ void ddgi_probe_irradiance_from_cards() {
     // 2026-09-05 对齐 Metal 能量门：卡片立体角权重（CPU 侧 Ω×NdotL×4π，Ω
     // 不饱和）在近距探针上把原始投影 L0 抬到 trace 尺度的百倍以上，且下方
     // l1/l2Limit 由它推导随垃圾膨胀。先门 L0 到 trace 工作点再派生上限。
-    const float SC_L0_GATE = 1.5;
+    const float SC_L0_GATE = 4.0;
     {
         float l0mag = length(sh[0]);
         if (l0mag > SC_L0_GATE) {
