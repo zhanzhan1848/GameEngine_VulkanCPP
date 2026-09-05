@@ -311,3 +311,40 @@ DEPTH_DUMP 证实深度图健康（mean 181 为天空逃逸 texel 主导），�
 
 Metal 全图仍比 Vulkan 亮 ~1.5×、暗区更黑（21 vs 73——Vulkan 场角向
 分布仍偏平）→ DDGI 逐探针 parity bisect 继续为主任务。
+
+## 第九轮："GI 暗部移动"判决——dispatch skip 帧间丢失（2026-09-05）
+
+### 判决链（锁机位三帧差分：52% 变化 / 26% 显著）
+
+1. 探针场校验和逐帧 ±0.2%，无 3 帧周期 → **三缓冲假设洗清**。
+2. TAA_OFF 抖动更大（57%）→ TAA 在阻尼，抖动在 TAA 上游。
+3. PRIMARY 直射层逐帧序列稳定，但带周期性零帧 → **fence 超时后的
+   dispatch skip**（每次超时后部分 pass 整帧丢失 = 暗部移动的感知）。
+4. skip 与 FULL_POST 完全相关（legacy 1 次 vs 全链 4017 次/千帧）。
+
+### 根因
+
+9df09146（MemoryBarrier 总是结束 encoder，L2 可见性修复）与 857db3ee
+（绑定守卫按 encoder 实例校验）组合：任何 "BindComputePipeline →
+InsertBarrier → Dispatch" 模式的 pass，barrier 后的新 encoder 无绑定
+记录 → Dispatch 被守卫静默跳过。全链新增大量带 barrier 的 compute pass
+后，skip 从偶发变常态（~4 次/帧）。
+
+### 修复
+
+MetalCommandBuffer 缓存最后一次成功的 compute pipeline state 与
+descriptor set 句柄；新 compute encoder 创建时自动重绑二者。守卫语义
+保留（真未绑定的 Dispatch 仍跳过并报错）。
+
+### 连带暴露与止损
+
+- skip 曾掩盖 bloom blur 的 RG 瞬态 temp 槽位别名（解析到
+  fusion_output，usage 0x05 缺 ShaderWrite → blurCS2D assert）。
+  别名修复前 bloom 默认关闭，PRIMAL_BLOOM=1 显式启用。
+- 修复后：skip/fence/assert 三零，锁机位残差 46.9%/24.3%（蓝通道、
+  直射过渡区）= 探针场慢呼吸（prev-screen 反馈环增益 ~1）。
+
+### 下轮
+
+DDGI 逐探针 parity bisect：压探针场慢呼吸 + 场角向特征对齐
+（Metal 全图仍亮 ~1.5×、暗区更黑 vs Vulkan 场偏平）。

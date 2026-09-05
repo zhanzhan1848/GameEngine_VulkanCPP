@@ -125,6 +125,13 @@ RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::Resourc
 
 RGResourceHandle RenderGraph::CreateTexture(const std::string& name, const rhi::TextureDesc& desc) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
+    if (desc.size.x >= 1000 && desc.size.y >= 500) {
+        static int rgTexDbg = 0;
+        if (rgTexDbg < 40) { ++rgTexDbg;
+            std::cout << "[RG_TEX] handle=" << handle.index << " name=" << name
+                      << " usage=" << (int)desc.usage << " " << desc.size.x << "x" << desc.size.y << std::endl;
+        }
+    }
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->AddFlag(RGResourceFlags::Transient);
     

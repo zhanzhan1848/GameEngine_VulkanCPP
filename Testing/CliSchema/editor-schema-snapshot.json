@@ -1,5 +1,5 @@
 {
-  "$version": "b116f715f73651fd",
+  "$version": "b982289ab8ddb8b9",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -309,6 +309,233 @@
       "verb": "scene.tree",
       "channel": "editor",
       "description": "序列化当前激活场景：场景 guid/名称 + 全部实体的 guid、名称、启用状态、组件清单。Transform 汇总为 position/rotation/scale（单位米/度，右手系，+Y 向上）。这是修改类命令的前置查询：先拿到 entityGuid 再调用实体/组件命令。无打开项目时返回 NOT_READY。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.add-camera-cut",
+      "channel": "editor",
+      "description": "加一个分镜头（camera cut）：[startFrame, endFrame) 半开区间由 cameraEntityGuid 取景（endFrame 不含，相邻 shot 不重叠）。相机实体须有 Camera 组件。记入 undo。 无 cut 覆盖的帧回落编辑器相机。",
+      "example": "{\"startFrame\":0,\"endFrame\":48,\"cameraEntityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "startFrame",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "endFrame",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "cameraEntityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.add-key",
+      "channel": "editor",
+      "description": "给实体变换轨加关键帧（无轨时自动建轨）。frame 缺省 = 当前播放头；position/rotationEuler/scale（Vec3，米/度）可省——省略的字段取实体当前值（即对齐当前视角的 K 帧）。同帧已有 key 则替换。interp: Linear|Constant（缺省 Linear）。记入 undo。",
+      "example": "{\"entityGuid\":\"…\",\"frame\":12,\"position\":[1,0,3]}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "frame",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "position",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "rotationEuler",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "scale",
+          "type": "vec3",
+          "required": false
+        },
+        {
+          "name": "interp",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.add-transform-track",
+      "channel": "editor",
+      "description": "给实体加变换关键帧轨（位置/旋转/缩放，单位米/度，右手系 +Y 向上）。实体必须存在于当前场景（guid 用 scene.tree 查）；已有同实体轨返回 NOT_FOUND 语义错误。记入 undo。相机运镜 = 给相机实体加本轨。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.info",
+      "channel": "editor",
+      "description": "查看当前打开序列的摘要：fps/时长/播放头/轨道列表（变换轨的实体 guid 与关键帧数、相机 cut 轨的 shot 列表）。没有打开序列返回 NOT_READY。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.new",
+      "channel": "editor",
+      "description": "新建拍片序列并打开（对标 Level Sequence）。fps 为帧率 1..120（帧↔秒换算与输出速率），durationFrames 为序列长度 ≥1（有效帧区间 [0, durationFrames)）。时间轴是帧号轴，单位米/度。新建仅入内存不落盘——用 sequence.save 持久化到 <project>/Sequences/<name>.pseq。新建即替换当前打开的序列（如有）。",
+      "example": "{\"name\":\"开场运镜\",\"fps\":30,\"durationFrames\":120}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "fps",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "durationFrames",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.open",
+      "channel": "editor",
+      "description": "打开 .pseq 序列文件（相对路径按项目根解析，也可绝对路径）。文件不存在/JSON 非法返回相应错误。打开即替换当前打开的序列（如有）。",
+      "example": "{\"path\":\"Sequences/开场运镜.pseq\"}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.pause",
+      "channel": "editor",
+      "description": "暂停预览播放（播放头停在当前帧）。未在播放时幂等返回。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.play",
+      "channel": "editor",
+      "description": "开始视口预览播放（DispatcherTimer @ 序列 fps 逐帧求值应用，相机 cut 自动切机位）。已在播放时幂等返回。播到末帧自动停。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.remove-key",
+      "channel": "editor",
+      "description": "删除实体变换轨上指定帧的关键帧。轨不存在或该帧无 key 返回 NOT_FOUND。记入 undo。",
+      "example": "{\"entityGuid\":\"…\",\"frame\":12}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "frame",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.remove-track",
+      "channel": "editor",
+      "description": "删除实体变换轨（含全部关键帧）。轨不存在返回 NOT_FOUND。记入 undo。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.render",
+      "channel": "editor",
+      "description": "把当前序列离线渲染为 PNG 帧序列（frame_%04d.png，0 起）到 out 目录（绝对路径，自动创建）。逐帧：seek 求值应用 → 按相机 cut 取景（无 cut 帧用编辑器相机）→ 离屏渲染落盘；分辨率 = 3D 视口当前分辨率。确定性：时间只由帧号驱动，同序列两次渲染逐帧一致（可用 editor.diff 验证）。渲染前快照受影响实体 pose，结束后恢复（场景不留录制残留），播放头回到起始帧。可选 video=x.mp4 用外部 ffmpeg 按序列 fps 编码（缺失时 videoEncoded=false，不影响 PNG）。帧数上限 3600。",
+      "example": "{\"out\":\"/tmp/render\",\"video\":\"/tmp/render/intro.mp4\"}",
+      "params": [
+        {
+          "name": "out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "video",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.save",
+      "channel": "editor",
+      "description": "保存当前打开的序列。path 可选（相对项目根或绝对路径）；省略时用当前路径，首次保存缺省 <project>/Sequences/<name>.pseq。返回落盘路径。",
+      "example": "{}",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.set-frame",
+      "channel": "editor",
+      "description": "把播放头移到指定帧并把求值结果应用到场景（预览 scrub）。帧号 clamp 到 [0, durationFrames)。播放态修改不入 undo；实体原 pose 在下一次编辑前不会自动恢复（用 editor.undo 撤关键帧编辑，非 seek）。",
+      "example": "{\"frame\":30}",
+      "params": [
+        {
+          "name": "frame",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.stop",
+      "channel": "editor",
+      "description": "停止预览播放并回到第 0 帧（应用第 0 帧求值结果）。",
       "example": "{}",
       "params": [],
       "returns": "object"

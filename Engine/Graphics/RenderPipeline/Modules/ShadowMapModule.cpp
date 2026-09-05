@@ -281,9 +281,18 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
         if (vsm) {
             auto momHandle = gpu_draw_pipeline_->GetShadowMoments(c, inputs.current_buffer_index);
             if (momHandle != handles::INVALID_RESOURCE) {
-                momentsRG[c] = graph.ImportResource(
+                // 2026-09-05：ImportResource 注册 Unknown 类型——下游按类型
+                // 守卫解析会回退创建无 UA 的纹理（usage 0x01），blurCS2D 写入
+                // 即 assert/设备丢失。改用 ImportTexture 携带完整 desc。
+                rhi::TextureDesc momDesc{};
+                momDesc.size = {2048, 2048, 1};
+                momDesc.format = rhi::DataFormat::RG32_Float;
+                momDesc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
+                                rhi::TextureUsage::UnorderedAccess;
+                momDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
+                momentsRG[c] = graph.ImportTexture(
                     "ShadowMoments_C" + std::to_string(c) + "_" + std::to_string(inputs.current_buffer_index),
-                    momHandle);
+                    momHandle, momDesc);
             }
         }
     }

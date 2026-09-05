@@ -260,6 +260,16 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // rather than crash writing an unmapped param buffer.
     if (pipeline_ == rhi::handles::INVALID_PIPELINE ||
         !paramBufferMapped_[frameIndex] || !cmdBuffer) return;
+    // TEMP usage 审计：blurCS2D 写 output 需 UnorderedAccess；0x01 纹理会
+    // 触发 validation assert（开）/ 设备丢失（关）。句柄供反查创建点。
+    {
+        static int usageDbg = 0;
+        if (usageDbg < 16) {
+            ++usageDbg;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[BLUR_EXEC] output handle=" << output
+                      << " frameIdx=" << frameIndex << std::endl;
+        }
+    }
 
     static u32 lastFrameIndex = -1;
     if (lastFrameIndex != frameIndex) {

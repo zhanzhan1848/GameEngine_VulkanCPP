@@ -21,6 +21,7 @@ public enum AssetType
     Prefab,
     ParticlePreset,
     Pcg,
+    Sequence,
 }
 
 public class ImportedAsset

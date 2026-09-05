@@ -1027,6 +1027,17 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     } else if (computeEncoder) {
                         if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                             computeEncoder->setTextures(mtlTextures.data(), range);
+                        static int texBindDbg = 0;
+                        if (texBindDbg < 400 && mtlTextures.size() == 1 && mtlTextures[0]) {
+                            ++texBindDbg;
+                            auto lbl = computeEncoder->label();
+                            PRIMAL_LOG_STREAM(Error, "RHI") << "[TEXBIND] slot=" << slot
+                                      << " handle=" << binding.resources[0]
+                                      << " mtlUsage=" << (int)mtlTextures[0]->usage()
+                                      << " size=" << mtlTextures[0]->width() << "x" << mtlTextures[0]->height()
+                                      << " enc=" << (lbl ? lbl->utf8String() : "?")
+                                      << std::endl;
+                        }
                     }
                     
                     // Bind Samplers (Array)

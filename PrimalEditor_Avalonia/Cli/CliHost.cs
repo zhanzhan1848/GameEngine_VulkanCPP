@@ -37,6 +37,7 @@ public static class CliHost
             Registry.Register(new SceneCommands());
             Registry.Register(new ComponentCommands());
             Registry.Register(new FrameCaptureCommands());
+            Registry.Register(new SequenceCommands());
             Registry.Register(new WorkflowCommands(Registry));
             Registry.Register(new DiagnosticsCommands());
 

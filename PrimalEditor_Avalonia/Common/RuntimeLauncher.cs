@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using PrimalEditor_Avalonia.Content;
 
 namespace PrimalEditor_Avalonia.Common;
@@ -21,6 +22,41 @@ public static class RuntimeLauncher
             return Path.Combine("Darwin", "DebugVulkan");
         var release = config.StartsWith("Release", StringComparison.OrdinalIgnoreCase);
         return Path.Combine("Darwin", release ? "Release" : "Debug");
+    }
+
+    /// <summary>
+    /// Run 录制设置（Part B，Docs/2026-09-05）。录制本体在 PrimalPlayer 进程内
+    /// （渲染帧与捕获帧 1:1，无丢帧）；编辑器只负责拼参数与落盘目录约定。
+    /// </summary>
+    public sealed record PlayerRecordOptions(bool Enabled, int Frames, int Every, bool Metrics);
+
+    /// <summary>
+    /// 拼装录制参数（纯函数，供单测）。语义与 PrimalPlayer main.cpp 对齐：
+    /// --record 目录（frame_%04d.png）、--record-frames 捕获帧上限
+    /// （0 = 跟随窗口关闭）、--record-every 步长、--record-metrics CSV。
+    /// </summary>
+    public static void AppendRecordArguments(List<string> arguments, string recordDir, PlayerRecordOptions options)
+    {
+        arguments.AddRange(new[] { "--record", recordDir });
+        arguments.AddRange(new[] { "--record-frames", Math.Max(0, options.Frames).ToString() });
+        if (options.Every > 1)
+            arguments.AddRange(new[] { "--record-every", options.Every.ToString() });
+        if (options.Metrics)
+            arguments.Add("--record-metrics");
+    }
+
+    /// <summary>录制产物目录约定：&lt;project&gt;/Captures/&lt;scene&gt;-&lt;yyyyMMdd-HHmmss&gt;。
+    /// 场景名去文件系统非法字符（GetInvalidFileNameChars 只在 Windows 覆盖
+    /// &lt; &gt; : 等，这里跨平台统一再补一组）；时间戳保证同场景多次录制不互覆盖。</summary>
+    public static string ResolveRecordDirectory(string projectPath, string sceneName)
+    {
+        const string extraForbidden = "<>:\"|?*";
+        var invalid = new char[Path.GetInvalidFileNameChars().Length + extraForbidden.Length];
+        Path.GetInvalidFileNameChars().CopyTo(invalid, 0);
+        extraForbidden.CopyTo(0, invalid, Path.GetInvalidFileNameChars().Length, extraForbidden.Length);
+        var safe = string.Concat(sceneName.Select(c => invalid.Contains(c) ? '_' : c));
+        return Path.Combine(projectPath, "Captures",
+            $"{safe}-{DateTime.Now:yyyyMMdd-HHmmss}");
     }
 
     /// <summary>仓库根目录：编辑器二进制在
@@ -80,6 +116,21 @@ public static class RuntimeLauncher
         }
 
         var arguments = new List<string> { "--scene", package };
+
+        // Run 录制（Part B）：VM 的录制开关 → player 参数。录满帧数后 player
+        // 自动退出，stderr 的 record summary 会经 BuildService.OnOutput 流入
+        // BuildLog 面板（PNG 序列主产物；mp4 编码入口由 sequence 模块统一提供）。
+        if (vm.RecordOnRun)
+        {
+            var recordDir = ResolveRecordDirectory(vm.Project.Path, vm.ActiveScene.Name);
+            AppendRecordArguments(arguments, recordDir, new PlayerRecordOptions(
+                Enabled: true,
+                Frames: vm.RecordFrames,
+                Every: 1,
+                Metrics: vm.RecordMetrics));
+            Logger.Info($"[Run] recording enabled → {recordDir} (frames={vm.RecordFrames}, metrics={vm.RecordMetrics})");
+        }
+
         var ok = BuildService.StartPlayer(playerPath, arguments, workingDirectory: Path.GetDirectoryName(playerPath)!);
         if (ok)
         {

@@ -57,6 +57,14 @@
                           ItemsSource="{Binding TargetGraphicsApis}"
                           SelectedIndex="{Binding TargetGraphicsApiIndex}"
                           ToolTip.Tip="Graphics API for the Run button's PrimalPlayer host"/>
+                <!-- Run 录制（Part B）：player 进程内逐帧 PNG 捕获（渲染帧与捕获帧
+                     1:1，无丢帧），录满帧数自动退出；产物在 <project>/Captures/。 -->
+                <CheckBox Content="Rec" VerticalAlignment="Center" Margin="8,0,0,0"
+                          IsChecked="{Binding RecordOnRun}"
+                          ToolTip.Tip="Run 时录制：PrimalPlayer 逐帧 PNG（渲染帧与捕获帧 1:1，无丢帧），录满自动退出"/>
+                <TextBox Width="56" Height="24" Text="{Binding RecordFrames}"
+                         VerticalAlignment="Center" VerticalContentAlignment="Center"
+                         ToolTip.Tip="录制帧数上限（捕获帧数；0 = 跟随窗口关闭）"/>
                 <!-- Viewport view mode (plan §6.3 A7): Shaded / Wireframe.
                      Orthogonal to RENDER (pass combos); applies per-frame. -->
                 <TextBlock Text="VIEW" FontFamily="{DynamicResource FontDisplay}"

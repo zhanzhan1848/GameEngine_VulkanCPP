@@ -2,6 +2,8 @@
 // PrimalPlayer — 运行时宿主（规划 §Run/Stop，2026-09-03）
 //
 //   PrimalPlayer --scene <active.primalrun> [--width W] [--height H] [--debug]
+//                 [--record <dir>] [--record-frames N] [--record-every N]
+//                 [--record-metrics <file.csv>]
 //
 // 编辑器 Run 按钮导出运行时场景包（Content/RuntimeSceneExporter.cs，行式
 // "primal-runtime-scene v1"）后启动本进程。本宿主是 EngineDLL 的 C ABI 消费
@@ -20,8 +22,12 @@
 
 #include <chrono>
 #include <cmath>
+#include <cfloat>
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -73,6 +79,9 @@ void          PipelineUnregisterMeshEntity(std::uint64_t entity_id);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
 void          DestroyRenderTarget(std::uint64_t handle);
+std::uint32_t DebugReadRenderTarget(std::uint64_t target_handle, void* out_buffer,
+                                    std::uint64_t buffer_size);
+int           SaveRenderTargetAsPng(std::uint64_t target_handle, const char* path);
 std::uint32_t PipelineRenderFrame(std::uint64_t target_handle, std::uint32_t camera_id,
                                   std::uint32_t surface_id);
 std::uint32_t BlitRenderTargetToSurface(std::uint64_t target_handle, std::uint32_t surface_id);
@@ -328,6 +337,80 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
     return 1;
 }
 
+// --- Run 录制（Part B，Docs/2026-09-05 规划）：渲染帧与捕获帧 1:1 ---
+// 主循环每帧 PipelineRenderFrame 之后对离屏 RT 调 SaveRenderTargetAsPng，
+// 一张 PNG 对应一次真实渲染、无丢帧（外部屏幕录制做不到）；读回 + PNG 编码
+// 会拖慢循环，这是分析模式的可接受代价。视频编码不做在本进程——帧序列留给
+// 编辑器侧用外部 ffmpeg 统一处理。
+
+struct RecordConfig {
+    bool enabled = false;
+    std::string directory;     // frame_%04d.png 输出目录
+    long max_frames = 0;       // 捕获帧上限（受 stride 影响计的是捕获数）；0 = 录到窗口关闭
+    long stride = 1;           // 每 N 个渲染帧捕获 1 帧
+    std::string metrics_path;  // 可选 CSV：frame,meanLuma,minLuma,maxLuma,captureMs
+};
+
+// IEEE 754 half → float（DebugReadRenderTarget 返回 RGBA16F）。不用
+// _Float16——Linux x86 工具链支持不齐。
+float HalfToFloat(std::uint16_t half)
+{
+    const std::uint32_t sign = static_cast<std::uint32_t>(half & 0x8000u) << 16;
+    const std::uint32_t exp = (half >> 10) & 0x1Fu;
+    const std::uint32_t man = half & 0x03FFu;
+    std::uint32_t bits;
+    if (exp == 0) {
+        if (man == 0) {
+            bits = sign;
+        } else {
+            // 半精度 subnormal → 规格化 float：左移找隐含位，指数同步回退。
+            std::uint32_t e = 0;
+            std::uint32_t m = man;
+            while ((m & 0x0400u) == 0) { m <<= 1; ++e; }
+            bits = sign | ((113u - e) << 23) | ((m & 0x03FFu) << 13);
+        }
+    } else if (exp == 0x1Fu) {
+        bits = sign | 0x7F800000u | (man << 13); // inf/nan
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (man << 13);
+    }
+    float out = 0.f;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+// Rec.709 线性亮度统计，HDR 原值不截断（对齐 Primal.CliFramework/FrameMetrics
+// 与 editor.metrics 的口径，两条通道的数字可直接对比）。
+struct FrameLumaStats { double mean_luma; float min_luma; float max_luma; };
+
+FrameLumaStats ComputeLumaStats(const std::uint16_t* rgba16f, std::size_t pixel_count)
+{
+    if (pixel_count == 0) return {0.0, 0.f, 0.f};
+    double sum = 0.0;
+    float mn = FLT_MAX, mx = -FLT_MAX;
+    for (std::size_t i = 0; i < pixel_count; ++i) {
+        const float r = HalfToFloat(rgba16f[i * 4 + 0]);
+        const float g = HalfToFloat(rgba16f[i * 4 + 1]);
+        const float b = HalfToFloat(rgba16f[i * 4 + 2]);
+        const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        sum += luma;
+        mn = std::min(mn, luma);
+        mx = std::max(mx, luma);
+    }
+    return {sum / static_cast<double>(pixel_count), mn, mx};
+}
+
+bool EnsureDirectory(const std::string& path)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    if (ec) {
+        std::fprintf(stderr, "[player] cannot create record dir %s: %s\n",
+                     path.c_str(), ec.message().c_str());
+    }
+    return !ec;
+}
+
 std::string ExeDir()
 {
     std::vector<char> buf(4096, 0);
@@ -351,6 +434,7 @@ int main(int argc, char** argv)
     std::uint32_t width = 1280, height = 720;
     bool debug_backend = false;
     std::uint32_t render_mode = 3; // Deferred+Shadow+AO+GI（编辑器默认档一致）
+    RecordConfig record;
 
     for (int i = 1; i < argc; ++i) {
         const auto next = [&]() -> const char* { return (i + 1 < argc) ? argv[++i] : nullptr; };
@@ -359,15 +443,32 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--height") == 0 && next()) height = static_cast<std::uint32_t>(std::atoi(argv[i]));
         else if (std::strcmp(argv[i], "--debug") == 0) debug_backend = true;
         else if (std::strcmp(argv[i], "--mode") == 0 && next()) render_mode = static_cast<std::uint32_t>(std::atoi(argv[i]));
+        else if (std::strcmp(argv[i], "--record") == 0 && next()) {
+            record.enabled = true;
+            record.directory = argv[i];
+        }
+        else if (std::strcmp(argv[i], "--record-frames") == 0 && next()) record.max_frames = std::atol(argv[i]);
+        else if (std::strcmp(argv[i], "--record-every") == 0 && next()) record.stride = std::atol(argv[i]);
+        else if (std::strcmp(argv[i], "--record-metrics") == 0 && next()) record.metrics_path = argv[i];
         else {
             std::fprintf(stderr, "[player] unknown arg: %s\n", argv[i]);
             std::fprintf(stderr, "usage: PrimalPlayer --scene <pkg> [--width W] [--height H] [--debug] [--mode 0..3]\n");
+            std::fprintf(stderr, "                   [--record <dir>] [--record-frames N] [--record-every N] [--record-metrics <file.csv>]\n");
             return 2;
         }
     }
     if (scene_path.empty() || width == 0 || height == 0) {
         std::fprintf(stderr, "usage: PrimalPlayer --scene <pkg> [--width W] [--height H]\n");
         return 2;
+    }
+    if (record.enabled) {
+        if (record.directory.empty()) {
+            std::fprintf(stderr, "[player] --record requires a directory\n");
+            return 2;
+        }
+        if (record.stride < 1) record.stride = 1;
+        if (record.max_frames < 0) record.max_frames = 0;
+        if (!EnsureDirectory(record.directory)) return 2;
     }
 
     // 引擎 shader blob 按 cwd 相对路径解析——切到 exe 目录（Darwin/<config>）。
@@ -446,6 +547,24 @@ int main(int argc, char** argv)
     // 帧数即退（CI/冒烟用）。
     const bool windowed = surface_id != kInvalidSurfaceId;
     int remaining_frames = windowed ? -1 : 120;
+
+    // 录制状态：rendered 计渲染帧，captured 计已捕获帧（第 1、1+stride、…
+    // 渲染帧落盘，文件名按捕获序号）。录满 max_frames 即退出进程——编辑器侧
+    // 依赖"进程退出 = 录制完成"的契约做后续编码/通知。
+    long rendered_frames = 0;
+    long captured_frames = 0;
+    double total_capture_ms = 0.0;
+    FILE* metrics_file = nullptr;
+    if (record.enabled && !record.metrics_path.empty()) {
+        metrics_file = std::fopen(record.metrics_path.c_str(), "w");
+        if (!metrics_file) {
+            std::fprintf(stderr, "[player] metrics csv open failed: %s（继续录制，仅无遥测）\n",
+                         record.metrics_path.c_str());
+        } else {
+            std::fprintf(metrics_file, "frame,meanLuma,minLuma,maxLuma,captureMs\n");
+        }
+    }
+
     while (true) {
 #if defined(PRIMAL_PLAYER_WINDOW)
         if (windowed && !PlayerWindowPump()) break;
@@ -456,7 +575,64 @@ int main(int argc, char** argv)
         }
         if (windowed)
             BlitRenderTargetToSurface(target, surface_id);
+        ++rendered_frames;
+
+        if (record.enabled && ((rendered_frames - 1) % record.stride) == 0) {
+            const auto capture_start = std::chrono::steady_clock::now();
+            char frame_name[32];
+            std::snprintf(frame_name, sizeof(frame_name), "frame_%04d.png",
+                          static_cast<int>(captured_frames));
+            const std::string png_path = record.directory + "/" + frame_name;
+            if (!SaveRenderTargetAsPng(target, png_path.c_str())) {
+                std::fprintf(stderr, "[player] record: SaveRenderTargetAsPng failed at rendered frame %ld\n",
+                             rendered_frames);
+                break;
+            }
+            if (metrics_file) {
+                // PNG 落盘后二次读回做遥测（SaveRenderTargetAsPng 内部读回不外露
+                // 数据）。逐帧 fflush：分析场景常伴随崩溃取证，不能丢尾部样本。
+                std::vector<std::uint16_t> pixels(static_cast<std::size_t>(width) * height * 4);
+                if (DebugReadRenderTarget(target, pixels.data(),
+                                          static_cast<std::uint64_t>(pixels.size()) * 2) == 1) {
+                    const auto stats = ComputeLumaStats(
+                        pixels.data(), static_cast<std::size_t>(width) * height);
+                    std::fprintf(metrics_file, "%ld,%.6f,%.6f,%.6f,",
+                                 captured_frames, stats.mean_luma,
+                                 static_cast<double>(stats.min_luma),
+                                 static_cast<double>(stats.max_luma));
+                } else {
+                    std::fprintf(metrics_file, "%ld,,,", captured_frames);
+                }
+            }
+            const double capture_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - capture_start).count();
+            total_capture_ms += capture_ms;
+            if (metrics_file) {
+                std::fprintf(metrics_file, "%.2f\n", capture_ms);
+                std::fflush(metrics_file);
+            }
+            ++captured_frames;
+            if (captured_frames % 60 == 0) {
+                std::fprintf(stderr, "[player] recorded %ld frames → %s\n",
+                             captured_frames, record.directory.c_str());
+            }
+            if (record.max_frames > 0 && captured_frames >= record.max_frames) {
+                std::fprintf(stderr, "[player] record complete: %ld frames → %s\n",
+                             captured_frames, record.directory.c_str());
+                break;
+            }
+        }
+
         if (!windowed && --remaining_frames <= 0) break;
+    }
+
+    if (metrics_file) std::fclose(metrics_file);
+    if (record.enabled && captured_frames > 0) {
+        std::fprintf(stderr,
+                     "[player] record summary: frames=%ld rendered=%ld avgCaptureMs=%.2f dir=%s\n",
+                     captured_frames, rendered_frames,
+                     total_capture_ms / static_cast<double>(captured_frames),
+                     record.directory.c_str());
     }
 
     if (surface_id != kInvalidSurfaceId)

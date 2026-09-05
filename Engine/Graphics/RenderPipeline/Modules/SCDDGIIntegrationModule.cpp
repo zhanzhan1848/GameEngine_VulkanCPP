@@ -508,7 +508,9 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     if (auto* irr = static_cast<const float*>(
                             device_->MapBuffer(ddgi_irr_staging_))) {
                         std::vector<float> l0;
+                        std::vector<float> l1;
                         l0.reserve(dump_probe_count_);
+                        l1.reserve(dump_probe_count_);
                         u32 badCount = 0;
                         for (u32 p = 0; p < dump_probe_count_; ++p) {
                             const float* c0 = irr + (size_t)p * 36;
@@ -518,9 +520,21 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                             if (bad) { ++badCount; continue; }
                             l0.push_back(0.2126f * c0[0] + 0.7152f * c0[1] +
                                          0.0722f * c0[2]);
+                            // L1 方向能量（band1-3 幅度均值）——场角向特征标定量。
+                            float l1m = 0.0f;
+                            for (int b = 1; b <= 3; ++b) {
+                                const float* bb = irr + (size_t)p * 36 + b * 3;
+                                l1m += std::sqrt(bb[0]*bb[0] + bb[1]*bb[1] + bb[2]*bb[2]);
+                            }
+                            l1.push_back(l1m / 3.0f);
                         }
                         if (!l0.empty()) {
                             std::sort(l0.begin(), l0.end());
+                            std::sort(l1.begin(), l1.end());
+                            auto pct1 = [&](float q) {
+                                return l1[std::min(l1.size() - 1,
+                                                   (size_t)(q * (l1.size() - 1)))];
+                            };
                             auto pct = [&](float q) {
                                 return l0[std::min(l0.size() - 1,
                                                    (size_t)(q * (l0.size() - 1)))];
@@ -530,7 +544,10 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                       << " L0lum p10=" << pct(0.10f)
                                       << " p50=" << pct(0.50f)
                                       << " p90=" << pct(0.90f)
-                                      << " max=" << l0.back() << std::endl;
+                                      << " max=" << l0.back()
+                                      << " | L1mag p10=" << pct1(0.10f)
+                                      << " p50=" << pct1(0.50f)
+                                      << " p90=" << pct1(0.90f) << std::endl;
 
                             // Full-SH evaluation at the 6 axis normals: a
                             // healthy L0 with oversized L1/L2 can still clamp

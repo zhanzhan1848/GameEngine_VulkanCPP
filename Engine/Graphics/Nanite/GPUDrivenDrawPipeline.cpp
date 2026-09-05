@@ -3065,6 +3065,8 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.memoryUsage = rhi::GPUMemoryUsage::Static;
                 auto& mom = (cascade == 0) ? frame.shadow_moments_0 : frame.shadow_moments_1;
                 mom = device_->CreateTexture(desc);
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SHADOW_TEX] cascade=" << cascade
+                          << " handle=" << mom << " usage=" << (int)desc.usage << std::endl;
                 if (mom == rhi::handles::INVALID_RESOURCE) return false;
             }
 

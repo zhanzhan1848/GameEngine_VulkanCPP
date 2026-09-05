@@ -66,58 +66,11 @@ public sealed class FrameCaptureCommands
 
     /// <summary>
     /// 用外部 ffmpeg 把 PNG 帧序列编码成视频（规划 §5.3 第 2 层：视频是 record 的
-    /// 输出选项，不是独立能力）。ffmpeg 是可选依赖——缺失/失败都不影响 PNG 序列
-    /// 这一主产物，只在 videoHint 里给出下一步。
+    /// 输出选项，不是独立能力）。实现已抽取到 <see cref="Common.VideoEncoder"/>
+    /// （sequence.render 与 Run 录制共用）；ffmpeg 缺失/失败不影响 PNG 主产物。
     /// </summary>
     private static (bool encoded, string? hint) EncodeVideo(string framesDir, string videoPath, int width, int height)
-    {
-        var ffmpeg = new[] { "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg" }
-            .FirstOrDefault(Findable);
-        if (ffmpeg == null)
-            return (false, "ffmpeg 未安装——PNG 序列已保留，安装 ffmpeg 后可用 editor.diff 逐帧比对");
-
-        // 宽高需为偶数（H.264 yuv420p 约束）。
-        var evenW = width - (width % 2);
-        var evenH = height - (height % 2);
-        var args = "-y -framerate 30 -i " +quotes(framesDir + "/frame_%04d.png") +
-                   " -vf scale=" + evenW + ":" + evenH +
-                   " -c:v libx264 -pix_fmt yuv420p -crf 20 " + quotes(videoPath);
-
-        static string quotes(string p) => "\"" + p + "\"";
-        var psi = new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = ffmpeg,
-            Arguments = args,
-            UseShellExecute = false,
-            RedirectStandardError = true,
-        };
-        try
-        {
-            using var process = System.Diagnostics.Process.Start(psi);
-            if (process == null) return (false, "ffmpeg 进程启动失败");
-            var stderr = process.StandardError.ReadToEnd();
-            process.WaitForExit();
-            if (process.ExitCode != 0 || !File.Exists(videoPath))
-            {
-                var lastLine = stderr.Split('\n').LastOrDefault(l => l.Trim().Length > 0) ?? "";
-                return (false, $"ffmpeg 退出码 {process.ExitCode}：{lastLine[..Math.Min(160, lastLine.Length)]}");
-            }
-            return (true, null);
-        }
-        catch (Exception ex)
-        {
-            return (false, ex.Message);
-        }
-
-        static bool Findable(string candidate)
-        {
-            if (candidate.Contains('/')) return File.Exists(candidate);
-            var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-            foreach (var dir in path.Split(':'))
-                if (File.Exists(Path.Combine(dir, candidate))) return true;
-            return false;
-        }
-    }
+        => Common.VideoEncoder.EncodePngSequence(framesDir, videoPath, width, height, framerate: 30);
 
     [CliCommand("editor.metrics",
         Description = "连续渲染 N 帧并输出每帧标量遥测（Rec.709 均亮度/方差/min/max/通道均值，HDR 原值不截断）。" +

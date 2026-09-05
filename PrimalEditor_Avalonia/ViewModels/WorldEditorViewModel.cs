@@ -237,6 +237,61 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
     public string TargetGraphicsApi => TargetGraphicsApis[_targetGraphicsApiIndex];
 
     // =======================================================================
+    // Run 录制（Part B，Docs/2026-09-05）：Run 启动 PrimalPlayer 时附带逐帧
+    // 录制参数。录制本体在 player 进程（渲染帧与捕获帧 1:1，无丢帧），编辑器
+    // 只拼参数；产物目录约定见 RuntimeLauncher.ResolveRecordDirectory。
+    // =======================================================================
+
+    private bool _recordOnRun;
+
+    /// <summary>Run 时对 PrimalPlayer 开启逐帧 PNG 录制（--record）。</summary>
+    public bool RecordOnRun
+    {
+        get => _recordOnRun;
+        set
+        {
+            if (_recordOnRun != value)
+            {
+                _recordOnRun = value;
+                OnPropertyChanged(nameof(RecordOnRun));
+            }
+        }
+    }
+
+    private int _recordFrames = 300;
+
+    /// <summary>录制捕获帧上限（录满后 player 自动退出）；0 = 跟随窗口关闭。</summary>
+    public int RecordFrames
+    {
+        get => _recordFrames;
+        set
+        {
+            var clamped = Math.Clamp(value, 0, 100_000);
+            if (_recordFrames != clamped)
+            {
+                _recordFrames = clamped;
+                OnPropertyChanged(nameof(RecordFrames));
+            }
+        }
+    }
+
+    private bool _recordMetrics = true;
+
+    /// <summary>录制时同时写逐帧亮度遥测 CSV（--record-metrics，口径同 editor.metrics）。</summary>
+    public bool RecordMetrics
+    {
+        get => _recordMetrics;
+        set
+        {
+            if (_recordMetrics != value)
+            {
+                _recordMetrics = value;
+                OnPropertyChanged(nameof(RecordMetrics));
+            }
+        }
+    }
+
+    // =======================================================================
     // Gizmo snapping (plan §6.1 A2)
     // =======================================================================
 

@@ -538,13 +538,50 @@ public partial class EngineViewport3D : UserControl
     }
 
     /// <summary>
+    /// sequence.render 的底层（Part A）：渲染一帧进现有离屏 RT 并存 PNG，
+    /// 但取景相机由调用方逐帧指定（sceneCameraEntityId > 0 = 场景相机实体，
+    /// 0 = 编辑器相机）——相机 cut 由此实现逐帧切机位，不改动视口当前的
+    /// look-through 状态。与 TryCaptureScreenshot 同一套互锁约束：UI 线程
+    /// 专用，绝不与渲染 tick 重入；跳过 Blit，视口画面不受影响。
+    /// </summary>
+    public bool TryRenderSequencePng(string absolutePath, uint sceneCameraEntityId, out int width, out int height)
+    {
+        width = _renderTargetWidth;
+        height = _renderTargetHeight;
+        if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return false;
+        if (_renderTarget == 0 || _host == null || !_host.IsReady) return false;
+        if (!NativeEngineBridge.IsValidCamera(_cameraId)) return false;
+        if (System.Threading.Interlocked.CompareExchange(ref _renderInProgress, 1, 0) != 0) return false;
+        try
+        {
+            var surfaceId = (uint)_host.SurfaceId;
+            if (sceneCameraEntityId != 0 && sceneCameraEntityId != NativeEngineBridge.InvalidEntityId)
+            {
+                NativeEngineBridge.PipelineRenderFrameForSceneCamera(
+                    _renderTarget, _cameraId, surfaceId, sceneCameraEntityId);
+            }
+            else
+            {
+                NativeEngineBridge.PipelineRenderFrameForEditorCamera(_renderTarget, _cameraId, surfaceId);
+            }
+            if (!NativeEngineBridge.SaveRenderTargetAsPng(_renderTarget, absolutePath)) return false;
+            width = _renderTargetWidth;
+            height = _renderTargetHeight;
+            return true;
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _renderInProgress, 0);
+        }
+    }
+
+    /// <summary>
     /// CLI/Agent 帧捕获（Phase 2，规划 §5.3）：渲染一帧进现有离屏 RT 并读回
     /// RGBA16F 原始像素（不写盘），供 editor.metrics 的标量遥测在托管侧统计。
     /// 渲染与回读整体持有互锁，绝不与渲染 tick 重入；UI 线程专用。
     /// </summary>
     public bool TryReadFramePixels(out byte[] rgba16f, out int width, out int height)
-    {
-        width = _renderTargetWidth;
+    {        width = _renderTargetWidth;
         height = _renderTargetHeight;
         rgba16f = Array.Empty<byte>();
         if (!NativeEngineBridge.IsLoaded || !_viewportInitialized) return false;

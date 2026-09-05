@@ -12,7 +12,7 @@ if(APPLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 endif()
 
-add_executable(${PROJECT_NAME} "main.cpp")
+add_executable(${PROJECT_NAME} "main.cpp" "player_window.mm")
 
 if(APPLE)
     # .mm 走 C++ 编译器 + per-source `-x objective-c++`（enable_language(OBJCXX)
