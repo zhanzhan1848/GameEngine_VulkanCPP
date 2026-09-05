@@ -48,6 +48,8 @@ public:
     // TEMP diagnosis (T8.13 Metal sync): direct CPU read of the SC shadow
     // visibility buffer (Dynamic/shared memory). Returns -1 when unavailable.
     float DebugShadowVisibilityAt(u32 index) const;
+    // T3.3 诊断：可见性缓冲统计（均值/零值占比）——直射项归零排查。
+    void DebugShadowVisibilityStats() const;
     bool DebugShadowPipelineReady() const { return shadow_pipeline_ != rhi::handles::INVALID_PIPELINE; }
 
     // T8.13: offline merged SDF (384^3) for the per-texel shadow march —

@@ -195,6 +195,27 @@ float SurfaceCachePass::DebugShadowVisibilityAt(u32 index) const {
     return v;
 }
 
+void SurfaceCachePass::DebugShadowVisibilityStats() const {
+    if (shadow_visibility_buffer_ == handles::INVALID_RESOURCE || !device_) return;
+    const u64 n = static_cast<u64>(atlas_size_) * atlas_size_;
+    auto* p = static_cast<const float*>(device_->MapBuffer(shadow_visibility_buffer_, 0, n * sizeof(float)));
+    if (!p) return;
+    double sum = 0.0; u64 zeros = 0; u64 ones = 0; float mx = 0.0f;
+    for (u64 i = 0; i < n; ++i) {
+        const float v = p[i];
+        sum += v;
+        if (v <= 1e-4f) ++zeros;
+        if (v >= 0.999f) ++ones;
+        if (v > mx) mx = v;
+    }
+    device_->UnmapBuffer(shadow_visibility_buffer_);
+    PRIMAL_LOG_STREAM(Error, "Render") << "[VIS_STATS] texels=" << n
+              << " mean=" << sum / n
+              << " zeros=" << 100.0 * zeros / n << "%"
+              << " ones=" << 100.0 * ones / n << "%"
+              << " max=" << mx << std::endl;
+}
+
 SurfaceCachePass::~SurfaceCachePass() {
     Shutdown();
 }
@@ -1667,6 +1688,15 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         // visibility write → LightEval read
                         cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                            AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+
+                        // T3.3 诊断：可见性缓冲统计（直射项归零排查）
+                        if (std::getenv("SC_DUMP_CARDS")) {
+                            static u32 visDumpFrame = 0;
+                            if (current_frame_index % 60u == 30u && visDumpFrame != current_frame_index) {
+                                visDumpFrame = current_frame_index;
+                                DebugShadowVisibilityStats();
+                            }
+                        }
                     }
                 }
             }
