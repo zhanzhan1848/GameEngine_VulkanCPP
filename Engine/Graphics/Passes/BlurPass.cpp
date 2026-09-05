@@ -293,9 +293,6 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         lastFrameIndex = frameIndex;
     }
 
-    cmdBuffer->BindComputePipeline(
-        (layers == 1 && pipeline2D_ != rhi::handles::INVALID_PIPELINE) ? pipeline2D_ : pipeline_);
-    
     // Barrier: Prepare Temp for writing (ShaderResource -> UnorderedAccess)
     // Assuming Temp was ShaderResource from previous frame or Undefined
     rhi::ResourceBarrier tempBarrier;
@@ -304,6 +301,9 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
     tempBarrier.afterState = rhi::ResourceState::UnorderedAccess;
     tempBarrier.subresource = rhi::RHI_ALL_SUBRESOURCES;
     cmdBuffer->InsertBarrier(&tempBarrier, 1);
+    cmdBuffer->BindComputePipeline(
+        (layers == 1 && pipeline2D_ != rhi::handles::INVALID_PIPELINE) ? pipeline2D_ : pipeline_);
+    
     
     // Pass 1: Horizontal (Input -> Temp)
     {
@@ -327,6 +327,10 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         
         rhi::DescriptorSetHandle set = GetDescriptorSet(frameIndex, input, temp, offset);
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout_, 0, 1, &set, 0, nullptr);
+        {   static int d1 = 0; if (d1 < 12) { ++d1;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[BLUR_P1] in=" << input << "("
+                << device_->QueryTextureUsage(input) << ") out/temp=" << temp << "("
+                << device_->QueryTextureUsage(temp) << ") set=" << set << std::endl; } }
         
         u32 groupX = (width + 8 - 1) / 8;
         u32 groupY = (height + 8 - 1) / 8;
@@ -376,6 +380,10 @@ void BlurPass::Execute(rhi::RHICommandBuffer* cmdBuffer,
         
         rhi::DescriptorSetHandle set = GetDescriptorSet(frameIndex, temp, output, offset);
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, pipelineLayout_, 0, 1, &set, 0, nullptr);
+        {   static int d2 = 0; if (d2 < 12) { ++d2;
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[BLUR_P2] in/temp=" << temp << "("
+                << device_->QueryTextureUsage(temp) << ") out=" << output << "("
+                << device_->QueryTextureUsage(output) << ") set=" << set << std::endl; } }
         
         u32 groupX = (width + 8 - 1) / 8;
         u32 groupY = (height + 8 - 1) / 8;

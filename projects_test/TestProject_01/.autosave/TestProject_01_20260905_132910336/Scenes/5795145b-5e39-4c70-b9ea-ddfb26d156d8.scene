@@ -182,6 +182,40 @@
           }
         }
       ]
+    },
+    {
+      "EntityGuid": "18412c65-c375-4c9f-ad3f-a43fb0ad7333",
+      "Name": "SmokeSeqBox",
+      "ParentEntityGuid": null,
+      "IsEnabled": true,
+      "Components": [
+        {
+          "$type": "transform",
+          "Data": {
+            "PositionX": 0,
+            "PositionY": 2.8000002,
+            "PositionZ": -4,
+            "RotationX": 0,
+            "RotationY": 0,
+            "RotationZ": 0,
+            "ScaleX": 1,
+            "ScaleY": 1,
+            "ScaleZ": 1,
+            "IsEnabled": true
+          }
+        },
+        {
+          "$type": "meshRenderer",
+          "Data": {
+            "MeshGuid": "00000000-0000-0000-0000-000000000000",
+            "BuiltinMesh": 1,
+            "MaterialGuids": [],
+            "CastShadow": true,
+            "ReceiveShadow": true,
+            "IsEnabled": true
+          }
+        }
+      ]
     }
   ],
   "Environment": {
