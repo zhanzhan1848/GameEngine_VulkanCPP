@@ -1,5 +1,5 @@
 {
-  "$version": "b982289ab8ddb8b9",
+  "$version": "184e48ee9540450c",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -521,7 +521,7 @@
     {
       "verb": "sequence.set-frame",
       "channel": "editor",
-      "description": "把播放头移到指定帧并把求值结果应用到场景（预览 scrub）。帧号 clamp 到 [0, durationFrames)。播放态修改不入 undo；实体原 pose 在下一次编辑前不会自动恢复（用 editor.undo 撤关键帧编辑，非 seek）。",
+      "description": "把播放头移到指定帧并把求值结果应用到场景（预览 scrub）。帧号自动 clamp 到 [0, durationFrames)——越界不报错，返回实际生效帧。播放态修改不入 undo；实体原 pose 在下一次编辑前不会自动恢复（undo 只针对关键帧编辑，不针对 seek）。",
       "example": "{\"frame\":30}",
       "params": [
         {

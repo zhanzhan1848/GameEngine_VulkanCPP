@@ -7,6 +7,7 @@
              xmlns:conv="using:PrimalEditor_Avalonia.Converters"
              xmlns:self="using:PrimalEditor_Avalonia.Views"
              xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
+             xmlns:seq="using:PrimalEditor_Avalonia.Views.Sequencer"
              x:Class="PrimalEditor_Avalonia.Views.WorldEditorView"
              x:DataType="vm:WorldEditorViewModel"
              Background="{DynamicResource VoidBrush}">
@@ -16,6 +17,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="280"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- =========== ROW 0: Toolbar (floating glass) =========== -->
@@ -78,6 +80,8 @@
                 <CheckBox Content="Bounds" VerticalAlignment="Center" Margin="8,0,0,0"
                           IsChecked="{Binding ShowAllBounds}"
                           ToolTip.Tip="A7: 显示全部带网格实体的 AABB 线框"/>
+                <Button Content="SEQ" Click="OnSequencerToggleClick" Padding="8,2"
+                        ToolTip.Tip="Sequencer 时间轴面板（Part A）：相机运镜/变换关键帧/离线渲染"/>
                 <Separator Margin="6,0"/>
                 <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
                 <Button Content="Array…" Click="OnArrayDuplicateClick" Padding="10,2"
@@ -251,5 +255,8 @@
                 </TabControl>
             </ctrl:TextureFrame>
         </Grid>
+
+        <!-- =========== ROW 3: Sequencer（工具栏 SEQ 开关切换显隐） =========== -->
+        <seq:SequencerPanel Grid.Row="3" Name="SequencerPanelHost" IsVisible="False"/>
     </Grid>
 </UserControl>

@@ -788,6 +788,12 @@ private EngineViewport3D? _viewport;
         }
     }
 
+    private void OnSequencerToggleClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (this.FindControl<Views.Sequencer.SequencerPanel>("SequencerPanelHost") is { } panel)
+            panel.IsVisible = !panel.IsVisible;
+    }
+
     private void OnTranslateModeClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e) =>
         _viewport?.SetGizmoMode(GizmoOverlay.GizmoMode.Translate);
 

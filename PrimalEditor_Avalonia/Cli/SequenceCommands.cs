@@ -135,7 +135,8 @@ public sealed class SequenceCommands
                 "该实体已有变换轨", "sequence.info 查看现有轨道；一个实体一条变换轨");
 
         var track = new TransformTrack { EntityGuid = entityGuid, Name = TrackName(worldEditor, entityGuid) };
-        PushUndo(worldEditor, new SequenceUndoActions.AddTrackAction(doc, track));
+        PushUndo(worldEditor, "Sequence Add Track",
+            new SequenceUndoActions.AddTrackAction(doc, track));
         return Describe(doc, created: false);
     }
 
@@ -161,13 +162,15 @@ public sealed class SequenceCommands
                 "先调大 sequence.new 的 durationFrames");
 
         var cut = doc.CameraCut;
+        var actions = new List<IUndoRedoAction>();
         if (cut == null)
         {
             cut = new CameraCutTrack { Name = "Camera Cuts" };
-            PushUndo(worldEditor, new SequenceUndoActions.AddTrackAction(doc, cut));
+            actions.Add(new SequenceUndoActions.AddTrackAction(doc, cut));
         }
-        PushUndo(worldEditor, new SequenceUndoActions.AddShotAction(cut,
+        actions.Add(new SequenceUndoActions.AddShotAction(cut,
             new CameraShot { StartFrame = startFrame, EndFrame = clampedEnd, CameraEntityGuid = cameraEntityGuid }));
+        PushUndo(worldEditor, "Sequence Add Camera Cut", actions.ToArray());
         return Describe(doc, created: false);
     }
 
@@ -194,10 +197,11 @@ public sealed class SequenceCommands
         var cur = TransformData.FromTransform(transform);
 
         var track = doc.FindTransformTrack(entityGuid);
+        var actions = new List<IUndoRedoAction>();
         if (track == null)
         {
             track = new TransformTrack { EntityGuid = entityGuid, Name = TrackName(worldEditor, entityGuid) };
-            PushUndo(worldEditor, new SequenceUndoActions.AddTrackAction(doc, track));
+            actions.Add(new SequenceUndoActions.AddTrackAction(doc, track));
         }
         var key = new TransformKey
         {
@@ -207,7 +211,8 @@ public sealed class SequenceCommands
             Scale = scale is { } sc ? new[] { sc.X, sc.Y, sc.Z } : new[] { cur.ScaleX, cur.ScaleY, cur.ScaleZ },
             Interpolation = interpolation,
         };
-        PushUndo(worldEditor, new SequenceUndoActions.AddKeyAction(track, key));
+        actions.Add(new SequenceUndoActions.AddKeyAction(track, key));
+        PushUndo(worldEditor, "Sequence Add Key", actions.ToArray());
         return new { trackEntityGuid = entityGuid.ToString("D").ToLowerInvariant(), frame = at, keys = track.Keys.Count };
     }
 
@@ -222,7 +227,8 @@ public sealed class SequenceCommands
             ?? throw CliError.NotFound($"实体 {entityGuid} 的变换轨", "sequence.info 查看现有轨道");
         var key = track.Keys.FirstOrDefault(k => k.Frame == frame)
             ?? throw CliError.NotFound($"帧 {frame} 上的关键帧", "sequence.info 查看关键帧分布");
-        PushUndo(worldEditor, new SequenceUndoActions.RemoveKeyAction(track, key));
+        PushUndo(worldEditor, "Sequence Remove Key",
+            new SequenceUndoActions.RemoveKeyAction(track, key));
         return new { removed = true, frame, keys = track.Keys.Count };
     }
 
@@ -235,7 +241,8 @@ public sealed class SequenceCommands
         var worldEditor = RequireWorldEditor();
         var track = doc.FindTransformTrack(entityGuid)
             ?? throw CliError.NotFound($"实体 {entityGuid} 的变换轨", "sequence.info 查看现有轨道");
-        PushUndo(worldEditor, new SequenceUndoActions.RemoveTrackAction(doc, track));
+        PushUndo(worldEditor, "Sequence Remove Track",
+            new SequenceUndoActions.RemoveTrackAction(doc, track));
         return new { removed = true };
     }
 
@@ -245,14 +252,14 @@ public sealed class SequenceCommands
 
     [CliCommand("sequence.set-frame",
         Description = "把播放头移到指定帧并把求值结果应用到场景（预览 scrub）。" +
-                      "帧号 clamp 到 [0, durationFrames)。播放态修改不入 undo；" +
-                      "实体原 pose 在下一次编辑前不会自动恢复（用 editor.undo 撤关键帧编辑，非 seek）。",
+                      "帧号自动 clamp 到 [0, durationFrames)——越界不报错，返回实际生效帧。" +
+                      "播放态修改不入 undo；实体原 pose 在下一次编辑前不会自动恢复" +
+                      "（undo 只针对关键帧编辑，不针对 seek）。",
         Example = """{"frame":30}""")]
     public object SetFrame(int frame)
     {
         var doc = RequireOpenSequence();
-        if (!SequenceEditorState.SetFrame(frame))
-            throw CliError.InvalidParams($"frame 越界: {frame}", $"有效区间 0..{doc.DurationFrames - 1}");
+        SequenceEditorState.SetFrame(frame); // clamp 到 [0, durationFrames)
         ApplyCurrent(worldEditor: RequireWorldEditor(), doc);
         return new { frame = SequenceEditorState.CurrentFrame };
     }
@@ -433,10 +440,18 @@ public sealed class SequenceCommands
     private static void ApplyCurrent(WorldEditorViewModel worldEditor, SequenceDocument doc) =>
         _ = SequenceDriver.ApplyFrame(doc, SequenceEditorState.CurrentFrame, worldEditor);
 
-    private static void PushUndo(WorldEditorViewModel worldEditor, IUndoRedoAction action)
+    private static void PushUndo(WorldEditorViewModel worldEditor, string name, params IUndoRedoAction[] actions)
     {
-        worldEditor.UndoRedo.Add(action);
-        action.Redo();
+        // 事务合成一步：add-key 自动建轨这类复合操作 = 一个 undo 步
+        //（与 UI 粘贴/复制实体的 BeginTransaction 惯例一致）。
+        using (worldEditor.UndoRedo.BeginTransaction(name))
+        {
+            foreach (var action in actions)
+            {
+                worldEditor.UndoRedo.Add(action);
+                action.Redo();
+            }
+        }
         SequenceEditorState.FireChanged();
     }
 

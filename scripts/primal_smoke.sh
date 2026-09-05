@@ -69,4 +69,42 @@ expect_ok "editor.redo(2)" "$PRIMAL" editor.redo
 expect_ok "editor.undo(清理 2)" "$PRIMAL" editor.undo
 "$PRIMAL" scene.tree 2>/dev/null | grep -q SmokeSphere && { echo "FAIL: 清理性 undo 后实体仍在"; exit 1; }
 
+# ============================================================================
+# Sequence 拍片闭环（Part A，自包含段：不干扰上文 undo 栈的计数断言）
+# 建轨 → K 帧 → seek 预览 → 离线渲染 ×2 → 逐帧确定性 → .pseq 落盘
+# ============================================================================
+step "Sequence 拍片闭环"
+expect_ok "sequence 实体创建" "$PRIMAL" entity.create '{"kind":"Sphere","name":"SmokeSeqBox","position":[0,1,-4]}'
+SEQ_GUID="$(python3 -c 'import json;print(json.load(open("'"$OUT_DIR"'/last.json"))["data"]["entityGuid"])')"
+
+expect_ok "sequence.new" "$PRIMAL" sequence.new '{"name":"SmokeSeq","fps":30,"durationFrames":6}'
+expect_ok "sequence.add-key f0" "$PRIMAL" sequence.add-key "{\"entityGuid\":\"$SEQ_GUID\",\"frame\":0,\"position\":[0,1,-4]}"
+expect_ok "sequence.add-key f5" "$PRIMAL" sequence.add-key "{\"entityGuid\":\"$SEQ_GUID\",\"frame\":5,\"position\":[0,4,-4]}"
+expect_ok "sequence.set-frame" "$PRIMAL" sequence.set-frame '{"frame":3}'
+python3 -c '
+import json
+d = json.load(open("'"$OUT_DIR"'/last.json"))
+assert d["ok"] and d["data"]["frame"] == 3, d'
+
+expect_ok "sequence.render 第一遍" "$PRIMAL" sequence.render "{\"out\":\"$OUT_DIR/seq_render_a\"}"
+python3 -c '
+import json
+d = json.load(open("'"$OUT_DIR"'/last.json"))
+assert d["ok"] and d["data"]["frames"] == 6, d'
+expect_ok "sequence.render 第二遍" "$PRIMAL" sequence.render "{\"out\":\"$OUT_DIR/seq_render_b\"}"
+
+# 确定性口径：同序列两遍渲染同帧比对。verdict=identical 为位级一致；
+# within-threshold（阈值内 0 差异像素）容忍 GI 时域收敛类噪声——真闪烁会被 changedPixelRatio 捕获。
+expect_ok "editor.diff 确定性验证" "$PRIMAL" editor.diff "{\"a\":\"$OUT_DIR/seq_render_a/frame_0003.png\",\"b\":\"$OUT_DIR/seq_render_b/frame_0003.png\",\"threshold\":8}"
+python3 -c '
+import json
+d = json.load(open("'"$OUT_DIR"'/last.json"))
+v = d["data"]["verdict"]
+assert v in ("identical", "within-threshold"), ("sequence.render 不确定！", v, d["data"]["changedPixelRatio"])
+print("   确定性:", v, "| changed:", d["data"]["changedPixelCount"])'
+
+expect_ok "sequence.save" "$PRIMAL" sequence.save
+grep -q "Sequences/SmokeSeq.pseq" "$OUT_DIR/last.json" || { echo "FAIL: .pseq 未落盘到 Sequences/"; exit 1; }
+echo "ok: .pseq 落盘（Sequences/SmokeSeq.pseq）" >&2
+
 echo "SMOKE PASSED（产物在 ${OUT_DIR}）" >&2

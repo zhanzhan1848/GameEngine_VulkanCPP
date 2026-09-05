@@ -250,11 +250,12 @@ public sealed class CliSequenceCommandTests : IDisposable
     }
 
     [Fact]
-    public void SetFrame_OutOfRange_ReturnsInvalidParams()
+    public void SetFrame_OutOfRange_ClampsToValidInterval()
     {
         Invoke("sequence.new", new { durationFrames = 10 });
-        Assert.False(Invoke("sequence.set-frame", new { frame = 10 }).Ok); // 有效区间 0..9
-        Assert.False(Invoke("sequence.set-frame", new { frame = -1 }).Ok);
+        // clamp 语义（对齐视频播放器 seek）：越界不报错，返回实际生效帧。
+        Assert.Equal(9, Data(Invoke("sequence.set-frame", new { frame = 10 }))["frame"].Int());
+        Assert.Equal(0, Data(Invoke("sequence.set-frame", new { frame = -1 }))["frame"].Int());
     }
 
     // ------------------------------------------------------------------
