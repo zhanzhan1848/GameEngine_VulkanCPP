@@ -377,6 +377,30 @@ ShaderResource）的全屏 1280×720 纹理；同句柄跨帧 usage 3→1 漂移
 blurCS2D 消费方排查：ShadowMap(mom=37/40 usage 7 ✓)、Bloom(已关)、
 LumenSSAO(不用 BlurPass)——剩余候选在 RG 瞬态生命周期审查中定位。
 
+## 第十二轮：blurCS2D 断言真因 = SSGI blur 写交换链（2026-09-05 收尾）
+
+地面真值（TEXBIND/BLUR_USE 打印）：失败 dispatch 绑定 slot1 =
+handle 199 = **1280×720 usage 0x01 = 交换链后备缓冲**（SetNativeTexture
+注入，绕过 MetalTexture::Initialize——故此前创建侧打印全部正常）。
+
+即：**SSGI blur（无 PRIMAL_SPGI 时 SSGI 活跃）的 RG 瞬态输出解析别名
+到了 BackBuffer**，blur 直接写交换链 → validation assert / 设备丢失。
+与 bloom temp 别名同类——RG 瞬态槽位复用冲突，两次暴露同一 RG 缺陷。
+
+### 处置
+
+- RHI 新增 QueryTextureUsage 虚接口（抽象基类默认 0，MetalDevice 实现
+  MTLTextureUsage 查询；其余后端零成本）。
+- BlurPass::Execute 加可写性守卫：output 缺 ShaderWrite → 跳过+告警
+  一次。应用存活（曾 840 帧稳定），不再被 assert/设备丢失打断。
+
+### 下轮
+
+1. **RG 瞬态槽位别名根修**（Compile/分配阶段对生命周期重叠的瞬态
+   纹理不复用物理槽；SSGI blur 输出与 BackBuffer 的别名是实例）。
+2. 修后 SSGI blur 恢复（删 BlurPass 守卫或保留为保险）。
+3. DDGI parity bisect 主线（Vulkan 半数探针 L1≈0 的稀疏更新制度差）。
+
 ## 第十一轮：bisect 中断与现状（2026-09-05 收尾）
 
 Metal 测试当前被 blurCS2D 陈旧句柄 assert 阻塞（validation 下 frame ~20
