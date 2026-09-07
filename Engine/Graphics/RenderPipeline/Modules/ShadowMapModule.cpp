@@ -476,6 +476,14 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 auto* p = static_cast<Params*>(device_->MapBuffer(shadow_filter_cb_[cbIdx]));
                 if (p) {
                     p->inv_view_proj = invVP;
+                    // TEMP-DIAG: filter UBO 的 invVP 真值
+                    if (std::getenv("PRIMAL_DUMP_MATRIX")) {
+                        std::fprintf(stderr, "[FILTER_INVP] (%.4f,%.4f,%.4f,%.4f) (%.4f,%.4f,%.4f,%.4f) (%.4f,%.4f,%.4f,%.4f) (%.4f,%.4f,%.4f,%.4f)\n",
+                                     invVP.columns[0].x, invVP.columns[0].y, invVP.columns[0].z, invVP.columns[0].w,
+                                     invVP.columns[1].x, invVP.columns[1].y, invVP.columns[1].z, invVP.columns[1].w,
+                                     invVP.columns[2].x, invVP.columns[2].y, invVP.columns[2].z, invVP.columns[2].w,
+                                     invVP.columns[3].x, invVP.columns[3].y, invVP.columns[3].z, invVP.columns[3].w);
+                    }
                     p->shadow_vp[0] = mat0;
                     p->shadow_vp[1] = mat1;
                     p->light_dir = math::v4{L.x, L.y, L.z, 0.0f};
