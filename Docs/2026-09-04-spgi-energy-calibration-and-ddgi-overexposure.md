@@ -751,3 +751,34 @@ PRIMAL_PROBE_HYSTERESIS 沿用。
 下轮：① 阴影泄漏根修（ShadowDepth 光栅/ShadowFilter 上游审计，
 RenderDoc 截帧 shadow map 内容直查）② SC 卡片辐射重测（直射复活后
 全部旧数据作废）③ 探针天空分档统一。
+
+
+### 第九轮（2026-09-07 续三）：shadow map 跨端内容测量——数据已备齐
+
+ShadowFilter 加诊断直出接收器光空间 UV 处的 shadow map 原始深度，
+Metal 同位借 VSM moments.x 对照（相同矩阵、相同 UV 约定）：
+
+| 区域 | Vulkan d | Metal moments.x | Vulkan 接收器 z |
+|---|---|---|---|
+| 庭院地板中 | 0.374 | 0.922 | 0.611 |
+| 庭院地板下 | 0.328 | 0.934 | 0.639 |
+| 2F 拱廊左 | 0.301 | 0.562 | 0.558 |
+| 受光墙左 | 0.325 | 0.509 | 0.539 |
+
+（Vulkan 值经 R8 钳位+曝光还原；sky 出界采样 ≈1.0 确认通道有效。）
+
+要点：
+- Vulkan 的 shadow map 深度挤在 0.30-0.39 窄带且系统性低于接收器
+  z（0.54-0.64）——每处都有"更近的遮挡体"或深度编码不同；
+- Metal 同位置深度 0.51-0.93 与其 z 相容（光池区 moments.x > z →
+  判 lit ✓）；
+- 同一 CPU 矩阵、同一资产、同一 UV 约定 → 分歧在**光栅/拷贝链**
+  （ShadowDepth WGSL 光栅 → D32 RT → ShadowBlit 原样拷贝 → R32
+  shadow map）。ShadowBlit 已核对为逐位拷贝，无重映射。
+- 注意：Metal 庭院地板 moments.x=0.92 > 接收器 z=0.61——地板自身
+  不在 map 的该 texel（更深者是地面/模型下部）——即"光池判 lit"
+  在 Metal 是 z ≤ moments.x 的自然结果。
+
+下轮首件事：**两端 shadow map 全图 2048² 读回转 PGM 并排对照**
+（读回管线可复用 capturePPM/DUMP 模式），直接看内容结构（镜像/
+缩放/幽灵几何一目了然），再决定修光栅还是修采样。
