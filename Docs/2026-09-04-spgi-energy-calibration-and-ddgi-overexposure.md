@@ -896,3 +896,21 @@ Blit 原样拷贝已排除）。修复后两平台直射同步复活，且强 SS
 vis=0 的直接原因不在 map/矩阵，而在 filter 自身的 depth→worldPos
 重建。下轮首查：filter 的 depthTex 绑定内容（D32 原始 vs RT1 线性
 深度）与 fullUV 采样约定。
+
+
+### 第十四轮（2026-09-08）：vis 噪声直接机制定位——filter worldPos 重建散光
+
+ShadowFilter 直出其重建的 worldPos.x：地板区域 **19.82 近常量
+（std 0.00）**，而 deferred 同位置验证值 10.82 且随场景变化。远端
+像素 sc0.x 超 1 出级联界。机制：filter 的 depth→worldPos 重建在
+depth≈0.99 的超敏感区（远平面附近逆投影放大）对采样微差极其敏感，
+或其 inv_view_proj 链路本身有误——**vis=0 的直接机制 = 接收器
+sc.xy 散光 → 深度比较随机**。
+
+已知事实汇总：shadow map 两端逐位一致且含完整内部几何（CullMode
+修复后）；接收器 z 正确（CPU 手算吻合）；worldPos 在 deferred 端
+正确。断点唯一收敛在 ShadowFilter 内部的 worldPos→sc 链路。
+
+下轮：① filter 内分步直出（depth → worldPos → sc.xy 三段各自
+验证）定位精确断点 ② 修复后 vis 恢复 → 直射双平台真复活 ③
+DIRECT/曝光联合重校准 ④ SC 重测 + ACES。
