@@ -805,3 +805,27 @@ rm/mv archive 后全量重建 Vulkan 库，同一份 shader 代码下：
 ① 2F/1F 内部直射泄漏（vis≈0.5，ShadowDepth 光栅/ShadowFilter 上游
 审计，shadow map 全图读回对照）② SC 卡片辐射重测（干净 archive 上
 重跑 A/B）③ ACES 显示变换重校准。
+
+
+### 第十一轮（2026-09-07 深夜）：vis 全零实锤——直射"复活"系 SPGI 伪装
+
+干净 archive 上重测阴影可见性：**vis 全域 = 0.000**（地板/1F/2F 全影
+）——即直射至今仍死亡，此前"直射复活"画面中的光池/明暗实为 SPGI
+屏幕探针 GI 的逐像素结构（SPGI 逐光线追踪可产生逼真的光池与阴影边
+缘）。布局双修复（vis 纹理写入前 ShaderResource→UnorderedAccess、
+读取前 UnorderedAccess→ShaderResource 显式屏障，validation 102→84）
+后 vis 仍全零——屏障非根因，但报错类别减少。
+
+**vis=0 机制定位**：PCSS 深度比较 sc.z-bias > d 全域失败——
+shadow map 深度挤在 0.30-0.39 窄带，而接收器 sc0.z（正确矩阵、
+正确 worldPos，CPU 手算 0.629 与实测 0.612-0.639 吻合）在 0.54-0.64。
+**shadow map 的深度尺度与 shadowMatrix0 不同**：光栅侧投影来自
+light_frustum_cb（GPU 剔除管线填充，非 CPU 的 shadowMatrix0）——
+其尺度差使全场景深度映射到 0.3-0.4 窄带 → 全域判影。Metal VSM
+"正常"系 moments 与其接收端共用了同一错位尺度（monotonic 重映射
+不破坏阴影结构），两平台是在不同的错位尺度下各自"工作"。
+
+下轮首件事：审计 light_frustum_cb 的填充/使用链（ShadowCulling
+comp → ShadowDepth WGSL），统一光栅与接收端的深度尺度；随后
+SC 卡片辐射重测、ACES 重校准。诊断工具（PRIMAL_DUMP_MATRIX、
+GBUFFER_DEBUG、vis/z 直出法）全部留档。

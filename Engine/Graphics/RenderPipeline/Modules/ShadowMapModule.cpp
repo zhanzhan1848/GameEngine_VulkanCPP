@@ -498,6 +498,18 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 // previous frame's ShadowBlit (cache hit skips the blit this frame).
                 // GBuffer depth/normal were written as RenderTarget by an earlier pass
                 // that has no explicit RG dependency with this compute dispatch.
+                // 2026-09-07：vis 纹理先转入 GENERAL（imageStore 写入要求）——
+                // 上一帧 sampled 读取后处于 SHADER_READ_ONLY，RG 未为 storage
+                // 写入发转换，写入被丢弃 → vis 恒 0（直射全域死亡根因之二）。
+                {
+                    rhi::ResourceBarrier visToStorage{};
+                    visToStorage.resource = shadow_visibility_tex_;
+                    visToStorage.beforeState = rhi::ResourceState::ShaderResource;
+                    visToStorage.afterState = rhi::ResourceState::UnorderedAccess;
+                    visToStorage.subresource = 0xFFFFFFFF;
+                    visToStorage.queueFamily = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&visToStorage, 1);
+                }
                 {
                     ResourceBarrier barriers[4];
                     barriers[0].resource = sm0;
@@ -530,6 +542,20 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 const DescriptorSetHandle sets[] = { shadow_filter_ds_[cbIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, shadow_filter_layout_, 0, 1, sets, 0, nullptr);
                 cmd->Dispatch((render_width_ / 2 + 7) / 8, (render_height_ / 2 + 7) / 8, 1);
+
+                // 2026-09-07 修复：imageStore 使 vis 纹理处于 GENERAL 布局，
+                // 下游 deferred 的 sampled 读取需要 SHADER_READ_ONLY。RG 状态
+                // 跟踪误报 before=SHADER_READ_ONLY（验证层 VUID-vkCmdPipeline
+                // Barrier-oldLayout-01197 ×20/帧，实际 GENERAL）→ 转换无效 →
+                // 采样读到未定义值 → vis 全 0 → 直射全域死亡。显式补正确
+                // 屏障，RG 后续转换变为合法 no-op。
+                rhi::ResourceBarrier visBarrier{};
+                visBarrier.resource = shadow_visibility_tex_;
+                visBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
+                visBarrier.afterState = rhi::ResourceState::ShaderResource;
+                visBarrier.subresource = 0xFFFFFFFF;
+                visBarrier.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&visBarrier, 1);
             }
         );
     }
