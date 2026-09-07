@@ -881,3 +881,18 @@ CullMode 修复同步至 Metal 后，Metal direct-only（SSGI/SPGI off）
 接收端 sc0.z 的深度方向约定需逐环节核对（ortho 近远映射/反转-Z/
 Blit 原样拷贝已排除）。修复后两平台直射同步复活，且强 SSGI/SPGI
 将回落为补偿角色。
+
+
+### 第十三轮补遗（同夜）：const-depth 扫图修正结论——地板在 map 里，散光在接收器
+
+常量深度诊断（ShadowDepth 全几何写 clip.z=0）扫图：庭院 slot 区
+出现 0.72 ≈ 地板真实 NDC z——**"地板未光栅化"结论撤回，地板一直
+在 shadow map 里**（此前 slot 值系前一帧缓存 map 的内容，shader
+编辑不失效缓存 map）。
+
+随之新线索：接收器 sc0.x 在地板区域散布 0.21-1.00+（正确矩阵下应
+紧聚 0.4-0.5）——**ShadowFilter 的 worldPos/采样输入链路有散光**
+（GetGBufferDepthSampleable 的纹理与采样 UV 约定头号嫌疑），即
+vis=0 的直接原因不在 map/矩阵，而在 filter 自身的 depth→worldPos
+重建。下轮首查：filter 的 depthTex 绑定内容（D32 原始 vs RT1 线性
+深度）与 fullUV 采样约定。
