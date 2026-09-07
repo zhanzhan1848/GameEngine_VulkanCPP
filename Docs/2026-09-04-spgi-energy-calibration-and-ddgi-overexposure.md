@@ -714,3 +714,40 @@ viewPos 232、shadowMatrix 240/304、shadowParams 368、ambientLight
 
 教训：跨平台 struct 对齐改动必须三端同检（C++/MSL/GLSL），Metal
 的 argument-length 校验是唯一的护栏，Vulkan/GLSL 静默错位无报警。
+
+
+### 第八轮（2026-09-07 续二）：直射复活后的 GI 病灶定量——平填充 + 阴影泄漏
+
+用户反馈：直射恢复但 GI 区偏暗，且 1F/2F 内部区域比邻近直射区的区域
+还亮。分源定量（区域亮度）：
+
+| 区域 | Vulkan | Metal |
+|---|---|---|
+| 1F 拱廊左/右 | 9.1 / 9.0 | 6.2 / 42.6 |
+| 2F 拱廊左/右 | 24.0 / 33.0 | 13.4 / 87.6 |
+| 庭院近直射 | 14.1 | 85.9 |
+
+两个病灶：
+
+1. **GI 填充平且无方向性**：Metal 填充强方向性（右=太阳侧 42.6/87.6，
+   左 6.2/13.4），Vulkan 近对称（9.1/9.0、24/33）且庭院近直射区
+   反而最暗（14.1）。GI_ISOLATE 分源（all/ddgi/spgi/ssgi）显示移除
+   任何单源画面几乎不变——多个源各自送出 ~均匀填充。探针场
+   DDGI_DUMP=1：L0≈0.28、L1 方向性弱（+x 偏置 0.23）——平填充在
+   探针层确认。SC 卡片辐射 3× 差专项需在直射复活后全部重测。
+
+2. **2F 内部填充 = 直射泄漏 + 平填充**：GI 全关（GI_ISOLATE=all）
+   后 2F 仍 24.7/33.6——排除 GI，为直射泄漏。阴影可见性可视化：
+   2F 内部 vis≈0.48-0.64（应为 ~0），光池区仅 0.51-0.55（应为 1）。
+   VSM 与 PCSS 两路径症状一致 → 共用上游（ShadowDepth 光栅/
+   ShadowFilter 级联选择）待审计；级联覆盖可视化确认全场景都在
+   cascade 0 界内，排除出界回退。Y 翻转 A/B 无效。
+
+本轮落地：Vulkan 主视图阴影默认切 PCSS（PRIMAL_VSM_SHADOWS=1 可回
+VSM 对照；validation 122→102）——两路径症状一致，切换本身不治病因，
+但少一类 descriptor 报错。诊断旋钮 PRIMAL_GBUFFER_DEBUG、
+PRIMAL_PROBE_HYSTERESIS 沿用。
+
+下轮：① 阴影泄漏根修（ShadowDepth 光栅/ShadowFilter 上游审计，
+RenderDoc 截帧 shadow map 内容直查）② SC 卡片辐射重测（直射复活后
+全部旧数据作废）③ 探针天空分档统一。

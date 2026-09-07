@@ -734,6 +734,15 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         gpuDraw.SetDebugMode((u32)atoi(dm));
         std::cerr << "[Diag] meshlet debug_mode = " << dm << std::endl;
     }
+    // 2026-09-07 Vulkan 主视图阴影切 PCSS（ShadowFilter.comp 半分辨率
+    // R8 可见性）：VSM moments 链（WGSL 光栅/模糊）实测几何错位——
+    // 光池区可见性仅 0.5、二楼内部 0.5-0.64 泄漏，而 Metal VSM 正常
+    // （光池 1.0）。PCSS 路径绕开 moments 全链。默认切换；置
+    // PRIMAL_VSM_SHADOWS=1 可回 VSM 对照。
+    if (!std::getenv("PRIMAL_VSM_SHADOWS")) {
+        pipeline_->SetVSMShadows(false);
+        std::cerr << "[Shadow] Vulkan PCSS path (VSM moments chain displaced, see docs)" << std::endl;
+    }
     gpuDraw.SetMaterialDataBuffer(materialRegistry_->GetMaterialDataBuffer());
     SamplerDesc texSamplerDesc{};
     texSamplerDesc.minFilter = FilterMode::Linear;
