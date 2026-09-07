@@ -870,3 +870,14 @@ stable shadow map depth"）——meshlet 缠绕方向不一致（2026-09-02 伪
 
 下轮：① Metal 重建复测（同修验证）② 镜像定位（sc.xy 直出对照）
 ③ DIRECT/曝光联合重校准 ④ SC 重测 ⑤ ACES。
+
+
+### 补充实证（同夜）：Metal 直射同样死亡——两平台同病
+
+CullMode 修复同步至 Metal 后，Metal direct-only（SSGI/SPGI off）
+实测 mean 4.6、全场景 vis≈0——**Metal 的主视图直射同样一直死亡**
+，此前"Metal 正常"完全由其强 SSGI/SPGI 掩盖。深度反转假设
+（map d = 1−z，0.36 ≈ 1−0.63 吻合）为头号候选：光栅 D32 写入与
+接收端 sc0.z 的深度方向约定需逐环节核对（ortho 近远映射/反转-Z/
+Blit 原样拷贝已排除）。修复后两平台直射同步复活，且强 SSGI/SPGI
+将回落为补偿角色。
