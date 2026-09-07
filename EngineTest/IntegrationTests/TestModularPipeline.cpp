@@ -1,5 +1,8 @@
 #include "TestModularPipeline.h"
+#include "SponzaReference.h"
+#include "Graphics/Lumen/GIDebugParams.h"
 #include "Engine/Common/CommonHeaders.h"
+#include "Engine/Common/CoreLogStream.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalMath.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
@@ -523,45 +526,25 @@ bool TestModularPipeline::InitializePipeline() {
         std::cout << "[TestModularPipeline] SPGI enabled via PRIMAL_SPGI" << std::endl;
     }
 
-    // T8.13 Vulkan↔Metal sync — SAME lighting calibration as
-    // TestVulkanSponzaRenderGraph (the measurement reference). Without this
-    // the pipeline defaults (light_color 5.0, ddgi_light_color 20.0) put the
-    // probe analytic drive at ~60x the Vulkan reference and pinned every
-    // GI-lit surface to the white ACES shoulder.
-    // 2026-09-02 再对齐：跟随 Vulkan 62c609bd 方向复原暖弹射，但 Metal 的
-    // SC↔probe 环路增益高于 Vulkan（同 5.0 档 gather_avg=1.107 vs Vulkan
-    // ~0.3-0.5，GIFusionVerify 上限 0.8），实测折中取 2.0：亮度回带内，
-    // 弹射色保留（旧值 0.318 时探针场全中性 rgb(0.215,0.212,0.209)，
-    // Vulkan 基准是暖色 (0.234,0.193,0.145)）。
     {
         auto renderSettings = pipeline_->GetSettings();
         renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
-        // PRIMAL_LIGHT_DIR="x,y,z"：GI 响应 A/B——翻转直射方向后对比 gather
-        // 条带分布，验证 GI 场是否真的跟随直射光（"GI 区是平的"排查）。
-        if (const char* ld = std::getenv("PRIMAL_LIGHT_DIR")) {
-            float lx, ly, lz;
-            if (std::sscanf(ld, "%f,%f,%f", &lx, &ly, &lz) == 3) {
-                renderSettings.lighting.light_direction = {lx, ly, lz};
-                std::cerr << "[TestModularPipeline] light_direction overridden: "
-                          << lx << "," << ly << "," << lz << std::endl;
-            }
-        }
-        renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f}; // 直射峰值对齐: 3.0 x albedo/pi 峰值 ~1.4 = Vulkan 实测 1.38 (7.5 档会到 ~3.6 死白)
-        // 2026-09-05 裁决：默认 3.0。曾短暂对齐 Vulkan 参照档 5.0，但实测
-        // 5.0 加重直射区过曝（用户可视验收），且 Vulkan 自身被判断"压得过
-        // 暗"——数值对齐不等于感知对齐，驱动档位随 Metal 感知标定走。
-        // 探针场对驱动不敏感（SC-first 下由卡片辐射主导，3.0→5.0 仅 +2%），
-        // 档位只影响 SC 薄覆盖区。
-        // PRIMAL_DDGI_LIGHT="r,g,b"：跨后端同机位 A/B 旋钮。
+        renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f};
+        // Preserve the validated Metal SC/probe feedback budget.
         renderSettings.lighting.ddgi_light_color = {3.0f, 3.0f, 3.0f, 1.0f};
-        if (const char* dl = std::getenv("PRIMAL_DDGI_LIGHT")) {
-            float lr, lg, lb;
-            if (std::sscanf(dl, "%f,%f,%f", &lr, &lg, &lb) == 3) {
-                renderSettings.lighting.ddgi_light_color = {lr, lg, lb, 1.0f};
-                std::cerr << "[TestModularPipeline] ddgi_light_color overridden: " << dl << std::endl;
-            }
-        }
+        sponza_reference::LightingSettings(renderSettings.lighting);
         pipeline_->UpdateSettings(renderSettings);
+    }
+
+    // 2026-09-06 三缓冲不统一抑制：探针每帧全量更新 + 射线集按帧轮转，
+    // 3 个历史槽内容发散轮播（连帧差实测 mean 5-6/255、太阳池 ±8）。
+    // 提高滞回平滑探针场；PRIMAL_PROBE_HYSTERESIS 可调（默认引擎值 0.2）。
+    if (const char* ph = std::getenv("PRIMAL_PROBE_HYSTERESIS")) {
+        float v = (float)atof(ph);
+        if (v >= 0.0f && v <= 0.99f) {
+            lumen::GIDebug().probe_hysteresis = v;
+            std::cout << "[TestModularPipeline] probe_hysteresis = " << v << std::endl;
+        }
     }
 
     // T8.13 sync: match the Vulkan reference app's pass scope — volume paths
@@ -590,6 +573,7 @@ bool TestModularPipeline::InitializePipeline() {
 
 void TestModularPipeline::SetupCamera() {
     float x = 0.0f, y = 5.0f, z = 0.0f, pitch = 0.0f, yaw = 0.0f;
+    sponza_reference::Camera(x, y, z, pitch, yaw);
     if (const char* cameraOverride = std::getenv("SPGI_CAM")) {
         if (std::sscanf(cameraOverride, "%f,%f,%f,%f,%f",
                         &x, &y, &z, &pitch, &yaw) == 5) {
@@ -1010,6 +994,13 @@ bool TestModularPipeline::LoadSponzaScene() {
     sunLight.direction = {0.5f, -0.7f, 0.3f};
     sunLight.color = {1.0f, 0.95f, 0.9f};
     sunLight.intensity = 3.0f;
+    if (sponza_reference::Enabled() || std::getenv("PRIMAL_LIGHT_DIR") ||
+        std::getenv("PRIMAL_DIRECT_LIGHT")) {
+        const auto& light = pipeline_->GetSettings().lighting;
+        sunLight.direction = light.light_direction;
+        sunLight.color = {light.light_color.x / 3.0f, light.light_color.y / 3.0f,
+                          light.light_color.z / 3.0f};
+    }
     scene_.AddLight(sunLight);
 
         RegisterSceneCardsWithSurfaceCache();
@@ -1076,8 +1067,21 @@ void TestModularPipeline::Run() {
     cmd->Reset();
     cmd->Begin();
 
+    const char* capturePath = std::getenv("SPONZA_CAPTURE");
+    const char* captureFrame = std::getenv("SPONZA_CAPTURE_FRAME");
+    const bool captureThisFrame = capturePath &&
+        frameCount_ + 1 == (captureFrame ? std::atoi(captureFrame) : 360);
+    auto outputDesc = renderSystem_.GetBackBufferDesc();
+    ResourceHandle captureTarget = handles::INVALID_RESOURCE;
+    if (captureThisFrame) {
+        // Metal drawables are framebufferOnly. Render the requested frame to
+        // an equivalent offscreen texture so validation stays enabled.
+        outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource | TextureUsage::CopySource;
+        outputDesc.memoryUsage = GPUMemoryUsage::Static;
+        captureTarget = device_->CreateTexture(outputDesc);
+    }
     pipeline_->RenderWithCommandBuffer(
-        scene_, view_, backBuffer, renderSystem_.GetBackBufferDesc(),
+        scene_, view_, captureTarget != handles::INVALID_RESOURCE ? captureTarget : backBuffer, outputDesc,
         cmd, bufferIndex, cmdHandle, signalFence);
 
     cmd->End();
@@ -1090,6 +1094,50 @@ void TestModularPipeline::Run() {
     renderSystem_.EndFrame();
 
     frameCount_++;
+    // Opt-in, deterministic native-resolution capture for reference matching.
+    // Read the offscreen output; no desktop scaling or UI overlays.
+    if (const char* path = std::getenv("SPONZA_CAPTURE")) {
+        const char* frame = std::getenv("SPONZA_CAPTURE_FRAME");
+        if (frameCount_ == (frame ? std::atoi(frame) : 360) && captureTarget != handles::INVALID_RESOURCE) {
+            const auto size = renderSystem_.GetBackBufferDesc().size;
+            BufferDesc bd{};
+            bd.size = static_cast<u64>(size.x) * size.y * 4;
+            bd.type = BufferType::Raw;
+            bd.memoryUsage = GPUMemoryUsage::Readback;
+            auto buffer = device_->CreateBuffer(bd);
+            auto handle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* capture = rhi::GetCommandBuffer(handle);
+            bool saved = false;
+            if (buffer != handles::INVALID_RESOURCE && capture && capture->Begin()) {
+                BufferTextureCopyRegion region{};
+                region.imageSubresource = {0, 0, 1};
+                region.imageExtent = {size.x, size.y, 1};
+                capture->CopyTextureToBuffer(captureTarget, buffer, &region, 1);
+                capture->End();
+                QueueSubmitInfo submit{};
+                submit.cmdBuffer = handle;
+                device_->Submit(submit);
+                capture->WaitForCompletion();
+                if (auto* pixels = static_cast<u8*>(device_->MapBuffer(buffer, 0, bd.size))) {
+                    std::ofstream out(path, std::ios::binary);
+                    out << "P6\n" << size.x << " " << size.y << "\n255\n";
+                    for (u64 i = 0; i < static_cast<u64>(size.x) * size.y; ++i) {
+                        const char rgb[] = {static_cast<char>(pixels[i * 4 + 2]),
+                                            static_cast<char>(pixels[i * 4 + 1]),
+                                            static_cast<char>(pixels[i * 4])};
+                        out.write(rgb, 3);
+                    }
+                    out.close();
+                    saved = out.good();
+                    device_->UnmapBuffer(buffer);
+                }
+            }
+            if (handle != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+            if (buffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
+            PRIMAL_LOG_STREAM(Info, "SponzaCapture") << (saved ? "saved " : "failed ") << path;
+            device_->DestroyTexture(captureTarget);
+        }
+    }
     if (frameCount_ <= 3 || frameCount_ % 60 == 0) {
         const auto& stats = pipeline_->GetStats();
         std::cout << "[TestModularPipeline] Frame " << frameCount_

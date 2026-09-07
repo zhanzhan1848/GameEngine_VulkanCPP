@@ -534,3 +534,183 @@ atlas 逐通道 dump，留待下轮专项。
 
 遗留：暗拱内部填充 92 vs UE 22——大尺度遮挡的 GI 填充（探针级遮挡
 衰减缺失），需要探针可见性/遮挡门控的深层 DDGI 工作；非旋钮可及。
+
+## UE 参考对齐第二日：Vulkan 补课 + Metal 二次标定（2026-09-06 下午）
+
+### 可见性 dump 结论（上轮第一靶子）
+
+SC_DUMP_CARDS 两平台实测：Metal mean=0.469 / zeros=53.1%，Vulkan
+mean=0.515 / zeros=48.6%——**两端都是健康二值阴影**。"Vulkan 可见性
+全零 → 直射项归零"假设证伪。卡片辐射 3× 差收敛到 SC atlas 内容
+（albedo/E_indirect 反馈平衡点），维持专项定位。
+
+### Vulkan 观感分叉根因（本轮主发现）
+
+第七轮校准（54c9b8c2）只改了 Metal 侧 shader，Vulkan 同名旋钮全部
+停留校准前：tonemap passthrough 缺 CAL_EXPOSURE（全图 ≈2.4× 过亮）、
+fusion AO mix(0.4,1.5) / ddgiBase 0.7 / 天光底 0.17 档未动、
+DeferredLighting DIRECT 2.5 + 多出 Metal 没有的 IBL ambient 0.15。
+对齐（GLSL/WGSL 重编 spv，pass 走 render graph 不变）后 Vulkan 拱门
+暗柱 45.8 → 10.9（参考 10.9 逐位对齐），mean 61.4 → 24.4。
+
+### Metal 二次标定（新机位/新灯下七轮 A/B，M1-M7）
+
+M5 定稿：CAL_EXPOSURE 0.30、DIRECT 7.5、AO mix(0.05,1,pow1.2)、
+ddgiBase 1.0、天光底 (0.11,0.115,0.13)×mix(0.30,1,pow1.1)、
+解析驱动 1.5×（烘焙进 SponzaReference.h，绝对值 (4.5,3.96,3.24)，
+顺带消除 Metal 3.0 / Vulkan 5.0 基座差）。实测 vs UE 参考：
+
+| 量 | UE 参考 | Metal 终态 |
+|---|---|---|
+| mean | 42.8 | 40.9 ✓ |
+| 深暗(<32) | 61.3% | 61.0% ✓ |
+| 贴白 | 0.04% | 0.31% ✓ |
+| 拱门暗柱 | 10.9 | 9.4 ✓ |
+| 最亮区块（上庭院墙） | 246 @rel(.45,.33) | 243 @rel(.51,.33) ✓ |
+| 庭院远墙/地面 | 139 / 148 | 85.7 / 74.2 ✗ |
+
+方法论教训：ddgiBase/天光底/曝光全部是全局旋钮（庭院/均值比卡
+1.6-2.0，参考 3.3+，加 GI 只是整体平移）；直射只作用于真实光池。
+参考的庭院对比度来自缺省传输：可见天空进探针（GIDebug
+sky_color_intensity=0.4 且 miss 项吃不到黑背景）、多次弹射、低角度
+扫墙太阳。
+
+### Vulkan 残差定性（本轮 A/B 实证）
+
+同参后 Vulkan mean 32.3 / 深暗 71.1%。PRIMAL_DDGI_LIGHT 2× 实验：
+拱门 +71% vs 庭院 +50——增益方向反了，扁平探针场把增量均匀灌进
+暗拱。结合第十五轮"L1 方向能量半缺"，**Vulkan 庭院收敛必经 SC 卡
+片辐射专项，合成层旋钮已到顶**。
+
+### 验证
+
+ctest Unit 1/1；两测试 360+ 帧无 fault（Vulkan 122 条 validation 均
+为第一轮已记录的存量类别）；Metal archive 已按协议恢复。
+对比图与复现命令见 Docs/render-comparisons/2026-09-06-sponza/。
+
+
+### 第三轮（同日续）：P1 天空接入
+
+**可见天空**：两端 `DeferredLighting` 背景像素从黑底改程序化天空
+（地平暖雾 2.2 档 → 天顶亮淡蓝 (2.75,2.88,3.00) 线性，按 UE 参考
+开口区实测 rgb 210,220,229 标定）。「暗拱剪影 → 亮庭院 → 可见天空」
+三段式构图两端齐备。
+
+**探针 miss 天空一致化（DDGI_SKY_COLOR 0.3 → 2.9 档）分叉结论**：
+- Metal（离线 384³ SDF，无穿孔）：庭院定向提亮（地面 +13、远墙 +18
+  @同曝光），暗拱纹丝不动——探针级遮挡的物理替代路径，已落地。
+- Vulkan（运行时 GlobalSDF）：薄墙穿孔使拱内探针射线假逃逸吃天空，
+  暗拱 14.3 → 29.4。治理：trace 编码区分逃逸（-2）与步数耗尽（-1），
+  Finalize/Update 三处消费点同口径门控，实测只回收部分（→26.5）；
+  命中带加宽 1.75×voxel 更差（36.6）已回退。专项修复前探针天空保守
+  回退 0.3 档（可见天空背景保留），终态 mean 27.0 / 拱门 12.8 ✓。
+
+Metal 终态：mean 43.4 / 深暗 62.4% / 贴白 0.14% / 拱门 8.0，逐帧
+可复现。全部改动限于平台 shader（MSL/GLSL），无引擎 C++/ABI 变更。
+Vulkan 庭院收敛 = SC 卡片辐射 + SDF 穿孔双专项（下轮开题）。
+
+
+### 第四轮（同日三续）：SDF 采样三线性对齐 + 诊断工具修正
+
+1. **dump 工具 bug**：DDGI_DUMP=2 按 64 射线/256B 步长读取，实际
+   RaysPerProbe=128/512B——"99% miss"是工具假象。修正后：拱门探针
+   miss 4.7%、庭院 15-20%，**Vulkan SDF trace 健康**，两端同用离线
+   384³ 场。「SDF 穿孔」假设撤销。
+2. **真分叉（已修）**：Vulkan SDF 采样 texelFetch 最近邻 vs Metal
+   硬件三线性（SDFTraceCommon.metal）。0.19m 体素下 1-2 体素薄墙被
+   1.5× 过冲步进跳过。统一为手写 8-fetch 三线性（DDGITraceSDF.comp
+   + TraceLib.glsl，后者惠及 SPGI 屏幕探针）。Vulkan mean 27.0→33.0
+   （真实弹射能量投递改善）。
+3. **探针天空**：2.9 档 Vulkan 仍过冲（mean 57/拱门 29），能量注入
+   路径与 Metal 不同——保留 0.3 档，与可见天空的统一并入 SC 专项。
+
+
+### 第五轮（2026-09-06 晚）：直射死亡根因 + 闪烁隔离 + ACES 评估
+
+用户反馈三问题（Vulkan 越来越暗/直射消失、Metal 三缓冲不统一、
+与 Lumen 差距仍大），逐一定位：
+
+1. **Vulkan 直射光死亡（实锤）**：GI_ALL_OFF direct-only A/B——
+   Vulkan 全图 0.0（仅天空背景），之前所有截图的"光池"实为 GI 填充。
+   逐层 shader 诊断（NdotL/L.y/shadowVis/法线可视化）锁定：
+   **GBuffer 法线是常量垃圾值**（地板/墙/拱廊全读出 (0.06,0.12,0.12)
+   显示值，与表面朝向无关）→ NdotL≈0 → 直射死亡。同一份 GBuffer 喂
+   SC 捕获 → 卡片辐射 3× 暗 → 探针场弱——**Vulkan 全链暗/扁平的
+   总根因**。修复路径 = P0 Vulkan 正确性专项（meshlet GBuffer→测试
+   拷贝→deferred 采样链 + 验证层报的 descriptor 生命周期三件套）。
+   阴影链（VSM moments）是否独立受损待直射复活后复测。
+
+2. **Metal 闪烁 = 屏幕空间 GI 时域噪声（位精确隔离）**：连帧
+   （359/360/361）diff mean 3-6/255、p99 24-50，热点=太阳池边界
+   ±45；探针滞回（0.2→0.9）、TAA_OFF、SHADOW_QUALITY=0 均无效
+   （TAA/SHADOW env 在 Metal 测试未接线）；**SSGI_OFF+SPGI_OFF 后
+   连帧差精确为 0**。修复入口 = SSGI/SPGI 时域滤波强化（Temporal
+   pass 已存在）或降射线旋转幅度。顺带：SSGI+SPGI 承载 Metal 当前
+   大部分 GI 能量（关闭后 mean 4.6）。
+
+3. **ACES 显示变换评估**：PRIMAL_TONE_ACES=1 实测——阳光地面
+   154（参考 148）、远墙 163（参考 139）几乎命中，**庭院辐射能量
+   已到参考量级**；但暗部被 gamma 抬亮（拱门 43.6 vs 参考 10.9、
+   深暗 7.1% vs 61.3%）。结论：与 Lumen 的观感差距大半在显示变换
+   曲线 + 暗部抑制，而非辐射能量本身。下一轮 = ACES 下全链重校准
+   （曝光/暗端 AO），不是继续在线性直出上拧旋钮。
+
+验证：ctest Unit 1/1；diff-check 通过；诊断 shader 改动已全部还原。
+用户工作区另有 MetalSurface.cpp 改动（编辑器渲染表面裁剪/层叠），
+非本轮内容，保留不动。
+
+
+### 第六轮（2026-09-07）：Vulkan 法线垃圾深挖——排除法收窄到 meshlet 顶点拉取链
+
+用户裁决继续修复。对直射死亡根因做写入侧/采样侧分离：
+
+**已证伪**（每项都有实测）：
+- 采样/解码侧：原始采样（编码域直出）同样垃圾，排除 deferred 解码；
+- TAA：TAA_OFF 改变数值但法线仍错，排除；
+- pass 交互：GI_ALL_OFF 与全管线同样垃圾，排除；
+- 打包/解包逻辑：C++ `dest.normal=(n0<<16)|n1` 与 WGSL `hi→f.x,
+  lo→f.y` 逐位一致（旧的直接拷贝 X/Y 互换 bug 已被 field-extraction
+  修复），排除；
+- 元素步长：24/20/8 字节三分支的输出均与实测值不符，排除。
+
+**收敛**：meshlet WGSL 片元里的 N（世界与物体空间，mode 4/5 双测）
+全场景近常量垃圾（地板 ≈ (0.29,0.25,0.19) 编码域，TAA_OFF 下），
+而同一 shader 的 albedo 采样正常、几何位置正确（位置与法线共用
+meshlet_vertices 间接寻址）→ 嫌疑收窄到 **elements SSBO 的上传/
+绑定与 meshlet 描边的 descriptor 有效性**（对应验证层三件套：18×
+SAMPLED_BIT 缺失、18× descriptorType mismatch、12+6× 在用更新）。
+
+**下轮修复入口**（按性价比序）：
+1. RenderDoc/MoltenVK conf 截取 meshlet 描边帧，直接看 elements
+   SSBO 绑定与内容（半小时内可定性）；
+2. 审计 GPUDrivenDrawPipeline 的 descriptor set 生命周期（三缓冲
+   化"在用更新"的 set；给缺 SAMPLED_BIT 的视图补用途）；
+3. CPU 侧 log mergedElements 首元素 packed 值与源 asset 解码值对照
+   （确认上游 contenttools 解码是否就坏了）。
+
+环境遗留：`PRIMAL_GBUFFER_DEBUG=4/5`（meshlet 法线可视化）、
+`PRIMAL_PROBE_HYSTERESIS`（Metal 探针平滑，默认不变）两个 env 旋
+钮已接入测试。Metal archive 已恢复；ctest Unit 1/1；Metal 终态
+复现 mean 43.4 / 拱门 8.0（逐帧确定）。
+
+
+### 第七轮（2026-09-07 续）：直射死亡真根因修复——SceneData 384/416B 错位
+
+用户提供关键证词："Vulkan 渲染在修 SPGI 前一直是正常的"。按回归
+排查，锁定 be0dcf12（SPGI 能量标定 commit）中的 SceneData 384→416B
+字段重排：C++/Metal MSL 同步对齐（Metal 靠 argument-length 校验抓
+到错位），**Vulkan GLSL DeferredLighting.frag 未同步**——无此类校
+验，静默错位。错位后果：shadowMatrix0/1 读到 time/viewPos 字节 →
+Chebyshev 全域≈0 → **直射×0 = 死亡**；viewPos 读到 jitter+time →
+视线/速度场错误 → TAA 把画面涂抹成常量色——**上一轮"GBuffer 法线
+垃圾"结论撤回**，那是 TAA 涂抹对测量的毒化，法线本身无罪。
+
+修复：GLSL SceneData 块对齐 416B（jitter 208/216、time 224/228、
+viewPos 232、shadowMatrix 240/304、shadowParams 368、ambientLight
+384）。实测直射复活：太阳光池、墙体明暗、VSM 阴影结构全部出现；
+光池峰值 142 vs Metal 166（同直射旋钮）。探针天空 2.9 档复测仍灌
+拱门（25.4 vs Metal 8.0）——维持 0.3 档定档，探针网格/SC 回退差
+异留待专项复测（直射复活后全部旧 A/B 数据需重测，含"卡片辐射 3×"）。
+
+教训：跨平台 struct 对齐改动必须三端同检（C++/MSL/GLSL），Metal
+的 argument-length 校验是唯一的护栏，Vulkan/GLSL 静默错位无报警。

@@ -66,9 +66,26 @@ float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
         uvw.z < 0.0 || uvw.z > 1.0) {
         return 1e10;
     }
+    // 2026-09-06 薄墙穿孔修复（与 DDGITraceSDF.comp 同步）：Metal 侧为
+    // filter::linear 三线性；nearest 在 0.19m 体素下让 1-2 体素薄墙被
+    // 1.5× 过冲步进整块跳过（采样点落到远侧大 d 体素 → 误逃逸）。8 fetch
+    // 手写三线性，描述符布局不变。
     ivec3 size = textureSize(sdfTexture, 0);
-    ivec3 coord = ivec3(clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size));
-    return texelFetch(sdfTexture, min(coord, size - ivec3(1)), 0).r;
+    vec3 p = clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size) - 0.5;
+    ivec3 base = ivec3(floor(p));
+    vec3 f = p - vec3(base);
+    ivec3 c0 = clamp(base, ivec3(0), size - ivec3(1));
+    ivec3 c1 = clamp(base + ivec3(1), ivec3(0), size - ivec3(1));
+    float d000 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c0.z), 0).r;
+    float d100 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float d010 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float d110 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float d001 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float d101 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float d011 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float d111 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
 }
 
 // Scalar-extent convenience overload: originExt = vec4(origin.xyz, extent)

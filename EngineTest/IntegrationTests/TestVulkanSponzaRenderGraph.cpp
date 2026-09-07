@@ -7,6 +7,7 @@
 // TestVulkanStandardPipelineRender_Windowed test produced via manual sync.
 
 #include "TestVulkanSponzaRenderGraph.h"
+#include "SponzaReference.h"
 
 #include "Engine/Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
@@ -468,6 +469,7 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
     renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f};
     renderSettings.lighting.ddgi_light_color = {5.0f, 5.0f, 5.0f, 1.0f};
+    sponza_reference::LightingSettings(renderSettings.lighting);
     pipeline_->UpdateSettings(renderSettings);
 
     // Reflections and all volume paths are intentionally out of scope for this
@@ -727,6 +729,11 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     std::cout << "[Part30.4] Materials uploaded to GPU" << std::endl;
 
     auto& gpuDraw = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
+    // 2026-09-06 诊断：PRIMAL_GBUFFER_DEBUG=4 世界法线可视化 / 5 物体法线
+    if (const char* dm = std::getenv("PRIMAL_GBUFFER_DEBUG")) {
+        gpuDraw.SetDebugMode((u32)atoi(dm));
+        std::cerr << "[Diag] meshlet debug_mode = " << dm << std::endl;
+    }
     gpuDraw.SetMaterialDataBuffer(materialRegistry_->GetMaterialDataBuffer());
     SamplerDesc texSamplerDesc{};
     texSamplerDesc.minFilter = FilterMode::Linear;
@@ -798,6 +805,13 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     sunLight.direction = v3{0.5f, -0.7f, 0.3f};
     sunLight.color = v3{1.0f, 0.95f, 0.9f};
     sunLight.intensity = 3.0f;
+    if (sponza_reference::Enabled() || std::getenv("PRIMAL_LIGHT_DIR") ||
+        std::getenv("PRIMAL_DIRECT_LIGHT")) {
+        const auto& light = pipeline_->GetSettings().lighting;
+        sunLight.direction = light.light_direction;
+        sunLight.color = {light.light_color.x / 3.0f, light.light_color.y / 3.0f,
+                          light.light_color.z / 3.0f};
+    }
     scene_.AddLight(sunLight);
 
     const u32 W = window_.width();
@@ -1180,6 +1194,7 @@ void TestVulkanSponzaRenderGraph::Run() {
         // Match Metal TestSponzaRenderGraph init: position {0,5,0}, rotation {0,0,0}.
         // SPGI_CAM="x,y,z,pitch,yaw" (degrees) overrides for framed captures.
         float cx = 0.0f, cy = 5.0f, cz = 0.0f, cpitch = 0.0f, cyaw = 0.0f;
+        sponza_reference::Camera(cx, cy, cz, cpitch, cyaw);
         if (const char* camEnv = std::getenv("SPGI_CAM")) {
             if (sscanf(camEnv, "%f,%f,%f,%f,%f", &cx, &cy, &cz, &cpitch, &cyaw) == 5) {
                 std::cerr << "[Cam] override " << camEnv << std::endl;
@@ -1387,10 +1402,22 @@ void TestVulkanSponzaRenderGraph::Run() {
     if (!cmd->Begin()) return;
 
     TextureDesc targetDesc = renderSystem_.GetBackBufferDesc();
+    const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
+    const bool referenceCapture = std::getenv("SPONZA_CAPTURE") &&
+        frameCount_ == (requestedFrame ? std::atoi(requestedFrame) : 360);
+    const bool diagnosticCapture = std::getenv("SPONZA_DIAGNOSTIC_CAPTURE") &&
+        (frameCount_ == 60 || frameCount_ == 61 || frameCount_ == 360 ||
+         frameCount_ == 361 || frameCount_ == 1800);
+    ResourceHandle captureTarget = handles::INVALID_RESOURCE;
+    if (referenceCapture || diagnosticCapture) {
+        targetDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource | TextureUsage::CopySource;
+        targetDesc.memoryUsage = GPUMemoryUsage::Static;
+        captureTarget = device_->CreateTexture(targetDesc);
+    }
 
     pipeline_->RenderWithCommandBuffer(
         scene_, view_,
-        backBuffer, targetDesc,
+        captureTarget != handles::INVALID_RESOURCE ? captureTarget : backBuffer, targetDesc,
         cmd, frameIdx, cmdHandle, imageAvailable);
 
     // T4.6.5 part 30.6 (X3 fix): StandardRenderPipeline's FinalBlit pass leaves
@@ -1400,7 +1427,8 @@ void TestVulkanSponzaRenderGraph::Run() {
     {
         rhi::ResourceBarrier toPresent{};
         toPresent.resource = backBuffer;
-        toPresent.beforeState = rhi::ResourceState::RenderTarget;
+        toPresent.beforeState = captureTarget != handles::INVALID_RESOURCE
+            ? rhi::ResourceState::Unknown : rhi::ResourceState::RenderTarget;
         toPresent.afterState = rhi::ResourceState::Present;
         toPresent.subresource = 0xFFFFFFFF;
         toPresent.queueFamily = 0xFFFFFFFF;
@@ -1425,11 +1453,10 @@ void TestVulkanSponzaRenderGraph::Run() {
 
     renderSystem_.EndFrame(renderDoneSem);
 
-    // Backbuffer PPM capture — pixel-exact frames for temporal-stability
-    // analysis. Fires at frames 60/61 (baseline, jitter ON) and for two
-    // adjacent frames after an F10 jitter toggle (A/B without window-scaling
-    // artifacts). Runs AFTER Present via a dedicated one-shot command buffer.
+    // Capture an offscreen final output. Swapchain images have no transfer-
+    // source usage and must never be accessed after Present releases them.
     auto capturePPM = [&](const char* tag) {
+        if (captureTarget == handles::INVALID_RESOURCE) return;
         u32 capW = targetDesc.size.x;
         u32 capH = targetDesc.size.y;
         BufferDesc sbDesc{};
@@ -1443,11 +1470,10 @@ void TestVulkanSponzaRenderGraph::Run() {
             auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
             capCmd->Begin();
 
-            // Swapchain image is in PRESENT_SRC after EndFrame. Transition to
-            // CopySource so we can read it back.
+            // The offscreen final blit ended in RenderTarget state.
             ResourceBarrier toCopy{};
-            toCopy.resource = backBuffer;
-            toCopy.beforeState = ResourceState::Present;
+            toCopy.resource = captureTarget;
+            toCopy.beforeState = ResourceState::RenderTarget;
             toCopy.afterState = ResourceState::CopySource;
             toCopy.subresource = 0xFFFFFFFF;
             capCmd->InsertBarrier(&toCopy, 1);
@@ -1457,12 +1483,12 @@ void TestVulkanSponzaRenderGraph::Run() {
             region.bufferRowLength = capW;
             region.imageSubresource = {0, 0, 1};
             region.imageExtent = {capW, capH, 1};
-            capCmd->CopyTextureToBuffer(backBuffer, stagingBuf, &region, 1);
+            capCmd->CopyTextureToBuffer(captureTarget, stagingBuf, &region, 1);
 
             ResourceBarrier toPresent{};
-            toPresent.resource = backBuffer;
+            toPresent.resource = captureTarget;
             toPresent.beforeState = ResourceState::CopySource;
-            toPresent.afterState = ResourceState::Present;
+            toPresent.afterState = ResourceState::RenderTarget;
             toPresent.subresource = 0xFFFFFFFF;
             capCmd->InsertBarrier(&toPresent, 1);
 
@@ -1476,6 +1502,7 @@ void TestVulkanSponzaRenderGraph::Run() {
         if (mapped) {
             std::string ppmPath = "/tmp/sponza_" + std::string(tag) + "_" +
                                   std::to_string(frameCount_) + ".ppm";
+            if (std::string(tag) == "reference") ppmPath = std::getenv("SPONZA_CAPTURE");
             std::ofstream ppm(ppmPath, std::ios::binary);
             ppm << "P6\n" << capW << " " << capH << "\n255\n";
             for (u32 y = 0; y < capH; ++y) {
@@ -1497,6 +1524,11 @@ void TestVulkanSponzaRenderGraph::Run() {
     // Probe diagnostics: set SPGI_PROBE_VIS=1/2/3 at launch to replace the
     // gather output with probe L0/depth/confidence grayscale (IrradianceAtlas
     // / DepthAtlas / Confidence).
+    if (std::getenv("SPONZA_CAPTURE")) {
+        const char* frame = std::getenv("SPONZA_CAPTURE_FRAME");
+        if (frameCount_ == (frame ? std::atoi(frame) : 360)) capturePPM("reference");
+    }
+
     if (const char* visEnv = std::getenv("SPGI_PROBE_VIS")) {
         lumen::GIDebug().probe_vis =
             static_cast<lumen::GIDebugParams::ProbeVisMode>(atoi(visEnv));
@@ -1660,7 +1692,8 @@ void TestVulkanSponzaRenderGraph::Run() {
         if (dumpEnv[0] == '2') {
             // ---- ray-level path histogram ----
             const u64 probeFloats = 4u; // DDGIRayData vec4
-            const u64 totalRays = (u64)cx * cy * cz * 64u; // RaysPerProbe=64
+            const u32 raysPerProbe = 128u; // 2026-09-06 修正：实际 RaysPerProbe=128（init 日志），旧值 64 使 dump 读到错位数据
+            const u64 totalRays = (u64)cx * cy * cz * raysPerProbe;
             const u64 copyBytes = totalRays * probeFloats * sizeof(float);
             BufferDesc rbDesc{};
             rbDesc.size = copyBytes;
@@ -1731,10 +1764,10 @@ void TestVulkanSponzaRenderGraph::Run() {
                         u32 x = idx % cx3;
                         u32 y = (idx / cx3) % cy3;
                         u32 z = idx / (cx3 * cy3);
-                        const float* base = data + ((u64)x + y * cx + z * cx * cy) * 64u * 4u;
+                        const float* base = data + ((u64)x + y * cx + z * cx * cy) * raysPerProbe * 4u;
                         uint32_t path[4] = {0,0,0,0}; uint32_t miss = 0;
                         float wmin = 1e30f, wmax = -1e30f;
-                        for (u32 r = 0; r < 64u; ++r) {
+                        for (u32 r = 0; r < raysPerProbe; ++r) {
                             float dist = base[r*4+3];
                             if (dist < 0.0f) { ++miss; continue; }
                             wmin = dist < wmin ? dist : wmin;
@@ -1747,8 +1780,8 @@ void TestVulkanSponzaRenderGraph::Run() {
                         fprintf(out, "%.2f,%.2f,%.2f,%u,%u,%u,%u,%u,%u,%.3f,%.3f\n",
                                 vol.origin.x + x*vol.spacing, vol.origin.y + y*vol.spacing,
                                 vol.origin.z + z*vol.spacing,
-                                64u-miss, miss, path[1], path[2], path[3],
-                                64u-miss-path[1]-path[2]-path[3], wmin, wmax);
+                                raysPerProbe-miss, miss, path[1], path[2], path[3],
+                                raysPerProbe-miss-path[1]-path[2]-path[3], wmin, wmax);
                     }
                     fclose(out);
                     device_->UnmapBuffer(staging);
@@ -1830,6 +1863,7 @@ void TestVulkanSponzaRenderGraph::Run() {
 
 
 
+    if (captureTarget != handles::INVALID_RESOURCE) device_->DestroyTexture(captureTarget);
     frameCount_++;
 }
 

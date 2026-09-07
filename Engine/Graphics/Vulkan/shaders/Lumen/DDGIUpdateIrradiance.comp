@@ -116,6 +116,7 @@ layout(set = 0, binding = 6) buffer ConfidenceBuffer {
 // ----------------------------------------------------------------------------
 // Constants
 // ----------------------------------------------------------------------------
+// 同 DDGITraceFinalize：保守回 0.3 档（能量注入路径待专项定位）。
 const vec3 DDGI_SKY_COLOR = vec3(0.3, 0.3, 0.35);
 
 const float DDGI_SH_C0   = 0.282095;
@@ -149,8 +150,10 @@ void ddgi_update_irradiance() {
         vec3 radiance = ray_buffer[rayIdx].radiance_and_dist.xyz;
         float hitDist = ray_buffer[rayIdx].radiance_and_dist.w;
 
-        if (hitDist < 0.0) {
-            radiance = DDGI_SKY_COLOR;
+        if (hitDist <= -1.5) {
+            radiance = DDGI_SKY_COLOR;   // 逃逸→天空
+        } else if (hitDist < 0.0) {
+            // 步数耗尽：保留 Finalize 解析结果（SC 回退或黑），不再覆盖成天空
         } else {
             // Gentler distance falloff — only attenuate near max distance
             float distWeight = 1.0 - smoothstep(volume.RayMaxDistance * 0.8, volume.RayMaxDistance, hitDist);

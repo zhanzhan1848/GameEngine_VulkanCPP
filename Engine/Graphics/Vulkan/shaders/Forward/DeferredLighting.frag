@@ -51,8 +51,12 @@ const float PI = 3.14159265358979;
 // DIRECT 2.5 × light_color 5.0 = 12.5 屏幕直射；IBL/阴影 ambient 维持
 // part 40.3 压制值（该时代的阴影暖填充来自 ddgi_light_color=20 的探针
 // 弹射，不是 skycolor 洗涤）。
-const float DIRECT_INTENSITY   = 2.5;
-const float IBL_INTENSITY      = 0.15;
+// 2026-09-06 UE 参考对齐：跟随 Metal gpuDriven 校准值（EngineTest
+// DeferredLighting.metal 54c9b8c2）——DIRECT_INTENSITY 2.5 → 5.0；
+// IBL ambient 归零（Metal gpuDriven 同位置 ambient=0，环境光由 DDGI
+// fusion 全权负责，避免第二环境光源把拱门阴影填亮）。
+const float DIRECT_INTENSITY   = 7.5;
+const float IBL_INTENSITY      = 0.0;
 const float SHADOW_AMBIENT_SCALE = 0.05;
 
 layout(set = 0, binding = 0) uniform ViewData {
@@ -60,6 +64,11 @@ layout(set = 0, binding = 0) uniform ViewData {
     mat4 invViewProjection;
 };
 
+// 2026-09-07 修复：对齐 C++ SceneData 416B 新布局（be0dcf12 字段重排——
+// jitter/previousJitter 前移至 208/216，新增 time/viewPos，shadowMatrix
+// 后移 240/304，尾部 ambientLight）。旧 384B 块使 shadowMatrix0/1 读到
+// time/viewPos 字节 → Chebyshev 全域≈0 → 直射×0（Vulkan 无 Metal 的
+// argument-length 校验，静默错位）。
 layout(set = 0, binding = 1) uniform SceneData {
     mat4 model;
     vec4 lightPos;
@@ -68,14 +77,18 @@ layout(set = 0, binding = 1) uniform SceneData {
     vec4 reflectionPlane2;
     vec4 reflectionPlane3;
     mat4 previousModel;
+    vec2 jitter;
+    vec2 previousJitter;
+    float time;
+    float _timePad;
     vec4 viewPos;
     mat4 shadowMatrix0;
     mat4 shadowMatrix1;
-    vec2 jitter;
-    vec2 previousJitter;
     // x = shadow mode (0 = pre-filtered R8 visibility, 1 = VSM moments +
     // Chebyshev), y = cascade 0 split distance, zw unused.
     vec4 shadowParams;
+    // rgb = scene ambient color, a = intensity.
+    vec4 ambientLight;
 };
 
 layout(set = 0, binding = 2) uniform texture2D albedoTex;
@@ -154,9 +167,20 @@ void main() {
     float depth = texture(sampler2D(depthTex, defaultSampler), inUv).r;
 
 
-    // Background discard — sky pixels have depth = 1.0.
+    // 2026-09-06 P1 天空接入：背景像素写程序化天空（原输出黑底），与
+    // Metal gpuDriven 同公式同标定（可见开口区显示值 ~89/255，UE 参考）。
     if (depth >= 1.0) {
-        outColor = vec4(0.0, 0.0, 0.0, 1.0);
+        vec2 skyNdc = vec2(inUv.x * 2.0 - 1.0, 1.0 - inUv.y * 2.0);
+        vec4 pFar = invViewProjection * vec4(skyNdc, 1.0, 1.0);
+        vec3 skyDir = normalize(pFar.xyz / max(pFar.w, 1e-6) - viewPos.xyz);
+        float up = clamp(skyDir.y, 0.0, 1.0);
+        vec3 horizonCol = vec3(2.20, 2.10, 1.90); // 暖白地平雾
+        vec3 zenithCol  = vec3(2.75, 2.88, 3.00); // 亮淡蓝天顶（UE 参考实测 rgb 210,220,229）
+        vec3 sky = mix(horizonCol, zenithCol, pow(up, 0.45));
+        vec3 sunL = normalize(lightPos.xyz);
+        float sunAmount = pow(clamp(dot(skyDir, sunL), 0.0, 1.0), 16.0);
+        sky += vec3(1.0, 0.85, 0.6) * sunAmount * 0.6; // 前向散射日晕
+        outColor = vec4(sky, 1.0);
         return;
     }
 

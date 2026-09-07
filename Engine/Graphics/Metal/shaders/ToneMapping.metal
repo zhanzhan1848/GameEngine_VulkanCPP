@@ -39,7 +39,7 @@ float3 ACESFilm(float3 x) {
 // 标定：同机位实测 Metal LDR 均值 131/255（贴白率 27.5%）vs Vulkan
 // 40/255（0.7%）——用户判定 Metal 过曝、Vulkan 偏暗，取中点迭代。
 // 上游 parity bisect 落地后本系数应回归 1.0。
-constant float CAL_EXPOSURE = 0.42f;
+constant float CAL_EXPOSURE = 0.26f; // 2026-09-06 对齐 UE 参考：GI 提亮后全局回拉（0.42 → 0.36，mean 52.9 → 目标 ~43）
 
 // Fragment Shader
 fragment float4 tonemap_fs(VertexOut in [[stage_in]],

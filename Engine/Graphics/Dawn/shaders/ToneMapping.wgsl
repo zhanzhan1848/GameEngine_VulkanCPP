@@ -40,11 +40,16 @@ fn tonemap_vs(@builtin(vertex_index) vertexID: u32) -> VertexOutput {
 // tonemap_fs（ACES+gamma）保留为 PRIMAL_TONE_ACES=1 的可选 HDR 展示路径；
 // 默认走 tonemap_fs_passthrough（仅 bloom 合成），与 Metal MSL 的
 // tonemap_fs_passthrough 对齐——见 ToneMappingPass.cpp 的选择逻辑。
+// 2026-09-06 UE 参考对齐：passthrough 同步 Metal 的 CAL_EXPOSURE=0.42
+// 标定（ToneMapping.metal 同名系数）——此系数缺席使 Vulkan 全图比
+// Metal 亮 ~2.4×，拱门暗部被抬亮（Sponza 同机位实测 mean 61 vs 31）。
+const CAL_EXPOSURE: f32 = 0.26;
+
 @fragment
 fn tonemap_fs_passthrough(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let color = textureSample(sceneTexture, texSampler, uv).rgb;
     let bloom = textureSample(bloomTexture, texSampler, uv).rgb;
-    return vec4<f32>(color + bloom, 1.0);
+    return vec4<f32>((color + bloom) * CAL_EXPOSURE, 1.0);
 }
 
 // ACES Tone Mapping

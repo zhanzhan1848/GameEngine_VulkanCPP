@@ -493,9 +493,22 @@ fragment float4 fragmentLighting_gpuDriven(
     normal = normal * 2.0 - 1.0;
     float depth = depthTex.sample(depthSampler, uv);
 
-    // Discard background pixels
+    // 2026-09-06 P1 天空接入：背景像素写程序化天空（原 discard 留黑底）。
+    // 亮度标定：可见开口区显示值 ~89/255（UE 参考），线性值经 CAL_EXPOSURE
+    // 0.30 直出，目标线性 ~1.1。与 GI 探针 miss 天空项的一致性见
+    // LumenDDGIPass 的 sky_color_intensity（本轮起背景不再是纯黑）。
     if (depth >= 1.0) {
-        discard_fragment();
+        float2 skyNdc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+        float4 pFar = viewData.invViewProjection * float4(skyNdc, 1.0, 1.0);
+        float3 skyDir = normalize(pFar.xyz / max(pFar.w, 1e-6) - sceneData.viewPos.xyz);
+        float up = saturate(skyDir.y);
+        float3 horizonCol = float3(2.20f, 2.10f, 1.90f); // 暖白地平雾
+        float3 zenithCol  = float3(2.75f, 2.88f, 3.00f); // 亮淡蓝天顶（UE 参考实测 rgb 210,220,229）
+        float3 sky = mix(horizonCol, zenithCol, pow(up, 0.45f));
+        float3 sunL = normalize(sceneData.lightPos.xyz);
+        float sunAmount = pow(saturate(dot(skyDir, sunL)), 16.0f);
+        sky += float3(1.0f, 0.85f, 0.6f) * sunAmount * 0.6f; // 前向散射日晕
+        return float4(sky, 0.0f);
     }
 
     float4 orm = ormTex.sample(linearSampler, uv);
@@ -557,7 +570,7 @@ fragment float4 fragmentLighting_gpuDriven(
         // 的同名旋钮同值（2.5）。GPU 驱动路径此前无此乘数——FULL_POST 的
         // ACES 下直射峰值 ~0.48 过不了感知门槛（画面呈纯环境光观感）。
         // legacy 直出时代该旋钮曾以 3.125 存在于测试副本（未同步入引擎）。
-        constexpr float DIRECT_INTENSITY = 5.0f; // 2026-09-05 对齐 UE 参考（阳光光斑亮度）
+        constexpr float DIRECT_INTENSITY = 7.5f; // 2026-09-06 对齐 UE 参考：阳光光池加强（5.0 → 7.5）
         Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL * DIRECT_INTENSITY;
     }
 
@@ -635,7 +648,7 @@ fragment float4 fragmentFusionIndirect(
     // SSAO is a local contact-shadow approximation, not a validity mask for
     // probe lighting — it shapes DDGI without erasing low-frequency bounce.
     // 2026-09-05 对齐 UE 参考：遮挡区 AO 压制加强（暗拱 93→UE 22 的差距）
-    float ao = mix(0.12f, 1.0f, pow(ssao, 1.2f));
+    float ao = mix(0.05f, 1.0f, pow(ssao, 1.2f));
 
     float3 ssgi_irr  = ssgi4.rgb;
     float  ssgi_hit  = ssgi4.a;
@@ -651,7 +664,7 @@ fragment float4 fragmentFusionIndirect(
 
     // DDGI is the stable low-frequency field; SPGI may replace it only where
     // the screen-probe estimate carries at least as much energy.
-    float3 ddgiBase   = ddgi * 0.5f;  // 2026-09-05 对齐 UE 参考：GI 水平校准
+    float3 ddgiBase   = ddgi * 1.0f;  // 2026-09-06 对齐 UE 参考：GI 弹射水平校准（0.5 → 1.0，庭院远墙 55 → 目标 ~139）
     float3 spgiTarget = spgi4.rgb * 1.25f;
     // T8.8: replacement needs a real brightness ADVANTAGE — luminance-ratio
     // ramp 1.10→1.35 gates the max() merge; confidence stays a multiplier.
@@ -663,7 +676,7 @@ fragment float4 fragmentFusionIndirect(
 
     // T8.9 + T8.10c: sky-leak ambient (Lumen far-field) — additive with the
     // near-field estimate, occlusion-modulated so shadow pockets key it down.
-    gi += float3(0.085f, 0.09f, 0.105f) * mix(0.45f, 1.0f, pow(ssao, 1.1f)); // 对齐 UE 暗部（减半档）
+    gi += float3(0.11f, 0.115f, 0.13f) * mix(0.30f, 1.0f, pow(ssao, 1.1f)); // 2026-09-06 对齐 UE 参考：遮挡端压深（0.45 → 0.30）
 
     float3 indirect = albedo * gi;
     indirect *= ao;

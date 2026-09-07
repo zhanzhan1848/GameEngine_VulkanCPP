@@ -43,7 +43,9 @@ void fusion_indirect() {
     // SSAO is a local contact-shadow approximation, not a validity mask for
     // probe lighting.  Let it shape DDGI without erasing the low-frequency
     // coloured bounce in the heavily occluded second-floor arcades.
-    float ao = mix(0.4, 1.0, pow(ssao, 1.5));
+    // 2026-09-06 UE 参考对齐：跟随 Metal 校准（54c9b8c2）——遮挡区 AO 压制
+    // 加强，暗拱内部不再被 GI 填充抬亮。
+    float ao = mix(0.05, 1.0, pow(ssao, 1.2));
 
     vec3 ssgi_irr  = ssgi4.rgb;
     float ssgi_hit  = ssgi4.a;
@@ -88,7 +90,8 @@ void fusion_indirect() {
     // alone must never turn the DDGI floor down. The old cross-fade reduced
     // DDGI to 10% at high confidence and created dark troughs precisely beside
     // bright direct-light samples when a sparse SPGI lobe underestimated them.
-    vec3 ddgiBase = ddgi * 0.7;
+    // 2026-09-06 UE 参考对齐：GI 弹射水平跟随 Metal 终档（0.7 → 1.0）。
+    vec3 ddgiBase = ddgi * 1.0;
     vec3 spgiTarget = spgi4.rgb * 1.25;
     // T8.8: replacement needs a real brightness ADVANTAGE. At parity the
     // componentwise max() still swapped chroma (SPGI's tint over DDGI's),
@@ -125,7 +128,8 @@ void fusion_indirect() {
     // uniform wash in shadow pockets beside lit zones (user report: surfaces
     // that should be darker than the outer colonnade stay bright). SSAO keys
     // the floor down to ~half in crevices while open bounce areas keep it.
-    gi += vec3(0.17, 0.18, 0.21) * mix(0.45, 1.0, pow(ssao, 1.1));
+    // 2026-09-06 UE 参考对齐：跟随 Metal 减半档（0.17 → 0.085）。
+    gi += vec3(0.11, 0.115, 0.13) * mix(0.30, 1.0, pow(ssao, 1.1));
 
     vec3 indirect = albedo * gi;
     indirect *= ao;

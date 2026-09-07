@@ -108,11 +108,28 @@ float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
         uvw.z < 0.0 || uvw.z > 1.0) {
         return 1.0e10;
     }
-    int resI = int(resolution);
-    int tx = clamp(int(uvw.x * float(resI)), 0, resI - 1);
-    int ty = clamp(int(uvw.y * float(resI)), 0, resI - 1);
-    int tz = clamp(int(uvw.z * float(resI)), 0, resI - 1);
-    return texelFetch(sdfTexture, ivec3(tx, ty, tz), 0).r;
+    // 2026-09-06 薄墙穿孔修复：Metal 侧同函数是 filter::linear 三线性
+    // （SDFTraceCommon.metal sampleSDFCascade），本端口原为 texelFetch 最近邻
+    // ——0.19m 体素量化下 1-2 体素薄墙被 1.5× 过冲步进整块跳过（采样点落到
+    // 远侧大 d 体素 → 误逃逸 → 探针吃天空，暗拱 14.3→26.5 实测）。三线性让
+    // 过冲落点仍插值到墙体影响带内 → 命中带捕获。8 fetch 手写三线性，描述符
+    // 布局不变；clamp 对齐 Metal clamp_to_edge。
+    vec3 p = uvw * float(resolution) - 0.5;
+    ivec3 base = ivec3(floor(p));
+    vec3 f = p - vec3(base);
+    ivec3 resI = ivec3(int(resolution) - 1);
+    ivec3 c0 = clamp(base, ivec3(0), resI);
+    ivec3 c1 = clamp(base + ivec3(1), ivec3(0), resI);
+    float d000 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c0.z), 0).r;
+    float d100 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float d010 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float d110 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float d001 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float d101 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float d011 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float d111 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
 }
 
 // Else-if cascade selection — 1 texture3D read per step (finest first).
@@ -212,7 +229,10 @@ void ddgi_trace_sdf() {
                                          volume.FrameIndex,
                                          uint(volume.RaySampleMode), toLight).xyz;
     float t = 0.0;
-    float hitDistance = -1.0;  // -1 = miss
+    // -1 = 步数耗尽（密闭内部爬行，非天空）；-2 = 越出 RayMaxDistance（真逃逸→天空）。
+    // 2026-09-06 逃逸门控：可见天空提到 2.9 档后，耗尽射线误吃天空会把暗拱
+    // 填亮（同机位实测 arch 14.3 → 29.4），必须在编码层区分两种 miss。
+    float hitDistance = -1.0;
 
     // T8.10b: hit band widened for the UNSIGNED shallow merged field
     // (min positive ≈0.19-0.38 m almost everywhere). voxel*0.5 left most
@@ -236,7 +256,7 @@ void ddgi_trace_sdf() {
         // Outside all cascades — fallback stride
         if (d >= 1.0e9) {
             t += fallbackStride;
-            if (t > volume.RayMaxDistance) break;
+            if (t > volume.RayMaxDistance) { hitDistance = -2.0; break; }
             continue;
         }
 
@@ -254,7 +274,7 @@ void ddgi_trace_sdf() {
             advance = max(d, minStep);
         }
         t += advance;
-        if (t > volume.RayMaxDistance) break;
+        if (t > volume.RayMaxDistance) { hitDistance = -2.0; break; }
     }
 
     // Indexed by update-slot (group) — finalize re-maps to absolute probe index.

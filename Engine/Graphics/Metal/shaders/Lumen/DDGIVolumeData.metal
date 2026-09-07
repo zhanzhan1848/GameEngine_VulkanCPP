@@ -24,7 +24,7 @@
 #define DDGI_MAX_SDF_STEPS   4
 #define DDGI_SH_C0           0.282095f
 #define DDGI_SH_C1           0.488603f
-#define DDGI_SKY_COLOR       float3(0.3f, 0.3f, 0.35f)
+#define DDGI_SKY_COLOR       float3(2.75f, 2.88f, 3.00f) // 2026-09-06 与可见天空一致化（原 0.3 档，差 10×）
 constant float DDGI_SH_C2_0  = 1.092548f;
 constant float DDGI_SH_C2_1  = 0.315392f;
 constant float DDGI_SH_C2_2  = 0.546274f;
