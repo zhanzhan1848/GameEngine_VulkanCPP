@@ -829,3 +829,23 @@ light_frustum_cb（GPU 剔除管线填充，非 CPU 的 shadowMatrix0）——
 comp → ShadowDepth WGSL），统一光栅与接收端的深度尺度；随后
 SC 卡片辐射重测、ACES 重校准。诊断工具（PRIMAL_DUMP_MATRIX、
 GBUFFER_DEBUG、vis/z 直出法）全部留档。
+
+
+### 第十二轮（2026-09-07 深夜续）：shadow map 只有外壳——ShadowCulling 剔除内部几何
+
+ShadowFilter 全图线性扫（已验证写读通路）+ 图像目视：**shadow map
+只包含建筑外壳**（屋顶+外墙），庭院开口区为空白（clear=1.0）——
+庭院地板、内部朝光面从未被光栅化。两端 map 逐位一致 → ShadowCulling
+（GPUCullingPipeline，GPU 侧）统一地把内部朝光 meshlet 剔除。
+
+统一解释：
+- 两端的阴影比较都是"接收器 z vs 外壳深度"——外壳剪影恰与真实
+  遮挡轮廓近似（开放顶建筑），故观感"接近正确"；
+- Metal 之所以"正常"：强 SSGI/SPGI 掩盖 + 壳体剪影的偶然正确；
+  Vulkan 的 SPGI 较弱，vis 全零直接暴露；
+- 直射死亡的真根因链 = SceneData 416B 错位（已修）+ **ShadowCulling
+  剔除内部朝光几何（本轮定位，未修）**。
+
+下轮首件事：审计 ShadowCulling 的剔除逻辑（光锥/朝向测试对庭院
+内部 meshlet 的判定），预期修复后 shadow map 开口区出现地板深度
+（~0.66），vis 恢复结构，直射真正复活。随后 SC 卡片重测、ACES。
