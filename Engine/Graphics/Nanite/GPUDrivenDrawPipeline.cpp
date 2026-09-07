@@ -2933,7 +2933,11 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         desc.enableDepthWrite = true;
         desc.depthFunc = rhi::ComparisonFunc::Less;
         desc.renderTargetCount = 0;
-        desc.cullMode = rhi::CullMode::Back;  // Cull back faces for stable shadow map depth
+        // 2026-09-07 根修：CullMode::Back → None。meshlet 缠绕方向不一致
+        // （2026-09-02 伪影1 同源），光视图下庭院地板等大面积面片被按
+        // 背面剔除 → shadow map 只有建筑外壳 → 接收器采到屋顶深度 →
+        // vis 全零 → 直射死亡。阴影贴图惯例渲染双面（深度取任一面）。
+        desc.cullMode = rhi::CullMode::None;
         desc.vertexAttributes.clear();
         desc.vertexBindings.clear();
 

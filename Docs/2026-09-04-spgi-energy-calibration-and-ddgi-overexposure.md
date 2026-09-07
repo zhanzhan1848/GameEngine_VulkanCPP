@@ -849,3 +849,24 @@ ShadowFilter 全图线性扫（已验证写读通路）+ 图像目视：**shadow
 下轮首件事：审计 ShadowCulling 的剔除逻辑（光锥/朝向测试对庭院
 内部 meshlet 的判定），预期修复后 shadow map 开口区出现地板深度
 （~0.66），vis 恢复结构，直射真正复活。随后 SC 卡片重测、ACES。
+
+
+### 第十三轮（2026-09-07 深夜二）：CullMode::Back 根修——shadow map 补全内部几何
+
+定位到 ShadowCulling"只画外壳"的直接原因：**shadow depth 管线的
+CullMode::Back**（GPUDrivenDrawPipeline.cpp:2936 "Cull back faces for
+stable shadow map depth"）——meshlet 缠绕方向不一致（2026-09-02 伪
+影1 同源问题，moments 管线当时已改 None，depth 管线漏改），光视图
+下庭院地板等面片被按背面剔除。改 CullMode::None 后：
+
+- vis 复活：地板低区 0.000→0.995、2F 拱廊 0.000→0.803、1F 拱廊
+  0.000→0.995（直射真正进入场景）；
+- 全图 mean 28.6→94.6——强度过头系 DIRECT 7.5 为直射死亡时代补偿
+  校准值，需在新的可见性格局下重新标定；
+- **新问题**：Vulkan 受光侧与 Metal 镜像（Vulkan 左亮/Metal 右亮）
+  ——两端 map 一致、worldPos 一致、z 一致，镜像源待查（矩阵读取
+  转置/级联 1 尺度候选）。修复对 Metal 同步生效（共享创建路径），
+  Metal 需重建后复测。
+
+下轮：① Metal 重建复测（同修验证）② 镜像定位（sc.xy 直出对照）
+③ DIRECT/曝光联合重校准 ④ SC 重测 ⑤ ACES。
