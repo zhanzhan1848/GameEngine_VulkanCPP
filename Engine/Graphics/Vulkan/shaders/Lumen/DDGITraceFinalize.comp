@@ -114,7 +114,7 @@ layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
 // 两端 trace 均健康（拱门 miss 4.7%）。但 2.9 档在此处仍使 Vulkan 全图
 // 过冲（mean 57 vs 参考 42.8，拱门 29）——能量注入路径与 Metal 不同，
 // 待 SC 卡片辐射专项定位后与可见天空统一。保守回 0.3 档。
-const vec3 DDGI_SKY_COLOR = vec3(0.3, 0.3, 0.35);
+const vec3 DDGI_SKY_COLOR = vec3(2.75, 2.88, 3.00);
 
 // T1.3: card lookup via uniform grid (header + prefix sums + card indices).
 // Replaces the shared-memory lookup cache + per-ray AABB prefilter loop.

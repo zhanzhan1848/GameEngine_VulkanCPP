@@ -353,6 +353,20 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         inputs.cascade_splits.x,
                         0.0f, 0.0f};
                     device_->UnmapBuffer(scene_cb_[cbIdx]);
+                    // TEMP-DIAG: SceneData 上传字节真值（PRIMAL_DUMP_MATRIX=1）
+                    if (std::getenv("PRIMAL_DUMP_MATRIX")) {
+                        auto* chk = static_cast<const SceneData*>(0);
+                        (void)chk;
+                        const math::m4x4& mm = inputs.shadow_matrix0;
+                        std::fprintf(stderr, "[SCENE_MAT0] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
+                                     mm.columns[0].x, mm.columns[0].y, mm.columns[0].z, mm.columns[0].w,
+                                     mm.columns[1].x, mm.columns[1].y, mm.columns[1].z, mm.columns[1].w,
+                                     mm.columns[2].x, mm.columns[2].y, mm.columns[2].z, mm.columns[2].w,
+                                     mm.columns[3].x, mm.columns[3].y, mm.columns[3].z, mm.columns[3].w);
+                        std::fprintf(stderr, "[SCENE_MISC] viewPos=(%.2f,%.2f,%.2f) shadowParams.x=%.1f\n",
+                                     inputs.camera_position.x, inputs.camera_position.y,
+                                     inputs.camera_position.z, inputs.vsm_enabled ? 1.0f : 0.0f);
+                    }
                 }
             }
 

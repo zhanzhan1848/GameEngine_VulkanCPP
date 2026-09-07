@@ -318,6 +318,16 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
         if (cascade == 0) outputs.shadow_matrix0 = lightVP;
         else outputs.shadow_matrix1 = lightVP;
 
+        // TEMP-DIAG: CPU 侧矩阵字节真值（PRIMAL_DUMP_MATRIX=1）
+        if (cascade == 0 && std::getenv("PRIMAL_DUMP_MATRIX")) {
+            std::fprintf(stderr, "[MATRIX] cascade0 columns:");
+            for (int c = 0; c < 4; ++c)
+                std::fprintf(stderr, " (%.4f,%.4f,%.4f,%.4f)",
+                             lightVP.columns[c][0], lightVP.columns[c][1],
+                             lightVP.columns[c][2], lightVP.columns[c][3]);
+            std::fprintf(stderr, "\n");
+        }
+
         if (cache_hit) continue;
         rasteredThisFrame[cascade] = true;
 

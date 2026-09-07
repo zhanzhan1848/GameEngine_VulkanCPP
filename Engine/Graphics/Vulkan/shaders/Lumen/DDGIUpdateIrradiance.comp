@@ -117,7 +117,7 @@ layout(set = 0, binding = 6) buffer ConfidenceBuffer {
 // Constants
 // ----------------------------------------------------------------------------
 // 同 DDGITraceFinalize：保守回 0.3 档（能量注入路径待专项定位）。
-const vec3 DDGI_SKY_COLOR = vec3(0.3, 0.3, 0.35);
+const vec3 DDGI_SKY_COLOR = vec3(2.75, 2.88, 3.00);
 
 const float DDGI_SH_C0   = 0.282095;
 const float DDGI_SH_C1   = 0.488603;

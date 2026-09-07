@@ -547,6 +547,23 @@ bool TestModularPipeline::InitializePipeline() {
         }
     }
 
+    // 2026-09-07 对齐 Vulkan 测试能力：GI_ALL_OFF 直射基线 + PCSS 阴影切换
+    if (std::getenv("GI_ALL_OFF")) {
+        auto& dbg = lumen::GIDebug();
+        dbg.ddgi_trace = false;
+        dbg.ddgi_far_volume = false;
+        dbg.sc_capture = false;
+        dbg.sc_lighting = false;
+        dbg.sc_shadow = false;
+        dbg.gi_gather = false;
+        dbg.fusion = false;
+        std::cerr << "[GI] ALL GI passes disabled (direct-only A/B)" << std::endl;
+    }
+    if (std::getenv("PRIMAL_SHADOW_PCSS")) {
+        pipeline_->SetVSMShadows(false);
+        std::cerr << "[Shadow] PCSS path (VSM off)" << std::endl;
+    }
+
     // T8.13 sync: match the Vulkan reference app's pass scope — volume paths
     // are explicitly out of scope there; fragmentFusion adds vol.rgb (fog
     // scatter) additively, so a Metal fog difference reads as a full-screen
