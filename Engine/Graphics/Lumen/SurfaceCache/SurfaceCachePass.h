@@ -120,6 +120,7 @@ public:
         view.card_lookup = card_generator_.GetCardLookupBuffer();
         view.grid_offsets = card_generator_.GetGridOffsetsBuffer();
         view.grid_cards = card_generator_.GetGridCardsBuffer();
+        view.depth_atlas = depth_atlas_;               // T3.4 (D3)
         view.atlas_size = atlas_size_;                 // == LumenConfig::surface_cache_atlas_size
         view.card_count = card_generator_.GetCardCount();
         view.max_card_count = card_generator_.GetMaxCardCount();
@@ -193,6 +194,9 @@ private:
     rhi::PipelineHandle indirect_resolve_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle atlas_init_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle capture_gather_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    // A7: write/clear phases of the three-dispatch capture (same comp file)
+    rhi::PipelineHandle capture_write_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle capture_clear_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle card_fill_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle shadow_pipeline_{ rhi::handles::INVALID_PIPELINE };   // T3.3
 
@@ -244,6 +248,21 @@ private:
     rhi::ResourceHandle light_info_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ray_hits_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle card_dispatch_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // A7: nearest-depth scratch (u32 floatBits per atlas texel) for the
+    // three-dispatch GBuffer-gather capture (clear → atomicMin → write).
+    rhi::ResourceHandle capture_min_depth_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // T3.3 (D10): indirect trace/resolve wiring — params UBOs, per-frame
+    // indirect_out target and a 16B dummy for the unused GlobalShaderData slot.
+    rhi::ResourceHandle indirect_trace_params_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle indirect_resolve_params_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle indirect_out_tex_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle indirect_dummy_cb_{ rhi::handles::INVALID_RESOURCE };
     // T3.3: atlas-space directional visibility (float per atlas texel,
     // CPU-initialized to 1.0) + triple-buffered shadow params CB.
     rhi::ResourceHandle shadow_visibility_buffer_{ rhi::handles::INVALID_RESOURCE };

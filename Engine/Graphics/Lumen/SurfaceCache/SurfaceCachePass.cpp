@@ -347,6 +347,16 @@ void SurfaceCachePass::CreateAtlasTextures() {
         light_info_buffer_ = device_->CreateBuffer(lightInfoDesc);
     }
 
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        // A7: nearest-depth scratch for the GBuffer-gather capture — one u32
+        // (floatBitsToUint of axis depth) per atlas texel. Cleared and
+        // consumed on the GPU every frame the capture dispatches.
+        BufferDesc capMinDesc{};
+        capMinDesc.size = (u64)atlas_size_ * atlas_size_ * sizeof(u32);
+        capMinDesc.type = BufferType::Structured;
+        capture_min_depth_buffer_ = device_->CreateBuffer(capMinDesc);
+    }
+
     {
         // Ray hits buffer: for indirect tracing
         u32 pagesPerSide = atlas_size_ / page_size_;
@@ -367,6 +377,38 @@ void SurfaceCachePass::CreateAtlasTextures() {
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
         card_dispatch_buffer_ = device_->CreateBuffer(desc);
+    }
+
+    // T3.3 (D10): indirect trace/resolve wiring resources
+    {
+        constexpr u32 kTile = 16;   // probe tile size (atlas/16 grid)
+        const u32 tiles = atlas_size_ / kTile;
+
+        for (int i = 0; i < 3; ++i) {
+            BufferDesc cbDesc{};
+            cbDesc.size = 288;   // sizeof(IndirectTraceParamsGPU)
+            cbDesc.type = BufferType::Structured;
+            cbDesc.usage = GPUMemoryUsage::Dynamic;
+            cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            indirect_trace_params_cb_[i] = device_->CreateBuffer(cbDesc);
+
+            cbDesc.size = 80;    // sizeof(IndirectResolveParamsGPU) padded
+            indirect_resolve_params_cb_[i] = device_->CreateBuffer(cbDesc);
+
+            TextureDesc outDesc{};
+            outDesc.size = { tiles, tiles, 1 };
+            outDesc.mipLevels = 1;
+            outDesc.arraySize = 1;
+            outDesc.format = DataFormat::RGBA16_Float;
+            outDesc.type = TextureType::Texture2D;
+            outDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+            indirect_out_tex_[i] = device_->CreateTexture(outDesc);
+        }
+
+        BufferDesc dummyDesc{};
+        dummyDesc.size = 16;
+        dummyDesc.type = BufferType::Structured;
+        indirect_dummy_cb_ = device_->CreateBuffer(dummyDesc);
     }
 }
 
@@ -465,11 +507,12 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // shadow_visibility (T3.3)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi irradiance (probe-fed indirect)
             {11, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas (surface-point probe gather)
+            {12, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // indirect_out (T3.3 tile radiosity)
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[9].readonly = true;
         b[10].readonly = true;
-        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({12, bindings});
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
@@ -486,11 +529,12 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(4)]] (multi-bounce)
             {5, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_atlas   [[texture(5)]]
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance [[buffer(6)]] (probe-fed indirect)
+            {6, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // indirect_out [[texture(6)]] (T3.3 tile radiosity)
         };
         DescriptorSetLayoutBinding* bm = bindings;
         bm[5].readonly = true;
         bm[8].readonly = true;  // ddgi irradiance
-        DescriptorSetLayoutDesc layoutDesc{12, bindings};
+        DescriptorSetLayoutDesc layoutDesc{13, bindings};
         light_eval_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -559,8 +603,9 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lookups
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits
+            {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev indirect_out (T3.3 EMA)
         };
-        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(0)]]
@@ -572,8 +617,9 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lookups       [[buffer(2)]]
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards         [[buffer(3)]]
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits      [[buffer(4)]]
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev indirect_out [[texture(6)]] (T3.3 EMA)
         };
-        DescriptorSetLayoutDesc layoutDesc{9, bindings};
+        DescriptorSetLayoutDesc layoutDesc{10, bindings};
         indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -609,7 +655,8 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
     }
 
     // --- Capture (GBuffer-gather, Vulkan-only): 3 GBuffer inputs + 3 atlas
-    //     write images + 1 UBO + 1 cards SSBO + 2 card-grid SSBOs (T1.3) ---
+    //     write images + 1 UBO + 1 cards SSBO + 2 card-grid SSBOs (T1.3)
+    //     + 1 nearest-depth scratch SSBO (A7) ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // gbuffer_depth
@@ -622,12 +669,13 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {7, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // cards
             {8, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // sc_grid_offsets
             {9, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // sc_grid_cards
+            {10, DescriptorType::StorageBuffer,    1, ShaderStage::Compute, nullptr},  // A7 capture_depth_min
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[7].readonly = true;
         b[8].readonly = true;
         b[9].readonly = true;
-        capture_gather_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
+        capture_gather_set_layout_ = device_->CreateDescriptorSetLayout({11, bindings});
     }
 
     // --- CardFill (SDF-based, Vulkan-only): 3 SDF 3D + 4 atlas + 1 UBO + 4 SSBO ---
@@ -888,6 +936,20 @@ void SurfaceCachePass::CreatePipelines() {
         pipeDesc.layout = capture_gather_layout_;
         pipeDesc.threadGroupSize = {8, 8, 1};
         capture_gather_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        // A7: write/clear phases — separate SPIR-V files (Vulkan loads one
+        // entry point per .comp.spv), same source SurfaceCacheCapture.comp.
+        ShaderHandle captureWriteShader = CompileComputeShader("SurfaceCacheCaptureWrite", "surface_cache_capture_write");
+        if (captureWriteShader != handles::INVALID_SHADER) {
+            ComputePipelineDesc writeDesc = pipeDesc;
+            writeDesc.computeShader = captureWriteShader;
+            capture_write_pipeline_ = device_->CreateComputePipeline(writeDesc);
+        }
+        ShaderHandle captureClearShader = CompileComputeShader("SurfaceCacheCaptureClear", "surface_cache_capture_clear");
+        if (captureClearShader != handles::INVALID_SHADER) {
+            ComputePipelineDesc clearDesc = pipeDesc;
+            clearDesc.computeShader = captureClearShader;
+            capture_clear_pipeline_ = device_->CreateComputePipeline(clearDesc);
+        }
     }
     // CardFill (Vulkan-only): (256,1,1) — same flattened texel dispatch as LightEval
     if (isVk && cardFillShader != handles::INVALID_SHADER) {
@@ -1067,18 +1129,28 @@ void SurfaceCachePass::AddCardCapturePasses(
 
                 math::v3 fwd, up;
                 float hu = 0.0f, hv = 0.0f, halfAxis = 0.0f;
+                // A3: worldToCardUV reads u from a fixed card-local axis
+                // (axis0:+y, axis1:+x, axis2:+x) while LookAt's right =
+                // cross(fwd, up) flips with dir. For the three combos where
+                // right lands on −local_u, mirror the ortho horizontally so
+                // the captured atlas matches the lookup convention (cull mode
+                // is None, so the winding flip is harmless).
+                bool mirror_u = false;
                 if (axis == 0u) {
                     fwd = math::v3{dir > 0u ? 1.0f : -1.0f, 0.0f, 0.0f};
                     up  = math::v3{0.0f, 0.0f, -1.0f};
                     hu = card.extent.y; hv = card.extent.z; halfAxis = card.extent.x;
+                    mirror_u = (dir == 0u);
                 } else if (axis == 1u) {
                     fwd = math::v3{0.0f, dir > 0u ? 1.0f : -1.0f, 0.0f};
                     up  = math::v3{0.0f, 0.0f, -1.0f};
                     hu = card.extent.x; hv = card.extent.z; halfAxis = card.extent.y;
+                    mirror_u = (dir > 0u);
                 } else {
                     fwd = math::v3{0.0f, 0.0f, dir > 0u ? 1.0f : -1.0f};
                     up  = math::v3{0.0f, -1.0f, 0.0f};
                     hu = card.extent.x; hv = card.extent.y; halfAxis = card.extent.z;
+                    mirror_u = (dir == 0u);
                 }
                 if (hu <= 0.0f || hv <= 0.0f || halfAxis <= 0.0f) continue;
 
@@ -1086,7 +1158,8 @@ void SurfaceCachePass::AddCardCapturePasses(
                 const math::v3 at = center + fwd;
                 const math::m4x4 view = rhimath::CreateLookAtMatrix(center, at, up);
                 const math::m4x4 proj = rhimath::CreateOrthographicMatrix(
-                    -hu, hu, -hv, hv, 0.05f, 2.0f * halfAxis + 0.5f);
+                    mirror_u ? hu : -hu, mirror_u ? -hu : hu, -hv, hv,
+                    0.05f, 2.0f * halfAxis + 0.5f);
 
                 const bool ok = gpuDraw.ExecuteCardCapturePass(
                     cmd, scene_snapshot, view, proj,
@@ -1114,6 +1187,9 @@ void SurfaceCachePass::AddCardCapturePasses(
             }
         });
 }
+
+// T3.3: SC Radiosity bring-up switch (SC_INDIRECT=1) — read once.
+static const bool kScIndirectEnabled = std::getenv("SC_INDIRECT") != nullptr;
 
 SurfaceCacheOutput SurfaceCachePass::AddPass(
     RenderGraph& graph,
@@ -1201,16 +1277,37 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // or budget ≥ total keeps the legacy full update.
             // ================================================================
             {
-                // PRIMAL_SC_BUDGET：页预算覆盖（页/帧）。0 = 全量更新——
+                // PRIMAL_SC_BUDGET：页预算上限（页/帧）。0 = 全量更新——
                 // Vulkan 基准行为（实测 374 卡/帧 vs Metal 预算后 8 卡/帧）。
                 // SC atlas 覆盖不足曾是 Metal finalize 的 SC-first 层级退化
                 // 为"黑+解析蓝"的根因（0c2e34d9 因此错误地改用 prev-first）。
+                // A6: env 与 governor 仲裁——env 是上限，governor 每帧
+                // SetPageBudget 的缩放值取 min 生效；不再无条件覆盖 governor。
                 static const u32 s_budgetOverride = [] {
                     const char* e = std::getenv("PRIMAL_SC_BUDGET");
                     return e ? (u32)std::atoi(e) : 0xFFFFFFFFu;
                 }();
-                u32 budgetPages = (s_budgetOverride != 0xFFFFFFFFu)
-                    ? s_budgetOverride : config_.surface_cache_capture_budget;
+                if (s_budgetOverride != 0xFFFFFFFFu) {
+                    static bool s_budgetWarned = false;
+                    if (!s_budgetWarned) {
+                        s_budgetWarned = true;
+                        PRIMAL_LOG_STREAM(Warn, "Render")
+                            << "[SurfaceCache] PRIMAL_SC_BUDGET=" << s_budgetOverride
+                            << " active as a ceiling; the GI governor scales the "
+                            << "per-frame page budget below it (min arbitration)."
+                            << std::endl;
+                    }
+                }
+                u32 budgetPages = config_.surface_cache_capture_budget;
+                if (s_budgetOverride != 0xFFFFFFFFu) {
+                    // env=0 → 全量更新（原语义）；config==0（Low 档）时 env 仍为上限；
+                    // 两者皆有限取 min（governor 只能压到 env 之下，不能抬高）。
+                    budgetPages = (s_budgetOverride == 0)
+                        ? 0u
+                        : (budgetPages == 0 || budgetPages > s_budgetOverride)
+                            ? s_budgetOverride
+                            : budgetPages;
+                }
                 const u32 texel_budget = budgetPages * page_size_ * page_size_;
                 // Lighting is triple-buffered and partial updates preserve the
                 // untouched texels in each slot. Seed every slot with one full
@@ -1275,15 +1372,28 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 static_assert(sizeof(LightInfoGPU) == 48, "LightInfo must be 48 bytes");
                 auto* lights = static_cast<LightInfoGPU*>(device_->MapBuffer(light_info_buffer_));
                 if (lights) {
-                    const u32 lightCount = frame_data.light_count > 0 ? frame_data.light_count : 1u;
-                    for (u32 i = 0; i < lightCount; ++i) {
-                        lights[i].position  = math::v4{0.0f, 0.0f, 0.0f, 1000.0f};
-                        lights[i].color     = math::v4{frame_data.light_color.x,
-                                                       frame_data.light_color.y,
-                                                       frame_data.light_color.z, 0.0f};
-                        lights[i].direction = math::v4{frame_data.light_direction.x,
-                                                       frame_data.light_direction.y,
-                                                       frame_data.light_direction.z, 1.0f}; // w=1 → directional
+                    // A4: upload the real per-slot light list when the caller
+                    // provided one (type/position/radius per slot) — keeps the
+                    // point-light path in LightEval alive. Legacy single
+                    // directional slot remains the fallback.
+                    const u32 realCount = frame_data.sc_light_count;
+                    if (realCount > 0) {
+                        for (u32 i = 0; i < realCount; ++i) {
+                            lights[i].position  = frame_data.sc_lights[i * 3 + 0];
+                            lights[i].color     = frame_data.sc_lights[i * 3 + 1];
+                            lights[i].direction = frame_data.sc_lights[i * 3 + 2];
+                        }
+                    } else {
+                        const u32 lightCount = frame_data.light_count > 0 ? frame_data.light_count : 1u;
+                        for (u32 i = 0; i < lightCount; ++i) {
+                            lights[i].position  = math::v4{0.0f, 0.0f, 0.0f, 1000.0f};
+                            lights[i].color     = math::v4{frame_data.light_color.x,
+                                                           frame_data.light_color.y,
+                                                           frame_data.light_color.z, 0.0f};
+                            lights[i].direction = math::v4{frame_data.light_direction.x,
+                                                           frame_data.light_direction.y,
+                                                           frame_data.light_direction.z, 1.0f}; // w=1 → directional
+                        }
                     }
                     device_->UnmapBuffer(light_info_buffer_);
                 }
@@ -1309,7 +1419,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     params.sc_params.lookup_count = card_generator_.GetLookupCount();
                     params.total_texels = total_texels;
                     params.card_count = card_count;
-                    params.light_count = frame_data.light_count;
+                    params.light_count = frame_data.sc_light_count > 0
+                        ? frame_data.sc_light_count
+                        : (frame_data.light_count > 0 ? frame_data.light_count : 1u);
                     params._pad = 0;
                     // Probe-fed indirect grid (Lumen hierarchy); valid flag 0
                     // keeps the shader on the legacy self-feedback path.
@@ -1320,7 +1432,16 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     params.ddgi_counts_valid[0] = frame_data.ddgi_counts[0];
                     params.ddgi_counts_valid[1] = frame_data.ddgi_counts[1];
                     params.ddgi_counts_valid[2] = frame_data.ddgi_counts[2];
-                    params.ddgi_counts_valid[3] = frame_data.ddgi_valid;
+                    // C1-H3: the card_dispatch stand-in binding (INVALID feed)
+                    // must never be read — force the flag off at the pass
+                    // boundary regardless of what the caller set.
+                    params.ddgi_counts_valid[3] =
+                        (frame_data.ddgi_irradiance != rhi::handles::INVALID_RESOURCE)
+                            ? frame_data.ddgi_valid : 0u;
+                    // T3.3: gate the LightEval tile-radiosity read on whether
+                    // the indirect trace/resolve actually ran this session —
+                    // indirect_out holds uninitialized data otherwise.
+                    params.radiosity_gate[0] = kScIndirectEnabled ? 1u : 0u;
                     *mapped = params;
                     device_->UnmapBuffer(params_cb_[frameIdx]);
                 }
@@ -1428,7 +1549,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         u32 card_count;
                         u32 render_width;
                         u32 render_height;
-                        u32 _pad;
+                        u32 atlas_size;
                     };
                     auto* mapped = static_cast<CaptureParamsCB*>(device_->MapBuffer(capture_cb_[frameIdx]));
                     if (mapped) {
@@ -1436,7 +1557,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         mapped->card_count    = card_count;
                         mapped->render_width  = frame_data.render_width;
                         mapped->render_height = frame_data.render_height;
-                        mapped->_pad = 0;
+                        mapped->atlas_size = atlas_size_;
                         device_->UnmapBuffer(capture_cb_[frameIdx]);
                     }
                 }
@@ -1452,15 +1573,35 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     {7, DescriptorType::StorageBuffer,     card_generator_.GetCardDataBuffer()},
                     {8, DescriptorType::StorageBuffer,     card_generator_.GetGridOffsetsBuffer()},
                     {9, DescriptorType::StorageBuffer,     card_generator_.GetGridCardsBuffer()},
+                    {10, DescriptorType::StorageBuffer,    capture_min_depth_buffer_},
                 };
-                UpdateDescriptorSet(device_, capture_gather_set_[frameIdx], captureParams, 10);
+                UpdateDescriptorSet(device_, capture_gather_set_[frameIdx], captureParams, 11);
 
                 cmd->BindComputePipeline(capture_gather_pipeline_);
                 const DescriptorSetHandle capSets[] = { capture_gather_set_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, capture_gather_layout_, 0, 1, capSets, 0, nullptr);
 
+                // A7 three-dispatch nearest-wins capture:
+                //   clear → (barrier) → atomicMin phase → (barrier) → write phase.
+                const u32 atlasGroups = (atlas_size_ + 7) / 8;
+                if (capture_clear_pipeline_ != handles::INVALID_PIPELINE) {
+                    cmd->BindComputePipeline(capture_clear_pipeline_);
+                    cmd->Dispatch(atlasGroups, atlasGroups, 1);
+                    cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                       AccessFlag::ShaderWrite, AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+                    cmd->BindComputePipeline(capture_gather_pipeline_);
+                }
+
                 cmd->Dispatch((frame_data.render_width + 7) / 8,
                               (frame_data.render_height + 7) / 8, 1);
+
+                if (capture_write_pipeline_ != handles::INVALID_PIPELINE) {
+                    cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                       AccessFlag::ShaderWrite, AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+                    cmd->BindComputePipeline(capture_write_pipeline_);
+                    cmd->Dispatch((frame_data.render_width + 7) / 8,
+                                  (frame_data.render_height + 7) / 8, 1);
+                }
 
                 cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
@@ -1732,6 +1873,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         // Surface-point reconstruction for the probe gather
                         // (same depth source the shadow pass uses).
                         {11, DescriptorType::StorageImage,  depth_atlas_},
+                        {12, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]},   // T3.3 tile radiosity
                     };
                     memcpy(evalParams, p, sizeof(p));
                 } else {
@@ -1756,10 +1898,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                          frame_data.ddgi_irradiance != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_irradiance
                              : card_dispatch_buffer_},
+                        // T3.3 tile radiosity (Metal texture namespace 6)
+                        {6, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]},
                     };
                     memcpy(evalParams, p, sizeof(p));
                 }
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 12);
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 13);
 
                 // Explicit GENERAL transition for the lighting atlases — do not
                 // rely on the render graph's Write declaration having put them
@@ -1794,6 +1938,147 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // slot 0 only; slots 1/2 rotate in on frames 1/2 and must
                 // seed themselves the same way.
                 lighting_atlas_seed_mask_ |= 1u << outIdx;
+
+                // ================================================================
+                // T3.3 (D10): indirect trace + resolve dispatch wiring (the
+                // pipelines existed since M4.4 but were never dispatched).
+                // OPT-IN (SC_INDIRECT=1): the 128×128 tile dispatches ×2 cost
+                // ~10× frame budget on Sponza; the LightEval tile-probe
+                // consumer lands in the next slice, until then this stays a
+                // bring-up path.
+                if (kScIndirectEnabled)
+                // trace: per-tile cosine ray fan → SDF march → ray_hits.
+                // resolve: aggregate ray_hits → indirect_out (tile grid).
+                // Consumers (LightEval tile probe) land in the next slice.
+                // ================================================================
+                {
+                    constexpr u32 kTile = 16;
+                    const u32 kRays = 32;
+                    const u32 kTiles = atlas_size_ / kTile;
+
+                    auto& gsdf = nanite::GlobalSDF::Get();
+
+                    // ---- trace params upload ----
+                    if (auto* tp = static_cast<IndirectTraceParamsGPU*>(
+                            device_->MapBuffer(indirect_trace_params_cb_[frameIdx]))) {
+                        *tp = IndirectTraceParamsGPU{};
+                        tp->sc_params.atlas_size = atlas_size_;
+                        tp->sc_params.page_size = page_size_;
+                        tp->sc_params.max_cards = config_.surface_cache_max_cards;
+                        tp->sc_params.lookup_count = card_generator_.GetLookupCount();
+                        tp->sc_params.indirect_rays_per_probe = kRays;
+                        tp->tile_size = kTile;
+                        tp->rays_per_probe = kRays;
+                        tp->frame_index = current_frame_index;
+                        tp->near_distance = 0.25f;
+                        tp->max_ray_distance = 50.0f;
+                        const u32 cc = std::min<u32>(3u, gsdf.GetConfig().cascade_count);
+                        for (u32 c = 0; c < 3; ++c) {
+                            if (c < cc) {
+                                const auto& cascade = gsdf.GetCascade(c);
+                                tp->sdf_origins[c] = math::v4{cascade.origin.x, cascade.origin.y, cascade.origin.z, 0.0f};
+                                tp->sdf_voxel_sizes[c] = math::v4{cascade.voxel_size, 0.0f, 0.0f, 0.0f};
+                                tp->sdf_extents[c] = math::v4{cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
+                                tp->sdf_resolutions[c] = math::u32v4{cascade.resolution, 0, 0, 0};
+                            }
+                        }
+                        tp->sdf_cascade_count = math::u32v4{cc, 0, 0, 0};
+                        device_->UnmapBuffer(indirect_trace_params_cb_[frameIdx]);
+                    }
+
+                    // ---- trace descriptors + dispatch ----
+                    {
+                        DescriptorData ip[9];
+                        if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+                            ip[0] = {0, DescriptorType::StorageImage,  depth_atlas_};
+                            ip[1] = {1, DescriptorType::StorageImage,  normal_atlas_};
+                            ip[2] = {2, DescriptorType::SampledImage,  gsdf.GetCascade(0).sdf_texture};
+                            ip[3] = {3, DescriptorType::SampledImage,  gsdf.GetCascade(1).sdf_texture};
+                            ip[4] = {4, DescriptorType::SampledImage,  gsdf.GetCascade(2).sdf_texture};
+                            ip[5] = {5, DescriptorType::UniformBuffer, indirect_dummy_cb_};
+                            ip[6] = {6, DescriptorType::UniformBuffer, indirect_trace_params_cb_[frameIdx]};
+                            ip[7] = {7, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
+                            ip[8] = {8, DescriptorType::StorageBuffer, ray_hits_buffer_};
+                        } else {
+                            ip[0] = {0, DescriptorType::StorageImage,  depth_atlas_};
+                            ip[1] = {1, DescriptorType::StorageImage,  normal_atlas_};
+                            ip[2] = {2, DescriptorType::SampledImage,  gsdf.GetCascade(0).sdf_texture};
+                            ip[3] = {3, DescriptorType::SampledImage,  gsdf.GetCascade(1).sdf_texture};
+                            ip[4] = {4, DescriptorType::SampledImage,  gsdf.GetCascade(2).sdf_texture};
+                            ip[5] = {0, DescriptorType::UniformBuffer, indirect_dummy_cb_};
+                            ip[6] = {1, DescriptorType::UniformBuffer, indirect_trace_params_cb_[frameIdx]};
+                            ip[7] = {2, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
+                            ip[8] = {3, DescriptorType::StorageBuffer, ray_hits_buffer_};
+                        }
+                        UpdateDescriptorSet(device_, indirect_trace_set_[frameIdx], ip, 9);
+                        cmd->BindComputePipeline(indirect_trace_pipeline_);
+                        const DescriptorSetHandle isets[] = { indirect_trace_set_[frameIdx] };
+                        cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_trace_layout_, 0, 1, isets, 0, nullptr);
+                        cmd->Dispatch(kTiles, kTiles, 1);
+                        rhi::ResourceBarrier rb{};
+                        rb.resource = ray_hits_buffer_;
+                        rb.beforeState = rhi::ResourceState::UnorderedAccess;
+                        rb.afterState  = rhi::ResourceState::UnorderedAccess;
+                        rb.subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&rb, 1);
+                    }
+
+                    // ---- resolve params upload ----
+                    if (auto* rp = static_cast<IndirectResolveParamsGPU*>(
+                            device_->MapBuffer(indirect_resolve_params_cb_[frameIdx]))) {
+                        *rp = IndirectResolveParamsGPU{};
+                        rp->sc_params.atlas_size = atlas_size_;
+                        rp->sc_params.page_size = page_size_;
+                        rp->sc_params.max_cards = config_.surface_cache_max_cards;
+                        rp->sc_params.lookup_count = card_generator_.GetLookupCount();
+                        rp->sc_params.indirect_rays_per_probe = kRays;
+                        rp->tile_size = kTile;
+                        rp->rays_per_probe = kRays;
+                        rp->temporal_weight = 0.9f;
+                        rp->frame_index = current_frame_index;
+                        rp->lookup_count = card_generator_.GetLookupCount();
+                        device_->UnmapBuffer(indirect_resolve_params_cb_[frameIdx]);
+                    }
+
+                    // ---- resolve descriptors + dispatch ----
+                    {
+                        DescriptorData rp2[10];
+                        if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+                            rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
+                            rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
+                            rp2[2] = {2, DescriptorType::SampledImage,  albedo_atlas_};   // dummy (unused)
+                            rp2[3] = {3, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
+                            rp2[4] = {4, DescriptorType::UniformBuffer, indirect_dummy_cb_};
+                            rp2[5] = {5, DescriptorType::UniformBuffer, indirect_resolve_params_cb_[frameIdx]};
+                            rp2[6] = {6, DescriptorType::StorageBuffer, card_generator_.GetCardLookupBuffer()};
+                            rp2[7] = {7, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
+                            rp2[8] = {8, DescriptorType::StorageBuffer, ray_hits_buffer_};
+                            rp2[9] = {9, DescriptorType::SampledImage,  indirect_out_tex_[histIdx]};   // T3.3 EMA history
+                        } else {
+                            rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
+                            rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
+                            rp2[2] = {2, DescriptorType::SampledImage,  albedo_atlas_};   // dummy (unused)
+                            rp2[3] = {3, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
+                            rp2[4] = {0, DescriptorType::UniformBuffer, indirect_dummy_cb_};
+                            rp2[5] = {1, DescriptorType::UniformBuffer, indirect_resolve_params_cb_[frameIdx]};
+                            rp2[6] = {2, DescriptorType::StorageBuffer, card_generator_.GetCardLookupBuffer()};
+                            rp2[7] = {3, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
+                            rp2[8] = {4, DescriptorType::StorageBuffer, ray_hits_buffer_};
+                            rp2[9] = {6, DescriptorType::SampledImage,  indirect_out_tex_[histIdx]};   // T3.3 EMA history
+                        }
+                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 10);
+                        cmd->BindComputePipeline(indirect_resolve_pipeline_);
+                        const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
+                        cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);
+                        cmd->Dispatch(kTiles, kTiles, 1);
+                        rhi::ResourceBarrier rb{};
+                        rb.resource = indirect_out_tex_[outIdx];
+                        rb.beforeState = rhi::ResourceState::UnorderedAccess;
+                        rb.afterState  = rhi::ResourceState::UnorderedAccess;
+                        rb.subresource = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&rb, 1);
+                    }
+                }   // end SC_INDIRECT bring-up block
 
                 // DEBUG: immediate post-dispatch memory barrier + inline readback
                 // to prove/disprove whether the imageStore landed in this very

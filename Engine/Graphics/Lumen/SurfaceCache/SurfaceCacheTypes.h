@@ -44,6 +44,37 @@ struct SurfaceCacheParams {
     uint32_t  _pad;
 };
 
+// T3.3 (D10): CPU mirrors of the indirect trace/resolve params UBOs.
+// Field order matches the shader structs EXACTLY (std140; scalar-packed
+// prefixes, vec4 arrays at 16B stride). Definition sites:
+//   SurfaceCacheIndirectTrace.comp:64   IndirectTraceParams
+//   SurfaceCacheIndirectResolve.comp:62 IndirectResolveParams
+struct IndirectTraceParamsGPU {
+    SurfaceCacheParams sc_params;   // 48B
+    uint32_t tile_size;
+    uint32_t rays_per_probe;
+    uint32_t frame_index;
+    float    near_distance;
+    float    max_ray_distance;
+    float    _pad0, _pad1;          // align 16 for the vec4 arrays
+    math::v4 sdf_origins[3];
+    math::v4 sdf_voxel_sizes[3];
+    math::v4 sdf_extents[3];
+    math::u32v4 sdf_resolutions[3]; // std140 u32 array stride = 16
+    math::u32v4 sdf_cascade_count;  // x = count
+};
+static_assert(sizeof(IndirectTraceParamsGPU) == 288, "std140 layout drift");
+
+struct IndirectResolveParamsGPU {
+    SurfaceCacheParams sc_params;   // 48B
+    uint32_t tile_size;
+    uint32_t rays_per_probe;
+    float    temporal_weight;
+    uint32_t frame_index;
+    uint32_t lookup_count;
+};
+static_assert(sizeof(IndirectResolveParamsGPU) == 68, "std140 layout drift");
+
 // Per-card dispatch info for flattened texel dispatch.
 // CPU builds prefix-sum array, GPU binary-searches to map thread_id → card → atlas UV.
 struct CardDispatchInfo {
@@ -70,6 +101,9 @@ struct FlattenedLightingParams {
     // backends whose shaders predate this field keep reading the first 64B).
     float              ddgi_origin_spacing[4];  // xyz origin, w spacing
     uint32_t           ddgi_counts_valid[4];    // xyz counts, w valid flag
+    // T3.3: SC Radiosity gate (x = indirect_radiosity_on) — appended at the
+    // end exactly like the probe-feed block above.
+    uint32_t           radiosity_gate[4];       // x = on, yzw reserved
 };
 
 struct SurfaceCacheFrameData {
@@ -85,6 +119,17 @@ struct SurfaceCacheFrameData {
     float      _pad3;
     math::v3   light_color{5.0f, 5.0f, 5.0f};
     float      _pad4;
+
+    // A4 (T0.4): real per-slot light list for the LightEval upload, packed in
+    // the GPU LightInfo layout (48 B/slot = 3 v4):
+    //   [0] position  = (xyz, w = radius/range)
+    //   [1] color     = (rgb premultiplied by intensity, w unused)
+    //   [2] direction = (xyz, w = type: 1.0 directional, 0.0 point/spot)
+    // sc_light_count == 0 → pass falls back to the legacy single
+    // directional slot built from light_direction/light_color.
+    static constexpr uint32_t kSCMaxLights = 64;
+    uint32_t   sc_light_count = 0;
+    math::v4   sc_lights[kSCMaxLights * 3] = {};
 
     // GBuffer-gather capture inputs (Vulkan Capture path): main-pass GBuffer
     // handles + inverse view-projection for world-position reconstruction.

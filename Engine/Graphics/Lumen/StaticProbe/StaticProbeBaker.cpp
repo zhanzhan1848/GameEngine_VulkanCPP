@@ -324,17 +324,24 @@ static inline float Dot3(v3 a, v3 b)
                                     neighbor_sh.coeffs[i] = neighbor_irradiance[i];
                                 }
 
-                                // Do NOT convolve with cosine lobe again — neighbor data
-                                // is already irradiance (cosine-convolved radiance).
-                                // Applying ConvolveCosineLobe again multiplies L0 by PI per bounce,
-                                // causing exponential energy amplification (PI^3 ≈ 31x for 3 bounces).
-
-                                // Accumulate weighted bounce (1/PI for Lambertian BRDF albedo term)
-                                constexpr float bounce_scale = 1.0f / PI;
+                                // B11: the bake stores RADIANCE SH (the initial
+                                // site explicitly skips the cosine convolution —
+                                // "output is radiance SH (matches runtime)"). The
+                                // bounce must therefore convolve the cosine lobe
+                                // per band (A0=π, A1=2π/3, A2=π/4 — Ramamoorthi)
+                                // before the Lambert albedo/π. Combined per-band
+                                // scale: {1, 2/3×3, 1/4×5}. The old code assumed
+                                // pre-convolved irradiance and skipped this step,
+                                // over-weighting L1 1.5× and L2 4×.
+                                static constexpr float kBandConv[9] = {
+                                    1.0f,                                      // A0·(1/π) = π/π
+                                    2.0f / 3.0f, 2.0f / 3.0f, 2.0f / 3.0f,     // A1·(1/π) = (2π/3)/π
+                                    0.25f, 0.25f, 0.25f, 0.25f, 0.25f          // A2·(1/π) = (π/4)/π
+                                };
                                 for (int i = 0; i < 9; ++i) {
-                                    bounce_sh.coeffs[i].x += neighbor_sh.coeffs[i].x * w * bounce_scale;
-                                    bounce_sh.coeffs[i].y += neighbor_sh.coeffs[i].y * w * bounce_scale;
-                                    bounce_sh.coeffs[i].z += neighbor_sh.coeffs[i].z * w * bounce_scale;
+                                    bounce_sh.coeffs[i].x += neighbor_sh.coeffs[i].x * w * kBandConv[i];
+                                    bounce_sh.coeffs[i].y += neighbor_sh.coeffs[i].y * w * kBandConv[i];
+                                    bounce_sh.coeffs[i].z += neighbor_sh.coeffs[i].z * w * kBandConv[i];
                                 }
                                 total_weight += w;
                             }

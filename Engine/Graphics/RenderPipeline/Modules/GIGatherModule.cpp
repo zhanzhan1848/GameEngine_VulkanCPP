@@ -2,8 +2,9 @@
 #include "Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Graphics/RHI/Core/RHIMath.h"
-#include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
-#include "Graphics/RHI/Platforms/Vulkan/VulkanTexture.h"
+// T1.9 (E3): platform headers removed — this module is backend-agnostic
+// (platform branches go through the RHI capability bits below). Do not
+// re-add platform includes here; Dawn/Metal builds must stay compilable.
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 
@@ -113,8 +114,11 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradianceBuffer
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // depthBuffer
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // TEMP dual-slot: same irradiance buffer
+            // T3.6/D2: far coarse volume (was Vulkan-only)
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // far irradiance (9 vec4/probe)
+            {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // far params (origin+spacing/counts+enabled)
         };
-        set_layout_ = device->CreateDescriptorSetLayout({16, bindings});
+        set_layout_ = device->CreateDescriptorSetLayout({18, bindings});
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
@@ -568,10 +572,10 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             }
 
             // Buffer bindings with sub-allocation from probe_cb_
-            WriteDescriptorSet bufWrites[10];
-            DescriptorBufferInfo bufInfos[10];
+            WriteDescriptorSet bufWrites[12];
+            DescriptorBufferInfo bufInfos[12];
             {
-                for (int i = 0; i < 10; ++i) {
+                for (int i = 0; i < 12; ++i) {
                     bufWrites[i].dstSet = descriptorSet;
                     bufWrites[i].dstArrayElement = 0;
                     bufWrites[i].descriptorCount = 1;
@@ -611,7 +615,15 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // TEMP dual-slot: same irradiance buffer at slot 9.
                 bufWrites[9].dstBinding = bufBase + 9; bufWrites[9].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[9].buffer = ddgi->GetIrradianceBuffer(ddgiReadIdx); bufInfos[9].offset = 0; bufInfos[9].range = ~0ull;
-                device_->UpdateDescriptorSets(10, bufWrites);
+                // T3.6/D2: far coarse volume (Metal offsets, not bufBase — the
+                // far slots live at 10/11 in the Metal namespace).
+                bufWrites[10].dstBinding = 10; bufWrites[10].descriptorType = DescriptorType::StorageBuffer;
+                bufInfos[10].buffer = (farView.IsValid() && farView.irradiance != handles::INVALID_RESOURCE)
+                    ? farView.irradiance : dummy_buffer_;
+                bufInfos[10].offset = 0; bufInfos[10].range = ~0ull;
+                bufWrites[11].dstBinding = 11;
+                bufInfos[11].buffer = farCB; bufInfos[11].offset = 0; bufInfos[11].range = 64;
+                device_->UpdateDescriptorSets(12, bufWrites);
             }
 
             // Dispatch
