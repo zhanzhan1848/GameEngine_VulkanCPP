@@ -62,6 +62,12 @@ private:
     bool InitializeWindowAndRenderSystem();
     bool InitializePipeline();
     bool LoadSponzaScene();
+    // T2.1 (F7): Vulkan GI numerical band gate — frame-90 readback of probe
+    // L0 + gather output, PASS/FAIL bands aligned with TestMetalGIFusion,
+    // then std::_Exit(0/1) so CI gets an exit-code gate. Activated by
+    // GI_VERIFY=1 (default off keeps the windowed long-run behavior).
+    void RunGIVerify();
+    bool giVerified_{false};
     // T4.6.5 part 37: load HDR + equirect→cube + IBL precompute + SetIBLResources.
     bool InitializeIBL();
 

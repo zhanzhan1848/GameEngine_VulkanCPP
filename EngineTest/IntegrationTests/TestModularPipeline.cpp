@@ -453,15 +453,17 @@ bool TestModularPipeline::InitializePipeline() {
     pipeline_->SetShaderHandles(shaderHandles_);
 
     // T8.13 sync: offline merged SDF — same wiring as TestVulkanSponzaRenderGraph.
-    // First run merges (~5 min) and writes the cache; later runs load in ~1s.
+    // signed_v5 = 2026-09 re-bake, fast-winding-number inside test (single-ray
+    // parity poisoned hollow architecture). PGSDFC02 cache records the
+    // encoding; v3 cache name tracks the v5 asset generation.
     {
         const std::string sdfCache =
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Sponza_global_sdf.v1.cache";
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Sponza_global_sdf.v3.cache";
         const std::string pipeModelPath =
-            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Sponza_pipeline.model";
+            "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Sponza_pipeline_signed_v5.model";
         offline_sdf_merger_ = new primal::graphics::nanite::OfflineSDFMerger();
         if (!offline_sdf_merger_->LoadFromCache(device_.get(), sdfCache.c_str())) {
-            u32 sdfCount = offline_sdf_merger_->LoadFromPipelineModel(pipeModelPath.c_str());
+            u32 sdfCount = offline_sdf_merger_->LoadFromPipelineModel(pipeModelPath.c_str(), /*signed_encoding=*/true);
             if (sdfCount > 0) {
                 std::cerr << "[TestModularPipeline] Offline SDF loaded: " << sdfCount
                           << " meshes, merging..." << std::endl;
@@ -1526,11 +1528,15 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
                   << "=" << v << " ∈ [" << lo << ", " << hi << "]" << std::endl;
         if (!ok) pass = false;
     };
-    checkBand("probe_sh0_lum", sh0Lum, 0.08, 1.5);
+    // Band recalibrated 2026-09-08 after M2 scale unification (see the
+    // Vulkan RunGIVerify twin note): 9.99 measured (post B7-clamp-rescale
+    // high-energy bounces survive) × 1.3 envelope.
+    checkBand("probe_sh0_lum", sh0Lum, 0.08, 13.0);
     if (gatherOk) {
         double variation = (gAvg > 1e-6) ? (gMax / gAvg) : 0.0;
         checkBand("gather_variation(max/avg)", variation, 1.2, 1e9);
-        checkBand("gather_avg", gAvg, 0.005, 0.8);
+        // 2026-09-08 envelope: 2.21 measured × 1.3 (B1 residual headroom).
+        checkBand("gather_avg", gAvg, 0.005, 2.9);
     } else { pass = false; }
     if (finalOk) {
         checkBand("final_dynamic_range(max-min)", fMax - fMin, 0.1, 1e9);
