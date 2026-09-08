@@ -57,6 +57,40 @@ constant float PROBE_SH_RAD_TO_IRRAD = 3.14159265f;
 // B4: radiance→irradiance per-band constants (Ramamoorthi): A0 = π for L0,
 // A1 = 2π/3 for L1. The old path scaled BOTH bands by π — the L1 band was
 // over-counted by 1.5×, exaggerating directional GI (colored banding).
+// B1: SH9 evaluation — all 9 coefficients from the DDGI irradiance buffer
+// (which is already SH9 on both backends). Per-band radiance→irradiance:
+// A0=π, A1=2π/3, A2=π/4 (Ramamoorthi).
+static float3 evalSH9Irradiance(thread const float3 sh[9], float3 d) {
+    float x = d.x, y = d.y, z = d.z;
+    float nxy = x*y, nyz = y*z, nzx = z*x;
+    float nxx = x*x, nyy = y*y, nzz = z*z;
+    return sh[0] * 0.88622692f                       // π  × 0.28209479
+         + sh[1] * (-1.02332674f * y)                // (2π/3) × 0.48860251
+         + sh[2] * ( 1.02332674f * z)
+         + sh[3] * (-1.02332674f * x)
+         + sh[4] * ( 0.85826450f * nxy)              // (π/4) × 1.09254843
+         + sh[5] * (-0.85826450f * nyz)
+         + sh[6] * ( 0.24770795f * (3.0f*nzz - 1.0f)) // (π/4) × 0.31539157
+         + sh[7] * (-0.85826450f * nzx)
+         + sh[8] * ( 0.42913225f * (nxx - nyy));     // (π/4) × 0.54627421
+}
+
+// B1: SH9 radiance evaluation (specular lobe path — no A_l correction).
+static float3 evalSH9Canonical(thread const float3 sh[9], float3 d) {
+    float x = d.x, y = d.y, z = d.z;
+    float nxy = x*y, nyz = y*z, nzx = z*x;
+    float nxx = x*x, nyy = y*y, nzz = z*z;
+    return sh[0] * 0.28209479f
+         + sh[1] * (-0.48860251f * y)
+         + sh[2] * ( 0.48860251f * z)
+         + sh[3] * (-0.48860251f * x)
+         + sh[4] * ( 1.09254843f * nxy)
+         + sh[5] * (-1.09254843f * nyz)
+         + sh[6] * ( 0.31539157f * (3.0f*nzz - 1.0f))
+         + sh[7] * (-1.09254843f * nzx)
+         + sh[8] * ( 0.54627421f * (nxx - nyy));
+}
+
 static float3 evalSH4Irradiance(thread const float3 sh[4], float3 d) {
     float x = d.x, y = d.y, z = d.z;
     return sh[0] * 0.88622692f       // π  × 0.28209479
@@ -299,12 +333,12 @@ kernel void ddgi_gi_gather(
             if (tw[p] < 0.01f) continue;
             uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
             uint shBase = pIdx * SH_COEFF_COUNT;
-            float3 sh[4];
-            for (uint i = 0u; i < 4u; ++i)
+            float3 sh[9];
+            for (uint i = 0u; i < 9u; ++i)
                 sh[i] = irradianceBuffer[shBase + i];
 
-            // Proper SH evaluation at the pixel's surface normal.
-            float3 irr = evalSH4Irradiance(sh, normal);   // B4
+            // B1: SH9 evaluation at the pixel's surface normal.
+            float3 irr = evalSH9Irradiance(sh, normal);
 
             float w = tw[p];
             float insidePenalty = 1.0f;
@@ -336,11 +370,11 @@ kernel void ddgi_gi_gather(
             if (tw[p] > bestBaseWeight) { bestBaseWeight = tw[p]; bestIrr = irr; }
 
             result += irr * w;          // B4: irradiance units (diffuse)
-            resultRadiance += evalSH4Canonical(sh, normal) * w;   // specular keeps radiance units
+            resultRadiance += evalSH9Canonical(sh, normal) * w;   // specular keeps radiance units
             totalW += w;
 
             // Reuse the same four loads for the reflection direction.
-            reflResult += evalSH4Canonical(sh, R) * w;
+            reflResult += evalSH9Canonical(sh, R) * w;
         }
         if (totalW > 0.0f) {
             result /= totalW;
