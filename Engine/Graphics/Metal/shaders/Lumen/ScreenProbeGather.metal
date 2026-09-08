@@ -48,6 +48,17 @@ struct ScreenProbeGlobalData {
 //   Y2 = 0.488603 * d.z
 //   Y3 = 0.488603 * d.x
 // Average stores SH coefficients C_i such that E(N) = Σ C_i * Y_i(N).
+// B1/B4: per-band radiance→irradiance evaluation (A0=π, A1=2π/3) — the
+// probe field stores radiance SH (DDGI-compatible projection) and the
+// diffuse consumer integrates it over the cosine lobe.
+static inline float3 evalSHIrradiance(float3 sh0, float3 sh1, float3 sh2, float3 sh3,
+                                      float3 n) {
+    return sh0 * (0.282095f * 3.14159265f)
+         + sh1 * (-0.488603f * 2.09439510f * n.y)
+         + sh2 * ( 0.488603f * 2.09439510f * n.z)
+         + sh3 * (-0.488603f * 2.09439510f * n.x);
+}
+
 static inline float3 evalSH(float3 sh0, float3 sh1, float3 sh2, float3 sh3,
                             float3 N)
 {
@@ -140,7 +151,7 @@ kernel void screen_probe_gather(
         float3 sh3 = probeSH[shBase + 3].rgb;
 
         // Proper SH evaluation at the pixel's surface normal.
-        float3 irr = evalSH(sh0, sh1, sh2, sh3, surfaceNormal);
+        float3 irr = evalSHIrradiance(sh0, sh1, sh2, sh3, surfaceNormal);   // B1
         irr = max(irr, float3(0.0f));
 
         // Reject probes whose normal faces away from the pixel's surface.

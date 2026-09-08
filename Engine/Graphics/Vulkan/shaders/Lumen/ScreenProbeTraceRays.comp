@@ -303,7 +303,8 @@ void screen_probe_trace_rays() {
         }
     }
 
-    // Write output: xyz = radiance, w = cosine weight × importance factor (F2)
-    float outputWeight = cosTheta * invNq;
+    // Write output: xyz = radiance, w = cosine weight × importance factor (F2).
+    // B5: negative w = miss→sky (sign is the geometry-hit flag for Average).
+    float outputWeight = (hit.hit ? cosTheta : -cosTheta) * invNq;
     probeRadiance.data[global_id] = vec4(radiance, outputWeight);
 }

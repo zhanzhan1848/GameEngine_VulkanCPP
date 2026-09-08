@@ -92,7 +92,8 @@ shared vec3 sharedSH[4][AVG_TG_SIZE];   // 4 SH bands
 shared float sharedWeight[AVG_TG_SIZE]; // cosTheta sum
 shared float sharedLum[AVG_TG_SIZE];    // luminance sum for variance
 shared float sharedLumSq[AVG_TG_SIZE];  // luminance^2 sum for variance
-shared float sharedHit[AVG_TG_SIZE];    // 1.0 if hit, 0.0 if miss
+shared float sharedHit[AVG_TG_SIZE];    // 1.0 if geometry hit, 0.0 if miss/inactive (B5)
+shared float sharedActive[AVG_TG_SIZE]; // 1.0 if the lane carries a ray (B5: variance divisor)
 
 // --------------------------------------------------------------------------------
 // Main
@@ -109,7 +110,9 @@ void screen_probe_average() {
     vec4 rayData = vec4(0.0, 0.0, 0.0, -1.0);
     if (tid < constants.raysPerProbe) rayData = rayRadiance.data[rayIdx];
 
-    if (rayData.w >= 0.0) {
+    // B5: sign encodes geometry hit (positive) vs miss→sky / inactive (≤ 0).
+    // Integration uses the magnitude; hit count requires w > 0.
+    if (rayData.w != 0.0) {
         // Hit: clamp radiance at source to prevent firefly propagation
         const float MAX_RAY_RADIANCE = 5.0;
         float rayLum = dot(rayData.rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -141,18 +144,22 @@ void screen_probe_average() {
 
         vec4 Y = shBasis(rayDir);
 
-        vec3 weightedRadiance = rayData.rgb * rayData.w;
+        float rayWeight = abs(rayData.w);   // B5: sign is a flag, not a weight
+        // B1: mode 0 radiance-SH projection (4π/N)·Σ rayL·Y — see Metal twin.
+        float projWeight = (constants.isMode > 0.5) ? rayWeight : 1.0;
+        vec3 weightedRadiance = rayData.rgb * projWeight;
         sharedSH[0][tid] = weightedRadiance * Y.x;
         sharedSH[1][tid] = weightedRadiance * Y.y;
         sharedSH[2][tid] = weightedRadiance * Y.z;
         sharedSH[3][tid] = weightedRadiance * Y.w;
-        sharedWeight[tid] = rayData.w;
+        sharedWeight[tid] = rayWeight;
+        sharedHit[tid] = (rayData.w > 0.0) ? 1.0 : 0.0;
+        sharedActive[tid] = 1.0;
 
         // Luminance for variance computation
         float lum = dot(rayData.rgb, vec3(0.2126, 0.7152, 0.0722));
         sharedLum[tid] = lum;
         sharedLumSq[tid] = lum * lum;
-        sharedHit[tid] = 1.0;
     } else {
         // Miss: contribute nothing
         sharedSH[0][tid] = vec3(0.0);
@@ -163,6 +170,7 @@ void screen_probe_average() {
         sharedLum[tid] = 0.0;
         sharedLumSq[tid] = 0.0;
         sharedHit[tid] = 0.0;
+        sharedActive[tid] = 0.0;
     }
 
     barrier();
@@ -178,6 +186,7 @@ void screen_probe_average() {
             sharedLum[tid]    += sharedLum[tid + stride];
             sharedLumSq[tid]  += sharedLumSq[tid + stride];
             sharedHit[tid]    += sharedHit[tid + stride];
+            sharedActive[tid] += sharedActive[tid + stride];
         }
         barrier();
     }
@@ -196,16 +205,25 @@ void screen_probe_average() {
             // to the standard SH evaluator with the matching convolution
             // normalization. Without this, a constant field reconstructs to
             // only 3/(4pi) ~= 24% along the probe normal.
-            const float L0_HEMISPHERE_SCALE = 6.28318530718;
-            const float L1_HEMISPHERE_SCALE = 3.14159265359;
+            // B1: mode 0 radiance projection ×(4π/N); importance legacy (B2).
+            const float FOUR_PI = 12.566370614;
+            const float L0_HEMISPHERE_SCALE = 0.56418958;
+            const float L1_HEMISPHERE_SCALE = 0.48860251;
+            const bool importanceMode = (constants.isMode > 0.5);
+            const float sumScale = importanceMode
+                ? invWeight
+                : (FOUR_PI / float(constants.raysPerProbe));
+            const float l0Scale = importanceMode ? L0_HEMISPHERE_SCALE : 1.0;
+            const float l1Scale = importanceMode ? L1_HEMISPHERE_SCALE : 1.0;
 
             // Hit ratio: how many rays hit geometry (or fell back to DDGI —
             // those also carry valid cached radiance).
             float hitRatio = hitCount / float(constants.raysPerProbe);
 
             // Radiance variance: Var(X) = E[X^2] - E[X]^2
-            float avgLum = sharedLum[0] / hitCount;
-            float avgLumSq = sharedLumSq[0] / hitCount;
+            const float activeCount = sharedActive[0];
+            float avgLum = (activeCount > 0.0) ? (sharedLum[0] / activeCount) : 0.0;
+            float avgLumSq = (activeCount > 0.0) ? (sharedLumSq[0] / activeCount) : 0.0;
             float lumVariance = max(avgLumSq - avgLum * avgLum, 0.0);
 
             // Multi-factor confidence. The old exp(-4*variance) collapsed to
@@ -217,10 +235,10 @@ void screen_probe_average() {
 
             float confidence = hitRatio * radianceConsistency;
 
-            probeSHOut.data[base + 0u] = vec4(sharedSH[0][0] * invWeight * L0_HEMISPHERE_SCALE, confidence);
-            probeSHOut.data[base + 1u] = vec4(sharedSH[1][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0);
-            probeSHOut.data[base + 2u] = vec4(sharedSH[2][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0);
-            probeSHOut.data[base + 3u] = vec4(sharedSH[3][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0);
+            probeSHOut.data[base + 0u] = vec4(sharedSH[0][0] * sumScale * l0Scale, confidence);
+            probeSHOut.data[base + 1u] = vec4(sharedSH[1][0] * sumScale * l1Scale, 1.0);
+            probeSHOut.data[base + 2u] = vec4(sharedSH[2][0] * sumScale * l1Scale, 1.0);
+            probeSHOut.data[base + 3u] = vec4(sharedSH[3][0] * sumScale * l1Scale, 1.0);
         } else {
             probeSHOut.data[base + 0u] = vec4(0.0, 0.0, 0.0, 0.0);
             probeSHOut.data[base + 1u] = vec4(0.0, 0.0, 0.0, 0.0);

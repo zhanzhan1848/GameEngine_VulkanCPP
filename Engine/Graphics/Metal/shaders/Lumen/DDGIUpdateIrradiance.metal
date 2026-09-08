@@ -67,6 +67,11 @@ kernel void ddgi_update_irradiance(
         } else {
             float distWeight = 1.0f - smoothstep(vol.RayMaxDistance * 0.8f, vol.RayMaxDistance, hitDist);
             radiance *= max(distWeight, 0.2f);
+            // T3.4 (D4): irradiance bailing — a hit inside ~2 texel-worlds
+            // means the probe is buried in or hugging geometry; such rays
+            // record self-light and destabilize the SH. Fade them out.
+            float bail = smoothstep(0.0f, vol.SdfVoxelSizes[0].x * 2.0f, hitDist);
+            radiance *= bail;
             // One lane can process multiple rays when RaysPerProbe > 64.
             // Count every hit rather than recording only a boolean.
             tg_hitFlags[tid] += 1u;
@@ -75,7 +80,10 @@ kernel void ddgi_update_irradiance(
         // T8.13 sync: same sampler the trace side used for this ray index —
         // the projection must reproduce the exact direction the radiance came
         // from (ProbeSampleLib port; ddgiRayDirection == mode 0 subset).
-        float3 toLight = normalize(-vol.LightDirection.xyz);
+        // C7: LightDirection may be zero (mode 2 doesn't use it) — normalize(0)
+        // is NaN and poisons the whole SH projection. Fall back to world down.
+        float3 lightDir = vol.LightDirection.xyz;
+        float3 toLight = normalize(dot(lightDir, lightDir) > 1e-8f ? -lightDir : float3(0.0f, -1.0f, 0.0f));
         float4 raySample = ddgiSampleRayDirection(r, vol.RaysPerProbe,
                                                   vol.FrameIndex,
                                                   uint(vol.RaySampleMode), toLight);
@@ -184,9 +192,12 @@ kernel void ddgi_update_irradiance(
     float3 sh0 = shAccum[0];
     // 硬上界：l1/l2Limit 由未钳位的原始 sh0 推导时，prev-screen 反馈环的
     // 辐射尖峰会同步抬高上限（实测 L1=1661 = 3×原始L0 553.6），钳位失效。
-    // L0 本身有 10 上界 → L1/L2 上界随之封顶。
-    float l1Limit = max(min(length(sh0) * 3.0f, 30.0f), 0.1f);
-    float l2Limit = max(min(length(sh0) * 2.0f, 20.0f), 0.05f);
+    // L0 本身有上界 → L1/L2 上界随之封顶。
+    // T2.4 (B7): 上限从 10/30/20 重定标至 64/192/128（×6.4）——旧 L0=10
+    // 折算平均亮度 ≈2.8，恰好钉死在天空亮度，高能反弹（太阳池/HDR 高光）
+    // 被整体截断。新值保留防 NaN 级发散的保护，普通探针（L0≈4）不受影响。
+    float l1Limit = max(min(length(sh0) * 3.0f, 192.0f), 0.1f);
+    float l2Limit = max(min(length(sh0) * 2.0f, 128.0f), 0.05f);
 
     float3 cachedHist[DDGI_SH_COEFF_COUNT];
     float3 cachedOut[DDGI_SH_COEFF_COUNT];
@@ -203,7 +214,7 @@ kernel void ddgi_update_irradiance(
 
         if (i == 0u) {
             float mag = length(filtered);
-            if (mag > 10.0f) filtered *= 10.0f / mag;
+            if (mag > 64.0f) filtered *= 64.0f / mag;   // T2.4 (B7): was 10.0
         } else if (i < 4u) {
             float mag = length(filtered);
             if (mag > l1Limit) filtered *= l1Limit / mag;

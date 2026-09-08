@@ -372,6 +372,48 @@ for i in "${!LUMEN_GLSL_NAMES[@]}"; do
     rm -rf "$tmpdir"
 done
 
+# T3.2: GlobalSDF min-mipmap kernel — Nanite/GlobalSDFVoxelizationGLSL.comp
+# second entry, same source, into Nanite/GlobalSDFMipmap.spv.
+src="$DEST_DIR/Nanite/GlobalSDFVoxelizationGLSL.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Nanite/GlobalSDFMipmap.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/GlobalSDFVoxelizationGLSL.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V --source-entrypoint main -e global_sdf_mipmap "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out")
+        printf "OK    Nanite/GlobalSDFMipmap.spv         (%d bytes)\n" "$sz"
+    else
+        echo "FAIL  Nanite/GlobalSDFMipmap"
+        sed 's/^/    /' "$tmpdir/err"
+    fi
+    rm -rf "$tmpdir"
+fi
+
+# A7: SurfaceCacheCapture write/clear phases — extra entry points of the SAME
+# source (SurfaceCacheCapture.comp), each into its own .comp.spv because the
+# Vulkan runtime loads one entry point per file (SurfaceCachePass.cpp
+# CompileComputeShader names: SurfaceCacheCaptureWrite / SurfaceCacheCaptureClear).
+for v in "surface_cache_capture_write:SurfaceCacheCaptureWrite" \
+         "surface_cache_capture_clear:SurfaceCacheCaptureClear"; do
+    entry="${v%%:*}"; out_name="${v##*:}"
+    src="$DEST_DIR/Lumen/SurfaceCacheCapture.comp"
+    if [ ! -f "$src" ]; then
+        printf "MISS  Lumen/SurfaceCacheCapture.comp for %s (skipped)\n" "$out_name"
+        continue
+    fi
+    out="$DEST_DIR/Lumen/$out_name.comp.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/SurfaceCacheCapture.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V --source-entrypoint main -e "$entry" "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out")
+        printf "OK    Lumen/%-26s (%d bytes)\n" "$out_name.comp.spv" "$sz"
+    else
+        printf "FAIL  Lumen/%s.comp.spv\n" "$out_name"
+        sed 's/^/    /' "$tmpdir/err"
+    fi
+    rm -rf "$tmpdir"
+done
+
 # M8/T8.7 GI_ISOLATE A/B variants of FusionIndirect (one source zeroed each).
 # Compiled from the same source with a -D so they can never drift semantically
 # from the main variant above.

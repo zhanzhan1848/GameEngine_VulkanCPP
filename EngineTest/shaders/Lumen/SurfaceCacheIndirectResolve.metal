@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "Lumen/../CommonTypes.metal"
-#include "Lumen/SurfaceCacheData.metal"
+#include "../CommonTypes.metal"
+#include "SurfaceCacheData.metal"
 
 struct ProbeRayHit {
     float3 hit_position;
@@ -25,6 +25,7 @@ kernel void surfaceCacheIndirectResolve(
     texture2d<float, access::read>   albedo_atlas   [[texture(1)]],
     texture2d<float, access::sample> sky_cubemap    [[texture(2)]],
     texture2d<float, access::write>  indirect_out   [[texture(3)]],
+    texture2d<float, access::read>   prev_indirect_out [[texture(6)]],  // T3.3 temporal EMA
     device GlobalShaderData&           gd           [[buffer(0)]],
     constant IndirectResolveParams&    params       [[buffer(1)]],
     constant SurfaceCacheCardLookup*   lookups      [[buffer(2)]],
@@ -88,12 +89,22 @@ kernel void surfaceCacheIndirectResolve(
 
     if (total_weight > 0.0) indirect /= total_weight;
 
+    // T3.3: temporal accumulation — see Vulkan twin (mix with the previous
+    // frame's slot; frame_index >= 2 guarantees history exists).
+    const float tw = clamp(params.temporal_weight, 0.0f, 0.95f);
+    const bool hasHistory = params.frame_index >= 2u;
+
     for (uint dy = 0; dy < tile_size; ++dy) {
         for (uint dx = 0; dx < tile_size; ++dx) {
             uint2 texel = tile_origin + uint2(dx, dy);
             if (texel.x >= params.sc_params.atlas_size || texel.y >= params.sc_params.atlas_size) continue;
             float3 albedo = albedo_atlas.read(texel).rgb;
-            indirect_out.write(float4(indirect * albedo, 1.0), texel);
+            float3 current = indirect * albedo;
+            if (hasHistory && tw > 0.0f) {
+                float3 prev = prev_indirect_out.read(texel).rgb;
+                current = mix(current, prev, tw);
+            }
+            indirect_out.write(float4(current, 1.0), texel);
         }
     }
 }

@@ -80,7 +80,7 @@ layout(set = 0, binding = 5, std140) uniform DDGIVolumeData {
     uint  ProbeUpdateCount;         //  84
     uint  SCLookupCount;            //  88  (Surface Cache card lookup count)
     uint  SCAtlasSize;              //  92  (Surface Cache lighting atlas size)
-    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftX;    //  96  RESERVED (D5/F4): never read —
     int   ProbeRelocationShiftY;    // 100
     int   ProbeRelocationShiftZ;    // 104
     int   RaySampleMode;            // 108 — ray sampler mode (ProbeSampleLib), fills the old padding slot
@@ -520,7 +520,7 @@ void ddgi_trace_rays() {
     // and gathers stay grid-indexed — only the tracing origin moves.
     probePos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing);
 
-    vec3 toLight = normalize(-volume.LightDirection.xyz);
+    vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
     vec3 rayDir = ddgiSampleRayDirection(localRayIdx, volume.RaysPerProbe,
                                          volume.FrameIndex,
                                          uint(volume.RaySampleMode), toLight).xyz;
@@ -539,7 +539,7 @@ void ddgi_trace_rays() {
         const float PI_VAL = 3.14159265358979;
 
         // Direct light at hit point (directional light + NdotL).
-        vec3 L = normalize(-volume.LightDirection.xyz);
+        vec3 L = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
         float NdotL = max(0.0, dot(N, L));
         vec3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
 

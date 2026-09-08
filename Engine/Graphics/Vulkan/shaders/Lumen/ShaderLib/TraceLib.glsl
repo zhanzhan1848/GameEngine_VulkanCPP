@@ -251,3 +251,46 @@ bool traceRayHZB(texture2D hzb, vec2 origin_uv, vec3 ray_origin_view,
 }
 
 #endif // LUMEN_TRACE_LIB_GLSL
+
+// ----------------------------------------------------------------------------
+// T3.2 (D7): cone-width-aware cascade sampling primitives (project convention:
+// samplerless textures + texelFetch manual trilinear — R32F is not filterable).
+// mipTex = ONE texture from the cascade's standalone min-mip chain
+// (DispatchMipChain); textureSize gives that level's dimensions.
+// sampleSDFCascadeMip  — trilinear within one mip level (conservative MIN data).
+// coneMipFrac          — footprint/voxelSize → (level, frac) for interpolation
+//                        across two adjacent standalone mips.
+// Both return LOWER-bound distances; cone hit tests are conservative.
+// ----------------------------------------------------------------------------
+float sampleSDFCascadeMip(texture3D mipTex, vec3 worldPos,
+                          vec3 cascadeOrigin, vec3 cascadeExtent) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) return 1e10;
+    ivec3 size = textureSize(mipTex, 0);
+    vec3 p = clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size) - 0.5;
+    ivec3 base = ivec3(floor(p));
+    vec3 f = p - vec3(base);
+    ivec3 c0 = clamp(base, ivec3(0), size - ivec3(1));
+    ivec3 c1 = clamp(base + ivec3(1), ivec3(0), size - ivec3(1));
+    float d000 = texelFetch(mipTex, ivec3(c0.x, c0.y, c0.z), 0).r;
+    float d100 = texelFetch(mipTex, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float d010 = texelFetch(mipTex, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float d110 = texelFetch(mipTex, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float d001 = texelFetch(mipTex, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float d101 = texelFetch(mipTex, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float d011 = texelFetch(mipTex, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float d111 = texelFetch(mipTex, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+
+// footprint → (level, frac): level k holds resolution >> (k+1); level k's
+// voxel size is voxelSize << (k+1). Consume as:
+//   d = mix(sampleSDFCascadeMip(mips[k], ...), sampleSDFCascadeMip(mips[k+1], ...), frac)
+vec2 coneMipFrac(float footprint, float voxelSize, uint maxMip) {
+    float t = clamp(log2(max(footprint / (voxelSize * 2.0), 1.0)), 0.0, float(maxMip) - 1.0);
+    float level = floor(t);
+    return vec2(level, t - level);
+}

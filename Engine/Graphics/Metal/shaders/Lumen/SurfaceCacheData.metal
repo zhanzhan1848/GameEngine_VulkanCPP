@@ -74,6 +74,9 @@ struct FlattenedLightingParams {
     // this field kept reading the first 64B.
     float4 ddgi_origin_spacing;    // xyz origin, w spacing
     uint4  ddgi_counts_valid;      // xyz counts, w valid flag
+    // T3.3: SC Radiosity gate (x = on) — indirect_out contains valid data
+    // only when SC_INDIRECT=1 dispatched the trace/resolve this session.
+    uint4  radiosity_gate;         // x = indirect_radiosity_on, yzw reserved
 };
 
 // Reconstruct world position from card atlas UV + depth
@@ -131,7 +134,7 @@ static bool worldToCardUV(
         v = (local.y / (card.extent.y * 2.0)) + 0.5;
     }
 
-    if (depth < 0.0 || u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return false;
+    if (depth < 0.0 || u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) return false;   // C6: u/v==1.0 bleeds into the next card
 
     out_uv.x = float(card.atlas_offset_x) + u * float(card.resolution);
     out_uv.y = float(card.atlas_offset_y) + v * float(card.resolution);
@@ -152,7 +155,8 @@ static float3 octDecode(float2 f) {
     f = f * 2.0 - 1.0;
     float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
     float t = clamp(-n.z, 0.0, 1.0);
-    n.xy += select(float2(-t), float2(t), n.xy >= 0.0);
+    // Inverse of the replace-fold in octEncode: n.xy >= 0 subtracts t, else adds.
+    n.xy += select(float2(t), float2(-t), n.xy >= 0.0);
     return normalize(n);
 }
 
@@ -220,7 +224,7 @@ static bool worldToCardUVDevice(float3 world_pos,
         v = (local.y / (card.extent.y * 2.0)) + 0.5;
     }
 
-    if (depth < 0.0 || u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return false;
+    if (depth < 0.0 || u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) return false;   // C6: u/v==1.0 bleeds into the next card
 
     out_uv.x = float(card.atlas_offset_x) + u * float(card.resolution);
     out_uv.y = float(card.atlas_offset_y) + v * float(card.resolution);

@@ -111,7 +111,10 @@ kernel void screen_probe_temporal(
                     if (hPos.w <= 0.0f) continue;
                     if (distance(curPos.xyz, hPos.xyz) > params.posThreshold) continue;
                     float4 hNorm = historyNormals[hIdx];
+                    // C7: a zero normal (never-written probe) must not
+                    // normalize() to NaN and fail the gate for valid neighbours.
                     if (hNorm.w > 0.0f && curNorm.w > 0.0f &&
+                        dot(curNorm.xyz, curNorm.xyz) > 1e-8f && dot(hNorm.xyz, hNorm.xyz) > 1e-8f &&
                         dot(normalize(curNorm.xyz), normalize(hNorm.xyz)) < params.normalThreshold) continue;
                     uint hb = hIdx * 4u;
                     if (historySH[hb].w <= 0.0f) continue;

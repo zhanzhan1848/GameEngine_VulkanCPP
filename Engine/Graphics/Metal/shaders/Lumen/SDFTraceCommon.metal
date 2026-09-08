@@ -102,6 +102,7 @@ static SDFHitResult traceSDF_relaxed(
     float hitThreshold = finestVoxelSize * SDF_HIT_THRESHOLD_FACTOR;
     float minStep = finestVoxelSize * SDF_MIN_STEP_FACTOR;
     float t = 0.0f;
+    float prevD = 3.4e38f;   // B13: distance trend across steps
 
     for (uint step = 0; step < SDF_MAX_STEPS; ++step) {
         float3 pos = rayOrigin + rayDir * t;
@@ -127,13 +128,17 @@ static SDFHitResult traceSDF_relaxed(
             break;
         }
 
-        // Relaxed sphere tracing: overstep when far, conservative when close
+        // Relaxed sphere tracing: overstep when far, conservative when close.
+        // B13: only over-relax while the field is NOT shrinking — an ω step
+        // onto a thin wall (thickness < ~2.5 voxels) lands past it and the
+        // unsigned field never reports the crossing.
         float advance;
-        if (d > hitThreshold * SDF_RELAXATION_GUARD) {
+        if (d > hitThreshold * SDF_RELAXATION_GUARD && d >= prevD) {
             advance = d * SDF_RELAXATION_OMEGA;
         } else {
             advance = max(d, minStep);
         }
+        prevD = d;
         t += advance;
         if (t > maxDist) break;
     }
@@ -142,3 +147,43 @@ static SDFHitResult traceSDF_relaxed(
 }
 
 #endif // SDF_TRACE_COMMON_METAL
+
+// ============================================================================
+// T3.2 (D7): cone-width-aware cascade sampling primitives (Vulkan twin in
+// ShaderLib/TraceLib.glsl). Project convention: texel-read manual trilinear
+// (R32F is not filterable). mipTex = ONE texture from the cascade's
+// standalone min-mip chain (DispatchMipChain); get_width() gives its dims.
+// sampleSDFCascadeMip — trilinear within one mip level (conservative MIN).
+// coneMipFrac         — footprint/voxelSize → (level, frac) across two mips.
+// Both return LOWER-bound distances; cone hit tests are conservative.
+// ============================================================================
+static float sampleSDFCascadeMip(texture3d<float, access::read> mipTex,
+                                 float3 worldPos,
+                                 float3 cascadeOrigin, float3 cascadeExtent) {
+    float3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0f || uvw.x > 1.0f ||
+        uvw.y < 0.0f || uvw.y > 1.0f ||
+        uvw.z < 0.0f || uvw.z > 1.0f) return 1e10f;
+    uint3 size = uint3(mipTex.get_width(), mipTex.get_height(), mipTex.get_depth());
+    float3 p = clamp(uvw, float3(0.0f), float3(1.0f)) * float3(size) - 0.5f;
+    uint3 base = uint3(clamp(floor(p), float3(0.0f), float3(size) - 1.0f));
+    float3 f = fract(p);
+    uint3 c1 = min(base + 1u, size - 1u);
+    float d000 = mipTex.read(uint3(base.x, base.y, base.z)).r;
+    float d100 = mipTex.read(uint3(c1.x,  base.y, base.z)).r;
+    float d010 = mipTex.read(uint3(base.x, c1.y,  base.z)).r;
+    float d110 = mipTex.read(uint3(c1.x,  c1.y,  base.z)).r;
+    float d001 = mipTex.read(uint3(base.x, base.y, c1.z)).r;
+    float d101 = mipTex.read(uint3(c1.x,  base.y, c1.z)).r;
+    float d011 = mipTex.read(uint3(base.x, c1.y,  c1.z)).r;
+    float d111 = mipTex.read(uint3(c1.x,  c1.y,  c1.z)).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+
+// footprint → (level, frac) — see Vulkan twin.
+static float2 coneMipFrac(float footprint, float voxelSize, uint maxMip) {
+    float t = clamp(log2(max(footprint / (voxelSize * 2.0f), 1.0f)), 0.0f, float(maxMip) - 1.0f);
+    float level = floor(t);
+    return float2(level, t - level);
+}

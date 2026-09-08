@@ -63,7 +63,10 @@ struct DDGIVolumeData {
 
     uint     SCLookupCount;           //  88 — Surface Cache card lookup count
     uint     SCAtlasSize;             //  92 — Surface Cache lighting atlas size
-    int      ProbeRelocationShift[3]; //  96: grid shift in probe cells
+    int      ProbeRelocationShift[3]; //  96: RESERVED, never read (D5/F4) —
+                                      // probe-grid relocation is absorbed by
+                                      // ProbeOrigin directly; removing the field
+                                      // would shift later UBO members.
     // T8.13 sync: probe ray sampler mode (Vulkan UBO offset 108). 0 = legacy
     // fixed spiral, 1 = per-frame golden-angle jitter, 2 = cosine mixture.
     // Semantics: ProbeSampleLib (ddgiSampleRayDirection below).

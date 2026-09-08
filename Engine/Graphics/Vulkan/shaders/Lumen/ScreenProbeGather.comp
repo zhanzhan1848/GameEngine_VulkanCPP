@@ -64,6 +64,14 @@ layout(set = 0, binding = 6, std430) readonly buffer ProbeNormalsBlock {
 //   Y3 = 0.488603 * d.x
 // Average stores SH coefficients C_i such that E(N) = sum C_i * Y_i(N).
 // --------------------------------------------------------------------------------
+// B1/B4: per-band radiance→irradiance (A0=π, A1=2π/3) — see Metal twin.
+vec3 evalSHIrradiance(vec3 sh0, vec3 sh1, vec3 sh2, vec3 sh3, vec3 N) {
+    return sh0 * (0.282095 * 3.14159265)
+         + sh1 * (-0.488603 * 2.09439510 * N.y)
+         + sh2 * ( 0.488603 * 2.09439510 * N.z)
+         + sh3 * (-0.488603 * 2.09439510 * N.x);
+}
+
 vec3 evalSH(vec3 sh0, vec3 sh1, vec3 sh2, vec3 sh3, vec3 N) {
     return sh0 * 0.282095
          + sh1 * (0.488603 * N.y)
@@ -180,7 +188,7 @@ void screen_probe_gather() {
         vec3 sh3 = probeSH.data[shBase + 3u].rgb;
 
         // Proper SH evaluation at the pixel's surface normal.
-        vec3 irr = evalSH(sh0, sh1, sh2, sh3, surfaceNormal);
+        vec3 irr = evalSHIrradiance(sh0, sh1, sh2, sh3, surfaceNormal);   // B1
         irr = max(irr, vec3(0.0));
 
         float baseWeight = spatialW[i] * sh0w;

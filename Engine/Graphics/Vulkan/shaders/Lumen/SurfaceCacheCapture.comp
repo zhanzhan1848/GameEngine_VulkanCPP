@@ -24,6 +24,12 @@
 //   7 = readonly buffer    SurfaceCacheCard cards[] (std430)
 //   8 = readonly buffer    uint sc_grid_offsets[] (64B header + prefix sums)
 //   9 = readonly buffer    uint sc_grid_cards[] (concatenated card indices)
+//  10 = readwrite buffer   uint capture_depth_min[] (A7 nearest-depth scratch)
+//
+// Entry points (three-dispatch A7 nearest-wins capture):
+//   surface_cache_capture_clear  — zero the depth scratch (atlas-sized 2D)
+//   surface_cache_capture        — phase A: atomicMin per card texel
+//   surface_cache_capture_write  — phase B: store atlas texels at min depth
 
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
@@ -45,7 +51,7 @@ layout(set = 0, binding = 6, std140) uniform CaptureParams {
     uint  card_count;          // offset 64
     uint  render_width;        // offset 68
     uint  render_height;       // offset 72
-    uint  _pad;                // offset 76  (total 80)
+    uint  atlas_size;          // offset 76  (total 80) — A7: scratch texel stride
 } cp;
 
 layout(set = 0, binding = 7, std430) readonly buffer CardBuf {
@@ -59,6 +65,13 @@ layout(set = 0, binding = 8, std430) readonly buffer SCGridOffsetsBuf {
 layout(set = 0, binding = 9, std430) readonly buffer SCGridCardsBuf {
     uint sc_grid_cards[];
 } scgc;
+
+// A7: per-card-texel nearest depth scratch (u32 = floatBitsToUint(axisDepth)).
+// Phase A atomicMins candidates; phase B writes atlas texels whose depth
+// matches the minimum — far surfaces can no longer overwrite near ones.
+layout(set = 0, binding = 10, std430) buffer CaptureDepthMinBuf {
+    uint capture_depth_min[];
+} cdm;
 
 // Project world position into a card's atlas frame. Also outputs the depth
 // along the card axis (same switch as worldToCardUV in SurfaceCacheData.glsl,
@@ -84,12 +97,61 @@ bool projectToCard(vec3 worldPos, SurfaceCacheCard card, out vec2 out_uv, out fl
         v = (local.y / (card.extent.y * 2.0)) + 0.5;
     }
 
-    if (depth < 0.0 || u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return false;
+    if (depth < 0.0 || u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) return false;   // C6: u/v==1.0 bleeds into the next card
 
     out_uv = vec2(float(card.atlas_offset_x) + u * float(card.resolution),
                   float(card.atlas_offset_y) + v * float(card.resolution));
     out_depth = depth;
     return true;
+}
+
+// A7 clear entry: (atlas_size/8)² groups of (8,8) threads — same local size as
+// the min/write phases so one local_size declaration covers all entries.
+// Resets the depth scratch to 0xFFFFFFFF (u32 pattern of a huge float) before
+// the min phase runs.
+void surface_cache_capture_clear() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= int(cp.atlas_size) || texel.y >= int(cp.atlas_size)) return;
+    cdm.capture_depth_min[texel.y * cp.atlas_size + texel.x] = 0xFFFFFFFFu;
+}
+
+// Shared per-pixel candidate walk for the min/write phases.
+// Phase A (min):   atomicMin the scratch with this sample's axis depth.
+// Phase B (write): store albedo/normal/depth only where this sample's depth
+//                  equals the per-texel minimum. Ties (equal depth) may write
+//                  twice — same surface, benign.
+bool surfaceCacheScatter(vec3 worldPos, vec3 albedo, vec2 encN, bool writePhase) {
+    uvec4 gh0 = uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
+                      scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]);
+    uvec4 gh1 = uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
+                      scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]);
+    uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
+                      scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
+    SCGridParams gp = scGridDecode(gh0, gh1, gh2);
+    uint cell = scGridCellIndex(gp, worldPos);
+    if (cell == 0xFFFFFFFFu) return false;
+    bool wrote = false;
+    uint begin = scgo.sc_grid_offsets[16u + cell];
+    uint end   = scgo.sc_grid_offsets[17u + cell];
+    for (uint gi = begin; gi < end; ++gi) {
+        SurfaceCacheCard card = cb.cards[scgc.sc_grid_cards[gi]];
+        vec2 atlasUV;
+        float axisDepth;
+        if (projectToCard(worldPos, card, atlasUV, axisDepth)) {
+            ivec2 texel = ivec2(atlasUV);
+            uint texelIdx = uint(texel.y) * cp.atlas_size + uint(texel.x);
+            if (!writePhase) {
+                atomicMin(cdm.capture_depth_min[texelIdx],
+                          floatBitsToUint(axisDepth));
+            } else if (cdm.capture_depth_min[texelIdx] == floatBitsToUint(axisDepth)) {
+                imageStore(albedo_atlas, texel, vec4(albedo, 1.0));
+                imageStore(normal_atlas, texel, vec4(encN, 0.0, 1.0));
+                imageStore(depth_atlas,  texel, vec4(axisDepth, 0.0, 0.0, 1.0));
+                wrote = true;
+            }
+        }
+    }
+    return wrote;
 }
 
 void surface_cache_capture() {
@@ -105,36 +167,27 @@ void surface_cache_capture() {
     vec4 worldPosH = cp.invViewProjection * vec4(ndc, depth, 1.0);
     vec3 worldPos = worldPosH.xyz / worldPosH.w;
 
+    // Phase A: nearest-depth only (albedo/normal fetched in the write phase).
+    surfaceCacheScatter(worldPos, vec3(0.0), vec2(0.0), false);
+}
+
+// A7 write entry: (8,8,1) over render resolution — same shape as the min phase.
+void surface_cache_capture_write() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(cp.render_width) || pixel.y >= int(cp.render_height)) return;
+
+    float depth = texelFetch(gbuffer_depth, pixel, 0).r;
+    if (depth >= 1.0) return;  // sky
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(cp.render_width, cp.render_height);
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec4 worldPosH = cp.invViewProjection * vec4(ndc, depth, 1.0);
+    vec3 worldPos = worldPosH.xyz / worldPosH.w;
+
     vec3 albedo = texelFetch(gbuffer_albedo, pixel, 0).rgb;
     vec3 n = texelFetch(gbuffer_normal, pixel, 0).xyz;
     n = normalize(n * 2.0 - 1.0);
     vec2 encN = octEncode(n);
 
-    // Scatter into every card whose ortho frame contains this point.
-    // T1.3: uniform grid narrows the candidate set from a linear scan over
-    // min(card_count, 24) cards to the ≤kMaxCardsPerGridCell entries of the
-    // world-position's cell (worldToCardUV stays the precise containment test).
-    uvec4 gh0 = uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
-                      scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]);
-    uvec4 gh1 = uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
-                      scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]);
-    uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
-                      scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
-    SCGridParams gp = scGridDecode(gh0, gh1, gh2);
-    uint cell = scGridCellIndex(gp, worldPos);
-    if (cell != 0xFFFFFFFFu) {
-        uint begin = scgo.sc_grid_offsets[16u + cell];
-        uint end   = scgo.sc_grid_offsets[17u + cell];
-        for (uint gi = begin; gi < end; ++gi) {
-            SurfaceCacheCard card = cb.cards[scgc.sc_grid_cards[gi]];
-            vec2 atlasUV;
-            float axisDepth;
-            if (projectToCard(worldPos, card, atlasUV, axisDepth)) {
-                ivec2 texel = ivec2(atlasUV);
-                imageStore(albedo_atlas, texel, vec4(albedo, 1.0));
-                imageStore(normal_atlas, texel, vec4(encN, 0.0, 1.0));
-                imageStore(depth_atlas,  texel, vec4(axisDepth, 0.0, 0.0, 1.0));
-            }
-        }
-    }
+    surfaceCacheScatter(worldPos, albedo, encN, true);
 }

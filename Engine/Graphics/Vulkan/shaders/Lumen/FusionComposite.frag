@@ -65,7 +65,10 @@ void fusion_composite() {
     // Beer-Lambert: attenuate scene by transmittance, add scattered light.
     // Output HDR linear — tonemap is handled by FinalBlit (Blit.frag) to avoid
     // double tonemap (which caused black patches in indirect-lit areas).
-    vec3 result = (scene + indirect + reflection) * vol.a + vol.rgb;
+    // B10: (1-F)·(1-metallic) on the diffuse indirect — see Metal twin.
+    vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - NoV, 5.0);
+    float kD = 1.0 - metallic;
+    vec3 result = (scene + indirect * kD * (vec3(1.0) - F) + reflection) * vol.a + vol.rgb;
     result = clamp(result, vec3(0.0), vec3(64.0));
 
     outColor = vec4(result, 1.0);

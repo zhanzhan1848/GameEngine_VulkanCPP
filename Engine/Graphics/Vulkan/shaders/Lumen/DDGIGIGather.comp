@@ -646,14 +646,14 @@ void ddgi_gi_gather() {
                     // The previous Vulkan N-volume path swapped coefficients
                     // 6/7 and omitted four signs, cancelling directional GI.
                     vec3 irr = sh[0] * SH_C0
-                             + sh[1] * (-SH_C1 * ny)
-                             + sh[2] * ( SH_C1 * nz)
-                             + sh[3] * (-SH_C1 * nx)
-                             + sh[4] * ( SH_C2_0 * nxy)
-                             + sh[5] * (-SH_C2_0 * nyz)
-                             + sh[6] * ( SH_C2_1 * (3.0*nzz - 1.0))
-                             + sh[7] * (-SH_C2_0 * nzx)
-                             + sh[8] * (SH_C2_2 * (nxx - nyy));
+                             + sh[1] * (-SH_C1 * 0.6666667 * ny)   // B4: A1 = 2π/3 (÷π ⇒ ×2/3)
+                             + sh[2] * ( SH_C1 * 0.6666667 * nz)
+                             + sh[3] * (-SH_C1 * 0.6666667 * nx)
+                             + sh[4] * ( SH_C2_0 * 0.25 * nxy)   // B4: A2 = π/4 (÷π ⇒ ×1/4)
+                             + sh[5] * (-SH_C2_0 * 0.25 * nyz)
+                             + sh[6] * ( SH_C2_1 * 0.25 * (3.0*nzz - 1.0))
+                             + sh[7] * (-SH_C2_0 * 0.25 * nzx)
+                             + sh[8] * (SH_C2_2 * 0.25 * (nxx - nyy));
 
                     float w = tw[p];
                     // Buried-probe gate for the low-frequency average (near
@@ -837,14 +837,14 @@ void ddgi_gi_gather() {
                     // the C2_1 zonal term (the old form swapped 6/7 and
                     // dropped four signs, cancelling directional GI).
                     vec3 irr = sh[0] * SH_C0
-                             + sh[1] * (-SH_C1 * ny)
-                             + sh[2] * ( SH_C1 * nz)
-                             + sh[3] * (-SH_C1 * nx)
-                             + sh[4] * ( SH_C2_0 * nxy)
-                             + sh[5] * (-SH_C2_0 * nyz)
-                             + sh[6] * ( SH_C2_1 * (3.0*nzz - 1.0))
-                             + sh[7] * (-SH_C2_0 * nzx)
-                             + sh[8] * ( SH_C2_2 * (nxx - nyy));
+                             + sh[1] * (-SH_C1 * 0.6666667 * ny)   // B4: A1 = 2π/3 (÷π ⇒ ×2/3)
+                             + sh[2] * ( SH_C1 * 0.6666667 * nz)
+                             + sh[3] * (-SH_C1 * 0.6666667 * nx)
+                             + sh[4] * ( SH_C2_0 * 0.25 * nxy)   // B4: A2 = π/4
+                             + sh[5] * (-SH_C2_0 * 0.25 * nyz)
+                             + sh[6] * ( SH_C2_1 * 0.25 * (3.0*nzz - 1.0))
+                             + sh[7] * (-SH_C2_0 * 0.25 * nzx)
+                             + sh[8] * ( SH_C2_2 * 0.25 * (nxx - nyy));
                     fresult += irr * ftw[p];
                     ftotalW += ftw[p];
                 }
@@ -928,14 +928,14 @@ void ddgi_gi_gather() {
                 sh[i] = irradianceBuffer[pIdx * 9u + uint(i)].xyz;
             // SH9 reconstruction — canonical basis, see far-path note above.
             vec3 irr = sh[0] * SH_C0
-                     + sh[1] * (-SH_C1 * ny)
-                     + sh[2] * ( SH_C1 * nz)
-                     + sh[3] * (-SH_C1 * nx)
-                     + sh[4] * ( SH_C2_0 * nxy)
-                     + sh[5] * (-SH_C2_0 * nyz)
-                     + sh[6] * ( SH_C2_1 * (3.0*nzz - 1.0))
-                     + sh[7] * (-SH_C2_0 * nzx)
-                     + sh[8] * ( SH_C2_2 * (nxx - nyy));
+                     + sh[1] * (-SH_C1 * 0.6666667 * ny)   // B4: A1 = 2π/3 (÷π ⇒ ×2/3)
+                     + sh[2] * ( SH_C1 * 0.6666667 * nz)
+                     + sh[3] * (-SH_C1 * 0.6666667 * nx)
+                     + sh[4] * ( SH_C2_0 * 0.25 * nxy)   // B4: A2 = π/4
+                     + sh[5] * (-SH_C2_0 * 0.25 * nyz)
+                     + sh[6] * ( SH_C2_1 * 0.25 * (3.0*nzz - 1.0))
+                     + sh[7] * (-SH_C2_0 * 0.25 * nzx)
+                     + sh[8] * ( SH_C2_2 * 0.25 * (nxx - nyy));
             result += irr * tw[p];
             totalW += tw[p];
 

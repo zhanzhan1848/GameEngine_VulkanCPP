@@ -158,11 +158,14 @@ void ddgi_update_irradiance() {
             // Gentler distance falloff — only attenuate near max distance
             float distWeight = 1.0 - smoothstep(volume.RayMaxDistance * 0.8, volume.RayMaxDistance, hitDist);
             radiance = radiance * max(distWeight, 0.2);
+            // T3.4 (D4): irradiance bailing — see Metal twin.
+            float bail = smoothstep(0.0, volume.SdfVoxelSizes[0].x * 2.0, hitDist);
+            radiance = radiance * bail;
         }
 
         // Same sampler the trace side used for this ray index — the projection
         // must reproduce the exact direction the radiance came from.
-        vec3 toLight = normalize(-volume.LightDirection.xyz);
+        vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
         vec4 raySample = ddgiSampleRayDirection(r, volume.RaysPerProbe,
                                                 volume.FrameIndex,
                                                 uint(volume.RaySampleMode), toLight);
@@ -221,8 +224,9 @@ void ddgi_update_irradiance() {
     // 2026-09-05 对齐 Metal 修复：上限随未钳位 sh0 无界放大时，prev-screen
     // 辐射尖峰同步抬高 l1/l2 上限（Metal 实测 L1=1661=3×553.6），钳位失效。
     // L0 本身有 10 上界 → L1/L2 上限随之封顶（30/20）。
-    float l1Limit = max(min(length(sh0) * 3.0, 30.0), 0.1);
-    float l2Limit = max(min(length(sh0) * 2.0, 20.0), 0.05);
+    // T2.4 (B7): rescale 30/20 → 192/128 (see Metal twin).
+    float l1Limit = max(min(length(sh0) * 3.0, 192.0), 0.1);
+    float l2Limit = max(min(length(sh0) * 2.0, 128.0), 0.05);
 
     for (uint i = 0u; i < 9u; i++) {
         vec3 history = irradiance_history[probeBase + i].xyz;
@@ -231,7 +235,7 @@ void ddgi_update_irradiance() {
         // Energy-aware clamp
         if (i == 0u) {
             float mag = length(filtered);
-            if (mag > 10.0) filtered = filtered * (10.0 / mag);
+            if (mag > 64.0) filtered = filtered * (64.0 / mag);   // T2.4 (B7): was 10.0
         } else if (i < 4u) {
             float mag = length(filtered);
             if (mag > l1Limit) filtered = filtered * (l1Limit / mag);

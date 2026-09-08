@@ -129,9 +129,12 @@ void fusion_indirect() {
     // that should be darker than the outer colonnade stay bright). SSAO keys
     // the floor down to ~half in crevices while open bounce areas keep it.
     // 2026-09-06 UE 参考对齐：跟随 Metal 减半档（0.17 → 0.085）。
-    gi += vec3(0.11, 0.115, 0.13) * mix(0.30, 1.0, pow(ssao, 1.1));
+    gi += vec3(0.11, 0.115, 0.13) * ao;   // B9: far-field floor keeps AO (its only visibility cue)
 
-    vec3 indirect = albedo * gi;
-    indirect *= ao;
+    // B3: indirect follows the direct chain's Lambert law (albedo/π·E).
+    // B9: the full-stack `indirect *= ao` is removed — GTAO double-occluded
+    // the near-field GI (probe visibility already attenuates it) while the
+    // far-field floor above keeps its AO modulation (its only visibility cue).
+    vec3 indirect = albedo * gi * 0.31830988;
     outColor = vec4(indirect, 1.0);
 }

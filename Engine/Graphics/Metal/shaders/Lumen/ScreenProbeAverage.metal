@@ -164,7 +164,8 @@ kernel void screen_probe_average(
     threadgroup float  sharedWeight[AVG_TG_SIZE];   // cosTheta sum
     threadgroup float  sharedLum[AVG_TG_SIZE];      // luminance sum for variance
     threadgroup float  sharedLumSq[AVG_TG_SIZE];    // luminance² sum for variance
-    threadgroup float  sharedHit[AVG_TG_SIZE];      // 1.0 if hit, 0.0 if miss
+    threadgroup float  sharedHit[AVG_TG_SIZE];      // 1.0 if geometry hit, 0.0 if miss/inactive (B5)
+    threadgroup float  sharedActive[AVG_TG_SIZE];   // 1.0 if the lane carries a ray (B5: variance divisor)
 
     // Each thread reads exactly 1 ray
     uint rayIdx = group_id * constants.raysPerProbe + tid;
@@ -172,7 +173,10 @@ kernel void screen_probe_average(
     float4 rayData = float4(0.0f, 0.0f, 0.0f, -1.0f);
     if (tid < constants.raysPerProbe) rayData = rayRadiance[rayIdx];
 
-    if (rayData.w >= 0.0f) {
+    // B5: sign encodes geometry hit (positive) vs miss→sky / inactive
+    // (≤ 0). Integration uses the magnitude — sky fallback radiance still
+    // contributes — but the hit count requires w > 0.
+    if (rayData.w != 0.0f) {
         // Hit: clamp radiance at source to prevent firefly propagation
         constexpr float MAX_RAY_RADIANCE = 5.0f;
         float rayLum = dot(rayData.rgb, float3(0.2126f, 0.7152f, 0.0722f));
@@ -204,18 +208,26 @@ kernel void screen_probe_average(
 
         float4 Y = shBasis(rayDir);
 
-        float3 weightedRadiance = rayData.rgb * rayData.w;
+        float rayWeight = abs(rayData.w);   // B5: sign is a flag, not a weight
+        // B1: mode 0 uses the RADIANCE-SH projection (4π/N)·Σ rayL·Y —
+        // identical to DDGI's projection, so both probe fields become the
+        // same object and Fusion's brightness comparison is meaningful.
+        // The cosθ-weighted form was an irradiance projection evaluated as
+        // radiance (the B1 2π mismatch). Importance mode keeps its weights.
+        float projWeight = (constants.isMode > 0.5f) ? rayWeight : 1.0f;
+        float3 weightedRadiance = rayData.rgb * projWeight;
         sharedSH[0][tid] = weightedRadiance * Y.x;
         sharedSH[1][tid] = weightedRadiance * Y.y;
         sharedSH[2][tid] = weightedRadiance * Y.z;
         sharedSH[3][tid] = weightedRadiance * Y.w;
-        sharedWeight[tid] = rayData.w;
+        sharedWeight[tid] = rayWeight;
+        sharedHit[tid] = (rayData.w > 0.0f) ? 1.0f : 0.0f;
+        sharedActive[tid] = 1.0f;
 
         // Luminance for variance computation
         float lum = dot(rayData.rgb, float3(0.2126f, 0.7152f, 0.0722f));
         sharedLum[tid] = lum;
         sharedLumSq[tid] = lum * lum;
-        sharedHit[tid] = 1.0f;
     } else {
         // Miss: contribute nothing
         sharedSH[0][tid] = float3(0.0f);
@@ -226,6 +238,7 @@ kernel void screen_probe_average(
         sharedLum[tid] = 0.0f;
         sharedLumSq[tid] = 0.0f;
         sharedHit[tid] = 0.0f;
+        sharedActive[tid] = 0.0f;
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -241,6 +254,7 @@ kernel void screen_probe_average(
             sharedLum[tid]    += sharedLum[tid + stride];
             sharedLumSq[tid]  += sharedLumSq[tid + stride];
             sharedHit[tid]    += sharedHit[tid + stride];
+            sharedActive[tid] += sharedActive[tid + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -254,18 +268,26 @@ kernel void screen_probe_average(
         if (totalWeight > 0.0f && hitCount > 0.0f) {
             float invWeight = 1.0f / totalWeight;
 
-            // The reduced coefficients are cosine-weighted hemispherical
-            // expectations. Convert to the normalization expected by the
-            // standard SH evaluator (L0 * 2pi, L1 * pi).
-            constexpr float L0_HEMISPHERE_SCALE = 6.28318530718f; /* MSL: no constant-address locals */
-            constexpr float L1_HEMISPHERE_SCALE = 3.14159265359f;
+            // B1: mode 0 — radiance-SH projection, gather applies per-band
+            // A_l (π, 2π/3) at evaluation. Importance mode keeps the legacy
+            // ratio estimator (2·C0 / C1, from B2).
+            constexpr float FOUR_PI = 12.566370614f;
+            constexpr float L0_HEMISPHERE_SCALE = 0.56418958f;  // 2 × 0.28209479
+            constexpr float L1_HEMISPHERE_SCALE = 0.48860251f;  // C1
+            const bool importanceMode = (constants.isMode > 0.5f);
+            const float sumScale = importanceMode
+                ? invWeight
+                : (FOUR_PI / float(constants.raysPerProbe));
+            const float l0Scale = importanceMode ? L0_HEMISPHERE_SCALE : 1.0f;
+            const float l1Scale = importanceMode ? L1_HEMISPHERE_SCALE : 1.0f;
 
             // Hit ratio: how many rays hit geometry
             float hitRatio = hitCount / float(constants.raysPerProbe);
 
             // Radiance variance: Var(X) = E[X²] - E[X]²
-            float avgLum = sharedLum[0] / hitCount;
-            float avgLumSq = sharedLumSq[0] / hitCount;
+            const float activeCount = sharedActive[0];
+            float avgLum = (activeCount > 0.0f) ? (sharedLum[0] / activeCount) : 0.0f;
+            float avgLumSq = (activeCount > 0.0f) ? (sharedLumSq[0] / activeCount) : 0.0f;
             float lumVariance = max(avgLumSq - avgLum * avgLum, 0.0f);
 
             // Radiance consistency: low variance → high consistency
@@ -275,10 +297,10 @@ kernel void screen_probe_average(
             // Multi-factor confidence
             float confidence = hitRatio * radianceConsistency;
 
-            probeSHOut[base + 0] = float4(sharedSH[0][0] * invWeight * L0_HEMISPHERE_SCALE, confidence);
-            probeSHOut[base + 1] = float4(sharedSH[1][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0f);
-            probeSHOut[base + 2] = float4(sharedSH[2][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0f);
-            probeSHOut[base + 3] = float4(sharedSH[3][0] * invWeight * L1_HEMISPHERE_SCALE, 1.0f);
+            probeSHOut[base + 0] = float4(sharedSH[0][0] * sumScale * l0Scale, confidence);
+            probeSHOut[base + 1] = float4(sharedSH[1][0] * sumScale * l1Scale, 1.0f);
+            probeSHOut[base + 2] = float4(sharedSH[2][0] * sumScale * l1Scale, 1.0f);
+            probeSHOut[base + 3] = float4(sharedSH[3][0] * sumScale * l1Scale, 1.0f);
         } else {
             probeSHOut[base + 0] = float4(0.0f, 0.0f, 0.0f, 0.0f);
             probeSHOut[base + 1] = float4(0.0f, 0.0f, 0.0f, 0.0f);

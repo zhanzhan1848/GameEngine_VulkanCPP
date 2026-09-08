@@ -199,6 +199,13 @@ void screen_probe_trace_finalize() {
                 for (uint gi = begin; gi < end && !usedSurfaceCache; ++gi) {
                     vec2 atlas_uv;
                     if (worldToCardUV(hitPos, cards.data[scgc.sc_grid_cards[gi]], atlas_uv)) {
+                        // C4: half-texel inset (see SurfaceCacheData.glsl note) —
+                        // bilinear at card edges bleeds from shelf neighbours.
+                        const SurfaceCacheCard insetCard = cards.data[scgc.sc_grid_cards[gi]];
+                        atlas_uv = clamp(atlas_uv,
+                            vec2(float(insetCard.atlas_offset_x), float(insetCard.atlas_offset_y)) + 0.5,
+                            vec2(float(insetCard.atlas_offset_x + insetCard.resolution),
+                                 float(insetCard.atlas_offset_y + insetCard.resolution)) - 0.5);
                         vec2 uv_norm = atlas_uv / vec2(atlasSize);
                         vec3 scRadiance = sampleBilinearRGB(surface_cache_lighting, uv_norm);
                         if (dot(scRadiance, scRadiance) > 0.0001) {
@@ -362,5 +369,7 @@ void screen_probe_trace_finalize() {
     }
 
     // w carries the SH-projection weight: cosθ × importance factor (F2).
-    probeRadiance.data[global_id] = vec4(radiance, cosTheta * invNq);
+    // B5: negative w for miss rays (sign is the geometry-hit flag).
+    const bool geoHit = (hit.w == 1.0) || (hit.w == 2.0) || (hit.w == 3.0);
+    probeRadiance.data[global_id] = vec4(radiance, geoHit ? cosTheta * invNq : -cosTheta * invNq);
 }

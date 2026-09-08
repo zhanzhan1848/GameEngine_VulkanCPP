@@ -120,7 +120,9 @@ fn voxelize_sdf(@builtin(global_invocation_id) tid: vec3<u32>) {
 
     let voxel_pos = origin + (vec3<f32>(tid) + 0.5) * voxel_size;
 
-    var min_dist = 1.0e10;
+    // B14: far constant must stay BELOW the tracer's out-of-cascade
+    // sentinel (1e9) — 1e10 aliased with it and sparse regions read as miss.
+    var min_dist = 1.0e6;
 
     for (var inst_idx: u32 = 0u; inst_idx < num_instances; inst_idx++) {
         if (min_dist <= 0.0) { break; }
@@ -140,6 +142,10 @@ fn voxelize_sdf(@builtin(global_invocation_id) tid: vec3<u32>) {
         let cluster_start = inst.meta0.z;
         let cluster_count = inst.meta0.w;
 
+        // B12: meshlet radius is local-space; scale by the instance's max axis
+        // scale so uniformly-scaled instances are not over-culled.
+        let inst_max_scale = max(max(length(inst.world_matrix[0].xyz), length(inst.world_matrix[1].xyz)), length(inst.world_matrix[2].xyz));
+
         for (var c: u32 = 0u; c < cluster_count; c++) {
             let global_cluster_idx = cluster_start + c;
             let cmap = cluster_map[global_cluster_idx];
@@ -150,7 +156,7 @@ fn voxelize_sdf(@builtin(global_invocation_id) tid: vec3<u32>) {
             // Reconstruct meshlet center & radius (RHIMeshlet.h:7-19).
             // center = (cone1.w, cone2.x, cone2.y), radius = cone2.z.
             let meshlet_center = vec3<f32>(meshlet.cone1.w, meshlet.cone2.x, meshlet.cone2.y);
-            let meshlet_radius = meshlet.cone2.z;
+            let meshlet_radius = meshlet.cone2.z * inst_max_scale;
 
             // Transform meshlet center to world space.
             let world_center = inst.world_matrix * vec4<f32>(meshlet_center, 1.0);

@@ -38,7 +38,8 @@ kernel void surfaceCacheLightEval(
     // T8.13 sync: probe-fed indirect — 9 vec4 SH coefficients per probe from
     // the near DDGI volume (previous-frame slot; SC runs before the DDGI
     // update). Dummy-bound when the feed is off (flag-gated in-shader).
-    device const float4*              ddgi_irradiance   [[buffer(6)]])
+    device const float4*              ddgi_irradiance   [[buffer(6)]],
+    texture2d<float, access::read>    indirect_out      [[texture(6)]])   // T3.3 tile radiosity
 {
     if (global_tid >= params.total_texels) return;
 
@@ -194,9 +195,26 @@ kernel void surfaceCacheLightEval(
     // In-volume texels take their bounce from the probes. Outside the probe
     // grid (or with the feed off) the gather is zero, so keep the legacy
     // self-feedback there — otherwise those texels collapse to pure black.
-    float3 result = (direct_light + E_indirect) * albedo.rgb
-                  + (probeFed && probeInVolume ? float3(0.0f)
-                                               : prev_light * albedo.rgb * SC_FEEDBACK)
+    // B3: SI convention — the atlas stores outgoing RADIANCE
+    // L_out = (albedo/π)·E (Lambert). Consumers (probes, gather) already
+    // treat it as radiance; the missing 1/π made every downstream stage π×
+    // bright and forced ad-hoc 0.5× knobs downstream.
+    constexpr float SC_INV_PI = 0.31830989f;
+    // T3.3: SC Radiosity tile probe — the indirect_out grid (trace+resolve,
+    // D10) stores per-tile first-bounce outgoing radiance (already albedo-
+    // weighted). It replaces the legacy self-feedback as the no-probe-feed
+    // bounce source and adds a low-frequency supplement in-probe-volume.
+    float3 tileRadiance = float3(0.0f);
+    if (params.radiosity_gate.x != 0u) {
+        uint2 tiles = uint2(params.sc_params.atlas_size / 16u);
+        uint2 tile = min(uint2(atlas_uv) / 16u, tiles - 1u);
+        tileRadiance = indirect_out.read(tile).rgb;
+    }
+
+    float3 result = (direct_light + E_indirect) * albedo.rgb * SC_INV_PI
+                  + (probeFed && probeInVolume
+                        ? tileRadiance * 0.25f
+                        : tileRadiance + prev_light * albedo.rgb * (SC_FEEDBACK * SC_INV_PI * 0.5f))
                   + emissive;
     result = min(result, float3(64.0f));
 

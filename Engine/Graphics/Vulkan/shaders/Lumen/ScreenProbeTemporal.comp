@@ -140,7 +140,9 @@ void screen_probe_temporal() {
                     // World-space consistency: history must describe this surface.
                     if (distance(curPos.xyz, hPos.xyz) > params.posThreshold) continue;
                     vec4 hNorm = historyNormals.data[hIdx];
+                    // C7: zero-normal guard (see Metal twin).
                     if (hNorm.w > 0.0 && curNorm.w > 0.0 &&
+                        dot(curNorm.xyz, curNorm.xyz) > 1e-8 && dot(hNorm.xyz, hNorm.xyz) > 1e-8 &&
                         dot(normalize(curNorm.xyz), normalize(hNorm.xyz)) < params.normalThreshold) continue;
                     uint hb = hIdx * 4u;
                     if (historySH.data[hb].w <= 0.0) continue;  // invalid history entry

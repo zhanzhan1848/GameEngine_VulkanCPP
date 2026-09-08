@@ -221,7 +221,7 @@ void ddgi_trace_sdf() {
     vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
     // Relocate buried ray origins (see ddgiRelocateProbeOrigin).
     probePos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing);
-    vec3 toLight = normalize(-volume.LightDirection.xyz);
+    vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
     // T8.13 P2: lane-strided ray loop — 64 lanes serve any RaysPerProbe
     // multiple of 64 (128 = two strided rays per lane).
     for (uint rayId = tid; rayId < volume.RaysPerProbe; rayId += 64u) {
@@ -249,6 +249,7 @@ void ddgi_trace_sdf() {
     // reached the sunlit geometry, so their SH only ever accumulated the gray
     // sky constant and shadowed regions stayed flat.
     const uint MAX_SDF_STEPS = 64u;
+    float prevD = 3.4e38;   // B13: distance trend across steps
     for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
         vec3 pos = probePos + rayDir * t;
         float d = sampleBestSDF(pos);
@@ -268,11 +269,13 @@ void ddgi_trace_sdf() {
         // Relaxed advancement: overstep when far, conservative when close.
         // BASELINE (cap off) for T8.10f A/B — bistability requires ≥3 runs.
         float advance;
-        if (d > hitThreshold * 4.0) {
+        // B13: no ω overstep while the field shrinks (thin-wall jump guard).
+        if (d > hitThreshold * 4.0 && d >= prevD) {
             advance = d * 1.5;
         } else {
             advance = max(d, minStep);
         }
+        prevD = d;
         t += advance;
         if (t > volume.RayMaxDistance) { hitDistance = -2.0; break; }
     }

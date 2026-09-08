@@ -74,24 +74,9 @@ vec3 evalSH9(vec3 sh[9], vec3 d) {
 // wins (identical bodies); this guard prevents a duplicate-definition error.
 // Ordering: include SurfaceCacheData.glsl BEFORE EncodeLib.glsl.
 // ----------------------------------------------------------------------------
-#ifndef SURFACE_CACHE_DATA_GLSL
-vec2 octEncode(vec3 n) {
-    float l1norm = abs(n.x) + abs(n.y) + abs(n.z);
-    vec2 result = n.xy / l1norm;
-    if (n.z < 0.0) {
-        result = (1.0 - abs(result.yx)) * mix(vec2(-1.0), vec2(1.0), step(vec2(0.0), result.xy));
-    }
-    return result * 0.5 + 0.5;
-}
-
-vec3 octDecode(vec2 f) {
-    f = f * 2.0 - 1.0;
-    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
-    float t = clamp(-n.z, 0.0, 1.0);
-    n.xy += mix(vec2(-t), vec2(t), step(vec2(0.0), n.xy));
-    return normalize(n);
-}
-#endif // !SURFACE_CACHE_DATA_GLSL
+// T1.10: octEncode/octDecode moved to the canonical MathLib.glsl — this
+// header re-exports them for existing consumers.
+#include "ShaderLib/MathLib.glsl"
 
 // ----------------------------------------------------------------------------
 // Karis analytic split-sum integral (mobile EnvBRDF approximation).

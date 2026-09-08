@@ -29,11 +29,13 @@ layout(set = 0, binding = 1, std140) uniform Cascade {
     uvec4 params;    // xyz = resolution, w = num_instances
 };
 
-// MeshletData — matches RHIMeshlet.h packing.
+// MeshletData — matches RHIMeshlet (RHIMeshAsset.h, sizeof == 64). Packed into
+// four vec4 lanes exactly like the WGSL/Metal versions.
 struct MeshletData {
-    uvec4 header;     // x=vert_offset, y=tri_offset(bytes), z=?, w=tri_count
-    vec4 cone1;       // xyz=cone_dir, w=center_x
-    vec4 cone2;       // x=center_y, y=center_z, z=radius, w=?
+    uvec4 header;     //  0: vertex_offset, triangle_offset(bytes), vertex_count, triangle_count
+    vec4  cone0;      // 16: cone_apex.xyz, cone_axis.x
+    vec4  cone1;      // 32: cone_axis.yz, cone_cutoff, center.x
+    vec4  cone2;      // 48: center.yz, radius, padding
 };
 
 layout(set = 0, binding = 2) readonly buffer VertexPositions { float vertex_positions[]; };
@@ -44,23 +46,23 @@ layout(set = 0, binding = 5) readonly buffer MeshletTriIndices { uint meshlet_tr
 struct ClusterMap { uvec4 data; };
 layout(set = 0, binding = 6) readonly buffer ClusterMapBuf { ClusterMap cluster_map[]; };
 
-// InstanceData — matches RenderSceneSnapshot.h. We only need bounds + matrix.
-// The struct is 192 bytes. world_matrix is at offset 0 (16 floats = 64 bytes).
-// bounds_center is at offset 160 (simd::float3 = 16 bytes aligned).
-// bounds_radius is at offset 176.
+// InstanceData — matches RenderSceneSnapshot.h as uploaded (raw memcpy of the
+// CPU struct, where math::v3 = simd::float3 is 16 bytes on arm64). Verified via
+// offsetof on the target platform: cluster_start@136, cluster_count@140,
+// bounds_center.xyz@160/164/168, [172]=v3 padding, bounds_radius@176.
 struct InstanceData {
     vec4 world_col0;    //   0
     vec4 world_col1;    //  16
     vec4 world_col2;    //  32
     vec4 world_col3;    //  48
-    vec4 meta0;         //  64
-    vec4 meta1;         //  80
-    vec4 meta2;         //  96
-    vec4 meta3;         // 112
-    vec4 pad0;          // 128
-    vec4 pad1;          // 144
-    vec4 bounds_center; // 160 (xyz = center, w = padding)
-    vec4 bounds_meta;   // 176 (x = bounds_radius)
+    vec4 inv_col0;      //  64
+    vec4 inv_col1;      //  80
+    vec4 inv_col2;      //  96
+    vec4 inv_col3;      // 112
+    vec4 meta0;         // 128 (x=geometry_id, y=material_id, z=cluster_start, w=cluster_count)
+    vec4 meta1;         // 144 (x=cluster_map_base, yzw=padding)
+    vec4 bounds_center; // 160 (xyz = center, w = v3 padding — do not read)
+    vec4 bounds_meta;   // 176 (x = bounds_radius, yzw = padding)
 };
 layout(set = 0, binding = 7) readonly buffer InstanceDataBuf { InstanceData instance_data[]; };
 
@@ -126,7 +128,9 @@ void voxelize_sdf() {
 
     vec3 voxel_pos = cascade_origin + (vec3(tid) + 0.5) * voxel_size;
 
-    float min_dist = 1.0e10;
+    // B14: far constant must stay BELOW the tracer's out-of-cascade
+    // sentinel (1e9) — 1e10 aliased with it and sparse regions read as miss.
+    float min_dist = 1.0e6;
 
     // Cull range: half the cascade extent. This ensures all geometry within
     // the cascade volume is evaluated (the WGSL version's voxel_size * 4.0
@@ -147,8 +151,15 @@ void voxelize_sdf() {
         float dist_to_bounds = length(voxel_pos - inst_center) - inst.bounds_meta.x;
         if (dist_to_bounds > cull_range) continue;
 
+        // meta0 @128: (geometry_id, material_id, cluster_start, cluster_count)
         uint cluster_start = uint(inst.meta0.z);
         uint cluster_count = uint(inst.meta0.w);
+
+        // B12: meshlet radius is local-space; scale it by the instance's max
+        // axis scale so uniformly-scaled instances are not over-culled.
+        float inst_max_scale = max(
+            max(length(inst.world_col0.xyz), length(inst.world_col1.xyz)),
+            length(inst.world_col2.xyz));
 
         for (uint c = 0u; c < cluster_count; c++) {
             uint global_cluster_idx = cluster_start + c;
@@ -156,9 +167,10 @@ void voxelize_sdf() {
 
             MeshletData meshlet = meshlets[meshlet_idx];
 
-            // Reconstruct meshlet center & radius.
+            // Meshlet center/radius (RHIMeshlet 64-byte packing):
+            // center = (cone1.w, cone2.x, cone2.y), radius = cone2.z.
             vec3 meshlet_center = vec3(meshlet.cone1.w, meshlet.cone2.x, meshlet.cone2.y);
-            float meshlet_radius = meshlet.cone2.z;
+            float meshlet_radius = meshlet.cone2.z * inst_max_scale;
 
             vec3 world_center = (world_matrix * vec4(meshlet_center, 1.0)).xyz;
             float dist_to_meshlet = length(voxel_pos - world_center) - meshlet_radius;
@@ -196,6 +208,33 @@ void voxelize_sdf() {
         }
     }
 
-    // GLSL marker: write fixed 77.0 to verify imageStore works.
-    imageStore(sdf_output, ivec3(tid), vec4(77.0, 0.0, 0.0, 0.0));
+    imageStore(sdf_output, ivec3(tid), vec4(min_dist, 0.0, 0.0, 0.0));
+}
+
+// ============================================================================
+// T3.2 (D7) first slice: conservative min-downsample mip chain (Metal twin:
+// global_sdf_mipmap in GlobalSDFVoxelization.metal). Each dst texel = MIN of
+// the 2x2x2 src block — conservative for SDF cone stepping.
+// Bindings: 0 = src image3D r32f (readonly), 1 = dst image3D r32f (writeonly).
+// ============================================================================
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(set = 0, binding = 0, r32f) readonly uniform image3D mip_src;
+layout(set = 0, binding = 1, r32f) writeonly uniform image3D mip_dst;
+
+void global_sdf_mipmap() {
+    uvec3 tid = gl_GlobalInvocationID;
+    uvec3 dstDims = uvec3(imageSize(mip_dst));
+    if (any(greaterThanEqual(tid, dstDims))) return;
+
+    uvec3 srcDims = uvec3(imageSize(mip_src));
+    uvec3 c = tid * 2u;
+
+    float best = 3.4e38;
+    for (uint z = 0u; z < 2u; ++z)
+    for (uint y = 0u; y < 2u; ++y)
+    for (uint x = 0u; x < 2u; ++x) {
+        uvec3 sc = min(c + uvec3(x, y, z), srcDims - uvec3(1u));
+        best = min(best, imageLoad(mip_src, ivec3(sc)).r);
+    }
+    imageStore(mip_dst, ivec3(tid), vec4(best, 0.0, 0.0, 0.0));
 }

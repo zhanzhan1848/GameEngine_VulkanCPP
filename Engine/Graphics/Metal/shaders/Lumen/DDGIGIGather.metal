@@ -54,6 +54,17 @@ struct TGProbe {
 // is RADIANCE (mcWeight = 4π/N). Applied at the diffuse output only.
 constant float PROBE_SH_RAD_TO_IRRAD = 3.14159265f;
 
+// B4: radiance→irradiance per-band constants (Ramamoorthi): A0 = π for L0,
+// A1 = 2π/3 for L1. The old path scaled BOTH bands by π — the L1 band was
+// over-counted by 1.5×, exaggerating directional GI (colored banding).
+static float3 evalSH4Irradiance(thread const float3 sh[4], float3 d) {
+    float x = d.x, y = d.y, z = d.z;
+    return sh[0] * 0.88622692f       // π  × 0.28209479
+         + sh[1] * (-1.02332674f * y) // (2π/3) × 0.48860251
+         + sh[2] * ( 1.02332674f * z)
+         + sh[3] * (-1.02332674f * x);
+}
+
 static float3 evalSH4Canonical(thread const float3 sh[4], float3 d) {
     float x = d.x, y = d.y, z = d.z;
     // L0+L1 keeps the per-pixel path to 32 buffer reads (8 probes × 4
@@ -109,7 +120,12 @@ kernel void ddgi_gi_gather(
     constant StaticProbeData& staticProbe  [[buffer(5)]],         // unused
     device const float* confidenceBuffer   [[buffer(6)]],         // unused
     device const float3* irradianceBuffer  [[buffer(7)]],
-    device const float* ddgiDepthBuffer    [[buffer(8)]]
+    device const float* ddgiDepthBuffer    [[buffer(8)]],
+
+    // T3.6/D2: far coarse volume (was Vulkan-only) — outside-near-grid
+    // pixels trilinear-sample this instead of dim ambient.
+    device const float4* farIrradiance     [[buffer(10)]],   // 9 vec4 per probe (radiance SH9)
+    constant float4* farParams             [[buffer(11)]]    // [0]=origin+spacing, [1]=counts+enabled
 ) {
     uint width = outputTex.get_width();
     uint height = outputTex.get_height();
@@ -153,9 +169,79 @@ kernel void ddgi_gi_gather(
     // Phase 1: per-pixel output (Vulkan legacy route)
     // ========================================================================
     if (inBounds && !active) {
-        // Outside the near grid (or sky): dim ambient (legacy parity).
-        outputTex.write(float4(0.03f, 0.03f, 0.035f, 1.0f), tid);
-        specularTex.write(float4(0.0f), tid);
+        // T3.6/D2: two-stage far fallback (Vulkan parity) — outside the near
+        // grid, trilinear-sample the far coarse volume before dim ambient.
+        bool farHit = false;
+        float4 f0 = farParams[0];
+        float4 f1 = farParams[1];
+        if (f1.w > 0.5f && depth < 1.0f) {
+            float3 fgp = (worldPos - f0.xyz) / f0.w;
+            float3 fcounts = f1.xyz;
+            float3 fgridMax = fcounts - 1.0f;
+            if (all(fgp >= float3(0.0f)) && all(fgp <= fgridMax)) {
+                uint3 fb0 = uint3(clamp(floor(fgp), float3(0.0f), fgridMax));
+                uint3 fb1 = min(fb0 + 1u, uint3(fcounts) - 1u);
+                float3 ffrac = fract(fgp);
+                float ffx = ffrac.x, ffy = ffrac.y, ffz = ffrac.z;
+
+                float ftw[8];
+                ftw[0] = (1.0f - ffx) * (1.0f - ffy) * (1.0f - ffz);
+                ftw[1] = ffx           * (1.0f - ffy) * (1.0f - ffz);
+                ftw[2] = (1.0f - ffx) * ffy           * (1.0f - ffz);
+                ftw[3] = ffx           * ffy           * (1.0f - ffz);
+                ftw[4] = (1.0f - ffx) * (1.0f - ffy) * ffz;
+                ftw[5] = ffx           * (1.0f - ffy) * ffz;
+                ftw[6] = (1.0f - ffx) * ffy           * ffz;
+                ftw[7] = ffx           * ffy           * ffz;
+
+                uint3 fpc[8];
+                fpc[0] = uint3(fb0.x, fb0.y, fb0.z); fpc[1] = uint3(fb1.x, fb0.y, fb0.z);
+                fpc[2] = uint3(fb0.x, fb1.y, fb0.z); fpc[3] = uint3(fb1.x, fb1.y, fb0.z);
+                fpc[4] = uint3(fb0.x, fb0.y, fb1.z); fpc[5] = uint3(fb1.x, fb0.y, fb1.z);
+                fpc[6] = uint3(fb0.x, fb1.y, fb1.z); fpc[7] = uint3(fb1.x, fb1.y, fb1.z);
+
+                // DDGI radiance-SH9 basis — matches DDGIUpdateIrradiance's
+                // projection (L1 x/y and L2 yz/xz minus signs, band-6 zonal).
+                const float C0 = 0.28209479f, C1 = 0.48860251f;
+                const float C2_0 = 1.09254843f, C2_1 = 0.31539157f, C2_2 = 0.54627421f;
+                float nx = normal.x, ny = normal.y, nz = normal.z;
+                float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
+                float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
+
+                float3 fresult = float3(0.0f);
+                float ftotalW = 0.0f;
+                for (uint p = 0; p < 8u; ++p) {
+                    if (ftw[p] < 0.01f) continue;
+                    uint pIdx = fpc[p].x + fpc[p].y * uint(fcounts.x) + fpc[p].z * uint(fcounts.x) * uint(fcounts.y);
+                    float3 sh[9];
+                    for (int i = 0; i < 9; ++i)
+                        sh[i] = farIrradiance[pIdx * 9u + uint(i)].xyz;
+                    float3 irr = sh[0] * C0
+                               + sh[1] * (-C1 * 0.6666667f * ny)   // B4: A1 = 2π/3
+                               + sh[2] * ( C1 * 0.6666667f * nz)
+                               + sh[3] * (-C1 * 0.6666667f * nx)
+                               + sh[4] * ( C2_0 * 0.25f * nxy)     // B4: A2 = π/4
+                               + sh[5] * (-C2_0 * 0.25f * nyz)
+                               + sh[6] * ( C2_1 * 0.25f * (3.0f*nzz - 1.0f))
+                               + sh[7] * (-C2_0 * 0.25f * nzx)
+                               + sh[8] * ( C2_2 * 0.25f * (nxx - nyy));
+                    fresult += irr * ftw[p];
+                    ftotalW += ftw[p];
+                }
+                if (ftotalW > 0.0f) {
+                    fresult /= ftotalW;
+                    fresult = max(fresult * PROBE_SH_RAD_TO_IRRAD, float3(0.02f, 0.02f, 0.025f));
+                    outputTex.write(float4(fresult, 1.0f), tid);
+                    specularTex.write(float4(0.0f), tid);
+                    farHit = true;
+                }
+            }
+        }
+        if (!farHit) {
+            // Outside the near grid (or sky): dim ambient (legacy parity).
+            outputTex.write(float4(0.03f, 0.03f, 0.035f, 1.0f), tid);
+            specularTex.write(float4(0.0f), tid);
+        }
     }
 
     if (active) {
@@ -186,6 +272,8 @@ kernel void ddgi_gi_gather(
         tw[7] = fx           * fy           * fz;
 
         float3 result = float3(0.0f);
+
+        float3 resultRadiance = float3(0.0f);   // B4: specular-side radiance
         float totalW = 0.0f;
 
         // T4.3 glossy: reflection-vector SH9 with the same plain trilinear
@@ -216,7 +304,7 @@ kernel void ddgi_gi_gather(
                 sh[i] = irradianceBuffer[shBase + i];
 
             // Proper SH evaluation at the pixel's surface normal.
-            float3 irr = evalSH4Canonical(sh, normal);
+            float3 irr = evalSH4Irradiance(sh, normal);   // B4
 
             float w = tw[p];
             float insidePenalty = 1.0f;
@@ -247,7 +335,8 @@ kernel void ddgi_gi_gather(
             lowFrequencyW += tw[p] * burial;
             if (tw[p] > bestBaseWeight) { bestBaseWeight = tw[p]; bestIrr = irr; }
 
-            result += irr * w;
+            result += irr * w;          // B4: irradiance units (diffuse)
+            resultRadiance += evalSH4Canonical(sh, normal) * w;   // specular keeps radiance units
             totalW += w;
 
             // Reuse the same four loads for the reflection direction.
@@ -255,6 +344,7 @@ kernel void ddgi_gi_gather(
         }
         if (totalW > 0.0f) {
             result /= totalW;
+            resultRadiance /= totalW;
             reflResult /= totalW;
         } else {
             // 深度数据异常时的防御回退：正常路径权重连续非零。
@@ -269,13 +359,13 @@ kernel void ddgi_gi_gather(
 
         // Radiance-unit base for the specular blend (pre-correction scale);
         // the diffuse output gets the radiance→irradiance factor instead.
-        float3 radBase = max(result, float3(0.05f, 0.05f, 0.06f));  // sky-leak ambient floor
+        float3 radBase = max(resultRadiance, float3(0.05f, 0.05f, 0.06f));  // B4: radiance units for specular
 
         // Glossy output: RGB = lobe radiance, A = NdotV (DFG in FusionComposite).
         float3 specIrr = mix(reflResult, radBase, roughness * roughness);
         specularTex.write(float4(specIrr, NdotV), tid);
 
-        float3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, float3(0.05f, 0.05f, 0.06f));
+        float3 diffOut = max(result, float3(0.05f, 0.05f, 0.06f));   // B4: irradiance built in-band
 
         // Vulkan legacy parity: the probe/SC chain owns temporal convergence.
         // An additional screen-space EMA masks the triple-buffer phase bug and

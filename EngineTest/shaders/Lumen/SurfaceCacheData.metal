@@ -152,7 +152,8 @@ static float3 octDecode(float2 f) {
     f = f * 2.0 - 1.0;
     float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
     float t = clamp(-n.z, 0.0, 1.0);
-    n.xy += select(float2(-t), float2(t), n.xy >= 0.0);
+    // Inverse of the replace-fold in octEncode: n.xy >= 0 subtracts t, else adds.
+    n.xy += select(float2(t), float2(-t), n.xy >= 0.0);
     return normalize(n);
 }
 

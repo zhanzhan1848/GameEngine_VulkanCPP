@@ -62,7 +62,16 @@ kernel void ddgi_update_depth(
         DDGIRayData ray = ray_buffer[rayOffset + r];
 
         if (ray.radiance_and_dist.w >= 0.0f) {
-            float3 rayDir = ddgiRayDirection(r, volume.RaysPerProbe, volume.FrameIndex);
+            // B8: binning must use the SAME mode-aware sampler as the trace
+            // side — a fixed mode-0 direction mis-bins every ray when
+            // RaySampleMode != 0 (directions no longer match traced radiance).
+            float3 lightDir = volume.LightDirection.xyz;
+            float3 toLight = (dot(lightDir, lightDir) > 1e-8f)
+                ? normalize(-lightDir) : float3(0.0f, -1.0f, 0.0f);
+            float3 rayDir = ddgiSampleRayDirection(r, volume.RaysPerProbe,
+                                                   volume.FrameIndex,
+                                                   uint(volume.RaySampleMode),
+                                                   toLight).xyz;
             float2 uv = octahedralEncode(rayDir);
             uint2 texel = uint2(clamp(uint(uv.x * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u),
                                 clamp(uint(uv.y * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u));

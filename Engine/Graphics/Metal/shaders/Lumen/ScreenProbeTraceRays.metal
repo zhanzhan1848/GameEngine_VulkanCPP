@@ -275,8 +275,9 @@ kernel void screen_probe_trace_rays(
     // T1.3: uniform card grid (header + prefix sums / card indices)
     device const uint*                sc_grid_offsets [[buffer(6)]],
     device const uint*                sc_grid_cards   [[buffer(7)]],
-    // T2.2: DDGI probe irradiance (SH3, 16B-stride float3 elements) for miss fallback
-    device const float3*              ddgi_irradiance [[buffer(8)]],
+    // T2.2: DDGI probe irradiance (SH3, 16B-stride float4 elements) for miss
+    // fallback — A8: must match finalize's float4 view of the same buffer.
+    device const float4*              ddgi_irradiance [[buffer(8)]],
     // F2 (M7): previous frame's final probe SH — importance proposal
     device const float4*              importanceSH    [[buffer(9)]],
 
@@ -365,6 +366,13 @@ kernel void screen_probe_trace_rays(
                 for (uint gi = begin; gi < end && !usedSurfaceCache; ++gi) {
                     float2 atlas_uv;
                     if (worldToCardUV(hit.position, cards[sc_grid_cards[gi]], atlas_uv)) {
+                        // C4: half-texel inset keeps bilinear sampling inside
+                        // this card's rect (shelf-packed atlas bleeds otherwise).
+                        const SurfaceCacheCard insetCard = cards[sc_grid_cards[gi]];
+                        atlas_uv = clamp(atlas_uv,
+                            float2(insetCard.atlas_offset_x, insetCard.atlas_offset_y) + 0.5,
+                            float2(insetCard.atlas_offset_x + insetCard.resolution,
+                                   insetCard.atlas_offset_y + insetCard.resolution) - 0.5);
                         // Convert atlas pixel coords to normalized UV for sampling
                         float2 uv_norm = atlas_uv / float2(atlasSize);
                         constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
@@ -405,10 +413,10 @@ kernel void screen_probe_trace_rays(
             gc = clamp(gc, int3(0), counts - int3(1));
             uint pidx = uint(gc.x) + uint(counts.x) * (uint(gc.y) + uint(counts.y) * uint(gc.z));
             // SH3 coefficients @ 16B stride (matches LumenDDGIPass irradiance buffers)
-            float3 sh0 = ddgi_irradiance[pidx * 9u + 0u];
-            float3 sh1 = ddgi_irradiance[pidx * 9u + 1u];
-            float3 sh2 = ddgi_irradiance[pidx * 9u + 2u];
-            float3 sh3 = ddgi_irradiance[pidx * 9u + 3u];
+            float3 sh0 = ddgi_irradiance[pidx * 9u + 0u].xyz;
+            float3 sh1 = ddgi_irradiance[pidx * 9u + 1u].xyz;
+            float3 sh2 = ddgi_irradiance[pidx * 9u + 2u].xyz;
+            float3 sh3 = ddgi_irradiance[pidx * 9u + 3u].xyz;
             radiance = max(0.0f,
                 0.282095f * sh0
                 - 0.488603f * sh1 * rayDir.y
@@ -427,7 +435,10 @@ kernel void screen_probe_trace_rays(
     }
 
     // Write output: xyz = radiance, w = cosine weight × importance factor (F2)
-    float outputWeight = (hit.hit ? cosTheta : cosTheta) * invNq; // miss rays also contribute sky ambient
+    // B5: sign encodes geometry hit (positive) vs miss→sky (negative).
+    // Average integrates |w| but counts hits with w > 0 — the old
+    // all-positive encoding made hitRatio ≡ 1 and killed confidence.
+    float outputWeight = (hit.hit ? cosTheta : -cosTheta) * invNq;
     probeRadiance[global_id] = float4(radiance, outputWeight);
 }
 
@@ -734,6 +745,12 @@ kernel void screen_probe_trace_finalize(
                 for (uint gi = begin; gi < end && reads < 8u; ++gi, ++reads) {
                     float2 atlas_uv;
                     if (worldToCardUV(hitPos, cards[sc_grid_cards[gi]], atlas_uv)) {
+                        // C4: half-texel inset (shelf atlas bleed guard)
+                        const SurfaceCacheCard insetCard = cards[sc_grid_cards[gi]];
+                        atlas_uv = clamp(atlas_uv,
+                            float2(insetCard.atlas_offset_x, insetCard.atlas_offset_y) + 0.5,
+                            float2(insetCard.atlas_offset_x + insetCard.resolution,
+                                   insetCard.atlas_offset_y + insetCard.resolution) - 0.5);
                         float2 uv_norm = atlas_uv / float2(atlasSize);
                         constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
                         radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
@@ -849,5 +866,7 @@ kernel void screen_probe_trace_finalize(
     }
 
     // w carries the SH-projection weight: cosθ × importance factor (F2).
-    probeRadiance[global_id] = float4(radiance, cosTheta * invNq);
+    // B5: negate for miss rays (sky fallback) — sign is the geometry-hit flag.
+    const bool geoHit = (hit.w == 1.0f) || (hit.w == 2.0f) || (hit.w == 3.0f);
+    probeRadiance[global_id] = float4(radiance, geoHit ? cosTheta * invNq : -cosTheta * invNq);
 }

@@ -75,6 +75,7 @@ layout(set = 0, binding = 10, std430) readonly buffer DDGIIrradianceBlock {
 // surface point instead of the card midplane (depth=0), which can sit inside
 // walls for large cards.
 layout(set = 0, binding = 11, r32f) readonly uniform image2D depth_atlas;
+layout(set = 0, binding = 12, rgba16f) readonly uniform image2D indirect_out;   // T3.3 tile radiosity
 
 // 8-probe trilinear gather of full L0-L2 SH, canonical basis (matches
 // DDGIUpdateIrradiance's projection). Returns incoming irradiance at a
@@ -242,8 +243,19 @@ void surface_cache_light_eval()
     // In-volume texels take their bounce from the probes. Outside the probe
     // grid (or with the feed off) the gather is zero, so keep the legacy
     // self-feedback there — otherwise those texels collapse to pure black.
-    vec3 result = (direct_light + E_indirect) * albedo.rgb
-                + (probeFed && probeInVolume ? vec3(0.0) : prev_light * albedo.rgb * SC_FEEDBACK)
+    // B3: SI convention — atlas stores outgoing radiance (albedo/π)·E.
+    // T3.3: SC Radiosity tile probe — see Metal twin.
+    vec3 tileRadiance = vec3(0.0);
+    if (flp.params.radiosity_gate.x != 0u) {
+        uvec2 tiles = uvec2(flp.params.sc_params.atlas_size / 16u);
+        uvec2 tile = min(uvec2(atlas_uv) / 16u, tiles - uvec3(1u).xy);
+        tileRadiance = imageLoad(indirect_out, ivec2(tile)).rgb;
+    }
+
+    vec3 result = (direct_light + E_indirect) * albedo.rgb * 0.31830988
+                + (probeFed && probeInVolume
+                      ? tileRadiance * 0.25
+                      : tileRadiance + prev_light * albedo.rgb * (SC_FEEDBACK * 0.31830988 * 0.5))
                 + emissive;
     result = min(result, vec3(64.0));
     imageStore(lighting_out, ivec2(atlas_uv), vec4(result, 1.0));

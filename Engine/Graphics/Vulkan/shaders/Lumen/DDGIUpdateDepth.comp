@@ -175,7 +175,7 @@ void ddgi_update_depth() {
         vec3 rayDir = ddgiSampleRayDirection(r, volume.RaysPerProbe,
                                              volume.FrameIndex,
                                              uint(volume.RaySampleMode),
-                                             normalize(-volume.LightDirection.xyz)).xyz;
+                                             (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0))).xyz;
         vec2 uv = octahedralEncode(rayDir);
         uvec2 texel = uvec2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
                             clamp(uint(uv.y * float(res)), 0u, res - 1u));

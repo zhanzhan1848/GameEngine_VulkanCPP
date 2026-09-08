@@ -74,6 +74,8 @@ struct FlattenedLightingParams {
     uint _pad;
     vec4 ddgi_origin_spacing;   // xyz origin, w spacing
     uvec4 ddgi_counts_valid;    // xyz counts, w valid flag
+    // T3.3: SC Radiosity gate (x = on) — see Metal twin.
+    uvec4 radiosity_gate;       // x = indirect_radiosity_on, yzw reserved
 };
 
 // Reconstruct world position from card atlas UV + depth.
@@ -123,30 +125,16 @@ bool worldToCardUV(vec3 world_pos, SurfaceCacheCard card, out vec2 out_uv) {
         v = (local.y / (card.extent.y * 2.0)) + 0.5;
     }
 
-    if (depth < 0.0 || u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return false;
+    if (depth < 0.0 || u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) return false;   // C6: u/v==1.0 bleeds into the next card
 
     out_uv.x = float(card.atlas_offset_x) + u * float(card.resolution);
     out_uv.y = float(card.atlas_offset_y) + v * float(card.resolution);
     return true;
 }
 
-// Octahedral normal encoding.
-vec2 octEncode(vec3 n) {
-    float l1norm = abs(n.x) + abs(n.y) + abs(n.z);
-    vec2 result = n.xy / l1norm;
-    if (n.z < 0.0) {
-        result = (1.0 - abs(result.yx)) * mix(vec2(-1.0), vec2(1.0), step(vec2(0.0), result.xy));
-    }
-    return result * 0.5 + 0.5;
-}
-
-vec3 octDecode(vec2 f) {
-    f = f * 2.0 - 1.0;
-    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
-    float t = clamp(-n.z, 0.0, 1.0);
-    n.xy += mix(vec2(-t), vec2(t), step(vec2(0.0), n.xy));
-    return normalize(n);
-}
+// T1.10: octEncode/octDecode are canonical in ShaderLib/MathLib.glsl now.
+// Textual include keeps this header self-contained for existing consumers.
+#include "ShaderLib/MathLib.glsl"
 
 // Hash function for reproducible random (ported from CommonFunction.metal::hash).
 float hash(vec2 p) {

@@ -221,6 +221,12 @@ kernel void ddgi_trace_rays(
                 ++deviceReads;
                 float2 atlasUV;
                 if (worldToCardUVDevice(hit.position, card, atlasUV)) {
+                    // C4: half-texel inset keeps bilinear inside this card's rect
+                    // (shelf-packed atlas bleeds from neighbours otherwise).
+                    atlasUV = clamp(atlasUV,
+                        float2(card.atlas_offset_x, card.atlas_offset_y) + 0.5,
+                        float2(card.atlas_offset_x + card.resolution,
+                               card.atlas_offset_y + card.resolution) - 0.5);
                     float2 normUV = atlasUV / atlasSize;
                     sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
                     radiance = lighting_atlas.sample(samp, normUV).xyz;
@@ -296,7 +302,7 @@ kernel void ddgi_trace_sdf(
                                         volume.SdfCascadeCount);
     float3 probePosRel = relocatedPos;
     probePos = probePosRel;
-    float3 toLight = normalize(-volume.LightDirection.xyz);
+    float3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : float3(0.0f, -1.0f, 0.0f));
 
     // T8.13 P2 sync: lane-strided ray loop — 64 lanes serve any RaysPerProbe
     // multiple of 64 (128 = two strided rays per lane).
@@ -323,6 +329,7 @@ kernel void ddgi_trace_sdf(
     // shared DDGI_MAX_SDF_STEPS=4 stays untouched (other consumers); the
     // Vulkan port defines the same 64 locally in DDGITraceSDF.comp.
     const uint DDGI_SPLIT_MAX_SDF_STEPS = 64u;
+    float prevD = 3.4e38f;   // B13: distance trend across steps
     for (uint step = 0; step < DDGI_SPLIT_MAX_SDF_STEPS; ++step) {
         float3 pos = probePos + rayDir * t;
 
@@ -346,12 +353,14 @@ kernel void ddgi_trace_sdf(
 
         // Relaxed advancement: overstep when far, conservative when close.
         // T8.13 sync: far-field overstep 1.2 → 1.5 (matches Vulkan).
+        // B13: no ω overstep while the field shrinks (thin-wall jump guard).
         float advance;
-        if (d > hitThreshold * 4.0f) {
+        if (d > hitThreshold * 4.0f && d >= prevD) {
             advance = d * 1.5f;
         } else {
             advance = max(d, minStep);
         }
+        prevD = d;
         t += advance;
         if (t > volume.RayMaxDistance) break;
     }
@@ -517,6 +526,7 @@ kernel void ddgi_trace_finalize(
     texture2d<float, access::sample> lighting_atlas [[texture(3)]],
     texture2d<float, access::sample> prev_frame_color [[texture(4)]],
     texture2d<float, access::sample> gbuffer_albedo [[texture(5)]],
+    texture2d<float, access::sample> depth_atlas [[texture(6)]],   // T3.4 (D3)
 
     constant DDGIVolumeData& volume [[buffer(1)]],
     device const float* hit_distance_buffer [[buffer(2)]],
@@ -545,7 +555,7 @@ kernel void ddgi_trace_finalize(
 
     uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
     float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
-    float3 toLight = normalize(-volume.LightDirection.xyz);
+    float3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : float3(0.0f, -1.0f, 0.0f));
 
     // T8.13 P2 sync: lane-strided ray loop (mirrors ddgi_trace_sdf).
     for (uint rayId = tid; rayId < volume.RaysPerProbe; rayId += 64u) {
@@ -608,10 +618,29 @@ kernel void ddgi_trace_finalize(
                     ++deviceReads;
                     float2 atlasUV;
                     if (worldToCardUVDevice(hitPos, card, atlasUV)) {
+                        // C4: half-texel inset keeps bilinear inside this card's rect
+                        // (shelf-packed atlas bleeds from neighbours otherwise).
+                        atlasUV = clamp(atlasUV,
+                            float2(card.atlas_offset_x, card.atlas_offset_y) + 0.5,
+                            float2(card.atlas_offset_x + card.resolution,
+                                   card.atlas_offset_y + card.resolution) - 0.5);
                         float2 normUV = atlasUV / atlasSize;
                         sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
+                        // T3.4 (D3): plane-consistency test — the sampled texel
+                        // must belong to the SAME surface the ray hit. Compare
+                        // the hit point's axis depth against the card's stored
+                        // texel depth; a card surface in front of the hit means
+                        // this texel describes other geometry (occluder) — its
+                        // radiance would poison the probe's incident estimate.
+                        float texelDepth = depth_atlas.sample(samp, normUV).r;
+                        float3 dl = hitPos - card.center.xyz;
+                        uint dAxis = card.axis_direction & 0xFFu;
+                        uint dDir = (card.axis_direction >> 8u) & 0xFFu;
+                        float hitAxisDepth = (dAxis == 0u ? dl.x : dAxis == 1u ? dl.y : dl.z) * (dDir != 0u ? 1.0f : -1.0f);
+                        float depthTol = 0.35f * max(card.extent.x, max(card.extent.y, card.extent.z));
+                        bool planeOk = (hitAxisDepth <= texelDepth + depthTol);
                         float3 scRadiance = lighting_atlas.sample(samp, normUV).xyz;
-                        if (dot(scRadiance, scRadiance) > 0.0001f) {
+                        if (planeOk && dot(scRadiance, scRadiance) > 0.0001f) {
                             radiance = scRadiance;
                             radianceFound = true;
 #ifdef DDGI_PATH_DEBUG
@@ -634,8 +663,10 @@ kernel void ddgi_trace_finalize(
                     float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3f);
                     float materialWeight = mix(0.15f, 0.85f, saturation);
                     float3 materialBounce = albedo * max(sourceLum, 0.12f) * materialWeight;
-                    // T8.13 P1: self-circulating feedback 0.70.
-                    radiance = prevRadiance + materialBounce + albedo * L_i_prev * 0.70f;
+                    // B6: prevRadiance already carries last frame's indirect
+                    // (direct + bounce baked into the screen color) — adding
+                    // the probe feedback again double-counted indirect light.
+                    radiance = prevRadiance + materialBounce;
                     radianceFound = true;
 #ifdef DDGI_PATH_DEBUG
                     dbgPath = 2u;
@@ -644,7 +675,7 @@ kernel void ddgi_trace_finalize(
             }
             if (!radianceFound) {
                 // 3) Analytic: self-computed direct + sky + multi-bounce
-                float3 L = normalize(-volume.LightDirection.xyz);
+                float3 L = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : float3(0.0f, -1.0f, 0.0f));
                 float NdotL = max(0.0f, dot(N, L));
                 float3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
                 float NdotUp = max(0.0f, N.y);
@@ -688,6 +719,12 @@ kernel void ddgi_trace_finalize(
                 ++missReads;
                 float2 atlasUV;
                 if (worldToCardUVDevice(probePos, card, atlasUV)) {
+                    // C4: half-texel inset keeps bilinear inside this card's rect
+                    // (shelf-packed atlas bleeds from neighbours otherwise).
+                    atlasUV = clamp(atlasUV,
+                        float2(card.atlas_offset_x, card.atlas_offset_y) + 0.5,
+                        float2(card.atlas_offset_x + card.resolution,
+                               card.atlas_offset_y + card.resolution) - 0.5);
                     float2 normUV = atlasUV / atlasSize;
                     sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
                     float3 missRadiance = lighting_atlas.sample(samp, normUV).xyz;
