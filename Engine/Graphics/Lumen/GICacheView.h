@@ -24,6 +24,7 @@ struct SurfaceCacheView {
     rhi::ResourceHandle card_lookup{ rhi::handles::INVALID_RESOURCE };     ///< CardGenerator mesh→card 查找 SSBO
     rhi::ResourceHandle grid_offsets{ rhi::handles::INVALID_RESOURCE };    ///< T1.3 uniform card grid offsets（可缺省）
     rhi::ResourceHandle grid_cards{ rhi::handles::INVALID_RESOURCE };      ///< T1.3 uniform card grid cards（可缺省）
+    rhi::ResourceHandle depth_atlas{ rhi::handles::INVALID_RESOURCE };     ///< T3.4 (D3): axis-depth per texel — plane-consistency test
 
     /// 可选：管线侧把 atlas 以某个 RG 名字 import 后回填（视图本身不建图）。
     rendergraph::RGResourceHandle lighting_rg{};

@@ -155,6 +155,7 @@ private:
     std::atomic<u32> currentFrameIndex_{0};
 
     // Allocators for all resource types
+    u64 deferred_frame_counter_{0};   ///< R1/T0.13 deferred-release clock
     RHIAllocator<DawnBuffer> bufferAllocator_;
     RHIAllocator<DawnTexture> textureAllocator_;
     RHIAllocator<DawnCommandBuffer> commandBufferAllocator_;

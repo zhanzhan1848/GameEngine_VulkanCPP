@@ -16,6 +16,7 @@
 #include <shared_mutex>
 #include <mutex>
 #include <type_traits>
+#include <vector>
 #include <iostream>
 
 namespace primal::graphics::rhi {
@@ -114,6 +115,7 @@ public:
                 FreeInternal(i);
             }
         }
+        _pending_frees.clear();   // shutdown releases everything immediately
     }
 
     /**
@@ -143,10 +145,45 @@ public:
     /**
      * @brief 释放对象
      * @param id 对象的Handle
+     * @details R1/T0.13: slot release is deferred by kDeferredFreeLag frames
+     *          once frame ticking is armed (see TickDeferredRelease). In-flight
+     *          frames may still hold ResourceHandle(id); handing the same id to
+     *          the next Allocate() aliases the old handle to a brand-new object
+     *          (C1-H2). The slot stays valid (Get returns the old object) until
+     *          the lag expires — GPU-safe by the same bound as the frame fence.
      */
     void Free(u32 id) {
         std::unique_lock<std::shared_mutex> lock(_mutex);
-        FreeInternal(id);
+        if (!_deferred_release_armed_) {
+            FreeInternal(id);
+            return;
+        }
+        // Duplicate Free of an already-pending id is dropped here; the actual
+        // pool slot is only removed once by TickDeferredRelease.
+        for (const auto& p : _pending_frees) {
+            if (p.id == id) return;
+        }
+        _pending_frees.push_back({id, _deferred_frame_});
+    }
+
+    /**
+     * @brief 推进延迟释放时钟并回收过期槽位
+     * @param frame 单调递增的帧号（各设备 beginFrame 驱动）
+     */
+    void TickDeferredRelease(u64 frame) {
+        std::unique_lock<std::shared_mutex> lock(_mutex);
+        _deferred_release_armed_ = true;
+        _deferred_frame_ = frame;
+        for (auto it = _pending_frees.begin(); it != _pending_frees.end();) {
+            if (frame >= it->frame + kDeferredFreeLag) {
+                if (_pool.is_valid(it->id)) {
+                    FreeInternal(it->id);
+                }
+                it = _pending_frees.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
     /**
@@ -222,6 +259,13 @@ private:
         _stats.activeAllocations--;
         _stats.totalBytesAllocated -= sizeof(T);
     }
+
+    // R1/T0.13: deferred slot release state
+    static constexpr u64 kDeferredFreeLag = 3;   // frames a freed slot stays reserved
+    struct PendingFree { u32 id; u64 frame; };
+    bool _deferred_release_armed_ = false;       // armed on first TickDeferredRelease
+    u64 _deferred_frame_ = 0;
+    std::vector<PendingFree> _pending_frees;     // guarded by _mutex
 
     primal::utl::free_list<T> _pool;
     mutable std::shared_mutex _mutex;

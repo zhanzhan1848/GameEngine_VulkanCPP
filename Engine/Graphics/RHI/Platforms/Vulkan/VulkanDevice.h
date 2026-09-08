@@ -264,6 +264,7 @@ private:
     VulkanStagingAllocator stagingAllocator_;
 
     // === Per-type free_list allocators ===
+    u64 deferred_frame_counter_{0};   ///< R1/T0.13 deferred-release clock
     RHIAllocator<VulkanBuffer>   bufferAllocator_;
     RHIAllocator<VulkanSync>     syncAllocator_;
     RHIAllocator<VulkanQueryPool> queryPoolAllocator_;

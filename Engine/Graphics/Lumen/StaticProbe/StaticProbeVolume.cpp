@@ -270,6 +270,7 @@ bool StaticProbeVolume::SaveToFile(const char* path) const {
     header.origin[2] = params_.origin.z;
     header.probe_count = ProbeCount();
     header.bounce_count = 3;
+    header.scene_hash = scene_hash_;   // A12/T0.10
 
     file.write(reinterpret_cast<const char*>(&header), sizeof(header));
 
@@ -295,6 +296,7 @@ bool StaticProbeVolume::LoadFromFile(const char* path) {
     grid_dim_x_ = header.grid_dim_x;
     grid_dim_y_ = header.grid_dim_y;
     grid_dim_z_ = header.grid_dim_z;
+    scene_hash_ = header.scene_hash;   // A12/T0.10
     params_.spacing = header.spacing;
     params_.origin = {header.origin[0], header.origin[1], header.origin[2]};
     params_.grid_dim_x = grid_dim_x_;

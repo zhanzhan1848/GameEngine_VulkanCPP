@@ -279,6 +279,24 @@ void VulkanDevice::beginFrameImpl() {
     // 每帧 BeginFrame 把当前 frame 的 staging pool bump offset 归零
     // (上一帧的 blit 应已 submit 完成,frame N+MAX_FRAMES_IN_FLIGHT 的 pool 安全复用)
     stagingAllocator_.BeginFrame();
+
+    // R1/T0.13: 驱动延迟槽位释放 — 已释放槽保留 kDeferredFreeLag 帧，防止
+    // in-flight 帧持有的 ResourceHandle 被新分配别名到新对象（C1-H2）。
+    // DEFAULT OFF — see MetalDevice::beginFrameImpl for the rationale.
+    static const bool deferredFreeEnabled =
+        std::getenv("PRIMAL_DEFERRED_FREE") != nullptr;
+    if (!deferredFreeEnabled) return;
+    const u64 deferredFrame = ++deferred_frame_counter_;
+    bufferAllocator_.TickDeferredRelease(deferredFrame);
+    syncAllocator_.TickDeferredRelease(deferredFrame);
+    queryPoolAllocator_.TickDeferredRelease(deferredFrame);
+    if (textureAllocator_)             textureAllocator_->TickDeferredRelease(deferredFrame);
+    if (commandBufferAllocator_)       commandBufferAllocator_->TickDeferredRelease(deferredFrame);
+    if (shaderAllocator_)              shaderAllocator_->TickDeferredRelease(deferredFrame);
+    if (samplerAllocator_)             samplerAllocator_->TickDeferredRelease(deferredFrame);
+    if (descriptorSetLayoutAllocator_) descriptorSetLayoutAllocator_->TickDeferredRelease(deferredFrame);
+    if (pipelineLayoutAllocator_)      pipelineLayoutAllocator_->TickDeferredRelease(deferredFrame);
+    if (descriptorSetAllocator_)       descriptorSetAllocator_->TickDeferredRelease(deferredFrame);
 }
 
 VulkanDevice::ImplicitUBOAlloc VulkanDevice::AllocImplicitComputeUBO(u32 size) {

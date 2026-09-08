@@ -130,6 +130,16 @@ private:
     
     // 资源查找表 (Name -> Handle) - 仅用于调试或查找
     std::unordered_map<std::string, RGResourceHandle> resourceMap_;
+    // T1.1 (C2): single physical import identity — one rhi resource may map to
+    // at most ONE RG identity per frame. Duplicate imports create alias
+    // blind spots (RAW deps across identities are invisible to the
+    // scheduler). Enforcement: warn once per duplicate by default, assert
+    // with PRIMAL_RG_STRICT_IMPORT=1. The pre-existing GBuffer-depth
+    // "unique name per reader" pattern is READ-only (producer recorded
+    // outside the graph) and stays exempt by design.
+    std::unordered_map<u32, RGResourceHandle> importedPhysical_;
+    void CheckSingleImportIdentity(const std::string& name, rhi::ResourceHandle resource,
+                                   RGResourceHandle handle);
 
     // 执行顺序 (经过拓扑排序和剔除后)
     utl::vector<RenderGraphPass*> activePasses_;

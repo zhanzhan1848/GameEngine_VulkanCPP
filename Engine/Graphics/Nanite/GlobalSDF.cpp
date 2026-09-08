@@ -171,13 +171,27 @@ void GlobalSDF::Update(const RenderSceneSnapshot& snapshot, u64 current_frame,
 bool GlobalSDF::CreateCascades() {
     for (auto& cascade : cascades_) {
         u32 resolution = cascade.resolution;
-        // SDF cascade only needs mip 0 — voxelization writes only to mip 0,
-        // and DDGI trace reads only mip 0. Extra mip levels waste memory
-        // and contain uninitialized garbage data.
-        u32 mip_levels = 1;
-        cascade.mip_levels = mip_levels;
+        // T3.2 (D7): mip 0 in sdf_texture, PLUS a conservative min-mip chain
+        // as standalone textures (mip_textures[k] holds resolution >> (k+1)).
+        // Mip 0 stays the only voxelization target; the chain is regenerated
+        // by DispatchMipChain right after each voxelization dispatch. Enables
+        // cone-width-aware sampling (consumers land with T3.2 cone tracing).
+        constexpr u32 kMaxMips = SDFCascade::kMaxMipLevels;
+        cascade.mip_levels = 1;   // mip 0 allocation stays single-level
+        u32 mipRes = resolution / 2;
+        cascade.mip_count = 0;
+        for (u32 k = 0; k < kMaxMips && mipRes >= 4; ++k) {
+            if (!AllocateTexture(cascade.mip_textures[k], mipRes, 1)) {
+                PRIMAL_LOG_STREAM(Warn, "Render") << "[GlobalSDF] mip texture alloc failed (level "
+                          << k << ", res " << mipRes << ") — cone sampling disabled"
+                          << std::endl;
+                break;
+            }
+            ++cascade.mip_count;
+            mipRes /= 2;
+        }
 
-        if (!AllocateTexture(cascade.sdf_texture, resolution, mip_levels)) {
+        if (!AllocateTexture(cascade.sdf_texture, resolution, cascade.mip_levels)) {
             return false;
         }
 
@@ -242,7 +256,43 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
     cascade.origin = new_origin;
 }
 
+// T3.1 (D6): cascade-chain consistency merge. The runtime field is UNSIGNED
+// (min-distance voxelization) and the tracer resolves overlaps by finest-
+// cascade-first selection (sampleBestSDF_elseIf), so a data-copying GPU
+// merge is unnecessary; what this hook must guarantee instead is that the
+// cascade chain is *consistent* — every coarse cascade fully covers the one
+// above it and voxel sizes double per level. Violations would silently
+// produce holes in the else-if selection (voxels attributed to no cascade).
+// A GPU data merge becomes relevant only when cone tracing (T3.2) lands.
 void GlobalSDF::MergeCascades() {
+    const u32 count = static_cast<u32>(cascades_.size());
+    if (count < 2u) return;
+
+    for (u32 i = 0u; i + 1u < count; ++i) {
+        const auto& fine = cascades_[i];
+        const auto& coarse = cascades_[i + 1u];
+        if (!fine.is_valid || !coarse.is_valid) continue;
+
+        // Coverage: coarse extent must be >= fine extent (else-if fallback
+        // relies on the coarser cascade to own everything the finer misses).
+        const f32 fine_extent = fine.extent.x;   // cascades are cubic
+        const f32 coarse_extent = coarse.extent.x;
+        if (coarse_extent + 1e-3f < fine_extent) {
+            PRIMAL_LOG_STREAM(Warn, "Render")
+                << "[GlobalSDF] cascade " << i << " extent " << fine_extent
+                << " exceeds coarser cascade " << (i + 1) << " extent "
+                << coarse_extent << " — else-if selection will fall through"
+                << std::endl;
+        }
+
+        // Voxel-size doubling per level (clipmap invariant).
+        const f32 ratio = coarse.voxel_size / fine.voxel_size;
+        if (ratio < 1.9f || ratio > 2.1f) {
+            PRIMAL_LOG_STREAM(Warn, "Render")
+                << "[GlobalSDF] cascade voxel ratio " << i << "->" << (i + 1)
+                << " = " << ratio << " (expected 2.0)" << std::endl;
+        }
+    }
 }
 
 void GlobalSDF::UpdateStats(u64 current_frame) {
@@ -641,6 +691,90 @@ bool GlobalSDF::IsVoxelizationReady() const {
     return voxelization_ready_ || provider_ready;
 }
 
+// T3.2 (D7): mipmap pipeline — 2 storage images (src read, dst write),
+// flat bindings on Vulkan (0/1), Metal texture namespace (0/1).
+bool GlobalSDF::CreateMipPipeline() {
+    if (mip_pipeline_ != rhi::handles::INVALID_PIPELINE) return true;
+
+    // Metal: the kernel lives in GlobalSDFVoxelization.metal (runtime multi-
+    // entry compile). Vulkan: build_spv.sh emits GlobalSDFMipmap.spv from the
+    // same source's second entry.
+    const char* shaderName = (device_->GetPlatform() == rhi::RHIPlatform::Metal)
+        ? "GlobalSDFVoxelization" : "GlobalSDFMipmap";
+    auto code = LoadShaderSource(shaderName, device_);
+    if (code.empty()) return false;
+    auto shader = device_->CreateShader(code.data(), code.size(),
+                                        rhi::ShaderStage::Compute, "global_sdf_mipmap");
+    if (shader == rhi::handles::INVALID_SHADER) return false;
+
+    rhi::DescriptorSetLayoutBinding bindings[] = {
+        {0, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr},  // src (read)
+        {1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr},  // dst (write)
+    };
+    mip_set_layout_ = device_->CreateDescriptorSetLayout({2, bindings});
+    if (mip_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
+
+    rhi::PipelineLayoutDesc plDesc;
+    plDesc.setLayoutCount = 1;
+    plDesc.setLayouts = &mip_set_layout_;
+    mip_layout_ = device_->CreatePipelineLayout(plDesc);
+
+    rhi::ComputePipelineDesc pipeDesc{};
+    pipeDesc.computeShader = shader;
+    pipeDesc.layout = mip_layout_;
+    pipeDesc.threadGroupSize = {4, 4, 4};
+    mip_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+    return mip_pipeline_ != rhi::handles::INVALID_PIPELINE;
+}
+
+// Dispatch the min-mip chain for one cascade: level k reads level k-1 (or
+// mip-0 voxelization output for k=1) and MIN-downsamples 2x2x2 -> 1. One
+// dispatch + barrier per level; all inside the caller's command buffer.
+void GlobalSDF::DispatchMipChain(rhi::RHICommandBuffer* cmd, u32 cascade_index) {
+    auto& cascade = cascades_[cascade_index];
+    if (cascade.mip_count == 0) return;
+    if (!CreateMipPipeline()) return;
+
+    rhi::ResourceHandle levels[SDFCascade::kMaxMipLevels + 1] = { cascade.sdf_texture,
+        cascade.mip_textures[0], cascade.mip_textures[1],
+        cascade.mip_textures[2], cascade.mip_textures[3] };
+
+    // Triple-buffered descriptor set per cascade (same slotting convention
+    // as the voxelization set — a cascade is dispatched at most once/frame).
+    auto& mipSet = mip_descriptor_sets_[cascade_index % 3];
+    if (mipSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
+        mipSet = device_->CreateDescriptorSet({mip_set_layout_});
+    }
+
+    u32 prevRes = cascade.resolution;
+    for (u32 k = 0; k < cascade.mip_count; ++k) {
+        const u32 curRes = std::max<u32>(1u, prevRes >> 1);
+
+        DescriptorData params[] = {
+            {0, rhi::DescriptorType::StorageImage, levels[k]},       // prev level
+            {1, rhi::DescriptorType::StorageImage, levels[k + 1]},   // current level
+        };
+        UpdateDescriptorSet(device_, mipSet, params, 2);
+
+        cmd->BindComputePipeline(mip_pipeline_);
+        const rhi::DescriptorSetHandle sets[] = { mipSet };
+        cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, mip_layout_, 0, 1, sets, 0, nullptr);
+        const u32 g = (curRes + 3) / 4;
+        cmd->Dispatch(g, g, g);
+
+        // Storage→storage barrier between levels.
+        rhi::ResourceBarrier b{};
+        b.resource = levels[k + 1];
+        b.beforeState = rhi::ResourceState::UnorderedAccess;
+        b.afterState = rhi::ResourceState::UnorderedAccess;
+        b.subresource = 0xFFFFFFFF;
+        b.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&b, 1);
+
+        prevRes = curRes;
+    }
+}
+
 void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_index) {
     if (!cmd) return;
     if (cascade_index >= cascades_.size()) return;
@@ -804,6 +938,10 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
         barrier.subresource = 0xFFFFFFFF;
         cmd->InsertBarrier(&barrier, 1);
     }
+
+    // T3.2 (D7): regenerate the conservative min-mip chain so cone-aware
+    // sampling (and future consumers) see this cascade's fresh data.
+    DispatchMipChain(cmd, cascade_index);
 }
 
 // --- f32 → f16 bit conversion (IEEE 754 half) ---

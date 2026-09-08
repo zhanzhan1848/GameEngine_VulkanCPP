@@ -83,9 +83,36 @@ void RenderGraph::CleanupPool() {
     }
 }
 
+// T1.1 (C2): one physical resource = one RG import identity per frame.
+// Duplicate imports under different names hide cross-identity RAW
+// dependencies from the scheduler. Default: one warning per duplicate
+// pair; PRIMAL_RG_STRICT_IMPORT=1 asserts (ramp-up enforcement).
+void RenderGraph::CheckSingleImportIdentity(const std::string& name, rhi::ResourceHandle resource,
+                                            RGResourceHandle handle) {
+    auto it = importedPhysical_.find(static_cast<u32>(resource));
+    if (it == importedPhysical_.end()) {
+        importedPhysical_.emplace(static_cast<u32>(resource), handle);
+        return;
+    }
+    static thread_local std::unordered_set<std::string> warned;
+    std::string key = name + "#" + std::to_string(static_cast<u32>(resource));
+    if (warned.insert(std::move(key)).second) {
+        PRIMAL_LOG_STREAM(Warn, "RG")
+            << "[RG] Duplicate physical import: '" << name
+            << "' aliases rhi resource " << static_cast<u32>(resource)
+            << " already imported (identity " << it->second.index << ")"
+            << " — cross-identity RAW deps are invisible to the scheduler."
+            << std::endl;
+        if (std::getenv("PRIMAL_RG_STRICT_IMPORT")) {
+            assert(false && "RG single-import-identity violation (C2)");
+        }
+    }
+}
+
 RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource,
                                               rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
+    CheckSingleImportIdentity(name, resource, handle);
     auto rgResource = std::make_unique<RenderGraphResource>(name, handle, RGResourceType::Unknown);
     rgResource->SetImportedResource(resource);
     rgResource->SetInitialState(initialState);
@@ -99,6 +126,7 @@ RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::Resour
                                              const rhi::TextureDesc& desc,
                                              rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
+    CheckSingleImportIdentity(name, resource, handle);
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
@@ -113,6 +141,7 @@ RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::Resourc
                                             const rhi::BufferDesc& desc,
                                             rhi::ResourceState initialState) {
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
+    CheckSingleImportIdentity(name, resource, handle);
     auto rgResource = std::make_unique<RenderGraphBuffer>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);

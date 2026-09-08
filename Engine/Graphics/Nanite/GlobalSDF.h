@@ -24,6 +24,14 @@ struct GlobalSDFConfig {
 
 struct SDFCascade {
     rhi::ResourceHandle sdf_texture{ rhi::handles::INVALID_RESOURCE };
+    // T3.2 (D7): conservative min-mip chain — standalone textures per level
+    // (level 1..mip_count; level 0 is sdf_texture). Enables cone-width-aware
+    // sampling without per-mip image views.
+    static constexpr u32 kMaxMipLevels = 4;
+    rhi::ResourceHandle mip_textures[kMaxMipLevels]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    u32 mip_count{ 0 };   // number of entries in mip_textures actually allocated
     math::v3 origin{ 0.0f, 1.0f, 1.0f };
     math::v3 extent{ 10.0f, 10.0f, 10.0f };
     f32 voxel_size{ 1.0f };
@@ -140,6 +148,14 @@ private:
     SDFVoxelizationResources vox_resources_;
     rhi::PipelineHandle vox_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineLayoutHandle vox_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    // T3.2 (D7): min-mipmap chain dispatch primitives (created lazily)
+    rhi::PipelineHandle mip_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle mip_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle mip_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetHandle mip_descriptor_sets_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET };
+    bool mip_pipeline_tried_{ false };
     rhi::DescriptorSetLayoutHandle vox_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetHandle vox_descriptor_sets_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET,
@@ -168,6 +184,8 @@ private:
     bool CreateGlobalTexture();
     void UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& snapshot, const math::v3& camera_position);
     void MergeCascades();
+    bool CreateMipPipeline();
+    void DispatchMipChain(rhi::RHICommandBuffer* cmd, u32 cascade_index);
     void UpdateStats(u64 current_frame);
 
     bool AllocateTexture(rhi::ResourceHandle& handle, u32 resolution, u32 mip_levels);

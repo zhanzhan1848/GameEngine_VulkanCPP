@@ -29,9 +29,10 @@ struct InstanceData {
     uint _pad0;
     uint _pad1;
     uint _pad2;
-    packed_float3 bounds_center;
-    float bounds_radius;           // offset 172 — matches CPU InstanceData layout
-    uint _pad_br[4];               // 16 bytes padding to reach 192 total
+    packed_float3 bounds_center;   // offset 160
+    uint _pad_center;              // offset 172 — math::v3 (simd::float3) is 16 B on arm64; lane 4 is padding
+    float bounds_radius;           // offset 176 — verified via offsetof(InstanceData, bounds_radius)
+    uint _pad_br[3];               // offsets 180-191 (total 192)
 };
 
 struct MeshletData {
@@ -146,7 +147,9 @@ kernel void voxelize_sdf(
     // World position of this voxel center
     float3 voxelPos = origin + (float3(tid) + 0.5f) * voxelSize;
 
-    float minDist = 1e10f;
+    // B14: far constant must stay BELOW the tracer's out-of-cascade
+    // sentinel (1e9) — 1e10 aliased with it and sparse regions read as miss.
+    float minDist = 1e6f;
 
     for (uint instIdx = 0; instIdx < numInstances; ++instIdx) {
         // Early out: can't get better than zero
@@ -159,6 +162,12 @@ kernel void voxelize_sdf(
         float distToBounds = length(toCenter) - inst.bounds_radius;
         // Skip if voxel is more than 4 voxels outside the instance bounds
         if (distToBounds > voxelSize * 4.0f) continue;
+
+        // B12: meshlet radius is local-space; scale by the instance's max axis
+        // scale so uniformly-scaled instances are not over-culled.
+        float instMaxScale = max(max(length(float3(inst.world_matrix.columns[0].xyz)),
+                                    length(float3(inst.world_matrix.columns[1].xyz))),
+                                    length(float3(inst.world_matrix.columns[2].xyz)));
 
         // Iterate clusters (meshlets) for this instance
         uint clusterStart = inst.cluster_start;
@@ -174,7 +183,7 @@ kernel void voxelize_sdf(
 
             // Meshlet bounding sphere cull
             float3 meshletCenter = float3(meshlet.center[0], meshlet.center[1], meshlet.center[2]);
-            float meshletRadius = meshlet.radius;
+            float meshletRadius = meshlet.radius * instMaxScale;
 
             // Transform meshlet center to world space
             float4 worldCenter = inst.world_matrix * float4(meshletCenter, 1.0f);
@@ -214,4 +223,33 @@ kernel void voxelize_sdf(
     }
 
     sdf_output.write(float4(minDist, 0.0f, 0.0f, 0.0f), tid);
+}
+
+// ============================================================================
+// T3.2 (D7) first slice: conservative min-downsample mip chain.
+// One dispatch per mip level: each destination texel takes the MIN of the
+// 2x2x2 source block — conservative for SDF (a coarse distance never
+// over-estimates, so cone stepping cannot tunnel through thin walls).
+// src/dst are standalone textures per level (no per-mip image views needed).
+// ============================================================================
+kernel void global_sdf_mipmap(
+    uint3 tid [[thread_position_in_grid]],
+    texture3d<float, access::read>  src [[texture(0)]],
+    texture3d<float, access::write> dst [[texture(1)]]
+)
+{
+    uint3 dstDims = uint3(dst.get_width(), dst.get_height(), dst.get_depth());
+    if (any(tid >= dstDims)) return;
+
+    uint3 srcDims = uint3(src.get_width(), src.get_height(), src.get_depth());
+    uint3 c = tid * 2u;
+
+    float best = 3.4e38f;
+    for (uint z = 0u; z < 2u; ++z)
+    for (uint y = 0u; y < 2u; ++y)
+    for (uint x = 0u; x < 2u; ++x) {
+        uint3 sc = min(c + uint3(x, y, z), srcDims - 1u);
+        best = min(best, src.read(sc).r);
+    }
+    dst.write(float4(best, 0.0f, 0.0f, 0.0f), tid);
 }

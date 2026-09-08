@@ -1127,7 +1127,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     RGResourceHandle scCardDataHandle;
     RGResourceHandle scCardLookupHandle;
     if (surface_cache_available_) {
-        scLightingHandle = graph.ImportResource("SurfaceCache_Lighting_ForProbes", surface_cache_lighting_atlas_);
+        // T1.1 (C2): reuse the pipeline-level "SCLightingAtlas" import when
+        // provided so the atlas has exactly one RG identity per frame.
+        scLightingHandle = external_lighting_rg_.IsValid()
+            ? external_lighting_rg_
+            : graph.ImportResource("SurfaceCache_Lighting_ForProbes", surface_cache_lighting_atlas_);
         scCardDataHandle = graph.ImportResource("SurfaceCache_CardData_ForProbes", surface_cache_card_data_buffer_);
         scCardLookupHandle = graph.ImportResource("SurfaceCache_CardLookup_ForProbes", surface_cache_card_lookup_buffer_);
     }
@@ -1658,9 +1662,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     case GITemporalStrategy::Reprojection:     temporalMode = 2.0f; break;
                     default: break;
                 }
+                // A11: one-shot reset — alpha 1.0 keeps only the current
+                // trace, dropping any stale history in one pass.
+                const float temporalAlpha = temporal_reset_pending_ ? 1.0f : 0.1f;
+                temporal_reset_pending_ = false;
                 TemporalCB tcb{
                     camera_data.prev_proj_matrix * camera_data.prev_view_matrix,
-                    grid_width_ * grid_height_, 0.1f, 0.5f, 0.5f, 2.0f, 2.0f,
+                    grid_width_ * grid_height_, temporalAlpha, 0.5f, 0.5f, 2.0f, 2.0f,
                     grid_width_, grid_height_, temporalMode, 0.0f};
 
                 // Vulkan reads the pool UBO (binding 5); Metal uses setBytes below.

@@ -27,9 +27,9 @@ struct InstanceData {
     u32 padding;                         // 4 bytes - offset 148
     u32 padding1;                         // 4 bytes - offset 152 (extra padding for 16-byte alignment)
     u32 padding2;                         // 4 bytes - offset 156 (extra padding for alignment)
-    math::v3 bounds_center;               // 12 bytes - offsets 160-171 (16-byte aligned!)
-    f32 bounds_radius;                    // 4 bytes - offset 172
-    u32 bounds_padding[2];                // 12 bytes - offsets 176-187
+    math::v3 bounds_center;               // 16 bytes - offsets 160-175 (simd::float3 is 16 B on arm64; lane 4 = padding)
+    f32 bounds_radius;                    // 4 bytes - offset 176 (verified via offsetof; all shader mirrors must read @176)
+    u32 bounds_padding[2];                // 4 bytes - offsets 180-187
     u32 bounds_padding2;                  // 4 bytes - offset 188-191 (total 192 bytes)
 };
 
@@ -67,6 +67,10 @@ public:
     u32 GetClusterRefCount() const { return cluster_ref_count_; }
     bool NeedsFullRebuild() const { return needs_full_rebuild_; }
     void ClearFullRebuildFlag() { needs_full_rebuild_ = false; }
+    // A14: external trigger so per-frame watchers can force a re-extract
+    // (e.g. entities spawned after the first frame previously stayed
+    // invisible because the flag was only set on Initialize/capacity growth).
+    void MarkFullRebuild() { needs_full_rebuild_ = true; }
     
     const utl::vector<InstanceData>& GetInstanceData() const { return instance_data_cpu_; }
 

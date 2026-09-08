@@ -415,6 +415,7 @@ void LumenDDGIPass::Shutdown() {
     if (!initialized_) return;
     initialized_ = false;
 
+    depth_readback_ring_.shutdown(device_);
     device_ = nullptr;
 
     // No explicit GPU resource destruction needed -- handles are POD types
@@ -592,6 +593,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (multi-bounce)
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
+            {13, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SC depth atlas (T3.4 D3)
         };
         finalizeBindings[2].readonly = true;
         finalizeBindings[3].readonly = true;
@@ -600,7 +602,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         finalizeBindings[10].readonly = true;
         finalizeBindings[11].readonly = true;
         finalizeBindings[12].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{13, finalizeBindings};
+        DescriptorSetLayoutDesc layoutDesc{14, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
@@ -617,11 +619,12 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // gbuffer_albedo (T3.1)
             {9, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // ViewProjection (T3.1)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (T3.1)
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SC depth atlas (T3.4 D3 plane test)
         };
         finalizeBindings[7].readonly = true;
         finalizeBindings[8].readonly = true;
         finalizeBindings[10].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{13, finalizeBindings};
+        DescriptorSetLayoutDesc layoutDesc{14, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 }
@@ -796,6 +799,33 @@ void LumenDDGIPass::CreatePipelines() {
     }
 }
 
+// T1.3 (C5): 3-slot readback ring, one depth field per slot (8 MB at the
+// default 16k-probe grid). Bandwidth cost ~0.1 ms/frame of GPU copy; buys
+// zero CPU-GPU sync points in the priority scheduler.
+void LumenDDGIPass::CreateDepthReadbackRing() {
+    static constexpr u32 kFloatsPerProbe = 128;   // [mean64 | var64]
+    const u64 probeCount = (u64)params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+    const u64 bytes = probeCount * kFloatsPerProbe * sizeof(float);
+    if (!depth_readback_ring_.initialize(device_, bytes, 3)) {
+        PRIMAL_LOG_STREAM(Warn, "Render")
+            << "[LumenDDGI] depth readback ring init failed — scheduler falls back to distance/age priority."
+            << std::endl;
+    }
+
+    // T1.5 (R4): indirect dispatch count buffer (Vulkan layout: 3×u32
+    // group counts; Metal dispatchThreadgroupsWithIndirectBuffer reads the
+    // same 3×u32 threadgroup layout; Dawn dispatchWorkgroupsIndirect too).
+    {
+        BufferDesc desc{};
+        desc.size = 16;   // 3×u32 + pad
+        desc.type = BufferType::Structured;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.bindFlags = static_cast<u32>(ResourceUsage::IndirectArg) |
+                         static_cast<u32>(BufferUsageFlags::TransferDst);
+        probe_dispatch_count_buffer_ = device_->CreateBuffer(desc);
+    }
+}
+
 void LumenDDGIPass::CreateConstantBuffers() {
     auto CreateCBs = [&](ResourceHandle (&cbs)[3], u64 size) {
         for (int i = 0; i < 3; i++) {
@@ -880,6 +910,8 @@ void LumenDDGIPass::CreateProbeTextures() {
             device_->UnmapBuffer(depth_buffers_[i]);
         }
     }
+
+    CreateDepthReadbackRing();
 
     // Confidence buffer (single-buffered). convergenceAge is a monotonic
     // per-probe counter (+1/30 per update); the previous triple-buffered
@@ -1016,6 +1048,40 @@ void LumenDDGIPass::CreateProbeTextures() {
 // Initialize probes from static bake data or sky estimate fallback
 // ============================================================================
 
+void LumenDDGIPass::ClearProbeField() {
+    if (!device_ || !initialized_) return;
+    const u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+    for (int f = 0; f < 3; f++) {
+        // Irradiance: 9 float3 coefficients per probe, flat float[3] layout.
+        if (irradiance_buffers_[f] != rhi::handles::INVALID_RESOURCE) {
+            if (float* irr = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]))) {
+                memset(irr, 0, static_cast<u64>(probeCount) * 9 * sizeof(float) * 3);
+                device_->UnmapBuffer(irradiance_buffers_[f]);
+            }
+        }
+        // Depth history: 128 floats/probe — reset to the same "open" defaults
+        // CreateProbeTextures uses (mean = ray_max_distance, var = small
+        // non-zero: zero variance trips the Chebyshev singularity).
+        if (depth_buffers_[f] != rhi::handles::INVALID_RESOURCE) {
+            constexpr u32 kDepthTexels = 64;            // 8×8 octahedral
+            constexpr u32 kFloatsPerProbe = kDepthTexels * 2;
+            const float depthMeanInit = params_.ray_max_distance;
+            const float depthVarInit = params_.probe_spacing * params_.probe_spacing * 0.25f;
+            if (float* dep = static_cast<float*>(device_->MapBuffer(depth_buffers_[f]))) {
+                for (u32 pIdx = 0; pIdx < probeCount; ++pIdx) {
+                    float* probe = dep + (u64)pIdx * kFloatsPerProbe;
+                    for (u32 j = 0; j < kDepthTexels; ++j) probe[j] = depthMeanInit;
+                    for (u32 j = kDepthTexels; j < kFloatsPerProbe; ++j) probe[j] = depthVarInit;
+                }
+                device_->UnmapBuffer(depth_buffers_[f]);
+            }
+        }
+    }
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[LumenDDGI] Probe field cleared (scene switch) — re-seeding from trace."
+        << std::endl;
+}
+
 void LumenDDGIPass::InitializeProbesFromStatic() {
     u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
 
@@ -1138,6 +1204,8 @@ void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
         ? view.grid_offsets : sc_grid_offsets_buffer_;
     sc_grid_cards_buffer_ = view.grid_cards != handles::INVALID_RESOURCE
         ? view.grid_cards : sc_grid_cards_buffer_;
+    sc_depth_atlas_ = view.depth_atlas != handles::INVALID_RESOURCE
+        ? view.depth_atlas : sc_depth_atlas_;   // T3.4 (D3)
 
     // Store SC params in DDGIVolumeData (triple-buffered, confirmed working)
     // instead of a separate sc_params buffer (binding 6 was not working).
@@ -1634,12 +1702,21 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // also a GPU sync point, killing CPU/GPU parallelism and tanking
             // framerate (Mode 11 dropped to ~2 FPS with it on). Fall back to
             // distance + age priority only on WASM.
+            // T1.3 (C5): the variance source is the readback ring copy from
+            // two frames ago — identical data to what the old code read via
+            // Map(depth_buffers_[histIdx]) (outIdx@N-2 == histIdx@N), minus
+            // the CPU-GPU sync point and the Dawn shared-memory clobber.
+            // WASM keeps its fallback only when the ring is unavailable.
             const bool isWasm = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
-            if (!isWasm &&
+            const bool ringReady = depth_ring_copies_ > 2 && depth_readback_ring_.is_initialized();
+            if ((!ringReady ? !isWasm : true) &&
                 !isFirstFrame &&
                 probe_states_.size() == probeCountTotal &&
                 probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE) {
-                float* depthData = static_cast<float*>(device_->MapBuffer(depth_buffers_[histIdx]));
+                const u32 rbSlot = depth_readback_ring_.slot_for_frame(camera_data.frame_index - 2u);
+                float* depthData = ringReady
+                    ? static_cast<float*>(depth_readback_ring_.map(device_, rbSlot))
+                    : nullptr;
                 if (depthData) {
                     static constexpr u32 DDGI_DEPTH_TEXELS = 64;
                     static constexpr u32 DDGI_FLOATS_PER_PROBE = DDGI_DEPTH_TEXELS * 2;
@@ -1650,7 +1727,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         }
                         probe_states_[i].max_depth_variance = maxVar;
                     }
-                    device_->UnmapBuffer(depth_buffers_[histIdx]);
+                    if (ringReady) depth_readback_ring_.unmap(device_, rbSlot);
+                    else device_->UnmapBuffer(depth_buffers_[histIdx]);
                 }
 
                 // Compute priority scores and select top-N probes
@@ -1712,6 +1790,20 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         mapped->ProbeUpdateCount = updateCount;
                         device_->UnmapBuffer(volume_cb_[frameIdx]);
                         volume_data_.ProbeUpdateCount = updateCount;
+                    }
+                }
+
+                // T1.5 (R4): encode the dispatch group count for the
+                // DispatchIndirect smoke path (PRIMAL_DDGI_INDIRECT=1).
+                // Group encoding matches the platform branches at the depth
+                // dispatch below (Metal: one group per probe; Vulkan: 64
+                // probes per group; Dawn: workgroups = probes).
+                if (probe_dispatch_count_buffer_ != handles::INVALID_RESOURCE) {
+                    const bool isMetalPlat = (device_->GetPlatform() == RHIPlatform::Metal);
+                    const u32 groups = isMetalPlat ? updateCount : ((updateCount + 63) / 64);
+                    if (u32* cnt = static_cast<u32*>(device_->MapBuffer(probe_dispatch_count_buffer_))) {
+                        cnt[0] = groups; cnt[1] = 1; cnt[2] = 1; cnt[3] = 0;
+                        device_->UnmapBuffer(probe_dispatch_count_buffer_);
                     }
                 }
             }
@@ -1833,8 +1925,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                             {11, DescriptorType::StorageBuffer, sc_grid_offsets_buffer_},
                             {12, DescriptorType::StorageBuffer, sc_grid_cards_buffer_},
+                            {13, DescriptorType::SampledImage,  sc_depth_atlas_},   // T3.4 (D3)
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 13);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 14);
                     } else {
                         DescriptorData finalizeParams[] = {
                             {3, DescriptorType::SampledImage,  lightingAtlasTex},
@@ -1850,8 +1943,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {5, DescriptorType::SampledImage,  gbufferAlbedoTex},
                             {9, DescriptorType::UniformBuffer, finalize_vp_cb_[frameIdx]},
                             {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
+                            {6, DescriptorType::SampledImage,  sc_depth_atlas_},   // T3.4 (D3)
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 13);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 14);
                     }
 
                     cmd->BindComputePipeline(finalize_pipeline_);
@@ -2014,7 +2108,32 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     (device_->GetPlatform() == RHIPlatform::Metal)
                         ? updateCount
                         : ((updateCount + 63) / 64);
-                cmd->Dispatch(depthGroups, 1, 1);
+                // T1.5 (R4): DispatchIndirect smoke path — same group counts
+                // uploaded per frame into probe_dispatch_count_buffer_.
+                // Opt-in so the default dispatch stays unchanged.
+                static const bool useIndirectDispatch =
+                    std::getenv("PRIMAL_DDGI_INDIRECT") != nullptr;
+                if (useIndirectDispatch &&
+                    probe_dispatch_count_buffer_ != handles::INVALID_RESOURCE) {
+                    cmd->DispatchIndirect(probe_dispatch_count_buffer_, 0);
+                } else {
+                    cmd->Dispatch(depthGroups, 1, 1);
+                }
+
+                // T1.3 (C5): async variance readback — copy the freshly
+                // written depth field into this frame's ring slot. The
+                // scheduler (2 frames later) maps the slot instead of
+                // Map-ing the GPU-hot depth buffer. Slot reuse safety uses
+                // the same bound as the staging pool: the per-frame fence
+                // waited in BeginFrame covers slot age = 3 frames.
+                if (depth_readback_ring_.is_initialized()) {
+                    const u32 rbSlot = depth_readback_ring_.slot_for_frame(camera_data.frame_index);
+                    const u64 depthBytes = (u64)probeCountTotal * 128u * sizeof(float);
+                    cmd->CopyBuffer(depth_buffers_[outIdx],
+                                    depth_readback_ring_.buffer(rbSlot),
+                                    0, 0, depthBytes);
+                    ++depth_ring_copies_;
+                }
             }
             cmd->MemoryBarrier(
                 PipelineStage::ComputeShader, PipelineStage::ComputeShader,

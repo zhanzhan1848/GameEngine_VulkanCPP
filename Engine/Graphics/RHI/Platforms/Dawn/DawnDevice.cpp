@@ -431,6 +431,18 @@ void DawnDevice::waitIdleImpl() const {
 void DawnDevice::beginFrameImpl() {
     ResetPushConstantOffset();
     currentFrameIndex_ = currentFrameIndex_.load() + 1;
+
+    // R1/T0.13: keep the deferred-release clock moving for parity. Dawn's
+    // native resources are reference-counted, so this only paces slot reuse.
+    // DEFAULT OFF — see MetalDevice::beginFrameImpl for the rationale.
+    static const bool deferredFreeEnabled =
+        std::getenv("PRIMAL_DEFERRED_FREE") != nullptr;
+    if (!deferredFreeEnabled) return;
+    const u64 deferredFrame = ++deferred_frame_counter_;
+    bufferAllocator_.TickDeferredRelease(deferredFrame);
+    textureAllocator_.TickDeferredRelease(deferredFrame);
+    commandBufferAllocator_.TickDeferredRelease(deferredFrame);
+    syncAllocator_.TickDeferredRelease(deferredFrame);
 }
 
 void DawnDevice::endFrameImpl() {

@@ -6,6 +6,7 @@
 #include "Graphics/Dawn/DawnDebugParams.h"
 #include "Graphics/Lumen/GIDebugParams.h"
 #include "Graphics/Lumen/GICacheView.h"
+#include "Graphics/RHI/Core/RHIReadbackRing.h"
 #include <vector>
 
 namespace primal::graphics::rhi {
@@ -172,6 +173,11 @@ public:
     rhi::ResourceHandle GetIrradianceBuffer(u32 frame_idx) const {
         return irradiance_buffers_[frame_idx % 3];
     }
+
+    // A12/T0.10: zero the probe field (all 3 frame slots' irradiance + depth
+    // history) so a scene switch can never inherit the previous scene's GI.
+    // The normal trace/update loop re-seeds within a few frames.
+    void ClearProbeField();
     rhi::ResourceHandle GetDepthBuffer(u32 frame_idx) const {
         return depth_buffers_[frame_idx % 3];
     }
@@ -230,8 +236,14 @@ public:
 
     // T4.1: runtime probe-update budget (GIAdaptiveGovernor). Applied at the
     // next AddPass — CPU-side only, no reallocation.
+    // A5: write the update-loop member directly — the loop reads
+    // max_probes_per_frame_ (frozen from params_ at Initialize), so a
+    // params_-only write never reached it.
     void SetMaxProbesPerFrame(u32 n) {
-        if (n > 0) params_.max_probes_per_frame = n;
+        if (n > 0) {
+            params_.max_probes_per_frame = n;
+            max_probes_per_frame_ = n;
+        }
     }
 
     // Accessors for Surface Cache → DDGI integration
@@ -333,6 +345,8 @@ private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
     void CreateConstantBuffers();
+    // T1.3 (C5): async variance readback ring (3 slots x probeCount*128 floats)
+    void CreateDepthReadbackRing();
     void CreateProbeTextures();
     void InitializeProbesFromStatic();
 
@@ -429,6 +443,15 @@ private:
     u32 max_probes_per_frame_ = 256;
     u32 probe_update_offset_ = 0;  // round-robin offset for partial updates
 
+    // T1.3 (C5): async readback ring for probe-depth variance scheduling —
+    // replaces the per-frame MapBuffer of the GPU-hot depth history.
+    rhi_readback_ring depth_readback_ring_;
+    u32 depth_ring_copies_ = 0;    // copies issued; consumer waits for > 2
+    // T1.5 (R4): DispatchIndirect smoke consumer — probe-update dispatch count
+    // (group count, platform-encoded) uploaded per frame; opt-in via
+    // PRIMAL_DDGI_INDIRECT=1 so the default path stays CPU-computed dispatch.
+    rhi::ResourceHandle probe_dispatch_count_buffer_{ rhi::handles::INVALID_RESOURCE };
+
     // Static probe volume reference (for initialization from bake data)
     StaticProbeVolume* static_volume_{nullptr};
 
@@ -455,6 +478,7 @@ private:
     rhi::ResourceHandle sc_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle sc_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle sc_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle sc_depth_atlas_{ rhi::handles::INVALID_RESOURCE };   // T3.4 (D3)
     rhi::ResourceHandle sc_grid_offsets_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle sc_grid_cards_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle sc_params_buffer_{ rhi::handles::INVALID_RESOURCE };

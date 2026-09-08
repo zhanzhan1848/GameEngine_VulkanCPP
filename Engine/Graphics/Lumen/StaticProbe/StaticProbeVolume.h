@@ -12,7 +12,10 @@ struct ProbeCacheHeader {
     // covers Sponza's [-32,+32]³ bounds. v2's 8x4x8 left [+24,+32]×[+8,+16]
     // out-of-grid, producing a hard black edge on the right half of the screen.
     // Bump invalidates IDBFS-cached v2 volumes so live visitors re-seed.
-    static constexpr u32 VERSION{3};
+    // v4 (A12/T0.10): added scene_hash — caches are scene-specific; a loader
+    // can reject a cache baked for a different scene instead of polluting the
+    // first DDGI seed. Bump invalidates all v3 caches.
+    static constexpr u32 VERSION{4};
 
     u32 magic{MAGIC};
     u32 version{VERSION};
@@ -23,6 +26,7 @@ struct ProbeCacheHeader {
     float origin[3]{0.0f, 0.0f, 0.0f};
     u32 probe_count{0};
     u32 bounce_count{0};
+    u32 scene_hash{0};   // 0 = unknown/legacy — hash validation skipped
 };
 
 class StaticProbeVolume {
@@ -53,6 +57,13 @@ public:
     bool IsLoaded() const { return is_loaded_; }
     u32 ProbeCount() const { return grid_dim_x_ * grid_dim_y_ * grid_dim_z_; }
     const StaticProbeParams& GetParams() const { return params_; }
+
+    // A12/T0.10: scene-hash validation — SetSceneHash before SaveToFile;
+    // SceneHash() returns what was loaded (0 = unknown). InvalidateLoaded()
+    // drops the in-memory copy so consumers fall back to the sky estimate.
+    void SetSceneHash(u32 h) { scene_hash_ = h; }
+    u32 SceneHash() const { return scene_hash_; }
+    void InvalidateLoaded() { is_loaded_ = false; }
 
     rhi::ResourceHandle GetStaticIrradiance() const { return static_irradiance_; }
     rhi::ResourceHandle GetStaticSkySH() const { return static_sky_sh_; }
@@ -86,6 +97,7 @@ private:
     bool is_loaded_{false};
     bool gpu_uploaded_{false};
 
+    u32 scene_hash_{0};   // A12/T0.10: identity of the scene this cache was baked for
     u32 grid_dim_x_{0};
     u32 grid_dim_y_{0};
     u32 grid_dim_z_{0};

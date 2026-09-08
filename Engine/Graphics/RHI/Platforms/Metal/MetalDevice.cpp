@@ -254,6 +254,24 @@ void MetalDevice::beginFrameImpl() {
     // waited on the per-frame fence for frame N-FRAME_COUNT, so the pool we're
     // about to reclaim is GPU-safe to overwrite.
     stagingAllocator_.BeginFrame();
+
+    // R1/T0.13: deferred slot release — freed allocator slots stay reserved
+    // for kDeferredFreeLag frames so in-flight frames cannot alias a live
+    // ResourceHandle to a newly allocated object (C1-H2).
+    //
+    // DEFAULT OFF (opt-in via PRIMAL_DEFERRED_FREE=1): deferral keeps freed
+    // slots alive across frames, which collides with an unresolved
+    // MetalCommandBuffer lifetime assumption — frame 1 SEGV with a zeroed
+    // vtable at GPUCullingPipeline::Execute's MemoryBarrier (bisected to this
+    // tick, reproducible on clean builds). The complete fix is the
+    // ResourceHandle generation counter (ABI change) planned for M1.
+    static const bool deferredFreeEnabled =
+        std::getenv("PRIMAL_DEFERRED_FREE") != nullptr;
+    if (!deferredFreeEnabled) return;
+    const u64 deferredFrame = ++deferred_frame_counter_;
+    bufferAllocator_.TickDeferredRelease(deferredFrame);
+    textureAllocator_.TickDeferredRelease(deferredFrame);
+    commandBufferAllocator_.TickDeferredRelease(deferredFrame);
 }
 
 void MetalDevice::endFrameImpl() {

@@ -360,6 +360,7 @@ private:
     
     std::atomic<u32> currentFrameIndex_{0};             ///< 当前帧索引
     
+    u64 deferred_frame_counter_{0};             ///< R1/T0.13 deferred-release clock
     RHIAllocator<MetalBuffer> bufferAllocator_; ///< 缓冲区分配器
     RHIAllocator<MetalTexture> textureAllocator_; ///< 纹理分配器
     RHIAllocator<MetalCommandBuffer> commandBufferAllocator_; ///< 命令缓冲区分配器

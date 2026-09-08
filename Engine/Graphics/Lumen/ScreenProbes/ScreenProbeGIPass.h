@@ -182,6 +182,13 @@ public:
         surface_cache_available_ = IsScreenProbeSurfaceCacheValid(view);
     }
 
+    // T1.1 (C2): single physical import identity — the pipeline imports the
+    // SC lighting atlas ONCE ("SCLightingAtlas") and hands the RG handle
+    // here; AddPass then skips its own "SurfaceCache_Lighting_ForProbes"
+    // import, which aliased the same physical texture under a second
+    // identity (cross-identity RAW deps invisible to the scheduler).
+    void SetExternalLightingRG(rendergraph::RGResourceHandle rg) { external_lighting_rg_ = rg; }
+
     // DEPRECATED (X2/A3): 旧签名保留为转发适配器（等价映射进视图签名）。
     void SetSurfaceCacheData(
         rhi::ResourceHandle lighting_atlas,
@@ -246,6 +253,11 @@ public:
     // （默认，行为不变）；EMAVarianceClamp/Reprojection 暂存枚举（TODO X3）。
     void SetTemporalStrategy(GITemporalStrategy strategy);
     GITemporalStrategy GetTemporalStrategy() const { return temporal_strategy_; }
+
+    // A11: skip history blending for exactly one temporal accumulation pass —
+    // call on camera cut / scene switch so stale probe radiance never bleeds
+    // into the new view.
+    void RequestTemporalReset() { temporal_reset_pending_ = true; }
 
 private:
     void CreateDescriptorSetLayouts();
@@ -375,6 +387,7 @@ private:
 
     // Surface Cache integration
     rhi::ResourceHandle surface_cache_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
+    rendergraph::RGResourceHandle external_lighting_rg_{};   // T1.1 (C2)
     rhi::ResourceHandle surface_cache_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_grid_offsets_buffer_{ rhi::handles::INVALID_RESOURCE };
@@ -403,6 +416,8 @@ private:
 
     // X2/A3 时域策略枚举存储（EMA = 现有 temporal accumulation，行为不变）
     GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;
+    // A11: one-shot temporal reset flag (alpha forced to 1.0 for one pass)
+    bool temporal_reset_pending_ = false;
 };
 
 } // namespace primal::graphics::lumen
