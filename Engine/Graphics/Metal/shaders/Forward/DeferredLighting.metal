@@ -651,7 +651,9 @@ fragment float4 fragmentFusionIndirect(
 
     // DDGI is the stable low-frequency field; SPGI may replace it only where
     // the screen-probe estimate carries at least as much energy.
-    float3 ddgiBase   = ddgi * 0.5f;  // 2026-09-05 对齐 UE 参考：GI 水平校准
+    // B3: platform knob removed — Vulkan path consumes ddgi at 1.0; the 0.5
+    // here was absorbing the missing 1/π downstream (fixed below).
+    float3 ddgiBase   = ddgi;
     float3 spgiTarget = spgi4.rgb * 1.25f;
     // T8.8: replacement needs a real brightness ADVANTAGE — luminance-ratio
     // ramp 1.10→1.35 gates the max() merge; confidence stays a multiplier.
@@ -663,10 +665,15 @@ fragment float4 fragmentFusionIndirect(
 
     // T8.9 + T8.10c: sky-leak ambient (Lumen far-field) — additive with the
     // near-field estimate, occlusion-modulated so shadow pockets key it down.
-    gi += float3(0.085f, 0.09f, 0.105f) * mix(0.45f, 1.0f, pow(ssao, 1.1f)); // 对齐 UE 暗部（减半档）
+    gi += float3(0.085f, 0.09f, 0.105f) * ao;   // B9: far-field floor keeps AO（对齐 UE 暗部）
 
-    float3 indirect = albedo * gi;
-    indirect *= ao;
+    // B3: indirect follows the same Lambert law as direct (kD·albedo/π·E) —
+    // the direct chain divides by π (line ~307/561) and the indirect chain
+    // never did, biasing indirect π× bright.
+    // B9: the full-stack `indirect *= ao` removed — GTAO double-occluded the
+    // near-field GI (probe visibility already attenuates it); the far-field
+    // floor above keeps its AO modulation (its only visibility cue).
+    float3 indirect = albedo * gi * 0.31830988f;
 
     return float4(indirect, 1.0f);
 }
@@ -711,7 +718,12 @@ fragment float4 fragmentFusion(
     // T8.13 sync: output HDR linear — Vulkan FusionComposite.frag parity
     // ("tonemap is handled by FinalBlit to avoid double tonemap"). The chain
     // continues through TAA → Bloom → ToneMappingPass (the single ACES+gamma).
-    float3 result = (scene + indirect + reflection) * vol.a + vol.rgb;
+    // B10: indirect diffuse carries (1-F)·(1-metallic) — the direct chain's
+    // kD=(1-kS) energy split was missing here, over-brightening diffuse GI
+    // exactly where the specular lobe (sharing the same energy) peaks.
+    float3 F = F0 + (float3(1.0f) - F0) * pow(1.0f - NoV, 5.0f);
+    float kD = 1.0f - metallic;
+    float3 result = (scene + indirect * kD * (float3(1.0f) - F) + reflection) * vol.a + vol.rgb;
     result = clamp(result, float3(0.0f), float3(64.0f));
 
     return float4(result, 1.0f);
