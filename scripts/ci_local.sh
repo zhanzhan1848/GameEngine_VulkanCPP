@@ -96,4 +96,7 @@ open('$TMP/ci_src.png', 'wb').write(png)"
     echo "editor smoke OK"
 fi
 
+# T1.7 (E1 前半)：shader 同语言拷贝漂移门禁（基线快照机制）
+"$ROOT/scripts/check_shader_copies.sh" || fail "shader 拷贝漂移门禁"
+
 printf '\nCI LOCAL PASSED（%s）\n' "${CONFIG}" >&2
