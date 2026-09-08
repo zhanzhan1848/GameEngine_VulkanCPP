@@ -81,6 +81,8 @@ public:
     void Update(const RenderSceneSnapshot& snapshot, u64 current_frame, const math::v3& camera_position);
 
     const SDFCascade& GetCascade(u32 index) const;
+    /// T4.1 (D8): mark all cascades for re-voxelization on dirty transforms.
+    void MarkAllCascadesForRevox();
     const rhi::ResourceHandle GetGlobalTexture() const { return global_sdf_texture_; }
     const GlobalSDFConfig& GetConfig() const { return config_; }
     const GlobalSDFStats& GetStats() const { return stats_; }
@@ -184,6 +186,7 @@ private:
     bool CreateGlobalTexture();
     void UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& snapshot, const math::v3& camera_position);
     void MergeCascades();
+
     bool CreateMipPipeline();
     void DispatchMipChain(rhi::RHICommandBuffer* cmd, u32 cascade_index);
     void UpdateStats(u64 current_frame);

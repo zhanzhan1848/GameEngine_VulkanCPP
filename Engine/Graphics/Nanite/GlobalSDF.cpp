@@ -256,6 +256,15 @@ void GlobalSDF::UpdateCascade(SDFCascade& cascade, const RenderSceneSnapshot& sn
     cascade.origin = new_origin;
 }
 
+// T4.1 (D8): mark ALL cascades for re-voxelization — called on dirty
+// transform events so the SDF tracks geometry that moved without changing
+// the proxy count (which A14's count-based check cannot detect).
+void GlobalSDF::MarkAllCascadesForRevox() {
+    for (auto& cascade : cascades_) {
+        if (cascade.is_valid) cascade.needs_voxelization = true;
+    }
+}
+
 // T3.1 (D6): cascade-chain consistency merge. The runtime field is UNSIGNED
 // (min-distance voxelization) and the tracer resolves overlaps by finest-
 // cascade-first selection (sampleBestSDF_elseIf), so a data-copying GPU

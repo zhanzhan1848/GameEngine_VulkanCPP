@@ -1048,6 +1048,16 @@ void LumenDDGIPass::CreateProbeTextures() {
 // Initialize probes from static bake data or sky estimate fallback
 // ============================================================================
 
+// T4.1 (D8): reset convergence ages — the partial-update scheduler's
+// ageScore term (min(age,30)/30 × 0.3) puts ALL probes at max urgency.
+void LumenDDGIPass::BoostProbePriority() {
+    // The scheduler's ageScore = min(frame - lastUpdate, 30)/30 × 0.3 —
+    // resetting lastUpdate to 0 puts every probe at max urgency.
+    for (auto& ps : probe_states_) {
+        ps.last_update_frame = 0;
+    }
+}
+
 void LumenDDGIPass::ClearProbeField() {
     if (!device_ || !initialized_) return;
     const u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;

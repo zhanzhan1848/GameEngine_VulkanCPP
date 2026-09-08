@@ -178,6 +178,9 @@ public:
     // history) so a scene switch can never inherit the previous scene's GI.
     // The normal trace/update loop re-seeds within a few frames.
     void ClearProbeField();
+    // T4.1 (D8): reset convergence ages so ALL probes become high-priority
+    // in the partial-update scheduler — used on scene/dirty-transform events.
+    void BoostProbePriority();
     rhi::ResourceHandle GetDepthBuffer(u32 frame_idx) const {
         return depth_buffers_[frame_idx % 3];
     }
