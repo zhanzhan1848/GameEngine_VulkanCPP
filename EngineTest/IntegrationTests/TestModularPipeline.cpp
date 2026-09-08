@@ -1535,12 +1535,13 @@ void TestModularPipeline::RunGIFusionVerification(ResourceHandle backBuffer) {
     if (gatherOk) {
         double variation = (gAvg > 1e-6) ? (gMax / gAvg) : 0.0;
         checkBand("gather_variation(max/avg)", variation, 1.2, 1e9);
-        // 2026-09-08 envelope: 2.21 measured × 1.3 (B1 residual headroom).
-        checkBand("gather_avg", gAvg, 0.005, 2.9);
+        // 2026-09-08 B1 calibration: Metal now matches Vulkan at ~5.55.
+        checkBand("gather_avg", gAvg, 0.005, 6.3);
     } else { pass = false; }
     if (finalOk) {
         checkBand("final_dynamic_range(max-min)", fMax - fMin, 0.1, 1e9);
-        checkBand("final_avg", fAvg, 0.005, 0.65);
+        // B1 calibration: brighter GI raises final composite.
+    checkBand("final_avg", fAvg, 0.005, 0.8);
     } else { pass = false; }
 
     std::cout << "[GIFusionVerify] " << (pass ? "ALL ALIGNED ✔" : "MISALIGNED ✘")

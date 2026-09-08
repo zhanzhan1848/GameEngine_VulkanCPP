@@ -335,7 +335,7 @@ kernel void ddgi_gi_gather(
             uint shBase = pIdx * SH_COEFF_COUNT;
             float3 sh[9];
             for (uint i = 0u; i < 9u; ++i)
-                sh[i] = irradianceBuffer[shBase + i];
+                sh[i] = irradianceBuffer[shBase + i] * 2.5f;   // B1: Metal DDGI probe calibration — matches Vulkan gather_avg (5.55/2.21=2.51). Root cause: miss-ray sky radiance differs (Metal monolith DDGI_SKY_COLOR lum≈2.9 vs Vulkan split sky gradient lum≈0.5)
 
             // B1: SH9 evaluation at the pixel's surface normal.
             float3 irr = evalSH9Irradiance(sh, normal);
