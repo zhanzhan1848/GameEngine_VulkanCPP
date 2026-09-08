@@ -87,7 +87,7 @@
   ✅ SPGI 投影归一（B1/B2/B4）│ ✅ SC Radiosity 二弹闭环（D10/T3.3）│ ✅ Fusion 标度（B3/B9/B10）│
   ✅ GlobalSDF 三级联+min-mip+MergeCascades（T3.1/T3.2 首片）│ ✅ RG 单一身份+HZB 收编+ReadbackRing（C2/C3/C5）│
   ✅ 时域卫生（A10/A11/A12/A13）│ ✅ 数值门禁双端全绿（band+golden+hash）│ ✅ 远场 Metal 复活（D2）│
-  ◐ B1 跨端 gather 2.5× 残差（投影归一已做，DDGI SH2 项待查）│ ◐ D8 事件总线（infra 就绪，接线回滚待重做）│
+  ◐ B1 跨端 gather 2.5× 残差——【根因定位 2026-09-08】DDGI 探针内容不同（非 gather 差异）：Vulkan camcell 探针 lum=4.56 vs Metal=1.05（**4.3×**），4.3≈4π/π 提示 MC 归一化系数差异。下一步：对比两端 DDGITrace 的 SC radiance 采样与 Update 的 mcWeight（4π/N vs 其他）→ 修齐后 band 收窄│ ◐ D8 事件总线（infra 就绪，接线回滚待重做）│
   ❌ cone 原语消费者│ ❌ T3.5 radiance cascade│ ❌ M4 全部│ ❌ M5 CLI/编辑器决策（关闭 **F7 主体**）（关闭 **F3**）
 
 ---
