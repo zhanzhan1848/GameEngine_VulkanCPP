@@ -35,7 +35,7 @@
 
 - [ ] ◐ 2026-09-08（M1 首批）：单一物理 import 身份规则落地（默认警告/PRIMAL_RG_STRICT_IMPORT=1 断言）；lighting atlas 三身份合一（SC 生产者身份贯通 SRP→SCDDGI/SPGI，重复 import 警告归零）；后处理链 ~33 处存量多身份读待后续批次收敛（警告清单即工作清单）  **T1.1** RG 单一 import 身份规则 + 违例断言；lighting atlas 三身份合一 — `SurfaceCachePass.cpp:1130` 等（关闭 **C2**）
 - [x] ✅ 2026-09-08（M1 第二批）：HZBBuild pass 声明 Read(depth)+Write(HZB)（原为 SideEffect 空声明）；HZB 纹理单一身份 'HZBTexture' 提前 import，SSGI/SSR/SPGI 三处下游复用（hzbRG 无效时回退自 import——HZB 未 ready 边界帧）；RenderWithCommandBuffer twin 路径的 BuildHZB 在图外直录（时序本就先行），其下游 import 保持原状  **T1.2** HZB 构建收编进 RG（声明写、kernel 绑 RG 句柄）— `StandardRenderPipeline.cpp:2214-2216`（关闭 **C3**）
-- [ ] ◐ 2026-09-08（M1 首批）：DDGI 深度方差调度迁 RHIReadbackRing（3 slot，CopyBuffer 于 depth dispatch 后，2 帧滞后消费，帧 fence 保证槽位安全）；WASM 回退路径保留（ring 不可用时）；Dawn 上 Map 热缓冲的踩写危害随迁移消除  **T1.3** DDGI 深度调度读回迁 RHIReadbackRing（N=2 帧延迟）；纪律注释：禁 Map 读 GPU 热数据 — `LumenDDGIPass.cpp:1642-1653`（关闭 **C5**，R2）
+- [x] ✅ 2026-09-08（M1 首批）：DDGI 深度方差调度迁 RHIReadbackRing（3 slot，CopyBuffer 于 depth dispatch 后，2 帧滞后消费，帧 fence 保证槽位安全）；WASM 回退路径保留（ring 不可用时）；Dawn 上 Map 热缓冲的踩写危害随迁移消除  **T1.3** DDGI 深度调度读回迁 RHIReadbackRing（N=2 帧延迟）；纪律注释：禁 Map 读 GPU 热数据 — `LumenDDGIPass.cpp:1642-1653`（关闭 **C5**，R2）
 - [x] ✅ 2026-09-08（M1 第三批）：实测核实——Metal RG_PROF=1 端到端出数（FinalBlit/FusionComposite/LumenDDGI 等完整 Top-24 表，格式与 Vulkan 一致），审计'只在 Vulkan 出过数'的记录已过时，无需补实现；备注：部分全屏 pass 数值偏大（疑含等待时间），量化精度归 M2 性能工作  **T1.4** 时间戳三端核实与补齐：Metal 端到端跑通 `RG_PROF=1`（T1.5-2024 记录与现状矛盾，先核实）— RHI QueryPool/RG（R3）
   - 验收：Metal 输出与 Vulkan 同格式 GI pass 耗时表
 - [x] ✅ 2026-09-08（M1 第三批）：三端 DispatchIndirect 实现本已完备（Vulkan vkCmdDispatchIndirect / Metal dispatchThreadgroups / Dawn indirect）但零调用者——新增首个 GI 冒烟消费者：DDGI 深度更新 dispatch（probe_dispatch_count_buffer_ 每帧上传平台编码组数；opt-in PRIMAL_DDGI_INDIRECT=1）；Metal+Vulkan 冒烟通过（开启后 GIFusion 门禁/日志与基线逐位一致）。真实 GPU 化调度归 M5  **T1.5** Indirect dispatch 三端语义统一 + 各端一个 GI 冒烟消费者 — R4
@@ -81,8 +81,14 @@
 - [ ] **T5.4** 编辑器/PIE 决策落地（Master Plan §11.1 拍板后执行）：编辑器 deferred+GI 接入或 UI 显式标注；PIE 接 RenderSceneSnapshot（关闭 **F1**）
 - [ ] **T5.5** 死资源清理：67MB ray_hits、4 死管线、绑定无人读的 staticSkySH 等、死旋钮接线或删除（关闭 **F4、F5**）
 - [ ] **T5.6** 文档回填：SDF spec 补 superseded 标注、预设阶梯注释修正、LumenConfigFromPreset 接通或删除、EngineDLL 默认档显式化（关闭 **F6**）
-- [ ] **T5.7** Mode 10 处置：测试激活验证或删除分支（关闭 **F3**）
-- [ ] **T5.8** 终验：对照 `2026-09-07-lumen-source-analysis-notes.md` 特性面自查表复核，更新缺口清单
+- [x] ✅ 2026-09-08（M5）：Mode 10 处置——Dawn 测试路径（非 MeshletDynamicDDGI 模式）激活验证过；native 路径恒 Mode 11（SetDynamicMode(true)）；非死代码保留（关闭 **F3**）
+- [x] ✅ 2026-09-08（M5）：终验特性面对照——
+  ✅ Vulkan 体素化（A1+radius 纠偏）│ ✅ SC 卡片+平面测试（A3/A7/D3）│ ✅ DDGI 探针+bailing+boost（D4/D5）│
+  ✅ SPGI 投影归一（B1/B2/B4）│ ✅ SC Radiosity 二弹闭环（D10/T3.3）│ ✅ Fusion 标度（B3/B9/B10）│
+  ✅ GlobalSDF 三级联+min-mip+MergeCascades（T3.1/T3.2 首片）│ ✅ RG 单一身份+HZB 收编+ReadbackRing（C2/C3/C5）│
+  ✅ 时域卫生（A10/A11/A12/A13）│ ✅ 数值门禁双端全绿（band+golden+hash）│ ✅ 远场 Metal 复活（D2）│
+  ◐ B1 跨端 gather 2.5× 残差（投影归一已做，DDGI SH2 项待查）│ ◐ D8 事件总线（infra 就绪，接线回滚待重做）│
+  ❌ cone 原语消费者│ ❌ T3.5 radiance cascade│ ❌ M4 全部│ ❌ M5 CLI/编辑器决策（关闭 **F7 主体**）（关闭 **F3**）
 
 ---
 
