@@ -149,7 +149,7 @@ kernel void ddgi_gi_gather(
     constant float4* viewCB                [[buffer(0)]],
     constant float4& probeOriginSpacing    [[buffer(1)]],
     constant float4& probeCountsCB         [[buffer(2)]],
-    device const float3* staticSkySHBuffer [[buffer(3)]],         // unused (Vulkan legacy route)
+    device const float3* staticSkySHBuffer [[buffer(3)]],         // DEAD (F4/D5): never read — (void)'d below. Binding kept for layout stability.
     device const float* staticSkyFactor    [[buffer(4)]],         // unused
     constant StaticProbeData& staticProbe  [[buffer(5)]],         // unused
     device const float* confidenceBuffer   [[buffer(6)]],         // unused
