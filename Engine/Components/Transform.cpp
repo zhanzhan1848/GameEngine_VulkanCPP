@@ -254,6 +254,8 @@ namespace primal::transform {
 		{
 			assert(game_entity::entity{ ids[i] }.is_valid());
 			flags[i] = changes_from_previous_frame[id::index(ids[i])];
+			// T4.1: consume-on-read — prevent every-frame GI invalidation loop
+			changes_from_previous_frame[id::index(ids[i])] = 0;
 		}
 	}
 

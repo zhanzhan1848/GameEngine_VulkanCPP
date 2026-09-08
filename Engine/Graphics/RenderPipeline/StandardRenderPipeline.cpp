@@ -1033,8 +1033,8 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                           << " scene instances with CardGenerator → "
                           << cardGen.GetCardCount() << " cards" << std::endl;
 
-        // T4.1 (D8) v2: dirty-transform GI invalidation — without
-        // MarkFullRebuild (which was too expensive and caused GPU hang).
+        // T4.1 (D8) v2: dirty-transform GI invalidation — with
+        // MarkFullRebuild (consume-on-read prevents every-frame loop).
         // GlobalSDF revox + DDGI probe boost only; the SC card positions
         // are updated by the render system's own transform pipeline.
         {
@@ -1049,6 +1049,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                 }
                 if (anyDirty) {
                     lastDirtyCheckFrame = static_cast<u32>(frameCount_);
+                    scene_snapshot_->MarkFullRebuild();
                     nanite::GlobalSDF::Get().MarkAllCascadesForRevox();
                     if (ddgi_pass_ && ddgi_pass_->IsInitialized())
                         ddgi_pass_->BoostProbePriority();

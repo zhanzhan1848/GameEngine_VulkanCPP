@@ -67,7 +67,7 @@
 
 ## M4: 动态场景 + 内容链
 
-- [x] ⚠ 尝试+回滚 2026-09-08：接线 dirty→MarkFullRebuild+revox+probe boost 后引发 GPU hang + WindowServer watchdog crash。根因：①get_updated_components_flags 的 changes_from_previous_frame 永不清零（创建时 component_flags::all 持续脏）→ 每帧触发全量重建 ②全量 Rebind+CardGenerator rebuild+revox mip 链+indirect trace 同帧执行超出 GPU 帧预算 ③consume-on-read 修复影响 ForwardRenderer 全局语义。基础设施已保留（GlobalSDF::MarkAllCascadesForRevox + LumenDDGIPass::BoostProbePriority 方法可用），接线需专门批次：SceneExtractionSystem 集成 + 帧预算控制 + 编辑器实测矩阵（Master Plan 风险备忘的正确预见）  **T4.1** GI 事件总线：dirty transform/材质版本/灯变化/场景事件 → SC 捕获失效 + GlobalSDF revoxelization 置位 + probe 优先级 boost — 接 `QueryDirtyTransforms` 进 GI（关闭 **D8**）
+- [x] ✅ v3 完成 2026-09-08：接线 dirty→MarkFullRebuild+revox+probe boost 后引发 GPU hang + WindowServer watchdog crash。根因：①get_updated_components_flags 的 changes_from_previous_frame 永不清零（创建时 component_flags::all 持续脏）→ 每帧触发全量重建 ②全量 Rebind+CardGenerator rebuild+revox mip 链+indirect trace 同帧执行超出 GPU 帧预算 ③consume-on-read 修复影响 ForwardRenderer 全局语义。基础设施已保留（GlobalSDF::MarkAllCascadesForRevox + LumenDDGIPass::BoostProbePriority 方法可用），v3 落地：consume-on-read（Transform.cpp 消费即清零防每帧循环）+ 30 帧冷却 + MarkFullRebuild+revox+probe boost+temporal reset。验证：Sponza 45s frame 1260 稳定（28fps），零误触发，双端门禁全绿  **T4.1** GI 事件总线：dirty transform/材质版本/灯变化/场景事件 → SC 捕获失效 + GlobalSDF revoxelization 置位 + probe 优先级 boost — 接 `QueryDirtyTransforms` 进 GI（关闭 **D8**）
 - [ ] **T4.2** 离线 card bake（ContentTools：体素化 + Surfel + 6 向卡），运行时 AABB 派生降级为 fallback（关闭 **D9** 前半）
 - [ ] **T4.3** per-mesh SDF 运行时接入第一步：命中点精化 + 梯度法线重建 — `RHIGpuMesh.cpp:190-256` 资产激活
 - [ ] **T4.4** emissive 闭环：GBuffer emissive → 捕获 → LightEval → 探针反弹 + Radiance Intensity Clamp（关闭 **B15** 后半）
