@@ -91,11 +91,20 @@ public:
 
     /// Set logical viewport dimensions.
     /// Actual render resolution = logical × quality_config_.render_scale.
+    /// A13/T0.11: a size change arms viewport_size_changed_, consumed at the
+    /// top of the next frame — TAA/SPGI history reset so no pass blends a
+    /// stale different-size history into the resized output. (Full GBuffer/GI
+    /// texture recreation remains engine-policy work, see the A13 notes.)
     void SetViewportSize(u32 width, u32 height) {
+        const u32 newW = static_cast<u32>(width  * settings_.quality.render_scale);
+        const u32 newH = static_cast<u32>(height * settings_.quality.render_scale);
+        if (newW != render_width_ || newH != render_height_) {
+            viewport_size_changed_ = true;
+        }
         logical_width_ = width;
         logical_height_ = height;
-        render_width_  = static_cast<u32>(width  * settings_.quality.render_scale);
-        render_height_ = static_cast<u32>(height * settings_.quality.render_scale);
+        render_width_  = newW;
+        render_height_ = newH;
     }
 
     /// Inject pre-compiled shader handles. Call before SetLumenConfig.
@@ -518,9 +527,31 @@ private:
     math::m4x4 view_matrix_{};
     math::m4x4 proj_matrix_{};
     // T5.2: previous-frame matrices for SPGI probe reprojection.
+    // A10/A11: now consumed by ALL temporal passes (DDGI/SSGI/GTAO too) and
+    // guarded by prev_matrices_valid_ + camera-cut detection.
     math::m4x4 prev_view_matrix_{};
     math::m4x4 prev_proj_matrix_{};
+    bool prev_matrices_valid_{false};
+    bool camera_cut_this_frame_{false};
+    bool viewport_size_changed_{false};   // A13/T0.11: consumed next frame
+    // A14: proxy count at the last successful snapshot extraction — differs
+    // from GetInstanceCount() because extraction skips proxies without
+    // cluster caches (a permanent gap that must not re-trigger rebuilds).
+    u32 snapshot_proxy_count_{0};
     math::v3 camera_position_{};
+
+  public:
+    /// A11: true exactly on the frame a camera cut was detected (large
+    /// inter-frame view/VP jump) — temporal consumers reset their history.
+    bool WasCameraCutThisFrame() const { return camera_cut_this_frame_; }
+
+  private:
+    /// A12/T0.10: scene-switch handling — snapshot full rebuild, DDGI probe
+    /// field clear, temporal reset, and static probe cache hash validation.
+    /// Called by both Render() and BuildRenderGraph() before current_scene_
+    /// rebinds; internally no-ops unless the scene pointer actually changed.
+    void OnSceneChanged(const RenderScene& scene, bool first_bind);
+    const RenderScene* last_bound_scene_{nullptr};
 
     // Per-frame data
     u64 frameCount_{0};

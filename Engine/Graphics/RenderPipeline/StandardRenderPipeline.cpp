@@ -10,6 +10,7 @@
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderView.h"
+
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
@@ -36,6 +37,98 @@
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
+
+// A4 (T0.4): pack the real scene light list into SurfaceCacheFrameData so the
+// SurfaceCache LightEval uploads per-slot type/position/radius (keeps the
+// point-light path alive). Leaves sc_light_count == 0 when the scene has no
+// lights — the pass then falls back to its legacy single directional slot.
+static void FillSCLightList(lumen::SurfaceCacheFrameData& fd, const RenderScene* scene) {
+    fd.sc_light_count = 0;
+    if (!scene) return;
+    u32 n = 0;
+    for (const auto& rl : scene->GetLights()) {
+        if (n >= lumen::SurfaceCacheFrameData::kSCMaxLights) break;
+        const f32 intensity = std::max(rl.intensity, 0.0f);
+        fd.sc_lights[n * 3 + 0] = math::v4{rl.position.x, rl.position.y, rl.position.z, rl.range};
+        fd.sc_lights[n * 3 + 1] = math::v4{rl.color.x * intensity, rl.color.y * intensity,
+                                           rl.color.z * intensity, 0.0f};
+        fd.sc_lights[n * 3 + 2] = math::v4{rl.direction.x, rl.direction.y, rl.direction.z,
+                                           rl.type == LightType::Directional ? 1.0f : 0.0f};
+        ++n;
+    }
+    fd.sc_light_count = n;
+}
+
+// A12/T0.10: cheap scene identity hash — FNV-1a over each proxy's mesh/entity
+// ids and world translation bits. Not cryptographic; enough to reject loading
+// (or keep) a static probe cache that was baked for a different scene.
+static u32 ComputeSceneHash(const RenderScene& scene) {
+    u32 h = 2166136261u;
+    auto mix = [&h](u32 v) {
+        h ^= v;
+        h *= 16777619u;
+    };
+    auto mixFloat = [&mix](float f) {
+        u32 bits; std::memcpy(&bits, &f, sizeof(bits));   // simd elements have no address
+        mix(bits);
+    };
+    const auto& proxies = scene.GetProxies();
+    mix((u32)proxies.size());
+    for (const auto& p : proxies) {
+        mix((u32)p.meshId);
+        mix((u32)p.entityId);
+        mixFloat(p.transform.columns[3].x);
+        mixFloat(p.transform.columns[3].y);
+        mixFloat(p.transform.columns[3].z);
+    }
+    return h ? h : 1u;
+}
+
+void StandardRenderPipeline::OnSceneChanged(const RenderScene& scene, bool first_bind) {
+    // Per-frame guards: identical scene pointer → nothing to do. The flag
+    // args tell us WHY we may act (first ever bind vs live switch) but the
+    // pointer identity is the actual switch test.
+    if (!first_bind && last_bound_scene_ == &scene) return;
+
+    // A12/T0.10: the three GI caches (snapshot / DDGI probes / static probe
+    // cache) previously survived scene switches untouched — old probe fields
+    // and other-scene caches polluted the new scene's first frames.
+    if (scene_snapshot_) {
+        scene_snapshot_->MarkFullRebuild();
+    }
+    snapshot_proxy_count_ = 0;   // re-arm the A14 growth check
+
+    if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+        ddgi_pass_->ClearProbeField();
+    }
+
+    // Static probe cache validation (A12): reject a cache baked for a
+    // different scene. hash==0 on either side (legacy cache / empty scene)
+    // skips validation.
+    if (static_probe_volume_ && static_probe_volume_->IsLoaded()) {
+        const u32 cacheHash = static_probe_volume_->SceneHash();
+        const u32 sceneHash = ComputeSceneHash(scene);
+        if (cacheHash != 0 && sceneHash != 0 && cacheHash != sceneHash) {
+            static_probe_volume_->InvalidateLoaded();
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lumen] Static probe cache rejected by scene hash (cache="
+                << cacheHash << " scene=" << sceneHash
+                << ") — DDGI re-seeds from trace." << std::endl;
+        }
+    }
+
+    if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+        screen_probe_pass_->RequestTemporalReset();
+    }
+    camera_cut_this_frame_ = true;   // switch is a cut for TAA purposes
+
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[Lumen] Scene " << (first_bind ? "bound" : "switch")
+        << " — snapshot rebuild + GI probe reset queued." << std::endl;
+    last_bound_scene_ = &scene;
+}
+
+
 
 using namespace rhi;
 using namespace rhi::math;
@@ -852,6 +945,40 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     view_matrix_ = view.GetViewMatrix();
     proj_matrix_ = view.GetProjectionMatrix();
 
+    // A10/A11: camera-cut detection. A large inter-frame jump in the view
+    // basis/translation makes every temporal reprojection (TAA/SPGI/DDGI/
+    // SSGI/GTAO) read garbage history. On a cut: re-latch prev := current so
+    // reprojection degenerates to identity for exactly one frame, flag the
+    // frame, and drop TAA history (the worst smearer).
+    camera_cut_this_frame_ = false;
+    if (!prev_matrices_valid_) {
+        prev_view_matrix_ = view_matrix_;
+        prev_proj_matrix_ = proj_matrix_;
+        prev_matrices_valid_ = true;
+        camera_cut_this_frame_ = true;   // first frame: no history to reuse
+    } else {
+        const m4x4& a = prev_view_matrix_;
+        const m4x4& b = view_matrix_;
+        float maxDelta = 0.0f;
+        for (u32 c = 0; c < 4; ++c) {
+            const v4& ca = a.columns[c];
+            const v4& cb = b.columns[c];
+            maxDelta = std::max(maxDelta, std::abs(ca.x - cb.x));
+            maxDelta = std::max(maxDelta, std::abs(ca.y - cb.y));
+            maxDelta = std::max(maxDelta, std::abs(ca.z - cb.z));
+        }
+        // View translation is -R^T·eye, so a cut swings it by scene-scale
+        // units while real per-frame motion (orbit/pan) stays well below.
+        // A 180° turn flips rotation rows by up to 2 — threshold 1.0 sits
+        // between real motion and any cut.
+        if (maxDelta > 1.0f) {
+            camera_cut_this_frame_ = true;
+            prev_view_matrix_ = view_matrix_;
+            prev_proj_matrix_ = proj_matrix_;
+            PostProcess::ResetTAAHistory();
+        }
+    }
+
     static u32 viewDiag = 0;
     if (viewDiag < 3) {
         PRIMAL_LOG_STREAM(Info, "Render") << "[Diag] View: col0=(" << view_matrix_.columns[0][0] << "," << view_matrix_.columns[0][1] << "," << view_matrix_.columns[0][2] << ")"
@@ -871,9 +998,21 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
 
     // Update scene snapshot
     if (scene_snapshot_) {
+        // A14: game-mode spawn unlock — the snapshot previously refreshed only
+        // on its internal NeedsFullRebuild flag, so entities spawned after the
+        // first frame never got extracted. Compare the live proxy count with
+        // the count at the last extraction (NOT instance_count_: extraction
+        // legitimately skips proxies without cluster caches, so a permanent
+        // gap there must not re-trigger rebuilds every frame).
+        const u32 liveProxies = static_cast<u32>(scene.GetProxies().size());
+        if (!scene_snapshot_->NeedsFullRebuild() &&
+            liveProxies != snapshot_proxy_count_) {
+            scene_snapshot_->MarkFullRebuild();
+        }
         if (scene_snapshot_->NeedsFullRebuild()) {
             scene_snapshot_->Rebind(scene);
             scene_snapshot_->ClearFullRebuildFlag();
+            snapshot_proxy_count_ = liveProxies;   // A14: re-arm the growth check
 
             // Phase 1 (Lumen architecture): register real mesh bounds with
             // the Surface Cache CardGenerator. Each scene instance gets its
@@ -1149,6 +1288,24 @@ bool StandardRenderPipeline::UpdateLightEntity(id::id_type entity_id, const ligh
 void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbIdx) {
     auto& graph = *renderGraph_;
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
+    // T1.2 (C3): the HZB texture's single RG identity, imported by the
+    // HZBBuild pass below and reused by SSGI/SSR/SPGI imports.
+    RGResourceHandle hzbRG{};
+
+    // A13/T0.11: on a viewport size change, drop all screen-space history
+    // before this frame records — TAA re-inits from the current frame instead
+    // of blending a different-size history (black/mixed-frame regression),
+    // SPGI drops its probe temporal accumulator.
+    if (viewport_size_changed_) {
+        viewport_size_changed_ = false;
+        PostProcess::ResetTAAHistory();
+        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+            screen_probe_pass_->RequestTemporalReset();
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Pipeline] Viewport resized to " << render_width_ << "x" << render_height_
+            << " — screen-space history reset." << std::endl;
+    }
 
     // T4.1: governor tick — scale the GI budgets for this frame (FPS ≥ 30 floor).
     gi_governor_.RecordFrame();
@@ -1275,12 +1432,20 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         );
 
         // Pass 1c: HZB build
+        // T1.2 (C3): declare the HZB write (and depth read) so the mip chain
+        // gets real barriers and downstream readers (SSGI/SSR/SPGI) order
+        // against this pass instead of racing it. hzbRG (declared at function
+        // scope) is imported HERE once and reused downstream; it stays
+        // invalid when HZB is not ready — consumers fall back then.
         if (hzb_system_ && hzb_system_->IsReady()) {
+            hzbRG = graph.ImportResource("HZBTexture", hzb_system_->GetHZBTexture());
+            auto depthHZB = graph.ImportResource("GBufferDepth_HZB", gpuDraw.GetGBufferDepthSampleable());
             graph.AddPass<NanitePassData>(
                 "HZBBuild",
                 RGPassType::Compute,
-                [&](NanitePassData& data, RenderGraphBuilder& builder) {
-                    builder.SideEffect();
+                [hzbRG, depthHZB, cbIdx](NanitePassData& data, RenderGraphBuilder& builder) {
+                    builder.Read(depthHZB, ResourceState::ShaderResource);
+                    builder.Write(hzbRG, ResourceState::UnorderedAccess);
                     data.buffer_index = cbIdx;
                 },
                 [this](const NanitePassData& data, RenderGraphContext& ctx) {
@@ -1376,8 +1541,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         lumen::SSAOCameraData camData{};
         camData.view_matrix = view_matrix_;
         camData.proj_matrix = proj_matrix_;
-        camData.prev_view_matrix = view_matrix_;
-        camData.prev_proj_matrix = proj_matrix_;
+        camData.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
+        camData.prev_proj_matrix = prev_proj_matrix_;
         camData.frame_index = static_cast<u32>(frameCount_);
         camData.delta_time = settings_.advanced.delta_time_override;
         ssaoOut = ssao_pass_->AddPass(graph, gbufferNormalSSAO, gbufferDepthSSAO, camData, static_cast<u32>(frameCount_));
@@ -1526,6 +1691,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         frameData.light_color = {settings_.lighting.light_color.x,
                                  settings_.lighting.light_color.y,
                                  settings_.lighting.light_color.z};
+        // A4: real per-slot light list (keeps point lights alive in LightEval)
+        FillSCLightList(frameData, current_scene_);
 
         // GBuffer-gather capture: real rendered surfaces → card atlas.
         frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
@@ -1548,7 +1715,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             frameData.ddgi_counts[0] = vol.ProbeCounts[0];
             frameData.ddgi_counts[1] = vol.ProbeCounts[1];
             frameData.ddgi_counts[2] = vol.ProbeCounts[2];
-            frameData.ddgi_valid = 1;
+            // C1-H3 hardening: only flag the feed valid when the buffer handle
+            // is real — ddgi_valid=1 with the card_dispatch stand-in bound made
+            // LightEval walk a 48B-struct array as a 9×float4-per-probe buffer.
+            frameData.ddgi_valid =
+                (frameData.ddgi_irradiance != handles::INVALID_RESOURCE) ? 1u : 0u;
         }
 
         ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
@@ -1558,11 +1729,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             surface_cache_pass_->AddCardCapturePasses(graph, *scene_snapshot_,
                                                       static_cast<u32>(frameCount_));
         }
-        surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf,
-                                     frameData, static_cast<u32>(frameCount_));
-
-        scLightingRG = graph.ImportResource("SCLightingAtlas",
-            surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
+        {
+            const auto scOut = surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf,
+                                                            frameData, static_cast<u32>(frameCount_));
+            // T1.1 (C2): reuse the producer's own RG identity instead of
+            // re-importing the same physical atlas as "SCLightingAtlas".
+            scLightingRG = scOut.lighting_atlas;
+        }
 
         if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
             // X2/A3: SC 数据走统一 Cache View（atlas_size/cardCount 与旧
@@ -1588,8 +1761,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         camData.camera_position = camera_position_;
         camData.view_matrix = view_matrix_;
         camData.proj_matrix = proj_matrix_;
-        camData.prev_view_matrix = view_matrix_;
-        camData.prev_proj_matrix = proj_matrix_;
+        camData.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
+        camData.prev_proj_matrix = prev_proj_matrix_;
         math::v3 lightFwd = Normalize(settings_.lighting.light_direction);
         camData.light_direction = lightFwd;
         camData.light_color = {settings_.lighting.ddgi_light_color.x, settings_.lighting.ddgi_light_color.y, settings_.lighting.ddgi_light_color.z};
@@ -1649,7 +1822,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
         auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
         auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
-        auto hzbHandle = graph.ImportResource("HZBTexture_SSGI", hzb_system_->GetHZBTexture());
+        // T1.2 (C3): reuse the HZBBuild producer identity when it exists
+        auto hzbHandle = hzbRG.IsValid()
+            ? hzbRG
+            : graph.ImportResource("HZBTexture_SSGI", hzb_system_->GetHZBTexture());
 
         RGResourceHandle prevColorSSGI;
         if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
@@ -1659,8 +1835,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         lumen::SSGICameraData ssgiCam{};
         ssgiCam.view_matrix = view_matrix_;
         ssgiCam.proj_matrix = proj_matrix_;
-        ssgiCam.prev_view_matrix = view_matrix_;
-        ssgiCam.prev_proj_matrix = proj_matrix_;
+        ssgiCam.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
+        ssgiCam.prev_proj_matrix = prev_proj_matrix_;
         ssgiCam.frame_index = static_cast<u32>(frameCount_);
         ssgiCam.delta_time = 0.016f;
 
@@ -1686,7 +1862,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             hdrSSR = graph.ImportResource("SSR_HdrSource", deferredOut.deferred_output_tex);
         }
         auto depthSSR = graph.ImportResource("GBufferDepth_SSR", gpuDraw.GetGBufferDepthSampleable());
-        auto hzbSSR   = graph.ImportResource("HZBTexture_SSR", hzb_system_->GetHZBTexture());
+        // T1.2 (C3): reuse the HZBBuild producer identity when it exists
+        auto hzbSSR = hzbRG.IsValid()
+            ? hzbRG
+            : graph.ImportResource("HZBTexture_SSR", hzb_system_->GetHZBTexture());
         auto velSSR   = graph.ImportResource("GBufferVelocity_SSR", gpuDraw.GetGBufferVelocity());
         auto ormSSR   = graph.ImportResource("GBufferORM_SSR", gpuDraw.GetGBufferORM());
 
@@ -1730,13 +1909,23 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         spCam.proj_matrix = proj_matrix_;
         spCam.prev_view_matrix = prev_view_matrix_;
         spCam.prev_proj_matrix = prev_proj_matrix_;
+        if (camera_cut_this_frame_ && screen_probe_pass_) {
+            screen_probe_pass_->RequestTemporalReset();   // A11
+        }
+        // T1.1 (C2): single RG identity for the SC lighting atlas
+        if (screen_probe_pass_ && scLightingRG.IsValid()) {
+            screen_probe_pass_->SetExternalLightingRG(scLightingRG);
+        }
         spCam.camera_position = camera_position_;
         spCam.frame_index = static_cast<u32>(frameCount_);
 
         // T5.1: HZB near-field input for the hybrid split trace.
         RGResourceHandle spHzb;
         if (hzb_system_) {
-            spHzb = graph.ImportResource("HZBTexture_SPGI", hzb_system_->GetHZBTexture());
+            // T1.2 (C3): reuse the HZBBuild producer identity when it exists
+            spHzb = hzbRG.IsValid()
+                ? hzbRG
+                : graph.ImportResource("HZBTexture_SPGI", hzb_system_->GetHZBTexture());
             screen_probe_pass_->SetHZBData(hzb_system_->GetHZBTexture(),
                                            hzb_system_->GetMipLevels());
         }
@@ -2101,6 +2290,21 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     CommandBufferHandle cmdHandle,
     SyncHandle signalFence)
 {
+    // A13/T0.11: on a viewport size change, drop all screen-space history
+    // before this frame records — TAA re-inits from the current frame instead
+    // of blending a different-size history (black/mixed-frame regression),
+    // SPGI drops its probe temporal accumulator.
+    if (viewport_size_changed_) {
+        viewport_size_changed_ = false;
+        PostProcess::ResetTAAHistory();
+        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+            screen_probe_pass_->RequestTemporalReset();
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Pipeline] Viewport resized to " << render_width_ << "x" << render_height_
+            << " — screen-space history reset." << std::endl;
+    }
+
     // T4.1: governor tick — scale the GI budgets for this frame (FPS ≥ 30 floor).
     gi_governor_.RecordFrame();
     if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
@@ -2111,6 +2315,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         surface_cache_pass_->SetPageBudget(
             GIAdaptiveGovernor::ScaleBudget(gi_base_page_budget_, gi_governor_.Scale()));
     }
+    OnSceneChanged(scene, current_scene_ == nullptr);
     current_scene_ = &scene;
     frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();
@@ -2326,8 +2531,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             lumen::SSAOCameraData camData{};
             camData.view_matrix = view_matrix_;
             camData.proj_matrix = proj_matrix_;
-            camData.prev_view_matrix = view_matrix_;
-            camData.prev_proj_matrix = proj_matrix_;
+            camData.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
+            camData.prev_proj_matrix = prev_proj_matrix_;
             camData.frame_index = static_cast<u32>(frameCount_);
             camData.delta_time = settings_.advanced.delta_time_override;
             ssaoOut = ssao_pass_->AddPass(graph, gbufferNormalSSAO, gbufferDepthSSAO, camData, static_cast<u32>(frameCount_));
@@ -2346,6 +2551,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             frameData.light_color = {settings_.lighting.ddgi_light_color.x,
                                      settings_.lighting.ddgi_light_color.y,
                                      settings_.lighting.ddgi_light_color.z};
+            // A4: real per-slot light list (keeps point lights alive in LightEval)
+            FillSCLightList(frameData, current_scene_);
             frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
             frameData.render_width  = render_width_;
             frameData.render_height = render_height_;
@@ -2362,7 +2569,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 frameData.ddgi_counts[0] = vol.ProbeCounts[0];
                 frameData.ddgi_counts[1] = vol.ProbeCounts[1];
                 frameData.ddgi_counts[2] = vol.ProbeCounts[2];
-                frameData.ddgi_valid = 1;
+                // C1-H3 hardening — see the BuildRenderGraph twin site.
+                frameData.ddgi_valid =
+                    (frameData.ddgi_irradiance != handles::INVALID_RESOURCE) ? 1u : 0u;
             }
             ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
             // T8.12: card-view capture — this path never had the wiring (the
@@ -2374,8 +2583,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 surface_cache_pass_->AddCardCapturePasses(graph, *scene_snapshot_,
                                                           static_cast<u32>(frameCount_));
             }
-            surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
-            scLightingRG = graph.ImportResource("SCLightingAtlas", surface_cache_pass_->GetLightingAtlas(static_cast<u32>(frameCount_)));
+            {
+                const auto scOut = surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
+                // T1.1 (C2): producer's RG identity — see BuildRenderGraph twin.
+                scLightingRG = scOut.lighting_atlas;
+            }
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
                 // X2/A3: SC→DDGI trace 注入走统一 Cache View
                 ddgi_pass_->SetSurfaceCacheResources(
@@ -2396,8 +2608,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             camData.camera_position = camera_position_;
             camData.view_matrix = view_matrix_;
             camData.proj_matrix = proj_matrix_;
-            camData.prev_view_matrix = view_matrix_;
-            camData.prev_proj_matrix = proj_matrix_;
+            camData.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
+            camData.prev_proj_matrix = prev_proj_matrix_;
             camData.light_direction = Normalize(settings_.lighting.light_direction);
             camData.light_color = {settings_.lighting.ddgi_light_color.x, settings_.lighting.ddgi_light_color.y, settings_.lighting.ddgi_light_color.z};
             camData.frame_index = static_cast<u32>(frameCount_);
@@ -2485,8 +2697,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             lumen::SSGICameraData ssgiCam{};
             ssgiCam.view_matrix = view_matrix_;
             ssgiCam.proj_matrix = proj_matrix_;
-            ssgiCam.prev_view_matrix = view_matrix_;
-            ssgiCam.prev_proj_matrix = proj_matrix_;
+            ssgiCam.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
+            ssgiCam.prev_proj_matrix = prev_proj_matrix_;
             ssgiCam.frame_index = static_cast<u32>(frameCount_);
             ssgiCam.delta_time = settings_.advanced.delta_time_override;
 
@@ -2523,6 +2735,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             spCam.proj_matrix = proj_matrix_;
             spCam.prev_view_matrix = prev_view_matrix_;
             spCam.prev_proj_matrix = prev_proj_matrix_;
+            if (camera_cut_this_frame_ && screen_probe_pass_) {
+                screen_probe_pass_->RequestTemporalReset();   // A11
+            }
+            // T1.1 (C2): single RG identity for the SC lighting atlas
+            if (screen_probe_pass_ && scLightingRG.IsValid()) {
+                screen_probe_pass_->SetExternalLightingRG(scLightingRG);
+            }
             spCam.camera_position = camera_position_;
             spCam.frame_index = static_cast<u32>(frameCount_);
 
@@ -3018,6 +3237,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
                                      ResourceHandle target, const TextureDesc& targetDesc,
                                      SyncHandle signalFence) {
+    OnSceneChanged(scene, current_scene_ == nullptr);
     current_scene_ = &scene;
     frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();
