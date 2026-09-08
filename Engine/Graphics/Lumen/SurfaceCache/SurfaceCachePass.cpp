@@ -357,17 +357,8 @@ void SurfaceCachePass::CreateAtlasTextures() {
         capture_min_depth_buffer_ = device_->CreateBuffer(capMinDesc);
     }
 
-    {
-        // Ray hits buffer: for indirect tracing
-        u32 pagesPerSide = atlas_size_ / page_size_;
-        u32 totalPages = pagesPerSide * pagesPerSide;
-        BufferDesc rayHitsDesc{};
-        rayHitsDesc.size = (u64)totalPages * page_size_ * page_size_ * sizeof(float) * 4; // RGBA per texel
-        rayHitsDesc.type = BufferType::Structured;
-        rayHitsDesc.usage = GPUMemoryUsage::Dynamic;
-        rayHitsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        ray_hits_buffer_ = device_->CreateBuffer(rayHitsDesc);
-    }
+    // T5.5 (F5): ray_hits 67MB deferred — allocated lazily on first
+    // SC_INDIRECT dispatch (see indirect block in AddPass).
 
     {
         // Card dispatch buffer: flattened per-card texel dispatch info
@@ -1952,6 +1943,18 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // Consumers (LightEval tile probe) land in the next slice.
                 // ================================================================
                 {
+                    // T5.5: lazy allocation on first opt-in dispatch
+                    if (ray_hits_buffer_ == handles::INVALID_RESOURCE) {
+                        u32 pagesPerSide = atlas_size_ / page_size_;
+                        u32 totalPages = pagesPerSide * pagesPerSide;
+                        BufferDesc rayHitsDesc{};
+                        rayHitsDesc.size = (u64)totalPages * page_size_ * page_size_ * sizeof(float) * 4;
+                        rayHitsDesc.type = BufferType::Structured;
+                        rayHitsDesc.usage = GPUMemoryUsage::Dynamic;
+                        rayHitsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                        ray_hits_buffer_ = device_->CreateBuffer(rayHitsDesc);
+                    }
+
                     constexpr u32 kTile = 16;
                     const u32 kRays = 32;
                     const u32 kTiles = atlas_size_ / kTile;
