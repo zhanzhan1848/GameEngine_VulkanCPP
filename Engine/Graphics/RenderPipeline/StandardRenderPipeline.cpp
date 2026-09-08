@@ -1032,7 +1032,34 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                 PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSC] Registered " << instances.size()
                           << " scene instances with CardGenerator → "
                           << cardGen.GetCardCount() << " cards" << std::endl;
+
+        // T4.1 (D8) v2: dirty-transform GI invalidation — without
+        // MarkFullRebuild (which was too expensive and caused GPU hang).
+        // GlobalSDF revox + DDGI probe boost only; the SC card positions
+        // are updated by the render system's own transform pipeline.
+        {
+            static u32 lastDirtyCheckFrame = 0;
+            if (frameCount_ - lastDirtyCheckFrame > 30) {   // 30-frame cooldown
+                bool anyDirty = false;
+                for (const auto& proxy : scene.GetProxies()) {
+                    u8 flag = 0;
+                    game_entity::entity_id eid{ proxy.entityId };
+                    transform::get_updated_components_flags(&eid, 1, &flag);
+                    if (flag != 0) { anyDirty = true; break; }
+                }
+                if (anyDirty) {
+                    lastDirtyCheckFrame = static_cast<u32>(frameCount_);
+                    nanite::GlobalSDF::Get().MarkAllCascadesForRevox();
+                    if (ddgi_pass_ && ddgi_pass_->IsInitialized())
+                        ddgi_pass_->BoostProbePriority();
+                    if (screen_probe_pass_ && screen_probe_pass_->IsInitialized())
+                        screen_probe_pass_->RequestTemporalReset();
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[Lumen] Dirty transform — revox+probe boost (no rebuild)."
+                        << std::endl;
+                }
             }
+        }            }
         }
     }
 
