@@ -263,6 +263,9 @@ private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
     void CreateConstantBuffers();
+    // T3.5: world-space radiance cascade (32³ RGBA16F double-buffered)
+    void CreateRadianceCascade();
+    void DispatchCascadeUpdate(rhi::RHICommandBuffer* cmd, u32 frameIdx, u32 cascadeIdx);
     void CreateBuffers();
 
     bool              initialized_{ false };
@@ -380,6 +383,22 @@ private:
     // Output textures (full-resolution RGBA16_Float)
     rhi::ResourceHandle output_texture_{ rhi::handles::INVALID_RESOURCE };           // Gather output (raw)
     rhi::ResourceHandle output_texture_filtered_{ rhi::handles::INVALID_RESOURCE };  // Denoise output (filtered)
+    // T3.5: world-space radiance cascade (32³ RGBA16F) — pre-integrated far-field
+    // radiance from DDGI probes, sampled by far-cache to avoid 16-read probe queries.
+    static constexpr u32 kRadianceCascadeRes = 32;
+    rhi::ResourceHandle radiance_cascade_[2]{                                         // double-buffered for temporal EMA
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    rhi::PipelineHandle cascade_update_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle cascade_update_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle cascade_update_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetHandle cascade_update_set_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET };
+    u32 cascade_update_frame_ = 0;   // frame counter for temporal EMA gating
+    // Cascade world extent — covers a larger volume than the DDGI probe grid.
+    math::v3 cascade_origin_{0.0f};
+    math::v3 cascade_extent_{128.0f};  // cubic extent (single scalar for simplicity)
+    float cascade_spacing_ = 128.0f / 32.0f;  // = 4.0 world units per cascade texel
 
     // Dummy resources for Metal validation (bound when surface cache is unavailable)
     rhi::ResourceHandle dummy_buffer_{ rhi::handles::INVALID_RESOURCE };

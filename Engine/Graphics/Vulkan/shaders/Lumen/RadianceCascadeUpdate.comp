@@ -1,0 +1,80 @@
+#version 450 core
+#extension GL_EXT_samplerless_texture_functions : enable
+// T3.5: Radiance cascade update — inject DDGI probe radiance into a 323
+// world-space cascade. Each texel = one coarse world position; trilinear
+// sample the 8 nearest DDGI probes and store the aggregated L0 radiance.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0, rgba16f) writeonly uniform image3D cascade_out;
+layout(set = 0, binding = 1) uniform texture3D cascade_prev;
+
+layout(set = 0, binding = 2, std140) uniform CascadeParams {
+    vec4 origin_spacing;
+    vec4 counts_enabled;
+    vec4 ddgi_origin_spacing;
+    vec4 ddgi_counts;
+    float temporal_weight;
+    float frame_index;
+    float pad0;
+    float pad1;
+} cp;
+
+layout(set = 0, binding = 3) uniform texture3D ddgi_irradiance_tex;
+
+void main() {
+    uvec3 tid = gl_GlobalInvocationID.xyz;
+    if (any(greaterThanEqual(tid, uvec3(32u)))) return;
+
+    if (cp.counts_enabled.w < 0.5) {
+        imageStore(cascade_out, ivec3(tid), vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    vec3 worldPos = cp.origin_spacing.xyz + (vec3(tid) + 0.5) * cp.origin_spacing.w;
+
+    vec3 gp = (worldPos - cp.ddgi_origin_spacing.xyz) / cp.ddgi_origin_spacing.w;
+    vec3 gridMax = vec3(cp.ddgi_counts.xyz) - 1.0;
+    if (any(lessThan(gp, vec3(0.0))) || any(greaterThan(gp, gridMax))) {
+        imageStore(cascade_out, ivec3(tid), vec4(0.03, 0.03, 0.035, 1.0));
+        return;
+    }
+
+    vec3 f = clamp(fract(gp), vec3(0.0), vec3(1.0));
+    ivec3 b0 = clamp(ivec3(floor(gp)), ivec3(0), ivec3(cp.ddgi_counts.xyz) - 1);
+    ivec3 b1 = min(b0 + ivec3(1), ivec3(cp.ddgi_counts.xyz) - 1);
+
+    float w[8];
+    w[0] = (1.0-f.x)*(1.0-f.y)*(1.0-f.z);
+    w[1] = f.x*(1.0-f.y)*(1.0-f.z);
+    w[2] = (1.0-f.x)*f.y*(1.0-f.z);
+    w[3] = f.x*f.y*(1.0-f.z);
+    w[4] = (1.0-f.x)*(1.0-f.y)*f.z;
+    w[5] = f.x*(1.0-f.y)*f.z;
+    w[6] = (1.0-f.x)*f.y*f.z;
+    w[7] = f.x*f.y*f.z;
+
+    ivec3 pc[8];
+    pc[0] = ivec3(b0.x, b0.y, b0.z); pc[1] = ivec3(b1.x, b0.y, b0.z);
+    pc[2] = ivec3(b0.x, b1.y, b0.z); pc[3] = ivec3(b1.x, b1.y, b0.z);
+    pc[4] = ivec3(b0.x, b0.y, b1.z); pc[5] = ivec3(b1.x, b0.y, b1.z);
+    pc[6] = ivec3(b0.x, b1.y, b1.z); pc[7] = ivec3(b1.x, b1.y, b1.z);
+
+    const float C0 = 0.28209479;
+    vec3 radiance = vec3(0.0);
+    float wsum = 0.0;
+    for (int p = 0; p < 8; ++p) {
+        if (w[p] < 0.01) continue;
+        uint pIdx = uint(pc[p].x) + uint(cp.ddgi_counts.x) * (uint(pc[p].y) + uint(cp.ddgi_counts.y) * uint(pc[p].z));
+        vec3 irr = C0 * texelFetch(ddgi_irradiance_tex, ivec3(int(pIdx), 0, 0), 0).rgb;
+        radiance += irr * w[p];
+        wsum += w[p];
+    }
+    if (wsum > 0.0) radiance /= wsum;
+
+    vec3 prev = vec3(texelFetch(cascade_prev, ivec3(tid), 0));
+    float tw = (cp.frame_index >= 2.0) ? cp.temporal_weight : 0.0;
+    radiance = mix(radiance, prev, tw);
+
+    imageStore(cascade_out, ivec3(tid), vec4(radiance, 1.0));
+}
