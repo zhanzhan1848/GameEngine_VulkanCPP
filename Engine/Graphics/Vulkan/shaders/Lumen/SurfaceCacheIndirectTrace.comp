@@ -32,6 +32,12 @@ layout(set = 0, binding = 2) uniform texture3D sdf0;
 layout(set = 0, binding = 3) uniform texture3D sdf1;
 layout(set = 0, binding = 4) uniform texture3D sdf2;
 
+// T3.2 (D7): cascade-0 conservative min-mip 链（DispatchMipChain 产出）。
+// 槽位缺失时 CPU 回绑 sdf0 本体 → textureSize 对比相等 → cone 检测自门控关闭。
+layout(set = 0, binding = 9)  uniform texture3D sdf0_mip0;
+layout(set = 0, binding = 10) uniform texture3D sdf0_mip1;
+layout(set = 0, binding = 11) uniform texture3D sdf0_mip2;
+
 // GlobalShaderData UBO — 480 bytes, mirrors C++ RHIShaderCommon.h.
 // Declared inline (not via #include RHIShaderTypes.glsl) to avoid the awk
 // inliner's source-dir-relative path resolution limitation with "../" prefixes.
@@ -116,6 +122,81 @@ float sampleSDFNearest(texture3D sdf, vec3 uvw) {
     ivec3 size = textureSize(sdf, 0);
     ivec3 coord = ivec3(clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size));
     return texelFetch(sdf, coord, 0).r;
+}
+
+// ============================================================================
+// T3.2 (D7): cone-width-aware cascade sampling primitives — GLSL twin of
+// SDFTraceCommon.metal's sampleSDFCascadeMip / coneMipFrac. texel-read manual
+// trilinear (R32F is not filterable). Both return LOWER-bound distances; the
+// cone hit test stays conservative. min-mip 是保守下界（≤ 真距离）——正确用途
+// 是"宽 footprint 内是否有表面"的命中检测，不是步进加速（路线图架构结论）。
+// ============================================================================
+float sampleSDFCascadeMipGLSL(texture3D mipTex, vec3 worldPos,
+                              vec3 cascadeOrigin, vec3 cascadeExtent) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) return 1e10;
+    ivec3 size = textureSize(mipTex, 0);
+    vec3 p = clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size) - 0.5;
+    ivec3 base = ivec3(clamp(floor(p), vec3(0.0), vec3(size) - 1.0));
+    vec3 f = fract(p);
+    ivec3 c1 = min(base + ivec3(1), size - ivec3(1));
+    float d000 = texelFetch(mipTex, ivec3(base.x, base.y, base.z), 0).r;
+    float d100 = texelFetch(mipTex, ivec3(c1.x,  base.y, base.z), 0).r;
+    float d010 = texelFetch(mipTex, ivec3(base.x, c1.y,  base.z), 0).r;
+    float d110 = texelFetch(mipTex, ivec3(c1.x,  c1.y,  base.z), 0).r;
+    float d001 = texelFetch(mipTex, ivec3(base.x, base.y, c1.z), 0).r;
+    float d101 = texelFetch(mipTex, ivec3(c1.x,  base.y, c1.z), 0).r;
+    float d011 = texelFetch(mipTex, ivec3(base.x, c1.y,  c1.z), 0).r;
+    float d111 = texelFetch(mipTex, ivec3(c1.x,  c1.y,  c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+
+// footprint → mip level（mip_textures[L] = 2^(L+1)× 粗于基础层）。
+float coneMipLevelGLSL(float footprint, float voxelSize, float maxMip) {
+    return floor(clamp(log2(max(footprint / (voxelSize * 2.0), 1.0)), 0.0, maxMip - 1.0));
+}
+
+// T3.3 消费者：cone 命中检测——march 耗尽后，用 min-mip 判定"该方向宽
+// footprint 内是否有表面"；有 → 记 far 遮挡（不累积天空 radiance）。
+bool coneHitOccluded(texture3D mip0, texture3D mip1, texture3D mip2,
+                     vec3 probePos, vec3 rayDir, float travelled, float maxDist,
+                     float rays) {
+    int baseRes = textureSize(sdf0, 0).x;
+    int m0Res = textureSize(mip0, 0).x;
+    if (baseRes <= 0 || m0Res <= 0 || m0Res >= baseRes) return false;  // 链不存在
+    vec3 org = itp.params.sdf_origins[0].xyz;
+    vec3 ext = itp.params.sdf_extents[0].xyz;
+
+    // ray-AABB slab：采样 t 钳制进 [tEnter, tExit] ∩ [0, min(travelled, maxDist)]。
+    // 耗尽射线的端点通常在体积外，不钳制则读到 1e10 哨兵、检测永不触发。
+    vec3 invD = mix(vec3(1e8), 1.0 / rayDir, greaterThan(abs(rayDir), vec3(1e-8)));
+    vec3 t0s = (org - probePos) * invD;
+    vec3 t1s = (org + ext - probePos) * invD;
+    vec3 tsm = min(t0s, t1s), tbg = max(t0s, t1s);
+    float tEnter = max(max(tsm.x, tsm.y), max(tsm.z, 0.0));
+    float tExit = min(min(tbg.x, tbg.y), tbg.z);
+    if (tExit <= tEnter) return false;               // 射线不穿体积
+    float sampleT = min(min(travelled, maxDist), tExit);
+    if (sampleT <= tEnter) return false;             // 体积内交点段为空
+    vec3 samplePos = probePos + rayDir * sampleT;
+
+    const float rayAngle = sqrt(12.566371 / max(rays, 1.0));  // ≈sqrt(4π/N) cosine 半角
+    float footprint = sampleT * rayAngle;
+    if (footprint <= 0.0) return false;
+    float voxel0 = ext.x / float(baseRes);
+    float level = coneMipLevelGLSL(footprint, voxel0, 3.0);
+    float mipD;
+    if (level < 0.5) {
+        mipD = sampleSDFCascadeMipGLSL(mip0, samplePos, org, ext);
+    } else if (level < 1.5) {
+        if (textureSize(mip1, 0).x >= baseRes) return false;  // 链比请求层级短
+        mipD = sampleSDFCascadeMipGLSL(mip1, samplePos, org, ext);
+    } else {
+        if (textureSize(mip2, 0).x >= baseRes) return false;
+        mipD = sampleSDFCascadeMipGLSL(mip2, samplePos, org, ext);
+    }
+    return mipD < footprint * 0.5;
 }
 
 // Apple Silicon: else-if cascade selection = 1 texture3D read per step (not 3)
@@ -206,6 +287,14 @@ void surface_cache_indirect_trace()
         }
 
         uint hit_idx = probe_idx * rays + r;
+        // T3.2 (D7) → T3.3 消费者: march 耗尽（原判 sky）时做 cone 命中检测
+        // ——宽 footprint 内 min-mip 报表面 → far 遮挡（不累积天空 radiance）。
+        if (!hit && coneHitOccluded(sdf0_mip0, sdf0_mip1, sdf0_mip2,
+                                    probe_pos, ray_dir, t, itp.params.max_ray_distance,
+                                    float(rays))) {
+            hit = true;
+            hit_pos = probe_pos + ray_dir * min(t, itp.params.max_ray_distance);
+        }
         ray_hits.data[hit_idx].hit_position_dist.w = t;
         if (hit && t < itp.params.near_distance) {
             ray_hits.data[hit_idx].hit_type_pad.x = 0u;

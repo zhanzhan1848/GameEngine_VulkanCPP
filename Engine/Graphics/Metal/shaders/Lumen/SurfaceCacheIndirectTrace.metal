@@ -74,6 +74,12 @@ kernel void surfaceCacheIndirectTrace(
     texture3d<float, access::sample> sdf0        [[texture(2)]],
     texture3d<float, access::sample> sdf1        [[texture(3)]],
     texture3d<float, access::sample> sdf2        [[texture(4)]],
+    // T3.2 (D7): cascade-0 conservative min-mip chain (DispatchMipChain).
+    // Missing slots rebind sdf0 itself → width comparison self-gates the
+    // cone hit test off (PRIMAL_SDF_CONE_HIT=0 kill switch is CPU-side).
+    texture3d<float, access::read>  sdf0_mip0    [[texture(5)]],
+    texture3d<float, access::read>  sdf0_mip1    [[texture(6)]],
+    texture3d<float, access::read>  sdf0_mip2    [[texture(7)]],
     device GlobalShaderData&        gd           [[buffer(0)]],
     constant IndirectTraceParams&   params       [[buffer(1)]],
     constant SurfaceCacheCard*      cards        [[buffer(2)]],
@@ -143,6 +149,48 @@ kernel void surfaceCacheIndirectTrace(
         }
 
         uint hit_idx = probe_idx * rays + r;
+        // T3.2 (D7) → T3.3 consumer: when the 4-step march exhausts (previously
+        // classified sky), test the min-mip chain with the ray's widening cone
+        // footprint — geometry in the cone → far occlusion (no sky radiance).
+        if (!hit) {
+            const float3 org = params.sdf_origins[0].xyz;
+            const float3 ext = params.sdf_extents[0].xyz;
+            // Ray-AABB slab: clamp the sample t into the cascade volume — the
+            // exhausted-ray endpoint is usually OUTSIDE it, and the unclamped
+            // read hits the 1e10 sentinel so the test would never fire.
+            const float3 invD = select(float3(1e8f), 1.0f / ray_dir,
+                                       abs(ray_dir) > float3(1e-8f));
+            const float3 t0s = (org - probe_pos) * invD;
+            const float3 t1s = (org + ext - probe_pos) * invD;
+            const float3 tsm = min(t0s, t1s);
+            const float3 tbg = max(t0s, t1s);
+            const float tEnter = max(max(tsm.x, tsm.y), max(tsm.z, 0.0f));
+            const float tExit = min(min(tbg.x, tbg.y), tbg.z);
+            const float sampleT = min(min(t, params.max_ray_distance), tExit);
+            if (tExit > tEnter && sampleT > tEnter) {
+                const float3 samplePos = probe_pos + ray_dir * sampleT;
+                const uint baseRes = sdf0.get_width();
+                const uint m0Res = sdf0_mip0.get_width();
+                if (baseRes > 0u && m0Res > 0u && m0Res < baseRes) {
+                    // cosine-lobe per-ray half-angle ≈ sqrt(4π/N)
+                    const float rayAngle = sqrt(12.566371f / float(max(rays, 1u)));
+                    const float footprint = sampleT * rayAngle;
+                    if (footprint > 0.0f) {
+                        const float voxel0 = ext.x / float(baseRes);
+                        const float2 lf = coneMipFrac(footprint, voxel0, 3u);
+                        texture3d<float, access::read> mipTex =
+                            lf.x < 0.5f ? sdf0_mip0 : (lf.x < 1.5f ? sdf0_mip1 : sdf0_mip2);
+                        if (mipTex.get_width() > 0u && mipTex.get_width() < baseRes) {
+                            const float mipD = sampleSDFCascadeMip(mipTex, samplePos, org, ext);
+                            if (mipD < footprint * 0.5f) {
+                                hit = true;
+                                hit_pos = probe_pos + ray_dir * min(t, params.max_ray_distance);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         ray_hits[hit_idx].hit_distance = t;
         if (hit && t < params.near_distance) {
             ray_hits[hit_idx].hit_type = 0;
