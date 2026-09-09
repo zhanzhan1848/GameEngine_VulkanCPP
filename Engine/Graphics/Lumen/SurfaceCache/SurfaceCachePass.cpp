@@ -13,6 +13,7 @@
 #include <iostream>
 #include <sstream>
 #include <cstring>
+#include <cstdio>
 #include <set>
 #include "Engine/Common/CoreLogStream.h"
 
@@ -229,6 +230,23 @@ void SurfaceCachePass::SetTemporalStrategy(GITemporalStrategy strategy) {
               << GITemporalStrategyName(strategy) << " (stored; takes effect in X3)" << std::endl;
 }
 
+// T4.4: per-instance emissive（a>0.5 覆盖 PRIMAL_SC_EMISSIVE 场景级源）。
+// Direct mapped 写入（Dynamic host-visible）；capture 下一帧散射进
+// emissive_atlas，经 LightEval 的 8.0 钳制进入 SC↔probe 反弹。
+void SurfaceCachePass::SetInstanceEmissive(uint32_t instance_id, const math::v3& rgb) {
+    if (instance_id >= kMaxEmissiveInstances) {
+        PRIMAL_LOG_STREAM(Warn, "Render") << "[SurfaceCache] SetInstanceEmissive: instance "
+                  << instance_id << " out of range (max " << kMaxEmissiveInstances << ")" << std::endl;
+        return;
+    }
+    if (instance_emissive_buffer_ == handles::INVALID_RESOURCE) return;
+    auto* m = static_cast<math::v4*>(device_->MapBuffer(instance_emissive_buffer_));
+    if (m) {
+        m[instance_id] = math::v4{rgb.x, rgb.y, rgb.z, 1.0f};
+        device_->UnmapBuffer(instance_emissive_buffer_);
+    }
+}
+
 bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& config) {
     if (initialized_) return true;
 
@@ -418,6 +436,24 @@ void SurfaceCachePass::CreateConstantBuffers() {
     CreateCBs(global_cb_, 512);    // GlobalShaderData (padded)
     CreateCBs(params_cb_, 512);    // SurfaceCacheParams (padded)
     CreateCBs(capture_cb_, 96);    // CaptureParams: invViewProj (64) + counts (16) padded
+    CreateCBs(capture_emissive_cb_, 16);  // T4.4: CaptureEmissive (rgba, 16B)
+
+    // T4.4: per-instance emissive 表（1024 × vec4，零初始化 = 无 emissive）。
+    if (instance_emissive_buffer_ == handles::INVALID_RESOURCE) {
+        BufferDesc ieDesc{};
+        ieDesc.size = (u64)kMaxEmissiveInstances * 16;
+        ieDesc.type = BufferType::Structured;
+        ieDesc.usage = GPUMemoryUsage::Dynamic;
+        ieDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        ieDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        ieDesc.structured.elementCount = kMaxEmissiveInstances;
+        ieDesc.structured.elementStride = 16;
+        instance_emissive_buffer_ = device_->CreateBuffer(ieDesc);
+        if (auto* m = static_cast<math::v4*>(device_->MapBuffer(instance_emissive_buffer_))) {
+            memset(m, 0, (size_t)kMaxEmissiveInstances * 16);
+            device_->UnmapBuffer(instance_emissive_buffer_);
+        }
+    }
     CreateCBs(card_fill_cb_, 176); // CardFillParams: SDF cascades + light + counts
     CreateCBs(shadow_cb_, 176);    // T3.3: ShadowParams (SDF cascades + light + counts)
 
@@ -673,12 +709,16 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {8, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // sc_grid_offsets
             {9, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // sc_grid_cards
             {10, DescriptorType::StorageBuffer,    1, ShaderStage::Compute, nullptr},  // A7 capture_depth_min
+            // T4.4 v1: emissive 闭环（场景级源，PRIMAL_SC_EMISSIVE 上传）。
+            {11, DescriptorType::StorageImage,     1, ShaderStage::Compute, nullptr},  // emissive_atlas
+            {12, DescriptorType::UniformBuffer,    1, ShaderStage::Compute, nullptr},  // CaptureEmissive
+            {13, DescriptorType::StorageBuffer,    1, ShaderStage::Compute, nullptr},  // instance emissive 表
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[7].readonly = true;
         b[8].readonly = true;
         b[9].readonly = true;
-        capture_gather_set_layout_ = device_->CreateDescriptorSetLayout({11, bindings});
+        capture_gather_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
     }
 
     // --- CardFill (SDF-based, Vulkan-only): 3 SDF 3D + 4 atlas + 1 UBO + 4 SSBO ---
@@ -1565,6 +1605,25 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     }
                 }
 
+                // T4.4 v1: capture emissive 源（PRIMAL_SC_EMISSIVE="r,g,b"，默认 0）。
+                {
+                    static const math::v4 s_sceneEmissive = [] {
+                        const char* e = std::getenv("PRIMAL_SC_EMISSIVE");
+                        if (!e) return math::v4{0.0f, 0.0f, 0.0f, 0.0f};
+                        float r = 0, g = 0, b = 0;
+# ifdef _MSC_VER
+                        if (sscanf_s(e, "%f,%f,%f", &r, &g, &b) != 3) return math::v4{0.0f, 0.0f, 0.0f, 0.0f};
+# else
+                        if (std::sscanf(e, "%f,%f,%f", &r, &g, &b) != 3) return math::v4{0.0f, 0.0f, 0.0f, 0.0f};
+# endif
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[SC] capture emissive = (" << r << "," << g << "," << b << ")" << std::endl;
+                        return math::v4{r, g, b, 1.0f};
+                    }();
+                    auto* em = static_cast<math::v4*>(device_->MapBuffer(capture_emissive_cb_[frameIdx]));
+                    if (em) { *em = s_sceneEmissive; device_->UnmapBuffer(capture_emissive_cb_[frameIdx]); }
+                }
+
                 DescriptorData captureParams[] = {
                     {0, DescriptorType::SampledDepthImage, frame_data.gbuffer_depth},
                     {1, DescriptorType::SampledImage,      frame_data.gbuffer_albedo},
@@ -1577,8 +1636,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     {8, DescriptorType::StorageBuffer,     card_generator_.GetGridOffsetsBuffer()},
                     {9, DescriptorType::StorageBuffer,     card_generator_.GetGridCardsBuffer()},
                     {10, DescriptorType::StorageBuffer,    capture_min_depth_buffer_},
+                    // T4.4 v1: emissive 写入 + 场景级源 + per-instance 表
+                    {11, DescriptorType::StorageImage,     emissive_atlas_},
+                    {12, DescriptorType::UniformBuffer,    capture_emissive_cb_[frameIdx]},
+                    {13, DescriptorType::StorageBuffer,    instance_emissive_buffer_},
                 };
-                UpdateDescriptorSet(device_, capture_gather_set_[frameIdx], captureParams, 11);
+                UpdateDescriptorSet(device_, capture_gather_set_[frameIdx], captureParams, 14);
 
                 cmd->BindComputePipeline(capture_gather_pipeline_);
                 const DescriptorSetHandle capSets[] = { capture_gather_set_[frameIdx] };

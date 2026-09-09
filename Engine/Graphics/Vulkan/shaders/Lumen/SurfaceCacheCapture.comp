@@ -46,6 +46,18 @@ layout(set = 0, binding = 3, rgba8)  writeonly uniform image2D albedo_atlas;
 layout(set = 0, binding = 4, rg16f)  writeonly uniform image2D normal_atlas;
 layout(set = 0, binding = 5, r32f)   writeonly uniform image2D depth_atlas;
 
+// T4.4 v1: emissive_atlas 写入（场景级 uniform 源，PRIMAL_SC_EMISSIVE 上传；
+// per-material/GBuffer-emissive 目标随后续批次落地）。LightEval 已消费本图。
+layout(set = 0, binding = 11, rgba16f) writeonly uniform image2D emissive_atlas;
+layout(set = 0, binding = 12, std140) uniform CaptureEmissive {
+    vec4 emissive_rgba;   // rgb = scene 级 emissive radiance, a = enabled
+} ce;
+// T4.4: per-instance emissive 表（SetInstanceEmissive 上传；a>0.5 覆盖
+// scene 级源）。卡片自带 mesh_instance_id → 无需 GBuffer 材质 id 通道。
+layout(set = 0, binding = 13, std430) readonly buffer InstanceEmissiveBuf {
+    vec4 instance_emissive[];   // rgb = radiance, a = enabled
+} ie;
+
 layout(set = 0, binding = 6, std140) uniform CaptureParams {
     mat4  invViewProjection;   // offset 0
     uint  card_count;          // offset 64
@@ -147,6 +159,16 @@ bool surfaceCacheScatter(vec3 worldPos, vec3 albedo, vec2 encN, bool writePhase)
                 imageStore(albedo_atlas, texel, vec4(albedo, 1.0));
                 imageStore(normal_atlas, texel, vec4(encN, 0.0, 1.0));
                 imageStore(depth_atlas,  texel, vec4(axisDepth, 0.0, 0.0, 1.0));
+                // T4.4: emissive atlas 与 albedo 同步散射。
+                // 源选择：instance 表（a>0.5）优先，否则 scene 级 uniform。
+                vec3 em = ce.emissive_rgba.rgb;
+                bool emOn = ce.emissive_rgba.a > 0.5;
+                uint iid = card.mesh_instance_id;
+                vec4 ieV = ie.instance_emissive[min(iid, 1023u)];
+                if (ieV.a > 0.5) { em = ieV.rgb; emOn = true; }
+                if (emOn) {
+                    imageStore(emissive_atlas, texel, vec4(em, 1.0));
+                }
                 wrote = true;
             }
         }

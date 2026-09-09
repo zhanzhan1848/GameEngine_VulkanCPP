@@ -175,6 +175,8 @@ void surface_cache_light_eval()
     vec2 enc_n = imageLoad(normal_atlas, ivec2(atlas_uv)).rg;
     vec3 normal = octDecode(enc_n);
     vec3 emissive = imageLoad(emissive_atlas, ivec2(atlas_uv)).rgb;
+    // Radiosity Intensity Clamp (UE 0x32): cap the SC↔probe feedback gain.
+    emissive = min(emissive, vec3(8.0));
 
     // Reconstruct the texel's surface point from the depth atlas (same recipe
     // as the shadow pass). depth<=0 means never captured — the card midplane

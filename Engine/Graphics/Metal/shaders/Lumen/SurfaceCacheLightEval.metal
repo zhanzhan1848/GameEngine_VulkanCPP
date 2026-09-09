@@ -72,6 +72,10 @@ kernel void surfaceCacheLightEval(
     float2 enc_n = normal_atlas.read(atlas_uv).rg;
     float3 normal = octDecode(enc_n);
     float3 emissive = emissive_atlas.read(atlas_uv).rgb;
+    // Radiosity Intensity Clamp (UE 0x32): the SC↔probe feedback loop gains
+    // from the emissive term every frame — clamp the per-texel contribution
+    // so a hot emissive source converges instead of exploding.
+    emissive = min(emissive, float3(8.0f));
 
     // T8.13 sync: reconstruct the texel's surface point from the depth atlas
     // (same recipe as the shadow pass). depth<=0 means never captured — the

@@ -137,6 +137,10 @@ public:
     CardGenerator& GetCardGenerator() { return card_generator_; }
     const CardGenerator& GetCardGenerator() const { return card_generator_; }
 
+    // T4.4: per-instance emissive（rgb = radiance）。下一帧 capture 写入
+    // emissive_atlas，LightEval 项随之进入 SC↔probe 反弹（≤8.0 钳制）。
+    void SetInstanceEmissive(uint32_t instance_id, const math::v3& rgb);
+
 private:
     void CreateAtlasTextures();
     void CreateConstantBuffers();
@@ -286,6 +290,17 @@ private:
     rhi::ResourceHandle capture_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+    // T4.4 v1: capture emissive 源（场景级 uniform；PRIMAL_SC_EMISSIVE="r,g,b"，
+    // 默认 0 = 行为不变）。per-material 源随 GBuffer-emissive 批次落地。
+    rhi::ResourceHandle capture_emissive_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    // T4.4: per-instance emissive 表（SetInstanceEmissive 写入；a>0.5 覆盖
+    // 场景级源）。容量 kMaxEmissiveInstances，索引 = mesh_instance_id。
+    static constexpr u32 kMaxEmissiveInstances = 1024;
+    rhi::ResourceHandle instance_emissive_buffer_{
+        rhi::handles::INVALID_RESOURCE };
+    bool instance_emissive_dirty_ = false;
     // CardFill (SDF-based fill) state
     rhi::ResourceHandle card_fill_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
