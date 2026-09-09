@@ -412,6 +412,7 @@ void ConfigurePipelineFromPOD(const ai_asset_pipeline_params& p, Config& cfg) {
     }
 
     cfg.enable_sdf = p.enable_sdf != 0;
+    cfg.enable_card_bake = p.enable_card_bake != 0;
     if (p.sdf_grid_resolution > 0) {
         cfg.sdf_params.resolution = p.sdf_grid_resolution;
     }

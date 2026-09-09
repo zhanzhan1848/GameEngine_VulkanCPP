@@ -7,15 +7,25 @@
 namespace primal::graphics::nanite {
 
 // Loads per-mesh offline SDF data from a pipeline model file, merges all
-// mesh-level SDFs into a single high-resolution global SDF volume (256³),
-// and uploads it as an R16F Texture3D for SDF visualization.
+// mesh-level SDFs into a single high-resolution global SDF volume (384³),
+// and uploads it as an R16F Texture3D for SDF visualization and GI tracing.
 //
-// The merge converts unsigned per-mesh distances into a signed global field:
-//   - For each global voxel, find the nearest mesh SDF that contains it.
-//   - Sample the mesh SDF to get unsigned distance.
-//   - Use the mesh's occupancy voxels to determine inside/outside.
-//   - Inside voxels get negative distance; outside get positive.
-//   - Take the minimum signed distance across all meshes.
+// Two encodings exist for the per-mesh u16 data (ContentTools/common/SDF.cpp):
+//   - signed (Sponza_pipeline_signed_v5+): fast-winding-number inside bake,
+//     packed as pack_float<16>(signedDist + max_dim, 0, 2*max_dim) —
+//     negative inside, positive outside. The merge min()s signed distances,
+//     but negatives deeper than 8 global voxels flip positive (hollow-
+//     architecture sign repair — see SampleMeshSDF): building-scale shells
+//     geometrically enclose room air, and an unclamped min() poisons every
+//     cavity probe. The result is a signed Mesh DF with a thin negative
+//     skin under every surface: relaxed tracers can no longer overstep
+//     thin walls (overshoot lands negative and still registers a hit)
+//     while open-air probes sample positive distances.
+//   - unsigned (legacy Sponza_pipeline.model, pre 2026-08-14 bakes):
+//     packed as pack_float<16>(dist, 0, max_dim). Merge takes the min
+//     positive distance.
+// The disk cache records the encoding in its header (PGSDFC02) so a stale
+// cache can never feed the wrong field semantics to the tracers.
 class OfflineSDFMerger {
 public:
     static constexpr u32 GLOBAL_RES = 384;
@@ -25,7 +35,7 @@ public:
         f32  bounds_min[3];
         f32  bounds_max[3];
         f32  max_dim;               // scale factor used during baking
-        utl::vector<u16> data;      // unsigned distance, packed as u16
+        utl::vector<u16> data;      // distance, packed as u16 (encoding per signed_encoding_)
         utl::vector<u8>  voxels;    // 255 = near surface / inside
     };
 
@@ -33,8 +43,12 @@ public:
     ~OfflineSDFMerger();
 
     // Parse the pipeline model file and extract all LOD0 mesh SDF data.
-    // Returns the number of meshes with SDF data loaded.
-    u32 LoadFromPipelineModel(const char* filePath);
+    // signed_encoding selects the u16 decode (see class comment). Returns
+    // the number of meshes with SDF data loaded.
+    u32 LoadFromPipelineModel(const char* filePath, bool signed_encoding = true);
+
+    // Encoding this merger instance decodes/bakes with (set by LoadFromPipelineModel).
+    bool IsSignedEncoding() const { return signed_encoding_; }
 
     // Merge all per-mesh SDFs into a single 384³ global volume and upload
     // to GPU as an R16F Texture3D. Must be called after LoadFromPipelineModel.
@@ -57,6 +71,7 @@ public:
 
 private:
     utl::vector<MeshSDF> mesh_sdfs_;
+    bool signed_encoding_{true};
     math::v3 origin_{0, 0, 0};
     math::v3 extent_{0, 0, 0};
     f32      voxel_size_{0};

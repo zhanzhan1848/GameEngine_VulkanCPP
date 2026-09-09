@@ -68,9 +68,20 @@
 ## M4: 动态场景 + 内容链
 
 - [x] ✅ v3 完成 2026-09-08：接线 dirty→MarkFullRebuild+revox+probe boost 后引发 GPU hang + WindowServer watchdog crash。根因：①get_updated_components_flags 的 changes_from_previous_frame 永不清零（创建时 component_flags::all 持续脏）→ 每帧触发全量重建 ②全量 Rebind+CardGenerator rebuild+revox mip 链+indirect trace 同帧执行超出 GPU 帧预算 ③consume-on-read 修复影响 ForwardRenderer 全局语义。基础设施已保留（GlobalSDF::MarkAllCascadesForRevox + LumenDDGIPass::BoostProbePriority 方法可用），v3 落地：consume-on-read（Transform.cpp 消费即清零防每帧循环）+ 30 帧冷却 + MarkFullRebuild+revox+probe boost+temporal reset。验证：Sponza 45s frame 1260 稳定（28fps），零误触发，双端门禁全绿  **T4.1** GI 事件总线：dirty transform/材质版本/灯变化/场景事件 → SC 捕获失效 + GlobalSDF revoxelization 置位 + probe 优先级 boost — 接 `QueryDirtyTransforms` 进 GI（关闭 **D8**）
-- [ ] **T4.2** 离线 card bake（ContentTools：体素化 + Surfel + 6 向卡），运行时 AABB 派生降级为 fallback（关闭 **D9** 前半）
-- [ ] **T4.3** per-mesh SDF 运行时接入第一步：命中点精化 + 梯度法线重建 — `RHIGpuMesh.cpp:190-256` 资产激活
-- [ ] **T4.4** emissive 闭环：GBuffer emissive → 捕获 → LightEval → 探针反弹 + Radiance Intensity Clamp（关闭 **B15** 后半）
+- [x] ✅ 2026-09-09 **T4.2** 离线 card bake（ContentTools：SDF 面壳占据 → 6 向紧致卡片 + Surfel），运行时 AABB 派生降级为 fallback（关闭 **D9** 前半）
+  - 链路：`common/CardBake.{h,cpp}`（bake 算法，32B/条 wire 记录）→ legacy cook（Geometry.cpp "CDBK" 尾段）与 pipeline cook（AssetPipeline build_packed_for_mesh，`enable_card_bake` 独立于 enable_sdf——只产 tiny 卡片段不拖 SDF 大负载）→ blob 读写（SceneBlobWriter/Reader，elements_type `card_bake_flag`=0x20）→ primal-engine cook-mesh 统计 `card_baked_meshes` → 引擎三条解析（ContentToEngine/CookedMeshAdapter/SceneDataAdapter）→ `RHIMeshAsset.card_bake`（static_assert 32B×2）→ `CardGenerator::RegisterMeshBaked`（世界变换 + AABB 收紧）+ `ResetRegistrations` 防重注册 → SRP 注册循环 baked 优先/AABB fallback + 一次性日志 `[LumenSC] cards source = baked (N) / fallback (M)`
+  - 单测 TestCardBake 8/8：薄向剔除/紧致投影/分辨率公式/surfel/开放几何/退化网格/blob 往返/旧格式零漂移；cook-mesh 双路径实测 legacy+pipeline 均 `card_baked_meshes=6`
+  - POD 扩展：`ai_asset_pipeline_params` 尾部追加 `enable_card_bake`（208→216B，C# 镜像同步，"只增不改"）；`GeometryImportSettings.EnableCardBake`（默认 true）
+  - Sponza 测试资产为旧 blob（无 CDBK）→ 393 实例全走 fallback（日志可观测），新 cook 资产自动带 bake
+- [x] ◐ 2026-09-09 **T4.3** per-mesh SDF 运行时接入——第一片（DDGI detail-SDF 命中精化 + 梯度法线，opt-in `PRIMAL_DDGI_DETAIL_SDF=1`）：
+  - 资产激活：SDF data 上传修正（u16 是 unorm 打包，原按 R16_Float 位重解=垃圾 → R16_UNorm）；有符号编码经 elements_type `sdf_signed_flag`(0x40) 贯通（ContentTools generate_sdf 置位 → 三端解析记录 `RHISDFData.signed_encoding`）；LoadPipelineFormat 补 SDF 段解析（原只 skip——pipeline 格式场景的 mesh 从此可带 per-mesh SDF）
+  - DDGI detail 槽位：K=4 槽（与 DDGI volume 相交、按交集体积 Top-K），独立 656B UBO（不动 336B DDGIVolumeData，避免 9 处镜像同步）；split trace 追加 binding（Vulkan flat 6..11 / Metal buffer 4,5 + texture 3..6），未用槽回退绑真 3D 级联纹理（零 dummy 依赖）；hit buffer 保持 float + 平行 `hit_normal` buffer（w=1 有效）
+  - shader：粗命中落槽位包围盒 → 局部二次步进 + 有符号二分/无符号 |d| 下降精化 t → 6 采样中心差分梯度法线（normal_matrix=inv_world 列，world 法线朝向射线翻转）；finalize 以真法线替换 `-rayDir` 伪法线（SH 求值 + 解析 NdotL 消费者）；count=0 时全惰性、位等价默认
+  - 验证：Vulkan GIVerify bands PASS（gather_avg 5.74∈[0.005,6.3]）+ GIGolden PASS（worstRel≈2e-4%）双路径（默认/enabled）；Metal Modular 75/90s 零 assertion；TestMetalGIFusion probe=9.99/gather_avg=5.5719=基线；ctest Unit PASS
+  - 【基线有意更新】`gi_probe_sh_vulkan.csv` 8 行——根因=同树未提交的有符号离线 SDF cache 解码（PGSDFC02 + 空腔符号修复）改变 trace 命中（14.6% 漂移），非 T4.3 引入（T4.3 默认关）；已按流程重生成并二次验证
+  - 遗留（二批）：count>0 实弹验证需带 per-mesh SDF 的测试场景——LoadRenderItemData 尚不解析 signed_v5 多组布局；SPGI trace 同批接入；monolith fallback 保持粗粒度
+- [ ] **T4.3（二批）** detail-SDF 实弹闭环：多组布局解析/测试资产升级、SPGI 接入、精化效果量化（漏光用例 GI_ISOLATE 对比）
+- [x] ◐ 2026-09-08（commit b78c89bd） **T4.4** emissive 闭环 v1：capture 写入 + per-instance emissive 表 + 强度钳制（SurfaceCacheCapture/LightEval 双端）——探针反弹消费与端到端验证归 v2（关闭 **B15** 后半的主体）
   - 验收：移动物体卡片更新延迟 ≤ 阈值帧；移灯 GI 收敛时间量化；自发光体照亮场景端到端
 
 ## M5: 功能面收尾

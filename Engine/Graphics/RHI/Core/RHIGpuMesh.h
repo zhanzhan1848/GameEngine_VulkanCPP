@@ -44,6 +44,16 @@ namespace primal::graphics::rhi
         const f32* GetBoundsMin() const { return bounds_min_; }
         const f32* GetBoundsMax() const { return bounds_max_; }
 
+        // T4.2: CPU-side offline card bake carried from the asset (no GPU
+        // upload — SurfaceCacheCardGenerator consumes it directly).
+        [[nodiscard]] const RHICardBakeData& GetCardBake() const { return card_bake_; }
+
+        // T4.3: SDF data encoding — 1 = signed distance packed as
+        // pack_float<16>(dist + max_dim, 0, 2*max_dim); 0 = legacy unsigned
+        // dist = unorm * max_dim. The texture uploads as R16_UNorm either
+        // way; the shader-side decode (DDGI detail-SDF slots) branches here.
+        [[nodiscard]] bool IsSDFSigned() const { return sdf_signed_ != 0; }
+
         u32 GetIndexCount() const { return index_count_; }
         u32 GetVertexCount() const { return vertex_count_; }
         u32 GetMeshletCount() const { return meshlet_count_; }
@@ -73,6 +83,11 @@ namespace primal::graphics::rhi
         
         f32 bounds_min_[3] = {0.f, 0.f, 0.f};
         f32 bounds_max_[3] = {0.f, 0.f, 0.f};
+
+        RHICardBakeData card_bake_;
+
+        // T4.3: SDF distance encoding flag (see IsSDFSigned).
+        u8 sdf_signed_{ 0 };
 
         // Helper for upload
         bool CreateAndUploadBuffer(const void* data, u64 size, ResourceHandle& out_buffer, BufferUsageFlags usage, const char* name);

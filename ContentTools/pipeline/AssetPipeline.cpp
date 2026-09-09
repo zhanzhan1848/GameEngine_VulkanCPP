@@ -2,6 +2,7 @@
 
 #include "SceneBlobWriter.h"
 #include "common/SDF.h"
+#include "common/CardBake.h"
 
 #include <algorithm>
 #include <csignal>
@@ -69,7 +70,10 @@ void build_packed_for_mesh(const ProcessableMesh& m,
 
     PackedMesh pm = BuildPackedMesh(m, md, lod_id, lod_threshold, out.warnings);
 
-    if (cfg.enable_sdf && !m.positions.empty()) {
+    // T4.2: card bake consumes the same occupancy grid SDF produces. Run
+    // generate_sdf when either consumer wants it; persist the (heavy) SDF
+    // payload only for the enable_sdf path so bake-only cooks stay small.
+    if ((cfg.enable_sdf || cfg.enable_card_bake) && !m.positions.empty()) {
         // SDF generation requires the legacy mesh struct because SDF.cpp
         // reads mesh.vertices (AoS). Build a minimal bridge mesh.
         mesh bridge{};
@@ -98,7 +102,31 @@ void build_packed_for_mesh(const ProcessableMesh& m,
             bridge.indices.resize(w);
         }
         generate_sdf(bridge, cfg.sdf_params.resolution);
-        pm.sdf = std::move(bridge.sdf);
+
+        // T4.2: offline card bake from the same bridge's SDF shell occupancy
+        // (zero extra voxelization; covers open/single-sided architecture).
+        // m.sdf / pm.sdf untouched, so runtime GI numerics don't shift.
+        // Output trails the blob as the "CDBK" section.
+        {
+            const mesh::sdf_data& sdf = bridge.sdf;
+            if (sdf.voxels.size() == (size_t)sdf.resolution[0] * sdf.resolution[1] * sdf.resolution[2])
+            {
+                card_bake::OccupancyGrid grid;
+                grid.voxels = sdf.voxels.data();
+                grid.resolution = sdf.resolution[0];
+                grid.grid_min = math::v3{ sdf.bounds_min[0], sdf.bounds_min[1], sdf.bounds_min[2] };
+                grid.voxel_size = math::v3{
+                    (sdf.bounds_max[0] - sdf.bounds_min[0]) / (f32)grid.resolution,
+                    (sdf.bounds_max[1] - sdf.bounds_min[1]) / (f32)grid.resolution,
+                    (sdf.bounds_max[2] - sdf.bounds_min[2]) / (f32)grid.resolution };
+                card_bake::Params bake_params{};
+                card_bake::bake(grid, bake_params, pm.card_bake);
+            }
+        }
+
+        if (cfg.enable_sdf) {
+            pm.sdf = std::move(bridge.sdf);
+        }
     }
 
     out.packed.emplace_back(std::move(pm));

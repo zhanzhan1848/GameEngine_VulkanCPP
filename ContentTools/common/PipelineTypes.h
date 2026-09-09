@@ -11,6 +11,7 @@
 
 #include "ToolsCommon.h"
 #include "Geometry.h"  // mesh::meshlet / mesh::sdf_data / elements::elements_type
+#include "CardBake.h"  // card_bake::data (T4.2 离线卡片烘焙)
 
 namespace primal::tools {
 
@@ -60,6 +61,10 @@ struct PackedMesh {
 
     MeshletData                     meshlets;
     mesh::sdf_data                  sdf;
+
+    // T4.2 offline card bake: serialized as a trailing "CDBK" section
+    // (elements_type card_bake_flag). Empty = section not written.
+    card_bake::data                 card_bake;
 };
 
 }  // namespace primal::tools

@@ -17,6 +17,7 @@ namespace primal::graphics::rhi
         , sdf_texture_(other.sdf_texture_)
         , voxel_texture_(other.voxel_texture_)
         , vector_field_texture_(other.vector_field_texture_)
+        , card_bake_(std::move(other.card_bake_))
         , index_count_(other.index_count_)
         , vertex_count_(other.vertex_count_)
         , meshlet_count_(other.meshlet_count_)
@@ -57,6 +58,7 @@ namespace primal::graphics::rhi
             sdf_texture_ = other.sdf_texture_;
             voxel_texture_ = other.voxel_texture_;
             vector_field_texture_ = other.vector_field_texture_;
+            card_bake_ = std::move(other.card_bake_);
             index_count_ = other.index_count_;
             vertex_count_ = other.vertex_count_;
             meshlet_count_ = other.meshlet_count_;
@@ -130,6 +132,9 @@ namespace primal::graphics::rhi
         index_count_ = 0;
         vertex_count_ = 0;
         meshlet_count_ = 0;
+        card_bake_.cards.clear();
+        card_bake_.surfels.clear();
+        sdf_signed_ = 0;
         memset(sdf_resolution_, 0, sizeof(sdf_resolution_));
         memset(vector_field_resolution_, 0, sizeof(vector_field_resolution_));
         memset(bounds_min_, 0, sizeof(bounds_min_));
@@ -190,15 +195,26 @@ namespace primal::graphics::rhi
         memcpy(sdf_resolution_, asset.sdf.resolution, sizeof(sdf_resolution_));
         memcpy(voxel_resolution_, asset.sdf.resolution, sizeof(voxel_resolution_));
         memcpy(vector_field_resolution_, asset.sdf.resolution, sizeof(vector_field_resolution_));
-        
+
         memcpy(bounds_min_, asset.sdf.bounds_min, sizeof(bounds_min_));
         memcpy(bounds_max_, asset.sdf.bounds_max, sizeof(bounds_max_));
+
+        // T4.2: hold the offline card bake (CPU-side; SurfaceCache consumes).
+        card_bake_ = asset.card_bake;
+
+        // T4.3: SDF distance encoding (decode contract for the detail-SDF
+        // slots — see RHIMeshAsset.h RHISDFData).
+        sdf_signed_ = asset.sdf.signed_encoding;
 
         // SDF Texture
         if (!asset.sdf.data.empty())
         {
-            // Assume 16-bit float format (Half Float)
-            if (CreateAndUploadTexture3D(asset.sdf.data.data(), asset.sdf.resolution[0], asset.sdf.resolution[1], asset.sdf.resolution[2], DataFormat::R16_Float, sdf_texture_, "SDFTexture")) {
+            // T4.3: the u16 payload is pack_float<16>-encoded (unorm), NOT
+            // float16 bits — R16_Float reinterpreted the raw values as halfs
+            // and every sample was garbage. Upload as R16_UNorm; consumers
+            // decode d = unorm * scale + offset with scale/offset from the
+            // slot table (signed: 2*max_dim / -max_dim; legacy: max_dim / 0).
+            if (CreateAndUploadTexture3D(asset.sdf.data.data(), asset.sdf.resolution[0], asset.sdf.resolution[1], asset.sdf.resolution[2], DataFormat::R16_UNorm, sdf_texture_, "SDFTexture")) {
                 sdf_resolution_[0] = asset.sdf.resolution[0];
                 sdf_resolution_[1] = asset.sdf.resolution[1];
                 sdf_resolution_[2] = asset.sdf.resolution[2];

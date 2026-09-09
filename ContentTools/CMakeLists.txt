@@ -29,6 +29,8 @@ set(PROJECTION_SOURCES
     # Phase 1 asset pipeline shared sources (M2)
     common/SDF.h
     common/SDF.cpp
+    common/CardBake.h
+    common/CardBake.cpp
     common/ProcessableMesh.h
     common/ProcessableMesh.cpp
     common/ErrorReport.h

@@ -16,6 +16,11 @@ namespace primal::content
         // elements_type::lightmap_uv_flag).
         constexpr std::uint32_t lightmap_uv_flag = 0x10;
         constexpr std::uint32_t lightmap_uv_magic = 0x4D4C5655; // "UVLM"
+        // T4.2 offline card bake ("CDBK"), flagged by bit 0x20.
+        constexpr std::uint32_t card_bake_flag = 0x20;
+        constexpr std::uint32_t card_bake_magic = 0x4B424443; // "CDBK"
+        constexpr std::size_t card_bake_card_size = 32;
+        constexpr std::size_t card_bake_surfel_size = 32;
         constexpr std::size_t serialized_meshlet_size = 60;
         constexpr std::uint32_t max_collection_count = 1u << 20;
 
@@ -150,6 +155,20 @@ namespace primal::content
                 if (!input.read_u32(uv_magic) || uv_magic != lightmap_uv_magic ||
                     !input.read_u32(uv_count) || uv_count != vertex_count ||
                     !input.skip(static_cast<std::size_t>(uv_count) * 2 * sizeof(float)))
+                    return false;
+            }
+
+            // T4.2: card bake section, only when flagged in the header.
+            if (element_type & card_bake_flag)
+            {
+                std::uint32_t cb_magic{};
+                std::uint32_t card_count{};
+                std::uint32_t surfel_count{};
+                if (!input.read_u32(cb_magic) || cb_magic != card_bake_magic ||
+                    !input.read_u32(card_count) || card_count > 4096 ||
+                    !input.skip(static_cast<std::size_t>(card_count) * card_bake_card_size) ||
+                    !input.read_u32(surfel_count) || surfel_count > (1u << 20) ||
+                    !input.skip(static_cast<std::size_t>(surfel_count) * card_bake_surfel_size))
                     return false;
             }
 

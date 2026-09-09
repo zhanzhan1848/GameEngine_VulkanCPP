@@ -49,6 +49,17 @@ struct PackedMeshView {
     u32                         lightmap_uv_count{0};
     const f32*                  lightmap_uvs{nullptr};
 
+    // T4.2 offline card bake (elements_type::card_bake_flag). Zero/none when
+    // the mesh has no bake data; pointers into the source buffer.
+    u32                         card_bake_card_count{0};
+    const card_bake::card*      card_bake_cards{nullptr};
+    u32                         card_bake_surfel_count{0};
+    const card_bake::surfel*    card_bake_surfels{nullptr};
+
+    // T4.3: elements_type::sdf_signed_flag — the mesh's SDF data array is a
+    // signed distance (pack_float<16>(dist + max_dim, 0, 2*max_dim)).
+    bool                        sdf_signed{false};
+
     // SDF data is shallow-copied; reader does NOT walk into sdf.data/voxels/
     // vector_field arrays because Phase 1 validation doesn't need them.
     // Future Phase 2 readers can extend PackedMeshView with SDF pointers.

@@ -5,6 +5,11 @@
 #include <cmath>
 #include <cstdio>
 
+#include <Eigen/Core>
+// libigl header-only: each header pulls its .cpp unless IGL_STATIC_LIBRARY is
+// defined (same convention as Remesh.cpp's igl::qslim include).
+#include <igl/fast_winding_number.h>
+
 #include "../Engine/Graphics/RHI/Core/RHIMath.h"
 
 namespace primal::tools {
@@ -125,6 +130,53 @@ void generate_sdf(mesh& m, u32 resolution) {
 
     const u32 num_indices = (u32)m.indices.size();
 
+    // ---- Inside/outside via fast winding number (Barill et al. 2018) ----
+    // The old +X Möller-Trumbore parity test mis-signs hollow architecture:
+    // a ray from inside Sponza's atrium crosses the shell once → "inside" →
+    // the whole cavity baked as deep-negative solid (measured: nave air read
+    // −40 after merge; every interior probe traced as buried). The winding
+    // number measures enclosed solid angle instead:
+    //   - closed solid meshes (statues, columns, wall slabs) → |w| ≈ 1
+    //     inside the material, 0 outside — correct signed cores;
+    //   - open / single-sided geometry (curtains, thin planes) → |w| < 0.5
+    //     almost everywhere — stays air, distance stays positive;
+    //   - closed hollow shells → outer/inner contributions cancel in the
+    //     cavity — air again.
+    // Threshold 0.5 (standard); accuracy_scale 2.0 per the igl docs.
+    Eigen::MatrixXf V(m.vertices.size(), 3);
+    for (size_t vi = 0; vi < m.vertices.size(); ++vi) {
+        V(vi, 0) = m.vertices[vi].position.x;
+        V(vi, 1) = m.vertices[vi].position.y;
+        V(vi, 2) = m.vertices[vi].position.z;
+    }
+    const u32 num_tris = num_indices / 3;
+    Eigen::MatrixXi F(num_tris, 3);
+    for (u32 t = 0; t < num_tris; ++t) {
+        F(t, 0) = (int)m.indices[t * 3 + 0];
+        F(t, 1) = (int)m.indices[t * 3 + 1];
+        F(t, 2) = (int)m.indices[t * 3 + 2];
+    }
+
+    // Voxel-center query grid (z-major, matching the loop below).
+    Eigen::MatrixXf Q((size_t)res * res * res, 3);
+    for (u32 z = 0; z < res; ++z)
+    for (u32 y = 0; y < res; ++y)
+    for (u32 x = 0; x < res; ++x) {
+        math::v3 p = min_b + step * (math::v3{ (f32)x, (f32)y, (f32)z } + 0.5f);
+        const size_t qi = ((size_t)z * res + y) * res + x;
+        Q(qi, 0) = p.x;
+        Q(qi, 1) = p.y;
+        Q(qi, 2) = p.z;
+    }
+
+    Eigen::VectorXf W(Q.rows());
+    W.setConstant(0.0f);
+    if (num_tris > 0) {
+        igl::FastWindingNumberBVH fwn_bvh;
+        igl::fast_winding_number(V, F, 2, fwn_bvh);
+        igl::fast_winding_number(fwn_bvh, 2.0f, Q, W);
+    }
+
     // ---- Build uniform spatial grid for triangle acceleration ----
     // The SDF voxel grid is res³ over [min_b, max_b]. We build a parallel
     // triangle grid at the same resolution: each triangle is inserted into
@@ -146,7 +198,6 @@ void generate_sdf(mesh& m, u32 resolution) {
     };
     grid.cells.resize((size_t)res * res * res);
 
-    const u32 num_tris = num_indices / 3;
     for (u32 t = 0; t < num_tris; ++t) {
         const u32 i0 = m.indices[t * 3 + 0];
         const u32 i1 = m.indices[t * 3 + 1];
@@ -232,31 +283,13 @@ void generate_sdf(mesh& m, u32 resolution) {
                 if (!std::isfinite(dist) || dist > max_dim) dist = max_dim;
                 u32 idx = z * res * res + y * res + x;
 
-                // Inside/outside test via +X ray casting across ALL triangles.
-                u32 intersectionCount = 0;
-                for (u32 i = 0; i < num_indices; i += 3) {
-                    math::v3 v0 = m.vertices[m.indices[i]].position;
-                    math::v3 v1 = m.vertices[m.indices[i + 1]].position;
-                    math::v3 v2 = m.vertices[m.indices[i + 2]].position;
-                    math::v3 edge1 = v1 - v0;
-                    math::v3 edge2 = v2 - v0;
-                    math::v3 rayDir{1.0f, 0.0f, 0.0f};
-                    math::v3 h = Cross(rayDir, edge2);
-                    f32 a = Dot(edge1, h);
-                    if (a > -1e-10f && a < 1e-10f) continue;
-                    f32 f = 1.0f / a;
-                    math::v3 s = p - v0;
-                    f32 u = f * Dot(s, h);
-                    if (u < 0.0f || u > 1.0f) continue;
-                    math::v3 q = Cross(s, edge1);
-                    f32 vRay = f * Dot(rayDir, q);
-                    if (vRay < 0.0f || u + vRay > 1.0f) continue;
-                    f32 t_ray = f * Dot(edge2, q);
-                    if (t_ray > 1e-6f) intersectionCount++;
-                }
-                bool inside = (intersectionCount % 2 == 1);
+                // Inside/outside from the precomputed winding number field.
+                const f32 winding = W[idx];
+                const bool inside = std::isfinite(winding) && winding > 0.5f;
                 f32 signedDist = inside ? -dist : dist;
                 m.sdf.data[idx] = math::pack_float<16>(signedDist + max_dim, 0.0f, max_dim * 2.0f);
+                // T4.3: this bake is signed (decode via sdf_signed_flag 0x40).
+                m.sdf.signed_encoding = 1;
 
                 f32 voxel_diag = Length(step);
                 m.sdf.voxels[idx] = (dist < voxel_diag * 0.5f) ? 255 : 0;

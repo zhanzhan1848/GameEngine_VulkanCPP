@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ToolsCommon.h"
+#include "common/CardBake.h"  // mesh::card_bake（T4.2 离线卡片烘焙）
 
 namespace primal::tools {
 
@@ -41,6 +42,26 @@ namespace primal::tools {
 				// after consuming the section. Old blobs (bit clear) parse
 				// byte-identically; meshes without lightmap UVs never set it.
 				lightmap_uv_flag				= 0x10,
+
+				// T4.2 offline card bake: blob-format flag only. When set, a
+				// trailing section follows the (optional) UVLM section of that
+				// mesh:
+				//   u32 magic 0x4B424443 ("CDBK")
+				// | u32 card_count | card_count * card_bake::card   (32 B each)
+				// | u32 surfel_count | surfel_count * card_bake::surfel (32 B each)
+				// Readers mask the bit off after consuming; old blobs (bit
+				// clear) parse byte-identically. Meshes without bake data
+				// never set it.
+				card_bake_flag					= 0x20,
+
+				// T4.3 per-mesh SDF signed encoding: metadata flag only (no
+				// extra section). When set, that mesh's SDF "data" array is a
+				// SIGNED distance packed as pack_float<16>(dist + max_dim,
+				// 0, 2*max_dim) (fast winding number inside test); clear =
+				// legacy unsigned dist = u16/65535 * max_dim. Readers mask the
+				// bit off and record it next to the parsed sdf_data. Old
+				// blobs (bit clear) decode unchanged.
+				sdf_signed_flag					= 0x40,
 			};
 		};
 
@@ -166,8 +187,19 @@ namespace primal::tools {
 			utl::vector<u16> data; // half-float distance
 			utl::vector<u8> voxels; // 8-bit occupancy/density
 			utl::vector<u16> vector_field; // 4x half-float vector to nearest surface (RGBA)
+
+			// T4.3: 1 = data is a SIGNED distance packed as
+			// pack_float<16>(dist + max_dim, 0, 2*max_dim); 0 = legacy
+			// unsigned dist = u16/65535 * max_dim. Persisted via the
+			// elements_type sdf_signed_flag (0x40) bit; generate_sdf sets it.
+			u8 signed_encoding{ 0 };
 		};
 		sdf_data								sdf;
+
+		// T4.2 offline card bake (surface cache cards + surfels, mesh local
+		// space). Serialized as the trailing "CDBK" section; empty for meshes
+		// without bake data (runtime falls back to AABB-derived cards).
+		card_bake::data							card_bake;
 
 		// Intermediate data
 		utl::vector<vertex>						vertices;

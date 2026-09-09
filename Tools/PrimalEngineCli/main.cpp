@@ -406,14 +406,15 @@ int VerbRender(int argc, char** argv)
 }
 
 // A9 PR2: 产物读回校验——把写盘后的 blob 按 SceneBlob 布局重新走一遍解析，
-// 统计 mesh 总数与带 UVLM（Lightmap UV sidecar）段的 mesh 数。这是
-// "cook → 磁盘 → 引擎读回" 闭环的校验端；读取失败不否定 cook 本身，
-// 但会体现在返回的统计里（mesh_count=0 即异常）。
+// 统计 mesh 总数与带 UVLM（Lightmap UV sidecar）/ CDBK（T4.2 card bake）段的
+// mesh 数。这是 "cook → 磁盘 → 引擎读回" 闭环的校验端；读取失败不否定
+// cook 本身，但会体现在返回的统计里（mesh_count=0 即异常）。
 static bool CountMeshStats(const char* path, u32* out_mesh_count,
-                           u32* out_lightmap_uv_meshes)
+                           u32* out_lightmap_uv_meshes, u32* out_card_baked_meshes)
 {
     *out_mesh_count = 0;
     *out_lightmap_uv_meshes = 0;
+    *out_card_baked_meshes = 0;
 
     FILE* f = std::fopen(path, "rb");
     if (!f) return false;
@@ -435,6 +436,7 @@ static bool CountMeshStats(const char* path, u32* out_mesh_count,
         [&](u32, const primal::tools::pipeline::PackedMeshView& view) {
             ++(*out_mesh_count);
             if (view.lightmap_uv_count > 0) ++(*out_lightmap_uv_meshes);
+            if (view.card_bake_card_count > 0) ++(*out_card_baked_meshes);
         },
         errs);
     return true;
@@ -446,7 +448,8 @@ static bool CountMeshStats(const char* path, u32* out_mesh_count,
 // blob 的 UVLM sidecar 段而非被丢弃。
 static bool CookMeshPipeline(const char* inPath, const char* outPath,
                              bool uvatlas, bool uvatlasLightmap,
-                             u32* out_mesh_count, u32* out_lightmap_uv_meshes)
+                             u32* out_mesh_count, u32* out_lightmap_uv_meshes,
+                             u32* out_card_baked_meshes)
 {
     ai_asset_pipeline_params p{};
     // 解析侧 legacy settings——与 legacy CookMesh 短格式默认一致
@@ -460,6 +463,9 @@ static bool CookMeshPipeline(const char* inPath, const char* outPath,
     p.enable_lod = 1;
     p.enable_meshlet = 1;
     p.enable_remesh = 1;
+    // T4.2: cook-mesh 产出离线卡片烘焙（occupancy 来自 generate_sdf，
+    // 但 SDF 大负载不持久化——输出只追加 tiny "CDBK" 段）。
+    p.enable_card_bake = 1;
     p.lod_ratio = 0.5f;
     p.auto_derive_after_subdivide = 1;
     p.subdivide_levels = 1;
@@ -479,7 +485,7 @@ static bool CookMeshPipeline(const char* inPath, const char* outPath,
     }
 
     if (CookMeshWithPipeline(inPath, outPath, &p) == 0) return false;
-    CountMeshStats(outPath, out_mesh_count, out_lightmap_uv_meshes);
+    CountMeshStats(outPath, out_mesh_count, out_lightmap_uv_meshes, out_card_baked_meshes);
     return true;
 }
 
@@ -516,16 +522,17 @@ int VerbCookMesh(int argc, char** argv)
     // cook 走 ContentTools 离线管线，不需要初始化渲染引擎。
     u32 mesh_count = 0;
     u32 lightmap_uv_meshes = 0;
+    u32 card_baked_meshes = 0;
     bool cooked = false;
     if (uvatlas)
     {
         cooked = CookMeshPipeline(inPath, outPath, true, uvatlasLightmap,
-                                  &mesh_count, &lightmap_uv_meshes);
+                                  &mesh_count, &lightmap_uv_meshes, &card_baked_meshes);
     }
     else
     {
         cooked = CookMesh(inPath, outPath) != 0;
-        if (cooked) CountMeshStats(outPath, &mesh_count, &lightmap_uv_meshes);
+        if (cooked) CountMeshStats(outPath, &mesh_count, &lightmap_uv_meshes, &card_baked_meshes);
     }
     if (!cooked)
     {
@@ -545,9 +552,9 @@ int VerbCookMesh(int argc, char** argv)
     char data[1024];
     std::snprintf(data, sizeof(data),
                   "{\"input\":%s,\"path\":%s,\"bytes\":%lld,"
-                  "\"meshes\":%u,\"lightmap_uv_meshes\":%u}",
+                  "\"meshes\":%u,\"lightmap_uv_meshes\":%u,\"card_baked_meshes\":%u}",
                   JsonEscape(inPath).c_str(), JsonEscape(outPath).c_str(), bytes,
-                  mesh_count, lightmap_uv_meshes);
+                  mesh_count, lightmap_uv_meshes, card_baked_meshes);
     PrintOk(data);
     return kExitOk;
 }

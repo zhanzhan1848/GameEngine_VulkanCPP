@@ -159,12 +159,32 @@ namespace primal::content
 		constexpr u32 lightmap_uv_flag{ 0x10 };
 		constexpr u32 lightmap_uv_magic{ 0x4D4C5655 };  // "UVLM"
 
+		// T4.2 offline card bake: mirrors elements_type::card_bake_flag and
+		// the "CDBK" trailing section (u32 magic | u32 card_count |
+		// card_count * RHICardBakeCard | u32 surfel_count | surfels).
+		constexpr u32 card_bake_flag{ 0x20 };
+		constexpr u32 card_bake_magic{ 0x4B424443 };  // "CDBK"
+
+		// T4.3 per-mesh SDF signed encoding: metadata flag only — when set,
+		// the SDF data array decodes as (unorm*2*max_dim - max_dim).
+		constexpr u32 sdf_signed_flag{ 0x40 };
+
 		void skip_lightmap_uv_section(utl::blob_stream_reader& blob)
 		{
 			const u32 magic{ blob.read<u32>() };
 			assert(magic == lightmap_uv_magic);
 			const u32 uv_count{ blob.read<u32>() };
 			blob.skip((size_t)uv_count * sizeof(f32) * 2);
+		}
+
+		void skip_card_bake_section(utl::blob_stream_reader& blob)
+		{
+			const u32 magic{ blob.read<u32>() };
+			assert(magic == card_bake_magic);
+			const u32 card_count{ blob.read<u32>() };
+			blob.skip((size_t)card_count * sizeof(graphics::rhi::RHICardBakeCard));
+			const u32 surfel_count{ blob.read<u32>() };
+			blob.skip((size_t)surfel_count * sizeof(graphics::rhi::RHICardBakeSurfel));
 		}
 
 		void skip_mesh_in_blob(utl::blob_stream_reader& blob)
@@ -223,6 +243,12 @@ namespace primal::content
 			{
 				skip_lightmap_uv_section(blob);
 			}
+
+			// T4.2: card bake section, only when flagged in the header.
+			if (elem_type & card_bake_flag)
+			{
+				skip_card_bake_section(blob);
+			}
 		}
 
 		void parse_mesh_to_asset(utl::blob_stream_reader& blob, graphics::rhi::RHIMeshAsset& asset)
@@ -237,9 +263,13 @@ namespace primal::content
 			const u32 elem_size{ blob.read<u32>() };
 			const u32 raw_elem_type{ blob.read<u32>() };
 			// A9: strip the lightmap sidecar flag — the in-memory asset
-			// keeps the canonical elements_type.
-			asset.elements_type = raw_elem_type & ~lightmap_uv_flag;
+			// keeps the canonical elements_type. T4.2: card_bake_flag (0x20)
+			// stripped the same way; the "CDBK" section is read below.
+			// T4.3: sdf_signed_flag (0x40) recorded into the SDF data.
+			asset.elements_type = raw_elem_type & ~(lightmap_uv_flag | card_bake_flag | sdf_signed_flag);
 			const bool has_lightmap_uvs{ (raw_elem_type & lightmap_uv_flag) != 0 };
+			const bool has_card_bake{ (raw_elem_type & card_bake_flag) != 0 };
+			asset.sdf.signed_encoding = (raw_elem_type & sdf_signed_flag) ? u8(1) : u8(0);
 			asset.num_vertices = blob.read<u32>();
 			asset.index_size = blob.read<u32>();
 			asset.num_indices = blob.read<u32>();
@@ -384,6 +414,31 @@ namespace primal::content
 				{
 					memcpy(asset.lightmap_uv_buffer.data(), blob.position(), asset.lightmap_uv_buffer.size());
 					blob.skip(asset.lightmap_uv_buffer.size());
+				}
+			}
+
+			// T4.2: card bake section — cards + surfels straight into the
+			// asset (32 B wire records, memcpy is layout-stable via
+			// static_assert on both sides).
+			if (has_card_bake)
+			{
+				const u32 magic{ blob.read<u32>() };
+				assert(magic == card_bake_magic);
+				const u32 card_count{ blob.read<u32>() };
+				asset.card_bake.cards.resize(card_count);
+				if (card_count > 0)
+				{
+					memcpy(asset.card_bake.cards.data(), blob.position(),
+					       (size_t)card_count * sizeof(graphics::rhi::RHICardBakeCard));
+					blob.skip((size_t)card_count * sizeof(graphics::rhi::RHICardBakeCard));
+				}
+				const u32 surfel_count{ blob.read<u32>() };
+				asset.card_bake.surfels.resize(surfel_count);
+				if (surfel_count > 0)
+				{
+					memcpy(asset.card_bake.surfels.data(), blob.position(),
+					       (size_t)surfel_count * sizeof(graphics::rhi::RHICardBakeSurfel));
+					blob.skip((size_t)surfel_count * sizeof(graphics::rhi::RHICardBakeSurfel));
 				}
 			}
 		}
@@ -1247,6 +1302,21 @@ namespace primal::content
 		if (!rhi_mesh_assets.is_valid(id)) return false;
 		asset = rhi_mesh_assets[id];
 		return true;
+	}
+
+	bool get_rhi_mesh_card_bake(id::id_type id, graphics::rhi::RHICardBakeData& out)
+	{
+		std::lock_guard lock{ rhi_mesh_mutex };
+		// T4.2：只拷贝 card bake（几 KB）而非整个 RHIMeshAsset（含
+		// position/SDF 大缓冲）——供 StandardRenderPipeline 的卡片注册
+		// 循环按实例调用，避免整资产拷贝与按需建 GPU mesh 的代价。
+		out.cards.clear();
+		out.surfels.clear();
+		if (!rhi_mesh_assets.is_valid(id)) return false;
+		const graphics::rhi::RHICardBakeData& bake{ rhi_mesh_assets[id].card_bake };
+		out.cards = bake.cards;
+		out.surfels = bake.surfels;
+		return !out.cards.empty();
 	}
 
     graphics::rhi::RHIGpuMesh* get_rhi_gpu_mesh(id::id_type id)

@@ -360,3 +360,30 @@ add_test(NAME TestPackedMeshDecoder COMMAND TestPackedMeshDecoder)
 set_target_properties(TestPackedMeshDecoder PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- T4.2 card bake test ----------------------------------------------------
+# Synthetic thin-plate mesh → 6-direction bake: thin-view culling, tight
+# projections, surfel generation, open-geometry fallback, blob round trip.
+
+add_executable(TestCardBake TestCardBake.cpp)
+
+target_include_directories(TestCardBake PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestCardBake PRIVATE ContentTools)
+
+target_compile_options(TestCardBake PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+)
+
+add_test(NAME TestCardBake COMMAND TestCardBake)
+set_target_properties(TestCardBake PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)

@@ -344,6 +344,42 @@ public:
         has_offline_sdf_ = (texture != rhi::handles::INVALID_RESOURCE && resolution > 0);
     }
 
+    // --- T4.3 per-mesh detail SDF slots (PRIMAL_DDGI_DETAIL_SDF=1) ---
+    // First slice of detail tracing: up to 4 instances whose per-mesh SDF
+    // textures (RHIGpuMesh, R16_UNorm) intersect the DDGI volume get bound
+    // to the split SDF trace. At a coarse GlobalSDF hit inside a slot's
+    // world AABB the trace refines t against the finer mesh field and
+    // derives a gradient normal (6-tap central difference) that finalize
+    // uses instead of the -rayDir fake. count=0 → trace writes zero
+    // normals and finalize keeps current behavior (bit-identical default).
+    //
+    // Layout contract (std140 UBO / Metal constant buffer, mirror in
+    // DDGITraceSDF.comp + DDGITraceRays.metal):
+    //   header      : vec4 (x = active slot count, yzw pad)
+    //   inv_world[4]: mat4 world → mesh-local
+    //   normal_mtx[4]: vec4[3] rows of transpose(inverse(world 3x3))
+    //   bounds_min[4]/bounds_max[4]: vec4 world AABB of the mesh SDF bounds
+    //   params[4]   : vec4 (resolution, max_dim, signed, voxel_size)
+    static constexpr u32 kDetailSDFSlots = 4;
+    struct DetailSDFSlot {
+        math::m4x4 inv_world;
+        math::v4   normal_matrix[3];
+        math::v4   bounds_min;
+        math::v4   bounds_max;
+        math::v4   params;          // x=resolution, y=max_dim, z=signed, w=voxel_size
+    };
+    void SetDetailSDFSlots(const rhi::ResourceHandle* textures,
+                           const DetailSDFSlot* slots, u32 count) {
+        detail_sdf_slot_count_ = (count > kDetailSDFSlots) ? kDetailSDFSlots : count;
+        for (u32 i = 0; i < detail_sdf_slot_count_; ++i) {
+            detail_sdf_textures_[i] = textures[i];
+            detail_sdf_slots_[i] = slots[i];
+        }
+    }
+    // World AABB of the probe volume (probe origin/counts/spacing + 1 cell
+    // margin) — the region detail-SDF refinement can affect.
+    void GetVolumeAABB(math::v3& out_min, math::v3& out_max) const;
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
@@ -426,6 +462,27 @@ private:
 
     // Hit distance buffer (intermediate between split trace dispatches)
     rhi::ResourceHandle hit_distance_buffer_{ rhi::handles::INVALID_RESOURCE };
+
+    // T4.3: per-ray refined hit normals (xyz, w>0.5 = valid), written by the
+    // split SDF trace (zeros when no detail slots), consumed by finalize.
+    rhi::ResourceHandle hit_normal_buffer_{
+        rhi::handles::INVALID_RESOURCE
+    };
+    // T4.3: detail-SDF slot table UBO (triple-buffered) + slot textures +
+    // dummy resources that keep the appended bindings valid when the feature
+    // is off (PRIMAL_DDGI_DETAIL_SDF unset → slot count 0 → shader no-op).
+    bool detail_sdf_enabled_{ false };
+    u32  detail_sdf_slot_count_{ 0 };
+    DetailSDFSlot detail_sdf_slots_[kDetailSDFSlots]{};
+    rhi::ResourceHandle detail_sdf_textures_[kDetailSDFSlots]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    rhi::ResourceHandle detail_table_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    // Unused detail slots bind the (always-valid) SDF cascade texture — no
+    // dummy texture needed.
 
     // Finalize screen-space sampling (Vulkan): ViewProjection CB (64B ×3) +
     // current frame's view-projection for projecting hit positions to screen.

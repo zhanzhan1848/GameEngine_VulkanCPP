@@ -103,7 +103,14 @@ struct ai_asset_pipeline_params
     // [4, 256]; values outside that range are pinned to the nearest bound.
     // Memory/cost scale cubically (~190MB at 256^3) — caller decides.
     u32                         sdf_grid_resolution;
+    // -- T4.2 offline card bake --
+    // Bake 6-direction SurfaceCache cards (+ surfels) from the SDF shell
+    // occupancy into the blob's trailing "CDBK" section. Independent of
+    // enable_sdf: when set, generate_sdf runs to produce the occupancy grid
+    // but the heavy SDF payload is NOT persisted — only the tiny card
+    // section ships. 0 = off; callers opt in.
+    u8                          enable_card_bake;
 };
 
-static_assert(sizeof(ai_asset_pipeline_params) == 208,
+static_assert(sizeof(ai_asset_pipeline_params) == 216,
               "ai_asset_pipeline_params ABI drifted from the C# mirror");

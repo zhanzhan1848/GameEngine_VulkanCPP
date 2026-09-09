@@ -47,6 +47,11 @@ public class GeometryImportSettings : IAssetImportSettings
     public bool AutoDeriveAfterSubdivide { get; set; } = true;
     public bool EnableSdf { get; set; } = true;
     public uint SdfGridResolution { get; set; } = 32;
+    // T4.2 offline card bake: bakes 6-direction SurfaceCache cards from the
+    // SDF shell occupancy. With EnableSdf on it rides the same grid; with
+    // EnableSdf off the grid is generated for the bake only and the heavy
+    // SDF payload is not persisted.
+    public bool EnableCardBake { get; set; } = true;
 
     public PipelineSubdivideScheme SubdivideScheme { get; set; } = PipelineSubdivideScheme.Loop;
     public uint SubdivideLevels { get; set; } = 1;
@@ -174,6 +179,7 @@ public class GeometryImportSettings : IAssetImportSettings
         ReadBool(settings, "AutoDeriveAfterSubdivide", v => AutoDeriveAfterSubdivide = v);
         ReadBool(settings, "EnableSdf", v => EnableSdf = v);
         ReadUInt(settings, "SdfGridResolution", v => SdfGridResolution = v);
+        ReadBool(settings, "EnableCardBake", v => EnableCardBake = v);
 
         // Subdivide
         ReadInt(settings, "SubdivideScheme", v => SubdivideScheme = (PipelineSubdivideScheme)v);
@@ -267,6 +273,7 @@ public class GeometryImportSettings : IAssetImportSettings
             ["AutoDeriveAfterSubdivide"] = AutoDeriveAfterSubdivide,
             ["EnableSdf"] = EnableSdf,
             ["SdfGridResolution"] = SdfGridResolution,
+            ["EnableCardBake"] = EnableCardBake,
             // Subdivide
             ["SubdivideScheme"] = (int)SubdivideScheme,
             ["SubdivideLevels"] = SubdivideLevels,
@@ -403,6 +410,7 @@ public class GeometryImportSettings : IAssetImportSettings
 
             EnableSdf                  = (byte)(EnableSdf ? 1 : 0),
             SdfGridResolution         = SdfGridResolution,
+            EnableCardBake            = (byte)(EnableCardBake ? 1 : 0),
         };
     }
 

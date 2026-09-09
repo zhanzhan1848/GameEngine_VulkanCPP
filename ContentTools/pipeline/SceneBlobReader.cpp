@@ -275,10 +275,19 @@ bool ReadNextPackedMesh(const u8*& cursor_in, const u8* end, PackedMeshView& out
 
     // A9: the blob header may carry lightmap_uv_flag; the in-memory view
     // keeps the canonical type and the flag drives the section read below.
+    // T4.2: card_bake_flag (0x20) handled the same way — the "CDBK" section
+    // is consumed (count recorded) below.
+    // T4.3: sdf_signed_flag (0x40) is pure metadata — recorded, no section.
     const bool has_lightmap_uvs =
         (out.elements_type & elements::elements_type::lightmap_uv_flag) != 0;
+    const bool has_card_bake =
+        (out.elements_type & elements::elements_type::card_bake_flag) != 0;
+    out.sdf_signed =
+        (out.elements_type & elements::elements_type::sdf_signed_flag) != 0;
     out.elements_type = (elements::elements_type::type)
-        (out.elements_type & ~elements::elements_type::lightmap_uv_flag);
+        (out.elements_type & ~(elements::elements_type::lightmap_uv_flag |
+                               elements::elements_type::card_bake_flag |
+                               elements::elements_type::sdf_signed_flag));
 
     // Buffers
     if (!c.read_bytes(out.position_buffer, (size_t)12 * out.num_vertices)) {
@@ -428,6 +437,43 @@ bool ReadNextPackedMesh(const u8*& cursor_in, const u8* end, PackedMeshView& out
         }
         out.lightmap_uv_count = uv_count;
         out.lightmap_uvs = reinterpret_cast<const f32*>(uv_bytes);
+    }
+
+    // T4.2 card bake ("CDBK"): presence is flagged in the header. Cards and
+    // surfels stay zero-copy pointers into the buffer.
+    out.card_bake_card_count = 0;
+    out.card_bake_cards = nullptr;
+    out.card_bake_surfel_count = 0;
+    out.card_bake_surfels = nullptr;
+    if (has_card_bake) {
+        constexpr u32 magic_cdbk = 0x4B424443u;  // "CDBK"
+        if (!c.expect_magic(magic_cdbk)) {
+            errors.emplace_back(ErrorReport{Severity::Error, "blob_read.missing_cdbk",
+                "blob_read: card_bake_flag set but CDBK magic missing", "blob_read"});
+            return false;
+        }
+        u32 card_count;
+        const u8* card_bytes;
+        if (!c.read_u32(card_count) ||
+            card_count > 4096 ||
+            !c.read_bytes(card_bytes, (size_t)card_count * sizeof(card_bake::card))) {
+            errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_cdbk_cards",
+                "blob_read: truncated at CDBK cards", "blob_read"});
+            return false;
+        }
+        out.card_bake_card_count = card_count;
+        out.card_bake_cards = reinterpret_cast<const card_bake::card*>(card_bytes);
+        u32 surfel_count;
+        const u8* surfel_bytes;
+        if (!c.read_u32(surfel_count) ||
+            surfel_count > (1u << 20) ||
+            !c.read_bytes(surfel_bytes, (size_t)surfel_count * sizeof(card_bake::surfel))) {
+            errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_cdbk_surfels",
+                "blob_read: truncated at CDBK surfels", "blob_read"});
+            return false;
+        }
+        out.card_bake_surfel_count = surfel_count;
+        out.card_bake_surfels = reinterpret_cast<const card_bake::surfel*>(surfel_bytes);
     }
 
     cursor_in = c.p;

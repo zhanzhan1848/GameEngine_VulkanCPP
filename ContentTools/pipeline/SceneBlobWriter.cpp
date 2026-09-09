@@ -219,6 +219,12 @@ size_t GetPackedMeshSize(const PackedMesh& pm) {
         size += sizeof(u32);                              // uv_count
         size += pm.lightmap_uvs.size() * sizeof(f32);     // uv pairs
     }
+    // T4.2 card bake section (only when present).
+    if (!pm.card_bake.cards.empty()) {
+        size += sizeof(u32);                              // CDBK magic
+        size += sizeof(u32) + pm.card_bake.cards.size() * sizeof(card_bake::card);
+        size += sizeof(u32) + pm.card_bake.surfels.size() * sizeof(card_bake::surfel);
+    }
     return size;
 }
 
@@ -233,9 +239,14 @@ void Serialize(const PackedMesh& pm, utl::blob_stream_writer& blob) {
     const u32 elements_size = (u32)get_vertex_element_size(pm.elements_type);
     blob.write(elements_size);
     // A9: lightmap_uv_flag tells readers a UVLM section follows the SDF
-    // section. pm.elements_type itself stays canonical.
+    // section. T4.3: sdf_signed_flag marks pm.sdf.data as signed-distance
+    // packed (metadata only — no extra section). pm.elements_type itself
+    // stays canonical.
     const u32 blob_elements_type = (u32)pm.elements_type |
-        (pm.lightmap_uvs.empty() ? 0u : (u32)elements::elements_type::lightmap_uv_flag);
+        (pm.lightmap_uvs.empty() ? 0u : (u32)elements::elements_type::lightmap_uv_flag) |
+        (pm.card_bake.cards.empty() ? 0u : (u32)elements::elements_type::card_bake_flag) |
+        ((pm.sdf.data.empty() || !pm.sdf.signed_encoding) ? 0u
+            : (u32)elements::elements_type::sdf_signed_flag);
     blob.write(blob_elements_type);
     const u32 num_vertices = (u32)(pm.position_buffer.size() / 12);
     blob.write(num_vertices);
@@ -310,6 +321,23 @@ void Serialize(const PackedMesh& pm, utl::blob_stream_writer& blob) {
         blob.write((u32)(pm.lightmap_uvs.size() / 2));
         blob.write((const u8*)pm.lightmap_uvs.data(),
                    pm.lightmap_uvs.size() * sizeof(f32));
+    }
+
+    // T4.2 card bake: written only when present, so meshes without bake
+    // data serialize byte-identically to the pre-T4.2 layout.
+    if (!pm.card_bake.cards.empty()) {
+        constexpr u32 magic_cdbk = 0x4B424443;  // "CDBK"
+        blob.write(magic_cdbk);
+        blob.write((u32)pm.card_bake.cards.size());
+        if (!pm.card_bake.cards.empty()) {
+            blob.write((const u8*)pm.card_bake.cards.data(),
+                       pm.card_bake.cards.size() * sizeof(card_bake::card));
+        }
+        blob.write((u32)pm.card_bake.surfels.size());
+        if (!pm.card_bake.surfels.empty()) {
+            blob.write((const u8*)pm.card_bake.surfels.data(),
+                       pm.card_bake.surfels.size() * sizeof(card_bake::surfel));
+        }
     }
 }
 

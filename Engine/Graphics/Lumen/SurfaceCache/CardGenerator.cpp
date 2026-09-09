@@ -34,7 +34,62 @@ void CardGenerator::RegisterMesh(const math::v3& aabb_min, const math::v3& aabb_
     info.aabb_max = aabb_max;
     info.instance_id = instance_id;
     info.screen_space_area = 0.0f;
+    info.baked_card_start = 0;
+    info.baked_card_count = 0;
     meshes_.push_back(info);
+    allocation_dirty_ = true;
+}
+
+void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const math::m4x4& world, uint32_t instance_id) {
+    MeshInstanceInfo info;
+    info.aabb_min = {3.402823466e+38f, 3.402823466e+38f, 3.402823466e+38f};
+    info.aabb_max = {-3.402823466e+38f, -3.402823466e+38f, -3.402823466e+38f};
+    info.instance_id = instance_id;
+    info.screen_space_area = 0.0f;
+    info.baked_card_start = static_cast<uint32_t>(baked_cards_pool_.size());
+    info.baked_card_count = 0;
+
+    for (const auto& bc : bake.cards) {
+        SurfaceCacheCard card;
+        memset(&card, 0, sizeof(card));
+
+        // Mesh-local → world (same space the fallback AABBs live in).
+        const math::v4 center_w = world * math::v4{bc.center[0], bc.center[1], bc.center[2], 1.0f};
+        f32 extent_w[3] = {0.0f, 0.0f, 0.0f};
+        for (u32 k = 0; k < 3; ++k) {
+            // Axis-aligned box under rotation+scale: project each local
+            // half-extent through the absolute column entries (column-major).
+            const math::v4& col = world.columns[k];
+            const f32 e = bc.extent[k];
+            extent_w[0] += std::abs(col.x) * e;
+            extent_w[1] += std::abs(col.y) * e;
+            extent_w[2] += std::abs(col.z) * e;
+        }
+
+        card.center = {center_w.x, center_w.y, center_w.z, 0.0f};
+        card.extent = {extent_w[0], extent_w[1], extent_w[2], 0.0f};
+        card.axis_direction = bc.axis_direction;
+        card.resolution = 0;
+        card.mesh_instance_id = instance_id;
+        baked_cards_pool_.push_back(card);
+        info.baked_card_count++;
+
+        info.aabb_min = {std::min(info.aabb_min.x, center_w.x - extent_w[0]),
+                         std::min(info.aabb_min.y, center_w.y - extent_w[1]),
+                         std::min(info.aabb_min.z, center_w.z - extent_w[2])};
+        info.aabb_max = {std::max(info.aabb_max.x, center_w.x + extent_w[0]),
+                         std::max(info.aabb_max.y, center_w.y + extent_w[1]),
+                         std::max(info.aabb_max.z, center_w.z + extent_w[2])};
+    }
+
+    if (info.baked_card_count == 0) return;   // callers fall back to RegisterMesh
+    meshes_.push_back(info);
+    allocation_dirty_ = true;
+}
+
+void CardGenerator::ResetRegistrations() {
+    meshes_.clear();
+    baked_cards_pool_.clear();
     allocation_dirty_ = true;
 }
 
@@ -43,14 +98,30 @@ void CardGenerator::RebuildCardAllocation() {
 
     cards_.clear();
     lookups_.clear();
+    baked_mesh_count_ = 0;
+    fallback_mesh_count_ = 0;
 
     uint32_t current_atlas_x = 0;
     uint32_t current_atlas_y = 0;
     uint32_t row_height = 0;
 
+    // T8.13 P3: min-card-resolution env (SC_MIN_CARD_RES, default 32/64 — see
+    // the note below). Raised floor for small-surface bounce detail.
+    static const u32 sc_min_card_res = [] {
+        const char* e = std::getenv("SC_MIN_CARD_RES");
+        return e ? (u32)std::max(32, atoi(e)) : 64u;
+    }();
+
     for (auto& mesh : meshes_) {
-        math::v3 half_extent = (mesh.aabb_max - mesh.aabb_min) * 0.5f;
-        math::v3 center = (mesh.aabb_min + mesh.aabb_max) * 0.5f;
+        const bool baked = mesh.baked_card_count > 0;
+        if (baked) ++baked_mesh_count_; else ++fallback_mesh_count_;
+
+        math::v3 half_extent{};
+        math::v3 center{};
+        if (!baked) {
+            half_extent = (mesh.aabb_max - mesh.aabb_min) * 0.5f;
+            center = (mesh.aabb_min + mesh.aabb_max) * 0.5f;
+        }
 
         SurfaceCacheCardLookup lookup;
         lookup.aabb_min = {mesh.aabb_min.x, mesh.aabb_min.y, mesh.aabb_min.z, 0.0f};
@@ -59,87 +130,110 @@ void CardGenerator::RebuildCardAllocation() {
         lookup.card_count = 0;
         lookup._pad[0] = lookup._pad[1] = 0;
 
-        // Find max projection area to filter degenerate views
+        // Projection area of one card view: extent[u]·extent[v]·4 where
+        // {u,v} are the two axes perpendicular to the card's axis.
+        auto view_area = [](const math::v4& extent, uint32_t axis) -> float {
+            const uint32_t u = (axis == 0) ? 1u : 0u;
+            const uint32_t v = (axis == 2) ? 1u : 2u;
+            const float e[3] = {extent.x, extent.y, extent.z};
+            return e[u] * e[v] * 4.0f;
+        };
+
+        // Max projection area — degenerate-view filter baseline (same rule
+        // for both sources; the bake already applied it offline).
         float max_proj_area = 0.0f;
-        for (uint8_t a = 0; a < 3; ++a) {
-            float pa;
-            if (a == 0) pa = half_extent.y * half_extent.z * 4.0f;
-            else if (a == 1) pa = half_extent.x * half_extent.z * 4.0f;
-            else pa = half_extent.x * half_extent.y * 4.0f;
-            max_proj_area = std::max(max_proj_area, pa);
+        if (baked) {
+            for (u32 bi = 0; bi < mesh.baked_card_count; ++bi) {
+                const SurfaceCacheCard& bc = baked_cards_pool_[mesh.baked_card_start + bi];
+                max_proj_area = std::max(max_proj_area,
+                                         view_area(bc.extent, bc.axis_direction & 0xFF));
+            }
+        } else {
+            for (uint8_t a = 0; a < 3; ++a) {
+                max_proj_area = std::max(max_proj_area, view_area(
+                    math::v4{half_extent.x, half_extent.y, half_extent.z, 0.0f}, a));
+            }
         }
 
-        for (uint8_t axis = 0; axis < 3; ++axis) {
-            for (uint8_t dir = 0; dir < 2; ++dir) {
-                float proj_area;
-                if (axis == 0) proj_area = half_extent.y * half_extent.z * 4.0f;
-                else if (axis == 1) proj_area = half_extent.x * half_extent.z * 4.0f;
-                else proj_area = half_extent.x * half_extent.y * 4.0f;
+        bool capacity_full = false;
 
-                if (proj_area < 0.01f) continue;
-                // Skip views where the object would be too thin (less than 5% of max view)
-                if (proj_area < max_proj_area * 0.05f) continue;
-                if (cards_.size() >= max_cards_) break;
+        // T4.2: shared card emission tail — candidate cards (from the offline
+        // bake or the legacy 6-direction derivation below) funnel through the
+        // same filters, resolution formula and atlas packing, so the baked
+        // path inherits max_cards truncation and shelf-packing behavior.
+        auto emit_card = [&](const math::v4& card_center, const math::v4& card_extent,
+                             uint32_t axis_direction) -> bool {
+            const uint32_t axis = axis_direction & 0xFF;
+            const float e[3] = {card_extent.x, card_extent.y, card_extent.z};
 
-                SurfaceCacheCard card;
-                card.center = {center.x, center.y, center.z, 0.0f};
-                card.extent = {half_extent.x, half_extent.y, half_extent.z, 0.0f};
-                card.axis_direction = static_cast<uint32_t>(axis) | (static_cast<uint32_t>(dir) << 8);
-                card.resolution = 0;
-                card._pad0 = 0;
-                card.atlas_offset_x = 0;
-                card.atlas_offset_y = 0;
-                card.mesh_instance_id = mesh.instance_id;
-                memset(card._pad1, 0, sizeof(card._pad1));
+            if (view_area(card_extent, axis) < 0.01f) return false;
+            if (view_area(card_extent, axis) < max_proj_area * 0.05f) return false;
+            if (cards_.size() >= max_cards_) { capacity_full = true; return false; }
 
-                float texels_per_unit = 64.0f;
-                float proj_size;
-                if (axis == 0) proj_size = std::max(half_extent.y, half_extent.z) * 2.0f;
-                else if (axis == 1) proj_size = std::max(half_extent.x, half_extent.z) * 2.0f;
-                else proj_size = std::max(half_extent.x, half_extent.y) * 2.0f;
+            SurfaceCacheCard card;
+            card.center = card_center;
+            card.extent = card_extent;
+            card.axis_direction = axis_direction;
+            card.resolution = 0;
+            card._pad0 = 0;
+            card.atlas_offset_x = 0;
+            card.atlas_offset_y = 0;
+            card.mesh_instance_id = mesh.instance_id;
+            memset(card._pad1, 0, sizeof(card._pad1));
 
-                // T8.13 P3: min-card-resolution env (SC_MIN_CARD_RES, default
-                // 32). Raises the floor for small-surface bounce detail.
-                // T8.13 P3 final: default 64 — texels 95.3% of the 2048² atlas
-                // (fits); NOTE the shelf packer drops ~33 tail cards (3.9M→4.0M
-                // with rounding) and the SC↔probe equilibrium shifts +27%
-                // brighter (stable over 3 runs, clip 0.24%). SC_MIN_CARD_RES=32
-                // restores the previous packing.
-                static const u32 sc_min_card_res = [] {
-                    const char* e = std::getenv("SC_MIN_CARD_RES");
-                    return e ? (u32)std::max(32, atoi(e)) : 64u;
-                }();
-                uint32_t res = static_cast<uint32_t>(proj_size * texels_per_unit);
-                uint32_t min_res = std::max(page_size_, sc_min_card_res);
-                res = std::max(res, min_res);
-                uint32_t max_card_res = page_size_ * 4;  // cap at 4 pages
-                res = std::min(res, max_card_res);
-                res = ((res + page_size_ - 1) / page_size_) * page_size_;
-                card.resolution = static_cast<uint16_t>(res);
+            float texels_per_unit = 64.0f;
+            const uint32_t u = (axis == 0) ? 1u : 0u;
+            const uint32_t v = (axis == 2) ? 1u : 2u;
+            float proj_size = std::max(e[u], e[v]) * 2.0f;
 
-                if (current_atlas_x + res > atlas_size_) {
-                    current_atlas_x = 0;
-                    current_atlas_y += row_height;
-                    row_height = 0;
-                }
-                // T8.13 P3: coverage > detail — a raised card that cannot fit
-                // drops back to one page before being skipped entirely.
-                if (current_atlas_y + res > atlas_size_ && res > page_size_) {
-                    res = page_size_;
-                    card.resolution = static_cast<uint16_t>(res);
-                }
-                // Skip card if it still doesn't fit in remaining atlas space
-                if (current_atlas_y + res > atlas_size_) continue;
+            uint32_t res = static_cast<uint32_t>(proj_size * texels_per_unit);
+            uint32_t min_res = std::max(page_size_, sc_min_card_res);
+            res = std::max(res, min_res);
+            uint32_t max_card_res = page_size_ * 4;  // cap at 4 pages
+            res = std::min(res, max_card_res);
+            res = ((res + page_size_ - 1) / page_size_) * page_size_;
+            card.resolution = static_cast<uint16_t>(res);
 
-                card.atlas_offset_x = current_atlas_x;
-                card.atlas_offset_y = current_atlas_y;
-                current_atlas_x += res;
-                row_height = std::max(row_height, res);
-
-                cards_.push_back(card);
-                lookup.card_count++;
+            if (current_atlas_x + res > atlas_size_) {
+                current_atlas_x = 0;
+                current_atlas_y += row_height;
+                row_height = 0;
             }
-            if (cards_.size() >= max_cards_) break;
+            // T8.13 P3: coverage > detail — a raised card that cannot fit
+            // drops back to one page before being skipped entirely.
+            if (current_atlas_y + res > atlas_size_ && res > page_size_) {
+                res = page_size_;
+                card.resolution = static_cast<uint16_t>(res);
+            }
+            // Skip card if it still doesn't fit in remaining atlas space
+            if (current_atlas_y + res > atlas_size_) return false;
+
+            card.atlas_offset_x = current_atlas_x;
+            card.atlas_offset_y = current_atlas_y;
+            current_atlas_x += res;
+            row_height = std::max(row_height, res);
+
+            cards_.push_back(card);
+            lookup.card_count++;
+            return true;
+        };
+
+        if (baked) {
+            // Baked source: emit the world-transformed cards as registered.
+            for (u32 bi = 0; bi < mesh.baked_card_count && !capacity_full; ++bi) {
+                const SurfaceCacheCard& bc = baked_cards_pool_[mesh.baked_card_start + bi];
+                emit_card(bc.center, bc.extent, bc.axis_direction);
+            }
+        } else {
+            // Fallback source: legacy 6-direction AABB derivation.
+            for (uint8_t axis = 0; axis < 3 && !capacity_full; ++axis) {
+                for (uint8_t dir = 0; dir < 2 && !capacity_full; ++dir) {
+                    emit_card(math::v4{center.x, center.y, center.z, 0.0f},
+                              math::v4{half_extent.x, half_extent.y, half_extent.z, 0.0f},
+                              static_cast<uint32_t>(axis) | (static_cast<uint32_t>(dir) << 8));
+                }
+                if (cards_.size() >= max_cards_) break;
+            }
         }
 
         lookups_.push_back(lookup);

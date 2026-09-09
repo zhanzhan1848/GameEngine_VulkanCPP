@@ -441,7 +441,11 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
              // section; strip it so downstream type handling sees the
              // canonical format (mirrors ContentTools lightmap_uv_flag).
              const bool hasLightmapUV = (elementsType & 0x10) != 0;
-             elementsType &= ~0x10u;
+             // T4.2: bit 0x20 flags the card bake ("CDBK") section.
+             const bool hasCardBake = (elementsType & 0x20) != 0;
+             // T4.3: bit 0x40 = SDF data is signed-distance packed.
+             const bool hasSdfSigned = (elementsType & 0x40) != 0;
+             elementsType &= ~0x70u;
              (void)elementsType;
              (void)primitiveTopology;
 
@@ -622,8 +626,10 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                              reader.Read(meshAsset.sdf.vector_field.data(), vecFieldSize * 2);
                          }
                      }
-                     
-                     // std::cout << "DEBUG: Loaded SDF data, resolution: " 
+                     // T4.3: signed-distance encoding (sdf_signed_flag 0x40).
+                     meshAsset.sdf.signed_encoding = hasSdfSigned ? u8(1) : u8(0);
+
+                     // std::cout << "DEBUG: Loaded SDF data, resolution: "
                      //           << meshAsset.sdf.resolution[0] << "x"
                      //           << meshAsset.sdf.resolution[1] << "x"
                      //           << meshAsset.sdf.resolution[2] << std::endl;
@@ -652,6 +658,41 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  if (!sidecarConsumed) {
                      PRIMAL_LOG_STREAM(Warn, "Scene") << "A9: flagged lightmap UV section missing/invalid for submesh '"
                                << meshName << "'; continuing without sidecar" << std::endl;
+                 }
+             }
+
+             // T4.2: card bake ("CDBK") section. Peek-gated on the magic like
+             // the UVLM block above; cards/surfels go straight into the asset
+             // (32 B wire records).
+             if (hasCardBake) {
+                 bool cardBakeConsumed = false;
+                 if (reader.Remaining() >= 8) {
+                     const u8* cdbkPeek = static_cast<const u8*>(reader.GetCurrentPtr());
+                     u32 cdbkMagic = ReadPackedValue<u32>(cdbkPeek);
+                     if (cdbkMagic == 0x4B424443) { // "CDBK"
+                         reader.Skip(4);
+                         u32 cardCount = reader.Read<u32>();
+                         const u32 cardBytes = cardCount * 32; // sizeof(RHICardBakeCard)
+                         if (cardCount <= 4096 && reader.Remaining() >= cardBytes + 4) {
+                             meshAsset.card_bake.cards.resize(cardCount);
+                             reader.Read(meshAsset.card_bake.cards.data(),
+                                         cardCount * sizeof(rhi::RHICardBakeCard));
+                             u32 surfelCount = reader.Read<u32>();
+                             const u32 surfelBytes = surfelCount * 32; // sizeof(RHICardBakeSurfel)
+                             if (surfelCount <= (1u << 20) && reader.Remaining() >= surfelBytes) {
+                                 meshAsset.card_bake.surfels.resize(surfelCount);
+                                 reader.Read(meshAsset.card_bake.surfels.data(),
+                                             surfelCount * sizeof(rhi::RHICardBakeSurfel));
+                                 cardBakeConsumed = true;
+                             }
+                         }
+                     }
+                 }
+                 if (!cardBakeConsumed) {
+                     PRIMAL_LOG_STREAM(Warn, "Scene") << "T4.2: flagged card bake section missing/invalid for submesh '"
+                               << meshName << "'; continuing without card bake" << std::endl;
+                     meshAsset.card_bake.cards.clear();
+                     meshAsset.card_bake.surfels.clear();
                  }
              }
 
@@ -1205,7 +1246,10 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
             // section; strip it so downstream type handling sees the
             // canonical format (mirrors ContentTools lightmap_uv_flag).
             const bool hasLightmapUV = (elementsType & 0x10) != 0;
-            elementsType &= ~0x10u;
+            // T4.2: bit 0x20 flags the card bake ("CDBK") section.
+            const bool hasCardBake = (elementsType & 0x20) != 0;
+            // T4.3: bit 0x40 = SDF data signed-distance encoding.
+            elementsType &= ~0x70u;
             (void)elementsType;
 
             u32 positionSize = 12 * vertexCount;
@@ -1331,6 +1375,40 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
                 if (!sidecarConsumed) {
                     PRIMAL_LOG_STREAM(Warn, "Scene") << "A9: flagged lightmap UV section missing/invalid for submesh '"
                               << meshName << "'; continuing without sidecar" << std::endl;
+                }
+            }
+
+            // T4.2: card bake ("CDBK") section — same peek-gate pattern as
+            // the UVLM block above.
+            if (hasCardBake) {
+                bool cardBakeConsumed = false;
+                if (reader.Remaining() >= 8) {
+                    const u8* cdbkPeek = static_cast<const u8*>(reader.GetCurrentPtr());
+                    u32 cdbkMagic = ReadPackedValue<u32>(cdbkPeek);
+                    if (cdbkMagic == 0x4B424443) { // "CDBK"
+                        reader.Skip(4);
+                        u32 cardCount = reader.Read<u32>();
+                        const u32 cardBytes = cardCount * 32; // sizeof(RHICardBakeCard)
+                        if (cardCount <= 4096 && reader.Remaining() >= cardBytes + 4) {
+                            meshAsset.card_bake.cards.resize(cardCount);
+                            reader.Read(meshAsset.card_bake.cards.data(),
+                                        cardCount * sizeof(rhi::RHICardBakeCard));
+                            u32 surfelCount = reader.Read<u32>();
+                            const u32 surfelBytes = surfelCount * 32; // sizeof(RHICardBakeSurfel)
+                            if (surfelCount <= (1u << 20) && reader.Remaining() >= surfelBytes) {
+                                meshAsset.card_bake.surfels.resize(surfelCount);
+                                reader.Read(meshAsset.card_bake.surfels.data(),
+                                            surfelCount * sizeof(rhi::RHICardBakeSurfel));
+                                cardBakeConsumed = true;
+                            }
+                        }
+                    }
+                }
+                if (!cardBakeConsumed) {
+                    PRIMAL_LOG_STREAM(Warn, "Scene") << "T4.2: flagged card bake section missing/invalid for submesh '"
+                              << meshName << "'; continuing without card bake" << std::endl;
+                    meshAsset.card_bake.cards.clear();
+                    meshAsset.card_bake.surfels.clear();
                 }
             }
 
@@ -1461,7 +1539,13 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             // A9: bit 0x10 flags the lightmap UV sidecar section; strip it so
             // canonical type handling is unaffected (ContentTools flag).
             const bool hasLightmapUV = (elemType & 0x10) != 0;
-            elemType &= ~0x10u;
+            // T4.2: bit 0x20 flags the card bake ("CDBK") section.
+            const bool hasCardBake = (elemType & 0x20) != 0;
+            // T4.3: bit 0x40 = SDF data signed-distance encoding. This loader
+            // does not parse SDF sections — masked off for canonical type only.
+            const bool hasSdfSigned = (elemType & 0x40) != 0;
+            (void)hasSdfSigned;
+            elemType &= ~0x70u;
             u32 vertCount = readU32();
             u32 idxSize = readU32();
             u32 idxCount = readU32();
@@ -1513,16 +1597,36 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
                 if (mtCount > 0) skipBytes(mtCount); // u8 per triangle index
             }
 
-            // Skip SDF data (SDF magic + header + data).
+            // SDF section. T4.3 资产激活：解析进 asset（此前只 skip——
+            // pipeline 格式场景的 mesh 因此从不带 per-mesh SDF 纹理，
+            // DDGI detail-SDF 槽位无米下锅）。有符号编码由 header 的
+            // sdf_signed_flag (0x40) 驱动（hasSdfSigned）。
+            u32 sdfRes[3] = {0, 0, 0};
+            f32 sdfBoundsMin[3] = {0.f, 0.f, 0.f};
+            f32 sdfBoundsMax[3] = {0.f, 0.f, 0.f};
+            utl::vector<u16> sdfData;
+            utl::vector<u8> sdfVoxels;
+            utl::vector<u16> sdfVectorField;
             u32 magicSdf = readU32();
             if (magicSdf == 0x20464453) { // "SDF "
-                skipBytes(12 + 24); // resolution[3] + bounds_min[3] + bounds_max[3]
+                reader.Read(sdfRes, sizeof(u32) * 3);
+                reader.Read(sdfBoundsMin, sizeof(f32) * 3);
+                reader.Read(sdfBoundsMax, sizeof(f32) * 3);
                 u32 sdfSize = readU32();
-                if (sdfSize > 0) skipBytes(sdfSize * 2);
+                if (sdfSize > 0 && sdfSize < 100000000) {
+                    sdfData.resize(sdfSize);
+                    reader.Read(sdfData.data(), (size_t)sdfSize * 2);
+                }
                 u32 voxSize = readU32();
-                if (voxSize > 0) skipBytes(voxSize);
+                if (voxSize > 0 && voxSize < 100000000) {
+                    sdfVoxels.resize(voxSize);
+                    reader.Read(sdfVoxels.data(), voxSize);
+                }
                 u32 vfSize = readU32();
-                if (vfSize > 0) skipBytes(vfSize * 2);
+                if (vfSize > 0 && vfSize < 100000000) {
+                    sdfVectorField.resize(vfSize);
+                    reader.Read(sdfVectorField.data(), (size_t)vfSize * 2);
+                }
             }
 
             // A9: lightmap UV sidecar (flagged in the header; the pipeline
@@ -1541,6 +1645,40 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
                 if (lightmapUVs.empty()) {
                     PRIMAL_LOG_STREAM(Warn, "Scene") << "[Pipeline] flagged lightmap UV section missing/invalid for \""
                               << meshName << "\"; continuing without sidecar" << std::endl;
+                }
+            }
+
+            // T4.2: card bake ("CDBK") section — peek-gated like UVLM above;
+            // kept in locals and copied into the asset registered below.
+            utl::vector<rhi::RHICardBakeCard> bakedCards;
+            utl::vector<rhi::RHICardBakeSurfel> bakedSurfels;
+            if (hasCardBake) {
+                bool cardBakeConsumed = false;
+                if (reader.Remaining() >= 8) {
+                    const u8* cdbkPeek = static_cast<const u8*>(reader.GetCurrentPtr());
+                    u32 cdbkMagic = ReadPackedValue<u32>(cdbkPeek);
+                    if (cdbkMagic == 0x4B424443) { // "CDBK"
+                        reader.Skip(4);
+                        u32 cardCount = reader.Read<u32>();
+                        const u32 cardBytes = cardCount * 32; // sizeof(RHICardBakeCard)
+                        if (cardCount <= 4096 && reader.Remaining() >= cardBytes + 4) {
+                            bakedCards.resize(cardCount);
+                            reader.Read(bakedCards.data(), cardCount * sizeof(rhi::RHICardBakeCard));
+                            u32 surfelCount = reader.Read<u32>();
+                            const u32 surfelBytes = surfelCount * 32; // sizeof(RHICardBakeSurfel)
+                            if (surfelCount <= (1u << 20) && reader.Remaining() >= surfelBytes) {
+                                bakedSurfels.resize(surfelCount);
+                                reader.Read(bakedSurfels.data(), surfelCount * sizeof(rhi::RHICardBakeSurfel));
+                                cardBakeConsumed = true;
+                            }
+                        }
+                    }
+                }
+                if (!cardBakeConsumed) {
+                    PRIMAL_LOG_STREAM(Warn, "Scene") << "[Pipeline] flagged card bake section missing/invalid for \""
+                              << meshName << "\"; continuing without card bake" << std::endl;
+                    bakedCards.clear();
+                    bakedSurfels.clear();
                 }
             }
 
@@ -1573,6 +1711,8 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             meshAsset.num_vertices = vertCount;
             meshAsset.num_indices = idxCount;
             meshAsset.elements_type = elemType;
+            meshAsset.card_bake.cards = std::move(bakedCards);
+            meshAsset.card_bake.surfels = std::move(bakedSurfels);
             meshAsset.position_buffer.resize(posSize);
             memcpy(meshAsset.position_buffer.data(), posPtr, posSize);
             meshAsset.element_buffer.resize(elemBufSize);
@@ -1580,6 +1720,16 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
             meshAsset.index_buffer.resize(idxBufSize);
             memcpy(meshAsset.index_buffer.data(), idxPtr, idxBufSize);
             meshAsset.lightmap_uv_buffer = std::move(lightmapUVs);
+            // T4.3: activate per-mesh SDF (upload happens in RHIGpuMesh).
+            if (!sdfData.empty()) {
+                memcpy(meshAsset.sdf.resolution, sdfRes, sizeof(sdfRes));
+                memcpy(meshAsset.sdf.bounds_min, sdfBoundsMin, sizeof(sdfBoundsMin));
+                memcpy(meshAsset.sdf.bounds_max, sdfBoundsMax, sizeof(sdfBoundsMax));
+                meshAsset.sdf.data = std::move(sdfData);
+                meshAsset.sdf.voxels = std::move(sdfVoxels);
+                meshAsset.sdf.vector_field = std::move(sdfVectorField);
+                meshAsset.sdf.signed_encoding = hasSdfSigned ? u8(1) : u8(0);
+            }
 
             id::id_type meshEntityId = content::register_mesh_asset(meshAsset);
 

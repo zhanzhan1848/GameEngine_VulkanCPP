@@ -13,6 +13,7 @@
 
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/RHI/Core/RHIGpuMesh.h"  // T4.3: detail-SDF slot selection
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Graphics/Nanite/GPUCullingPipeline.h"
 #include "Graphics/Nanite/NaniteStreamingManager.h"
@@ -24,6 +25,7 @@
 #include "Graphics/PCG/GPU/GPUMesher.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
 #include "Graphics/Scene/CameraSyncSystem.h"
+#include "Content/ContentToEngine.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Components/Entity.h"
 #include "Components/Transform.h"
@@ -1021,17 +1023,32 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
             // improvement to SC atlas coverage and per-mesh detail.
             if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
                 auto& cardGen = surface_cache_pass_->GetCardGenerator();
+                // T4.2: the loop runs on every full rebuild — drop the
+                // previous registration set first, otherwise instances
+                // accumulate and duplicate cards.
+                cardGen.ResetRegistrations();
                 const auto& instances = scene_snapshot_->GetInstanceData();
                 for (u32 i = 0; i < instances.size(); ++i) {
                     const auto& inst = instances[i];
-                    math::v3 aabbMin = inst.bounds_center - math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
-                    math::v3 aabbMax = inst.bounds_center + math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
-                    cardGen.RegisterMesh(aabbMin, aabbMax, i);
+                    // T4.2: prefer the mesh's offline card bake; fall back to
+                    // the sphere-derived cube AABB when absent (procedural
+                    // meshes, pre-T4.2 blobs, zero-occupancy geometry).
+                    rhi::RHICardBakeData bake;
+                    if (primal::content::get_rhi_mesh_card_bake(inst.geometry_id, bake)) {
+                        cardGen.RegisterMeshBaked(bake, inst.world_matrix, i);
+                    } else {
+                        math::v3 aabbMin = inst.bounds_center - math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                        math::v3 aabbMax = inst.bounds_center + math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                        cardGen.RegisterMesh(aabbMin, aabbMax, i);
+                    }
                 }
                 cardGen.RebuildCardAllocation();
                 PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSC] Registered " << instances.size()
                           << " scene instances with CardGenerator → "
-                          << cardGen.GetCardCount() << " cards" << std::endl;
+                          << cardGen.GetCardCount() << " cards"
+                          << " | cards source = baked (" << cardGen.GetBakedMeshCount()
+                          << " meshes) / fallback (" << cardGen.GetFallbackMeshCount()
+                          << " meshes)" << std::endl;
 
         // T4.1 (D8) v2: dirty-transform GI invalidation — with
         // MarkFullRebuild (consume-on-read prevents every-frame loop).
@@ -1061,6 +1078,139 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                 }
             }
         }            }
+        }
+    }
+
+    // T4.3: per-mesh detail-SDF slot selection (first slice of detail
+    // tracing, PRIMAL_DDGI_DETAIL_SDF=1). Up to 4 instances whose per-mesh
+    // SDF textures intersect the DDGI volume, scored by intersection volume;
+    // the split SDF trace refines coarse hits against them and derives
+    // gradient normals consumed by finalize.
+    {
+        static const bool detailSDFEnabled =
+            (std::getenv("PRIMAL_DDGI_DETAIL_SDF") != nullptr);
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized() && detailSDFEnabled && scene_snapshot_) {
+            constexpr u32 kMaxSlots = lumen::LumenDDGIPass::kDetailSDFSlots;
+            math::v3 volMin, volMax;
+            ddgi_pass_->GetVolumeAABB(volMin, volMax);
+
+            struct Candidate { f32 score; u32 index; };
+            Candidate cands[kMaxSlots] = {};
+            u32 candCount = 0;
+            u32 worstSlot = 0;
+
+            const auto& instances = scene_snapshot_->GetInstanceData();
+            for (u32 i = 0; i < instances.size(); ++i) {
+                const auto& inst = instances[i];
+                rhi::RHIGpuMesh* mesh = primal::content::get_rhi_gpu_mesh(inst.geometry_id);
+                if (!mesh || mesh->GetSDFTexture() == handles::INVALID_RESOURCE) continue;
+
+                // Mesh-local SDF bounds → world AABB (axis-expanded extents
+                // under rotation+scale, same recipe as RegisterMeshBaked).
+                const f32* bmin = mesh->GetBoundsMin();
+                const f32* bmax = mesh->GetBoundsMax();
+                const math::v3 ext{ (bmax[0] - bmin[0]) * 0.5f,
+                                    (bmax[1] - bmin[1]) * 0.5f,
+                                    (bmax[2] - bmin[2]) * 0.5f };
+                const math::v3 lc{ (bmax[0] + bmin[0]) * 0.5f,
+                                   (bmax[1] + bmin[1]) * 0.5f,
+                                   (bmax[2] + bmin[2]) * 0.5f };
+                const math::m4x4& w = inst.world_matrix;
+                f32 we[3] = {0.f, 0.f, 0.f};
+                for (u32 k = 0; k < 3; ++k) {
+                    const math::v4& col = w.columns[k];
+                    const f32 e = (k == 0) ? ext.x : (k == 1) ? ext.y : ext.z;
+                    we[0] += std::abs(col.x) * e;
+                    we[1] += std::abs(col.y) * e;
+                    we[2] += std::abs(col.z) * e;
+                }
+                const math::v4 cw = w * math::v4{lc.x, lc.y, lc.z, 1.0f};
+                const math::v3 wmin{cw.x - we[0], cw.y - we[1], cw.z - we[2]};
+                const math::v3 wmax{cw.x + we[0], cw.y + we[1], cw.z + we[2]};
+
+                // Score = world-AABB ∩ DDGI-volume intersection volume.
+                const math::v3 imin{std::max(wmin.x, volMin.x), std::max(wmin.y, volMin.y), std::max(wmin.z, volMin.z)};
+                const math::v3 imax{std::min(wmax.x, volMax.x), std::min(wmax.y, volMax.y), std::min(wmax.z, volMax.z)};
+                const f32 vx = imax.x - imin.x, vy = imax.y - imin.y, vz = imax.z - imin.z;
+                if (vx <= 0.f || vy <= 0.f || vz <= 0.f) continue;
+                const f32 score = vx * vy * vz;
+
+                if (candCount < kMaxSlots) {
+                    cands[candCount++] = {score, i};
+                    if (candCount == kMaxSlots) {
+                        worstSlot = 0;
+                        for (u32 s = 1; s < kMaxSlots; ++s)
+                            if (cands[s].score < cands[worstSlot].score) worstSlot = s;
+                    }
+                } else if (score > cands[worstSlot].score) {
+                    cands[worstSlot] = {score, i};
+                    worstSlot = 0;
+                    for (u32 s = 1; s < kMaxSlots; ++s)
+                        if (cands[s].score < cands[worstSlot].score) worstSlot = s;
+                }
+            }
+
+            if (candCount > 0) {
+                lumen::LumenDDGIPass::DetailSDFSlot slots[kMaxSlots] = {};
+                rhi::ResourceHandle texs[kMaxSlots] = {
+                    handles::INVALID_RESOURCE, handles::INVALID_RESOURCE,
+                    handles::INVALID_RESOURCE, handles::INVALID_RESOURCE };
+                for (u32 s = 0; s < candCount; ++s) {
+                    const auto& inst = instances[cands[s].index];
+                    rhi::RHIGpuMesh* mesh = primal::content::get_rhi_gpu_mesh(inst.geometry_id);
+                    if (!mesh) continue;
+
+                    slots[s].inv_world = Inverse(inst.world_matrix);
+                    // Normal-matrix rows = columns of inv_world: for
+                    // column-major M, n_world = (M₃ₓ₃⁻¹)ᵀ n_local, applied as
+                    // Σ_j inv.columns[j] * g_j — exactly the shader's row form.
+                    slots[s].normal_matrix[0] = slots[s].inv_world.columns[0];
+                    slots[s].normal_matrix[1] = slots[s].inv_world.columns[1];
+                    slots[s].normal_matrix[2] = slots[s].inv_world.columns[2];
+
+                    const f32* bmin = mesh->GetBoundsMin();
+                    const f32* bmax = mesh->GetBoundsMax();
+                    slots[s].bounds_min = math::v4{bmin[0], bmin[1], bmin[2], 0.f};
+                    slots[s].bounds_max = math::v4{bmax[0], bmax[1], bmax[2], 0.f};
+                    // Decode params: max_dim = padded bounds max extent / 1.4
+                    // (ContentTools uniform 20% padding); voxel = extent/res.
+                    const f32 ex = bmax[0] - bmin[0], ey = bmax[1] - bmin[1], ez = bmax[2] - bmin[2];
+                    const f32 maxExt = std::max({ex, ey, ez});
+                    const u32 res = mesh->GetSDFResolution()[0];
+                    slots[s].params = math::v4{
+                        (f32)res, maxExt / 1.4f,
+                        mesh->IsSDFSigned() ? 1.0f : 0.0f,
+                        maxExt / (f32)std::max(res, 1u)};
+                    texs[s] = mesh->GetSDFTexture();
+                }
+                ddgi_pass_->SetDetailSDFSlots(texs, slots, candCount);
+                static u32 lastLogged = 0xFFFFFFFFu;
+                if (candCount != lastLogged) {
+                    lastLogged = candCount;
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[LumenDDGI] T4.3 detail-SDF slots active = " << candCount
+                        << "/" << kMaxSlots << std::endl;
+                }
+            } else {
+                ddgi_pass_->SetDetailSDFSlots(nullptr, nullptr, 0);
+                // One-shot diagnostics: why no slot activated.
+                static bool diagLogged = false;
+                if (!diagLogged && !scene_snapshot_->GetInstanceData().empty()) {
+                    diagLogged = true;
+                    u32 meshNull = 0, texInvalid = 0, total = 0;
+                    const auto& insts = scene_snapshot_->GetInstanceData();
+                    for (u32 i = 0; i < insts.size(); ++i) {
+                        ++total;
+                        rhi::RHIGpuMesh* mesh = primal::content::get_rhi_gpu_mesh(insts[i].geometry_id);
+                        if (!mesh) { ++meshNull; continue; }
+                        if (mesh->GetSDFTexture() == handles::INVALID_RESOURCE) ++texInvalid;
+                    }
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[LumenDDGI] T4.3 detail-SDF: " << total << " instances, "
+                        << meshNull << " no GPU mesh, " << texInvalid << " mesh w/o SDF texture"
+                        << std::endl;
+                }
+            }
         }
     }
 

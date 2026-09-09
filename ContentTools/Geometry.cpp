@@ -575,6 +575,25 @@ namespace primal::tools
 			process_meshlets(m);
 			generate_sdf(m);
 
+			// T4.2: offline card bake from the SDF shell occupancy
+			// (generate_sdf output — zero extra voxelization, and the shell
+			// marks open/single-sided architecture that a solid winding test
+			// would miss). m.sdf itself is untouched, so runtime GI numerics
+			// don't shift; output trails the blob as the "CDBK" section.
+			if (m.sdf.voxels.size() == (size_t)m.sdf.resolution[0] * m.sdf.resolution[1] * m.sdf.resolution[2])
+			{
+				card_bake::OccupancyGrid grid;
+				grid.voxels = m.sdf.voxels.data();
+				grid.resolution = m.sdf.resolution[0];
+				grid.grid_min = math::v3{ m.sdf.bounds_min[0], m.sdf.bounds_min[1], m.sdf.bounds_min[2] };
+				grid.voxel_size = math::v3{
+					(m.sdf.bounds_max[0] - m.sdf.bounds_min[0]) / (f32)grid.resolution,
+					(m.sdf.bounds_max[1] - m.sdf.bounds_min[1]) / (f32)grid.resolution,
+					(m.sdf.bounds_max[2] - m.sdf.bounds_min[2]) / (f32)grid.resolution };
+				card_bake::Params bake_params{};
+				card_bake::bake(grid, bake_params, m.card_bake);
+			}
+
 			pack_vertices(m);
 		}
 
@@ -589,7 +608,7 @@ namespace primal::tools
 			const u64 index_size{ (num_vertices < (1 << 16)) ? sizeof(u16) : sizeof(u32) };
 			const u64 index_buffer_size{ index_size * m.indices.size() };
 			constexpr u64 su32{ sizeof(u32) };
-			const u64 size{
+			u64 size{
 				su32 + m.name.size() +							// mesh name lenght and room for mesh name string
 				su32 +											// LOD id
 				su32 +											// material index
@@ -619,6 +638,16 @@ namespace primal::tools
 				sizeof(u32) +									// vector field size
 				sizeof(u16) * m.sdf.vector_field.size()			// vector field
 			};
+			// T4.2: trailing "CDBK" card-bake section (only when present).
+			if (!m.card_bake.cards.empty())
+			{
+				size +=
+					sizeof(u32) +								// CDBK magic
+					sizeof(u32) +								// card count
+					m.card_bake.cards.size() * sizeof(card_bake::card) +
+					sizeof(u32) +								// surfel count
+					m.card_bake.surfels.size() * sizeof(card_bake::surfel);
+			}
 			return size;
 		}
 
@@ -673,7 +702,14 @@ namespace primal::tools
 			const u32 elements_size{ (u32)get_vertex_element_size(m.elements_type) };
 			blob.write(elements_size);
 			// elements type enumeration
-			blob.write((u32)m.elements_type);
+			// T4.2: card_bake_flag tells readers a "CDBK" section follows the
+			// (optional) UVLM section. T4.3: sdf_signed_flag marks the SDF
+			// data array as signed-distance packed. m.elements_type itself
+			// stays canonical.
+			blob.write((u32)m.elements_type |
+				(m.card_bake.cards.empty() ? 0u : (u32)elements::elements_type::card_bake_flag) |
+				((m.sdf.data.empty() || !m.sdf.signed_encoding) ? 0u
+					: (u32)elements::elements_type::sdf_signed_flag));
 			// number of vertices
 			const u32 num_vertices{ (u32)m.vertices.size() };
 			blob.write(num_vertices);
@@ -744,6 +780,23 @@ namespace primal::tools
 			blob.write((u32)m.sdf.vector_field.size());
 			if (!m.sdf.vector_field.empty())
 				blob.write((const char*)m.sdf.vector_field.data(), m.sdf.vector_field.size() * sizeof(u16));
+
+			// T4.2: trailing "CDBK" card-bake section, only when present, so
+			// meshes without bake data serialize byte-identically to the
+			// pre-T4.2 layout.
+			if (!m.card_bake.cards.empty())
+			{
+				constexpr u32 magic_cdbk{ 0x4B424443 }; // "CDBK"
+				blob.write(magic_cdbk);
+				blob.write((u32)m.card_bake.cards.size());
+				if (!m.card_bake.cards.empty())
+					blob.write((const char*)m.card_bake.cards.data(),
+					           m.card_bake.cards.size() * sizeof(card_bake::card));
+				blob.write((u32)m.card_bake.surfels.size());
+				if (!m.card_bake.surfels.empty())
+					blob.write((const char*)m.card_bake.surfels.data(),
+					           m.card_bake.surfels.size() * sizeof(card_bake::surfel));
+			}
 		}
 
 		bool split_meshes_by_material(u32 material_idx, const mesh& m, mesh& submesh)
@@ -1039,6 +1092,19 @@ namespace primal::tools
 			(void)magic_uvlm; // "UVLM" — flag bit already guarantees presence
 			const u32 uv_count{ blob.read<u32>() };
 			blob.skip((size_t)uv_count * sizeof(f32) * 2);
+		}
+
+		// T4.2 card bake: flagged in the header (0x20), the "CDBK" section
+		// (magic | card_count | cards | surfel_count | surfels) trails the
+		// UVLM section. Same skip-or-misparse contract as UVLM above.
+		if (elements_type & 0x20) // elements_type::card_bake_flag
+		{
+			const u32 magic_cdbk{ blob.read<u32>() };
+			(void)magic_cdbk; // "CDBK"
+			const u32 card_count{ blob.read<u32>() };
+			blob.skip((size_t)card_count * sizeof(card_bake::card));
+			const u32 surfel_count{ blob.read<u32>() };
+			blob.skip((size_t)surfel_count * sizeof(card_bake::surfel));
 		}
 	}
 

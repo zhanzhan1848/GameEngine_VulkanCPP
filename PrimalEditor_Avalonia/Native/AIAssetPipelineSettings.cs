@@ -17,7 +17,7 @@ namespace PrimalEditor_Avalonia.Native;
 /// alignment padding between them is a constant source of ABI mismatch
 /// bugs.
 ///
-/// Total size: 208 bytes on the target ABI (8-byte aligned). Asserted at
+/// Total size: 216 bytes on the target ABI (8-byte aligned). Asserted at
 /// startup by <see cref="AssertSize"/>.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -113,13 +113,19 @@ public struct AIAssetPipelineSettings
     public byte EnableSdf;
     public uint SdfGridResolution;  // 0 = use default (32); clamped to [4, 256] inside generate_sdf
 
+    // -- T4.2 offline card bake --
+    // Bake 6-direction SurfaceCache cards (+ surfels) from the SDF shell
+    // occupancy into the blob's trailing "CDBK" section. Independent of
+    // EnableSdf: the SDF payload is not persisted when only this is set.
+    public byte EnableCardBake;
+
     /// <summary>
     /// Asserts <see cref="Marshal.SizeOf{T}"/> matches the C++ struct size.
     /// A mismatch means the C# mirror has drifted from the C++ POD and
     /// every ABI call will silently mis-parse — this is the only thing
     /// that catches a field-order typo.
     /// </summary>
-    public const int ExpectedSizeBytes = 208;
+    public const int ExpectedSizeBytes = 216;
 
     public static void AssertSize()
     {

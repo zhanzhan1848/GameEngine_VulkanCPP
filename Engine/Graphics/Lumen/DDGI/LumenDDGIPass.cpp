@@ -309,6 +309,13 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
                                           : " (cosine mixture around light)")
               << std::endl;
 
+    // T4.3: per-mesh detail-SDF hit refinement (first slice of detail
+    // tracing). Opt-in: PRIMAL_DDGI_DETAIL_SDF=1 binds up to 4 per-mesh SDF
+    // textures near the probe volume; the trace refines coarse GlobalSDF
+    // hits and derives gradient normals. Default OFF — hit/normal behavior
+    // bit-identical to the pre-T4.3 split trace.
+    detail_sdf_enabled_ = (std::getenv("PRIMAL_DDGI_DETAIL_SDF") != nullptr);
+
     // Pre-compute probe origin at the center of the grid
     probe_origin_ = {
         -(float)(params_.probe_count_x - 1) * params_.probe_spacing * 0.5f,
@@ -542,6 +549,13 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_distance_buffer (write)
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probeUpdateList (read)
+            // T4.3 per-mesh detail SDF: refined normals + 4 slot textures + table UBO
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_normal_buffer (write)
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // detail slot 0
+            {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // detail slot 1
+            {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // detail slot 2
+            {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // detail slot 3
+            {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // detail slot table
         };
         sdfTraceBindings[0].is3D = true;
         sdfTraceBindings[1].is3D = true;
@@ -550,7 +564,11 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         sdfTraceBindings[1].unfilterableFloat = true;
         sdfTraceBindings[2].unfilterableFloat = true;
         sdfTraceBindings[5].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{6, sdfTraceBindings};
+        for (u32 bi = 7; bi <= 10; ++bi) {   // R16_UNorm 3D — same flags as cascades
+            sdfTraceBindings[bi].is3D = true;
+            sdfTraceBindings[bi].unfilterableFloat = true;
+        }
+        DescriptorSetLayoutDesc layoutDesc{12, sdfTraceBindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding sdfTraceBindings[] = {
@@ -560,6 +578,14 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // DDGIVolumeData
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_distance_buffer
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probeUpdateList
+            // T4.3 (Metal overlapping namespaces): buffer(4) normals, buffer(5) table
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // hit_normal_buffer (write)
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // detail slot table
+            // texture(3..6) = detail slots
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
         };
         // R32Float 3D cascades must be declared as 3D + UnfilterableFloat on Dawn
         // (see trace_set_layout_ block above). Without these flags, CreateBindGroup
@@ -572,7 +598,11 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         sdfTraceBindings[1].unfilterableFloat = true;
         sdfTraceBindings[2].unfilterableFloat = true;
         sdfTraceBindings[5].readonly = true;  // probe_update_list: var<storage, read>
-        DescriptorSetLayoutDesc layoutDesc{6, sdfTraceBindings};
+        for (u32 bi = 8; bi <= 11; ++bi) {
+            sdfTraceBindings[bi].is3D = true;
+            sdfTraceBindings[bi].unfilterableFloat = true;
+        }
+        DescriptorSetLayoutDesc layoutDesc{12, sdfTraceBindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -594,6 +624,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_offsets (T1.3)
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
             {13, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SC depth atlas (T3.4 D3)
+            {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_normal_buffer (T4.3, read)
         };
         finalizeBindings[2].readonly = true;
         finalizeBindings[3].readonly = true;
@@ -602,7 +633,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         finalizeBindings[10].readonly = true;
         finalizeBindings[11].readonly = true;
         finalizeBindings[12].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{14, finalizeBindings};
+        finalizeBindings[14].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{15, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
@@ -620,11 +652,13 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {9, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // ViewProjection (T3.1)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (T3.1)
             {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SC depth atlas (T3.4 D3 plane test)
+            {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_normal_buffer (T4.3, read)
         };
         finalizeBindings[7].readonly = true;
         finalizeBindings[8].readonly = true;
         finalizeBindings[10].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{14, finalizeBindings};
+        finalizeBindings[14].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{15, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 }
@@ -842,6 +876,23 @@ void LumenDDGIPass::CreateConstantBuffers() {
     CreateCBs(global_cb_, 512);          // GlobalShaderData (432 bytes, padded)
     CreateCBs(volume_cb_, 512);          // DDGIVolumeData
     CreateCBs(finalize_vp_cb_, 64);      // ViewProjection for screen-space prev_color sampling
+    // T4.3: detail-SDF slot table (16B header + 4 × 160B slots = 656B).
+    // Always bound; header count=0 makes the shader skip refinement when the
+    // feature is off — no dummy CB needed.
+    CreateCBs(detail_table_cb_, 656);
+}
+
+void LumenDDGIPass::GetVolumeAABB(math::v3& out_min, math::v3& out_max) const {
+    // Probe positions sit at origin + cell*spacing; pad one cell so rays
+    // originating just outside the grid still fall inside the refinement
+    // region.
+    const math::v3 extent{
+        (float)(params_.probe_count_x - 1) * params_.probe_spacing,
+        (float)(params_.probe_count_y - 1) * params_.probe_spacing,
+        (float)(params_.probe_count_z - 1) * params_.probe_spacing,
+    };
+    out_min = probe_origin_ - math::v3{params_.probe_spacing};
+    out_max = probe_origin_ + extent + math::v3{params_.probe_spacing};
 }
 
 void LumenDDGIPass::CreateProbeTextures() {
@@ -973,6 +1024,13 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.structured.elementCount = totalRays;
         desc.structured.elementStride = sizeof(float);
         hit_distance_buffer_ = device_->CreateBuffer(desc);
+
+        // T4.3: parallel refined-normal buffer — xyz = world normal,
+        // w = 1.0 valid / 0.0 fallback (finalize keeps -rayDir). Zero-filled
+        // by the trace every frame (slot count 0 → all zeros).
+        desc.size = (u64)totalRays * 4 * sizeof(float);
+        desc.structured.elementStride = 4 * sizeof(float);
+        hit_normal_buffer_ = device_->CreateBuffer(desc);
     }
 
     // Dummy Surface Cache buffers — always bound so the trace descriptor set
@@ -1862,8 +1920,57 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 {
                     const bool splitIsVk =
                         (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                    // T4.3: upload the detail slot table into this frame's
+                    // UBO slot (656B; count=0 when the feature is off — the
+                    // shader then skips refinement and writes zero normals).
+                    if (detail_table_cb_[frameIdx] != handles::INVALID_RESOURCE) {
+                        struct DetailTableGPU {
+                            math::v4 header;                    // x = slot count
+                            math::m4x4 inv_world[4];
+                            math::v4 normal_matrix[4][3];
+                            math::v4 bounds_min[4];
+                            math::v4 bounds_max[4];
+                            math::v4 params[4];                 // res, max_dim, signed, voxel
+                        };
+                        static_assert(sizeof(DetailTableGPU) == 656, "detail table layout drift");
+                        auto* tm = static_cast<DetailTableGPU*>(device_->MapBuffer(detail_table_cb_[frameIdx]));
+                        if (tm) {
+                            tm->header = math::v4{(f32)detail_sdf_slot_count_, 0.f, 0.f, 0.f};
+                            for (u32 s = 0; s < 4; ++s) {
+                                if (s < detail_sdf_slot_count_) {
+                                    tm->inv_world[s] = detail_sdf_slots_[s].inv_world;
+                                    for (u32 r = 0; r < 3; ++r)
+                                        tm->normal_matrix[s][r] = detail_sdf_slots_[s].normal_matrix[r];
+                                    tm->bounds_min[s] = detail_sdf_slots_[s].bounds_min;
+                                    tm->bounds_max[s] = detail_sdf_slots_[s].bounds_max;
+                                    tm->params[s] = detail_sdf_slots_[s].params;
+                                } else {
+                                    tm->inv_world[s] = math::m4x4{};
+                                    tm->normal_matrix[s][0] = tm->normal_matrix[s][1] = math::v4{};
+                                    tm->normal_matrix[s][2] = math::v4{};
+                                    tm->bounds_min[s] = tm->bounds_max[s] = math::v4{};
+                                    tm->params[s] = math::v4{};
+                                }
+                            }
+                            device_->UnmapBuffer(detail_table_cb_[frameIdx]);
+                        }
+                    }
+
+                    // Detail textures: real slots, unused slots fall back to
+                    // the (always valid, always 3D) SDF cascade texture — the
+                    // shader never samples them when slot count is 0, and a
+                    // dummy 3D texture dependency is removed entirely.
+                    ResourceHandle detailTex[kDetailSDFSlots];
+                    for (u32 s = 0; s < kDetailSDFSlots; ++s) {
+                        detailTex[s] = (s < detail_sdf_slot_count_ &&
+                                        detail_sdf_textures_[s] != handles::INVALID_RESOURCE)
+                            ? detail_sdf_textures_[s] : sdfTextures[0];
+                    }
+
                     // Flat bindings on Vulkan (UBO=3, hit_dist=4, list=5);
                     // Metal keeps overlapping slots (UBO=1, hit_dist=2, list=3).
+                    // T4.3: hit_normal + 4 detail textures + table UBO appended
+                    // (Vulkan flat 6..11; Metal buffer 4/5 + texture 3..6).
                     DescriptorData sdfTraceParams[] = {
                         {0, DescriptorType::SampledImage,  sdfTextures[0]},
                         {1, DescriptorType::SampledImage,  sdfTextures[1]},
@@ -1871,8 +1978,14 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         {splitIsVk ? 3u : 1u, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                         {splitIsVk ? 4u : 2u, DescriptorType::StorageBuffer, hit_distance_buffer_},
                         {splitIsVk ? 5u : 3u, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                        {splitIsVk ? 6u : 4u, DescriptorType::StorageBuffer, hit_normal_buffer_},
+                        {splitIsVk ? 7u : 3u, DescriptorType::SampledImage,  detailTex[0]},
+                        {splitIsVk ? 8u : 4u, DescriptorType::SampledImage,  detailTex[1]},
+                        {splitIsVk ? 9u : 5u, DescriptorType::SampledImage,  detailTex[2]},
+                        {splitIsVk ? 10u : 6u, DescriptorType::SampledImage, detailTex[3]},
+                        {splitIsVk ? 11u : 5u, DescriptorType::UniformBuffer, detail_table_cb_[frameIdx]},
                     };
-                    UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 6);
+                    UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 12);
 
                     // barrier: 上一帧 irradiance/depth 写入对本帧 trace 可见
                     cmd->MemoryBarrier(
@@ -1936,8 +2049,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {11, DescriptorType::StorageBuffer, sc_grid_offsets_buffer_},
                             {12, DescriptorType::StorageBuffer, sc_grid_cards_buffer_},
                             {13, DescriptorType::SampledImage,  sc_depth_atlas_},   // T3.4 (D3)
+                            {14, DescriptorType::StorageBuffer, hit_normal_buffer_}, // T4.3 (read)
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 14);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 15);
                     } else {
                         DescriptorData finalizeParams[] = {
                             {3, DescriptorType::SampledImage,  lightingAtlasTex},
@@ -1954,8 +2068,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {9, DescriptorType::UniformBuffer, finalize_vp_cb_[frameIdx]},
                             {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                             {6, DescriptorType::SampledImage,  sc_depth_atlas_},   // T3.4 (D3)
+                            {11, DescriptorType::StorageBuffer, hit_normal_buffer_}, // T4.3 (read)
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 14);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 15);
                     }
 
                     cmd->BindComputePipeline(finalize_pipeline_);

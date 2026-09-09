@@ -41,7 +41,8 @@ OfflineSDFMerger::~OfflineSDFMerger() {
     }
 }
 
-u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
+u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath, bool signed_encoding) {
+    signed_encoding_ = signed_encoding;
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Failed to open: " << filePath << std::endl;
@@ -82,16 +83,22 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
 
     // num_lod_groups
     u32 numLods = ReadU32(data, off); off += 4;
-    if (numLods == 0 || numLods > 100) return 0;
-
-    // First LOD group: name + mesh_count
-    u32 lodNameLen = ReadU32(data, off); off += 4 + lodNameLen;
-    u32 meshCount = ReadU32(data, off); off += 4;
-    if (meshCount > 100000) return 0;
+    // 2026-09 signed_v4 bake: one group per submesh cluster (381 groups for
+    // Sponza). The old 100-group cap rejected the new layout outright.
+    if (numLods == 0 || numLods > 100000) return 0;
 
     u32 sdfFound = 0;
 
-    for (u32 i = 0; i < meshCount; ++i) {
+    // Group headers and their meshes interleave: header, meshCount meshes,
+    // next header, ... Walk them in lockstep (a pre-scan of headers would
+    // consume bytes the flat mesh loop then misparses).
+    for (u32 g = 0; g < numLods; ++g) {
+        if (off + 8 > (size_t)size) break;
+        u32 lodNameLen = ReadU32(data, off); off += 4 + lodNameLen;
+        u32 meshCount = ReadU32(data, off); off += 4;
+        if (meshCount > 100000) break;
+
+        for (u32 i = 0; i < meshCount; ++i) {
         if (off + 32 > (size_t)size) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Stop at mesh " << i << ": off=" << off << " size=" << size << std::endl;
             break;
@@ -154,8 +161,11 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
                 f32 sdim = std::max({sbmax[0]-sbmin[0], sbmax[1]-sbmin[1], sbmax[2]-sbmin[2]});
                 if (sdim < 1e-6f) sdim = 1.0f;
 
-                // Only LOD0 meshes store SDF for visualization.
-                if (lodId == 0xFFFFFFFF) {
+                // Only LOD0 meshes store SDF for the merge. LOD0 is
+                // 0xFFFFFFFF in the legacy single-group layout and 0 in the
+                // 2026-09 multi-group (signed_v4) layout; LOD1+ use 1..N in
+                // both.
+                if (lodId == 0xFFFFFFFF || lodId == 0) {
                     MeshSDF sdf{};
                     sdf.resolution[0] = sres[0]; sdf.resolution[1] = sres[1]; sdf.resolution[2] = sres[2];
                     for (int j = 0; j < 3; ++j) { sdf.bounds_min[j] = sbmin[j]; sdf.bounds_max[j] = sbmax[j]; }
@@ -219,11 +229,14 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
                                       << " data=" << sdf.data.size()
                                       << " (res3=" << (u64)sdf.resolution[0] * sdf.resolution[1] * sdf.resolution[2] << ")"
                                       << " vox=" << sdf.voxels.size() << " nz=" << voxNZ
+                                      << " signed=" << signed_encoding_
                                       << " sdim=" << sdim
                                       << " bounds=[" << sbmin[0] << "," << sbmin[1] << "," << sbmin[2]
                                       << "]-[" << sbmax[0] << "," << sbmax[1] << "," << sbmax[2] << "]"
                                       << " u16min=" << vmin << " u16max=" << vmax
-                                      << " dmax=" << (f32)vmax / 65535.0f * sdim
+                                      << " dmax=" << (signed_encoding_
+                                          ? (f32)vmax / 65535.0f * 2.0f * sdim - sdim
+                                          : (f32)vmax / 65535.0f * sdim)
                                       << std::endl;
                         }
                         mesh_sdfs_.push_back(std::move(sdf));
@@ -247,8 +260,22 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath) {
             u32 uvlmCount = ReadU32(data, off); off += 4;
             off += (size_t)uvlmCount * 8;
         }
+
+        // T4.2 card bake: flagged by bit 0x20, a "CDBK" section (magic |
+        // card_count | cards | surfel_count | surfels, 32 B per record)
+        // trails the UVLM section. Same consume-or-misparse contract.
+        if ((elemType & 0x20) && off + 8 <= (size_t)size) {
+            off += 4; // CDBK magic
+            u32 cardCount = ReadU32(data, off); off += 4;
+            off += (size_t)cardCount * 32;
+            if (off + 4 <= (size_t)size) {
+                u32 surfelCount = ReadU32(data, off); off += 4;
+                off += (size_t)surfelCount * 32;
+            }
+        }
         continue;
     } // end mesh loop
+    } // end lod-group loop
 
     // Compute global bounds
     if (mesh_sdfs_.empty()) {
@@ -327,37 +354,41 @@ f32 OfflineSDFMerger::SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) 
     y0 = clampCoord(y0, sdf.resolution[1]); y1 = clampCoord(y1, sdf.resolution[1]);
     z0 = clampCoord(z0, sdf.resolution[2]); z1 = clampCoord(z1, sdf.resolution[2]);
 
-    // Sign via the bake's occupancy voxels (design documented in the header,
-    // never wired before): cells the bake marked inside/near-surface return a
-    // NEGATIVE distance, so the merged global field is properly signed and
-    // sphere tracing cannot step over thin/grazing surfaces — unsigned fields
-    // let relaxed marches pass straight through walls into the environment.
-    auto occupied = [&](int32_t x, int32_t y, int32_t z) -> bool {
-        if (sdf.voxels.empty()) return false;
-        const u32 idx = (u32)z * sdf.resolution[0] * sdf.resolution[1]
-                      + (u32)y * sdf.resolution[0]
-                      + (u32)x;
-        return idx < sdf.voxels.size() && sdf.voxels[idx] != 0;
-    };
-    const bool inside = occupied(
-        clampCoord((int32_t)std::lround(fx), sdf.resolution[0]),
-        clampCoord((int32_t)std::lround(fy), sdf.resolution[1]),
-        clampCoord((int32_t)std::lround(fz), sdf.resolution[2]));
-
-    auto sampleData = [&](int32_t x, int32_t y, int32_t z, f32 wx, f32 wy, f32 wz) -> f32 {
+    auto sampleData = [&](int32_t x, int32_t y, int32_t z) -> f32 {
         u32 idx = (u32)z * sdf.resolution[0] * sdf.resolution[1]
                 + (u32)y * sdf.resolution[0]
                 + (u32)x;
         if (idx >= sdf.data.size()) return 1e10f;
-        // Decode unsigned distance: dist = u16 / 65535 * max_dim
+        if (signed_encoding_) {
+            // Signed bake (ContentTools fast-winding-number inside test):
+            // packed as pack_float<16>(signedDist + max_dim, 0, 2*max_dim) —
+            // negative inside, positive outside.
+            f32 sd = (f32)sdf.data[idx] / 65535.0f * 2.0f * sdf.max_dim - sdf.max_dim;
+            // Hollow-architecture sign repair. A building-scale enclosing
+            // shell (one mesh = whole atrium envelope) geometrically encloses
+            // the room air: winding number ≈ 1, distance clamps to −max_dim
+            // (−25..−52 m on Sponza). Materially that air is NOT solid, and
+            // min() over meshes would poison every cavity probe (v4 ran the
+            // whole nave black this way). True material interiors only extend
+            // a wall's thickness below the surface, so negatives deeper than
+            // the band flip positive. False-cavity readings always sit at the
+            // −max_dim clamp, far beyond the band; real masonry keeps its
+            // sign within the band (thin-wall overstep protection intact);
+            // deep pillar cores degrade to the nearest-surface distance,
+            // which is what the tracers wanted anyway.
+            const f32 band = 8.0f * voxel_size_;
+            if (sd < -band) sd = -sd;
+            return sd;
+        }
+        // Legacy unsigned bake: dist = u16 / 65535 * max_dim
         return (f32)sdf.data[idx] / 65535.0f * sdf.max_dim;
     };
 
     // Trilinear interpolation
-    f32 c000 = sampleData(x0, y0, z0, lx, ly, lz), c100 = sampleData(x1, y0, z0, lx, ly, lz);
-    f32 c010 = sampleData(x0, y1, z0, lx, ly, lz), c110 = sampleData(x1, y1, z0, lx, ly, lz);
-    f32 c001 = sampleData(x0, y0, z1, lx, ly, lz), c101 = sampleData(x1, y0, z1, lx, ly, lz);
-    f32 c011 = sampleData(x0, y1, z1, lx, ly, lz), c111 = sampleData(x1, y1, z1, lx, ly, lz);
+    f32 c000 = sampleData(x0, y0, z0), c100 = sampleData(x1, y0, z0);
+    f32 c010 = sampleData(x0, y1, z0), c110 = sampleData(x1, y1, z0);
+    f32 c001 = sampleData(x0, y0, z1), c101 = sampleData(x1, y0, z1);
+    f32 c011 = sampleData(x0, y1, z1), c111 = sampleData(x1, y1, z1);
 
     f32 c00 = c000 * (1 - tx) + c100 * tx;
     f32 c01 = c001 * (1 - tx) + c101 * tx;
@@ -368,13 +399,13 @@ f32 OfflineSDFMerger::SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) 
     f32 c1 = c01 * (1 - ty) + c11 * ty;
 
     f32 d = c0 * (1 - tz) + c1 * tz;
-    // T8.10b FINAL SEMANTICS: UNSIGNED distance only. The occupancy-signed
-    // variant (inside → −d) filled hollow architecture: Sponza's atrium cavity
-    // was marked solid, so every interior probe ray insta-hit at d≈0 and the
-    // whole inner scene traced as one black block (measured: nave-air probe
-    // samples returned −2.7/−0.38/−3.5 m). Unsigned fields are what relaxed
-    // sphere-tracers (DDGITraceSDF / ScreenProbeTraceSDF) are designed for;
-    // the cross-nave transport now lives in SC-cached radiance on hit.
+    // T8.10b HISTORY: this function once forced unsigned output because the
+    // sign came from occupancy voxels (which marked only a near-surface skin
+    // and flooded Sponza's atrium cavity as "solid": nave-air probes read
+    // −2.7/−0.38/−3.5 m). With the ContentTools ray-cast signed bake the
+    // signed distance is real data, not a voxel-skin heuristic — the decode
+    // above returns it directly and the T8.10b pathology does not apply.
+    // Unsigned legacy bakes still decode positively (branch above).
     return d;
 }
 
@@ -571,19 +602,22 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
     // scene; later runs LoadFromCache instead of re-parsing the pipeline model.
     if (cachePath) {
         struct CacheHeader {
-            char magic[8];   // "PGSDFC01"
+            char magic[8];   // "PGSDFC02"
             u32  res;
             f32  origin[3];
             f32  extent[3];
             f32  voxel;
+            u32  flags;      // bit0: signed encoding
+            u32  _pad;       // keep 8-byte alignment for the u64 below
             u64  texelCount;
         };
         CacheHeader hdr{};
-        std::memcpy(hdr.magic, "PGSDFC01", 8);
+        std::memcpy(hdr.magic, "PGSDFC02", 8);
         hdr.res = res;
         hdr.origin[0] = origin_[0]; hdr.origin[1] = origin_[1]; hdr.origin[2] = origin_[2];
         hdr.extent[0] = extent_[0]; hdr.extent[1] = extent_[1]; hdr.extent[2] = extent_[2];
         hdr.voxel = voxel_size_;
+        hdr.flags = signed_encoding_ ? 1u : 0u;
         hdr.texelCount = totalVoxels;
         std::ofstream out(cachePath, std::ios::binary | std::ios::trunc);
         if (out) {
@@ -592,7 +626,8 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
                       (std::streamsize)(totalVoxels * sizeof(u16)));
             out.close();
             PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Cache written: " << cachePath << " ("
-                      << (totalVoxels * sizeof(u16)) / (1024 * 1024) << " MB)" << std::endl;
+                      << (totalVoxels * sizeof(u16)) / (1024 * 1024) << " MB, signed="
+                      << signed_encoding_ << ")" << std::endl;
         } else {
             PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] WARNING: cache write failed: " << cachePath << std::endl;
         }
@@ -611,6 +646,8 @@ bool OfflineSDFMerger::LoadFromCache(rhi::RHIDeviceBase* device, const char* cac
         f32  origin[3];
         f32  extent[3];
         f32  voxel;
+        u32  flags;
+        u32  _pad;
         u64  texelCount;
     };
     std::ifstream in(cachePath, std::ios::binary);
@@ -618,9 +655,15 @@ bool OfflineSDFMerger::LoadFromCache(rhi::RHIDeviceBase* device, const char* cac
 
     CacheHeader hdr{};
     in.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    if (!in || std::memcmp(hdr.magic, "PGSDFC01", 8) != 0 ||
+    // PGSDFC01 (pre-signed bake) is stale by definition — its field semantics
+    // differ, so accept only v2 caches whose encoding matches this merger's.
+    const bool hdrOk = std::memcmp(hdr.magic, "PGSDFC02", 8) == 0;
+    const bool flagsOk = (hdr.flags & 1u) == (signed_encoding_ ? 1u : 0u);
+    if (!in || !hdrOk || !flagsOk ||
         hdr.res != GLOBAL_RES || hdr.texelCount != (u64)GLOBAL_RES * GLOBAL_RES * GLOBAL_RES) {
-        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Cache stale/invalid: " << cachePath << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Cache stale/invalid: " << cachePath
+                  << (hdrOk ? (flagsOk ? " (geometry)" : " (encoding mismatch)") : " (magic)")
+                  << std::endl;
         return false;
     }
 
