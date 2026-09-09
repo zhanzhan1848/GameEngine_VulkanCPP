@@ -102,14 +102,20 @@ private:
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle dummy_buffer_{rhi::handles::INVALID_RESOURCE};
-    // T6.3 sub-B: N-volume 参数 CB（binding 18，144B std140）+ 能力位。
-    // nvolume_supported_ = Vulkan 且设备开启 descriptor indexing
-    // （VulkanDevice::SupportsDescriptorIndexing）。不可用时 DSL 不带
-    // PartiallyBound 标志、CB meta.x 恒 0 → shader 走 legacy 两槽路径。
+    // T6.3 sub-B → T3.6/D1: N-volume 参数 CB（144B std140）。原 binding 18
+    // NVolumeCB 原位改型为 FlatVolumeCB（probe offset 表）。
     rhi::ResourceHandle nvolumes_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE};
-    bool nvolume_supported_ = false;
+    // T3.6/D1: flat irradiance SSBO（triple-buffered，按需增长）。所有 volume
+    // 的 9-vec4/probe 探针数据连续打包：[header 256B][vol0][vol1]...；描述符
+    // 绑 offset 256 跳过头部，shader 侧即纯探针数组。取代 Vulkan 的
+    // descriptor-indexing SSBO 数组（原 binding 17 array[4]）与双端 legacy
+    // near/far 双槽绑定——Metal 与 Vulkan 走同一条 flat 路径。
+    rhi::ResourceHandle flat_irr_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    u64 flat_irr_capacity_[3]{0, 0, 0};   // 已分配字节数（16 头部 + probes×144）
 
     // Debug (SC_DUMP_CARDS=1): staging copy of the gather output + dump frame
     // (deferred print >=3 frames later — correlates probe health with what

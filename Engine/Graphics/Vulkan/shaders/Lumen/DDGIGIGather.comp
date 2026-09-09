@@ -8,11 +8,13 @@
 // T6.3 sub-A (probe_vis 数据面): binding 6 的 ProbeCounts UBO 扩到 48B,新增
 // debugVis.x = GIDebug().probe_vis 模式(0=Off 零变化)。!=Off 时 Phase 1 输出
 // 调试可视化色(probe SH L0 / octahedral 深度 / confidence),spec 输出清零。
-// T6.3 sub-B (N-volume): binding 17 = SSBO 数组[4](每 volume irradiance)、
-// binding 18 = volume 参数 CB(origin/spacing/counts×4 + count)。nvolMeta.x > 0
-// 时走"包含该点且 spacing 最细"的逐像素 volume 选择(descriptor indexing,
-// nonuniformEXT 索引);CPU 侧能力位门控,不可用/单 volume 时 nvolMeta.x = 0
-// 走 legacy 两槽路径(与 T4.4/T5.5 行为逐字节一致)。
+// T3.6/D1 (flat-buffer): binding 17 = 单 SSBO,所有 volume 的探针数据顺序
+// 拼接([header 256B][vol0][vol1]...,描述符绑 offset 256 跳过头部)、
+// binding 18 = FlatVolumeCB(origin/spacing + counts/probeOffset ×4 + count)。
+// 逐像素选择"包含该点且 spacing 最细"的 volume(平局取低索引 → near 优先),
+// 经 probeOffset 索引 flat 数组——不依赖 descriptor indexing,Metal 同构。
+// 原 15/16 far 双槽与 legacy 两槽路径删除(T4.4/T5.5 行为由 sel==0/sel>0
+// 分支等价承接)。
 //
 // Flat descriptor bindings:
 //   binding 0  = SampledDepthImage  gbuffer_depth
@@ -31,17 +33,13 @@
 //   binding 13 = SampledImage       gbuffer_orm (r=AO, g=Roughness, b=Metallic)
 //   binding 14 = StorageImage(rgba16f) spec_output_tex (half-res glossy:
 //                                    RGB = SH(R) lobe radiance, A = NdotV)
-//   binding 15 = UniformBuffer      farVolume (T4.4: origin.xyz+spacing.w,
-//                                    counts.xyz+enabled.w)
-//   binding 16 = StorageBuffer(ro)  farIrradianceBuffer (9 vec4 per probe)
-//   binding 17 = StorageBuffer(ro)[] nvolIrradiance[4] (T6.3 sub-B; 数组描述符,
-//                                    nonuniformEXT 逐像素索引)
-//   binding 18 = UniformBuffer      nvolumeCB (T6.3 sub-B: originSpacing[4] +
-//                                    countsEnabled[4] + meta.x=count)
+//   binding 17 = StorageBuffer(ro)  flatIrradiance (T3.6/D1: 全部 volume 的
+//                                    9 vec4/probe 探针顺序拼接,offset 256 起)
+//   binding 18 = UniformBuffer      FlatVolumeCB (T3.6/D1: originSpacing[4] +
+//                                    countsOffset[4] + meta.x=count)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
-#extension GL_EXT_nonuniform_qualifier : require
 
 // Shared shader library (axis refactor X1): SH9 evaluation lives in
 // ShaderLib/EncodeLib.glsl. Constants are float32-identical to the previous
@@ -105,27 +103,18 @@ layout(set = 0, binding = 12) readonly buffer DDGIDepthBuf {
 };
 layout(set = 0, binding = 13) uniform texture2D gbuffer_orm;
 layout(set = 0, binding = 14, rgba16f) writeonly uniform image2D spec_output_tex;
-layout(set = 0, binding = 15, std140) uniform FarVolumeCB {
-    vec4 farOriginSpacing;  // xyz = origin, w = spacing (T4.4)
-    vec4 farCountsEnabled;  // xyz = counts, w = enabled flag
+// T3.6/D1: 15/16（far 双槽）与 17 array[4]（descriptor indexing）删除。
+// flat 路径：17 = 单 SSBO，所有 volume 的 9-vec4/probe 探针数据顺序拼接
+//（描述符绑 offset 256 跳过头部，此处即纯探针数组）；18 = FlatVolumeCB
+//（origin/spacing + counts/probeOffset ×4 + meta.x=count）。
+layout(set = 0, binding = 17) readonly buffer FlatIrradianceBuf {
+    vec4 flatIrradiance[];  // 9 vec4 per probe，volume v 的探针 0 位于
+                            // uint(fvCountsOffset[v].w)
 };
-layout(set = 0, binding = 16) readonly buffer FarIrradianceBuf {
-    vec4 farIrradianceBuffer[];  // 9 vec4 per probe
-};
-// T6.3 sub-B: N-volume 路径(descriptor indexing,能力位门控)。
-// binding 17 = 每 volume 的 irradiance SSBO 数组(9 vec4 per probe);
-// binding 18 = volume 参数(与 GIGatherModule::NVolumeCB 上传布局一致)。
-// 数组槽位 0 = near(ddgi_volumes_[0]),1..3 = 附加 volume;binding 15/16 的
-// legacy 槽在 N-volume 路径下仍写描述符但 nvolMeta.x>0 时不再读取。
-layout(set = 0, binding = 17) readonly buffer NVolumeIrradianceBuf {
-    // Unsized: indexed as pIdx * 9 + i (whole-volume buffer, 9 vec4/probe).
-    // A fixed [9] declaration is formally out-of-bounds at pIdx > 0.
-    vec4 nvolSh9[];
-} nvolIrradiance[4];
-layout(set = 0, binding = 18, std140) uniform NVolumeCB {
-    vec4 nvolOriginSpacing[4];  // xyz = origin, w = spacing
-    vec4 nvolCounts[4];         // xyz = counts, w = enabled
-    vec4 nvolMeta;              // x = 有效 volume 数(0 = 走 legacy 两槽路径)
+layout(set = 0, binding = 18, std140) uniform FlatVolumeCB {
+    vec4 fvOriginSpacing[4];   // xyz = origin, w = spacing（0 = 未用槽）
+    vec4 fvCountsOffset[4];    // xyz = counts, w = flat SSBO probe 偏移
+    vec4 fvMeta;               // x = 有效 volume 数（0 = 防御 dim ambient）
 };
 
 // --------------------------------------------------------------------------------
@@ -442,9 +431,8 @@ void ddgi_gi_gather() {
 
     // Phase 1: per-pixel output. 三条互斥路由:
     //   (A) probe_vis 调试可视化(T6.3 sub-A)—— debugVis.x > 0.5;
-    //   (B) N-volume gather(T6.3 sub-B,descriptor indexing)—— nvolMeta.x > 0.5;
-    //   (C) legacy 两槽 near+far —— debugVis.x == 0 且 nvolMeta.x == 0,
-    //       与 T4.4/T5.5 旧行为逐字节一致(默认档零变化)。
+    //   (B) flat-buffer 多 volume gather(T3.6/D1)—— fvMeta.x > 0.5
+    //       (sel==0 近场数学 / sel>0 远场数学;两槽 legacy 已删除)。
     if (inBounds && debugVis.x > 0.5) {
         // ====================================================================
         // (A) probe 调试可视化 — GIDebug().probe_vis 数据面(T6.3 sub-A)。
@@ -517,10 +505,12 @@ void ddgi_gi_gather() {
                     }
                     vis = vec3(clamp(conf / max(wsum, 1e-4), 0.0, 1.0));
                 }
-            } else if (visMode == 1 && farCountsEnabled.w > 0.5) {
-                // 近场网格外、远场 volume 内:L0 三线性(与 gather 远场同几何)。
-                vec3 fgp = (worldPos - farOriginSpacing.xyz) / farOriginSpacing.w;
-                vec3 fcounts = farCountsEnabled.xyz;
+            } else if (visMode == 1 && fvMeta.x > 1.5 && fvOriginSpacing[1].w > 0.0) {
+                // 近场网格外、far volume（flat vols[1]）内:L0 三线性(与 gather
+                // 远场同几何)。T3.6/D1: 读 flat SSBO 而非已删除的 far 双槽。
+                vec3 fgp = (worldPos - fvOriginSpacing[1].xyz) / fvOriginSpacing[1].w;
+                vec3 fcounts = fvCountsOffset[1].xyz;
+                uint foff = uint(fvCountsOffset[1].w);
                 vec3 fgridMax = fcounts - 1.0;
                 if (all(greaterThanEqual(fgp, vec3(0.0))) && all(lessThanEqual(fgp, fgridMax))) {
                     uvec3 fb0 = clamp(uvec3(floor(fgp)), uvec3(0u), uvec3(fcounts) - 1u);
@@ -547,7 +537,7 @@ void ddgi_gi_gather() {
                         if (ftw[p] < 0.01) continue;
                         uint pIdx = fpc[p].x + fpc[p].y * uint(fcounts.x)
                                   + fpc[p].z * uint(fcounts.x) * uint(fcounts.y);
-                        sh0 += farIrradianceBuffer[pIdx * 9u].xyz * ftw[p];
+                        sh0 += flatIrradiance[(foff + pIdx) * 9u].xyz * ftw[p];
                         wsum += ftw[p];
                     }
                     if (wsum > 0.0) sh0 /= wsum;
@@ -557,33 +547,34 @@ void ddgi_gi_gather() {
         }
         imageStore(output_tex, ivec2(tid), vec4(vis, 1.0));
         imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
-    } else if (nvolMeta.x > 0.5) {
+    } else if (fvMeta.x > 0.5) {
         // ====================================================================
-        // (B) N-volume gather(T6.3 sub-B,Vulkan Desktop 档 descriptor
-        // indexing)。逐像素选择"包含该点且 spacing 最细"的 volume(平局取
-        // 低索引 → near=volume 0 优先),对该 volume 做 8-probe 三线性 SH9
-        // gather。selected == 0 时与 legacy 近场路径同数学(含 R lobe spec
-        // 输出);否则与 legacy 远场路径同数学(spec 清零)。天空/网外像素
-        // 与 legacy 相同的 dim ambient。
+        // (B) flat-buffer 多 volume gather（T3.6/D1，取代 descriptor-indexing
+        // N-volume 与 legacy 两槽双路径）。逐像素选择"包含该点且 spacing 最细"
+        // 的 volume（平局取低索引 → near=volume 0 优先），经 probeOffset 索引
+        // 单一 flat SSBO。selected == 0 时与原近场路径同数学（含 R lobe spec
+        // 输出 + 深度图可见性/法线加权）；否则与原远场路径同数学（spec 清零）。
+        // 天空/网外像素与原路径相同的 dim ambient。
         // ====================================================================
         if (inBounds && depth < 1.0) {
             int sel = -1;
             float selSpacing = 0.0;
-            int nvolCount = int(nvolMeta.x);
+            int nvolCount = int(fvMeta.x);
             for (int v = 0; v < nvolCount; ++v) {
-                if (nvolCounts[v].w < 0.5) continue;
-                vec3 gpv = (worldPos - nvolOriginSpacing[v].xyz) / nvolOriginSpacing[v].w;
-                vec3 gridMax = nvolCounts[v].xyz - 1.0;
+                if (fvOriginSpacing[v].w <= 0.0) continue;  // spacing=0 = 未用槽
+                vec3 gpv = (worldPos - fvOriginSpacing[v].xyz) / fvOriginSpacing[v].w;
+                vec3 gridMax = fvCountsOffset[v].xyz - 1.0;
                 if (all(greaterThanEqual(gpv, vec3(0.0))) && all(lessThanEqual(gpv, gridMax))) {
-                    if (sel < 0 || nvolOriginSpacing[v].w < selSpacing) {
+                    if (sel < 0 || fvOriginSpacing[v].w < selSpacing) {
                         sel = v;
-                        selSpacing = nvolOriginSpacing[v].w;
+                        selSpacing = fvOriginSpacing[v].w;
                     }
                 }
             }
             if (sel >= 0) {
-                vec3 gpn = (worldPos - nvolOriginSpacing[sel].xyz) / nvolOriginSpacing[sel].w;
-                uvec3 ncounts = uvec3(nvolCounts[sel].xyz);
+                uint volOff = uint(fvCountsOffset[sel].w);
+                vec3 gpn = (worldPos - fvOriginSpacing[sel].xyz) / fvOriginSpacing[sel].w;
+                uvec3 ncounts = uvec3(fvCountsOffset[sel].xyz);
                 uvec3 b0 = clamp(uvec3(floor(gpn)), uvec3(0u), ncounts - 1u);
                 uvec3 b1 = min(b0 + 1u, ncounts - 1u);
                 vec3 fracGp = fract(gpn);
@@ -637,11 +628,9 @@ void ddgi_gi_gather() {
                     if (tw[p] < 0.01) continue;
                     uint pIdx = pc[p].x + pc[p].y * ncounts.x + pc[p].z * ncounts.x * ncounts.y;
                     vec3 sh[9];
-                    // Index by pIdx: 9 SH coefficients per probe. Using the loop
-                    // index alone reads probe 0's SH for every pixel, turning the
-                    // whole screen into one flat irradiance (sky-init probe 0).
+                    // T3.6/D1: flat SSBO 索引——volume 偏移 + volume 内探针索引。
                     for (int i = 0; i < 9; ++i)
-                        sh[i] = nvolIrradiance[nonuniformEXT(sel)].nvolSh9[pIdx * 9u + uint(i)].xyz;
+                        sh[i] = flatIrradiance[(volOff + pIdx) * 9u + uint(i)].xyz;
                     // Must exactly match DDGIUpdateIrradiance's real-SH basis.
                     // The previous Vulkan N-volume path swapped coefficients
                     // 6/7 and omitted four signs, cancelling directional GI.
@@ -669,7 +658,7 @@ void ddgi_gi_gather() {
                     // Metal/Dawn gather so irradiance cannot leak through walls
                     // as probe-sized white cells.
                     if (sel == 0) {
-                        vec3 probePos = nvolOriginSpacing[sel].xyz
+                        vec3 probePos = fvOriginSpacing[sel].xyz
                                       + vec3(pc[p]) * selSpacing;
                         vec3 toProbeVec = probePos - biasedPos;
                         float distToProbe = length(toProbeVec);
@@ -780,191 +769,9 @@ void ddgi_gi_gather() {
             imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
         }
     } else {
-    // ========================================================================
-    // (C) legacy 两槽路径(near 显式槽 + far 显式槽)—— probe_vis == Off 且
-    // N-volume 未激活(CPU 能力位门控/单 volume)时的默认路径,保持
-    // T4.4/T5.5 行为不变。
-    // ========================================================================
-    if (inBounds && !isActive) {
-        // T4.4 two-stage: outside the near grid, try the far coarse volume
-        // before falling back to dim ambient.
-        bool farHit = false;
-        if (farCountsEnabled.w > 0.5 && depth < 1.0) {
-            vec3 fgp = (worldPos - farOriginSpacing.xyz) / farOriginSpacing.w;
-            vec3 fcounts = farCountsEnabled.xyz;
-            vec3 fgridMax = fcounts - 1.0;
-            if (all(greaterThanEqual(fgp, vec3(0.0))) && all(lessThanEqual(fgp, fgridMax))) {
-                uvec3 fb0 = clamp(uvec3(floor(fgp)), uvec3(0u), uvec3(fcounts) - 1u);
-                uvec3 fb1 = min(fb0 + 1u, uvec3(fcounts) - 1u);
-                vec3 ffrac = fract(fgp);
-                float ffx = ffrac.x, ffy = ffrac.y, ffz = ffrac.z;
-
-                float ftw[8];
-                ftw[0] = (1.0 - ffx) * (1.0 - ffy) * (1.0 - ffz);
-                ftw[1] = ffx           * (1.0 - ffy) * (1.0 - ffz);
-                ftw[2] = (1.0 - ffx) * ffy           * (1.0 - ffz);
-                ftw[3] = ffx           * ffy           * (1.0 - ffz);
-                ftw[4] = (1.0 - ffx) * (1.0 - ffy) * ffz;
-                ftw[5] = ffx           * (1.0 - ffy) * ffz;
-                ftw[6] = (1.0 - ffx) * ffy           * ffz;
-                ftw[7] = ffx           * ffy           * ffz;
-
-                uvec3 fpc[8];
-                fpc[0] = uvec3(fb0.x, fb0.y, fb0.z); fpc[1] = uvec3(fb1.x, fb0.y, fb0.z);
-                fpc[2] = uvec3(fb0.x, fb1.y, fb0.z); fpc[3] = uvec3(fb1.x, fb1.y, fb0.z);
-                fpc[4] = uvec3(fb0.x, fb0.y, fb1.z); fpc[5] = uvec3(fb1.x, fb0.y, fb1.z);
-                fpc[6] = uvec3(fb0.x, fb1.y, fb1.z); fpc[7] = uvec3(fb1.x, fb1.y, fb1.z);
-
-                const float SH_C0   = 0.28209479;
-                const float SH_C1   = 0.48860251;
-                const float SH_C2_0 = 1.09254843;
-                const float SH_C2_1 = 0.31539157;
-                const float SH_C2_2 = 0.54627421;
-                float nx = normal.x, ny = normal.y, nz = normal.z;
-                float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
-                float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
-
-                vec3 fresult = vec3(0.0);
-                float ftotalW = 0.0;
-                for (int p = 0; p < 8; ++p) {
-                    if (ftw[p] < 0.01) continue;
-                    uint pIdx = fpc[p].x + fpc[p].y * uint(fcounts.x) + fpc[p].z * uint(fcounts.x) * uint(fcounts.y);
-                    vec3 sh[9];
-                    for (int i = 0; i < 9; ++i)
-                        sh[i] = farIrradianceBuffer[pIdx * 9u + uint(i)].xyz;
-                    // Must match DDGIUpdateIrradiance's projection basis:
-                    // L1 x/y and L2 yz/xz carry minus signs, and band-6 is
-                    // the C2_1 zonal term (the old form swapped 6/7 and
-                    // dropped four signs, cancelling directional GI).
-                    vec3 irr = sh[0] * SH_C0
-                             + sh[1] * (-SH_C1 * 0.6666667 * ny)   // B4: A1 = 2π/3 (÷π ⇒ ×2/3)
-                             + sh[2] * ( SH_C1 * 0.6666667 * nz)
-                             + sh[3] * (-SH_C1 * 0.6666667 * nx)
-                             + sh[4] * ( SH_C2_0 * 0.25 * nxy)   // B4: A2 = π/4
-                             + sh[5] * (-SH_C2_0 * 0.25 * nyz)
-                             + sh[6] * ( SH_C2_1 * 0.25 * (3.0*nzz - 1.0))
-                             + sh[7] * (-SH_C2_0 * 0.25 * nzx)
-                             + sh[8] * ( SH_C2_2 * 0.25 * (nxx - nyy));
-                    fresult += irr * ftw[p];
-                    ftotalW += ftw[p];
-                }
-                if (ftotalW > 0.0) {
-                    fresult /= ftotalW;
-                    // Same radiance→irradiance correction as the near path;
-                    // floor stays absolute.
-                    fresult = max(fresult * PROBE_SH_RAD_TO_IRRAD, vec3(0.02, 0.02, 0.025));
-                    imageStore(output_tex, ivec2(tid), vec4(fresult, 1.0));
-                    imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
-                    farHit = true;
-                }
-            }
-        }
-        if (!farHit) {
-            // Outside both grids: dim ambient.
-            imageStore(output_tex, ivec2(tid), vec4(0.03, 0.03, 0.035, 1.0));
-            imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
-        }
+        // T3.6/D1: legacy 两槽路径已删除。fvMeta.x==0（flat 未上传——
+        // GIGatherModule 拿不到 volume 数据时的防御分支）→ dim ambient。
+        imageStore(output_tex, ivec2(tid), vec4(0.03, 0.03, 0.035, 1.0));
+        imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
     }
-
-    if (isActive) {
-        // Direct trilinear interpolation — no cooperative loading.
-        // Each thread independently reads irradiance_buffer for its 8 surrounding probes.
-        uvec3 b0 = clamp(uvec3(floor(gp)), uvec3(0u), counts - 1u);
-        uvec3 b1 = min(b0 + 1u, counts - 1u);
-        vec3 fracGp = fract(gp);
-        float fx = fracGp.x, fy = fracGp.y, fz = fracGp.z;
-
-        float tw[8];
-        tw[0] = (1.0 - fx) * (1.0 - fy) * (1.0 - fz);
-        tw[1] = fx           * (1.0 - fy) * (1.0 - fz);
-        tw[2] = (1.0 - fx) * fy           * (1.0 - fz);
-        tw[3] = fx           * fy           * (1.0 - fz);
-        tw[4] = (1.0 - fx) * (1.0 - fy) * fz;
-        tw[5] = fx           * (1.0 - fy) * fz;
-        tw[6] = (1.0 - fx) * fy           * fz;
-        tw[7] = fx           * fy           * fz;
-
-        uvec3 pc[8];
-        pc[0] = uvec3(b0.x, b0.y, b0.z); pc[1] = uvec3(b1.x, b0.y, b0.z);
-        pc[2] = uvec3(b0.x, b1.y, b0.z); pc[3] = uvec3(b1.x, b1.y, b0.z);
-        pc[4] = uvec3(b0.x, b0.y, b1.z); pc[5] = uvec3(b1.x, b0.y, b1.z);
-        pc[6] = uvec3(b0.x, b1.y, b1.z); pc[7] = uvec3(b1.x, b1.y, b1.z);
-
-        // SH reconstruction coefficients
-        // Full SH9 reconstruction coefficients (L0+L1+L2)
-        const float SH_C0   = 0.28209479;
-        const float SH_C1   = 0.48860251;
-        const float SH_C2_0 = 1.09254843;  // xy
-        const float SH_C2_1 = 0.31539157;  // 3zz-1
-        const float SH_C2_2 = 0.54627421;  // xx-yy
-        float nx = normal.x, ny = normal.y, nz = normal.z;
-        float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
-        float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
-
-        vec3 result = vec3(0.0);
-        float totalW = 0.0;
-
-        // T4.3 glossy: reflection vector R = reflect(-V, N), evaluated with the
-        // same SH9 coefficients. Roughness widens the lobe by blending towards
-        // the diffuse reconstruction (cosine-lobe limit at roughness → 1).
-        vec3 V = normalize(cameraPos.xyz - worldPos);
-        float NdotV = clamp(dot(normal, V), 0.05, 1.0);
-        vec3 R = reflect(-V, normal);
-        float roughness = 1.0;
-        {
-            ivec2 fullOrmTexel = ivec2(vec2(textureSize(gbuffer_orm, 0)) * uv);
-            roughness = clamp(texelFetch(gbuffer_orm, fullOrmTexel, 0).g, 0.04, 1.0);
-        }
-        float rx = R.x, ry = R.y, rz = R.z;
-        float rxy = rx*ry, ryz = ry*rz, rzx = rz*rx;
-        float rxx = rx*rx, ryy = ry*ry, rzz = rz*rz;
-        vec3 reflResult = vec3(0.0);
-
-        for (int p = 0; p < 8; ++p) {
-            if (tw[p] < 0.01) continue;
-            uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
-            vec3 sh[9];
-            for (int i = 0; i < 9; ++i)
-                sh[i] = irradianceBuffer[pIdx * 9u + uint(i)].xyz;
-            // SH9 reconstruction — canonical basis, see far-path note above.
-            vec3 irr = sh[0] * SH_C0
-                     + sh[1] * (-SH_C1 * 0.6666667 * ny)   // B4: A1 = 2π/3 (÷π ⇒ ×2/3)
-                     + sh[2] * ( SH_C1 * 0.6666667 * nz)
-                     + sh[3] * (-SH_C1 * 0.6666667 * nx)
-                     + sh[4] * ( SH_C2_0 * 0.25 * nxy)   // B4: A2 = π/4
-                     + sh[5] * (-SH_C2_0 * 0.25 * nyz)
-                     + sh[6] * ( SH_C2_1 * 0.25 * (3.0*nzz - 1.0))
-                     + sh[7] * (-SH_C2_0 * 0.25 * nzx)
-                     + sh[8] * ( SH_C2_2 * 0.25 * (nxx - nyy));
-            result += irr * tw[p];
-            totalW += tw[p];
-
-            // Same coefficients along R — no extra device reads.
-            reflResult += sh[0] * SH_C0
-                        + sh[1] * (-SH_C1 * ry)
-                        + sh[2] * ( SH_C1 * rz)
-                        + sh[3] * (-SH_C1 * rx)
-                        + sh[4] * ( SH_C2_0 * rxy)
-                        + sh[5] * (-SH_C2_0 * ryz)
-                        + sh[6] * ( SH_C2_1 * (3.0*rzz - 1.0))
-                        + sh[7] * (-SH_C2_0 * rzx)
-                        + sh[8] * ( SH_C2_2 * (rxx - ryy));
-        }
-        if (totalW > 0.0) {
-            result /= totalW;
-            reflResult /= totalW;
-        }
-        // Radiance-unit base for the specular blend (pre-correction scale);
-        // the diffuse output gets the radiance→irradiance factor instead.
-        vec3 radBase = max(result, vec3(0.05, 0.05, 0.06));  // sky-leak ambient floor
-
-        // Glossy output: RGB = lobe radiance, A = NdotV (DFG happens in
-        // FusionComposite where albedo/metallic are available).
-        vec3 specIrr = mix(reflResult, radBase, roughness * roughness);
-        imageStore(spec_output_tex, ivec2(tid), vec4(specIrr, NdotV));
-
-        vec3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, vec3(0.05, 0.05, 0.06));
-        imageStore(output_tex, ivec2(tid), vec4(diffOut, 1.0));
-    }
-    }  // end legacy route (C)
 }

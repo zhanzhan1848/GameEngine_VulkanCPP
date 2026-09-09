@@ -33,12 +33,14 @@ struct GIGatherCB {
     math::v4   debug_vis;
 };
 
-// T6.3 sub-B: N-volume 参数 CB（binding 18，std140 布局与
-// DDGIGIGather.comp 的 NVolumeCB 一致：3 个 vec4 数组 + meta）。
-struct NVolumeCB {
+// T6.3 sub-B → T3.6/D1: volume 参数 CB（binding 18，std140 布局与
+// DDGIGIGather.comp 的 FlatVolumeCB 一致）。NVolumeCB 原位改型：counts[].w
+// 从 enabled 位改为该 volume 在 flat SSBO 里的 probe 偏移（enabled 由
+// spacing>0 隐含——未用槽位 CPU 侧清零，spacing=0 被 shader 选择器跳过）。
+struct FlatVolumeCB {
     math::v4 origin_spacing[4];   // xyz = origin, w = spacing
-    math::v4 counts_enabled[4];   // xyz = counts, w = enabled
-    math::v4 meta;                // x = 有效 volume 数（0 = legacy 路径）
+    math::v4 counts_offset[4];    // xyz = counts, w = probe offset (flat SSBO)
+    math::v4 meta;                // x = 有效 volume 数（0 = flat 路径关闭）
 };
 
 struct GPUStaticProbeData {
@@ -63,10 +65,9 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     // Metal: overlapping texture/buffer namespaces (idiomatic Metal).
     // Vulkan: flat 0..14 (depth as SampledDepthImage) — matches GLSL shader.
     const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
-    // T6.3 sub-B: descriptor indexing 能力位（VulkanDevice 查询并启用了
-    // descriptorBindingPartiallyBound + shaderStorageBufferArrayNonUniformIndexing）。
-    // Metal/Dawn 继承默认 false → N-volume 分支不存在，两槽路径不变。
-    nvolume_supported_ = isVk && device->SupportsDescriptorIndexing();
+    // T3.6/D1: flat-buffer 路径取代 N-volume descriptor-indexing 数组与
+    // near/far 双槽 legacy 路径——不再依赖 descriptor indexing，Metal 与
+    // Vulkan 同一条路径（消除 nvolume_supported_ 能力差异）。
     if (isVk) {
         DescriptorSetLayoutBinding vkBindings[] = {
             {0,  DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // depth
@@ -80,22 +81,17 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {8,  DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // staticSkyFactor
             {9,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // staticProbeParams
             {10, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // confidenceBuffer
-            {11, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // irradianceBuffer
+            {11, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // near irradiance (debug route A)
             {12, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // depthBuffer
             {13, DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // gbuffer_orm (T4.3)
             {14, DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // specular output (T4.3)
-            {15, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // far volume CB (T4.4)
-            {16, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // far irradiance (T4.4)
-            // T6.3 sub-B: N-volume irradiance 数组（4 槽）。能力可用时
-            // PartiallyBound（volume 数 < 4 允许未写槽——本模块仍全写
-            // dummy 保平局安全）；不可用时普通数组（shader 静态使用存在，
-            // 全槽必写，meta.x=0 永不进入数组访问分支）。
-            {17, DescriptorType::StorageBuffer,     4, ShaderStage::Compute, nullptr,
-             nvolume_supported_ ? DescriptorBindingFlags::PartiallyBound
-                                : DescriptorBindingFlags::None},
-            {18, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // NVolumeCB (T6.3 sub-B)
+            // T3.6/D1: binding 17/18 原位改型——17 = flat irradiance SSBO
+            //（单 buffer，offset 256 跳过头部），18 = FlatVolumeCB。原 15/16
+            //（far 双槽）与 17 array[4] 删除。
+            {17, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // flat irradiance (T3.6/D1)
+            {18, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // FlatVolumeCB (T3.6/D1)
         };
-        set_layout_ = device->CreateDescriptorSetLayout({19, vkBindings});
+        set_layout_ = device->CreateDescriptorSetLayout({17, vkBindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -111,14 +107,13 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // staticSkyFactor
             {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // staticProbeParams
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // confidenceBuffer
-            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradianceBuffer
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // depthBuffer
-            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // TEMP dual-slot: same irradiance buffer
-            // T3.6/D2: far coarse volume (was Vulkan-only)
-            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // far irradiance (9 vec4/probe)
-            {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // far params (origin+spacing/counts+enabled)
+            // T3.6/D1: 10/11 原位改型为 flat SSBO + FlatVolumeCB；原 7（near
+            // irr）/9（dup）/10（far irr）/11（far params）删除。
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // flat irradiance (T3.6/D1)
+            {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // FlatVolumeCB (T3.6/D1)
         };
-        set_layout_ = device->CreateDescriptorSetLayout({18, bindings});
+        set_layout_ = device->CreateDescriptorSetLayout({16, bindings});
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
@@ -218,7 +213,9 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
     // T6.3 sub-B: 附加 volume（索引 ≥2）的读依赖注册——与 far import 同模式，
     // 把第 3/4 个 volume 的 irradiance 纳入本帧图（别名注册 + 与其 trace pass
     // 的次序约束）。volume[0]/[1] 已由上方 near/far import 覆盖。
-    if (nvolume_supported_ && inputs.volume_count > 2) {
+    // T3.6/D1: flat 路径不再依赖 descriptor indexing——所有有效 volume 都
+    // 参与打包，import 不再受能力位门控。
+    if (inputs.volume_count > 2) {
         for (u32 vi = 2; vi < inputs.volume_count && vi < GIGatherInputs::kMaxVolumes; ++vi) {
             if (inputs.volume_views[vi].IsValid())
                 graph.ImportResource("DDGINvolIrrRead" + std::to_string(vi),
@@ -249,7 +246,6 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             const u32 bindingIdx = inputs.current_buffer_index % 3;
             const DescriptorSetHandle descriptorSet = descriptor_sets_[bindingIdx];
             const ResourceHandle probeCB = probe_cb_[bindingIdx];
-            const ResourceHandle farCB = far_cb_[bindingIdx];
             const ResourceHandle staticProbeCB = static_probe_cb_[bindingIdx];
             const ResourceHandle nvolumesCB = nvolumes_cb_[bindingIdx];
 
@@ -261,11 +257,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 farView = inputs.ddgi_far_pass->GetVolumeView(ddgiReadIdx);
             }
 
-            // T6.3 sub-B: 组装 N-volume 视图表。inputs.volume_views 优先（管线
-            // 侧把 ddgi_volumes_[0..count) 全量传入）；[0]/[1] 缺省时回退
-            // near pass / farView——与 legacy 槽同源同槽位，N-volume 激活时
-            // 输出与两槽路径一致。nvolumeActive 仅在能力位开 + ≥2 个有效
-            // volume 时为真；否则 CB meta.x = 0，shader 走 legacy 分支。
+            // T3.6/D1: 组装 flat volume 表。inputs.volume_views 优先（管线侧把
+            // ddgi_volumes_[0..count) 全量传入）；[0]/[1] 缺省时回退 near
+            // pass / farView——与旧 near/far 槽同源同槽位。flatActive 在
+            // ≥1 个有效 volume 时为真（near 恒在），不再有 descriptor
+            // indexing 能力门控——Metal/Vulkan 同一条 flat 路径。
             lumen::DDGIVolumeView nvolViews[GIGatherInputs::kMaxVolumes]{};
             u32 nvolCount = 0;
             {
@@ -280,16 +276,59 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 for (u32 vi = 0; vi < GIGatherInputs::kMaxVolumes; ++vi)
                     if (nvolViews[vi].IsValid()) nvolCount = vi + 1;
             }
-            const bool nvolumeActive = nvolume_supported_ && nvolCount >= 2;
-            // 路径选择一次性日志（SDFViz 先例）——N-volume 激活/回退可观测。
+            const bool flatActive = nvolCount >= 1;
+            // 路径选择一次性日志（SDFViz 先例）。
             static bool loggedGatherPath = false;
             if (!loggedGatherPath) {
                 loggedGatherPath = true;
-                PRIMAL_LOG_STREAM(Error, "Render") << "[GIGather] path = "
-                          << (nvolumeActive ? "N-volume (descriptor indexing, "
-                                             : "legacy two-slot (")
-                          << (nvolume_supported_ ? "capability on" : "capability off")
-                          << ", volumes=" << nvolCount << ")" << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[GIGather] path = flat-buffer (volumes="
+                          << nvolCount << ")" << std::endl;
+            }
+
+            // T3.6/D1: flat 布局计算——probeOffset 累计 + 按需增长 flat SSBO。
+            // [header 256B][vol0: probes×9×vec4][vol1]...；描述符绑 offset 256
+            // 跳过头部，shader 侧即纯探针数组（256 满足所有后端的 SSBO
+            // offset 对齐）。头部 16B 有效内容：totalProbes, volumeCount。
+            u32 fvOffsets[GIGatherInputs::kMaxVolumes] = {};
+            u32 fvTotalProbes = 0;
+            ResourceHandle flatBuf = handles::INVALID_RESOURCE;
+            if (flatActive) {
+                constexpr u64 kFlatHeaderBytes = 256;
+                for (u32 vi = 0; vi < nvolCount; ++vi) {
+                    fvOffsets[vi] = fvTotalProbes;
+                    const auto& v = nvolViews[vi];
+                    fvTotalProbes += (u32)v.counts.x * (u32)v.counts.y * (u32)v.counts.z;
+                }
+                const u64 needed = kFlatHeaderBytes + (u64)fvTotalProbes * 144ull;
+                if (flat_irr_buffer_[bindingIdx] == handles::INVALID_RESOURCE ||
+                    flat_irr_capacity_[bindingIdx] < needed) {
+                    // 按需增长（三槽一起换，容量一致）。实际只在首帧或
+                    // volume 数变化时触发。
+                    for (u32 s = 0; s < 3; ++s) {
+                        if (flat_irr_buffer_[s] != handles::INVALID_RESOURCE)
+                            device_->DestroyBuffer(flat_irr_buffer_[s]);
+                        BufferDesc fbDesc{};
+                        fbDesc.size = needed;
+                        fbDesc.type = BufferType::Structured;
+                        fbDesc.usage = GPUMemoryUsage::Dynamic;
+                        fbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                        fbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                                           static_cast<u32>(BufferUsageFlags::TransferDst);
+                        fbDesc.name = "GIGather_FlatIrr";
+                        flat_irr_buffer_[s] = device_->CreateBuffer(fbDesc);
+                        flat_irr_capacity_[s] = needed;
+                    }
+                }
+                flatBuf = flat_irr_buffer_[bindingIdx];
+                // 头部（host 写，立即驻留；后续 CopyBuffer 只写 [256, ...)）。
+                auto* hdr = static_cast<u32*>(device_->MapBuffer(flatBuf));
+                if (hdr) {
+                    hdr[0] = fvTotalProbes;
+                    hdr[1] = nvolCount;
+                    hdr[2] = 0;
+                    hdr[3] = 0;
+                    device_->UnmapBuffer(flatBuf);
+                }
             }
 
             // Upload GIGatherCB
@@ -323,33 +362,24 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 }
             }
 
-            // T4.4: upload far-volume params (origin+spacing / counts / flags)
-            // X2/A3: 数据源改为 farView（view 优先、pass 兜底），上传值不变。
-            {
-                auto* fb = static_cast<math::v4*>(device_->MapBuffer(farCB));
-                if (fb) {
-                    memset(fb, 0, 64);
-                    if (farView.IsValid()) {
-                        fb[0] = math::v4{farView.origin.x, farView.origin.y, farView.origin.z, farView.spacing};
-                        fb[1] = math::v4{farView.counts.x, farView.counts.y, farView.counts.z, 1.0f}; // w = enabled
-                    }
-                    device_->UnmapBuffer(farCB);
-                }
-            }
+            // T3.6/D1: far 双槽 CB 上传删除（far volume 数据经 flat SSBO +
+            // FlatVolumeCB 到达 shader；far_cb_ 成员保留但不再绑定）。
 
-            // T6.3 sub-B: upload N-volume params（binding 18）。nvolumeActive
-            // 时写入 volume[0..nvolCount) 的 origin/spacing/counts（w=enabled）
-            // + meta.x = nvolCount；否则整块清零（meta.x=0 → legacy 路径）。
-            // 无效中段槽位（counts=0/w=0）被 shader 的 enabled 检查跳过。
+            // T6.3 sub-B → T3.6/D1: upload FlatVolumeCB（binding 18）。flatActive
+            // 时写入 volume[0..nvolCount) 的 origin/spacing/counts + probe
+            // offset（w 槽，原 NVolumeCB 的 enabled 位改型）；否则整块清零
+            // （meta.x=0 → shader 输出 dim ambient 防御路径）。无效中段槽位
+            // （spacing=0）被 shader 选择器跳过。
             {
-                auto* nv = static_cast<NVolumeCB*>(device_->MapBuffer(nvolumesCB));
+                auto* nv = static_cast<FlatVolumeCB*>(device_->MapBuffer(nvolumesCB));
                 if (nv) {
-                    memset(nv, 0, sizeof(NVolumeCB));
-                    if (nvolumeActive) {
+                    memset(nv, 0, sizeof(FlatVolumeCB));
+                    if (flatActive) {
                         for (u32 vi = 0; vi < nvolCount; ++vi) {
                             const auto& v = nvolViews[vi];
                             nv->origin_spacing[vi] = math::v4{v.origin.x, v.origin.y, v.origin.z, v.spacing};
-                            nv->counts_enabled[vi] = math::v4{v.counts.x, v.counts.y, v.counts.z, 1.0f};
+                            nv->counts_offset[vi] = math::v4{v.counts.x, v.counts.y, v.counts.z,
+                                                             (float)fvOffsets[vi]};
                         }
                         nv->meta = math::v4{(float)nvolCount, 0.0f, 0.0f, 0.0f};
                     }
@@ -383,7 +413,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
 
             // Barrier DDGI buffers from UAV to ShaderResource
             {
-                ResourceBarrier barriers[8]{};  // near irr/depth/conf + far + nvol[2..3]
+                // T3.6/D1: 只保留仍以 SRV 直接绑定的近场 irr/depth/conf。
+                // far/附加 volume 的 irradiance 改为 flat 打包的 CopyBuffer
+                // 源（同 CB 内队列序先于 dispatch，无需 barrier——Vulkan 端
+                // buffer barrier 本就是 no-op，Metal 无显式 buffer 布局）。
+                ResourceBarrier barriers[3]{};
                 int bc = 0;
                 auto irrBuf = ddgi->GetIrradianceBuffer(ddgiReadIdx);
                 auto depthBuf = ddgi->GetDepthBuffer(ddgiReadIdx);
@@ -409,27 +443,22 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     barriers[bc].subresource = 0xFFFFFFFF;
                     bc++;
                 }
-                // T4.4: far volume irradiance (X2/A3: 取数改走 farView，句柄同源)
-                if (farView.IsValid() && farView.irradiance != handles::INVALID_RESOURCE) {
-                    barriers[bc].resource = farView.irradiance;
-                    barriers[bc].beforeState = ResourceState::UnorderedAccess;
-                    barriers[bc].afterState = ResourceState::ShaderResource;
-                    barriers[bc].subresource = 0xFFFFFFFF;
-                    bc++;
-                }
-                // T6.3 sub-B: 附加 volume（vi ≥ 2）irradiance 同样 UAV→SRV。
-                // volume[0]/[1] 已由上方 near/far 路径覆盖（同句柄）。
-                if (nvolumeActive) {
-                    for (u32 vi = 2; vi < nvolCount && vi < GIGatherInputs::kMaxVolumes; ++vi) {
-                        if (nvolViews[vi].irradiance == handles::INVALID_RESOURCE) continue;
-                        barriers[bc].resource = nvolViews[vi].irradiance;
-                        barriers[bc].beforeState = ResourceState::UnorderedAccess;
-                        barriers[bc].afterState = ResourceState::ShaderResource;
-                        barriers[bc].subresource = 0xFFFFFFFF;
-                        bc++;
-                    }
-                }
                 if (bc > 0) cmd->InsertBarrier(barriers, bc);
+            }
+
+            // T3.6/D1: flat 打包 copy——各 volume irradiance → flat SSBO。
+            // 编码于同一 CB、先于 dispatch（队列序即依赖）。bindingIdx 槽与
+            // 描述符一致，头部已由上方 host 写驻留。
+            if (flatActive && flatBuf != handles::INVALID_RESOURCE) {
+                for (u32 vi = 0; vi < nvolCount; ++vi) {
+                    const auto& v = nvolViews[vi];
+                    if (v.irradiance == handles::INVALID_RESOURCE) continue;
+                    const u64 probes = (u64)v.counts.x * (u64)v.counts.y * (u64)v.counts.z;
+                    if (probes == 0) continue;
+                    cmd->CopyBuffer(v.irradiance, flatBuf,
+                                    0, 256ull + (u64)fvOffsets[vi] * 144ull,
+                                    probes * 144ull);
+                }
             }
 
             // Update descriptor set
@@ -509,73 +538,40 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 device_->UpdateDescriptorSets(6, texWrites);
             }
 
-            // T4.4: far-volume bindings (Vulkan flat 15/16; Metal deferred with
-            // the Metal catch-up round — engine Metal gather shader not present).
+            // T3.6/D1: Vulkan flat 绑定（17 = flat SSBO offset 256 跳过头部，
+            // 18 = FlatVolumeCB）。原 15/16（far 双槽）与 17 array[4] 描述符
+            // 写入删除。Metal 的 flat 槽（10/11）走下方 bufWrites 路径。
             if (isVk) {
-                WriteDescriptorSet farWrites[2];
-                DescriptorBufferInfo farInfos[2];
-                farWrites[0].dstSet = descriptorSet;
-                farWrites[0].dstBinding = 15;
-                farWrites[0].dstArrayElement = 0;
-                farWrites[0].descriptorCount = 1;
-                farWrites[0].descriptorType = DescriptorType::UniformBuffer;
-                farWrites[0].bufferInfo = &farInfos[0];
-                farInfos[0].buffer = farCB; farInfos[0].offset = 0; farInfos[0].range = 64;
-                farWrites[1].dstSet = descriptorSet;
-                farWrites[1].dstBinding = 16;
-                farWrites[1].dstArrayElement = 0;
-                farWrites[1].descriptorCount = 1;
-                farWrites[1].descriptorType = DescriptorType::StorageBuffer;
-                farWrites[1].bufferInfo = &farInfos[1];
-                // X2/A3: 远场 irradiance 句柄改走 farView（view 优先、pass 兜底）。
-                ResourceHandle farIrr = (farView.IsValid() && farView.irradiance != handles::INVALID_RESOURCE)
-                    ? farView.irradiance : dummy_buffer_;
-                if (farIrr == handles::INVALID_RESOURCE) farIrr = dummy_buffer_;
-                farInfos[1].buffer = farIrr; farInfos[1].offset = 0; farInfos[1].range = ~0ull;
-                device_->UpdateDescriptorSets(2, farWrites);
-            }
-
-            // T6.3 sub-B: N-volume bindings (17 = SSBO 数组×4, 18 = 参数 CB)。
-            // shader 静态使用这两个 binding → 即使 legacy 路径也必须写满
-            // （数组 4 槽全写：有效 view 或 dummy；meta.x=0 保证不进入访问）。
-            // 能力不可用设备的 DSL binding 17 无 PartiallyBound 标志，全写
-            // dummy 同样合法。Metal 分支不带这两个 binding（shader 未声明）。
-            if (isVk) {
-                // binding 17: 数组元素 [0..4) —— dstArrayElement 定位槽位。
-                WriteDescriptorSet nvolWrites[5];
-                DescriptorBufferInfo nvolInfos[5];
-                for (u32 i = 0; i < 4; ++i) {
-                    nvolWrites[i].dstSet = descriptorSet;
-                    nvolWrites[i].dstBinding = 17;
-                    nvolWrites[i].dstArrayElement = i;
-                    nvolWrites[i].descriptorCount = 1;
-                    nvolWrites[i].descriptorType = DescriptorType::StorageBuffer;
-                    nvolWrites[i].imageInfo = nullptr;
-                    nvolWrites[i].bufferInfo = &nvolInfos[i];
-                    ResourceHandle irr = (nvolumeActive && i < nvolCount &&
-                                          nvolViews[i].irradiance != handles::INVALID_RESOURCE)
-                                         ? nvolViews[i].irradiance : dummy_buffer_;
-                    if (irr == handles::INVALID_RESOURCE) irr = dummy_buffer_;
-                    nvolInfos[i].buffer = irr; nvolInfos[i].offset = 0; nvolInfos[i].range = ~0ull;
-                }
-                // binding 18: 参数 CB。
-                nvolWrites[4].dstSet = descriptorSet;
-                nvolWrites[4].dstBinding = 18;
-                nvolWrites[4].dstArrayElement = 0;
-                nvolWrites[4].descriptorCount = 1;
-                nvolWrites[4].descriptorType = DescriptorType::UniformBuffer;
-                nvolWrites[4].imageInfo = nullptr;
-                nvolWrites[4].bufferInfo = &nvolInfos[4];
-                nvolInfos[4].buffer = nvolumesCB; nvolInfos[4].offset = 0;
-                nvolInfos[4].range = sizeof(NVolumeCB);
-                device_->UpdateDescriptorSets(5, nvolWrites);
+                WriteDescriptorSet flatWrites[2];
+                DescriptorBufferInfo flatInfos[2];
+                flatWrites[0].dstSet = descriptorSet;
+                flatWrites[0].dstBinding = 17;
+                flatWrites[0].dstArrayElement = 0;
+                flatWrites[0].descriptorCount = 1;
+                flatWrites[0].descriptorType = DescriptorType::StorageBuffer;
+                flatWrites[0].imageInfo = nullptr;
+                flatWrites[0].bufferInfo = &flatInfos[0];
+                flatInfos[0].buffer = (flatActive && flatBuf != handles::INVALID_RESOURCE)
+                    ? flatBuf : dummy_buffer_;
+                flatInfos[0].offset = 256;   // 跳过头部 → 纯探针数组
+                flatInfos[0].range = ~0ull;
+                flatWrites[1].dstSet = descriptorSet;
+                flatWrites[1].dstBinding = 18;
+                flatWrites[1].dstArrayElement = 0;
+                flatWrites[1].descriptorCount = 1;
+                flatWrites[1].descriptorType = DescriptorType::UniformBuffer;
+                flatWrites[1].imageInfo = nullptr;
+                flatWrites[1].bufferInfo = &flatInfos[1];
+                flatInfos[1].buffer = nvolumesCB; flatInfos[1].offset = 0;
+                flatInfos[1].range = sizeof(FlatVolumeCB);
+                device_->UpdateDescriptorSets(2, flatWrites);
             }
 
             // Buffer bindings with sub-allocation from probe_cb_
-            WriteDescriptorSet bufWrites[12];
-            DescriptorBufferInfo bufInfos[12];
+            WriteDescriptorSet bufWrites[10];
+            DescriptorBufferInfo bufInfos[10];
             {
-                for (int i = 0; i < 12; ++i) {
+                for (int i = 0; i < 10; ++i) {
                     bufWrites[i].dstSet = descriptorSet;
                     bufWrites[i].dstArrayElement = 0;
                     bufWrites[i].descriptorCount = 1;
@@ -604,26 +600,37 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 bufInfos[6].buffer = ddgi->GetConfidenceBuffer(ddgiReadIdx); bufInfos[6].offset = 0; bufInfos[6].range = ~0ull;
                 bufWrites[7].dstBinding = bufBase + 7; bufWrites[7].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[7].buffer = ddgi->GetIrradianceBuffer(ddgiReadIdx); bufInfos[7].offset = 0; bufInfos[7].range = ~0ull;
-                // TEMP diagnosis: what handle does GetIrradianceBuffer return?
-                static bool s_irrHandleDbg = false;
-                if (!s_irrHandleDbg) { s_irrHandleDbg = true;
-                    PRIMAL_LOG_STREAM(Error, "Render") << "[GATHER_IRR] ddgi=" << (const void*)ddgi
-                              << " readIdx=" << ddgiReadIdx
-                              << " irrHandle=" << bufInfos[7].buffer << std::endl; }
                 bufWrites[8].dstBinding = bufBase + 8; bufWrites[8].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[8].buffer = ddgi->GetDepthBuffer(ddgiReadIdx); bufInfos[8].offset = 0; bufInfos[8].range = ~0ull;
-                // TEMP dual-slot: same irradiance buffer at slot 9.
-                bufWrites[9].dstBinding = bufBase + 9; bufWrites[9].descriptorType = DescriptorType::StorageBuffer;
-                bufInfos[9].buffer = ddgi->GetIrradianceBuffer(ddgiReadIdx); bufInfos[9].offset = 0; bufInfos[9].range = ~0ull;
-                // T3.6/D2: far coarse volume (Metal offsets, not bufBase — the
-                // far slots live at 10/11 in the Metal namespace).
-                bufWrites[10].dstBinding = 10; bufWrites[10].descriptorType = DescriptorType::StorageBuffer;
-                bufInfos[10].buffer = (farView.IsValid() && farView.irradiance != handles::INVALID_RESOURCE)
-                    ? farView.irradiance : dummy_buffer_;
-                bufInfos[10].offset = 0; bufInfos[10].range = ~0ull;
-                bufWrites[11].dstBinding = 11;
-                bufInfos[11].buffer = farCB; bufInfos[11].offset = 0; bufInfos[11].range = 64;
-                device_->UpdateDescriptorSets(12, bufWrites);
+                if (isVk) {
+                    // Vulkan: bindings 4..12（flat 槽 17/18 已由上方 flatWrites 写入）。
+                    device_->UpdateDescriptorSets(9, bufWrites);
+                } else {
+                    // T3.6/D1: Metal flat 槽（10 = flat SSBO offset 256，11 = fvCB）。
+                    // 原 7（near irr）/9（dual-slot dup）/10（far irr）/11（far
+                    // params）删除——dual-slot 在 Vulkan 上还会把 SSBO 写进
+                    // binding 13 的 orm SampledImage 槽（基线验证错误）。
+                    bufWrites[9].dstBinding = 10;
+                    bufWrites[9].descriptorType = DescriptorType::StorageBuffer;
+                    bufInfos[9].buffer = (flatActive && flatBuf != handles::INVALID_RESOURCE)
+                        ? flatBuf : dummy_buffer_;
+                    bufInfos[9].offset = 256;
+                    bufInfos[9].range = ~0ull;
+                    device_->UpdateDescriptorSets(10, bufWrites);
+                    // Metal fvCB（binding 11，UBO）。
+                    WriteDescriptorSet fvWrite{};
+                    DescriptorBufferInfo fvInfo{};
+                    fvWrite.dstSet = descriptorSet;
+                    fvWrite.dstBinding = 11;
+                    fvWrite.dstArrayElement = 0;
+                    fvWrite.descriptorCount = 1;
+                    fvWrite.descriptorType = DescriptorType::UniformBuffer;
+                    fvWrite.imageInfo = nullptr;
+                    fvWrite.bufferInfo = &fvInfo;
+                    fvInfo.buffer = nvolumesCB; fvInfo.offset = 0;
+                    fvInfo.range = sizeof(FlatVolumeCB);
+                    device_->UpdateDescriptorSets(1, &fvWrite);
+                }
             }
 
             // Dispatch

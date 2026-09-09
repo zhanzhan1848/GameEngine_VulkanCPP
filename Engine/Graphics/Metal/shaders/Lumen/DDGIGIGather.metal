@@ -153,13 +153,15 @@ kernel void ddgi_gi_gather(
     device const float* staticSkyFactor    [[buffer(4)]],         // unused
     constant StaticProbeData& staticProbe  [[buffer(5)]],         // unused
     device const float* confidenceBuffer   [[buffer(6)]],         // unused
-    device const float3* irradianceBuffer  [[buffer(7)]],
     device const float* ddgiDepthBuffer    [[buffer(8)]],
 
-    // T3.6/D2: far coarse volume (was Vulkan-only) — outside-near-grid
-    // pixels trilinear-sample this instead of dim ambient.
-    device const float4* farIrradiance     [[buffer(10)]],   // 9 vec4 per probe (radiance SH9)
-    constant float4* farParams             [[buffer(11)]]    // [0]=origin+spacing, [1]=counts+enabled
+    // T3.6/D1: flat 多 volume（原 7 near irr / 9 dup / 10 far irr / 11 far
+    // params 双槽删除）。flatIrradiance = 全部 volume 的 9 vec4/probe 探针
+    // 顺序拼接（描述符绑 offset 256 跳过头部）；fvCB = 每volume
+    // origin/spacing + counts/probeOffset + meta.x=count。与 Vulkan
+    // DDGIGIGather.comp binding 17/18 同构。
+    device const float4* flatIrradiance    [[buffer(10)]],
+    constant float4* fvCB                  [[buffer(11)]]   // [0..3]=origin+spacing, [4..7]=counts+probeOffset, [8]=meta
 ) {
     uint width = outputTex.get_width();
     uint height = outputTex.get_height();
@@ -200,90 +202,44 @@ kernel void ddgi_gi_gather(
     uint3 counts = uint3(uint(probeCountsCB.x), uint(probeCountsCB.y), uint(probeCountsCB.z));
 
     // ========================================================================
-    // Phase 1: per-pixel output (Vulkan legacy route)
+    // Phase 1: per-pixel output — T3.6/D1 flat 多 volume 路由（与 Vulkan
+    // DDGIGIGather.comp route B 同构）。逐像素选择"包含该点且 spacing 最细"
+    // 的 volume（平局取低索引 → near=volume 0 优先）：
+    //   sel==0 → 近场数学（可见性/法线加权 + B1 ×2.5 探针校准 + spec 输出）
+    //   sel>0  → 纯三线性远场数学（spec 清零）
+    //   sel<0  → 网外/天空 dim ambient
     // ========================================================================
-    if (inBounds && !active) {
-        // T3.6/D2: two-stage far fallback (Vulkan parity) — outside the near
-        // grid, trilinear-sample the far coarse volume before dim ambient.
-        bool farHit = false;
-        float4 f0 = farParams[0];
-        float4 f1 = farParams[1];
-        if (f1.w > 0.5f && depth < 1.0f) {
-            float3 fgp = (worldPos - f0.xyz) / f0.w;
-            float3 fcounts = f1.xyz;
-            float3 fgridMax = fcounts - 1.0f;
-            if (all(fgp >= float3(0.0f)) && all(fgp <= fgridMax)) {
-                uint3 fb0 = uint3(clamp(floor(fgp), float3(0.0f), fgridMax));
-                uint3 fb1 = min(fb0 + 1u, uint3(fcounts) - 1u);
-                float3 ffrac = fract(fgp);
-                float ffx = ffrac.x, ffy = ffrac.y, ffz = ffrac.z;
-
-                float ftw[8];
-                ftw[0] = (1.0f - ffx) * (1.0f - ffy) * (1.0f - ffz);
-                ftw[1] = ffx           * (1.0f - ffy) * (1.0f - ffz);
-                ftw[2] = (1.0f - ffx) * ffy           * (1.0f - ffz);
-                ftw[3] = ffx           * ffy           * (1.0f - ffz);
-                ftw[4] = (1.0f - ffx) * (1.0f - ffy) * ffz;
-                ftw[5] = ffx           * (1.0f - ffy) * ffz;
-                ftw[6] = (1.0f - ffx) * ffy           * ffz;
-                ftw[7] = ffx           * ffy           * ffz;
-
-                uint3 fpc[8];
-                fpc[0] = uint3(fb0.x, fb0.y, fb0.z); fpc[1] = uint3(fb1.x, fb0.y, fb0.z);
-                fpc[2] = uint3(fb0.x, fb1.y, fb0.z); fpc[3] = uint3(fb1.x, fb1.y, fb0.z);
-                fpc[4] = uint3(fb0.x, fb0.y, fb1.z); fpc[5] = uint3(fb1.x, fb0.y, fb1.z);
-                fpc[6] = uint3(fb0.x, fb1.y, fb1.z); fpc[7] = uint3(fb1.x, fb1.y, fb1.z);
-
-                // DDGI radiance-SH9 basis — matches DDGIUpdateIrradiance's
-                // projection (L1 x/y and L2 yz/xz minus signs, band-6 zonal).
-                const float C0 = 0.28209479f, C1 = 0.48860251f;
-                const float C2_0 = 1.09254843f, C2_1 = 0.31539157f, C2_2 = 0.54627421f;
-                float nx = normal.x, ny = normal.y, nz = normal.z;
-                float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
-                float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
-
-                float3 fresult = float3(0.0f);
-                float ftotalW = 0.0f;
-                for (uint p = 0; p < 8u; ++p) {
-                    if (ftw[p] < 0.01f) continue;
-                    uint pIdx = fpc[p].x + fpc[p].y * uint(fcounts.x) + fpc[p].z * uint(fcounts.x) * uint(fcounts.y);
-                    float3 sh[9];
-                    for (int i = 0; i < 9; ++i)
-                        sh[i] = farIrradiance[pIdx * 9u + uint(i)].xyz;
-                    float3 irr = sh[0] * C0
-                               + sh[1] * (-C1 * 0.6666667f * ny)   // B4: A1 = 2π/3
-                               + sh[2] * ( C1 * 0.6666667f * nz)
-                               + sh[3] * (-C1 * 0.6666667f * nx)
-                               + sh[4] * ( C2_0 * 0.25f * nxy)     // B4: A2 = π/4
-                               + sh[5] * (-C2_0 * 0.25f * nyz)
-                               + sh[6] * ( C2_1 * 0.25f * (3.0f*nzz - 1.0f))
-                               + sh[7] * (-C2_0 * 0.25f * nzx)
-                               + sh[8] * ( C2_2 * 0.25f * (nxx - nyy));
-                    fresult += irr * ftw[p];
-                    ftotalW += ftw[p];
-                }
-                if (ftotalW > 0.0f) {
-                    fresult /= ftotalW;
-                    fresult = max(fresult * PROBE_SH_RAD_TO_IRRAD, float3(0.02f, 0.02f, 0.025f));
-                    outputTex.write(float4(fresult, 1.0f), tid);
-                    specularTex.write(float4(0.0f), tid);
-                    farHit = true;
-                }
+    constant float4* fvOrg = fvCB;       // [0..3] origin+spacing
+    constant float4* fvCnt = fvCB + 4;   // [4..7] counts+probeOffset
+    float4 fvMeta = fvCB[8];
+    int sel = -1;
+    float selSpacing = 0.0f;
+    if (fvMeta.x > 0.5f && inBounds && depth < 1.0f) {
+        const int n = int(fvMeta.x);
+        for (int v = 0; v < n; ++v) {
+            const float sp = fvOrg[v].w;
+            if (sp <= 0.0f) continue;   // spacing=0 = 未用槽
+            const float3 g = (worldPos - fvOrg[v].xyz) / sp;
+            const float3 gmax = fvCnt[v].xyz - 1.0f;
+            if (all(g >= float3(0.0f)) && all(g <= gmax)) {
+                if (sel < 0 || sp < selSpacing) { sel = v; selSpacing = sp; }
             }
-        }
-        if (!farHit) {
-            // Outside the near grid (or sky): dim ambient (legacy parity).
-            outputTex.write(float4(0.03f, 0.03f, 0.035f, 1.0f), tid);
-            specularTex.write(float4(0.0f), tid);
         }
     }
 
-    if (active) {
+    if (inBounds && sel < 0) {
+        // 网外/天空：dim ambient（legacy parity）。
+        outputTex.write(float4(0.03f, 0.03f, 0.035f, 1.0f), tid);
+        specularTex.write(float4(0.0f), tid);
+    }
+
+    if (inBounds && sel == 0) {
         // Select the trilinear cell per pixel. The previous cooperative path
         // selected one representative cell for the whole 8x8 screen tile;
         // pixels crossing a world-space probe boundary then combined their own
         // fractional weights with another pixel's probe indices, producing the
         // visible jagged checker/grid seams.
+        uint nearOff = uint(fvCnt[0].w);   // flat SSBO probe 偏移（近场恒 0，仍按表读）
         uint3 b0 = uint3(clamp(floor(gp), float3(0.0f), float3(counts - 1u)));
         uint3 b1 = min(b0 + 1u, counts - 1u);
         uint3 pc[8];
@@ -332,10 +288,10 @@ kernel void ddgi_gi_gather(
         for (uint p = 0u; p < 8u; ++p) {
             if (tw[p] < 0.01f) continue;
             uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
-            uint shBase = pIdx * SH_COEFF_COUNT;
+            uint shBase = nearOff + pIdx * SH_COEFF_COUNT;
             float3 sh[9];
             for (uint i = 0u; i < 9u; ++i)
-                sh[i] = irradianceBuffer[shBase + i] * 2.5f;   // B1: Metal DDGI probe calibration — matches Vulkan gather_avg (5.55/2.21=2.51). Root cause: miss-ray sky radiance differs (Metal monolith DDGI_SKY_COLOR lum≈2.9 vs Vulkan split sky gradient lum≈0.5)
+                sh[i] = flatIrradiance[shBase + i].xyz * 2.5f;   // B1: Metal DDGI probe calibration — matches Vulkan gather_avg (5.55/2.21=2.51). Root cause: miss-ray sky radiance differs (Metal monolith DDGI_SKY_COLOR lum≈2.9 vs Vulkan split sky gradient lum≈0.5)
 
             // B1: SH9 evaluation at the pixel's surface normal.
             float3 irr = evalSH9Irradiance(sh, normal);
@@ -405,6 +361,72 @@ kernel void ddgi_gi_gather(
         // An additional screen-space EMA masks the triple-buffer phase bug and
         // ghosts during camera motion, so publish the gathered value directly.
         outputTex.write(float4(diffOut, 1.0f), tid);
+    }
+
+    if (inBounds && sel > 0) {
+        // T3.6/D1: sel>0 远场数学（与 Vulkan legacy 远场/flat sel>0 同构）——
+        // 纯 8-probe 三线性 SH9，无可见性加权，spec 清零。SH 读 flat SSBO。
+        uint volOff = uint(fvCnt[sel].w);
+        uint3 fb0 = uint3(clamp(floor((worldPos - fvOrg[sel].xyz) / selSpacing),
+                                float3(0.0f), fvCnt[sel].xyz - 1.0f));
+        uint3 fb1 = min(fb0 + 1u, uint3(fvCnt[sel].xyz) - 1u);
+        float3 ffrac = fract((worldPos - fvOrg[sel].xyz) / selSpacing);
+        float ffx = ffrac.x, ffy = ffrac.y, ffz = ffrac.z;
+
+        float ftw[8];
+        ftw[0] = (1.0f - ffx) * (1.0f - ffy) * (1.0f - ffz);
+        ftw[1] = ffx           * (1.0f - ffy) * (1.0f - ffz);
+        ftw[2] = (1.0f - ffx) * ffy           * (1.0f - ffz);
+        ftw[3] = ffx           * ffy           * (1.0f - ffz);
+        ftw[4] = (1.0f - ffx) * (1.0f - ffy) * ffz;
+        ftw[5] = ffx           * (1.0f - ffy) * ffz;
+        ftw[6] = (1.0f - ffx) * ffy           * ffz;
+        ftw[7] = ffx           * ffy           * ffz;
+
+        uint3 fpc[8];
+        fpc[0] = uint3(fb0.x, fb0.y, fb0.z); fpc[1] = uint3(fb1.x, fb0.y, fb0.z);
+        fpc[2] = uint3(fb0.x, fb1.y, fb0.z); fpc[3] = uint3(fb1.x, fb1.y, fb0.z);
+        fpc[4] = uint3(fb0.x, fb0.y, fb1.z); fpc[5] = uint3(fb1.x, fb0.y, fb1.z);
+        fpc[6] = uint3(fb0.x, fb1.y, fb1.z); fpc[7] = uint3(fb1.x, fb1.y, fb1.z);
+
+        // DDGI radiance-SH9 basis — matches DDGIUpdateIrradiance's
+        // projection (L1 x/y and L2 yz/xz minus signs, band-6 zonal).
+        const float C0 = 0.28209479f, C1 = 0.48860251f;
+        const float C2_0 = 1.09254843f, C2_1 = 0.31539157f, C2_2 = 0.54627421f;
+        float nx = normal.x, ny = normal.y, nz = normal.z;
+        float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
+        float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
+
+        float3 fresult = float3(0.0f);
+        float ftotalW = 0.0f;
+        for (uint p = 0; p < 8u; ++p) {
+            if (ftw[p] < 0.01f) continue;
+            uint pIdx = fpc[p].x + fpc[p].y * uint(fvCnt[sel].x)
+                      + fpc[p].z * uint(fvCnt[sel].x) * uint(fvCnt[sel].y);
+            float3 sh[9];
+            for (int i = 0; i < 9; ++i)
+                sh[i] = flatIrradiance[(volOff + pIdx) * 9u + uint(i)].xyz;
+            float3 irr = sh[0] * C0
+                       + sh[1] * (-C1 * 0.6666667f * ny)   // B4: A1 = 2π/3
+                       + sh[2] * ( C1 * 0.6666667f * nz)
+                       + sh[3] * (-C1 * 0.6666667f * nx)
+                       + sh[4] * ( C2_0 * 0.25f * nxy)     // B4: A2 = π/4
+                       + sh[5] * (-C2_0 * 0.25f * nyz)
+                       + sh[6] * ( C2_1 * 0.25f * (3.0f*nzz - 1.0f))
+                       + sh[7] * (-C2_0 * 0.25f * nzx)
+                       + sh[8] * ( C2_2 * 0.25f * (nxx - nyy));
+            fresult += irr * ftw[p];
+            ftotalW += ftw[p];
+        }
+        if (ftotalW > 0.0f) {
+            fresult /= ftotalW;
+            fresult = max(fresult * PROBE_SH_RAD_TO_IRRAD, float3(0.02f, 0.02f, 0.025f));
+            outputTex.write(float4(fresult, 1.0f), tid);
+            specularTex.write(float4(0.0f), tid);
+        } else {
+            outputTex.write(float4(0.03f, 0.03f, 0.035f, 1.0f), tid);
+            specularTex.write(float4(0.0f), tid);
+        }
     }
 
     (void)staticSkySHBuffer;
