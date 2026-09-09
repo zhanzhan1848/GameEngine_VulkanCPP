@@ -82,6 +82,11 @@ public:
     // --- Runtime settings ---
     const RenderPipelineSettings& GetSettings() const { return settings_; }
     void UpdateSettings(const RenderPipelineSettings& settings);
+    // M2/M4: light-only mutation — deferred direct, SC LightEval and the DDGI
+    // trace all read settings_.lighting per frame, so this toggles the real
+    // sun WITHOUT the ApplyConfigChanges Lumen rebuild (which resets the
+    // probe field and would measure re-init, not light response).
+    void UpdateLightingSettings(const RenderPipelineSettings& settings) { settings_.lighting = settings.lighting; }
 
     lumen::StaticProbeVolume* GetStaticProbeVolume() const { return static_probe_volume_.get(); }
 

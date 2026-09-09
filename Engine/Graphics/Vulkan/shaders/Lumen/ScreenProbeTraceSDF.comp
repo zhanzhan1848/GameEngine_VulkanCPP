@@ -62,6 +62,117 @@ layout(set = 0, binding = 7, std430) readonly buffer ImportanceSHBlock {
     vec4 data[];
 } importanceSH;
 
+// ----------------------------------------------------------------------------
+// T4.3 二批: per-mesh detail SDF slots (mirror of DDGITraceSDF.comp — distance
+// refinement only; screen probes carry their own GBuffer normals). Decode
+// contract: signed (params.z=1) d = unorm*2*max_dim − max_dim, legacy unsigned
+// d = unorm*max_dim; max_dim = padded bounds max extent / 1.4.
+// ----------------------------------------------------------------------------
+layout(set = 0, binding = 8, std140) uniform DetailSDFTable {
+    vec4  header;                 // x = active slot count (0..4)
+    mat4  inv_world[4];           // world → mesh-local
+    vec4  normal_matrix[4][3];    // unused here (distance-only refine)
+    vec4  bounds_min[4];
+    vec4  bounds_max[4];
+    vec4  params[4];              // resolution, max_dim, signed, voxel_size
+} dtable;
+layout(set = 0, binding = 9)  uniform texture3D detail_sdf_0;
+layout(set = 0, binding = 10) uniform texture3D detail_sdf_1;
+layout(set = 0, binding = 11) uniform texture3D detail_sdf_2;
+layout(set = 0, binding = 12) uniform texture3D detail_sdf_3;
+
+float detailSampleRaw(texture3D tex, vec3 bounds_min, vec3 extent, float res, vec3 local) {
+    vec3 uvw = (local - bounds_min) / max(extent, vec3(1e-6));
+    if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 || uvw.z < 0.0 || uvw.z > 1.0) {
+        return 1.0;   // outside → decoded as +max_dim (far)
+    }
+    vec3 p = uvw * res - 0.5;
+    ivec3 base = ivec3(floor(p));
+    vec3 f = p - vec3(base);
+    ivec3 resI = ivec3(int(res) - 1);
+    ivec3 c0 = clamp(base, ivec3(0), resI);
+    ivec3 c1 = clamp(base + ivec3(1), ivec3(0), resI);
+    float d000 = texelFetch(tex, ivec3(c0.x, c0.y, c0.z), 0).r;
+    float d100 = texelFetch(tex, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float d010 = texelFetch(tex, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float d110 = texelFetch(tex, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float d001 = texelFetch(tex, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float d101 = texelFetch(tex, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float d011 = texelFetch(tex, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float d111 = texelFetch(tex, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+
+float detailSampleK(uint k, vec3 local) {
+    vec3 bmin = dtable.bounds_min[k].xyz;
+    vec3 ext = dtable.bounds_max[k].xyz - bmin;
+    float res = dtable.params[k].x;
+    if (k == 0u) return detailSampleRaw(detail_sdf_0, bmin, ext, res, local);
+    if (k == 1u) return detailSampleRaw(detail_sdf_1, bmin, ext, res, local);
+    if (k == 2u) return detailSampleRaw(detail_sdf_2, bmin, ext, res, local);
+    return detailSampleRaw(detail_sdf_3, bmin, ext, res, local);
+}
+
+float detailDecode(uint k, float raw) {
+    float max_dim = dtable.params[k].y;
+    if (dtable.params[k].z > 0.5) return raw * 2.0 * max_dim - max_dim;
+    return raw * max_dim;
+}
+
+// Distance-only refinement of the coarse GlobalSDF hit (same algorithm as the
+// DDGI trace's refine; normal output omitted). Returns true when refined.
+bool detailSDFRefine(vec3 rayOrigin, vec3 rayDir, inout float t) {
+    uint count = uint(dtable.header.x);
+    if (count == 0u) return false;
+    vec3 hitPos = rayOrigin + rayDir * t;
+
+    int best = -1;
+    float bestAbs = 3.4e38;
+    for (uint k = 0u; k < count; ++k) {
+        if (any(lessThan(hitPos, dtable.bounds_min[k].xyz)) ||
+            any(greaterThan(hitPos, dtable.bounds_max[k].xyz))) continue;
+        vec3 local = (dtable.inv_world[k] * vec4(hitPos, 1.0)).xyz;
+        float d = detailDecode(k, detailSampleK(k, local));
+        float a = abs(d);
+        if (a < bestAbs) { bestAbs = a; best = int(k); }
+    }
+    if (best < 0) return false;
+    const uint bk = uint(best);
+    const float localVoxel = max(dtable.params[bk].w, 1e-5);
+    const bool signedField = dtable.params[bk].z > 0.5;
+
+    float fBest = bestAbs;
+    float tBest = t;
+    if (signedField) {
+        float tLo = t, tHi = t;
+        bool haveLo = false, haveHi = false;
+        for (int i = -5; i <= 5; ++i) {
+            float ti = t + float(i) * localVoxel;
+            float fi = detailDecode(bk, detailSampleK(bk, (dtable.inv_world[bk] * vec4(rayOrigin + rayDir * ti, 1.0)).xyz));
+            if (fi < 0.0 && (!haveLo || ti > tLo)) { tLo = ti; haveLo = true; }
+            if (fi >= 0.0 && (!haveHi || ti < tHi)) { tHi = ti; haveHi = true; }
+            if (abs(fi) < fBest) { fBest = abs(fi); tBest = ti; }
+        }
+        if (haveLo && haveHi) {
+            for (int it = 0; it < 5; ++it) {
+                float tm = 0.5 * (tLo + tHi);
+                float fm = detailDecode(bk, detailSampleK(bk, (dtable.inv_world[bk] * vec4(rayOrigin + rayDir * tm, 1.0)).xyz));
+                if (fm < 0.0) tLo = tm; else tHi = tm;
+            }
+            tBest = 0.5 * (tLo + tHi);
+        }
+    } else {
+        for (int i = 1; i <= 6; ++i) {
+            float ti = t + float(i) * 0.5 * localVoxel;
+            float fi = detailDecode(bk, detailSampleK(bk, (dtable.inv_world[bk] * vec4(rayOrigin + rayDir * ti, 1.0)).xyz));
+            if (abs(fi) < fBest) { fBest = abs(fi); tBest = ti; } else break;
+        }
+    }
+    t = tBest;
+    return true;
+}
+
 // fibonacciDirection / orientAroundNormalTBN (was orientAroundNormal),
 // sampleSDFCascade / sampleBestSDF and the relaxed march moved to
 // ShaderLib/{EncodeLib,TraceLib}.glsl (axis refactor X1).
@@ -132,7 +243,10 @@ void screen_probe_trace_sdf() {
                                           uint(global.sdf_resolutions.w));
 
     if (res.hit) {
-        hit_buffer.data[global_id] = vec4(res.distance, 0.0, 0.0, 2.0);
+        // T4.3 二批: refine the coarse hit distance against detail slots.
+        float t = res.distance;
+        detailSDFRefine(origin, rayDir, t);
+        hit_buffer.data[global_id] = vec4(t, 0.0, 0.0, 2.0);
     } else if (cacheStart > 0.0) {
         // F1 far-cache: x = travelled distance (stop point = origin + dir * x).
         hit_buffer.data[global_id] = vec4(res.distance, 0.0, 0.0, 3.0);

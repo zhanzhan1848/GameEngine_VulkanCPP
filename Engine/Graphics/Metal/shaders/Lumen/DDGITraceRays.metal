@@ -268,135 +268,6 @@ kernel void ddgi_trace_rays(
 // off) → zero normals, behavior bit-identical to pre-T4.3.
 // ============================================================================
 
-// Mirror of LumenDDGIPass.h DetailSDFSlot table (std140-aligned UBO on
-// Vulkan; constant buffer here). Decode contract:
-//   signed (params.z=1): d = unorm * 2*max_dim - max_dim
-//   legacy unsigned    : d = unorm * max_dim
-// max_dim = padded bounds max extent / 1.4 (ContentTools uniform 20%
-// padding); bounds_min/max are the WORLD AABB of the mesh SDF grid.
-struct DDGIDetailSDFTable {
-    float4 header;               // x = active slot count (0..4)
-    float4x4 inv_world[4];       // world → mesh-local
-    float4 normal_matrix[4][3];  // rows of transpose(inverse(world 3x3))
-    float4 bounds_min[4];
-    float4 bounds_max[4];
-    float4 params[4];            // resolution, max_dim, signed, voxel_size
-};
-
-static float ddgiDetailDecode(constant DDGIDetailSDFTable& dt, uint k, float raw) {
-    float max_dim = dt.params[k].y;
-    if (dt.params[k].z > 0.5f) return raw * 2.0f * max_dim - max_dim;
-    return raw * max_dim;
-}
-
-// Normalized-coords linear sample; the unorm decode is affine so it commutes
-// with linear filtering (parity with the Vulkan 8-tap manual trilinear).
-static float ddgiDetailSample(texture3d<float, access::sample> tex,
-                              constant float4& bmin, constant float4& bmax,
-                              float res, float3 local) {
-    float3 uvw = (local - bmin.xyz) / max(bmax.xyz - bmin.xyz, float3(1e-6f));
-    if (any(uvw < float3(0.0f)) || any(uvw > float3(1.0f))) return 1.0f;  // far
-    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-    return tex.sample(s, uvw).r;
-}
-
-// Refine the coarse GlobalSDF hit against the finest slot containing it.
-// Returns true with refined t in outT and the gradient normal in outN
-// (world space, oriented against the incident ray).
-static bool ddgiDetailRefine(constant DDGIDetailSDFTable& dt,
-                             texture3d<float, access::sample> tex0,
-                             texture3d<float, access::sample> tex1,
-                             texture3d<float, access::sample> tex2,
-                             texture3d<float, access::sample> tex3,
-                             float3 probePos, float3 rayDir,
-                             thread float& t, thread float3& outN) {
-    outN = float3(0.0f);
-    const uint count = uint(dt.header.x);
-    if (count == 0u) return false;
-
-    const float3 hitPos = probePos + rayDir * t;
-
-    // Slot search: containing world AABB, smallest |d| at the hit (wall
-    // seams put the point in several grids; the tightest match wins).
-    int best = -1;
-    float bestAbs = 3.4e38f;
-    for (uint k = 0u; k < count; ++k) {
-        if (any(hitPos < dt.bounds_min[k].xyz) || any(hitPos > dt.bounds_max[k].xyz)) continue;
-        float3 local = (dt.inv_world[k] * float4(hitPos, 1.0f)).xyz;
-        float d;
-        if (k == 0u)      d = ddgiDetailDecode(dt, k, ddgiDetailSample(tex0, dt.bounds_min[k], dt.bounds_max[k], dt.params[k].x, local));
-        else if (k == 1u) d = ddgiDetailDecode(dt, k, ddgiDetailSample(tex1, dt.bounds_min[k], dt.bounds_max[k], dt.params[k].x, local));
-        else if (k == 2u) d = ddgiDetailDecode(dt, k, ddgiDetailSample(tex2, dt.bounds_min[k], dt.bounds_max[k], dt.params[k].x, local));
-        else              d = ddgiDetailDecode(dt, k, ddgiDetailSample(tex3, dt.bounds_min[k], dt.bounds_max[k], dt.params[k].x, local));
-        if (fabs(d) < bestAbs) { bestAbs = fabs(d); best = int(k); }
-    }
-    if (best < 0) return false;
-    const uint bk = uint(best);
-    texture3d<float, access::sample> tex =
-        (bk == 0u) ? tex0 : (bk == 1u) ? tex1 : (bk == 2u) ? tex2 : tex3;
-    const float localVoxel = max(dt.params[bk].w, 1e-5f);
-    const bool signedField = dt.params[bk].z > 0.5f;
-
-    // Field value in t-parameter space; local(t) = inv_world * (p + r*t).
-    #define DDGI_DETAIL_F(ti_) \
-        ddgiDetailDecode(dt, bk, ddgiDetailSample(tex, dt.bounds_min[bk], dt.bounds_max[bk], \
-            dt.params[bk].x, (dt.inv_world[bk] * float4(probePos + rayDir * (ti_), 1.0f)).xyz))
-
-    float fBest = bestAbs;
-    float tBest = t;
-    if (signedField) {
-        // Signed field: scan a ±5*localVoxel window for the zero crossing,
-        // then bisect (the coarse hit sits inside the inflated hit band).
-        float tLo = t, tHi = t;
-        bool haveLo = false, haveHi = false;
-        for (int i = -5; i <= 5; ++i) {
-            float ti = t + float(i) * localVoxel;
-            float fi = DDGI_DETAIL_F(ti);
-            if (fi < 0.0f && (!haveLo || ti > tLo)) { tLo = ti; haveLo = true; }
-            if (fi >= 0.0f && (!haveHi || ti < tHi)) { tHi = ti; haveHi = true; }
-            if (fabs(fi) < fBest) { fBest = fabs(fi); tBest = ti; }
-        }
-        if (haveLo && haveHi) {
-            for (int it = 0; it < 5; ++it) {
-                float tm = 0.5f * (tLo + tHi);
-                if (DDGI_DETAIL_F(tm) < 0.0f) tLo = tm; else tHi = tm;
-            }
-            tBest = 0.5f * (tLo + tHi);
-        }
-    } else {
-        // Legacy unsigned field: descend on |d| — the surface is the local
-        // minimum of the distance band.
-        for (int i = 1; i <= 6; ++i) {
-            float ti = t + float(i) * 0.5f * localVoxel;
-            float fi = DDGI_DETAIL_F(ti);
-            if (fabs(fi) < fBest) { fBest = fabs(fi); tBest = ti; } else break;
-        }
-    }
-    #undef DDGI_DETAIL_F
-
-    // Gradient normal at the refined point (central difference, 6 taps).
-    const float e = 0.75f * localVoxel;
-    float3 lp = (dt.inv_world[bk] * float4(probePos + rayDir * tBest, 1.0f)).xyz;
-    float dx = ddgiDetailDecode(dt, bk, ddgiDetailSample(tex, dt.bounds_min[bk], dt.bounds_max[bk], dt.params[bk].x, lp + float3(e, 0, 0)))
-             - ddgiDetailDecode(dt, bk, ddgiDetailSample(tex, dt.bounds_min[bk], dt.bounds_max[bk], dt.params[bk].x, lp - float3(e, 0, 0)));
-    float dy = ddgiDetailDecode(dt, bk, ddgiDetailSample(tex, dt.bounds_min[bk], dt.bounds_max[bk], dt.params[bk].x, lp + float3(0, e, 0)))
-             - ddgiDetailDecode(dt, bk, ddgiDetailSample(tex, dt.bounds_min[bk], dt.bounds_max[bk], dt.params[bk].x, lp - float3(0, e, 0)));
-    float dz = ddgiDetailDecode(dt, bk, ddgiDetailSample(tex, dt.bounds_min[bk], dt.bounds_max[bk], dt.params[bk].x, lp + float3(0, 0, e)))
-             - ddgiDetailDecode(dt, bk, ddgiDetailSample(tex, dt.bounds_min[bk], dt.bounds_max[bk], dt.params[bk].x, lp - float3(0, 0, e)));
-    float3 gLocal = float3(dx, dy, dz);
-    if (dot(gLocal, gLocal) < 1e-14f) return false;
-
-    float3 n = normalize(
-        dt.normal_matrix[bk][0].xyz * gLocal.x +
-        dt.normal_matrix[bk][1].xyz * gLocal.y +
-        dt.normal_matrix[bk][2].xyz * gLocal.z);
-    if (dot(n, rayDir) > 0.0f) n = -n;   // orient against the incident ray
-    outN = n;
-    t = tBest;
-    return true;
-}
-
-
 kernel void ddgi_trace_sdf(
     uint2 tid2d [[thread_position_in_threadgroup]],
     uint2 gid2d [[threadgroup_position_in_grid]],
@@ -526,7 +397,7 @@ kernel void ddgi_trace_sdf(
     float hnValid = 0.0f;
     if (hitDistance >= 0.0f) {
         float tRefined = hitDistance;
-        if (ddgiDetailRefine(detail_table, detail_sdf_0, detail_sdf_1,
+        if (detailSDFRefine(detail_table, detail_sdf_0, detail_sdf_1,
                              detail_sdf_2, detail_sdf_3,
                              probePos, rayDir, tRefined, hitN)) {
             hitDistance = tRefined;

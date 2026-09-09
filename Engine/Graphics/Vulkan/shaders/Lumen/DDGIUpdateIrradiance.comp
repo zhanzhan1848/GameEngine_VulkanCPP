@@ -223,8 +223,7 @@ void ddgi_update_irradiance() {
     vec3 sh0 = shAccum[0];
     // 2026-09-05 对齐 Metal 修复：上限随未钳位 sh0 无界放大时，prev-screen
     // 辐射尖峰同步抬高 l1/l2 上限（Metal 实测 L1=1661=3×553.6），钳位失效。
-    // L0 本身有 10 上界 → L1/L2 上限随之封顶（30/20）。
-    // T2.4 (B7): rescale 30/20 → 192/128 (see Metal twin).
+    // T2.4 (B7): L0 钳位 10→64、比例上限 30/20→192/128（see Metal twin）。
     float l1Limit = max(min(length(sh0) * 3.0, 192.0), 0.1);
     float l2Limit = max(min(length(sh0) * 2.0, 128.0), 0.05);
 

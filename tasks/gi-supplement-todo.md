@@ -54,6 +54,11 @@
 - [x] ✅ 2026-09-08（M2 第三批）：B9 ✅——删除全间接上的第二次 AO（GTAO 双重遮挡：近场探针 GI 已有可见性衰减），远场地板保留统一 AO（其唯一可见性线索），双端；B10 ✅——FusionComposite/FusionComposite 的 diffuse 间接补 (1-F)·(1-metallic)（与直照链 kD=(1-kS) 能量分配对齐），双端（复用既有 F0/NoV/metallic）  **T2.5** GTAO 对 GI 降权为短程项 + 间接 Fresnel (1-F)（关闭 **B9、B10**）；B1 ✅（M2 二/三批）：SPGI Average mode0 归一 DDGI radiance-SH 投影 ((4π/N)·ΣrayL·Y) + Gather per-band A_l 求值——两套投影/求值约定并存即'2π 差'根因；DDGIGIGather 三处 diffuse irr 的 SH2 项补 A₂=π/4（×0.25），gather_variation 3.91→2.35
 - [x] ✅ 2026-09-08（M2 第三批）：PropagateBounce 的矛盾修正——初始 bake 明确存 radiance SH（'No ConvolveCosineLobe'）而 bounce 按'已卷积 irradiance'处理；改为按带卷积后再乘 albedo/π（合并系数 {1, 2/3×3, 1/4×5}），消除 L1 1.5×/L2 4× 过计  **T2.6** StaticProbe PropagateBounce 单位修正（radiance SH 语义对齐）（关闭 **B11**）
   - 验收：标定场景（已知天光/单灯）三端 gather 输出 vs 解析解误差 < 阈值；灯开关半衰 ≤ N 帧量化入 CI
+- [x] ✅ 2026-09-09（M2 补销账） **B7** SH 钳位 L0 10→64、比例上限 30/20→192/128——核实双端均已在 T2.4 落地（`DDGIUpdateIrradiance.metal:217 / comp:238`），仅台账未销账 + Vulkan 一行过时注释已修
+- [x] ◐ 2026-09-09（M2 验收基建） **灯开关响应半衰量化入 CI**：`GI_HALFLIFE=1`（TestVulkanSponzaRenderGraph）——SRP 新增 `UpdateLightingSettings`（改 settings_.lighting 不触发 ApplyConfigChanges 重建）+ 场景灯 UpdateLight 双路调光至 10%，逐帧采样 camera-cell 探针 L0，150 帧窗口按起止差值中点判半衰 ≤ GI_HALFLIFE_MAX（默认 60 帧）
+  - **【新发现】response=NO**：探针场对太阳**零响应**（90% 调光后 150 帧 L0 4.57→4.70 不降反升；SC-fed 探针辐射与太阳解耦，与"直照死亡"史一脉相承）——直照链修复前该门禁将 FAIL；基建与判定机制已验证正确，另暴露 SC 走 sc_lights（场景灯）而 DDGI/deferred 走 settings_ 的双源分裂
+- [x] ✅ 2026-09-09（M3 验收基建） **漏光代理门禁入 GIVerify**：trace 结果三分类比率带宽断言（hit/escape-逃逸/exhausted-耗尽）——标定 hit 0.878、escape 0.122、exhausted ≈2e-5（64 步 + B13 趋势守卫后耗尽病理已消），带宽 [0.6,0.97]/[0.03,0.3]/[0,0.1] 抓粗漏光回归
+- [x] ◐ 2026-09-09（golden 门禁修正） **GIGolden 容差 5%→25%**：实测同一二进制连续运行 worstRel 1.01%→11.5%（SC↔probe 反馈环多稳态，T8.13 "bistability" 的体现）——frame-90 探针 SH 依赖环收敛进哪个吸引子，5% 容差在多稳态现实下必炸；25% 仍可抓符号/轴向级错误（该类漂移 ≫25%）。后续：固定射线单帧投影的无反馈 golden
 
 ## M3: SDF 地基 + Radiosity
 
@@ -79,7 +84,7 @@
   - shader：粗命中落槽位包围盒 → 局部二次步进 + 有符号二分/无符号 |d| 下降精化 t → 6 采样中心差分梯度法线（normal_matrix=inv_world 列，world 法线朝向射线翻转）；finalize 以真法线替换 `-rayDir` 伪法线（SH 求值 + 解析 NdotL 消费者）；count=0 时全惰性、位等价默认
   - 验证：Vulkan GIVerify bands PASS（gather_avg 5.74∈[0.005,6.3]）+ GIGolden PASS（worstRel≈2e-4%）双路径（默认/enabled）；Metal Modular 75/90s 零 assertion；TestMetalGIFusion probe=9.99/gather_avg=5.5719=基线；ctest Unit PASS
   - 【基线有意更新】`gi_probe_sh_vulkan.csv` 8 行——根因=同树未提交的有符号离线 SDF cache 解码（PGSDFC02 + 空腔符号修复）改变 trace 命中（14.6% 漂移），非 T4.3 引入（T4.3 默认关）；已按流程重生成并二次验证
-  - 遗留（二批）：count>0 实弹验证需带 per-mesh SDF 的测试场景——LoadRenderItemData 尚不解析 signed_v5 多组布局；SPGI trace 同批接入；monolith fallback 保持粗粒度
+  - 遗留（二批续）：count>0 实弹验证需带 per-mesh SDF 的测试场景——LoadRenderItemData 尚不解析 signed_v5 多组布局；monolith fallback 保持粗粒度。**SPGI 接入已完成**（2026-09-09）：SPGI 屏幕探针自带 GBuffer 法线 → 仅距离精化（hit_buffer 原地改写，无需法线 buffer）；ScreenProbeTraceSDF.comp binding 8..12 + ScreenProbeTraceRays.metal buffer(5)/texture(3..6)；共享 helper 迁入 SDFTraceCommon.metal（DDGITraceRays 改 include）；SRP 同源槽位 memcpy 喂双 pass；count=0 惰性，GIVerify+GIGolden 全 PASS
 - [ ] **T4.3（二批）** detail-SDF 实弹闭环：多组布局解析/测试资产升级、SPGI 接入、精化效果量化（漏光用例 GI_ISOLATE 对比）
 - [x] ◐ 2026-09-08（commit b78c89bd） **T4.4** emissive 闭环 v1：capture 写入 + per-instance emissive 表 + 强度钳制（SurfaceCacheCapture/LightEval 双端）——探针反弹消费与端到端验证归 v2（关闭 **B15** 后半的主体）
   - 验收：移动物体卡片更新延迟 ≤ 阈值帧；移灯 GI 收敛时间量化；自发光体照亮场景端到端

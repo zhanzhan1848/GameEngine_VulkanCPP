@@ -558,11 +558,18 @@ kernel void screen_probe_trace_sdf(
     texture3d<float, access::sample>  sdf1          [[texture(1)]],
     texture3d<float, access::sample>  sdf2          [[texture(2)]],
 
+    // T4.3 二批: per-mesh detail SDF slots (dummy-cascade-bound when off)
+    texture3d<float, access::sample>  detail0       [[texture(3)]],
+    texture3d<float, access::sample>  detail1       [[texture(4)]],
+    texture3d<float, access::sample>  detail2       [[texture(5)]],
+    texture3d<float, access::sample>  detail3       [[texture(6)]],
+
     device const float4*              probePositions [[buffer(0)]],
     device const float4*              probeNormals   [[buffer(1)]],
     device float4*                    hit_buffer     [[buffer(2)]],
     constant ScreenProbeGlobalData&   global         [[buffer(3)]],
     device const float4*              importanceSH   [[buffer(4)]],  // F2
+    constant DetailSDFTableGPU&       detail_table   [[buffer(5)]],  // T4.3 二批
 
     uint global_id [[thread_position_in_grid]])
 {
@@ -642,6 +649,13 @@ kernel void screen_probe_trace_sdf(
     }
 
     if (hitDistance > 0.0f) {
+        // T4.3 二批: per-mesh detail refinement of the coarse GlobalSDF hit
+        // (distance only — screen probes carry their own GBuffer normals).
+        float3 detailN;
+        if (detailSDFRefine(detail_table, detail0, detail1, detail2, detail3,
+                            origin, rayDir, hitDistance, detailN)) {
+            // refined hitDistance already in out-param
+        }
         hit_buffer[global_id] = float4(hitDistance, 0.0f, 0.0f, 2.0f);
     } else if (cacheStart > 0.0f) {
         // F1 far-cache: x = travelled distance (stop point = origin + dir * x).

@@ -68,6 +68,18 @@ private:
     // GI_VERIFY=1 (default off keeps the windowed long-run behavior).
     void RunGIVerify();
     bool giVerified_{false};
+    // M2 acceptance: light-response half-life quantification. GI_HALFLIFE=1
+    // steps the probe-trace light down to 10% at GI_HALFLIFE_FRAME (default
+    // 90) via the DDGI probe-light override, samples the camera-cell probe
+    // L0 every frame for GI_HALFLIFE_WINDOW (default 150) frames, then
+    // asserts the measured half-life ≤ GI_HALFLIFE_MAX (frames) and _Exit.
+    void RunGIHalflife();
+    bool giHalflifeActive_{false};
+    u32 giHalflifeToggleFrame_{0};
+    double giHalflifeStartLum_{-1.0};
+    std::vector<double> giHalflifeSamples_;
+    primal::graphics::RenderLight giHalflifeSun_{};
+    double ReadCamCellProbeL0();
     // T4.6.5 part 37: load HDR + equirect→cube + IBL precompute + SetIBLResources.
     bool InitializeIBL();
 

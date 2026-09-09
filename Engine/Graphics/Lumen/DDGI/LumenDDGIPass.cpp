@@ -1696,6 +1696,12 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.LightColor = {camera_data.light_color.x,
                                      camera_data.light_color.y,
                                      camera_data.light_color.z, 3.0f};
+                    // M2: light-response half-life gate — override AFTER the
+                    // per-frame fill so the probe trace sees the stepped
+                    // light without a (field-resetting) pass rebuild.
+                    if (probe_light_override_active_) {
+                        vd.LightColor = probe_light_override_;
+                    }
                     // Mode 11 canonical radiance inputs — live-tunable (default
                     // sky 0.4 / albedo 0.5). SkyColor.xyz preserve the 0.85/0.85/1.0
                     // tint ratio; Albedo.xyz are set uniformly.

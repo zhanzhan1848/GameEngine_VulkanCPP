@@ -380,6 +380,16 @@ public:
     // margin) — the region detail-SDF refinement can affect.
     void GetVolumeAABB(math::v3& out_min, math::v3& out_max) const;
 
+    // M2 acceptance (light-response half-life): override the trace light
+    // color the probes see, WITHOUT the UpdateSettings pass rebuild — the
+    // rebuild resets the probe field and would measure re-init, not the
+    // SC↔probe convergence the gate wants. Cleared explicitly.
+    void SetProbeLightOverride(const math::v4& color) {
+        probe_light_override_ = color;
+        probe_light_override_active_ = true;
+    }
+    void ClearProbeLightOverride() { probe_light_override_active_ = false; }
+
 private:
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
@@ -483,6 +493,10 @@ private:
     };
     // Unused detail slots bind the (always-valid) SDF cascade texture — no
     // dummy texture needed.
+
+    // M2: probe-light override (light-response half-life gate).
+    math::v4 probe_light_override_{};
+    bool probe_light_override_active_{ false };
 
     // Finalize screen-space sampling (Vulkan): ViewProjection CB (64B ×3) +
     // current frame's view-projection for projecting hit positions to screen.

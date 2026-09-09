@@ -818,6 +818,9 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     sunLight.direction = v3{0.5f, -0.7f, 0.3f};
     sunLight.color = v3{1.0f, 0.95f, 0.9f};
     sunLight.intensity = 3.0f;
+    // M2: stable id so GI_HALFLIFE can dim THIS light via UpdateLight.
+    sunLight.entityId = 7001;
+    giHalflifeSun_ = sunLight;
     if (sponza_reference::Enabled() || std::getenv("PRIMAL_LIGHT_DIR") ||
         std::getenv("PRIMAL_DIRECT_LIGHT")) {
         const auto& light = pipeline_->GetSettings().lighting;
@@ -1891,6 +1894,146 @@ void TestVulkanSponzaRenderGraph::Run() {
             RunGIVerify();   // never returns (_Exit)
         }
     }
+
+    // M2 acceptance: light-response half-life gate (GI_HALFLIFE=1). Steps the
+    // probe-trace light to 10% at GI_HALFLIFE_FRAME (default 90) via the DDGI
+    // probe-light override — NOT UpdateSettings, whose ApplyConfigChanges
+    // rebuild would reset the probe field and measure re-init — samples the
+    // camera-cell L0 every frame, and at GI_HALFLIFE_WINDOW (default 150)
+    // frames asserts half-life ≤ GI_HALFLIFE_MAX (default 60) then _Exit.
+    if (std::getenv("GI_HALFLIFE")) {
+        static u32 toggleFrame = [] {
+            const char* e = std::getenv("GI_HALFLIFE_FRAME");
+            return e ? (u32)std::atoi(e) : 90u;
+        }();
+        static u32 windowFrames = [] {
+            const char* e = std::getenv("GI_HALFLIFE_WINDOW");
+            return e ? (u32)std::atoi(e) : 150u;
+        }();
+        if (giHalflifeActive_) {
+            if (frameCount_ > giHalflifeToggleFrame_) {
+                const double l = ReadCamCellProbeL0();
+                giHalflifeSamples_.push_back(l);
+                if (frameCount_ % 10 == 0) {
+                    std::cout << "[GIHalflife] +" << (frameCount_ - giHalflifeToggleFrame_)
+                              << " frames: L0=" << l << std::endl;
+                }
+            }
+            if (frameCount_ >= giHalflifeToggleFrame_ + windowFrames) {
+                RunGIHalflife();   // never returns (_Exit)
+            }
+        } else if (frameCount_ == toggleFrame) {
+            giHalflifeActive_ = true;
+            giHalflifeToggleFrame_ = frameCount_;
+            giHalflifeStartLum_ = ReadCamCellProbeL0();
+            if (pipeline_) {
+                // M2: real light toggle — dim the sun to 10% everywhere:
+                // (a) the scene light (feeds SC LightEval via sc_lights),
+                // (b) settings_.lighting (deferred direct + DDGI trace — all
+                // read settings_.lighting per frame) — without rebuilding the
+                // Lumen passes.
+                auto s = pipeline_->GetSettings();
+                s.lighting.light_color = {s.lighting.light_color.x * 0.1f,
+                                          s.lighting.light_color.y * 0.1f,
+                                          s.lighting.light_color.z * 0.1f,
+                                          s.lighting.light_color.w};
+                pipeline_->UpdateLightingSettings(s);
+                primal::graphics::RenderLight dim = giHalflifeSun_;
+                dim.color = dim.color * 0.1f;
+                dim.intensity *= 0.1f;
+                scene_.UpdateLight(dim.entityId, dim);
+            }
+            std::cout << "[GIHalflife] sun stepped to 10% at frame "
+                      << frameCount_ << ", start L0 lum=" << giHalflifeStartLum_ << std::endl;
+        }
+    }
+}
+
+// M2 acceptance: camera-cell 2×2×2 probe L0 luminance (same recipe as the
+// GIVerify band) — the per-frame sample for the light-response half-life.
+double TestVulkanSponzaRenderGraph::ReadCamCellProbeL0() {
+    using primal::graphics::rhi::handles::INVALID_RESOURCE;
+    auto* ddgi = pipeline_ ? pipeline_->GetDDGIPass() : nullptr;
+    if (!ddgi) return -1.0;
+    auto irr = ddgi->GetIrradianceBuffer(0);
+    if (irr == INVALID_RESOURCE) return -1.0;
+    float* m = static_cast<float*>(device_->MapBuffer(irr, 0, 9 * 8 * sizeof(float)));
+    if (!m) return -1.0;
+    double result = -1.0;
+    const auto vol = ddgi->GetVolumeData();
+    if (vol.ProbeCountTotal > 0 && vol.ProbeSpacing > 0.0f &&
+        vol.ProbeCounts[0] > 0 && vol.ProbeCounts[1] > 0 && vol.ProbeCounts[2] > 0) {
+        const math::v3 campos = camera_.GetPosition();
+        auto gcoord = [&](float w, u32 axis) -> int {
+            float rel = (axis == 0 ? w - vol.ProbeOrigin.x
+                       : axis == 1 ? w - vol.ProbeOrigin.y
+                                   : w - vol.ProbeOrigin.z) / vol.ProbeSpacing;
+            int c = (int)std::lround(rel);
+            u32 nn = vol.ProbeCounts[axis];
+            return std::min(std::max(c, 0), (int)nn - 1);
+        };
+        int cx = gcoord(campos.x, 0), cy = gcoord(campos.y, 1), cz = gcoord(campos.z, 2);
+        auto idx = [&](int x, int y, int z) -> u32 {
+            return (u32)(x + vol.ProbeCounts[0] * (y + vol.ProbeCounts[1] * z));
+        };
+        double acc = 0.0; u32 cnt = 0;
+        for (int dz = 0; dz <= 1; ++dz)
+            for (int dy = 0; dy <= 1; ++dy)
+                for (int dx = 0; dx <= 1; ++dx) {
+                    u32 pi = idx(cx + dx, cy + dy, cz + dz);
+                    if (pi >= vol.ProbeCountTotal) continue;
+                    const float* sh = m + pi * 36;
+                    acc += 0.2126 * sh[0] + 0.7152 * sh[1] + 0.0722 * sh[2];
+                    ++cnt;
+                }
+        if (cnt > 0) result = acc / cnt;
+    }
+    device_->UnmapBuffer(irr);
+    return result;
+}
+
+// M2 acceptance verdict: the probe field must move meaningfully in response
+// to the sun step (|Δend−start| ≥ 20% of start) and reach half of the total
+// transition within GI_HALFLIFE_MAX frames (default 60). Half-life measured
+// against the observed end level (median of the last 8 samples) — approach
+// direction agnostic, no analytic-convergence assumption.
+void TestVulkanSponzaRenderGraph::RunGIHalflife() {
+    u32 maxHalf = 60;
+    if (const char* e = std::getenv("GI_HALFLIFE_MAX")) maxHalf = (u32)std::atoi(e);
+
+    double lEnd = -1.0;
+    {
+        const auto& s = giHalflifeSamples_;
+        if (s.size() >= 8) {
+            std::vector<double> tail(s.end() - 8, s.end());
+            std::sort(tail.begin(), tail.end());
+            lEnd = tail[tail.size() / 2];
+        }
+    }
+    const double delta = (giHalflifeStartLum_ > 0.0 && lEnd >= 0.0)
+        ? std::abs(lEnd - giHalflifeStartLum_) : 0.0;
+
+    u32 half = 0;
+    if (delta > giHalflifeStartLum_ * 0.2) {
+        const double mid = giHalflifeStartLum_ + (lEnd - giHalflifeStartLum_) * 0.5;
+        const bool descending = lEnd < giHalflifeStartLum_;
+        for (size_t i = 0; i < giHalflifeSamples_.size(); ++i) {
+            const double l = giHalflifeSamples_[i];
+            if ((descending && l <= mid) || (!descending && l >= mid)) {
+                half = (u32)(i + 1);
+                break;
+            }
+        }
+    }
+
+    const bool responded = delta > giHalflifeStartLum_ * 0.2;
+    const bool ok = responded && half > 0 && half <= maxHalf;
+    std::cout << "[GIHalflife] " << (ok ? "PASS" : "FAIL")
+              << " half_life=" << half << " frames ≤ " << maxHalf
+              << " | start L0=" << giHalflifeStartLum_
+              << " end L0=" << lEnd
+              << " | response=" << (responded ? "yes" : "NO") << std::endl;
+    std::_Exit(ok ? 0 : 1);
 }
 
 
@@ -2047,12 +2190,62 @@ void TestVulkanSponzaRenderGraph::RunGIVerify() {
         pass = false;
     }
 
+    // --- 3. M3 acceptance: thin-wall leak proxy — ray outcome ratios ------
+    // Classify the split trace's hit_distance field (update-slot indexed,
+    // full-grid updates make all entries fresh):
+    //   hit      d ≥ 0    — surface found
+    //   escape   d ≤ -1.5 — left RayMaxDistance toward sky
+    //   exhausted d == -1 — step budget spent INSIDE the field
+    // A thin-wall/lights-leak regression shows up as escape-ratio inflation
+    // (rays punch through walls that should catch them) or as hit-ratio
+    // collapse; bands below are generous envelopes around the measured
+    // Sponza camera-area values so only gross regressions trip.
+    bool traceOk = false;
+    if (auto* ddgi = pipeline_ ? pipeline_->GetDDGIPass() : nullptr) {
+        auto hdBuf = ddgi->GetHitDistanceBuffer();
+        const auto vol = ddgi->GetVolumeData();
+        if (hdBuf != INVALID_RESOURCE && vol.ProbeCountTotal > 0 && vol.RaysPerProbe > 0) {
+            const u64 totalRays = (u64)vol.ProbeCountTotal * vol.RaysPerProbe;
+            if (float* hd = static_cast<float*>(device_->MapBuffer(
+                    hdBuf, 0, totalRays * sizeof(float)))) {
+                u64 hits = 0, escapes = 0, exhausted = 0;
+                for (u64 i = 0; i < totalRays; ++i) {
+                    const float d = hd[i];
+                    if (d >= 0.0f) ++hits;
+                    else if (d <= -1.5f) ++escapes;
+                    else ++exhausted;
+                }
+                device_->UnmapBuffer(hdBuf);
+                const double hitR = double(hits) / double(totalRays);
+                const double escR = double(escapes) / double(totalRays);
+                const double exhR = double(exhausted) / double(totalRays);
+                std::cout << "[GIVerify] trace outcome: hit=" << hitR
+                          << " escape=" << escR << " exhausted=" << exhR << std::endl;
+                // Envelopes from the 2026-09-09 calibration run (hit 0.877,
+                // escape 0.123, exhausted ≈2e-5 — the 64-step march plus the
+                // B13 trend guard eliminated step exhaustion on this scene).
+                // Margins wide enough to catch gross leak regressions only.
+                checkBand("trace_hit_ratio", hitR, 0.60, 0.97);
+                checkBand("trace_escape_ratio", escR, 0.03, 0.30);
+                checkBand("trace_exhausted_ratio", exhR, 0.0, 0.10);
+                traceOk = true;
+            }
+        }
+    }
+    if (!traceOk) {
+        std::cout << "[GIVerify] FAIL trace outcome bands UNAVAILABLE (readback failed)" << std::endl;
+        pass = false;
+    }
+
     std::cout << "[GIVerify] " << (pass ? "ALL BANDS PASS ✔" : "BAND FAILURE ✘")
               << " — Vulkan GI numerical gate" << std::endl;
 
     // ------------------------------------------------------------------
     // T2.2: SH golden CSV — camera-cell probe L0+L1 against a checked-in
-    // baseline (5% relative tolerance; GPU float + EMA frame jitter).
+    // baseline (25% relative tolerance — the SC↔probe feedback loop is
+    // multi-stable, so frame-90 SH swings run-to-run; the gate catches
+    // sign/axis-class regressions which drift far further. GPU float + EMA
+    // frame jitter).
     //   GI_GOLDEN=1              run the diff
     //   GI_GOLDEN_UPDATE=1       (re)write the baseline instead
     // ------------------------------------------------------------------
@@ -2110,7 +2303,13 @@ void TestVulkanSponzaRenderGraph::RunGIVerify() {
                         const double denom = std::max(1e-4, std::abs((double)bv[c]));
                         const double rel = std::abs(cv[c] - bv[c]) / denom;
                         if (rel > worstRel) { worstRel = rel; worstCol = (u32)c; }
-                        if (rel > 0.05) {
+                        // Tolerance 25%: the SC↔probe feedback loop is
+                        // multi-stable (T8.13) — identical binaries measured
+                        // 1%…11.5% run-to-run on 2026-09-09, so frame-90 SH
+                        // depends on which attractor the loop settles into.
+                        // The gate still catches sign/axis regressions, which
+                        // drift ≫25% (B7-class: 100%+).
+                        if (rel > 0.25) {
                             std::cout << "[GIGolden] FAIL row " << row << " col " << c
                                       << ": " << cv[c] << " vs baseline " << bv[c]
                                       << " (rel " << rel * 100.0 << "%)" << std::endl;

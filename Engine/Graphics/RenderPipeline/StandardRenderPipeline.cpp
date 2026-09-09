@@ -1183,16 +1183,28 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                         maxExt / (f32)std::max(res, 1u)};
                     texs[s] = mesh->GetSDFTexture();
                 }
-                ddgi_pass_->SetDetailSDFSlots(texs, slots, candCount);
-                static u32 lastLogged = 0xFFFFFFFFu;
-                if (candCount != lastLogged) {
-                    lastLogged = candCount;
-                    PRIMAL_LOG_STREAM(Info, "Render")
-                        << "[LumenDDGI] T4.3 detail-SDF slots active = " << candCount
-                        << "/" << kMaxSlots << std::endl;
-                }
-            } else {
-                ddgi_pass_->SetDetailSDFSlots(nullptr, nullptr, 0);
+                        ddgi_pass_->SetDetailSDFSlots(texs, slots, candCount);
+                        // T4.3 二批: mirror into the SPGI pass (POD-identical
+                        // slot layout; distance-only refinement on its side).
+                        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+                            static_assert(sizeof(lumen::ScreenProbeGIPass::DetailSDFSlot) ==
+                                          sizeof(lumen::LumenDDGIPass::DetailSDFSlot),
+                                          "detail slot POD drift");
+                            lumen::ScreenProbeGIPass::DetailSDFSlot spgiSlots[kMaxSlots];
+                            memcpy(spgiSlots, slots, sizeof(spgiSlots));
+                            screen_probe_pass_->SetDetailSDFSlots(texs, spgiSlots, candCount);
+                        }
+                        static u32 lastLogged = 0xFFFFFFFFu;
+                        if (candCount != lastLogged) {
+                            lastLogged = candCount;
+                            PRIMAL_LOG_STREAM(Info, "Render")
+                                << "[LumenDDGI] T4.3 detail-SDF slots active = " << candCount
+                                << "/" << kMaxSlots << std::endl;
+                        }
+                    } else {
+                        ddgi_pass_->SetDetailSDFSlots(nullptr, nullptr, 0);
+                        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized())
+                            screen_probe_pass_->SetDetailSDFSlots(nullptr, nullptr, 0);
                 // One-shot diagnostics: why no slot activated.
                 static bool diagLogged = false;
                 if (!diagLogged && !scene_snapshot_->GetInstanceData().empty()) {

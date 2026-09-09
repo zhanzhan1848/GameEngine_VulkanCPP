@@ -207,6 +207,28 @@ public:
     // identity (cross-identity RAW deps invisible to the scheduler).
     void SetExternalLightingRG(rendergraph::RGResourceHandle rg) { external_lighting_rg_ = rg; }
 
+    // --- T4.3 二批: per-mesh detail SDF slots (PRIMAL_DDGI_DETAIL_SDF=1) ---
+    // Same contract as LumenDDGIPass::DetailSDFSlot (POD, 160 B, keep in
+    // sync): the split SDF trace refines coarse GlobalSDF hit DISTANCES
+    // against the per-mesh field — distance only, screen probes carry their
+    // own GBuffer normals. count=0 → inert.
+    static constexpr u32 kDetailSDFSlots = 4;
+    struct DetailSDFSlot {
+        math::m4x4 inv_world;
+        math::v4   normal_matrix[3];   // unused by SPGI (kept for layout parity)
+        math::v4   bounds_min;
+        math::v4   bounds_max;
+        math::v4   params;             // x=resolution, y=max_dim, z=signed, w=voxel_size
+    };
+    void SetDetailSDFSlots(const rhi::ResourceHandle* textures,
+                           const DetailSDFSlot* slots, u32 count) {
+        detail_sdf_slot_count_ = (count > kDetailSDFSlots) ? kDetailSDFSlots : count;
+        for (u32 i = 0; i < detail_sdf_slot_count_; ++i) {
+            detail_sdf_textures_[i] = textures[i];
+            detail_sdf_slots_[i] = slots[i];
+        }
+    }
+
     // DEPRECATED (X2/A3): 旧签名保留为转发适配器（等价映射进视图签名）。
     void SetSurfaceCacheData(
         rhi::ResourceHandle lighting_atlas,
@@ -227,8 +249,7 @@ public:
         SetSurfaceCacheData(view);
     }
 
-    // DDGI probe fallback (T2.2): miss rays evaluate the nearest DDGI probe's
-    // SH L0+L1 along the ray direction.
+    // DDGI probe fallback (T2.2): miss rays evaluate the nearest DDGI probe's    // SH L0+L1 along the ray direction.
     // X2/A3: 视图签名（推荐）—— 从 LumenDDGIPass::GetVolumeView() 直传。
     void SetDDGIFallbackData(const DDGIVolumeView& view) {
         ddgi_irradiance_buffer_ = view.irradiance;
@@ -367,6 +388,17 @@ private:
 
     // Constant buffers (triple-buffered)
     rhi::ResourceHandle global_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+
+    // T4.3 二批: detail-SDF slot table UBO (656B, mirror of LumenDDGIPass)
+    u32  detail_sdf_slot_count_{ 0 };
+    DetailSDFSlot detail_sdf_slots_[kDetailSDFSlots]{};
+    rhi::ResourceHandle detail_sdf_textures_[kDetailSDFSlots]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
+    rhi::ResourceHandle detail_table_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
 

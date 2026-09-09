@@ -415,6 +415,12 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (rw)
             {6, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
+            // T4.3 二批: detail slot table + 4 textures (distance refinement)
+            {8, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // detail slot table
+            {9,  DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // detail slot 0
+            {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // detail slot 1
+            {11, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // detail slot 2
+            {12, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // detail slot 3
         };
         bindings[0].is3D = true;
         bindings[1].is3D = true;
@@ -422,7 +428,11 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[3].readonly = true;
         bindings[4].readonly = true;
         bindings[7].readonly = true;  // importanceSH (F2)
-        sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout({8, bindings});
+        for (u32 bi = 9; bi <= 12; ++bi) {
+            bindings[bi].is3D = true;
+            bindings[bi].unfilterableFloat = true;
+        }
+        sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SDF 0
@@ -433,8 +443,14 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (rw)
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global data
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // importanceSH (F2)
+            // T4.3 二批 (Metal overlapping namespaces): buffer(5) table + texture(3..6)
+            {5, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // detail slot table
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // detail slot 0
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // detail slot 1
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // detail slot 2
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // detail slot 3
         };
-        DescriptorSetLayoutDesc layoutDesc{8, bindings};
+        DescriptorSetLayoutDesc layoutDesc{13, bindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -897,6 +913,17 @@ void ScreenProbeGIPass::CreateConstantBuffers() {
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
         global_cb_[i] = device_->CreateBuffer(desc);
+    }
+    // T4.3 二批: detail-SDF slot table (16B header + 4 × 160B slots = 656B).
+    // Always bound; header count=0 keeps the shader inert when the feature
+    // is off (PRIMAL_DDGI_DETAIL_SDF unset / no nearby per-mesh SDF).
+    for (int i = 0; i < 3; i++) {
+        BufferDesc desc{};
+        desc.size = 656;
+        desc.type = BufferType::Constant;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        detail_table_cb_[i] = device_->CreateBuffer(desc);
     }
 }
 
@@ -1708,6 +1735,46 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     // still be using it.
 
                     // --- 2b: SDF far-field (pure texture3D + probe buffers) ---
+                    // T4.3 二批: upload the detail slot table + bind the extra
+                    // entries (unused slots fall back to sdfTextures[0] — the
+                    // shader never samples them when header.count is 0).
+                    if (detail_table_cb_[frameIdx] != handles::INVALID_RESOURCE) {
+                        struct DetailTableGPU {
+                            math::v4 header;
+                            math::m4x4 inv_world[4];
+                            math::v4 normal_matrix[4][3];
+                            math::v4 bounds_min[4];
+                            math::v4 bounds_max[4];
+                            math::v4 params[4];
+                        };
+                        static_assert(sizeof(DetailTableGPU) == 656, "detail table layout drift");
+                        if (auto* tm = static_cast<DetailTableGPU*>(device_->MapBuffer(detail_table_cb_[frameIdx]))) {
+                            tm->header = math::v4{(f32)detail_sdf_slot_count_, 0.f, 0.f, 0.f};
+                            for (u32 s = 0; s < 4; ++s) {
+                                if (s < detail_sdf_slot_count_) {
+                                    tm->inv_world[s] = detail_sdf_slots_[s].inv_world;
+                                    for (u32 r = 0; r < 3; ++r)
+                                        tm->normal_matrix[s][r] = detail_sdf_slots_[s].normal_matrix[r];
+                                    tm->bounds_min[s] = detail_sdf_slots_[s].bounds_min;
+                                    tm->bounds_max[s] = detail_sdf_slots_[s].bounds_max;
+                                    tm->params[s] = detail_sdf_slots_[s].params;
+                                } else {
+                                    tm->inv_world[s] = math::m4x4{};
+                                    tm->normal_matrix[s][0] = tm->normal_matrix[s][1] = math::v4{};
+                                    tm->normal_matrix[s][2] = math::v4{};
+                                    tm->bounds_min[s] = tm->bounds_max[s] = math::v4{};
+                                    tm->params[s] = math::v4{};
+                                }
+                            }
+                            device_->UnmapBuffer(detail_table_cb_[frameIdx]);
+                        }
+                    }
+                    ResourceHandle detailTex[kDetailSDFSlots];
+                    for (u32 s = 0; s < kDetailSDFSlots; ++s) {
+                        detailTex[s] = (s < detail_sdf_slot_count_ &&
+                                        detail_sdf_textures_[s] != handles::INVALID_RESOURCE)
+                            ? detail_sdf_textures_[s] : sdfTextures[0];
+                    }
                     if (splitIsVk) {
                         DescriptorData sdfParams[] = {
                             {0, DescriptorType::SampledImage,  sdfTextures[0]},
@@ -1718,8 +1785,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {5, DescriptorType::StorageBuffer, hit_distance_buffer_},
                             {6, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                             {7, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
+                            {8,  DescriptorType::UniformBuffer, detail_table_cb_[frameIdx]},   // T4.3 二批
+                            {9,  DescriptorType::SampledImage,  detailTex[0]},
+                            {10, DescriptorType::SampledImage,  detailTex[1]},
+                            {11, DescriptorType::SampledImage,  detailTex[2]},
+                            {12, DescriptorType::SampledImage,  detailTex[3]},
                         };
-                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 8);
+                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 13);
                     } else {
                         DescriptorData sdfParams[] = {
                             {0, DescriptorType::SampledImage,  sdfTextures[0]},
@@ -1730,8 +1802,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
                             {3, DescriptorType::UniformBuffer, global_cb_[frameIdx]},
                             {4, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
+                            {5, DescriptorType::UniformBuffer, detail_table_cb_[frameIdx]},    // T4.3 二批
+                            {3, DescriptorType::SampledImage,  detailTex[0]},
+                            {4, DescriptorType::SampledImage,  detailTex[1]},
+                            {5, DescriptorType::SampledImage,  detailTex[2]},
+                            {6, DescriptorType::SampledImage,  detailTex[3]},
                         };
-                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 8);
+                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 13);
                     }
                     cmd->BindComputePipeline(sdf_trace_pipeline_);
                     const DescriptorSetHandle sdfSets[] = { sdf_trace_ds_[frameIdx] };
