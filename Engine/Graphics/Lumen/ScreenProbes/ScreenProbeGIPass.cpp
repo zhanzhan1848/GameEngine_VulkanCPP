@@ -218,6 +218,10 @@ struct ScreenProbePassData {
     RGResourceHandle gbuffer_normal;
     RGResourceHandle prev_frame_color;
     RGResourceHandle gi_output;
+    // T3.5: cascade textures of this frame (write = EMA target, prev = EMA
+    // history consumed by the cascade update AND the finalize far-cache).
+    RGResourceHandle cascade_write;
+    RGResourceHandle cascade_prev;
 };
 
 } // anonymous namespace
@@ -266,6 +270,7 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
     CreatePipelines();
     CreateConstantBuffers();
     CreateBuffers();
+    CreateRadianceCascade();
 
     initialized_ = true;
 
@@ -434,7 +439,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- T5.1 2c: Finalize — 2 textures (prev_color + sc_lighting) + radiance chain buffers ---
-    // Vulkan flat 0..11; Metal overlapping (texture 0-1, buffer 0-9).
+    // Vulkan flat 0..13; Metal overlapping (texture 0-2, buffer 0-10).
+    // T3.5: binding 13 / texture(2) = radiance cascade (prev frame) for the
+    // far-cache fast path (1 texel read vs the 16-read tetrahedral query).
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prevFrameColor
@@ -450,6 +457,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_cards (T1.3)
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi_irradiance (T2.2)
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
+            {13, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade (T3.5)
         };
         bindings[2].readonly = true;
         bindings[3].readonly = true;
@@ -460,11 +468,13 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[10].readonly = true;
         bindings[11].readonly = true;
         bindings[12].readonly = true; // importanceSH (F2)
-        finalize_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
+        bindings[13].is3D = true;     // radiance cascade (T3.5)
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev frame color
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // surface cache lighting atlas
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // radiance cascade (T3.5)
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe positions
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (in)
@@ -477,7 +487,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi_irradiance (T2.2)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
         };
-        DescriptorSetLayoutDesc layoutDesc{13, bindings};
+        bindings[2].is3D = true;  // radiance cascade (T3.5)
+        DescriptorSetLayoutDesc layoutDesc{14, bindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -897,6 +908,16 @@ static bool SpgiStageSkipped(const char* stage) {
     if (!skipList) return false;
     return std::strstr(skipList, stage) != nullptr;
 }
+
+// T3.5: radiance cascade kill switch. PRIMAL_GI_CASCADE=0 restores the legacy
+// 16-read tetrahedral far-cache query (dispatch + finalize fast path both off).
+static bool CascadeEnabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("PRIMAL_GI_CASCADE");
+        return !(e && std::strcmp(e, "0") == 0);
+    }();
+    return enabled;
+}
 static void SpgiStageMark(u32 frameIdx, const char* stage) {
     static u32 marks = 0;
     if (marks < 30) {  // bring-up: first frames only
@@ -1095,6 +1116,191 @@ void ScreenProbeGIPass::CreateBuffers() {
 }
 
 // ============================================================================
+// T3.5: world-space radiance cascade
+// ============================================================================
+
+void ScreenProbeGIPass::CreateRadianceCascade() {
+    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+
+    // 2 × 32³ RGBA16F double-buffered cascade volumes. Extent/origin derive
+    // from the DDGI volume per dispatch (SetDDGIFallbackData may arrive after
+    // Initialize), so only the fixed-resolution resources are created here.
+    for (int i = 0; i < 2; ++i) {
+        TextureDesc desc{};
+        desc.size = {kRadianceCascadeRes, kRadianceCascadeRes, kRadianceCascadeRes};
+        desc.format = DataFormat::RGBA16_Float;
+        desc.type = TextureType::Texture3D;
+        desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+        radiance_cascade_[i] = device_->CreateTexture(desc);
+    }
+
+    // 1³ dummy for the finalize cascade slot when the system is off.
+    {
+        TextureDesc desc{};
+        desc.size = {1, 1, 1};
+        desc.format = DataFormat::RGBA16_Float;
+        desc.type = TextureType::Texture3D;
+        desc.usage = TextureUsage::ShaderResource;
+        dummy_texture_3d_ = device_->CreateTexture(desc);
+    }
+
+    // Update pipeline. Vulkan loads the precompiled .comp.spv (the standalone
+    // build_spv block keeps the unnamed "main" entry); Metal compiles the
+    // .metal source at runtime with the camelCase entry.
+    const char* entry = isVk ? "main" : "radianceCascadeUpdate";
+    auto code = LoadShaderBytecode(device_, "RadianceCascadeUpdate");
+    if (code.empty()) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[ScreenProbeGI] Failed to load RadianceCascadeUpdate shader" << std::endl;
+        return;
+    }
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[ScreenProbeGI] compiling RadianceCascadeUpdate : " << entry << std::endl;
+    auto shader = device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
+    if (shader == handles::INVALID_SHADER) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[ScreenProbeGI] RadianceCascadeUpdate shader compilation failed" << std::endl;
+        return;
+    }
+
+    // Descriptor layout — 4 bindings: cascade out (storage image) / cascade
+    // prev (sampled 3D) / params UBO / DDGI irradiance (readonly SSBO).
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev
+            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // RadianceCascadeParams
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance
+        };
+        bindings[0].is3D = true;
+        bindings[1].is3D = true;
+        bindings[3].readonly = true;
+        cascade_update_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+    } else {
+        // Metal overlapping namespaces: texture(0) out, texture(1) prev,
+        // buffer(2) DDGI irradiance, buffer(3) params (setBytes override).
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev
+            {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params (setBytes)
+        };
+        bindings[0].is3D = true;
+        bindings[1].is3D = true;
+        cascade_update_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+    }
+    if (cascade_update_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[ScreenProbeGI] RadianceCascade descriptor layout creation failed" << std::endl;
+        return;
+    }
+
+    PipelineLayoutDesc plDesc;
+    plDesc.setLayoutCount = 1;
+    plDesc.setLayouts = &cascade_update_set_layout_;
+    cascade_update_layout_ = device_->CreatePipelineLayout(plDesc);
+
+    ComputePipelineDesc pipeDesc{};
+    pipeDesc.computeShader = shader;
+    pipeDesc.layout = cascade_update_layout_;
+    pipeDesc.threadGroupSize = {4, 4, 4};  // matches the .comp local_size; 8³ groups
+    cascade_update_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+
+    // Triple-buffered descriptor sets + params constant buffers.
+    for (int i = 0; i < 3; ++i) {
+        DescriptorSetDesc dsDesc{cascade_update_set_layout_};
+        cascade_update_set_[i] = device_->CreateDescriptorSet(dsDesc);
+
+        BufferDesc cbDesc{};
+        cbDesc.size = sizeof(RadianceCascadeParams);  // 80B
+        cbDesc.type = BufferType::Constant;
+        cbDesc.usage = GPUMemoryUsage::Dynamic;
+        cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        cascade_params_cb_[i] = device_->CreateBuffer(cbDesc);
+    }
+
+    if (cascade_update_pipeline_ == handles::INVALID_PIPELINE) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[ScreenProbeGI] [SPGI] PIPELINE INVALID: cascade_update" << std::endl;
+    } else {
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[ScreenProbeGI] Radiance cascade ready (32³ RGBA16F ×2, "
+            << (CascadeEnabled() ? "enabled" : "disabled via PRIMAL_GI_CASCADE=0")
+            << ")" << std::endl;
+    }
+}
+
+void ScreenProbeGIPass::DispatchCascadeUpdate(RHICommandBuffer* cmd, u32 frameIdx,
+                                              ResourceHandle writeTex, ResourceHandle prevTex) {
+    if (cmd == nullptr ||
+        cascade_update_pipeline_ == handles::INVALID_PIPELINE ||
+        cascade_update_set_[frameIdx] == handles::INVALID_DESCRIPTOR_SET ||
+        frameIdx >= 3 || cascade_update_frame_ >= 0xFFFFFFFFu ||
+        writeTex == handles::INVALID_RESOURCE || prevTex == handles::INVALID_RESOURCE) {
+        return;
+    }
+    // Without DDGI probes there is nothing to inject — leave the cascade as-is.
+    if (!ddgi_fallback_available_ || ddgi_irradiance_buffer_ == handles::INVALID_RESOURCE) {
+        return;
+    }
+    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+
+    // Extent derivation — the finalize consumers repeat this exact formula
+    // from ddgi_fb constants, so CPU and shader never drift.
+    const float maxCount = std::max({ddgi_fb_counts_.x, ddgi_fb_counts_.y, ddgi_fb_counts_.z});
+    const float extent = std::max(maxCount * ddgi_fb_spacing_ * 2.0f, 1.0f);
+    cascade_extent_ = math::v3{extent, extent, extent};   // cubic extent as v3 (member type)
+    cascade_origin_ = ddgi_fb_origin_ - math::v3{extent * 0.25f, extent * 0.25f, extent * 0.25f};
+    cascade_spacing_ = extent / float(kRadianceCascadeRes);
+
+    RadianceCascadeParams params{};
+    params.origin_spacing = {cascade_origin_.x, cascade_origin_.y, cascade_origin_.z,
+                             cascade_spacing_};
+    params.counts_enabled = {float(kRadianceCascadeRes), float(kRadianceCascadeRes),
+                             float(kRadianceCascadeRes), 1.0f};
+    params.ddgi_origin_spacing = {ddgi_fb_origin_.x, ddgi_fb_origin_.y, ddgi_fb_origin_.z,
+                                  ddgi_fb_spacing_};
+    params.ddgi_counts = {ddgi_fb_counts_.x, ddgi_fb_counts_.y, ddgi_fb_counts_.z, 0.0f};
+    params.temporal_weight = 0.9f;
+    params.frame_index = float(cascade_update_frame_);
+
+    {
+        auto* cb = static_cast<RadianceCascadeParams*>(device_->MapBuffer(cascade_params_cb_[frameIdx]));
+        if (cb) { *cb = params; device_->UnmapBuffer(cascade_params_cb_[frameIdx]); }
+    }
+
+    // Double buffer: the caller resolved writeTex/prevTex from
+    // cascade_update_frame_ % 2 before import (write = frame_%2, EMA read = 1-write).
+
+    if (isVk) {
+        DescriptorData d[] = {
+            {0, DescriptorType::StorageImage,  writeTex},
+            {1, DescriptorType::SampledImage,  prevTex},
+            {2, DescriptorType::UniformBuffer, cascade_params_cb_[frameIdx]},
+            {3, DescriptorType::StorageBuffer, ddgi_irradiance_buffer_},
+        };
+        UpdateDescriptorSet(device_, cascade_update_set_[frameIdx], d, 4);
+    } else {
+        DescriptorData d[] = {
+            {0, DescriptorType::StorageImage,  writeTex},
+            {1, DescriptorType::SampledImage,  prevTex},
+            {2, DescriptorType::StorageBuffer, ddgi_irradiance_buffer_},
+            {3, DescriptorType::UniformBuffer, cascade_params_cb_[frameIdx]},
+        };
+        UpdateDescriptorSet(device_, cascade_update_set_[frameIdx], d, 4);
+    }
+
+    cmd->BindComputePipeline(cascade_update_pipeline_);
+    const DescriptorSetHandle sets[] = { cascade_update_set_[frameIdx] };
+    cmd->BindDescriptorSets(PipelineBindPoint::Compute, cascade_update_layout_, 0, 1, sets, 0, nullptr);
+    if (!isVk) cmd->SetComputeBytes(3, &params, sizeof(RadianceCascadeParams));
+    cmd->Dispatch(kRadianceCascadeRes / 4, kRadianceCascadeRes / 4, kRadianceCascadeRes / 4);
+    SpgiStageMark(frameIdx, "cascade");
+
+    ++cascade_update_frame_;
+}
+
+// ============================================================================
 // AddPass -- main entry point called per frame
 // ============================================================================
 
@@ -1136,6 +1342,23 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
         scCardLookupHandle = graph.ImportResource("SurfaceCache_CardLookup_ForProbes", surface_cache_card_lookup_buffer_);
     }
 
+    // T3.5: import the cascade double buffer for this frame. Write side gets
+    // UnorderedAccess (storage image), prev side ShaderResource (sampled by
+    // the cascade update kernel AND the finalize far-cache — one frame stale,
+    // which the temporal EMA already implies). RG-tracked transitions preserve
+    // the cross-frame contents (Vulkan oldLayout comes from the texture).
+    const bool cascadeActive = CascadeEnabled() &&
+        cascade_update_pipeline_ != handles::INVALID_PIPELINE &&
+        radiance_cascade_[0] != handles::INVALID_RESOURCE &&
+        radiance_cascade_[1] != handles::INVALID_RESOURCE;
+    const u32 cascadeWriteIdx = cascade_update_frame_ % 2;
+    RGResourceHandle cascadeWriteRG;
+    RGResourceHandle cascadePrevRG;
+    if (cascadeActive) {
+        cascadeWriteRG = graph.ImportResource("RadianceCascade_Write", radiance_cascade_[cascadeWriteIdx]);
+        cascadePrevRG  = graph.ImportResource("RadianceCascade_Prev", radiance_cascade_[1 - cascadeWriteIdx]);
+    }
+
     graph.AddPass<ScreenProbePassData>("ScreenProbeGI",
         RGPassType::Compute, RGPassCategory::Lighting,
 
@@ -1143,7 +1366,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
         // Setup lambda: declare resource dependencies
         // ====================================================================
         [this, gbuffer_depth, gbuffer_normal, prev_frame_color, hzb_texture, giOutputHandle, giFilteredHandle,
-         scLightingHandle, scCardDataHandle, scCardLookupHandle](
+         scLightingHandle, scCardDataHandle, scCardLookupHandle, cascadeWriteRG, cascadePrevRG](
             ScreenProbePassData& data, RenderGraphBuilder& builder) {
             // Read GBuffer inputs
             builder.Read(gbuffer_depth, ResourceState::ShaderResource);
@@ -1171,16 +1394,23 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Write to filtered output texture (Denoise output)
             builder.Write(giFilteredHandle, ResourceState::UnorderedAccess);
 
+            // T3.5: cascade storage-image write + sampled read of the EMA history
+            if (cascadeWriteRG.IsValid()) builder.Write(cascadeWriteRG, ResourceState::UnorderedAccess);
+            if (cascadePrevRG.IsValid())  builder.Read(cascadePrevRG, ResourceState::ShaderResource);
+
             data.gbuffer_depth = gbuffer_depth;
             data.gbuffer_normal = gbuffer_normal;
             data.prev_frame_color = prev_frame_color;
             data.gi_output = giOutputHandle;
+            data.cascade_write = cascadeWriteRG;
+            data.cascade_prev = cascadePrevRG;
         },
 
         // ====================================================================
         // Execute lambda: dispatch 3 compute sub-passes
         // ====================================================================
-        [this, camera_data, frameIdx, histIdx, giFilteredHandle, splitIsVk](
+        [this, camera_data, frameIdx, histIdx, giFilteredHandle, splitIsVk,
+         cascadeActive, cascadeWriteRG, cascadePrevRG](
             const ScreenProbePassData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
@@ -1317,10 +1547,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                  params_.hzb_max_distance};
 
                 // F1: far-cache early-out distance (0 disables); F2: y = importance;
-                // F4: z = adaptive interpolation-error threshold (0 → legacy).
+                // F4: z = adaptive interpolation-error threshold (0 → legacy);
+                // T3.5: w = radiance cascade far-cache fast path (0 → legacy
+                // 16-read tetrahedral query).
                 gd.cache_params = {params_.far_cache_start_distance,
                                    params_.enable_importance ? 1.0f : 0.0f,
-                                   params_.adaptive_pos_threshold, 0.0f};
+                                   params_.adaptive_pos_threshold,
+                                   cascadeActive ? 1.0f : 0.0f};
             }
 
             // Split kernels take the global data through the pool UBO
@@ -1433,6 +1666,19 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                       hzb_texture_ != handles::INVALID_RESOURCE && hzb_mip_levels_ > 0);
 
                 if (splitReady && !SpgiStageSkipped("trace")) {
+                    // --- T3.5: cascade update (before any far-cache consumer) ---
+                    ResourceHandle cascadePrevTex = handles::INVALID_RESOURCE;
+                    if (cascadeActive && cascadeWriteRG.IsValid() && cascadePrevRG.IsValid()) {
+                        auto* resW = context.graph->GetResource(cascadeWriteRG);
+                        auto* resP = context.graph->GetResource(cascadePrevRG);
+                        ResourceHandle writeTex = resW ? resW->GetPhysicalHandle() : handles::INVALID_RESOURCE;
+                        cascadePrevTex = resP ? resP->GetPhysicalHandle() : handles::INVALID_RESOURCE;
+                        DispatchCascadeUpdate(cmd, frameIdx, writeTex, cascadePrevTex);
+                        // Storage-image write → sampled reads of the same texture
+                        // (cascade EMA read next frame + finalize this frame).
+                        cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                           AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                    }
                     // --- 2a: HZB near-field (optional first stage) ---
                     if (hzbReady) {
                         // Infer the descriptor count: importance sampling adds a
@@ -1497,6 +1743,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
 
                     // --- 2c: radiance finalize (texture2D + buffers) ---
+                    // T3.5: binding 13 / texture(2) carries the cascade texture.
+                    // The finalize samples the PREV import identity — one frame
+                    // stale, which the cascade's temporal EMA already implies,
+                    // and the RG has it in ShaderResource layout for the
+                    // SampledImage descriptor without a mid-pass transition.
+                    ResourceHandle cascadeFinalTex = (cascadeActive && cascadePrevTex != handles::INVALID_RESOURCE)
+                        ? cascadePrevTex : dummy_texture_3d_;
                     if (splitIsVk) {
                         DescriptorData finParams[] = {
                             {0, DescriptorType::SampledImage,  prevColorTex},
@@ -1512,12 +1765,14 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {10, DescriptorType::StorageBuffer, scGridCards},
                             {11, DescriptorType::StorageBuffer, ddgiIrr},
                             {12, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
+                            {13, DescriptorType::SampledImage, cascadeFinalTex},  // T3.5
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 13);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 14);
                     } else {
                         DescriptorData finParams[] = {
                             {0, DescriptorType::SampledImage,  prevColorTex},
                             {1, DescriptorType::SampledImage,  scLightingAtlas},
+                            {2, DescriptorType::SampledImage,  cascadeFinalTex},  // T3.5
                             {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
                             {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                             {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
@@ -1530,7 +1785,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {9, DescriptorType::StorageBuffer, ddgiIrr},
                             {10, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 13);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 14);
                     }
                     cmd->BindComputePipeline(finalize_pipeline_);
                     const DescriptorSetHandle finSets[] = { finalize_ds_[frameIdx] };

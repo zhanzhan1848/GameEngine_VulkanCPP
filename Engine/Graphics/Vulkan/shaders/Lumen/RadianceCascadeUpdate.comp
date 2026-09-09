@@ -20,7 +20,12 @@ layout(set = 0, binding = 2, std140) uniform CascadeParams {
     float pad1;
 } cp;
 
-layout(set = 0, binding = 3) uniform texture3D ddgi_irradiance_tex;
+// DDGI irradiance is the same flat 9-vec4-per-probe storage buffer every
+// other consumer binds (ScreenProbeTraceFinalize.comp binding 11 convention).
+// L0 coefficient lives at [pIdx * 9].
+layout(set = 0, binding = 3, std430) readonly buffer DDGIIrradianceBuf {
+    vec4 ddgi_irradiance_vec4[];
+} ddgiIrr;
 
 void main() {
     uvec3 tid = gl_GlobalInvocationID.xyz;
@@ -66,7 +71,7 @@ void main() {
     for (int p = 0; p < 8; ++p) {
         if (w[p] < 0.01) continue;
         uint pIdx = uint(pc[p].x) + uint(cp.ddgi_counts.x) * (uint(pc[p].y) + uint(cp.ddgi_counts.y) * uint(pc[p].z));
-        vec3 irr = C0 * texelFetch(ddgi_irradiance_tex, ivec3(int(pIdx), 0, 0), 0).rgb;
+        vec3 irr = C0 * ddgiIrr.ddgi_irradiance_vec4[pIdx * 9u].rgb;
         radiance += irr * w[p];
         wsum += w[p];
     }

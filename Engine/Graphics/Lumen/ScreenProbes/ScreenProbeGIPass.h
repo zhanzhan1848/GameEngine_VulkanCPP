@@ -115,6 +115,24 @@ static_assert(offsetof(ScreenProbeGlobalData, hzb_params) == 384, "HZB constants
 static_assert(offsetof(ScreenProbeGlobalData, cache_params) == 400, "Cache constants offset mismatch");
 
 // ============================================================================
+// RadianceCascadeParams — T3.5 cascade update constants (must match both
+// shader dialects: std140 block in RadianceCascadeUpdate.comp, MSL struct in
+// RadianceCascadeUpdate.metal). 4 × vec4 + 4 scalars = 80B in both layouts.
+// ============================================================================
+
+struct RadianceCascadeParams {
+    math::v4 origin_spacing;        // xyz = cascade origin (world), w = texel spacing
+    math::v4 counts_enabled;        // xyz = cascade resolution (32,32,32), w = enabled (0/1)
+    math::v4 ddgi_origin_spacing;   // xyz = DDGI probe grid origin, w = probe spacing
+    math::v4 ddgi_counts;           // xyz = DDGI probe counts per axis
+    float    temporal_weight;       // EMA factor toward the previous cascade
+    float    frame_index;           // EMA engages from frame 2
+    float    pad[2];
+};
+
+static_assert(sizeof(RadianceCascadeParams) == 80, "RadianceCascade shader constants must stay 80 bytes");
+
+// ============================================================================
 // ScreenProbeGIPass
 // ============================================================================
 
@@ -265,7 +283,10 @@ private:
     void CreateConstantBuffers();
     // T3.5: world-space radiance cascade (32³ RGBA16F double-buffered)
     void CreateRadianceCascade();
-    void DispatchCascadeUpdate(rhi::RHICommandBuffer* cmd, u32 frameIdx, u32 cascadeIdx);
+    // writeTex/prevTex are the RG-resolved physical cascade textures of this
+    // frame (writeIdx = cascade_update_frame_ % 2; prev = 1 - writeIdx).
+    void DispatchCascadeUpdate(rhi::RHICommandBuffer* cmd, u32 frameIdx,
+                               rhi::ResourceHandle writeTex, rhi::ResourceHandle prevTex);
     void CreateBuffers();
 
     bool              initialized_{ false };
@@ -399,6 +420,14 @@ private:
     math::v3 cascade_origin_{0.0f};
     math::v3 cascade_extent_{128.0f};  // cubic extent (single scalar for simplicity)
     float cascade_spacing_ = 128.0f / 32.0f;  // = 4.0 world units per cascade texel
+    // T3.5: per-frame RadianceCascadeParams upload (80B, triple-buffered;
+    // Metal overrides buffer(3) with setBytes at dispatch time).
+    rhi::ResourceHandle cascade_params_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE };
+    // 1³ RGBA16F dummy bound at the finalize cascade slot when the cascade
+    // system is off (layout must stay complete for the recompiled shaders).
+    rhi::ResourceHandle dummy_texture_3d_{ rhi::handles::INVALID_RESOURCE };
 
     // Dummy resources for Metal validation (bound when surface cache is unavailable)
     rhi::ResourceHandle dummy_buffer_{ rhi::handles::INVALID_RESOURCE };

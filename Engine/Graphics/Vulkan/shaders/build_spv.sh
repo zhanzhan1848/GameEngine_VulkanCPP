@@ -372,6 +372,37 @@ for i in "${!LUMEN_GLSL_NAMES[@]}"; do
     rm -rf "$tmpdir"
 done
 
+# T3.5: RadianceCascadeUpdate — 32³ world-space radiance cascade update.
+src="$DEST_DIR/Lumen/RadianceCascadeUpdate.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Lumen/RadianceCascadeUpdate.comp.spv"
+    tmpdir="$(mktemp -d)"
+    if glslangValidator --quiet -V "$src" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out")
+        printf "OK    Lumen/RadianceCascadeUpdate.comp.spv (%d bytes)\n" "$sz"
+    else
+        echo "FAIL  Lumen/RadianceCascadeUpdate.comp.spv"
+        sed 's/^/    /' "$tmpdir/err"
+    fi
+    rm -rf "$tmpdir"
+fi
+
+# T3.2 (D7): DDGITraceSDFCone — PRIMAL_SDF_CONE variant for cone-mip far stepping.
+src="$DEST_DIR/Lumen/DDGITraceSDF.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Lumen/DDGITraceSDFCone.comp.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGITraceSDF.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V -DPRIMAL_SDF_CONE --source-entrypoint main -e ddgi_trace_sdf "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out")
+        printf "OK    Lumen/DDGITraceSDFCone.comp.spv (%d bytes)\n" "$sz"
+    else
+        echo "FAIL  Lumen/DDGITraceSDFCone.comp.spv"
+        sed 's/^/    /' "$tmpdir/err"
+    fi
+    rm -rf "$tmpdir"
+fi
+
 # T3.2: GlobalSDF min-mipmap kernel — Nanite/GlobalSDFVoxelizationGLSL.comp
 # second entry, same source, into Nanite/GlobalSDFMipmap.spv.
 src="$DEST_DIR/Nanite/GlobalSDFVoxelizationGLSL.comp"

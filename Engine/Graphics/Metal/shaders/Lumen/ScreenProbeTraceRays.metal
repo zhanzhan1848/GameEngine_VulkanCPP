@@ -655,12 +655,17 @@ kernel void screen_probe_trace_sdf(
 // T5.1 2c: radiance finalize — texture2D + buffers only (no texture3D).
 //   w==1 HZB hit → prev frame color at hit UV (sharp screen-space detail)
 //   w==2 SDF hit → SC card grid (T1.3) for near hits → prev color projection
-//   w==3 far-cache (F1) → DDGI 4-probe tetrahedral L0+L1 at the stop point
+//   w==3 far-cache (F1) → T3.5 radiance cascade 1-texel read (legacy: DDGI
+//        4-probe tetrahedral L0+L1 at the stop point)
 //   w==0 miss    → DDGI probe fallback (T2.2) → sky gradient
+// T3.5 note: texture(2) adds ONE texture3d read (unfiltered texel fetch) to
+// this kernel — within the Apple Silicon read budget, monitored via
+// PRIMAL_GI_CASCADE=0 A/B.
 // ============================================================================
 kernel void screen_probe_trace_finalize(
     texture2d<float, access::sample>  prevFrameColor        [[texture(0)]],
     texture2d<float, access::sample>  surface_cache_lighting [[texture(1)]],
+    texture3d<float, access::read>    radianceCascade        [[texture(2)]],  // T3.5
 
     device const float4*              probePositions  [[buffer(0)]],
     device const float4*              probeNormals    [[buffer(1)]],
@@ -768,12 +773,34 @@ kernel void screen_probe_trace_finalize(
         cosTheta = max(dot(probeNormal, rayDir), 0.0f);
     } else if (hit.w == 3.0f) {
         // F1 (M7) far-cache: the SDF march stopped at far_cache_start —
-        // query the DDGI radiance cache at the stop point (UE world-probe
-        // semantics). Read budget: 4-probe tetrahedral × L0+L1 = 16 buffer
-        // reads. Mirrors ScreenProbeTraceFinalize.comp byte-for-byte.
+        // query the radiance cache at the stop point (UE world-probe
+        // semantics). T3.5: the 32³ radiance cascade serves the query with
+        // ONE texel read (cache_params.w gates the fast path); the legacy
+        // 4-probe tetrahedral × L0+L1 = 16 buffer reads stays as fallback.
+        // Mirrors ScreenProbeTraceFinalize.comp byte-for-byte.
         float3 stopPos = origin + rayDir * max(hit.x, 0.0f);
         bool ddgiOk = false;
-        if (global.ddgi_fb[1].w > 0.5f) {
+        if (global.cache_params.w > 0.5f && global.ddgi_fb[1].w > 0.5f) {
+            // Extent derivation — must match DispatchCascadeUpdate:
+            // extent = max(counts)×spacing×2, origin = ddgi_origin − extent×0.25.
+            float ddgiSpan = max(max(global.ddgi_fb[1].x, global.ddgi_fb[1].y),
+                                 global.ddgi_fb[1].z) * global.ddgi_fb[0].w;
+            float cExtent = max(ddgiSpan * 2.0f, 1.0f);
+            float3 cOrg = global.ddgi_fb[0].xyz - float3(cExtent * 0.25f);
+            float cSpacing = cExtent / 32.0f;
+            float3 cgp = (stopPos - cOrg) / cSpacing;
+            if (all(cgp >= float3(0.0f)) && all(cgp < float3(32.0f))) {
+                // texture3d access::read does not clamp — guard manually.
+                uint3 ct = min(uint3(floor(cgp)), uint3(31u));
+                float3 cached = radianceCascade.read(ct).rgb;
+                if (all(cached > float3(0.0f))) {
+                    radiance = cached;
+                    cosTheta = max(dot(probeNormal, rayDir), 0.0f);
+                    ddgiOk = true;
+                }
+            }
+        }
+        if (!ddgiOk && global.ddgi_fb[1].w > 0.5f) {
             float3 org = global.ddgi_fb[0].xyz;
             float spacing = max(global.ddgi_fb[0].w, 0.01f);
             int3 counts = int3(global.ddgi_fb[1].xyz);

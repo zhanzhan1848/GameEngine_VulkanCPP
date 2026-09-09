@@ -548,7 +548,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         capture_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- IndirectTrace: 5 textures (depth+normal+3 SDF) + 1 UBO + 1 UBO + 2 SSBO ---
+    // --- IndirectTrace: 5 textures (depth+normal+3 SDF) + 3 SDF mips + 1 UBO + 1 UBO + 2 SSBO ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas
@@ -560,12 +560,21 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits
+            // T3.2 (D7) cone-hit 消费者（T3.3 Radiosity 的 indirect trace）：
+            // cascade-0 conservative min-mip 链（DispatchMipChain 产出）。
+            // 缺槽回绑 sdf0 本体——shader 用 textureSize 对比自门控。
+            {9,  DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // cascade0 mip1 (3D)
+            {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // cascade0 mip2 (3D)
+            {11, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // cascade0 mip3 (3D)
         };
         // Mark SDF textures as 3D view dimension
         bindings[2].is3D = true;
         bindings[3].is3D = true;
         bindings[4].is3D = true;
-        indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+        bindings[9].is3D = true;
+        bindings[10].is3D = true;
+        bindings[11].is3D = true;
+        indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout({12, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_atlas  [[texture(0)]]
@@ -573,12 +582,15 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // sdf0         [[texture(2)]]
             {3, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // sdf1         [[texture(3)]]
             {4, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // sdf2         [[texture(4)]]
+            {5, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // cascade0 mip1 [[texture(5)]] (T3.2)
+            {6, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // cascade0 mip2 [[texture(6)]] (T3.2)
+            {7, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // cascade0 mip3 [[texture(7)]] (T3.2)
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // global_cb    [[buffer(0)]]
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params       [[buffer(1)]]
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards        [[buffer(2)]]
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits     [[buffer(3)]]
         };
-        DescriptorSetLayoutDesc layoutDesc{9, bindings};
+        DescriptorSetLayoutDesc layoutDesc{12, bindings};
         indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1991,7 +2003,22 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                     // ---- trace descriptors + dispatch ----
                     {
-                        DescriptorData ip[9];
+                        // T3.2: cascade-0 min-mip 链绑定（cone 命中检测消费者）。
+                        // PRIMAL_SDF_CONE_HIT=0 或链未分配时回绑 sdf0 本体——
+                        // shader 用 textureSize(mip) < textureSize(sdf0) 自门控。
+                        static const bool coneHitOn = [] {
+                            const char* e = std::getenv("PRIMAL_SDF_CONE_HIT");
+                            return !(e && std::strcmp(e, "0") == 0);
+                        }();
+                        const auto& cas0 = gsdf.GetCascade(0);
+                        ResourceHandle mipTex[3];
+                        for (u32 m = 0; m < 3; ++m) {
+                            ResourceHandle h = (coneHitOn && m < cas0.mip_count)
+                                ? cas0.mip_textures[m] : cas0.sdf_texture;
+                            if (h == rhi::handles::INVALID_RESOURCE) h = cas0.sdf_texture;
+                            mipTex[m] = h;
+                        }
+                        DescriptorData ip[12];
                         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
                             ip[0] = {0, DescriptorType::StorageImage,  depth_atlas_};
                             ip[1] = {1, DescriptorType::StorageImage,  normal_atlas_};
@@ -2002,18 +2029,24 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             ip[6] = {6, DescriptorType::UniformBuffer, indirect_trace_params_cb_[frameIdx]};
                             ip[7] = {7, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
                             ip[8] = {8, DescriptorType::StorageBuffer, ray_hits_buffer_};
+                            ip[9]  = {9,  DescriptorType::SampledImage, mipTex[0]};
+                            ip[10] = {10, DescriptorType::SampledImage, mipTex[1]};
+                            ip[11] = {11, DescriptorType::SampledImage, mipTex[2]};
                         } else {
                             ip[0] = {0, DescriptorType::StorageImage,  depth_atlas_};
                             ip[1] = {1, DescriptorType::StorageImage,  normal_atlas_};
                             ip[2] = {2, DescriptorType::SampledImage,  gsdf.GetCascade(0).sdf_texture};
                             ip[3] = {3, DescriptorType::SampledImage,  gsdf.GetCascade(1).sdf_texture};
                             ip[4] = {4, DescriptorType::SampledImage,  gsdf.GetCascade(2).sdf_texture};
-                            ip[5] = {0, DescriptorType::UniformBuffer, indirect_dummy_cb_};
-                            ip[6] = {1, DescriptorType::UniformBuffer, indirect_trace_params_cb_[frameIdx]};
-                            ip[7] = {2, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
-                            ip[8] = {3, DescriptorType::StorageBuffer, ray_hits_buffer_};
+                            ip[5] = {5, DescriptorType::SampledImage,  mipTex[0]};
+                            ip[6] = {6, DescriptorType::SampledImage,  mipTex[1]};
+                            ip[7] = {7, DescriptorType::SampledImage,  mipTex[2]};
+                            ip[8] = {0, DescriptorType::UniformBuffer, indirect_dummy_cb_};
+                            ip[9] = {1, DescriptorType::UniformBuffer, indirect_trace_params_cb_[frameIdx]};
+                            ip[10] = {2, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
+                            ip[11] = {3, DescriptorType::StorageBuffer, ray_hits_buffer_};
                         }
-                        UpdateDescriptorSet(device_, indirect_trace_set_[frameIdx], ip, 9);
+                        UpdateDescriptorSet(device_, indirect_trace_set_[frameIdx], ip, 12);
                         cmd->BindComputePipeline(indirect_trace_pipeline_);
                         const DescriptorSetHandle isets[] = { indirect_trace_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_trace_layout_, 0, 1, isets, 0, nullptr);
@@ -2024,6 +2057,63 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         rb.afterState  = rhi::ResourceState::UnorderedAccess;
                         rb.subresource = 0xFFFFFFFF;
                         cmd->InsertBarrier(&rb, 1);
+
+                        // T3.2 bring-up: PRIMAL_SDF_CONE_STATS=1 — 头 3 帧
+                        // readback ray_hits 类型分布。与 PRIMAL_SDF_CONE_HIT=0
+                        // 对跑，far 计数差 = cone 检测的 sky→far 转化量。
+                        //（ProbeRayHit 双端都是 32B/条，hit_type 在 +20B。）
+                        static const bool coneStatsOn = [] {
+                            const char* e = std::getenv("PRIMAL_SDF_CONE_STATS");
+                            return e && atoi(e) != 0;
+                        }();
+                        static u32 coneStatsFrames = 0;
+                        if (coneStatsOn && coneStatsFrames < 3) {
+                            ++coneStatsFrames;
+                            const u64 totalHits = (u64)kTiles * kTiles * kRays;
+                            const u64 copyBytes = totalHits * 32ull;
+                            static rhi::ResourceHandle coneStaging = rhi::handles::INVALID_RESOURCE;
+                            if (coneStaging == rhi::handles::INVALID_RESOURCE) {
+                                rhi::BufferDesc cs{};
+                                cs.size = copyBytes;
+                                cs.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
+                                cs.usage = rhi::GPUMemoryUsage::Readback;
+                                cs.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                                cs.name = "SDFCone_Stats";
+                                coneStaging = device_->CreateBuffer(cs);
+                            }
+                            if (coneStaging != rhi::handles::INVALID_RESOURCE) {
+                                auto ch = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+                                auto* c = rhi::GetCommandBuffer(ch);
+                                if (c) {
+                                    c->Begin();
+                                    c->CopyBuffer(ray_hits_buffer_, coneStaging, 0, 0, copyBytes);
+                                    c->End(); c->Submit(); c->WaitForCompletion();
+                                    device_->DestroyCommandBuffer(ch);
+                                    if (auto* q = static_cast<const u8*>(device_->MapBuffer(coneStaging))) {
+                                        u64 nearHits = 0, farHits = 0, skyHits = 0;
+                                        for (u64 h = 0; h < totalHits; ++h) {
+                                            const u32 type = *reinterpret_cast<const u32*>(q + h * 32ull + 20ull);
+                                            if (type == 0u) ++nearHits;
+                                            else if (type == 1u) ++farHits;
+                                            else ++skyHits;
+                                        }
+                                        PRIMAL_LOG_STREAM(Info, "Render")
+                                            << "[SDFCone] frame " << coneStatsFrames
+                                            << " ray types: near=" << nearHits
+                                            << " far=" << farHits
+                                            << " sky=" << skyHits
+                                            << " (total=" << totalHits << ")" << std::endl;
+                                        PRIMAL_LOG_STREAM(Info, "Render")
+                                            << "[SDFCone] cas0 origin=(" << cas0.origin.x << ","
+                                            << cas0.origin.y << "," << cas0.origin.z << ") extent=("
+                                            << cas0.extent.x << "," << cas0.extent.y << ","
+                                            << cas0.extent.z << ") voxel=" << cas0.voxel_size
+                                            << " mip_count=" << cas0.mip_count << std::endl;
+                                        device_->UnmapBuffer(coneStaging);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // ---- resolve params upload ----
