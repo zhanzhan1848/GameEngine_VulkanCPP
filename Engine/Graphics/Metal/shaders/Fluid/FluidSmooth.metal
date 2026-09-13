@@ -28,7 +28,7 @@ kernel void fluid_smooth(
 
     constexpr sampler s(coord::pixel, filter::nearest, address::clamp_to_edge);
 
-    float centerDepth = depth_in.sample(s, float2(gid)).r;
+    float centerDepth = depth_in.sample(s, float2(float(gid.x), float(gid.y))).r;
 
     // No fluid at this pixel — pass through
     if (centerDepth <= 0.0) {
@@ -51,7 +51,7 @@ kernel void fluid_smooth(
             int2 samplePos = int2(gid) + int2(dx, dy);
             if (samplePos.x < 0 || samplePos.y < 0) continue;
 
-            float sampleDepth = depth_in.sample(s, float2(samplePos)).r;
+            float sampleDepth = depth_in.sample(s, float2(float(samplePos.x), float(samplePos.y))).r;
             if (sampleDepth <= 0.0) continue;
 
             // Bilateral weights: spatial + depth

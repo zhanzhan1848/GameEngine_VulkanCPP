@@ -390,9 +390,42 @@ FluidOutput FluidRenderPass::AddPass(RenderGraph& graph, const FluidInputs& inpu
                 }
             }
 
-            // TODO: Sub-pass 1 — FluidSplat (graphics pass with particle buffer)
-            // Requires render pass setup with depth + thickness render targets
-            // Skipping for now — needs graphics encoder integration
+            // Sub-pass 1 — FluidSplat（图形 pass：粒子点精灵 → 半分辨率深度 + 厚度）
+            // N6 fluid 渲染器接线（架构文档 §10.6.3）：粒子缓冲（xyz=pos, w=radius）
+            // 渲入 fluid_thickness_[outIdx]（加色）与 fluid_depth_[outIdx]（D32 深度测试/写入）。
+            if (splat_pipeline_ != handles::INVALID_PIPELINE && inputs.particle_count > 0) {
+                rhi::RenderPassDesc rp{};
+                rp.viewport = {{0.0f, 0.0f}, {(float)half_w, (float)half_h}, 0.0f, 1.0f};
+                rp.scissor = {{0, 0}, {(u32)half_w, (u32)half_h}};
+
+                rhi::RenderPassDesc::Attachment color_att{};
+                color_att.texture = fluid_thickness_[outIdx];
+                color_att.format = DataFormat::R16_Float;
+                color_att.loadOp = LoadAction::Clear;
+                color_att.storeOp = StoreAction::Store;
+                rp.colorAttachments.push_back(color_att);
+
+                rhi::RenderPassDesc::Attachment depth_att{};
+                depth_att.texture = fluid_depth_[outIdx];
+                depth_att.format = DataFormat::D32_Float;
+                depth_att.loadOp = LoadAction::Clear;
+                depth_att.storeOp = StoreAction::Store;
+                depth_att.clearValue.depth = 1.0f;
+                rp.depthAttachment = depth_att;
+
+                cmd->BeginRenderPass(rp);
+                cmd->BindGraphicsPipeline(splat_pipeline_);
+                cmd->BindDescriptorSets(PipelineBindPoint::Graphics, splat_layout_,
+                                        0, 1, &splat_ds_[outIdx], 0, nullptr);
+                cmd->Draw(6, 0, inputs.particle_count, 0);
+                cmd->EndRenderPass();
+                if (!splat_log_once_) {
+                    splat_log_once_ = true;
+                    PRIMAL_LOG_STREAM(Info, "ParticleFX")
+                        << "[FluidSplat] splatting " << inputs.particle_count
+                        << " particles into half-res depth/thickness" << std::endl;
+                }
+            }
 
             // Sub-pass 2 — FluidSmooth (compute)
             if (smooth_pipeline_ != handles::INVALID_PIPELINE) {

@@ -17,6 +17,7 @@ struct ParticleUniforms {
     uint texture_frames_x;
     uint texture_frames_y;
     float frame_rate;
+    float4 soft_params;   // N6 soft particles：x=softness（深度差衰减尺度）y=enabled zw=pad
 };
 
 struct VisibleIndices {
@@ -33,6 +34,9 @@ struct ParticleVertexOut {
     float2 uv;
     float age;
     uint texture_frame;
+    float2 screen_uv;   // N6 soft particles：屏幕 uv（深度采样）
+    float clip_depth;   // N6 soft particles：粒子自身深度（clip.z/w，Metal [0,1]）
+    float soft_pad;
 };
 
 struct QuadVertex {
@@ -87,7 +91,10 @@ vertex ParticleVertexOut particle_vertex_instanced(
     float3 offset = camera_right * quad.position.x * scale.x + camera_up * quad.position.y * scale.y;
     
     float4 world_position = float4(world_pos + offset, 1.0);
-    out.position = uniforms.view_projection * world_position;
+    float4 clip = uniforms.view_projection * world_position;
+    out.position = clip;
+    out.screen_uv = (clip.xy / clip.w) * 0.5 + 0.5;
+    out.clip_depth = clip.z / clip.w;
     
     // Color with age-based alpha fade
     float age = p.position.w;
@@ -115,7 +122,10 @@ vertex ParticleVertexOut particle_vertex_point(
     
     float3 world_pos = p.position.xyz;
     
-    out.position = uniforms.view_projection * float4(world_pos, 1.0);
+    float4 clip = uniforms.view_projection * float4(world_pos, 1.0);
+    out.position = clip;
+    out.screen_uv = (clip.xy / clip.w) * 0.5 + 0.5;
+    out.clip_depth = clip.z / clip.w;
     
     // Set point size based on scale and distance
     float dist = length(world_pos);
@@ -135,8 +145,16 @@ vertex ParticleVertexOut particle_vertex_point(
 fragment float4 particle_fragment(
     ParticleVertexOut in [[stage_in]],
     texture2d<float> particle_texture [[texture(0)]],
-    sampler tex_sampler [[sampler(0)]])
+    sampler tex_sampler [[sampler(0)]],
+    depth2d<float> scene_depth [[texture(1)]],
+    constant ParticleUniforms& uniforms [[buffer(0)]])
 {
+    // N6 soft particles：场景深度差淡出（同空间深度值比较，方向单调）
+    float soft_fade = 1.0;
+    if (uniforms.soft_params.y > 0.5) {
+        float scene_d = scene_depth.sample(tex_sampler, in.screen_uv);
+        soft_fade = saturate((scene_d - in.clip_depth) / max(uniforms.soft_params.x, 1e-5));
+    }
     float4 tex_color = particle_texture.sample(tex_sampler, in.uv);
     float4 final_color = tex_color * in.color;
     
@@ -144,11 +162,16 @@ fragment float4 particle_fragment(
         discard_fragment();
     }
     
+    final_color.a *= soft_fade;
     return final_color;
 }
 
 fragment float4 particle_fragment_untextured(
-    ParticleVertexOut in [[stage_in]])
+    ParticleVertexOut in [[stage_in]],
+    texture2d<float> particle_texture [[texture(0)]],
+    depth2d<float> scene_depth [[texture(1)]],
+    sampler tex_sampler [[sampler(0)]],
+    constant ParticleUniforms& uniforms [[buffer(0)]])
 {
     // Create circular shape from UV
     float2 centered = in.uv - 0.5;
@@ -158,8 +181,15 @@ fragment float4 particle_fragment_untextured(
         discard_fragment();
     }
     
-    // Soft edge
+    // Soft edge（UV 圆形边缘）
     float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
     
-    return float4(in.color.rgb, in.color.a * alpha);
+    // N6 soft particles：场景深度差淡出
+    float soft_fade = 1.0;
+    if (uniforms.soft_params.y > 0.5) {
+        float scene_d = scene_depth.sample(tex_sampler, in.screen_uv);
+        soft_fade = saturate((scene_d - in.clip_depth) / max(uniforms.soft_params.x, 1e-5));
+    }
+    
+    return float4(in.color.rgb, in.color.a * alpha * soft_fade);
 }

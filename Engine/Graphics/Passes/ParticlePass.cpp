@@ -126,11 +126,12 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
             { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Vertex },  // Particle data
             { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Vertex },  // Visible count
             { 3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::ShaderStage::Pixel },  // Texture
+            { 4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::ShaderStage::Pixel },  // N6: Scene depth (soft particles)
         };
 
         rhi::DescriptorSetLayoutDesc layout_desc{};
         layout_desc.bindings = bindings;
-        layout_desc.bindingCount = 4;
+        layout_desc.bindingCount = 5;
         descriptor_set_layout_ = device->CreateDescriptorSetLayout(layout_desc);
 
         rhi::PushConstantRange push_ranges[] = {
@@ -367,6 +368,9 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     pc.texture_frames_x = texture_frames_x_;
     pc.texture_frames_y = texture_frames_y_;
     pc.frame_rate = texture_frame_rate_;
+    pc.soft_params[0] = softness_;
+    pc.soft_params[1] = (soft_enabled_ && scene_depth_ != rhi::handles::INVALID_RESOURCE) ? 1.f : 0.f;
+    pc.soft_params[2] = pc.soft_params[3] = 0.f;
     
     // T4.6.5 part 16.3: Vulkan reads uniforms from UBO at binding 0
     // (ParticlePushConstants is 152B > Vulkan default maxPushConstantsSize 128B).
@@ -440,6 +444,12 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     // Draw instanced: 6 vertices per particle quad, N instances
     // Draw(vertexCount, startVertex, instanceCount, startInstance)
     cmd_buffer->Draw(6, 0, active_count, 0);
+    if (pc.soft_params[1] > 0.5f && !soft_log_once_) {
+        soft_log_once_ = true;
+        PRIMAL_LOG_STREAM(Info, "ParticleFX")
+            << "[ParticlePass] soft particles active (softness=" << softness_
+            << ", depth bound)" << std::endl;
+    }
 }
 void ParticlePass::set_blend_mode(particles::blend_mode mode) {
     current_blend_mode_ = mode;
@@ -568,9 +578,10 @@ void ParticlePass::update_descriptor_set(u32 frame_index) {
     if (descriptor_sets_[frame_index] == rhi::handles::INVALID_DESCRIPTOR_SET) return;
     
     // Update descriptor set with current buffers and texture
-    rhi::WriteDescriptorSet writes[4];
+    rhi::WriteDescriptorSet writes[5];
     rhi::DescriptorBufferInfo bufferInfos[3];
     rhi::DescriptorImageInfo imageInfo{};
+        rhi::DescriptorImageInfo depthImageInfo{};
     
     // Binding 0: Uniform buffer
     writes[0].dstSet = descriptor_sets_[frame_index];
@@ -611,8 +622,22 @@ void ParticlePass::update_descriptor_set(u32 frame_index) {
     imageInfo.imageLayout = rhi::ResourceState::ShaderResource;
     imageInfo.sampler = defaultSampler_;
     writes[3].imageInfo = &imageInfo;
-    
-    device_->UpdateDescriptorSets(4, writes);
+
+    // Binding 4: Scene depth (N6 soft particles；未启用时不写，shader 分支旁路采样)
+    const bool soft_active = soft_enabled_ && scene_depth_ != rhi::handles::INVALID_RESOURCE;
+    if (soft_active) {
+        writes[4].dstSet = descriptor_sets_[frame_index];
+        writes[4].dstBinding = 4;
+        writes[4].descriptorCount = 1;
+        writes[4].descriptorType = rhi::DescriptorType::CombinedImageSampler;
+        depthImageInfo.imageView = scene_depth_;
+        depthImageInfo.imageLayout = rhi::ResourceState::ShaderResource;
+        depthImageInfo.sampler = defaultSampler_;
+        writes[4].imageInfo = &depthImageInfo;
+    }
+    const u32 write_count = soft_active ? 5u : 4u;
+
+    device_->UpdateDescriptorSets(write_count, writes);
 }
 
 void ParticlePass::create_default_texture() {

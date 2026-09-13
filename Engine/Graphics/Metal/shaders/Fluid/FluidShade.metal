@@ -55,15 +55,15 @@ kernel void fluid_shade(
     constexpr sampler s(coord::pixel, filter::nearest, address::clamp_to_edge);
     constexpr sampler bilinear(coord::normalized, filter::linear, address::clamp_to_edge);
 
-    float2 uv = (float2(gid) + 0.5) / params.ScreenParams.xy;
+    float2 uv = (float2(float(gid.x), float(gid.y)) + 0.5) / params.ScreenParams.xy;
 
-    float depth = smoothed_depth.sample(s, float2(gid)).r;
+    float depth = smoothed_depth.sample(s, float2(float(gid.x), float(gid.y))).r;
     if (depth <= 0.0) return;
 
-    float4 normalEnc = fluid_normal.sample(s, float2(gid));
+    float4 normalEnc = fluid_normal.sample(s, float2(float(gid.x), float(gid.y)));
     if (normalEnc.a < 0.5) return;
 
-    float thickness = fluid_thickness.sample(s, float2(gid)).r;
+    float thickness = fluid_thickness.sample(s, float2(float(gid.x), float(gid.y))).r;
     float ior = params.FluidParams1.w;
     float absorption = params.FluidParams1.z;
 

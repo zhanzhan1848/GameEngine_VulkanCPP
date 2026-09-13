@@ -50,7 +50,7 @@ kernel void fluid_normal(
 
     constexpr sampler s(coord::pixel, filter::nearest, address::clamp_to_edge);
 
-    float centerDepth = smoothed_depth.sample(s, float2(gid)).r;
+    float centerDepth = smoothed_depth.sample(s, float2(float(gid.x), float(gid.y))).r;
 
     // No fluid — mark invalid
     if (centerDepth <= 0.0) {
@@ -59,11 +59,11 @@ kernel void fluid_normal(
     }
 
     // Cross-pattern finite differences (4 texture reads)
-    uint2 w = uint(params.ScreenParams.x), h = uint(params.ScreenParams.y);
-    float dLeft   = smoothed_depth.sample(s, float2(max(int(gid.x) - 1, 0), gid.y)).r;
-    float dRight  = smoothed_depth.sample(s, float2(min(gid.x + 1, w - 1u), gid.y)).r;
-    float dTop    = smoothed_depth.sample(s, float2(gid.x, max(int(gid.y) - 1, 0))).r;
-    float dBottom = smoothed_depth.sample(s, float2(gid.x, min(gid.y + 1, h - 1u))).r;
+    uint w = uint(params.ScreenParams.x), h = uint(params.ScreenParams.y);
+    float dLeft   = smoothed_depth.sample(s, float2(float(max(int(gid.x) - 1, 0)), float(gid.y))).r;
+    float dRight  = smoothed_depth.sample(s, float2(float(min(gid.x + 1u, w - 1u)), float(gid.y))).r;
+    float dTop    = smoothed_depth.sample(s, float2(float(gid.x), float(max(int(gid.y) - 1, 0)))).r;
+    float dBottom = smoothed_depth.sample(s, float2(float(gid.x), float(min(gid.y + 1, h - 1u)))).r;
 
     // Use valid neighbors only
     float dx = 0.0, dy = 0.0;
@@ -76,9 +76,9 @@ kernel void fluid_normal(
     else if (dBottom > 0.0) dy = dBottom - centerDepth;
 
     // Reconstruct world positions for normal estimation
-    float2 uv      = (float2(gid) + 0.5) / params.ScreenParams.xy;
-    float2 uvRight = (float2(gid) + float2(1.0, 0.5)) / params.ScreenParams.xy;
-    float2 uvUp    = (float2(gid) + float2(0.5, 1.0)) / params.ScreenParams.xy;
+    float2 uv      = (float2(float(gid.x), float(gid.y)) + 0.5) / params.ScreenParams.xy;
+    float2 uvRight = (float2(float(gid.x), float(gid.y)) + float2(1.0, 0.5)) / params.ScreenParams.xy;
+    float2 uvUp    = (float2(float(gid.x), float(gid.y)) + float2(0.5, 1.0)) / params.ScreenParams.xy;
 
     float3 posCenter = reconstructWorldPos(uv, centerDepth, params);
     float3 posRight  = reconstructWorldPos(uvRight, max(dRight, centerDepth), params);

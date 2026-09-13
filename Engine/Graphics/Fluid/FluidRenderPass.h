@@ -50,6 +50,7 @@ private:
     void CreateFluidTextures();
 
     bool              initialized_{ false };
+    bool              splat_log_once_{ false };
     rhi::RHIDeviceBase* device_{ nullptr };
     u32               render_width_{ 0 };
     u32               render_height_{ 0 };

@@ -32,6 +32,17 @@ public:
     void set_particle_texture(rhi::ResourceHandle texture);
     void set_sorting_enabled(bool enabled) { enable_sorting_ = enabled; }
     bool is_sorting_enabled() const { return enable_sorting_; }
+
+    // N6 soft particles 真实现：绑定场景深度并启用深度差淡出（旧假开关的了断）。
+    // depth 传 INVALID_RESOURCE = 禁用（shader 分支旁路，采样不会执行）。
+    void set_soft_particles(bool enabled, f32 softness = 0.004f) {
+        soft_enabled_ = enabled;
+        softness_ = softness > 1e-5f ? softness : 1e-5f;
+    }
+    void set_scene_depth(rhi::ResourceHandle depth) {
+        scene_depth_ = depth;
+        if (device_) for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) update_descriptor_set(i);
+    }
     rhi::PipelineHandle get_current_pipeline() const;
 private:
     struct ParticlePushConstants {
@@ -43,6 +54,7 @@ private:
         u32 texture_frames_x;
         u32 texture_frames_y;
         f32 frame_rate;
+        f32 soft_params[4];   // N6 soft particles：x=softness y=enabled zw=pad（尾部追加，Vulkan UBO 布局兼容）
     };
     
     rhi::RHIDeviceBase* device_{ nullptr };
@@ -66,6 +78,10 @@ private:
     };
     rhi::ResourceHandle particle_texture_{ rhi::handles::INVALID_RESOURCE };
     rhi::SamplerHandle defaultSampler_{ rhi::handles::INVALID_SAMPLER };
+    rhi::ResourceHandle scene_depth_{ rhi::handles::INVALID_RESOURCE };
+    bool soft_enabled_{ false };
+    f32 softness_{ 0.004f };
+    bool soft_log_once_{ false };
     
     particles::blend_mode current_blend_mode_{ particles::blend_mode::additive };
     bool depth_write_enabled_{ false };
