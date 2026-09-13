@@ -306,3 +306,35 @@ if(APPLE OR UNIX)
         target_compile_options(ContentToolsCLI PRIVATE -std=c++17 -stdlib=libc++)
     endif()
 endif()
+# =============================================================================
+# pfx_converter — PFX 离线缓存转换器（Alembic → .pcache；架构文档 §5/N4）
+# 离线工具：链接 vendored Alembic/Imath；运行时（libEngine）零第三方依赖。
+# =============================================================================
+add_executable(pfx_converter
+    pipeline/PfxCacheConvert.cpp
+    pipeline/PfxCacheConvertVdb.cpp
+    pipeline/PfxCacheConvertMain.cpp
+)
+find_package(TBB CONFIG REQUIRED
+    PATHS ${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib/cmake/TBB
+    NO_DEFAULT_PATH)
+target_include_directories(pfx_converter PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/include
+    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/include/Imath
+    ${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/include
+    ${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/include
+    /opt/homebrew/include
+)
+target_link_libraries(pfx_converter PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib/libAlembic.dylib
+    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib/libImath-3_1.dylib
+    ${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib/libopenvdb.dylib
+    TBB::tbb
+)
+set_target_properties(pfx_converter PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
+    BUILD_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
+    INSTALL_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
+)
