@@ -34,3 +34,6 @@
 [submodule "third_party/xatlas"]
 	path = third_party/xatlas
 	url = https://github.com/jpcy/xatlas.git
+[submodule "third_party/JoltPhysics"]
+	path = third_party/JoltPhysics
+	url = https://github.com/jrouwe/JoltPhysics.git

@@ -294,8 +294,12 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/Geometry/Algorithms/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JobSystem/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Simulation/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Simulation/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Particles/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Particles/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ParticleFX/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ParticleFX/*.cpp"
 )
 
 # 根据编译器排除特定文件
@@ -571,6 +575,26 @@ if(ENABLE_VULKAN)
         )
     endif()
     message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIR}")
+endif()
+
+# === Jolt Physics（物理内核；Jolt 头文件只允许出现在 Engine/Simulation/ 内部）===
+if(TARGET Jolt)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Jolt)
+    # 1) Jolt 以 -fno-rtti 编译（不产出 typeinfo）。派生 JPH::DebugRenderer 的 TU 若带
+    #    RTTI，其 vtable/typeinfo 会引用基类 typeinfo 导致链接失败。
+    # 2) Simulation 各 TU 内联了大量 Jolt 头文件模板/内联代码，引擎全局的 -ffast-math
+    #    会在 -O3 下对其实施可能改变语义的浮点变换（build-wt 的 DebugEditor 树上实证
+    #    出堆损坏）——对 Simulation 源文件统一屏蔽 fast-math。
+    #    注意：同一文件的 set_source_files_properties 是替换语义，必须一次给全。
+    file(GLOB PRIMAL_SIMULATION_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Simulation/*.cpp")
+    set_source_files_properties(${PRIMAL_SIMULATION_SOURCES} PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
+    if(MSVC)
+        set_source_files_properties(Simulation/SimulationDebugDraw.cpp PROPERTIES
+            COMPILE_OPTIONS "/GR-")
+    else()
+        set_source_files_properties(Simulation/SimulationDebugDraw.cpp PROPERTIES
+            COMPILE_OPTIONS "-fno-rtti;-fno-fast-math")
+    endif()
 endif()
 
 # 添加平台相关库

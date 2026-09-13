@@ -2588,6 +2588,47 @@ target_compile_definitions(TestParticles PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CO
 message(STATUS "Particle System Tests configured:")
 message(STATUS "  - TestParticles: Particle pool and emitter unit tests")
 
+# ======================
+# ParticleFX Framework Tests (N0 骨架 —— Docs/2026-09-12-particle-framework-architecture.md)
+# ======================
+
+add_executable(TestParticleFX
+    ParticleFX/TestParticleFX.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/AttributeStore.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/EventBus.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/PfxSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/PfxJson.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/ModuleRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/EmitterProgram.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/modules/BuiltinModules.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/LegacyPresetConvert.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/render/Bridges.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/PhysicsQuery.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/RigidBodySpawner.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/FieldSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/modules/FieldModules.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/host/BudgetManager.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/GeometryCache.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/CacheConverters.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/EmissiveGI.cpp
+)
+target_include_directories(TestParticleFX PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/EngineTest/UnitTests
+)
+if(NOT WIN32)
+    target_link_libraries(TestParticleFX PRIVATE pthread)
+endif()
+target_link_libraries(TestParticleFX PRIVATE Engine)
+add_test(NAME TestParticleFX COMMAND TestParticleFX)
+set_target_properties(TestParticleFX PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/Particles"
+)
+target_compile_definitions(TestParticleFX PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+
 # 创建RenderSystem集成测试
 add_executable(TestRenderSystemIntegration Graphics/TestRenderSystemIntegration.cpp)
 target_include_directories(TestRenderSystemIntegration PRIVATE 
@@ -3504,3 +3545,24 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -fsanitize=alignment -fno-sanitize-recover=alignment)
     target_link_options(StandaloneGraphics_SceneDataAdapter_Test PRIVATE -fsanitize=alignment)
 endif()
+
+# === Engine/Simulation L0：固定步长累加器 / 碰撞层矩阵 / 确定性哈希（Jolt，无 GPU）===
+add_executable(TestPhysicsSimulation TestPhysicsSimulation.cpp)
+target_include_directories(TestPhysicsSimulation PRIVATE
+    ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+target_link_libraries(TestPhysicsSimulation PRIVATE Engine)
+add_test(NAME UnitPhysicsSimulation COMMAND TestPhysicsSimulation)
+
+# === M2-D 组件闭环：Collider/RigidBody 组件 → 物理物化 → owner 回写 ===
+add_executable(TestPhysicsComponents TestPhysicsComponents.cpp)
+target_include_directories(TestPhysicsComponents PRIVATE
+    ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+target_link_libraries(TestPhysicsComponents PRIVATE Engine)
+add_test(NAME UnitPhysicsComponents COMMAND TestPhysicsComponents)
+
+# === M4：接触事件 + 凸包/三角网碰撞体 ===
+add_executable(TestPhysicsM4 TestPhysicsM4.cpp)
+target_include_directories(TestPhysicsM4 PRIVATE
+    ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+target_link_libraries(TestPhysicsM4 PRIVATE Engine)
+add_test(NAME UnitPhysicsM4 COMMAND TestPhysicsM4)
