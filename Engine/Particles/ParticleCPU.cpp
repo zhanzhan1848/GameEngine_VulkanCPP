@@ -49,7 +49,6 @@ void particle_cpu_processor::initialize() {
     }
 
     spawn_queue_.clear();
-    collision_callback_ = nullptr;
     initialized_ = true;
 }
 
@@ -59,8 +58,6 @@ void particle_cpu_processor::shutdown() {
     }
 
     spawn_queue_.clear();
-    collision_callback_ = nullptr;
-    collision_callback_ = nullptr;
     initialized_ = false;
 }
 
@@ -165,10 +162,6 @@ void particle_cpu_processor::process_spawn_queue() {
     }
 }
 
-void particle_cpu_processor::set_collision_callback(std::function<bool(math::v3&, math::v3&)> callback) {
-    collision_callback_ = callback;
-}
-
 void particle_cpu_processor::sync_frame_data(u32 frame_index) {
     set_frame_index(frame_index);
 }
@@ -218,16 +211,6 @@ u32 get_pending_spawn_count() {
         return g_cpu_processor->get_pending_spawn_count();
     }
     return 0;
-}
-
-void set_collision_handler(std::function<bool(math::v3&, math::v3&)> handler) {
-    if (g_cpu_processor) {
-        g_cpu_processor->set_collision_callback(handler);
-    }
-}
-
-bool has_collision_handler() {
-    return g_cpu_processor && g_cpu_processor->has_collision_support();
 }
 
 void sync_frame(u32 frame_index) {
