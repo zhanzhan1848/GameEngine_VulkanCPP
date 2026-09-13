@@ -24,6 +24,14 @@
 #include "Engine/Particles/ParticleEmitter.h"
 #include "Engine/Particles/ParticleCPU.h"
 #include "Engine/Graphics/Passes/ParticlePass.h"
+#include "Engine/Graphics/Passes/ParticleFXMeshPass.h"
+#include "Engine/Graphics/Passes/ParticleFXRibbonPass.h"
+#include "Engine/Graphics/Passes/ParticleFXLightPass.h"
+#include "Engine/Graphics/Passes/ParticleFXDecalPass.h"
+#include "Engine/ParticleFX/render/RibbonTrail.h"
+#include "Graphics/Fluid/FluidRenderPass.h"
+#include "Engine/ParticleFX/core/PfxSystem.h"
+#include "Engine/ParticleFX/render/Bridges.h"
 
 
 class TestParticleSponza;
@@ -101,6 +109,20 @@ private:
     // Particle System
     primal::particles::emitter_id particleEmitter{ primal::particles::invalid_id };
     primal::graphics::ParticlePass particlePass_;
+    primal::graphics::ParticleFXMeshPass particleFXMeshPass_;
+    primal::graphics::ParticleFXRibbonPass particleFXRibbonPass_;
+    primal::graphics::ParticleFXLightPass particleFXLightPass_;
+    primal::graphics::ParticleFXDecalPass particleFXDecalPass_;
+    primal::pfx::emitter_id pfxDecalEmitter_{ 0 };
+    primal::pfx::render::ribbon_trail pfxTrail_;
+    primal::pfx::emitter_id pfxEmitter_{ 0 };
+    primal::pfx::emitter_id pfxTrailEmitter_{ 0 };
+    primal::pfx::particle_handle pfxTrailHandle_{};
+    primal::pfx::emitter_id pfxWaterEmitter_{ 0 };
+    primal::graphics::fluid::FluidRenderPass fluidPass_;
+    primal::graphics::rhi::ResourceHandle pfxWaterBuffer_{ primal::graphics::rhi::handles::INVALID_RESOURCE };
+    u32 pfxWaterStaged_{ 0 };
+    bool fluidWired_{ false };
     float particleSpawnRate = 15.0f;
     float particleLifetime = 1.5f;
     primal::math::v3 emitterPosition{ 0.0f, 5.0f, 0.0f };

@@ -3,6 +3,10 @@
 #include "Engine/Content/AsyncResourceLoader.h"
 #include "Engine/JobSystem/JobSystem.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#include "Engine/ParticleFX/core/PfxSystem.h"
+#include "Engine/ParticleFX/render/Bridges.h"
+#include "Engine/Graphics/Passes/ParticleFXDecalPass.h"
+#include "Engine/ParticleFX/render/Decals.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Engine/Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Engine/Graphics/Lighting/LightProbeManager.h"
@@ -36,6 +40,10 @@ Engine_Test::Engine_Test()
 #endif
 
 namespace {
+// PFX mesh pass 实例上限（与 ParticleFXMeshPass::max_instances 一致）
+constexpr u32 pfx_render_max_instances_helper() { return 4096; }
+constexpr u32 pfx_graphics_max_instances_helper() { return 4096; }
+
     // Shader File Infos
     const shader_file_info gbuffer_vs_info{ "GBuffer.metal", "vertexMain", shader_type::vertex };
     const shader_file_info gbuffer_ps_info{ "GBuffer.metal", "fragmentMain", shader_type::pixel };
@@ -478,6 +486,86 @@ bool TestParticleSponza::Initialize() {
     particlePass_.set_blend_mode(primal::particles::blend_mode::additive);
     particlePass_.set_depth_write_enabled(false);
     particlePass_.set_depth_test_enabled(false);  // Disable depth test for debugging
+
+    // ---- PFX mesh 粒子（N2 渲染半边门禁）：1000 实例刚体化立方体 ----
+    {
+        using namespace primal::pfx;
+        if (!is_initialized()) initialize({});
+        const char* pfx_json = R"json({"capacity":2000,"seed":42,"stages":{
+            "spawn":[{"module":"SpawnBurst","count":1000,"period":1000}],
+            "init":[{"module":"SetLifetime","min":30,"max":30},
+                    {"module":"ShapeLocation","shape":"sphere_surface","radius":3},
+                    {"module":"AddVelocity","mode":"random_sphere","speed_min":2,"speed_max":5}]}})json";
+        emitter_program prog;
+        std::string pfx_err;
+        if (compile_emitter_from_text(pfx_json, strlen(pfx_json), prog, pfx_err)) {
+            pfxEmitter_ = emitter_create_from_program(prog);
+            std::cout << "[ParticleFX] mesh emitter created (id=" << pfxEmitter_ << ")" << std::endl;
+        } else {
+            std::cout << "[ParticleFX] emitter compile failed: " << pfx_err << std::endl;
+        }
+        if (particleFXMeshPass_.initialize(device)) {
+            particleFXMeshPass_.set_color(0.3f, 0.85f, 1.0f);
+        }
+
+        // 贴花发射器（N6）：粒子落地停留 → decal 投影体积
+        {
+            const char* decal_json = R"json({"capacity":128,"seed":66,"stages":{
+                "spawn":[{"module":"SpawnBurst","count":32,"period":3}],
+                "init":[{"module":"SetLifetime","min":8,"max":8},
+                        {"module":"ShapeLocation","shape":"box","half":[2,0.1,2]},
+                        {"module":"AddVelocity","mode":"fixed","direction":[0,-1,0],"speed_min":1,"speed_max":1}],
+                "update":[{"module":"GravityForce","gravity":[0,-3,0]},
+                          {"module":"IntegrateVelocity"},
+                          {"module":"KillVolume","shape":"plane","normal":[0,1,0],
+                           "response":"clamp"}]}})json";
+            primal::pfx::emitter_program dprog;
+            if (primal::pfx::compile_emitter_from_text(decal_json, strlen(decal_json), dprog, pfx_err)) {
+                pfxDecalEmitter_ = primal::pfx::emitter_create_from_program(dprog);
+            }
+        }
+
+        // 拖尾：单粒子弹道 + ribbon 记录（N6）
+        const char* trail_json = R"json({"capacity":8,"seed":77,"stages":{
+            "spawn":[{"module":"SpawnBurst","count":1,"period":100}],
+            "init":[{"module":"SetLifetime","min":30,"max":30},
+                    {"module":"AddVelocity","mode":"fixed","direction":[1,0.6,0.2],"speed_min":3,"speed_max":3}],
+            "update":[{"module":"GravityForce","gravity":[0,-2,0]},
+                      {"module":"IntegrateVelocity"}]}})json";
+        primal::pfx::emitter_program tprog;
+        if (primal::pfx::compile_emitter_from_text(trail_json, strlen(trail_json), tprog, pfx_err)) {
+            pfxTrailEmitter_ = primal::pfx::emitter_create_from_program(tprog);
+        }
+        if (particleFXRibbonPass_.initialize(device)) {
+            particleFXRibbonPass_.set_color(1.0f, 0.6f, 0.2f, 0.8f);
+        }
+        if (particleFXLightPass_.initialize(device)) {
+            // light 渲染器就绪（N6）
+        }
+        if (particleFXDecalPass_.initialize(device)) {
+            particleFXDecalPass_.set_scene_depth(depthTexture);
+        }
+
+        // 水柱（N6 fluid 接线）：密集粒子柱下落 + IntegrateVelocity
+        const char* water_json = R"json({"capacity":4096,"seed":88,"stages":{
+            "spawn":[{"module":"SpawnBurst","count":2000,"period":1000}],
+            "init":[{"module":"SetLifetime","min":60,"max":60},
+                    {"module":"ShapeLocation","shape":"box","half":[0.3,0.05,0.3]},
+                    {"module":"AddVelocity","mode":"fixed","direction":[0,-1,0],"speed_min":1,"speed_max":2}]}})json";
+        primal::pfx::emitter_program wprog;
+        if (primal::pfx::compile_emitter_from_text(water_json, strlen(water_json), wprog, pfx_err)) {
+            pfxWaterEmitter_ = primal::pfx::emitter_create_from_program(wprog);
+        }
+        rhi::BufferDesc wbuf{};
+        wbuf.size = 4096 * sizeof(float) * 4;
+        wbuf.type = rhi::BufferType::Structured;
+        wbuf.usage = rhi::GPUMemoryUsage::Dynamic;
+        wbuf.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+        wbuf.structured.elementCount = 4096;
+        wbuf.structured.elementStride = sizeof(float) * 4;
+        pfxWaterBuffer_ = device->CreateBuffer(wbuf);
+        std::cout << "[ParticleFX] water column emitter ready (id=" << pfxWaterEmitter_ << ")" << std::endl;
+    }
     std::cout << "Particle pass initialized (depth test DISABLED for debugging)" << std::endl;
 
 #else
@@ -1635,6 +1723,9 @@ bool TestParticleSponza::CreatePersistentResources() {
     depthDesc.format = DataFormat::D32_Float;
     depthDesc.usage = TextureUsage::DepthStencil | TextureUsage::ShaderResource;
     depthTexture = device->CreateTexture(depthDesc);
+    particlePass_.set_scene_depth(depthTexture);
+    particlePass_.set_soft_particles(true, 0.002f);
+    std::cout << "[ParticleFX] soft particles enabled (scene depth bound)" << std::endl;
     
     // Create Default Textures
     TextureDesc whiteDesc{ .size = { 1, 1, 1 }, .format = DataFormat::RGBA8_UNorm, .usage = TextureUsage::ShaderResource | TextureUsage::CopyDest };
@@ -1919,6 +2010,224 @@ void TestParticleSponza::BuildRenderGraph(RenderGraph& graph, ResourceHandle bac
                 particlePass_.execute(cmd, renderSystem.GetCurrentFrameIndex(), viewMat, projMat);
             }
         );
+    }
+
+    // ---- PFX mesh pass（N2）：只读光照输出与深度，紧随旧粒子 pass ----
+    if (pfxEmitter_ != 0 && particleFXMeshPass_.max_instances() > 0)
+    {
+        struct ParticleFXMeshPassData {
+            RGResourceHandle output;
+            RGResourceHandle depth;
+        };
+        graph.AddPass<ParticleFXMeshPassData>("ParticleFXMeshPass", RGPassType::Graphics, RGPassCategory::PostProcess,
+            [this, depth, lightingOutput](ParticleFXMeshPassData& data, RenderGraphBuilder& builder) {
+                data.output = builder.Write(lightingOutput, ResourceState::RenderTarget);
+                data.depth = builder.Read(depth);
+                RGRenderPassDesc rpDesc;
+                rpDesc.colors.push_back(RGAttachmentDesc{ .texture = data.output, .loadOp = LoadAction::Load, .storeOp = StoreAction::Store });
+                rpDesc.depthStencil = { .texture = depth, .depthLoadOp = LoadAction::Load, .depthStoreOp = StoreAction::Store };
+                builder.DeclareRenderPass(rpDesc);
+            },
+            [this](const ParticleFXMeshPassData& /*data*/, RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                primal::math::m4x4 pfxView = m_camera.GetViewMatrix();
+                float pfxFov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
+                float pfxAspect = (float)renderWidth / (float)renderHeight;
+                primal::math::m4x4 pfxProj = primal::graphics::rhi::math::CreatePerspectiveMatrix(pfxFov, pfxAspect, 0.1f, 1000.0f);
+
+                // CPU 侧：推进 PFX 模拟 → 打包 48B 实例缓冲 → 上传本帧 → 绘制
+                static static primal::pfx::render::mesh_instance_data pfx_instances[4096];
+                pfx::pfx_emitter* em = pfx::emitter_get(pfxEmitter_);
+                if (em) {
+                    em->tick(1.f / 60.f);
+                    const u32 n = pfx::render::pack_mesh_instances(em->store(), pfx_instances, 4096);
+                    particleFXMeshPass_.stage_instances(pfx_instances, n, renderSystem.GetCurrentFrameIndex());
+                }
+                particleFXMeshPass_.execute(cmd, renderSystem.GetCurrentFrameIndex(), pfxView, pfxProj);
+            }
+        );
+    }
+
+    // ---- PFX ribbon pass（N6）：拖尾条带，读同一光照输出/深度 ----
+    if (pfxTrailEmitter_ != 0 && particleFXRibbonPass_.max_vertices() > 0)
+    {
+        struct ParticleFXRibbonPassData {
+            RGResourceHandle output;
+            RGResourceHandle depth;
+        };
+        graph.AddPass<ParticleFXRibbonPassData>("ParticleFXRibbonPass", RGPassType::Graphics, RGPassCategory::PostProcess,
+            [this, depth, lightingOutput](ParticleFXRibbonPassData& data, RenderGraphBuilder& builder) {
+                data.output = builder.Write(lightingOutput, ResourceState::RenderTarget);
+                data.depth = builder.Read(depth);
+                RGRenderPassDesc rpDesc;
+                rpDesc.colors.push_back(RGAttachmentDesc{ .texture = data.output, .loadOp = LoadAction::Load, .storeOp = StoreAction::Store });
+                rpDesc.depthStencil = { .texture = depth, .depthLoadOp = LoadAction::Load, .depthStoreOp = StoreAction::Store };
+                builder.DeclareRenderPass(rpDesc);
+            },
+            [this](const ParticleFXRibbonPassData& /*data*/, RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                primal::math::m4x4 pfxView = m_camera.GetViewMatrix();
+                float pfxFov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
+                float pfxAspect = (float)renderWidth / (float)renderHeight;
+                primal::math::m4x4 pfxProj = primal::graphics::rhi::math::CreatePerspectiveMatrix(pfxFov, pfxAspect, 0.1f, 1000.0f);
+
+                // CPU：推进拖尾粒子、采样历史、打包条带并上传
+                pfx::pfx_emitter* tem = pfx::emitter_get(pfxTrailEmitter_);
+                pfx::pfx_emitter* em = tem;
+                if (em) {
+                    if (!pfxTrailHandle_.is_valid() && em->alive_count() > 0) {
+                        pfxTrailHandle_ = pfx::particle_handle{ 0, em->store().row_handle(0).generation };
+                    }
+                    if (!pfxTrail_.is_attached() && pfxTrailHandle_.is_valid() && em->alive_count() > 0) {
+                        pfxTrail_.configure(48, 1.f / 60.f, 0.15f);
+                        pfxTrail_.attach(pfxTrailHandle_, &em->store());
+                    }
+                    em->tick(1.f / 60.f);
+                    pfxTrail_.record(1.f / 60.f);
+                    static pfx::render::ribbon_vertex pfx_ribbon_verts[256];
+                    static unsigned short pfx_ribbon_indices[1536];
+                    const u32 vc = pfxTrail_.build_strip(primal::math::v3{ 1.f, 0.f, 0.f },
+                                                         pfx_ribbon_verts, 256,
+                                                         pfx_ribbon_indices, 1536);
+                    if (vc >= 2) {
+                        particleFXRibbonPass_.stage_strip(pfx_ribbon_verts, vc * 2, pfx_ribbon_indices,
+                                                          (pfxTrail_.sample_count() - 1) * 6,
+                                                          renderSystem.GetCurrentFrameIndex());
+                    }
+                }
+                particleFXRibbonPass_.execute(cmd, renderSystem.GetCurrentFrameIndex(), pfxView, pfxProj);
+            }
+        );
+    }
+
+    // ---- PFX light 渲染器（N6）：前 32 个活粒子 → HDR 自发光光斑 ----
+    if (pfxEmitter_ != 0 && particleFXLightPass_.max_lights() > 0)
+    {
+        struct ParticleFXLightPassData {
+            RGResourceHandle output;
+            RGResourceHandle depth;
+        };
+        graph.AddPass<ParticleFXLightPassData>("ParticleFXLightPass", RGPassType::Graphics, RGPassCategory::PostProcess,
+            [this, depth, lightingOutput](ParticleFXLightPassData& data, RenderGraphBuilder& builder) {
+                data.output = builder.Write(lightingOutput, ResourceState::RenderTarget);
+                data.depth = builder.Read(depth);
+                RGRenderPassDesc rpDesc;
+                rpDesc.colors.push_back(RGAttachmentDesc{ .texture = data.output, .loadOp = LoadAction::Load, .storeOp = StoreAction::Store });
+                rpDesc.depthStencil = { .texture = data.depth, .depthLoadOp = LoadAction::Load, .depthStoreOp = StoreAction::Store };
+                builder.DeclareRenderPass(rpDesc);
+            },
+            [this](const ParticleFXLightPassData& /*data*/, RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                primal::math::m4x4 pfxView = m_camera.GetViewMatrix();
+                float pfxFov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
+                float pfxAspect = (float)renderWidth / (float)renderHeight;
+                primal::math::m4x4 pfxProj = primal::graphics::rhi::math::CreatePerspectiveMatrix(pfxFov, pfxAspect, 0.1f, 1000.0f);
+
+                pfx::pfx_emitter* lem = pfx::emitter_get(pfxEmitter_);
+                if (lem) {
+                    struct LightInstance {
+                        float pos[3]; float intensity;
+                        float color[3]; float pad;
+                    };
+                    static LightInstance lights[32];
+                    u32 n = 0;
+                    for (u32 row = 0; row < lem->store().capacity() && n < 32; ++row) {
+                        if (!lem->store().is_row_alive(row)) continue;
+                        const primal::math::v4* p = lem->store().v4_channel(pfx::attr::position) + row;
+                        const primal::math::v4* c = lem->store().v4_channel(pfx::attr::color) + row;
+                        lights[n].pos[0] = p->x; lights[n].pos[1] = p->y; lights[n].pos[2] = p->z;
+                        lights[n].intensity = 2.0f;
+                        lights[n].color[0] = c->x; lights[n].color[1] = c->y; lights[n].color[2] = c->z;
+                        lights[n].pad = 0.f;
+                        ++n;
+                    }
+                    particleFXLightPass_.stage_lights(lights, n, renderSystem.GetCurrentFrameIndex());
+                }
+                particleFXLightPass_.execute(cmd, renderSystem.GetCurrentFrameIndex(), pfxView, pfxProj);
+            }
+        );
+    }
+
+    // ---- PFX decal 渲染器（N6）：地面停留粒子 → 球形贴花（深度重建投影） ----
+    if (pfxDecalEmitter_ != 0 && particleFXDecalPass_.max_decals() > 0)
+    {
+        struct ParticleFXDecalPassData {
+            RGResourceHandle output;
+            RGResourceHandle depth;
+        };
+        graph.AddPass<ParticleFXDecalPassData>("ParticleFXDecalPass", RGPassType::Graphics, RGPassCategory::PostProcess,
+            [this, depth, lightingOutput](ParticleFXDecalPassData& data, RenderGraphBuilder& builder) {
+                data.output = builder.Write(lightingOutput, ResourceState::RenderTarget);
+                data.depth = builder.Read(depth);
+                RGRenderPassDesc rpDesc;
+                rpDesc.colors.push_back(RGAttachmentDesc{ .texture = data.output, .loadOp = LoadAction::Load, .storeOp = StoreAction::Store });
+                rpDesc.depthStencil = { .texture = data.depth, .depthLoadOp = LoadAction::Load, .depthStoreOp = StoreAction::Store };
+                builder.DeclareRenderPass(rpDesc);
+            },
+            [this](const ParticleFXDecalPassData& /*data*/, RenderGraphContext& context) {
+                auto cmd = context.cmdBuffer;
+                primal::math::m4x4 pfxView = m_camera.GetViewMatrix();
+                float pfxFov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
+                float pfxAspect = (float)renderWidth / (float)renderHeight;
+                primal::math::m4x4 pfxProj = primal::graphics::rhi::math::CreatePerspectiveMatrix(pfxFov, pfxAspect, 0.1f, 1000.0f);
+
+                pfx::pfx_emitter* dem = pfx::emitter_get(pfxDecalEmitter_);
+                if (dem) {
+                    dem->tick(1.f / 60.f);   // 推进模拟（否则贴花粒子永不生成）
+                    static pfx::render::decal_instance_data pfx_decals[64];
+                    const u32 n = pfx::render::pack_decal_instances(dem->store(), 0.35f, 0.8f,
+                                                                    pfx_decals, 64);
+                    particleFXDecalPass_.stage_decals(pfx_decals, n, renderSystem.GetCurrentFrameIndex());
+                }
+                particleFXDecalPass_.execute(cmd, renderSystem.GetCurrentFrameIndex(), pfxView, pfxProj);
+            }
+        );
+    }
+
+    // ---- PFX fluid 渲染器接线（N6）：水柱粒子 → FluidSplat → 平滑/法线/着色 ----
+    if (pfxWaterEmitter_ != 0 && renderWidth > 0 && renderHeight > 0)
+    {
+        pfx::pfx_emitter* wem = pfx::emitter_get(pfxWaterEmitter_);
+        if (wem) wem->tick(1.f / 60.f);   // 先推进：首帧生成水柱粒子
+        if (wem && wem->alive_count() > 0) {
+            // 打包 float4 (xyz, w=radius) 并上传
+            const u32 n = wem->alive_count() < 4096u ? wem->alive_count() : 4096u;
+            static float wpos[4096 * 4];
+            u32 staged = 0;
+            for (u32 row = 0; row < wem->store().capacity() && staged < n; ++row) {
+                if (!wem->store().is_row_alive(row)) continue;
+                const primal::math::v4* p = wem->store().v4_channel(pfx::attr::position) + row;
+                float* d = &wpos[staged * 4];
+                d[0] = p->x; d[1] = p->y; d[2] = p->z; d[3] = 0.05f;
+                ++staged;
+            }
+            pfxWaterStaged_ = staged;
+            if (void* mapped = device->MapBuffer(pfxWaterBuffer_)) {
+                std::memcpy(mapped, wpos, (size_t)staged * 16);
+                device->UnmapBuffer(pfxWaterBuffer_);
+            }
+
+            if (fluidPass_.Initialize(device, renderWidth, renderHeight)) {
+                fluidWired_ = true;
+                std::cout << "[ParticleFX] fluid pass wired (particles=" << staged << ")" << std::endl;
+            }
+
+            primal::math::m4x4 fView = m_camera.GetViewMatrix();
+            float fFov = 60.0f * primal::graphics::rhi::math::constants::DEG_TO_RAD;
+            float fAspect = (float)renderWidth / (float)renderHeight;
+            primal::math::m4x4 fProj = primal::graphics::rhi::math::CreatePerspectiveMatrix(fFov, fAspect, 0.1f, 1000.0f);
+            primal::graphics::fluid::FluidInputs fin;
+            fin.particle_buffer = pfxWaterBuffer_;
+            fin.particle_count = pfxWaterStaged_;
+            fin.view_matrix = fView;
+            fin.proj_matrix = fProj;
+            fin.camera_position = m_camera.GetPosition();
+            fin.scene_color = lightingOutput;
+            fin.gbuffer_depth = depth;
+            fin.width = renderWidth;
+            fin.height = renderHeight;
+            fluidPass_.AddPass(graph, fin);
+        }
     }
     
 
