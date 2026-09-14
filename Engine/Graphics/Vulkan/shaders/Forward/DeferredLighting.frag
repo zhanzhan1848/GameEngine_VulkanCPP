@@ -55,7 +55,10 @@ const float PI = 3.14159265358979;
 // DeferredLighting.metal 54c9b8c2）——DIRECT_INTENSITY 2.5 → 5.0；
 // IBL ambient 归零（Metal gpuDriven 同位置 ambient=0，环境光由 DDGI
 // fusion 全权负责，避免第二环境光源把拱门阴影填亮）。
-const float DIRECT_INTENSITY   = 7.5;
+// 2026-09-10 C4 首旋钮：GI 修复（探针索引/步长封顶/C3.1）后室内拾亮，
+// 直射相对冲击力下降（用户目测"直射偏弱"）。7.5 → 10.0（+33%）。
+// 只缩放屏幕直射——不进探针回路，不移动 SC↔probe 平衡（T8.4 教训）。
+const float DIRECT_INTENSITY   = 50.0;   // 2026-09-10 十七: 用户实验 20→50（SC 尺度同步 ×2.5，C2.1 单位统一保持）
 const float IBL_INTENSITY      = 0.0;
 const float SHADOW_AMBIENT_SCALE = 0.05;
 
@@ -167,19 +170,28 @@ void main() {
     float depth = texture(sampler2D(depthTex, defaultSampler), inUv).r;
 
 
-    // 2026-09-06 P1 天空接入：背景像素写程序化天空（原输出黑底），与
-    // Metal gpuDriven 同公式同标定（可见开口区显示值 ~89/255，UE 参考）。
+    // 2026-09-06 P1 天空接入：背景像素写程序化天空（原输出黑底）。
+    // B15 (2026-09-11)：常数 ×2.0 重标——旧值按 passthrough ×0.26 线性直出
+    // 标定（可见开口 ~182-210/255），B10.5 换 ACES×0.10 后同一 HDR 值显示
+    // 只有 ~123/255。目标回到 UE 参考 ~210/255： zenith 2.88×0.10=0.288 →
+    // ACES≈0.41 → gamma ≈0.67（123）；×2.0 → 0.576 → ACES≈0.70 → ≈0.85
+    // （216）。只影响可见天空像素的显示——探针 GI 供给走独立的
+    // DDGI_SKY_COLOR×SkyColor.x 门（C3.3），此改动不进 GI 回路。
     if (depth >= 1.0) {
+        if (shadowParams.z > 0.5) {
+            outColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
         vec2 skyNdc = vec2(inUv.x * 2.0 - 1.0, 1.0 - inUv.y * 2.0);
         vec4 pFar = invViewProjection * vec4(skyNdc, 1.0, 1.0);
         vec3 skyDir = normalize(pFar.xyz / max(pFar.w, 1e-6) - viewPos.xyz);
         float up = clamp(skyDir.y, 0.0, 1.0);
-        vec3 horizonCol = vec3(2.20, 2.10, 1.90); // 暖白地平雾
-        vec3 zenithCol  = vec3(2.75, 2.88, 3.00); // 亮淡蓝天顶（UE 参考实测 rgb 210,220,229）
+        vec3 horizonCol = vec3(4.40, 4.20, 3.80); // 暖白地平雾
+        vec3 zenithCol  = vec3(5.50, 5.76, 6.00); // 亮淡蓝天顶（UE 参考实测 rgb 210,220,229）
         vec3 sky = mix(horizonCol, zenithCol, pow(up, 0.45));
         vec3 sunL = normalize(lightPos.xyz);
         float sunAmount = pow(clamp(dot(skyDir, sunL), 0.0, 1.0), 16.0);
-        sky += vec3(1.0, 0.85, 0.6) * sunAmount * 0.6; // 前向散射日晕
+        sky += vec3(1.0, 0.85, 0.6) * sunAmount * 1.2; // 前向散射日晕
         outColor = vec4(sky, 1.0);
         return;
     }
@@ -227,6 +239,9 @@ void main() {
 
     // Shadow visibility.
     //   mode 0 (PCSS): ShadowMapModule's pre-filtered R8 visibility texture.
+    //   mode 0.5 (PRIMAL_SHADOW_VIS_DEBUG): PCSS vis sampled normally, then
+    //          output as grayscale — visualizes the ShadowFilter output
+    //          (×(1/0.26) pre-compensates the tonemap passthrough exposure).
     //   mode 1 (VSM): project worldPos into the cascade's light clip space,
     //                 sample blurred (z, z²) moments, Chebyshev upper bound.
     // Cascade selection is BOUNDS-based with fallback (cascade 0 → 1 → lit),
@@ -236,7 +251,7 @@ void main() {
     // gl_Position.y in ShadowDepth.wgsl (T4.6.5 part 40.1 — the same fix the
     // PCSS path needed; regressing it mirrors the shadow map vertically).
     float shadowVisibility;
-    if (shadowParams.x > 0.5) {
+    if (shadowParams.x > 0.75) {
         shadowVisibility = 1.0;
         // Cascade 0
         vec4 clip0 = shadowMatrix0 * vec4(worldPos, 1.0);
@@ -262,6 +277,36 @@ void main() {
         }
     } else {
         shadowVisibility = texture(sampler2D(shadowVisTex, defaultSampler), inUv).r;
+    }
+    // B16 (2026-09-11): 曾加 vis<0.03 噪声门——已回退。锁相机 noAll+gate A/B
+    // 证明拱腹"室内暖光"是 PCSS 大面积泄漏（vis≈0.1-0.3，见 SurfaceCache/
+    // ShadowFilter 排查），不是 <3% 的预滤波底噪，此门无效且经 prevColor
+    // 供给回路引入不可控的均衡漂移。真正的修复在 PCSS 链（ShadowDepth bias /
+    // ShadowFilter blocker 搜索），见后续 B17。
+
+    // Raw diagnostics: no exposure, gamma, GI, or temporal filtering.
+    if (shadowParams.z > 0.5) {
+        vec3 diagnostic = normalEnc;
+        if (shadowParams.z == 2.0) diagnostic = vec3(NdotL);
+        if (shadowParams.z == 3.0) diagnostic = vec3(shadowVisibility);
+        if (shadowParams.z == 4.0) diagnostic = albedo;
+        outColor = vec4(diagnostic, 1.0);
+        return;
+    }
+
+    // PRIMAL_SHADOW_VIS_DEBUG (mode 0.5): PCSS branch above ran normally —
+    // direct-output its result so the ShadowFilter output is visible on
+    // screen without RenderDoc. ×(1/0.26) pre-compensates the tonemap
+    // passthrough CAL_EXPOSURE so grayscale reads at native visibility.
+    if (shadowParams.x > 0.25 && shadowParams.x < 0.75) {
+        outColor = vec4(vec3(shadowVisibility) * 3.8461, 1.0);
+        return;
+    }
+    // mode 0.25 (PRIMAL_GBUFFER_ALBEDO_DEBUG): raw GBuffer albedo, no
+    // lighting — verifies the texture sRGB decode path end to end.
+    if (shadowParams.x > 0.05 && shadowParams.x < 0.25) {
+        outColor = vec4(albedo, 1.0);
+        return;
     }
 
     vec3 Lo = (diffuse + specular) * lightColor.rgb * NdotL * shadowVisibility

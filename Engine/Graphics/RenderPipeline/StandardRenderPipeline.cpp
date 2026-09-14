@@ -41,16 +41,36 @@
 namespace primal::graphics {
 
 // A4 (T0.4): pack the real scene light list into SurfaceCacheFrameData so the
-// SurfaceCache LightEval uploads per-slot type/position/radius (keeps the
+// Surface Cache LightEval uploads per-slot type/position/radius (keeps the
 // point-light path alive). Leaves sc_light_count == 0 when the scene has no
 // lights — the pass then falls back to its legacy single directional slot.
+// C2.1 (2026-09-10): the deferred screen path multiplies direct light by
+// DIRECT_INTENSITY (20.0 — DeferredLighting.frag / DeferredLighting.metal /
+// EngineTest DeferredLighting.metal gpuDriven, kept in sync). The SC atlas
+// must live in the SAME units, otherwise its sunlit texels sit 20× below the
+// visible surface radiance and every probe bounce reads a 1/20-bright world —
+// measured as the multi-bounce supply collapse (interior GI 0.7-1.4 vs UE
+// 8.9-59.5, SC atlas max texel lum 1.6 vs expected ~13). A/B:
+// PRIMAL_SC_DIRECT_SCALE (default follows the shader constant).
+static f32 SCDirectIntensityScale() {
+    static const f32 scale = [] {
+        if (const char* e = std::getenv("PRIMAL_SC_DIRECT_SCALE")) {
+            const f32 v = (f32)std::atof(e);
+            if (v >= 0.0f && v <= 1000.0f) return v;
+        }
+        return 50.0f;   // 2026-09-10 十七: 同步 DIRECT_INTENSITY 20→50（C2.1 单位统一）
+    }();
+    return scale;
+}
+
 static void FillSCLightList(lumen::SurfaceCacheFrameData& fd, const RenderScene* scene) {
     fd.sc_light_count = 0;
     if (!scene) return;
     u32 n = 0;
+    const f32 directScale = SCDirectIntensityScale();
     for (const auto& rl : scene->GetLights()) {
         if (n >= lumen::SurfaceCacheFrameData::kSCMaxLights) break;
-        const f32 intensity = std::max(rl.intensity, 0.0f);
+        const f32 intensity = std::max(rl.intensity, 0.0f) * directScale;
         fd.sc_lights[n * 3 + 0] = math::v4{rl.position.x, rl.position.y, rl.position.z, rl.range};
         fd.sc_lights[n * 3 + 1] = math::v4{rl.color.x * intensity, rl.color.y * intensity,
                                            rl.color.z * intensity, 0.0f};
@@ -1475,6 +1495,34 @@ bool StandardRenderPipeline::UpdateLightEntity(id::id_type entity_id, const ligh
 // Build Render Graph
 // ============================================================================
 
+// B11 (2026-09-11) 探针辐射度供给：DDGI finalize 的 prev-screen 档（binding 8）
+// 改读上一帧 Fusion HDR 输出（含 GI 的完整 Lo）。旧绑定 DeferredLighting 输出
+// 只有 ×50 直射（IBL_INTENSITY=0）——射线命中屏幕内阴影面时供给 ≈0，fallback
+// materialBounce≈0.1×albedo 比物理阴影墙辐射低 ~30×，室内探针能量只剩逃逸
+// 天空档 + fusion floor 三个漏光代理在撑，color bleeding 也随供给链断在半路。
+// 上一帧槽 (cbIdx+2)%3 GPU-complete（三缓冲，与 DDGI irradiance history 同
+// 惯例）；本帧 Fusion 在 RG 中位于 DDGI 之后且写的是 cbIdx 槽，读写异槽无环。
+// 门控：Vulkan（Metal 的 fusion 上游单位制另案审计）；frameCount_≥8 避开
+// 未初始化槽（Vulkan heap 纹理非零初始化，见 SurfaceCacheLightEval 的
+// prev_light sanitize 注释）；fusion 需真实在管线中；PRIMAL_PROBE_FUSED_SUPPLY=0
+// 回退旧行为（A/B 门）。
+rendergraph::RGResourceHandle StandardRenderPipeline::MakeProbeRadianceSource(
+    rendergraph::RenderGraph& graph, u32 cbIdx) {
+    static const bool fusedSupply = [] {
+        const char* e = std::getenv("PRIMAL_PROBE_FUSED_SUPPLY");
+        return !e || std::atoi(e) != 0;
+    }();
+    if (!fusedSupply || !fusion_module_ || frameCount_ < 8) return {};
+    if (!device_ || device_->GetPlatform() != rhi::RHIPlatform::Vulkan) return {};
+    if (!(settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
+          settings_.quality.enable_screen_probes) || !lumen::GIDebug().fusion) {
+        return {};
+    }
+    const ResourceHandle tex = fusion_module_->GetFusionOutput((cbIdx + 2u) % 3u);
+    if (tex == handles::INVALID_RESOURCE) return {};
+    return graph.ImportResource("PrevFrameColor_Fused", tex);
+}
+
 void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbIdx) {
     auto& graph = *renderGraph_;
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
@@ -1900,6 +1948,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             const auto& vol = ddgi_pass_->GetVolumeData();
             frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBuffer(
                 (static_cast<u32>(frameCount_) + 2) % 3);
+            // C 系列：同槽位探针深度——LightEval gather 的 Chebyshev 可见性。
+            frameData.ddgi_depth = ddgi_pass_->GetDepthBuffer(
+                (static_cast<u32>(frameCount_) + 2) % 3);
             frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
             frameData.ddgi_spacing = vol.ProbeSpacing;
             frameData.ddgi_counts[0] = vol.ProbeCounts[0];
@@ -1962,6 +2013,21 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         RGResourceHandle prevColor;
         if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
+        }
+        // B11: 上一帧 Fusion HDR（含 GI）优先——直射-only 供给使阴影命中 ≈0。
+        if (RGResourceHandle fused = MakeProbeRadianceSource(graph, cbIdx); fused.IsValid()) {
+            prevColor = fused;
+            camData.radiance_is_previous_frame = true;
+        }
+        if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+            camData.screen_depth = graph.ImportResource("DDGI_CurrentScreenDepth", gpuDraw.GetGBufferDepthSampleable());
+            if (!camData.radiance_is_previous_frame) {
+                camData.radiance_depth = camData.screen_depth;
+            } else if (depth_history_ && !camera_cut_this_frame_) {
+                const auto previous = depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_));
+                if (previous.is_valid && previous.texture != handles::INVALID_RESOURCE)
+                    camData.radiance_depth = graph.ImportResource("DDGI_RadianceDepth", previous.texture);
+            }
         }
 
         ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData,
@@ -2376,6 +2442,14 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
         }
+        if (const char* debug = std::getenv("PRIMAL_LIGHTING_DEBUG");
+            debug && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+            if (std::strcmp(debug, "normal") == 0 || std::strcmp(debug, "ndotl") == 0 ||
+                std::strcmp(debug, "shadow") == 0 || std::strcmp(debug, "albedo") == 0) {
+                blitIn.input_rg = deferredOut.deferred_output_rg;
+                blitIn.input_tex = deferredOut.deferred_output_tex;
+            }
+        }
         blitIn.backbuffer_rg = graph.ImportResource("BackBuffer", backBuffer);
         blitIn.current_buffer_index = cbIdx;
         blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
@@ -2754,6 +2828,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 const auto& vol = ddgi_pass_->GetVolumeData();
                 frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBuffer(
                     (static_cast<u32>(frameCount_) + 2) % 3);
+                // C 系列：同槽位探针深度（twin 站点同步）。
+                frameData.ddgi_depth = ddgi_pass_->GetDepthBuffer(
+                    (static_cast<u32>(frameCount_) + 2) % 3);
                 frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
                 frameData.ddgi_spacing = vol.ProbeSpacing;
                 frameData.ddgi_counts[0] = vol.ProbeCounts[0];
@@ -2807,6 +2884,21 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             RGResourceHandle prevColor;
             if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE)
                 prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
+            // B11: 上一帧 Fusion HDR（含 GI）优先——直射-only 供给使阴影命中 ≈0。
+            if (RGResourceHandle fused = MakeProbeRadianceSource(graph, cbIdx); fused.IsValid()) {
+                prevColor = fused;
+                camData.radiance_is_previous_frame = true;
+            }
+            if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+                camData.screen_depth = graph.ImportResource("DDGI_CurrentScreenDepth", gpuDraw.GetGBufferDepthSampleable());
+                if (!camData.radiance_is_previous_frame) {
+                    camData.radiance_depth = camData.screen_depth;
+                } else if (depth_history_ && !camera_cut_this_frame_) {
+                    const auto previous = depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_));
+                    if (previous.is_valid && previous.texture != handles::INVALID_RESOURCE)
+                        camData.radiance_depth = graph.ImportResource("DDGI_RadianceDepth", previous.texture);
+                }
+            }
             ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
 
             // T5.5: secondary volumes (no SC atlas — near-field data only).
@@ -3254,6 +3346,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             blitIn.input_rg = deferredOut.deferred_output_rg;
             blitIn.input_tex = deferredOut.deferred_output_tex;
+        }
+        // Vulkan numerical debug views must reach the target unchanged.
+        // In particular, GI and ACES can make a zero shadow mask look nonzero.
+        if (const char* debug = std::getenv("PRIMAL_LIGHTING_DEBUG");
+            debug && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+            if (std::strcmp(debug, "normal") == 0 || std::strcmp(debug, "ndotl") == 0 ||
+                std::strcmp(debug, "shadow") == 0 || std::strcmp(debug, "albedo") == 0) {
+                blitIn.input_rg = deferredOut.deferred_output_rg;
+                blitIn.input_tex = deferredOut.deferred_output_tex;
+            }
         }
         blitIn.backbuffer_rg = graph.ImportResource("BackBuffer", target);
         blitIn.current_buffer_index = cbIdx;

@@ -64,11 +64,9 @@ kernel void ddgi_probe_irradiance_from_cards(
 
     uint base = probeIdx * 9u;
     float alpha = vol.ProbeHysteresis;
-    // 能量门：卡片立体角权重（CPU 侧 solidAngle×NdotL×4π，Ω 不饱和）在
-    // 近距探针上把原始投影 L0 抬到 trace 尺度的百倍以上（实测 ~1230 vs
-    // ~1.2），且下方 l1/l2Limit 由它推导，随垃圾同步膨胀（实测 L1=1661）。
-    // 先把 L0 门到 trace 工作点，再派生波段上限——全波段硬上界。
-    constexpr float SC_L0_GATE = 4.0f;
+    // CPU solid-angle weights have no extra 4pi. Match the trace L0
+    // safety bound instead of discarding legitimate HDR scale at 4.
+    constexpr float SC_L0_GATE = 64.0f;
     {
         float l0mag = length(sh[0]);
         if (l0mag > SC_L0_GATE) {
@@ -81,7 +79,7 @@ kernel void ddgi_probe_irradiance_from_cards(
     float l2Limit = max(length(sh0) * 2.0f, 0.1f);
 
     // Step 1: SC-filtered results — temporal blend with history + energy
-    // clamps mirroring DDGIUpdateIrradiance (L0 <= 10, L1 <= 3|L0|, L2 <= 2|L0|).
+    // clamps mirroring DDGIUpdateIrradiance (L0 <= 64, L1 <= 3|L0|, L2 <= 2|L0|).
     float3 scResult[9];
     for (uint i = 0; i < 9u; ++i) {
         float3 history = irradiance_history[base + i].xyz;
@@ -90,7 +88,7 @@ kernel void ddgi_probe_irradiance_from_cards(
             history = float3(0.0);
 
         float3 filtered = mix(history, sh[i], alpha);
-        float limit = (i == 0u) ? 10.0f : ((i < 4u) ? l1Limit : l2Limit);
+        float limit = (i == 0u) ? 64.0f : ((i < 4u) ? l1Limit : l2Limit);
         float mag = length(filtered);
         if (mag > limit) filtered *= limit / mag;
         scResult[i] = filtered;

@@ -557,7 +557,7 @@ fragment float4 fragmentLighting_gpuDriven(
         // 的同名旋钮同值（2.5）。GPU 驱动路径此前无此乘数——FULL_POST 的
         // ACES 下直射峰值 ~0.48 过不了感知门槛（画面呈纯环境光观感）。
         // legacy 直出时代该旋钮曾以 3.125 存在于测试副本（未同步入引擎）。
-        constexpr float DIRECT_INTENSITY = 5.0f; // 2026-09-05 对齐 UE 参考（阳光光斑亮度）
+        constexpr float DIRECT_INTENSITY = 50.0f; // 2026-09-10 十七: 同步 Vulkan 20→50（C4 实验档）
         Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL * DIRECT_INTENSITY;
     }
 
@@ -642,26 +642,14 @@ fragment float4 fragmentFusionIndirect(
     // SSGI confidence normalized against the 30-unit trace cap; ≥0.3 floor.
     float  ssgi_hit_norm = clamp(ssgi_hit, 0.0f, 30.0f) / 30.0f;
     float  ssgi_conf = clamp(1.0f - ssgi_hit_norm * 0.7f, 0.3f, 1.0f);
-    // T8.7: SPGI confidence × luminance validity — confidently-black SPGI
-    // must not suppress the accumulated world-probe ambient.
-    float  spgiLum = dot(spgi4.rgb, float3(0.2126f, 0.7152f, 0.0722f));
-    float  radianceValidity = smoothstep(0.02f, 0.15f, spgiLum);
-    float  spgi_w = clamp(spgi4.a * 2.0f, 0.0f, 0.9f) * radianceValidity;
+    // Same irradiance units: confidence blends estimates without selecting
+    // only brighter samples or adding a compensating SPGI gain.
+    float spgi_w = clamp(spgi4.a, 0.0f, 0.9f);
     albedo = clamp(albedo, float3(0.0f), float3(1.0f));
 
-    // DDGI is the stable low-frequency field; SPGI may replace it only where
-    // the screen-probe estimate carries at least as much energy.
-    // B3: platform knob removed — Vulkan path consumes ddgi at 1.0; the 0.5
-    // here was absorbing the missing 1/π downstream (fixed below).
-    float3 ddgiBase   = ddgi;
-    float3 spgiTarget = spgi4.rgb * 1.25f;
-    // T8.8: replacement needs a real brightness ADVANTAGE — luminance-ratio
-    // ramp 1.10→1.35 gates the max() merge; confidence stays a multiplier.
-    float ddgiLum  = dot(ddgiBase,   float3(0.2126f, 0.7152f, 0.0722f));
-    float spgiLumT = dot(spgiTarget, float3(0.2126f, 0.7152f, 0.0722f));
-    float replaceW = smoothstep(1.10f, 1.35f, spgiLumT / max(ddgiLum, 1e-5f));
-    float3 gi = mix(ddgiBase, max(ddgiBase, spgiTarget), spgi_w * replaceW)
-              + ssgi_irr * ssgi_conf * mix(0.25f, 0.15f, spgi_w * replaceW);
+    float3 gi = mix(ddgi, spgi4.rgb, spgi_w)
+              + ssgi_irr * ssgi_conf * mix(0.25f, 0.15f, spgi_w);
+
 
     // T8.9 + T8.10c: sky-leak ambient (Lumen far-field) — additive with the
     // near-field estimate, occlusion-modulated so shadow pockets key it down.

@@ -333,6 +333,20 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 if (vd) {
                     vd->viewProjection = vp;
                     vd->invViewProjection = Inverse(vp);
+                    // TEMP-DIAG: deferred 的 vp/invVP 真值
+                    if (std::getenv("PRIMAL_DUMP_MATRIX")) {
+                        std::fprintf(stderr, "[DEF_VP] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
+                                     vp.columns[0].x, vp.columns[0].y, vp.columns[0].z, vp.columns[0].w,
+                                     vp.columns[1].x, vp.columns[1].y, vp.columns[1].z, vp.columns[1].w,
+                                     vp.columns[2].x, vp.columns[2].y, vp.columns[2].z, vp.columns[2].w,
+                                     vp.columns[3].x, vp.columns[3].y, vp.columns[3].z, vp.columns[3].w);
+                        const math::m4x4& iv = vd->invViewProjection;
+                        std::fprintf(stderr, "[DEF_INVP] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
+                                     iv.columns[0].x, iv.columns[0].y, iv.columns[0].z, iv.columns[0].w,
+                                     iv.columns[1].x, iv.columns[1].y, iv.columns[1].z, iv.columns[1].w,
+                                     iv.columns[2].x, iv.columns[2].y, iv.columns[2].z, iv.columns[2].w,
+                                     iv.columns[3].x, iv.columns[3].y, iv.columns[3].z, iv.columns[3].w);
+                    }
                     device_->UnmapBuffer(view_cb_[cbIdx]);
                 }
             }
@@ -348,10 +362,30 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                     sd->viewPos = math::v4{inputs.camera_position.x, inputs.camera_position.y, inputs.camera_position.z, 1.0f};
                     sd->shadowMatrix0 = inputs.shadow_matrix0;
                     sd->shadowMatrix1 = inputs.shadow_matrix1;
+                    // PRIMAL_SHADOW_VIS_DEBUG=1: vis-only visualization (0.5).
+                    // PRIMAL_GBUFFER_ALBEDO_DEBUG=1: raw albedo (0.25).
+                    // Both keep the PCSS branch semantics; see the frag.
+                    const bool albedoDebug = std::getenv("PRIMAL_GBUFFER_ALBEDO_DEBUG") != nullptr;
+                    const bool visDebug = std::getenv("PRIMAL_SHADOW_VIS_DEBUG") != nullptr;
+                    static bool visDebugLogged = false;
+                    if ((visDebug || albedoDebug) && !visDebugLogged) {
+                        visDebugLogged = true;
+                        std::fprintf(stderr, "[VIS_DEBUG] shadowParams.x=%s active\n",
+                                     albedoDebug ? "0.25 (albedo)" : "0.5 (vis)");
+                    }
                     sd->shadowParams = math::v4{
-                        inputs.vsm_enabled ? 1.0f : 0.0f,
+                        albedoDebug ? 0.25f
+                            : (visDebug ? 0.5f : (inputs.vsm_enabled ? 1.0f : 0.0f)),
                         inputs.cascade_splits.x,
                         0.0f, 0.0f};
+                    // Raw Vulkan diagnostics keep the selected shadow method.
+                    if (const char* debug = std::getenv("PRIMAL_LIGHTING_DEBUG");
+                        debug && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+                        if (std::strcmp(debug, "normal") == 0) sd->shadowParams.z = 1.0f;
+                        if (std::strcmp(debug, "ndotl") == 0) sd->shadowParams.z = 2.0f;
+                        if (std::strcmp(debug, "shadow") == 0) sd->shadowParams.z = 3.0f;
+                        if (std::strcmp(debug, "albedo") == 0) sd->shadowParams.z = 4.0f;
+                    }
                     device_->UnmapBuffer(scene_cb_[cbIdx]);
                     // TEMP-DIAG: SceneData 上传字节真值（PRIMAL_DUMP_MATRIX=1）
                     if (std::getenv("PRIMAL_DUMP_MATRIX")) {

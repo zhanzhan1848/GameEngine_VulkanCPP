@@ -362,6 +362,10 @@ private:
 
     void UpdatePerFrame(RenderScene& scene, RenderView& view);
     void BuildRenderGraph(rhi::ResourceHandle backBuffer, u32 currentBufferIndex);
+    // B11: DDGI/探针射线的 prev-screen 辐射度供给源（上一帧 Fusion HDR，
+    // 含 GI；不可用时返回 invalid，调用方回退 DeferredLighting 直射输出）。
+    rendergraph::RGResourceHandle MakeProbeRadianceSource(rendergraph::RenderGraph& graph,
+                                                          u32 currentBufferIndex);
     bool ApplyConfigChanges();
 
     rhi::RHIDeviceBase* device_{nullptr};

@@ -28,10 +28,14 @@ struct GIGatherCB {
     math::v4   camera_pos;  // T4.3: world-space camera for reflection vectors
     // T6.3 sub-A: probe_vis 数据面。debug_vis.x = GIDebug().probe_vis 模式
     // （0=Off）。经 binding 6（48B range，第三 vec4 = offset 112）上传；
-    // camera_pos 槽位（offset 96）在 shader 内是 binding 6 的占位镜像
-    // （未读），布局保持前四字段逐字节不变。
+    // camera_pos（offset 96）由 Vulkan binding 6 / Metal buffer(2) 读取。
     math::v4   debug_vis;
 };
+
+static_assert(offsetof(GIGatherCB, probe_origin_spacing) == 64);
+static_assert(offsetof(GIGatherCB, probe_counts) == 80);
+static_assert(offsetof(GIGatherCB, camera_pos) == 96);
+static_assert(offsetof(GIGatherCB, debug_vis) == 112);
 
 // T6.3 sub-B → T3.6/D1: volume 参数 CB（binding 18，std140 布局与
 // DDGIGIGather.comp 的 FlatVolumeCB 一致）。NVolumeCB 原位改型：counts[].w
@@ -74,7 +78,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {1,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // normal
             {2,  DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // output
             {3,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // history
-            {4,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // invViewProj+cameraPos
+            {4,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // invViewProj; camera is in binding 6
             {5,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeOriginSpacing
             {6,  DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // probeCounts (+debugVis, 48B)
             {7,  DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // staticSkySH

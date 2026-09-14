@@ -445,11 +445,17 @@ for v in "surface_cache_capture_write:SurfaceCacheCaptureWrite" \
     rm -rf "$tmpdir"
 done
 
+# Keep the path diagnostic on the same descriptor/UBO layout as production.
+glslangValidator --quiet -V -I"$DEST_DIR" -DDDGI_PATH_DEBUG \
+    --source-entrypoint main -e ddgi_trace_finalize \
+    "$DEST_DIR/Lumen/DDGITraceFinalize.comp" \
+    -o "$DEST_DIR/Lumen/DDGITraceFinalize_pathdbg.comp.spv"
+
 # M8/T8.7 GI_ISOLATE A/B variants of FusionIndirect (one source zeroed each).
 # Compiled from the same source with a -D so they can never drift semantically
 # from the main variant above.
 echo "==> Lumen GI_ISOLATE FusionIndirect variants =="
-for v in "noSsgi:GI_NO_SSGI" "noDdgi:GI_NO_DDGI" "noSpgi:GI_NO_SPGI"; do
+for v in "noSsgi:GI_NO_SSGI" "noDdgi:GI_NO_DDGI" "noSpgi:GI_NO_SPGI" "noAll:GI_NO_ALL"; do
     suffix="${v%%:*}"
     define="${v##*:}"
     src="$DEST_DIR/Lumen/FusionIndirect.frag"

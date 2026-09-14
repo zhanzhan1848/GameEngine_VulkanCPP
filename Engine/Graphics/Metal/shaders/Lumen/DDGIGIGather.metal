@@ -148,7 +148,7 @@ kernel void ddgi_gi_gather(
 
     constant float4* viewCB                [[buffer(0)]],
     constant float4& probeOriginSpacing    [[buffer(1)]],
-    constant float4& probeCountsCB         [[buffer(2)]],
+    constant float4* probeCountsData       [[buffer(2)]], // counts, camera position, debug
     device const float3* staticSkySHBuffer [[buffer(3)]],         // DEAD (F4/D5): never read — (void)'d below. Binding kept for layout stability.
     device const float* staticSkyFactor    [[buffer(4)]],         // unused
     constant StaticProbeData& staticProbe  [[buffer(5)]],         // unused
@@ -163,6 +163,7 @@ kernel void ddgi_gi_gather(
     device const float4* flatIrradiance    [[buffer(10)]],
     constant float4* fvCB                  [[buffer(11)]]   // [0..3]=origin+spacing, [4..7]=counts+probeOffset, [8]=meta
 ) {
+    float4 probeCountsCB = probeCountsData[0];
     uint width = outputTex.get_width();
     uint height = outputTex.get_height();
 
@@ -205,7 +206,7 @@ kernel void ddgi_gi_gather(
     // Phase 1: per-pixel output — T3.6/D1 flat 多 volume 路由（与 Vulkan
     // DDGIGIGather.comp route B 同构）。逐像素选择"包含该点且 spacing 最细"
     // 的 volume（平局取低索引 → near=volume 0 优先）：
-    //   sel==0 → 近场数学（可见性/法线加权 + B1 ×2.5 探针校准 + spec 输出）
+    //   sel==0 → 近场数学（可见性/法线加权 + spec 输出；B1 ×2.5 已于 C3.4 回撤）
     //   sel>0  → 纯三线性远场数学（spec 清零）
     //   sel<0  → 网外/天空 dim ambient
     // ========================================================================
@@ -268,7 +269,9 @@ kernel void ddgi_gi_gather(
 
         // T4.3 glossy: reflection-vector SH9 with the same plain trilinear
         // weights; roughness widens the lobe towards the diffuse limit.
-        float3 camPos = viewCB[4].xyz;
+        // buffer(2) starts at GIGatherCB offset 80; the camera is at 96.
+        // viewCB[4] is the probe-grid origin, not the camera.
+        float3 camPos = probeCountsData[1].xyz;
         float3 V = normalize(camPos - worldPos);
         float NdotV = clamp(dot(normal, V), 0.05f, 1.0f);
         float3 R = reflect(-V, normal);
@@ -291,7 +294,7 @@ kernel void ddgi_gi_gather(
             uint shBase = nearOff + pIdx * SH_COEFF_COUNT;
             float3 sh[9];
             for (uint i = 0u; i < 9u; ++i)
-                sh[i] = flatIrradiance[shBase + i].xyz * 2.5f;   // B1: Metal DDGI probe calibration — matches Vulkan gather_avg (5.55/2.21=2.51). Root cause: miss-ray sky radiance differs (Metal monolith DDGI_SKY_COLOR lum≈2.9 vs Vulkan split sky gradient lum≈0.5)
+                sh[i] = flatIrradiance[shBase + i].xyz;   // C3.4: B1 ×2.5 探针校准回撤——原始根因（miss 单位源分叉）已由 escape/exhausted 分档修复闭合，双端 trace/finalize/投影语义逐行对齐后平台校准系数失去存在理由（T3 A/B：gather_avg 3.22→≈1.3×L0 比值与 Vulkan 对齐）
 
             // B1: SH9 evaluation at the pixel's surface normal.
             float3 irr = evalSH9Irradiance(sh, normal);

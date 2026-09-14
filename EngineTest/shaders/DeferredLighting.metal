@@ -536,6 +536,12 @@ fragment float4 fragmentLighting_gpuDriven(
         shadow = GetShadowVisibility(uv, shadowVisibility, defaultSampler);
     }
 
+    // C1.1 直出诊断：final = vis（含 ShadowFilter 三段直出的编码值），
+    // SPONZA_CAPTURE 抓帧即可读全分辨率 vis 内容，无需 readback 代码。
+#ifdef PRIMAL_VIS_DEBUG
+    return float4(shadow, shadow, shadow, 1.0);
+#endif
+
     // 4. Direct Lighting (Cook-Torrance PBR + shadow)
     float3 N = normalize(normal);
     float3 L = normalize(sceneData.lightPos.xyz);
@@ -570,7 +576,7 @@ fragment float4 fragmentLighting_gpuDriven(
         // 的同名旋钮同值（2.5）。GPU 驱动路径此前无此乘数——FULL_POST 的
         // ACES 下直射峰值 ~0.48 过不了感知门槛（画面呈纯环境光观感）。
         // legacy 直出时代该旋钮曾以 3.125 存在于测试副本（未同步入引擎）。
-        constexpr float DIRECT_INTENSITY = 7.5f; // 2026-09-06 对齐 UE 参考：阳光光池加强（5.0 → 7.5）
+        constexpr float DIRECT_INTENSITY = 50.0f; // 2026-09-10 十七: 同步 Vulkan 20→50（SC 尺度同步 ×2.5）
         Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL * DIRECT_INTENSITY;
     }
 
@@ -682,12 +688,20 @@ fragment float4 fragmentFusionIndirect(
     indirect *= ao;
 
 #ifdef GI_DEBUG_STRIP
-    // Washout diagnosis: 0.25× strips — left→right: ddgi / ssgi / spgi / full.
+    // Washout diagnosis（带内全画面版）——左→右四带：ddgi / ssgi / spgi / full。
+    // 前三带按 fract(uv.x*4) 重映射 uv，各自显示"该源贡献的完整画面"（×1.0
+    // 不缩放）；full 带走正常路径，作为同帧标定锚。区域亮度直接可读。
     {
         float x = in.uv.x;
-        if (x < 0.25f)      return float4(ddgi * 0.25f, 1.0f);
-        else if (x < 0.5f)  return float4(ssgi4.rgb * 0.25f, 1.0f);
-        else if (x < 0.75f) return float4(spgi4.rgb * 0.25f, 1.0f);
+        if (x < 0.75f) {
+            float2 buv = float2(fract(x * 4.0f), in.uv.y);
+            float4 ssgiB = ssgiColor.sample(s, buv);
+            float3 ddgiB = ddgiColor.sample(s, buv).rgb;
+            float4 spgiB = spgiColor.sample(s, buv);
+            if (x < 0.25f)      return float4(ddgiB, 1.0f);
+            else if (x < 0.5f)  return float4(ssgiB.rgb, 1.0f);
+            else                return float4(spgiB.rgb, 1.0f);
+        }
     }
 #endif
 

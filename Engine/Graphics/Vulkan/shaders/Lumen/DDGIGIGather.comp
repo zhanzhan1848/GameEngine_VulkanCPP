@@ -21,9 +21,9 @@
 //   binding 1  = SampledImage       gbuffer_normal
 //   binding 2  = StorageImage(rgba16f) output_tex  (half-res GI)
 //   binding 3  = SampledImage       history_tex    (temporal)
-//   binding 4  = UniformBuffer      invViewProj + cameraPos (5 vec4 = 80B)
+//   binding 4  = UniformBuffer      invViewProj (first 64B of GIGatherCB)
 //   binding 5  = UniformBuffer      probeOriginSpacing (origin.xyz + spacing.w)
-//   binding 6  = UniformBuffer      probeCounts (xyz) + cameraPosMirror + debugVis
+//   binding 6  = UniformBuffer      probeCounts (xyz) + cameraPos + debugVis
 //   binding 7  = StorageBuffer(ro)  staticSkySH (9 float3)
 //   binding 8  = StorageBuffer(ro)  staticSkyFactor (float per probe)
 //   binding 9  = UniformBuffer      staticProbeParams (StaticProbeData)
@@ -59,17 +59,17 @@ layout(set = 0, binding = 3) uniform texture2D history_tex; // unused (temporal 
 
 layout(set = 0, binding = 4, std140) uniform ViewCB {
     vec4 viewRows[4];  // invViewProj as 4 vec4 rows (column-major matrix)
-    vec4 cameraPos;    // world-space camera position (T4.3 glossy reflections)
 };
 layout(set = 0, binding = 5, std140) uniform ProbeOriginSpacing {
     vec4 probeOriginSpacing;  // xyz=origin, w=spacing
 };
 layout(set = 0, binding = 6, std140) uniform ProbeCounts {
     vec4 probeCounts;  // xyz=counts, w=unused
-    // T6.3 sub-A: binding 6 扩到 48B。中间槽位镜像 CPU 侧 camera_pos 字段
-    // (GIGatherCB offset 96 — shader binding 4 的 80B range 不覆盖它,仅占位
-    // 保证 debugVis 落在 CPU offset 112),第三个 vec4 = debugVis。
-    vec4 cameraPosMirror;  // 占位(未读)
+    // Binding 6 begins at GIGatherCB offset 80. The camera is at offset 96,
+    // not immediately after invViewProj (offset 64 holds the probe origin).
+    // Using that origin as the camera incorrectly suppressed diffuse GI via
+    // NdotV/Fresnel and also pointed the reflection lobe in the wrong direction.
+    vec4 cameraPos;
     vec4 debugVis;         // x = probe_vis 模式 (0=Off,1=IrradianceAtlas,
                            //      2=DepthAtlas,3=Confidence)
 };
@@ -741,18 +741,24 @@ void ddgi_gi_gather() {
                     // this component from recreating the former white grid.
                     result = mix(lowFrequencyGI, result, 0.45);  // thin-geometry probes get Chebyshev-rejected; 55% low-freq keeps near-light bounce
                 }
-                // Specular keeps RADIANCE units (reflection lobe sampling is not
-                // cosine-projected) and blends against the uncorrected result,
-                // preserving the pre-fix scale of the glossy chain.
-                vec3 radBase = max(result, vec3(0.05, 0.05, 0.06));  // sky-leak ambient floor
-                vec3 diffOut = max(radBase * PROBE_SH_RAD_TO_IRRAD, vec3(0.05, 0.05, 0.06));
+                // B13 (2026-09-11): sky-leak ambient floor REMOVED — same B12
+                // rationale (fused-supply transport B11 made the leak proxies
+                // obsolete). The old max(result, 0.05) pre-π floored every
+                // in-volume pixel's gi at ~0.16 post-π, flattening dark
+                // pockets. Negative SH reconstruction now clamps to 0 only.
+                vec3 diffOut = max(result * PROBE_SH_RAD_TO_IRRAD, vec3(0.0));
                 imageStore(output_tex, ivec2(tid), vec4(diffOut, 1.0));
 
                 if (sel == 0) {
                     // Glossy output(与 legacy 近场一致):RGB = lobe radiance,
                     // A = NdotV(DFG 在 FusionComposite)。
+                    // B13: specular keeps RADIANCE units (lobe sampling is not
+                    // cosine-projected) and KEEPS the 0.05 floor — glossy chain
+                    // preserves its pre-B13 scale; only the diffuse leg dropped
+                    // the sky-leak floor.
                     ivec2 fullOrmTexel = ivec2(vec2(textureSize(gbuffer_orm, 0)) * uv);
                     float roughness = clamp(texelFetch(gbuffer_orm, fullOrmTexel, 0).g, 0.04, 1.0);
+                    vec3 radBase = max(result, vec3(0.05, 0.05, 0.06));
                     vec3 specIrr = mix(reflResult, radBase, roughness * roughness);
                     imageStore(spec_output_tex, ivec2(tid), vec4(specIrr, NdotV));
                 } else {
