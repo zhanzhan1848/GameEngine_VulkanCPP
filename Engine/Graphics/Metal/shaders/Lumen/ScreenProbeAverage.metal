@@ -99,15 +99,27 @@ static float3 spgiImportanceDirection(uint rayIdx, uint raysPerProbe,
         float3 local = rot * fibonacciDirection(i, n);
         float3 world = tangent * local.x + bitangent * local.y + probeNormal * local.z;
         float3 irr = sh0 * 0.282095f
-                   + sh1 * (0.488603f * world.y)
+                   + sh1 * (-0.488603f * world.y)
                    + sh2 * (0.488603f * world.z)
-                   + sh3 * (0.488603f * world.x);
+                   + sh3 * (-0.488603f * world.x);
         float lum = max(dot(irr, float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
         pdf[i] = max(local.z, 0.02f) * (lum + 0.05f);
         sum += pdf[i];
     }
 
-    float u = (float(rayIdx) + 0.5f) / float(n) * sum;
+    // Defensive mixture keeps every candidate reachable even when history
+    // misses a bright lobe. q >= 0.25/N bounds invNq <= 4 without clipping
+    // radiance or biasing the estimator; PDF correction uses this mixture.
+    for (uint i = 0u; i < n; ++i)
+        pdf[i] = 0.25f / float(n) + 0.75f * pdf[i] / max(sum, 1e-6f);
+    sum = 1.0f;
+
+    // Jitter within each CDF stratum. A fixed midpoint can permanently omit
+    // small-probability candidates; the PDF correction needs random coverage.
+    uint sampleSeed = frameSeed < 0.0f ? 0u : uint(frameSeed);
+    uint sampleHash = spgiJitterHash(probeIdx * 0x9e3779b9u ^ sampleSeed ^ (rayIdx * 0x85ebca6bu));
+    float jitter = (float(sampleHash & 0x00ffffffu) + 0.5f) / 16777216.0f;
+    float u = (float(rayIdx) + jitter) / float(n) * sum;
     uint c = n - 1u;
     float acc = 0.0f;
     for (uint i = 0u; i < n; ++i) {
@@ -126,9 +138,9 @@ static float3 spgiImportanceDirection(uint rayIdx, uint raysPerProbe,
 static float4 shBasis(float3 d) {
     return float4(
         0.282095f,                  // Y0 (L0)
-        0.488603f * d.y,           // Y1 (L1, y)
+        -0.488603f * d.y,           // Y1 (L1, y)
         0.488603f * d.z,           // Y2 (L1, z)
-        0.488603f * d.x            // Y3 (L1, x)
+        -0.488603f * d.x            // Y3 (L1, x)
     );
 }
 
@@ -170,15 +182,16 @@ kernel void screen_probe_average(
     // Each thread reads exactly 1 ray
     uint rayIdx = group_id * constants.raysPerProbe + tid;
     // Inactive lanes must reach every barrier and contribute zero.
-    float4 rayData = float4(0.0f, 0.0f, 0.0f, -1.0f);
+    float4 rayData = float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (tid < constants.raysPerProbe) rayData = rayRadiance[rayIdx];
 
     // B5: sign encodes geometry hit (positive) vs miss→sky / inactive
     // (≤ 0). Integration uses the magnitude — sky fallback radiance still
     // contributes — but the hit count requires w > 0.
     if (rayData.w != 0.0f) {
-        // Hit: clamp radiance at source to prevent firefly propagation
-        constexpr float MAX_RAY_RADIANCE = 5.0f;
+        // HDR safety bound, matching the SC radiance range. The old 5.0
+        // ceiling clipped ordinary sunlit bounce before projection.
+        constexpr float MAX_RAY_RADIANCE = 64.0f;
         float rayLum = dot(rayData.rgb, float3(0.2126f, 0.7152f, 0.0722f));
         if (rayLum > MAX_RAY_RADIANCE) {
             rayData.rgb *= MAX_RAY_RADIANCE / rayLum;
@@ -189,7 +202,7 @@ kernel void screen_probe_average(
         float3 probeNormal = normalize(normData.xyz);
 
         float3 rayDir;
-        float invNq;   // already applied to rayData.w by the Finalize kernel
+        float invNq = 1.0f; // discrete candidate PDF correction, regenerated with the ray
         if (constants.isMode > 0.5f) {
             uint hb = group_id * 4u;
             float4 h0 = importanceSH[hb + 0u];
@@ -209,12 +222,11 @@ kernel void screen_probe_average(
         float4 Y = shBasis(rayDir);
 
         float rayWeight = abs(rayData.w);   // B5: sign is a flag, not a weight
-        // B1: mode 0 uses the RADIANCE-SH projection (4π/N)·Σ rayL·Y —
-        // identical to DDGI's projection, so both probe fields become the
-        // same object and Fusion's brightness comparison is meaningful.
-        // The cosθ-weighted form was an irradiance projection evaluated as
-        // radiance (the B1 2π mismatch). Importance mode keeps its weights.
-        float projWeight = (constants.isMode > 0.5f) ? rayWeight : 1.0f;
+        // Project radiance, not cosine-weighted irradiance. The candidate
+        // set covers 4pi; invNq=1/(candidateCount*q) corrects resampling.
+        // rayData.w supplies validity/hit classification only. Gather applies
+        // the cosine convolution once, after the SH projection.
+        float projWeight = invNq;
         float3 weightedRadiance = rayData.rgb * projWeight;
         sharedSH[0][tid] = weightedRadiance * Y.x;
         sharedSH[1][tid] = weightedRadiance * Y.y;
@@ -266,22 +278,10 @@ kernel void screen_probe_average(
         float totalWeight = sharedWeight[0];
 
         if (totalWeight > 0.0f && hitCount > 0.0f) {
-            float invWeight = 1.0f / totalWeight;
+            // Both modes store canonical radiance SH. No division by the
+            // observed cosine-weight sum: that destroys the integral scale.
+            const float sumScale = 12.566370614f / float(constants.raysPerProbe);
 
-            // B1: mode 0 — radiance-SH projection, gather applies per-band
-            // A_l (π, 2π/3) at evaluation. Importance mode keeps the legacy
-            // ratio estimator (2·C0 / C1, from B2).
-            constexpr float FOUR_PI = 12.566370614f;
-            constexpr float L0_HEMISPHERE_SCALE = 0.56418958f;  // 2 × 0.28209479
-            constexpr float L1_HEMISPHERE_SCALE = 0.48860251f;  // C1
-            const bool importanceMode = (constants.isMode > 0.5f);
-            const float sumScale = importanceMode
-                ? invWeight
-                : (FOUR_PI / float(constants.raysPerProbe));
-            const float l0Scale = importanceMode ? L0_HEMISPHERE_SCALE : 1.0f;
-            const float l1Scale = importanceMode ? L1_HEMISPHERE_SCALE : 1.0f;
-
-            // Hit ratio: how many rays hit geometry
             float hitRatio = hitCount / float(constants.raysPerProbe);
 
             // Radiance variance: Var(X) = E[X²] - E[X]²
@@ -297,10 +297,10 @@ kernel void screen_probe_average(
             // Multi-factor confidence
             float confidence = hitRatio * radianceConsistency;
 
-            probeSHOut[base + 0] = float4(sharedSH[0][0] * sumScale * l0Scale, confidence);
-            probeSHOut[base + 1] = float4(sharedSH[1][0] * sumScale * l1Scale, 1.0f);
-            probeSHOut[base + 2] = float4(sharedSH[2][0] * sumScale * l1Scale, 1.0f);
-            probeSHOut[base + 3] = float4(sharedSH[3][0] * sumScale * l1Scale, 1.0f);
+            probeSHOut[base + 0] = float4(sharedSH[0][0] * sumScale, confidence);
+            probeSHOut[base + 1] = float4(sharedSH[1][0] * sumScale, 1.0f);
+            probeSHOut[base + 2] = float4(sharedSH[2][0] * sumScale, 1.0f);
+            probeSHOut[base + 3] = float4(sharedSH[3][0] * sumScale, 1.0f);
         } else {
             probeSHOut[base + 0] = float4(0.0f, 0.0f, 0.0f, 0.0f);
             probeSHOut[base + 1] = float4(0.0f, 0.0f, 0.0f, 0.0f);

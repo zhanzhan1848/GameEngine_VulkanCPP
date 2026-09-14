@@ -79,9 +79,9 @@ const uint  AVG_TG_SIZE  = 64u;
 vec4 shBasis(vec3 d) {
     return vec4(
         0.282095,                // Y0 (L0)
-        0.488603 * d.y,          // Y1 (L1, y)
+        -0.488603 * d.y,          // Y1 (L1, y)
         0.488603 * d.z,          // Y2 (L1, z)
-        0.488603 * d.x           // Y3 (L1, x)
+        -0.488603 * d.x           // Y3 (L1, x)
     );
 }
 
@@ -107,14 +107,15 @@ void screen_probe_average() {
     // Each thread reads exactly 1 ray
     uint rayIdx = group_id * constants.raysPerProbe + tid;
     // Keep all lanes in the reduction without reading beyond this probe.
-    vec4 rayData = vec4(0.0, 0.0, 0.0, -1.0);
+    vec4 rayData = vec4(0.0, 0.0, 0.0, 0.0);
     if (tid < constants.raysPerProbe) rayData = rayRadiance.data[rayIdx];
 
     // B5: sign encodes geometry hit (positive) vs miss→sky / inactive (≤ 0).
     // Integration uses the magnitude; hit count requires w > 0.
     if (rayData.w != 0.0) {
-        // Hit: clamp radiance at source to prevent firefly propagation
-        const float MAX_RAY_RADIANCE = 5.0;
+        // HDR safety bound, matching the SC radiance range. The old 5.0
+        // ceiling clipped ordinary sunlit bounce before projection.
+        const float MAX_RAY_RADIANCE = 64.0;
         float rayLum = dot(rayData.rgb, vec3(0.2126, 0.7152, 0.0722));
         if (rayLum > MAX_RAY_RADIANCE) {
             rayData.rgb *= MAX_RAY_RADIANCE / rayLum;
@@ -125,7 +126,7 @@ void screen_probe_average() {
         vec3 probeNormal = normalize(normData.xyz);
 
         vec3 rayDir;
-        float invNq;   // already applied to rayData.w by the Finalize kernel
+        float invNq = 1.0; // discrete candidate PDF correction, regenerated with the ray
         if (constants.isMode > 0.5) {
             uint hb = group_id * 4u;
             vec4 h0 = importanceSH.data[hb + 0u];
@@ -145,8 +146,11 @@ void screen_probe_average() {
         vec4 Y = shBasis(rayDir);
 
         float rayWeight = abs(rayData.w);   // B5: sign is a flag, not a weight
-        // B1: mode 0 radiance-SH projection (4π/N)·Σ rayL·Y — see Metal twin.
-        float projWeight = (constants.isMode > 0.5) ? rayWeight : 1.0;
+        // Project radiance, not cosine-weighted irradiance. The candidate
+        // set covers 4pi; invNq=1/(candidateCount*q) corrects resampling.
+        // rayData.w supplies validity/hit classification only. Gather applies
+        // the cosine convolution once, after the SH projection.
+        float projWeight = invNq;
         vec3 weightedRadiance = rayData.rgb * projWeight;
         sharedSH[0][tid] = weightedRadiance * Y.x;
         sharedSH[1][tid] = weightedRadiance * Y.y;
@@ -198,23 +202,9 @@ void screen_probe_average() {
         float totalWeight = sharedWeight[0];
 
         if (totalWeight > 0.0 && hitCount > 0.0) {
-            float invWeight = 1.0 / totalWeight;
-
-            // sharedSH / totalWeight is a cosine-weighted hemispherical
-            // expectation, not a standard orthonormal SH projection. Feed it
-            // to the standard SH evaluator with the matching convolution
-            // normalization. Without this, a constant field reconstructs to
-            // only 3/(4pi) ~= 24% along the probe normal.
-            // B1: mode 0 radiance projection ×(4π/N); importance legacy (B2).
-            const float FOUR_PI = 12.566370614;
-            const float L0_HEMISPHERE_SCALE = 0.56418958;
-            const float L1_HEMISPHERE_SCALE = 0.48860251;
-            const bool importanceMode = (constants.isMode > 0.5);
-            const float sumScale = importanceMode
-                ? invWeight
-                : (FOUR_PI / float(constants.raysPerProbe));
-            const float l0Scale = importanceMode ? L0_HEMISPHERE_SCALE : 1.0;
-            const float l1Scale = importanceMode ? L1_HEMISPHERE_SCALE : 1.0;
+            // Both modes store canonical radiance SH. No division by the
+            // observed cosine-weight sum: that destroys the integral scale.
+            const float sumScale = 12.566370614 / float(constants.raysPerProbe);
 
             // Hit ratio: how many rays hit geometry (or fell back to DDGI —
             // those also carry valid cached radiance).
@@ -235,10 +225,10 @@ void screen_probe_average() {
 
             float confidence = hitRatio * radianceConsistency;
 
-            probeSHOut.data[base + 0u] = vec4(sharedSH[0][0] * sumScale * l0Scale, confidence);
-            probeSHOut.data[base + 1u] = vec4(sharedSH[1][0] * sumScale * l1Scale, 1.0);
-            probeSHOut.data[base + 2u] = vec4(sharedSH[2][0] * sumScale * l1Scale, 1.0);
-            probeSHOut.data[base + 3u] = vec4(sharedSH[3][0] * sumScale * l1Scale, 1.0);
+            probeSHOut.data[base + 0u] = vec4(sharedSH[0][0] * sumScale, confidence);
+            probeSHOut.data[base + 1u] = vec4(sharedSH[1][0] * sumScale, 1.0);
+            probeSHOut.data[base + 2u] = vec4(sharedSH[2][0] * sumScale, 1.0);
+            probeSHOut.data[base + 3u] = vec4(sharedSH[3][0] * sumScale, 1.0);
         } else {
             probeSHOut.data[base + 0u] = vec4(0.0, 0.0, 0.0, 0.0);
             probeSHOut.data[base + 1u] = vec4(0.0, 0.0, 0.0, 0.0);

@@ -41,7 +41,7 @@ layout(set = 0, binding = 3, std430) writeonly buffer ProbeNormalsBlock {
     vec4 data[];
 } probeNormals;
 
-// ScreenProbeGlobalData UBO — 352 bytes, mirrors C++ struct.
+// ScreenProbeGlobalData UBO — 416 bytes, mirrors C++ struct.
 // Declared inline per established pattern (see SSAOTrace.comp).
 layout(set = 0, binding = 4, std140) uniform GlobalBlock {
     mat4 view_projection;
@@ -54,8 +54,9 @@ layout(set = 0, binding = 4, std140) uniform GlobalBlock {
     vec4 sdf_extents[3];
     uvec4 sdf_resolutions;       // xyz=res0/1/2, w=cascadeCount
     vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=jitter_max_world (F5)
-    vec4 hzb_params;             // declared for offset parity (unused here)
-    vec4 cache_params;           // F4: z = adaptive_pos_error threshold (0 → legacy variance test)
+    vec4 ddgi_fb[2];             // offset 352; preserve the C++ layout even when unused
+    vec4 hzb_params;             // offset 384 (unused here)
+    vec4 cache_params;           // offset 400: z = adaptive_pos_error threshold (0 → legacy variance test)
 } global;
 
 // --------------------------------------------------------------------------------

@@ -191,6 +191,7 @@ public:
     // view.card_count，供后续消费者使用。
     void SetSurfaceCacheData(const SurfaceCacheView& view) {
         surface_cache_lighting_atlas_ = view.lighting_atlas;
+        surface_cache_depth_atlas_ = view.depth_atlas;
         surface_cache_card_data_buffer_ = view.card_data;
         surface_cache_card_lookup_buffer_ = view.card_lookup;
         surface_cache_atlas_size_ = view.atlas_size;
@@ -306,8 +307,10 @@ private:
     void CreateRadianceCascade();
     // writeTex/prevTex are the RG-resolved physical cascade textures of this
     // frame (writeIdx = cascade_update_frame_ % 2; prev = 1 - writeIdx).
+    // SH-L1: 4 texture pairs per slot — [0] = L0, [1..3] = L1x/L1y/L1z.
     void DispatchCascadeUpdate(rhi::RHICommandBuffer* cmd, u32 frameIdx,
-                               rhi::ResourceHandle writeTex, rhi::ResourceHandle prevTex);
+                               const rhi::ResourceHandle* writeTexs /*[4]*/,
+                               const rhi::ResourceHandle* prevTexs /*[4]*/);
     void CreateBuffers();
 
     bool              initialized_{ false };
@@ -438,9 +441,14 @@ private:
     rhi::ResourceHandle output_texture_filtered_{ rhi::handles::INVALID_RESOURCE };  // Denoise output (filtered)
     // T3.5: world-space radiance cascade (32³ RGBA16F) — pre-integrated far-field
     // radiance from DDGI probes, sampled by far-cache to avoid 16-read probe queries.
+    // 2026-09-10 SH-L1 upgrade: texel semantics are RGB = raw SH coefficient,
+    // A = validity; radiance_cascade_ holds L0, radiance_cascade_l1_[slot][0..2]
+    // hold the L1x/L1y/L1z coefficients. Far-cache evaluates the canonical DDGI
+    // L0+L1 basis along the ray direction (the old DC-only cascade was isotropic).
     static constexpr u32 kRadianceCascadeRes = 32;
     rhi::ResourceHandle radiance_cascade_[2]{                                         // double-buffered for temporal EMA
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle radiance_cascade_l1_[2][3]{};                                 // [slot][L1x/L1y/L1z]
     rhi::PipelineHandle cascade_update_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineLayoutHandle cascade_update_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle cascade_update_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
@@ -467,6 +475,7 @@ private:
 
     // Surface Cache integration
     rhi::ResourceHandle surface_cache_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle surface_cache_depth_atlas_{ rhi::handles::INVALID_RESOURCE };
     rendergraph::RGResourceHandle external_lighting_rg_{};   // T1.1 (C2)
     rhi::ResourceHandle surface_cache_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };

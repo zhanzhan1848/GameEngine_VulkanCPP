@@ -162,7 +162,22 @@ void screen_probe_trace_hzb() {
         if (rayLin > sceneLin) {
             if (mip == 0u) {
                 if (rayLin <= sceneLin + thickness) {
-                    hit_buffer.data[global_id] = vec4(t, uv.x, uv.y, 1.0);
+                    // A depth-thickness overlap is only a candidate. The
+                    // captured surface must also lie within the ray's pixel
+                    // footprint, otherwise it borrows light from a neighbor.
+                    vec2 dims = vec2(textureSize(hzb_texture, 0));
+                    vec2 center = (floor(uv * dims) + 0.5) / dims;
+                    vec2 screenNDC = vec2(center.x * 2.0 - 1.0, 1.0 - center.y * 2.0);
+                    vec4 hp = global.inv_view_projection * vec4(screenNDC, sceneNDC, 1.0);
+                    if (abs(hp.w) < 1e-6) continue;
+                    vec3 surface = hp.xyz / hp.w;
+                    vec4 px = global.inv_view_projection * vec4(screenNDC + vec2(2.0/dims.x, 0.0), sceneNDC, 1.0);
+                    if (abs(px.w) < 1e-6) continue;
+                    float footprint = distance(surface, px.xyz / px.w);
+                    float alongRay = dot(surface - origin, rayDir);
+                    float rayError = distance(surface, origin + rayDir * alongRay);
+                    if (alongRay <= 0.0 || alongRay > maxDist || rayError > max(0.02, footprint * 1.5)) continue;
+                    hit_buffer.data[global_id] = vec4(alongRay, center.x, center.y, 1.0);
                     return;
                 }
                 // Passed through — keep marching at mip 0.

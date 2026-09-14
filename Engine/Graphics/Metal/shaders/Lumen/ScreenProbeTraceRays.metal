@@ -152,15 +152,27 @@ static float3 spgiImportanceDirection(uint rayIdx, uint raysPerProbe,
         float3 local = rot * fibonacciDirection(i, n);
         float3 world = tangent * local.x + bitangent * local.y + probeNormal * local.z;
         float3 irr = sh0 * 0.282095f
-                   + sh1 * (0.488603f * world.y)
+                   + sh1 * (-0.488603f * world.y)
                    + sh2 * (0.488603f * world.z)
-                   + sh3 * (0.488603f * world.x);
+                   + sh3 * (-0.488603f * world.x);
         float lum = max(dot(irr, float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
         pdf[i] = max(local.z, 0.02f) * (lum + 0.05f);
         sum += pdf[i];
     }
 
-    float u = (float(rayIdx) + 0.5f) / float(n) * sum;
+    // Defensive mixture keeps every candidate reachable even when history
+    // misses a bright lobe. q >= 0.25/N bounds invNq <= 4 without clipping
+    // radiance or biasing the estimator; PDF correction uses this mixture.
+    for (uint i = 0u; i < n; ++i)
+        pdf[i] = 0.25f / float(n) + 0.75f * pdf[i] / max(sum, 1e-6f);
+    sum = 1.0f;
+
+    // Jitter within each CDF stratum. A fixed midpoint can permanently omit
+    // small-probability candidates; the PDF correction needs random coverage.
+    uint sampleSeed = frameSeed < 0.0f ? 0u : uint(frameSeed);
+    uint sampleHash = spgiJitterHash(probeIdx * 0x9e3779b9u ^ sampleSeed ^ (rayIdx * 0x85ebca6bu));
+    float jitter = (float(sampleHash & 0x00ffffffu) + 0.5f) / 16777216.0f;
+    float u = (float(rayIdx) + jitter) / float(n) * sum;
     uint c = n - 1u;
     float acc = 0.0f;
     for (uint i = 0u; i < n; ++i) {
@@ -536,7 +548,22 @@ kernel void screen_probe_trace_hzb(
         if (rayLin > sceneLin) {
             if (mip == 0u) {
                 if (rayLin <= sceneLin + thickness) {
-                    hit_buffer[global_id] = float4(t, uv.x, uv.y, 1.0f);
+                    // A depth-thickness overlap is only a candidate. The
+                    // captured surface must also lie within the ray's pixel
+                    // footprint, otherwise it borrows light from a neighbor.
+                    float2 dims = float2(hzb_texture.get_width(), hzb_texture.get_height());
+                    float2 center = (floor(uv * dims) + 0.5f) / dims;
+                    float2 screenNDC = float2(center.x * 2.0f - 1.0f, 1.0f - center.y * 2.0f);
+                    float4 hp = global.inv_view_projection * float4(screenNDC, sceneNDC, 1.0f);
+                    if (abs(hp.w) < 1e-6f) continue;
+                    float3 surface = hp.xyz / hp.w;
+                    float4 px = global.inv_view_projection * float4(screenNDC + float2(2.0f/dims.x, 0.0f), sceneNDC, 1.0f);
+                    if (abs(px.w) < 1e-6f) continue;
+                    float footprint = distance(surface, px.xyz / px.w);
+                    float alongRay = dot(surface - origin, rayDir);
+                    float rayError = distance(surface, origin + rayDir * alongRay);
+                    if (alongRay <= 0.0f || alongRay > maxDist || rayError > max(0.02f, footprint * 1.5f)) continue;
+                    hit_buffer[global_id] = float4(alongRay, center.x, center.y, 1.0f);
                     return;
                 }
             } else {
@@ -669,17 +696,21 @@ kernel void screen_probe_trace_sdf(
 // T5.1 2c: radiance finalize — texture2D + buffers only (no texture3D).
 //   w==1 HZB hit → prev frame color at hit UV (sharp screen-space detail)
 //   w==2 SDF hit → SC card grid (T1.3) for near hits → prev color projection
-//   w==3 far-cache (F1) → T3.5 radiance cascade 1-texel read (legacy: DDGI
-//        4-probe tetrahedral L0+L1 at the stop point)
+//   w==3 far-cache (F1) → T3.5 radiance cascade SH-L1 directional evaluation
+//        (legacy: DDGI 4-probe tetrahedral L0+L1 at the stop point)
 //   w==0 miss    → DDGI probe fallback (T2.2) → sky gradient
-// T3.5 note: texture(2) adds ONE texture3d read (unfiltered texel fetch) to
-// this kernel — within the Apple Silicon read budget, monitored via
+// T3.5 note: textures (2)..(5) add FOUR texture3d texel fetches (unfiltered)
+// to this kernel — within the Apple Silicon read budget, monitored via
 // PRIMAL_GI_CASCADE=0 A/B.
 // ============================================================================
 kernel void screen_probe_trace_finalize(
     texture2d<float, access::sample>  prevFrameColor        [[texture(0)]],
     texture2d<float, access::sample>  surface_cache_lighting [[texture(1)]],
-    texture3d<float, access::read>    radianceCascade        [[texture(2)]],  // T3.5
+    texture3d<float, access::read>    radianceCascadeL0      [[texture(2)]],  // T3.5 SH-L1
+    texture3d<float, access::read>    radianceCascadeL1x     [[texture(3)]],  // T3.5 SH-L1
+    texture3d<float, access::read>    radianceCascadeL1y     [[texture(4)]],  // T3.5 SH-L1
+    texture3d<float, access::read>    radianceCascadeL1z     [[texture(5)]],  // T3.5 SH-L1
+    texture2d<float, access::read>    surface_cache_depth    [[texture(6)]],
 
     device const float4*              probePositions  [[buffer(0)]],
     device const float4*              probeNormals    [[buffer(1)]],
@@ -735,6 +766,7 @@ kernel void screen_probe_trace_finalize(
     float4 hit = hit_buffer[global_id];
     float3 radiance = float3(0.0f);
     float cosTheta = 0.0f;
+    bool useWorldFallback = false;
 
     if (hit.w == 1.0f) {
         // HZB near-field hit — sharp screen-space radiance at the hit UV.
@@ -747,50 +779,55 @@ kernel void screen_probe_trace_finalize(
         float3 hitPos = origin + rayDir * hit.x;
         bool usedSurfaceCache = false;
 
-        if (hit.x < 2.0f && global.surface_cache_params.z > 0.5f) {
-            float atlasSize = global.surface_cache_params.x;
-            uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1],
-                              sc_grid_offsets[2], sc_grid_offsets[3]);
-            uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5],
-                              sc_grid_offsets[6], sc_grid_offsets[7]);
-            uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
-                              sc_grid_offsets[10], sc_grid_offsets[11]);
+        // A card projection only proves UV coverage, not surface identity.
+        // Validate against captured geometry and choose the closest matching
+        // surface, rather than the first card in the spatial bucket.
+        if (global.surface_cache_params.z > 0.5f && (surface_cache_depth.get_width() == uint(global.surface_cache_params.x))) {
+            uint4 gh0 = uint4(sc_grid_offsets[0], sc_grid_offsets[1], sc_grid_offsets[2], sc_grid_offsets[3]);
+            uint4 gh1 = uint4(sc_grid_offsets[4], sc_grid_offsets[5], sc_grid_offsets[6], sc_grid_offsets[7]);
+            uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9], sc_grid_offsets[10], sc_grid_offsets[11]);
             SCGridParams gp = scGridDecode(gh0, gh1, gh2);
             uint cell = scGridCellIndex(gp, hitPos);
+            float bestError = 1e20f;
             if (cell != 0xFFFFFFFFu) {
                 uint begin = sc_grid_offsets[16u + cell];
-                uint end   = sc_grid_offsets[17u + cell];
-                uint reads = 0u;
-                for (uint gi = begin; gi < end && reads < 8u; ++gi, ++reads) {
-                    float2 atlas_uv;
-                    if (worldToCardUV(hitPos, cards[sc_grid_cards[gi]], atlas_uv)) {
-                        // C4: half-texel inset (shelf atlas bleed guard)
-                        const SurfaceCacheCard insetCard = cards[sc_grid_cards[gi]];
-                        atlas_uv = clamp(atlas_uv,
-                            float2(insetCard.atlas_offset_x, insetCard.atlas_offset_y) + 0.5,
-                            float2(insetCard.atlas_offset_x + insetCard.resolution,
-                                   insetCard.atlas_offset_y + insetCard.resolution) - 0.5);
-                        float2 uv_norm = atlas_uv / float2(atlasSize);
-                        constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-                        radiance = surface_cache_lighting.sample(s, uv_norm).rgb;
-                        usedSurfaceCache = true;
-                        break;
-                    }
+                uint end = sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end; ++gi) {
+                    uint ci = sc_grid_cards[gi];
+                    float2 atlasUV;
+                    if (!worldToCardUV(hitPos, cards[ci], atlasUV)) continue;
+                    uint2 texel = uint2(atlasUV);
+                    float depth = surface_cache_depth.read(texel).r;
+                    if (!isfinite(depth) || depth < 0.0f) continue;
+                    float3 captured = cardTexelToWorld(texel, depth, cards[ci]);
+                    float error = distance(hitPos, captured);
+                    float footprint = length(cards[ci].extent.xyz) / float(max(uint(cards[ci].resolution), 1u));
+                    float tolerance = max(0.15f, global.sdf_voxel_sizes[0].x * 1.25f) + footprint;
+                    if (error > tolerance || error >= bestError) continue;
+                    float3 candidate = surface_cache_lighting.read(texel).rgb;
+                    if (!all(isfinite(candidate))) continue;
+                    radiance = candidate; // valid black is a valid surface sample
+                    bestError = error;
+                    usedSurfaceCache = true;
                 }
             }
         }
-
         if (!usedSurfaceCache) {
-            radiance = samplePrevFrameColor(hitPos, prevFrameColor, global);
+            // A coarse SDF hit has no matching raster-depth proof. Projecting
+            // it into screen color can borrow sunlight from an occluder.
+            // Use the existing world-probe estimate until a validated screen
+            // hit (HZB) or a surface-cache card supplies this ray.
+            useWorldFallback = true;
         }
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = float3(0.0f);
         cosTheta = max(dot(probeNormal, rayDir), 0.0f);
     } else if (hit.w == 3.0f) {
         // F1 (M7) far-cache: the SDF march stopped at far_cache_start —
         // query the radiance cache at the stop point (UE world-probe
-        // semantics). T3.5: the 32³ radiance cascade serves the query with
-        // ONE texel read (cache_params.w gates the fast path); the legacy
-        // 4-probe tetrahedral × L0+L1 = 16 buffer reads stays as fallback.
+        // semantics). T3.5 + SH-L1: the 32³ cascade serves the query with
+        // FOUR texel reads evaluated along rayDir (cache_params.w gates the
+        // fast path); the legacy 4-probe tetrahedral × L0+L1 = 16 buffer
+        // reads stays as fallback.
         // Mirrors ScreenProbeTraceFinalize.comp byte-for-byte.
         float3 stopPos = origin + rayDir * max(hit.x, 0.0f);
         bool ddgiOk = false;
@@ -806,9 +843,20 @@ kernel void screen_probe_trace_finalize(
             if (all(cgp >= float3(0.0f)) && all(cgp < float3(32.0f))) {
                 // texture3d access::read does not clamp — guard manually.
                 uint3 ct = min(uint3(floor(cgp)), uint3(31u));
-                float3 cached = radianceCascade.read(ct).rgb;
-                if (all(cached > float3(0.0f))) {
-                    radiance = cached;
+                float4 cL0  = radianceCascadeL0.read(ct);
+                float3 cL1x = radianceCascadeL1x.read(ct).rgb;
+                float3 cL1y = radianceCascadeL1y.read(ct).rgb;
+                float3 cL1z = radianceCascadeL1z.read(ct).rgb;
+                // Validity: A = written-by-cascade, L0 nonzero (a disabled
+                // cascade writes zeros). L1 coefficients are legitimately
+                // negative — never gate on their sign.
+                if (cL0.a > 0.5f && any(cL0.rgb > float3(0.0f))) {
+                    // Canonical DDGI L0+L1 basis, same as the fallback below.
+                    float3 irr = 0.282095f * cL0.rgb
+                               - 0.488603f * cL1x * rayDir.y
+                               + 0.488603f * cL1y * rayDir.z
+                               - 0.488603f * cL1z * rayDir.x;
+                    radiance = max(irr, float3(0.0f));
                     cosTheta = max(dot(probeNormal, rayDir), 0.0f);
                     ddgiOk = true;
                 }
@@ -848,7 +896,13 @@ kernel void screen_probe_trace_finalize(
                     if (wn[i] <= 0.0f) continue;
                     uint pidx = uint(cn[i].x)
                               + uint(counts.x) * (uint(cn[i].y) + uint(counts.y) * uint(cn[i].z));
-                    // L0 + L1 only (4 reads), canonical DDGI basis.
+                    // L0 + L1 only (4 reads), canonical DDGI basis. KNOWN
+                    // DOWNGRADE (deliberate): DDGI stores full SH L2 (9
+                    // coefficients); this fallback truncates to L1 to keep
+                    // 4 reads/probe. The T3.5 cascade now carries L1 too, so
+                    // no link in the far-field chain loses direction below
+                    // L1; reading coeffs 4..8 here is a possible future
+                    // quality step (5 extra buffer reads/ray).
                     float3 sh0 = ddgiIrradiance[pidx * 9u + 0u].xyz;
                     float3 sh1 = ddgiIrradiance[pidx * 9u + 1u].xyz;
                     float3 sh2 = ddgiIrradiance[pidx * 9u + 2u].xyz;
@@ -876,7 +930,8 @@ kernel void screen_probe_trace_finalize(
                 cosTheta = skyWeight;
             }
         }
-    } else {
+    }
+    if (useWorldFallback || (hit.w != 1.0f && hit.w != 2.0f && hit.w != 3.0f)) {
         // Miss → DDGI probe fallback (T2.2) → sky gradient.
         if (global.ddgi_fb[1].w > 0.5f) {
             float3 org = global.ddgi_fb[0].xyz;

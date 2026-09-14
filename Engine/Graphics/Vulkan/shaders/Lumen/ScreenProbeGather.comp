@@ -5,8 +5,8 @@
 //
 // For each full-res pixel: reads depth/normal, finds the screen-space probe
 // covering it, evaluates the already-filtered probe SH at the pixel's surface
-// normal, and gathers center + 4 cardinal neighbors with bilateral weights
-// (5-tap cross matching SpatialFilter's kernel) to fill sparse coverage.
+// normal, and reconstructs the sparse probe lattice with a continuous
+// 4x4 tent footprint and normal/confidence weights.
 //
 // ThreadGroupSize: (8, 8, 1).
 //
@@ -59,10 +59,10 @@ layout(set = 0, binding = 6, std430) readonly buffer ProbeNormalsBlock {
 // --------------------------------------------------------------------------------
 // SH basis (must match ScreenProbeAverage::shBasis):
 //   Y0 = 0.282095
-//   Y1 = 0.488603 * d.y
+//   Y1 = -0.488603 * d.y
 //   Y2 = 0.488603 * d.z
-//   Y3 = 0.488603 * d.x
-// Average stores SH coefficients C_i such that E(N) = sum C_i * Y_i(N).
+//   Y3 = -0.488603 * d.x
+// Average stores radiance SH; irradiance requires the per-band cosine convolution.
 // --------------------------------------------------------------------------------
 // B1/B4: per-band radiance→irradiance (A0=π, A1=2π/3) — see Metal twin.
 vec3 evalSHIrradiance(vec3 sh0, vec3 sh1, vec3 sh2, vec3 sh3, vec3 N) {
@@ -74,9 +74,9 @@ vec3 evalSHIrradiance(vec3 sh0, vec3 sh1, vec3 sh2, vec3 sh3, vec3 N) {
 
 vec3 evalSH(vec3 sh0, vec3 sh1, vec3 sh2, vec3 sh3, vec3 N) {
     return sh0 * 0.282095
-         + sh1 * (0.488603 * N.y)
+         + sh1 * (-0.488603 * N.y)
          + sh2 * (0.488603 * N.z)
-         + sh3 * (0.488603 * N.x);
+         + sh3 * (-0.488603 * N.x);
 }
 
 // Manual bilinear sample replicating Metal linear sampler (clamp_to_edge).
@@ -132,28 +132,21 @@ void screen_probe_gather() {
     vec4 normalEncoded = sampleBilinearRGBA(normalTexture, pixelUV);
     vec3 surfaceNormal = normalize(normalEncoded.xyz * 2.0 - 1.0);
 
-    // ---------------------------------------------------------------
-    // Center probe coord for this pixel
-    // ---------------------------------------------------------------
-    ivec2 centerProbe = ivec2(int(tid.x) / int(downsample),
-                              int(tid.y) / int(downsample));
+    // Compare actual receiver/probe surface positions, not only screen
+    // proximity. A foreground column and the rear wall may share normals.
+    vec2 ndc = vec2(pixelUV.x * 2.0 - 1.0, 1.0 - pixelUV.y * 2.0);
+    vec4 receiverH = global.inv_view_projection * vec4(ndc, depth, 1.0);
+    vec3 receiverPos = receiverH.xyz / receiverH.w;
+    vec4 footprintH = global.inv_view_projection * vec4(
+        ndc + vec2(2.0 * downsample / float(renderW), 0.0), depth, 1.0);
+    float planeSigma = max(0.02, distance(receiverPos, footprintH.xyz / footprintH.w) * 0.25);
 
-    // 5-tap cross pattern: center + 4 cardinals (matches SpatialFilter kernel).
-    ivec2 offsets[5];
-    offsets[0] = ivec2( 0,  0);
-    offsets[1] = ivec2(-1,  0);
-    offsets[2] = ivec2( 1,  0);
-    offsets[3] = ivec2( 0, -1);
-    offsets[4] = ivec2( 0,  1);
-
-    // Spatial weights for the cross (center gets 2.0, neighbors 1.0).
-    // Mirrors SpatialFilter's center-weighted blending so we don't double-smooth.
-    float spatialW[5];
-    spatialW[0] = 2.0;
-    spatialW[1] = 1.0;
-    spatialW[2] = 1.0;
-    spatialW[3] = 1.0;
-    spatialW[4] = 1.0;
+    // Continuous tent reconstruction on the probe-center lattice. Radius two
+    // includes diagonal/coarse probes when the adaptive fine tier is inactive.
+    // A tap enters/leaves the 4x4 footprint at zero weight, avoiding the old
+    // fixed cross's discontinuities at every downsample-sized pixel block.
+    vec2 probeCoord = (vec2(tid) + 0.5) / downsample - 0.5;
+    ivec2 baseProbe = ivec2(floor(probeCoord));
 
     vec3 irradianceSum = vec3(0.0);
     float confidenceOut = 0.0;
@@ -166,8 +159,11 @@ void screen_probe_gather() {
     float fallbackConfidenceOut = 0.0;
     float fallbackWeightSum = 0.0;
 
-    for (int i = 0; i < 5; ++i) {
-        ivec2 npc = centerProbe + offsets[i];
+    for (int i = 0; i < 16; ++i) {
+        ivec2 npc = baseProbe + ivec2(i % 4 - 1, i / 4 - 1);
+        vec2 tent = max(vec2(0.0), 1.0 - abs(vec2(npc) - probeCoord) * 0.5);
+        float spatialWeight = tent.x * tent.y;
+        if (spatialWeight <= 0.0) continue;
         if (npc.x < 0 || npc.y < 0 ||
             npc.x >= int(gridW) || npc.y >= int(gridH)) {
             continue;
@@ -177,6 +173,13 @@ void screen_probe_gather() {
 
         vec4 posData = probePositions.data[probeIdx];
         if (posData.w <= 0.0) continue;
+
+        vec3 surfaceDelta = posData.xyz - receiverPos;
+        float planeDistance = abs(dot(surfaceDelta, surfaceNormal));
+        float geometryWeight = exp(-0.5 * planeDistance * planeDistance / (planeSigma * planeSigma));
+        // Underflow means this tap lies on a different surface; do not let
+        // confidence normalization resurrect an entirely rejected neighbour.
+        if (geometryWeight < 1e-5) continue;
 
         uint shBase = probeIdx * 4u;
         float sh0w = probeSH.data[shBase + 0u].w;
@@ -191,7 +194,7 @@ void screen_probe_gather() {
         vec3 irr = evalSHIrradiance(sh0, sh1, sh2, sh3, surfaceNormal);   // B1
         irr = max(irr, vec3(0.0));
 
-        float baseWeight = spatialW[i] * sh0w;
+        float baseWeight = spatialWeight * geometryWeight * sh0w;
         fallbackIrradianceSum += irr * baseWeight;
         fallbackConfidenceOut += sh0w * baseWeight;
         fallbackWeightSum += baseWeight;

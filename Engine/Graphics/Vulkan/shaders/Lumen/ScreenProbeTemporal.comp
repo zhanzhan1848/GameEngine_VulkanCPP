@@ -1,13 +1,10 @@
 #version 450 core
-// Vulkan Lumen Screen Probe GI — Change-penalizing temporal accumulation.
+// Vulkan Lumen Screen Probe GI — Reprojected temporal accumulation.
 // Hand-written GLSL port of ScreenProbeTemporal.metal (entry: screen_probe_temporal).
 //
-// Core principle: penalize change, don't reward stability.
-//   - Base alpha = slow accumulation (0.1)
-//   - High gradient (|current - history|) -> faster adaptation (trust current)
-//   - Low confidence -> reset history (clear bad data)
-//   - Disocclusion -> reset history
-//   - History clamping + gradient limiter prevent energy explosion
+// Valid reprojected history uses a fixed EMA. Disocclusion resets history;
+// mode 1 additionally clamps against neighborhood variance. Sampling noise
+// must not increase alpha or clamp history to a single noisy current sample.
 //
 // ThreadGroupSize: (64, 1, 1), 1D dispatch.
 //
@@ -17,7 +14,7 @@
 //   binding 2 = SSBO read   currentPositions[]
 //   binding 3 = SSBO read   historyPositions[]
 //   binding 4 = SSBO write  outputSH[]
-//   binding 5 = UBO         TemporalConstants (32B)
+//   binding 5 = UBO         TemporalConstants (112B)
 //   binding 6 = SSBO read   currentNormals[]
 //   binding 7 = SSBO read   historyNormals[]
 
@@ -60,7 +57,7 @@ layout(set = 0, binding = 5, std140) uniform TemporalConstantsBlock {
     float posThreshold;     // world-space distance threshold for disocclusion
     float normalThreshold;  // normal dot-product threshold (reject if below)
     float clampScale;       // history clamp range relative to current
-    float maxGradient;      // maximum SH change per frame (gradient limiter)
+    float maxGradient;      // reserved legacy field (kept for constant-buffer layout)
     uint  gridW;            // T5.2: probe grid dims for prev-cell lookup
     uint  gridH;
     float mode;             // F3 (M7): 0=EMA (default), 1=EMAVarianceClamp, 2=Reprojection
@@ -215,48 +212,15 @@ void screen_probe_temporal() {
         histSH[3].rgb *= shrink;
     }
 
-    // =================================================================
-    // Compute per-probe gradient (how much SH changed)
-    // =================================================================
-    vec3 diff0 = curSH0.rgb - histSH[0].rgb;
-    float gradient = length(diff0);
-
-    // =================================================================
-    // Change-penalizing blend:
-    //   High gradient -> high alpha -> trust current (adapt to change)
-    //   Low gradient -> base alpha -> slow accumulation
-    // =================================================================
-    float changeAlpha = clamp(gradient / params.maxGradient, 0.0, 1.0);
-    float alpha = max(params.baseAlpha, changeAlpha);
-
-    // =================================================================
-    // Blend 4 SH coefficients with clamping + gradient limiter
-    // =================================================================
+    // History already passed position/normal disocclusion checks. Monte Carlo
+    // sample variation is not a lighting change: increasing alpha with a
+    // single-frame SH difference selects noisy bright samples and kills EMA.
+    // Mode 1 retains the neighborhood variance clamp above; reset uses alpha=1.
+    float alpha = clamp(params.baseAlpha, 0.0, 1.0);
     for (int b = 0; b < 4; b++) {
         vec4 cur = currentSH.data[base + uint(b)];
-        vec4 hist = histSH[b];
-
-        // F3 mode 2 (Reprojection): pure bilinear history reuse — skip the
-        // relative clamp and gradient limiter to isolate reprojection quality.
-        vec3 clampedHist = hist.rgb;
-        if (params.mode < 1.5) {
-            // Clamp history to prevent energy drift
-            vec3 curAbs = max(abs(cur.rgb), vec3(0.1));
-            vec3 lo = cur.rgb - params.clampScale * curAbs;
-            vec3 hi = cur.rgb + params.clampScale * curAbs;
-            clampedHist = clamp(hist.rgb, lo, hi);
-
-            // Gradient limiter: cap per-frame change
-            vec3 diff = cur.rgb - clampedHist;
-            float diffLen = length(diff);
-            if (diffLen > params.maxGradient && diffLen > 0.001) {
-                cur.rgb = clampedHist + normalize(diff) * params.maxGradient;
-            }
-        }
-
-        // Blend
-        vec3 blended = mix(clampedHist, cur.rgb, alpha);
+        vec3 blended = mix(histSH[b].rgb, cur.rgb, alpha);
         outputSH.data[base + uint(b)] = (b == 0) ? vec4(blended, probeConfidence)
-                                                 : vec4(blended, cur.w);
+            : vec4(blended, cur.w);
     }
 }

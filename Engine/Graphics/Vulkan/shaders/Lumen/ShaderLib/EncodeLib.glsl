@@ -170,11 +170,9 @@ vec2 spgiJitterOffset01(uint probeIdx, float frameSeed) {
 // radiance map. The proposal pdf runs over the probe's rotated Fibonacci
 // candidates (N = raysPerProbe, capped at 64):
 //   q_i ∝ max(cosθ_i, 0.02) * (luminance(evalSH_L1(history, d_i)) + 0.05)
-// Ray j picks candidate ⌈CDF⁻¹((j + 0.5)/N)⌉; bright directions collect the
-// rays that zero-pdf texel directions lose in UE's scheme. Consumers weight
-// each ray by cosθ · invNq (invNq = 1/(N·q_c) = sum/(N·pdf_c)) — importance
-// resampling keeps the cosine-weighted SH projection unbiased w.r.t. the
-// candidate set (self-normalized ratio estimator).
+// Each ray samples one jittered CDF stratum. invNq=1/(N*q_c) corrects
+// the discrete resampling of the full-sphere candidate set. Average projects
+// radiance with (4pi/rayCount)*invNq; cosine convolution belongs in Gather.
 //
 // Deterministic in (probeIdx, frameSeed): every kernel that regenerates
 // directions must pass the SAME history SH — probe_avg_radiance_[histIdx],
@@ -204,16 +202,28 @@ vec3 spgiImportanceDirection(uint rayIdx, uint raysPerProbe,
         vec3 local = rot * fibonacciDirection(i, n);
         vec3 world = tangent * local.x + bitangent * local.y + probeNormal * local.z;
         vec3 irr = sh0 * 0.282095
-                 + sh1 * (0.488603 * world.y)
+                 + sh1 * (-0.488603 * world.y)
                  + sh2 * (0.488603 * world.z)
-                 + sh3 * (0.488603 * world.x);
+                 + sh3 * (-0.488603 * world.x);
         float lum = max(dot(irr, vec3(0.2126, 0.7152, 0.0722)), 0.0);
         pdf[i] = max(local.z, 0.02) * (lum + 0.05);
         sum += pdf[i];
     }
 
     // Inverse-CDF resampling at this ray's stratified position.
-    float u = (float(rayIdx) + 0.5) / float(n) * sum;
+    // Defensive mixture keeps every candidate reachable even when history
+    // misses a bright lobe. q >= 0.25/N bounds invNq <= 4 without clipping
+    // radiance or biasing the estimator; PDF correction uses this mixture.
+    for (uint i = 0u; i < n; ++i)
+        pdf[i] = 0.25 / float(n) + 0.75 * pdf[i] / max(sum, 1e-6);
+    sum = 1.0;
+
+    // Jitter within each CDF stratum. A fixed midpoint can permanently omit
+    // small-probability candidates; the PDF correction needs random coverage.
+    uint sampleSeed = frameSeed < 0.0 ? 0u : uint(frameSeed);
+    uint sampleHash = spgiJitterHash(probeIdx * 0x9e3779b9u ^ sampleSeed ^ (rayIdx * 0x85ebca6bu));
+    float jitter = (float(sampleHash & 0x00ffffffu) + 0.5) / 16777216.0;
+    float u = (float(rayIdx) + jitter) / float(n) * sum;
     uint c = n - 1u;
     float acc = 0.0;
     for (uint i = 0u; i < n; ++i) {

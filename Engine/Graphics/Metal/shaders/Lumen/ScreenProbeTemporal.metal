@@ -26,7 +26,7 @@ struct TemporalConstants {
     float posThreshold;     // world-space distance threshold for disocclusion
     float normalThreshold;  // normal dot-product threshold (reject if below)
     float clampScale;       // history clamp range relative to current
-    float maxGradient;      // maximum SH change per frame (gradient limiter)
+    float maxGradient;      // reserved legacy field (kept for constant-buffer layout)
     uint  gridW;            // T5.2: probe grid dims for prev-cell lookup
     uint  gridH;
     float mode;             // F3 (M7): 0=EMA (default), 1=EMAVarianceClamp, 2=Reprojection
@@ -185,48 +185,15 @@ kernel void screen_probe_temporal(
         histSH[3].rgb *= shrink;
     }
 
-    // =================================================================
-    // Compute per-probe gradient (how much SH changed)
-    // =================================================================
-    float3 diff0 = curSH0.rgb - histSH[0].rgb;
-    float gradient = length(diff0);
-
-    // =================================================================
-    // Change-penalizing blend:
-    //   High gradient → high alpha → trust current (adapt to change)
-    //   Low gradient → base alpha → slow accumulation
-    // =================================================================
-    float changeAlpha = saturate(gradient / params.maxGradient);
-    float alpha = max(params.baseAlpha, changeAlpha);
-
-    // =================================================================
-    // Blend 4 SH coefficients with clamping + gradient limiter
-    // =================================================================
+    // History already passed position/normal disocclusion checks. Monte Carlo
+    // sample variation is not a lighting change: increasing alpha with a
+    // single-frame SH difference selects noisy bright samples and kills EMA.
+    // Mode 1 retains the neighborhood variance clamp above; reset uses alpha=1.
+    float alpha = clamp(params.baseAlpha, 0.0f, 1.0f);
     for (int b = 0; b < 4; b++) {
         float4 cur = currentSH[base + b];
-        float4 hist = histSH[b];
-
-        // F3 mode 2 (Reprojection): pure bilinear history reuse — skip the
-        // relative clamp and gradient limiter to isolate reprojection quality.
-        float3 clampedHist = hist.rgb;
-        if (params.mode < 1.5f) {
-            // Clamp history to prevent energy drift
-            float3 curAbs = max(abs(cur.rgb), float3(0.1f));
-            float3 lo = cur.rgb - params.clampScale * curAbs;
-            float3 hi = cur.rgb + params.clampScale * curAbs;
-            clampedHist = clamp(hist.rgb, lo, hi);
-
-            // Gradient limiter: cap per-frame change
-            float3 diff = cur.rgb - clampedHist;
-            float diffLen = length(diff);
-            if (diffLen > params.maxGradient && diffLen > 0.001f) {
-                cur.rgb = clampedHist + normalize(diff) * params.maxGradient;
-            }
-        }
-
-        // Blend
-        float3 blended = mix(clampedHist, cur.rgb, alpha);
+        float3 blended = mix(histSH[b].rgb, cur.rgb, alpha);
         outputSH[base + b] = (b == 0) ? float4(blended, probeConfidence)
-                                      : float4(blended, cur.w);
+            : float4(blended, cur.w);
     }
 }

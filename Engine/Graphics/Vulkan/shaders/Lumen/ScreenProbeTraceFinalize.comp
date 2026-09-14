@@ -38,6 +38,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D prevFrameColor;
 layout(set = 0, binding = 1) uniform texture2D surface_cache_lighting;
+layout(set = 0, binding = 17) uniform texture2D surface_cache_depth;
 
 layout(set = 0, binding = 2) readonly buffer ProbePositionsBuf {
     vec4 data[];
@@ -88,11 +89,18 @@ layout(set = 0, binding = 11) readonly buffer DDGIIrradianceBuf {
     vec4 ddgi_irradiance_vec4[];
 } ddgiIrr;
 
-// T3.5: world-space radiance cascade (32³ RGBA16F) — pre-integrated DDGI
-// radiance, one texel read replaces the 16-read tetrahedral query below.
-// Bound texture is the previous frame's cascade (temporal EMA implies ≥1
+// T3.5 + 2026-09-10 SH-L1 upgrade: world-space radiance cascade (32³ RGBA16F
+// × 4) — pre-integrated DDGI SH L0 + L1 coefficients (RGB = raw coefficient,
+// A = validity). One texel fetch per coefficient replaces the 16-read
+// tetrahedral query below, and the evaluation is DIRECTIONAL: the old
+// DC-only cascade lost all direction information (9→1 downgrade). Stored
+// value is the raw L0 coefficient now, so the evaluation applies C0 itself.
+// Bound textures are the previous frame's cascade (temporal EMA implies ≥1
 // frame of lag anyway). Extent derivation must match DispatchCascadeUpdate.
-layout(set = 0, binding = 13) uniform texture3D radianceCascade;
+layout(set = 0, binding = 13) uniform texture3D radianceCascadeL0;
+layout(set = 0, binding = 14) uniform texture3D radianceCascadeL1x;
+layout(set = 0, binding = 15) uniform texture3D radianceCascadeL1y;
+layout(set = 0, binding = 16) uniform texture3D radianceCascadeL1z;
 
 // fibonacciDirection / orientAroundNormalTBN (was orientAroundNormal) moved
 // to ShaderLib/EncodeLib.glsl (axis refactor X1) — identical body, so the
@@ -175,6 +183,7 @@ void screen_probe_trace_finalize() {
     vec4 hit = hit_buffer.data[global_id];
     vec3 radiance = vec3(0.0);
     float cosTheta = 0.0;
+    bool useWorldFallback = false;
 
     if (hit.w == 1.0) {
         // HZB near-field hit — sharp screen-space radiance at the hit UV.
@@ -182,57 +191,59 @@ void screen_probe_trace_finalize() {
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
         cosTheta = max(dot(probeNormal, rayDir), 0.0);
     } else if (hit.w == 2.0) {
-        // SDF far-field hit — SC-first radiance hierarchy: the card grid is
-        // position-based and works at any hit distance (the old 2-unit cap
-        // pushed distant hits to the noisier prev-color projection); prev
-        // frame color remains the fallback where the cache has no coverage.
+        // Coarse SDF hit: validate the surface-cache texel's captured position.
         vec3 hitPos = origin + rayDir * hit.x;
         bool usedSurfaceCache = false;
 
-        if (global.surface_cache_params.z > 0.5) {
-            float atlasSize = global.surface_cache_params.x;
-            uvec4 gh0 = uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
-                              scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]);
-            uvec4 gh1 = uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
-                              scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]);
-            uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
-                              scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
+        // A card projection only proves UV coverage, not surface identity.
+        // Validate against captured geometry and choose the closest matching
+        // surface, rather than the first card in the spatial bucket.
+        if (global.surface_cache_params.z > 0.5 && (textureSize(surface_cache_depth, 0) == textureSize(surface_cache_lighting, 0))) {
+            uvec4 gh0 = uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1], scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]);
+            uvec4 gh1 = uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5], scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]);
+            uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9], scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
             SCGridParams gp = scGridDecode(gh0, gh1, gh2);
             uint cell = scGridCellIndex(gp, hitPos);
+            float bestError = 1e20;
             if (cell != 0xFFFFFFFFu) {
                 uint begin = scgo.sc_grid_offsets[16u + cell];
-                uint end   = scgo.sc_grid_offsets[17u + cell];
-                for (uint gi = begin; gi < end && !usedSurfaceCache; ++gi) {
-                    vec2 atlas_uv;
-                    if (worldToCardUV(hitPos, cards.data[scgc.sc_grid_cards[gi]], atlas_uv)) {
-                        // C4: half-texel inset (see SurfaceCacheData.glsl note) —
-                        // bilinear at card edges bleeds from shelf neighbours.
-                        const SurfaceCacheCard insetCard = cards.data[scgc.sc_grid_cards[gi]];
-                        atlas_uv = clamp(atlas_uv,
-                            vec2(float(insetCard.atlas_offset_x), float(insetCard.atlas_offset_y)) + 0.5,
-                            vec2(float(insetCard.atlas_offset_x + insetCard.resolution),
-                                 float(insetCard.atlas_offset_y + insetCard.resolution)) - 0.5);
-                        vec2 uv_norm = atlas_uv / vec2(atlasSize);
-                        vec3 scRadiance = sampleBilinearRGB(surface_cache_lighting, uv_norm);
-                        if (dot(scRadiance, scRadiance) > 0.0001) {
-                            radiance = scRadiance;
-                            usedSurfaceCache = true;
-                        }
-                    }
+                uint end = scgo.sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end; ++gi) {
+                    uint ci = scgc.sc_grid_cards[gi];
+                    vec2 atlasUV;
+                    if (!worldToCardUV(hitPos, cards.data[ci], atlasUV)) continue;
+                    uvec2 texel = uvec2(atlasUV);
+                    float depth = texelFetch(surface_cache_depth, ivec2(texel), 0).r;
+                    if ((isnan(depth) || isinf(depth)) || depth < 0.0) continue;
+                    vec3 captured = cardTexelToWorld(texel, depth, cards.data[ci]);
+                    float error = distance(hitPos, captured);
+                    float footprint = length(cards.data[ci].extent.xyz) / float(max(cards.data[ci].resolution, 1u));
+                    float tolerance = max(0.15, global.sdf_voxel_sizes[0].x * 1.25) + footprint;
+                    if (error > tolerance || error >= bestError) continue;
+                    vec3 candidate = texelFetch(surface_cache_lighting, ivec2(texel), 0).rgb;
+                    if ((any(isnan(candidate)) || any(isinf(candidate)))) continue;
+                    radiance = candidate; // valid black is a valid surface sample
+                    bestError = error;
+                    usedSurfaceCache = true;
                 }
             }
         }
         if (!usedSurfaceCache) {
-            radiance = samplePrevFrameColor(hitPos);
+            // A coarse SDF hit has no matching raster-depth proof. Projecting
+            // it into screen color can borrow sunlight from an occluder.
+            // Use the existing world-probe estimate until a validated screen
+            // hit (HZB) or a surface-cache card supplies this ray.
+            useWorldFallback = true;
         }
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
         cosTheta = max(dot(probeNormal, rayDir), 0.0);
     } else if (hit.w == 3.0) {
         // F1 (M7) far-cache: the SDF march stopped at far_cache_start —
         // query the radiance cache at the stop point (UE world-probe
-        // semantics). T3.5: the 32³ radiance cascade serves the query with
-        // ONE texel read (cache_params.w gates the fast path); the legacy
-        // 4-probe tetrahedral × L0+L1 = 16 buffer reads stays as fallback.
+        // semantics). T3.5 + SH-L1: the 32³ cascade serves the query with
+        // FOUR texel reads evaluated along rayDir (cache_params.w gates the
+        // fast path); the legacy 4-probe tetrahedral × L0+L1 = 16 buffer
+        // reads stays as fallback.
         vec3 stopPos = origin + rayDir * max(hit.x, 0.0);
         bool ddgiOk = false;
         if (global.cache_params.w > 0.5 && global.ddgi_fb[1].w > 0.5) {
@@ -246,9 +257,20 @@ void screen_probe_trace_finalize() {
             vec3 cgp = (stopPos - cOrg) / cSpacing;
             if (all(greaterThanEqual(cgp, vec3(0.0))) && all(lessThan(cgp, vec3(32.0)))) {
                 ivec3 ct = clamp(ivec3(floor(cgp)), ivec3(0), ivec3(31));
-                vec3 cached = texelFetch(radianceCascade, ct, 0).rgb;
-                if (all(greaterThan(cached, vec3(0.0)))) {
-                    radiance = cached;
+                vec4 cL0  = texelFetch(radianceCascadeL0,  ct, 0);
+                vec3 cL1x = texelFetch(radianceCascadeL1x, ct, 0).rgb;
+                vec3 cL1y = texelFetch(radianceCascadeL1y, ct, 0).rgb;
+                vec3 cL1z = texelFetch(radianceCascadeL1z, ct, 0).rgb;
+                // Validity: A = written-by-cascade, L0 nonzero (a disabled
+                // cascade writes zeros). L1 coefficients are legitimately
+                // negative — never gate on their sign.
+                if (cL0.a > 0.5 && any(greaterThan(cL0.rgb, vec3(0.0)))) {
+                    // Canonical DDGI L0+L1 basis, same as the fallback below.
+                    vec3 irr = 0.282095 * cL0.rgb
+                             - 0.488603 * cL1x * rayDir.y
+                             + 0.488603 * cL1y * rayDir.z
+                             - 0.488603 * cL1z * rayDir.x;
+                    radiance = max(irr, vec3(0.0));
                     cosTheta = max(dot(probeNormal, rayDir), 0.0);
                     ddgiOk = true;
                 }
@@ -288,7 +310,13 @@ void screen_probe_trace_finalize() {
                     if (wn[i] <= 0.0) continue;
                     uint pidx = uint(cn[i].x)
                               + uint(counts.x) * (uint(cn[i].y) + uint(counts.y) * uint(cn[i].z));
-                    // L0 + L1 only (4 reads), canonical DDGI basis.
+                    // L0 + L1 only (4 reads), canonical DDGI basis. KNOWN
+                    // DOWNGRADE (deliberate): DDGI stores full SH L2 (9
+                    // coefficients); this fallback truncates to L1 to keep
+                    // 4 reads/probe. The T3.5 cascade now carries L1 too, so
+                    // no link in the far-field chain loses direction below
+                    // L1; reading coeffs 4..8 here is a possible future
+                    // quality step (5 extra buffer reads/ray).
                     vec3 sh0 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 0u].xyz;
                     vec3 sh1 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 1u].xyz;
                     vec3 sh2 = ddgiIrr.ddgi_irradiance_vec4[pidx * 9u + 2u].xyz;
@@ -316,7 +344,8 @@ void screen_probe_trace_finalize() {
                 cosTheta = skyWeight;
             }
         }
-    } else {
+    }
+    if (useWorldFallback || (hit.w != 1.0 && hit.w != 2.0 && hit.w != 3.0)) {
         // Miss → DDGI world-probe fallback (T2.2): 8-probe trilinear of the
         // full L0-L2 SH (upgraded from nearest-probe L0+L1, which produced
         // probe-grid seams); the sky gradient only fires when DDGI is

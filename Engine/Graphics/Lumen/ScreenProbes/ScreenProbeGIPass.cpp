@@ -220,8 +220,9 @@ struct ScreenProbePassData {
     RGResourceHandle gi_output;
     // T3.5: cascade textures of this frame (write = EMA target, prev = EMA
     // history consumed by the cascade update AND the finalize far-cache).
-    RGResourceHandle cascade_write;
-    RGResourceHandle cascade_prev;
+    // SH-L1: [0] = L0, [1..3] = L1x/L1y/L1z coefficient volumes.
+    RGResourceHandle cascade_write[4];
+    RGResourceHandle cascade_prev[4];
 };
 
 } // anonymous namespace
@@ -455,9 +456,10 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
     }
 
     // --- T5.1 2c: Finalize — 2 textures (prev_color + sc_lighting) + radiance chain buffers ---
-    // Vulkan flat 0..13; Metal overlapping (texture 0-2, buffer 0-10).
-    // T3.5: binding 13 / texture(2) = radiance cascade (prev frame) for the
-    // far-cache fast path (1 texel read vs the 16-read tetrahedral query).
+    // Vulkan flat 0..16; Metal overlapping (texture 0-5, buffer 0-10).
+    // T3.5 + SH-L1: bindings 13-16 / textures (2)-(5) = radiance cascade
+    // L0+L1xyz (prev frame) for the far-cache fast path (4 texel reads vs the
+    // 16-read tetrahedral query).
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prevFrameColor
@@ -473,7 +475,11 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sc_grid_cards (T1.3)
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi_irradiance (T2.2)
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
-            {13, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade (T3.5)
+            {13, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade L0 (T3.5)
+            {14, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade L1x (SH-L1)
+            {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade L1y (SH-L1)
+            {16, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade L1z (SH-L1)
+            {17, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // SC depth for hit validation
         };
         bindings[2].readonly = true;
         bindings[3].readonly = true;
@@ -485,12 +491,19 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[11].readonly = true;
         bindings[12].readonly = true; // importanceSH (F2)
         bindings[13].is3D = true;     // radiance cascade (T3.5)
-        finalize_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
+        bindings[14].is3D = true;     // radiance cascade (SH-L1)
+        bindings[15].is3D = true;     // radiance cascade (SH-L1)
+        bindings[16].is3D = true;     // radiance cascade (SH-L1)
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout({18, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev frame color
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // surface cache lighting atlas
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // radiance cascade (T3.5)
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // radiance cascade L0 (T3.5)
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // radiance cascade L1x (SH-L1)
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // radiance cascade L1y (SH-L1)
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // radiance cascade L1z (SH-L1)
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SC depth
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe positions
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe normals
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_buffer (in)
@@ -503,8 +516,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi_irradiance (T2.2)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
         };
-        bindings[2].is3D = true;  // radiance cascade (T3.5)
-        DescriptorSetLayoutDesc layoutDesc{14, bindings};
+        for (int b = 2; b < 6; ++b) bindings[b].is3D = true;  // radiance cascade (T3.5 + SH-L1)
+        DescriptorSetLayoutDesc layoutDesc{18, bindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1054,11 +1067,13 @@ void ScreenProbeGIPass::CreateBuffers() {
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
         avg_constants_[i] = device_->CreateBuffer(desc);
 
-        struct AvgCB { u32 totalProbes; u32 raysPerProbe; };
+        struct AvgCB { u32 totalProbes; u32 raysPerProbe; float frameSeed; float isMode; };
         auto* mapped = static_cast<AvgCB*>(device_->MapBuffer(avg_constants_[i]));
         if (mapped) {
             mapped->totalProbes = totalProbes;
             mapped->raysPerProbe = params_.rays_per_probe;
+            mapped->frameSeed = -1.0f;
+            mapped->isMode = params_.enable_importance ? 1.0f : 0.0f;
             device_->UnmapBuffer(avg_constants_[i]);
         }
     }
@@ -1149,9 +1164,10 @@ void ScreenProbeGIPass::CreateBuffers() {
 void ScreenProbeGIPass::CreateRadianceCascade() {
     const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
 
-    // 2 × 32³ RGBA16F double-buffered cascade volumes. Extent/origin derive
-    // from the DDGI volume per dispatch (SetDDGIFallbackData may arrive after
-    // Initialize), so only the fixed-resolution resources are created here.
+    // 2 × 32³ RGBA16F double-buffered cascade volumes (L0 + 3 × L1 per slot
+    // since the SH-L1 upgrade). Extent/origin derive from the DDGI volume per
+    // dispatch (SetDDGIFallbackData may arrive after Initialize), so only the
+    // fixed-resolution resources are created here.
     for (int i = 0; i < 2; ++i) {
         TextureDesc desc{};
         desc.size = {kRadianceCascadeRes, kRadianceCascadeRes, kRadianceCascadeRes};
@@ -1159,6 +1175,9 @@ void ScreenProbeGIPass::CreateRadianceCascade() {
         desc.type = TextureType::Texture3D;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         radiance_cascade_[i] = device_->CreateTexture(desc);
+        for (int c = 0; c < 3; ++c) {
+            radiance_cascade_l1_[i][c] = device_->CreateTexture(desc);
+        }
     }
 
     // 1³ dummy for the finalize cascade slot when the system is off.
@@ -1190,31 +1209,44 @@ void ScreenProbeGIPass::CreateRadianceCascade() {
         return;
     }
 
-    // Descriptor layout — 4 bindings: cascade out (storage image) / cascade
-    // prev (sampled 3D) / params UBO / DDGI irradiance (readonly SSBO).
+    // Descriptor layout — 10 bindings: cascade out L0+L1xyz (storage images) /
+    // cascade prev L0+L1xyz (sampled 3D) / params UBO / DDGI irradiance
+    // (readonly SSBO).
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
-            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out
-            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev
-            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // RadianceCascadeParams
-            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L0
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L1x
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L1y
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L1z
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L0
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L1x
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L1y
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L1z
+            {8, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // RadianceCascadeParams
+            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance
         };
-        bindings[0].is3D = true;
-        bindings[1].is3D = true;
-        bindings[3].readonly = true;
-        cascade_update_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+        for (int b = 0; b < 8; ++b) bindings[b].is3D = true;
+        bindings[9].readonly = true;
+        cascade_update_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
     } else {
-        // Metal overlapping namespaces: texture(0) out, texture(1) prev,
+        // Metal overlapping namespaces: texture(0..3) out, texture(4..7) prev,
         // buffer(2) DDGI irradiance, buffer(3) params (setBytes override).
+        // Duplicate binding numbers across the texture/buffer namespaces match
+        // the finalize layout pattern.
         DescriptorSetLayoutBinding bindings[] = {
-            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out
-            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L0
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L1x
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L1y
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // cascade out L1z
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L0
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L1x
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L1y
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // cascade prev L1z
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance
             {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params (setBytes)
         };
-        bindings[0].is3D = true;
-        bindings[1].is3D = true;
-        cascade_update_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+        for (int b = 0; b < 8; ++b) bindings[b].is3D = true;
+        cascade_update_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
     }
     if (cascade_update_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
         PRIMAL_LOG_STREAM(Error, "Render")
@@ -1258,14 +1290,22 @@ void ScreenProbeGIPass::CreateRadianceCascade() {
 }
 
 void ScreenProbeGIPass::DispatchCascadeUpdate(RHICommandBuffer* cmd, u32 frameIdx,
-                                              ResourceHandle writeTex, ResourceHandle prevTex) {
+                                              const ResourceHandle* writeTexs,
+                                              const ResourceHandle* prevTexs) {
     if (cmd == nullptr ||
         cascade_update_pipeline_ == handles::INVALID_PIPELINE ||
         cascade_update_set_[frameIdx] == handles::INVALID_DESCRIPTOR_SET ||
-        frameIdx >= 3 || cascade_update_frame_ >= 0xFFFFFFFFu ||
-        writeTex == handles::INVALID_RESOURCE || prevTex == handles::INVALID_RESOURCE) {
+        frameIdx >= 3 || cascade_update_frame_ >= 0xFFFFFFFFu) {
         return;
     }
+    bool texValid = writeTexs != nullptr && prevTexs != nullptr;
+    if (texValid) {
+        for (int c = 0; c < 4; ++c) {
+            if (writeTexs[c] == handles::INVALID_RESOURCE ||
+                prevTexs[c] == handles::INVALID_RESOURCE) { texValid = false; break; }
+        }
+    }
+    if (!texValid) return;
     // Without DDGI probes there is nothing to inject — leave the cascade as-is.
     if (!ddgi_fallback_available_ || ddgi_irradiance_buffer_ == handles::INVALID_RESOURCE) {
         return;
@@ -1296,25 +1336,38 @@ void ScreenProbeGIPass::DispatchCascadeUpdate(RHICommandBuffer* cmd, u32 frameId
         if (cb) { *cb = params; device_->UnmapBuffer(cascade_params_cb_[frameIdx]); }
     }
 
-    // Double buffer: the caller resolved writeTex/prevTex from
+    // Double buffer: the caller resolved writeTexs/prevTexs from
     // cascade_update_frame_ % 2 before import (write = frame_%2, EMA read = 1-write).
+    // [0] = L0, [1..3] = L1x/L1y/L1z.
 
     if (isVk) {
         DescriptorData d[] = {
-            {0, DescriptorType::StorageImage,  writeTex},
-            {1, DescriptorType::SampledImage,  prevTex},
-            {2, DescriptorType::UniformBuffer, cascade_params_cb_[frameIdx]},
-            {3, DescriptorType::StorageBuffer, ddgi_irradiance_buffer_},
+            {0, DescriptorType::StorageImage,  writeTexs[0]},
+            {1, DescriptorType::StorageImage,  writeTexs[1]},
+            {2, DescriptorType::StorageImage,  writeTexs[2]},
+            {3, DescriptorType::StorageImage,  writeTexs[3]},
+            {4, DescriptorType::SampledImage,  prevTexs[0]},
+            {5, DescriptorType::SampledImage,  prevTexs[1]},
+            {6, DescriptorType::SampledImage,  prevTexs[2]},
+            {7, DescriptorType::SampledImage,  prevTexs[3]},
+            {8, DescriptorType::UniformBuffer, cascade_params_cb_[frameIdx]},
+            {9, DescriptorType::StorageBuffer, ddgi_irradiance_buffer_},
         };
-        UpdateDescriptorSet(device_, cascade_update_set_[frameIdx], d, 4);
+        UpdateDescriptorSet(device_, cascade_update_set_[frameIdx], d, 10);
     } else {
         DescriptorData d[] = {
-            {0, DescriptorType::StorageImage,  writeTex},
-            {1, DescriptorType::SampledImage,  prevTex},
+            {0, DescriptorType::StorageImage,  writeTexs[0]},
+            {1, DescriptorType::StorageImage,  writeTexs[1]},
+            {2, DescriptorType::StorageImage,  writeTexs[2]},
+            {3, DescriptorType::StorageImage,  writeTexs[3]},
+            {4, DescriptorType::SampledImage,  prevTexs[0]},
+            {5, DescriptorType::SampledImage,  prevTexs[1]},
+            {6, DescriptorType::SampledImage,  prevTexs[2]},
+            {7, DescriptorType::SampledImage,  prevTexs[3]},
             {2, DescriptorType::StorageBuffer, ddgi_irradiance_buffer_},
             {3, DescriptorType::UniformBuffer, cascade_params_cb_[frameIdx]},
         };
-        UpdateDescriptorSet(device_, cascade_update_set_[frameIdx], d, 4);
+        UpdateDescriptorSet(device_, cascade_update_set_[frameIdx], d, 10);
     }
 
     cmd->BindComputePipeline(cascade_update_pipeline_);
@@ -1359,12 +1412,15 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     RGResourceHandle scLightingHandle;
     RGResourceHandle scCardDataHandle;
     RGResourceHandle scCardLookupHandle;
+    RGResourceHandle scDepthHandle;
     if (surface_cache_available_) {
         // T1.1 (C2): reuse the pipeline-level "SCLightingAtlas" import when
         // provided so the atlas has exactly one RG identity per frame.
         scLightingHandle = external_lighting_rg_.IsValid()
             ? external_lighting_rg_
             : graph.ImportResource("SurfaceCache_Lighting_ForProbes", surface_cache_lighting_atlas_);
+        if (surface_cache_depth_atlas_ != handles::INVALID_RESOURCE)
+            scDepthHandle = graph.ImportResource("SurfaceCache_Depth_ForProbes", surface_cache_depth_atlas_);
         scCardDataHandle = graph.ImportResource("SurfaceCache_CardData_ForProbes", surface_cache_card_data_buffer_);
         scCardLookupHandle = graph.ImportResource("SurfaceCache_CardLookup_ForProbes", surface_cache_card_lookup_buffer_);
     }
@@ -1377,13 +1433,26 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     const bool cascadeActive = CascadeEnabled() &&
         cascade_update_pipeline_ != handles::INVALID_PIPELINE &&
         radiance_cascade_[0] != handles::INVALID_RESOURCE &&
-        radiance_cascade_[1] != handles::INVALID_RESOURCE;
+        radiance_cascade_[1] != handles::INVALID_RESOURCE &&
+        radiance_cascade_l1_[0][0] != handles::INVALID_RESOURCE &&
+        radiance_cascade_l1_[1][0] != handles::INVALID_RESOURCE;
     const u32 cascadeWriteIdx = cascade_update_frame_ % 2;
-    RGResourceHandle cascadeWriteRG;
-    RGResourceHandle cascadePrevRG;
+    // SH-L1: one write/prev import pair per coefficient — [0] = L0,
+    // [1..3] = L1x/L1y/L1z. Unique import names keep the RG identities distinct.
+    static constexpr const char* kCascadeCoeffNames[4] = {"L0", "L1x", "L1y", "L1z"};
+    RGResourceHandle cascadeWriteRG[4];
+    RGResourceHandle cascadePrevRG[4];
     if (cascadeActive) {
-        cascadeWriteRG = graph.ImportResource("RadianceCascade_Write", radiance_cascade_[cascadeWriteIdx]);
-        cascadePrevRG  = graph.ImportResource("RadianceCascade_Prev", radiance_cascade_[1 - cascadeWriteIdx]);
+        for (int c = 0; c < 4; ++c) {
+            cascadeWriteRG[c] = graph.ImportResource(
+                std::string("RadianceCascade_Write_") + kCascadeCoeffNames[c],
+                (c == 0) ? radiance_cascade_[cascadeWriteIdx]
+                         : radiance_cascade_l1_[cascadeWriteIdx][c - 1]);
+            cascadePrevRG[c] = graph.ImportResource(
+                std::string("RadianceCascade_Prev_") + kCascadeCoeffNames[c],
+                (c == 0) ? radiance_cascade_[1 - cascadeWriteIdx]
+                         : radiance_cascade_l1_[1 - cascadeWriteIdx][c - 1]);
+        }
     }
 
     graph.AddPass<ScreenProbePassData>("ScreenProbeGI",
@@ -1393,7 +1462,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
         // Setup lambda: declare resource dependencies
         // ====================================================================
         [this, gbuffer_depth, gbuffer_normal, prev_frame_color, hzb_texture, giOutputHandle, giFilteredHandle,
-         scLightingHandle, scCardDataHandle, scCardLookupHandle, cascadeWriteRG, cascadePrevRG](
+         scLightingHandle, scCardDataHandle, scCardLookupHandle, scDepthHandle, cascadeWriteRG, cascadePrevRG](
             ScreenProbePassData& data, RenderGraphBuilder& builder) {
             // Read GBuffer inputs
             builder.Read(gbuffer_depth, ResourceState::ShaderResource);
@@ -1412,6 +1481,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Read surface cache resources for near-hit sampling
             if (surface_cache_available_) {
                 builder.Read(scLightingHandle, ResourceState::ShaderResource);
+                if (scDepthHandle.IsValid()) builder.Read(scDepthHandle, ResourceState::ShaderResource);
                 builder.Read(scCardDataHandle, ResourceState::ShaderResource);
                 builder.Read(scCardLookupHandle, ResourceState::ShaderResource);
             }
@@ -1421,16 +1491,21 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Write to filtered output texture (Denoise output)
             builder.Write(giFilteredHandle, ResourceState::UnorderedAccess);
 
-            // T3.5: cascade storage-image write + sampled read of the EMA history
-            if (cascadeWriteRG.IsValid()) builder.Write(cascadeWriteRG, ResourceState::UnorderedAccess);
-            if (cascadePrevRG.IsValid())  builder.Read(cascadePrevRG, ResourceState::ShaderResource);
+            // T3.5: cascade storage-image writes + sampled reads of the EMA
+            // histories (L0 + L1x/L1y/L1z since the SH-L1 upgrade).
+            for (int c = 0; c < 4; ++c) {
+                if (cascadeWriteRG[c].IsValid()) builder.Write(cascadeWriteRG[c], ResourceState::UnorderedAccess);
+                if (cascadePrevRG[c].IsValid())  builder.Read(cascadePrevRG[c], ResourceState::ShaderResource);
+            }
 
             data.gbuffer_depth = gbuffer_depth;
             data.gbuffer_normal = gbuffer_normal;
             data.prev_frame_color = prev_frame_color;
             data.gi_output = giOutputHandle;
-            data.cascade_write = cascadeWriteRG;
-            data.cascade_prev = cascadePrevRG;
+            for (int c = 0; c < 4; ++c) {
+                data.cascade_write[c] = cascadeWriteRG[c];
+                data.cascade_prev[c] = cascadePrevRG[c];
+            }
         },
 
         // ====================================================================
@@ -1651,6 +1726,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Monolithic trace is the fallback when split pipelines are absent.
             // ==================================================================
             if (sdfAvailable && prevColorTex != handles::INVALID_RESOURCE) {
+                ResourceHandle scDepthAtlas = surface_cache_depth_atlas_ != handles::INVALID_RESOURCE ? surface_cache_depth_atlas_ : dummy_texture_2d_;
                 ResourceHandle scLightingAtlas = surface_cache_available_ ? surface_cache_lighting_atlas_ : dummy_texture_2d_;
                 ResourceHandle scCardData = surface_cache_available_ ? surface_cache_card_data_buffer_ : dummy_buffer_;
                 ResourceHandle scCardLookup = surface_cache_available_ ? surface_cache_card_lookup_buffer_ : dummy_buffer_;
@@ -1694,15 +1770,30 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 if (splitReady && !SpgiStageSkipped("trace")) {
                     // --- T3.5: cascade update (before any far-cache consumer) ---
-                    ResourceHandle cascadePrevTex = handles::INVALID_RESOURCE;
-                    if (cascadeActive && cascadeWriteRG.IsValid() && cascadePrevRG.IsValid()) {
-                        auto* resW = context.graph->GetResource(cascadeWriteRG);
-                        auto* resP = context.graph->GetResource(cascadePrevRG);
-                        ResourceHandle writeTex = resW ? resW->GetPhysicalHandle() : handles::INVALID_RESOURCE;
-                        cascadePrevTex = resP ? resP->GetPhysicalHandle() : handles::INVALID_RESOURCE;
-                        DispatchCascadeUpdate(cmd, frameIdx, writeTex, cascadePrevTex);
-                        // Storage-image write → sampled reads of the same texture
-                        // (cascade EMA read next frame + finalize this frame).
+                    // SH-L1: [0] = L0, [1..3] = L1x/L1y/L1z physical handles;
+                    // cascadePrevTex feeds the finalize far-cache bindings.
+                    ResourceHandle cascadeWriteTexs[4];
+                    ResourceHandle cascadePrevTex[4];
+                    bool cascadeReady = cascadeActive;
+                    for (int c = 0; c < 4; ++c) {
+                        cascadeWriteTexs[c] = handles::INVALID_RESOURCE;
+                        cascadePrevTex[c] = handles::INVALID_RESOURCE;
+                    }
+                    if (cascadeReady && cascadeWriteRG[0].IsValid() && cascadePrevRG[0].IsValid()) {
+                        for (int c = 0; c < 4; ++c) {
+                            auto* resW = context.graph->GetResource(cascadeWriteRG[c]);
+                            auto* resP = context.graph->GetResource(cascadePrevRG[c]);
+                            cascadeWriteTexs[c] = resW ? resW->GetPhysicalHandle() : handles::INVALID_RESOURCE;
+                            cascadePrevTex[c] = resP ? resP->GetPhysicalHandle() : handles::INVALID_RESOURCE;
+                            if (cascadeWriteTexs[c] == handles::INVALID_RESOURCE ||
+                                cascadePrevTex[c] == handles::INVALID_RESOURCE) { cascadeReady = false; break; }
+                        }
+                    }
+                    if (cascadeReady) {
+                        DispatchCascadeUpdate(cmd, frameIdx, cascadeWriteTexs, cascadePrevTex);
+                        // Storage-image write → sampled reads of the same
+                        // textures (cascade EMA read next frame + finalize
+                        // this frame).
                         cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                            AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
                     }
@@ -1820,13 +1911,17 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
 
                     // --- 2c: radiance finalize (texture2D + buffers) ---
-                    // T3.5: binding 13 / texture(2) carries the cascade texture.
+                    // T3.5: binding 13 / texture(2) carries the cascade L0;
+                    // SH-L1 adds bindings 14-16 / textures (3)-(5) for L1xyz.
                     // The finalize samples the PREV import identity — one frame
                     // stale, which the cascade's temporal EMA already implies,
                     // and the RG has it in ShaderResource layout for the
                     // SampledImage descriptor without a mid-pass transition.
-                    ResourceHandle cascadeFinalTex = (cascadeActive && cascadePrevTex != handles::INVALID_RESOURCE)
-                        ? cascadePrevTex : dummy_texture_3d_;
+                    ResourceHandle cascadeFinalTex[4];
+                    for (int c = 0; c < 4; ++c) {
+                        cascadeFinalTex[c] = (cascadeReady && cascadePrevTex[c] != handles::INVALID_RESOURCE)
+                            ? cascadePrevTex[c] : dummy_texture_3d_;
+                    }
                     if (splitIsVk) {
                         DescriptorData finParams[] = {
                             {0, DescriptorType::SampledImage,  prevColorTex},
@@ -1842,14 +1937,21 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {10, DescriptorType::StorageBuffer, scGridCards},
                             {11, DescriptorType::StorageBuffer, ddgiIrr},
                             {12, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
-                            {13, DescriptorType::SampledImage, cascadeFinalTex},  // T3.5
+                            {17, DescriptorType::SampledImage, scDepthAtlas},
+                            {13, DescriptorType::SampledImage, cascadeFinalTex[0]},  // T3.5 L0
+                            {14, DescriptorType::SampledImage, cascadeFinalTex[1]},  // SH-L1 L1x
+                            {15, DescriptorType::SampledImage, cascadeFinalTex[2]},  // SH-L1 L1y
+                            {16, DescriptorType::SampledImage, cascadeFinalTex[3]},  // SH-L1 L1z
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 14);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 18);
                     } else {
                         DescriptorData finParams[] = {
                             {0, DescriptorType::SampledImage,  prevColorTex},
                             {1, DescriptorType::SampledImage,  scLightingAtlas},
-                            {2, DescriptorType::SampledImage,  cascadeFinalTex},  // T3.5
+                            {2, DescriptorType::SampledImage,  cascadeFinalTex[0]},  // T3.5 L0
+                            {3, DescriptorType::SampledImage,  cascadeFinalTex[1]},  // SH-L1 L1x
+                            {4, DescriptorType::SampledImage,  cascadeFinalTex[2]},  // SH-L1 L1y
+                            {5, DescriptorType::SampledImage,  cascadeFinalTex[3]},  // SH-L1 L1z
                             {0, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
                             {1, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx]},
                             {2, DescriptorType::StorageBuffer, hit_distance_buffer_},
@@ -1861,8 +1963,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {8, DescriptorType::StorageBuffer, scGridCards},
                             {9, DescriptorType::StorageBuffer, ddgiIrr},
                             {10, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
+                            {6, DescriptorType::SampledImage, scDepthAtlas},
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 14);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 18);
                     }
                     cmd->BindComputePipeline(finalize_pipeline_);
                     const DescriptorSetHandle finSets[] = { finalize_ds_[frameIdx] };
@@ -1943,6 +2046,15 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     ? static_cast<float>(camera_data.frame_index) : -1.0f;
                 const float avgIsMode = params_.enable_importance ? 1.0f : 0.0f;
                 AvgCB acb{grid_width_ * grid_height_, params_.rays_per_probe, avgSeed, avgIsMode};
+                static_assert(sizeof(AvgCB) == 16);
+                // Vulkan binding 2 is an explicit UBO. SetComputeBytes writes
+                // push constants there, so it cannot update this descriptor.
+                // Regenerating different rays in Average corrupts SH direction
+                // and PDF weights even when the trace itself is correct.
+                if (auto* cb = device_->MapBuffer(avg_constants_[frameIdx])) {
+                    std::memcpy(cb, &acb, sizeof(acb));
+                    device_->UnmapBuffer(avg_constants_[frameIdx]);
+                }
 
                 DescriptorData params[] = {
                     {0, DescriptorType::StorageBuffer, probe_radiance_buffer_[frameIdx]},
@@ -1956,7 +2068,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->BindComputePipeline(avg_pipeline_);
                 const DescriptorSetHandle sets[] = { avg_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, avg_layout_, 0, 1, sets, 0, nullptr);
-                cmd->SetComputeBytes(2, &acb, sizeof(AvgCB));
+                if (!splitIsVk)
+                    cmd->SetComputeBytes(2, &acb, sizeof(AvgCB));
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch(totalProbes, 1, 1);
@@ -2050,6 +2163,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 const ResourceHandle spatialOutput = filteredSH == probe_avg_radiance_[frameIdx]
                     ? probe_temporal_radiance_[frameIdx] : probe_avg_radiance_[frameIdx];
                 SpatialCB scb{grid_width_ * grid_height_, grid_width_, 2.0f, 0.0f};
+                static_assert(sizeof(SpatialCB) == 16);
+                if (auto* cb = device_->MapBuffer(spatial_cb_[frameIdx])) {
+                    std::memcpy(cb, &scb, sizeof(scb));
+                    device_->UnmapBuffer(spatial_cb_[frameIdx]);
+                }
 
                 DescriptorData params[] = {
                     {0, DescriptorType::StorageBuffer, filteredSH},
@@ -2062,7 +2180,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->BindComputePipeline(spatial_pipeline_);
                 const DescriptorSetHandle sets[] = { spatial_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, spatial_layout_, 0, 1, sets, 0, nullptr);
-                cmd->SetComputeBytes(3, &scb, sizeof(SpatialCB));
+                if (!splitIsVk) cmd->SetComputeBytes(3, &scb, sizeof(SpatialCB));
 
                 u32 totalProbes = grid_width_ * grid_height_;
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);

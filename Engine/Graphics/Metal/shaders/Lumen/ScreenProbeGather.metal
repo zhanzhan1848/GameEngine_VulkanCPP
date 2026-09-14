@@ -2,19 +2,15 @@
  * @file ScreenProbeGather.metal
  * @brief Screen Probe GI - Gather pass (SH evaluation + probe bilateral filter)
  *
- * Two bugs fixed vs. prior version:
- *  1. SH evaluation now actually uses the surface normal. Old code summed all
- *     SH bands as scalars (L0 + |L1|), which collapsed to a spatially-uniform
- *     result — every pixel sharing a probe got the same color. The correct
- *     irradiance reconstruction is E(N) = Σ SH_C_i * Y_i(N).
- *  2. Pixel-level probe gather. Old code read exactly one probe per pixel
- *     (the one the pixel fell inside), so pixels whose assigned probe was
- *     inactive got zero. We now gather center + 4 cardinal neighbors
- *     (5-tap cross, matching SpatialFilter's probe-level kernel) with
- *     bilateral weights, which fills sparse coverage.
+ * Evaluates radiance SH at the receiver normal, then continuously reconstructs
+ * the adaptive probe lattice with a radius-two tent over 4x4 probe centers.
+ * The former fixed five-tap cross changed its entire footprint at cell edges,
+ * producing downsample-sized blocks even when its input SH was filtered.
+ * Inactive probes are omitted and remaining weights normalized. Radius two
+ * retains coarse-tier coverage around inactive checkerboard fine probes.
  *
- * Apple Silicon constraint: keep per-thread device buffer reads ≤ 32.
- *   5 probes × (4 SH + 1 pos + 1 normal) = 30 reads.
+ * Up to 16 probes are read per pixel (formerly 5); the extra gather bandwidth
+ * buys continuous reconstruction without blurring full-resolution materials.
  *
  * Buffers:
  *   texture(0): depthTexture       (full-res, sampled)
@@ -44,10 +40,10 @@ struct ScreenProbeGlobalData {
 
 // SH basis (must match ScreenProbeAverage::shBasis):
 //   Y0 = 0.282095
-//   Y1 = 0.488603 * d.y
+//   Y1 = -0.488603 * d.y
 //   Y2 = 0.488603 * d.z
-//   Y3 = 0.488603 * d.x
-// Average stores SH coefficients C_i such that E(N) = Σ C_i * Y_i(N).
+//   Y3 = -0.488603 * d.x
+// Average stores radiance SH; irradiance requires the per-band cosine convolution.
 // B1/B4: per-band radiance→irradiance evaluation (A0=π, A1=2π/3) — the
 // probe field stores radiance SH (DDGI-compatible projection) and the
 // diffuse consumer integrates it over the cosine lobe.
@@ -63,9 +59,9 @@ static inline float3 evalSH(float3 sh0, float3 sh1, float3 sh2, float3 sh3,
                             float3 N)
 {
     return sh0 * 0.282095f
-         + sh1 * (0.488603f * N.y)
+         + sh1 * (-0.488603f * N.y)
          + sh2 * (0.488603f * N.z)
-         + sh3 * (0.488603f * N.x);
+         + sh3 * (-0.488603f * N.x);
 }
 
 kernel void screen_probe_gather(
@@ -106,31 +102,31 @@ kernel void screen_probe_gather(
     float4 normalEncoded = normalTexture.sample(screenSamp, pixelUV);
     float3 surfaceNormal = normalize(normalEncoded.xyz * 2.0f - 1.0f);
 
-    // ---------------------------------------------------------------
-    // Center probe coord for this pixel
-    // ---------------------------------------------------------------
-    int2 centerProbe = int2(int(tid.x) / int(downsample),
-                            int(tid.y) / int(downsample));
+    // Compare actual receiver/probe surface positions, not only screen
+    // proximity. A foreground column and the rear wall may share normals.
+    float2 ndc = float2(pixelUV.x * 2.0 - 1.0, 1.0 - pixelUV.y * 2.0);
+    float4 receiverH = global.inv_view_projection * float4(ndc, depth, 1.0);
+    float3 receiverPos = receiverH.xyz / receiverH.w;
+    float4 footprintH = global.inv_view_projection * float4(
+        ndc + float2(2.0 * downsample / float(renderW), 0.0), depth, 1.0);
+    float planeSigma = max(0.02, distance(receiverPos, footprintH.xyz / footprintH.w) * 0.25);
 
-    // 5-tap cross pattern: center + 4 cardinals (matches SpatialFilter kernel).
-    thread const int2 offsets[5] = {
-        int2( 0,  0),
-        int2(-1,  0), int2( 1,  0),
-        int2( 0, -1), int2( 0,  1),
-    };
-
-    // Spatial weights for the cross (center gets 2.0, neighbors 1.0).
-    // This mirrors SpatialFilter's "center-weighted" blending so we don't
-    // double-smooth — Gather just evaluates the already-filtered SH at this
-    // pixel's actual surface normal.
-    thread const float spatialW[5] = { 2.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    // Continuous tent reconstruction on the probe-center lattice. Radius two
+    // includes diagonal/coarse probes when the adaptive fine tier is inactive.
+    // A tap enters/leaves the 4x4 footprint at zero weight, avoiding the old
+    // fixed cross's discontinuities at every downsample-sized pixel block.
+    float2 probeCoord = (float2(tid) + 0.5) / downsample - 0.5;
+    int2 baseProbe = int2(floor(probeCoord));
 
     float3 irradianceSum = float3(0.0f);
     float  confidenceOut = 0.0f;
     float  weightSum     = 0.0f;
 
-    for (int i = 0; i < 5; ++i) {
-        int2 npc = centerProbe + offsets[i];
+    for (int i = 0; i < 16; ++i) {
+        int2 npc = baseProbe + int2(i % 4 - 1, i / 4 - 1);
+        float2 tent = max(float2(0.0), 1.0 - abs(float2(npc) - probeCoord) * 0.5);
+        float spatialWeight = tent.x * tent.y;
+        if (spatialWeight <= 0.0) continue;
         if (npc.x < 0 || npc.y < 0 ||
             npc.x >= int(gridW) || npc.y >= int(gridH)) {
             continue;
@@ -140,6 +136,13 @@ kernel void screen_probe_gather(
 
         float4 posData = probePositions[probeIdx];
         if (posData.w <= 0.0f) continue;
+
+        float3 surfaceDelta = posData.xyz - receiverPos;
+        float planeDistance = abs(dot(surfaceDelta, surfaceNormal));
+        float geometryWeight = exp(-0.5 * planeDistance * planeDistance / (planeSigma * planeSigma));
+        // Underflow means this tap lies on a different surface; do not let
+        // confidence normalization resurrect an entirely rejected neighbour.
+        if (geometryWeight < 1e-5) continue;
 
         uint shBase = probeIdx * 4;
         float sh0w = probeSH[shBase + 0].w;
@@ -165,7 +168,7 @@ kernel void screen_probe_gather(
             normalWeight = pow(nDot, 2.0f);
         }
 
-        float w = spatialW[i] * normalWeight * sh0w;
+        float w = spatialWeight * geometryWeight * normalWeight * sh0w;
         irradianceSum += irr * w;
         confidenceOut += sh0w * w;
         weightSum += w;
