@@ -145,11 +145,17 @@ validation VUID 直方图、dump1/2/4/5 产物）：
   移除后 direct/interior ratio 5.30 超旧带宽（2.3-4.6）——属预期移除，
   重新平衡归阶段 3，门限阶段 4 以固定基线重定。
 
-**下一步**：阶段 2 已全部完成（B/G/D/C）。**阶段 3 成为关键路径**：
-- A（tile 中心连续重建 + 能量再标定）：C 落地后室内间接 Level 下降
-  （移除未校验跨面供能的直接后果，实测探针场 p90 较基线减半、
-  L_arcade 26.5→13.3）——必须按 §三.A 保存有效 tile 的入射辐射度并
-  连续重建，恢复正确的跨面传输；亮度门限在阶段 4 以固定基线重定。
+**下一步**：阶段 2 已全部完成（B/G/D/C）。**阶段 3 进行中**：
+- **A slice 1 已落地**（f5d611e8）：resolve 改写 tile 域输出（入射辐射度
+  + 有效性，三缓冲 EMA/carry；aux 携带法线/深度/卡片 id），新增
+  SurfaceCacheIndirectReconstruct（GLSL+MSL）做同表面验证的 tile 中心
+  双线性重建、材质乘法移入重建 pass——"分离入射光和材质乘法"落地。
+  PRIMAL_SC_TILE_RECON=0 保留 legacy splat 供 A/B（同机位对比：
+  upper_wall std 9.18→8.81，Level 持平）。证据 `stage3-a*/`。
+- A 后续：能量再标定（C 落地后室内间接 Level 下降——探针场 p90 较
+  基线减半、L_arcade 26.5→13.2，需按 §三.A 重建正确跨面传输后重定
+  工作点）；tile=4/8/16 × render scale=1/2 矩阵对比。
 - F（probe 过滤表面兼容性）→ E（SDF 采样连续性）。
-- 工具债：build_spv.sh 对 FAIL 不置退出码 + 以入口文件 mtime 判重
-  （include 头改动漏编）——本次造成四轮假测量，应优先修。
+- 工具债：build_spv.sh FAIL 不置退出码已修；但 include 头改动仍不触发
+  重编（脚本无依赖跟踪——改 SurfaceCacheData.glsl 后需 touch 入口文件
+  或全量重编，改头文件后务必核对 spv mtime）。
