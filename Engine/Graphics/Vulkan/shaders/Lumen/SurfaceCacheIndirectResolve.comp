@@ -66,6 +66,10 @@ struct IndirectResolveParams {
     float temporal_weight;
     uint frame_index;
     uint lookup_count;
+    // B (plan §三.B): mirrors the trace refresh amortization — C++
+    // IndirectResolveParamsGPU fields at offsets 68/72.
+    uint refresh_stride;
+    uint refresh_phase;
 };
 
 layout(set = 0, binding = 5, std140) uniform IndirectResolveParamsBlock {
@@ -93,6 +97,15 @@ layout(set = 0, binding = 8, std430) readonly buffer RayHitsBlock {
     ProbeRayHit data[];
 } ray_hits;
 
+// B (plan §三.B): per-tile validity bitmask (1 bit per tile, packed u32).
+// Written by this shader for tiles whose hits were consumed while CURRENT;
+// read to decide whether a non-refreshed tile may carry its history. A clear
+// bit = never-traced (or post-reset): the tile's texels must be explicit
+// zeros (validity A=0), not stale hits reinterpreted as measurements.
+layout(set = 0, binding = 10, std430) buffer TileValidBlock {
+    uint data[];
+} tile_valid;
+
 // --------------------------------------------------------------------------------
 void surface_cache_indirect_resolve()
 {
@@ -107,14 +120,29 @@ void surface_cache_indirect_resolve()
 
     if (tile_origin.x >= irp.params.sc_params.atlas_size || tile_origin.y >= irp.params.sc_params.atlas_size) return;
 
+    // B (plan §三.B): is this tile part of THIS frame's refresh phase? The
+    // trace skipped tiles outside the phase (early-out before the march), so
+    // their ray_hits are stale by definition and must not be consumed.
+    const bool refreshed = irp.params.refresh_stride <= 1u ||
+                           (probe_idx % irp.params.refresh_stride) == irp.params.refresh_phase;
+    const uint tvWord = probe_idx >> 5u;
+    const uint tvBit = 1u << (probe_idx & 31u);
+    const bool tileWasValid = (tile_valid.data[tvWord] & tvBit) != 0u;
+
     vec3 indirect = vec3(0.0);
     float total_weight = 0.0;
 
+    if (refreshed) {
     for (uint r = 0u; r < rays; ++r) {
         uint hit_idx = probe_idx * rays + r;
         vec3 hit_pos = ray_hits.data[hit_idx].hit_position_dist.xyz;
         uint hit_type = ray_hits.data[hit_idx].hit_type_pad.x;
         vec3 radiance = vec3(0.0);
+
+        // hit_type ≥ 3 is the INVALID sentinel (unwritten/garbage slot) —
+        // never a measurement. Skipping it (instead of counting black or sky)
+        // keeps a partially-written tile from synthesising energy.
+        if (hit_type >= 3u) continue;
 
         // 2026-09-10 C3.5 slice 1: near AND far hits both resolve through the
         // atlas — the card lookup is position-based and works at any distance.
@@ -151,8 +179,16 @@ void surface_cache_indirect_resolve()
         indirect += radiance;
         total_weight += 1.0;
     }
+    }
 
     if (total_weight > 0.0) indirect /= total_weight;
+
+    // B: this tile's ray_hits were consumed while CURRENT — from now on its
+    // history is legitimate carry data. Non-refreshed tiles keep whatever
+    // validity they had (their hits were not touched).
+    if (refreshed && (tile_valid.data[tvWord] & tvBit) == 0u) {
+        tile_valid.data[tvWord] |= tvBit;
+    }
 
     // T3.3: temporal accumulation — the trace ray directions are frame-hashed
     // (blue-noise-ish), so per-frame tile estimates carry visible variance.
@@ -166,6 +202,23 @@ void surface_cache_indirect_resolve()
         for (uint dx = 0u; dx < tile_size; ++dx) {
             uvec2 texel = tile_origin + uvec2(dx, dy);
             if (texel.x >= irp.params.sc_params.atlas_size || texel.y >= irp.params.sc_params.atlas_size) continue;
+
+            // B: a tile outside this frame's refresh phase contributes no new
+            // estimate. With a set validity bit its history is carried
+            // verbatim (the EMA implies the stored value already includes the
+            // albedo product); a cleared bit means never-traced/post-reset —
+            // explicit zeros with validity A=0 so LightEval skips the term
+            // instead of reading stale or uninitialized slots as black light.
+            if (!refreshed) {
+                if (tileWasValid && hasHistory) {
+                    vec3 prev = texelFetch(prev_indirect_out, ivec2(texel), 0).rgb;
+                    imageStore(indirect_out, ivec2(texel), vec4(prev, 1.0));
+                } else {
+                    imageStore(indirect_out, ivec2(texel), vec4(0.0));
+                }
+                continue;
+            }
+
             vec3 albedo = imageLoad(albedo_atlas, ivec2(texel)).rgb;
             vec3 current = indirect * albedo;
             if (hasHistory && tw > 0.0) {

@@ -77,8 +77,13 @@ struct IndirectResolveParamsGPU {
     float    temporal_weight;
     uint32_t frame_index;
     uint32_t lookup_count;
+    // B (plan §三.B): mirrors the trace's refresh amortization so resolve can
+    // identify tiles NOT traced this frame and carry/clear them instead of
+    // consuming stale ray_hits. Offsets 68/72 — std140 rounds the UBO to 80.
+    uint32_t refresh_stride;        // 0/1 = every tile every frame
+    uint32_t refresh_phase;         // frame_index % refresh_stride
 };
-static_assert(sizeof(IndirectResolveParamsGPU) == 68, "std140 layout drift");
+static_assert(sizeof(IndirectResolveParamsGPU) == 76, "std140 layout drift");
 
 // Per-card dispatch info for flattened texel dispatch.
 // CPU builds prefix-sum array, GPU binary-searches to map thread_id → card → atlas UV.

@@ -194,6 +194,28 @@ struct SurfaceCacheRGData {
 // SurfaceCachePass Implementation
 // ============================================================================
 
+// G (plan §三.G): the tile-radiosity tile size is resolved ONCE per session.
+// The ray_hits buffer cannot follow a mid-run env change without a rebuild,
+// so the config must be stable for the buffers' lifetime. Values are rounded
+// DOWN to a power of two within [4, 128]: a power-of-two tile always divides
+// the power-of-two atlas exactly (no untraced edge strips, exact grid for the
+// resolve dispatch and the validity bitmask).
+static u32 SCRadiosityTileSize() {
+    static const u32 v = [] {
+        const char* e = std::getenv("PRIMAL_SC_RADIOSITY_TILE");
+        u32 t = e ? (u32)std::atoi(e) : 8u;   // 2026-09-11 promoted: 0.85 m patches
+        if (t < 4u) t = 4u;
+        if (t > 128u) t = 128u;
+        if ((t & (t - 1u)) != 0u) {
+            u32 p = 4u;
+            while ((p << 1) <= t) p <<= 1;
+            t = p;
+        }
+        return t;
+    }();
+    return v;
+}
+
 float SurfaceCachePass::DebugShadowVisibilityAt(u32 index) const {
     if (shadow_visibility_buffer_ == handles::INVALID_RESOURCE || !device_) return -1.0f;
     auto* p = static_cast<const float*>(device_->MapBuffer(shadow_visibility_buffer_));
@@ -688,7 +710,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- IndirectResolve: 4 textures + 1 UBO + 1 UBO + 3 SSBO ---
+    // --- IndirectResolve: 4 textures + 1 UBO + 1 UBO + 4 SSBO ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev_lighting
@@ -701,8 +723,9 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits
             {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev indirect_out (T3.3 EMA)
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // tile validity bitmask (B)
         };
-        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({10, bindings});
+        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({11, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(0)]]
@@ -714,9 +737,10 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // lookups       [[buffer(2)]]
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards         [[buffer(3)]]
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits      [[buffer(4)]]
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // tile validity [[buffer(5)]] (B)
             {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev indirect_out [[texture(6)]] (T3.3 EMA)
         };
-        DescriptorSetLayoutDesc layoutDesc{10, bindings};
+        DescriptorSetLayoutDesc layoutDesc{11, bindings};
         indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -2208,28 +2232,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // Consumers (LightEval tile probe) land in the next slice.
                 // ================================================================
                 {
-                    // T5.5: lazy allocation on first opt-in dispatch
-                    if (ray_hits_buffer_ == handles::INVALID_RESOURCE) {
-                        u32 pagesPerSide = atlas_size_ / page_size_;
-                        u32 totalPages = pagesPerSide * pagesPerSide;
-                        BufferDesc rayHitsDesc{};
-                        rayHitsDesc.size = (u64)totalPages * page_size_ * page_size_ * sizeof(float) * 4;
-                        rayHitsDesc.type = BufferType::Structured;
-                        rayHitsDesc.usage = GPUMemoryUsage::Dynamic;
-                        rayHitsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-                        ray_hits_buffer_ = device_->CreateBuffer(rayHitsDesc);
-                    }
-
                     // C3.5 slice 2: runtime tile size + trace stride.
-                    // PRIMAL_SC_RADIOSITY_TILE (default 16), PRIMAL_SC_RADIOSITY_STRIDE
+                    // PRIMAL_SC_RADIOSITY_TILE (power-of-two, resolved once —
+                    // see SCRadiosityTileSize), PRIMAL_SC_RADIOSITY_STRIDE
                     // (default 1 = every tile every frame; N = each tile traced
                     // every Nth frame, phase rotating with frame_index).
-                    const u32 kTile = [] {
-                        const char* e = std::getenv("PRIMAL_SC_RADIOSITY_TILE");
-                        if (!e) return 8u;   // 2026-09-11 promoted: 0.85 m patches
-                        const u32 v = (u32)std::atoi(e);
-                        return (v >= 4u && v <= 128u) ? v : 8u;
-                    }();
+                    const u32 kTile = std::min<u32>(SCRadiosityTileSize(), atlas_size_);
                     const u32 kStride = [] {
                         const char* e = std::getenv("PRIMAL_SC_RADIOSITY_STRIDE");
                         if (!e) return 2u;   // promoted default: half-rate trace
@@ -2238,6 +2246,94 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     }();
                     const u32 kRays = 32;
                     const u32 kTiles = atlas_size_ / kTile;
+                    // G (plan §三.G): ray_hits capacity follows the runtime
+                    // tile config — tilesX×tilesY×raysPerProbe×32B
+                    // (ProbeRayHit = two vec4s, both backends). The old
+                    // totalPages×page²×16B formula was only coincidentally
+                    // sufficient at tile=8; tile=4 needed 4× that and
+                    // silently wrote out of bounds.
+                    constexpr u64 kRayHitStride = 32;   // GLSL ProbeRayHit / MSL ProbeRayHit
+                    const u64 kTotalHits = (u64)kTiles * kTiles * kRays;
+                    // Overflow guard (64Mi hits × 32B = 2 GiB cap): zero the
+                    // dispatch grid for this session instead of under-
+                    // allocating — a zero-group dispatch is a no-op on both
+                    // backends, and tile_size=0 early-outs the shaders.
+                    u32 kTilesEff = kTiles;
+                    if (kTotalHits == 0 || kTotalHits > (u64)64 * 1024 * 1024) {
+                        static bool gOverflowLogged = false;
+                        if (!gOverflowLogged) {
+                            gOverflowLogged = true;
+                            PRIMAL_LOG_STREAM(Error, "Render")
+                                << "[SurfaceCache] ray_hits capacity overflow: tiles="
+                                << kTiles << " rays=" << kRays << " hits=" << kTotalHits
+                                << " — tile radiosity disabled this session" << std::endl;
+                        }
+                        kTilesEff = 0;
+                    } else {
+                    // T5.5: lazy allocation on first opt-in dispatch
+                    if (ray_hits_buffer_ == handles::INVALID_RESOURCE ||
+                        ray_hits_capacity_ != kTotalHits) {
+                        if (ray_hits_buffer_ != handles::INVALID_RESOURCE) {
+                            device_->DestroyBuffer(ray_hits_buffer_);
+                            ray_hits_buffer_ = handles::INVALID_RESOURCE;
+                        }
+                        BufferDesc rayHitsDesc{};
+                        rayHitsDesc.size = kTotalHits * kRayHitStride;
+                        rayHitsDesc.type = BufferType::Structured;
+                        rayHitsDesc.usage = GPUMemoryUsage::Dynamic;
+                        rayHitsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                        ray_hits_buffer_ = device_->CreateBuffer(rayHitsDesc);
+                        ray_hits_capacity_ = kTotalHits;
+                        // Hits start zeroed: with the B validity contract the
+                        // contents are never read before a trace writes them,
+                        // but a deterministic initial state keeps readback
+                        // diagnostics honest.
+                        if (ray_hits_buffer_ != handles::INVALID_RESOURCE) {
+                            if (void* z = device_->MapBuffer(ray_hits_buffer_, 0, rayHitsDesc.size)) {
+                                std::memset(z, 0, rayHitsDesc.size);
+                                device_->UnmapBuffer(ray_hits_buffer_);
+                            }
+                        }
+                    }
+
+                    // B (plan §三.B): per-tile validity bitmask. Config
+                    // signature = tile grid + card-set identity — a changed
+                    // tile size or regenerated card set zeroes every tile's
+                    // validity (history must not survive a geometry/config
+                    // change it was not captured against).
+                    const u64 tileSig = ((u64)kTiles << 32) ^
+                                        (u64)card_generator_.GetLookupCount() ^
+                                        ((u64)card_generator_.GetCards().size() << 8);
+                    const u64 tileWords = ((u64)kTiles * kTiles + 31u) / 32u;
+                    if (indirect_tile_valid_buffer_ == handles::INVALID_RESOURCE ||
+                        indirect_tile_config_sig_ != tileSig) {
+                        if (indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE) {
+                            device_->DestroyBuffer(indirect_tile_valid_buffer_);
+                            indirect_tile_valid_buffer_ = handles::INVALID_RESOURCE;
+                        }
+                        BufferDesc tvDesc{};
+                        tvDesc.size = tileWords * sizeof(u32);
+                        tvDesc.type = BufferType::Raw;
+                        tvDesc.usage = GPUMemoryUsage::Dynamic;
+                        tvDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                        indirect_tile_valid_buffer_ = device_->CreateBuffer(tvDesc);
+                        indirect_tile_config_sig_ = tileSig;
+                        if (indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE) {
+                            if (void* z = device_->MapBuffer(indirect_tile_valid_buffer_, 0, tvDesc.size)) {
+                                std::memset(z, 0, tvDesc.size);
+                                device_->UnmapBuffer(indirect_tile_valid_buffer_);
+                            }
+                            static u64 lastResetSig = 0;
+                            if (lastResetSig != tileSig) {
+                                lastResetSig = tileSig;
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[SurfaceCache] tile validity reset (tiles=" << kTiles
+                                    << " cards=" << card_generator_.GetCards().size() << ")" << std::endl;
+                            }
+                        }
+                    }
+                    }
+
                     // C3.5 slice 4: offline propagated SDF for the tile march
                     // (thin-arch sky leaks in the coarse runtime GlobalSDF).
                     const bool useOfflineSdf = sc_offline_sdf_texture_ != handles::INVALID_RESOURCE;
@@ -2253,7 +2349,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         tp->sc_params.max_cards = config_.surface_cache_max_cards;
                         tp->sc_params.lookup_count = card_generator_.GetLookupCount();
                         tp->sc_params.indirect_rays_per_probe = kRays;
-                        tp->tile_size = kTile;
+                        tp->tile_size = kTilesEff != 0u ? kTile : 0u;
                         tp->rays_per_probe = kRays;
                         tp->frame_index = current_frame_index;
                         tp->near_distance = 0.25f;
@@ -2352,7 +2448,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         cmd->BindComputePipeline(indirect_trace_pipeline_);
                         const DescriptorSetHandle isets[] = { indirect_trace_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_trace_layout_, 0, 1, isets, 0, nullptr);
-                        cmd->Dispatch(kTiles, kTiles, 1);
+                        cmd->Dispatch(kTilesEff, kTilesEff, 1);
                         rhi::ResourceBarrier rb{};
                         rb.resource = ray_hits_buffer_;
                         rb.beforeState = rhi::ResourceState::UnorderedAccess;
@@ -2369,9 +2465,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             return e && atoi(e) != 0;
                         }();
                         static u32 coneStatsFrames = 0;
-                        if (coneStatsOn && coneStatsFrames < 3) {
+                        if (coneStatsOn && coneStatsFrames < 3 &&
+                            ray_hits_buffer_ != handles::INVALID_RESOURCE) {
                             ++coneStatsFrames;
-                            const u64 totalHits = (u64)kTiles * kTiles * kRays;
+                            const u64 totalHits = ray_hits_capacity_;
                             const u64 copyBytes = totalHits * 32ull;
                             static rhi::ResourceHandle coneStaging = rhi::handles::INVALID_RESOURCE;
                             if (coneStaging == rhi::handles::INVALID_RESOURCE) {
@@ -2427,17 +2524,22 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         rp->sc_params.max_cards = config_.surface_cache_max_cards;
                         rp->sc_params.lookup_count = card_generator_.GetLookupCount();
                         rp->sc_params.indirect_rays_per_probe = kRays;
-                        rp->tile_size = kTile;
+                        rp->tile_size = kTilesEff != 0u ? kTile : 0u;
                         rp->rays_per_probe = kRays;
                         rp->temporal_weight = 0.9f;
                         rp->frame_index = current_frame_index;
                         rp->lookup_count = card_generator_.GetLookupCount();
+                        // B: resolve must mirror the trace's refresh schedule —
+                        // tiles outside this frame's phase carry history (if
+                        // valid) or explicit zeros, never stale ray_hits.
+                        rp->refresh_stride = kStride;
+                        rp->refresh_phase = kStride > 1u ? current_frame_index % kStride : 0u;
                         device_->UnmapBuffer(indirect_resolve_params_cb_[frameIdx]);
                     }
 
                     // ---- resolve descriptors + dispatch ----
                     {
-                        DescriptorData rp2[10];
+                        DescriptorData rp2[11];
                         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
@@ -2449,6 +2551,14 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[7] = {7, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
                             rp2[8] = {8, DescriptorType::StorageBuffer, ray_hits_buffer_};
                             rp2[9] = {9, DescriptorType::SampledImage,  indirect_out_tex_[histIdx]};   // T3.3 EMA history
+                            // B: per-tile validity bitmask (resolve writes the
+                            // bit for tiles it consumed current hits for; the
+                            // INVALID stand-in keeps the binding valid when
+                            // tile radiosity is resourced off).
+                            rp2[10] = {10, DescriptorType::StorageBuffer,
+                                       indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE
+                                           ? indirect_tile_valid_buffer_
+                                           : card_dispatch_buffer_};
                         } else {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
@@ -2460,12 +2570,16 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[7] = {3, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
                             rp2[8] = {4, DescriptorType::StorageBuffer, ray_hits_buffer_};
                             rp2[9] = {6, DescriptorType::SampledImage,  indirect_out_tex_[histIdx]};   // T3.3 EMA history
+                            rp2[10] = {5, DescriptorType::StorageBuffer,   // [[buffer(5)]]
+                                       indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE
+                                           ? indirect_tile_valid_buffer_
+                                           : card_dispatch_buffer_};
                         }
-                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 10);
+                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 11);
                         cmd->BindComputePipeline(indirect_resolve_pipeline_);
                         const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);
-                        cmd->Dispatch(kTiles, kTiles, 1);
+                        cmd->Dispatch(kTilesEff, kTilesEff, 1);
                         rhi::ResourceBarrier rb{};
                         rb.resource = indirect_out_tex_[outIdx];
                         rb.beforeState = rhi::ResourceState::UnorderedAccess;

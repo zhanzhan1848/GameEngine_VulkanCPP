@@ -251,6 +251,18 @@ private:
     // Runtime buffers
     rhi::ResourceHandle light_info_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ray_hits_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // G (plan §三.G): actual hit capacity of ray_hits_buffer_ in ProbeRayHit
+    // entries (tilesX×tilesY×raysPerProbe) — sized from the runtime tile
+    // config, guarded before every trace/resolve dispatch.
+    u64 ray_hits_capacity_{ 0 };
+    // B (plan §三.B): per-tile validity bitmask (1 bit per tile, packed u32).
+    // A set bit means "ray_hits for this tile were consumed while current" —
+    // resolve may carry that tile's history; a clear bit means never-traced
+    // (or post-reset) and its texels must be explicit zeros, never stale
+    // hits reinterpreted as measurements. Recreated (zeroed) when the tile
+    // grid or the card set changes.
+    rhi::ResourceHandle indirect_tile_valid_buffer_{ rhi::handles::INVALID_RESOURCE };
+    u64 indirect_tile_config_sig_{ 0 };
     rhi::ResourceHandle card_dispatch_buffer_{ rhi::handles::INVALID_RESOURCE };
     // A7: nearest-depth scratch (u32 floatBits per atlas texel) for the
     // three-dispatch GBuffer-gather capture (clear → atomicMin → write).

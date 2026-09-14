@@ -1868,12 +1868,16 @@ void TestVulkanSponzaRenderGraph::Run() {
                                 c.axis_direction & 0xFFu, (c.axis_direction >> 8) & 0xFFu,
                                 c.resolution, c.atlas_offset_x, c.atlas_offset_y,
                                 mr, mg, mb, lum, mx, 100.0 * lit / n);
-                        // top-24 insertion
+                        // top-24 insertion. Bubble the new element toward
+                        // the front with --k (the old ++k walked OUT OF the
+                        // 24-slot array, read adjacent-stack garbage lums and
+                        // swapped them into the top list — the phantom
+                        // "card #1 lum=1e27" rows in older dumps).
                         if (topN < 24) { top[topN++] = {lum, ci};
-                            for (u32 k = topN - 1; k && top[k].lum > top[k-1].lum; ++k)
+                            for (u32 k = topN - 1; k && top[k].lum > top[k-1].lum; --k)
                                 std::swap(top[k], top[k-1]); }
                         else if (lum > top[23].lum) { top[23] = {lum, ci};
-                            for (u32 k = 23; k && top[k].lum > top[k-1].lum; ++k)
+                            for (u32 k = 23; k && top[k].lum > top[k-1].lum; --k)
                                 std::swap(top[k], top[k-1]); }
                     }
                     fclose(out);

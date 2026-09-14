@@ -17,6 +17,10 @@ struct IndirectResolveParams {
     float temporal_weight;
     uint frame_index;
     uint lookup_count;
+    // B (plan §三.B): mirrors the trace refresh amortization — C++
+    // IndirectResolveParamsGPU fields at offsets 68/72.
+    uint refresh_stride;
+    uint refresh_phase;
 };
 
 kernel void surfaceCacheIndirectResolve(
@@ -30,7 +34,8 @@ kernel void surfaceCacheIndirectResolve(
     constant IndirectResolveParams&    params       [[buffer(1)]],
     constant SurfaceCacheCardLookup*   lookups      [[buffer(2)]],
     constant SurfaceCacheCard*         cards        [[buffer(3)]],
-    device const ProbeRayHit*          ray_hits     [[buffer(4)]])
+    device const ProbeRayHit*          ray_hits     [[buffer(4)]],
+    device uint*                       tile_valid   [[buffer(5)]])   // B: per-tile validity bitmask
 {
     uint probe_x = global_id.x;
     uint probe_y = global_id.y;
@@ -43,14 +48,25 @@ kernel void surfaceCacheIndirectResolve(
 
     if (tile_origin.x >= params.sc_params.atlas_size || tile_origin.y >= params.sc_params.atlas_size) return;
 
+    // B (plan §三.B): per-tile validity — tiles outside this frame's refresh
+    // phase carry history (if valid) or explicit zeros (A=0); their stale
+    // ray_hits are never consumed. hit_type >= 3 is the INVALID sentinel.
+    const bool refreshed = params.refresh_stride <= 1u ||
+                           (probe_idx % params.refresh_stride) == params.refresh_phase;
+    const uint tvWord = probe_idx >> 5u;
+    const uint tvBit = 1u << (probe_idx & 31u);
+    const bool tileWasValid = (tile_valid[tvWord] & tvBit) != 0u;
+
     float3 indirect = float3(0.0);
     float total_weight = 0.0;
 
-    for (uint r = 0; r < rays; ++r) {
+    for (uint r = 0; r < rays && refreshed; ++r) {
         uint hit_idx = probe_idx * rays + r;
         float3 hit_pos = ray_hits[hit_idx].hit_position;
         uint hit_type = ray_hits[hit_idx].hit_type;
         float3 radiance = float3(0.0);
+
+        if (hit_type >= 3u) continue;   // B: INVALID sentinel — never a measurement
 
         // 2026-09-11 Metal sync (C3.5 slice 1 parity): near AND far hits both
         // resolve through the atlas — the card lookup is position-based and
@@ -91,6 +107,11 @@ kernel void surfaceCacheIndirectResolve(
 
     if (total_weight > 0.0) indirect /= total_weight;
 
+    // B: consumed current hits — the tile's history is legitimate carry data.
+    if (refreshed && (tile_valid[tvWord] & tvBit) == 0u) {
+        tile_valid[tvWord] |= tvBit;
+    }
+
     // T3.3: temporal accumulation — see Vulkan twin (mix with the previous
     // frame's slot; frame_index >= 2 guarantees history exists).
     const float tw = clamp(params.temporal_weight, 0.0f, 0.95f);
@@ -100,6 +121,17 @@ kernel void surfaceCacheIndirectResolve(
         for (uint dx = 0; dx < tile_size; ++dx) {
             uint2 texel = tile_origin + uint2(dx, dy);
             if (texel.x >= params.sc_params.atlas_size || texel.y >= params.sc_params.atlas_size) continue;
+            if (!refreshed) {
+                // B: no new estimate this frame — carry valid history
+                // verbatim, otherwise explicit zeros with A=0.
+                if (tileWasValid && hasHistory) {
+                    float3 prev = prev_indirect_out.read(texel).rgb;
+                    indirect_out.write(float4(prev, 1.0), texel);
+                } else {
+                    indirect_out.write(float4(0.0), texel);
+                }
+                continue;
+            }
             float3 albedo = albedo_atlas.read(texel).rgb;
             float3 current = indirect * albedo;
             if (hasHistory && tw > 0.0f) {

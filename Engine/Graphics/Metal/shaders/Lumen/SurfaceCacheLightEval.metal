@@ -312,7 +312,10 @@ kernel void surfaceCacheLightEval(
         // Resolve stores outgoing radiance at full atlas texel coordinates,
         // including this texel's albedo. Tile-grid coordinates address an
         // unrelated surface and may cross card boundaries.
-        tileRadiance = indirect_out.read(atlas_uv).rgb;
+        // B (plan §三.B): A=validity — never-traced/post-reset tiles store
+        // explicit zeros with A=0 (Vulkan twin parity).
+        float4 tileSample = indirect_out.read(atlas_uv);
+        if (tileSample.a > 0.0f) tileRadiance = tileSample.rgb;
     }
 
     // C3.5 slice 5+6: texel-side ambient floor with sky-openness modulation

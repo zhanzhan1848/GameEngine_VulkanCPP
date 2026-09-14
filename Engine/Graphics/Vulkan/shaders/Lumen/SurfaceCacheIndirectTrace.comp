@@ -124,10 +124,12 @@ uint findOwningCard(uvec2 uv, int count) {
 }
 
 // Nearest-sample SDF from a 3D texture at normalized uvw (samplerless texelFetch).
+// uvw==1 lands exactly on coord==size — clamp the INTEGER coord to size-1
+// (plan §三.E 边界漏洞；Shadow 孪生早已夹取，此处补齐半开域语义).
 float sampleSDFNearest(texture3D sdf, vec3 uvw) {
     ivec3 size = textureSize(sdf, 0);
     ivec3 coord = ivec3(clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(size));
-    return texelFetch(sdf, coord, 0).r;
+    return texelFetch(sdf, clamp(coord, ivec3(0), size - ivec3(1)), 0).r;
 }
 
 // ============================================================================

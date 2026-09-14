@@ -441,7 +441,11 @@ void surface_cache_light_eval()
         // Resolve stores outgoing radiance at full atlas texel coordinates,
         // including this texel's albedo. Tile-grid coordinates address an
         // unrelated surface and may cross card boundaries.
-        tileRadiance = imageLoad(indirect_out, ivec2(atlas_uv)).rgb;
+        // B (plan §三.B): A=validity — never-traced/post-reset tiles store
+        // explicit zeros with A=0; consuming them as black light would fake
+        // a "no indirect" measurement inside the feedback loop.
+        vec4 tileSample = imageLoad(indirect_out, ivec2(atlas_uv));
+        if (tileSample.a > 0.0) tileRadiance = tileSample.rgb;
     }
 
     // C3.5 slice 5: the texel-side ambient floor — same irradiance tier as
