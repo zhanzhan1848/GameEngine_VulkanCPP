@@ -290,6 +290,28 @@ public sealed class SceneRuntimeSynchronizer
                     upVector: new[] { 0f, 1f, 0f });
             }
 
+            // 物理组件（M2-D）：collider 必须先于 rigidbody（EngineDLL 语义：
+            // RigidBody 物化依赖同实体已存在的 Collider）
+            foreach (var collider in entity.Components.OfType<ColliderComponent>())
+            {
+                _bridge.AddEntityCollider(runtimeId,
+                    (uint)collider.Shape,
+                    new[] { collider.HalfX, collider.HalfY, collider.HalfZ },
+                    new[] { 0f, 0f, 0f },
+                    collider.IsTrigger,
+                    (uint)collider.Layer);
+            }
+
+            foreach (var rigidBody in entity.Components.OfType<RigidBodyComponent>())
+            {
+                _bridge.AddEntityRigidBody(runtimeId,
+                    (uint)rigidBody.Mode,
+                    rigidBody.Mass,
+                    rigidBody.Restitution,
+                    rigidBody.Friction,
+                    new[] { rigidBody.VelocityX, rigidBody.VelocityY, rigidBody.VelocityZ });
+            }
+
             // 粒子发射器（plan §6.3 B4 P1）：预设标量场填默认 config，
             // 覆盖 SpawnRate（blob offset 8 = emitter_config.spawn_rate），
             // 再为实体创建发射器。曲线字段由引擎侧 SanitizeConfig 置空。
@@ -707,6 +729,27 @@ public sealed class SceneRuntimeSynchronizer
                     nearZ: camera.NearPlane,
                     farZ: camera.FarPlane,
                     upVector: new[] { 0f, 1f, 0f });
+            }
+
+            // 物理组件（M2-D）：collider 先于 rigidbody
+            foreach (var collider in entity.Components.OfType<ColliderComponent>())
+            {
+                _bridge.AddEntityCollider(runtimeId,
+                    (uint)collider.Shape,
+                    new[] { collider.HalfX, collider.HalfY, collider.HalfZ },
+                    new[] { 0f, 0f, 0f },
+                    collider.IsTrigger,
+                    (uint)collider.Layer);
+            }
+
+            foreach (var rigidBody in entity.Components.OfType<RigidBodyComponent>())
+            {
+                _bridge.AddEntityRigidBody(runtimeId,
+                    (uint)rigidBody.Mode,
+                    rigidBody.Mass,
+                    rigidBody.Restitution,
+                    rigidBody.Friction,
+                    new[] { rigidBody.VelocityX, rigidBody.VelocityY, rigidBody.VelocityZ });
             }
 
             BindEditorHelperMesh(entity, runtimeId);

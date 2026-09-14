@@ -61,6 +61,34 @@ public sealed class SceneRuntimeSynchronizerTests
             return entityId;
         }
 
+        // === 物理组件（M2-D，测试桩） ===
+        public uint AddEntityCollider(uint entityId, uint shape, float[] halfExtents, float[] offset, bool isTrigger, uint layer)
+        {
+            Calls.Add($"collider({entityId})");
+            return 1;
+        }
+
+        public uint RemoveEntityCollider(uint entityId)
+        {
+            Calls.Add($"collider-remove({entityId})");
+            return 1;
+        }
+
+        public uint AddEntityRigidBody(uint entityId, uint mode, float mass, float restitution, float friction, float[] velocity)
+        {
+            Calls.Add($"rigidbody({entityId})");
+            return 1;
+        }
+
+        public uint RemoveEntityRigidBody(uint entityId)
+        {
+            Calls.Add($"rigidbody-remove({entityId})");
+            return 1;
+        }
+
+        public bool EntityHasCollider(uint entityId) => true;
+        public bool EntityHasRigidBody(uint entityId) => true;
+
         public ulong ImportMesh(string cookedPath)
         {
             Calls.Add($"importMesh({cookedPath})");

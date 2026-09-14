@@ -69,6 +69,12 @@ public sealed class WorldEditorViewModelSynchronizationTests
         public void SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale) => SetEntityTransformCalled = true;
         public uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) => 0;
         public uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector) => 0;
+        public uint AddEntityCollider(uint entityId, uint shape, float[] halfExtents, float[] offset, bool isTrigger, uint layer) => 1;
+        public uint RemoveEntityCollider(uint entityId) => 1;
+        public uint AddEntityRigidBody(uint entityId, uint mode, float mass, float restitution, float friction, float[] velocity) => 1;
+        public uint RemoveEntityRigidBody(uint entityId) => 1;
+        public bool EntityHasCollider(uint entityId) => true;
+        public bool EntityHasRigidBody(uint entityId) => true;
         public ulong ImportMesh(string cookedPath) { ImportMeshCalled = true; return 0xDEADBEEFUL; }
         public uint CreateMaterial(AssetGuid shaderGuid) => ++NextEntityId;
         public void SetEntityMesh(uint entityId, ulong geometryContentId, uint[] materialRuntimeIds, uint materialCount) => SetEntityMeshCalled = true;

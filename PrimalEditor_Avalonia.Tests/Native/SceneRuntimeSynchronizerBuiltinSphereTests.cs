@@ -215,6 +215,14 @@ public sealed class SceneRuntimeSynchronizerBuiltinSphereTests
         public void SetEntityTransform(uint entityId, float[] position, float[] rotation, float[] scale) { Calls.Add($"transform({entityId})"); }
         public uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) { Calls.Add($"light({entityId})"); return entityId; }
         public uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector) { Calls.Add($"camera({entityId})"); return entityId; }
+
+        // === 物理组件（M2-D，测试桩） ===
+        public uint AddEntityCollider(uint entityId, uint shape, float[] halfExtents, float[] offset, bool isTrigger, uint layer) { Calls.Add($"collider({entityId})"); return 1; }
+        public uint RemoveEntityCollider(uint entityId) { Calls.Add($"collider-remove({entityId})"); return 1; }
+        public uint AddEntityRigidBody(uint entityId, uint mode, float mass, float restitution, float friction, float[] velocity) { Calls.Add($"rigidbody({entityId})"); return 1; }
+        public uint RemoveEntityRigidBody(uint entityId) { Calls.Add($"rigidbody-remove({entityId})"); return 1; }
+        public bool EntityHasCollider(uint entityId) => true;
+        public bool EntityHasRigidBody(uint entityId) => true;
         public ulong ImportMesh(string cookedPath) { Calls.Add($"importMesh({cookedPath})"); return 0xABCDUL; }
         public uint CreateMaterial(AssetGuid shaderGuid) { Calls.Add("material"); return NextMaterialId++; }
         public void SetEntityMesh(uint entityId, ulong geometryContentId, uint[] materialRuntimeIds, uint materialCount) { Calls.Add($"setMesh({entityId},{materialCount})"); }

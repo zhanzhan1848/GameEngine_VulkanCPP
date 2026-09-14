@@ -8,6 +8,8 @@ namespace PrimalEditor_Avalonia.Components;
 [JsonDerivedType(typeof(LightComponent), typeDiscriminator: "light")]
 [JsonDerivedType(typeof(CameraComponent), typeDiscriminator: "camera")]
 [JsonDerivedType(typeof(MaterialOverrideComponent), typeDiscriminator: "materialOverride")]
+[JsonDerivedType(typeof(ColliderComponent), typeDiscriminator: "collider")]
+[JsonDerivedType(typeof(RigidBodyComponent), typeDiscriminator: "rigidbody")]
 public abstract class Component : ViewModelBase
 {
     [JsonPropertyName("IsEnabled")]
