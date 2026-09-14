@@ -145,7 +145,11 @@ validation VUID 直方图、dump1/2/4/5 产物）：
   移除后 direct/interior ratio 5.30 超旧带宽（2.3-4.6）——属预期移除，
   重新平衡归阶段 3，门限阶段 4 以固定基线重定。
 
-**下一步**：阶段 2 收尾 = C（SC 查询契约统一：IndirectResolve 的
-first-hit 接受、DDGITraceFinalize 的容差、ScreenProbeTraceFinalize 的
-候选选择三路对齐）；之后进入阶段 3（A/F 连续重建 → E）。370 条
-validation 的分类清除仍留在阶段 4。
+**下一步**：阶段 2 已全部完成（B/G/D/C）。**阶段 3 成为关键路径**：
+- A（tile 中心连续重建 + 能量再标定）：C 落地后室内间接 Level 下降
+  （移除未校验跨面供能的直接后果，实测探针场 p90 较基线减半、
+  L_arcade 26.5→13.3）——必须按 §三.A 保存有效 tile 的入射辐射度并
+  连续重建，恢复正确的跨面传输；亮度门限在阶段 4 以固定基线重定。
+- F（probe 过滤表面兼容性）→ E（SDF 采样连续性）。
+- 工具债：build_spv.sh 对 FAIL 不置退出码 + 以入口文件 mtime 判重
+  （include 头改动漏编）——本次造成四轮假测量，应优先修。
