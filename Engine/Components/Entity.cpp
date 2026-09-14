@@ -200,6 +200,12 @@ namespace primal::game_entity {
 		component_masks[id::index(id)] |= (component_mask{1} << bit);
 	}
 
+	bool has_component_bit(entity_id id, u8 bit)
+	{
+		assert(is_alive(id));
+		return (component_masks[id::index(id)] & (component_mask{1} << bit)) != 0;
+	}
+
 	void clear_component_bit(entity_id id, u8 bit)
 	{
 		assert(is_alive(id));

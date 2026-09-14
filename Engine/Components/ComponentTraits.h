@@ -17,6 +17,8 @@ namespace component {
     struct Material {};
     struct Light {};
     struct Camera {};
+    struct Collider {};
+    struct RigidBody {};
 }
 
 enum class component_bit : u8 {
@@ -31,6 +33,8 @@ enum class component_bit : u8 {
     Material = 8,
     Light = 9,
     Camera = 10,
+    Collider = 11,
+    RigidBody = 12,
     Count
 };
 
@@ -53,6 +57,8 @@ constexpr component_bit component_bit_of() {
     else if constexpr (std::is_same_v<T, component::Material>)      return component_bit::Material;
     else if constexpr (std::is_same_v<T, component::Light>)         return component_bit::Light;
     else if constexpr (std::is_same_v<T, component::Camera>)        return component_bit::Camera;
+    else if constexpr (std::is_same_v<T, component::Collider>)      return component_bit::Collider;
+    else if constexpr (std::is_same_v<T, component::RigidBody>)     return component_bit::RigidBody;
     else static_assert(!std::is_same_v<T, T>, "Unknown component type");
 }
 

@@ -12,6 +12,8 @@
 #include "Components/Material.h"
 #include "Components/Light.h"
 #include "Components/Camera.h"
+#include "Components/Collider.h"
+#include "Components/RigidBody.h"
 
 namespace primal {
 
@@ -25,6 +27,8 @@ template<> struct component_init_info<component::Geometry>      { using type = g
 template<> struct component_init_info<component::Material>      { using type = material::init_info; };
 template<> struct component_init_info<component::Light>         { using type = light::init_info; };
 template<> struct component_init_info<component::Camera>        { using type = camera::init_info; };
+template<> struct component_init_info<component::Collider>      { using type = collider::init_info; };
+template<> struct component_init_info<component::RigidBody>     { using type = rigidbody::init_info; };
 
 namespace game_entity {
 
@@ -46,6 +50,10 @@ template<typename T>
         return primal::light::component{ primal::light::light_component_id{_id} };
     } else if constexpr (std::is_same_v<T, component::Camera>) {
         return primal::camera::component{ primal::camera::camera_component_id{_id} };
+    } else if constexpr (std::is_same_v<T, component::Collider>) {
+        return primal::collider::component{ primal::collider::collider_component_id{_id} };
+    } else if constexpr (std::is_same_v<T, component::RigidBody>) {
+        return primal::rigidbody::component{ primal::rigidbody::rigidbody_component_id{_id} };
     }
 }
 
@@ -86,6 +94,14 @@ void entity::Add(const typename component_init_info<T>::type& info) {
         auto c = camera::create(info, *this);
         assert(c.is_valid());
         set_component_bit(_id, static_cast<u8>(component_bit::Camera));
+    } else if constexpr (std::is_same_v<T, component::Collider>) {
+        auto c = collider::create(info, *this);
+        assert(c.is_valid());
+        set_component_bit(_id, static_cast<u8>(component_bit::Collider));
+    } else if constexpr (std::is_same_v<T, component::RigidBody>) {
+        auto c = rigidbody::create(info, *this);
+        assert(c.is_valid());
+        set_component_bit(_id, static_cast<u8>(component_bit::RigidBody));
     }
 }
 
@@ -124,6 +140,14 @@ void entity::Remove() {
         camera::component cc{ camera::camera_component_id{_id} };
         camera::remove(cc);
         clear_component_bit(_id, static_cast<u8>(component_bit::Camera));
+    } else if constexpr (std::is_same_v<T, component::Collider>) {
+        collider::component cc{ collider::collider_component_id{_id} };
+        collider::remove(cc);
+        clear_component_bit(_id, static_cast<u8>(component_bit::Collider));
+    } else if constexpr (std::is_same_v<T, component::RigidBody>) {
+        rigidbody::component rc{ rigidbody::rigidbody_component_id{_id} };
+        rigidbody::remove(rc);
+        clear_component_bit(_id, static_cast<u8>(component_bit::RigidBody));
     }
 }
 
