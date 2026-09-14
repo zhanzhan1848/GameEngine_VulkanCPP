@@ -1327,6 +1327,19 @@ void MetalCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size) 
 void MetalCommandBuffer::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     MTL::ComputeCommandEncoder* encoder = getComputeEncoder();
     if (!encoder) return;
+    if (groupCountX == 0 || groupCountY == 0 || groupCountZ == 0) {
+        // Vulkan no-ops a zero-group dispatch; Metal validation asserts and a
+        // raw dispatch faults. Skip with the same semantics (happens when a
+        // pass computes its grid from a disabled feature's zero counts).
+        static bool s_warnedZeroDispatch = false;
+        if (!s_warnedZeroDispatch) {
+            s_warnedZeroDispatch = true;
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[MetalCommandBuffer] Dispatch skipped — zero threadgroups ("
+                << groupCountX << "," << groupCountY << "," << groupCountZ << ")" << std::endl;
+        }
+        return;
+    }
     if (computePipelineBoundEncoder_ != encoder) {
         // The current encoder has no verified BindComputePipeline (never bound,
         // or the bind failed, or the encoder was recreated after the last
@@ -1380,6 +1393,17 @@ void MetalCommandBuffer::BindComputeBuffers(u32 firstSlot, u32 slotCount, const 
 // === Resource Commands ===
 
 void MetalCommandBuffer::CopyBuffer(ResourceHandle src, ResourceHandle dst, u64 srcOffset, u64 dstOffset, u64 size) {
+    if (size == 0) {
+        // Metal validation asserts on zero-size blit copies; upstream callers
+        // (disabled GI features) emit them where Vulkan tolerates a no-op.
+        static bool s_warnedZeroCopy = false;
+        if (!s_warnedZeroCopy) {
+            s_warnedZeroCopy = true;
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[MetalCommandBuffer] CopyBuffer skipped — size 0" << std::endl;
+        }
+        return;
+    }
     MTL::BlitCommandEncoder* encoder = getBlitEncoder();
     if (!encoder) return;
     

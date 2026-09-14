@@ -159,12 +159,23 @@ bool metal_surface::create()
         // we leave autoresizingMask at 0 (no auto-resize).
         _mtk_view->setAutoresizingMask(0u);
 
-        // autoresizingMask = ViewMinYMargin (2) | ViewMaxYMargin (16) keeps
-        // the MTKView stretched vertically while letting us set its frame
-        // explicitly. Setting it to 0 triggers AppKit to dispatch
-        // setFrame:display: on the MTKView, which is not a recognized
-        // selector on the runtime subclass and crashes the process.
+        // autoresizingMask = ViewWidthSizable (2) | ViewHeightSizable (16)
+        // keeps the MTKView filling the host view automatically whenever
+        // Avalonia resizes the host child NSView. Setting it to 0 triggers
+        // AppKit to dispatch setFrame:display: on the MTKView, which is not
+        // a recognized selector on the runtime subclass and crashes the
+        // process. With the sizing mask on, set_external_frame must NOT
+        // fight AppKit with explicit frames (see set_external_frame).
         _mtk_view->setAutoresizingMask(2u | 16u);
+
+        // NSView.clipsToBounds (macOS 14+): contain the MTKView within the
+        // host view even if a frame update races Avalonia's native child
+        // layout — without this the render surface can transiently (or
+        // persistently) paint over sibling editor panels (the "render
+        // surface floats above Content Browser / Build Log" mislayer).
+        reinterpret_cast<void (*)(struct objc_object*, SEL, BOOL)>(objc_msgSend)(
+            reinterpret_cast<struct objc_object*>(_host_view),
+            sel_registerName("setClipsToBounds:"), YES);
 
         _host_view->addSubview(_mtk_view);
 
@@ -176,15 +187,17 @@ bool metal_surface::create()
     {
         if (!_is_external || !_mtk_view || !_host_view) return;
 
-        // Convert client (top-left origin) coordinates to NSView
-        // (bottom-left origin) coordinates. The host's bounds height
-        // comes from the host view itself.
-        const CGRect hostBounds = _host_view->bounds();
-        const CGFloat ny = hostBounds.size.height - static_cast<CGFloat>(y) - static_cast<CGFloat>(h);
-
-        CGRect frame{ { static_cast<CGFloat>(x), ny },
-                     { static_cast<CGFloat>(w), static_cast<CGFloat>(h) } };
-        _mtk_view->setFrame(frame);
+        // The MTKView's autoresizing mask (width+height sizable, set in
+        // create_external) makes AppKit keep it filling the host view as
+        // Avalonia resizes/repositions that host. Here we must only sync
+        // the drawable resolution. Setting an explicit frame computed from
+        // _host_view->bounds() races Avalonia's native child update (the
+        // managed LayoutUpdated fires BEFORE the native frame lands), so
+        // the frame gets computed against stale bounds and the surface is
+        // left misaligned/oversized — the editor-side "错误叠层" bug. The
+        // x/y parameters stay in the signature for ABI stability and are
+        // intentionally ignored.
+        (void)x; (void)y;
         _mtk_view->setDrawableSize(CGSizeMake(static_cast<CGFloat>(w), static_cast<CGFloat>(h)));
     }
 
