@@ -161,12 +161,9 @@ elseif(APPLE AND NOT EMSCRIPTEN)
         )
     endif()
 
-    # === PhysX (Engine/Simulation/) ===
-    # TODO: 使用 git submodule 集成 PhysX 源码：
-    #   git submodule add https://github.com/NVIDIAGameWorks/PhysX.git third_party/PhysX
-    # Engine/Simulation/ 中保留了 include 头文件和桥接层，预编译二进制已移除。
-    # 当前状态：未集成到 CMake 构建系统，代码中暂无使用。
-    message(STATUS "PhysX: not yet integrated as submodule (Engine/Simulation/ has headers only)")
+    # === 物理内核选型结论见 Docs/completed/2026-09-11-physics-simulation-survey.md ===
+    # PhysX 4.1 已从 third_party/PhysX 归档（2021 冻结分支、Apple Silicon 无官方支持），
+    # 改用 Jolt Physics（C++17、MIT、macOS ARM64 官方支持），接入代码在 add_subdirectory(Engine) 之前。
     
     # 如果没有找到FBX SDK，提供安装指导
     if(NOT FBX_SDK_FOUND)
@@ -382,6 +379,38 @@ endif()
 if(NOT EMSCRIPTEN AND BUILD_CONTENT_TOOLS)
     add_subdirectory(ContentTools)
 endif()
+# === Jolt Physics（Engine/Simulation/ 的物理内核，third_party/JoltPhysics submodule）===
+# 选项必须在 add_subdirectory 之前设置。入口是 Build/ 子目录（仓库根没有 CMakeLists.txt）。
+set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)          # 避免拉 gtest
+set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)   # Debug 树保干净；release LTO 另议
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE) # 与引擎动态 CRT 一致，避免 Win 侧运行时混链
+# DEBUG_RENDERER_IN_DEBUG_AND_RELEASE 默认 ON：Debug 配置带 JPH_DEBUG_RENDERER，供 SimulationDebugDraw 使用
+# 静态链接：libJolt.a 进 libEngine.a，避开 dylib 导出/typeinfo 问题（引擎此前的 dylib 导出坑同理）
+set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+# Jolt 的条件编译（JPH_ENABLE_ASSERTS/JPH_DEBUG_RENDERER/NDEBUG 等）只认标准 config 名。
+# 仓库自定义 build type（如 build-wt 的 DebugEditor）不命中其 $<CONFIG:...> gen-expr 时，
+# libJolt.a 与消费方头文件内联代码会条件编译不一致 → 类布局错位 → 堆损坏。
+# 在 Jolt 子目录范围内归一化为 Debug（PUBLIC 宏会传播给 Engine 保持两边一致）。
+set(JOLT_ORIG_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release|ReleaseASAN|ReleaseUBSAN|ReleaseTSAN|ReleaseCoverage|Distribution)$")
+    set(CMAKE_BUILD_TYPE Debug)
+endif()
+add_subdirectory(third_party/JoltPhysics/Build)
+set(CMAKE_BUILD_TYPE "${JOLT_ORIG_BUILD_TYPE}")
+if(NOT JOLT_ORIG_BUILD_TYPE MATCHES "^(Debug|Release|ReleaseASAN|ReleaseUBSAN|ReleaseTSAN|ReleaseCoverage|Distribution)$")
+    # Jolt 的 INTERFACE 条件定义按"消费者"的 config 求值：非标准 config（如 DebugEditor）
+    # 永远不命中 gen-expr，收不到这些宏 → 与 libJolt.a 条件编译不一致（布局错位）。
+    # 这里把 Jolt Debug 语义下会生效的条件宏显式展开为无条件（对 Jolt 本体是无害重复）。
+    # 若未来漂移，Jolt 在 RegisterTypes 时会做 define 一致性自检并主动 abort，不会静默腐蚀堆。
+    target_compile_definitions(Jolt PUBLIC JPH_PROFILE_ENABLED JPH_DEBUG_RENDERER)
+endif()
+# libEngine.a 会被链入 PrimalEngine.dylib（共享库），Jolt 静态目标必须 PIC
+set_target_properties(Jolt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Emscripten: Particles/*.cpp pulls in Metal headers and breaks the WASM build.
 # Set the option BEFORE add_subdirectory(Engine) so the source-file filter runs.
 if(EMSCRIPTEN)

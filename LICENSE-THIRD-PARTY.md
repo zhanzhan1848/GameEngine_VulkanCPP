@@ -11,6 +11,7 @@ licenses. These components are distributed under their own terms.
 
 | Component                         | License                  |
 | --------------------------------- | ------------------------ |
+| third_party/JoltPhysics           | MIT                      |
 | third_party/PhysX                 | BSD-3-Clause             |
 | third_party/VHACD                 | Apache-2.0               |
 | third_party/WebGPU (Dawn)         | BSD-3-Clause             |
