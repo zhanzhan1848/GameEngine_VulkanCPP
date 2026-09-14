@@ -47,6 +47,15 @@ public:
     // the number of meshes with SDF data loaded.
     u32 LoadFromPipelineModel(const char* filePath, bool signed_encoding = true);
 
+    // 2026-09-10 M3-A1: rewrite every LOD0 SDF section of a pipeline model
+    // with a sign-aware 6-direction distance propagation applied to its
+    // stored field. The v5-era bake clamped air beyond the 3³ closest-point
+    // search to max_dim — the stored field was skin+clamp, not a distance
+    // field (tracers tunnelled through thin slabs / escaped through walls).
+    // Copies all other bytes verbatim; section sizes are unchanged. Returns
+    // the number of sections rebaked.
+    static u32 RebakePerMeshSDF(const char* inPath, const char* outPath);
+
     // Encoding this merger instance decodes/bakes with (set by LoadFromPipelineModel).
     bool IsSignedEncoding() const { return signed_encoding_; }
 

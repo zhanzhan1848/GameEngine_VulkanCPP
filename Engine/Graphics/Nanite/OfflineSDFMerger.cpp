@@ -41,6 +41,61 @@ OfflineSDFMerger::~OfflineSDFMerger() {
     }
 }
 
+// ============================================================================
+static void PropagateMeshSDF(OfflineSDFMerger::MeshSDF& sdf) {
+    const int res[3] = { (int)sdf.resolution[0], (int)sdf.resolution[1],
+                         (int)sdf.resolution[2] };
+    const u64 n = (u64)res[0] * res[1] * res[2];
+    const f32 sdim = sdf.max_dim;
+    const f32 sdim2 = 2.0f * sdim;
+    const f32 step[3] = { (sdf.bounds_max[0] - sdf.bounds_min[0]) / res[0],
+                          (sdf.bounds_max[1] - sdf.bounds_min[1]) / res[1],
+                          (sdf.bounds_max[2] - sdf.bounds_min[2]) / res[2] };
+
+    std::vector<f32> sd(n);
+    for (u64 i = 0; i < n; ++i)
+        sd[i] = (f32)sdf.data[i] / 65535.0f * sdim2 - sdim;
+
+    auto encode = [&](u64 i) {
+        f32 v = std::clamp(sd[i], -sdim, sdim);
+        sdf.data[i] = (u16)std::clamp(
+            (int)((v + sdim) / sdim2 * 65535.0f + 0.5f), 0, 65535);
+    };
+
+    for (int iter = 0; iter < 2; ++iter)
+    for (int pass = 0; pass < 6; ++pass) {
+        const int axis = pass / 2;
+        const bool forward = (pass % 2) == 0;
+        const int dir = forward ? 1 : -1;
+        for (int pz = 0; pz < res[2]; ++pz)
+        for (int py = 0; py < res[1]; ++py)
+        for (int px = 0; px < res[0]; ++px) {
+            int x = px, y = py, z = pz;
+            if (!forward) {
+                if (axis == 0) x = res[0] - 1 - px;
+                if (axis == 1) y = res[1] - 1 - py;
+                if (axis == 2) z = res[2] - 1 - pz;
+            }
+            // neighbor = 1 voxel behind the sweep direction on `axis`
+            int nx = x, ny = y, nz = z;
+            if (axis == 0) nx -= dir;
+            else if (axis == 1) ny -= dir;
+            else nz -= dir;
+            const f32 stp = step[axis];
+            if (nx < 0 || nx >= res[0] || ny < 0 || ny >= res[1] || nz < 0 || nz >= res[2])
+                continue;
+            const u64 idx = (u64)z * res[0] * res[1] + (u64)y * res[0] + x;
+            const u64 nidx = (u64)nz * res[0] * res[1] + (u64)ny * res[0] + nx;
+            const f32 cand = std::fabs(sd[nidx]) + stp;
+            const f32 cur = std::fabs(sd[idx]);
+            if (cand < cur) {
+                sd[idx] = sd[idx] < 0.0f ? -cand : cand;
+                encode(idx);
+            }
+        }
+    }
+}
+
 u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath, bool signed_encoding) {
     signed_encoding_ = signed_encoding;
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
@@ -239,6 +294,11 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath, bool signed_en
                                           : (f32)vmax / 65535.0f * sdim)
                                       << std::endl;
                         }
+                        // M3-A1: propagate clamped air to true distances
+                        // before the merge consumes the field (SDF_NO_
+                        // PROPAGATE=1 disables for A/B).
+                        if (!std::getenv("SDF_NO_PROPAGATE"))
+                            PropagateMeshSDF(sdf);
                         mesh_sdfs_.push_back(std::move(sdf));
                         sdfFound++;
                     }
@@ -338,7 +398,17 @@ f32 OfflineSDFMerger::SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) 
     if (!(fx >= 0.0f && fx <= (f32)sdf.resolution[0] - 1.0f &&
           fy >= 0.0f && fy <= (f32)sdf.resolution[1] - 1.0f &&
           fz >= 0.0f && fz <= (f32)sdf.resolution[2] - 1.0f)) {
-        return 1.0e10f;   // outside grid: positive far distance, NOT occupiable
+        // 2026-09-10 M3-A1: out-of-grid used to return the 1e10 sentinel —
+        // min() over meshes then went BLIND to this mesh (took a far other
+        // mesh's distance), so the merged field OVERESTIMATED near grid
+        // seams: tracers stepped straight through thin slabs (the arcade -y
+        // floor, grid only ±0.35 m, was invisible until landed in). Replace
+        // with the conservative AABB distance — a valid LOWER bound of the
+        // true distance (sphere-tracing-safe: smaller steps, no tunneling).
+        f32 ax = std::max(std::max(sdf.bounds_min[0] - lx, lx - sdf.bounds_max[0]), 0.0f);
+        f32 ay = std::max(std::max(sdf.bounds_min[1] - ly, ly - sdf.bounds_max[1]), 0.0f);
+        f32 az = std::max(std::max(sdf.bounds_min[2] - lz, lz - sdf.bounds_max[2]), 0.0f);
+        return std::sqrt(ax * ax + ay * ay + az * az);
     }
 
     int32_t x0 = (int32_t)std::floor(fx), x1 = x0 + 1;
@@ -407,6 +477,294 @@ f32 OfflineSDFMerger::SampleMeshSDF(const MeshSDF& sdf, f32 lx, f32 ly, f32 lz) 
     // above returns it directly and the T8.10b pathology does not apply.
     // Unsigned legacy bakes still decode positively (branch above).
     return d;
+}
+
+
+// ============================================================================
+// 2026-09-10 M3-A1: per-mesh SDF rebake (see the header comment). Walks the
+// pipeline model byte-for-byte; every LOD0 'SDF ' section is decoded, its
+// stored field propagated (sign-aware 6-direction sweep — the v5 bake
+// clamped air beyond the 3³ closest-point search to max_dim, so the stored
+// field was skin+clamp, not a distance field), re-encoded, and emitted.
+// All other bytes copy verbatim; section sizes are unchanged.
+
+// ============================================================================
+// 2026-09-10 M3-A1: propagate the stored per-mesh SDF field. The v5-era
+// bake's closest-point search only covers the 3³ cell neighborhood — air
+// beyond ~1 voxel was clamped to max_dim, so the stored field is
+// skin+clamp, not a distance field (tracers tunnelled through thin slabs /
+// escaped through walls; interior probes read garbage). Classic sign-aware
+// 6-direction sweep: each voxel relaxes to |neighbor distance| + 1 step,
+// sign carried by the voxel's own stored sign.
+// ============================================================================
+u32 OfflineSDFMerger::RebakePerMeshSDF(const char* inPath, const char* outPath) {
+    std::ifstream in(inPath, std::ios::binary | std::ios::ate);
+    if (!in) return 0;
+    const std::streamsize fsize = in.tellg();
+    in.seekg(0);
+    std::vector<uint8_t> data((size_t)fsize);
+    if (!in.read(reinterpret_cast<char*>(data.data()), fsize)) return 0;
+    in.close();
+
+    std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
+    if (!out) return 0;
+    size_t off = 0;          // read cursor
+    size_t written = 0;      // output bytes committed
+    u32 rebaked = 0;
+    auto fail = [&](const char* stage) {
+        out.flush(); out.close();
+        std::remove(outPath);
+        std::cerr << "[SDF_REBAKE] aborted at input offset " << off << " stage=" << stage << std::endl;
+        return 0u;
+    };
+    // Bounds-checked reads and writes; any anomaly aborts all-or-nothing.
+    auto need = [&](size_t n) -> bool { return off + n <= data.size(); };
+    auto copyIn = [&](size_t n) { out.write(reinterpret_cast<const char*>(data.data() + off), (std::streamsize)n); off += n; written += n; };
+    auto putU32 = [&](u32 v) { out.write(reinterpret_cast<const char*>(&v), 4); written += 4; };
+    auto putBuf = [&](const void* p, size_t n) { out.write(reinterpret_cast<const char*>(p), (std::streamsize)n); written += n; };
+    auto u32rd = [&](size_t o) -> u32 { u32 v; std::memcpy(&v, data.data() + o, 4); return v; };
+    auto f32rd = [&](size_t o) -> f32 { f32 v; std::memcpy(&v, data.data() + o, 4); return v; };
+    auto u16rd = [&](size_t o) -> u16 { u16 v; std::memcpy(&v, data.data() + o, 2); return v; };
+    auto atEof = [&]() { return off >= data.size(); };
+
+    // Prefix u32(0)
+    if (!need(4)) return fail("numMat_need");
+    const u32 prefix = u32rd(off); copyIn(4);
+    if (prefix != 0) {
+        // No prefix — restart output without it.
+        out.close(); out.open(outPath, std::ios::binary | std::ios::trunc);
+        written = 0; off = 0;
+    }
+
+    // num_materials + materials (3 length-prefixed strings each)
+    if (!need(4)) return fail("materials_loop_need4");
+    const u32 numMat = u32rd(off); copyIn(4);
+    if (numMat > 10000) return fail("materials_slen");
+    for (u32 mi = 0; mi < numMat; ++mi) {
+        for (int fi = 0; fi < 3; ++fi) {
+            if (!need(4)) return fail("materials_data");
+            const u32 slen = u32rd(off); copyIn(4);
+            if (slen > 10000 || !need(slen)) return fail("numLods_need4");
+            copyIn(slen);
+        }
+    }
+
+    // num_lod_groups
+    if (!need(4)) return fail("group_need8");
+    const u32 numLods = u32rd(off); copyIn(4);
+    if (numLods == 0 || numLods > 100000) return fail("lodNameLen_need4");
+
+    for (u32 g = 0; g < numLods; ++g) {
+        if (!need(8)) return fail("name_need");
+        const u32 lodNameLen = u32rd(off); copyIn(4);
+        if (!need(lodNameLen)) return fail("meshhdr_need32");
+        copyIn(lodNameLen);
+        if (!need(4)) return fail("geo_need");
+        const u32 meshCount = u32rd(off); copyIn(4);
+        if (meshCount > 100000) return fail("mshl_need8");
+
+        for (u32 i = 0; i < meshCount; ++i) {
+            if (!need(32)) return fail("mshl_magic");
+            const u32 nameLen = u32rd(off); copyIn(4);
+            if (nameLen > 200 || !need(nameLen)) return fail("mshl_need4");
+            copyIn(nameLen);
+            static bool dbg0 = false;
+            if (!dbg0) { dbg0 = true;
+                std::cerr << "[SDF_REBAKE][DBG] mesh0 header off=" << off
+                          << " lodId=" << u32rd(off) << " matIdx=" << u32rd(off+4)
+                          << " elemSize=" << u32rd(off+8) << " elemType=" << u32rd(off+12)
+                          << " vertCount=" << u32rd(off+16) << " idxSize=" << u32rd(off+20)
+                          << " idxCount=" << u32rd(off+24) << std::endl;
+                std::cerr << "[SDF_REBAKE][DBG] preceding bytes:" << std::endl;
+                for (int i = -32; i < 32; i += 16) {
+                    if (off + i >= 0 && off + i + 16 <= (int)data.size()) {
+                        char hex[50];
+                        for (int j = 0; j < 16; ++j)
+                            std::snprintf(hex + j*3, 4, "%02X ", data[off + i + j]);
+                        std::cerr << "  off+" << i << ": " << hex << std::endl;
+                    }
+                }
+            }
+            const u32 lodId     = u32rd(off);
+            const u32 elemSize  = u32rd(off + 8);
+            const u32 elemType  = u32rd(off + 12);
+            const u32 vertCount = u32rd(off + 16);
+            const u32 idxSize   = u32rd(off + 20);
+            const u32 idxCount  = u32rd(off + 24);
+            copyIn(32);
+            const size_t geoBytes = 12ull * vertCount + (size_t)elemSize * vertCount +
+                                    (size_t)idxSize * idxCount;
+            if (!need(geoBytes)) {
+                std::cerr << "[SDF_REBAKE][DBG] geoBytes=" << geoBytes << " off=" << off
+                          << " data.size()=" << data.size() << std::endl;
+                return fail("mlv_need4");
+            }
+            copyIn(geoBytes);
+
+            // MSHL section (mandatory for pipeline models)
+            if (!need(8) || u32rd(off) != 0x4C48534D) return fail("mlv_data");
+            copyIn(4);
+            if (!need(4)) return fail("mlt_need4");
+            const u32 mlCount = u32rd(off); copyIn(4);
+            if (!need((size_t)mlCount * 60)) return fail("mlt_data");
+            copyIn((size_t)mlCount * 60);
+            if (!need(4)) return fail("sdf_need8");
+            const u32 mlvCount = u32rd(off); copyIn(4);
+            if (!need((size_t)mlvCount * 4)) return fail("sdf_hdr_need");
+            copyIn((size_t)mlvCount * 4);
+            if (!need(4)) return fail("sdf_cnt_need");
+            const u32 mltCount = u32rd(off); copyIn(4);
+            if (!need(mltCount)) return fail("nonlod0_data");
+            copyIn(mltCount);
+
+            const bool lod0 = (lodId == 0xFFFFFFFFu || lodId == 0u);
+
+            // SDF section
+            if (!need(8) || u32rd(off) != 0x20464453) return fail("nonlod0_vox");
+            copyIn(4);
+            if (!need(12 + 24 + 4)) return fail("nonlod0_vf_need4");
+            const u32 sres[3] = { u32rd(off), u32rd(off + 4), u32rd(off + 8) };
+            const f32 sbmin[3] = { f32rd(off + 12), f32rd(off + 16), f32rd(off + 20) };
+            const f32 sbmax[3] = { f32rd(off + 24), f32rd(off + 28), f32rd(off + 32) };
+            const u32 dataCount = u32rd(off + 36);
+            const u32 voxCountFile = u32rd(off + 40);
+            const u32 vfCount = u32rd(off + 44);
+            const u32 voxCount = sres[0] * sres[1] * sres[2];
+            const bool layoutOk = dataCount == voxCount && voxCountFile == voxCount &&
+                                  vfCount == voxCount * 4u && voxCount > 0 &&
+                                  sres[0] && sres[1] && sres[2];
+
+
+            if (!lod0 || !layoutOk) {
+                // Consume verbatim (guards mirror LoadFromPipelineModel).
+                if (!need(4 + (size_t)dataCount * 2)) return fail("nonlod0_vf_data");
+                copyIn(4 + (size_t)dataCount * 2);
+                if (!need(4 + voxCountFile)) return fail("trail_need");
+                copyIn(4 + voxCountFile);
+                if (!need(4)) return fail("nonlod0_vf_need4");
+                const u32 vfN = u32rd(off);
+                if (vfN > 100000000) return fail("nonlod0_vf_need4");
+                if (!need(4 + (size_t)vfN * 2)) return fail("nonlod0_vf_need4");
+                copyIn(4 + (size_t)vfN * 2);
+                continue;
+            }
+
+            copyIn(36 + 12); // header: res + bounds + counts (already read)
+
+            f32 sdim = std::max({ sbmax[0] - sbmin[0], sbmax[1] - sbmin[1],
+                                  sbmax[2] - sbmin[2] });
+            if (sdim < 1e-6f) sdim = 1.0f;
+            const f32 sdim2 = 2.0f * sdim;
+            const f32 step[3] = { (sbmax[0] - sbmin[0]) / sres[0],
+                                  (sbmax[1] - sbmin[1]) / sres[1],
+                                  (sbmax[2] - sbmin[2]) / sres[2] };
+
+            // Decode the stored field.
+            std::vector<f32> sd(voxCount);
+            std::vector<f32> cpts(voxCount * 3);
+            std::vector<uint8_t> inside(voxCount);
+            std::vector<uint16_t> voxels(voxCount);
+            std::vector<uint16_t> newData(voxCount);
+            std::vector<uint16_t> newVf(voxCount * 4);
+            const size_t dataOff = off;
+            const size_t voxOff = dataOff + (size_t)dataCount * 2;
+            const size_t vfOff = voxOff + voxCount;
+            if (!need((size_t)dataCount * 2 + voxCount + (size_t)vfCount * 2))
+                return fail("nonlod0_vf_need4");
+            std::memcpy(voxels.data(), data.data() + voxOff, voxCount);
+            auto enc = [sdim, sdim2](f32 v) -> u16 {
+                v = std::clamp(v, -sdim, sdim);
+                return (u16)std::clamp(
+                    (int)((v + sdim) / sdim2 * 65535.0f + 0.5f), 0, 65535);
+            };
+            auto relax = [&](u32 idx, u32 nidx) {
+                const f32 dx = cpts[nidx * 3 + 0] - cpts[idx * 3 + 0];
+                const f32 dy = cpts[nidx * 3 + 1] - cpts[idx * 3 + 1];
+                const f32 dz = cpts[nidx * 3 + 2] - cpts[idx * 3 + 2];
+                const f32 len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const f32 cand = inside[idx] ? -len : len;
+                if (std::fabs(cand) < std::fabs(sd[idx])) {
+                    sd[idx] = cand;
+                    cpts[idx * 3 + 0] = cpts[nidx * 3 + 0];
+                    cpts[idx * 3 + 1] = cpts[nidx * 3 + 1];
+                    cpts[idx * 3 + 2] = cpts[nidx * 3 + 2];
+                }
+            };
+
+            for (u32 vz = 0; vz < sres[2]; ++vz)
+            for (u32 vy = 0; vy < sres[1]; ++vy)
+            for (u32 vx = 0; vx < sres[0]; ++vx) {
+                const u32 idx = vz * sres[0] * sres[1] + vy * sres[0] + vx;
+                sd[idx] = (f32)u16rd(dataOff + (size_t)idx * 2) / 65535.0f * sdim2 - sdim;
+                inside[idx] = sd[idx] < 0.0f ? 1u : 0u;
+                const f32 cx = sbmin[0] + ((f32)vx + 0.5f) * step[0];
+                const f32 cy = sbmin[1] + ((f32)vy + 0.5f) * step[1];
+                const f32 cz = sbmin[2] + ((f32)vz + 0.5f) * step[2];
+                for (int c = 0; c < 3; ++c) {
+                    const f32 o = (f32)u16rd(vfOff + (size_t)idx * 8 + (size_t)c * 2) /
+                                  65535.0f * sdim2 - sdim;
+                    cpts[idx * 3 + c] = (c == 0 ? cx : c == 1 ? cy : cz) + o;
+                }
+            }
+
+            for (int iter = 0; iter < 2; ++iter)
+            for (int pass = 0; pass < 6; ++pass) {
+                const int axis = pass / 2;
+                const bool forward = (pass % 2) == 0;
+                const int sx = axis == 0 ? (forward ? 1 : -1) : 0;
+                const int sy = axis == 1 ? (forward ? 1 : -1) : 0;
+                const int sz = axis == 2 ? (forward ? 1 : -1) : 0;
+                for (int pz = 0; pz < (int)sres[2]; ++pz)
+                for (int py = 0; py < (int)sres[1]; ++py)
+                for (int px = 0; px < (int)sres[0]; ++px) {
+                    const int x = sx > 0 ? px : (int)sres[0] - 1 - px;
+                    const int y = sy > 0 ? py : (int)sres[1] - 1 - py;
+                    const int z = sz > 0 ? pz : (int)sres[2] - 1 - pz;
+                    const int nx = x - sx, ny = y - sy, nz = z - sz;
+                    if (nx < 0 || nx >= (int)sres[0] ||
+                        ny < 0 || ny >= (int)sres[1] ||
+                        nz < 0 || nz >= (int)sres[2]) continue;
+                    relax((u32)z * sres[0] * sres[1] + (u32)y * sres[0] + (u32)x,
+                          (u32)nz * sres[0] * sres[1] + (u32)ny * sres[0] + (u32)nx);
+                }
+            }
+
+            for (u32 vz = 0; vz < sres[2]; ++vz)
+            for (u32 vy = 0; vy < sres[1]; ++vy)
+            for (u32 vx = 0; vx < sres[0]; ++vx) {
+                const u32 idx = vz * sres[0] * sres[1] + vy * sres[0] + vx;
+                newData[idx] = enc(sd[idx]);
+                const f32 cx = sbmin[0] + ((f32)vx + 0.5f) * step[0];
+                const f32 cy = sbmin[1] + ((f32)vy + 0.5f) * step[1];
+                const f32 cz = sbmin[2] + ((f32)vz + 0.5f) * step[2];
+                for (int c = 0; c < 3; ++c)
+                    newVf[(size_t)idx * 4 + c] =
+                        enc(cpts[idx * 3 + c] - (c == 0 ? cx : c == 1 ? cy : cz));
+                newVf[(size_t)idx * 4 + 3] = 0;
+            }
+
+            putU32(dataCount);
+            putBuf(newData.data(), (size_t)voxCount * 2);
+            putU32(voxCountFile);
+            putBuf(voxels.data(), voxCount);
+            putU32(vfCount);
+            putBuf(newVf.data(), (size_t)vfCount * 2);
+            off = vfOff + (size_t)vfCount * 2;
+            ++rebaked;
+            continue;
+        }
+
+        // Per-mesh UVLM/CDBK sidecar sections are consumed inside the mesh
+        // loop by the caller-side logic; Sponza's v5 model carries them per
+        // mesh, and any remaining bytes flow through the walk below.
+    }
+
+    // Trailing bytes
+    if (off < data.size()) copyIn(data.size() - off);
+    out.flush();
+    std::cerr << "[SDF_REBAKE] wrote " << outPath << " (" << rebaked
+              << " sections propagated)" << std::endl;
+    return rebaked;
 }
 
 bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* cachePath) {

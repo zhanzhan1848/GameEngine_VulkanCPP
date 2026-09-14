@@ -28,8 +28,10 @@ public:
         device_ = device;
         resolution_ = cascade_resolution;
 
-        // R16_Float = 2 bytes per texel
-        u64 buf_size = static_cast<u64>(cascade_resolution) * cascade_resolution * cascade_resolution * 2;
+        // GlobalSDF cascade 纹理是 R32_Float（GlobalSDF.cpp 创建处），4 字节/体素。
+        // 此前按 R16_Float（2 字节）分配——缓冲只有一半，CopyTextureToBuffer 在 Metal
+        // 校验层下断言、非校验下静默破坏后续编码器（2026-09-11 物理冒烟测试实证）。
+        u64 buf_size = static_cast<u64>(cascade_resolution) * cascade_resolution * cascade_resolution * 4;
         rhi::BufferDesc desc{};
         desc.size = buf_size;
         desc.type = rhi::BufferType::Raw;
@@ -37,7 +39,7 @@ public:
         desc.memoryUsage = rhi::GPUMemoryUsage::Readback;
         readback_buffer_ = device_->CreateBuffer(desc);
 
-        data_.resize(buf_size / 2, 0);
+        data_.resize(static_cast<u64>(cascade_resolution) * cascade_resolution * cascade_resolution, 0.0f);
         return readback_buffer_ != rhi::handles::INVALID_RESOURCE;
     }
 
@@ -72,7 +74,7 @@ public:
     bool ReadbackData() {
         if (!issued_ || readback_buffer_ == rhi::handles::INVALID_RESOURCE) return false;
 
-        u64 data_size = static_cast<u64>(resolution_) * resolution_ * resolution_ * 2;
+        u64 data_size = static_cast<u64>(resolution_) * resolution_ * resolution_ * sizeof(f32);
         void* mapped = device_->MapBuffer(readback_buffer_, 0, data_size);
         if (!mapped) return false;
 
@@ -106,14 +108,14 @@ public:
         f32 fx = gx - x0, fy = gy - y0, fz = gz - z0;
 
         // 8-tap trilinear interpolation
-        f32 c000 = ReadHalf(x0, y0, z0);
-        f32 c100 = ReadHalf(x1, y0, z0);
-        f32 c010 = ReadHalf(x0, y1, z0);
-        f32 c110 = ReadHalf(x1, y1, z0);
-        f32 c001 = ReadHalf(x0, y0, z1);
-        f32 c101 = ReadHalf(x1, y0, z1);
-        f32 c011 = ReadHalf(x0, y1, z1);
-        f32 c111 = ReadHalf(x1, y1, z1);
+        f32 c000 = ReadTexel(x0, y0, z0);
+        f32 c100 = ReadTexel(x1, y0, z0);
+        f32 c010 = ReadTexel(x0, y1, z0);
+        f32 c110 = ReadTexel(x1, y1, z0);
+        f32 c001 = ReadTexel(x0, y0, z1);
+        f32 c101 = ReadTexel(x1, y0, z1);
+        f32 c011 = ReadTexel(x0, y1, z1);
+        f32 c111 = ReadTexel(x1, y1, z1);
 
         f32 x00 = c000 + fx * (c100 - c000);
         f32 x10 = c010 + fx * (c110 - c010);
@@ -155,16 +157,15 @@ public:
     }
 
 private:
-    f32 ReadHalf(u32 x, u32 y, u32 z) const {
+    f32 ReadTexel(u32 x, u32 y, u32 z) const {
         u32 idx = x + y * resolution_ + z * resolution_ * resolution_;
         if (idx >= data_.size()) return 0.0f;
-        u16 h = data_[idx];
-        return HalfToFloat(h);
+        return data_[idx];   // R32_Float 体素原值
     }
 
     rhi::RHIDeviceBase* device_{nullptr};
     rhi::ResourceHandle readback_buffer_{rhi::handles::INVALID_RESOURCE};
-    std::vector<u16> data_;
+    std::vector<f32> data_;
     u32 resolution_{128};
     bool issued_{false};
     bool data_ready_{false};
