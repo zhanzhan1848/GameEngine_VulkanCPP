@@ -18,6 +18,145 @@ using namespace metal;
 #include "CommonTypes.metal"
 #include "Lumen/SurfaceCacheData.metal"
 
+// C 系列：八面体深度采样 + Chebyshev 可见性（配方 = DDGIGIGather.metal
+// 第四轮 route-A 移植版）。DEPTH_FLOATS_PER_PROBE = 8×8 texels ×
+// (mean+variance) = 128 floats，与 DDGIUpdateDepth 的写入布局一致。
+constant uint SC_DEPTH_RES = 8u;
+constant uint SC_DEPTH_TEXELS = 64u;
+constant uint SC_DEPTH_FLOATS_PER_PROBE = 128u;
+
+float2 scGatherOctEncode(float3 d) {
+    float l1norm = abs(d.x) + abs(d.y) + abs(d.z);
+    float2 u = d.xy / l1norm;
+    float2 s = float2(u.x >= 0.0f ? 1.0f : -1.0f, u.y >= 0.0f ? 1.0f : -1.0f);
+    if (d.z < 0.0f) u = (1.0f - abs(float2(u.y, u.x))) * s;
+    return u * 0.5f + 0.5f;
+}
+
+float2 scSampleProbeDepthMV(uint probeIdx, float3 dirToSurface,
+                            device const float* ddgi_depth_buffer) {
+    // dir 惯例与屏幕侧一致：传"探针→表面"的负向（即表面→探针的反向），
+    // 见 DDGIGIGather.metal sampleNearProbeDepth(pIdx, -toProbe, ...)。
+    float2 uv = scGatherOctEncode(dirToSurface);
+    uint2 texel = uint2(clamp(uint(uv.x * float(SC_DEPTH_RES)), 0u, SC_DEPTH_RES - 1u),
+                        clamp(uint(uv.y * float(SC_DEPTH_RES)), 0u, SC_DEPTH_RES - 1u));
+    uint octIdx = texel.y * SC_DEPTH_RES + texel.x;
+    uint base = probeIdx * SC_DEPTH_FLOATS_PER_PROBE;
+    return float2(ddgi_depth_buffer[base + octIdx],
+                  ddgi_depth_buffer[base + SC_DEPTH_TEXELS + octIdx]);
+}
+
+float scVisibilityWeight(float distToProbe, float mean, float variance) {
+    float dist = max(distToProbe - mean, 0.0f);
+    if (variance < 0.0001f) return 1.0f;
+    float cheb = variance / (variance + dist * dist);
+    return clamp(max(cheb * 2.0f, 0.2f), 0.0f, 1.0f);
+}
+
+// 8-probe trilinear gather of full L0-L2 SH, canonical basis (matches
+// DDGIUpdateIrradiance's projection). Returns incoming irradiance at a
+// surface point for the given normal; 0 outside the volume / feed invalid.
+// Raw radiance SH is cosine-convolved per band, then multiplied by pi.
+// The returned value is irradiance, matching the screen-side DDGI gather.
+float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
+                             constant FlattenedLightingParams& params,
+                             device const float4* ddgi_irradiance,
+                             device const float* ddgi_depth_buffer) {
+    inVolume = false;
+    if (params.ddgi_counts_valid.w == 0u) return float3(0.0f);
+    float3 org = params.ddgi_origin_spacing.xyz;
+    float spacing = max(params.ddgi_origin_spacing.w, 0.01f);
+    int3 counts = int3(params.ddgi_counts_valid.xyz);
+    float3 gp = (wpos - org) / spacing;
+    float3 gridMax = float3(counts - 1);
+    if (any(gp < float3(0.0f)) || any(gp > gridMax)) return float3(0.0f);
+    inVolume = true;
+
+    int3 b0 = clamp(int3(floor(gp)), int3(0), counts - 1);
+    int3 b1 = min(b0 + 1, counts - 1);
+    float3 fr = clamp(fract(gp), float3(0.0f), float3(1.0f));
+
+    // C 系列：双累加器 —— accVis 走 Chebyshev+法线+掩埋加权（45%），
+    // accLow 只做掩埋降权（55% 低频保底，细薄几何处 Chebyshev 拒探针
+    // 不至于塌黑）。配方与屏幕侧 DDGIGIGather 一致。
+    float3 accVis = float3(0.0f);
+    float3 accLow = float3(0.0f);
+    float visW = 0.0f;
+    float lowW = 0.0f;
+    for (int z = 0; z < 2; ++z)
+    for (int y = 0; y < 2; ++y)
+    for (int x = 0; x < 2; ++x) {
+        float tw = mix(1.0f - fr.x, fr.x, float(x))
+                 * mix(1.0f - fr.y, fr.y, float(y))
+                 * mix(1.0f - fr.z, fr.z, float(z));
+        if (tw <= 0.0f) continue;
+        int3 pc = int3(mix(float3(b0), float3(b1), float3(float(x), float(y), float(z))));
+        uint pidx = uint(pc.x) + uint(counts.x) * (uint(pc.y) + uint(counts.y) * uint(pc.z));
+
+        float3 sh[9];
+        for (int i = 0; i < 9; ++i)
+            sh[i] = ddgi_irradiance[pidx * 9u + uint(i)].xyz;
+        // Cosine convolution relative to A0=pi; final gather applies pi.
+        float3 irr = sh[0] * 0.282095f
+                   + sh[1] * (2.0f / 3.0f) * (-0.488603f * N.y)
+                   + sh[2] * (2.0f / 3.0f) * ( 0.488603f * N.z)
+                   + sh[3] * (2.0f / 3.0f) * (-0.488603f * N.x)
+                   + sh[4] * 0.25f * ( 1.092548f * N.y * N.x)
+                   + sh[5] * 0.25f * (-1.092548f * N.y * N.z)
+                   + sh[6] * 0.25f * ( 0.315392f * (3.0f * N.z * N.z - 1.0f))
+                   + sh[7] * 0.25f * (-1.092548f * N.x * N.z)
+                   + sh[8] * 0.25f * ( 0.546274f * (N.x * N.x - N.y * N.y));
+        irr = max(irr, float3(0.0f));
+
+        float3 probePos = org + float3(pc) * spacing;
+        // 表面点沿法线推 5% 间距，避免选中所在墙体内的探针（屏幕侧同款）。
+        float3 biasedPos = wpos + N * spacing * 0.05f;
+        float3 toProbeVec = probePos - biasedPos;
+        float distToProbe = length(toProbeVec);
+        float3 toProbe = toProbeVec / max(distToProbe, 1e-5f);
+
+        float2 depthMV = scSampleProbeDepthMV(pidx, -toProbe, ddgi_depth_buffer);
+        float insidePenalty = 1.0f;
+        float burial = 1.0f;
+        if (depthMV.x < spacing * 0.2f) {
+            insidePenalty = mix(0.2f, 1.0f, smoothstep(0.0f, 0.2f, depthMV.x / spacing));
+            burial = mix(0.1f, 1.0f, smoothstep(0.0f, 0.2f, depthMV.x / spacing));
+        }
+        float normalWeight = mix(0.2f, 1.0f,
+            clamp((dot(N, toProbe) + 0.5f) / 0.7f, 0.0f, 1.0f));
+        float nwSoft = max(normalWeight, 0.40f);
+        float vw = max(scVisibilityWeight(distToProbe, depthMV.x, depthMV.y), 0.38f);
+
+        accVis += irr * tw * nwSoft * vw * insidePenalty;
+        visW   += tw * nwSoft * vw * insidePenalty;
+        accLow += irr * tw * burial;
+        lowW   += tw * burial;
+    }
+    float3 result = float3(0.0f);
+    if (visW > 0.0f) result += (accVis / visW) * 0.45f;
+    if (lowW > 0.0f) result += (accLow / lowW) * 0.55f;
+    if (visW <= 0.0f && lowW <= 0.0f) return float3(0.0f);
+    // 2026-09-10 十: the eval reconstructs RADIANCE L(d); the texel's physical
+    // input is IRRADIANCE E ≈ π·L. π deficit no longer deliberate — Vulkan
+    // twin promoted the ×π to default the same day (loop fixed point ×1.7-2.1
+    // measured, DC gain 0.19→~0.53 < 1, stable through frame 5000). Matches
+    // the screen side's B4 ×π (DDGIGIGather PROBE_SH_RAD_TO_IRRAD).
+    result *= 3.14159265f;
+    // Clamp bounds the accumulated indirect independently of the feedback
+    // loop (collection × albedo must stay < 1 or high-albedo walls diverge).
+    // 4.0 → 64.0 with the C2.1 SC direct-scale unification (see Vulkan twin).
+    return min(result, float3(64.0f));
+}
+
+
+// T3.3 tile radiosity weight — runtime knob. radiosity_gate.y carries the
+// weight as raw float bits (0 = legacy 0.25); C++ packs it from
+// PRIMAL_SC_RADIOSITY_W. Vulkan twin: SurfaceCacheLightEval.comp
+// scRadiosityWeight().
+static inline float scRadiosityWeight(uint bits) {
+    return bits != 0u ? as_type<float>(bits) : 0.25f;
+}
+
 kernel void surfaceCacheLightEval(
     uint global_tid [[thread_position_in_grid]],
 
@@ -39,7 +178,10 @@ kernel void surfaceCacheLightEval(
     // the near DDGI volume (previous-frame slot; SC runs before the DDGI
     // update). Dummy-bound when the feed is off (flag-gated in-shader).
     device const float4*              ddgi_irradiance   [[buffer(6)]],
-    texture2d<float, access::read>    indirect_out      [[texture(6)]])   // T3.3 tile radiosity
+    texture2d<float, access::read>    indirect_out      [[texture(6)]],   // T3.3 tile radiosity
+    // C 系列：探针八面体深度（mean+variance per texel，128 floats/probe）——
+    // gather 的 Chebyshev 可见性，封锁"受光带探针能量隔墙传给阴影卡片"。
+    device const float*               ddgi_depth_buffer [[buffer(7)]])
 {
     if (global_tid >= params.total_texels) return;
 
@@ -76,6 +218,11 @@ kernel void surfaceCacheLightEval(
     // from the emissive term every frame — clamp the per-texel contribution
     // so a hot emissive source converges instead of exploding.
     emissive = min(emissive, float3(8.0f));
+#ifdef PRIMAL_SC_NO_EMISSIVE
+    // C 系列归因旋钮：emissive 直加不查遮挡（T4.4 闭环后生效），断电用于
+    // 验证室内平填充是否由 emissive 主导。
+    emissive = float3(0.0f);
+#endif
 
     // T8.13 sync: reconstruct the texel's surface point from the depth atlas
     // (same recipe as the shadow pass). depth<=0 means never captured — the
@@ -87,6 +234,11 @@ kernel void surfaceCacheLightEval(
     // Inline per-texel lighting (replaces separate LightCull pass)
     float3 direct_light = float3(0.0);
     uint lightCount = min(params.light_count, 256u);
+#ifdef PRIMAL_SC_NO_DIRECT
+    // C 系列归因旋钮：断开 SC 卡片直射项——室内 atlas 若随之塌黑则能量
+    // 来自 direct×vis（vis 泄漏 / 卡片朝向），不变则来自 E_ind 探针环自持。
+    lightCount = 0u;
+#endif
 
     // T3.3: directional visibility from the shadow pass (atlas-space index).
     uint atlas_size = params.sc_params.atlas_size;
@@ -123,60 +275,6 @@ kernel void surfaceCacheLightEval(
     // (mirrors SurfaceCacheLightEval.comp).
     // --------------------------------------------------------------------------------
 
-    // 8-probe trilinear gather of full L0-L2 SH, canonical basis (matches
-    // DDGIUpdateIrradiance's projection). Returns incoming irradiance at a
-    // surface point for the given normal; 0 outside the volume / feed invalid.
-    // The stored SH is RADIANCE (mcWeight = 4π/N), so this evaluation
-    // under-reads true irradiance by π — DELIBERATE: this function sits inside
-    // the SC↔probe feedback loop and its gain budget was calibrated with these
-    // units. Screen-side consumers get the ×π correction in DDGIGIGather.
-    auto gatherProbeIrradiance = [&](float3 wpos, float3 N, thread bool& inVolume) -> float3 {
-        inVolume = false;
-        if (params.ddgi_counts_valid.w == 0u) return float3(0.0f);
-        float3 org = params.ddgi_origin_spacing.xyz;
-        float spacing = max(params.ddgi_origin_spacing.w, 0.01f);
-        int3 counts = int3(params.ddgi_counts_valid.xyz);
-        float3 gp = (wpos - org) / spacing;
-        float3 gridMax = float3(counts - 1);
-        if (any(gp < float3(0.0f)) || any(gp > gridMax)) return float3(0.0f);
-        inVolume = true;
-
-        int3 b0 = clamp(int3(floor(gp)), int3(0), counts - 1);
-        int3 b1 = min(b0 + 1, counts - 1);
-        float3 fr = clamp(fract(gp), float3(0.0f), float3(1.0f));
-
-        float3 acc = float3(0.0f);
-        float wsum = 0.0f;
-        for (int z = 0; z < 2; ++z)
-        for (int y = 0; y < 2; ++y)
-        for (int x = 0; x < 2; ++x) {
-            float tw = mix(1.0f - fr.x, fr.x, float(x))
-                     * mix(1.0f - fr.y, fr.y, float(y))
-                     * mix(1.0f - fr.z, fr.z, float(z));
-            if (tw <= 0.0f) continue;
-            int3 pc = int3(mix(float3(b0), float3(b1), float3(float(x), float(y), float(z))));
-            uint pidx = uint(pc.x) + uint(counts.x) * (uint(pc.y) + uint(counts.y) * uint(pc.z));
-
-            float3 sh[9];
-            for (int i = 0; i < 9; ++i)
-                sh[i] = ddgi_irradiance[pidx * 9u + uint(i)].xyz;
-            float3 irr = sh[0] * 0.282095f
-                       + sh[1] * (-0.488603f * N.y)
-                       + sh[2] * ( 0.488603f * N.z)
-                       + sh[3] * (-0.488603f * N.x)
-                       + sh[4] * ( 1.092548f * N.y * N.x)
-                       + sh[5] * (-1.092548f * N.y * N.z)
-                       + sh[6] * ( 0.315392f * (3.0f * N.z * N.z - 1.0f))
-                       + sh[7] * (-1.092548f * N.x * N.z)
-                       + sh[8] * ( 0.546274f * (N.x * N.x - N.y * N.y));
-            acc += max(irr, float3(0.0f)) * tw;
-            wsum += tw;
-        }
-        if (wsum <= 0.0f) return float3(0.0f);
-        // Clamp bounds the accumulated indirect independently of the feedback
-        // loop (collection × albedo must stay < 1 or high-albedo walls diverge).
-        return min(acc / wsum, float3(4.0f));
-    };
 
     // Previous frame's lighting at this texel — the self-feedback fallback.
     // The feedback slot is not written on the first frames and Metal heap
@@ -193,7 +291,8 @@ kernel void surfaceCacheLightEval(
     constexpr float SC_FEEDBACK = 0.70f;
 
     bool probeInVolume = false;
-    float3 E_indirect = gatherProbeIrradiance(world_pos, normal, probeInVolume);
+    float3 E_indirect = gatherProbeIrradiance(world_pos, normal, probeInVolume,
+                                              params, ddgi_irradiance, ddgi_depth_buffer);
     bool probeFed = params.ddgi_counts_valid.w != 0u;
 
     // In-volume texels take their bounce from the probes. Outside the probe
@@ -210,14 +309,37 @@ kernel void surfaceCacheLightEval(
     // bounce source and adds a low-frequency supplement in-probe-volume.
     float3 tileRadiance = float3(0.0f);
     if (params.radiosity_gate.x != 0u) {
-        uint2 tiles = uint2(params.sc_params.atlas_size / 16u);
-        uint2 tile = min(uint2(atlas_uv) / 16u, tiles - 1u);
-        tileRadiance = indirect_out.read(tile).rgb;
+        // Resolve stores outgoing radiance at full atlas texel coordinates,
+        // including this texel's albedo. Tile-grid coordinates address an
+        // unrelated surface and may cross card boundaries.
+        tileRadiance = indirect_out.read(atlas_uv).rgb;
     }
 
+    // C3.5 slice 5+6: texel-side ambient floor with sky-openness modulation
+    // (occlusion-aware; enclosed crevices keep a 0.25 floor) — Vulkan twin:
+    // scSkyOpenness in SurfaceCacheLightEval.comp.
+    float skyOpen = 1.0f;
+    if (params.ddgi_counts_valid.w != 0u && probeInVolume) {
+        float3 org = params.ddgi_origin_spacing.xyz;
+        float spacing = max(params.ddgi_origin_spacing.w, 0.01f);
+        int3 counts = int3(params.ddgi_counts_valid.xyz);
+        float3 gp = (world_pos - org) / spacing;
+        int3 c0 = clamp(int3(round(gp)), int3(0), counts - 1);
+        uint pidx = uint(c0.x) + uint(counts.x) * (uint(c0.y) + uint(counts.y) * uint(c0.z));
+        float open = 0.0f;
+        for (int k = 0; k < 6; ++k) {
+            float3 d = (k == 0) ? float3(1,0,0) : (k == 1) ? float3(-1,0,0)
+                     : (k == 2) ? float3(0,1,0) : (k == 3) ? float3(0,-1,0)
+                     : (k == 4) ? float3(0,0,1) : float3(0,0,-1);
+            float2 mv = scSampleProbeDepthMV(pidx, d, ddgi_depth_buffer);
+            open += smoothstep(spacing * 0.5f, spacing * 2.0f, mv.x);
+        }
+        skyOpen = open / 6.0f;
+    }
+    E_indirect = max(E_indirect, float3(0.52f, 0.46f, 0.37f) * mix(0.25f, 1.0f, skyOpen));
     float3 result = (direct_light + E_indirect) * albedo.rgb * SC_INV_PI
                   + (probeFed && probeInVolume
-                        ? tileRadiance * 0.25f
+                        ? tileRadiance * scRadiosityWeight(params.radiosity_gate.y)
                         : tileRadiance + prev_light * albedo.rgb * (SC_FEEDBACK * SC_INV_PI * 0.5f))
                   + emissive;
     result = min(result, float3(64.0f));

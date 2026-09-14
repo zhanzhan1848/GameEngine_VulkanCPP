@@ -206,9 +206,8 @@ kernel void surfaceCacheLightEval(
     // bounce source and adds a low-frequency supplement in-probe-volume.
     float3 tileRadiance = float3(0.0f);
     {
-        uint2 tiles = uint2(params.sc_params.atlas_size / 16u);
-        uint2 tile = min(uint2(atlas_uv) / 16u, tiles - 1u);
-        tileRadiance = indirect_out.read(tile).rgb;
+        // Resolve expands tile lighting into the full material atlas.
+        tileRadiance = indirect_out.read(atlas_uv).rgb;
     }
 
     float3 result = (direct_light + E_indirect) * albedo.rgb * SC_INV_PI

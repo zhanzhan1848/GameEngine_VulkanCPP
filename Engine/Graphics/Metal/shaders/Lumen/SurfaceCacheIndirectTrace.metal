@@ -12,6 +12,12 @@ struct IndirectTraceParams {
     uint frame_index;
     float near_distance;
     float max_ray_distance;
+    // C3.5 slice 2: stride amortization (C++ IndirectTraceParamsGPU
+    // refresh_stride/refresh_phase — lands in the old padding slots, 288B
+    // total). refresh_stride 0/1 = trace every tile every frame; otherwise
+    // only tiles with probe_idx % stride == phase march this frame.
+    uint refresh_stride;
+    uint refresh_phase;
     float4 sdf_origins[3];
     float4 sdf_voxel_sizes[3];
     float4 sdf_extents[3];
@@ -38,6 +44,11 @@ static uint findOwningCard(uint2 uv, constant SurfaceCacheCard* cards, uint coun
 }
 
 // Apple Silicon: else-if cascade selection = 1 texture3D read per step (not 3)
+// 2026-09-11 Metal sync (C3.5 slice 1 parity): drop the ×sdf_extents
+// multiplier — the GlobalSDF voxelization stores RAW METERS (the runtime
+// voxelization imageStores min_dist unscaled; SDFTraceCommon.metal's
+// sampleSDFCascade reads .r directly as meters too). The old ×extent made
+// every d value dimensionally meaningless and the march instant-hit.
 static float sampleSDF(float3 pos,
     texture3d<float, access::sample> sdf0,
     texture3d<float, access::sample> sdf1,
@@ -50,19 +61,19 @@ static float sampleSDF(float3 pos,
         float3 local_p = (pos - params.sdf_origins[0].xyz) / params.sdf_extents[0].xyz;
         float3 uvw = local_p * 0.5 + 0.5;
         if (uvw.x >= 0 && uvw.x <= 1 && uvw.y >= 0 && uvw.y <= 1 && uvw.z >= 0 && uvw.z <= 1)
-            return sdf0.sample(s, uvw).r * params.sdf_extents[0].x;
+            return sdf0.sample(s, uvw).r;
     }
     if (params.sdf_cascade_count > 1) {
         float3 local_p = (pos - params.sdf_origins[1].xyz) / params.sdf_extents[1].xyz;
         float3 uvw = local_p * 0.5 + 0.5;
         if (uvw.x >= 0 && uvw.x <= 1 && uvw.y >= 0 && uvw.y <= 1 && uvw.z >= 0 && uvw.z <= 1)
-            return sdf1.sample(s, uvw).r * params.sdf_extents[1].x;
+            return sdf1.sample(s, uvw).r;
     }
     if (params.sdf_cascade_count > 2) {
         float3 local_p = (pos - params.sdf_origins[2].xyz) / params.sdf_extents[2].xyz;
         float3 uvw = local_p * 0.5 + 0.5;
         if (uvw.x >= 0 && uvw.x <= 1 && uvw.y >= 0 && uvw.y <= 1 && uvw.z >= 0 && uvw.z <= 1)
-            return sdf2.sample(s, uvw).r * params.sdf_extents[2].x;
+            return sdf2.sample(s, uvw).r;
     }
     return 1e6;
 }
@@ -90,6 +101,10 @@ kernel void surfaceCacheIndirectTrace(
     if (params.tile_size == 0) return;
     uint tiles_x = params.sc_params.atlas_size / params.tile_size;
     uint probe_idx = probe_y * tiles_x + probe_x;
+    // C3.5 slice 2: stride amortization — non-refreshed tiles exit before the
+    // march. Over `refresh_stride` frames every tile is traced exactly once.
+    if (params.refresh_stride > 1u &&
+        (probe_idx % params.refresh_stride) != params.refresh_phase) return;
 
     uint2 tile_origin = uint2(probe_x * params.tile_size + params.tile_size/2,
                                probe_y * params.tile_size + params.tile_size/2);
@@ -107,8 +122,19 @@ kernel void surfaceCacheIndirectTrace(
     float3 probe_pos = cardTexelToWorld(tile_origin, depth, cards[card_idx]);
 
     uint rays = params.rays_per_probe;
-    // Apple Silicon: 4 SDF steps × 1 texture3D read/step = 4 reads/ray (within ~4 limit)
-    constexpr uint kMaxSDFSteps = 4;
+    // 2026-09-11 Metal sync (C3.5 slice 1 parity): real march parameters.
+    // The stub used 4 steps with hitThreshold = cascade extent × 0.5 (21 m)
+    // — every ray "hit" instantly and far hits resolved to the Phase-A 0.02
+    // placeholder. DDGI-style band from the finest cascade voxel, 32 steps,
+    // and a normal offset so tiles starting ON a surface don't self-hit.
+    float voxel0 = params.sdf_extents[0].x / max(float(params.sdf_resolutions[0]), 1.0f);
+    float hitThreshold = max(voxel0 * 1.25f, 0.30f);
+    float minStep = voxel0 * 0.25f;
+    constexpr uint kMaxSDFSteps = 32;
+    // Origin clearance must EXCEED hitThreshold — a start point inside the
+    // hit band registers an instant t=0 self-hit (the tile reads its own
+    // texel, and the "transport" degenerates into self-feedback).
+    float3 ray_origin = probe_pos + probe_normal * (hitThreshold + 0.05f);
     for (uint r = 0; r < rays; ++r) {
         float2 seed = float2(hash(float2(float(probe_idx * rays + r), float(params.frame_index))),
                              hash(float2(float(params.frame_index), float(probe_idx * rays + r))));
@@ -127,12 +153,8 @@ kernel void surfaceCacheIndirectTrace(
         bool hit = false;
         float3 hit_pos = float3(0.0);
 
-        // Adaptive threshold based on finest cascade voxel size
-        float hitThreshold = params.sdf_extents[0].x * 0.5f;
-        float minStep = params.sdf_extents[0].x * 0.25f;
-
         for (uint step = 0; step < kMaxSDFSteps; ++step) {
-            float3 p = probe_pos + ray_dir * t;
+            float3 p = ray_origin + ray_dir * t;
             float d = sampleSDF(p, sdf0, sdf1, sdf2, params);
 
             if (d < hitThreshold) { hit = true; hit_pos = p; break; }
@@ -149,9 +171,9 @@ kernel void surfaceCacheIndirectTrace(
         }
 
         uint hit_idx = probe_idx * rays + r;
-        // T3.2 (D7) → T3.3 consumer: when the 4-step march exhausts (previously
-        // classified sky), test the min-mip chain with the ray's widening cone
-        // footprint — geometry in the cone → far occlusion (no sky radiance).
+        // T3.2 (D7) → T3.3 consumer: when the march exhausts (previously
+        // classified sky), test the min-mip chain with the ray's widening
+        // cone footprint — geometry in the cone → far occlusion (no sky).
         if (!hit) {
             const float3 org = params.sdf_origins[0].xyz;
             const float3 ext = params.sdf_extents[0].xyz;

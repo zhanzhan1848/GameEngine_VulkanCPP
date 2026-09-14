@@ -116,8 +116,13 @@ void surface_cache_indirect_resolve()
         uint hit_type = ray_hits.data[hit_idx].hit_type_pad.x;
         vec3 radiance = vec3(0.0);
 
-        if (hit_type == 0u) {
-            // Near hit: lookup atlas UV through card system
+        // 2026-09-10 C3.5 slice 1: near AND far hits both resolve through the
+        // atlas — the card lookup is position-based and works at any distance.
+        // The old split sent every t≥0.25 m hit to a Phase-A 0.02 placeholder,
+        // which made the whole tile path transport-inert (with the trace stub
+        // fixed, virtually all legit hits are "far").
+        if (hit_type == 0u || hit_type == 1u) {
+            // Lookup atlas UV through card system
             vec2 atlas_uv;
             bool found = false;
             for (uint li = 0u; li < irp.params.lookup_count && !found; ++li) {
@@ -137,12 +142,10 @@ void surface_cache_indirect_resolve()
             } else {
                 radiance = vec3(0.02, 0.02, 0.03);
             }
-        } else if (hit_type == 1u) {
-            // Far hit: DDGI placeholder (Phase A)
-            radiance = vec3(0.02, 0.02, 0.03);
         } else {
-            // Sky
-            radiance = vec3(0.05, 0.05, 0.08);
+            // Sky — same tier as DDGITraceFinalize's escape
+            // (DDGI_SKY_COLOR × SkyColor.x with the 0.4 default intensity).
+            radiance = vec3(2.75, 2.88, 3.00) * 0.4;
         }
 
         indirect += radiance;

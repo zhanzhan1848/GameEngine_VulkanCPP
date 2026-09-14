@@ -43,8 +43,6 @@ kernel void surfaceCacheIndirectResolve(
 
     if (tile_origin.x >= params.sc_params.atlas_size || tile_origin.y >= params.sc_params.atlas_size) return;
 
-    constexpr sampler linear_samp(coord::normalized, filter::linear, address::clamp_to_edge);
-
     float3 indirect = float3(0.0);
     float total_weight = 0.0;
 
@@ -54,8 +52,14 @@ kernel void surfaceCacheIndirectResolve(
         uint hit_type = ray_hits[hit_idx].hit_type;
         float3 radiance = float3(0.0);
 
-        if (hit_type == 0) {
-            // Near hit: lookup atlas UV through card system
+        // 2026-09-11 Metal sync (C3.5 slice 1 parity): near AND far hits both
+        // resolve through the atlas — the card lookup is position-based and
+        // works at any distance. The old split sent every t≥0.25 m hit to a
+        // Phase-A 0.02 placeholder, which made the whole tile path
+        // transport-inert (with the trace stub fixed, virtually all legit
+        // hits are "far").
+        if (hit_type == 0u || hit_type == 1u) {
+            // Lookup atlas UV through card system
             float2 atlas_uv;
             bool found = false;
             for (uint li = 0; li < params.lookup_count && !found; ++li) {
@@ -70,17 +74,15 @@ kernel void surfaceCacheIndirectResolve(
                 }
             }
             if (found) {
-                float2 uv_norm = atlas_uv / float2(params.sc_params.atlas_size);
-                radiance = prev_lighting.sample(linear_samp, uv_norm).rgb;
+                // Nearest read at integer atlas coords (Vulkan-twin parity).
+                radiance = prev_lighting.read(uint2(atlas_uv)).rgb;
             } else {
                 radiance = float3(0.02, 0.02, 0.03);
             }
-        } else if (hit_type == 1) {
-            // Far hit: DDGI placeholder (Phase A)
-            radiance = float3(0.02, 0.02, 0.03);
         } else {
-            // Sky
-            radiance = float3(0.05, 0.05, 0.08);
+            // Sky — same tier as DDGITraceFinalize's escape
+            // (DDGI_SKY_COLOR × SkyColor.x with the 0.4 default intensity).
+            radiance = float3(2.75f, 2.88f, 3.00f) * 0.4f;
         }
 
         indirect += radiance;

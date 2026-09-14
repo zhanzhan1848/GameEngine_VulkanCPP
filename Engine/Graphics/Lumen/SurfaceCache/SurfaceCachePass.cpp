@@ -170,6 +170,13 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
     }
     std::set<std::string> included;
     std::string resolved = ResolveIncludes(source, SC_SHADER_DIR, included);
+    // C 系列归因旋钮（编译期诊断变体，默认关闭）：SC 侧注入路径逐条断电。
+    if (std::getenv("PRIMAL_SC_NO_EMISSIVE")) {
+        resolved = "#define PRIMAL_SC_NO_EMISSIVE 1\n" + resolved;
+    }
+    if (std::getenv("PRIMAL_SC_NO_DIRECT")) {
+        resolved = "#define PRIMAL_SC_NO_DIRECT 1\n" + resolved;
+    }
     return std::vector<u8>(resolved.begin(), resolved.end());
 }
 
@@ -215,6 +222,54 @@ void SurfaceCachePass::DebugShadowVisibilityStats() const {
               << " zeros=" << 100.0 * zeros / n << "%"
               << " ones=" << 100.0 * ones / n << "%"
               << " max=" << mx << std::endl;
+
+    // C 系列诊断：atlas 可见性整图落盘（PGM，白=lit/黑=shadowed）。与卡片
+    // atlas_offset 对照即可定位"室内 lit"texel 属于哪些卡片。
+    if (std::getenv("SC_VIS_DUMP")) {
+        auto* q = static_cast<const float*>(device_->MapBuffer(shadow_visibility_buffer_, 0, n * sizeof(float)));
+        if (q) {
+            std::ofstream out("/tmp/sc_visibility.pgm", std::ios::binary);
+            out << "P5\n" << atlas_size_ << " " << atlas_size_ << "\n255\n";
+            std::vector<unsigned char> row(atlas_size_);
+            for (u32 y = 0; y < atlas_size_; ++y) {
+                for (u32 x = 0; x < atlas_size_; ++x)
+                    row[x] = (unsigned char)(q[(u64)y * atlas_size_ + x] * 255.0f + 0.5f);
+                out.write(reinterpret_cast<const char*>(row.data()), atlas_size_);
+            }
+            out.close();
+
+            // 每卡片 lit 占比 + 世界坐标关联表 → /tmp/sc_cards_vis.txt。
+            // 列：idx atlas_x atlas_y res lit% cx cy cz ex ey ez axis dir。
+            std::ofstream cards("/tmp/sc_cards_vis.txt");
+            const auto& cardList = card_generator_.GetCards();
+            u32 count = std::min<u32>(cardList.size(), 4096u);
+            for (u32 ci = 0; ci < count; ++ci) {
+                const auto& c = cardList[ci];
+                u64 lit = 0, tot = 0;
+                for (u32 y = 0; y < c.resolution; ++y) {
+                    const u64 rowBase = (u64)(c.atlas_offset_y + y) * atlas_size_;
+                    for (u32 x = 0; x < c.resolution; ++x) {
+                        float depthChk = 1.0f; // lit 统计含全部 texel（empty texel 也计）
+                        (void)depthChk;
+                        float v = q[rowBase + c.atlas_offset_x + x];
+                        ++tot;
+                        if (v >= 0.5f) ++lit;
+                    }
+                }
+                cards << ci << ' ' << c.atlas_offset_x << ' ' << c.atlas_offset_y << ' '
+                      << c.resolution << ' '
+                      << (tot ? 100.0 * lit / tot : 0.0) << ' '
+                      << c.center.x << ' ' << c.center.y << ' ' << c.center.z << ' '
+                      << c.extent.x << ' ' << c.extent.y << ' ' << c.extent.z << ' '
+                      << (c.axis_direction & 0xFFu) << ' ' << ((c.axis_direction >> 8) & 0xFFu)
+                      << '\n';
+            }
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[VIS_DUMP] wrote /tmp/sc_visibility.pgm + /tmp/sc_cards_vis.txt ("
+                << count << " cards)" << std::endl;
+            device_->UnmapBuffer(shadow_visibility_buffer_);
+        }
+    }
 }
 
 SurfaceCachePass::~SurfaceCachePass() {
@@ -390,9 +445,6 @@ void SurfaceCachePass::CreateAtlasTextures() {
 
     // T3.3 (D10): indirect trace/resolve wiring resources
     {
-        constexpr u32 kTile = 16;   // probe tile size (atlas/16 grid)
-        const u32 tiles = atlas_size_ / kTile;
-
         for (int i = 0; i < 3; ++i) {
             BufferDesc cbDesc{};
             cbDesc.size = 288;   // sizeof(IndirectTraceParamsGPU)
@@ -405,7 +457,9 @@ void SurfaceCachePass::CreateAtlasTextures() {
             indirect_resolve_params_cb_[i] = device_->CreateBuffer(cbDesc);
 
             TextureDesc outDesc{};
-            outDesc.size = { tiles, tiles, 1 };
+            // Resolve expands each tile into material-weighted atlas texels.
+            // Allocation and consumers must use this same full-atlas domain.
+            outDesc.size = { atlas_size_, atlas_size_, 1 };
             outDesc.mipLevels = 1;
             outDesc.arraySize = 1;
             outDesc.format = DataFormat::RGBA16_Float;
@@ -535,11 +589,13 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi irradiance (probe-fed indirect)
             {11, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas (surface-point probe gather)
             {12, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // indirect_out (T3.3 tile radiosity)
+            {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi depth (Chebyshev gather visibility, C 系列)
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[9].readonly = true;
         b[10].readonly = true;
-        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
+        b[13].readonly = true;
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
@@ -557,11 +613,13 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {5, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_atlas   [[texture(5)]]
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance [[buffer(6)]] (probe-fed indirect)
             {6, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // indirect_out [[texture(6)]] (T3.3 tile radiosity)
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi depth [[buffer(7)]] (Chebyshev gather visibility, C 系列)
         };
         DescriptorSetLayoutBinding* bm = bindings;
         bm[5].readonly = true;
         bm[8].readonly = true;  // ddgi irradiance
-        DescriptorSetLayoutDesc layoutDesc{13, bindings};
+        bm[13].readonly = true; // ddgi depth
+        DescriptorSetLayoutDesc layoutDesc{14, bindings};
         light_eval_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -829,7 +887,27 @@ void SurfaceCachePass::CreatePipelines() {
         isVk ? "surface_cache_dilate" : "surfaceCacheDilate");
     auto lightCullShader    = CompileComputeShader("SurfaceCacheLightCull",
         isVk ? "surface_cache_light_cull" : "surfaceCacheLightCull");
-    auto lightEvalShader    = CompileComputeShader("SurfaceCacheLightEval",
+    // PRIMAL_SC_GATHER_RADIUS=2 selects the LightEval radius-2 (27-point)
+    // probe-gather variant (multi-bounce cascade footprint — see
+    // SurfaceCacheLightEval.comp). PRIMAL_SC_GATHER_PI=1 selects the physical
+    // irradiance variant (×π, restores E=π·L units the legacy path ships
+    // deliberately π-deficient for loop headroom). Default keeps the legacy
+    // 8-point spv.
+    const char* lightEvalName = "SurfaceCacheLightEval";
+    if (const char* e = std::getenv("PRIMAL_SC_GATHER_RADIUS")) {
+        if (std::atoi(e) >= 2) lightEvalName = "SurfaceCacheLightEval_r2";
+    }
+    if (const char* e = std::getenv("PRIMAL_SC_GATHER_PI")) {
+        if (std::atoi(e) >= 1) {
+            lightEvalName = std::getenv("PRIMAL_SC_GATHER_RADIUS") && std::atoi(std::getenv("PRIMAL_SC_GATHER_RADIUS")) >= 2
+                ? "SurfaceCacheLightEval_pi_r2"
+                : "SurfaceCacheLightEval_pi";
+        }
+    }
+    if (const char* e = std::getenv("PRIMAL_SC_GATHER_RADIUS")) {
+        if (std::atoi(e) >= 2) lightEvalName = "SurfaceCacheLightEval_r2";
+    }
+    auto lightEvalShader    = CompileComputeShader(lightEvalName,
         isVk ? "surface_cache_light_eval" : "surfaceCacheLightEval");
     auto indirectTraceShader  = CompileComputeShader("SurfaceCacheIndirectTrace",
         isVk ? "surface_cache_indirect_trace" : "surfaceCacheIndirectTrace");
@@ -1176,8 +1254,9 @@ void SurfaceCachePass::AddCardCapturePasses(
                 // (axis0:+y, axis1:+x, axis2:+x) while LookAt's right =
                 // cross(fwd, up) flips with dir. For the three combos where
                 // right lands on −local_u, mirror the ortho horizontally so
-                // the captured atlas matches the lookup convention (cull mode
-                // is None, so the winding flip is harmless).
+                // the captured atlas matches the lookup convention. Capture shaders
+                // orient two-sided normals toward the card eye, independently
+                // of the mirrored raster winding (culling is disabled).
                 bool mirror_u = false;
                 if (axis == 0u) {
                     fwd = math::v3{dir > 0u ? 1.0f : -1.0f, 0.0f, 0.0f};
@@ -1232,7 +1311,42 @@ void SurfaceCachePass::AddCardCapturePasses(
 }
 
 // T3.3: SC Radiosity bring-up switch (SC_INDIRECT=1) — read once.
-static const bool kScIndirectEnabled = std::getenv("SC_INDIRECT") != nullptr;
+// 2026-09-10 十三: tile radiosity promoted to DEFAULT-ON on Vulkan (the
+// trace's four stub defects are fixed and W sweep measured monotonic gain;
+// W=2.0 → +38% on the darkest wall strips). SC_INDIRECT=0 forces it off.
+// 2026-09-11: promoted to DEFAULT-ON on Metal too — its trace/resolve twins
+// received the same stub fixes (meters-read march, real hitThreshold, 32
+// steps, self-hit origin offset, far-hit atlas resolution, sky tier parity,
+// refresh-stride struct fields) and the Metal descriptor branch now binds the
+// offline SDF for the tile march.
+// SC_INDIRECT env: -1 = unset → default-on on every platform;
+// 0/1 force either way.
+static const int kScIndirectEnv = [] {
+    const char* e = std::getenv("SC_INDIRECT");
+    return e ? std::atoi(e) : -1;
+}();
+// Single source of truth for "does the tile solver run this frame" — BOTH the
+// LightEval radiosity_gate.x fill and the trace/resolve dispatch condition
+// must read it (the 09-10 十六 "warm entry light that fades" bug was exactly
+// these two sites drifting apart).
+static bool scIndirectEnabled(rhi::RHIDeviceBase* device) {
+    if (kScIndirectEnv >= 0) return kScIndirectEnv != 0;
+    (void)device;
+    return true;
+}
+// C3.5 slice 3: warm-up window (frames) — probe feed cut + tile solver held
+// back so the atlas converges on direct light deterministically before the
+// feedback loops start (multi-stable branch selection happens against the
+// transient otherwise). Promoted default 90 (stabilization measured:
+// L_arcade runs 2.4/3.1 vs 1.3-3.1 with dark-branch draws).
+static const u32 scWarmupFrames() {
+    static const u32 v = [] {
+        const char* e = std::getenv("PRIMAL_SC_WARMUP_FRAMES");
+        if (e) return (u32)std::max(0, std::atoi(e));
+        return 90u;
+    }();
+    return v;
+}
 
 SurfaceCacheOutput SurfaceCachePass::AddPass(
     RenderGraph& graph,
@@ -1478,13 +1592,51 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // C1-H3: the card_dispatch stand-in binding (INVALID feed)
                     // must never be read — force the flag off at the pass
                     // boundary regardless of what the caller set.
+                    // SC_PROBE_FEED_OFF=1（C 系列归因旋钮）：切断 probe→SC
+                    // 馈送。gatherProbeIrradiance 是无可见性 8-probe 三线性，
+                    // 封闭区域卡片隔墙采到亮探针 = 室内平填充的头号泄漏入口；
+                    // 置 0 回落 legacy 自反馈路径做干预式 A/B。
+                    // C3.5 slice 3: during the warm-up window the probe feed
+                    // is cut so LightEval's texels converge on direct+capture
+                    // alone (deterministic) — matches the DDGI probe freeze
+                    // (PRIMAL_SC_WARMUP_FRAMES).
                     params.ddgi_counts_valid[3] =
-                        (frame_data.ddgi_irradiance != rhi::handles::INVALID_RESOURCE)
+                        (frame_data.ddgi_irradiance != rhi::handles::INVALID_RESOURCE &&
+                         !std::getenv("SC_PROBE_FEED_OFF") &&
+                         current_frame_index >= scWarmupFrames())
                             ? frame_data.ddgi_valid : 0u;
                     // T3.3: gate the LightEval tile-radiosity read on whether
                     // the indirect trace/resolve actually ran this session —
                     // indirect_out holds uninitialized data otherwise.
-                    params.radiosity_gate[0] = kScIndirectEnabled ? 1u : 0u;
+                    // Gate.x must follow the DISPATCH condition exactly —
+                    // during the warm-up window the solver does not run, and
+                    // reading the never-written indirect_out here fed
+                    // uninitialized heap memory into the atlas (the "warm
+                    // entry light that fades seconds later" report).
+                    params.radiosity_gate[0] =
+                        scIndirectEnabled(device_) &&
+                        current_frame_index >= scWarmupFrames()
+                            ? 1u : 0u;
+                    // C3.5 slice 2: tile-radiosity tile size for the LightEval
+                    // consumption read (0 = shader-side legacy 16).
+                    params.radiosity_gate[2] = [] {
+                        const char* e = std::getenv("PRIMAL_SC_RADIOSITY_TILE");
+                        if (!e) return 8u;   // LightEval consumption grid follows
+                        const u32 v = (u32)std::atoi(e);
+                        return (v >= 4u && v <= 128u) ? v : 8u;
+                    }();
+                    // T3.3 runtime weight knob: radiosity_gate.y packs the
+                    // tile-radiosity consumption weight as raw float bits
+                    // (0 = shader-side legacy 0.25). PRIMAL_SC_RADIOSITY_W.
+                    params.radiosity_gate[1] = [] {
+                        // Promoted default 2.0 (W sweep: monotonic gain to
+                        // +38% on the darkest strips, stable at frame 800).
+                        const char* e = std::getenv("PRIMAL_SC_RADIOSITY_W");
+                        const float v = e ? (float)std::atof(e) : 2.0f;
+                        if (v <= 0.0f || v > 4.0f) return 0u;
+                        u32 bits; std::memcpy(&bits, &v, 4);
+                        return bits;
+                    }();
                     *mapped = params;
                     device_->UnmapBuffer(params_cb_[frameIdx]);
                 }
@@ -1917,7 +2069,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // back is safe to read (GPU finished with it) and serves as
                 // the multi-bounce feedback source.
                 u32 histIdx = (current_frame_index + 1) % 3;
-                DescriptorData evalParams[12];
+                DescriptorData evalParams[14];
                 if (isVk) {
                     DescriptorData p[] = {
                         {0, DescriptorType::StorageImage,  albedo_atlas_},
@@ -1940,6 +2092,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         // (same depth source the shadow pass uses).
                         {11, DescriptorType::StorageImage,  depth_atlas_},
                         {12, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]},   // T3.3 tile radiosity
+                        // C 系列：探针深度（Chebyshev gather 可见性）；无效时绑
+                        // stand-in（CB flag 关 → shader 不读）。
+                        {13, DescriptorType::StorageBuffer,
+                         frame_data.ddgi_depth != handles::INVALID_RESOURCE
+                             ? frame_data.ddgi_depth
+                             : card_dispatch_buffer_},
                     };
                     memcpy(evalParams, p, sizeof(p));
                 } else {
@@ -1966,10 +2124,41 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                              : card_dispatch_buffer_},
                         // T3.3 tile radiosity (Metal texture namespace 6)
                         {6, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]},
+                        // C 系列：探针深度（Chebyshev gather 可见性）
+                        {7, DescriptorType::StorageBuffer,
+                         frame_data.ddgi_depth != handles::INVALID_RESOURCE
+                             ? frame_data.ddgi_depth
+                             : card_dispatch_buffer_},
                     };
                     memcpy(evalParams, p, sizeof(p));
                 }
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 13);
+                // C 系列诊断：深度缓冲真值（量级/单位校验）
+                if (std::getenv("SC_DEPTH_STATS")) {
+                    static u32 dsFrame = 0;
+                    if (frame_data.ddgi_depth != handles::INVALID_RESOURCE &&
+                        current_frame_index % 120u == 60u && dsFrame != current_frame_index) {
+                        dsFrame = current_frame_index;
+                        const u64 depthFloats = u64(16384) * 128;
+                        if (auto* d = static_cast<const float*>(device_->MapBuffer(frame_data.ddgi_depth, 0, depthFloats * sizeof(float)))) {
+                            double s0 = 0, s1 = 0;
+                            for (int i = 0; i < 64; ++i) s0 += d[i];
+                            for (int i = 0; i < 128; ++i) s1 += d[i];
+                            u32 camProbe = 7947; // camera-cell (11,8,15)
+                            double cMean = 0;
+                            for (int i = 0; i < 64; ++i) cMean += d[camProbe * 128 + i];
+                            PRIMAL_LOG_STREAM(Error, "Render") << "[SC_DEPTH_STATS] probe0 mean_avg="
+                                      << s0 / 64.0 << " all128_avg=" << s1 / 128.0
+                                      << " camcell7947 mean_avg=" << cMean / 64.0
+                                      << " cam8=(" << d[camProbe * 128 + 0] << "," << d[camProbe * 128 + 1]
+                                      << "," << d[camProbe * 128 + 2] << "," << d[camProbe * 128 + 3]
+                                      << "," << d[camProbe * 128 + 4] << "," << d[camProbe * 128 + 5]
+                                      << "," << d[camProbe * 128 + 6] << "," << d[camProbe * 128 + 7] << ")" << std::endl;
+                            device_->UnmapBuffer(frame_data.ddgi_depth);
+                        }
+                    }
+                }
+
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 14);
 
                 // Explicit GENERAL transition for the lighting atlases — do not
                 // rely on the render graph's Write declaration having put them
@@ -2012,9 +2201,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // ~10× frame budget on Sponza; the LightEval tile-probe
                 // consumer lands in the next slice, until then this stays a
                 // bring-up path.
-                if (kScIndirectEnabled)
+                const bool scIndirectOn = scIndirectEnabled(device_);
+                if (scIndirectOn && current_frame_index >= scWarmupFrames())
                 // trace: per-tile cosine ray fan → SDF march → ray_hits.
-                // resolve: aggregate ray_hits → indirect_out (tile grid).
+                // resolve: aggregate ray_hits and expand into full-atlas indirect_out.
                 // Consumers (LightEval tile probe) land in the next slice.
                 // ================================================================
                 {
@@ -2030,9 +2220,27 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         ray_hits_buffer_ = device_->CreateBuffer(rayHitsDesc);
                     }
 
-                    constexpr u32 kTile = 16;
+                    // C3.5 slice 2: runtime tile size + trace stride.
+                    // PRIMAL_SC_RADIOSITY_TILE (default 16), PRIMAL_SC_RADIOSITY_STRIDE
+                    // (default 1 = every tile every frame; N = each tile traced
+                    // every Nth frame, phase rotating with frame_index).
+                    const u32 kTile = [] {
+                        const char* e = std::getenv("PRIMAL_SC_RADIOSITY_TILE");
+                        if (!e) return 8u;   // 2026-09-11 promoted: 0.85 m patches
+                        const u32 v = (u32)std::atoi(e);
+                        return (v >= 4u && v <= 128u) ? v : 8u;
+                    }();
+                    const u32 kStride = [] {
+                        const char* e = std::getenv("PRIMAL_SC_RADIOSITY_STRIDE");
+                        if (!e) return 2u;   // promoted default: half-rate trace
+                        const u32 v = (u32)std::atoi(e);
+                        return (v >= 1u && v <= 64u) ? v : 1u;
+                    }();
                     const u32 kRays = 32;
                     const u32 kTiles = atlas_size_ / kTile;
+                    // C3.5 slice 4: offline propagated SDF for the tile march
+                    // (thin-arch sky leaks in the coarse runtime GlobalSDF).
+                    const bool useOfflineSdf = sc_offline_sdf_texture_ != handles::INVALID_RESOURCE;
 
                     auto& gsdf = nanite::GlobalSDF::Get();
 
@@ -2050,7 +2258,25 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         tp->frame_index = current_frame_index;
                         tp->near_distance = 0.25f;
                         tp->max_ray_distance = 50.0f;
-                        const u32 cc = std::min<u32>(3u, gsdf.GetConfig().cascade_count);
+                        tp->refresh_stride = kStride;
+                        tp->refresh_phase = kStride > 1u ? current_frame_index % kStride : 0u;
+                        // C3.5 slice 4: prefer the OFFLINE propagated SDF
+                        // (384³, signed, real distances — same source the DDGI
+                        // trace marches). The runtime GlobalSDF's coarse
+                        // cascades leak thin arches as false sky in the tile
+                        // traces (measured: occluded soffits glowing). Fall
+                        // back to GlobalSDF only when no offline source.
+                        u32 cc = std::min<u32>(3u, gsdf.GetConfig().cascade_count);
+                        if (useOfflineSdf) {
+                            cc = 1u;
+                            tp->sdf_origins[0] = math::v4{sc_offline_sdf_origin_.x, sc_offline_sdf_origin_.y,
+                                                          sc_offline_sdf_origin_.z, 0.0f};
+                            tp->sdf_extents[0] = math::v4{sc_offline_sdf_extent_.x, sc_offline_sdf_extent_.y,
+                                                          sc_offline_sdf_extent_.z, 0.0f};
+                            tp->sdf_resolutions[0] = math::u32v4{sc_offline_sdf_resolution_, 0, 0, 0};
+                            tp->sdf_voxel_sizes[0] = math::v4{
+                                sc_offline_sdf_extent_.x / (float)sc_offline_sdf_resolution_, 0.0f, 0.0f, 0.0f};
+                        } else {
                         for (u32 c = 0; c < 3; ++c) {
                             if (c < cc) {
                                 const auto& cascade = gsdf.GetCascade(c);
@@ -2059,6 +2285,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                 tp->sdf_extents[c] = math::v4{cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
                                 tp->sdf_resolutions[c] = math::u32v4{cascade.resolution, 0, 0, 0};
                             }
+                        }
                         }
                         tp->sdf_cascade_count = math::u32v4{cc, 0, 0, 0};
                         device_->UnmapBuffer(indirect_trace_params_cb_[frameIdx]);
@@ -2076,18 +2303,26 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         const auto& cas0 = gsdf.GetCascade(0);
                         ResourceHandle mipTex[3];
                         for (u32 m = 0; m < 3; ++m) {
-                            ResourceHandle h = (coneHitOn && m < cas0.mip_count)
+                            // Offline SDF has no mip chain — binding the same
+                            // texture makes textureSize(mip)==textureSize(sdf0)
+                            // self-gate the cone check off (see shader note).
+                            ResourceHandle h = (!useOfflineSdf && coneHitOn && m < cas0.mip_count)
                                 ? cas0.mip_textures[m] : cas0.sdf_texture;
                             if (h == rhi::handles::INVALID_RESOURCE) h = cas0.sdf_texture;
+                            if (useOfflineSdf) h = sc_offline_sdf_texture_;
                             mipTex[m] = h;
                         }
                         DescriptorData ip[12];
+                        // C3.5 slice 4: offline SDF (when present) replaces the
+                        // GlobalSDF cascade bindings for the tile march.
+                        const rhi::ResourceHandle tileSdf0 = useOfflineSdf
+                            ? sc_offline_sdf_texture_ : gsdf.GetCascade(0).sdf_texture;
                         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
                             ip[0] = {0, DescriptorType::StorageImage,  depth_atlas_};
                             ip[1] = {1, DescriptorType::StorageImage,  normal_atlas_};
-                            ip[2] = {2, DescriptorType::SampledImage,  gsdf.GetCascade(0).sdf_texture};
-                            ip[3] = {3, DescriptorType::SampledImage,  gsdf.GetCascade(1).sdf_texture};
-                            ip[4] = {4, DescriptorType::SampledImage,  gsdf.GetCascade(2).sdf_texture};
+                            ip[2] = {2, DescriptorType::SampledImage,  tileSdf0};
+                            ip[3] = {3, DescriptorType::SampledImage,  useOfflineSdf ? tileSdf0 : gsdf.GetCascade(1).sdf_texture};
+                            ip[4] = {4, DescriptorType::SampledImage,  useOfflineSdf ? tileSdf0 : gsdf.GetCascade(2).sdf_texture};
                             ip[5] = {5, DescriptorType::UniformBuffer, indirect_dummy_cb_};
                             ip[6] = {6, DescriptorType::UniformBuffer, indirect_trace_params_cb_[frameIdx]};
                             ip[7] = {7, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
@@ -2098,9 +2333,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         } else {
                             ip[0] = {0, DescriptorType::StorageImage,  depth_atlas_};
                             ip[1] = {1, DescriptorType::StorageImage,  normal_atlas_};
-                            ip[2] = {2, DescriptorType::SampledImage,  gsdf.GetCascade(0).sdf_texture};
-                            ip[3] = {3, DescriptorType::SampledImage,  gsdf.GetCascade(1).sdf_texture};
-                            ip[4] = {4, DescriptorType::SampledImage,  gsdf.GetCascade(2).sdf_texture};
+                            // 2026-09-11 Metal sync: offline SDF substitution
+                            // for the tile march (Vulkan-branch parity) — the
+                            // coarse runtime GlobalSDF leaks thin arches as
+                            // false sky in the tile traces.
+                            ip[2] = {2, DescriptorType::SampledImage,  tileSdf0};
+                            ip[3] = {3, DescriptorType::SampledImage,  useOfflineSdf ? tileSdf0 : gsdf.GetCascade(1).sdf_texture};
+                            ip[4] = {4, DescriptorType::SampledImage,  useOfflineSdf ? tileSdf0 : gsdf.GetCascade(2).sdf_texture};
                             ip[5] = {5, DescriptorType::SampledImage,  mipTex[0]};
                             ip[6] = {6, DescriptorType::SampledImage,  mipTex[1]};
                             ip[7] = {7, DescriptorType::SampledImage,  mipTex[2]};

@@ -101,7 +101,11 @@ kernel void surfaceCacheShadow(
     float hitThreshold = voxel * 0.5f;
     float shadow = 1.0f;
 
-    for (int step = 0; step < 16; ++step) {
+    // C1 修复：保守球追踪。原 d×1.2 过冲在 2-3 体素距离上一跳可越过
+    // 0.3-0.5m 的墙（体素 ≈0.19m），建筑内部卡片因此吃到假阳光——室内
+    // 平填充的主要能量入口（SC_PROBE_FEED_OFF 实验定位）。步数 16→24
+    // 覆盖 50m maxDist 的远距起步。
+    for (int step = 0; step < 24; ++step) {
         float3 pos = origin + L * t;
         float d = 1.0e10f;
         if (cc > 0u && scShadowInside(pos, sp.sdf_origins[0].xyz, sp.sdf_extents[0].xyz))
@@ -116,7 +120,7 @@ kernel void surfaceCacheShadow(
 
         if (d > 1.0e9f) break;   // left all cascades → unoccluded
         if (d < hitThreshold) { shadow = 0.0f; break; }
-        float advance = (d > hitThreshold * 4.0f) ? d * 1.2f : max(d, voxel * 0.25f);
+        float advance = max(d, voxel * 0.25f);
         t += advance;
         if (t >= maxDist) break;
     }

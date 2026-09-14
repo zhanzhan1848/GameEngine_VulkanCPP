@@ -56,7 +56,12 @@ struct IndirectTraceParamsGPU {
     uint32_t frame_index;
     float    near_distance;
     float    max_ray_distance;
-    float    _pad0, _pad1;          // align 16 for the vec4 arrays
+    // 2026-09-10 C3.5 slice 2: was float _pad0/_pad1 — now the trace-refresh
+    // stride amortization (shader early-outs non-refreshed tiles before the
+    // march). Offsets land in what was std140 padding before the vec4 arrays;
+    // sizeof unchanged (288).
+    uint32_t refresh_stride;        // 0/1 = every tile every frame
+    uint32_t refresh_phase;         // frame_index % refresh_stride
     math::v4 sdf_origins[3];
     math::v4 sdf_voxel_sizes[3];
     math::v4 sdf_extents[3];
@@ -144,6 +149,10 @@ struct SurfaceCacheFrameData {
     // probe, previous-frame slot — SC runs before the DDGI update) + grid
     // params. ddgi_valid = 0 leaves LightEval on the legacy self-feedback.
     rhi::ResourceHandle ddgi_irradiance{ rhi::handles::INVALID_RESOURCE };
+    // C 系列：同一槽位的探针八面体深度（mean+variance/texel），LightEval 的
+    // gather 用它做 Chebyshev 可见性——封闭区域卡片隔墙采到受光带探针是
+    // 室内平填充的根因（Docs/2026-09-09 计划 §C2/C3）。
+    rhi::ResourceHandle ddgi_depth{ rhi::handles::INVALID_RESOURCE };
     math::v3   ddgi_origin{};
     float      ddgi_spacing = 0.0f;
     uint32_t   ddgi_counts[3] = {0, 0, 0};
