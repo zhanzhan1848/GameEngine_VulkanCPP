@@ -45,6 +45,16 @@ fn tonemap_vs(@builtin(vertex_index) vertexID: u32) -> VertexOutput {
 // Metal 亮 ~2.4×，拱门暗部被抬亮（Sponza 同机位实测 mean 61 vs 31）。
 const CAL_EXPOSURE: f32 = 0.26;
 
+// B10.5 (2026-09-11)：tonemap_fs 是"上游线性 HDR"路径（Vulkan/Dawn 默认，
+// 见 ToneMappingPass.cpp 的平台选择；passthrough 的 CAL_EXPOSURE 只服务
+// Metal 的 LDR 上游，保持不动）。旧实现无曝光——HDR 直入 ACES，×50 显示
+// 单位下向阳石墙 (~24) 必然饱和贴白。0.10 按 Sponza 同机位标定：
+//   向阳墙 ~24 → ×0.10=2.4 → ACES 肩部 ~0.93 → gamma 后 ~0.97
+//   天空 2.75   → 0.28 → ~0.41 → ~0.67
+//   GI 阴影 0.05-0.3 → 12-58/255（暗部从贴地抬起）
+// 偏亮/偏暗调此常数（有效域约 0.05-0.2），勿动 CAL_EXPOSURE（Metal 语义）。
+const HDR_ACES_EXPOSURE: f32 = 0.10;
+
 @fragment
 fn tonemap_fs_passthrough(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let color = textureSample(sceneTexture, texSampler, uv).rgb;
@@ -97,7 +107,7 @@ fn tonemap_fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
     // Add bloom (simple additive)
     let bloom = textureSample(bloomTexture, texSampler, uv).rgb;
-    var result = color + bloom;
+    var result = (color + bloom) * HDR_ACES_EXPOSURE;
 
     // Tone mapping
     result = ACESFilm(result);

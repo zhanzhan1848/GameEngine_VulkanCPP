@@ -42,6 +42,10 @@ float3 ACESFilm(float3 x) {
 constant float CAL_EXPOSURE = 0.26f; // 2026-09-06 对齐 UE 参考：GI 提亮后全局回拉（0.42 → 0.36，mean 52.9 → 目标 ~43）
 
 // Fragment Shader
+// 注意（2026-09-11 B10.5）：两平台 ACES 路径的曝光语义有意分叉——Metal 的
+// 上游是 LDR（fusion 已做过 exposure+ACES+gamma），继续用 CAL_EXPOSURE；
+// Vulkan/Dawn 的上游是线性 HDR，曝光在 WGSL tonemap_fs 的 HDR_ACES_EXPOSURE
+// （0.10，Dawn/shaders/ToneMapping.wgsl）。不要把两边"对齐"——上游单位制不同。
 fragment float4 tonemap_fs(VertexOut in [[stage_in]],
                            texture2d<float> sceneTexture [[texture(0)]],
                            texture2d<float> bloomTexture [[texture(1)]]) // Optional

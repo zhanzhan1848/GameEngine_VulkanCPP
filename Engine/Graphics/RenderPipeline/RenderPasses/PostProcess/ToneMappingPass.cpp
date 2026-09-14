@@ -19,8 +19,18 @@ using namespace rhi;
 
 static PipelineHandle s_ToneMapPipeline = handles::INVALID_PIPELINE;
 static PipelineHandle s_ToneMapPassthroughPipeline = handles::INVALID_PIPELINE;
-// PRIMAL_TONE_ACES=1：强制走完整 ACES+gamma 展示管线（默认透传，匹配基准）
+// PRIMAL_TONE_ACES=1：强制走完整 ACES+gamma 展示管线（默认按平台选择）。
 static const bool s_ForceACES = std::getenv("PRIMAL_TONE_ACES") != nullptr;
+// PRIMAL_TONE_PASSTHROUGH=1：强制回旧的透传行为（A/B 门——透传在 Vulkan 上
+// 是 HDR×0.26 硬裁剪直出，仅用于与旧观感对比）。
+static const bool s_ForcePassthrough = std::getenv("PRIMAL_TONE_PASSTHROUGH") != nullptr;
+// 上游单位制决定 tonemap 形态（EnsurePipeline 按 device 平台填充）：
+//   Metal：fusion 上游已做过 exposure+ACES+gamma（LDR 输出）→ 透传。
+//   Vulkan/Dawn：FusionComposite/DeferredLighting 输出线性 HDR → ACES+gamma。
+// 旧默认（全平台透传）在 Vulkan 上把 HDR ×0.26 后硬裁剪直出：>1/0.26≈3.85
+// 全部贴白、无肩部、无 gamma 编码——向阳面纹理全灭、阴影中调线性压死
+// （2026-09-11 全链审计：56.6% 像素 <5%、9.3% 贴白正是该变换的签名）。
+static bool s_UpstreamIsHDR = false;
 static PipelineLayoutHandle s_ToneMapLayout = handles::INVALID_PIPELINE_LAYOUT;
 static DescriptorSetLayoutHandle s_ToneMapDSL = handles::INVALID_RESOURCE;
 static SamplerHandle s_ToneMapSampler = handles::INVALID_SAMPLER;
@@ -70,6 +80,7 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     if (s_ToneMapPipeline != handles::INVALID_PIPELINE) return;
 
     auto platform = device.GetPlatform();
+    s_UpstreamIsHDR = platform != RHIPlatform::Metal;
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "ToneMapping");
     // Resolve independently of process CWD（同 T8.13 对 TAA 的修复——从构建
     // 目录启动时裸 CWD 相对路径打不开文件，管线静默 INVALID，ToneMapping 整体旁路）。
@@ -454,9 +465,13 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             cmd->BeginRenderPass(passDesc);
             cmd->SetViewport(viewport);
             cmd->SetScissor({ { 0, 0 }, { (u32)viewport.size.x, (u32)viewport.size.y } });
-            // Metal：上游已 LDR，走透传（仅 bloom 合成）；Vulkan/Dawn：ACES。
-            const bool forceACES = s_ForceACES;
-            const bool usePassthrough = !forceACES &&
+            // 管线选择（2026-09-11 B10.5）：按上游单位制——
+            //   Metal（上游 LDR）→ 透传（仅 bloom 合成，legacy 基准观感）；
+            //   Vulkan/Dawn（上游线性 HDR）→ ACES+gamma（WGSL tonemap_fs 内
+            //   含 HDR_ACES_EXPOSURE 曝光标定）。
+            // PRIMAL_TONE_ACES=1 强制 ACES；PRIMAL_TONE_PASSTHROUGH=1 强制透传
+            // （Vulkan A/B 旧行为用）。
+            const bool usePassthrough = !s_ForceACES && !s_UpstreamIsHDR && !s_ForcePassthrough &&
                 s_ToneMapPassthroughPipeline != handles::INVALID_PIPELINE;
             cmd->BindGraphicsPipeline(usePassthrough ? s_ToneMapPassthroughPipeline
                                                      : s_ToneMapPipeline);
