@@ -138,6 +138,14 @@ validation VUID 直方图、dump1/2/4/5 产物）：
   hit_type≥3 = INVALID 哨兵；tile 网格/卡片集变更清零。LightEval 按 A 门控
   （Vulkan+Metal 同步）。区域门 sunlit/int 1.19→1.37，R_arcade 23.0→34.3。
 - 顺带修复 §三.E 记录的 sampleSDFNearest uvw==1 越界（夹至 size-1）。
+- **D（cone 伪精确命中隔离）已落地**：cone 检测原点统一为 ray_origin；
+  min-mip 命中记 hit_type=3（cone-occluded），不再拼接 probe_pos+t 的假
+  命中点做 SC 精确查询；resolve 对其计权重、零辐射（不吃天空也不借伪造
+  位置颜色），INVALID 哨兵顺移至 ≥4。证据 `stage2-d/`。注意：cone 假能量
+  移除后 direct/interior ratio 5.30 超旧带宽（2.3-4.6）——属预期移除，
+  重新平衡归阶段 3，门限阶段 4 以固定基线重定。
 
-**下一步**：阶段 2 剩余 = D（cone 伪精确命中隔离）→ C（SC 查询契约统一）；
-之后进入阶段 3（A/F 连续重建 → E）。370 条 validation 的分类清除仍留在阶段 4。
+**下一步**：阶段 2 收尾 = C（SC 查询契约统一：IndirectResolve 的
+first-hit 接受、DDGITraceFinalize 的容差、ScreenProbeTraceFinalize 的
+候选选择三路对齐）；之后进入阶段 3（A/F 连续重建 → E）。370 条
+validation 的分类清除仍留在阶段 4。
