@@ -107,4 +107,35 @@ expect_ok "sequence.save" "$PRIMAL" sequence.save
 grep -q "Sequences/SmokeSeq.pseq" "$OUT_DIR/last.json" || { echo "FAIL: .pseq 未落盘到 Sequences/"; exit 1; }
 echo "ok: .pseq 落盘（Sequences/SmokeSeq.pseq）" >&2
 
+# ============================================================================
+# 物理冒烟（M3 T2，自包含段）：地面(静态) + 球(动态) → sim.play → 坠落断言
+# → sim.pause → 截图。物理由 UI 线程定时器驱动（60Hz 固定步长，play 期间）。
+# ============================================================================
+step "物理冒烟（sim.*：ground + ball + play + 坠落断言）"
+expect_ok "phys 地面创建" "$PRIMAL" entity.create '{"kind":"Box","name":"PhysGround","position":[16,-0.5,-4]}'
+GROUND_GUID="$(python3 -c 'import json;print(json.load(open("'"$OUT_DIR"'/last.json"))["data"]["entityGuid"])')"
+expect_ok "phys 地面缩放" "$PRIMAL" entity.set-transform "{\"entityGuid\":\"$GROUND_GUID\",\"scale\":[40,1,40]}"
+expect_ok "phys 地面碰撞体(静态)" "$PRIMAL" sim.body.add "{\"entityGuid\":\"$GROUND_GUID\",\"shape\":\"box\",\"mode\":\"static\",\"half\":\"20,0.5,20\"}"
+
+expect_ok "phys 球创建" "$PRIMAL" entity.create '{"kind":"Sphere","name":"PhysBall","position":[16,3,-4]}'
+BALL_GUID="$(python3 -c 'import json;print(json.load(open("'"$OUT_DIR"'/last.json"))["data"]["entityGuid"])')"
+expect_ok "phys 球刚体(动态)" "$PRIMAL" sim.body.add "{\"entityGuid\":\"$BALL_GUID\",\"shape\":\"sphere\",\"mode\":\"dynamic\",\"half\":\"0.5\",\"mass\":1.0}"
+
+expect_ok "sim.play" "$PRIMAL" sim.play
+sleep 3
+
+"$PRIMAL" sim.body.status "{\"entityGuid\":\"$BALL_GUID\"}" > "$OUT_DIR/last.json"
+python3 -c '
+import json
+d = json.load(open("'"$OUT_DIR"'/last.json"))["data"]
+assert d.get("materialized"), ("球物理体未物化", d)
+y = d["position"][1]
+assert 0.0 < y < 1.5, ("球未按预期坠落（应从 3m 落到 ~0.5m）", y)
+print("   ball y =", round(y, 3), "| sleeping =", d["sleeping"])'
+
+expect_ok "sim.pause" "$PRIMAL" sim.pause
+expect_ok "phys 截图" "$PRIMAL" editor.screenshot "{\"path\":\"$OUT_DIR/physics.png\"}"
+test -s "$OUT_DIR/physics.png" || { echo "FAIL: 物理截图为空"; exit 1; }
+echo "ok: 物理截图（$OUT_DIR/physics.png）" >&2
+
 echo "SMOKE PASSED（产物在 ${OUT_DIR}）" >&2

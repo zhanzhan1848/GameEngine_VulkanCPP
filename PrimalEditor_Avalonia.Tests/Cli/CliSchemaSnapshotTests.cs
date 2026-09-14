@@ -25,6 +25,7 @@ public sealed class CliSchemaSnapshotTests
         registry.Register(new FrameCaptureCommands());
         registry.Register(new SequenceCommands());
         registry.Register(new RunCommands());
+        registry.Register(new PhysicsCommands());
 
         var options = new JsonSerializerOptions
         {

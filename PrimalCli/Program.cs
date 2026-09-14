@@ -95,6 +95,12 @@ internal static class Program
             return TestRender(positional.Skip(2).ToList());
         }
 
+        // M2 T3 离线物理门禁：`primal test physics …`（physics-sim 离屏仿真 + PNG 基线）
+        if (verb == "test" && positional.Count >= 2 && positional[1] == "physics")
+        {
+            return TestPhysics(positional.Skip(2).ToList());
+        }
+
         // Optional params JSON: either argv[1] or '-' (read stdin, for long payloads).
         JsonElement? parameters = null;
         if (positional.Count >= 2)
@@ -328,6 +334,105 @@ internal static class Program
         if (!passed)
         {
             Console.Error.WriteLine("primal: 渲染结果与基线不一致——若是预期改动，用 --update-baseline 更新基线并在 PR 说明");
+            return CliExitCodes.EngineError;
+        }
+        return CliExitCodes.Success;
+    }
+
+    /// M2 T3：离线物理门禁 —— `primal test physics`。
+    /// primal-engine physics-sim 离屏仿真（地面+动态盒坠落，PipelineTick 驱动），
+    /// C++ 侧已断言终态 y∈[0.44,0.56]（退出码承载），本层再做 PNG 基线比对。
+    private static int TestPhysics(System.Collections.Generic.List<string> restArgs)
+    {
+        string? baseline = null, heatmap = null;
+        bool update = false;
+        int threshold = ImageDiff.DefaultThreshold;
+        var simArgs = new System.Collections.Generic.List<string>();
+
+        for (int i = 0; i < restArgs.Count; i++)
+        {
+            switch (restArgs[i])
+            {
+                case "--baseline" when i + 1 < restArgs.Count: baseline = restArgs[++i]; break;
+                case "--heatmap" when i + 1 < restArgs.Count: heatmap = restArgs[++i]; break;
+                case "--update-baseline": update = true; break;
+                case "--threshold" when i + 1 < restArgs.Count && int.TryParse(restArgs[++i], out var t): threshold = t; break;
+                default: simArgs.Add(restArgs[i]); break;
+            }
+        }
+
+        var actual = Path.Combine(Path.GetTempPath(), $"primal-test-physics-{Guid.NewGuid():N}.png");
+        simArgs.AddRange(new[] { "--out", actual });
+        if (!simArgs.Contains("--width")) simArgs.AddRange(new[] { "--width", "320" });
+        if (!simArgs.Contains("--height")) simArgs.AddRange(new[] { "--height", "180" });
+        if (!simArgs.Contains("--frames")) simArgs.AddRange(new[] { "--frames", "120" });
+
+        var engine = LocatePrimalEngine();
+        if (engine == null)
+        {
+            Console.Error.WriteLine("primal: 未找到 primal-engine（离线执行器）");
+            return CliExitCodes.EditorNotRunning;
+        }
+
+        var childArgs = new System.Collections.Generic.List<string> { "physics-sim" };
+        foreach (var arg in simArgs) childArgs.Add(arg);
+        Console.Error.WriteLine("primal: test physics — 离屏物理仿真（120 帧坠落）…");
+        var (jsonLine, exitCode) = RunOffline(engine, childArgs);
+        if (jsonLine == null || exitCode != 0)
+        {
+            Console.Error.WriteLine($"primal: physics-sim 失败 (exit {exitCode})——物理数值断言未通过或引擎错误");
+            return CliExitCodes.EngineError;
+        }
+
+        baseline ??= Path.Combine("Testing", "Baselines", "physics-sim-320x180.png");
+
+        if (update || !File.Exists(baseline))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(baseline))!);
+            File.Copy(actual, baseline, overwrite: true);
+            Console.Out.WriteLine(JsonSerializer.Serialize(new
+            {
+                ok = true,
+                data = new
+                {
+                    verdict = "baseline-created",
+                    baseline = Path.GetFullPath(baseline),
+                    actual,
+                },
+            }, PrettyOptions));
+            Console.Error.WriteLine(update
+                ? "primal: 基线已更新（--update-baseline）"
+                : "primal: 基线不存在，已用本次仿真创建。提交该基线后 CI 即开始门禁。");
+            return CliExitCodes.Success;
+        }
+
+        var diff = ImageDiff.Compare(actual, baseline, heatmap, threshold);
+        var verdict = !diff.SameSize ? "different-size"
+            : diff.Identical ? "identical"
+            : diff.ChangedPixelRatio == 0 ? "within-threshold" : "different";
+        var passed = verdict is "identical" or "within-threshold";
+        Console.Out.WriteLine(JsonSerializer.Serialize(new
+        {
+            ok = passed,
+            data = new
+            {
+                verdict,
+                baseline = Path.GetFullPath(baseline),
+                actual,
+                meanAbsDelta = diff.MeanAbsDelta,
+                maxAbsDelta = diff.MaxAbsDelta,
+                changedPixelRatio = diff.ChangedPixelRatio,
+                changedPixelCount = diff.ChangedPixelCount,
+                threshold,
+                heatmap,
+            },
+        }, PrettyOptions));
+
+        try { File.Delete(actual); } catch { }
+
+        if (!passed)
+        {
+            Console.Error.WriteLine("primal: 物理仿真画面与基线不一致——若是预期改动，用 --update-baseline 更新基线并在 PR 说明");
             return CliExitCodes.EngineError;
         }
         return CliExitCodes.Success;

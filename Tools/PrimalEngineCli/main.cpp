@@ -176,6 +176,14 @@ u32  CreateCamera(u32 entityId, float fov, float aspect, float nearZ, float farZ
 void SetEntityTransform(u32 entityId, float* position, float* rotation, float* scale);
 u64  ProceduralMeshCreate(u32 meshType, float* parameters, u32 parameterCount);
 void ProceduralMeshDestroy(u64 contentId);
+
+// 物理仿真（PhysicsAPI.cpp — M2 离线门禁；POD 布局与 EngineDLL/PhysicsAPI.cpp 一致）
+u32  PhysicsInitialize(const void* settingsPod);
+void PhysicsShutdown(void);
+u32  PhysicsSetRunning(u32 running);
+void PipelineTick(f32 dtSeconds);
+u64  PhysicsBodyCreate(const void* bodyDescPod);
+u32  PhysicsBodyGetTransform(u64 bodyId, void* outTransformPod);
 u64  PipelineRegisterMeshEntity(u64 geometryContentId, u64* textureContentIds, u32 textureCount);
 void PipelineUnregisterMeshEntity(u64 entityId);
 u64  PipelineRegisterLightEntity(PipelineLightDesc* desc);
@@ -402,6 +410,196 @@ int VerbRender(int argc, char** argv)
                   JsonEscape(outPath).c_str(), width, height, frames);
     PrintOk(data);
     return kExitOk;
+#endif
+}
+
+// physics-sim（M2 T3 离线门禁）：离屏物理仿真——地面 + 动态盒从 y=3 落地，
+// 固定 1/60 步长驱动 PipelineTick，每帧渲染进离屏 RT，末帧写 PNG。
+// 物理数值断言：终态盒 y ∈ [0.44, 0.56]（半高 0.5）。这是"接通即有测试 +
+// 渲染可视化"纪律的 CLI 形态（设计文档 §8.4）。
+int VerbPhysicsSim(int argc, char** argv)
+{
+#if defined(_WIN32)
+    (void)argc; (void)argv;
+    PrintError("NOT_SUPPORTED", "physics-sim 在 Windows 上尚未可用", "使用 macOS/Linux 运行离线 verbs");
+    return kExitEngine;
+#else
+    const char* outPath = nullptr;
+    u32 width = 320, height = 180;
+    int frames = 120;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const auto next = [&]() -> const char* {
+            return (i + 1 < argc) ? argv[++i] : nullptr;
+        };
+        if (std::strcmp(argv[i], "--out") == 0)
+        {
+            outPath = next();
+            if (!outPath) { PrintError("INVALID_PARAMS", "--out 缺少路径参数", "示例: --out /tmp/phys.png"); return kExitUsage; }
+        }
+        else if (std::strcmp(argv[i], "--width") == 0 && next()) width = static_cast<u32>(std::atoi(argv[i]));
+        else if (std::strcmp(argv[i], "--height") == 0 && next()) height = static_cast<u32>(std::atoi(argv[i]));
+        else if (std::strcmp(argv[i], "--frames") == 0 && next()) frames = std::atoi(argv[i]);
+        else
+        {
+            PrintError("INVALID_PARAMS", (std::string("未知参数: ") + argv[i]).c_str(),
+                       "支持 --out/--width/--height/--frames");
+            return kExitUsage;
+        }
+    }
+
+    if (!outPath || width == 0 || height == 0 || frames < 30 || frames > 600)
+    {
+        PrintError("INVALID_PARAMS", "参数无效（需要 --out；frames 30..600）",
+                   "示例: primal-engine physics-sim --out /tmp/phys.png --frames 120");
+        return kExitUsage;
+    }
+
+    // POD 镜像（布局必须与 EngineDLL/PhysicsAPI.cpp 逐字段一致，static_assert 锁尺寸）
+    struct PhysicsSettingsPod
+    {
+        float gravity[3]; unsigned max_bodies, max_worker_threads; float fixed_dt; unsigned max_sub_steps;
+    };
+    static_assert(sizeof(PhysicsSettingsPod) == 28, "ABI mismatch vs EngineDLL/PhysicsAPI.cpp");
+    struct PhysicsBodyDescPod
+    {
+        unsigned shape, mode;
+        float half[3], position[3], euler[3];
+        float mass, restitution, friction;
+        unsigned layer, debug_draw_proxy;
+    };
+    static_assert(sizeof(PhysicsBodyDescPod) == 64, "ABI mismatch vs EngineDLL/PhysicsAPI.cpp");
+    struct PhysicsBodyTransformPod
+    {
+        float position[3], orientation_euler[3], linear_velocity[3]; unsigned sleeping;
+    };
+    static_assert(sizeof(PhysicsBodyTransformPod) == 40, "ABI mismatch vs EngineDLL/PhysicsAPI.cpp");
+
+    LogToStderr("initializing engine (offline physics-sim)…");
+    const u32 platform =
+#if defined(__APPLE__)
+        kPlatformMetal;
+#else
+        kPlatformVulkan;
+#endif
+    if (InitializeEngine(platform, 0) == 0)
+    {
+        PrintError("ENGINE_ERROR", "InitializeEngine 失败", "确认 shader blob 与 dylib 同目录并从该目录运行");
+        return kExitEngine;
+    }
+    auto fail = [&](const char* message) {
+        PrintError("ENGINE_ERROR", message, "重跑一次；连续失败请附 stderr 日志上报");
+        return kExitEngine;
+    };
+
+    SetPipelineViewportSize(width, height);
+    const u64 device = GetEngineDeviceHandle();
+    if (device == 0 || CreateStandardRenderPipeline(device) == 0) return fail("CreateStandardRenderPipeline 失败");
+    PipelineSetEditorMode(1);
+
+    // 相机（正视坠落平面）
+    const u32 cameraEntity = CreateEntity(0.f, 1.5f, -14.f);
+    if (cameraEntity == 0xFFFFFFFFu) return fail("CreateEntity 失败");
+    const u32 camera = CreateCamera(cameraEntity, 1.f / 3.f, static_cast<float>(width) / static_cast<float>(height), 0.1f, 1000.f);
+    if (camera == 0xFFFFFFFFu) return fail("CreateCamera 失败");
+
+    // 网格：地面 20×1×20 + 动态盒 1×1×1（type 3 = box，参数为全尺寸）
+    float groundParams[3] = { 20.f, 1.f, 20.f };
+    const u64 groundGeo = ProceduralMeshCreate(3, groundParams, 3);
+    float boxParams[3] = { 1.f, 1.f, 1.f };
+    const u64 boxGeo = ProceduralMeshCreate(3, boxParams, 3);
+    if (groundGeo == 0xFFFFFFFFFFFFFFFFull || boxGeo == 0xFFFFFFFFFFFFFFFFull) return fail("ProceduralMeshCreate 失败");
+
+    u64 textureIds[1] = { 0 };
+    const u32 groundEntity = PipelineRegisterMeshEntity(groundGeo, textureIds, 1);
+    const u32 boxEntity = PipelineRegisterMeshEntity(boxGeo, textureIds, 1);
+    if (groundEntity == 0xFFFFFFFFu || boxEntity == 0xFFFFFFFFu) return fail("PipelineRegisterMeshEntity 失败");
+    {
+        float gp[3] = { 0.f, -0.5f, 0.f }, bp[3] = { 0.f, 3.f, 0.f };
+        float rot[3] = { 0.f, 0.f, 0.f }, scl[3] = { 1.f, 1.f, 1.f };
+        SetEntityTransform(groundEntity, gp, rot, scl);
+        SetEntityTransform(boxEntity, bp, rot, scl);
+    }
+
+    PipelineLightDesc light{};
+    light.type = 0;
+    light.color[0] = light.color[1] = light.color[2] = 1.f;
+    light.intensity = 5.f;
+    light.direction[0] = -1.f; light.direction[1] = -1.f; light.direction[2] = 0.f;
+    light.is_enabled = 1;
+    const u64 lightEntity = PipelineRegisterLightEntity(&light);
+
+    // 物理：地面静态 + 动态盒 @ y=3
+    PhysicsSettingsPod ps{};
+    ps.gravity[0] = 0.f; ps.gravity[1] = -9.81f; ps.gravity[2] = 0.f;
+    ps.max_bodies = 4096; ps.max_worker_threads = 0;   // 0 = 单线程确定性
+    ps.fixed_dt = 1.f / 60.f; ps.max_sub_steps = 5;
+    if (PhysicsInitialize(&ps) == 0) return fail("PhysicsInitialize 失败");
+
+    PhysicsBodyDescPod gd{};
+    gd.shape = 0; gd.mode = 0;   // static box
+    gd.layer = 0;                // simulation::layers::kStatic
+    gd.half[0] = 10.f; gd.half[1] = 0.5f; gd.half[2] = 10.f;
+    gd.position[1] = -0.5f;
+    gd.restitution = 0.1f; gd.friction = 0.5f;
+    const u64 groundBody = PhysicsBodyCreate(&gd);
+
+    PhysicsBodyDescPod bd{};
+    bd.shape = 0; bd.mode = 1;   // dynamic box
+    bd.layer = 1;                // simulation::layers::kDynamic——POD 零值 = kStatic，
+                                 // 动态体落错 broadphase 层会直接穿地（首个实测踩坑）
+    bd.half[0] = bd.half[1] = bd.half[2] = 0.5f;
+    bd.position[1] = 3.f;
+    bd.mass = 1.f; bd.restitution = 0.1f; bd.friction = 0.5f;
+    const u64 boxBody = PhysicsBodyCreate(&bd);
+    if (groundBody == 0 || boxBody == 0) return fail("PhysicsBodyCreate 失败");
+    PhysicsSetRunning(1);
+
+    const u64 target = CreateRenderTarget(width, height, kRenderTargetFormatRgba16F);
+    if (target == 0) return fail("CreateRenderTarget 失败");
+
+    for (int i = 0; i < frames; ++i)
+    {
+        PipelineTick(1.f / 60.f);
+        PhysicsBodyTransformPod t{};
+        if (PhysicsBodyGetTransform(boxBody, &t) == 1)
+        {
+            float pos[3] = { t.position[0], t.position[1], t.position[2] };
+            float rot[3] = { 0.f, 0.f, 0.f }, scl[3] = { 1.f, 1.f, 1.f };
+            SetEntityTransform(boxEntity, pos, rot, scl);
+        }
+        if (PipelineRenderFrame(target, camera, kInvalidSurfaceId) == 0)
+            return fail("PipelineRenderFrame 失败");
+    }
+
+    PhysicsBodyTransformPod ft{};
+    const int have_final = PhysicsBodyGetTransform(boxBody, &ft);
+    const float final_y = have_final ? ft.position[1] : -1000.f;
+    const bool physics_passed = have_final && (final_y > 0.44f && final_y < 0.56f);
+
+    const int saved = SaveRenderTargetAsPng(target, outPath);
+    if (saved == 0) return fail("SaveRenderTargetAsPng 失败");
+
+    // JSON 先行：结果在 SaveRenderTargetAsPng 后已完全确定
+    char data[640];
+    std::snprintf(data, sizeof(data),
+                  "{\"ok\":true,\"passed\":%s,\"final_y\":%.4f,\"expected_y\":0.5,\"frames\":%d,\"path\":%s}",
+                  physics_passed ? "true" : "false", static_cast<double>(final_y), frames,
+                  JsonEscape(outPath).c_str());
+    PrintOk(data);
+
+    if (!physics_passed)
+    {
+        PrintError("PHYSICS_FAILED", "动态盒未落在地面（y 偏离 0.5 带内）",
+                   "若为预期物理行为变更，更新 --frames 或检查重力/接触参数");
+    }
+
+    // 一次性门禁进程：不做逐层拆除（teardown 与 cwd 相关的 shader 状态耦合，
+    // 存在引擎侧双重释放噪声），直接带确定退出码退出，资源由 OS 回收。
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::_Exit(physics_passed ? kExitOk : kExitEngine);
 #endif
 }
 
@@ -1061,6 +1259,7 @@ int Run(int argc, char** argv)
     const std::string verb = argv[1];
     if (verb == "engine" && argc >= 3 && std::strcmp(argv[2], "info") == 0) return VerbEngineInfo();
     if (verb == "render") return VerbRender(argc - 2, argv + 2);
+    if (verb == "physics-sim") return VerbPhysicsSim(argc - 2, argv + 2);
     if (verb == "cook-mesh") return VerbCookMesh(argc - 2, argv + 2);
     if (verb == "import-texture") return VerbImportTexture(argc - 2, argv + 2);
     if (verb == "bake-vt") return VerbBakeVt(argc - 2, argv + 2);

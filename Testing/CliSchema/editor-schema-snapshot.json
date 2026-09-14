@@ -1,5 +1,5 @@
 {
-  "$version": "93acaa9fb41a4d21",
+  "$version": "c88b38e8d6e69fae",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -816,6 +816,110 @@
       "description": "停止预览播放并回到第 0 帧（应用第 0 帧求值结果）。",
       "example": "{}",
       "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sim.body.add",
+      "channel": "editor",
+      "description": "为实体添加 Collider + RigidBody 组件并物化物理体。shape: box|sphere（缺省 box）；mode: static|dynamic|kinematic（缺省 dynamic）；half: box 半尺寸或 sphere 半径（米，'s' 或 'x,y,z'，缺省 0.5,0.5,0.5）；mass 千克（缺省 1）；restitution/friction ∈[0,1]（缺省 0.1/0.5）。失败：实体不存在 → NotFound，参数非法 → InvalidParams。",
+      "example": "{\"entityGuid\":\"0c9a1d2e-1111-2222-3333-444455556666\",\"shape\":\"box\",\"mode\":\"dynamic\",\"mass\":1.0}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "shape",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "half",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "mass",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "restitution",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "friction",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sim.body.status",
+      "channel": "editor",
+      "description": "查询实体物理体的实时状态：position（米）、sleeping。前置：实体已物化物理体（sim.body.add 或同步器推送）。实体不存在 → NotFound；未物化 → materialized:false（非失败）。",
+      "example": "{\"entityGuid\":\"0c9a1d2e-1111-2222-3333-444455556666\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sim.materialize",
+      "channel": "editor",
+      "description": "为所有带 Collider 的存活实体补建物理体（幂等；sim.play 会自动调用）。返回本次新建数量。调试用。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sim.pause",
+      "channel": "editor",
+      "description": "暂停物理仿真（保留当前状态；sim.step 仍可单步推进）。无参数。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sim.play",
+      "channel": "editor",
+      "description": "启动物理仿真（若未初始化则以缺省参数初始化物理世界）。此后引擎每帧以固定步长 1/60s 推进物理，并回写物理驱动实体的 Transform。无参数。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sim.status",
+      "channel": "editor",
+      "description": "查询物理世界状态：initialized（物理世界是否存在）、running（是否在推进）。无参数。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "sim.step",
+      "channel": "editor",
+      "description": "暂停状态下手动推进 N 个固定步长（每步 1/60s，N∈[1,600]）。单位：秒/60。隐含暂停语义：运行中先暂停再步进。失败：参数越界 → InvalidParams。",
+      "example": "{\"frames\":1}",
+      "params": [
+        {
+          "name": "frames",
+          "type": "integer",
+          "required": false
+        }
+      ],
       "returns": "object"
     }
   ]

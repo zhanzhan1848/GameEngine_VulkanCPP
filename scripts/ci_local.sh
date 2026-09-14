@@ -61,6 +61,17 @@ BASE="$TMP/baseline.png"
 "$PRIMAL" test render --baseline "$BASE" >/dev/null 2>&1 || fail "test render identical 应通过"
 echo "baseline create + identical OK"
 
+step "6b/8 物理离线门禁（primal test physics：离屏仿真 + 物理断言 + 基线）"
+# 物理仿真固定用 Darwin/Debug 的 primal-engine（见设计文档 §10-8：DebugEditor
+# 混合配置下 Jolt 物理世界初始化存在堆损坏，专项排查前不在该配置跑物理）
+PHYS_ENGINE="$ROOT/Darwin/Debug/primal-engine"
+cmake --build "$ROOT/Darwin/Debug" --target PrimalEngineCli --parallel >/dev/null
+PRIMAL_ENGINE_BIN="$PHYS_ENGINE" "$PRIMAL" test physics --baseline "$TMP/phys-baseline.png" >/dev/null 2>&1 \
+    || fail "test physics 建基线"
+PRIMAL_ENGINE_BIN="$PHYS_ENGINE" "$PRIMAL" test physics --baseline "$TMP/phys-baseline.png" >/dev/null 2>&1 \
+    || fail "test physics identical 应通过"
+echo "test physics OK"
+
 step "7/8 虚拟纹理烘焙（bake-vt 薄包装 vtbake）"
 VTBAKE="$ROOT/build-wt/Tools/vtbake"
 [ -x "$VTBAKE" ] || VTBAKE="$ROOT/Darwin/Debug/Tools/vtbake"
@@ -70,7 +81,20 @@ python3 -c "import zlib,struct;w=h=8;raw=b''.join(b'\\x00'+bytes([200,30,40]*w) 
 [ -s "$TMP/t.vtex" ] || fail "bake-vt 产物为空"
 echo "bake-vt OK"
 
-step "8/8 编辑器闭环冒烟（PRIMAL_OPEN_PROJECT；无显示环境用 SKIP_EDITOR_SMOKE=1 跳过）"
+step "8/9 物理模拟门禁（L0 单测 + T0 可视化冒烟，Engine/Simulation × Jolt）"
+# 注意：物理测试跑在 Darwin/Debug（仓库规定的 C++ 回归树，AGENTS.md 同款）。
+# build-wt 的 DebugEditor 混合配置（Engine -O3/NDEBUG × Jolt）当前存在独立的堆损坏
+# 问题（见 Docs/2026-09-11-physics-simulation-design.md §10），本门禁不在那棵树跑。
+PHYS_BUILD="$ROOT/Darwin/Debug"
+cmake --build "$PHYS_BUILD" --target TestPhysicsSimulation TestPhysicsSmoke --parallel >/dev/null
+ctest --test-dir "$PHYS_BUILD" -R "UnitPhysicsSimulation" --output-on-failure >/dev/null \
+    || fail "UnitPhysicsSimulation"
+echo "UnitPhysicsSimulation OK"
+ctest --test-dir "$PHYS_BUILD" -R "Engine_Integration_Tests_TestPhysicsSmoke" --output-on-failure >/dev/null \
+    || fail "TestPhysicsSmoke"
+echo "TestPhysicsSmoke OK"
+
+step "9/9 编辑器闭环冒烟（PRIMAL_OPEN_PROJECT；无显示环境用 SKIP_EDITOR_SMOKE=1 跳过）"
 if [ "${SKIP_EDITOR_SMOKE:-0}" = "1" ]; then
     echo "skipped (SKIP_EDITOR_SMOKE=1)"
 else
