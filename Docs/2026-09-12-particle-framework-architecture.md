@@ -545,7 +545,7 @@ Niagara 可视化节点编辑器（N7 可选）、全量 GPU 模块翻译、SPH/
 | N3 事件 + 刚体消费者 | ✅ 完成 | 4 项含确定性哈希门禁 |
 | N4 场系统 + POP 碰撞/平流 | ✅ 完成 | 5 项 + 死代码清理完成 |
 | N5 GPU 图发射器 | ⏸ 延后（决议②） | 启动条件见 §3.6 |
-| N6 预算/LOD + 渲染件 | 🔶 预算/LOD/ribbon/soft/fluid/light/decal 完成（六大渲染件 Sponza 同帧共存证据）；emissive→GI v1 聚合注入完成（设计文档已出） |
+| N6 预算/LOD + 渲染件 | ✅ 完成——预算/LOD/ribbon/soft/fluid/light/decal + emissive v1 聚合注入全部落地（六大渲染件 Sponza 同帧共存 2891 帧 VALID） |
 | N7 可选项池 | 按需（不默认进） | — |
 
 **回归证据**：TestParticleFX 34 项全绿；TestParticles / TestPhysicsSimulation / TestPhysicsM4 无回归；C# Native 72 项 + Cli 55/56（唯一失败为 dev 分支预置 schema 快照问题，与 PFX 无关）；Sponza 集成冒烟 90s 4888 帧 VALID 零 fault。
