@@ -32,20 +32,34 @@ norm_sha() {  # 规范化哈希：剔除 #include 行
     grep -v '^[[:space:]]*#include' "$1" | shasum -a 256 | cut -d' ' -f1
 }
 
+# 测试副本 → 引擎权威源的映射：先同相对路径，再 Lumen/ 子目录
+# （T3.6 教训：引擎 gather 在 Lumen/ 下，flat 映射把这对标成 TEST_ONLY，
+#  绑定签名级断裂从门禁漏网）
+twin_of() {
+    local f="$1"
+    if [ -f "Engine/Graphics/Metal/shaders/$f" ]; then
+        echo "Engine/Graphics/Metal/shaders/$f"
+    elif [ -f "Engine/Graphics/Metal/shaders/Lumen/$f" ]; then
+        echo "Engine/Graphics/Metal/shaders/Lumen/$f"
+    else
+        echo ""
+    fi
+}
+
 current_state() {
     # 遍历 EngineTest/shaders 下所有 .metal，与 Engine 树同名文件比对
     (cd EngineTest/shaders && find . -name '*.metal' | sed 's|^\./||' | sort) | while read -r f; do
-        twin="Engine/Graphics/Metal/shaders/$f"
-        if [ -f "$twin" ]; then
+        twin=$(twin_of "$f")
+        if [ -n "$twin" ]; then
             ha=$(norm_sha "EngineTest/shaders/$f")
             hb=$(norm_sha "$twin")
             if [ "$ha" = "$hb" ]; then
-                echo "SAME $f"
+                echo "SAME $twin $f"
             else
-                echo "DRIFT $f"
+                echo "DRIFT $twin $f"
             fi
         else
-            echo "TEST_ONLY $f"
+            echo "TEST_ONLY - $f"
         fi
     done
 }
@@ -63,17 +77,17 @@ fi
 
 fail=0
 fixed=0
-# 逐对比对（baseline 驱动）
-while read -r exp_status f; do
-    if [ ! -f "EngineTest/shaders/$f" ] || [ ! -f "Engine/Graphics/Metal/shaders/$f" ]; then
+# 逐对比对（baseline 驱动；行格式 = <status> <twin-path> <test-path>）
+while read -r exp_status twin f; do
+    if [ ! -f "EngineTest/shaders/$f" ] || [ ! -f "$twin" ]; then
         continue  # 文件被移动/删除：结构变化，由 --update-baseline 记账
     fi
     ha=$(norm_sha "EngineTest/shaders/$f")
-    hb=$(norm_sha "Engine/Graphics/Metal/shaders/$f")
+    hb=$(norm_sha "$twin")
     now_status="DRIFT"; [ "$ha" = "$hb" ] && now_status="SAME"
     if [ "$exp_status" = "SAME" ] && [ "$now_status" = "DRIFT" ]; then
         echo "[shader-copies] FAIL: NEW drift — $f"
-        echo "    EngineTest/shaders/$f vs Engine/Graphics/Metal/shaders/$f diverged."
+        echo "    EngineTest/shaders/$f vs $twin diverged."
         echo "    Sync the copy, or (structural reason) update the baseline deliberately."
         fail=1
     elif [ "$exp_status" = "DRIFT" ] && [ "$now_status" = "SAME" ]; then

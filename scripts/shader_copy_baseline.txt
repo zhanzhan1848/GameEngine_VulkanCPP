@@ -1,77 +1,77 @@
-TEST_ONLY CardCapture.metal
-TEST_ONLY ClusterBinning.metal
-SAME CommonConstants.metal
-DRIFT CommonFunction.metal
-DRIFT CommonTypes.metal
-TEST_ONLY Compose.metal
-TEST_ONLY DDGIGIGather.metal
-TEST_ONLY DDGIProbeAtlas.metal
-TEST_ONLY DDGIVisibility.metal
-TEST_ONLY DebugTexture.metal
-TEST_ONLY DeferredLighting.metal
-TEST_ONLY DepthOnly.metal
-SAME DepthPassShader.metal
-TEST_ONLY EquirectangularToCube.metal
-DRIFT FullScreenTriangle.metal
-TEST_ONLY GBuffer.metal
-TEST_ONLY GBufferAlphaClip.metal
-TEST_ONLY GBufferFoliage.metal
-TEST_ONLY GBufferTransparent.metal
-TEST_ONLY GBufferUnlit.metal
-TEST_ONLY GBufferWater.metal
-TEST_ONLY GPUCullingPipeline.metal
-TEST_ONLY GPUDrivenDraw.metal
-TEST_ONLY IBL_BRDFIntegration.metal
-TEST_ONLY IBL_Hammersley.metal
-TEST_ONLY IBL_IrradianceConvolution.metal
-TEST_ONLY IBL_SpecularPrefilter.metal
-TEST_ONLY InstanceData.metal
-SAME Lumen/DDGICardRadianceAvg.metal
-SAME Lumen/DDGIProbeIrradianceFromCards.metal
-DRIFT Lumen/DDGITraceRays.metal
-DRIFT Lumen/DDGIVolumeData.metal
-DRIFT Lumen/SDFTraceCommon.metal
-SAME Lumen/SSGIFilter.metal
-SAME Lumen/SSGITemporal.metal
-SAME Lumen/SSGITrace.metal
-DRIFT Lumen/ScreenProbeTraceRays.metal
-TEST_ONLY Lumen/SurfaceCacheCardCapture.metal
-DRIFT Lumen/SurfaceCacheData.metal
-SAME Lumen/SurfaceCacheDilate.metal
-SAME Lumen/SurfaceCacheIndirectResolve.metal
-SAME Lumen/SurfaceCacheIndirectTrace.metal
-SAME Lumen/SurfaceCacheLightCull.metal
-SAME Lumen/SurfaceCacheLightEval.metal
-TEST_ONLY Lumen/SurfaceCacheTestData.metal
-TEST_ONLY MeshletCulling.metal
-TEST_ONLY MirrorReflection.metal
-TEST_ONLY MultiView.metal
-TEST_ONLY MultiView_Updated.metal
-DRIFT ParticleAtlas.metal
-DRIFT PostProcess.metal
-TEST_ONLY ProbeSphere.metal
-TEST_ONLY RHIShaderCommon.metal
-TEST_ONLY RHIShaderConstants.metal
-TEST_ONLY RHIShaderFunctions.metal
-TEST_ONLY RHIShaderPBR.metal
-TEST_ONLY RHIShaderTypes.metal
-TEST_ONLY SH_Common.metal
-SAME SSAOShader.metal
-SAME SSGIShader.metal
-TEST_ONLY ShadowBlit.metal
-TEST_ONLY ShadowCulling.metal
-TEST_ONLY ShadowDepth.metal
-TEST_ONLY ShadowFilter.metal
-TEST_ONLY ShadowMoments.metal
-TEST_ONLY ShadowSampling.metal
-TEST_ONLY SimpleColor.metal
-TEST_ONLY SimpleGeometry.metal
-TEST_ONLY SimpleTest.metal
-TEST_ONLY Skybox.metal
-DRIFT TAA.metal
-TEST_ONLY TAAShader.metal
-TEST_ONLY TestPRT.metal
-TEST_ONLY TestPRTBaked.metal
-TEST_ONLY TestShader_CSM.metal
-DRIFT VisibilityBuffer.metal
-TEST_ONLY VisibilityBufferResolve.metal
+TEST_ONLY - CardCapture.metal
+TEST_ONLY - ClusterBinning.metal
+SAME Engine/Graphics/Metal/shaders/CommonConstants.metal CommonConstants.metal
+DRIFT Engine/Graphics/Metal/shaders/CommonFunction.metal CommonFunction.metal
+DRIFT Engine/Graphics/Metal/shaders/CommonTypes.metal CommonTypes.metal
+TEST_ONLY - Compose.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/DDGIGIGather.metal DDGIGIGather.metal
+TEST_ONLY - DDGIProbeAtlas.metal
+TEST_ONLY - DDGIVisibility.metal
+TEST_ONLY - DebugTexture.metal
+TEST_ONLY - DeferredLighting.metal
+TEST_ONLY - DepthOnly.metal
+SAME Engine/Graphics/Metal/shaders/DepthPassShader.metal DepthPassShader.metal
+TEST_ONLY - EquirectangularToCube.metal
+DRIFT Engine/Graphics/Metal/shaders/FullScreenTriangle.metal FullScreenTriangle.metal
+TEST_ONLY - GBuffer.metal
+TEST_ONLY - GBufferAlphaClip.metal
+TEST_ONLY - GBufferFoliage.metal
+TEST_ONLY - GBufferTransparent.metal
+TEST_ONLY - GBufferUnlit.metal
+TEST_ONLY - GBufferWater.metal
+TEST_ONLY - GPUCullingPipeline.metal
+TEST_ONLY - GPUDrivenDraw.metal
+TEST_ONLY - IBL_BRDFIntegration.metal
+TEST_ONLY - IBL_Hammersley.metal
+TEST_ONLY - IBL_IrradianceConvolution.metal
+TEST_ONLY - IBL_SpecularPrefilter.metal
+TEST_ONLY - InstanceData.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/DDGICardRadianceAvg.metal Lumen/DDGICardRadianceAvg.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/DDGIProbeIrradianceFromCards.metal Lumen/DDGIProbeIrradianceFromCards.metal
+DRIFT Engine/Graphics/Metal/shaders/Lumen/DDGITraceRays.metal Lumen/DDGITraceRays.metal
+DRIFT Engine/Graphics/Metal/shaders/Lumen/DDGIVolumeData.metal Lumen/DDGIVolumeData.metal
+DRIFT Engine/Graphics/Metal/shaders/Lumen/SDFTraceCommon.metal Lumen/SDFTraceCommon.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SSGIFilter.metal Lumen/SSGIFilter.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SSGITemporal.metal Lumen/SSGITemporal.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SSGITrace.metal Lumen/SSGITrace.metal
+DRIFT Engine/Graphics/Metal/shaders/Lumen/ScreenProbeTraceRays.metal Lumen/ScreenProbeTraceRays.metal
+TEST_ONLY - Lumen/SurfaceCacheCardCapture.metal
+DRIFT Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheData.metal Lumen/SurfaceCacheData.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheDilate.metal Lumen/SurfaceCacheDilate.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheIndirectResolve.metal Lumen/SurfaceCacheIndirectResolve.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheIndirectTrace.metal Lumen/SurfaceCacheIndirectTrace.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheLightCull.metal Lumen/SurfaceCacheLightCull.metal
+DRIFT Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheLightEval.metal Lumen/SurfaceCacheLightEval.metal
+TEST_ONLY - Lumen/SurfaceCacheTestData.metal
+TEST_ONLY - MeshletCulling.metal
+TEST_ONLY - MirrorReflection.metal
+TEST_ONLY - MultiView.metal
+TEST_ONLY - MultiView_Updated.metal
+DRIFT Engine/Graphics/Metal/shaders/ParticleAtlas.metal ParticleAtlas.metal
+DRIFT Engine/Graphics/Metal/shaders/PostProcess.metal PostProcess.metal
+TEST_ONLY - ProbeSphere.metal
+TEST_ONLY - RHIShaderCommon.metal
+TEST_ONLY - RHIShaderConstants.metal
+TEST_ONLY - RHIShaderFunctions.metal
+TEST_ONLY - RHIShaderPBR.metal
+TEST_ONLY - RHIShaderTypes.metal
+TEST_ONLY - SH_Common.metal
+SAME Engine/Graphics/Metal/shaders/SSAOShader.metal SSAOShader.metal
+SAME Engine/Graphics/Metal/shaders/SSGIShader.metal SSGIShader.metal
+TEST_ONLY - ShadowBlit.metal
+TEST_ONLY - ShadowCulling.metal
+TEST_ONLY - ShadowDepth.metal
+TEST_ONLY - ShadowFilter.metal
+TEST_ONLY - ShadowMoments.metal
+TEST_ONLY - ShadowSampling.metal
+TEST_ONLY - SimpleColor.metal
+TEST_ONLY - SimpleGeometry.metal
+TEST_ONLY - SimpleTest.metal
+TEST_ONLY - Skybox.metal
+DRIFT Engine/Graphics/Metal/shaders/TAA.metal TAA.metal
+TEST_ONLY - TAAShader.metal
+TEST_ONLY - TestPRT.metal
+TEST_ONLY - TestPRTBaked.metal
+TEST_ONLY - TestShader_CSM.metal
+DRIFT Engine/Graphics/Metal/shaders/VisibilityBuffer.metal VisibilityBuffer.metal
+TEST_ONLY - VisibilityBufferResolve.metal

@@ -80,6 +80,14 @@ private:
     std::vector<double> giHalflifeSamples_;
     primal::graphics::RenderLight giHalflifeSun_{};
     double ReadCamCellProbeL0();
+    // C2.3 (2026-09-10): response-metric instrument — strided u16 bit-sample
+    // of the SC lighting atlas (same recipe as DDGI_DUMP=4). The halflife
+    // gate compares pre-dim vs post-dim dumps: the SC atlas is the FIRST
+    // link in the sun→GI transport chain (LightEval writes direct radiance
+    // here), so a 10× dim must move a large fraction of bit samples. The
+    // old camcell-L0 metric sat downstream of the probe EMA + the multi-
+    // stable SC↔probe loop — 10× dimming moved it only 1-5% (SNR too low).
+    bool DumpSCAtlasBits(const char* path, u64& nonzero, u64& rawSum);
     // T4.6.5 part 37: load HDR + equirect→cube + IBL precompute + SetIBLResources.
     bool InitializeIBL();
 
