@@ -724,8 +724,10 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits
             {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev indirect_out (T3.3 EMA)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // tile validity bitmask (B)
+            {11, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas (C: capture validation)
+            {12, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // normal_atlas (C: orientation)
         };
-        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({11, bindings});
+        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(0)]]
@@ -739,8 +741,10 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits      [[buffer(4)]]
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // tile validity [[buffer(5)]] (B)
             {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev indirect_out [[texture(6)]] (T3.3 EMA)
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas   [[texture(7)]] (C)
+            {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas  [[texture(8)]] (C)
         };
-        DescriptorSetLayoutDesc layoutDesc{11, bindings};
+        DescriptorSetLayoutDesc layoutDesc{13, bindings};
         indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -2536,6 +2540,16 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         // valid) or explicit zeros, never stale ray_hits.
                         rp->refresh_stride = kStride;
                         rp->refresh_phase = kStride > 1u ? current_frame_index % kStride : 0u;
+                        // C: same hit band the trace marches with — a march
+                        // hit can undershoot the true surface by up to this
+                        // much along the ray, so the capture-validation
+                        // tolerance must absorb it.
+                        float voxel0 = useOfflineSdf
+                            ? sc_offline_sdf_extent_.x / float(std::max(sc_offline_sdf_resolution_, 1u))
+                            : (gsdf.GetConfig().cascade_count > 0u
+                                ? gsdf.GetCascade(0).extent.x / float(std::max(gsdf.GetCascade(0).resolution, 1u))
+                                : 0.30f);
+                        rp->hit_band = std::max(voxel0 * 1.25f, 0.30f);
                         device_->UnmapBuffer(indirect_resolve_params_cb_[frameIdx]);
                     }
 
@@ -2561,6 +2575,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                        indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE
                                            ? indirect_tile_valid_buffer_
                                            : card_dispatch_buffer_};
+                            // C: capture validation + orientation atlases.
+                            rp2[11] = {11, DescriptorType::SampledImage, depth_atlas_};
+                            rp2[12] = {12, DescriptorType::SampledImage, normal_atlas_};
                         } else {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
@@ -2576,8 +2593,14 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                        indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE
                                            ? indirect_tile_valid_buffer_
                                            : card_dispatch_buffer_};
+                            // C: Metal texture namespace — the layout binding
+                            // number IS the MSL [[texture(N)]] index: 7 = depth,
+                            // 8 = normal (4/5 would collide with the buffer
+                            // namespace's ray_hits/tile_valid entries).
+                            rp2[11] = {7, DescriptorType::SampledImage, depth_atlas_};
+                            rp2[12] = {8, DescriptorType::SampledImage, normal_atlas_};
                         }
-                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 11);
+                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 13);
                         cmd->BindComputePipeline(indirect_resolve_pipeline_);
                         const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);

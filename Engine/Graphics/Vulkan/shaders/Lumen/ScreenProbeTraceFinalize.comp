@@ -204,27 +204,28 @@ void screen_probe_trace_finalize() {
             uvec4 gh2 = uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9], scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]);
             SCGridParams gp = scGridDecode(gh0, gh1, gh2);
             uint cell = scGridCellIndex(gp, hitPos);
-            float bestError = 1e20;
+            // C (plan §三.C): unified query contract (shared helper) — adds
+            // the side-orientation test (captured face must front the incoming
+            // ray; the old texel-error loop could flip between the two cards
+            // of a two-sided wall) and decomposed along/perp tolerances to the
+            // existing depth + min-error scheme. Valid black stays accepted.
+            float bestKey = 1e30;
             if (cell != 0xFFFFFFFFu) {
                 uint begin = scgo.sc_grid_offsets[16u + cell];
                 uint end = scgo.sc_grid_offsets[17u + cell];
                 for (uint gi = begin; gi < end; ++gi) {
                     uint ci = scgc.sc_grid_cards[gi];
-                    vec2 atlasUV;
-                    if (!worldToCardUV(hitPos, cards.data[ci], atlasUV)) continue;
-                    uvec2 texel = uvec2(atlasUV);
-                    float depth = texelFetch(surface_cache_depth, ivec2(texel), 0).r;
-                    if ((isnan(depth) || isinf(depth)) || depth < 0.0) continue;
-                    vec3 captured = cardTexelToWorld(texel, depth, cards.data[ci]);
-                    float error = distance(hitPos, captured);
-                    float footprint = length(cards.data[ci].extent.xyz) / float(max(cards.data[ci].resolution, 1u));
-                    float tolerance = max(0.15, global.sdf_voxel_sizes[0].x * 1.25) + footprint;
-                    if (error > tolerance || error >= bestError) continue;
-                    vec3 candidate = texelFetch(surface_cache_lighting, ivec2(texel), 0).rgb;
-                    if ((any(isnan(candidate)) || any(isinf(candidate)))) continue;
-                    radiance = candidate; // valid black is a valid surface sample
-                    bestError = error;
-                    usedSurfaceCache = true;
+                    vec3 candidate; float key;
+                    if (scQueryCardCandidate(cards.data[ci], hitPos, -rayDir,
+                                             max(0.15, global.sdf_voxel_sizes[0].x * 1.25),
+                                             surface_cache_depth, surface_cache_lighting,
+                                             candidate, key)) {
+                        if (key < bestKey) {
+                            bestKey = key;
+                            radiance = candidate;
+                            usedSurfaceCache = true;
+                        }
+                    }
                 }
             }
         }

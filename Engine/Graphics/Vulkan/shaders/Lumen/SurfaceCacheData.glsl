@@ -1,6 +1,11 @@
 #ifndef SURFACE_CACHE_DATA_GLSL
 #define SURFACE_CACHE_DATA_GLSL
 
+// The C-series query contract (scQueryCardCandidate) reads atlases through
+// samplerless texelFetch; enable the extension here so every consumer gets it
+// (duplicate enable in the including shader is legal).
+#extension GL_EXT_samplerless_texture_functions : enable
+
 // Shared structs + helpers for SurfaceCache Vulkan GLSL shaders.
 // Ported from Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheData.metal.
 // All vec3 → vec4 for 16-byte alignment (matches Metal float4 / C++ math::v4 pattern).
@@ -79,8 +84,7 @@ struct FlattenedLightingParams {
 };
 
 // Reconstruct world position from card atlas UV + depth.
-vec3 cardTexelToWorld(uvec2 atlas_uv, float depth, SurfaceCacheCard card) {
-    float u = (float(atlas_uv.x - card.atlas_offset_x) + 0.5) / float(card.resolution);
+vec3 cardTexelToWorld(uvec2 atlas_uv, float depth, SurfaceCacheCard card) {    float u = (float(atlas_uv.x - card.atlas_offset_x) + 0.5) / float(card.resolution);
     float v = (float(atlas_uv.y - card.atlas_offset_y) + 0.5) / float(card.resolution);
 
     uint axis = card.axis_direction & 0xFFu;
@@ -129,6 +133,96 @@ bool worldToCardUV(vec3 world_pos, SurfaceCacheCard card, out vec2 out_uv) {
 
     out_uv.x = float(card.atlas_offset_x) + u * float(card.resolution);
     out_uv.y = float(card.atlas_offset_y) + v * float(card.resolution);
+    return true;
+}
+
+// ============================================================================
+// C (plan §三.C): unified Surface Cache query contract.
+//
+// All SC consumers (SurfaceCacheIndirectResolve, DDGITraceFinalize,
+// ScreenProbeTraceFinalize) validate candidates the same way:
+//   1. bounds        — worldToCardUV (UV coverage on the card plane)
+//   2. orientation   — the captured surface must face the QUERY side:
+//                      dot(faceNormal, surfaceFacing) > 0 (surfaceFacing is
+//                      -rayDir for ray queries, the receiver normal for tile
+//                      queries). Two-sided walls get distinct cards per side;
+//                      a bounds-passing card facing away describes the wrong
+//                      face.
+//   3. capture valid — depth texel finite and ≥ 0
+//   4. decomposed error vs the reconstructed captured position
+//                      (cardTexelToWorld): |along| (card axis depth mismatch —
+//                      covers the caller's SDF hit band) and perp (lateral —
+//                      must stay inside the texel footprint). The old
+//                      extent-proportional single-sided tolerance accepted
+//                      captures metres in front of interior hits on big AABB
+//                      cards.
+//   5. stable choice — min key = perp + 0.5·|along| across ALL candidates
+//                      (never first-hit / card-list order dependent)
+//   6. valid black   — accepted (a black texel is a measurement); only
+//                      NaN/Inf candidate radiance is rejected.
+// ============================================================================
+vec3 scCardFaceNormal(SurfaceCacheCard card) {
+    uint axis = card.axis_direction & 0xFFu;
+    uint dir  = (card.axis_direction >> 8u) & 0xFFu;
+    float s = (dir > 0u) ? 1.0 : -1.0;
+    return (axis == 0u) ? vec3(s, 0.0, 0.0)
+         : (axis == 1u) ? vec3(0.0, s, 0.0)
+                        : vec3(0.0, 0.0, s);
+}
+
+// One-candidate evaluation. Returns false when the candidate is rejected;
+// on true, outRadiance carries the texel radiance (may be black) and outKey
+// the selection key. tolFloor covers the caller's query-position error band
+// (SDF march threshold); footprint covers texel quantization.
+bool scQueryCardCandidate(SurfaceCacheCard card,
+                          vec3 hitPos,
+                          vec3 surfaceFacing,
+                          float tolFloor,
+                          texture2D depthAtlas,
+                          texture2D lightingAtlas,
+                          out vec3 outRadiance,
+                          out float outKey) {
+    outRadiance = vec3(0.0);
+    outKey = 1e30;
+
+    vec2 atlasUV;
+    if (!worldToCardUV(hitPos, card, atlasUV)) return false;
+
+    // 2. orientation — the captured surface's VISIBLE side faces the card
+    // plane (n_true = -faceNormal; the eye sits at the plane looking along
+    // faceNormal). A query legitimately sees the surface only when it
+    // arrives from that side: dot(-faceNormal, -surfaceFacing) < 0.
+    // (The first draft had this comparison inverted — it rejected every
+    // front-face lookup and starved the transport.)
+    if (dot(scCardFaceNormal(card), surfaceFacing) >= 0.0) return false;
+
+    // 3. capture validity.
+    uvec2 texel = uvec2(clamp(atlasUV, vec2(0.0), vec2(card.atlas_offset_x + card.resolution - 1u,
+                                                       card.atlas_offset_y + card.resolution - 1u)));
+    float depth = texelFetch(depthAtlas, ivec2(texel), 0).r;
+    if (isnan(depth) || isinf(depth) || depth < 0.0) return false;
+
+    // 4. decomposed position error.
+    vec3 captured = cardTexelToWorld(texel, depth, card);
+    vec3 delta = captured - hitPos;
+    vec3 n = scCardFaceNormal(card);
+    float along = dot(delta, n);
+    vec3 perpV = delta - n * along;
+    float perp = length(perpV);
+    float footprint = length(card.extent.xyz) / float(max(card.resolution, 1u));
+    float tolAlong = tolFloor + footprint;
+    // The caller's uncertainty is a ball of radius ~tolFloor (the SDF hit
+    // band projects LATERALLY onto grazing-oriented card planes), plus texel
+    // quantization laterally. tolPerp floor of tolFloor — not a constant —
+    // was measured starving the transport via grazing rejections.
+    float tolPerp = max(footprint * 1.5, tolFloor);
+    if (abs(along) > tolAlong || perp > tolPerp) return false;
+
+    // 6. radiance fetch — valid black accepted.
+    vec3 c = texelFetch(lightingAtlas, ivec2(texel), 0).rgb;
+    if (any(isnan(c)) || any(isinf(c))) return false;
+    outRadiance = c;
+    outKey = perp + 0.5 * abs(along);
     return true;
 }
 

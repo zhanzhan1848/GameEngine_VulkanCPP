@@ -82,8 +82,11 @@ struct IndirectResolveParamsGPU {
     // consuming stale ray_hits. Offsets 68/72 — std140 rounds the UBO to 80.
     uint32_t refresh_stride;        // 0/1 = every tile every frame
     uint32_t refresh_phase;         // frame_index % refresh_stride
+    // C (plan §三.C): the trace's SDF hit band (max(voxel×1.25, 0.30)) — the
+    // query contract's along-axis tolerance floor. Offset 76 (std140 → 80).
+    float    hit_band;
 };
-static_assert(sizeof(IndirectResolveParamsGPU) == 76, "std140 layout drift");
+static_assert(sizeof(IndirectResolveParamsGPU) == 80, "std140 layout drift");
 
 // Per-card dispatch info for flattened texel dispatch.
 // CPU builds prefix-sum array, GPU binary-searches to map thread_id → card → atlas UV.

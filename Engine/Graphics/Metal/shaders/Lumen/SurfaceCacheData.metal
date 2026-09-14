@@ -80,10 +80,12 @@ struct FlattenedLightingParams {
 };
 
 // Reconstruct world position from card atlas UV + depth
+// The card is passed BY VALUE: MSL forbids address-space-agnostic
+// references, and callers hold cards in constant/device space.
 static float3 cardTexelToWorld(
     uint2 atlas_uv,
     float depth,
-    constant SurfaceCacheCard& card)
+    SurfaceCacheCard card)
 {
     float u = (float(atlas_uv.x - card.atlas_offset_x) + 0.5) / float(card.resolution);
     float v = (float(atlas_uv.y - card.atlas_offset_y) + 0.5) / float(card.resolution);
@@ -108,10 +110,11 @@ static float3 cardTexelToWorld(
     return local_pos + card.center.xyz;
 }
 
-// Find atlas UV for a world position given a card
+// Find atlas UV for a world position given a card (card by value — see
+// cardTexelToWorld's address-space note).
 static bool worldToCardUV(
     float3 world_pos,
-    constant SurfaceCacheCard& card,
+    SurfaceCacheCard card,
     thread float2& out_uv)
 {
     float3 local = world_pos - card.center.xyz;
@@ -138,6 +141,66 @@ static bool worldToCardUV(
 
     out_uv.x = float(card.atlas_offset_x) + u * float(card.resolution);
     out_uv.y = float(card.atlas_offset_y) + v * float(card.resolution);
+    return true;
+}
+
+// ============================================================================
+// C (plan §三.C): unified Surface Cache query contract — MSL twin of
+// SurfaceCacheData.glsl::scQueryCardCandidate. Bounds → side orientation →
+// capture validity → decomposed along/perp error → min-key selection;
+// valid black is a measurement, only NaN/Inf candidate radiance rejects.
+// ============================================================================
+static float3 scCardFaceNormal(SurfaceCacheCard card) {
+    uint axis = card.axis_direction & 0xFFu;
+    uint dir  = (card.axis_direction >> 8u) & 0xFFu;
+    float s = (dir > 0u) ? 1.0f : -1.0f;
+    return (axis == 0u) ? float3(s, 0.0f, 0.0f)
+         : (axis == 1u) ? float3(0.0f, s, 0.0f)
+                        : float3(0.0f, 0.0f, s);
+}
+
+// Card by value (64B — MSL forbids address-space-agnostic references) and
+// texture params templated: callers hold atlases with different access
+// qualifiers (sample in DDGI, read in resolve/SPGI); .read() works for both.
+template <typename TEXD, typename TEXL>
+static bool scQueryCardCandidate(SurfaceCacheCard card,
+                                 float3 hitPos,
+                                 float3 surfaceFacing,
+                                 float tolFloor,
+                                 TEXD depthAtlas,
+                                 TEXL lightingAtlas,
+                                 thread float3& outRadiance,
+                                 thread float& outKey) {
+    outRadiance = float3(0.0f);
+    outKey = 1e30f;
+
+    float2 atlasUV;
+    if (!worldToCardUV(hitPos, card, atlasUV)) return false;
+
+    // n_true = -faceNormal (faces the card plane); see GLSL twin for sign.
+    if (dot(scCardFaceNormal(card), surfaceFacing) >= 0.0f) return false;
+
+    uint2 texel = uint2(clamp(atlasUV, float2(0.0f),
+                              float2(card.atlas_offset_x + card.resolution - 1u,
+                                     card.atlas_offset_y + card.resolution - 1u)));
+    float depth = depthAtlas.read(texel).r;
+    if (isinf(depth) || isnan(depth) || depth < 0.0f) return false;
+
+    float3 captured = cardTexelToWorld(texel, depth, card);
+    float3 n = scCardFaceNormal(card);
+    float3 delta = captured - hitPos;
+    float along = dot(delta, n);
+    float perp = length(delta - n * along);
+    float footprint = length(card.extent.xyz) / float(max(uint(card.resolution), 1u));
+    float tolAlong = tolFloor + footprint;
+    // Uncertainty ball: the SDF band projects laterally on grazing cards.
+    float tolPerp = max(footprint * 1.5f, tolFloor);
+    if (fabs(along) > tolAlong || perp > tolPerp) return false;
+
+    float3 c = lightingAtlas.read(texel).xyz;
+    if (any(isnan(c)) || any(isinf(c))) return false;
+    outRadiance = c;
+    outKey = perp + 0.5f * fabs(along);
     return true;
 }
 

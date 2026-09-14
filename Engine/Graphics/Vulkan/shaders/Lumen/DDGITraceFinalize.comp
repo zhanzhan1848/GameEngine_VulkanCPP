@@ -421,39 +421,33 @@ void ddgi_trace_finalize() {
             if (cell != 0xFFFFFFFFu) {
                 uint begin = scgo.sc_grid_offsets[16u + cell];
                 uint end   = scgo.sc_grid_offsets[17u + cell];
+                // C (plan §三.C): unified query contract over ALL candidates —
+                // replaces the T3.4 plane test's extent-proportional
+                // single-sided tolerance (0.35×extent accepted captures metres
+                // in front of interior hits on big AABB cards), the
+                // first-pass-accept break (card-list-order dependent), and the
+                // >0 luminance gate (valid black was rejected). Candidates now
+                // validate capture depth, side orientation vs the incoming
+                // ray, decomposed along/perp error, and the min-key match
+                // wins. See SurfaceCacheData.glsl::scQueryCardCandidate.
+                float bestKey = 1e30;
                 for (uint gi = begin; gi < end && deviceReads < kMaxDeviceReads; ++gi) {
                     uint cardIdx = scgc.sc_grid_cards[gi];
                     if (cardIdx >= 4096u) continue;
                     SurfaceCacheCard card = cd.card_data[cardIdx];
                     ++deviceReads;
-                    vec2 atlasUV;
-                    // 2026-09-10: keep searching when a bounds-passing card
-                    // fails the plane test — the grid order is volume-descending,
-                    // so the first bounds hit is usually a huge AABB card whose
-                    // captured surface sits far in front of an interior hit
-                    // (hollow-building inner walls); rejecting it must not mask
-                    // the smaller, tight cards later in the list (the miss
-                    // branch already had these semantics).
-                    if (!worldToCardUV(hitPos, card, atlasUV)) continue;
-                    {
-                        // T3.4 (D3): plane-consistency test — see Metal twin.
-                        ivec2 dTexel = ivec2(clamp(atlasUV, vec2(0.0), vec2(volume.SCAtlasSize - 1.0)));
-                        float texelDepth = texelFetch(depth_atlas, dTexel, 0).r;
-                        vec3 dl = hitPos - card.center.xyz;
-                        uint dAxis = card.axis_direction & 0xFFu;
-                        uint dDir = (card.axis_direction >> 8u) & 0xFFu;
-                        float hitAxisDepth = (dAxis == 0u ? dl.x : dAxis == 1u ? dl.y : dl.z) * (dDir != 0u ? 1.0 : -1.0);
-                        float depthTol = 0.35 * max(card.extent.x, max(card.extent.y, card.extent.z));
-                        bool planeOk = (hitAxisDepth <= texelDepth + depthTol);
-                        vec3 scRadiance = sampleAtlasBilinear(atlasUV);
-                        if (planeOk && dot(scRadiance, scRadiance) > 0.0001) {
+                    vec3 scRadiance; float key;
+                    if (scQueryCardCandidate(card, hitPos, -rayDir,
+                                             max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
+                                             depth_atlas, lighting_atlas, scRadiance, key)) {
+                        if (key < bestKey) {
+                            bestKey = key;
                             result.xyz = scRadiance;
                             scUsed = true;
 #ifdef DDGI_PATH_DEBUG
                             dbgPath = 1u;
 #endif
                         }
-                        if (scUsed) break;
                     }
                 }
             }

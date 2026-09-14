@@ -698,6 +698,7 @@ kernel void ddgi_trace_finalize(
                               sc_grid_offsets[10], sc_grid_offsets[11]);
             SCGridParams gp = scGridDecode(gh0, gh1, gh2);
             uint cell = scGridCellIndex(gp, hitPos);
+            float bestKey = 1e30f;
             if (cell != 0xFFFFFFFFu) {
                 uint begin = sc_grid_offsets[16u + cell];
                 uint end   = sc_grid_offsets[17u + cell];
@@ -706,46 +707,27 @@ kernel void ddgi_trace_finalize(
                     if (cardIdx >= 4096u) continue;
                     device const SurfaceCacheCard& card = card_data[cardIdx];
                     ++deviceReads;
-                    float2 atlasUV;
-                    // 2026-09-10: keep searching when a bounds-passing card
-                    // fails the plane test — the grid order is volume-descending,
-                    // so the first bounds hit is usually a huge AABB card whose
-                    // captured surface sits far in front of an interior hit
-                    // (hollow-building inner walls); rejecting it must not mask
-                    // the smaller, tight cards later in the list. Vulkan twin
-                    // (DDGITraceFinalize.comp) changed in the same batch.
-                    if (!worldToCardUVDevice(hitPos, card, atlasUV)) continue;
-                    {
-                        // C4: half-texel inset keeps bilinear inside this card's rect
-                        // (shelf-packed atlas bleeds from neighbours otherwise).
-                        atlasUV = clamp(atlasUV,
-                            float2(card.atlas_offset_x, card.atlas_offset_y) + 0.5,
-                            float2(card.atlas_offset_x + card.resolution,
-                                   card.atlas_offset_y + card.resolution) - 0.5);
-                        float2 normUV = atlasUV / atlasSize;
-                        sampler samp(coord::normalized, filter::linear, address::clamp_to_edge);
-                        // T3.4 (D3): plane-consistency test — the sampled texel
-                        // must belong to the SAME surface the ray hit. Compare
-                        // the hit point's axis depth against the card's stored
-                        // texel depth; a card surface in front of the hit means
-                        // this texel describes other geometry (occluder) — its
-                        // radiance would poison the probe's incident estimate.
-                        float texelDepth = depth_atlas.sample(samp, normUV).r;
-                        float3 dl = hitPos - card.center.xyz;
-                        uint dAxis = card.axis_direction & 0xFFu;
-                        uint dDir = (card.axis_direction >> 8u) & 0xFFu;
-                        float hitAxisDepth = (dAxis == 0u ? dl.x : dAxis == 1u ? dl.y : dl.z) * (dDir != 0u ? 1.0f : -1.0f);
-                        float depthTol = 0.35f * max(card.extent.x, max(card.extent.y, card.extent.z));
-                        bool planeOk = (hitAxisDepth <= texelDepth + depthTol);
-                        float3 scRadiance = lighting_atlas.sample(samp, normUV).xyz;
-                        if (planeOk && dot(scRadiance, scRadiance) > 0.0001f) {
+                    // C (plan §三.C): unified query contract (shared helper,
+                    // Vulkan twin DDGITraceFinalize.comp) — capture depth
+                    // validity, side orientation vs the incoming ray,
+                    // decomposed along/perp error with footprint tolerances,
+                    // min-key selection over ALL candidates. Replaces the
+                    // extent-proportional single-sided plane test, the
+                    // first-accept break, and the >0 luminance gate (valid
+                    // black is a measurement).
+                    float3 scRadiance; float key;
+                    if (scQueryCardCandidate(card, hitPos, -rayDir,
+                                             max(volume.SdfVoxelSizes[0].x * 1.25f, 0.45f),
+                                             depth_atlas, lighting_atlas,
+                                             scRadiance, key)) {
+                        if (key < bestKey) {
+                            bestKey = key;
                             radiance = scRadiance;
                             radianceFound = true;
 #ifdef DDGI_PATH_DEBUG
                             dbgPath = 1u;
 #endif
                         }
-                        if (radianceFound) break;
                     }
                 }
             }

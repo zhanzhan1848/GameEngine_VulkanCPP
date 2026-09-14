@@ -21,6 +21,8 @@ struct IndirectResolveParams {
     // IndirectResolveParamsGPU fields at offsets 68/72.
     uint refresh_stride;
     uint refresh_phase;
+    // C (plan §三.C): the trace's SDF hit band — along-axis tolerance floor.
+    float hit_band;
 };
 
 kernel void surfaceCacheIndirectResolve(
@@ -35,7 +37,9 @@ kernel void surfaceCacheIndirectResolve(
     constant SurfaceCacheCardLookup*   lookups      [[buffer(2)]],
     constant SurfaceCacheCard*         cards        [[buffer(3)]],
     device const ProbeRayHit*          ray_hits     [[buffer(4)]],
-    device uint*                       tile_valid   [[buffer(5)]])   // B: per-tile validity bitmask
+    device uint*                       tile_valid   [[buffer(5)]],   // B: per-tile validity bitmask
+    texture2d<float, access::read>     depth_atlas  [[texture(7)]],  // C: capture validation
+    texture2d<float, access::read>     normal_atlas [[texture(8)]])  // C: orientation
 {
     uint probe_x = global_id.x;
     uint probe_y = global_id.y;
@@ -47,6 +51,12 @@ kernel void surfaceCacheIndirectResolve(
     uint2 tile_origin = uint2(probe_x * tile_size, probe_y * tile_size);
 
     if (tile_origin.x >= params.sc_params.atlas_size || tile_origin.y >= params.sc_params.atlas_size) return;
+
+    // C (plan §三.C): the tile receiver normal for the contract's orientation
+    // test — the captured card face must face the same side as the querying
+    // surface (two-sided walls have one card per side).
+    const uint2 centerTexel = tile_origin + uint2(tile_size / 2u);
+    const float3 tileNormal = octDecode(normal_atlas.read(centerTexel).rg);
 
     // B (plan §三.B): per-tile validity — tiles outside this frame's refresh
     // phase carry history (if valid) or explicit zeros (A=0); their stale
@@ -82,10 +92,12 @@ kernel void surfaceCacheIndirectResolve(
         // Phase-A 0.02 placeholder, which made the whole tile path
         // transport-inert (with the trace stub fixed, virtually all legit
         // hits are "far").
+        // C (plan §三.C): unified query contract over ALL bucket candidates —
+        // capture validity, side orientation, decomposed along/perp error,
+        // min-key selection (Vulkan twin parity). Valid black accepted.
         if (hit_type == 0u || hit_type == 1u) {
-            // Lookup atlas UV through card system
-            float2 atlas_uv;
             bool found = false;
+            float bestKey = 1e30f;
             for (uint li = 0; li < params.lookup_count && !found; ++li) {
                 float3 mn = lookups[li].aabb_min.xyz;
                 float3 mx = lookups[li].aabb_max.xyz;
@@ -93,14 +105,16 @@ kernel void surfaceCacheIndirectResolve(
                     hit_pos.y < mn.y || hit_pos.y > mx.y ||
                     hit_pos.z < mn.z || hit_pos.z > mx.z) continue;
                 for (uint ci = lookups[li].card_start;
-                     ci < lookups[li].card_start + lookups[li].card_count && !found; ++ci) {
-                    found = worldToCardUV(hit_pos, cards[ci], atlas_uv);
+                     ci < lookups[li].card_start + lookups[li].card_count; ++ci) {
+                    float3 cand; float key;
+                    if (scQueryCardCandidate(cards[ci], hit_pos, tileNormal,
+                                             max(params.hit_band, 0.15f),
+                                             depth_atlas, prev_lighting, cand, key)) {
+                        if (key < bestKey) { bestKey = key; radiance = cand; found = true; }
+                    }
                 }
             }
-            if (found) {
-                // Nearest read at integer atlas coords (Vulkan-twin parity).
-                radiance = prev_lighting.read(uint2(atlas_uv)).rgb;
-            } else {
+            if (!found) {
                 radiance = float3(0.02, 0.02, 0.03);
             }
         } else {

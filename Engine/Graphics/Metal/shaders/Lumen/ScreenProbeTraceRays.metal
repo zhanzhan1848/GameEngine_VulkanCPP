@@ -788,27 +788,29 @@ kernel void screen_probe_trace_finalize(
             uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9], sc_grid_offsets[10], sc_grid_offsets[11]);
             SCGridParams gp = scGridDecode(gh0, gh1, gh2);
             uint cell = scGridCellIndex(gp, hitPos);
-            float bestError = 1e20f;
+            // C (plan §三.C): unified query contract (shared helper, Vulkan
+            // twin ScreenProbeTraceFinalize.comp) — adds the side-orientation
+            // test (captured face must front the incoming ray; the old
+            // texel-error loop could flip between the two cards of a
+            // two-sided wall) and decomposed along/perp tolerances to the
+            // existing depth + min-error scheme. Valid black stays accepted.
+            float bestKey = 1e30f;
             if (cell != 0xFFFFFFFFu) {
                 uint begin = sc_grid_offsets[16u + cell];
                 uint end = sc_grid_offsets[17u + cell];
                 for (uint gi = begin; gi < end; ++gi) {
                     uint ci = sc_grid_cards[gi];
-                    float2 atlasUV;
-                    if (!worldToCardUV(hitPos, cards[ci], atlasUV)) continue;
-                    uint2 texel = uint2(atlasUV);
-                    float depth = surface_cache_depth.read(texel).r;
-                    if (!isfinite(depth) || depth < 0.0f) continue;
-                    float3 captured = cardTexelToWorld(texel, depth, cards[ci]);
-                    float error = distance(hitPos, captured);
-                    float footprint = length(cards[ci].extent.xyz) / float(max(uint(cards[ci].resolution), 1u));
-                    float tolerance = max(0.15f, global.sdf_voxel_sizes[0].x * 1.25f) + footprint;
-                    if (error > tolerance || error >= bestError) continue;
-                    float3 candidate = surface_cache_lighting.read(texel).rgb;
-                    if (!all(isfinite(candidate))) continue;
-                    radiance = candidate; // valid black is a valid surface sample
-                    bestError = error;
-                    usedSurfaceCache = true;
+                    float3 candidate; float key;
+                    if (scQueryCardCandidate(cards[ci], hitPos, -rayDir,
+                                             max(0.15f, global.sdf_voxel_sizes[0].x * 1.25f),
+                                             surface_cache_depth, surface_cache_lighting,
+                                             candidate, key)) {
+                        if (key < bestKey) {
+                            bestKey = key;
+                            radiance = candidate;
+                            usedSurfaceCache = true;
+                        }
+                    }
                 }
             }
         }
