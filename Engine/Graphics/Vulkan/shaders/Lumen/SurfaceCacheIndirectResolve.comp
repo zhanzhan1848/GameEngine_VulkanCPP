@@ -75,6 +75,11 @@ struct IndirectResolveParams {
     // C (plan §三.C): the trace's SDF hit band (max(voxel×1.25, 0.30)) —
     // along-axis tolerance floor for capture validation. Offset 76.
     float hit_band;
+    // A (plan §三.A): 1 = tile-grid + reconstruct path (resolve stores
+    // INCIDENT tile radiance, the reconstruct pass owns the full atlas);
+    // 0 = legacy piecewise-constant expansion for A/B. Offsets 80/84.
+    uint recon_enabled;
+    uint card_count;
 };
 
 layout(set = 0, binding = 5, std140) uniform IndirectResolveParamsBlock {
@@ -100,6 +105,9 @@ struct ProbeRayHit {
 layout(set = 0, binding = 9) uniform texture2D prev_indirect_out;   // T3.3 temporal EMA
 layout(set = 0, binding = 11) uniform texture2D depth_atlas;    // C: capture validation
 layout(set = 0, binding = 12) uniform texture2D normal_atlas;  // C: orientation (sampled, twin parity)
+layout(set = 0, binding = 13, rgba16f) writeonly uniform image2D tile_grid;       // A: incident + validity
+layout(set = 0, binding = 14, rgba16f) writeonly uniform image2D tile_aux;        // A: octN / depth / card id
+layout(set = 0, binding = 15) uniform texture2D prev_tile_grid;   // A: tile EMA history
 layout(set = 0, binding = 8, std430) readonly buffer RayHitsBlock {
     ProbeRayHit data[];
 } ray_hits;
@@ -241,6 +249,53 @@ void surface_cache_indirect_resolve()
     const float tw = clamp(irp.params.temporal_weight, 0.0, 0.95);
     const bool hasHistory = irp.params.frame_index >= 2u;
 
+    if (irp.params.recon_enabled != 0u) {
+        // A (plan §三.A): TILE-DOMAIN output — store the INCIDENT estimate
+        // (cosine-weighted ray average, albedo NOT applied — the separation
+        // of incident light and material response) plus validity in
+        // tile_grid, and the tile center's compat evidence (oct normal /
+        // capture depth / owning card id) in tile_aux. The reconstruct pass
+        // owns the full-atlas indirect_out from here on.
+        vec3 tileValue = indirect;
+        float tileValid;
+        if (!refreshed) {
+            tileValid = (tileWasValid && hasHistory) ? 1.0 : 0.0;
+            vec3 prev = (tileWasValid && hasHistory)
+                ? texelFetch(prev_tile_grid, ivec2(probe_x, probe_y), 0).rgb : vec3(0.0);
+            tileValue = prev;
+        } else if (hasHistory && tw > 0.0) {
+            vec3 prev = texelFetch(prev_tile_grid, ivec2(probe_x, probe_y), 0).rgb;
+            tileValue = mix(indirect, prev, tw);
+            tileValid = 1.0;
+        } else {
+            tileValid = 1.0;
+        }
+        imageStore(tile_grid, ivec2(probe_x, probe_y), vec4(tileValue, tileValid));
+
+        // Compat evidence at the TILE CENTER: owning card by atlas-rect
+        // containment (shelf-packed ⇒ unique), center normal (already read:
+        // probe_normal) and capture depth. Written for ALL tiles — the
+        // reconstruct pass interpolates between centers regardless of the
+        // refresh schedule.
+        uvec2 centerTexel = tile_origin + uvec2(tile_size / 2u);
+        uint foundCard = 4095u;   // half-exact sentinel (never a real card id)
+        for (uint ci = 0u; ci < irp.params.card_count; ++ci) {
+            SurfaceCacheCard c = cards.data[ci];
+            if (c.resolution == 0u) continue;
+            if (centerTexel.x >= c.atlas_offset_x && centerTexel.x < c.atlas_offset_x + c.resolution &&
+                centerTexel.y >= c.atlas_offset_y && centerTexel.y < c.atlas_offset_y + c.resolution) {
+                foundCard = ci;
+                break;
+            }
+        }
+        float centerDepth = texelFetch(depth_atlas, ivec2(centerTexel), 0).r;
+        imageStore(tile_aux, ivec2(probe_x, probe_y),
+                   vec4(enc_n.x, enc_n.y, centerDepth, float(foundCard)));
+        return;
+    }
+
+    // Legacy piecewise-constant expansion (PRIMAL_SC_TILE_RECON=0 A/B path):
+    // one tile-center estimate × per-texel albedo, splatted flat.
     for (uint dy = 0u; dy < tile_size; ++dy) {
         for (uint dx = 0u; dx < tile_size; ++dx) {
             uvec2 texel = tile_origin + uvec2(dx, dy);

@@ -475,7 +475,7 @@ void SurfaceCachePass::CreateAtlasTextures() {
             cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
             indirect_trace_params_cb_[i] = device_->CreateBuffer(cbDesc);
 
-            cbDesc.size = 80;    // sizeof(IndirectResolveParamsGPU) padded
+            cbDesc.size = 96;    // sizeof(IndirectResolveParamsGPU) padded (88 → std140 round-up)
             indirect_resolve_params_cb_[i] = device_->CreateBuffer(cbDesc);
 
             TextureDesc outDesc{};
@@ -488,6 +488,29 @@ void SurfaceCachePass::CreateAtlasTextures() {
             outDesc.type = TextureType::Texture2D;
             outDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
             indirect_out_tex_[i] = device_->CreateTexture(outDesc);
+
+            // A (plan §三.A): per-tile incident radiance + validity (rgb, a)
+            // triple-buffered for the tile-domain EMA, plus a single-buffered
+            // compat-evidence texture (oct16 normal / capture depth / owning
+            // card id) rewritten every resolve dispatch.
+            const u32 tileDim = std::min<u32>(SCRadiosityTileSize(), atlas_size_);
+            const u32 tilesPerSide = atlas_size_ / tileDim;
+            TextureDesc tileDesc = outDesc;
+            tileDesc.size = { tilesPerSide, tilesPerSide, 1 };
+            indirect_tile_tex_[i] = device_->CreateTexture(tileDesc);
+        }
+        {
+            const u32 tileDim = std::min<u32>(SCRadiosityTileSize(), atlas_size_);
+            const u32 tilesPerSide = atlas_size_ / tileDim;
+            TextureDesc auxDesc{};
+            auxDesc.size = { tilesPerSide, tilesPerSide, 1 };
+            auxDesc.mipLevels = 1;
+            auxDesc.arraySize = 1;
+            auxDesc.format = DataFormat::RGBA16_Float;
+            auxDesc.type = TextureType::Texture2D;
+            auxDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+            auxDesc.name = "SurfaceCache_TileAux";
+            indirect_tile_aux_ = device_->CreateTexture(auxDesc);
         }
 
         BufferDesc dummyDesc{};
@@ -726,8 +749,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // tile validity bitmask (B)
             {11, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas (C: capture validation)
             {12, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // normal_atlas (C: orientation)
+            {13, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // tile_grid (A)
+            {14, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // tile_aux (A)
+            {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // prev tile_grid (A EMA)
         };
-        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
+        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({16, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(0)]]
@@ -743,9 +769,37 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev indirect_out [[texture(6)]] (T3.3 EMA)
             {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas   [[texture(7)]] (C)
             {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas  [[texture(8)]] (C)
+            {9, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // tile_grid     [[texture(9)]] (A)
+            {10, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // tile_aux      [[texture(10)]] (A)
+            {11, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // prev tile_grid [[texture(11)]] (A EMA)
         };
-        DescriptorSetLayoutDesc layoutDesc{13, bindings};
+        DescriptorSetLayoutDesc layoutDesc{16, bindings};
         indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
+
+    // --- IndirectReconstruct (A): tile-grid → validated continuous full atlas ---
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo (ro)
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas
+            {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // tile_grid
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // tile_aux
+            {6, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // indirect_out
+        };
+        indirect_reconstruct_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
+    } else {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params [[buffer(0)]]
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo [[texture(0)]]
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // tile_grid [[texture(1)]]
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // tile_aux [[texture(2)]]
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // indirect_out [[texture(3)]]
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas [[texture(4)]]
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas [[texture(5)]]
+        };
+        indirect_reconstruct_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
     }
 
     // --- AtlasInit: 4 write images + 1 UBO + 1 SSBO ---
@@ -1072,6 +1126,25 @@ void SurfaceCachePass::CreatePipelines() {
         pipeDesc.threadGroupSize = {256, 1, 1};
         atlas_init_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
+    // IndirectReconstruct (A): (8,8,1) over the full atlas — tile-center
+    // continuous reconstruction. Built on both backends (Metal kernel twin).
+    {
+        auto reconstructShader = CompileComputeShader("SurfaceCacheIndirectReconstruct",
+            isVk ? "surface_cache_indirect_reconstruct" : "surfaceCacheIndirectReconstruct");
+        if (reconstructShader != handles::INVALID_SHADER) {
+            {
+                PipelineLayoutDesc plDesc;
+                plDesc.setLayoutCount = 1;
+                plDesc.setLayouts = &indirect_reconstruct_set_layout_;
+                indirect_reconstruct_layout_ = device_->CreatePipelineLayout(plDesc);
+            }
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = reconstructShader;
+            pipeDesc.layout = indirect_reconstruct_layout_;
+            pipeDesc.threadGroupSize = {8, 8, 1};
+            indirect_reconstruct_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        }
+    }
     // Capture gather (Vulkan-only): (8,8,1) over render resolution
     if (isVk && captureGatherShader != handles::INVALID_SHADER) {
         {
@@ -1210,6 +1283,10 @@ void SurfaceCachePass::CreatePipelines() {
         {
             DescriptorSetDesc dsDesc{indirect_resolve_set_layout_};
             indirect_resolve_set_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        {
+            DescriptorSetDesc dsDesc{indirect_reconstruct_set_layout_};
+            indirect_reconstruct_set_[i] = device_->CreateDescriptorSet(dsDesc);
         }
     }
 }
@@ -2248,6 +2325,15 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         const u32 v = (u32)std::atoi(e);
                         return (v >= 1u && v <= 64u) ? v : 1u;
                     }();
+                    // A (plan §三.A): continuous reconstruction on by default;
+                    // PRIMAL_SC_TILE_RECON=0 keeps the legacy piecewise-constant
+                    // expansion for A/B evidence.
+                    static const bool kTileRecon = [] {
+                        const char* e = std::getenv("PRIMAL_SC_TILE_RECON");
+                        return !e || std::atoi(e) != 0;
+                    }();
+                    const bool reconActive = kTileRecon &&
+                        indirect_reconstruct_pipeline_ != handles::INVALID_PIPELINE;
                     const u32 kRays = 32;
                     const u32 kTiles = atlas_size_ / kTile;
                     // G (plan §三.G): ray_hits capacity follows the runtime
@@ -2540,6 +2626,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         // valid) or explicit zeros, never stale ray_hits.
                         rp->refresh_stride = kStride;
                         rp->refresh_phase = kStride > 1u ? current_frame_index % kStride : 0u;
+                        rp->recon_enabled = reconActive ? 1u : 0u;
+                        rp->card_count = (u32)card_generator_.GetCards().size();
                         // C: same hit band the trace marches with — a march
                         // hit can undershoot the true surface by up to this
                         // much along the ray, so the capture-validation
@@ -2555,7 +2643,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                     // ---- resolve descriptors + dispatch ----
                     {
-                        DescriptorData rp2[11];
+                        DescriptorData rp2[16];
                         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
@@ -2578,6 +2666,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             // C: capture validation + orientation atlases.
                             rp2[11] = {11, DescriptorType::SampledImage, depth_atlas_};
                             rp2[12] = {12, DescriptorType::SampledImage, normal_atlas_};
+                            // A: tile-grid output + aux evidence + EMA history.
+                            rp2[13] = {13, DescriptorType::StorageImage, indirect_tile_tex_[outIdx]};
+                            rp2[14] = {14, DescriptorType::StorageImage, indirect_tile_aux_};
+                            rp2[15] = {15, DescriptorType::SampledImage, indirect_tile_tex_[histIdx]};
                         } else {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
@@ -2599,8 +2691,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             // namespace's ray_hits/tile_valid entries).
                             rp2[11] = {7, DescriptorType::SampledImage, depth_atlas_};
                             rp2[12] = {8, DescriptorType::SampledImage, normal_atlas_};
+                            // A: tile-grid [[texture(9)]], aux [[texture(10)]],
+                            // prev tile grid [[texture(11)]].
+                            rp2[13] = {9, DescriptorType::StorageImage, indirect_tile_tex_[outIdx]};
+                            rp2[14] = {10, DescriptorType::StorageImage, indirect_tile_aux_};
+                            rp2[15] = {11, DescriptorType::SampledImage, indirect_tile_tex_[histIdx]};
                         }
-                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 13);
+                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 16);
                         cmd->BindComputePipeline(indirect_resolve_pipeline_);
                         const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);
@@ -2611,6 +2708,63 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         rb.afterState  = rhi::ResourceState::UnorderedAccess;
                         rb.subresource = 0xFFFFFFFF;
                         cmd->InsertBarrier(&rb, 1);
+
+                        // A (plan §三.A): continuous reconstruction — replace the
+                        // piecewise-constant tile splat with a validated
+                        // bilinear rebuild on the tile-center lattice before
+                        // LightEval consumes indirect_out.
+                        if (reconActive && kTilesEff != 0u) {
+                            rhi::ResourceBarrier tileRb{};
+                            tileRb.resource = indirect_tile_tex_[outIdx];
+                            tileRb.beforeState = rhi::ResourceState::UnorderedAccess;
+                            tileRb.afterState  = rhi::ResourceState::ShaderResource;
+                            tileRb.subresource = 0xFFFFFFFF;
+                            rhi::ResourceBarrier auxRb{};
+                            auxRb.resource = indirect_tile_aux_;
+                            auxRb.beforeState = rhi::ResourceState::UnorderedAccess;
+                            auxRb.afterState  = rhi::ResourceState::ShaderResource;
+                            auxRb.subresource = 0xFFFFFFFF;
+                            rhi::ResourceBarrier pair[] = { tileRb, auxRb };
+                            cmd->InsertBarrier(pair, 2);
+
+                            DescriptorData rc[7];
+                            if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+                                rc[0] = {0, DescriptorType::UniformBuffer, indirect_resolve_params_cb_[frameIdx]};
+                                rc[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
+                                rc[2] = {2, DescriptorType::SampledImage,  depth_atlas_};
+                                rc[3] = {3, DescriptorType::SampledImage,  normal_atlas_};
+                                rc[4] = {4, DescriptorType::SampledImage,  indirect_tile_tex_[outIdx]};
+                                rc[5] = {5, DescriptorType::SampledImage,  indirect_tile_aux_};
+                                rc[6] = {6, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
+                            } else {
+                                rc[0] = {0, DescriptorType::UniformBuffer, indirect_resolve_params_cb_[frameIdx]};
+                                rc[1] = {0, DescriptorType::StorageImage,  albedo_atlas_};
+                                rc[2] = {1, DescriptorType::SampledImage,  indirect_tile_tex_[outIdx]};
+                                rc[3] = {2, DescriptorType::SampledImage,  indirect_tile_aux_};
+                                rc[4] = {3, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
+                                rc[5] = {4, DescriptorType::SampledImage,  depth_atlas_};
+                                rc[6] = {5, DescriptorType::SampledImage,  normal_atlas_};
+                            }
+                            UpdateDescriptorSet(device_, indirect_reconstruct_set_[frameIdx], rc, 7);
+                            cmd->BindComputePipeline(indirect_reconstruct_pipeline_);
+                            const DescriptorSetHandle rcSets[] = { indirect_reconstruct_set_[frameIdx] };
+                            cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_reconstruct_layout_, 0, 1, rcSets, 0, nullptr);
+                            cmd->Dispatch(atlas_size_ / 8u, atlas_size_ / 8u, 1);
+                            // tile textures back to UAV for next frame's resolve
+                            // write; indirect_out stays UAV → LightEval read.
+                            rhi::ResourceBarrier tileRb2{};
+                            tileRb2.resource = indirect_tile_tex_[outIdx];
+                            tileRb2.beforeState = rhi::ResourceState::ShaderResource;
+                            tileRb2.afterState  = rhi::ResourceState::UnorderedAccess;
+                            tileRb2.subresource = 0xFFFFFFFF;
+                            rhi::ResourceBarrier auxRb2{};
+                            auxRb2.resource = indirect_tile_aux_;
+                            auxRb2.beforeState = rhi::ResourceState::ShaderResource;
+                            auxRb2.afterState  = rhi::ResourceState::UnorderedAccess;
+                            auxRb2.subresource = 0xFFFFFFFF;
+                            rhi::ResourceBarrier back[] = { tileRb2, auxRb2 };
+                            cmd->InsertBarrier(back, 2);
+                        }
                     }
                 }   // end SC_INDIRECT bring-up block
 

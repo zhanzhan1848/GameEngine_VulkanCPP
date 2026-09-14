@@ -12,6 +12,7 @@
 #   - naga  (cargo install naga-cli --locked)   — WGSL → SPIR-V
 #   - glslangValidator (/usr/local/bin or brew) — GLSL → SPIR-V
 
+SPV_FAILURES=0
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,7 +88,7 @@ for s in "${WGSL_SHADERS[@]}"; do
         sz=$(stat -f %z "$DEST_DIR/$s.spv")
         printf "OK    %-36s (%d bytes)\n" "$s.spv" "$sz"
     else
-        echo "FAIL  $s.wgsl"
+        echo "FAIL  $s.wgsl"; SPV_FAILURES=$((SPV_FAILURES+1))
         sed 's/^/    /' "$tmpdir/err"
     fi
     rm -rf "$tmpdir"
@@ -121,7 +122,7 @@ for s in "${NANITE_SHADERS[@]}"; do
         sz=$(stat -f %z "$DEST_DIR/Nanite/$s.spv")
         printf "OK    Nanite/%-30s (%d bytes)\n" "$s.spv" "$sz"
     else
-        echo "FAIL  Nanite/$s.wgsl"
+        echo "FAIL  Nanite/$s.wgsl"; SPV_FAILURES=$((SPV_FAILURES+1))
         sed 's/^/    /' "$tmpdir/err"
     fi
     rm -rf "$tmpdir"
@@ -156,7 +157,7 @@ for pair in "${GLSL_NAMES[@]}"; do
             sz=$(stat -f %z "$out")
             printf "OK    %-36s (%d bytes)\n" "$src_dir/$src_name.$stage.spv" "$sz"
         else
-            echo "FAIL  $src_dir/$src_name.$stage"
+            echo "FAIL  $src_dir/$src_name.$stage"; SPV_FAILURES=$((SPV_FAILURES+1))
             sed 's/^/    /' "$tmpdir/err"
         fi
         rm -rf "$tmpdir"
@@ -180,7 +181,7 @@ if [ -f "$src" ]; then
     inline_includes "$src" > "$tmp"
     if glslangValidator --quiet -V --source-entrypoint main -e cluster_binning_kernel "$tmp" -o "$out" 2>"$tmpdir/err"; then
         sz=$(stat -f %z "$out"); printf "OK    Nanite/ClusterBinning.spv          (%d bytes)\n" "$sz"
-    else echo "FAIL  Nanite/ClusterBinning.comp"; sed 's/^/    /' "$tmpdir/err"; fi
+    else echo "FAIL  Nanite/ClusterBinning.comp"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
     rm -rf "$tmpdir"
 else echo "MISS  Nanite/ClusterBinning.comp (skipped)"; fi
 
@@ -197,7 +198,7 @@ if [ -f "$vb_dir/VisibilityBuffer.vert" ] && [ -f "$vb_dir/VisibilityBuffer.frag
        spirv-link "$tmpdir/vb.vert.spv" "$tmpdir/vb.frag.spv" -o "$vb_dir/VisibilityBuffer.spv" 2>"$tmpdir/err_link"; then
         sz=$(stat -f %z "$vb_dir/VisibilityBuffer.spv")
         printf "OK    Nanite/VisibilityBuffer.spv         (%d bytes)\n" "$sz"
-    else echo "FAIL  Nanite/VisibilityBuffer (vert+frag link)";
+    else echo "FAIL  Nanite/VisibilityBuffer (vert+frag link)"; SPV_FAILURES=$((SPV_FAILURES+1));
         [ -s "$tmpdir/err_v" ] && sed 's/^/    [v] /' "$tmpdir/err_v"
         [ -s "$tmpdir/err_f" ] && sed 's/^/    [f] /' "$tmpdir/err_f"
         [ -s "$tmpdir/err_link" ] && sed 's/^/    [link] /' "$tmpdir/err_link"
@@ -213,7 +214,7 @@ if [ -f "$src" ]; then
     inline_includes "$src" > "$tmp"
     if glslangValidator --quiet -V --source-entrypoint main -e ComputeMain "$tmp" -o "$out" 2>"$tmpdir/err"; then
         sz=$(stat -f %z "$out"); printf "OK    Nanite/VisibilityBufferResolve.spv (%d bytes)\n" "$sz"
-    else echo "FAIL  Nanite/VisibilityBufferResolve.comp"; sed 's/^/    /' "$tmpdir/err"; fi
+    else echo "FAIL  Nanite/VisibilityBufferResolve.comp"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
     rm -rf "$tmpdir"
 else echo "MISS  Nanite/VisibilityBufferResolve.comp (skipped)"; fi
 
@@ -227,7 +228,7 @@ if [ -f "$src" ]; then
     inline_includes "$src" > "$tmp"
     if glslangValidator --quiet -V --source-entrypoint main -e main "$tmp" -o "$out" 2>"$tmpdir/err"; then
         sz=$(stat -f %z "$out"); printf "OK    ShadowFilter.spv                       (%d bytes)\n" "$sz"
-    else echo "FAIL  ShadowFilter.comp"; sed 's/^/    /' "$tmpdir/err"; fi
+    else echo "FAIL  ShadowFilter.comp"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
     rm -rf "$tmpdir"
 else echo "MISS  ShadowFilter.comp (skipped)"; fi
 
@@ -240,7 +241,7 @@ if [ -f "$src" ]; then
     inline_includes "$src" > "$tmp"
     if glslangValidator --quiet -V --source-entrypoint main -e main "$tmp" -o "$out" 2>"$tmpdir/err"; then
         sz=$(stat -f %z "$out"); printf "OK    PostProcess/Toon.comp.spv              (%d bytes)\n" "$sz"
-    else echo "FAIL  PostProcess/Toon.comp"; sed 's/^/    /' "$tmpdir/err"; fi
+    else echo "FAIL  PostProcess/Toon.comp"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
     rm -rf "$tmpdir"
 else echo "MISS  PostProcess/Toon.comp (skipped)"; fi
 
@@ -254,7 +255,7 @@ if [ -f "$src" ]; then
     inline_includes "$src" > "$tmp"
     if glslangValidator --quiet -V "$tmp" -o "$out" 2>"$tmpdir/err"; then
         sz=$(stat -f %z "$out"); printf "OK    Nanite/ShadowMoments.frag.spv         (%d bytes)\n" "$sz"
-    else echo "FAIL  Nanite/ShadowMoments.frag"; sed 's/^/    /' "$tmpdir/err"; fi
+    else echo "FAIL  Nanite/ShadowMoments.frag"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
     rm -rf "$tmpdir"
 else echo "MISS  Nanite/ShadowMoments.frag (skipped)"; fi
 
@@ -268,7 +269,7 @@ if [ -f "$DEST_DIR/Nanite/MirrorReflection.vert" ] && [ -f "$DEST_DIR/Nanite/Mir
         if glslangValidator --quiet -V "$tmpdir/mr.$stage" -o "$DEST_DIR/Nanite/MirrorReflection.$stage.spv" 2>"$tmpdir/err"; then
             sz=$(stat -f %z "$DEST_DIR/Nanite/MirrorReflection.$stage.spv")
             printf "OK    Nanite/MirrorReflection.%s.spv        (%d bytes)\n" "$stage" "$sz"
-        else echo "FAIL  Nanite/MirrorReflection.$stage"; sed 's/^/    /' "$tmpdir/err"; fi
+        else echo "FAIL  Nanite/MirrorReflection.$stage"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
         rm -rf "$tmpdir"
     done
 else echo "MISS  Nanite/MirrorReflection.vert/.frag (skipped)"; fi
@@ -282,7 +283,7 @@ if [ -f "$DEST_DIR/PostProcess/MirrorComposite.vert" ] && [ -f "$DEST_DIR/PostPr
         if glslangValidator --quiet -V "$tmpdir/mc.$stage" -o "$DEST_DIR/PostProcess/MirrorComposite.$stage.spv" 2>"$tmpdir/err"; then
             sz=$(stat -f %z "$DEST_DIR/PostProcess/MirrorComposite.$stage.spv")
             printf "OK    PostProcess/MirrorComposite.%s.spv   (%d bytes)\n" "$stage" "$sz"
-        else echo "FAIL  PostProcess/MirrorComposite.$stage"; sed 's/^/    /' "$tmpdir/err"; fi
+        else echo "FAIL  PostProcess/MirrorComposite.$stage"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
         rm -rf "$tmpdir"
     done
 else echo "MISS  PostProcess/MirrorComposite.vert/.frag (skipped)"; fi
@@ -318,7 +319,7 @@ for s in "${LUMEN_WGSL_SHADERS[@]}"; do
         sz=$(stat -f %z "$DEST_DIR/Lumen/$s.spv")
         printf "OK    Lumen/%-26s (%d bytes)\n" "$s.spv" "$sz"
     else
-        printf "FAIL  Lumen/%s.wgsl\n" "$s"
+        printf "FAIL  Lumen/%s.wgsl\n" "$s"; SPV_FAILURES=$((SPV_FAILURES+1))
         sed 's/^/    /' "$tmpdir/err"
     fi
     rm -rf "$tmpdir"
@@ -344,9 +345,9 @@ mkdir -p "$DEST_DIR/Lumen"
 
 # Parallel arrays (Bash 3.2 on macOS lacks associative arrays).
 # Compute shaders use .comp → .comp.spv; fragment shaders use .frag → .frag.spv.
-LUMEN_GLSL_NAMES=( "Lumen/SSAOTrace" "Lumen/SSAOFilter" "Lumen/DDGIGIGather" "Lumen/FusionIndirect" "Lumen/FusionComposite" "Lumen/DDGITraceRays" "Lumen/DDGIUpdateIrradiance" "Lumen/DDGIUpdateDepth" "Lumen/SSGITrace" "Lumen/SSGITemporal" "Lumen/SSGIFilter" "Lumen/SSGIHalfResDenoise" "Lumen/SSRTrace" "Lumen/SSRTemporal" "Lumen/SSRComposite" "Lumen/TAA" "Lumen/SurfaceCacheDilate" "Lumen/SurfaceCacheLightCull" "Lumen/SurfaceCacheLightEval" "Lumen/SurfaceCacheIndirectTrace" "Lumen/SurfaceCacheIndirectResolve" "Lumen/SurfaceCacheAtlasInit" "Lumen/ScreenProbePlace" "Lumen/ScreenProbeTraceRays" "Lumen/ScreenProbeAverage" "Lumen/ScreenProbeTemporal" "Lumen/ScreenProbeSpatialFilter" "Lumen/ScreenProbeGather" "Lumen/ScreenProbeDenoise" "Lumen/DDGICardRadianceAvg" "Lumen/DDGIProbeIrradianceFromCards" "Lumen/SurfaceCacheCapture" "Lumen/DDGITraceSDF" "Lumen/DDGITraceFinalize" "Lumen/ScreenProbeTraceHZB" "Lumen/ScreenProbeTraceSDF" "Lumen/ScreenProbeTraceFinalize" )
-LUMEN_GLSL_ENTRIES=( "ssao_trace" "ssao_filter" "ddgi_gi_gather" "fusion_indirect" "fusion_composite" "ddgi_trace_rays" "ddgi_update_irradiance" "ddgi_update_depth" "ssgi_trace" "ssgi_temporal" "ssgi_filter" "ssgi_halfres_denoise" "ssr_trace" "ssr_temporal" "ssr_composite" "taa_main" "surface_cache_dilate" "surface_cache_light_cull" "surface_cache_light_eval" "surface_cache_indirect_trace" "surface_cache_indirect_resolve" "surface_cache_atlas_init" "screen_probe_place" "screen_probe_trace_rays" "screen_probe_average" "screen_probe_temporal" "screen_probe_spatial_filter" "screen_probe_gather" "screen_probe_denoise" "ddgi_card_radiance_avg" "ddgi_probe_irradiance_from_cards" "surface_cache_capture" "ddgi_trace_sdf" "ddgi_trace_finalize" "screen_probe_trace_hzb" "screen_probe_trace_sdf" "screen_probe_trace_finalize" )
-LUMEN_GLSL_STAGES=( "comp" "comp" "comp" "frag" "frag" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" )
+LUMEN_GLSL_NAMES=( "Lumen/SSAOTrace" "Lumen/SSAOFilter" "Lumen/DDGIGIGather" "Lumen/FusionIndirect" "Lumen/FusionComposite" "Lumen/DDGITraceRays" "Lumen/DDGIUpdateIrradiance" "Lumen/DDGIUpdateDepth" "Lumen/SSGITrace" "Lumen/SSGITemporal" "Lumen/SSGIFilter" "Lumen/SSGIHalfResDenoise" "Lumen/SSRTrace" "Lumen/SSRTemporal" "Lumen/SSRComposite" "Lumen/TAA" "Lumen/SurfaceCacheDilate" "Lumen/SurfaceCacheLightCull" "Lumen/SurfaceCacheLightEval" "Lumen/SurfaceCacheIndirectTrace" "Lumen/SurfaceCacheIndirectResolve" "Lumen/SurfaceCacheIndirectReconstruct" "Lumen/SurfaceCacheAtlasInit" "Lumen/ScreenProbePlace" "Lumen/ScreenProbeTraceRays" "Lumen/ScreenProbeAverage" "Lumen/ScreenProbeTemporal" "Lumen/ScreenProbeSpatialFilter" "Lumen/ScreenProbeGather" "Lumen/ScreenProbeDenoise" "Lumen/DDGICardRadianceAvg" "Lumen/DDGIProbeIrradianceFromCards" "Lumen/SurfaceCacheCapture" "Lumen/DDGITraceSDF" "Lumen/DDGITraceFinalize" "Lumen/ScreenProbeTraceHZB" "Lumen/ScreenProbeTraceSDF" "Lumen/ScreenProbeTraceFinalize" )
+LUMEN_GLSL_ENTRIES=( "ssao_trace" "ssao_filter" "ddgi_gi_gather" "fusion_indirect" "fusion_composite" "ddgi_trace_rays" "ddgi_update_irradiance" "ddgi_update_depth" "ssgi_trace" "ssgi_temporal" "ssgi_filter" "ssgi_halfres_denoise" "ssr_trace" "ssr_temporal" "ssr_composite" "taa_main" "surface_cache_dilate" "surface_cache_light_cull" "surface_cache_light_eval" "surface_cache_indirect_trace" "surface_cache_indirect_resolve" "surface_cache_indirect_reconstruct" "surface_cache_atlas_init" "screen_probe_place" "screen_probe_trace_rays" "screen_probe_average" "screen_probe_temporal" "screen_probe_spatial_filter" "screen_probe_gather" "screen_probe_denoise" "ddgi_card_radiance_avg" "ddgi_probe_irradiance_from_cards" "surface_cache_capture" "ddgi_trace_sdf" "ddgi_trace_finalize" "screen_probe_trace_hzb" "screen_probe_trace_sdf" "screen_probe_trace_finalize" )
+LUMEN_GLSL_STAGES=( "comp" "comp" "comp" "frag" "frag" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" )
 
 for i in "${!LUMEN_GLSL_NAMES[@]}"; do
     pair="${LUMEN_GLSL_NAMES[$i]}"
@@ -368,6 +369,7 @@ for i in "${!LUMEN_GLSL_NAMES[@]}"; do
     else
         printf "FAIL  %s/%s.%s\n" "$src_dir" "$src_name" "$stage"
         sed 's/^/    /' "$tmpdir/err"
+        SPV_FAILURES=$((SPV_FAILURES+1))
     fi
     rm -rf "$tmpdir"
 done
@@ -502,9 +504,14 @@ for i in "${!DEBUG_GLSL_NAMES[@]}"; do
     else
         printf "FAIL  %s/%s.%s\n" "$src_dir" "$src_name" "$stage"
         sed 's/^/    /' "$tmpdir/err"
+        SPV_FAILURES=$((SPV_FAILURES+1))
     fi
     rm -rf "$tmpdir"
 done
 
 echo
 echo "Done."
+if [ "$SPV_FAILURES" -ne 0 ]; then
+    echo "FAILED: $SPV_FAILURES shader(s) failed to compile" >&2
+    exit 1
+fi

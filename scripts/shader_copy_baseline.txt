@@ -38,6 +38,7 @@ DRIFT Engine/Graphics/Metal/shaders/Lumen/ScreenProbeTraceRays.metal Lumen/Scree
 TEST_ONLY - Lumen/SurfaceCacheCardCapture.metal
 DRIFT Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheData.metal Lumen/SurfaceCacheData.metal
 SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheDilate.metal Lumen/SurfaceCacheDilate.metal
+SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheIndirectReconstruct.metal Lumen/SurfaceCacheIndirectReconstruct.metal
 SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheIndirectResolve.metal Lumen/SurfaceCacheIndirectResolve.metal
 SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheIndirectTrace.metal Lumen/SurfaceCacheIndirectTrace.metal
 SAME Engine/Graphics/Metal/shaders/Lumen/SurfaceCacheLightCull.metal Lumen/SurfaceCacheLightCull.metal

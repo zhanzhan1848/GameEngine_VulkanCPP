@@ -85,8 +85,12 @@ struct IndirectResolveParamsGPU {
     // C (plan §三.C): the trace's SDF hit band (max(voxel×1.25, 0.30)) — the
     // query contract's along-axis tolerance floor. Offset 76 (std140 → 80).
     float    hit_band;
+    // A (plan §三.A): tile-grid/reconstruct path enable (PRIMAL_SC_TILE_RECON)
+    // and the card count for the resolve's aux owning-card scan. Offsets 80/84.
+    uint32_t recon_enabled;
+    uint32_t card_count;
 };
-static_assert(sizeof(IndirectResolveParamsGPU) == 80, "std140 layout drift");
+static_assert(sizeof(IndirectResolveParamsGPU) == 88, "std140 layout drift");
 
 // Per-card dispatch info for flattened texel dispatch.
 // CPU builds prefix-sum array, GPU binary-searches to map thread_id → card → atlas UV.

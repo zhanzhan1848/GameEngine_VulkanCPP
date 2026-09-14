@@ -263,6 +263,21 @@ private:
     // grid or the card set changes.
     rhi::ResourceHandle indirect_tile_valid_buffer_{ rhi::handles::INVALID_RESOURCE };
     u64 indirect_tile_config_sig_{ 0 };
+    // A (plan §三.A): per-tile INCIDENT radiance + validity (triple-buffered,
+    // tile-domain EMA) and the compat-evidence tile texture (oct normal /
+    // capture depth / owning card id, single-buffered — rewritten per frame).
+    rhi::ResourceHandle indirect_tile_tex_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle indirect_tile_aux_{ rhi::handles::INVALID_RESOURCE };
+    // A: reconstruct pass (tile-grid → validated continuous full atlas).
+    rhi::PipelineHandle indirect_reconstruct_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle indirect_reconstruct_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle indirect_reconstruct_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetHandle indirect_reconstruct_set_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET
+    };
     rhi::ResourceHandle card_dispatch_buffer_{ rhi::handles::INVALID_RESOURCE };
     // A7: nearest-depth scratch (u32 floatBits per atlas texel) for the
     // three-dispatch GBuffer-gather capture (clear → atomicMin → write).
