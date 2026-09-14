@@ -54,6 +54,12 @@ struct Config {
     bool                    enable_meshlet{true};
     bool                    enable_collision{false};
     bool                    enable_sdf{false};  // Phase 1: off (legacy SDF consumer is ImportFbx only)
+    // T4.2 offline card bake: bake 6-direction SurfaceCache cards from the
+    // SDF shell occupancy into the trailing "CDBK" section. Independent of
+    // enable_sdf — when set, generate_sdf runs for the occupancy grid but
+    // the (heavy) SDF payload is NOT persisted into pm.sdf; only the tiny
+    // card section ships.
+    bool                    enable_card_bake{false};
 
     // Minimum vertex count for LOD generation per mesh. Meshes with fewer
     // vertices are too simple to benefit from LOD (simplifying a 50-vertex

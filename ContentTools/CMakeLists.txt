@@ -47,7 +47,7 @@ if(NOT EXISTS "${MESHOPT_DIR}/meshoptimizer.h")
 endif()
 
 # ---------------------------------------------------------------------------
-# Phase 1 AI asset pipeline submodules (see Docs/2026-08-07-asset-pipeline-
+# Phase 1 AI asset pipeline submodules (see Docs/completed/2026-08-07-asset-pipeline-
 # phase1-library-survey.md and ~/.claude/plans/memoized-dancing-boot.md).
 # ---------------------------------------------------------------------------
 set(PHASE1_SUBMODULES

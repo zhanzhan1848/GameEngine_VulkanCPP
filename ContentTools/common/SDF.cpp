@@ -241,6 +241,15 @@ void generate_sdf(mesh& m, u32 resolution) {
     std::vector<u32> tri_stamp(num_tris, 0);
     u32 current_stamp = 0;
 
+    // 2026-09-10 M3-A1: the 3³-cell closest-point search below clamps air
+    // beyond ~1 voxel to max_dim — the stored field was skin+clamp, NOT a
+    // distance field (downstream min-combined tracers tunnelled through thin
+    // slabs and escaped through walls). Keep the raw values, then propagate
+    // with the classic 6-direction sign-aware sweep before packing.
+    std::vector<f32> sdist((size_t)res * res * res);
+    std::vector<math::v3> cpts((size_t)res * res * res);
+    std::vector<u8> inside_flag((size_t)res * res * res);
+
     for (u32 z = 0; z < res; ++z) {
         for (u32 y = 0; y < res; ++y) {
             for (u32 x = 0; x < res; ++x) {
@@ -287,27 +296,77 @@ void generate_sdf(mesh& m, u32 resolution) {
                 const f32 winding = W[idx];
                 const bool inside = std::isfinite(winding) && winding > 0.5f;
                 f32 signedDist = inside ? -dist : dist;
-                m.sdf.data[idx] = math::pack_float<16>(signedDist + max_dim, 0.0f, max_dim * 2.0f);
-                // T4.3: this bake is signed (decode via sdf_signed_flag 0x40).
-                m.sdf.signed_encoding = 1;
+
+                sdist[idx] = signedDist;
+                cpts[idx] = closest_p;
+                inside_flag[idx] = inside ? 1u : 0u;
 
                 f32 voxel_diag = Length(step);
                 m.sdf.voxels[idx] = (dist < voxel_diag * 0.5f) ? 255 : 0;
-
-                math::v3 to_closest = closest_p - p;
-                auto clamp_field = [max_dim](f32 v) -> f32 {
-                    if (!std::isfinite(v)) return 0.f;
-                    if (v < -max_dim) v = -max_dim;
-                    if (v >  max_dim) v =  max_dim;
-                    return v;
-                };
-                u32 vec_idx = idx * 4;
-                m.sdf.vector_field[vec_idx + 0] = math::pack_float<16>(clamp_field(to_closest.x), -max_dim, max_dim);
-                m.sdf.vector_field[vec_idx + 1] = math::pack_float<16>(clamp_field(to_closest.y), -max_dim, max_dim);
-                m.sdf.vector_field[vec_idx + 2] = math::pack_float<16>(clamp_field(to_closest.z), -max_dim, max_dim);
-                m.sdf.vector_field[vec_idx + 3] = 0;
             }
         }
+    }
+
+    // ---- M3-A1: sign-aware 6-direction distance propagation ----
+    // Each voxel relaxes against its 6 axis neighbors: candidate distance =
+    // |p − neighbor.closest_point|, signed by the voxel's own winding. Two
+    // full forward/backward iterations over the 3 axes propagate the true
+    // closest-point distance across the whole grid (the initial 3³ search
+    // only covers ~1 voxel around surfaces).
+    const auto relax = [&](u32 idx, u32 nidx) {
+        const f32 len = Length(cpts[nidx] - cpts[idx]);
+        const f32 cand = (inside_flag[idx] ? -len : len);
+        if (std::fabs(cand) < std::fabs(sdist[idx])) {
+            sdist[idx] = cand;
+            cpts[idx] = cpts[nidx];
+        }
+    };
+    for (int iter = 0; iter < 2; ++iter) {
+        for (int pass = 0; pass < 6; ++pass) {
+            const int axis = pass / 2;
+            const bool forward = (pass % 2) == 0;
+            const int sx = axis == 0 ? (forward ? 1 : -1) : 0;
+            const int sy = axis == 1 ? (forward ? 1 : -1) : 0;
+            const int sz = axis == 2 ? (forward ? 1 : -1) : 0;
+            for (int pz = 0; pz < (int)res; ++pz)
+            for (int py = 0; py < (int)res; ++py)
+            for (int px = 0; px < (int)res; ++px) {
+                const int x = sx > 0 ? px : (int)res - 1 - px;
+                const int y = sy > 0 ? py : (int)res - 1 - py;
+                const int z = sz > 0 ? pz : (int)res - 1 - pz;
+                const int nx = x - sx, ny = y - sy, nz = z - sz;
+                if (nx < 0 || nx >= (int)res ||
+                    ny < 0 || ny >= (int)res ||
+                    nz < 0 || nz >= (int)res) continue;
+                const u32 idx = (u32)z * res * res + (u32)y * res + (u32)x;
+                const u32 nidx = (u32)nz * res * res + (u32)ny * res + (u32)nx;
+                relax(idx, nidx);
+            }
+        }
+    }
+
+    // Pack the propagated field.
+    auto clamp_field = [max_dim](f32 v) -> f32 {
+        if (!std::isfinite(v)) return 0.f;
+        if (v < -max_dim) v = -max_dim;
+        if (v >  max_dim) v =  max_dim;
+        return v;
+    };
+    for (u32 z = 0; z < res; ++z)
+    for (u32 y = 0; y < res; ++y)
+    for (u32 x = 0; x < res; ++x) {
+        const u32 idx = z * res * res + y * res + x;
+        const f32 signedDist = clamp_field(sdist[idx]);
+        m.sdf.data[idx] = math::pack_float<16>(signedDist + max_dim, 0.0f, max_dim * 2.0f);
+        m.sdf.signed_encoding = 1;
+
+        const math::v3 voxel_center = min_b + step * (math::v3{ (f32)x, (f32)y, (f32)z } + 0.5f);
+        math::v3 to_closest = cpts[idx] - voxel_center;
+        u32 vec_idx = idx * 4;
+        m.sdf.vector_field[vec_idx + 0] = math::pack_float<16>(clamp_field(to_closest.x), -max_dim, max_dim);
+        m.sdf.vector_field[vec_idx + 1] = math::pack_float<16>(clamp_field(to_closest.y), -max_dim, max_dim);
+        m.sdf.vector_field[vec_idx + 2] = math::pack_float<16>(clamp_field(to_closest.z), -max_dim, max_dim);
+        m.sdf.vector_field[vec_idx + 3] = 0;
     }
 }
 
