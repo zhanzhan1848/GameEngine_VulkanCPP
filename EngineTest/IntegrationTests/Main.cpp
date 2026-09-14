@@ -64,6 +64,10 @@
 #include "Graphics/WFC/TestWFCStreaming.h"
 #elif TEST_KENNEY_TILE_PREVIEW
 #include "Graphics/WFC/TestKenneyTilePreview.h"
+#elif TEST_PHYSICS_SMOKE
+#include "TestPhysicsSmoke.h"
+#elif TEST_PHYSICS_MULTIBODY
+#include "TestPhysicsMultiBody.h"
 #else
 #error One of the tests need to be enabled - check CMakeLists.txt compile definitions
 #endif

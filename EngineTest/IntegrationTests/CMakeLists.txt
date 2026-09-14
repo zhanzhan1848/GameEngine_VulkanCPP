@@ -741,8 +741,33 @@ if(APPLE)
     )
     target_compile_definitions(TestKenneyTilePreview PRIVATE "TEST_KENNEY_TILE_PREVIEW=1" "TEST_RENDERER=0")
 
+    # 34. TestPhysicsSmoke — T0 物理可视化冒烟（Engine/Simulation × Jolt）。
+    # 场景/断言/PNG 产物见文件头与 Docs/2026-09-11-physics-simulation-design.md §8.1。
+    # 脚手架沿 TestWFCRendering（窗口 + 前向管线 + 帧数上限退出）；
+    # 渲染目标为离屏 RGBA8 RT，帧 {1,30,60,90,120} 落 PNG 到 test-output/physics-smoke/。
+    add_executable(TestPhysicsSmoke
+        "Main.cpp"
+        "TestPhysicsSmoke.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPhysicsSmoke)
+    target_compile_definitions(TestPhysicsSmoke PRIVATE "TEST_PHYSICS_SMOKE=1" "TEST_RENDERER=0")
+
+    # 35. TestPhysicsMultiBody — T1 多物体刚体可视化测试（M1，设计文档 §8.2）。
+    # 三场景：砖塔安定+推倒 / 金字塔坍塌 / 弹性阶梯。确定性哈希基线 +
+    # 双管线可视化（窗口 RWC backbuffer + 捕获管线离屏 RT PNG）。
+    add_executable(TestPhysicsMultiBody
+        "Main.cpp"
+        "TestPhysicsMultiBody.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestPhysicsMultiBody)
+    target_compile_definitions(TestPhysicsMultiBody PRIVATE "TEST_PHYSICS_MULTIBODY=1" "TEST_RENDERER=0")
+
     # Create IntegrationTests pseudo-target
-    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart TestWFCRuinsRendering TestKenneyTilePreview)
+    add_custom_target(IntegrationTests DEPENDS TestRendererMac TestMetalRenderer TestCSMIntegration TestStandardPipeline TestModularPipeline TestCSMIntegrationRenderGraph TestMultiView TestSponzaRenderGraph TestGeometryDebugSponza TestParticleSponza TestNaniteStreamingPipeline TestHZBStandalone TestForwardRenderer TestPCGScatter TestGeometryAPI TestFieldDrivenScatter TestMaterialPreview TestMaterialPreviewEditor TestRendererRHIDevice TestEngineDLLLifecycle TestRenderFrameAPI TestLightCameraAPI TestRenderPipelineAPI TestMiscRenderingAPIs TestMediatedDataFlow TestGPUMesherIntegration TestRenderViewBuilder TestPipelineLightEntity TestPipelineRenderFrame TestWFC3DParametric TestWFCRendering TestWFCRendering2DSmoke TestWFCStreaming TestWFCCategorySolve TestWFCRuinsAdjacencyConsistency TestWFCRuinsSolveSmall TestWFCRuinsMixedCategories TestWFCRuinsRestart TestWFCRuinsRendering TestKenneyTilePreview TestPhysicsSmoke TestPhysicsMultiBody)
 
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
