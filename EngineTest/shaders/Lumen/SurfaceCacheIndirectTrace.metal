@@ -173,7 +173,9 @@ kernel void surfaceCacheIndirectTrace(
         uint hit_idx = probe_idx * rays + r;
         // T3.2 (D7) → T3.3 consumer: when the march exhausts (previously
         // classified sky), test the min-mip chain with the ray's widening
-        // cone footprint — geometry in the cone → far occlusion (no sky).
+        // cone footprint — geometry in the cone → cone-occluded (no sky).
+        // Type contract (D): 0=near, 1=far, 2=sky, 3=cone-occluded, ≥4=INVALID.
+        bool coneOccluded = false;
         if (!hit) {
             const float3 org = params.sdf_origins[0].xyz;
             const float3 ext = params.sdf_extents[0].xyz;
@@ -182,15 +184,18 @@ kernel void surfaceCacheIndirectTrace(
             // read hits the 1e10 sentinel so the test would never fire.
             const float3 invD = select(float3(1e8f), 1.0f / ray_dir,
                                        abs(ray_dir) > float3(1e-8f));
-            const float3 t0s = (org - probe_pos) * invD;
-            const float3 t1s = (org + ext - probe_pos) * invD;
+            // D (plan §三.D): measure from ray_origin (the march's origin) —
+            // the old probe_pos origin offset every distance by the normal
+            // offset and mis-placed the sample point.
+            const float3 t0s = (org - ray_origin) * invD;
+            const float3 t1s = (org + ext - ray_origin) * invD;
             const float3 tsm = min(t0s, t1s);
             const float3 tbg = max(t0s, t1s);
             const float tEnter = max(max(tsm.x, tsm.y), max(tsm.z, 0.0f));
             const float tExit = min(min(tbg.x, tbg.y), tbg.z);
             const float sampleT = min(min(t, params.max_ray_distance), tExit);
             if (tExit > tEnter && sampleT > tEnter) {
-                const float3 samplePos = probe_pos + ray_dir * sampleT;
+                const float3 samplePos = ray_origin + ray_dir * sampleT;
                 const uint baseRes = sdf0.get_width();
                 const uint m0Res = sdf0_mip0.get_width();
                 if (baseRes > 0u && m0Res > 0u && m0Res < baseRes) {
@@ -204,9 +209,12 @@ kernel void surfaceCacheIndirectTrace(
                             lf.x < 0.5f ? sdf0_mip0 : (lf.x < 1.5f ? sdf0_mip1 : sdf0_mip2);
                         if (mipTex.get_width() > 0u && mipTex.get_width() < baseRes) {
                             const float mipD = sampleSDFCascadeMip(mipTex, samplePos, org, ext);
+                            // D: min-mip proves an occluder in the wide
+                            // footprint, not a surface position — record the
+                            // dedicated cone-occluded type, never a stitched
+                            // precise hit_pos (the old probe_pos+t blend).
                             if (mipD < footprint * 0.5f) {
-                                hit = true;
-                                hit_pos = probe_pos + ray_dir * min(t, params.max_ray_distance);
+                                coneOccluded = true;
                             }
                         }
                     }
@@ -220,6 +228,9 @@ kernel void surfaceCacheIndirectTrace(
         } else if (hit) {
             ray_hits[hit_idx].hit_type = 1;
             ray_hits[hit_idx].hit_position = hit_pos;
+        } else if (coneOccluded) {
+            ray_hits[hit_idx].hit_type = 3;
+            ray_hits[hit_idx].hit_position = float3(0.0);   // no position evidence
         } else {
             ray_hits[hit_idx].hit_type = 2;
             ray_hits[hit_idx].hit_position = float3(0.0);

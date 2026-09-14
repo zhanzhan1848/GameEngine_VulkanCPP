@@ -2489,18 +2489,20 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                     c->End(); c->Submit(); c->WaitForCompletion();
                                     device_->DestroyCommandBuffer(ch);
                                     if (auto* q = static_cast<const u8*>(device_->MapBuffer(coneStaging))) {
-                                        u64 nearHits = 0, farHits = 0, skyHits = 0;
+                                        u64 nearHits = 0, farHits = 0, skyHits = 0, coneHits = 0;
                                         for (u64 h = 0; h < totalHits; ++h) {
                                             const u32 type = *reinterpret_cast<const u32*>(q + h * 32ull + 20ull);
                                             if (type == 0u) ++nearHits;
                                             else if (type == 1u) ++farHits;
-                                            else ++skyHits;
+                                            else if (type == 3u) ++coneHits;   // D: cone-occluded
+                                            else if (type == 2u) ++skyHits;
                                         }
                                         PRIMAL_LOG_STREAM(Info, "Render")
                                             << "[SDFCone] frame " << coneStatsFrames
                                             << " ray types: near=" << nearHits
                                             << " far=" << farHits
                                             << " sky=" << skyHits
+                                            << " cone=" << coneHits
                                             << " (total=" << totalHits << ")" << std::endl;
                                         PRIMAL_LOG_STREAM(Info, "Render")
                                             << "[SDFCone] cas0 origin=(" << cas0.origin.x << ","

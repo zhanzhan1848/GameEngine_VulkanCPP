@@ -66,7 +66,15 @@ kernel void surfaceCacheIndirectResolve(
         uint hit_type = ray_hits[hit_idx].hit_type;
         float3 radiance = float3(0.0);
 
-        if (hit_type >= 3u) continue;   // B: INVALID sentinel — never a measurement
+        // D (plan §三.D): 3 = cone-occluded — occluder proven, position
+        // unknown. Count with ZERO radiance (no sky through the occluder, no
+        // exact SC fetch at a fabricated position). ≥4 = INVALID sentinel.
+        if (hit_type == 3u) {
+            indirect += float3(0.0);
+            total_weight += 1.0;
+            continue;
+        }
+        if (hit_type >= 4u) continue;
 
         // 2026-09-11 Metal sync (C3.5 slice 1 parity): near AND far hits both
         // resolve through the atlas — the card lookup is position-based and

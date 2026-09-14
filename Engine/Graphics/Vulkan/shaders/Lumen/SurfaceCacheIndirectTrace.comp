@@ -166,9 +166,12 @@ float coneMipLevelGLSL(float footprint, float voxelSize, float maxMip) {
 }
 
 // T3.3 消费者：cone 命中检测——march 耗尽后，用 min-mip 判定"该方向宽
-// footprint 内是否有表面"；有 → 记 far 遮挡（不累积天空 radiance）。
+// footprint 内是否有表面"；有 → 记 cone-occluded（不累积天空 radiance）。
+// D（plan §三.D）：原点必须与 march 的 ray_origin 一致——旧实现传 probe_pos，
+// 而 march 从法线偏移后的 ray_origin 出发，travelled 距离被平移了半个
+// 命中带，采样点与构造 hit_pos 都错位。
 bool coneHitOccluded(texture3D mip0, texture3D mip1, texture3D mip2,
-                     vec3 probePos, vec3 rayDir, float travelled, float maxDist,
+                     vec3 rayOrigin, vec3 rayDir, float travelled, float maxDist,
                      float rays) {
     int baseRes = textureSize(sdf0, 0).x;
     int m0Res = textureSize(mip0, 0).x;
@@ -179,15 +182,15 @@ bool coneHitOccluded(texture3D mip0, texture3D mip1, texture3D mip2,
     // ray-AABB slab：采样 t 钳制进 [tEnter, tExit] ∩ [0, min(travelled, maxDist)]。
     // 耗尽射线的端点通常在体积外，不钳制则读到 1e10 哨兵、检测永不触发。
     vec3 invD = mix(vec3(1e8), 1.0 / rayDir, greaterThan(abs(rayDir), vec3(1e-8)));
-    vec3 t0s = (org - probePos) * invD;
-    vec3 t1s = (org + ext - probePos) * invD;
+    vec3 t0s = (org - rayOrigin) * invD;
+    vec3 t1s = (org + ext - rayOrigin) * invD;
     vec3 tsm = min(t0s, t1s), tbg = max(t0s, t1s);
     float tEnter = max(max(tsm.x, tsm.y), max(tsm.z, 0.0));
     float tExit = min(min(tbg.x, tbg.y), tbg.z);
     if (tExit <= tEnter) return false;               // 射线不穿体积
     float sampleT = min(min(travelled, maxDist), tExit);
     if (sampleT <= tEnter) return false;             // 体积内交点段为空
-    vec3 samplePos = probePos + rayDir * sampleT;
+    vec3 samplePos = rayOrigin + rayDir * sampleT;
 
     const float rayAngle = sqrt(12.566371 / max(rays, 1.0));  // ≈sqrt(4π/N) cosine 半角
     float footprint = sampleT * rayAngle;
@@ -312,13 +315,15 @@ void surface_cache_indirect_trace()
 
         uint hit_idx = probe_idx * rays + r;
         // T3.2 (D7) → T3.3 消费者: march 耗尽（原判 sky）时做 cone 命中检测
-        // ——宽 footprint 内 min-mip 报表面 → far 遮挡（不累积天空 radiance）。
-        if (!hit && coneHitOccluded(sdf0_mip0, sdf0_mip1, sdf0_mip2,
-                                    probe_pos, ray_dir, t, itp.params.max_ray_distance,
-                                    float(rays))) {
-            hit = true;
-            hit_pos = probe_pos + ray_dir * min(t, itp.params.max_ray_distance);
-        }
+        // ——宽 footprint 内 min-mip 报表面 → cone-occluded（不累积天空
+        // radiance）。D（plan §三.D）：min-mip 只证明"宽 footprint 内有
+        // 遮挡"，不是表面定位——绝不构造伪精确 hit_pos 去 SC 精确查询
+        // （旧实现用 probe_pos 原点 + march 的 t 拼一个假命中点）。类型
+        // 契约：0=near, 1=far, 2=sky, 3=cone-occluded, ≥4=INVALID。
+        const bool coneOccluded = !hit &&
+            coneHitOccluded(sdf0_mip0, sdf0_mip1, sdf0_mip2,
+                            ray_origin, ray_dir, t, itp.params.max_ray_distance,
+                            float(rays));
         ray_hits.data[hit_idx].hit_position_dist.w = t;
         if (hit && t < itp.params.near_distance) {
             ray_hits.data[hit_idx].hit_type_pad.x = 0u;
@@ -326,6 +331,9 @@ void surface_cache_indirect_trace()
         } else if (hit) {
             ray_hits.data[hit_idx].hit_type_pad.x = 1u;
             ray_hits.data[hit_idx].hit_position_dist.xyz = hit_pos;
+        } else if (coneOccluded) {
+            ray_hits.data[hit_idx].hit_type_pad.x = 3u;
+            ray_hits.data[hit_idx].hit_position_dist.xyz = vec3(0.0);   // 无位置依据
         } else {
             ray_hits.data[hit_idx].hit_type_pad.x = 2u;
             ray_hits.data[hit_idx].hit_position_dist.xyz = vec3(0.0);

@@ -86,7 +86,7 @@ layout(set = 0, binding = 7, std430) readonly buffer CardsBlock {
 
 // ProbeRayHit — two vec4s (32 bytes) per hit (matches IndirectTrace).
 //   hit_position_dist.xyz = position, .w = hit_distance
-//   hit_type_pad.x = hit_type (0=near, 1=far, 2=sky)
+//   hit_type_pad.x = hit_type (0=near, 1=far, 2=sky, 3=cone-occluded, ≥4=INVALID)
 struct ProbeRayHit {
     vec4 hit_position_dist;
     uvec4 hit_type_pad;
@@ -139,10 +139,20 @@ void surface_cache_indirect_resolve()
         uint hit_type = ray_hits.data[hit_idx].hit_type_pad.x;
         vec3 radiance = vec3(0.0);
 
-        // hit_type ≥ 3 is the INVALID sentinel (unwritten/garbage slot) —
-        // never a measurement. Skipping it (instead of counting black or sky)
-        // keeps a partially-written tile from synthesising energy.
-        if (hit_type >= 3u) continue;
+        // D (plan §三.D): hit_type 3 = cone-occluded — the min-mip test only
+        // proves an occluder inside the ray's wide footprint, NOT a surface
+        // position. Conservative response: the ray counts toward the tile
+        // average with ZERO radiance — it must not collect sky (the occluder
+        // blocks it) and must not fetch an exact SC color at a fabricated
+        // position (the old code stitched one from a mismatched origin).
+        // hit_type ≥ 4 is the INVALID sentinel (unwritten/garbage slot):
+        // skipped entirely so a partially-written tile synthesises nothing.
+        if (hit_type == 3u) {
+            indirect += vec3(0.0);
+            total_weight += 1.0;
+            continue;
+        }
+        if (hit_type >= 4u) continue;
 
         // 2026-09-10 C3.5 slice 1: near AND far hits both resolve through the
         // atlas — the card lookup is position-based and works at any distance.
