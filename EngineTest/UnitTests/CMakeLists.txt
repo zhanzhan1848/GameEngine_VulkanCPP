@@ -2611,6 +2611,7 @@ add_executable(TestParticleFX
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/GeometryCache.cpp
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/CacheConverters.cpp
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/EmissiveGI.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/render/FieldDebugOverlay.cpp
 )
 target_include_directories(TestParticleFX PRIVATE
     ${CMAKE_SOURCE_DIR}

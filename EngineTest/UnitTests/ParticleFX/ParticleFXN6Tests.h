@@ -9,6 +9,7 @@
 #include "Engine/ParticleFX/interop/LegacyPresetConvert.h"
 #include "Engine/Particles/ParticlePreset.h"
 #include "Engine/ParticleFX/interop/EmissiveGI.h"
+#include "Engine/ParticleFX/render/FieldDebugOverlay.h"
 #include "Engine/ParticleFX/interop/CacheConverters.h"
 #include "Engine/ParticleFX/interop/GeometryCache.h"
 
@@ -196,6 +197,29 @@ inline void test_convert_emits_overlife_modules() {
     std::cout << "  PASS: Converted presets emit over-life modules (" << with_blend << " with blend)" << std::endl;
 }
 
+
+inline void test_field_debug_overlay() {
+    std::cout << "Testing field debug overlay (wireframe generation)..." << std::endl;
+
+    std::vector<render::debug_line> lines;
+    render::append_box_wireframe(math::v3{ 0.f, 0.f, 0.f }, math::v3{ 1.f, 1.f, 1.f },
+                                 math::v4{ 1.f, 0.f, 0.f, 1.f }, lines);
+    render::append_sphere_wireframe(math::v3{ 5.f, 0.f, 0.f }, 2.f,
+                                    math::v4{ 0.f, 1.f, 0.f, 1.f }, lines, 16);
+    // AABB: 12 棱边；球体: 3 环 × 16 段 = 48
+    assert(lines.size() == 12 + 48);
+    // 颜色编码：红 = KillVolume，绿 = SDF
+    assert(lines[0].color.x == 1.f && lines[0].color.y == 0.f);
+    assert(lines[12].color.y == 1.f && lines[12].color.z == 0.f);
+    // 球体线框的端点应在球面上
+    const auto& last = lines.back();
+    f32 dx = last.to.x - 5.f, dy = last.to.y, dz = last.to.z;
+    f32 r = std::sqrt(dx * dx + dy * dy + dz * dz);
+    assert(std::fabs(r - 2.f) < 0.1f);
+    std::cout << "  PASS: Field debug overlay (wireframe generation)" << std::endl;
+}
+
+
 inline void run_all_n6_tests() {
     test_geometry_cache_roundtrip();
     test_converter_skeletons();
@@ -203,6 +227,7 @@ inline void run_all_n6_tests() {
     test_ribbon_trail();
     test_emissive_gi_injector();
     test_convert_emits_overlife_modules();
+    test_field_debug_overlay();
     std::cout << "All ParticleFX N6 tests passed." << std::endl;
 }
 
