@@ -845,6 +845,85 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("ParticleEnsureSystems failed", ex); return false; }
     }
 
+    // ---- PFX（可编程粒子框架，Docs/2026-09-12-particle-framework-architecture.md §6）----
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxSystemEnsure", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxSystemEnsure();
+    public static bool PfxSystemEnsure()
+    {
+        if (!_isLoaded) return false;
+        try { return _PfxSystemEnsure() != 0; }
+        catch (Exception ex) { Logger.Error("PfxSystemEnsure failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxEmitterCreateFromAsset", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxEmitterCreateFromAsset(string path);
+    public static uint PfxEmitterCreateFromAsset(string path)
+    {
+        if (!_isLoaded || string.IsNullOrEmpty(path)) return 0;
+        try { return _PfxEmitterCreateFromAsset(path); }
+        catch (Exception ex) { Logger.Error($"PfxEmitterCreateFromAsset({path}) failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxEmitterRemove", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxEmitterRemove(uint emitterId);
+    public static uint PfxEmitterRemove(uint emitterId)
+    {
+        if (!_isLoaded) return 0;
+        try { return _PfxEmitterRemove(emitterId); }
+        catch (Exception ex) { Logger.Error($"PfxEmitterRemove({emitterId}) failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxEmitterReloadFromMemory", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxEmitterReloadFromMemory(uint emitterId, byte[] text, uint length);
+    public static uint PfxEmitterReloadFromMemory(uint emitterId, byte[] text)
+    {
+        if (!_isLoaded || text == null || text.Length == 0) return 0;
+        try { return _PfxEmitterReloadFromMemory(emitterId, text, (uint)text.Length); }
+        catch (Exception ex) { Logger.Error($"PfxEmitterReloadFromMemory({emitterId}) failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxSetExposedParam", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxSetExposedParam(uint emitterId, uint nameHash, float value);
+    public static uint PfxSetExposedParam(uint emitterId, uint nameHash, float value)
+    {
+        if (!_isLoaded) return 0;
+        try { return _PfxSetExposedParam(emitterId, nameHash, value); }
+        catch (Exception ex) { Logger.Error($"PfxSetExposedParam({emitterId}) failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxGetEmitterStats", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxGetEmitterStats(uint emitterId, out uint active, out uint capacity);
+    public static uint PfxGetEmitterStats(uint emitterId, out uint active, out uint capacity)
+    {
+        active = 0; capacity = 0;
+        if (!_isLoaded) return 0;
+        try { return _PfxGetEmitterStats(emitterId, out active, out capacity); }
+        catch (Exception ex) { Logger.Error($"PfxGetEmitterStats({emitterId}) failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxGetEmitterSchema", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxGetEmitterSchema(out IntPtr schemaPtr);
+    public static string? PfxGetEmitterSchema()
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            if (_PfxGetEmitterSchema(out var ptr) == 0 || ptr == IntPtr.Zero) return null;
+            return System.Runtime.InteropServices.Marshal.PtrToStringUTF8(ptr);
+        }
+        catch (Exception ex) { Logger.Error("PfxGetEmitterSchema failed", ex); return null; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxConvertLegacyPresets", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxConvertLegacyPresets(string outDir);
+    public static uint PfxConvertLegacyPresets(string outDir)
+    {
+        if (!_isLoaded) return 0;
+        try { return _PfxConvertLegacyPresets(outDir); }
+        catch (Exception ex) { Logger.Error("PfxConvertLegacyPresets failed", ex); return 0; }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "ParticleEmitterConfigSize", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _ParticleEmitterConfigSize();
     public static uint ParticleEmitterConfigSize()
@@ -1401,6 +1480,155 @@ public static class NativeEngineBridge
     {
         if (!_isLoaded) return;
         try { _RemoveEntityLight(entityId); } catch (Exception ex) { Logger.Error("RemoveEntityLight failed", ex); }
+    }
+
+    // === 物理组件（M2-D；POD 布局见 EngineDLL/PhysicsAPI.cpp static_assert） ===
+
+    [DllImport("PrimalEngine", EntryPoint = "AddEntityCollider", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _AddEntityCollider(uint entityId, uint shape, float[] halfExtents, float[] offset, uint isTrigger, uint layer);
+    public static uint AddEntityCollider(uint entityId, uint shape, float[] halfExtents, float[] offset, bool isTrigger, uint layer)
+    {
+        if (!_isLoaded || halfExtents == null || offset == null) return 0;
+        try { return _AddEntityCollider(entityId, shape, halfExtents, offset, isTrigger ? 1u : 0u, layer); }
+        catch (Exception ex) { Logger.Error("AddEntityCollider failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "RemoveEntityCollider", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _RemoveEntityCollider(uint entityId);
+    public static uint RemoveEntityCollider(uint entityId)
+    {
+        if (!_isLoaded) return 0;
+        try { return _RemoveEntityCollider(entityId); }
+        catch (Exception ex) { Logger.Error("RemoveEntityCollider failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "AddEntityRigidBody", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _AddEntityRigidBody(uint entityId, uint mode, float mass, float restitution, float friction, float[] velocity);
+    public static uint AddEntityRigidBody(uint entityId, uint mode, float mass, float restitution, float friction, float[] velocity)
+    {
+        if (!_isLoaded || velocity == null) return 0;
+        try { return _AddEntityRigidBody(entityId, mode, mass, restitution, friction, velocity); }
+        catch (Exception ex) { Logger.Error("AddEntityRigidBody failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "RemoveEntityRigidBody", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _RemoveEntityRigidBody(uint entityId);
+    public static uint RemoveEntityRigidBody(uint entityId)
+    {
+        if (!_isLoaded) return 0;
+        try { return _RemoveEntityRigidBody(entityId); }
+        catch (Exception ex) { Logger.Error("RemoveEntityRigidBody failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "EntityHasCollider", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EntityHasCollider(uint entityId);
+    public static bool EntityHasCollider(uint entityId)
+    {
+        if (!_isLoaded) return false;
+        try { return _EntityHasCollider(entityId) != 0; }
+        catch (Exception ex) { Logger.Error("EntityHasCollider failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "EntityHasRigidBody", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _EntityHasRigidBody(uint entityId);
+
+    // === 物理世界驱动（sim.* CLI 族；M2） ===
+
+    [DllImport("PrimalEngine", EntryPoint = "PhysicsInitialize", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PhysicsInitialize(IntPtr settingsPod);
+    public static bool PhysicsInitialize()
+    {
+        if (!_isLoaded) return false;
+        try
+        {
+            // 缺省 POD：gravity(0,-9.81,0) max_bodies=4096 workers=0(单线程确定性)
+            // fixed_dt=1/60 sub_steps=5 —— 28 字节，与 EngineDLL/PhysicsAPI.cpp 一致
+            var pod = new byte[28];
+            BitConverter.GetBytes(0f).CopyTo(pod, 0);
+            BitConverter.GetBytes(-9.81f).CopyTo(pod, 4);
+            BitConverter.GetBytes(0f).CopyTo(pod, 8);
+            BitConverter.GetBytes(4096u).CopyTo(pod, 12);
+            BitConverter.GetBytes(0u).CopyTo(pod, 16);
+            BitConverter.GetBytes(1f / 60f).CopyTo(pod, 20);
+            BitConverter.GetBytes(5u).CopyTo(pod, 24);
+            var handle = System.Runtime.InteropServices.GCHandle.Alloc(pod, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try { return _PhysicsInitialize(handle.AddrOfPinnedObject()) != 0; }
+            finally { handle.Free(); }
+        }
+        catch (Exception ex) { Logger.Error("PhysicsInitialize failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineTick", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineTick(float dtSeconds);
+    public static void PipelineTick(float dtSeconds)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineTick(dtSeconds); } catch (Exception ex) { Logger.Error("PipelineTick failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PhysicsSetRunning", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PhysicsSetRunning(uint running);
+    public static bool PhysicsSetRunning(bool running)
+    {
+        if (!_isLoaded) return false;
+        try { return _PhysicsSetRunning(running ? 1u : 0u) != 0; }
+        catch (Exception ex) { Logger.Error("PhysicsSetRunning failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PhysicsIsRunning", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PhysicsIsRunning();
+    public static bool PhysicsIsRunning()
+    {
+        if (!_isLoaded) return false;
+        try { return _PhysicsIsRunning() != 0; }
+        catch (Exception ex) { Logger.Error("PhysicsIsRunning failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PhysicsIsInitialized", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PhysicsIsInitialized();
+    public static bool PhysicsIsInitialized()
+    {
+        if (!_isLoaded) return false;
+        try { return _PhysicsIsInitialized() != 0; }
+        catch (Exception ex) { Logger.Error("PhysicsIsInitialized failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PhysicsMaterializeAll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PhysicsMaterializeAll();
+    public static uint PhysicsMaterializeAll()
+    {
+        if (!_isLoaded) return 0;
+        try { return _PhysicsMaterializeAll(); }
+        catch (Exception ex) { Logger.Error("PhysicsMaterializeAll failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PhysicsEntityBody", CallingConvention = CallingConvention.Cdecl)]
+    private static extern ulong _PhysicsEntityBody(uint entityId);
+    public static ulong PhysicsEntityBody(uint entityId)
+    {
+        if (!_isLoaded) return 0;
+        try { return _PhysicsEntityBody(entityId); }
+        catch (Exception ex) { Logger.Error("PhysicsEntityBody failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PhysicsBodyGetTransform", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PhysicsBodyGetTransform(ulong bodyId, float[] outTransform);
+    public static (float X, float Y, float Z, bool Sleeping)? PhysicsBodyGetTransform(ulong bodyId)
+    {
+        if (!_isLoaded || bodyId == 0) return null;
+        var pod = new float[10];
+        try
+        {
+            if (_PhysicsBodyGetTransform(bodyId, pod) == 0) return null;
+            return (pod[0], pod[1], pod[2], pod[9] != 0);
+        }
+        catch (Exception ex) { Logger.Error("PhysicsBodyGetTransform failed", ex); return null; }
+    }
+    public static bool EntityHasRigidBody(uint entityId)
+    {
+        if (!_isLoaded) return false;
+        try { return _EntityHasRigidBody(entityId) != 0; }
+        catch (Exception ex) { Logger.Error("EntityHasRigidBody failed", ex); return false; }
     }
 
     // Live light-edit setters (LightAPI.cpp) — let Inspector changes reach

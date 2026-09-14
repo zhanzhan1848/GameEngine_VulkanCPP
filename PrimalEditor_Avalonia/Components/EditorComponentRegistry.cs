@@ -37,7 +37,10 @@ public static class EditorComponentRegistry
         ["transform"] = new("transform", "Transform", typeof(Transform), () => new Transform(), required: true),
         ["meshRenderer"] = new("meshRenderer", "Mesh Renderer", typeof(MeshRendererComponent), () => new MeshRendererComponent()),
         ["light"] = new("light", "Light", typeof(LightComponent), () => new LightComponent()),
-        ["camera"] = new("camera", "Camera", typeof(CameraComponent), () => new CameraComponent())
+        ["camera"] = new("camera", "Camera", typeof(CameraComponent), () => new CameraComponent()),
+        ["collider"] = new("collider", "Collider", typeof(ColliderComponent), () => new ColliderComponent()),
+        ["rigidbody"] = new("rigidbody", "Rigid Body", typeof(RigidBodyComponent), () => new RigidBodyComponent()),
+        ["particleFX"] = new("particleFX", "Particle FX", typeof(ParticleFXComponent), () => new ParticleFXComponent())
     };
 
     public static IReadOnlyCollection<EditorComponentDescriptor> All => _byId.Values;

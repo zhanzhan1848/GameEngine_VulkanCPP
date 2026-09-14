@@ -134,6 +134,24 @@ public partial class EngineViewport3D : UserControl
     private void OnAttached(object? sender, VisualTreeAttachmentEventArgs e)
     {
         _isAttached = true;
+        // OnDetached unsubscribes LayoutUpdated（标签页切换 / Dock 重布局会
+        // detach）；不在此处补订阅的话，第二次 attach 之后 resize 处理永久
+        // 失效——布局变化不再触发 _host.Resize / 渲染目标重建，原生表面就会
+        // 停留在旧尺寸（错层 bug 的另一诱因）。
+        LayoutUpdated -= OnLayoutUpdated;
+        LayoutUpdated += OnLayoutUpdated;
+
+        // 标签页往返（Sequencer ⇄ World Editor）：表面保持存活（见
+        // OnDetached），这里直接恢复渲染循环，不做销毁级重建——
+        // RemoveRenderSurface/DestroyRenderTarget 的会话中途调用会踩中
+        // 引擎静态注册表断言（libEngineDLL 二次加载后 surfaces 为空）。
+        if (_viewportInitialized && _host is { IsReady: true })
+        {
+            StartRenderLoop();
+            SyncOverlay();
+            return;
+        }
+
         if (_viewportInitialized) return;
         if (!NativeEngineBridge.IsLoaded)
         {
@@ -327,7 +345,7 @@ public partial class EngineViewport3D : UserControl
         // causing "mutex lock failed: Invalid argument" crashes. The
         // DispatcherTimer runs entirely on the UI thread — no
         // cross-thread marshalling, no mutex contention, no crash.
-        _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
+        _renderTimer = new DispatcherTimer(DispatcherPriority.Background)  // TEMP-DEBUG：验证 Dock flush 饿死假说
         {
             Interval = TimeSpan.FromMilliseconds(33)
         };
@@ -460,6 +478,10 @@ public partial class EngineViewport3D : UserControl
         try
         {
             _animTime += dt;
+
+            // N6：PipelineTick 驱动物理 + PFX 粒子框架 tick
+            // （pfx::tick 幂等 ensure，未初始化时惰性启动）
+            NativeEngineBridge.PipelineTick(dt);
 
             // Runtime 预览（Run 模式 Render Surface）下不画编辑器视觉
             // （网格 / 世界轴 / 光源图标 / gizmo 线）——与 PrimalPlayer 的画面
@@ -711,16 +733,17 @@ public partial class EngineViewport3D : UserControl
         _pendingInit = false;
         _retryTimer?.Stop();
         _retryTimer = null;
+        // 标签页切换（Sequencer ⇄ World Editor）会 detach 本控件。这里只
+        // 暂停渲染循环，**保留**原生表面 / 渲染目标 / 相机状态——会话中途
+        // 的 RemoveRenderSurface 会打中 libEngineDLL 二次加载副本的空
+        // surfaces 注册表（断言崩溃），且销毁级重建会把用户相机位姿清掉。
+        // 重新 attach 时 OnAttached 直接 StartRenderLoop 复用表面。
+        // （进程退出的清理由 App.OnExit / dylib 卸载兜底。）
         StopPreviewFrameCapture();
         StopRenderLoop();
         LayoutUpdated -= OnLayoutUpdated;
-        if (_renderTarget != 0)
-        {
-            NativeEngineBridge.DestroyRenderTarget(_renderTarget);
-            _renderTarget = 0;
-        }
-        _host?.Destroy();
-        _viewportInitialized = false;
+        // _renderTarget / _host（原生表面）/ 相机与预览状态全部保留，
+        // 供重新 attach 时复用（见 OnAttached 的 keep-alive 分支）。
     }
 
     // LayoutUpdated fires after the visual tree's layout pass completes. The
@@ -795,6 +818,15 @@ public partial class EngineViewport3D : UserControl
             if (_cameraEntityId != NativeEngineBridge.InvalidEntityId && width > 0 && height > 0)
             {
                 NativeEngineBridge.SetEntityCameraAspectRatio(_cameraEntityId, (float)width / height);
+            }
+
+            // 透过场景相机取景（runtime 预览 / LookThroughCamera）时，场景
+            // 相机的纵横比也必须跟随 surface。否则任何 resize（典型：打开
+            // Sequencer 面板挤压视口）后画面仍按开始预览时的旧纵横比投影，
+            // 看起来被拉伸/压扁。编辑器相机在上面已同步，这里补场景相机。
+            if (IsLookingThroughSceneCamera && width > 0 && height > 0)
+            {
+                NativeEngineBridge.SetEntityCameraAspectRatio(_lookThroughSceneEntityId, (float)width / height);
             }
         }
 
@@ -1491,7 +1523,15 @@ public partial class EngineViewport3D : UserControl
         SetEditorOverlaysVisible(true);
         _runtimePreview = false;
         Logger.Info("[Run] runtime 预览结束：editor mode=true, 编辑器相机恢复");
+        RuntimePreviewEnded?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>
+    /// runtime 预览结束时触发（Stop 按钮 / 切场景两条退出路径都会经过
+    /// <see cref="EndRuntimePreview"/>）。WorldEditorView 用它恢复工具栏上
+    /// 预览期间禁用的编辑器视口开关（VIEW/Bounds/Ortho/Rec）。
+    /// </summary>
+    public event System.EventHandler? RuntimePreviewEnded;
 
     private void SetEditorOverlaysVisible(bool visible)
     {

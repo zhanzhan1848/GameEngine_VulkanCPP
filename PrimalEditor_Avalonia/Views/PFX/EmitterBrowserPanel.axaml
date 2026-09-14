@@ -1,0 +1,25 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels.PFX"
+             xmlns:mdl="using:PrimalEditor_Avalonia.Models.PFX"
+             x:Class="PrimalEditor_Avalonia.Views.PFX.EmitterBrowserPanel"
+             x:DataType="vm:PfxBrowserPanelViewModel">
+  <DockPanel Margin="8">
+    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="4" Margin="0,0,0,6">
+      <Button Content="＋" Command="{Binding NewAssetCommand}" Width="32" Height="26"
+              ToolTip.Tip="新建发射器"/>
+      <Button Content="🗑" Command="{Binding DeleteCommand}" Width="32" Height="26"
+              ToolTip.Tip="删除选中"/>
+      <TextBox Watermark="搜索…" Text="{Binding FilterText, Mode=TwoWay}" Width="120" Height="26"/>
+    </StackPanel>
+    <ListBox ItemsSource="{Binding FilteredAssets}"
+             SelectedItem="{Binding SelectedAsset, Mode=TwoWay}"
+             DoubleTapped="OnAssetDoubleTapped">
+      <ListBox.ItemTemplate>
+        <DataTemplate DataType="mdl:PfxAssetEntry">
+          <TextBlock Text="{Binding DisplayName}" Margin="4,2"/>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+  </DockPanel>
+</UserControl>

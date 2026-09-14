@@ -1,9 +1,9 @@
 # PFX 架构设计 —— Niagara 级可编程粒子框架 × Houdini POP 能力 × 引擎松耦合集成
 
 - 日期：2026-09-12
-- 定位：**取代** `Docs/2026-09-12-particle-system-upgrade-plan.md` 的架构层结论（该文档降级为"存量系统过渡路径"参考，其 P0 的句柄/死亡通知设计被本文 N0 吸收）。
+- 定位：**取代** `Docs/completed/2026-09-12-particle-system-upgrade-plan.md` 的架构层结论（该文档降级为"存量系统过渡路径"参考，其 P0 的句柄/死亡通知设计被本文 N0 吸收）。
 - 前置调研：同日完成的 `Engine/Particles/` 全量盘点（能力清单与已知问题见 upgrade-plan §0，本文不重复）。
-- 关联文档：`Docs/2026-09-11-physics-simulation-design.md`（Jolt 接线纪律、PipelineTick、确定性门禁）、`Docs/2026-09-11-physics-simulation-survey.md` §2.4（流体求解器归属）。
+- 关联文档：`Docs/2026-09-11-physics-simulation-design.md`（Jolt 接线纪律、PipelineTick、确定性门禁）、`Docs/completed/2026-09-11-physics-simulation-survey.md` §2.4（流体求解器归属）。
 - 本文回答： Niagara 的架构范式如何在本引擎落地（非搬运）、Houdini POP 系列能力映射到什么载体、与引擎各系统（ECS/物理/序列器/GI/编辑器/CLI）的**松耦合**接口长什么样、N0–N7 里程碑怎么排。
 - **复审记录（2026-09-12 同日）**：用户决议两项——①v1 编辑器形态 = JSON 资产 + 表单 Inspector（节点图延后）；②N5 GPU 图发射器**无期限延后**。代码库事实核查修正四项——①`PipelineTick` 已存在（`EngineDLL/PhysicsAPI.cpp:177`，物理 M0 已落地，原"待新增"表述作废）；②`particles::update` 生产宿主从未调用（仅集成测试驱动），N0 补生产 tick 接线；③引擎 C++ 无 JSON 库，N1 补 vendor 决议；④`mesh::mesh_id` + `RenderMesh.h` 确认存在，N2 引用具体化。编辑归属决议一项——⑤**文档在 UI（UndoRedo/文件），schema 反射在引擎（`PfxGetEmitterSchema`），引擎不做结构性编辑导出**（§6）。
 - **当前状态（2026-09-13）**：N0 框架骨架**已完成并通过全部门禁**（交付物、门禁结果与实现偏差见 §10 实施状态）；下一里程碑 N1。
@@ -544,3 +544,14 @@ Niagara 可视化节点编辑器（N7 可选）、全量 GPU 模块翻译、SPH/
 | N7 可选项池 | 按需（不默认进） | — |
 
 **回归证据**：TestParticleFX 34 项全绿；TestParticles / TestPhysicsSimulation / TestPhysicsM4 无回归；C# Native 72 项 + Cli 55/56（唯一失败为 dev 分支预置 schema 快照问题，与 PFX 无关）；Sponza 集成冒烟 90s 4888 帧 VALID 零 fault。
+
+
+### 10.6.5 R2 schema 驱动动态表单 —— 已完成（2026-09-14）
+
+**交付物**：PfxEditorWindowViewModel 从 JSON TextBox 升级为 schema 驱动结构化编辑——
+ObservableCollection<PfxModuleRow> 按阶段分组、每模块 PfxParamField 集合可编辑、
+SyncToJson 序列化回 JSON、300ms 防抖热预览推送、Undo/Redo 双栈按钮接通 AXAML。
+EmitterEditorWindow.axaml 从 JSON TextBox 升级为三列结构化编辑
+（阶段 ComboBox + 模块 ListBox + 参数 ItemsControl），x:DataType 编译绑定适配 Avalonia 12。
+
+**门禁**：TestParticleFX 37 项 + C# Native 72 项全绿；dotnet build 0 errors。

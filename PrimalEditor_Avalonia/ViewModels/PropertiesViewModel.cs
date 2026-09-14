@@ -62,6 +62,59 @@ public class PropertiesViewModel : ViewModelBase
     public MSCamera? Camera { get; private set; }
     public MSMeshRenderer? MeshRenderer { get; private set; }
 
+    // ---- 物理组件（M2-D）----
+    private MSCollider? _collider;
+    public MSCollider? Collider
+    {
+        get => _collider;
+        private set
+        {
+            if (_collider != null) _collider.PropertyChanged -= OnComponentPropertyChanged;
+            _collider = value;
+            if (_collider != null) _collider.PropertyChanged += OnComponentPropertyChanged;
+        }
+    }
+
+    private MSRigidBody? _rigidBody;
+    public MSRigidBody? RigidBody
+    {
+        get => _rigidBody;
+        private set
+        {
+            if (_rigidBody != null) _rigidBody.PropertyChanged -= OnComponentPropertyChanged;
+            _rigidBody = value;
+            if (_rigidBody != null) _rigidBody.PropertyChanged += OnComponentPropertyChanged;
+        }
+    }
+
+    public bool HasColliderComponent => Collider != null;
+    public bool HasRigidBodyComponent => RigidBody != null;
+
+    // Inspector 绑定包装（ComboBox 用 SelectedIndex；nullable float 直绑）
+    public System.Collections.Generic.IReadOnlyList<string> ColliderShapeOptions { get; } =
+        new[] { "Box", "Sphere" };
+    public int ColliderShapeIndex
+    {
+        get => Collider?.Shape ?? 0;
+        set { if (Collider != null) Collider.Shape = value; }
+    }
+    public float? ColliderHalfX { get => Collider?.HalfX; set { if (Collider != null) Collider.HalfX = value; } }
+    public float? ColliderHalfY { get => Collider?.HalfY; set { if (Collider != null) Collider.HalfY = value; } }
+    public float? ColliderHalfZ { get => Collider?.HalfZ; set { if (Collider != null) Collider.HalfZ = value; } }
+    public bool? ColliderIsTrigger { get => Collider?.IsTrigger; set { if (Collider != null) Collider.IsTrigger = value; } }
+    public int? ColliderLayer { get => Collider?.Layer; set { if (Collider != null) Collider.Layer = value; } }
+
+    public System.Collections.Generic.IReadOnlyList<string> RigidBodyModeOptions { get; } =
+        new[] { "Static", "Dynamic", "Kinematic" };
+    public int RigidBodyModeIndex
+    {
+        get => RigidBody?.Mode ?? 1;
+        set { if (RigidBody != null) RigidBody.Mode = value; }
+    }
+    public float? RigidBodyMass { get => RigidBody?.Mass; set { if (RigidBody != null) RigidBody.Mass = value; } }
+    public float? RigidBodyRestitution { get => RigidBody?.Restitution; set { if (RigidBody != null) RigidBody.Restitution = value; } }
+    public float? RigidBodyFriction { get => RigidBody?.Friction; set { if (RigidBody != null) RigidBody.Friction = value; } }
+
     /// <summary>
     /// Component sections are visible only when every selected entity owns
     /// that component. This keeps multi-editing predictable: a component edit
@@ -99,6 +152,91 @@ public class PropertiesViewModel : ViewModelBase
         }
     }
 
+    // ---- Particle FX（PFX，N1 基础表单）----
+
+    public bool HasParticleFXComponent => SingleSelection.Count == 1 &&
+        SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>() != null;
+
+    public PrimalEditor_Avalonia.Components.ParticleFXComponent? ParticleFX
+    {
+        get
+        {
+            var c = SingleSelection.Count == 1
+                ? SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>()
+                : null;
+            ParticleFXInstanceStatic = c;
+            return c;
+        }
+    }
+
+    public string ParticleFXAssetPath
+    {
+        get => ParticleFX?.AssetPath ?? "";
+        set
+        {
+            if (ParticleFX == null || ParticleFX.AssetPath == value) return;
+            ParticleFX.AssetPath = value;
+            MarkProjectDirtyCallback?.Invoke();
+        }
+    }
+
+    public bool ParticleFXEnabled
+    {
+        get => ParticleFX?.IsEnabled ?? false;
+        set
+        {
+            if (ParticleFX == null) return;
+            ParticleFX.IsEnabled = value;
+            MarkProjectDirtyCallback?.Invoke();
+        }
+    }
+
+    /// <summary>同步 ExposedParams 到引擎发射器（遍历 rows，逐个调 PfxSetExposedParam）。</summary>
+    public System.Windows.Input.ICommand PfxSyncParamsCommand { get; } =
+        new PrimalEditor_Avalonia.Common.RelayCommand(_ =>
+        {
+            var pfx = ParticleFXInstanceStatic;
+            if (pfx == null) return;
+            var nativeId = SelectedEntityNativeIdStatic;
+            if (nativeId == 0) return;
+
+            foreach (var kv in pfx.ExposedParams)
+            {
+                var hash = PrimalEditor_Avalonia.Native.PfxHash.HashName(kv.Key);
+                PrimalEditor_Avalonia.Native.NativeEngineBridge.PfxSetExposedParam(nativeId, hash, kv.Value);
+            }
+            Logger.Info($"[ParticleFX] synced {pfx.ExposedParams.Count} exposed params");
+        });
+
+    // 静态中转（RelayCommand 闭包无法捕获实例——编辑器单实例语义）
+    internal static PrimalEditor_Avalonia.Components.ParticleFXComponent? ParticleFXInstanceStatic;
+    internal static uint SelectedEntityNativeIdStatic;
+
+    // ---- ExposedParams 行模型（DataGrid 绑定）----
+
+    private System.Collections.ObjectModel.ObservableCollection<PfxExposedParamRow>? _pfxParamRows;
+
+    public System.Collections.ObjectModel.ObservableCollection<PfxExposedParamRow>? PfxParamRows
+    {
+        get
+        {
+            if (_pfxParamRows == null && ParticleFX != null)
+            {
+                _pfxParamRows = new System.Collections.ObjectModel.ObservableCollection<PfxExposedParamRow>();
+                foreach (var kv in ParticleFX.ExposedParams)
+                    _pfxParamRows.Add(new PfxExposedParamRow { Name = kv.Key, Value = kv.Value });
+            }
+            return _pfxParamRows;
+        }
+    }
+
+    public void RefreshPfxParamRows()
+    {
+        _pfxParamRows = null;
+        OnPropertyChanged(nameof(PfxParamRows));
+    }
+
+    
     private System.Collections.Generic.IReadOnlyList<string>? _particlePresets;
     public System.Collections.Generic.IReadOnlyList<string> ParticlePresetOptions
         => _particlePresets ??= PrimalEditor_Avalonia.Native.NativeEngineBridge.ParticlePresetList()?
@@ -309,6 +447,8 @@ public class PropertiesViewModel : ViewModelBase
                 Light = null;
                 Camera = null;
                 MeshRenderer = null;
+                Collider = null;
+                RigidBody = null;
                 MeshAsset = null;
                 HasMaterialOverrideComponent = false;
                 MaterialOverrides.Clear();
@@ -320,6 +460,8 @@ public class PropertiesViewModel : ViewModelBase
                 Light = HasCommonComponent<LightComponent>(ms) ? new MSLight(ms) : null;
                 Camera = HasCommonComponent<CameraComponent>(ms) ? new MSCamera(ms) : null;
                 MeshRenderer = HasCommonComponent<MeshRendererComponent>(ms) ? new MSMeshRenderer(ms) : null;
+                Collider = HasCommonComponent<ColliderComponent>(ms) ? new MSCollider(ms) : null;
+                RigidBody = HasCommonComponent<RigidBodyComponent>(ms) ? new MSRigidBody(ms) : null;
                 RebuildMeshAsset(ms.SelectedEntities);
                 HasMaterialOverrideComponent = HasCommonComponent<MaterialOverrideComponent>(ms);
                 RebuildMaterialOverrides(ms.SelectedEntities);
@@ -567,6 +709,56 @@ public class PropertiesViewModel : ViewModelBase
         PushLightsToNative();
     }
 
+    // 物理组件（M2-D）：inspector 编辑 → Remove+Add 重物化原生 body
+    //（EngineDLL 的 Add* 为一次性创建语义；M3 play 态机引入后可改为参数更新）
+    private void OnComponentPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        PushPhysicsComponentsToNative();
+    }
+
+    private void PushPhysicsComponentsToNative()
+    {
+        var selected = _msEntity.SelectedEntities;
+        if (selected.Count == 0) return;
+        if (!NativeEngineBridge.IsLoaded) return;
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        var worldEditor = lifetime?.MainWindow?.DataContext is MainWindowViewModel mainVm
+            ? mainVm.WorldEditor
+            : null;
+        if (worldEditor == null) return;
+
+        foreach (var entity in selected)
+        {
+            var nativeId = worldEditor.GetNativeEntityId(entity);
+            if (nativeId == 0) continue;
+
+            var collider = entity.GetComponent<ColliderComponent>();
+            if (collider != null && NativeEngineBridge.EntityHasCollider(nativeId))
+            {
+                NativeEngineBridge.RemoveEntityCollider(nativeId);
+                NativeEngineBridge.AddEntityCollider(nativeId,
+                    (uint)collider.Shape,
+                    new[] { collider.HalfX, collider.HalfY, collider.HalfZ },
+                    new[] { 0f, 0f, 0f },
+                    collider.IsTrigger,
+                    (uint)collider.Layer);
+            }
+
+            var rigidBody = entity.GetComponent<RigidBodyComponent>();
+            if (rigidBody != null && NativeEngineBridge.EntityHasRigidBody(nativeId))
+            {
+                NativeEngineBridge.RemoveEntityRigidBody(nativeId);
+                NativeEngineBridge.AddEntityRigidBody(nativeId,
+                    (uint)rigidBody.Mode,
+                    rigidBody.Mass,
+                    rigidBody.Restitution,
+                    rigidBody.Friction,
+                    new[] { rigidBody.VelocityX, rigidBody.VelocityY, rigidBody.VelocityZ });
+            }
+        }
+    }
+
     // ---- Scene environment (HDR sky + IBL), surfaced in the LIGHT section
     // of the inspector so the sun light's env map is editable in place.
     // Values delegate to the active scene's SceneEnvironmentViewModel; the
@@ -770,6 +962,8 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(MeshRenderer));
         OnPropertyChanged(nameof(MeshAsset));
         OnPropertyChanged(nameof(HasLightComponent));
+        OnPropertyChanged(nameof(HasColliderComponent));
+        OnPropertyChanged(nameof(HasRigidBodyComponent));
         OnPropertyChanged(nameof(HasEnvironmentComponent));
         OnPropertyChanged(nameof(EnvironmentVM));
         OnPropertyChanged(nameof(HasCameraComponent));

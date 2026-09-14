@@ -36,7 +36,24 @@ public interface INativeEngineBridgeLike
     /// </summary>
     void SetEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) { }
 
+    // ---- PFX（可编程粒子框架）；默认实现保持测试替身兼容 ----
+
+    bool PfxSystemEnsure() => false;
+    uint PfxEmitterCreateFromAsset(string path) => 0u;
+    uint PfxEmitterRemove(uint emitterId) => 0u;
+    uint PfxEmitterReloadFromMemory(uint emitterId, byte[] text) => 0u;
+    uint PfxSetExposedParam(uint emitterId, uint nameHash, float value) => 0u;
+    uint PfxGetEmitterStats(uint emitterId, out uint active, out uint capacity) { active = 0; capacity = 0; return 0u; }
+
     uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector);
+
+    // === 物理组件（M2-D） ===
+    uint AddEntityCollider(uint entityId, uint shape, float[] halfExtents, float[] offset, bool isTrigger, uint layer);
+    uint RemoveEntityCollider(uint entityId);
+    uint AddEntityRigidBody(uint entityId, uint mode, float mass, float restitution, float friction, float[] velocity);
+    uint RemoveEntityRigidBody(uint entityId);
+    bool EntityHasCollider(uint entityId);
+    bool EntityHasRigidBody(uint entityId);
 
     /// <summary>
     /// Synchronously resolve a mesh import. Returns the native geometry
@@ -162,11 +179,32 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
     public string? ParticlePresetList() => NativeEngineBridge.ParticlePresetList();
     public bool ParticlePresetApplyToConfig(string name, byte[] config) => NativeEngineBridge.ParticlePresetApplyToConfig(name, config);
 
+    public bool PfxSystemEnsure() => NativeEngineBridge.PfxSystemEnsure();
+    public uint PfxEmitterCreateFromAsset(string path) => NativeEngineBridge.PfxEmitterCreateFromAsset(path);
+    public uint PfxEmitterRemove(uint emitterId) => NativeEngineBridge.PfxEmitterRemove(emitterId);
+    public uint PfxEmitterReloadFromMemory(uint emitterId, byte[] text) => NativeEngineBridge.PfxEmitterReloadFromMemory(emitterId, text);
+    public uint PfxSetExposedParam(uint emitterId, uint nameHash, float value) => NativeEngineBridge.PfxSetExposedParam(emitterId, nameHash, value);
+    public uint PfxGetEmitterStats(uint emitterId, out uint active, out uint capacity) => NativeEngineBridge.PfxGetEmitterStats(emitterId, out active, out capacity);
+
     public void SetEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) =>
         NativeEngineBridge.SetEntityLight(entityId, lightType, intensity, colorRgb, range, umbraRad, penumbraRad, isEnabled);
 
     public uint AddEntityCamera(uint entityId, uint projectionType, float fieldOfView, float aspectRatio, float nearZ, float farZ, float[] upVector) =>
         NativeEngineBridge.AddEntityCamera(entityId, projectionType, fieldOfView, aspectRatio, nearZ, farZ, upVector);
+
+    // === 物理组件（M2-D） ===
+    public uint AddEntityCollider(uint entityId, uint shape, float[] halfExtents, float[] offset, bool isTrigger, uint layer) =>
+        NativeEngineBridge.AddEntityCollider(entityId, shape, halfExtents, offset, isTrigger, layer);
+    public uint RemoveEntityCollider(uint entityId) =>
+        NativeEngineBridge.RemoveEntityCollider(entityId);
+    public uint AddEntityRigidBody(uint entityId, uint mode, float mass, float restitution, float friction, float[] velocity) =>
+        NativeEngineBridge.AddEntityRigidBody(entityId, mode, mass, restitution, friction, velocity);
+    public uint RemoveEntityRigidBody(uint entityId) =>
+        NativeEngineBridge.RemoveEntityRigidBody(entityId);
+    public bool EntityHasCollider(uint entityId) =>
+        NativeEngineBridge.EntityHasCollider(entityId);
+    public bool EntityHasRigidBody(uint entityId) =>
+        NativeEngineBridge.EntityHasRigidBody(entityId);
 
     public ulong ImportMesh(string cookedPath)
     {

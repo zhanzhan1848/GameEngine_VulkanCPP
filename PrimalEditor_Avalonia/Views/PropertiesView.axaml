@@ -95,6 +95,71 @@
                 <TextBox Grid.Row="0" Grid.Column="2" Text="{Binding ScaleZ, Mode=TwoWay}" KeyDown="OnTransformTextBoxKeyDown" Margin="2,0,0,0"/>
             </Grid>
 
+            <!-- ===== COLLIDER（M2-D） ===== -->
+            <StackPanel IsVisible="{Binding HasColliderComponent}" Spacing="6">
+                <Separator Margin="0,12"/>
+
+                <TextBlock Text="COLLIDER"
+                       FontFamily="{DynamicResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{DynamicResource CoralBrush}"
+                       Margin="0,0,0,6"/>
+                <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" Margin="0,3">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Shape" VerticalAlignment="Center"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                    <ComboBox Grid.Row="0" Grid.Column="1"
+                              ItemsSource="{Binding ColliderShapeOptions}"
+                              SelectedIndex="{Binding ColliderShapeIndex, Mode=TwoWay}"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Half Size" VerticalAlignment="Center"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                        <TextBox Text="{Binding ColliderHalfX, Mode=TwoWay}" Width="60"/>
+                        <TextBox Text="{Binding ColliderHalfY, Mode=TwoWay}" Width="60"/>
+                        <TextBox Text="{Binding ColliderHalfZ, Mode=TwoWay}" Width="60"/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Layer" VerticalAlignment="Center"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                    <TextBox  Grid.Row="2" Grid.Column="1" Text="{Binding ColliderLayer, Mode=TwoWay}"/>
+
+                    <CheckBox Grid.Row="3" Grid.Column="1"
+                              Content="Is Trigger"
+                              IsChecked="{Binding ColliderIsTrigger, Mode=TwoWay}"
+                              Margin="0,4,0,0"/>
+                </Grid>
+            </StackPanel>
+
+            <!-- ===== RIGID BODY（M2-D） ===== -->
+            <StackPanel IsVisible="{Binding HasRigidBodyComponent}" Spacing="6">
+                <Separator Margin="0,12"/>
+
+                <TextBlock Text="RIGID BODY"
+                       FontFamily="{DynamicResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="12" LetterSpacing="1"
+                       Foreground="{DynamicResource CoralBrush}"
+                       Margin="0,0,0,6"/>
+                <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto" Margin="0,3">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Mode" VerticalAlignment="Center"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                    <ComboBox Grid.Row="0" Grid.Column="1"
+                              ItemsSource="{Binding RigidBodyModeOptions}"
+                              SelectedIndex="{Binding RigidBodyModeIndex, Mode=TwoWay}"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Mass" VerticalAlignment="Center"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                    <TextBox  Grid.Row="1" Grid.Column="1" Text="{Binding RigidBodyMass, Mode=TwoWay}"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Restitution" VerticalAlignment="Center"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                    <TextBox  Grid.Row="2" Grid.Column="1" Text="{Binding RigidBodyRestitution, Mode=TwoWay}"/>
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Friction" VerticalAlignment="Center"
+                               Foreground="{DynamicResource SecondaryTextBrush}"/>
+                    <TextBox  Grid.Row="3" Grid.Column="1" Text="{Binding RigidBodyFriction, Mode=TwoWay}"/>
+                </Grid>
+            </StackPanel>
+
             <StackPanel IsVisible="{Binding HasLightComponent}" Spacing="6">
                 <Separator Margin="0,12"/>
 
@@ -264,6 +329,35 @@
                 <Button Content="Curves…" Click="OnOpenCurveEditorClick" HorizontalAlignment="Left"
                         Padding="8,2" Margin="0,6,0,0"
                         ToolTip.Tip="B4 P3: 编辑 Scale/Alpha/Color/Velocity/Force/Rotation 六条 over-life 曲线"/>
+            </StackPanel>
+
+            <!-- Particle FX（PFX 可编程粒子框架，N1 基础表单 + N6 暴露参数编辑） -->
+            <StackPanel IsVisible="{Binding HasParticleFXComponent}" Spacing="6">
+                <Separator Margin="0,12"/>
+                <TextBlock Text="PARTICLE FX" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <Grid ColumnDefinitions="90,*" RowDefinitions="Auto,Auto,Auto">
+                    <TextBlock Grid.Row="0" Text="Asset" VerticalAlignment="Center"
+                               ToolTip.Tip=".pfx_emitter JSON 资产路径"/>
+                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ParticleFXAssetPath, Mode=TwoWay}"/>
+                    <CheckBox Grid.Row="1" Grid.Column="1" Content="Enabled" IsChecked="{Binding ParticleFXEnabled, Mode=TwoWay}" Margin="0,4,0,0"/>
+                    <Button Grid.Row="2" Grid.Column="1" Content="Sync Params → Engine"
+                            Command="{Binding PfxSyncParamsCommand}" Margin="0,6,0,0" Padding="8,2"
+                            HorizontalAlignment="Left"
+                            ToolTip.Tip="推送 ExposedParams 到引擎发射器"/>
+                </Grid>
+                <TextBlock Text="Exposed Params" FontSize="11" Margin="0,8,0,2"/>
+                <ItemsControl ItemsSource="{Binding PfxParamRows}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnDefinitions="*,70" Margin="0,1">
+                                <TextBox Grid.Column="0" Text="{Binding Name, Mode=TwoWay}" IsReadOnly="True"/>
+                                <TextBox Grid.Column="1" Text="{Binding ValueStr, Mode=TwoWay}" Margin="4,0,0,0"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Button Content="Sync Params → Engine" Command="{Binding PfxSyncParamsCommand}"
+                        Padding="8,2" Margin="0,4,0,0" HorizontalAlignment="Left"/>
             </StackPanel>
 
             <StackPanel IsVisible="{Binding HasMeshRendererComponent}" Spacing="6">
