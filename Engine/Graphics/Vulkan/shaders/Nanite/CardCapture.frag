@@ -73,7 +73,9 @@ void main() {
     vec3 base_color = albedo_sample.rgb * mat.albedo_tint;
 
     vec3 N = normalize(IN.normal);
-    if (!gl_FrontFacing) N = -N;
+    // Card projections mirror U for three faces. Raster winding therefore
+    // cannot identify the physical side of this two-sided captured surface.
+    if (dot(N, cb.fwd.xyz) > 0.0) N = -N;
 
     out_albedo = vec4(base_color, 1.0);
     out_normal = vec4(octEncode(N), 0.0, 1.0);

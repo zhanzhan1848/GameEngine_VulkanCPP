@@ -132,4 +132,7 @@ void main() {
     OUT.world_pos = world_pos.xyz;
 
     gl_Position = cb.proj * (cb.view * world_pos);
+    // Card views use Metal's Y-up clip convention; Vulkan uses a positive
+    // viewport height. Match worldToCardUV's increasing local-v atlas rows.
+    gl_Position.y = -gl_Position.y;
 }

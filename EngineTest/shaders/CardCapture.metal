@@ -208,7 +208,8 @@ fragment CardCapturePSOut card_capture_fragment(
     float3 base_color = albedo_sample.rgb * mat.albedo_tint;
 
     float3 N = normalize(IN.normal);
-    if (!front_facing) N = -N;
+    // Mirroring the card projection must not reverse the physical normal.
+    if (dot(N, cb.fwd.xyz) > 0.0f) N = -N;
 
     CardCapturePSOut OUT;
     OUT.albedo = float4(base_color, 1.0f);
