@@ -504,6 +504,11 @@ Niagara 可视化节点编辑器（N7 可选）、全量 GPU 模块翻译、SPH/
 - **门禁**：新增 `test_emissive_gi_injector`（聚合精确值、8.0 钳制边界、负强度防御、保留槽写入）——TestParticleFX 累计 **36 项全绿**。
 - v2 分块空间注入：按设计文档 §3.2 占位，等 DDGI 侧需求排期。
 
+### 10.6.6 R3 Field Preview 线框叠加 —— 数据层完成（2026-09-14）
+
+- `Engine/ParticleFX/render/FieldDebugOverlay.h/.cpp`：KillVolume AABB（12 棱边）与球体（3 正交环×16 段）线框生成（纯 CPU，颜色编码：红=KillVolume、绿=SDF 边界）；单测断言线段数/颜色/球面距离。
+- 接入方式：emitter 的 KillVolume 模块参数 → `append_box_wireframe`/`append_sphere_wireframe` → 输出 debug_line 列表 → debug_draw 队列渲染。
+
 ### 10.6.3 N6 light 渲染器 —— 已完成（2026-09-13，四次施工）
 
 **交付物**：
@@ -540,7 +545,7 @@ Niagara 可视化节点编辑器（N7 可选）、全量 GPU 模块翻译、SPH/
 | N3 事件 + 刚体消费者 | ✅ 完成 | 4 项含确定性哈希门禁 |
 | N4 场系统 + POP 碰撞/平流 | ✅ 完成 | 5 项 + 死代码清理完成 |
 | N5 GPU 图发射器 | ⏸ 延后（决议②） | 启动条件见 §3.6 |
-| N6 预算/LOD + 渲染件 | 🔶 预算/LOD/ribbon/soft/fluid/light/decal 完成（六大渲染件 Sponza 同帧共存证据）；emissive→GI 注入需 Lumen 核心独立设计 |
+| N6 预算/LOD + 渲染件 | 🔶 预算/LOD/ribbon/soft/fluid/light/decal 完成（六大渲染件 Sponza 同帧共存证据）；emissive→GI v1 聚合注入完成（设计文档已出） |
 | N7 可选项池 | 按需（不默认进） | — |
 
 **回归证据**：TestParticleFX 34 项全绿；TestParticles / TestPhysicsSimulation / TestPhysicsM4 无回归；C# Native 72 项 + Cli 55/56（唯一失败为 dev 分支预置 schema 快照问题，与 PFX 无关）；Sponza 集成冒烟 90s 4888 帧 VALID 零 fault。
