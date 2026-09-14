@@ -6,11 +6,12 @@
 // same cascade selection logic, same PCF kernel.
 //
 // Bindings (Vulkan, separate texture + sampler):
-//   0: UBO Params (inv_view_proj, shadow_vp[2], light_dir, texel sizes, ...)
+//   0: UBO Params (inv_view_proj, shadow_vp[2], light_dir, texel sizes, ...,
+//      cascade_params[2])
 //   1: texture2D shadowMap0 (R32_Float, manual compare)
 //   2: texture2D shadowMap1 (R32_Float, manual compare)
 //   3: image2D visibilityOut (R8_UNorm, write-only)
-//   4: texture2D normalTex (GBuffer normal, currently unused — reserved)
+//   4: texture2D normalTex (GBuffer RT1 rgb = world normal * 0.5 + 0.5)
 //   5: texture2D depthTex  (GBuffer depth, for world reconstruction)
 //   6: sampler linearSampler (shared across all texture samples)
 //
@@ -22,6 +23,30 @@
 //
 // Workgroup: 8x8x1 (matches ShadowMapModule.cpp:95 threadGroupSize + 2D
 // shared-memory IGN noise pattern).
+//
+// B17 (2026-09-11) thin-occluder leak fix — arch soffit "fake GI" warm light:
+//   The old constant bias = 0.003 NDC translated to world depth as
+//   0.003 * depthSpan (0.12-0.21 wu at the measured spans) — LARGER than the
+//   light-space depth gap a thin arch ring (0.15-0.3 wu wall) produces, so
+//   receivers under thin occluders compared as lit. Together with the raster
+//   side's +0.001 clip.z occluder bias (ShadowDepth.wgsl) the total window
+//   was ~0.004 NDC. Fix: per-cascade world-scale params (cascade_params:
+//   x=texel world size, y=depth span) drive
+//     * slope-scaled normal-offset along the world normal — puts the lookup
+//       point strictly in front of its own surface by texel*(1+2*slope)/cos
+//       (kills acne) and, for back-facing receivers (N·L<0: arch soffits),
+//       pushes the receiver AWAY from the light (kills the thin-gap leak);
+//     * world-unit depth bias (0.5 + 2*slope texels → NDC by the cascade
+//       span) — replaces the constant 0.003 (≈5 texels of cascade 0!).
+//   slope = tan(angle between N and L), clamped to 4. The quality-5 hard
+//   sentinel shares this exact projection+bias so PRIMAL_SHADOW_DBG_HARD
+//   measures the production compare.
+//   Diagnostics (ShadowMapModule.cpp maps the envs): quality 3 = shadow-map
+//   depth at the OFFSET lookup, 4 = raw receiver sc0.z (no offset), 5 = hard
+//   compare (production bias+offset), 6 = PCSS blocker-hit density,
+//   7 = NdotL normal-space sentinel (bright = facing the light; the sun band
+//   must read bright and the arch soffit dark — proves normalTex is world
+//   space and correctly oriented vs the reconstructed worldPos).
 
 #version 450
 
@@ -51,18 +76,20 @@ const vec2 POISSON_DISK_16[16] = vec2[16](
     vec2( 0.4000000, -0.3000000)
 );
 
-// Match ShadowMapModule.cpp:306-316 Params struct exactly. std140 layout:
-// m4x4 (64B) + m4x4×2 (128B) + v4 (16B) + v2+v2 (16B) + u32×3 + f32 + pad.
+// Match ShadowMapModule.cpp Params struct exactly. std140 layout:
+// m4x4 (64B) + m4x4×2 (128B) + v4 (16B) + v2+v2 (16B) + u32×3 + f32 + pad
+// (16B) + v4×2 cascade_params (32B).
 layout(set = 0, binding = 0, std140) uniform Params {
     mat4 inv_view_proj;
     mat4 shadow_vp[2];
     vec4 light_dir;
     vec2 texel_size;          // 1.0 / 2048.0
     vec2 depth_texel_size;    // 1.0 / (render_width, render_height)
-    uint shadow_quality;      // 0=Hard, 1=PCF, 2=PCSS
+    uint shadow_quality;      // 0=Hard, 1=PCF, 2=PCSS, 3-7=debug sentinels
     uint render_width;
     uint render_height;
     float _pad0;
+    vec4 cascade_params[2];   // x=texel_world, y=depth_span(wu per NDC z), z=extent, w=_
 };
 
 layout(set = 0, binding = 1) uniform texture2D shadowMap0;
@@ -140,8 +167,55 @@ float sampleShadowMap(texture2D<float> sm, vec3 sc, vec2 screenPos,
     } else {
         // T8.13: light size 0.005 → 0.012 — penumbra widening was too
         // conservative (shadow edges read near-hard at nave distances).
-        return pcssShadow(sm, sc, screenPos, texSize, bias, 0.05);
+        // 2026-09-09 V1: 0.05 是 9526281c 时代的笔误档（注释写 0.012、代码写
+        // 0.05，且当时该分支是死代码）——0.05 UV ≈ 3wu"太阳"（物理太阳
+        // ≈0.0087 UV），把 PCSS 激活为默认后光池带被人为半影化（vis 0.4-0.7）。
+        // 0.012 ≈ 1.4× 物理太阳角径，与 T8.13 记录一致。
+        return pcssShadow(sm, sc, screenPos, texSize, bias, 0.012);
     }
+}
+
+// --- B17 world-scale bias / normal-offset helpers ---
+
+// Project world position to a cascade's shadow-map UVZ (with the T4.6.5
+// part 40.1 Y-flip matching naga's OpFNegate in ShadowDepth.wgsl).
+vec3 projectToCascade(mat4 vp, vec3 worldPos) {
+    vec4 clip = vp * vec4(worldPos, 1.0);
+    vec3 sc = clip.xyz / max(clip.w, 1e-6);
+    sc.x = sc.x * 0.5 + 0.5;
+    sc.y = 0.5 - sc.y * 0.5;
+    return sc;
+}
+
+bool scInBounds(vec3 sc) {
+    return sc.x >= 0.0 && sc.x <= 1.0 && sc.y >= 0.0 && sc.y <= 1.0;
+}
+
+// Slope-scaled depth bias in NDC: (0.5 + 2*tan) texels of world depth,
+// converted through the cascade's NDC z→world span. Replaces the constant
+// 0.003 NDC (which was ≈0.12-0.21 wu — bigger than a thin arch wall's gap).
+// B17.2: front-face slope clamps at 3 (bias ≤3.5 texels — under the old
+// flat-0.003's ≈5 texels, so silhouette margins never exceed the old leak
+// profile); backfaces clamp at 4 (they can never be direct-lit).
+float cascadeBiasNDC(uint c, float slope, float ndl) {
+    float texelWorld = cascade_params[c].x;
+    float spanW = max(cascade_params[c].y, 1e-3);
+    float s = ndl > 0.0 ? min(slope, 3.0) : min(slope, 4.0);
+    return texelWorld * (0.5 + 2.0 * s) / spanW;
+}
+
+// Normal-offset magnitude: front-facing receivers project in front of their
+// own surface (kills acne); back-facing receivers (arch soffits) push AWAY
+// from the light (kills the thin-occluder leak). Both directions are safe —
+// see the B17 header note.
+// B17.2: front-face reach is capped tighter (slope ≤3, 1+slope texels ≤4)
+// — the earlier (1+2·slope, clamp 4) reach (≤9 texels ≈0.26wu lateral) let
+// grazing lookups cross occluder silhouettes and grew the arcade sun
+// patches (reference direct/interior 5.6→3.36). Backfaces keep the strong
+// push: they can never be direct-lit, so over-shadowing there is free.
+vec3 cascadeNormalOffset(uint c, vec3 N, float slope, float ndl) {
+    float k = ndl > 0.0 ? min(1.0 + slope, 4.0) : (1.0 + 2.0 * min(slope, 4.0));
+    return N * (cascade_params[c].x * k);
 }
 
 void main() {
@@ -151,6 +225,15 @@ void main() {
 
     // Half-res visibility — sample full-res depth at gid*2+0.5 mapped to [0,1].
     vec2 fullUV = (vec2(gid) * 2.0 + 1.0) / vec2(render_width, render_height);
+
+    // PRIMAL_SHADOW_WHITE (quality 255): write all-white vis (no shadows).
+    // The Metal kernel has had this sentinel at ShadowFilter.metal:107 since
+    // T8.x; the Vulkan port silently fell through to PCSS, so the env was a
+    // no-op on Vulkan until B17.3. Needed for direct-light-isolation A/Bs.
+    if (shadow_quality == 255u) {
+        imageStore(visibilityOut, ivec2(gid), vec4(1.0));
+        return;
+    }
 
     float depth = texture(sampler2D(depthTex, linearSampler), fullUV).r;
     if (depth >= 1.0) {
@@ -170,38 +253,74 @@ void main() {
     vec4 worldPos4 = inv_view_proj * clipPos;
     vec3 worldPos = worldPos4.xyz / max(worldPos4.w, 1e-6);
 
-    float bias = 0.003;
+    // B17: world normal (GBuffer RT1, *0.5+0.5 stored) + receiver slope.
+    // light_dir is the propagation direction (Y down) — surface-to-light is
+    // its negation.
+    vec3 N = texture(sampler2D(normalTex, linearSampler), fullUV).rgb * 2.0 - 1.0;
+    if (dot(N, N) < 1e-4) N = vec3(0.0, -1.0, 0.0);
+    N = normalize(N);
+    vec3 LtoLight = -normalize(light_dir.xyz);
+    float NdotL = dot(N, LtoLight);
+    // tan(theta) with a |NdotL| floor of 0.25 (tan ≤ 3.88) — keeps grazing
+    // surfaces bounded without a discontinuity at silhouettes.
+    float slope = clamp(sqrt(max(0.0, 1.0 - NdotL * NdotL)) / max(abs(NdotL), 0.25),
+                        0.0, 4.0);
+
     vec2 screenPos = vec2(gid);
     float visibility = 1.0;
 
-    // Cascade 0
-    vec4 clip0 = shadow_vp[0] * vec4(worldPos, 1.0);
-    vec3 sc0 = clip0.xyz / max(clip0.w, 1e-6);
-    sc0.x = sc0.x * 0.5 + 0.5;
-    // T4.6.5 part 40.1: Y-flip to match naga's auto-inserted OpFNegate on
-    // gl_Position.y in ShadowDepth.wgsl vertex shader. After Y-negate,
-    // shadow-map framebuffer pixel (0,0) [Vulkan BOTTOM] contains world Y+
-    // in light space; sampling at UV y=0 returns world Y+ depth. So for a
-    // receiver with positive clip-space y (world Y+ in cascade space), we
-    // need UV y=0 (not 1). Old code `cy*0.5+0.5` produced UV y=1 for cy=+1
-    // → sampled world Y- depth → inverted shadow comparison.
-    sc0.y = 0.5 - sc0.y * 0.5;
+    vec3 offset0 = cascadeNormalOffset(0u, N, slope, NdotL);
+    float bias0 = cascadeBiasNDC(0u, slope, NdotL);
+    vec3 sc0 = projectToCascade(shadow_vp[0], worldPos + offset0);
 
-    if (sc0.x >= 0.0 && sc0.x <= 1.0 && sc0.y >= 0.0 && sc0.y <= 1.0 &&
-        sc0.z >= 0.0 && sc0.z <= 1.0) {
+    // PRIMAL_SHADOW_DEBUG sentinels (quality 3-7): 3 = shadow-map depth at
+    // the production (offset) lookup, 4 = raw receiver depth (no offset),
+    // 5 = hard compare with the production bias/offset, 6 = PCSS blocker-hit
+    // density, 7 = NdotL normal-space sentinel.
+    if (shadow_quality >= 3u && shadow_quality <= 7u) {
+        float outV = 0.0;
+        if (shadow_quality == 7u) {
+            outV = clamp(NdotL * 0.5 + 0.5, 0.0, 1.0);
+        } else if (shadow_quality == 4u) {
+            vec3 raw0 = projectToCascade(shadow_vp[0], worldPos);
+            outV = clamp(raw0.z, 0.0, 1.0);
+        } else if (shadow_quality == 5u) {
+            if (scInBounds(sc0) && sc0.z >= 0.0 && sc0.z <= 1.0) {
+                float d = texture(sampler2D(shadowMap0, linearSampler), sc0.xy).r;
+                outV = (sc0.z - bias0 > d) ? 0.0 : 1.0;
+            }
+        } else if (shadow_quality == 6u) {
+            if (scInBounds(sc0) && sc0.z >= 0.0 && sc0.z <= 1.0) {
+                // blocker-hit density over the PCSS search disk (÷8, amplified
+                // ×4 so small counts stay visible through the ×0.26 passthrough)
+                float cnt = 0.0;
+                for (int i = 0; i < 8; ++i) {
+                    vec2 uv = sc0.xy + POISSON_DISK_16[i] * 0.05;
+                    float d = texture(sampler2D(shadowMap0, linearSampler), uv).r;
+                    if (d < sc0.z - bias0) cnt += 1.0;
+                }
+                outV = clamp(cnt / 8.0 * 4.0, 0.0, 1.0);
+            }
+        } else if (scInBounds(sc0) && sc0.z >= 0.0 && sc0.z <= 1.0) {
+            outV = texture(sampler2D(shadowMap0, linearSampler), sc0.xy).r;
+        }
+        imageStore(visibilityOut, ivec2(gid), vec4(outV));
+        return;
+    }
+
+    // Cascade 0
+    if (scInBounds(sc0) && sc0.z >= 0.0 && sc0.z <= 1.0) {
         visibility = sampleShadowMap(shadowMap0, sc0, screenPos,
-                                     texel_size, bias, shadow_quality);
+                                     texel_size, bias0, shadow_quality);
     } else {
         // Cascade 1
-        vec4 clip1 = shadow_vp[1] * vec4(worldPos, 1.0);
-        vec3 sc1 = clip1.xyz / max(clip1.w, 1e-6);
-        sc1.x = sc1.x * 0.5 + 0.5;
-        sc1.y = 0.5 - sc1.y * 0.5;  // T4.6.5 part 40.1: Y-flip (same as cascade 0)
+        vec3 offset1 = cascadeNormalOffset(1u, N, slope, NdotL);
+        float bias1 = cascadeBiasNDC(1u, slope, NdotL);
+        vec3 sc1 = projectToCascade(shadow_vp[1], worldPos + offset1);
 
-        if (sc1.x >= 0.0 && sc1.x <= 1.0 && sc1.y >= 0.0 && sc1.y <= 1.0 &&
-            sc1.z >= 0.0 && sc1.z <= 1.0) {
+        if (scInBounds(sc1) && sc1.z >= 0.0 && sc1.z <= 1.0) {
             visibility = sampleShadowMap(shadowMap1, sc1, screenPos,
-                                         texel_size, bias, shadow_quality);
+                                         texel_size, bias1, shadow_quality);
         }
     }
 

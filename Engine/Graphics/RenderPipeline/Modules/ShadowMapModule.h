@@ -63,7 +63,8 @@ private:
     bool InitializeShadowFilterPipeline();
     math::m4x4 ComputeCascadeVP(math::v3 lightDir, math::v3 cameraPos,
                                 float orthoExtent, u32 shadowMapSize,
-                                const ShadowMapInputs& inputs, u32 cascade);
+                                const ShadowMapInputs& inputs, u32 cascade,
+                                float* outNearPlane = nullptr, float* outFarPlane = nullptr);
 
     rhi::RHIDeviceBase* device_ = nullptr;
     nanite::GPUDrivenDrawPipeline* gpu_draw_pipeline_ = nullptr;

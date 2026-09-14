@@ -3325,11 +3325,17 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
     ExtractFrustumPlanes(lightVP, frustumPlanes);
 
     // --- CPU frustum culling: instance-level + meshlet-level ---
-    auto sphereVsFrustum = [&](const math::v3& center, float radius) -> bool {
+    // outRejectPlane (optional) reports which plane rejected the sphere —
+    // used by the PRIMAL_SHADOW_CULL_DIAG block below to attribute lost
+    // geometry to a specific frustum plane (left/right/bottom/top/near/far).
+    auto sphereVsFrustum = [&](const math::v3& center, float radius, int* outRejectPlane = nullptr) -> bool {
         for (int i = 0; i < 6; ++i) {
             float dist = frustumPlanes[i].x*center.x + frustumPlanes[i].y*center.y +
                          frustumPlanes[i].z*center.z + frustumPlanes[i].w;
-            if (dist < -radius) return false;
+            if (dist < -radius) {
+                if (outRejectPlane) *outRejectPlane = i;
+                return false;
+            }
         }
         return true;
     };
@@ -3345,12 +3351,57 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
             utl::vector<u32> visibleClusters;
             visibleClusters.reserve(shadow_max_clusters_);
 
+            // B16 诊断门（2026-09-11）：PRIMAL_SHADOW_NO_CULL=1 跳过实例/簇级
+            // 光视锥剔除——定位"拱腹直射泄漏"（锁相机 A/B 证明阴影贴图缺拱圈
+            // 遮挡层）。若开启后泄漏消失即为剔除丢几何；仅诊断用，不进生产默认。
+            const bool shadowNoCull = std::getenv("PRIMAL_SHADOW_NO_CULL") != nullptr;
+
+            // B17 诊断门（2026-09-11）：PRIMAL_SHADOW_CULL_DIAG=1 一次性打印
+            // cascade 级剔除归因——6 个 plane 的实例/簇拒绝分布、实例 scale、
+            // 拱圈区域被拒 meshlet 样本。与 NO_CULL 互斥使用（NO_CULL 开着时
+            // 拒绝计数恒 0）。
+            const bool cullDiag17 = cascade_index == 0 &&
+                                  std::getenv("PRIMAL_SHADOW_CULL_DIAG") != nullptr;
+            static bool cullDiagDone = false;
+            int instRejectsByPlane[6] = {0, 0, 0, 0, 0, 0};
+            int meshletRejectsByPlane[6] = {0, 0, 0, 0, 0, 0};
+            u32 diagInstTotal = 0, diagInstPassed = 0;
+            u32 diagMeshletTotal = 0, diagMeshletPassed = 0;
+            f32 diagMaxScale = 0.0f, diagMinScale = 1e9f;
+            struct RejectedMeshletSample {
+                math::v3 worldCenter; f32 radius; f32 minPlaneDist; int plane;
+            };
+            utl::vector<RejectedMeshletSample> diagAtriumRejects;
+
             for (const auto& inst : instances) {
                 math::v3 instCenter = inst.bounds_center;
                 float instRadius = inst.bounds_radius;
 
+                // Uniform-ish scale estimate = max abs component over the 3x3
+                // (same convention as RenderSceneSnapshot's bounds_radius).
+                f32 instScale = std::max({
+                    std::abs(inst.world_matrix.columns[0].x),
+                    std::abs(inst.world_matrix.columns[0].y),
+                    std::abs(inst.world_matrix.columns[0].z),
+                    std::abs(inst.world_matrix.columns[1].x),
+                    std::abs(inst.world_matrix.columns[1].y),
+                    std::abs(inst.world_matrix.columns[1].z),
+                    std::abs(inst.world_matrix.columns[2].x),
+                    std::abs(inst.world_matrix.columns[2].y),
+                    std::abs(inst.world_matrix.columns[2].z) });
+                if (cullDiag17) {
+                    diagMaxScale = std::max(diagMaxScale, instScale);
+                    diagMinScale = std::min(diagMinScale, instScale);
+                    diagInstTotal++;
+                }
+
                 // Instance-level cull
-                if (!sphereVsFrustum(instCenter, instRadius)) continue;
+                int rejectPlane = -1;
+                if (!shadowNoCull && !sphereVsFrustum(instCenter, instRadius, &rejectPlane)) {
+                    if (cullDiag17 && rejectPlane >= 0) instRejectsByPlane[rejectPlane]++;
+                    continue;
+                }
+                if (cullDiag17) diagInstPassed++;
 
                 // Per-cluster cull
                 for (u32 c = 0; c < inst.cluster_count; ++c) {
@@ -3363,9 +3414,64 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
                     math::v4 worldCenter4 = inst.world_matrix * math::v4{localCenter.x, localCenter.y, localCenter.z, 1.0f};
                     math::v3 worldCenter{worldCenter4.x, worldCenter4.y, worldCenter4.z};
 
-                    if (!sphereVsFrustum(worldCenter, meshlet.radius)) continue;
+                    // B17 fix candidate: meshlet center/radius are local-space;
+                    // radius must scale with the instance transform or scaled
+                    // instances cull their edge meshlets out of the shadow map.
+                    const f32 worldRadius = meshlet.radius * instScale;
+
+                    rejectPlane = -1;
+                    if (!shadowNoCull && !sphereVsFrustum(worldCenter, worldRadius, &rejectPlane)) {
+                        if (cullDiag17) {
+                            if (rejectPlane >= 0) meshletRejectsByPlane[rejectPlane]++;
+                            diagMeshletTotal++;
+                            // Atrium/arch band sample (camera at (0,5,0) looking
+                            // at the great hall; arches live in this box).
+                            if (std::abs(worldCenter.x) < 12.0f && std::abs(worldCenter.z) < 12.0f &&
+                                worldCenter.y > 0.0f && worldCenter.y < 12.0f &&
+                                diagAtriumRejects.size() < 8) {
+                                f32 minDist = 1e9f; int minPlane = -1;
+                                for (int pi = 0; pi < 6; ++pi) {
+                                    f32 d = frustumPlanes[pi].x*worldCenter.x + frustumPlanes[pi].y*worldCenter.y +
+                                            frustumPlanes[pi].z*worldCenter.z + frustumPlanes[pi].w;
+                                    if (d < minDist) { minDist = d; minPlane = pi; }
+                                }
+                                diagAtriumRejects.push_back({worldCenter, worldRadius, minDist, minPlane});
+                            }
+                        }
+                        continue;
+                    }
+                    if (cullDiag17) diagMeshletPassed++;
 
                     visibleClusters.push_back(globalIdx);
+                }
+            }
+
+            if (cullDiag17 && !cullDiagDone) {
+                cullDiagDone = true;
+                PRIMAL_LOG_STREAM(Info, "Render") << "[CullDiag17] planes:"
+                    << " L(" << frustumPlanes[0].x << "," << frustumPlanes[0].y << "," << frustumPlanes[0].z << "," << frustumPlanes[0].w << ")"
+                    << " R(" << frustumPlanes[1].x << "," << frustumPlanes[1].y << "," << frustumPlanes[1].z << "," << frustumPlanes[1].w << ")"
+                    << " B(" << frustumPlanes[2].x << "," << frustumPlanes[2].y << "," << frustumPlanes[2].z << "," << frustumPlanes[2].w << ")"
+                    << " T(" << frustumPlanes[3].x << "," << frustumPlanes[3].y << "," << frustumPlanes[3].z << "," << frustumPlanes[3].w << ")"
+                    << " N(" << frustumPlanes[4].x << "," << frustumPlanes[4].y << "," << frustumPlanes[4].z << "," << frustumPlanes[4].w << ")"
+                    << " F(" << frustumPlanes[5].x << "," << frustumPlanes[5].y << "," << frustumPlanes[5].z << "," << frustumPlanes[5].w << ")"
+                    << std::endl;
+                PRIMAL_LOG_STREAM(Info, "Render") << "[CullDiag17] instRejectsByPlane LRTBNF ="
+                    << " " << instRejectsByPlane[0] << " " << instRejectsByPlane[1]
+                    << " " << instRejectsByPlane[2] << " " << instRejectsByPlane[3]
+                    << " " << instRejectsByPlane[4] << " " << instRejectsByPlane[5]
+                    << " | passed=" << diagInstPassed << "/" << diagInstTotal
+                    << " scale=[" << diagMinScale << "," << diagMaxScale << "]" << std::endl;
+                PRIMAL_LOG_STREAM(Info, "Render") << "[CullDiag17] meshletRejectsByPlane LRTBNF ="
+                    << " " << meshletRejectsByPlane[0] << " " << meshletRejectsByPlane[1]
+                    << " " << meshletRejectsByPlane[2] << " " << meshletRejectsByPlane[3]
+                    << " " << meshletRejectsByPlane[4] << " " << meshletRejectsByPlane[5]
+                    << " | passed=" << diagMeshletPassed << " rejected=" << diagMeshletTotal << std::endl;
+                for (const auto& s : diagAtriumRejects) {
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[CullDiag17] atriumReject worldCenter("
+                        << s.worldCenter.x << "," << s.worldCenter.y << "," << s.worldCenter.z
+                        << ") r=" << s.radius << " minPlaneDist=" << s.minPlaneDist
+                        << " plane=" << s.plane << std::endl;
                 }
             }
 

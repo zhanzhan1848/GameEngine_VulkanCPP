@@ -6,6 +6,7 @@
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/Passes/BlurPass.h"
 #include "Engine/Common/CoreLogStream.h"
+#include <vector>
 
 namespace primal::graphics {
 
@@ -125,16 +126,24 @@ bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) 
     // previous layout declared binding 0 twice (UBO + SampledImage overlap)
     // which is invalid Vulkan and silently masked by InitializeShadowFilter
     // never running until Part 40.
-    DescriptorSetLayoutBinding bindings[] = {
+    // Metal: the kernel's depthTex lives at texture(0) — same binding number
+    // as the Params UBO but a different namespace. MetalDescriptorSet matches
+    // by (binding, type), so the Metal layout declares binding 0 twice.
+    std::vector<DescriptorSetLayoutBinding> bindings = {
         {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // Params UBO
         {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap0
         {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap1
         {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // visibilityOut
         {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTex
-        {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depthTex
+        {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depthTex (Vulkan)
         {6, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr},  // linearSampler
     };
-    shadow_filter_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
+    if (device_->GetPlatform() != RHIPlatform::Vulkan) {
+        bindings.push_back(
+            {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr});  // depthTex (Metal texture(0))
+    }
+    shadow_filter_set_layout_ = device_->CreateDescriptorSetLayout(
+        {static_cast<u32>(bindings.size()), bindings.data()});
     shadow_filter_layout_ = device_->CreatePipelineLayout({1, &shadow_filter_set_layout_});
 
     for (int i = 0; i < 3; ++i)
@@ -181,7 +190,8 @@ bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) 
 
 math::m4x4 ShadowMapModule::ComputeCascadeVP(math::v3 lightDir, math::v3 cameraPos,
                                               float orthoExtent, u32 shadowMapSize,
-                                              const ShadowMapInputs& inputs, u32 cascade) {
+                                              const ShadowMapInputs& inputs, u32 cascade,
+                                              float* outNearPlane, float* outFarPlane) {
     math::v3 lightUp = (std::abs(lightDir.y) < 0.99f)
         ? math::v3{0.0f, 1.0f, 0.0f} : math::v3{1.0f, 0.0f, 0.0f};
 
@@ -244,8 +254,28 @@ math::m4x4 ShadowMapModule::ComputeCascadeVP(math::v3 lightDir, math::v3 cameraP
     float nearPlane = std::max(minDist - margin, 0.5f);
     float farPlane = maxDist + margin;
 
+    // B17 诊断：级联深度跨度真值。0.003 NDC 的旧常数 bias 折算世界深度 =
+    // 0.003 × (farPlane - nearPlane)。实测 span≈51wu → 0.003 NDC ≈ 0.15wu。
+    // 注意（B17 最终归因）：拱腹暖光并非该 bias 的泄漏——纯 vis 比较在拱内
+    // 框 raw-leak≈0，vis≡1 对照证明阴影链挡掉了全部可挡直射；此打印保留用
+    // 于核对 bias/offset 的世界量级。
+    if (std::getenv("PRIMAL_SHADOW_CULL_DIAG") && !cascade) {
+        static bool spanDumped = false;
+        if (!spanDumped) {
+            spanDumped = true;
+            std::fprintf(stderr,
+                "[CullDiag17] cascade0 span: near=%.2f far=%.2f depthSpan=%.2f "
+                "bias0.003->%.3fwu texel=%.4fwu (extent %.0f/2048)\n",
+                nearPlane, farPlane, farPlane - nearPlane,
+                0.003f * (farPlane - nearPlane),
+                (orthoExtent * 2.0f) / (float)shadowMapSize, orthoExtent);
+        }
+    }
+
     math::m4x4 lightProj = CreateOrthographicMatrix(
         -orthoExtent, orthoExtent, -orthoExtent, orthoExtent, nearPlane, farPlane);
+    if (outNearPlane) *outNearPlane = nearPlane;
+    if (outFarPlane) *outFarPlane = farPlane;
     return lightProj * lightView;
 }
 
@@ -307,9 +337,25 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     struct ShadowPassData {};
     bool rasteredThisFrame[2] = {false, false};
 
+    // B17（2026-09-11）薄遮挡器泄漏修复：ShadowFilter 需要每级联的世界尺度
+    // 参数才能做 slope 自适应 normal-offset + 世界单位 bias——常数 0.003 NDC
+    // bias 折算世界深度 = 0.003×depthSpan（≈0.12-0.21wu），比拱圈壁厚
+    // （0.15-0.3wu）的光空间深度差还大，是拱腹暖光泄漏的主因。布局：
+    //   x = texel_world = 2×orthoExtent/2048（一张 shadow map 纹素的世界尺寸）
+    //   y = depth_span = farPlane - nearPlane（NDC z=1 对应的世界深度跨度）
+    //   z = orthoExtent
+    //   w = 保留
+    float filterCascadeParams[2][4] = {};
+
     for (u32 cascade = 0; cascade < 2; ++cascade) {
         float orthoExtent = (cascade == 0) ? 30.0f : 150.0f;
-        math::m4x4 lightVP = ComputeCascadeVP(lightDir, inputs.camera_position, orthoExtent, 2048, inputs, cascade);
+        float cascadeNear = 0.0f, cascadeFar = 0.0f;
+        math::m4x4 lightVP = ComputeCascadeVP(lightDir, inputs.camera_position, orthoExtent, 2048, inputs, cascade,
+                                              &cascadeNear, &cascadeFar);
+        filterCascadeParams[cascade][0] = (orthoExtent * 2.0f) / 2048.0f;
+        filterCascadeParams[cascade][1] = cascadeFar - cascadeNear;
+        filterCascadeParams[cascade][2] = orthoExtent;
+        filterCascadeParams[cascade][3] = 0.0f;
 
         bool cache_hit = shadow_cache_globally_valid_ &&
                          shadow_cache_valid_[cbIdx][cascade] &&
@@ -447,6 +493,12 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
         // Capture outputs by value for shadow matrices
         auto mat0 = outputs.shadow_matrix0;
         auto mat1 = outputs.shadow_matrix1;
+        const float cascadeParams[2][4] = {
+            {filterCascadeParams[0][0], filterCascadeParams[0][1],
+             filterCascadeParams[0][2], filterCascadeParams[0][3]},
+            {filterCascadeParams[1][0], filterCascadeParams[1][1],
+             filterCascadeParams[1][2], filterCascadeParams[1][3]},
+        };
 
         graph.AddPass<ShadowFilterData>("ShadowFilter",
             rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Copy,
@@ -456,9 +508,22 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     if (shadowMapRG[c].IsValid())
                         builder.Read(shadowMapRG[c], ResourceState::ShaderResource);
             },
-            [this, inputs, cbIdx, mat0, mat1](const ShadowFilterData&, rendergraph::RenderGraphContext& context) {
+            [this, inputs, cbIdx, mat0, mat1, cascadeParams](const ShadowFilterData&, rendergraph::RenderGraphContext& context) {
                 auto cmd = context.cmdBuffer;
                 math::m4x4 invVP = Inverse(inputs.proj_matrix * inputs.view_matrix);
+                // TEMP-DIAG: shadow 模块的 proj/view 真值
+                if (std::getenv("PRIMAL_DUMP_MATRIX")) {
+                    std::fprintf(stderr, "[SHADOW_V] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
+                                 inputs.view_matrix.columns[0].x, inputs.view_matrix.columns[0].y, inputs.view_matrix.columns[0].z, inputs.view_matrix.columns[0].w,
+                                 inputs.view_matrix.columns[1].x, inputs.view_matrix.columns[1].y, inputs.view_matrix.columns[1].z, inputs.view_matrix.columns[1].w,
+                                 inputs.view_matrix.columns[2].x, inputs.view_matrix.columns[2].y, inputs.view_matrix.columns[2].z, inputs.view_matrix.columns[2].w,
+                                 inputs.view_matrix.columns[3].x, inputs.view_matrix.columns[3].y, inputs.view_matrix.columns[3].z, inputs.view_matrix.columns[3].w);
+                    std::fprintf(stderr, "[SHADOW_P] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
+                                 inputs.proj_matrix.columns[0].x, inputs.proj_matrix.columns[0].y, inputs.proj_matrix.columns[0].z, inputs.proj_matrix.columns[0].w,
+                                 inputs.proj_matrix.columns[1].x, inputs.proj_matrix.columns[1].y, inputs.proj_matrix.columns[1].z, inputs.proj_matrix.columns[1].w,
+                                 inputs.proj_matrix.columns[2].x, inputs.proj_matrix.columns[2].y, inputs.proj_matrix.columns[2].z, inputs.proj_matrix.columns[2].w,
+                                 inputs.proj_matrix.columns[3].x, inputs.proj_matrix.columns[3].y, inputs.proj_matrix.columns[3].z, inputs.proj_matrix.columns[3].w);
+                }
                 math::v3 L = Normalize(inputs.light_direction);
 
                 struct Params {
@@ -471,6 +536,8 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     u32 render_width;
                     u32 render_height;
                     float _pad0;
+                    // B17: per-cascade {texel_world, depth_span, ortho_extent, _}
+                    math::v4   cascade_params[2];
                 };
 
                 auto* p = static_cast<Params*>(device_->MapBuffer(shadow_filter_cb_[cbIdx]));
@@ -491,11 +558,32 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     p->depth_texel_size = math::v2{1.0f / (float)render_width_, 1.0f / (float)render_height_};
                     // 伪影1 探针：PRIMAL_SHADOW_WHITE=1 → shadow_quality=255 哨兵，
                     // ShadowFilter.metal kernel 直接写全白 vis（无阴影）。
+                    // PRIMAL_SHADOW_DBG_DEPTH/RECV=1 → quality 3/4：直接可视化
+                    // 比较两端（阴影图深度 / 接收器 sc0.z），定位投影错位。
                     p->shadow_quality = std::getenv("PRIMAL_SHADOW_WHITE")
-                        ? 255u : static_cast<u32>(inputs.shadow_quality);
+                        ? 255u
+                        : (std::getenv("PRIMAL_SHADOW_DBG_DEPTH") ? 3u
+                           : (std::getenv("PRIMAL_SHADOW_DBG_RECV") ? 4u
+                              : (std::getenv("PRIMAL_SHADOW_DBG_HARD") ? 5u
+                                 : (std::getenv("PRIMAL_SHADOW_DBG_BLOCKER") ? 6u
+                                    : (std::getenv("PRIMAL_SHADOW_DBG_NORMAL") ? 7u
+                                       : static_cast<u32>(inputs.shadow_quality))))));
                     p->render_width = render_width_;
                     p->render_height = render_height_;
                     p->_pad0 = 0.0f;
+                    p->cascade_params[0] = math::v4{cascadeParams[0][0], cascadeParams[0][1],
+                                                    cascadeParams[0][2], cascadeParams[0][3]};
+                    p->cascade_params[1] = math::v4{cascadeParams[1][0], cascadeParams[1][1],
+                                                    cascadeParams[1][2], cascadeParams[1][3]};
+                    // B17: quality 解析真值 + 级联参数（一次性）
+                    static bool filterParamLogged = false;
+                    if (!filterParamLogged) {
+                        filterParamLogged = true;
+                        std::fprintf(stderr,
+                            "[FilterParams] quality=%u cascade0(texel=%.4f span=%.1f) cascade1(texel=%.4f span=%.1f)\n",
+                            p->shadow_quality, cascadeParams[0][0], cascadeParams[0][1],
+                            cascadeParams[1][0], cascadeParams[1][1]);
+                    }
                     device_->UnmapBuffer(shadow_filter_cb_[cbIdx]);
                 }
 
@@ -535,7 +623,16 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     cmd->InsertBarrier(barriers, 4);
                 }
 
-                DescData params[] = {
+                // Texture slot conventions differ per backend:
+                //   Vulkan GLSL (ShadowFilter.comp): depth@5, normal@4,
+                //     sm0/sm1/out @1/2/3, sampler@6.
+                //   Metal kernel (ShadowFilter.metal): depthTex@0, sm0@1,
+                //     sm1@2, visibilityOut@3 — no normal/sampler params.
+                // The flat {1..6} table bound depth@5 on Metal too, leaving the
+                // kernel's texture(0) (depth) UNBOUND → vis sampled garbage →
+                // direct-light visibility dead on the whole Metal PCSS path.
+                const bool isVkShadow = device_->GetPlatform() == RHIPlatform::Vulkan;
+                DescData filterParams[7] = {
                     {0, DescriptorType::UniformBuffer, shadow_filter_cb_[cbIdx]},
                     {1, DescriptorType::SampledImage, sm0},
                     {2, DescriptorType::SampledImage, sm1},
@@ -544,7 +641,15 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     {5, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()},
                     {6, DescriptorType::Sampler, shadow_filter_sampler_},
                 };
-                UpdateDesc(device_, shadow_filter_ds_[cbIdx], params, 7);
+                if (!isVkShadow) {
+                    filterParams[1] = {0, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()};
+                    filterParams[2] = {1, DescriptorType::SampledImage, sm0};
+                    filterParams[3] = {2, DescriptorType::SampledImage, sm1};
+                    filterParams[4] = {3, DescriptorType::StorageImage, shadow_visibility_tex_};
+                    filterParams[5] = {4, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferNormal()};
+                    filterParams[6] = {6, DescriptorType::Sampler, shadow_filter_sampler_};
+                }
+                UpdateDesc(device_, shadow_filter_ds_[cbIdx], filterParams, 7);
 
                 cmd->BindComputePipeline(shadow_filter_pipeline_);
                 const DescriptorSetHandle sets[] = { shadow_filter_ds_[cbIdx] };
