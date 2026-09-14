@@ -23,6 +23,10 @@ public sealed class PfxParamField : INotifyPropertyChanged
     public string Type { get; }
     public string Note { get; }
 
+    // 类型分发标志（schema 驱动 AXAML 控件切换）
+    public bool IsEnum { get; }
+    public bool IsF32 => !IsEnum;
+
     public string Value
     {
         get => _value;
@@ -32,6 +36,7 @@ public sealed class PfxParamField : INotifyPropertyChanged
     public PfxParamField(string name, string type, string note, string initial)
     {
         Name = name; Type = type; Note = note; _value = initial;
+        IsEnum = type == "enum";
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
