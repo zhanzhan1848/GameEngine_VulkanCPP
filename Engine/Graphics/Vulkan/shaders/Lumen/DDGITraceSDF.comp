@@ -36,6 +36,31 @@ layout(set = 0, binding = 4) writeonly buffer HitDistanceBuf {
     float hit_distance[];
 } hd;
 
+// T4.3: refined hit normals — xyz world normal (0 when not refined),
+// w = 1.0 valid / 0.0 fallback. Finalize keeps -rayDir when w <= 0.5.
+layout(set = 0, binding = 6) writeonly buffer HitNormalBuf {
+    vec4 hit_normal[];
+} hn;
+
+// T4.3 per-mesh detail SDF slots (PRIMAL_DDGI_DETAIL_SDF): 4 per-mesh
+// R16_UNorm distance fields near the probe volume. Decode contract:
+//   signed (params.z=1): d = unorm * 2*max_dim - max_dim
+//   legacy unsigned    : d = unorm * max_dim
+// max_dim = padded bounds max extent / 1.4 (ContentTools uniform 20%
+// padding); bounds are the WORLD AABB of the mesh SDF grid.
+layout(set = 0, binding = 7) uniform texture3D detail_sdf_0;
+layout(set = 0, binding = 8) uniform texture3D detail_sdf_1;
+layout(set = 0, binding = 9) uniform texture3D detail_sdf_2;
+layout(set = 0, binding = 10) uniform texture3D detail_sdf_3;
+layout(set = 0, binding = 11, std140) uniform DetailSDFTable {
+    vec4  header;                 // x = active slot count (0..4)
+    mat4  inv_world[4];           // world → mesh-local
+    vec4  normal_matrix[4][3];    // rows of transpose(inverse(world 3x3))
+    vec4  bounds_min[4];          // world AABB of the SDF grid
+    vec4  bounds_max[4];
+    vec4  params[4];              // resolution, max_dim, signed, voxel_size
+} dtable;
+
 layout(set = 0, binding = 5, std430) readonly buffer ProbeUpdateBuf {
     uint probe_update_list[];
 } pul;
@@ -166,7 +191,14 @@ vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
     // bounded and only for the buried minority.
     float voxel = volume.SdfVoxelSizes[0].x;
     float skin = max(voxel * 1.5, spacing * 0.05);
-    const float maxPush = spacing * 0.45;
+    // 2026-09-10 十五: 0.45×spacing (1.35 m) left probes buried in thick
+    // entrance masonry permanently dead (57-85/128 exhausted rays at the west
+    // probes — the whole facing-wall zone loses its probe feed). 0.95×spacing
+    // lets the multi-axis search escape thick walls; the gather-side
+    // interpolation skew at ≤2.9 m displacement is the lesser error vs a
+    // dead probe (measured: entrance-probe exhausted rate + facing-wall
+    // texels, this session).
+    const float maxPush = spacing * 0.95;
     float d0 = sampleBestSDF(probePos);
     if (d0 > skin) return probePos;
     vec3 best = probePos;
@@ -185,12 +217,18 @@ vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
         float roundBestD = bestD;
         for (int k = 0; k < 14; ++k) {
             vec3 p = best;
-            for (int st = 0; st < 6; ++st) {
+            // 10 steps × 0.3 m = 3 m search reach — must cover maxPush
+            // (0.95×spacing = 2.85 m); 6 steps (1.8 m) fell short of free air
+            // across the thick entrance masonry and the push cap never bound.
+            for (int st = 0; st < 10; ++st) {
                 p += dirs[k] * stepLen;
                 vec3 delta = p - probePos;
                 if (dot(delta, delta) > maxPush * maxPush) break;
                 float d = sampleBestSDF(p);
-                if (d > roundBestD) { roundBestD = d; roundBest = p; }
+                // 覆盖内守卫（对齐 Metal 孪生 2026-09-04 伪影1 修复）：越界
+                // 哨兵（≥1e9）恒大于真实距离，旧逻辑会把"最大距离"当最开阔
+                // 候选，探针被重定位到场外 → 全部射线从场外空走 → miss。
+                if (d < 1.0e9 && d > roundBestD) { roundBestD = d; roundBest = p; }
                 if (d > skin) break;
             }
         }
@@ -199,7 +237,176 @@ vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
         bestD = roundBestD;
         if (bestD > skin) break;
     }
+    // 2026-09-11 深埋回退：上面的多轴搜索封顶 0.95×spacing，更厚砌体里的
+    // 探针（入口柱，每枚 28-30% exhausted 射线）永远摸不到自由空气。搜索
+    // 26 个网格对齐的邻格中心（probePos 网格对齐，±spacing 即真实格心），
+    // 从最开阔的一格起 trace——"整格探针走最近自由格"。借来的探针好过死
+    // 探针：SH 变成真实传输而不是逐射线 SC 兜底。候选带覆盖内守卫
+    // （d < 1e9，对齐 Metal 孪生 2026-09-04 伪影1 修复）——场外哨兵距离
+    // 恒大于任何真实距离，绝不能在 max-d 搜索中获胜。
+    if (bestD <= skin) {
+        vec3 freeBest = best;
+        float freeBestD = bestD;
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    vec3 c = probePos + vec3(float(dx), float(dy), float(dz)) * spacing;
+                    float d = sampleBestSDF(c);
+                    if (d < 1.0e9 && d > freeBestD) { freeBestD = d; freeBest = c; }
+                }
+            }
+        }
+        if (freeBestD > skin) best = freeBest;
+    }
     return best;
+}
+
+// ----------------------------------------------------------------------------
+// T4.3: per-mesh detail SDF refinement
+// ----------------------------------------------------------------------------
+
+// Trilinear texelFetch over a detail slot's local field (samplerless,
+// clamp-to-edge aligned with sampleSDFCascade). Returns the RAW unorm value
+// (decode happens in detailDecode — the 8 taps must not decode first).
+// The texture is a parameter because GLSL cannot index bindings dynamically;
+// the slot search picks ONE k, so the dispatch below is uniform per ray.
+float detailSampleRaw(texture3D tex, vec3 bounds_min, vec3 extent, float res, vec3 local) {
+    vec3 uvw = (local - bounds_min) / max(extent, vec3(1e-6));
+    if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 || uvw.z < 0.0 || uvw.z > 1.0) {
+        return 1.0;   // outside → decoded as +max_dim (far)
+    }
+    vec3 p = uvw * res - 0.5;
+    ivec3 base = ivec3(floor(p));
+    vec3 f = p - vec3(base);
+    ivec3 resI = ivec3(int(res) - 1);
+    ivec3 c0 = clamp(base, ivec3(0), resI);
+    ivec3 c1 = clamp(base + ivec3(1), ivec3(0), resI);
+    float d000 = texelFetch(tex, ivec3(c0.x, c0.y, c0.z), 0).r;
+    float d100 = texelFetch(tex, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float d010 = texelFetch(tex, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float d110 = texelFetch(tex, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float d001 = texelFetch(tex, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float d101 = texelFetch(tex, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float d011 = texelFetch(tex, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float d111 = texelFetch(tex, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+
+float detailSampleK(uint k, vec3 local) {
+    vec3 bmin = dtable.bounds_min[k].xyz;
+    vec3 ext = dtable.bounds_max[k].xyz - bmin;
+    float res = dtable.params[k].x;
+    if (k == 0u) return detailSampleRaw(detail_sdf_0, bmin, ext, res, local);
+    if (k == 1u) return detailSampleRaw(detail_sdf_1, bmin, ext, res, local);
+    if (k == 2u) return detailSampleRaw(detail_sdf_2, bmin, ext, res, local);
+    return detailSampleRaw(detail_sdf_3, bmin, ext, res, local);
+}
+
+float detailDecode(uint k, float raw) {
+    float max_dim = dtable.params[k].y;
+    if (dtable.params[k].z > 0.5) return raw * 2.0 * max_dim - max_dim;
+    return raw * max_dim;
+}
+
+// Refine the coarse GlobalSDF hit against the finest slot containing it.
+// Returns true with the refined t in outT and the gradient normal in outN
+// (world space, oriented against the incident ray). False → keep coarse t
+// and the -rayDir fake normal.
+bool ddgiDetailRefine(vec3 probePos, vec3 rayDir, inout float t, out vec3 outN) {
+    outN = vec3(0.0);
+    uint count = uint(dtable.header.x);
+    if (count == 0u) return false;
+
+    vec3 hitPos = probePos + rayDir * t;
+
+    // Slot search: containing world AABB, smallest |d| at the hit (wall
+    // seams put the point in several grids; the tightest match wins).
+    int best = -1;
+    float bestAbs = 3.4e38;
+    vec3 bestLocal = vec3(0.0);
+    for (uint k = 0u; k < count; ++k) {
+        if (any(lessThan(hitPos, dtable.bounds_min[k].xyz)) ||
+            any(greaterThan(hitPos, dtable.bounds_max[k].xyz))) continue;
+        vec3 local = (dtable.inv_world[k] * vec4(hitPos, 1.0)).xyz;
+        float d = detailDecode(k, detailSampleK(k, local));
+        float a = abs(d);
+        if (a < bestAbs) { bestAbs = a; best = int(k); bestLocal = local; }
+    }
+    if (best < 0) return false;
+
+    const uint bk = uint(best);
+    const float localVoxel = max(dtable.params[bk].w, 1e-5);
+    const bool signedField = dtable.params[bk].z > 0.5;
+
+    // Field value in t-parameter space around the coarse hit.
+    // f(ti) = decoded distance at probePos + rayDir*ti, mesh-local.
+    float fBest = bestAbs;
+    float tBest = t;
+    if (signedField) {
+        // Signed field: scan a ±4*localVoxel window for the zero crossing,
+        // then bisect. The coarse hit sits inside the inflated hit band, so
+        // the surface is within a couple of coarse voxels almost always.
+        float tLo = t, tHi = t;
+        float fLo = bestAbs, fHi = bestAbs;   // re-evaluated below
+        bool haveLo = false, haveHi = false;
+        for (int i = -5; i <= 5; ++i) {
+            float ti = t + float(i) * localVoxel;
+            vec3 lp = (dtable.inv_world[bk] * vec4(probePos + rayDir * ti, 1.0)).xyz;
+            float fi = detailDecode(bk, detailSampleK(bk, lp));
+            if (fi < 0.0 && (!haveLo || ti > tLo)) { tLo = ti; fLo = fi; haveLo = true; }
+            if (fi >= 0.0 && (!haveHi || ti < tHi)) { tHi = ti; fHi = fi; haveHi = true; }
+            if (abs(fi) < fBest) { fBest = abs(fi); tBest = ti; }
+        }
+        if (haveLo && haveHi) {
+            for (int it = 0; it < 5; ++it) {
+                float tm = 0.5 * (tLo + tHi);
+                vec3 lp = (dtable.inv_world[bk] * vec4(probePos + rayDir * tm, 1.0)).xyz;
+                float fm = detailDecode(bk, detailSampleK(bk, lp));
+                if (fm < 0.0) { tLo = tm; } else { tHi = tm; }
+            }
+            tBest = 0.5 * (tLo + tHi);
+        }
+    } else {
+        // Legacy unsigned field: descend on |d| — the surface is the local
+        // minimum of the distance band. A handful of local steps suffice;
+        // fall back to the coarse hit if nothing beats it.
+        for (int i = 1; i <= 6; ++i) {
+            float ti = t + float(i) * 0.5 * localVoxel;
+            vec3 lp = (dtable.inv_world[bk] * vec4(probePos + rayDir * ti, 1.0)).xyz;
+            float fi = detailDecode(bk, detailSampleK(bk, lp));
+            if (abs(fi) < fBest) { fBest = abs(fi); tBest = ti; } else break;
+        }
+    }
+
+    // Gradient normal at the refined point (central difference, 6 taps).
+    const float e = 0.75 * localVoxel;
+    vec3 lp = (dtable.inv_world[bk] * vec4(probePos + rayDir * tBest, 1.0)).xyz;
+    float dx = detailDecode(bk, detailSampleK(bk, lp + vec3(e, 0, 0)))
+             - detailDecode(bk, detailSampleK(bk, lp - vec3(e, 0, 0)));
+    float dy = detailDecode(bk, detailSampleK(bk, lp + vec3(0, e, 0)))
+             - detailDecode(bk, detailSampleK(bk, lp - vec3(0, e, 0)));
+    float dz = detailDecode(bk, detailSampleK(bk, lp + vec3(0, 0, e)))
+             - detailDecode(bk, detailSampleK(bk, lp - vec3(0, 0, e)));
+    vec3 gLocal = vec3(dx, dy, dz);
+    if (dot(gLocal, gLocal) < 1e-14) return false;
+
+    // Signed gradient points outward; unsigned gradient points away from the
+    // surface — both are the outward normal direction. → world via the
+    // normal matrix (transpose(inverse(world))).
+    vec3 n = normalize(
+        dtable.normal_matrix[bk][0].xyz * gLocal.x +
+        dtable.normal_matrix[bk][1].xyz * gLocal.y +
+        dtable.normal_matrix[bk][2].xyz * gLocal.z);
+    // Orient against the incident ray (probe → surface).
+    if (dot(n, rayDir) > 0.0) n = -n;
+    outN = n;
+
+    // Guard: a degenerate refinement (window found nothing better) keeps the
+    // coarse t — still report the normal, it comes from the finer field.
+    t = tBest;
+    return true;
 }
 
 // ----------------------------------------------------------------------------
@@ -208,7 +415,12 @@ vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
 
 void ddgi_trace_sdf() {
     uint tid      = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;  // ray lane 0..63
-    uint group_id = gl_GlobalInvocationID.x;                               // probe update slot
+    // One group per probe (Dispatch(updateCount), local 8×8 = 64 ray lanes).
+    // gl_WorkGroupID.x matches Metal's [[threadgroup_position_in_grid]] twin.
+    // The old gl_GlobalInvocationID.x folded the ray-lane x into the probe
+    // index: only rays ≡ lane (mod 8) of the first updateCount/8 slots were
+    // ever written — the flat, sun-decoupled Vulkan probe field's root cause.
+    uint group_id = gl_WorkGroupID.x;
 
     if (group_id >= volume.ProbeUpdateCount) return;
     if (tid >= volume.RaysPerProbe) return;
@@ -239,7 +451,13 @@ void ddgi_trace_sdf() {
     // rays marching past surfaces without ever entering the sub-threshold
     // band → step exhaustion → miss→sky. 1.25×voxel inflates surfaces by
     // ~half a step-band (≈24 cm at this res) — invisible at GI frequencies.
-    float hitThreshold = volume.SdfVoxelSizes[0].x * 1.25;
+    // 2026-09-09 V1.3: the real trace outcome (exposed by the probe-indexing
+    // fix above) was 97.9% escape — voxel*1.25 ≈ 0.30 sits INSIDE the
+    // 0.19-0.38 shallow band, and the 1.5× relaxed step tunnels straight
+    // through the remainder. Cover the whole band: ≥0.45 m. Surface
+    // inflation ≈0.45 m — still invisible at GI frequencies (UE Lumen's
+    // mesh-card traces use comparable inflation).
+    float hitThreshold = max(volume.SdfVoxelSizes[0].x * 1.25, 0.45);
     float minStep      = volume.SdfVoxelSizes[0].x * 0.25;
     uint coarsest      = min(2u, volume.SdfResolutionsAndCount.w - 1u);
     float fallbackStride = volume.SdfExtents[coarsest].x * 0.1;
@@ -250,6 +468,14 @@ void ddgi_trace_sdf() {
     // sky constant and shadowed regions stayed flat.
     const uint MAX_SDF_STEPS = 64u;
     float prevD = 3.4e38;   // B13: distance trend across steps
+    // 2026-09-10 M3-A1: buried-start crawl. Topologically-ambiguous air
+    // (open-top courtyards) can hold exact-0 voxels from the merge winding —
+    // a probe starting there would "hit" at t=0 for all 128 rays and take
+    // its projected screen color as radiance. Skip hit registration until
+    // the ray has left the hit skin once; rays that never exit (thick
+    // masonry) exhaust into the miss branch (dim SC fallback), which is the
+    // correct answer for wall-interior probes.
+    bool clearedSkin = false;
     for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
         vec3 pos = probePos + rayDir * t;
         float d = sampleBestSDF(pos);
@@ -262,18 +488,34 @@ void ddgi_trace_sdf() {
         }
 
         if (d < hitThreshold) {
+            if (!clearedSkin) {
+                // Still inside the origin skin — crawl out, don't register.
+                t += max(d, minStep);
+                if (t > volume.RayMaxDistance) { hitDistance = -2.0; break; }
+                continue;
+            }
             hitDistance = t;
             break;
         }
+        clearedSkin = true;
 
         // Relaxed advancement: overstep when far, conservative when close.
-        // BASELINE (cap off) for T8.10f A/B — bistability requires ≥3 runs.
-        float advance;
         // B13: no ω overstep while the field shrinks (thin-wall jump guard).
-        if (d > hitThreshold * 4.0 && d >= prevD) {
+        // 2026-09-10 M3-A1: the min-combined field OVERESTIMATES near
+        // mesh-grid seams (out-of-grid sentinel 1e10 → min() takes a far
+        // mesh), so raw d-steps tunnel through thin geometry — per-ray dumps
+        // showed in-box probes registering only 14-20 m distant hits while
+        // walls stood 1-6 m away. Cap near-field steps at ≈2 voxels so the
+        // shallow band (0.19-0.38 m) is crossed in 1-2 steps; far-field
+        // (growing d) keeps the 1.5× overstep for reach.
+        float advance;
+        // M3-A1 残项：封顶区扩到 6 m——mesh 网格接缝的高估区（薄网格如地板
+        // 只覆盖 ±0.35 m，其余高度 min() 取远处墙体 → d 虚高 2-5 m）恰在
+        // 1.8-6 m 带，-y 射线一步跳过地板网格（arcade 逃逸的 -y 15%）。
+        if (d > 6.0 && d >= prevD) {
             advance = d * 1.5;
         } else {
-            advance = max(d, minStep);
+            advance = clamp(d, minStep, max(volume.SdfVoxelSizes[0].x * 2.0, 0.20));
         }
         prevD = d;
         t += advance;
@@ -282,6 +524,20 @@ void ddgi_trace_sdf() {
 
     // Indexed by update-slot (group) — finalize re-maps to absolute probe index.
     uint globalRayIdx = group_id * volume.RaysPerProbe + rayId;
+
+    // T4.3: per-mesh detail refinement + gradient normal. Slot count 0
+    // (feature off / no nearby per-mesh SDF) → zero normal, coarse t kept.
+    vec3 hitN = vec3(0.0);
+    float hnValid = 0.0;
+    if (hitDistance >= 0.0) {
+        float tRefined = hitDistance;
+        if (ddgiDetailRefine(probePos, rayDir, tRefined, hitN)) {
+            hitDistance = tRefined;
+            hnValid = 1.0;
+        }
+    }
+    hn.hit_normal[globalRayIdx] = vec4(hitN, hnValid);
+
     hd.hit_distance[globalRayIdx] = hitDistance;
     } // T8.13 P2 stride loop
 }

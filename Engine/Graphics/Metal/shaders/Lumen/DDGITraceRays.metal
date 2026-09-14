@@ -68,7 +68,9 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
                                       texture3d<float, access::sample> sdf2) {
     float voxel = volume.SdfVoxelSizes[0].x;
     float skin = max(voxel * 1.5f, spacing * 0.05f);
-    const float maxPush = spacing * 0.45f;
+    // 2026-09-10 十五: raised with the Vulkan twin (see DDGITraceSDF.comp) —
+    // 0.45×spacing left thick-masonry probes permanently buried.
+    const float maxPush = spacing * 0.95f;
     float d0 = sampleBestSDF_elseIf(probePos, sdf0, sdf1, sdf2,
                                     volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
                                     volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
@@ -91,7 +93,9 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
         float roundBestD = bestD;
         for (uint k = 0u; k < 14u; ++k) {
             float3 p = best;
-            for (uint st = 0u; st < 6u; ++st) {
+            // 10 steps × 0.3 m = 3 m reach — must cover maxPush (0.95×spacing);
+            // see the Vulkan twin (DDGITraceSDF.comp) for the full note.
+            for (uint st = 0u; st < 10u; ++st) {
                 p += dirs[k] * stepLen;
                 float3 delta = p - probePos;
                 if (dot(delta, delta) > maxPush * maxPush) break;
@@ -112,6 +116,32 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
         best = roundBest;
         bestD = roundBestD;
         if (bestD > skin) break;
+    }
+    // 2026-09-11 深埋回退 (Vulkan-twin parity, DDGITraceSDF.comp): the
+    // multi-axis search is capped at 0.95×spacing; probes in thicker masonry
+    // (entrance columns, 28-30% exhausted rays each) never reach free air.
+    // Search the 26 grid-aligned neighbor CELL centers (probePos is
+    // grid-aligned, so ±spacing steps land on real cell centers) and trace
+    // from the freest one — "walk to the nearest free cell's SH". A borrowed
+    // probe beats a dead one: its SH becomes real transmission instead of
+    // per-ray SC fallback. In-coverage guard per the 伪影1 fix below.
+    if (bestD <= skin) {
+        float3 freeBest = best;
+        float freeBestD = bestD;
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    float3 c = probePos + float3(float(dx), float(dy), float(dz)) * spacing;
+                    float d = sampleBestSDF_elseIf(c, sdf0, sdf1, sdf2,
+                                                   volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
+                                                   volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
+                                                   volume.SdfCascadeCount);
+                    if (d < 1e9f && d > freeBestD) { freeBestD = d; freeBest = c; }
+                }
+            }
+        }
+        if (freeBestD > skin) best = freeBest;
     }
     return best;
 }
@@ -286,7 +316,7 @@ kernel void ddgi_trace_sdf(
     device float* hit_distance_buffer [[buffer(2)]],
     device const uint* probeUpdateList [[buffer(3)]],
     device float4* hit_normal_buffer [[buffer(4)]],                    // T4.3
-    constant DDGIDetailSDFTable& detail_table [[buffer(5)]]            // T4.3
+    constant DetailSDFTableGPU& detail_table [[buffer(5)]]             // T4.3
 )
 {
     uint tid = tid2d.y * 8u + tid2d.x;
@@ -333,7 +363,10 @@ kernel void ddgi_trace_sdf(
     // (voxel*0.5 let most rays march past surfaces → step exhaustion →
     // miss→sky; 1.25×voxel inflates surfaces by ~half a step-band —
     // invisible at GI frequencies).
-    float hitThreshold = volume.SdfVoxelSizes[0].x * 1.25f;
+    // 2026-09-10 V1.3 sync (Vulkan DDGITraceSDF.comp): cover the unsigned
+    // shallow band (min positive ≈0.19-0.38 m) — voxel*1.25 ≈0.30 sits inside
+    // it, and the relaxed step tunnels straight through the remainder.
+    float hitThreshold = max(volume.SdfVoxelSizes[0].x * 1.25f, 0.45f);
     float minStep = volume.SdfVoxelSizes[0].x * 0.25f;
     uint coarsest = min(2u, volume.SdfCascadeCount - 1u);
     float fallbackStride = volume.SdfExtents[coarsest].x * 0.1f;
@@ -344,6 +377,11 @@ kernel void ddgi_trace_sdf(
     // Vulkan port defines the same 64 locally in DDGITraceSDF.comp.
     const uint DDGI_SPLIT_MAX_SDF_STEPS = 64u;
     float prevD = 3.4e38f;   // B13: distance trend across steps
+    // 2026-09-10 sync (Vulkan DDGITraceSDF.comp): buried-start skin crawl —
+    // topologically-ambiguous air (open-top courtyards) holds exact-0 voxels
+    // from the merge winding; a probe starting there must not register t≈0
+    // hits for all rays (it takes its projected screen color as radiance).
+    bool clearedSkin = false;
     for (uint step = 0; step < DDGI_SPLIT_MAX_SDF_STEPS; ++step) {
         float3 pos = probePos + rayDir * t;
 
@@ -356,27 +394,41 @@ kernel void ddgi_trace_sdf(
         // Outside all cascades — fallback stride
         if (d >= 1e9f) {
             t += fallbackStride;
-            if (t > volume.RayMaxDistance) break;
+            if (t > volume.RayMaxDistance) { hitDistance = -2.0f; break; }
             continue;
         }
 
         if (d < hitThreshold) {
+            if (!clearedSkin) {
+                // Buried origin — crawl out, don't register a t≈0 hit;
+                // rays that never exit exhaust into the miss branch (dim SC
+                // fallback), the correct answer for wall-interior probes.
+                t += max(d, minStep);
+                if (t > volume.RayMaxDistance) { hitDistance = -2.0f; break; }
+                continue;
+            }
             hitDistance = t;
             break;
         }
+        clearedSkin = true;
 
         // Relaxed advancement: overstep when far, conservative when close.
         // T8.13 sync: far-field overstep 1.2 → 1.5 (matches Vulkan).
         // B13: no ω overstep while the field shrinks (thin-wall jump guard).
+        // 2026-09-10 M3-A1 sync (Vulkan): the min-combined field OVERESTIMATES
+        // near mesh-grid seams (out-of-grid sentinel → min() takes a far
+        // mesh), so raw d-steps tunnel through thin geometry — in-box probes
+        // registered only 14-20 m distant hits while walls stood 1-6 m away.
+        // Cap near-field steps at ≈2 voxels.
         float advance;
         if (d > hitThreshold * 4.0f && d >= prevD) {
             advance = d * 1.5f;
         } else {
-            advance = max(d, minStep);
+            advance = clamp(d, minStep, max(volume.SdfVoxelSizes[0].x * 2.0f, 0.20f));
         }
         prevD = d;
         t += advance;
-        if (t > volume.RayMaxDistance) break;
+        if (t > volume.RayMaxDistance) { hitDistance = -2.0f; break; }
     }
 
     // Indexed by update-slot (group) — finalize re-maps to absolute probe index.
@@ -655,7 +707,15 @@ kernel void ddgi_trace_finalize(
                     device const SurfaceCacheCard& card = card_data[cardIdx];
                     ++deviceReads;
                     float2 atlasUV;
-                    if (worldToCardUVDevice(hitPos, card, atlasUV)) {
+                    // 2026-09-10: keep searching when a bounds-passing card
+                    // fails the plane test — the grid order is volume-descending,
+                    // so the first bounds hit is usually a huge AABB card whose
+                    // captured surface sits far in front of an interior hit
+                    // (hollow-building inner walls); rejecting it must not mask
+                    // the smaller, tight cards later in the list. Vulkan twin
+                    // (DDGITraceFinalize.comp) changed in the same batch.
+                    if (!worldToCardUVDevice(hitPos, card, atlasUV)) continue;
+                    {
                         // C4: half-texel inset keeps bilinear inside this card's rect
                         // (shelf-packed atlas bleeds from neighbours otherwise).
                         atlasUV = clamp(atlasUV,
@@ -685,7 +745,7 @@ kernel void ddgi_trace_finalize(
                             dbgPath = 1u;
 #endif
                         }
-                        break;
+                        if (radianceFound) break;
                     }
                 }
             }
@@ -693,6 +753,11 @@ kernel void ddgi_trace_finalize(
                 // 2) Prev-frame screen color（off-screen 或 SC 黑时）。
                 // 门用 isfinite 收紧：屏幕颜色里若有 NaN（specular 除零等），
                 // NaN 参与任何比较恒为 false——能量门会静默失效。
+#ifdef PRIMAL_DDGI_NO_PREVSCREEN
+                // C3 归因旋钮：path 2 直接断电（投影采样无深度测试，
+                // occluded/off-screen hit 会采到无关亮像素）。
+                radianceFound = false;
+#else
                 float3 prevRadiance = scSamplePrevColor(hitPos, view_projection, prev_frame_color);
                 if (all(isfinite(prevRadiance)) && dot(prevRadiance, prevRadiance) > 0.0001f) {
                     float sourceLum = dot(prevRadiance, float3(0.2126f, 0.7152f, 0.0722f));
@@ -710,9 +775,15 @@ kernel void ddgi_trace_finalize(
                     dbgPath = 2u;
 #endif
                 }
+#endif // PRIMAL_DDGI_NO_PREVSCREEN
             }
             if (!radianceFound) {
                 // 3) Analytic: self-computed direct + sky + multi-bounce
+#ifdef PRIMAL_DDGI_NO_ANALYTIC
+                // C3 归因旋钮：路径 3 置黑——它的 E_direct 无阴影判断、
+                // E_sky 无条件加入，都是不查遮挡的能量注入。
+                radiance = float3(0.0f);
+#else
                 float3 L = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : float3(0.0f, -1.0f, 0.0f));
                 float NdotL = max(0.0f, dot(N, L));
                 float3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
@@ -720,20 +791,35 @@ kernel void ddgi_trace_finalize(
                 float3 E_sky = volume.SkyColor.xyz * (0.5f + 0.5f * NdotUp);
                 constexpr float PI_VAL = 3.14159265358979f;
                 radiance = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70f);
+#endif
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 3u;
 #endif
             }
         }
         result.radiance_and_dist.xyz = radiance;
+    } else if (hitDistance <= -1.5f) {
+        // C3.3：逃逸（越出 RayMaxDistance）——真正面向天空的射线，吃天空色。
+        // Vulkan DDGITraceFinalize 同款分档；w 编码沿用 march 的 -2，
+        // 投影端据此把逃逸与耗尽区分开（2026-09-06 逃逸门控：耗尽射线
+        // 误吃天空会把暗拱填亮）。
+        result.radiance_and_dist.w = hitDistance;
+#ifdef PRIMAL_DDGI_NO_SKY
+        // C3 归因旋钮：逃逸能量断电。
+        result.radiance_and_dist.xyz = float3(0.0f);
+#else
+        result.radiance_and_dist.xyz = DDGI_SKY_COLOR;
+#endif
     } else {
-        result.radiance_and_dist.w = -1.0f;
+        // C3.3：步数耗尽（密闭内部爬行，非天空）——仅回退探针周边 SC 卡，
+        // 找不到卡保持黑（Vulkan：result 默认 vec4(0,-1)，不再兜底天空）。
+        result.radiance_and_dist.w = hitDistance;
 
         // Miss fallback: nearby SC cards centered on the PROBE (not hit).
         // T8.13 sync: only accept card light that actually has energy — in
         // shadowed arcades the atlas is still converging and a black card
-        // must not override the sky term; try the next covering card instead.
-        float3 fallbackRadiance = DDGI_SKY_COLOR;
+        // must not override a lit neighbour; try the next covering card.
+        float3 fallbackRadiance = float3(0.0f);
         float atlasSize = float(volume.SCAtlasSize);
 
         bool missFound = false;

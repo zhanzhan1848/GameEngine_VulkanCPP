@@ -62,8 +62,22 @@ kernel void ddgi_update_irradiance(
         float3 radiance = ray.radiance_and_dist.xyz;
         float hitDist = ray.radiance_and_dist.w;
 
-        if (hitDist < 0.0f) {
+        if (hitDist <= -1.5f) {
+            // C3.3：逃逸（w=-2，越出 RayMaxDistance）→ 天空。Vulkan
+            // DDGIUpdateIrradiance.comp 同款分档；finalize 已把 SKY 写进
+            // radiance，这里按 w 再兜一次（防御 + 语义显式）。
+#ifdef PRIMAL_DDGI_PROJ_NOSKY
+            // C 系列归因旋钮：逃逸/覆盖天空能量断电——A/B 实测 escape 天空
+            // 在探针场平衡态的真实份额。
+            radiance = float3(0.0f);
+#else
             radiance = DDGI_SKY_COLOR;
+#endif
+        } else if (hitDist < 0.0f) {
+            // C3.3：步数耗尽（w=-1）——保留 finalize 的 SC 卡回退/黑，
+            // 不再覆盖成天空（旧实现把两种 miss 一律换成 DDGI_SKY_COLOR，
+            // 暗拱被 2.87 档天空整体填亮，Metal 拱廊 69.5 vs UE 22.5 的
+            // 主能量源）。
         } else {
             float distWeight = 1.0f - smoothstep(vol.RayMaxDistance * 0.8f, vol.RayMaxDistance, hitDist);
             radiance *= max(distWeight, 0.2f);
@@ -136,42 +150,14 @@ kernel void ddgi_update_irradiance(
         hitCount += tg_hitFlags[t];
     }
 
-    // =====================================================================
-    // 2026-09-04 棋盘格/闪烁修复：探针空间平滑（irradiance blur）
-    //
-    // 每帧只更新 256/16384 探针（优先级调度），不同子集在不同帧更新。
-    // SC atlas 辐射的逐帧微小变化 + 探针更新批次差异 → 相邻探针 SH 值
-    // 不连续 → gather 插值在格边界产生可见的方块/棋盘格图案 + 高频闪烁。
-    //
-    // 修复：对每个探针的 SH 结果与其 +x/+y/+z 邻居的历史值混合。
-    // 负方向邻居在下一帧作为正方向邻居来平滑当前探针——渐进收敛。
-    // 标准 DDGI irradiance blur 的简化实现（只混合正方向，不协调权重）。
-    // =====================================================================
-    {
-        constexpr float SPATIAL_W = 0.04f;  // 每个正轴邻居的混合权重
-        uint3 counts = uint3(vol.ProbeCounts[0], vol.ProbeCounts[1], vol.ProbeCounts[2]);
-        uint pz = probeIdx / (counts.x * counts.y);
-        uint rem = probeIdx % (counts.x * counts.y);
-        uint py = rem / counts.x;
-        uint px = rem % counts.x;
-        uint3 gc = uint3(px, py, pz);
-
-        for (uint axis = 0u; axis < 3u; ++axis) {
-            uint3 nc = gc;
-            if (nc[axis] + 1u >= counts[axis]) continue;  // 边界跳过
-            nc[axis] += 1u;
-            uint nIdx = nc.x + counts.x * (nc.y + counts.y * nc.z);
-            uint nBase = nIdx * 9u;
-            // 跳过 NaN/Inf 邻居
-            float3 n0 = irradianceHistory[nBase + 0u].xyz;
-            uint3 nb = as_type<uint3>(n0);
-            if (((nb.x | nb.y | nb.z) & 0x7F800000u) == 0x7F800000u) continue;
-            for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
-                float3 nSH = irradianceHistory[nBase + i].xyz;
-                shAccum[i] = mix(shAccum[i], nSH, SPATIAL_W);
-            }
-        }
-    }
+    // NOTE (2026-09-10): the former +x/+y/+z neighbor-history blend
+    // (SPATIAL_W = 0.04, the 2026-09-04 checkerboard/seam fix) is REMOVED to
+    // match the Vulkan kernel. Reasons: a probe-update-stage blend bypasses
+    // the gather-stage Chebyshev visibility test (light smears across walls),
+    // and the +axis-only neighbor selection was a systematic directional
+    // bias. Vulkan never had it and shows no seams. If Metal seams reappear,
+    // the correct fix is a geometry/visibility-aware blend — NOT restoring
+    // this unconditional history average.
 
     // T8.13 sync: temporal blend with history — Vulkan DDGIUpdateIrradiance
     // scheme. A probe that never converged must not EMA-blend against the

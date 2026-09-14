@@ -59,6 +59,11 @@ struct DDGICameraData {
     math::v3   light_color;       // linear HDR light color
     u32        frame_index;
     float      delta_time;
+    // Vulkan screen-hit validation. Missing depth rejects screen samples;
+    // Surface Cache / world probes remain available as fallback.
+    rendergraph::RGResourceHandle screen_depth{};
+    rendergraph::RGResourceHandle radiance_depth{};
+    bool radiance_is_previous_frame = false;
 };
 
 /// Output from DDGI AddPass — probe irradiance buffer available for sampling.
@@ -459,6 +464,14 @@ private:
     };
 
     // Probe irradiance buffers (persistent, triple-buffered for history)
+    // Concurrency contract (audited 2026-09-10): with outIdx = frame % 3 and
+    // histIdx = (frame + 2) % 3, frame N writes slot N%3 while frames N-1/N-2
+    // read slots (N-1)%3/(N-2)%3 and frame N-2 reads slot N%3 as history.
+    // This is race-free because MAX_FRAMES_IN_FLIGHT = 3 (RHITypes.h) plus the
+    // BeginFrame fence wait on frame N-3 (RenderSystem) guarantees the last
+    // same-slot WRITER (frame N-3) is complete, and single-queue submission
+    // order guarantees the in-flight readers' commands execute before this
+    // frame's writes. Do NOT shrink the fence wait without re-auditing.
     rhi::ResourceHandle irradiance_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
@@ -498,8 +511,8 @@ private:
     math::v4 probe_light_override_{};
     bool probe_light_override_active_{ false };
 
-    // Finalize screen-space sampling (Vulkan): ViewProjection CB (64B ×3) +
-    // current frame's view-projection for projecting hit positions to screen.
+    // Finalize screen-space sampling: current/radiance VP, inverse matrices
+    // and depth validity (272B per slot). Metal reads the leading current VP.
     rhi::ResourceHandle finalize_vp_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };

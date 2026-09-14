@@ -22,14 +22,15 @@
 //   4 = StorageBuffer (write)     ray_buffer[] (DDGIRayData = vec4)
 //   5 = StorageBuffer (readonly)  SurfaceCacheCardLookup card_lookups[]
 //   6 = StorageBuffer (readonly)  SurfaceCacheCard card_data[]
-//   7 = UniformBuffer             ViewProjection (mat4, 64B) — for screen-space
-//                                  prev_frame_color sampling at hit positions
+//   7 = UniformBuffer             FinalizeViewData (272B): current/radiance
+//                                  projections, inverses, depth validity
 //   8 = SampledImage (texture2D)  prev_frame_color — real rendered scene colors
 //                                  (has material albedo + lighting variation)
 //   9 = SampledImage (texture2D)  gbuffer_albedo — per-surface albedo for the
 //                                  multi-bounce self-circulating term
 //   10 = StorageBuffer (readonly) irradiance_history — previous frame's probe
 //                                  irradiance for multi-bounce colored GI
+//   15/16 = SampledImage          current/radiance depth for hit validation
 
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
@@ -67,7 +68,13 @@ layout(set = 0, binding = 6, std430) readonly buffer CardDataBuf {
 
 layout(set = 0, binding = 7, std140) uniform ViewProjBlock {
     mat4 viewProjection;
+    mat4 radianceViewProjection;
+    mat4 inverseViewProjection;
+    mat4 inverseRadianceViewProjection;
+    vec4 screenValidity;
 } vp;
+layout(set = 0, binding = 15) uniform texture2D screen_depth;
+layout(set = 0, binding = 16) uniform texture2D radiance_depth;
 
 layout(set = 0, binding = 8) uniform texture2D prev_frame_color;
 layout(set = 0, binding = 9) uniform texture2D gbuffer_albedo;
@@ -126,6 +133,12 @@ layout(set = 0, binding = 12, std430) readonly buffer SCGridCardsBuf {
     uint sc_grid_cards[];
 } scgc;
 
+// T4.3: refined hit normals from the split SDF trace (xyz world normal,
+// w = 1.0 valid / 0.0 → fall back to the -rayDir fake).
+layout(set = 0, binding = 14, std430) readonly buffer HitNormalBuf {
+    vec4 hit_normal[];
+} hnb;
+
 SCGridParams scGridLoad() {
     return scGridDecode(
         uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
@@ -180,34 +193,49 @@ vec3 sampleAtlasBilinear(vec2 uvPx) {
 // light (warm reds from brick, cool grays from stone) instead of the
 // uniform pale yellow the SC atlas produces while its Capture coverage
 // is still ~0.1%.
-vec3 samplePrevColor(vec3 hitPos) {
-    vec4 clip = vp.viewProjection * vec4(hitPos, 1.0);
-    if (clip.w <= 0.0) return vec3(0.0);
+// A projected point is usable only if raster depth represents the same
+// surface. Reject sky, offscreen, and occluded hits before reading any color.
+// The 0.15 world-unit limit is conservative: coarse SDF hits with larger
+// position error must use world-space lighting instead of borrowing a pixel.
+bool projectVisibleHit(vec3 hitPos, mat4 viewProjection, mat4 inverseVP,
+                       texture2D depthTexture, out ivec2 texel) {
+    vec4 clip = viewProjection * vec4(hitPos, 1.0);
+    if (clip.w <= 0.0) return false;
     vec3 ndc = clip.xyz / clip.w;
-    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
-        ndc.z < 0.0 || ndc.z > 1.0) {
-        return vec3(0.0);  // off-screen hit
-    }
-    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
-    ivec2 dims = textureSize(prev_frame_color, 0);
-    ivec2 texel = clamp(ivec2(uv * vec2(dims)), ivec2(0), dims - ivec2(1));
-    return texelFetch(prev_frame_color, texel, 0).rgb;
+    if (any(lessThan(ndc, vec3(-1.0, -1.0, 0.0))) ||
+        any(greaterThan(ndc, vec3(1.0)))) return false;
+    ivec2 dims = textureSize(depthTexture, 0);
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    texel = clamp(ivec2(uv * vec2(dims)), ivec2(0), dims - 1);
+    float depth = texelFetch(depthTexture, texel, 0).r;
+    if (depth >= 1.0 || depth < 0.0) return false;
+    vec2 center = (vec2(texel) + 0.5) / vec2(dims);
+    vec4 surface = inverseVP * vec4(center.x * 2.0 - 1.0,
+                                    1.0 - center.y * 2.0, depth, 1.0);
+    if (abs(surface.w) < 1e-6) return false;
+    return distance(surface.xyz / surface.w, hitPos) <= vp.screenValidity.z;
 }
 
-// Hit-position -> GBuffer albedo (per-surface color for multi-bounce).
-// NOTE: off-screen hits fall back to volume.Albedo (uniform gray) — this is
-// the main reason GI colors don't reflect scene albedo for ~75% of rays.
-// Fix requires Phase 4 full (Capture graphics pipeline for per-surface colors).
+bool samplePrevColor(vec3 hitPos, out vec3 radiance) {
+    radiance = vec3(0.0);
+    if (vp.screenValidity.y < 0.5) return false;
+    ivec2 texel;
+    if (!projectVisibleHit(hitPos, vp.radianceViewProjection,
+                           vp.inverseRadianceViewProjection, radiance_depth, texel)) return false;
+    if (any(notEqual(textureSize(prev_frame_color, 0), textureSize(radiance_depth, 0)))) return false;
+    radiance = texelFetch(prev_frame_color, texel, 0).rgb;
+    if (any(isnan(radiance)) || any(isinf(radiance))) return false;
+    radiance = max(radiance, vec3(0.0));
+    return true; // Valid black is a measurement, not a missing sample.
+}
+
 vec3 sampleHitAlbedo(vec3 hitPos) {
-    vec4 clip = vp.viewProjection * vec4(hitPos, 1.0);
-    if (clip.w <= 0.0) return volume.Albedo.xyz;
-    vec3 ndc = clip.xyz / clip.w;
-    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
-        ndc.z < 0.0 || ndc.z > 1.0) return volume.Albedo.xyz;
-    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
-    ivec2 dims = textureSize(gbuffer_albedo, 0);
-    ivec2 texel = clamp(ivec2(uv * vec2(dims)), ivec2(0), dims - ivec2(1));
-    return texelFetch(gbuffer_albedo, texel, 0).rgb;
+    if (vp.screenValidity.x < 0.5) return volume.Albedo.xyz;
+    ivec2 texel;
+    if (!projectVisibleHit(hitPos, vp.viewProjection, vp.inverseViewProjection,
+                           screen_depth, texel)) return volume.Albedo.xyz;
+    if (any(notEqual(textureSize(gbuffer_albedo, 0), textureSize(screen_depth, 0)))) return volume.Albedo.xyz;
+    return clamp(texelFetch(gbuffer_albedo, texel, 0).rgb, vec3(0.0), vec3(1.0));
 }
 
 // ----------------------------------------------------------------------------
@@ -330,7 +358,10 @@ vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
 
 void ddgi_trace_finalize() {
     uint tid      = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;
-    uint group_id = gl_GlobalInvocationID.x;
+    // One group per probe — must match DDGITraceSDF (see the note there).
+    // gl_GlobalInvocationID.x mixed the ray-lane x into the probe index, so
+    // only 16 of 128 rays per probe were ever finalized (stale -1 elsewhere).
+    uint group_id = gl_WorkGroupID.x;
 
     // ---- Phase 0 removed (T1.3): card lookup now goes through the uniform
     //      grid — no cooperative preload, no barrier, no shared memory. ----
@@ -365,13 +396,20 @@ void ddgi_trace_finalize() {
         //    feedback already accumulates multi-bounce light, so no extra
         //    albedo × L_i_prev term is added on this path (that would count
         //    the same bounce twice).
-        // 2. Prev-frame screen color (real rendered color) + one
-        //    self-circulating bounce term.
-        // 3. Analytic direct + sky + multi-bounce as the last resort.
+        // 2. Depth-validated screen radiance, including valid black.
+        // 3. Sky + world-probe bounce as the last resort.
         vec3 hitPos = probePos + rayDir * hitDistance;
         result.w = hitDistance;
 
+        // T4.3: real gradient normal when the detail-SDF refinement ran;
+        // -rayDir fake otherwise (bit-identical default behavior).
         vec3 N = -rayDir;
+        {
+            const vec4 hn = hnb.hit_normal[globalRayIdx];
+            if (hn.w > 0.5 && dot(hn.xyz, hn.xyz) > 0.25) {
+                N = normalize(hn.xyz);
+            }
+        }
         vec3 albedo = sampleHitAlbedo(hitPos);
 
         bool scUsed = false;
@@ -389,7 +427,15 @@ void ddgi_trace_finalize() {
                     SurfaceCacheCard card = cd.card_data[cardIdx];
                     ++deviceReads;
                     vec2 atlasUV;
-                    if (worldToCardUV(hitPos, card, atlasUV)) {
+                    // 2026-09-10: keep searching when a bounds-passing card
+                    // fails the plane test — the grid order is volume-descending,
+                    // so the first bounds hit is usually a huge AABB card whose
+                    // captured surface sits far in front of an interior hit
+                    // (hollow-building inner walls); rejecting it must not mask
+                    // the smaller, tight cards later in the list (the miss
+                    // branch already had these semantics).
+                    if (!worldToCardUV(hitPos, card, atlasUV)) continue;
+                    {
                         // T3.4 (D3): plane-consistency test — see Metal twin.
                         ivec2 dTexel = ivec2(clamp(atlasUV, vec2(0.0), vec2(volume.SCAtlasSize - 1.0)));
                         float texelDepth = texelFetch(depth_atlas, dTexel, 0).r;
@@ -407,40 +453,32 @@ void ddgi_trace_finalize() {
                             dbgPath = 1u;
 #endif
                         }
-                        break;
+                        if (scUsed) break;
                     }
                 }
             }
         }
         if (!scUsed) {
             vec3 L_i_prev = samplePrevProbeGrid(hitPos, N);
-            vec3 prevRadiance = samplePrevColor(hitPos);
-            if (dot(prevRadiance, prevRadiance) > 0.0001) {
-                // On-screen: real rendered color + multi-bounce colored GI.
-                // A cloth hit can be shadowed/back-facing in prevRadiance even
-                // though its saturated albedo must still tint incoming ambient
-                // light. Keep a small albedo-driven diffuse source so red/green/
-                // blue fabrics contribute chroma instead of becoming black emitters.
-                float sourceLum = dot(prevRadiance, vec3(0.2126, 0.7152, 0.0722));
-                float albedoMax = max(max(albedo.r, albedo.g), albedo.b);
-                float albedoMin = min(min(albedo.r, albedo.g), albedo.b);
-                float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3);
-                float materialWeight = mix(0.15, 0.85, saturation);
-                vec3 materialBounce = albedo * max(sourceLum, 0.12) * materialWeight;
-                // B6: drop the probe-feedback term — double-counted indirect.
-                result.xyz = prevRadiance + materialBounce;
+            vec3 prevRadiance;
+            if (samplePrevColor(hitPos, prevRadiance)) {
+                // Screen radiance already includes this surface's material
+                // response. Adding another albedo-colored source creates energy.
+                result.xyz = prevRadiance;
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 2u;
 #endif
             } else {
-                // Analytic: self-computed direct + sky + multi-bounce
-                vec3 L = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
-                float NdotL = max(0.0, dot(N, L));
-                vec3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
+                // Analytic: sky floor + multi-bounce self-circulation.
+                // C3.1: the old unshadowed E_direct here injected sunlight
+                // through walls for every ray whose SC/prev-screen lookups
+                // failed — this path must only fill "black", never "bright".
+                // E_sky stays as a dim environmental floor (×0.3); multi-bounce
+                // keeps the 0.70 L_i_prev circulation.
                 float NdotUp = max(0.0, N.y);
-                vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp);
+                vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp) * 0.3;
                 const float PI_VAL = 3.14159265358979;
-                result.xyz = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70);
+                result.xyz = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev * 0.70);
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 3u;
 #endif
@@ -448,7 +486,12 @@ void ddgi_trace_finalize() {
         }
     } else if (hitDistance <= -1.5) {
         // 逃逸（越出 RayMaxDistance）——真正面向天空的射线，吃天空色。
-        result.xyz = DDGI_SKY_COLOR;
+        // C3.3: 天空档位统一——逃逸射线此前绕过 sky_color_intensity 直取
+        // 满档 2.88（可见天空线性亮度），而引擎天空档 = SkyColor.x
+        // （GIDebug sky_color_intensity，默认 0.4）。2.5× 超档天空经盒内
+        // 探针的逃逸份额均匀灌注室内 = "albedo×0.2 均匀贴回"的主源。
+        // SkyColor.x 即档位系数，跟随同一旋钮。
+        result.xyz = DDGI_SKY_COLOR * volume.SkyColor.x;
     } else {
         // ---- Miss（步数耗尽）：仅回退探针周边 SC 卡，不再兜底天空 ----
         uint deviceReads = 0u;

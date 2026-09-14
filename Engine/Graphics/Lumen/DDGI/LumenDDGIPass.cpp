@@ -32,6 +32,15 @@ using namespace rendergraph;
 
 namespace {
 
+struct FinalizeViewData {
+    math::m4x4 currentVP;
+    math::m4x4 radianceVP;
+    math::m4x4 inverseCurrentVP;
+    math::m4x4 inverseRadianceVP;
+    math::v4 validity; // current depth, radiance depth, world tolerance, unused
+};
+static_assert(sizeof(FinalizeViewData) == 272);
+
 // ============================================================================
 // Descriptor update helper (from TestNaniteStreamingPipeline pattern)
 // ============================================================================
@@ -238,6 +247,15 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
     // GIFusionVerify 的 ray-path 直方图读回定位辐射来源。
     if (std::getenv("DDGI_PATH_DEBUG")) {
         resolved = "#define DDGI_PATH_DEBUG 1\n" + resolved;
+    }
+
+    // C 系列归因旋钮（编译期诊断变体，默认全部关闭）：逐条断电不查遮挡的
+    // 能量注入路径，干预式 A/B 定位探针场能量来源（计划文档 §C3）。
+    for (const char* knob : {"PRIMAL_DDGI_NO_ANALYTIC", "PRIMAL_DDGI_NO_SKY",
+                             "PRIMAL_DDGI_NO_PREVSCREEN", "PRIMAL_DDGI_PROJ_NOSKY"}) {
+        if (std::getenv(knob)) {
+            resolved = std::string("#define ") + knob + " 1\n" + resolved;
+        }
     }
 
     // DEBUG: Dump resolved source to file
@@ -617,7 +635,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // ray_buffer (write)
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_lookups (read)
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // card_data (read)
-            {7, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // ViewProjection (64B)
+            {7, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // FinalizeViewData (272B)
             {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // prev_frame_color
             {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // gbuffer_albedo
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (multi-bounce)
@@ -625,6 +643,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
             {13, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // SC depth atlas (T3.4 D3)
             {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_normal_buffer (T4.3, read)
+            {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // current depth
+            {16, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // radiance depth
         };
         finalizeBindings[2].readonly = true;
         finalizeBindings[3].readonly = true;
@@ -634,7 +654,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         finalizeBindings[11].readonly = true;
         finalizeBindings[12].readonly = true;
         finalizeBindings[14].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{15, finalizeBindings};
+        DescriptorSetLayoutDesc layoutDesc{17, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
@@ -875,7 +895,7 @@ void LumenDDGIPass::CreateConstantBuffers() {
 
     CreateCBs(global_cb_, 512);          // GlobalShaderData (432 bytes, padded)
     CreateCBs(volume_cb_, 512);          // DDGIVolumeData
-    CreateCBs(finalize_vp_cb_, 64);      // ViewProjection for screen-space prev_color sampling
+    CreateCBs(finalize_vp_cb_, sizeof(FinalizeViewData));
     // T4.3: detail-SDF slot table (16B header + 4 × 160B slots = 656B).
     // Always bound; header count=0 makes the shader skip refinement when the
     // feature is off — no dummy CB needed.
@@ -1322,6 +1342,18 @@ bool LumenDDGIPass::UpdateProbeOrigin(const math::v3& camera_position)
 
     // Static scene: lock probe origin at initial center position (set in Initialize).
     // Do not follow camera — prevents SDF/probe mismatch and multi-bounce instability.
+    //
+    // DO NOT delete this early return to re-enable camera scrolling. The code
+    // below is a dormant skeleton; scrolling is UNSAFE until all of:
+    //   1. probe_positions_ — filled ONCE at Initialize with absolute world
+    //      positions; a shifted grid makes every entry stale.
+    //   2. ProbeRelocationShift — declared in every DDGI UBO but READ BY NO
+    //      SHADER; nothing consumes a nonzero shift today.
+    //   3. History relocation — irradiance/depth history is indexed by
+    //      physical probe slot with no ring offset or shift-aware fetch, so a
+    //      scrolled grid would bind old radiance to new world positions.
+    // Correct design: logical coord + ring offset for history, positions
+    // derived as volumeOrigin + logicalCoord * spacing (never persisted).
     return false;
 
     float spacing = params_.probe_spacing;
@@ -1401,13 +1433,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
         // Setup lambda: declare resource dependencies
         // ====================================================================
         [prev_frame_color, irradianceOutHandle, irradianceHistHandle,
-         depthOutHandle, depthHistHandle, sc_lighting_atlas](
+         depthOutHandle, depthHistHandle, sc_lighting_atlas, camera_data](
             LumenDDGIData& data, RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling — outputs go to imported buffers
             // Read previous frame color (for lighting lookup during trace)
             builder.Read(prev_frame_color, ResourceState::ShaderResource);
 
             data.prev_frame_color = prev_frame_color;
+            if (camera_data.screen_depth.IsValid())
+                builder.Read(camera_data.screen_depth, ResourceState::ShaderResource);
+            if (camera_data.radiance_depth.IsValid())
+                builder.Read(camera_data.radiance_depth, ResourceState::ShaderResource);
 
             // Declare dependency on SC lighting atlas when SC is active.
             // Without this, the RG has no barrier between SC Lighting write
@@ -1484,15 +1520,32 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
             u32 probeCountTotal = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
             u32 updateCount = std::min(max_probes_per_frame_, probeCountTotal);
+            // C3.5 slice 3 (deterministic stabilization): during the warm-up
+            // window the probe field stays frozen at its deterministic init
+            // while the capture and direct lighting converge the atlas —
+            // updating probes against the transient is what selects the
+            // multi-stable branch (09-10 十二). Single choke point: zeroing
+            // updateCount no-ops every downstream update dispatch (zero-size
+            // guards from C0 cover the dispatches). Default 0 = off.
+            {
+                static const u32 kWarmupFrames = [] {
+                    const char* e = std::getenv("PRIMAL_SC_WARMUP_FRAMES");
+                    return e ? (u32)std::max(0, std::atoi(e)) : 0u;
+                }();
+                if (kWarmupFrames > 0u && current_frame_index < kWarmupFrames) updateCount = 0;
+            }
 
             // Resolve physical handles from render graph
             auto ResolveTexture = [&](RGResourceHandle handle) -> ResourceHandle {
+                if (!handle.IsValid()) return handles::INVALID_RESOURCE;
                 auto* res = context.graph->GetResource(handle);
                 if (res) return res->GetPhysicalHandle();
                 return handles::INVALID_RESOURCE;
             };
 
             ResourceHandle prevColorTex = ResolveTexture(prev_frame_color);
+            const auto screenDepthTex = ResolveTexture(camera_data.screen_depth);
+            const auto radianceDepthTex = ResolveTexture(camera_data.radiance_depth);
 
             // Resolve SDF cascade textures from GlobalSDF, or use offline SDF if set.
             ResourceHandle sdfTextures[3] = {
@@ -1686,7 +1739,26 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // T4.5: unified three-backend debug knobs (GIDebug()).
                     // DawnDebugParams sliders bridge in via ApplyLegacy.
                     vd.ProbeHysteresis = GIDebug().probe_hysteresis;
+                    // 2026-09-10: PRIMAL_DDGI_TEMPORAL_ALPHA overrides the
+                    // settled EMA alpha. Diagnosis (multi-bounce专项): with
+                    // probes updating once per ~64 frames (governor age
+                    // floor), alpha 0.02 gives an effective time constant of
+                    // ~3200 frames — ground probes locked into the dark
+                    // branch during the atlas warm-up never re-sample evidence
+                    // (multi-bounce transport starves even with a bright SC
+                    // atlas). A/B knob; default keeps the configured value.
                     vd.TemporalAlpha = params_.irradiance_temporal_weight; // EMA alpha (default 0.05)
+                    if (const char* e = std::getenv("PRIMAL_DDGI_TEMPORAL_ALPHA")) {
+                        const float v = std::atof(e);
+                        if (v > 0.0f && v <= 1.0f) vd.TemporalAlpha = v;
+                    }
+                    // 2026-09-11: hold the young-probe alpha (0.35) until this
+                    // frame — probes keep tracking fresh evidence instead of
+                    // drifting to their equilibrium over minutes (the "indirect
+                    // fading after entry" perception). Fixed point unchanged.
+                    if (const char* e = std::getenv("PRIMAL_DDGI_ALPHA_HOLD")) {
+                        if (current_frame_index < (u32)std::max(0, std::atoi(e))) vd.TemporalAlpha = 0.35f;
+                    }
                     vd.LightDirection = {camera_data.light_direction.x,
                                          camera_data.light_direction.y,
                                          camera_data.light_direction.z, 0.0f};
@@ -1718,6 +1790,17 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                     // Fill SDF cascade data — offline SDF or runtime GlobalSDF.
                     if (has_offline_sdf_) {
+                        static bool sdfCbLogged = false;
+                        if (!sdfCbLogged) {
+                            sdfCbLogged = true;
+                            PRIMAL_LOG_STREAM(Info, "Render")
+                                << "[DDGI_SDF_CB] origin=(" << offline_sdf_origin_.x << ","
+                                << offline_sdf_origin_.y << "," << offline_sdf_origin_.z
+                                << ") extent=(" << offline_sdf_extent_.x << ","
+                                << offline_sdf_extent_.y << "," << offline_sdf_extent_.z
+                                << ") res=" << offline_sdf_resolution_
+                                << " rayMax=" << volume_data_.RayMaxDistance << std::endl;
+                        }
                         vd.SdfOrigins[0] = {offline_sdf_origin_.x, offline_sdf_origin_.y,
                                             offline_sdf_origin_.z, 0.0f};
                         vd.SdfExtents[0] = {offline_sdf_extent_.x, offline_sdf_extent_.y,
@@ -1861,6 +1944,12 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 {
                     auto* mapped = static_cast<DDGIVolumeData*>(device_->MapBuffer(volume_cb_[frameIdx]));
                     if (mapped) {
+                        // C3.5 slice 3 (deterministic stabilization): during the
+                        // atlas warm-up window the probe field stays frozen at
+                        // its deterministic init — updating probes against the
+                        // still-converging capture/atlas is what selects the
+                        // multi-stable branch (09-10 十二). PRIMAL_SC_WARMUP_
+                        // FRAMES gates the freeze; 0 (default) = off.
                         mapped->ProbeUpdateCount = updateCount;
                         device_->UnmapBuffer(volume_cb_[frameIdx]);
                         volume_data_.ProbeUpdateCount = updateCount;
@@ -2027,13 +2116,21 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     const bool finIsVk =
                         (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
 
-                    // Upload ViewProjection for screen-space prev_color sampling
-                    // (64-byte CB, per-frame slot).
+                    // Match each screen source to its own projection and depth.
                     if (finIsVk && finalize_vp_cb_[frameIdx] != handles::INVALID_RESOURCE) {
-                        auto* vpm = static_cast<math::m4x4*>(
+                        auto* vpm = static_cast<FinalizeViewData*>(
                             device_->MapBuffer(finalize_vp_cb_[frameIdx]));
                         if (vpm) {
-                            *vpm = current_view_projection_;
+                            vpm->currentVP = current_view_projection_;
+                            vpm->radianceVP = camera_data.radiance_is_previous_frame
+                                ? camera_data.prev_proj_matrix * camera_data.prev_view_matrix
+                                : current_view_projection_;
+                            vpm->inverseCurrentVP = rhi::math::Inverse(vpm->currentVP);
+                            vpm->inverseRadianceVP = rhi::math::Inverse(vpm->radianceVP);
+                            vpm->validity = math::v4{
+                                screenDepthTex != handles::INVALID_RESOURCE ? 1.0f : 0.0f,
+                                radianceDepthTex != handles::INVALID_RESOURCE ? 1.0f : 0.0f,
+                                0.15f, 0.0f};
                             device_->UnmapBuffer(finalize_vp_cb_[frameIdx]);
                         }
                     }
@@ -2056,8 +2153,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {12, DescriptorType::StorageBuffer, sc_grid_cards_buffer_},
                             {13, DescriptorType::SampledImage,  sc_depth_atlas_},   // T3.4 (D3)
                             {14, DescriptorType::StorageBuffer, hit_normal_buffer_}, // T4.3 (read)
+                            {15, DescriptorType::SampledImage, screenDepthTex != handles::INVALID_RESOURCE ? screenDepthTex : prevColorTex},
+                            {16, DescriptorType::SampledImage, radianceDepthTex != handles::INVALID_RESOURCE ? radianceDepthTex : prevColorTex},
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 15);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 17);
                     } else {
                         DescriptorData finalizeParams[] = {
                             {3, DescriptorType::SampledImage,  lightingAtlasTex},
