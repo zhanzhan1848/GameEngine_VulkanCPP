@@ -54,7 +54,7 @@ public sealed class ParticleCurveEditorWindow : Window
             int index = (int)slot;
 
             var editor = new EmitterCurveEditor { Slot = slot, MinHeight = 220 };
-            editor.CurveEdited += () => PushSlot(index);
+            editor.CurveEdited += (_, _) => PushSlot(index);
             _editors[index] = editor;
 
             var enable = new CheckBox

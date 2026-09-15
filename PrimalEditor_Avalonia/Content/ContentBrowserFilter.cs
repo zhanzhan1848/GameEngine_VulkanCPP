@@ -17,6 +17,7 @@ public static class ContentBrowserFilter
 {
     private const string ModelSidecarSuffix = ".model.json";
     private const string MaterialSidecarSuffix = ".material.json";
+    private const string ParticlePresetSidecarSuffix = ".particle.json";
 
     private static readonly HashSet<string> EngineFormats = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -25,7 +26,8 @@ public static class ContentBrowserFilter
         ".texture",
         ".material",
         ".shader",
-        // .material.json / .model.json handled via suffix checks
+        ".pfx_emitter",
+        // .material.json / .model.json / .particle.json handled via suffix checks
         // (Path.GetExtension only returns the last suffix, so multi-
         // extension sidecars need the EndsWith fast-path below).
     };
@@ -39,6 +41,8 @@ public static class ContentBrowserFilter
         if (fullPath.EndsWith(ModelSidecarSuffix, StringComparison.OrdinalIgnoreCase))
             return true;
         if (fullPath.EndsWith(MaterialSidecarSuffix, StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (fullPath.EndsWith(ParticlePresetSidecarSuffix, StringComparison.OrdinalIgnoreCase))
             return true;
         return EngineFormats.Contains(Path.GetExtension(fullPath));
     }

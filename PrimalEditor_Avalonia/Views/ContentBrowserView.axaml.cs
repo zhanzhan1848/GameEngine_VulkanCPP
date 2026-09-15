@@ -364,6 +364,60 @@ public partial class ContentBrowserView : UserControl
         e.Handled = true;
     }
 
+    /// <summary>Toolbar "P": author a brand-new .pfx_emitter (default module
+    /// stack) in the selected folder, then open it in the PFX editor —
+    /// the material workflow.</summary>
+    private async void OnNewPfxEmitterClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        await vm.CreatePfxEmitterAsync();
+    }
+
+    /// <summary>Context menu: attach the .pfx_emitter asset to the currently
+    /// selected entity (adds or retargets its ParticleFX component).</summary>
+    /// <summary>右键菜单 Delete：直接删除该资产文件（含确认）。</summary>
+    private async void OnContextDeleteClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not Avalonia.Controls.MenuItem mi || mi.DataContext is not AssetInfo info) return;
+        if (DataContext is not ContentBrowserViewModel vm) return;
+        var top = Avalonia.Controls.TopLevel.GetTopLevel(this) as Window;
+        if (top == null) return;
+
+        var dlg = PrimalEditor_Avalonia.Views.ConfirmDialog.Create(
+            "Delete asset",
+            $"Delete '{info.FileName}'? This cannot be undone.");
+        var r = await dlg.ShowDialogAsync(top);
+        if (r != PrimalEditor_Avalonia.Views.ConfirmResult.Save) return;
+
+        try
+        {
+            if (System.IO.Directory.Exists(info.FullPath))
+                System.IO.Directory.Delete(info.FullPath, recursive: true);
+            else if (System.IO.File.Exists(info.FullPath))
+                System.IO.File.Delete(info.FullPath);
+            PrimalEditor_Avalonia.Content.AssetRegistry.Unregister(info.FullPath);
+            vm.RefreshFolders();
+        }
+        catch (Exception ex)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Error($"Context delete failed: {ex.Message}", ex);
+        }
+    }
+
+    private void OnApplyPfxToSelectedClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not Avalonia.Controls.MenuItem mi || mi.DataContext is not AssetInfo info) return;
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+        if (lifetime?.MainWindow?.DataContext is not MainWindowViewModel mainVm)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning("[PFX] apply: no main view model");
+            return;
+        }
+        mainVm.WorldEditor.ApplyPfxToSelectedEntity(info);
+        e.Handled = true;
+    }
+
     private void ToggleContainer(AssetInfo info)
     {
         if (DataContext is not ContentBrowserViewModel vm) return;

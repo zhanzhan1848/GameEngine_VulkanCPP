@@ -227,49 +227,70 @@ public:
         if (!first_) ss_ << ",";
         ss_ << "\"" << escape_json(key) << "\":";
         first_ = false;
+        pending_value_ = true;   // 下一个 write_* 是该键的值：不写元素逗号
     }
-    
+
     void write_string(const std::string& value) {
+        value_prefix();
         ss_ << "\"" << escape_json(value) << "\"";
     }
-    
+
     void write_number(f32 value) {
+        value_prefix();
         ss_ << value;
     }
-    
+
     void write_int(u32 value) {
+        value_prefix();
         ss_ << value;
     }
-    
+
     void write_bool(bool value) {
+        value_prefix();
         ss_ << (value ? "true" : "false");
     }
-    
+
     void begin_object() {
         ss_ << "{";
         first_ = true;
+        pending_value_ = false;
     }
-    
+
     void end_object() {
         ss_ << "}";
         first_ = false;
+        pending_value_ = false;
     }
-    
+
     void begin_array() {
         ss_ << "[";
         first_ = true;
+        pending_value_ = false;
     }
-    
+
     void end_array() {
         ss_ << "]";
         first_ = false;
+        pending_value_ = false;
     }
-    
+
     std::string str() const { return ss_.str(); }
-    
+
 private:
+    // 数组元素分隔：键后的第一个值不带逗号（write_key 已定位），同层数组
+    // 的后续值写逗号。修复：旧实现 begin_array 重置 first_ 后元素间从不
+    // 写逗号，导出 "[0 1 0]" 这类非法 JSON。
+    void value_prefix() {
+        if (pending_value_) {
+            pending_value_ = false;
+            return;
+        }
+        if (!first_) ss_ << ",";
+    }
+
     std::ostringstream ss_;
     bool first_ = false;
+    bool pending_value_ = false;
 };
 
 std::string to_json(const particle_preset& preset) {

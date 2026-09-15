@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Dock.Controls.DeferredContentControl;
 using Dock.Model.Mvvm.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
@@ -17,8 +18,24 @@ using PrimalEditor_Avalonia.ViewModels;
 
 namespace PrimalEditor_Avalonia.ViewModels;
 
-public class WorldEditorViewModel : Document, ISceneEntityContext
+public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredContentPresentation
 {
+    // Dock 12.1 延迟呈现（reveal 时间线）在真实窗口下不刷新内容区，声明同步呈现。
+    public bool DeferContentPresentation => false;
+    private int _bottomPanelIndex;
+    /// <summary>Local bottom-panel tab; changing it never replaces or resizes the viewport.</summary>
+    public int BottomPanelIndex
+    {
+        get => _bottomPanelIndex;
+        set
+        {
+            var index = Math.Clamp(value, 0, 1);
+            if (_bottomPanelIndex == index) return;
+            _bottomPanelIndex = index;
+            OnPropertyChanged(nameof(BottomPanelIndex));
+        }
+    }
+
     private Project? _project;
     private Scene? _activeScene;
     private GameEntity? _selectedEntity;
@@ -529,6 +546,55 @@ public class WorldEditorViewModel : Document, ISceneEntityContext
                 Properties.RefreshParticlePresetOptions();
             }
         };
+        // Inspector "Open Editor…": open the preset in the material-style
+        // asset editor window; built-in presets (fire/smoke/…) have no file
+        // yet, so export the engine's current config to disk on first open.
+        Properties.ParticleOpenEditorCallback = name =>
+        {
+            if (Project == null)
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning("[Particle] open editor: no project open");
+                return;
+            }
+            var safe = string.Join('_', name.Split(
+                System.IO.Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+            var path = System.IO.Path.Combine(Project.Path, safe + ".particle.json");
+            if (!System.IO.File.Exists(path))
+            {
+                if (!PrimalEditor_Avalonia.Native.NativeEngineBridge.ParticlePresetSaveToFile(name, path))
+                {
+                    PrimalEditor_Avalonia.Common.Logger.Warning($"[Particle] preset export failed: {name}");
+                    return;
+                }
+                PrimalEditor_Avalonia.Common.Logger.Info($"[Particle] preset exported for editing: {path}");
+                Properties.RefreshParticlePresetOptions();
+            }
+            Editors.AssetEditorRegistry.Open(new Content.AssetInfo
+            {
+                FullPath = path,
+                Type = PrimalEditor_Avalonia.Native.AssetType.ParticlePreset,
+            });
+        };
+        // Inspector PARTICLE FX "Open Editor…": open the .pfx_emitter asset in
+        // the module-stack editor window (the PFX framework's editing surface).
+        Properties.PfxOpenEditorCallback = assetPath =>
+        {
+            if (Project == null)
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning("[ParticleFX] open editor: no project open");
+                return;
+            }
+            if (!System.IO.File.Exists(assetPath))
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning($"[ParticleFX] open editor: asset missing '{assetPath}'");
+                return;
+            }
+            Editors.AssetEditorRegistry.Open(new Content.AssetInfo
+            {
+                FullPath = assetPath,
+                Type = PrimalEditor_Avalonia.Native.AssetType.PfxEmitter,
+            });
+        };
         // Material editors are free-floating windows; their saves reach
         // the live scene through this static event.
         SceneRuntimeSynchronizer.MaterialSavedOnDisk += OnMaterialSavedOnDisk;
@@ -829,6 +895,16 @@ public uint GetNativeEntityId(GameEntity? entity)
         {
             return CreateParticlePresetEntity(info, posX, posY, posZ);
         }
+        // PFX programmable emitter drop — attach to the selected entity when
+        // one exists (author-then-apply workflow), otherwise spawn a fresh
+        // emitter entity at the drop point.
+        if (info.Type == AssetType.PfxEmitter ||
+            info.FullPath.EndsWith(".pfx_emitter", StringComparison.OrdinalIgnoreCase))
+        {
+            if (SelectedEntities.Length == 1 && ApplyPfxToSelectedEntity(info))
+                return SelectedEntities[0];
+            return CreatePfxEntity(info, posX, posY, posZ);
+        }
         var (nativeMeshPath, entityName) = ResolveDropTarget(info);
         if (nativeMeshPath == null)
         {
@@ -838,7 +914,9 @@ public uint GetNativeEntityId(GameEntity? entity)
 
         var entity = new GameEntity(entityName);
         entity.Components.Add(new Transform { PositionX = posX, PositionY = posY, PositionZ = posZ });
-        entity.Components.Add(new MeshRendererComponent { MeshGuid = new AssetGuid(info.Guid) });
+        var meshRenderer = new MeshRendererComponent { MeshGuid = new AssetGuid(info.Guid) };
+        TryAssignDefaultMaterial(meshRenderer, info.FullPath);
+        entity.Components.Add(meshRenderer);
 
         if (NativeEngineBridge.IsLoaded)
         {
@@ -916,6 +994,68 @@ public uint GetNativeEntityId(GameEntity? entity)
         if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
         PrimalEditor_Avalonia.Common.Logger.Info(
             $"[Particle] preset dropped: {info.FileName} → entity {entity.Name}");
+        return entity;
+    }
+
+    /// <summary>
+    /// B4 P4: apply a .particle.json preset (content-browser context menu) to
+    /// the single selected entity's particle emitter. Loads the file into the
+    /// preset system first (custom presets are unknown to the engine until
+    /// loaded), then routes through the inspector's preset switch = remove
+    /// old emitter + rebuild. Returns false (with a log) when the selection
+    /// has no particle emitter.
+    /// </summary>
+    /// <summary>
+    /// PFX author-then-apply: attach a .pfx_emitter asset to the single
+    /// selected entity — adds a ParticleFX component when missing, otherwise
+    /// retargets AssetPath (the sync path destroys nothing: the component's
+    /// emitter is recreated on the next SyncEntity after EmitterRemove).
+    /// Returns false (with a log) when the workflow preconditions fail.
+    /// </summary>
+    public bool ApplyPfxToSelectedEntity(PrimalEditor_Avalonia.Content.AssetInfo info)
+    {
+        if (info == null) return false;
+        if (SelectedEntities.Length != 1)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                "[PFX] apply: select exactly one entity");
+            return false;
+        }
+        var entity = SelectedEntities[0];
+        var pfx = entity.GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>();
+        if (pfx == null)
+        {
+            pfx = new PrimalEditor_Avalonia.Components.ParticleFXComponent();
+            entity.Components.Add(pfx);
+        }
+        pfx.AssetPath = info.FullPath;
+        if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
+        MarkProjectDirty();
+        PrimalEditor_Avalonia.Common.Logger.Info(
+            $"[PFX] asset applied: {info.FileName} → entity '{entity.Name}'");
+        return true;
+    }
+
+    /// <summary>PFX drop onto empty space: create an emitter entity bound to
+    /// the asset (same flow as the B4 preset drop).</summary>
+    private GameEntity? CreatePfxEntity(AssetInfo info, float posX, float posY, float posZ)
+    {
+        var entityName = Path.GetFileNameWithoutExtension(info.FullPath.Replace(".pfx_emitter", ""));
+        var entity = new GameEntity(entityName);
+        entity.Components.Add(new Transform { PositionX = posX, PositionY = posY, PositionZ = posZ });
+        entity.Components.Add(new PrimalEditor_Avalonia.Components.ParticleFXComponent
+        {
+            AssetPath = info.FullPath,
+        });
+
+        AddEntity(entity);
+        var action = new AddEntityAction(this, entity);
+        UndoRedo.Add(action);
+        action.Redo();
+        SelectedEntities = new[] { entity };
+        if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
+        PrimalEditor_Avalonia.Common.Logger.Info(
+            $"[PFX] asset dropped: {info.FileName} → entity {entity.Name}");
         return entity;
     }
 
@@ -1172,6 +1312,32 @@ public uint GetNativeEntityId(GameEntity? entity)
             default:
                 return (null, entityName);
         }
+    }
+
+    /// <summary>
+    /// A model imported through MeshImporterPlugin gets a sibling default
+    /// material ("&lt;stem&gt;.material.json" with a graph referencing the
+    /// copied textures). Assign it on drop so the placed entity renders
+    /// textured — SceneRuntimeSynchronizer binds the albedo/normal/ORM
+    /// triple from the first entry of MaterialGuids and falls back to the
+    /// white default when the list is empty. No-op when the model has no
+    /// sibling material (e.g. source files dropped without importing).
+    /// </summary>
+    internal static void TryAssignDefaultMaterial(MeshRendererComponent renderer, string modelAssetPath)
+    {
+        var fileName = System.IO.Path.GetFileName(modelAssetPath);
+        const string modelSidecarSuffix = ".model.json";
+        var stem = fileName.EndsWith(modelSidecarSuffix, StringComparison.OrdinalIgnoreCase)
+            ? fileName[..^modelSidecarSuffix.Length]
+            : System.IO.Path.GetFileNameWithoutExtension(fileName);
+        if (string.IsNullOrEmpty(stem)) return;
+
+        var materialPath = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(modelAssetPath) ?? string.Empty, stem + ".material.json");
+        var material = AssetRegistry.Get(materialPath);
+        if (material == null || material.Guid == Guid.Empty) return;
+
+        renderer.MaterialGuids.Add(new AssetGuid(material.Guid));
     }
 
     /// <summary>

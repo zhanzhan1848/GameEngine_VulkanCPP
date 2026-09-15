@@ -73,6 +73,14 @@ public abstract class AssetEditorViewModel : ViewModelBase, IAssetEditor, Common
     public virtual void Save() { }
     public virtual void Discard() { }
 
+    /// <summary>Initial window size for editors without a persisted layout
+    /// (AssetEditorHost falls back to 900×700 when null).</summary>
+    public virtual (int W, int H)? PreferredInitialSize => null;
+
+    /// <summary>Editor host window closed: release native-side preview
+    /// resources (render loops, private preview emitters).</summary>
+    public virtual void OnEditorClosed() { }
+
     public virtual void SetAsset(AssetInfo info)
     {
         Asset = info;

@@ -15,10 +15,37 @@ namespace PrimalEditor_Avalonia.Editors.Particle;
 /// </summary>
 public sealed class EmitterCurveEditor : Control
 {
-    public event Action? CurveEdited;
+    /// <summary>曲线编辑完成（XAML 可直接订阅的标准事件）。</summary>
+    public event EventHandler? CurveEdited;
 
-    public ParticleCurveSlot Slot { get; set; } = ParticleCurveSlot.Alpha;
-    public ParticleCurveData? Curve { get; set; }
+    /// <summary>Avalonia property so XAML hosts (ParticleEmitterEditorView)
+    /// can bind the displayed curve; the legacy code-behind hosts
+    /// (ParticleCurveEditorWindow) keep using the CLR wrapper.</summary>
+    public static readonly StyledProperty<ParticleCurveData?> CurveProperty =
+        AvaloniaProperty.Register<EmitterCurveEditor, ParticleCurveData?>(nameof(Curve));
+
+    public ParticleCurveData? Curve
+    {
+        get => GetValue(CurveProperty);
+        set => SetValue(CurveProperty, value);
+    }
+
+    public static readonly StyledProperty<ParticleCurveSlot> SlotProperty =
+        AvaloniaProperty.Register<EmitterCurveEditor, ParticleCurveSlot>(nameof(Slot), ParticleCurveSlot.Alpha);
+
+    /// <summary>Legacy slot driving the editor's value range. PFX modules map
+    /// over-life quantities onto these ranges (see PfxEmitterEditorViewModel).</summary>
+    public ParticleCurveSlot Slot
+    {
+        get => GetValue(SlotProperty);
+        set => SetValue(SlotProperty, value);
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+        if (e.Property == CurveProperty) InvalidateVisual();
+    }
 
     // 交互状态
     private int _dragKey = -1;          // 被拖键帧索引；-1 无
@@ -103,7 +130,7 @@ public sealed class EmitterCurveEditor : Control
         {
             _dragKey = -1;
             _dragTangent = false;
-            CurveEdited?.Invoke();
+            CurveEdited?.Invoke(this, EventArgs.Empty);
         }
         e.Pointer.Capture(null);
     }
@@ -136,7 +163,7 @@ public sealed class EmitterCurveEditor : Control
         key.Value[0] = Math.Clamp(PixelToValue(pos.Y), min, max);
         Curve.Keys.Add(key);
         Curve.Keys.Sort((a, b) => a.Time.CompareTo(b.Time));
-        CurveEdited?.Invoke();
+        CurveEdited?.Invoke(this, EventArgs.Empty);
         return Curve.Keys.IndexOf(key);
     }
 
@@ -144,7 +171,7 @@ public sealed class EmitterCurveEditor : Control
     {
         if (Curve == null || index < 0 || index >= Curve.Keys.Count) return;
         Curve.Keys.RemoveAt(index);
-        CurveEdited?.Invoke();
+        CurveEdited?.Invoke(this, EventArgs.Empty);
         InvalidateVisual();
     }
 

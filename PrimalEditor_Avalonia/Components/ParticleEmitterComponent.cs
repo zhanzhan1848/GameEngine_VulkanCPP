@@ -9,10 +9,11 @@ namespace PrimalEditor_Avalonia.Components;
 /// </summary>
 public sealed class ParticleEmitterComponent : Component
 {
-    /// <summary>预设名（内置：fire/smoke/explosion/magic_sparkle/rain/snow/dust/bubbles，
-    /// 或 .particle.json 装载的具名预设）。空串回退 "fire"。</summary>
+    /// <summary>预设名（内置：Fire/Smoke/Explosion/Magic Sparkle/Rain/Snow/Dust/Bubbles，
+    /// 或 .particle.json 装载的具名预设）。预设管理器是精确匹配，引擎内置名
+    /// 首字母大写——默认值必须写成 "Fire" 才能被 Preset 下拉框命中。</summary>
     [JsonPropertyName("PresetName")]
-    public string PresetName { get; set; } = "fire";
+    public string PresetName { get; set; } = "Fire";
 
     private float _spawnRate = 50f;
     [JsonPropertyName("SpawnRate")]

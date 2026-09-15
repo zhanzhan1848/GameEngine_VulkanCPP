@@ -46,8 +46,9 @@ public class AssetEditorHost : Window
         }
         else
         {
-            Width = 900;
-            Height = 700;
+            var preferred = ViewModel.PreferredInitialSize;
+            Width = preferred?.W ?? 900;
+            Height = preferred?.H ?? 700;
         }
     }
 
@@ -70,6 +71,8 @@ public class AssetEditorHost : Window
         PrimitiveMesh.PrimitiveMeshViewModel => new PrimitiveMesh.PrimitiveMeshView { DataContext = vm },
         MeshAssetInspector.MeshAssetInspectorViewModel => new MeshAssetInspector.MeshAssetInspectorView { DataContext = vm },
         Material.MaterialEditorViewModel => new Material.MaterialEditorView { DataContext = vm },
+        Particle.ParticleEmitterEditorViewModel => new Particle.ParticleEmitterEditorView { DataContext = vm },
+        ViewModels.PFX.PfxEmitterEditorViewModel => new Views.PFX.PfxEmitterEditorView { DataContext = vm },
         Prefab.PrefabInspectorViewModel => new Prefab.PrefabInspectorView { DataContext = vm },
         Pcg.PcgEditorViewModel => new Pcg.PcgEditorView { DataContext = vm },
         _ => null,
@@ -136,6 +139,7 @@ public class AssetEditorHost : Window
     {
         // Close path: strip this asset from layout.OpenAssets so the next
         // session doesn't reopen it; bounds still live in AssetWindows.
+        ViewModel?.OnEditorClosed();
         SaveLayoutNow(isClosing: true);
         AssetEditorRegistry.Unregister(this);
         base.OnClosed(e);

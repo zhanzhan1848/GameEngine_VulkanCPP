@@ -98,14 +98,32 @@ if [[ -z "$NATIVE_LIB_DIR" && -d "$WT_DEBUG_DIR" ]]; then
   LIB_SRC_LABEL="worktree"
 fi
 if [[ "$NATIVE_LIB_DIR" == "$WT_NATIVE_DIR" && -d "$WT_DEBUG_DIR" ]]; then
-  cfg_has=$({ nm -gU "$WT_NATIVE_DIR/libContentTools.dylib" 2>/dev/null | grep -c CookMeshWithPipeline; } 2>/dev/null || echo 0)
-  dbg_has=$({ nm -gU "$WT_DEBUG_DIR/libContentTools.dylib" 2>/dev/null | grep -c CookMeshWithPipeline; } 2>/dev/null || echo 0)
+  # grep -c always prints a count (even "0") — appending `|| echo 0` would
+  # yield "0\n0" and break the arithmetic comparison below.
+  cfg_has=$(nm -gU "$WT_NATIVE_DIR/libContentTools.dylib" 2>/dev/null | grep -c CookMeshWithPipeline || true)
+  dbg_has=$(nm -gU "$WT_DEBUG_DIR/libContentTools.dylib" 2>/dev/null | grep -c CookMeshWithPipeline || true)
   if [[ "$cfg_has" -eq 0 && "$dbg_has" -gt 0 ]]; then
     echo "[build_app] WARNING: $WT_NATIVE_DIR/libContentTools.dylib is stale (missing recent ABI symbols); using $WT_DEBUG_DIR" >&2
     echo "[build_app]   rebuild inside the worktree to refresh $WT_NATIVE_DIR:" >&2
     echo "[build_app]     $PROJ_DIR/build/build_engine.sh $CONFIG" >&2
     NATIVE_LIB_DIR="$WT_DEBUG_DIR"
     LIB_SRC_LABEL="worktree (Debug fallback — $CONFIG dylib was stale)"
+  fi
+fi
+
+# Same staleness guard for libEngineDLL.dylib itself: PfxGetEmitterSchema is
+# the most recent engine-ABI anchor (ParticleFX schema reflection). Without
+# this, the .app silently loads a pre-PFX engine and every PfxGetEmitterSchema
+# call throws EntryPointNotFound (symptom: empty PFX module palette).
+if [[ "$NATIVE_LIB_DIR" == "$WT_NATIVE_DIR" && -d "$WT_DEBUG_DIR" ]]; then
+  cfg_pfx=$(nm -gU "$WT_NATIVE_DIR/libEngineDLL.dylib" 2>/dev/null | grep -c PfxGetEmitterSchema || true)
+  dbg_pfx=$(nm -gU "$WT_DEBUG_DIR/libEngineDLL.dylib" 2>/dev/null | grep -c PfxGetEmitterSchema || true)
+  if [[ "$cfg_pfx" -eq 0 && "$dbg_pfx" -gt 0 ]]; then
+    echo "[build_app] WARNING: $WT_NATIVE_DIR/libEngineDLL.dylib is stale (missing PfxGetEmitterSchema); using $WT_DEBUG_DIR" >&2
+    echo "[build_app]   rebuild inside the worktree to refresh $WT_NATIVE_DIR:" >&2
+    echo "[build_app]     $PROJ_DIR/build/build_engine.sh $CONFIG" >&2
+    NATIVE_LIB_DIR="$WT_DEBUG_DIR"
+    LIB_SRC_LABEL="worktree (Debug fallback — engine dylib was stale)"
   fi
 fi
 

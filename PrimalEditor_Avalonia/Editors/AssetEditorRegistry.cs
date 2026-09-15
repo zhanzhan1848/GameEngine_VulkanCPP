@@ -63,10 +63,18 @@ public static class AssetEditorRegistry
             return null;
         }
 
+        string requestedPath;
+        try { requestedPath = System.IO.Path.GetFullPath(info.FullPath); }
+        catch { requestedPath = info.FullPath; }
+
         foreach (var existing in _openHosts)
         {
             if (existing.ViewModel?.Asset == null) continue;
-            if (string.Equals(existing.ViewModel.Asset.FullPath, info.FullPath, StringComparison.OrdinalIgnoreCase))
+            string existingPath;
+            try { existingPath = System.IO.Path.GetFullPath(existing.ViewModel.Asset.FullPath); }
+            catch { existingPath = existing.ViewModel.Asset.FullPath; }
+
+            if (string.Equals(existingPath, requestedPath, StringComparison.OrdinalIgnoreCase))
             {
                 existing.Activate();
                 Logger.Info($"AssetEditorRegistry: activated existing editor for {info.FileName}");

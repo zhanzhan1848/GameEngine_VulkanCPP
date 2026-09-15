@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Controls;
+using Dock.Controls.DeferredContentControl;
 using Dock.Model.Mvvm.Controls;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
@@ -45,8 +46,10 @@ public enum FileViewMode
     Thumbnails,
 }
 
-public class ContentBrowserViewModel : Document
+public class ContentBrowserViewModel : Document, IDeferredContentPresentation
 {
+    // Dock 12.1 延迟呈现（reveal 时间线）在真实窗口下不刷新内容区，声明同步呈现。
+    public bool DeferContentPresentation => false;
     private Project? _project;
     private ContentFolder? _selectedFolder;
     private AssetInfo? _selectedFile;
@@ -639,7 +642,7 @@ public class ContentBrowserViewModel : Document
                 if (plugin is MeshImporterPlugin)
                 {
                     var stem = Path.GetFileNameWithoutExtension(name);
-                    ImportingStatus = $"Cooking {name} → {stem}.mesh + {stem}.model.json ({index}/{total}) — large meshes may take several minutes...";
+                    ImportingStatus = $"Cooking {name} → {stem}/{stem}.mesh + {stem}.model.json ({index}/{total}) — large meshes may take several minutes...";
                 }
                 else
                 {
@@ -740,6 +743,83 @@ public class ContentBrowserViewModel : Document
             AssetEditorRegistry.Open(info);
         }
     }
+
+    /// <summary>
+    /// Create a brand-new .pfx_emitter (default starter module stack) in the
+    /// selected folder and open it in the PFX module-stack editor — the same
+    /// author-first workflow as new materials.
+    /// </summary>
+    public async Task CreatePfxEmitterAsync()
+    {
+        if (Project == null || SelectedFolder == null) return;
+
+        var topLevel = Avalonia.Application.Current?.ApplicationLifetime is
+            Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+            ? desktop.MainWindow : null;
+        if (topLevel == null) return;
+
+        var parent = SelectedFolder != null && SelectedFolder.FullPath != _project.ContentPath
+            ? SelectedFolder.FullPath
+            : _project.ContentPath;
+
+        var name = await PromptForTextAsync(topLevel, "New PFX Emitter", "Emitter name:", "NewPfxEmitter");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        name = name.Trim();
+
+        var assetPath = Path.Combine(parent, name + ".pfx_emitter");
+        if (File.Exists(assetPath))
+        {
+            Logger.Warning($"CreatePfxEmitter: '{assetPath}' already exists");
+            StatusMessage = $"PFX emitter '{name}' already exists";
+            return;
+        }
+
+        try
+        {
+            File.WriteAllText(assetPath, PfxEmitterTemplate(name));
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("CreatePfxEmitter: write failed", ex);
+            StatusMessage = $"Failed to write PFX emitter: {ex.Message}";
+            return;
+        }
+
+        var info = AssetRegistry.Register(assetPath);
+        RefreshFolders();
+
+        if (info != null)
+        {
+            // Material workflow: open the editor right away.
+            AssetEditorRegistry.Open(info);
+        }
+    }
+
+    /// <summary>Starter program: spawn → init → update（含 IntegrateVelocity
+    /// 位置积分）→ over-life 曲线。没有 IntegrateVelocity 就不会有粒子位移。</summary>
+    private static string PfxEmitterTemplate(string name) => $$"""
+{
+  "name": {{System.Text.Json.JsonSerializer.Serialize(name)}},
+  "blend": "alpha",
+  "capacity": 4096,
+  "stages": {
+    "spawn": [
+      { "module": "SpawnRate", "rate": 50 }
+    ],
+    "init": [
+      { "module": "SetLifetime", "min": 1, "max": 3 },
+      { "module": "SetScale", "scale": [0.3, 0.3], "scale_end": [0.8, 0.8] },
+      { "module": "AddVelocity", "mode": "random_sphere", "speed_min": 1, "speed_max": 3 }
+    ],
+    "update": [
+      { "module": "IntegrateVelocity" },
+      { "module": "GravityForce", "gravity": [0, -2, 0] },
+      { "module": "AlphaOverLife", "curve": [[0, 1], [0.7, 0.8], [1, 0]] },
+      { "module": "ScaleOverLife", "curve": [[0, 1], [1, 0.2]] }
+    ]
+  }
+}
+""";
 
     private static Task<string?> PromptForTextAsync(Window owner, string title, string prompt, string initial)
     {

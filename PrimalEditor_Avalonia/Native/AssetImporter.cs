@@ -20,6 +20,7 @@ public enum AssetType
     Shader,
     Prefab,
     ParticlePreset,
+    PfxEmitter,
     Pcg,
     Sequence,
 }

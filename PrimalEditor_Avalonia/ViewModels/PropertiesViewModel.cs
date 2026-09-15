@@ -165,6 +165,7 @@ public class PropertiesViewModel : ViewModelBase
                 ? SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>()
                 : null;
             ParticleFXInstanceStatic = c;
+            ParticleFXAssetPathStatic = c?.AssetPath;
             return c;
         }
     }
@@ -211,6 +212,30 @@ public class PropertiesViewModel : ViewModelBase
     // 静态中转（RelayCommand 闭包无法捕获实例——编辑器单实例语义）
     internal static PrimalEditor_Avalonia.Components.ParticleFXComponent? ParticleFXInstanceStatic;
     internal static uint SelectedEntityNativeIdStatic;
+    private static string? ParticleFXAssetPathStatic;
+
+    /// <summary>Opens the selected entity's .pfx_emitter asset in the PFX
+    /// module-stack editor window (material-editor style).</summary>
+    public System.Windows.Input.ICommand PfxOpenEditorCommand { get; } =
+        new PrimalEditor_Avalonia.Common.RelayCommand(_ =>
+        {
+            var path = ParticleFXAssetPathStatic;
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                PrimalEditor_Avalonia.Common.Logger.Info("[ParticleFX] open editor: entity has no asset path");
+                return;
+            }
+            PfxOpenEditorCallbackStatic?.Invoke(path);
+        });
+
+    /// <summary>WorldEditorViewModel 注入：按资产路径打开 PFX 编辑器窗口。</summary>
+    public System.Action<string>? PfxOpenEditorCallback
+    {
+        get => PfxOpenEditorCallbackStatic;
+        set => PfxOpenEditorCallbackStatic = value;
+    }
+
+    private static System.Action<string>? PfxOpenEditorCallbackStatic;
 
     // ---- ExposedParams 行模型（DataGrid 绑定）----
 
@@ -240,7 +265,7 @@ public class PropertiesViewModel : ViewModelBase
     private System.Collections.Generic.IReadOnlyList<string>? _particlePresets;
     public System.Collections.Generic.IReadOnlyList<string> ParticlePresetOptions
         => _particlePresets ??= PrimalEditor_Avalonia.Native.NativeEngineBridge.ParticlePresetList()?
-               .Split('\n') ?? new[] { "fire", "smoke", "explosion", "rain", "snow" };
+               .Split('\n') ?? new[] { "Fire", "Smoke", "Explosion", "Magic Sparkle", "Rain", "Snow", "Dust", "Bubbles" };
 
     /// <summary>B4 P4: drop the cached preset list so the next read re-queries
     /// the engine (after Save/Load adds a custom .particle.json).</summary>
@@ -310,13 +335,54 @@ public class PropertiesViewModel : ViewModelBase
     public System.Windows.Input.ICommand ParticleSavePresetCommand { get; } =
         new PrimalEditor_Avalonia.Common.RelayCommand(_ =>
         {
-            var name = ParticlePresetNameStatic;
-            if (!string.IsNullOrEmpty(name)) ParticleSavePresetCallbackStatic?.Invoke(name);
+            var name = EffectiveParticlePresetName();
+            if (name != null) ParticleSavePresetCallbackStatic?.Invoke(name);
         });
+
+    /// <summary>Opens the selected emitter's preset in the AssetEditorHost
+    /// particle editor (material-editor style window). The callback exports
+    /// the preset to .particle.json first when no file exists yet.</summary>
+    public System.Windows.Input.ICommand ParticleOpenEditorCommand { get; } =
+        new PrimalEditor_Avalonia.Common.RelayCommand(_ =>
+        {
+            var name = EffectiveParticlePresetName();
+            if (name != null) ParticleOpenEditorCallbackStatic?.Invoke(name);
+        });
+
+    /// <summary>Preset name the commands should act on, or null when there is
+    /// nothing to act on. An empty PresetName falls back to "fire", then the
+    /// name is canonicalized against the engine's preset list — built-ins are
+    /// stored capitalized ("Fire"/"Dust"/…) and preset_manager::get_preset is
+    /// an exact-match lookup, so exporting a legacy lowercase "fire" fails
+    /// otherwise (the observed "preset export failed: fire").</summary>
+    private static string? EffectiveParticlePresetName()
+    {
+        if (ParticleOpenEditorCallbackStatic == null || ParticleSavePresetCallbackStatic == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning("[Particle] preset command: WorldEditor callback not wired");
+            return null;
+        }
+        var name = string.IsNullOrEmpty(ParticlePresetNameStatic) ? "fire" : ParticlePresetNameStatic;
+        var canonical = PrimalEditor_Avalonia.Native.NativeEngineBridge.ParticlePresetList()?
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(p => string.Equals(p, name, StringComparison.OrdinalIgnoreCase));
+        if (canonical != null) name = canonical;
+        PrimalEditor_Avalonia.Common.Logger.Info($"[Particle] preset command → '{name}'");
+        return name;
+    }
+
+    /// <summary>WorldEditorViewModel 注入：打开（必要时先导出）预设文件编辑器。
+    /// 静态中转供 RelayCommand 闭包使用（编辑器单实例语义）。</summary>
+    public System.Action<string>? ParticleOpenEditorCallback
+    {
+        get => ParticleOpenEditorCallbackStatic;
+        set => ParticleOpenEditorCallbackStatic = value;
+    }
 
     // RelayCommand 闭包无法捕获实例——经静态中转（编辑器单实例语义）。
     private static string? ParticlePresetNameStatic;
     private static System.Action<string>? ParticleSavePresetCallbackStatic;
+    private static System.Action<string>? ParticleOpenEditorCallbackStatic;
 
 
     /// <summary>"Look Through This Camera" or "Restore Editor Camera"
@@ -971,6 +1037,12 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(HasMaterialOverrideComponent));
         OnPropertyChanged(nameof(HasParticleComponent));
         OnPropertyChanged(nameof(Particle));
+        // Section visibility alone is not enough: without these the Preset
+        // combo / Spawn Rate / Enabled keep the values they had before the
+        // emitter existed (empty / 0 / unchecked) after re-selection.
+        OnPropertyChanged(nameof(ParticlePresetName));
+        OnPropertyChanged(nameof(ParticleSpawnRate));
+        OnPropertyChanged(nameof(ParticleEnabled));
 
         MixedValueMessage = _msEntity.SelectedEntities.Count > 1
             ? "Multiple entities selected - showing first value or '-' for mixed"

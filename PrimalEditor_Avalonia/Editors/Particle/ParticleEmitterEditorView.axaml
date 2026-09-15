@@ -1,0 +1,183 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.Editors.Particle"
+             xmlns:p="using:PrimalEditor_Avalonia.Editors.Particle"
+             xmlns:cv="using:PrimalEditor_Avalonia.Common.Converters"
+             x:Class="PrimalEditor_Avalonia.Editors.Particle.ParticleEmitterEditorView"
+             x:DataType="vm:ParticleEmitterEditorViewModel"
+             Background="{DynamicResource VoidBrush}">
+
+  <UserControl.Resources>
+    <cv:StringToFloatConverter x:Key="FloatConv" />
+  </UserControl.Resources>
+
+  <!-- Same shell as the material editor: top toolbar / left palette /
+       center canvas / right parameter panel / bottom status line. -->
+  <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="220,*,300" Background="{DynamicResource VoidBrush}">
+
+    <!-- TOP: Save/Discard toolbar (Ctrl+S / Ctrl+Shift+S are already wired
+         by AssetEditorHost — this row mirrors MaterialEditorView). -->
+    <Border Grid.Row="0" Grid.ColumnSpan="3" Classes="floating"
+            Margin="6,6,6,2" Padding="8,4">
+      <Grid ColumnDefinitions="*,Auto,Auto">
+        <TextBlock Grid.Column="0"
+                   Text="{Binding Asset.FileName, FallbackValue='(no asset)'}"
+                   FontFamily="{DynamicResource FontMono}"
+                   FontSize="11"
+                   Foreground="{DynamicResource SecondaryTextBrush}"
+                   VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="0" Margin="180,0,0,0"
+                   Text="{Binding DirtyMarker, FallbackValue=''}"
+                   FontFamily="{DynamicResource FontMono}"
+                   FontSize="11"
+                   Foreground="{DynamicResource AmberBrush}"
+                   VerticalAlignment="Center"/>
+        <Button Grid.Column="1" Content="Discard" Margin="4,0"
+                Click="OnDiscardClick"
+                IsEnabled="{Binding IsDirty}"/>
+        <Button Grid.Column="2" Content="Save" Classes="accent"
+                Click="OnSaveClick"
+                IsEnabled="{Binding IsDirty}"/>
+      </Grid>
+    </Border>
+
+    <!-- LEFT: section palette -->
+    <Border Grid.Row="1" Grid.Column="0" Classes="floating" Margin="6,2,2,6">
+      <DockPanel>
+        <Border DockPanel.Dock="Top" Padding="8,6">
+          <TextBlock Text="SECTION PALETTE"
+                     FontFamily="{DynamicResource FontDisplay}"
+                     FontWeight="SemiBold" FontSize="11"
+                     LetterSpacing="2"
+                     Foreground="{DynamicResource ElectricBlueBrush}"/>
+        </Border>
+        <ListBox ItemsSource="{Binding SectionPalette}"
+                 SelectedIndex="{Binding SelectedSectionIndex}"
+                 Padding="4">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="vm:ParticleSectionTemplateViewModel">
+              <Border Margin="2" Padding="4,2" Background="Transparent">
+                <StackPanel>
+                  <TextBlock Text="{Binding DisplayName}"
+                             FontFamily="{DynamicResource FontMono}"
+                             FontSize="11"
+                             Foreground="{StaticResource FontBrush}"/>
+                  <TextBlock Text="{Binding Note}"
+                             FontFamily="{DynamicResource FontMono}"
+                             FontSize="9"
+                             Foreground="{DynamicResource MutedTextBrush}"/>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </DockPanel>
+    </Border>
+
+    <!-- CENTER: over-life curve editor -->
+    <Border Grid.Row="1" Grid.Column="1" Classes="floating" Margin="2,2,2,2"
+            BorderBrush="{DynamicResource ElectricBlueDeepBrush}"
+            BorderThickness="1">
+      <DockPanel Margin="8">
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="10"
+                    Margin="0,0,0,6">
+          <TextBlock Text="OVER-LIFE CURVES"
+                     FontFamily="{DynamicResource FontDisplay}"
+                     FontWeight="SemiBold" FontSize="11"
+                     LetterSpacing="2" VerticalAlignment="Center"
+                     Foreground="{DynamicResource ElectricBlueBrush}"/>
+          <ComboBox MinWidth="100" VerticalAlignment="Center"
+                    ItemsSource="{Binding CurveSlotTitles}"
+                    SelectedIndex="{Binding SelectedCurveSlot}"/>
+          <CheckBox Content="Enabled" VerticalAlignment="Center"
+                    IsChecked="{Binding SelectedCurveEnabled}"/>
+          <ComboBox MinWidth="90" VerticalAlignment="Center"
+                    IsEnabled="{Binding SelectedCurveEnabled}"
+                    SelectedIndex="{Binding SelectedCurveInterpolation}">
+            <ComboBoxItem>Constant</ComboBoxItem>
+            <ComboBoxItem>Linear</ComboBoxItem>
+            <ComboBoxItem>Smooth</ComboBoxItem>
+            <ComboBoxItem>Bezier</ComboBoxItem>
+          </ComboBox>
+          <TextBlock Text="drag keys · double-click adds · right-click removes"
+                     VerticalAlignment="Center"
+                     FontFamily="{DynamicResource FontMono}" FontSize="9"
+                     Foreground="{DynamicResource MutedTextBrush}"/>
+        </StackPanel>
+        <Border Background="{DynamicResource SlateBrush}"
+                CornerRadius="3"
+                BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1">
+          <p:EmitterCurveEditor x:Name="CurveEditor"
+                                Curve="{Binding SelectedCurve}"/>
+        </Border>
+      </DockPanel>
+    </Border>
+
+    <!-- RIGHT: parameter panel for the selected section -->
+    <Border Grid.Row="1" Grid.Column="2" Classes="floating" Margin="2,2,6,6">
+      <DockPanel>
+        <Border DockPanel.Dock="Top" Padding="8,6">
+          <TextBlock Text="{Binding SelectedSectionTitle, FallbackValue='PARAMETERS'}"
+                     FontFamily="{DynamicResource FontDisplay}"
+                     FontWeight="SemiBold" FontSize="11"
+                     LetterSpacing="2"
+                     Foreground="{DynamicResource ElectricBlueBrush}"/>
+        </Border>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <ItemsControl ItemsSource="{Binding Rows}" Padding="8">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ParticleParamViewModel">
+                <StackPanel Orientation="Horizontal" Spacing="2" Margin="0,2">
+                  <TextBlock Text="{Binding Name}" Width="92"
+                             FontFamily="{DynamicResource FontMono}" FontSize="11"
+                             VerticalAlignment="Center"
+                             Foreground="{DynamicResource MutedTextBrush}"/>
+
+                  <!-- float -->
+                  <TextBox Width="64" FontSize="11" IsVisible="{Binding IsFloat}"
+                           Text="{Binding FloatValue, Mode=TwoWay, Converter={StaticResource FloatConv}}"/>
+
+                  <!-- int -->
+                  <TextBox Width="64" FontSize="11" IsVisible="{Binding IsInt}"
+                           Text="{Binding IntValue, Mode=TwoWay}"/>
+
+                  <!-- bool -->
+                  <CheckBox IsVisible="{Binding IsBool}" IsChecked="{Binding BoolValue, Mode=TwoWay}"/>
+
+                  <!-- text -->
+                  <TextBox MinWidth="150" FontSize="11" IsVisible="{Binding IsText}"
+                           Text="{Binding TextValue, Mode=TwoWay}"/>
+
+                  <!-- enum -->
+                  <ComboBox MinWidth="120" FontSize="11" IsVisible="{Binding IsEnum}"
+                            ItemsSource="{Binding EnumOptions}"
+                            SelectedIndex="{Binding EnumIndex, Mode=TwoWay}"/>
+
+                  <!-- vector: X/Y/Z/W component boxes, material-editor style -->
+                  <TextBox Width="48" FontSize="11" IsVisible="{Binding ShowX}"
+                           Text="{Binding X, Mode=TwoWay, Converter={StaticResource FloatConv}}"/>
+                  <TextBox Width="48" FontSize="11" IsVisible="{Binding ShowY}"
+                           Text="{Binding Y, Mode=TwoWay, Converter={StaticResource FloatConv}}"/>
+                  <TextBox Width="48" FontSize="11" IsVisible="{Binding ShowZ}"
+                           Text="{Binding Z, Mode=TwoWay, Converter={StaticResource FloatConv}}"/>
+                  <TextBox Width="48" FontSize="11" IsVisible="{Binding ShowW}"
+                           Text="{Binding W, Mode=TwoWay, Converter={StaticResource FloatConv}}"/>
+                </StackPanel>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </DockPanel>
+    </Border>
+
+    <!-- BOTTOM: status / diagnostics -->
+    <Border Grid.Row="2" Grid.ColumnSpan="3" Classes="floating"
+            Margin="6,2,6,6" Padding="8,4">
+      <TextBlock Text="{Binding StatusLine, FallbackValue='Ready'}"
+                 FontFamily="{DynamicResource FontMono}"
+                 FontSize="10"
+                 Foreground="{DynamicResource MutedTextBrush}"/>
+    </Border>
+
+  </Grid>
+</UserControl>

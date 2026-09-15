@@ -71,7 +71,7 @@
 
                     <!-- Compact toolbar: current path | collapsible search | actions -->
                     <Border DockPanel.Dock="Top" Padding="4,4,4,2">
-                        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
                             <TextBlock Grid.Column="0" Text="FILES"
                                        FontFamily="{StaticResource FontDisplay}"
                                        FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
@@ -107,24 +107,27 @@
                                     Width="22" Height="22" Margin="0,0,4,0" Padding="0"/>
                             <Button Grid.Column="4" Content="+" Click="OnNewFolderClick"
                                     ToolTip.Tip="New folder"
-                                    Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
+                                    Width="22" Height="22" Margin="8,0,2,0" Padding="0"/>
                             <Button Grid.Column="5" Content="M" Click="OnNewMaterialClick"
                                     ToolTip.Tip="New material"
                                     Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
-                            <Button Grid.Column="6" Content="R" Click="OnRenameClick"
+                            <Button Grid.Column="6" Content="P" Click="OnNewPfxEmitterClick"
+                                    ToolTip.Tip="New PFX emitter (module-stack particle)"
+                                    Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
+                            <Button Grid.Column="7" Content="R" Click="OnRenameClick"
                                     ToolTip.Tip="Rename"
                                     Width="22" Height="22" Margin="0,0,2,0" Padding="0"/>
-                            <Button Grid.Column="7" Content="D" Click="OnDeleteClick"
+                            <Button Grid.Column="8" Content="D" Click="OnDeleteClick"
                                     ToolTip.Tip="Delete"
                                     Width="22" Height="22" Margin="0,0,4,0" Padding="0"
                                     Classes="danger"/>
-                            <ToggleButton Grid.Column="8"
+                            <ToggleButton Grid.Column="9"
                                           IsChecked="{Binding ViewMode, Converter={x:Static conv:FileViewModeConverters.ToThumbnails}, Mode=TwoWay}"
                                           ToolTip.Tip="Toggle thumbnails view"
-                                          Width="22" Height="22" Margin="0,0,2,0" Padding="0">
+                                          Width="22" Height="22" Margin="8,0,2,0" Padding="0">
                                 <TextBlock Text="▦" FontSize="11"/>
                             </ToggleButton>
-                            <Button Grid.Column="9" Content="⬇" Click="OnImportClick"
+                            <Button Grid.Column="10" Content="⬇" Click="OnImportClick"
                                     ToolTip.Tip="Import asset"
                                     Width="22" Height="22" Padding="0"/>
                         </Grid>
@@ -159,6 +162,15 @@
                                                       IsVisible="{Binding IsParticlePreset}"
                                                       Click="OnApplyPresetToSelectedClick"
                                                       ToolTip.Tip="B4 P4: 把该预设应用到当前选中的粒子实体"/>
+                                            <MenuItem Header="Apply to Selected Entity"
+                                                      IsVisible="{Binding IsPfxEmitter}"
+                                                      Click="OnApplyPfxToSelectedClick"
+                                                      ToolTip.Tip="把该 PFX 发射器资产挂到当前选中的实体（已有则替换 AssetPath）"/>
+                                            <Separator/>
+                                            <MenuItem Header="Delete" Click="OnContextDeleteClick"
+                                                      ToolTip.Tip="删除该资产文件"/>
+                                            <MenuItem Header="Delete" Click="OnDeleteClick"
+                                                      ToolTip.Tip="删除该资产"/>
                                         </ContextMenu>
                                     </Grid.ContextMenu>
                                     <Path Grid.Column="0" Width="14" Height="14" Stretch="Uniform"
@@ -230,6 +242,15 @@
                                                       IsVisible="{Binding IsParticlePreset}"
                                                       Click="OnApplyPresetToSelectedClick"
                                                       ToolTip.Tip="B4 P4: 把该预设应用到当前选中的粒子实体"/>
+                                            <MenuItem Header="Apply to Selected Entity"
+                                                      IsVisible="{Binding IsPfxEmitter}"
+                                                      Click="OnApplyPfxToSelectedClick"
+                                                      ToolTip.Tip="把该 PFX 发射器资产挂到当前选中的实体（已有则替换 AssetPath）"/>
+                                            <Separator/>
+                                            <MenuItem Header="Delete" Click="OnContextDeleteClick"
+                                                      ToolTip.Tip="删除该资产文件"/>
+                                            <MenuItem Header="Delete" Click="OnDeleteClick"
+                                                      ToolTip.Tip="删除该资产"/>
                                         </ContextMenu>
                                     </ctrl:TextureFrame.ContextMenu>
                                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">

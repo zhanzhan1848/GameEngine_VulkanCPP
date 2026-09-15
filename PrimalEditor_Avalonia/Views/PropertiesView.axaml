@@ -315,7 +315,7 @@
             <StackPanel IsVisible="{Binding HasParticleComponent}" Spacing="6">
                 <Separator Margin="0,12"/>
                 <TextBlock Text="PARTICLE EMITTER" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                <Grid ColumnDefinitions="90,*" RowDefinitions="Auto,Auto,Auto">
+                <Grid ColumnDefinitions="90,*,Auto" RowDefinitions="Auto,Auto,Auto">
                     <TextBlock Grid.Row="0" Text="Preset" VerticalAlignment="Center"/>
                     <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding ParticlePresetOptions}"
                               SelectedItem="{Binding ParticlePresetName}"/>
@@ -326,9 +326,14 @@
                     <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ParticleSpawnRate, Mode=TwoWay}" Margin="0,4,0,0"/>
                     <CheckBox Grid.Row="2" Grid.Column="1" Content="Enabled" IsChecked="{Binding ParticleEnabled, Mode=TwoWay}" Margin="0,4,0,0"/>
                 </Grid>
-                <Button Content="Curves…" Click="OnOpenCurveEditorClick" HorizontalAlignment="Left"
-                        Padding="8,2" Margin="0,6,0,0"
-                        ToolTip.Tip="B4 P3: 编辑 Scale/Alpha/Color/Velocity/Force/Rotation 六条 over-life 曲线"/>
+                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,6,0,0">
+                    <Button Content="Curves…" Click="OnOpenCurveEditorClick"
+                            Padding="8,2"
+                            ToolTip.Tip="B4 P3: 编辑选中实体发射器的 Scale/Alpha/Color/Velocity/Force/Rotation 六条 over-life 曲线"/>
+                    <Button Content="Open Editor…" Command="{Binding ParticleOpenEditorCommand}"
+                            Padding="8,2"
+                            ToolTip.Tip="在独立的粒子编辑器窗口中编辑当前预设（材质编辑器同款；内置预设首次打开会先导出为项目根下的 .particle.json）"/>
+                </StackPanel>
             </StackPanel>
 
             <!-- Particle FX（PFX 可编程粒子框架，N1 基础表单 + N6 暴露参数编辑） -->
@@ -345,6 +350,9 @@
                             HorizontalAlignment="Left"
                             ToolTip.Tip="推送 ExposedParams 到引擎发射器"/>
                 </Grid>
+                <Button Content="Open Editor…" Command="{Binding PfxOpenEditorCommand}"
+                        HorizontalAlignment="Left" Padding="8,2" Margin="0,6,0,0"
+                        ToolTip.Tip="在 PFX 模块堆栈编辑器窗口中打开该资产（spawn/init/update 模块 + 曲线 + 热预览）"/>
                 <TextBlock Text="Exposed Params" FontSize="11" Margin="0,8,0,2"/>
                 <ItemsControl ItemsSource="{Binding PfxParamRows}">
                     <ItemsControl.ItemTemplate>

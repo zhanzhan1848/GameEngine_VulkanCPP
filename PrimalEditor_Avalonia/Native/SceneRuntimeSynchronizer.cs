@@ -91,6 +91,14 @@ public sealed class SceneRuntimeSynchronizer
                 new[] { transform.PositionX, transform.PositionY, transform.PositionZ },
                 new[] { transform.RotationX, transform.RotationY, transform.RotationZ },
                 new[] { transform.ScaleX, transform.ScaleY, transform.ScaleZ });
+
+            // PFX 发射器跟随实体位置（拖拽 gizmo / 属性面板改位置即生效）
+            if (entity.GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>() != null
+                && PfxEmitterByRuntime.TryGetValue(runtimeId, out var pfxId))
+            {
+                _bridge.PfxSetEmitterPosition(pfxId,
+                    transform.PositionX, transform.PositionY, transform.PositionZ);
+            }
         }
     }
 
@@ -322,9 +330,12 @@ public sealed class SceneRuntimeSynchronizer
                 var size = (int)_bridge.ParticleEmitterConfigSize();
                 if (size <= 0) break;
                 var config = new byte[size];
-                var presetName = string.IsNullOrWhiteSpace(emitter.PresetName) ? "fire" : emitter.PresetName;
+                // preset_manager::get_preset 是精确匹配，且引擎内置名首字母
+                // 大写（"Fire"/"Dust"/…）。历史场景里可能存着小写 "fire"，
+                // 先按不区分大小写对齐到引擎列表里的规范名再应用。
+                var presetName = ResolvePresetName(emitter.PresetName);
                 if (!_bridge.ParticlePresetApplyToConfig(presetName, config) &&
-                    !_bridge.ParticlePresetApplyToConfig("fire", config))
+                    !_bridge.ParticlePresetApplyToConfig("Fire", config))
                 {
                     Logger.Warning($"[Particle] preset '{presetName}' unavailable, entity '{entity.Name}' skipped");
                     break;
@@ -337,6 +348,34 @@ public sealed class SceneRuntimeSynchronizer
                     Logger.Info($"[Particle] emitter {emitterId} created for '{entity.Name}' (preset={presetName})");
             }
 
+            // PFX 可编程粒子框架（N1 基础接线）：按资产路径创建发射器并应用暴露参数。
+            foreach (var pfx in entity.Components.OfType<ParticleFXComponent>())
+            {
+                if (!pfx.IsEnabled) continue;
+                if (string.IsNullOrWhiteSpace(pfx.AssetPath))
+                {
+                    Logger.Warning($"[ParticleFX] entity '{entity.Name}' has no AssetPath, skipped");
+                    continue;
+                }
+                if (!_bridge.PfxSystemEnsure()) break;
+                var pfxEmitterId = _bridge.PfxEmitterCreateFromAsset(pfx.AssetPath);
+                if (pfxEmitterId == 0)
+                {
+                    Logger.Warning($"[ParticleFX] asset '{pfx.AssetPath}' failed to load for '{entity.Name}'");
+                    continue;
+                }
+                RegisterPfxRuntimeEmitter(runtimeId, pfx.AssetPath, pfxEmitterId);
+                var emitTransform = entity.GetTransform();
+                if (emitTransform is not null)
+                    _bridge.PfxSetEmitterPosition(pfxEmitterId,
+                        emitTransform.PositionX, emitTransform.PositionY, emitTransform.PositionZ);
+                foreach (var (paramName, paramValue) in pfx.ExposedParams)
+                {
+                    _bridge.PfxSetExposedParam(pfxEmitterId, PfxHash.HashName(paramName), paramValue);
+                }
+                Logger.Info($"[ParticleFX] emitter {pfxEmitterId} created for '{entity.Name}' (asset={pfx.AssetPath})");
+            }
+
             BindEditorHelperMesh(entity, runtimeId);
 
             var transform = entity.GetTransform();
@@ -345,6 +384,14 @@ public sealed class SceneRuntimeSynchronizer
                 new[] { transform.PositionX, transform.PositionY, transform.PositionZ },
                 new[] { transform.RotationX, transform.RotationY, transform.RotationZ },
                 new[] { transform.ScaleX, transform.ScaleY, transform.ScaleZ });
+
+            // PFX 发射器跟随实体位置（拖拽 gizmo / 属性面板改位置即生效）
+            if (entity.GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>() != null
+                && PfxEmitterByRuntime.TryGetValue(runtimeId, out var pfxId))
+            {
+                _bridge.PfxSetEmitterPosition(pfxId,
+                    transform.PositionX, transform.PositionY, transform.PositionZ);
+            }
         }
     }
 
@@ -657,6 +704,55 @@ public sealed class SceneRuntimeSynchronizer
         }
 
         RefreshEntityMaterials(entity);
+    }
+
+    /// <summary>
+    /// <summary>
+    /// 把组件里的预设名（可能为空或历史小写 "fire"）对齐到引擎预设管理器
+    /// 里的规范名。内置名首字母大写（Engine/Particles/ParticlePreset.cpp
+    /// default_presets），get_preset 是精确匹配。
+    /// </summary>
+    private string ResolvePresetName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) name = "Fire";
+        return _bridge.ParticlePresetList()?.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                   .FirstOrDefault(p => string.Equals(p, name, StringComparison.OrdinalIgnoreCase))
+               ?? name;
+    }
+
+    // ---- PFX 运行时发射器登记（编辑器热预览 / 实体位置同步用） ----------------
+    // 按实体 runtime id 登记（同一资产可挂多个实体，各自独立发射器）；
+    // 资产路径一并保存，供编辑器按资产查找"任意活发射器"做热预览。
+    private static readonly System.Collections.Generic.Dictionary<uint, (string AssetPath, uint EmitterId)>
+        PfxRuntimeEmitters = new();
+
+    // runtimeId → emitterId 快速别名（PushTransforms 位置回填用）
+    private static readonly System.Collections.Generic.Dictionary<uint, uint> PfxEmitterByRuntime = new();
+
+    private void RegisterPfxRuntimeEmitter(uint runtimeId, string assetPath, uint emitterId)
+    {
+        if (runtimeId == 0 || emitterId == 0 || string.IsNullOrEmpty(assetPath)) return;
+        PfxRuntimeEmitters[runtimeId] = (System.IO.Path.GetFullPath(assetPath), emitterId);
+        PfxEmitterByRuntime[runtimeId] = emitterId;
+    }
+
+    /// <summary>某实体的 PFX 发射器 id（0 = 无）。</summary>
+    public uint TryGetPfxEmitterIdForEntity(uint runtimeId) =>
+        runtimeId != 0 && PfxRuntimeEmitters.TryGetValue(runtimeId, out var e) ? e.EmitterId : 0u;
+
+    /// <summary>使用某 .pfx_emitter 资产的任意活发射器 id（0 = 无；多实体取首个）。</summary>
+    public static uint TryGetPfxRuntimeEmitterId(string assetPath)
+    {
+        if (string.IsNullOrEmpty(assetPath)) return 0;
+        try
+        {
+            var full = System.IO.Path.GetFullPath(assetPath);
+            foreach (var (_, (path, emitterId)) in PfxRuntimeEmitters)
+                if (string.Equals(path, full, StringComparison.OrdinalIgnoreCase) && emitterId != 0)
+                    return emitterId;
+            return 0u;
+        }
+        catch { return 0; }
     }
 
     /// <summary>

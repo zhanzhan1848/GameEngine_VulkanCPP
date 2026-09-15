@@ -39,6 +39,10 @@ public sealed class PfxEditorService
         catch { return false; }
     }
 
+    /// <summary>直接注入 schema（测试主机没有引擎 dylib 时由测试构造；
+    /// 编辑器正常路径走 LoadSchema 反射）。</summary>
+    public void SetSchema(PfxSchema schema) => Schema = schema;
+
     /// <summary>扫描目录下所有 .pfx_emitter 文件。</summary>
     public List<PfxAssetEntry> ScanAssets(string directory)
     {

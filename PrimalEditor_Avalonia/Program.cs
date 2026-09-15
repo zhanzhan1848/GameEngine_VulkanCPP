@@ -438,6 +438,12 @@ sealed class Program
         Editors.AssetEditorRegistry.Register(
             Native.AssetType.Pcg,
             info => new Editors.Pcg.PcgEditorViewModel());
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.ParticlePreset,
+            info => new Editors.Particle.ParticleEmitterEditorViewModel());
+        Editors.AssetEditorRegistry.Register(
+            Native.AssetType.PfxEmitter,
+            info => ViewModels.PFX.PfxEmitterEditorViewModel.Current);
     }
 
     private static int RunSerializationVerification()

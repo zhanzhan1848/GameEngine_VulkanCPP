@@ -865,6 +865,32 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error($"PfxEmitterCreateFromAsset({path}) failed", ex); return 0; }
     }
 
+    [DllImport("PrimalEngine", EntryPoint = "PfxSetEmitterPosition", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxSetEmitterPosition(uint emitterId, float x, float y, float z);
+
+    /// <summary>回填发射器世界位置（宿主实体同步；init 出栈的新粒子叠加此偏移）。</summary>
+    public static uint PfxSetEmitterPosition(uint emitterId, float x, float y, float z)
+    {
+        if (!IsLoaded || emitterId == 0) return 0;
+        try { return _PfxSetEmitterPosition(emitterId, x, y, z); }
+        catch (Exception ex) { Logger.Error($"PfxSetEmitterPosition({emitterId}) failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PfxGetParticleSnapshot", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxGetParticleSnapshot(uint emitterId, float[] posSize, float[] color, uint cap);
+
+    /// <summary>
+    /// 导出发射器当前活粒子渲染快照：posSize[i*4..+2]=xyz 位置、[+3]=统一尺寸；
+    /// color[i*4..+3]=rgba。返回实际写入数；未知 id / 引擎未加载返回 0。
+    /// （PFX 编辑器内嵌预览用，只读。）
+    /// </summary>
+    public static uint PfxGetParticleSnapshot(uint emitterId, float[] posSize, float[] color, uint cap)
+    {
+        if (!IsLoaded || cap == 0) return 0;
+        try { return _PfxGetParticleSnapshot(emitterId, posSize, color, cap); }
+        catch (Exception ex) { Logger.Error($"PfxGetParticleSnapshot({emitterId}) failed", ex); return 0; }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "PfxEmitterRemove", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _PfxEmitterRemove(uint emitterId);
     public static uint PfxEmitterRemove(uint emitterId)
@@ -903,14 +929,18 @@ public static class NativeEngineBridge
     }
 
     [DllImport("PrimalEngine", EntryPoint = "PfxGetEmitterSchema", CallingConvention = CallingConvention.Cdecl)]
-    private static extern uint _PfxGetEmitterSchema(out IntPtr schemaPtr);
+    private static extern uint _PfxGetEmitterSchema(byte[]? outBuffer, uint cap, out uint outLen);
     public static string? PfxGetEmitterSchema()
     {
         if (!_isLoaded) return null;
         try
         {
-            if (_PfxGetEmitterSchema(out var ptr) == 0 || ptr == IntPtr.Zero) return null;
-            return System.Runtime.InteropServices.Marshal.PtrToStringUTF8(ptr);
+            // 两段调用：先探测长度
+            uint len = 0;
+            if (_PfxGetEmitterSchema(null, 0, out len) == 0 || len == 0) return null;
+            var buf = new byte[len];
+            if (_PfxGetEmitterSchema(buf, len, out len) == 0) return null;
+            return System.Text.Encoding.UTF8.GetString(buf, 0, (int)len);
         }
         catch (Exception ex) { Logger.Error("PfxGetEmitterSchema failed", ex); return null; }
     }
@@ -1866,6 +1896,25 @@ public static class NativeEngineBridge
     private static void TrackSurface(uint id)
     {
         if (id != InvalidRenderSurfaceId) LiveRenderSurfaces.Add(id);
+    }
+
+    /// <summary>
+    /// 移除全部存活渲染表面（对登记表快照逐个下发）。仅供退出路径调用：
+    /// 引擎契约要求宿主在 ShutdownEngine 之前移除表面，而引擎侧 shutdown
+    /// 不清表面/窗口注册表，遗留条目会在静态析构阶段触发 free_list 泄漏
+    /// 哨兵断言（FreeList.h:27 assert(!_size)，SIGABRT）。必须在
+    /// ShutdownEngine 前调用；RemoveRenderSurface 会连带释放平台窗口槽位。
+    /// </summary>
+    public static void RemoveAllRenderSurfaces()
+    {
+        if (!_isLoaded || LiveRenderSurfaces.Count == 0) return;
+        // RemoveRenderSurface 会从登记表移除条目，必须迭代快照。
+        var ids = new uint[LiveRenderSurfaces.Count];
+        LiveRenderSurfaces.CopyTo(ids);
+        foreach (var id in ids)
+        {
+            RemoveRenderSurface(id);
+        }
     }
 
     public static IntPtr GetWindowHandle(uint id)

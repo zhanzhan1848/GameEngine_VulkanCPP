@@ -1,0 +1,321 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:PrimalEditor_Avalonia.ViewModels.PFX"
+             xmlns:p="using:PrimalEditor_Avalonia.Editors.Particle"
+             xmlns:n="using:NodifyM.Avalonia.Controls"
+             xmlns:nconv="using:NodifyM.Avalonia.Converters"
+             x:Class="PrimalEditor_Avalonia.Views.PFX.PfxEmitterEditorView"
+             x:DataType="vm:PfxEmitterEditorViewModel"
+             Background="{DynamicResource VoidBrush}">
+
+  <UserControl.Resources>
+    <nconv:FlowToDirectionConverter x:Key="FlowToDirectionConverter" />
+
+    <!-- Pipeline node: one module instance (or the Emitter/Output terminals).
+         Edges are fixed stage flow — the engine executes the stack linearly —
+         so the graph is not user-wirable; nodes are click-to-select. -->
+    <DataTemplate DataType="vm:PfxNodeViewModel" x:Key="PfxNodeTemplate">
+      <n:Node Header="{Binding Title}"
+              HeaderBrush="{DynamicResource ElectricBlueDeepBrush}"
+              BorderBrush="{DynamicResource HairlineBrush}"
+              Background="{DynamicResource PanelBrush}"
+              Input="{Binding Input}"
+              Output="{Binding Output}"
+              Location="{Binding Location, Mode=TwoWay}"
+              PointerPressed="OnNodePointerPressed">
+        <StackPanel Margin="6,3">
+          <TextBlock Text="{Binding Subtitle}"
+                     FontFamily="{DynamicResource FontMono}"
+                     FontSize="9" LetterSpacing="2"
+                     Foreground="{DynamicResource MutedTextBrush}"/>
+        </StackPanel>
+        <n:Node.InputConnectorTemplate>
+          <DataTemplate DataType="vm:PfxPinViewModel">
+            <n:NodeInput Anchor="{Binding Anchor, Mode=OneWayToSource}">
+              <n:NodeInput.HeaderTemplate>
+                <DataTemplate>
+                  <TextBlock Text="in" FontFamily="{DynamicResource FontMono}"
+                             FontSize="9" Foreground="{DynamicResource MintBrush}"/>
+                </DataTemplate>
+              </n:NodeInput.HeaderTemplate>
+            </n:NodeInput>
+          </DataTemplate>
+        </n:Node.InputConnectorTemplate>
+        <n:Node.OutputConnectorTemplate>
+          <DataTemplate DataType="vm:PfxPinViewModel">
+            <n:NodeOutput Anchor="{Binding Anchor, Mode=OneWayToSource}">
+              <n:NodeOutput.HeaderTemplate>
+                <DataTemplate>
+                  <TextBlock Text="out" FontFamily="{DynamicResource FontMono}"
+                             FontSize="9" Foreground="{DynamicResource AmberBrush}"/>
+                </DataTemplate>
+              </n:NodeOutput.HeaderTemplate>
+            </n:NodeOutput>
+          </DataTemplate>
+        </n:Node.OutputConnectorTemplate>
+      </n:Node>
+    </DataTemplate>
+
+    <DataTemplate DataType="vm:PfxConnectionViewModel" x:Key="PfxConnectionTemplate">
+      <Grid>
+        <n:Connection Source="{Binding Source.Anchor}"
+                      Target="{Binding Target.Anchor}"
+                      Direction="{Binding ., Converter={StaticResource FlowToDirectionConverter}}"
+                      Stroke="{DynamicResource ElectricBlueBrush}"
+                      StrokeThickness="2"/>
+      </Grid>
+    </DataTemplate>
+  </UserControl.Resources>
+
+  <!-- Material-editor shell: top toolbar / left palette / center canvas /
+       right parameters / bottom status line. -->
+  <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="240,*,300" Background="{DynamicResource VoidBrush}">
+
+    <!-- TOP: Save/Discard toolbar (Ctrl+S / Ctrl+Shift+S via AssetEditorHost) -->
+    <Border Grid.Row="0" Grid.ColumnSpan="3" Classes="floating"
+            Margin="6,6,6,2" Padding="8,4">
+      <Grid ColumnDefinitions="*,Auto,Auto">
+        <TextBlock Grid.Column="0"
+                   Text="{Binding Asset.FileName, FallbackValue='(no asset)'}"
+                   FontFamily="{DynamicResource FontMono}"
+                   FontSize="11"
+                   Foreground="{DynamicResource SecondaryTextBrush}"
+                   VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="0" Margin="180,0,0,0"
+                   Text="{Binding DirtyMarker, FallbackValue=''}"
+                   FontFamily="{DynamicResource FontMono}"
+                   FontSize="11"
+                   Foreground="{DynamicResource AmberBrush}"
+                   VerticalAlignment="Center"/>
+        <Button Grid.Column="1" Content="Discard" Margin="4,0"
+                Click="OnDiscardClick"
+                IsEnabled="{Binding IsDirty}"/>
+        <Button Grid.Column="2" Content="Save" Classes="accent"
+                Click="OnSaveClick"
+                IsEnabled="{Binding IsDirty}"/>
+      </Grid>
+    </Border>
+
+    <!-- LEFT: stage selector + module palette (schema-driven) -->
+    <Border Grid.Row="1" Grid.Column="0" Classes="floating" Margin="6,2,2,6">
+      <DockPanel>
+        <Border DockPanel.Dock="Top" Padding="8,6">
+          <TextBlock Text="MODULE PALETTE"
+                     FontFamily="{DynamicResource FontDisplay}"
+                     FontWeight="SemiBold" FontSize="11"
+                     LetterSpacing="2"
+                     Foreground="{DynamicResource ElectricBlueBrush}"/>
+        </Border>
+        <TextBlock DockPanel.Dock="Top" Margin="8,2,8,6"
+                   Text="all stages · double-click to add"
+                   FontFamily="{DynamicResource FontMono}" FontSize="9"
+                   Foreground="{DynamicResource MutedTextBrush}"/>
+        <TextBlock DockPanel.Dock="Bottom" Margin="8,4,8,8"
+                   Text="double-click to add to the stack"
+                   FontFamily="{DynamicResource FontMono}" FontSize="9"
+                   TextWrapping="Wrap"
+                   Foreground="{DynamicResource MutedTextBrush}"/>
+        <ListBox ItemsSource="{Binding PaletteModules}"
+                 DoubleTapped="OnPaletteDoubleTapped"
+                 Padding="4">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="vm:PaletteModuleViewModel">
+              <Border Margin="2" Padding="4,2" Background="Transparent">
+                <StackPanel>
+                  <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Grid.Column="0" Text="{Binding DisplayName}"
+                               FontFamily="{DynamicResource FontMono}"
+                               FontSize="11"
+                               Foreground="{StaticResource FontBrush}"/>
+                    <TextBlock Grid.Column="1" Text="{Binding StageTitle}"
+                               FontFamily="{DynamicResource FontMono}"
+                               FontSize="8" LetterSpacing="1"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource ElectricBlueBrush}"/>
+                  </Grid>
+                  <TextBlock Text="{Binding Note}"
+                             FontFamily="{DynamicResource FontMono}"
+                             FontSize="9"
+                             TextTrimming="CharacterEllipsis"
+                             Foreground="{DynamicResource MutedTextBrush}"/>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </DockPanel>
+    </Border>
+
+    <!-- CENTER: 3D particle preview (top) + pipeline canvas (bottom) -->
+    <Grid Grid.Row="1" Grid.Column="1" RowDefinitions="300*,340*" Margin="0">
+      <!-- Embedded 3D preview viewport (software-projected particle snapshot) -->
+      <Border Grid.Row="0" Classes="floating" Margin="0,0,0,4"
+              BorderBrush="{DynamicResource ElectricBlueDeepBrush}"
+              BorderThickness="1" ClipToBounds="True">
+        <DockPanel>
+          <Border DockPanel.Dock="Top" Padding="8,4">
+            <Grid ColumnDefinitions="Auto,*,Auto">
+              <TextBlock Grid.Column="0" Text="PREVIEW"
+                         FontFamily="{DynamicResource FontDisplay}"
+                         FontWeight="SemiBold" FontSize="10"
+                         LetterSpacing="2" VerticalAlignment="Center"
+                         Foreground="{DynamicResource ElectricBlueBrush}"/>
+            </Grid>
+          </Border>
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Bottom" Margin="4,2"
+                       Text="{Binding DebugState, FallbackValue='(state)'}"
+                       FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       Foreground="{DynamicResource AmberBrush}"/>
+            <p:ParticlePreviewControl ViewModel="{Binding}"/>
+          </DockPanel>
+        </DockPanel>
+      </Border>
+
+      <!-- Pipeline canvas — the module stack drawn as a node chain -->
+      <Border Grid.Row="1" Classes="floating" Margin="0"
+              BorderBrush="{DynamicResource ElectricBlueDeepBrush}"
+              BorderThickness="1">
+        <n:NodifyEditor x:Name="PipelineEditor"
+                      ItemsSource="{Binding Nodes}"
+                      ItemTemplate="{StaticResource PfxNodeTemplate}"
+                      Connections="{Binding Connections}"
+                        ConnectionTemplate="{StaticResource PfxConnectionTemplate}"
+                        Focusable="True"
+                        Background="{DynamicResource SlateBrush}"/>
+      </Border>
+    </Grid>
+
+    <!-- RIGHT: 全量数值陈列 — 所有模块实例的可调参数直接展示，无需选择。
+         结构：EMITTER 根设置（上）+ 每个模块实例的参数卡片（下，按堆栈顺序）。 -->
+    <Border Grid.Row="1" Grid.Column="2" Classes="floating" Margin="2,2,6,6">
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="8">
+
+          <!-- EMITTER 根设置 -->
+          <Border Padding="0,4,0,2">
+            <TextBlock Text="EMITTER"
+                       FontFamily="{DynamicResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="11"
+                       LetterSpacing="2"
+                       Foreground="{DynamicResource ElectricBlueBrush}"/>
+          </Border>
+          <TextBlock Text="NAME" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                     Foreground="{DynamicResource MutedTextBrush}"/>
+          <TextBox Text="{Binding EmitterName, Mode=TwoWay}" Margin="0,1,0,6"/>
+          <Grid ColumnDefinitions="Auto,*" Margin="0,0,0,6">
+            <TextBlock Grid.Column="0" Text="BLEND" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"/>
+            <ComboBox Grid.Column="1" MinWidth="120" HorizontalAlignment="Left" Margin="8,0,0,0"
+                      ItemsSource="{Binding BlendOptions}"
+                      SelectedItem="{Binding BlendMode}"/>
+          </Grid>
+          <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,6">
+            <TextBlock Grid.Column="0" Text="CAPACITY" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"/>
+            <TextBox Grid.Column="1" Text="{Binding Capacity, Mode=TwoWay}" Margin="8,0,0,0"/>
+          </Grid>
+          <Grid ColumnDefinitions="Auto,*" Margin="0,0,0,10">
+            <TextBlock Grid.Column="0" Text="RENDERER" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"/>
+            <ComboBox Grid.Column="1" MinWidth="120" HorizontalAlignment="Left" Margin="8,0,0,0"
+                      ItemsSource="{Binding RendererOptions}"
+                      SelectedItem="{Binding EmitterRenderer}"/>
+          </Grid>
+
+          <!-- 模块堆栈：每个实例一张参数卡 -->
+          <Border Padding="0,10,0,2">
+            <TextBlock Text="MODULES"
+                       FontFamily="{DynamicResource FontDisplay}"
+                       FontWeight="SemiBold" FontSize="11"
+                       LetterSpacing="2"
+                       Foreground="{DynamicResource ElectricBlueBrush}"/>
+          </Border>
+          <ItemsControl ItemsSource="{Binding AllModules}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:PfxStackModuleRow">
+                <Border Margin="0,3" Padding="8,6" CornerRadius="3"
+                        BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1">
+                  <StackPanel>
+                    <Grid ColumnDefinitions="*,Auto,Auto">
+                      <TextBlock Grid.Column="0" Text="{Binding Name}"
+                                 FontFamily="{DynamicResource FontMono}" FontSize="11"
+                                 VerticalAlignment="Center"
+                                 Foreground="{StaticResource FontBrush}"/>
+                      <TextBlock Grid.Column="1" Text="{Binding StageTitle}"
+                                 FontFamily="{DynamicResource FontMono}" FontSize="8"
+                                 LetterSpacing="2" VerticalAlignment="Center" Margin="0,0,8,0"
+                                 Foreground="{DynamicResource ElectricBlueBrush}"/>
+                      <Button Grid.Column="2" Content="✕" Padding="4,0" FontSize="10"
+                              Click="OnRemoveModuleClick" CommandParameter="{Binding}"
+                              ToolTip.Tip="移除该模块"/>
+                    </Grid>
+                    <ItemsControl ItemsSource="{Binding Params}" Margin="0,4,0,0">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:PfxParamRow">
+                          <StackPanel>
+                            <StackPanel Orientation="Horizontal" Spacing="2" Margin="0,2">
+                              <TextBlock Text="{Binding Name}" Width="96"
+                                         FontFamily="{DynamicResource FontMono}" FontSize="11"
+                                         VerticalAlignment="Center"
+                                         Foreground="{DynamicResource MutedTextBrush}"/>
+                              <TextBox Width="66" FontSize="11" IsVisible="{Binding IsNumeric}"
+                                       ToolTip.Tip="{Binding Note}"
+                                       Text="{Binding Value, Mode=TwoWay}"/>
+                              <!-- X/Y/Z/W 源是 string（PfxParamRow），不走 FloatConv：
+                                   该转换器只认 float/double，string 会被显示成空框 -->
+                              <TextBox Width="50" FontSize="11" IsVisible="{Binding ShowX}"
+                                       ToolTip.Tip="{Binding Note}"
+                                       Text="{Binding X, Mode=TwoWay}"/>
+                              <TextBox Width="50" FontSize="11" IsVisible="{Binding ShowY}"
+                                       Text="{Binding Y, Mode=TwoWay}"/>
+                              <TextBox Width="50" FontSize="11" IsVisible="{Binding ShowZ}"
+                                       Text="{Binding Z, Mode=TwoWay}"/>
+                              <TextBox Width="50" FontSize="11" IsVisible="{Binding ShowW}"
+                                       Text="{Binding W, Mode=TwoWay}"/>
+                              <CheckBox IsVisible="{Binding IsBool}" IsChecked="{Binding BoolValue, Mode=TwoWay}"/>
+                              <ComboBox MinWidth="130" FontSize="11" IsVisible="{Binding IsEnum}"
+                                        ToolTip.Tip="{Binding Note}"
+                                        ItemsSource="{Binding EnumOptions}"
+                                        SelectedItem="{Binding Value, Mode=TwoWay}"/>
+                              <TextBox MinWidth="110" FontSize="11" IsVisible="{Binding IsText}"
+                                       ToolTip.Tip="{Binding Note}"
+                                       Text="{Binding Value, Mode=TwoWay}"/>
+                              <TextBlock IsVisible="{Binding IsCurve}" Text="curve ↓"
+                                         VerticalAlignment="Center"
+                                         FontFamily="{DynamicResource FontMono}" FontSize="10"
+                                         Foreground="{DynamicResource MutedTextBrush}"/>
+                            </StackPanel>
+                            <!-- 曲线参数：内嵌曲线编辑器 -->
+                            <Border IsVisible="{Binding IsCurve}" Margin="20,2,0,4"
+                                    Background="{DynamicResource SlateBrush}" CornerRadius="2"
+                                    BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1">
+                              <p:EmitterCurveEditor Height="90"
+                                                    Curve="{Binding Curve}"
+                                                    Slot="{Binding CurveSlot}"
+                                                    CurveEdited="OnCurveEdited"/>
+                            </Border>
+                          </StackPanel>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+
+    <!-- BOTTOM: status / diagnostics -->
+    <Border Grid.Row="2" Grid.ColumnSpan="3" Classes="floating"
+            Margin="6,2,6,6" Padding="8,4">
+      <TextBlock Text="{Binding StatusLine, FallbackValue='Ready'}"
+                 FontFamily="{DynamicResource FontMono}"
+                 FontSize="10"
+                 Foreground="{DynamicResource MutedTextBrush}"/>
+    </Border>
+
+  </Grid>
+</UserControl>

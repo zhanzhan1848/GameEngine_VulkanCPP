@@ -56,6 +56,12 @@ public sealed class AssetInfo : INotifyPropertyChanged
         Type == AssetType.ParticlePreset ||
         Extension == ".particle.json";
 
+    /// <summary>PFX programmable emitter asset (.pfx_emitter).</summary>
+    [JsonIgnore]
+    public bool IsPfxEmitter =>
+        Type == AssetType.PfxEmitter ||
+        Extension == ".pfx_emitter";
+
     /// <summary>A8 源码控制: git working-tree status of this asset's file,
     /// refreshed by the source-control panel (None = untracked-by-git or
     /// unchanged). Drives the content browser status dot.</summary>
