@@ -131,6 +131,10 @@ bool compile_emitter(const json::value& root, emitter_program& out, std::string&
             if (v->as_string() == names[i]) { out.blend = i; break; }
         }
     }
+    if (const json::value* v = root.find("renderer"); v && v->is_string()) {
+        // §7-N2：渲染器类型声明。v1：billboard（sprite 桥）/ mesh（立方体实例）。
+        if (v->as_string() == "mesh") out.renderer_type = emitter_program::renderer_mesh;
+    }
     if (const json::value* v = root.find("capacity"); v) {
         if (!v->is_number() || v->as_u32() == 0) return c.fail("capacity", "must be positive number", v->line());
         out.capacity = v->as_u32();
@@ -335,6 +339,11 @@ std::string build_schema_json() {
             s += "\",\"type\":\"";
             s += def.hints[i].type;
             s += "\"";
+            // default 为 JSON 编码文本，原样内联（如 "100"、"[0,1,0]"）
+            if (def.hints[i].def && def.hints[i].def[0]) {
+                s += ",\"default\":";
+                s += def.hints[i].def;
+            }
             if (def.hints[i].note && def.hints[i].note[0]) {
                 s += ",\"note\":\"";
                 s += def.hints[i].note;

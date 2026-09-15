@@ -143,7 +143,7 @@ u32 spawn_rate_exec(sim_context& ctx, const void* params) {
     return n;
 }
 
-constexpr param_hint spawn_rate_hints[] = { { "rate", "param_ref", "particles per second" } };
+constexpr param_hint spawn_rate_hints[] = { { "rate", "param_ref", "particles per second", "100" } };
 
 // SpawnBurst -------------------------------------------------------------
 struct spawn_burst_params {
@@ -182,8 +182,8 @@ u32 spawn_burst_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint spawn_burst_hints[] = {
-    { "period", "param_ref", "seconds between bursts" },
-    { "count", "param_ref", "particles per burst" },
+    { "period", "param_ref", "seconds between bursts", "2" },
+    { "count", "param_ref", "particles per burst", "50" },
 };
 
 // ShapeLocation ----------------------------------------------------------
@@ -274,11 +274,11 @@ void shape_location_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint shape_location_hints[] = {
-    { "shape", "enum", "point|sphere_surface|sphere_volume|box|cone|cylinder" },
-    { "radius", "f32", "sphere/cylinder/cone radius" },
-    { "height", "f32", "cone/cylinder height" },
-    { "half", "v3", "box half extents" },
-    { "angle", "f32", "cone half angle in degrees" },
+    { "shape", "enum", "point|sphere_surface|sphere_volume|box|cone|cylinder", "\"point\"" },
+    { "radius", "f32", "sphere/cylinder/cone radius", "1" },
+    { "height", "f32", "cone/cylinder height", "1" },
+    { "half", "v3", "box half extents", "[0.5,0.5,0.5]" },
+    { "angle", "f32", "cone half angle in degrees", "25" },
 };
 
 // AddVelocity ------------------------------------------------------------
@@ -342,11 +342,11 @@ void add_velocity_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint add_velocity_hints[] = {
-    { "mode", "enum", "fixed|shape_normal|random_sphere" },
-    { "direction", "v3", "fixed mode direction" },
-    { "speed_min", "param_ref", "" },
-    { "speed_max", "param_ref", "" },
-    { "inherit_source_velocity", "f32", "0..1 fraction of source velocity" },
+    { "mode", "enum", "fixed|shape_normal|random_sphere", "\"fixed\"" },
+    { "direction", "v3", "fixed mode direction", "[0,1,0]" },
+    { "speed_min", "param_ref", "", "1" },
+    { "speed_max", "param_ref", "", "2" },
+    { "inherit_source_velocity", "f32", "0..1 fraction of source velocity", "0" },
 };
 
 // SetLifetime ------------------------------------------------------------
@@ -371,8 +371,8 @@ void set_lifetime_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint set_lifetime_hints[] = {
-    { "min", "param_ref", "seconds" },
-    { "max", "param_ref", "seconds" },
+    { "min", "param_ref", "seconds", "1" },
+    { "max", "param_ref", "seconds", "1" },
 };
 
 // SetColor ---------------------------------------------------------------
@@ -428,7 +428,8 @@ void set_color_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint set_color_hints[] = {
-    { "color", "v4", "[r,g,b,a] start" },
+    { "color", "v4", "[r,g,b,a] start", "[1,1,1,1]" },
+    // color_end 不给 default：存在即启用 range 模式（presence-sensitive）
     { "color_end", "v4", "optional end (random lerp)" },
 };
 
@@ -476,7 +477,8 @@ void set_scale_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint set_scale_hints[] = {
-    { "scale", "v2", "[w,h]" },
+    { "scale", "v2", "[w,h]", "[1,1]" },
+    // scale_end 不给 default：存在即启用 range 模式（presence-sensitive）
     { "scale_end", "v2", "optional end (random lerp)" },
 };
 
@@ -512,7 +514,7 @@ void gravity_exec(sim_context& ctx, const void* params) {
     vel->z += p->g[2] * ctx.dt;
 }
 
-constexpr param_hint gravity_hints[] = { { "gravity", "v3", "acceleration m/s^2 (default -Y 9.81)" } };
+constexpr param_hint gravity_hints[] = { { "gravity", "v3", "acceleration m/s^2 (default -Y 9.81)", "[0,-9.81,0]" } };
 
 // DragForce --------------------------------------------------------------
 struct drag_params {
@@ -536,7 +538,7 @@ void drag_exec(sim_context& ctx, const void* params) {
     vel->z *= damp;
 }
 
-constexpr param_hint drag_hints[] = { { "coefficient", "param_ref", "linear drag 1/s" } };
+constexpr param_hint drag_hints[] = { { "coefficient", "param_ref", "linear drag 1/s", "0" } };
 
 // ---- over-life 曲线数据结构（POD，键数上限 8，线性插值 + 端点钳制）----------
 
@@ -854,9 +856,9 @@ void animate_uv_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint animate_uv_hints[] = {
-    { "frame_rate", "f32", "atlas frames per second" },
-    { "frames", "u32", "total atlas frames" },
-    { "loop", "bool", "loop over emitter lifetime" },
+    { "frame_rate", "f32", "atlas frames per second", "10" },
+    { "frames", "u32", "total atlas frames", "4" },
+    { "loop", "bool", "loop over emitter lifetime", "true" },
 };
 
 // IntegrateVelocity ------------------------------------------------------// IntegrateVelocity ------------------------------------------------------
@@ -895,7 +897,194 @@ void kill_age_exec(sim_context& ctx, const void* params) {
     }
 }
 
-constexpr param_hint kill_age_hints[] = { { "normalized_max", "param_ref", "kill at this lifetime fraction" } };
+constexpr param_hint kill_age_hints[] = { { "normalized_max", "param_ref", "kill at this lifetime fraction", "1" } };
+
+// PointForce（update）：点引力/斥力（POP Force / Niagara Point Force 对齐）
+// strength 符号决定吸/斥；radius > 0 时线性衰减到 0。
+struct point_force_params {
+    f32 center[3]{ 0.f, 0.f, 0.f };
+    param_ref strength{ u32_invalid_id, 10.f };
+    param_ref radius{ u32_invalid_id, 0.f };
+};
+
+bool point_force_parse(const json::value& o, void* out, std::string& err) {
+    auto* p = (point_force_params*)out;
+    if (const json::value* v = o.find("center"); v && v->is_array()) {
+        if (v->array_size() != 3) { err = "'center' must be [x,y,z]"; return false; }
+        for (int i = 0; i < 3; ++i) {
+            const json::value* e = v->array_at(i);
+            if (!e->is_number()) { err = "'center' elements must be numbers"; return false; }
+            p->center[i] = e->as_f32();
+        }
+    }
+    if (!get_param_ref_field(o, "strength", param_ref{ u32_invalid_id, 10.f }, p->strength,
+                             parse_env_get().exposed, err)) return false;
+    if (!get_param_ref_field(o, "radius", param_ref{ u32_invalid_id, 0.f }, p->radius,
+                             parse_env_get().exposed, err)) return false;
+    return true;
+}
+
+void point_force_exec(sim_context& ctx, const void* params) {
+    auto* p = (const point_force_params*)params;
+    const math::v4* pos4 = ctx.store->v4_channel(attr::position) + ctx.row;
+    const f32 dx = p->center[0] - pos4->x;
+    const f32 dy = p->center[1] - pos4->y;
+    const f32 dz = p->center[2] - pos4->z;
+    const f32 dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < 1e-4f) return;
+
+    const f32 radius = resolve_param(p->radius, ctx);
+    f32 falloff = 1.f;
+    if (radius > 0.f) {
+        falloff = 1.f - dist / radius;
+        if (falloff <= 0.f) return;
+    }
+    const f32 s = resolve_param(p->strength, ctx) * falloff * ctx.dt / dist;
+    math::v4* vel = ctx.store->v4_channel(attr::velocity) + ctx.row;
+    vel->x += dx * s;
+    vel->y += dy * s;
+    vel->z += dz * s;
+}
+
+constexpr param_hint point_force_hints[] = {
+    { "center", "v3", "attraction/repulsion point", "[0,0,0]" },
+    { "strength", "param_ref", "+ attract / - repel (m/s^2 at center)", "10" },
+    { "radius", "param_ref", "linear falloff radius; 0 = infinite", "0" },
+};
+
+// VortexForce（update）：绕轴涡旋（POP Vortex 对齐）。切向 swirl + 径向内聚。
+struct vortex_force_params {
+    f32 center[3]{ 0.f, 0.f, 0.f };
+    f32 axis[3]{ 0.f, 1.f, 0.f };
+    param_ref strength{ u32_invalid_id, 5.f };   // 切向速度增量 (m/s^2)
+    param_ref inward{ u32_invalid_id, 0.f };     // 径向内聚 (m/s^2)
+};
+
+bool vortex_force_parse(const json::value& o, void* out, std::string& err) {
+    auto* p = (vortex_force_params*)out;
+    auto parse_v3 = [&](const char* key, f32* dst) -> bool {
+        if (const json::value* v = o.find(key); v && v->is_array()) {
+            if (v->array_size() != 3) { err = std::string("'") + key + "' must be [x,y,z]"; return false; }
+            for (int i = 0; i < 3; ++i) {
+                const json::value* e = v->array_at(i);
+                if (!e->is_number()) { err = "axis/center elements must be numbers"; return false; }
+                dst[i] = e->as_f32();
+            }
+        }
+        return true;
+    };
+    if (!parse_v3("center", p->center)) return false;
+    if (!parse_v3("axis", p->axis)) return false;
+    const f32 len = std::sqrt(p->axis[0] * p->axis[0] + p->axis[1] * p->axis[1] + p->axis[2] * p->axis[2]);
+    if (len > 1e-6f) {
+        p->axis[0] /= len; p->axis[1] /= len; p->axis[2] /= len;
+    }
+    if (!get_param_ref_field(o, "strength", param_ref{ u32_invalid_id, 5.f }, p->strength,
+                             parse_env_get().exposed, err)) return false;
+    if (!get_param_ref_field(o, "inward", param_ref{ u32_invalid_id, 0.f }, p->inward,
+                             parse_env_get().exposed, err)) return false;
+    return true;
+}
+
+void vortex_force_exec(sim_context& ctx, const void* params) {
+    auto* p = (const vortex_force_params*)params;
+    const math::v4* pos4 = ctx.store->v4_channel(attr::position) + ctx.row;
+    const f32 rx = pos4->x - p->center[0];
+    const f32 ry = pos4->y - p->center[1];
+    const f32 rz = pos4->z - p->center[2];
+    const f32 rlen = std::sqrt(rx * rx + ry * ry + rz * rz);
+    if (rlen < 1e-4f) return;
+
+    // 切向 = axis × r（归一化）；径向内聚 = -r̂
+    const f32 tx = p->axis[1] * rz - p->axis[2] * ry;
+    const f32 ty = p->axis[2] * rx - p->axis[0] * rz;
+    const f32 tz = p->axis[0] * ry - p->axis[1] * rx;
+    const f32 tlen = std::sqrt(tx * tx + ty * ty + tz * tz);
+    if (tlen < 1e-6f) return;
+
+    const f32 swirl = resolve_param(p->strength, ctx);
+    const f32 inward = resolve_param(p->inward, ctx);
+    if (swirl == 0.f && inward == 0.f) return;
+
+    const f32 inv_r = 1.f / rlen;
+    const f32 inv_t = 1.f / tlen;
+    math::v4* vel = ctx.store->v4_channel(attr::velocity) + ctx.row;
+    vel->x += (tx * inv_t * swirl - rx * inv_r * inward) * ctx.dt;
+    vel->y += (ty * inv_t * swirl - ry * inv_r * inward) * ctx.dt;
+    vel->z += (tz * inv_t * swirl - rz * inv_r * inward) * ctx.dt;
+}
+
+constexpr param_hint vortex_force_hints[] = {
+    { "center", "v3", "vortex center", "[0,0,0]" },
+    { "axis", "v3", "swirl axis (normalized internally)", "[0,1,0]" },
+    { "strength", "param_ref", "tangential acceleration (m/s^2)", "5" },
+    { "inward", "param_ref", "radial pull toward axis (m/s^2)", "0" },
+};
+
+// BoundsWrap（update）：越界回绕（POP Limit/Wrap 对齐）。逐轴环绕 min..max。
+struct bounds_wrap_params {
+    f32 min[3]{ -10.f, -10.f, -10.f };
+    f32 max[3]{ 10.f, 10.f, 10.f };
+};
+
+bool bounds_wrap_parse(const json::value& o, void* out, std::string& err) {
+    auto* p = (bounds_wrap_params*)out;
+    auto parse_v3 = [&](const char* key, f32* dst) -> bool {
+        if (const json::value* v = o.find(key); v && v->is_array()) {
+            if (v->array_size() != 3) { err = std::string("'") + key + "' must be [x,y,z]"; return false; }
+            for (int i = 0; i < 3; ++i) {
+                const json::value* e = v->array_at(i);
+                if (!e->is_number()) { err = "min/max elements must be numbers"; return false; }
+                dst[i] = e->as_f32();
+            }
+        }
+        return true;
+    };
+    return parse_v3("min", p->min) && parse_v3("max", p->max);
+}
+
+void bounds_wrap_exec(sim_context& ctx, const void* params) {
+    auto* p = (const bounds_wrap_params*)params;
+    math::v4* pos4 = ctx.store->v4_channel(attr::position) + ctx.row;
+    auto wrap = [](f32 v, f32 lo, f32 hi) {
+        const f32 size = hi - lo;
+        if (size <= 0.f) return v;
+        if (v < lo) return v + size * (f32)((int)((lo - v) / size) + 1);
+        if (v > hi) return v - size * (f32)((int)((v - hi) / size) + 1);
+        return v;
+    };
+    pos4->x = wrap(pos4->x, p->min[0], p->max[0]);
+    pos4->y = wrap(pos4->y, p->min[1], p->max[1]);
+    pos4->z = wrap(pos4->z, p->min[2], p->max[2]);
+}
+
+constexpr param_hint bounds_wrap_hints[] = {
+    { "min", "v3", "wrap bounds min", "[-10,-10,-10]" },
+    { "max", "v3", "wrap bounds max", "[10,10,10]" },
+};
+
+// KillSpeed（update）：速度低于阈值即回收（落定灰尘/烟尘收尾，POP Kill 对齐）
+struct kill_speed_params {
+    param_ref threshold{ u32_invalid_id, 0.1f };   // m/s
+};
+
+bool kill_speed_parse(const json::value& o, void* out, std::string& err) {
+    auto* p = (kill_speed_params*)out;
+    return get_param_ref_field(o, "threshold", param_ref{ u32_invalid_id, 0.1f }, p->threshold,
+                               parse_env_get().exposed, err);
+}
+
+void kill_speed_exec(sim_context& ctx, const void* params) {
+    auto* p = (const kill_speed_params*)params;
+    const math::v4* vel = ctx.store->v4_channel(attr::velocity) + ctx.row;
+    const f32 speed2 = vel->x * vel->x + vel->y * vel->y + vel->z * vel->z;
+    const f32 t = resolve_param(p->threshold, ctx);
+    if (speed2 < t * t) ctx.store->free(ctx.handle);   // death 事件经 store 发出
+}
+
+constexpr param_hint kill_speed_hints[] = {
+    { "threshold", "param_ref", "kill when speed drops below (m/s)", "0.1" },
+};
 
 // ---- 注册 --------------------------------------------------------------------
 
@@ -967,6 +1156,14 @@ void register_builtin_modules() {
                                 (void*)force_over_life_exec, force_over_life_hints, 1);
     reg<animate_uv_params>(r, "AnimateUv", stage_kind::update, animate_uv_parse,
                            (void*)animate_uv_exec, animate_uv_hints, 3);
+    reg<point_force_params>(r, "PointForce", stage_kind::update, point_force_parse,
+                            (void*)point_force_exec, point_force_hints, 3);
+    reg<vortex_force_params>(r, "VortexForce", stage_kind::update, vortex_force_parse,
+                             (void*)vortex_force_exec, vortex_force_hints, 4);
+    reg<bounds_wrap_params>(r, "BoundsWrap", stage_kind::update, bounds_wrap_parse,
+                            (void*)bounds_wrap_exec, bounds_wrap_hints, 2);
+    reg<kill_speed_params>(r, "KillSpeed", stage_kind::update, kill_speed_parse,
+                           (void*)kill_speed_exec, kill_speed_hints, 1);
 }
 
 } // namespace primal::pfx

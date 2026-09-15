@@ -64,6 +64,10 @@ struct param_hint {
     const char* name;
     const char* type;    // "f32"|"u32"|"v3"|"v2"|"enum"|"bool"|"param_ref"
     const char* note;    // 可为 ""
+    // JSON 编码的默认值（如 "[0,1,0]"、"100"）；nullptr = 不进 schema。
+    // 编辑器据此为文档缺失的参数补出可编辑行——仅限"缺席与否不改变模块行为"
+    // 的参数（scale_end/color_end 这类"存在即启用"的参数不得给 default）。
+    const char* def{ nullptr };
 };
 
 struct module_def {
