@@ -955,7 +955,13 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
         if (_previewEmitterId == 0 && NativeEngineBridge.IsLoaded)
         {
             _previewEmitterId = NativeEngineBridge.PfxEmitterCreateFromAsset(Asset.FullPath);
-            _ownsPreviewEmitter = _previewEmitterId != 0;
+            if (_previewEmitterId != 0)
+            {
+                _ownsPreviewEmitter = true;
+                // 编辑器私有预览发射器不进世界场景渲染（否则主视口会在
+                // 世界原点"凭空"画出预览粒子）。
+                NativeEngineBridge.PfxSetEditorPreview(_previewEmitterId, preview: true);
+            }
         }
         return _previewEmitterId;
     }

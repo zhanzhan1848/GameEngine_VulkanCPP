@@ -344,6 +344,10 @@ void emitter_set_position(emitter_id id, const math::v3& position) {
     if (pfx_emitter* em = emitter_get(id)) em->set_position(position);
 }
 
+void emitter_set_editor_preview(emitter_id id, bool preview) {
+    if (pfx_emitter* em = emitter_get(id)) em->set_editor_preview(preview);
+}
+
 u32 drain_events(pfx_event* out, u32 cap) { return g_bus ? g_bus->drain(out, cap) : 0; }
 
 u32 pending_events() { return g_bus ? g_bus->pending() : 0; }
@@ -378,6 +382,7 @@ const primal::particles::particle_data* packed_frame_pool(
     for (auto& b : buckets) b.clear();
 
     for_each_emitter([&](pfx_emitter& em) {
+        if (em.editor_preview()) return;                                        // 编辑器私有预览不进世界场景
         if (em.has_program() &&
             em.program().renderer_type == emitter_program::renderer_mesh) return;   // mesh 型走 ParticleFXMeshPass
         auto& store = em.store();

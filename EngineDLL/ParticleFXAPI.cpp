@@ -70,6 +70,16 @@ EDITOR_INTERFACE u32 PfxSetEmitterPosition(u32 emitter_id, f32 x, f32 y, f32 z)
     return 1u;
 }
 
+// 编辑器私有预览标记：带标记的发射器不进世界场景渲染（渲染桥 / mesh /
+// light 收集路径跳过）。PFX 编辑器为其内嵌预览创建的私有发射器必须打标，
+// 否则主视口会在世界原点"凭空"画出预览粒子。未知 id 返回 0。
+EDITOR_INTERFACE u32 PfxSetEditorPreview(u32 emitter_id, u32 preview)
+{
+    if (pfx::emitter_get(emitter_id) == nullptr) return 0;
+    pfx::emitter_set_editor_preview(emitter_id, preview != 0);
+    return 1u;
+}
+
 // 编辑器内嵌预览：导出发射器当前活粒子的渲染快照（只读，逐活行）。
 // out_pos_size[i*4 .. +2] = xyz 世界位置，[+3] = 统一尺寸（scale_rotation.x）；
 // out_color[i*4 .. +3] = rgba。返回实际写入数（超过 cap 截断）；未知 id 返回 0。

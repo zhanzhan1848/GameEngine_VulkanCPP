@@ -4,6 +4,7 @@
 #include "ParticleFXN4Tests.h"
 #include "ParticleFXN6Tests.h"
 #include "ParticleFXParityTests.h"
+#include "ParticleFXEditorPreviewTests.h"
 #include "ParticleFXTests.h"
 
 int main() {
@@ -14,5 +15,6 @@ int main() {
     primal::pfx::test::run_all_n4_tests();   // N4
     primal::pfx::test::run_all_n6_tests();   // N6
     primal::pfx::test::run_all_parity_tests(); // Niagara/POP 对齐批次
+    primal::pfx::test::run_all_editor_preview_tests(); // 编辑器私有预览渲染隔离
     return 0;
 }

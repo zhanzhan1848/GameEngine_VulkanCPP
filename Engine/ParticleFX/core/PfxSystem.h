@@ -66,6 +66,12 @@ public:
     void set_position(const math::v3& position) { _position = position; }
     const math::v3& position() const { return _position; }
 
+    // 编辑器私有预览标记：带标记的发射器不进世界场景渲染（渲染桥 / mesh /
+    // light 收集路径跳过）。PFX 编辑器的私有预览发射器与场景实体无关，
+    // 泄漏进主视口会表现为"场景原点凭空出现粒子发射器"。
+    void set_editor_preview(bool p) { _editor_preview = p; }
+    bool editor_preview() const { return _editor_preview; }
+
     // 暴露参数值（按编译期名册下标；调用方先查 program().exposed）
     void set_exposed_value(size_t index, f32 value) {
         if (index < _exposed_values.size()) _exposed_values[index] = value;
@@ -90,6 +96,7 @@ private:
     std::vector<u8>    _module_state;      // 每实例状态块（零初始化）
     std::vector<f32>   _exposed_values;    // 运行期暴露参数值
     f32                _spawn_accum{ 0.f };
+    bool               _editor_preview{ false };
 };
 
 // ---- 系统级 API（模式沿 primal::particles 的自由函数门面）------------------
@@ -109,6 +116,7 @@ void          emitter_destroy(emitter_id id);   // 未知 id 安全无操作
 pfx_emitter*  emitter_get(emitter_id id);       // 未知 id 返回 nullptr
 u32           emitter_count();
 void          emitter_set_position(emitter_id id, const math::v3& position);   // 实体同步回填
+void          emitter_set_editor_preview(emitter_id id, bool preview);          // 编辑器私有预览标记
 
 // 热重载：同 id 重绑程序并重启（失败返回 false，原状保留）。
 bool emitter_reload_from_memory(emitter_id id, const char* json_text, u32 length, std::string* err = nullptr);

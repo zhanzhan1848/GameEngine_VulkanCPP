@@ -41,6 +41,7 @@ public interface INativeEngineBridgeLike
     bool PfxSystemEnsure() => false;
     uint PfxEmitterCreateFromAsset(string path) => 0u;
     uint PfxSetEmitterPosition(uint emitterId, float x, float y, float z) => 0u;
+    uint PfxSetEditorPreview(uint emitterId, bool preview) => 0u;
     uint PfxEmitterRemove(uint emitterId) => 0u;
     uint PfxEmitterReloadFromMemory(uint emitterId, byte[] text) => 0u;
     uint PfxSetExposedParam(uint emitterId, uint nameHash, float value) => 0u;
@@ -183,6 +184,7 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
     public bool PfxSystemEnsure() => NativeEngineBridge.PfxSystemEnsure();
     public uint PfxEmitterCreateFromAsset(string path) => NativeEngineBridge.PfxEmitterCreateFromAsset(path);
     public uint PfxSetEmitterPosition(uint emitterId, float x, float y, float z) => NativeEngineBridge.PfxSetEmitterPosition(emitterId, x, y, z);
+    public uint PfxSetEditorPreview(uint emitterId, bool preview) => NativeEngineBridge.PfxSetEditorPreview(emitterId, preview);
     public uint PfxEmitterRemove(uint emitterId) => NativeEngineBridge.PfxEmitterRemove(emitterId);
     public uint PfxEmitterReloadFromMemory(uint emitterId, byte[] text) => NativeEngineBridge.PfxEmitterReloadFromMemory(emitterId, text);
     public uint PfxSetExposedParam(uint emitterId, uint nameHash, float value) => NativeEngineBridge.PfxSetExposedParam(emitterId, nameHash, value);

@@ -876,6 +876,18 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error($"PfxSetEmitterPosition({emitterId}) failed", ex); return 0; }
     }
 
+    [DllImport("PrimalEngine", EntryPoint = "PfxSetEditorPreview", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PfxSetEditorPreview(uint emitterId, uint preview);
+
+    /// <summary>标记编辑器私有预览发射器：带标记的发射器不进世界场景渲染
+    /// （渲染桥 / mesh / light 收集跳过）。未知 id / 引擎未加载返回 0。</summary>
+    public static uint PfxSetEditorPreview(uint emitterId, bool preview)
+    {
+        if (!IsLoaded || emitterId == 0) return 0;
+        try { return _PfxSetEditorPreview(emitterId, preview ? 1u : 0u); }
+        catch (Exception ex) { Logger.Error($"PfxSetEditorPreview({emitterId}) failed", ex); return 0; }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "PfxGetParticleSnapshot", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _PfxGetParticleSnapshot(uint emitterId, float[] posSize, float[] color, uint cap);
 
@@ -1909,9 +1921,7 @@ public static class NativeEngineBridge
     {
         if (!_isLoaded || LiveRenderSurfaces.Count == 0) return;
         // RemoveRenderSurface 会从登记表移除条目，必须迭代快照。
-        var ids = new uint[LiveRenderSurfaces.Count];
-        LiveRenderSurfaces.CopyTo(ids);
-        foreach (var id in ids)
+        foreach (var id in LiveRenderSurfaces.ToArray())
         {
             RemoveRenderSurface(id);
         }
