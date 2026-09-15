@@ -231,7 +231,7 @@ bool ParticleFXMeshPass::initialize(rhi::RHIDeviceBase* device) {
     inst_desc.structured.elementStride = kInstanceStride;
     rhi::BufferDesc uni_desc{};
     uni_desc.size = sizeof(VPUniforms);
-    uni_desc.type = rhi::BufferType::Structured;
+    uni_desc.type = rhi::BufferType::Constant;
     uni_desc.usage = rhi::GPUMemoryUsage::Dynamic;
     uni_desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     uni_desc.structured.elementCount = 1;

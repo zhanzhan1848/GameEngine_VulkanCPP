@@ -63,6 +63,44 @@ EDITOR_INTERFACE u32 PfxGetEmitterStats(u32 emitter_id, u32* out_active, u32* ou
     return 1u;
 }
 
+// 发射器世界位置（宿主实体同步回填）：init 出栈的新粒子叠加此偏移。
+EDITOR_INTERFACE u32 PfxSetEmitterPosition(u32 emitter_id, f32 x, f32 y, f32 z)
+{
+    pfx::emitter_set_position(emitter_id, math::v3{ x, y, z });
+    return 1u;
+}
+
+// 编辑器内嵌预览：导出发射器当前活粒子的渲染快照（只读，逐活行）。
+// out_pos_size[i*4 .. +2] = xyz 世界位置，[+3] = 统一尺寸（scale_rotation.x）；
+// out_color[i*4 .. +3] = rgba。返回实际写入数（超过 cap 截断）；未知 id 返回 0。
+EDITOR_INTERFACE u32 PfxGetParticleSnapshot(u32 emitter_id, f32* out_pos_size, f32* out_color, u32 cap)
+{
+    const pfx::pfx_emitter* em = pfx::emitter_get(emitter_id);
+    if (!em || !out_pos_size || !out_color || cap == 0) return 0;
+    auto& store = em->store();
+    const u32 capacity = store.capacity();
+    const math::v4* pos = store.v4_channel(pfx::attr::position);
+    const math::v4* scl = store.v4_channel(pfx::attr::scale_rotation);
+    const math::v4* col = store.v4_channel(pfx::attr::color);
+    if (!pos || !scl || !col) return 0;
+    u32 n = 0;
+    for (u32 row = 0; row < capacity && n < cap; ++row) {
+        if (!store.is_row_alive(row)) continue;
+        f32* dst_pos = out_pos_size + n * 4;
+        f32* dst_col = out_color + n * 4;
+        dst_pos[0] = pos[row].x;
+        dst_pos[1] = pos[row].y;
+        dst_pos[2] = pos[row].z;
+        dst_pos[3] = scl[row].x;
+        dst_col[0] = col[row].x;
+        dst_col[1] = col[row].y;
+        dst_col[2] = col[row].z;
+        dst_col[3] = col[row].w;
+        ++n;
+    }
+    return n;
+}
+
 // schema 反射：模块清单/参数提示/标准通道（编辑器表单与 CLI 校验的单一事实源）。
 // 惯例同 EmitterGetConfig：out 可为 null 查长度；cap 不足时返回 0 并填 out_len。
 EDITOR_INTERFACE u32 PfxGetEmitterSchema(char* out, u32 cap, u32* out_len)

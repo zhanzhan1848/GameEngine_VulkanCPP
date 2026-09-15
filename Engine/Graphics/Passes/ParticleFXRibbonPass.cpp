@@ -157,7 +157,7 @@ bool ParticleFXRibbonPass::initialize(rhi::RHIDeviceBase* device) {
     idesc.structured.elementStride = sizeof(u16);
     rhi::BufferDesc udesc{};
     udesc.size = sizeof(VPUniforms);
-    udesc.type = rhi::BufferType::Structured;
+    udesc.type = rhi::BufferType::Constant;
     udesc.usage = rhi::GPUMemoryUsage::Dynamic;
     udesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     udesc.structured.elementCount = 1;

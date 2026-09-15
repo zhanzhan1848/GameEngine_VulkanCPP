@@ -12,6 +12,8 @@
 
 #include <unordered_map>
 
+#include <unordered_map>
+
 namespace primal::pfx {
 
 namespace {
@@ -167,6 +169,13 @@ void pfx_emitter::tick_program(f32 dt) {
             ctx.state = _module_state.data() + inst.state_offset;
             if (def.row_exec) def.row_exec(ctx, inst.params.data());
             if (!_store.is_row_alive(h.row)) break;   // 防御：init 模块理论上不杀行
+        }
+        // 发射器世界位置：init 模块在发射器本地空间生成，出栈时叠加宿主实体偏移
+        if (_position.x != 0.f || _position.y != 0.f || _position.z != 0.f) {
+            math::v4* pos = _store.v4_channel(attr::position) + h.row;
+            pos->x += _position.x;
+            pos->y += _position.y;
+            pos->z += _position.z;
         }
         if (g_bus) {
             g_bus->push(pfx_event{ h, _id, event_type::birth, 0.0f });
@@ -331,9 +340,81 @@ pfx_emitter* emitter_get(emitter_id id) {
 
 u32 emitter_count() { return static_cast<u32>(g_emitters.size()); }
 
+void emitter_set_position(emitter_id id, const math::v3& position) {
+    if (pfx_emitter* em = emitter_get(id)) em->set_position(position);
+}
+
 u32 drain_events(pfx_event* out, u32 cap) { return g_bus ? g_bus->drain(out, cap) : 0; }
 
 u32 pending_events() { return g_bus ? g_bus->pending() : 0; }
+
+void for_each_emitter(const std::function<void(pfx_emitter&)>& fn) {
+    if (!fn) return;
+    for (auto& [id, em] : g_emitters) {
+        if (em) fn(*em);
+    }
+}
+
+#if !defined(DISABLE_PARTICLE_SYSTEM)
+
+// ---- 渲染兼容桥 v2（§7-N2 前置）------------------------------------------
+// 全部 PFX 发射器的活粒子 → 按混合模式分桶的紧凑 particle_data 缓冲。
+// ParticlePass 每桶一次 draw（4 条混合管线），逐桶 push constants 在 Metal
+// 上精确；标准通道与 particle_data 逐字段一致（TestParticleFX 锁定）。
+
+const primal::particles::particle_data* packed_frame_pool(
+    u32 frame_index, u32* out_count, u32 blend_counts_out[4])
+{
+    constexpr u32 kBridgeFrames = 3;   // = rhi::MAX_FRAMES_IN_FLIGHT（避免引 RHI 头）
+    static std::vector<primal::particles::particle_data> packed[kBridgeFrames];
+    static u32 packed_blend[kBridgeFrames][4] = {};
+    if (frame_index >= kBridgeFrames || !out_count) return nullptr;
+
+    auto& buf = packed[frame_index];
+    buf.clear();
+    for (u32 b = 0; b < 4; ++b) packed_blend[frame_index][b] = 0;
+
+    static std::vector<primal::particles::particle_data> buckets[4];
+    for (auto& b : buckets) b.clear();
+
+    for_each_emitter([&](pfx_emitter& em) {
+        if (em.has_program() &&
+            em.program().renderer_type == emitter_program::renderer_mesh) return;   // mesh 型走 ParticleFXMeshPass
+        auto& store = em.store();
+        const u32 capacity = store.capacity();
+        if (store.alive_count() == 0) return;
+        const math::v4* pos = store.v4_channel(attr::position);
+        const math::v4* vel = store.v4_channel(attr::velocity);
+        const math::v4* col = store.v4_channel(attr::color);
+        const math::v4* scr = store.v4_channel(attr::scale_rotation);
+        const math::v4* uvp = store.v4_channel(attr::uv_params);
+        if (!pos || !vel || !col || !scr || !uvp) return;
+
+        const u32 blend = em.has_program()
+            ? std::min<u32>(em.program().blend, 3u)
+            : 0u;
+        for (u32 row = 0; row < capacity; ++row) {
+            if (!store.is_row_alive(row)) continue;
+            primal::particles::particle_data p;
+            p.position = pos[row];
+            p.velocity = vel[row];
+            p.color = col[row];
+            p.scale_rotation = scr[row];
+            p.uv_params = uvp[row];
+            buckets[blend].push_back(p);
+        }
+    });
+
+    for (u32 b = 0; b < 4; ++b) {
+        blend_counts_out[b] = (u32)buckets[b].size();
+        packed_blend[frame_index][b] = (u32)buckets[b].size();
+        buf.insert(buf.end(), buckets[b].begin(), buckets[b].end());
+    }
+    *out_count = (u32)buf.size();
+    return buf.empty() ? nullptr : buf.data();
+}
+
+#endif // !DISABLE_PARTICLE_SYSTEM
 
 } // namespace primal::pfx
 

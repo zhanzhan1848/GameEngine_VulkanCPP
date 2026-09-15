@@ -25,6 +25,10 @@ public:
                  const math::m4x4& projection_matrix);
     
     void set_blend_mode(particles::blend_mode mode);
+
+    // PFX 渲染兼容桥（§7-N2 前置）：渲染端每帧把 pfx::packed_frame_pool 的
+    // 输出喂进来；execute 在 legacy 池之后按混合桶逐段绘制。
+    void set_pfx_data(const particles::particle_data* data, u32 total, const u32 blend_counts[4]);
     void set_depth_write_enabled(bool enabled);
     void set_depth_test_enabled(bool enabled);
     
@@ -103,6 +107,11 @@ private:
     // CPU-side sorting data
     utl::vector<u32> sorted_indices_;
     bool enable_sorting_{ true };
+
+    // PFX 分桶数据（指针由渲染端当帧持有，execute 期间有效）
+    const particles::particle_data* pfx_data_{ nullptr };
+    u32 pfx_total_{ 0 };
+    u32 pfx_blend_counts_[4]{ 0, 0, 0, 0 };
     
     bool create_pipelines();
     bool create_descriptor_sets();

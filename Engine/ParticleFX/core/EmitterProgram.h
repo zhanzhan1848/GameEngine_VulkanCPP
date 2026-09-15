@@ -48,6 +48,12 @@ struct emitter_program {
     // 混合模式（N6 桥接：sprite 兼容桥按此选 ParticlePass 管线）
     // 0 additive / 1 alpha / 2 multiply / 3 premultiplied（与 legacy blend_mode 对齐）
     u8 blend{ 0 };
+
+    // 渲染器类型（§7-N2）：0 billboard（默认，走 sprite 兼容桥）/
+    // 1 mesh（走 ParticleFXMeshPass 立方体实例）。JSON "renderer" 字符串。
+    u8 renderer_type{ 0 };
+    static constexpr u8 renderer_billboard{ 0 };
+    static constexpr u8 renderer_mesh{ 1 };
 };
 
 // 编译 JSON 根对象 → 程序。失败返回 false 并写 err（含路径与行号）。

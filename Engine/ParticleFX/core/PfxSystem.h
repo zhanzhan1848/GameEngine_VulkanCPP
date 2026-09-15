@@ -10,7 +10,11 @@
 #include "AttributeStore.h"
 #include "EventBus.h"
 #include "EmitterProgram.h"
+#if !defined(DISABLE_PARTICLE_SYSTEM)
+#include "Particles/ParticleTypes.h"   // 渲染兼容桥：particle_data
+#endif
 
+#include <functional>
 #include <string>
 
 #ifndef DISABLE_PARTICLE_FX
@@ -57,6 +61,11 @@ public:
 
     pcg32& rng() { return _rng; }
 
+    // 发射器世界位置：init 阶段结束后叠加到新粒子（跟随宿主实体，渲染桥/同步回填）。
+    // v1 仅平移（旋转让随 N 系列后续批次）。
+    void set_position(const math::v3& position) { _position = position; }
+    const math::v3& position() const { return _position; }
+
     // 暴露参数值（按编译期名册下标；调用方先查 program().exposed）
     void set_exposed_value(size_t index, f32 value) {
         if (index < _exposed_values.size()) _exposed_values[index] = value;
@@ -73,6 +82,7 @@ private:
     attribute_store _store;
     pcg32           _rng;
     f32             _elapsed{ 0.f };
+    math::v3        _position{ 0.f, 0.f, 0.f };
 
     // 程序模式状态
     bool               _has_program{ false };
@@ -98,6 +108,7 @@ emitter_id    emitter_create_from_asset(const char* json_path, std::string* err 
 void          emitter_destroy(emitter_id id);   // 未知 id 安全无操作
 pfx_emitter*  emitter_get(emitter_id id);       // 未知 id 返回 nullptr
 u32           emitter_count();
+void          emitter_set_position(emitter_id id, const math::v3& position);   // 实体同步回填
 
 // 热重载：同 id 重绑程序并重启（失败返回 false，原状保留）。
 bool emitter_reload_from_memory(emitter_id id, const char* json_text, u32 length, std::string* err = nullptr);
@@ -117,6 +128,19 @@ f32  get_global_lod();
 // 消费者单帧入口（ADR4）：取出全部挂起事件（FIFO），返回实际取出数。
 u32 drain_events(pfx_event* out, u32 cap);
 u32 pending_events();
+
+// 遍历全部存活发射器（渲染桥 / 统计）。单线程帧管线语义。
+void for_each_emitter(const std::function<void(pfx_emitter&)>& fn);
+
+#if !defined(DISABLE_PARTICLE_SYSTEM)
+// 渲染兼容桥 v2（§7-N2 前置）：把全部 PFX 发射器的活粒子打包成按混合模式
+// 分桶的紧凑 particle_data 缓冲（标准通道与 particle_data 逐字段一致，
+// TestParticleFX 锁定）。ParticlePass 逐桶 draw（4 条混合管线就绪），
+// 不再共享 legacy 帧池（解除 10k 容量耦合与自由表索引纠纷）。
+// 须在 pfx::tick 之后、渲染之前由渲染端调用。
+const primal::particles::particle_data* packed_frame_pool(
+    u32 frame_index, u32* out_count, u32 blend_counts_out[4]);
+#endif
 
 } // namespace primal::pfx
 

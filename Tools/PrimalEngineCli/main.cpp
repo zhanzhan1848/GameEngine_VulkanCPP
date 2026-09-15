@@ -51,6 +51,14 @@ const void* GetCrashSnapshot(std::uint32_t* outLen);
 
 namespace {
 
+// ---- PFX（可编程粒子框架）函数声明镜像（§9：非 POD 内存镜像）----
+extern "C" {
+using PfxDebugDumpFn = std::uint32_t (*)(const char*, std::uint32_t, float, char*, std::uint32_t, std::uint32_t*);
+}
+extern "C" std::uint32_t PfxSystemEnsure();
+extern "C" std::uint32_t PfxDebugDump(const char* asset_path, std::uint32_t frames, float dt,
+                                      char* out, std::uint32_t cap, std::uint32_t* out_len);
+
 bool DirExists(const char* path)
 {
     struct stat st;
@@ -417,6 +425,49 @@ int VerbRender(int argc, char** argv)
 // 固定 1/60 步长驱动 PipelineTick，每帧渲染进离屏 RT，末帧写 PNG。
 // 物理数值断言：终态盒 y ∈ [0.44, 0.56]（半高 0.5）。这是"接通即有测试 +
 // 渲染可视化"纪律的 CLI 形态（设计文档 §8.4）。
+// pfx-debug：离线驱动 PFX 发射器并 dump 统计 JSON（架构文档 §7-N2 pfx.debug）。
+//   primal-engine pfx-debug --asset a.pfx_emitter [--frames 120] [--dt 0.0166667]
+int VerbPfxDebug(int argc, char** argv)
+{
+    const char* asset = nullptr;
+    std::uint32_t frames = 120;
+    float dt = 1.f / 60.f;
+    auto next = [&](int i) -> const char* { return (i + 1 < argc) ? argv[i + 1] : nullptr; };
+    for (int i = 0; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--asset") == 0) {
+            asset = next(i);
+            if (!asset) { PrintError("INVALID_PARAMS", "--asset 缺少路径参数", "示例: --asset /tmp/jet.pfx_emitter"); return kExitUsage; }
+        } else if (std::strcmp(argv[i], "--frames") == 0 && next(i)) {
+            frames = static_cast<std::uint32_t>(std::atoi(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--dt") == 0 && next(i)) {
+            dt = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
+            std::printf("pfx-debug --asset <pfx_emitter> [--frames N] [--dt SEC]\n");
+            return kExitOk;
+        }
+    }
+    if (!asset) {
+        PrintError("INVALID_PARAMS", "--asset 缺少路径参数", "示例: primal-engine pfx-debug --asset /tmp/jet.pfx_emitter --frames 120");
+        return kExitUsage;
+    }
+
+    // 动态缓冲：先探测长度再取数（ABI 惯例 out/cap/out_len）
+    std::uint32_t len = 0;
+    if (!PfxDebugDump(asset, frames, dt, nullptr, 0, &len) || len == 0) {
+        PrintError("PFX_DUMP_FAILED", "发射器加载/驱动失败", "检查 --asset 路径与 JSON 合法性（stderr 有详情）");
+        return kExitEngine;
+    }
+    std::vector<char> buf(len + 1);
+    if (!PfxDebugDump(asset, frames, dt, buf.data(), len, &len)) {
+        PrintError("PFX_DUMP_FAILED", "二次调用失败（非确定性问题？）", "");
+        return kExitEngine;
+    }
+    buf[len] = '\0';
+    std::fputs(buf.data(), stdout);
+    std::fputc('\n', stdout);
+    return kExitOk;
+}
+
 int VerbPhysicsSim(int argc, char** argv)
 {
 #if defined(_WIN32)
@@ -1260,6 +1311,7 @@ int Run(int argc, char** argv)
     if (verb == "engine" && argc >= 3 && std::strcmp(argv[2], "info") == 0) return VerbEngineInfo();
     if (verb == "render") return VerbRender(argc - 2, argv + 2);
     if (verb == "physics-sim") return VerbPhysicsSim(argc - 2, argv + 2);
+    if (verb == "pfx-debug") return VerbPfxDebug(argc - 2, argv + 2);
     if (verb == "cook-mesh") return VerbCookMesh(argc - 2, argv + 2);
     if (verb == "import-texture") return VerbImportTexture(argc - 2, argv + 2);
     if (verb == "bake-vt") return VerbBakeVt(argc - 2, argv + 2);

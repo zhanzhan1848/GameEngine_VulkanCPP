@@ -152,7 +152,7 @@ bool ParticleFXDecalPass::initialize(rhi::RHIDeviceBase* device) {
     ldesc.structured.elementStride = instance_stride();
     rhi::BufferDesc udesc{};
     udesc.size = sizeof(VPUniforms);
-    udesc.type = rhi::BufferType::Structured;
+    udesc.type = rhi::BufferType::Constant;
     udesc.usage = rhi::GPUMemoryUsage::Dynamic;
     udesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     udesc.structured.elementCount = 1;

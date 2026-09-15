@@ -324,6 +324,13 @@ void ParticlePass::shutdown() {
     device_ = nullptr;
 }
 
+void ParticlePass::set_pfx_data(const particles::particle_data* data, u32 total,
+                                const u32 blend_counts[4]) {
+    pfx_data_ = data;
+    pfx_total_ = total;
+    for (int i = 0; i < 4; ++i) pfx_blend_counts_[i] = blend_counts[i];
+}
+
 void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
                            u32 frame_index,
                            const math::m4x4& view_matrix,
@@ -331,24 +338,21 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     if (!device_ || !cmd_buffer) {
         return;
     }
-    
+
     // Get particle data from system
     auto& pool = particles::get_frame_pool(frame_index);
     auto* particle_data = pool.data();
     u32 active_count = pool.allocated_count();
-    
-    if (active_count == 0 || !particle_data) {
+
+    const bool has_legacy = active_count > 0 && particle_data;
+    const bool has_pfx = pfx_total_ > 0 && pfx_data_;
+    if (!has_legacy && !has_pfx) {
         return;
     }
     
     // Get the appropriate pipeline for blend mode
     u32 blend_idx = static_cast<u32>(current_blend_mode_);
     rhi::PipelineHandle pipeline = pipelines_[blend_idx];
-    
-    PRIMAL_LOG_STREAM(Info, "Engine") << "[ParticlePass::execute] frame=" << frame_index 
-              << ", active_count=" << active_count 
-              << ", pipeline=" << (pipeline == rhi::handles::INVALID_PIPELINE ? "INVALID" : "VALID") 
-              << std::endl;
     
     if (pipeline == rhi::handles::INVALID_PIPELINE) {
         PRIMAL_LOG_STREAM(Error, "Engine") << "[ParticlePass::execute] ERROR: Pipeline is INVALID!" << std::endl;
@@ -384,16 +388,24 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
         memcpy(uniform_buffer_mapped_[frame_index], &pc, sizeof(pc));
     }
     
-    // Update particle data buffer
-    size_t particle_data_size = active_count * sizeof(particles::particle_data);
+    // Update particle data buffer: legacy 池在前，PFX 分桶段在后
+    u32 pfx_copied = 0;
+    if (has_pfx) {
+        constexpr u32 kMaxRecords = (u32)(MAX_PARTICLE_BUFFER_SIZE / sizeof(particles::particle_data));
+        pfx_copied = std::min(pfx_total_, kMaxRecords > active_count ? kMaxRecords - active_count : 0u);
+    }
+    size_t particle_data_size = (active_count + pfx_copied) * sizeof(particles::particle_data);
     void* particle_mapped = device_->MapBuffer(particle_buffers_[frame_index]);
     if (particle_mapped) {
-        memcpy(particle_mapped, particle_data, particle_data_size);
+        if (has_legacy) memcpy(particle_mapped, particle_data, active_count * sizeof(particles::particle_data));
+        if (pfx_copied > 0)
+            memcpy((u8*)particle_mapped + active_count * sizeof(particles::particle_data),
+                   pfx_data_, pfx_copied * sizeof(particles::particle_data));
         device_->UnmapBuffer(particle_buffers_[frame_index]);
     }
     
     // Update count buffer
-    u32 visible_count = active_count;
+    u32 visible_count = active_count + pfx_copied;
     void* count_mapped = device_->MapBuffer(count_buffers_[frame_index]);
     if (count_mapped) {
         memcpy(count_mapped, &visible_count, sizeof(u32));
@@ -443,7 +455,36 @@ void ParticlePass::execute(rhi::RHICommandBuffer* cmd_buffer,
     
     // Draw instanced: 6 vertices per particle quad, N instances
     // Draw(vertexCount, startVertex, instanceCount, startInstance)
-    cmd_buffer->Draw(6, 0, active_count, 0);
+    if (has_legacy) {
+        cmd_buffer->Draw(6, 0, active_count, 0);
+    }
+
+    // PFX 分桶绘制：每桶绑定对应混合管线；Metal 走 push constants（逐桶精确），
+    // Vulkan 走 UBO（单次写入，桶间共用——blend uniform 仅影响着色器分支，
+    // 混合本身来自管线状态，视觉近似可接受）。
+    if (has_pfx) {
+        u32 start_instance = active_count;
+        u32 start_bucket = 0;
+        for (u32 b = 0; b < 4; ++b) {
+            if (pfx_blend_counts_[b] == 0) continue;
+            rhi::PipelineHandle bucket_pipeline = pipelines_[b];
+            if (bucket_pipeline == rhi::handles::INVALID_PIPELINE) {
+                start_instance += pfx_blend_counts_[b];
+                continue;
+            }
+            cmd_buffer->BindGraphicsPipeline(bucket_pipeline);
+            pc.blend_mode = b;
+            if (device_->GetPlatform() != rhi::RHIPlatform::Vulkan) {
+                cmd_buffer->PushConstants(pipeline_layout_, rhi::ShaderStage::Vertex, 0, sizeof(pc), &pc);
+            }
+            cmd_buffer->Draw(6, 0, pfx_blend_counts_[b], start_instance);
+            start_instance += pfx_blend_counts_[b];
+            start_bucket = b + 1;
+        }
+        (void)start_bucket;
+        // 恢复 legacy 管线绑定（下一帧开头会重新绑定，此处仅保持状态卫生）
+        cmd_buffer->BindGraphicsPipeline(pipeline);
+    }
     if (pc.soft_params[1] > 0.5f && !soft_log_once_) {
         soft_log_once_ = true;
         PRIMAL_LOG_STREAM(Info, "ParticleFX")
