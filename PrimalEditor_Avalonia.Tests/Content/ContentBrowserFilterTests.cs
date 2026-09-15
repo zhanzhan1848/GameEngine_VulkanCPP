@@ -20,6 +20,11 @@ public class ContentBrowserFilterTests
     [InlineData("foo.material", true)]
     [InlineData("foo.material.json", true)]
     [InlineData("path/to/Metarial/Test01.material.json", true)]
+    // Particle formats: legacy presets + PFX module-stack emitters.
+    [InlineData("foo.particle.json", true)]
+    [InlineData("path/to/Dust.particle.json", true)]
+    [InlineData("foo.pfx_emitter", true)]
+    [InlineData("path/to/Content/Test_PFX_01.pfx_emitter", true)]
     [InlineData("foo.shader", true)]
     [InlineData("foo.fbx", false)]
     [InlineData("foo.obj", false)]
