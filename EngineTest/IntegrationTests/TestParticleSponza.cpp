@@ -2041,7 +2041,7 @@ void TestParticleSponza::BuildRenderGraph(RenderGraph& graph, ResourceHandle bac
                 if (em) {
                     em->tick(1.f / 60.f);
                     const u32 n = pfx::render::pack_mesh_instances(em->store(), pfx_instances, 4096);
-                    particleFXMeshPass_.stage_instances(pfx_instances, n, renderSystem.GetCurrentFrameIndex());
+                    particleFXMeshPass_.stage_instances(pfx_instances, nullptr, n, renderSystem.GetCurrentFrameIndex());
                 }
                 particleFXMeshPass_.execute(cmd, renderSystem.GetCurrentFrameIndex(), pfxView, pfxProj);
             }
