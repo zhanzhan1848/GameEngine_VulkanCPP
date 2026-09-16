@@ -132,6 +132,7 @@ void pfx_emitter::tick_program(f32 dt) {
     ctx.source_velocity = _program.source_velocity;
     ctx.spawn_accum = &_spawn_accum;
     ctx.fields = &_program.field_grids;
+    ctx.meshes = &_program.mesh_views;
     ctx.lod_factor = g_global_lod;
 
     // ---- spawn 阶段：各模块贡献生成数 ----

@@ -135,6 +135,15 @@ bool compile_emitter(const json::value& root, emitter_program& out, std::string&
         // §7-N2：渲染器类型声明。v1：billboard（sprite 桥）/ mesh（立方体实例）。
         if (v->as_string() == "mesh") out.renderer_type = emitter_program::renderer_mesh;
     }
+    if (const json::value* v = root.find("instance"); v) {
+        // 渲染 instance 声明：{"mesh":"<cooked .mesh 路径>","guid":"..."}。
+        // mesh 缺席/空 = 内置立方体回退；guid 仅编辑器元数据，引擎不消费。
+        if (!v->is_object()) return c.fail("instance", "must be an object", v->line());
+        if (const json::value* m = v->find("mesh"); m) {
+            if (!m->is_string()) return c.fail("instance.mesh", "must be a string", m->line());
+            out.instance_mesh_path = m->as_string();
+        }
+    }
     if (const json::value* v = root.find("capacity"); v) {
         if (!v->is_number() || v->as_u32() == 0) return c.fail("capacity", "must be positive number", v->line());
         out.capacity = v->as_u32();
@@ -228,6 +237,11 @@ bool compile_emitter(const json::value& root, emitter_program& out, std::string&
     struct fields_guard {
         ~fields_guard() { set_compile_env_fields(nullptr); }
     } fields_guard_;
+    // mesh 路径绑定窗口（ShapeLocation "mesh" → out.meshes 下标，按路径去重）
+    set_compile_env_meshes(&out);
+    struct meshes_env_guard {
+        ~meshes_env_guard() { set_compile_env_meshes(nullptr); }
+    } meshes_env_guard_;
 
     // 阶段模块
     const json::value* stages = root.find("stages");

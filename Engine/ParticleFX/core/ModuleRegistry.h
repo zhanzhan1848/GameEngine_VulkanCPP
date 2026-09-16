@@ -7,6 +7,7 @@
 #include "../PfxTypes.h"
 #include "AttributeStore.h"
 #include "FieldSystem.h"
+#include "MeshGeometry.h"
 #include "PfxJson.h"
 
 #include <memory>
@@ -17,6 +18,7 @@
 namespace primal::pfx {
 
 struct exposed_param;   // EmitterProgram.h（此处仅指针形参，前置声明足够）
+struct emitter_program; // 同上（mesh 路径绑定编译环境用）
 
 enum class stage_kind : u8 { spawn = 0, init = 1, update = 2 };
 
@@ -39,6 +41,7 @@ struct sim_context {
     math::v3 source_velocity{};         // 继承源速度（N3 起由组件回填；N1 为程序常量）
     math::v3 last_normal{ 0.f, 0.f, 1.f }; // init 模块契约：ShapeLocation 写、AddVelocity(normal) 读
     const std::vector<std::shared_ptr<volume_grid>>* fields{ nullptr }; // 发射器场表（field_id 索引）
+    const std::vector<std::shared_ptr<mesh_geometry>>* meshes{ nullptr }; // 发射源网格表（mesh_idx 索引）
     u32 row{ u32_invalid_id };          // init/update 阶段：当前行
     particle_handle handle{};
 };
@@ -106,12 +109,23 @@ void register_builtin_modules();
 // 由 register_builtin_modules 内部调用；单独导出仅供测试。
 void register_field_modules();
 
+// 粒子 vs 物理世界碰撞（PhysicsCollision，update 阶段）。
+// 由 register_builtin_modules 内部调用；单独导出仅供测试。
+void register_physics_collision_module();
+
 // 编译期场名册（编译器解析 "fields" 声明后设置；模块 "field" 名 → 下标绑定）。
 void set_compile_env_fields(const std::vector<std::string>* names);
 
 // 编译期环境：暴露参数名册。编译器在解析 stages 前设置，结束后置 nullptr
 // （模块 param_ref 的 {"param":"Name"} 绑定按名查下标）。
 void set_compile_env_exposed(std::vector<exposed_param>* exposed);
+// 模块 parse 期读取当前名册（未在编译窗口内时为 nullptr → param 绑定报错）。
+std::vector<exposed_param>* compile_env_exposed_get();
+
+// 编译期环境：目标程序。ShapeLocation 的 "mesh" OBJ 路径经此按路径去重
+// 落入 program->meshes 并返回下标；解析窗口外（测试直调 parse）为 null，
+// 此时引用 mesh 的参数报错。置 nullptr 即清除。
+void set_compile_env_meshes(emitter_program* program);
 
 } // namespace primal::pfx
 

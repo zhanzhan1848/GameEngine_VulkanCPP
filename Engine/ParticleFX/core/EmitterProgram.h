@@ -27,6 +27,13 @@ struct module_instance {
     std::vector<u8> params;          // POD blob，尺寸 = def.params_size
 };
 
+// 发射源网格（ShapeLocation mesh_surface）：模块参数里直写 OBJ 路径，
+// 编译期经编译环境在此表按路径去重落位（与 fields 场表同模式、免文档段）。
+struct mesh_entry {
+    std::string path;
+    std::shared_ptr<mesh_geometry> mesh;
+};
+
 struct emitter_program {
     std::string name;
     u32 asset_version{ 1 };
@@ -42,6 +49,8 @@ struct emitter_program {
     };
     std::vector<field_entry> fields;
     std::vector<std::shared_ptr<volume_grid>> field_grids;   // 与 fields 平行（sim_context 视图）
+    std::vector<mesh_entry> meshes;                          // 按路径去重（编译期填充）
+    std::vector<std::shared_ptr<mesh_geometry>> mesh_views;  // 与 meshes 平行（sim_context 视图）
     std::vector<module_instance> stages[3];   // [stage_kind]
     u32 state_bytes{ 0 };            // 全部实例状态块总大小
 
@@ -54,6 +63,10 @@ struct emitter_program {
     u8 renderer_type{ 0 };
     static constexpr u8 renderer_billboard{ 0 };
     static constexpr u8 renderer_mesh{ 1 };
+
+    // 渲染 instance 几何源：JSON "instance":{"mesh":"<cooked .mesh 路径>"}。
+    // 空 = 内置立方体回退；运行期由渲染桥按路径懒加载换几何槽（零编译期 IO）。
+    std::string instance_mesh_path;
 };
 
 // 编译 JSON 根对象 → 程序。失败返回 false 并写 err（含路径与行号）。

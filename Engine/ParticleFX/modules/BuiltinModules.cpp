@@ -108,6 +108,7 @@ bool get_param_ref_field(const json::value& o, const char* k, const param_ref& d
 // 编译期 parse 上下文：暴露参数名册（模块绑定需要；直接 spawn/无绑定场景可为 null）
 struct parse_env {
     std::vector<exposed_param>* exposed{ nullptr };
+    emitter_program* program{ nullptr };   // mesh 路径 → 表下标绑定（编译窗口内非空）
 };
 
 parse_env& parse_env_get() {
@@ -119,7 +120,32 @@ parse_env& parse_env_get() {
 
 void set_compile_env_exposed(std::vector<exposed_param>* exposed) { parse_env_get().exposed = exposed; }
 
+std::vector<exposed_param>* compile_env_exposed_get() { return parse_env_get().exposed; }
+
+void set_compile_env_meshes(emitter_program* program) { parse_env_get().program = program; }
+
 namespace {
+
+// "mesh" OBJ 路径 → 发射器 mesh 表下标（同路径去重；失败写 err 返回 invalid）。
+// 加载发生在编译窗口内，运行期零 IO。
+u32 mesh_find_or_load(const std::string& path, std::string& err) {
+    emitter_program* prog = parse_env_get().program;
+    if (!prog) {
+        err = "no compile env: 'mesh' can only be resolved during emitter compilation";
+        return u32_invalid_id;
+    }
+    for (u32 i = 0; i < prog->meshes.size(); ++i)
+        if (prog->meshes[i].path == path) return i;
+    auto m = std::make_shared<mesh_geometry>();
+    std::string load_err;
+    if (!m->load_obj(path.c_str(), load_err)) {
+        err = "mesh '" + path + "' load failed: " + load_err;
+        return u32_invalid_id;
+    }
+    prog->meshes.push_back(mesh_entry{ path, m });
+    prog->mesh_views.push_back(std::move(m));
+    return (u32)(prog->meshes.size() - 1);
+}
 
 // ---- 模块参数 POD 与实现 -------------------------------------------------------
 
@@ -189,20 +215,40 @@ constexpr param_hint spawn_burst_hints[] = {
 // ShapeLocation ----------------------------------------------------------
 struct shape_location_params {
     u8 shape{ 0 };           // 0 point 1 sphere_surface 2 sphere_volume 3 box 4 cone 5 cylinder
-    f32 angle_deg{ 25.f };   // cone 半角（度）
-    f32 radius{ 1.f };       // sphere/cylinder/cone 底半径
-    f32 height{ 1.f };       // cone 高 / cylinder 高
+                             // 6 mesh_surface 7 mesh_volume（v1 编译期拒绝，见 parse）
+    u8 scatter{ 0 };         // mesh 形状：0 area_uniform 1 triangle_uniform 2 vertex 3 density_weighted
+    u8 weight_channel{ 0 };  // density_weighted：0 none(=面积) 1 vertex_color_r 2 uv0_u
     f32 half[3]{ 0.5f, 0.5f, 0.5f };
+    param_ref radius{ u32_invalid_id, 1.f };       // sphere/cylinder/cone 底半径
+    param_ref height{ u32_invalid_id, 1.f };       // cone 高 / cylinder 高
+    param_ref angle_deg{ u32_invalid_id, 25.f };   // cone 半角（度）
+    param_ref bias{ u32_invalid_id, 0.f };         // density_weighted：0=按权重密度 → 1=强极化
+    u32 mesh_idx{ u32_invalid_id };                // 编译期按路径绑定 → 发射器 mesh 表
 };
 
 bool shape_location_parse(const json::value& o, void* out, std::string& err) {
     auto* p = (shape_location_params*)out;
     static const char* const shape_names[] = { "point", "sphere_surface", "sphere_volume", "box", "cone",
-                                               "cylinder" };
-    if (!get_u8_enum(o, "shape", shape_names, 6, p->shape, p->shape, err)) return false;
-    if (!get_f32_opt(o, "radius", 1.f, p->radius, err)) return false;
-    if (!get_f32_opt(o, "height", 1.f, p->height, err)) return false;
-    if (!get_f32_opt(o, "angle", 25.f, p->angle_deg, err)) return false;
+                                               "cylinder", "mesh_surface", "mesh_volume" };
+    static const char* const scatter_names[] = { "area_uniform", "triangle_uniform", "vertex",
+                                                 "density_weighted" };
+    static const char* const weight_names[] = { "none", "vertex_color_r", "uv0_u" };
+    if (!get_u8_enum(o, "shape", shape_names, 8, p->shape, p->shape, err)) return false;
+    if (!get_u8_enum(o, "scatter", scatter_names, 4, p->scatter, p->scatter, err)) return false;
+    if (!get_u8_enum(o, "weight_channel", weight_names, 3, p->weight_channel, p->weight_channel, err))
+        return false;
+    if (!get_param_ref_field(o, "radius", param_ref{ u32_invalid_id, 1.f }, p->radius,
+                             parse_env_get().exposed, err))
+        return false;
+    if (!get_param_ref_field(o, "height", param_ref{ u32_invalid_id, 1.f }, p->height,
+                             parse_env_get().exposed, err))
+        return false;
+    if (!get_param_ref_field(o, "angle", param_ref{ u32_invalid_id, 25.f }, p->angle_deg,
+                             parse_env_get().exposed, err))
+        return false;
+    if (!get_param_ref_field(o, "bias", param_ref{ u32_invalid_id, 0.f }, p->bias,
+                             parse_env_get().exposed, err))
+        return false;
     if (const json::value* v = o.find("half"); v) {
         if (!v->is_array() || v->array_size() != 3) {
             err = "'half' must be [x,y,z]";
@@ -217,6 +263,19 @@ bool shape_location_parse(const json::value& o, void* out, std::string& err) {
             p->half[i] = e->as_f32();
         }
     }
+    if (p->shape == 7) {
+        err = "shape 'mesh_volume' is not implemented yet (v1: use 'mesh_surface')";
+        return false;
+    }
+    if (p->shape == 6) {
+        const json::value* v = o.find("mesh");
+        if (!v || !v->is_string()) {
+            err = "shape 'mesh_surface' requires a 'mesh' OBJ path";
+            return false;
+        }
+        p->mesh_idx = mesh_find_or_load(v->as_string(), err);
+        if (p->mesh_idx == u32_invalid_id) return false;
+    }
     return true;
 }
 
@@ -230,12 +289,12 @@ void shape_location_exec(sim_context& ctx, const void* params) {
     switch (p->shape) {
         case 1: {   // sphere_surface
             n = random_unit_vector(rng);
-            p3 = n * p->radius;
+            p3 = n * resolve_param(p->radius, ctx);
             break;
         }
         case 2: {   // sphere_volume（体积均匀：r ∝ cbrt(u)）
             n = random_unit_vector(rng);
-            const f32 r = p->radius * std::cbrt(rng.next_f32());
+            const f32 r = resolve_param(p->radius, ctx) * std::cbrt(rng.next_f32());
             p3 = n * r;
             break;
         }
@@ -247,19 +306,75 @@ void shape_location_exec(sim_context& ctx, const void* params) {
         }
         case 4: {   // cone：顶点在原点、朝 +Y 展开
             const f32 t = rng.next_f32();
-            const f32 tan_a = std::tan(p->angle_deg * kPi / 180.f);
-            const f32 r = t * p->height * tan_a;
+            const f32 tan_a = std::tan(resolve_param(p->angle_deg, ctx) * kPi / 180.f);
+            const f32 r = t * resolve_param(p->height, ctx) * tan_a;
             const f32 theta = rng.next_f32() * 2.f * kPi;
-            p3 = math::v3{ r * std::cos(theta), t * p->height, r * std::sin(theta) };
+            p3 = math::v3{ r * std::cos(theta), t * resolve_param(p->height, ctx), r * std::sin(theta) };
             n = math::v3{ std::cos(theta), tan_a, std::sin(theta) };
             break;
         }
         case 5: {   // cylinder：绕 +Y 的体积
             const f32 theta = rng.next_f32() * 2.f * kPi;
-            const f32 r = p->radius * std::sqrt(rng.next_f32());
-            p3 = math::v3{ r * std::cos(theta), lerp(-p->height * 0.5f, p->height * 0.5f, rng.next_f32()),
+            const f32 r = resolve_param(p->radius, ctx) * std::sqrt(rng.next_f32());
+            p3 = math::v3{ r * std::cos(theta), lerp(-resolve_param(p->height, ctx) * 0.5f,
+                                                     resolve_param(p->height, ctx) * 0.5f,
+                                                     rng.next_f32()),
                            r * std::sin(theta) };
             n = math::v3{ std::cos(theta), 0.f, std::sin(theta) };
+            break;
+        }
+        case 6: {   // mesh_surface：发射源网格采样（局部空间 = 发射器局部空间）
+            const mesh_geometry* m = nullptr;
+            if (ctx.meshes && p->mesh_idx < ctx.meshes->size())
+                m = (*ctx.meshes)[p->mesh_idx].get();
+            if (!m || m->triangle_count() == 0) break;   // 编译期已校验；防御空表 → 原点
+
+            if (p->scatter == 2) {   // vertex：顶点均匀（索引数组均匀取，重复顶点随其共享度）
+                const u32 vi = m->indices[rng.next_u32() % (u32)m->indices.size()];
+                p3 = m->positions[vi];
+                break;
+            }
+
+            // 三角形抽取
+            const mesh_geometry::weight_cdf& wc = p->weight_channel == 1 ? m->color
+                                                : p->weight_channel == 2 ? m->uv
+                                                                         : m->area;
+            u32 t = 0;
+            if (p->scatter == 1) {   // triangle_uniform：每三角形等概率（密度随面片大小变）
+                t = rng.next_u32() % m->triangle_count();
+            } else if (p->scatter == 3 && wc.valid) {   // density_weighted + bias 极化
+                const f32 bias = std::min(std::max(resolve_param(p->bias, ctx), 0.f), 1.f);
+                t = m->sample_triangle(wc, rng.next_f32() * wc.total);
+                if (bias > 0.f && wc.max_dens > 0.f) {
+                    // 随机接受实现幂极化：接受概率 (density/max)^(power-1)，power=1+15·bias。
+                    // 8 次上限保确定性；耗尽即接受当前抽样（极化略欠，可接受）。
+                    const f32 power = 1.f + 15.f * bias;
+                    for (u32 attempt = 0; attempt < 8; ++attempt) {
+                        if (rng.next_f32() < std::pow(wc.dens[t] / wc.max_dens, power - 1.f)) break;
+                        t = m->sample_triangle(wc, rng.next_f32() * wc.total);
+                    }
+                }
+            } else {   // area_uniform（及权重分布退化时的兜底）
+                t = m->sample_triangle(wc, rng.next_f32() * wc.total);
+            }
+
+            // 面上均匀重心坐标 + 面法线
+            const math::v3& a = m->positions[m->indices[t * 3]];
+            const math::v3& b = m->positions[m->indices[t * 3 + 1]];
+            const math::v3& c = m->positions[m->indices[t * 3 + 2]];
+            const f32 r1 = std::sqrt(rng.next_f32());
+            const f32 r2 = rng.next_f32();
+            const f32 wa = 1.f - r1;
+            const f32 wb = r2 * r1;
+            const f32 wc_ = 1.f - wa - wb;
+            p3 = math::v3{ a.x * wa + b.x * wb + c.x * wc_, a.y * wa + b.y * wb + c.y * wc_,
+                           a.z * wa + b.z * wb + c.z * wc_ };
+            const math::v3 ab{ b.x - a.x, b.y - a.y, b.z - a.z };
+            const math::v3 ac{ c.x - a.x, c.y - a.y, c.z - a.z };
+            const math::v3 cr{ ab.y * ac.z - ab.z * ac.y, ab.z * ac.x - ab.x * ac.z,
+                               ab.x * ac.y - ab.y * ac.x };
+            const f32 len = std::sqrt(cr.x * cr.x + cr.y * cr.y + cr.z * cr.z);
+            if (len > 1e-12f) n = math::v3{ cr.x / len, cr.y / len, cr.z / len };
             break;
         }
         case 0:
@@ -274,11 +389,18 @@ void shape_location_exec(sim_context& ctx, const void* params) {
 }
 
 constexpr param_hint shape_location_hints[] = {
-    { "shape", "enum", "point|sphere_surface|sphere_volume|box|cone|cylinder", "\"point\"" },
-    { "radius", "f32", "sphere/cylinder/cone radius", "1" },
-    { "height", "f32", "cone/cylinder height", "1" },
+    { "shape", "enum", "point|sphere_surface|sphere_volume|box|cone|cylinder|mesh_surface|mesh_volume",
+      "\"point\"" },
+    { "radius", "param_ref", "sphere/cylinder/cone radius", "1" },
+    { "height", "param_ref", "cone/cylinder height", "1" },
     { "half", "v3", "box half extents", "[0.5,0.5,0.5]" },
-    { "angle", "f32", "cone half angle in degrees", "25" },
+    { "angle", "param_ref", "cone half angle in degrees", "25" },
+    { "scatter", "enum", "area_uniform|triangle_uniform|vertex|density_weighted (mesh shapes)",
+      "\"area_uniform\"" },
+    { "mesh", "string", "OBJ path relative to working directory, loaded at emitter compile "
+                        "(mesh_surface)", nullptr },
+    { "weight_channel", "enum", "none|vertex_color_r|uv0_u, source for density_weighted", "\"none\"" },
+    { "bias", "param_ref", "density_weighted: 0=weight density, 1=strongly polarized", "0" },
 };
 
 // AddVelocity ------------------------------------------------------------
@@ -1113,6 +1235,7 @@ void register_builtin_modules() {
     done = true;
 
     register_field_modules();   // N4 场与边界模块
+    register_physics_collision_module();   // 粒子 vs 物理世界碰撞
 
     module_registry& r = module_registry::get();
 
@@ -1121,7 +1244,7 @@ void register_builtin_modules() {
     reg<spawn_burst_params>(r, "SpawnBurst", stage_kind::spawn, spawn_burst_parse, (void*)spawn_burst_exec,
                             spawn_burst_hints, 2, sizeof(spawn_burst_state));
     reg<shape_location_params>(r, "ShapeLocation", stage_kind::init, shape_location_parse,
-                               (void*)shape_location_exec, shape_location_hints, 5);
+                               (void*)shape_location_exec, shape_location_hints, 9);
     reg<add_velocity_params>(r, "AddVelocity", stage_kind::init, add_velocity_parse,
                              (void*)add_velocity_exec, add_velocity_hints, 5);
     reg<set_lifetime_params>(r, "SetLifetime", stage_kind::init, set_lifetime_parse,
