@@ -114,6 +114,18 @@ public sealed class ParticlePreviewControl : Control
                 ctx.DrawLine(gridPen, new Point(cx2, cy2), new Point(dx2, dy2));
         }
 
+        // P1.5:instance 感知视觉——renderer=mesh 时标注实例资产名,粒子画旋转方块
+        bool isMesh = vm.IsRenderMesh;
+        string? instName = vm.InstanceMeshSelected;
+        if (isMesh)
+        {
+            var label = string.IsNullOrWhiteSpace(instName) ? "INSTANCE: (内置立方体)" : $"INSTANCE: {instName}";
+            var ft = new FormattedText(label, System.Globalization.CultureInfo.CurrentCulture,
+                FlowDirection.LeftToRight, new Typeface(FontFamily.Default), 11,
+                new SolidColorBrush(Color.FromRgb(0x8A, 0xC8, 0xFF)));
+            ctx.DrawText(ft, new Point(8, 6));
+        }
+
         // 粒子：读快照 → 投影 → 远到近画圆点
         if (!vm.TryGetPreviewSnapshot(out var posSize, out var color, out var count)) return;
 
@@ -138,12 +150,29 @@ public sealed class ParticlePreviewControl : Control
         }
         // 远→近
         System.Array.Sort(drawItems, (a, b) => b.Z.CompareTo(a.Z));
+        var instanceOutline = new Pen(new SolidColorBrush(Color.FromRgb(0x30, 0x30, 0x40)), 1);
         for (int i = 0; i < n; ++i)
         {
             var d = drawItems[i];
             float radius = d.SizePx * 0.5f;
             var brush = new SolidColorBrush(Color.FromRgb(d.R, d.G, d.B), d.A / 255.0);
-            ctx.FillRectangle(brush, new Rect(d.Sx - radius, d.Sy - radius, radius * 2, radius * 2));
+            if (isMesh)
+            {
+                // mesh 实例:伪随机旋转的方块 + 描边,与 billboard 方点区分
+                double angle = (i * 41) % 180;
+                var rect = new Rect(d.Sx - radius, d.Sy - radius, radius * 2, radius * 2);
+                var m = Matrix.CreateRotation(angle * Math.PI / 180.0);
+                m = Matrix.CreateTranslation(d.Sx, d.Sy) * m * Matrix.CreateTranslation(-d.Sx, -d.Sy);
+                using (ctx.PushTransform(m))
+                {
+                    ctx.FillRectangle(brush, rect);
+                    ctx.DrawRectangle(instanceOutline, rect);
+                }
+            }
+            else
+            {
+                ctx.FillRectangle(brush, new Rect(d.Sx - radius, d.Sy - radius, radius * 2, radius * 2));
+            }
         }
     }
 }

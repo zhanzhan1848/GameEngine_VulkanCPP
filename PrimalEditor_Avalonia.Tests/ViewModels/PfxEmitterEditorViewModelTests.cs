@@ -372,4 +372,38 @@ public sealed class PfxEmitterEditorViewModelTests
         }
         finally { File.Delete(path); }
     }
+    [Fact]
+    public void PhysicsSelfCollision_ToggleOn_PersistsOmitted_True()
+    {
+        // 复刻用户流程:资产存 self_collision=false → UI 勾选自碰撞 → Save → 文件应移除该字段(缺省=true)
+        InjectSchema();
+        var path = Path.Combine(Path.GetTempPath(), $"pfx_test_{Guid.NewGuid():N}.pfx_emitter");
+        File.WriteAllText(path, """
+            {
+              "name": "inst",
+              "renderer": "mesh",
+              "instance": { "mesh": "builtin:sphere",
+                            "physics": { "mode": "rigid_body", "collider": "sphere",
+                                         "radius": 0.2, "self_collision": false, "max_bodies": 256 } },
+              "stages": { "spawn": [ { "module": "SpawnRate", "rate": 10 } ] }
+            }
+            """);
+        var vm = new PfxEmitterEditorViewModel();
+        vm.SetAsset(new AssetInfo { FullPath = path, Type = PrimalEditor_Avalonia.Native.AssetType.PfxEmitter });
+        try
+        {
+            Assert.True(vm.IsPhysicsEnabled);
+            Assert.False(vm.PhysicsSelfCollision);   // 载入 false
+            vm.PhysicsSelfCollision = true;          // 用户勾选
+            vm.Save();
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            var ph = doc.RootElement.GetProperty("instance").GetProperty("physics");
+            Assert.Equal("rigid_body", ph.GetProperty("mode").GetString());
+            // 自碰撞开 = 字段省略(缺省 true);不得残留 false
+            Assert.False(ph.TryGetProperty("self_collision", out _) &&
+                         ph.GetProperty("self_collision").GetBoolean() == false,
+                "勾选自碰撞后 Save 不应残留 self_collision=false");
+        }
+        finally { File.Delete(path); }
+    }
 }

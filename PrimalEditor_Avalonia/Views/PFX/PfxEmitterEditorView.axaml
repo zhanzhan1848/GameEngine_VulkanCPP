@@ -254,6 +254,37 @@
                     ToolTip.Tip="把 PhysicsCollision.radius 填成实例网格在缩放 1 时的真实半径（粒子缩放自动跟随）"/>
           </Grid>
 
+          <!-- PHYSICS:逐粒子刚体(引擎出生建 Jolt 动态体、物理权威回写;
+               与 update 阶段 PhysicsCollision 模块互斥,引擎编译期拒绝双开) -->
+          <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,Auto" Margin="0,0,0,6" IsEnabled="{Binding IsRenderMesh}">
+            <TextBlock Grid.Column="0" Text="PHYSICS" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"/>
+            <ComboBox Grid.Column="1" MinWidth="110" Margin="8,0,0,0"
+                      ItemsSource="{Binding PhysicsModeOptions}"
+                      SelectedItem="{Binding PhysicsMode}"/>
+            <TextBlock Grid.Column="2" Text="R" FontSize="9" VerticalAlignment="Center" Margin="10,0,2,0"
+                       Foreground="{DynamicResource MutedTextBrush}"/>
+            <TextBox Grid.Column="3" Width="52" Text="{Binding PhysicsRadius, Mode=TwoWay}"
+                     ToolTip.Tip="球代理半径"/>
+            <TextBlock Grid.Column="4" Text="MAX" FontSize="9" VerticalAlignment="Center" Margin="10,0,2,0"
+                       Foreground="{DynamicResource MutedTextBrush}"/>
+          </Grid>
+          <Grid ColumnDefinitions="Auto,Auto,Auto,Auto" Margin="0,0,0,10" IsEnabled="{Binding IsPhysicsEnabled}">
+            <TextBlock Grid.Column="0" Text="MASS" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"/>
+            <TextBox Grid.Column="1" Width="52" Text="{Binding PhysicsMass, Mode=TwoWay}"/>
+            <TextBlock Grid.Column="2" Text="MAX BODIES" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       VerticalAlignment="Center" Margin="12,0,2,0"
+                       Foreground="{DynamicResource MutedTextBrush}"/>
+            <TextBox Grid.Column="3" Width="52" Text="{Binding PhysicsMaxBodies, Mode=TwoWay}"/>
+          </Grid>
+
+          <Grid ColumnDefinitions="Auto,Auto,Auto" Margin="0,0,0,10" IsEnabled="{Binding IsPhysicsEnabled}">
+            <CheckBox Content="自碰撞（互相排开）" IsChecked="{Binding PhysicsSelfCollision, Mode=TwoWay}"
+                      VerticalAlignment="Center"
+                      ToolTip.Tip="开 = kDynamic 层,粒子互相排开堆叠;关 = kParticle 层,只碰世界互相穿透(Jolt 层矩阵,宽阶段零成本)"/>
+          </Grid>
+
           <!-- 模块堆栈：每个实例一张参数卡 -->
           <Border Padding="0,10,0,2">
             <TextBlock Text="MODULES"
@@ -312,6 +343,11 @@
                               <TextBox MinWidth="110" FontSize="11" IsVisible="{Binding IsText}"
                                        ToolTip.Tip="{Binding Note}"
                                        Text="{Binding Value, Mode=TwoWay}"/>
+                              <!-- P4.2:asset 类型 → 资产选择器(项目 OBJ 源,CWD 相对路径) -->
+                              <ComboBox MinWidth="150" FontSize="11" IsVisible="{Binding IsAsset}"
+                                        ToolTip.Tip="{Binding Note}"
+                                        ItemsSource="{Binding AssetOptions}"
+                                        SelectedItem="{Binding Value, Mode=TwoWay}"/>
                               <TextBlock IsVisible="{Binding IsCurve}" Text="curve ↓"
                                          VerticalAlignment="Center"
                                          FontFamily="{DynamicResource FontMono}" FontSize="10"

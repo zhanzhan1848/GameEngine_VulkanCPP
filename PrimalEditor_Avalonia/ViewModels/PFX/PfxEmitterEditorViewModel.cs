@@ -26,7 +26,7 @@ namespace PrimalEditor_Avalonia.ViewModels.PFX;
 /// </summary>
 public sealed class PfxParamRow : INotifyPropertyChanged
 {
-    public enum ParamKind { Numeric, Vector, Bool, Enum, Curve, Text }
+    public enum ParamKind { Numeric, Vector, Bool, Enum, Curve, Text, Asset }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Fire([System.Runtime.CompilerServices.CallerMemberName] string? name = null)
@@ -58,6 +58,9 @@ public sealed class PfxParamRow : INotifyPropertyChanged
     public bool IsCurve => Kind == ParamKind.Curve;
     public bool IsEnum => Kind == ParamKind.Enum;
     public bool IsText => Kind == ParamKind.Text;
+    public bool IsAsset => Kind == ParamKind.Asset;
+    /// <summary>P4.2:asset 类型参数的可选项(CWD 相对路径,即存储格式本身)。</summary>
+    public string[] AssetOptions { get; set; } = Array.Empty<string>();
 
     // scalar / free text (enum + param_ref: schema carries no option lists)
     private string _value = "0";
@@ -441,6 +444,55 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
         StatusLine = "Fill radius: add a PhysicsCollision module first";
     }
 
+    // ---- P2:逐粒子刚体（instance.physics;引擎侧出生建 Jolt 动态体、物理权威回写）----
+    public static IReadOnlyList<string> PhysicsModeOptions { get; } = new[] { "Off", "Rigid Bodies" };
+
+    public string PhysicsMode
+    {
+        get => _physicsMode;
+        set
+        {
+            if (_physicsMode == value) return;
+            _physicsMode = value;
+            Fire(nameof(PhysicsMode));
+            Fire(nameof(IsPhysicsEnabled));
+            OnStructureEdited("instance.physics.mode");
+        }
+    }
+    private string _physicsMode = "Off";
+
+    public bool IsPhysicsEnabled => string.Equals(_physicsMode, "Rigid Bodies", StringComparison.OrdinalIgnoreCase);
+
+    public string PhysicsRadius
+    {
+        get => _physicsRadius;
+        set { if (_physicsRadius == value) return; _physicsRadius = value; Fire(nameof(PhysicsRadius)); OnStructureEdited("instance.physics.radius"); }
+    }
+    private string _physicsRadius = "0.05";
+
+    public string PhysicsMass
+    {
+        get => _physicsMass;
+        set { if (_physicsMass == value) return; _physicsMass = value; Fire(nameof(PhysicsMass)); OnStructureEdited("instance.physics.mass"); }
+    }
+    private string _physicsMass = "1";
+
+    public string PhysicsMaxBodies
+    {
+        get => _physicsMaxBodies;
+        set { if (_physicsMaxBodies == value) return; _physicsMaxBodies = value; Fire(nameof(PhysicsMaxBodies)); OnStructureEdited("instance.physics.max_bodies"); }
+    }
+    private string _physicsMaxBodies = "256";
+
+    /// <summary>自碰撞:kDynamic(互相排开堆叠,默认)/ 关 → kParticle(只碰世界,互相穿透)。
+    /// 引擎经对象层矩阵控制(Jolt 宽阶段零成本跳过)。</summary>
+    public bool PhysicsSelfCollision
+    {
+        get => _physicsSelfCollision;
+        set { if (_physicsSelfCollision == value) return; _physicsSelfCollision = value; Fire(nameof(PhysicsSelfCollision)); OnStructureEdited("instance.physics.self_collision"); }
+    }
+    private bool _physicsSelfCollision = true;
+
     private static string InstanceMeshDisplayName(AssetInfo a) => a.FileName;
 
     // 内置程序化 instance 几何（引擎 ParticleFXMeshPass 槽 0/1，无需内容资产）
@@ -665,11 +717,27 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
                     ? mv.GetValue<string>() : "";
                 _instanceMeshGuid = inst["guid"] is System.Text.Json.Nodes.JsonValue gv
                     ? gv.GetValue<string>() : "";
+                if (inst["physics"] is System.Text.Json.Nodes.JsonObject ph)
+                {
+                    var mode = ph["mode"]?.GetValue<string>();
+                    _physicsMode = mode == "rigid_body" ? "Rigid Bodies" : "Off";
+                    _physicsRadius = ph["radius"]?.ToJsonString().Trim('"') is { } r && float.TryParse(r, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _) ? r : "0.05";
+                    _physicsMass = ph["mass"]?.ToJsonString().Trim('"') is { } m && float.TryParse(m, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _) ? m : "1";
+                    _physicsMaxBodies = ph["max_bodies"]?.ToJsonString().Trim('"') is { } b && int.TryParse(b, out _) ? b : "256";
+                    _physicsSelfCollision = ph["self_collision"] is not System.Text.Json.Nodes.JsonValue sc || sc.GetValue<bool>();
+                }
+                else
+                {
+                    _physicsMode = "Off";
+                    _physicsSelfCollision = true;
+                }
             }
             else
             {
                 _instanceMeshPath = "";
                 _instanceMeshGuid = "";
+                _physicsMode = "Off";
+                _physicsSelfCollision = true;
             }
             RefreshInstanceMeshOptions();
             _instanceMeshSelected = InstanceMeshDisplayFor(_instanceMeshPath, _instanceMeshGuid);
@@ -747,6 +815,9 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
             "bool" => PfxParamRow.ParamKind.Bool,
             "curve" => PfxParamRow.ParamKind.Curve,
             "enum" => PfxParamRow.ParamKind.Enum,
+            // P4.2:asset 类型 → 资产选择器(选项 = 项目内 OBJ 源资产的 CWD 相对路径,
+            // 与引擎 ShapeLocation mesh 的存储格式一致;选中即写值)
+            "asset" => PfxParamRow.ParamKind.Asset,
             // param_ref 的数字形态必须按 Numeric 编辑/序列化：引擎侧
             // get_param_ref_field 只认 number 或 {"param":...} 绑定对象，
             // 写成 JSON 字符串会编译失败（reload 被拒 → 预览保持旧程序）。
@@ -761,6 +832,16 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
             CurveSlot = CurveSlotForModule(moduleName),
         };
         row.SetChangedCallback(() => OnParamEdited(row));
+        if (kind == PfxParamRow.ParamKind.Asset)
+        {
+            // P4.2:OBJ 源资产(引擎 ShapeLocation mesh 解析器只吃 OBJ)→ CWD 相对路径选项
+            row.AssetOptions = AssetRegistry.Assets
+                .Where(a => a.Type == Native.AssetType.Mesh &&
+                            string.Equals(a.Extension, ".obj", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(a => a.FileName, StringComparer.OrdinalIgnoreCase)
+                .Select(a => Native.CookedArtifactResolver.ToCwdRelative(a.FullPath))
+                .ToArray();
+        }
         switch (kind)
         {
             case PfxParamRow.ParamKind.Numeric:
@@ -893,12 +974,34 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
         root["name"] = _rootName;
         root["blend"] = _blendMode;
         root["renderer"] = _renderer;
-        if (!string.IsNullOrEmpty(_instanceMeshPath))
+        if (!string.IsNullOrEmpty(_instanceMeshPath) || IsPhysicsEnabled)
         {
             var inst = root["instance"] as System.Text.Json.Nodes.JsonObject
                        ?? new System.Text.Json.Nodes.JsonObject();
-            inst["mesh"] = _instanceMeshPath;
-            if (!string.IsNullOrEmpty(_instanceMeshGuid)) inst["guid"] = _instanceMeshGuid;
+            if (!string.IsNullOrEmpty(_instanceMeshPath))
+            {
+                inst["mesh"] = _instanceMeshPath;
+                // guid:空值时显式移除——节点复用会让旧文档的残留键"复活"
+                if (!string.IsNullOrEmpty(_instanceMeshGuid)) inst["guid"] = _instanceMeshGuid;
+                else inst.Remove("guid");
+            }
+            if (IsPhysicsEnabled)
+            {
+                var ph = inst["physics"] as System.Text.Json.Nodes.JsonObject
+                         ?? new System.Text.Json.Nodes.JsonObject();
+                ph["mode"] = "rigid_body";
+                if (float.TryParse(_physicsRadius, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rad)) ph["radius"] = rad;
+                if (float.TryParse(_physicsMass, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mass)) ph["mass"] = mass;
+                if (int.TryParse(_physicsMaxBodies, out var mb) && mb > 0) ph["max_bodies"] = mb;
+                // 自碰撞开 = 键省略(缺省 true);必须显式移除旧键,否则文档残留的 false 会存活
+                if (_physicsSelfCollision) ph.Remove("self_collision");
+                else ph["self_collision"] = false;
+                inst["physics"] = ph;
+            }
+            else if (inst["physics"] is not null)
+            {
+                inst.Remove("physics");
+            }
             root["instance"] = inst;
         }
         else if (root["instance"] is not null)
