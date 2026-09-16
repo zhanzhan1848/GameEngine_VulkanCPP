@@ -1,6 +1,6 @@
 # PFX 渲染 Instance 与碰撞 排期路线图
 
-> 日期:2026-09-16 ｜ 状态:📋 排期中 ｜ 前置:v1 已交付(见 §1)
+> 日期:2026-09-16 ｜ 状态:✅ 全阶段已完成(2026-09-16 当日交付,实际记录见 §5)| 前置:v1 已交付(见 §1)
 > 范围:粒子渲染 instance(content browser 资产实例化)、粒子 vs 世界静态碰撞 v1 的后续阶段,
 > 以及发射源 mesh 采样的补完项。工作量均为估算值(人日,含测试与门禁)。
 
@@ -79,3 +79,29 @@ RigidBodySpawner 已完整且 N3 单测覆盖(建/删/物理权威回写/预算 
 - 几何槽上限 8、max_instances 4096 为 v1 常量;P1.4 或 P3 若触及上限,再做槽淘汰策略(按 LRU 注销,需同步 `pfx_instance_geometry_slots_` 缓存)。
 - P2 的物理权威回写(ADR3)与渲染读 position 通道天然兼容,但与 PhysicsCollision 模块同开时语义重叠(刚体自带碰撞)——资产校验应拒绝二者同开,或文档明确优先级。
 - `TestVulkanSponza` 属 Vulkan 树,交叉构建纪律照旧(切树先 `rm Darwin/Debug/libEngine.a`)。
+
+
+---
+
+## 5. 交付实录(2026-09-16,全阶段当日完成)
+
+| 项 | 实际落点 | 验证 |
+|---|---|---|
+| P1.1 内置 mesh 选项 | `Bridges.cpp create_builtin_geometry`(builtin:box/cube/sphere/plane/capsule → content 注册 → 同一解包尾巴);编辑器内置分组 | `test_builtin_instance_geometry` |
+| P1.2 实例旋转 | `pack_mesh_instances` 消费 `scale_rotation.z`(弧度,绕 +Y 四元数;48B 布局不变) | `test_pack_mesh_rotation_and_tint` |
+| P1.4 实例色 | pad 区装 RGB(pad0=R、scale_and_pad.zw=GB),Metal/GLSL 顶点→片段 tint 相乘,spv 重编 | 同上 |
+| P1.3 Vulkan 步长修复 | `ParticleFXMesh.vert` positions/normals 改 float 数组 + std430(修 16B 步长错位),glslc 重编 spv | Vulkan 树 `TestVulkanSponzaRenderGraph` 90s 实跑零故障零验证错误 |
+| P1.5 内嵌预览 | mesh 模式:实例资产名标注 + 旋转方块描边标记 | 编译 + 人工 |
+| P2.1/2.3 PhysicsBindings | `interop/PhysicsBindings.*`(drain 一次→按 source 路由→逐绑定回写);`PipelineTick` 尾部 `physics_bindings_tick`;create/reload/remove 生命周期挂钩;`PhysicsShutdown` clear | `test_bindings_route_and_budget` 等 |
+| P2.2 instance.physics | mode(none/rigid_body)/collider(sphere/convex)/radius/mass/restitution/friction/max_bodies;**刚体与 PhysicsCollision 模块双开编译期拒绝** | `test_instance_physics_parse_and_mutex` |
+| P2.4 编辑器 PHYSICS 行 | 模式下拉 + R/MASS/MAX BODIES;`IsRenderMesh` 联动禁用 | C# 构建 |
+| P2.5 预算统一口径 | `budget_config.max_live_rigid_bodies{1024}` → PhysicsInitialize 注入 PhysicsBindings 全局否决 | `test_bindings_route_and_budget`(预算 0 否决) |
+| P3.1 convex 碰撞体 | policy 扩展 `collider_kind::convex` + 顶点采样(cap 64);`body_create_convex` 路径;convex 需 instance.mesh(编译期校验) | `test_convex_spawn` |
+| P3.2 collision 事件 | spawner writeback 产出接触事件(仅策略开启时 drain,不与 HUD 抢流)→ `emit_event`(新增核心 API)→ 总线 | `test_collision_events_produced` |
+| P3.3 物理多线程 | `max_worker_threads>0` → `JPH::JobSystemThreadPool`(≤16 线程);默认 0 单线程确定性基线不变 | `test_multithreaded_step` |
+| P4.1 mesh_volume 发射 | `mesh_geometry` 内点云(固定种子 1024 候选 AABB 撒点 + +X 射线奇偶 inside,≤512 点);空 → surface 退化;编译期拒绝移除 | mesh_volume 用例改正例 |
+| P4.2 asset 类型 hint | ShapeLocation mesh 参数 hint "string"→"asset";编辑器 `ParamKind.Asset` + ComboBox(项目 OBJ 源,CWD 相对路径) | C# 构建 + schema 断言更新 |
+
+| 修复(实场验证发现) | ① `SyncToJson` 复用旧 physics 节点导致 `self_collision:false` 残留(勾选自碰保存后仍 false 的根因,含 guid 同类隐患);② `PhysicsBindings.set_enabled` 重置 spawner 未处置旧跟踪体(幽灵碰撞体泄漏)。回归:PhysicsSelfCollision 持久化单测 + 实场差分(自碰开 244↔172 动态 vs 自碰关 34px 恒定) |
+门禁终态:TestParticleFX **67 组全绿**(+11);C# Pfx 30 / Cli 57 全绿;ctest Unit 4/4;全量构建 ✓;
+Metal `TestModularPipeline` 75s 与 Vulkan `TestVulkanSponzaRenderGraph` 90s 实跑均零故障。
