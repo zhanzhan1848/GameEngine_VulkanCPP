@@ -331,6 +331,9 @@ public static class Serializer
                     PrimalEditor_Avalonia.Components.PrefabInstanceComponent prefabInstance => JsonSerializer.SerializeToElement(prefabInstance, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.ParticleEmitterComponent particleEmitter => JsonSerializer.SerializeToElement(particleEmitter, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent crossScene => JsonSerializer.SerializeToElement(crossScene, SceneDocument.JsonOptions),
+                    PrimalEditor_Avalonia.Components.ColliderComponent collider => JsonSerializer.SerializeToElement(collider, SceneDocument.JsonOptions),
+                    PrimalEditor_Avalonia.Components.RigidBodyComponent rigidBody => JsonSerializer.SerializeToElement(rigidBody, SceneDocument.JsonOptions),
+                    PrimalEditor_Avalonia.Components.ParticleFXComponent particleFx => JsonSerializer.SerializeToElement(particleFx, SceneDocument.JsonOptions),
                     _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
                 };
                 var componentDoc = new ComponentDocument
@@ -366,6 +369,9 @@ public static class Serializer
             PrimalEditor_Avalonia.Components.PrefabInstanceComponent => "prefabInstance",
             PrimalEditor_Avalonia.Components.ParticleEmitterComponent => "particleEmitter",
             PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent => "crossSceneReference",
+            PrimalEditor_Avalonia.Components.ColliderComponent => "collider",
+            PrimalEditor_Avalonia.Components.RigidBodyComponent => "rigidbody",
+            PrimalEditor_Avalonia.Components.ParticleFXComponent => "particleFX",
             _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
         };
     }
@@ -471,6 +477,9 @@ public static class Serializer
             "prefabinstance" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.PrefabInstanceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "particleemitter" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.ParticleEmitterComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "crossscenereference" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.CrossSceneReferenceComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "collider" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.ColliderComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "rigidbody" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.RigidBodyComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "particlefx" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.ParticleFXComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             _ => throw new NotSupportedException($"Unknown component type discriminator: '{componentDoc.Type}'")
         };
     }
