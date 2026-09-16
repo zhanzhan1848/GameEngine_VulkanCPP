@@ -36,6 +36,7 @@ public static class SequenceDriver
             var transform = entity?.GetTransform();
             if (entity == null || transform == null) continue; // 轨指向的实体已删除：跳过
             data.ApplyTo(transform);
+            worldEditor.Properties.RefreshFromTransform(transform);
             touched.Add(entity);
         }
         if (touched.Count > 0)
@@ -71,7 +72,11 @@ public static class SequenceDriver
     {
         if (snapshot.Entries.Count == 0) return;
         foreach (var (entity, data) in snapshot.Entries)
-            if (entity.GetTransform() is { } t) data.ApplyTo(t);
+            if (entity.GetTransform() is { } t)
+            {
+                data.ApplyTo(t);
+                worldEditor.Properties.RefreshFromTransform(t);
+            }
         worldEditor.PushTransformsToNative(SnapshotEntities(snapshot));
     }
 

@@ -406,6 +406,7 @@ public sealed class SequenceCommands
             if (doc == null || _timer != null) return; // 幂等
             if (SequenceEditorState.CurrentFrame >= doc.DurationFrames - 1)
                 SequenceEditorState.SetFrame(0);
+            if (EditorServices.WorldEditor is { } world) ApplyCurrent(world, doc);
             SequenceEditorState.SetPlaying(true);
             _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000.0 / Math.Max(1, doc.Fps)) };
             _timer.Tick += (_, _) =>
@@ -437,8 +438,13 @@ public sealed class SequenceCommands
     /// <summary>预览播放器单例（面板与 CLI 共用）。</summary>
     public static SequencerController Playback { get; } = new();
 
-    private static void ApplyCurrent(WorldEditorViewModel worldEditor, SequenceDocument doc) =>
-        _ = SequenceDriver.ApplyFrame(doc, SequenceEditorState.CurrentFrame, worldEditor);
+    private static void ApplyCurrent(WorldEditorViewModel worldEditor, SequenceDocument doc)
+    {
+        var (_, camera) = SequenceDriver.ApplyFrame(doc, SequenceEditorState.CurrentFrame, worldEditor);
+        var viewport = EditorServices.FindViewport();
+        if (viewport != null && viewport.LookThroughSceneEntityId != camera)
+            viewport.LookThroughCamera(camera);
+    }
 
     private static void PushUndo(WorldEditorViewModel worldEditor, string name, params IUndoRedoAction[] actions)
     {

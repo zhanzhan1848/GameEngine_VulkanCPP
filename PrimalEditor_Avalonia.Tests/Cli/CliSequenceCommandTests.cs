@@ -246,6 +246,7 @@ public sealed class CliSequenceCommandTests : IDisposable
         var entity = SequenceDriver.FindEntity(_scene.Entities, GuidOf(guid))!;
         var transform = entity.GetTransform()!;
         Assert.Equal(5f, transform.PositionX, 5);
+        Assert.Equal(5f, _worldEditor.Properties.PosX);
         Assert.Equal(5, SequenceEditorState.CurrentFrame);
     }
 
