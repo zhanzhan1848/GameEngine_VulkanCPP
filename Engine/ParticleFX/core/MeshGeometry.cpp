@@ -129,7 +129,58 @@ bool mesh_geometry::load_obj(const char* path, std::string& err) {
     area.valid = true;
     color = build_cdf(*this, &corner_r);
     uv = build_cdf(*this, &corner_u);
+
+    // P4.1:mesh_volume 内点云(开放网格/退化 → 空,采样端退化 surface)
+    bake_interior_points(1024, 512);
     return true;
+}
+
+// ---- 内点云(mesh_volume)------------------------------------------------------
+
+bool mesh_geometry::contains_point(const math::v3& p) const {
+    // +X 射线奇偶计数(2D 投影 yz 平面交叉法)
+    u32 crossings = 0;
+    const u32 tri = triangle_count();
+    for (u32 t = 0; t < tri; ++t) {
+        const math::v3& a = positions[indices[t * 3]];
+        const math::v3& b = positions[indices[t * 3 + 1]];
+        const math::v3& c = positions[indices[t * 3 + 2]];
+        // 射线沿 +X:解 2D 射线-三角形(yz 平面),交点 x 须 > p.x
+        const f32 ay = a.y, az = a.z, by = b.y, bz = b.z, cy = c.y, cz = c.z;
+        const f32 d1 = (p.y - by) * (cz - bz) - (p.z - bz) * (cy - by);
+        const f32 d2 = (p.y - cy) * (az - cz) - (p.z - cz) * (ay - cz);
+        const f32 d3 = (p.y - ay) * (bz - az) - (p.z - az) * (by - az);
+        const bool has_neg = d1 < 0 || d2 < 0 || d3 < 0;
+        const bool has_pos = d1 > 0 || d2 > 0 || d3 > 0;
+        if (has_neg && has_pos) continue;                       // 射线不穿该三角形投影
+        // 交点 x
+        const f32 denom = (b.y - a.y) * (c.z - a.z) - (c.y - a.y) * (b.z - a.z);
+        if (std::fabs(denom) < 1e-12f) continue;                // 投影退化(与射线平行)
+        const f32 u = ((p.y - a.y) * (c.z - a.z) - (p.z - a.z) * (c.y - a.y)) / denom;
+        const f32 v = ((b.y - a.y) * (p.z - a.z) - (b.z - a.z) * (p.y - a.y)) / denom;
+        if (u < 0.f || v < 0.f || u + v > 1.f) continue;
+        const f32 x_hit = a.x + u * (b.x - a.x) + v * (c.x - a.x);
+        if (x_hit > p.x) ++crossings;
+    }
+    return (crossings % 2) == 1;
+}
+
+void mesh_geometry::bake_interior_points(u32 candidates, u32 cap) {
+    interior.clear();
+    if (positions.empty()) return;
+    math::v3 lo = positions[0], hi = positions[0];
+    for (const auto& p : positions) {
+        lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y); lo.z = std::min(lo.z, p.z);
+        hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y); hi.z = std::max(hi.z, p.z);
+    }
+    pcg32 rng;
+    rng.seed(0x9E3779B9ULL);   // 固定种子:同网格烘焙结果确定
+    for (u32 i = 0; i < candidates && interior.size() < cap; ++i) {
+        const math::v3 p{ lo.x + (hi.x - lo.x) * rng.next_f32(),
+                          lo.y + (hi.y - lo.y) * rng.next_f32(),
+                          lo.z + (hi.z - lo.z) * rng.next_f32() };
+        if (contains_point(p)) interior.push_back(p);
+    }
 }
 
 } // namespace primal::pfx

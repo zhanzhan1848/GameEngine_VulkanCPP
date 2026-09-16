@@ -263,14 +263,10 @@ bool shape_location_parse(const json::value& o, void* out, std::string& err) {
             p->half[i] = e->as_f32();
         }
     }
-    if (p->shape == 7) {
-        err = "shape 'mesh_volume' is not implemented yet (v1: use 'mesh_surface')";
-        return false;
-    }
-    if (p->shape == 6) {
+    if (p->shape == 6 || p->shape == 7) {
         const json::value* v = o.find("mesh");
         if (!v || !v->is_string()) {
-            err = "shape 'mesh_surface' requires a 'mesh' OBJ path";
+            err = "shape 'mesh_surface'/'mesh_volume' requires a 'mesh' OBJ path";
             return false;
         }
         p->mesh_idx = mesh_find_or_load(v->as_string(), err);
@@ -332,6 +328,14 @@ void shape_location_exec(sim_context& ctx, const void* params) {
             if (p->scatter == 2) {   // vertex：顶点均匀（索引数组均匀取，重复顶点随其共享度）
                 const u32 vi = m->indices[rng.next_u32() % (u32)m->indices.size()];
                 p3 = m->positions[vi];
+                break;
+            }
+
+            // P4.1:mesh_volume——内点云均匀采样(加载末尾确定性烘焙;
+            // 开放网格/退化 → 空 → 退化为 surface)
+            if (p->shape == 7 && !m->interior.empty()) {
+                p3 = m->interior[rng.next_u32() % (u32)m->interior.size()];
+                n = random_unit_vector(rng);   // 体积内无确定面法向
                 break;
             }
 
@@ -397,8 +401,8 @@ constexpr param_hint shape_location_hints[] = {
     { "angle", "param_ref", "cone half angle in degrees", "25" },
     { "scatter", "enum", "area_uniform|triangle_uniform|vertex|density_weighted (mesh shapes)",
       "\"area_uniform\"" },
-    { "mesh", "string", "OBJ path relative to working directory, loaded at emitter compile "
-                        "(mesh_surface)", nullptr },
+    { "mesh", "asset", "OBJ path relative to working directory, loaded at emitter compile "
+                       "(mesh_surface/mesh_volume)", nullptr },
     { "weight_channel", "enum", "none|vertex_color_r|uv0_u, source for density_weighted", "\"none\"" },
     { "bias", "param_ref", "density_weighted: 0=weight density, 1=strongly polarized", "0" },
 };
