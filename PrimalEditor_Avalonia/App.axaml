@@ -3,6 +3,7 @@
              x:Class="PrimalEditor_Avalonia.App"
              xmlns:local="using:PrimalEditor_Avalonia"
              xmlns:dockTheme="using:Dock.Avalonia.Themes.Fluent"
+             xmlns:dock="using:Dock.Avalonia.Controls"
              xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
              xmlns:th="using:Avalonia.Styling"
              RequestedThemeVariant="{x:Static th:ThemeVariant.Dark}">
@@ -28,6 +29,9 @@
     <Application.Styles>
         <FluentTheme />
         <dockTheme:DockFluentTheme />
+        <!-- 覆盖 Dock 的 DocumentContentControl 模板（同步呈现文档内容），
+             必须排在 DockFluentTheme 之后。原因见该文件内注释。 -->
+        <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/Controls/DocumentContentControlOverride.axaml" />
         <StyleInclude Source="avares://NodifyM.Avalonia/Styles/ControlStyles.axaml" />
         <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/Warcraft/WarcraftTheme.Styles.axaml" />
         <StyleInclude Source="avares://PrimalEditor_Avalonia/Themes/Controls/CyberCorner.axaml" />

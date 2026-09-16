@@ -17,6 +17,14 @@
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource VoidBrush}">
 
+    <!-- View 菜单项只显示 InputGesture，不实际绑定按键——这里补上真实
+         的快捷键（此前 F4/F5/F6/F7 均为纯装饰）。 -->
+    <Window.KeyBindings>
+        <KeyBinding Gesture="F4" Command="{Binding ToggleWorldEditorTabCommand}"/>
+        <KeyBinding Gesture="F5" Command="{Binding ToggleContentBrowserTabCommand}"/>
+        <KeyBinding Gesture="F7" Command="{Binding ToggleSequencerTabCommand}"/>
+    </Window.KeyBindings>
+
     <DockPanel LastChildFill="True">
 
         <!-- =========== TOP MENU BAR =========== -->
@@ -66,6 +74,11 @@
                     <MenuItem Header="Toggle _Content Browser" Command="{Binding ToggleContentBrowserTabCommand}" InputGesture="F5">
                         <MenuItem.Icon>
                             <CheckBox IsChecked="{Binding IsContentBrowserVisible}" IsHitTestVisible="False"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="_Sequencer Panel" Command="{Binding ToggleSequencerTabCommand}" InputGesture="F7">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding IsSequencerVisible}" IsHitTestVisible="False"/>
                         </MenuItem.Icon>
                     </MenuItem>
                     <MenuItem Header="Toggle _Logger" Click="OnToggleLogger" InputGesture="F6"/>

@@ -24,8 +24,7 @@
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
-    <AvaloniaResource Include="Controls\*.axaml" />
-    <AvaloniaResource Include="Themes\**\*.axaml" />
+    <!-- .axaml files are included once by Avalonia's default AvaloniaXaml glob. -->
   </ItemGroup>
 
   <ItemGroup>

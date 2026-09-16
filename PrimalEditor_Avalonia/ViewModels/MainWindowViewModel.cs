@@ -23,6 +23,8 @@ public class MainWindowViewModel : ViewModelBase
 
     public ContentBrowserViewModel ContentBrowser { get; } = new ContentBrowserViewModel();
 
+    public SequencerViewModel Sequencer { get; } = new SequencerViewModel();
+
     public LoggerViewModel Logger { get; } = new LoggerViewModel();
 
     private IRootDock? _layout;
@@ -89,9 +91,25 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    /// <summary>F7 switches the World Editor's bottom panel, not the document tab.</summary>
+    public bool IsSequencerVisible
+    {
+        get => WorldEditor.BottomPanelIndex == 1;
+        set
+        {
+            WorldEditor.BottomPanelIndex = value ? 1 : 0;
+            if (value)
+            {
+                IsWorldEditorVisible = true;
+                ApplyDockableVisibility(WorldEditor, true);
+            }
+        }
+    }
+
     public void ToggleLogger() => IsLoggerVisible = !IsLoggerVisible;
     public void ToggleWorldEditorTab() => IsWorldEditorVisible = !IsWorldEditorVisible;
     public void ToggleContentBrowserTab() => IsContentBrowserVisible = !IsContentBrowserVisible;
+    public void ToggleSequencerTab() => IsSequencerVisible = !IsSequencerVisible;
 
     /// <summary>
     /// Add or remove a dockable from the dock that hosts it. WorldEditor
@@ -100,6 +118,9 @@ public class MainWindowViewModel : ViewModelBase
     /// find its owning dock; when re-shown we add it back to that same
     /// dock. Layout docks may be nested (RootDock → ProportionalDock →
     /// DocumentDock/ToolDock), so the lookup has to descend.
+    /// 注意：VisibleDockables 是普通 List（不可通知），增删必须走 dock 的
+    /// 官方 API（AddDocument/AddTool 维护 Owner 并触发激活/焦点语义），
+    /// 直接操作列表会导致视图层不刷新——标签不出现（F7 首修时的实测）。
     /// </summary>
     private void ApplyDockableVisibility(Dock.Model.Core.IDockable dockable, bool visible)
     {
@@ -112,27 +133,42 @@ public class MainWindowViewModel : ViewModelBase
 
     private void HideDockable(Dock.Model.Core.IDockable target)
     {
-        var owner = FindOwningDock(Layout, target);
-        if (owner != null)
-        {
-            owner.VisibleDockables.Remove(target);
-        }
+        var owner = FindOwningDock(Layout, target) ?? target.Owner as Dock.Model.Core.IDock;
+        if (owner == null) return;
+        owner.VisibleDockables.Remove(target);
+        if (ReferenceEquals(owner.ActiveDockable, target))
+            owner.ActiveDockable = owner.VisibleDockables.LastOrDefault();
+        target.Owner = null;
     }
 
     private void ShowDockable(Dock.Model.Core.IDockable target)
     {
-        // Find any dock that already contains this dockable — covers the
-        // case where a previous hide-and-show cycle must restore it.
+        // 已在树里：只需确保可见并把激活标签切过去（用户从 View 菜单
+        // 打开时预期看到它）。
         var owner = FindOwningDock(Layout, target);
-        if (owner != null && !owner.VisibleDockables.Contains(target))
+        if (owner != null)
         {
-            owner.VisibleDockables.Add(target);
+            if (!owner.VisibleDockables.Contains(target))
+            {
+                owner.VisibleDockables.Add(target);
+                target.Owner = owner;
+            }
+            owner.ActiveDockable = target;
             return;
         }
-        // First-time show: fall back to the default host. DocumentDock
-        // for tabs (WorldEditor), ToolDock for tool windows (ContentBrowser).
+
+        // 首次显示（从不在布局树里）：走 dock 的官方 API——AddDocument
+        // 会维护 Owner、激活并聚焦该标签。
         var fallback = ResolveDefaultHost(Layout, target);
-        fallback?.VisibleDockables.Add(target);
+        if (fallback is Dock.Model.Mvvm.Controls.DocumentDock docs)
+            docs.AddDocument(target);
+        else if (fallback is Dock.Model.Mvvm.Controls.ToolDock tool)
+            tool.AddTool(target);
+        else
+        {
+            fallback?.VisibleDockables.Add(target);
+            target.Owner = fallback;
+        }
     }
 
     private static Dock.Model.Core.IDock? FindOwningDock(
@@ -286,11 +322,17 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand AboutCommand { get; }
     public ICommand ToggleWorldEditorTabCommand { get; }
     public ICommand ToggleContentBrowserTabCommand { get; }
+    public ICommand ToggleSequencerTabCommand { get; }
 
     private List<GameEntity> _clipboard = new();
 
     public MainWindowViewModel()
     {
+        WorldEditor.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(WorldEditorViewModel.BottomPanelIndex))
+                OnPropertyChanged(nameof(IsSequencerVisible));
+        };
         WorldEditor.Properties.RevealAssetCallback = ContentBrowser.RevealAsset;
         Factory = new MainWindowDockFactory(this);
         Layout = Factory.CreateLayout();
@@ -309,6 +351,7 @@ public class MainWindowViewModel : ViewModelBase
         CutCommand = new RelayCommand(_ => CutExecute(), _ => WorldEditor.SelectedEntities.Length > 0);
         ToggleWorldEditorTabCommand = new RelayCommand(_ => ToggleWorldEditorTab());
         ToggleContentBrowserTabCommand = new RelayCommand(_ => ToggleContentBrowserTab());
+        ToggleSequencerTabCommand = new RelayCommand(_ => ToggleSequencerTab());
         CopyCommand = new RelayCommand(_ => CopyExecute(), _ => WorldEditor.SelectedEntities.Length > 0);
         PasteCommand = new RelayCommand(_ => PasteExecute(), _ => _clipboard.Count > 0 && WorldEditor.ActiveScene != null);
         AboutCommand = new RelayCommand(_ => AboutExecute());

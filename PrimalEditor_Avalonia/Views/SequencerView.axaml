@@ -1,0 +1,8 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:seq="using:PrimalEditor_Avalonia.Views.Sequencer"
+             x:Class="PrimalEditor_Avalonia.Views.SequencerView">
+    <!-- Sequencer 标签页内容：ViewLocator 按 Dockable.Id "Sequencer" 约定
+         解析到本视图；真实面板逻辑在 Views/Sequencer/SequencerPanel。 -->
+    <seq:SequencerPanel/>
+</UserControl>

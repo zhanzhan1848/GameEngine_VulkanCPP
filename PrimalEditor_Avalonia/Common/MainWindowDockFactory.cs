@@ -30,18 +30,29 @@ public sealed class MainWindowDockFactory : Factory
         worldEditor.Id = "WorldEditor";
         worldEditor.Title = "World Editor";
 
+        // Sequencer 只登记 Id/Title（ViewLocator 按 Id 解析视图），
+        // 不放进初始 VisibleDockables；若被 ShowDockable 显示则由
+        // DocumentDock 兜底加回标签组（F7 本体切底部面板，见
+        // SequencerTabTests）。
+        var sequencer = _vm.Sequencer;
+        sequencer.Id = "Sequencer";
+        sequencer.Title = "Sequencer";
+
+        // VisibleDockables 必须用 Factory.CreateList（可通知集合）：
+        // 运行期经 View 菜单增删标签依赖 CollectionChanged 刷新视图，
+        // 普通 List 的增删不会让标签条重绘（F7 标签不出现的实测根因）。
         var documents = new DocumentDock
         {
             Id = "MainDocuments",
             Title = "Documents",
-            VisibleDockables = new List<IDockable> { worldEditor },
+            VisibleDockables = CreateList(new IDockable[] { worldEditor }),
             ActiveDockable = worldEditor,
         };
 
         var root = CreateRootDock();
         root.Id = "MainRoot";
         root.Title = "Root";
-        root.VisibleDockables = new List<IDockable> { documents };
+        root.VisibleDockables = CreateList(new IDockable[] { documents });
         root.ActiveDockable = documents;
         return root;
     }

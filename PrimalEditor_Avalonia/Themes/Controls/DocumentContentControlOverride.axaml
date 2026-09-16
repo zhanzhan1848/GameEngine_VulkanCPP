@@ -1,0 +1,100 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:dock="using:Dock.Avalonia.Controls"
+        xmlns:core="using:Dock.Model.Core"
+        xmlns:views="using:PrimalEditor_Avalonia.Views"
+        x:CompileBindings="False">
+
+  <Styles.Resources>
+    <ResourceDictionary>
+
+      <!-- 同步呈现文档工作区。Sequencer 作为 WorldEditorView 内部的
+           底部工具标签，不参与顶部文档切换或原生视口重建。 -->
+
+      <ControlTheme x:Key="PrimalDocumentControlTheme" TargetType="dock:DocumentControl">
+
+        <Setter Property="TabsLayout" Value="{Binding TabsLayout, Mode=TwoWay}" />
+        <Setter Property="CloseButtonTheme" Value="{DynamicResource DockDefaultDocumentCloseButtonTheme}" />
+
+        <Setter Property="IconTemplate">
+          <DataTemplate DataType="core:IDockable">
+            <Panel />
+          </DataTemplate>
+        </Setter>
+
+        <Setter Property="HeaderTemplate">
+          <DataTemplate DataType="core:IDockable">
+            <TextBlock Text="{Binding Title}"
+                       VerticalAlignment="Center"
+                       Padding="{DynamicResource DockHeaderContentPadding}"  />
+          </DataTemplate>
+        </Setter>
+
+        <Setter Property="ModifiedTemplate">
+          <DataTemplate DataType="core:IDockable">
+            <TextBlock VerticalAlignment="Center"
+                       Text="*"
+                       Margin="{DynamicResource DockModifiedIndicatorMargin}" />
+          </DataTemplate>
+        </Setter>
+
+        <Setter Property="CloseTemplate" Value="{DynamicResource DockDefaultDocumentCloseTemplate}" />
+
+        <Setter Property="Template">
+          <ControlTemplate>
+            <Grid RowDefinitions="Auto,Auto,*">
+              <DocumentTabStrip x:Name="PART_TabStrip" Grid.Row="0"
+                                ItemsSource="{Binding VisibleDockables}"
+                                SelectedItem="{Binding ActiveDockable, Mode=TwoWay}"
+                                CanCreateItem="{Binding CanCreateDocument}"
+                                IconTemplate="{TemplateBinding IconTemplate}"
+                                HeaderTemplate="{TemplateBinding HeaderTemplate}"
+                                ModifiedTemplate="{TemplateBinding ModifiedTemplate}"
+                                CloseTemplate="{TemplateBinding CloseTemplate}"
+                                CloseButtonTheme="{TemplateBinding CloseButtonTheme}"
+                                IsActive="{TemplateBinding IsActive}"
+                                Orientation="Horizontal">
+                <DocumentTabStrip.Styles>
+                  <Style Selector="DocumentTabStripItem">
+                    <Setter Property="IsActive" Value="{Binding $parent[DocumentTabStrip].IsActive}" />
+                  </Style>
+                </DocumentTabStrip.Styles>
+              </DocumentTabStrip>
+              <Panel x:Name="PART_DocumentSeperatorHost" Grid.Row="1"
+                     IsVisible="{Binding #PART_TabStrip.IsVisible}">
+                <Panel x:Name="PART_DocumentSeperator"
+                       IsVisible="{DynamicResource DockDocumentTabStripSeparatorVisible}" />
+              </Panel>
+              <Border x:Name="PART_Border" Grid.Row="2">
+                <Grid>
+                  <views:DocumentWorkspace ActiveDocument="{Binding ActiveDockable}"
+                                           HorizontalAlignment="Stretch"
+                                           VerticalAlignment="Stretch" />
+                </Grid>
+              </Border>
+            </Grid>
+          </ControlTemplate>
+        </Setter>
+
+        <Style Selector="^/template/ Panel#PART_DocumentSeperator">
+          <Setter Property="Background" Value="{DynamicResource DockSeparatorBrush}" />
+        </Style>
+
+        <Style Selector="^:active /template/ Panel#PART_DocumentSeperator">
+          <Setter Property="Background" Value="{DynamicResource DockTabActiveIndicatorBrush}" />
+        </Style>
+
+        <Style Selector="^/template/ Border#PART_Border">
+          <Setter Property="BorderBrush" Value="{DynamicResource DockDocumentContentBorderBrush}" />
+          <Setter Property="BorderThickness" Value="{DynamicResource DockDocumentContentBorderThickness}" />
+        </Style>
+
+      </ControlTheme>
+    </ResourceDictionary>
+  </Styles.Resources>
+
+  <!-- 显式指定 Theme，绕过资源查找顺序问题（确保覆盖生效） -->
+  <Style Selector="dock|DocumentControl">
+    <Setter Property="Theme" Value="{DynamicResource PrimalDocumentControlTheme}" />
+  </Style>
+</Styles>
