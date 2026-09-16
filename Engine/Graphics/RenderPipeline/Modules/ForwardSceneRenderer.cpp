@@ -1,4 +1,6 @@
 #include "ForwardSceneRenderer.h"
+#include "ParticleFX/core/PfxSystem.h"
+#include "ParticleFX/render/Bridges.h"
 #include "../../VirtualTexture/VirtualTextureSystem.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
@@ -376,7 +378,14 @@ ResourceHandle LoadTextureFromFile(RHIDeviceBase* dev, const std::string& path, 
     return tex;
 }
 
-std::string ResolveTexturePath(const std::string& baseDir, const std::string& filename) {
+// Resolves a texture reference from the cooked .mesh material header
+// against candidate roots. References are stored as recorded at import
+// time (bare filenames or source-relative paths). extraSubdir is the
+// per-asset texture folder the editor importer copies referenced files
+// into ("<stem>_textures/" next to the .mesh); the fbx_textures /
+// models/Sponza probes keep the EngineTest asset layout working.
+std::string ResolveTexturePath(const std::string& baseDir, const std::string& filename,
+                               const std::string& extraSubdir = {}) {
     if (filename.empty()) return "";
     std::string cleanName = filename;
     std::replace(cleanName.begin(), cleanName.end(), '\\', '/');
@@ -386,6 +395,9 @@ std::string ResolveTexturePath(const std::string& baseDir, const std::string& fi
         baseDir + "fbx_textures/",
         baseDir + "models/Sponza/",
     };
+    if (!extraSubdir.empty()) {
+        basePaths.insert(basePaths.begin() + 1, baseDir + extraSubdir);
+    }
     for (const auto& base : basePaths) {
         std::string fullPath = base + cleanName;
         std::ifstream f(fullPath.c_str());
@@ -618,6 +630,10 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
 
 #ifndef DISABLE_PARTICLE_SYSTEM
     particle_pass_.initialize(device);
+#ifndef DISABLE_PARTICLE_FX
+    particle_fx_light_pass_.initialize(device);   // §7-N6：亮粒子加色灯（软失败无害）
+    particle_fx_mesh_pass_.initialize(device);    // §7-N2：mesh 粒子实例绘制（内置立方体）
+#endif
 #endif
 
     // Geometry line renderer
@@ -641,6 +657,10 @@ void ForwardSceneRenderer::Shutdown() {
 
 #ifndef DISABLE_PARTICLE_SYSTEM
     particle_pass_.shutdown();
+#ifndef DISABLE_PARTICLE_FX
+    particle_fx_light_pass_.shutdown();
+    particle_fx_mesh_pass_.shutdown();
+#endif
 #endif
 
     // Compiled graph-material variants reference the fallback textures and
@@ -1170,7 +1190,9 @@ void ForwardSceneRenderer::CreatePipelines() {
             device_->CreateDescriptorSetLayout({(u32)graphBindings.size(), graphBindings.data()});
 
         DescriptorSetLayoutHandle graphSets[] = {global_set_layout_, graph_material_set_layout_};
-        PushConstantRange modelPush{ShaderStage::Vertex, 2, sizeof(PCGPushConsts)};
+        // offset 必须 4 对齐（VUID-VkPushConstantRange-offset-00295）；shader 块从 0 开始，
+        // Metal 端忽略 offset 参数，两端统一 0。
+        PushConstantRange modelPush{ShaderStage::Vertex, 0, sizeof(PCGPushConsts)};
         graph_material_layout_ = device_->CreatePipelineLayout({2, graphSets, 1, &modelPush});
     }
 
@@ -1587,9 +1609,24 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
         return false;
     }
 
-    // Create per-mesh material descriptor sets with loaded textures
-    const std::string assetBaseDir =
-        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
+    // Create per-mesh material descriptor sets with loaded textures.
+    // Textures resolve against the cooked mesh's own directory — this raw-
+    // file path (stb decode) serves EngineTest-style assets, where textures
+    // live next to the model (fbx_textures probe). Editor project imports
+    // bind differently: their default material graph references cooked
+    // .texture assets under "<stem>_textures/", consumed at placement time
+    // via PipelineImportCookedTexture instead of this loader.
+    std::string assetBaseDir = model_path;
+    const size_t lastSlash = assetBaseDir.find_last_of("/\\");
+    assetBaseDir = (lastSlash == std::string::npos)
+        ? std::string("./")
+        : assetBaseDir.substr(0, lastSlash + 1);
+    std::string modelStem = model_path;
+    const size_t lastSegment = model_path.find_last_of("/\\");
+    if (lastSegment != std::string::npos) modelStem = model_path.substr(lastSegment + 1);
+    const size_t lastDot = modelStem.find_last_of('.');
+    if (lastDot != std::string::npos) modelStem = modelStem.substr(0, lastDot);
+    const std::string textureSubdir = modelStem + "_textures/";
     std::unordered_map<std::string, ResourceHandle> textureCache;
 
     for (auto& meshInfo : mesh_infos_) {
@@ -1604,7 +1641,7 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
 
         // Load albedo texture
         if (!meshInfo.diffuseTexturePath.empty()) {
-            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.diffuseTexturePath);
+            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.diffuseTexturePath, textureSubdir);
             if (!fullPath.empty()) {
                 auto it = textureCache.find(fullPath);
                 if (it != textureCache.end()) {
@@ -1637,7 +1674,7 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
                 inferred.replace(diff.find("_Diff."), 5, "_Normal.");
             }
             if (!inferred.empty()) {
-                std::string fullPath = ResolveTexturePath(assetBaseDir, inferred);
+                std::string fullPath = ResolveTexturePath(assetBaseDir, inferred, textureSubdir);
                 std::ifstream testFile(fullPath);
                 if (testFile.good()) meshInfo.normalTexturePath = inferred;
             }
@@ -1645,7 +1682,7 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
 
         // Load normal texture
         if (!meshInfo.normalTexturePath.empty()) {
-            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath);
+            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath, textureSubdir);
             if (!fullPath.empty()) {
                 auto it = textureCache.find(fullPath);
                 if (it != textureCache.end()) {
@@ -2421,6 +2458,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             inst.roughness    = proxy->roughness;
             inst.metallic     = proxy->metallic;
             inst.alpha_cutoff = proxy->alpha_cutoff;
+            inst.transmission = proxy->transmission;
             graph_groups[proxy->graphVariant][meshIdx].push_back(inst);
             continue;
         }
@@ -2433,6 +2471,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         inst.roughness    = proxy->roughness;
         inst.metallic     = proxy->metallic;
         inst.alpha_cutoff = proxy->alpha_cutoff;
+        inst.transmission = proxy->transmission;
         technique_groups[t][meshIdx].push_back(inst);
     }
 
@@ -2590,7 +2629,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             PCGPushConsts pc{};
             pc.transform = MatrixIdentity();
             pc.use_instances = 1;
-            cmd->PushConstants(graph_material_layout_, ShaderStage::Vertex, 2, sizeof(PCGPushConsts), &pc);
+            cmd->PushConstants(graph_material_layout_, ShaderStage::Vertex, 0, sizeof(PCGPushConsts), &pc);
 
             for (auto& [meshIdx, range] : meshMap) {
                 u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
@@ -3399,7 +3438,99 @@ void ForwardSceneRenderer::RenderParticlePass(rhi::RHICommandBuffer* cmd, u32 fr
     cmd->SetViewport({{0, 0}, {(float)render_width_, (float)render_height_}, 0, 1});
     cmd->SetScissor ({{0, 0}, {render_width_, render_height_}});
 
+#ifndef DISABLE_PARTICLE_FX
+    // PFX 渲染兼容桥：喂入按混合模式分桶的 PFX 粒子缓冲（§7-N2 前置）
+    u32 pfx_total = 0;
+    u32 pfx_blend_counts[4] = { 0, 0, 0, 0 };
+    const auto* pfx_data = primal::pfx::packed_frame_pool(idx, &pfx_total, pfx_blend_counts);
+    particle_pass_.set_pfx_data(pfx_data, pfx_total, pfx_blend_counts);
+
+    // mesh 渲染器：renderer_type=mesh 的发射器 → 48B 实例（几何源 = instance 声明
+    // 或内置立方体）。同发射器实例同槽且连续，pass 侧扫描分组绘制。
+    {
+        using primal::pfx::render::mesh_instance_data;
+        using RendererType = primal::pfx::emitter_program;
+        static thread_local mesh_instance_data mesh_buf[ParticleFXMeshPass::max_instances()];
+        static thread_local u32 mesh_slots[ParticleFXMeshPass::max_instances()];
+        u32 mesh_count = 0;
+        primal::pfx::for_each_emitter([&](primal::pfx::pfx_emitter& em) {
+            if (mesh_count >= ParticleFXMeshPass::max_instances()) return;
+            if (em.editor_preview()) return;   // 编辑器私有预览不进世界场景
+            if (!em.has_program() ||
+                em.program().renderer_type != RendererType::renderer_mesh) return;
+
+            // instance 声明的几何源 → 槽号（懒加载注册；失败回退立方体并缓存）。
+            // "builtin:cube" / "builtin:sphere" 为内置程序化几何伪路径。
+            u32 slot = 0;
+            const std::string& mesh_path = em.program().instance_mesh_path;
+            if (!mesh_path.empty() && mesh_path != "builtin:cube") {
+                if (mesh_path == "builtin:sphere") {
+                    slot = ParticleFXMeshPass::builtin_sphere_slot();
+                } else if (auto it = pfx_instance_geometry_slots_.find(mesh_path);
+                           it != pfx_instance_geometry_slots_.end()) {
+                    slot = it->second;
+                } else {
+                    primal::pfx::render::instance_geometry geom;
+                    std::string geom_err;
+                    if (primal::pfx::render::load_instance_geometry(mesh_path.c_str(), geom,
+                                                                    geom_err)) {
+                        slot = particle_fx_mesh_pass_.register_geometry(
+                            geom.positions.data(), geom.normals.data(),
+                            (u32)geom.positions.size(), geom.indices.data(), geom.index_count);
+                        if (slot == u32_invalid_id) slot = 0;   // 槽满等 → 立方体回退
+                    } else {
+                        PRIMAL_LOG_STREAM(Warn, "ParticleFX")
+                            << "instance mesh '" << mesh_path << "' load failed (" << geom_err
+                            << "), using cube fallback" << std::endl;
+                        slot = 0;
+                    }
+                    pfx_instance_geometry_slots_.emplace(mesh_path, slot);
+                }
+            }
+
+            const u32 base = mesh_count;
+            mesh_count += primal::pfx::render::pack_mesh_instances(
+                em.store(), mesh_buf + mesh_count,
+                ParticleFXMeshPass::max_instances() - mesh_count);
+            for (u32 i = base; i < mesh_count; ++i) mesh_slots[i] = slot;
+        });
+        particle_fx_mesh_pass_.stage_instances(mesh_buf, mesh_slots, mesh_count, idx);
+    }
+#endif
+
     particle_pass_.execute(cmd, frame_index, view_matrix, proj_matrix);
+
+#ifndef DISABLE_PARTICLE_FX
+    particle_fx_mesh_pass_.execute(cmd, idx, view_matrix, proj_matrix);
+#endif
+
+#ifndef DISABLE_PARTICLE_FX
+    // §7-N6 light 渲染器：亮粒子 → 加色 HDR billboard 灯（同一 lighting 输出）
+    {
+        constexpr u32 kMaxLights = primal::graphics::ParticleFXLightPass::max_lights();
+        float staged[kMaxLights * 8] = {};
+        u32 n = 0;
+        primal::pfx::for_each_emitter([&](primal::pfx::pfx_emitter& em) {
+            if (em.editor_preview()) return;   // 编辑器私有预览不进世界场景
+            auto& store = em.store();
+            const u32 capacity = store.capacity();
+            if (store.alive_count() == 0 || n >= kMaxLights) return;
+            const math::v4* pos = store.v4_channel(primal::pfx::attr::position);
+            const math::v4* col = store.v4_channel(primal::pfx::attr::color);
+            if (!pos || !col) return;
+            for (u32 row = 0; row < capacity && n < kMaxLights; ++row) {
+                if (!store.is_row_alive(row)) continue;
+                float* l = staged + n * 8;
+                l[0] = pos[row].x; l[1] = pos[row].y; l[2] = pos[row].z;
+                l[3] = col[row].w;                       // intensity = alpha（淡出即灯弱）
+                l[4] = col[row].x; l[5] = col[row].y; l[6] = col[row].z; l[7] = 0.f;
+                ++n;
+            }
+        });
+        particle_fx_light_pass_.stage_lights(staged, n, idx);
+        particle_fx_light_pass_.execute(cmd, idx, view_matrix, proj_matrix);
+    }
+#endif
 
     cmd->EndRenderPass();
 }

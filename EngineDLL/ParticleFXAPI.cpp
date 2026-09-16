@@ -9,6 +9,7 @@
 #include "Common/CoreLogStream.h"
 #include "ParticleFX/core/PfxSystem.h"
 #include "ParticleFX/interop/LegacyPresetConvert.h"
+#include "ParticleFX/render/Bridges.h"
 
 #include <cmath>
 #include <cstring>
@@ -45,6 +46,24 @@ EDITOR_INTERFACE u32 PfxEmitterReloadFromMemory(u32 emitter_id, const char* json
 {
     if (!json_text || length == 0) return 0;
     return pfx::emitter_reload_from_memory(emitter_id, json_text, length, nullptr) ? 1u : 0u;
+}
+
+// 实例网格真实半径（缩放 1 时的包围球半径，米）：供编辑器把 PhysicsCollision
+// radius 对齐视觉尺寸。"builtin:sphere"/"builtin:cube" 与 ParticleFXMeshPass
+// 内置槽同基准（0.05）；加载失败返回 0（未知）。
+EDITOR_INTERFACE f32 PfxInstanceMeshRadius(const char* mesh_path)
+{
+    if (!mesh_path || !mesh_path[0]) return 0.f;
+    if (std::strcmp(mesh_path, "builtin:sphere") == 0 ||
+        std::strcmp(mesh_path, "builtin:cube") == 0)
+        return 0.05f;
+    pfx::render::instance_geometry geom;
+    std::string err;
+    if (!pfx::render::load_instance_geometry(mesh_path, geom, err)) return 0.f;
+    f32 r = 0.f;
+    for (const auto& p : geom.positions)
+        r = std::max(r, std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z));
+    return r;
 }
 
 // 设置暴露参数（name_hash 用 PfxGetEmitterSchema 中名字的 Murmur3-32）。

@@ -4,6 +4,10 @@
 #include "Graphics/RHI/Core/RHIShaderCommon.h"
 #include "Graphics/SceneDataAdapter.h"
 #include "Graphics/Passes/ParticlePass.h"
+#ifndef DISABLE_PARTICLE_FX
+#include "Graphics/Passes/ParticleFXLightPass.h"
+#include "Graphics/Passes/ParticleFXMeshPass.h"
+#endif
 #include "Graphics/RenderPipeline/Modules/LineBatchRenderer.h"
 #include "Graphics/DebugDraw/DebugDrawQueue.h"
 #include "Graphics/Material/ShaderTechnique.h"
@@ -412,6 +416,13 @@ private:
 
     // Particle pass (owned)
     ParticlePass particle_pass_;
+#ifndef DISABLE_PARTICLE_FX
+    ParticleFXLightPass particle_fx_light_pass_;
+    ParticleFXMeshPass particle_fx_mesh_pass_;
+    // 渲染 instance 几何槽缓存：emitter 的 instance_mesh_path → ParticleFXMeshPass 槽号
+    //（0 = 内置立方体回退；加载失败也缓存，避免每帧重试刷盘）。
+    std::unordered_map<std::string, u32> pfx_instance_geometry_slots_;
+#endif
 
     // Lighting state
     math::v3 light_dir_{-0.9f, 1.5f, -0.8f};

@@ -74,6 +74,48 @@ std::string load_shader_source() {
     return {};
 }
 
+// 程序化 UV 球（内置几何槽 1）。positions 与 normals 同形（单位球向径）。
+struct sphere_mesh {
+    std::vector<math::v3> positions;
+    std::vector<math::v3> normals;
+    std::vector<u32> indices;
+};
+
+sphere_mesh make_uv_sphere(float radius, u32 stacks, u32 slices) {
+    constexpr f32 kPi = 3.14159265f;
+    sphere_mesh m;
+    if (stacks < 2 || slices < 3) return m;
+    m.positions.reserve((u64)(stacks + 1) * slices);
+    m.normals.reserve(m.positions.capacity());
+    for (u32 h = 0; h <= stacks; ++h) {
+        const f32 theta = kPi * (f32)h / (f32)stacks;
+        for (u32 w = 0; w < slices; ++w) {
+            const f32 phi = 2.f * kPi * (f32)w / (f32)slices;
+            math::v3 n{ std::sin(theta) * std::cos(phi), std::cos(theta),
+                        std::sin(theta) * std::sin(phi) };
+            m.positions.push_back(n * radius);
+            m.normals.push_back(n);
+        }
+    }
+    auto at = [slices](u32 h, u32 w) { return h * slices + (w % slices); };
+    for (u32 h = 0; h + 1 < stacks; ++h) {
+        for (u32 w = 0; w < slices; ++w) {
+            const u32 a = at(h, w), b = at(h, w + 1), c = at(h + 1, w), d = at(h + 1, w + 1);
+            if (h > 0) {   // 上三角（极点行退化跳过）
+                m.indices.push_back(a);
+                m.indices.push_back(c);
+                m.indices.push_back(b);
+            }
+            if (h + 2 < stacks) {   // 下三角
+                m.indices.push_back(b);
+                m.indices.push_back(c);
+                m.indices.push_back(d);
+            }
+        }
+    }
+    return m;
+}
+
 } // namespace
 
 bool ParticleFXMeshPass::initialize(rhi::RHIDeviceBase* device) {
@@ -175,50 +217,20 @@ bool ParticleFXMeshPass::initialize(rhi::RHIDeviceBase* device) {
         return false;
     }
 
-    // ---- 描述符集 ----
-    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
-        rhi::DescriptorSetDesc set_desc{};
-        set_desc.layout = descriptor_layout_;
-        descriptor_sets_[i] = device->CreateDescriptorSet(set_desc);
-    }
-
-    // ---- 网格缓冲（程序化立方体）----
+    // ---- 几何槽 0：内置程序化立方体 ----
     const cube_mesh cube = make_cube(0.05f);
-    index_count_ = 36;
-
-    rhi::BufferDesc vdesc{};
-    vdesc.size = sizeof(cube.positions);
-    vdesc.type = rhi::BufferType::Structured;
-    vdesc.usage = rhi::GPUMemoryUsage::Dynamic;
-    vdesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-    vdesc.structured.elementCount = 24;
-    vdesc.structured.elementStride = sizeof(math::v3);
-    position_buffer_ = device->CreateBuffer(vdesc);
-    normal_buffer_ = device->CreateBuffer(vdesc);
-    rhi::BufferDesc idesc{};
-    idesc.size = sizeof(cube.indices);
-    idesc.type = rhi::BufferType::Structured;
-    idesc.usage = rhi::GPUMemoryUsage::Dynamic;
-    idesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-    idesc.structured.elementCount = 36;
-    idesc.structured.elementStride = sizeof(u16);
-    index_buffer_ = device->CreateBuffer(idesc);
-    if (position_buffer_ == rhi::handles::INVALID_RESOURCE ||
-        normal_buffer_ == rhi::handles::INVALID_RESOURCE ||
-        index_buffer_ == rhi::handles::INVALID_RESOURCE) {
+    auto& cube_slot = slots_[0];
+    cube_slot.vertex_count = 24;
+    cube_slot.index_count = 36;
+    cube_slot.index_u32 = false;   // 立方体保持 R16 索引
+    if (!create_buffer_and_upload(cube_slot.positions, sizeof(cube.positions), 24, sizeof(math::v3),
+                                  cube.positions) ||
+        !create_buffer_and_upload(cube_slot.normals, sizeof(cube.normals), 24, sizeof(math::v3),
+                                  cube.normals) ||
+        !create_buffer_and_upload(cube_slot.index, sizeof(cube.indices), 36, sizeof(u16),
+                                  cube.indices)) {
         PRIMAL_LOG_STREAM(Error, "ParticleFX") << "mesh pass: mesh buffer creation failed" << std::endl;
         return false;
-    }
-    {
-        void* mp = device->MapBuffer(position_buffer_);
-        if (mp) std::memcpy(mp, cube.positions, sizeof(cube.positions));
-        device->UnmapBuffer(position_buffer_);
-        mp = device->MapBuffer(normal_buffer_);
-        if (mp) std::memcpy(mp, cube.normals, sizeof(cube.normals));
-        device->UnmapBuffer(normal_buffer_);
-        mp = device->MapBuffer(index_buffer_);
-        if (mp) std::memcpy(mp, cube.indices, sizeof(cube.indices));
-        device->UnmapBuffer(index_buffer_);
     }
 
     // ---- per-frame 实例 / 常量缓冲 ----
@@ -246,25 +258,90 @@ bool ParticleFXMeshPass::initialize(rhi::RHIDeviceBase* device) {
         }
     }
 
-    // ---- 描述集写入 ----
+    // ---- 槽 0 描述符集 ----
+    if (!create_geometry_descriptor_sets(cube_slot)) {
+        PRIMAL_LOG_STREAM(Error, "ParticleFX") << "mesh pass: descriptor set creation failed" << std::endl;
+        return false;
+    }
+
+    // ---- 几何槽 1：内置程序化球体（builtin:sphere）----
+    const sphere_mesh sphere = make_uv_sphere(0.05f, 12, 18);
+    auto& sphere_slot = slots_[ParticleFXMeshPass::builtin_sphere_slot()];
+    sphere_slot.vertex_count = (u32)sphere.positions.size();
+    sphere_slot.index_count = (u32)sphere.indices.size();
+    sphere_slot.index_u32 = true;
+    if (sphere_slot.vertex_count > 0 &&
+        create_buffer_and_upload(sphere_slot.positions,
+                                 (u64)sphere.positions.size() * sizeof(math::v3),
+                                 (u32)sphere.positions.size(), sizeof(math::v3),
+                                 sphere.positions.data()) &&
+        create_buffer_and_upload(sphere_slot.normals,
+                                 (u64)sphere.normals.size() * sizeof(math::v3),
+                                 (u32)sphere.normals.size(), sizeof(math::v3),
+                                 sphere.normals.data()) &&
+        create_buffer_and_upload(sphere_slot.index,
+                                 (u64)sphere.indices.size() * sizeof(u32),
+                                 (u32)sphere.indices.size(), sizeof(u32),
+                                 sphere.indices.data()) &&
+        create_geometry_descriptor_sets(sphere_slot)) {
+        geometry_count_ = 2;   // 槽 0/1 均为内置；外部几何从槽 2 起
+        PRIMAL_LOG_STREAM(Info, "ParticleFX")
+            << "mesh pass: builtin sphere registered (slot 1, " << sphere_slot.vertex_count
+            << " verts)" << std::endl;
+    } else {
+        PRIMAL_LOG_STREAM(Warn, "ParticleFX")
+            << "mesh pass: builtin sphere creation failed — builtin:sphere falls back to cube"
+            << std::endl;
+    }
+
+    PRIMAL_LOG_STREAM(Info, "ParticleFX") << "mesh pass initialized (max_instances=" << kMaxInstances
+                                          << ")" << std::endl;
+    return true;
+}
+
+bool ParticleFXMeshPass::create_buffer_and_upload(rhi::ResourceHandle& out, u64 size,
+                                                  u32 element_count, u32 element_stride,
+                                                  const void* data) {
+    rhi::BufferDesc desc{};
+    desc.size = size;
+    desc.type = rhi::BufferType::Structured;
+    desc.usage = rhi::GPUMemoryUsage::Dynamic;
+    desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    desc.structured.elementCount = element_count;
+    desc.structured.elementStride = element_stride;
+    out = device_->CreateBuffer(desc);
+    if (out == rhi::handles::INVALID_RESOURCE) return false;
+    if (void* mapped = device_->MapBuffer(out)) {
+        std::memcpy(mapped, data, (size_t)size);
+        device_->UnmapBuffer(out);
+        return true;
+    }
+    return false;
+}
+
+bool ParticleFXMeshPass::create_geometry_descriptor_sets(geometry_buffers& g) {
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
-        if (descriptor_sets_[i] == rhi::handles::INVALID_DESCRIPTOR_SET) continue;
+        rhi::DescriptorSetDesc set_desc{};
+        set_desc.layout = descriptor_layout_;
+        g.descriptor_sets[i] = device_->CreateDescriptorSet(set_desc);
+        if (g.descriptor_sets[i] == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
         rhi::WriteDescriptorSet writes[4];
         rhi::DescriptorBufferInfo infos[4];
         for (u32 b = 0; b < 4; ++b) {
-            writes[b].dstSet = descriptor_sets_[i];
+            writes[b].dstSet = g.descriptor_sets[i];
             writes[b].dstBinding = b;
             writes[b].descriptorCount = 1;
             writes[b].descriptorType = b == 3 ? rhi::DescriptorType::UniformBuffer
                                               : rhi::DescriptorType::StorageBuffer;
         }
-        infos[0].buffer = position_buffer_;
+        const u64 vtx_range = (u64)g.vertex_count * sizeof(math::v3);
+        infos[0].buffer = g.positions;
         infos[0].offset = 0;
-        infos[0].range = sizeof(cube.positions);
+        infos[0].range = vtx_range;
         writes[0].bufferInfo = &infos[0];
-        infos[1].buffer = normal_buffer_;
+        infos[1].buffer = g.normals;
         infos[1].offset = 0;
-        infos[1].range = sizeof(cube.positions);
+        infos[1].range = vtx_range;
         writes[1].bufferInfo = &infos[1];
         infos[2].buffer = instance_buffers_[i];
         infos[2].offset = 0;
@@ -274,30 +351,69 @@ bool ParticleFXMeshPass::initialize(rhi::RHIDeviceBase* device) {
         infos[3].offset = 0;
         infos[3].range = sizeof(VPUniforms);
         writes[3].bufferInfo = &infos[3];
-        device->UpdateDescriptorSets(4, writes);
+        device_->UpdateDescriptorSets(4, writes);
     }
-
-    PRIMAL_LOG_STREAM(Info, "ParticleFX") << "mesh pass initialized (max_instances=" << kMaxInstances
-                                          << ")" << std::endl;
     return true;
+}
+
+u32 ParticleFXMeshPass::register_geometry(const math::v3* positions, const math::v3* normals,
+                                          u32 vertex_count, const u32* indices, u32 index_count) {
+    if (!device_ || !positions || !normals || !indices || vertex_count == 0 || index_count == 0)
+        return u32_invalid_id;
+    if (geometry_count_ >= max_geometry_slots()) {
+        PRIMAL_LOG_STREAM(Warn, "ParticleFX")
+            << "mesh pass: geometry slots full (" << max_geometry_slots() << "), using cube fallback"
+            << std::endl;
+        return u32_invalid_id;
+    }
+    geometry_buffers& g = slots_[geometry_count_];
+    g.vertex_count = vertex_count;
+    g.index_count = index_count;
+    g.index_u32 = true;   // 外部几何统一 u32 索引（load_instance_geometry 已扩展）
+    if (!create_buffer_and_upload(g.positions, (u64)vertex_count * sizeof(math::v3), vertex_count,
+                                  sizeof(math::v3), positions) ||
+        !create_buffer_and_upload(g.normals, (u64)vertex_count * sizeof(math::v3), vertex_count,
+                                  sizeof(math::v3), normals) ||
+        !create_buffer_and_upload(g.index, (u64)index_count * sizeof(u32), index_count, sizeof(u32),
+                                  indices)) {
+        PRIMAL_LOG_STREAM(Error, "ParticleFX") << "mesh pass: instance geometry buffer creation failed"
+                                               << std::endl;
+        return u32_invalid_id;
+    }
+    if (!create_geometry_descriptor_sets(g)) {
+        PRIMAL_LOG_STREAM(Error, "ParticleFX")
+            << "mesh pass: instance geometry descriptor creation failed" << std::endl;
+        return u32_invalid_id;
+    }
+    PRIMAL_LOG_STREAM(Info, "ParticleFX") << "mesh pass: registered instance geometry slot "
+                                          << geometry_count_ << " (" << vertex_count << " verts, "
+                                          << index_count << " indices)" << std::endl;
+    return geometry_count_++;
 }
 
 void ParticleFXMeshPass::shutdown() {
     device_ = nullptr;
     pipeline_ = rhi::handles::INVALID_PIPELINE;
     vertex_shader_ = fragment_shader_ = rhi::handles::INVALID_SHADER;
-    position_buffer_ = normal_buffer_ = index_buffer_ = rhi::handles::INVALID_RESOURCE;
+    for (u32 s = 0; s < max_geometry_slots(); ++s) {
+        geometry_buffers& g = slots_[s];
+        g.positions = g.normals = g.index = rhi::handles::INVALID_RESOURCE;
+        g.vertex_count = g.index_count = 0;
+        for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i)
+            g.descriptor_sets[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
+    }
+    geometry_count_ = 1;
     for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
         instance_buffers_[i] = rhi::handles::INVALID_RESOURCE;
         uniform_buffers_[i] = rhi::handles::INVALID_RESOURCE;
-        descriptor_sets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
     }
     descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     pipeline_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
     staged_count_ = 0;
 }
 
-void ParticleFXMeshPass::stage_instances(const void* data, u32 count, u32 frame_index) {
+void ParticleFXMeshPass::stage_instances(const void* data, const u32* instance_slots, u32 count,
+                                         u32 frame_index) {
     staged_count_ = 0;
     if (!device_ || !data || count == 0 || count > max_instances()) return;
     const u32 frame = frame_index % rhi::MAX_FRAMES_IN_FLIGHT;
@@ -305,6 +421,10 @@ void ParticleFXMeshPass::stage_instances(const void* data, u32 count, u32 frame_
     if (!mapped) return;
     std::memcpy(mapped, data, (size_t)count * kInstanceStride);
     device_->UnmapBuffer(instance_buffers_[frame]);
+    for (u32 i = 0; i < count; ++i)
+        instance_slots_[i] = (instance_slots && instance_slots[i] < geometry_count_)
+                                 ? instance_slots[i]
+                                 : 0u;
     staged_count_ = count;
 }
 
@@ -326,18 +446,29 @@ void ParticleFXMeshPass::execute(rhi::RHICommandBuffer* cmd_buffer,
     }
 
     cmd_buffer->BindGraphicsPipeline(pipeline_);
-    if (descriptor_sets_[frame] != rhi::handles::INVALID_DESCRIPTOR_SET) {
-        cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, pipeline_layout_, 0, 1,
-                                       &descriptor_sets_[frame], 0, nullptr);
+    // 按几何槽分组绘制：实例按发射器序打包，同槽实例天然连续，扫描即得分组。
+    u32 start = 0;
+    while (start < staged_count_) {
+        const geometry_buffers& g = slot_geometry(instance_slots_[start]);
+        u32 end = start + 1;
+        while (end < staged_count_ &&
+               &slot_geometry(instance_slots_[end]) == &g)
+            ++end;
+        if (g.descriptor_sets[frame] != rhi::handles::INVALID_DESCRIPTOR_SET) {
+            cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, pipeline_layout_, 0, 1,
+                                           &g.descriptor_sets[frame], 0, nullptr);
+        }
+        cmd_buffer->BindIndexBuffer(g.index,
+                                    g.index_u32 ? rhi::DataFormat::R32_UInt : rhi::DataFormat::R16_UInt,
+                                    0);
+        cmd_buffer->DrawIndexed(g.index_count, 0, 0, end - start, start);
+        start = end;
     }
-    cmd_buffer->BindIndexBuffer(index_buffer_, rhi::DataFormat::R16_UInt, 0);
-    // 索引化实例绘制：36 索引 × staged_count 实例
-    cmd_buffer->DrawIndexed(index_count_, 0, 0, staged_count_, 0);
     if (!first_draw_logged_) {
         first_draw_logged_ = true;
         PRIMAL_LOG_STREAM(Info, "ParticleFX")
-            << "[ParticleFXMeshPass] first draw: " << staged_count_ << " instances x "
-            << index_count_ << " indices" << std::endl;
+            << "[ParticleFXMeshPass] first draw: " << staged_count_ << " instances in "
+            << (instance_slots_[0] ? "instance" : "cube") << " geometry" << std::endl;
     }
 }
 

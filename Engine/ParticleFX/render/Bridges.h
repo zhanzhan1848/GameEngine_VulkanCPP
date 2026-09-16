@@ -29,6 +29,17 @@ static_assert(sizeof(mesh_instance_data) == 48, "mesh instance layout locked (48
 // 把 store 活行打包为 mesh 实例缓冲。返回实例数（≤ cap）。
 u32 pack_mesh_instances(const attribute_store& store, mesh_instance_data* out, u32 cap);
 
+// ---- 渲染 instance 几何加载（ForwardSceneRenderer 注册到 ParticleFXMeshPass 前消费）----
+// cooked .mesh（ContentTools legacy scene blob）→ 三角形汤。失败写 err 返回 false。
+// 本函数含进程级缓存：同路径只读盘一次；失败结果也被缓存（不反复重试刷日志）。
+struct instance_geometry {
+    std::vector<math::v3> positions;
+    std::vector<math::v3> normals;   // element_buffer 前 12B；资产无法线时为零向量
+    std::vector<u32> indices;        // 统一扩展为 u32（pass 侧建 R32 索引缓冲）
+    u32 index_count{ 0 };
+};
+bool load_instance_geometry(const char* cooked_mesh_path, instance_geometry& out, std::string& err);
+
 } // namespace primal::pfx::render
 
 #endif // !DISABLE_PARTICLE_FX
