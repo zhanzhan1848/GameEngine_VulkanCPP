@@ -8,6 +8,7 @@ using Avalonia.Interactivity;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Primal.CliFramework;
 using PrimalEditor_Avalonia.Cli;
 using PrimalEditor_Avalonia.Common;
@@ -40,13 +41,18 @@ public partial class SequencerPanel : UserControl
 
     private readonly SequenceCommands _commands = new();
     private bool _scrubbing;
+    private bool _updatingFrame;
     private bool _renderInProgress;
 
     public SequencerPanel()
     {
         InitializeComponent();
-        SequenceEditorState.Changed += OnSequenceChanged;
-        SequenceCommands.Playback.PlaybackStopped += OnSequenceChanged;
+        AttachedToVisualTree += (_, _) =>
+        {
+            SequenceEditorState.Changed += OnSequenceChanged;
+            SequenceCommands.Playback.PlaybackStopped += OnSequenceChanged;
+            Redraw();
+        };
         DetachedFromVisualTree += (_, _) =>
         {
             SequenceEditorState.Changed -= OnSequenceChanged;
@@ -67,7 +73,7 @@ public partial class SequencerPanel : UserControl
 
     private void OnNewClick(object? sender, RoutedEventArgs e)
     {
-        Run(() => _commands.New(Text(NameBox), fps: 30, durationFrames: 120));
+        Run(() => _commands.New(Text(NameBox), fps: (int)(FpsBox.Value ?? 30), durationFrames: (int)(DurationBox.Value ?? 120)));
     }
 
     private async void OnOpenClick(object? sender, RoutedEventArgs e)
@@ -110,7 +116,7 @@ public partial class SequencerPanel : UserControl
         var entity = SelectedEntity();
         if (entity == null)
         {
-            Logger.Warning("[sequencer] K 帧：先在层级面板选中实体");
+            StatusLabel.Text = "先在左侧层级面板选中实体，再记录关键帧。";
             return;
         }
         Run(() => _commands.AddKey(entity.EntityGuid.Value));
@@ -121,7 +127,7 @@ public partial class SequencerPanel : UserControl
         var entity = SelectedEntity();
         if (entity == null)
         {
-            Logger.Warning("[sequencer] 加轨：先在层级面板选中实体");
+            StatusLabel.Text = "先在左侧层级面板选中实体，再添加变换轨。";
             return;
         }
         Run(() => _commands.AddTransformTrack(entity.EntityGuid.Value));
@@ -132,7 +138,7 @@ public partial class SequencerPanel : UserControl
         var entity = SelectedEntity();
         if (entity == null || entity.Components.OfType<CameraComponent>().FirstOrDefault() == null)
         {
-            Logger.Warning("[sequencer] + Cut：先选中带 Camera 组件的实体");
+            StatusLabel.Text = "先选中带 Camera 组件的实体，再添加镜头。";
             return;
         }
         var start = SequenceEditorState.CurrentFrame;
@@ -146,14 +152,16 @@ public partial class SequencerPanel : UserControl
         if (doc == null || worldEditor?.Project == null || _renderInProgress) return;
         if (EditorServices.FindViewport() == null)
         {
-            Logger.Warning("[sequencer] 渲染：3D 视口未就绪");
+            // Sequencer 现在是独立标签页：World Editor 标签页隐藏时视口不在
+            // 视觉树里，离线渲染无法取景——提示用户切回去再执行。
+            Logger.Warning("[sequencer] 渲染：3D 视口未就绪（请先切回 World Editor 标签页）");
             return;
         }
         var dir = Path.Combine(worldEditor.Project.Path, "Captures",
             $"{Sanitize(doc.Name)}-{DateTime.Now:yyyyMMdd-HHmmss}");
         var video = Path.Combine(dir, Sanitize(doc.Name) + ".mp4");
         _renderInProgress = true;
-        RenderButton.IsEnabled = false;
+        Redraw();
         try
         {
             var result = await _commands.Render(dir, video);
@@ -171,7 +179,7 @@ public partial class SequencerPanel : UserControl
         finally
         {
             _renderInProgress = false;
-            RenderButton.IsEnabled = true;
+            Redraw();
         }
     }
 
@@ -181,7 +189,7 @@ public partial class SequencerPanel : UserControl
 
     private double PixelsPerFrame => double.IsNaN(TimelineCanvas.Bounds.Width) || TimelineCanvas.Bounds.Width <= NameColumnWidth + 16
         ? 4.0
-        : Math.Max(1.0, (TimelineCanvas.Bounds.Width - NameColumnWidth - 8) / Math.Max(1, SequenceEditorState.Current?.DurationFrames ?? 120));
+        : Math.Max(0.01, (TimelineCanvas.Bounds.Width - NameColumnWidth - 8) / Math.Max(1, SequenceEditorState.Current?.DurationFrames ?? 120));
 
     private double FrameToX(int frame) => NameColumnWidth + frame * PixelsPerFrame;
 
@@ -198,14 +206,27 @@ public partial class SequencerPanel : UserControl
         if (canvas == null || !IsVisible) return;
         canvas.Children.Clear();
         var doc = SequenceEditorState.Current;
+        _updatingFrame = true;
+        FrameBox.Maximum = Math.Max(0, (doc?.DurationFrames ?? 1) - 1);
+        FrameBox.Value = SequenceEditorState.CurrentFrame;
+        _updatingFrame = false;
+        foreach (var button in new[] { JumpStartButton, PrevFrameButton, PlayPauseButton, NextFrameButton,
+                     JumpEndButton, KeyButton, AddTrackButton, AddCutButton, CaptureButton, RenderButton })
+            button.IsEnabled = doc != null && !_renderInProgress;
+        FrameBox.IsEnabled = doc != null && !_renderInProgress;
+        NewButton.IsEnabled = OpenButton.IsEnabled = !_renderInProgress;
+        SaveButton.IsEnabled = doc != null && !_renderInProgress;
         FrameLabel.Text = doc == null
             ? "—"
-            : $"F {SequenceEditorState.CurrentFrame} / {doc.DurationFrames} @ {doc.Fps}fps" +
+            : $"/ {doc.DurationFrames - 1}  ·  {SequenceEditorState.CurrentFrame / (double)doc.Fps:0.000}s  ·  {doc.Fps} fps" +
               (SequenceCommands.Playback.IsRunning ? " ▶" : "");
         PlayPauseButton.Content = SequenceCommands.Playback.IsRunning ? "Pause" : "Play";
         if (doc == null)
         {
-            DrawText(canvas, "sequence.new / Open… 创建或打开序列", 10, RulerHeight + 10);
+            canvas.Height = 150;
+            DrawText(canvas, "创建渲染调试序列", 16, 24);
+            DrawText(canvas, "设置名称、FPS 和总帧数，点击 New；或 Open 打开已有 .pseq。", 16, 52);
+            DrawText(canvas, "相机和场景实体可记录变换关键帧；上方视口随时间轴实时预览。", 16, 80);
             return;
         }
 
@@ -215,7 +236,7 @@ public partial class SequencerPanel : UserControl
 
         // 标尺（自适应刻度步长）
         var step = Math.Max(1, (int)Math.Round(60 / PixelsPerFrame));
-        var nice = step <= 5 ? 5 : step <= 10 ? 10 : step <= 30 ? 30 : step <= 60 ? 60 : 120;
+        var nice = step <= 5 ? 5 : step <= 10 ? 10 : step <= 30 ? 30 : step <= 60 ? 60 : step <= 120 ? 120 : (int)Math.Ceiling(step / 100.0) * 100;
         for (int f = 0; f <= doc.DurationFrames; f += nice)
         {
             var x = FrameToX(f);
@@ -310,10 +331,19 @@ public partial class SequencerPanel : UserControl
     private void OnCanvasPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         var doc = SequenceEditorState.Current;
-        if (doc == null) return;
+        if (doc == null || _renderInProgress) return;
         var point = e.GetCurrentPoint(TimelineCanvas);
         var pos = point.Position;
 
+        if (point.Properties.IsLeftButtonPressed && pos.X < NameColumnWidth)
+        {
+            var row = (int)Math.Floor((pos.Y - RulerHeight) / RowHeight) - 1;
+            var track = doc.Tracks.OfType<TransformTrack>().ElementAtOrDefault(row);
+            var world = EditorServices.WorldEditor;
+            var entity = track == null ? null : SequenceDriver.FindEntity(world?.ActiveScene?.Entities, track.EntityGuid);
+            if (world != null && entity != null) world.SelectedEntities = new[] { entity };
+            return;
+        }
         if (point.Properties.IsRightButtonPressed)
         {
             if (!TryDeleteKeyAt(doc, pos)) TryDeleteShotAt(doc, pos);
@@ -321,7 +351,9 @@ public partial class SequencerPanel : UserControl
         }
         if (point.Properties.IsLeftButtonPressed && pos.X >= NameColumnWidth - 6)
         {
+            Focus();
             _scrubbing = true;
+            e.Pointer.Capture(TimelineCanvas);
             ScrubTo(XToFrame(pos.X));
         }
     }
@@ -333,7 +365,11 @@ public partial class SequencerPanel : UserControl
         ScrubTo(XToFrame(pos.X));
     }
 
-    private void OnCanvasPointerReleased(object? sender, PointerReleasedEventArgs e) => _scrubbing = false;
+    private void OnCanvasPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        _scrubbing = false;
+        e.Pointer.Capture(null);
+    }
 
     private void OnCanvasPointerWheel(object? sender, PointerWheelEventArgs e)
     {
@@ -344,17 +380,60 @@ public partial class SequencerPanel : UserControl
         e.Handled = true;
     }
 
-    private void ScrubTo(int frame)
-    {
-        Seek(frame);
-        if (EditorServices.WorldEditor is { } we && SequenceEditorState.Current is { } doc)
-            _ = SequenceDriver.ApplyFrame(doc, SequenceEditorState.CurrentFrame, we);
-    }
+    private void ScrubTo(int frame) => Seek(frame);
 
     private void Seek(int frame)
     {
-        if (SequenceEditorState.Current == null) return;
-        SequenceEditorState.SetFrame(frame);
+        if (SequenceEditorState.Current == null || _renderInProgress) return;
+        Run(() =>
+        {
+            _commands.Pause();
+            _commands.SetFrame(frame);
+        });
+    }
+
+    private void OnTimelineKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Source is TextBox || (e.Source as Control)?.FindAncestorOfType<TextBox>() != null
+            || e.KeyModifiers != KeyModifiers.None || _renderInProgress) return;
+        switch (e.Key)
+        {
+            case Key.Left: Seek(SequenceEditorState.CurrentFrame - 1); break;
+            case Key.Right: Seek(SequenceEditorState.CurrentFrame + 1); break;
+            case Key.Home: Seek(0); break;
+            case Key.End: OnJumpEndClick(sender, e); break;
+            case Key.Space: OnPlayPauseClick(sender, e); break;
+            case Key.K: OnKeyClick(sender, e); break;
+            default: return;
+        }
+        e.Handled = true;
+    }
+
+    private void OnFrameValueChanged(object? sender, NumericUpDownValueChangedEventArgs e)
+    {
+        if (!_updatingFrame && e.NewValue.HasValue) Seek((int)e.NewValue.Value);
+    }
+
+    private void OnCaptureFrameClick(object? sender, RoutedEventArgs e)
+    {
+        Run(() =>
+        {
+            var doc = SequenceEditorState.Current;
+            var world = EditorServices.WorldEditor;
+            var viewport = EditorServices.FindViewport();
+            if (doc == null || world?.Project == null || viewport == null)
+                throw CliError.NotReady("渲染视口未就绪", "打开项目并等待场景加载");
+            _commands.Pause();
+            var frame = SequenceEditorState.CurrentFrame;
+            var (_, camera) = SequenceDriver.ApplyFrame(doc, frame, world);
+            var dir = Path.Combine(world.Project.Path, "Captures", Sanitize(doc.Name));
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, $"frame_{frame:D4}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+            if (!viewport.TryRenderSequencePng(path, camera, out _, out _))
+                throw CliError.NotReady("当前帧渲染失败", "等待视口就绪后重试");
+            StatusLabel.Text = $"已保存 F{frame}: {path}";
+            Logger.Info($"[sequencer] {StatusLabel.Text}");
+        });
     }
 
     /// <summary>命中测试：右键删除关键帧（返回是否命中）。</summary>
@@ -418,10 +497,12 @@ public partial class SequencerPanel : UserControl
         }
         catch (CliError error)
         {
-            Logger.Warning($"[sequencer] {error.Message}（{error.Hint}）");
+            StatusLabel.Text = $"{error.Message}（{error.Hint}）";
+            Logger.Warning($"[sequencer] {StatusLabel.Text}");
         }
         catch (Exception ex)
         {
+            StatusLabel.Text = ex.Message;
             Logger.Error($"[sequencer] {ex.Message}", ex);
         }
     }

@@ -1,56 +1,73 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             x:Class="PrimalEditor_Avalonia.Views.Sequencer.SequencerPanel">
+             x:Class="PrimalEditor_Avalonia.Views.Sequencer.SequencerPanel"
+             Focusable="True" KeyDown="OnTimelineKeyDown">
     <!-- Sequencer 时间轴面板（Part A，Docs/2026-09-05）：对标 Unreal 底部
          Sequencer 的一期版。传输/编辑按钮内部调用 sequence.* 命令（与 CLI
          同一 API、同一 undo 路径）；时间轴/关键帧/相机 cut 由 code-behind
          在 Canvas 上自绘（与视口同为重交互控件走 code-behind 的惯例）。 -->
     <Border Classes="floating tex-panel" Margin="6,0,6,6">
         <DockPanel>
+            <TextBlock Name="StatusLabel" DockPanel.Dock="Bottom" Margin="12,4,12,8" Text="新建序列 → 选中实体 → K 记录关键帧 → 拖动标尺或逐帧检查渲染" TextWrapping="Wrap"/>
             <!-- ============ 顶栏：文件 | 传输 | 编辑 | 渲染 ============ -->
-            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6" Margin="8,6,8,4">
-                <TextBlock Text="SEQUENCER" FontFamily="{DynamicResource FontDisplay}"
-                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{DynamicResource ElectricBlueBrush}"
-                           VerticalAlignment="Center"/>
-                <Button Name="NewButton" Content="New" Click="OnNewClick" Padding="8,2"
-                        ToolTip.Tip="按左侧名字新建序列（30fps / 120 帧）"/>
-                <TextBox Name="NameBox" Width="110" Height="24" Text="Sequence"
-                         VerticalContentAlignment="Center"
-                         ToolTip.Tip="New 使用的序列名"/>
-                <Button Content="Open…" Click="OnOpenClick" Padding="8,2" ToolTip.Tip="打开 .pseq"/>
-                <Button Content="Save" Click="OnSaveClick" Padding="8,2"
-                        ToolTip.Tip="保存 .pseq（首次存到 项目目录/Sequences/名字.pseq）"/>
-                <Separator Margin="6,0"/>
-                <Button Name="JumpStartButton" Content="|&lt;" Click="OnJumpStartClick" Padding="6,2" ToolTip.Tip="回到第 0 帧"/>
-                <Button Name="PrevFrameButton" Content="&lt;" Click="OnPrevFrameClick" Padding="6,2" ToolTip.Tip="上一帧"/>
-                <Button Name="PlayPauseButton" Content="Play" Click="OnPlayPauseClick" Padding="10,2" Classes="accent"
-                        ToolTip.Tip="预览播放（视口内逐帧求值应用，相机 cut 自动切机位）"/>
-                <Button Name="NextFrameButton" Content=">" Click="OnNextFrameClick" Padding="6,2" ToolTip.Tip="下一帧"/>
-                <Button Name="JumpEndButton" Content=">|" Click="OnJumpEndClick" Padding="6,2" ToolTip.Tip="跳到末帧"/>
-                <TextBlock Name="FrameLabel" Text="F 0 / 120 @ 30fps" VerticalAlignment="Center"
-                           Margin="8,0,0,0" Opacity="0.8"/>
-                <Separator Margin="6,0"/>
-                <Button Name="KeyButton" Content="K" Click="OnKeyClick" Padding="10,2" Classes="accent"
-                        ToolTip.Tip="K 帧：在当前帧记录选中实体的当前 pose（无轨自动建轨）"/>
-                <Button Name="AddTrackButton" Content="+ Track" Click="OnAddTrackClick" Padding="8,2"
-                        ToolTip.Tip="给选中实体加变换轨"/>
-                <Button Name="AddCutButton" Content="+ Cut" Click="OnAddCutClick" Padding="8,2"
-                        ToolTip.Tip="加相机分镜头：[当前帧, 当前帧+24) 由选中相机实体取景"/>
-                <Separator Margin="6,0"/>
-                <Button Name="RenderButton" Content="Render…" Click="OnRenderClick" Padding="8,2"
-                        ToolTip.Tip="离线渲染：PNG 帧序列 + mp4 → 项目目录/Captures/（逐帧确定性）"/>
-            </StackPanel>
+            <!-- 与主工具栏同一布局策略：功能分簇 + WrapPanel，面板窄时整簇
+                 换行而不是溢出裁切。 -->
+            <WrapPanel DockPanel.Dock="Top" Margin="8,6,8,4">
+                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2,12,2">
+                    <TextBlock Text="SEQUENCER" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center"/>
+                    <Button Name="NewButton" Content="New" Click="OnNewClick" Padding="8,2"
+                            ToolTip.Tip="按名称、FPS 和总帧数新建序列"/>
+                    <TextBox Name="NameBox" Width="110" Height="24" Text="Sequence"
+                             VerticalContentAlignment="Center"
+                             ToolTip.Tip="New 使用的序列名"/>
+                    <TextBlock Text="FPS" VerticalAlignment="Center"/>
+                    <NumericUpDown Name="FpsBox" Value="30" Minimum="1" Maximum="120" Width="110" FormatString="0" ToolTip.Tip="新序列 FPS"/>
+                    <TextBlock Text="Frames" VerticalAlignment="Center"/>
+                    <NumericUpDown Name="DurationBox" Value="120" Minimum="1" Maximum="3600" Width="125" FormatString="0" ToolTip.Tip="新序列总帧数"/>
+                    <Button Name="OpenButton" Content="Open…" Click="OnOpenClick" Padding="8,2" ToolTip.Tip="打开 .pseq"/>
+                    <Button Name="SaveButton" Content="Save" Click="OnSaveClick" Padding="8,2"
+                            ToolTip.Tip="保存 .pseq（首次存到 项目目录/Sequences/名字.pseq）"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2,12,2">
+                    <Button Name="JumpStartButton" Content="|&lt;" Click="OnJumpStartClick" Padding="6,2" ToolTip.Tip="回到第 0 帧"/>
+                    <Button Name="PrevFrameButton" Content="&lt;" Click="OnPrevFrameClick" Padding="6,2" ToolTip.Tip="上一帧"/>
+                    <Button Name="PlayPauseButton" Content="Play" Click="OnPlayPauseClick" Padding="10,2" Classes="accent"
+                            ToolTip.Tip="预览播放（视口内逐帧求值应用，相机 cut 自动切机位）"/>
+                    <Button Name="NextFrameButton" Content=">" Click="OnNextFrameClick" Padding="6,2" ToolTip.Tip="下一帧"/>
+                    <Button Name="JumpEndButton" Content="&gt;|" Click="OnJumpEndClick" Padding="6,2" ToolTip.Tip="跳到末帧"/>
+                    <NumericUpDown Name="FrameBox" Value="0" Minimum="0" Maximum="119" Width="110" FormatString="0" ValueChanged="OnFrameValueChanged" ToolTip.Tip="跳到指定帧并应用场景姿态"/>
+                    <TextBlock Name="FrameLabel" Text="F 0 / 120 @ 30fps" VerticalAlignment="Center"
+                               Margin="8,0,0,0" Opacity="0.8"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2,12,2">
+                    <Button Name="KeyButton" Content="K" Click="OnKeyClick" Padding="10,2" Classes="accent"
+                            ToolTip.Tip="K 帧：在当前帧记录选中实体的当前 pose（无轨自动建轨）"/>
+                    <Button Name="AddTrackButton" Content="+ Track" Click="OnAddTrackClick" Padding="8,2"
+                            ToolTip.Tip="给选中实体加变换轨"/>
+                    <Button Name="AddCutButton" Content="+ Cut" Click="OnAddCutClick" Padding="8,2"
+                            ToolTip.Tip="加相机分镜头：[当前帧, 当前帧+24) 由选中相机实体取景"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2,0,2">
+                    <Button Name="CaptureButton" Content="Capture frame" Click="OnCaptureFrameClick" Padding="8,2" ToolTip.Tip="保存当前序列帧 PNG，用于比较渲染结果"/>
+                    <Button Name="RenderButton" Content="Render…" Click="OnRenderClick" Padding="8,2"
+                            ToolTip.Tip="离线渲染：PNG 帧序列 + mp4 → 项目目录/Captures/（逐帧求值场景姿态）"/>
+                </StackPanel>
+            </WrapPanel>
 
             <!-- ============ 时间轴 Canvas（自绘） ============ -->
             <Border Background="#22000000" Margin="6,0,6,6" CornerRadius="4">
-                <Canvas Name="TimelineCanvas" ClipToBounds="True"
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                <Canvas Name="TimelineCanvas" Background="Transparent" ClipToBounds="True"
                         MinHeight="110"
                         PointerPressed="OnCanvasPointerPressed"
                         PointerMoved="OnCanvasPointerMoved"
                         PointerReleased="OnCanvasPointerReleased"
                         PointerWheelChanged="OnCanvasPointerWheel"
                         SizeChanged="OnCanvasSizeChanged"/>
+                </ScrollViewer>
             </Border>
         </DockPanel>
     </Border>
