@@ -4,7 +4,7 @@
 
 - 日期：2026-09-12
 - 前置调研：本文 §1 的差距结论来自对 `Engine/Particles/`、`Engine/Graphics/ParticleMaterial.*`、`EngineDLL/Particle*API.cpp` 的逐文件盘点（2026-09-12 完成）。
-- 关联文档：`Docs/2026-09-11-physics-simulation-design.md`（Jolt M0–M4 里程碑，P3 阶段的上游依赖）、`Docs/2026-09-11-physics-simulation-survey.md`（§2.4 流体自研路线，P5/P7 的边界）。
+- 关联文档：`Docs/2026-09-11-physics-simulation-design.md`（Jolt M0–M4 里程碑，P3 阶段的上游依赖）、`Docs/completed/2026-09-11-physics-simulation-survey.md`（§2.4 流体自研路线，P5/P7 的边界）。
 - 本文档回答：现有粒子 API 的确切能力边界、目标架构与架构决策、P0–P7 分阶段任务级规划（每阶段含数据结构草案、涉及文件、ABI 增量、验收门禁、风险与工作量）。
 
 ---
