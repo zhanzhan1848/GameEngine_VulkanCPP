@@ -14,11 +14,12 @@ namespace primal::simulation {
 
 // ---- 对象层（碰撞过滤策略的引擎侧事实源；Jolt 侧过滤表在 Initialize 时按 can_collide 逐对启用）----
 namespace layers {
-constexpr u32 kStatic  = 0;
-constexpr u32 kDynamic = 1;
-constexpr u32 kDebris  = 2;
-constexpr u32 kTrigger = 3;
-constexpr u32 kCount   = 4;
+constexpr u32 kStatic   = 0;
+constexpr u32 kDynamic  = 1;
+constexpr u32 kDebris   = 2;
+constexpr u32 kTrigger  = 3;
+constexpr u32 kParticle = 4;   // 刚体化粒子(P2):碰世界、不碰同类(自碰关,路线图 P3+)
+constexpr u32 kCount    = 5;
 
 // broadphase 层数：static 类（static/trigger 归 0）与 moving 类（dynamic/debris 归 1）
 constexpr u32 kBroadPhaseStatic = 0;

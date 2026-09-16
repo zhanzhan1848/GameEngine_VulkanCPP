@@ -17,6 +17,7 @@
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Body/BodyManager.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -68,7 +69,9 @@ struct world_state
 
     std::unique_ptr<JPH::PhysicsSystem>             system;
     std::unique_ptr<JPH::TempAllocatorMalloc>       temp;       // Update() 的帧内临时分配
-    std::unique_ptr<JPH::JobSystemSingleThreaded>   jobs;
+    std::unique_ptr<JPH::JobSystemSingleThreaded>   jobs_single;
+    std::unique_ptr<JPH::JobSystemThreadPool>       jobs_mt;    // M2-lite:max_worker_threads>0 时启用
+    JPH::JobSystem*                                 jobs{ nullptr };  // Update 用的当前实现
     std::unique_ptr<layers::jolt_tables>            tables;
 #ifdef JPH_DEBUG_RENDERER
     std::unique_ptr<simulation_debug_renderer>      debug_renderer;
@@ -225,14 +228,17 @@ bool initialize(const settings& s)
     ws.system->SetContactListener(&contact_listener());
 
     if (s.max_worker_threads == 0) {
-        // M0/M1 确定性基线：单线程。M2 的 JoltJobAdapter 接引擎 JobSystem 后替换。
-        ws.jobs = std::make_unique<JPH::JobSystemSingleThreaded>(s.max_bodies * 4);
+        // M0/M1 确定性基线：单线程。接引擎 JobSystem 的完整适配器仍归 M2。
+        ws.jobs_single = std::make_unique<JPH::JobSystemSingleThreaded>(s.max_bodies * 4);
+        ws.jobs = ws.jobs_single.get();
     } else {
-        // 显式请求多线程但适配器未接：回落单线程并记日志（不静默）
-        PRIMAL_LOG_STREAM(Warn, "Simulation")
-            << "max_worker_threads > 0 not supported until M2 JobSystem adapter; falling back to single thread"
-            << std::endl;
-        ws.jobs = std::make_unique<JPH::JobSystemSingleThreaded>(s.max_bodies * 4);
+        // P3.3:Jolt 原生线程池(确定性默认不变——默认 settings 仍为 0 单线程)
+        const int threads = (int)std::min<u32>(s.max_worker_threads, 16u);
+        ws.jobs_mt = std::make_unique<JPH::JobSystemThreadPool>(s.max_bodies * 4,
+                                                                s.max_bodies * 2, threads);
+        ws.jobs = ws.jobs_mt.get();
+        PRIMAL_LOG_STREAM(Info, "Simulation")
+            << "job system: thread pool (" << threads << " workers)" << std::endl;
     }
 
     ws.accumulator.fixed_dt = s.fixed_dt;
@@ -255,7 +261,9 @@ void shutdown()
 
     // Jolt 顺序：先销毁 PhysicsSystem（其 body 池引用 factory 注册的类型），再拆 factory。
     ws.system.reset();
-    ws.jobs.reset();
+    ws.jobs_single.reset();
+    ws.jobs_mt.reset();
+    ws.jobs = nullptr;
     ws.temp.reset();
     ws.tables.reset();
 #ifdef JPH_DEBUG_RENDERER
@@ -286,7 +294,7 @@ void step(f32 host_dt)
 
     const u32 n = ws.accumulator.advance(host_dt);
     for (u32 i = 0; i < n; ++i) {
-        ws.system->Update(ws.cfg.fixed_dt, 1, ws.temp.get(), ws.jobs.get());
+        ws.system->Update(ws.cfg.fixed_dt, 1, ws.temp.get(), ws.jobs);
     }
     sync_bound_transforms();
 }
@@ -295,7 +303,7 @@ void step_once()
 {
     world_state& ws = state();
     if (!ws.initialized) return;
-    ws.system->Update(ws.cfg.fixed_dt, 1, ws.temp.get(), ws.jobs.get());
+    ws.system->Update(ws.cfg.fixed_dt, 1, ws.temp.get(), ws.jobs);
     sync_bound_transforms();
 }
 

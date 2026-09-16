@@ -70,6 +70,12 @@ void test_layer_matrix()
     check(!can_collide(kStatic, kDebris), "static-debris no collide");
     check(can_collide(kStatic, kTrigger), "static-trigger collide");
     check(can_collide(kDynamic, kDynamic), "dynamic-dynamic collide");
+    // kParticle(P2 刚体化粒子):碰世界(static/dynamic)、自碰关、不碰 debris/trigger
+    check(can_collide(kStatic, kParticle), "static-particle collide");
+    check(can_collide(kDynamic, kParticle), "dynamic-particle collide");
+    check(!can_collide(kParticle, kParticle), "particle-particle no collide (self off)");
+    check(!can_collide(kDebris, kParticle), "debris-particle no collide");
+    check(!can_collide(kTrigger, kParticle), "trigger-particle no collide");
     check(can_collide(kDynamic, kDebris), "dynamic-debris collide");
     check(can_collide(kDynamic, kTrigger), "dynamic-trigger collide");
     check(can_collide(kDebris, kDebris), "debris-debris collide");

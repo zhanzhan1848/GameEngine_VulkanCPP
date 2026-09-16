@@ -15,8 +15,9 @@ bool can_collide(u32 a, u32 b)
     // static vs dynamic/trigger：碰；static vs debris：不碰（碎屑只与场景碰）
     // dynamic vs trigger：碰（触发器事件）；dynamic vs debris：碰
     // debris vs trigger：碰；无其余
-    if (lo == kStatic)  return hi == kDynamic || hi == kTrigger;
-    if (lo == kDynamic) return hi == kDebris || hi == kTrigger;
+    if (lo == kStatic)  return hi == kDynamic || hi == kTrigger || hi == kParticle;
+    if (lo == kDynamic) return hi == kDebris || hi == kTrigger || hi == kParticle;
+    // kParticle:只与 static/dynamic 碰(上方已列),与 debris/trigger 及同层不碰
     if (lo == kDebris)  return hi == kTrigger;
     return false;
 }
