@@ -135,6 +135,8 @@ f32  get_global_lod();
 
 // 消费者单帧入口（ADR4）：取出全部挂起事件（FIFO），返回实际取出数。
 u32 drain_events(pfx_event* out, u32 cap);
+// 事件注入（interop 消费者回写用，如 spawner 的 collision 事件；总线未初始化时丢弃）。
+void emit_event(const pfx_event& e);
 u32 pending_events();
 
 // 遍历全部存活发射器（渲染桥 / 统计）。单线程帧管线语义。

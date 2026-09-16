@@ -9,6 +9,10 @@
 #include "Common/CoreLogStream.h"
 #include "ParticleFX/core/PfxSystem.h"
 #include "ParticleFX/interop/LegacyPresetConvert.h"
+#include "ParticleFX/interop/PhysicsBindings.h"
+#include "ParticleFX/interop/RigidBodySpawner.h"
+#include "Simulation/SimulationAPI.h"
+#include "ParticleFX/render/Bridges.h"
 #include "ParticleFX/render/Bridges.h"
 
 #include <cmath>
@@ -17,6 +21,63 @@
 
 namespace pfx = primal::pfx;
 namespace math = primal::math;
+
+namespace {
+
+// P2.3:instance.physics 声明 → spawner 策略。convex 碰撞体的凸包源取 instance.mesh
+// 顶点(确定性等距采样 ≤ 64 点;加载失败回退球代理并告警一次)。
+pfx::interop::rigid_spawn_policy policy_from_program(const pfx::emitter_program& prog) {
+    using rigid_policy = pfx::interop::rigid_spawn_policy;
+    rigid_policy p;
+    const pfx::instance_physics_settings& ip = prog.instance_physics;
+    p.mass = ip.mass;
+    p.restitution = ip.restitution;
+    p.friction = ip.friction;
+    p.max_live_bodies = ip.max_bodies;
+    p.emit_collision_events = true;   // P3.2:刚体粒子默认产出碰撞事件
+    p.layer = ip.self_collision ? primal::simulation::layers::kDynamic
+                                : primal::simulation::layers::kParticle;
+
+    bool convex_ok = false;
+    if (ip.collider == 1 && !prog.instance_mesh_path.empty()) {
+        p.collider = rigid_policy::collider_kind::convex;
+        pfx::render::instance_geometry geom;
+        std::string geom_err;
+        if (pfx::render::load_instance_geometry(prog.instance_mesh_path.c_str(), geom, geom_err) &&
+            !geom.positions.empty()) {
+            const u32 count = (u32)geom.positions.size();
+            const u32 stride = count > p.convex_point_cap
+                                   ? (count + p.convex_point_cap - 1) / p.convex_point_cap
+                                   : 1u;
+            for (u32 i = 0; i < count && p.convex_points.size() < p.convex_point_cap; i += stride)
+                p.convex_points.push_back(geom.positions[i]);
+            convex_ok = !p.convex_points.empty();
+        } else {
+            PRIMAL_LOG_STREAM(Warn, "ParticleFX")
+                << "instance.physics convex: mesh '" << prog.instance_mesh_path
+                << "' unavailable (" << geom_err << "), using sphere proxy" << std::endl;
+        }
+    }
+    if (!convex_ok) {
+        p.collider = rigid_policy::collider_kind::primitive;
+        p.shape = primal::simulation::body_desc::shape::sphere;
+        p.half_extents = math::v3{ ip.radius, 0.f, 0.f };
+    }
+    return p;
+}
+
+// 发射器 create/reload 后按程序声明同步刚体绑定。
+void bindings_sync(u32 emitter_id) {
+    const pfx::pfx_emitter* em = pfx::emitter_get(emitter_id);
+    if (!em || !em->has_program()) return;
+    if (em->program().instance_physics.rigid_body)
+        pfx::interop::physics_bindings::get().set_enabled(emitter_id,
+                                                          policy_from_program(em->program()));
+    else
+        pfx::interop::physics_bindings::get().remove(emitter_id);
+}
+
+} // namespace
 
 extern "C" {
 
@@ -30,13 +91,16 @@ EDITOR_INTERFACE u32 PfxSystemEnsure(void)
 EDITOR_INTERFACE u32 PfxEmitterCreateFromAsset(const char* json_path)
 {
     if (!json_path) return 0;
-    return pfx::emitter_create_from_asset(json_path, nullptr);
+    const u32 id = pfx::emitter_create_from_asset(json_path, nullptr);
+    if (id != 0) bindings_sync(id);   // P2:instance.physics 刚体绑定
+    return id;
 }
 
 // 移除发射器。未知 id 返回 0；成功 1。
 EDITOR_INTERFACE u32 PfxEmitterRemove(u32 emitter_id)
 {
     if (pfx::emitter_get(emitter_id) == nullptr) return 0;
+    pfx::interop::physics_bindings::get().remove(emitter_id);   // 先摘绑定(连带 body 处置)
     pfx::emitter_destroy(emitter_id);
     return 1u;
 }
@@ -45,7 +109,9 @@ EDITOR_INTERFACE u32 PfxEmitterRemove(u32 emitter_id)
 EDITOR_INTERFACE u32 PfxEmitterReloadFromMemory(u32 emitter_id, const char* json_text, u32 length)
 {
     if (!json_text || length == 0) return 0;
-    return pfx::emitter_reload_from_memory(emitter_id, json_text, length, nullptr) ? 1u : 0u;
+    const bool ok = pfx::emitter_reload_from_memory(emitter_id, json_text, length, nullptr);
+    if (ok) bindings_sync(emitter_id);   // P2:reload 可能增删 physics 声明
+    return ok ? 1u : 0u;
 }
 
 // 实例网格真实半径（缩放 1 时的包围球半径，米）：供编辑器把 PhysicsCollision

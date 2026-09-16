@@ -34,6 +34,20 @@ struct mesh_entry {
     std::shared_ptr<mesh_geometry> mesh;
 };
 
+// 逐粒子刚体绑定声明（路线图 P2：JSON instance.physics）。rigid_body=true 时
+// 出生粒子建 Jolt 动态体、物理持有变换权威；与 update 阶段 PhysicsCollision
+// 模块互斥（编译期拒绝——刚体自带碰撞，双开语义冲突）。
+struct instance_physics_settings {
+    bool rigid_body{ false };
+    u8  collider{ 0 };          // 0 sphere（radius 为半径）| 1 convex（P3：instance.mesh 顶点凸包）
+    bool self_collision{ true }; // true=kDynamic(互相排开堆叠) / false=kParticle(只碰世界,互相穿透)
+    f32 radius{ 0.05f };
+    f32 mass{ 1.f };
+    f32 restitution{ 0.2f };
+    f32 friction{ 0.5f };
+    u32 max_bodies{ 256 };
+};
+
 struct emitter_program {
     std::string name;
     u32 asset_version{ 1 };
@@ -51,6 +65,7 @@ struct emitter_program {
     std::vector<std::shared_ptr<volume_grid>> field_grids;   // 与 fields 平行（sim_context 视图）
     std::vector<mesh_entry> meshes;                          // 按路径去重（编译期填充）
     std::vector<std::shared_ptr<mesh_geometry>> mesh_views;  // 与 meshes 平行（sim_context 视图）
+    instance_physics_settings instance_physics;              // instance.physics 声明
     std::vector<module_instance> stages[3];   // [stage_kind]
     u32 state_bytes{ 0 };            // 全部实例状态块总大小
 

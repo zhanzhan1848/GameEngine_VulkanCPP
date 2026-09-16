@@ -37,6 +37,17 @@ set_target_properties(TestCookedMeshAdapter PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
+# M0 神经渲染：.pnn 解析 + CPU 参考前向（自包含，零 GPU/Engine-lib 依赖）。
+add_executable(TestNeuralWeights
+    Neural/TestNeuralWeights.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralWeights.cpp
+)
+target_include_directories(TestNeuralWeights PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME TestNeuralWeights COMMAND TestNeuralWeights)
+set_target_properties(TestNeuralWeights PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 add_executable(TestCookedMeshImport Content/TestCookedMeshImport.cpp)
 target_include_directories(TestCookedMeshImport PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(TestCookedMeshImport PRIVATE EngineDLL)
@@ -96,6 +107,14 @@ set_target_properties(TestRHIDeviceFactory PROPERTIES
 # Vulkan RHI 后端设备测试 — 仅在 ENABLE_VULKAN 时编入 Vulkan 代码路径。
 # ENABLE_VULKAN 未定义时此 TU 仍可编译（main 返回 0），但不会连接 Vulkan SDK。
 if(ENABLE_VULKAN)
+    # Xcode 15+ 的 SDK sysroot 不再默认搜索 /usr/local/include，而 Vulkan
+    # （MoltenVK）头文件装在那里；显式补上（与 IntegrationTests/CMakeLists.txt
+    # 同款补法），否则 Vulkan 单测在本机编译报 'vulkan/vulkan.h' not found。
+    if(EXISTS "$ENV{VULKAN_SDK}/Include/vulkan/vulkan.h")
+        include_directories("$ENV{VULKAN_SDK}/Include")
+    elseif(EXISTS "/usr/local/include/vulkan/vulkan.h")
+        include_directories("/usr/local/include")
+    endif()
     # Vulkan/Metal shader 共享拷贝（stamp 目标）：此前 6 个 TestVulkan* 目标各自
     # POST_BUILD copy_directory 到同一目的地，MSBuild --parallel 下并发写同一目录
     # 竞态失败（MSB3073，report-17）——与上方 UnitTestAssetsCopy 同模式收敛为单次
@@ -2601,6 +2620,8 @@ add_executable(TestParticleFX
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/ModuleRegistry.cpp
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/EmitterProgram.cpp
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/modules/BuiltinModules.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/modules/PhysicsCollisionModule.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/PhysicsBindings.cpp
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/LegacyPresetConvert.cpp
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/render/Bridges.cpp
     ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/interop/PhysicsQuery.cpp

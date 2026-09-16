@@ -9,6 +9,9 @@
 #include "CommonHeaders.h"
 #include "Simulation/SimulationAPI.h"
 #include "ParticleFX/core/PfxSystem.h"
+#include "ParticleFX/interop/PhysicsQuery.h"
+#include "ParticleFX/interop/PhysicsBindings.h"
+#include "ParticleFX/host/BudgetManager.h"
 #include "Components/Collider.h"
 #include "Components/RigidBody.h"
 #include "Components/Entity.h"
@@ -159,11 +162,17 @@ extern "C" {
 EDITOR_INTERFACE u32 PhysicsInitialize(const PhysicsSettingsPod* in_settings)
 {
     if (!in_settings) return 0;
+    // PFX 碰撞模块（PhysicsCollision）经 physics_query 门面查世界；适配器只装一次。
+    pfx::interop::install_simulation_adapter();
+    // P2.5:刚体化粒子全局预算与 budget_config 单一口径
+    pfx::interop::physics_bindings::get().set_global_body_budget(
+        pfx::host::budget_config{}.max_live_rigid_bodies);
     return simulation::initialize(to_settings(in_settings)) ? 1u : 0u;
 }
 
 EDITOR_INTERFACE void PhysicsShutdown(void)
 {
+    pfx::interop::physics_bindings::get().clear();   // 刚体化粒子的绑定连带处置
     simulation::shutdown();
 }
 
@@ -182,6 +191,8 @@ EDITOR_INTERFACE void PipelineTick(f32 dt_seconds)
 {
     simulation::step(dt_seconds);
     pfx::tick(dt_seconds);
+    // P2:逐粒子刚体绑定——drain 事件一次、路由、物理 transform 回写
+    pfx::interop::physics_bindings_tick();
 }
 
 EDITOR_INTERFACE void PhysicsStepOnce(void)

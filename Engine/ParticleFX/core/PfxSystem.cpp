@@ -351,6 +351,10 @@ void emitter_set_editor_preview(emitter_id id, bool preview) {
 
 u32 drain_events(pfx_event* out, u32 cap) { return g_bus ? g_bus->drain(out, cap) : 0; }
 
+void emit_event(const pfx_event& e) {
+    if (g_bus) g_bus->push(e);
+}
+
 u32 pending_events() { return g_bus ? g_bus->pending() : 0; }
 
 void for_each_emitter(const std::function<void(pfx_emitter&)>& fn) {

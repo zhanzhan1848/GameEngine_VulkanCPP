@@ -14,6 +14,7 @@ namespace primal::pfx::host {
 struct budget_config {
     u32 max_emitters{ 32 };             // 并发发射器上限（超出者按优先级拒新）
     u32 max_live_particles{ 200000 };   // 全局活粒子上限
+    u32 max_live_rigid_bodies{ 1024 };  // 全局刚体化粒子上限(PhysicsBindings 全局否决,P2.5)
     f32 lod_near{ 20.f };               // 距离 < near ⇒ 因子 1
     f32 lod_far{ 120.f };               // 距离 > far ⇒ 因子 = min_factor
     f32 min_factor{ 0.1f };             // 最远 LOD 的 spawn 缩放下限

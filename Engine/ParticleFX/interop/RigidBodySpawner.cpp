@@ -43,6 +43,7 @@ void rigid_body_spawner::spawn_body_for(const particle_handle& h, attribute_stor
 
     simulation::body_desc d;
     d.s = _policy.shape;
+    d.layer = _policy.layer;
     d.m = simulation::body_desc::mode::dynamic;
     d.half_extents = _policy.half_extents;
     d.position = math::v3{ pos->x, pos->y, pos->z };
@@ -51,7 +52,12 @@ void rigid_body_spawner::spawn_body_for(const particle_handle& h, attribute_stor
     d.friction = _policy.friction;
     d.debug_draw_proxy = false;   // 刚体化粒子的 proxy 线框由 spawner 预算 HUD 决定，默认关
 
-    const u64 body_id = simulation::body_create(d);
+    // P3.1:convex 走 body_create_convex(点集已在策略里采样上限内)
+    const u64 body_id = (_policy.collider == rigid_spawn_policy::collider_kind::convex &&
+                         !_policy.convex_points.empty())
+                            ? simulation::body_create_convex(d, _policy.convex_points.data(),
+                                                             (u32)_policy.convex_points.size())
+                            : simulation::body_create(d);
     if (body_id == 0) {
         ++_rejected;
         return;
@@ -81,27 +87,55 @@ void rigid_body_spawner::dispose_body(tracked& t, attribute_store* store) {
 void rigid_body_spawner::tick(f32 dt, attribute_store& store) {
     (void)dt;
 
-    // ---- 事件消费（v1 单消费者：drain 全部，处理 source 匹配项）----
+    // ---- 事件消费（便捷入口：drain 全局流，丢弃非本源事件）----
     pfx_event events[128];
     u32 n = drain_events(events, 128);
     while (n > 0) {
-        for (u32 i = 0; i < n; ++i) {
-            const pfx_event& e = events[i];
-            if (e.source != _source) continue;
+        consume(events, n, store);
+        n = drain_events(events, 128);
+    }
 
-            if (e.type == event_type::birth) {
-                spawn_body_for(e.handle, store);
-            } else if (e.type == event_type::death) {
-                for (size_t k = 0; k < _tracked.size(); ++k) {
-                    if (_tracked[k].handle == e.handle) {
-                        dispose_body(_tracked[k], &store);
-                        _tracked.erase(_tracked.begin() + (long)k);
-                        break;
-                    }
+    writeback(store);
+}
+
+void rigid_body_spawner::consume(const pfx_event* events, u32 count, attribute_store& store) {
+    for (u32 i = 0; i < count; ++i) {
+        const pfx_event& e = events[i];
+        if (e.source != _source) continue;
+
+        if (e.type == event_type::birth) {
+            spawn_body_for(e.handle, store);
+        } else if (e.type == event_type::death) {
+            for (size_t k = 0; k < _tracked.size(); ++k) {
+                if (_tracked[k].handle == e.handle) {
+                    dispose_body(_tracked[k], &store);
+                    _tracked.erase(_tracked.begin() + (long)k);
+                    break;
                 }
             }
         }
-        n = drain_events(events, 128);
+    }
+}
+
+void rigid_body_spawner::dispose_all_bodies() {
+    for (tracked& t : _tracked) dispose_body(t, nullptr);
+    _tracked.clear();
+}
+
+void rigid_body_spawner::writeback(attribute_store& store) {
+    // ---- P3.2:跟踪体接触 → pfx collision 事件（仅策略开启时 drain,避免抢流）----
+    if (_policy.emit_collision_events) {
+        simulation::contact_event contacts[64];
+        const u32 cn = simulation::drain_contacts(contacts, 64);
+        for (u32 i = 0; i < cn; ++i) {
+            if (contacts[i].added == 0) continue;   // 只报新增接触
+            for (const tracked& t : _tracked) {
+                if (t.body_id == contacts[i].body_a || t.body_id == contacts[i].body_b) {
+                    emit_event(pfx_event{ t.handle, _source, event_type::collision, 0.f });
+                    break;
+                }
+            }
+        }
     }
 
     // ---- 物理权威回写（ADR3 单写）：body transform → 粒子 position ----

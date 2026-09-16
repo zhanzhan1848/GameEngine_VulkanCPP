@@ -143,6 +143,66 @@ bool compile_emitter(const json::value& root, emitter_program& out, std::string&
             if (!m->is_string()) return c.fail("instance.mesh", "must be a string", m->line());
             out.instance_mesh_path = m->as_string();
         }
+        // P2：逐粒子刚体声明 instance.physics
+        if (const json::value* ph = v->find("physics"); ph) {
+            if (!ph->is_object())
+                return c.fail("instance.physics", "must be an object", ph->line());
+            auto& p = out.instance_physics;
+            if (const json::value* mode = ph->find("mode"); mode) {
+                if (!mode->is_string())
+                    return c.fail("instance.physics.mode", "must be a string", mode->line());
+                if (mode->as_string() == "rigid_body") p.rigid_body = true;
+                else if (mode->as_string() != "none")
+                    return c.fail("instance.physics.mode",
+                                  "unknown mode '" + mode->as_string() + "' (none|rigid_body)",
+                                  mode->line());
+            }
+            if (const json::value* col = ph->find("collider"); col) {
+                if (!col->is_string())
+                    return c.fail("instance.physics.collider", "must be a string", col->line());
+                if (col->as_string() == "sphere") p.collider = 0;
+                else if (col->as_string() == "convex") p.collider = 1;
+                else
+                    return c.fail("instance.physics.collider",
+                                  "unknown collider '" + col->as_string() + "' (sphere|convex)",
+                                  col->line());
+            }
+            struct num_field {
+                const char* key;
+                f32* dst;
+                f32 lo;
+            };
+            const num_field nums[] = {
+                { "radius", &p.radius, 1e-4f },
+                { "mass", &p.mass, 1e-4f },
+                { "restitution", &p.restitution, 0.f },
+                { "friction", &p.friction, 0.f },
+            };
+            for (const num_field& nf : nums) {
+                if (const json::value* nv = ph->find(nf.key); nv) {
+                    if (!nv->is_number() || nv->as_f32() < nf.lo)
+                        return c.fail(std::string("instance.physics.") + nf.key,
+                                      "must be a number ≥ " + std::to_string(nf.lo), nv->line());
+                    *nf.dst = nv->as_f32();
+                }
+            }
+            if (const json::value* sc = ph->find("self_collision"); sc) {
+                if (!sc->is_bool())
+                    return c.fail("instance.physics.self_collision", "must be a bool", sc->line());
+                p.self_collision = sc->as_bool();
+            }
+            if (const json::value* mb = ph->find("max_bodies"); mb) {
+                if (!mb->is_number() || mb->as_u32() == 0)
+                    return c.fail("instance.physics.max_bodies", "must be a positive number",
+                                  mb->line());
+                p.max_bodies = mb->as_u32();
+            }
+            // collider=convex 需要 instance.mesh 提供凸包源顶点
+            if (p.rigid_body && p.collider == 1 && out.instance_mesh_path.empty())
+                return c.fail("instance.physics.collider",
+                              "convex collider requires instance.mesh (convex hull source)",
+                              ph->line());
+        }
     }
     if (const json::value* v = root.find("capacity"); v) {
         if (!v->is_number() || v->as_u32() == 0) return c.fail("capacity", "must be positive number", v->line());
@@ -278,6 +338,18 @@ bool compile_emitter(const json::value& root, emitter_program& out, std::string&
                 return false;
             }
             out.stages[sk].push_back(std::move(inst));
+        }
+    }
+
+    // P2 互斥红线：刚体变换权威回写与 PhysicsCollision 模块语义冲突，编译期拒绝
+    if (out.instance_physics.rigid_body) {
+        const u32 phys_col_hash = hash_name("PhysicsCollision");
+        for (const auto& inst : out.stages[(u8)stage_kind::update]) {
+            if (reg.all()[inst.def_index].name_hash == phys_col_hash)
+                return c.fail("instance.physics.mode",
+                              "rigid_body writeback conflicts with PhysicsCollision module "
+                              "(rigid bodies own collision); remove one of them",
+                              stages->line());
         }
     }
 
