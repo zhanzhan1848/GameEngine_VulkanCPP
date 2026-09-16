@@ -16,13 +16,13 @@ namespace primal::pfx::render {
 // out 为 nullptr 或 cap 不足时返回需要的行数（探测用法）。
 u32 pack_sprite_instances(const attribute_store& store, void* out, u32 cap_bytes);
 
-// mesh 渲染器实例数据（48B；四元数当前为单位姿态——自旋通道 N4+ 引入）。
+// mesh 渲染器实例数据（48B；P1 起消费旋转与实例色）。
 struct mesh_instance_data {
     f32 pos[3];
-    f32 pad0;
-    f32 rot[4];    // 单位四元数 [x,y,z,w]
+    f32 col_r;      // 实例色 R（原 pad0；来自 color 通道 rgb）
+    f32 rot[4];     // 四元数 [x,y,z,w]（scale_rotation.z 弧度绕 +Y；未写旋转 = 单位姿态）
     f32 scale[2];
-    f32 pad1[2];
+    f32 col_gb[2];  // 实例色 G/B（原 pad1）
 };
 static_assert(sizeof(mesh_instance_data) == 48, "mesh instance layout locked (48B)");
 
@@ -30,8 +30,10 @@ static_assert(sizeof(mesh_instance_data) == 48, "mesh instance layout locked (48
 u32 pack_mesh_instances(const attribute_store& store, mesh_instance_data* out, u32 cap);
 
 // ---- 渲染 instance 几何加载（ForwardSceneRenderer 注册到 ParticleFXMeshPass 前消费）----
-// cooked .mesh（ContentTools legacy scene blob）→ 三角形汤。失败写 err 返回 false。
-// 本函数含进程级缓存：同路径只读盘一次；失败结果也被缓存（不反复重试刷日志）。
+// 两种来源：
+//   1. cooked .mesh（ContentTools legacy scene blob）→ 文件读取后解包；
+//   2. "builtin:<name>"（box/sphere/plane/capsule）→ 程序化几何注册进 content 系统后解包。
+// 失败写 err 返回 false。进程级缓存：同路径只读盘一次；失败结果也被缓存（不反复重试）。
 struct instance_geometry {
     std::vector<math::v3> positions;
     std::vector<math::v3> normals;   // element_buffer 前 12B；资产无法线时为零向量

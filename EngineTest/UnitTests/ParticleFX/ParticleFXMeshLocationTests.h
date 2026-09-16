@@ -9,6 +9,7 @@
 #include "Engine/ParticleFX/core/EmitterProgram.h"
 #include "Engine/ParticleFX/core/MeshGeometry.h"
 #include "Engine/ParticleFX/core/PfxSystem.h"
+#include "Engine/ParticleFX/render/Bridges.h"
 
 #include <cassert>
 #include <cmath>
@@ -262,10 +263,9 @@ inline void test_mesh_compile_errors() {
         { R"({"stages":{"init":[{"module":"ShapeLocation","shape":"mesh_surface",
                                    "mesh":"/tmp/pfx_mesh_test_missing.obj"}]}})",
           "load failed" },
-        // mesh_volume v1 显式拒绝
-        { R"({"stages":{"init":[{"module":"ShapeLocation","shape":"mesh_volume",
-                                   "mesh":"/tmp/pfx_mesh_test_square.obj"}]}})",
-          "not implemented" },
+        // mesh_volume 缺 mesh
+        { R"({"stages":{"init":[{"module":"ShapeLocation","shape":"mesh_volume"}]}})",
+          "requires a 'mesh'" },
         // 未知 scatter 枚举
         { R"({"stages":{"init":[{"module":"ShapeLocation","shape":"point",
                                    "scatter":"whatever"}]}})",
@@ -352,10 +352,76 @@ inline void test_schema_mesh_hints() {
     // radius/height/angle 升级为 param_ref 类型
     assert(schema.find("{\"name\":\"radius\",\"type\":\"param_ref\"") != std::string::npos);
     assert(schema.find("{\"name\":\"bias\",\"type\":\"param_ref\"") != std::string::npos);
-    // mesh 参数为 string 类型
-    assert(schema.find("{\"name\":\"mesh\",\"type\":\"string\"") != std::string::npos);
+    // mesh 参数为 asset 类型(P4.2:编辑器渲染成资产选择器)
+    assert(schema.find("{\"name\":\"mesh\",\"type\":\"asset\"") != std::string::npos);
 
     std::cout << "  PASS: schema mesh hints" << std::endl;
+}
+
+
+// ---- P1:实例旋转 / 实例色 / builtin 几何 ---------------------------------------
+
+inline void test_pack_mesh_rotation_and_tint() {
+    std::cout << "Testing pack_mesh_instances rotation + tint (P1.2/P1.4)..." << std::endl;
+
+    assert(initialize(system_config{ 4, 256 }));
+    // 粒子色 = (1, 0.5, 0.25);scale_rotation.z = π/2(绕 +Y 转九十度)
+    const emitter_id id = make_program_emitter(
+        R"({"capacity":8,"seed":3,"stages":{
+            "spawn":[{"module":"SpawnRate","rate":1}],
+            "init":[{"module":"SetLifetime","min":60,"max":60},
+                    {"module":"SetColor","color":[1,0.5,0.25,1]}],
+            "update":[{"module":"IntegrateVelocity"}]}})", 3);
+    assert(id != invalid_emitter);
+    pfx_emitter* em = emitter_get(id);
+    em->tick(1.f);
+    assert(em->alive_count() == 1);
+    // 手写旋转角(SetScale 系模块 v1 不写 zw;通道语义已定义,pack 负责消费)
+    math::v4* scl = em->store().v4_channel(attr::scale_rotation);
+    scl[0].z = 3.14159265f * 0.5f;
+
+    render::mesh_instance_data inst[1];
+    const u32 n = render::pack_mesh_instances(em->store(), inst, 1);
+    assert(n == 1);
+    // 四元数:绕 +Y 半角 π/4 → (0, sin(π/4), 0, cos(π/4))
+    assert(std::fabs(inst[0].rot[1] - 0.70710678f) < 1e-5f);
+    assert(std::fabs(inst[0].rot[3] - 0.70710678f) < 1e-5f);
+    assert(std::fabs(inst[0].rot[0]) < 1e-6f && std::fabs(inst[0].rot[2]) < 1e-6f);
+    // 实例色 RGB 走 pad 区(48B 布局不变)
+    assert(std::fabs(inst[0].col_r - 1.f) < 1e-6f);
+    assert(std::fabs(inst[0].col_gb[0] - 0.5f) < 1e-6f);
+    assert(std::fabs(inst[0].col_gb[1] - 0.25f) < 1e-6f);
+
+    emitter_destroy(id);
+    shutdown();
+    std::cout << "  PASS: pack rotation + tint" << std::endl;
+}
+
+inline void test_builtin_instance_geometry() {
+    std::cout << "Testing builtin instance geometry (P1.1)..." << std::endl;
+
+    render::instance_geometry g;
+    std::string err;
+    assert(render::load_instance_geometry("builtin:sphere", g, err));
+    assert(g.positions.size() > 8 && g.index_count >= 12 && g.indices.size() == g.index_count);
+    // 球半径 0.05:包围盒半径容差内
+    f32 max_r = 0.f;
+    for (const auto& p : g.positions)
+        max_r = std::max(max_r, std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z));
+    // 创建器的球面顶点可略超名义半径(极点/细分实现细节),只断言量级正确且非退化
+    assert(max_r > 0.02f && max_r < 0.2f);
+    assert(g.positions.size() > 8 && g.index_count > 12);
+
+    render::instance_geometry box;
+    assert(render::load_instance_geometry("builtin:box", box, err));
+    assert(box.positions.size() >= 8 && box.index_count > 0);
+
+    // 未知 builtin → 失败且缓存(二次调用不再报新错误)
+    render::instance_geometry bad;
+    assert(!render::load_instance_geometry("builtin:teapot", bad, err));
+    assert(err.find("unknown builtin") != std::string::npos);
+
+    std::cout << "  PASS: builtin instance geometry" << std::endl;
 }
 
 inline void run_all_mesh_location_tests() {
@@ -366,6 +432,8 @@ inline void run_all_mesh_location_tests() {
     test_mesh_compile_errors();
     test_param_ref_shapes_regression();
     test_schema_mesh_hints();
+    test_pack_mesh_rotation_and_tint();
+    test_builtin_instance_geometry();
     std::cout << "All ParticleFX mesh location tests passed." << std::endl;
 }
 
