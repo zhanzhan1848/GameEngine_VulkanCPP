@@ -178,8 +178,14 @@ public class PropertiesViewModel : ViewModelBase
             if (ParticleFX == null || ParticleFX.AssetPath == value) return;
             ParticleFX.AssetPath = value;
             MarkProjectDirtyCallback?.Invoke();
+            // 换绑/清除资产 → 立即按组件当前状态重建该实体的原生发射器
+            //（回调由 WorldEditorViewModel 注入，走 SceneRuntimeSynchronizer）
+            PfxEmitterResyncCallback?.Invoke();
         }
     }
+
+    /// <summary>Inspector 改动 PFX 资产绑定后请求同步器重建发射器（静态注入）。</summary>
+    public static System.Action? PfxEmitterResyncCallback;
 
     public bool ParticleFXEnabled
     {

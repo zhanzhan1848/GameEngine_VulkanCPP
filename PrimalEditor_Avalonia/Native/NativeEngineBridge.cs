@@ -912,6 +912,16 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error($"PfxEmitterRemove({emitterId}) failed", ex); return 0; }
     }
 
+    [DllImport("PrimalEngine", EntryPoint = "PfxInstanceMeshRadius", CallingConvention = CallingConvention.Cdecl)]
+    private static extern float _PfxInstanceMeshRadius(string path);
+    /// <summary>实例网格缩放 1 时的包围球半径（米）；0 = 未知（加载失败/空路径）。</summary>
+    public static float PfxInstanceMeshRadius(string path)
+    {
+        if (!_isLoaded || string.IsNullOrEmpty(path)) return 0f;
+        try { return _PfxInstanceMeshRadius(path); }
+        catch (Exception ex) { Logger.Error($"PfxInstanceMeshRadius({path}) failed", ex); return 0f; }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "PfxEmitterReloadFromMemory", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _PfxEmitterReloadFromMemory(uint emitterId, byte[] text, uint length);
     public static uint PfxEmitterReloadFromMemory(uint emitterId, byte[] text)
@@ -1921,7 +1931,9 @@ public static class NativeEngineBridge
     {
         if (!_isLoaded || LiveRenderSurfaces.Count == 0) return;
         // RemoveRenderSurface 会从登记表移除条目，必须迭代快照。
-        foreach (var id in LiveRenderSurfaces.ToArray())
+        var ids = new uint[LiveRenderSurfaces.Count];
+        LiveRenderSurfaces.CopyTo(ids);
+        foreach (var id in ids)
         {
             RemoveRenderSurface(id);
         }

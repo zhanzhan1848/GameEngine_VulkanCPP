@@ -2,119 +2,152 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:PrimalEditor_Avalonia.ViewModels"
              xmlns:views="using:PrimalEditor_Avalonia.Views"
+             xmlns:seq="using:PrimalEditor_Avalonia.Views.Sequencer"
              xmlns:views3d="using:PrimalEditor_Avalonia.Views.Engine3D"
              xmlns:entities="using:PrimalEditor_Avalonia.Entities"
              xmlns:conv="using:PrimalEditor_Avalonia.Converters"
              xmlns:self="using:PrimalEditor_Avalonia.Views"
              xmlns:ctrl="using:PrimalEditor_Avalonia.Themes.Controls"
-             xmlns:seq="using:PrimalEditor_Avalonia.Views.Sequencer"
              x:Class="PrimalEditor_Avalonia.Views.WorldEditorView"
              x:DataType="vm:WorldEditorViewModel"
              Background="{DynamicResource VoidBrush}">
 
-    <Grid Background="{DynamicResource VoidBrush}">
+    <Grid Name="WorkspaceGrid" Background="{DynamicResource VoidBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="280"/>
-            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- =========== ROW 0: Toolbar (floating glass) =========== -->
+        <!-- 功能按簇分组放进 WrapPanel：每簇是不可拆分的逻辑组，窗口不够宽时
+             整组换行而不是水平裁切/滚动——任何窗口宽度下所有功能保持可见。 -->
         <ctrl:TextureFrame Grid.Row="0" Classes="floating tex-strip" Margin="6,6,6,2">
-            <StackPanel Orientation="Horizontal" Spacing="6" Margin="8,4">
-                <TextBlock Text="BUILD" FontFamily="{DynamicResource FontDisplay}"
-                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{DynamicResource ElectricBlueBrush}"
-                           VerticalAlignment="Center" Margin="0,0,4,0"/>
-                <ComboBox Width="140"
-                          ItemsSource="{Binding BuildConfigurations}"
-                          SelectedItem="{Binding Project.BuildConfigName}"/>
-                <Button Content="Build" Click="OnBuildClick" Padding="10,2"
-                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
-                <Button Content="Rebuild" Click="OnRebuildClick" Padding="10,2"
-                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
-                <Button Content="Run" Click="OnRunClick" Padding="10,2" Classes="accent"
-                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
-                <Button Name="StopBuild" Content="Stop" Click="OnBuildStopClick" Padding="10,2" Classes="danger"
-                        IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}}"/>
-                <Separator Margin="6,0"/>
-                <!-- Viewport render mode (plan §6.1 B3): Forward / Deferred /
+            <WrapPanel Orientation="Horizontal" Margin="8,3">
+
+                <!-- Build：构建配置 + Build/Rebuild/Run/Stop -->
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,12,2">
+                    <TextBlock Text="BUILD" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="9" LetterSpacing="1"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <ComboBox Width="110"
+                              ItemsSource="{Binding BuildConfigurations}"
+                              SelectedItem="{Binding Project.BuildConfigName}"/>
+                    <Button Content="Build" Click="OnBuildClick" Padding="10,2"
+                            IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                    <Button Content="Rebuild" Click="OnRebuildClick" Padding="10,2"
+                            IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                    <Button Content="Run" Click="OnRunClick" Padding="10,2" Classes="accent"
+                            IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}, Converter={x:Static conv:CommonConverters.InvertBool}}"/>
+                    <Button Name="StopBuild" Content="Stop" Click="OnBuildStopClick" Padding="10,2" Classes="danger"
+                            IsEnabled="{Binding IsBuilding, RelativeSource={RelativeSource AncestorType=self:WorldEditorView}}"/>
+                </StackPanel>
+
+                <!-- Render：视口管线模式 + Run 目标图形 API。
+                     Viewport render mode (plan §6.1 B3): Forward / Deferred /
                      +Shadow+AO / +Shadow+AO+GI. Runs live in the render surface. -->
-                <TextBlock Text="RENDER" FontFamily="{DynamicResource FontDisplay}"
-                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{DynamicResource ElectricBlueBrush}"
-                           VerticalAlignment="Center" Margin="0,0,4,0"/>
-                <ComboBox Width="190"
-                          ItemsSource="{Binding RenderModeOptions}"
-                          SelectedIndex="{Binding EditorRenderModeIndex}"
-                          ToolTip.Tip="Viewport pipeline mode (applies live to the render surface)"/>
-                <!-- Run target graphics API (plan §Run/Stop): Metal → Darwin/Debug|Release,
-                     Vulkan → Darwin/DebugVulkan tree. -->
-                <TextBlock Text="API" FontFamily="{DynamicResource FontDisplay}"
-                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{DynamicResource ElectricBlueBrush}"
-                           VerticalAlignment="Center" Margin="0,0,4,0"/>
-                <ComboBox Width="90"
-                          ItemsSource="{Binding TargetGraphicsApis}"
-                          SelectedIndex="{Binding TargetGraphicsApiIndex}"
-                          ToolTip.Tip="Graphics API for the Run button's PrimalPlayer host"/>
-                <!-- Run 模式三选一：独立窗口（原路线 PrimalPlayer）/ 固定分辨率
-                     （PrimalPlayer width/height/fixed 参数）/ 渲染表面（不开外部
-                     进程，内嵌 surface 切 runtime 渲染路径 + 场景相机取景）。 -->
-                <TextBlock Text="RUN" FontFamily="{DynamicResource FontDisplay}"
-                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{DynamicResource ElectricBlueBrush}"
-                           VerticalAlignment="Center" Margin="0,0,4,0"/>
-                <ComboBox Width="130"
-                          ItemsSource="{Binding RunModeOptions}"
-                          SelectedIndex="{Binding RunModeIndex}"
-                          ToolTip.Tip="Run 路线：Player Window=外部 PrimalPlayer 默认窗口；Fixed Resolution=固定分辨率窗口（确定性录制）；Render Surface=编辑器内嵌渲染表面直接跑 runtime 渲染路径（Stop 退出）"/>
-                <TextBox Width="56" Height="24" Text="{Binding RunWidth}"
-                         IsVisible="{Binding IsFixedResolutionMode}"
-                         VerticalAlignment="Center" VerticalContentAlignment="Center"
-                         ToolTip.Tip="固定分辨率宽度（像素）"/>
-                <TextBox Width="56" Height="24" Text="{Binding RunHeight}"
-                         IsVisible="{Binding IsFixedResolutionMode}"
-                         VerticalAlignment="Center" VerticalContentAlignment="Center"
-                         ToolTip.Tip="固定分辨率高度（像素）"/>
-                <!-- Run 录制（Part B）：player 进程内逐帧 PNG 捕获（渲染帧与捕获帧
-                     1:1，无丢帧），录满帧数自动退出；产物在 <project>/Captures/。 -->
-                <CheckBox Content="Rec" VerticalAlignment="Center" Margin="8,0,0,0"
-                          IsChecked="{Binding RecordOnRun}"
-                          ToolTip.Tip="Run 时录制：PrimalPlayer 逐帧 PNG（渲染帧与捕获帧 1:1，无丢帧），录满自动退出"/>
-                <TextBox Width="56" Height="24" Text="{Binding RecordFrames}"
-                         VerticalAlignment="Center" VerticalContentAlignment="Center"
-                         ToolTip.Tip="录制帧数上限（捕获帧数；0 = 跟随窗口关闭）"/>
-                <!-- Viewport view mode (plan §6.3 A7): Shaded / Wireframe.
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,12,2">
+                    <TextBlock Text="RENDER" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="9" LetterSpacing="1"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <ComboBox Width="150"
+                              ItemsSource="{Binding RenderModeOptions}"
+                              SelectedIndex="{Binding EditorRenderModeIndex}"
+                              ToolTip.Tip="Viewport pipeline mode (applies live to the render surface)"/>
+                    <!-- Run target graphics API (plan §Run/Stop): Metal → Darwin/Debug|Release,
+                         Vulkan → Darwin/DebugVulkan tree. -->
+                    <TextBlock Text="API" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="9" LetterSpacing="1"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center" Margin="4,0,2,0"/>
+                    <ComboBox Width="75"
+                              ItemsSource="{Binding TargetGraphicsApis}"
+                              SelectedIndex="{Binding TargetGraphicsApiIndex}"
+                              ToolTip.Tip="Graphics API for the Run button's PrimalPlayer host"/>
+                </StackPanel>
+
+                <!-- Run：路线三选一 + 固定分辨率宽高 + 录制。
+                     独立窗口（原路线 PrimalPlayer）/ 固定分辨率（PrimalPlayer
+                     width/height/fixed 参数）/ 渲染表面（不开外部进程，内嵌
+                     surface 切 runtime 渲染路径 + 场景相机取景）。 -->
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,12,2">
+                    <TextBlock Text="RUN" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="9" LetterSpacing="1"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <ComboBox Width="110"
+                              ItemsSource="{Binding RunModeOptions}"
+                              SelectedIndex="{Binding RunModeIndex}"
+                              ToolTip.Tip="Run 路线：Player Window=外部 PrimalPlayer 默认窗口；Fixed Resolution=固定分辨率窗口（确定性录制）；Render Surface=编辑器内嵌渲染表面直接跑 runtime 渲染路径（Stop 退出）"/>
+                    <TextBox Width="50" Height="24" Text="{Binding RunWidth}"
+                             IsVisible="{Binding IsFixedResolutionMode}"
+                             VerticalAlignment="Center" VerticalContentAlignment="Center"
+                             ToolTip.Tip="固定分辨率宽度（像素）"/>
+                    <TextBox Width="50" Height="24" Text="{Binding RunHeight}"
+                             IsVisible="{Binding IsFixedResolutionMode}"
+                             VerticalAlignment="Center" VerticalContentAlignment="Center"
+                             ToolTip.Tip="固定分辨率高度（像素）"/>
+                    <!-- Run 录制（Part B）：player 进程内逐帧 PNG 捕获（渲染帧与捕获帧
+                         1:1，无丢帧），录满帧数自动退出；产物在 <project>/Captures/。 -->
+                    <CheckBox Name="RecCheck" Content="Rec" VerticalAlignment="Center" Margin="6,0,0,0"
+                              IsChecked="{Binding RecordOnRun}"
+                              ToolTip.Tip="Run 时录制：PrimalPlayer 逐帧 PNG（渲染帧与捕获帧 1:1，无丢帧），录满自动退出"/>
+                    <TextBox Name="RecordFramesBox" Width="50" Height="24" Text="{Binding RecordFrames}"
+                             VerticalAlignment="Center" VerticalContentAlignment="Center"
+                             ToolTip.Tip="录制帧数上限（捕获帧数；0 = 跟随窗口关闭）"/>
+                </StackPanel>
+
+                <!-- View：着色模式 + AABB 显示 + 正交投影。
+                     Viewport view mode (plan §6.3 A7): Shaded / Wireframe.
                      Orthogonal to RENDER (pass combos); applies per-frame. -->
-                <TextBlock Text="VIEW" FontFamily="{DynamicResource FontDisplay}"
-                           FontWeight="SemiBold" FontSize="10" LetterSpacing="2"
-                           Foreground="{DynamicResource ElectricBlueBrush}"
-                           VerticalAlignment="Center" Margin="0,0,4,0"/>
-                <ComboBox Width="110"
-                          ItemsSource="{Binding ViewModeOptions}"
-                          SelectedIndex="{Binding ViewModeIndex}"
-                          ToolTip.Tip="Viewport shading mode (Shaded / Wireframe; Unlit 预留)"/>
-                <CheckBox Content="Bounds" VerticalAlignment="Center" Margin="8,0,0,0"
-                          IsChecked="{Binding ShowAllBounds}"
-                          ToolTip.Tip="A7: 显示全部带网格实体的 AABB 线框"/>
-                <Button Content="SEQ" Click="OnSequencerToggleClick" Padding="8,2"
-                        ToolTip.Tip="Sequencer 时间轴面板（Part A）：相机运镜/变换关键帧/离线渲染"/>
-                <Separator Margin="6,0"/>
-                <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"/>
-                <Button Content="Array…" Click="OnArrayDuplicateClick" Padding="10,2"
-                        ToolTip.Tip="把选中实体沿轴深拷 N 份（A5 批量布设）"/>
-                <Button Content="SCM…" Click="OnSourceControlClick" Padding="10,2"
-                        ToolTip.Tip="A8 源码控制：git 状态列表 + 提交面板"/>
-                <Separator Margin="6,0"/>
-                <Button Content="W Move" Click="OnTranslateModeClick" Padding="8,2" ToolTip.Tip="Translate gizmo (W)"/>
-                <Button Content="E Rotate" Click="OnRotateModeClick" Padding="8,2" ToolTip.Tip="Rotate gizmo (R)"/>
-                <Button Content="R Scale" Click="OnScaleModeClick" Padding="8,2" ToolTip.Tip="Scale gizmo (R)"/>
-                <Separator Margin="6,0"/>
-                <CheckBox Name="OrthoToggle" Content="Ortho" VerticalAlignment="Center"
-                          Click="OnOrthoToggleClick"/>
-            </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,12,2">
+                    <TextBlock Text="VIEW" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="9" LetterSpacing="1"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <ComboBox Name="ViewModeCombo" Width="90"
+                              ItemsSource="{Binding ViewModeOptions}"
+                              SelectedIndex="{Binding ViewModeIndex}"
+                              ToolTip.Tip="Viewport shading mode (Shaded / Wireframe; Unlit 预留)"/>
+                    <CheckBox Name="BoundsToggle" Content="Bounds" VerticalAlignment="Center" Margin="6,0,0,0"
+                              IsChecked="{Binding ShowAllBounds}"
+                              ToolTip.Tip="A7: 显示全部带网格实体的 AABB 线框"/>
+                    <CheckBox Name="OrthoToggle" Content="Ortho" VerticalAlignment="Center" Margin="6,0,0,0"
+                              Click="OnOrthoToggleClick"/>
+                </StackPanel>
+
+                <!-- Tools：图元网格 / 阵列 / 源码控制（Sequencer 已改为
+                     View 菜单开关的独立标签页） -->
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,12,2">
+                    <Button Content="Primitive Mesh…" Click="OnCreatePrimitiveMeshClick" Padding="10,2"
+                            ToolTip.Tip="创建图元网格实体（Sphere/Box/Plane 等）"/>
+                    <Button Content="Array…" Click="OnArrayDuplicateClick" Padding="10,2"
+                            ToolTip.Tip="把选中实体沿轴深拷 N 份（A5 批量布设）"/>
+                    <Button Content="SCM…" Click="OnSourceControlClick" Padding="10,2"
+                            ToolTip.Tip="A8 源码控制：git 状态列表 + 提交面板"/>
+                </StackPanel>
+
+                <!-- Sim：物理/碰撞模拟播放（粒子 vs 世界静态碰撞、刚体验证的 UI 入口） -->
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,12,2">
+                    <TextBlock Text="SIM" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="9" LetterSpacing="1"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Button Content="▶ Play" Click="OnSimPlayClick" Padding="10,2"
+                            ToolTip.Tip="初始化并启动物理模拟（视口每帧 PipelineTick 推进；粒子 PhysicsCollision 与刚体在此验证）"/>
+                    <Button Content="⏸ Pause" Click="OnSimPauseClick" Padding="10,2"
+                            ToolTip.Tip="暂停物理模拟（保留当前状态）"/>
+                </StackPanel>
+
+                <!-- Gizmo：变换手柄模式 -->
+                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,0,2">
+                    <Button Content="W Move" Click="OnTranslateModeClick" Padding="8,2" ToolTip.Tip="Translate gizmo (W)"/>
+                    <Button Content="E Rotate" Click="OnRotateModeClick" Padding="8,2" ToolTip.Tip="Rotate gizmo (R)"/>
+                    <Button Content="R Scale" Click="OnScaleModeClick" Padding="8,2" ToolTip.Tip="Scale gizmo (R)"/>
+                </StackPanel>
+            </WrapPanel>
         </ctrl:TextureFrame>
 
         <!-- =========== ROW 1: Hierarchy | Viewport | Inspector =========== -->
@@ -148,29 +181,30 @@
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
 
-                            <ScrollViewer HorizontalScrollBarVisibility="Auto"
-                                          VerticalScrollBarVisibility="Disabled">
-                                <ItemsControl ItemsSource="{Binding EntityFactoryItems}">
-                                    <ItemsControl.ItemsPanel>
-                                        <ItemsPanelTemplate>
-                                            <StackPanel Orientation="Horizontal" Spacing="4"/>
-                                        </ItemsPanelTemplate>
-                                    </ItemsControl.ItemsPanel>
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate DataType="entities:EntityFactoryDescriptor">
-                                            <Button Tag="{Binding}"
-                                                    Click="OnAddEntityKindClick"
-                                                    ToolTip.Tip="{Binding Tooltip}"
-                                                    Padding="8,2">
-                                                <StackPanel Orientation="Horizontal" Spacing="4">
-                                                    <TextBlock Text="{Binding IconGlyph}"/>
-                                                    <TextBlock Text="{Binding DisplayName}"/>
+                            <!-- 实体工厂：图标按钮 + WrapPanel，面板太窄时换行，
+                                 不再横向滚动/裁切；名称与说明放 tooltip。 -->
+                            <ItemsControl ItemsSource="{Binding EntityFactoryItems}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel Orientation="Horizontal"/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="entities:EntityFactoryDescriptor">
+                                        <Button Tag="{Binding}"
+                                                Click="OnAddEntityKindClick"
+                                                Width="30" Height="24" Padding="0" Margin="0,0,4,4">
+                                            <ToolTip.Tip>
+                                                <StackPanel Spacing="2">
+                                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                                    <TextBlock Text="{Binding Tooltip}"/>
                                                 </StackPanel>
-                                            </Button>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                            </ScrollViewer>
+                                            </ToolTip.Tip>
+                                            <TextBlock Text="{Binding IconGlyph}" TextAlignment="Center"/>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
 
                             <Grid ColumnDefinitions="*,Auto,Auto">
                                 <TextBlock Grid.Column="0" Text="HIERARCHY"
@@ -210,8 +244,10 @@
                                           ToolTip.Tip="把选中实体沿轴深拷 N 份"/>
                                 <MenuItem Header="Add Environment" Click="OnAddEnvironmentClick"
                                           ToolTip.Tip="挂 Environment 组件——属性面板由此显示雾/probe/GI 环境控制"/>
-                                <MenuItem Header="Add Particle Emitter" Click="OnAddParticleEmitterClick"
-                                          ToolTip.Tip="给选中实体挂粒子发射器（内置 fire 预设起步）"/>
+                                <MenuItem Header="Add Particle FX (PFX Emitter)" Click="OnAddParticleFxClick"
+                                          ToolTip.Tip="给选中实体挂新粒子系统 ParticleFX 组件；之后把 .pfx_emitter 资产拖进 Inspector 的 Asset 槽，或在 PFX 编辑器里 Bind"/>
+                                <MenuItem Header="Add Particle Emitter (Legacy)" Click="OnAddParticleEmitterClick"
+                                          ToolTip.Tip="旧粒子系统（内置 fire 预设起步）。新粒子系统请用 Add Particle FX"/>
                             </ContextMenu>
                         </TreeView.ContextMenu>
                         <TreeView.ItemTemplate>
@@ -228,9 +264,18 @@
                     DragDrop.AllowDrop="True"
                     DragDrop.Drop="OnAssetDrop"
                     DragDrop.DragOver="OnDragOver">
-                <views3d:EngineViewport3D Name="WorldViewport" MinHeight="200" MinWidth="200"
-                                          HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                                          Background="#FF000000"/>
+                <Grid>
+                    <views3d:EngineViewport3D Name="WorldViewport" MinHeight="200" MinWidth="200"
+                                              HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                              Background="#FF000000"/>
+                    <!-- SIM 未运行提示：粒子碰撞/刚体静默失效的可见化 -->
+                    <Border x:Name="SimInactiveHint" HorizontalAlignment="Center" VerticalAlignment="Top"
+                            Margin="0,8,0,0" Padding="10,4" CornerRadius="3"
+                            Background="#CC302020" IsHitTestVisible="False" IsVisible="False">
+                        <TextBlock Text="⚠ SIM 未运行 — 粒子碰撞/刚体停用，点击 ▶ Play 启动物理"
+                                   Foreground="#FFD0A0" FontSize="12"/>
+                    </Border>
+                </Grid>
             </Border>
 
             <!-- Inspector panel -->
@@ -247,14 +292,21 @@
         </Grid>
 
         <!-- =========== ROW 2: Content Browser | Build Log / Logger tab =========== -->
-        <Grid Grid.Row="2" ColumnDefinitions="*,*" Margin="6,2,6,6">
+        <TabControl Name="BottomPanelTabs" Grid.Row="2" Margin="6,2,6,6"
+                    SelectedIndex="{Binding BottomPanelIndex, Mode=TwoWay}"
+                    Background="Transparent" Padding="0">
+            <TabItem>
+                <TabItem.Header>
+                    <TextBlock Text="Content &amp; Logs" FontSize="12"/>
+                </TabItem.Header>
+        <Grid Name="AssetAndLogPanel" ColumnDefinitions="*,*" Margin="6,2,6,6">
             <!-- LEFT: Content Browser -->
             <ctrl:TextureFrame Grid.Column="0" Classes="floating tex-panel" Margin="0,0,3,0">
                 <views:ContentBrowserView Name="ContentBrowserBottomView"/>
             </ctrl:TextureFrame>
             <!-- RIGHT: Build Log + Logger tab -->
             <ctrl:TextureFrame Grid.Column="1" Classes="floating tex-panel" Margin="3,0,0,0">
-                <TabControl SelectedIndex="0" Background="Transparent" Padding="0">
+                <TabControl SelectedIndex="1" Background="Transparent" Padding="0">
                     <TabItem>
                         <TabItem.Header>
                             <TextBlock Text="BUILD LOG" FontFamily="{DynamicResource FontDisplay}"
@@ -274,8 +326,13 @@
                 </TabControl>
             </ctrl:TextureFrame>
         </Grid>
-
-        <!-- =========== ROW 3: Sequencer（工具栏 SEQ 开关切换显隐） =========== -->
-        <seq:SequencerPanel Grid.Row="3" Name="SequencerPanelHost" IsVisible="False"/>
+            </TabItem>
+            <TabItem>
+                <TabItem.Header>
+                    <TextBlock Text="Sequencer" FontSize="12"/>
+                </TabItem.Header>
+                <seq:SequencerPanel/>
+            </TabItem>
+        </TabControl>
     </Grid>
 </UserControl>

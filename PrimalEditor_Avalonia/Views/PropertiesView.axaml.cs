@@ -97,6 +97,52 @@ public partial class PropertiesView : UserControl
         Logger.Info($"HDR Env Map set from drop: {path}");
     }
 
+    // ---- PARTICLE FX 资产拖拽槽（同 HDR Env Map 槽的交互惯例） ----------------
+
+    private static string? ResolvePfxEmitterPath(Avalonia.Input.DragEventArgs e)
+    {
+        var payload = AssetDropHandler.ReadPayload(e);
+        var asset = payload == null ? null : AssetDropHandler.Resolve(payload);
+        var raw = asset?.FullPath ?? payload?.FullPath ?? AssetDropHandler.FirstFilePath(e);
+        if (string.IsNullOrEmpty(raw)) return null;
+        return raw.EndsWith(".pfx_emitter", System.StringComparison.OrdinalIgnoreCase) ? raw : null;
+    }
+
+    private void OnPfxAssetDragOver(object? sender, Avalonia.Input.DragEventArgs e)
+    {
+        e.Handled = true;
+        e.DragEffects = ResolvePfxEmitterPath(e) != null
+            ? Avalonia.Input.DragDropEffects.Copy
+            : Avalonia.Input.DragDropEffects.None;
+    }
+
+    private void OnPfxAssetDragLeave(object? sender, Avalonia.Input.DragEventArgs e)
+    {
+        e.Handled = true;
+    }
+
+    private void OnPfxAssetDrop(object? sender, Avalonia.Input.DragEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not ViewModels.PropertiesViewModel vm) return;
+        var path = ResolvePfxEmitterPath(e);
+        if (path == null)
+        {
+            Logger.Warning("Particle FX: drop rejected — drag a .pfx_emitter asset from the Content Browser.");
+            return;
+        }
+        vm.ParticleFXAssetPath = path;   // setter 会触发 PfxEmitterResyncCallback（重建发射器）
+        Logger.Info($"Particle FX asset bound from drop: {path}");
+    }
+
+    private void OnPfxAssetClearClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not ViewModels.PropertiesViewModel vm) return;
+        if (string.IsNullOrEmpty(vm.ParticleFXAssetPath)) return;
+        vm.ParticleFXAssetPath = string.Empty;   // 触发发射器销毁
+        Logger.Info("Particle FX asset binding cleared.");
+    }
+
     private async void OnBrowseLightEnvMapClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not ViewModels.PropertiesViewModel vm) return;

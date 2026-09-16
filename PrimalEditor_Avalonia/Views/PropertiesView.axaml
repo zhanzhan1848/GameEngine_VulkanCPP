@@ -343,7 +343,20 @@
                 <Grid ColumnDefinitions="90,*" RowDefinitions="Auto,Auto,Auto">
                     <TextBlock Grid.Row="0" Text="Asset" VerticalAlignment="Center"
                                ToolTip.Tip=".pfx_emitter JSON 资产路径"/>
-                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ParticleFXAssetPath, Mode=TwoWay}"/>
+                    <Border Grid.Row="0" Grid.Column="1" Background="#22FFFFFF" Padding="4,2"
+                            DragDrop.AllowDrop="True"
+                            DragDrop.DragOver="OnPfxAssetDragOver"
+                            DragDrop.DragLeave="OnPfxAssetDragLeave"
+                            DragDrop.Drop="OnPfxAssetDrop"
+                            ToolTip.Tip="从 Content Browser 拖入 .pfx_emitter 资产；换绑立即重建发射器">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <TextBox Grid.Column="0" Text="{Binding ParticleFXAssetPath, Mode=TwoWay}"
+                                 Watermark="拖入 .pfx_emitter 资产（或手输路径）" FontSize="11"/>
+                        <Button Grid.Column="1" Content="✕" Padding="4,0" Margin="4,0,0,0"
+                                Click="OnPfxAssetClearClick"
+                                ToolTip.Tip="清除绑定（场景发射器随之销毁）"/>
+                      </Grid>
+                    </Border>
                     <CheckBox Grid.Row="1" Grid.Column="1" Content="Enabled" IsChecked="{Binding ParticleFXEnabled, Mode=TwoWay}" Margin="0,4,0,0"/>
                     <Button Grid.Row="2" Grid.Column="1" Content="Sync Params → Engine"
                             Command="{Binding PfxSyncParamsCommand}" Margin="0,6,0,0" Padding="8,2"

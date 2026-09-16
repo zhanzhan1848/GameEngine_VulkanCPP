@@ -74,7 +74,7 @@
     <!-- TOP: Save/Discard toolbar (Ctrl+S / Ctrl+Shift+S via AssetEditorHost) -->
     <Border Grid.Row="0" Grid.ColumnSpan="3" Classes="floating"
             Margin="6,6,6,2" Padding="8,4">
-      <Grid ColumnDefinitions="*,Auto,Auto">
+      <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto">
         <TextBlock Grid.Column="0"
                    Text="{Binding Asset.FileName, FallbackValue='(no asset)'}"
                    FontFamily="{DynamicResource FontMono}"
@@ -87,10 +87,18 @@
                    FontSize="11"
                    Foreground="{DynamicResource AmberBrush}"
                    VerticalAlignment="Center"/>
-        <Button Grid.Column="1" Content="Discard" Margin="4,0"
+        <ComboBox Grid.Column="1" Margin="4,0"
+                  ItemsSource="{Binding SceneEntityOptions}"
+                  SelectedItem="{Binding SelectedSceneEntity, Mode=TwoWay}"
+                  MinWidth="170"
+                  ToolTip.Tip="目标发射源实体：Bind 会把当前资产挂到该场景实体（新建/替换其 ParticleFX 组件）"/>
+        <Button Grid.Column="2" Content="Bind" Margin="4,0"
+                Click="OnBindToSelectedClick"
+                ToolTip.Tip="把当前 .pfx_emitter 资产挂到上方选中的场景实体；未选则用 Hierarchy 当前选中实体"/>
+        <Button Grid.Column="3" Content="Discard" Margin="4,0"
                 Click="OnDiscardClick"
                 IsEnabled="{Binding IsDirty}"/>
-        <Button Grid.Column="2" Content="Save" Classes="accent"
+        <Button Grid.Column="4" Content="Save" Classes="accent"
                 Click="OnSaveClick"
                 IsEnabled="{Binding IsDirty}"/>
       </Grid>
@@ -221,6 +229,29 @@
             <ComboBox Grid.Column="1" MinWidth="120" HorizontalAlignment="Left" Margin="8,0,0,0"
                       ItemsSource="{Binding RendererOptions}"
                       SelectedItem="{Binding EmitterRenderer}"/>
+          </Grid>
+          <!-- INSTANCE MESH：renderer=mesh 时的每粒子几何源（content browser Mesh/Model
+               资产；引擎懒加载 cooked .mesh，空 = 内置立方体回退） -->
+          <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,4" IsEnabled="{Binding IsRenderMesh}">
+            <TextBlock Grid.Column="0" Text="INSTANCE" FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       VerticalAlignment="Center" Foreground="{DynamicResource MutedTextBrush}"/>
+            <ComboBox Grid.Column="1" Margin="8,0,0,0"
+                      ItemsSource="{Binding InstanceMeshOptions}"
+                      SelectedItem="{Binding InstanceMeshSelected}"
+                      ToolTip.Tip="每个粒子实例化的 mesh 资产（content browser Mesh/Model）；空 = 内置立方体回退"/>
+            <Button Grid.Column="2" Content="×" Padding="6,0" Margin="6,0,0,0"
+                    Click="OnClearInstanceMeshClick"
+                    ToolTip.Tip="清除 instance mesh（回退内置立方体）"/>
+          </Grid>
+          <!-- 实例网格真实半径（引擎查询），一键对齐 PhysicsCollision.radius -->
+          <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,10" IsVisible="{Binding IsRenderMesh}">
+            <TextBlock Grid.Column="0" Text="{Binding InstanceMeshRadiusText}"
+                       FontFamily="{DynamicResource FontMono}" FontSize="9"
+                       Foreground="{DynamicResource MutedTextBrush}"
+                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+            <Button Grid.Column="1" Content="radius→collision" Padding="6,2" Margin="6,0,0,0"
+                    FontSize="10" Click="OnFillCollisionRadiusClick"
+                    ToolTip.Tip="把 PhysicsCollision.radius 填成实例网格在缩放 1 时的真实半径（粒子缩放自动跟随）"/>
           </Grid>
 
           <!-- 模块堆栈：每个实例一张参数卡 -->

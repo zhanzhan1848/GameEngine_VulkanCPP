@@ -595,6 +595,65 @@ public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredCont
                 Type = PrimalEditor_Avalonia.Native.AssetType.PfxEmitter,
             });
         };
+        // PFX 编辑器窗口 "Bind to Selected Entity"：把打开的资产挂到当前
+        // Hierarchy 选中实体——与内容浏览器右键 Apply to Selected Entity
+        // 完全同一文档模型路径（ApplyPfxToSelectedEntity）。
+        ViewModels.PFX.PfxEmitterEditorViewModel.BindToSelectedEntityCallback = assetPath =>
+        {
+            if (Project == null) return null;
+            var ok = ApplyPfxToSelectedEntity(new Content.AssetInfo
+            {
+                FullPath = assetPath,
+                Type = PrimalEditor_Avalonia.Native.AssetType.PfxEmitter,
+            });
+            if (ok) Properties.Entities = SelectedEntities; // 立即刷新 Inspector 的 PARTICLE FX 区块
+            return ok ? "Bound asset to selected entity" : null;
+        };
+        // PFX 编辑器目标实体下拉：当前场景实体名 + 按名绑定（新建/复用 ParticleFX）
+        ViewModels.PFX.PfxEmitterEditorViewModel.SceneEntityNamesProvider = () =>
+        {
+            var scene = ActiveScene;
+            return scene == null
+                ? Array.Empty<string>()
+                : scene.Entities.Select(e => e.Name).ToArray();
+        };
+        ViewModels.PFX.PfxEmitterEditorViewModel.BindToSceneEntityCallback = (entityName, assetPath) =>
+        {
+            var entity = ActiveScene?.Entities.FirstOrDefault(e => e.Name == entityName);
+            if (entity == null) return null;
+            var pfx = entity.GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>();
+            if (pfx == null)
+            {
+                pfx = new PrimalEditor_Avalonia.Components.ParticleFXComponent();
+                entity.Components.Add(pfx);
+            }
+            pfx.AssetPath = assetPath;
+            if (NativeEngineBridge.IsLoaded) SceneSynchronizer.ResyncPfxEmitter(entity);
+            MarkProjectDirty();
+            Properties.Entities = SelectedEntities; // Inspector PARTICLE FX 区块即时刷新
+            return $"Bound to '{entityName}'";
+        };
+        // Inspector 资产槽换绑/清空后：重建（或销毁）该实体的原生发射器
+        PrimalEditor_Avalonia.ViewModels.PropertiesViewModel.PfxEmitterResyncCallback = () =>
+        {
+            if (SelectedEntities.Length == 1)
+                SceneSynchronizer.ResyncPfxEmitter(SelectedEntities[0]);
+        };
+        // PFX 编辑器 Save：落盘后重建场景中使用该资产的活动发射器（热更新），
+        // 否则场景会一直跑资产打开时编译的旧程序——改 lifetime/alpha/collider
+        // 都"不生效"。
+        ViewModels.PFX.PfxEmitterEditorViewModel.AssetSavedOnDiskCallback = assetPath =>
+        {
+            try
+            {
+                SceneSynchronizer.ReloadPfxEmittersForAsset(assetPath);
+            }
+            catch (Exception ex)
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning(
+                    $"[ParticleFX] hot-reload after save failed: {ex.Message}");
+            }
+        };
         // Material editors are free-floating windows; their saves reach
         // the live scene through this static event.
         SceneRuntimeSynchronizer.MaterialSavedOnDisk += OnMaterialSavedOnDisk;

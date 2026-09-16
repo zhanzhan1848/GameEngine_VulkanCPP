@@ -38,8 +38,25 @@ namespace PrimalEditor_Avalonia.Views;
             {
                 Interval = TimeSpan.FromMilliseconds(100),
             };
-            _buildPollTimer.Tick += (_, _) => IsBuilding = BuildService.IsRunning;
+            _buildPollTimer.Tick += (_, _) =>
+            {
+                IsBuilding = BuildService.IsRunning;
+                UpdateSimInactiveHint();
+            };
             _buildPollTimer.Start();
+        }
+
+        /// <summary>场景里存在物理相关组件（ParticleFX/Collider）但 SIM 未运行时，
+        /// 在视口顶部亮提示——否则碰撞静默失效无从察觉。</summary>
+        private void UpdateSimInactiveHint()
+        {
+            if (this.FindControl<Avalonia.Controls.Border>("SimInactiveHint") is not { } hint) return;
+            var vm = DataContext as WorldEditorViewModel;
+            var hasPhysicsContent = vm?.ActiveScene != null && vm.ActiveScene.Entities.Any(e =>
+                e.GetComponent<Components.ParticleFXComponent>() != null ||
+                e.GetComponent<Components.ColliderComponent>() != null);
+            hint.IsVisible = hasPhysicsContent
+                             && (!NativeEngineBridge.IsLoaded || !NativeEngineBridge.PhysicsIsInitialized());
         }
 
 private EngineViewport3D? _viewport;
@@ -62,6 +79,7 @@ private EngineViewport3D? _viewport;
         {
             _viewport.EntityPicked -= OnEntityPicked;
             _viewport.GizmoDrag -= OnGizmoDrag;
+            _viewport.RuntimePreviewEnded -= OnRuntimePreviewEnded;
         }
         if (_vm != null)
         {
@@ -74,6 +92,10 @@ private EngineViewport3D? _viewport;
         }
         _vm = DataContext as WorldEditorViewModel;
         _viewport = this.FindControl<EngineViewport3D>("WorldViewport");
+        // runtime 预览可能经 Stop 按钮或切场景两条路径结束（EndRuntimePreview
+        // 内部），订阅事件统一恢复工具栏的编辑器视口开关。
+        if (_viewport != null)
+            _viewport.RuntimePreviewEnded += OnRuntimePreviewEnded;
         var mainVm = ResolveMainVm();
         if (mainVm != null && this.FindControl<LoggerView>("LoggerTabView") is { } loggerView)
         {
@@ -311,6 +333,26 @@ private EngineViewport3D? _viewport;
         if (e.PropertyName == nameof(WorldEditorViewModel.ActiveScene))
         {
             _viewport.SetScene(_vm.ActiveScene);
+            return;
+        }
+        if (e.PropertyName == nameof(WorldEditorViewModel.RecordOnRun))
+        {
+            // Render Surface 预览中 Rec 实时开/停捕获（Player Window 模式的
+            // 录制由 player 进程在 Run 时读取一次性参数，维持原语义）。
+            if (_viewport is { IsRuntimePreview: true } && DataContext is WorldEditorViewModel recVm)
+            {
+                if (recVm.RecordOnRun && recVm.Project != null && recVm.ActiveScene != null)
+                {
+                    var recordDir = RuntimeLauncher.ResolveRecordDirectory(recVm.Project.Path, recVm.ActiveScene.Name);
+                    if (_viewport.StartPreviewFrameCapture(recordDir, recVm.RecordFrames))
+                        AppendBuildLog($"[run] preview capture → {recordDir} (frames={recVm.RecordFrames})");
+                }
+                else if (!recVm.RecordOnRun)
+                {
+                    _viewport.StopPreviewFrameCapture();
+                    AppendBuildLog("[run] preview capture stopped (Rec unchecked)");
+                }
+            }
             return;
         }
         if (e.PropertyName != nameof(WorldEditorViewModel.SelectedEntities)) return;
@@ -687,6 +729,7 @@ private EngineViewport3D? _viewport;
             vm.SceneSynchronizer.SyncEntity(target);
         }
         vm.MarkProjectDirty();
+        vm.Properties.Entities = vm.SelectedEntities; // same immediate-refresh as particle emitter add
         Logger.Info($"[Environment] component added to '{target.Name}'");
     }
 
@@ -711,7 +754,42 @@ private EngineViewport3D? _viewport;
             vm.SceneSynchronizer.SyncEntity(target);
         }
         vm.MarkProjectDirty();
+        // Selection didn't change, so Properties.Entities' setter (the thing
+        // that raises HasParticleComponent) never re-ran — re-assign to make
+        // the PARTICLE EMITTER section appear immediately.
+        vm.Properties.Entities = vm.SelectedEntities;
         Logger.Info($"[Particle] emitter component added to '{target.Name}'");
+    }
+
+    /// <summary>
+    /// 给选中实体挂新粒子系统 ParticleFX 组件（.pfx_emitter 模块栈）。
+    /// 项目里恰有一个 .pfx_emitter 时自动绑定，否则留空并在 Logger 提示
+    /// 用内容浏览器右键 / PFX 编辑器 Bind 按钮选择资产。
+    /// </summary>
+    private void OnAddParticleFxClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is not WorldEditorViewModel vm) return;
+        if (vm.SelectedEntities.Length == 0)
+        {
+            Logger.Info("[PFX] select an entity first");
+            return;
+        }
+        var target = vm.SelectedEntities[0];
+        if (target.GetComponent<Components.ParticleFXComponent>() != null)
+        {
+            Logger.Info($"[PFX] '{target.Name}' already has a ParticleFX component");
+            return;
+        }
+        var pfx = new Components.ParticleFXComponent();
+        target.Components.Add(pfx);
+        if (vm.GetNativeEntityId(target) is var nativeId && nativeId != 0)
+        {
+            vm.SceneSynchronizer.SyncEntity(target);
+        }
+        vm.MarkProjectDirty();
+        vm.Properties.Entities = vm.SelectedEntities; // 立即显示 PARTICLE FX 区块
+        Logger.Info($"[PFX] ParticleFX component added to '{target.Name}'" +
+                    " — drag a .pfx_emitter asset into the Asset slot (or use the PFX editor's Bind).");
     }
 
     private async void OnCreatePrefabClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -788,10 +866,30 @@ private EngineViewport3D? _viewport;
         }
     }
 
-    private void OnSequencerToggleClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    // Sequencer 已改为 View 菜单开关的独立标签页（MainWindowViewModel
+    // .ToggleSequencerTabCommand），工具栏的 SEQ 开关随之移除。
+
+    // Sim：物理/碰撞模拟。播放语义与 CLI sim.play 一致（Initialize→MaterializeAll→
+    // SetRunning），tick 由视口渲染循环每帧 PipelineTick 驱动，无需独立定时器。
+    private void OnSimPlayClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (this.FindControl<Views.Sequencer.SequencerPanel>("SequencerPanelHost") is { } panel)
-            panel.IsVisible = !panel.IsVisible;
+        if (!NativeEngineBridge.IsLoaded) return;
+        if (!NativeEngineBridge.PhysicsIsInitialized())
+        {
+            if (!NativeEngineBridge.PhysicsInitialize())
+            {
+                Logger.Warning("[Sim] physics initialize failed");
+                return;
+            }
+            NativeEngineBridge.PhysicsMaterializeAll();
+        }
+        NativeEngineBridge.PhysicsSetRunning(true);
+        Logger.Info("[Sim] physics running (viewport tick)");
+    }
+
+    private void OnSimPauseClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (NativeEngineBridge.IsLoaded) NativeEngineBridge.PhysicsSetRunning(false);
     }
 
     private void OnTranslateModeClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e) =>
@@ -839,6 +937,7 @@ private EngineViewport3D? _viewport;
             }
             AppendBuildLog($"[run] runtime preview in render surface (scene='{vm.ActiveScene?.Name}', api=editor viewport)");
             IsBuilding = true;  // 启用 Stop 按钮；Stop 分支先查预览再查进程
+            SetPreviewUiState(true);
 
             // Rec：Render Surface 模式没有 player 进程，录制由编辑器侧
             // DispatcherTimer 驱动（TryCaptureScreenshot 逐帧落 PNG）。
@@ -869,7 +968,7 @@ private EngineViewport3D? _viewport;
         // 退出预览并恢复编辑器渲染状态。
         if (_viewport is { IsRuntimePreview: true })
         {
-            _viewport.EndRuntimePreview();
+            _viewport.EndRuntimePreview();  // 内部触发 RuntimePreviewEnded → 恢复工具栏
             IsBuilding = false;
             AppendBuildLog("[run] render-surface runtime preview stopped");
             return;
@@ -877,6 +976,39 @@ private EngineViewport3D? _viewport;
         AppendBuildLog("[build] stop requested");
         BuildService.Stop();
     }
+
+    // ========= runtime 预览（Render Surface）期间的工具栏状态 =========
+    // VIEW/Bounds/Ortho 是编辑器视口的开关：预览中叠层被刻意隐藏、画面与
+    // player 同口径（runtime 路径尚未接入编辑器实体），这些开关不再作用于
+    // 画面——禁用并在 tooltip 注明原因，避免"切了没反应"的假故障观感。
+    // Rec 例外：预览中保持可用并实时生效（勾选立即开始捕获，取消即停）。
+
+    private void SetPreviewUiState(bool previewing)
+    {
+        const string suffix = "（runtime 预览中不可用：画面与 player 同口径）";
+        ApplyPreviewToggle(this.FindControl<ComboBox>("ViewModeCombo"), previewing, suffix);
+        ApplyPreviewToggle(this.FindControl<CheckBox>("BoundsToggle"), previewing, suffix);
+        ApplyPreviewToggle(this.FindControl<CheckBox>("OrthoToggle"), previewing, suffix);
+        if (this.FindControl<CheckBox>("RecCheck") is { } rec)
+        {
+            ToolTip.SetTip(rec, previewing
+                ? "预览录制开关：勾选立即开始逐帧 PNG 捕获，取消即停（Render Surface 模式）"
+                : "Run 时录制：PrimalPlayer 逐帧 PNG（渲染帧与捕获帧 1:1，无丢帧），录满自动退出");
+        }
+    }
+
+    private static void ApplyPreviewToggle(Avalonia.Controls.Control? control, bool previewing, string suffix)
+    {
+        if (control == null) return;
+        control.IsEnabled = !previewing;
+        if (ToolTip.GetTip(control) is not string tip) return;
+        if (previewing && !tip.Contains(suffix, StringComparison.Ordinal))
+            ToolTip.SetTip(control, tip + suffix);
+        else if (!previewing)
+            ToolTip.SetTip(control, tip.Replace(suffix, string.Empty, StringComparison.Ordinal));
+    }
+
+    private void OnRuntimePreviewEnded(object? sender, EventArgs e) => SetPreviewUiState(false);
 
     // BuildLogView (the inner control at the bottom of WorldEditorView's
     // tab strip) subscribes to BuildService itself. Toolbar buttons call

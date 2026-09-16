@@ -92,9 +92,28 @@ public partial class PfxEmitterEditorView : UserControl
         if (DataContext is PfxEmitterEditorViewModel vm) vm.Save();
     }
 
+    /// <summary>清除 instance mesh（回退内置立方体）。ComboBox 直接置空触发 VM 回写。</summary>
+    private void OnClearInstanceMeshClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is PfxEmitterEditorViewModel vm) vm.InstanceMeshSelected = null;
+    }
+
+    /// <summary>把 PhysicsCollision.radius 填成实例网格真实半径（缩放 1 基准）。</summary>
+    private void OnFillCollisionRadiusClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is PfxEmitterEditorViewModel vm) vm.FillCollisionRadiusFromMesh();
+    }
+
     private void OnDiscardClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is PfxEmitterEditorViewModel vm) vm.Discard();
+    }
+
+    /// <summary>把当前资产挂到 Hierarchy 选中实体（文档模型与内容浏览器
+    /// 右键 Apply to Selected Entity 同路径；结果写状态行 + Logger）。</summary>
+    private void OnBindToSelectedClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is PfxEmitterEditorViewModel vm) vm.BindToSelectedEntity();
     }
 
     /// <summary>Canvas node click → selects the module (terminals → root settings).</summary>

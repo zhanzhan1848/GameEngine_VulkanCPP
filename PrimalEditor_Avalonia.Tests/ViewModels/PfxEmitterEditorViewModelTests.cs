@@ -331,4 +331,45 @@ public sealed class PfxEmitterEditorViewModelTests
         }
         finally { File.Delete(path); }
     }
+    [Fact]
+    public void InstanceMesh_RoundTripsThroughSave_And_ClearRemovesSection()
+    {
+        InjectSchema();
+        var path = Path.Combine(Path.GetTempPath(), $"pfx_test_{Guid.NewGuid():N}.pfx_emitter");
+        File.WriteAllText(path, """
+            {
+              "name": "inst",
+              "renderer": "mesh",
+              "instance": { "mesh": "Content/Meshes/rock.mesh", "guid": "00000000-0000-0000-0000-000000000000" },
+              "stages": { "spawn": [ { "module": "SpawnRate", "rate": 10 } ] }
+            }
+            """);
+        var vm = new PfxEmitterEditorViewModel();
+        vm.SetAsset(new AssetInfo { FullPath = path, Type = PrimalEditor_Avalonia.Native.AssetType.PfxEmitter });
+        try
+        {
+            Assert.True(vm.IsRenderMesh, "renderer=mesh 时 instance 行应可用");
+            // guid 未注册（空注册表）→ 显示名回退为存储路径
+            Assert.Equal("Content/Meshes/rock.mesh", vm.InstanceMeshSelected);
+
+            vm.Save();
+            using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)))
+            {
+                var inst = doc.RootElement.GetProperty("instance");
+                Assert.Equal("Content/Meshes/rock.mesh", inst.GetProperty("mesh").GetString());
+                Assert.Equal("00000000-0000-0000-0000-000000000000", inst.GetProperty("guid").GetString());
+            }
+
+            // 清除 → instance 节整体移除（不残留空对象）
+            vm.InstanceMeshSelected = null;
+            Assert.True(string.IsNullOrEmpty(vm.InstanceMeshSelected));
+            vm.Save();
+            using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)))
+            {
+                Assert.False(doc.RootElement.TryGetProperty("instance", out _),
+                    "清除后 instance 节应被移除");
+            }
+        }
+        finally { File.Delete(path); }
+    }
 }

@@ -476,6 +476,83 @@ public sealed class SceneRuntimeSynchronizer
         }
     }
 
+    /// <summary>
+    /// 按实体当前的 ParticleFX 组件状态重建其原生发射器（销毁旧的 → 依 AssetPath
+    /// 重新编译创建 → 恢复位置/暴露参数）。资产换绑 / 保存热更新共用。
+    /// </summary>
+    public void ResyncPfxEmitter(GameEntity entity)
+    {
+        if (!_bridge.IsLoaded) return;
+        var pfx = entity.GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>();
+        if (pfx == null) return;
+        if (_entities.GetEntityId(entity.EntityGuid) is not { } runtimeId) return;
+
+        // 组件禁用/清空资产 → 只销毁旧发射器（无资产可重建）
+        if (!pfx.IsEnabled || string.IsNullOrWhiteSpace(pfx.AssetPath))
+        {
+            if (PfxEmitterByRuntime.Remove(runtimeId, out var stale) && stale != 0)
+                _bridge.PfxEmitterRemove(stale);
+            PfxRuntimeEmitters.Remove(runtimeId);
+            return;
+        }
+
+        if (PfxEmitterByRuntime.TryGetValue(runtimeId, out var oldId))
+        {
+            if (oldId != 0) _bridge.PfxEmitterRemove(oldId);
+            PfxEmitterByRuntime.Remove(runtimeId);
+            PfxRuntimeEmitters.Remove(runtimeId);
+        }
+
+        var newId = _bridge.PfxEmitterCreateFromAsset(pfx.AssetPath);
+        if (newId == 0 || newId == uint.MaxValue)
+        {
+            Logger.Warning($"[ParticleFX] emitter (re)create failed for '{entity.Name}' (asset={pfx.AssetPath})");
+            return;
+        }
+        RegisterPfxRuntimeEmitter(runtimeId, pfx.AssetPath, newId);
+
+        var transform = entity.GetTransform();
+        if (transform is not null)
+            _bridge.PfxSetEmitterPosition(newId,
+                transform.PositionX, transform.PositionY, transform.PositionZ);
+        foreach (var (paramName, paramValue) in pfx.ExposedParams)
+            _bridge.PfxSetExposedParam(newId, PfxHash.HashName(paramName), paramValue);
+
+        Logger.Info($"[ParticleFX] emitter hot-reloaded for '{entity.Name}' " +
+                    $"(asset={System.IO.Path.GetFileName(pfx.AssetPath)}, id={newId})");
+    }
+
+    /// <summary>
+    /// .pfx_emitter 资产保存后的热更新：销毁所有使用该资产的活发射器，
+    /// 按当前磁盘内容重新编译创建（位置/暴露参数沿用组件当前值）。
+    /// 与 <see cref="ReloadMaterial"/> 同思路——PFX 编辑器 Save 后场景里的
+    /// 发射器立即生效，无需重载场景或重新同步实体。
+    /// </summary>
+    public void ReloadPfxEmittersForAsset(string assetPath)
+    {
+        if (string.IsNullOrWhiteSpace(assetPath) || !_bridge.IsLoaded) return;
+        string full;
+        try { full = System.IO.Path.GetFullPath(assetPath); }
+        catch (Exception ex)
+        {
+            Logger.Warning($"[ParticleFX] hot-reload: bad asset path '{assetPath}': {ex.Message}");
+            return;
+        }
+
+        foreach (var entity in _live)
+        {
+            var pfx = entity.GetComponent<PrimalEditor_Avalonia.Components.ParticleFXComponent>();
+            if (pfx == null || !pfx.IsEnabled || string.IsNullOrWhiteSpace(pfx.AssetPath)) continue;
+
+            string entityAssetFull;
+            try { entityAssetFull = System.IO.Path.GetFullPath(pfx.AssetPath); }
+            catch { continue; }
+            if (!string.Equals(entityAssetFull, full, StringComparison.OrdinalIgnoreCase)) continue;
+
+            ResyncPfxEmitter(entity);
+        }
+    }
+
     private ulong[] ResolveWorldTextureIds(MeshRendererComponent renderer)
     {
         if (renderer.MaterialGuids.Count == 0) return Array.Empty<ulong>();
@@ -512,36 +589,10 @@ public sealed class SceneRuntimeSynchronizer
         return ids;
     }
 
-    private string? ResolveCookedArtifactPath(AssetInfo info)
-    {
-        var relative = AssetRegistry.GetRelativePath(info.FullPath);
-        if (relative is not { } rel) return UseSourceAsFallback ? info.FullPath : null;
-
-        var projectRoot = AssetRegistry.ProjectRoot;
-        if (string.IsNullOrEmpty(projectRoot)) return UseSourceAsFallback ? info.FullPath : null;
-
-		var artifactRelativePath = rel.Value;
-		string? sourceArtifactPath = info.FullPath;
-		const string modelSidecarSuffix = ".model.json";
-		if (artifactRelativePath.EndsWith(modelSidecarSuffix, StringComparison.OrdinalIgnoreCase))
-		{
-			artifactRelativePath = artifactRelativePath[..^modelSidecarSuffix.Length] + ".mesh";
-			sourceArtifactPath = info.FullPath[..^modelSidecarSuffix.Length] + ".mesh";
-		}
-		else if (Path.GetExtension(artifactRelativePath).Equals(".model", StringComparison.OrdinalIgnoreCase))
-		{
-			artifactRelativePath = Path.ChangeExtension(artifactRelativePath, ".mesh");
-			sourceArtifactPath = Path.ChangeExtension(info.FullPath, ".mesh");
-		}
-
-        var cookedAbsolute = Path.Combine(
-            projectRoot, ".Primal", "Cooked", CookedPlatform, CookedConfiguration,
-			artifactRelativePath.Replace('/', Path.DirectorySeparatorChar));
-
-        if (File.Exists(cookedAbsolute)) return cookedAbsolute;
-		if (UseSourceAsFallback && File.Exists(sourceArtifactPath)) return sourceArtifactPath;
-        return null;
-    }
+    private string? ResolveCookedArtifactPath(AssetInfo info) =>
+        // 实现提取至 CookedArtifactResolver（PFX 发射器编辑器选 mesh 资产共用）
+        CookedArtifactResolver.ResolveCookedPath(
+            info, CookedPlatform, CookedConfiguration, UseSourceAsFallback);
 
     /// <summary>
     /// Lazily create and cache one native procedural geometry resource per

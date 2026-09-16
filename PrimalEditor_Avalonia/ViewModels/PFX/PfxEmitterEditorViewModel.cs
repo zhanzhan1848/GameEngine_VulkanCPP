@@ -335,15 +335,149 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
     public static IReadOnlyList<string> BlendOptions { get; } =
         new[] { "additive", "alpha", "multiply", "premultiplied" };
 
-    // 渲染器类型（§7-N2）：billboard = sprite 兼容桥；mesh = ParticleFXMeshPass 立方体实例
+    // 渲染器类型（§7-N2）：billboard = sprite 兼容桥；mesh = ParticleFXMeshPass 实例
     public string EmitterRenderer
     {
         get => _renderer;
-        set { if (_renderer == value) return; _renderer = value; Fire(nameof(EmitterRenderer)); OnStructureEdited("renderer"); }
+        set
+        {
+            if (_renderer == value) return;
+            _renderer = value;
+            Fire(nameof(EmitterRenderer));
+            Fire(nameof(IsRenderMesh));
+            OnStructureEdited("renderer");
+        }
     }
     private string _renderer = "billboard";
 
     public static IReadOnlyList<string> RendererOptions { get; } = new[] { "billboard", "mesh" };
+
+    public bool IsRenderMesh => string.Equals(_renderer, "mesh", StringComparison.OrdinalIgnoreCase);
+
+    // ---- 渲染 instance 几何源（renderer=mesh 时生效；空 = 内置立方体回退）----------
+    // 引擎侧按路径懒加载 cooked .mesh（Bridges load_instance_geometry）；
+    // guid 仅供编辑器回读时反查显示，不是引擎事实源。
+    public IReadOnlyList<string> InstanceMeshOptions => _instanceMeshOptions;
+    private readonly List<string> _instanceMeshOptions = new();
+    private readonly List<AssetInfo> _instanceMeshAssets = new();
+
+    public string? InstanceMeshSelected
+    {
+        get => _instanceMeshSelected;
+        set
+        {
+            if (_instanceMeshSelected == value) return;
+            _instanceMeshSelected = value;
+            Fire(nameof(InstanceMeshSelected));
+            if (value is not null && BuiltInInstanceOptions.TryGetValue(value, out var pseudo))
+            {
+                // 内置程序化几何：引擎按伪路径解析（builtin:cube/sphere），无需资产
+                _instanceMeshPath = pseudo;
+                _instanceMeshGuid = "";
+            }
+            else
+            {
+                var info = _instanceMeshAssets.FirstOrDefault(a => InstanceMeshDisplayName(a) == value);
+                if (info is null)
+                {
+                    _instanceMeshPath = "";
+                    _instanceMeshGuid = "";
+                }
+                else
+                {
+                    var cooked = Native.CookedArtifactResolver.ResolveCookedPath(info);
+                    _instanceMeshPath = cooked is null
+                        ? ""
+                        : Native.CookedArtifactResolver.ToCwdRelative(cooked);
+                    _instanceMeshGuid = info.Guid.ToString();
+                }
+            }
+            OnStructureEdited("instance.mesh");
+            UpdateInstanceMeshRadius();
+        }
+    }
+    private string? _instanceMeshSelected;
+    private string _instanceMeshPath = "";
+    private string _instanceMeshGuid = "";
+
+    // ---- 实例网格半径（缩放 1 时的包围球半径）→ 碰撞半径对齐用 ---------------
+    private string _instanceMeshRadiusText = "";
+    public string InstanceMeshRadiusText
+    {
+        get => _instanceMeshRadiusText;
+        private set { if (_instanceMeshRadiusText != value) { _instanceMeshRadiusText = value; Fire(nameof(InstanceMeshRadiusText)); } }
+    }
+
+    /// <summary>查询引擎侧网格包围球半径并更新提示文本。</summary>
+    private void UpdateInstanceMeshRadius()
+    {
+        if (string.IsNullOrEmpty(_instanceMeshPath))
+        {
+            InstanceMeshRadiusText = "";
+            return;
+        }
+        var r = PrimalEditor_Avalonia.Native.NativeEngineBridge.PfxInstanceMeshRadius(_instanceMeshPath);
+        InstanceMeshRadiusText = r > 0
+            ? $"instance radius ≈ {r:0.###} m — PhysicsCollision radius 填同值（缩放自动跟随）"
+            : "";
+    }
+
+    /// <summary>一键把 PhysicsCollision.radius 填成实例网格半径（缩放 1 基准）。</summary>
+    public void FillCollisionRadiusFromMesh()
+    {
+        if (string.IsNullOrEmpty(_instanceMeshPath)) { StatusLine = "Fill radius: no instance mesh"; return; }
+        var r = PrimalEditor_Avalonia.Native.NativeEngineBridge.PfxInstanceMeshRadius(_instanceMeshPath);
+        if (r <= 0) { StatusLine = "Fill radius: mesh radius unknown"; return; }
+        foreach (var row in AllModules)
+        {
+            if (!string.Equals(row.Name, "PhysicsCollision", StringComparison.OrdinalIgnoreCase)) continue;
+            var radiusParam = row.Params.FirstOrDefault(p => p.Name == "radius");
+            if (radiusParam == null) continue;
+            radiusParam.Value = r.ToString("0.###");
+            OnParamEdited(radiusParam);
+            StatusLine = $"PhysicsCollision radius ← {r:0.###} m";
+            return;
+        }
+        StatusLine = "Fill radius: add a PhysicsCollision module first";
+    }
+
+    private static string InstanceMeshDisplayName(AssetInfo a) => a.FileName;
+
+    // 内置程序化 instance 几何（引擎 ParticleFXMeshPass 槽 0/1，无需内容资产）
+    public const string BuiltInCubeOption = "Built-in Cube (内置立方体)";
+    public const string BuiltInSphereOption = "Built-in Sphere (内置球体)";
+    private static readonly System.Collections.Generic.Dictionary<string, string>
+        BuiltInInstanceOptions = new()
+    {
+        [BuiltInCubeOption] = "builtin:cube",
+        [BuiltInSphereOption] = "builtin:sphere",
+    };
+
+    /// <summary>按 AssetRegistry 当前内容重建 mesh 选项（Mesh/Model 资产，名称排序）。
+    /// 内置 Cube/Sphere 恒在最前。编辑器打开资产（SetAsset→LoadFromJson）时调用。</summary>
+    private void RefreshInstanceMeshOptions()
+    {
+        _instanceMeshAssets.Clear();
+        _instanceMeshOptions.Clear();
+        _instanceMeshAssets.AddRange(AssetRegistry.Assets
+            .Where(a => a.Type == Native.AssetType.Mesh || a.Type == Native.AssetType.Model)
+            .OrderBy(a => a.FileName, StringComparer.OrdinalIgnoreCase));
+        _instanceMeshOptions.Add(BuiltInCubeOption);
+        _instanceMeshOptions.Add(BuiltInSphereOption);
+        _instanceMeshOptions.AddRange(_instanceMeshAssets.Select(InstanceMeshDisplayName));
+        Fire(nameof(InstanceMeshOptions));
+    }
+
+    /// <summary>存储的 instance 路径/guid → ComboBox 显示名（guid 反查优先，退回路径）。</summary>
+    private string? InstanceMeshDisplayFor(string path, string guid)
+    {
+        foreach (var (label, pseudo) in BuiltInInstanceOptions)
+            if (string.Equals(path, pseudo, StringComparison.OrdinalIgnoreCase)) return label;
+        if (Guid.TryParse(guid, out var g)
+            && AssetRegistry.GetByGuid(g) is { } info)
+            return InstanceMeshDisplayName(info);
+        return string.IsNullOrEmpty(path) ? null : path;
+    }
 
     public string Capacity
     {
@@ -411,6 +545,8 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
         }
         LoadFromJson(_json);
         _lastSnapshot = _json; // undo baseline: the freshly-loaded document
+        RefreshSceneEntities(); // 目标实体下拉随资产打开刷新
+        UpdateInstanceMeshRadius(); // 实例半径提示随加载刷新
         ClearDirty();
         StatusLine = "Ready";
     }
@@ -426,6 +562,9 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
             StatusLine = $"Saved {Asset.FileName}";
             PushHotPreview();
             Logger.Info($"Saved PFX emitter: {Asset.FileName}");
+            // 场景热更新：重建所有使用该资产的活动发射器（回调由
+            // WorldEditorViewModel 注入 → SceneRuntimeSynchronizer）。
+            AssetSavedOnDiskCallback?.Invoke(Asset.FullPath);
         }
         catch (Exception ex)
         {
@@ -438,6 +577,64 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
     {
         if (Asset == null) return;
         SetAsset(Asset);
+    }
+
+    // ============================================================
+    //  Scene binding（把资产挂到场景实体——回答"哪个实例用它发射"）
+    // ============================================================
+
+    /// <summary>静态回调由 WorldEditorViewModel 注入：把资产挂到 Hierarchy 当前
+    /// 选中实体（Bind 未选下拉目标时的回退路径）。null = 失败（原因已写日志）。</summary>
+    public static Func<string, string?>? BindToSelectedEntityCallback { get; set; }
+
+    /// <summary>静态回调由 WorldEditorViewModel 注入：Save 落盘后重建场景中
+    /// 使用该资产的活动发射器（热更新，场景无需重载）。</summary>
+    public static Action<string>? AssetSavedOnDiskCallback { get; set; }
+
+    /// <summary>场景发射源选择：当前激活场景的实体名列表（null = 无场景）。</summary>
+    public static Func<IReadOnlyList<string>>? SceneEntityNamesProvider { get; set; }
+
+    /// <summary>把资产绑定到指定名字的场景实体（新建/复用其 ParticleFX 组件）。
+    /// 返回 null = 失败。entityName 用实体名匹配（v1：取第一个同名实体）。</summary>
+    public static Func<string, string, string?>? BindToSceneEntityCallback { get; set; }
+
+    public System.Collections.ObjectModel.ObservableCollection<string> SceneEntityOptions { get; } = new();
+
+    private string? _selectedSceneEntity;
+    public string? SelectedSceneEntity
+    {
+        get => _selectedSceneEntity;
+        set { if (_selectedSceneEntity != value) { _selectedSceneEntity = value; Fire(nameof(SelectedSceneEntity)); } }
+    }
+
+    /// <summary>刷新目标实体下拉（窗口打开/Save 后调用）。</summary>
+    public void RefreshSceneEntities()
+    {
+        var names = SceneEntityNamesProvider?.Invoke();
+        SceneEntityOptions.Clear();
+        if (names != null) foreach (var n in names) SceneEntityOptions.Add(n);
+        Fire(nameof(SceneEntityOptions));
+        if (_selectedSceneEntity == null && SceneEntityOptions.Count > 0)
+            SelectedSceneEntity = SceneEntityOptions[0];
+    }
+
+    /// <summary>工具栏 "Bind"：优先绑定下拉选中的场景实体；未选则回退
+    /// 到 Hierarchy 当前选中实体。</summary>
+    public void BindToSelectedEntity()
+    {
+        if (Asset == null)
+        {
+            StatusLine = "Bind: no asset open";
+            return;
+        }
+        if (!string.IsNullOrEmpty(SelectedSceneEntity))
+        {
+            var byName = BindToSceneEntityCallback?.Invoke(SelectedSceneEntity, Asset.FullPath);
+            StatusLine = byName ?? $"Bind failed — scene entity '{SelectedSceneEntity}' not found";
+            return;
+        }
+        var result = BindToSelectedEntityCallback?.Invoke(Asset.FullPath);
+        StatusLine = result ?? "Bind failed — select a target entity (or select one in Hierarchy)";
     }
 
     // ============================================================
@@ -462,6 +659,22 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
                 _capacity = cv.ToJsonString().Trim('"');
             if (root?["renderer"] is System.Text.Json.Nodes.JsonValue rv)
                 _renderer = rv.GetValue<string>();
+            if (root?["instance"] is System.Text.Json.Nodes.JsonObject inst)
+            {
+                _instanceMeshPath = inst["mesh"] is System.Text.Json.Nodes.JsonValue mv
+                    ? mv.GetValue<string>() : "";
+                _instanceMeshGuid = inst["guid"] is System.Text.Json.Nodes.JsonValue gv
+                    ? gv.GetValue<string>() : "";
+            }
+            else
+            {
+                _instanceMeshPath = "";
+                _instanceMeshGuid = "";
+            }
+            RefreshInstanceMeshOptions();
+            _instanceMeshSelected = InstanceMeshDisplayFor(_instanceMeshPath, _instanceMeshGuid);
+            Fire(nameof(InstanceMeshSelected));
+            Fire(nameof(IsRenderMesh));
             if (root?["stages"] is System.Text.Json.Nodes.JsonObject stages)
             {
                 foreach (var stage in _stageNames)
@@ -680,6 +893,18 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
         root["name"] = _rootName;
         root["blend"] = _blendMode;
         root["renderer"] = _renderer;
+        if (!string.IsNullOrEmpty(_instanceMeshPath))
+        {
+            var inst = root["instance"] as System.Text.Json.Nodes.JsonObject
+                       ?? new System.Text.Json.Nodes.JsonObject();
+            inst["mesh"] = _instanceMeshPath;
+            if (!string.IsNullOrEmpty(_instanceMeshGuid)) inst["guid"] = _instanceMeshGuid;
+            root["instance"] = inst;
+        }
+        else if (root["instance"] is not null)
+        {
+            root.Remove("instance");
+        }
         if (int.TryParse(_capacity, out var cap) && cap > 0) root["capacity"] = cap;
 
         var stages = root["stages"] as System.Text.Json.Nodes.JsonObject ?? new System.Text.Json.Nodes.JsonObject();
@@ -897,18 +1122,10 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
         var bytes = System.Text.Encoding.UTF8.GetBytes(_json);
         var ok = true;
 
-        // ① 场景中挂载该资产的活实体发射器（所见即所得）
-        var liveId = Native.SceneRuntimeSynchronizer.TryGetPfxRuntimeEmitterId(Asset.FullPath);
-        if (liveId != 0)
-        {
-            ok &= NativeEngineBridge.PfxEmitterReloadFromMemory(liveId, bytes) != 0;
-            if (_lastPushedEmitterId != liveId)
-                StatusLine = $"Live preview → emitter {liveId}";
-            _lastPushedEmitterId = liveId;
-        }
-
-        // ② 私有预览发射器（编辑器内嵌 viewport 的数据源）——
-        //    惰性创建，此后 PipelineTick 持续 tick 模拟。
+        // 只推私有预览发射器（编辑器内嵌 viewport 的数据源）。
+        // 场景里的活发射器不再被窗口内存态直接覆盖——旧实现会在用户仅打开
+        // 窗口/改参数时把过期的内存程序推入场景（表现为"改了没作用"或
+        // "行为突然变成另一套"）；场景统一走 Save → 落盘 → Resync 链路。
         var previewId = ResolvePreviewEmitterId();
         if (previewId != 0)
         {
@@ -946,12 +1163,10 @@ public sealed class PfxEmitterEditorViewModel : AssetEditorViewModel
     private uint ResolvePreviewEmitterId()
     {
         if (Asset == null) return 0;
-        var live = Native.SceneRuntimeSynchronizer.TryGetPfxRuntimeEmitterId(Asset.FullPath);
-        if (live != 0)
-        {
-            ReleaseOwnedPreviewEmitter();
-            return live;
-        }
+        // 注意：不再把场景活发射器当作预览目标——那会让任何一次预览推送
+        // （改参数/撤销/加删模块）把窗口内存 JSON ReloadFromMemory 进场景，
+        // 窗口状态与磁盘稍有出入时场景行为就突变。预览永远用私有发射器；
+        // 场景发射器只经 Save → AssetSavedOnDiskCallback → Resync 更新。
         if (_previewEmitterId == 0 && NativeEngineBridge.IsLoaded)
         {
             _previewEmitterId = NativeEngineBridge.PfxEmitterCreateFromAsset(Asset.FullPath);
