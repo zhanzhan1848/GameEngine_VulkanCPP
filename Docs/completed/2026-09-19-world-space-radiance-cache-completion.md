@@ -109,6 +109,9 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
 | shader 同语言拷贝门禁 `check_shader_copies.sh` | ✅（同步 EngineTest 三份拷贝后 0 漂移） |
 | §1.2-5 include 禁令 | ✅ `WRC/` 域与 WRC shader 0 个 DDGI include；共享仅白名单（GIWarmup/GIDebugParams/GICacheView/LumenTypes/SurfaceCacheData/ShaderLib） |
 | Stream B ladder dump 逐回路断言实跑（三配置 × 500/400 帧：默认 / bootstrap / WRC+bootstrap，`GI_DCGAIN=1 GI_LADDER_DUMP=1 SPGI_CAM_LOCK=1`） | ✅ 已执行。GILadderVerdict=`C_fused_matches_model`（残差 med 0.0126 / P95 0.046）；GIDCGain amp 断言三配置均超 0.05 线（**基线自身 0.128 即超**——本工作树 ROI 噪声底，非 Stream B 引入）；逐回路启动衰减率（仪表口径：收敛瞬态相邻 |Δ| 比中位数）base 1.34 → boot 0.886 → wrc 0.606——bootstrap/WRC 配置单调改善且无发散（500 帧稳态漂移 base +24% vs boot −3.8%）；严格 <0.5 受仪表噪声底限制为后续项（需更静默 ROI/去噪读回） |
+| **A2 验收：prefilter SH9 vs 消费端 cos 加权积分**（`PRIMAL_WRC_ENABLE=1 PRIMAL_WRC_PREFILTER=1 PRIMAL_WRC_DUMP=1`，`[WRC_PF_CHECK]` 探针级读回对照，+2 帧读回环） | ✅ 已执行。**远场 volume（SPGI 实际消费对象）PASS**：2030 探针 median=2.64% < 5%（p95 6.9% / max 11%）。**近场 volume FAIL**：1340 探针 median=13.3%（p95 111%）——根因：Sponza 内场直射太阳热点探针的方向 radiance 近 δ 分布，SH9 带限平滑与 c⁶ lobe 核在峰值处系统性分歧（SH9 为低频近似，直射热点由 SC 直射链单独供给，prefilter 档定位即调试/低频降级）。缓解路径（后续）：峰值探针剔除口径 / 高阶 lobe / 直接 irradiance store |
+| **A3 验收：远场 A/B 对照**（`PRIMAL_WRC_ENABLE=0/1` × `GI_LADDER_DUMP=1 SPGI_CAM_LOCK=1`，帧 300/360/420 三时点、440 锁定机位像素，spgi 亮度） | ✅ 已执行。**远场时间方差**：逐像素 CV 中位 0.809（DDGI 回退）→ **0.555（WRC）= −31%**。**暗角**：暗部尾巴 P1 2.57→3.84、P5 3.39→5.13（+49~51% 提亮，暗角减轻）；均值 4.34→6.63。**死列**：两配置 dead(<0.02 亮度) 均为 0（症状在 scene-fit DDGI 网格后已消，WRC 接管无回归） |
+| **A4 验收：三场景基线 ±10% + 故障计数周环比** | ⚠️ 部分会话外：周环比需 7 天故障计数窗口（fusion_darkening/indirect 类），**记录为会话外验收**；三场景基线对照需 Sponza/arcade/TestProject_01 三场景采集流水线，本会话完成 Sponza 单场景能量与稳定性证据（§2 各行），arcade/TestProject_01 采集待会话外补齐 |
 | C# / CLI 门禁 | 不涉及（无 CLI 命令面变化，schema 快照无影响） |
 | `ci_local.sh` step 5 render | ⚠️ 关机期 FreeList 断言（render 本体 ok:true、PNG 正常）——**经还原对照实验确认为工作树遗留问题**（还原我的全部相关修改后 exit=134 依旧），非本次引入；见 §4 |
 

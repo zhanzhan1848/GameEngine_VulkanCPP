@@ -133,6 +133,14 @@ public:
         float mean_lum = 0.0f;
     };
     const DumpStats& GetLastDumpStats() const { return dump_stats_; }
+    /// [A2 验收] prefilter SH9 vs 消费端 cos 加权积分的探针级误差统计。
+    struct PrefilterCheckStats {
+        u32 probes_checked = 0;
+        float median_rel_err = 0.0f;   // 探针中位相对误差（验收线 <5%）
+        float p95_rel_err = 0.0f;
+        float max_rel_err = 0.0f;
+    };
+    const PrefilterCheckStats& GetLastPrefilterCheck() const { return prefilter_check_; }
 
 private:
     void CreatePipelines();
@@ -225,6 +233,10 @@ private:
     rhi_readback_ring dump_ring_;                  ///< PRIMAL_WRC_DUMP 读回环
     u32 dump_copies_{ 0 };
     DumpStats dump_stats_{};
+    // [A2 验收] prefilter SH9 读回环（prefilter_enabled_ + dump 开时启用）。
+    rhi_readback_ring prefilter_ring_;
+    u32 prefilter_copies_{ 0 };
+    PrefilterCheckStats prefilter_check_{};
     // A5 需求驱动预算：消费计数周期读回（每 256 帧 copy，+2 帧 map）+
     // 优先级窗口（消费计数降序 → 0 计数轮转保底）。
     rhi_readback_ring consume_ring_;

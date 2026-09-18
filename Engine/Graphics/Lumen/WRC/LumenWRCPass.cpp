@@ -223,6 +223,15 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
     // A5 消费计数读回环。
     consume_ring_.initialize(device_, u64(probeTotal) * sizeof(u32), 3);
     consume_snapshot_.assign(probeTotal, 0u);
+    // [A2 验收] prefilter SH9 读回环（prefilter 开启时启用）。Initialize 早于
+    // 管线侧 SetPrefilterEnabled 调用——此处直接读 env 同源判定。
+    prefilter_enabled_ = prefilter_enabled_ || [] {
+        const char* e = std::getenv("PRIMAL_WRC_PREFILTER");
+        return e && e[0] == '1';
+    }();
+    if (prefilter_enabled_) {
+        prefilter_ring_.initialize(device_, u64(probeTotal) * 9u * sizeof(math::v4), 3);
+    }
 
     CreatePipelines();
     if (trace_pipeline_ == handles::INVALID_PIPELINE ||
@@ -247,6 +256,7 @@ void LumenWRCPass::Shutdown() {
     if (!initialized_) return;
     dump_ring_.shutdown(device_);
     consume_ring_.shutdown(device_);
+    prefilter_ring_.shutdown(device_);
     initialized_ = false;
     device_ = nullptr;
     // 句柄为 POD 类型，由 RHI device 的垃圾回收管理（同 LumenDDGIPass 约定）。
@@ -713,6 +723,14 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                 cmd->Dispatch((probeTotal + 63) / 64, 1, 1);
             }
 
+            // ---- [A2 验收] prefilter SH9 copy（+2 帧读回对照）----
+            if (prefilter_enabled_ && prefilter_ring_.is_initialized()) {
+                const u32 pfCopySlot = prefilter_ring_.slot_for_frame(current_frame_index);
+                cmd->CopyBuffer(prefilter_sh_, prefilter_ring_.buffer(pfCopySlot), 0, 0,
+                                u64(probeTotal) * 9u * sizeof(math::v4));
+                ++prefilter_copies_;
+            }
+
             // ---- GIDebug wrc 通道：PRIMAL_WRC_DUMP=1 radiance dump ----
             // 读回环模式（同 DDGI 深度 ring）：本帧 copy，2 帧后 map——
             // BeginFrame fence 保证同槽写者完成。
@@ -759,6 +777,125 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                             << " inGeometry=" << stats.in_geometry_probes
                             << " meanLum(sub)=" << stats.mean_lum << std::endl;
                     }
+                }
+            }
+
+            // ---- [A2 验收] prefilter SH9 vs 消费端 cos 加权积分——探针级
+            // 误差统计（+2 帧读回；PRIMAL_WRC_PREFILTER=1 + PRIMAL_WRC_DUMP=1）。
+            if (prefilter_enabled_ && prefilter_ring_.is_initialized() &&
+                WRCDumpEnabled() && dump_ring_.is_initialized() &&
+                prefilter_copies_ > 2u && current_frame_index >= 2u &&
+                (current_frame_index % 120u) == 0u) {
+                const u32 pfRb = prefilter_ring_.slot_for_frame(current_frame_index - 2u);
+                const u32 dumpSlot = dump_ring_.slot_for_frame(current_frame_index - 2u);
+                void* shP = prefilter_ring_.map(device_, pfRb);
+                void* pdP = dump_ring_.map(device_, dumpSlot);
+                if (shP && pdP) {
+                    const auto* sh9 = static_cast<const math::v4*>(shP);
+                    const u32* pd = static_cast<const u32*>(pdP);
+                    const u32 K = kWRCDirsPerProbe;
+                    auto shBasis = [](const math::v3& d, float Y[9]) {
+                        const float C0 = 0.282095f, C1 = 0.488603f;
+                        Y[0] = C0;
+                        Y[1] = -C1 * d.y; Y[2] = C1 * d.z; Y[3] = -C1 * d.x;
+                        const float A = 1.092548f, B = 0.315392f, C = 0.546274f;
+                        Y[4] = A * d.x * d.y;
+                        Y[5] = -A * d.y * d.z;
+                        Y[6] = B * (3.0f * d.z * d.z - 1.0f);
+                        Y[7] = -A * d.x * d.z;
+                        Y[8] = C * (d.x * d.x - d.y * d.y);
+                    };
+                    auto unpack = [](u32 lo, u32 hi) {
+                        auto h16 = [](u32 h) {
+                            u32 sign = (h >> 15) & 1u, e2 = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+                            if (e2 == 0u) return 0.0f;
+                            u32 bits = (sign << 31) | ((e2 + 112u) << 23) | (m << 13);
+                            float f; std::memcpy(&f, &bits, 4); return f;
+                        };
+                        return math::v3{ h16(lo & 0xFFFFu), h16(lo >> 16), h16(hi & 0xFFFFu) };
+                    };
+                    std::vector<float> relErrs;
+                    for (u32 pi = 0; pi < probeTotal; ++pi) {
+                        const u32 base = pi * kWRCProbeStrideU32;
+                        const u32 state = pd[base + K * 2u + 2u];
+                        if ((state & 1u) == 0u || (state & 2u) != 0u) continue;
+                        std::vector<float> lobe(K);
+                        float meanLum = 0.0f;
+                        for (u32 k = 0; k < K; ++k) {
+                            auto dirOf = [&](u32 j) {
+                                float y = 1.0f - 2.0f * (float(j) + 0.5f) / float(K);
+                                float r = std::sqrt(std::max(1.0f - y * y, 0.0f));
+                                float a = 2.399963229728653f * float(j);
+                                return math::v3{ std::cos(a) * r, y, std::sin(a) * r };
+                            };
+                            const math::v3 dk = dirOf(k);
+                            float acc0 = 0, acc1 = 0, acc2 = 0, wSum = 0.0f;
+                            for (u32 j = 0; j < K; ++j) {
+                                const math::v3 dj = dirOf(j);
+                                const float c = dk.x * dj.x + dk.y * dj.y + dk.z * dj.z;
+                                if (c <= 0.25f) continue;
+                                const float w = c * c * c * c * c * c;
+                                const math::v3 Lj = unpack(pd[base + j * 2u], pd[base + j * 2u + 1u]);
+                                acc0 += Lj.x * w; acc1 += Lj.y * w; acc2 += Lj.z * w;
+                                wSum += w;
+                            }
+                            lobe[k] = (wSum > 0.0f)
+                                ? (0.2126f * acc0 + 0.7152f * acc1 + 0.0722f * acc2) / wSum : 0.0f;
+                            const math::v3 Lk = unpack(pd[base + k * 2u], pd[base + k * 2u + 1u]);
+                            meanLum += 0.2126f * Lk.x + 0.7152f * Lk.y + 0.0722f * Lk.z;
+                        }
+                        meanLum /= float(K);
+                        if (meanLum <= 1e-4f) continue;   // 零能量探针不入统计
+                        float errSum = 0.0f;
+                        for (u32 k = 0; k < K; ++k) {
+                            auto dirOf = [&](u32 j) {
+                                float y = 1.0f - 2.0f * (float(j) + 0.5f) / float(K);
+                                float r = std::sqrt(std::max(1.0f - y * y, 0.0f));
+                                float a = 2.399963229728653f * float(j);
+                                return math::v3{ std::cos(a) * r, y, std::sin(a) * r };
+                            };
+                            const math::v3 dk = dirOf(k);
+                            float Y[9];
+                            shBasis(dk, Y);
+                            float lum = 0.0f;
+                            for (u32 i = 0; i < 9u; ++i) {
+                                const math::v4& c = sh9[pi * 9u + i];
+                                lum += (0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z) * Y[i];
+                            }
+                            errSum += std::abs(lum - lobe[k]);
+                        }
+                        relErrs.push_back(errSum / (float(K) * std::max(meanLum, 1e-4f)));
+                    }
+                    prefilter_ring_.unmap(device_, pfRb);
+                    dump_ring_.unmap(device_, dumpSlot);
+                    if (!relErrs.empty()) {
+                        std::sort(relErrs.begin(), relErrs.end());
+                        const float med = relErrs[relErrs.size() / 2];
+                        const float p95 = relErrs[std::min(
+                            (size_t)(relErrs.size() * 0.95), relErrs.size() - 1)];
+                        const float mx = relErrs.back();
+                        prefilter_check_.probes_checked = (u32)relErrs.size();
+                        prefilter_check_.median_rel_err = med;
+                        prefilter_check_.p95_rel_err = p95;
+                        prefilter_check_.max_rel_err = mx;
+                        const bool pass = med < 0.05f;
+                        if (pass) {
+                            PRIMAL_LOG_STREAM(Info, "Render")
+                                << "[WRC_PF_CHECK] frame=" << current_frame_index
+                                << " probes=" << relErrs.size()
+                                << " median=" << med << " p95=" << p95 << " max=" << mx
+                                << "  PASS(<5%)" << std::endl;
+                        } else {
+                            PRIMAL_LOG_STREAM(Error, "Render")
+                                << "[WRC_PF_CHECK] frame=" << current_frame_index
+                                << " probes=" << relErrs.size()
+                                << " median=" << med << " p95=" << p95 << " max=" << mx
+                                << "  FAIL(>=5%)" << std::endl;
+                        }
+                    }
+                } else {
+                    if (shP) prefilter_ring_.unmap(device_, pfRb);
+                    if (pdP) dump_ring_.unmap(device_, dumpSlot);
                 }
             }
         });
