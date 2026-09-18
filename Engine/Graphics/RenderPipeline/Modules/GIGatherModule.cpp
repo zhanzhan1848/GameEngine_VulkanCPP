@@ -94,8 +94,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             //（far 双槽）与 17 array[4] 删除。
             {17, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // flat irradiance (T3.6/D1)
             {18, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // FlatVolumeCB (T3.6/D1)
+            // 2026-09-17 P0：近场 volume 重定位后有效起点（可见性锚点）
+            {19, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // near relocated origins
         };
-        set_layout_ = device->CreateDescriptorSetLayout({17, vkBindings});
+        set_layout_ = device->CreateDescriptorSetLayout({18, vkBindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -116,8 +118,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             // irr）/9（dup）/10（far irr）/11（far params）删除。
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // flat irradiance (T3.6/D1)
             {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // FlatVolumeCB (T3.6/D1)
+            // 2026-09-17 P0：near relocated origins（Metal buffer(12)，与 Vulkan flat 19 对等）
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // near relocated origins
         };
-        set_layout_ = device->CreateDescriptorSetLayout({16, bindings});
+        set_layout_ = device->CreateDescriptorSetLayout({17, bindings});
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
@@ -147,11 +151,14 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     texDesc.type = TextureType::Texture2D;
     texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
     gi_halfres_texture_ = device->CreateTexture(texDesc);
+    device->PrimeTextureLayout(gi_halfres_texture_);  // P0-B 首帧 priming
     texDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
     gi_halfres_history_ = device->CreateTexture(texDesc);
+    device->PrimeTextureLayout(gi_halfres_history_);  // P0-B 首帧 priming
     // T4.3: half-res glossy specular output (RGB = SH(R) radiance, A = NdotV)
     texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
     gi_specular_texture_ = device->CreateTexture(texDesc);
+    device->PrimeTextureLayout(gi_specular_texture_);  // P0-B 首帧 priming
 
     // Constant buffers — need UniformBuffer bind flag for UBO descriptors.
     BufferDesc cbDesc{};
@@ -421,11 +428,14 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // far/附加 volume 的 irradiance 改为 flat 打包的 CopyBuffer
                 // 源（同 CB 内队列序先于 dispatch，无需 barrier——Vulkan 端
                 // buffer barrier 本就是 no-op，Metal 无显式 buffer 布局）。
-                ResourceBarrier barriers[3]{};
+                ResourceBarrier barriers[4]{};
                 int bc = 0;
                 auto irrBuf = ddgi->GetIrradianceBuffer(ddgiReadIdx);
                 auto depthBuf = ddgi->GetDepthBuffer(ddgiReadIdx);
                 auto confBuf = ddgi->GetConfidenceBuffer(ddgiReadIdx);
+                // 2026-09-17 P0：近场重定位起点与 irr/depth 同为本帧 trace 产物。
+                auto roBuf = nvolViews[0].IsValid() ? nvolViews[0].relocated_origins
+                                                    : handles::INVALID_RESOURCE;
                 if (irrBuf != handles::INVALID_RESOURCE) {
                     barriers[bc].resource = irrBuf;
                     barriers[bc].beforeState = ResourceState::UnorderedAccess;
@@ -442,6 +452,13 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 }
                 if (confBuf != handles::INVALID_RESOURCE) {
                     barriers[bc].resource = confBuf;
+                    barriers[bc].beforeState = ResourceState::UnorderedAccess;
+                    barriers[bc].afterState = ResourceState::ShaderResource;
+                    barriers[bc].subresource = 0xFFFFFFFF;
+                    bc++;
+                }
+                if (roBuf != handles::INVALID_RESOURCE) {
+                    barriers[bc].resource = roBuf;
                     barriers[bc].beforeState = ResourceState::UnorderedAccess;
                     barriers[bc].afterState = ResourceState::ShaderResource;
                     barriers[bc].subresource = 0xFFFFFFFF;
@@ -546,8 +563,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // 18 = FlatVolumeCB）。原 15/16（far 双槽）与 17 array[4] 描述符
             // 写入删除。Metal 的 flat 槽（10/11）走下方 bufWrites 路径。
             if (isVk) {
-                WriteDescriptorSet flatWrites[2];
-                DescriptorBufferInfo flatInfos[2];
+                WriteDescriptorSet flatWrites[3];
+                DescriptorBufferInfo flatInfos[3];
                 flatWrites[0].dstSet = descriptorSet;
                 flatWrites[0].dstBinding = 17;
                 flatWrites[0].dstArrayElement = 0;
@@ -568,7 +585,24 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 flatWrites[1].bufferInfo = &flatInfos[1];
                 flatInfos[1].buffer = nvolumesCB; flatInfos[1].offset = 0;
                 flatInfos[1].range = sizeof(FlatVolumeCB);
-                device_->UpdateDescriptorSets(2, flatWrites);
+                // 2026-09-17 P0：binding 19 = 近场重定位有效起点（INVALID 时绑
+                // dummy，shader 侧 w=0 回退逻辑格点）。
+                flatWrites[2].dstSet = descriptorSet;
+                flatWrites[2].dstBinding = 19;
+                flatWrites[2].dstArrayElement = 0;
+                flatWrites[2].descriptorCount = 1;
+                flatWrites[2].descriptorType = DescriptorType::StorageBuffer;
+                flatWrites[2].imageInfo = nullptr;
+                flatWrites[2].bufferInfo = &flatInfos[2];
+                {
+                    ResourceHandle nearRo = nvolViews[0].IsValid()
+                        ? nvolViews[0].relocated_origins : handles::INVALID_RESOURCE;
+                    flatInfos[2].buffer = (nearRo != handles::INVALID_RESOURCE)
+                        ? nearRo : dummy_buffer_;
+                }
+                flatInfos[2].offset = 0;
+                flatInfos[2].range = ~0ull;
+                device_->UpdateDescriptorSets(3, flatWrites);
             }
 
             // Buffer bindings with sub-allocation from probe_cb_
@@ -634,6 +668,25 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     fvInfo.buffer = nvolumesCB; fvInfo.offset = 0;
                     fvInfo.range = sizeof(FlatVolumeCB);
                     device_->UpdateDescriptorSets(1, &fvWrite);
+                    // 2026-09-17 P0：Metal buffer(12) = 近场重定位有效起点。
+                    WriteDescriptorSet roWrite{};
+                    DescriptorBufferInfo roInfo{};
+                    roWrite.dstSet = descriptorSet;
+                    roWrite.dstBinding = 12;
+                    roWrite.dstArrayElement = 0;
+                    roWrite.descriptorCount = 1;
+                    roWrite.descriptorType = DescriptorType::StorageBuffer;
+                    roWrite.imageInfo = nullptr;
+                    roWrite.bufferInfo = &roInfo;
+                    {
+                        ResourceHandle nearRo = nvolViews[0].IsValid()
+                            ? nvolViews[0].relocated_origins : handles::INVALID_RESOURCE;
+                        roInfo.buffer = (nearRo != handles::INVALID_RESOURCE)
+                            ? nearRo : dummy_buffer_;
+                    }
+                    roInfo.offset = 0;
+                    roInfo.range = ~0ull;
+                    device_->UpdateDescriptorSets(1, &roWrite);
                 }
             }
 

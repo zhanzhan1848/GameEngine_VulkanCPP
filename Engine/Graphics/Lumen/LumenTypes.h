@@ -86,6 +86,8 @@ struct LumenConfig {
 
     // DDGI settings
     // DDGI probe grid — known-working config for Sponza.
+    // Probe density/spacing rationale & multi-volume guidance:
+    //   Docs/2026-09-16-ddgi-world-space-probe-grid-reference.md
     u32 ddgi_probe_count_x = 32;
     u32 ddgi_probe_count_y = 16;
     u32 ddgi_probe_count_z = 32;
@@ -98,6 +100,23 @@ struct LumenConfig {
     float ddgi_irradiance_temporal_weight = 0.02f;
     float ddgi_depth_temporal_weight = 0.2f;
     float ddgi_ray_max_distance = 50.0f;
+
+    // DDGI scene-fit grid (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md
+    // §5.1): when enabled, the near volume's probe counts are derived from the
+    // target coverage box below (counts = ceil(extent/spacing)+1 per axis,
+    // clamped 4..64) instead of the fixed ddgi_probe_count_*, and probe[0] is
+    // placed on the box's min corner (RTXGI (N-1)×S convention). Takes
+    // precedence over ddgi_probe_count_*; far volume unaffected.
+    bool     ddgi_fit_to_bounds = false;
+    math::v3 ddgi_fit_bounds_min{0.0f};
+    math::v3 ddgi_fit_bounds_max{0.0f};
+    float    ddgi_fit_margin = 0.0f;   // outward expansion per side (world units), 0 = tight bbox
+    // P1-A automation: when the offline SDF source arrives
+    // (SetOfflineSDFSource), overwrite the bounds above with the merger
+    // volume (origin/origin+extent) and flag a config rebuild. Explicit
+    // bounds are still honored until the SDF shows up; auto=false keeps the
+    // host-provided box authoritative (Sponza P0 path).
+    bool     ddgi_fit_bounds_auto = false;
 
     // DDGI far-field coarse volume (T4.4): second layer so pixels outside the
     // near-field box still receive GI. Extent = counts × spacing (default

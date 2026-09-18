@@ -61,11 +61,16 @@ static SDFHitResult ddgiTraceSDF(
 // free-air volume). Without this, probes sitting inside arcade masonry bake
 // wall-interior black and starve the second-floor GI.
 // ============================================================================
+// outState（审计 §5.3-4 分类，与 DDGITraceSDF.comp 对等）: 1.0 = 本格自由 /
+// 重定位成功；0.5 = 深埋借格（从邻格中心起 trace——SH 描述的是借来格的环境，
+// 消费方必须降权，不得当作原格位的完整测量）。
 static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
                                       constant DDGIVolumeData& volume,
                                       texture3d<float, access::sample> sdf0,
                                       texture3d<float, access::sample> sdf1,
-                                      texture3d<float, access::sample> sdf2) {
+                                      texture3d<float, access::sample> sdf2,
+                                      thread float& outState) {
+    outState = 1.0f;
     float voxel = volume.SdfVoxelSizes[0].x;
     float skin = max(voxel * 1.5f, spacing * 0.05f);
     // 2026-09-10 十五: raised with the Vulkan twin (see DDGITraceSDF.comp) —
@@ -141,7 +146,12 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
                 }
             }
         }
-        if (freeBestD > skin) best = freeBest;
+        if (freeBestD > skin) {
+            best = freeBest;
+            // 借格：本格深埋无解，从最开阔邻格起 trace。分类为 0.5——
+            // gather 按半权处理，深度/起点查询锚定借来位置。
+            outState = 0.5f;
+        }
     }
     return best;
 }
@@ -316,7 +326,10 @@ kernel void ddgi_trace_sdf(
     device float* hit_distance_buffer [[buffer(2)]],
     device const uint* probeUpdateList [[buffer(3)]],
     device float4* hit_normal_buffer [[buffer(4)]],                    // T4.3
-    constant DetailSDFTableGPU& detail_table [[buffer(5)]]             // T4.3
+    constant DetailSDFTableGPU& detail_table [[buffer(5)]],            // T4.3
+    // 2026-09-17 P0：发布重定位后有效起点（绝对 probeIdx，w=1.0）。
+    // finalize（buffer(12)）与 gather 可见性必须消费同一起点。
+    device float4* relocated_origins [[buffer(6)]]                     // P0: effective origins
 )
 {
     uint tid = tid2d.y * 8u + tid2d.x;
@@ -337,8 +350,10 @@ kernel void ddgi_trace_sdf(
                                         volume.SdfCascadeCount);
     // T8.13 sync: relocate buried ray origins (multi-axis deepest-free-point,
     // same policy as DDGITraceSDF.comp::ddgiRelocateProbeOrigin).
+    float originState = 1.0f;
     float3 relocatedPos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing, volume,
-                                       sdf_cascade_0, sdf_cascade_1, sdf_cascade_2);
+                                       sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
+                                       originState);
     // TEMP diagnosis: also record the relocated origin's SDF value on ray 1.
     float d1_dbg = sampleBestSDF_elseIf(relocatedPos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
                                         volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
@@ -346,6 +361,11 @@ kernel void ddgi_trace_sdf(
                                         volume.SdfCascadeCount);
     float3 probePosRel = relocatedPos;
     probePos = probePosRel;
+    // P0 坐标契约：发布本 probe 的有效起点与分类（同帧版本唯一事实源，
+    // tid 0 写一次）。w：1.0 本格 / 0.5 借格（gather 半权）/ 0 未 trace。
+    if (tid == 0u) {
+        relocated_origins[probeIdx] = float4(probePos, originState);
+    }
     float3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : float3(0.0f, -1.0f, 0.0f));
 
     // T8.13 P2 sync: lane-strided ray loop — 64 lanes serve any RaysPerProbe
@@ -619,7 +639,12 @@ kernel void ddgi_trace_finalize(
     device const uint* sc_grid_cards   [[buffer(8)]],  // T1.3: card indices
     constant float4x4& view_projection [[buffer(9)]],  // T3.1: screen projection
     device const float4* irradiance_history [[buffer(10)]],  // T3.1: multi-bounce
-    device const float4* hit_normal_buffer [[buffer(11)]]    // T4.3: refined normals
+    device const float4* hit_normal_buffer [[buffer(11)]],   // T4.3: refined normals
+    // 2026-09-17 P0（probe-selection-density-audit §5）：ddgi_trace_sdf 本帧
+    // 发布的重定位后有效射线起点（绝对 probeIdx，w=1.0 有效）。hitPos 重建与
+    // miss 卡片查询从这里出发——旧实现用原格点重建 P1 起点的命中，移动过的
+    // probe 距离全错位。与 Vulkan DDGITraceFinalize.comp binding 17 对等。
+    device const float4* relocated_origins [[buffer(12)]]     // P0: effective origins
 )
 {
     uint tid = tid2d.y * 8u + tid2d.x;
@@ -637,6 +662,12 @@ kernel void ddgi_trace_finalize(
 
     uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
     float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
+    // P0 坐标契约：射线起点 = sdf trace 本帧发布的有效（重定位后）起点。
+    // 首帧该 probe 尚未被 trace（w=0）时回退逻辑格点——与旧行为一致。
+    float3 rayOrigin = probePos;
+    if (relocated_origins[probeIdx].w > 0.5f) {
+        rayOrigin = relocated_origins[probeIdx].xyz;
+    }
     float3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : float3(0.0f, -1.0f, 0.0f));
 
     // T8.13 P2 sync: lane-strided ray loop (mirrors ddgi_trace_sdf).
@@ -655,9 +686,9 @@ kernel void ddgi_trace_finalize(
 
     if (hitDistance >= 0.0f) {
         result.radiance_and_dist.w = hitDistance;
-        // Recompute hit position (same recipe as DDGITraceFinalize.comp:
-        // probePos is the UN-relocated grid position here).
-        float3 hitPos = probePos + rayDir * hitDistance;
+        // P0: rebuild the hit position from the SAME origin the sdf trace
+        // marched from (relocated when published, grid point otherwise).
+        float3 hitPos = rayOrigin + rayDir * hitDistance;
 
         // ---- 2026-09-02：SC-FIRST 曾因 SC atlas 覆盖不足被改为 prev-first。
         //
@@ -719,7 +750,7 @@ kernel void ddgi_trace_finalize(
                     if (scQueryCardCandidate(card, hitPos, -rayDir,
                                              max(volume.SdfVoxelSizes[0].x * 1.25f, 0.45f),
                                              depth_atlas, lighting_atlas,
-                                             scRadiance, key)) {
+                                             float3(0.0f), scRadiance, key)) {
                         if (key < bestKey) {
                             bestKey = key;
                             radiance = scRadiance;
@@ -814,7 +845,8 @@ kernel void ddgi_trace_finalize(
         uint4 gh2 = uint4(sc_grid_offsets[8], sc_grid_offsets[9],
                           sc_grid_offsets[10], sc_grid_offsets[11]);
         SCGridParams gp = scGridDecode(gh0, gh1, gh2);
-        uint cell = scGridCellIndex(gp, probePos);
+        // P0 坐标契约：miss 卡片查询同样从有效起点出发。
+        uint cell = scGridCellIndex(gp, rayOrigin);
         if (cell != 0xFFFFFFFFu) {
             uint begin = sc_grid_offsets[16u + cell];
             uint end   = sc_grid_offsets[17u + cell];
@@ -824,7 +856,7 @@ kernel void ddgi_trace_finalize(
                 device const SurfaceCacheCard& card = card_data[cardIdx];
                 ++missReads;
                 float2 atlasUV;
-                if (worldToCardUVDevice(probePos, card, atlasUV)) {
+                if (worldToCardUVDevice(rayOrigin, card, atlasUV)) {
                     // C4: half-texel inset keeps bilinear inside this card's rect
                     // (shelf-packed atlas bleeds from neighbours otherwise).
                     atlasUV = clamp(atlasUV,

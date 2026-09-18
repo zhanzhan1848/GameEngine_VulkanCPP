@@ -152,6 +152,80 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     return out.str();
 }
 
+// 2026-09-17 审计"测有效覆盖"（DDGI_ORIGIN_STATS=1 一次性）：同步读回
+// relocated origins 缓冲，统计重定位分类分布（本格/借格/未 trace）与位移量
+// 分位数。同步停等仅诊断路径使用（与 FusionCompositeModule::RunGiLadderDump
+// 同模式——同队列提交即保序，读到的就是本帧 trace 刚写的内容）。
+// 口径对应审计 §3.1 的"候选数/激活数/失活原因"缺口中的重定位维度；
+// 覆盖率细分（inactive/零权重率）仍需逐探针 gather 诊断，未含。
+static void DumpRelocatedOriginStats(rhi::RHIDeviceBase* device,
+                                     ResourceHandle originsBuf,
+                                     const DDGIRuntimeParams& params,
+                                     const DDGIVolumeData& volume) {
+    const u32 total = params.probe_count_x * params.probe_count_y * params.probe_count_z;
+    if (total == 0 || originsBuf == handles::INVALID_RESOURCE) return;
+
+    BufferDesc bd{};
+    bd.size = (u64)total * sizeof(math::v4);
+    bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+    bd.memoryUsage = GPUMemoryUsage::Readback;
+    auto stage = device->CreateBuffer(bd);
+    if (stage == handles::INVALID_RESOURCE) return;
+
+    auto ch = device->CreateCommandBuffer(CommandQueueType::Graphics);
+    auto* c = rhi::GetCommandBuffer(ch);
+    if (!c) { device->DestroyBuffer(stage); return; }
+    c->Begin();
+    c->CopyBuffer(originsBuf, stage, 0, 0, bd.size);
+    c->End(); c->Submit(); c->WaitForCompletion();
+    device->DestroyCommandBuffer(ch);
+
+    const auto* data = static_cast<const math::v4*>(device->MapBuffer(stage, 0, bd.size));
+    if (!data) { device->DestroyBuffer(stage); return; }
+
+    u32 nUntraced = 0, nSelf = 0, nBorrowed = 0;
+    std::vector<float> disp;                 // 已发布条目的 |origin − 格点|
+    disp.reserve(total);
+    for (u32 i = 0; i < total; ++i) {
+        const float w = data[i].w;
+        const u32 ix = i % params.probe_count_x;
+        const u32 iy = (i / params.probe_count_x) % params.probe_count_y;
+        const u32 iz = i / (params.probe_count_x * params.probe_count_y);
+        const float gx = volume.ProbeOrigin.x + (float)ix * params.probe_spacing;
+        const float gy = volume.ProbeOrigin.y + (float)iy * params.probe_spacing;
+        const float gz = volume.ProbeOrigin.z + (float)iz * params.probe_spacing;
+        const float dx = data[i].x - gx, dy = data[i].y - gy, dz = data[i].z - gz;
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (w >= 0.75f) {
+            ++nSelf;
+            if (d > 1e-4f) disp.push_back(d);   // 自由未动的不计位移
+        } else if (w >= 0.25f) {
+            ++nBorrowed;
+            disp.push_back(d);
+        } else {
+            ++nUntraced;
+        }
+    }
+    device->UnmapBuffer(stage);
+    device->DestroyBuffer(stage);
+
+    std::sort(disp.begin(), disp.end());
+    auto pick = [&](float frac) -> float {
+        return disp.empty() ? 0.0f
+                            : disp[std::min(disp.size() - 1, (size_t)(disp.size() * frac))];
+    };
+    PRIMAL_LOG_STREAM(Error, "Render")
+        << "[DDGIOriginStats] total=" << total
+        << " self=" << nSelf << " (" << (100.0f * nSelf / total) << "%)"
+        << " borrowed=" << nBorrowed << " (" << (100.0f * nBorrowed / total) << "%)"
+        << " untraced=" << nUntraced
+        << " | displaced_probes=" << disp.size()
+        << " disp_med=" << pick(0.5f)
+        << " disp_P95=" << pick(0.95f)
+        << " disp_max=" << (disp.empty() ? 0.0f : disp.back())
+        << std::endl;
+}
+
 static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDeviceBase* device) {
     auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
 
@@ -334,12 +408,21 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     // bit-identical to the pre-T4.3 split trace.
     detail_sdf_enabled_ = (std::getenv("PRIMAL_DDGI_DETAIL_SDF") != nullptr);
 
-    // Pre-compute probe origin at the center of the grid
-    probe_origin_ = {
-        -(float)(params_.probe_count_x - 1) * params_.probe_spacing * 0.5f,
-        -(float)(params_.probe_count_y - 1) * params_.probe_spacing * 0.5f,
-        -(float)(params_.probe_count_z - 1) * params_.probe_spacing * 0.5f,
-    };
+    // Probe origin: scene-fit grids place probe[0] on the coverage box's min
+    // corner (origin supplied by the pipeline's fit derivation,
+    // Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §5.3); legacy grids
+    // center the volume on the world origin. Everything below (position
+    // buffer fill, volume_data_.ProbeOrigin sync, GetVolumeAABB) already
+    // consumes probe_origin_, so the layout change needs no shader edits.
+    if (params_.use_probe_origin) {
+        probe_origin_ = params_.probe_origin;
+    } else {
+        probe_origin_ = {
+            -(float)(params_.probe_count_x - 1) * params_.probe_spacing * 0.5f,
+            -(float)(params_.probe_count_y - 1) * params_.probe_spacing * 0.5f,
+            -(float)(params_.probe_count_z - 1) * params_.probe_spacing * 0.5f,
+        };
+    }
 
     // First-class probe position buffer — the DEFINITION of probe placement,
     // written once here before the render loop (static grid). Trace, gather
@@ -445,6 +528,72 @@ void LumenDDGIPass::Shutdown() {
 
     // No explicit GPU resource destruction needed -- handles are POD types
     // managed by the RHI device's garbage collector.
+}
+
+const math::v4* LumenDDGIPass::GetRelocatedOriginsCpu(u32& count, u32& version) {
+    count = 0;
+    version = relocated_origins_cpu_version_;
+    if (relocated_origins_cpu_done_) {
+        count = (u32)relocated_origins_cpu_.size();
+        return relocated_origins_cpu_.data();
+    }
+    // 前 60 帧缓冲尚未被稳态写入（独立提交先于本帧 render graph 执行，读到
+    // 的总是上一帧结果）——与 DDGI_ORIGIN_STATS 的触发时机同一理由。
+    if (exec_frame_index_ < 60 || relocated_origins_ == handles::INVALID_RESOURCE) {
+        static bool gateLogged = false;
+        if (!gateLogged && exec_frame_index_ > 90u) {
+            gateLogged = true;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[LumenDDGI] RelocatedOrigins CPU readback gated: frame="
+                << exec_frame_index_ << " buffer="
+                << (relocated_origins_ != handles::INVALID_RESOURCE ? "ok" : "INVALID")
+                << std::endl;
+        }
+        return nullptr;
+    }
+    const u32 total = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+    if (total == 0) return nullptr;
+
+    BufferDesc bd{};
+    bd.size = (u64)total * sizeof(math::v4);
+    bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+    bd.memoryUsage = GPUMemoryUsage::Readback;
+    auto stage = device_->CreateBuffer(bd);
+    if (stage == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RelocatedOrigins readback: stage buffer create failed" << std::endl;
+        return nullptr;
+    }
+    auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+    auto* c = rhi::GetCommandBuffer(ch);
+    if (!c) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RelocatedOrigins readback: command buffer unavailable" << std::endl;
+        device_->DestroyBuffer(stage);
+        return nullptr;
+    }
+    c->Begin();
+    c->CopyBuffer(relocated_origins_, stage, 0, 0, bd.size);
+    c->End(); c->Submit(); c->WaitForCompletion();
+    device_->DestroyCommandBuffer(ch);
+
+    const auto* data = static_cast<const math::v4*>(device_->MapBuffer(stage, 0, bd.size));
+    if (!data) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RelocatedOrigins readback: map failed" << std::endl;
+        device_->DestroyBuffer(stage);
+        return nullptr;
+    }
+    relocated_origins_cpu_.assign(data, data + total);
+    device_->UnmapBuffer(stage);
+    device_->DestroyBuffer(stage);
+
+    relocated_origins_cpu_done_ = true;
+    ++relocated_origins_cpu_version_;
+    count = total;
+    version = relocated_origins_cpu_version_;
+    PRIMAL_LOG_STREAM(Error, "Render")
+        << "[LumenDDGI] RelocatedOrigins CPU readback done (" << total
+        << " probes, v" << version << ") — probe-sphere viz state colors live"
+        << std::endl;
+    return relocated_origins_cpu_.data();
 }
 
 // ============================================================================
@@ -574,6 +723,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // detail slot 2
             {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // detail slot 3
             {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // detail slot table
+            // 2026-09-17 P0：重定位后有效起点（writeonly，绝对 probeIdx）。
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // relocated origins (write)
         };
         sdfTraceBindings[0].is3D = true;
         sdfTraceBindings[1].is3D = true;
@@ -586,7 +737,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             sdfTraceBindings[bi].is3D = true;
             sdfTraceBindings[bi].unfilterableFloat = true;
         }
-        DescriptorSetLayoutDesc layoutDesc{12, sdfTraceBindings};
+        DescriptorSetLayoutDesc layoutDesc{13, sdfTraceBindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding sdfTraceBindings[] = {
@@ -604,6 +755,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
             {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
             {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            // 2026-09-17 P0：relocated origins（Metal buffer(6)，与 Vulkan flat 12 对等）
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // relocated origins (write)
         };
         // R32Float 3D cascades must be declared as 3D + UnfilterableFloat on Dawn
         // (see trace_set_layout_ block above). Without these flags, CreateBindGroup
@@ -620,7 +773,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             sdfTraceBindings[bi].is3D = true;
             sdfTraceBindings[bi].unfilterableFloat = true;
         }
-        DescriptorSetLayoutDesc layoutDesc{12, sdfTraceBindings};
+        DescriptorSetLayoutDesc layoutDesc{13, sdfTraceBindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -645,6 +798,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_normal_buffer (T4.3, read)
             {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // current depth
             {16, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // radiance depth
+            // 2026-09-17 P0：本帧 TraceSDF 发布的重定位后有效起点（readonly）
+            {17, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // relocated origins (read)
         };
         finalizeBindings[2].readonly = true;
         finalizeBindings[3].readonly = true;
@@ -654,7 +809,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         finalizeBindings[11].readonly = true;
         finalizeBindings[12].readonly = true;
         finalizeBindings[14].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{17, finalizeBindings};
+        finalizeBindings[17].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{18, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
@@ -673,12 +829,15 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance_history (T3.1)
             {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SC depth atlas (T3.4 D3 plane test)
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit_normal_buffer (T4.3, read)
+            // 2026-09-17 P0：relocated origins（Metal buffer(12)，与 Vulkan flat 17 对等）
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // relocated origins (read)
         };
         finalizeBindings[7].readonly = true;
         finalizeBindings[8].readonly = true;
         finalizeBindings[10].readonly = true;
         finalizeBindings[14].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{15, finalizeBindings};
+        finalizeBindings[15].readonly = true;  // relocated origins (buffer 12)
+        DescriptorSetLayoutDesc layoutDesc{16, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 }
@@ -692,6 +851,12 @@ void LumenDDGIPass::CreatePipelines() {
         std::string effectiveName = name;
         if (std::getenv("DDGI_PATH_DEBUG") && std::string(name) == "DDGITraceFinalize") {
             effectiveName = "DDGITraceFinalize_pathdbg";
+        }
+        // 2026-09-17 归因 A/B：DDGI_LEGACY_CONSUMERS=1 → 消费端旧原格点行为
+        // 变体（build_spv.sh 以 -DDDGI_LEGACY_CONSUMERS 编译；缓冲仍照常写）。
+        if (std::getenv("DDGI_LEGACY_CONSUMERS") &&
+            (std::string(name) == "DDGITraceFinalize")) {
+            effectiveName = "DDGITraceFinalize_legacy";
         }
         auto code = LoadShaderBytecode(effectiveName.c_str(), device_);
         if (code.empty()) return handles::INVALID_SHADER;
@@ -1051,6 +1216,28 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.size = (u64)totalRays * 4 * sizeof(float);
         desc.structured.elementStride = 4 * sizeof(float);
         hit_normal_buffer_ = device_->CreateBuffer(desc);
+
+        // 2026-09-17 P0：重定位后有效起点（float4 per probe，绝对 probeIdx）。
+        // 显式清零：w=0 表示"该 probe 尚未被 trace 发布过有效起点"，消费方
+        // （finalize / gather）据此回退逻辑格点，首帧/紧预算下不读到垃圾。
+        {
+            BufferDesc roDesc{};
+            roDesc.size = (u64)totalProbes * sizeof(math::v4);
+            roDesc.type = BufferType::Structured;
+            roDesc.usage = GPUMemoryUsage::Dynamic;
+            roDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            roDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+            roDesc.structured.elementCount = totalProbes;
+            roDesc.structured.elementStride = sizeof(math::v4);
+            relocated_origins_ = device_->CreateBuffer(roDesc);
+            if (relocated_origins_ != handles::INVALID_RESOURCE) {
+                if (auto* mapped =
+                        static_cast<math::v4*>(device_->MapBuffer(relocated_origins_))) {
+                    std::memset(mapped, 0, (size_t)roDesc.size);
+                    device_->UnmapBuffer(relocated_origins_);
+                }
+            }
+        }
     }
 
     // Dummy Surface Cache buffers — always bound so the trace descriptor set
@@ -1104,6 +1291,20 @@ void LumenDDGIPass::CreateProbeTextures() {
         gcards.structured.elementCount = 4;
         gcards.structured.elementStride = sizeof(uint32_t);
         sc_grid_cards_buffer_ = device_->CreateBuffer(gcards);
+    }
+
+    // Dummy depth atlas (T3.4 D3 兜底) — finalize 的 binding13(R32_Float 深度
+    // 图集) 静态绑定,SC atlas 未就绪时若留 INVALID 会写出 VK_NULL_HANDLE
+    // 采样图描述符(Vulkan validation 02997 + dispatch 期 binding 无效)。
+    // 1×1 R32F 恒 0 深度,SC 未启用路径本就不消费该数据。
+    {
+        TextureDesc desc{};
+        desc.size = {1, 1, 1};
+        desc.format = DataFormat::R32_Float;
+        desc.type = TextureType::Texture2D;
+        desc.usage = TextureUsage::ShaderResource;
+        sc_depth_atlas_ = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(sc_depth_atlas_);  // P0-B 首帧 priming（1x1 深度占位）
     }
     {
         BufferDesc desc{};
@@ -1294,6 +1495,9 @@ void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
         ? view.grid_cards : sc_grid_cards_buffer_;
     sc_depth_atlas_ = view.depth_atlas != handles::INVALID_RESOURCE
         ? view.depth_atlas : sc_depth_atlas_;   // T3.4 (D3)
+    // P0-B: view 侧真实 atlas 首次接管时 prime（tracked==UNDEF 才实际提交，
+    // 之后 no-op）——binding 13 以 SampledImage 采样它，承诺 SRO。
+    device_->PrimeTextureLayout(sc_depth_atlas_);
 
     // Store SC params in DDGIVolumeData (triple-buffered, confirmed working)
     // instead of a separate sc_params buffer (binding 6 was not working).
@@ -1410,6 +1614,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
     u32 outIdx = current_frame_index % 3;
     u32 histIdx = (current_frame_index + 2) % 3;
+    exec_frame_index_ = current_frame_index;   // §8.3 CPU 读回的帧门用
 
     // Import persistent probe buffers/textures into render graph.
     // T4.4: rg_name_prefix_ disambiguates near/far volume instances.
@@ -1940,6 +2145,36 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
                 }
 
+                // 2026-09-17 P0（probe-selection-density-audit §3.3/§9-P2）：
+                // age 分布与更新率一次性实测（DDGI_AGE_STATS=1 开启；审计要求
+                // 的"age P95/max 与 update ratio"口径）。检查紧预算下的饥饿：
+                // age 封顶 30 帧后长期不更新的点不再提优先级。
+                if (std::getenv("DDGI_AGE_STATS")) {
+                    static bool ageDumped = false;
+                    if (!ageDumped && updateCount < probeCountTotal) {
+                        ageDumped = true;
+                        std::vector<u32> ages;
+                        ages.reserve(probeCountTotal);
+                        for (u32 i = 0; i < probeCountTotal; ++i) {
+                            ages.push_back(current_frame_index - probe_states_[i].last_update_frame);
+                        }
+                        std::sort(ages.begin(), ages.end());
+                        auto pick = [&](float frac) -> u32 {
+                            return ages[std::min(ages.size() - 1,
+                                                 (size_t)(ages.size() * frac))];
+                        };
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[DDGIAgeStats] update_ratio=" << updateCount
+                            << "/" << probeCountTotal
+                            << " age_med=" << pick(0.5f)
+                            << " age_P95=" << pick(0.95f)
+                            << " age_max=" << ages.back()
+                            << " (capped-30 starvation risk when P95==30 and"
+                               " update_ratio<1)"
+                            << std::endl;
+                    }
+                }
+
                 // Patch ProbeUpdateCount in the volume constant buffer
                 {
                     auto* mapped = static_cast<DDGIVolumeData*>(device_->MapBuffer(volume_cb_[frameIdx]));
@@ -2079,8 +2314,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         {splitIsVk ? 9u : 5u, DescriptorType::SampledImage,  detailTex[2]},
                         {splitIsVk ? 10u : 6u, DescriptorType::SampledImage, detailTex[3]},
                         {splitIsVk ? 11u : 5u, DescriptorType::UniformBuffer, detail_table_cb_[frameIdx]},
+                        // 2026-09-17 P0：重定位后有效起点（本 pass 写，finalize/gather 读）
+                        {splitIsVk ? 12u : 6u, DescriptorType::StorageBuffer, relocated_origins_},
                     };
-                    UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 12);
+                    UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 13);
 
                     // barrier: 上一帧 irradiance/depth 写入对本帧 trace 可见
                     cmd->MemoryBarrier(
@@ -2155,8 +2392,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {14, DescriptorType::StorageBuffer, hit_normal_buffer_}, // T4.3 (read)
                             {15, DescriptorType::SampledImage, screenDepthTex != handles::INVALID_RESOURCE ? screenDepthTex : prevColorTex},
                             {16, DescriptorType::SampledImage, radianceDepthTex != handles::INVALID_RESOURCE ? radianceDepthTex : prevColorTex},
+                            {17, DescriptorType::StorageBuffer, relocated_origins_},   // P0: relocated origins (read)
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 17);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 18);
                     } else {
                         DescriptorData finalizeParams[] = {
                             {3, DescriptorType::SampledImage,  lightingAtlasTex},
@@ -2174,8 +2412,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
                             {6, DescriptorType::SampledImage,  sc_depth_atlas_},   // T3.4 (D3)
                             {11, DescriptorType::StorageBuffer, hit_normal_buffer_}, // T4.3 (read)
+                            {12, DescriptorType::StorageBuffer, relocated_origins_}, // P0: relocated origins (read)
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 15);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 16);
                     }
 
                     cmd->BindComputePipeline(finalize_pipeline_);
@@ -2272,6 +2511,21 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     }
 
                     cmd->Dispatch(gx, 1, 1);
+                }
+            }
+
+            // 2026-09-17 审计"测有效覆盖"：DDGI_ORIGIN_STATS=1 时一次性同步
+            // 读回重定位分类分布（split trace 路径才有该缓冲；队列序保证读到
+            // 本帧刚写的内容）。注意：独立提交先于本帧 render graph 执行，
+            // 读到的是上一帧 trace 的结果——延迟到第 60 帧触发，保证缓冲已被
+            // 稳态写入（首帧触发会读到 init 清零态）。
+            if (std::getenv("DDGI_ORIGIN_STATS") &&
+                relocated_origins_ != handles::INVALID_RESOURCE &&
+                sdf_trace_pipeline_ != handles::INVALID_PIPELINE) {
+                if (!origin_stats_dumped_ && ++origin_stats_tick_ >= 60u) {
+                    origin_stats_dumped_ = true;
+                    DumpRelocatedOriginStats(device_, relocated_origins_,
+                                             params_, volume_data_);
                 }
             }
 

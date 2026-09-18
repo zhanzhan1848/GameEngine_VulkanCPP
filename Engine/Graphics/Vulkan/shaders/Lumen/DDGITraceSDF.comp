@@ -65,6 +65,15 @@ layout(set = 0, binding = 5, std430) readonly buffer ProbeUpdateBuf {
     uint probe_update_list[];
 } pul;
 
+// 2026-09-17 P0（probe-selection-density-audit §5.3-2）：重定位后有效射线起点
+// （绝对 probeIdx 索引）。xyz = effective origin；w = 分类：1.0 本格自由/重定位
+// 成功、0.5 深埋借格（SH 描述借来格环境，消费方降权）、0 未 trace 过（回退
+// 逻辑格点）。Trace 从该点追踪，Finalize / Gather 的 hitPos 重建与可见性查询
+// 必须消费同一起点——禁止再用原格点 P0 重建 P1 起点的命中。
+layout(set = 0, binding = 12) writeonly buffer RelocatedOriginBuf {
+    vec4 relocated_origin[];
+} robuf;
+
 // DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h (336 bytes).
 // Same declaration as DDGITraceRays.comp.
 layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
@@ -177,11 +186,14 @@ float sampleBestSDF(vec3 pos) {
 // Probe relocation (ray-origin only) — same policy as
 // DDGITraceRays.comp::ddgiRelocateProbeOrigin: push a buried ray origin out
 // along the local SDF gradient until it clears the hit-bias skin, capped at
-// 0.45 × spacing so gather-side grid-distance visibility tests stay valid.
-// Without this, 3 m-grid probes sitting inside arcade masonry bake
-// wall-interior black and starve the second-floor GI.
+// 0.95 × spacing. Without this, 3 m-grid probes sitting inside arcade
+// masonry bake wall-interior black and starve the second-floor GI.
+// outState（审计 §5.3-4 分类）: 1.0 = 本格自由 / 重定位成功（对原格位的独立
+// 测量）；0.5 = 深埋借格（从邻格中心起 trace——SH 描述的是借来格的环境，
+// 消费方必须降权，不得当作原格位的完整测量）。
 // ----------------------------------------------------------------------------
-vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
+vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing, out float outState) {
+    outState = 1.0;
     // Classic DDGI relocation (multi-axis deepest-free-point). The old
     // single-gradient push parked probes ON the nearest surface — useless for
     // probes inside thick walls or the floor slab. This searches 6 axes + 8
@@ -257,7 +269,12 @@ vec3 ddgiRelocateProbeOrigin(vec3 probePos, float spacing) {
                 }
             }
         }
-        if (freeBestD > skin) best = freeBest;
+        if (freeBestD > skin) {
+            best = freeBest;
+            // 借格：本格深埋无解，从最开阔邻格起 trace。分类为 0.5——
+            // 消费方（gather）按半权处理，且深度/起点查询锚定借来位置。
+            outState = 0.5;
+        }
     }
     return best;
 }
@@ -432,7 +449,13 @@ void ddgi_trace_sdf() {
     uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
     vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
     // Relocate buried ray origins (see ddgiRelocateProbeOrigin).
-    probePos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing);
+    float originState = 1.0;
+    probePos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing, originState);
+    // P0 坐标契约：发布本 probe 的有效起点与分类（同帧版本唯一事实源）。
+    // 重定位对同一 SDF/UBO 确定性，本帧 Finalize 直接消费，不重推。
+    if (tid == 0u) {
+        robuf.relocated_origin[probeIdx] = vec4(probePos, originState);
+    }
     vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
     // T8.13 P2: lane-strided ray loop — 64 lanes serve any RaysPerProbe
     // multiple of 64 (128 = two strided rays per lane).

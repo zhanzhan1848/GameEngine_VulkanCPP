@@ -46,6 +46,11 @@ struct DDGIVolumeView {
     math::v3 counts{};    ///< params_.probe_count_{x,y,z}（float 化，与旧上传一致）
     float spacing = 0.0f;  ///< params_.probe_spacing
 
+    // 2026-09-17 P0（probe-selection-density-audit §5）：重定位后有效起点
+    // （float4 per probe，绝对 probeIdx 索引，w=1.0 有效）。GIGather 近场
+    // 可见性从该锚点测 distToProbe；可缺省（INVALID → shader w=0 回退格点）。
+    rhi::ResourceHandle relocated_origins{ rhi::handles::INVALID_RESOURCE };
+
     bool IsValid() const { return irradiance != rhi::handles::INVALID_RESOURCE; }
 };
 

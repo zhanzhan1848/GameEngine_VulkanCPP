@@ -36,6 +36,10 @@ struct DDGIProbeState {
 // ============================================================================
 
 /// DDGI volume configuration (set once at initialization).
+/// Note: these struct defaults are NOT the runtime config — presets in
+/// RenderPipelineConfig::LumenConfigFromPreset() + LumenConfig defaults
+/// (LumenTypes.h) override them. Probe density/spacing reference:
+/// Docs/2026-09-16-ddgi-world-space-probe-grid-reference.md
 struct DDGIRuntimeParams {
     u32   probe_count_x = 16;
     u32   probe_count_y = 8;
@@ -46,6 +50,11 @@ struct DDGIRuntimeParams {
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
     u32   max_probes_per_frame = 16384;          // Update ALL probes every frame (no flicker)
+    // Scene-fit grids (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §5.2):
+    // false = legacy centered origin (default), true = probe_origin is the
+    // grid's min corner (probe[0] world position).
+    math::v3 probe_origin{0.0f};
+    bool     use_probe_origin = false;
 };
 
 /// Per-frame camera data that the caller must provide.
@@ -212,6 +221,17 @@ public:
     // 诊断：hit_distance_buffer 直读（ray0/1 被 ddgi_trace_sdf 写入
     // 探针原点/重定位后的原始 SDF 距离——级联外为 5555 哨兵）。
     rhi::ResourceHandle GetHitDistanceBuffer() const { return hit_distance_buffer_; }
+    // 2026-09-17 P0：重定位后有效起点缓冲（契约见成员注释）。调试可视化
+    // 与 gather 经此取同一份数据。
+    rhi::ResourceHandle GetRelocatedOriginsBuffer() const { return relocated_origins_; }
+    // 审计 §8.3 调试可视化用：一次性同步读回 relocated origins 到 CPU
+    //（probeIdx 索引，xyz=有效起点，w=分类）。第 60 帧前返回 nullptr（缓冲
+    // 尚未被稳态写入）。version 随读回次数递增，供消费方触发重建。
+    const math::v4* GetRelocatedOriginsCpu(u32& count, u32& version);
+    // DDGI_ORIGIN_STATS 一次性读回的 per-instance 守卫（近/远两个 pass 实例
+    // 各自 dump 一次；函数级 static 会被先到 60 帧的实例独占）。
+    u32  origin_stats_tick_{ 0 };
+    bool origin_stats_dumped_{ false };
     // 诊断：SC grid header 读回（验证 grid 覆盖范围/卡片数）
     rhi::ResourceHandle GetSCGridOffsetsBuffer() const { return sc_grid_offsets_buffer_; }
     rhi::ResourceHandle GetSCGridCardsBuffer() const { return sc_grid_cards_buffer_; }
@@ -234,6 +254,7 @@ public:
                                 static_cast<float>(params_.probe_count_y),
                                 static_cast<float>(params_.probe_count_z) };
         view.spacing = params_.probe_spacing;
+        view.relocated_origins = relocated_origins_;
         return view;
     }
 
@@ -491,6 +512,15 @@ private:
     rhi::ResourceHandle hit_normal_buffer_{
         rhi::handles::INVALID_RESOURCE
     };
+    // 2026-09-17 P0：重定位后有效射线起点（float4 per probe，绝对 probeIdx 索引）
+    rhi::ResourceHandle relocated_origins_{
+        rhi::handles::INVALID_RESOURCE
+    };
+    // §8.3 调试可视化：一次性 CPU 读回产物（GetRelocatedOriginsCpu 填充）。
+    std::vector<math::v4> relocated_origins_cpu_;
+    bool relocated_origins_cpu_done_{ false };
+    u32  relocated_origins_cpu_version_{ 0 };
+    u32  exec_frame_index_{ 0 };   // AddPass 参数帧号（CPU 读回帧门用）
     // T4.3: detail-SDF slot table UBO (triple-buffered) + slot textures +
     // dummy resources that keep the appended bindings valid when the feature
     // is off (PRIMAL_DDGI_DETAIL_SDF unset → slot count 0 → shader no-op).

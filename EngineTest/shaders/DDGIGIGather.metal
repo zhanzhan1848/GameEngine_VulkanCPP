@@ -161,7 +161,12 @@ kernel void ddgi_gi_gather(
     // origin/spacing + counts/probeOffset + meta.x=count。与 Vulkan
     // DDGIGIGather.comp binding 17/18 同构。
     device const float4* flatIrradiance    [[buffer(10)]],
-    constant float4* fvCB                  [[buffer(11)]]   // [0..3]=origin+spacing, [4..7]=counts+probeOffset, [8]=meta
+    constant float4* fvCB                  [[buffer(11)]], // [0..3]=origin+spacing, [4..7]=counts+probeOffset, [8]=meta
+    // 2026-09-17 P0（probe-selection-density-audit §5.1 末段）：近场 volume
+    // 重定位后有效起点（ddgi_trace_sdf 发布，w=1.0 有效）。八面体深度图记录
+    // 自该物理起点，可见性 distToProbe 必须同起点测量；w=0 回退逻辑格点。
+    // 与 Vulkan DDGIGIGather.comp binding 19 对等。
+    device const float4* relocatedOrigins  [[buffer(12)]]
 ) {
     float4 probeCountsCB = probeCountsData[0];
     uint width = outputTex.get_width();
@@ -304,6 +309,14 @@ kernel void ddgi_gi_gather(
             float burial = 1.0f;
             {
                 float3 probePos = probeOriginSpacing.xyz + float3(pc[p]) * probeOriginSpacing.w;
+                // P0 坐标契约（w 分类：1.0 本格 / 0.5 借格 / 0 未 trace）：
+                // 八面体深度图记录自重定位后的物理起点，distToProbe 必须同起点
+                // 测量；借格探针 SH 描述借来格环境——可见性通过后仍打半权。
+                float originState = 0.0f;
+                if (relocatedOrigins[pIdx].w > 0.25f) {
+                    probePos = relocatedOrigins[pIdx].xyz;
+                    originState = relocatedOrigins[pIdx].w;
+                }
                 float3 toProbeVec = probePos - biasedPos;
                 float distToProbe = length(toProbeVec);
                 float3 toProbe = toProbeVec / max(distToProbe, 1e-5f);
@@ -321,6 +334,8 @@ kernel void ddgi_gi_gather(
                 float nwSoft = max(normalWeight, 0.40f);
                 float vw = max(visibilityWeight(distToProbe, depthMV.x, depthMV.y,
                                                 probeOriginSpacing.w), 0.38f);
+                // 借格半权：其 SH 不是原格位的独立测量（审计 §5.3-4）。
+                vw *= mix(0.5f, 1.0f, step(0.75f, originState));
                 w *= nwSoft * vw * insidePenalty;
             }
 

@@ -1079,12 +1079,25 @@ add_test(NAME TestSphericalHarmonics COMMAND TestSphericalHarmonics)
 set_target_properties(TestSphericalHarmonics PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_include_directories(TestSphericalHarmonics PRIVATE 
+target_include_directories(TestSphericalHarmonics PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/Engine
     ${CMAKE_SOURCE_DIR}/Engine/Common
 )
 target_compile_definitions(TestSphericalHarmonics PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+
+# DDGI scene-fit probe grid 推导（Docs/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §6.1）
+add_executable(TestDDGIFitGrid Graphics/TestDDGIFitGrid.cpp)
+add_test(NAME UnitDDGIFitGrid COMMAND TestDDGIFitGrid)
+set_target_properties(TestDDGIFitGrid PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+target_include_directories(TestDDGIFitGrid PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_compile_definitions(TestDDGIFitGrid PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 
 # 创建 PRT Baker 测试
 add_executable(TestPRTBaker Graphics/TestPRTBaker.cpp)

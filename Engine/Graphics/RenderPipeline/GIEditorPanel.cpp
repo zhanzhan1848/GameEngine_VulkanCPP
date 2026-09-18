@@ -3,6 +3,7 @@
 // StaticProbeBaker.h 之前 —— 后者经 BVH.hpp 打开 primal::graphics::utl，会遮蔽
 // 后续头文件里 primal::utl 的名字查找（RenderSceneSnapshot/RenderGraph 同理）。
 #include "Graphics/RenderPipeline/StandardRenderPipeline.h"
+#include "Graphics/Lumen/DDGIFitGrid.h"
 #include "Graphics/Lumen/StaticProbe/StaticProbeBaker.h"
 
 #include <algorithm>
@@ -39,6 +40,39 @@ bool CommitSettings(StandardRenderPipeline* pipeline,
     if (!pipeline) return false;
     pipeline->UpdateSettings(s);
     return true;
+}
+
+// P1-A（Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §5.6/§8）：fit 启用
+// 时把 near 体积的编辑/显示口径同步为拟合后的实际网格——优先从 pass 回读
+// （运行中的真实 counts/spacing/min-corner origin），pass 未建时按 config
+// 推导兜底。origin 走 LumenVolumeConfig::origin_override（gizmo 显示契约），
+// 不与 pass 侧的 runtime params 混用。
+void ApplyFitToNearVolume(StandardRenderPipeline* pipeline,
+                          const lumen::LumenConfig& lc,
+                          lumen::LumenVolumeConfig& near_v) {
+    if (!lc.ddgi_fit_to_bounds) return;
+    if (lumen::LumenDDGIPass* ddgi = pipeline ? pipeline->GetDDGIPass() : nullptr) {
+        const lumen::DDGIRuntimeParams& p = ddgi->GetParams();
+        near_v.probe_count_x = p.probe_count_x;
+        near_v.probe_count_y = p.probe_count_y;
+        near_v.probe_count_z = p.probe_count_z;
+        near_v.probe_spacing = p.probe_spacing;
+        near_v.rays_per_probe = p.rays_per_probe;
+        near_v.ray_max_distance = p.ray_max_distance;
+        if (p.use_probe_origin) {
+            near_v.origin_override = p.probe_origin;
+            near_v.use_origin_override = true;
+        }
+        return;
+    }
+    const lumen::DDGIFitGrid g = lumen::DDGIFitGridFromBounds(
+        lc.ddgi_fit_bounds_min, lc.ddgi_fit_bounds_max,
+        lc.ddgi_probe_spacing, lc.ddgi_fit_margin);
+    near_v.probe_count_x = g.count_x;
+    near_v.probe_count_y = g.count_y;
+    near_v.probe_count_z = g.count_z;
+    near_v.origin_override = g.origin;
+    near_v.use_origin_override = true;
 }
 
 // clamp 到描述符表声明的合法范围（与 GetVolumeParamDescriptors 一致）
@@ -185,6 +219,7 @@ bool MaterializeDerivedVolumes(StandardRenderPipeline* pipeline) {
     near_v.rays_per_probe = lc.ddgi_rays_per_probe;
     near_v.probe_spacing = lc.ddgi_probe_spacing;
     near_v.ray_max_distance = lc.ddgi_ray_max_distance;
+    ApplyFitToNearVolume(pipeline, lc, near_v);   // P1-A：fit 时回读实际体积
     vols.push_back(near_v);
     if (lc.ddgi_enable_far_volume) {
         lumen::LumenVolumeConfig far_v{};
@@ -219,6 +254,7 @@ bool GetEffectiveVolumeConfig(StandardRenderPipeline* pipeline, u32 index,
         near_v.rays_per_probe = lc.ddgi_rays_per_probe;
         near_v.probe_spacing = lc.ddgi_probe_spacing;
         near_v.ray_max_distance = lc.ddgi_ray_max_distance;
+        ApplyFitToNearVolume(pipeline, lc, near_v);   // P1-A：fit 时回读实际体积
         *out = near_v;
         return true;
     }

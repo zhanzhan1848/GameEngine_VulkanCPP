@@ -42,6 +42,9 @@
 // trace side (jitter/cosine modes rotate the set per frame).
 #include "ShaderLib/ProbeSampleLib.glsl"
 
+// P1.1: 共享解析天空（可见天空 / GI miss 单一事实源）
+#include "ShaderLib/SkyAtmosphere.glsl"
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D lighting_atlas;
@@ -121,7 +124,10 @@ layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
 // 两端 trace 均健康（拱门 miss 4.7%）。但 2.9 档在此处仍使 Vulkan 全图
 // 过冲（mean 57 vs 参考 42.8，拱门 29）——能量注入路径与 Metal 不同，
 // 待 SC 卡片辐射专项定位后与可见天空统一。保守回 0.3 档。
-const vec3 DDGI_SKY_COLOR = vec3(2.75, 2.88, 3.00);
+// P1.2 (2026-09-15)：逃逸射线天空改用共享 EvaluateSkyBase（与可见天空
+// 同源同色，见 ShaderLib/SkyAtmosphere.glsl），档位仍由 SkyColor.x 门控
+// ——旧 DDGI_SKY_COLOR(2.88) 是重标前的旧值，与可见天空(5.76)差 2×。
+// 档位旋钮不变，可经 sky_color_intensity 回调。
 
 // T1.3: card lookup via uniform grid (header + prefix sums + card indices).
 // Replaces the shared-memory lookup cache + per-ray AABB prefilter loop.
@@ -138,6 +144,14 @@ layout(set = 0, binding = 12, std430) readonly buffer SCGridCardsBuf {
 layout(set = 0, binding = 14, std430) readonly buffer HitNormalBuf {
     vec4 hit_normal[];
 } hnb;
+
+// 2026-09-17 P0（probe-selection-density-audit §5）：本帧 TraceSDF 发布的
+// 重定位后有效射线起点（绝对 probeIdx 索引，w = 1.0 有效）。hitPos 重建与
+// miss 卡片查询必须从该点出发——旧实现用原格点 P0 重建 P1 起点的命中，
+// 对移动过的 probe 距离全部错位（ΔP 可达 0.95×spacing，深埋借格 5.2 m）。
+layout(set = 0, binding = 17, std430) readonly buffer RelocatedOriginBuf {
+    vec4 relocated_origin[];
+} robuf;
 
 SCGridParams scGridLoad() {
     return scGridDecode(
@@ -380,6 +394,16 @@ void ddgi_trace_finalize() {
     uvec3 counts = volume.ProbeCounts.xyz;
     uvec3 gc = ddgiProbeGridCoord(probeIdx, counts);
     vec3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
+    // P0 坐标契约：射线起点 = TraceSDF 本帧发布的有效（重定位后）起点。
+    // 首帧该 probe 尚未被 trace（w=0）时回退逻辑格点——与旧行为一致。
+    // DDGI_LEGACY_CONSUMERS=1（编译期变体，-DDDGI_LEGACY_CONSUMERS，C++ 侧
+    // 按 env 选择 bytecode）：归因 A/B——消费端回到旧原格点行为（缓冲仍写）。
+    vec3 rayOrigin = probePos;
+#ifndef DDGI_LEGACY_CONSUMERS
+    if (robuf.relocated_origin[probeIdx].w > 0.5) {
+        rayOrigin = robuf.relocated_origin[probeIdx].xyz;
+    }
+#endif
     vec3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
                                          volume.FrameIndex,
                                          uint(volume.RaySampleMode),
@@ -398,7 +422,7 @@ void ddgi_trace_finalize() {
         //    the same bounce twice).
         // 2. Depth-validated screen radiance, including valid black.
         // 3. Sky + world-probe bounce as the last resort.
-        vec3 hitPos = probePos + rayDir * hitDistance;
+        vec3 hitPos = rayOrigin + rayDir * hitDistance;
         result.w = hitDistance;
 
         // T4.3: real gradient normal when the detail-SDF refinement ran;
@@ -439,7 +463,8 @@ void ddgi_trace_finalize() {
                     vec3 scRadiance; float key;
                     if (scQueryCardCandidate(card, hitPos, -rayDir,
                                              max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
-                                             depth_atlas, lighting_atlas, scRadiance, key)) {
+                                             depth_atlas, lighting_atlas,
+                                             vec3(0.0), scRadiance, key)) {
                         if (key < bestKey) {
                             bestKey = key;
                             result.xyz = scRadiance;
@@ -480,19 +505,21 @@ void ddgi_trace_finalize() {
         }
     } else if (hitDistance <= -1.5) {
         // 逃逸（越出 RayMaxDistance）——真正面向天空的射线，吃天空色。
-        // C3.3: 天空档位统一——逃逸射线此前绕过 sky_color_intensity 直取
-        // 满档 2.88（可见天空线性亮度），而引擎天空档 = SkyColor.x
-        // （GIDebug sky_color_intensity，默认 0.4）。2.5× 超档天空经盒内
-        // 探针的逃逸份额均匀灌注室内 = "albedo×0.2 均匀贴回"的主源。
-        // SkyColor.x 即档位系数，跟随同一旋钮。
-        result.xyz = DDGI_SKY_COLOR * volume.SkyColor.x;
+        // P1.2: 共享 EvaluateSkyBase（与可见天空同源同色）。P0 校准：改乘
+        // SkyColor.xyz——旧实现只乘 x 通道当强度门，逃逸射线拿到的是灰天空，
+        // 与下方 SC-miss 回退路径的暖色 E_sky（×xyz）在同一探针网格里拼出
+        // 灰/暖色块。两处统一为同一天空色度，能量仍由 SkyColor 档位控制。
+        // 漫反射探针不含日晕热点（直射阳光由 SC 单独供给，防重复计能）。
+        result.xyz = EvaluateSkyBase(rayDir) * volume.SkyColor.xyz;
     } else {
         // ---- Miss（步数耗尽）：仅回退探针周边 SC 卡，不再兜底天空 ----
+        // P0 坐标契约：卡片查询同样从有效起点出发——耗尽射线物理上是从
+        // 重定位后的位置爬行失败，周边卡片的语义以该位置为准。
         uint deviceReads = 0u;
         const uint kMaxMissReads = 8u;
         bool found = false;
         SCGridParams gp = scGridLoad();
-        uint cell = scGridCellIndex(gp, probePos);
+        uint cell = scGridCellIndex(gp, rayOrigin);
         if (cell != 0xFFFFFFFFu) {
             uint begin = scgo.sc_grid_offsets[16u + cell];
             uint end   = scgo.sc_grid_offsets[17u + cell];
@@ -503,7 +530,7 @@ void ddgi_trace_finalize() {
                 ++deviceReads;
 
                 vec2 atlasUV;
-                if (worldToCardUV(probePos, card, atlasUV)) {
+                if (worldToCardUV(rayOrigin, card, atlasUV)) {
                     vec3 missRadiance = sampleAtlasBilinear(atlasUV);
                     // Only accept card light that actually has energy — in
                     // shadowed arcades the atlas is still converging and a
