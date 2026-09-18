@@ -109,7 +109,8 @@ kernel void surfaceCacheIndirectResolve(
                     float3 cand; float key;
                     if (scQueryCardCandidate(cards[ci], hit_pos, tileNormal,
                                              max(params.hit_band, 0.15f),
-                                             depth_atlas, prev_lighting, cand, key)) {
+                                             depth_atlas, prev_lighting,
+                                             float3(0.0f), cand, key)) {
                         if (key < bestKey) { bestKey = key; radiance = cand; found = true; }
                     }
                 }

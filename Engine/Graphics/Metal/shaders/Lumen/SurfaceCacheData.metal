@@ -163,12 +163,15 @@ static float3 scCardFaceNormal(SurfaceCacheCard card) {
 // texture params templated: callers hold atlases with different access
 // qualifiers (sample in DDGI, read in resolve/SPGI); .read() works for both.
 template <typename TEXD, typename TEXL>
+// hitNormalHint（G2，2026-09-16，与 GLSL 孪生同步）: 命中点 SDF 梯度，
+// length² > 0.25 时启用朝向身份门；float3(0) = 不启用。
 static bool scQueryCardCandidate(SurfaceCacheCard card,
                                  float3 hitPos,
                                  float3 surfaceFacing,
                                  float tolFloor,
                                  TEXD depthAtlas,
                                  TEXL lightingAtlas,
+                                 float3 hitNormalHint,
                                  thread float3& outRadiance,
                                  thread float& outKey) {
     outRadiance = float3(0.0f);
@@ -179,6 +182,9 @@ static bool scQueryCardCandidate(SurfaceCacheCard card,
 
     // n_true = -faceNormal (faces the card plane); see GLSL twin for sign.
     if (dot(scCardFaceNormal(card), surfaceFacing) >= 0.0f) return false;
+    // G2: 朝向身份门（cos > 0.5 容差，吸收粗 SDF 梯度模糊）
+    if (dot(hitNormalHint, hitNormalHint) > 0.25f &&
+        dot(scCardFaceNormal(card), hitNormalHint) > -0.5f) return false;
 
     uint2 texel = uint2(clamp(atlasUV, float2(0.0f),
                               float2(card.atlas_offset_x + card.resolution - 1u,

@@ -106,13 +106,22 @@ struct ScreenProbeGlobalData {
     // units) — SDF rays stop there and query the DDGI radiance cache at the
     // stop point (UE world-probe semantics); 0 disables (legacy miss chain).
     // F2 (M7): y = importance resampling on/off (1/0).
-    math::v4   cache_params;           // offset 400: x=far_cache_start, y=importance, zw reserved
+    math::v4   cache_params;           // offset 400: x=far_cache_start, y=importance, z=adaptive_thr, w=cascade
+    // P1（sponza-gap-reaudit §4.1/4.2 逐阶段台账）: trace 诊断模式。
+    // x = mode: 0=off, 1=分支统计, 2=HZB hit 去亮度惩罚（raw 对照）,
+    // 3=SC card 同亮度惩罚（两端一致对照）。yzw 保留。
+    math::v4   diag_params;            // offset 416
+    // G2 A/B（2026-09-16）: x = 三线性 SDF 梯度 hint 开关（TraceSDF 消费，
+    // 供 SC 朝向门的命中法线）。仅声明尾扩；未读取该字段的 kernel 其
+    // std140 前缀布局稳定，无需同步改声明。
+    math::v4   hint_params;            // offset 432
 };
 
-static_assert(sizeof(ScreenProbeGlobalData) == 416, "ScreenProbe shader constants must stay 416 bytes");
+static_assert(sizeof(ScreenProbeGlobalData) == 448, "ScreenProbe shader constants must stay 448 bytes");
 static_assert(offsetof(ScreenProbeGlobalData, ddgi_fb) == 352, "DDGI constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, hzb_params) == 384, "HZB constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, cache_params) == 400, "Cache constants offset mismatch");
+static_assert(offsetof(ScreenProbeGlobalData, diag_params) == 416, "Diag constants offset mismatch");
 
 // ============================================================================
 // RadianceCascadeParams — T3.5 cascade update constants (must match both
@@ -298,6 +307,15 @@ public:
     // call on camera cut / scene switch so stale probe radiance never bleeds
     // into the new view.
     void RequestTemporalReset() { temporal_reset_pending_ = true; }
+
+    // P1（reaudit §4.1/4.2）: trace 分支诊断。mode 见 diag_params 注释；
+    // mode>=1 时 finalize 逐射线记录 hit 分支/亮度统计（Vulkan only），
+    // 由测试在指定帧读回（仿 FROXEL_DUMP 的 SPGI_TRACE_DIAG 通道）。
+    void SetTraceDiagMode(u32 mode) { trace_diag_mode_ = mode; }
+    u32  GetTraceDiagMode() const { return trace_diag_mode_; }
+    rhi::ResourceHandle GetTraceStatsBuffer() const { return trace_stats_buffer_; }
+    u32 GetGridWidth() const { return grid_width_; }
+    u32 GetGridHeight() const { return grid_height_; }
 
 private:
     void CreateDescriptorSetLayouts();
@@ -507,6 +525,11 @@ private:
     GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;
     // A11: one-shot temporal reset flag (alpha forced to 1.0 for one pass)
     bool temporal_reset_pending_ = false;
+
+    // P1（reaudit §4.1/4.2）: finalize 分支统计缓冲（uvec4[4][17]，host-visible
+    // 便于读回；atomic 仅在 diag_params.x>0.5 时执行，默认路径零开销）。
+    u32 trace_diag_mode_{ 0 };
+    rhi::ResourceHandle trace_stats_buffer_{ rhi::handles::INVALID_RESOURCE };
 };
 
 } // namespace primal::graphics::lumen

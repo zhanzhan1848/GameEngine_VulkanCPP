@@ -480,6 +480,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade L1y (SH-L1)
             {16, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade L1z (SH-L1)
             {17, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // SC depth for hit validation
+            {18, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // P1: trace 分支统计（diag 门控）
         };
         bindings[2].readonly = true;
         bindings[3].readonly = true;
@@ -494,7 +495,7 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[14].is3D = true;     // radiance cascade (SH-L1)
         bindings[15].is3D = true;     // radiance cascade (SH-L1)
         bindings[16].is3D = true;     // radiance cascade (SH-L1)
-        finalize_set_layout_ = device_->CreateDescriptorSetLayout({18, bindings});
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout({19, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev frame color
@@ -940,9 +941,15 @@ void ScreenProbeGIPass::CreateConstantBuffers() {
     }
 }
 
-// SPGI bring-up bisect (TEMP): PRIMAL_SPGI_SKIP="trace,post,gather" — comma/
-// substring list of dispatch groups to skip, so a device hang can be attributed
-// to a single stage in one run. Used together with PRIMAL_SPGI=1.
+// SPGI bring-up bisect (TEMP): PRIMAL_SPGI_SKIP="trace,hzb,temporal,spatial,denoise,post,gather"
+// — comma/substring list of dispatch groups to skip, so a device hang or
+// visual artifact can be attributed to a single stage in one run. `hzb`
+// skips the near-field HZB dispatch and clears its UBO mip-level gate so SDF
+// owns every ray. `temporal` and `denoise` skip only those filters while
+// preserving the remaining post stages. `spatial`
+// skips only the probe-grid SpatialFilter; `post` keeps its historical meaning
+// and skips Temporal, SpatialFilter, and Denoise together. Used together with
+// PRIMAL_SPGI=1.
 static bool SpgiStageSkipped(const char* stage) {
     static const char* skipList = std::getenv("PRIMAL_SPGI_SKIP");
     if (!skipList) return false;
@@ -1116,6 +1123,7 @@ void ScreenProbeGIPass::CreateBuffers() {
         desc.type = TextureType::Texture2D;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         output_texture_ = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(output_texture_);  // P0-B 首帧 priming
     }
 
     // Filtered output texture: full-resolution RGBA16_Float (Denoise output)
@@ -1126,6 +1134,7 @@ void ScreenProbeGIPass::CreateBuffers() {
         desc.type = TextureType::Texture2D;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         output_texture_filtered_ = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(output_texture_filtered_);  // P0-B 首帧 priming
     }
 
     // Dummy buffer for Metal validation when surface cache is unavailable
@@ -1154,6 +1163,29 @@ void ScreenProbeGIPass::CreateBuffers() {
         desc.type = TextureType::Texture2D;
         desc.usage = TextureUsage::ShaderResource;
         dummy_texture_2d_ = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(dummy_texture_2d_);  // P0-B 首帧 priming
+    }
+
+    // P1（sponza-gap-reaudit §4.1/4.2）: finalize 分支统计缓冲。仅 Vulkan
+    // （trace split/finalize 是 Vulkan-only 链）。host-visible 便于测试直接
+    // 读回；布局必须始终含 binding 18（shader 静态使用），atomic 写由
+    // diag_params.x 门控，默认路径只多绑 2KB 空缓冲。
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        BufferDesc desc{};
+        desc.size = 16 * 4 * 17;   // uvec4[branch][bucket] — see shader
+        desc.type = BufferType::Structured;
+        desc.usage = GPUMemoryUsage::Readback;
+        desc.memoryUsage = GPUMemoryUsage::Readback;
+        desc.structured.elementCount = 4 * 17;
+        desc.structured.elementStride = 16;
+        trace_stats_buffer_ = device_->CreateBuffer(desc);
+        if (trace_stats_buffer_ != handles::INVALID_RESOURCE) {
+            void* mapped = device_->MapBuffer(trace_stats_buffer_);
+            if (mapped) {
+                memset(mapped, 0, desc.size);
+                device_->UnmapBuffer(trace_stats_buffer_);
+            }
+        }
     }
 }
 
@@ -1175,8 +1207,10 @@ void ScreenProbeGIPass::CreateRadianceCascade() {
         desc.type = TextureType::Texture3D;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         radiance_cascade_[i] = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(radiance_cascade_[i]);  // P0-B 首帧 priming
         for (int c = 0; c < 3; ++c) {
             radiance_cascade_l1_[i][c] = device_->CreateTexture(desc);
+            device_->PrimeTextureLayout(radiance_cascade_l1_[i][c]);  // P0-B 首帧 priming
         }
     }
 
@@ -1188,6 +1222,7 @@ void ScreenProbeGIPass::CreateRadianceCascade() {
         desc.type = TextureType::Texture3D;
         desc.usage = TextureUsage::ShaderResource;
         dummy_texture_3d_ = device_->CreateTexture(desc);
+        // 3D dummy 不 Prime（3D 无 SampledImage 首帧绑定问题，且保持无状态）
     }
 
     // Update pipeline. Vulkan loads the precompiled .comp.spv (the standalone
@@ -1404,9 +1439,14 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     auto giFilteredHandle = graph.ImportResource("ScreenProbeGI_Filtered", output_texture_filtered_);
     // T5.3: denoise re-enabled. The historical "solid color in mode 6" came from
     // the descriptor-update bug fixed in the denoise dispatch (Vulkan bindings
-    // clashed at 0 and the params UBO was never bound). GetOutputTexture()
-    // still returns the raw Gather texture for debug modes.
-    output.gi_output = giFilteredHandle;
+    // clashed at 0 and the params UBO was never bound). Route diagnostics that
+    // skip denoise/post to the Gather texture: the filtered texture has no
+    // producer in those modes, so exposing it would sample an unwritten image
+    // and make the A/B look like SPGI was disabled.
+    const bool denoiseOutput = denoise_pipeline_ != handles::INVALID_PIPELINE &&
+                               !SpgiStageSkipped("post") &&
+                               !SpgiStageSkipped("denoise");
+    output.gi_output = denoiseOutput ? giFilteredHandle : giOutputHandle;
 
     // Import surface cache resources into render graph (needed for RGResourceHandle conversion)
     RGResourceHandle scLightingHandle;
@@ -1517,7 +1557,27 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
+            // Keep the HZB bisect single-stage: when skipped, both the dispatch
+            // and the shader's early HZB-hit gate are disabled. Otherwise SDF
+            // could observe a stale w==1 entry from the shared hit buffer and
+            // the result would not be a valid HZB-vs-SDF comparison.
+            const bool skipHZB = SpgiStageSkipped("hzb");
+
             // Resolve physical handles from render graph
+            // P0-B（01197 定位）: storage 写入前确保 GENERAL。帧内
+            // "restore→SRO 后又被本 pass 后续子阶段 storage 写"的序列不会自动
+            // 补 SRO→GENERAL（RG 只在 pass 入口发一次），tracked/real 从此
+            // 失步。UA→UA barrier 由后端按 tracked 解析：已是 GENERAL 时
+            // no-op，停在 SRO 时发转换。
+            auto EnsureStorageWritable = [&](ResourceHandle tex) {
+                if (tex == handles::INVALID_RESOURCE) return;
+                ResourceBarrier b{};
+                b.resource = tex;
+                b.beforeState = ResourceState::UnorderedAccess;
+                b.afterState  = ResourceState::UnorderedAccess;
+                b.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&b, 1);
+            };
             auto ResolveTexture = [&](RGResourceHandle handle) -> ResourceHandle {
                 auto* res = context.graph->GetResource(handle);
                 if (res) return res->GetPhysicalHandle();
@@ -1643,7 +1703,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 // T5.1: HZB near-field march params (SSGI/SSR near-far convention).
                 gd.hzb_params = {0.1f, 1000.0f,
-                                 (hzb_trace_pipeline_ != handles::INVALID_PIPELINE &&
+                                 (!skipHZB && hzb_trace_pipeline_ != handles::INVALID_PIPELINE &&
                                   hzb_texture_ != handles::INVALID_RESOURCE && hzb_mip_levels_ > 0)
                                      ? (float)hzb_mip_levels_ : 0.0f,
                                  params_.hzb_max_distance};
@@ -1656,6 +1716,28 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                    params_.enable_importance ? 1.0f : 0.0f,
                                    params_.adaptive_pos_threshold,
                                    cascadeActive ? 1.0f : 0.0f};
+                // P1（reaudit §4.1/4.2）: trace 诊断模式（0=off 默认零开销）
+                // G2 A/B（2026-09-16）: y = SC 候选朝向门阈值（n_true·hint
+                // 低于阈值拒绝）。PRIMAL_SPGI_FACE_GATE 环境可调（0.5 默认，
+                // 0.0=仅拒绝明显异面，-1=门关闭）；z 非 0 表示 hint 用三线性
+                // 梯度（PRIMAL_SPGI_TRILINEAR_HINT）。
+                static const float kFaceGate = [] {
+                    if (const char* e = std::getenv("PRIMAL_SPGI_FACE_GATE")) {
+                        char* end = nullptr;
+                        float v = std::strtof(e, &end);
+                        if (end && *end == '\0') return v;
+                    }
+                    // 2026-09-16 A/B 实测定档：0.5→0.25。PCSS 卡片修复后
+                    // 门限 0.25 与 0.0 的 arch/darkarch 差异在噪声内，而
+                    // darkarch（合法反弹）+0.8；门全关 arch 回跳 17→21。
+                    return 0.25f;
+                }();
+                static const float kTrilinearHint = [] {
+                    const char* e = std::getenv("PRIMAL_SPGI_TRILINEAR_HINT");
+                    return (e && e[0] != '0') ? 1.0f : 0.0f;
+                }();
+                gd.diag_params = {static_cast<float>(trace_diag_mode_), kFaceGate, kTrilinearHint, 0.0f};
+                gd.hint_params = {kTrilinearHint, 0.0f, 0.0f, 0.0f};
             }
 
             // Split kernels take the global data through the pool UBO
@@ -1765,7 +1847,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 const bool splitReady = (sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
                                          finalize_pipeline_ != handles::INVALID_PIPELINE &&
                                          hit_distance_buffer_ != handles::INVALID_RESOURCE);
-                const bool hzbReady = (hzb_trace_pipeline_ != handles::INVALID_PIPELINE &&
+                const bool hzbReady = (!skipHZB && hzb_trace_pipeline_ != handles::INVALID_PIPELINE &&
                                       hzb_texture_ != handles::INVALID_RESOURCE && hzb_mip_levels_ > 0);
 
                 if (splitReady && !SpgiStageSkipped("trace")) {
@@ -1942,8 +2024,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {14, DescriptorType::SampledImage, cascadeFinalTex[1]},  // SH-L1 L1x
                             {15, DescriptorType::SampledImage, cascadeFinalTex[2]},  // SH-L1 L1y
                             {16, DescriptorType::SampledImage, cascadeFinalTex[3]},  // SH-L1 L1z
+                            {18, DescriptorType::StorageBuffer,
+                                trace_stats_buffer_ != handles::INVALID_RESOURCE
+                                    ? trace_stats_buffer_ : dummy_buffer_},          // P1: 分支统计
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 18);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 19);
                     } else {
                         DescriptorData finParams[] = {
                             {0, DescriptorType::SampledImage,  prevColorTex},
@@ -1967,6 +2052,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         };
                         UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 18);
                     }
+                    EnsureStorageWritable(outputTex);
                     cmd->BindComputePipeline(finalize_pipeline_);
                     const DescriptorSetHandle finSets[] = { finalize_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, finSets, 0, nullptr);
@@ -2015,6 +2101,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         };
                         UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 15);
                     }
+                    EnsureStorageWritable(outputTex);
                     cmd->BindComputePipeline(trace_pipeline_);
                     const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
@@ -2037,7 +2124,12 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             // Sub-pass 2.5: ScreenProbeAverage (SH2 accumulation)
             // ==================================================================
-            if (!SpgiStageSkipped("post")) {
+            // Average is the first materialized SH result. Keep it enabled
+            // when `post` is skipped so PRIMAL_SPGI_SKIP=post still feeds the
+            // raw current-frame SH into Gather; otherwise the diagnostic path
+            // would consume the untouched (zeroed) history slot and look the
+            // same as disabling SPGI entirely.
+            if (!SpgiStageSkipped("average")) {
                 struct AvgCB { u32 totalProbes; u32 raysPerProbe; float pad[2]; };
                 // pad[0] = F5 jitter seed — MUST equal camera_position.w so the
                 // SH projection regenerates the same rotated ray directions as
@@ -2090,7 +2182,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // Sub-pass 2.75: Probe Temporal Accumulation (T5.2 reprojection)
             // ==================================================================
             ResourceHandle filteredSH = probe_avg_radiance_[frameIdx];
-            if (temporal_pipeline_ != handles::INVALID_PIPELINE && !SpgiStageSkipped("post")) {
+            if (temporal_pipeline_ != handles::INVALID_PIPELINE &&
+                !SpgiStageSkipped("post") && !SpgiStageSkipped("temporal")) {
                 // std140 layout: mat4 prevVP (64B) + 10 scalars (48B) = 112B
                 struct alignas(16) TemporalCB {
                     math::m4x4 prev_view_projection;
@@ -2158,7 +2251,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             // Sub-pass 2.9: Probe Spatial Filter
             // ==================================================================
-            if (spatial_pipeline_ != handles::INVALID_PIPELINE && !SpgiStageSkipped("post")) {
+            if (spatial_pipeline_ != handles::INVALID_PIPELINE &&
+                !SpgiStageSkipped("post") && !SpgiStageSkipped("spatial")) {
                 struct SpatialCB { u32 totalProbes; u32 gridW; float sigma; float pad; };
                 const ResourceHandle spatialOutput = filteredSH == probe_avg_radiance_[frameIdx]
                     ? probe_temporal_radiance_[frameIdx] : probe_avg_radiance_[frameIdx];
@@ -2190,6 +2284,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
             // If either optional filter is unavailable, preserve its last valid
             // output in the current history slot too (never overwrite histIdx).
+            // A targeted `spatial` skip still goes through this copy so the
+            // next frame observes the same temporal history chain as the
+            // default path; Gather receives the copied temporal result.
             if (filteredSH != probe_avg_radiance_[frameIdx]) {
                 ResourceBarrier copies[2]{};
                 copies[0].resource = filteredSH;
@@ -2252,6 +2349,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 }
                 UpdateDescriptorSet(device_, gather_ds_[frameIdx], params, 7);
 
+                EnsureStorageWritable(outputTex);
                 cmd->BindComputePipeline(gather_pipeline_);
                 const DescriptorSetHandle sets[] = { gather_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, gather_layout_, 0, 1, sets, 0, nullptr);
@@ -2278,6 +2376,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             if (denoise_pipeline_ != handles::INVALID_PIPELINE &&
                 !SpgiStageSkipped("post") &&
+                !SpgiStageSkipped("denoise") &&
                 filteredTex != handles::INVALID_RESOURCE) {
                 struct DenoiseCB {
                     float sigma_depth; float sigma_normal; float sigma_spatial; float pad1;
@@ -2310,6 +2409,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     UpdateDescriptorSet(device_, denoise_ds_[frameIdx], params, 5);
                 }
 
+                EnsureStorageWritable(filteredTex);
                 cmd->BindComputePipeline(denoise_pipeline_);
                 const DescriptorSetHandle sets[] = { denoise_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, denoise_layout_, 0, 1, sets, 0, nullptr);

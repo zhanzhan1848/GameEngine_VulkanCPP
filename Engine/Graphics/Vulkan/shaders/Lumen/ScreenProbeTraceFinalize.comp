@@ -34,6 +34,9 @@
 // first (octEncode guard order).
 #include "ShaderLib/EncodeLib.glsl"
 
+// P1.1: 共享解析天空（DDGI 不可用时的探针回退与可见天空同源同色）
+#include "ShaderLib/SkyAtmosphere.glsl"
+
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D prevFrameColor;
@@ -63,7 +66,18 @@ layout(set = 0, binding = 5, std140) uniform GlobalData {
     vec4 ddgi_fb[2];
     vec4 hzb_params;
     vec4 cache_params;   // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
+    vec4 diag_params;    // P1（reaudit §4.1/4.2）: x = diag mode（0/1/2/3，见 C++）
 } global;
+
+// P1（sponza-gap-reaudit §4.1/4.2 逐阶段台账）: 分支计数 + 辐射累计。
+// branch: 0=HZB hit(w==1), 1=SC card(w==2 且通过校验), 2=far-cache(w==3),
+// 3=world-fallback/DDGI/miss。bucket 0=全局，1..16 = 屏幕 4×4 桶
+// （x 主序，bucket1=左上——拱顶热点 ROI 所在）。
+// 分量：x=count，y=luminance 累计（×64 定点），z=max luminance（×64 定点），
+// w=cosTheta 累计（×256）。atomic 写由 global.diag_params.x 门控。
+layout(std430, set = 0, binding = 18) buffer SpgiTraceStats {
+    uvec4 spgi_stats[4][17];
+};
 
 // F2 (M7): previous frame's final probe SH — importance-resampling proposal.
 layout(set = 0, binding = 12, std430) readonly buffer ImportanceSHBlock {
@@ -140,6 +154,27 @@ vec3 samplePrevFrameColor(vec3 worldPos) {
     return sampleBilinearRGB(prevFrameColor, uv);
 }
 
+// P1: 记录一条已完成分支处理的射线（diag mode 才执行）。
+void spgiStatRecord(uint probeIdx, uint branch, vec3 radiance, float cosTheta) {
+    if (global.diag_params.x < 0.5) return;
+    uint gridW = max(uint(global.grid_params.x), 1u);
+    uint gridH = max(uint(global.grid_params.y), 1u);
+    float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+    uint lumQ = uint(clamp(lum, 0.0, 65535.0) * 64.0);
+    uint cosQ = uint(clamp(cosTheta, 0.0, 1.0) * 256.0);
+    uint col = min((probeIdx % gridW) * 4u / gridW, 3u);
+    uint row = min((probeIdx / gridW) * 4u / gridH, 3u);
+    uint bucket = 1u + col + row * 4u;   // bucket1 = 屏幕左上（拱顶热点 ROI）
+    atomicAdd(spgi_stats[branch][0u].x, 1u);
+    atomicAdd(spgi_stats[branch][0u].y, lumQ);
+    atomicMax(spgi_stats[branch][0u].z, lumQ);
+    atomicAdd(spgi_stats[branch][0u].w, cosQ);
+    atomicAdd(spgi_stats[branch][bucket].x, 1u);
+    atomicAdd(spgi_stats[branch][bucket].y, lumQ);
+    atomicMax(spgi_stats[branch][bucket].z, lumQ);
+    atomicAdd(spgi_stats[branch][bucket].w, cosQ);
+}
+
 void screen_probe_trace_finalize() {
     uint global_id = gl_GlobalInvocationID.x;
     uint gridW = uint(global.grid_params.x);
@@ -178,21 +213,51 @@ void screen_probe_trace_finalize() {
         rayDir = spgiJitterRotation(probeIdx, global.camera_position.w) * rayDir;
         rayDir = orientAroundNormalTBN(rayDir, probeNormal);
     }
-    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
+    // Keep this exactly in lockstep with ScreenProbeTraceSDF: the hit
+    // distance is measured from the biased origin, so a mismatch would move
+    // every SDF/SC hit during finalization.
+    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 0.25;
 
     vec4 hit = hit_buffer.data[global_id];
     vec3 radiance = vec3(0.0);
     float cosTheta = 0.0;
     bool useWorldFallback = false;
+    // P1: 逐射线分支归因（0=HZB, 1=SC, 2=far-cache, 3=fallback/miss）
+    uint statBranch = 3u;
 
     if (hit.w == 1.0) {
         // HZB near-field hit — sharp screen-space radiance at the hit UV.
         radiance = samplePrevFrameColorAt(hit.yz);
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+        // P1-A: prev-frame color is the lit HDR scene color — it contains the
+        // direct sun term (DIRECT_INTENSITY-scaled). Feeding it unattenuated
+        // into probe radiance double-counts direct light and paints warm
+        // blobs on probe vertices near sunlit geometry (the "yellow arch"
+        // artifact). Apply the same bright penalty SSGITrace.comp uses for
+        // its screen-space hits so indirect stays indirect.
+        float hzbHitLum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+        // P1（reaudit §4.2）: diag mode 2 = HZB 去惩罚（raw 对照，量化该
+        // 经验钳制对热点/整图的贡献）。0/1/3 维持默认。
+        if (global.diag_params.x < 1.5 || global.diag_params.x > 2.5) {
+            radiance *= 1.0 / (1.0 + max(hzbHitLum - 1.0, 0.0) * 2.0);
+        }
         cosTheta = max(dot(probeNormal, rayDir), 0.0);
+        statBranch = 0u;
     } else if (hit.w == 2.0) {
         // Coarse SDF hit: validate the surface-cache texel's captured position.
         vec3 hitPos = origin + rayDir * hit.x;
+        // G2（2026-09-16）: 2b 在 hit_buffer.y 编码了命中点 SDF 梯度法线
+        // （octEncode + packSnorm2x16；八面体编码返回 [0,1]²，snorm 域映射
+        // 回 [-1,1]）。长度 <0.5 = 退化（级联外），不启朝向门。
+        // diag_params.y = 门阈值（PRIMAL_SPGI_FACE_GATE：<0 关门；
+        // 0.5 默认 / 0.0 仅拒异面）。
+        vec3 hitNormalHint = vec3(0.0);
+        {
+            vec2 octS = unpackSnorm2x16(floatBitsToUint(hit.y));
+            vec3 decoded = octDecode(clamp(octS * 0.5 + 0.5, vec2(0.0), vec2(1.0)));
+            if (dot(decoded, decoded) > 0.25) hitNormalHint = decoded;
+        }
+        const float faceGate = global.diag_params.y;
         bool usedSurfaceCache = false;
 
         // A card projection only proves UV coverage, not surface identity.
@@ -216,10 +281,15 @@ void screen_probe_trace_finalize() {
                 for (uint gi = begin; gi < end; ++gi) {
                     uint ci = scgc.sc_grid_cards[gi];
                     vec3 candidate; float key;
+                    // 门阈值经 hint 缩放实现（SurfaceCacheData 的硬编码门
+                    // 是 n_true·hint < 0.5 拒绝）：k=0.5/T 使有效阈值=T。
+                    // T<0 → 零向量（门关）。
+                    vec3 hintForQuery = (faceGate < 0.0) ? vec3(0.0)
+                                        : hitNormalHint * (0.5 / max(faceGate, 1e-3));
                     if (scQueryCardCandidate(cards.data[ci], hitPos, -rayDir,
                                              max(0.15, global.sdf_voxel_sizes[0].x * 1.25),
                                              surface_cache_depth, surface_cache_lighting,
-                                             candidate, key)) {
+                                             hintForQuery, candidate, key)) {
                         if (key < bestKey) {
                             bestKey = key;
                             radiance = candidate;
@@ -236,9 +306,17 @@ void screen_probe_trace_finalize() {
             // hit (HZB) or a surface-cache card supplies this ray.
             useWorldFallback = true;
         }
+        // P1（reaudit §4.2）: diag mode 3 = 对 SC card radiance 施加与 HZB
+        // 相同的亮度惩罚——两路径同处理的能量一致性对照。
+        if (global.diag_params.x > 2.5) {
+            float scLum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+            radiance *= 1.0 / (1.0 + max(scLum - 1.0, 0.0) * 2.0);
+        }
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
         cosTheta = max(dot(probeNormal, rayDir), 0.0);
+        statBranch = usedSurfaceCache ? 1u : 3u;
     } else if (hit.w == 3.0) {
+        statBranch = 2u;
         // F1 (M7) far-cache: the SDF march stopped at far_cache_start —
         // query the radiance cache at the stop point (UE world-probe
         // semantics). T3.5 + SH-L1: the 32³ cascade serves the query with
@@ -337,11 +415,12 @@ void screen_probe_trace_finalize() {
             }
         }
         if (!ddgiOk) {
-            // DDGI unavailable / stop point outside the volume → sky gradient.
+            // DDGI unavailable / stop point outside the volume → sky.
+            // P1.1: 第三套硬编码渐变(0.15-0.65) → 共享 EvaluateSkyBase，
+            // 与可见天空/DDGI miss 同源同色。
             float skyWeight = max(dot(probeNormal, rayDir), 0.0);
             if (skyWeight > 0.0) {
-                float skyY = rayDir.y * 0.5 + 0.5;
-                radiance = mix(vec3(0.15, 0.18, 0.25), vec3(0.4, 0.5, 0.65), skyY);
+                radiance = EvaluateSkyBase(rayDir);
                 cosTheta = skyWeight;
             }
         }
@@ -424,5 +503,7 @@ void screen_probe_trace_finalize() {
     // w carries the SH-projection weight: cosθ × importance factor (F2).
     // B5: negative w for miss rays (sign is the geometry-hit flag).
     const bool geoHit = (hit.w == 1.0) || (hit.w == 2.0) || (hit.w == 3.0);
+    // P1: fallback/DDGI/miss 分支统一记为 3（含 w==2 校验失败→世界回退）
+    spgiStatRecord(probeIdx, statBranch, radiance, cosTheta);
     probeRadiance.data[global_id] = vec4(radiance, geoHit ? cosTheta * invNq : -cosTheta * invNq);
 }

@@ -7,8 +7,10 @@
  * functions, and accumulates into threadgroup shared memory via parallel
  * reduction.
  *
- * Confidence = hitRatio × radianceConsistency
- *   - hitRatio: how many rays hit geometry (0 = all missed, 1 = all hit)
+ * Confidence = mix(0.35, 1, hitRatio) × radianceConsistency (2026-09-17 P1,
+ * audit §6.3: validity decoupled from geometry hits — sky/fallback samples
+ * keep the probe alive with a 0.35 reliability floor)
+ *   - hitRatio: geometry-hit fraction (0 = all fallback/sky, 1 = all hit)
  *   - radianceConsistency: exp(-variance_of_luminance) — penalizes probes
  *     that see wildly different colors in different directions (likely at
  *     geometric boundaries or seeing through geometry)
@@ -276,16 +278,23 @@ kernel void screen_probe_average(
         uint base = group_id * 4;
         float hitCount = sharedHit[0];
         float totalWeight = sharedWeight[0];
+        const float activeCount = sharedActive[0];
 
-        if (totalWeight > 0.0f && hitCount > 0.0f) {
+        // 2026-09-17 P1（probe-selection-density-audit §6.3，与 Vulkan 孪生
+        // 对齐）：valid 与几何命中解耦。旧门 totalWeight>0 && hitCount>0 会把
+        // "全部射线 miss 几何但拿到合法天空/回退辐射"的探针整格清零。有效性
+        // = 存在任一已分类样本（activeCount）；几何命中比例降级为 confidence
+        // 的来源可靠性因子——见下。
+        if (totalWeight > 0.0f && activeCount > 0.0f) {
             // Both modes store canonical radiance SH. No division by the
             // observed cosine-weight sum: that destroys the integral scale.
             const float sumScale = 12.566370614f / float(constants.raysPerProbe);
 
+            // Geometry-hit ratio: rays that hit geometry directly; the rest
+            // carry sky or DDGI-fallback radiance (valid but borrowed).
             float hitRatio = hitCount / float(constants.raysPerProbe);
 
             // Radiance variance: Var(X) = E[X²] - E[X]²
-            const float activeCount = sharedActive[0];
             float avgLum = (activeCount > 0.0f) ? (sharedLum[0] / activeCount) : 0.0f;
             float avgLumSq = (activeCount > 0.0f) ? (sharedLumSq[0] / activeCount) : 0.0f;
             float lumVariance = max(avgLumSq - avgLum * avgLum, 0.0f);
@@ -294,8 +303,10 @@ kernel void screen_probe_average(
             // Scale factor: variance of 1.0 → consistency ≈ 0.02
             float radianceConsistency = exp(-lumVariance * 4.0f);
 
-            // Multi-factor confidence
-            float confidence = hitRatio * radianceConsistency;
+            // 来源可靠性分级：几何命中线性抬升到 1；纯 fallback 保 0.35 底
+            // （非零才能通过 Gather 的 sh0w>0 门；完整来源感知分级按审计
+            // 顺序属 fallback/confidence 阶段）。
+            float confidence = mix(0.35f, 1.0f, hitRatio) * radianceConsistency;
 
             probeSHOut[base + 0] = float4(sharedSH[0][0] * sumScale, confidence);
             probeSHOut[base + 1] = float4(sharedSH[1][0] * sumScale, 1.0f);

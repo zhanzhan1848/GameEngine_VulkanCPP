@@ -174,12 +174,17 @@ vec3 scCardFaceNormal(SurfaceCacheCard card) {
 // on true, outRadiance carries the texel radiance (may be black) and outKey
 // the selection key. tolFloor covers the caller's query-position error band
 // (SDF march threshold); footprint covers texel quantization.
+// hitNormalHint（G2，2026-09-16）: 命中点 SDF 梯度（指向空气），长度² > 0.25
+// 时启用朝向身份门。粗 SDF march 的 ±voxel×0.5 误差带内，平行近邻面（拱腹
+// vs 受光外墙）位置不可分、朝向类可分——拱顶热点借光的治理手段。
+// vec3(0) = 不启用（调用方无 SDF 法线来源时保持原行为）。
 bool scQueryCardCandidate(SurfaceCacheCard card,
                           vec3 hitPos,
                           vec3 surfaceFacing,
                           float tolFloor,
                           texture2D depthAtlas,
                           texture2D lightingAtlas,
+                          vec3 hitNormalHint,
                           out vec3 outRadiance,
                           out float outKey) {
     outRadiance = vec3(0.0);
@@ -195,6 +200,12 @@ bool scQueryCardCandidate(SurfaceCacheCard card,
     // (The first draft had this comparison inverted — it rejected every
     // front-face lookup and starved the transport.)
     if (dot(scCardFaceNormal(card), surfaceFacing) >= 0.0) return false;
+    // G2: n_true = -faceNormal 必须与 SDF 外向梯度一致（cos > 0.5，60° 吸收
+    // 4m 体素梯度的模糊）；异面/平行邻面 dot ≤ 0 拒绝。
+    if (dot(hitNormalHint, hitNormalHint) > 0.25 &&
+        dot(scCardFaceNormal(card), hitNormalHint) > -0.5) {
+        return false;
+    }
 
     // 3. capture validity.
     uvec2 texel = uvec2(clamp(atlasUV, vec2(0.0), vec2(card.atlas_offset_x + card.resolution - 1u,

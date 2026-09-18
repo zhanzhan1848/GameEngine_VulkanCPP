@@ -213,7 +213,8 @@ void surface_cache_indirect_resolve()
                     vec3 cand; float key;
                     if (scQueryCardCandidate(cards.data[ci], hit_pos, -tileRayDir,
                                              max(irp.params.hit_band, 0.15),
-                                             depth_atlas, prev_lighting, cand, key)) {
+                                             depth_atlas, prev_lighting,
+                                             vec3(0.0), cand, key)) {
                         if (key < bestKey) { bestKey = key; radiance = cand; found = true; }
                     }
                 }

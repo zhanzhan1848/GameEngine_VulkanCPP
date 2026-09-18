@@ -804,7 +804,7 @@ kernel void screen_probe_trace_finalize(
                     if (scQueryCardCandidate(cards[ci], hitPos, -rayDir,
                                              max(0.15f, global.sdf_voxel_sizes[0].x * 1.25f),
                                              surface_cache_depth, surface_cache_lighting,
-                                             candidate, key)) {
+                                             float3(0.0f), candidate, key)) {
                         if (key < bestKey) {
                             bestKey = key;
                             radiance = candidate;

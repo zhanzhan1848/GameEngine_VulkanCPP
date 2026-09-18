@@ -55,6 +55,7 @@ layout(set = 0, binding = 6, std140) uniform GlobalData {
     vec4 ddgi_fb[2];
     vec4 hzb_params;
     vec4 cache_params;   // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
+    vec4 hint_params;    // G2 A/B: x = 三线性梯度 hint（PRIMAL_SPGI_TRILINEAR_HINT）
 } global;
 
 // F2 (M7): previous frame's final probe SH — importance-resampling proposal.
@@ -183,6 +184,38 @@ bool detailSDFRefine(vec3 rayOrigin, vec3 rayDir, inout float t) {
 // TraceLib version uses sdf_extents[c].xyz like the monolithic
 // ScreenProbeTraceRays kernel, restoring a real far-field trace.
 
+// G2: 三线性 SDF 采样（仅供中心差分梯度）——最近点采样把粗体素场台阶化，
+// 三线性给出连续场。8 fetch/次，仅 hint 启用时调用。
+float sampleSDFTrilin(texture3D tex, vec3 pos, vec3 origin, vec3 extent, uint res) {
+    vec3 uvw = (pos - origin) / extent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) return 1.0e10;
+    vec3 p = clamp(uvw, vec3(0.0), vec3(1.0)) * vec3(float(res)) - 0.5;
+    ivec3 c0 = ivec3(floor(p));
+    vec3 f = fract(p);
+    ivec3 c1 = min(c0 + ivec3(1), ivec3(int(res) - 1));
+    c0 = max(c0, ivec3(0));
+    float v000 = texelFetch(tex, c0, 0).r;
+    float v100 = texelFetch(tex, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float v010 = texelFetch(tex, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float v110 = texelFetch(tex, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float v001 = texelFetch(tex, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float v101 = texelFetch(tex, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float v011 = texelFetch(tex, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float v111 = texelFetch(tex, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(v000, v100, f.x), mix(v010, v110, f.x), f.y),
+               mix(mix(v001, v101, f.x), mix(v011, v111, f.x), f.y), f.z);
+}
+
+float sampleBestSDFTrilinear(vec3 pos) {
+    uint cc = uint(global.sdf_resolutions.w);
+    if (cc > 0u)
+        return sampleSDFTrilin(sdf0, pos, global.sdf_origins[0].xyz,
+                               global.sdf_extents[0].xyz,
+                               uint(global.sdf_resolutions.x));
+    return 1.0e10;
+}
+
 void screen_probe_trace_sdf() {
     uint global_id = gl_GlobalInvocationID.x;
     uint gridW = uint(global.grid_params.x);
@@ -223,7 +256,10 @@ void screen_probe_trace_sdf() {
         rayDir = spgiJitterRotation(probeIdx, global.camera_position.w) * rayDir;
         rayDir = orientAroundNormalTBN(rayDir, probeNormal);
     }
-    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0;
+    // Origin-bias AB: keep the ray just outside the receiver surface while
+    // avoiding a full two-voxel jump across thin shells (the 2x baseline is
+    // backed up in /tmp for comparison). Finalize must use the same origin.
+    vec3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 0.25;
 
     // F1 (M7): cap the march at far_cache_start_distance — UE world-probe
     // semantics. Unresolved rays become far-cache queries (w = 3) evaluated
@@ -246,7 +282,58 @@ void screen_probe_trace_sdf() {
         // T4.3 二批: refine the coarse hit distance against detail slots.
         float t = res.distance;
         detailSDFRefine(origin, rayDir, t);
-        hit_buffer.data[global_id] = vec4(t, 0.0, 0.0, 2.0);
+
+        // G2（volume-gi-repair-audit §6；2026-09-16）: SDF 命中点梯度法线，
+        // 八面体编码进 hit_buffer.y（SDF 命中的 yz 原本恒 0 未用；HZB 命中
+        // 的 yz 是 UV，w 区分）。粗 march 的 stop 点带 ±voxel0×0.5 位置误差
+        // （detail slot 未启用时无 refine），Finalize 的 SC card 候选校验用
+        // 它做**朝向一致性**身份门——±2m 误差带内平行近邻面（拱腹 vs 受光
+        // 外墙）无法靠位置区分，但法线朝向类可分。
+        vec3 hitPos = origin + rayDir * t;
+        vec3 gNormal = vec3(0.0);
+        {
+            float h = max(global.sdf_voxel_sizes[0].x, 1e-4);
+            float dx = sampleBestSDF(hitPos + vec3(h, 0, 0), sdf0, sdf1, sdf2,
+                                     global.sdf_origins, global.sdf_extents,
+                                     uint(global.sdf_resolutions.w))
+                     - sampleBestSDF(hitPos - vec3(h, 0, 0), sdf0, sdf1, sdf2,
+                                     global.sdf_origins, global.sdf_extents,
+                                     uint(global.sdf_resolutions.w));
+            float dy = sampleBestSDF(hitPos + vec3(0, h, 0), sdf0, sdf1, sdf2,
+                                     global.sdf_origins, global.sdf_extents,
+                                     uint(global.sdf_resolutions.w))
+                     - sampleBestSDF(hitPos - vec3(0, h, 0), sdf0, sdf1, sdf2,
+                                     global.sdf_origins, global.sdf_extents,
+                                     uint(global.sdf_resolutions.w));
+            float dz = sampleBestSDF(hitPos + vec3(0, 0, h), sdf0, sdf1, sdf2,
+                                     global.sdf_origins, global.sdf_extents,
+                                     uint(global.sdf_resolutions.w))
+                     - sampleBestSDF(hitPos - vec3(0, 0, h), sdf0, sdf1, sdf2,
+                                     global.sdf_origins, global.sdf_extents,
+                                     uint(global.sdf_resolutions.w));
+            gNormal = normalize(vec3(dx, dy, dz) + vec3(1e-6));
+            // 三线性版本（hint_params.x = PRIMAL_SPGI_TRILINEAR_HINT）：最近
+            // 点采样在 4m 体素上量化 ±2m，梯度台阶化导致薄几何处朝向类错误
+            // （拱腹 hint 侧向 → 正确卡片被朝向门误拒）。三线性连续插值给
+            // 出平滑梯度，与最近点梯度 mix 0.75。
+            if (global.hint_params.x > 0.5) {
+                float tdx = sampleBestSDFTrilinear(hitPos + vec3(h, 0, 0))
+                          - sampleBestSDFTrilinear(hitPos - vec3(h, 0, 0));
+                float tdy = sampleBestSDFTrilinear(hitPos + vec3(0, h, 0))
+                          - sampleBestSDFTrilinear(hitPos - vec3(0, h, 0));
+                float tdz = sampleBestSDFTrilinear(hitPos + vec3(0, 0, h))
+                          - sampleBestSDFTrilinear(hitPos - vec3(0, 0, h));
+                vec3 tn = normalize(vec3(tdx, tdy, tdz) + vec3(1e-6));
+                gNormal = normalize(mix(gNormal, tn, 0.75f));
+            }
+        }
+        // packSnorm2x16(octEncode) → 一枚 u32；长度 <0.5 表示退化（级联外/
+        // 零梯度），消费端以此判断"无朝向 hint"。
+        vec2 oct = octEncode(gNormal);   // 返回 [0,1]^2
+        vec2 octS = clamp(oct * 2.0 - 1.0, vec2(-1.0), vec2(1.0));
+        hit_buffer.data[global_id] = vec4(t,
+                                          uintBitsToFloat(packSnorm2x16(octS)),
+                                          0.0, 2.0);
     } else if (cacheStart > 0.0) {
         // F1 far-cache: x = travelled distance (stop point = origin + dir * x).
         hit_buffer.data[global_id] = vec4(res.distance, 0.0, 0.0, 3.0);
