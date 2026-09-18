@@ -519,6 +519,20 @@ void LumenWRCPass::AddPass(
             }
             if (sdfTextures[0] == handles::INVALID_RESOURCE) return;
 
+            // 占位 2D 纹理一次性 UNDEFINED→SRO 转换——descriptor 以 SRO 写入，
+            // 未转换的占位在 submit 校验报 "expects SRO -- instead UNDEFINED"
+            //（WRC 路径早期帧告警根因）。
+            if (!dummy_2d_transitioned_ && dummy_2d_ != handles::INVALID_RESOURCE) {
+                ResourceBarrier b{};
+                b.resource = dummy_2d_;
+                b.beforeState = ResourceState::Unknown;
+                b.afterState = ResourceState::ShaderResource;
+                b.subresource = 0xFFFFFFFF;
+                b.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&b, 1);
+                dummy_2d_transitioned_ = true;
+            }
+
             // SDF 布局守卫（同 DDGI：强制 SHADER_READ_ONLY 收敛）。
             for (u32 c = 0; c < 3; ++c) {
                 if (sdfTextures[c] != handles::INVALID_RESOURCE) {

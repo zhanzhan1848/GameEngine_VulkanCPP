@@ -87,7 +87,25 @@ struct FlattenedLightingParams {
     // WRC 计划 Stream B1/B2（能量单向化）— 与 C++ SurfaceCacheTypes.h 同步。
     float probe_feed_bootstrap; // 引导因子（PRIMAL_GI_PROBE_FEED_BOOTSTRAP=1：窗口内 1→0）
     uint  radiosity_solo;       // 1 = tile radiosity 单轨（volume 外 texel 间接唯一来源）
+    // [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 过表寻址开关。
+    uint  page_table_enabled;
 };
+
+// ============================================================================
+// [WRC 计划 Stream D2]: 页表过表寻址——页表模式（pageTableEnabled）下卡片
+// 的 atlas 原点经 card_page_table 条目解析（x_page<<16|y_page，乘 page_size
+// 得 texel 原点），替换直读 card.atlas_offset_{x,y}；下游 worldToCardUV /
+// cardTexelToWorld / scQueryCardCandidate 全部消费解析后的卡片——采样与
+// resolve 查询契约由此统一过表。关闭时原样返回（逐位旧行为）。
+// ============================================================================
+SurfaceCacheCard scResolveCardOrigin(SurfaceCacheCard card, bool pageTableEnabled,
+                                     uint pageEntry, uint page_size) {
+    if (pageTableEnabled) {
+        card.atlas_offset_x = ((pageEntry >> 16u) & 0xFFFFu) * page_size;
+        card.atlas_offset_y = (pageEntry & 0xFFFFu) * page_size;
+    }
+    return card;
+}
 
 // Reconstruct world position from card atlas UV + depth.
 vec3 cardTexelToWorld(uvec2 atlas_uv, float depth, SurfaceCacheCard card) {    float u = (float(atlas_uv.x - card.atlas_offset_x) + 0.5) / float(card.resolution);

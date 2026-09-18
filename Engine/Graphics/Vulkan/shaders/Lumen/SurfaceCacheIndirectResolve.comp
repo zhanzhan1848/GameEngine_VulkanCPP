@@ -80,6 +80,8 @@ struct IndirectResolveParams {
     // 0 = legacy piecewise-constant expansion for A/B. Offsets 80/84.
     uint recon_enabled;
     uint card_count;
+    // [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 过表寻址开关。Offset 88。
+    uint page_table_enabled;
 };
 
 layout(set = 0, binding = 5, std140) uniform IndirectResolveParamsBlock {
@@ -111,6 +113,13 @@ layout(set = 0, binding = 15) uniform texture2D prev_tile_grid;   // A: tile EMA
 layout(set = 0, binding = 8, std430) readonly buffer RayHitsBlock {
     ProbeRayHit data[];
 } ray_hits;
+
+// [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 卡片页表——resolve 查询
+// 契约经 scResolveCardOrigin 过表解析卡片 atlas 原点，替换直读
+// card.atlas_offset_*；flag 关闭时原卡直读（逐位旧行为）。
+layout(set = 0, binding = 16, std430) readonly buffer PageTableBlock {
+    uint card_page_table[];        // card_index → (x_page<<16|y_page)
+} pageTable;
 
 // B (plan §三.B): per-tile validity bitmask (1 bit per tile, packed u32).
 // Written by this shader for tiles whose hits were consumed while CURRENT;
@@ -203,6 +212,11 @@ void surface_cache_indirect_resolve()
             }
             bool found = false;
             float bestKey = 1e30;
+            // [WRC 计划 Stream D2]: 过表寻址——候选卡片先经 scResolveCardOrigin
+            // 解析 atlas 原点再进查询契约（capture 校验/卡片采样全走解析后
+            // 的卡片）；关闭时原卡直读。
+            const bool ptOn = irp.params.page_table_enabled != 0u;
+            const uint ptPage = max(irp.params.sc_params.page_size, 1u);
             for (uint li = 0u; li < irp.params.lookup_count && !found; ++li) {
                 vec3 mn = lookups.data[li].aabb_min.xyz;
                 vec3 mx = lookups.data[li].aabb_max.xyz;
@@ -211,8 +225,10 @@ void surface_cache_indirect_resolve()
                     hit_pos.z < mn.z || hit_pos.z > mx.z) continue;
                 for (uint ci = lookups.data[li].card_start;
                      ci < lookups.data[li].card_start + lookups.data[li].card_count; ++ci) {
+                    SurfaceCacheCard card = scResolveCardOrigin(
+                        cards.data[ci], ptOn, pageTable.card_page_table[ci], ptPage);
                     vec3 cand; float key;
-                    if (scQueryCardCandidate(cards.data[ci], hit_pos, -tileRayDir,
+                    if (scQueryCardCandidate(card, hit_pos, -tileRayDir,
                                              max(irp.params.hit_band, 0.15),
                                              depth_atlas, prev_lighting,
                                              vec3(0.0), cand, key)) {

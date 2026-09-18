@@ -50,6 +50,7 @@ public:
 
     /// D2: 开启页表模式（PRIMAL_SC_PAGE_TABLE=1 时由 SurfaceCachePass 调用）。
     void EnablePageTable() { page_table_enabled_ = true; }
+    bool IsPageTableEnabled() const { return page_table_enabled_; }
     /// D2: 页表（每卡一个 u32 = 页坐标 pack：x_page<<16 | y_page）。
     const std::vector<u32>& GetPageTable() const { return page_table_; }
     rhi::ResourceHandle GetPageTableBuffer() const { return page_table_buffer_; }

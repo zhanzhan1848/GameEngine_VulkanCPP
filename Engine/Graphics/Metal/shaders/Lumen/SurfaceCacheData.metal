@@ -81,6 +81,7 @@ struct FlattenedLightingParams {
     // WRC 计划 Stream B1/B2（能量单向化）— 与 C++ SurfaceCacheTypes.h 同步。
     float  probe_feed_bootstrap;   // 引导因子（PRIMAL_GI_PROBE_FEED_BOOTSTRAP=1：窗口内 1→0）
     uint   radiosity_solo;         // 1 = tile radiosity 单轨（volume 外 texel 间接唯一来源）
+    uint   page_table_enabled;     // [WRC Stream D2] 过表寻址开关（Metal 绑定面 parity 后置）
 };
 
 // Reconstruct world position from card atlas UV + depth

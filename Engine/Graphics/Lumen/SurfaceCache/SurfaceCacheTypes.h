@@ -89,8 +89,11 @@ struct IndirectResolveParamsGPU {
     // and the card count for the resolve's aux owning-card scan. Offsets 80/84.
     uint32_t recon_enabled;
     uint32_t card_count;
+    // [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 过表寻址开关——
+    // resolve 查询契约经 card_page_table 解析卡片 atlas 原点。
+    uint32_t page_table_enabled;
 };
-static_assert(sizeof(IndirectResolveParamsGPU) == 88, "std140 layout drift");
+static_assert(sizeof(IndirectResolveParamsGPU) == 92, "std140 layout drift");
 
 // Per-card dispatch info for flattened texel dispatch.
 // CPU builds prefix-sum array, GPU binary-searches to map thread_id → card → atlas UV.
@@ -129,6 +132,9 @@ struct FlattenedLightingParams {
     // append-at-end 惯例：旧后端 shader 不读也安全。
     float              probe_feed_bootstrap;
     uint32_t           radiosity_solo;
+    // [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: LightEval 采样契约
+    // 过页表寻址——1 时卡片 atlas 原点经 card_page_table 解析。
+    uint32_t           page_table_enabled;
 };
 
 struct SurfaceCacheFrameData {

@@ -218,6 +218,7 @@ private:
     // SC 缺席时的占位资源（1x1 RGBA16F dummy 2D + 16B dummy SSBO）。
     rhi::ResourceHandle dummy_2d_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle dummy_buffer_{ rhi::handles::INVALID_RESOURCE };
+    bool dummy_2d_transitioned_{ false };   ///< 首次 dispatch 前 UNDEFINED→SRO 一次性转换
     math::v3 probe_origin_{ 0.0f, 0.0f, 0.0f };   ///< 探针格原点（SetVolumeOrigin）
     bool prefilter_enabled_{ false };              ///< PRIMAL_WRC_PREFILTER=1
     bool probe_field_seeded_{ false };             ///< 场景切换检测（ClearProbeField）

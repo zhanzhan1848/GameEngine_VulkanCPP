@@ -96,6 +96,12 @@ layout(set = 0, binding = 14, std430) readonly buffer DDGIOpenSkyBlock {
     float ddgi_opensky_buffer[];   // stride 2：[p*2]=escapeRatio，[p*2+1]=sER
 } ddgiOpenSky;
 
+// [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 卡片页表——采样契约经
+// 过表寻址（scResolveCardOrigin），flag 关闭时 card_dispatch 直读偏移。
+layout(set = 0, binding = 15, std430) readonly buffer PageTableBlock {
+    uint card_page_table[];        // card_index → (x_page<<16|y_page)
+} pageTable;
+
 #define SC_DEPTH_RES 8u
 #define SC_DEPTH_TEXELS 64u
 #define SC_DEPTH_FLOATS_PER_PROBE 128u
@@ -430,9 +436,17 @@ void surface_cache_light_eval()
     uint res = card_dispatch.data[lo].resolution;
     uint local_x = local_texel % res;
     uint local_y = local_texel / res;
-    uvec2 atlas_uv = uvec2(
-        card_dispatch.data[lo].atlas_offset_x + local_x,
-        card_dispatch.data[lo].atlas_offset_y + local_y);
+    // [WRC 计划 Stream D2]: 过表寻址——page_table_enabled 时卡片 atlas
+    // 原点经 card_page_table[card_index] 解析（x_page<<16|y_page × 页尺寸），
+    // 替换直读 card_dispatch.atlas_offset_*；关闭时逐位旧行为。
+    uvec2 atlas_origin = uvec2(card_dispatch.data[lo].atlas_offset_x,
+                               card_dispatch.data[lo].atlas_offset_y);
+    if (flp.params.page_table_enabled != 0u) {
+        const uint ptEntry = pageTable.card_page_table[card_dispatch.data[lo].card_index];
+        const uint ptPage = max(flp.params.sc_params.page_size, 1u);
+        atlas_origin = uvec2((ptEntry >> 16u) & 0xFFFFu, ptEntry & 0xFFFFu) * ptPage;
+    }
+    uvec2 atlas_uv = atlas_origin + uvec2(local_x, local_y);
     uint card_idx = card_dispatch.data[lo].card_index;
 
     // Read material data

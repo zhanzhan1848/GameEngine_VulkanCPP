@@ -666,13 +666,15 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {12, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // indirect_out (T3.3 tile radiosity)
             {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi depth (Chebyshev gather visibility, C 系列)
             {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // GI 根治 Phase 3.2: ddgi openSky (天空分类)
+            {15, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [WRC Stream D2]: 卡片页表（过表寻址）
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[9].readonly = true;
         b[10].readonly = true;
         b[13].readonly = true;
         b[14].readonly = true;
-        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({15, bindings});
+        b[15].readonly = true;
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({16, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
@@ -789,8 +791,9 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {13, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // tile_grid (A)
             {14, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // tile_aux (A)
             {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // prev tile_grid (A EMA)
+            {16, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [WRC Stream D2]: 卡片页表（过表寻址）
         };
-        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({16, bindings});
+        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({17, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(0)]]
@@ -1963,6 +1966,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     params.probe_feed_bootstrap =
                         lumen::GIProbeBootstrapFactor(current_frame_index);
                     params.radiosity_solo = kProbeFeedBootstrap ? 1u : 0u;
+                    // [WRC 计划 Stream D2]: LightEval 采样契约过表寻址开关。
+                    params.page_table_enabled =
+                        card_generator_.IsPageTableEnabled() ? 1u : 0u;
                     *mapped = params;
                     device_->UnmapBuffer(params_cb_[frameIdx]);
                 }
@@ -2440,7 +2446,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // DDGISlotMap 恒等（N-2 ≡ N+1 mod 3，+1 写法避免 unsigned
                 // 下溢），槽位语义以 DDGISlotMap.h 为准。
                 const u32 histIdx = DDGISlotsForFrame(current_frame_index + 1u).currentIndex;
-                DescriptorData evalParams[15];
+                DescriptorData evalParams[16];
+                // [WRC 计划 Stream D2]: 页表缓冲（页表模式用真表；关闭时绑
+                // stand-in，flag=0 shader 不读）。
+                const bool ptOn = card_generator_.IsPageTableEnabled();
+                ResourceHandle pageTableBuf = ptOn
+                    ? card_generator_.GetPageTableBuffer()
+                    : ResourceHandle(card_dispatch_buffer_);
                 if (isVk) {
                     DescriptorData p[] = {
                         {0, DescriptorType::StorageImage,  albedo_atlas_},
@@ -2475,6 +2487,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                          frame_data.ddgi_opensky != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_opensky
                              : card_dispatch_buffer_},
+                        // [WRC 计划 Stream D2]: 卡片页表（过表寻址）。
+                        {15, DescriptorType::StorageBuffer, pageTableBuf},
                     };
                     memcpy(evalParams, p, sizeof(p));
                 } else {
@@ -2540,7 +2554,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     }
                 }
 
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 15);
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 16);
 
                 // Explicit GENERAL transition for the lighting atlases — do not
                 // rely on the render graph's Write declaration having put them
@@ -2919,6 +2933,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         rp->refresh_phase = kStride > 1u ? current_frame_index % kStride : 0u;
                         rp->recon_enabled = reconActive ? 1u : 0u;
                         rp->card_count = (u32)card_generator_.GetCards().size();
+                        // [WRC 计划 Stream D2]: resolve 查询契约过表寻址开关。
+                        rp->page_table_enabled =
+                            card_generator_.IsPageTableEnabled() ? 1u : 0u;
                         // C: same hit band the trace marches with — a march
                         // hit can undershoot the true surface by up to this
                         // much along the ray, so the capture-validation
@@ -2970,7 +2987,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             }
                             cmd->InsertBarrier(resolveBarriers, 7);
                         }
-                        DescriptorData rp2[16];
+                        DescriptorData rp2[17];
+                        const bool ptOn = card_generator_.IsPageTableEnabled();
+                        const ResourceHandle pageTableBuf = ptOn
+                            ? card_generator_.GetPageTableBuffer()
+                            : ResourceHandle(card_dispatch_buffer_);
                         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
@@ -2997,6 +3018,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[13] = {13, DescriptorType::StorageImage, indirect_tile_tex_[outIdx]};
                             rp2[14] = {14, DescriptorType::StorageImage, indirect_tile_aux_};
                             rp2[15] = {15, DescriptorType::SampledImage, indirect_tile_tex_[histIdx]};
+                            // [WRC 计划 Stream D2]: 卡片页表（过表寻址）。
+                            rp2[16] = {16, DescriptorType::StorageBuffer, pageTableBuf};
                         } else {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
@@ -3024,7 +3047,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[14] = {10, DescriptorType::StorageImage, indirect_tile_aux_};
                             rp2[15] = {11, DescriptorType::SampledImage, indirect_tile_tex_[histIdx]};
                         }
-                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 16);
+                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 17);
                         cmd->BindComputePipeline(indirect_resolve_pipeline_);
                         const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);

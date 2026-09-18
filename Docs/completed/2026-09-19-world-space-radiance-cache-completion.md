@@ -77,9 +77,15 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
 - **D3**：LRU（`TouchCard`/`card_last_touch_`，LightEval/capture 两侧刷新）+
   自由页段（`free_runs_`）：capacity_full 静默丢弃改挤页——货架满时 LRU 最旧的
   超页卡片降档单页、腾出页段重试分配。
-- **D2 残项（如实记录）**：GPU 采样契约（`SurfaceCacheData.glsl` 过表寻址）未切
-  ——v1 无运行时页迁移，页表与 card.atlas_offset 逐字节等价，shader 端直读偏移
-  数据等价；随 D3 运行时迁移一起落地。
+- **D2 GPU 过表寻址（已落地）**：`SurfaceCacheData.glsl` 新增
+  `scResolveCardOrigin` 过表解析帮助函数；LightEval（采样契约，binding 15 +
+  `FlattenedLightingParams.page_table_enabled` offset 120）与
+  `SurfaceCacheIndirectResolve`（resolve 查询契约，binding 16 +
+  `IndirectResolveParamsGPU.page_table_enabled` offset 88，92B 断言）在
+  `PRIMAL_SC_PAGE_TABLE=1` 时经 `card_page_table` 解析卡片 atlas 原点，替换直读
+  `card.atlas_offset_*`——下游 worldToCardUV/cardTexelToWorld/scQueryCardCandidate
+  全部消费解析后的卡片。关闭时原卡直读（逐位旧行为）；v1 页表与
+  card.atlas_offset 恒等（无运行时迁移），数据等价性由构造保证。
 
 ### Stream E —— SC 失效粒度（E1/E2）
 
@@ -97,19 +103,24 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
 | Vulkan Debug 树编译 | ✅ 0 error |
 | Metal Debug 树编译 | ✅ 0 error |
 | `ctest -R Unit`（双树） | ✅ 5/5 |
-| TestVulkanSponzaRenderGraph（默认，env 全关） | ✅ 2671 帧，0 validation/fault（"fault"匹配均为 "default" 误报） |
+| TestVulkanSponzaRenderGraph（默认，env 全关，最终二进制复测） | ✅ 1651 帧，0 validation/fault（"fault"匹配均为 "default" 误报） |
 | TestVulkanSponzaRenderGraph（`PRIMAL_WRC_ENABLE=1 DUMP=1`） | ✅ 1621 帧；A1 验收：GIDebug 探针视图无穿模热点（dump 亮度稳态 0.33/0.76）；A1 内存实测 ≈9.6MB（16384+2048 探针）< 25MB cap；A2 排除率仪表输出 inGeometry 计数 |
 | 同上（`PRIMAL_GI_PROBE_FEED_BOOTSTRAP=1`） | ✅ 1231 帧，0 validation |
 | shader 同语言拷贝门禁 `check_shader_copies.sh` | ✅（同步 EngineTest 三份拷贝后 0 漂移） |
 | §1.2-5 include 禁令 | ✅ `WRC/` 域与 WRC shader 0 个 DDGI include；共享仅白名单（GIWarmup/GIDebugParams/GICacheView/LumenTypes/SurfaceCacheData/ShaderLib） |
+| Stream B ladder dump 逐回路断言实跑（三配置 × 500/400 帧：默认 / bootstrap / WRC+bootstrap，`GI_DCGAIN=1 GI_LADDER_DUMP=1 SPGI_CAM_LOCK=1`） | ✅ 已执行。GILadderVerdict=`C_fused_matches_model`（残差 med 0.0126 / P95 0.046）；GIDCGain amp 断言三配置均超 0.05 线（**基线自身 0.128 即超**——本工作树 ROI 噪声底，非 Stream B 引入）；逐回路启动衰减率（仪表口径：收敛瞬态相邻 |Δ| 比中位数）base 1.34 → boot 0.886 → wrc 0.606——bootstrap/WRC 配置单调改善且无发散（500 帧稳态漂移 base +24% vs boot −3.8%）；严格 <0.5 受仪表噪声底限制为后续项（需更静默 ROI/去噪读回） |
 | C# / CLI 门禁 | 不涉及（无 CLI 命令面变化，schema 快照无影响） |
 | `ci_local.sh` step 5 render | ⚠️ 关机期 FreeList 断言（render 本体 ok:true、PNG 正常）——**经还原对照实验确认为工作树遗留问题**（还原我的全部相关修改后 exit=134 依旧），非本次引入；见 §4 |
 
 ## 3. 已知问题与残留（如实记录）
 
-1. **WRC 路径早期帧 viewType 告警**（`PRIMAL_WRC_ENABLE=1` 时约 40 行、前 ~2 帧）：
-   WRC finalize 的 SC atlas/depth 绑定在 SC 首帧捕获未完成时 viewType 校验告警，
-   随后 1600+ 帧干净、探针正常收敛。修复方向：SC 首帧完成前强制绑 dummy 2D。
+1. **WRC 路径早期帧告警（已修复 + 残留良性项）**：原 viewType 告警根因
+   （dummy 2D 占位未转换布局 + 3D SDF 误占位）已修复——dummy 2D 替换 3D 占位 +
+   一次性 Unknown→SRO 转换 + SC 首帧完成前强制绑 dummy（frame 0 门控）；
+   `PRIMAL_WRC_ENABLE=1` 复测 viewType 告警清零。残留 ~20 条
+   `[AlbedoTextureArray]` 布局严格性告警（材质数组懒重建时序，GENERAL 下采样
+   功能无影响，渲染收敛正常），根因在材质数组重建与描述符布局声明时序，
+   不在 WRC 数据路径，另立专项处理。
 2. **Metal gather 崩溃（工作树遗留，非本次引入）**：TestModularPipeline Metal
    链在 `ddgi_gi_gather` 编码期断言 missing buffer 12（relocatedOrigins）。
    本次修复了同类的两个布局计数 bug（Metal light_eval 15 项传 14、Metal gather

@@ -2749,9 +2749,15 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             if (!wrc_volumes_[vi] || !wrc_volumes_[vi]->IsInitialized()) continue;
             if (vi == 0 && surface_cache_pass_) {
                 // X2/A3 同款视图签名：SC 数据走统一 Cache View（独立接线
-                // block，§1.2-2）。
-                wrc_volumes_[vi]->SetSurfaceCacheResources(
-                    surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
+                // block，§1.2-2）。SC 首帧完成前强制绑 dummy 2D（占位在
+                // WRC dispatch 内一次性转换到 SRO）——避免 SC atlas 首帧
+                // 布局/内容未定时进入采样描述符。
+                if (frameCount_ >= 1) {
+                    wrc_volumes_[vi]->SetSurfaceCacheResources(
+                        surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
+                } else {
+                    wrc_volumes_[vi]->ClearSurfaceCacheResources();
+                }
             }
             lumen::WRCCameraData wrcCam{};
             wrcCam.light_direction = rhi::math::Normalize(settings_.lighting.light_direction);
@@ -4114,8 +4120,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
                 if (!wrc_volumes_[vi] || !wrc_volumes_[vi]->IsInitialized()) continue;
                 if (vi == 0 && surface_cache_pass_) {
-                    wrc_volumes_[vi]->SetSurfaceCacheResources(
-                        surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
+                    // SC 首帧完成前强制绑 dummy 2D（同 Step 6.7 门控）。
+                    if (frameCount_ >= 1) {
+                        wrc_volumes_[vi]->SetSurfaceCacheResources(
+                            surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
+                    } else {
+                        wrc_volumes_[vi]->ClearSurfaceCacheResources();
+                    }
                 }
                 lumen::WRCCameraData wrcCam{};
                 wrcCam.light_direction = rhi::math::Normalize(settings_.lighting.light_direction);
