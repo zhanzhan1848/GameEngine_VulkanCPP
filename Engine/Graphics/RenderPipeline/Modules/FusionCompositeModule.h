@@ -44,6 +44,12 @@ struct FusionInputs {
     u32 render_width = 0;
     u32 render_height = 0;
     rhi::ResourceHandle black_texture{rhi::handles::INVALID_RESOURCE};
+
+    // sun-audit P1（暗地面 GI 逐段查）: GI_LADDER_DUMP 能量台账输入——
+    // 直射可见性（ShadowFilter 半分辨率 R8，读回的是上一完成帧内容，锁定
+    // 机位下逐帧一致）与 invVP（dump 像素 → 世界射线，固定世界位置标注）。
+    rhi::ResourceHandle shadow_vis_tex{rhi::handles::INVALID_RESOURCE};
+    math::m4x4 inv_view_projection{};
 };
 
 // T4.6.5 part 30.6 (X4 fix): default member initializers prevent stack garbage.
@@ -102,6 +108,10 @@ private:
 
     // Vulkan-only: explicit linear-clamp sampler (Metal uses implicit samplers).
     rhi::SamplerHandle default_sampler_{rhi::handles::INVALID_SAMPLER};
+    // sun-audit P2 用户反馈（间接光过弱）：GI 融合增益运行时旋钮（UBO，三缓冲）
+    rhi::ResourceHandle indirect_gain_cb_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
 
     // 1x1 identity texture for volume scatter fallback: RGBA = (0,0,0,1)
     rhi::ResourceHandle volume_identity_tex_{rhi::handles::INVALID_RESOURCE};
