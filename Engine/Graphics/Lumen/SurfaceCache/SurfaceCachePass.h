@@ -294,6 +294,11 @@ private:
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle indirect_dummy_cb_{ rhi::handles::INVALID_RESOURCE };
+    // 1x1 stand-in for shader-layout SampledImage slots that the resolve
+    // pass never reads — binding a real atlas there forces the descriptor's
+    // SHADER_READ_ONLY_OPTIMAL expectation onto a texture that is parked in
+    // GENERAL for storage writes (VUID-vkCmdDraw-None-09600 every dispatch).
+    rhi::ResourceHandle indirect_dummy_tex_{ rhi::handles::INVALID_RESOURCE };
     // T3.3: atlas-space directional visibility (float per atlas texel,
     // CPU-initialized to 1.0) + triple-buffered shadow params CB.
     rhi::ResourceHandle shadow_visibility_buffer_{ rhi::handles::INVALID_RESOURCE };

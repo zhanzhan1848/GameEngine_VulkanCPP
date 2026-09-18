@@ -2,12 +2,16 @@
 // Vulkan Lumen Surface Cache Shadow Trace (T3.3).
 // Entry point: surface_cache_shadow  (glslangValidator -e surface_cache_shadow)
 //
-// Per card texel: reconstruct the world position from the depth atlas,
-// march the GlobalSDF toward the directional light (relaxed sphere tracing,
-// 16 steps), and write a per-texel visibility value into an atlas-space
-// float buffer. LightEval consumes it in a separate buffer-only dispatch —
-// the two passes split by read type (texture3D-heavy vs buffer/image),
-// mirroring the proven ddgi_trace_sdf / ddgi_trace_finalize recipe.
+// Per card texel: reconstruct the world position from the depth atlas and
+// write a per-texel visibility value into an atlas-space float buffer.
+// LightEval consumes it in a separate buffer-only dispatch — the two passes
+// split by read type (texture3D-heavy vs buffer/image), mirroring the proven
+// ddgi_trace_sdf / ddgi_trace_finalize recipe.
+// G2（2026-09-16, volume-gi-repair-audit §6）: 可见性来源改为 PCSS light-space
+// 深度优先（与表面直射同源同帧——卡片 radiance 从此与表面阴影一致）。
+// 旧粗 SDF march 是最近点采样 4m 体素场，0.5m 薄墙不可见 → 拱腹卡片被烘焙
+// 假直射（SPGI 残余热点与 DDGI 基线偏亮的共同根因）。级联全越界/无深度
+// 输入时保留原 SDF march 作回退。
 //
 // Hit threshold scales with the receiver's own cascade voxel and requires
 // the march to halve the origin's SDF distance (adjacency guard) — plain
@@ -53,6 +57,10 @@ layout(set = 0, binding = 5, std140) uniform ShadowParamsBlock {
     vec4  light_direction;         // xyz = dir TOWARD the light (normalized), w unused
     vec4  shadow_params;           // x = max_distance, y = normal_bias (voxels), z = atlas_size, w unused
     vec4  counts;                  // x = total_texels, y = card_count, z/u unused
+    // G2: PCSS 矩阵（列主序 lightProj*lightView）+ meta（x=cascade_count>0.5
+    // 启用 shadow-map 优先；y=texel 法线偏移 ×footprint）
+    vec4  shadow_matrices[4][4];   // [cascade][column]
+    vec4  shadow_meta;
 } sp;
 
 layout(set = 0, binding = 6, std430) readonly buffer CardDispatchBlock {
@@ -66,6 +74,12 @@ layout(set = 0, binding = 7, std430) readonly buffer CardsBlock {
 layout(set = 0, binding = 8, std430) writeonly buffer VisibilityBlock {
     float visibility[];
 } vis;
+
+// G2: PCSS light-space 深度（D32→R32 blit，与 ShadowFilter/Deferred 同源）
+layout(set = 0, binding = 9)  uniform texture2D shadow_depth_0;
+layout(set = 0, binding = 10) uniform texture2D shadow_depth_1;
+layout(set = 0, binding = 11) uniform texture2D shadow_depth_2;
+layout(set = 0, binding = 12) uniform texture2D shadow_depth_3;
 
 bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
     return all(greaterThanEqual(pos, origin)) && all(lessThan(pos, origin + extent));
@@ -119,6 +133,50 @@ float voxelAt(vec3 pos) {
     return finestVoxelSize();
 }
 
+// --- G2: PCSS light-space 可见性（列主序 M·p，与 ShadowFilter 同约定：
+// sc.x = ndc.x*0.5+0.5, sc.y = 0.5 - ndc.y*0.5；深度比较用 NDC z）---
+// 4-tap PCF（手动双线性，opaque 类型经参数传递——GLSL 禁止三目选择）
+float scPcf4(texture2D depthMap, vec2 uv, float ndcZ) {
+    ivec2 dims = textureSize(depthMap, 0);
+    const float bias = 0.0015;
+    vec2 q = clamp(uv, vec2(0.0), vec2(1.0)) * vec2(dims) - 0.5;
+    ivec2 t0 = ivec2(floor(q));
+    vec2 f = fract(q);
+    ivec2 t1 = min(t0 + ivec2(1), dims - ivec2(1));
+    t0 = max(t0, ivec2(0));
+    float lit = 0.0;
+    lit += (ndcZ - bias > texelFetch(depthMap, t0, 0).r) ? 0.0 : 1.0;
+    lit += (ndcZ - bias > texelFetch(depthMap, ivec2(t1.x, t0.y), 0).r) ? 0.0 : 1.0;
+    lit += (ndcZ - bias > texelFetch(depthMap, ivec2(t0.x, t1.y), 0).r) ? 0.0 : 1.0;
+    lit += (ndcZ - bias > texelFetch(depthMap, t1, 0).r) ? 0.0 : 1.0;
+    return lit * 0.25;
+}
+
+float scShadowMapVisibility(vec3 world, vec3 normal, float footprint) {
+    uint cascadeCount = uint(sp.shadow_meta.x + 0.5);
+    // 前向法线偏移：texel 是受采表面点，自身/共面几何会自阴影；
+    // footprint 级偏移 + NDC bias 吸收栅格化精度。
+    vec3 p = world + normal * (footprint * sp.shadow_meta.y);
+    for (uint c = 0u; c < cascadeCount && c < 4u; ++c) {
+        vec4 col0 = sp.shadow_matrices[c][0];
+        vec4 col1 = sp.shadow_matrices[c][1];
+        vec4 col2 = sp.shadow_matrices[c][2];
+        vec4 col3 = sp.shadow_matrices[c][3];
+        vec4 clip = col0 * p.x + col1 * p.y + col2 * p.z + col3;
+        if (clip.w <= 1e-6) continue;
+        vec3 ndc = clip.xyz / clip.w;
+        if (ndc.x < -1.0 || ndc.x > 1.0 ||
+            ndc.y < -1.0 || ndc.y > 1.0 ||
+            ndc.z <  0.0 || ndc.z > 1.0) continue;
+        vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (c == 0u) return scPcf4(shadow_depth_0, uv, ndc.z);
+        if (c == 1u) return scPcf4(shadow_depth_1, uv, ndc.z);
+        if (c == 2u) return scPcf4(shadow_depth_2, uv, ndc.z);
+        return scPcf4(shadow_depth_3, uv, ndc.z);
+    }
+    return -1.0;   // 全级联越界 → 调用方走 SDF march 回退
+}
+
 void surface_cache_shadow()
 {
     uint global_tid = gl_GlobalInvocationID.x;
@@ -158,6 +216,18 @@ void surface_cache_shadow()
     vec3 normal = octDecode(enc_n);
 
     vec3 world = cardTexelToWorld(atlas_uv, depth, cards.data[card_idx]);
+    float texelRes = float(max(cards.data[card_idx].resolution, 1u));
+    float footprint = length(cards.data[card_idx].extent.xyz) / texelRes;
+
+    // G2: PCSS 深度优先——与表面直射同一份阴影；越界/无输入走 SDF march
+    if (sp.shadow_meta.x > 0.5) {
+        float v = scShadowMapVisibility(world, normal, footprint);
+        if (v >= 0.0) {
+            vis.visibility[vis_index] = v;
+            return;
+        }
+    }
+
     float voxel = voxelAt(world);
     vec3 origin = world + normal * (voxel * sp.shadow_params.y);   // self-hit bias
 

@@ -23,6 +23,9 @@ struct SCShadowParams {
     float4  light_direction;         // xyz = dir TOWARD the light, w unused
     float4  shadow_params;           // x = max_distance, y = normal_bias, z = atlas_size, w unused
     float4  counts;                  // x = total_texels, y = card_count
+    // G2（2026-09-16，与 GLSL 孪生同步）: PCSS 矩阵 + meta
+    float4  shadow_matrices[4][4];   // [cascade][column] lightProj*lightView
+    float4  shadow_meta;             // x=cascade_count（>0.5 启用）, y=normal_offset_scale
 };
 
 static bool scShadowInside(float3 pos, float3 origin, float3 extent) {
@@ -39,6 +42,49 @@ static float scShadowSample(texture3d<float, access::sample> tex, float3 pos,
     return tex.read(uint3(t)).r;
 }
 
+// G2: PCSS 4-tap PCF（与 GLSL scPcf4 同式；access::read 用 read() 采样）
+static float scPcf4Depth(texture2d<float, access::read> depthMap,
+                         float2 uv, float ndcZ) {
+    uint2 dims = uint2(depthMap.get_width(), depthMap.get_height());
+    const float bias = 0.0015f;
+    float2 q = clamp(uv, float2(0.0f), float2(1.0f)) * float2(dims) - 0.5f;
+    int2 t0 = int2(floor(q));
+    int2 t1 = min(t0 + int2(1), int2(dims) - int2(1));
+    t0 = max(t0, int2(0));
+    float lit = 0.0f;
+    lit += (ndcZ - bias > depthMap.read(uint2(t0)).r) ? 0.0f : 1.0f;
+    lit += (ndcZ - bias > depthMap.read(uint2(t1.x, t0.y)).r) ? 0.0f : 1.0f;
+    lit += (ndcZ - bias > depthMap.read(uint2(t0.x, t1.y)).r) ? 0.0f : 1.0f;
+    lit += (ndcZ - bias > depthMap.read(uint2(t1)).r) ? 0.0f : 1.0f;
+    return lit * 0.25f;
+}
+
+static float scShadowMapVisibility(float3 world, float3 normal, float footprint,
+                                   constant SCShadowParams& sp,
+                                   texture2d<float, access::read> d0,
+                                   texture2d<float, access::read> d1,
+                                   texture2d<float, access::read> d2,
+                                   texture2d<float, access::read> d3) {
+    uint cascadeCount = uint(sp.shadow_meta.x + 0.5f);
+    float3 p = world + normal * (footprint * sp.shadow_meta.y);
+    for (uint c = 0u; c < cascadeCount && c < 4u; ++c) {
+        float4 clip = sp.shadow_matrices[c][0] * p.x
+                    + sp.shadow_matrices[c][1] * p.y
+                    + sp.shadow_matrices[c][2] * p.z
+                    + sp.shadow_matrices[c][3];
+        if (clip.w <= 1e-6f) continue;
+        float3 ndc = clip.xyz / clip.w;
+        if (ndc.x < -1.0f || ndc.x > 1.0f ||
+            ndc.y < -1.0f || ndc.y > 1.0f ||
+            ndc.z <  0.0f || ndc.z > 1.0f) continue;
+        float2 uv = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
+        if (c == 0u) return scPcf4Depth(d0, uv, ndc.z);
+        if (c == 1u) return scPcf4Depth(d1, uv, ndc.z);
+        if (c == 2u) return scPcf4Depth(d2, uv, ndc.z);
+        return scPcf4Depth(d3, uv, ndc.z);
+    }
+    return -1.0f;   // 全级联越界 → SDF march 回退
+}
 kernel void surfaceCacheShadow(
     uint global_tid [[thread_position_in_grid]],
 
@@ -47,6 +93,10 @@ kernel void surfaceCacheShadow(
     texture3d<float, access::sample> sdf2 [[texture(2)]],
     texture2d<float, access::read>   depth_atlas  [[texture(3)]],
     texture2d<float, access::read>   normal_atlas [[texture(4)]],
+    texture2d<float, access::read>   shadow_depth_0 [[texture(5)]],
+    texture2d<float, access::read>   shadow_depth_1 [[texture(6)]],
+    texture2d<float, access::read>   shadow_depth_2 [[texture(7)]],
+    texture2d<float, access::read>   shadow_depth_3 [[texture(8)]],
 
     constant SCShadowParams& sp           [[buffer(0)]],
     constant CardDispatchInfo* card_dispatch [[buffer(1)]],
@@ -88,6 +138,20 @@ kernel void surfaceCacheShadow(
     float3 normal = octDecode(enc_n);
 
     float3 world = cardTexelToWorld(atlas_uv, depth, cards[card_idx]);
+
+    // G2: PCSS 深度优先——与表面直射同一份阴影（薄墙/细柱正确）；越界或
+    // 无深度输入走 SDF march 回退（与 GLSL 孪生同语义）。
+    if (sp.shadow_meta.x > 0.5f) {
+        float texelRes = float(max(uint(cards[card_idx].resolution), 1u));
+        float footprint = length(cards[card_idx].extent.xyz) / texelRes;
+        float v = scShadowMapVisibility(world, normal, footprint, sp,
+                                        shadow_depth_0, shadow_depth_1,
+                                        shadow_depth_2, shadow_depth_3);
+        if (v >= 0.0f) {
+            visibility[vis_index] = v;
+            return;
+        }
+    }
 
     uint cc = uint(sp.sdf_resolutions_count.w);
     float voxel = cc > 0u

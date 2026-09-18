@@ -470,7 +470,9 @@ void SurfaceCachePass::CreateAtlasTextures() {
         for (int i = 0; i < 3; ++i) {
             BufferDesc cbDesc{};
             cbDesc.size = 288;   // sizeof(IndirectTraceParamsGPU)
-            cbDesc.type = BufferType::Structured;
+            // 按 UniformBuffer 描述符绑定(:2513 等),创建必须 Constant——
+            // Structured 只产 STORAGE usage,触发 VUID-00330。
+            cbDesc.type = BufferType::Constant;
             cbDesc.usage = GPUMemoryUsage::Dynamic;
             cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
             indirect_trace_params_cb_[i] = device_->CreateBuffer(cbDesc);
@@ -511,12 +513,27 @@ void SurfaceCachePass::CreateAtlasTextures() {
             auxDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
             auxDesc.name = "SurfaceCache_TileAux";
             indirect_tile_aux_ = device_->CreateTexture(auxDesc);
+            // P0-B 注：此处不可 prime——tile_aux 的帧内循环是
+            // "resolve 写(UA) → recon 采(SRO) → 回置 UA"，tracked 从 UNDEF
+            // 起步由首个 recon barrier 正确初始化；prime 到 SRO 反而让
+            // resolve 的 storage 写落在 SRO 上（validation 钉 GENERAL）。
         }
 
         BufferDesc dummyDesc{};
         dummyDesc.size = 16;
-        dummyDesc.type = BufferType::Structured;
+        // 按 UniformBuffer 描述符绑定(:2514 等),同上需 Constant 产出 UNIFORM usage。
+        dummyDesc.type = BufferType::Constant;
         indirect_dummy_cb_ = device_->CreateBuffer(dummyDesc);
+
+        // P0-B: unused SampledImage slots in the resolve/reconstruct layouts
+        // need a binding that is not a live atlas (see header note).
+        TextureDesc dummyTexDesc{};
+        dummyTexDesc.size = {1, 1, 1};
+        dummyTexDesc.format = DataFormat::RGBA16_Float;
+        dummyTexDesc.type = TextureType::Texture2D;
+        dummyTexDesc.usage = TextureUsage::ShaderResource;
+        dummyTexDesc.name = "SurfaceCache_DummySRV";
+        indirect_dummy_tex_ = device_->CreateTexture(dummyTexDesc);
     }
 }
 
@@ -554,7 +571,7 @@ void SurfaceCachePass::CreateConstantBuffers() {
         }
     }
     CreateCBs(card_fill_cb_, 176); // CardFillParams: SDF cascades + light + counts
-    CreateCBs(shadow_cb_, 176);    // T3.3: ShadowParams (SDF cascades + light + counts)
+    CreateCBs(shadow_cb_, 464);    // T3.3/G2: ShadowParams（96B 基础 + 256B shadow 矩阵 + 16B meta）
 
     // T3.3: atlas-space visibility buffer (float per atlas texel), CPU-
     // initialized to 1.0 so untraced texels / SDF-unavailable frames stay lit.
@@ -913,6 +930,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // card_dispatch
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // cards
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // visibility (write)
+            // G2（2026-09-16）: PCSS light-space 深度 ×4（与表面直射同源）
+            {9,  DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 0
+            {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 1
+            {11, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 2
+            {12, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 3
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[0].is3D = true;
@@ -922,7 +944,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         b[4].readonly = true;
         b[6].readonly = true;
         b[7].readonly = true;
-        shadow_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+        shadow_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // sdf0          [[texture(0)]]
@@ -934,6 +956,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // card_dispatch [[buffer(1)]]
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // cards         [[buffer(2)]]
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // visibility    [[buffer(3)]]
+            // G2（2026-09-16）: PCSS 深度 ×4 [[texture(5..8)]]
+            {5, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 0
+            {6, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 1
+            {7, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 2
+            {8, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // shadow_depth cascade 3
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[0].is3D = true;
@@ -943,7 +970,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         b[4].readonly = true;
         b[6].readonly = true;
         b[7].readonly = true;
-        shadow_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
+        shadow_set_layout_ = device_->CreateDescriptorSetLayout({13, bindings});
     }
 }
 
@@ -1477,12 +1504,20 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
         // ====================================================================
         // Setup lambda: declare resource dependencies
         // ====================================================================
-        [prev_frame_color, lightingHandle](
+        [prev_frame_color, lightingHandle, frame_data](
             SurfaceCacheRGData& data, RenderGraphBuilder& builder) {
             // Read previous frame color
             builder.Read(prev_frame_color, ResourceState::ShaderResource);
 
             data.prev_frame_color = prev_frame_color;
+
+            // G2（2026-09-16）: PCSS light-space 深度——shadow dispatch 每帧
+            // 采样（与表面直射同源同帧）。无效句柄跳过（cascade count 随
+            // 之为 0，shader 走 SDF march 回退）。
+            for (u32 c = 0; c < 4; ++c) {
+                if (frame_data.shadow_depth[c].IsValid())
+                    builder.Read(frame_data.shadow_depth[c], ResourceState::ShaderResource);
+            }
 
             // Write declaration (prevents RG cull). DEBUG: imported under a
             // side name so the "SurfaceCache_Lighting_N" identity isn't shared.
@@ -1754,17 +1789,22 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             //     lighting_atlas is), so their layout must be managed here.
             // ================================================================
             {
-                ResourceBarrier atlasBarriers[4]{};
+                ResourceBarrier atlasBarriers[6]{};
                 atlasBarriers[0].resource = albedo_atlas_;
                 atlasBarriers[1].resource = normal_atlas_;
                 atlasBarriers[2].resource = depth_atlas_;
                 atlasBarriers[3].resource = emissive_atlas_;
+                // P0-B: tile_aux 同样在 pass 入口收敛到 GENERAL——它是
+                // resolve 的 storage 写目标（rp2[14]），首帧 tracked=UNDEF
+                // 时写前必须有转换；后续帧由 recon 回置保持 GENERAL。
+                atlasBarriers[4].resource = indirect_tile_aux_;
+                atlasBarriers[5].resource = indirect_tile_tex_[current_frame_index % 3];
                 for (auto& b : atlasBarriers) {
                     b.beforeState = ResourceState::UnorderedAccess;
                     b.afterState  = ResourceState::UnorderedAccess;
                     b.subresource = 0xFFFFFFFF;
                 }
-                cmd->InsertBarrier(atlasBarriers, 4);
+                cmd->InsertBarrier(atlasBarriers, 6);
             }
 
             // ================================================================
@@ -2090,7 +2130,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         const bool shIsVk =
                             device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
 
-                        // ShadowParams (mirror of the shader UBO, 96B)
+                        // ShadowParams (mirror of the shader UBO)。
+                        // G2（2026-09-16）: 尾扩 shadow 矩阵（列主序 4 级联）
+                        // + meta（x=PCSS 级联数，>0.5 启用 shadow-map 优先
+                        // 可见性；y=texel 法线偏移缩放）。
                         struct ShadowParamsGPU {
                             math::v4 sdf_origins[3];
                             math::v4 sdf_extents[3];
@@ -2098,6 +2141,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             math::v4 light_dir_toward;
                             math::v4 shadow_params;   // x=maxDist, y=bias, z=atlasSize
                             math::v4 counts;          // x=total_texels, y=card_count
+                            math::m4x4 shadow_matrices[4];  // lightProj*lightView（列主序）
+                            math::v4 shadow_meta;     // x=cascade_count, y=normal_offset_scale
                         };
                         auto* sp = static_cast<ShadowParamsGPU*>(device_->MapBuffer(shadow_cb_[frameIdx]));
                         if (sp) {
@@ -2126,9 +2171,32 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             sp->light_dir_toward = {toward.x, toward.y, toward.z, 0.0f};
                             sp->shadow_params = {50.0f, 1.5f, (float)atlas_size_, 0.0f};
                             sp->counts = {(float)total_texels, (float)card_count, 0.0f, 0.0f};
+                            // G2: PCSS 矩阵/级联数（frame_data 无效矩阵保持
+                            // 全零 → meta.x=0 → shader 走 SDF march 回退）
+                            u32 sc = 0;
+                            for (u32 c = 0; c < 4 && c < frame_data.shadow_cascade_count; ++c) {
+                                if (!frame_data.shadow_depth[c].IsValid()) break;
+                                sp->shadow_matrices[c] = frame_data.shadow_matrices[c];
+                                ++sc;
+                            }
+                            sp->shadow_meta = {(float)sc, 0.75f, 0.0f, 0.0f};
                             device_->UnmapBuffer(shadow_cb_[frameIdx]);
                         }
 
+                        // G2: 解析 shadow depth RG → 物理（无效槽位回退
+                        // depth_atlas 占位——cascade_count 已反映有效性，
+                        // shader 不会采样无效槽位）
+                        ResourceHandle depthTex[4];
+                        for (u32 c = 0; c < 4; ++c) {
+                            // 占位用 SRV-only dummy（depth_atlas 是 readonly
+                            // storage → GENERAL 布局，不能同时作 SampledImage）
+                            depthTex[c] = indirect_dummy_tex_;
+                            if (c < frame_data.shadow_cascade_count &&
+                                frame_data.shadow_depth[c].IsValid()) {
+                                auto* res = context.graph->GetResource(frame_data.shadow_depth[c]);
+                                if (res) depthTex[c] = res->GetPhysicalHandle();
+                            }
+                        }
                         DescriptorData shadowParams[] = {
                             {0, DescriptorType::SampledImage, sdfTex[0]},
                             {1, DescriptorType::SampledImage, sdfTex[1]},
@@ -2139,8 +2207,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             {shIsVk ? 6u : 1u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
                             {shIsVk ? 7u : 2u, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
                             {shIsVk ? 8u : 3u, DescriptorType::StorageBuffer, shadow_visibility_buffer_},
+                            {shIsVk ? 9u : 4u,  DescriptorType::SampledImage, depthTex[0]},
+                            {shIsVk ? 10u : 5u, DescriptorType::SampledImage, depthTex[1]},
+                            {shIsVk ? 11u : 6u, DescriptorType::SampledImage, depthTex[2]},
+                            {shIsVk ? 12u : 7u, DescriptorType::SampledImage, depthTex[3]},
                         };
-                        UpdateDescriptorSet(device_, shadow_set_[frameIdx], shadowParams, 9);
+                        UpdateDescriptorSet(device_, shadow_set_[frameIdx], shadowParams, 13);
 
                         cmd->BindComputePipeline(shadow_pipeline_);
                         const DescriptorSetHandle shSets[] = { shadow_set_[frameIdx] };
@@ -2274,15 +2346,21 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // The Vulkan backend resolves oldLayout from the tracked layout,
                 // so the first such barrier correctly performs UNDEFINED→UAV.
                 {
-                    ResourceBarrier lb[2]{};
+                    // P0-B（01197 定位）: indirect_out[outIdx] 也在 LightEval
+                    // 的 storage 写列表（binding 12）——上一帧它作为 resolve 的
+                    // EMA history 被 sampled（tracked=SRO），写前必须转回
+                    // GENERAL；否则 storage 写在 SRO 上发生（UB，validation 钉
+                    // real=GENERAL），后续 resolve 前置 UA barrier 触发 01197。
+                    ResourceBarrier lb[3]{};
                     lb[0].resource = lighting_atlas_[outIdx];
                     lb[1].resource = lighting_atlas_[histIdx];
+                    lb[2].resource = indirect_out_tex_[outIdx];
                     for (auto& b : lb) {
                         b.beforeState = ResourceState::UnorderedAccess;
                         b.afterState  = ResourceState::UnorderedAccess;
                         b.subresource = 0xFFFFFFFF;
                     }
-                    cmd->InsertBarrier(lb, 2);
+                    cmd->InsertBarrier(lb, 3);
                 }
 
                 cmd->BindComputePipeline(light_eval_pipeline_);
@@ -2643,11 +2721,47 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                     // ---- resolve descriptors + dispatch ----
                     {
+                        // P0-B: five of the bindings below are SampledImage,
+                        // but the surrounding code parks those atlases in
+                        // GENERAL for storage access (material atlases) or
+                        // leaves the history slots UNDEFINED on early frames.
+                        // Descriptors record SHADER_READ_ONLY_OPTIMAL at write
+                        // time, so transition the sampled set here; the backend
+                        // resolves oldLayout from the tracked layout, mirroring
+                        // the 3.4/3.4-LightEval barrier pattern above.
+                        // The two write slots (outIdx) get the inverse UA
+                        // transition: with the 3-slot rotation a slot that was
+                        // sampled as history last frame is tracked SRO while
+                        // this dispatch writes it as StorageImage (GENERAL).
+                        {
+                            ResourceBarrier resolveBarriers[8]{};
+                            resolveBarriers[0].resource = lighting_atlas_[histIdx];
+                            resolveBarriers[1].resource = depth_atlas_;
+                            resolveBarriers[2].resource = normal_atlas_;
+                            resolveBarriers[3].resource = indirect_out_tex_[histIdx];
+                            resolveBarriers[4].resource = indirect_tile_tex_[histIdx];
+                            for (u32 bi = 0; bi < 5; ++bi) {
+                                resolveBarriers[bi].beforeState = ResourceState::ShaderResource;
+                                resolveBarriers[bi].afterState  = ResourceState::ShaderResource;
+                                resolveBarriers[bi].subresource = 0xFFFFFFFF;
+                            }
+                            resolveBarriers[5].resource = indirect_out_tex_[outIdx];
+                            resolveBarriers[6].resource = indirect_tile_tex_[outIdx];
+                            // tile_aux 也在 resolve 的 storage 写列表（rp2[14]）：
+                            // 首帧 tracked=UNDEF，写前必须转 GENERAL。
+                            resolveBarriers[7].resource = indirect_tile_aux_;
+                            for (u32 bi = 5; bi < 8; ++bi) {
+                                resolveBarriers[bi].beforeState = ResourceState::UnorderedAccess;
+                                resolveBarriers[bi].afterState  = ResourceState::UnorderedAccess;
+                                resolveBarriers[bi].subresource = 0xFFFFFFFF;
+                            }
+                            cmd->InsertBarrier(resolveBarriers, 7);
+                        }
                         DescriptorData rp2[16];
                         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
-                            rp2[2] = {2, DescriptorType::SampledImage,  albedo_atlas_};   // dummy (unused)
+                            rp2[2] = {2, DescriptorType::SampledImage,  indirect_dummy_tex_};   // dummy (unused)
                             rp2[3] = {3, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
                             rp2[4] = {4, DescriptorType::UniformBuffer, indirect_dummy_cb_};
                             rp2[5] = {5, DescriptorType::UniformBuffer, indirect_resolve_params_cb_[frameIdx]};
@@ -2673,7 +2787,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         } else {
                             rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
-                            rp2[2] = {2, DescriptorType::SampledImage,  albedo_atlas_};   // dummy (unused)
+                            rp2[2] = {2, DescriptorType::SampledImage,  indirect_dummy_tex_};   // dummy (unused)
                             rp2[3] = {3, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
                             rp2[4] = {0, DescriptorType::UniformBuffer, indirect_dummy_cb_};
                             rp2[5] = {1, DescriptorType::UniformBuffer, indirect_resolve_params_cb_[frameIdx]};
@@ -2848,6 +2962,28 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 barrier.afterState = ResourceState::ShaderResource;
                 barrier.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&barrier, 1);
+            }
+
+            // ================================================================
+            // 4b. P0.1 (00344):material atlases UA -> SR for same-frame
+            //     sampled consumers (DDGI finalize samples depth_atlas;
+            //     SC↔probe 路径采样 albedo/normal)。SC 全程以 storage 写
+            //     (GENERAL),不转 SR 则采样描述符与实际布局冲突。下一帧
+            //     开头的 :1759 UA→UA 屏障按跟踪布局(SR→GENERAL)真实过渡,
+            //     读写闭环成立。
+            // ================================================================
+            {
+                ResourceBarrier atlasSrBarriers[4]{};
+                atlasSrBarriers[0].resource = albedo_atlas_;
+                atlasSrBarriers[1].resource = normal_atlas_;
+                atlasSrBarriers[2].resource = depth_atlas_;
+                atlasSrBarriers[3].resource = emissive_atlas_;
+                for (auto& b : atlasSrBarriers) {
+                    b.beforeState = ResourceState::UnorderedAccess;
+                    b.afterState  = ResourceState::ShaderResource;
+                    b.subresource = 0xFFFFFFFF;
+                }
+                cmd->InsertBarrier(atlasSrBarriers, 4);
             }
         }
     );

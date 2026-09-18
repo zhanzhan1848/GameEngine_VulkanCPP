@@ -157,6 +157,14 @@ struct SurfaceCacheFrameData {
     rhi::ResourceHandle gbuffer_albedo { rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle gbuffer_normal { rhi::handles::INVALID_RESOURCE };
 
+    // G2 capture 侧（2026-09-16）: PCSS light-space 深度 + 矩阵（与表面直射
+    // 同源同帧，round3 导出的 shadow_depth_rg 契约）。卡片 texel 直射可见性
+    // 优先消费它（粗 SDF 最近点采样对 0.5m 薄墙必然漏光——拱腹卡片被烘焙
+    // 假直射的根因）；级联全越界回退原 SDF march。
+    rendergraph::RGResourceHandle shadow_depth[4];
+    math::m4x4 shadow_matrices[4];
+    uint32_t   shadow_cascade_count = 0;
+
     // Probe-fed indirect (Lumen hierarchy): near-volume irradiance (9 vec4 per
     // probe, previous-frame slot — SC runs before the DDGI update) + grid
     // params. ddgi_valid = 0 leaves LightEval on the legacy self-feedback.
