@@ -354,7 +354,10 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
         dv.arraySize = 1;
         dv.format = DataFormat::D32_Float;
         dv.type = TextureType::Texture2D;
-        dv.usage = TextureUsage::DepthStencil;
+        // GI 根治 Phase 3 修（VUID-01211）：该深度也被 LightEval gather 以
+        // SRO 采样（卡片可见性平面一致性测试）——usage 必须含 SAMPLED，
+        // 否则 RG 的 UNDEF→SRO barrier 对纯 DEPTH_STENCIL usage 非法。
+        dv.usage = TextureUsage::DepthStencil | TextureUsage::ShaderResource;
         dv.name = "SurfaceCache_CardViewDepth";
         card_view_depth_ = device_->CreateTexture(dv);
         PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] T8.12 card-view capture ENABLED (depth "

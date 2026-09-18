@@ -310,6 +310,11 @@ public:
     // 远场只表达低频环境，逃逸比例天然高，全额天空会成为封闭区隐性泵浦）。
     void SetFarSkyScale(float s) { far_sky_scale_ = s; }
 
+    // GI 能量根治方案 Phase 4: 离线场为有符号编码时置 true——trace 端启用
+    // 零穿越命中判定（sign change + 5 次二分），根治无符号场 thin-wall
+    // tunneling（R6/T8.10f 正解的运行时半）。
+    void SetCoarseSdfSigned(bool s) { coarse_sdf_signed_ = s; }
+
     // Live-tunable debug params (WASM sidebar). Indices 4..6 of DawnDebugParams
     // map to SkyColor intensity, Albedo intensity, ProbeHysteresis. Values are
     // consumed in AddPass when uploading DDGIVolumeData to the GPU.
@@ -609,6 +614,8 @@ private:
     };
     // 远场天空档位（Phase 3.3），默认 1.0 = 近场行为。
     float far_sky_scale_{ 1.0f };
+    // 有符号粗场旗标（Phase 4），经 ProbeCounts[3]（原 padding）进 shader。
+    bool coarse_sdf_signed_{ false };
 
     // Surface Cache resources (set externally before AddPass)
     rhi::ResourceHandle sc_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };

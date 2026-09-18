@@ -271,12 +271,21 @@ public:
     // When set, SDF visualization uses this pre-built global SDF texture
     // instead of the runtime GlobalSDF cascades.
     void SetOfflineSDFSource(rhi::ResourceHandle texture,
-                             math::v3 origin, math::v3 extent, u32 resolution) {
+                             math::v3 origin, math::v3 extent, u32 resolution,
+                             bool signed_field = false) {
         offline_sdf_texture_ = texture;
         offline_sdf_origin_ = origin;
         offline_sdf_extent_ = extent;
         offline_sdf_resolution_ = resolution;
         has_offline_sdf_ = (texture != rhi::handles::INVALID_RESOURCE);
+        // GI 根治 Phase 4: 场符号性旗标——转发 DDGI 探针 trace 的零穿越命中
+        // 判定（ProbeCounts[3] padding 槽复用，无布局变化）。host 在管线
+        // 初始化后才调用本 setter，必须同步转发到已创建的 volume 实例。
+        offline_sdf_signed_ = signed_field;
+        for (u32 vi = 0; vi < ddgi_volume_count_; ++vi) {
+            if (ddgi_volumes_[vi]) ddgi_volumes_[vi]->SetCoarseSdfSigned(signed_field);
+        }
+        if (ddgi_pass_) ddgi_pass_->SetCoarseSdfSigned(signed_field);
         // P1-A (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §8): with
         // fit+auto, adopt the merger volume as the DDGI fit box. Flagging
         // settings_dirty_ defers the DDGI teardown/rebuild to the next frame's
@@ -525,6 +534,8 @@ private:
 
     // Offline SDF data source for SDF visualization.
     bool has_offline_sdf_{false};
+    // GI 根治 Phase 4: 离线场是否为有符号编码（DDGI 零穿越命中判定）。
+    bool offline_sdf_signed_{false};
     rhi::ResourceHandle offline_sdf_texture_{rhi::handles::INVALID_RESOURCE};
     math::v3 offline_sdf_origin_{0, 0, 0};
     math::v3 offline_sdf_extent_{0, 0, 0};

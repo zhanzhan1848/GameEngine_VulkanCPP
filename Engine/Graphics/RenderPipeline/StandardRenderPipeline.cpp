@@ -797,6 +797,14 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             vol->SetDynamicMode(true);   // Mode 11: runtime SDF trace
             if (vi > 0) vol->SetRGNamePrefix(kPrefixes[vi]);
             if (vi > 0) vol->SetFarSkyScale(0.5f);   // GI 根治 Phase 3.3: 远场天空 ×0.5 档
+            {
+                // GI 根治 Phase 4: 有符号粗场旗标（PRIMAL_DDGI_UNSIGNED_TRACE=1 回滚）。
+                bool signedField = offline_sdf_signed_;
+                if (const char* e = std::getenv("PRIMAL_DDGI_UNSIGNED_TRACE")) {
+                    if (e[0] != '0') signedField = false;
+                }
+                vol->SetCoarseSdfSigned(signedField);
+            }
             ddgi_volumes_[ddgi_volume_count_++] = std::move(vol);
             PRIMAL_LOG_STREAM(Info, "Render") << "[Lumen] DDGI volume " << vi << " initialized ("
                       << vp.probe_count_x << "x" << vp.probe_count_y
@@ -825,6 +833,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (ddgi_pass_ && offline_sdf_texture_ != handles::INVALID_RESOURCE) {
         ddgi_pass_->SetOfflineSDFSource(offline_sdf_texture_, offline_sdf_origin_,
                                         offline_sdf_extent_, offline_sdf_resolution_);
+        ddgi_pass_->SetCoarseSdfSigned(offline_sdf_signed_);   // GI 根治 Phase 4
         PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] Offline SDF re-applied to DDGI trace ("
                   << offline_sdf_resolution_ << "³)" << std::endl;
     }

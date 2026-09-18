@@ -1954,7 +1954,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.ProbeCounts[0] = params_.probe_count_x;
                     vd.ProbeCounts[1] = params_.probe_count_y;
                     vd.ProbeCounts[2] = params_.probe_count_z;
-                    // ProbeCounts[3] auto-zeroed (padding)
+                    // GI 根治 Phase 4: 复用 padding 槽传有符号场旗标
+                    //（零穿越命中判定；无布局变化，Metal/comp 声明同步）。
+                    vd.ProbeCounts[3] = coarse_sdf_signed_ ? 1u : 0u;
                     vd.RaysPerProbe = params_.rays_per_probe;
                     vd.ProbeCountTotal = probeCountTotal;
                     vd.IrradianceBlurSigma = params_.irradiance_temporal_weight;

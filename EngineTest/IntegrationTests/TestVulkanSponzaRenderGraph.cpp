@@ -821,7 +821,8 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
             offlineSDFMerger_->GetTexture(),
             offlineSDFMerger_->GetOrigin(),
             offlineSDFMerger_->GetExtent(),
-            offlineSDFMerger_->GetResolution());
+            offlineSDFMerger_->GetResolution(),
+            offlineSDFMerger_->IsSignedEncoding());   // GI 根治 Phase 4: 零穿越命中
     }
 
     // Directional light + camera (TestDawnForwardRenderer defaults).
