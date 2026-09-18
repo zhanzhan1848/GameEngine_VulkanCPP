@@ -66,15 +66,18 @@ void DepthHistoryManager::Shutdown() {
             device_->DestroyPipelineLayout(depth_copy_layout_);
         if (depth_copy_ds_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)
             device_->DestroyDescriptorSetLayout(depth_copy_ds_layout_);
-        if (depth_copy_ds_ != rhi::handles::INVALID_DESCRIPTOR_SET)
-            device_->DestroyDescriptorSet(depth_copy_ds_);
+        for (u32 s = 0; s < kCopySetSlots; ++s) {
+            if (depth_copy_ds_[s] != rhi::handles::INVALID_DESCRIPTOR_SET)
+                device_->DestroyDescriptorSet(depth_copy_ds_[s]);
+            depth_copy_ds_[s] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
         if (depth_copy_cb_ != rhi::handles::INVALID_RESOURCE)
             device_->DestroyBuffer(depth_copy_cb_);
 
         depth_copy_pipeline_ = rhi::handles::INVALID_PIPELINE;
         depth_copy_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
         depth_copy_ds_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
-        depth_copy_ds_ = rhi::handles::INVALID_DESCRIPTOR_SET;
+        for (u32 s = 0; s < kCopySetSlots; ++s) depth_copy_ds_[s] = rhi::handles::INVALID_DESCRIPTOR_SET;
         depth_copy_cb_ = rhi::handles::INVALID_RESOURCE;
     }
 
@@ -128,7 +131,7 @@ bool DepthHistoryManager::StoreCurrentFrameDepth(rhi::ResourceHandle depth_textu
     u32 write_index = frame_index % config_.buffer_count;
 
     // Copy current depth to history buffer
-    if (!CopyDepthTexture(depth_texture, depth_buffers_[write_index].texture, cmd_buffer)) {
+    if (!CopyDepthTexture(depth_texture, depth_buffers_[write_index].texture, cmd_buffer, write_index)) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[DepthHistoryManager] Failed to copy depth texture to buffer " << write_index << std::endl;
         return false;
     }
@@ -191,18 +194,20 @@ bool DepthHistoryManager::IsPreviousFrameDepthAvailable(u32 frame_index) const {
 
 bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
                                           rhi::ResourceHandle destination,
-                                          rhi::RHICommandBuffer* cmd_buffer) {
+                                          rhi::RHICommandBuffer* cmd_buffer,
+                                          u32 frame_slot) {
     if (!device_ || !cmd_buffer) return false;
     if (source == rhi::handles::INVALID_RESOURCE || destination == rhi::handles::INVALID_RESOURCE) return false;
     if (depth_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
 
     // Update descriptor set: source = SampledImage, destination = StorageImage
+    const rhi::DescriptorSetHandle copySet = depth_copy_ds_[frame_slot % kCopySetSlots];
     rhi::DescriptorImageInfo srcInfo{ rhi::handles::INVALID_SAMPLER, source, rhi::ResourceState::ShaderResource };
     rhi::DescriptorImageInfo dstInfo{ rhi::handles::INVALID_SAMPLER, destination, rhi::ResourceState::UnorderedAccess };
 
     rhi::WriteDescriptorSet writes[2];
-    writes[0] = { depth_copy_ds_, 0, 0, 1, rhi::DescriptorType::SampledImage, &srcInfo, nullptr };
-    writes[1] = { depth_copy_ds_, 1, 0, 1, rhi::DescriptorType::StorageImage, &dstInfo, nullptr };
+    writes[0] = { copySet, 0, 0, 1, rhi::DescriptorType::SampledImage, &srcInfo, nullptr };
+    writes[1] = { copySet, 1, 0, 1, rhi::DescriptorType::StorageImage, &dstInfo, nullptr };
 
     device_->UpdateDescriptorSets(2, writes);
 
@@ -230,7 +235,7 @@ bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
     u32 groupsY = (config_.height + 15) / 16;
 
     cmd_buffer->BindComputePipeline(depth_copy_pipeline_);
-    rhi::DescriptorSetHandle dsHandle = depth_copy_ds_;
+    rhi::DescriptorSetHandle dsHandle = copySet;
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, depth_copy_layout_, 0, 1, &dsHandle, 0, nullptr);
     cmd_buffer->Dispatch(groupsX, groupsY, 1);
     cmd_buffer->MemoryBarrier(
@@ -345,10 +350,12 @@ bool DepthHistoryManager::CreateCopyPipeline() {
     depth_copy_pipeline_ = device_->CreateComputePipeline(computeDesc);
     if (depth_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
 
-    // Create one descriptor set (reused for all copies — updated before each dispatch)
-    rhi::DescriptorSetDesc dsDesc{ depth_copy_ds_layout_ };
-    depth_copy_ds_ = device_->CreateDescriptorSet(dsDesc);
-    if (depth_copy_ds_ == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
+    // P0.1 (03047):按帧槽创建三个 copy set(此前单 set 每帧 update 与在飞帧冲突)
+    for (u32 s = 0; s < kCopySetSlots; ++s) {
+        rhi::DescriptorSetDesc dsDesc{ depth_copy_ds_layout_ };
+        depth_copy_ds_[s] = device_->CreateDescriptorSet(dsDesc);
+        if (depth_copy_ds_[s] == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
+    }
 
     return true;
 }

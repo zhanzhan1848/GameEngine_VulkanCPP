@@ -128,6 +128,13 @@ private:
     // authoritative sync. Reset to false in resetImpl.
     bool            externalFenceSignaled_{false};
 
+    // P0.1 validation 修复:记录上次提交真正被 signal 的 external fence。
+    // destroyCommandBufferImpl 对 Submitted 状态调用 WaitForCompletion 兜底
+    // 同步,但 X7 让它在 external 分支直接返回——CPU 无限跑前,三缓冲
+    // descriptor set 在飞行中被更新(VUID-vkUpdateDescriptorSets-None-03047)。
+    // 有此句柄时等待它本身;已 signaled 则立即返回,未变语义只补齐时序。
+    VkFence         externalFence_{VK_NULL_HANDLE};
+
     // P4c-F4: beginImpl/endImpl/resetImpl 维护 — 驱动 VulkanDevice 的
     // IsFrameRecording()(帧内上传走 staging 队列的分流依据)。
     bool            isRecording_{false};

@@ -16,6 +16,7 @@
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
 #include <iostream>
+#include <cstdio>
 #include <vector>
 
 namespace primal::graphics::rhi {
@@ -126,6 +127,13 @@ void VulkanDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCoun
                 for (u32 j = 0; j < vw.descriptorCount; ++j) {
                     VkDescriptorImageInfo ii{};
                     VulkanTexture* tex = vk.GetTexture(w.imageInfo[j].imageView);
+                    // P0-B 定位（PRIMAL_RG_LAYOUT_TRACE=1）: sampled 绑定追踪
+                    if (tex && std::getenv("PRIMAL_RG_LAYOUT_TRACE")) {
+                        fprintf(stderr, "[DSSAMPLED] set=%p binding=%u img=0x%llx name='%s'\n",
+                                (void*)set_, w.dstBinding,
+                                (unsigned long long)(uintptr_t)tex->GetNativeImage(),
+                                tex->GetTextureDesc().name.c_str());
+                    }
                     ii.imageView = tex ? tex->GetNativeView() : VK_NULL_HANDLE;
                     VulkanSampler* samp = vk.GetSampler(w.imageInfo[j].sampler);
                     ii.sampler = samp ? samp->GetNativeSampler() : VK_NULL_HANDLE;
@@ -140,6 +148,14 @@ void VulkanDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCoun
                 for (u32 j = 0; j < vw.descriptorCount; ++j) {
                     VkDescriptorImageInfo ii{};
                     VulkanTexture* tex = vk.GetTexture(w.imageInfo[j].imageView);
+                    // P0-B 定位（PRIMAL_RG_LAYOUT_TRACE=1）: storage image 绑定
+                    // 追踪——与 [RGTRACE] 的 img= 句柄同键，用于把"无 barrier 的
+                    // storage 写"归属到具体 set/binding。
+                    if (tex && std::getenv("PRIMAL_RG_LAYOUT_TRACE")) {
+                        fprintf(stderr, "[DSWRITE] set=%p binding=%u img=0x%llx\n",
+                                (void*)set_, w.dstBinding,
+                                (unsigned long long)(uintptr_t)tex->GetNativeImage());
+                    }
                     ii.imageView = tex ? tex->GetNativeView() : VK_NULL_HANDLE;
                     VulkanSampler* samp = vk.GetSampler(w.imageInfo[j].sampler);
                     ii.sampler = samp ? samp->GetNativeSampler() : VK_NULL_HANDLE;

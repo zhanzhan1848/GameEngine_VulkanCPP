@@ -625,6 +625,14 @@ ResourceHandle VulkanDevice::createTextureImpl(const TextureDesc& desc) {
         return handles::INVALID_RESOURCE;
     }
     tex->SetHandle(ResourceHandle(id));
+    // P0-B 定位（PRIMAL_RG_LAYOUT_TRACE=1）: 创建序号+名字+尺寸，与
+    // [DSSAMPLED]/[RGTRACE] 的 VkImage 句柄对照，定位匿名纹理的创建流程。
+    if (std::getenv("PRIMAL_RG_LAYOUT_TRACE")) {
+        fprintf(stderr, "[TEXCREATE] id=%u img=0x%llx name='%s' %ux%u fmt=%d mips=%u\n",
+                id, (unsigned long long)(uintptr_t)tex->GetNativeImage(),
+                desc.name.c_str(), desc.size.x, desc.size.y,
+                (int)desc.format, desc.mipLevels);
+    }
     return ResourceHandle(id);
 }
 
@@ -727,8 +735,10 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
             vkResetFences(device_, 1, &signalFence);
         }
         cmd->externalFenceSignaled_ = false;
+        cmd->externalFence_ = VK_NULL_HANDLE;
     } else {
         cmd->externalFenceSignaled_ = true;
+        cmd->externalFence_ = signalFence;  // P0.1: 供 WaitForCompletion 兜底等待
     }
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -871,6 +881,15 @@ VulkanDescriptorSetLayout* VulkanDevice::GetDescriptorSetLayout(DescriptorSetLay
     return descriptorSetLayoutAllocator_->Get(static_cast<u32>(handle));
 }
 
+// P0.1 诊断:PRIMAL_DS_TRACE=1 启用描述符集/布局追踪(set 误用与 03047 定罪)
+static bool DSTraceEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("PRIMAL_DS_TRACE");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+
 DescriptorSetLayoutHandle VulkanDevice::createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc) {
     if (!desc.bindings && desc.bindingCount > 0) return handles::INVALID_RESOURCE;
     u32 id = descriptorSetLayoutAllocator_->Allocate(*this, desc);
@@ -881,6 +900,15 @@ DescriptorSetLayoutHandle VulkanDevice::createDescriptorSetLayoutImpl(const Desc
         return handles::INVALID_RESOURCE;
     }
     l->SetHandle(ResourceHandle(id));
+    // P0.1 诊断:PRIMAL_DS_TRACE=1 时打印 DSL 的绑定布局(与 [DS-UPD]/错误
+    // 消息里的 layout/set 句柄对照,定位 set 误用)。
+    if (DSTraceEnabled()) {
+        fprintf(stderr, "[DS-LAYOUT] layout=%u bindings=", id);
+        for (u32 b = 0; b < desc.bindingCount; ++b)
+            fprintf(stderr, "{%u,t%u}", desc.bindings[b].binding,
+                    static_cast<unsigned>(desc.bindings[b].descriptorType));
+        fprintf(stderr, "\n");
+    }
     return DescriptorSetLayoutHandle(id);
 }
 
@@ -920,8 +948,7 @@ VulkanDescriptorSet* VulkanDevice::GetDescriptorSet(DescriptorSetHandle handle) 
     return descriptorSetAllocator_->Get(static_cast<u32>(handle));
 }
 
-DescriptorSetHandle VulkanDevice::createDescriptorSetImpl(const DescriptorSetDesc& desc) {
-    if (desc.layout == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
+DescriptorSetHandle VulkanDevice::createDescriptorSetImpl(const DescriptorSetDesc& desc) {    if (desc.layout == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
     u32 id = descriptorSetAllocator_->Allocate(*this, desc);
     VulkanDescriptorSet* s = descriptorSetAllocator_->Get(id);
     if (!s || !s->Initialize()) {
@@ -930,22 +957,46 @@ DescriptorSetHandle VulkanDevice::createDescriptorSetImpl(const DescriptorSetDes
         return handles::INVALID_RESOURCE;
     }
     s->SetHandle(ResourceHandle(id));
+    // P0.1 诊断:PRIMAL_DS_TRACE=1 时打印 set 的 id 与所属 layout id,
+    // 与 [DS-LAYOUT]/[DS-UPD] 对照定位 set 误用。
+    if (DSTraceEnabled()) {
+        fprintf(stderr, "[DS-NEW] set=%u layout=%u\n", id,
+                static_cast<unsigned>(desc.layout));
+    }
     return DescriptorSetHandle(id);
 }
 
 void VulkanDevice::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
     VulkanDescriptorSet* s = GetDescriptorSet(handle);
+    // P0.1 诊断:PRIMAL_DS_TRACE=1 时打印 set 销毁(与 [DS-UPD]/[DS-NEW]
+    // 对照,定位"在飞被销毁"的 0x29xx 失效源)。
+    if (s && DSTraceEnabled()) {
+        fprintf(stderr, "[DS-DEL] set=%p rhi=%u\n",
+                (void*)s->GetNativeSet(), static_cast<unsigned>(handle));
+    }
     if (s) s->destroyImpl();
     descriptorSetAllocator_->Free(static_cast<u32>(handle));
 }
 
 void VulkanDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {
     if (!writes || writeCount == 0) return;
+    // P0.1 诊断:PRIMAL_DS_TRACE=1 时打印 set 更新(原生句柄与 MoltenVK
+    // validation 消息里的 VkDescriptorSet 句柄同源,可对照定罪 03047)。
+    const bool dsTrace = DSTraceEnabled();
     // 按 dstSet 分组(每个 DescriptorSet::Update 单独处理自己)
     for (u32 i = 0; i < writeCount; ++i) {
         VulkanDescriptorSet* ds = GetDescriptorSet(writes[i].dstSet);
-        if (ds) ds->Update(&writes[i], 1);
+        if (ds) {
+            if (dsTrace) {
+                fprintf(stderr, "[DS-UPD] set=%p rhi=%u binding=%u type=%d\n",
+                        (void*)ds->GetNativeSet(),
+                        static_cast<unsigned>(writes[i].dstSet),
+                        writes[i].dstBinding,
+                        static_cast<int>(writes[i].descriptorType));
+            }
+            ds->Update(&writes[i], 1);
+        }
     }
 }
 
@@ -1443,6 +1494,69 @@ void VulkanDevice::destroyLogicalDevice() {
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
         graphicsQueue_ = computeQueue_ = transferQueue_ = VK_NULL_HANDLE;
+    }
+}
+
+// P0-B: one-shot UNDEF→SRO priming（VulkanTexture 首帧绑定 SampledImage 的
+// 布局契约）。资产加载期/初始化期调用；帧录制期调用无意义（帧内 barrier
+// 走 truth-based tracked 路径）。
+void VulkanDevice::PrimeTextureLayout(rhi::ResourceHandle texture) {
+    VulkanTexture* tex = GetTexture(texture);
+    if (!tex || !tex->GetNativeImage()) return;
+    if (tex->GetCurrentLayout() != VK_IMAGE_LAYOUT_UNDEFINED) return; // 已有明确状态
+    VkDevice dev = GetNativeDevice();
+    VkQueue queue = GetGraphicsQueue();
+    u32 queueFamily = GetGraphicsQueueFamily();
+    if (queue == VK_NULL_HANDLE) return;
+
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = queueFamily;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(dev, &pci, nullptr, &pool) != VK_SUCCESS) return;
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(dev, &ai, &cmd) != VK_SUCCESS) {
+        vkDestroyCommandPool(dev, pool, nullptr);
+        return;
+    }
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    VkImageMemoryBarrier bar{};
+    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = tex->GetNativeImage();
+    bar.subresourceRange.aspectMask = tex->GetAspectMask();
+    bar.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    bar.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &bar);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+    vkDestroyCommandPool(dev, pool, nullptr);
+
+    tex->SetCurrentLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (std::getenv("PRIMAL_RG_LAYOUT_TRACE")) {
+        fprintf(stderr, "[PRIME] img=0x%llx primed to SRO\n",
+                (unsigned long long)(uintptr_t)tex->GetNativeImage());
     }
 }
 

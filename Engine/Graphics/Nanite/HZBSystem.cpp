@@ -26,6 +26,15 @@ bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
     device_ = device;
     config_ = config;
 
+    // P0.1:池槽位必须初始化为 INVALID(-1)而非 0——0 是全局 UBO set 的
+    // 合法句柄,零初始化会让懒创建检查失效、把采样描述符写进 UBO set。
+    for (u32 f = 0; f < kMipPoolFrames; ++f) {
+        copy_set_pool_[f] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        for (u32 m = 0; m < kMipPoolPerFrame; ++m) {
+            mip_set_pool_[f][m] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
+    }
+
 //    std::cout << "[HZBSystem] Initializing..." << std::endl;
 //    std::cout << "  Max Resolution: " << config_.max_width << "x" << config_.max_height << std::endl;
 //    std::cout << "  Min Mip Size: " << config_.min_mip_size << "x" << config_.min_mip_size << std::endl;
@@ -69,6 +78,23 @@ void HZBSystem::Shutdown() {
         hzb_copy_pipeline_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
         hzb_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
         hzb_copy_descriptor_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+
+        // P0.1:释放持久 mip/copy 描述符集池(03047 修复引入)。
+        // 同样跳过 0(全局 UBO set 的合法句柄)以防未初始化状态泄漏到这里。
+        for (u32 f = 0; f < kMipPoolFrames; ++f) {
+            if (copy_set_pool_[f] != rhi::handles::INVALID_DESCRIPTOR_SET &&
+                static_cast<u32>(copy_set_pool_[f]) != 0u) {
+                device_->DestroyDescriptorSet(copy_set_pool_[f]);
+                copy_set_pool_[f] = rhi::handles::INVALID_DESCRIPTOR_SET;
+            }
+            for (u32 m = 0; m < kMipPoolPerFrame; ++m) {
+                if (mip_set_pool_[f][m] != rhi::handles::INVALID_DESCRIPTOR_SET &&
+                    static_cast<u32>(mip_set_pool_[f][m]) != 0u) {
+                    device_->DestroyDescriptorSet(mip_set_pool_[f][m]);
+                    mip_set_pool_[f][m] = rhi::handles::INVALID_DESCRIPTOR_SET;
+                }
+            }
+        }
     }
 
     initialized_ = false;
@@ -389,7 +415,8 @@ bool HZBSystem::CreateHZBComputePipeline() {
 }
 
 HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
-                                          rhi::RHICommandBuffer* cmd_buffer) {
+                                          rhi::RHICommandBuffer* cmd_buffer,
+                                          u32 frame_slot) {
     if (!initialized_) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Not initialized" << std::endl;
         return {};
@@ -406,7 +433,7 @@ HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
 
     if (config_.generate_on_gpu && cmd_buffer) {
 //        std::cout << "[HZBSystem] Attempting GPU HZB generation..." << std::endl;
-        if (!GenerateHZBOnGPU(cmd_buffer, depth_texture)) {
+        if (!GenerateHZBOnGPU(cmd_buffer, depth_texture, frame_slot)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ GPU HZB generation failed, falling back to CPU" << std::endl;
             GenerateHZBOnCPU(depth_texture);
         }
@@ -438,7 +465,8 @@ bool HZBSystem::GenerateHZBOnCPU(rhi::ResourceHandle depth_texture) {
     return true;
 }
 
-bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::ResourceHandle depth_texture) {
+bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::ResourceHandle depth_texture,
+                                 u32 frame_slot) {
 //    std::cout << "[HZBSystem] ========== GPU HZB Generation Start ==========" << std::endl;
 
     if (hzb_copy_pipeline_ == rhi::handles::INVALID_PIPELINE ||
@@ -470,6 +498,11 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     // Dawn's InsertBarrier is a no-op (WebGPU tracks internally). Metal's path
     // reuses the single descriptor layout and doesn't reach this branch.
     const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    // P0.1:池槽位有效性检查——0 是全局 UBO set 的合法句柄,不可复用。
+    auto isValidSet = [](rhi::DescriptorSetHandle h) {
+        return h != rhi::handles::INVALID_DESCRIPTOR_SET &&
+               static_cast<u32>(h) != 0u;
+    };
     auto emitImageBarrier = [&](rhi::ResourceHandle tex, u32 mip,
                                  rhi::ResourceState before, rhi::ResourceState after) {
         if (!isVulkan) return;
@@ -502,14 +535,15 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
 
     rhi::DescriptorSetHandle copyDescriptorSet = rhi::handles::INVALID_DESCRIPTOR_SET;
     if (isDawn) {
-        rhi::DescriptorSetDesc copyDesc{};
-        copyDesc.layout = hzb_copy_descriptor_layout_;
-        copyDescriptorSet = device_->CreateDescriptorSet(copyDesc);
-        if (copyDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-            PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB copy descriptor set" << std::endl;
-            return false;
+        // P0.1 (03047):copy set 也入持久池(按帧槽),不再帧内创建销毁——
+        // GC 同 id 回收会让下一帧的新 set 与旧 pending command buffer 撞句柄。
+        const u32 slot = frame_slot % kMipPoolFrames;
+        if (!isValidSet(copy_set_pool_[slot])) {
+            rhi::DescriptorSetDesc poolCopyDesc{};
+            poolCopyDesc.layout = hzb_copy_descriptor_layout_;
+            copy_set_pool_[slot] = device_->CreateDescriptorSet(poolCopyDesc);
         }
-        temporaryDescriptorSets.push_back(copyDescriptorSet);
+        copyDescriptorSet = copy_set_pool_[slot];
     } else {
         // Metal path reuses the single descriptorSet for both stages.
         copyDescriptorSet = descriptorSet;
@@ -630,22 +664,33 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
         }
         temporaryViews.push_back(targetView);
 
-        // Dawn/Vulkan: allocate a fresh descriptor set per iteration. Updating a
-        // descriptor set after it's been bound to the command buffer (without
-        // UPDATE_AFTER_BIND) trips Vulkan validation. Metal's API is permissive
-        // and reuses the single descriptorSet across iterations.
+        // P0.1 (03047):Dawn/Vulkan 共用持久 mip set 池(帧槽 × mip 级)。
+        // 旧实现每帧「创建 11 个 set→录制→销毁」,GC 立即回收同 id,下一帧
+        // 更新同 id set 时上一帧 pending 的 command buffer 仍握着它,
+        // MoltenVK 报 VUID-vkUpdateDescriptorSets-None-03047 并作废整条
+        // recording(级联出全部 -recording 洪泛与 submit 期布局错)。持久池
+        // 下每个 set 每帧槽仅更新一次,槽间由 BeginFrame 的 fence 隔离。
+        // Metal 的 API 宽容,仍复用单个 descriptorSet。
         rhi::DescriptorSetHandle iterDescriptorSet;
         if (isDawn) {
-            rhi::DescriptorSetDesc iterDesc{};
-            iterDesc.layout = hzb_descriptor_layout_;
-            iterDescriptorSet = device_->CreateDescriptorSet(iterDesc);
-            if (iterDescriptorSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-                PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB mip descriptor set" << std::endl;
+            const u32 slot = frame_slot % kMipPoolFrames;
+            if (mip_level >= kMipPoolPerFrame) {
+                PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] mip " << mip_level
+                          << " exceeds mip set pool (" << kMipPoolPerFrame << ")" << std::endl;
                 for (auto view : temporaryViews) device_->DestroyTexture(view);
-                for (auto ds : temporaryDescriptorSets) device_->DestroyDescriptorSet(ds);
                 return false;
             }
-            temporaryDescriptorSets.push_back(iterDescriptorSet);
+            if (!isValidSet(mip_set_pool_[slot][mip_level])) {
+                rhi::DescriptorSetDesc iterDesc{};
+                iterDesc.layout = hzb_descriptor_layout_;
+                mip_set_pool_[slot][mip_level] = device_->CreateDescriptorSet(iterDesc);
+                if (!isValidSet(mip_set_pool_[slot][mip_level])) {
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to create HZB mip descriptor set" << std::endl;
+                    for (auto view : temporaryViews) device_->DestroyTexture(view);
+                    return false;
+                }
+            }
+            iterDescriptorSet = mip_set_pool_[slot][mip_level];
         } else {
             iterDescriptorSet = descriptorSet;
         }

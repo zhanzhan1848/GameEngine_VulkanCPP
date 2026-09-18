@@ -104,7 +104,7 @@ public:
 private:
     bool CreateDepthResources();
     bool CopyDepthTexture(rhi::ResourceHandle source, rhi::ResourceHandle destination,
-                         rhi::RHICommandBuffer* cmd_buffer);
+                          rhi::RHICommandBuffer* cmd_buffer, u32 frame_slot);
 
     rhi::RHIDeviceBase* device_{ nullptr };
     Config config_;
@@ -117,7 +117,13 @@ private:
     rhi::PipelineHandle depth_copy_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineLayoutHandle depth_copy_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle depth_copy_ds_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    rhi::DescriptorSetHandle depth_copy_ds_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    // P0.1 (03047):copy set 按帧槽三缓冲。单 set 每帧 update 时,上一帧的
+    // pending command buffer 仍绑定它(Vulkan 视为 in-use),触发
+    // VUID-vkUpdateDescriptorSets-None-03047 并作废整条 recording。槽间
+    // 由 BeginFrame 的 slot fence 隔离。
+    static constexpr u32 kCopySetSlots = 3;
+    rhi::DescriptorSetHandle depth_copy_ds_[kCopySetSlots]{ rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
     rhi::ResourceHandle depth_copy_cb_{ rhi::handles::INVALID_RESOURCE };
 
     bool CreateCopyPipeline();

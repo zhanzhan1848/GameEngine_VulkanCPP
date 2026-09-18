@@ -353,9 +353,12 @@ bool VulkanTexture::Initialize() {
     // Cube textures must declare the CUBE_COMPATIBLE bit so layers can be
     // interpreted as +X/-X/+Y/-Y/+Z/-Z faces when bound to a CUBE view.
     ici.flags = isCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
-    // TextureType 在 RHIResource 基类被压平成 ResourceType::Texture;从 extent 推断:
-    //   z > 1 → 3D,否则 2D(Phase 3 测试范围只用 2D;Cube/1D 由 Phase 5 扩展)
-    ici.imageType = (texDesc_.size.z > 1) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    // TextureType 在 RHIResource 基类被压平成 ResourceType::Texture;从 extent/type 推断:
+    //   type==Texture3D 或 z > 1 → 3D(3D 允许 depth=1,与下方 view 判据保持同一口径,
+    //   避免 Texture3D+z==1 产出 "2D image + 3D view" 的非法组合)
+    ici.imageType = (texDesc_.size.z > 1 || texDesc_.type == TextureType::Texture3D)
+                        ? VK_IMAGE_TYPE_3D
+                        : VK_IMAGE_TYPE_2D;
     ici.format = vkFormat_;
     ici.extent.width  = std::max<u32>(1u, texDesc_.size.x);
     ici.extent.height = std::max<u32>(1u, texDesc_.size.y);
@@ -599,6 +602,13 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
                                       /*backLayout=*/layoutAfter,
                                       /*aspect=*/aspect,
                                       /*texelSize=*/static_cast<u32>(bpt));
+            // P0-B 定位: 帧内上传 trace（谁在帧录制期上传纹理并留下
+            // TRANSFER_DST 中间态到下一 Begin 才闭合）
+            if (std::getenv("PRIMAL_RG_LAYOUT_TRACE")) {
+                fprintf(stderr, "[TEXUPLOAD] img=0x%llx name='%s' %ux%u deferred-upload\n",
+                        (unsigned long long)(uintptr_t)vkImage_,
+                        texDesc_.name.c_str(), width, height);
+            }
             SetCurrentLayout(layoutAfter);
             return true;
         }

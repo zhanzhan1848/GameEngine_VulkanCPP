@@ -43,7 +43,12 @@ void RenderGraph::Clear() {
     resources_.clear();
     resourceMap_.clear();
     activePasses_.clear();
-    
+    // importedPhysical_ is per-frame bookkeeping (see header): stale entries
+    // from previous frames would flag every legitimate re-import of a
+    // persistent texture (frame-slot rotation, shadow visibility, ...) as a
+    // duplicate and hide real per-frame alias merges.
+    importedPhysical_.clear();
+
     currentFrame_++;
     CleanupPool();
 }
@@ -84,38 +89,42 @@ void RenderGraph::CleanupPool() {
 }
 
 // T1.1 (C2): one physical resource = one RG import identity per frame.
-// Duplicate imports under different names hide cross-identity RAW
-// dependencies from the scheduler. Default: one warning per duplicate
-// pair; PRIMAL_RG_STRICT_IMPORT=1 asserts (ramp-up enforcement).
-void RenderGraph::CheckSingleImportIdentity(const std::string& name, rhi::ResourceHandle resource,
-                                            RGResourceHandle handle) {
+// Duplicate imports under different names used to hide cross-identity RAW
+// dependencies from the scheduler. Since P0-B the graph merges alias imports
+// onto the existing identity instead of creating a second, blind one —
+// Read/Write declarations from every alias land on the same resource state,
+// so producer/consumer edges and barriers stay visible.
+RGResourceHandle RenderGraph::ResolveImportIdentity(const std::string& name, rhi::ResourceHandle resource) {
     auto it = importedPhysical_.find(static_cast<u32>(resource));
     if (it == importedPhysical_.end()) {
-        importedPhysical_.emplace(static_cast<u32>(resource), handle);
-        return;
+        return kInvalidRGResourceHandle;
     }
-    static thread_local std::unordered_set<std::string> warned;
-    std::string key = name + "#" + std::to_string(static_cast<u32>(resource));
-    if (warned.insert(std::move(key)).second) {
-        PRIMAL_LOG_STREAM(Warn, "RG")
-            << "[RG] Duplicate physical import: '" << name
-            << "' aliases rhi resource " << static_cast<u32>(resource)
-            << " already imported (identity " << it->second.index << ")"
-            << " — cross-identity RAW deps are invisible to the scheduler."
-            << std::endl;
-        if (std::getenv("PRIMAL_RG_STRICT_IMPORT")) {
-            assert(false && "RG single-import-identity violation (C2)");
+    if (std::getenv("PRIMAL_RG_STRICT_IMPORT")) {
+        static thread_local std::unordered_set<std::string> traced;
+        std::string key = name + "#" + std::to_string(static_cast<u32>(resource));
+        if (traced.insert(std::move(key)).second) {
+            PRIMAL_LOG_STREAM(Info, "RG")
+                << "[RG] Import alias '" << name << "' merged onto identity "
+                << it->second.index << " for rhi resource " << static_cast<u32>(resource)
+                << std::endl;
         }
     }
+    return it->second;
 }
 
 RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::ResourceHandle resource,
                                               rhi::ResourceState initialState) {
+    RGResourceHandle existing = ResolveImportIdentity(name, resource);
+    if (existing.IsValid()) {
+        resourceMap_[name] = existing;
+        return existing;
+    }
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
-    CheckSingleImportIdentity(name, resource, handle);
+    importedPhysical_.emplace(static_cast<u32>(resource), handle);
     auto rgResource = std::make_unique<RenderGraphResource>(name, handle, RGResourceType::Unknown);
     rgResource->SetImportedResource(resource);
     rgResource->SetInitialState(initialState);
+
 
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
@@ -125,12 +134,18 @@ RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::Resou
 RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::ResourceHandle resource,
                                              const rhi::TextureDesc& desc,
                                              rhi::ResourceState initialState) {
+    RGResourceHandle existing = ResolveImportIdentity(name, resource);
+    if (existing.IsValid()) {
+        resourceMap_[name] = existing;
+        return existing;
+    }
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
-    CheckSingleImportIdentity(name, resource, handle);
+    importedPhysical_.emplace(static_cast<u32>(resource), handle);
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
     rgResource->SetInitialState(initialState);
+
 
     resources_.push_back(std::move(rgResource));
     resourceMap_[name] = handle;
@@ -140,8 +155,13 @@ RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::Resour
 RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::ResourceHandle resource,
                                             const rhi::BufferDesc& desc,
                                             rhi::ResourceState initialState) {
+    RGResourceHandle existing = ResolveImportIdentity(name, resource);
+    if (existing.IsValid()) {
+        resourceMap_[name] = existing;
+        return existing;
+    }
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
-    CheckSingleImportIdentity(name, resource, handle);
+    importedPhysical_.emplace(static_cast<u32>(resource), handle);
     auto rgResource = std::make_unique<RenderGraphBuffer>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
@@ -415,6 +435,12 @@ void RenderGraph::AllocateResources() {
                 } else {
                     // Create new
                     rhi::ResourceHandle handle = device_.CreateTexture(tex->GetDesc());
+                    // P0-B（validation 预热瞬态定位）: 新物理纹理立即 prime 到
+                    // SRO——瞬态纹理在被 RG 声明触达前就可能被 raw descriptor
+                    // 绑成 SampledImage（承诺 SHADER_READ_ONLY）；池预热期
+                    // （kKeepFrames=3）首帧绑定早于首次转换会产生
+                    // "expects SRO, actual UNDEFINED"。非 Vulkan 平台为 no-op。
+                    device_.PrimeTextureLayout(handle);
                     if (handle == rhi::handles::INVALID_RESOURCE) {
                         // 分配失败若静默，下游 BeginRenderPass 会拿到 INVALID
                         // 物理句柄构造出畸形 render pass（Vulkan validation 崩溃

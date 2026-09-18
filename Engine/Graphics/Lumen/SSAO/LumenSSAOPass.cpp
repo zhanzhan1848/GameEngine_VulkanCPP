@@ -383,6 +383,7 @@ void LumenSSAOPass::CreatePersistentTextures() {
         desc.format = DataFormat::R16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
         trace_texture_ = device_->CreateTexture(desc);
+    device_->PrimeTextureLayout(trace_texture_);  // P0-B 首帧 priming
     }
 
     // Full-res filter output (R16_Float)
@@ -392,6 +393,7 @@ void LumenSSAOPass::CreatePersistentTextures() {
         desc.format = DataFormat::R16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::CopySource;
         filter_texture_ = device_->CreateTexture(desc);
+    device_->PrimeTextureLayout(filter_texture_);  // P0-B 首帧 priming
     }
 }
 

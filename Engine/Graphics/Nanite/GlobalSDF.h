@@ -154,9 +154,12 @@ private:
     rhi::PipelineHandle mip_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineLayoutHandle mip_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle mip_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
-    rhi::DescriptorSetHandle mip_descriptor_sets_[3]{
-        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
-        rhi::handles::INVALID_DESCRIPTOR_SET };
+    // P0.1 (03047):mip 链每级一次 update+bind,单 set 会在同一 recording 内
+    // 对已绑定的 set 二次 update(MoltenVK 判 in-use 并作废 CB)。改为
+    // [帧槽][级] 分 set,每帧槽每级只 update 一次。惰性创建,检查须同时
+    // 拒绝 0(全局 set 的合法句柄)与 INVALID。
+    static constexpr u32 kMipSetFrames = 3;
+    rhi::DescriptorSetHandle mip_descriptor_sets_[kMipSetFrames][SDFCascade::kMaxMipLevels]{};
     bool mip_pipeline_tried_{ false };
     rhi::DescriptorSetLayoutHandle vox_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetHandle vox_descriptor_sets_[3]{

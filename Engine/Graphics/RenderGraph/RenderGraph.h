@@ -133,13 +133,13 @@ private:
     // T1.1 (C2): single physical import identity — one rhi resource may map to
     // at most ONE RG identity per frame. Duplicate imports create alias
     // blind spots (RAW deps across identities are invisible to the
-    // scheduler). Enforcement: warn once per duplicate by default, assert
-    // with PRIMAL_RG_STRICT_IMPORT=1. The pre-existing GBuffer-depth
-    // "unique name per reader" pattern is READ-only (producer recorded
-    // outside the graph) and stays exempt by design.
+    // scheduler). Enforcement: alias imports are now MERGED onto the first
+    // identity (P0-B), so all declarations share one resource state; enable
+    // a per-frame trace with PRIMAL_RG_STRICT_IMPORT=1.
     std::unordered_map<u32, RGResourceHandle> importedPhysical_;
-    void CheckSingleImportIdentity(const std::string& name, rhi::ResourceHandle resource,
-                                   RGResourceHandle handle);
+    // Returns the existing identity for this physical resource this frame,
+    // or an invalid handle when this is the first import.
+    RGResourceHandle ResolveImportIdentity(const std::string& name, rhi::ResourceHandle resource);
 
     // 执行顺序 (经过拓扑排序和剔除后)
     utl::vector<RenderGraphPass*> activePasses_;

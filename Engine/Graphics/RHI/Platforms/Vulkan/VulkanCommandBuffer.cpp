@@ -176,6 +176,7 @@ bool VulkanCommandBuffer::resetImpl() {
     }
     // T4.6.5 part 30.6 (X7 fix): clear external-fence flag — fresh submit.
     externalFenceSignaled_ = false;
+    externalFence_ = VK_NULL_HANDLE;  // P0.1: 同步清空,避免等待已失效的旧句柄
     scope_ = Scope::None;
     pendingSecondaryMode_ = false;
     return true;
@@ -269,7 +270,19 @@ bool VulkanCommandBuffer::waitForCompletionImpl() {
     // signalFence, this cmd buffer's internal submitFence_ was NOT signaled
     // by that submit. Caller's WaitForSync(external_fence) is authoritative;
     // waiting on our unused internal fence would always 5s-timeout.
-    if (externalFenceSignaled_) return true;
+    //
+    // P0.1: 但 destroy 路径把这里当兜底同步点(逐帧 destroy 设计依赖它)。
+    // externalFence_ 是上次提交真正被 signal 的 fence——等它:调用方已等过
+    // 则立即返回,没等过则在此补齐,防止帧飞行中的 set 被 update(03047)。
+    if (externalFenceSignaled_) {
+        if (externalFence_ == VK_NULL_HANDLE) return true;
+        VkDevice extDev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
+        VkResult extRes = vkWaitForFences(extDev, 1, &externalFence_, VK_TRUE, 5ULL * 1000ULL * 1000ULL * 1000ULL);
+        if (extRes == VK_TIMEOUT) {
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] External fence WaitForCompletion TIMEOUT (5s)" << std::endl;
+        }
+        return extRes == VK_SUCCESS;
+    }
 
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
     if (submitFence_ == VK_NULL_HANDLE) return false;
@@ -381,6 +394,11 @@ void VulkanCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, Resourc
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            buf->GetNativeBuffer(),
                            regionCount, copies.data());
+    // P0-B（validation 预热瞬态收尾）: 拷贝完成后把源纹理收敛回
+    // SHADER_READ_ONLY—— sampled 用例（历史环/调试读回）远多于继续 TRANSFER
+    // 的用例；updateData 的 backLayout 惯例与此一致。truth-based，已 SRO 时
+    // 后续 barrier 自然 no-op。
+    TransitionImageLayout(tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     UpdateStats(CommandType::CopyTextureToBuffer);
 }
 
@@ -392,6 +410,13 @@ void VulkanCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
     VulkanTexture* dstTex = vk.GetTexture(dst);
     if (!srcTex || !dstTex || !srcTex->GetNativeImage() || !dstTex->GetNativeImage()) return;
 
+    // P0-B 定位（PRIMAL_RG_LAYOUT_TRACE=1）: blit 布局责任追踪
+    if (std::getenv("PRIMAL_RG_LAYOUT_TRACE")) {
+        fprintf(stderr, "[BLIT] src=0x%llx (tracked %s) dst=0x%llx\n",
+                (unsigned long long)(uintptr_t)srcTex->GetNativeImage(),
+                [](VkImageLayout l) { return l == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? "SRO" : "OTHER"; }(srcTex->GetCurrentLayout()),
+                (unsigned long long)(uintptr_t)dstTex->GetNativeImage());
+    }
     TransitionImageLayout(srcTex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     TransitionImageLayout(dstTex, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
@@ -417,6 +442,11 @@ void VulkanCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                    srcTex->GetNativeImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dstTex->GetNativeImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    regionCount, blits.data(), vkFilter);
+    // P0-B: blit 完成后把两端收敛回 SHADER_READ_ONLY（与上面 CopyTextureTo
+    // Buffer 的收尾同理）。调用方既有的回置 barrier（TAA histBarrier、
+    // ColorHistory restore 等）由 InsertBarrier 的同布局 skip 变为 no-op。
+    TransitionImageLayout(srcTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    TransitionImageLayout(dstTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     UpdateStats(CommandType::BlitTexture);
 }
 
@@ -572,6 +602,34 @@ void VulkanCommandBuffer::InsertBarrier(const ResourceBarrier* barriers, u32 bar
             oldLayout = tex->GetCurrentLayout();
         }
         VkImageLayout newLayout = dstLA.layout;
+
+        // P0-B diagnosis (PRIMAL_RG_LAYOUT_TRACE=1): one line per barrier with
+        // the resource name, declared states, tracked oldLayout and the native
+        // VkImage handle — correlates 1:1 with validation 01197 messages so a
+        // tracked-vs-real desync can be attributed to the exact resource.
+        static const bool s_layoutTrace = std::getenv("PRIMAL_RG_LAYOUT_TRACE") != nullptr;
+        if (s_layoutTrace) {
+            static const auto layoutName = [](VkImageLayout l) -> const char* {
+                switch (l) {
+                    case VK_IMAGE_LAYOUT_UNDEFINED: return "UNDEF";
+                    case VK_IMAGE_LAYOUT_GENERAL: return "GENERAL";
+                    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: return "SRO";
+                    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: return "XFER_DST";
+                    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: return "XFER_SRC";
+                    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: return "COLOR";
+                    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: return "DS";
+                    default: return "OTHER";
+                }
+            };
+            PRIMAL_LOG_STREAM(Info, "RGTRACE")
+                << "[RGTRACE] tex='" << tex->GetTextureDesc().name
+                << "' img=0x" << std::hex << reinterpret_cast<uintptr_t>(tex->GetNativeImage()) << std::dec
+                << " declared=" << layoutName(vulkan::ResourceStateToVkLayout(rb.beforeState).layout)
+                << "->" << layoutName(newLayout)
+                << " tracked_old=" << layoutName(oldLayout)
+                << (oldLayout == newLayout ? " SKIP" : " EMIT")
+                << std::endl;
+        }
 
         // If old == new, skip this barrier (no-op, avoids validation warning).
         if (oldLayout == newLayout) {
@@ -1164,6 +1222,15 @@ void VulkanCommandBuffer::BindIndexBuffer(ResourceHandle buffer, DataFormat form
     vkCmdBindIndexBuffer(cmdBuffer_, b->GetNativeBuffer(), offset, idxType);
 }
 
+// P0.1 诊断:PRIMAL_DS_TRACE=1 时启用 set 更新/绑定追踪(03047 定罪用)。
+static bool dsTraceBind() {
+    static const bool on = [] {
+        const char* e = std::getenv("PRIMAL_DS_TRACE");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+
 void VulkanCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint, PipelineLayoutHandle /*layout*/,
                                              u32 firstSet, u32 setCount,
                                              const DescriptorSetHandle* descriptorSets,
@@ -1174,6 +1241,10 @@ void VulkanCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint, Pipeli
     for (u32 i = 0; i < setCount; ++i) {
         VulkanDescriptorSet* ds = vk.GetDescriptorSet(descriptorSets[i]);
         sets[i] = ds ? ds->GetNativeSet() : VK_NULL_HANDLE;
+        // P0.1 诊断:PRIMAL_DS_TRACE=1 时打印绑定(与 [DS-UPD] 对照)。
+        if (ds && dsTraceBind()) {
+            fprintf(stderr, "[DS-BIND] set=%p firstSet=%u\n", (void*)sets[i], firstSet + i);
+        }
     }
     VkPipelineBindPoint pbp = (bindPoint == PipelineBindPoint::Compute)
                               ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;

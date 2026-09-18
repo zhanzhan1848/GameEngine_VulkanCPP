@@ -65,6 +65,12 @@ public:
     explicit VulkanDevice(const DeviceDesc& desc);
     ~VulkanDevice() override;
 
+    // P0-B: 首帧 priming——创建后立即把纹理转到一个明确定义的初始 layout
+    // （一次性提交）。用途：模块三缓冲纹理在被 RG 声明/手工 barrier 触达前
+    // 就被 raw descriptor 绑成 SampledImage（承诺 SHADER_READ_ONLY），
+    // 首帧 submit 会报"expects SRO, actual UNDEFINED"。
+    void PrimeTextureLayout(rhi::ResourceHandle texture);
+
     VkInstance GetNativeInstance() const { return instance_; }
     VkPhysicalDevice GetNativePhysicalDevice() const { return physicalDevice_; }
     VkDevice GetNativeDevice() const { return device_; }

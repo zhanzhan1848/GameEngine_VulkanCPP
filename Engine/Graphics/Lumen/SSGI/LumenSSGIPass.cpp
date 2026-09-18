@@ -476,6 +476,7 @@ void LumenSSGIPass::CreatePersistentTextures() {
         desc.format = DataFormat::RGBA16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         trace_texture_ = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(trace_texture_);  // P0-B 首帧 priming
     }
 
     // Half-res denoised trace output
@@ -485,6 +486,7 @@ void LumenSSGIPass::CreatePersistentTextures() {
         desc.format = DataFormat::RGBA16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         trace_denoised_texture_ = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(trace_denoised_texture_);  // P0-B 首帧 priming
     }
 
     // Full-res temporal textures (triple-buffered)
@@ -494,6 +496,7 @@ void LumenSSGIPass::CreatePersistentTextures() {
         desc.format = DataFormat::RGBA16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         temporal_textures_[i] = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(temporal_textures_[i]);  // P0-B 首帧 priming
     }
 
     // Full-res filter output
@@ -503,6 +506,7 @@ void LumenSSGIPass::CreatePersistentTextures() {
         desc.format = DataFormat::RGBA16_Float;
         desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
         filter_texture_ = device_->CreateTexture(desc);
+        device_->PrimeTextureLayout(filter_texture_);  // P0-B 首帧 priming
     }
 }
 
@@ -582,6 +586,20 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
          hzb_texture, prev_frame_color, outIdx, histIdx](
             const LumenSSGIData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
+
+            // P0-B（01197 定位）: storage 写入前确保 GENERAL（同
+            // ScreenProbeGIPass 的说明——帧内 restore→SRO 后的再次 storage 写
+            // 需要显式转回，否则 tracked/real 失步，下帧 RG 入口 barrier 被
+            // VUID-01197 标记）。
+            auto EnsureStorageWritable = [&](ResourceHandle tex) {
+                if (tex == handles::INVALID_RESOURCE) return;
+                ResourceBarrier b{};
+                b.resource = tex;
+                b.beforeState = ResourceState::UnorderedAccess;
+                b.afterState  = ResourceState::UnorderedAccess;
+                b.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&b, 1);
+            };
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
             static int s_ssgi_exec = 0;
             if (s_ssgi_exec < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSGI_EXEC] frame " << s_ssgi_exec
@@ -747,6 +765,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, 7);
                 }
 
+                EnsureStorageWritable(trace_texture_);
                 cmd->BindComputePipeline(trace_pipeline_);
                 const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
@@ -818,6 +837,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     UpdateDescriptorSet(device_, halfres_denoise_ds_[frameIdx], denoiseParamsDesc, 3);
                 }
 
+                EnsureStorageWritable(trace_denoised_texture_);
                 cmd->BindComputePipeline(halfres_denoise_pipeline_);
                 const DescriptorSetHandle denoiseSets[] = { halfres_denoise_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, halfres_denoise_layout_, 0, 1, denoiseSets, 0, nullptr);
@@ -884,6 +904,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     UpdateDescriptorSet(device_, filter_ds_[frameIdx], filterParamsDesc, 6);
                 }
 
+                EnsureStorageWritable(filter_texture_);
                 cmd->BindComputePipeline(filter_pipeline_);
                 const DescriptorSetHandle sets[] = { filter_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, filter_layout_, 0, 1, sets, 0, nullptr);
@@ -946,6 +967,7 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                     UpdateDescriptorSet(device_, temporal_ds_[frameIdx], temporalParamsDesc, 8);
                 }
 
+                EnsureStorageWritable(temporal_textures_[outIdx]);
                 cmd->BindComputePipeline(temporal_pipeline_);
                 const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, temporal_layout_, 0, 1, sets, 0, nullptr);

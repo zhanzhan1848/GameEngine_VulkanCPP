@@ -748,16 +748,23 @@ void GlobalSDF::DispatchMipChain(rhi::RHICommandBuffer* cmd, u32 cascade_index) 
         cascade.mip_textures[0], cascade.mip_textures[1],
         cascade.mip_textures[2], cascade.mip_textures[3] };
 
-    // Triple-buffered descriptor set per cascade (same slotting convention
-    // as the voxelization set — a cascade is dispatched at most once/frame).
-    auto& mipSet = mip_descriptor_sets_[cascade_index % 3];
-    if (mipSet == rhi::handles::INVALID_DESCRIPTOR_SET) {
-        mipSet = device_->CreateDescriptorSet({mip_set_layout_});
-    }
+    // P0.1 (03047):每 [帧槽][mip 级] 一个 set——单 set 会在同一 recording
+    // 内被 4 级反复 update(第二次落在已绑定 set 上,MoltenVK 判 in-use)。
+    // 槽间由 BeginFrame 的 slot fence 隔离;0 与 INVALID 都视为未创建。
+    const u32 mipSlot = cascade_index % 3;
+    auto isValidMipSet = [](rhi::DescriptorSetHandle h) {
+        return h != rhi::handles::INVALID_DESCRIPTOR_SET && static_cast<u32>(h) != 0u;
+    };
 
     u32 prevRes = cascade.resolution;
     for (u32 k = 0; k < cascade.mip_count; ++k) {
         const u32 curRes = std::max<u32>(1u, prevRes >> 1);
+
+        auto& mipSet = mip_descriptor_sets_[mipSlot][k];
+        if (!isValidMipSet(mipSet)) {
+            mipSet = device_->CreateDescriptorSet({mip_set_layout_});
+        }
+        if (!isValidMipSet(mipSet)) return;
 
         DescriptorData params[] = {
             {0, rhi::DescriptorType::StorageImage, levels[k]},       // prev level
@@ -765,22 +772,59 @@ void GlobalSDF::DispatchMipChain(rhi::RHICommandBuffer* cmd, u32 cascade_index) 
         };
         UpdateDescriptorSet(device_, mipSet, params, 2);
 
+        // Storage-image 描述符固定绑 GENERAL,两侧必须真的处于 GENERAL:
+        //   - 源 levels[k]:k==0 上一帧消费者(如 AnalyticSDFProvider)可能把它留在
+        //     SHADER_READ_ONLY;同帧跟在体素化后时已是 GENERAL(屏障自动变 no-op)。
+        //   - 目标 levels[k+1]:新建纹理 tracked=UNDEFINED,从未进过 GENERAL。
+        // InsertBarrier 以跟踪布局推导 oldLayout,声明值只作语义文档。
+        {
+            rhi::ResourceBarrier srcReady{};
+            srcReady.resource = levels[k];
+            srcReady.beforeState = rhi::ResourceState::ShaderResource;
+            srcReady.afterState = rhi::ResourceState::UnorderedAccess;
+            srcReady.subresource = 0xFFFFFFFF;
+            srcReady.queueFamily = 0xFFFFFFFF;
+            cmd->InsertBarrier(&srcReady, 1);
+
+            rhi::ResourceBarrier dstReady{};
+            dstReady.resource = levels[k + 1];
+            dstReady.beforeState = rhi::ResourceState::Unknown;
+            dstReady.afterState = rhi::ResourceState::UnorderedAccess;
+            dstReady.subresource = 0xFFFFFFFF;
+            dstReady.queueFamily = 0xFFFFFFFF;
+            cmd->InsertBarrier(&dstReady, 1);
+        }
+
         cmd->BindComputePipeline(mip_pipeline_);
         const rhi::DescriptorSetHandle sets[] = { mipSet };
         cmd->BindDescriptorSets(rhi::PipelineBindPoint::Compute, mip_layout_, 0, 1, sets, 0, nullptr);
         const u32 g = (curRes + 3) / 4;
         cmd->Dispatch(g, g, g);
 
-        // Storage→storage barrier between levels.
-        rhi::ResourceBarrier b{};
-        b.resource = levels[k + 1];
-        b.beforeState = rhi::ResourceState::UnorderedAccess;
-        b.afterState = rhi::ResourceState::UnorderedAccess;
-        b.subresource = 0xFFFFFFFF;
-        b.queueFamily = 0xFFFFFFFF;
-        cmd->InsertBarrier(&b, 1);
+        // 级间 write→read 内存依赖。同布局的 image barrier 会被 InsertBarrier
+        // 整体跳过,这里用全局 memory barrier 保证下一级读到本级写入。
+        cmd->MemoryBarrier(
+            rhi::PipelineStage::ComputeShader,
+            rhi::PipelineStage::ComputeShader,
+            rhi::AccessFlag::ShaderWrite,
+            rhi::AccessFlag::ShaderRead
+        );
 
         prevRes = curRes;
+    }
+
+    // 链后收尾:同帧下游消费方(SurfaceCache tile march/ATLAS_INIT、SPGI、
+    // DDGI trace)以 SampledImage 采样级联 SDF 与 mip,必须落在
+    // SHADER_READ_ONLY,否则采样描述符(layout=SR)与实际 GENERAL 冲突。
+    // 下一帧 DispatchVoxelization 的 preBarrier(SR→UA)负责转回。
+    for (u32 k = 0; k <= cascade.mip_count; ++k) {
+        rhi::ResourceBarrier toSr{};
+        toSr.resource = levels[k];
+        toSr.beforeState = rhi::ResourceState::UnorderedAccess;
+        toSr.afterState = rhi::ResourceState::ShaderResource;
+        toSr.subresource = 0xFFFFFFFF;
+        toSr.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&toSr, 1);
     }
 }
 
