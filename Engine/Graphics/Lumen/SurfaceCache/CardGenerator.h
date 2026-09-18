@@ -36,6 +36,32 @@ public:
     void ResetRegistrations();
     void RebuildCardAllocation();
 
+    // ============================================================================
+    // [WRC 计划 Stream D2/D3/E2]
+    //   D2（PRIMAL_SC_PAGE_TABLE=1）：页表间接化——每卡记录物理 page run
+    //     （page 粒度坐标），随卡片缓冲一起上传；无淘汰（v1）。
+    //   D3：物理页池 + LRU 挤页——页表模式下 RebuildInstance 的重发卡优先
+    //     复用自由页段（free-run first-fit）；自由段不足时按 LRU
+    //     （card_last_touch_，TouchCard 由 LightEval/capture 两侧刷新）挤掉
+    //     最久未服务的卡片页段，替代 capacity_full 静默丢弃。
+    //   E2：RebuildInstance——单实例增量重建（槽位重排），配合管线侧
+    //     事件驱动变换脏路径（替代 30 帧冷却 + 全量 Rebind）。
+    // ============================================================================
+
+    /// D2: 开启页表模式（PRIMAL_SC_PAGE_TABLE=1 时由 SurfaceCachePass 调用）。
+    void EnablePageTable() { page_table_enabled_ = true; }
+    /// D2: 页表（每卡一个 u32 = 页坐标 pack：x_page<<16 | y_page）。
+    const std::vector<u32>& GetPageTable() const { return page_table_; }
+    rhi::ResourceHandle GetPageTableBuffer() const { return page_table_buffer_; }
+    /// D3: 卡片服务新近度（LightEval Top-K / card-view capture 两侧刷新）。
+    void TouchCard(u32 card_idx, u32 frame) {
+        if (card_idx < card_last_touch_.size()) card_last_touch_[card_idx] = frame;
+    }
+    /// E2: 单实例增量重建——更新注册 AABB 后重发该实例的卡片。页表关闭时
+    /// 等价于标记全量重分配（allocation_dirty_）。
+    bool RebuildInstance(uint32_t instance_id,
+                         const math::v3& aabb_min, const math::v3& aabb_max);
+
     rhi::ResourceHandle GetCardDataBuffer() const { return card_data_buffer_; }
     rhi::ResourceHandle GetCardLookupBuffer() const { return card_lookup_buffer_; }
     rhi::ResourceHandle GetGridOffsetsBuffer() const { return grid_offsets_buffer_; }
@@ -68,6 +94,14 @@ private:
     uint32_t baked_mesh_count_ = 0;
     uint32_t fallback_mesh_count_ = 0;
     bool allocation_dirty_ = true;
+
+    // [WRC 计划 Stream D2/D3] 页表模式状态。
+    bool page_table_enabled_ = false;
+    std::vector<u32> page_table_;        // card slot → 页坐标 pack
+    std::vector<u32> card_last_touch_;   // card slot → 最后服务帧（LRU）
+    struct FreeRun { uint32_t x, y, res; };
+    std::vector<FreeRun> free_runs_;     // D3: 自由页段（重发优先复用）
+    rhi::ResourceHandle page_table_buffer_ = rhi::handles::INVALID_RESOURCE;
 
     rhi::ResourceHandle card_data_buffer_ = rhi::handles::INVALID_RESOURCE;
     rhi::ResourceHandle card_lookup_buffer_ = rhi::handles::INVALID_RESOURCE;

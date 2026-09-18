@@ -125,7 +125,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             // GI 根治 Phase 3.2: flat openSky（Metal buffer(13)，与 Vulkan flat 20 对等）
             {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // flat probe openSky
         };
-        set_layout_ = device->CreateDescriptorSetLayout({17, bindings});
+        // 修复：18 个条目（含 openSky buffer(13)）但 count 传 17——最后一个
+        // 条目从未进布局，Metal ddgi_gi_gather 编码期断言
+        // "missing Buffer binding at index 12/13"。
+        set_layout_ = device->CreateDescriptorSetLayout({18, bindings});
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
@@ -212,18 +215,19 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
     outputs.gi_specular_rg = graph.ImportResource("DDGIHalfResGlossy", gi_specular_texture_);
 
     // Read the slot DDGI trace + SC-DDGI integration wrote this frame
-    // (frame_index % 3). The old (cbIdx + 2) % 3 derived from the swapchain
-    // index and could phase-shift against the writers' frame counter.
+    // (currentIndex — RG ordering guarantees the writes land before this
+    // read). Phase 1d: 槽位单一事实源 DDGISlotMap.h；frame_index 缺省时
+    // 回退旧 cbIdx 时钟（仅未迁移的调用方触达）。
     u32 ddgiReadIdx = (inputs.frame_index != GIGatherInputs::kFrameIndexUnset)
-                          ? (inputs.frame_index % 3)
+                          ? lumen::DDGISlotsForFrame(inputs.frame_index).currentIndex
                           : ((inputs.current_buffer_index + 2) % 3);
 
     // Import DDGI buffers
-    auto irrHandle = graph.ImportResource("DDGIIrrRead", inputs.ddgi_pass->GetIrradianceBuffer(ddgiReadIdx));
-    auto depthHandle = graph.ImportResource("DDGIDepthRead", inputs.ddgi_pass->GetDepthBuffer(ddgiReadIdx));
+    auto irrHandle = graph.ImportResource("DDGIIrrRead", inputs.ddgi_pass->GetIrradianceBufferBySlot(ddgiReadIdx));
+    auto depthHandle = graph.ImportResource("DDGIDepthRead", inputs.ddgi_pass->GetDepthBufferBySlot(ddgiReadIdx));
     // T4.4: far volume read dependency (ordering vs. its trace pass).
     if (inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized()) {
-        graph.ImportResource("DDGIFarIrrRead", inputs.ddgi_far_pass->GetIrradianceBuffer(ddgiReadIdx));
+        graph.ImportResource("DDGIFarIrrRead", inputs.ddgi_far_pass->GetIrradianceBufferBySlot(ddgiReadIdx));
     }
     // T6.3 sub-B: 附加 volume（索引 ≥2）的读依赖注册——与 far import 同模式，
     // 把第 3/4 个 volume 的 irradiance 纳入本帧图（别名注册 + 与其 trace pass
@@ -269,7 +273,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // 槽位），CB 上传与 barrier/descriptor 取数逐字节等价。
             lumen::DDGIVolumeView farView = inputs.far_volume_view;
             if (!farView.IsValid() && inputs.ddgi_far_pass && inputs.ddgi_far_pass->IsInitialized()) {
-                farView = inputs.ddgi_far_pass->GetVolumeView(ddgiReadIdx);
+                farView = inputs.ddgi_far_pass->GetVolumeViewBySlot(ddgiReadIdx);
             }
 
             // T3.6/D1: 组装 flat volume 表。inputs.volume_views 优先（管线侧把
@@ -285,7 +289,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         nvolViews[vi] = inputs.volume_views[vi];
                 }
                 if (!nvolViews[0].IsValid())
-                    nvolViews[0] = ddgi->GetVolumeView(ddgiReadIdx);
+                    nvolViews[0] = ddgi->GetVolumeViewBySlot(ddgiReadIdx);
                 if (!nvolViews[1].IsValid() && farView.IsValid())
                     nvolViews[1] = farView;
                 for (u32 vi = 0; vi < GIGatherInputs::kMaxVolumes; ++vi)
@@ -344,9 +348,10 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     hdr[3] = 0;
                     device_->UnmapBuffer(flatBuf);
                 }
-                // GI 根治 Phase 3.2: flat openSky 缓冲（256B 头 + probes×4B），
+                // GI 根治 Phase 3.2 + 能量所有权 Phase 4a: flat openSky 缓冲
+                // （256B 头 + probes×8B，float2/探针 = {escapeRatio, sER}），
                 // 同槽位按需增长。
-                const u64 neededSky = kFlatHeaderBytes + (u64)fvTotalProbes * 4ull;
+                const u64 neededSky = kFlatHeaderBytes + (u64)fvTotalProbes * 8ull;
                 if (flat_opensky_buffer_[bindingIdx] == handles::INVALID_RESOURCE ||
                     flat_opensky_capacity_[bindingIdx] < neededSky) {
                     for (u32 s2 = 0; s2 < 3; ++s2) {
@@ -406,6 +411,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             if (const char* e = std::getenv("PRIMAL_GI_OPENSKY")) {
                 if (e[0] == '0') openskyActive = false;
             }
+            // 能量所有权 Phase 4a: openSky V2 开关（meta.z）——E_geo/E_sky
+            // 拆分消费；PRIMAL_GI_OPENSKY_V2=0 回退旧整探针分类（sER=1）。
+            bool openskyV2 = true;
+            if (const char* e = std::getenv("PRIMAL_GI_OPENSKY_V2")) {
+                if (e[0] == '0') openskyV2 = false;
+            }
             // T6.3 sub-B → T3.6/D1: upload FlatVolumeCB（binding 18）。flatActive
             // 时写入 volume[0..nvolCount) 的 origin/spacing/counts + probe
             // offset（w 槽，原 NVolumeCB 的 enabled 位改型）；否则整块清零
@@ -425,8 +436,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         // y = openSky 分类开关（Phase 3.2，实际生效还要求
                         // openskyActive——volume 视图缺 opensky 时 shader 侧
                         // 由 dummy 兜底但开关同时关掉）。
+                        // z = openSky V2 开关（Phase 4a；PRIMAL_GI_OPENSKY_V2=0
+                        // 回滚旧整探针分类——shader 侧 sER=1 等价旧行为）。
                         nv->meta = math::v4{(float)nvolCount,
-                                            openskyActive ? 1.0f : 0.0f, 0.0f, 0.0f};
+                                            openskyActive ? 1.0f : 0.0f,
+                                            openskyV2 ? 1.0f : 0.0f, 0.0f};
                     }
                     device_->UnmapBuffer(nvolumesCB);
                 }
@@ -464,8 +478,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // buffer barrier 本就是 no-op，Metal 无显式 buffer 布局）。
                 ResourceBarrier barriers[4]{};
                 int bc = 0;
-                auto irrBuf = ddgi->GetIrradianceBuffer(ddgiReadIdx);
-                auto depthBuf = ddgi->GetDepthBuffer(ddgiReadIdx);
+                auto irrBuf = ddgi->GetIrradianceBufferBySlot(ddgiReadIdx);
+                auto depthBuf = ddgi->GetDepthBufferBySlot(ddgiReadIdx);
                 auto confBuf = ddgi->GetConfidenceBuffer(ddgiReadIdx);
                 // 2026-09-17 P0：近场重定位起点与 irr/depth 同为本帧 trace 产物。
                 auto roBuf = nvolViews[0].IsValid() ? nvolViews[0].relocated_origins
@@ -525,8 +539,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     const u64 probes = (u64)v.counts.x * (u64)v.counts.y * (u64)v.counts.z;
                     if (probes == 0) continue;
                     cmd->CopyBuffer(v.opensky, flatOpenSkyBuf,
-                                    0, 256ull + (u64)fvOffsets[vi] * 4ull,
-                                    probes * 4ull);
+                                    0, 256ull + (u64)fvOffsets[vi] * 8ull,
+                                    probes * 8ull);
                 }
             }
 
@@ -701,9 +715,9 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 bufWrites[6].dstBinding = bufBase + 6; bufWrites[6].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[6].buffer = ddgi->GetConfidenceBuffer(ddgiReadIdx); bufInfos[6].offset = 0; bufInfos[6].range = ~0ull;
                 bufWrites[7].dstBinding = bufBase + 7; bufWrites[7].descriptorType = DescriptorType::StorageBuffer;
-                bufInfos[7].buffer = ddgi->GetIrradianceBuffer(ddgiReadIdx); bufInfos[7].offset = 0; bufInfos[7].range = ~0ull;
+                bufInfos[7].buffer = ddgi->GetIrradianceBufferBySlot(ddgiReadIdx); bufInfos[7].offset = 0; bufInfos[7].range = ~0ull;
                 bufWrites[8].dstBinding = bufBase + 8; bufWrites[8].descriptorType = DescriptorType::StorageBuffer;
-                bufInfos[8].buffer = ddgi->GetDepthBuffer(ddgiReadIdx); bufInfos[8].offset = 0; bufInfos[8].range = ~0ull;
+                bufInfos[8].buffer = ddgi->GetDepthBufferBySlot(ddgiReadIdx); bufInfos[8].offset = 0; bufInfos[8].range = ~0ull;
                 if (isVk) {
                     // Vulkan: bindings 4..12（flat 槽 17/18 已由上方 flatWrites 写入）。
                     device_->UpdateDescriptorSets(9, bufWrites);
@@ -857,7 +871,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         // buffer AS THE GATHER READS IT (same slot, buffer
                         // copy — bypasses every sampling/stride question).
                         {
-                            auto irrHandle = ddgi->GetIrradianceBuffer(ddgiReadIdx);
+                            auto irrHandle = ddgi->GetIrradianceBufferBySlot(ddgiReadIdx);
                             if (irrHandle != rhi::handles::INVALID_RESOURCE) {
                                 const u64 irrBytes = 16384ull * 9u * 16u;
                                 static rhi::ResourceHandle irrStaging = rhi::handles::INVALID_RESOURCE;
@@ -939,7 +953,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                             // 深度图健康检查：可见性加权的输入。
                                             // 全零/全 1 → UpdateDepth 未生效。
                                             if (auto* dp = static_cast<const float*>(
-                                                    device_->MapBuffer(ddgi->GetDepthBuffer(ddgiReadIdx), 0, 16384ull * 128u * 4u))) {
+                                                    device_->MapBuffer(ddgi->GetDepthBufferBySlot(ddgiReadIdx), 0, 16384ull * 128u * 4u))) {
                                                 u64 zeroMean = 0; float meanSum = 0.0f, varSum = 0.0f;
                                                 for (u64 pr = 0; pr < 16384ull; ++pr) {
                                                     const float* dm = dp + pr * 128u;
@@ -953,7 +967,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                                 PRIMAL_LOG_STREAM(Error, "Render") << "  [DEPTH_DUMP] zeroMeanProbes=" << zeroMean
                                                           << "/16384 meanOfMeans=" << meanSum / 16384.0f
                                                           << " avgVar=" << varSum / (16384.0f * 64.0f) << std::endl;
-                                                device_->UnmapBuffer(ddgi->GetDepthBuffer(ddgiReadIdx));
+                                                device_->UnmapBuffer(ddgi->GetDepthBufferBySlot(ddgiReadIdx));
                                             }
                                             PRIMAL_LOG_STREAM(Error, "Render") << "  worstProbe=" << worstProbe
                                                       << " abs=" << worst[0]

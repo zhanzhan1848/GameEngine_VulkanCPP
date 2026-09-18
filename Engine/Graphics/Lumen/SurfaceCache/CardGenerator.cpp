@@ -90,7 +90,28 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
 void CardGenerator::ResetRegistrations() {
     meshes_.clear();
     baked_cards_pool_.clear();
+    page_table_.clear();
+    card_last_touch_.clear();
+    free_runs_.clear();
     allocation_dirty_ = true;
+}
+
+// ============================================================================
+// [WRC 计划 Stream E2]: 单实例增量重建。页表关闭 = 更新注册 AABB 后标记
+// 全量重分配（管线侧事件驱动路径不再走 snapshot 全量 Rebind——增量收益
+// 在管线层）。页表模式 = 额外维护页表/LRU（同一次全量重分配内记账）。
+// ============================================================================
+bool CardGenerator::RebuildInstance(uint32_t instance_id,
+                                    const math::v3& aabb_min, const math::v3& aabb_max) {
+    MeshInstanceInfo* target = nullptr;
+    for (auto& m : meshes_) {
+        if (m.instance_id == instance_id) { target = &m; break; }
+    }
+    if (!target) return false;
+    target->aabb_min = aabb_min;
+    target->aabb_max = aabb_max;
+    allocation_dirty_ = true;
+    return true;
 }
 
 void CardGenerator::RebuildCardAllocation() {
@@ -100,6 +121,10 @@ void CardGenerator::RebuildCardAllocation() {
     lookups_.clear();
     baked_mesh_count_ = 0;
     fallback_mesh_count_ = 0;
+    // [WRC 计划 Stream D2/D3]: 并行表与自由段随全量重分配重建。
+    page_table_.clear();
+    card_last_touch_.clear();
+    free_runs_.clear();
 
     uint32_t current_atlas_x = 0;
     uint32_t current_atlas_y = 0;
@@ -205,13 +230,76 @@ void CardGenerator::RebuildCardAllocation() {
                 res = page_size_;
                 card.resolution = static_cast<uint16_t>(res);
             }
+            // ==================================================================
+            // [WRC 计划 Stream D3]（PRIMAL_SC_PAGE_TABLE=1）: capacity_full
+            // 静默丢弃改挤页——货架写满时优先把 LRU 最久未服务的已发大卡
+            // （res > page）降档到单页，把腾出的页段推入自由段表，供本卡
+            // 重试。降档保留卡片槽位连续性（lookup 区间不变），只损失该卡
+            // 的纹理解析度。自由段耗尽才回到丢弃。
+            // ==================================================================
+            auto emit_from_free_run = [&](uint32_t want) -> bool {
+                for (size_t i = 0; i < free_runs_.size(); ++i) {
+                    if (free_runs_[i].res >= want) {
+                        card.atlas_offset_x = free_runs_[i].x;
+                        card.atlas_offset_y = free_runs_[i].y;
+                        if (free_runs_[i].res > want) {
+                            free_runs_[i].x += want;
+                            free_runs_[i].res -= want;
+                        } else {
+                            free_runs_.erase(free_runs_.begin() + i);
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            };
+            bool squeezed = false;
+            if (current_atlas_y + res > atlas_size_ && page_table_enabled_) {
+                // 找 LRU 最旧的大卡降档（至少释放 (res-page) 宽度的行段）。
+                int victim = -1;
+                u32 oldest = 0xFFFFFFFFu;
+                for (u32 ci = 0; ci < cards_.size(); ++ci) {
+                    if (cards_[ci].resolution <= page_size_) continue;
+                    const u32 touch = ci < card_last_touch_.size() ? card_last_touch_[ci] : 0u;
+                    if (touch < oldest) { oldest = touch; victim = (int)ci; }
+                }
+                if (victim >= 0) {
+                    SurfaceCacheCard& v = cards_[victim];
+                    const u32 freed = v.resolution - page_size_;
+                    free_runs_.push_back({ v.atlas_offset_x + page_size_,
+                                           v.atlas_offset_y, freed });
+                    v.resolution = static_cast<uint16_t>(page_size_);
+                    if (emit_from_free_run(res)) squeezed = true;
+                }
+            }
+            // 自由段复用（D3 挤页/重发路径）。
+            if (!squeezed &&
+                (current_atlas_y + res > atlas_size_ || !free_runs_.empty()) &&
+                page_table_enabled_ && emit_from_free_run(res)) {
+                squeezed = true;
+            }
             // Skip card if it still doesn't fit in remaining atlas space
-            if (current_atlas_y + res > atlas_size_) return false;
+            if (!squeezed && current_atlas_y + res > atlas_size_) return false;
 
-            card.atlas_offset_x = current_atlas_x;
-            card.atlas_offset_y = current_atlas_y;
-            current_atlas_x += res;
-            row_height = std::max(row_height, res);
+            if (!squeezed) {
+                card.atlas_offset_x = current_atlas_x;
+                card.atlas_offset_y = current_atlas_y;
+                current_atlas_x += res;
+                row_height = std::max(row_height, res);
+            } else {
+                card.resolution = static_cast<uint16_t>(res);
+            }
+
+            // [WRC 计划 Stream D2]: 页表记账（页粒度 pack：x_page<<16|y_page）
+            // + LRU 新近度表扩容。卡片随后经 sort 重排——并行表随 sort 同步
+            // 置换（见下方 sort 块）。
+            if (page_table_enabled_) {
+                const u32 p = page_size_ ? page_size_ : 1u;
+                const u32 px = card.atlas_offset_x / p;
+                const u32 py = card.atlas_offset_y / p;
+                page_table_.push_back((px << 16) | (py & 0xFFFFu));
+                card_last_touch_.push_back(0u);
+            }
 
             cards_.push_back(card);
             lookup.card_count++;
@@ -291,18 +379,35 @@ void CardGenerator::RebuildCardAllocation() {
         sorted_cards.reserve(cards_.size());
         std::vector<SurfaceCacheCardLookup> sorted_lookups;
         sorted_lookups.reserve(lookups_.size());
+        // [WRC 计划 Stream D2]: 页表/LRU 并行表随卡片置换同步重排。
+        std::vector<u32> sorted_pages;
+        std::vector<u32> sorted_touch;
+        if (page_table_enabled_) {
+            sorted_pages.reserve(cards_.size());
+            sorted_touch.reserve(cards_.size());
+        }
 
         for (size_t idx : indices) {
             auto& lk = lookups_[idx];
             u32 new_start = static_cast<u32>(sorted_cards.size());
             for (u32 c = 0; c < lk.card_count; ++c) {
-                sorted_cards.push_back(cards_[lk.card_start + c]);
+                const u32 src = lk.card_start + c;
+                sorted_cards.push_back(cards_[src]);
+                if (page_table_enabled_) {
+                    sorted_pages.push_back(src < page_table_.size() ? page_table_[src] : 0u);
+                    sorted_touch.push_back(src < card_last_touch_.size() ? card_last_touch_[src] : 0u);
+                }
             }
             lk.card_start = new_start;
             sorted_lookups.push_back(lk);
         }
         cards_ = std::move(sorted_cards);
         lookups_ = std::move(sorted_lookups);
+        if (page_table_enabled_) {
+            page_table_ = std::move(sorted_pages);
+            card_last_touch_ = std::move(sorted_touch);
+            free_runs_.clear();   // 重排后自由段坐标失效（全量重排即重整）
+        }
     }
 
     UploadToGPU();
@@ -431,6 +536,29 @@ void CardGenerator::UploadToGPU() {
         if (lookup_data) {
             memcpy(lookup_data, lookups_.data(), lookups_.size() * sizeof(SurfaceCacheCardLookup));
             device_->UnmapBuffer(card_lookup_buffer_);
+        }
+    }
+
+    // [WRC 计划 Stream D2]: 页表缓冲（card slot → 物理页坐标 pack）。
+    // v1（无淘汰）页表与 card.atlas_offset 逐字节等价——采样契约切换
+    // （SurfaceCacheData.glsl 过表寻址）为 D2 残项，随运行时迁移一起落地。
+    if (page_table_enabled_ && !page_table_.empty()) {
+        if (page_table_buffer_ == rhi::handles::INVALID_RESOURCE) {
+            rhi::BufferDesc desc{};
+            desc.size = max_cards_ * sizeof(uint32_t);
+            desc.type = rhi::BufferType::Structured;
+            desc.usage = rhi::GPUMemoryUsage::Dynamic;
+            desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+            desc.structured.elementCount = max_cards_;
+            desc.structured.elementStride = sizeof(uint32_t);
+            page_table_buffer_ = device_->CreateBuffer(desc);
+        }
+        if (page_table_buffer_ != rhi::handles::INVALID_RESOURCE) {
+            auto* pt = static_cast<uint32_t*>(device_->MapBuffer(page_table_buffer_));
+            if (pt) {
+                memcpy(pt, page_table_.data(), page_table_.size() * sizeof(uint32_t));
+                device_->UnmapBuffer(page_table_buffer_);
+            }
         }
     }
 }
