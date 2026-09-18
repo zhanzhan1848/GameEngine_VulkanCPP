@@ -186,6 +186,11 @@ lumen::LumenConfig PipelineQualityConfig::LumenConfigFromPreset(lumen::LumenQual
         c.ddgi_rays_per_probe = 64;
         c.ddgi_enable_far_volume = true;
         c.surface_cache_capture_budget = 512;
+        // [WRC] A4（设计文档 §3/§5.3）: High/Ultra 档世界空间缓存默认切 WRC
+        //（迁移完成判据 §5.3 五项通过后的档位接线）。DDGI 直采永久保留
+        //（Medium 档正解）；运行总开关仍是 PRIMAL_WRC_ENABLE（WRCEnabled()，
+        // 置 0 全量回 DDGI 线）。
+        c.wrc_enable = true;
         break;
     }
 
@@ -225,6 +230,11 @@ lumen::LumenConfig PipelineQualityConfig::LumenConfigFromPreset(lumen::LumenQual
     case lumen::LumenQualityPreset::Ultra:
     case lumen::LumenQualityPreset::UltraRT:
         c.axes.use_screen_probes = true;
+        // [WRC] A4: High/Ultra 轴4 边——propagate_sc_to_wrc（WRC trace 采样
+        // SC）+ fallback_spgi_to_wrc（SPGI 远场消费 WRC）。wrc_spgi_consume
+        // 为 false 时 SPGI 远场回落冻结边 fallback_spgi_to_ddgi。
+        c.wrc_propagate_sc = true;
+        c.wrc_spgi_consume = true;
         break;
     }
 

@@ -482,6 +482,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {16, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // radiance cascade L1z (SH-L1)
             {17, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // SC depth for hit validation
             {18, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // P1: trace 分支统计（diag 门控）
+            {19, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [WRC] A3: WRC probe_data (ro)
+            {20, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [WRC] A3: 消费计数（atomic）
         };
         bindings[2].readonly = true;
         bindings[3].readonly = true;
@@ -496,7 +498,8 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         bindings[14].is3D = true;     // radiance cascade (SH-L1)
         bindings[15].is3D = true;     // radiance cascade (SH-L1)
         bindings[16].is3D = true;     // radiance cascade (SH-L1)
-        finalize_set_layout_ = device_->CreateDescriptorSetLayout({19, bindings});
+        bindings[19].readonly = true; // [WRC] probe_data（radiance 方向格）
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout({21, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // prev frame color
@@ -1702,6 +1705,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 gd.ddgi_fb[1] = {ddgi_fb_counts_.x, ddgi_fb_counts_.y, ddgi_fb_counts_.z,
                                  ddgi_fallback_available_ ? 1.0f : 0.0f};
 
+                // [WRC] A3: 远场 WRC 消费 header（fallback_spgi_to_wrc 边）。
+                gd.wrc_fb[0] = {wrc_origin_.x, wrc_origin_.y, wrc_origin_.z, wrc_spacing_};
+                gd.wrc_fb[1] = {wrc_counts_.x, wrc_counts_.y, wrc_counts_.z,
+                                wrc_available_ ? 1.0f : 0.0f};
+
                 // T5.1: HZB near-field march params (SSGI/SSR near-far convention).
                 gd.hzb_params = {0.1f, 1000.0f,
                                  (!skipHZB && hzb_trace_pipeline_ != handles::INVALID_PIPELINE &&
@@ -1827,6 +1835,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 ResourceHandle ddgiIrr = (ddgi_fallback_available_ &&
                     ddgi_irradiance_buffer_ != handles::INVALID_RESOURCE)
                     ? ddgi_irradiance_buffer_ : dummy_buffer_;
+                // [WRC] A3: 未启用时绑定 dummy（shader 由 wrc_fb[1].w 短路）。
+                ResourceHandle wrcProbeData = (wrc_available_ &&
+                    wrc_probe_data_ != handles::INVALID_RESOURCE)
+                    ? wrc_probe_data_ : dummy_buffer_;
+                ResourceHandle wrcConsume = (wrc_available_ &&
+                    wrc_consume_buffer_ != handles::INVALID_RESOURCE)
+                    ? wrc_consume_buffer_ : dummy_buffer_;
 
                 u32 totalRays = grid_width_ * grid_height_ * params_.rays_per_probe;
                 u32 dispatchX = (totalRays + 63) / 64;
@@ -2033,8 +2048,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {18, DescriptorType::StorageBuffer,
                                 trace_stats_buffer_ != handles::INVALID_RESOURCE
                                     ? trace_stats_buffer_ : dummy_buffer_},          // P1: 分支统计
+                            {19, DescriptorType::StorageBuffer, wrcProbeData},       // [WRC] A3
+                            {20, DescriptorType::StorageBuffer, wrcConsume},         // [WRC] A3
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 19);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 21);
                     } else {
                         DescriptorData finParams[] = {
                             {0, DescriptorType::SampledImage,  prevColorTex},

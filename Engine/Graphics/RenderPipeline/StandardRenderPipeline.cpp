@@ -83,6 +83,193 @@ static void FillSCLightList(lumen::SurfaceCacheFrameData& fd, const RenderScene*
     fd.sc_light_count = n;
 }
 
+// P1（2026-09-17 sun-audit §7）：单一太阳合同。BuildRenderGraph 与
+// RenderWithCommandBuffer 两个 RenderGraph 站点必须从同一填充器取方向与
+// 颜色——两处曾漂移（RenderWithCommandBuffer 的 SC 备用色错用
+// ddgi_light_color，与主路径 light_color 相差 1.5×）。
+//   - 屏幕直射 / SC 灯表与备用色：light_color（真实太阳）；
+//   - DDGI 解析探针驱动：ddgi_light_color（历史 1.5× 档，审计 §7 P1：
+//     移除前必须先追踪它在 SC hit/miss/fallback 各分支的消费）。
+static void FillSurfaceCacheSunLight(lumen::SurfaceCacheFrameData& fd,
+                                     const RenderPipelineSettings& settings,
+                                     const RenderScene* scene) {
+    fd.light_count = 1;
+    fd.light_direction = rhi::math::Normalize(settings.lighting.light_direction);
+    fd.light_color = {settings.lighting.light_color.x,
+                      settings.lighting.light_color.y,
+                      settings.lighting.light_color.z};
+    FillSCLightList(fd, scene);
+}
+
+static void FillDDGISunLight(lumen::DDGICameraData& camData,
+                             const RenderPipelineSettings& settings) {
+    camData.light_direction = rhi::math::Normalize(settings.lighting.light_direction);
+    camData.light_color = {settings.lighting.ddgi_light_color.x,
+                           settings.lighting.ddgi_light_color.y,
+                           settings.lighting.ddgi_light_color.z};
+}
+
+// P0（sun-audit §7）：解析后的有效太阳/相机/pass 尺寸参数一次性打到 stderr
+// ——采集脚本捕获 render.log 后并入 capture.json（engine_reported），保证
+// metadata 与实际 GPU UBO 数值对应（修复旧采集器环境白名单缺
+// PRIMAL_DIRECT_LIGHT/PRIMAL_SC_DIRECT_SCALE 的 provenance 缺口）。
+struct SunContractSizes {
+    u32 render_w = 0, render_h = 0;
+    u32 shadow_map_resolution = 0, shadow_cascades = 0;
+    float shadow_extents[4] = {};
+    u32 sc_atlas = 0, sc_cards = 0, sc_max_cards = 0;
+    u32 ddgi_counts[3] = {};
+    float ddgi_spacing = 0.0f;
+    bool froxel_enabled = false;
+    u32 froxel_grid[3] = {};
+};
+
+static void LogSunContractOnce(const RenderPipelineSettings& settings,
+                               const math::m4x4& view, const math::m4x4& proj,
+                               const SunContractSizes& s, u32 frame) {
+    // 第 1 帧导出一次（保证最短采集也有 provenance）；第 30 帧再导出一次
+    // 稳态值——首帧时 tone 的上游 HDR 标志与 DDGI volume 尺寸尚未初始化
+    // （base 会误报 passthrough 0.26、probe counts 全 0）。脚本取最后一行。
+    static bool loggedEarly = false;
+    static bool loggedSteady = false;
+    if (frame <= 1) {
+        if (loggedEarly) return;
+        loggedEarly = true;
+    } else if (frame >= 30) {
+        if (loggedSteady) return;
+        loggedSteady = true;
+    } else {
+        return;
+    }
+    const auto& l = settings.lighting;
+    const math::v3 D = rhi::math::Normalize(l.light_direction);
+    // 0 = 显式关档（旧固定 lightSizeUV），如实上报 0 而非夹紧后的下限。
+    const f32 diameter = l.sun_angular_diameter_deg > 0.0f
+        ? std::min(std::max(l.sun_angular_diameter_deg, 0.05f), 10.0f)
+        : 0.0f;
+    const auto tone = PostProcess::GetToneProvenance();
+    std::fprintf(stderr,
+                 "[SunContract] {\"light_direction\":[%.6f,%.6f,%.6f],"
+                 "\"to_light\":[%.6f,%.6f,%.6f],"
+                 "\"direct_light_color\":[%.6f,%.6f,%.6f],"
+                 "\"ddgi_probe_light_color\":[%.6f,%.6f,%.6f],"
+                 "\"sc_direct_scale\":%.3f,"
+                 "\"sun_angular_diameter_deg\":%.4f,"
+                 "\"exposure\":{\"ev\":%.4f,\"base\":%.6f,\"effective\":%.6f,"
+                 "\"adapt_enabled\":%s,\"force_aces\":%s,\"force_passthrough\":%s,"
+                 "\"contrast\":%.4f,\"saturation\":%.4f,\"vignette\":%.4f,"
+                 "\"key\":%.4f,\"bloom_intensity\":%.4f},"
+                 "\"camera\":{\"view\":[[%.6f,%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f,%.6f],"
+                 "[%.6f,%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f,%.6f]],"
+                 "\"projection\":[[%.6f,%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f,%.6f],"
+                 "[%.6f,%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f,%.6f]]},"
+                 "\"passes\":{\"render\":[%u,%u],"
+                 "\"shadow\":{\"map_resolution\":%u,\"cascades\":%u,"
+                 "\"extents\":[%.1f,%.1f,%.1f,%.1f]},"
+                 "\"sc_atlas\":{\"size\":%u,\"cards\":%u,\"max_cards\":%u},"
+                 "\"ddgi\":{\"probe_counts\":[%u,%u,%u],\"probe_spacing\":%.4f},"
+                 "\"froxel\":{\"enabled\":%s,\"grid\":[%u,%u,%u]}}}\n",
+                 D.x, D.y, D.z, -D.x, -D.y, -D.z,
+                 l.light_color.x, l.light_color.y, l.light_color.z,
+                 l.ddgi_light_color.x, l.ddgi_light_color.y, l.ddgi_light_color.z,
+                 SCDirectIntensityScale(), diameter,
+                 tone.exposure_ev, tone.base_exposure, tone.exposure,
+                 tone.adapt_enabled ? "true" : "false",
+                 tone.force_aces ? "true" : "false",
+                 tone.force_passthrough ? "true" : "false",
+                 tone.contrast, tone.saturation, tone.vignette, tone.key,
+                 tone.bloom_intensity,
+                 view.columns[0].x, view.columns[0].y, view.columns[0].z, view.columns[0].w,
+                 view.columns[1].x, view.columns[1].y, view.columns[1].z, view.columns[1].w,
+                 view.columns[2].x, view.columns[2].y, view.columns[2].z, view.columns[2].w,
+                 view.columns[3].x, view.columns[3].y, view.columns[3].z, view.columns[3].w,
+                 proj.columns[0].x, proj.columns[0].y, proj.columns[0].z, proj.columns[0].w,
+                 proj.columns[1].x, proj.columns[1].y, proj.columns[1].z, proj.columns[1].w,
+                 proj.columns[2].x, proj.columns[2].y, proj.columns[2].z, proj.columns[2].w,
+                 proj.columns[3].x, proj.columns[3].y, proj.columns[3].z, proj.columns[3].w,
+                 s.render_w, s.render_h,
+                 s.shadow_map_resolution, s.shadow_cascades,
+                 s.shadow_extents[0], s.shadow_extents[1], s.shadow_extents[2], s.shadow_extents[3],
+                 s.sc_atlas, s.sc_cards, s.sc_max_cards,
+                 s.ddgi_counts[0], s.ddgi_counts[1], s.ddgi_counts[2], s.ddgi_spacing,
+                 s.froxel_enabled ? "true" : "false",
+                 s.froxel_grid[0], s.froxel_grid[1], s.froxel_grid[2]);
+}
+
+// 采集点收集 pass 尺寸真值（const 访问器，null 安全）。
+static SunContractSizes GatherSunContractSizes(const RenderPipelineSettings& settings,
+                                               u32 render_w, u32 render_h,
+                                               const ShadowMapOutputs* shadowOut,
+                                               const lumen::SurfaceCachePass* scPass, u32 frame,
+                                               const lumen::LumenDDGIPass* ddgiPass) {
+    SunContractSizes s{};
+    s.render_w = render_w;
+    s.render_h = render_h;
+    if (shadowOut) {
+        s.shadow_map_resolution = shadowOut->shadow_map_resolution;
+        s.shadow_cascades = shadowOut->shadow_cascade_count;
+        for (u32 c = 0; c < 4; ++c) s.shadow_extents[c] = shadowOut->shadow_cascade_extents[c];
+    }
+    if (scPass && scPass->IsInitialized()) {
+        const auto view = scPass->GetCacheView(frame);
+        s.sc_atlas = view.atlas_size;
+        s.sc_cards = view.card_count;
+        s.sc_max_cards = view.max_card_count;
+    }
+    if (ddgiPass && ddgiPass->IsInitialized()) {
+        const auto& vol = ddgiPass->GetVolumeData();
+        s.ddgi_counts[0] = vol.ProbeCounts[0];
+        s.ddgi_counts[1] = vol.ProbeCounts[1];
+        s.ddgi_counts[2] = vol.ProbeCounts[2];
+        s.ddgi_spacing = vol.ProbeSpacing;
+    }
+    s.froxel_enabled = settings.quality.enable_froxel_fog;
+    s.froxel_grid[0] = settings.froxel.grid_width;
+    s.froxel_grid[1] = settings.froxel.grid_height;
+    s.froxel_grid[2] = settings.froxel.grid_depth;
+    return s;
+}
+
+// Bloom is a reference-scene presentation effect while the Vulkan HDR path is
+// the only path whose input units are known to match the bright-pass threshold.
+// 2026-09-17 用户反馈：bloom 观感过强（合成增益 4.0 的大范围光晕把受光区
+// 洗白、掩盖间接光结构），默认关闭——PRIMAL_BLOOM=1 显式开启，0/未设=关。
+static bool ShouldEnableBloom(const rhi::RHIDeviceBase& device) {
+    if (const char* e = std::getenv("PRIMAL_BLOOM")) {
+        if (std::strcmp(e, "0") == 0) return false;
+        if (std::strcmp(e, "1") == 0) return true;
+    }
+    (void)device;
+    return false;
+}
+
+// P3（sponza-gap-audit §4.9）: bright-pass 参数接线——Bloom.frag 的
+// threshold/knee/energy 已改为 UBO，由这里从环境变量构造（默认 = 旧标定
+// 常数 4/1/0.2，行为零变化）。合成强度见 ToneMappingPass 的
+// PRIMAL_BLOOM_INTENSITY。
+static PostProcess::BloomParams MakeBloomParams() {
+    PostProcess::BloomParams p{};
+    auto envF = [](const char* name, float def) {
+        if (const char* e = std::getenv(name)) {
+            char* end = nullptr;
+            float v = std::strtof(e, &end);
+            if (end && *end == '\0' && v >= 0.0f) return v;
+        }
+        return def;
+    };
+    p.threshold = envF("PRIMAL_BLOOM_THRESHOLD", p.threshold);
+    p.knee      = envF("PRIMAL_BLOOM_KNEE", p.knee);
+    p.energy    = envF("PRIMAL_BLOOM_ENERGY", p.energy);
+    // 2026-09-16: 渐进宽模糊链旋钮（BloomParams 新字段）。passes=1 回到旧
+    // 单次 σ2 行为；sigmaBase 缩放整条 σ={2,3,5,8} 链（默认 2.0=名义值）。
+    if (const char* e = std::getenv("PRIMAL_BLOOM_PASSES")) {
+        int v = (int)std::strtof(e, nullptr);
+        if (v >= 1 && v <= 4) p.blurPasses = v;
+    }
+    p.blurSigmaBase = envF("PRIMAL_BLOOM_SIGMA", p.blurSigmaBase);
+    return p;
+}
+
 // A12/T0.10: cheap scene identity hash — FNV-1a over each proxy's mesh/entity
 // ids and world translation bits. Not cryptographic; enough to reject loading
 // (or keep) a static probe cache that was baked for a different scene.
@@ -124,6 +311,12 @@ void StandardRenderPipeline::OnSceneChanged(const RenderScene& scene, bool first
 
     if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
         ddgi_pass_->ClearProbeField();
+    }
+    // [WRC] 场景切换同步清场（A12 同语义：不继承旧场景 GI）。
+    for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
+        if (wrc_volumes_[vi] && wrc_volumes_[vi]->IsInitialized()) {
+            wrc_volumes_[vi]->ClearProbeField();
+        }
     }
 
     // Static probe cache validation (A12): reject a cache baked for a
@@ -618,6 +811,33 @@ void StandardRenderPipeline::InitializeSubsystems() {
         sdf_viz_module_->Initialize(device_, blit_vs_, sdf_viz_ps_);
     }
 
+    // M0 神经渲染 debug 链路：PRIMAL_NEURAL_DEBUG=1 时激活。模块自加载
+    // shader 字节码与 .pnn 权重资产；env 未设置时零资源零开销。
+    if (const char* nd = std::getenv("PRIMAL_NEURAL_DEBUG"); nd && nd[0] == '1') {
+        auto module = std::make_unique<NeuralDebugModule>();
+        if (module->Initialize(device_, render_width_, render_height_)) {
+            neural_debug_module_ = std::move(module);
+            neural_debug_enabled_ = true;
+        }
+    }
+
+    // M1 神经降噪训练数据采集：PRIMAL_NEURAL_CAPTURE=1 时激活（自加载，
+    // take 完成后自动 idle）。
+    if (const char* nc = std::getenv("PRIMAL_NEURAL_CAPTURE"); nc && nc[0] == '1') {
+        auto module = std::make_unique<NeuralCaptureModule>();
+        if (module->Initialize(device_, render_width_, render_height_)) {
+            neural_capture_module_ = std::move(module);
+        }
+    }
+
+    // M1 神经降噪推理：PRIMAL_NEURAL_DENOISE=1 时激活（自加载，纯推理）。
+    if (const char* ndn = std::getenv("PRIMAL_NEURAL_DENOISE"); ndn && ndn[0] == '1') {
+        auto module = std::make_unique<NeuralDenoiseModule>();
+        if (module->Initialize(device_, render_width_, render_height_)) {
+            neural_denoise_module_ = std::move(module);
+        }
+    }
+
     if (settings_.quality.enable_ddgi && gi_gather_shader_ != handles::INVALID_SHADER) {
         gi_gather_module_ = std::make_unique<GIGatherModule>();
         gi_gather_module_->Initialize(device_, gi_gather_shader_, render_width_, render_height_);
@@ -668,6 +888,9 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (gi_gather_module_) { gi_gather_module_->Shutdown(); gi_gather_module_.reset(); }
     if (final_blit_module_) { final_blit_module_->Shutdown(); final_blit_module_.reset(); }
     if (sdf_viz_module_) { sdf_viz_module_->Shutdown(); sdf_viz_module_.reset(); }
+    if (neural_debug_module_) { neural_debug_module_->Shutdown(); neural_debug_module_.reset(); }
+    if (neural_capture_module_) { neural_capture_module_->Shutdown(); neural_capture_module_.reset(); }
+    if (neural_denoise_module_) { neural_denoise_module_->Shutdown(); neural_denoise_module_.reset(); }
     if (probe_sphere_module_) { probe_sphere_module_->Shutdown(); probe_sphere_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
@@ -796,7 +1019,18 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             }
             vol->SetDynamicMode(true);   // Mode 11: runtime SDF trace
             if (vi > 0) vol->SetRGNamePrefix(kPrefixes[vi]);
-            if (vi > 0) vol->SetFarSkyScale(0.5f);   // GI 根治 Phase 3.3: 远场天空 ×0.5 档
+            // 能量所有权 Phase 4b: 远场 ×0.5 退场（审计 §2.5——×0.5 不物理，
+            // 是"远场只表达低频"的代理；远场天空改由解析天空路径统一供给，
+            // 即 finalize 逃逸分支的 EvaluateSkyBase×SkyColor 单一事实源）。
+            // env PRIMAL_GI_FAR_SKY 保留 A/B（=0.5 回到旧档）。
+            if (vi > 0) {
+                float farSky = 1.0f;
+                if (const char* e = std::getenv("PRIMAL_GI_FAR_SKY")) {
+                    const float v = (float)std::atof(e);
+                    if (v > 0.0f && v <= 1.0f) farSky = v;
+                }
+                vol->SetFarSkyScale(farSky);
+            }
             {
                 // GI 根治 Phase 4: 有符号粗场旗标（PRIMAL_DDGI_UNSIGNED_TRACE=1 回滚）。
                 bool signedField = offline_sdf_signed_;
@@ -836,6 +1070,97 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         ddgi_pass_->SetCoarseSdfSigned(offline_sdf_signed_);   // GI 根治 Phase 4
         PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] Offline SDF re-applied to DDGI trace ("
                   << offline_sdf_resolution_ << "³)" << std::endl;
+    }
+
+    // ========================================================================
+    // [WRC] World Space Radiance Cache（设计文档 §4 Stream A）。
+    // PRIMAL_WRC_ENABLE=1 且 High/Ultra 档（或显式 wrc_enable）时创建
+    // near + far 两实例；默认（env=0）不创建——零行为变化。§3 迁移表：
+    // "A4 落地 = High/Ultra 档世界缓存默认 WRC"。独立代码域：创建/接线/
+    // 销毁全部在本 block 内，禁止触碰 DDGI 数据面。
+    // ========================================================================
+    wrc_volume_count_ = 0;
+    const bool wrcTierDefault = config.quality == lumen::LumenQualityPreset::High ||
+                                config.quality == lumen::LumenQualityPreset::Ultra ||
+                                config.quality == lumen::LumenQualityPreset::UltraRT;
+    if (lumen::WRCEnabled() && (config.wrc_enable || wrcTierDefault)) {
+        if (!settings_.quality.enable_surface_cache) {
+            // 近场命中采样 SC（cache 填充的唯一合法路径）；无 SC 时 WRC 只剩
+            // 天空契约，cache 身份不成立——拒绝创建并提示。
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[WRC] Surface Cache disabled — WRC trace would have no SC "
+                << "truth layer to cache; WRC not created." << std::endl;
+        } else {
+            lumen::WRCRuntimeParams nearParams{};
+            nearParams.probe_count_x = config.wrc_probe_count_x;
+            nearParams.probe_count_y = config.wrc_probe_count_y;
+            nearParams.probe_count_z = config.wrc_probe_count_z;
+            nearParams.probe_spacing = config.wrc_probe_spacing;
+            nearParams.ray_max_distance = config.wrc_ray_max_distance;
+            nearParams.update_budget_probes_per_frame = config.wrc_update_budget_probes_per_frame;
+            auto nearVol = std::make_unique<lumen::LumenWRCPass>();
+            // A5 placement：离线 SDF 已就位时，近场网格从 merger volume 贴合
+            //（WRCFitGridFromBounds，probe[0] = fit_min）。SDF 晚于管线创建
+            // 到位的场景不做延迟重建（网格容量冻结于 Initialize）——与 DDGI
+            // fit+auto 的 settings_dirty_ 重建路径相比是已知收窄，文档记录。
+            if (offline_sdf_texture_ != handles::INVALID_RESOURCE && offline_sdf_resolution_ > 0) {
+                const math::v3 bmax{ offline_sdf_origin_.x + offline_sdf_extent_.x,
+                                     offline_sdf_origin_.y + offline_sdf_extent_.y,
+                                     offline_sdf_origin_.z + offline_sdf_extent_.z };
+                const lumen::WRCFitGrid wrcFit = lumen::WRCFitGridFromBounds(
+                    offline_sdf_origin_, bmax, config.wrc_probe_spacing, 0.0f);
+                nearParams.probe_count_x = wrcFit.count_x;
+                nearParams.probe_count_y = wrcFit.count_y;
+                nearParams.probe_count_z = wrcFit.count_z;
+                nearParams.update_budget_probes_per_frame =
+                    std::min(nearParams.update_budget_probes_per_frame,
+                             wrcFit.count_x * wrcFit.count_y * wrcFit.count_z);
+            }
+            if (nearVol->Initialize(device_, nearParams)) {
+                if (offline_sdf_texture_ != handles::INVALID_RESOURCE && offline_sdf_resolution_ > 0) {
+                    const math::v3 bmax{ offline_sdf_origin_.x + offline_sdf_extent_.x,
+                                         offline_sdf_origin_.y + offline_sdf_extent_.y,
+                                         offline_sdf_origin_.z + offline_sdf_extent_.z };
+                    const lumen::WRCFitGrid wrcFit = lumen::WRCFitGridFromBounds(
+                        offline_sdf_origin_, bmax, config.wrc_probe_spacing, 0.0f);
+                    nearVol->SetVolumeOrigin(wrcFit.origin);
+                }
+                wrc_volumes_[wrc_volume_count_++] = std::move(nearVol);
+            }
+            if (config.wrc_enable_far_volume && wrc_volume_count_ > 0) {
+                lumen::WRCRuntimeParams farParams{};
+                farParams.probe_count_x = config.wrc_far_probe_count_x;
+                farParams.probe_count_y = config.wrc_far_probe_count_y;
+                farParams.probe_count_z = config.wrc_far_probe_count_z;
+                farParams.probe_spacing = config.wrc_far_probe_spacing;
+                farParams.ray_max_distance = config.wrc_far_ray_max_distance;
+                farParams.update_budget_probes_per_frame =
+                    config.wrc_far_probe_count_x * config.wrc_far_probe_count_y * config.wrc_far_probe_count_z;
+                auto farVol = std::make_unique<lumen::LumenWRCPass>();
+                if (farVol->Initialize(device_, farParams)) {
+                    farVol->SetRGNamePrefix("Far");
+                    // 远场不采 SC（同 DDGI far 语义：卡片数据是近场真值）。
+                    farVol->ClearSurfaceCacheResources();
+                    wrc_volumes_[wrc_volume_count_++] = std::move(farVol);
+                }
+            }
+            if (wrc_volume_count_ > 0) {
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[WRC] enabled: " << wrc_volume_count_ << " volume(s), "
+                    << "High/Ultra 世界空间缓存接管 SPGI 远场消费（A3）" << std::endl;
+            }
+        }
+    }
+    // 离线 SDF 转发（与 DDGI 同一 host 供给）。
+    for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
+        if (wrc_volumes_[vi] && offline_sdf_texture_ != handles::INVALID_RESOURCE) {
+            wrc_volumes_[vi]->SetOfflineSDFSource(offline_sdf_texture_, offline_sdf_origin_,
+                                                  offline_sdf_extent_, offline_sdf_resolution_);
+            wrc_volumes_[vi]->SetCoarseSdfSigned(offline_sdf_signed_);
+        }
+        if (wrc_volumes_[vi]) {
+            wrc_volumes_[vi]->SetPrefilterEnabled(std::getenv("PRIMAL_WRC_PREFILTER") != nullptr);
+        }
     }
 
     // SSAO
@@ -896,12 +1221,34 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         // 64→32 rays halves it (F2 importance + spatial filter + denoise
         // absorb the noise; adaptive/bilateral path per M7).
         if (const char* e = std::getenv("SCREEN_PROBE_RAYS")) {
-            probeParams.rays_per_probe = std::max(8u, (u32)atoi(e));
+            // 2026-09-17 P1（probe-selection-density-audit §7）：Average 只有
+            // 64 lanes、每 lane 读一条——override >64 会只积分前 64 条却按更大
+            // raysPerProbe 归一化，能量反而变暗（audit §7 实测警示）。上限钳到
+            // 64；更高值需先实现 lane-strided accumulation + 同步归一化。
+            u32 requested = std::max(8u, (u32)atoi(e));
+            if (requested > 64u) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[Lumen] SCREEN_PROBE_RAYS=" << requested
+                    << " clamped to 64 — ScreenProbeAverage integrates 64 lanes; "
+                       "larger values would dim the result until lane-strided "
+                       "accumulation lands" << std::endl;
+                requested = 64u;
+            }
+            probeParams.rays_per_probe = requested;
         }
         probeParams.enable_jitter = config.screen_probes_jitter;   // F5 (M7)
         probeParams.far_cache_start_distance = config.screen_probes_far_cache_start;  // F1 (M7)
         probeParams.enable_importance = config.screen_probes_importance;  // F2 (M7)
         probeParams.adaptive_pos_threshold = config.screen_probes_adaptive_pos_error;  // F4 (M7)
+        // 最终防线：config 路径同样钳 64（Average 64-lane 上限，见上）。
+        if (probeParams.rays_per_probe > 64u) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[Lumen] screen_probes_rays=" << probeParams.rays_per_probe
+                << " clamped to 64 (ScreenProbeAverage 64-lane limit)" << std::endl;
+            probeParams.rays_per_probe = 64u;
+        }
+        // P1（reaudit §4.1/4.2）: 重建后保持诊断模式（测试在 init 前设定）
+        screen_probe_pass_->SetTraceDiagMode(spgi_trace_diag_mode_);
         if (!screen_probe_pass_->Initialize(device_, render_width_, render_height_, probeParams)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] Screen Probes init failed" << std::endl;
             screen_probe_pass_.reset();
@@ -994,6 +1341,11 @@ void StandardRenderPipeline::ShutdownLumenPasses() {
         if (ddgi_volumes_[vi]) { ddgi_volumes_[vi]->Shutdown(); ddgi_volumes_[vi].reset(); }
     }
     ddgi_volume_count_ = 0;
+    // [WRC] 独立销毁（§1.2-2 文件属地禁令：与 DDGI 各自独立 block）。
+    for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
+        if (wrc_volumes_[vi]) { wrc_volumes_[vi]->Shutdown(); wrc_volumes_[vi].reset(); }
+    }
+    wrc_volume_count_ = 0;
 }
 
 // ============================================================================
@@ -1019,6 +1371,26 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     prev_proj_matrix_ = proj_matrix_;
     view_matrix_ = view.GetViewMatrix();
     proj_matrix_ = view.GetProjectionMatrix();
+
+    // M1 采集多机位：按当前 take 应用相机偏移（PRIMAL_NEURAL_CAPTURE_CAM_PATH）。
+    // 偏移在切镜检测之前生效——take 间瞬移自然触发 camera_cut，采集统计与
+    // SPGI/TAA 时序历史随之复位。
+    if (neural_capture_module_ && neural_capture_module_->IsInitialized() &&
+        neural_capture_module_->IsActive()) {
+        const math::v3 off = neural_capture_module_->GetTakeCameraOffset();
+        if (off.x != 0.0f || off.y != 0.0f || off.z != 0.0f) {
+            // view' = T(-off)·view：平移列 -= R·off（R 的列即 view 前 3 列）。
+            const v4& c0 = view_matrix_.columns[0];
+            const v4& c1 = view_matrix_.columns[1];
+            const v4& c2 = view_matrix_.columns[2];
+            view_matrix_.columns[3].x -= c0.x * off.x + c1.x * off.y + c2.x * off.z;
+            view_matrix_.columns[3].y -= c0.y * off.x + c1.y * off.y + c2.y * off.z;
+            view_matrix_.columns[3].z -= c0.z * off.x + c1.z * off.y + c2.z * off.z;
+            camera_position_.x += off.x;
+            camera_position_.y += off.y;
+            camera_position_.z += off.z;
+        }
+    }
 
     // A10/A11: camera-cut detection. A large inter-frame jump in the view
     // basis/translation makes every temporal reprojection (TAA/SPGI/DDGI/
@@ -1110,9 +1482,45 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                     if (primal::content::get_rhi_mesh_card_bake(inst.geometry_id, bake)) {
                         cardGen.RegisterMeshBaked(bake, inst.world_matrix, i);
                     } else {
-                        math::v3 aabbMin = inst.bounds_center - math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
-                        math::v3 aabbMax = inst.bounds_center + math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
-                        cardGen.RegisterMesh(aabbMin, aabbMax, i);
+                        // [WRC 计划 Stream E1]: fallback AABB 从 bounds_radius
+                        // 球转立方体换 mesh 紧致 AABB——本地 bounds 经 world
+                        // 轴展开（与 RegisterMeshBaked / detail-SDF 同配方）。
+                        // 球转立方体把平板/细长网格的空体积全数包进卡片 AABB，
+                        // 卡片分辨率与覆盖都被球半径主导。无 mesh bounds 时
+                        // 保留球转立方体回退。
+                        bool tightApplied = false;
+                        if (rhi::RHIGpuMesh* mesh = primal::content::get_rhi_gpu_mesh(inst.geometry_id)) {
+                            const f32* bmin = mesh->GetBoundsMin();
+                            const f32* bmax = mesh->GetBoundsMax();
+                            if (bmin && bmax &&
+                                bmax[0] > bmin[0] && bmax[1] > bmin[1] && bmax[2] > bmin[2]) {
+                                const math::v3 ext{ (bmax[0] - bmin[0]) * 0.5f,
+                                                    (bmax[1] - bmin[1]) * 0.5f,
+                                                    (bmax[2] - bmin[2]) * 0.5f };
+                                const math::v3 lc{ (bmax[0] + bmin[0]) * 0.5f,
+                                                   (bmax[1] + bmin[1]) * 0.5f,
+                                                   (bmax[2] + bmin[2]) * 0.5f };
+                                const math::m4x4& w = inst.world_matrix;
+                                f32 we[3] = {0.f, 0.f, 0.f};
+                                for (u32 k = 0; k < 3; ++k) {
+                                    const math::v4& col = w.columns[k];
+                                    const f32 e = (k == 0) ? ext.x : (k == 1) ? ext.y : ext.z;
+                                    we[0] += std::abs(col.x) * e;
+                                    we[1] += std::abs(col.y) * e;
+                                    we[2] += std::abs(col.z) * e;
+                                }
+                                const math::v4 cw = w * math::v4{lc.x, lc.y, lc.z, 1.0f};
+                                const math::v3 wmin{cw.x - we[0], cw.y - we[1], cw.z - we[2]};
+                                const math::v3 wmax{cw.x + we[0], cw.y + we[1], cw.z + we[2]};
+                                cardGen.RegisterMesh(wmin, wmax, i);
+                                tightApplied = true;
+                            }
+                        }
+                        if (!tightApplied) {
+                            math::v3 aabbMin = inst.bounds_center - math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                            math::v3 aabbMax = inst.bounds_center + math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                            cardGen.RegisterMesh(aabbMin, aabbMax, i);
+                        }
                     }
                 }
                 cardGen.RebuildCardAllocation();
@@ -1123,32 +1531,69 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                           << " meshes) / fallback (" << cardGen.GetFallbackMeshCount()
                           << " meshes)" << std::endl;
 
-        // T4.1 (D8) v2: dirty-transform GI invalidation — with
-        // MarkFullRebuild (consume-on-read prevents every-frame loop).
-        // GlobalSDF revox + DDGI probe boost only; the SC card positions
-        // are updated by the render system's own transform pipeline.
+        // [WRC 计划 Stream E2]: dirty-transform GI invalidation 改事件驱动
+        // （每帧查询变换脏旗标——旗标即事件源，30 帧冷却废除），增量路径：
+        // 脏实体的 SC 卡片经 CardGenerator::RebuildInstance 单实例重建，
+        // snapshot 全量 Rebind 与 GlobalSDF revox / probe boost 保持原语义。
         {
-            static u32 lastDirtyCheckFrame = 0;
-            if (frameCount_ - lastDirtyCheckFrame > 30) {   // 30-frame cooldown
-                bool anyDirty = false;
-                for (const auto& proxy : scene.GetProxies()) {
-                    u8 flag = 0;
-                    game_entity::entity_id eid{ proxy.entityId };
-                    transform::get_updated_components_flags(&eid, 1, &flag);
-                    if (flag != 0) { anyDirty = true; break; }
+            static u32 lastDirtyRebuildFrame = 0;
+            bool anyDirty = false;
+            const auto& proxies = scene.GetProxies();
+            for (u32 pi = 0; pi < proxies.size(); ++pi) {
+                u8 flag = 0;
+                game_entity::entity_id eid{ proxies[pi].entityId };
+                transform::get_updated_components_flags(&eid, 1, &flag);
+                if (flag == 0) continue;
+                anyDirty = true;
+                // E2 增量：脏实例的注册 AABB 立即更新（紧致 AABB 配方同上，
+                // 失败回退球转立方体）。allocation_dirty_ 触发下一次
+                // RebuildCardAllocation（Rebind 重建帧内先于注册循环执行）。
+                if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+                    auto& cardGen = surface_cache_pass_->GetCardGenerator();
+                    const auto& instances = scene_snapshot_->GetInstanceData();
+                    if (pi < instances.size()) {
+                        const auto& inst = instances[pi];
+                        math::v3 mn = inst.bounds_center - math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                        math::v3 mx = inst.bounds_center + math::v3{inst.bounds_radius, inst.bounds_radius, inst.bounds_radius};
+                        if (rhi::RHIGpuMesh* mesh = primal::content::get_rhi_gpu_mesh(inst.geometry_id)) {
+                            const f32* bmin = mesh->GetBoundsMin();
+                            const f32* bmax = mesh->GetBoundsMax();
+                            if (bmin && bmax && bmax[0] > bmin[0] && bmax[1] > bmin[1] && bmax[2] > bmin[2]) {
+                                const math::v3 ext{ (bmax[0] - bmin[0]) * 0.5f,
+                                                    (bmax[1] - bmin[1]) * 0.5f,
+                                                    (bmax[2] - bmin[2]) * 0.5f };
+                                const math::v3 lc{ (bmax[0] + bmin[0]) * 0.5f,
+                                                   (bmax[1] + bmin[1]) * 0.5f,
+                                                   (bmax[2] + bmin[2]) * 0.5f };
+                                const math::m4x4& w = inst.world_matrix;
+                                f32 we[3] = {0.f, 0.f, 0.f};
+                                for (u32 k = 0; k < 3; ++k) {
+                                    const math::v4& col = w.columns[k];
+                                    const f32 e = (k == 0) ? ext.x : (k == 1) ? ext.y : ext.z;
+                                    we[0] += std::abs(col.x) * e;
+                                    we[1] += std::abs(col.y) * e;
+                                    we[2] += std::abs(col.z) * e;
+                                }
+                                const math::v4 cw = w * math::v4{lc.x, lc.y, lc.z, 1.0f};
+                                mn = {cw.x - we[0], cw.y - we[1], cw.z - we[2]};
+                                mx = {cw.x + we[0], cw.y + we[1], cw.z + we[2]};
+                            }
+                        }
+                        cardGen.RebuildInstance(pi, mn, mx);
+                    }
                 }
-                if (anyDirty) {
-                    lastDirtyCheckFrame = static_cast<u32>(frameCount_);
-                    scene_snapshot_->MarkFullRebuild();
-                    nanite::GlobalSDF::Get().MarkAllCascadesForRevox();
-                    if (ddgi_pass_ && ddgi_pass_->IsInitialized())
-                        ddgi_pass_->BoostProbePriority();
-                    if (screen_probe_pass_ && screen_probe_pass_->IsInitialized())
-                        screen_probe_pass_->RequestTemporalReset();
-                    PRIMAL_LOG_STREAM(Info, "Render")
-                        << "[Lumen] Dirty transform — revox+probe boost (no rebuild)."
-                        << std::endl;
-                }
+            }
+            if (anyDirty && frameCount_ != lastDirtyRebuildFrame) {
+                lastDirtyRebuildFrame = static_cast<u32>(frameCount_);
+                scene_snapshot_->MarkFullRebuild();
+                nanite::GlobalSDF::Get().MarkAllCascadesForRevox();
+                if (ddgi_pass_ && ddgi_pass_->IsInitialized())
+                    ddgi_pass_->BoostProbePriority();
+                if (screen_probe_pass_ && screen_probe_pass_->IsInitialized())
+                    screen_probe_pass_->RequestTemporalReset();
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[Lumen] Dirty transform (event-driven) — incremental "
+                    << "card rebuild + revox+probe boost." << std::endl;
             }
         }            }
         }
@@ -1557,13 +2002,20 @@ bool StandardRenderPipeline::UpdateLightEntity(id::id_type entity_id, const ligh
 // 惯例）；本帧 Fusion 在 RG 中位于 DDGI 之后且写的是 cbIdx 槽，读写异槽无环。
 // 门控：Vulkan（Metal 的 fusion 上游单位制另案审计）；frameCount_≥8 避开
 // 未初始化槽（Vulkan heap 纹理非零初始化，见 SurfaceCacheLightEval 的
-// prev_light sanitize 注释）；fusion 需真实在管线中；PRIMAL_PROBE_FUSED_SUPPLY=0
-// 回退旧行为（A/B 门）。
+// prev_light sanitize 注释）；fusion 需真实在管线中；Phase 2a 起默认断开，
+// PRIMAL_PROBE_FUSED_SUPPLY=1 回接（A/B 门，语义已反转）。
 rendergraph::RGResourceHandle StandardRenderPipeline::MakeProbeRadianceSource(
     rendergraph::RenderGraph& graph, u32 cbIdx) {
+    // GI 能量所有权修复 Phase 2a（审计 P1）: E4 边（FusionIndirect→DDGI）
+    // 默认断开——语义反转，env =1 才回接（A/B 保留）。理由：Fusion 输出含
+    // DDGI(t−2) 的 gather 回波，回灌探针场 = 层级自反馈（E1/E2/E3 携带的
+    // 能量两帧后经屏幕再入账），稳态偏亮且无法归因；既有稳定手段保证收敛
+    // 但不保证能量归属唯一。断边后 bounce 由 SC（E2 逐射线采样 + E6 自反弹）
+    // 与 DDGI 自身多反弹承担——观测窗若能量塌陷，禁止加 gain 回接，按
+    // 修复计划 §2b 修供给归属后复测。
     static const bool fusedSupply = [] {
         const char* e = std::getenv("PRIMAL_PROBE_FUSED_SUPPLY");
-        return !e || std::atoi(e) != 0;
+        return e && std::atoi(e) != 0;
     }();
     if (!fusedSupply || !fusion_module_ || frameCount_ < 8) return {};
     if (!device_ || device_->GetPlatform() != rhi::RHIPlatform::Vulkan) return {};
@@ -1578,7 +2030,9 @@ rendergraph::RGResourceHandle StandardRenderPipeline::MakeProbeRadianceSource(
     // 直射供给由 SC 卡片（带 PCSS 可见性）负责，prev-screen 分支的过亮
     // 惩罚（Phase 1.4）继续兜住残余热点。PRIMAL_PROBE_FUSED_SUPPLY=0 仍可
     // 断电回退到直射-only 供给。
-    const ResourceHandle tex = fusion_module_->GetIndirectOutput((cbIdx + 2u) % 3u);
+    // Phase 1d: 读槽 = DDGISlotMap.h previousIndex(frameCount_)（原
+    // (cbIdx+2)%3 裸算随 cbIdx 时钟一并废除）。
+    const ResourceHandle tex = fusion_module_->GetIndirectOutput(static_cast<u32>(frameCount_));
     if (tex == handles::INVALID_RESOURCE) return {};
     return graph.ImportResource("PrevFrameColor_GIIndirect", tex);
 }
@@ -1589,6 +2043,24 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // T1.2 (C3): the HZB texture's single RG identity, imported by the
     // HZBBuild pass below and reused by SSGI/SSR/SPGI imports.
     RGResourceHandle hzbRG{};
+
+    // ======================================================================
+    // GI 能量所有权修复 Phase 5b（P5，Vulkan 领先）: GBuffer 进 RG——
+    // 单一规范身份（producer identity），NaniteSceneRender 以 Write 声明
+    // 产出，下游 SC capture/GIGather/SPGI/SSR/Fusion 全部复用本身份，
+    // 不再各自 ImportResource 造第二身份。消除的旧模式：~12 处
+    // "GBuffer*_XXX" 重复导入让 RG 看不到跨消费者依赖，逼出
+    // SurfaceCachePass 里的手工 GBuffer no-op barrier（本阶段删除）。
+    // ======================================================================
+    // env 回滚开关（Phase 5b 二分用）：PRIMAL_GBUFFER_RG=0 → 旧 per-site 导入。
+    const bool gbufferInRG = device_ && device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+                             [](const char* e) { return !(e && e[0] == '0'); }(std::getenv("PRIMAL_GBUFFER_RG"));
+    RGResourceHandle gbufferDepthRG{}, gbufferAlbedoRG{}, gbufferNormalRG{};
+    if (gbufferInRG) {
+        gbufferDepthRG = graph.ImportResource("GBufferDepth", gpuDraw.GetGBufferDepthSampleable());
+        gbufferAlbedoRG = graph.ImportResource("GBufferAlbedo", gpuDraw.GetGBufferAlbedo());
+        gbufferNormalRG = graph.ImportResource("GBufferNormal", gpuDraw.GetGBufferNormal());
+    }
 
     // A13/T0.11: on a viewport size change, drop all screen-space history
     // before this frame records — TAA re-inits from the current frame instead
@@ -1614,6 +2086,31 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
         surface_cache_pass_->SetPageBudget(
             GIAdaptiveGovernor::ScaleBudget(gi_base_page_budget_, gi_governor_.Scale()));
+    }
+
+    // ========================================================================
+    // GIHistoryValidity 最小版（GI 能量所有权修复 Phase 5a）：灯光修改事件
+    // 消费。DDGI：BoostProbePriority + 30 帧 alpha=0.35 抬升窗；SC：tile
+    // validity 位图清零（下一帧 AddPass 生效）+ 本帧页预算拉满（0=全量，
+    // 下一帧 governor 恢复缩放）；SPGI：temporal reset。
+    // ========================================================================
+    if (gi_history_dirty_) {
+        gi_history_dirty_ = false;
+        const u32 now = static_cast<u32>(frameCount_);
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            ddgi_pass_->NotifyLightingChanged(now);
+        }
+        if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+            surface_cache_pass_->RequestTileValidityReset();
+            surface_cache_pass_->SetPageBudget(0u);   // 一帧页预算拉满
+        }
+        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+            screen_probe_pass_->RequestTemporalReset();
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[GIHistory] lighting changed — DDGI boost+alpha-hold, SC tile"
+               " reset+full page budget, SPGI temporal reset at frame " << now
+            << std::endl;
     }
 
     // NOTE: GBuffer and culling buffers are NOT tracked through the render graph.
@@ -1667,11 +2164,17 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
         // Pass 1b: GPU Draw — declare Read on culling buffers to force a
         // Compute→Graphics barrier, and Write on GBuffer textures for downstream passes.
+        // Phase 5b: GBuffer Write 声明实际落地（Vulkan）——下游全部经
+        // producer identity 读取，RG 插入 Write→Read 转换，SC 手工 barrier
+        // 随之删除。Metal 依赖 encoder 边界语义，暂不声明（parity 矩阵另案）。
         graph.AddPass<NanitePassData>(
             "NaniteSceneRender",
             RGPassType::Graphics,
             [&](NanitePassData& data, RenderGraphBuilder& builder) {
                 builder.SideEffect();
+                if (gbufferDepthRG.IsValid()) builder.Write(gbufferDepthRG, ResourceState::ShaderResource);
+                if (gbufferAlbedoRG.IsValid()) builder.Write(gbufferAlbedoRG, ResourceState::ShaderResource);
+                if (gbufferNormalRG.IsValid()) builder.Write(gbufferNormalRG, ResourceState::ShaderResource);
                 data.culling_pipeline = culling_pipeline_;
                 data.streaming_manager = streaming_manager_;
                 data.scene_snapshot = scene_snapshot_.get();
@@ -1737,7 +2240,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // invalid when HZB is not ready — consumers fall back then.
         if (hzb_system_ && hzb_system_->IsReady()) {
             hzbRG = graph.ImportResource("HZBTexture", hzb_system_->GetHZBTexture());
-            auto depthHZB = graph.ImportResource("GBufferDepth_HZB", gpuDraw.GetGBufferDepthSampleable());
+            auto depthHZB = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_HZB", gpuDraw.GetGBufferDepthSampleable());
             graph.AddPass<NanitePassData>(
                 "HZBBuild",
                 RGPassType::Compute,
@@ -1746,10 +2249,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                     builder.Write(hzbRG, ResourceState::UnorderedAccess);
                     data.buffer_index = cbIdx;
                 },
-                [this](const NanitePassData& data, RenderGraphContext& ctx) {
+                [this, cbIdx](const NanitePassData& data, RenderGraphContext& ctx) {
                     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
                     if (!gpuDraw.IsInitialized()) return;
-                    hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), ctx.cmdBuffer);
+                    hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), ctx.cmdBuffer, cbIdx);
                 }
             );
         }
@@ -1808,7 +2311,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
     ShadowMapOutputs shadowOut;
     math::v3 lightDir = Normalize(settings_.lighting.light_direction);
-    if (shadow_module_) {
+    {
         ShadowMapInputs shadowIn;
         shadowIn.gpu_draw_pipeline = &gpuDraw;
         shadowIn.scene_snapshot = scene_snapshot_.get();
@@ -1816,6 +2319,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         shadowIn.view_matrix = view_matrix_;
         shadowIn.proj_matrix = proj_matrix_;
         shadowIn.light_direction = lightDir;
+        shadowIn.sun_angular_diameter_deg = settings_.lighting.sun_angular_diameter_deg;
         shadowIn.current_buffer_index = cbIdx;
         shadowIn.shadow_quality = settings_.quality.shadow_quality;
         // T8.13: shadow softness knobs (Hard=0 / PCF=1 / PCSS=2).
@@ -1824,6 +2328,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         }
         shadowOut = shadow_module_->AddPasses(graph, shadowIn);
     }
+    // P0: shadow 段之后输出——ShadowMapOutputs 的尺寸 provenance 已填充。
+    LogSunContractOnce(settings_, view_matrix_, proj_matrix_,
+                       GatherSunContractSizes(settings_, render_width_, render_height_,
+                                              &shadowOut, surface_cache_pass_.get(),
+                                              static_cast<u32>(frameCount_),
+                                              ddgi_pass_.get()),
+                       static_cast<u32>(frameCount_));
 
     // ========================================================================
     // Step 3: SSAO
@@ -1834,8 +2345,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // Import GBuffer under UNIQUE names for SSAO — the RG should NOT know
         // these are the same physical textures written by NaniteSceneRender.
         // Metal's encoder boundary synchronization handles transitions.
-        auto gbufferNormalSSAO = graph.ImportResource("GBufferNormal_SSAO", gpuDraw.GetGBufferNormal());
-        auto gbufferDepthSSAO = graph.ImportResource("GBufferDepth_SSAO", gpuDraw.GetGBufferDepthSampleable());
+        auto gbufferNormalSSAO = gbufferInRG ? gbufferNormalRG : graph.ImportResource("GBufferNormal_SSAO", gpuDraw.GetGBufferNormal());
+        auto gbufferDepthSSAO = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_SSAO", gpuDraw.GetGBufferDepthSampleable());
         lumen::SSAOCameraData camData{};
         camData.view_matrix = view_matrix_;
         camData.proj_matrix = proj_matrix_;
@@ -1854,10 +2365,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     if (deferred_module_) {
         // Import GBuffer under UNIQUE names for Deferred — same physical textures,
         // different RG identities.  No dependency chain with NaniteSceneRender.
-        auto gbufferAlbedoDL = graph.ImportResource("GBufferAlbedo_DL", gpuDraw.GetGBufferAlbedo());
-        auto gbufferNormalDL = graph.ImportResource("GBufferNormal_DL", gpuDraw.GetGBufferNormal());
+        auto gbufferAlbedoDL = gbufferInRG ? gbufferAlbedoRG : graph.ImportResource("GBufferAlbedo_DL", gpuDraw.GetGBufferAlbedo());
+        auto gbufferNormalDL = gbufferInRG ? gbufferNormalRG : graph.ImportResource("GBufferNormal_DL", gpuDraw.GetGBufferNormal());
         auto gbufferORMDL = graph.ImportResource("GBufferORM_DL", gpuDraw.GetGBufferORM());
-        auto gbufferDepthDL = graph.ImportResource("GBufferDepth_DL", gpuDraw.GetGBufferDepthSampleable());
+        auto gbufferDepthDL = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_DL", gpuDraw.GetGBufferDepthSampleable());
 
         DeferredLightingInputs deferredIn;
         deferredIn.gpu_draw_pipeline = &gpuDraw;
@@ -1868,8 +2379,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         deferredIn.light_pos = math::v4{-lightDir.x, -lightDir.y, -lightDir.z, 0.0f};
         deferredIn.light_color = settings_.lighting.light_color;
         deferredIn.cascade_splits = settings_.lighting.cascade_splits;
-        deferredIn.shadow_matrix0 = shadowOut.shadow_matrix0;
-        deferredIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+        deferredIn.shadow_matrix0 = shadowOut.shadow_matrix[0];
+        deferredIn.shadow_matrix1 = shadowOut.shadow_matrix[1];
+        deferredIn.shadow_matrix2 = shadowOut.shadow_matrix[2];   // P4.2
+        deferredIn.shadow_matrix3 = shadowOut.shadow_matrix[3];   // P4.2
         deferredIn.current_buffer_index = cbIdx;
         deferredIn.shadow_visibility_rg = shadowOut.shadow_visibility_rg;
         deferredIn.shadow_visibility_tex = shadowOut.shadow_visibility_tex;
@@ -1880,11 +2393,112 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         deferredIn.shadow_moments_rg[1] = shadowOut.shadow_moments_rg[1];
         deferredIn.shadow_moments_tex[0] = shadowOut.shadow_moments_tex[0];
         deferredIn.shadow_moments_tex[1] = shadowOut.shadow_moments_tex[1];
+        deferredIn.shadow_moments_tex[2] = shadowOut.shadow_moments_tex[2];   // P4.2
+        deferredIn.shadow_moments_tex[3] = shadowOut.shadow_moments_tex[3];   // P4.2
+        deferredIn.shadow_translucent_rg = shadowOut.shadow_translucent_rg;   // P4.1
+        deferredIn.shadow_translucent_tex = shadowOut.shadow_translucent_tex; // P4.1
+        // sun-audit P2 第二步: 探针深度可见性输入（PRIMAL_PROBE_OCC 变体）
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            deferredIn.probe_depth_buf = ddgi_pass_->GetDepthBufferBySlot(cbIdx);  // 槽号（swapchain 环），诊断变体
+            const auto& vol = ddgi_pass_->GetVolumeData();
+            deferredIn.probe_origin_spacing = math::v4{
+                vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z, vol.ProbeSpacing};
+            deferredIn.probe_counts = math::v4{
+                float(vol.ProbeCounts[0]), float(vol.ProbeCounts[1]),
+                float(vol.ProbeCounts[2]),
+                float(vol.ProbeCounts[0] * vol.ProbeCounts[1] * vol.ProbeCounts[2])};
+        }
         deferredIn.gbuffer_albedo_rg = gbufferAlbedoDL;
         deferredIn.gbuffer_normal_rg = gbufferNormalDL;
         deferredIn.gbuffer_orm_rg = gbufferORMDL;
         deferredIn.gbuffer_depth_rg = gbufferDepthDL;
         deferredOut = deferred_module_->AddPasses(graph, deferredIn);
+
+        // P1-B（sponza-gap-audit §4.2）: 世界空间定点 HDR 探针。参考模式
+        // 相机锁定 ⇒ 固定屏幕点即固定世界点。PRIMAL_GI_PROBE=1 时把融合后
+        // HDR 输出的三个探针点（左上日照拱 / 右暗拱 / 中央地面，audit
+        // measurements ROI 中心 ×2 render scale）拷入 3 槽 staging ring，
+        // 滞后 2 帧 Map 并打 log（线性 HDR，非显示编码）。
+        if (gi_probe_enabled_ && deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
+            static ResourceHandle s_probeStaging[3] = {
+                handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
+            static bool s_probeStagingInit = false;
+            const u32 probeSlot = static_cast<u32>(frameCount_) % 3;
+            if (!s_probeStagingInit) {
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[GI-PROBE] staging init, deferredTex="
+                    << deferredOut.deferred_output_tex << std::endl;
+                BufferDesc pb{};
+                pb.size = 64;  // 3 × RGBA16F 像素（8B）对齐 16
+                pb.type = BufferType::Raw;
+                pb.usage = GPUMemoryUsage::Readback;
+                pb.memoryUsage = GPUMemoryUsage::Readback;
+                for (u32 i = 0; i < 3; ++i) s_probeStaging[i] = graph.GetDevice().CreateBuffer(pb);
+                s_probeStagingInit = true;
+            }
+            struct GIProbeData { rendergraph::RGResourceHandle rgTex; u32 slot; };
+            graph.AddPass<GIProbeData>("GIProbeDump", RGPassType::Copy, RGPassCategory::Copy,
+                [rgTex = deferredOut.deferred_output_rg, slot = probeSlot](GIProbeData& d, RenderGraphBuilder& builder) {
+                    d.rgTex = rgTex; d.slot = slot;
+                    builder.Read(rgTex, ResourceState::ShaderResource);
+                },
+                [this](const GIProbeData& d, RenderGraphContext& context) {
+                    auto* res = context.graph->GetResource(d.rgTex);
+                    ResourceHandle phys = res ? res->GetPhysicalHandle() : handles::INVALID_RESOURCE;
+                    if (phys == handles::INVALID_RESOURCE ||
+                        s_probeStaging[d.slot] == handles::INVALID_RESOURCE) return;
+                    rhi::BufferTextureCopyRegion regions[3];
+                    // 点位标定（display 720p → render ×2）：
+                    //  arch_sunlit  (150,20)  显示亮度 ~166（日照拱顶亮带）
+                    //  floor_sunlit (760,655) 显示亮度 ~239（日照地面亮带）
+                    //  right_dark   (982,297) 显示亮度 ~56（暗拱间接光区）
+                    const u32 px[3][2] = { {300, 40}, {1520, 1310}, {1940, 570} };  // right_dark (940,285)×2 亮度 ~5（纯间接光区）  // arch / right-arch / floor
+                    for (u32 i = 0; i < 3; ++i) {
+                        regions[i].bufferOffset = i * 16;
+                        regions[i].bufferRowLength = 0;
+                        regions[i].bufferImageHeight = 0;
+                        regions[i].imageSubresource.mipLevel = 0;
+                        regions[i].imageSubresource.baseArrayLayer = 0;
+                        regions[i].imageSubresource.layerCount = 1;
+                        regions[i].imageOffset = {static_cast<s32>(px[i][0]), static_cast<s32>(px[i][1]), 0};
+                        regions[i].imageExtent = {1, 1, 1};
+                    }
+                    context.cmdBuffer->CopyTextureToBuffer(phys, s_probeStaging[d.slot], regions, 3);
+                });
+            // 滞后 2 帧 readback（同队列顺序提交，2 帧前的拷贝早已完成）
+            {
+                const u32 lagSlot = (probeSlot + 1) % 3;
+                const u32 lagFrame = static_cast<u32>(frameCount_) - 2;
+                if (static_cast<u32>(frameCount_) >= 2 &&
+                    (lagFrame == 120 || lagFrame == 360 || lagFrame == 1200)) {
+                    static bool s_probeMapLogged = false;
+                    if (!s_probeMapLogged) {
+                        s_probeMapLogged = true;
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[GI-PROBE] lag readback attempt at frame " << frameCount_
+                            << " lagFrame=" << lagFrame << std::endl;
+                    }
+                    if (void* p = graph.GetDevice().MapBuffer(s_probeStaging[lagSlot], 0, 64)) {
+                        const u16* v = static_cast<const u16*>(p);
+                        auto f16 = [](u16 h) {
+                            u32 sign = (h & 0x8000u) << 16, expo = (h & 0x7C00u) >> 10, man = h & 0x03FFu;
+                            u32 bits;
+                            if (expo == 0) bits = sign;
+                            else if (expo == 31) bits = sign | 0x7F800000u | (man << 13);
+                            else bits = sign | ((expo - 15u + 127u) << 23) | (man << 13);
+                            float f; std::memcpy(&f, &bits, 4); return f;
+                        };
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[GI-PROBE] frame=" << lagFrame
+                            << " archHDR=(" << f16(v[0]) << "," << f16(v[1]) << "," << f16(v[2]) << ")"
+                            << " rightArchHDR=(" << f16(v[4]) << "," << f16(v[5]) << "," << f16(v[6]) << ")"
+                            << " floorHDR=(" << f16(v[8]) << "," << f16(v[9]) << "," << f16(v[10]) << ")"
+                            << std::endl;
+                        graph.GetDevice().UnmapBuffer(s_probeStaging[lagSlot]);
+                    }
+                }
+            }
+        }
     }
 
     // ========================================================================
@@ -1911,11 +2525,26 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     volume::VolumeOutput volumeOut;
     if (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
         volume::FroxelInputs froxelIn;
-        froxelIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+        froxelIn.gbuffer_depth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
         froxelIn.scene_color = deferredOut.deferred_output_rg;
         froxelIn.shadow_map = shadowOut.shadow_visibility_rg;
-        froxelIn.shadow_matrix0 = shadowOut.shadow_matrix0;
-        froxelIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+        froxelIn.shadow_matrix0 = shadowOut.shadow_matrix[0];
+        froxelIn.shadow_matrix1 = shadowOut.shadow_matrix[1];
+        // P2-B（sponza-gap-audit §4.6）: 雾的阴影输入换成 light-space VSM
+        // moments + 全 4 级联矩阵。屏幕空间表面可见性图不再被雾采样（屏幕 UV
+        // 与 light VP UV 不对应，表面可见性不描述空间点遮挡）。
+        // P1（sponza-gap-reaudit §4.4）: 同时传入 PCSS 深度图；无 moments
+        // （默认 PCSS）时 FroxelFogPass 自动切换 shadow_mode=2 深度比较，
+        // 不再恒 lit。级联数按 4 传入，模式由纹理有效性在 pass 内决定。
+        // SetFroxelShadowsEnabled(false)（FROXEL_NO_SHADOW）→ 恒 lit 对照组。
+        if (froxel_shadows_enabled_) {
+            for (u32 c = 0; c < 4; ++c) {
+                froxelIn.shadow_moments[c] = shadowOut.shadow_moments_rg[c];
+                froxelIn.shadow_matrices[c] = shadowOut.shadow_matrix[c];
+                froxelIn.shadow_depth[c] = shadowOut.shadow_depth_rg[c];
+            }
+            froxelIn.shadow_cascade_count = 4u;
+        }
         collectSDFCascades(froxelIn);
 
         volume::VolumeCameraData volCam{};
@@ -1934,7 +2563,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         volumeOut.valid = froxelOut.valid;
     } else if (volume_pass_ && volume_pass_->IsInitialized()) {
         volume::VolumeInputs volIn;
-        volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
+        volIn.gbuffer_depth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
         volIn.scene_color = deferredOut.deferred_output_rg;
         volIn.shadow_map = shadowOut.shadow_visibility_rg;
         collectSDFCascades(volIn);
@@ -1963,7 +2592,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fluidIn.proj_matrix = proj_matrix_;
         fluidIn.camera_position = camera_position_;
         fluidIn.scene_color = deferredOut.deferred_output_rg;
-        fluidIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Fluid", gpuDraw.GetGBufferDepthSampleable());
+        fluidIn.gbuffer_depth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_Fluid", gpuDraw.GetGBufferDepthSampleable());
         fluidIn.width = render_width_;
         fluidIn.height = render_height_;
         fluidOut = fluid_render_pass_->AddPass(graph, fluidIn);
@@ -1978,19 +2607,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         lumen::SurfaceCacheFrameData frameData{};
         frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
         frameData.frame_index = static_cast<u32>(frameCount_);
-        frameData.light_count = 1;
-        // T3.2: real light from settings instead of the SC-internal hardcode
-        math::v3 scLightDir = Normalize(settings_.lighting.light_direction);
-        frameData.light_direction = scLightDir;
-        // T3.2+: SC texels see the REAL sun (light_color). The old
-        // ddgi_light_color (≈half intensity, tuned when the trace chain was
-        // broken) made every card's direct term 2× dimmer than the main pass
-        // — the whole GI pyramid inherited the deficit.
-        frameData.light_color = {settings_.lighting.light_color.x,
-                                 settings_.lighting.light_color.y,
-                                 settings_.lighting.light_color.z};
-        // A4: real per-slot light list (keeps point lights alive in LightEval)
-        FillSCLightList(frameData, current_scene_);
+        // T3.2/T3.2+: 方向与颜色来自单一太阳合同（真实太阳 light_color 进
+        // SC 备用色；灯表经 FillSCLightList × SC_DIRECT_SCALE）。
+        FillSurfaceCacheSunLight(frameData, settings_, current_scene_);
 
         // GBuffer-gather capture: real rendered surfaces → card atlas.
         frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
@@ -2001,16 +2620,16 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
 
         // Probe-fed indirect (Lumen hierarchy): previous-frame near-volume
-        // irradiance — SC runs before the DDGI update, so (frame+2)%3 is the
-        // last fully integrated result. Shadowed texels gather their bounce
-        // from these probes instead of collapsing to black.
+        // irradiance — SC runs before the DDGI update, so previousIndex is
+        // the last fully integrated result. Shadowed texels gather their
+        // bounce from these probes instead of collapsing to black.
+        // Phase 1d: 槽位单一事实源 DDGISlotMap.h。
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            const auto ddgiSlots = lumen::DDGISlotsForFrame(static_cast<u32>(frameCount_));
             const auto& vol = ddgi_pass_->GetVolumeData();
-            frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBuffer(
-                (static_cast<u32>(frameCount_) + 2) % 3);
+            frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBufferBySlot(ddgiSlots.previousIndex);
             // C 系列：同槽位探针深度——LightEval gather 的 Chebyshev 可见性。
-            frameData.ddgi_depth = ddgi_pass_->GetDepthBuffer(
-                (static_cast<u32>(frameCount_) + 2) % 3);
+            frameData.ddgi_depth = ddgi_pass_->GetDepthBufferBySlot(ddgiSlots.previousIndex);
             // GI 根治 Phase 3.2: 同源 openSky 统计（天空分类）。
             frameData.ddgi_opensky = ddgi_pass_->GetOpenSkyBuffer();
             frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
@@ -2024,6 +2643,14 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             frameData.ddgi_valid =
                 (frameData.ddgi_irradiance != handles::INVALID_RESOURCE) ? 1u : 0u;
         }
+
+        // G2 capture 侧（2026-09-16）: 卡片直射可见性消费与表面同源的 PCSS
+        // 深度（薄墙不再被粗 SDF 漏光烘焙成假直射）
+        for (u32 c = 0; c < 4; ++c) {
+            frameData.shadow_depth[c] = shadowOut.shadow_depth_rg[c];
+            frameData.shadow_matrices[c] = shadowOut.shadow_matrix[c];
+        }
+        frameData.shadow_cascade_count = 4u;
 
         ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
         // T8.12: card-view capture (SC_CARDVIEW=1) — runs instead of the
@@ -2066,9 +2693,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         camData.proj_matrix = proj_matrix_;
         camData.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
         camData.prev_proj_matrix = prev_proj_matrix_;
-        math::v3 lightFwd = Normalize(settings_.lighting.light_direction);
-        camData.light_direction = lightFwd;
-        camData.light_color = {settings_.lighting.ddgi_light_color.x, settings_.lighting.ddgi_light_color.y, settings_.lighting.ddgi_light_color.z};
+        FillDDGISunLight(camData, settings_);
         camData.frame_index = static_cast<u32>(frameCount_);
         camData.delta_time = settings_.advanced.delta_time_override;
 
@@ -2078,19 +2703,25 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         }
         // B11/Phase 2.3: 回灌 pre-gain GI 缓冲（FusionIndirect 输出）——
         // 融合增益与直射不再进探针回路（直射供给由 SC 卡片负责）。
+        // Phase 2a: 默认断边（env =1 回接）。断边态 radiance_depth 置无效
+        // → finalize validity.y=0 → samplePrevColor 短路，prev-screen 分支
+        // 落 analytic——**不**绑 deferred 直射输出当 radiance（防"直射绕过
+        // 遮挡二次入账"复发，审计 §2.2/计划 §2a 决策）。
         if (RGResourceHandle fused = MakeProbeRadianceSource(graph, cbIdx); fused.IsValid()) {
             prevColor = fused;
             camData.radiance_is_previous_frame = true;
         }
         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-            camData.screen_depth = graph.ImportResource("DDGI_CurrentScreenDepth", gpuDraw.GetGBufferDepthSampleable());
-            if (!camData.radiance_is_previous_frame) {
-                camData.radiance_depth = camData.screen_depth;
-            } else if (depth_history_ && !camera_cut_this_frame_) {
-                const auto previous = depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_));
-                if (previous.is_valid && previous.texture != handles::INVALID_RESOURCE)
-                    camData.radiance_depth = graph.ImportResource("DDGI_RadianceDepth", previous.texture);
+            camData.screen_depth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("DDGI_CurrentScreenDepth", gpuDraw.GetGBufferDepthSampleable());
+            if (camData.radiance_is_previous_frame) {
+                if (depth_history_ && !camera_cut_this_frame_) {
+                    const auto previous = depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_));
+                    if (previous.is_valid && previous.texture != handles::INVALID_RESOURCE)
+                        camData.radiance_depth = graph.ImportResource("DDGI_RadianceDepth", previous.texture);
+                }
             }
+            // 断边默认态：radiance_depth 保持无效 = 屏域 radiance 档关断
+            // （省一次历史深度解析）；screen_depth 仍供 albedo/遮挡查询。
         }
 
         ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData,
@@ -2104,6 +2735,35 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                                                static_cast<u32>(frameCount_), RGResourceHandle{});
                 }
             }
+        }
+    }
+
+    // ========================================================================
+    // Step 6.7: [WRC] World Space Radiance Cache（设计文档 §4 Stream A）。
+    // PRIMAL_WRC_ENABLE=0 时 wrc_volume_count_==0，本块整体跳过（零行为
+    // 变化）。能量单向律：WRC 只在此被 SC 填充（trace 采样），消费在 SPGI
+    // 远场（fallback_spgi_to_wrc 边，A3）——绝不回灌 SC/DDGI。
+    // ========================================================================
+    if (wrc_volume_count_ > 0) {
+        for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
+            if (!wrc_volumes_[vi] || !wrc_volumes_[vi]->IsInitialized()) continue;
+            if (vi == 0 && surface_cache_pass_) {
+                // X2/A3 同款视图签名：SC 数据走统一 Cache View（独立接线
+                // block，§1.2-2）。
+                wrc_volumes_[vi]->SetSurfaceCacheResources(
+                    surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
+            }
+            lumen::WRCCameraData wrcCam{};
+            wrcCam.light_direction = rhi::math::Normalize(settings_.lighting.light_direction);
+            wrcCam.light_color = {settings_.lighting.ddgi_light_color.x,
+                                  settings_.lighting.ddgi_light_color.y,
+                                  settings_.lighting.ddgi_light_color.z};
+            // 天空单一事实源：与 DDGI 同一 GIDebug 档位（中性色调，T8.13 P4）。
+            const float skyTier = lumen::GIDebug().sky_color_intensity;
+            wrcCam.sky_color = {skyTier, skyTier, skyTier};
+            wrcCam.frame_index = static_cast<u32>(frameCount_);
+            const RGResourceHandle scRG = (vi == 0) ? scLightingRG : RGResourceHandle{};
+            wrc_volumes_[vi]->AddPass(graph, wrcCam, static_cast<u32>(frameCount_), scRG);
         }
     }
 
@@ -2138,8 +2798,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     const bool spgiActive = screen_probe_pass_ && screen_probe_pass_->IsInitialized();
     const bool ssgiSuppressed = spgiActive && !std::getenv("SSGI_FORCE");
     if (ssgi_pass_ && ssgi_pass_->IsInitialized() && !ssgiSuppressed) {
-        auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
-        auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
+        auto gbufferNormalSSGI = gbufferInRG ? gbufferNormalRG : graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
+        auto gbufferDepthSSGI = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
         auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
         // T1.2 (C3): reuse the HZBBuild producer identity when it exists
         auto hzbHandle = hzbRG.IsValid()
@@ -2180,7 +2840,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         } else if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             hdrSSR = graph.ImportResource("SSR_HdrSource", deferredOut.deferred_output_tex);
         }
-        auto depthSSR = graph.ImportResource("GBufferDepth_SSR", gpuDraw.GetGBufferDepthSampleable());
+        auto depthSSR = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_SSR", gpuDraw.GetGBufferDepthSampleable());
         // T1.2 (C3): reuse the HZBBuild producer identity when it exists
         auto hzbSSR = hzbRG.IsValid()
             ? hzbRG
@@ -2200,21 +2860,39 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
     lumen::ScreenProbeGIOutput spgiOut;
     if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
+        // [WRC] A3（fallback_spgi_to_wrc 边）：远场段优先消费 WRC。near volume
+        // 的 cache view + 消费计数缓冲传入；边关断/WRC 未启用 → 空视图
+        // （shader 走冻结的 DDGI 回退边，行为与 A3 前一致）。
+        {
+            bool wrcEdge = settings_.lumen.wrc_spgi_consume &&
+                           wrc_volume_count_ > 0 &&
+                           wrc_volumes_[0] && wrc_volumes_[0]->IsInitialized();
+            if (wrcEdge) {
+                screen_probe_pass_->SetWRCCacheData(
+                    wrc_volumes_[0]->GetCacheView(static_cast<u32>(frameCount_)),
+                    wrc_volumes_[0]->GetConsumeCounterBuffer(), true);
+            } else {
+                screen_probe_pass_->SetWRCCacheData(lumen::WRCCacheView{},
+                                                    rhi::handles::INVALID_RESOURCE, false);
+            }
+        }
         // T2.2: DDGI probe fallback for miss rays (hist slot — one frame
         // behind, no read/write race with this frame's DDGI update).
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
             if (settings_.lumen.axes.fallback_spgi_to_ddgi) {
-                // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
+                // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）。
+                // Phase 1d: previousIndex = 上一完成帧（原 frame+2 裸算）。
                 screen_probe_pass_->SetDDGIFallbackData(
-                    ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
+                    ddgi_pass_->GetVolumeViewBySlot(
+                        lumen::DDGISlotsForFrame(static_cast<u32>(frameCount_)).previousIndex));
             } else {
                 // X3/A6 轴4: fallback 边关断 → Clear 语义（空 view 置
                 // ddgi_fallback_available_=false，miss 回落天空常量）
                 screen_probe_pass_->SetDDGIFallbackData(lumen::DDGIVolumeView{});
             }
         }
-        auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
-        auto spNormal = graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
+        auto spDepth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
+        auto spNormal = gbufferInRG ? gbufferNormalRG : graph.ImportResource("GBufferNormal_SP", gpuDraw.GetGBufferNormal());
 
         RGResourceHandle spRadiance;
         if (deferredOut.deferred_output_rg.IsValid()) {
@@ -2250,6 +2928,32 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         }
         spgiOut = screen_probe_pass_->AddPass(graph, spDepth, spNormal,
             spRadiance, spCam, static_cast<u32>(frameCount_), spHzb);
+
+        // M1 采集：SPGI gather 输出（Denoise 前）+ GBuffer 特征 → Welford
+        // 累积（PRIMAL_NEURAL_CAPTURE=1 门控；未激活时零足迹）。
+        if (neural_capture_module_ && neural_capture_module_->IsInitialized()) {
+            NeuralCaptureInputs capIn;
+            capIn.spgi_gi_output = spgiOut.gi_output;
+            capIn.gbuffer_depth = spDepth;
+            capIn.gbuffer_normal = spNormal;
+            capIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+            capIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+            capIn.current_buffer_index = static_cast<u32>(frameCount_);
+            capIn.camera_cut = camera_cut_this_frame_;
+            neural_capture_module_->AddPass(graph, capIn);
+        }
+ 
+        // M1 神经降噪推理（env 门控；与捕获共用同一 SPGI 输出口）。
+        if (neural_denoise_module_ && neural_denoise_module_->IsInitialized()) {
+            NeuralDenoiseInputs dnIn;
+            dnIn.spgi_gi_output = spgiOut.gi_output;
+            dnIn.gbuffer_depth = spDepth;
+            dnIn.gbuffer_normal = spNormal;
+            dnIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+            dnIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+            dnIn.current_buffer_index = static_cast<u32>(frameCount_);
+            neural_denoise_module_->AddPass(graph, dnIn);
+        }
     }
 
     // ========================================================================
@@ -2260,26 +2964,27 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized() && lumen::GIDebug().gi_gather) {
         // Import GBuffer under UNIQUE names for GIGather — same physical textures,
         // different RG identities.
-        auto gbufferDepthGI = graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
-        auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
+        auto gbufferDepthGI = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
+        auto gbufferNormalGI = gbufferInRG ? gbufferNormalRG : graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
         GIGatherInputs giIn;
         giIn.ddgi_pass = ddgi_pass_.get();
         giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
-        // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
+        // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）。
+        // Phase 1d: GetVolumeView(frame) 内部派生 currentIndex（本帧完成槽）。
         giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
-            ? ddgi_volumes_[1]->GetVolumeView(static_cast<u32>(frameCount_) % 3) : lumen::DDGIVolumeView{};
+            ? ddgi_volumes_[1]->GetVolumeView(static_cast<u32>(frameCount_)) : lumen::DDGIVolumeView{};
         // T6.3 sub-B: 全 volume 视图直传（模块内按 descriptor indexing 能力位
         // 门控 N-volume 路径；能力不可用/有效 volume < 2 时零行为变化）。
         giIn.volume_count = ddgi_volume_count_;
         for (u32 vi = 0; vi < ddgi_volume_count_ && vi < GIGatherInputs::kMaxVolumes; ++vi)
-            if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView(static_cast<u32>(frameCount_) % 3);
+            if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView(static_cast<u32>(frameCount_));
         giIn.static_probe_volume = static_probe_volume_.get();
         giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
         giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
         giIn.gbuffer_orm = gpuDraw.GetGBufferORM();
         giIn.gbuffer_depth_rg = gbufferDepthGI;
         giIn.gbuffer_normal_rg = gbufferNormalGI;
-        auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
+        auto gbufferOrmGI = gbufferInRG ? graph.ImportResource("GBufferOrm", gpuDraw.GetGBufferORM()) : graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
         giIn.gbuffer_orm_rg = gbufferOrmGI;
         giIn.view_matrix = view_matrix_;
         giIn.proj_matrix = proj_matrix_;
@@ -2316,10 +3021,17 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionIn.ddgi_specular_tex = giOut.gi_specular_tex;
         fusionIn.volume_scatter_rg = volumeOut.volume_scatter;
         fusionIn.volume_scatter_tex = handles::INVALID_RESOURCE; // RG-resolved inside module
+        // sun-audit P1: GI_LADDER_DUMP 能量台账输入（vis 半分辨率 R8 + invVP）
+        fusionIn.shadow_vis_tex = shadowOut.shadow_visibility_tex;
+        fusionIn.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
         fusionIn.current_buffer_index = cbIdx;
+        fusionIn.frame_index = static_cast<u32>(frameCount_);
         fusionIn.render_width = render_width_;
         fusionIn.render_height = render_height_;
         fusionIn.black_texture = black_texture_;
+        // WRC 计划 Stream C1（Fusion 档位化）：High/Ultra（use_screen_probes）
+        // 像素只读 SPGI，Medium 只读 DDGI——档位结构不变，见 FusionInputs 注释。
+        fusionIn.pixel_gi_spgi_only = settings_.lumen.axes.use_screen_probes;
         fusionOut = fusion_module_->AddPasses(graph, fusionIn);
     }
 
@@ -2392,15 +3104,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         RGResourceHandle hdrClean = taaOut.output;
         taaResolvedColor = hdrClean;
 
-        // 2026-09-05：bloom blur 的 RG 瞬态 temp 解析存在槽位别名
-        // （Bloom_Temp 解析到 fusion_output，usage 0x05 缺 ShaderWrite →
-        // blurCS2D validation assert）。曾被 bind-guard 的 dispatch skip
-        // 掩盖（blur 从未真正执行）。别名修复前 bloom 默认关闭，
-        // PRIMAL_BLOOM=1 显式启用。
-        const bool bloomOff = std::getenv("PRIMAL_BLOOM") == nullptr;
-        auto bloomOut = bloomOff
-            ? PostProcess::BloomPassData{}
-            : PostProcess::AddBloomPass(graph, hdrClean, cbIdx);
+        // Bloom owns independent per-frame images (BloomPass.cpp), so it can
+        // be enabled for the reference Vulkan HDR path without relying on the
+        // transient pool's aliasing decisions.  Explicit env values remain an
+        // A/B switch for captures and diagnostics.
+        auto bloomOut = ShouldEnableBloom(graph.GetDevice())
+            ? PostProcess::AddBloomPass(graph, hdrClean, cbIdx, MakeBloomParams())
+            : PostProcess::BloomPassData{};
 
         // FusionIndirect has already applied AO and blended SSGI/DDGI/SPGI.
         // Do not feed AO/SSGI to ToneMapping again or the legacy post-process
@@ -2417,11 +3127,239 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 giAlreadyComposited ? RGResourceHandle{} : ssaoOut.ssao_output,
                 giAlreadyComposited ? RGResourceHandle{} : ssgiOut.ssgi_output,
                 velTAA,                   // velocity
-                cbIdx);
+                static_cast<u32>(frameCount_));  // sun-audit P3: 绝对帧号（fi 取模不变），[ToneAdapt] 采样用
     }
 
     // ========================================================================
-    // Step 10.6: Toon post process (optional, both platforms)
+    // Step 10.55 (sun-audit P1 第二层): SC atlas card-space 定点读回
+    // ========================================================================
+    {
+        struct ScLadderHit {
+            u32 res = 0, ox = 0, oy = 0, axis = 0, dir = 0;
+            float cx = 0, cy = 0, cz = 0;
+            float u = 0, v = 0;   // 查询点在卡片内的归一坐标
+            rhi::ResourceHandle buf{handles::INVALID_RESOURCE};
+        };
+        static std::vector<ScLadderHit> scLadderHits;
+        static bool scLadderDone = false;
+
+        // ② frame 382：映射打印（fence 已由 BeginFrame 等待，2 帧前拷贝完成）
+        if (scLadderDone && !scLadderHits.empty() && frameCount_ == 382) {
+            auto f16 = [](u16 h) {
+                const u32 sign = (h >> 15) & 1u, ex = (h >> 10) & 0x1Fu, mant = h & 0x3FFu;
+                if (ex == 0u) return 0.0f;
+                u32 bits = (sign << 31) | ((ex + 112u) << 23) | (mant << 13);
+                float f; std::memcpy(&f, &bits, 4); return f;
+            };
+            double bestMax = 0.0;
+            for (auto& h : scLadderHits) {
+                if (h.buf == handles::INVALID_RESOURCE) continue;
+                const u64 bytes = u64(h.res) * h.res * 8;
+                const u16* t = static_cast<const u16*>(device_->MapBuffer(h.buf, 0, bytes));
+                if (!t) { device_->DestroyBuffer(h.buf); h.buf = handles::INVALID_RESOURCE; continue; }
+                double sum = 0.0; float mx = 0.0f; u64 n = 0;
+                float mr = 0, mg = 0, mb = 0;
+                for (u32 y = 0; y < h.res; y += 2) {
+                    for (u32 x = 0; x < h.res; x += 2) {
+                        const u16* p = t + ((size_t)y * h.res + x) * 4;
+                        const float r = f16(p[0]), g = f16(p[1]), b = f16(p[2]);
+                        if (std::isnan(r)) continue;
+                        const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                        sum += lum; ++n;
+                        if (lum > mx) { mx = lum; mr = r; mg = g; mb = b; }
+                    }
+                }
+                // 查询点 (u,v) 处的定点纹素（3×3 邻域均值）
+                const u32 tx = std::min(h.res - 1u, u32(h.u * h.res));
+                const u32 ty = std::min(h.res - 1u, u32(h.v * h.res));
+                double tsum = 0.0; float tmax = 0.0f; u32 tn = 0;
+                float tr = 0, tg = 0, tb = 0;
+                for (int oy2 = -1; oy2 <= 1; ++oy2) {
+                    for (int ox2 = -1; ox2 <= 1; ++ox2) {
+                        const int px = int(tx) + ox2, py = int(ty) + oy2;
+                        if (px < 0 || py < 0 || px >= int(h.res) || py >= int(h.res)) continue;
+                        const u16* p = t + ((size_t)py * h.res + px) * 4;
+                        const float r = f16(p[0]), g = f16(p[1]), b = f16(p[2]);
+                        if (std::isnan(r)) continue;
+                        const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                        tsum += lum; ++tn;
+                        if (lum > tmax) { tmax = lum; tr = r; tg = g; tb = b; }
+                    }
+                }
+                device_->UnmapBuffer(h.buf);
+                device_->DestroyBuffer(h.buf);
+                h.buf = handles::INVALID_RESOURCE;
+                const double mean = n ? sum / n : 0.0;
+                const double texelLum = tn ? tsum / tn : 0.0;
+                bestMax = std::max(bestMax, double(mx));
+                const char* axn = h.axis == 0 ? "X" : (h.axis == 1 ? "Y" : "Z");
+                std::fprintf(stderr,
+                    "[SCLadder] card axis=%s dir=%u res=%u atlas=(%u,%u) world=(%.2f,%.2f,%.2f) "
+                    "queryUV=(%.2f,%.2f) texel_lum=%.4f maxTexel=(%.3f,%.3f,%.3f) "
+                    "card_mean_lum=%.4f card_max_lum=%.4f\n",
+                    axn, h.dir, h.res, h.ox, h.oy, h.cx, h.cy, h.cz,
+                    h.u, h.v, texelLum, tr, tg, tb, mean, mx);
+            }
+            const char* verdict = bestMax >= 0.5 ? "sc_source_lit(A-excluded)"
+                                : (bestMax < 0.1 ? "sc_source_dark" : "sc_source_dim");
+            std::fprintf(stderr,
+                "[SCLadderVerdict] best_card_max_lum=%.4f -> %s | "
+                "若 sc_source_lit 且 GI_LADDER 判 A：命中/方向错（查卡片深度、SDF 覆盖）；"
+                "若 sc_source_dark：查太阳方向/阴影/材质（SC 源面已暗）\n",
+                bestMax, verdict);
+            scLadderHits.clear();
+        }
+
+        // ① frame 380：CPU 卡片查找（与 SurfaceCacheCapture/LightEval 同一 uv
+        // 约定）+ 记录卡片 rect 拷贝 pass。世界点 = 中央地面 ROI 中心视线 ∩
+        // y=0 平面。
+        if (std::getenv("GI_LADDER_DUMP") && scLightingRG.IsValid() &&
+            surface_cache_pass_ && frameCount_ == 380 && !scLadderDone) {
+            const math::m4x4 invVP = Inverse(proj_matrix_ * view_matrix_);
+            auto xform = [&invVP](float x, float y, float z, float out[4]) {
+                const float xs[4] = {x, y, z, 1.0f};
+                for (int rr = 0; rr < 4; ++rr) out[rr] = 0.0f;
+                for (int cc = 0; cc < 4; ++cc)
+                    for (int rr = 0; rr < 4; ++rr) out[rr] += invVP.columns[cc][rr] * xs[cc];
+            };
+            float n0[4], n1[4];
+            xform(0.4727f * 2.0f - 1.0f, 1.0f - 2.0f * 0.9167f, 0.0f, n0);
+            xform(0.4727f * 2.0f - 1.0f, 1.0f - 2.0f * 0.9167f, 1.0f, n1);
+            const math::v3 p0{n0[0] / std::max(n0[3], 1e-6f), n0[1] / std::max(n0[3], 1e-6f), n0[2] / std::max(n0[3], 1e-6f)};
+            const math::v3 p1{n1[0] / std::max(n1[3], 1e-6f), n1[1] / std::max(n1[3], 1e-6f), n1[2] / std::max(n1[3], 1e-6f)};
+            math::v3 query{0.0f, 0.0f, 0.0f};
+            if (std::abs(p1.y - p0.y) > 1e-5f) {
+                const float t = (0.0f - p0.y) / (p1.y - p0.y);
+                if (t > 0.0f) {
+                    query.x = p0.x + (p1.x - p0.x) * t;
+                    query.y = 0.0f;
+                    query.z = p0.z + (p1.z - p0.z) * t;
+                }
+            }
+            // GI_LADDER_QUERY=x,y,z：覆盖查询点（如直射光区旁的墙面/布料，
+            // 审计分支"靠近直射区的表面是否收到 bounce"的定点测量）。
+            if (const char* q = std::getenv("GI_LADDER_QUERY")) {
+                float qx, qy, qz;
+                if (std::sscanf(q, "%f,%f,%f", &qx, &qy, &qz) == 3) {
+                    query = math::v3{qx, qy, qz};
+                    std::fprintf(stderr, "[SCLadder] query overridden by GI_LADDER_QUERY=%s\n", q);
+                }
+            }
+            // GI_LADDER_QUERY=x,y,z：覆盖查询点（如直射光区旁的墙面/布料，
+            // 审计分支"靠近直射区的表面是否收到 bounce"的定点测量）。
+            if (const char* q = std::getenv("GI_LADDER_QUERY")) {
+                float qx, qy, qz;
+                if (std::sscanf(q, "%f,%f,%f", &qx, &qy, &qz) == 3) {
+                    query = math::v3{qx, qy, qz};
+                    std::fprintf(stderr, "[SCLadder] query overridden by GI_LADDER_QUERY=%s\n", q);
+                }
+            }
+            std::fprintf(stderr,
+                "[SCLadder] query world point = (%.3f, %.3f, %.3f) (ROI 中心视线 ∩ y=0)\n",
+                query.x, query.y, query.z);
+
+            const auto& cards = surface_cache_pass_->GetCardGenerator().GetCards();
+            // 容差匹配：AABB 外 0.75u 内也算命中（墙面/布面是薄板，空中
+            // 查询点贴面偏移可命中），按 AABB 距离升序取最近 4 张。
+            constexpr float kMatchTol = 0.75f;
+            struct RankedCard { float dist; float vol; const lumen::SurfaceCacheCard* p; };
+            std::vector<RankedCard> ranked;
+            for (const auto& card : cards) {
+                const float cx = card.center.x, cy = card.center.y, cz = card.center.z;
+                const float ex = card.extent.x, ey = card.extent.y, ez = card.extent.z;
+                const float dx = std::max(std::abs(query.x - cx) - ex, 0.0f);
+                const float dy = std::max(std::abs(query.y - cy) - ey, 0.0f);
+                const float dz = std::max(std::abs(query.z - cz) - ez, 0.0f);
+                const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (dist <= kMatchTol) ranked.push_back({dist, ex * ey * ez, &card});
+            }
+            // 同距离时优先更小体积的卡片（贴墙/贴面薄板优先于庭院级巨卡）。
+            // 比较器只用元素自身字段（std::sort 的枢轴临时副本上 &e-data()
+            // 会越界——上一版UB）。
+            std::sort(ranked.begin(), ranked.end(), [](const RankedCard& a, const RankedCard& b) {
+                if (a.dist != b.dist) return a.dist < b.dist;
+                return a.vol < b.vol;
+            });
+            for (const auto& rc : ranked) {
+                const auto& [d, vol, pc] = rc;
+                if (scLadderHits.size() >= 4) break;
+                const auto& card = *pc;
+                if (card.resolution == 0) continue;
+                const float cx = card.center.x, cy = card.center.y, cz = card.center.z;
+                const float ex = card.extent.x, ey = card.extent.y, ez = card.extent.z;
+                const u32 axis = card.axis_direction & 0xFFu;
+                const u32 dir = (card.axis_direction >> 8) & 0xFFu;
+                float u = 0.0f, v = 0.0f;
+                if (axis == 0) {
+                    u = (query.y - cy) / (2.0f * ey) + 0.5f;
+                    v = (query.z - cz) / (2.0f * ez) + 0.5f;
+                } else if (axis == 1) {
+                    u = (query.x - cx) / (2.0f * ex) + 0.5f;
+                    v = (query.z - cz) / (2.0f * ez) + 0.5f;
+                } else {
+                    u = (query.x - cx) / (2.0f * ex) + 0.5f;
+                    v = (query.y - cy) / (2.0f * ey) + 0.5f;
+                }
+                if (u <= 0.0f || u >= 1.0f || v <= 0.0f || v >= 1.0f) continue;
+                ScLadderHit h;
+                h.res = card.resolution; h.ox = card.atlas_offset_x; h.oy = card.atlas_offset_y;
+                h.axis = axis; h.dir = dir; h.cx = cx; h.cy = cy; h.cz = cz;
+                h.u = u; h.v = v;
+                BufferDesc bd{};
+                bd.size = u64(h.res) * h.res * 8;
+                bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                h.buf = device_->CreateBuffer(bd);
+                if (h.buf != handles::INVALID_RESOURCE) scLadderHits.push_back(h);
+            }
+            scLadderDone = true;
+
+            if (scLadderHits.empty()) {
+                std::fprintf(stderr, "[SCLadder] no card AABB contains the query point\n");
+            } else {
+                struct SCLadderData { rhi::ResourceHandle atlas; };
+                auto* hitsPtr = &scLadderHits;
+                // atlas 物理句柄（三缓冲当前槽）；不通过 RG Read(CopySource)
+                // 声明——与同帧其它 ShaderResource 读冲突会让 RG 状态解析
+                // 死循环（实测 906% CPU 挂死）。改为 SideEffect pass + 主 cmd
+                // 手动 SR→CopySource→SR 屏障（跟踪器在同一 CB 内解析）。
+                const rhi::ResourceHandle atlasTex =
+                    surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)).lighting_atlas;
+                graph.AddPass<SCLadderData>("SCLadderReadback",
+                    rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+                    [atlasTex](SCLadderData&, rendergraph::RenderGraphBuilder& builder) {
+                        builder.SideEffect();
+                    },
+                    [atlasTex, hitsPtr](const SCLadderData&, rendergraph::RenderGraphContext& context) {
+                        if (atlasTex == handles::INVALID_RESOURCE) return;
+                        auto* cmd = context.cmdBuffer;
+                        std::fprintf(stderr, "[SCLadder] readback pass executing, hits=%zu\n", hitsPtr->size());
+                        ResourceBarrier toCopy{};
+                        toCopy.resource = atlasTex;
+                        toCopy.beforeState = ResourceState::ShaderResource;
+                        toCopy.afterState = ResourceState::CopySource;
+                        toCopy.subresource = 0xFFFFFFFF;
+                        toCopy.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&toCopy, 1);
+                        for (const auto& h : *hitsPtr) {
+                            BufferTextureCopyRegion rr{};
+                            rr.imageSubresource.layerCount = 1;
+                            rr.imageOffset = {(int)h.ox, (int)h.oy, 0};
+                            rr.imageExtent = {h.res, h.res, 1};
+                            cmd->CopyTextureToBuffer(atlasTex, h.buf, &rr, 1);
+                        }
+                        ResourceBarrier toSR{};
+                        toSR.resource = atlasTex;
+                        toSR.beforeState = ResourceState::CopySource;
+                        toSR.afterState = ResourceState::ShaderResource;
+                        toSR.subresource = 0xFFFFFFFF;
+                        toSR.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&toSR, 1);
+                    });
+            }
+            }
+        }
+
     // ========================================================================
     // Cel shading on the tone-mapped LDR frame: color quantization + depth
     // Sobel edges. Runs before the GeometryDebug overlay so debug colors stay
@@ -2482,6 +3420,15 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             vizIn.offline_sdf_resolution = offline_sdf_resolution_;
         }
         sdf_viz_module_->AddPass(graph, vizIn);
+    } else if (neural_debug_enabled_ && neural_debug_module_ &&
+               neural_debug_module_->IsInitialized()) {
+        // M0 神经渲染 debug 视图：左半屏 MLP 推理重建，右半屏 GT 参考函数。
+        NeuralDebugInputs ndIn;
+        ndIn.backbuffer_rg = graph.ImportResource("BackBuffer", backBuffer);
+        ndIn.current_buffer_index = cbIdx;
+        ndIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        ndIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        neural_debug_module_->AddPass(graph, ndIn);
     } else if (final_blit_module_) {
         FinalBlitInputs blitIn;
         // Prefer the tone-mapped LDR output (Toon-processed when enabled);
@@ -2547,7 +3494,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             psIn.probe_counts[2] = ddgi_pass_->GetParams().probe_count_z;
             psIn.probe_count = probeCount;
             psIn.probe_spacing = ddgi_pass_->GetParams().probe_spacing;
-            psIn.irradiance_buffer = ddgi_pass_->GetIrradianceBuffer(cbIdx);
+            psIn.irradiance_buffer = ddgi_pass_->GetIrradianceBufferBySlot(cbIdx);  // 槽号（诊断可视化）
             // B1 L3 遮挡：GBuffer 深度导入（唯一名——物理纹理与 Nanite 写入
             // 的同一张，RG 不感知复用；Metal 编码器边界同步处理转移）。
             auto& gpuDrawForDepth = nanite::GPUDrivenDrawPipeline::Get();
@@ -2555,6 +3502,15 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                                                  gpuDrawForDepth.GetGBufferDepthSampleable());
             psIn.depth_width = render_width_;
             psIn.depth_height = render_height_;
+            // 2026-09-17 审计 §8.3：relocated origins CPU 读回（60 帧后到达，
+            // 版本变化触发 VB 重建）→ 球体按 绿/黄/红/灰 状态着色。
+            u32 originStateCount = 0, originStateVersion = 0;
+            if (const math::v4* originStates =
+                    ddgi_pass_->GetRelocatedOriginsCpu(originStateCount, originStateVersion)) {
+                psIn.origin_states = originStates;
+                psIn.origin_states_count = originStateCount;
+                psIn.origin_states_version = originStateVersion;
+            }
             probe_sphere_module_->AddPass(graph, psIn);
         }
     }
@@ -2580,13 +3536,34 @@ static void ReportGraphPassTimes(RenderGraph& graph) {
 
     static std::unordered_map<std::string, double> sumMs;
     static std::unordered_map<std::string, u32> cnt;
+    // sun-audit P3: P50/P95 帧时统计——每帧各 pass 样本与帧总 GPU ms
+    //（120 帧窗口，报告后清空）。
+    static std::unordered_map<std::string, std::vector<double>> valsMs;
+    static std::vector<double> frameTotals;
     static u32 frames = 0;
 
+    double thisFrameTotal = 0.0;
     for (const auto& [name, ms] : graph.GetPassExecutionTimes()) {
         sumMs[name] += ms;
         cnt[name] += 1;
+        valsMs[name].push_back(ms);
+        thisFrameTotal += ms;
     }
+    frameTotals.push_back(thisFrameTotal);
     if (++frames < 120) return;
+
+    auto percentile = [](std::vector<double> v, double p) -> double {
+        if (v.empty()) return 0.0;
+        std::sort(v.begin(), v.end());
+        const size_t idx = std::min((size_t)(p * (v.size() - 1)), v.size() - 1);
+        return v[idx];
+    };
+
+    const double totalP50 = percentile(frameTotals, 0.50);
+    const double totalP95 = percentile(frameTotals, 0.95);
+    double totalMean = 0.0;
+    for (double t : frameTotals) totalMean += t;
+    totalMean /= frameTotals.size();
 
     std::vector<std::pair<std::string, double>> rows;
     double total = 0.0;
@@ -2598,15 +3575,22 @@ static void ReportGraphPassTimes(RenderGraph& graph) {
               [](const auto& a, const auto& b) { return a.second > b.second; });
 
     PRIMAL_LOG_STREAM(Error, "Render") << "[RG-Perf] === GPU ms/frame over last " << frames << " frames ===" << std::endl;
+    // sun-audit P3: 帧总 GPU 时间 P50/P95（切镜尖峰在此窗口内可见）
+    PRIMAL_LOG_STREAM(Error, "Render") << "[RG-Perf] FRAME_TOTAL p50=" << totalP50
+                                       << " p95=" << totalP95
+                                       << " mean=" << totalMean << " ms" << std::endl;
     u32 shown = 0;
     for (const auto& [n, avg] : rows) {
         if (shown++ >= 24) break;
-        PRIMAL_LOG_STREAM(Error, "Render") << "  " << avg << "  " << n << std::endl;
+        const double p95 = percentile(valsMs[n], 0.95);
+        PRIMAL_LOG_STREAM(Error, "Render") << "  " << avg << "  p95=" << p95 << "  " << n << std::endl;
     }
     PRIMAL_LOG_STREAM(Error, "Render") << "[RG-Perf] TOTAL(sum of passes) = " << total << " ms/frame" << std::endl;
 
     sumMs.clear();
     cnt.clear();
+    valsMs.clear();
+    frameTotals.clear();
     frames = 0;
 }
 
@@ -2617,6 +3601,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     CommandBufferHandle cmdHandle,
     SyncHandle signalFence)
 {
+    // Phase 5b: 本 twin 路径的 RG 在函数内多次 Clear/重建，规范身份的导入
+    // 时机与图生命周期耦合——保持下方消费点的 IsValid() 回退（= 旧 per-site
+    // 导入），待本路径图生命周期梳理后再接入 producer identity。
+    RGResourceHandle gbufferDepthRG{}, gbufferAlbedoRG{}, gbufferNormalRG{};
     // A13/T0.11: on a viewport size change, drop all screen-space history
     // before this frame records — TAA re-inits from the current frame instead
     // of blending a different-size history (black/mixed-frame regression),
@@ -2641,6 +3629,31 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
         surface_cache_pass_->SetPageBudget(
             GIAdaptiveGovernor::ScaleBudget(gi_base_page_budget_, gi_governor_.Scale()));
+    }
+
+    // ========================================================================
+    // GIHistoryValidity 最小版（GI 能量所有权修复 Phase 5a）：灯光修改事件
+    // 消费。DDGI：BoostProbePriority + 30 帧 alpha=0.35 抬升窗；SC：tile
+    // validity 位图清零（下一帧 AddPass 生效）+ 本帧页预算拉满（0=全量，
+    // 下一帧 governor 恢复缩放）；SPGI：temporal reset。
+    // ========================================================================
+    if (gi_history_dirty_) {
+        gi_history_dirty_ = false;
+        const u32 now = static_cast<u32>(frameCount_);
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            ddgi_pass_->NotifyLightingChanged(now);
+        }
+        if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+            surface_cache_pass_->RequestTileValidityReset();
+            surface_cache_pass_->SetPageBudget(0u);   // 一帧页预算拉满
+        }
+        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized()) {
+            screen_probe_pass_->RequestTemporalReset();
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[GIHistory] lighting changed — DDGI boost+alpha-hold, SC tile"
+               " reset+full page budget, SPGI temporal reset at frame " << now
+            << std::endl;
     }
     OnSceneChanged(scene, current_scene_ == nullptr);
     current_scene_ = &scene;
@@ -2744,7 +3757,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     // scene. BuildHZB writes nearest-depth mip chain via MIN filter so
     // next frame's Stage5 has correct occluder depths.
     if (hzb_system_ && hzb_system_->IsReady() && gpuDraw.IsInitialized()) {
-        hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), cmd);
+        hzb_system_->BuildHZB(gpuDraw.GetGBufferDepthSampleable(), cmd, cbIdx % 3);
     }
 
     // ========================================================================
@@ -2786,6 +3799,28 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         return;
     }
 
+    // ========================================================================
+    // Neural debug early-out (PRIMAL_NEURAL_DEBUG=1): fullscreen hash-encode +
+    // MLP inference view, same early-out shape as the SDF visualization above.
+    // ========================================================================
+    if (neural_debug_enabled_ && neural_debug_module_ &&
+        neural_debug_module_->IsInitialized()) {
+        renderGraph_->Clear();
+        auto& graph = *renderGraph_;
+
+        NeuralDebugInputs ndIn;
+        ndIn.backbuffer_rg = graph.ImportResource("BackBuffer", target);
+        ndIn.current_buffer_index = cbIdx;
+        ndIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+        ndIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        neural_debug_module_->AddPass(graph, ndIn);
+
+        graph.Compile();
+        graph.Execute(cmd);
+        ReportGraphPassTimes(graph);
+        return;
+    }
+
     // After draw: Shadow + Deferred + FinalBlit via RenderGraph.
     // T4.6.5 part 39: GBuffer path requires Stage3 to have populated the
     // GBuffer RTs. In VisibilityBufferOnly mode, skip the entire block and
@@ -2813,6 +3848,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             shadowIn.view_matrix = view_matrix_;
             shadowIn.proj_matrix = proj_matrix_;
             shadowIn.light_direction = lightDir;
+            shadowIn.sun_angular_diameter_deg = settings_.lighting.sun_angular_diameter_deg;
             shadowIn.current_buffer_index = cbIdx;
             shadowIn.shadow_quality = settings_.quality.shadow_quality;
         // T8.13: shadow softness knobs (Hard=0 / PCF=1 / PCSS=2).
@@ -2821,6 +3857,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
             shadowOut = shadow_module_->AddPasses(graph, shadowIn);
         }
+        // P0: shadow 段之后输出——ShadowMapOutputs 的尺寸 provenance 已填充。
+        LogSunContractOnce(settings_, view_matrix_, proj_matrix_,
+                           GatherSunContractSizes(settings_, render_width_, render_height_,
+                                                  &shadowOut, surface_cache_pass_.get(),
+                                                  static_cast<u32>(frameCount_),
+                                                  ddgi_pass_.get()),
+                           static_cast<u32>(frameCount_));
 
         // Deferred Lighting — lightPos = direction TO light = -lightDir
         DeferredLightingInputs deferredIn;
@@ -2832,8 +3875,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         deferredIn.light_pos = math::v4{-lightDir.x, -lightDir.y, -lightDir.z, 0.0f};
         deferredIn.light_color = settings_.lighting.light_color;
         deferredIn.cascade_splits = settings_.lighting.cascade_splits;
-        deferredIn.shadow_matrix0 = shadowOut.shadow_matrix0;
-        deferredIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+        deferredIn.shadow_matrix0 = shadowOut.shadow_matrix[0];
+        deferredIn.shadow_matrix1 = shadowOut.shadow_matrix[1];
+        deferredIn.shadow_matrix2 = shadowOut.shadow_matrix[2];   // P4.2
+        deferredIn.shadow_matrix3 = shadowOut.shadow_matrix[3];   // P4.2
         deferredIn.current_buffer_index = cbIdx;
         deferredIn.shadow_visibility_rg = shadowOut.shadow_visibility_rg;
         deferredIn.shadow_visibility_tex = shadowOut.shadow_visibility_tex;
@@ -2844,11 +3889,92 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         deferredIn.shadow_moments_rg[1] = shadowOut.shadow_moments_rg[1];
         deferredIn.shadow_moments_tex[0] = shadowOut.shadow_moments_tex[0];
         deferredIn.shadow_moments_tex[1] = shadowOut.shadow_moments_tex[1];
+        deferredIn.shadow_moments_tex[2] = shadowOut.shadow_moments_tex[2];   // P4.2
+        deferredIn.shadow_moments_tex[3] = shadowOut.shadow_moments_tex[3];   // P4.2
+        deferredIn.shadow_translucent_rg = shadowOut.shadow_translucent_rg;   // P4.1
+        deferredIn.shadow_translucent_tex = shadowOut.shadow_translucent_tex; // P4.1
         deferredIn.gbuffer_albedo_rg = gbufferAlbedoDL;
         deferredIn.gbuffer_normal_rg = gbufferNormalDL;
         deferredIn.gbuffer_orm_rg = gbufferORMDL;
         deferredIn.gbuffer_depth_rg = gbufferDepthDL;
+        // sun-audit P2 第二步: 探针深度可见性输入（PRIMAL_PROBE_OCC 变体）
+        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+            deferredIn.probe_depth_buf = ddgi_pass_->GetDepthBufferBySlot(cbIdx);  // 槽号（swapchain 环），诊断变体
+            const auto& vol = ddgi_pass_->GetVolumeData();
+            deferredIn.probe_origin_spacing = math::v4{
+                vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z, vol.ProbeSpacing};
+            deferredIn.probe_counts = math::v4{
+                float(vol.ProbeCounts[0]), float(vol.ProbeCounts[1]),
+                float(vol.ProbeCounts[2]),
+                float(vol.ProbeCounts[0] * vol.ProbeCounts[1] * vol.ProbeCounts[2])};
+        }
         auto deferredOut = deferred_module_->AddPasses(graph, deferredIn);
+
+        // P1-B（sponza-gap-audit §4.2）: 世界空间定点 HDR 探针（RWCB 路径，
+        // P3 修订：接入点改挂 TAA 解析后的最终 HDR（hdrCleanRWCB），
+        // 逐级能量链审计以 GI_ALL_OFF / GI_ISOLATE 消融驱动）。
+        // 相机锁定 ⇒ 固定屏幕点即固定世界点。PRIMAL_GI_PROBE=1 时在
+        // frame 120/360/1202 用一次性命令缓冲把融合后 HDR 输出的三个探针点
+        // （audit measurements ROI 中心 ×2 render scale）读回并打 log
+        // （线性 HDR，非显示编码）。SC_DUMP_CARDS 同款 one-shot 模式。
+        if (gi_probe_enabled_) {
+            const u32 probeFrame = static_cast<u32>(frameCount_);
+            if (probeFrame == 122 || probeFrame == 362 || probeFrame == 1202) {
+                // P3 修订: 源 = 上一帧 TAA 解析后的最终 HDR（锁定相机下等价）。
+                ResourceHandle physTex = probe_taa_output_phys_;
+
+                rhi::RHIDeviceBase* dev = &graph.GetDevice();
+                auto ch = dev->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+                auto* c2 = rhi::GetCommandBuffer(ch);
+                if (c2) {
+                        BufferDesc pb{};
+                        pb.size = 64;
+                        pb.type = BufferType::Raw;
+                        pb.bindFlags = (u32)rhi::BufferUsageFlags::TransferDst;
+                        pb.memoryUsage = GPUMemoryUsage::Readback;
+                        ResourceHandle stage = dev->CreateBuffer(pb);
+                        if (stage == handles::INVALID_RESOURCE) { dev->DestroyCommandBuffer(ch); }
+                        else {
+                            c2->Begin();
+                            rhi::BufferTextureCopyRegion regions[3];
+                            // 点位标定（display 720p → render ×2）：
+                            //  arch_sunlit  (150,20)  显示亮度 ~166（日照拱顶亮带）
+                            //  floor_sunlit (760,655) 显示亮度 ~239（日照地面亮带）
+                            //  right_dark   (982,297) 显示亮度 ~56（暗拱间接光区）
+                            const u32 px[3][2] = { {300, 40}, {1520, 1310}, {1964, 594} };
+                            for (u32 i = 0; i < 3; ++i) {
+                                regions[i].bufferOffset = i * 16;
+                                regions[i].imageSubresource.mipLevel = 0;
+                                regions[i].imageSubresource.layerCount = 1;
+                                regions[i].imageOffset = {static_cast<s32>(px[i][0]), static_cast<s32>(px[i][1]), 0};
+                                regions[i].imageExtent = {1, 1, 1};
+                            }
+                            c2->CopyTextureToBuffer(physTex, stage, regions, 3);
+                            c2->End(); c2->Submit(); c2->WaitForCompletion();
+                            if (void* p = dev->MapBuffer(stage, 0, 64)) {
+                                const u16* v = static_cast<const u16*>(p);
+                                auto f16 = [](u16 h) {
+                                    u32 sign = (h & 0x8000u) << 16, expo = (h & 0x7C00u) >> 10, man = h & 0x03FFu;
+                                    u32 bits;
+                                    if (expo == 0) bits = sign;
+                                    else if (expo == 31) bits = sign | 0x7F800000u | (man << 13);
+                                    else bits = sign | ((expo - 15u + 127u) << 23) | (man << 13);
+                                    float f; std::memcpy(&f, &bits, 4); return f;
+                                };
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[GI-PROBE] frame=" << probeFrame
+                                    << " archHDR=(" << f16(v[0]) << "," << f16(v[1]) << "," << f16(v[2]) << ")"
+                                    << " rightArchHDR=(" << f16(v[4]) << "," << f16(v[5]) << "," << f16(v[6]) << ")"
+                                    << " floorHDR=(" << f16(v[8]) << "," << f16(v[9]) << "," << f16(v[10]) << ")"
+                                    << std::endl;
+                                dev->UnmapBuffer(stage);
+                            }
+                            dev->DestroyBuffer(stage);
+                        }
+                    dev->DestroyCommandBuffer(ch);
+                }
+            }
+        }
 
         // --- SSAO ---
         lumen::LumenSSAOOutput ssaoOut{};
@@ -2871,15 +3997,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             lumen::SurfaceCacheFrameData frameData{};
             frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
             frameData.frame_index = static_cast<u32>(frameCount_);
-            frameData.light_count = 1;
-            // T3.2: real light from settings instead of the SC-internal hardcode
-            math::v3 scLightDir2 = Normalize(settings_.lighting.light_direction);
-            frameData.light_direction = scLightDir2;
-            frameData.light_color = {settings_.lighting.ddgi_light_color.x,
-                                     settings_.lighting.ddgi_light_color.y,
-                                     settings_.lighting.ddgi_light_color.z};
-            // A4: real per-slot light list (keeps point lights alive in LightEval)
-            FillSCLightList(frameData, current_scene_);
+            // sun-audit §7 P1: 与 BuildRenderGraph 站点统一——旧代码在这里把
+            // 备用 SC 阳光写成 ddgi_light_color（比主路径 light_color 高
+            // 1.5×），是两条 RenderGraph 站点漂移的实锤。现在两个站点都走
+            // FillSurfaceCacheSunLight。
+            FillSurfaceCacheSunLight(frameData, settings_, current_scene_);
             frameData.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
             frameData.render_width  = render_width_;
             frameData.render_height = render_height_;
@@ -2887,13 +4009,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             frameData.gbuffer_albedo = gpuDraw.GetGBufferAlbedo();
             frameData.gbuffer_normal = gpuDraw.GetGBufferNormal();
             // Probe-fed indirect — see the BuildRenderGraph twin site.
+            // Phase 1d: 槽位单一事实源 DDGISlotMap.h。
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+                const auto ddgiSlots = lumen::DDGISlotsForFrame(static_cast<u32>(frameCount_));
                 const auto& vol = ddgi_pass_->GetVolumeData();
-                frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBuffer(
-                    (static_cast<u32>(frameCount_) + 2) % 3);
+                frameData.ddgi_irradiance = ddgi_pass_->GetIrradianceBufferBySlot(ddgiSlots.previousIndex);
                 // C 系列：同槽位探针深度（twin 站点同步）。
-                frameData.ddgi_depth = ddgi_pass_->GetDepthBuffer(
-                    (static_cast<u32>(frameCount_) + 2) % 3);
+                frameData.ddgi_depth = ddgi_pass_->GetDepthBufferBySlot(ddgiSlots.previousIndex);
                 // GI 根治 Phase 3.2: 同源 openSky 统计（twin 站点同步）。
                 frameData.ddgi_opensky = ddgi_pass_->GetOpenSkyBuffer();
                 frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
@@ -2905,6 +4027,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 frameData.ddgi_valid =
                     (frameData.ddgi_irradiance != handles::INVALID_RESOURCE) ? 1u : 0u;
             }
+            // G2 capture 侧（2026-09-16）: 同 site 1——PCSS 深度供卡片
+            // 直射可见性
+            for (u32 c = 0; c < 4; ++c) {
+                frameData.shadow_depth[c] = shadowOut.shadow_depth_rg[c];
+                frameData.shadow_matrices[c] = shadowOut.shadow_matrix[c];
+            }
+            frameData.shadow_cascade_count = 4u;
+
             ResourceHandle nullLightBuf{handles::INVALID_RESOURCE};
             // T8.12: card-view capture — this path never had the wiring (the
             // BuildRenderGraph twin site has it). With card view enabled the
@@ -2942,8 +4072,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             camData.proj_matrix = proj_matrix_;
             camData.prev_view_matrix = prev_view_matrix_;   // A10: true previous-frame VP
             camData.prev_proj_matrix = prev_proj_matrix_;
-            camData.light_direction = Normalize(settings_.lighting.light_direction);
-            camData.light_color = {settings_.lighting.ddgi_light_color.x, settings_.lighting.ddgi_light_color.y, settings_.lighting.ddgi_light_color.z};
+            FillDDGISunLight(camData, settings_);
             camData.frame_index = static_cast<u32>(frameCount_);
             camData.delta_time = settings_.advanced.delta_time_override;
             RGResourceHandle prevColor;
@@ -2951,19 +4080,21 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
             // B11/Phase 2.3: 回灌 pre-gain GI 缓冲（FusionIndirect 输出）——
             // 融合增益与直射不再进探针回路（直射供给由 SC 卡片负责）。
+            // Phase 2a: 默认断边（twin 站点与主路径同步，见上方注释）。
             if (RGResourceHandle fused = MakeProbeRadianceSource(graph, cbIdx); fused.IsValid()) {
                 prevColor = fused;
                 camData.radiance_is_previous_frame = true;
             }
             if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
                 camData.screen_depth = graph.ImportResource("DDGI_CurrentScreenDepth", gpuDraw.GetGBufferDepthSampleable());
-                if (!camData.radiance_is_previous_frame) {
-                    camData.radiance_depth = camData.screen_depth;
-                } else if (depth_history_ && !camera_cut_this_frame_) {
-                    const auto previous = depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_));
-                    if (previous.is_valid && previous.texture != handles::INVALID_RESOURCE)
-                        camData.radiance_depth = graph.ImportResource("DDGI_RadianceDepth", previous.texture);
+                if (camData.radiance_is_previous_frame) {
+                    if (depth_history_ && !camera_cut_this_frame_) {
+                        const auto previous = depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_));
+                        if (previous.is_valid && previous.texture != handles::INVALID_RESOURCE)
+                            camData.radiance_depth = graph.ImportResource("DDGI_RadianceDepth", previous.texture);
+                    }
                 }
+                // 断边默认态：radiance_depth 保持无效 = 屏域 radiance 档关断。
             }
             ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
 
@@ -2975,6 +4106,27 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                                                    static_cast<u32>(frameCount_), RGResourceHandle{});
                     }
                 }
+            }
+        }
+
+        // --- [WRC] twin 站点同步（Step 6.7 的 RWCB 路径镜像，独立接线 block）。
+        if (wrc_volume_count_ > 0) {
+            for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
+                if (!wrc_volumes_[vi] || !wrc_volumes_[vi]->IsInitialized()) continue;
+                if (vi == 0 && surface_cache_pass_) {
+                    wrc_volumes_[vi]->SetSurfaceCacheResources(
+                        surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)));
+                }
+                lumen::WRCCameraData wrcCam{};
+                wrcCam.light_direction = rhi::math::Normalize(settings_.lighting.light_direction);
+                wrcCam.light_color = {settings_.lighting.ddgi_light_color.x,
+                                      settings_.lighting.ddgi_light_color.y,
+                                      settings_.lighting.ddgi_light_color.z};
+                const float skyTier = lumen::GIDebug().sky_color_intensity;
+                wrcCam.sky_color = {skyTier, skyTier, skyTier};
+                wrcCam.frame_index = static_cast<u32>(frameCount_);
+                const RGResourceHandle scRG = (vi == 0) ? scLightingRG : RGResourceHandle{};
+                wrc_volumes_[vi]->AddPass(graph, wrcCam, static_cast<u32>(frameCount_), scRG);
             }
         }
 
@@ -3004,11 +4156,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
             // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
             giIn.far_volume_view = (ddgi_volume_count_ > 1 && ddgi_volumes_[1])
-                ? ddgi_volumes_[1]->GetVolumeView(static_cast<u32>(frameCount_) % 3) : lumen::DDGIVolumeView{};
+                ? ddgi_volumes_[1]->GetVolumeView(static_cast<u32>(frameCount_)) : lumen::DDGIVolumeView{};
             // T6.3 sub-B: 全 volume 视图直传（同 Render 路径；能力门控在模块内）。
             giIn.volume_count = ddgi_volume_count_;
             for (u32 vi = 0; vi < ddgi_volume_count_ && vi < GIGatherInputs::kMaxVolumes; ++vi)
-                if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView(static_cast<u32>(frameCount_) % 3);
+                if (ddgi_volumes_[vi]) giIn.volume_views[vi] = ddgi_volumes_[vi]->GetVolumeView(static_cast<u32>(frameCount_));
             giIn.static_probe_volume = static_probe_volume_.get();
             giIn.gbuffer_depth = gpuDraw.GetGBufferDepthSampleable();
             giIn.gbuffer_normal = gpuDraw.GetGBufferNormal();
@@ -3062,13 +4214,29 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // T2.2: DDGI probe fallback for miss rays
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
                 if (settings_.lumen.axes.fallback_spgi_to_ddgi) {
-                    // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）
+                    // X2/A3: volume 数据走统一 Cache View（ddgi_pass_ 别名 ddgi_volumes_[0]）。
+                    // Phase 1d: previousIndex = 上一完成帧（twin 站点同步）。
                     screen_probe_pass_->SetDDGIFallbackData(
-                        ddgi_pass_->GetVolumeView(static_cast<u32>(frameCount_ + 2) % 3));
+                        ddgi_pass_->GetVolumeViewBySlot(
+                            lumen::DDGISlotsForFrame(static_cast<u32>(frameCount_)).previousIndex));
                 } else {
                     // X3/A6 轴4: fallback 边关断 → Clear 语义（空 view 置
                     // ddgi_fallback_available_=false，miss 回落天空常量）
                     screen_probe_pass_->SetDDGIFallbackData(lumen::DDGIVolumeView{});
+                }
+            }
+            // [WRC] A3 twin 站点同步（fallback_spgi_to_wrc 边，见 Step 9 注释）。
+            {
+                bool wrcEdge = settings_.lumen.wrc_spgi_consume &&
+                               wrc_volume_count_ > 0 &&
+                               wrc_volumes_[0] && wrc_volumes_[0]->IsInitialized();
+                if (wrcEdge) {
+                    screen_probe_pass_->SetWRCCacheData(
+                        wrc_volumes_[0]->GetCacheView(static_cast<u32>(frameCount_)),
+                        wrc_volumes_[0]->GetConsumeCounterBuffer(), true);
+                } else {
+                    screen_probe_pass_->SetWRCCacheData(lumen::WRCCacheView{},
+                                                        rhi::handles::INVALID_RESOURCE, false);
                 }
             }
             auto spDepth = graph.ImportResource("GBufferDepth_SP", gpuDraw.GetGBufferDepthSampleable());
@@ -3102,6 +4270,31 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             }
             spgiOut = screen_probe_pass_->AddPass(graph, spDepth, spNormal,
                 spRadiance, spCam, static_cast<u32>(frameCount_), spHzb);
+
+            // M1 采集（第二渲染路径，同上）。
+            if (neural_capture_module_ && neural_capture_module_->IsInitialized()) {
+                NeuralCaptureInputs capIn;
+                capIn.spgi_gi_output = spgiOut.gi_output;
+                capIn.gbuffer_depth = spDepth;
+                capIn.gbuffer_normal = spNormal;
+                capIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+                capIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+                capIn.current_buffer_index = cbIdx;
+                capIn.camera_cut = camera_cut_this_frame_;
+                neural_capture_module_->AddPass(graph, capIn);
+            }
+ 
+            // M1 神经降噪推理（第二渲染路径，同上）。
+            if (neural_denoise_module_ && neural_denoise_module_->IsInitialized()) {
+                NeuralDenoiseInputs dnIn;
+                dnIn.spgi_gi_output = spgiOut.gi_output;
+                dnIn.gbuffer_depth = spDepth;
+                dnIn.gbuffer_normal = spNormal;
+                dnIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+                dnIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+                dnIn.current_buffer_index = cbIdx;
+                neural_denoise_module_->AddPass(graph, dnIn);
+            }
         }
 
         // --- Volume (Froxel Fog or Ray March) ---
@@ -3111,8 +4304,22 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             froxelIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
             froxelIn.scene_color = deferredOut.deferred_output_rg;
             froxelIn.shadow_map = shadowOut.shadow_visibility_rg;
-            froxelIn.shadow_matrix0 = shadowOut.shadow_matrix0;
-            froxelIn.shadow_matrix1 = shadowOut.shadow_matrix1;
+            froxelIn.shadow_matrix0 = shadowOut.shadow_matrix[0];
+            froxelIn.shadow_matrix1 = shadowOut.shadow_matrix[1];
+            // P2-B（sponza-gap-audit §4.6）: 雾的阴影输入换成 light-space VSM
+            // moments + 全 4 级联矩阵。屏幕空间表面可见性图不再被雾采样（屏幕 UV
+            // 与 light VP UV 不对应，表面可见性不描述空间点遮挡）。
+            // P1（sponza-gap-reaudit §4.4）: 同时传入 PCSS 深度图；无 moments
+            // （默认 PCSS）时 FroxelFogPass 自动切换 shadow_mode=2 深度比较，
+            // 不再恒 lit。级联数按 4 传入，模式由纹理有效性在 pass 内决定。
+            if (froxel_shadows_enabled_) {
+                for (u32 c = 0; c < 4; ++c) {
+                    froxelIn.shadow_moments[c] = shadowOut.shadow_moments_rg[c];
+                    froxelIn.shadow_matrices[c] = shadowOut.shadow_matrix[c];
+                    froxelIn.shadow_depth[c] = shadowOut.shadow_depth_rg[c];
+                }
+                froxelIn.shadow_cascade_count = 4u;
+            }
 
             auto& globalSDF = nanite::GlobalSDF::Get();
             if (globalSDF.IsInitialized()) {
@@ -3273,12 +4480,20 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.ssr_rg = ssrOutRWCB.outputColor;
             fusionIn.ssr_tex = handles::INVALID_RESOURCE;
             fusionIn.gbuffer_orm = gpuDraw.GetGBufferORM();
+            // sun-audit P1: GI_LADDER_DUMP 能量台账输入（vis 半分辨率 R8 + invVP）
+            fusionIn.shadow_vis_tex = shadowOut.shadow_visibility_tex;
+            fusionIn.inv_view_projection = Inverse(proj_matrix_ * view_matrix_);
             fusionIn.current_buffer_index = cbIdx;
+            // Phase 1d: twin 站点同步——frame_index 是三缓冲槽位单一事实源
+            // （漏设会钉死 slot0/prevIdx=2，仪表与下游读到未写槽 = NaN）。
+            fusionIn.frame_index = static_cast<u32>(frameCount_);
             fusionIn.render_width = render_width_;
             fusionIn.render_height = render_height_;
             fusionIn.black_texture = black_texture_;
             fusionIn.volume_scatter_rg = volume_scatter_rg.IsValid()
                 ? volume_scatter_rg : volumeOut.volume_scatter;
+            // WRC 计划 Stream C1（Fusion 档位化）twin 站点同步（见 2790 处注释）。
+            fusionIn.pixel_gi_spgi_only = settings_.lumen.axes.use_screen_probes;
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 
@@ -3349,10 +4564,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 hdrCleanRWCB = taaRWCB.output;
             }
             taaResolvedColorRWCB = hdrCleanRWCB;
+            // P1-B/P3: 解析 TAA 输出物理纹理供下一帧 GI-PROBE 一次性读回。
+            if (gi_probe_enabled_) {
+                auto* res = graph.GetResource(taaResolvedColorRWCB);
+                if (res) probe_taa_output_phys_ = res->GetPhysicalHandle();
+            }
 
-            auto bloomRWCB = std::getenv("PRIMAL_BLOOM") == nullptr
-                ? PostProcess::BloomPassData{}
-                : PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx);
+            auto bloomRWCB = ShouldEnableBloom(graph.GetDevice())
+                ? PostProcess::AddBloomPass(graph, hdrCleanRWCB, cbIdx, MakeBloomParams())
+                : PostProcess::BloomPassData{};
             // FusionIndirect already owns AO/GI composition. ToneMapping only
             // receives those legacy inputs when Fusion was unavailable.
             const bool giAlreadyCompositedRWCB =
@@ -3364,7 +4584,227 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     graph, hdrCleanRWCB, bloomRWCB.bloomOutput,
                     giAlreadyCompositedRWCB ? RGResourceHandle{} : ssaoOut.ssao_output,
                     giAlreadyCompositedRWCB ? RGResourceHandle{} : ssgiOut.ssgi_output,
-                    velRWCB, cbIdx);
+                    velRWCB, static_cast<u32>(frameCount_));  // sun-audit P3: 绝对帧号
+    // ========================================================================
+    // Step 10.55 (sun-audit P1 第二层): SC atlas card-space 定点读回
+    // ========================================================================
+    {
+        struct ScLadderHit {
+            u32 res = 0, ox = 0, oy = 0, axis = 0, dir = 0;
+            float cx = 0, cy = 0, cz = 0;
+            float u = 0, v = 0;   // 查询点在卡片内的归一坐标
+            rhi::ResourceHandle buf{handles::INVALID_RESOURCE};
+        };
+        static std::vector<ScLadderHit> scLadderHits;
+        static bool scLadderDone = false;
+
+        // ② frame 382：映射打印（fence 已由 BeginFrame 等待，2 帧前拷贝完成）
+        if (scLadderDone && !scLadderHits.empty() && frameCount_ == 382) {
+            auto f16 = [](u16 h) {
+                const u32 sign = (h >> 15) & 1u, ex = (h >> 10) & 0x1Fu, mant = h & 0x3FFu;
+                if (ex == 0u) return 0.0f;
+                u32 bits = (sign << 31) | ((ex + 112u) << 23) | (mant << 13);
+                float f; std::memcpy(&f, &bits, 4); return f;
+            };
+            double bestMax = 0.0;
+            for (auto& h : scLadderHits) {
+                if (h.buf == handles::INVALID_RESOURCE) continue;
+                const u64 bytes = u64(h.res) * h.res * 8;
+                const u16* t = static_cast<const u16*>(device_->MapBuffer(h.buf, 0, bytes));
+                if (!t) { device_->DestroyBuffer(h.buf); h.buf = handles::INVALID_RESOURCE; continue; }
+                double sum = 0.0; float mx = 0.0f; u64 n = 0;
+                float mr = 0, mg = 0, mb = 0;
+                for (u32 y = 0; y < h.res; y += 2) {
+                    for (u32 x = 0; x < h.res; x += 2) {
+                        const u16* p = t + ((size_t)y * h.res + x) * 4;
+                        const float r = f16(p[0]), g = f16(p[1]), b = f16(p[2]);
+                        if (std::isnan(r)) continue;
+                        const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                        sum += lum; ++n;
+                        if (lum > mx) { mx = lum; mr = r; mg = g; mb = b; }
+                    }
+                }
+                // 查询点 (u,v) 处的定点纹素（3×3 邻域均值）
+                const u32 tx = std::min(h.res - 1u, u32(h.u * h.res));
+                const u32 ty = std::min(h.res - 1u, u32(h.v * h.res));
+                double tsum = 0.0; float tmax = 0.0f; u32 tn = 0;
+                float tr = 0, tg = 0, tb = 0;
+                for (int oy2 = -1; oy2 <= 1; ++oy2) {
+                    for (int ox2 = -1; ox2 <= 1; ++ox2) {
+                        const int px = int(tx) + ox2, py = int(ty) + oy2;
+                        if (px < 0 || py < 0 || px >= int(h.res) || py >= int(h.res)) continue;
+                        const u16* p = t + ((size_t)py * h.res + px) * 4;
+                        const float r = f16(p[0]), g = f16(p[1]), b = f16(p[2]);
+                        if (std::isnan(r)) continue;
+                        const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                        tsum += lum; ++tn;
+                        if (lum > tmax) { tmax = lum; tr = r; tg = g; tb = b; }
+                    }
+                }
+                device_->UnmapBuffer(h.buf);
+                device_->DestroyBuffer(h.buf);
+                h.buf = handles::INVALID_RESOURCE;
+                const double mean = n ? sum / n : 0.0;
+                const double texelLum = tn ? tsum / tn : 0.0;
+                bestMax = std::max(bestMax, double(mx));
+                const char* axn = h.axis == 0 ? "X" : (h.axis == 1 ? "Y" : "Z");
+                std::fprintf(stderr,
+                    "[SCLadder] card axis=%s dir=%u res=%u atlas=(%u,%u) world=(%.2f,%.2f,%.2f) "
+                    "queryUV=(%.2f,%.2f) texel_lum=%.4f maxTexel=(%.3f,%.3f,%.3f) "
+                    "card_mean_lum=%.4f card_max_lum=%.4f\n",
+                    axn, h.dir, h.res, h.ox, h.oy, h.cx, h.cy, h.cz,
+                    h.u, h.v, texelLum, tr, tg, tb, mean, mx);
+            }
+            const char* verdict = bestMax >= 0.5 ? "sc_source_lit(A-excluded)"
+                                : (bestMax < 0.1 ? "sc_source_dark" : "sc_source_dim");
+            std::fprintf(stderr,
+                "[SCLadderVerdict] best_card_max_lum=%.4f -> %s | "
+                "若 sc_source_lit 且 GI_LADDER 判 A：命中/方向错（查卡片深度、SDF 覆盖）；"
+                "若 sc_source_dark：查太阳方向/阴影/材质（SC 源面已暗）\n",
+                bestMax, verdict);
+            scLadderHits.clear();
+        }
+
+        // ① frame 380：CPU 卡片查找（与 SurfaceCacheCapture/LightEval 同一 uv
+        // 约定）+ 记录卡片 rect 拷贝 pass。世界点 = 中央地面 ROI 中心视线 ∩
+        // y=0 平面。
+        if (std::getenv("GI_LADDER_DUMP") && scLightingRG.IsValid() &&
+            surface_cache_pass_ && frameCount_ == 380 && !scLadderDone) {
+            const math::m4x4 invVP = Inverse(proj_matrix_ * view_matrix_);
+            auto xform = [&invVP](float x, float y, float z, float out[4]) {
+                const float xs[4] = {x, y, z, 1.0f};
+                for (int rr = 0; rr < 4; ++rr) out[rr] = 0.0f;
+                for (int cc = 0; cc < 4; ++cc)
+                    for (int rr = 0; rr < 4; ++rr) out[rr] += invVP.columns[cc][rr] * xs[cc];
+            };
+            float n0[4], n1[4];
+            xform(0.4727f * 2.0f - 1.0f, 1.0f - 2.0f * 0.9167f, 0.0f, n0);
+            xform(0.4727f * 2.0f - 1.0f, 1.0f - 2.0f * 0.9167f, 1.0f, n1);
+            const math::v3 p0{n0[0] / std::max(n0[3], 1e-6f), n0[1] / std::max(n0[3], 1e-6f), n0[2] / std::max(n0[3], 1e-6f)};
+            const math::v3 p1{n1[0] / std::max(n1[3], 1e-6f), n1[1] / std::max(n1[3], 1e-6f), n1[2] / std::max(n1[3], 1e-6f)};
+            math::v3 query{0.0f, 0.0f, 0.0f};
+            if (std::abs(p1.y - p0.y) > 1e-5f) {
+                const float t = (0.0f - p0.y) / (p1.y - p0.y);
+                if (t > 0.0f) {
+                    query.x = p0.x + (p1.x - p0.x) * t;
+                    query.y = 0.0f;
+                    query.z = p0.z + (p1.z - p0.z) * t;
+                }
+            }
+            // GI_LADDER_QUERY=x,y,z：覆盖查询点（如直射光区旁的墙面/布料，
+            // 审计分支"靠近直射区的表面是否收到 bounce"的定点测量）。
+            if (const char* q = std::getenv("GI_LADDER_QUERY")) {
+                float qx, qy, qz;
+                if (std::sscanf(q, "%f,%f,%f", &qx, &qy, &qz) == 3) {
+                    query = math::v3{qx, qy, qz};
+                    std::fprintf(stderr, "[SCLadder] query overridden by GI_LADDER_QUERY=%s\n", q);
+                }
+            }
+            std::fprintf(stderr,
+                "[SCLadder] query world point = (%.3f, %.3f, %.3f) (ROI 中心视线 ∩ y=0)\n",
+                query.x, query.y, query.z);
+
+            const auto& cards = surface_cache_pass_->GetCardGenerator().GetCards();
+            // 容差匹配：AABB 外 0.75u 内也算命中（墙面/布面是薄板，空中
+            // 查询点贴面偏移可命中），按 AABB 距离升序取最近 4 张。
+            constexpr float kMatchTol = 0.75f;
+            struct RankedCard { float dist; float vol; const lumen::SurfaceCacheCard* p; };
+            std::vector<RankedCard> ranked;
+            for (const auto& card : cards) {
+                const float cx = card.center.x, cy = card.center.y, cz = card.center.z;
+                const float ex = card.extent.x, ey = card.extent.y, ez = card.extent.z;
+                const float dx = std::max(std::abs(query.x - cx) - ex, 0.0f);
+                const float dy = std::max(std::abs(query.y - cy) - ey, 0.0f);
+                const float dz = std::max(std::abs(query.z - cz) - ez, 0.0f);
+                const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (dist <= kMatchTol) ranked.push_back({dist, ex * ey * ez, &card});
+            }
+            // 同距离时优先更小体积的卡片（贴墙/贴面薄板优先于庭院级巨卡）。
+            // 比较器只用元素自身字段（std::sort 的枢轴临时副本上 &e-data()
+            // 会越界——上一版UB）。
+            std::sort(ranked.begin(), ranked.end(), [](const RankedCard& a, const RankedCard& b) {
+                if (a.dist != b.dist) return a.dist < b.dist;
+                return a.vol < b.vol;
+            });
+            for (const auto& rc : ranked) {
+                const auto& [d, vol, pc] = rc;
+                if (scLadderHits.size() >= 4) break;
+                const auto& card = *pc;
+                if (card.resolution == 0) continue;
+                const float cx = card.center.x, cy = card.center.y, cz = card.center.z;
+                const float ex = card.extent.x, ey = card.extent.y, ez = card.extent.z;
+                const u32 axis = card.axis_direction & 0xFFu;
+                const u32 dir = (card.axis_direction >> 8) & 0xFFu;
+                float u = 0.0f, v = 0.0f;
+                if (axis == 0) {
+                    u = (query.y - cy) / (2.0f * ey) + 0.5f;
+                    v = (query.z - cz) / (2.0f * ez) + 0.5f;
+                } else if (axis == 1) {
+                    u = (query.x - cx) / (2.0f * ex) + 0.5f;
+                    v = (query.z - cz) / (2.0f * ez) + 0.5f;
+                } else {
+                    u = (query.x - cx) / (2.0f * ex) + 0.5f;
+                    v = (query.y - cy) / (2.0f * ey) + 0.5f;
+                }
+                if (u <= 0.0f || u >= 1.0f || v <= 0.0f || v >= 1.0f) continue;
+                ScLadderHit h;
+                h.res = card.resolution; h.ox = card.atlas_offset_x; h.oy = card.atlas_offset_y;
+                h.axis = axis; h.dir = dir; h.cx = cx; h.cy = cy; h.cz = cz;
+                h.u = u; h.v = v;
+                BufferDesc bd{};
+                bd.size = u64(h.res) * h.res * 8;
+                bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                h.buf = device_->CreateBuffer(bd);
+                if (h.buf != handles::INVALID_RESOURCE) scLadderHits.push_back(h);
+            }
+            scLadderDone = true;
+
+            if (scLadderHits.empty()) {
+                std::fprintf(stderr, "[SCLadder] no card AABB contains the query point\n");
+            } else {
+                struct SCLadderData { rhi::ResourceHandle atlas; };
+                auto* hitsPtr = &scLadderHits;
+                // atlas 物理句柄（三缓冲当前槽）；不通过 RG Read(CopySource)
+                // 声明——与同帧其它 ShaderResource 读冲突会让 RG 状态解析
+                // 死循环（实测 906% CPU 挂死）。改为 SideEffect pass + 主 cmd
+                // 手动 SR→CopySource→SR 屏障（跟踪器在同一 CB 内解析）。
+                const rhi::ResourceHandle atlasTex =
+                    surface_cache_pass_->GetCacheView(static_cast<u32>(frameCount_)).lighting_atlas;
+                graph.AddPass<SCLadderData>("SCLadderReadback",
+                    rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
+                    [atlasTex](SCLadderData&, rendergraph::RenderGraphBuilder& builder) {
+                        builder.SideEffect();
+                    },
+                    [atlasTex, hitsPtr](const SCLadderData&, rendergraph::RenderGraphContext& context) {
+                        if (atlasTex == handles::INVALID_RESOURCE) return;
+                        auto* cmd = context.cmdBuffer;
+                        std::fprintf(stderr, "[SCLadder] readback pass executing, hits=%zu\n", hitsPtr->size());
+                        ResourceBarrier toCopy{};
+                        toCopy.resource = atlasTex;
+                        toCopy.beforeState = ResourceState::ShaderResource;
+                        toCopy.afterState = ResourceState::CopySource;
+                        toCopy.subresource = 0xFFFFFFFF;
+                        toCopy.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&toCopy, 1);
+                        for (const auto& h : *hitsPtr) {
+                            BufferTextureCopyRegion rr{};
+                            rr.imageSubresource.layerCount = 1;
+                            rr.imageOffset = {(int)h.ox, (int)h.oy, 0};
+                            rr.imageExtent = {h.res, h.res, 1};
+                            cmd->CopyTextureToBuffer(atlasTex, h.buf, &rr, 1);
+                        }
+                        ResourceBarrier toSR{};
+                        toSR.resource = atlasTex;
+                        toSR.beforeState = ResourceState::CopySource;
+                        toSR.afterState = ResourceState::ShaderResource;
+                        toSR.subresource = 0xFFFFFFFF;
+                        toSR.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&toSR, 1);
+                    });
+            }
+            }
+        }
         }
 
         // Toon post process — mirrors BuildRenderGraph Step 10.6.
@@ -3471,6 +4911,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 psIn.probe_counts[2] = ddgi_pass_->GetParams().probe_count_z;
                 psIn.probe_count = volPS.ProbeCountTotal;
                 psIn.probe_spacing = ddgi_pass_->GetParams().probe_spacing;
+                // 2026-09-17 审计 §8.3：relocated origins CPU 读回（60 帧后到
+                // 达，版本变化触发 VB 重建）→ 球体按 绿/黄/红/灰 状态着色。
+                u32 originStateCount = 0, originStateVersion = 0;
+                if (const math::v4* originStates =
+                        ddgi_pass_->GetRelocatedOriginsCpu(originStateCount, originStateVersion)) {
+                    psIn.origin_states = originStates;
+                    psIn.origin_states_count = originStateCount;
+                    psIn.origin_states_version = originStateVersion;
+                }
                 probe_sphere_module_->AddPass(graph, psIn);
             }
         }

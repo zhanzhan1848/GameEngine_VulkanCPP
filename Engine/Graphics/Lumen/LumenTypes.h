@@ -65,7 +65,9 @@ struct GIFiveAxisConfig {
     enum class DFGPath { Analytic, PreintegratedLUT };
     DFGPath dfg_path = DFGPath::Analytic;
 
-    // 轴4 更新传播拓扑（SC→DDGI 喂食边 / SPGI miss→DDGI fallback 边）
+    // 轴4 更新传播拓扑（SC→DDGI 喂食边 / SPGI miss→DDGI fallback 边；
+    // [WRC] 边见下方 wrc 段——propagate_sc_to_wrc = WRC trace 采样 SC，
+    // fallback_spgi_to_wrc = SPGI 远场消费 WRC，A3 起生效）
     bool propagate_sc_to_ddgi = true;
     bool fallback_spgi_to_ddgi = true;
 
@@ -170,6 +172,31 @@ struct LumenConfig {
     float screen_probes_far_cache_start = 30.0f;  // F1 (M7): SDF far-field early-out → DDGI cache query (0 disables)
     bool screen_probes_importance = true;  // F2 (M7): importance resampling of ray directions (history-SH guided)
     float screen_probes_adaptive_pos_error = 0.35f;  // F4 (M7): fine-tier interpolation-failure threshold (0 → legacy variance test)
+
+    // ============================================================================
+    // [WRC] World Space Radiance Cache（独立代码域，设计文档 §1）。
+    // 运行总开关是 env PRIMAL_WRC_ENABLE（WRCTypes.h WRCEnabled()，默认 0）；
+    // 此处是探针网格/预算的配置面（LumenConfigFromPreset 按档位填充）。
+    // DDGI 的 ddgi_* 字段冻结不动（§0.2 判定：Medium 档正解，命名不动）。
+    // ============================================================================
+    bool  wrc_enable = false;                       // 预设表翻转位（& PRIMAL_WRC_ENABLE）
+    u32   wrc_probe_count_x = 32;
+    u32   wrc_probe_count_y = 16;
+    u32   wrc_probe_count_z = 32;
+    float wrc_probe_spacing = 3.0f;
+    u32   wrc_rays_per_probe = 64;                  // = K（Fibonacci 球面方向数）
+    float wrc_ray_max_distance = 50.0f;
+    u32   wrc_update_budget_probes_per_frame = 16384;  // UE NumProbesToTraceBudget 精神
+    // far 粗壳 volume（同 DDGI 近/远两层结构；entry 语义独立声明）
+    bool  wrc_enable_far_volume = true;
+    u32   wrc_far_probe_count_x = 16;
+    u32   wrc_far_probe_count_y = 8;
+    u32   wrc_far_probe_count_z = 16;
+    float wrc_far_probe_spacing = 8.0f;
+    float wrc_far_ray_max_distance = 128.0f;
+    // 轴4 [WRC] 边：trace 采样 SC（填充）+ SPGI 远场消费 WRC
+    bool  wrc_propagate_sc = true;                  // propagate_sc_to_wrc
+    bool  wrc_spgi_consume = true;                  // fallback_spgi_to_wrc
 
     // Performance budget (ms)
     float max_gi_time_ms = 6.0f;

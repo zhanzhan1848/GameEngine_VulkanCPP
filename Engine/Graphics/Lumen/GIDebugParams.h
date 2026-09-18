@@ -28,6 +28,7 @@ struct GIDebugParams {
     bool sc_shadow = true;           ///< T3.3 SDF 阴影 split-pass
     bool gi_gather = true;           ///< GIGather（近场+远场 gather）
     bool fusion = true;              ///< FusionIndirect/Composite
+    bool wrc_trace = true;           ///< [WRC] WRC trace/update 链（独立通道）
 
     // ------------------------------------------------------------------
     // 权重热调（CPU 侧即时生效；shader 内常量旋钮随 T6.1 CB 化）

@@ -71,7 +71,18 @@ layout(set = 0, binding = 5, std140) uniform GlobalData {
     // 与 DDGITraceFinalize 逃逸分支同源同门（EvaluateSkyBase × SkyColor.xyz）。
     // 旧实现无门控，探针拿到 ~3.0 全额天空而 DDGI 只有 0.4 档（6-7× 失配）。
     vec4 sky_params;     // x = sky_color_intensity（GIDebug 单一事实源）
+    // [WRC] A3 尾扩: [0] = origin.xyz + spacing; [1] = counts.xyz + enabled。
+    vec4 wrc_fb[2];
 } global;
+
+// [WRC] A3（fallback_spgi_to_wrc 边）: WRC radiance 方向格 + 消费计数。
+// 存储布局契约见 WRCTypes.h（K=64，kWRCProbeStrideU32 = K*2+4）。
+layout(set = 0, binding = 19, std430) readonly buffer WrcProbeDataBuf {
+    uint wrc_probe_data[];
+};
+layout(set = 0, binding = 20, std430) buffer WrcConsumeBuf {
+    uint wrc_consume[];
+};
 
 // P1（sponza-gap-reaudit §4.1/4.2 逐阶段台账）: 分支计数 + 辐射累计。
 // branch: 0=HZB hit(w==1), 1=SC card(w==2 且通过校验), 2=far-cache(w==3),
@@ -123,6 +134,54 @@ layout(set = 0, binding = 16) uniform texture3D radianceCascadeL1z;
 // fibonacciDirection / orientAroundNormalTBN (was orientAroundNormal) moved
 // to ShaderLib/EncodeLib.glsl (axis refactor X1) — identical body, so the
 // finalize kernel still reconstructs the exact same per-ray directions.
+
+// ============================================================================
+// [WRC] A3: 世界空间 radiance cache 消费（UE WSRC 语义：空间低分辨率 × 方向
+// 高分辨率）。方向性保留到消费端——cos 加权 radiance 积分（lobe 指数 24
+// ≈ 15° 有效瓣宽，覆盖 K=64 Fibonacci 格的 ~25° 方向间距）。
+// 近邻探针采样（远场低频：空间插值的增益小于逐方向成本的代价）。
+// 消费计数原子累加——A5 需求驱动预算的优先级数据源（探针 state 的
+// bits[16..31] 语义在 WRC 侧独立维护，这里只 bump 独立计数缓冲）。
+// ============================================================================
+vec3 wrcSampleRadiance(vec3 stopPos, vec3 dir, out bool ok) {
+    ok = false;
+    if (global.wrc_fb[1].w <= 0.5) return vec3(0.0);
+    const uint K = 64u;                     // kWRCDirsPerProbe
+    const uint stride = K * 2u + 4u;        // kWRCProbeStrideU32
+    vec3 org = global.wrc_fb[0].xyz;
+    float spacing = max(global.wrc_fb[0].w, 0.01);
+    ivec3 counts = ivec3(global.wrc_fb[1].xyz);
+    vec3 gp = (stopPos - org) / spacing;
+    vec3 gridMax = vec3(counts - ivec3(1));
+    if (any(lessThan(gp, vec3(0.0))) || any(greaterThan(gp, gridMax))) return vec3(0.0);
+    ivec3 c0 = clamp(ivec3(round(gp)), ivec3(0), counts - ivec3(1));
+    uint pidx = uint(c0.x) + uint(counts.x) * (uint(c0.y) + uint(counts.y) * uint(c0.z));
+    uint base = pidx * stride;
+    uint state = wrc_probe_data[base + K * 2u + 2u];
+    if ((state & 1u) == 0u || (state & 2u) != 0u) return vec3(0.0);   // 未收敛 / 入几何
+
+    vec3 acc = vec3(0.0);
+    float wSum = 0.0;
+    for (uint k = 0u; k < K; ++k) {
+        float y = 1.0 - 2.0 * (float(k) + 0.5) / float(K);
+        float r = sqrt(max(1.0 - y * y, 0.0));
+        float a = 2.399963229728653 * float(k);
+        vec3 wk = vec3(cos(a) * r, y, sin(a) * r);
+        float c = dot(wk, dir);
+        if (c <= 0.25) continue;
+        float w = c * c * c * c * c * c;    // c^6：K=64 的紧凑瓣（≈35° 有效带宽）
+        uvec2 p = uvec2(wrc_probe_data[base + k * 2u], wrc_probe_data[base + k * 2u + 1u]);
+        vec2 lo = unpackHalf2x16(p.x);
+        vec2 hi = unpackHalf2x16(p.y);
+        acc += vec3(lo.x, lo.y, hi.x) * w;
+        wSum += w;
+    }
+    if (wSum <= 0.0) return vec3(0.0);
+    ok = true;
+    atomicAdd(wrc_consume[pidx], 1u);
+    return acc / wSum;
+}
+
 
 vec3 sampleBilinearRGB(texture2D tex, vec2 uv) {
     vec2 size = vec2(textureSize(tex, 0));
@@ -329,7 +388,19 @@ void screen_probe_trace_finalize() {
         // reads stays as fallback.
         vec3 stopPos = origin + rayDir * max(hit.x, 0.0);
         bool ddgiOk = false;
-        if (global.cache_params.w > 0.5 && global.ddgi_fb[1].w > 0.5) {
+        // [WRC] A3 优先消费（fallback_spgi_to_wrc）：WRC 有效 → 远场由
+        // WRC 供给（High/Ultra 世界缓存角色）；无效/网外 → 冻结边
+        // fallback_spgi_to_ddgi 保留作为回退（级联 → SH → 天空，原链不变）。
+        {
+            bool wrcOk = false;
+            vec3 wrcRad = wrcSampleRadiance(stopPos, rayDir, wrcOk);
+            if (wrcOk) {
+                radiance = max(wrcRad, vec3(0.0));
+                cosTheta = max(dot(probeNormal, rayDir), 0.0);
+                ddgiOk = true;
+            }
+        }
+        if (!ddgiOk && global.cache_params.w > 0.5 && global.ddgi_fb[1].w > 0.5) {
             // Extent derivation — must match DispatchCascadeUpdate:
             // extent = max(counts)×spacing×2, origin = ddgi_origin − extent×0.25.
             float ddgiSpan = max(max(global.ddgi_fb[1].x, global.ddgi_fb[1].y),

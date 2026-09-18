@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/Lumen/GICacheView.h"
+#include "Graphics/Lumen/WRC/WRCCacheView.h"
 #include "ScreenProbeCacheValidation.h"
 
 namespace primal::graphics::rhi {
@@ -119,14 +120,20 @@ struct ScreenProbeGlobalData {
     // SkyColor 档位门（GIDebug().sky_color_intensity，与 DDGI volume 同一
     // 单一事实源）。同 hint_params 的尾扩惯例：未读取的 kernel 不改声明。
     math::v4   sky_params;             // offset 448
+    // [WRC] A3（fallback_spgi_to_wrc 边）: 远场 WRC 消费的网格 header 尾扩。
+    // [0] = 探针格 origin.xyz + spacing；[1] = counts.xyz + enabled(0/1)。
+    // K 固定 64（WRCTypes.h kWRCDirsPerProbe，shader 侧同常量）。尾扩惯例：
+    // 未读取该字段的 kernel / Metal 旧声明不受影响。
+    math::v4   wrc_fb[2];              // offset 464
 };
 
-static_assert(sizeof(ScreenProbeGlobalData) == 464, "ScreenProbe shader constants must stay 464 bytes");
+static_assert(sizeof(ScreenProbeGlobalData) == 496, "ScreenProbe shader constants must stay 496 bytes");
 static_assert(offsetof(ScreenProbeGlobalData, ddgi_fb) == 352, "DDGI constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, hzb_params) == 384, "HZB constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, cache_params) == 400, "Cache constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, diag_params) == 416, "Diag constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, sky_params) == 448, "Sky constants offset mismatch");
+static_assert(offsetof(ScreenProbeGlobalData, wrc_fb) == 464, "WRC constants offset mismatch");
 
 // ============================================================================
 // RadianceCascadeParams — T3.5 cascade update constants (must match both
@@ -307,6 +314,21 @@ public:
     // （默认，行为不变）；EMAVarianceClamp/Reprojection 暂存枚举（TODO X3）。
     void SetTemporalStrategy(GITemporalStrategy strategy);
     GITemporalStrategy GetTemporalStrategy() const { return temporal_strategy_; }
+
+    // [WRC] A3（fallback_spgi_to_wrc 边）: 远场段消费 WRC radiance 方向格。
+    // 视图从 LumenWRCPass::GetCacheView() 直传；consume_buffer = WRC 消费
+    // 计数（u32/probe，finalize 原子累加，A5 预算优先级数据源）。enabled=false
+    // → 全部位无效，finalize 走冻结的 DDGI 回退边（行为与 A3 前一致）。
+    void SetWRCCacheData(const WRCCacheView& view,
+                         rhi::ResourceHandle consume_buffer, bool enabled) {
+        wrc_probe_data_ = view.probe_data;
+        wrc_origin_ = view.origin;
+        wrc_counts_ = view.counts;
+        wrc_spacing_ = view.spacing;
+        wrc_consume_buffer_ = consume_buffer;
+        wrc_available_ = enabled && view.IsValid() &&
+                         view.probe_data != rhi::handles::INVALID_RESOURCE;
+    }
 
     // A11: skip history blending for exactly one temporal accumulation pass —
     // call on camera cut / scene switch so stale probe radiance never bleeds
@@ -510,10 +532,17 @@ private:
 
     // DDGI probe fallback (T2.2)
     rhi::ResourceHandle ddgi_irradiance_buffer_{ rhi::handles::INVALID_RESOURCE };
-    math::v3 ddgi_fb_origin_{ 0.0f };
-    math::v3 ddgi_fb_counts_{ 0.0f };
+    math::v3 ddgi_fb_origin_{ 0.0f };    math::v3 ddgi_fb_counts_{ 0.0f };
     float ddgi_fb_spacing_ = 0.0f;
     bool ddgi_fallback_available_ = false;
+
+    // [WRC] A3: 远场消费数据面（SetWRCCacheData 快照）。
+    rhi::ResourceHandle wrc_probe_data_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle wrc_consume_buffer_{ rhi::handles::INVALID_RESOURCE };
+    math::v3 wrc_origin_{ 0.0f };
+    math::v3 wrc_counts_{ 0.0f };
+    float wrc_spacing_ = 0.0f;
+    bool wrc_available_ = false;
 
     // T5.1: HZB near-field input
     rhi::ResourceHandle hzb_texture_{ rhi::handles::INVALID_RESOURCE };

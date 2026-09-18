@@ -9,6 +9,8 @@
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Graphics/Lumen/DDGI/LumenDDGIPass.h"
+#include "Graphics/Lumen/WRC/LumenWRCPass.h"
+#include "Graphics/Lumen/WRC/WRCFitGrid.h"
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include <array>
@@ -27,6 +29,9 @@
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
 #include "Graphics/RenderPipeline/Modules/SDFVisualizationModule.h"
+#include "Graphics/RenderPipeline/Modules/NeuralDebugModule.h"
+#include "Graphics/RenderPipeline/Modules/NeuralCaptureModule.h"
+#include "Graphics/RenderPipeline/Modules/NeuralDenoiseModule.h"
 #include "Graphics/RenderPipeline/Modules/DebugProbeSphereModule.h"
 #include "Graphics/RenderPipeline/Modules/GIGatherModule.h"
 #include "Graphics/RenderPipeline/Modules/FusionCompositeModule.h"
@@ -87,7 +92,22 @@ public:
     // trace all read settings_.lighting per frame, so this toggles the real
     // sun WITHOUT the ApplyConfigChanges Lumen rebuild (which resets the
     // probe field and would measure re-init, not light response).
-    void UpdateLightingSettings(const RenderPipelineSettings& settings) { settings_.lighting = settings.lighting; }
+    // GI 能量所有权修复 Phase 5a（GIHistoryValidity 最小版）: 灯光 color/
+    // direction 变化检测 → 置 gi_history_dirty_，渲染帧起点触发 DDGI 提权
+    // + α 抬升窗 / SC tile validity 清零 / SPGI temporal reset。与编辑器
+    // GI 面板、M2 半衰期门共用本入口（单一事实源，不新增第二路径）。
+    void UpdateLightingSettings(const RenderPipelineSettings& settings) {
+        const auto& a = settings_.lighting;
+        const auto& b = settings.lighting;
+        const bool changed =
+            a.light_color.x != b.light_color.x || a.light_color.y != b.light_color.y ||
+            a.light_color.z != b.light_color.z || a.light_color.w != b.light_color.w ||
+            a.light_direction.x != b.light_direction.x ||
+            a.light_direction.y != b.light_direction.y ||
+            a.light_direction.z != b.light_direction.z;
+        settings_.lighting = settings.lighting;
+        if (changed) gi_history_dirty_ = true;
+    }
 
     lumen::StaticProbeVolume* GetStaticProbeVolume() const { return static_probe_volume_.get(); }
 
@@ -195,6 +215,20 @@ public:
         return ddgi_volumes_[0] ? ddgi_volumes_[0].get() : nullptr;
     }
 
+    // Debug/testing: screen-probe GI access（SPGI_TRACE_DIAG 读回用）.
+    lumen::ScreenProbeGIPass* GetScreenProbePass() const {
+        return screen_probe_pass_ ? screen_probe_pass_.get() : nullptr;
+    }
+    // P1（reaudit §4.1/4.2）: trace 分支诊断模式（0=off，1/2/3 见 diag_params）。
+    // 重建 screen_probe_pass_ 时保留（创建点读取成员）。
+    void SetScreenProbeDiagMode(u32 mode) {
+        spgi_trace_diag_mode_ = mode;
+        if (screen_probe_pass_) screen_probe_pass_->SetTraceDiagMode(mode);
+    }
+    // P1（reaudit §4.4 验收）: 雾的体积阴影开关（FROXEL_NO_SHADOW A/B 用）。
+    // false 时不给 FroxelFogPass 传任何阴影输入（shadowMode=0 恒 lit）。
+    void SetFroxelShadowsEnabled(bool enabled) { froxel_shadows_enabled_ = enabled; }
+
     rhi::RHIDeviceBase* GetDevice() const { return device_; }
 
     // --- Editor mode (lightweight forward rendering) ---
@@ -286,6 +320,10 @@ public:
             if (ddgi_volumes_[vi]) ddgi_volumes_[vi]->SetCoarseSdfSigned(signed_field);
         }
         if (ddgi_pass_) ddgi_pass_->SetCoarseSdfSigned(signed_field);
+        // [WRC] 同旗标转发（零穿越命中判定；独立代码域内的同一 host 契约）。
+        for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
+            if (wrc_volumes_[vi]) wrc_volumes_[vi]->SetCoarseSdfSigned(signed_field);
+        }
         // P1-A (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §8): with
         // fit+auto, adopt the merger volume as the DDGI fit box. Flagging
         // settings_dirty_ defers the DDGI teardown/rebuild to the next frame's
@@ -461,12 +499,20 @@ private:
     std::array<std::unique_ptr<lumen::LumenDDGIPass>, 4> ddgi_volumes_{};
     u32 ddgi_volume_count_ = 0;
     std::unique_ptr<lumen::LumenDDGIPass>& ddgi_pass_ = ddgi_volumes_[0];
+    // [WRC] World Space Radiance Cache（设计文档 §1 独立代码域；PRIMAL_WRC_
+    // ENABLE=1 时创建，默认 0 = 零行为变化）。near + far 两实例（cap 2），
+    // 与 DDGI 逐项同构、互不包含——禁止从 WRC 读 DDGI 内部（反之亦然）。
+    std::array<std::unique_ptr<lumen::LumenWRCPass>, 2> wrc_volumes_{};
+    u32 wrc_volume_count_ = 0;
     lumen::GIPlatformProfile gi_profile_{};                // T4.5/C5 capability ceiling
     std::unique_ptr<lumen::LumenSSAOPass> ssao_pass_;
     std::unique_ptr<lumen::LumenSSGIPass> ssgi_pass_;
     std::unique_ptr<lumen::SurfaceCachePass> surface_cache_pass_;
     std::unique_ptr<lumen::ScreenProbeGIPass> screen_probe_pass_;
     std::unique_ptr<lumen::StaticProbeVolume> static_probe_volume_;
+    // P1（reaudit §4.1/4.2）: SPGI trace 诊断模式（诊断重建保留）+ 雾阴影开关
+    u32 spgi_trace_diag_mode_{ 0 };
+    bool froxel_shadows_enabled_{ true };
 
     // --- Volume Rendering ---
     std::unique_ptr<volume::VolumePass> volume_pass_;
@@ -491,9 +537,20 @@ private:
     GIAdaptiveGovernor gi_governor_;
     u32 gi_base_probe_budget_ = 0;   // full-quality DDGI probe update count
     u32 gi_base_page_budget_ = 0;    // full-quality LightEval page budget
+    // GI 能量所有权修复 Phase 5a: GIHistoryValidity 最小版——灯光修改事件
+    // 旗标（UpdateLightingSettings 置位，BuildRenderGraph 帧起点消费）。
+    bool gi_history_dirty_ = false;
     std::unique_ptr<FusionCompositeModule> fusion_module_;
     std::unique_ptr<SCDDGIIntegrationModule> sc_ddgi_module_;
     std::unique_ptr<SDFVisualizationModule> sdf_viz_module_;
+    // M0 神经渲染 debug 链路：PRIMAL_NEURAL_DEBUG=1 时激活（模块自加载字节码
+    // 与 .pnn 权重；未设置 env 时零资源零开销）。
+    std::unique_ptr<NeuralDebugModule> neural_debug_module_;
+    bool neural_debug_enabled_{false};
+    // M1 神经降噪训练数据采集：PRIMAL_NEURAL_CAPTURE=1 时激活（模块自加载）。
+    std::unique_ptr<NeuralCaptureModule> neural_capture_module_;
+    // M1 神经降噪推理：PRIMAL_NEURAL_DENOISE=1 时激活（模块自加载）。
+    std::unique_ptr<NeuralDenoiseModule> neural_denoise_module_;
     std::unique_ptr<DebugProbeSphereModule> probe_sphere_module_;
 
     // --- Shader compilation cache ---
@@ -580,6 +637,10 @@ private:
     bool prev_matrices_valid_{false};
     bool camera_cut_this_frame_{false};
     bool viewport_size_changed_{false};   // A13/T0.11: consumed next frame
+    // P1-B: PRIMAL_GI_PROBE=1 → 世界空间定点 HDR 探针（锁定相机下固定屏幕点）
+    bool gi_probe_enabled_{std::getenv("PRIMAL_GI_PROBE") != nullptr};
+    // P3 修订: 探针源 = 上一帧 TAA 解析后的最终 HDR 物理纹理（RWCB 链）。
+    rhi::ResourceHandle probe_taa_output_phys_{};
     // A14: proxy count at the last successful snapshot extraction — differs
     // from GetInstanceCount() because extraction skips proxies without
     // cluster caches (a permanent gap that must not re-trigger rebuilds).
