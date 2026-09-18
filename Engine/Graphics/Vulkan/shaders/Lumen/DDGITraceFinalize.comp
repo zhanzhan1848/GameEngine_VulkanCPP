@@ -494,16 +494,21 @@ void ddgi_trace_finalize() {
                 dbgPath = 2u;
 #endif
             } else {
-                // Analytic: sky floor + multi-bounce self-circulation.
+                // Analytic: sky floor + single diffuse bounce.
                 // C3.1: the old unshadowed E_direct here injected sunlight
                 // through walls for every ray whose SC/prev-screen lookups
                 // failed — this path must only fill "black", never "bright".
-                // E_sky stays as a dim environmental floor (×0.3); multi-bounce
-                // keeps the 0.70 L_i_prev circulation.
+                // E_sky stays as a dim environmental floor (×0.3).
+                // Phase 2.1（本方案）: 反馈回路物理化——旧手工系数 0.70 删除，
+                // 改为扩散一跳 L_bounce = (ρ/π)·E_prev。samplePrevProbeGrid
+                // 返回未乘 π 的 SH 辐亮度评估，故 E_prev = π·L_i_prev；回路
+                // 稳态增益 = ρ（材质反照率，<1 保证几何收敛），不再有手工
+                // 常数。（scsupply0 A/B 已证旧 0.70 回路把天空地板能量泵满
+                // 封闭区——SC=0 后上拱仍 54.7 vs 参考 18.9。）
                 float NdotUp = max(0.0, N.y);
                 vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp) * 0.3;
                 const float PI_VAL = 3.14159265358979;
-                result.xyz = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev * 0.70);
+                result.xyz = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev);
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 3u;
 #endif

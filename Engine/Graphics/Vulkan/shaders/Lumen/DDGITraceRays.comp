@@ -554,8 +554,9 @@ void ddgi_trace_rays() {
         vec3 albedo = sampleHitAlbedo(hit.position);
 
         // DDGI stores outgoing radiance at hit point: sky + bounce.
-        //（直射不再进探针——见上 Phase 1.5 注释。）
-        vec3 L_out = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev * 0.70);
+        //（直射不再进探针——见上 Phase 1.5 注释。Phase 2.1 同步：0.70 手工
+        // 回路系数删除——扩散一跳 (ρ/π)·E_prev，回路增益 = ρ。）
+        vec3 L_out = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev);
         result.radiance_and_dist = vec4(L_out, hit.distance);
     } else {
         // Miss: ray escaped to sky.

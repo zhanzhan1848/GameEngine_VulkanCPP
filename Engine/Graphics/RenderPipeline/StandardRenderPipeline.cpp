@@ -1561,9 +1561,16 @@ rendergraph::RGResourceHandle StandardRenderPipeline::MakeProbeRadianceSource(
           settings_.quality.enable_screen_probes) || !lumen::GIDebug().fusion) {
         return {};
     }
-    const ResourceHandle tex = fusion_module_->GetFusionOutput((cbIdx + 2u) % 3u);
+    // GI 能量根治方案 Phase 2.3（R4/B11）: 探针供给改回灌 **FusionIndirect 的
+    // pre-gain GI 缓冲**——不再回灌含直射与融合增益的最终 Fusion HDR。
+    // giIndirectGain 永久移出回路：未来任何显示增益调整都不会被 B11 回灌
+    // 再放大（旧的"含 ×3 增益的融合结果回喂探针"是整体偏亮放大器）。
+    // 直射供给由 SC 卡片（带 PCSS 可见性）负责，prev-screen 分支的过亮
+    // 惩罚（Phase 1.4）继续兜住残余热点。PRIMAL_PROBE_FUSED_SUPPLY=0 仍可
+    // 断电回退到直射-only 供给。
+    const ResourceHandle tex = fusion_module_->GetIndirectOutput((cbIdx + 2u) % 3u);
     if (tex == handles::INVALID_RESOURCE) return {};
-    return graph.ImportResource("PrevFrameColor_Fused", tex);
+    return graph.ImportResource("PrevFrameColor_GIIndirect", tex);
 }
 
 void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbIdx) {
@@ -2057,7 +2064,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE) {
             prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
         }
-        // B11: 上一帧 Fusion HDR（含 GI）优先——直射-only 供给使阴影命中 ≈0。
+        // B11/Phase 2.3: 回灌 pre-gain GI 缓冲（FusionIndirect 输出）——
+        // 融合增益与直射不再进探针回路（直射供给由 SC 卡片负责）。
         if (RGResourceHandle fused = MakeProbeRadianceSource(graph, cbIdx); fused.IsValid()) {
             prevColor = fused;
             camData.radiance_is_previous_frame = true;
@@ -2927,7 +2935,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             RGResourceHandle prevColor;
             if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE)
                 prevColor = graph.ImportResource("PrevFrameColor", deferredOut.deferred_output_tex);
-            // B11: 上一帧 Fusion HDR（含 GI）优先——直射-only 供给使阴影命中 ≈0。
+            // B11/Phase 2.3: 回灌 pre-gain GI 缓冲（FusionIndirect 输出）——
+            // 融合增益与直射不再进探针回路（直射供给由 SC 卡片负责）。
             if (RGResourceHandle fused = MakeProbeRadianceSource(graph, cbIdx); fused.IsValid()) {
                 prevColor = fused;
                 camData.radiance_is_previous_frame = true;

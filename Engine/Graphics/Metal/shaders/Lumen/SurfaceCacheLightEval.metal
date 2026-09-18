@@ -283,12 +283,9 @@ kernel void surfaceCacheLightEval(
     float3 prev_light = prev_lighting_atlas.read(atlas_uv).rgb;
     if (any(isnan(prev_light)) || any(isinf(prev_light))) prev_light = float3(0.0f);
     prev_light = clamp(prev_light, float3(0.0f), float3(256.0f));
-    // T8.13 P1 sync: 0.85 → 0.70. Gain audit found the two coupled loops
-    // (probe-internal 0.85 feedback ∘ SC 0.85×albedo) sitting at marginal
-    // stability for bright albedo — small transients flipped the SC↔probe
-    // equilibrium between a normal and a runaway-bright branch. 0.70 restores
-    // margin; equilibrium brightness cost measured at a few percent.
-    constexpr float SC_FEEDBACK = 0.70f;
+    // Phase 2.2 孪生同步（SurfaceCacheLightEval.comp）: SC_FEEDBACK 0.70 手工
+    // 系数删除（连同 ×0.5 半档）——反馈改物理形式 prev_light·ρ·(1/π)，
+    // 回路稳态增益 = ρ < 1；T8.13"0.85 上限"改为 DC 增益断言（<0.5）。
 
     bool probeInVolume = false;
     float3 E_indirect = gatherProbeIrradiance(world_pos, normal, probeInVolume,
@@ -343,7 +340,7 @@ kernel void surfaceCacheLightEval(
     float3 result = (direct_light + E_indirect) * albedo.rgb * SC_INV_PI
                   + (probeFed && probeInVolume
                         ? tileRadiance * scRadiosityWeight(params.radiosity_gate.y)
-                        : tileRadiance + prev_light * albedo.rgb * (SC_FEEDBACK * SC_INV_PI * 0.5f))
+                        : tileRadiance + prev_light * albedo.rgb * SC_INV_PI)
                   + emissive;
     result = min(result, float3(64.0f));
 

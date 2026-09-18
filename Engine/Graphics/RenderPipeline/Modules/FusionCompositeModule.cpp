@@ -396,9 +396,10 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
         // GBuffer albedo 是 BGRA8_UNorm（4B/px）——按 8B 半浮点读会得到垃圾。
         {"albedo", in.gbuffer_albedo != handles::INVALID_RESOURCE ? in.gbuffer_albedo : in.black_texture, 1.0f, 4},
     };
-    // 与 FusionIndirect pass 同源的增益（PRIMAL_GI_INDIRECT_GAIN，默认 3）。
+    // 与 FusionIndirect pass 同源的增益（PRIMAL_GI_INDIRECT_GAIN，
+    // Phase 1.1 起默认 1.0）。
     const float ladderGain = [] {
-        float g = 3.0f;
+        float g = 1.0f;
         if (const char* e = std::getenv("PRIMAL_GI_INDIRECT_GAIN")) {
             const float v = static_cast<float>(std::atof(e));
             if (v >= 0.0f && v <= 8.0f) g = v;
@@ -629,6 +630,126 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
         << std::endl;
 }
 
+// ============================================================================
+// GI 能量根治方案 Phase 2.4: 逐回路 DC 增益仪表（GI_DCGAIN=1 启用，默认零开销）。
+// 每 GI_DCGAIN_STRIDE 帧读回上一帧 GI 供给（indirect）中心 ROI 的均值能量，
+// 维护样本窗口；回路 DC 增益 ≈ 相邻帧能量增量之比的中位数（误差衰减率，
+// 几何收敛回路应单调衰减 → <1，断言线 0.5）。张弛振荡表现为比值 >1 且
+// 正负交替——一并打印符号序列供人工判读（TemporalAlpha/hysteresis 扫描）。
+// ============================================================================
+void RunGiLoopDcGainMeter(RHIDeviceBase* device, ResourceHandle indirectTex,
+                          u32 renderW, u32 renderH) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("GI_DCGAIN");
+        return e && e[0] != '0';
+    }();
+    if (!enabled) return;
+    static const u32 strideFrames = [] {
+        const char* e = std::getenv("GI_DCGAIN_STRIDE");
+        // 缺省 9 = 3 的倍数（indirect 三缓冲深度）——保证每次仪表采样落在
+        // 同一物理槽位；否则槽间收敛残余差异会伪装成周期性"振荡"。
+        return e ? std::clamp((u32)std::atoi(e), 1u, 128u) : 9u;
+    }();
+    static u32 tick = 0;
+    ++tick;
+    if (tick % strideFrames != 0) return;
+
+    constexpr u32 kRoiW = 48, kRoiH = 48;
+    const u32 x0 = renderW / 2 - kRoiW / 2, y0 = renderH / 2 - kRoiH / 2;
+    const u64 bytes = (u64)kRoiW * kRoiH * 8;   // RGBA16F
+
+    BufferDesc bd{}; bd.size = bytes;
+    bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+    bd.memoryUsage = GPUMemoryUsage::Readback;
+    auto stage = device->CreateBuffer(bd);
+    if (stage == handles::INVALID_RESOURCE) return;
+    float energy = -1.0f;
+    {
+        auto ch = device->CreateCommandBuffer(CommandQueueType::Graphics);
+        auto* cmd = rhi::GetCommandBuffer(ch);
+        if (cmd) {
+            cmd->Begin();
+            BufferTextureCopyRegion rr{};
+            rr.bufferOffset = 0;
+            rr.imageSubresource.layerCount = 1;
+            rr.imageOffset = {(int)x0, (int)y0, 0};
+            rr.imageExtent = {kRoiW, kRoiH, 1};
+            cmd->CopyTextureToBuffer(indirectTex, stage, &rr, 1);
+            cmd->End(); cmd->Submit(); cmd->WaitForCompletion();
+            if (const auto* base = static_cast<const u16*>(device->MapBuffer(stage, 0, bytes))) {
+                double sum = 0.0;
+                const size_t px = (size_t)kRoiW * kRoiH;
+                for (size_t i = 0; i < px; ++i) {
+                    const float r = GiLadderH16(base[i * 4 + 0]);
+                    const float g = GiLadderH16(base[i * 4 + 1]);
+                    const float b = GiLadderH16(base[i * 4 + 2]);
+                    sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                }
+                energy = (float)(sum / (double)px);
+            }
+        }
+        device->DestroyCommandBuffer(ch);
+    }
+    device->DestroyBuffer(stage);
+    if (energy < 0.0f) return;
+
+    constexpr u32 kWindow = 16;
+    static float samples[kWindow] = {};
+    static u32 count = 0;
+    samples[count++ % kWindow] = energy;
+
+    if (count < 4) return;
+    // 相邻增量比（|Δ_n| / |Δ_{n-1}|，跳过近零增量），取中位数 = DC 增益估计。
+    const u32 n = std::min(count, kWindow);
+    std::vector<float> ratios;
+    std::string seq;
+    float prevDelta = 0.0f;
+    bool havePrev = false;
+    for (u32 i = 1; i < n; ++i) {
+        const float ePrev = samples[(count - n + i - 1) % kWindow];
+        const float eCurr = samples[(count - n + i) % kWindow];
+        const float d = eCurr - ePrev;
+        seq += d >= 0.0f ? "+" : "-";
+        if (havePrev && std::abs(prevDelta) > 1e-4f && std::abs(d) > 1e-4f) {
+            ratios.push_back(std::abs(d) / std::abs(prevDelta));
+        }
+        prevDelta = d;
+        havePrev = true;
+    }
+    float dcGain = 0.0f;
+    if (!ratios.empty()) {
+        std::nth_element(ratios.begin(), ratios.begin() + ratios.size() / 2, ratios.end());
+        dcGain = ratios[ratios.size() / 2];
+    }
+    // 判定（Phase 2.4 / Phase 5 门②）：断言对象是"无张弛振荡/双稳态"。
+    //   - 摆动幅度 amp = max|E - mean| / mean > 5% → FAIL（收敛后能量不应
+    //     有大幅极限环；双稳态表现为幅度可观的分支跳变）。
+    //   - dc_gain（相邻 |Δ| 比中位数）在稳态被读数噪声托底到 ~1，不能直接
+    //     作断言线（计划稿的 "<0.5" 语义适用于收敛瞬态的衰减率）——保留为
+    //     诊断输出，配合 seq 符号序列人工判读。
+    double sum2 = 0.0;
+    float emax = 0.0f, emin = 1e9f;
+    for (u32 i = 0; i < n; ++i) {
+        const float e = samples[i];
+        sum2 += e; emax = std::max(emax, e); emin = std::min(emin, e);
+    }
+    const float emean = static_cast<float>(sum2 / n);
+    const float amp = emean > 1e-6f ? (emax - emin) / emean : 0.0f;
+    if (amp > 0.05f) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[GIDCGain] E=" << energy << " mean=" << emean
+            << " amp=" << amp << " (assert < 0.05) dc_gain=" << dcGain
+            << " seq=" << seq
+            << "  << 张弛振荡/双稳态警报：查注入端能量与 TemporalAlpha/hysteresis"
+            << std::endl;
+    } else {
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[GIDCGain] E=" << energy << " mean=" << emean
+            << " amp=" << amp << " (assert < 0.05) dc_gain=" << dcGain
+            << " seq=" << seq << "  OK" << std::endl;
+    }
+}
+
 } // namespace
 
 FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs) {
@@ -803,6 +924,9 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
 
             // sun-audit P1: GI_LADDER_DUMP 能量台账（一次性同步读回，见函数头注释）
             RunGiLadderDump(device_, inputs, spgiTex, indirect_output_[(cbIdx + 2) % 3]);
+            // GI 能量根治方案 Phase 2.4: 逐回路 DC 增益仪表（GI_DCGAIN=1 启用）
+            RunGiLoopDcGainMeter(device_, indirect_output_[(cbIdx + 2) % 3],
+                                 inputs.render_width, inputs.render_height);
 
             // TEMP diagnosis: one-shot per-strip stats of the indirect output
             // (RGBA16F full-res). Strips when GI_DEBUG_STRIP=1: ddgi|ssgi|spgi|full.

@@ -805,10 +805,12 @@ kernel void ddgi_trace_finalize(
                 // Phase 1.5 孪生同步（DDGITraceFinalize.comp C3.1 / R5）：
                 // 无阴影解析直射 E_direct 删除——不查遮挡的 15×NdotL 种子。
                 // E_sky 对齐 Vulkan ×0.3 档（该路径只准填"暗"，不准填"亮"）。
+                // Phase 2.1 孪生同步：0.70 手工回路系数删除——扩散一跳
+                // (ρ/π)·E_prev，回路增益 = ρ。
                 float NdotUp = max(0.0f, N.y);
                 float3 E_sky = volume.SkyColor.xyz * (0.5f + 0.5f * NdotUp) * 0.3f;
                 constexpr float PI_VAL = 3.14159265358979f;
-                radiance = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev * 0.70f);
+                radiance = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev);
 #endif
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 3u;
