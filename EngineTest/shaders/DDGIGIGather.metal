@@ -60,6 +60,9 @@ constant float PROBE_SH_RAD_TO_IRRAD = 3.14159265f;
 // B1: SH9 evaluation — all 9 coefficients from the DDGI irradiance buffer
 // (which is already SH9 on both backends). Per-band radiance→irradiance:
 // A0=π, A1=2π/3, A2=π/4 (Ramamoorthi).
+// Phase 1b（GI 能量所有权修复）: 评基单源 = Vulkan ShaderLib/EvalLib.glsl
+// （evalProbeIrradianceSH9）。注意本函数输出是 E 尺度（因子已乘 π），与
+// EvalLib 的 E/π 约定差一个 PROBE_SH_RAD_TO_IRRAD——改任一处必须对表。
 static float3 evalSH9Irradiance(thread const float3 sh[9], float3 d) {
     float x = d.x, y = d.y, z = d.z;
     float nxy = x*y, nyz = y*z, nzx = z*x;
@@ -76,6 +79,8 @@ static float3 evalSH9Irradiance(thread const float3 sh[9], float3 d) {
 }
 
 // B1: SH9 radiance evaluation (specular lobe path — no A_l correction).
+// Phase 1b: 单源 = Vulkan ShaderLib/EvalLib.glsl evalProbeRadianceSH9
+// （DDGI real-SH 投影约定同款；复制实现，注释互指）。
 static float3 evalSH9Canonical(thread const float3 sh[9], float3 d) {
     float x = d.x, y = d.y, z = d.z;
     float nxy = x*y, nyz = y*z, nzx = z*x;
@@ -89,6 +94,24 @@ static float3 evalSH9Canonical(thread const float3 sh[9], float3 d) {
          + sh[6] * ( 0.31539157f * (3.0f*nzz - 1.0f))
          + sh[7] * (-1.09254843f * nzx)
          + sh[8] * ( 0.54627421f * (nxx - nyy));
+}
+
+// Phase 1b: EvalLib.glsl evalProbeIrradianceSH9 的 E/π twin（远场 far-path
+// 消费端 ×PROBE_SH_RAD_TO_IRRAD(π) 还原 E——与近场 evalSH9Irradiance 的
+// E 尺度区分；复制实现，注释互指）。
+static float3 evalSH9IrradianceOverPi(thread const float3 sh[9], float3 n) {
+    const float x = n.x, y = n.y, z = n.z;
+    const float xy = x*y, yz = y*z, zx = z*x;
+    const float xx = x*x, yy = y*y, zz = z*z;
+    return sh[0] * 0.28209479f
+         + sh[1] * (-0.48860251f * 0.6666667f * y)   // B4: A1 = 2π/3 (÷π)
+         + sh[2] * ( 0.48860251f * 0.6666667f * z)
+         + sh[3] * (-0.48860251f * 0.6666667f * x)
+         + sh[4] * ( 1.09254843f * 0.25f * xy)       // B4: A2 = π/4 (÷π)
+         + sh[5] * (-1.09254843f * 0.25f * yz)
+         + sh[6] * ( 0.31539157f * 0.25f * (3.0f*zz - 1.0f))
+         + sh[7] * (-1.09254843f * 0.25f * zx)
+         + sh[8] * ( 0.54627421f * 0.25f * (xx - yy));
 }
 
 static float3 evalSH4Irradiance(thread const float3 sh[4], float3 d) {
@@ -166,7 +189,9 @@ kernel void ddgi_gi_gather(
     // 重定位后有效起点（ddgi_trace_sdf 发布，w=1.0 有效）。八面体深度图记录
     // 自该物理起点，可见性 distToProbe 必须同起点测量；w=0 回退逻辑格点。
     // 与 Vulkan DDGIGIGather.comp binding 19 对等。
-    device const float4* relocatedOrigins  [[buffer(12)]]
+    device const float4* relocatedOrigins  [[buffer(12)]],
+    // GI 根治 Phase 3.2: flat openSky 统计（Vulkan binding 20 对等）。
+    device const float* flatOpenSky        [[buffer(13)]]
 ) {
     float4 probeCountsCB = probeCountsData[0];
     uint width = outputTex.get_width();
@@ -293,6 +318,22 @@ kernel void ddgi_gi_gather(
         // 探针选择偏置：沿法线推 5% 间距，避免表面像素选中墙内探针。
         float3 biasedPos = worldPos + normal * probeOriginSpacing.w * 0.05f;
 
+        // GI 根治 Phase 3.2: 天空可见性分类（Vulkan DDGIGIGather.comp 孪生）。
+        // fvCB[8].y = 分类开关；像素 openSky = 邻域三线性探针逃逸占比。
+        constant float4& fvMeta = fvCB[8];
+        const bool classifyEnable = fvMeta.y > 0.5f;
+        float pixOpen = 0.0f;
+        float pixOpenW = 0.0f;
+        if (classifyEnable) {
+            for (uint q = 0u; q < 8u; ++q) {
+                if (tw[q] < 0.01f) continue;
+                uint qIdx = pc[q].x + pc[q].y * counts.x + pc[q].z * counts.x * counts.y;
+                pixOpen += flatOpenSky[nearOff + qIdx] * tw[q];
+                pixOpenW += tw[q];
+            }
+            if (pixOpenW > 0.0f) pixOpen /= pixOpenW;
+        }
+
         for (uint p = 0u; p < 8u; ++p) {
             if (tw[p] < 0.01f) continue;
             uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
@@ -305,6 +346,15 @@ kernel void ddgi_gi_gather(
             float3 irr = evalSH9Irradiance(sh, normal);
 
             float w = tw[p];
+            // Phase 3.2: 探针露天度 × 像素封闭度 → 一致度衰减（孪生）。
+            float classify = 1.0f;
+            if (classifyEnable) {
+                float pOpen = flatOpenSky[nearOff + pIdx];
+                float skyness = smoothstep(0.35f, 0.65f, pOpen);
+                float enclosed = 1.0f - smoothstep(0.05f, 0.25f, pixOpen);
+                classify = 1.0f - skyness * enclosed * 0.85f;
+            }
+            w *= classify;
             float insidePenalty = 1.0f;
             float burial = 1.0f;
             {
@@ -339,8 +389,8 @@ kernel void ddgi_gi_gather(
                 w *= nwSoft * vw * insidePenalty;
             }
 
-            lowFrequencyGI += irr * tw[p] * burial;
-            lowFrequencyW += tw[p] * burial;
+            lowFrequencyGI += irr * tw[p] * burial * classify;
+            lowFrequencyW += tw[p] * burial * classify;
             if (tw[p] > bestBaseWeight) { bestBaseWeight = tw[p]; bestIrr = irr; }
 
             result += irr * w;          // B4: irradiance units (diffuse)
@@ -409,12 +459,8 @@ kernel void ddgi_gi_gather(
 
         // DDGI radiance-SH9 basis — matches DDGIUpdateIrradiance's
         // projection (L1 x/y and L2 yz/xz minus signs, band-6 zonal).
-        const float C0 = 0.28209479f, C1 = 0.48860251f;
-        const float C2_0 = 1.09254843f, C2_1 = 0.31539157f, C2_2 = 0.54627421f;
-        float nx = normal.x, ny = normal.y, nz = normal.z;
-        float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
-        float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
-
+        // Phase 1b: 展开 → EvalLib 同款 E/π twin（单源 = Vulkan
+        // ShaderLib/EvalLib.glsl evalProbeIrradianceSH9；复制实现注释互指）。
         float3 fresult = float3(0.0f);
         float ftotalW = 0.0f;
         for (uint p = 0; p < 8u; ++p) {
@@ -424,15 +470,7 @@ kernel void ddgi_gi_gather(
             float3 sh[9];
             for (int i = 0; i < 9; ++i)
                 sh[i] = flatIrradiance[(volOff + pIdx) * 9u + uint(i)].xyz;
-            float3 irr = sh[0] * C0
-                       + sh[1] * (-C1 * 0.6666667f * ny)   // B4: A1 = 2π/3
-                       + sh[2] * ( C1 * 0.6666667f * nz)
-                       + sh[3] * (-C1 * 0.6666667f * nx)
-                       + sh[4] * ( C2_0 * 0.25f * nxy)     // B4: A2 = π/4
-                       + sh[5] * (-C2_0 * 0.25f * nyz)
-                       + sh[6] * ( C2_1 * 0.25f * (3.0f*nzz - 1.0f))
-                       + sh[7] * (-C2_0 * 0.25f * nzx)
-                       + sh[8] * ( C2_2 * 0.25f * (nxx - nyy));
+            float3 irr = evalSH9IrradianceOverPi(sh, normal);
             fresult += irr * ftw[p];
             ftotalW += ftw[p];
         }

@@ -1,4 +1,6 @@
 #include "SurfaceCachePass.h"
+#include "Engine/Graphics/Lumen/GIWarmup.h"
+#include "Engine/Graphics/Lumen/DDGISlotMap.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RenderGraph/RenderGraphPass.h"
@@ -338,6 +340,14 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
     // Initialize card generator (meshes registered later by the pipeline
     // when the scene snapshot rebuilds — real per-mesh AABBs, not test data).
     card_generator_.Initialize(device, atlas_size_, page_size_, config.surface_cache_max_cards);
+    // [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 页表间接化分配——
+    // 卡片分配记账页坐标 + LRU 挤页（D3）；默认 0 = 行为不变。
+    if (const char* ptEnv = std::getenv("PRIMAL_SC_PAGE_TABLE"); ptEnv && ptEnv[0] == '1') {
+        card_generator_.EnablePageTable();
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[SurfaceCache] PRIMAL_SC_PAGE_TABLE=1 — page-table allocation "
+            << "+ LRU squeeze enabled" << std::endl;
+    }
 
     // Create atlas textures
     CreateAtlasTextures();
@@ -687,7 +697,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         bm[5].readonly = true;
         bm[8].readonly = true;  // ddgi irradiance
         bm[13].readonly = true; // ddgi depth
-        DescriptorSetLayoutDesc layoutDesc{14, bindings};
+        bm[14].readonly = true; // GI 根治 Phase 3.2: ddgi openSky
+        // 修复：15 个条目（含 openSky buffer(8)）但 count 传 14——最后一个
+        // 条目从未进布局，Metal LightEval 编码期断言
+        // "missing Buffer binding at index 8 for ddgi_opensky_buffer"。
+        DescriptorSetLayoutDesc layoutDesc{15, bindings};
         light_eval_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1340,6 +1354,13 @@ void SurfaceCachePass::AddCardCapturePasses(
     u32 current_frame_index) {
     if (!card_view_enabled_ || !initialized_) return;
 
+    // [WRC 计划 Stream D1]（PRIMAL_SC_PRIORITY=1）：卡片重要性打分 + Top-K
+    // 替换轮转游标。静态局部定义（文件内 AddPass 侧同读）。
+    static const bool kScPriorityCapture = [] {
+        const char* e = std::getenv("PRIMAL_SC_PRIORITY");
+        return e && e[0] == '1';
+    }();
+
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
     if (!gpuDraw.IsCardCaptureReady() && !gpuDraw.InitializeCardCaptureResources(1u << 20)) return;
 
@@ -1378,11 +1399,8 @@ void SurfaceCachePass::AddCardCapturePasses(
             }
 
             u32 faces = 0;
-            for (u32 k = 0; k < total && faces < batch; ++k) {
-                const u32 ci = (card_view_cursor_ + k) % total;
-                const auto& card = cards[ci];
-                if (card.resolution == 0) continue;
-
+            // 单卡片正交捕获（两条调度路径共享；faces = face-slot，帧内唯一）。
+            auto captureOne = [&](const SurfaceCacheCard& card, u32 faceSlot) -> bool {
                 const uint axis = card.axis_direction & 0xFFu;
                 const uint dir  = (card.axis_direction >> 8u) & 0xFFu;
 
@@ -1412,7 +1430,7 @@ void SurfaceCachePass::AddCardCapturePasses(
                     hu = card.extent.x; hv = card.extent.y; halfAxis = card.extent.z;
                     mirror_u = (dir == 0u);
                 }
-                if (hu <= 0.0f || hv <= 0.0f || halfAxis <= 0.0f) continue;
+                if (hu <= 0.0f || hv <= 0.0f || halfAxis <= 0.0f) return false;
 
                 const math::v3 center{card.center.x, card.center.y, card.center.z};
                 const math::v3 at = center + fwd;
@@ -1421,20 +1439,64 @@ void SurfaceCachePass::AddCardCapturePasses(
                     mirror_u ? hu : -hu, mirror_u ? -hu : hu, -hv, hv,
                     0.05f, 2.0f * halfAxis + 0.5f);
 
-                const bool ok = gpuDraw.ExecuteCardCapturePass(
+                return gpuDraw.ExecuteCardCapturePass(
                     cmd, scene_snapshot, view, proj,
                     math::v4{center.x, center.y, center.z, 1.0f},
                     math::v4{fwd.x, fwd.y, fwd.z, 0.0f},
                     0.05f, 2.0f * halfAxis + 0.5f,
-                    faces,          // face_slot — unique within this frame
+                    faceSlot,       // face_slot — unique within this frame
                     current_frame_index,
                     card.atlas_offset_x, card.atlas_offset_y, card.resolution,
                     albedo_atlas_, normal_atlas_, depth_atlas_, card_view_depth_);
-                if (ok) ++faces;
-            }
+            };
 
-            card_view_cursor_ = (card_view_cursor_ + faces) % total;
-            if (card_view_cursor_ == 0 && faces > 0) card_view_seeded_ = true;
+            // [WRC 计划 Stream D1]（PRIMAL_SC_PRIORITY=1）：Top-K 替换轮转
+            // 游标——卡片按重要性打分降序取 batch（无相机数据，打分项 =
+            // 面积代理 × 新鲜度）；关闭时保留轮转游标逐位不变。
+            if (kScPriorityCapture) {
+                if (card_capture_last_frame_.size() < total) {
+                    card_capture_last_frame_.resize(total, 0u);
+                }
+                static thread_local std::vector<std::pair<float, u32>> capRanked;
+                capRanked.clear();
+                capRanked.reserve(total);
+                for (u32 k = 0; k < total; ++k) {
+                    const auto& c = cards[k];
+                    if (c.resolution == 0) continue;
+                    const float ex = c.extent.x, ey = c.extent.y, ez = c.extent.z;
+                    const uint capAxis = c.axis_direction & 0xFFu;
+                    const float hu2 = (capAxis == 0u) ? ey : ex;
+                    const float hv2 = (capAxis == 0u) ? ez : (capAxis == 1u ? ez : ey);
+                    const u32 age = current_frame_index
+                        - std::min(card_capture_last_frame_[k], current_frame_index);
+                    const float fresh = std::clamp(float(age) / 30.0f, 0.25f, 1.0f);
+                    capRanked.emplace_back(4.0f * hu2 * hv2 * fresh, k);
+                }
+                std::partial_sort(capRanked.begin(),
+                                  capRanked.begin() + std::min<u32>((u32)capRanked.size(), batch),
+                                  capRanked.end(),
+                                  [](const std::pair<float, u32>& a, const std::pair<float, u32>& b) {
+                                      return a.first > b.first;
+                                  });
+                for (u32 k = 0; k < capRanked.size() && faces < batch; ++k) {
+                    const u32 ci = capRanked[k].second;
+                    if (captureOne(cards[ci], faces)) {
+                        card_capture_last_frame_[ci] = current_frame_index;
+                        ++faces;
+                    }
+                }
+                if (faces > 0) card_view_seeded_ = true;
+            } else {
+                for (u32 k = 0; k < total && faces < batch; ++k) {
+                    const u32 ci = (card_view_cursor_ + k) % total;
+                    const auto& card = cards[ci];
+                    if (card.resolution == 0) continue;
+                    if (captureOne(card, faces)) ++faces;
+                }
+
+                card_view_cursor_ = (card_view_cursor_ + faces) % total;
+                if (card_view_cursor_ == 0 && faces > 0) card_view_seeded_ = true;
+            }
 
             // Back to storage layouts for the LightEval/consumer imageLoads.
             for (auto h : pages) {
@@ -1477,13 +1539,39 @@ static bool scIndirectEnabled(rhi::RHIDeviceBase* device) {
 // feedback loops start (multi-stable branch selection happens against the
 // transient otherwise). Promoted default 90 (stabilization measured:
 // L_arcade runs 2.4/3.1 vs 1.3-3.1 with dark-branch draws).
-static const u32 scWarmupFrames() {
-    static const u32 v = [] {
-        const char* e = std::getenv("PRIMAL_SC_WARMUP_FRAMES");
-        if (e) return (u32)std::max(0, std::atoi(e));
-        return 90u;
-    }();
-    return v;
+// Phase 1a: knob moved to GIWarmup.h (single source shared with LumenDDGIPass).
+static const u32 scWarmupFrames() { return lumen::GIWarmupFrames(); }
+// WRC 计划 Stream B1/B2（能量单向化）：探针馈送改暖启动引导 + tile radiosity
+// 单轨。单一开关定义在 GIWarmup.h（GIProbeFeedBootstrapEnabled，DDGI 探针
+// 冻结解除同读它）；此处只在每帧 params 填充与 dispatch 条件处消费。
+static const bool kProbeFeedBootstrap = lumen::GIProbeFeedBootstrapEnabled();
+// WRC 计划 Stream D1（PRIMAL_SC_PRIORITY=1）：卡片重要性打分 + Top-K 替换
+// LightEval round-robin 与 card-view 轮转游标。默认 0 = 现有调度逐位不变。
+static const bool kScPriority = [] {
+    const char* e = std::getenv("PRIMAL_SC_PRIORITY");
+    return e && e[0] == '1';
+}();
+// 打分公式（设计文档 Stream D1）：屏幕占比 × 1/距离² × 新鲜度。
+//   coverage : 卡片正面面积 4·ex·ey（extent 为半轴）——屏幕占比的视距无关
+//              代理，配合 1/d² 即立体角权重；
+//   fresh    : clamp(age / 30, 0.25, 1)——30 帧未服务升满；
+//   blend    : mix(1.0, fresh, importance_weight)——复活 importance_weight；
+//   距离门   : d > update_distance → score 0——复活 update_distance。
+static float ScCardPriority(const SurfaceCacheCard& card, const math::v3& camPos,
+                            float importanceWeight, float updateDistance,
+                            u32 currentFrame, const u32* lastFrame) {
+    const float ex = card.extent.x, ey = card.extent.y, ez = card.extent.z;
+    const uint axis = card.axis_direction & 0xFFu;
+    const float hu = (axis == 0u) ? ey : ex;
+    const float hv = (axis == 0u) ? ez : (axis == 1u ? ez : ey);
+    const float coverage = 4.0f * hu * hv;
+    const math::v3 dvec{ card.center.x - camPos.x, card.center.y - camPos.y, card.center.z - camPos.z };
+    const float dist = std::max(std::sqrt(dvec.x * dvec.x + dvec.y * dvec.y + dvec.z * dvec.z), 1.0f);
+    if (updateDistance > 0.0f && dist > updateDistance) return 0.0f;
+    const u32 age = lastFrame ? (currentFrame - std::min(*lastFrame, currentFrame)) : 30u;
+    const float fresh = std::clamp(float(age) / 30.0f, 0.25f, 1.0f);
+    const float w = std::clamp(importanceWeight, 0.0f, 1.0f);
+    return (coverage / (dist * dist)) * ((1.0f - w) + w * fresh);
 }
 
 SurfaceCacheOutput SurfaceCachePass::AddPass(
@@ -1495,7 +1583,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 {
     SurfaceCacheOutput output{};
 
-    u32 outIdx = current_frame_index % 3;
+    // Phase 1d: 槽位单一事实源 DDGISlotMap.h（outIdx = writeIndex）。
+    const u32 outIdx = DDGISlotsForFrame(current_frame_index).writeIndex;
 
     // Import persistent lighting atlas into render graph
     auto lightingHandle = graph.ImportResource(
@@ -1538,7 +1627,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
-            u32 frameIdx = current_frame_index % 3;
+            const u32 frameIdx = DDGISlotsForFrame(current_frame_index).writeIndex;
 
             // Guard: pipeline must be valid
             if (light_eval_pipeline_ == handles::INVALID_PIPELINE) return;
@@ -1551,6 +1640,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             u32 total_texels = 0;
 
             std::vector<CardDispatchInfo> dispatch_info(card_count);
+            // [WRC 计划 Stream D1]: 卡片集重建后新鲜度表跟随扩容（新卡 0 =
+            // 最陈旧，首轮即被 Top-K 拾起）。
+            if (card_light_last_frame_.size() < cards.size()) {
+                card_light_last_frame_.resize(cards.size(), 0u);
+            }
             for (u32 i = 0; i < card_count; ++i) {
                 u32 res = cards[i].resolution;
                 u32 count = res * res;
@@ -1626,28 +1720,85 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // replaced by `taken` below for the GPU dispatch; taking
                     // modulo that reduced count pinned the cursor at zero.
                     const u32 source_card_count = card_count;
-                    const u32 start = light_eval_rr_cursor_ % source_card_count;
-                    u32 acc = 0, taken = 0;
-                    for (u32 k = 0; k < source_card_count; ++k) {
-                        const u32 cnt = dispatch_info[(start + k) % source_card_count].texel_count;
-                        if (taken > 0 && acc + cnt > texel_budget) break;
-                        acc += cnt;
-                        ++taken;
-                    }
-                    if (taken < source_card_count) {
-                        std::vector<CardDispatchInfo> selected(taken);
-                        u32 off = 0;
-                        for (u32 k = 0; k < taken; ++k) {
-                            const u32 idx = (start + k) % source_card_count;
-                            selected[k] = dispatch_info[idx];
-                            selected[k].texel_offset = off;   // rebase to 0
-                            off += selected[k].texel_count;
+
+                    // [WRC 计划 Stream D1]（PRIMAL_SC_PRIORITY=1）：Top-K 替换
+                    // round-robin——卡片按重要性打分降序装入页预算窗口。
+                    // 打分项 = 屏幕占比(面积代理) × 1/dist²(相机距离) ×
+                    // 新鲜度(30 帧未服务升满)，importance_weight 调新鲜度
+                    // 权重，update_distance 外的卡片 score=0。
+                    bool topkApplied = false;
+                    if (kScPriority && card_light_last_frame_.size() >= source_card_count) {
+                        static thread_local std::vector<std::pair<float, u32>> ranked;
+                        ranked.clear();
+                        ranked.reserve(source_card_count);
+                        const math::v3 camPos = frame_data.camera_position;
+                        for (u32 k = 0; k < source_card_count; ++k) {
+                            const CardDispatchInfo& di = dispatch_info[k];
+                            const SurfaceCacheCard& c = cards[di.card_index];
+                            const float score = ScCardPriority(
+                                c, camPos,
+                                config_.surface_cache_importance_weight,
+                                config_.surface_cache_update_distance,
+                                current_frame_index,
+                                &card_light_last_frame_[di.card_index]);
+                            ranked.emplace_back(score, k);
                         }
-                        dispatch_info = std::move(selected);
-                        card_count = taken;
-                        total_texels = off;
+                        std::partial_sort(ranked.begin(),
+                                          ranked.begin() + std::min<u32>(source_card_count, 64u),
+                                          ranked.end(),
+                                          [](const std::pair<float, u32>& a, const std::pair<float, u32>& b) {
+                                              return a.first > b.first;
+                                          });
+                        u32 acc2 = 0, taken2 = 0;
+                        std::vector<CardDispatchInfo> selected;
+                        for (u32 k = 0; k < source_card_count && taken2 < 64u; ++k) {
+                            const CardDispatchInfo& di = dispatch_info[ranked[k].second];
+                            const u32 cnt = di.texel_count;
+                            if (cnt == 0) continue;
+                            if (taken2 > 0 && acc2 + cnt > texel_budget) break;
+                            acc2 += cnt;
+                            ++taken2;
+                            CardDispatchInfo out = di;
+                            out.texel_offset = 0;   // rebased below
+                            selected.push_back(out);
+                            card_light_last_frame_[di.card_index] = current_frame_index;
+                        }
+                        if (taken2 > 0 && taken2 < source_card_count) {
+                            u32 off = 0;
+                            for (auto& out : selected) { out.texel_offset = off; off += out.texel_count; }
+                            dispatch_info = std::move(selected);
+                            card_count = taken2;
+                            total_texels = off;
+                            // 轮转游标仍推进（下一帧预算窗口起点公平移动）。
+                            light_eval_rr_cursor_ = (light_eval_rr_cursor_ + taken2) % source_card_count;
+                            topkApplied = true;
+                        }
+                        // Top-K 全量装下（罕见）→ 落回 legacy 轮转逻辑。
                     }
-                    light_eval_rr_cursor_ = (start + taken) % source_card_count;
+                    if (!topkApplied) {
+                        const u32 start = light_eval_rr_cursor_ % source_card_count;
+                        u32 acc = 0, taken = 0;
+                        for (u32 k = 0; k < source_card_count; ++k) {
+                            const u32 cnt = dispatch_info[(start + k) % source_card_count].texel_count;
+                            if (taken > 0 && acc + cnt > texel_budget) break;
+                            acc += cnt;
+                            ++taken;
+                        }
+                        if (taken < source_card_count) {
+                            std::vector<CardDispatchInfo> selected(taken);
+                            u32 off = 0;
+                            for (u32 k = 0; k < taken; ++k) {
+                                const u32 idx = (start + k) % source_card_count;
+                                selected[k] = dispatch_info[idx];
+                                selected[k].texel_offset = off;   // rebase to 0
+                                off += selected[k].texel_count;
+                            }
+                            dispatch_info = std::move(selected);
+                            card_count = taken;
+                            total_texels = off;
+                        }
+                        light_eval_rr_cursor_ = (start + taken) % source_card_count;
+                    }
                 }
             }
 
@@ -1725,7 +1876,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     params.light_count = frame_data.sc_light_count > 0
                         ? frame_data.sc_light_count
                         : (frame_data.light_count > 0 ? frame_data.light_count : 1u);
-                    params._pad = 0;
+                    params.opensky_v2 = 0;   // 原零化 _pad 槽；Phase 4a 起为 openSky V2 门（env 覆盖在下方）
                     // Probe-fed indirect grid (Lumen hierarchy); valid flag 0
                     // keeps the shader on the legacy self-feedback path.
                     params.ddgi_origin_spacing[0] = frame_data.ddgi_origin.x;
@@ -1746,10 +1897,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // is cut so LightEval's texels converge on direct+capture
                     // alone (deterministic) — matches the DDGI probe freeze
                     // (PRIMAL_SC_WARMUP_FRAMES).
+                    // WRC 计划 Stream B1: bootstrap 模式下馈送从第 0 帧生效，
+                    // 由 probe_feed_bootstrap 因子在窗口内线性衰减到 0——
+                    // "窗口后常开"的 E1 反馈边改为一次性引导。
                     params.ddgi_counts_valid[3] =
                         (frame_data.ddgi_irradiance != rhi::handles::INVALID_RESOURCE &&
                          !std::getenv("SC_PROBE_FEED_OFF") &&
-                         current_frame_index >= scWarmupFrames())
+                         (kProbeFeedBootstrap || current_frame_index >= scWarmupFrames()))
                             ? frame_data.ddgi_valid : 0u;
                     // T3.3: gate the LightEval tile-radiosity read on whether
                     // the indirect trace/resolve actually ran this session —
@@ -1758,10 +1912,16 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // during the warm-up window the solver does not run, and
                     // reading the never-written indirect_out here fed
                     // uninitialized heap memory into the atlas (the "warm
-                    // entry light that fades seconds later" report).
+                    // entry light that fades" report).
+                    // WRC 计划 Stream B2: bootstrap 模式下 solver 从第 0 帧运行
+                    //（dispatch 条件同步放开）；消费端从第 1 帧读——LightEval
+                    // 在同一 AddPass 里先于 trace/resolve 执行，第 0 帧读到的
+                    // 是未初始化堆内存（同一历史 bug 的边界）。
                     params.radiosity_gate[0] =
                         scIndirectEnabled(device_) &&
-                        current_frame_index >= scWarmupFrames()
+                        (kProbeFeedBootstrap
+                            ? current_frame_index >= 1u
+                            : current_frame_index >= scWarmupFrames())
                             ? 1u : 0u;
                     // C3.5 slice 2: tile-radiosity tile size for the LightEval
                     // consumption read (0 = shader-side legacy 16).
@@ -1791,7 +1951,18 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             if (e[0] == '0') openskyOn = false;
                         }
                         params.radiosity_gate[3] = openskyOn ? 1u : 0u;
+                        // 能量所有权 Phase 4a: openSky V2（E_geo/E_sky 拆分），
+                        // PRIMAL_GI_OPENSKY_V2=0 回退旧整探针分类。
+                        params.opensky_v2 = [] {
+                            const char* e = std::getenv("PRIMAL_GI_OPENSKY_V2");
+                            return (e && e[0] == '0') ? 0u : 1u;
+                        }();
                     }
+                    // WRC 计划 Stream B1/B2（能量单向化）：引导因子 + 单轨标志。
+                    // 旧语义（bootstrap 关）factor=1、solo=0，shader 端逐位不变。
+                    params.probe_feed_bootstrap =
+                        lumen::GIProbeBootstrapFactor(current_frame_index);
+                    params.radiosity_solo = kProbeFeedBootstrap ? 1u : 0u;
                     *mapped = params;
                     device_->UnmapBuffer(params_cb_[frameIdx]);
                 }
@@ -1813,7 +1984,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // resolve 的 storage 写目标（rp2[14]），首帧 tracked=UNDEF
                 // 时写前必须有转换；后续帧由 recon 回置保持 GENERAL。
                 atlasBarriers[4].resource = indirect_tile_aux_;
-                atlasBarriers[5].resource = indirect_tile_tex_[current_frame_index % 3];
+                atlasBarriers[5].resource = indirect_tile_tex_[DDGISlotsForFrame(current_frame_index).writeIndex];
                 for (auto& b : atlasBarriers) {
                     b.beforeState = ResourceState::UnorderedAccess;
                     b.afterState  = ResourceState::UnorderedAccess;
@@ -1884,7 +2055,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                 // Transition GBuffer inputs to SHADER_READ (first use may be
                 // UNDEFINED when the main GBuffer pass hasn't run yet).
-                {
+                // GI 能量所有权修复 Phase 5b: Vulkan 上 GBuffer 已进 RG
+                // （NaniteSceneRender Write 声明 → producer identity），RG
+                // 插入正式 Write→Read 转换，此 no-op barrier 不再需要。
+                // Metal 仍保留（encoder 边界语义另案，parity 矩阵已记）。
+                const bool gbufferRG = device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+                    [](const char* e) { return !(e && e[0] == '0'); }(std::getenv("PRIMAL_GBUFFER_RG"));
+                if (!gbufferRG) {
                     ResourceBarrier gbBarriers[3]{};
                     gbBarriers[0].resource = frame_data.gbuffer_depth;
                     gbBarriers[1].resource = frame_data.gbuffer_albedo;
@@ -2259,8 +2436,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
                 // histIdx = 2 frames ago — the lighting atlas from 2 frames
                 // back is safe to read (GPU finished with it) and serves as
-                // the multi-bounce feedback source.
-                u32 histIdx = (current_frame_index + 1) % 3;
+                // the multi-bounce feedback source. Phase 1d: (N+1)%3 与
+                // DDGISlotMap 恒等（N-2 ≡ N+1 mod 3，+1 写法避免 unsigned
+                // 下溢），槽位语义以 DDGISlotMap.h 为准。
+                const u32 histIdx = DDGISlotsForFrame(current_frame_index + 1u).currentIndex;
                 DescriptorData evalParams[15];
                 if (isVk) {
                     DescriptorData p[] = {
@@ -2411,7 +2590,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // consumer lands in the next slice, until then this stays a
                 // bring-up path.
                 const bool scIndirectOn = scIndirectEnabled(device_);
-                if (scIndirectOn && current_frame_index >= scWarmupFrames())
+                // WRC 计划 Stream B2: bootstrap 模式下 solver 从第 0 帧运行
+                //（LightEval 消费端 gate.x 同步改为 frame>=1，见 params 填充处）。
+                if (scIndirectOn &&
+                    (kProbeFeedBootstrap || current_frame_index >= scWarmupFrames()))
                 // trace: per-tile cosine ray fan → SDF march → ray_hits.
                 // resolve: aggregate ray_hits and expand into full-atlas indirect_out.
                 // Consumers (LightEval tile probe) land in the next slice.
@@ -2499,8 +2681,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                         (u64)card_generator_.GetLookupCount() ^
                                         ((u64)card_generator_.GetCards().size() << 8);
                     const u64 tileWords = ((u64)kTiles * kTiles + 31u) / 32u;
+                    // GI 能量所有权修复 Phase 5a: 灯光修改事件强制清零一次
+                    // （temporal invalidation——tile EMA 历史不得跨灯光变化
+                    // 存活）。清零后恢复常规 sig 门控。
+                    const bool forceTileReset = tile_validity_reset_pending_;
+                    tile_validity_reset_pending_ = false;
                     if (indirect_tile_valid_buffer_ == handles::INVALID_RESOURCE ||
-                        indirect_tile_config_sig_ != tileSig) {
+                        indirect_tile_config_sig_ != tileSig || forceTileReset) {
                         if (indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE) {
                             device_->DestroyBuffer(indirect_tile_valid_buffer_);
                             indirect_tile_valid_buffer_ = handles::INVALID_RESOURCE;

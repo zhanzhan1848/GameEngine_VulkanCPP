@@ -97,6 +97,8 @@ public:
     // T4.1: runtime LightEval page budget (GIAdaptiveGovernor). 0 keeps the
     // legacy full-update path; takes effect at the next AddPass.
     void SetPageBudget(u32 pages) { config_.surface_cache_capture_budget = pages; }
+    // GI 能量所有权修复 Phase 5a: 灯光修改事件 → 下帧 tile validity 清零。
+    void RequestTileValidityReset() { tile_validity_reset_pending_ = true; }
     rhi::ResourceHandle GetCardDataBuffer() const {
         return card_generator_.GetCardDataBuffer();
     }
@@ -161,6 +163,10 @@ private:
     rhi::ResourceHandle lighting_atlas_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+    // UNITS: lighting_atlas_ = DiffuseOutgoingRadiance（Lo = ρ(E_direct +
+    // E_probe_floor + E_sc_bounce)/π + emissive，LightEval 产出；审计 §5：
+    // DDGI trace 反向采样它是合法 radiance；审计 §3.2：探针项是冷启动地板，
+    // 收敛后应由 E2 逐射线采样承担）。
 
     // T8.12 card-view capture state
     bool card_view_enabled_{ false };
@@ -262,6 +268,9 @@ private:
     // hits reinterpreted as measurements. Recreated (zeroed) when the tile
     // grid or the card set changes.
     rhi::ResourceHandle indirect_tile_valid_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // GI 能量所有权修复 Phase 5a: 灯光修改事件 → 下帧 tile validity 位图
+    // 强制清零（indirect tile EMA 历史失效，radiosity 重新积累）。
+    bool tile_validity_reset_pending_{ false };
     u64 indirect_tile_config_sig_{ 0 };
     // A (plan §三.A): per-tile INCIDENT radiance + validity (triple-buffered,
     // tile-domain EMA) and the compat-evidence tile texture (oct normal /
@@ -317,6 +326,13 @@ private:
     u32 light_eval_rr_cursor_ = 0;   // T1.4: round-robin card cursor for page-budget LightEval
     u32 lighting_atlas_seed_mask_ = 0; // one bit per triple-buffered lighting slot
     GITemporalStrategy temporal_strategy_ = GITemporalStrategy::EMA;   // X2/A3 枚举存储（暂不改变行为）
+
+    // [WRC 计划 Stream D1]（PRIMAL_SC_PRIORITY=1）：卡片重要性打分的新鲜度
+    // 状态——上次被 LightEval / card-view capture 服务的帧号。打分 =
+    // 屏幕占比代理(4·ex·ey) × 1/dist² × mix(1, freshness, importance_weight)，
+    // d > surface_cache_update_distance 的卡片 score=0（两个死配置参数复活）。
+    std::vector<u32> card_light_last_frame_;
+    std::vector<u32> card_capture_last_frame_;
 
     // GBuffer-gather capture state
     rhi::ResourceHandle capture_cb_[3]{

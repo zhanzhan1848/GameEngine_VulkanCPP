@@ -183,8 +183,9 @@ void surface_cache_indirect_resolve()
         // capture validity, side orientation, decomposed along/perp error,
         // min-key selection. The old first-worldToCardUV-hit-accept took
         // whichever card the AABB loop found first, with no captured-depth
-        // check at all. Valid black is accepted; an exhausted search keeps
-        // the legacy dim placeholder.
+        // check at all. Valid black is accepted; an exhausted search skips
+        // the ray (WRC 计划 Stream B3：0.02 灰占位符删除——查询失败 =
+        // 无测量，不再向反馈回路伪造微弱亮度)。
         if (hit_type == 0u || hit_type == 1u) {
             // Regenerate this ray's direction exactly as the trace does
             // (same hash sequence, same tangent frame) — the orientation
@@ -219,9 +220,7 @@ void surface_cache_indirect_resolve()
                     }
                 }
             }
-            if (!found) {
-                radiance = vec3(0.02, 0.02, 0.03);
-            }
+            if (!found) continue;
         } else {
             // Sky — same tier as DDGITraceFinalize's escape
             // (DDGI_SKY_COLOR × SkyColor.x with the 0.4 default intensity).
@@ -267,9 +266,11 @@ void surface_cache_indirect_resolve()
         } else if (hasHistory && tw > 0.0) {
             vec3 prev = texelFetch(prev_tile_grid, ivec2(probe_x, probe_y), 0).rgb;
             tileValue = mix(indirect, prev, tw);
-            tileValid = 1.0;
+            // WRC 计划 Stream B3: 本帧刷新但零有效测量（全部射线被跳过）→
+            // A=0 显式无效——"valid black"会伪装成一次"无间接"测量。
+            tileValid = total_weight > 0.0 ? 1.0 : 0.0;
         } else {
-            tileValid = 1.0;
+            tileValid = total_weight > 0.0 ? 1.0 : 0.0;
         }
         imageStore(tile_grid, ivec2(probe_x, probe_y), vec4(tileValue, tileValid));
 
@@ -324,7 +325,9 @@ void surface_cache_indirect_resolve()
                 vec3 prev = texelFetch(prev_indirect_out, ivec2(texel), 0).rgb;
                 current = mix(current, prev, tw);
             }
-            imageStore(indirect_out, ivec2(texel), vec4(current, 1.0));
+            // WRC 计划 Stream B3: 零有效测量 → A=0 显式无效（同 recon 路径）。
+            imageStore(indirect_out, ivec2(texel),
+                       vec4(current, total_weight > 0.0 ? 1.0 : 0.0));
         }
     }
 }

@@ -1,6 +1,7 @@
 #include "FusionCompositeModule.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
+#include "Graphics/Lumen/DDGISlotMap.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include <iostream>
@@ -754,7 +755,14 @@ void RunGiLoopDcGainMeter(RHIDeviceBase* device, ResourceHandle indirectTex,
 
 FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs) {
     FusionOutputs outputs{};
-    u32 cbIdx = inputs.current_buffer_index % 3;
+    // Phase 1d（时钟统一，审计 §2.4 新发现①）: 三缓冲槽位从 cbIdx（swapchain
+    // 槽）改为绝对帧号——cbIdx 与 frameCount%3 之间无同步不变量（resize/多
+    // 视图/未来异步会错位），错位时读侧会拿到本帧正在写的槽。现随 DDGI 体系
+    // 统一走 DDGISlotMap.h；今天两者数值恒等（调用端 cbIdx=frameCount_%3），
+    // 行为零变化，不变量显式化。
+    u32 cbIdx = lumen::DDGISlotsForFrame(inputs.frame_index).writeIndex;
+    // 同一帧号的上一完成槽（诊断读回统一取此槽，Phase 1d 起禁裸算）。
+    const u32 prevIdx = lumen::DDGISlotsForFrame(inputs.frame_index).previousIndex;
 
     if (indirect_pipeline_ == handles::INVALID_PIPELINE || composite_pipeline_ == handles::INVALID_PIPELINE)
         return outputs;
@@ -803,7 +811,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::DontCare, .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 0}}});
             builder.DeclareRenderPass(rpDesc);
         },
-        [this, inputs, cbIdx, resolve](const IndirectData&, rendergraph::RenderGraphContext& context) {
+        [this, inputs, cbIdx, prevIdx, resolve](const IndirectData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             static int s_fusion_diag = 0;
             if (s_fusion_diag < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_INDIRECT] exec " << s_fusion_diag << std::endl; s_fusion_diag++; }
@@ -888,8 +896,18 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 const float v = static_cast<float>(std::atof(g));
                 if (v >= 0.0f && v <= 8.0f) giIndirectGain = v;
             }
+            // WRC 计划 Stream C1（Fusion 档位化）：像素级 GI 来源 mode switch。
+            // 档位结构单一事实源 = axes.use_screen_probes（决定 SPGI 是否
+            // 运行）；此处只决定 fusion 像素读哪路：High/Ultra → SPGI-only，
+            // Medium → DDGI-only。PRIMAL_FUSION_PERPIXEL=1 回滚旧逐像素
+            // 置信度混合（A/B 证据保留）。
+            float fusionMode = inputs.pixel_gi_spgi_only ? 1.0f : 2.0f;
+            if (const char* p = std::getenv("PRIMAL_FUSION_PERPIXEL")) {
+                if (p[0] == '1') fusionMode = 0.0f;
+            }
             if (indirect_gain_cb_[cbIdx] != handles::INVALID_RESOURCE) {
-                device_->UpdateBufferData(indirect_gain_cb_[cbIdx], &giIndirectGain, sizeof(float), 0);
+                const float gainUbo[2] = { giIndirectGain, fusionMode };
+                device_->UpdateBufferData(indirect_gain_cb_[cbIdx], gainUbo, sizeof(gainUbo), 0);
             }
             DescData params[7] = {
                 {0, DescriptorType::SampledImage, ssgiTex},
@@ -923,9 +941,9 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             cmd->Draw(3, 0, 1, 0);
 
             // sun-audit P1: GI_LADDER_DUMP 能量台账（一次性同步读回，见函数头注释）
-            RunGiLadderDump(device_, inputs, spgiTex, indirect_output_[(cbIdx + 2) % 3]);
+            RunGiLadderDump(device_, inputs, spgiTex, indirect_output_[prevIdx]);
             // GI 能量根治方案 Phase 2.4: 逐回路 DC 增益仪表（GI_DCGAIN=1 启用）
-            RunGiLoopDcGainMeter(device_, indirect_output_[(cbIdx + 2) % 3],
+            RunGiLoopDcGainMeter(device_, indirect_output_[prevIdx],
                                  inputs.render_width, inputs.render_height);
 
             // TEMP diagnosis: one-shot per-strip stats of the indirect output
@@ -939,7 +957,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 const u32 w = render_width_, h = render_height_;
                 // Read LAST frame's output (triple-buffered, GPU-complete —
                 // this frame's [cbIdx] hasn't been submitted yet).
-                const u32 readIdx = (cbIdx + 2) % 3;
+                const u32 readIdx = prevIdx;
                 BufferDesc bd{}; bd.size = (u64)w * h * 8;
                 bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
                 bd.memoryUsage = GPUMemoryUsage::Readback;

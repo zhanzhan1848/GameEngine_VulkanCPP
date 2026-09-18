@@ -115,9 +115,7 @@ kernel void surfaceCacheIndirectResolve(
                     }
                 }
             }
-            if (!found) {
-                radiance = float3(0.02, 0.02, 0.03);
-            }
+            if (!found) continue;   // WRC 计划 Stream B3: 查询失败 = 无测量（0.02 灰占位符删除）
         } else {
             // Sky — same tier as DDGITraceFinalize's escape
             // (DDGI_SKY_COLOR × SkyColor.x with the 0.4 default intensity).
@@ -161,7 +159,8 @@ kernel void surfaceCacheIndirectResolve(
                 float3 prev = prev_indirect_out.read(texel).rgb;
                 current = mix(current, prev, tw);
             }
-            indirect_out.write(float4(current, 1.0), texel);
+            // WRC 计划 Stream B3: 零有效测量 → A=0 显式无效（Vulkan 孪生同步）。
+            indirect_out.write(float4(current, total_weight > 0.0f ? 1.0f : 0.0f), texel);
         }
     }
 }

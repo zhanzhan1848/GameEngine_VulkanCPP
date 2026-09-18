@@ -1,5 +1,7 @@
 #include "LumenDDGIPass.h"
 #include "Engine/Graphics/Lumen/GIDebugParams.h"
+#include "Engine/Graphics/Lumen/GIWarmup.h"
+#include "Engine/Graphics/Lumen/DDGISlotMap.h"
 #include "Engine/Graphics/Lumen/StaticProbe/StaticProbeVolume.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/SurfaceCacheTypes.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
@@ -1181,22 +1183,24 @@ void LumenDDGIPass::CreateProbeTextures() {
         }
     }
 
-    // GI 能量根治方案 Phase 3.1: 每探针 openSky 统计缓冲（float/probe）。
+    // GI 根治 Phase 3.1 + 能量所有权 Phase 4a: 每探针 openSky 统计缓冲，
+    // float2/probe = {escapeRatio, skyEnergyRatio}（ UpdateIrradiance 写，
+    // EMA 平滑；GIGather/LightEval 消费——V2 拆 E_geo/E_sky 用 y 分量）。
     // 必须显式清零——Vulkan/堆纹理不保证零初始化（confidence 同款教训），
     // 垃圾值会让 gather 的天空分类在首帧就失真。单缓冲持久，探针逐批
     // EMA 更新。
     {
         BufferDesc desc{};
-        desc.size = (u64)totalProbes * sizeof(float);
+        desc.size = (u64)totalProbes * 2u * sizeof(float);
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
         desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
         desc.structured.elementCount = totalProbes;
-        desc.structured.elementStride = sizeof(float);
+        desc.structured.elementStride = 2u * sizeof(float);
         opensky_buffer_ = device_->CreateBuffer(desc);
         if (float* mapped = static_cast<float*>(device_->MapBuffer(opensky_buffer_))) {
-            for (u32 p = 0; p < totalProbes; p++) mapped[p] = 0.0f;
+            for (u32 p = 0; p < totalProbes * 2u; p++) mapped[p] = 0.0f;
             device_->UnmapBuffer(opensky_buffer_);
         }
     }
@@ -1633,8 +1637,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 {
     LumenDDGIOutput output{};
 
-    u32 outIdx = current_frame_index % 3;
-    u32 histIdx = (current_frame_index + 2) % 3;
+    // Phase 1d: 槽位单一事实源 DDGISlotMap.h（writeIndex = currentIndex =
+    // 本帧写槽；previousIndex = 上一完成帧，语义同原 histIdx）。
+    const auto slots = DDGISlotsForFrame(current_frame_index);
+    const u32 outIdx = slots.writeIndex;
+    const u32 histIdx = slots.previousIndex;
     exec_frame_index_ = current_frame_index;   // §8.3 CPU 读回的帧门用
 
     // Import persistent probe buffers/textures into render graph.
@@ -1742,7 +1749,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 return;
             }
 
-            u32 frameIdx = current_frame_index % 3;
+            u32 frameIdx = DDGISlotsForFrame(current_frame_index).writeIndex;
 
             u32 probeCountTotal = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
             u32 updateCount = std::min(max_probes_per_frame_, probeCountTotal);
@@ -1752,13 +1759,18 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // updating probes against the transient is what selects the
             // multi-stable branch (09-10 十二). Single choke point: zeroing
             // updateCount no-ops every downstream update dispatch (zero-size
-            // guards from C0 cover the dispatches). Default 0 = off.
+            // guards from C0 cover the dispatches). Phase 1a: knob shared
+            // with SC via GIWarmup.h — unified default 90 (was 0 here, which
+            // left the two modules' warmup windows inconsistent without env;
+            // see remediation plan §执行日志 for the recorded rationale).
+            // WRC 计划 Stream B1: bootstrap 模式（PRIMAL_GI_PROBE_FEED_
+            // BOOTSTRAP=1）下解除窗口冻结——探针从第 0 帧更新，衰减引导项在
+            // 窗口内才携带真实反弹供给 SC；窗口后归零、SC 常备间接交棒
+            // tile radiosity。冻结政策不变：这仍属 DDGI 线 bug 修复级改动。
             {
-                static const u32 kWarmupFrames = [] {
-                    const char* e = std::getenv("PRIMAL_SC_WARMUP_FRAMES");
-                    return e ? (u32)std::max(0, std::atoi(e)) : 0u;
-                }();
-                if (kWarmupFrames > 0u && current_frame_index < kWarmupFrames) updateCount = 0;
+                const u32 kWarmupFrames = GIWarmupFrames();
+                if (!GIProbeFeedBootstrapEnabled() &&
+                    kWarmupFrames > 0u && current_frame_index < kWarmupFrames) updateCount = 0;
             }
 
             // Resolve physical handles from render graph
@@ -1987,6 +1999,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     if (const char* e = std::getenv("PRIMAL_DDGI_ALPHA_HOLD")) {
                         if (current_frame_index < (u32)std::max(0, std::atoi(e))) vd.TemporalAlpha = 0.35f;
                     }
+                    // GI 能量所有权修复 Phase 5a: 事件驱动窗（灯光修改 →
+                    // OnLightingChanged）——窗内探针保持年轻档 α=0.35 加速
+                    // 重收敛，与 env 版同一机制、由事件而非常量帧数驱动。
+                    if (current_frame_index < alpha_hold_until_frame_) vd.TemporalAlpha = 0.35f;
                     vd.LightDirection = {camera_data.light_direction.x,
                                          camera_data.light_direction.y,
                                          camera_data.light_direction.z, 0.0f};
@@ -2199,6 +2215,57 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             << " (capped-30 starvation risk when P95==30 and"
                                " update_ratio<1)"
                             << std::endl;
+                    }
+                }
+
+                // GI ownership plan Phase 0 (2026-09-18): openSky 直方图一次性
+                // dump（DDGI_OPENSKY_STATS=1，沿用上方 age-stats 的"一次即弃"
+                // 模式）。收敛窗后逐探针读回 openSky 逃逸占比，10 桶直方图 +
+                // 中位数——基线/断边 A/B 都用它回答"探针场的天空归属分布"。
+                if (std::getenv("DDGI_OPENSKY_STATS")) {
+                    static bool skyDumped = false;
+                    static const u32 skyDumpFrame = [] {
+                        const char* e = std::getenv("DDGI_OPENSKY_STATS_FRAME");
+                        return e ? (u32)std::atoi(e) : 300u;
+                    }();
+                    if (!skyDumped && current_frame_index >= skyDumpFrame &&
+                        opensky_buffer_ != handles::INVALID_RESOURCE) {
+                        skyDumped = true;
+                        const u32 n = volume_data_.ProbeCountTotal;
+                        if (float* os = static_cast<float*>(
+                                device_->MapBuffer(opensky_buffer_, 0, (u64)n * 2u * sizeof(float)))) {
+                            u32 histBuckets[10] = {};
+                            std::vector<float> vals;
+                            std::vector<float> sers;
+                            vals.reserve(n);
+                            sers.reserve(n);
+                            for (u32 i = 0; i < n; ++i) {
+                                const float v = std::clamp(os[i * 2u + 0u], 0.0f, 1.0f);
+                                vals.push_back(v);
+                                sers.push_back(std::clamp(os[i * 2u + 1u], 0.0f, 1.0f));
+                                histBuckets[std::min(9u, (u32)(v * 10.0f))]++;
+                            }
+                            device_->UnmapBuffer(opensky_buffer_);
+                            std::sort(vals.begin(), vals.end());
+                            const float med = vals.empty()
+                                ? 0.0f
+                                : vals[vals.size() / 2];
+                            std::sort(sers.begin(), sers.end());
+                            const float serMed = sers.empty()
+                                ? 0.0f
+                                : sers[sers.size() / 2];
+                            std::string hist;
+                            for (int b = 0; b < 10; ++b) {
+                                char cell[16];
+                                std::snprintf(cell, sizeof(cell), "%s%u",
+                                              b ? "," : "", (unsigned)histBuckets[b]);
+                                hist += cell;
+                            }
+                            PRIMAL_LOG_STREAM(Error, "Render")
+                                << "[DDGIOpenSkyStats] probes=" << n << " med=" << med
+                                << " ser_med=" << serMed
+                                << " hist(0-1 step0.1)=" << hist << std::endl;
+                        }
                     }
                 }
 

@@ -76,12 +76,17 @@ struct FlattenedLightingParams {
     uint total_texels;
     uint card_count;
     uint light_count;
-    uint _pad;
+    // 能量所有权 Phase 4a: openSky V2 开关（E_geo/E_sky 拆分消费；
+    // PRIMAL_GI_OPENSKY_V2=0 → 0 = 旧整探针分类）。
+    uint opensky_v2;
     vec4 ddgi_origin_spacing;   // xyz origin, w spacing
     uvec4 ddgi_counts_valid;    // xyz counts, w valid flag
     // T3.3: SC Radiosity gate (x = on) — see Metal twin.
     uvec4 radiosity_gate;       // x = indirect_radiosity_on, y = radiosity weight 档,
                                 // z = tile size, w = openSky 分类开关（GI 根治 Phase 3.2）
+    // WRC 计划 Stream B1/B2（能量单向化）— 与 C++ SurfaceCacheTypes.h 同步。
+    float probe_feed_bootstrap; // 引导因子（PRIMAL_GI_PROBE_FEED_BOOTSTRAP=1：窗口内 1→0）
+    uint  radiosity_solo;       // 1 = tile radiosity 单轨（volume 外 texel 间接唯一来源）
 };
 
 // Reconstruct world position from card atlas UV + depth.

@@ -112,7 +112,8 @@ struct FlattenedLightingParams {
     uint32_t           total_texels; // sum of all card resolutions squared
     uint32_t           card_count;   // number of active cards in dispatch
     uint32_t           light_count;
-    uint32_t           _pad;
+    // 能量所有权 Phase 4a: openSky V2 开关（PRIMAL_GI_OPENSKY_V2=0 回滚）。
+    uint32_t           opensky_v2;
     // Probe-fed indirect (Lumen hierarchy): near-volume grid so LightEval can
     // gather incoming irradiance from the DDGI probes (appended at the end —
     // backends whose shaders predate this field keep reading the first 64B).
@@ -121,6 +122,13 @@ struct FlattenedLightingParams {
     // T3.3: SC Radiosity gate (x = indirect_radiosity_on) — appended at the
     // end exactly like the probe-feed block above.
     uint32_t           radiosity_gate[4];       // x = on, yzw reserved
+    // WRC 计划 Stream B1/B2（能量单向化，PRIMAL_GI_PROBE_FEED_BOOTSTRAP=1）：
+    // probe_feed_bootstrap = 引导因子（窗口内 1→0 线性，窗口后 0；旧语义恒
+    // 1，shader 端乘法恒等）。radiosity_solo = 1 → volume 外 texel 的间接项
+    // 只来自 tile radiosity，legacy prev_light 自反馈双轨停用。
+    // append-at-end 惯例：旧后端 shader 不读也安全。
+    float              probe_feed_bootstrap;
+    uint32_t           radiosity_solo;
 };
 
 struct SurfaceCacheFrameData {

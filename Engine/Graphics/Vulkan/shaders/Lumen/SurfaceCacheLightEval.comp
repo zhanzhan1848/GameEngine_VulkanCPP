@@ -25,6 +25,9 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
+// Phase 1b: DDGI 评基单源（cos-lobe 因子只存在于 EvalLib——原 gatherProbeSH
+// 内联展开的交叉引用警告随之撤销）。
+#include "ShaderLib/EvalLib.glsl"
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -66,6 +69,8 @@ layout(set = 0, binding = 9, std430) readonly buffer ShadowVisibilityBlock {
 
 // Probe-fed indirect (Lumen hierarchy): 9 vec4 SH coefficients per probe from
 // the near DDGI volume (previous-frame slot — SC runs before the DDGI update).
+// UNITS: Radiance-SH（radiance 投影；评基单源 ShaderLib/EvalLib.glsl，
+// 评出 E/π 后 ×π = E——铁律见 EvalLib 头注释）。
 layout(set = 0, binding = 10, std430) readonly buffer DDGIIrradianceBlock {
     vec4 ddgi_irradiance[];
 } ddgiIrr;
@@ -83,11 +88,12 @@ layout(set = 0, binding = 13, std430) readonly buffer DDGIDepthBlock {
     float ddgi_depth_buffer[];
 } ddgiDepth;
 
-// GI 能量根治方案 Phase 3.2: 每探针 openSky 统计（逃逸占比 EMA）——
-// 卡片 texel 侧 gather 的天空可见性分类（R7：受光带探针能量隔墙传给
-// 封闭卡片 texel）。radiosity_gate.w 非零时启用（PRIMAL_GI_OPENSKY 回滚）。
+// GI 根治 Phase 3.2 + 能量所有权 Phase 4a: 每探针 openSky 统计，
+// float2 = {escapeRatio, skyEnergyRatio}（EMA）——卡片 texel 侧 gather 的
+// 天空可见性分类（R7）+ V2 天空分量拆分（E_geo/E_sky，gate.z）。
+// radiosity_gate.w 非零时启用分类（PRIMAL_GI_OPENSKY 回滚）。
 layout(set = 0, binding = 14, std430) readonly buffer DDGIOpenSkyBlock {
-    float ddgi_opensky_buffer[];
+    float ddgi_opensky_buffer[];   // stride 2：[p*2]=escapeRatio，[p*2+1]=sER
 } ddgiOpenSky;
 
 #define SC_DEPTH_RES 8u
@@ -162,15 +168,9 @@ vec3 gatherProbeSH(uint pidx, vec3 N) {
     for (int i = 0; i < 9; ++i)
         sh[i] = ddgiIrr.ddgi_irradiance[pidx * 9u + uint(i)].xyz;
     // Cosine convolution relative to A0=pi; final gather applies pi.
-        vec3 irr = sh[0] * 0.282095
-             + sh[1] * (2.0 / 3.0) * (-0.488603 * N.y)
-             + sh[2] * (2.0 / 3.0) * ( 0.488603 * N.z)
-             + sh[3] * (2.0 / 3.0) * (-0.488603 * N.x)
-             + sh[4] * 0.25 * ( 1.092548 * N.y * N.x)
-             + sh[5] * 0.25 * (-1.092548 * N.y * N.z)
-             + sh[6] * 0.25 * ( 0.315392 * (3.0 * N.z * N.z - 1.0))
-             + sh[7] * 0.25 * (-1.092548 * N.x * N.z)
-             + sh[8] * 0.25 * ( 0.546274 * (N.x * N.x - N.y * N.y));
+    // Phase 1b: 展开 → EvalLib 单源（E/π 语义，常量统一到高精度字面量，
+    // ≤1 ulp）。
+    vec3 irr = evalProbeIrradianceSH9(sh, N);
     return max(irr, vec3(0.0));
 }
 
@@ -200,7 +200,7 @@ vec3 gatherProbeIrradiance(vec3 worldPos, vec3 N, out bool inVolume) {
             float tw = kw.x * kw.y * kw.z;
             if (tw <= 0.0) continue;
             uint pidx = uint(pc.x) + uint(counts.x) * (uint(pc.y) + uint(counts.y) * uint(pc.z));
-            pixOpen += ddgiOpenSky.ddgi_opensky_buffer[pidx] * tw;
+            pixOpen += ddgiOpenSky.ddgi_opensky_buffer[pidx * 2u] * tw;
             pixOpenW += tw;
         }
         if (pixOpenW > 0.0) pixOpen /= pixOpenW;
@@ -242,18 +242,26 @@ vec3 gatherProbeIrradiance(vec3 worldPos, vec3 N, out bool inVolume) {
 
         // GI 根治 Phase 3.2: 天空分类衰减（DDGIGIGather 孪生）——探针露天
         // 度 × 像素封闭度，露天能量不再隔墙传给封闭卡片 texel。
-        float classify = 1.0;
+        // 能量所有权 Phase 4a（openSky V2）: 衰减只作用于探针贡献的**天空
+        // 分量**——atten = mix(1, classify, sER)，sER = 探针天空能量占比
+        // （flat openSky 第二分量，params.opensky_v2 非零启用）。几何主导
+        // 探针的地面反弹不再被整探针压暗；V2 关闭（PRIMAL_GI_OPENSKY_V2=0
+        // → opensky_v2=0）时 sER=1 → atten=classify 逐位旧行为。
+        float atten = 1.0;
         if (flp.params.radiosity_gate.w != 0u) {
-            float pOpen = ddgiOpenSky.ddgi_opensky_buffer[pidx];
+            float pOpen = ddgiOpenSky.ddgi_opensky_buffer[pidx * 2u];
             float skyness = smoothstep(0.15, 0.45, pOpen);
             float enclosed = 1.0 - smoothstep(0.05, 0.25, pixOpen);
-            classify = 1.0 - skyness * enclosed * 0.85;
+            const float classify = 1.0 - skyness * enclosed * 0.85;
+            atten = (flp.params.opensky_v2 != 0u)
+                ? mix(1.0, classify, ddgiOpenSky.ddgi_opensky_buffer[pidx * 2u + 1u])
+                : classify;
         }
 
-        accVis += irr * tw * nwSoft * vw * insidePenalty * classify;
-        visW   += tw * nwSoft * vw * insidePenalty * classify;
-        accLow += irr * tw * burial * classify;
-        lowW   += tw * burial * classify;
+        accVis += irr * tw * nwSoft * vw * insidePenalty * atten;
+        visW   += tw * nwSoft * vw * insidePenalty * atten;
+        accLow += irr * tw * burial * atten;
+        lowW   += tw * burial * atten;
     }
     vec3 result = vec3(0.0);
     if (visW > 0.0) result += (accVis / visW) * 0.45;
@@ -296,7 +304,7 @@ vec3 gatherProbeIrradiance(vec3 worldPos, vec3 N, out bool inVolume) {
             if (tw <= 0.0) continue;
             ivec3 pc = ivec3(mix(b0, b1, ivec3(x, y, z)));
             uint pidx = uint(pc.x) + uint(counts.x) * (uint(pc.y) + uint(counts.y) * uint(pc.z));
-            pixOpen += ddgiOpenSky.ddgi_opensky_buffer[pidx] * tw;
+            pixOpen += ddgiOpenSky.ddgi_opensky_buffer[pidx * 2u] * tw;
             pixOpenW += tw;
         }
         if (pixOpenW > 0.0) pixOpen /= pixOpenW;
@@ -338,18 +346,26 @@ vec3 gatherProbeIrradiance(vec3 worldPos, vec3 N, out bool inVolume) {
 
         // GI 根治 Phase 3.2: 天空分类衰减（DDGIGIGather 孪生）——探针露天
         // 度 × 像素封闭度，露天能量不再隔墙传给封闭卡片 texel。
-        float classify = 1.0;
+        // 能量所有权 Phase 4a（openSky V2）: 衰减只作用于探针贡献的**天空
+        // 分量**——atten = mix(1, classify, sER)，sER = 探针天空能量占比
+        // （flat openSky 第二分量，params.opensky_v2 非零启用）。几何主导
+        // 探针的地面反弹不再被整探针压暗；V2 关闭（PRIMAL_GI_OPENSKY_V2=0
+        // → opensky_v2=0）时 sER=1 → atten=classify 逐位旧行为。
+        float atten = 1.0;
         if (flp.params.radiosity_gate.w != 0u) {
-            float pOpen = ddgiOpenSky.ddgi_opensky_buffer[pidx];
+            float pOpen = ddgiOpenSky.ddgi_opensky_buffer[pidx * 2u];
             float skyness = smoothstep(0.15, 0.45, pOpen);
             float enclosed = 1.0 - smoothstep(0.05, 0.25, pixOpen);
-            classify = 1.0 - skyness * enclosed * 0.85;
+            const float classify = 1.0 - skyness * enclosed * 0.85;
+            atten = (flp.params.opensky_v2 != 0u)
+                ? mix(1.0, classify, ddgiOpenSky.ddgi_opensky_buffer[pidx * 2u + 1u])
+                : classify;
         }
 
-        accVis += irr * tw * nwSoft * vw * insidePenalty * classify;
-        visW   += tw * nwSoft * vw * insidePenalty * classify;
-        accLow += irr * tw * burial * classify;
-        lowW   += tw * burial * classify;
+        accVis += irr * tw * nwSoft * vw * insidePenalty * atten;
+        visW   += tw * nwSoft * vw * insidePenalty * atten;
+        accLow += irr * tw * burial * atten;
+        lowW   += tw * burial * atten;
     }
     vec3 result = vec3(0.0);
     if (visW > 0.0) result += (accVis / visW) * 0.45;
@@ -493,6 +509,11 @@ void surface_cache_light_eval()
     bool probeInVolume = false;
     vec3 E_indirect = gatherProbeIrradiance(world_pos, normal, probeInVolume);
     bool probeFed = flp.params.ddgi_counts_valid.w != 0u;
+    // WRC 计划 Stream B1（能量单向化）：探针馈送改暖启动引导项——
+    // PRIMAL_GI_PROBE_FEED_BOOTSTRAP=1 时因子在 GIWarmup 窗口内 1→0 线性、
+    // 窗口后恒 0（CPU 端 GIProbeBootstrapFactor 计算并随 params 下发）；
+    // 旧语义 factor=1，乘法恒等。E1 边（DDGI→SC）由此退出常备回路。
+    E_indirect *= flp.params.probe_feed_bootstrap;
 
     // In-volume texels take their bounce from the probes. Outside the probe
     // grid (or with the feed off) the gather is zero, so keep the legacy
@@ -530,10 +551,15 @@ void surface_cache_light_eval()
     // WATCH: if interiors decay over minutes again, the loop lost its floor —
     // restore with:
     //   E_indirect = max(E_indirect, vec3(0.52,0.46,0.37) * mix(0.25,1.0,skyOpen));
+    // WRC 计划 Stream B2: radiosity_solo=1 时 tile radiosity 是全部 texel
+    //（含 volume 外）的唯一常备间接来源——legacy prev_light 自反馈双轨停用，
+    // 消除 E6 自反馈与探针环的双轨叠加（能量单向化的 SC 内圈）。
     vec3 result = (direct_light + E_indirect) * albedo.rgb * 0.31830988
-                + (probeFed && probeInVolume
+                + (flp.params.radiosity_solo != 0u
                       ? tileRadiance * scRadiosityWeight(flp.params.radiosity_gate.y)
-                      : tileRadiance + prev_light * albedo.rgb * 0.31830988)
+                      : (probeFed && probeInVolume
+                            ? tileRadiance * scRadiosityWeight(flp.params.radiosity_gate.y)
+                            : tileRadiance + prev_light * albedo.rgb * 0.31830988))
                 + emissive;
     result = min(result, vec3(64.0));
     imageStore(lighting_out, ivec2(atlas_uv), vec4(result, 1.0));

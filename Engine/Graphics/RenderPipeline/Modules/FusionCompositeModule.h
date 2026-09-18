@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/Lumen/DDGISlotMap.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 
 namespace primal::graphics {
@@ -41,9 +42,19 @@ struct FusionInputs {
     rhi::ResourceHandle volume_scatter_tex{rhi::handles::INVALID_RESOURCE};
 
     u32 current_buffer_index = 0;
+    // Phase 1d: 绝对帧号——三缓冲槽位单一事实源 DDGISlotMap.h（cbIdx 时钟
+    // 废除，与 DDGI 体系统一；current_buffer_index 仅为兼容保留）。
+    u32 frame_index = 0;
     u32 render_width = 0;
     u32 render_height = 0;
     rhi::ResourceHandle black_texture{rhi::handles::INVALID_RESOURCE};
+
+    // WRC 计划 Stream C1（Fusion 档位化）：像素级 GI 来源档位——true =
+    // High/Ultra（axes.use_screen_probes）→ 像素只读 SPGI；false = Medium
+    // → 像素只读 DDGI。use_screen_probes 档位结构不变（决定 SPGI 是否运行）；
+    // 本位只决定 fusion 像素读哪路。PRIMAL_FUSION_PERPIXEL=1 整体回滚旧
+    // 逐像素置信度混合（A/B）。
+    bool pixel_gi_spgi_only = false;
 
     // sun-audit P1（暗地面 GI 逐段查）: GI_LADDER_DUMP 能量台账输入——
     // 直射可见性（ShadowFilter 半分辨率 R8，读回的是上一完成帧内容，锁定
@@ -70,8 +81,15 @@ public:
     void Shutdown();
 
     // Debug/testing: resolved fusion intermediate outputs.
-    rhi::ResourceHandle GetIndirectOutput(u32 cb) const { return indirect_output_[cb % 3]; }
-    rhi::ResourceHandle GetFusionOutput(u32 cb) const { return fusion_output_[cb % 3]; }
+    // Phase 1d: 参数 = 绝对帧号（原 cbIdx 槽号废除）。indirect 返回上一完成
+    // 槽（previousIndex——DDGI finalize 的 prev-screen 供给语义）；fusion 返回
+    // 本帧完成槽（currentIndex）。
+    rhi::ResourceHandle GetIndirectOutput(u32 frame) const {
+        return indirect_output_[lumen::DDGISlotsForFrame(frame).previousIndex];
+    }
+    rhi::ResourceHandle GetFusionOutput(u32 frame) const {
+        return fusion_output_[lumen::DDGISlotsForFrame(frame).currentIndex];
+    }
 
 
     FusionOutputs AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs);
@@ -91,6 +109,8 @@ private:
     rhi::ResourceHandle indirect_output_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+    // UNITS: DiffuseOutgoingRadiance（Lo = albedo·E/π，FusionIndirect.frag
+    // 输出；审计 §5 铁律 2：作为 ray radiance 合法、作为 irradiance 非法）。
 
     // Pass 2: FusionComposite (full-res, 2 textures)
     rhi::PipelineHandle composite_pipeline_{rhi::handles::INVALID_PIPELINE};
@@ -102,6 +122,8 @@ private:
     rhi::ResourceHandle fusion_output_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+    // UNITS: ScreenIndirectLighting 合成输出前的融合中间面（Lo 量纲，合成在
+    // primary 直射之上进 TAA）。
 
     // Shared vertex shader (full-screen triangle)
     rhi::ShaderHandle vertex_shader_{rhi::handles::INVALID_SHADER};

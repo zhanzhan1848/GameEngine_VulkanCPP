@@ -35,8 +35,14 @@ layout(set = 0, binding = 5) uniform sampler defaultSampler;
 // GI 能量根治方案 Phase 1.1: GI 融合增益 debug 旋钮（UBO）。
 // CPU 端默认写入 1.0（物理恒等）——gain 仅为调试旋钮，显示增益永不进入
 // 反馈回路；PRIMAL_GI_INDIRECT_GAIN 可调（0..8，设 3.0 回滚旧行为）。
+// WRC 计划 Stream C1（Fusion 档位化）：第二个 float = 像素级 GI 来源
+// mode switch——0=旧逐像素置信度混合（PRIMAL_FUSION_PERPIXEL=1 A/B 回滚），
+// 1=High/Ultra 档只读 SPGI，2=Medium 档只读 DDGI。CPU 端由
+// axes.use_screen_probes 档位结构驱动（use_screen_probes 决定 SPGI 是否
+// 运行，mode switch 只决定像素读哪路；两条线正交）。
 layout(set = 0, binding = 6) uniform GiGainUBO {
     float giIndirectGain;
+    float fusionMode;
 };
 
 void fusion_indirect() {
@@ -86,15 +92,30 @@ void fusion_indirect() {
 
     albedo = clamp(albedo, vec3(0.0), vec3(1.0));
 
-    vec3 gi = mix(ddgi, spgi4.rgb, spgi_w)
-            + ssgi_irr * ssgi_conf * mix(0.25, 0.15, spgi_w);
+    // WRC 计划 Stream C1: mode switch（档位化）。High/Ultra 像素只读 SPGI
+    //（DDGI 继续作为 SPGI 远场 fallback 的供给——axis-4 边——但不再逐像素
+    // 进 Fusion）；Medium 像素只读 DDGI（UE IFG/Lumen Lite 语义）。SSGI 全档
+    // 保留，混合权重取该档的 spgi_w 档位值（High=0.15 / Medium=0.25）。
+    vec3 gi;
+    float ssgiBlend;
+    if (fusionMode < 0.5) {
+        gi = mix(ddgi, spgi4.rgb, spgi_w);
+        ssgiBlend = mix(0.25, 0.15, spgi_w);
+    } else if (fusionMode < 1.5) {
+        gi = spgi4.rgb;
+        ssgiBlend = 0.15;
+    } else {
+        gi = ddgi;
+        ssgiBlend = 0.25;
+    }
+    gi += ssgi_irr * ssgi_conf * ssgiBlend;
 
 
     // No constant ambient floor: indirect energy comes from the traced caches.
 
     // B3: indirect follows the direct chain's Lambert law (albedo/π·E).
     // B9: the full-stack `indirect *= ao` is removed — GTAO double-occluded
-    // the near-field GI (probe visibility already attenuates it) while the
+    // the near-field GI (probe visibility already attenuated it) while the
     // far-field floor above keeps its AO modulation (its only visibility cue).
     vec3 indirect = albedo * gi * giIndirectGain * 0.31830988;
     outColor = vec4(indirect, 1.0);

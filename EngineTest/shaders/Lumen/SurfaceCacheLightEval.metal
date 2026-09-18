@@ -58,10 +58,28 @@ float scVisibilityWeight(float distToProbe, float mean, float variance) {
 // surface point for the given normal; 0 outside the volume / feed invalid.
 // Raw radiance SH is cosine-convolved per band, then multiplied by pi.
 // The returned value is irradiance, matching the screen-side DDGI gather.
+// Phase 1b（GI 能量所有权修复）: cos-lobe 评基单源 = Vulkan
+// ShaderLib/EvalLib.glsl evalProbeIrradianceSH9（E/π 语义）。MSL 无共享
+// include——下方 lumenEvalProbeIrradianceSH9 为行为一致的复制实现（注释互指）。
+static inline float3 lumenEvalProbeIrradianceSH9(thread const float3 sh[9], float3 n) {
+    const float x = n.x, y = n.y, z = n.z;
+    const float xy = x*y, yz = y*z, zx = z*x;
+    const float xx = x*x, yy = y*y, zz = z*z;
+    return sh[0] * 0.28209479f
+         + sh[1] * (-0.48860251f * 0.6666667f * y)   // B4: A1 = 2π/3 (÷π)
+         + sh[2] * ( 0.48860251f * 0.6666667f * z)
+         + sh[3] * (-0.48860251f * 0.6666667f * x)
+         + sh[4] * ( 1.09254843f * 0.25f * xy)       // B4: A2 = π/4 (÷π)
+         + sh[5] * (-1.09254843f * 0.25f * yz)
+         + sh[6] * ( 0.31539157f * 0.25f * (3.0f*zz - 1.0f))
+         + sh[7] * (-1.09254843f * 0.25f * zx)
+         + sh[8] * ( 0.54627421f * 0.25f * (xx - yy));
+}
 float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
                              constant FlattenedLightingParams& params,
                              device const float4* ddgi_irradiance,
-                             device const float* ddgi_depth_buffer) {
+                             device const float* ddgi_depth_buffer,
+                             device const float* ddgi_opensky_buffer) {
     inVolume = false;
     if (params.ddgi_counts_valid.w == 0u) return float3(0.0f);
     float3 org = params.ddgi_origin_spacing.xyz;
@@ -79,6 +97,24 @@ float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
     // C 系列：双累加器 —— accVis 走 Chebyshev+法线+掩埋加权（45%），
     // accLow 只做掩埋降权（55% 低频保底，细薄几何处 Chebyshev 拒探针
     // 不至于塌黑）。配方与屏幕侧 DDGIGIGather 一致。
+    // GI 根治 Phase 3.2 孪生：像素 openSky 预计算（8 探针三线性 tw 加权）。
+    float pixOpen = 0.0f;
+    float pixOpenW = 0.0f;
+    if (params.radiosity_gate.w != 0u) {
+        for (int z = 0; z < 2; ++z)
+        for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x) {
+            float tw = mix(1.0f - fr.x, fr.x, float(x))
+                     * mix(1.0f - fr.y, fr.y, float(y))
+                     * mix(1.0f - fr.z, fr.z, float(z));
+            if (tw <= 0.0f) continue;
+            int3 pc = int3(mix(float3(b0), float3(b1), float3(float(x), float(y), float(z))));
+            uint pidx = uint(pc.x) + uint(counts.x) * (uint(pc.y) + uint(counts.y) * uint(pc.z));
+            pixOpen += ddgi_opensky_buffer[pidx] * tw;
+            pixOpenW += tw;
+        }
+        if (pixOpenW > 0.0f) pixOpen /= pixOpenW;
+    }
     float3 accVis = float3(0.0f);
     float3 accLow = float3(0.0f);
     float visW = 0.0f;
@@ -97,15 +133,8 @@ float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
         for (int i = 0; i < 9; ++i)
             sh[i] = ddgi_irradiance[pidx * 9u + uint(i)].xyz;
         // Cosine convolution relative to A0=pi; final gather applies pi.
-        float3 irr = sh[0] * 0.282095f
-                   + sh[1] * (2.0f / 3.0f) * (-0.488603f * N.y)
-                   + sh[2] * (2.0f / 3.0f) * ( 0.488603f * N.z)
-                   + sh[3] * (2.0f / 3.0f) * (-0.488603f * N.x)
-                   + sh[4] * 0.25f * ( 1.092548f * N.y * N.x)
-                   + sh[5] * 0.25f * (-1.092548f * N.y * N.z)
-                   + sh[6] * 0.25f * ( 0.315392f * (3.0f * N.z * N.z - 1.0f))
-                   + sh[7] * 0.25f * (-1.092548f * N.x * N.z)
-                   + sh[8] * 0.25f * ( 0.546274f * (N.x * N.x - N.y * N.y));
+        // Phase 1b: 展开 → lumenEvalProbeIrradianceSH9（EvalLib 单源复制）。
+        float3 irr = lumenEvalProbeIrradianceSH9(sh, N);
         irr = max(irr, float3(0.0f));
 
         float3 probePos = org + float3(pc) * spacing;
@@ -127,10 +156,19 @@ float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
         float nwSoft = max(normalWeight, 0.40f);
         float vw = max(scVisibilityWeight(distToProbe, depthMV.x, depthMV.y), 0.38f);
 
-        accVis += irr * tw * nwSoft * vw * insidePenalty;
-        visW   += tw * nwSoft * vw * insidePenalty;
-        accLow += irr * tw * burial;
-        lowW   += tw * burial;
+        // Phase 3.2 孪生: 天空分类衰减——探针露天度 × 像素封闭度。
+        float classify = 1.0f;
+        if (params.radiosity_gate.w != 0u) {
+            float pOpen = ddgi_opensky_buffer[pidx];
+            float skyness = smoothstep(0.35f, 0.65f, pOpen);
+            float enclosed = 1.0f - smoothstep(0.05f, 0.25f, pixOpen);
+            classify = 1.0f - skyness * enclosed * 0.85f;
+        }
+
+        accVis += irr * tw * nwSoft * vw * insidePenalty * classify;
+        visW   += tw * nwSoft * vw * insidePenalty * classify;
+        accLow += irr * tw * burial * classify;
+        lowW   += tw * burial * classify;
     }
     float3 result = float3(0.0f);
     if (visW > 0.0f) result += (accVis / visW) * 0.45f;
@@ -181,7 +219,9 @@ kernel void surfaceCacheLightEval(
     texture2d<float, access::read>    indirect_out      [[texture(6)]],   // T3.3 tile radiosity
     // C 系列：探针八面体深度（mean+variance per texel，128 floats/probe）——
     // gather 的 Chebyshev 可见性，封锁"受光带探针能量隔墙传给阴影卡片"。
-    device const float*               ddgi_depth_buffer [[buffer(7)]])
+    device const float*               ddgi_depth_buffer [[buffer(7)]],
+    // GI 根治 Phase 3.2 孪生: openSky 统计（Metal buffer(8)）
+    device const float*               ddgi_opensky_buffer [[buffer(8)]])
 {
     if (global_tid >= params.total_texels) return;
 
@@ -283,17 +323,20 @@ kernel void surfaceCacheLightEval(
     float3 prev_light = prev_lighting_atlas.read(atlas_uv).rgb;
     if (any(isnan(prev_light)) || any(isinf(prev_light))) prev_light = float3(0.0f);
     prev_light = clamp(prev_light, float3(0.0f), float3(256.0f));
-    // T8.13 P1 sync: 0.85 → 0.70. Gain audit found the two coupled loops
-    // (probe-internal 0.85 feedback ∘ SC 0.85×albedo) sitting at marginal
-    // stability for bright albedo — small transients flipped the SC↔probe
-    // equilibrium between a normal and a runaway-bright branch. 0.70 restores
-    // margin; equilibrium brightness cost measured at a few percent.
-    constexpr float SC_FEEDBACK = 0.70f;
+    // Phase 2.2 孪生同步（SurfaceCacheLightEval.comp）: SC_FEEDBACK 0.70 手工
+    // 系数删除（连同 ×0.5 半档）——反馈改物理形式 prev_light·ρ·(1/π)，
+    // 回路稳态增益 = ρ < 1；T8.13"0.85 上限"改为 DC 增益断言（<0.5）。
 
     bool probeInVolume = false;
     float3 E_indirect = gatherProbeIrradiance(world_pos, normal, probeInVolume,
-                                              params, ddgi_irradiance, ddgi_depth_buffer);
+                                              params, ddgi_irradiance, ddgi_depth_buffer,
+                                              ddgi_opensky_buffer);
     bool probeFed = params.ddgi_counts_valid.w != 0u;
+    // WRC 计划 Stream B1（能量单向化）Vulkan 孪生同步：探针馈送改暖启动
+    // 引导项——PRIMAL_GI_PROBE_FEED_BOOTSTRAP=1 时因子在 GIWarmup 窗口内
+    // 1→0 线性、窗口后恒 0（CPU 端 GIProbeBootstrapFactor 随 params 下发）；
+    // 旧语义 factor=1，乘法恒等。
+    E_indirect *= params.probe_feed_bootstrap;
 
     // In-volume texels take their bounce from the probes. Outside the probe
     // grid (or with the feed off) the gather is zero, so keep the legacy
@@ -321,8 +364,11 @@ kernel void surfaceCacheLightEval(
     // C3.5 slice 5+6: texel-side ambient floor with sky-openness modulation
     // (occlusion-aware; enclosed crevices keep a 0.25 floor) — Vulkan twin:
     // scSkyOpenness in SurfaceCacheLightEval.comp.
+    // WRC 计划 Stream B3（删稳定器）Vulkan B14 对齐：radiosity_solo=1
+    // （bootstrap 模式）时地板项关闭——常量注入会让衰减引导项永远到不了
+    // 0， defeated 能量单向化。旧语义（solo=0）保留 Metal 现状。
     float skyOpen = 1.0f;
-    if (params.ddgi_counts_valid.w != 0u && probeInVolume) {
+    if (params.radiosity_solo == 0u && params.ddgi_counts_valid.w != 0u && probeInVolume) {
         float3 org = params.ddgi_origin_spacing.xyz;
         float spacing = max(params.ddgi_origin_spacing.w, 0.01f);
         int3 counts = int3(params.ddgi_counts_valid.xyz);
@@ -339,11 +385,18 @@ kernel void surfaceCacheLightEval(
         }
         skyOpen = open / 6.0f;
     }
-    E_indirect = max(E_indirect, float3(0.52f, 0.46f, 0.37f) * mix(0.25f, 1.0f, skyOpen));
+    if (params.radiosity_solo == 0u) {
+        E_indirect = max(E_indirect, float3(0.52f, 0.46f, 0.37f) * mix(0.25f, 1.0f, skyOpen));
+    }
+    // WRC 计划 Stream B2: radiosity_solo=1 时 tile radiosity 是全部 texel
+    //（含 volume 外）的唯一常备间接来源——legacy prev_light 自反馈双轨停用
+    //（Vulkan 孪生同步）。
     float3 result = (direct_light + E_indirect) * albedo.rgb * SC_INV_PI
-                  + (probeFed && probeInVolume
+                  + (params.radiosity_solo != 0u
                         ? tileRadiance * scRadiosityWeight(params.radiosity_gate.y)
-                        : tileRadiance + prev_light * albedo.rgb * (SC_FEEDBACK * SC_INV_PI * 0.5f))
+                        : (probeFed && probeInVolume
+                              ? tileRadiance * scRadiosityWeight(params.radiosity_gate.y)
+                              : tileRadiance + prev_light * albedo.rgb * SC_INV_PI))
                   + emissive;
     result = min(result, float3(64.0f));
 
