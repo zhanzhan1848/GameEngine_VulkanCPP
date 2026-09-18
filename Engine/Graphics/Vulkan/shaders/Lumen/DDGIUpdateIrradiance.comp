@@ -104,6 +104,12 @@ layout(set = 0, binding = 5) readonly buffer ProbeUpdateList {
 layout(set = 0, binding = 6) buffer ConfidenceBuffer {
     float probe_confidence[];
 };
+// GI 能量根治方案 Phase 3.1: 每探针 openSky 统计（逃逸射线占比，EMA 平滑）。
+// gather 端（DDGIGIGather / SurfaceCacheLightEval）据此把 sky-dominant 探针
+// 对封闭像素的贡献按分类一致度衰减——露天能量不再隔墙三线性渗透（R7）。
+layout(set = 0, binding = 7) buffer ProbeOpenSky {
+    float probe_opensky[];
+};
 
 // ----------------------------------------------------------------------------
 // Shared probe ray sampler — single source with the trace shaders. The SH
@@ -148,6 +154,10 @@ void ddgi_update_irradiance() {
         shAccum[i] = vec3(0.0);
     }
 
+    // Phase 3.1: 本帧逃逸射线计数（真·露天射线，w ≤ -1.5；步数耗尽的密闭
+    // 爬行不计入——它不是可见天空）。
+    uint escapeCount = 0u;
+
     for (uint r = 0u; r < volume.RaysPerProbe; r++) {
         uint rayIdx = rayOffset + r;
         vec3 radiance = ray_buffer[rayIdx].radiance_and_dist.xyz;
@@ -156,6 +166,7 @@ void ddgi_update_irradiance() {
         if (hitDist <= -1.5) {
             // 逃逸→沿用 Finalize 写入的 EvaluateSkyBase × SkyColor.xyz
             //（Phase 1.2：不再覆盖成硬编码常量）。
+            ++escapeCount;
         } else if (hitDist < 0.0) {
             // 步数耗尽：保留 Finalize 解析结果（SC 回退或黑），不再覆盖成天空
         } else {
@@ -254,4 +265,13 @@ void ddgi_update_irradiance() {
     // snapping to 1, giving probe_vis (and any future consumer) a real
     // "how settled is this probe" signal.
     probe_confidence[confidenceBase + 3u] = min(conv + 0.0333, 1.0);
+
+    // Phase 3.1: openSky 统计写入——逃逸占比 EMA 平滑（射线随机抽样逐帧
+    // 噪声大；α=0.35 ≈ τ3 帧收敛，与年轻探针 SH 的激进混合一致）。首次
+    // 写入直接发布（EMA 从 0 起步会系统性低估露天探针）。
+    float curOpen = float(escapeCount) / float(volume.RaysPerProbe);
+    float prevOpen = probe_opensky[probeIdx];
+    probe_opensky[probeIdx] = (prevOpen <= 0.0 && curOpen > 0.0 && conv < 0.5)
+                                  ? curOpen
+                                  : mix(prevOpen, curOpen, 0.35);
 }

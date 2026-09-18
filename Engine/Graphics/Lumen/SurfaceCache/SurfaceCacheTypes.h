@@ -173,6 +173,9 @@ struct SurfaceCacheFrameData {
     // gather 用它做 Chebyshev 可见性——封闭区域卡片隔墙采到受光带探针是
     // 室内平填充的根因（Docs/2026-09-09 计划 §C2/C3）。
     rhi::ResourceHandle ddgi_depth{ rhi::handles::INVALID_RESOURCE };
+    // GI 能量根治方案 Phase 3.2: 每探针 openSky 统计（卡片 texel gather 的
+    // 天空分类）；INVALID = 分类关闭。
+    rhi::ResourceHandle ddgi_opensky{ rhi::handles::INVALID_RESOURCE };
     math::v3   ddgi_origin{};
     float      ddgi_spacing = 0.0f;
     uint32_t   ddgi_counts[3] = {0, 0, 0};

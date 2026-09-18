@@ -515,6 +515,11 @@ void ddgi_trace_finalize() {
             }
         }
     } else if (hitDistance <= -1.5) {
+        // GI 根治 Phase 3.1 修复：逃逸射线的 w 编码对齐 Metal（-2）——旧实现
+        // 只写 .xyz，w 保持默认 -1，update 端无法区分"逃逸（露天）"与
+        // "步数耗尽（密闭）"，openSky 统计恒 0。天空能量值不变（xyz 仍由
+        // EvaluateSkyBase × SkyColor 提供），只是分类位恢复正确。
+        result.w = hitDistance;
         // 逃逸（越出 RayMaxDistance）——真正面向天空的射线，吃天空色。
         // P1.2: 共享 EvaluateSkyBase（与可见天空同源同色）。P0 校准：改乘
         // SkyColor.xyz——旧实现只乘 x 通道当强度门，逃逸射线拿到的是灰天空，

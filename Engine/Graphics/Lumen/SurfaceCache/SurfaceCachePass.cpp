@@ -652,12 +652,14 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {11, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // depth_atlas (surface-point probe gather)
             {12, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // indirect_out (T3.3 tile radiosity)
             {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi depth (Chebyshev gather visibility, C 系列)
+            {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // GI 根治 Phase 3.2: ddgi openSky (天空分类)
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[9].readonly = true;
         b[10].readonly = true;
         b[13].readonly = true;
-        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
+        b[14].readonly = true;
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({15, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
@@ -676,6 +678,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi irradiance [[buffer(6)]] (probe-fed indirect)
             {6, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // indirect_out [[texture(6)]] (T3.3 tile radiosity)
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi depth [[buffer(7)]] (Chebyshev gather visibility, C 系列)
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // GI 根治 Phase 3.2: ddgi openSky [[buffer(8)]] (天空分类)
         };
         DescriptorSetLayoutBinding* bm = bindings;
         bm[5].readonly = true;
@@ -1777,6 +1780,15 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         u32 bits; std::memcpy(&bits, &v, 4);
                         return bits;
                     }();
+                    // GI 根治 Phase 3.2: radiosity_gate.w = openSky 分类开关
+                    // （数据源 ddgi_opensky 无效时关闭；PRIMAL_GI_OPENSKY=0 回滚）。
+                    {
+                        bool openskyOn = frame_data.ddgi_opensky != handles::INVALID_RESOURCE;
+                        if (const char* e = std::getenv("PRIMAL_GI_OPENSKY")) {
+                            if (e[0] == '0') openskyOn = false;
+                        }
+                        params.radiosity_gate[3] = openskyOn ? 1u : 0u;
+                    }
                     *mapped = params;
                     device_->UnmapBuffer(params_cb_[frameIdx]);
                 }
@@ -2246,7 +2258,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // back is safe to read (GPU finished with it) and serves as
                 // the multi-bounce feedback source.
                 u32 histIdx = (current_frame_index + 1) % 3;
-                DescriptorData evalParams[14];
+                DescriptorData evalParams[15];
                 if (isVk) {
                     DescriptorData p[] = {
                         {0, DescriptorType::StorageImage,  albedo_atlas_},
@@ -2274,6 +2286,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {13, DescriptorType::StorageBuffer,
                          frame_data.ddgi_depth != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_depth
+                             : card_dispatch_buffer_},
+                        // GI 根治 Phase 3.2: openSky 统计（无效时绑 stand-in，
+                        // radiosity_gate.z 关 → shader 不读）。
+                        {14, DescriptorType::StorageBuffer,
+                         frame_data.ddgi_opensky != handles::INVALID_RESOURCE
+                             ? frame_data.ddgi_opensky
                              : card_dispatch_buffer_},
                     };
                     memcpy(evalParams, p, sizeof(p));
@@ -2306,6 +2324,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                          frame_data.ddgi_depth != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_depth
                              : card_dispatch_buffer_},
+                        // GI 根治 Phase 3.2: openSky 统计（Metal buffer(8)）
+                        {8, DescriptorType::StorageBuffer,
+                         frame_data.ddgi_opensky != handles::INVALID_RESOURCE
+                             ? frame_data.ddgi_opensky
+                             : card_dispatch_buffer_},
                     };
                     memcpy(evalParams, p, sizeof(p));
                 }
@@ -2335,7 +2358,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     }
                 }
 
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 14);
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 15);
 
                 // Explicit GENERAL transition for the lighting atlases — do not
                 // rely on the render graph's Write declaration having put them

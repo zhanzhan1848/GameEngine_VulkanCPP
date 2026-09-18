@@ -80,7 +80,8 @@ struct FlattenedLightingParams {
     vec4 ddgi_origin_spacing;   // xyz origin, w spacing
     uvec4 ddgi_counts_valid;    // xyz counts, w valid flag
     // T3.3: SC Radiosity gate (x = on) — see Metal twin.
-    uvec4 radiosity_gate;       // x = indirect_radiosity_on, yzw reserved
+    uvec4 radiosity_gate;       // x = indirect_radiosity_on, y = radiosity weight 档,
+                                // z = tile size, w = openSky 分类开关（GI 根治 Phase 3.2）
 };
 
 // Reconstruct world position from card atlas UV + depth.

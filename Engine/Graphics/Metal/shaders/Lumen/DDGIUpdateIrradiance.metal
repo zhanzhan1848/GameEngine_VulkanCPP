@@ -33,7 +33,10 @@ kernel void ddgi_update_irradiance(
     device const float4* irradianceHistory [[buffer(3)]],
     device float4* irradianceOutput [[buffer(4)]],
     device const uint* probeUpdateList [[buffer(5)]],
-    device float* confidenceBuffer [[buffer(6)]]
+    device float* confidenceBuffer [[buffer(6)]],
+    // GI 能量根治方案 Phase 3.1: 每探针 openSky 统计（逃逸占比 EMA），
+    // gather 端天空分类加权用（Vulkan flat binding 7 对等）。
+    device float* openSkyBuffer [[buffer(7)]]
 )
 {
     uint tid = tid2d.y * 8u + tid2d.x;
@@ -52,10 +55,12 @@ kernel void ddgi_update_irradiance(
     // =====================================================================
     threadgroup PartialSH tg_partial[64];
     threadgroup uint tg_hitFlags[64];
+    threadgroup uint tg_escapeFlags[64];   // Phase 3.1: 每 lane 逃逸射线计数
 
     for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i)
         tg_partial[tid].sh[i] = float3(0.0f);
     tg_hitFlags[tid] = 0u;
+    tg_escapeFlags[tid] = 0u;
 
     for (uint r = tid; r < vol.RaysPerProbe; r += 64u) {
         DDGIRayData ray = rayData[rayOffset + r];
@@ -67,6 +72,7 @@ kernel void ddgi_update_irradiance(
             // 同步（DDGIUpdateIrradiance.comp）：不再按 w 覆盖成 DDGI_SKY_COLOR
             // 常量——逃逸能量由 finalize 写入 ray_buffer（Vulkan 为
             // EvaluateSkyBase×SkyColor.xyz 单一事实源），这里直接沿用。
+            tg_escapeFlags[tid] += 1u;   // Phase 3.1: 逃逸计数
 #ifdef PRIMAL_DDGI_PROJ_NOSKY
             // C 系列归因旋钮：逃逸/覆盖天空能量断电——A/B 实测 escape 天空
             // 在探针场平衡态的真实份额。
@@ -138,6 +144,7 @@ kernel void ddgi_update_irradiance(
     for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) shAccum[i] = float3(0.0f);
 
     uint hitCount = 0u;
+    uint escapeCount = 0u;   // Phase 3.1
     // tg_partial/tg_hitFlags contain one aggregate per physical lane, not one
     // entry per ray.  Iterating RaysPerProbe here read past the 64-entry
     // threadgroup arrays at the 128-ray setting, producing unstable SH energy
@@ -147,6 +154,7 @@ kernel void ddgi_update_irradiance(
             shAccum[i] += tg_partial[t].sh[i];
         }
         hitCount += tg_hitFlags[t];
+        escapeCount += tg_escapeFlags[t];
     }
 
     // NOTE (2026-09-10): the former +x/+y/+z neighbor-history blend
@@ -228,4 +236,12 @@ kernel void ddgi_update_irradiance(
     // T8.13 sync: convergence ramp climbs 1/30 per update (Vulkan parity) —
     // also the SC bootstrap and the confidence debug view's signal.
     confidenceBuffer[probeIdx * 4 + 3] = min(age + 1.0f / 30.0f, 1.0f);
+
+    // Phase 3.1 孪生同步（DDGIUpdateIrradiance.comp）: openSky 统计写入——
+    // 逃逸占比 EMA（α=0.35）；未收敛探针首次非零直接发布，避免系统性低估。
+    float curOpen = float(escapeCount) / float(vol.RaysPerProbe);
+    float prevOpen = openSkyBuffer[probeIdx];
+    openSkyBuffer[probeIdx] = (prevOpen <= 0.0f && curOpen > 0.0f && age < 0.5f)
+                                  ? curOpen
+                                  : mix(prevOpen, curOpen, 0.35f);
 }

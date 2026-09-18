@@ -255,8 +255,13 @@ public:
                                 static_cast<float>(params_.probe_count_z) };
         view.spacing = params_.probe_spacing;
         view.relocated_origins = relocated_origins_;
+        // GI 能量根治方案 Phase 3.1: 每探针 openSky 统计（逃逸占比，EMA）。
+        view.opensky = opensky_buffer_;
         return view;
     }
+
+    // GI 能量根治方案 Phase 3.2: SC 卡片 texel gather 的天空分类数据源。
+    rhi::ResourceHandle GetOpenSkyBuffer() const { return opensky_buffer_; }
 
     // X2/A3: 时域策略映射 —— EMA 即现有 irradiance/depth EMA（默认，行为
     // 不变）；EMAVarianceClamp/Reprojection 暂等同 EMA（TODO X3 落地完整实现）。
@@ -300,6 +305,10 @@ public:
     // without it both instances import different physical buffers under the
     // same "LumenDDGI_Irradiance_N" name and the graph aliases them.
     void SetRGNamePrefix(const std::string& prefix) { rg_name_prefix_ = prefix; }
+
+    // GI 能量根治方案 Phase 3.3: 远场 volume 天空档位（vi>0 时设 0.5——
+    // 远场只表达低频环境，逃逸比例天然高，全额天空会成为封闭区隐性泵浦）。
+    void SetFarSkyScale(float s) { far_sky_scale_ = s; }
 
     // Live-tunable debug params (WASM sidebar). Indices 4..6 of DawnDebugParams
     // map to SkyColor intensity, Albedo intensity, ProbeHysteresis. Values are
@@ -590,6 +599,16 @@ private:
     rhi::ResourceHandle confidence_buffer_{
         rhi::handles::INVALID_RESOURCE
     };
+
+    // GI 能量根治方案 Phase 3.1: 每探针 openSky 统计（float/probe，逃逸射线
+    // 占比，EMA 平滑）。单缓冲持久（探针逐批更新，未更新帧保留旧值），
+    // 写入 DDGIUpdateIrradiance，读取 GIGather / SurfaceCacheLightEval 的
+    // 天空可见性分类。
+    rhi::ResourceHandle opensky_buffer_{
+        rhi::handles::INVALID_RESOURCE
+    };
+    // 远场天空档位（Phase 3.3），默认 1.0 = 近场行为。
+    float far_sky_scale_{ 1.0f };
 
     // Surface Cache resources (set externally before AddPass)
     rhi::ResourceHandle sc_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };

@@ -115,6 +115,8 @@ layout(set = 0, binding = 18, std140) uniform FlatVolumeCB {
     vec4 fvOriginSpacing[4];   // xyz = origin, w = spacing（0 = 未用槽）
     vec4 fvCountsOffset[4];    // xyz = counts, w = flat SSBO probe 偏移
     vec4 fvMeta;               // x = 有效 volume 数（0 = 防御 dim ambient）
+                               // y = openSky 分类开关（GI 根治 Phase 3.2；
+                               //     PRIMAL_GI_OPENSKY=0 时 CPU 置 0 关闭）
 };
 // 2026-09-17 P0（probe-selection-density-audit §5.1 末段）：近场 volume 的
 // 重定位后有效起点（DDGITraceSDF 本帧/近期 trace 时发布，w = 1.0 有效）。
@@ -123,6 +125,11 @@ layout(set = 0, binding = 18, std140) uniform FlatVolumeCB {
 // 尚未被 trace 过）回退逻辑格点——与旧行为一致。
 layout(set = 0, binding = 19) readonly buffer NearRelocatedOriginsBuf {
     vec4 nearRelocatedOrigins[];  // 近场 volume 内 probeIdx 索引
+};
+// GI 能量根治方案 Phase 3.2: flat openSky 统计（float/probe，volume 顺序与
+// flatIrradiance 一致）。DDGIUpdateIrradiance 写入（逃逸占比 EMA）。
+layout(set = 0, binding = 20) readonly buffer FlatOpenSkyBuf {
+    float flatProbeOpenSky[];
 };
 
 // --------------------------------------------------------------------------------
@@ -632,6 +639,24 @@ void ddgi_gi_gather() {
                 float bestBaseWeight = -1.0;
                 vec3 biasedPos = worldPos + normal * selSpacing * 0.05;
 
+                // GI 能量根治方案 Phase 3.2: 天空可见性分类（R7 根修）。
+                // 像素 openSky = 邻域三线性（同 tw 权重）的探针逃逸占比；
+                // sky-dominant 探针对封闭像素的贡献按一致度衰减——露天能量
+                // 不再隔墙渗透。PRIMAL_GI_OPENSKY=0 时 CPU 置 fvMeta.y=0
+                // （回滚开关），shader 完全跳过分类读。
+                const bool classifyEnable = fvMeta.y > 0.5;
+                float pixOpen = 0.0;
+                float pixOpenW = 0.0;
+                if (classifyEnable) {
+                    for (int q = 0; q < 8; ++q) {
+                        if (tw[q] < 0.01) continue;
+                        uint qIdx = pc[q].x + pc[q].y * ncounts.x + pc[q].z * ncounts.x * ncounts.y;
+                        pixOpen += flatProbeOpenSky[volOff + qIdx] * tw[q];
+                        pixOpenW += tw[q];
+                    }
+                    if (pixOpenW > 0.0) pixOpen /= pixOpenW;
+                }
+
                 for (int p = 0; p < 8; ++p) {
                     if (tw[p] < 0.01) continue;
                     uint pIdx = pc[p].x + pc[p].y * ncounts.x + pc[p].z * ncounts.x * ncounts.y;
@@ -653,6 +678,17 @@ void ddgi_gi_gather() {
                              + sh[8] * (SH_C2_2 * 0.25 * (nxx - nyy));
 
                     float w = tw[p];
+                    // Phase 3.2: 探针露天度 × 像素封闭度 → 一致度衰减
+                    //（最多压到 0.15，保留环境地板；露天像素 enclosed≈0
+                    // 完全不受影响）。复用现有权重管线，无新增 trace。
+                    float classify = 1.0;
+                    if (classifyEnable) {
+                        float pOpen = flatProbeOpenSky[volOff + pIdx];
+                        float skyness = smoothstep(0.15, 0.45, pOpen);
+                        float enclosed = 1.0 - smoothstep(0.05, 0.25, pixOpen);
+                        classify = 1.0 - skyness * enclosed * 0.85;
+                    }
+                    w *= classify;
                     // Buried-probe gate for the low-frequency average (near
                     // volume only). A probe inside the wall records near-zero
                     // octahedral mean depth toward every direction; at raw
@@ -724,8 +760,8 @@ void ddgi_gi_gather() {
                     // Buried probes are excluded from this component — their
                     // SH is wall interior, not a legitimate low-frequency
                     // source.
-                    lowFrequencyGI += irr * tw[p] * burial;
-                    lowFrequencyW += tw[p] * burial;
+                    lowFrequencyGI += irr * tw[p] * burial * classify;
+                    lowFrequencyW += tw[p] * burial * classify;
 
                     if (tw[p] > bestBaseWeight) {
                         bestBaseWeight = tw[p];

@@ -76,7 +76,8 @@ struct FlattenedLightingParams {
     uint4  ddgi_counts_valid;      // xyz counts, w valid flag
     // T3.3: SC Radiosity gate (x = on) — indirect_out contains valid data
     // only when SC_INDIRECT=1 dispatched the trace/resolve this session.
-    uint4  radiosity_gate;         // x = indirect_radiosity_on, yzw reserved
+    uint4  radiosity_gate;         // x = indirect_radiosity_on, y = radiosity weight 档,
+                                   // z = tile size, w = openSky 分类开关（GI 根治 Phase 3.2）
 };
 
 // Reconstruct world position from card atlas UV + depth

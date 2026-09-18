@@ -796,6 +796,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             }
             vol->SetDynamicMode(true);   // Mode 11: runtime SDF trace
             if (vi > 0) vol->SetRGNamePrefix(kPrefixes[vi]);
+            if (vi > 0) vol->SetFarSkyScale(0.5f);   // GI 根治 Phase 3.3: 远场天空 ×0.5 档
             ddgi_volumes_[ddgi_volume_count_++] = std::move(vol);
             PRIMAL_LOG_STREAM(Info, "Render") << "[Lumen] DDGI volume " << vi << " initialized ("
                       << vp.probe_count_x << "x" << vp.probe_count_y
@@ -2001,6 +2002,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             // C 系列：同槽位探针深度——LightEval gather 的 Chebyshev 可见性。
             frameData.ddgi_depth = ddgi_pass_->GetDepthBuffer(
                 (static_cast<u32>(frameCount_) + 2) % 3);
+            // GI 根治 Phase 3.2: 同源 openSky 统计（天空分类）。
+            frameData.ddgi_opensky = ddgi_pass_->GetOpenSkyBuffer();
             frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
             frameData.ddgi_spacing = vol.ProbeSpacing;
             frameData.ddgi_counts[0] = vol.ProbeCounts[0];
@@ -2882,6 +2885,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 // C 系列：同槽位探针深度（twin 站点同步）。
                 frameData.ddgi_depth = ddgi_pass_->GetDepthBuffer(
                     (static_cast<u32>(frameCount_) + 2) % 3);
+                // GI 根治 Phase 3.2: 同源 openSky 统计（twin 站点同步）。
+                frameData.ddgi_opensky = ddgi_pass_->GetOpenSkyBuffer();
                 frameData.ddgi_origin = {vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z};
                 frameData.ddgi_spacing = vol.ProbeSpacing;
                 frameData.ddgi_counts[0] = vol.ProbeCounts[0];

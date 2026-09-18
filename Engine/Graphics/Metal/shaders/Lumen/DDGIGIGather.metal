@@ -166,7 +166,9 @@ kernel void ddgi_gi_gather(
     // 重定位后有效起点（ddgi_trace_sdf 发布，w=1.0 有效）。八面体深度图记录
     // 自该物理起点，可见性 distToProbe 必须同起点测量；w=0 回退逻辑格点。
     // 与 Vulkan DDGIGIGather.comp binding 19 对等。
-    device const float4* relocatedOrigins  [[buffer(12)]]
+    device const float4* relocatedOrigins  [[buffer(12)]],
+    // GI 根治 Phase 3.2: flat openSky 统计（Vulkan binding 20 对等）。
+    device const float* flatOpenSky        [[buffer(13)]]
 ) {
     float4 probeCountsCB = probeCountsData[0];
     uint width = outputTex.get_width();
@@ -293,6 +295,22 @@ kernel void ddgi_gi_gather(
         // 探针选择偏置：沿法线推 5% 间距，避免表面像素选中墙内探针。
         float3 biasedPos = worldPos + normal * probeOriginSpacing.w * 0.05f;
 
+        // GI 根治 Phase 3.2: 天空可见性分类（Vulkan DDGIGIGather.comp 孪生）。
+        // fvCB[8].y = 分类开关；像素 openSky = 邻域三线性探针逃逸占比。
+        constant float4& fvMeta = fvCB[8];
+        const bool classifyEnable = fvMeta.y > 0.5f;
+        float pixOpen = 0.0f;
+        float pixOpenW = 0.0f;
+        if (classifyEnable) {
+            for (uint q = 0u; q < 8u; ++q) {
+                if (tw[q] < 0.01f) continue;
+                uint qIdx = pc[q].x + pc[q].y * counts.x + pc[q].z * counts.x * counts.y;
+                pixOpen += flatOpenSky[nearOff + qIdx] * tw[q];
+                pixOpenW += tw[q];
+            }
+            if (pixOpenW > 0.0f) pixOpen /= pixOpenW;
+        }
+
         for (uint p = 0u; p < 8u; ++p) {
             if (tw[p] < 0.01f) continue;
             uint pIdx = pc[p].x + pc[p].y * counts.x + pc[p].z * counts.x * counts.y;
@@ -305,6 +323,15 @@ kernel void ddgi_gi_gather(
             float3 irr = evalSH9Irradiance(sh, normal);
 
             float w = tw[p];
+            // Phase 3.2: 探针露天度 × 像素封闭度 → 一致度衰减（孪生）。
+            float classify = 1.0f;
+            if (classifyEnable) {
+                float pOpen = flatOpenSky[nearOff + pIdx];
+                float skyness = smoothstep(0.35f, 0.65f, pOpen);
+                float enclosed = 1.0f - smoothstep(0.05f, 0.25f, pixOpen);
+                classify = 1.0f - skyness * enclosed * 0.85f;
+            }
+            w *= classify;
             float insidePenalty = 1.0f;
             float burial = 1.0f;
             {
@@ -339,8 +366,8 @@ kernel void ddgi_gi_gather(
                 w *= nwSoft * vw * insidePenalty;
             }
 
-            lowFrequencyGI += irr * tw[p] * burial;
-            lowFrequencyW += tw[p] * burial;
+            lowFrequencyGI += irr * tw[p] * burial * classify;
+            lowFrequencyW += tw[p] * burial * classify;
             if (tw[p] > bestBaseWeight) { bestBaseWeight = tw[p]; bestIrr = irr; }
 
             result += irr * w;          // B4: irradiance units (diffuse)

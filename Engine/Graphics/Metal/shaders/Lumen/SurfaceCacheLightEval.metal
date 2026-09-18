@@ -61,7 +61,8 @@ float scVisibilityWeight(float distToProbe, float mean, float variance) {
 float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
                              constant FlattenedLightingParams& params,
                              device const float4* ddgi_irradiance,
-                             device const float* ddgi_depth_buffer) {
+                             device const float* ddgi_depth_buffer,
+                             device const float* ddgi_opensky_buffer) {
     inVolume = false;
     if (params.ddgi_counts_valid.w == 0u) return float3(0.0f);
     float3 org = params.ddgi_origin_spacing.xyz;
@@ -79,6 +80,24 @@ float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
     // C 系列：双累加器 —— accVis 走 Chebyshev+法线+掩埋加权（45%），
     // accLow 只做掩埋降权（55% 低频保底，细薄几何处 Chebyshev 拒探针
     // 不至于塌黑）。配方与屏幕侧 DDGIGIGather 一致。
+    // GI 根治 Phase 3.2 孪生：像素 openSky 预计算（8 探针三线性 tw 加权）。
+    float pixOpen = 0.0f;
+    float pixOpenW = 0.0f;
+    if (params.radiosity_gate.w != 0u) {
+        for (int z = 0; z < 2; ++z)
+        for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x) {
+            float tw = mix(1.0f - fr.x, fr.x, float(x))
+                     * mix(1.0f - fr.y, fr.y, float(y))
+                     * mix(1.0f - fr.z, fr.z, float(z));
+            if (tw <= 0.0f) continue;
+            int3 pc = int3(mix(float3(b0), float3(b1), float3(float(x), float(y), float(z))));
+            uint pidx = uint(pc.x) + uint(counts.x) * (uint(pc.y) + uint(counts.y) * uint(pc.z));
+            pixOpen += ddgi_opensky_buffer[pidx] * tw;
+            pixOpenW += tw;
+        }
+        if (pixOpenW > 0.0f) pixOpen /= pixOpenW;
+    }
     float3 accVis = float3(0.0f);
     float3 accLow = float3(0.0f);
     float visW = 0.0f;
@@ -127,10 +146,19 @@ float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
         float nwSoft = max(normalWeight, 0.40f);
         float vw = max(scVisibilityWeight(distToProbe, depthMV.x, depthMV.y), 0.38f);
 
-        accVis += irr * tw * nwSoft * vw * insidePenalty;
-        visW   += tw * nwSoft * vw * insidePenalty;
-        accLow += irr * tw * burial;
-        lowW   += tw * burial;
+        // Phase 3.2 孪生: 天空分类衰减——探针露天度 × 像素封闭度。
+        float classify = 1.0f;
+        if (params.radiosity_gate.w != 0u) {
+            float pOpen = ddgi_opensky_buffer[pidx];
+            float skyness = smoothstep(0.35f, 0.65f, pOpen);
+            float enclosed = 1.0f - smoothstep(0.05f, 0.25f, pixOpen);
+            classify = 1.0f - skyness * enclosed * 0.85f;
+        }
+
+        accVis += irr * tw * nwSoft * vw * insidePenalty * classify;
+        visW   += tw * nwSoft * vw * insidePenalty * classify;
+        accLow += irr * tw * burial * classify;
+        lowW   += tw * burial * classify;
     }
     float3 result = float3(0.0f);
     if (visW > 0.0f) result += (accVis / visW) * 0.45f;
@@ -181,7 +209,9 @@ kernel void surfaceCacheLightEval(
     texture2d<float, access::read>    indirect_out      [[texture(6)]],   // T3.3 tile radiosity
     // C 系列：探针八面体深度（mean+variance per texel，128 floats/probe）——
     // gather 的 Chebyshev 可见性，封锁"受光带探针能量隔墙传给阴影卡片"。
-    device const float*               ddgi_depth_buffer [[buffer(7)]])
+    device const float*               ddgi_depth_buffer [[buffer(7)]],
+    // GI 根治 Phase 3.2 孪生: openSky 统计（Metal buffer(8)）
+    device const float*               ddgi_opensky_buffer [[buffer(8)]])
 {
     if (global_tid >= params.total_texels) return;
 
@@ -289,7 +319,8 @@ kernel void surfaceCacheLightEval(
 
     bool probeInVolume = false;
     float3 E_indirect = gatherProbeIrradiance(world_pos, normal, probeInVolume,
-                                              params, ddgi_irradiance, ddgi_depth_buffer);
+                                              params, ddgi_irradiance, ddgi_depth_buffer,
+                                              ddgi_opensky_buffer);
     bool probeFed = params.ddgi_counts_valid.w != 0u;
 
     // In-volume texels take their bounce from the probes. Outside the probe

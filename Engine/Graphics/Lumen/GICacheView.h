@@ -51,6 +51,10 @@ struct DDGIVolumeView {
     // 可见性从该锚点测 distToProbe；可缺省（INVALID → shader w=0 回退格点）。
     rhi::ResourceHandle relocated_origins{ rhi::handles::INVALID_RESOURCE };
 
+    // GI 能量根治方案 Phase 3.1: 每探针 openSky 统计（float/probe，逃逸占比
+    // EMA）。gather 端天空分类加权用；可缺省（INVALID → 分类关闭）。
+    rhi::ResourceHandle opensky{ rhi::handles::INVALID_RESOURCE };
+
     bool IsValid() const { return irradiance != rhi::handles::INVALID_RESOURCE; }
 };
 

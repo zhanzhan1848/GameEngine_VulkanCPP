@@ -663,7 +663,7 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         }
     }
 
-    // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) + 1 SSBO (update list) + 1 SSBO (confidence) ---
+    // --- Irradiance: 2 UBO + 3 SSBO (ray data + irradiance history + irradiance output) + 1 SSBO (update list) + 1 SSBO (confidence) + 1 SSBO (openSky) ---
     {
         DescriptorSetLayoutBinding irradianceBindings[] = {
             {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},   // GlobalShaderData
@@ -673,12 +673,13 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // irradiance output buffer (read_write)
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // confidence buffer
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // GI 根治 Phase 3.1: openSky 统计 (read_write)
         };
         irradianceBindings[2].readonly = true;  // ray_buffer: var<storage, read>
         irradianceBindings[3].readonly = true;  // irradiance_history: var<storage, read>
         irradianceBindings[5].readonly = true;  // probe_update_list: var<storage, read>
         // irradianceBindings[4] (irradiance_output) stays read_write.
-        DescriptorSetLayoutDesc layoutDesc{7, irradianceBindings};
+        DescriptorSetLayoutDesc layoutDesc{8, irradianceBindings};
         irradiance_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1177,6 +1178,26 @@ void LumenDDGIPass::CreateProbeTextures() {
                 mapped[p * 4 + 3] = initAge;  // convergenceAge
             }
             device_->UnmapBuffer(confidence_buffer_);
+        }
+    }
+
+    // GI 能量根治方案 Phase 3.1: 每探针 openSky 统计缓冲（float/probe）。
+    // 必须显式清零——Vulkan/堆纹理不保证零初始化（confidence 同款教训），
+    // 垃圾值会让 gather 的天空分类在首帧就失真。单缓冲持久，探针逐批
+    // EMA 更新。
+    {
+        BufferDesc desc{};
+        desc.size = (u64)totalProbes * sizeof(float);
+        desc.type = BufferType::Structured;
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.structured.elementCount = totalProbes;
+        desc.structured.elementStride = sizeof(float);
+        opensky_buffer_ = device_->CreateBuffer(desc);
+        if (float* mapped = static_cast<float*>(device_->MapBuffer(opensky_buffer_))) {
+            for (u32 p = 0; p < totalProbes; p++) mapped[p] = 0.0f;
+            device_->UnmapBuffer(opensky_buffer_);
         }
     }
 
@@ -1990,7 +2011,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // gather windows), washing out colored bounce. The blue
                     // cast belongs to the sky VISUAL, not the ambient
                     // integration constant.
-                    vd.SkyColor = {sky * 1.0f, sky * 1.0f, sky * 1.0f, 0.0f};
+                    // GI 根治 Phase 3.3: 远场 volume 天空 ×0.5 档——远场
+                    // 只表达低频环境，逃逸比例天然高，全额天空会让远场探针
+                    // 成为封闭区的隐性泵浦（分类加权的供给端补充）。
+                    vd.SkyColor = {sky * far_sky_scale_, sky * far_sky_scale_,
+                                   sky * far_sky_scale_, 0.0f};
                     vd.Albedo   = {alb, alb, alb, 0.0f};
 
                     // Fill SDF cascade data — offline SDF or runtime GlobalSDF.
@@ -2551,8 +2576,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {4, DescriptorType::StorageBuffer, irradiance_buffers_[outIdx]},
                     {5, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
                     {6, DescriptorType::StorageBuffer, confidence_buffer_},
+                    {7, DescriptorType::StorageBuffer, opensky_buffer_},
                 };
-                UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 7);
+                UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 8);
 
                 cmd->BindComputePipeline(irradiance_pipeline_);
                 const DescriptorSetHandle sets[] = { irradiance_ds_[frameIdx] };

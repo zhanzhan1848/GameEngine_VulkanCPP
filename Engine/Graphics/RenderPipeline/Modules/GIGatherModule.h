@@ -115,7 +115,12 @@ private:
     rhi::ResourceHandle flat_irr_buffer_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE};
-    u64 flat_irr_capacity_[3]{0, 0, 0};   // 已分配字节数（16 头部 + probes×144）
+    u64 flat_irr_capacity_[3]{0, 0, 0};
+    // GI 根治 Phase 3.2: flat openSky 缓冲（256B 头 + probes×4B，同槽位轮转）。
+    rhi::ResourceHandle flat_opensky_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    u64 flat_opensky_capacity_[3]{0, 0, 0};   // 已分配字节数（16 头部 + probes×144）
 
     // Debug (SC_DUMP_CARDS=1): staging copy of the gather output + dump frame
     // (deferred print >=3 frames later — correlates probe health with what

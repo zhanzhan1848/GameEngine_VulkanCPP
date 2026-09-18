@@ -96,8 +96,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {18, DescriptorType::UniformBuffer,     1, ShaderStage::Compute, nullptr},  // FlatVolumeCB (T3.6/D1)
             // 2026-09-17 P0：近场 volume 重定位后有效起点（可见性锚点）
             {19, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // near relocated origins
+            // GI 根治 Phase 3.2: flat openSky 统计（天空可见性分类）
+            {20, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // flat probe openSky
         };
-        set_layout_ = device->CreateDescriptorSetLayout({18, vkBindings});
+        set_layout_ = device->CreateDescriptorSetLayout({19, vkBindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -120,6 +122,8 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // FlatVolumeCB (T3.6/D1)
             // 2026-09-17 P0：near relocated origins（Metal buffer(12)，与 Vulkan flat 19 对等）
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // near relocated origins
+            // GI 根治 Phase 3.2: flat openSky（Metal buffer(13)，与 Vulkan flat 20 对等）
+            {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // flat probe openSky
         };
         set_layout_ = device->CreateDescriptorSetLayout({17, bindings});
     }
@@ -340,6 +344,26 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     hdr[3] = 0;
                     device_->UnmapBuffer(flatBuf);
                 }
+                // GI 根治 Phase 3.2: flat openSky 缓冲（256B 头 + probes×4B），
+                // 同槽位按需增长。
+                const u64 neededSky = kFlatHeaderBytes + (u64)fvTotalProbes * 4ull;
+                if (flat_opensky_buffer_[bindingIdx] == handles::INVALID_RESOURCE ||
+                    flat_opensky_capacity_[bindingIdx] < neededSky) {
+                    for (u32 s2 = 0; s2 < 3; ++s2) {
+                        if (flat_opensky_buffer_[s2] != handles::INVALID_RESOURCE)
+                            device_->DestroyBuffer(flat_opensky_buffer_[s2]);
+                        BufferDesc osDesc{};
+                        osDesc.size = neededSky;
+                        osDesc.type = BufferType::Structured;
+                        osDesc.usage = GPUMemoryUsage::Dynamic;
+                        osDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                        osDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                                           static_cast<u32>(BufferUsageFlags::TransferDst);
+                        osDesc.name = "GIGather_FlatOpenSky";
+                        flat_opensky_buffer_[s2] = device_->CreateBuffer(osDesc);
+                        flat_opensky_capacity_[s2] = neededSky;
+                    }
+                }
             }
 
             // Upload GIGatherCB
@@ -376,6 +400,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // T3.6/D1: far 双槽 CB 上传删除（far volume 数据经 flat SSBO +
             // FlatVolumeCB 到达 shader；far_cb_ 成员保留但不再绑定）。
 
+            // GI 根治 Phase 3.2: openSky 分类开关（PRIMAL_GI_OPENSKY=0 回滚），
+            // 供 FlatVolumeCB.meta.y 与下方 flat 装配共用。
+            bool openskyActive = flatActive;
+            if (const char* e = std::getenv("PRIMAL_GI_OPENSKY")) {
+                if (e[0] == '0') openskyActive = false;
+            }
             // T6.3 sub-B → T3.6/D1: upload FlatVolumeCB（binding 18）。flatActive
             // 时写入 volume[0..nvolCount) 的 origin/spacing/counts + probe
             // offset（w 槽，原 NVolumeCB 的 enabled 位改型）；否则整块清零
@@ -392,7 +422,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                             nv->counts_offset[vi] = math::v4{v.counts.x, v.counts.y, v.counts.z,
                                                              (float)fvOffsets[vi]};
                         }
-                        nv->meta = math::v4{(float)nvolCount, 0.0f, 0.0f, 0.0f};
+                        // y = openSky 分类开关（Phase 3.2，实际生效还要求
+                        // openskyActive——volume 视图缺 opensky 时 shader 侧
+                        // 由 dummy 兜底但开关同时关掉）。
+                        nv->meta = math::v4{(float)nvolCount,
+                                            openskyActive ? 1.0f : 0.0f, 0.0f, 0.0f};
                     }
                     device_->UnmapBuffer(nvolumesCB);
                 }
@@ -470,6 +504,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // T3.6/D1: flat 打包 copy——各 volume irradiance → flat SSBO。
             // 编码于同一 CB、先于 dispatch（队列序即依赖）。bindingIdx 槽与
             // 描述符一致，头部已由上方 host 写驻留。
+            ResourceHandle flatOpenSkyBuf = handles::INVALID_RESOURCE;
             if (flatActive && flatBuf != handles::INVALID_RESOURCE) {
                 for (u32 vi = 0; vi < nvolCount; ++vi) {
                     const auto& v = nvolViews[vi];
@@ -479,6 +514,19 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     cmd->CopyBuffer(v.irradiance, flatBuf,
                                     0, 256ull + (u64)fvOffsets[vi] * 144ull,
                                     probes * 144ull);
+                }
+            }
+            // GI 根治 Phase 3.2: flat openSky 装配（volume 顺序与 irr 一致）。
+            if (openskyActive && flat_opensky_buffer_[bindingIdx] != handles::INVALID_RESOURCE) {
+                flatOpenSkyBuf = flat_opensky_buffer_[bindingIdx];
+                for (u32 vi = 0; vi < nvolCount; ++vi) {
+                    const auto& v = nvolViews[vi];
+                    if (v.opensky == handles::INVALID_RESOURCE) { openskyActive = false; break; }
+                    const u64 probes = (u64)v.counts.x * (u64)v.counts.y * (u64)v.counts.z;
+                    if (probes == 0) continue;
+                    cmd->CopyBuffer(v.opensky, flatOpenSkyBuf,
+                                    0, 256ull + (u64)fvOffsets[vi] * 4ull,
+                                    probes * 4ull);
                 }
             }
 
@@ -563,8 +611,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // 18 = FlatVolumeCB）。原 15/16（far 双槽）与 17 array[4] 描述符
             // 写入删除。Metal 的 flat 槽（10/11）走下方 bufWrites 路径。
             if (isVk) {
-                WriteDescriptorSet flatWrites[3];
-                DescriptorBufferInfo flatInfos[3];
+                WriteDescriptorSet flatWrites[4];
+                DescriptorBufferInfo flatInfos[4];
                 flatWrites[0].dstSet = descriptorSet;
                 flatWrites[0].dstBinding = 17;
                 flatWrites[0].dstArrayElement = 0;
@@ -602,7 +650,23 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 }
                 flatInfos[2].offset = 0;
                 flatInfos[2].range = ~0ull;
-                device_->UpdateDescriptorSets(3, flatWrites);
+                // GI 根治 Phase 3.2: binding 20 = flat openSky（关闭时绑 dummy，
+                // fvMeta.y=0 让 shader 跳过读取）。
+                flatWrites[3].dstSet = descriptorSet;
+                flatWrites[3].dstBinding = 20;
+                flatWrites[3].dstArrayElement = 0;
+                flatWrites[3].descriptorCount = 1;
+                flatWrites[3].descriptorType = DescriptorType::StorageBuffer;
+                flatWrites[3].imageInfo = nullptr;
+                flatWrites[3].bufferInfo = &flatInfos[3];
+                flatInfos[3].buffer = (flatOpenSkyBuf != handles::INVALID_RESOURCE)
+                    ? flatOpenSkyBuf : dummy_buffer_;
+                // 与 flatIrradiance 同款：offset 256 跳过头部（shader 侧索引
+                // 即纯探针数组）。offset 0 会让 shader 读到头部整型位模式的
+                // ≈0 浮点，分类静默失效。
+                flatInfos[3].offset = 256;
+                flatInfos[3].range = ~0ull;
+                device_->UpdateDescriptorSets(4, flatWrites);
             }
 
             // Buffer bindings with sub-allocation from probe_cb_
@@ -686,7 +750,21 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     }
                     roInfo.offset = 0;
                     roInfo.range = ~0ull;
-                    device_->UpdateDescriptorSets(1, &roWrite);
+                    // GI 根治 Phase 3.2: Metal buffer(13) = flat openSky。
+                    WriteDescriptorSet osWrite{};
+                    DescriptorBufferInfo osInfo{};
+                    osWrite.dstSet = descriptorSet;
+                    osWrite.dstBinding = 13;
+                    osWrite.dstArrayElement = 0;
+                    osWrite.descriptorCount = 1;
+                    osWrite.descriptorType = DescriptorType::StorageBuffer;
+                    osWrite.imageInfo = nullptr;
+                    osWrite.bufferInfo = &osInfo;
+                    osInfo.buffer = (flatOpenSkyBuf != handles::INVALID_RESOURCE)
+                        ? flatOpenSkyBuf : dummy_buffer_;
+                    osInfo.offset = 0;
+                    osInfo.range = ~0ull;
+                    device_->UpdateDescriptorSets(1, &osWrite);
                 }
             }
 
