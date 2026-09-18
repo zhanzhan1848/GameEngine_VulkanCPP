@@ -774,15 +774,20 @@ kernel void ddgi_trace_finalize(
                 float3 prevRadiance = scSamplePrevColor(hitPos, view_projection, prev_frame_color);
                 if (all(isfinite(prevRadiance)) && dot(prevRadiance, prevRadiance) > 0.0001f) {
                     float sourceLum = dot(prevRadiance, float3(0.2126f, 0.7152f, 0.0722f));
+                    // Phase 1.4 孪生同步（DDGITraceFinalize.comp R4）：过亮
+                    // 惩罚 1/(1+max(lum-1,0)·2)——prev-screen 含直射 ×50，
+                    // 无惩罚回喂 = 直射绕过遮挡二次入账。惩罚同时作用于
+                    // screen 项与 materialBounce 的亮度种子。
+                    float brightPenalty = 1.0f / (1.0f + max(sourceLum - 1.0f, 0.0f) * 2.0f);
                     float albedoMax = max(max(albedo.r, albedo.g), albedo.b);
                     float albedoMin = min(min(albedo.r, albedo.g), albedo.b);
                     float saturation = (albedoMax - albedoMin) / max(albedoMax, 1e-3f);
                     float materialWeight = mix(0.15f, 0.85f, saturation);
-                    float3 materialBounce = albedo * max(sourceLum, 0.12f) * materialWeight;
+                    float3 materialBounce = albedo * max(sourceLum * brightPenalty, 0.12f) * materialWeight;
                     // B6: prevRadiance already carries last frame's indirect
                     // (direct + bounce baked into the screen color) — adding
                     // the probe feedback again double-counted indirect light.
-                    radiance = prevRadiance + materialBounce;
+                    radiance = prevRadiance * brightPenalty + materialBounce;
                     radianceFound = true;
 #ifdef DDGI_PATH_DEBUG
                     dbgPath = 2u;
@@ -791,19 +796,19 @@ kernel void ddgi_trace_finalize(
 #endif // PRIMAL_DDGI_NO_PREVSCREEN
             }
             if (!radianceFound) {
-                // 3) Analytic: self-computed direct + sky + multi-bounce
+                // 3) Analytic: sky floor + multi-bounce
 #ifdef PRIMAL_DDGI_NO_ANALYTIC
                 // C3 归因旋钮：路径 3 置黑——它的 E_direct 无阴影判断、
                 // E_sky 无条件加入，都是不查遮挡的能量注入。
                 radiance = float3(0.0f);
 #else
-                float3 L = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : float3(0.0f, -1.0f, 0.0f));
-                float NdotL = max(0.0f, dot(N, L));
-                float3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
+                // Phase 1.5 孪生同步（DDGITraceFinalize.comp C3.1 / R5）：
+                // 无阴影解析直射 E_direct 删除——不查遮挡的 15×NdotL 种子。
+                // E_sky 对齐 Vulkan ×0.3 档（该路径只准填"暗"，不准填"亮"）。
                 float NdotUp = max(0.0f, N.y);
-                float3 E_sky = volume.SkyColor.xyz * (0.5f + 0.5f * NdotUp);
+                float3 E_sky = volume.SkyColor.xyz * (0.5f + 0.5f * NdotUp) * 0.3f;
                 constexpr float PI_VAL = 3.14159265358979f;
-                radiance = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70f);
+                radiance = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev * 0.70f);
 #endif
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 3u;

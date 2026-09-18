@@ -11,6 +11,7 @@
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Field/FieldRegistry.h"
 #include "Graphics/Field/FieldView.h"
+#include "Graphics/Lumen/GIDebugParams.h"  // Phase 1.3: sky_color_intensity 单一事实源
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -1738,6 +1739,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 }();
                 gd.diag_params = {static_cast<float>(trace_diag_mode_), kFaceGate, kTrilinearHint, 0.0f};
                 gd.hint_params = {kTrilinearHint, 0.0f, 0.0f, 0.0f};
+                // GI 能量根治方案 Phase 1.3（R3）: 天空档位门——与 DDGI
+                // volume 的 SkyColor 同源（GIDebug 单例，缺省 0.4）。
+                gd.sky_params = {GIDebug().sky_color_intensity,
+                                 GIDebug().sky_color_intensity,
+                                 GIDebug().sky_color_intensity, 0.0f};
             }
 
             // Split kernels take the global data through the pool UBO

@@ -115,13 +115,18 @@ struct ScreenProbeGlobalData {
     // 供 SC 朝向门的命中法线）。仅声明尾扩；未读取该字段的 kernel 其
     // std140 前缀布局稳定，无需同步改声明。
     math::v4   hint_params;            // offset 432
+    // GI 能量根治方案 Phase 1.3（R3）: far-cache / world-fallback 天空回退的
+    // SkyColor 档位门（GIDebug().sky_color_intensity，与 DDGI volume 同一
+    // 单一事实源）。同 hint_params 的尾扩惯例：未读取的 kernel 不改声明。
+    math::v4   sky_params;             // offset 448
 };
 
-static_assert(sizeof(ScreenProbeGlobalData) == 448, "ScreenProbe shader constants must stay 448 bytes");
+static_assert(sizeof(ScreenProbeGlobalData) == 464, "ScreenProbe shader constants must stay 464 bytes");
 static_assert(offsetof(ScreenProbeGlobalData, ddgi_fb) == 352, "DDGI constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, hzb_params) == 384, "HZB constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, cache_params) == 400, "Cache constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, diag_params) == 416, "Diag constants offset mismatch");
+static_assert(offsetof(ScreenProbeGlobalData, sky_params) == 448, "Sky constants offset mismatch");
 
 // ============================================================================
 // RadianceCascadeParams — T3.5 cascade update constants (must match both

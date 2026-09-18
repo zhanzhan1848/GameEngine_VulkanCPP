@@ -116,8 +116,11 @@ layout(set = 0, binding = 6) buffer ConfidenceBuffer {
 // ----------------------------------------------------------------------------
 // Constants
 // ----------------------------------------------------------------------------
-// 同 DDGITraceFinalize：保守回 0.3 档（能量注入路径待专项定位）。
-const vec3 DDGI_SKY_COLOR = vec3(2.75, 2.88, 3.00);
+// GI 能量根治方案 Phase 1.2：DDGI_SKY_COLOR 常量已删除（R2 根因）。逃逸射线
+// 的天空能量由 Finalize 的 EvaluateSkyBase(rayDir) × volume.SkyColor.xyz 单一
+// 事实源写入 ray_buffer，本 kernel 直接沿用——SkyColor 档位旋钮恢复效力，
+// 逃逸注入与可见天空/SPGI 门控同源。（旧常量 (2.75,2.88,3.00) 是全天空档，
+// 绕过 Finalize 已做的 SkyColor 门控，注释自称"0.3 档"实为 10× 过驱。）
 
 const float DDGI_SH_C0   = 0.282095;
 const float DDGI_SH_C1   = 0.488603;
@@ -151,7 +154,8 @@ void ddgi_update_irradiance() {
         float hitDist = ray_buffer[rayIdx].radiance_and_dist.w;
 
         if (hitDist <= -1.5) {
-            radiance = DDGI_SKY_COLOR;   // 逃逸→天空
+            // 逃逸→沿用 Finalize 写入的 EvaluateSkyBase × SkyColor.xyz
+            //（Phase 1.2：不再覆盖成硬编码常量）。
         } else if (hitDist < 0.0) {
             // 步数耗尽：保留 Finalize 解析结果（SC 回退或黑），不再覆盖成天空
         } else {

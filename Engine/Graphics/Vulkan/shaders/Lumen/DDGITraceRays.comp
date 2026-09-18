@@ -4,8 +4,10 @@
 //   (glslangValidator --source-entrypoint main -e ddgi_trace_rays)
 //
 // Each thread traces one ray from one probe through the GlobalSDF volume.
-// At hit, computes canonical DDGI outgoing radiance:
-//   L_out = (albedo / PI) * (E_direct + E_sky + PI * L_i_prev * feedback)
+// At hit, computes legacy analytic outgoing radiance:
+//   L_out = (albedo / PI) * (E_sky + PI * L_i_prev * feedback)
+//（Phase 1.5 / R5：E_direct 无阴影解析直射已删除——直射由 SC 卡片带
+// SurfaceCacheShadow 可见性单独供给，探针不再吃 15×NdotL 无遮挡种子。）
 //
 // Why GLSL (not naga-compiled WGSL): the WGSL DDGIVolumeData uniform struct
 // contains array<vec4<f32>, 3> fields (SdfOrigins/VoxelSizes/Extents). naga
@@ -531,17 +533,14 @@ void ddgi_trace_rays() {
     DDGIRayData result;
 
     if (hit.hit != 0u) {
-        // Use self-computed direct lighting (NOT screen-space sampling).
-        // This is camera-independent — probe values only depend on geometry
-        // (normal/position) and light parameters, not on current camera view.
-        // Matches Metal DDGI trace approach.
+        // Legacy analytic path (NOT the active Vulkan supply chain — SC-first
+        // hierarchy lives in DDGITraceFinalize). Phase 1.5（R5 地雷清除）:
+        // 无阴影解析直射 E_direct（light_color×3.0×NdotL ≈ 15×NdotL）已删除
+        // ——ddgilight0 A/B 证明它今天无贡献，但任何 trace 路径切换都会让这颗
+        // 15× 无遮挡直射种子突然生效。直射由 SC 卡片（带 SurfaceCacheShadow
+        // 可见性）单独供给。
         vec3 N = hit.normal;
         const float PI_VAL = 3.14159265358979;
-
-        // Direct light at hit point (directional light + NdotL).
-        vec3 L = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
-        float NdotL = max(0.0, dot(N, L));
-        vec3 E_direct = volume.LightColor.xyz * volume.LightColor.w * NdotL;
 
         // Sky ambient — hemisphere-weighted sky color.
         float NdotUp = max(0.0, N.y);
@@ -554,12 +553,9 @@ void ddgi_trace_rays() {
         // Falls back to uniform albedo constant when hit point is off-screen.
         vec3 albedo = sampleHitAlbedo(hit.position);
 
-        // DDGI stores outgoing radiance at hit point: direct + sky + bounce.
-        // Direct lighting is needed as seed for multi-bounce — without it,
-        // probes never accumulate bounced direct light.
-        // FusionIndirect then scales this down so it supplements (not replaces)
-        // DeferredLighting's direct result.
-        vec3 L_out = (albedo / PI_VAL) * (E_direct + E_sky + PI_VAL * L_i_prev * 0.70);
+        // DDGI stores outgoing radiance at hit point: sky + bounce.
+        //（直射不再进探针——见上 Phase 1.5 注释。）
+        vec3 L_out = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev * 0.70);
         result.radiance_and_dist = vec4(L_out, hit.distance);
     } else {
         // Miss: ray escaped to sky.

@@ -5,6 +5,11 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include <iostream>
 #include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <algorithm>
+#include <utility>
+#include <vector>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
@@ -21,6 +26,9 @@ struct DescData {
 static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const DescData* params, u32 count) {
     std::vector<WriteDescriptorSet> writes(count);
     std::vector<DescriptorImageInfo> imageInfos(count);
+    // sun-audit P2: UniformBuffer 描述符走 bufferInfo（imageInfo 为 NULL 时
+    // vkUpdateDescriptorSets 报 VUID-00324）。
+    std::vector<DescriptorBufferInfo> bufferInfos(count);
 
     for (u32 i = 0; i < count; ++i) {
         writes[i].dstSet = set;
@@ -29,11 +37,17 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const Des
         writes[i].descriptorType = params[i].type;
         if (params[i].type == DescriptorType::Sampler) {
             imageInfos[i].sampler = static_cast<SamplerHandle>(params[i].resource);
+            writes[i].imageInfo = &imageInfos[i];
+        } else if (params[i].type == DescriptorType::UniformBuffer) {
+            bufferInfos[i].buffer = params[i].resource;
+            bufferInfos[i].offset = 0;
+            bufferInfos[i].range = 16;  // GI 融合增益 UBO（float）
+            writes[i].bufferInfo = &bufferInfos[i];
         } else {
             imageInfos[i].imageView = params[i].resource;
             imageInfos[i].imageLayout = ResourceState::ShaderResource;
+            writes[i].imageInfo = &imageInfos[i];
         }
-        writes[i].imageInfo = &imageInfos[i];
     }
     device->UpdateDescriptorSets(count, writes.data());
 }
@@ -99,8 +113,8 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
 
     // --- Pass 1: FusionIndirect (full-res, 5 texture reads + 1 sampler on Vulkan) ---
     {
-        const u32 indirectBindingCount = isVk ? 6 : 5;
-        DescriptorSetLayoutBinding bindings[6];
+        const u32 indirectBindingCount = isVk ? 7 : 5;
+        DescriptorSetLayoutBinding bindings[7];
         bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // SSGI
         bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // DDGI
         bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // SPGI
@@ -108,12 +122,23 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         bindings[4] = {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // SSAO
         if (isVk) {
             bindings[5] = {5, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
+            // sun-audit P2 用户反馈（间接光过弱）：GI 融合增益运行时旋钮
+            bindings[6] = {6, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr};
         }
         indirect_set_layout_ = device->CreateDescriptorSetLayout({indirectBindingCount, bindings});
         indirect_layout_ = device->CreatePipelineLayout({1, &indirect_set_layout_});
 
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < 3; ++i) {
             indirect_ds_[i] = device->CreateDescriptorSet({indirect_set_layout_});
+            // sun-audit P2: GI 融合增益 UBO（16B float；PRIMAL_GI_INDIRECT_GAIN）
+            if (isVk) {
+                BufferDesc gcb{};
+                gcb.size = 16;
+                gcb.type = BufferType::Constant;
+                gcb.memoryUsage = GPUMemoryUsage::Dynamic;
+                indirect_gain_cb_[i] = device->CreateBuffer(gcb);
+            }
+        }
 
         // Full-res indirect output.  SPGI and material data contain thin
         // receiver geometry that cannot survive an unguided half-res resolve.
@@ -210,6 +235,20 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
                             region.imageSubresource = {0, 0, 1};
                             region.imageExtent = {1, 1, 1};
                             cmd->CopyBufferToTexture(staging, volume_identity_tex_, &region, 1);
+                            // P0-B: 上传后回置 SRO——该 1×1 纹理被 ToneMapping
+                            // binding 2 作为 SampledImage 采样（承诺 SRO），
+                            // CopyBufferToTexture 把它停在 TRANSFER_DST，
+                            // 帧 1-7 每帧 submit 报 "expects SRO, got
+                            // TRANSFER_DST"。truth-based，恰好发一次转换。
+                            {
+                                ResourceBarrier restoreBar{};
+                                restoreBar.resource = volume_identity_tex_;
+                                restoreBar.beforeState = ResourceState::CopyDest;
+                                restoreBar.afterState  = ResourceState::ShaderResource;
+                                restoreBar.subresource = 0xFFFFFFFF;
+                                restoreBar.queueFamily = 0xFFFFFFFF;
+                                cmd->InsertBarrier(&restoreBar, 1);
+                            }
                             cmd->End();
                             cmd->Submit();
                             cmd->WaitForCompletion();
@@ -261,6 +300,336 @@ void FusionCompositeModule::Shutdown() {
         }
     }
 }
+
+// ============================================================================
+// sun-audit P1（暗地面 GI 逐段查，§7）: GI_LADDER_DUMP 能量台账。
+//
+// 对固定屏幕 ROI 逐像素读回数值链：
+//   vis（直射可见性，ShadowFilter 半分辨率 R8）→ direct（屏幕直射 HDR）
+//   → ddgi / spgi（探针积分阶段）→ indirect（FusionIndirect 输出=探针融合），
+// 每行附世界射线（invVP 反投影；锁定机位下 ROI 像素 ⇔ 固定世界位置）。
+// ROI 级判定（审计分段口径）：
+//   A trace_or_sc_source_dark —— 参考带供给在而目标 ROI 探针段≈0：
+//       查 SC texel/卡片深度/SDF 覆盖/太阳方向（SC atlas 本体另用
+//       SC_CARDVIEW / SC_DUMP_CARDS 检查）；
+//   B fusion_darkening —— 目标 ROI 探针段有光而融合输出衰减：
+//       查 SH 卷积/π/albedo 重复乘/置信度归一；
+//   C indirect_ok —— HDR 间接光存在：显示仍暗则查曝光/色调映射。
+// 读回沿用 SC_DUMP_CARDS 的同步单发惯例：读上一完成帧的三缓冲输出
+// （BeginFrame 的 per-frame fence 已保证完成）；vis 为单缓冲，读到的是
+// 上一帧内容——锁定机位+静态场景下逐帧一致。
+// 环境：GI_LADDER_DUMP=1、GI_LADDER_FRAME（默认 360）、GI_LADDER_ROI /
+// GI_LADDER_ROI2（归一 x0,y0,x1,y1；默认 = 审计中央地面 / 右立面参考带）、
+// GI_LADDER_STRIDE（默认 8）。
+// ============================================================================
+namespace {
+
+float GiLadderH16(u16 h) {
+    const u32 sign = (h >> 15) & 1u, ex = (h >> 10) & 0x1Fu, mant = h & 0x3FFu;
+    if (ex == 0u) return 0.0f;
+    u32 bits = (sign << 31) | ((ex + 112u) << 23) | (mant << 13);
+    float f; std::memcpy(&f, &bits, 4); return f;
+}
+
+struct GiLadderRoi { u32 x0, y0, x1, y1; };
+
+GiLadderRoi GiLadderParseRoi(const char* envName, const char* def, u32 w, u32 h) {
+    const char* s = std::getenv(envName);
+    float v[4] = {0, 0, 0, 0};
+    if (!s || std::sscanf(s, "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]) != 4) {
+        std::sscanf(def, "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]);
+    }
+    for (float& e : v) e = std::min(std::max(e, 0.0f), 1.0f);
+    if (v[2] < v[0]) std::swap(v[0], v[2]);
+    if (v[3] < v[1]) std::swap(v[1], v[3]);
+    GiLadderRoi r{};
+    r.x0 = std::min(u32(v[0] * w), w - 1);  r.x1 = std::max(u32(v[2] * w), r.x0 + 1);
+    r.y0 = std::min(u32(v[1] * h), h - 1);  r.y1 = std::max(u32(v[3] * h), r.y0 + 1);
+    r.x1 = std::min(r.x1, w); r.y1 = std::min(r.y1, h);
+    return r;
+}
+
+// 列主序 m4x4 × (x,y,z,1)，返回 float[4]。
+void GiLadderXform(const math::m4x4& m, float x, float y, float z, float out[4]) {
+    const float xs[4] = {x, y, z, 1.0f};
+    for (int rr = 0; rr < 4; ++rr) out[rr] = 0.0f;
+    for (int cc = 0; cc < 4; ++cc)
+        for (int rr = 0; rr < 4; ++rr)
+            out[rr] += m.columns[cc][rr] * xs[cc];
+}
+
+void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
+                     ResourceHandle spgiTex, ResourceHandle indirectTex) {
+    static bool dumped = false;
+    if (dumped) return;
+    static const u32 ladderFrame = [] {
+        const char* e = std::getenv("GI_LADDER_FRAME");
+        return e ? (u32)std::atoi(e) : 360u;
+    }();
+    static u32 tick = 0;
+    ++tick;
+    if (tick < ladderFrame) return;
+    dumped = true;
+
+    const u32 w = in.render_width, h = in.render_height;
+    u32 stride = 8;
+    if (const char* e = std::getenv("GI_LADDER_STRIDE")) stride = std::clamp((u32)std::atoi(e), 1u, 64u);
+    const GiLadderRoi rois[2] = {
+        GiLadderParseRoi("GI_LADDER_ROI", "0.4414,0.8583,0.5039,0.975", w, h),
+        GiLadderParseRoi("GI_LADDER_ROI2", "0.766,0.25,0.996,0.667", w, h),
+    };
+    const char* roiNames[2] = {"target", "reference"};
+
+    struct Source { const char* name; ResourceHandle tex; float scale; u32 bytesPx; };
+    // ddgi/spgi（探针 gather 输出）与 vis（ShadowFilter）/ssgi 按设计为半分辨率
+    // ——ROI 全分辨率坐标按 scale 缩放到各自纹素空间后拷贝/取样。
+    // 2026-09-17 P0（probe-selection-density-audit §8.1）：新增 ssgi 与 albedo
+    // 两个源——台账期望值改为逐像素镜像 FusionIndirect.frag 的真实融合式
+    // （mix+SSGI 项+真实 albedo+gain），取代旧 (ddgi+spgi)×0.25/π 启发式。
+    const Source sources[7] = {
+        {"direct", in.primary_input_tex != handles::INVALID_RESOURCE ? in.primary_input_tex : in.black_texture, 1.0f, 8},
+        {"ddgi", in.ddgi_tex != handles::INVALID_RESOURCE ? in.ddgi_tex : in.black_texture, 0.5f, 8},
+        {"spgi", spgiTex != handles::INVALID_RESOURCE ? spgiTex : in.black_texture, 0.5f, 8},
+        {"indirect", indirectTex != handles::INVALID_RESOURCE ? indirectTex : in.black_texture, 1.0f, 8},
+        {"vis", in.shadow_vis_tex != handles::INVALID_RESOURCE ? in.shadow_vis_tex : in.black_texture, 0.5f, 1},
+        {"ssgi", in.ssgi_tex != handles::INVALID_RESOURCE ? in.ssgi_tex : in.black_texture, 0.5f, 8},
+        // GBuffer albedo 是 BGRA8_UNorm（4B/px）——按 8B 半浮点读会得到垃圾。
+        {"albedo", in.gbuffer_albedo != handles::INVALID_RESOURCE ? in.gbuffer_albedo : in.black_texture, 1.0f, 4},
+    };
+    // 与 FusionIndirect pass 同源的增益（PRIMAL_GI_INDIRECT_GAIN，默认 3）。
+    const float ladderGain = [] {
+        float g = 3.0f;
+        if (const char* e = std::getenv("PRIMAL_GI_INDIRECT_GAIN")) {
+            const float v = static_cast<float>(std::atof(e));
+            if (v >= 0.0f && v <= 8.0f) g = v;
+        }
+        return g;
+    }();
+
+    PRIMAL_LOG_STREAM(Error, "Render")
+        << "[GILadderMeta] frame=" << tick << " render=" << w << "x" << h
+        << " stride=" << stride
+        << " vis_tex=" << (in.shadow_vis_tex != handles::INVALID_RESOURCE ? "bound" : "MISSING")
+        << " ddgi_tex=" << (in.ddgi_tex != handles::INVALID_RESOURCE ? "bound" : "black")
+        << " spgi_tex=" << (spgiTex != handles::INVALID_RESOURCE ? "bound" : "black")
+        << " ssgi_tex=" << (in.ssgi_tex != handles::INVALID_RESOURCE ? "bound" : "black")
+        << " albedo_tex=" << (in.gbuffer_albedo != handles::INVALID_RESOURCE ? "bound" : "black")
+        << " gain=" << ladderGain
+        << " (CSV: px,py,rayx,rayy,rayz,vis,direct_rgb,ddgi_rgb,spgi_rgb,indirect_rgb"
+           ",ssgi_rgb,albedo_rgb,spgi_a,expected_lum,residual_lum)"
+        << std::endl;
+
+    // ROI 级亮度收集（判定用）：[roi][stage]
+    std::vector<float> lums[2][4] = {};
+    // 目标带（roi 0）模型期望/残差聚合——判定块引用。
+    float floorExpected = 0.0f, resMedianAll = 0.0f, resP95All = 0.0f, resMaxAll = 0.0f;
+
+    for (int ri = 0; ri < 2; ++ri) {
+        const GiLadderRoi r = rois[ri];
+        // 每源一段（256 对齐）；段尺寸按源缩放后的纹素数。
+        u64 secAlign[7];
+        u32 secW[7], secH[7];
+        u64 total = 0;
+        for (int k = 0; k < 7; ++k) {
+            secW[k] = std::max(1u, u32((r.x1 - r.x0) * sources[k].scale));
+            secH[k] = std::max(1u, u32((r.y1 - r.y0) * sources[k].scale));
+            const u64 bytes = (u64)secW[k] * secH[k] * sources[k].bytesPx;
+            secAlign[k] = (total + 255u) & ~255u;
+            total = secAlign[k] + bytes;
+        }
+
+        BufferDesc bd{}; bd.size = total;
+        bd.bindFlags = (u32)BufferUsageFlags::TransferDst;
+        bd.memoryUsage = GPUMemoryUsage::Readback;
+        auto stage = device->CreateBuffer(bd);
+        if (stage == handles::INVALID_RESOURCE) continue;
+
+        bool copied = false;
+        bool live[7] = {};
+        {
+            auto ch = device->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* c2 = rhi::GetCommandBuffer(ch);
+            if (c2) {
+                c2->Begin();
+                for (int k = 0; k < 7; ++k) {
+                    if (sources[k].tex == in.black_texture) continue; // 1×1 占位不可拷 ROI
+                    live[k] = true;
+                    BufferTextureCopyRegion rr{};
+                    rr.bufferOffset = secAlign[k];
+                    rr.imageSubresource.layerCount = 1;
+                    rr.imageOffset = {(int)(r.x0 * sources[k].scale),
+                                      (int)(r.y0 * sources[k].scale), 0};
+                    rr.imageExtent = {secW[k], secH[k], 1};
+                    c2->CopyTextureToBuffer(sources[k].tex, stage, &rr, 1);
+                }
+                c2->End(); c2->Submit(); c2->WaitForCompletion();
+                copied = true;
+            }
+            device->DestroyCommandBuffer(ch);
+        }
+        if (!copied) { device->DestroyBuffer(stage); continue; }
+
+        const auto* base = static_cast<const u8*>(device->MapBuffer(stage, 0, total));
+        if (!base) { device->DestroyBuffer(stage); continue; }
+
+        std::vector<float> visL, dirL, ddgiL, spgiL, indL, expL, resL;
+        for (u32 y = r.y0; y < r.y1; y += stride) {
+            for (u32 x = r.x0; x < r.x1; x += stride) {
+                // 世界射线：NDC 近/远两点反投影差向量（锁定机位 → 固定世界位置）
+                const float u = (x + 0.5f) / w, v = (y + 0.5f) / h;
+                float n0[4], n1[4];
+                GiLadderXform(in.inv_view_projection, u * 2.0f - 1.0f, 1.0f - 2.0f * v, -1.0f, n0);
+                GiLadderXform(in.inv_view_projection, u * 2.0f - 1.0f, 1.0f - 2.0f * v, 1.0f, n1);
+                float dir[3];
+                for (int k = 0; k < 3; ++k) {
+                    const float fz = n1[k] / std::max(n1[3], 1e-6f);
+                    const float nz = n0[k] / std::max(n0[3], 1e-6f);
+                    dir[k] = fz - nz;
+                }
+                const float dl = std::sqrt(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+                float rgb[7][3] = {};   // 清零：未绑定源保持 0（模型 ssgi 项随之归零）
+                float lum[7] = {0, 0, 0, 0, 0, 0, 0};
+                float spgiA = 0.0f, ssgiA = 0.0f;
+                for (int k = 0; k < 7; ++k) {
+                    if (!live[k]) continue; // 静音/缺资源段：保持 0
+                    // 全分辨率采样点 → 该源缩放空间最近纹素
+                    const u32 sx = std::min(secW[k] - 1u, u32((x - r.x0) * sources[k].scale));
+                    const u32 sy = std::min(secH[k] - 1u, u32((y - r.y0) * sources[k].scale));
+                    if (sources[k].bytesPx == 8) {
+                        const u16* t = reinterpret_cast<const u16*>(base + secAlign[k]) +
+                                       ((size_t)sy * secW[k] + sx) * 4;
+                        for (int cch = 0; cch < 3; ++cch) rgb[k][cch] = GiLadderH16(t[cch]);
+                        // alpha：spgi→融合权重 w；ssgi→命中距离（→置信度）。
+                        if (k == 2) spgiA = GiLadderH16(t[3]);
+                        if (k == 5) ssgiA = GiLadderH16(t[3]);
+                    } else if (sources[k].bytesPx == 4) {
+                        // BGRA8_UNorm：内存序 [B,G,R,A]。
+                        const u8* t = base + secAlign[k] + ((size_t)sy * secW[k] + sx) * 4;
+                        rgb[k][0] = t[2] / 255.0f;
+                        rgb[k][1] = t[1] / 255.0f;
+                        rgb[k][2] = t[0] / 255.0f;
+                    } else {
+                        const u8 g = *(base + secAlign[k] + (size_t)sy * secW[k] + sx);
+                        rgb[k][0] = rgb[k][1] = rgb[k][2] = (float)g / 255.0f;
+                    }
+                    lum[k] = 0.2126f * rgb[k][0] + 0.7152f * rgb[k][1] + 0.0722f * rgb[k][2];
+                }
+                // 2026-09-17 P0：逐像素镜像 FusionIndirect.frag 的真实融合式
+                //   w      = clamp(spgi.a, 0, 0.9)
+                //   ssgi_c = clamp(1 - clamp(ssgi.a,0,30)/30*0.7, 0.3, 1)
+                //   E      = mix(ddgi, spgi, w) + ssgi * ssgi_c * mix(.25,.15,w)
+                //   Lo     = albedo * E * gain / π
+                // 旧判定器 (ddgi+spgi)*0.25/π 与其差了加法/混合、实际 albedo、
+                // alpha、SSGI 与 gain——C 档因此只证明"非零输出"。
+                float wFusion = std::clamp(spgiA, 0.0f, 0.9f);
+                float ssgiConf = std::clamp(1.0f - std::clamp(ssgiA, 0.0f, 30.0f) / 30.0f * 0.7f,
+                                            0.3f, 1.0f);
+                float expR = 0.0f, expG = 0.0f, expB = 0.0f;
+                for (int cch = 0; cch < 3; ++cch) {
+                    float mixTerm = rgb[1][cch] * (1.0f - wFusion) + rgb[2][cch] * wFusion;
+                    float ssgiTerm = rgb[5][cch] * ssgiConf * (0.25f + (0.15f - 0.25f) * wFusion);
+                    float e = (mixTerm + ssgiTerm) * rgb[6][cch] * ladderGain * 0.31830988f;
+                    expR = cch == 0 ? e : expR;
+                    expG = cch == 1 ? e : expG;
+                    expB = cch == 2 ? e : expB;
+                }
+                float expectedLum = 0.2126f * expR + 0.7152f * expG + 0.0722f * expB;
+                float residual = std::fabs(lum[3] - expectedLum);
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[GILadder] " << roiNames[ri]
+                    << "," << x << "," << y
+                    << "," << dir[0] / dl << "," << dir[1] / dl << "," << dir[2] / dl
+                    << "," << rgb[4][0]
+                    << "," << rgb[0][0] << "," << rgb[0][1] << "," << rgb[0][2]
+                    << "," << rgb[1][0] << "," << rgb[1][1] << "," << rgb[1][2]
+                    << "," << rgb[2][0] << "," << rgb[2][1] << "," << rgb[2][2]
+                    << "," << rgb[3][0] << "," << rgb[3][1] << "," << rgb[3][2]
+                    << "," << rgb[5][0] << "," << rgb[5][1] << "," << rgb[5][2]
+                    << "," << rgb[6][0] << "," << rgb[6][1] << "," << rgb[6][2]
+                    << "," << spgiA
+                    << "," << expectedLum << "," << residual
+                    << std::endl;
+                visL.push_back(rgb[4][0]);
+                dirL.push_back(lum[0]); ddgiL.push_back(lum[1]);
+                spgiL.push_back(lum[2]); indL.push_back(lum[3]);
+                expL.push_back(expectedLum); resL.push_back(residual);
+            }
+        }
+        device->UnmapBuffer(stage);
+        device->DestroyBuffer(stage);
+
+        auto med = [](std::vector<float> v) -> float {
+            if (v.empty()) return 0.0f;
+            std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+            return v[v.size() / 2];
+        };
+        // P95/Max（残差分布用；med 会破坏排序，副本单独算）。
+        auto p95 = [](std::vector<float> v) -> float {
+            if (v.empty()) return 0.0f;
+            std::sort(v.begin(), v.end());
+            return v[std::min(v.size() - 1, (size_t)(v.size() * 95 / 100))];
+        };
+        auto vmax = [](std::vector<float> v) -> float {
+            float m = 0.0f;
+            for (float x : v) m = std::max(m, x);
+            return m;
+        };
+        lums[ri][0] = {med(visL)}; lums[ri][1] = {med(dirL)};
+        lums[ri][2] = {med(ddgiL), med(spgiL)}; lums[ri][3] = {med(indL)};
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[GILadderRoi] " << roiNames[ri]
+            << " px=(" << r.x0 << "," << r.y0 << ")-(" << r.x1 << "," << r.y1 << ")"
+            << " median vis=" << med(visL) << " direct=" << med(dirL)
+            << " ddgi=" << med(ddgiL) << " spgi=" << med(spgiL)
+            << " indirect=" << med(indL) << " expected(model)=" << med(expL)
+            << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[GILadderResidual] " << roiNames[ri]
+            << " median=" << med(resL) << " P95=" << p95(resL)
+            << " max=" << vmax(resL)
+            << " (逐像素 |indirect - model|；模型=融合式逐项镜像，"
+               "输入为同一完成帧读回，锁定机位下混帧误差可忽略)"
+            << std::endl;
+        if (ri == 0) { // 目标带聚合供判定块使用
+            floorExpected = med(expL);
+            resMedianAll = med(resL);
+            resP95All = p95(resL);
+            resMaxAll = vmax(resL);
+        }
+    }
+
+    // 审计分段判定（第一层分支；阈值是趋势判断的启发式，非验收线）。
+    // 2026-09-17 P0（probe-selection-density-audit §8.1）：期望值改为逐像素
+    // 镜像 FusionIndirect.frag 的真实融合式（mix + SSGI 项 + 实际 albedo +
+    // spgi.a 权重 + PRIMAL_GI_INDIRECT_GAIN），不再用 (ddgi+spgi)×0.25/π。
+    // 语义边界（必须随判定一起读）：
+    //   A/B 档：供给为零 / 融合显著低于模型——有明确源可查。
+    //   C 档：融合输出与模型一致——只证明"合成公式按预期工作"，
+    //         不证明命中正确/能量守恒/只剩曝光问题（探针供给本身错误时
+    //         模型会同样一致地复现错误）。
+    const float supplyProbe = std::max(lums[1][2][0] + lums[1][2][1],
+                                       lums[0][2][0] + lums[0][2][1]); // 对照带/目标带 ddgi+spgi 上界
+    const float floorProbe = lums[0][2][0] + lums[0][2][1];
+    const float floorFused = lums[0][3][0];
+    const float floorModel = floorExpected; // 逐像素模型期望的中位数（目标带）
+    const char* verdict = "C_fused_matches_model";
+    if (floorProbe < std::max(0.02f * supplyProbe, 1e-3f))
+        verdict = "A_trace_or_sc_source_dark";
+    else if (floorFused < 0.5f * floorModel)
+        verdict = "B_fusion_darkening";
+    PRIMAL_LOG_STREAM(Error, "Render")
+        << "[GILadderVerdict] " << verdict
+        << " supply_probe=" << supplyProbe << " floor_probe=" << floorProbe
+        << " floor_fused=" << floorFused
+        << " floor_model(mix+ssgi+albedo+gain/pi)=" << floorModel
+        << " residual(med/P95/max)=" << resMedianAll << "/" << resP95All << "/" << resMaxAll
+        << " | A: 查SC texel/卡片深度/SDF/太阳方向(用SC_CARDVIEW/SC_DUMP_CARDS)"
+        << " B: 查融合式输入(混帧/置信度/gain) C: 合成一致≠供给正确——"
+           "仍需 GILadderResidual 与分支统计定位探针侧问题"
+        << std::endl;
+}
+
+} // namespace
 
 FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs) {
     FusionOutputs outputs{};
@@ -321,7 +690,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
-            const u32 paramCount = isVk ? 6 : 5;
+            u32 paramCount = isVk ? 6 : 5;
 
             // Resolve SSGI/DDGI/SPGI from RG handles when physical tex is INVALID.
             ResourceHandle ssgiTex = inputs.ssgi_tex;
@@ -356,7 +725,52 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 cmd->InsertBarrier(&ssgiBar, 1);
             }
 
-            DescData params[6] = {
+            // P0-B（queue-submit 09600 收尾）: 对其余全部 sampled 输入做同样
+            // 的 ensure-SRO。SRO→SRO 声明是通用收敛原语：后端按 tracked 解析
+            // ——tracked 停在 XFER_*/GENERAL（上游 blit/storage 写遗留）时发
+            // 一次精确转换，已 SRO 时 no-op。ddgi/spgi 槽承载的纹理有 blit
+            // 上游（probe radiance fused supply / SPGI blit），首帧绑定早于
+            // 其首次转换时正是 "expects SRO, actual TRANSFER_*/UNDEFINED"
+            // 预热错误的来源。black 占位纹理除外（常驻 SRO）。
+            {
+                ResourceHandle ensureList[4] = {
+                    inputs.ddgi_tex != handles::INVALID_RESOURCE ? inputs.ddgi_tex : inputs.black_texture,
+                    spgiTex != inputs.black_texture ? spgiTex : inputs.black_texture,
+                    inputs.gbuffer_albedo != handles::INVALID_RESOURCE ? inputs.gbuffer_albedo : inputs.black_texture,
+                    inputs.ssao_tex != handles::INVALID_RESOURCE ? inputs.ssao_tex : inputs.black_texture,
+                };
+                ResourceBarrier ensureBars[4]{};
+                u32 ensureCount = 0;
+                for (u32 i = 0; i < 4; ++i) {
+                    if (ensureList[i] == inputs.black_texture ||
+                        ensureList[i] == handles::INVALID_RESOURCE ||
+                        ensureList[i] == ssgiTex) continue;  // ssgi 已单独处理
+                    ensureBars[ensureCount].resource = ensureList[i];
+                    ensureBars[ensureCount].beforeState = ResourceState::ShaderResource;
+                    ensureBars[ensureCount].afterState  = ResourceState::ShaderResource;
+                    ensureBars[ensureCount].subresource = 0xFFFFFFFF;
+                    ensureBars[ensureCount].queueFamily = 0xFFFFFFFF;
+                    ++ensureCount;
+                }
+                if (ensureCount > 0) cmd->InsertBarrier(ensureBars, ensureCount);
+            }
+
+            // GI 能量根治方案 Phase 1.1（Docs/2026-09-18-gi-energy-root-cure-plan.md）：
+            // 融合端全局增益默认回归 **1.0**（物理恒等）。旧默认 3.0 是死探针
+            // 网格时代扫频调出的均衡点（"gain3.0 全图统计落参考区间"），scene-fit
+            // 后探针场变活，3.0 即整体过驱（mean 108.3 vs 参考 42.7，gain 只平移
+            // 不恢复层次）。FusionIndirect.frag 的 gain 仅为 debug 旋钮，显示增益
+            // 永不进入反馈回路。PRIMAL_GI_INDIRECT_GAIN 运行时可调（0..8；
+            // 设 3.0 可临时回滚旧行为）。
+            float giIndirectGain = 1.0f;
+            if (const char* g = std::getenv("PRIMAL_GI_INDIRECT_GAIN")) {
+                const float v = static_cast<float>(std::atof(g));
+                if (v >= 0.0f && v <= 8.0f) giIndirectGain = v;
+            }
+            if (indirect_gain_cb_[cbIdx] != handles::INVALID_RESOURCE) {
+                device_->UpdateBufferData(indirect_gain_cb_[cbIdx], &giIndirectGain, sizeof(float), 0);
+            }
+            DescData params[7] = {
                 {0, DescriptorType::SampledImage, ssgiTex},
                 {1, DescriptorType::SampledImage, inputs.ddgi_tex != handles::INVALID_RESOURCE ? inputs.ddgi_tex : inputs.black_texture},
                 {2, DescriptorType::SampledImage, spgiTex},
@@ -364,6 +778,10 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 {4, DescriptorType::SampledImage, inputs.ssao_tex != handles::INVALID_RESOURCE ? inputs.ssao_tex : inputs.black_texture},
                 {5, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
             };
+            if (isVk && indirect_gain_cb_[cbIdx] != handles::INVALID_RESOURCE) {
+                params[6] = {6, DescriptorType::UniformBuffer, indirect_gain_cb_[cbIdx]};
+                paramCount = 7;
+            }
             // TEMP diagnosis: what really lands in each GI texture slot.
             static int s_fusion_slots = 0;
             if (s_fusion_slots < 3) {
@@ -382,6 +800,9 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             const DescriptorSetHandle sets[] = { indirect_ds_[cbIdx] };
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, indirect_layout_, 0, 1, sets, 0, nullptr);
             cmd->Draw(3, 0, 1, 0);
+
+            // sun-audit P1: GI_LADDER_DUMP 能量台账（一次性同步读回，见函数头注释）
+            RunGiLadderDump(device_, inputs, spgiTex, indirect_output_[(cbIdx + 2) % 3]);
 
             // TEMP diagnosis: one-shot per-strip stats of the indirect output
             // (RGBA16F full-res). Strips when GI_DEBUG_STRIP=1: ddgi|ssgi|spgi|full.
@@ -507,16 +928,17 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            // Resolve volume scatter from RG, or fall back to identity texture (transmittance=1).
-            // On Vulkan, volume pass is not active — force identity to avoid binding
-            // an incorrectly-formatted texture from RG (causes R32_UINT validation error).
-            ResourceHandle volTex;
-            if (device_->GetPlatform() == RHIPlatform::Vulkan) {
-                volTex = volume_identity_tex_;
-            } else {
-                volTex = resolve(inputs.volume_scatter_rg);
-                if (volTex == inputs.black_texture || volTex == handles::INVALID_RESOURCE)
-                    volTex = volume_identity_tex_;
+            // Resolve volume scatter from RG, or fall back to identity texture
+            // (transmittance=1). P1（sponza-gap-reaudit §4.4）: 旧 workaround 在
+            // Vulkan 无条件绑 identity（当年 RG 解析出错误格式的 VolumePass 纹理
+            // 触发 R32_UINT validation）——这使 FROXEL 开启后合成始终不消费雾，
+            // 全图 RGB MAE 仅 0.118/255。Froxel 输出现在是合法 RGBA16F 半分辨率
+            // 纹理，两平台统一恢复 RG 消费；无有效输入时仍回 identity。
+            ResourceHandle volTex = volume_identity_tex_;
+            if (inputs.volume_scatter_rg.IsValid()) {
+                ResourceHandle rgVol = resolve(inputs.volume_scatter_rg);
+                if (rgVol != inputs.black_texture && rgVol != handles::INVALID_RESOURCE)
+                    volTex = rgVol;
             }
 
             // Resolve SSR from RG when physical tex is INVALID; fall back to black.

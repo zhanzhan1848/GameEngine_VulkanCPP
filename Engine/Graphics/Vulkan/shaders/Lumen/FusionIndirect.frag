@@ -32,6 +32,13 @@ layout(set = 0, binding = 3) uniform texture2D albedoTex;
 layout(set = 0, binding = 4) uniform texture2D ssaoTex;
 layout(set = 0, binding = 5) uniform sampler defaultSampler;
 
+// GI 能量根治方案 Phase 1.1: GI 融合增益 debug 旋钮（UBO）。
+// CPU 端默认写入 1.0（物理恒等）——gain 仅为调试旋钮，显示增益永不进入
+// 反馈回路；PRIMAL_GI_INDIRECT_GAIN 可调（0..8，设 3.0 回滚旧行为）。
+layout(set = 0, binding = 6) uniform GiGainUBO {
+    float giIndirectGain;
+};
+
 void fusion_indirect() {
     vec4 ssgi4   = texture(sampler2D(ssgiColor, defaultSampler), inUv);
     vec3 ddgi    = texture(sampler2D(ddgiColor, defaultSampler), inUv).rgb;
@@ -50,7 +57,10 @@ void fusion_indirect() {
     // coloured bounce in the heavily occluded second-floor arcades.
     // 2026-09-06 UE 参考对齐：跟随 Metal 校准（54c9b8c2）——遮挡区 AO 压制
     // 加强，暗拱内部不再被 GI 填充抬亮。
-    float ao = mix(0.05, 1.0, pow(ssao, 1.2));
+    // B9: `indirect *= ao` stays removed (GTAO double-occludes near-field GI
+    // that probe visibility already attenuates). The former pow/mix `ao`
+    // computation was a dead variable — deleted so nobody reintroduces it by
+    // accident; ssao only feeds debug views from here.
 
     vec3 ssgi_irr  = ssgi4.rgb;
     float ssgi_hit  = ssgi4.a;
@@ -86,6 +96,6 @@ void fusion_indirect() {
     // B9: the full-stack `indirect *= ao` is removed — GTAO double-occluded
     // the near-field GI (probe visibility already attenuates it) while the
     // far-field floor above keeps its AO modulation (its only visibility cue).
-    vec3 indirect = albedo * gi * 0.31830988;
+    vec3 indirect = albedo * gi * giIndirectGain * 0.31830988;
     outColor = vec4(indirect, 1.0);
 }

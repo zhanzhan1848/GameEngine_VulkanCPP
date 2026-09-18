@@ -63,15 +63,14 @@ kernel void ddgi_update_irradiance(
         float hitDist = ray.radiance_and_dist.w;
 
         if (hitDist <= -1.5f) {
-            // C3.3：逃逸（w=-2，越出 RayMaxDistance）→ 天空。Vulkan
-            // DDGIUpdateIrradiance.comp 同款分档；finalize 已把 SKY 写进
-            // radiance，这里按 w 再兜一次（防御 + 语义显式）。
+            // C3.3：逃逸（w=-2，越出 RayMaxDistance）→ 天空。Phase 1.2 孪生
+            // 同步（DDGIUpdateIrradiance.comp）：不再按 w 覆盖成 DDGI_SKY_COLOR
+            // 常量——逃逸能量由 finalize 写入 ray_buffer（Vulkan 为
+            // EvaluateSkyBase×SkyColor.xyz 单一事实源），这里直接沿用。
 #ifdef PRIMAL_DDGI_PROJ_NOSKY
             // C 系列归因旋钮：逃逸/覆盖天空能量断电——A/B 实测 escape 天空
             // 在探针场平衡态的真实份额。
             radiance = float3(0.0f);
-#else
-            radiance = DDGI_SKY_COLOR;
 #endif
         } else if (hitDist < 0.0f) {
             // C3.3：步数耗尽（w=-1）——保留 finalize 的 SC 卡回退/黑，

@@ -62,7 +62,8 @@ kernel void ddgi_update_irradiance(
         float hitDist = ray.radiance_and_dist.w;
 
         if (hitDist < 0.0f) {
-            radiance = DDGI_SKY_COLOR;
+            // Phase 1.2 孪生同步：逃逸/耗尽不再覆盖成 DDGI_SKY_COLOR——
+            // 沿用 finalize 写入 ray_buffer 的天空/SC 回退结果。
         } else {
             // Gentler distance falloff — only attenuate near max distance
             float distWeight = 1.0f - smoothstep(vol.RayMaxDistance * 0.8f, vol.RayMaxDistance, hitDist);

@@ -67,6 +67,10 @@ layout(set = 0, binding = 5, std140) uniform GlobalData {
     vec4 hzb_params;
     vec4 cache_params;   // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
     vec4 diag_params;    // P1（reaudit §4.1/4.2）: x = diag mode（0/1/2/3，见 C++）
+    // GI 能量根治方案 Phase 1.3（R3）: far-cache 天空回退的 SkyColor 档位门——
+    // 与 DDGITraceFinalize 逃逸分支同源同门（EvaluateSkyBase × SkyColor.xyz）。
+    // 旧实现无门控，探针拿到 ~3.0 全额天空而 DDGI 只有 0.4 档（6-7× 失配）。
+    vec4 sky_params;     // x = sky_color_intensity（GIDebug 单一事实源）
 } global;
 
 // P1（sponza-gap-reaudit §4.1/4.2 逐阶段台账）: 分支计数 + 辐射累计。
@@ -418,9 +422,12 @@ void screen_probe_trace_finalize() {
             // DDGI unavailable / stop point outside the volume → sky.
             // P1.1: 第三套硬编码渐变(0.15-0.65) → 共享 EvaluateSkyBase，
             // 与可见天空/DDGI miss 同源同色。
+            // Phase 1.3（R3）: 补 SkyColor 档位门——旧实现无门控，far-cache
+            // 回退注入 ~3.0 全额天空（DDGI 同源只有 ×0.4 档），是"室内=中庭"
+            // 的次通道。与 DDGITraceFinalize 逃逸分支同门同值。
             float skyWeight = max(dot(probeNormal, rayDir), 0.0);
             if (skyWeight > 0.0) {
-                radiance = EvaluateSkyBase(rayDir);
+                radiance = EvaluateSkyBase(rayDir) * global.sky_params.xyz;
                 cosTheta = skyWeight;
             }
         }
@@ -491,10 +498,12 @@ void screen_probe_trace_finalize() {
             }
         }
         if (!ddgiOk) {
+            // Phase 1.3（R3）: 第四套（残存的）硬编码渐变 → 共享
+            // EvaluateSkyBase × SkyColor 档位门——world-fallback miss 与
+            // far-cache/可见天空/DDGI 同源同值（天空单一事实源）。
             float skyWeight = max(dot(probeNormal, rayDir), 0.0);
             if (skyWeight > 0.0) {
-                float skyY = rayDir.y * 0.5 + 0.5;
-                radiance = mix(vec3(0.15, 0.18, 0.25), vec3(0.4, 0.5, 0.65), skyY);
+                radiance = EvaluateSkyBase(rayDir) * global.sky_params.xyz;
                 cosTheta = skyWeight;
             }
         }

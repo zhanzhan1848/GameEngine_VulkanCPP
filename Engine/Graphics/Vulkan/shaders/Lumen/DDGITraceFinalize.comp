@@ -483,6 +483,12 @@ void ddgi_trace_finalize() {
             if (samplePrevColor(hitPos, prevRadiance)) {
                 // Screen radiance already includes this surface's material
                 // response. Adding another albedo-colored source creates energy.
+                // Phase 1.4（R4）: 过亮惩罚——prev-screen 是含直射 ×50 单位的
+                // 上一帧融合色，无惩罚回喂探针 = 直射绕过遮挡二次入账（历史
+                // 上还叠加了 ×3 融合增益）。对齐 SPGI finalize / SSGI 的
+                // 1/(1+max(lum-1,0)·2)：直射热点被压回间接量级。
+                float prevLum = dot(prevRadiance, vec3(0.2126, 0.7152, 0.0722));
+                prevRadiance *= 1.0 / (1.0 + max(prevLum - 1.0, 0.0) * 2.0);
                 result.xyz = prevRadiance;
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 2u;
