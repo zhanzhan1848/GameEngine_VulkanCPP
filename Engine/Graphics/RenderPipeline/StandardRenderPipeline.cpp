@@ -1,4 +1,5 @@
 #include "StandardRenderPipeline.h"
+#include "Graphics/Lumen/DDGIFitGrid.h"
 #include "Graphics/RenderPipeline/RenderPasses/ForwardPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/SSAOPass.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/BloomPass.h"
@@ -36,6 +37,7 @@
 #include "Components/Material.h"
 #include <iostream>
 #include <chrono>
+#include <cstring>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
@@ -696,9 +698,24 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (!device_) return;
     const auto& config = settings_.lumen;
 
+    // Scene-fit probe grid (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md
+    // §5.4): when ddgi_fit_to_bounds, the near volume's counts are derived
+    // from the coverage box (ceil(extent/spacing)+1 per axis, clamp 4..64)
+    // and probe[0] sits on the box's min corner. Pure arithmetic, shared with
+    // the unit tests via DDGIFitGrid.h.
+    const bool ddgiFit = config.ddgi_fit_to_bounds;
+    const lumen::DDGIFitGrid fitGrid = ddgiFit
+        ? lumen::DDGIFitGridFromBounds(config.ddgi_fit_bounds_min,
+                                       config.ddgi_fit_bounds_max,
+                                       config.ddgi_probe_spacing,
+                                       config.ddgi_fit_margin)
+        : lumen::DDGIFitGrid{};
+
     // T4.1: capture the base GI budgets before the governor starts scaling them.
-    gi_base_probe_budget_ = config.ddgi_probe_count_x * config.ddgi_probe_count_y *
-                            config.ddgi_probe_count_z;
+    const u32 nearCountX = ddgiFit ? fitGrid.count_x : config.ddgi_probe_count_x;
+    const u32 nearCountY = ddgiFit ? fitGrid.count_y : config.ddgi_probe_count_y;
+    const u32 nearCountZ = ddgiFit ? fitGrid.count_z : config.ddgi_probe_count_z;
+    gi_base_probe_budget_ = nearCountX * nearCountY * nearCountZ;
     gi_base_page_budget_ = config.surface_cache_capture_budget;
     gi_governor_ = {};   // reset to full quality on (re)initialization
 
@@ -735,9 +752,19 @@ void StandardRenderPipeline::InitializeLumenPasses() {
                 far.update_budget_divisor = 4;
                 vols.push_back(far);
             }
-            vols[0].probe_count_x = config.ddgi_probe_count_x;
-            vols[0].probe_count_y = config.ddgi_probe_count_y;
-            vols[0].probe_count_z = config.ddgi_probe_count_z;
+            if (ddgiFit) {
+                // Scene-fit near volume: fitted counts + min-corner origin
+                // (RTXGI (N-1)×S coverage convention). The origin rides the
+                // runtime params — LumenVolumeConfig::origin_override stays
+                // reserved for static bakes / gizmo editing (plan §5.1).
+                vols[0].probe_count_x = fitGrid.count_x;
+                vols[0].probe_count_y = fitGrid.count_y;
+                vols[0].probe_count_z = fitGrid.count_z;
+            } else {
+                vols[0].probe_count_x = config.ddgi_probe_count_x;
+                vols[0].probe_count_y = config.ddgi_probe_count_y;
+                vols[0].probe_count_z = config.ddgi_probe_count_z;
+            }
             vols[0].rays_per_probe = config.ddgi_rays_per_probe;
             vols[0].probe_spacing = config.ddgi_probe_spacing;
             vols[0].ray_max_distance = config.ddgi_ray_max_distance;
@@ -756,6 +783,10 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             vp.irradiance_temporal_weight = config.ddgi_irradiance_temporal_weight;
             vp.depth_temporal_weight = config.ddgi_depth_temporal_weight;
             vp.ray_max_distance = vc.ray_max_distance;
+            if (ddgiFit && vi == 0) {
+                vp.probe_origin = fitGrid.origin;
+                vp.use_probe_origin = true;
+            }
             if (vi > 0 && vc.update_budget_divisor > 1)
                 vp.max_probes_per_frame = 16384u / vc.update_budget_divisor;
             auto vol = std::make_unique<lumen::LumenDDGIPass>();
@@ -770,6 +801,18 @@ void StandardRenderPipeline::InitializeLumenPasses() {
                       << vp.probe_count_x << "x" << vp.probe_count_y
                       << "x" << vp.probe_count_z << " @ spacing "
                       << vp.probe_spacing << ")" << std::endl;
+        }
+        if (ddgiFit && ddgi_volume_count_ > 0) {
+            const math::v3 fmax{fitGrid.origin.x + fitGrid.covered.x,
+                                fitGrid.origin.y + fitGrid.covered.y,
+                                fitGrid.origin.z + fitGrid.covered.z};
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lumen] DDGI scene-fit grid: fit_min (" << fitGrid.origin.x << ", "
+                << fitGrid.origin.y << ", " << fitGrid.origin.z << ") covered "
+                << fitGrid.covered.x << "x" << fitGrid.covered.y << "x" << fitGrid.covered.z
+                << " (fit_max " << fmax.x << ", " << fmax.y << ", " << fmax.z << "), margin "
+                << config.ddgi_fit_margin << ", probes "
+                << fitGrid.count_x * fitGrid.count_y * fitGrid.count_z << std::endl;
         }
     }
 

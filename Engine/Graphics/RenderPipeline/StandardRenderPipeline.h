@@ -14,6 +14,7 @@
 #include <array>
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Lumen/GIPlatformProfile.h"
+#include "Engine/Common/CoreLogStream.h"   // SetOfflineSDFSource 的 auto-fit 日志（P1-A）
 #include "Graphics/Volume/VolumePass.h"
 #include "Graphics/RenderPipeline/Modules/GIAdaptiveGovernor.h"
 #include "Graphics/Volume/VolumeRenderer.h"
@@ -276,6 +277,31 @@ public:
         offline_sdf_extent_ = extent;
         offline_sdf_resolution_ = resolution;
         has_offline_sdf_ = (texture != rhi::handles::INVALID_RESOURCE);
+        // P1-A (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §8): with
+        // fit+auto, adopt the merger volume as the DDGI fit box. Flagging
+        // settings_dirty_ defers the DDGI teardown/rebuild to the next frame's
+        // ApplyConfigChanges (the §5.5 timing hazard); InitializeLumenPasses
+        // re-applies this SDF source to the rebuilt pass afterwards. Re-entry
+        // is safe — the second call sees equal bounds and skips.
+        if (settings_.lumen.ddgi_fit_to_bounds &&
+            settings_.lumen.ddgi_fit_bounds_auto &&
+            has_offline_sdf_) {
+            const math::v3 bmin = origin;
+            const math::v3 bmax{origin.x + extent.x, origin.y + extent.y,
+                                origin.z + extent.z};
+            const math::v3 curMax = settings_.lumen.ddgi_fit_bounds_max;
+            const math::v3 curMin = settings_.lumen.ddgi_fit_bounds_min;
+            if (bmin.x != curMin.x || bmin.y != curMin.y || bmin.z != curMin.z ||
+                bmax.x != curMax.x || bmax.y != curMax.y || bmax.z != curMax.z) {
+                settings_.lumen.ddgi_fit_bounds_min = bmin;
+                settings_.lumen.ddgi_fit_bounds_max = bmax;
+                settings_dirty_ = true;
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[Lumen] DDGI fit bounds auto-filled from offline SDF volume ("
+                    << extent.x << "x" << extent.y << "x" << extent.z
+                    << ") — DDGI volumes rebuild next frame" << std::endl;
+            }
+        }
         // Forward to DDGI pass so it uses the same high-res SDF for ray tracing.
         if (ddgi_pass_) {
             ddgi_pass_->SetOfflineSDFSource(texture, origin, extent, resolution);
