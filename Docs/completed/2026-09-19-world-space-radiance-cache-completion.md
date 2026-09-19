@@ -160,6 +160,20 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
    - **光向结论**：Lumen 参考的"颜色反射"观感主要由光向驱动（斜射光照亮
      旗帜/墙面的直射项 + 随光向分布的反弹）；`PRIMAL_LIGHT_DIR` env 可
      驱动对比（垂直顶光 vs 0.45,-0.8,0.35 斜射，截图入对比图集）。
+3. **[多跳衰减机制澄清 + 双稳态发现——2026-09-19 用户问询驱动]**
+   - **多跳衰减本身存在且正确**：SC tile radiosity 递推 `L(t) = base +
+     w×ρ×L(t-1)`，每跳衰减 = 表面反照率 ρ（石头 0.2-0.5），第 3 跳后 ≤8%；
+     DDGI/WRC 探针不再向 SC 注入（bootstrap 翻转后 E1 边衰减归零）。
+   - **非物理放大器已定位**：tile radiosity 权重 w=2.0 使每跳有效增益
+     w×ρ 达 0.6-1.0（高反照率面），稳态放大 2.5×（物理 1.43×）且高ρ 面
+     增益逼近 1——阴影被人为泵住。A/B 实测：w=1.0 室内 32.7 vs w=2.0
+     分支 15.0/37.3（不稳定）。
+   - **重大新发现：SC↔probe 系统双稳态**（与 w 无关——w=1.0 下三次运行
+     10.6/32.8/10.6）：暗分支 ~10 / 亮分支 ~33，分支选择取决于初始化
+     时序（atlas 收敛 vs 探针 trace 启动的亚帧竞态）。这解释了历史
+     "T8.13 多稳态/暗分支"现象在 bootstrap 翻转后仍存在——修复方向：
+     确定性收敛排序（探针 trace 严格晚于 atlas 首次收敛的帧级栅栏）或
+     loop-gain 钳制（GIDCGain 仪表已可监测）。
 3. **Metal parity 后置**（计划既定决策，GI 计划 §2①"Vulkan 领衔"）：
    C1 fusion mode（Metal 无 gain UBO 绑定面）、WRC pass（`WRC*.metal` 八件套）、
    B 系 Metal 端效果级 A/B。B1/B2/B3 的 Metal shader 侧已同步（含 Metal 现存
