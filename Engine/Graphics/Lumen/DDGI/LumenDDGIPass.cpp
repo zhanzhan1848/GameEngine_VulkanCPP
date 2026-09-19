@@ -1763,14 +1763,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // with SC via GIWarmup.h — unified default 90 (was 0 here, which
             // left the two modules' warmup windows inconsistent without env;
             // see remediation plan §执行日志 for the recorded rationale).
-            // WRC 计划 Stream B1: bootstrap 模式（PRIMAL_GI_PROBE_FEED_
-            // BOOTSTRAP=1）下解除窗口冻结——探针从第 0 帧更新，衰减引导项在
-            // 窗口内才携带真实反弹供给 SC；窗口后归零、SC 常备间接交棒
-            // tile radiosity。冻结政策不变：这仍属 DDGI 线 bug 修复级改动。
             {
                 const u32 kWarmupFrames = GIWarmupFrames();
-                if (!GIProbeFeedBootstrapEnabled() &&
-                    kWarmupFrames > 0u && current_frame_index < kWarmupFrames) updateCount = 0;
+                if (kWarmupFrames > 0u && current_frame_index < kWarmupFrames) updateCount = 0;
             }
 
             // Resolve physical handles from render graph

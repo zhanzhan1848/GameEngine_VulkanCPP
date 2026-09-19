@@ -138,6 +138,9 @@ struct FlattenedLightingParams {
 };
 
 struct SurfaceCacheFrameData {
+    // [双稳态修复] GI 暖启动时钟（frame - 内容就绪帧）——暖启动门禁
+    // 以此计数，消除异步内容加载时序导致的分支选择。
+    uint32_t gi_frame = 0;
     math::v3   camera_position;
     float      _pad;
     uint32_t   frame_index;

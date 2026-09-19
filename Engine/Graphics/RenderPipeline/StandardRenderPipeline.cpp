@@ -2602,6 +2602,17 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // Step 5: Surface Cache
     // ========================================================================
 
+    // [双稳态修复] GI 内容就绪闩锁：全部异步内容（离线 SDF / GlobalSDF
+    // 体素化 / 场景快照）就位的首帧。GI 暖启动时钟 gi_frame 从此帧计数，
+    // 消除异步加载时序导致的 SC↔probe 双稳态分支选择。
+    if (gi_content_ready_frame_ == 0xFFFFFFFFu) {
+        const bool sdfReady = (has_offline_sdf_ && offline_sdf_texture_ != handles::INVALID_RESOURCE)
+            || nanite::GlobalSDF::Get().IsVoxelizationReady();
+        const bool snapshotStable = !scene_snapshot_ || !scene_snapshot_->NeedsFullRebuild();
+        if (sdfReady && snapshotStable) gi_content_ready_frame_ = static_cast<u32>(frameCount_);
+    }
+    const u32 giFrame = GIFrame(static_cast<u32>(frameCount_));
+
     RGResourceHandle scLightingRG;
     if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
         lumen::SurfaceCacheFrameData frameData{};
@@ -2660,8 +2671,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                                                       static_cast<u32>(frameCount_));
         }
         {
+            lumen::SurfaceCacheFrameData frameDataGi = frameData;
+            frameDataGi.gi_frame = giFrame;
             const auto scOut = surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf,
-                                                            frameData, static_cast<u32>(frameCount_));
+                                                            frameDataGi, static_cast<u32>(frameCount_));
             // T1.1 (C2): reuse the producer's own RG identity instead of
             // re-importing the same physical atlas as "SCLightingAtlas".
             scLightingRG = scOut.lighting_atlas;
@@ -4056,8 +4069,18 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 surface_cache_pass_->AddCardCapturePasses(graph, *scene_snapshot_,
                                                           static_cast<u32>(frameCount_));
             }
+            // [双稳态修复] twin 站点同步闩锁（幂等——先到先锁）。
+            if (gi_content_ready_frame_ == 0xFFFFFFFFu) {
+                const bool sdfReadyT = (has_offline_sdf_ && offline_sdf_texture_ != handles::INVALID_RESOURCE)
+                    || nanite::GlobalSDF::Get().IsVoxelizationReady();
+                const bool snapshotStableT = !scene_snapshot_ || !scene_snapshot_->NeedsFullRebuild();
+                if (sdfReadyT && snapshotStableT) gi_content_ready_frame_ = static_cast<u32>(frameCount_);
+            }
+            const u32 giFrameT = GIFrame(static_cast<u32>(frameCount_));
             {
-                const auto scOut = surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameData, static_cast<u32>(frameCount_));
+                lumen::SurfaceCacheFrameData frameDataGi = frameData;
+                frameDataGi.gi_frame = giFrameT;
+                const auto scOut = surface_cache_pass_->AddPass(graph, RGResourceHandle{}, nullLightBuf, frameDataGi, static_cast<u32>(frameCount_));
                 // T1.1 (C2): producer's RG identity — see BuildRenderGraph twin.
                 scLightingRG = scOut.lighting_atlas;
             }

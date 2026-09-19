@@ -1900,13 +1900,15 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // is cut so LightEval's texels converge on direct+capture
                     // alone (deterministic) — matches the DDGI probe freeze
                     // (PRIMAL_SC_WARMUP_FRAMES).
-                    // WRC 计划 Stream B1: bootstrap 模式下馈送从第 0 帧生效，
-                    // 由 probe_feed_bootstrap 因子在窗口内线性衰减到 0——
-                    // "窗口后常开"的 E1 反馈边改为一次性引导。
+                    // WRC 计划 Stream B1: bootstrap 模式（默认开）下探针馈送
+                    // 边彻底切断（E1 边消失——能量单向化的最终态；暖启动窗口
+                    // 内 entire GI 回路冻结 = 确定性相位 1）。旧语义（bootstrap
+                    // 关）保留窗口后常开馈送。
                     params.ddgi_counts_valid[3] =
                         (frame_data.ddgi_irradiance != rhi::handles::INVALID_RESOURCE &&
                          !std::getenv("SC_PROBE_FEED_OFF") &&
-                         (kProbeFeedBootstrap || current_frame_index >= scWarmupFrames()))
+                         !kProbeFeedBootstrap &&
+                         frame_data.gi_frame >= scWarmupFrames())
                             ? frame_data.ddgi_valid : 0u;
                     // T3.3: gate the LightEval tile-radiosity read on whether
                     // the indirect trace/resolve actually ran this session —
@@ -1920,12 +1922,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     //（dispatch 条件同步放开）；消费端从第 1 帧读——LightEval
                     // 在同一 AddPass 里先于 trace/resolve 执行，第 0 帧读到的
                     // 是未初始化堆内存（同一历史 bug 的边界）。
+                    // 暖启动窗口内 tile 求解器冻结（确定性相位 1——atlas 纯
+                    // 直射收敛，无任何回路运行）；窗口后统一启动。
                     params.radiosity_gate[0] =
                         scIndirectEnabled(device_) &&
-                        (kProbeFeedBootstrap
-                            ? current_frame_index >= 1u
-                            : current_frame_index >= scWarmupFrames())
-                            ? 1u : 0u;
+                        frame_data.gi_frame >= scWarmupFrames() ? 1u : 0u;
                     // C3.5 slice 2: tile-radiosity tile size for the LightEval
                     // consumption read (0 = shader-side legacy 16).
                     params.radiosity_gate[2] = [] {
@@ -2604,10 +2605,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // consumer lands in the next slice, until then this stays a
                 // bring-up path.
                 const bool scIndirectOn = scIndirectEnabled(device_);
-                // WRC 计划 Stream B2: bootstrap 模式下 solver 从第 0 帧运行
-                //（LightEval 消费端 gate.x 同步改为 frame>=1，见 params 填充处）。
-                if (scIndirectOn &&
-                    (kProbeFeedBootstrap || current_frame_index >= scWarmupFrames()))
+                if (scIndirectOn && frame_data.gi_frame >= scWarmupFrames())
                 // trace: per-tile cosine ray fan → SDF march → ray_hits.
                 // resolve: aggregate ray_hits and expand into full-atlas indirect_out.
                 // Consumers (LightEval tile probe) land in the next slice.

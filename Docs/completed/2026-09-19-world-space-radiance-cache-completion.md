@@ -174,6 +174,17 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
      "T8.13 多稳态/暗分支"现象在 bootstrap 翻转后仍存在——修复方向：
      确定性收敛排序（探针 trace 严格晚于 atlas 首次收敛的帧级栅栏）或
      loop-gain 钳制（GIDCGain 仪表已可监测）。
+3. **[双稳态修复已落地——2026-09-19 确定性收敛排序]**：GI 内容就绪闩锁
+   （`gi_content_ready_frame_`：离线 SDF 就位 + GlobalSDF 体素化就绪 +
+   快照无待处理重建的首帧，双渲染路径幂等闩锁）+ GI 暖启动时钟
+   `gi_frame = frame - ready`（经 SurfaceCacheFrameData.gi_frame 流入
+   全部暖启动门禁）。**修复前**：同配置三次运行室内亮度 37.3/15.0/11.8
+   等（3× 方差，双稳态分支选择）；**修复后**：11.8/11.8/11.8（方差 0）。
+   直射区亦同步收敛（124.2 ×3，修复前 11% 漂移）。
+   - tile radiosity 权重 w 保持 2.0 默认（双稳态根因非 w；w=1.0 物理衰减
+     模式的 A/B 数据 32.7/10.6 留档）。
+   - DDGI 暖启动冻结恢复恒定生效（bootstrap 模式的提前解除撤销——冻结
+     是确定性相位 1 的一部分）。
 3. **Metal parity 后置**（计划既定决策，GI 计划 §2①"Vulkan 领衔"）：
    C1 fusion mode（Metal 无 gain UBO 绑定面）、WRC pass（`WRC*.metal` 八件套）、
    B 系 Metal 端效果级 A/B。B1/B2/B3 的 Metal shader 侧已同步（含 Metal 现存

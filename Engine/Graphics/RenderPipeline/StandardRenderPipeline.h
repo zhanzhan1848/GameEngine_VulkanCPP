@@ -504,6 +504,15 @@ private:
     // 与 DDGI 逐项同构、互不包含——禁止从 WRC 读 DDGI 内部（反之亦然）。
     std::array<std::unique_ptr<lumen::LumenWRCPass>, 2> wrc_volumes_{};
     u32 wrc_volume_count_ = 0;
+    // [双稳态修复] GI 内容就绪闩锁——首次满足（离线 SDF 就位 + GlobalSDF
+    // 体素化就绪 + 快照无待处理重建）的帧号。GI 暖启动时钟从此帧计数
+    // （gi_frame = frame - ready_frame），消除异步内容加载时序导致的
+    // SC↔probe 双稳态分支选择。
+    u32 gi_content_ready_frame_ = 0xFFFFFFFFu;
+    u32 GIFrame(u32 frame) const {
+        return gi_content_ready_frame_ == 0xFFFFFFFFu
+            ? 0u : (frame - gi_content_ready_frame_);
+    }
     lumen::GIPlatformProfile gi_profile_{};                // T4.5/C5 capability ceiling
     std::unique_ptr<lumen::LumenSSAOPass> ssao_pass_;
     std::unique_ptr<lumen::LumenSSGIPass> ssgi_pass_;
