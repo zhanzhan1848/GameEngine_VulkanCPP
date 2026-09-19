@@ -196,6 +196,19 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
    修复方向（capture/query 一致性专项）：① 卡片捕获近平面/远平面与
    卡片自身表面的包含关系；② 捕获深度有效性掩码（未捕获 texel 显式
    无效而非伪深度）；③ bounds 缺口的卡片 AABB 扩张（+SDF 命中带）。
+3. **[运行间卡片集合方差——"时平时暗"的最终根因]**（2026-09-19 深夜定位）：
+   CardGenerator 的卡片集合在不同运行间为 **374 张 vs 256 张** 两态：
+   异步 mesh 加载完成前注册的实例拿不到 mesh 紧致 AABB（E1 回退球转
+   立方体），回退 AABB 松→卡片投影面积过滤/分辨率公式产出不同集合；
+   256 卡状态下 SC 查询 found=0（全部候选 bounds 拒绝——卡片 AABB 与
+   实际几何错位），374 卡状态 found=37.7k 正常。这解释了：
+   - 运行间室内亮度 3× 方差（双稳态的真正根源，与 tile radiosity w 无关）；
+   - "间接光平/无结构"：256 卡状态查询全灭 → 反弹场退化为均匀暗场；
+   - 历史所有 A/B 对比的基线漂移。
+   **修复方向（下一专项）**：卡片注册确定性化——SC 卡片首次 Rebuild
+   推迟到 mesh 内容全部就位（content-ready 闩锁复用），或注册时对未
+   加载 mesh 延迟登记 + 就绪后增量重建。已完成的前置：内容就绪闩锁
+   （gi_content_ready_frame_）与 gi_frame 时钟已入库。
 3. **Metal parity 后置**（计划既定决策，GI 计划 §2①"Vulkan 领衔"）：
    C1 fusion mode（Metal 无 gain UBO 绑定面）、WRC pass（`WRC*.metal` 八件套）、
    B 系 Metal 端效果级 A/B。B1/B2/B3 的 Metal shader 侧已同步（含 Metal 现存

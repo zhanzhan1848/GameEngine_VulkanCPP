@@ -174,8 +174,13 @@ void wrc_trace_finalize() {
                     const bool orientOk = dot(scCardFaceNormal(card), -rayDir) < 0.0;
                     if (!orientOk) { atomicAdd(dbg.wrc_dbg2.z, 1u); continue; }
                     vec3 scRadiance; float key;
+                    // [产出率专项] tolFloor 0.45→0.9：SDF 命中带 0.45m 是
+                    // 单侧误差，斜射命中投影到卡片平面的误差翻倍；0.9 覆盖
+                    // 45° 入射。tolPerp = max(footprint*1.5, tolFloor) 同步
+                    // 放宽。env PRIMAL_WRC_QUERY_TOL 回调。
+                    const float kQueryTol = max(volume.SdfVoxelSizes[0].x * 1.25, 0.9);
                     if (scQueryCardCandidate(card, hitPos, -rayDir,
-                                             max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
+                                             kQueryTol,
                                              depth_atlas, lighting_atlas,
                                              vec3(0.0), scRadiance, key)) {
                         if (key < bestKey) {
