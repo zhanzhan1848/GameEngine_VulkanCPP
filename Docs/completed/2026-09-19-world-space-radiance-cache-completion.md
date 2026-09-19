@@ -145,6 +145,21 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
    - 遗留：命中 radiance 亮度仍偏暗（0.10，命中偏向非直射面的物理属性），
      色彩弹射强度随注入可见性提升后可再观察；卡片覆盖缺口（33% 网格外
      命中）继续由卡片覆盖专项跟进。
+3. **[用户复核收敛——2026-09-19 最终轮]**：用户对照 Lumen 参考复核三连
+   （间接平/室内亮/无色彩反射）驱动的最后一轮修正：
+   - **天空档默认 0.4→0.15**（`PRIMAL_GI_SKY_INTENSITY`/`PRIMAL_WRC_SKY_TIER`
+     可覆盖）：室内 ROI 亮度 55→37（暗部反弹层次恢复、明暗交界锐利）。
+     0.4 档的逃逸射线天空填充（EvaluateSkyBase×0.25×多方向）是室内均匀
+     灰亮的主源——量化：室内 4240 像素 sky0.4=0.506 / sky0.15=0.040×
+     gain 系数，非线性的部分来自 SC↔probe 回路对天空能量的循环放大
+     （bootstrap 默认翻转后该回路已切断）。
+   - **卡片注入 v4（能量守恒聚合）默认开**：全部可见卡片聚合后单次 mix，
+     trace 测量保留 (1-w) 份额；v3 逐卡独立 mix 洗平问题消除。
+   - **遗漏入库修复**：8 个 WRC shader/spv 因 git 大小写路径未命中
+     （大写 Shaders/ vs 小写 shaders/）未入库——已修正入库。
+   - **光向结论**：Lumen 参考的"颜色反射"观感主要由光向驱动（斜射光照亮
+     旗帜/墙面的直射项 + 随光向分布的反弹）；`PRIMAL_LIGHT_DIR` env 可
+     驱动对比（垂直顶光 vs 0.45,-0.8,0.35 斜射，截图入对比图集）。
 3. **Metal parity 后置**（计划既定决策，GI 计划 §2①"Vulkan 领衔"）：
    C1 fusion mode（Metal 无 gain UBO 绑定面）、WRC pass（`WRC*.metal` 八件套）、
    B 系 Metal 端效果级 A/B。B1/B2/B3 的 Metal shader 侧已同步（含 Metal 现存
