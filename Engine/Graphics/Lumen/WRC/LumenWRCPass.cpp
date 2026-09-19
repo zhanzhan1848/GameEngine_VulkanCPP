@@ -463,7 +463,7 @@ void LumenWRCPass::FillVolumeData(WRCVolumeData& vd, const WRCCameraData& cam, u
     vd.LightColor = math::v4{ cam.light_color.x, cam.light_color.y, cam.light_color.z, 0.0f };
     // 天空契约：共享 EvaluateSkyBase × SkyColor.xyz × 档位（kWRCSkyTier 独立
     // 常量源，随 w 下发；w=0 关闭天空注入）。
-    vd.SkyColor = math::v4{ cam.sky_color.x, cam.sky_color.y, cam.sky_color.z, kWRCSkyTier };
+    vd.SkyColor = math::v4{ cam.sky_color.x, cam.sky_color.y, cam.sky_color.z, WRCSkyTier() };
     vd.SCLookupCount = sc_lookup_count_;
     vd.SCAtlasSize = sc_atlas_size_;
     vd.SCGridValid = (sc_grid_offsets_ != rhi::handles::INVALID_RESOURCE &&

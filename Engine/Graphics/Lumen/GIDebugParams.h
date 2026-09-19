@@ -75,9 +75,18 @@ struct GIDebugParams {
     }
 };
 
-// 进程级实例（Meyers singleton，WASM 安全）
+// 进程级实例（Meyers singleton，WASM 安全）。
+// PRIMAL_GI_SKY_INTENSITY：天空档位 env 入口（默认 0.4 = 历史校准值）——
+// 三端单一旋钮的 env 面；调低可收紧封闭区的均匀灰填充（间接对比度 A/B）。
 inline GIDebugParams& GIDebug() {
-    static GIDebugParams instance;
+    static GIDebugParams instance = [] {
+        GIDebugParams p{};
+        if (const char* e = std::getenv("PRIMAL_GI_SKY_INTENSITY")) {
+            const float v = static_cast<float>(std::atof(e));
+            if (v >= 0.0f && v <= 4.0f) p.sky_color_intensity = v;
+        }
+        return p;
+    }();
     return instance;
 }
 

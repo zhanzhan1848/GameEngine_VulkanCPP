@@ -77,7 +77,17 @@ inline constexpr u32 kWRCProbeStrideU32       = kWRCDirsPerProbe * kWRCDirU32Str
 
 // 天空契约档位（§2.2：与 DDGITraceFinalize 同源的 sky tier，常量独立定义
 // ——不复用 DDGI 侧数值来源，两条线的天空档位可独立演化）。
-inline constexpr float kWRCSkyTier = 0.4f;   // × EvaluateSkyBase × SkyColor
+// PRIMAL_WRC_SKY_TIER env 可调（默认 0.4 = 历史校准值；调低收紧逃逸射线
+// 的均匀天空填充，室内/中庭对比度 A/B 用）。
+inline float WRCSkyTier() {
+    static const float v = [] {
+        const char* e = std::getenv("PRIMAL_WRC_SKY_TIER");
+        if (!e) return 0.4f;
+        const float f = static_cast<float>(std::atof(e));
+        return (f >= 0.0f && f <= 2.0f) ? f : 0.4f;
+    }();
+    return v;
+}
 
 // 探针 radiance EMA α（§2.2：独立于 DDGI 的 0.02/0.2 双系数，起步 0.1）。
 inline constexpr float kWRCRadianceAlpha = 0.1f;
