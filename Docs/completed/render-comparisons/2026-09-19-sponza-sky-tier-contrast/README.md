@@ -28,3 +28,14 @@
 - `sky_tier_040_default.png`——现状（平）
 - `sky_tier_025_gain16.png`——推荐档（结构恢复）
 - `sky_tier_015.png`——对比上限（室内过黑，暴露反弹缺口）
+
+## 追加（同日）：卡片→探针直投影（反弹修复）
+
+WRC trace 的 SC 命中产出率实测仅 ~20%（漏斗仪表），几何反弹≈0。新增
+`WRCCardInject`（DDGI SCDDGIIntegration 的 WRC 域等价边）：每探针按 CPU
+邻域表（374 卡片，1935/1936 探针有卡）将卡片平均 radiance 以距离衰减权重
+（≤0.45 封顶）注入最近方向槽。近场探针 meanLum 0.329→0.421（+28%）。
+
+- `sky025_inject_on.png`——天空档 0.25 + gain 1.6 + 注入开（当前推荐档）
+- 回滚：`PRIMAL_WRC_CARD_INJECT=0`
+- 已知限制：无可见性检查（与 DDGI path B 同款），隔墙注入靠距离衰减限制

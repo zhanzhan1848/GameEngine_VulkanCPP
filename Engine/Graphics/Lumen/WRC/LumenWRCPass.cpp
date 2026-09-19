@@ -6,6 +6,7 @@
 #include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Lumen/GIWarmup.h"
+#include "Graphics/Lumen/SurfaceCache/SurfaceCacheTypes.h"
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -366,6 +367,26 @@ void LumenWRCPass::CreatePipelines() {
     update_pipeline_    = MakePipeline(updateShader, update_layout_, 64, 1);
     prefilter_pipeline_ = MakePipeline(prefilterShader, prefilter_layout_, 64, 1);
 
+    // [反弹修复] 卡片→探针注入（binding 2 UBO / 3 probe_data rw / 4 cards /
+    // 5 lighting atlas / 6 card list）。
+    {
+        DescriptorSetLayoutBinding b[] = {
+            {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+        };
+        b[4].readonly = true;
+        b[6].readonly = true;
+        inject_set_layout_ = device_->CreateDescriptorSetLayout({7, b});
+        PipelineLayoutDesc pl{}; pl.setLayoutCount = 1; pl.setLayouts = &inject_set_layout_;
+        inject_layout_ = device_->CreatePipelineLayout(pl);
+        inject_pipeline_ = MakePipeline(Compile("WRCCardInject", "wrc_card_inject"),
+                                        inject_layout_, 64, 1);
+        for (u32 i = 0; i < 3; ++i)
+            inject_ds_[i] = device_->CreateDescriptorSet({inject_set_layout_});
+    }
     for (u32 i = 0; i < 3; ++i) {
         trace_ds_[i] = device_->CreateDescriptorSet({trace_set_layout_});
         finalize_ds_[i] = device_->CreateDescriptorSet({finalize_set_layout_});
@@ -417,6 +438,96 @@ WRCCacheView LumenWRCPass::GetCacheView(u32 frame_idx) const {
     view.dirs_per_probe = kWRCDirsPerProbe;
     view.probe_count_total = GetProbeCountTotal();
     return view;
+}
+
+// ============================================================================
+// [反弹修复] 卡片→探针邻域表构建（CPU，卡片数变化时重建）。
+// 每探针收集半径 R = 2.5×spacing 内的卡片，按 faceArea/d² 权重降序取 ≤16，
+// 打包为扁平 u32 表：[count, (cardIdx, wBits) × 16] × probeTotal。
+// ============================================================================
+void LumenWRCPass::UpdateProbeCardList(const SurfaceCacheCard* cards, u32 cardCount) {
+    card_inject_enabled_ = card_inject_enabled_ &&
+        std::getenv("PRIMAL_WRC_CARD_INJECT") == nullptr;
+    if (!card_inject_enabled_ || cardCount == 0 ||
+        cardCount == card_list_card_count_) return;
+    card_list_card_count_ = cardCount;
+
+    const u32 probeTotal = GetProbeCountTotal();
+    const float spacing = params_.probe_spacing;
+    const float radius = spacing * 2.5f + 1.0f;
+    probe_card_list_cpu_.assign(size_t(probeTotal) * 17u, 0u);
+
+    for (u32 pi = 0; pi < probeTotal; ++pi) {
+        const u32 pz = pi / (params_.probe_count_x * params_.probe_count_y);
+        const u32 rem = pi % (params_.probe_count_x * params_.probe_count_y);
+        const u32 py = rem / params_.probe_count_x;
+        const u32 px = rem % params_.probe_count_x;
+        const math::v3 probePos{
+            probe_origin_.x + float(px) * spacing,
+            probe_origin_.y + float(py) * spacing,
+            probe_origin_.z + float(pz) * spacing };
+
+        std::vector<std::pair<float, u32>> picked;   // (weight, cardIdx)
+        for (u32 ci = 0; ci < cardCount; ++ci) {
+            const SurfaceCacheCard& c = cards[ci];
+            if (c.resolution == 0) continue;
+            const math::v3 d{
+                c.center.x - probePos.x, c.center.y - probePos.y, c.center.z - probePos.z };
+            const float d2 = d.x * d.x + d.y * d.y + d.z * d.z;
+            const float ex = c.extent.x, ey = c.extent.y, ez = c.extent.z;
+            const uint axis = c.axis_direction & 0xFFu;
+            const float hu = (axis == 0u) ? ey : ex;
+            const float hv = (axis == 0u) ? ez : (axis == 1u ? ez : ey);
+            const float faceArea = 4.0f * hu * hv;
+            if (faceArea <= 0.0f) continue;
+            // 可达半径 = 卡片包围球 + 探针影响半径
+            const float bound = std::sqrt(ex * ex + ey * ey + ez * ez) + radius;
+            if (d2 > bound * bound) continue;
+            const float w = std::min(faceArea / std::max(d2, 1.0f) * 0.3f, 0.45f);
+            if (w <= 0.01f) continue;
+            picked.emplace_back(w, ci);
+        }
+        if (picked.empty()) continue;
+        std::sort(picked.begin(), picked.end(),
+                  [](const std::pair<float, u32>& a, const std::pair<float, u32>& b) {
+                      return a.first > b.first;
+                  });
+        const u32 take = std::min<u32>((u32)picked.size(), 16u);
+        u32* out = &probe_card_list_cpu_[size_t(pi) * 17u];
+        out[0] = take;
+        for (u32 i = 0; i < take; ++i) {
+            u32 bits;
+            std::memcpy(&bits, &picked[i].first, 4);
+            out[1 + i * 2 + 0] = picked[i].second;
+            out[1 + i * 2 + 1] = bits;
+        }
+    }
+
+    // 上传（缓冲按需建/重建）。
+    const u64 bytes = u64(probeTotal) * 17u * sizeof(u32);
+    if (card_list_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(card_list_);
+    BufferDesc desc{};
+    desc.size = bytes;
+    desc.type = BufferType::Structured;
+    desc.usage = GPUMemoryUsage::Dynamic;
+    desc.memoryUsage = GPUMemoryUsage::Dynamic;
+    desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    desc.structured.elementCount = probeTotal * 17u;
+    desc.structured.elementStride = sizeof(u32);
+    card_list_ = device_->CreateBuffer(desc);
+    if (card_list_ != handles::INVALID_RESOURCE) {
+        if (auto* m = static_cast<u32*>(device_->MapBuffer(card_list_))) {
+            std::memcpy(m, probe_card_list_cpu_.data(), bytes);
+            device_->UnmapBuffer(card_list_);
+        }
+    }
+    u32 probesWithCards = 0;
+    for (u32 pi = 0; pi < probeTotal; ++pi)
+        if (probe_card_list_cpu_[size_t(pi) * 17u] != 0u) ++probesWithCards;
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[WRC] card-inject list rebuilt: cards=" << cardCount
+        << " probes_with_cards=" << probesWithCards << "/" << probeTotal
+        << std::endl;
 }
 
 // ============================================================================
@@ -810,6 +921,26 @@ cmd->BindComputePipeline(update_pipeline_);
                             << "/" << probesValid << std::endl;
                     }
                 }
+            }
+
+            // ---- dispatch 3.5: WRCCardInject 卡片→探针直投影（反弹修复）----
+            if (card_inject_enabled_ && inject_pipeline_ != handles::INVALID_PIPELINE &&
+                card_list_ != handles::INVALID_RESOURCE &&
+                sc_enabled_ && sc_lighting_atlas_ != handles::INVALID_RESOURCE) {
+                DescriptorData params[] = {
+                    {2, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                    {3, DescriptorType::StorageBuffer, probe_data_},
+                    {4, DescriptorType::StorageBuffer, sc_card_data_},
+                    {5, DescriptorType::SampledImage, sc_lighting_atlas_},
+                    {6, DescriptorType::StorageBuffer, card_list_},
+                };
+                UpdateDescriptorSet(device_, inject_ds_[frameIdx], params, 5);
+                cmd->BindComputePipeline(inject_pipeline_);
+                DescriptorSetHandle sets[] = { inject_ds_[frameIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, inject_layout_, 0, 1, sets, 0, nullptr);
+                cmd->Dispatch((probeTotal + 63) / 64, 1, 1);
+                cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                   AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
             }
 
             // ---- dispatch 4（调试/降级，PRIMAL_WRC_PREFILTER=1）----

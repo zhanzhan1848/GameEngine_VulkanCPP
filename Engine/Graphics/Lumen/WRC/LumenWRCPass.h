@@ -16,6 +16,10 @@ namespace primal::graphics::rhi {
     class RHIDeviceBase;
 }
 
+namespace primal::graphics::lumen {
+struct SurfaceCacheCard;   // SC 域公共真值类型（SurfaceCacheTypes.h，cpp 内 include）
+}
+
 namespace primal::graphics::rendergraph {
     class RenderGraph;
 }
@@ -103,6 +107,12 @@ public:
 
     /// 调试/降级 prefilter dispatch 开关（PRIMAL_WRC_PREFILTER=1）。
     void SetPrefilterEnabled(bool e) { prefilter_enabled_ = e; }
+
+    /// [反弹修复] 卡片→探针直投影（DDGI SCDDGIIntegration 的 WRC 域等价边，
+    /// PRIMAL_WRC_CARD_INJECT=0 回滚）。管线侧每帧把卡片数组递进来；卡片数
+    /// 变化时 CPU 重建每探针邻域卡片表（≤16 张，按 faceArea/d² 权重降序）。
+    void UpdateProbeCardList(const SurfaceCacheCard* cards, u32 cardCount);
+    bool IsCardInjectEnabled() const { return card_inject_enabled_; }
 
     /// 探针数据缓冲（诊断读回 / GIDebug wrc 通道数据面）。
     rhi::ResourceHandle GetProbeDataBuffer() const { return probe_data_; }
@@ -243,6 +253,17 @@ private:
     bool trace_stats_enabled_{ false };
     // [Q2 排查] SC 查询漏斗计数（uvec4，DebugChannel 门控）。
     rhi::ResourceHandle dbg_buf_{ rhi::handles::INVALID_RESOURCE };
+    // [反弹修复] 卡片→探针注入状态。
+    bool card_inject_enabled_{ true };             ///< PRIMAL_WRC_CARD_INJECT=0 回滚
+    rhi::PipelineHandle inject_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle inject_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle inject_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetHandle inject_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET };
+    rhi::ResourceHandle card_list_{ rhi::handles::INVALID_RESOURCE };
+    u32 card_list_card_count_{ 0xFFFFFFFFu };      ///< 上次 build 时的卡片数（变更触发重建）
+    std::vector<u32> probe_card_list_cpu_;  ///< 扁平 (count, [cardIdx, wBits]×16) per probe
     // A5 需求驱动预算：消费计数周期读回（每 256 帧 copy，+2 帧 map）+
     // 优先级窗口（消费计数降序 → 0 计数轮转保底）。
     rhi_readback_ring consume_ring_;

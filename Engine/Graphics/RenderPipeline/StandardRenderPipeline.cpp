@@ -2758,6 +2758,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 } else {
                     wrc_volumes_[vi]->ClearSurfaceCacheResources();
                 }
+                // [反弹修复] 卡片→探针直投影的邻域表供给（卡片数变化时
+                // 内部自动重建）。
+                auto& cardGen = surface_cache_pass_->GetCardGenerator();
+                wrc_volumes_[vi]->UpdateProbeCardList(
+                    cardGen.GetCards().data(), (u32)cardGen.GetCards().size());
             }
             lumen::WRCCameraData wrcCam{};
             wrcCam.light_direction = rhi::math::Normalize(settings_.lighting.light_direction);
@@ -4127,6 +4132,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     } else {
                         wrc_volumes_[vi]->ClearSurfaceCacheResources();
                     }
+                    auto& cardGen = surface_cache_pass_->GetCardGenerator();
+                    wrc_volumes_[vi]->UpdateProbeCardList(
+                        cardGen.GetCards().data(), (u32)cardGen.GetCards().size());
                 }
                 lumen::WRCCameraData wrcCam{};
                 wrcCam.light_direction = rhi::math::Normalize(settings_.lighting.light_direction);
