@@ -82,9 +82,9 @@ inline constexpr u32 kWRCProbeStrideU32       = kWRCDirsPerProbe * kWRCDirU32Str
 inline float WRCSkyTier() {
     static const float v = [] {
         const char* e = std::getenv("PRIMAL_WRC_SKY_TIER");
-        if (!e) return 0.4f;
+        if (!e) return 0.15f;   // 反弹专项：与 GI 全局天空档同步下调
         const float f = static_cast<float>(std::atof(e));
-        return (f >= 0.0f && f <= 2.0f) ? f : 0.4f;
+        return (f >= 0.0f && f <= 2.0f) ? f : 0.15f;
     }();
     return v;
 }

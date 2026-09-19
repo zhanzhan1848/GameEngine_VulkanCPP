@@ -33,7 +33,10 @@ struct GIDebugParams {
     // ------------------------------------------------------------------
     // 权重热调（CPU 侧即时生效；shader 内常量旋钮随 T6.1 CB 化）
     // ------------------------------------------------------------------
-    float sky_color_intensity = 0.4f;    ///< DDGI 天空色强度（原 DawnDebugParams[4]）
+    // 默认 0.15（2026-09-19 反弹专项证据翻转）：0.4 档的天空填充把室内
+    // 抬到 64/255 的均匀灰（"间接光平/室内亮"的主源）；0.15 档室内 ~30
+    // 且保留反弹衰减层次。env PRIMAL_GI_SKY_INTENSITY 可覆盖（0.4 回旧观感）。
+    float sky_color_intensity = 0.15f;   ///< DDGI/WRC 天空色强度
     float albedo_intensity = 0.5f;       ///< DDGI 多反弹 albedo 强度（原 [5]）
     float probe_hysteresis = 0.2f;       ///< probe EMA 滞回（原 [6]）
     float fusion_glossy_strength = 0.75f; ///< T4.3 光泽项强度（0.75 为实测达标值）
