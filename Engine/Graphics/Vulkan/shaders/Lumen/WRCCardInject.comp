@@ -1,0 +1,232 @@
+#version 450 core
+// [WRC 反弹专项] WRCCardInject — 卡片→探针 radiance 直投影（DDGI
+// SCDDGIIntegration 的 WRC 域等价边）+ SDF 可见性门控。
+// Entry point: wrc_card_inject
+//
+// 动机（Q3 排查结论）：WRC trace 的 SC 命中产出率仅 ~20%，几何反弹三重衰减
+// 至 ≈0——室内探针只采到天空泄漏。本 pass 把 DDGI path B 的保底边带进 WRC
+// 域：每探针按 CPU 预build 的邻域卡片表，将卡片平均 radiance 以距离衰减权重
+// 注入 store 中最近的 Fibonacci 方向槽。
+//
+// 反弹专项 v2：每条 probe→card 连线经 GlobalSDF 可见性步进——遮挡则跳过
+//（消除隔墙注入的均匀灰化）；可见卡片权重上限由 CPU 按
+// PRIMAL_WRC_INJECT_CAP（默认 0.6）预夹紧，可见反弹得以压过天空填充。
+//
+// 能量语义：卡片 radiance 是 SC 真值（含直射 + tile 反弹 + emissive）——
+// 注入属合法 cache 填充（能量单向律不变：WRC 仍只被消费）。
+//
+// Flat bindings:
+//   2 = UniformBuffer                WRCVolumeData
+//   3 = StorageBuffer (read/write)   probe_data[]
+//   4 = StorageBuffer (readonly)     cards[]
+//   5 = SampledImage (2D)            SC lighting_atlas
+//   6 = StorageBuffer (readonly)     probe_card_list[] (uvec2: cardIdx, w bits)
+//   7..9 = SampledImage (3D)         SDF cascades（可见性步进）
+
+#extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 2, std140) uniform WRCVolumeDataBlock {
+    vec4  ProbeOrigin;
+    uvec4 ProbeCounts;
+    uvec4 ProbeMeta;
+    vec4  TraceParams;
+    vec4  SdfOrigins[3];
+    vec4  SdfVoxelSizes[3];
+    vec4  SdfExtents[3];
+    uvec4 SdfResolutionsAndCount;
+    vec4  LightDirection;
+    vec4  LightColor;
+    vec4  SkyColor;
+    uvec4 SCParams;
+} volume;
+
+layout(set = 0, binding = 3, std430) buffer ProbeDataBuf {
+    uint probe_data[];
+} pd;
+
+layout(set = 0, binding = 4, std430) readonly buffer CardsBuf {
+    SurfaceCacheCard data[];
+} cards;
+
+layout(set = 0, binding = 5) uniform texture2D lighting_atlas;
+
+layout(set = 0, binding = 6, std430) readonly buffer CardListBuf {
+    uvec2 data[];   // probe × (16 项 + 1 count 头)；y = weight float bits
+} cardList;
+
+layout(set = 0, binding = 7) uniform texture3D sdf_cascade_0;
+layout(set = 0, binding = 8) uniform texture3D sdf_cascade_1;
+layout(set = 0, binding = 9) uniform texture3D sdf_cascade_2;
+
+vec3 wrcUnpackRGB(uvec2 p) {
+    vec2 lo = unpackHalf2x16(p.x);
+    vec2 hi = unpackHalf2x16(p.y);
+    return vec3(lo.x, lo.y, hi.x);
+}
+vec2 wrcPackRGB(vec3 c) {
+    return uvec2(packHalf2x16(vec2(c.r, c.g)), packHalf2x16(vec2(c.b, 0.0)));
+}
+vec3 wrcDir(uint k, uint K) {
+    float y = 1.0 - 2.0 * (float(k) + 0.5) / float(K);
+    float r = sqrt(max(1.0 - y * y, 0.0));
+    float a = 2.399963229728653 * float(k);
+    return vec3(cos(a) * r, y, sin(a) * r);
+}
+
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    vec3 local = pos - origin;
+    return local.x >= 0.0 && local.x < extent.x &&
+           local.y >= 0.0 && local.y < extent.y &&
+           local.z >= 0.0 && local.z < extent.z;
+}
+
+float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
+                       vec3 cascadeOrigin, vec3 cascadeExtent, uint resolution) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) {
+        return 1.0e10;
+    }
+    vec3 p = uvw * float(resolution) - 0.5;
+    ivec3 base = ivec3(floor(p));
+    vec3 f = p - vec3(base);
+    ivec3 resI = ivec3(int(resolution) - 1);
+    ivec3 c0 = clamp(base, ivec3(0), resI);
+    ivec3 c1 = clamp(base + ivec3(1), ivec3(0), resI);
+    float d000 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c0.z), 0).r;
+    float d100 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float d010 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float d110 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float d001 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float d101 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float d011 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float d111 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+
+float sampleBestSDF(vec3 pos) {
+    uint cc = volume.SdfResolutionsAndCount.w;
+    if (cc > 0u && isInsideCascade(pos, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz)) {
+        return sampleSDFCascade(sdf_cascade_0, pos, volume.SdfOrigins[0].xyz,
+                                volume.SdfExtents[0].xyz, volume.SdfResolutionsAndCount.x);
+    } else if (cc > 1u && isInsideCascade(pos, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz)) {
+        return sampleSDFCascade(sdf_cascade_1, pos, volume.SdfOrigins[1].xyz,
+                                volume.SdfExtents[1].xyz, volume.SdfResolutionsAndCount.y);
+    } else if (cc > 2u && isInsideCascade(pos, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz)) {
+        return sampleSDFCascade(sdf_cascade_2, pos, volume.SdfOrigins[2].xyz,
+                                volume.SdfExtents[2].xyz, volume.SdfResolutionsAndCount.z);
+    }
+    return 1.0e10;
+}
+
+// probe→cardCenter 可见性步进：在到达卡片带（0.85×距离）之前进入 SDF 命中
+// 带 → 遮挡；探针自身皮肤内先爬出（同 trace 语义）。越界按大步走（朝卡片
+// 方向的越界意味着卡片在场外——保持可见，由 CPU 半径过滤兜底）。
+bool wrcVisible(vec3 probePos, vec3 dir, float cardDist) {
+    float voxel = volume.SdfVoxelSizes[0].x;
+    float hitThreshold = max(voxel * 1.25, 0.45);
+    float minStep = voxel * 0.25;
+    float stopT = 0.85 * cardDist;
+    bool clearedSkin = false;
+    float t = 0.0;
+    const uint STEPS = 24u;
+    for (uint i = 0u; i < STEPS; ++i) {
+        float d = sampleBestSDF(probePos + dir * t);
+        if (d >= 1.0e9) {
+            t += max(cardDist * 0.15, 1.0);   // 场外大步（卡片在场外 → 放行）
+            if (t >= stopT) return true;
+            continue;
+        }
+        if (d < hitThreshold) {
+            if (!clearedSkin) {
+                t += max(d, minStep);
+                if (t >= stopT) return true;
+                continue;
+            }
+            return t >= stopT;   // 命中带内且未到卡片带 → 遮挡
+        }
+        clearedSkin = true;
+        t += clamp(d, minStep, max(voxel * 2.0, 0.2));
+        if (t >= stopT) return true;
+    }
+    return true;
+}
+
+void wrc_card_inject() {
+    uint pi = gl_GlobalInvocationID.x;
+    if (pi >= volume.ProbeMeta.y) return;
+
+    const uint K = volume.ProbeMeta.x;
+    const uint stride = K * 2u + 4u;
+    const uint base = pi * stride;
+
+    // 入几何 / 未收敛探针不注入（与 update 端排除口径一致）。
+    uint state = pd.probe_data[base + K * 2u + 2u];
+    if ((state & 1u) == 0u || (state & 2u) != 0u) return;
+
+    uint count = cardList.data[pi * 17u].x;
+    if (count == 0u) return;
+    count = min(count, 16u);
+
+    uvec3 counts = volume.ProbeCounts.xyz;
+    uint pz = pi / (counts.x * counts.y);
+    uint rem = pi % (counts.x * counts.y);
+    uint py = rem / counts.x;
+    uint px = rem % counts.x;
+    vec3 probePos = volume.ProbeOrigin.xyz
+                  + vec3(float(px), float(py), float(pz)) * volume.ProbeOrigin.w;
+
+    const uint atlasSize = volume.SCParams.y;
+
+    for (uint i = 0u; i < count; ++i) {
+        uvec2 entry = cardList.data[pi * 17u + 1u + i];
+        uint cardIdx = entry.x;
+        float w = uintBitsToFloat(entry.y);
+        if (w <= 0.0) break;   // CPU 已按权重降序；0 之后全部无效
+
+        SurfaceCacheCard card = cards.data[cardIdx];
+        vec3 toCard = card.center.xyz - probePos;
+        float d2 = dot(toCard, toCard);
+        if (d2 < 1e-4) continue;
+        float dist = sqrt(d2);
+        vec3 dir = toCard / dist;
+
+        // 可见性门控（反弹专项 v2）：遮挡卡片跳过——消除隔墙注入灰化。
+        if (!wrcVisible(probePos, dir, dist)) continue;
+
+        // 卡片面平均 radiance：atlas rect 4×4 采样。
+        uint res = card.resolution;
+        vec3 acc = vec3(0.0);
+        for (uint sy = 0u; sy < 4u; ++sy)
+        for (uint sx = 0u; sx < 4u; ++sx) {
+            uvec2 t = uvec2(card.atlas_offset_x + (res * (sx * 2u + 1u)) / 8u,
+                            card.atlas_offset_y + (res * (sy * 2u + 1u)) / 8u);
+            acc += texelFetch(lighting_atlas, ivec2(min(t, uvec2(atlasSize - 1u))), 0).rgb;
+        }
+        acc /= 16.0;
+        float lum = 0.2126 * acc.r + 0.7152 * acc.g + 0.0722 * acc.b;
+        if (lum <= 1e-4) continue;   // 黑卡片 = 无测量
+
+        // 最近 Fibonacci 方向槽（radiance 沿射线不变——直接值注入，无 cos 因子）。
+        uint best = 0u;
+        float bestDot = -2.0;
+        for (uint k = 0u; k < K; ++k) {
+            float c = dot(wrcDir(k, K), dir);
+            if (c > bestDot) { bestDot = c; best = k; }
+        }
+
+        uint slot = base + best * 2u;
+        vec3 existing = wrcUnpackRGB(uvec2(pd.probe_data[slot], pd.probe_data[slot + 1u]));
+        vec3 blended = mix(existing, min(acc, vec3(64.0)), clamp(w, 0.0, 1.0));
+        uvec2 packed = wrcPackRGB(blended);
+        pd.probe_data[slot] = packed.x;
+        pd.probe_data[slot + 1u] = packed.y;
+    }
+}

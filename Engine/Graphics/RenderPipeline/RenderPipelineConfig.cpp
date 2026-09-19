@@ -190,7 +190,11 @@ lumen::LumenConfig PipelineQualityConfig::LumenConfigFromPreset(lumen::LumenQual
         //（迁移完成判据 §5.3 五项通过后的档位接线）。DDGI 直采永久保留
         //（Medium 档正解）；运行总开关仍是 PRIMAL_WRC_ENABLE（WRCEnabled()，
         // 置 0 全量回 DDGI 线）。
+        // [反弹专项] 近场密度 3→2m（RTXGI 参考粗端→中位）：3-5m 宽的室内
+        // 房间 3m 间距仅 ~1 探针/间，房间内变化被抹平（"间接光平"第二
+        // 成因）。2m → 场景贴合后 ~2600 探针（预算可负担）。
         c.wrc_enable = true;
+        c.wrc_probe_spacing = 2.0f;
         break;
     }
 

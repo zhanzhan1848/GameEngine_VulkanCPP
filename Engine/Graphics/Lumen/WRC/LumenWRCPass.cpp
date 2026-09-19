@@ -368,7 +368,7 @@ void LumenWRCPass::CreatePipelines() {
     prefilter_pipeline_ = MakePipeline(prefilterShader, prefilter_layout_, 64, 1);
 
     // [反弹修复] 卡片→探针注入（binding 2 UBO / 3 probe_data rw / 4 cards /
-    // 5 lighting atlas / 6 card list）。
+    // 5 lighting atlas / 6 card list / 7..9 SDF 可见性步进）。
     {
         DescriptorSetLayoutBinding b[] = {
             {2, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
@@ -376,10 +376,16 @@ void LumenWRCPass::CreatePipelines() {
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
             {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+            {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
         };
         b[4].readonly = true;
         b[6].readonly = true;
-        inject_set_layout_ = device_->CreateDescriptorSetLayout({7, b});
+        b[7].is3D = true;
+        b[8].is3D = true;
+        b[9].is3D = true;
+        inject_set_layout_ = device_->CreateDescriptorSetLayout({8, b});
         PipelineLayoutDesc pl{}; pl.setLayoutCount = 1; pl.setLayouts = &inject_set_layout_;
         inject_layout_ = device_->CreatePipelineLayout(pl);
         inject_pipeline_ = MakePipeline(Compile("WRCCardInject", "wrc_card_inject"),
@@ -483,7 +489,16 @@ void LumenWRCPass::UpdateProbeCardList(const SurfaceCacheCard* cards, u32 cardCo
             // 可达半径 = 卡片包围球 + 探针影响半径
             const float bound = std::sqrt(ex * ex + ey * ey + ez * ez) + radius;
             if (d2 > bound * bound) continue;
-            const float w = std::min(faceArea / std::max(d2, 1.0f) * 0.3f, 0.45f);
+            // 反弹专项 v2: 可见卡片权重上限 PRIMAL_WRC_INJECT_CAP（默认
+            // 0.6）——可见反弹压过天空填充；shader 端 clamp 放宽到 1.0，
+            // 夹紧责任在 CPU。
+            static const float kInjectCap = [] {
+                const char* e = std::getenv("PRIMAL_WRC_INJECT_CAP");
+                if (!e) return 0.6f;
+                const float v = (float)std::atof(e);
+                return (v > 0.0f && v <= 1.0f) ? v : 0.6f;
+            }();
+            const float w = std::min(faceArea / std::max(d2, 1.0f) * 0.3f, kInjectCap);
             if (w <= 0.01f) continue;
             picked.emplace_back(w, ci);
         }
@@ -923,9 +938,11 @@ cmd->BindComputePipeline(update_pipeline_);
                 }
             }
 
-            // ---- dispatch 3.5: WRCCardInject 卡片→探针直投影（反弹修复）----
+            // ---- dispatch 3.5: WRCCardInject 卡片→探针直投影（反弹修复，
+            // SDF 可见性门控需要 sdfTextures 就位）----
             if (card_inject_enabled_ && inject_pipeline_ != handles::INVALID_PIPELINE &&
                 card_list_ != handles::INVALID_RESOURCE &&
+                sdfTextures[0] != handles::INVALID_RESOURCE &&
                 sc_enabled_ && sc_lighting_atlas_ != handles::INVALID_RESOURCE) {
                 DescriptorData params[] = {
                     {2, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
@@ -933,8 +950,11 @@ cmd->BindComputePipeline(update_pipeline_);
                     {4, DescriptorType::StorageBuffer, sc_card_data_},
                     {5, DescriptorType::SampledImage, sc_lighting_atlas_},
                     {6, DescriptorType::StorageBuffer, card_list_},
+                    {7, DescriptorType::SampledImage, sdfTextures[0]},
+                    {8, DescriptorType::SampledImage, sdfTextures[1]},
+                    {9, DescriptorType::SampledImage, sdfTextures[2]},
                 };
-                UpdateDescriptorSet(device_, inject_ds_[frameIdx], params, 5);
+                UpdateDescriptorSet(device_, inject_ds_[frameIdx], params, 8);
                 cmd->BindComputePipeline(inject_pipeline_);
                 DescriptorSetHandle sets[] = { inject_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, inject_layout_, 0, 1, sets, 0, nullptr);

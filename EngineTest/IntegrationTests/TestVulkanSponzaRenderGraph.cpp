@@ -41,6 +41,8 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <string>
+#include <cctype>
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -130,6 +132,27 @@ static uint16_t f32_to_f16(float f) {
     if (exp <= 0) return sign;
     if (exp >= 31) return sign | 0x7C00u;
     return sign | (uint16_t(exp) << 10) | uint16_t(mantissa);
+}
+
+// P3（sponza-gap-reaudit §4.8）: 表现层开关的统一 env 语义——未设置=关，
+// 显式 "0"/"false"/"off"（不区分大小写）也=关。旧 `getenv()!=nullptr` 让
+// FROXEL=0 / SSR=0 反而开启功能，实验记录与用户理解不一致。
+static bool EnvEnabled(const char* name) {
+    const char* v = std::getenv(name);
+    if (!v) return false;
+    std::string s(v);
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return !(s == "0" || s == "false" || s == "off");
+}
+
+// 2026-09-16（volume-gi-repair-audit V-Test-A/V7）: froxel 标定用的 float env
+// 读取——未设置/非法返回 def。
+static float EnvFloat(const char* name, float def) {
+    const char* v = std::getenv(name);
+    if (!v) return def;
+    char* end = nullptr;
+    float val = std::strtof(v, &end);
+    return (end && *end == '\0') ? val : def;
 }
 
 // T4.6.5 part 37: load precompiled .spv bytes (binary SPIR-V). Mirrors the
@@ -341,7 +364,15 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         return bytes;
     };
     auto deferredVsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.vert.spv");
-    auto deferredFsBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.frag.spv");
+    auto deferredFsBytes = loadSpv(
+        // sun-audit P2: PRIMAL_SPEC_OCC=1 → GTAO 镜面遮挡变体；=2 → DDGI
+        // 探针 Chebyshev 可见性变体（第二步，消除 GTAO 饱和）；未设 →
+        // 太阳阴影代理 stand-in。见 DeferredLighting.frag 分支注释。
+        [](const char* e) -> const char* {
+            if (!e) return "Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting.frag.spv";
+            if (e[0] == '2') return "Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting_probeocc.frag.spv";
+            return "Engine/Graphics/Vulkan/shaders/Forward/DeferredLighting_specocc.frag.spv";
+        }(std::getenv("PRIMAL_SPEC_OCC")));
     if (deferredVsBytes.empty() || deferredFsBytes.empty()) {
         std::cerr << "[Part30.4] Missing DeferredLighting SPIR-V" << std::endl;
         return false;
@@ -396,7 +427,16 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         std::cerr << "[GI-isolate] FusionIndirect variant: " << fiPath << std::endl;
         fusionIndirectBytes = loadSpv(fiPath.c_str());
     }
+    // 2026-09-17 归因 A/B：DDGI_LEGACY_CONSUMERS=1 → 消费端旧原格点行为变体
+    // （build_spv.sh 以 -DDDGI_LEGACY_CONSUMERS 编译的 sibling bytecode）。
     auto giGatherBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather.comp.spv");
+    if (std::getenv("DDGI_LEGACY_CONSUMERS")) {
+        auto legacyBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_legacy.comp.spv");
+        if (!legacyBytes.empty()) {
+            giGatherBytes = legacyBytes;
+            std::cerr << "[GI-legacy] DDGIGIGather_legacy variant loaded" << std::endl;
+        }
+    }
     if (!fusionIndirectBytes.empty())
         handles.fusion_indirect_ps = device_->CreateShader(
             fusionIndirectBytes.data(), fusionIndirectBytes.size(), ShaderStage::Pixel, "fusion_indirect");
@@ -448,11 +488,37 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     lumen::LumenConfig lumenConfig{};
     lumenConfig.quality = lumen::LumenQualityPreset::High;
     lumenConfig.axes.use_screen_probes = true;
+    // [反弹专项] WRC 近场密度 3→2m（RTXGI 参考中位；3-5m 宽的室内房间
+    // 3m 间距仅 ~1 探针/间，房间内变化被抹平）。测试直构 config 不走
+    // preset 工厂——这里与 preset 表同步。
+    lumenConfig.wrc_probe_spacing = 2.0f;
     // 2026-09-05 跨平台 SC 制度对齐：全量捕获（capture_budget=0）与 Metal
     // TestModularPipeline 同配置。稀疏更新（默认 256 页/帧）下 SC atlas 长
     // 期陈旧 → 探针 trace 采样到均匀化辐射 → 探针场 L1 方向能量只有
     // Metal 的一半（|L1|/|L0| 0.18 vs 0.40），画面偏平偏暗。
     lumenConfig.surface_cache_capture_budget = 0;
+    // Scene-fit DDGI probe grid (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md
+    // §5.5): near volume derives counts from the geometry AABB measured off
+    // Sponza_pipeline_signed_v5.model vertex buffers (plan §1.2,
+    // 37.2×15.6×22.9). Spacing 3.0 → 14×7×9 = 882 probes vs 16,384 fixed.
+    // A/B switches: SPONZA_DDGI_NO_FIT=1 reverts to the legacy centered
+    // 32×16×32 grid; SPONZA_FIT_SPACING overrides spacing for the same-AABB
+    // density ladder (P1-B, 3.0 vs 1.5).
+    if (!std::getenv("SPONZA_DDGI_NO_FIT")) {
+        lumenConfig.ddgi_fit_to_bounds = true;
+        if (std::getenv("SPONZA_FIT_AUTO")) {
+            // P1-A 口径 A: no explicit box — SetOfflineSDFSource backfills the
+            // merger volume and the DDGI volumes rebuild on frame 1.
+            lumenConfig.ddgi_fit_bounds_auto = true;
+        } else {
+            lumenConfig.ddgi_fit_bounds_min = {-19.21f, -1.26f, -11.83f};
+            lumenConfig.ddgi_fit_bounds_max = { 18.00f, 14.29f,  11.05f};
+        }
+        if (const char* e = std::getenv("SPONZA_FIT_SPACING")) {
+            const float s = (float)std::atof(e);
+            if (s > 0.25f && s < 32.0f) lumenConfig.ddgi_probe_spacing = s;
+        }
+    }
     pipeline_->SetLumenConfig(lumenConfig);
 
     // Keep direct and probe lighting in the same physical scale. The DDGI
@@ -468,15 +534,40 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f};
     renderSettings.lighting.ddgi_light_color = {5.0f, 5.0f, 5.0f, 1.0f};
     sponza_reference::LightingSettings(renderSettings.lighting);
+    // sun-audit §5.3: PCSS 太阳角直径（度）。默认 0.5357 已在
+    // SceneLightingParams；这里给 A/B 调参入口，0 = 旧固定 lightSizeUV 档。
+    if (const char* e = std::getenv("PRIMAL_SUN_ANGULAR_DIAMETER")) {
+        const float v = (float)std::atof(e);
+        if (v >= 0.0f && v <= 10.0f) renderSettings.lighting.sun_angular_diameter_deg = v;
+    }
+    // P2.1 (2026-09-15): FroxelFog Vulkan 启用复测（路线图 Phase 2）——
+    // FROXEL=1 环境变量开启（体积雾 + 体积阴影光轴）。默认仍关，A/B 门。
+    // 密度按参考图空气透视感调参：默认 extinction 0.1 过淡、高度雾关闭。
+    renderSettings.quality.enable_froxel_fog = EnvEnabled("FROXEL");
+    if (renderSettings.quality.enable_froxel_fog) {
+        renderSettings.froxel.extinction_scale = 0.35f;
+        renderSettings.froxel.height_fog_base  = 0.0f;
+        renderSettings.froxel.height_fog_scale = 8.0f;   // 地面雾向上 ~8m 渐隐
+        // P1（reaudit §4.4）: 默认 fade_range=10 → 距相机 20m 外密度清零，
+        // 参考机位下庭院（30-60m）整段无雾。扩到 30：30m 内全密度，
+        // 60m 处收敛 0，覆盖庭院可视深度。
+        renderSettings.froxel.density_fade_range = 30.0f;
+        // 2026-09-16（volume-gi-repair-audit V-Test-A/V7）: 标定旋钮。
+        // FROXEL_UNIFORM=<density> 常量介质（绕过 noise/SDF/height/fade，
+        // 仅保留几何清零）；FROXEL_PHASE_G=<g> HG 各向异性（0=各向同性）。
+        renderSettings.froxel.density_uniform_debug = EnvFloat("FROXEL_UNIFORM", -1.0f);
+        renderSettings.froxel.phase_g = EnvFloat("FROXEL_PHASE_G", 0.0f);
+    }
     pipeline_->UpdateSettings(renderSettings);
 
-    // Reflections and all volume paths are intentionally out of scope for this
-    // test. Keep these explicit so future preset changes cannot enable them.
-    pipeline_->SetPassEnabled(RenderPassID::SSR, false);
+    // Reflections and volume paths are gated per-phase (roadmap
+    // 2026-09-15-sponza-reference-look-roadmap): SSR/Volumetric 仍默认关，
+    // FroxelFog 由 FROXEL=1 环境变量开启（P2.1 Vulkan 复测）。
+    pipeline_->SetPassEnabled(RenderPassID::SSR, EnvEnabled("SSR"));
     pipeline_->SetMirrorEnabled(false);
     pipeline_->SetPassEnabled(RenderPassID::VolumePass, false);
     pipeline_->SetPassEnabled(RenderPassID::VolumeRenderer, false);
-    pipeline_->SetPassEnabled(RenderPassID::FroxelFog, false);
+    pipeline_->SetPassEnabled(RenderPassID::FroxelFog, EnvEnabled("FROXEL"));
 
     // Mirror plane: cover the whole Sponza floor (the camera starts at
     // {0,5,0} looking horizontally — a small mirror at the origin sits
@@ -497,7 +588,11 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     const std::string baseDir =
         "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
     // Try pipeline model (high-precision per-mesh SDF) first, fall back to old.
-    std::string modelPath = baseDir + "Sponza.model";
+    // PRIMAL_TEST_MODEL：A/B 替代资产名（如 SponzaSDF.model——--sdf 烘焙的
+    // per-mesh SDF 版本，供 PRIMAL_DDGI_DETAIL_SDF 消费）。
+    std::string modelName = "Sponza.model";
+    if (const char* e = std::getenv("PRIMAL_TEST_MODEL")) modelName = e;
+    std::string modelPath = baseDir + modelName;
     std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         std::cerr << "[Part30.4] Failed to open " << modelPath << std::endl;
@@ -507,7 +602,7 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     file.seekg(0, std::ios::beg);
     std::vector<char> modelBuffer(static_cast<size_t>(modelSize));
     if (!file.read(modelBuffer.data(), modelSize)) {
-        std::cerr << "[Part30.4] Failed to read Sponza.model" << std::endl;
+        std::cerr << "[Part30.4] Failed to read " << modelName << std::endl;
         return false;
     }
 
@@ -519,7 +614,7 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         return false;
     }
     std::cout << "[Part30.4] Loaded " << sceneMeshes_.size()
-              << " meshes from Sponza.model" << std::endl;
+              << " meshes from " << modelName << std::endl;
 
     // Shared Material + fallback textures + sampler (mirror NonEditor Step 2).
     sharedMaterial_ = std::make_shared<Material>();
@@ -590,8 +685,77 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
             out.valid = (out.data != nullptr);
         };
         decode(ResolveTexturePath(baseDir, meshInfo.diffuseTexturePath), decAlbedo[i]);
-        decode(ResolveTexturePath(baseDir, meshInfo.normalTexturePath), decNormal[i]);
-        decode(ResolveTexturePath(baseDir, meshInfo.ormTexturePath), decORM[i]);
+        // P1-C（sponza-gap-audit §4.4）: 法线完整性。Sponza.model 的
+        // pipeline 格式材质里 normal 字段全为空字符串——法线贴图从未加载
+        // （全静默回退平法线）。显式路径优先，否则按磁盘命名约定
+        // （`_diffuse`→`_normal`、`_Albedo`→`_Normal`）派生兄弟贴图。
+        {
+            std::string normalPath = ResolveTexturePath(baseDir, meshInfo.normalTexturePath);
+            if (normalPath.empty()) {
+                const std::string diffRel = meshInfo.diffuseTexturePath;
+                for (const char* suffix : {"_normal.png", "_Normal.png"}) {
+                    const size_t pos = diffRel.rfind("_diffuse");
+                    if (pos != std::string::npos) {
+                        normalPath = ResolveTexturePath(baseDir, diffRel.substr(0, pos) + suffix);
+                    } else {
+                        const size_t posA = diffRel.rfind("_Albedo");
+                        if (posA != std::string::npos)
+                            normalPath = ResolveTexturePath(baseDir, diffRel.substr(0, posA) + suffix);
+                    }
+                    if (!normalPath.empty()) break;
+                }
+            }
+            decode(normalPath, decNormal[i]);
+        }
+        // P1-C: ORM 完整性。pipeline 格式从不赋值 ormTexturePath，且磁盘
+        // 资产是分离的 `_roughness/_metallic`（无 _orm 合并文件）——此前
+        // 全部 393 个 mesh 静默回退 roughness≈0.5 常数，粗糙度贴图被抹掉。
+        // 先试显式 ormTexturePath，否则派生 roughness/metallic 兄弟贴图并
+        // 合成 ORM（R=AO 恒 1，G=roughness，B=metallic）。
+        const std::string ormPath = ResolveTexturePath(baseDir, meshInfo.ormTexturePath);
+        if (!ormPath.empty()) {
+            decode(ormPath, decORM[i]);
+        } else {
+            const std::string diffRel = meshInfo.diffuseTexturePath;
+            auto deriveSibling = [&](const char* const* suffixes, int n) {
+                for (int si = 0; si < n; ++si) {
+                    std::string p;
+                    const size_t pos = diffRel.rfind("_diffuse");
+                    if (pos != std::string::npos) {
+                        p = ResolveTexturePath(baseDir, diffRel.substr(0, pos) + suffixes[si]);
+                        if (!p.empty()) return p;
+                    }
+                    const size_t posA = diffRel.rfind("_Albedo");
+                    if (posA != std::string::npos) {
+                        p = ResolveTexturePath(baseDir, diffRel.substr(0, posA) + suffixes[si]);
+                        if (!p.empty()) return p;
+                    }
+                }
+                return std::string();
+            };
+            static const char* kRoughSuf[] = {"_roughness.png", "_Roughness.png"};
+            static const char* kMetalSuf[] = {"_metallic.png", "_Metallic.png"};
+            DecodedTex rough, metal;
+            decode(deriveSibling(kRoughSuf, 2), rough);
+            decode(deriveSibling(kMetalSuf, 2), metal);
+            if (rough.valid || metal.valid) {
+                const int w = rough.valid ? rough.width : metal.width;
+                const int h = rough.valid ? rough.height : metal.height;
+                const size_t pxCount = (size_t)w * (size_t)h;
+                auto* out = (unsigned char*)malloc(pxCount * 4);
+                if (out) {
+                    for (size_t px = 0; px < pxCount; ++px) {
+                        out[px * 4 + 0] = 255;                                   // AO: 无烘焙 AO
+                        out[px * 4 + 1] = rough.valid ? rough.data[px * 4 + 0] : 128;
+                        out[px * 4 + 2] = metal.valid ? metal.data[px * 4 + 0] : 0;
+                        out[px * 4 + 3] = 255;
+                    }
+                    decORM[i] = {w, h, out, true};
+                }
+            }
+            if (rough.data) stbi_image_free(rough.data);
+            if (metal.data) stbi_image_free(metal.data);
+        }
     };
 
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -605,6 +769,10 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     // Serial phase: CreateTextureFromData + material/entity setup.
     // RHI device + MaterialInstance are not thread-safe.
     u32 texLoaded = 0, texFailed = 0;
+    // P1-C: normal/ORM 也计数——旧的 "392 loaded, 1 fallback" 只统计
+    // diffuse，法线/ORM 的静默回退完全不可见。
+    u32 normalLoaded = 0, normalFallback = 0, ormLoaded = 0, ormFallback = 0;
+    std::string missingNormalList, missingORMList;
     for (u32 i = 0; i < meshCount; ++i) {
         auto& meshInfo = sceneMeshes_[i];
         meshInfo.material = sharedMaterial_;
@@ -629,14 +797,28 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
             normalTex = CreateTextureFromData(
                 device_, decNormal[i].width, decNormal[i].height, decNormal[i].data);
         }
-        if (normalTex == handles::INVALID_RESOURCE) normalTex = fallbackNormal_;
+        if (normalTex == handles::INVALID_RESOURCE) {
+            normalTex = fallbackNormal_;
+            normalFallback++;
+            if (missingNormalList.size() < 512) {
+                missingNormalList += " ";
+                missingNormalList += meshInfo.name;
+            }
+        } else normalLoaded++;
 
         ResourceHandle ormTex = handles::INVALID_RESOURCE;
         if (decORM[i].valid) {
             ormTex = CreateTextureFromData(
                 device_, decORM[i].width, decORM[i].height, decORM[i].data);
         }
-        if (ormTex == handles::INVALID_RESOURCE) ormTex = fallbackORM_;
+        if (ormTex == handles::INVALID_RESOURCE) {
+            ormTex = fallbackORM_;
+            ormFallback++;
+            if (missingORMList.size() < 512) {
+                missingORMList += " ";
+                missingORMList += meshInfo.name;
+            }
+        } else ormLoaded++;
 
         // Free stbi buffers now that CreateTextureFromData has copied the pixels.
         if (decAlbedo[i].data) stbi_image_free(decAlbedo[i].data);
@@ -680,13 +862,32 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         proxy.entityId = meshInfo.meshEntityId;
         proxy.meshId = clusterComp;
         proxy.transform = rhimath::MatrixIdentity();
+        // P2-B: 布料实例标注透光掩码（audit §4.7——石墙严格 0，薄布料开启）。
+        // pipeline 格式的 mesh 名是通用名（Mesh_N_M），材质身份在贴图路径里
+        // ——按 diffuse 文件名匹配帘幕/织物；其余（石材、金属链等）保持 0。
+        {
+            std::string lowerName = meshInfo.diffuseTexturePath;
+            for (auto& ch : lowerName) ch = (char)tolower((unsigned char)ch);
+            if (lowerName.find("curtain") != std::string::npos ||
+                lowerName.find("fabric") != std::string::npos ||
+                lowerName.find("cloth") != std::string::npos ||
+                lowerName.find("banner") != std::string::npos) {
+                proxy.transmission = 0.7f;
+            }
+        }
         if (meshInfo.mesh && meshInfo.mesh->IsValid()) {
             proxy.worldAABB = meshInfo.mesh->GetLocalAABB();
         }
         scene_.AddProxy(proxy);
     }
-    std::cout << "[Part30.4] Textures: " << texLoaded << " loaded, "
-              << texFailed << " fallback" << std::endl;
+    std::cout << "[Part30.4] Textures: diffuse " << texLoaded << " loaded / "
+              << texFailed << " fallback; normal " << normalLoaded << " / "
+              << normalFallback << "; ORM " << ormLoaded << " / "
+              << ormFallback << std::endl;
+    if (!missingNormalList.empty())
+        std::cout << "[Part30.4] Missing normal maps:" << missingNormalList << std::endl;
+    if (!missingORMList.empty())
+        std::cout << "[Part30.4] Missing ORM maps:" << missingORMList << std::endl;
     std::cout << "[Part30.4] Scene proxies: " << scene_.GetProxies().size() << std::endl;
 
     // GPUMaterialRegistry wiring (mirror NonEditor Step 4).
@@ -749,7 +950,24 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     texSamplerDesc.addressU = TextureAddressMode::Wrap;
     texSamplerDesc.addressV = TextureAddressMode::Wrap;
     texSamplerDesc.addressW = TextureAddressMode::Wrap;
-    texSamplerDesc.maxAnisotropy = 1;
+    // Use the highest safe value for the oblique, mipmapped floor textures,
+    // capped at the device limit and at 8x for a stable reference capture.
+    // RHI Vulkan enables this feature only when supported, so keep 1x on
+    // devices that expose no sampler anisotropy capability.
+    u32 textureAnisotropy = 1;
+    if (auto* vkDevice = static_cast<VulkanDevice*>(device_)) {
+        VkPhysicalDeviceFeatures supportedFeatures{};
+        vkGetPhysicalDeviceFeatures(vkDevice->GetNativePhysicalDevice(),
+                                    &supportedFeatures);
+        VkPhysicalDeviceProperties physicalProperties{};
+        vkGetPhysicalDeviceProperties(vkDevice->GetNativePhysicalDevice(),
+                                      &physicalProperties);
+        if (supportedFeatures.samplerAnisotropy == VK_TRUE) {
+            textureAnisotropy = std::max(
+                1u, std::min(8u, static_cast<u32>(physicalProperties.limits.maxSamplerAnisotropy)));
+        }
+    }
+    texSamplerDesc.maxAnisotropy = textureAnisotropy;
     texSamplerDesc.minLod = 0.0f;
     texSamplerDesc.maxLod = 100.0f;
     texSamplerDesc.comparisonFunc = ComparisonFunc::Never;
@@ -886,6 +1104,9 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
 // IBL. DeferredLighting.frag falls back to flat 0.03*albedo ambient when
 // IBL bindings are invalid (bindings 10/11/12 set to INVALID_RESOURCE).
 bool TestVulkanSponzaRenderGraph::InitializeIBL() {
+    // sun-audit P2: PRIMAL_SKY_IBL=1 → 解析天空作为 IBL 源（见步骤 2 注释），
+    // 不查找/不要求 sunset.hdr。
+    const bool skyIbl = std::getenv("PRIMAL_SKY_IBL") != nullptr;
     // ----- 1. Locate sunset.hdr -----
     const char* kHdrPaths[] = {
         "EngineTest/assets/textures/hdr/sunset.hdr",
@@ -894,36 +1115,67 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
         "sunset.hdr",
     };
     std::string hdrPath;
-    for (const char* p : kHdrPaths) {
-        std::ifstream f(p);
-        if (f.is_open()) { hdrPath = p; break; }
-    }
-    // T4.6.5 part 37: walk up parent dirs as fallback (test runs from various cwd).
-    if (hdrPath.empty()) {
-        for (int i = 1; i <= 6; ++i) {
-            std::string prefix;
-            for (int j = 0; j < i; ++j) prefix += "../";
-            std::ifstream f(prefix + "EngineTest/assets/textures/hdr/sunset.hdr");
-            if (f.is_open()) {
-                hdrPath = prefix + "EngineTest/assets/textures/hdr/sunset.hdr";
-                break;
+    if (!skyIbl) {
+        for (const char* p : kHdrPaths) {
+            std::ifstream f(p);
+            if (f.is_open()) { hdrPath = p; break; }
+        }
+        // T4.6.5 part 37: walk up parent dirs as fallback (test runs from various cwd).
+        if (hdrPath.empty()) {
+            for (int i = 1; i <= 6; ++i) {
+                std::string prefix;
+                for (int j = 0; j < i; ++j) prefix += "../";
+                std::ifstream f(prefix + "EngineTest/assets/textures/hdr/sunset.hdr");
+                if (f.is_open()) {
+                    hdrPath = prefix + "EngineTest/assets/textures/hdr/sunset.hdr";
+                    break;
+                }
             }
         }
+        if (hdrPath.empty()) {
+            std::cerr << "[Part37] sunset.hdr not found — IBL disabled" << std::endl;
+            return false;
+        }
+        std::cerr << "[Part37] Loading HDR: " << hdrPath << std::endl;
     }
-    if (hdrPath.empty()) {
-        std::cerr << "[Part37] sunset.hdr not found — IBL disabled" << std::endl;
-        return false;
-    }
-    std::cerr << "[Part37] Loading HDR: " << hdrPath << std::endl;
 
-    // ----- 2. stbi_loadf → RGBA32F -----
-    int hdrW, hdrH, hdrC;
-    float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrC, 4);
-    if (!hdrData) {
-        std::cerr << "[Part37] stbi_loadf failed: " << hdrPath << std::endl;
-        return false;
+    // ----- 2. HDR source: sunset.hdr（默认）或解析天空（PRIMAL_SKY_IBL=1）-----
+    // sun-audit P2（同源天空）: skyIbl 时 equirect 由解析天空填充
+    // ——SkyAtmosphere.glsl::EvaluateSkyBase 的 CPU 逐位镜像（horizon 4.40,
+    // 4.20, 3.80 / zenith 5.50, 5.76, 6.00 / pow(up, 0.45)；若改 GLSL 侧
+    // 常量必须同步此处）。可见天空、GI miss、镜面 IBL 三者自此同源；不含
+    // 太阳盘/日晕——直射由 deferred 单独供给，防止重复计能。
+    int hdrW = 0, hdrH = 0, hdrC = 4;
+    float* hdrData = nullptr;
+    if (skyIbl) {
+        hdrW = 1024;
+        hdrH = 512;
+        hdrData = static_cast<float*>(std::malloc(size_t(hdrW) * hdrH * 4 * sizeof(float)));
+        for (int y = 0; y < hdrH; ++y) {
+            // 与 IBL_EquirectangularToCube.wgsl 的 sphereUV 约定互逆：
+            // uv = (atan2(z,x), asin(y)) * invAtan + 0.5
+            const float theta = ((y + 0.5f) / hdrH - 0.5f) * 3.14159265f;
+            for (int x = 0; x < hdrW; ++x) {
+                const float phi = ((x + 0.5f) / hdrW - 0.5f) * 6.28318531f;
+                const float up = std::clamp(std::sin(theta), 0.0f, 1.0f);
+                const float t = std::pow(up, 0.45f);
+                float* px = hdrData + (size_t(y) * hdrW + x) * 4;
+                px[0] = 4.40f + (5.50f - 4.40f) * t;
+                px[1] = 4.20f + (5.76f - 4.20f) * t;
+                px[2] = 3.80f + (6.00f - 3.80f) * t;
+                px[3] = 1.0f;
+            }
+        }
+        std::cerr << "[Part37] PRIMAL_SKY_IBL: equirect filled from analytic sky "
+                  << hdrW << "x" << hdrH << " (EvaluateSkyBase mirror)" << std::endl;
+    } else {
+        hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrC, 4);
+        if (!hdrData) {
+            std::cerr << "[Part37] stbi_loadf failed: " << hdrPath << std::endl;
+            return false;
+        }
+        std::cerr << "[Part37] HDR loaded: " << hdrW << "x" << hdrH << std::endl;
     }
-    std::cerr << "[Part37] HDR loaded: " << hdrW << "x" << hdrH << std::endl;
 
     // ----- 3. Convert f32 → f16 (RGBA16F) -----
     const size_t kPixels = size_t(hdrW) * hdrH;
@@ -938,7 +1190,7 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
         std::memcpy(rgba16.data() + i * 8 + 4, &b, 2);
         std::memcpy(rgba16.data() + i * 8 + 6, &a, 2);
     }
-    stbi_image_free(hdrData);
+    if (skyIbl) std::free(hdrData); else stbi_image_free(hdrData);
 
     // ----- 4. Create equirectTex_ (Texture2D RGBA16F) -----
     TextureDesc equirectDesc{};
@@ -1374,7 +1626,50 @@ void TestVulkanSponzaRenderGraph::Run() {
     // open instance leaks WASD into automated capture runs (measured: frame
     // viewpoint drifting mid-A/B). Capture runs set the lock; interactive
     // runs leave it unset.
-    if (!std::getenv("SPGI_CAM_LOCK")) {
+    // sun-audit P3 动态验收（SPONZA_CAM_SCRIPT=1）: 脚本化相机回放，覆盖
+    // 审计"静止→慢移→快转→遮挡物离屏→切镜"全序列（帧号 = frameCount_）：
+    //   0-119  静止（参考机位）
+    //   120-239 慢移（前向 0.5 u/s）
+    //   240-299 快转（yaw +3°/帧 = 180°/60 帧）
+    //   300-359 遮挡物离屏（世界 +X 横移 2 u/s，近柱滑出画面）
+    //   360    切镜（瞬移庭院对侧——view 矩阵 delta>1 触发管线自动判切，
+    //          复位 TAA/探针历史；此机制本身是被验证对象，不手动 reset）
+    //   361-420 静止收敛窗（切镜后第 1/2/4/8/16/60 帧各存 cut PPM）
+    const bool camScript = std::getenv("SPONZA_CAM_SCRIPT") != nullptr;
+    if (camScript) {
+        const u32 f = (u32)frameCount_;
+        // 参考机位（SponzaReference.h 同值）
+        const float bx = -12.5f, by = 1.7f, bz = -0.7f;
+        const float bpitch = 14.0f, byaw0 = 2.0f;
+        // 前向单位向量（RHICamera 约定，yaw/pitch 度）
+        const float fyaw = byaw0 * 3.14159265f / 180.0f;
+        const float fpit = bpitch * 3.14159265f / 180.0f;
+        const float fx = std::cos(fyaw) * std::cos(fpit);
+        const float fyy = std::sin(fpit);
+        const float fz = std::sin(fyaw) * std::cos(fpit);
+
+        float cx = bx, cy = by, cz = bz, cp = bpitch, cyw = byaw0;
+        static int lastPhase = -1;
+        int phase;
+        if (f < 120)      { phase = 0; }
+        else if (f < 240) { phase = 1; const float t = (f - 120) / 60.0f;
+                            cx = bx + fx * 0.5f * t; cy = by + fyy * 0.5f * t; cz = bz + fz * 0.5f * t; }
+        else if (f < 300) { phase = 2; const float t = (f - 120) / 60.0f;
+                            cx = bx + fx * 0.5f * t; cy = by + fyy * 0.5f * t; cz = bz + fz * 0.5f * t;
+                            cyw = byaw0 + (f - 240) * 3.0f; }
+        else if (f < 360) { phase = 3; const float t = (f - 120) / 60.0f;
+                            cx = bx + fx * 0.5f * t + 2.0f * ((f - 300) / 60.0f);
+                            cy = by + fyy * 0.5f * t; cz = bz + fz * 0.5f * t;
+                            cyw = byaw0 + 60.0f * 3.0f; }
+        else              { phase = 4; cx = 10.0f; cy = 2.5f; cz = -6.0f; cp = 10.0f; cyw = 178.0f; }
+        if (phase != lastPhase) {
+            std::cerr << "[CamScript] frame=" << f << " phase=" << phase
+                      << " (0=still 1=slow 2=fastyaw 3=occluder-off 4=cut+settle)"
+                      << std::endl;
+            lastPhase = phase;
+        }
+        camera_.Initialize({cx, cy, cz}, {cp, cyw, 0.0f});
+    } else if (!std::getenv("SPGI_CAM_LOCK")) {
         camera_.Update(dt);
     }
     view_.SetViewMatrix(camera_.GetViewMatrix());
@@ -1411,6 +1706,36 @@ void TestVulkanSponzaRenderGraph::Run() {
         primal::graphics::debug_draw::add_line(0,0,0, 0,0,3, 0x0000FF); // +Z blue
     }
 
+    // sun-audit §5.2 步骤 2: 单位轴/太阳方向诊断场景（SPONZA_AXIS_DIAG=1）。
+    // 庭院中画长世界轴（+X 红 / -X 暗红、+Y 绿 / -Y 暗绿、+Z 蓝 / -Z 暗蓝，
+    // 各 ±15u，负方向用暗色区分正负）与太阳双向量（自 (0,6,0) 起）：
+    //   橙线 = toSun（指向太阳），紫线 = D（光线传播方向，等长反向）。
+    // 目的：从锁定机位直接读出画面左右对应的世界 +X/+Z 方向，排除"由画面
+    // 左右猜世界方位"，为相机配准（步骤 1）与 ±2° 细搜（步骤 6）提供依据。
+    if (std::getenv("SPONZA_AXIS_DIAG")) {
+        using primal::graphics::debug_draw::add_line;
+        const float L = 15.0f;
+        add_line(0,0.02f,0,  L,0.02f,0, 0xFF3030); // +X 红
+        add_line(0,0.02f,0, -L,0.02f,0, 0x5A1010); // -X 暗红
+        add_line(0,0.02f,0, 0, L,0, 0x30FF30);     // +Y 绿
+        add_line(0,0.02f,0, 0,-L,0, 0x105A10);     // -Y 暗绿（入地，基本不可见，占位对称）
+        add_line(0,0.02f,0, 0,0.02f, L, 0x3050FF); // +Z 蓝
+        add_line(0,0.02f,0, 0,0.02f,-L, 0x101A5A); // -Z 暗蓝
+        const auto D = rhi::math::Normalize(pipeline_->GetSettings().lighting.light_direction);
+        const float px = 0.0f, py = 6.0f, pz = 0.0f;
+        const float len = 9.0f;
+        add_line(px,py,pz, px - D.x*len, py - D.y*len, pz - D.z*len, 0xFFA500); // toSun 橙（指向太阳）
+        add_line(px,py,pz, px + D.x*len, py + D.y*len, pz + D.z*len, 0xB046C8); // D 紫（传播方向）
+        static bool axisDiagLogged = false;
+        if (!axisDiagLogged) {
+            axisDiagLogged = true;
+            std::fprintf(stderr,
+                "[AxisDiag] long axes +/-X(+red/darkred) +/-Y(+green) +/-Z(+blue/darkblue), "
+                "toSun(orange)=(-%.4f,-%.4f,-%.4f) D(purple)=(%.4f,%.4f,%.4f) from (0,6,0)\n",
+                D.x, D.y, D.z, D.x, D.y, D.z);
+        }
+    }
+
     ResourceHandle backBuffer;
     SyncHandle signalFence;
     if (!renderSystem_.BeginFrame(backBuffer, signalFence)) {
@@ -1437,8 +1762,16 @@ void TestVulkanSponzaRenderGraph::Run() {
     const bool diagnosticCapture = std::getenv("SPONZA_DIAGNOSTIC_CAPTURE") &&
         (frameCount_ == 60 || frameCount_ == 61 || frameCount_ == 360 ||
          frameCount_ == 361 || frameCount_ == 1800);
+    // sun-audit P3: 切镜收敛采样帧（360+{1,2,4,8,16,60}）也需要离屏 target
+    bool cutSampleFrame = std::getenv("SPONZA_CAM_SCRIPT") != nullptr && frameCount_ > 360;
+    if (cutSampleFrame) {
+        cutSampleFrame = false;
+        for (u32 k : {1u, 2u, 4u, 8u, 16u, 60u}) {
+            if ((u32)frameCount_ == 360 + k) { cutSampleFrame = true; break; }
+        }
+    }
     ResourceHandle captureTarget = handles::INVALID_RESOURCE;
-    if (referenceCapture || diagnosticCapture) {
+    if (referenceCapture || diagnosticCapture || cutSampleFrame) {
         targetDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource | TextureUsage::CopySource;
         targetDesc.memoryUsage = GPUMemoryUsage::Static;
         captureTarget = device_->CreateTexture(targetDesc);
@@ -1529,8 +1862,9 @@ void TestVulkanSponzaRenderGraph::Run() {
 
         auto* mapped = static_cast<u8*>(device_->MapBuffer(stagingBuf));
         if (mapped) {
-            std::string ppmPath = "/tmp/sponza_" + std::string(tag) + "_" +
-                                  std::to_string(frameCount_) + ".ppm";
+            const char* capDir = std::getenv("SPONZA_CAPTURE_DIR");
+            std::string ppmPath = std::string(capDir ? capDir : "/tmp/sponza_") +
+                                  std::string(tag) + "_" + std::to_string(frameCount_) + ".ppm";
             if (std::string(tag) == "reference") ppmPath = std::getenv("SPONZA_CAPTURE");
             std::ofstream ppm(ppmPath, std::ios::binary);
             ppm << "P6\n" << capW << " " << capH << "\n255\n";
@@ -1558,10 +1892,35 @@ void TestVulkanSponzaRenderGraph::Run() {
         if (frameCount_ == (frame ? std::atoi(frame) : 360)) capturePPM("reference");
     }
 
+    // sun-audit P3: 切镜后收敛采样——SPONZA_CAM_SCRIPT 回放在 frame 360 切镜，
+    // 第 1/2/4/8/16/60 帧各存一张 cut PPM（SPONZA_CAPTURE_DIR 前缀），用于
+    // 核查 SC/探针/TAA 历史失效策略的收敛过程（残影应逐帧消退）。
+    if (camScript && frameCount_ >= 361) {
+        static const u32 kCutSamples[] = {1, 2, 4, 8, 16, 60};
+        for (u32 k : kCutSamples) {
+            if (frameCount_ == 360 + k) {
+                capturePPM("cut");
+                std::cerr << "[CamScript] cut+" << k << " sampled" << std::endl;
+            }
+        }
+    }
+
     if (const char* visEnv = std::getenv("SPGI_PROBE_VIS")) {
         lumen::GIDebug().probe_vis =
             static_cast<lumen::GIDebugParams::ProbeVisMode>(atoi(visEnv));
         std::cerr << "[ProbeVis] mode=" << visEnv << std::endl;
+    }
+
+    // P1（sponza-gap-reaudit §4.1/4.2）: SPGI_TRACE_DIAG=1 分支统计读回；
+    // 2=HZB 去惩罚对照；3=SC 同惩罚对照（finalize 内按 diag_params 分支）。
+    if (const char* td = std::getenv("SPGI_TRACE_DIAG")) {
+        pipeline_->SetScreenProbeDiagMode((u32)atoi(td));
+        std::cerr << "[SPGI_TRACE_DIAG] mode=" << td << std::endl;
+    }
+    // P1（reaudit §4.4 验收）: FROXEL_NO_SHADOW=1 → 雾体恒 lit 对照组。
+    if (std::getenv("FROXEL_NO_SHADOW")) {
+        pipeline_->SetFroxelShadowsEnabled(false);
+        std::cerr << "[FROXEL_NO_SHADOW] fog volume shadows disabled (A/B)" << std::endl;
     }
 
     // M8/T8.5: real-mesh probe spheres — SPGI_PROBE_SPHERES=1 renders one
@@ -1601,6 +1960,230 @@ void TestVulkanSponzaRenderGraph::Run() {
     // (probe EMA is 0.02); capture the converged steady state as well.
     if (frameCount_ == 360 || frameCount_ == 361) {
         capturePPM("steady");
+    }
+
+    // P1（sponza-gap-reaudit §4.4）: FROXEL_DUMP=1 在 frame 350 读回 resolve
+    // 后的半分辨率 scatter 纹理（RGB=scatter, A=transmittance），打印分带统计
+    // 并输出 ×60 提亮的 PPM——直接回答"密度是否被清零 / transmittance 是否
+    // 恒 1"，不再从最终 PNG 反推。FROXEL_DUMP=2 额外读回 3D 密度网格，
+    // 按深度切片打印均值，定位密度在哪个环节被清零。
+    static bool froxelDumped = false;
+    if (!froxelDumped && std::getenv("FROXEL_DUMP") && frameCount_ == 350) {
+        froxelDumped = true;
+        auto* froxel = pipeline_->GetFroxelFogPass();
+        if (!froxel || !froxel->IsInitialized()) {
+            std::cerr << "[FROXEL_DUMP] pass not initialized" << std::endl;
+        } else {
+            u32 fidx = renderSystem_.GetCurrentFrameIndex();
+            if (std::string(std::getenv("FROXEL_DUMP")) == "2") {
+                // ---- 3D density grid (R16F) ----
+                const u32 gw = froxel->GetGridWidth(), gh = froxel->GetGridHeight(),
+                          gd = froxel->GetGridDepth();
+                const u64 dbytes = u64(gw) * gh * gd * 2;
+                BufferDesc dDesc{};
+                dDesc.size = dbytes;
+                dDesc.usage = GPUMemoryUsage::Readback;
+                dDesc.memoryUsage = GPUMemoryUsage::Readback;
+                ResourceHandle dstaging = device_->CreateBuffer(dDesc);
+                auto dcmdH = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                if (dcmdH != handles::INVALID_COMMAND_BUFFER &&
+                    dstaging != handles::INVALID_RESOURCE) {
+                    auto* dcmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(dcmdH);
+                    dcmd->Begin();
+                    BufferTextureCopyRegion dregion{};
+                    dregion.bufferOffset = 0;
+                    dregion.bufferRowLength = gw;
+                    dregion.imageSubresource = {0, 0, 1};
+                    dregion.imageExtent = {gw, gh, gd};
+                    dcmd->CopyTextureToBuffer(froxel->GetDensityTexture(fidx), dstaging, &dregion, 1);
+                    dcmd->End();
+                    dcmd->Submit();
+                    dcmd->WaitForCompletion();
+                    device_->DestroyCommandBuffer(dcmdH);
+                    if (u16* ddata = static_cast<u16*>(device_->MapBuffer(dstaging))) {
+                        auto f16 = [](u16 h) -> float {
+                            u32 sign = (h >> 15) & 1, exp = (h >> 10) & 0x1F, mant = h & 0x3FF;
+                            if (exp == 0) return sign ? -0.0f : 0.0f;
+                            u32 bits = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
+                            float f; std::memcpy(&f, &bits, 4); return f;
+                        };
+                        double total = 0; u32 nz = 0;
+                        const u64 sliceN = u64(gw) * gh;
+                        std::cerr << "[FROXEL_DUMP2] density slices (z: mean, nonzero%):" << std::endl;
+                        for (u32 z = 0; z < gd; ++z) {
+                            double s = 0; u32 c = 0;
+                            for (u64 i = 0; i < sliceN; ++i) {
+                                float v = f16(ddata[z * sliceN + i]);
+                                s += v; if (v > 0.001f) ++c;
+                            }
+                            total += s; nz += c;
+                            if (z % 8 == 0 || z == gd - 1)
+                                std::cerr << "  z=" << z << " mean=" << s / sliceN
+                                          << " nz=" << 100.0 * c / sliceN << "%" << std::endl;
+                        }
+                        std::cerr << "[FROXEL_DUMP2] grid " << gw << "x" << gh << "x" << gd
+                                  << " overall mean=" << total / (double(gw) * gh * gd)
+                                  << " nonzero=" << 100.0 * nz / (double(gw) * gh * gd) << "%" << std::endl;
+                        device_->UnmapBuffer(dstaging);
+                    }
+                    device_->DestroyBuffer(dstaging);
+                }
+            }
+            const u32 hw = froxel->GetScatterWidth();
+            const u32 hh = froxel->GetScatterHeight();
+            const u64 bytes = u64(hw) * hh * 8;
+            BufferDesc rbDesc{};
+            rbDesc.size = bytes;
+            rbDesc.usage = GPUMemoryUsage::Readback;
+            rbDesc.memoryUsage = GPUMemoryUsage::Readback;
+            ResourceHandle staging = device_->CreateBuffer(rbDesc);
+            auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (capCmdHandle != handles::INVALID_COMMAND_BUFFER &&
+                staging != handles::INVALID_RESOURCE) {
+                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                capCmd->Begin();
+                BufferTextureCopyRegion region{};
+                region.bufferOffset = 0;
+                region.bufferRowLength = hw;
+                region.imageSubresource = {0, 0, 1};
+                region.imageExtent = {hw, hh, 1};
+                capCmd->CopyTextureToBuffer(froxel->GetScatterTexture(renderSystem_.GetCurrentFrameIndex()),
+                                            staging, &region, 1);
+                capCmd->End();
+                capCmd->Submit();
+                capCmd->WaitForCompletion();
+                device_->DestroyCommandBuffer(capCmdHandle);
+                if (u16* hdata = static_cast<u16*>(device_->MapBuffer(staging))) {
+                    auto f16 = [](u16 h) -> float {
+                        u32 sign = (h >> 15) & 1, exp = (h >> 10) & 0x1F, mant = h & 0x3FF;
+                        if (exp == 0) return sign ? -0.0f : 0.0f;
+                        u32 bits = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
+                        float f; std::memcpy(&f, &bits, 4); return f;
+                    };
+                    FILE* out = fopen("/tmp/froxel_scatter.ppm", "wb");
+                    fprintf(out, "P6\n%u %u\n255\n", hw, hh);
+                    double sr = 0, sg = 0, sb = 0, sa = 0;
+                    float smin = 1e30f, smax = -1e30f, amin = 1e30f, amax = -1e30f;
+                    for (u32 y = 0; y < hh; ++y)
+                    for (u32 x = 0; x < hw; ++x) {
+                        const u16* px = hdata + ((size_t)y * hw + x) * 4;
+                        float r = f16(px[0]), g = f16(px[1]), b = f16(px[2]);
+                        float a = f16(px[3]);
+                        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                        sr += r; sg += g; sb += b; sa += a;
+                        smin = std::min(smin, lum); smax = std::max(smax, lum);
+                        amin = std::min(amin, a); amax = std::max(amax, a);
+                        u8 R = (u8)std::clamp(r * 60.0f, 0.0f, 255.0f);
+                        u8 G = (u8)std::clamp(g * 60.0f, 0.0f, 255.0f);
+                        u8 B = (u8)std::clamp(b * 60.0f, 0.0f, 255.0f);
+                        fwrite(&R, 1, 1, out); fwrite(&G, 1, 1, out); fwrite(&B, 1, 1, out);
+                    }
+                    fclose(out);
+                    device_->UnmapBuffer(staging);
+                    const double n = double(hw) * hh;
+                    std::cerr << "[FROXEL_DUMP] " << hw << "x" << hh
+                              << " scatter rgb mean=(" << sr / n << "," << sg / n << "," << sb / n << ")"
+                              << " lum min=" << smin << " max=" << smax
+                              << " transmittance mean=" << sa / n
+                              << " min=" << amin << " max=" << amax
+                              << " -> /tmp/froxel_scatter.ppm" << std::endl;
+                }
+                device_->DestroyBuffer(staging);
+            }
+        }
+    }
+
+    // P1（sponza-gap-reaudit §4.1/4.2）: SPGI_TRACE_DIAG 在 frame 350 读回
+    // finalize 分支统计（自帧 0 累计；host-visible 直接映射）。输出每分支
+    // 全局 count/mean/max/cos 与屏幕 4×4 桶的 count 占比 + 平均亮度
+    // （bucket1 = 左上 = 拱顶热点 ROI），回答"热点能量来自 HZB 还是 SC"。
+    // G0（volume-gi-repair-audit §6，2026-09-16）: 旧实现一次性读 350 帧
+    // uint32 原子累计——SC-card sum 溢出 3 次（审计算术：回绕均值差
+    // 0.447/次，偏差比 ≈3.0）。改为 25 帧窗口读回+清零、CPU uint64 累计
+    // （单窗口最坏 sum ≈ 5000 rays×65535×64 远小于 2^32），输出帧范围与
+    // "分桶 count 总和 == 全局 count"守恒校验。诊断门控不变：diag 关闭时
+    // 零读回零清零、渲染零影响。
+    static bool spgiDiagDumped = false;
+    static u64 spgiStatAcc[4][17][4] = {};   // [branch][bucket][count,sumY,maxY,sumC]
+    static u32 spgiStatWindows = 0;
+    static u32 spgiStatFirstFrame = 0;
+    static u32 spgiStatLastFrame = 0;
+    constexpr u32 kSpgiStatWindow = 25;
+    auto* spgiPassForStats = pipeline_->GetScreenProbePass();
+    const bool spgiStatsLive = std::getenv("SPGI_TRACE_DIAG") && spgiPassForStats &&
+        spgiPassForStats->GetTraceStatsBuffer() != handles::INVALID_RESOURCE;
+    if (spgiStatsLive && !spgiDiagDumped &&
+        (frameCount_ % kSpgiStatWindow == kSpgiStatWindow - 1 ||
+         frameCount_ == 350)) {
+        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetTraceStatsBuffer())) {
+            const u32* s = static_cast<const u32*>(mapped);
+            for (u32 br = 0; br < 4; ++br)
+                for (u32 bk = 0; bk < 17; ++bk)
+                    for (u32 comp = 0; comp < 4; ++comp) {
+                        u32 v = s[((br * 17) + bk) * 4 + comp];
+                        if (comp == 2) // max: 窗口最大值的 running max
+                            spgiStatAcc[br][bk][comp] =
+                                (spgiStatAcc[br][bk][comp] > v) ? spgiStatAcc[br][bk][comp] : u64(v);
+                        else
+                            spgiStatAcc[br][bk][comp] += v;
+                    }
+            std::memset(mapped, 0, 16 * 4 * 17);
+            device_->UnmapBuffer(spgiPassForStats->GetTraceStatsBuffer());
+            if (spgiStatWindows == 0) spgiStatFirstFrame = frameCount_;
+            spgiStatLastFrame = frameCount_;
+            ++spgiStatWindows;
+        }
+    }
+    if (!spgiDiagDumped && spgiStatsLive && frameCount_ == 350) {
+        spgiDiagDumped = true;
+        auto get = [&](u32 br, u32 bk, u32 comp) -> u64 {
+            return spgiStatAcc[br][bk][comp];
+        };
+        const char* brName[4] = {"HZB", "SC-card", "far-cache", "fallback"};
+        std::cerr << "[SPGI_TRACE_DIAG] mode="
+                  << spgiPassForStats->GetTraceDiagMode()
+                  << " window=" << kSpgiStatWindow
+                  << " frames=" << spgiStatFirstFrame << ".." << spgiStatLastFrame
+                  << " (" << spgiStatWindows << " windows)"
+                  << " branch totals (count, meanLum, maxLum, meanCos):" << std::endl;
+        u64 totalRays = 0;
+        for (u32 b = 0; b < 4; ++b) totalRays += get(b, 0, 0);
+        for (u32 b = 0; b < 4; ++b) {
+            u64 cnt = get(b, 0, 0), sumY = get(b, 0, 1), maxQ = get(b, 0, 2), sumC = get(b, 0, 3);
+            double meanY = cnt ? double(sumY) / (double(cnt) * 64.0) : 0.0;
+            std::cerr << "  " << brName[b] << ": n=" << cnt << " ("
+                      << (totalRays ? 100.0 * cnt / double(totalRays) : 0.0) << "%)"
+                      << " meanLum=" << meanY
+                      << " maxLum=" << double(maxQ) / 64.0
+                      << " meanCos=" << (cnt ? double(sumC) / (double(cnt) * 256.0) : 0.0)
+                      << std::endl;
+        }
+        // G0 守恒校验：各分支 16 个屏幕桶 count 之和 == 该分支全局 count
+        //（不等 = 窗口边界丢写/统计写路径不对称，数据不可信）。
+        for (u32 b = 0; b < 4; ++b) {
+            u64 bucketSum = 0;
+            for (u32 bk = 1; bk < 17; ++bk) bucketSum += get(b, bk, 0);
+            std::cerr << "  [conservation] " << brName[b]
+                      << " global=" << get(b, 0, 0)
+                      << " bucket_sum=" << bucketSum
+                      << ((bucketSum == get(b, 0, 0)) ? " OK" : " MISMATCH")
+                      << std::endl;
+        }
+        for (u32 b = 0; b < 4; ++b) {
+            std::cerr << "  [" << brName[b] << "] 4x4 buckets (count% / meanLum):" << std::endl;
+            for (u32 r = 0; r < 4; ++r) {
+                std::cerr << "    row" << r << ": ";
+                for (u32 c = 0; c < 4; ++c) {
+                    u32 bk = 1u + c + r * 4u;
+                    u64 cnt = get(b, bk, 0), sumY = get(b, bk, 1);
+                    u64 gcnt = get(b, 0, 0);
+                    double pct = gcnt ? 100.0 * cnt / double(gcnt) : 0.0;
+                    double meanY = cnt ? double(sumY) / (double(cnt) * 64.0) : 0.0;
+                    std::cerr << "b" << bk << " " << pct << "%/" << meanY << "  ";
+                }
+                std::cerr << std::endl;
+            }
+        }
     }
 
     // T8.9b diagnostic: DDGI_DUMP=1 reads back the near-volume probe SH at
@@ -2099,6 +2682,18 @@ void TestVulkanSponzaRenderGraph::Run() {
     if (captureTarget != handles::INVALID_RESOURCE) device_->DestroyTexture(captureTarget);
     frameCount_++;
 
+    // GI ownership baseline (2026-09-18 plan Phase 0): env-gated auto-exit so
+    // scripted long runs (500-frame baselines) don't need a window close.
+    // _Exit matches the GI_VERIFY/GI_HALFLIFE gate convention — no static
+    // destructor teardown racing the still-alive swapchain.
+    if (const char* mf = std::getenv("SPONZA_MAX_FRAMES")) {
+        if (frameCount_ >= (u32)std::atoi(mf)) {
+            std::cout << "[SponzaRun] SPONZA_MAX_FRAMES=" << mf
+                      << " reached — clean exit at frame " << frameCount_ << std::endl;
+            std::_Exit(0);
+        }
+    }
+
     // T2.1 (F7): GI numerical band gate — frame 90 (env-overridable), then
     // _Exit(0/1). GI_VERIFY=1 activates; default off keeps windowed behavior.
     if (std::getenv("GI_VERIFY") && !giVerified_) {
@@ -2458,7 +3053,14 @@ void TestVulkanSponzaRenderGraph::RunGIVerify() {
         // was calibrated for the PRE-unification DDGI chain; B1's remaining
         // DDGI-side 2π keeps live probes at ~4.4 — envelope = measured×1.35
         // until B1 fully converges, then tighten back toward [0.08, 1.5].
-        checkBand("probe_sh0_lum", sh0Lum, 0.08, 6.0);
+        // 2026-09-18 scene-fit grid (14×7×9 @ 3.0, geometry AABB): the probe
+        // field switched from "mostly dead/sky probes" (old centered
+        // 32×16×32: 7 of 16 Y layers underground, most cells in open air) to
+        // all-live in-building probes (trace hit ratio 0.88) — camera-cell
+        // L0 lum moved 4.4 → 6.94 measured. Layout-change re-anchor, not an
+        // energy-kernel change (UpdateIrradiance untouched); see
+        // Docs/completed/render-comparisons/2026-09-18-ddgi-scene-fit-grid/.
+        checkBand("probe_sh0_lum", sh0Lum, 0.08, 9.5);
     }
 
     // --- 2. Gather output (half-res RGBA16F) avg + variation ----------------
@@ -2503,7 +3105,10 @@ void TestVulkanSponzaRenderGraph::RunGIVerify() {
                 checkBand("gather_variation(max/avg)", variation, 1.2, 1e9);
                 // 2026-09-08 envelope: 5.76 measured (post D3 plane-test
                 // re-convergence) × 1.1 (see probe note).
-                checkBand("gather_avg", avg, 0.005, 6.3);
+                // 2026-09-18 scene-fit re-anchor: all-live probe field lifted
+                // the screen gather average 5.8 → 10.0 measured (same layout
+                // change as probe_sh0_lum above; envelope = measured×1.2).
+                checkBand("gather_avg", avg, 0.005, 12.0);
                 gatherOk = true;
             }
             device_->DestroyBuffer(staging);
