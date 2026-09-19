@@ -82,8 +82,10 @@ layout(set = 0, binding = 9, std430) readonly buffer SCGridCardsBuf {
 } scgc;
 
 // [Q2 排查] SC 查询漏斗计数（DebugChannel=1 时累加；CPU 读回定位失败级）。
+// wrc_dbg2: x=candidates y=boundsFail z=orientFail w=queryFail(深度/误差)。
 layout(set = 0, binding = 10, std430) buffer WrcDbgBuf {
-    uvec4 wrc_dbg;   // x=hits y=gridOk z=cellFound w=found
+    uvec4 wrc_dbg;
+    uvec4 wrc_dbg2;
 } dbg;
 
 // 手动双线性（samplerless，clamp-to-edge）——miss 回退的卡片采样。
@@ -163,6 +165,14 @@ void wrc_trace_finalize() {
                     if (cardIdx >= 4096u) continue;
                     SurfaceCacheCard card = cd.card_data[cardIdx];
                     ++deviceReads;
+                    if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg2.x, 1u);
+                    // [产出率定位] 拒绝原因预分类（与 scQueryCardCandidate 同
+                    // 逻辑的前两级——bounds / orientation）。
+                    vec2 dbgUV;
+                    const bool boundsOk = worldToCardUV(hitPos, card, dbgUV);
+                    if (!boundsOk) { atomicAdd(dbg.wrc_dbg2.y, 1u); continue; }
+                    const bool orientOk = dot(scCardFaceNormal(card), -rayDir) < 0.0;
+                    if (!orientOk) { atomicAdd(dbg.wrc_dbg2.z, 1u); continue; }
                     vec3 scRadiance; float key;
                     if (scQueryCardCandidate(card, hitPos, -rayDir,
                                              max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),

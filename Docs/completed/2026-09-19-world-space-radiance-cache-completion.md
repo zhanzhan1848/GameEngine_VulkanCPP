@@ -185,6 +185,17 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
      模式的 A/B 数据 32.7/10.6 留档）。
    - DDGI 暖启动冻结恢复恒定生效（bootstrap 模式的提前解除撤销——冻结
      是确定性相位 1 的一部分）。
+3. **[SC 查询产出率瓶颈定位——拒绝原因计数器]**（WRC finalize 预分类
+   仪表，360 帧累计，近场）：候选 111 万次评估的拒绝分解——
+   **boundsFail 51%**（hitPos 投影不到卡片 UV：uncarded 几何/掠射投影）、
+   **orientFail 24%**（双面墙/邻面朝向不符）、**queryFail ~86%**（通过
+   前两级的候选在深度/along/perp 一致性检查处被拒——卡片捕获深度与
+   SDF 命中面不一致：卡片 face 平面捕获的是"可见几何"而非卡片自身
+   表面（自身在近平面 0.05 内被裁剪/被遮挡），捕获深度=远处几何 →
+   along 误差数米 ≫ 容差 0.48m）。
+   修复方向（capture/query 一致性专项）：① 卡片捕获近平面/远平面与
+   卡片自身表面的包含关系；② 捕获深度有效性掩码（未捕获 texel 显式
+   无效而非伪深度）；③ bounds 缺口的卡片 AABB 扩张（+SDF 命中带）。
 3. **Metal parity 后置**（计划既定决策，GI 计划 §2①"Vulkan 领衔"）：
    C1 fusion mode（Metal 无 gain UBO 绑定面）、WRC pass（`WRC*.metal` 八件套）、
    B 系 Metal 端效果级 A/B。B1/B2/B3 的 Metal shader 侧已同步（含 Metal 现存

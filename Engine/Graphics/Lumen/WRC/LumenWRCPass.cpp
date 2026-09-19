@@ -232,7 +232,7 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
     if (trace_stats_enabled_) {
         rays_ring_.initialize(device_, u64(probeTotal) * kWRCDirsPerProbe * sizeof(math::v4), 3);
         BufferDesc dbgDesc{};
-        dbgDesc.size = 16;
+        dbgDesc.size = 32;
         dbgDesc.type = BufferType::Structured;
         dbgDesc.usage = GPUMemoryUsage::Dynamic;
         dbgDesc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -783,7 +783,7 @@ void LumenWRCPass::AddPass(
 
             if (dbg_buf_ != handles::INVALID_RESOURCE) {
                 if (auto* d = static_cast<u32*>(device_->MapBuffer(dbg_buf_))) {
-                    d[0] = d[1] = d[2] = d[3] = 0u;
+                    for (u32 i = 0; i < 8; ++i) d[i] = 0u;
                     device_->UnmapBuffer(dbg_buf_);
                 }
             }
@@ -868,7 +868,7 @@ cmd->BindComputePipeline(update_pipeline_);
             // [Q2 排查] SC 查询漏斗：GPU 侧拷贝进 consume_ring（+2 帧读回，
             // 同 rays/dump ring 的 fence 语义；槽位互不冲突见注）。
             if (dbg_buf_ != handles::INVALID_RESOURCE && consume_ring_.is_initialized()) {
-                cmd->CopyBuffer(dbg_buf_, consume_ring_.buffer(consume_ring_.slot_for_frame(current_frame_index)), 0, 0, 16);
+                cmd->CopyBuffer(dbg_buf_, consume_ring_.buffer(consume_ring_.slot_for_frame(current_frame_index)), 0, 0, 32);
                 cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
                                    AccessFlag::TransferWrite, AccessFlag::HostRead);
             }
@@ -884,6 +884,8 @@ cmd->BindComputePipeline(update_pipeline_);
                         << (rg_name_prefix_.empty() ? "near" : rg_name_prefix_)
                         << " hits=" << d[0] << " gridOk=" << d[1]
                         << " cellFound=" << d[2] << " found=" << d[3]
+                        << " | cands=" << d[4] << " boundsFail=" << d[5]
+                        << " orientFail=" << d[6] << " queryFail=" << d[7]
                         << std::endl;
                     consume_ring_.unmap(device_, fRb);
                 }
