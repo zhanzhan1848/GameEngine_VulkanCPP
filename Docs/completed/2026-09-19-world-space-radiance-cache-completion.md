@@ -129,6 +129,10 @@ SC 视图同源转发（GetCacheView → SetSurfaceCacheResources）、离线 SD
    本次修复了同类的两个布局计数 bug（Metal light_eval 15 项传 14、Metal gather
    18 项传 17——上一会话新增 openSky/relocated 条目未增 count），使故障点从
    LightEval 推进到 gather；根因（binding 12 写路径未达）待Metal parity 专项处理。
+3. **[Q1/Q2/Q3 排查结论——DDGI 间距 / 天空泄漏 / 反弹缺失]**（仪表：`PRIMAL_WRC_TRACE_STATS=1` 的 `[WRC_TRACE_STATS]` 逐探针射线去向 + `[WRC_SC_FUNNEL]` SC 查询漏斗）：
+   - **Q1 探针网格**：近场 DDGI 场景贴合 14×7×9=882 探针 @3m，覆盖 39×18×24（全建筑）——**范围合理、密度在 RTXGI 参考（2-3m）粗端**；3-5m 宽的室内房间仅 ~1 探针/间，房间内变化被抹平（"平"第二成因）。建议 hero 室内降至 2m（DDGI ≈2600 探针，预算可负担）。远场 WRC 16×8×16@8m 覆盖 128³——97% 探针在建筑外属设计使然（远场=天空壳）。
+   - **Q2 天空泄漏语义**：射线语义本身正确——遮挡射线返回黑（exhausted 9.5%）、真正逃逸才返回天空。中庭开放屋顶使朝上射线合法见天；但近场探针 **34.2% 射线逃逸→天空、45% 探针（877/1936）天空占比过半**，而逃逸亮度 0.756 ≫ 命中亮度 0.10——探针能量被天空主导。
+   - **Q3 真因（新发现）**：SC 查询漏斗（近场单帧 69742 命中）→ gridOk 100% → cellFound 67% → **found 仅 ~20%**（13993，miss 回退移植后 +138%）。三重衰减（命中×产出×亮度 0.10 vs 0.756）使几何反弹≈0，与 A3 的"室内间接 92% 是天空填充"互为印证。逐项：① 33% 命中在卡片网格 AABB 外（未被卡片覆盖的几何——被 5% 退化视图过滤器丢弃的小面/织物正是色彩弹射源头，红毯色弹射消失的机制）；② cell 内 ~70% 被方位/深度容差契约拒绝（0.45m SDF 命中带 + 双面墙）；③ **WRC 缺少 DDGI 的 SCDDGIIntegration 卡片→探针投影等价物**（DDGI 探针的反弹主要来自该路径而非 trace 命中）——这是反弹缺失的主修补方向。
 3. **Metal parity 后置**（计划既定决策，GI 计划 §2①"Vulkan 领衔"）：
    C1 fusion mode（Metal 无 gain UBO 绑定面）、WRC pass（`WRC*.metal` 八件套）、
    B 系 Metal 端效果级 A/B。B1/B2/B3 的 Metal shader 侧已同步（含 Metal 现存

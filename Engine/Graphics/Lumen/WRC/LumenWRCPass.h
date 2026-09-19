@@ -237,6 +237,12 @@ private:
     rhi_readback_ring prefilter_ring_;
     u32 prefilter_copies_{ 0 };
     PrefilterCheckStats prefilter_check_{};
+    // [Q2 排查] 逐探针射线去向构成（PRIMAL_WRC_TRACE_STATS=1）。
+    rhi_readback_ring rays_ring_;
+    u32 rays_copies_{ 0 };
+    bool trace_stats_enabled_{ false };
+    // [Q2 排查] SC 查询漏斗计数（uvec4，DebugChannel 门控）。
+    rhi::ResourceHandle dbg_buf_{ rhi::handles::INVALID_RESOURCE };
     // A5 需求驱动预算：消费计数周期读回（每 256 帧 copy，+2 帧 map）+
     // 优先级窗口（消费计数降序 → 0 计数轮转保底）。
     rhi_readback_ring consume_ring_;

@@ -223,6 +223,23 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
     // A5 消费计数读回环。
     consume_ring_.initialize(device_, u64(probeTotal) * sizeof(u32), 3);
     consume_snapshot_.assign(probeTotal, 0u);
+    // [Q2 排查] 射线去向构成读回环（PRIMAL_WRC_TRACE_STATS=1）。
+    trace_stats_enabled_ = [] {
+        const char* e = std::getenv("PRIMAL_WRC_TRACE_STATS");
+        return e && e[0] == '1';
+    }();
+    if (trace_stats_enabled_) {
+        rays_ring_.initialize(device_, u64(probeTotal) * kWRCDirsPerProbe * sizeof(math::v4), 3);
+        BufferDesc dbgDesc{};
+        dbgDesc.size = 16;
+        dbgDesc.type = BufferType::Structured;
+        dbgDesc.usage = GPUMemoryUsage::Dynamic;
+        dbgDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        dbgDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        dbgDesc.structured.elementCount = 4;
+        dbgDesc.structured.elementStride = sizeof(u32);
+        dbg_buf_ = device->CreateBuffer(dbgDesc);
+    }
     // [A2 验收] prefilter SH9 读回环（prefilter 开启时启用）。Initialize 早于
     // 管线侧 SetPrefilterEnabled 调用——此处直接读 env 同源判定。
     prefilter_enabled_ = prefilter_enabled_ || [] {
@@ -257,6 +274,7 @@ void LumenWRCPass::Shutdown() {
     dump_ring_.shutdown(device_);
     consume_ring_.shutdown(device_);
     prefilter_ring_.shutdown(device_);
+    rays_ring_.shutdown(device_);
     initialized_ = false;
     device_ = nullptr;
     // 句柄为 POD 类型，由 RHI device 的垃圾回收管理（同 LumenDDGIPass 约定）。
@@ -301,11 +319,12 @@ void LumenWRCPass::CreatePipelines() {
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc cards (ro)
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc grid offsets (ro)
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc grid cards (ro)
+            {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [Q2] 查询漏斗计数
         };
         b[1].readonly = true; b[3].readonly = true;
         b[5].readonly = true; b[6].readonly = true;
         b[7].readonly = true; b[8].readonly = true; b[9].readonly = true;
-        finalize_set_layout_ = device_->CreateDescriptorSetLayout({10, b});
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout({11, b});
         PipelineLayoutDesc pl{}; pl.setLayoutCount = 1; pl.setLayouts = &finalize_set_layout_;
         finalize_layout_ = device_->CreatePipelineLayout(pl);
     }
@@ -634,6 +653,13 @@ void LumenWRCPass::AddPass(
                 }
             }
 
+            if (dbg_buf_ != handles::INVALID_RESOURCE) {
+                if (auto* d = static_cast<u32*>(device_->MapBuffer(dbg_buf_))) {
+                    d[0] = d[1] = d[2] = d[3] = 0u;
+                    device_->UnmapBuffer(dbg_buf_);
+                }
+            }
+
             // ---- dispatch 1: WRCTraceSDF（1 group/probe，64 lanes = K 方向）----
             {
                 DescriptorData params[] = {
@@ -681,8 +707,10 @@ cmd->BindComputePipeline(trace_pipeline_);
                     {7, DescriptorType::StorageBuffer, cards},
                     {8, DescriptorType::StorageBuffer, gOff},
                     {9, DescriptorType::StorageBuffer, gCards},
+                    {10, DescriptorType::StorageBuffer,
+                        dbg_buf_ != handles::INVALID_RESOURCE ? dbg_buf_ : hit_distance_},
                 };
-                UpdateDescriptorSet(device_, finalize_ds_[frameIdx], params, 10);
+                UpdateDescriptorSet(device_, finalize_ds_[frameIdx], params, 11);
                 DescriptorSetHandle sets[] = { finalize_ds_[frameIdx] };
 cmd->BindComputePipeline(finalize_pipeline_);
                                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, sets, 0, nullptr);
@@ -709,6 +737,81 @@ cmd->BindComputePipeline(update_pipeline_);
                                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
             }
 
+            // [Q2 排查] SC 查询漏斗：GPU 侧拷贝进 consume_ring（+2 帧读回，
+            // 同 rays/dump ring 的 fence 语义；槽位互不冲突见注）。
+            if (dbg_buf_ != handles::INVALID_RESOURCE && consume_ring_.is_initialized()) {
+                cmd->CopyBuffer(dbg_buf_, consume_ring_.buffer(consume_ring_.slot_for_frame(current_frame_index)), 0, 0, 16);
+                cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                                   AccessFlag::TransferWrite, AccessFlag::HostRead);
+            }
+
+            // [Q2 排查] SC 查询漏斗读回（+2 帧）。
+            if (dbg_buf_ != handles::INVALID_RESOURCE && consume_ring_.is_initialized() &&
+                current_frame_index >= 2u && (current_frame_index % 120u) == 0u) {
+                const u32 fRb = consume_ring_.slot_for_frame(current_frame_index - 2u);
+                if (void* fp = consume_ring_.map(device_, fRb)) {
+                    const u32* d = static_cast<const u32*>(fp);
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[WRC_SC_FUNNEL] tag="
+                        << (rg_name_prefix_.empty() ? "near" : rg_name_prefix_)
+                        << " hits=" << d[0] << " gridOk=" << d[1]
+                        << " cellFound=" << d[2] << " found=" << d[3]
+                        << std::endl;
+                    consume_ring_.unmap(device_, fRb);
+                }
+            }
+
+            // ---- [Q2 排查] 射线去向构成读回：命中(w>=0)/耗尽(w=-1)/
+            // 逃逸天空(w<=-1.5) 逐探针统计（PRIMAL_WRC_TRACE_STATS=1）。
+            if (trace_stats_enabled_ && rays_ring_.is_initialized() &&
+                rays_copies_ > 2u && current_frame_index >= 2u &&
+                (current_frame_index % 120u) == 0u) {
+                const u32 rRb = rays_ring_.slot_for_frame(current_frame_index - 2u);
+                if (void* rp = rays_ring_.map(device_, rRb)) {
+                    const auto* rays = static_cast<const math::v4*>(rp);
+                    const u32 K = kWRCDirsPerProbe;
+                    u64 nHit = 0, nExh = 0, nEsc = 0, nTot = 0;
+                    u32 skyHi = 0, probesValid = 0;   // 逃逸占比 >50% 的探针数
+                    double hitLum = 0.0, escLum = 0.0;
+                    u64 hitN = 0, escN = 0;
+                    for (u32 pi = 0; pi < probeTotal; ++pi) {
+                        // 独立有效性判定：从未更新探针的全零射线（w=0 且亮度 0）。
+                        u64 esc = 0, zero = 0;
+                        for (u32 k = 0; k < K; ++k) {
+                            const math::v4 r = rays[pi * K + k];
+                            if (r.w == 0.0f && r.x == 0.0f && r.y == 0.0f && r.z == 0.0f) ++zero;
+                        }
+                        if (zero == K) continue;
+                        ++probesValid;
+                        for (u32 k = 0; k < K; ++k) {
+                            const math::v4 r = rays[pi * K + k];
+                            ++nTot;
+                            if (r.w >= 0.0f) {
+                                ++nHit; ++hitN;
+                                hitLum += 0.2126 * r.x + 0.7152 * r.y + 0.0722 * r.z;
+                            } else if (r.w <= -1.5f) {
+                                ++nEsc; ++escN; ++esc;
+                                escLum += 0.2126 * r.x + 0.7152 * r.y + 0.0722 * r.z;
+                            } else { ++nExh; }
+                        }
+                        if (esc * 2u > K) ++skyHi;
+                    }
+                    rays_ring_.unmap(device_, rRb);
+                    if (nTot) {
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[WRC_TRACE_STATS] tag=" << (rg_name_prefix_.empty() ? "near" : rg_name_prefix_)
+                            << " probes=" << probesValid
+                            << " hit=" << (100.0 * nHit / nTot) << "% exhausted="
+                            << (100.0 * nExh / nTot) << "% escape_sky="
+                            << (100.0 * nEsc / nTot) << "% | hitLum="
+                            << (hitN ? hitLum / hitN : 0.0) << " escLum="
+                            << (escN ? escLum / escN : 0.0)
+                            << " | probes_escape_gt50%=" << skyHi
+                            << "/" << probesValid << std::endl;
+                    }
+                }
+            }
+
             // ---- dispatch 4（调试/降级，PRIMAL_WRC_PREFILTER=1）----
             if (prefilter_enabled_ && prefilter_pipeline_ != handles::INVALID_PIPELINE) {
                 DescriptorData params[] = {
@@ -729,6 +832,14 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                 cmd->CopyBuffer(prefilter_sh_, prefilter_ring_.buffer(pfCopySlot), 0, 0,
                                 u64(probeTotal) * 9u * sizeof(math::v4));
                 ++prefilter_copies_;
+            }
+
+            // ---- [Q2 排查] 射线去向构成 copy（+2 帧读回）----
+            if (trace_stats_enabled_ && rays_ring_.is_initialized()) {
+                const u32 raysSlot = rays_ring_.slot_for_frame(current_frame_index);
+                cmd->CopyBuffer(ray_data_, rays_ring_.buffer(raysSlot), 0, 0,
+                                u64(probeTotal) * kWRCDirsPerProbe * sizeof(math::v4));
+                ++rays_copies_;
             }
 
             // ---- GIDebug wrc 通道：PRIMAL_WRC_DUMP=1 radiance dump ----
