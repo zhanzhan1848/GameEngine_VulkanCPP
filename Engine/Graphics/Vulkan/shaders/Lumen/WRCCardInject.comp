@@ -136,7 +136,7 @@ bool wrcVisible(vec3 probePos, vec3 dir, float cardDist) {
     float stopT = 0.85 * cardDist;
     bool clearedSkin = false;
     float t = 0.0;
-    const uint STEPS = 24u;
+    const uint STEPS = 48u;
     for (uint i = 0u; i < STEPS; ++i) {
         float d = sampleBestSDF(probePos + dir * t);
         if (d >= 1.0e9) {
@@ -156,7 +156,7 @@ bool wrcVisible(vec3 probePos, vec3 dir, float cardDist) {
         t += clamp(d, minStep, max(voxel * 2.0, 0.2));
         if (t >= stopT) return true;
     }
-    return true;
+    return false;   // 反弹专项 v2: 步数耗尽未达卡片带 → 保守判遮挡
 }
 
 void wrc_card_inject() {
@@ -171,6 +171,9 @@ void wrc_card_inject() {
     uint state = pd.probe_data[base + K * 2u + 2u];
     if ((state & 1u) == 0u || (state & 2u) != 0u) return;
 
+    // 反弹专项 v4: 能量守恒聚合注入——先聚合全部可见卡片的加权 radiance /
+    // 方向 / 总权重，再一次 mix 进聚合方向槽。v3 的逐卡独立 mix 会累积覆盖
+    // trace 测量（16×0.3 后仅剩 0.7^16）——洗平对比度的根因。
     uint count = cardList.data[pi * 17u].x;
     if (count == 0u) return;
     count = min(count, 16u);
@@ -184,6 +187,10 @@ void wrc_card_inject() {
                   + vec3(float(px), float(py), float(pz)) * volume.ProbeOrigin.w;
 
     const uint atlasSize = volume.SCParams.y;
+
+    float Wacc = 0.0;
+    vec3 Lacc = vec3(0.0);
+    vec3 Dacc = vec3(0.0);
 
     for (uint i = 0u; i < count; ++i) {
         uvec2 entry = cardList.data[pi * 17u + 1u + i];
@@ -214,19 +221,33 @@ void wrc_card_inject() {
         float lum = 0.2126 * acc.r + 0.7152 * acc.g + 0.0722 * acc.b;
         if (lum <= 1e-4) continue;   // 黑卡片 = 无测量
 
-        // 最近 Fibonacci 方向槽（radiance 沿射线不变——直接值注入，无 cos 因子）。
-        uint best = 0u;
-        float bestDot = -2.0;
-        for (uint k = 0u; k < K; ++k) {
-            float c = dot(wrcDir(k, K), dir);
-            if (c > bestDot) { bestDot = c; best = k; }
-        }
-
-        uint slot = base + best * 2u;
-        vec3 existing = wrcUnpackRGB(uvec2(pd.probe_data[slot], pd.probe_data[slot + 1u]));
-        vec3 blended = mix(existing, min(acc, vec3(64.0)), clamp(w, 0.0, 1.0));
-        uvec2 packed = wrcPackRGB(blended);
-        pd.probe_data[slot] = packed.x;
-        pd.probe_data[slot + 1u] = packed.y;
+        // 聚合：总权重 + 加权 radiance + 加权平均方向。
+        Wacc += w;
+        Lacc += acc * w;
+        Dacc += dir * w;
     }
+
+    if (Wacc <= 1e-4) return;
+
+    // 聚合方向槽（radiance 沿射线不变——直接值注入，无 cos 因子）。
+    float dmLen = length(Dacc);
+    if (dmLen < 1e-4) return;
+    vec3 dirAgg = Dacc / dmLen;
+    uint best = 0u;
+    float bestDot = -2.0;
+    for (uint k = 0u; k < K; ++k) {
+        float c = dot(wrcDir(k, K), dirAgg);
+        if (c > bestDot) { bestDot = c; best = k; }
+    }
+
+    // 单次 mix（权重 = 总聚合权重夹紧）——trace 测量保留 (1-w) 份额，
+    // 不再被逐卡反复覆盖。
+    float w = clamp(Wacc, 0.0, 0.85);
+    uint slot = base + best * 2u;
+    vec3 existing = wrcUnpackRGB(uvec2(pd.probe_data[slot], pd.probe_data[slot + 1u]));
+    vec3 L = min(Lacc / Wacc, vec3(64.0));
+    vec3 blended = mix(existing, L, w);
+    uvec2 packed = wrcPackRGB(blended);
+    pd.probe_data[slot] = packed.x;
+    pd.probe_data[slot + 1u] = packed.y;
 }

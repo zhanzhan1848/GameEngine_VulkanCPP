@@ -452,11 +452,10 @@ WRCCacheView LumenWRCPass::GetCacheView(u32 frame_idx) const {
 // 打包为扁平 u32 表：[count, (cardIdx, wBits) × 16] × probeTotal。
 // ============================================================================
 void LumenWRCPass::UpdateProbeCardList(const SurfaceCacheCard* cards, u32 cardCount) {
-    // 反弹专项 v3 结论：逐帧累加注入洗平对比度（16 卡×0.3 → trace 值剩
-    // 0.7^16；top-1 单卡 0.3/帧同样 3:1 压过 trace EMA）——默认关，
-    // PRIMAL_WRC_CARD_INJECT=1 供 v4 重设计（权重归一/可见性强化）A/B。
+    // 反弹专项 v4（能量守恒聚合注入）默认开：聚合后单次 mix，trace 测量
+    // 保留 (1-w) 份额——v3 的逐卡独立 mix 洗平问题消除。env=0 回滚。
     card_inject_enabled_ = card_inject_enabled_ &&
-        [] { const char* e = std::getenv("PRIMAL_WRC_CARD_INJECT"); return e && e[0] == '1'; }();
+        [] { const char* e = std::getenv("PRIMAL_WRC_CARD_INJECT"); return !(e && e[0] == '0'); }();
     if (!card_inject_enabled_ || cardCount == 0 ||
         cardCount == card_list_card_count_) return;
     card_list_card_count_ = cardCount;
