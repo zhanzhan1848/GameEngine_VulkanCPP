@@ -452,15 +452,18 @@ WRCCacheView LumenWRCPass::GetCacheView(u32 frame_idx) const {
 // 打包为扁平 u32 表：[count, (cardIdx, wBits) × 16] × probeTotal。
 // ============================================================================
 void LumenWRCPass::UpdateProbeCardList(const SurfaceCacheCard* cards, u32 cardCount) {
+    // 反弹专项 v3 结论：逐帧累加注入洗平对比度（16 卡×0.3 → trace 值剩
+    // 0.7^16；top-1 单卡 0.3/帧同样 3:1 压过 trace EMA）——默认关，
+    // PRIMAL_WRC_CARD_INJECT=1 供 v4 重设计（权重归一/可见性强化）A/B。
     card_inject_enabled_ = card_inject_enabled_ &&
-        std::getenv("PRIMAL_WRC_CARD_INJECT") == nullptr;
+        [] { const char* e = std::getenv("PRIMAL_WRC_CARD_INJECT"); return e && e[0] == '1'; }();
     if (!card_inject_enabled_ || cardCount == 0 ||
         cardCount == card_list_card_count_) return;
     card_list_card_count_ = cardCount;
 
     const u32 probeTotal = GetProbeCountTotal();
     const float spacing = params_.probe_spacing;
-    const float radius = spacing * 2.5f + 1.0f;
+    const float radius = spacing * 1.8f;   // 反弹专项 v2: 7m→3.6m——远卡属更近探针
     probe_card_list_cpu_.assign(size_t(probeTotal) * 17u, 0u);
 
     for (u32 pi = 0; pi < probeTotal; ++pi) {

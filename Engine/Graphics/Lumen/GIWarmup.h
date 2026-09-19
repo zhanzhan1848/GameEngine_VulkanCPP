@@ -36,10 +36,14 @@ inline u32 GIWarmupFrames() {
 // SC 的常备间接来源交棒 tile radiosity（B2 单轨）。默认 0 = 旧语义逐位不变。
 // 回滚：置 0。
 // ============================================================================
+// 默认 1（2026-09-19 反弹传输专项证据翻转：馈送常开时 SC↔probe 回路把
+// 天空能量循环放大——室内间接 0.49 且对比度 2.4×；切断后 0.10（与
+// GILadder 模型期望 0.11 一致）、对比度 7.6×。PRIMAL_GI_PROBE_FEED_
+// BOOTSTRAP=0 回退旧常驻馈送语义。
 inline bool GIProbeFeedBootstrapEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("PRIMAL_GI_PROBE_FEED_BOOTSTRAP");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0');   // 默认 1；=0 显式回退
     }();
     return v;
 }
