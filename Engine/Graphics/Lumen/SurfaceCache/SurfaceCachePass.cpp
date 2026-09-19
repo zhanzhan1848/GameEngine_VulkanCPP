@@ -1438,6 +1438,9 @@ void SurfaceCachePass::AddCardCapturePasses(
                 const math::v3 center{card.center.x, card.center.y, card.center.z};
                 const math::v3 at = center + fwd;
                 const math::m4x4 view = rhimath::CreateLookAtMatrix(center, at, up);
+                // 注：near=0.05 与捕获像素着色器的深度编码耦合（曾试
+                // near=0 触发探针场崩溃 0.42→0.03，假设证伪已回滚）——
+                // 深度编码语义见 capture/query 一致性专项后续。
                 const math::m4x4 proj = rhimath::CreateOrthographicMatrix(
                     mirror_u ? hu : -hu, mirror_u ? -hu : hu, -hv, hv,
                     0.05f, 2.0f * halfAxis + 0.5f);
