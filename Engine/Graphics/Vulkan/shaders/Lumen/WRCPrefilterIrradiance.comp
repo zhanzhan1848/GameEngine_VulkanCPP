@@ -1,0 +1,109 @@
+#version 450 core
+// [WRC] WRCPrefilterIrradiance — radiance 方向格 → SH9 预积分（IFG 式）。
+// Entry point: wrc_prefilter_irradiance
+//
+// 定位（设计文档 §2.3）：调试/降级档——供 ① Medium-grade 降级直采路径
+// （UE 5.8 IFG 语义）② 与消费端逐方向 cos 加权积分的 A/B 误差对照
+//（验收 <5%）。不是 High 档依赖；由 PRIMAL_WRC_PREFILTER=1 门控 dispatch。
+//
+// 输出：radiance-SH9（9×vec4/probe，mcWeight = 4π/N，canonical basis）——
+// 与 DDGI irradiance buffer 同约定同布局，降级直采路径可直接套用既有
+// SH 评估设施。SH 基常量取自 ShaderLib/EvalLib（共享单一事实源，非 DDGI
+// 私有头）。
+//
+// Flat bindings:
+//   2  = UniformBuffer               WRCVolumeData
+//   4  = StorageBuffer (readonly)    probe_data[]
+//   10 = StorageBuffer (write)       sh9_out[] (9 vec4 per probe)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 2, std140) uniform WRCVolumeDataBlock {
+    vec4  ProbeOrigin;
+    uvec4 ProbeCounts;
+    uvec4 ProbeMeta;
+    vec4  TraceParams;
+    vec4  SdfOrigins[3];
+    vec4  SdfVoxelSizes[3];
+    vec4  SdfExtents[3];
+    uvec4 SdfResolutionsAndCount;
+    vec4  LightDirection;
+    vec4  LightColor;
+    vec4  SkyColor;
+    uvec4 SCParams;
+} volume;
+
+layout(set = 0, binding = 4, std430) readonly buffer ProbeDataBuf {
+    uint probe_data[];
+} pd;
+
+layout(set = 0, binding = 10) writeonly buffer SH9OutBuf {
+    vec4 sh9_out[];
+} sh;
+
+vec3 wrcUnpackRGB(uvec2 p) {
+    vec2 lo = unpackHalf2x16(p.x);
+    vec2 hi = unpackHalf2x16(p.y);
+    return vec3(lo.x, lo.y, hi.x);
+}
+
+// Fibonacci 球面（与 trace/finalize 同构重推——固定方向坐标系）。
+vec3 wrcDir(uint k, uint count) {
+    float y = 1.0 - 2.0 * (float(k) + 0.5) / float(count);
+    float r = sqrt(max(1.0 - y * y, 0.0));
+    float ga = 2.399963229728653;
+    float a = ga * float(k);
+    return vec3(cos(a) * r, y, sin(a) * r);
+}
+
+// canonical L2 SH basis（EvalLib 同源常量；此处独立展开避免给调试 pass
+// 引入依赖面——常量与 EvalLib 逐字节一致， EvalLib 变更时必须同步）。
+void wrcSHBasis(vec3 d, out float Y[9]) {
+    const float C0 = 0.282095;
+    const float C1 = 0.488603;
+    Y[0] = C0;
+    Y[1] = -C1 * d.y;
+    Y[2] =  C1 * d.z;
+    Y[3] = -C1 * d.x;
+    const float C2_0 = 1.092548;
+    const float C2_1 = 0.315392;
+    const float C2_2 = 0.546274;
+    Y[4] =  C2_0 * d.x * d.y;
+    Y[5] = -C2_0 * d.y * d.z;
+    Y[6] =  C2_1 * (3.0 * d.z * d.z - 1.0);
+    Y[7] = -C2_0 * d.x * d.z;
+    Y[8] =  C2_2 * (d.x * d.x - d.y * d.y);
+}
+
+void wrc_prefilter_irradiance() {
+    uint tid = gl_LocalInvocationID.x;
+    uint group_id = gl_WorkGroupID.x;
+    uint probeIdx = group_id * 64u + tid;
+    if (probeIdx >= volume.ProbeMeta.y) return;
+
+    const uint K = volume.ProbeMeta.x;
+    const uint base = probeIdx * (K * 2u + 4u);
+
+    uint state = pd.probe_data[base + K * 2u + 2u];
+    if ((state & 1u) == 0u) {
+        for (uint i = 0u; i < 9u; ++i) sh.sh9_out[probeIdx * 9u + i] = vec4(0.0);
+        return;
+    }
+
+    // radiance-SH 投影：sh_i = (4π/N) Σ_k L(ω_k)·Y_i(ω_k)。
+    // 每线程独立累加（每探针 9 系数 × K 方向，64 探针/组并行）。
+    vec4 acc[9];
+    for (uint i = 0u; i < 9u; ++i) acc[i] = vec4(0.0);
+    float Y[9];
+    for (uint d = 0u; d < K; ++d) {
+        uvec2 p0 = uvec2(pd.probe_data[base + d * 2u + 0],
+                         pd.probe_data[base + d * 2u + 1]);
+        vec3 L = wrcUnpackRGB(p0);
+        wrcSHBasis(wrcDir(d, K), Y);
+        for (uint i = 0u; i < 9u; ++i) acc[i].xyz += L * Y[i];
+    }
+    const float mcWeight = 4.0 * 3.14159265358979 / float(K);
+    for (uint i = 0u; i < 9u; ++i) sh.sh9_out[probeIdx * 9u + i] = vec4(acc[i].xyz * mcWeight, 1.0);
+}

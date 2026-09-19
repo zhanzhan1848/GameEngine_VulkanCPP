@@ -1,0 +1,225 @@
+#version 450 core
+// [WRC] WRCTraceFinalize — split-trace pass 2: hit distance → radiance.
+// Entry point: wrc_trace_finalize
+//
+// 能量单向律（设计文档 §0.3）：WRC 的 radiance 只来自两条合法路径——
+//   1. 近场命中 → SC lighting atlas 采样（cache 填充，合法）；
+//   2. 逃逸（越出 RayMaxDistance）→ 天空契约（EvaluateSkyBase × SkyColor
+//      × kWRCSkyTier 档位——与 DDGITraceFinalize 同源的共享天空函数，
+//      档位常量独立定义于 WRCTypes.h）。
+// 步数耗尽（密闭 miss）→ 黑（非天空，与 DDGI 的两种 miss 区分一致）。
+// SC 查询失败 → 黑（测量缺失 ≠ 伪造能量；对齐 Stream B3 的显式无效语义）。
+// 没有 prev-screen 回灌、没有 analytic 直射、没有探针自反弹——WRC 从不下
+// 注能量到任何被缓存对象。
+//
+// Flat bindings:
+//   0 = SampledImage (2D)             SC lighting_atlas
+//   1 = SampledImage (2D)             SC depth_atlas
+//   2 = UniformBuffer                 WRCVolumeData
+//   3 = StorageBuffer (readonly)      hit_distance[]
+//   4 = StorageBuffer (write)         wrc_rays[] (vec4 xyz radiance, w dist)
+//   5 = StorageBuffer (readonly)      probe_update_list[]
+//   6 = StorageBuffer (readonly)      SC card lookups
+//   7 = StorageBuffer (readonly)      SC card data
+//   8 = StorageBuffer (readonly)      SC grid offsets
+//   9 = StorageBuffer (readonly)      SC grid cards
+
+#extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+// 公共真值层（§1.2-3：SurfaceCacheData.glsl 双方都可以 include）——
+// 卡片查询契约 scQueryCardCandidate 单一事实源。
+#include "SurfaceCacheData.glsl"
+// 共享解析天空（单一事实源；档位常量在 WRCTypes/UBO SkyColor.w）。
+#include "ShaderLib/SkyAtmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D lighting_atlas;
+layout(set = 0, binding = 1) uniform texture2D depth_atlas;
+
+layout(set = 0, binding = 2, std140) uniform WRCVolumeDataBlock {
+    vec4  ProbeOrigin;
+    uvec4 ProbeCounts;
+    uvec4 ProbeMeta;
+    vec4  TraceParams;
+    vec4  SdfOrigins[3];
+    vec4  SdfVoxelSizes[3];
+    vec4  SdfExtents[3];
+    uvec4 SdfResolutionsAndCount;
+    vec4  LightDirection;
+    vec4  LightColor;
+    vec4  SkyColor;
+    uvec4 SCParams;
+} volume;
+
+layout(set = 0, binding = 3, std430) readonly buffer HitDistanceBuf {
+    float hit_distance[];
+} hd;
+
+layout(set = 0, binding = 4) writeonly buffer WrcRayStoreBuf {
+    vec4 wrc_rays[];
+} rd;
+
+layout(set = 0, binding = 5, std430) readonly buffer ProbeUpdateBuf {
+    uint probe_update_list[];
+} pul;
+
+layout(set = 0, binding = 6, std430) readonly buffer CardLookupBuf {
+    SurfaceCacheCardLookup card_lookups[];
+} cl;
+
+layout(set = 0, binding = 7, std430) readonly buffer CardDataBuf {
+    SurfaceCacheCard card_data[];
+} cd;
+
+layout(set = 0, binding = 8, std430) readonly buffer SCGridOffsetsBuf {
+    uint sc_grid_offsets[];
+} scgo;
+
+layout(set = 0, binding = 9, std430) readonly buffer SCGridCardsBuf {
+    uint sc_grid_cards[];
+} scgc;
+
+// [Q2 排查] SC 查询漏斗计数（DebugChannel=1 时累加；CPU 读回定位失败级）。
+layout(set = 0, binding = 10, std430) buffer WrcDbgBuf {
+    uvec4 wrc_dbg;   // x=hits y=gridOk z=cellFound w=found
+} dbg;
+
+// 手动双线性（samplerless，clamp-to-edge）——miss 回退的卡片采样。
+vec3 wrcSampleAtlasBilinear(vec2 uvPx) {
+    float atlasSize = float(volume.SCParams.y);
+    vec2 coord = clamp(uvPx, vec2(0.0), vec2(atlasSize - 1.0)) - 0.5;
+    ivec2 base = ivec2(int(floor(coord.x)), int(floor(coord.y)));
+    vec2 f = clamp(fract(coord), vec2(0.0), vec2(1.0));
+    int maxC = int(atlasSize) - 1;
+    vec3 c00 = texelFetch(lighting_atlas, clamp(base,                ivec2(0), ivec2(maxC)), 0).rgb;
+    vec3 c10 = texelFetch(lighting_atlas, clamp(base + ivec2(1, 0),  ivec2(0), ivec2(maxC)), 0).rgb;
+    vec3 c01 = texelFetch(lighting_atlas, clamp(base + ivec2(0, 1),  ivec2(0), ivec2(maxC)), 0).rgb;
+    vec3 c11 = texelFetch(lighting_atlas, clamp(base + ivec2(1, 1),  ivec2(0), ivec2(maxC)), 0).rgb;
+    return c00 * (1.0 - f.x) * (1.0 - f.y)
+         + c10 * f.x * (1.0 - f.y)
+         + c01 * (1.0 - f.x) * f.y
+         + c11 * f.x * f.y;
+}
+
+SCGridParams wrcGridLoad() {
+    return scGridDecode(
+        uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
+              scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]),
+        uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
+              scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]),
+        uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
+              scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]));
+}
+
+void wrc_trace_finalize() {
+    uint tid      = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;
+    uint group_id = gl_WorkGroupID.x;
+
+    if (group_id >= volume.ProbeMeta.w) return;
+    if (tid >= volume.ProbeMeta.x) return;
+
+    uint probeIdx = pul.probe_update_list[group_id];
+    if (probeIdx >= volume.ProbeMeta.y) return;
+
+    uint globalRayIdx = group_id * volume.ProbeMeta.x + tid;
+    float hitDistance = hd.hit_distance[globalRayIdx];
+
+    uvec3 counts = volume.ProbeCounts.xyz;
+    uint pz  = probeIdx / (counts.x * counts.y);
+    uint rem = probeIdx % (counts.x * counts.y);
+    uint py  = rem / counts.x;
+    uint px  = rem % counts.x;
+    vec3 probePos = volume.ProbeOrigin.xyz + vec3(float(px), float(py), float(pz)) * volume.ProbeOrigin.w;
+
+    // 方向集与 trace 侧同构重推（Fibonacci，固定坐标系）。
+    float y = 1.0 - 2.0 * (float(tid) + 0.5) / float(volume.ProbeMeta.x);
+    float r = sqrt(max(1.0 - y * y, 0.0));
+    float ga = 2.399963229728653;
+    float a = ga * float(tid);
+    vec3 rayDir = vec3(cos(a) * r, y, sin(a) * r);
+
+    vec4 result = vec4(vec3(0.0), hitDistance);
+
+    if (hitDistance >= 0.0) {
+        // ---- 近场命中 → SC lighting atlas（cache 填充，唯一 hit 路径）----
+        vec3 hitPos = probePos + rayDir * hitDistance;
+        float bestKey = 1e30;
+        bool found = false;
+        if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg.x, 1u);
+        if (volume.SCParams.z != 0u) {
+            if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg.y, 1u);
+            uint deviceReads = 0u;
+            const uint kMaxReads = 16u;
+            SCGridParams gp = wrcGridLoad();
+            uint cell = scGridCellIndex(gp, hitPos);
+            if (cell != 0xFFFFFFFFu) {
+                if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg.z, 1u);
+                uint begin = scgo.sc_grid_offsets[16u + cell];
+                uint end   = scgo.sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && deviceReads < kMaxReads; ++gi) {
+                    uint cardIdx = scgc.sc_grid_cards[gi];
+                    if (cardIdx >= 4096u) continue;
+                    SurfaceCacheCard card = cd.card_data[cardIdx];
+                    ++deviceReads;
+                    vec3 scRadiance; float key;
+                    if (scQueryCardCandidate(card, hitPos, -rayDir,
+                                             max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
+                                             depth_atlas, lighting_atlas,
+                                             vec3(0.0), scRadiance, key)) {
+                        if (key < bestKey) {
+                            bestKey = key;
+                            result.xyz = scRadiance;
+                            found = true;
+                            if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg.w, 1u);
+                        }
+                    }
+                }
+            }
+        }
+        // 查询失败 → 保持黑（测量缺失，不伪造能量）。
+        if (!found) result.xyz = vec3(0.0);
+    } else if (hitDistance <= -1.5) {
+        // ---- 逃逸 → 天空契约 ----
+        // 共享 EvaluateSkyBase；档位 kWRCSkyTier 由 CPU 经 SkyColor.w 下发
+        //（0.4，与 DDGI 天空档同值、常量源独立）。
+        result.xyz = EvaluateSkyBase(rayDir) * volume.SkyColor.xyz * volume.SkyColor.w;
+    } else {
+        // ---- 步数耗尽（密闭）→ 周边卡片回退（DDGI miss 分支移植）----
+        // 探针周边 SC 卡的世界坐标投影 + atlas 双线性采样；只接受真正有
+        // 能量的卡片（黑色 = 无测量，不伪造）。全失 → 黑。
+        bool found = false;
+        if (volume.SCParams.z != 0u) {
+            uint deviceReads = 0u;
+            const uint kMaxMissReads = 8u;
+            SCGridParams gp = wrcGridLoad();
+            uint cell = scGridCellIndex(gp, probePos);
+            if (cell != 0xFFFFFFFFu) {
+                uint begin = scgo.sc_grid_offsets[16u + cell];
+                uint end   = scgo.sc_grid_offsets[17u + cell];
+                for (uint gi = begin; gi < end && deviceReads < kMaxMissReads; ++gi) {
+                    uint cardIdx = scgc.sc_grid_cards[gi];
+                    if (cardIdx >= 4096u) continue;
+                    const SurfaceCacheCard card = cd.card_data[cardIdx];
+                    ++deviceReads;
+                    vec2 atlasUV;
+                    if (worldToCardUV(probePos, card, atlasUV)) {
+                        vec3 missRadiance = wrcSampleAtlasBilinear(atlasUV);
+                        if (dot(missRadiance, missRadiance) > 0.0001) {
+                            result.xyz = missRadiance;
+                            found = true;
+                            if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg.w, 1u);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!found) result.xyz = vec3(0.0);
+    }
+
+    if (any(isnan(result.xyz)) || any(isinf(result.xyz))) result.xyz = vec3(0.0);
+    result.xyz = min(result.xyz, vec3(64.0));
+    rd.wrc_rays[probeIdx * volume.ProbeMeta.x + tid] = result;   // 绝对探针索引
+}

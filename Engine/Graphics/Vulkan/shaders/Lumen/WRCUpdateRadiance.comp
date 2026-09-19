@@ -1,0 +1,170 @@
+#version 450 core
+// [WRC] WRCUpdateRadiance — radiance 方向格 EMA + Chebyshev 可见性 + 状态。
+// Entry point: wrc_update_radiance
+//
+// 存储布局（WRCTypes.h kWRCProbeStrideU32，单 storage buffer）：
+//   [base + d*2 + 0] = packHalf2x16(r, g)
+//   [base + d*2 + 1] = packHalf2x16(b, 0)
+//   [base + K*2 + 0] = hit_dist_mean
+//   [base + K*2 + 1] = hit_dist_var
+//   [base + K*2 + 2] = state: bit0 valid / bit1 in-geometry / bits[16..31] 消费计数
+//   [base + K*2 + 3] = pad
+//
+// 语义（设计文档 §2.2）：
+//   - EMA α = 0.1（独立于 DDGI 的 0.02/0.2 双系数）；
+//   - Chebyshev 可见性门：偏差射线按 var/(var+Δ²) 降权后进 EMA；
+//   - 暖启动冻结（§6-2）：frame < GIWarmupFrames 时不写——WRC 不采未收敛
+//     的场，EMA 在暖启动期保持初值；
+//   - 入几何排除（A2）：in-geometry 位（CPU 侧按 SDF 起点距离置位，见
+//     LumenWRCPass 的 update list 构建注释）置位探针跳过更新，radiance 清零；
+//   - 消费计数（A3/A5）：由 SPGI 消费端原子递增，本 pass 不改写。
+//
+// Flat bindings:
+//   2 = UniformBuffer                WRCVolumeData
+//   3 = StorageBuffer (readonly)     wrc_rays[]
+//   4 = StorageBuffer (read/write)   probe_data[]
+//   5 = StorageBuffer (readonly)     probe_update_list[]
+//   6 = StorageBuffer (readonly)     hit_distance[]（尾部 = 本帧起点 SDF 距离）
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 2, std140) uniform WRCVolumeDataBlock {
+    vec4  ProbeOrigin;
+    uvec4 ProbeCounts;
+    uvec4 ProbeMeta;
+    vec4  TraceParams;
+    vec4  SdfOrigins[3];
+    vec4  SdfVoxelSizes[3];
+    vec4  SdfExtents[3];
+    uvec4 SdfResolutionsAndCount;
+    vec4  LightDirection;
+    vec4  LightColor;
+    vec4  SkyColor;
+    uvec4 SCParams;
+} volume;
+
+layout(set = 0, binding = 3, std430) readonly buffer WrcRayStoreBuf {
+    vec4 wrc_rays[];
+} rd;
+
+layout(set = 0, binding = 4, std430) buffer ProbeDataBuf {
+    uint probe_data[];   // kWRCProbeStrideU32 per probe
+} pd;
+
+layout(set = 0, binding = 5, std430) readonly buffer ProbeUpdateBuf {
+    uint probe_update_list[];
+} pul;
+
+layout(set = 0, binding = 6, std430) readonly buffer HitDistanceBuf {
+    float hit_distance[];
+} hd;
+
+uvec2 wrcPackRGB(vec3 c) {
+    return uvec2(packHalf2x16(vec2(c.r, c.g)), packHalf2x16(vec2(c.b, 0.0)));
+}
+vec3 wrcUnpackRGB(uvec2 p) {
+    vec2 lo = unpackHalf2x16(p.x);
+    vec2 hi = unpackHalf2x16(p.y);
+    return vec3(lo.x, lo.y, hi.x);
+}
+
+void wrc_update_radiance() {
+    uint tid = gl_LocalInvocationID.x;
+    uint group_id = gl_WorkGroupID.x;
+    uint slot = group_id * 64u + tid;
+    if (slot >= volume.ProbeMeta.w) return;   // updateCount
+
+    uint probeIdx = pul.probe_update_list[slot];
+    if (probeIdx >= volume.ProbeMeta.y) return;
+
+    const uint K = volume.ProbeMeta.x;
+    const uint base = probeIdx * (K * 2u + 4u);
+
+    // 暖启动冻结（§6-2）：窗口内 EMA 不写——WRC 不采未收敛 SC。
+    if (volume.TraceParams.z < volume.TraceParams.w) return;
+
+    uint state = pd.probe_data[base + K * 2u + 2u];
+
+    // A2 入几何排除：trace 端 lane 0 写入的起点 SDF 距离（hit 缓冲尾部）。
+    // d0 < skin（同 DDGI relocation 的 skin 公式）→ 探针在墙内：置 in-geometry
+    // 位、清 radiance——不得向消费端输出墙内采样。
+    {
+        const float skin = max(volume.SdfVoxelSizes[0].x * 1.5, volume.ProbeOrigin.w * 0.05);
+        float d0 = hd.hit_distance[volume.ProbeMeta.w * K + slot];
+        if (d0 >= 0.0 && d0 < skin) {
+            for (uint d = 0u; d < K; ++d) {
+                pd.probe_data[base + d * 2u + 0] = 0u;
+                pd.probe_data[base + d * 2u + 1] = 0u;
+            }
+            pd.probe_data[base + K * 2u + 0] = 0u;   // mean
+            pd.probe_data[base + K * 2u + 1] = 0u;   // var
+            pd.probe_data[base + K * 2u + 2] = (state & 0xFFFF0000u) | (1u << 1);   // in-geometry，保留消费计数
+            return;
+        }
+    }
+
+    // 显式 in-geometry 位（已排除探针的后续帧）：置位即跳过更新。
+    if ((state & (1u << 1)) != 0u) {
+        return;
+    }
+
+    const float alpha = volume.TraceParams.y;   // 0.1
+
+    // 逐方向 EMA + Chebyshev 加权。ray k ↔ 方向 k 一一对应（固定方向集）。
+    // 首次更新（bit0 未置）：直接写入测量（非 EMA——旧 0 是无效值不是历史）。
+    const bool firstFill = (state & 1u) == 0u;
+
+    // mean/var 的旧值（Chebyshev 参照）。首次更新无历史 → 权重恒 1。
+    uint meanU = pd.probe_data[base + K * 2u + 0u];
+    uint varU  = pd.probe_data[base + K * 2u + 1u];
+    float meanD = firstFill ? 0.0 : uintBitsToFloat(meanU);
+    float varD  = firstFill ? 0.0 : uintBitsToFloat(varU);
+    bool haveStats = !firstFill && meanU != 0u && varU != 0u;
+
+    float sumD = 0.0;
+    float sumD2 = 0.0;
+    float wSum = 0.0;
+    for (uint d = 0u; d < K; ++d) {
+        vec4 raySample = rd.wrc_rays[probeIdx * K + d];
+        float dist = raySample.w;
+        vec3 rad = max(raySample.xyz, vec3(0.0));
+
+        uvec2 oldPacked = uvec2(pd.probe_data[base + d * 2u + 0],
+                                pd.probe_data[base + d * 2u + 1]);
+        vec3 oldRad = wrcUnpackRGB(oldPacked);
+
+        // Chebyshev 可见性：命中距离偏离探针均值的射线降权（对齐 DDGI 已
+        // 验证思路，独立实现——离群射线多为穿透/贴面采样）。
+        float w = 1.0;
+        if (haveStats && dist >= 0.0) {
+            float dd = max(dist - meanD, 0.0);
+            w = clamp(varD / (varD + dd * dd) * 2.0, 0.2, 1.0);
+        }
+
+        vec3 blended = firstFill ? rad : mix(oldRad, rad, alpha * w);
+        uvec2 packed = wrcPackRGB(min(blended, vec3(64.0)));
+        pd.probe_data[base + d * 2u + 0] = packed.x;
+        pd.probe_data[base + d * 2u + 1] = packed.y;
+
+        if (dist >= 0.0) {
+            sumD += w * dist;
+            sumD2 += w * dist * dist;
+            wSum += w;
+        }
+    }
+
+    // hit 距离 mean/var EMA（可见性统计；逃逸射线不计入）。
+    // mean/var 用 u32 直存 f32 位型（半精度不够表达 var 的动态范围）。
+    if (wSum > 0.0) {
+        float newMean = sumD / wSum;
+        float newVar = max(sumD2 / wSum - newMean * newMean, 0.0);
+        float outMean = firstFill ? newMean : mix(meanD, newMean, alpha);
+        float outVar  = firstFill ? newVar  : mix(varD,  newVar,  alpha);
+        pd.probe_data[base + K * 2u + 0] = floatBitsToUint(outMean);
+        pd.probe_data[base + K * 2u + 1] = floatBitsToUint(outVar);
+    }
+
+    pd.probe_data[base + K * 2u + 2] = state | 1u;   // 置 valid，保留消费计数
+}
