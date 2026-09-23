@@ -387,3 +387,29 @@ add_test(NAME TestCardBake COMMAND TestCardBake)
 set_target_properties(TestCardBake PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# ---- glTF 2.0 importer test (.glb container / .gltf JSON / Draco reject) ----
+
+add_executable(TestGltfImporter TestGltfImporter.cpp)
+
+target_include_directories(TestGltfImporter PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+    ${CMAKE_SOURCE_DIR}/OSAPI/MAC
+)
+
+target_link_libraries(TestGltfImporter PRIVATE ContentTools contenttools_pipeline)
+
+target_compile_options(TestGltfImporter PRIVATE
+    -std=c++17
+    -stdlib=libc++
+    -Wno-deprecated-declarations
+    -Wno-unused-parameter
+)
+
+add_test(NAME TestGltfImporter COMMAND TestGltfImporter)
+set_target_properties(TestGltfImporter PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
+)

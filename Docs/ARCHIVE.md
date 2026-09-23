@@ -323,6 +323,7 @@ flowchart TD
 | `2026-08-11-world-editor-scene-manipulation-design.md` | ✅ | World Editor R1：EntityFactory/Gizmo Rotate-Scale/Inspector 推送/默认材质（代码中 EntityFactory、EntityMetadata 均已存在） |
 | `2026-08-11-world-editor-render-surface-design.md` | ✅ | World Editor R2：SceneEnvironment 持久化 + Gizmo 锚定 + AABB 高亮（SceneEnvironmentViewModel 等已存在） |
 | `2026-08-14-model-import-pipeline-phase2-m13.md` | ✅ | M13 Shipped：ContentTools 全管线参数 ~208B POD ABI + GeometryImportPanel |
+| `2026-09-23-gltf-glb-import-support.md` | ✅ | glTF 2.0 导入 Shipped：GltfImporter（.glb/.gltf + 内嵌贴图提取，PfxJson 复用）+ 编辑器面板解锁 + OBJ 行为孪生对拍测试 |
 
 ### 4.3 superpowers/（32 份，保持 plans/specs/notes 结构）
 

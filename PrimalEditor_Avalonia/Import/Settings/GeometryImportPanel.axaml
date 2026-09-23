@@ -148,7 +148,7 @@
       </Border>
 
       <!-- ============================================================= -->
-      <!-- STAGE 2 CARD : Asset Pipeline (FBX/OBJ only)                    -->
+      <!-- STAGE 2 CARD : Asset Pipeline (FBX/OBJ/glTF/GLB)              -->
       <!-- Gated by PipelineAvailable; controls disable when format       -->
       <!-- unsupported (theme greys disabled controls uniformly).         -->
       <!-- ============================================================= -->
@@ -189,7 +189,7 @@
                          Foreground="{DynamicResource AmberBrush}"/>
               <TextBlock TextWrapping="Wrap" FontSize="11"
                          Foreground="{DynamicResource PrimaryTextBrush}"
-                         Text="Pipeline modules only run on .fbx and .obj source files. Other formats (.gltf, .glb, .dae, .blend) use the legacy import path and ignore the flags below."/>
+                         Text="Pipeline modules only run on .fbx, .obj, .gltf and .glb source files. Other formats (.dae, .blend) use the legacy import path and ignore the flags below. .gltf/.glb must be plain glTF 2.0 (no Draco compression)."/>
             </StackPanel>
           </Border>
 

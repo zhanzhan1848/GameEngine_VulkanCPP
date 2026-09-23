@@ -48,7 +48,8 @@ public partial class ImportSettingsDialog : Window
         for (int i = 0; i < files.Count; ++i)
         {
             var ext = Path.GetExtension(files[i]).ToLowerInvariant();
-            if (ext == ".fbx" || ext == ".obj") return true;
+            // .gltf/.glb: ContentTools glTF 2.0 importer (plain glTF — no Draco).
+            if (ext == ".fbx" || ext == ".obj" || ext == ".gltf" || ext == ".glb") return true;
         }
         return false;
     }

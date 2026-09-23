@@ -17,15 +17,19 @@ set(PROJECTION_SOURCES
     ContentTools.cpp
     FbxImporter.cpp
     Geometry.cpp
+    GltfImporter.cpp
     NormalMapIdentification.cpp
     ObjImporter.cpp
     PrimitiveMesh.cpp
     TextureImporter.cpp
     FbxImporter.h
     Geometry.h
+    GltfImporter.h
     ObjImporter.h
     PrimitiveMesh.h
     NormalMapIdentification.h
+    # glTF 解析复用引擎自研无异常 JSON 解析器（单一事实源，见 PfxJson.h 头注释）
+    ${CMAKE_SOURCE_DIR}/Engine/ParticleFX/core/PfxJson.cpp
     # Phase 1 asset pipeline shared sources (M2)
     common/SDF.h
     common/SDF.cpp

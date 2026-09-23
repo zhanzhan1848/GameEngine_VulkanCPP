@@ -120,6 +120,7 @@
     <ClInclude Include="Geometry.h" />
     <ClInclude Include="meshoptimizer\meshoptimizer.h" />
     <ClInclude Include="ObjImporter.h" />
+    <ClInclude Include="GltfImporter.h" />
     <ClInclude Include="PrimitiveMesh.h" />
     <ClInclude Include="TemplateShader\PBR_Template_Shader_v1.h" />
     <ClInclude Include="ToolsCommon.h" />
@@ -146,6 +147,8 @@
     <ClCompile Include="meshoptimizer\vfetchoptimizer.cpp" />
     <ClCompile Include="NormalMapIdentification.cpp" />
     <ClCompile Include="ObjImporter.cpp" />
+    <ClCompile Include="GltfImporter.cpp" />
+    <ClCompile Include="..\Engine\ParticleFX\core\PfxJson.cpp" />
     <ClCompile Include="PrimitiveMesh.cpp" />
     <ClCompile Include="TextureImporter.cpp" />
   </ItemGroup>

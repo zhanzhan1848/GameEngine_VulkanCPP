@@ -251,6 +251,7 @@ int run_pipeline(int argc, char* argv[]) {
                      "[--uvatlas-lightmap] "
                      "[--repair-normal-signs] [--no-lod] [--no-meshlet] [--collision] "
                      "[--lod-ratio <f>]\n"
+                     "  Input formats: .fbx .obj .gltf .glb (glTF 2.0, plain — no Draco)\n"
                      "  Subdivide:    --subdivide-levels N (default 1)\n"
                      "                --subdivide-scheme loop|catmull (default loop)\n"
                      "  Derive (M11): --derive (standalone; auto-cascade after --subdivide is on by default)\n"

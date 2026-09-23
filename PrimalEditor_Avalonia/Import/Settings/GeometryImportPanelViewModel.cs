@@ -39,10 +39,11 @@ public sealed class GeometryImportPanelViewModel : ImportSettingsViewModelBase
     public bool ShowAdvancedVisibility => _showAdvanced;
 
     /// <summary>
-    /// False when the user selected a non-FBX/OBJ file (gltf/glb/dae/blend).
-    /// ContentTools' pipeline path only handles .fbx and .obj; for other
-    /// formats we fall back to the legacy import path and grey-out the
-    /// pipeline section so toggles there do nothing misleading.
+    /// False when the user selected a format ContentTools' pipeline path does
+    /// not handle (dae/blend). .fbx/.obj/.gltf/.glb all run through
+    /// ProcessAIAsset now; unsupported formats fall back to the legacy import
+    /// path and the pipeline section greys out so toggles there do nothing
+    /// misleading.
     /// </summary>
     public bool PipelineAvailable
     {

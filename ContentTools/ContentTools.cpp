@@ -33,14 +33,15 @@
 namespace primal::tools {
 
 // Forward-declared legacy importers (defined in FbxImporter.cpp /
-// ObjImporter.cpp). Same signature: (file, scene_data*, progress callback).
-// Declared at file scope so the C ABI below can name them.
+// ObjImporter.cpp / GltfImporter.cpp). Same signature: (file, scene_data*,
+// progress callback). Declared at file scope so the C ABI below can name them.
 extern "C" void ImportFbx(const char* file, scene_data* data, void(*callback)(s32, s32));
 extern "C" void ImportObjAPI(const char* file, scene_data* data, void(*callback)(s32, s32));
+extern "C" void ImportGltfAPI(const char* file, scene_data* data, void(*callback)(s32, s32));
 
 extern void ShutDownTextureTools();
 
-// Detect file extension. Returns "fbx" / "obj" / "" (unknown).
+// Detect file extension. Returns "fbx" / "obj" / "gltf" / "glb" / "" (unknown).
 static std::string get_extension(const char* path) {
     if (!path) return "";
     std::string p{path};
@@ -499,6 +500,8 @@ EDITOR_INTERFACE void ProcessAIAsset(ai_asset_pipeline_params* p)
         ImportFbx(p->input_path, p->out_data, nullptr);
     } else if (ext == "obj") {
         ImportObjAPI(p->input_path, p->out_data, nullptr);
+    } else if (ext == "gltf" || ext == "glb") {
+        ImportGltfAPI(p->input_path, p->out_data, nullptr);
     } else {
         std::cerr << "ProcessAIAsset: unsupported extension '" << ext << "'\n";
         return;
@@ -571,6 +574,10 @@ EDITOR_INTERFACE u32 CookMeshWithSettings(const char* input, const char* output,
 	else if (strcasecmp(ext, ".obj") == 0)
 	{
 		ImportObjAPI(input, &data, nullptr);
+	}
+	else if (strcasecmp(ext, ".gltf") == 0 || strcasecmp(ext, ".glb") == 0)
+	{
+		ImportGltfAPI(input, &data, nullptr);
 	}
 	else
 	{
