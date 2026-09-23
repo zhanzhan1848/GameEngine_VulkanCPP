@@ -1,0 +1,173 @@
+#pragma once
+
+// T4.6.5 part 30.4 — Vulkan Sponza render via RenderSystem.
+//
+// Mirrors TestNaniteStreamingPipeline scaffolding (RenderTestRunner +
+// RenderSystem + 60 FPS CFRunLoopTimer), but drives the production non-Editor
+// path through StandardRenderPipeline::RenderWithCommandBuffer on a Vulkan
+// device. Replaces the manual swapchain/semaphore/cmd-buffer management of
+// the deleted TestVulkanStandardPipelineRender_Windowed test, which was the
+// source of recurring fence/command-buffer-in-use validation errors.
+
+#include "RenderTestFramework.h"
+#include "Engine/Graphics/RHI/Core/RHIDevice.h"
+#include "Engine/Graphics/RHI/Systems/RenderSystem.h"
+#include "Engine/Graphics/RHI/Components/RHICamera.h"
+#include <chrono>
+#include "Engine/Graphics/RHI/Utils/IBLPrecomputer.h"
+#include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
+#include "Engine/Graphics/RenderScene.h"
+#include "Engine/Graphics/RenderView.h"
+#include "Engine/Graphics/Lumen/LumenTypes.h"
+#include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
+#include "Engine/Graphics/SceneDataAdapter.h"
+#include "Engine/Graphics/Material.h"
+#include "Engine/Graphics/MaterialInstance.h"
+#include "Engine/Graphics/Nanite/GPUMaterialRegistry.h"
+#include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
+#include "Engine/Graphics/RenderProxy.h"
+#include "Engine/Graphics/RenderMesh.h"
+#include "Engine/Components/Entity.h"
+#include "Engine/Components/Cluster.h"
+#include "Engine/Components/Transform.h"
+#include "Engine/JobSystem/JobSystem.h"
+#include "Engine/Platform/Platform.h"
+#include "Engine/Platform/Window.h"
+#include "Engine/Platform/PlatformTypes.h"
+#include "Engine/Particles/ParticleSystem.h"
+#include "Engine/Graphics/DebugDraw/DebugDrawQueue.h"
+
+#include <memory>
+#include <vector>
+#include <string>
+
+class TestVulkanDLSSRenderGraph;
+
+class Engine_Test : public primal::test::RenderTestRunner {
+public:
+    Engine_Test();
+};
+
+class TestVulkanDLSSRenderGraph : public primal::test::RenderTestCase {
+public:
+    TestVulkanDLSSRenderGraph() = default;
+    ~TestVulkanDLSSRenderGraph() override;
+
+    bool Initialize() override;
+    void Run() override;
+    void Shutdown() override;
+
+private:
+    bool InitializeDevice();
+    bool InitializeWindowAndRenderSystem();
+    bool InitializePipeline();
+    bool LoadSponzaScene();
+    // T2.1 (F7): Vulkan GI numerical band gate — frame-90 readback of probe
+    // L0 + gather output, PASS/FAIL bands aligned with TestMetalGIFusion,
+    // then std::_Exit(0/1) so CI gets an exit-code gate. Activated by
+    // GI_VERIFY=1 (default off keeps the windowed long-run behavior).
+    void RunGIVerify();
+    // DLSS 集成门禁（DLSS_GATE=1）：FG + NR 模块在引擎内被真实管线驱动后，
+    // 校验非零/无 NaN/帧计数并 _Exit(0/1)。TestVulkanDLSSRenderGraph 专属。
+    void RunDLSSGate();
+    bool dlssGateDone_{false};
+    bool giVerified_{false};
+    // M2 acceptance: light-response half-life quantification. GI_HALFLIFE=1
+    // steps the probe-trace light down to 10% at GI_HALFLIFE_FRAME (default
+    // 90) via the DDGI probe-light override, samples the camera-cell probe
+    // L0 every frame for GI_HALFLIFE_WINDOW (default 150) frames, then
+    // asserts the measured half-life ≤ GI_HALFLIFE_MAX (frames) and _Exit.
+    void RunGIHalflife();
+    bool giHalflifeActive_{false};
+    u32 giHalflifeToggleFrame_{0};
+    double giHalflifeStartLum_{-1.0};
+    std::vector<double> giHalflifeSamples_;
+    primal::graphics::RenderLight giHalflifeSun_{};
+    double ReadCamCellProbeL0();
+    // C2.3 (2026-09-10): response-metric instrument — strided u16 bit-sample
+    // of the SC lighting atlas (same recipe as DDGI_DUMP=4). The halflife
+    // gate compares pre-dim vs post-dim dumps: the SC atlas is the FIRST
+    // link in the sun→GI transport chain (LightEval writes direct radiance
+    // here), so a 10× dim must move a large fraction of bit samples. The
+    // old camcell-L0 metric sat downstream of the probe EMA + the multi-
+    // stable SC↔probe loop — 10× dimming moved it only 1-5% (SNR too low).
+    bool DumpSCAtlasBits(const char* path, u64& nonzero, u64& rawSum);
+    // T4.6.5 part 37: load HDR + equirect→cube + IBL precompute + SetIBLResources.
+    bool InitializeIBL();
+
+    primal::platform::window window_;
+    primal::graphics::rhi::RHIDeviceBase* device_{nullptr};
+    std::unique_ptr<primal::graphics::rhi::RHIDeviceBase> deviceOwnership_;
+    primal::graphics::RenderSystem renderSystem_;
+    std::unique_ptr<primal::graphics::StandardRenderPipeline> pipeline_;
+    primal::graphics::RenderScene scene_;
+    primal::graphics::RenderView view_;
+
+    // Sponza scene state — mirrors TestVulkanStandardPipelineRender_NonEditor.
+    primal::utl::vector<primal::graphics::SceneDataMeshInfo> sceneMeshes_;
+    std::vector<std::shared_ptr<primal::graphics::MaterialInstance>> materialInstances_;
+    std::vector<primal::game_entity::entity> entities_;
+    std::vector<primal::cluster::component> clusterComps_;
+    std::shared_ptr<primal::graphics::Material> sharedMaterial_;
+    primal::graphics::nanite::GPUMaterialRegistry* materialRegistry_{nullptr};
+
+    // Offline SDF merger — loads per-mesh SDF from pipeline model for visualization.
+    primal::graphics::nanite::OfflineSDFMerger* offlineSDFMerger_{nullptr};
+
+    // Cached handles for cleanup.
+    primal::graphics::rhi::ResourceHandle fallbackDiffuse_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle fallbackNormal_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle fallbackORM_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::SamplerHandle materialSampler_{primal::graphics::rhi::handles::INVALID_SAMPLER};
+    primal::graphics::rhi::SamplerHandle texSampler_{primal::graphics::rhi::handles::INVALID_SAMPLER};
+
+    primal::math::m4x4 viewMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
+    primal::math::m4x4 projMatrix_{primal::graphics::rhi::math::MatrixIdentity()};
+
+    // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). sunset.hdr →
+    // envCube (TextureCube) → irradiance/prefilter cubes + brdfLUT 2D via
+    // IBLPrecomputer. All forwarded to deferred_module_ via
+    // pipeline_->SetIBLResources(). precomputer_ must outlive pipeline_ since
+    // the generated ResourceHandles are owned by the device, but the
+    // precomputer object manages pipeline/layout state used during generation.
+    std::unique_ptr<primal::graphics::rhi::IBLPrecomputer> iblPrecomputer_;
+    primal::graphics::rhi::ResourceHandle iblIrradiance_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle iblPrefilter_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle iblBrdfLUT_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    // Intermediate envCube + its 2DArray storage view (for equirect→cube write).
+    primal::graphics::rhi::ResourceHandle envCube_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle envCubeArrayView_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+    primal::graphics::rhi::ResourceHandle equirectTex_{primal::graphics::rhi::handles::INVALID_RESOURCE};
+
+    // T4.6.5 part 31: WASD + right-mouse-look camera. Lazy-initialized on first
+    // Run() to the same view {0,5,-10} looking +Z and slightly down that
+    // LoadSponzaScene hard-coded before. Each frame: camera_.Update(1/60) +
+    // view_.SetViewMatrix(camera_.GetViewMatrix()) + view_.UpdateFrustum().
+    primal::graphics::rhi::RHICamera camera_;
+    bool cameraInitialized_{false};
+    std::chrono::steady_clock::time_point lastFrameTime_;
+
+    // T4.6.5 part 30.13 (X5 fix): per-swapchain-image render-done semaphores.
+    // Validation hint (VUID-vkQueueSubmit-pSignalSemaphores-00067): "Swapchain
+    // image N was presented but was not re-acquired, so VkSemaphore may still
+    // be in use and cannot be safely reused with image index M." Single
+    // semaphore cycles too fast under FIFO; per-image index guarantees the
+    // semaphore isn't reused until that image comes back via AcquireNextImage.
+    static constexpr u32 kMaxSwapchainImages = 3;
+    primal::graphics::rhi::SyncHandle renderDoneSemaphores_[kMaxSwapchainImages] = {
+        primal::graphics::rhi::handles::INVALID_SYNC,
+        primal::graphics::rhi::handles::INVALID_SYNC,
+        primal::graphics::rhi::handles::INVALID_SYNC
+    };
+
+    u64 frameCount_{0};
+    bool subsystemsInitialized_{false};
+    bool hasShutdown_{false};  // T4.6.5 part 35.7: re-entrancy guard
+
+    // T4.6.5 part 38: ParticleSystem emitter for ForwardSceneRenderer Pass 4c.
+    // Emitter is config-driven (no per-frame emit() call needed); update(dt)
+    // advances simulation. RenderWithCommandBuffer → ForwardSceneRenderer::Render
+    // → Pass 4c → particle_pass_.execute drains the per-frame pool.
+    primal::particles::emitter_id particleEmitter_{primal::particles::invalid_id};
+    bool particlesInitialized_{false};
+};

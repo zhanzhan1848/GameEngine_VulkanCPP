@@ -317,6 +317,33 @@ if(APPLE)
     setup_test_target(TestVulkanSponzaRenderGraph)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
 
+    # DLSS 集成门禁测试：复制 Sponza 脚手架 + 内置 FG/NR 自动断言（_Exit 0/1）。
+    # 与 TestVulkanSponzaRenderGraph 完全独立——原测试不读 DLSS 门禁 env，
+    # 本测试自带 env（Initialize 内 setenv）。运行：
+    #   Darwin/Debug/TestVulkanDLSSRenderGraph; echo $?
+    add_executable(TestVulkanDLSSRenderGraph
+        "Main.cpp"
+        "TestVulkanDLSSRenderGraph.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
+    )
+    setup_test_target(TestVulkanDLSSRenderGraph)
+    target_compile_definitions(TestVulkanDLSSRenderGraph PRIVATE "TEST_VULKAN_DLSS_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
+
+    # Refuse to link/run the Vulkan Sponza target with a source-backed shader
+    # older than its GLSL/WGSL input (including recursively included GLSL).
+    # This target is deliberately always evaluated: shader sources and the
+    # checked-in SPIR-V may be changed outside CMake's generated dependency
+    # graph.
+    add_custom_target(VulkanShaderFreshnessGate
+        COMMAND ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/build_spv.sh --check-freshness
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Checking Vulkan shader source/SPIR-V freshness"
+        VERBATIM
+    )
+    add_dependencies(TestVulkanSponzaRenderGraph VulkanShaderFreshnessGate)
+
     # T4.6.5 part 35.3: bundle Vulkan SPIR-V shaders next to the test binary.
     # Without this, LoadShaderBytecode falls back to
     # /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/ + relative path, which
@@ -327,6 +354,12 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
         $<TARGET_FILE_DIR:TestVulkanSponzaRenderGraph>/Engine/Graphics/Vulkan/shaders
+    )
+
+    add_custom_command(TARGET TestVulkanDLSSRenderGraph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+        $<TARGET_FILE_DIR:TestVulkanDLSSRenderGraph>/Engine/Graphics/Vulkan/shaders
     )
 
     # 11. TestHZBStandalone

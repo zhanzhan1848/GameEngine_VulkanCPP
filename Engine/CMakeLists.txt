@@ -149,6 +149,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/RenderPasses/Visibility/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lighting/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lighting/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Neural/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Neural/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utils/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/*.h"

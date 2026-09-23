@@ -546,8 +546,16 @@ void StandardRenderPipeline::SetLumenConfig(const lumen::LumenConfig& config) {
     ApplyGIAxis1_SpaceCaches(settings_);
 
     // Apply render scale: GPU resolution = logical window size × scale
-    render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale);
-    render_height_ = static_cast<u32>(logical_height_ * settings_.quality.render_scale);
+    // PRIMAL_RENDER_SCALE：离线对比实验用渲染比例覆盖（默认 1.0 零影响）。
+    static const float s_renderScaleEnv = [] {
+        if (const char* e = std::getenv("PRIMAL_RENDER_SCALE")) {
+            const float v = static_cast<float>(std::atof(e));
+            if (v > 0.1f && v <= 2.0f) return v;
+        }
+        return 1.0f;
+    }();
+    render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale * s_renderScaleEnv);
+    render_height_ = static_cast<u32>(logical_height_ * settings_.quality.render_scale * s_renderScaleEnv);
 
     PRIMAL_LOG_STREAM(Info, "Render") << "[Pipeline] Render scale=" << settings_.quality.render_scale
               << " logical=" << logical_width_ << "x" << logical_height_
@@ -629,8 +637,16 @@ void StandardRenderPipeline::UpdateSettings(const RenderPipelineSettings& settin
     settings_dirty_ = true;
 
     // Re-derive render dimensions if scale changed
-    render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale);
-    render_height_ = static_cast<u32>(logical_height_ * settings_.quality.render_scale);
+    // PRIMAL_RENDER_SCALE：离线对比实验用渲染比例覆盖（默认 1.0 零影响）。
+    static const float s_renderScaleEnv = [] {
+        if (const char* e = std::getenv("PRIMAL_RENDER_SCALE")) {
+            const float v = static_cast<float>(std::atof(e));
+            if (v > 0.1f && v <= 2.0f) return v;
+        }
+        return 1.0f;
+    }();
+    render_width_  = static_cast<u32>(logical_width_  * settings_.quality.render_scale * s_renderScaleEnv);
+    render_height_ = static_cast<u32>(logical_height_ * settings_.quality.render_scale * s_renderScaleEnv);
 }
 
 bool StandardRenderPipeline::ApplyConfigChanges() {
@@ -838,6 +854,25 @@ void StandardRenderPipeline::InitializeSubsystems() {
         }
     }
 
+    // R2.1 神经帧生成：PRIMAL_FRAMEGEN=1 时激活（shim 自加载；shim 内部走
+    // MLX/Metal，但数据面是 CPU 缓冲，引擎两个后端均可用）。
+    if (const char* fg = std::getenv("PRIMAL_FRAMEGEN"); fg && fg[0] == '1') {
+        auto module = std::make_unique<NeuralFrameGenModule>();
+        if (module->Initialize(device_, render_width_, render_height_)) {
+            neural_framegen_module_ = std::move(module);
+            const char* fp = std::getenv("PRIMAL_FRAMEGEN_PRESENT");
+            framegen_present_ = fp && fp[0] == '1';
+        }
+    }
+
+    // NR transformer 推理：PRIMAL_NEURAL_NR=1 时激活（间隔门控；默认关）。
+    if (const char* nr = std::getenv("PRIMAL_NEURAL_NR"); nr && nr[0] == '1') {
+        auto module = std::make_unique<NeuralNRModule>();
+        if (module->Initialize(device_, render_width_, render_height_)) {
+            neural_nr_module_ = std::move(module);
+        }
+    }
+
     if (settings_.quality.enable_ddgi && gi_gather_shader_ != handles::INVALID_SHADER) {
         gi_gather_module_ = std::make_unique<GIGatherModule>();
         gi_gather_module_->Initialize(device_, gi_gather_shader_, render_width_, render_height_);
@@ -891,6 +926,9 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (neural_debug_module_) { neural_debug_module_->Shutdown(); neural_debug_module_.reset(); }
     if (neural_capture_module_) { neural_capture_module_->Shutdown(); neural_capture_module_.reset(); }
     if (neural_denoise_module_) { neural_denoise_module_->Shutdown(); neural_denoise_module_.reset(); }
+    if (neural_framegen_module_) { neural_framegen_module_->Shutdown(); neural_framegen_module_.reset(); }
+    if (neural_nr_module_) { neural_nr_module_->Shutdown(); neural_nr_module_.reset(); }
+    framegen_present_ = false;
     if (probe_sphere_module_) { probe_sphere_module_->Shutdown(); probe_sphere_module_.reset(); }
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
@@ -3488,6 +3526,25 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         blitIn.current_buffer_index = cbIdx;
         blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
         blitIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        // R2.1 神经帧生成：回读当帧 blit 输入 + 上传上轮插值结果；
+        // present 开启且插值帧就绪时 FinalBlit 换源为插值纹理。
+        if (neural_framegen_module_ && neural_framegen_module_->IsInitialized()) {
+            NeuralFrameGenInputs fgIn;
+            fgIn.blit_input = blitIn.input_rg;
+            fgIn.render_width = blitIn.render_width;
+            fgIn.render_height = blitIn.render_height;
+            fgIn.current_buffer_index = cbIdx;
+            fgIn.input_is_hdr = false;
+            fgIn.present_interpolated = framegen_present_;
+            neural_framegen_module_->AddPass(graph, fgIn);
+            if (framegen_present_ && neural_framegen_module_->PresentReady()) {
+                blitIn.input_rg = graph.ImportTexture(
+                    "FrameGenPresent", neural_framegen_module_->OutputTexture(),
+                    neural_framegen_module_->OutputDesc(),
+                    rhi::ResourceState::ShaderResource);
+                blitIn.input_tex = handles::INVALID_RESOURCE;
+            }
+        }
         finalOutputNode = blitIn.backbuffer_rg;
         final_blit_module_->AddPass(graph, blitIn);
     }
@@ -3536,6 +3593,17 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 psIn.origin_states_version = originStateVersion;
             }
             probe_sphere_module_->AddPass(graph, psIn);
+        }
+        // NR transformer 推理（PRIMAL_NEURAL_NR 门控；与降噪共用 SPGI 输出口）。
+        if (neural_nr_module_ && neural_nr_module_->IsInitialized()) {
+            NeuralNRInputs nrIn;
+            nrIn.spgi_gi_output = spgiOut.gi_output;
+            nrIn.gbuffer_depth = spDepth;
+            nrIn.gbuffer_normal = spNormal;
+            nrIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+            nrIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+            nrIn.current_buffer_index = static_cast<u32>(frameCount_);
+            neural_nr_module_->AddPass(graph, nrIn);
         }
     }
 }
@@ -5003,7 +5071,27 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         blitIn.current_buffer_index = cbIdx;
         blitIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
         blitIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+        // R2.1 神经帧生成（RenderWithCommandBuffer 路径，同 BuildRenderGraph）。
+        if (neural_framegen_module_ && neural_framegen_module_->IsInitialized()) {
+            NeuralFrameGenInputs fgIn;
+            fgIn.blit_input = blitIn.input_rg;
+            fgIn.render_width = blitIn.render_width;
+            fgIn.render_height = blitIn.render_height;
+            fgIn.current_buffer_index = cbIdx;
+            fgIn.input_is_hdr = false;
+            fgIn.present_interpolated = framegen_present_;
+            neural_framegen_module_->AddPass(graph, fgIn);
+            if (framegen_present_ && neural_framegen_module_->PresentReady()) {
+                blitIn.input_rg = graph.ImportTexture(
+                    "FrameGenPresent", neural_framegen_module_->OutputTexture(),
+                    neural_framegen_module_->OutputDesc(),
+                    rhi::ResourceState::ShaderResource);
+                blitIn.input_tex = handles::INVALID_RESOURCE;
+            }
+        }
         final_blit_module_->AddPass(graph, blitIn);
+        blitBackbufferRG = blitIn.backbuffer_rg;
+        } // !rwcbPassDebug
 
         graph.Compile();
         graph.Execute(cmd);
@@ -5016,6 +5104,17 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             if (depth_history_->StoreCurrentFrameDepth(gpuDraw.GetGBufferDepthSampleable(), cmd, static_cast<u32>(frameCount_))) {
                 prev_taa_view_proj_ = proj_matrix_ * view_matrix_;
                 has_prev_taa_view_proj_ = true;
+            }
+            // NR transformer 推理（第二渲染路径，同上）。
+            if (neural_nr_module_ && neural_nr_module_->IsInitialized()) {
+                NeuralNRInputs nrIn;
+                nrIn.spgi_gi_output = spgiOut.gi_output;
+                nrIn.gbuffer_depth = spDepth;
+                nrIn.gbuffer_normal = spNormal;
+                nrIn.render_width = target_width_ > 0 ? target_width_ : render_width_;
+                nrIn.render_height = target_height_ > 0 ? target_height_ : render_height_;
+                nrIn.current_buffer_index = cbIdx;
+                neural_nr_module_->AddPass(graph, nrIn);
             }
         }
     } else {

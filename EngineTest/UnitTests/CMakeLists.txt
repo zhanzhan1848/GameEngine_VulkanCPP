@@ -48,6 +48,48 @@ set_target_properties(TestNeuralWeights PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
+# M1-a MLX 后端对拍门禁：shim 缺失 SKIP，库存在而对拍失败 FAIL。
+# 依赖 Tools/NeuralMLXShim 的构建产物（dylib + mlx.metallib），见
+# scripts/build_neural_mlx_metallib.sh 与 Docs/2026-09-15-neural-mlx-backend-plan.md。
+add_executable(TestNeuralMLXShim
+    Neural/TestNeuralMLXShim.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralWeights.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralMLXBackend.cpp
+)
+target_include_directories(TestNeuralMLXShim PRIVATE
+    ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine)
+add_test(NAME TestNeuralMLXShim COMMAND TestNeuralMLXShim
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_target_properties(TestNeuralMLXShim PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# R2.1 神经帧生成机制门禁：shim 缺失 SKIP，插值机制失败 FAIL。
+add_executable(TestNeuralFrameGen
+    Neural/TestNeuralFrameGen.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralFrameGenBackend.cpp
+)
+target_include_directories(TestNeuralFrameGen PRIVATE
+    ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine)
+add_test(NAME TestNeuralFrameGen COMMAND TestNeuralFrameGen
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_target_properties(TestNeuralFrameGen PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# M1-b 端到端 PSNR 门禁工具（离线；需要 MLX shim + 采集 take 数据，
+# 无数据时 SKIP）。非 CTest 用例——数据是会话产物。
+add_executable(NeuralMLXGate
+    ${CMAKE_SOURCE_DIR}/Tools/NeuralMLXGate/NeuralMLXGateMain.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralWeights.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralMLXBackend.cpp
+)
+target_include_directories(NeuralMLXGate PRIVATE
+    ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine)
+set_target_properties(NeuralMLXGate PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 add_executable(TestCookedMeshImport Content/TestCookedMeshImport.cpp)
 target_include_directories(TestCookedMeshImport PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(TestCookedMeshImport PRIVATE EngineDLL)

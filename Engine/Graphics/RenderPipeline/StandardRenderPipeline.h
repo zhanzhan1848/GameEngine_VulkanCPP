@@ -32,6 +32,8 @@
 #include "Graphics/RenderPipeline/Modules/NeuralDebugModule.h"
 #include "Graphics/RenderPipeline/Modules/NeuralCaptureModule.h"
 #include "Graphics/RenderPipeline/Modules/NeuralDenoiseModule.h"
+#include "Graphics/RenderPipeline/Modules/NeuralFrameGenModule.h"
+#include "Graphics/RenderPipeline/Modules/NeuralNRModule.h"
 #include "Graphics/RenderPipeline/Modules/DebugProbeSphereModule.h"
 #include "Graphics/RenderPipeline/Modules/GIGatherModule.h"
 #include "Graphics/RenderPipeline/Modules/FusionCompositeModule.h"
@@ -204,6 +206,12 @@ public:
     volume::FroxelFogPass* GetFroxelFogPass() const {
         return froxel_fog_pass_ ? froxel_fog_pass_.get() : nullptr;
     }
+
+    // DLSS 集成门禁（TestVulkanDLSSRenderGraph）用模块访问器；env 未开时返回空。
+    NeuralFrameGenModule* GetNeuralFrameGenModule() const {
+        return neural_framegen_module_.get();
+    }
+    NeuralNRModule* GetNeuralNRModule() const { return neural_nr_module_.get(); }
 
     // Debug/testing: fusion composite module access.
     FusionCompositeModule* GetFusionCompositeModule() const {
@@ -560,7 +568,14 @@ private:
     std::unique_ptr<NeuralCaptureModule> neural_capture_module_;
     // M1 神经降噪推理：PRIMAL_NEURAL_DENOISE=1 时激活（模块自加载）。
     std::unique_ptr<NeuralDenoiseModule> neural_denoise_module_;
+    // R2.1 神经帧生成：PRIMAL_FRAMEGEN=1 时激活（延迟回读插值；默认关）。
+    std::unique_ptr<NeuralFrameGenModule> neural_framegen_module_;
+    bool framegen_present_{false};
+    // NR transformer 推理：PRIMAL_NEURAL_NR=1 时激活（间隔门控；默认关）。
+    std::unique_ptr<NeuralNRModule> neural_nr_module_;
     std::unique_ptr<DebugProbeSphereModule> probe_sphere_module_;
+    // Pass Debug View：整屏中间资源查看（自加载着色器，加载失败软降级）。
+    std::unique_ptr<PassDebugViewModule> pass_debug_view_module_;
 
     // --- Shader compilation cache ---
     rhi::ShaderHandle shadow_filter_shader_{rhi::handles::INVALID_SHADER};
