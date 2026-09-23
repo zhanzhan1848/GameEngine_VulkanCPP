@@ -286,6 +286,12 @@ R4.1 (更多数据) ──→ R4.2 (架构搜索)             │
 4. 引擎 FG 的 Metal 树运行时验证（编译已覆盖，运行时只验了 Vulkan 树；
    Metal 树重建有共享 libEngine.a 交叉污染坑，见 AGENTS.md）。
 
+## 经验文档交叉引用
+
+- SR capture 完整调试历程与环境边界定论：`Docs/2026-09-24-dlss-sr-capture-experience-and-blockers.md`
+- NGX DLSS-SR 需要驱动 ngx capability（容器挂载），compute-only 容器天然不支持
+- FG 引擎集成的 WSI/swapchain 坑位：假 swapchain 需真实 VkImage、present 需队列信号量
+
 ## 风险与缓解
 
 | 风险 | 概率 | 缓解 |
