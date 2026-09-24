@@ -22,15 +22,29 @@ public sealed class ModelSubmeshEntry
 }
 
 /// <summary>
-/// JSON sidecar written by ContentTools (Geometry.cpp::write_model_sidecar)
+/// Material record extracted from the cooked .mesh's material header.
+/// Texture fields are references as recorded at import time (bare
+/// filenames or source-relative paths), not project paths.
+/// </summary>
+public sealed class ModelMaterialEntry
+{
+    public string Name { get; set; } = string.Empty;
+    public string Diffuse { get; set; } = string.Empty;
+    public string Normal { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// JSON sidecar written by ContentTools (ContentTools.cpp::write_model_sidecar)
 /// alongside the cooked .mesh. The editor reads this to display a model's
-/// submeshes in the Content Browser.
+/// submeshes in the Content Browser and to locate the source-referenced
+/// textures that must travel with the asset into the project.
 /// </summary>
 public sealed class ModelSidecar
 {
     public int Version { get; set; } = 1;
     public string Source { get; set; } = string.Empty;
     public string Mesh { get; set; } = string.Empty;
+    public List<ModelMaterialEntry> Materials { get; set; } = new();
     public List<ModelSubmeshEntry> Submeshes { get; set; } = new();
 
     /// <summary>
