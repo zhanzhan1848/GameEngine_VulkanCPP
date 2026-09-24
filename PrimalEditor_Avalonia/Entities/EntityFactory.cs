@@ -148,21 +148,6 @@ public static class EntityFactory
                 }),
 
             new EntityFactoryDescriptor(
-                EntityKind.EnvironmentLight,
-                "Env Light",
-                "🌍",
-                "Environment light — edit HDR sky / IBL settings by selecting it",
-                new[] { "transform", "environment" },
-                () =>
-                {
-                    var n = System.Threading.Interlocked.Increment(ref envLightCount);
-                    var entity = new GameEntity($"Env_{n}");
-                    entity.Components.Add(new Transform());
-                    entity.Components.Add(new EnvironmentComponent());
-                    return entity;
-                }),
-
-            new EntityFactoryDescriptor(
                 EntityKind.Camera,
                 "Camera",
                 "🎥",
