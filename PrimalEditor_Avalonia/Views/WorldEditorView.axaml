@@ -111,6 +111,20 @@
                               ItemsSource="{Binding ViewModeOptions}"
                               SelectedIndex="{Binding ViewModeIndex}"
                               ToolTip.Tip="Viewport shading mode (Shaded / Wireframe; Unlit 预留)"/>
+                    <!-- Pass Debug View：选中后视口整屏显示该 pass 结果
+                         （强制切到完整渲染图路径；Off 恢复轻量前向）。 -->
+                    <TextBlock Text="PASS" FontFamily="{DynamicResource FontDisplay}"
+                               FontWeight="SemiBold" FontSize="9" LetterSpacing="1"
+                               Foreground="{DynamicResource ElectricBlueBrush}"
+                               VerticalAlignment="Center" Margin="4,0,2,0"/>
+                    <ComboBox Width="120"
+                              ItemsSource="{Binding PassDebugViewOptions}"
+                              SelectedIndex="{Binding PassDebugViewIndex}"
+                              ToolTip.Tip="Pass 可视化：albedo/normal/depth/visibility/meshlet/cluster/mesh/SSAO/deferred/GI indirect/SPGI/SC atlas。选中非 Off 会切到完整渲染图路径（Deferred+GI），Off 恢复"/>
+                    <!-- WRC 探针球 overlay（world space radiance probe 可视化）。 -->
+                    <CheckBox Content="WRC" VerticalAlignment="Center" Margin="6,0,0,0"
+                              IsChecked="{Binding WrcProbeDebug}"
+                              ToolTip.Tip="WRC 探针球 overlay：按 64 方向 radiance 着色的 world space radiance probe（暗灰=invalid，偏红=inGeometry）"/>
                     <CheckBox Name="BoundsToggle" Content="Bounds" VerticalAlignment="Center" Margin="6,0,0,0"
                               IsChecked="{Binding ShowAllBounds}"
                               ToolTip.Tip="A7: 显示全部带网格实体的 AABB 线框"/>

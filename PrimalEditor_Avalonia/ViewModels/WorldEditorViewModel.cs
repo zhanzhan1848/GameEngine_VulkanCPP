@@ -225,6 +225,90 @@ public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredCont
     }
 
     // =======================================================================
+    // Pass Debug View（视口实时 pass 可视化）
+    // =======================================================================
+
+    private System.Collections.Generic.IReadOnlyList<string>? _passDebugViewOptions;
+
+    /// <summary>Pass 视图选项——从引擎拉取（PipelineGetPassDebugViewCount/Name），
+    /// 引擎为单一事实源；bridge 未加载或引擎未就绪时退回最小表。</summary>
+    public System.Collections.Generic.IReadOnlyList<string> PassDebugViewOptions
+    {
+        get
+        {
+            if (_passDebugViewOptions != null) return _passDebugViewOptions;
+            var names = new System.Collections.Generic.List<string>();
+            if (NativeEngineBridge.IsLoaded)
+            {
+                var count = NativeEngineBridge.PipelineGetPassDebugViewCount();
+                for (uint i = 0; i < count; i++)
+                {
+                    var n = NativeEngineBridge.PipelineGetPassDebugViewName(i);
+                    names.Add(n ?? $"view{i}");
+                }
+            }
+            if (names.Count <= 1)
+            {
+                // native 未加载或引擎表缺失：不缓存，下次绑定重试。
+                return new[] { names.Count > 0 ? names[0] : "Off" };
+            }
+            _passDebugViewOptions = names;
+            OnPropertyChanged(nameof(PassDebugViewOptions));
+            return _passDebugViewOptions;
+        }
+    }
+
+    private int _passDebugViewIndex;
+
+    /// <summary>选中 pass 视图。0=Off（恢复轻量前向）；非 Off 由引擎强制切
+    /// 完整渲染图路径。UI 首次绑定该属性时触发选项表惰性加载。</summary>
+    public int PassDebugViewIndex
+    {
+        get
+        {
+            _ = PassDebugViewOptions; // 惰性加载选项表
+            return _passDebugViewIndex;
+        }
+        set
+        {
+            if (value < 0 || value >= PassDebugViewOptions.Count) return;
+            if (_passDebugViewIndex != value)
+            {
+                _passDebugViewIndex = value;
+                OnPropertyChanged(nameof(PassDebugViewIndex));
+                if (NativeEngineBridge.IsLoaded)
+                {
+                    NativeEngineBridge.PipelineSetPassDebugView((uint)value);
+                    PrimalEditor_Avalonia.Common.Logger.Info(
+                        $"[Render] pass debug view → {PassDebugViewOptions[value]}");
+                }
+            }
+        }
+    }
+
+    private bool _wrcProbeDebug;
+
+    /// <summary>WRC 探针球 overlay（world space radiance probe 可视化）。</summary>
+    public bool WrcProbeDebug
+    {
+        get => _wrcProbeDebug;
+        set
+        {
+            if (_wrcProbeDebug != value)
+            {
+                _wrcProbeDebug = value;
+                OnPropertyChanged(nameof(WrcProbeDebug));
+                if (NativeEngineBridge.IsLoaded)
+                {
+                    NativeEngineBridge.PipelineSetWRCProbeDebug(value);
+                    PrimalEditor_Avalonia.Common.Logger.Info(
+                        $"[Render] WRC probe overlay → {(value ? "on" : "off")}");
+                }
+            }
+        }
+    }
+
+    // =======================================================================
     // Run target graphics API (plan §Run/Stop: 分图形API / 分debug/release)
     // =======================================================================
 

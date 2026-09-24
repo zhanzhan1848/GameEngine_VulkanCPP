@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Primal.CliFramework;
+using PrimalEditor_Avalonia.Native;
 using PrimalEditor_Avalonia.Views.Engine3D;
 using System.Threading.Tasks;
 
@@ -164,6 +165,107 @@ public sealed class FrameCaptureCommands
             verdict = result.Identical ? "identical"
                 : !result.SameSize ? "different-size"
                 : result.ChangedPixelRatio == 0 ? "within-threshold" : "different",
+        };
+    }
+
+    // ---- Pass Debug View（视口实时 pass 可视化） ----------------------------
+
+    /// <summary>按名解析引擎 pass 视图（引擎侧单一事实源，大小写不敏感）。</summary>
+    private static int? ResolvePassDebugView(string view)
+    {
+        var count = NativeEngineBridge.PipelineGetPassDebugViewCount();
+        for (uint i = 0; i < count; i++)
+        {
+            var name = NativeEngineBridge.PipelineGetPassDebugViewName(i);
+            if (name != null && string.Equals(name, view.Trim(), StringComparison.OrdinalIgnoreCase))
+                return (int)i;
+        }
+        return null;
+    }
+
+    [CliCommand("editor.pass-view",
+        Description = "切换视口 pass 可视化视图（整屏显示该 pass 结果）。可选值由引擎枚举：off/albedo/normal/orm/" +
+                      "depth/velocity/visibility/meshlet/cluster/mesh/ssao/deferred/gi_indirect/spgi/sc_atlas/" +
+                      "sc_albedo/sc_normal/sc_depth/spgi_raw/sc_emissive/sc_shadow/sc_indirect/sc_tile/sc_tile_aux" +
+                      "（editor.schema 返回的命令描述为准）。前置：选中非 off 视图会强制编辑器切到完整渲染图" +
+                      "路径（Deferred+GI），视口离开轻量前向；off 恢复。失败语义：未知名返回 InvalidParams 并" +
+                      "附合法名单；目标 pass 未启用/内容未就绪时引擎回退正常画面（日志提示），命令仍成功。" +
+                      "相关：editor.pass-capture 可一步切视图+截图。",
+        Example = """{"view":"albedo"}""")]
+    public object PassView(string view)
+    {
+        if (string.IsNullOrWhiteSpace(view))
+            throw CliError.InvalidParams("view 不能为空", @"示例: {""view"":""albedo""}");
+        var index = ResolvePassDebugView(view)
+            ?? throw CliError.InvalidParams($"未知 pass 视图 '{view}'",
+                "合法值见 editor.schema 的本命令描述；常用：off/albedo/normal/depth/visibility/meshlet/ssao/gi_indirect");
+        NativeEngineBridge.PipelineSetPassDebugView((uint)index);
+        return new { view = view.ToLowerInvariant(), index, applied = true };
+    }
+
+    [CliCommand("editor.pass-capture",
+        Description = "切换 pass 可视化视图并以编辑器视口相机渲染一帧存 PNG（= editor.pass-view + editor.screenshot " +
+                      "一步到位）。path 必须为绝对路径（相对路径按编辑器进程 cwd 解析），目录自动创建。view 可选：" +
+                      "省略时沿用当前视图；restore=true 时截图后恢复切换前的视图（默认 false，保持所选视图便于" +
+                      "连续取图）。format 可选：hdr=RGBA16F 主 RT（默认）；ldr=一次性 BGRA8 RT（诊断管线格式组合" +
+                      "因素用）。失败语义：未知名返回 InvalidParams；视口未就绪返回 NOT_READY；目标 pass 未产出" +
+                      "时引擎回退正常画面（PNG 即回退画面），命令仍成功。",
+        Example = """{"path":"/tmp/albedo.png","view":"meshlet","restore":false,"format":"hdr"}""")]
+    public object PassCapture(string path, string? view = null, bool restore = false, string format = "hdr")
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw CliError.InvalidParams("path 不能为空", @"示例: {""path"":""/tmp/albedo.png"",""view"":""meshlet""}");
+        if (format != "hdr" && format != "ldr")
+            throw CliError.InvalidParams("format 取值 hdr|ldr", @"hdr=RGBA16F 主 RT；ldr=一次性 BGRA8 RT");
+
+        var viewport = EditorServices.FindViewport()
+            ?? throw CliError.NotReady("3D 视口未就绪",
+                "在编辑器中打开一个项目并切换到世界编辑器标签后再截图");
+
+        uint previousIndex = NativeEngineBridge.PipelineGetPassDebugView();
+        string? previousName = restore ? NativeEngineBridge.PipelineGetPassDebugViewName(previousIndex) : null;
+        int? switchIndex = null;
+        if (!string.IsNullOrWhiteSpace(view))
+        {
+            switchIndex = ResolvePassDebugView(view!)
+                ?? throw CliError.InvalidParams($"未知 pass 视图 '{view}'",
+                    "合法值见 editor.schema 的本命令描述；常用：off/albedo/normal/depth/visibility/meshlet/ssao/gi_indirect");
+            NativeEngineBridge.PipelineSetPassDebugView((uint)switchIndex.Value);
+        }
+
+        var resolved = Path.IsPathRooted(path) ? path : Path.GetFullPath(path);
+        var dir = Path.GetDirectoryName(resolved);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        bool restored = false;
+        int width = 0, height = 0;
+        try
+        {
+            if (!viewport.TryCaptureScreenshot(resolved, format == "ldr" ? 0 : 1, out width, out height))
+                throw new CliError(CliErrorCodes.EngineError,
+                    "截图失败：视口尚未完成首次渲染或引擎忙",
+                    "先等待 1-2 秒后重试，或用 editor.ping 确认 engineInitialized");
+        }
+        finally
+        {
+            if (switchIndex.HasValue && restore)
+            {
+                NativeEngineBridge.PipelineSetPassDebugView(previousIndex);
+                restored = true;
+            }
+        }
+
+        var appliedIndex = NativeEngineBridge.PipelineGetPassDebugView();
+        return new
+        {
+            path = resolved,
+            width,
+            height,
+            bytes = File.Exists(resolved) ? new FileInfo(resolved).Length : 0,
+            view = NativeEngineBridge.PipelineGetPassDebugViewName(appliedIndex)
+                   ?? $"view{appliedIndex}",
+            viewIndex = appliedIndex,
+            restored,
         };
     }
 

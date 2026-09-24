@@ -506,7 +506,13 @@ public partial class EngineViewport3D : UserControl
             // user picks a scene Camera entity via LookThroughCamera, route
             // through the legacy entry so SyncCamerasFromECS picks that
             // entity's CameraComponent + Transform for the view matrices.
-            if (IsLookingThroughSceneCamera)
+            if (NativeEngineBridge.PipelineGetPassDebugView() != 0)
+            {
+                // Pass view 激活期走 RWCB 路径（RG 输出才可落盘，见
+                // Docs/2026-09-20-pass-debug-view.md）。
+                NativeEngineBridge.PipelineRenderFrameRWCB(_renderTarget, _cameraId, surfaceId);
+            }
+            else if (IsLookingThroughSceneCamera)
             {
                 NativeEngineBridge.PipelineRenderFrameForSceneCamera(
                     _renderTarget, _cameraId, surfaceId, _lookThroughSceneEntityId);
@@ -535,6 +541,11 @@ public partial class EngineViewport3D : UserControl
     /// 或引擎忙时返回 false，成功返回 true 并带回实际分辨率。
     /// </summary>
     public bool TryCaptureScreenshot(string absolutePath, out int width, out int height)
+        => TryCaptureScreenshot(absolutePath, 0, out width, out height);
+
+    /// <summary>formatOverride 参数保留（0=常规 HDR RT 渲染）。Pass view 激活
+    /// 期自动改走 RWCB 入口（见文件内 PipelineRenderFrameRWCB 注释）。</summary>
+    public bool TryCaptureScreenshot(string absolutePath, int formatOverride, out int width, out int height)
     {
         width = _renderTargetWidth;
         height = _renderTargetHeight;
@@ -545,22 +556,45 @@ public partial class EngineViewport3D : UserControl
         try
         {
             var surfaceId = (uint)_host.SurfaceId;
-            if (IsLookingThroughSceneCamera)
+            bool passViewActive = NativeEngineBridge.PipelineGetPassDebugView() != 0;
+            try
             {
-                NativeEngineBridge.PipelineRenderFrameForSceneCamera(
-                    _renderTarget, _cameraId, surfaceId, _lookThroughSceneEntityId);
-            }
-            else
-            {
-                NativeEngineBridge.PipelineRenderFrameForEditorCamera(_renderTarget, _cameraId, surfaceId);
-            }
+                // Pass view 激活期走 RWCB 入口（RenderWithCommandBuffer 孪生
+                // 路径）：Render() 路径的 RG 输出在离屏 RGBA16F RT 上无法落盘
+                // 是先于本功能的基建问题（FinalBlit 同样受影响），见
+                // Docs/2026-09-20-pass-debug-view.md。
+                if (passViewActive)
+                {
+                    if (!NativeEngineBridge.PipelineRenderFrameRWCB(
+                            _renderTarget, _cameraId, surfaceId)) return false;
+                }
+                else if (IsLookingThroughSceneCamera)
+                {
+                    NativeEngineBridge.PipelineRenderFrameForSceneCamera(
+                        _renderTarget, _cameraId, surfaceId, _lookThroughSceneEntityId);
+                }
+                else
+                {
+                    NativeEngineBridge.PipelineRenderFrameForEditorCamera(_renderTarget, _cameraId, surfaceId);
+                }
 
-            // SaveRenderTargetAsPng 内部先 FlushGPU（WaitIdle）再离线读回编码，
-            // 与 OnRenderTick 的连续帧路径互不干扰。
-            if (!NativeEngineBridge.SaveRenderTargetAsPng(_renderTarget, absolutePath)) return false;
-            width = _renderTargetWidth;
-            height = _renderTargetHeight;
-            return true;
+                // SaveRenderTargetAsPng 内部先 FlushGPU（WaitIdle）再离线读回编码，
+                // 与 OnRenderTick 的连续帧路径互不干扰。Pass view 激活期先过
+                // 一次 blit：blit 内部对 RWCB 帧后的 RT 做采样状态处理，缺这步
+                // 读回全零（PNG 黑屏）。
+                if (passViewActive)
+                {
+                    NativeEngineBridge.BlitRenderTargetToSurface(_renderTarget, surfaceId);
+                }
+                if (!NativeEngineBridge.SaveRenderTargetAsPng(_renderTarget, absolutePath)) return false;
+                width = _renderTargetWidth;
+                height = _renderTargetHeight;
+                return true;
+            }
+            finally
+            {
+                _ = formatOverride;
+            }
         }
         finally
         {

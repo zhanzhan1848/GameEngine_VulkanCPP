@@ -389,6 +389,85 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("PipelineSetProbeSphereDebug failed", ex); }
     }
 
+    // ---- Pass Debug View（视口实时 pass 可视化）--------------------------
+
+    /// <summary>Switch the fullscreen pass debug view (0=Off, engine enum).
+    /// view != Off forces the full render-graph path (editor forward mode off);
+    /// Off restores it. Invalid values are rejected engine-side (logged).</summary>
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetPassDebugView", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineSetPassDebugView(uint view);
+    public static void PipelineSetPassDebugView(uint view)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineSetPassDebugView(view); }
+        catch (Exception ex) { Logger.Error("PipelineSetPassDebugView failed", ex); }
+    }
+
+    /// <summary>Pass-view-period render entry: RenderWithCommandBuffer twin
+    /// (mature RWCB path — the editor Render() path's RG output to offscreen
+    /// RGBA16F RT is a pre-existing infra issue, see Docs/2026-09-20-pass-debug-view.md).
+    /// Same semantics as PipelineRenderFrameForEditorCamera.</summary>
+    [DllImport("PrimalEngine", EntryPoint = "PipelineRenderFrameRWCB", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineRenderFrameRWCB(ulong target, uint cameraId, uint surfaceId);
+    public static bool PipelineRenderFrameRWCB(ulong target, uint cameraId, uint surfaceId)
+    {
+        if (!_isLoaded) return false;
+        try { return _PipelineRenderFrameRWCB(target, cameraId, surfaceId) != 0; }
+        catch (Exception ex) { Logger.Error("PipelineRenderFrameRWCB failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineGetPassDebugView", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineGetPassDebugView();
+    public static uint PipelineGetPassDebugView()
+    {
+        if (!_isLoaded) return 0;
+        try { return _PipelineGetPassDebugView(); }
+        catch (Exception ex) { Logger.Error("PipelineGetPassDebugView failed", ex); return 0; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineGetPassDebugViewCount", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineGetPassDebugViewCount();
+    public static uint PipelineGetPassDebugViewCount()
+    {
+        if (!_isLoaded) return 0;
+        try { return _PipelineGetPassDebugViewCount(); }
+        catch (Exception ex) { Logger.Error("PipelineGetPassDebugViewCount failed", ex); return 0; }
+    }
+
+    /// <summary>Lowercase engine-side view name; null when out of range.</summary>
+    [DllImport("PrimalEngine", EntryPoint = "PipelineGetPassDebugViewName", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineGetPassDebugViewName(uint view, out IntPtr outName);
+    public static string? PipelineGetPassDebugViewName(uint view)
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            if (_PipelineGetPassDebugViewName(view, out IntPtr ptr) == 0 || ptr == IntPtr.Zero)
+                return null;
+            return Marshal.PtrToStringAnsi(ptr);
+        }
+        catch (Exception ex) { Logger.Error("PipelineGetPassDebugViewName failed", ex); return null; }
+    }
+
+    /// <summary>WRC probe sphere overlay (world space radiance probes).</summary>
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetWRCProbeDebug", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineSetWRCProbeDebug(uint enabled);
+    public static void PipelineSetWRCProbeDebug(bool enabled)
+    {
+        if (!_isLoaded) return;
+        try { _PipelineSetWRCProbeDebug(enabled ? 1u : 0u); }
+        catch (Exception ex) { Logger.Error("PipelineSetWRCProbeDebug failed", ex); }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineGetWRCProbeDebug", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineGetWRCProbeDebug();
+    public static bool PipelineGetWRCProbeDebug()
+    {
+        if (!_isLoaded) return false;
+        try { return _PipelineGetWRCProbeDebug() != 0; }
+        catch (Exception ex) { Logger.Error("PipelineGetWRCProbeDebug failed", ex); return false; }
+    }
+
     // ---- B1 L2: DDGI probe readback (inspector data source) ----------------
 
     public sealed class PcgProbeMeta
