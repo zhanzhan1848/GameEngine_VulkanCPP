@@ -221,6 +221,9 @@ public partial class App : Application
                     // dialog is owned by it, and ShowDialog on a never-shown
                     // owner throws. Showing first also means a recovery
                     // failure still leaves the editor UI open.
+                    // The browser owns recovery for this explicit project open.
+                    // Suppress the Opened handler before Show starts its async scan.
+                    mainWindow.SkipStartupRecoveryScan();
                     ShowMain(desktop, mainWindow, vm);
                     await mainWindow.PromptAndApplyRecoveryAsync(
                         new AutoSaveRecoveryCoordinator.RecoveryCandidate(candidate, path));
@@ -314,6 +317,11 @@ public partial class App : Application
             }
             try { NativeEngineBridge.FlushGPU(); } catch { }
             try { NativeEngineBridge.DestroyStandardRenderPipeline(); } catch { }
+            // 退出兜底（OnDetached 注释里约定的"App.OnExit 清理"）：会话期间
+            // 表面被有意保留，引擎 ShutdownEngine 不清表面/窗口注册表，遗留
+            // 条目会在静态析构阶段触发 free_list 泄漏哨兵断言（FreeList.h:27，
+            // SIGABRT）。必须在 ShutdownEngine 前移除。
+            try { NativeEngineBridge.RemoveAllRenderSurfaces(); } catch { }
             try { NativeEngineBridge.ShutdownAssetSystem(); } catch { }
             try { NativeEngineBridge.ShutdownEngine(); } catch { }
             try { System.Threading.Thread.Sleep(1500); } catch { }

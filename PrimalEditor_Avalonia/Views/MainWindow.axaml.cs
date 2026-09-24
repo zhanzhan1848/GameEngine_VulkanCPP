@@ -1,6 +1,7 @@
 using System.IO;
 using System.Linq;
 using Avalonia.Controls;
+using Avalonia.VisualTree;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.Editors;
@@ -25,6 +26,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         Opened += OnMainWindowOpened;
         InitializeThemeMenu();
+
+
     }
 
     /// <summary>
@@ -94,6 +97,8 @@ public partial class MainWindow : Window
     /// project has already been assigned (e.g. by an earlier
     /// recovery or programmatic load).
     /// </summary>
+    internal void SkipStartupRecoveryScan() => _recoveryScanned = true;
+
     public async System.Threading.Tasks.Task ScanForRecoveryOnceAsync()
     {
         if (_recoveryScanned) return;
