@@ -129,6 +129,12 @@ public class FileTypeToIconConverter : IValueConverter
     private static readonly StreamGeometry FileIcon = StreamGeometry.Parse("M0,0 L25,0 L40,15 L40,40 L0,40 Z M25,0 L25,15 L40,15");
     // Folder = standard "manila folder" outline (rectangle with a tab).
     private static readonly StreamGeometry FolderIcon = StreamGeometry.Parse("M0,12 L0,38 L0,40 L2,40 L38,40 L40,40 L40,16 L40,14 L22,14 L18,8 L18,8 L18,6 L4,6 L2,6 L0,8 L0,12 Z");
+    // Particle = burst: core ring + radiating sparks (distinct from folders
+    // and documents; used for both PFX emitters and legacy presets).
+    private static readonly StreamGeometry ParticleBurstIcon = StreamGeometry.Parse(
+        "M20,13 A7,7 0 1 0 20,27 A7,7 0 1 0 20,13 Z " +
+        "M20,2 L20,8 M20,32 L20,38 M2,20 L8,20 M32,20 L38,20 " +
+        "M7,7 L11,11 M29,29 L33,33 M33,7 L29,11 M11,29 L7,33");
 
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
     {
@@ -140,6 +146,7 @@ public class FileTypeToIconConverter : IValueConverter
             AssetType.Texture => TextureIcon,
             AssetType.Audio => AudioIcon,
             AssetType.Script => ScriptIcon,
+            AssetType.PfxEmitter or AssetType.ParticlePreset => ParticleBurstIcon,
             _ => FileIcon,
         };
     }
