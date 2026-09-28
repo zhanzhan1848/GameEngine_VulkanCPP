@@ -1,1 +1,0 @@
-No ERROR:, failed assertion, or GPU fault lines found in this capture run.

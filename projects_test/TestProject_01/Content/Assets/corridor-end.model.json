@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "source": "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/Raw/kenney_dungeon_tiles/corridor-end.fbx",
-  "mesh": "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/projects_test/TestProject_01/Content/Assets/corridor-end.mesh",
-  "submeshes": [
-    {"name": "corridor-end", "lod_id": 4294967295, "lod_index": 0, "mesh_index": 0, "material_index": 0, "vertex_count": 12059, "index_count": 40326},
-    {"name": "corridor-end", "lod_id": 1, "lod_index": 0, "mesh_index": 1, "material_index": 0, "vertex_count": 9368, "index_count": 25110}
-  ]
-}
