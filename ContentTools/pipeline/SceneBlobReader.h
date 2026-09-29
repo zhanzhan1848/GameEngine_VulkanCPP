@@ -51,10 +51,12 @@ struct PackedMeshView {
 
     // T4.2 offline card bake (elements_type::card_bake_flag). Zero/none when
     // the mesh has no bake data; pointers into the source buffer.
+    // card_bake_version: 1 = legacy "CDBK" section, 2 = "CDB2" (+version u32).
     u32                         card_bake_card_count{0};
     const card_bake::card*      card_bake_cards{nullptr};
     u32                         card_bake_surfel_count{0};
     const card_bake::surfel*    card_bake_surfels{nullptr};
+    u32                         card_bake_version{0};
 
     // T4.3: elements_type::sdf_signed_flag — the mesh's SDF data array is a
     // signed distance (pack_float<16>(dist + max_dim, 0, 2*max_dim)).

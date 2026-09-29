@@ -439,18 +439,34 @@ bool ReadNextPackedMesh(const u8*& cursor_in, const u8* end, PackedMeshView& out
         out.lightmap_uvs = reinterpret_cast<const f32*>(uv_bytes);
     }
 
-    // T4.2 card bake ("CDBK"): presence is flagged in the header. Cards and
-    // surfels stay zero-copy pointers into the buffer.
+    // T4.2 card bake: presence is flagged in the header. Cards and
+    // surfels stay zero-copy pointers into the buffer. v2 ("CDB2")
+    // prepends a version u32; legacy "CDBK" sections parse as v1.
     out.card_bake_card_count = 0;
     out.card_bake_cards = nullptr;
     out.card_bake_surfel_count = 0;
     out.card_bake_surfels = nullptr;
+    out.card_bake_version = 0;
     if (has_card_bake) {
-        constexpr u32 magic_cdbk = 0x4B424443u;  // "CDBK"
-        if (!c.expect_magic(magic_cdbk)) {
+        // Manually read the magic: expect_magic consumes on failure, so a
+        // chained fallback probe would swallow the v2 version field.
+        u32 magic_read = 0;
+        if (!c.read_u32(magic_read) ||
+            (magic_read != card_bake::kCardBakeMagicV1 &&
+             magic_read != card_bake::kCardBakeMagicV2)) {
             errors.emplace_back(ErrorReport{Severity::Error, "blob_read.missing_cdbk",
-                "blob_read: card_bake_flag set but CDBK magic missing", "blob_read"});
+                "blob_read: card_bake_flag set but CDBK/CDB2 magic missing", "blob_read"});
             return false;
+        }
+        out.card_bake_version = 1;
+        if (magic_read == card_bake::kCardBakeMagicV2) {
+            u32 version;
+            if (!c.read_u32(version)) {
+                errors.emplace_back(ErrorReport{Severity::Error, "blob_read.truncated_cdbk_version",
+                    "blob_read: truncated at CDB2 version", "blob_read"});
+                return false;
+            }
+            out.card_bake_version = version;
         }
         u32 card_count;
         const u8* card_bytes;

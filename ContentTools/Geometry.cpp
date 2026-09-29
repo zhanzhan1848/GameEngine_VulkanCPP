@@ -639,10 +639,13 @@ namespace primal::tools
 				sizeof(u16) * m.sdf.vector_field.size()			// vector field
 			};
 			// T4.2: trailing "CDBK" card-bake section (only when present).
+			// v2 (2026-09-19): "CDB2" magic + version u32 prepended — readers
+			// accept both magics, legacy blobs parse as v1.
 			if (!m.card_bake.cards.empty())
 			{
 				size +=
-					sizeof(u32) +								// CDBK magic
+					sizeof(u32) +								// "CDB2" magic
+					sizeof(u32) +								// version
 					sizeof(u32) +								// card count
 					m.card_bake.cards.size() * sizeof(card_bake::card) +
 					sizeof(u32) +								// surfel count
@@ -781,13 +784,14 @@ namespace primal::tools
 			if (!m.sdf.vector_field.empty())
 				blob.write((const char*)m.sdf.vector_field.data(), m.sdf.vector_field.size() * sizeof(u16));
 
-			// T4.2: trailing "CDBK" card-bake section, only when present, so
+			// T4.2: trailing card-bake section, only when present, so
 			// meshes without bake data serialize byte-identically to the
-			// pre-T4.2 layout.
+			// pre-T4.2 layout. v2: "CDB2" magic + version u32 (readers
+			// accept both magics; legacy blobs parse as v1).
 			if (!m.card_bake.cards.empty())
 			{
-				constexpr u32 magic_cdbk{ 0x4B424443 }; // "CDBK"
-				blob.write(magic_cdbk);
+				blob.write(card_bake::kCardBakeMagicV2);
+				blob.write(card_bake::kCardBakeVersionV2);
 				blob.write((u32)m.card_bake.cards.size());
 				if (!m.card_bake.cards.empty())
 					blob.write((const char*)m.card_bake.cards.data(),
@@ -1094,13 +1098,14 @@ namespace primal::tools
 			blob.skip((size_t)uv_count * sizeof(f32) * 2);
 		}
 
-		// T4.2 card bake: flagged in the header (0x20), the "CDBK" section
-		// (magic | card_count | cards | surfel_count | surfels) trails the
-		// UVLM section. Same skip-or-misparse contract as UVLM above.
+		// T4.2 card bake: flagged in the header (0x20), the card-bake
+		// section trails the UVLM section. Same skip-or-misparse contract
+		// as UVLM above. v2 ("CDB2") prepends a version u32; legacy "CDBK"
+		// sections have no version field.
 		if (elements_type & 0x20) // elements_type::card_bake_flag
 		{
-			const u32 magic_cdbk{ blob.read<u32>() };
-			(void)magic_cdbk; // "CDBK"
+			const u32 magic{ blob.read<u32>() };
+			if (magic == card_bake::kCardBakeMagicV2) blob.skip(sizeof(u32));  // version
 			const u32 card_count{ blob.read<u32>() };
 			blob.skip((size_t)card_count * sizeof(card_bake::card));
 			const u32 surfel_count{ blob.read<u32>() };
@@ -1108,24 +1113,43 @@ namespace primal::tools
 		}
 	}
 
-	bool extract_submesh_metadata(const u8* buffer, u32 buffer_size, utl::vector<submesh_meta>& out)
+	bool extract_submesh_metadata(const u8* buffer, u32 buffer_size, utl::vector<submesh_meta>& out,
+		utl::vector<material_meta>* out_materials)
 	{
 		out.clear();
+		if (out_materials) out_materials->clear();
 		if (!buffer || buffer_size == 0) return false;
 
 		utl::blob_stream_reader blob{ buffer };
 
-		// scene name
-		const u32 scene_name_len{ blob.read<u32>() };
-		blob.skip(scene_name_len);
+		// helper: read a length-prefixed string, or skip it when not captured
+		auto read_or_skip_string = [&](std::string* captured)
+		{
+			const u32 len{ blob.read<u32>() };
+			if (captured)
+			{
+				captured->resize(len);
+				blob.read(reinterpret_cast<u8*>(captured->data()), len);
+			}
+			else
+			{
+				blob.skip(len);
+			}
+		};
 
-		// materials (skip the whole block)
+		// scene name
+		read_or_skip_string(nullptr);
+
+		// materials
 		const u32 material_count{ blob.read<u32>() };
+		if (out_materials) out_materials->reserve(material_count);
 		for (u32 i{ 0 }; i < material_count; ++i)
 		{
-			blob.skip(blob.read<u32>());  // name
-			blob.skip(blob.read<u32>());  // diffuse_texture
-			blob.skip(blob.read<u32>());  // normal_texture
+			material_meta mat{};
+			read_or_skip_string(out_materials ? &mat.name : nullptr);          // name
+			read_or_skip_string(out_materials ? &mat.diffuse_texture : nullptr); // diffuse_texture
+			read_or_skip_string(out_materials ? &mat.normal_texture : nullptr);  // normal_texture
+			if (out_materials) out_materials->emplace_back(std::move(mat));
 		}
 
 		// LOD groups

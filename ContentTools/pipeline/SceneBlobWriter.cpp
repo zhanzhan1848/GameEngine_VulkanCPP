@@ -219,9 +219,10 @@ size_t GetPackedMeshSize(const PackedMesh& pm) {
         size += sizeof(u32);                              // uv_count
         size += pm.lightmap_uvs.size() * sizeof(f32);     // uv pairs
     }
-    // T4.2 card bake section (only when present).
+    // T4.2 card bake section (only when present). v2: "CDB2" + version u32.
     if (!pm.card_bake.cards.empty()) {
-        size += sizeof(u32);                              // CDBK magic
+        size += sizeof(u32);                              // CDB2 magic
+        size += sizeof(u32);                              // version
         size += sizeof(u32) + pm.card_bake.cards.size() * sizeof(card_bake::card);
         size += sizeof(u32) + pm.card_bake.surfels.size() * sizeof(card_bake::surfel);
     }
@@ -324,10 +325,11 @@ void Serialize(const PackedMesh& pm, utl::blob_stream_writer& blob) {
     }
 
     // T4.2 card bake: written only when present, so meshes without bake
-    // data serialize byte-identically to the pre-T4.2 layout.
+    // data serialize byte-identically to the pre-T4.2 layout. v2: "CDB2"
+    // magic + version u32 (readers accept both magics; legacy = v1).
     if (!pm.card_bake.cards.empty()) {
-        constexpr u32 magic_cdbk = 0x4B424443;  // "CDBK"
-        blob.write(magic_cdbk);
+        blob.write(card_bake::kCardBakeMagicV2);
+        blob.write(card_bake::kCardBakeVersionV2);
         blob.write((u32)pm.card_bake.cards.size());
         if (!pm.card_bake.cards.empty()) {
             blob.write((const u8*)pm.card_bake.cards.data(),

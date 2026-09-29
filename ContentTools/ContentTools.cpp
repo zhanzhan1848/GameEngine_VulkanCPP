@@ -100,10 +100,11 @@ u32 write_model_sidecar(const u8* buffer, u32 buffer_size, const char* sidecar_p
     if (!buffer || buffer_size == 0 || !sidecar_path) return 0;
 
     primal::utl::vector<submesh_meta> metas;
-    if (!extract_submesh_metadata(buffer, buffer_size, metas)) return 0;
+    primal::utl::vector<material_meta> materials;
+    if (!extract_submesh_metadata(buffer, buffer_size, metas, &materials)) return 0;
 
     primal::utl::vector<char> json;
-    json.reserve(256 + metas.size() * 96);
+    json.reserve(256 + metas.size() * 96 + materials.size() * 96);
 
     const char* header =
         "{\n"
@@ -120,6 +121,44 @@ u32 write_model_sidecar(const u8* buffer, u32 buffer_size, const char* sidecar_p
     append_json_escaped(json, mesh_file ? mesh_file : "");
     json.emplace_back(',');
     json.emplace_back('\n');
+    json.emplace_back(' ');
+    json.emplace_back(' ');
+    const char* materials_field = "\"materials\": [";
+    for (const char* p = materials_field; *p; ++p) json.emplace_back(*p);
+    json.emplace_back('\n');
+
+    for (size_t i = 0; i < materials.size(); ++i)
+    {
+        const material_meta& mat = materials[i];
+        json.emplace_back(' ');
+        json.emplace_back(' ');
+        json.emplace_back(' ');
+        json.emplace_back(' ');
+        const char* mat_hdr = "{\"name\": ";
+        for (const char* p = mat_hdr; *p; ++p) json.emplace_back(*p);
+        append_json_escaped(json, mat.name);
+
+        const char* mat_diff = ", \"diffuse\": ";
+        for (const char* p = mat_diff; *p; ++p) json.emplace_back(*p);
+        append_json_escaped(json, mat.diffuse_texture);
+
+        const char* mat_norm = ", \"normal\": ";
+        for (const char* p = mat_norm; *p; ++p) json.emplace_back(*p);
+        append_json_escaped(json, mat.normal_texture);
+
+        json.emplace_back('}');
+        if (i + 1 < materials.size())
+        {
+            json.emplace_back(',');
+        }
+        json.emplace_back('\n');
+    }
+
+    json.emplace_back(' ');
+    json.emplace_back(' ');
+    const char* materials_footer = "],\n";
+    for (const char* p = materials_footer; *p; ++p) json.emplace_back(*p);
+
     json.emplace_back(' ');
     json.emplace_back(' ');
     const char* sub_field = "\"submeshes\": [";

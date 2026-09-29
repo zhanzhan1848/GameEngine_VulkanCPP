@@ -271,8 +271,22 @@ namespace primal::tools {
 		u32							num_indices{ 0 };
 	};
 
+	// Material record as stored in the cooked buffer's material header
+	// (3-field format written by pipeline/SceneBlobWriter.cpp::SerializeScene).
+	// Texture fields are references as recorded at import time, e.g. bare
+	// filenames or source-relative paths.
+	struct material_meta
+	{
+		std::string					name;
+		std::string					diffuse_texture;
+		std::string					normal_texture;
+	};
+
 	// Walks a cooked scene_data buffer and returns one submesh_meta per mesh,
 	// ordered by (lod_index, mesh_index). Returns false if the buffer is malformed.
 	// Used by ContentTools.cpp to write .model.json sidecars.
-	bool extract_submesh_metadata(const u8* buffer, u32 buffer_size, utl::vector<submesh_meta>& out);
+	// When out_materials is non-null it also receives the material records
+	// (name + texture references as stored in the binary header).
+	bool extract_submesh_metadata(const u8* buffer, u32 buffer_size, utl::vector<submesh_meta>& out,
+		utl::vector<material_meta>* out_materials = nullptr);
 }
