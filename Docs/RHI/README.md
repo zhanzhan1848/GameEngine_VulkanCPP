@@ -67,6 +67,19 @@
 
 ---
 
+### 🌉 跨平台对照文档
+
+#### [GraphicsAPI_Parity_Matrix.md](./GraphicsAPI_Parity_Matrix.md)
+- **类型**: 跨平台 API 对照矩阵
+- **描述**: Vulkan / Metal / D3D12 / Dawn(WebGPU) 四家图形 API 核心对象对照（19 行主表 + 4 行本仓库补充：交换链/二级录制/间接绘制/时间线同步）
+- **内容**:
+  - 核心对象对照总表（设备/队列/命令/渲染通道/管线/描述符/内存/同步/着色器/推送常量/动态状态）
+  - 显式性光谱与 RHI 层设计含义
+  - 与 rhi-barrier-semantics、双端对等计划的关联
+- **适用读者**: RHI 模块开发者、跨后端移植工程师
+
+---
+
 ## 文档使用指南
 
 ### 📖 阅读顺序建议
@@ -242,12 +255,16 @@
 #### 🧪 测试文档
 - [RHI_Test_Documentation.md](./RHI_Test_Documentation.md) - RHI测试框架规范
 
+#### 🌉 对照文档
+- [GraphicsAPI_Parity_Matrix.md](./GraphicsAPI_Parity_Matrix.md) - Vulkan/Metal/D3D12/Dawn 四 API 对照矩阵
+
 ### 按模块分类
 
 #### RHI模块
 - [RHI_ToDoList.md](./RHI_ToDoList.md) - 规划
 - [RHI_Core_API_Documentation.md](./RHI_Core_API_Documentation.md) - 核心API
 - [RHI_Test_Documentation.md](./RHI_Test_Documentation.md) - 测试规范
+- [GraphicsAPI_Parity_Matrix.md](./GraphicsAPI_Parity_Matrix.md) - 跨平台对照
 
 ### 按读者分类
 

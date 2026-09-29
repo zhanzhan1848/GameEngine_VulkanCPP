@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17, Dawn (WebGPU native), WGSL, CMake.
 
-**Spec reference:** `Docs/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md`
+**Spec reference:** `Docs/completed/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md`
 
 ---
 
@@ -219,7 +219,7 @@ with:
     // 2a. GlobalSDF init — needed for Mode 11 canonical dynamic DDGI.
     // WGSL port + Dawn RHI support (R16Float + StorageBinding) are complete;
     // prior blocker comment was stale (audit 2026-07-10, see spec
-    // Docs/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md).
+    // Docs/completed/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md).
     {
         auto& globalSDF = primal::graphics::nanite::GlobalSDF::Get();
         primal::graphics::nanite::GlobalSDFConfig sdfConfig;
@@ -426,7 +426,7 @@ Voxelization runs every frame in Mode 11 only. Three-layer verification:
 no validation errors, safety-net bypassed (stderr confirms runtime trace
 active), Mode 10 unaffected.
 
-Spec: Docs/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md"
+Spec: Docs/completed/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md"
 ```
 
 ---
@@ -463,7 +463,7 @@ In Mode 11, navigate through courtyard / arches. Indirect lighting should follow
 
 - [ ] **Step 4: Document observation**
 
-Append findings to `Docs/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md` Section 6 (Layer 3 verification matrix):
+Append findings to `Docs/completed/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md` Section 6 (Layer 3 verification matrix):
 
 ```
 ## Verification Result (YYYY-MM-DD)
@@ -502,7 +502,7 @@ After applying any cut, add a comment in `LumenDDGIPass.cpp` near line 692:
 
 If no scope cuts applied:
 ```bash
-git add Docs/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md
+git add Docs/completed/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md
 git commit -m "docs(spec): GlobalSDF Dawn port — Layer 3 verification passed"
 ```
 
@@ -510,7 +510,7 @@ If scope cuts applied, also stage the relevant shader/code changes:
 ```bash
 git add Engine/Graphics/Lumen/DDGI/LumenDDGIPass.cpp \
         Engine/Graphics/Dawn/shaders/Lumen/DDGITraceRays.wgsl \
-        Docs/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md
+        Docs/completed/superpowers/specs/2026-07-10-globalsdf-dawn-port-design.md
 git commit -m "fix(ddgi): scope cut S<N> applied — <reason>
 
 Verification: Layer 1 ✓ Layer 2 ✓ Layer 3 (with cut) ✓"
@@ -544,7 +544,7 @@ Verification: Layer 1 ✓ Layer 2 ✓ Layer 3 (with cut) ✓"
 
 ## Execution Handoff
 
-Plan complete and saved to `Docs/superpowers/plans/2026-07-10-globalsdf-dawn-port-plan.md`. Two execution options:
+Plan complete and saved to `Docs/completed/superpowers/plans/2026-07-10-globalsdf-dawn-port-plan.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** — Dispatch a fresh subagent per task, review between tasks, fast iteration.
 

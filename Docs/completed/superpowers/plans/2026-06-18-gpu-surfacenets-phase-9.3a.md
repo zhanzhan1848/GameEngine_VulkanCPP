@@ -4,7 +4,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Spec:** `Docs/superpowers/specs/2026-06-18-gpu-surfacenets-phase-9.3a-design.md`
+**Spec:** `Docs/completed/superpowers/specs/2026-06-18-gpu-surfacenets-phase-9.3a-design.md`
 
 **Goal:** Move SurfaceNets meshing to a 4-pass GPU compute pipeline so the same `MarchingCubesNode` can produce `RHIMeshAsset` via either CPU or GPU path, selected by the `algorithm` param (0=CPU, 1=GPU).
 

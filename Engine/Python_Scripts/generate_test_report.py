@@ -7,7 +7,7 @@ generate_test_report.py
 
 用途：
 - 读取 C++ 核心层 EngineTest 的运行日志与退出码，
-- 生成结构化的 Markdown 测试报告，写入到 Docs/CI/TestReports/ 目录。
+- 生成结构化的 Markdown 测试报告，写入到 Docs/completed/CI/TestReports/ 目录。
 
 设计约束：
 - 仅使用 Python 标准库，不引入第三方库；

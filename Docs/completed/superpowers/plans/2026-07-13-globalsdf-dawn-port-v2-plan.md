@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17, Dawn (WebGPU native), WGSL, CMake.
 
-**Spec reference:** `Docs/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md`
+**Spec reference:** `Docs/completed/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md`
 
 ---
 
@@ -446,7 +446,7 @@ If the Metal backend breaks, apply spec Risk 2 mitigation: condition the layout 
 If L1 + L2 pass, add a result section to the bottom of the spec file:
 
 ```bash
-cat >> Docs/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md <<'EOF'
+cat >> Docs/completed/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md <<'EOF'
 
 ---
 
@@ -527,7 +527,7 @@ type: project
 ## Update (YYYY-MM-DD): v2 fixes landed
 
 All 4 blockers (entry point, R16Float, binding layout, init_resources_valid_)
-fixed per `Docs/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md`.
+fixed per `Docs/completed/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md`.
 Mode 11 now produces canonical dynamic DDGI on Dawn.
 ```
 
@@ -536,7 +536,7 @@ Otherwise, write a new memory entry covering the v2 fix.
 - [ ] **Step 2: Commit any remaining doc/memory updates**
 
 ```bash
-git add Docs/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md
+git add Docs/completed/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md
 git status
 # Review what's staged before committing
 git commit -m "docs(globalSDF/dawn): v2 verification result + memory update"

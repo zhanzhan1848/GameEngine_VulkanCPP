@@ -1,10 +1,10 @@
 # Phase 9.3b — GPU-Resident Streaming Terrain Implementation Plan
 
-> **Status (2026-06-23):** ✅ Complete. All 14 tasks implemented across 9 commits (`5e10688` → `053a2d8`). `TestGPUMesherIntegration` passes 7/7 Phase 9.3b sub-tests (sub-tests 1+2 skip dispatch — GlobalSDF has no debug-fill path; deferred to Task 13 interactive). `TestPCGScatter` has B-key toggle for visual verification. Known v1 limitation: vertex buffer binding has no effect under `draw_pipeline_` (storage-buffer vertex pulling); streaming terrain may not render visibly — tracked as follow-up. See spec postmortem (`Docs/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md` §11) for bugs, deviations, and lessons.
+> **Status (2026-06-23):** ✅ Complete. All 14 tasks implemented across 9 commits (`5e10688` → `053a2d8`). `TestGPUMesherIntegration` passes 7/7 Phase 9.3b sub-tests (sub-tests 1+2 skip dispatch — GlobalSDF has no debug-fill path; deferred to Task 13 interactive). `TestPCGScatter` has B-key toggle for visual verification. Known v1 limitation: vertex buffer binding has no effect under `draw_pipeline_` (storage-buffer vertex pulling); streaming terrain may not render visibly — tracked as follow-up. See spec postmortem (`Docs/completed/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md` §11) for bugs, deviations, and lessons.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Spec:** `Docs/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md`
+**Spec:** `Docs/completed/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md`
 
 **Goal:** Eliminate the CPU round-trip for GPU SurfaceNets by binding GlobalSDF cascades directly in compute shaders and emitting a GPU-resident `StreamingMesh` entity that Nanite draws via `draw_primitives_indirect`.
 
@@ -1815,12 +1815,12 @@ git commit -m "test(pcg/gpu): N-key toggle for GlobalSDFMeshNode in TestPCGScatt
 **Why:** Keep the spec + plan in sync with reality. Postmortem lessons feed into 9.4 / 9.5.
 
 **Files:**
-- Modify: `Docs/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md`
-- Modify: `Docs/superpowers/plans/2026-06-22-gpu-surfacenets-phase-9.3b.md`
+- Modify: `Docs/completed/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md`
+- Modify: `Docs/completed/superpowers/plans/2026-06-22-gpu-surfacenets-phase-9.3b.md`
 
 - [ ] **Step 1: Update spec status**
 
-Open `Docs/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md`. Update the Status line at the top:
+Open `Docs/completed/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md`. Update the Status line at the top:
 
 ```markdown
 **Status:** ✅ Complete (YYYY-MM-DD). Implementation: ...
@@ -1833,7 +1833,7 @@ Add a `## Postmortem` section at the end mirroring the 9.3a postmortem structure
 
 - [ ] **Step 2: Update plan status**
 
-Open `Docs/superpowers/plans/2026-06-22-gpu-surfacenets-phase-9.3b.md`. Add a status blockquote at the top (mirroring the 9.3a plan):
+Open `Docs/completed/superpowers/plans/2026-06-22-gpu-surfacenets-phase-9.3b.md`. Add a status blockquote at the top (mirroring the 9.3a plan):
 
 ```markdown
 > **Status (YYYY-MM-DD):** ✅ Complete. All 14 tasks implemented; integration tests pass; ...
@@ -1842,8 +1842,8 @@ Open `Docs/superpowers/plans/2026-06-22-gpu-surfacenets-phase-9.3b.md`. Add a st
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Docs/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md \
-        Docs/superpowers/plans/2026-06-22-gpu-surfacenets-phase-9.3b.md
+git add Docs/completed/superpowers/specs/2026-06-22-gpu-surfacenets-phase-9.3b-design.md \
+        Docs/completed/superpowers/plans/2026-06-22-gpu-surfacenets-phase-9.3b.md
 git commit -m "docs(pcg/gpu): mark Phase 9.3b complete; add postmortem"
 ```
 

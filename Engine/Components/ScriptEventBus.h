@@ -2,7 +2,7 @@
 //
 // script_event_bus singleton — type-erased pub/sub for inter-script communication.
 //
-// 设计契约(见 Docs/superpowers/specs/2026-07-07-script-core-capabilities-design.md §event bus):
+// 设计契约(见 Docs/completed/superpowers/specs/2026-07-07-script-core-capabilities-design.md §event bus):
 //   1) FIFO dispatch — events drained in emission order.
 //   2) Re-emit isolation — events emitted from within a handler go to a separate
 //      `re_emitted_` queue, drained in a subsequent internal pass within the same

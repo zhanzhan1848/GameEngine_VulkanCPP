@@ -1,5 +1,7 @@
 # SPGI 能量标定 → DDGI 过曝根因修复（2026-09-04）
 
+> 相关参考：`Docs/2026-09-16-ddgi-world-space-probe-grid-reference.md`（DDGI probe 网格密度/间距/多尺度参考——probe 参数类问题先看该文）
+
 ## 结论
 
 "SPGI 槽位能量超标"判断被数据推翻。过曝根因在 **DDGI 的 SC 注入路径**：
@@ -586,7 +588,7 @@ sky_color_intensity=0.4 且 miss 项吃不到黑背景）、多次弹射、低�
 
 ctest Unit 1/1；两测试 360+ 帧无 fault（Vulkan 122 条 validation 均
 为第一轮已记录的存量类别）；Metal archive 已按协议恢复。
-对比图与复现命令见 Docs/render-comparisons/2026-09-06-sponza/。
+对比图与复现命令见 Docs/completed/render-comparisons/2026-09-06-sponza/。
 
 
 ### 第三轮（同日续）：P1 天空接入

@@ -3,7 +3,7 @@
 > 日期：2026-08-26
 > 状态：v6 —— **M7 融合轮 F1-F5 全部实装完成**（GLSL+Metal+C++ 全链路；SPIR-V 编译 / 引擎构建 / Vulkan 设备冒烟，validation 计数与基线一致 106=106；RHI 单测 22/22）。效果级验收（banding/收敛/SDF 步数量化）待 T1.5 基线与录屏。F3 含勘误：双线性混合 T5.2 已有，实装的是 variance clamp + 策略枚举激活。
 > 范围：Screen Probe GI（`Engine/Graphics/Lumen/ScreenProbes/`）与其上下游（HZB / GlobalSDF / SurfaceCache / DDGI / Fusion）
-> 关联文档：`Docs/2026-08-24-gi-optimization-plan.md`（总体计划，本文是其补集）、`Docs/2026-08-09-vulkan-lumen-gi-port-design.md`
+> 关联文档：`Docs/2026-08-24-gi-optimization-plan.md`（总体计划，本文是其补集）、`Docs/2026-08-09-vulkan-lumen-gi-port-design.md`、`Docs/2026-09-16-ddgi-world-space-probe-grid-reference.md`（DDGI probe 密度/间距/多尺度参考）、`Docs/2026-09-16-spgi-screen-probe-distribution-reference.md`（SPGI 屏幕空间 probe 分布/布点/ray 预算长期参考）
 > 信息来源：Vulkan SPGI 全链路代码走查（C++ pass + GLSL kernel）× UE Lumen Screen Probe (2021) 公开方案对照
 
 ---

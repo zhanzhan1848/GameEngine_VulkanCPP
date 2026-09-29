@@ -8,9 +8,9 @@
 
 **Tech Stack:** C++17, CMake, primal `TestFramework` (`TestResult` + `TEST_ASSERT_*`), existing `Engine/Graphics/WFC/*` modules, Möller–Trumbore ray-triangle (build-time precompute, no BVH needed at <1k triangles/tile).
 
-**Spec reference:** `Docs/superpowers/specs/2026-08-06-wfc-pcg-c1-single-domain-mixed-design.md`
+**Spec reference:** `Docs/completed/superpowers/specs/2026-08-06-wfc-pcg-c1-single-domain-mixed-design.md`
 
-**Predecessor:** `Docs/superpowers/plans/2026-07-31-wfc-phase-c1-ruins.md` (shipped — provides WFCCategory, ruins tiles, 8-bit corner signatures)
+**Predecessor:** `Docs/completed/superpowers/plans/2026-07-31-wfc-phase-c1-ruins.md` (shipped — provides WFCCategory, ruins tiles, 8-bit corner signatures)
 
 ---
 
@@ -2140,7 +2140,7 @@ Expected: all targets build; all tests pass; no console errors in browser.
 
 - [ ] **Step 2: Verify spec exit criteria**
 
-Walk through `Docs/superpowers/specs/2026-08-06-wfc-pcg-c1-single-domain-mixed-design.md` §11 (Phase Exit Criteria):
+Walk through `Docs/completed/superpowers/specs/2026-08-06-wfc-pcg-c1-single-domain-mixed-design.md` §11 (Phase Exit Criteria):
 
 - [ ] AutoSocketClassifier ships with 8×8 occupancy grid algorithm
 - [ ] ProceduralRoomPack generates 12 valid tiles
@@ -2163,13 +2163,13 @@ Watch for: crashes, validation errors, assertion failures in stderr.
 
 - [ ] **Step 4: Commit completion note**
 
-Create `Docs/superpowers/notes/2026-08-XX-wfc-phase-c1-mixed-completion.md` summarizing:
+Create `Docs/completed/superpowers/notes/2026-08-XX-wfc-phase-c1-mixed-completion.md` summarizing:
 - What shipped (count of tiles, classifiers, tests)
 - Convergence benchmark numbers (run benchmark mode if implemented; otherwise note "deferred")
 - Known issues / follow-ups for C.2
 
 ```bash
-git add Docs/superpowers/notes/2026-08-XX-wfc-phase-c1-mixed-completion.md
+git add Docs/completed/superpowers/notes/2026-08-XX-wfc-phase-c1-mixed-completion.md
 git commit -m "docs(wfc): Phase C.1 Mixed completion note"
 ```
 
@@ -2228,7 +2228,7 @@ No "TBD" / "TODO" / "fill in later" anywhere. The single "exercise following exi
 
 ## Execution Handoff
 
-Plan complete and saved to `Docs/superpowers/plans/2026-08-06-wfc-phase-c1-mixed-multi-category.md`. Two execution options:
+Plan complete and saved to `Docs/completed/superpowers/plans/2026-08-06-wfc-phase-c1-mixed-multi-category.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration
 

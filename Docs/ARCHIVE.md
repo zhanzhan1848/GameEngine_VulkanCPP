@@ -108,6 +108,24 @@ flowchart TD
         GI_SUN_AUDIT["🚧 Docs/completed/render-comparisons/2026-09-17-vulkan-lumen-sun-audit/ 太阳审计：P0/P1台账/P2日晕/P3 A/B 落地+§5.2 网格实采（IMPLEMENTATION-P0-P1.md），配准/SC读回/IBL/布帘/动态验收待办"]
         GI_CRASH["🚧 Docs/2026-09-04-spgi-metal-crash-investigation.md"]
         GI_ROOT_CURE["📋 Docs/2026-09-18-gi-energy-root-cure-plan.md GI 能量根治五阶段：单位制/天空单一源/回路物理化/天空分类/tunneling/门禁（待实施）"]
+        GI_SC_PARITY["✅ Docs/2026-09-19-sc-card-lumen-parity-investigation-and-plan.md SC 卡片 vs Lumen 参照：现状调查与改造规划（Phase 0-5 全部落地，完工记录 completed/2026-09-21-…state.md）"]
+        GI_ASYM_PLAN["✅ Docs/2026-09-20-gi-energy-asymmetry-fix-plan.md 能量不对称修复计划 F0-F6（已落地，完工记录 completed/2026-09-20-…completion.md）"]
+        GI_ENERGY_FLOW["🚧 Docs/2026-09-20-gi-energy-flow-deep-investigation.md 能量流深度调查：辐射计量单位全链审计 + 能量不对称发现（A1-A3）"]
+        GI_GAP["🚧 Docs/2026-09-20-sponza-vs-lumen-visual-gap-analysis.md Sponza vs UE Lumen 观感差距根因分析 + 缺口清单（行动项落地见 gap-actions 完工）"]
+        GI_DEBUG_VIEW["✅ Docs/2026-09-20-pass-debug-view.md Pass Debug View 视口实时 pass 可视化（14 视图管线）"]
+        GI_REFL_FEAS["📋 Docs/2026-09-20-lumen-reflections-feasibility.md 间接镜面缺口立项评估（已并入 SC 整合计划）"]
+        GI_SC_NEAR["✅ Docs/2026-09-20-sc-capture-near-plane-mechanism.md SC 捕获近平面 near=0 崩溃机制排查 + 参数化方案"]
+        GI_SC_INTG["✅ Docs/2026-09-20-sc-correctness-and-reflections-integrated-plan.md SC 正确性 × Reflections 整合 R0-R5（完工记录 completed/2026-09-20-…completion.md）"]
+        GI_ASYM_DONE["✅ Docs/completed/2026-09-20-gi-energy-asymmetry-fix-completion.md 能量不对称 F0-F6 完工"]
+        GI_SC_INTG_DONE["✅ Docs/completed/2026-09-20-sc-correctness-and-reflections-completion.md SC×REFL R0-R5 完工"]
+        GI_GAP_DONE["✅ Docs/completed/2026-09-20-sponza-gap-actions-completion.md Sponza 观感差距行动轮 P0-P6 完工"]
+        GI_SPgiPlanAB["✅ Docs/completed/render-comparisons/2026-09-21-spgi-probe-distribution/ 基线/P0P1/全计划对照图集 + Lumen 参考图（tier 分布 75%/25%、lightVar 512 封顶、FPS 30 持平）"]
+        GI_DIST_DONE["✅ Docs/completed/2026-09-21-spgi-probe-distribution-completion.md SPGI Probe 分布优化完工记录（P0-P4 全阶段落地）"]
+        GI_SPgiPlan["✅ Docs/2026-09-21-spgi-probe-distribution-optimization-plan.md SPGI probe 分布优化计划（P0-P4 全部实施，完工记录 completed/2026-09-21-…-completion.md；代表像素/normal门默认开，tier3+lightVar+tierRays Vulkan pilot 默认关）"]
+        GI_COURT["✅ Docs/2026-09-21-courtyard-upstream-energy-investigation.md 中庭偏暗上游能量排查(R2 双通路)：五假设核验+双轨修复已落地（完工记录 completed/2026-09-21-probe-repr-e0-energy-dual-track-completion.md）：E0-I 仪表落地（diag mode 4/5 + SC 漏斗——首跑定论 SPGI 侧 orientFail 47.9% 为拒绝主因、下行黑区 5 射线可忽略）→ E0-B bounce 轨落地（nodirect atlas 探针查询 + 惩罚退役膝点 8；floor ROI +73% 对回滚对照、meanY 持平；780 帧回路稳定性修复=nodirect 不得接入 prev_light/tile 源）→ Sky 轨 K-1 tile 天空方向化落地 + K-2 半档复退无感 + K-3 计数结案；K-4 显式 V 维持远期立项"]
+        PROBE_OPT["✅ Docs/2026-09-21-probe-representation-optimization-plan.md Probe 表示优化(R4) 全可执行阶段完工（同上完工记录）：P0 debug 解耦（PRIMAL_PROBE_SPHERE_MODE 四模式 + PRIMAL_WRC_PROBE_SPHERES env 入口 + RWCB 注入/irradiance 管线两处存量 bug 修复）→ P4 三指标（WRC 近场 SH9 重建 p95 90% FAIL/远场 PASS——SH9 带宽不足定量证据；WRC 角向方差近 0.79/远 0.031；SPGI SH2 重代入 P50 0.47）→ P1 raw ray 单缓冲 -88.5MB → P2 WRC AoS→SoA 双区域（radiance 512B 对齐 + meta 独立区，6 消费端迁移）；P3 oct 抽象触发条件未触发维持登记"]
+        PROBE_OPT_DONE["✅ Docs/completed/2026-09-21-probe-repr-e0-energy-dual-track-completion.md Probe 表示优化 + 中庭能量链双轨完工记录（frame 780 验收 + Debug A/B 读数 + 遗留清单）"]
+        ROUND2_DONE["✅⚠️ Docs/completed/2026-09-21-round2-orientfail-k4-hygiene-completion.md 第二轮（orientFail 治理/K-4 切片/radiance 卫生/moments 视图）：hint 门过杀实锤（关=found 3×但拱顶借光回归）→ 软键惩罚 PRIMAL_SPGI_HINT_SOFT 默认关；SPGI openSky 统计 + confidence 地板参数化（默认 no-op）；⚠️ 间歇 780 帧坍黑根因定位=SC tile radiosity 回路双稳态（SC_INDIRECT=0 六连全稳/默认 ~20% 坍黑/坍黑态逐位可复现），增长率钳制已发、根治=回路增益分析（下会话 P0）"]
     end
 
     subgraph NANITELayer["Nanite / GPU-Driven"]
@@ -209,6 +227,20 @@ flowchart TD
 
 | 文档 | 状态 | 摘要 |
 |---|---|---|
+| `2026-09-24-neural-gi-pass-training-plan.md` | 📋 | GI 各 Pass 神经渲染生成规划（**暂缓执行——决策：GI 基线观感达标后再启动**，神经代理会固化当前 GI 缺陷）：R1 降噪/融合增强（60 takes+11k 基线现成）→ R2 质量档"GI 超分"（复用 SR 双跑配对范式）→ R3 NRC 式代理（调研）；含 Phase G 前置门槛（ROI+分腿判读）、数据集规格与版本化（单场景债/时序契约/监督漂移风险）、Mac MPS 训练基础设施复用 |
+| `2026-09-24-sr-training-div2k-sponza.md` | ✅ | 2× 超分模型训练完工：DIV2K 预训练（34.60dB）+ 引擎实拍 Sponza 帧微调（`PRIMAL_RENDER_SCALE=0.5/1.0` 双跑采集协议，200 对，160 训/40 留出）→ **game_val 32.96dB（bilinear 25.06，+7.91，目标 27 达成）**；零样本迁移仅 +0.11 证明微调为决定性步骤；EDSR-lite 1.19M 参数，TorchScript + CoreML 双导出（三端 PSNR 一致）；**M4 Pro MPS 实测 13.6 it/s，后续微调可全在 Mac 做**；真正短板=单相机路径数据多样性（文档含加强路线）；工具链 `sr_train_v2.py`/`build_game_pairs.py`/`prep_npy_cache.py`，产物 `ContentTools/neural/sr_output/` |
+| `2026-09-24-dlss-sr-capture-experience-and-blockers.md` | 📖 | DLSS-SR capture 工具链经验与阻塞记录（ngx demo 包/CUDA capture/容器 Vulkan 栈），SR 训练文档（上条）的前置背景 |
+| `2026-09-21-courtyard-upstream-energy-investigation.md` | ✅ | 中庭偏暗上游能量链排查（R2 双通路）：用户五假设逐条核验（①sky miss 历史成立已修 ②SC bounce 三重饥饿=第一嫌疑 ③π 排除 ④真凶=单点亮度惩罚 ⑤sampling 非瓶颈）；双通路判读采纳；修复双轨（E0-I 仪表 → E0-B bounce 根治 → E0-K sky 份额）已全部落地，见 `completed/2026-09-21-probe-repr-e0-energy-dual-track-completion.md`；K-4 显式天空可见性维持远期立项 |
+| `2026-09-21-probe-representation-optimization-plan.md` | ✅ | Probe 表示优化计划（R4）：E0 能量链双轨 + P0 debug 解耦 + P4 三指标 + P1 单缓冲 + P2 SoA 全部完工（同上完工记录）；P3 oct 抽象触发条件未触发维持登记；普查证实无一探针体系是 vec4 |
+| `2026-09-21-spgi-probe-distribution-optimization-plan.md` | ✅ | SPGI probe 分布优化计划（P0 代表像素 → P1 normal 门 → P2 4 槽位+compaction → P3 辐亮度判据 → P4 分档 ray）——**P0-P4 全部实施**，完工记录 `completed/2026-09-21-spgi-probe-distribution-completion.md`；代表像素/normal 门默认开，tier3+lightVar+tierRays Vulkan pilot 默认关 |
+| `2026-09-20-pass-debug-view.md` | ✅ | Pass Debug View——视口实时 pass 可视化（14 视图管线）；`PRIMAL_PASS_DEBUG` 启动视图 + 运行时切换；详见 Docs/ARCHIVE.md 登记 |
+| `2026-09-20-sponza-vs-lumen-visual-gap-analysis.md` | 🚧 | Sponza vs UE Lumen 观感差距根因分析 + 缺口清单（行动项见 gap-actions 完工；P2 阶梯实测 adapt 吸收为本轮方法学基线） |
+| `2026-09-20-gi-energy-flow-deep-investigation.md` | 🚧 | 能量流深度调查：辐射计量单位全链审计（π 成对/albedo 单乘/L→E 恰一次）+ A1 tile 天空基色残差 + A3 F2 惩罚不对称发现 |
+| `2026-09-20-gi-energy-asymmetry-fix-plan.md` | ✅ | 能量不对称修复计划 F0-F6（SC tile 天空档接线/HZB-SC 惩罚对称/UBO 对齐/回滚位）——已落地 |
+| `2026-09-20-sc-correctness-and-reflections-integrated-plan.md` | ✅ | SC 正确性 × Lumen Reflections 整合 R0-R5（缺陷清单 + 分阶段实施）——全部落地，完工记录 `completed/2026-09-20-sc-correctness-and-reflections-completion.md` |
+| `2026-09-20-lumen-reflections-feasibility.md` | 📋 | 间接镜面缺口立项评估（P6）——已并入 SC 整合计划，保留作选项调研依据 |
+| `2026-09-20-sc-capture-near-plane-mechanism.md` | ✅ | SC 捕获近平面 near=0 崩溃机制排查（R2.1 产出）+ 参数化方案（不承诺 near=0 落地） |
+| `2026-09-19-sc-card-lumen-parity-investigation-and-plan.md` | ✅ | SC 卡片 vs Lumen 参照：现状调查与改造规划（Phase 0-5 全部落地） |
 | `2026-09-18-gi-energy-ownership-audit-and-remediation.md` | 🚧 | GI 能量所有权审计：外部评审 6 项结构性风险（Fusion→DDGI 反馈环/槽位语义/SC 双路径/量纲/openSky 三职/temporal 链）逐条对码核实，含 Surface Card 创建专项评估与 P0–P5 修复设计 |
 | `2026-09-18-gi-energy-ownership-remediation-plan.md` | 📋 | 上述审计的修复实施计划（Vulkan 优先）：Phase 0 基线 → P0 量纲+槽位 → P1 断 Fusion→DDGI 主实验 → P2 SC 注入置信门 → P3 openSky 拆分 → P4/P5 temporal+RG |
 | `2026-08-24-gi-optimization-plan.md` | 🚧 | GI 体系总优化计划（架构/效果/接口三轨道），后半为海量实施日志：Sponza GI 亮度 +199%、60FPS 冲刺、十余轮 Metal 根因修复 |
@@ -294,6 +326,12 @@ flowchart TD
 
 | 文档 | 状态 | 摘要 |
 |---|---|---|
+| `2026-09-21-round2-orientfail-k4-hygiene-completion.md` | ✅⚠️ | 第二轮完工：①orientFail 治理（漏斗 16 项射线级分类；G2 hint 门过杀实锤=关掉 found 3×；软键惩罚 PRIMAL_SPGI_HINT_SOFT 默认关）/ ②K-4 切片（SPGI per-probe openSky 统计 + confidence 地板参数化默认 no-op）/ ③radiance 卫生（finalize/WRC/适应 NaN 消毒 + 64 上限）/ ④DDGI moments 接探针球 confidence/variance 热图；⚠️ 间歇 780 帧坍黑根因定位=SC tile radiosity 回路双稳态（SC_INDIRECT=0 六连全稳；默认 ~20% 坍黑；增长钳制已发、根治下会话 P0） |
+| `2026-09-21-probe-repr-e0-energy-dual-track-completion.md` | ✅ | Probe 表示优化 + 中庭能量链双轨完工记录：E0-I 仪表（diag 4/5 + SC 漏斗——orientFail 47.9% 为 SPGI 拒绝主因、下行黑区 5 射线）/ E0-B nodirect atlas + 惩罚退役膝点 8（floor ROI +73% 对回滚、meanY 持平；780 帧回路稳定性修复）/ K-1 tile 天空方向化 / P0 探针球四模式 + env 入口（两处存量 bug 修复）/ P4 三指标（近场 SH9 p95 90% FAIL 定量证据、ANGVAR 近 0.79 远 0.031、SH2 P50 0.47）/ P1 单缓冲 -88.5MB / P2 SoA 双区域；frame 780 统一配方验收 + 遗留清单 |
+| `2026-09-21-spgi-probe-distribution-completion.md` | ✅ | SPGI Probe 分布优化完工记录（P0-P4 全阶段落地）：代表像素选择 / F4 normal 门 / 4 槽位 compaction / 辐亮度判据 / 分档 ray；门禁通过；对照图集见 render-comparisons/2026-09-21-spgi-probe-distribution/ |
+| `2026-09-20-gi-energy-asymmetry-fix-completion.md` | ✅ | 能量不对称修复 F0-F6 完工：F0 SC tile 天空档接线、F1 失败射线低频回退限幅、F2 SC/HZB 惩罚对称、F3 诊断视图、F4 读取链一处遗留在案、F5 卡片 override、F6 dc_gain 复验 |
+| `2026-09-20-sc-correctness-and-reflections-completion.md` | ✅ | SC 正确性 × Reflections R0-R5 六阶段完工：R0 漏斗细分 / R1 查询 UV 米制 pad / R2 capture 专项 / R3 近平面机制 / R4 WRC 探针镜面采样 / R5 REFLECT 三档；boundsFail 主因=未卡化几何 |
+| `2026-09-20-sponza-gap-actions-completion.md` | ✅ | Sponza 观感差距行动轮 P0-P6 完工（A4 三场景周环比与 boundsFail 覆盖缺口为会话外遗留） |
 | `2026-09-19-world-space-radiance-cache-completion.md` | ✅ | WRC 完工记录：五 Stream（A0–A5/B1–B3/C1/D1–D3/E1–E2）全落地——能量单向化（bootstrap 探针馈送 + tile radiosity 单轨 + 占位符删除）、Fusion 档位 mode switch、WRC 独立代码域（trace/finalize/update/prefilter + CacheView + SPGI 远场消费 + FitGrid/消费计数预算）、SC Top-K 调度/页表/LRU、E1 紧致 AABB/E2 事件驱动增量；Vulkan/Metal 双树编译、Unit 5/5、Sponza 2671 帧 0 fault、WRC 路径探针收敛实测；已知问题与 Metal parity 后置项如实记录 |
 | `2026-08-06-wfc-phase-c1-mixed-multi-category-completion.md` | ✅ | WFC C.1 混合多类别完成报告：M1–M7 全 ✅，26 个测试二进制全绿 |
 | `2026-09-18-ddgi-scene-fit-probe-grid-plan.md` | ✅ | DDGI 场景贴合 Probe 网格实施方案（已实施归档）：Sponza 实测 bbox（37.2×15.6×22.9）为覆盖目标、`ceil(E/S)+1` 反推 counts、origin 对齐 bbox 角点；near 16,384→882 probes，trace 主 pass 3.62→0.65ms；纯 C++ 编排层（DDGIRuntimeParams 补 origin），零 shader；P0 显式 bbox / P1-A SDF 体积自动回填（16×11×11=1,936，与口径 A 预测一致）/ P1-B 同 AABB 密度 A/B（维持 3.0）全落地；P2 scrolling·classification 待做且优先级上调（见对比文档 §6） |
@@ -346,10 +384,18 @@ flowchart TD
 | `CodeReview/`（51 md） | ✅ | 50 份 CSharpReview 报告为同一模板（78 文件缺注释清单）按 Run ID 重复生成；生成脚本仍在 `Engine/Python_Scripts/`，现行 ci.yml 已不调用 |
 | `CI/TestReports/`（51 md） | ✅ | 全部为"未发现 Python 测试入口"的占位空壳报告，最后 Run 2026-03-04 |
 
+> 2026-09-24：这两组目录已停止 git 跟踪（仅本地保留，.gitignore 已加 `Docs/completed/CodeReview/`、`Docs/completed/CI/`）；后续新报告一律不入库。
+
 ### 4.5 render-comparisons/
+
+> 2026-09-24：整目录本地留存、不再跟踪（.gitignore 已加 `Docs/completed/render-comparisons/` 与 `Docs/diagnostics/`，`*.ppm` 全局忽略）；合计约 530M 图集/日志/配置转储。本节表格作为离线档案索引保留，链接仅本机可解析。
 
 | 目录 | 状态 | 摘要 |
 |---|---|---|
+| `2026-09-21-spgi-probe-distribution/` | ✅ | SPGI 分布计划 P0-P4 基线/P0P1/全计划对照图集 + UE Lumen 参考图（frame 360；三图同态核实=UBO 修复后二进制） |
+| `2026-09-20-gap-actions-and-sc-audit/` | ✅ | Sponza 差距行动轮 + SC 审计对照图集 |
+| `2026-09-20-gi-energy-asymmetry-fix/` | ✅ | 能量不对称修复 F0-F6 A/B 对照图集 |
+| `2026-09-20-sc-correctness-and-reflections/` | ✅ | SC 正确性 × Reflections R0-R5 对照图集 |
 | `2026-09-06-sponza/` | ✅ | UE Lumen 参考 vs Metal/Vulkan 四轮 GI 对比：结构性根因（Metal 侧旋钮未同步 Vulkan）修复后逐位对齐；P0/P1 缺口移交 09-12 诊断专项 |
 | [`2026-09-16-sponza-gap-audit/`](completed/render-comparisons/2026-09-16-sponza-gap-audit/README.md) | ✅ 分析完成，修复未实施 | 当前 Vulkan 三次实采 vs 用户参考：SPGI 黄斑消融、资产/材质/光照差距、体积阴影坐标与透射厚度缺陷、修复优先级和验收方法；附原图、日志、配置及版本摘要 |
 | [`2026-09-16-sponza-gap-reaudit/`](completed/render-comparisons/2026-09-16-sponza-gap-reaudit/README.md) | ✅ 复查完成，建议未实施 | 五组新实采复查：默认 validation 已清洁，SPGI 热点/地面暗仍在；FROXEL 可选路径布局错误与 PCSS/VSM 接线缺口、材质反射及动态验收不足，附修复顺序与证据 |

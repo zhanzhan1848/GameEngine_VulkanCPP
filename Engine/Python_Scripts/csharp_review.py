@@ -15,7 +15,7 @@ csharp_review.py
 设计约束：
 - 使用 Python 标准库，不引入第三方库；
 - 识别规则为近似匹配，强调覆盖面与轻量化；
-- 输出 Markdown 报告到 Docs/CodeReview/ 目录。
+- 输出 Markdown 报告到 Docs/completed/CodeReview/ 目录。
 """
 
 import argparse

@@ -108,6 +108,33 @@
 
 ---
 
+## M6: 物理关系校准（C 系列，2026-09-09 开题）
+
+**Plan**: `Docs/2026-09-09-gi-physical-relation-calibration-plan.md`（症状诊断、基线数据表、逐项验收带）。
+**触发症状**：室内间接光比直射区墙还亮（物理关系反转）——①探针场与太阳解耦（M2 GI_HALFLIFE response=NO）+ ②直射链大面积死亡（Round 13-14 遗留）+ ③能量放大器（B7 钳位抬升 / B1 ×2.5 / analytic 兜底无阴影 / prev-screen 无深度测试）。
+
+- [x] ◐ 2026-09-09（C0/C1 第一批，见计划文档 §9 执行日志） **C0** 全部完成：EngineTest DDGIGIGather 同步 flat-buffer + check_shader_copies Lumen/ 映射盲区修复；Metal Dispatch/CopyBuffer 零尺寸守卫；`scripts/sponza_region_lum.py` 区域门禁脚本；双平台基线 capture
+- [x] ◐ 2026-09-09（C1 第一批） **C1** 诊断+首修：ShadowFilter Metal 深度绑定错配已修（depthTex@0 vs C++ 绑 5——PCSS 链曾读未绑定垃圾）；三段直出旋钮 PRIMAL_SFD_MODE/PRIMAL_VIS_DEBUG 落地。【前提修正】直射链双平台均存活（光池小=52° 仰角物理正确，强度差归 C4）；GI_DEBUG_STRIP full 带不等价正常管线（禁用于归因）；探针场 360/800 帧逐位稳定（无 runaway）
+- [x] ◐ 2026-09-10（T1-T4 专项，见计划文档 §9 "2026-09-10 四"） **T1 π 链审计闭合 + 两个跨端分叉修复**：Metal march/finalize/投影端 miss 处理对齐 Vulkan 2026-09-06 逃逸门控（−1 耗尽=SC 卡回退/黑 / −2 逃逸=SKY 2.87；此前 Metal 耗尽射线全兜天空——内部探针 69% 能量、拱廊 −84% 的主源，PROJ_NOSKY 旋钮判决）。**T2 DC 增益**：0.5×/1×/2× 阶跃 → 平衡态 = 1.17 太阳无关项(81%) + 0.28×sun（增益 0.19/unit 饱和）；feed-off=T8.13 亮支路 3.3×。**T3 B1 ×2.5 回撤落地**（根因已修非补偿；floor 200.9→108.0，band 重核 gather_avg 0.78✓）。**T4 部分**：调光 response 实质性 YES（camcell −40%/区域 −45%，修前 −22%）；floor 199→108（目标 60-90 差 1.2×）
+- [ ] **C2** 探针-太阳耦合（残余，2026-09-10 五精确化）：Metal response YES（等效实验 −40%）；**Vulkan 正式门禁 FAIL（response=NO，L0 5.567→5.585）——定性为弹射传输饥饿**（direct_patch GI≈0、floor 15.7=UE 26%），非解耦 bug；修 SC→probe 弹射馈送后应自然翻转。另：GI_HALFLIFE 门禁代码判据本身合理（>20%+半衰≤60），计划文本"<20%"作废；SSGI_OFF 在 Metal 是坏仪器（quality 闸门连带关闭整个 fusion 间接链）
+  - **【2026-09-10 六】饥饿根因定罪并修复（Vulkan response= YES）**：`FillSCLightList` 与 deferred 的 **DIRECT_INTENSITY 20× 尺度分裂**——SC 图册的受光 texel 只有屏幕世界的 1/20（max texel lum 1.62 vs 理论 13-17），探针弹射传输整体挨饿。修 = `SCDirectIntensityScale()`（默认 20，A/B `PRIMAL_SC_DIRECT_SCALE`）。修后 GI_HALFLIFE **response=YES**（new metric，见 C2.3）。C2.1 尺度面随之闭合；源表面（SC 走 scene lights / deferred 走 settings_，halflife 已双路同步调光）已归档。
+- [ ] **C3** 能量注入收敛（残余）：escape/exhausted 分档 + ×2.5 回撤 ✅ 已落地；剩 analytic 兜底去无阴影 E_direct（归因≈0 但代码在）；path2 投影加深度测试 + 去 0.12 floor；分区 escape 门禁（室内 cell ≤0.05）；反馈回路 DC 增益余量 ≥20%（T2 数据：81% 太阳无关项 = escape 传输 + 暗卡弛豫，需分解）
+  - **【2026-09-10 十 π 单位修正转正】**：SC gather 求值重建的是 L(d)，texel 需要的是 E=π·L——历史"deliberate π 缺损"（注释自认）与屏幕侧 B4 ×π 两腿不一致。转正后回路不动点 ×1.7-2.1（L_arc 1.4→2.9@800 / 3.1@5000 稳定）、DC 增益 0.19→0.53（余量 47% 达标）。comp 双分支 + Metal gather 双端同步。新默认基线：interior 2.2-2.3 / direct 70.6（本轮起点 0.7-1.4 → ×3）。金色基线已重生成。详见计划 §9 09-10 十。
+- [ ] **C4** 端到端 UE 参考重校准：**【前提修正 2026-09-10】参考机位下 sunlit_wall/L_arcade/R_arcade/floor 四 box 均不含直射（GI_ALL_OFF 全零，太阳缝在近屋顶带）**——门禁"直射÷内部比≥8"的 box 语义失效，C4.1 必须先重定义 box（直射缝 box 与纯间接 box 分离）再推导期望带；DIRECT_INTENSITY 四值归一 + CAL_EXPOSURE 显示链重标其后
+  - **【2026-09-10 六 ⏸ 按红线缓行】**：室内仍 ~10× 低于 UE（见下方两个结构性残项），此时动 CAL_EXPOSURE/天光底 = 全局常量掩盖传输缺陷（纪律 6）。可标定域：direct_patch 69.1（DI 20，≥67 达标）。**新专项（M7 候选）**：①AABB 回退卡对空心建筑内壁的覆盖缺口（内壁从未被捕获，命中读对侧暗 texel 或被 D3 planeOk 拒——判决仪器 `DDGI_DUMP=5` 逐卡亮度表已入库；修复 = T4.2 card bake 重烘 Sponza 或运行时卡片放置升级，**bake 的定制烘焙命令已失传需先复原**）；②SC↔probe 回路多稳态在满能量下放大（camcell L0 run-to-run 差 30-177%，相邻探针 0.9 vs 0.02 落不同吸引子 = 室内斑驳的直接机制；golden frame-400 仪器失效，正解 = 固定射线单帧投影无反馈 golden，M2 已列）。
+
+### 2026-09-10 六（多弹射断供专项收尾批）
+
+- [x] ✅ 2026-09-10 **C2.3 response 度量切换**：GI_HALFLIFE 判定改为 SC 图册位样变化率（`DumpSCAtlasBits`，与 DDGI_DUMP=4 同配方；阈值 `GI_HALFLIFE_MIN_BITRATE` 默认 0.10）；camcell L0 降级为半衰曲线 informational。**3/3 连跑 PASS**：bit_change 70.62/70.66/70.65%、half_life=36≤60。协议 `GI_HALFLIFE_FRAME=360`（收敛后调光）
+- [x] ✅ 2026-09-10 **M3-A1 残项重定义**：传播修复后 -y 地板隧穿已灭（fresh dump：盒内 escape 0.0%、-y 份额 0；旧 15-18% 为修复前数据）。新残项 = 入口被埋探针（(-13.5,*) 63-85/128 射线爬出失败 → exhausted），GIVerify exhausted 3.6% band 内，归 relocation 增强专项
+- [x] ✅ 2026-09-10 **三修批（双平台同步）**：①FillSCLightList ×20（见 C2）；②finalize 命中分支 continue-on-planeOk（首个 bounds-pass 卡被拒后继续尝试后续小卡；miss 分支语义本就正确；DDGITraceFinalize.comp + DDGITraceRays.metal 同步）；③SC 侧 gather 钳位 4.0→64.0（SurfaceCacheLightEval 双端；×20 后 4.0 进入合法工作区间，硬非线性把 golden 多稳态从 0.36% 放大到 115-330%——回路 DC 增益 4·C0·albedo≈0.79 与钳位无关，64 对齐图册存储钳位与 B7）。效果：室内 L_arc 0.7→1.8 / R 1.4→2.1 / floor 0.7→2.0，frame 1500≈360 无 runaway，GIVerify 全带 PASS，golden 基线按新平衡重生成（判据改 L0 25% + L1 向量方向/范数带）
+- [x] ◐ 2026-09-10 **诊断仪器批**：`DDGI_DUMP=5` SC 图册逐卡亮度表（/tmp/sc_card_lum.csv：逐卡 mean/max/lit% + 世界坐标 + top-24 stderr）；pathdbg spv 按当前源重编（旧 spv 落后 miss 分档修复；`-DDGI_PATH_DEBUG` 宏注入在 glslangValidator 下不生效，需 #version 后显式 #define——已入 build 备注）
+- [ ] **C5** 门禁固化：GIVerify 物理关系带（室内地面 < 直射墙）；GI_HALFLIFE/分区 escape 入 ci_local；shader 副本布局签名 hash（binding 级漂移禁入豁免）；另：Metal GIFusionVerify 末段 backBuffer 回读触发 framebufferOnly assert（PASS/FAIL 行永不打印，带检查数据已完整输出——顺带修）
+
+依赖：C1 独立于 C2/C3 可先行；C3.4（回撤 ×2.5）必须在 C2 之后（否则回退到用校准系数补偿的状态）；C4 硬性最后。
+
+---
+
 ## 附：并行性与风险备忘
 
 - M0 全部条目可并行（单点修复，互不依赖）；T0.13 是 T0.14 的前置。

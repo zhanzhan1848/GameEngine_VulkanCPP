@@ -19,8 +19,9 @@
 
 ## 2. InsertBarrier（按资源，状态转换）
 
-- Vulkan：`vkCmdPipelineBarrier` 的 image/buffer barrier 数组（oldLayout/newLayout、
-  src/dst queueFamily 由资源跟踪层推断）。
+- Vulkan：当前 `InsertBarrier` 实际仅处理 image barrier（oldLayout/newLayout、
+  src/dst queueFamily 由资源跟踪层推断）；buffer 被跳过，尚未接入 buffer barrier。
+  缓冲区依赖不能只靠该接口声明，显式同步诊断实例见 §4.4。
 - Metal：`MTLCommandEncoder` 的 `useResource`/`memoryBarrier(scope)` 组合 +
   纹理 layout 跟踪（Metal 无显式 layout，追踪层保证状态机不产生错误假设）。
 - Dawn：no-op（use-order 由 GPU 自动）。
@@ -50,3 +51,10 @@ RG 生成的 barrier 走同一路径。
 3. Dawn 端 `MapBuffer(GPU-only storage)` 返回零页且 Unmap 回写（历史踩写事故，
    见 LumenDDGIPass C5 注释）—— CPU 读 GPU 数据一律走 Readback buffer +
    rhi_readback_ring。
+4. 2026-09-28 实码核验：当前 `VulkanCommandBuffer::InsertBarrier` 仅生成纹理屏障，
+   buffer 会跳过（实现注释仍标记 phase 5 待接）。缓冲区的 `UnorderedAccess→CopySource`
+   声明不能替代真实依赖。同命令 compute 写后立即复制，必须显式
+   `MemoryBarrier(ComputeShader→Transfer, ShaderWrite→TransferRead)`；读回再接
+   `Transfer→Host, TransferWrite→HostRead`，并提交等待后 Map Readback。
+   fence 只保证提交完成，不能修复提交内部已经抢先执行的 CopyBuffer。
+   SC GPU 几何只读诊断使用这条显式路径；本轮未改通用 RHI buffer 屏障实现。

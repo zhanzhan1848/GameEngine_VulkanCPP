@@ -1,7 +1,7 @@
 # WFC Phase C.1 Mixed Multi-Category — Completion Note
 
 **Date:** 2026-08-06
-**Plan:** `Docs/superpowers/plans/2026-08-06-wfc-phase-c1-mixed-multi-category.md`
+**Plan:** `Docs/completed/superpowers/plans/2026-08-06-wfc-phase-c1-mixed-multi-category.md`
 **Branch:** `feat/wfc-pcg`
 
 ## Outcome

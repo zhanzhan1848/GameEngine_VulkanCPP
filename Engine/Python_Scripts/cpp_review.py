@@ -15,7 +15,7 @@ cpp_review.py
 设计约束：
 - 使用 Python 标准库，不引入第三方库；
 - 尽量遵循项目的代码风格与约束；
-- 结果以 Markdown 报告形式输出到 Docs/CodeReview/。
+- 结果以 Markdown 报告形式输出到 Docs/completed/CodeReview/。
 """
 
 import argparse

@@ -3,9 +3,9 @@
 **Date:** 2026-07-29
 **Branch:** `feat/wfc-pcg`
 **Predecessors:**
-- Spec: `Docs/superpowers/specs/2026-07-29-wfc-phase-b1-design.md` (commit `8170319`)
-- Plan: `Docs/superpowers/plans/2026-07-29-wfc-phase-b1.md` (commit `b70af5b`)
-- Completion notes: `Docs/superpowers/notes/2026-07-29-wfc-phase-b1-completion.md`
+- Spec: `Docs/completed/superpowers/specs/2026-07-29-wfc-phase-b1-design.md` (commit `8170319`)
+- Plan: `Docs/completed/superpowers/plans/2026-07-29-wfc-phase-b1.md` (commit `b70af5b`)
+- Completion notes: `Docs/completed/superpowers/notes/2026-07-29-wfc-phase-b1-completion.md`
 
 ## Goal
 

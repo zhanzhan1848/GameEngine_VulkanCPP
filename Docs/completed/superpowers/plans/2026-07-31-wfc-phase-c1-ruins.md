@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17, CMake, primal `TestFramework` (`TestResult` + `TEST_ASSERT_*` + `TestSuite`), existing `Engine/Graphics/WFC/*` and `Engine/Graphics/ProceduralMesh.h` modules, no external libraries.
 
-**Spec reference:** `Docs/superpowers/specs/2026-07-31-wfc-phase-c1-ruins-design.md`
+**Spec reference:** `Docs/completed/superpowers/specs/2026-07-31-wfc-phase-c1-ruins-design.md`
 
 ---
 
@@ -2639,7 +2639,7 @@ git commit -m "test(wfc): TestWFCRuinsRendering visual smoke binary (Phase C.1 �
 
 ## Self-Review
 
-**Spec coverage** (cross-check against `Docs/superpowers/specs/2026-07-31-wfc-phase-c1-ruins-design.md`):
+**Spec coverage** (cross-check against `Docs/completed/superpowers/specs/2026-07-31-wfc-phase-c1-ruins-design.md`):
 
 - §1 Architecture: WFCCategory enum ✓ (T1), active_category_mask ✓ (T2 + T5), DeriveSocketEncoding ✓ (T15)
 - §2 Tile Catalog (15 tiles, 16×4 packing, ~70 rules): packing ✓ (T3), all 10 Ruins factories ✓ (T18-T21), Populate wiring ✓ (T22)
@@ -2664,7 +2664,7 @@ git commit -m "test(wfc): TestWFCRuinsRendering visual smoke binary (Phase C.1 �
 
 ## Execution Handoff
 
-**Plan complete and saved to `Docs/superpowers/plans/2026-07-31-wfc-phase-c1-ruins.md`. Two execution options:**
+**Plan complete and saved to `Docs/completed/superpowers/plans/2026-07-31-wfc-phase-c1-ruins.md`. Two execution options:**
 
 **1. Subagent-Driven (recommended)** — Dispatch a fresh subagent per task, review between tasks (spec compliance first, then code quality). Fast iteration, main context stays clean.
 

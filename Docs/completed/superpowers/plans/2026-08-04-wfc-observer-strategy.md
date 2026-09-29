@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17, CMake, primal engine (`Engine/Graphics/WFC/`), existing WFC unit-test framework (`TestResult` + `TEST_ASSERT*` + `TestSuite`).
 
-**Spec:** `Docs/superpowers/specs/2026-08-04-wfc-observer-strategy-design.md`
+**Spec:** `Docs/completed/superpowers/specs/2026-08-04-wfc-observer-strategy-design.md`
 
 ---
 
@@ -1012,7 +1012,7 @@ If everything passes, no commit needed — Task 7 already captured the integrati
 ## Self-Review
 
 ### Spec coverage check
-Walk through each section of the spec (`Docs/superpowers/specs/2026-08-04-wfc-observer-strategy-design.md`) and confirm a task implements it:
+Walk through each section of the spec (`Docs/completed/superpowers/specs/2026-08-04-wfc-observer-strategy-design.md`) and confirm a task implements it:
 
 | Spec section | Covered by |
 |---|---|
@@ -1058,7 +1058,7 @@ None. All tasks contain full code; no body is left as an exercise.
 
 ## Execution Handoff
 
-**Plan complete and saved to `Docs/superpowers/plans/2026-08-04-wfc-observer-strategy.md`. Two execution options:**
+**Plan complete and saved to `Docs/completed/superpowers/plans/2026-08-04-wfc-observer-strategy.md`. Two execution options:**
 
 **1. Subagent-Driven (recommended)** — dispatch a fresh subagent per task, two-stage review (spec + code quality) between tasks. Best for protecting the main context window and ensuring each task is independently validated.
 

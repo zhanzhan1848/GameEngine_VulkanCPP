@@ -4,8 +4,8 @@
 
 Three diagnostic hooks have been added to the meshlet rendering path to investigate the long-standing "gray-white screen at specific camera positions" bug affecting modes 7/8/9/10/11.
 
-- **Spec:** `Docs/superpowers/specs/2026-07-09-dawn-meshlet-camera-graywhite-instrumentation-design.md`
-- **Plan:** `Docs/superpowers/plans/2026-07-09-dawn-meshlet-camera-graywhite-instrumentation-plan.md`
+- **Spec:** `Docs/completed/superpowers/specs/2026-07-09-dawn-meshlet-camera-graywhite-instrumentation-design.md`
+- **Plan:** `Docs/completed/superpowers/plans/2026-07-09-dawn-meshlet-camera-graywhite-instrumentation-plan.md`
 - **Tag:** `diagnostic-v1`
 
 ## Build

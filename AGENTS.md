@@ -78,3 +78,14 @@ Darwin/DebugVulkan/TestVulkanSponzaRenderGraph 2>&1 | tee /tmp/regress_vulkan.lo
   （沿 `AssetAPI.h` / `EngineEventsAPI.h` 惯例）。
 - **日志纪律**：新 C++ 代码用 `PRIMAL_LOG`/`primal::diag::Emit`，日志走 stderr，
   stdout 留给机器输出。
+- **渲染/RHI 必读**：动 `Engine/Graphics/`（RHI、渲染图、任一后端）前先查
+  `Docs/RHI/GraphicsAPI_Parity_Matrix.md`（Vulkan/Metal/D3D12/Dawn 四 API 对等矩阵，
+  注意 Dawn 端的降级边界）和 `Docs/rhi-barrier-semantics.md`（三端同步语义）。
+- **文档索引**：全仓文档状态/位置以 `Docs/ARCHIVE.md` 为单一事实源；完工文档移入
+  `Docs/completed/` 并同步登记。
+- **PFX/粒子排障速查**：PFX 相关"改了没作用/行为突变/穿地/无法保存"类问题，
+  先查 `Docs/2026-09-16-pfx-troubleshooting-root-causes.md`（根因+现行规则）。
+  高频结论：预览推送只进私有预览发射器，场景发射器只经 Save→Resync 更新；
+  PhysicsCollision.radius 是"缩放 1 时的半径"（内置几何基准 0.05）且需 SIM ▶ Play；
+  新增编辑器组件必须登记 Serializer.cs 三处，否则保存抛 Unknown component type；
+  同 guid scene.load 不重建原生实体（强制重建需跨场景切换）。

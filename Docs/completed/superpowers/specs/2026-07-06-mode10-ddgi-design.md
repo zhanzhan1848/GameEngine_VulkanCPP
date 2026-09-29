@@ -2,6 +2,7 @@
 
 **Date**: 2026-07-06
 **Status**: Design — pending implementation plan
+**Related**: `Docs/2026-09-16-ddgi-world-space-probe-grid-reference.md` (DDGI probe grid density/spacing/multi-scale reference)
 **Branch target**: `worktree-dawn-webgpu-backend`
 
 ## Goal

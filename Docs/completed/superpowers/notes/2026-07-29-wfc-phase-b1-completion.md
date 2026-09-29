@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-29
 **Branch:** `feat/wfc-pcg`
-**Spec:** `Docs/superpowers/specs/2026-07-29-wfc-phase-b1-design.md` (commit `8170319`)
-**Plan:** `Docs/superpowers/plans/2026-07-29-wfc-phase-b1.md` (commit `b70af5b`)
+**Spec:** `Docs/completed/superpowers/specs/2026-07-29-wfc-phase-b1-design.md` (commit `8170319`)
+**Plan:** `Docs/completed/superpowers/plans/2026-07-29-wfc-phase-b1.md` (commit `b70af5b`)
 
 ## What landed
 

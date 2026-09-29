@@ -3,7 +3,7 @@
 > 日期：2026-08-24（2026-08-26 增补：M7/F 系列融合轮 + §1.1 现状修订，增补部分待评审）
 > 状态：已评审定稿（决策记录见 §2）
 > 范围：Lumen GI 体系（DDGI / SurfaceCache / ScreenProbe / SSGI / Fusion / GIGather）
-> 关联文档：`Docs/2026-08-09-vulkan-lumen-gi-port-design.md`、`Docs/2026-08-19-rhi-vulkan-metal-parity-plan.md`、`Docs/2026-08-21-virtual-texture-system-design.md`、`Docs/2026-08-26-spgi-lumen-screen-probe-fusion.md`（M7/F 系列机制细节与外部依据）
+> 关联文档：`Docs/2026-08-09-vulkan-lumen-gi-port-design.md`、`Docs/2026-08-19-rhi-vulkan-metal-parity-plan.md`、`Docs/2026-08-21-virtual-texture-system-design.md`、`Docs/2026-08-26-spgi-lumen-screen-probe-fusion.md`（M7/F 系列机制细节与外部依据）、`Docs/2026-09-16-ddgi-world-space-probe-grid-reference.md`（DDGI probe 密度/间距/多尺度参考，本计划 §1.1 "无远场"表述的更新对照）
 
 ---
 

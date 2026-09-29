@@ -5,6 +5,7 @@
 > **Scope**: 将 Metal active path（`StandardRenderPipeline`）的全部 Lumen GI 系统与 PostProcess 链路移植到 Vulkan，对齐到 **Ultra 质量档**（含 SurfaceCache + ScreenProbe），并接入 TAA / Bloom / ToneMapping / SSR 四个 PostProcess pass。
 > **Worktree**: `.worktrees/vulkan-rhi/`（分支 `feat/vulkan-rhi-backend`）
 > **先决条件**: Vulkan Nanite（GPUCulling/HZB/GlobalSDF）+ DeferredLighting(compute) 已跑通；ForwardSceneRenderer(Editor 路径) 的 Vulkan Lumen 接入不在本期范围。
+> **关联文档**: `Docs/2026-09-16-ddgi-world-space-probe-grid-reference.md`（DDGI probe 网格密度/间距/多尺度参考）
 
 ---
 
@@ -103,7 +104,7 @@ Step 11  FinalBlit                      (Graphics, blit to backbuffer)         �
 - **GlobalSDF**（Texture3D storage image + 6 SSBO）— `Engine/Graphics/Nanite/GlobalSDF.cpp`
 - **GPUCullingPipeline**（8-stage compute，HZB occlusion）— `Engine/Graphics/Nanite/GPUCullingPipeline.cpp`
 - **DeferredLighting**（WGSL→SPIR-V compute，storage image 输出）— `ForwardSceneRenderer.cpp:2103`
-- **Dawn port v2**（descriptor 重编号先例）— `Docs/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md` 已验证 Metal 也接受 flat 顺序编号
+- **Dawn port v2**（descriptor 重编号先例）— `Docs/completed/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md` 已验证 Metal 也接受 flat 顺序编号
 
 ---
 
@@ -164,7 +165,7 @@ DDGI 分歧比 SSAO/SSGI 更深：
 - 缺点：DDGI 强依赖 SurfaceCache，Phase 2/4 必须合并；需手写 GLSL + 额外 SC binding（card_lookups/card_data）
 - 工作量：显著增加
 
-**推荐 A**：DDGI 走 WGSL Mode 11，理由是 (1) 这本身就是设计目标（`Docs/superpowers/specs/2026-07-06-mode10-ddgi-design.md` 记录 Mode 11 = MeshletDynamicDDGI）；(2) 解耦 Phase 2/4；(3) SurfaceCache 在 Ultra 档作为 DDGI 的增强（而非依赖）。
+**推荐 A**：DDGI 走 WGSL Mode 11，理由是 (1) 这本身就是设计目标（`Docs/completed/superpowers/specs/2026-07-06-mode10-ddgi-design.md` 记录 Mode 11 = MeshletDynamicDDGI）；(2) 解耦 Phase 2/4；(3) SurfaceCache 在 Ultra 档作为 DDGI 的增强（而非依赖）。
 
 > ⚠️ **需用户确认**：DDGI 走 A（WGSL Mode 11 自循环）还是 B（复刻 Metal SC-sampling）？
 

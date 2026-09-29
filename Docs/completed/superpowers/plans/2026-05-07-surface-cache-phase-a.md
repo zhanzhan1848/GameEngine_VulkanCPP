@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17 / Metal Shading Language / Apple Silicon (M-series)
 
-**Spec:** `Docs/superpowers/specs/2026-05-07-surface-cache-design.md`
+**Spec:** `Docs/completed/superpowers/specs/2026-05-07-surface-cache-design.md`
 
 ---
 
