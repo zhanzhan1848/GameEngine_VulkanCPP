@@ -10,10 +10,12 @@ namespace PrimalEditor_Avalonia.Tests.Native;
 
 /// <summary>
 /// Contract: importing a model source file (.fbx / .obj / .gltf / ...)
-/// must NOT copy the source into the project directory. Only the cooked
-/// .mesh and the .model.json sidecar live there; the source stays at its
-/// original location on disk. This is the regression guard for the
-/// no-copy import feature.
+/// must NOT copy the source into the project directory. Everything the
+/// import produces (cooked .mesh, .model.json sidecar, default material,
+/// cooked .texture assets) lives under a per-model asset folder
+/// "&lt;Content&gt;/&lt;stem&gt;/"; the source stays at its original
+/// location on disk. This is the regression guard for the no-copy import
+/// feature and the per-model folder layout.
 /// </summary>
 public sealed class MeshImporterNoCopyTests
 {
@@ -44,7 +46,7 @@ public sealed class MeshImporterNoCopyTests
         Assert.False(result.Success);
         Assert.Equal(AssetType.Model, result.Type);
         Assert.Equal(sourcePath, result.SourcePath);
-        Assert.Equal(Path.Combine(temp.ContentPath, "monster.model.json"), result.DestinationPath);
+        Assert.Equal(Path.Combine(temp.ContentPath, "monster", "monster.model.json"), result.DestinationPath);
 
         Assert.True(File.Exists(sourcePath), "source must remain on disk");
         Assert.Equal(sourceBytes, File.ReadAllBytes(sourcePath));
@@ -53,7 +55,13 @@ public sealed class MeshImporterNoCopyTests
         var copiedSource = Path.Combine(temp.ContentPath, "monster.fbx");
         Assert.False(File.Exists(copiedSource), "source must NOT be copied into the project");
 
-        Assert.False(File.Exists(Path.Combine(temp.ContentPath, "monster.mesh")));
-        Assert.False(File.Exists(Path.Combine(temp.ContentPath, "monster.model.json")));
+        // Engine-unavailable failure must not leave artifacts (or even the
+        // asset folder) behind.
+        Assert.False(Directory.Exists(Path.Combine(temp.ContentPath, "monster")),
+            "failed import must not create the per-model asset folder");
+
+        var assetDir = Path.Combine(temp.ContentPath, "monster");
+        Assert.False(File.Exists(Path.Combine(assetDir, "monster.mesh")));
+        Assert.False(File.Exists(Path.Combine(assetDir, "monster.model.json")));
     }
 }
