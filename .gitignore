@@ -490,3 +490,16 @@ sr_output/
 Docs/completed/render-comparisons/
 Docs/diagnostics/
 *.ppm
+
+# GI/SC/DDGI 本地审计/取证脚本：会话级诊断工作流产物，本地留存不入库。
+# 已跟踪文件（scripts/test_gi_shader_layout.py 等）不受 ignore 规则影响。
+scripts/test_*.py
+scripts/audit_*.py
+scripts/analyze_*.py
+scripts/compare_*.py
+scripts/certify_*.py
+scripts/make_*.py
+scripts/ddgi_*.py
+scripts/spgi_plan_*.py
+scripts/sponza_sdf_*.py
+scripts/gi_ownership_baseline.sh
