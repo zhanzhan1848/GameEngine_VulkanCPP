@@ -393,6 +393,7 @@ GameEngine_VulkanCPP_Debug/
 *.metalar
 *.ir
 *.model
+*.csv
 *.texture
 # EngineTest/assets/ holds heavy binaries (models, textures) that shouldn't be
 # tracked. Use contents-list pattern (assets/*) not dir pattern (assets/) so
