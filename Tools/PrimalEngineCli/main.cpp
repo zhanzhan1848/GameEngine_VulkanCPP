@@ -21,6 +21,10 @@
 // 调用方一律 include 本头）+ 产物读回校验（SceneBlobReader 认 UVLM 段）。
 #include "AIAssetPipelineParams.h"
 #include "pipeline/SceneBlobReader.h"
+// bake-sdf: per-mesh SDF 生成（mesh + generate_sdf）
+#include "Geometry.h"
+#include "common/SDF.h"
+#include "common/CardBake.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -659,11 +663,16 @@ int VerbPhysicsSim(int argc, char** argv)
 // mesh 数。这是 "cook → 磁盘 → 引擎读回" 闭环的校验端；读取失败不否定
 // cook 本身，但会体现在返回的统计里（mesh_count=0 即异常）。
 static bool CountMeshStats(const char* path, u32* out_mesh_count,
-                           u32* out_lightmap_uv_meshes, u32* out_card_baked_meshes)
+                           u32* out_lightmap_uv_meshes, u32* out_card_baked_meshes,
+                           u32* out_total_cards = nullptr, u32* out_max_cards = nullptr,
+                           f32* out_mean_cards = nullptr)
 {
     *out_mesh_count = 0;
     *out_lightmap_uv_meshes = 0;
     *out_card_baked_meshes = 0;
+    if (out_total_cards) *out_total_cards = 0;
+    if (out_max_cards) *out_max_cards = 0;
+    if (out_mean_cards) *out_mean_cards = 0.f;
 
     FILE* f = std::fopen(path, "rb");
     if (!f) return false;
@@ -686,8 +695,14 @@ static bool CountMeshStats(const char* path, u32* out_mesh_count,
             ++(*out_mesh_count);
             if (view.lightmap_uv_count > 0) ++(*out_lightmap_uv_meshes);
             if (view.card_bake_card_count > 0) ++(*out_card_baked_meshes);
+            // [SC 卡片 Lumen 对齐 Phase 0]：卡数分布汇总（均值/最差值）。
+            if (out_total_cards) *out_total_cards += view.card_bake_card_count;
+            if (out_max_cards)
+                *out_max_cards = std::max(*out_max_cards, view.card_bake_card_count);
         },
         errs);
+    if (out_mean_cards && *out_mesh_count > 0 && out_total_cards)
+        *out_mean_cards = (f32)*out_total_cards / (f32)*out_mesh_count;
     return true;
 }
 
@@ -697,6 +712,7 @@ static bool CountMeshStats(const char* path, u32* out_mesh_count,
 // blob 的 UVLM sidecar 段而非被丢弃。
 static bool CookMeshPipeline(const char* inPath, const char* outPath,
                              bool uvatlas, bool uvatlasLightmap,
+                             bool enable_sdf,
                              u32* out_mesh_count, u32* out_lightmap_uv_meshes,
                              u32* out_card_baked_meshes)
 {
@@ -714,7 +730,10 @@ static bool CookMeshPipeline(const char* inPath, const char* outPath,
     p.enable_remesh = 1;
     // T4.2: cook-mesh 产出离线卡片烘焙（occupancy 来自 generate_sdf，
     // 但 SDF 大负载不持久化——输出只追加 tiny "CDBK" 段）。
+    // T4.3（2026-09-16）: --sdf 时持久化 per-mesh SDF 段（detail-SDF refine
+    // 消费）。generate_sdf 反正为 card bake 运行，此开关只决定是否落盘。
     p.enable_card_bake = 1;
+    p.enable_sdf = enable_sdf ? 1 : 0;
     p.lod_ratio = 0.5f;
     p.auto_derive_after_subdivide = 1;
     p.subdivide_levels = 1;
@@ -738,12 +757,701 @@ static bool CookMeshPipeline(const char* inPath, const char* outPath,
     return true;
 }
 
+// ============================================================================
+// bake-sdf（2026-09-16）: 给已有 .model 的空 "SDF " 段填充 per-mesh SDF，
+// 几何与其他段逐字节保持不变——场景分割/实例布局与原资产完全一致，绕开
+// "原 cook 配方不可复现"的问题（重烤会改变 submesh 组成与 GI 基线）。
+// 用途：为 detail-SDF refine（DDGI/SPGI，PRIMAL_DDGI_DETAIL_SDF 门控）补
+// 生产资产的数据。选 N 个体积最大的 submesh 烘焙（运行时槽位只选 4 个）。
+// wire 格式契约与 Engine/Content/ContentToEngine.cpp 的
+// skip_mesh_in_blob/skip_lightmap_uv_section/skip_card_bake_section 逐字段
+// 一致（flags 0x10 UVLM / 0x20 CDBK / 0x40 sdf_signed；card/surfel 32B）。
+// ============================================================================
+static int VerbBakeSdf(int argc, char** argv)
+{
+    const char* inPath = nullptr;
+    const char* outPath = nullptr;
+    u32 resolution = 48;
+    u32 topN = 16;
+    for (int i = 0; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--in") == 0 && i + 1 < argc) inPath = argv[++i];
+        else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
+        else if (std::strcmp(argv[i], "--resolution") == 0 && i + 1 < argc) resolution = (u32)std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--top") == 0 && i + 1 < argc) topN = (u32)std::atoi(argv[++i]);
+        else
+        {
+            PrintError("INVALID_PARAMS", (std::string("未知参数: ") + argv[i]).c_str(),
+                       "支持 --in/--out/--resolution/--top");
+            return kExitUsage;
+        }
+    }
+    if (!inPath || !outPath)
+    {
+        PrintError("INVALID_PARAMS", "需要 --in <.model> 与 --out <.model>",
+                   "示例: primal-engine bake-sdf --in Sponza.model --out SponzaSDF.model --top 16");
+    PrintError("NOT_SUPPORTED",
+               "bake-sdf 当前仅支持 pipeline（pack_mesh_data）格式的 .model；"
+               "legacy pack_geometry 容器的 submesh 头存在双格式/对齐启发式，未复刻", 
+               "生成 pipeline 格式资产：primal-engine cook-mesh --in <fbx> --out <model> --sdf");
+        return kExitUsage;
+    }
+    if (resolution < 4) resolution = 4;
+    if (resolution > 128) resolution = 128;
+
+    FILE* in = std::fopen(inPath, "rb");
+    if (!in) { PrintError("ENGINE_ERROR", "无法打开输入文件", inPath); return kExitEngine; }
+    std::fseek(in, 0, SEEK_END);
+    long long inSize64 = std::ftell(in);
+    std::fseek(in, 0, SEEK_SET);
+    std::vector<u8> inBuf((size_t)inSize64);
+    if (std::fread(inBuf.data(), 1, (size_t)inSize64, in) != (size_t)inSize64)
+    { std::fclose(in); PrintError("ENGINE_ERROR", "读取输入失败", inPath); return kExitEngine; }
+    std::fclose(in);
+    const u64 inSize = (u64)inSize64;
+
+    struct Cursor {
+        const u8* p;
+        u64 pos = 0;
+        u64 size = 0;
+        bool bad = false;
+        u32 u32_() {
+            if (pos + 4 > size) { bad = true; pos = size; return 0; }
+            u32 v; std::memcpy(&v, p + pos, 4); pos += 4; return v;
+        }
+        f32 f32_() {
+            if (pos + 4 > size) { bad = true; pos = size; return 0.f; }
+            f32 v; std::memcpy(&v, p + pos, 4); pos += 4; return v;
+        }
+        void skip(u64 n) {
+            if (pos + n > size) { bad = true; pos = size; return; }
+            pos += n;
+        }
+    };
+
+    constexpr u32 kSdfMagicW = 0x20464453;   // "SDF "
+    constexpr u32 kSdfSignedFlag = 0x40;
+
+    // 与输入 walk 共用的单 submesh 解析（返回各段偏移 + 几何）
+    struct Submesh {
+        u64 subStart, elemTypeOff, sdfOff, sdfEnd, subEnd;
+        u32 elemType;
+        std::vector<f32> positions;   // raw geometry
+        std::vector<u32> indices;
+        f32 rankVolume = 0.0f;
+        bool selected = false;
+        std::vector<u8> newSdf;       // 选中时的新 SDF 段
+    };
+
+    auto walk = [&](bool collect) {
+        // .model 旧格式（SceneDataAdapter 旧解析器同构，pack_geometry.py 产物）:
+        // [u32 numMaterials] × (5 或 3 个 len 字符串——探测确定)
+        // [u32 lodCount][f32 thresholds × lodCount][u32 lod_offsets × lodCount]
+        // per LOD: [u32 submeshCount][u32 sizeOfSubmeshes] × pack_mesh_data
+        Cursor cur{inBuf.data(), 0, inSize, false};
+        std::vector<Submesh> subs;
+        auto readStr = [&]() {
+            const u32 len = cur.u32_(); cur.skip(len); };
+        const u32 matCount = cur.u32_();
+        // 字段数探测（与 SceneDataAdapter tryFieldCount 同法）：5 优先，3 兜底
+        auto probeFields = [&](u32 fields) -> bool {
+            u64 probe = cur.pos;
+            for (u32 s = 0; s < matCount * fields; ++s) {
+                if (probe + 4 > inSize) return false;
+                u32 sLen; std::memcpy(&sLen, inBuf.data() + probe, 4);
+                if (sLen > 500) return false;
+                probe += 4 + sLen;
+                if (probe > inSize) return false;
+            }
+            if (probe + 4 > inSize) return false;
+            u32 maybeLod; std::memcpy(&maybeLod, inBuf.data() + probe, 4);
+            return maybeLod > 0 && maybeLod < 100000;
+        };
+        u32 fieldsPerMaterial = probeFields(5) ? 5u : (probeFields(3) ? 3u : 5u);
+        for (u32 m = 0; m < matCount; ++m)
+            for (u32 f = 0; f < fieldsPerMaterial; ++f) readStr();
+        const u32 lodCount = cur.u32_();
+        std::fprintf(stderr, "[walk] matCount=%u fields=%u lodCount=%u\n", matCount, fieldsPerMaterial, lodCount);
+        cur.skip(4ull * lodCount);            // thresholds
+        // pipeline（lodCount==1 且 mesh_count 合理）无 lod_offsets 数组
+        bool pipelineLayout = false;
+        {
+            u64 probe = cur.pos;
+            if (lodCount == 1 && probe + 4 <= inSize) {
+                u32 peek; std::memcpy(&peek, inBuf.data() + probe, 4);
+                pipelineLayout = (peek > 50 && peek < 500000);
+            }
+        }
+        std::fprintf(stderr, "[walk] pipelineLayout=%d\n", (int)pipelineLayout);
+        if (!pipelineLayout)
+            cur.skip(4ull * lodCount);        // lod_offsets（旧格式）
+        for (u32 lod = 0; lod < lodCount; ++lod)
+        {
+            u32 idCount = cur.u32_();
+            if (!pipelineLayout)
+                cur.skip(4);                  // sizeOfSubmeshes（旧格式）
+            for (u32 id = 0; id < idCount; ++id)
+            {
+                Submesh sm;
+                sm.subStart = cur.pos;
+                const u32 nameLen = cur.u32_(); cur.skip(nameLen);
+                (void)cur.u32_(); (void)cur.u32_();
+                const u32 elemSize = cur.u32_();
+                sm.elemType = cur.u32_();
+                sm.elemTypeOff = cur.pos - 4;
+                const u32 V = cur.u32_();
+                const u32 idxSize = cur.u32_();
+                const u32 N = cur.u32_();
+                (void)cur.f32_();
+                const u64 posOff = cur.pos;
+                cur.skip(12ull * V);
+                cur.skip((u64)elemSize * V);
+                const u64 idxOff = cur.pos;
+                cur.skip((u64)idxSize * N);
+                // MSHL
+                (void)cur.u32_();
+                const u32 mc = cur.u32_(); cur.skip(60ull * mc);
+                const u32 mvc = cur.u32_(); cur.skip(4ull * mvc);
+                const u32 mtc = cur.u32_(); cur.skip(mtc);
+                // SDF
+                sm.sdfOff = cur.pos;
+                (void)cur.u32_();
+                (void)cur.u32_(); (void)cur.u32_(); (void)cur.u32_();
+                cur.skip(24);
+                const u32 dataCount = cur.u32_(); cur.skip(2ull * dataCount);
+                const u32 voxelCount = cur.u32_(); cur.skip(voxelCount);
+                const u32 vfCount = cur.u32_(); cur.skip(2ull * vfCount);
+                sm.sdfEnd = cur.pos;
+                if (sm.elemType & 0x10) { (void)cur.u32_(); const u32 uvc = cur.u32_(); cur.skip(8ull * uvc); }
+                if (sm.elemType & 0x20) {
+                    // v1 "CDBK" 或 v2 "CDB2"（多一个 version u32）。
+                    const u32 cdbkMagic = cur.u32_();
+                    if (cdbkMagic == 0x32424443) (void)cur.u32_();  // version
+                    const u32 cc = cur.u32_(); cur.skip(32ull * cc);
+                    (void)cur.u32_(); const u32 sc = cur.u32_(); cur.skip(32ull * sc);
+                }
+                sm.subEnd = cur.pos;
+                if (collect && V > 0 && N > 0)
+                {
+                    sm.positions.resize((size_t)V * 3);
+                    std::memcpy(sm.positions.data(), inBuf.data() + posOff, 12ull * V);
+                    sm.indices.resize((size_t)N);
+                    if (idxSize == 4)
+                        std::memcpy(sm.indices.data(), inBuf.data() + idxOff, 4ull * N);
+                    else
+                        for (u32 i = 0; i < N; ++i) {
+                            u16 v; std::memcpy(&v, inBuf.data() + idxOff + 2ull * i, 2);
+                            sm.indices[i] = v;
+                        }
+                    f32 mn[3] = {1e30f,1e30f,1e30f}, mx[3] = {-1e30f,-1e30f,-1e30f};
+                    for (u32 i = 0; i < V; ++i)
+                        for (u32 a = 0; a < 3; ++a) {
+                            f32 v = sm.positions[i*3+a];
+                            mn[a] = std::min(mn[a], v); mx[a] = std::max(mx[a], v);
+                        }
+                    sm.rankVolume = (mx[0]-mn[0]) * (mx[1]-mn[1]) * (mx[2]-mn[2]);
+                }
+                subs.push_back(std::move(sm));
+            }
+        }
+        return subs;
+    };
+
+    std::vector<Submesh> subs = walk(true);
+
+    // 体积降序选前 N，离线生成 SDF
+    std::vector<u32> order(subs.size());
+    for (u32 i = 0; i < subs.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
+        return subs[a].rankVolume > subs[b].rankVolume; });
+    if (topN > subs.size()) topN = (u32)subs.size();
+    u32 baked = 0;
+    for (u32 k = 0; k < topN; ++k)
+    {
+        auto& sm = subs[order[k]];
+        if (sm.positions.empty()) continue;
+        primal::tools::mesh bridge;
+        bridge.vertices.resize(sm.positions.size() / 3);
+        for (size_t v = 0; v < bridge.vertices.size(); ++v)
+            bridge.vertices[v].position = { sm.positions[v*3+0], sm.positions[v*3+1], sm.positions[v*3+2] };
+        bridge.indices.assign(sm.indices.begin(), sm.indices.end());
+        // Validate index range before SDF (same guard as AssetPipeline):
+        // legacy blobs can carry indices past positions.size() after
+        // compaction — closest_point_triangle would read out of bounds.
+        {
+            u32 w = 0;
+            for (u32 r = 0; r + 2 < (u32)bridge.indices.size(); r += 3) {
+                if (bridge.indices[r]     >= bridge.vertices.size()) continue;
+                if (bridge.indices[r + 1] >= bridge.vertices.size()) continue;
+                if (bridge.indices[r + 2] >= bridge.vertices.size()) continue;
+                bridge.indices[w++] = bridge.indices[r];
+                bridge.indices[w++] = bridge.indices[r + 1];
+                bridge.indices[w++] = bridge.indices[r + 2];
+            }
+            bridge.indices.resize(w);
+        }
+        primal::tools::generate_sdf(bridge, resolution);
+        if (bridge.sdf.data.empty()) continue;
+        auto put = [&sm](const void* d, size_t n) {
+            sm.newSdf.insert(sm.newSdf.end(), (const u8*)d, (const u8*)d + n); };
+        put(&kSdfMagicW, 4);
+        put(bridge.sdf.resolution, 12);
+        put(bridge.sdf.bounds_min, 12);
+        put(bridge.sdf.bounds_max, 12);
+        u32 dc = (u32)bridge.sdf.data.size();
+        put(&dc, 4); put(bridge.sdf.data.data(), (size_t)dc * 2);
+        u32 vc = (u32)bridge.sdf.voxels.size();
+        put(&vc, 4); put(bridge.sdf.voxels.data(), vc);
+        u32 fc = (u32)bridge.sdf.vector_field.size();
+        put(&fc, 4); put(bridge.sdf.vector_field.data(), (size_t)fc * 2);
+        sm.selected = true;
+        ++baked;
+    }
+
+    // ---- 顺序重放输出：容器/头部字节逐字节原样，仅选中 submesh 的
+    // elem_type OR 0x40 且 SDF 段替换为新数据 ----
+    std::vector<u8> outBuf;
+    outBuf.reserve(inSize + (size_t)baked * resolution * resolution * resolution * 11ull / 4ull);
+    u64 inPos = 0;
+    for (const auto& sm : subs)
+    {
+        auto copy = [&](u64 a, u64 b) {
+            outBuf.insert(outBuf.end(), inBuf.begin() + a, inBuf.begin() + b); };
+        copy(inPos, sm.subStart);
+        copy(sm.subStart, sm.elemTypeOff);
+        const u32 newType = sm.selected ? (sm.elemType | kSdfSignedFlag) : sm.elemType;
+        outBuf.insert(outBuf.end(), (u8*)&newType, (u8*)&newType + 4);
+        copy(sm.elemTypeOff + 4, sm.sdfOff);
+        if (sm.selected)
+            outBuf.insert(outBuf.end(), sm.newSdf.begin(), sm.newSdf.end());
+        else
+            copy(sm.sdfOff, sm.sdfEnd);
+        copy(sm.sdfEnd, sm.subEnd);
+        inPos = sm.subEnd;
+    }
+    if (inPos < inSize)
+        outBuf.insert(outBuf.end(), inBuf.begin() + inPos, inBuf.end());
+
+    FILE* out = std::fopen(outPath, "wb");
+    if (!out) { PrintError("ENGINE_ERROR", "无法打开输出文件", outPath); return kExitEngine; }
+    size_t written = std::fwrite(outBuf.data(), 1, outBuf.size(), out);
+    std::fclose(out);
+    if (written != outBuf.size())
+    { PrintError("ENGINE_ERROR", "写出不完整", outPath); return kExitEngine; }
+
+    char msg[256];
+    std::snprintf(msg, sizeof(msg),
+                  "{\"submeshes\":%u,\"baked\":%u,\"resolution\":%u,\"bytes_in\":%lld,\"bytes_out\":%llu}",
+                  (u32)subs.size(), baked, resolution, inSize64, (unsigned long long)outBuf.size());
+    PrintOk(msg);
+    return kExitOk;
+}
+
+// ============================================================================
+// bake-cards（2026-09-19 SC 卡片 Lumen 对齐 Phase 2）：给已有 .model 补 per-
+// mesh 离线卡片烘焙（v2 coverage 驱动贴面卡），几何与其他段逐字节不变——
+// 与 bake-sdf 同一"容器重放"策略，绕开"重烤改变 submesh 组成与 GI 基线"
+// 的问题。legacy（pack_geometry）与 pipeline（pack_mesh_data）容器都支持
+// （探测同 SceneDataAdapter）。产出 v2 "CDB2" 段；已带卡段的 submesh 原段
+// 被替换。默认不写 surfel（运行时无消费者，控制 blob 体积；--surfels 1 打开）。
+// PRIMAL_SC_BAKE_V2=0 或 --v1 走 v1 算法（回滚路径）。
+// ============================================================================
+int VerbBakeCards(int argc, char** argv)
+{
+    const char* inPath = nullptr;
+    const char* outPath = nullptr;
+    u32 resolution = 32;
+    bool writeSurfels = false;
+    bool useV1 = false;
+    for (int i = 0; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--in") == 0 && i + 1 < argc) inPath = argv[++i];
+        else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
+        else if (std::strcmp(argv[i], "--resolution") == 0 && i + 1 < argc) resolution = (u32)std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--surfels") == 0 && i + 1 < argc) writeSurfels = std::atoi(argv[++i]) != 0;
+        else if (std::strcmp(argv[i], "--v1") == 0) useV1 = true;
+        else
+        {
+            PrintError("INVALID_PARAMS", (std::string("未知参数: ") + argv[i]).c_str(),
+                       "支持 --in/--out/--resolution/--surfels/--v1");
+            return kExitUsage;
+        }
+    }
+    if (!inPath || !outPath)
+    {
+        PrintError("INVALID_PARAMS", "需要 --in <.model> 与 --out <.model>",
+                   "示例: primal-engine bake-cards --in Sponza.model --out Sponza.model");
+        return kExitUsage;
+    }
+    if (resolution < 4) resolution = 4;
+    if (resolution > 128) resolution = 128;
+    const char* v2Env = std::getenv("PRIMAL_SC_BAKE_V2");
+    if (v2Env && v2Env[0] == '0') useV1 = true;
+
+    FILE* in = std::fopen(inPath, "rb");
+    if (!in) { PrintError("ENGINE_ERROR", "无法打开输入文件", inPath); return kExitEngine; }
+    std::fseek(in, 0, SEEK_END);
+    long long inSize64 = std::ftell(in);
+    std::fseek(in, 0, SEEK_SET);
+    std::vector<u8> inBuf((size_t)inSize64);
+    if (std::fread(inBuf.data(), 1, (size_t)inSize64, in) != (size_t)inSize64)
+    { std::fclose(in); PrintError("ENGINE_ERROR", "读取输入失败", inPath); return kExitEngine; }
+    std::fclose(in);
+    const u64 inSize = (u64)inSize64;
+
+    struct Cursor {
+        const u8* p;
+        u64 pos = 0;
+        u64 size = 0;
+        bool bad = false;
+        u32 u32_() {
+            if (pos + 4 > size) { bad = true; pos = size; return 0; }
+            u32 v; std::memcpy(&v, p + pos, 4); pos += 4; return v;
+        }
+        f32 f32_() {
+            if (pos + 4 > size) { bad = true; pos = size; return 0.f; }
+            f32 v; std::memcpy(&v, p + pos, 4); pos += 4; return v;
+        }
+        void skip(u64 n) {
+            if (pos + n > size) { bad = true; pos = size; return; }
+            pos += n;
+        }
+    };
+
+    // 单 submesh 解析（返回各段偏移 + 几何）。容器探测与 bake-sdf /
+    // SceneDataAdapter 同构：5/3 字段材质探测 + pipeline/legacy 布局探测。
+    struct Submesh {
+        u64 subStart, elemTypeOff, sdfEnd, uvlmEnd, cdbkOff, cdbkEnd, subEnd;
+        u32 elemType;
+        std::vector<f32> positions;
+        std::vector<u32> indices;
+    };
+
+    bool walkBad = false;
+    u32 total = 0;
+    auto walk = [&](bool collect) {
+        // 容器/头部解析同 SceneDataAdapter 的权威双路径：pipeline
+        //（pack_mesh_data：带名字头部、无填充）与 legacy（pack_geometry：
+        // 无名字 6 字段头、pos/elem 16 字节对齐、peek 门控的 MSHL/SDF/
+        // UVLM/CDBK 段）。每一步都有边界检查——越界即截断 walk（bake-sdf
+        // 的无守卫版本在 legacy 资产上会冲出缓冲 SIGSEGV）。
+        Cursor cur{inBuf.data(), 0, inSize, false};
+        auto peek_magic = [&](u64 at) -> u32 {
+            u32 v = 0;
+            if (at + 4 <= inSize) std::memcpy(&v, inBuf.data() + at, 4);
+            return v;
+        };
+        std::vector<Submesh> subs;
+        auto readStr = [&]() {
+            const u32 len = cur.u32_(); cur.skip(len); };
+        const u32 matCount = cur.u32_();
+        auto probeFields = [&](u32 fields) -> bool {
+            u64 probe = cur.pos;
+            for (u32 s = 0; s < matCount * fields; ++s) {
+                if (probe + 4 > inSize) return false;
+                u32 sLen; std::memcpy(&sLen, inBuf.data() + probe, 4);
+                if (sLen > 500) return false;
+                probe += 4 + sLen;
+                if (probe > inSize) return false;
+            }
+            if (probe + 4 > inSize) return false;
+            u32 maybeLod; std::memcpy(&maybeLod, inBuf.data() + probe, 4);
+            return maybeLod > 0 && maybeLod < 100000;
+        };
+        u32 fieldsPerMaterial = probeFields(5) ? 5u : (probeFields(3) ? 3u : 5u);
+        for (u32 m = 0; m < matCount; ++m)
+            for (u32 f = 0; f < fieldsPerMaterial; ++f) readStr();
+        const u32 lodCount = cur.u32_();
+        cur.skip(4ull * lodCount);            // thresholds
+        bool pipelineLayout = false;
+        {
+            u64 probe = cur.pos;
+            if (lodCount == 1 && probe + 4 <= inSize) {
+                u32 peek; std::memcpy(&peek, inBuf.data() + probe, 4);
+                pipelineLayout = (peek > 50 && peek < 500000);
+            }
+        }
+        if (!pipelineLayout)
+            cur.skip(4ull * lodCount);        // lod_offsets（旧格式）
+        for (u32 lod = 0; lod < lodCount && !cur.bad; ++lod)
+        {
+            if (cur.pos + 8 > inSize) { std::fprintf(stderr, "[walk] lod %u: pos+8>inSize\n", lod); break; }
+            u32 idCount = cur.u32_();
+            if (!pipelineLayout)
+                cur.skip(4);                  // sizeOfSubmeshes（旧格式）
+            if (cur.bad || idCount > 1000000u) { std::fprintf(stderr, "[walk] lod %u: bad=%d idCount=%u\n", lod, (int)cur.bad, idCount); break; }
+            for (u32 id = 0; id < idCount && !cur.bad; ++id)
+            {
+                if (cur.pos + 28 > inSize) { std::fprintf(stderr, "[walk] lod %u mesh %u: pos+28>inSize\n", lod, id); break; }
+                Submesh sm{};
+                sm.subStart = cur.pos;
+                // ---- 头部双格式探测（同 SceneDataAdapter）----
+                const u64 nameOff = cur.pos;
+                const u32 firstVal = cur.u32_();
+                bool compact = false;
+                u32 elemSize = 0, elemType = 0, V = 0, N = 0, idxSize = 2;
+                // 双格式探测逐字段镜像 SceneDataAdapter 的权威实现——包括
+                // compact 尝试失败后**不回退游标**（legacy 分支从 compact
+                // 停下的位置继续读）。回退会让偏移与引擎解读分叉。
+                if (firstVal > 0 && firstVal < 200 && cur.pos + firstVal + 32 <= inSize) {
+                    bool printable = true;
+                    for (u32 c = 0; c < firstVal && c < 50; ++c) {
+                        const u8 ch = inBuf[cur.pos + c];
+                        if (ch != 0 && (ch < 32 || ch > 126)) { printable = false; break; }
+                    }
+                    if (printable) {
+                        cur.skip(firstVal);
+                        (void)cur.u32_();                   // lodId
+                        (void)cur.u32_();                   // materialIdx
+                        elemSize = cur.u32_();
+                        elemType = cur.u32_(); sm.elemTypeOff = cur.pos - 4;
+                        V = cur.u32_();
+                        const u32 idxSzField = cur.u32_();
+                        N = cur.u32_();
+                        cur.skip(4);                        // lod threshold
+                        if ((idxSzField == 2 || idxSzField == 4) &&
+                            V > 0 && V < 10000000u && N > 0 && N < 30000000u) {
+                            compact = true;
+                            idxSize = idxSzField;
+                        }
+                        // 验证失败不回退——游标停在 compact 尝试终点。
+                    }
+                }
+                if (!compact) {
+                    // legacy：[MatIdx][ElemSize][V][N][ElemType][PrimTopo] 或
+                    // 旧 MeshCPU：[ElemSize][V][N][ElemType][PrimTopo]（无材质）。
+                    const u32 second = cur.u32_();
+                    if (second > 200) {
+                        elemSize = firstVal;                // 旧格式
+                        V = second;
+                    } else {
+                        elemSize = second;                  // pack_geometry
+                        V = cur.u32_();
+                    }
+                    N = cur.u32_();
+                    elemType = cur.u32_(); sm.elemTypeOff = cur.pos - 4;
+                    cur.skip(4);                            // primitiveTopology
+                    idxSize = (V < (1u << 16)) ? 2u : 4u;
+                }
+                // ---- 缓冲（legacy: pos/elem 16 字节对齐；pipeline: 紧排）----
+                const u64 posOff = cur.pos;
+                {
+                    const u64 endP = cur.pos + 12ull * V;
+                    const u64 aligned = pipelineLayout ? endP : ((endP + 15) & ~15ull);
+                    cur.skip(aligned - cur.pos);
+                }
+                {
+                    const u64 endE = cur.pos + (u64)elemSize * V;
+                    const u64 aligned = pipelineLayout ? endE : ((endE + 15) & ~15ull);
+                    cur.skip(aligned - cur.pos);
+                }
+                const u64 idxOff = cur.pos;
+                cur.skip((u64)idxSize * N);
+                // ---- MSHL（peek 门控）----
+                if (peek_magic(cur.pos) == 0x4C48534D) {
+                    cur.skip(4);
+                    const u32 mc = cur.u32_();
+                    if (mc > 0 && mc < 100000u) {
+                        cur.skip(60ull * mc);
+                        if (cur.pos + 4 <= inSize) {
+                            const u32 mvc = cur.u32_();
+                            if (mvc > 0 && mvc < 10000000u) cur.skip(4ull * mvc);
+                        }
+                        if (cur.pos + 4 <= inSize) {
+                            const u32 mtc = cur.u32_();
+                            if (mtc > 0 && mtc < 10000000u) cur.skip(mtc);
+                        }
+                    }
+                }
+                // ---- SDF（peek 门控）----
+                if (peek_magic(cur.pos) == 0x20464453) {
+                    cur.skip(4);
+                    cur.skip(12 + 24);                      // res + bounds
+                    const u32 dc = cur.u32_(); cur.skip(2ull * dc);
+                    const u32 vc = cur.u32_(); cur.skip(vc);
+                    const u32 fc = cur.u32_(); cur.skip(2ull * fc);
+                }
+                sm.sdfEnd = cur.pos;
+                // ---- UVLM（flag + magic 双门控）----
+                sm.uvlmEnd = cur.pos;
+                if ((elemType & 0x10) && peek_magic(cur.pos) == 0x4D4C5655) {
+                    cur.skip(4);
+                    const u32 uvc = cur.u32_(); cur.skip(8ull * uvc);
+                    sm.uvlmEnd = cur.pos;
+                }
+                // ---- 卡片烘焙段（flag + magic 双门控；v1/v2）----
+                sm.cdbkOff = cur.pos;
+                sm.cdbkEnd = cur.pos;
+                if ((elemType & 0x20) && cur.pos + 8 <= inSize) {
+                    const u32 magic = peek_magic(cur.pos);
+                    if (magic == 0x4B424443 || magic == 0x32424443) {
+                        cur.skip(4);
+                        if (magic == 0x32424443) cur.skip(4);   // version
+                        const u32 cc = cur.u32_(); cur.skip(32ull * cc);
+                        cur.skip(4);
+                        const u32 sc = cur.u32_(); cur.skip(32ull * sc);
+                        sm.cdbkEnd = cur.pos;
+                    }
+                }
+                sm.subEnd = cur.pos;
+                sm.elemType = elemType;
+                if (collect && V > 0 && N > 0 &&
+                    posOff + 12ull * V <= inSize && idxOff + (u64)idxSize * N <= inSize)
+                {
+                    sm.positions.resize((size_t)V * 3);
+                    std::memcpy(sm.positions.data(), inBuf.data() + posOff, 12ull * V);
+                    sm.indices.resize((size_t)N);
+                    if (idxSize == 4)
+                        std::memcpy(sm.indices.data(), inBuf.data() + idxOff, 4ull * N);
+                    else
+                        for (u32 i = 0; i < N; ++i) {
+                            u16 v; std::memcpy(&v, inBuf.data() + idxOff + 2ull * i, 2);
+                            sm.indices[i] = v;
+                        }
+                }
+                if (total < 6)
+                            ++total;
+                subs.push_back(std::move(sm));
+            }
+        }
+        if (cur.bad) walkBad = true;
+        return subs;
+    };
+    std::vector<Submesh> subs = walk(true);
+    std::fprintf(stderr, "[walk] subs=%zu walkBad=%d\n", subs.size(), (int)walkBad);
+    if (subs.empty() || walkBad) {
+        std::fprintf(stderr, "[bake-cards] container walk failed\n");
+        PrintError("ENGINE_ERROR", "容器解析失败（非 pack_geometry/pack_mesh_data 格式？）",
+                   "bake-cards 支持 legacy 与 pipeline 两种 .model 容器");
+        return kExitEngine;
+    }
+
+    // 全部 submesh 离线烘卡（v2 贴面 coverage 贪心，默认）。
+    u32 baked = 0, emptyShell = 0, replaced = 0;
+    u32 totalCards = 0;
+    f32 coverageSum = 0.f, coverageMin = 1.f;
+    std::vector<std::vector<u8>> newSections(subs.size());
+    for (size_t k = 0; k < subs.size(); ++k)
+    {
+        auto& sm = subs[k];
+        if (sm.positions.empty()) continue;
+        if (sm.cdbkEnd > sm.cdbkOff) ++replaced;
+        primal::tools::mesh bridge;
+        bridge.vertices.resize(sm.positions.size() / 3);
+        for (size_t v = 0; v < bridge.vertices.size(); ++v)
+            bridge.vertices[v].position = { sm.positions[v*3+0], sm.positions[v*3+1], sm.positions[v*3+2] };
+        bridge.indices.assign(sm.indices.begin(), sm.indices.end());
+        // Validate index range before SDF (same guard as AssetPipeline):
+        // legacy blobs can carry indices past positions.size() after
+        // compaction — closest_point_triangle would read out of bounds.
+        {
+            u32 w = 0;
+            for (u32 r = 0; r + 2 < (u32)bridge.indices.size(); r += 3) {
+                if (bridge.indices[r]     >= bridge.vertices.size()) continue;
+                if (bridge.indices[r + 1] >= bridge.vertices.size()) continue;
+                if (bridge.indices[r + 2] >= bridge.vertices.size()) continue;
+                bridge.indices[w++] = bridge.indices[r];
+                bridge.indices[w++] = bridge.indices[r + 1];
+                bridge.indices[w++] = bridge.indices[r + 2];
+            }
+            bridge.indices.resize(w);
+        }
+        primal::tools::generate_sdf(bridge, resolution);
+        if (bridge.sdf.voxels.empty() ||
+            bridge.sdf.voxels.size() != (size_t)bridge.sdf.resolution[0] *
+                                       bridge.sdf.resolution[1] * bridge.sdf.resolution[2])
+        { ++emptyShell; continue; }
+
+        primal::tools::card_bake::OccupancyGrid grid;
+        grid.voxels = bridge.sdf.voxels.data();
+        grid.resolution = bridge.sdf.resolution[0];
+        grid.grid_min.x = bridge.sdf.bounds_min[0];
+        grid.grid_min.y = bridge.sdf.bounds_min[1];
+        grid.grid_min.z = bridge.sdf.bounds_min[2];
+        grid.voxel_size.x = (bridge.sdf.bounds_max[0] - bridge.sdf.bounds_min[0]) / (f32)grid.resolution;
+        grid.voxel_size.y = (bridge.sdf.bounds_max[1] - bridge.sdf.bounds_min[1]) / (f32)grid.resolution;
+        grid.voxel_size.z = (bridge.sdf.bounds_max[2] - bridge.sdf.bounds_min[2]) / (f32)grid.resolution;
+        primal::tools::card_bake::Params params{};
+        params.generate_surfels = writeSurfels;
+        primal::tools::card_bake::data bakeOut;
+        if (useV1)
+            primal::tools::card_bake::bake_v1(grid, params, bakeOut);
+        else
+            primal::tools::card_bake::bake_v2(grid, params, bakeOut);
+        if (bakeOut.cards.empty()) { ++emptyShell; continue; }
+
+        auto& sec = newSections[k];
+        auto put = [&sec](const void* d, size_t n) {
+            sec.insert(sec.end(), (const u8*)d, (const u8*)d + n); };
+        const u32 magic = primal::tools::card_bake::kCardBakeMagicV2;
+        const u32 version = primal::tools::card_bake::kCardBakeVersionV2;
+        put(&magic, 4);
+        put(&version, 4);
+        const u32 cc = (u32)bakeOut.cards.size();
+        put(&cc, 4);
+        put(bakeOut.cards.data(), (size_t)cc * 32);
+        const u32 sc = (u32)bakeOut.surfels.size();
+        put(&sc, 4);
+        if (sc) put(bakeOut.surfels.data(), (size_t)sc * 32);
+
+        ++baked;
+        totalCards += cc;
+        coverageSum += bakeOut.coverage;
+        coverageMin = std::min(coverageMin, bakeOut.coverage);
+    }
+
+    // ---- 顺序重放输出：头部字节逐字节原样（仅 0x20 旗标置位），尾段替换
+    // / 追加新 "CDB2" 段 ----
+    std::vector<u8> outBuf;
+    outBuf.reserve(inSize + (size_t)totalCards * 32ull + 4096ull);
+    u64 inPos = 0;
+    for (size_t k = 0; k < subs.size(); ++k)
+    {
+        const auto& sm = subs[k];
+        auto copy = [&](u64 a, u64 b) {
+            outBuf.insert(outBuf.end(), inBuf.begin() + a, inBuf.begin() + b); };
+        copy(inPos, sm.subStart);
+        copy(sm.subStart, sm.elemTypeOff);
+        const u32 newType = newSections[k].empty() ? sm.elemType : (sm.elemType | 0x20);
+        outBuf.insert(outBuf.end(), (u8*)&newType, (u8*)&newType + 4);
+        // elemTypeOff+4 → CDBK 起点（SDF + UVLM 原样）。
+        copy(sm.elemTypeOff + 4, sm.cdbkOff);
+        if (!newSections[k].empty())
+            outBuf.insert(outBuf.end(), newSections[k].begin(), newSections[k].end());
+        copy(sm.cdbkEnd, sm.subEnd);
+        inPos = sm.subEnd;
+    }
+    if (inPos < inSize)
+        outBuf.insert(outBuf.end(), inBuf.begin() + inPos, inBuf.end());
+
+    FILE* out = std::fopen(outPath, "wb");
+    if (!out) { PrintError("ENGINE_ERROR", "无法打开输出文件", outPath); return kExitEngine; }
+    size_t written = std::fwrite(outBuf.data(), 1, outBuf.size(), out);
+    std::fclose(out);
+    if (written != outBuf.size())
+    { PrintError("ENGINE_ERROR", "写出不完整", outPath); return kExitEngine; }
+
+    const f32 meanCov = baked ? coverageSum / (f32)baked : 0.f;
+    char msg[512];
+    std::snprintf(msg, sizeof(msg),
+                  "{\"submeshes\":%u,\"baked\":%u,\"replaced\":%u,\"empty_shell\":%u,"
+                  "\"cards_total\":%u,\"coverage_mean\":%.3f,\"coverage_min\":%.3f,"
+                  "\"resolution\":%u,\"v1\":%s,\"bytes_in\":%lld,\"bytes_out\":%llu}",
+                  (u32)subs.size(), baked, replaced, emptyShell, totalCards,
+                  (double)meanCov, baked ? (double)coverageMin : 0.0,
+                  resolution, useV1 ? "true" : "false",
+                  inSize64, (unsigned long long)outBuf.size());
+    PrintOk(msg);
+    return kExitOk;
+}
+
 int VerbCookMesh(int argc, char** argv)
 {
     const char* inPath = nullptr;
     const char* outPath = nullptr;
     bool uvatlas = false;
     bool uvatlasLightmap = false;
+    bool cookSdf = false;
     for (int i = 0; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--in") == 0 && i + 1 < argc) inPath = argv[++i];
@@ -754,17 +1462,18 @@ int VerbCookMesh(int argc, char** argv)
             uvatlas = true;
             uvatlasLightmap = true;
         }
+        else if (std::strcmp(argv[i], "--sdf") == 0) cookSdf = true;
         else
         {
             PrintError("INVALID_PARAMS", (std::string("未知参数: ") + argv[i]).c_str(),
-                       "支持 --in/--out/--uvatlas/--uvatlas-lightmap");
+                       "支持 --in/--out/--uvatlas/--uvatlas-lightmap/--sdf");
             return kExitUsage;
         }
     }
     if (!inPath || !outPath)
     {
         PrintError("INVALID_PARAMS", "需要 --in <源网格> 与 --out <.mesh 输出>",
-                   "示例: primal-engine cook-mesh --in mesh.obj --out mesh.mesh [--uvatlas-lightmap]");
+                   "示例: primal-engine cook-mesh --in mesh.obj --out mesh.mesh [--uvatlas-lightmap] [--sdf]");
         return kExitUsage;
     }
 
@@ -775,8 +1484,15 @@ int VerbCookMesh(int argc, char** argv)
     bool cooked = false;
     if (uvatlas)
     {
-        cooked = CookMeshPipeline(inPath, outPath, true, uvatlasLightmap,
+        cooked = CookMeshPipeline(inPath, outPath, true, uvatlasLightmap, cookSdf,
                                   &mesh_count, &lightmap_uv_meshes, &card_baked_meshes);
+    }
+    else if (cookSdf)
+    {
+        // --sdf 需 pipeline 路径（legacy CookMesh 不产 SDF 段）
+        cooked = CookMeshPipeline(inPath, outPath, false, false, true,
+                                  &mesh_count, &lightmap_uv_meshes, &card_baked_meshes);
+        if (cooked) CountMeshStats(outPath, &mesh_count, &lightmap_uv_meshes, &card_baked_meshes);
     }
     else
     {
@@ -799,11 +1515,18 @@ int VerbCookMesh(int argc, char** argv)
     }
 
     char data[1024];
+    u32 total_cards = 0, max_cards = 0;
+    f32 mean_cards = 0.f;
+    CountMeshStats(outPath, &mesh_count, &lightmap_uv_meshes, &card_baked_meshes,
+                   &total_cards, &max_cards, &mean_cards);
     std::snprintf(data, sizeof(data),
                   "{\"input\":%s,\"path\":%s,\"bytes\":%lld,"
-                  "\"meshes\":%u,\"lightmap_uv_meshes\":%u,\"card_baked_meshes\":%u}",
+                  "\"meshes\":%u,\"lightmap_uv_meshes\":%u,\"card_baked_meshes\":%u,"
+                  "\"card_bake_cards_total\":%u,\"card_bake_cards_max\":%u,"
+                  "\"card_bake_cards_mean\":%.2f}",
                   JsonEscape(inPath).c_str(), JsonEscape(outPath).c_str(), bytes,
-                  mesh_count, lightmap_uv_meshes, card_baked_meshes);
+                  mesh_count, lightmap_uv_meshes, card_baked_meshes,
+                  total_cards, max_cards, (double)mean_cards);
     PrintOk(data);
     return kExitOk;
 }
@@ -824,7 +1547,19 @@ int VerbSchema()
         "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
         "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
         "{\"name\":\"--uvatlas\",\"type\":\"boolean\",\"required\":false},"
-        "{\"name\":\"--uvatlas-lightmap\",\"type\":\"boolean\",\"required\":false}],\"returns\":\"object\"},"
+        "{\"name\":\"--uvatlas-lightmap\",\"type\":\"boolean\",\"required\":false},"
+        "{\"name\":\"--sdf\",\"type\":\"boolean\",\"required\":false}],\"returns\":\"object\"},"
+        "{\"verb\":\"bake-sdf\",\"description\":\"为已有 .model 的空 SDF 段填充 per-mesh SDF（几何逐字节不变，detail-SDF refine 数据源）\",\"params\":["
+        "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
+        "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
+        "{\"name\":\"--resolution\",\"type\":\"integer\",\"required\":false},"
+        "{\"name\":\"--top\",\"type\":\"integer\",\"required\":false}],\"returns\":\"object\"},"
+        "{\"verb\":\"bake-cards\",\"description\":\"为已有 .model 补 per-mesh 离线卡片烘焙（v2 贴面 coverage 贪心，几何逐字节不变；SC 卡片 Lumen 对齐 Phase 2）\",\"params\":["
+        "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
+        "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
+        "{\"name\":\"--resolution\",\"type\":\"integer\",\"required\":false},"
+        "{\"name\":\"--surfels\",\"type\":\"boolean\",\"required\":false},"
+        "{\"name\":\"--v1\",\"type\":\"boolean\",\"required\":false}],\"returns\":\"object\"},"
         "{\"verb\":\"import-texture\",\"description\":\"源纹理离线 cook 为引擎 .texture（TEXR 容器）\",\"params\":["
         "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
         "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
@@ -1299,7 +2034,9 @@ int Run(int argc, char** argv)
                      "用法:\n"
                      "  primal-engine engine info\n"
                      "  primal-engine render --out f.png [--width W] [--height H] [--frames N]\n"
-                     "  primal-engine cook-mesh --in m.obj --out m.mesh [--uvatlas|--uvatlas-lightmap]\n"
+                     "  primal-engine cook-mesh --in m.obj --out m.mesh [--uvatlas|--uvatlas-lightmap] [--sdf]\n"
+                     "  primal-engine bake-sdf --in m.model --out mSDF.model [--resolution 48] [--top 16]\n"
+                     "  primal-engine bake-cards --in m.model --out m2.model [--resolution 32] [--surfels 0] [--v1]\n"
                      "  primal-engine import-texture --in t.png --out t.texture [--format bc7]\n"
                      "  primal-engine bake-vt --in t.png --out t.vtex [--kind color|normal|scalar|auto]\n"
                      "  primal-engine build-shaders [--build-dir DIR]\n"
@@ -1313,6 +2050,8 @@ int Run(int argc, char** argv)
     if (verb == "physics-sim") return VerbPhysicsSim(argc - 2, argv + 2);
     if (verb == "pfx-debug") return VerbPfxDebug(argc - 2, argv + 2);
     if (verb == "cook-mesh") return VerbCookMesh(argc - 2, argv + 2);
+    if (verb == "bake-sdf") return VerbBakeSdf(argc - 2, argv + 2);
+    if (verb == "bake-cards") return VerbBakeCards(argc - 2, argv + 2);
     if (verb == "import-texture") return VerbImportTexture(argc - 2, argv + 2);
     if (verb == "bake-vt") return VerbBakeVt(argc - 2, argv + 2);
     if (verb == "build-shaders") return VerbBuildShaders(argc - 2, argv + 2);
@@ -1321,7 +2060,7 @@ int Run(int argc, char** argv)
     if (verb == "schema") return VerbSchema();
 
     PrintError("BAD_VERB", (std::string("未知命令 '") + verb + "'").c_str(),
-               "支持: engine info / render / cook-mesh / import-texture / bake-vt / build-shaders / bake-gi / schema");
+               "支持: engine info / render / cook-mesh / bake-sdf / import-texture / bake-vt / build-shaders / bake-gi / schema");
     return kExitUsage;
 }
 
