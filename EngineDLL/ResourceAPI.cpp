@@ -229,7 +229,6 @@ std::vector<u8> wrap_as_compiled_shader(const std::vector<u8>& metallib)
 }
 
 struct default_material_cache {
-    std::once_flag once;
     u64 vs_group_id{id_eng::invalid_id};
     u64 ps_group_id{id_eng::invalid_id};
     u64 material_id{id_eng::invalid_id};
@@ -238,71 +237,87 @@ struct default_material_cache {
 
 default_material_cache g_default_material;
 
+// [PassDebugView 排查] 原 std::call_once 实现：编辑器项目自动加载
+// （PRIMAL_OPEN_PROJECT）会早于 viewport/引擎 legacy 初始化触发首次
+// CreateDefaultMaterial，此时 gfx.resources.add_material 尚为 NULL，
+// 失败结果被 call_once 永久缓存 → 引擎就绪后的所有重试都返回 invalid
+// → materialID 无效 → meshlet PS material_words 越界读零 → albedo 全黑。
+// 改为"成功才落缓存"的可重试实现。
 void build_default_material_once()
 {
-    std::call_once(g_default_material.once, []() {
-        auto vs_metallib = compile_msl_to_metallib(
-            primal::editor_shaders::kEditorSphereVertexShader, "primal_sphere_vs");
-        auto ps_metallib = compile_msl_to_metallib(
-            primal::editor_shaders::kEditorSpherePixelShader, "primal_sphere_ps");
-        if (vs_metallib.empty() || ps_metallib.empty()) {
-            g_default_material.compile_failed = true;
-            return;
-        }
-        auto vs_blob = wrap_as_compiled_shader(vs_metallib);
-        auto ps_blob = wrap_as_compiled_shader(ps_metallib);
+    static std::mutex s_mutex;
+    static bool s_done = false;
+    std::lock_guard lock{ s_mutex };
+    if (s_done) return;
 
-        // We split vertex and pixel into two separate shader_groups because
-        // Engine/Graphics/Metal/MetalContent.cpp's create_pso looks up the
-        // entry-point function name per group via
-        // primal::content::get_shader_function_name, and that API returns a single
-        // name per group — vertex and pixel obviously have different
-        // entry points (sphere_vs vs sphere_ps) so a single group would
-        // resolve both to whichever name was registered last. Two groups
-        // also let create_pso apply the vertex-only elements_type key
-        // (static_normal_texture = 3) to the VS group while the PS group
-        // uses the u32_invalid_id sentinel that create_pso expects for
-        // non-vertex shader types.
-        const u8* vs_ptr = vs_blob.data();
-        const u32 vs_key = 3u; // static_normal_texture
-        g_default_material.vs_group_id = primal::content::add_shader_group(
-            &vs_ptr, 1, &vs_key);
-        if (g_default_material.vs_group_id == id_eng::invalid_id) {
-            g_default_material.compile_failed = true;
-            return;
-        }
-        primal::content::add_shader_function_name(
-            static_cast<id_eng::id_type>(g_default_material.vs_group_id), "sphere_vs");
+    auto vs_metallib = compile_msl_to_metallib(
+        primal::editor_shaders::kEditorSphereVertexShader, "primal_sphere_vs");
+    auto ps_metallib = compile_msl_to_metallib(
+        primal::editor_shaders::kEditorSpherePixelShader, "primal_sphere_ps");
+    if (vs_metallib.empty() || ps_metallib.empty()) {
+        g_default_material.compile_failed = true;
+        return; // 下次调用重试（xcrun 失败可能是暂态）
+    }
+    g_default_material.compile_failed = false;
+    auto vs_blob = wrap_as_compiled_shader(vs_metallib);
+    auto ps_blob = wrap_as_compiled_shader(ps_metallib);
 
-        const u8* ps_ptr = ps_blob.data();
-        const u32 ps_key = 0xFFFFFFFFu; // u32_invalid_id sentinel
-        g_default_material.ps_group_id = primal::content::add_shader_group(
-            &ps_ptr, 1, &ps_key);
-        if (g_default_material.ps_group_id == id_eng::invalid_id) {
-            g_default_material.compile_failed = true;
-            return;
-        }
-        primal::content::add_shader_function_name(
-            static_cast<id_eng::id_type>(g_default_material.ps_group_id), "sphere_ps");
+    // We split vertex and pixel into two separate shader_groups because
+    // Engine/Graphics/Metal/MetalContent.cpp's create_pso looks up the
+    // entry-point function name per group via
+    // primal::content::get_shader_function_name, and that API returns a single
+    // name per group — vertex and pixel obviously have different
+    // entry points (sphere_vs vs sphere_ps) so a single group would
+    // resolve both to whichever name was registered last. Two groups
+    // also let create_pso apply the vertex-only elements_type key
+    // (static_normal_texture = 3) to the VS group while the PS group
+    // uses the u32_invalid_id sentinel that create_pso expects for
+    // non-vertex shader types.
+    const u8* vs_ptr = vs_blob.data();
+    const u32 vs_key = 3u; // static_normal_texture
+    g_default_material.vs_group_id = primal::content::add_shader_group(
+        &vs_ptr, 1, &vs_key);
+    if (g_default_material.vs_group_id == id_eng::invalid_id) {
+        g_default_material.compile_failed = true;
+        return;
+    }
+    primal::content::add_shader_function_name(
+        static_cast<id_eng::id_type>(g_default_material.vs_group_id), "sphere_vs");
 
-        primal::graphics::material_init_info info{};
-        info.type = primal::graphics::material_type::opauqe;
-        info.texture_count = 0;
-        info.texture_ids = nullptr;
-        // shader_ids[] layout: bit 0 = vertex, bit 1 = pixel (others
-        // unused). create_pso iterates these in shader_type enum order so
-        // [vertex] must come first.
-        for (u32 i = 0; i < primal::graphics::shader_type::count; ++i) {
-            info.shader_ids[i] = id_eng::invalid_id;
-        }
-        info.shader_ids[primal::graphics::shader_type::vertex] =
-            static_cast<id_eng::id_type>(g_default_material.vs_group_id);
-        info.shader_ids[primal::graphics::shader_type::pixel] =
-            static_cast<id_eng::id_type>(g_default_material.ps_group_id);
+    const u8* ps_ptr = ps_blob.data();
+    const u32 ps_key = 0xFFFFFFFFu; // u32_invalid_id sentinel
+    g_default_material.ps_group_id = primal::content::add_shader_group(
+        &ps_ptr, 1, &ps_key);
+    if (g_default_material.ps_group_id == id_eng::invalid_id) {
+        g_default_material.compile_failed = true;
+        return;
+    }
+    primal::content::add_shader_function_name(
+        static_cast<id_eng::id_type>(g_default_material.ps_group_id), "sphere_ps");
 
-        g_default_material.material_id =
-            static_cast<u64>(primal::graphics::add_material(info));
-    });
+    primal::graphics::material_init_info info{};
+    info.type = primal::graphics::material_type::opauqe;
+    info.texture_count = 0;
+    info.texture_ids = nullptr;
+    // shader_ids[] layout: bit 0 = vertex, bit 1 = pixel (others
+    // unused). create_pso iterates these in shader_type enum order so
+    // [vertex] must come first.
+    for (u32 i = 0; i < primal::graphics::shader_type::count; ++i) {
+        info.shader_ids[i] = id_eng::invalid_id;
+    }
+    info.shader_ids[primal::graphics::shader_type::vertex] =
+        static_cast<id_eng::id_type>(g_default_material.vs_group_id);
+    info.shader_ids[primal::graphics::shader_type::pixel] =
+        static_cast<id_eng::id_type>(g_default_material.ps_group_id);
+
+    g_default_material.material_id =
+        static_cast<u64>(primal::graphics::add_material(info));
+
+    // 只有成功才落缓存；legacy gfx 未就绪时（add_material 返回 invalid）
+    // 留待下次调用重试。
+    if (g_default_material.material_id != id_eng::invalid_id) {
+        s_done = true;
+    }
 }
 
 } // namespace
