@@ -10,6 +10,7 @@
 #include "Graphics/Field/FieldRegistry.h"
 #include "Graphics/Field/FieldDescriptor.h"
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <cstring>
@@ -107,7 +108,36 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
     return out.str();
 }
 
-static std::vector<u8> LoadShaderBytecode(const char* shaderName) {
+static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIPlatform platform) {
+    // P2.1 (2026-09-15): Vulkan 走预编译 SPIR-V（build_spv.sh 的 Volume/
+    // 条目）；MSL 文本喂给 Vulkan shader 模块是无效 pCode（08738，
+    // "FroxelFogPass Shader compilation failed" 的根因）。
+    if (platform == rhi::RHIPlatform::Vulkan) {
+        const char* spvPaths[] = {
+            "Engine/Graphics/Vulkan/shaders/Volume/",
+            "Darwin/Debug/Engine/Graphics/Vulkan/shaders/Volume/",
+        };
+        for (const char* dir : spvPaths) {
+            std::ifstream f(std::string(dir) + shaderName + ".comp.spv",
+                            std::ios::binary | std::ios::ate);
+            if (!f.is_open()) continue;
+            std::streamsize sz = f.tellg();
+            f.seekg(0);
+            std::vector<u8> code(static_cast<size_t>(sz));
+            f.read(reinterpret_cast<char*>(code.data()), sz);
+            // 2026-09-30: 一次性加载源诊断（cwd 相对路径歧义排查）
+            static std::set<std::string> logged;
+            if (logged.insert(shaderName).second) {
+                PRIMAL_LOG_STREAM(Info, "Engine")
+                    << "[FroxelFogPass] loaded spv " << shaderName
+                    << " from ./" << dir << " (" << sz << " bytes, cwd="
+                    << std::filesystem::current_path().string() << ")" << std::endl;
+            }
+            return code;
+        }
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[FroxelFogPass] Failed to load spv: " << shaderName << std::endl;
+        return {};
+    }
     std::string shaderPath = VOLUME_SHADER_DIR + shaderName + ".metal";
     std::string source = ReadFileToString(shaderPath);
     if (source.empty()) {
@@ -182,6 +212,34 @@ bool FroxelFogPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
     CreatePipelines();
     CreateConstantBuffers();
     CreateNoiseTexture();
+
+    // P2-B: 1x1 2D 占位纹理——shadow moments 空槽位的 stand-in（必须是 2D
+    // 以匹配 shader 的 texture2D 绑定；噪声纹理是 3D，仅适用于 SDF 槽位）。
+    {
+        TextureDesc dummyDesc{};
+        dummyDesc.size = {1, 1, 1};
+        dummyDesc.mipLevels = 1;
+        dummyDesc.arraySize = 1;
+        dummyDesc.format = DataFormat::R32_Float;
+        dummyDesc.type = TextureType::Texture2D;
+        dummyDesc.usage = TextureUsage::ShaderResource;
+        dummyDesc.memoryUsage = GPUMemoryUsage::Static;
+        dummyDesc.name = "FroxelDummyShadow2D";
+        dummy_shadow_2d_ = device_->CreateTexture(dummyDesc);
+    }
+    // WP2: 1x1 黑 2D——spgi_ambient 空槽位（RGB 采样需 RGBA 格式）。
+    {
+        TextureDesc dummyDesc{};
+        dummyDesc.size = {1, 1, 1};
+        dummyDesc.mipLevels = 1;
+        dummyDesc.arraySize = 1;
+        dummyDesc.format = DataFormat::RGBA16_Float;
+        dummyDesc.type = TextureType::Texture2D;
+        dummyDesc.usage = TextureUsage::ShaderResource;
+        dummyDesc.memoryUsage = GPUMemoryUsage::Static;
+        dummyDesc.name = "FroxelDummyAmbient2D";
+        dummy_ambient_2d_ = device_->CreateTexture(dummyDesc);
+    }
     CreateFroxelTextures();
     CreateScatterTextures();
 
@@ -202,6 +260,9 @@ void FroxelFogPass::Shutdown() {
 }
 
 void FroxelFogPass::CreateDescriptorSetLayouts() {
+    // P2.1 (2026-09-15): Vulkan 扁平绑定命名空间下 UBO 与 StorageImage 不
+    // 可共占 binding 0（00279 duplicate binding）——UBO 重编号为 6/3/3
+    // （原 Metal 双命名空间写法；MSL 的 [[buffer(N)]] 已同步改号）。
     // --- Density inject: 1 storage texture + 5 sampled textures + 1 UBO ---
     {
         DescriptorSetLayoutBinding bindings[] = {
@@ -211,22 +272,42 @@ void FroxelFogPass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf_cascade_1
             {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf_cascade_2
             {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_buffer
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
+            {6, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
         };
         DescriptorSetLayoutDesc layoutDesc{7, bindings};
         density_inject_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Light integrate: 1 sampled + 1 storage texture + 1 sampled + 1 UBO ---
+    // --- Light integrate: 1 sampled + 1 storage texture + 4 shadow moments
+    //     + WP2 SPGI ambient + 1 UBO ---
     {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // froxel_density
             {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // froxel_scatter (write)
-            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadow_map
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
+            {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // legacy shadow_map (unused at mode!=0)
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
+            // P2-B: light-space VSM moments per cascade
+            {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadow_moments cascade 0
+            {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadow_moments cascade 1
+            {6, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadow_moments cascade 2
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadow_moments cascade 3
+            // WP2: 上一帧 SPGI 辐照（ambient_source=1 时采样；无效时绑 1x1 黑）
+            {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // spgi_ambient
+        };
+        DescriptorSetLayoutDesc layoutDesc{9, bindings};
+        light_integrate_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+    }
+
+    // --- WP3 Reproject: 2 sampled 3D + 1 storage 3D + 1 UBO ---
+    {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // froxel_scatter_curr
+            {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // froxel_scatter_prev
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // froxel_scatter_out (write)
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
         };
         DescriptorSetLayoutDesc layoutDesc{4, bindings};
-        light_integrate_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+        reproject_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
     // --- Resolve: 2 sampled textures + 1 storage texture + 1 UBO ---
@@ -235,7 +316,7 @@ void FroxelFogPass::CreateDescriptorSetLayouts() {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // froxel_scatter
             {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_buffer
             {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // output_color (write)
-            {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
         };
         DescriptorSetLayoutDesc layoutDesc{4, bindings};
         resolve_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
@@ -244,7 +325,7 @@ void FroxelFogPass::CreateDescriptorSetLayouts() {
 
 void FroxelFogPass::CreatePipelines() {
     auto CompileShader = [&](const char* file, const char* entry) -> ShaderHandle {
-        auto code = LoadShaderBytecode(file);
+        auto code = LoadShaderBytecode(file, device_->GetPlatform());
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
@@ -252,6 +333,8 @@ void FroxelFogPass::CreatePipelines() {
     auto densityShader = CompileShader("FroxelDensityInject", "froxel_density_inject");
     auto lightShader   = CompileShader("FroxelLightIntegrate", "froxel_light_integrate");
     auto resolveShader = CompileShader("FroxelResolve", "froxel_resolve");
+    // WP3: reproject 失败不阻塞其余三 pass（temporal_enabled_ 由编译结果门控）
+    auto reprojectShader = CompileShader("FroxelReproject", "froxel_reproject");
 
     if (densityShader == handles::INVALID_SHADER ||
         lightShader   == handles::INVALID_SHADER ||
@@ -279,6 +362,12 @@ void FroxelFogPass::CreatePipelines() {
         plDesc.setLayouts = &resolve_set_layout_;
         resolve_layout_ = device_->CreatePipelineLayout(plDesc);
     }
+    if (reprojectShader != handles::INVALID_SHADER) {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &reproject_set_layout_;
+        reproject_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
 
     // Compute pipelines
     {
@@ -302,19 +391,30 @@ void FroxelFogPass::CreatePipelines() {
         pipeDesc.threadGroupSize = {8, 8, 1};
         resolve_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
+    if (reprojectShader != handles::INVALID_SHADER) {
+        ComputePipelineDesc pipeDesc{};
+        pipeDesc.computeShader = reprojectShader;
+        pipeDesc.layout = reproject_layout_;
+        pipeDesc.threadGroupSize = {4, 4, 4};
+        reproject_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        temporal_available_ = true;
+        PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] Reproject pipeline ready (WP3 temporal)" << std::endl;
+    }
 
     // Triple-buffered descriptor sets
     for (int i = 0; i < 3; i++) {
         density_inject_ds_[i] = device_->CreateDescriptorSet({density_inject_set_layout_});
         light_integrate_ds_[i] = device_->CreateDescriptorSet({light_integrate_set_layout_});
         resolve_ds_[i] = device_->CreateDescriptorSet({resolve_set_layout_});
+        if (reproject_pipeline_ != handles::INVALID_PIPELINE)
+            reproject_ds_[i] = device_->CreateDescriptorSet({reproject_set_layout_});
     }
 }
 
 void FroxelFogPass::CreateConstantBuffers() {
     for (int i = 0; i < 3; i++) {
         BufferDesc desc{};
-        desc.size = 640;
+        desc.size = sizeof(FroxelParams); // 656（FrustumParams2 扩展后）
         desc.type = BufferType::Constant;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -349,7 +449,9 @@ void FroxelFogPass::CreateNoiseTexture() {
 
     BufferDesc stagingDesc{};
     stagingDesc.size = NOISE_VOXELS * sizeof(float);
-    stagingDesc.memoryUsage = GPUMemoryUsage::Unknown;
+    // P2.1: Unknown → device-local，MapBuffer 触发 00682（映射非
+    // HOST_VISIBLE）。Staging 语义即 CPU 写入 + 拷贝源。
+    stagingDesc.memoryUsage = GPUMemoryUsage::Staging;
     stagingDesc.name = "FroxelNoiseStaging";
     auto staging = device_->CreateBuffer(stagingDesc);
     if (staging == handles::INVALID_RESOURCE) return;
@@ -370,6 +472,16 @@ void FroxelFogPass::CreateNoiseTexture() {
     region.imageSubresource = {0, 0, 1};
     region.imageExtent = {NOISE_SIZE, NOISE_SIZE, NOISE_SIZE};
     cmd->CopyBufferToTexture(staging, noise_texture_, &region, 1);
+    // P0（sponza-gap-reaudit §4.4）: 上传后把布局收敛到 ShaderResource。
+    // CopyBufferToTexture 停在 TRANSFER_DST_OPTIMAL 且此纹理不经 RenderGraph
+    // 管理，首次 density inject 采样即报 TRANSFER_DST vs SHADER_READ_ONLY
+    // validation（本轮 20 条）。与 CopyTextureToBuffer 的 P0-B 收尾惯例一致。
+    ResourceBarrier noiseBarrier{};
+    noiseBarrier.resource = noise_texture_;
+    noiseBarrier.beforeState = ResourceState::CopyDest;
+    noiseBarrier.afterState = ResourceState::ShaderResource;
+    noiseBarrier.subresource = 0xFFFFFFFF;
+    cmd->InsertBarrier(&noiseBarrier, 1);
     cmd->End();
     cmd->Submit();
     cmd->WaitForCompletion();
@@ -402,6 +514,17 @@ void FroxelFogPass::CreateFroxelTextures() {
             desc.memoryUsage = GPUMemoryUsage::Static;
             desc.name = "FroxelScatter";
             froxel_scatter_[i] = device_->CreateTexture(desc);
+        }
+        // WP3: temporal 混合结果（resolve 采样源 + 下一帧 reproject 的 prev）
+        {
+            TextureDesc desc{};
+            desc.size = {config_.grid_width, config_.grid_height, config_.grid_depth};
+            desc.format = DataFormat::RGBA16_Float;
+            desc.type = TextureType::Texture3D;
+            desc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
+            desc.memoryUsage = GPUMemoryUsage::Static;
+            desc.name = "FroxelScatterHist";
+            froxel_scatter_hist_[i] = device_->CreateTexture(desc);
         }
     }
 }
@@ -437,14 +560,30 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
         "FroxelScatter_" + std::to_string(outIdx), scatter_texture_[outIdx]);
     output.volume_scatter = scatterHandle;
 
+    // P0（reaudit §4.4）: 噪声纹理纳入图依赖——density inject 每帧采样它
+    // （且在 SDF 级联缺失时顶替 3D 槽位），此前绕过 RG 无首次使用审计。
+    rendergraph::RGResourceHandle noiseRG{};
+    if (noise_texture_ != handles::INVALID_RESOURCE)
+        noiseRG = graph.ImportResource("FroxelNoise3D", noise_texture_);
+
     graph.AddPass<FroxelPassData>("FroxelFog",
         RGPassType::Compute, RGPassCategory::Lighting,
 
         // Setup
-        [inputs, scatterHandle](FroxelPassData& data, RenderGraphBuilder& builder) {
+        [inputs, scatterHandle, noiseRG](FroxelPassData& data, RenderGraphBuilder& builder) {
             builder.Read(inputs.gbuffer_depth, ResourceState::ShaderResource);
-            if (inputs.shadow_map.IsValid())
-                builder.Read(inputs.shadow_map, ResourceState::ShaderResource);
+            if (noiseRG.IsValid())
+                builder.Read(noiseRG, ResourceState::ShaderResource);
+            // P2-B: light-space moments are the shadow input of record. The
+            // legacy screen-space shadow_map is no longer read by the
+            // integrate shader (coordinate contract fixed).
+            for (u32 c = 0; c < 4; ++c) {
+                if (inputs.shadow_moments[c].IsValid())
+                    builder.Read(inputs.shadow_moments[c], ResourceState::ShaderResource);
+                // P1（reaudit §4.4）: PCSS light-space 深度图（mode 2）
+                if (inputs.shadow_depth[c].IsValid())
+                    builder.Read(inputs.shadow_depth[c], ResourceState::ShaderResource);
+            }
             if (inputs.sdf_cascade_0.IsValid())
                 builder.Read(inputs.sdf_cascade_0, ResourceState::ShaderResource);
             if (inputs.sdf_cascade_1.IsValid())
@@ -468,6 +607,45 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
             ResourceHandle depthTex  = ResolveTexture(inputs.gbuffer_depth);
             ResourceHandle shadowTex = ResolveTexture(inputs.shadow_map);
 
+            // P2-B: resolve light-space moments (mode selector for the shader).
+            // 首帧把 2D 占位纹理 prime 到 SRO（创建时是 UNDEFINED，本帧描述符
+            // 即承诺 SRO；后端按 tracked 布局发射转换）。
+            {
+                static bool s_dummyPrimed = false;
+                if (!s_dummyPrimed && dummy_shadow_2d_ != handles::INVALID_RESOURCE) {
+                    ResourceBarrier primeBarrier{};
+                    primeBarrier.resource = dummy_shadow_2d_;
+                    primeBarrier.beforeState = ResourceState::ShaderResource;
+                    primeBarrier.afterState = ResourceState::ShaderResource;
+                    primeBarrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&primeBarrier, 1);
+                    s_dummyPrimed = true;
+                }
+            }
+            ResourceHandle momentTex[4] = {dummy_shadow_2d_, dummy_shadow_2d_,
+                                           dummy_shadow_2d_, dummy_shadow_2d_};
+            u32 shadowMode = 0;
+            for (u32 c = 0; c < 4 && c < inputs.shadow_cascade_count; ++c) {
+                ResourceHandle m = ResolveTexture(inputs.shadow_moments[c]);
+                if (m != handles::INVALID_RESOURCE) {
+                    momentTex[c] = m;
+                    shadowMode = 1;
+                }
+            }
+            // P1（reaudit §4.4）: 默认 PCSS 场景不产 VSM moments——回退消费
+            // 与 PCSS 共用的 light-space 深度图（D32→R32 blit），shadow_mode=2
+            // 让 integrate 逐 froxel 做深度比较。2026-09-30 Metal MSL 已移植
+            // 该分支（FroxelLightIntegrate.metal 双模式），撤 Vulkan-only 门。
+            if (shadowMode == 0) {
+                for (u32 c = 0; c < 4 && c < inputs.shadow_cascade_count; ++c) {
+                    ResourceHandle d = ResolveTexture(inputs.shadow_depth[c]);
+                    if (d != handles::INVALID_RESOURCE) {
+                        momentTex[c] = d;
+                        shadowMode = 2;
+                    }
+                }
+            }
+
             ResourceHandle sdfTex0 = ResolveTexture(inputs.sdf_cascade_0);
             if (sdfTex0 == handles::INVALID_RESOURCE) sdfTex0 = noise_texture_;
             ResourceHandle sdfTex1 = ResolveTexture(inputs.sdf_cascade_1);
@@ -475,7 +653,23 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
             ResourceHandle sdfTex2 = ResolveTexture(inputs.sdf_cascade_2);
             if (sdfTex2 == handles::INVALID_RESOURCE) sdfTex2 = noise_texture_;
 
-            if (shadowTex == handles::INVALID_RESOURCE) shadowTex = depthTex;
+            // WP2: SPGI 辐照纹理。无效句柄 → 1x1 黑占位；CB 里的
+            // ambient_source 在下方 Upload 段按同一有效性判定强制 0
+            //（shader 不采样，占位绑定只为描述符集完整）。
+            ResourceHandle ambientTex = inputs.spgi_ambient_tex;
+            if (ambientTex == handles::INVALID_RESOURCE)
+                ambientTex = dummy_ambient_2d_;
+            // 已知启动期瞬态（2026-09-30 记录）：SPGI 重建窗口（GI
+            // content-ready 同帧）内，output_texture_filtered_ 的句柄值被
+            // 复用而其 view 短暂为 0x0，binding 8 会报 ~18 条 validation
+            // 警告后自愈（句柄值不变故无法在 froxel 侧探测；任何消费该
+            // 纹理的裸绑定都会暴露）。不崩溃、结果正确，留待 SPGI 侧
+            // 重建时序治理。
+
+            // P2-B: 旧的 depthTex fallback 已删除——camera depth 数值不是
+            // visibility。无任何阴影输入时 shadowMode=0，shader 恒 lit，
+            // 槽位绑 1x1 占位纹理；mode 1=VSM moments，mode 2=PCSS 深度。
+            (void)shadowTex;
 
             // ---- Upload FroxelParams ----
             {
@@ -488,18 +682,34 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                                     inputs.camera_data.camera_position.y,
                                     inputs.camera_data.camera_position.z, 0.0f};
 
-                    math::m4x4 viewProj = inputs.camera_data.view_matrix * inputs.camera_data.proj_matrix;
+                    math::m4x4 viewProj = inputs.camera_data.proj_matrix * inputs.camera_data.view_matrix;
+                    // 2026-09-16（audit V1）: 此前是 view*proj（与 Deferred
+                    // /Forward 的 proj*view 契约相反），反投影出的世界位置不
+                    // 对应 GBuffer——雾的坐标/阴影/相位全部被污染。
                     math::m4x4 invViewProj = rhi::math::Inverse(viewProj);
                     fp.InvViewProj[0] = invViewProj.columns[0];
                     fp.InvViewProj[1] = invViewProj.columns[1];
                     fp.InvViewProj[2] = invViewProj.columns[2];
                     fp.InvViewProj[3] = invViewProj.columns[3];
 
-                    // Frustum
+                    // Frustum（雾体自身范围——只定义 froxel 切片分布，不参与
+                    // scene depth 解码）
                     float near_p = config_.near_plane;
                     float far_p  = config_.far_plane;
                     fp.FrustumParams = {near_p, far_p, log2f(far_p / near_p),
                                         1.0f / (float)config_.grid_depth};
+
+                    // 真实相机 near/far（audit V3）: 从 proj 元素反解。LH [0,1]
+                    // 深度投影：P[2].z=f/(f-n)，P[3].z=-nf/(f-n)。
+                    {
+                        const math::m4x4& P = inputs.camera_data.proj_matrix;
+                        float a = P.columns[2].z;
+                        float b = -P.columns[3].z; // = n*f/(f-n) > 0
+                        float camNear = (a > 1e-6f) ? b / a : 0.1f;
+                        float camFar = (a > 1.000001f) ? b / (a - 1.0f) : 1000.0f;
+                        fp.FrustumParams2 = {camNear, camFar,
+                                             config_.density_uniform_debug, 0.0f};
+                    }
 
                     // Froxel dims
                     fp.FroxelDims = {(float)config_.grid_width, (float)config_.grid_height,
@@ -515,7 +725,39 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                                         config_.ambient_intensity,
                                         (float)inputs.camera_data.frame_index * 0.016f};
                     fp.VolumeParams3 = {config_.phase_g, config_.noise_scale,
-                                        config_.noise_speed, 0.0f};
+                                        config_.noise_speed, (float)shadowMode};
+
+                    // WP1/WP2/WP3: march 步数 / SPGI 环境源 / 时域混合。
+                    // override 优先（门禁 G5 双相位免重建切换），否则用 config；
+                    // SPGI 句柄无效时环境源强制回退硬编码（ambientSrc=0）。
+                    {
+                        const u32 marchSteps = (march_steps_override_ != 0xFFFFFFFFu)
+                            ? march_steps_override_ : config_.march_steps;
+                        u32 ambientSrc = (ambient_spgi_override_ != 0xFFFFFFFFu)
+                            ? ambient_spgi_override_ : config_.ambient_source_spgi;
+                        if (inputs.spgi_ambient_tex == handles::INVALID_RESOURCE)
+                            ambientSrc = 0;
+                        const float blend = temporal_enabled_ ? config_.temporal_blend : 0.0f;
+                        fp.VolumeParams4 = {(float)marchSteps, config_.march_distance,
+                                            (float)ambientSrc, blend};
+                    }
+
+                    // WP2: 当前帧 view-projection（世界→屏幕采 SPGI 辐照）
+                    fp.ViewProj[0] = viewProj.columns[0];
+                    fp.ViewProj[1] = viewProj.columns[1];
+                    fp.ViewProj[2] = viewProj.columns[2];
+                    fp.ViewProj[3] = viewProj.columns[3];
+
+                    // WP3: 上一帧 inverse view-projection（首帧用当前帧 =
+                    // 恒等重投影；体积雾低频 + 邻域钳制兜底切镜鬼影）
+                    {
+                        const math::m4x4& prev = has_prev_camera_
+                            ? prev_inv_view_proj_ : invViewProj;
+                        fp.PrevInvViewProj[0] = prev.columns[0];
+                        fp.PrevInvViewProj[1] = prev.columns[1];
+                        fp.PrevInvViewProj[2] = prev.columns[2];
+                        fp.PrevInvViewProj[3] = prev.columns[3];
+                    }
 
                     // Screen
                     fp.ScreenParams = {(float)inputs.width, (float)inputs.height,
@@ -554,17 +796,67 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                                      inputs.camera_data.light_color.y,
                                      inputs.camera_data.light_color.z, 0.0f};
 
-                    // Shadow VP matrices
-                    for (u32 c = 0; c < 2; ++c) {
-                        const auto& mat = (c == 0) ? inputs.shadow_matrix0 : inputs.shadow_matrix1;
-                        fp.ShadowVP[c][0] = mat.columns[0];
-                        fp.ShadowVP[c][1] = mat.columns[1];
-                        fp.ShadowVP[c][2] = mat.columns[2];
-                        fp.ShadowVP[c][3] = mat.columns[3];
+                    // Shadow VP matrices — P2-B: 4 级联。优先用新输入
+                    // shadow_matrices[0..3]（与 shadow_moments 同源同帧）；
+                    // 旧调用方未填充（全零）时 0/1 级联回退 legacy 字段，
+                    // 保持既有 Metal/旧路径行为。
+                    for (u32 c = 0; c < 4; ++c) {
+                        const math::m4x4* src = &inputs.shadow_matrices[c];
+                        const bool unpopulated =
+                            src->columns[0].x == 0.0f && src->columns[1].y == 0.0f &&
+                            src->columns[2].z == 0.0f && src->columns[3].w == 0.0f;
+                        if (unpopulated && c < 2) {
+                            src = (c == 0) ? &inputs.shadow_matrix0 : &inputs.shadow_matrix1;
+                        }
+                        fp.ShadowVP[c][0] = src->columns[0];
+                        fp.ShadowVP[c][1] = src->columns[1];
+                        fp.ShadowVP[c][2] = src->columns[2];
+                        fp.ShadowVP[c][3] = src->columns[3];
                     }
 
                     *mapped = fp;
                     device_->UnmapBuffer(params_cb_[outIdx]);
+
+                    // WP3: 记录本帧相机供下一帧重投影（首帧后 prev 有效）
+                    prev_inv_view_proj_ = invViewProj;
+                    has_prev_camera_ = true;
+
+                    // P1（reaudit §4.4）: 一次性诊断——SDF 级联覆盖 vs 相机、
+                    // 阴影模式、级联数。配合 FROXEL_DUMP 读回定位密度清零环节。
+                    static bool s_froxDiagLogged = false;
+                    // 2026-09-30: 追加周期打印（每 45 帧）——门禁 G5 双相位的
+                    // march 切换（396+ 帧）需要确认 CB 实际值。
+                    const u32 diagFrame = inputs.camera_data.frame_index;
+                    if ((!s_froxDiagLogged || diagFrame == 350u || diagFrame % 45u == 0u)
+                        && std::getenv("FROXEL_DUMP")) {
+                        if (diagFrame == 350u) s_froxDiagLogged = true;
+                        s_froxDiagLogged = true;
+                        PRIMAL_LOG_STREAM(Info, "Engine")
+                            << "[FROXEL_DIAG] frame=" << inputs.camera_data.frame_index
+                            << " shadowMode=" << shadowMode
+                            << " march=" << (int)fp.VolumeParams4.x
+                            << " ambientSrc=" << (int)fp.VolumeParams4.z
+                            << " temporal=" << fp.VolumeParams4.w
+                            << " cascades=" << inputs.shadow_cascade_count
+                            << " sdfCount=" << fp.SdfResolutions.w
+                            << " sdfRes=(" << fp.SdfResolutions.x << "," << fp.SdfResolutions.y
+                            << "," << fp.SdfResolutions.z << ")"
+                            << " cam=(" << fp.CameraPos.x << "," << fp.CameraPos.y << "," << fp.CameraPos.z << ")"
+                            << " frustum=(fog " << fp.FrustumParams.x << "," << fp.FrustumParams.y << ")"
+                            << " cam=(n " << fp.FrustumParams2.x << " f " << fp.FrustumParams2.y << ")"
+                            << " uniform=" << fp.FrustumParams2.z
+                            << " vol1=(ext=" << fp.VolumeParams1.x << " thr=" << fp.VolumeParams1.z
+                            << " fade=" << fp.VolumeParams1.w << ")"
+                            << " vol2=(base=" << fp.VolumeParams2.x << " hscale=" << fp.VolumeParams2.y << ")";
+                        for (u32 c = 0; c < 3 && c < (u32)fp.SdfResolutions.w; ++c) {
+                            PRIMAL_LOG_STREAM(Info, "Engine")
+                                << "[FROXEL_DIAG] sdf" << c
+                                << " origin=(" << fp.SdfOrigins[c].x << "," << fp.SdfOrigins[c].y
+                                << "," << fp.SdfOrigins[c].z << ")"
+                                << " extent=(" << fp.SdfExtents[c].x << "," << fp.SdfExtents[c].y
+                                << "," << fp.SdfExtents[c].z << ")";
+                        }
+                    }
                 }
             }
 
@@ -579,9 +871,22 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     {3, DescriptorType::SampledImage,  sdfTex1},
                     {4, DescriptorType::SampledImage,  sdfTex2},
                     {5, DescriptorType::SampledImage,  depthTex},
-                    {0, DescriptorType::UniformBuffer,  params_cb_[outIdx]},
+                    {6, DescriptorType::UniformBuffer, params_cb_[outIdx]},
                 };
                 UpdateDescriptorSet(device_, density_inject_ds_[outIdx], params, 7);
+
+                // P2-B: froxel textures are module-owned (not RG-imported);
+                // prime the write slot to UA — on the first rotation cycle the
+                // tracked layout is UNDEFINED and the storage write would be
+                // flagged (expects GENERAL, got UNDEFINED).
+                {
+                    ResourceBarrier primeBarrier{};
+                    primeBarrier.resource = froxel_density_[outIdx];
+                    primeBarrier.beforeState = ResourceState::UnorderedAccess;
+                    primeBarrier.afterState = ResourceState::UnorderedAccess;
+                    primeBarrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&primeBarrier, 1);
+                }
 
                 cmd->BindComputePipeline(density_inject_pipeline_);
                 const DescriptorSetHandle sets[] = { density_inject_ds_[outIdx] };
@@ -612,9 +917,28 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     {0, DescriptorType::SampledImage,  froxel_density_[outIdx]},
                     {1, DescriptorType::StorageImage,   froxel_scatter_[outIdx]},
                     {2, DescriptorType::SampledImage,  shadowTex},
-                    {0, DescriptorType::UniformBuffer,  params_cb_[outIdx]},
+                    {3, DescriptorType::UniformBuffer,  params_cb_[outIdx]},
+                    // P2-B: light-space VSM moments（无阴影时为噪声占位，
+                    // shadowMode=0 下 shader 不采样）
+                    {4, DescriptorType::SampledImage,  momentTex[0]},
+                    {5, DescriptorType::SampledImage,  momentTex[1]},
+                    {6, DescriptorType::SampledImage,  momentTex[2]},
+                    {7, DescriptorType::SampledImage,  momentTex[3]},
+                    // WP2: 上一帧 SPGI 辐照（无效时 1x1 黑，CB ambient_source=0）
+                    {8, DescriptorType::SampledImage,  ambientTex},
                 };
-                UpdateDescriptorSet(device_, light_integrate_ds_[outIdx], params, 4);
+                UpdateDescriptorSet(device_, light_integrate_ds_[outIdx], params, 9);
+
+                // P2-B: scatter 写入槽位同样先转 UA（见上方 density 注释；
+                // 轮转槽位上一帧可能停在 SRO——上一帧作为 resolve 采样源）。
+                {
+                    ResourceBarrier primeBarrier{};
+                    primeBarrier.resource = froxel_scatter_[outIdx];
+                    primeBarrier.beforeState = ResourceState::UnorderedAccess;
+                    primeBarrier.afterState = ResourceState::UnorderedAccess;
+                    primeBarrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&primeBarrier, 1);
+                }
 
                 cmd->BindComputePipeline(light_integrate_pipeline_);
                 const DescriptorSetHandle sets[] = { light_integrate_ds_[outIdx] };
@@ -637,14 +961,67 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
             }
 
             // ================================================================
-            // Sub-pass 3: Resolve
+            // Sub-pass 3 (WP3): Temporal Reproject
+            // integrate 输出 → 与上一帧混合结果做邻域钳制混合 → hist 纹理。
+            // temporal_enabled_=0 或管线编译失败时整段旁路（resolve 直采
+            // integrate 输出，行为与历史一致）。
+            // ================================================================
+            const bool temporalActive = temporal_enabled_ &&
+                                        temporal_available_ &&
+                                        reproject_pipeline_ != handles::INVALID_PIPELINE;
+            if (temporalActive) {
+                const u32 prevIdx = (outIdx + 2u) % 3u;   // 上一帧写过的 hist 槽
+                DescriptorData params[] = {
+                    {0, DescriptorType::SampledImage,  froxel_scatter_[outIdx]},
+                    {1, DescriptorType::SampledImage,  froxel_scatter_hist_[prevIdx]},
+                    {2, DescriptorType::StorageImage,   froxel_scatter_hist_[outIdx]},
+                    {3, DescriptorType::UniformBuffer,  params_cb_[outIdx]},
+                };
+                UpdateDescriptorSet(device_, reproject_ds_[outIdx], params, 4);
+
+                // hist 写入槽位 prime 到 UA（轮转槽位上一帧停在 SRO）
+                {
+                    ResourceBarrier primeBarrier{};
+                    primeBarrier.resource = froxel_scatter_hist_[outIdx];
+                    primeBarrier.beforeState = ResourceState::UnorderedAccess;
+                    primeBarrier.afterState = ResourceState::UnorderedAccess;
+                    primeBarrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&primeBarrier, 1);
+                }
+
+                cmd->BindComputePipeline(reproject_pipeline_);
+                const DescriptorSetHandle sets[] = { reproject_ds_[outIdx] };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute, reproject_layout_,
+                                        0, 1, sets, 0, nullptr);
+
+                u32 gx = (config_.grid_width  + 3) / 4;
+                u32 gy = (config_.grid_height + 3) / 4;
+                u32 gz = (config_.grid_depth  + 3) / 4;
+                cmd->Dispatch(gx, gy, gz);
+
+                // Barrier: hist UAV -> SRV (resolve 采样源)
+                {
+                    ResourceBarrier barrier{};
+                    barrier.resource = froxel_scatter_hist_[outIdx];
+                    barrier.beforeState = ResourceState::UnorderedAccess;
+                    barrier.afterState = ResourceState::ShaderResource;
+                    barrier.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&barrier, 1);
+                }
+            }
+
+            // ================================================================
+            // Sub-pass 4: Resolve
+            // temporal 开启时采混合结果（hist），否则采 integrate 输出——
+            // 与 GetScatter3DTexture 的门禁读回保持同源。
             // ================================================================
             if (resolve_pipeline_ != handles::INVALID_PIPELINE) {
                 DescriptorData params[] = {
-                    {0, DescriptorType::SampledImage,  froxel_scatter_[outIdx]},
+                    {0, DescriptorType::SampledImage,  temporalActive
+                        ? froxel_scatter_hist_[outIdx] : froxel_scatter_[outIdx]},
                     {1, DescriptorType::SampledImage,  depthTex},
                     {2, DescriptorType::StorageImage,   scatter_texture_[outIdx]},
-                    {0, DescriptorType::UniformBuffer,  params_cb_[outIdx]},
+                    {3, DescriptorType::UniformBuffer,  params_cb_[outIdx]},
                 };
                 UpdateDescriptorSet(device_, resolve_ds_[outIdx], params, 4);
 

@@ -1,3 +1,4 @@
+#include <iomanip>
 // T4.6.5 part 30.4 — TestVulkanSponzaRenderGraph.cpp
 //
 // First visible-window Vulkan Sponza render using the RenderSystem abstraction
@@ -16,6 +17,14 @@
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanSampler.h"
+#if defined(__APPLE__) && __has_include(<MoltenVK/mvk_private_api.h>)
+#include <MoltenVK/mvk_private_api.h>
+#include <dlfcn.h>
+#define DDGI_RECORD_MVK_PRIVATE_QUERY_AVAILABLE 1
+#endif
+#include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanTexture.h"
+#include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanPipeline.h"
 
 // Note: the `Engine/...` include prefix matches TestNaniteStreamingPipeline.cpp.
 // The Engine target propagates its own include path transitively via
@@ -23,6 +32,8 @@
 #include "Engine/Content/ContentToEngine.h"
 #include "Engine/Content/AsyncResourceLoader.h"
 #include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
+#include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
+#include "Engine/Graphics/Scene/RenderSceneSnapshot.h"
 #include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
 #include "Engine/Graphics/Lumen/GIDebugParams.h"
 
@@ -43,6 +54,8 @@
 #include <algorithm>
 #include <string>
 #include <cctype>
+#include <limits>
+#include <stdexcept>
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -188,6 +201,17 @@ std::string ResolveTexturePath(const std::string& base, const std::string& filen
     { std::ifstream f(path); if (f.is_open()) return path; }
     return "";
 }
+
+#include "SCGeometrySupportProof.inl"
+#include "DDGIFirstSurfaceCandidate.inl"
+#include "DDGIZeroNormalFactor.inl"
+#include "DDGIFirstNormalProof.inl"
+#include "DDGIFirstNativeNormalCandidate.inl"
+#include "DDGIAnalyticFirstRhoCandidate.inl"
+#include "DDGIFirstPrimaryRasterProof.inl"
+#include "DDGIFirstRecordProof.inl"
+#include "DDGIDefaultFirstOracle.inl"
+#include "SCMaterialSampleProof.inl"
 
 m4x4 make_identity_m4x4() {
     m4x4 r{};
@@ -488,6 +512,12 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     lumen::LumenConfig lumenConfig{};
     lumenConfig.quality = lumen::LumenQualityPreset::High;
     lumenConfig.axes.use_screen_probes = true;
+    // Source-isolation probe: keep DDGI's final Fusion leg intact while
+    // replacing only the SPGI miss -> DDGI edge with its sky fallback.
+    if (std::getenv("SPGI_NO_DDGI_FALLBACK")) {
+        lumenConfig.axes.fallback_spgi_to_ddgi = false;
+        std::cerr << "[GI-isolate] SPGI -> DDGI fallback disabled" << std::endl;
+    }
     // [反弹专项] WRC 近场密度 3→2m（RTXGI 参考中位；3-5m 宽的室内房间
     // 3m 间距仅 ~1 探针/间，房间内变化被抹平）。测试直构 config 不走
     // preset 工厂——这里与 preset 表同步。
@@ -557,6 +587,25 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         // 仅保留几何清零）；FROXEL_PHASE_G=<g> HG 各向异性（0=各向同性）。
         renderSettings.froxel.density_uniform_debug = EnvFloat("FROXEL_UNIFORM", -1.0f);
         renderSettings.froxel.phase_g = EnvFloat("FROXEL_PHASE_G", 0.0f);
+        // 2026-09-30 lookdev 旋钮：FROXEL_EXT 覆写消光系数、FROXEL_AMBIENT
+        // 覆写环境强度（参考图对标的体积云观感调参用）。
+        if (EnvFloat("FROXEL_EXT", -1.0f) > 0.0f)
+            renderSettings.froxel.extinction_scale = EnvFloat("FROXEL_EXT", 0.35f);
+        if (EnvFloat("FROXEL_AMBIENT", -1.0f) >= 0.0f)
+            renderSettings.froxel.ambient_intensity = EnvFloat("FROXEL_AMBIENT", 0.3f);
+        // 2026-09-30（froxel-upgrade 计划 WP1/WP2/WP3）:
+        // FROXEL_MARCH=<N> light march 步数（0=legacy 单查询回滚位）；
+        // FROXEL_SPGI_AMBIENT=1 环境项采上一帧 SPGI 辐照（0=硬编码天空色）；
+        // FROXEL_TEMPORAL=1 体积时间重投影（blend 0.35）。
+        {
+            const float march = EnvFloat("FROXEL_MARCH", 0.0f);
+            renderSettings.froxel.march_steps = (u32)std::max(0.0f, march);
+            renderSettings.froxel.ambient_source_spgi = EnvEnabled("FROXEL_SPGI_AMBIENT") ? 1u : 0u;
+            if (EnvEnabled("FROXEL_TEMPORAL")) renderSettings.froxel.temporal_blend = 0.35f;
+            std::cerr << "[FROXEL] march=" << renderSettings.froxel.march_steps
+                      << " spgi_ambient=" << renderSettings.froxel.ambient_source_spgi
+                      << " temporal=" << renderSettings.froxel.temporal_blend << std::endl;
+        }
     }
     pipeline_->UpdateSettings(renderSettings);
 
@@ -615,6 +664,169 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     }
     std::cout << "[Part30.4] Loaded " << sceneMeshes_.size()
               << " meshes from " << modelName << std::endl;
+
+    if (const char* prefix=std::getenv("SC_GPU_GEOMETRY_PROOF_PREFIX")) {
+        std::vector<SCProofTriangle> triangles;
+        for (u32 mi=0;mi<sceneMeshes_.size();++mi) {
+            rhi::RHIMeshAsset mesh{};
+            if (!primal::content::get_rhi_mesh_asset(sceneMeshes_[mi].meshEntityId,mesh) ||
+                (mesh.index_size!=2 && mesh.index_size!=4) || mesh.num_indices%3 ||
+                mesh.position_buffer.size()<size_t(mesh.num_vertices)*12 ||
+                mesh.index_buffer.size()<size_t(mesh.num_indices)*mesh.index_size) return false;
+            for (u32 ti=0;ti<mesh.num_indices;ti+=3) {
+                float vertices[3][3];
+                for (u32 k=0;k<3;++k) {
+                    u32 index=0; std::memcpy(&index,mesh.index_buffer.data()+size_t(ti+k)*mesh.index_size,mesh.index_size);
+                    if (index>=mesh.num_vertices) return false;
+                    std::memcpy(vertices[k],mesh.position_buffer.data()+size_t(index)*12,12);
+                    for(float value:vertices[k]) if(!SCProofFinite(value)) return false;
+                }
+                SCProofTriangle triangle{};
+                for(u32 k=0;k<3;++k) {
+                    triangle.a[k]=vertices[0][k]; triangle.e1[k]=vertices[1][k]-vertices[0][k];
+                    triangle.e2[k]=vertices[2][k]-vertices[0][k];
+                }
+                triangle.a[3]=float(triangles.size()); triangle.e1[3]=float(mi); triangle.e2[3]=float(ti/3);
+                triangles.push_back(triangle);
+            }
+        }
+        if(!RunSCGeometrySupportProof(device_,triangles,prefix)) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[SC_GPU_GEOMETRY_PROOF] rejected input or resource/readback failure";
+            return false;
+        }
+    }
+
+    // Opt-in CPU-side geometry ownership audit for DDGI near-origin hits.
+    // The Sponza CDB2 blob has cards but no surfels. Query the original mesh
+    // triangles instead of inferring ownership from overlapping card bounds.
+    // Every mesh in this locked test scene uses an identity transform.
+    if (const char* target = std::getenv("DDGI_GEOMETRY_AUDIT")) {
+        float tx = -10.25f, ty = 1.62f, tz = 0.05f;
+        std::sscanf(target, "%f,%f,%f", &tx, &ty, &tz);
+        if (FILE* out = fopen("/tmp/ddgi_near_geometry.csv", "w")) {
+            FILE* cardOut = fopen("/tmp/ddgi_near_cards.csv", "w");
+            if (cardOut)
+                fprintf(cardOut, "mesh_index,name,card_index,axis,dir,cx,cy,cz,ex,ey,ez,resolution\n");
+            fprintf(out, "mesh_index,geometry_id,name,triangle,card_count,"
+                         "distance,px,py,pz,nx,ny,nz\n");
+            for (u32 i = 0; i < sceneMeshes_.size(); ++i) {
+                rhi::RHIMeshAsset mesh{};
+                if (!primal::content::get_rhi_mesh_asset(sceneMeshes_[i].meshEntityId, mesh) ||
+                    (mesh.index_size != 2 && mesh.index_size != 4) ||
+                    mesh.position_buffer.size() < size_t(mesh.num_vertices) * 12u ||
+                    mesh.index_buffer.size() < size_t(mesh.num_indices) * mesh.index_size)
+                    continue;
+                auto indexAt = [&](u32 at) {
+                    u32 value = 0;
+                    if (mesh.index_size == 2) {
+                        u16 shortValue = 0;
+                        std::memcpy(&shortValue, mesh.index_buffer.data() + size_t(at) * 2u, 2);
+                        value = shortValue;
+                    } else {
+                        std::memcpy(&value, mesh.index_buffer.data() + size_t(at) * 4u, 4);
+                    }
+                    return value;
+                };
+                auto vertexAt = [&](u32 at, float p[3]) {
+                    std::memcpy(p, mesh.position_buffer.data() + size_t(at) * 12u, 12);
+                };
+                float best = 1e30f, bestPos[3]{}, bestNormal[3]{};
+                u32 bestTriangle = 0;
+                for (u32 t = 0; t + 2 < mesh.num_indices; t += 3) {
+                    const u32 ia = indexAt(t), ib = indexAt(t + 1), ic = indexAt(t + 2);
+                    if (ia >= mesh.num_vertices || ib >= mesh.num_vertices || ic >= mesh.num_vertices)
+                        continue;
+                    float a[3], b[3], c[3];
+                    vertexAt(ia, a); vertexAt(ib, b); vertexAt(ic, c);
+                    const float p[3]{tx, ty, tz};
+                    bool outsideBox = false;
+                    for (u32 k = 0; k < 3; ++k)
+                        outsideBox |= p[k] < std::min({a[k], b[k], c[k]}) - 2.0f ||
+                                      p[k] > std::max({a[k], b[k], c[k]}) + 2.0f;
+                    if (outsideBox) continue;
+                    float e0[3], e1[3], n[3], q[3], v2[3];
+                    for (u32 k = 0; k < 3; ++k) { e0[k] = b[k] - a[k]; e1[k] = c[k] - a[k]; }
+                    n[0] = e0[1] * e1[2] - e0[2] * e1[1];
+                    n[1] = e0[2] * e1[0] - e0[0] * e1[2];
+                    n[2] = e0[0] * e1[1] - e0[1] * e1[0];
+                    const float n2 = n[0]*n[0] + n[1]*n[1] + n[2]*n[2];
+                    if (n2 < 1e-12f) continue;
+                    const float signedD = ((p[0]-a[0])*n[0] + (p[1]-a[1])*n[1] +
+                                           (p[2]-a[2])*n[2]) / std::sqrt(n2);
+                    float distance = std::abs(signedD);
+                    if (distance >= best) continue;
+                    for (u32 k = 0; k < 3; ++k) {
+                        q[k] = p[k] - signedD * n[k] / std::sqrt(n2);
+                        v2[k] = q[k] - a[k];
+                    }
+                    const float d00 = e0[0]*e0[0] + e0[1]*e0[1] + e0[2]*e0[2];
+                    const float d01 = e0[0]*e1[0] + e0[1]*e1[1] + e0[2]*e1[2];
+                    const float d11 = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2];
+                    const float d20 = v2[0]*e0[0] + v2[1]*e0[1] + v2[2]*e0[2];
+                    const float d21 = v2[0]*e1[0] + v2[1]*e1[1] + v2[2]*e1[2];
+                    const float denom = d00*d11 - d01*d01;
+                    if (std::abs(denom) < 1e-12f) continue;
+                    const float v = (d11*d20 - d01*d21) / denom;
+                    const float w = (d00*d21 - d01*d20) / denom;
+                    if (v < -1e-4f || w < -1e-4f || v + w > 1.0001f) {
+                        // A projection outside the triangle may still have a
+                        // nearby edge; include it for a true mesh distance.
+                        float nearestD2 = 1e30f;
+                        const float* edges[3][2] = {{a, b}, {b, c}, {c, a}};
+                        for (const auto& edge : edges) {
+                            float along = 0.0f, length2 = 0.0f;
+                            for (u32 k = 0; k < 3; ++k) {
+                                const float delta = edge[1][k] - edge[0][k];
+                                along += (p[k] - edge[0][k]) * delta;
+                                length2 += delta * delta;
+                            }
+                            const float fraction = std::clamp(along / std::max(length2, 1e-12f), 0.0f, 1.0f);
+                            float candidate[3], d2 = 0.0f;
+                            for (u32 k = 0; k < 3; ++k) {
+                                candidate[k] = edge[0][k] + fraction * (edge[1][k] - edge[0][k]);
+                                d2 += (p[k] - candidate[k]) * (p[k] - candidate[k]);
+                            }
+                            if (d2 < nearestD2) {
+                                nearestD2 = d2;
+                                for (u32 k = 0; k < 3; ++k) q[k] = candidate[k];
+                            }
+                        }
+                        distance = std::sqrt(nearestD2);
+                        if (distance >= best) continue;
+                    }
+                    best = distance;
+                    bestTriangle = t / 3u;
+                    for (u32 k = 0; k < 3; ++k) {
+                        bestPos[k] = q[k]; bestNormal[k] = n[k] / std::sqrt(n2);
+                    }
+                }
+                if (best < 2.0f) {
+                    fprintf(out, "%u,%u,%s,%u,%zu,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f\n",
+                            i, sceneMeshes_[i].meshEntityId, sceneMeshes_[i].name.c_str(),
+                            bestTriangle, mesh.card_bake.cards.size(), best,
+                            bestPos[0], bestPos[1], bestPos[2],
+                            bestNormal[0], bestNormal[1], bestNormal[2]);
+                    if (cardOut && best < 0.1f) {
+                        for (u32 ci = 0; ci < mesh.card_bake.cards.size(); ++ci) {
+                            const auto& card = mesh.card_bake.cards[ci];
+                            fprintf(cardOut, "%u,%s,%u,%u,%u,%.5f,%.5f,%.5f,"
+                                             "%.5f,%.5f,%.5f,%u\n",
+                                    i, sceneMeshes_[i].name.c_str(), ci,
+                                    card.axis_direction & 0xFFu,
+                                    (card.axis_direction >> 8u) & 0xFFu,
+                                    card.center[0], card.center[1], card.center[2],
+                                    card.extent[0], card.extent[1], card.extent[2],
+                                    card.resolution);
+                        }
+                    }
+                }
+            }
+            if (cardOut) fclose(cardOut);
+            fclose(out);
+            std::cerr << "[DDGI_GEOMETRY_AUDIT] wrote /tmp/ddgi_near_geometry.csv for ("
+                      << tx << "," << ty << "," << tz << ")" << std::endl;
+        }
+    }
 
     // Shared Material + fallback textures + sampler (mirror NonEditor Step 2).
     sharedMaterial_ = std::make_shared<Material>();
@@ -773,6 +985,17 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     // diffuse，法线/ORM 的静默回退完全不可见。
     u32 normalLoaded = 0, normalFallback = 0, ormLoaded = 0, ormFallback = 0;
     std::string missingNormalList, missingORMList;
+    // The supplied reference uses a substantially darker courtyard stone than
+    // this Sponza asset.  Keep the correction reference-only and in linear
+    // albedo space; the environment override remains available for A/B.
+    float floorAlbedoScale = sponza_reference::Enabled() ? 0.5f : 1.0f;
+    if (const char* e = std::getenv("SPONZA_FLOOR_ALBEDO_SCALE")) {
+        char* end = nullptr;
+        const float parsed = std::strtof(e, &end);
+        if (end != e && std::isfinite(parsed))
+            floorAlbedoScale = std::clamp(parsed, 0.1f, 1.5f);
+    }
+    u32 scaledFloorMeshes = 0;
     for (u32 i = 0; i < meshCount; ++i) {
         auto& meshInfo = sceneMeshes_[i];
         meshInfo.material = sharedMaterial_;
@@ -785,6 +1008,27 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
 
         ResourceHandle diffuseTex = handles::INVALID_RESOURCE;
         if (decAlbedo[i].valid) {
+            std::string lowerDiffuse = meshInfo.diffuseTexturePath;
+            for (auto& ch : lowerDiffuse) ch = (char)tolower((unsigned char)ch);
+            if (floorAlbedoScale != 1.0f &&
+                lowerDiffuse.find("sponza_floor_diffuse") != std::string::npos) {
+                const size_t pixelCount = (size_t)decAlbedo[i].width * decAlbedo[i].height;
+                for (size_t px = 0; px < pixelCount; ++px) {
+                    for (u32 c = 0; c < 3; ++c) {
+                        const float srgb = decAlbedo[i].data[px * 4 + c] / 255.0f;
+                        float linear = srgb <= 0.04045f
+                            ? srgb / 12.92f
+                            : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+                        linear = std::clamp(linear * floorAlbedoScale, 0.0f, 1.0f);
+                        const float encoded = linear <= 0.0031308f
+                            ? linear * 12.92f
+                            : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+                        decAlbedo[i].data[px * 4 + c] =
+                            (unsigned char)std::clamp(encoded * 255.0f + 0.5f, 0.0f, 255.0f);
+                    }
+                }
+                ++scaledFloorMeshes;
+            }
             diffuseTex = CreateTextureFromData(
                 device_, decAlbedo[i].width, decAlbedo[i].height,
                 decAlbedo[i].data, DataFormat::RGBA8_sRGB);
@@ -873,6 +1117,15 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
                 lowerName.find("cloth") != std::string::npos ||
                 lowerName.find("banner") != std::string::npos) {
                 proxy.transmission = 0.7f;
+                // Keep the GPU material table in sync with the per-instance
+                // transport annotation.  Nanite GBuffer/CardCapture consume
+                // MaterialData, while the proxy value is used by the legacy
+                // forward path; setting both avoids a backend-dependent cloth
+                // transmission split.
+                matInst->SetTransmissionFactor(proxy.transmission);
+                // Thin hanging cloth: normalized optical path used by the
+                // Surface Cache back-light transmission term.
+                matInst->SetThicknessFactor(0.15f);
             }
         }
         if (meshInfo.mesh && meshInfo.mesh->IsValid()) {
@@ -884,6 +1137,10 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
               << texFailed << " fallback; normal " << normalLoaded << " / "
               << normalFallback << "; ORM " << ormLoaded << " / "
               << ormFallback << std::endl;
+    if (floorAlbedoScale != 1.0f) {
+        std::cout << "[Part30.4] Floor albedo scale=" << floorAlbedoScale
+                  << " meshes=" << scaledFloorMeshes << std::endl;
+    }
     if (!missingNormalList.empty())
         std::cout << "[Part30.4] Missing normal maps:" << missingNormalList << std::endl;
     if (!missingORMList.empty())
@@ -943,6 +1200,124 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         std::cerr << "[Shadow] Vulkan PCSS path (VSM moments chain displaced, see docs)" << std::endl;
     }
     gpuDraw.SetMaterialDataBuffer(materialRegistry_->GetMaterialDataBuffer());
+    // Default-off source-distance experiment. Geometry is derived from this
+    // run's loaded meshes, with current registered material flags. The locked
+    // scene currently uses identity transforms; reject other transforms rather
+    // than silently treating local positions as world-space first surfaces.
+    std::vector<u8> firstNativeTriangleMapping;
+    std::vector<u8> analyticFirstRhoMapping;
+    std::vector<SCProofTriangle> analyticFirstRhoScene;
+    std::vector<SCProofTriangle> analyticFirstRhoTriangles;
+    std::vector<SCProofNode> analyticFirstRhoNodes;
+    const auto envOne = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && std::strcmp(value, "1") == 0;
+    };
+    const auto envNonEmpty = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && value[0] != '\0';
+    };
+    const bool firstSurfaceRequested = envOne("DDGI_FIRST_SURFACE");
+    const bool firstZeroCrossRequested = envOne("DDGI_FIRST_ZERO_CROSS");
+    const bool zeroCrossEvidenceConflict =
+        envNonEmpty("SDF_GPU_EVIDENCE") || envNonEmpty("DDGI_EVIDENCE_NORMAL") ||
+        envNonEmpty("DDGI_DEPTH_ONLY_EVIDENCE") || envNonEmpty("DDGI_SDF_EVIDENCE_MODE");
+    const bool zeroCrossCandidateConflict =
+        firstSurfaceRequested || envOne("DDGI_FIRST_NATIVE_NORMAL") ||
+        envOne("DDGI_ANALYTIC_FIRST_RHO") ||
+        envNonEmpty("DDGI_ANALYTIC_FIRST_POSITION") ||
+        envNonEmpty("DDGI_ANALYTIC_FIRST_RHO_PREFIX") || zeroCrossEvidenceConflict;
+    if (firstZeroCrossRequested && zeroCrossCandidateConflict) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_FIRST_ZERO_CROSS] rejected by test host: mixed "
+               "FIRST_SURFACE/FIRST_NATIVE_NORMAL/analytic-rho/evidence environment"
+            << std::endl;
+        return false;
+    }
+    if (firstSurfaceRequested || firstZeroCrossRequested) {
+        auto* ddgi=pipeline_->GetDDGIPass();
+        if (!ddgi || !materialRegistry_ || materialRegistry_->GetMaterialCount()==0) return false;
+        if (firstZeroCrossRequested && ddgi->GetVolumeData().RaySampleMode != 0) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_FIRST_ZERO_CROSS] rejected by test host: requires "
+                   "DDGI_RAY_SAMPLE=0" << std::endl;
+            return false;
+        }
+        std::vector<SCProofTriangle> firstScene;
+        const auto identity=rhimath::MatrixIdentity();
+        for (u32 mi=0;mi<sceneMeshes_.size();++mi) {
+            const auto& info=sceneMeshes_[mi];
+            const auto& proxies=scene_.GetProxies();
+            const auto proxy=std::find_if(proxies.begin(),proxies.end(),[&](const auto& p){return p.entityId==info.meshEntityId;});
+            if (proxy==proxies.end() || info.gpuMaterialId>=materialRegistry_->GetMaterialCount()) return false;
+            const auto* matrix=reinterpret_cast<const float*>(&proxy->transform);
+            const auto* expected=reinterpret_cast<const float*>(&identity);
+            static_assert(sizeof(identity)==16*sizeof(float));
+            for (u32 k=0;k<16;++k) if (!SCProofFinite(matrix[k]) || matrix[k]!=expected[k]) return false;
+            u32 flags=materialRegistry_->GetMaterialData()[info.gpuMaterialId].flags;
+            // Unsupported raster/material contracts are opaque to this guard.
+            // First geometry still participates; never look through it for a
+            // later supported surface. High bit forbids distance replacement.
+            if (proxy->technique!=ShaderTechnique::Opaque || proxy->base_color[3]!=1.f || proxy->graphVariant!=0)
+                flags|=0x80000000u;
+            rhi::RHIMeshAsset mesh{};
+            if (!primal::content::get_rhi_mesh_asset(info.meshEntityId,mesh) ||
+                (mesh.index_size!=2 && mesh.index_size!=4) || mesh.num_indices%3 ||
+                mesh.position_buffer.size()<size_t(mesh.num_vertices)*12 ||
+                mesh.index_buffer.size()<size_t(mesh.num_indices)*mesh.index_size) return false;
+            for (u32 ti=0;ti<mesh.num_indices;ti+=3) {
+                float v[3][3];
+                for (u32 k=0;k<3;++k) {
+                    u32 index=0;std::memcpy(&index,mesh.index_buffer.data()+size_t(ti+k)*mesh.index_size,mesh.index_size);
+                    if (index>=mesh.num_vertices) return false;
+                    std::memcpy(v[k],mesh.position_buffer.data()+size_t(index)*12,12);
+                    for (float x:v[k]) if (!SCProofFinite(x)) return false;
+                }
+                SCProofTriangle triangle{};
+                for (u32 k=0;k<3;++k) { triangle.a[k]=v[0][k];triangle.e1[k]=v[1][k]-v[0][k];triangle.e2[k]=v[2][k]-v[0][k]; }
+                triangle.a[3]=float(firstScene.size());
+                std::memcpy(&triangle.e1[3],&flags,4);triangle.e2[3]=float(mi);
+                firstScene.push_back(triangle);
+            }
+        }
+        std::vector<SCProofNode> firstNodes;std::vector<SCProofTriangle> firstTriangles;
+        if (const char* native=std::getenv("DDGI_FIRST_NATIVE_NORMAL");
+            native && std::strcmp(native,"1")==0) {
+            std::string mappingError;
+            if (!BuildDDGIFirstNativeTriangleMapping(
+                    sceneMeshes_, firstScene, firstNativeTriangleMapping, mappingError)) {
+                PRIMAL_LOG_STREAM(Error,"Render")
+                    << "[DDGI_FIRST_NATIVE_NORMAL] triangle mapping rejected: "
+                    << mappingError << std::endl;
+                return false;
+            }
+        }
+        BuildDDGIFirstSurfaceBVH(firstScene,firstTriangles,firstNodes);
+        if (!pipeline_->SetDDGIFirstSurfaceGeometry(firstNodes.data(),firstNodes.size()*48u,firstTriangles.data(),firstTriangles.size()*48u)) {
+            PRIMAL_LOG_STREAM(Error,"Render")
+                << (firstZeroCrossRequested ? "[DDGI_FIRST_ZERO_CROSS]"
+                                             : "[DDGI_FIRST_SURFACE]")
+                << " setup rejected; candidate not run";
+            return false;
+        }
+        if (const char* prefix=std::getenv("DDGI_FIRST_SURFACE_GEOMETRY_PREFIX")) {
+            auto save=[&](const char* suffix,const void* data,u64 bytes) {
+                std::ofstream f(std::string(prefix)+suffix,std::ios::binary);f.write(static_cast<const char*>(data),std::streamsize(bytes));f.close();return bool(f);
+            };
+            if (!save(".nodes.bin",firstNodes.data(),firstNodes.size()*48u) ||
+                !save(".triangles.bin",firstTriangles.data(),firstTriangles.size()*48u) ||
+                !save(".scene.bin",firstScene.data(),firstScene.size()*48u) ||
+                !save(".materials.bin",materialRegistry_->GetMaterialData(),materialRegistry_->GetMaterialCount()*48u)) return false;
+        }
+        PRIMAL_LOG_STREAM(Info,"Render")
+            << (firstZeroCrossRequested ? "[DDGI_FIRST_ZERO_CROSS]" : "[DDGI_FIRST_SURFACE]")
+            << " test-scene candidate ready triangles=" << firstTriangles.size()
+            << " nodes=" << firstNodes.size()
+            << " scope=" << (firstZeroCrossRequested ? "zero-crossing-distance-only"
+                                                     : "first-surface-distance")
+            << " default_on=false";
+    }
+
     SamplerDesc texSamplerDesc{};
     texSamplerDesc.minFilter = FilterMode::Linear;
     texSamplerDesc.magFilter = FilterMode::Linear;
@@ -977,6 +1352,130 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         materialRegistry_->GetNormalTextureArray(),
         materialRegistry_->GetORMTextureArray(),
         texSampler_);
+    if (const char* native=std::getenv("DDGI_FIRST_NATIVE_NORMAL");
+        native && std::strcmp(native,"1")==0) {
+        if (firstNativeTriangleMapping.empty()) {
+            PRIMAL_LOG_STREAM(Error,"Render")
+                << "[DDGI_FIRST_NATIVE_NORMAL] no current-scene triangle mapping" << std::endl;
+            return false;
+        }
+        if (!pipeline_->SetDDGIFirstNativeNormalSources(
+                gpuDraw.GetGlobalVertexBuffer(), gpuDraw.GetGlobalElementBuffer(),
+                gpuDraw.GetGlobalInstanceDataBuffer(), gpuDraw.GetMaterialDataBuffer(),
+                gpuDraw.GetNormalTextureArray(), gpuDraw.GetTextureSampler(),
+                firstNativeTriangleMapping.data(), firstNativeTriangleMapping.size())) {
+            PRIMAL_LOG_STREAM(Error,"Render")
+                << "[DDGI_FIRST_NATIVE_NORMAL] live source setup rejected" << std::endl;
+            return false;
+        }
+    }
+    const char* analyticRhoFlag = std::getenv("DDGI_ANALYTIC_FIRST_RHO");
+    const char* analyticPositionFlag = std::getenv("DDGI_ANALYTIC_FIRST_POSITION");
+    const char* analyticRhoPrefix = std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX");
+    const char* analyticRhoDump = std::getenv("DDGI_DUMP");
+    const bool analyticRhoRequested =
+        (analyticRhoFlag && std::strcmp(analyticRhoFlag, "1") == 0) ||
+        (analyticPositionFlag && (std::strcmp(analyticPositionFlag, "1") == 0 ||
+                                  std::strcmp(analyticPositionFlag, "0") == 0)) ||
+        (analyticRhoPrefix && analyticRhoPrefix[0] && analyticRhoDump &&
+         std::strcmp(analyticRhoDump, "2") == 0);
+    if (analyticRhoRequested) {
+        // Lumen passes are created by the deferred settings rebuild. The
+        // pipeline setter retains these sources until that pass exists.
+        if (!materialRegistry_) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_ANALYTIC_FIRST_RHO] candidate has no material source"
+                << std::endl;
+            return false;
+        }
+        std::vector<u8> nativeMapping;
+        std::string rhoError;
+        if (!DDGIFirstOracleBuildScene(
+                sceneMeshes_, materialRegistry_, scene_.GetProxies(),
+                analyticFirstRhoScene, analyticFirstRhoTriangles,
+                analyticFirstRhoNodes, nativeMapping, rhoError)) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_ANALYTIC_FIRST_RHO] scene mapping rejected: " << rhoError
+                << std::endl;
+            return false;
+        }
+        std::vector<u32> analyticFirstRhoInstanceMaterials;
+        std::vector<u8> analyticFirstRhoClusterMap;
+        // Use the ordinary native upload from the current scene before any
+        // frame command is recorded. This creates the same borrowed buffers
+        // Execute() will reuse by geometry signature; no lighting is warmed up.
+        RenderSceneSnapshot rhoSnapshot;
+        if (!rhoSnapshot.Initialize(device_) || !rhoSnapshot.Rebind(scene_) ||
+            rhoSnapshot.GetInstanceCount() != scene_.GetProxies().size()) {
+            rhoSnapshot.Shutdown();
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_ANALYTIC_FIRST_RHO] current native snapshot rejected"
+                << std::endl;
+            return false;
+        }
+        gpuDraw.UpdateGeometryData(rhoSnapshot);
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[DDGI_ANALYTIC_FIRST_RHO] native geometry prepared before frame recording"
+            << " instances=" << rhoSnapshot.GetInstanceCount()
+            << " cluster_entries=" << gpuDraw.GetClusterMapEntryCount()
+            << std::endl;
+        rhoSnapshot.Shutdown();
+        if (!ReadDDGIAnalyticFirstRhoClusterMaterials(
+                device_, analyticFirstRhoInstanceMaterials,
+                analyticFirstRhoClusterMap, rhoError)) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_ANALYTIC_FIRST_RHO] current cluster-map proof rejected: "
+                << rhoError << std::endl;
+            return false;
+        }
+        if (!BuildDDGIAnalyticFirstRhoMapping(
+                analyticFirstRhoScene, nativeMapping, sceneMeshes_, materialRegistry_,
+                analyticFirstRhoInstanceMaterials,
+                analyticFirstRhoMapping, rhoError)) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_ANALYTIC_FIRST_RHO] material mapping rejected: " << rhoError
+                << std::endl;
+            return false;
+        }
+        if (!pipeline_->SetDDGIAnalyticFirstRhoSources(
+                analyticFirstRhoNodes.data(), analyticFirstRhoNodes.size() * sizeof(SCProofNode),
+                analyticFirstRhoTriangles.data(), analyticFirstRhoTriangles.size() * sizeof(SCProofTriangle),
+                gpuDraw.GetGlobalVertexBuffer(), gpuDraw.GetGlobalElementBuffer(),
+                gpuDraw.GetGlobalInstanceDataBuffer(), gpuDraw.GetMaterialDataBuffer(),
+                gpuDraw.GetAlbedoTextureArray(), gpuDraw.GetTextureSampler(),
+                analyticFirstRhoMapping.data(), analyticFirstRhoMapping.size())) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_ANALYTIC_FIRST_RHO] live source setup rejected" << std::endl;
+            return false;
+        }
+        if (const char* geometryPrefix = std::getenv("DDGI_ANALYTIC_FIRST_RHO_GEOMETRY_PREFIX")) {
+            auto save = [&](const char* suffix, const void* data, u64 bytes) {
+                std::ofstream file(std::string(geometryPrefix) + suffix,
+                                   std::ios::binary | std::ios::trunc);
+                if (!file) return false;
+                file.write(static_cast<const char*>(data), std::streamsize(bytes));
+                return bool(file);
+            };
+            if (!save(".nodes.bin", analyticFirstRhoNodes.data(),
+                      analyticFirstRhoNodes.size() * sizeof(SCProofNode)) ||
+                !save(".triangles.bin", analyticFirstRhoTriangles.data(),
+                      analyticFirstRhoTriangles.size() * sizeof(SCProofTriangle)) ||
+                !save(".scene.bin", analyticFirstRhoScene.data(),
+                      analyticFirstRhoScene.size() * sizeof(SCProofTriangle)) ||
+                !save(".mapping.bin", analyticFirstRhoMapping.data(), analyticFirstRhoMapping.size()) ||
+                !save(".cluster_map.bin", analyticFirstRhoClusterMap.data(),
+                      analyticFirstRhoClusterMap.size()) ||
+                !save(".instance_materials.bin", analyticFirstRhoInstanceMaterials.data(),
+                      analyticFirstRhoInstanceMaterials.size() * sizeof(u32)) ||
+                !save(".materials.bin", materialRegistry_->GetMaterialData(),
+                      materialRegistry_->GetMaterialCount() * 48u))
+                return false;
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[DDGI_ANALYTIC_FIRST_RHO] test-scene candidate ready triangles="
+            << analyticFirstRhoTriangles.size() << " nodes=" << analyticFirstRhoNodes.size()
+            << " mapping_records=" << analyticFirstRhoMapping.size() / 32u << std::endl;
+    }
     // T4.6.5 part 35.7: GPUDrivenDrawPipeline::SetTextureArrays stores the
     // sampler handle and destroys it on Shutdown (cpp:274). Mark ownership
     // transferred so this test doesn't double-destroy. The engine-side
@@ -996,7 +1495,11 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     // PGSDFC02 cache records the encoding so the old unsigned v1 cache can
     // never be reused against the new field semantics.
     {
-        const std::string sdfCache = baseDir + "Sponza_global_sdf.v3.cache";
+        // A/B cache path: rebuild experiments must not overwrite the normal
+        // 108 MB Sponza cache or make subsequent baseline runs ambiguous.
+        const char* cacheOverride = std::getenv("PRIMAL_SDF_CACHE_PATH");
+        const std::string sdfCache = cacheOverride && cacheOverride[0]
+            ? cacheOverride : baseDir + "Sponza_global_sdf.v3.cache";
         std::string pipeModelPath = baseDir + "Sponza_pipeline_signed_v5.model";
         // SDF_REBAKE_V6=1: propagate the per-mesh SDF fields in-place into a
         // v6 model (M3-A1 — the v5 bake clamped air beyond the 3³ search to
@@ -1013,6 +1516,18 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
             }
         }
         offlineSDFMerger_ = new primal::graphics::nanite::OfflineSDFMerger();
+        if (const char* geometryDecode=std::getenv("SDF_GEOMETRY_DECODE")) {
+            if (geometryDecode[0]=='1') {
+                // Refuse production-cache overwrite and mixed experiments.
+                if (!cacheOverride || !cacheOverride[0] || sdfCache==baseDir+"Sponza_global_sdf.v3.cache" ||
+                    std::getenv("SDF_GPU_EVIDENCE") || std::getenv("SDF_NO_PROPAGATE") || std::getenv("SDF_REBAKE_V6")) {
+                    PRIMAL_LOG_STREAM(Error,"Render") << "[SDFGeometryDecode] refused unsafe/mixed cache experiment" << std::endl;
+                    return false;
+                }
+                offlineSDFMerger_->EnableGeometryDistanceDecode();
+                PRIMAL_LOG_STREAM(Info,"Render") << "[SDFGeometryDecode] authenticated geometry-span decode requested, cache=" << sdfCache << std::endl;
+            }
+        }
         if (!offlineSDFMerger_->LoadFromCache(device_, sdfCache.c_str())) {
             u32 sdfCount = offlineSDFMerger_->LoadFromPipelineModel(pipeModelPath.c_str(), /*signed_encoding=*/true);
             if (sdfCount > 0) {
@@ -1025,6 +1540,40 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
                 std::cerr << "[Part30.4] No offline SDF data found (pipeline model missing?)"
                           << std::endl;
             }
+        }
+        if (const char* evidencePath=std::getenv("SDF_GPU_EVIDENCE")) {
+            if (std::string(evidencePath)==sdfCache || std::getenv("SDF_NO_PROPAGATE") ||
+                std::getenv("OFFLINE_SDF_SEAL") || std::getenv("PRIMAL_OFFLINE_SDF_ZERO")) {
+                PRIMAL_LOG_STREAM(Error,"Render") << "[SDFEvidence] refused conflicting cache/merge flags" << std::endl;
+            } else {
+                auto* evidence=new nanite::OfflineSDFMerger();
+                evidence->EnableHitEvidence();
+                const bool loaded=evidence->LoadFromCache(device_,evidencePath) ||
+                    (evidence->LoadFromPipelineModel(pipeModelPath.c_str(),true)>0 && evidence->BuildAndUpload(device_,evidencePath));
+                if (loaded) {
+                    delete offlineSDFMerger_; offlineSDFMerger_=evidence;
+                    const char* modeEnv=std::getenv("DDGI_SDF_EVIDENCE_MODE");
+                    const u32 mode=modeEnv?u32(std::strtoul(modeEnv,nullptr,10)):1u;
+                    pipeline_->SetOfflineSDFHitEvidence(mode);
+                    PRIMAL_LOG_STREAM(Error,"Render") << "[SDFEvidence] RG16F enabled, DDGI mode=" << std::min(mode,3u) << std::endl;
+                } else delete evidence;
+            }
+        }
+        if (const char* voxels = std::getenv("SDF_VOXEL_PROVENANCE")) {
+            const char* output = std::getenv("SDF_VOXEL_PROVENANCE_OUT");
+            nanite::OfflineSDFMerger source;
+            if (!output || source.LoadFromPipelineModel(pipeModelPath.c_str(), true)==0 ||
+                !source.AuditCacheVoxels(voxels, sdfCache.c_str(), output))
+                PRIMAL_LOG_STREAM(Error,"Render") << "[SDFVoxelProvenance] audit failed; no exact source attribution" << std::endl;
+        }
+        if (const char* points = std::getenv("SDF_POINT_PROVENANCE")) {
+            nanite::OfflineSDFMerger source;
+            if (source.LoadFromPipelineModel(pipeModelPath.c_str(), true)==0 ||
+                !source.AuditCachePoints(points, sdfCache.c_str(), "/tmp/sdf_point_provenance.csv"))
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SDFProvenance] audit failed; no source attribution" << std::endl;
+            if (std::getenv("SDF_TRACE_REPLAY") &&
+                !source.AuditTraceEvidence(points, sdfCache.c_str(), "/tmp/sdf_trace_evidence.csv"))
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SDFTraceEvidence] audit failed" << std::endl;
         }
         if (!offlineSDFMerger_->IsValid()) {
             delete offlineSDFMerger_;
@@ -1077,7 +1626,7 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
 
     viewMatrix_ = rhimath::CreateLookAtMatrix(cameraPos, target, up);
     projMatrix_ = rhimath::CreatePerspectiveMatrix(
-        60.0f * rhimath::constants::DEG_TO_RAD,
+        sponza_reference::FovDegrees() * rhimath::constants::DEG_TO_RAD,
         static_cast<float>(W) / static_cast<float>(H), 0.1f, 1000.0f);
     view_.SetViewMatrix(viewMatrix_);
     view_.SetProjectionMatrix(projMatrix_);
@@ -1757,8 +2306,17 @@ void TestVulkanSponzaRenderGraph::Run() {
 
     TextureDesc targetDesc = renderSystem_.GetBackBufferDesc();
     const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
-    const bool referenceCapture = std::getenv("SPONZA_CAPTURE") &&
-        frameCount_ == (requestedFrame ? std::atoi(requestedFrame) : 360);
+    const u32 captureStart = requestedFrame
+        ? static_cast<u32>(std::max(0, std::atoi(requestedFrame))) : 360u;
+    const char* requestedCount = std::getenv("SPONZA_CAPTURE_COUNT");
+    const u32 captureCount = requestedCount
+        ? static_cast<u32>(std::clamp(std::atoi(requestedCount), 1, 240)) : 1u;
+    const char* capturePath = std::getenv("SPONZA_CAPTURE");
+    const char* captureDir = std::getenv("SPONZA_CAPTURE_DIR");
+    // A sequence is directory-based, so SPONZA_CAPTURE_DIR is sufficient to
+    // activate it.  Keep SPONZA_CAPTURE as the legacy single-file trigger.
+    const bool referenceCapture = (capturePath || (captureCount > 1u && captureDir)) &&
+        frameCount_ >= captureStart && frameCount_ < captureStart + captureCount;
     const bool diagnosticCapture = std::getenv("SPONZA_DIAGNOSTIC_CAPTURE") &&
         (frameCount_ == 60 || frameCount_ == 61 || frameCount_ == 360 ||
          frameCount_ == 361 || frameCount_ == 1800);
@@ -1815,8 +2373,30 @@ void TestVulkanSponzaRenderGraph::Run() {
 
     renderSystem_.EndFrame(renderDoneSem);
 
+    if (std::getenv("DDGI_SH_PRODUCER_AUDIT_PREFIX")) {
+        auto* ddgi = pipeline_ ? pipeline_->GetDDGIPass() : nullptr;
+        if (!ddgi || !ddgi->FlushSHProducerAudit(frameCount_)) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_SH_PRODUCER_AUDIT] readback failed" << std::endl;
+            Shutdown();
+            std::exit(2);
+        }
+    }
+
+    if(const char* prefix=std::getenv("SC_GPU_MATERIAL_PROOF_PREFIX")) {
+        static bool attempted=false;
+        if(!attempted && frameCount_>=4) {
+            attempted=true;
+            if(!RunSCMaterialSampleProof(device_,prefix)) {
+                PRIMAL_LOG_STREAM(Error,"Render")<<"[SC_GPU_MATERIAL_PROOF] failed";
+                Shutdown();
+                std::exit(2); // Explicit diagnostic failure, never report a clean proof.
+            }
+        }
+    }
+
     // Capture an offscreen final output. Swapchain images have no transfer-
     // source usage and must never be accessed after Present releases them.
+    bool captureSequenceVerifyFailed = false;
     auto capturePPM = [&](const char* tag) {
         if (captureTarget == handles::INVALID_RESOURCE) return;
         u32 capW = targetDesc.size.x;
@@ -1863,9 +2443,23 @@ void TestVulkanSponzaRenderGraph::Run() {
         auto* mapped = static_cast<u8*>(device_->MapBuffer(stagingBuf));
         if (mapped) {
             const char* capDir = std::getenv("SPONZA_CAPTURE_DIR");
-            std::string ppmPath = std::string(capDir ? capDir : "/tmp/sponza_") +
-                                  std::string(tag) + "_" + std::to_string(frameCount_) + ".ppm";
-            if (std::string(tag) == "reference") ppmPath = std::getenv("SPONZA_CAPTURE");
+            std::string ppmPath;
+            if (capDir) {
+                ppmPath = capDir;
+                if (!ppmPath.empty() && ppmPath.back() != '/') ppmPath.push_back('/');
+            } else {
+                ppmPath = "/tmp/sponza_";
+            }
+            ppmPath += std::string(tag) + "_" + std::to_string(frameCount_) + ".ppm";
+            // Preserve the historical single-frame exact-path contract.  A
+            // sequence uses SPONZA_CAPTURE_DIR + reference_<frame>.ppm so
+            // adjacent frames cannot overwrite one another.
+            if (std::string(tag) == "reference" && captureCount == 1u)
+                ppmPath = std::getenv("SPONZA_CAPTURE");
+            const bool sequenceStats = std::getenv("SPONZA_CAPTURE_SEQUENCE_STATS") != nullptr &&
+                                       std::string(tag) == "reference";
+            std::vector<u8> sequenceRgb;
+            if (sequenceStats) sequenceRgb.reserve((size_t)capW * capH * 3u);
             std::ofstream ppm(ppmPath, std::ios::binary);
             ppm << "P6\n" << capW << " " << capH << "\n255\n";
             for (u32 y = 0; y < capH; ++y) {
@@ -1875,11 +2469,64 @@ void TestVulkanSponzaRenderGraph::Run() {
                     ppm.write(reinterpret_cast<const char*>(&p[2]), 1);
                     ppm.write(reinterpret_cast<const char*>(&p[1]), 1);
                     ppm.write(reinterpret_cast<const char*>(&p[0]), 1);
+                    if (sequenceStats) {
+                        sequenceRgb.push_back(p[2]);
+                        sequenceRgb.push_back(p[1]);
+                        sequenceRgb.push_back(p[0]);
+                    }
                 }
             }
             device_->UnmapBuffer(stagingBuf);
             std::cerr << "[DEBUG] Frame " << frameCount_ << " captured to " << ppmPath
                       << " (" << capW << "x" << capH << ")" << std::endl;
+
+            // Consecutive-frame regression metric.  A temporal chain split into
+            // independent even/odd histories has d(N,N+1) ~= -d(N+1,N+2) and
+            // frame N ~= frame N+2.  Keep the gate opt-in because animated pass
+            // views can legitimately contain period-two content.
+            if (sequenceStats) {
+                static std::vector<std::vector<u8>> sequenceFrames;
+                if (frameCount_ == captureStart) sequenceFrames.clear();
+                if (sequenceFrames.size() < 3u) sequenceFrames.push_back(std::move(sequenceRgb));
+                if (sequenceFrames.size() == 3u) {
+                    const auto& a = sequenceFrames[0];
+                    const auto& b = sequenceFrames[1];
+                    const auto& c = sequenceFrames[2];
+                    double abs01 = 0.0, abs12 = 0.0, abs02 = 0.0;
+                    double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumYY = 0.0, sumXY = 0.0;
+                    for (size_t i = 0; i < a.size(); ++i) {
+                        const double x = double(b[i]) - double(a[i]);
+                        const double y = double(c[i]) - double(b[i]);
+                        abs01 += std::abs(x);
+                        abs12 += std::abs(y);
+                        abs02 += std::abs(double(c[i]) - double(a[i]));
+                        sumX += x; sumY += y;
+                        sumXX += x * x; sumYY += y * y; sumXY += x * y;
+                    }
+                    const double n = double(a.size());
+                    const double varX = std::max(0.0, sumXX - sumX * sumX / n);
+                    const double varY = std::max(0.0, sumYY - sumY * sumY / n);
+                    const double denom = std::sqrt(varX * varY);
+                    const double corr = denom > 1e-12
+                        ? (sumXY - sumX * sumY / n) / denom : 0.0;
+                    const double mae01 = abs01 / n;
+                    const double mae12 = abs12 / n;
+                    const double mae02 = abs02 / n;
+                    const bool periodTwo = corr < -0.98 &&
+                        mae02 < std::max(0.25, 0.25 * std::min(mae01, mae12));
+                    std::cerr << "[CAPTURE_SEQUENCE] frames=" << captureStart << ".."
+                              << (captureStart + 2u) << " mae01=" << mae01
+                              << " mae12=" << mae12 << " mae02=" << mae02
+                              << " delta_corr=" << corr
+                              << " period2=" << (periodTwo ? 1 : 0) << std::endl;
+                    if (periodTwo && std::getenv("SPONZA_CAPTURE_NO_PERIOD2")) {
+                        std::cerr << "[CAPTURE_SEQUENCE] FAIL: deterministic period-two history detected"
+                                  << std::endl;
+                        captureSequenceVerifyFailed = true;
+                    }
+                    sequenceFrames.clear();
+                }
+            }
         }
         device_->DestroyBuffer(stagingBuf);
     };
@@ -1887,9 +2534,10 @@ void TestVulkanSponzaRenderGraph::Run() {
     // Probe diagnostics: set SPGI_PROBE_VIS=1/2/3 at launch to replace the
     // gather output with probe L0/depth/confidence grayscale (IrradianceAtlas
     // / DepthAtlas / Confidence).
-    if (std::getenv("SPONZA_CAPTURE")) {
-        const char* frame = std::getenv("SPONZA_CAPTURE_FRAME");
-        if (frameCount_ == (frame ? std::atoi(frame) : 360)) capturePPM("reference");
+    if (referenceCapture) capturePPM("reference");
+    if (captureSequenceVerifyFailed) {
+        if (captureTarget != handles::INVALID_RESOURCE) device_->DestroyTexture(captureTarget);
+        std::_Exit(6);
     }
 
     // sun-audit P3: 切镜后收敛采样——SPONZA_CAM_SCRIPT 回放在 frame 360 切镜，
@@ -2093,8 +2741,9 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
 
-    // P1（sponza-gap-reaudit §4.1/4.2）: SPGI_TRACE_DIAG 在 frame 350 读回
-    // finalize 分支统计（自帧 0 累计；host-visible 直接映射）。输出每分支
+    // P1（sponza-gap-reaudit §4.1/4.2）: SPGI_TRACE_DIAG 在逻辑 GI 帧
+    // SPGI_TRACE_DIAG_GI_FRAME（默认 180）读回。内容就绪前及 GI frame 0
+    // 清空统计，避免 late card registration 时测到 placeholder 阶段。输出每分支
     // 全局 count/mean/max/cos 与屏幕 4×4 桶的 count 占比 + 平均亮度
     // （bucket1 = 左上 = 拱顶热点 ROI），回答"热点能量来自 HZB 还是 SC"。
     // G0（volume-gi-repair-audit §6，2026-09-16）: 旧实现一次性读 350 帧
@@ -2104,20 +2753,38 @@ void TestVulkanSponzaRenderGraph::Run() {
     // "分桶 count 总和 == 全局 count"守恒校验。诊断门控不变：diag 关闭时
     // 零读回零清零、渲染零影响。
     static bool spgiDiagDumped = false;
-    static u64 spgiStatAcc[4][17][4] = {};   // [branch][bucket][count,sumY,maxY,sumC]
+    static u64 spgiStatAcc[7][17][4] = {};   // [branch][bucket][count,sumY,maxY,sumC]
+    static u64 spgiRoiAcc[6][4][4] = {};
     static u32 spgiStatWindows = 0;
     static u32 spgiStatFirstFrame = 0;
     static u32 spgiStatLastFrame = 0;
     constexpr u32 kSpgiStatWindow = 25;
     auto* spgiPassForStats = pipeline_->GetScreenProbePass();
+    const u32 giDiagFrame = pipeline_->GetGIFrameIndex();
+    const u32 giDiagTarget = [] {
+        const char* e = std::getenv("SPGI_TRACE_DIAG_GI_FRAME");
+        return e ? static_cast<u32>(std::max(1, std::atoi(e))) : 180u;
+    }();
     const bool spgiStatsLive = std::getenv("SPGI_TRACE_DIAG") && spgiPassForStats &&
         spgiPassForStats->GetTraceStatsBuffer() != handles::INVALID_RESOURCE;
+    if (spgiStatsLive && giDiagFrame == 0u) {
+        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetTraceStatsBuffer())) {
+            std::memset(mapped, 0, 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3));
+            device_->UnmapBuffer(spgiPassForStats->GetTraceStatsBuffer());
+        }
+        std::memset(spgiStatAcc, 0, sizeof(spgiStatAcc));
+        std::memset(spgiRoiAcc, 0, sizeof(spgiRoiAcc));
+        spgiStatWindows = 0;
+        spgiStatFirstFrame = 0;
+        spgiStatLastFrame = 0;
+    }
     if (spgiStatsLive && !spgiDiagDumped &&
-        (frameCount_ % kSpgiStatWindow == kSpgiStatWindow - 1 ||
-         frameCount_ == 350)) {
+        giDiagFrame > 0u &&
+        (giDiagFrame % kSpgiStatWindow == kSpgiStatWindow - 1 ||
+         giDiagFrame == giDiagTarget)) {
         if (void* mapped = device_->MapBuffer(spgiPassForStats->GetTraceStatsBuffer())) {
             const u32* s = static_cast<const u32*>(mapped);
-            for (u32 br = 0; br < 4; ++br)
+            for (u32 br = 0; br < 7; ++br)
                 for (u32 bk = 0; bk < 17; ++bk)
                     for (u32 comp = 0; comp < 4; ++comp) {
                         u32 v = s[((br * 17) + bk) * 4 + comp];
@@ -2127,19 +2794,50 @@ void TestVulkanSponzaRenderGraph::Run() {
                         else
                             spgiStatAcc[br][bk][comp] += v;
                     }
-            std::memset(mapped, 0, 16 * 4 * 17);
+            const u32* roi = s + 4 * (7 * 17 + 36 * 4 + 36 * 8 * 2);
+            for (u32 r = 0; r < 6; ++r)
+                for (u32 c = 0; c < 4; ++c)
+                    for (u32 k = 0; k < 4; ++k)
+                        spgiRoiAcc[r][c][k] += roi[(r * 4 + c) * 4 + k];
+            std::memset(mapped, 0, 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3));
             device_->UnmapBuffer(spgiPassForStats->GetTraceStatsBuffer());
-            if (spgiStatWindows == 0) spgiStatFirstFrame = frameCount_;
-            spgiStatLastFrame = frameCount_;
+            if (spgiStatWindows == 0) spgiStatFirstFrame = giDiagFrame;
+            spgiStatLastFrame = giDiagFrame;
             ++spgiStatWindows;
         }
     }
-    if (!spgiDiagDumped && spgiStatsLive && frameCount_ == 350) {
+    if (!spgiDiagDumped && spgiStatsLive && giDiagFrame == giDiagTarget) {
         spgiDiagDumped = true;
+        const char* roiNames[6] = {"direct_patch", "L_arcade", "R_arcade", "sunlit_wall", "sky", "floor_near"};
+        const char* categoryNames[4] = {"nearReject", "farReject", "validated", "other"};
+        FILE* roiCsv = fopen("/tmp/spgi_roi_trace.csv", "w");
+        if (roiCsv) fprintf(roiCsv, "roi,category,gi_frame,count,mean_radiance_lum,cosine_energy_share,mean_cos\n");
+        std::cerr << "[SPGI_ROI_TRACE] projected receiver samples; not final pixel irradiance" << std::endl;
+        for (u32 r = 0; r < 6; ++r) {
+            u64 energy = 0;
+            for (u32 c = 0; c < 4; ++c) energy += spgiRoiAcc[r][c][2];
+            for (u32 c = 0; c < 4; ++c) {
+                const u64* v = spgiRoiAcc[r][c];
+                std::cerr << "  " << roiNames[r] << " " << categoryNames[c]
+                          << " count=" << v[0]
+                          << " meanLum=" << (v[0] ? double(v[1]) / (64.0 * v[0]) : 0.0)
+                          << " cosineEnergyShare=" << (energy ? double(v[2]) / energy : 0.0)
+                          << " meanCos=" << (v[0] ? double(v[3]) / (256.0 * v[0]) : 0.0)
+                          << std::endl;
+                if (roiCsv) fprintf(roiCsv, "%s,%s,%u,%llu,%.8f,%.8f,%.8f\n",
+                    roiNames[r], categoryNames[c], giDiagFrame,
+                    static_cast<unsigned long long>(v[0]),
+                    v[0] ? double(v[1]) / (64.0 * v[0]) : 0.0,
+                    energy ? double(v[2]) / energy : 0.0,
+                    v[0] ? double(v[3]) / (256.0 * v[0]) : 0.0);
+            }
+        }
+        if (roiCsv) fclose(roiCsv);
         auto get = [&](u32 br, u32 bk, u32 comp) -> u64 {
             return spgiStatAcc[br][bk][comp];
         };
-        const char* brName[4] = {"HZB", "SC-card", "far-cache", "fallback"};
+        const char* brName[7] = {"HZB", "SC-card", "far-cache", "fallback",
+                                 "fallback-DDGI", "fallback-sky", "fallback-SC-reject"};
         std::cerr << "[SPGI_TRACE_DIAG] mode="
                   << spgiPassForStats->GetTraceDiagMode()
                   << " window=" << kSpgiStatWindow
@@ -2148,19 +2846,24 @@ void TestVulkanSponzaRenderGraph::Run() {
                   << " branch totals (count, meanLum, maxLum, meanCos):" << std::endl;
         u64 totalRays = 0;
         for (u32 b = 0; b < 4; ++b) totalRays += get(b, 0, 0);
-        for (u32 b = 0; b < 4; ++b) {
+        for (u32 b = 0; b < 7; ++b) {
             u64 cnt = get(b, 0, 0), sumY = get(b, 0, 1), maxQ = get(b, 0, 2), sumC = get(b, 0, 3);
             double meanY = cnt ? double(sumY) / (double(cnt) * 64.0) : 0.0;
             std::cerr << "  " << brName[b] << ": n=" << cnt << " ("
                       << (totalRays ? 100.0 * cnt / double(totalRays) : 0.0) << "%)"
                       << " meanLum=" << meanY
                       << " maxLum=" << double(maxQ) / 64.0
-                      << " meanCos=" << (cnt ? double(sumC) / (double(cnt) * 256.0) : 0.0)
+                      << (b == 6 ? " meanHitDistanceCapped4=" : " meanCos=")
+                      << (cnt ? double(sumC) / (double(cnt) * (b == 6 ? 16.0 : 32.0)) : 0.0)
                       << std::endl;
         }
+        std::cerr << "  [subtype-conservation] fallback=" << get(3, 0, 0)
+                  << " DDGI+sky=" << get(4, 0, 0) + get(5, 0, 0)
+                  << ((get(3, 0, 0) == get(4, 0, 0) + get(5, 0, 0)) ? " OK" : " MISMATCH")
+                  << std::endl;
         // G0 守恒校验：各分支 16 个屏幕桶 count 之和 == 该分支全局 count
         //（不等 = 窗口边界丢写/统计写路径不对称，数据不可信）。
-        for (u32 b = 0; b < 4; ++b) {
+        for (u32 b = 0; b < 7; ++b) {
             u64 bucketSum = 0;
             for (u32 bk = 1; bk < 17; ++bk) bucketSum += get(b, bk, 0);
             std::cerr << "  [conservation] " << brName[b]
@@ -2169,7 +2872,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                       << ((bucketSum == get(b, 0, 0)) ? " OK" : " MISMATCH")
                       << std::endl;
         }
-        for (u32 b = 0; b < 4; ++b) {
+        for (u32 b = 0; b < 7; ++b) {
             std::cerr << "  [" << brName[b] << "] 4x4 buckets (count% / meanLum):" << std::endl;
             for (u32 r = 0; r < 4; ++r) {
                 std::cerr << "    row" << r << ": ";
@@ -2179,9 +2882,479 @@ void TestVulkanSponzaRenderGraph::Run() {
                     u64 gcnt = get(b, 0, 0);
                     double pct = gcnt ? 100.0 * cnt / double(gcnt) : 0.0;
                     double meanY = cnt ? double(sumY) / (double(cnt) * 64.0) : 0.0;
-                    std::cerr << "b" << bk << " " << pct << "%/" << meanY << "  ";
+                    std::cerr << "b" << bk << " " << pct << "%/" << meanY;
+                    if (b == 6)
+                        std::cerr << "/" << (cnt ? double(get(b, bk, 3)) / (double(cnt) * 16.0) : 0.0) << "m";
+                    std::cerr << "  ";
                 }
                 std::cerr << std::endl;
+            }
+        }
+    }
+
+    // [E0-I 2026-09-21 决策仪表] SC 产出率漏斗 + 下行失败射线读回（frame 350
+    // 打印累计值）。与 SPGI_TRACE_DIAG 分支统计互补：漏斗区分"惩罚压制"与
+    // "查询拒绝"（能量-排查 §5 实验 6 / §6 I-2），[5]/[6] 量化下行黑区面积
+    //（K-3）。门控：SPGI_TRACE_DIAG（随分支统计一起）或 PRIMAL_SPGI_SC_FUNNEL。
+    // [P0 调试] SPGI_PROBE_IRR_DUMP=1：读回 DDGI 三槽 SH9 缓冲首探针系数
+    //（radiance 球黑屏排查——确认缓冲是否有数据）。
+    static bool irrDumped = false;
+    if (!irrDumped && frameCount_ == 100 && std::getenv("SPGI_PROBE_IRR_DUMP") &&
+        pipeline_->GetDDGIPass()) {
+        irrDumped = true;
+        for (u32 slot = 0; slot < 3; ++slot) {
+            rhi::ResourceHandle h = pipeline_->GetDDGIPass()->GetIrradianceBufferBySlot(slot);
+            if (h == handles::INVALID_RESOURCE) { std::cerr << "[IRR_DUMP] slot" << slot << " INVALID" << std::endl; continue; }
+            if (void* m = device_->MapBuffer(h)) {
+                const float* f = static_cast<const float*>(m);
+                double s = 0.0; for (int i = 0; i < 36; ++i) s += f[i];
+                std::cerr << "[IRR_DUMP] slot" << slot << " first36sum=" << s
+                          << " c0=(" << f[0] << "," << f[1] << "," << f[2] << ")"
+                          << " c144=(" << f[144] << "," << f[145] << "," << f[146] << ")" << std::endl;
+                device_->UnmapBuffer(h);
+            }
+        }
+    }
+
+    static bool spgiFunnelDumped = false;
+    const bool spgiFunnelLive = spgiPassForStats &&
+        (std::getenv("SPGI_TRACE_DIAG") || std::getenv("PRIMAL_SPGI_SC_FUNNEL")) &&
+        spgiPassForStats->GetFailStatsBuffer() != handles::INVALID_RESOURCE;
+    if (spgiFunnelLive && giDiagFrame == 0u) {
+        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetFailStatsBuffer())) {
+            std::memset(mapped, 0, 16 * sizeof(u32));
+            device_->UnmapBuffer(spgiPassForStats->GetFailStatsBuffer());
+        }
+    }
+    if (!spgiFunnelDumped && spgiFunnelLive && giDiagFrame == giDiagTarget) {
+        spgiFunnelDumped = true;
+        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetFailStatsBuffer())) {
+            const u32* f = static_cast<const u32*>(mapped);
+            const char* fName[16] = {"candidates", "boundsFail", "orientFacingFail", "depthFail",
+                                     "found", "downNoFallback", "downClampServed", "orientHintSoft",
+                                     "transmissiveBackfaceCandidateAccepted", "raysFound", "raysAllRejOrient", "raysZeroCand",
+                                     "raysRejectNearOrigin", "raysAllRejBounds", "raysAllRejDepth", "raysRejectBeyondSkin"};
+            std::cerr << "[SPGI_SC_FUNNEL] gi_frame=" << giDiagFrame
+                      << " (cumulative since content-ready)" << std::endl;
+            for (u32 i = 0; i < 16; ++i)
+                std::cerr << "  " << fName[i] << "=" << f[i] << std::endl;
+            const u64 cands = f[0], found = f[4];
+            if (cands > 0)
+                std::cerr << "  [rate] found=" << (100.0 * double(found) / double(cands)) << "%"
+                          << " boundsFail=" << (100.0 * double(f[1]) / double(cands)) << "%"
+                          << " orientFacing=" << (100.0 * double(f[2]) / double(cands)) << "%"
+                          << " orientHintSoft=" << (100.0 * double(f[7]) / double(cands)) << "%"
+                          << " depthFail=" << (100.0 * double(f[3]) / double(cands)) << "%"
+                          << std::endl;
+            // [①治理] 射线级送达率（真正决定 transport 的量）
+            const u64 raysLoop = f[9] + f[10] + f[11] + f[13] + f[14];
+            if (raysLoop > 0)
+                std::cerr << "  [rays] loop=" << raysLoop
+                          << " foundRate=" << (100.0 * double(f[9]) / double(raysLoop)) << "%"
+                          << " allRejOrient=" << (100.0 * double(f[10]) / double(raysLoop)) << "%"
+                          << " allRejBounds=" << (100.0 * double(f[13]) / double(raysLoop)) << "%"
+                          << " allRejDepth=" << (100.0 * double(f[14]) / double(raysLoop)) << "%"
+                          << " zeroCand=" << (100.0 * double(f[11]) / double(raysLoop)) << "%"
+                          << std::endl;
+            device_->UnmapBuffer(spgiPassForStats->GetFailStatsBuffer());
+        }
+    }
+
+    // [P4 2026-09-21 probe-repr-plan] SPGI SH2 重建误差分位数读回（frame 350，
+    // env PRIMAL_SPGI_SH2_CHECK=1 分配时有效）。per-probe 均值 |Δ|lum =
+    // Σ|Δ|/样本数；输出 P50/P95/max——"SPGI SH2 够不够"的定量判据（评审 #7）。
+    static bool spgiSh2Dumped = false;
+    if (!spgiSh2Dumped && frameCount_ == 350 && spgiPassForStats &&
+        spgiPassForStats->GetSH2CheckBuffer() != handles::INVALID_RESOURCE) {
+        spgiSh2Dumped = true;
+        const u32 nProbes = spgiPassForStats->SlotCount();
+        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetSH2CheckBuffer())) {
+            const float* f = static_cast<const float*>(mapped);
+            std::vector<double> errs;
+            errs.reserve(nProbes);
+            for (u32 p = 0; p < nProbes; ++p) {
+                const float sumD = f[p * 4 + 0];
+                const float n = f[p * 4 + 1];
+                const float active = f[p * 4 + 2];
+                if (n > 0.5f && active > 0.5f)
+                    errs.push_back(double(sumD) / double(n));
+            }
+            if (!errs.empty()) {
+                std::sort(errs.begin(), errs.end());
+                const double p50 = errs[errs.size() / 2];
+                const double p95 = errs[std::min((size_t)(errs.size() * 0.95), errs.size() - 1)];
+                std::cerr << "[SPGI_SH2_CHECK] frame=350 probes=" << errs.size()
+                          << "/" << nProbes
+                          << " relErr|Δ|lum mean P50=" << p50
+                          << " P95=" << p95
+                          << " max=" << errs.back() << std::endl;
+            }
+            device_->UnmapBuffer(spgiPassForStats->GetSH2CheckBuffer());
+        }
+    }
+
+    // SPGI probe-distribution plan（P2/P4 验收）: SPONZA_SPGI_TIER_STATS=1
+    // 在 frame 350 读回 compact 统计（host-visible，单缓冲，当帧值）——
+    // 活跃槽数 + 16/32/64-ray 档分布（tierRays 关闭时全部落 64 桶）。
+    static bool spgiTierDumped = false;
+    if (!spgiTierDumped && std::getenv("SPONZA_SPGI_TIER_STATS") && frameCount_ == 350) {
+        spgiTierDumped = true;
+        auto* sp = pipeline_->GetScreenProbePass();
+        if (sp && sp->Tier3Enabled() &&
+            sp->GetTierStatsBuffer() != handles::INVALID_RESOURCE) {
+            if (void* mapped = device_->MapBuffer(sp->GetTierStatsBuffer())) {
+                const u32* s = static_cast<const u32*>(mapped);
+                const u32 total = s[0], t16 = s[1], t32 = s[2];
+                const u32 t64 = (total > t16 + t32) ? total - t16 - t32 : 0u;
+                std::cerr << "[SPGI_TIER_STATS] activeSlots=" << total
+                          << " / cap=" << sp->RadianceCapacity()
+                          << " / slots=" << sp->SlotCount()
+                          << "  tier16=" << t16 << " tier32=" << t32
+                          << " tier64=" << t64 << std::endl;
+                if (total > 0) {
+                    std::cerr << "[SPGI_TIER_STATS] distribution: "
+                              << (100.0 * t16 / total) << "% coarse(16r) / "
+                              << (100.0 * t32 / total) << "% quad(32r) / "
+                              << (100.0 * t64 / total) << "% full(budget rays)"
+                              << std::endl;
+                }
+                device_->UnmapBuffer(sp->GetTierStatsBuffer());
+                if (sp->LightVarEnabled() &&
+                    sp->GetLightVarStatsBuffer() != handles::INVALID_RESOURCE) {
+                    if (void* lm = device_->MapBuffer(sp->GetLightVarStatsBuffer())) {
+                        std::cerr << "[SPGI_TIER_STATS] lightVar activeTiles="
+                                  << static_cast<const u32*>(lm)[0] << std::endl;
+                        device_->UnmapBuffer(sp->GetLightVarStatsBuffer());
+                    }
+                }
+            }
+        } else {
+            std::cerr << "[SPGI_TIER_STATS] tier3 not enabled — no stats" << std::endl;
+        }
+    }
+
+    // Mode-6 fixed right-arcade ray samples: read after the frame fence, not
+    // by reconstructing importance-resampled directions on the CPU.
+    static bool spgiRightSamplesDumped = false;
+    if (!spgiRightSamplesDumped && std::getenv("SPGI_RIGHT_RAY_SAMPLES") &&
+        frameCount_ == u32(std::atoi(std::getenv("SPGI_RIGHT_RAY_SAMPLES")))) {
+        spgiRightSamplesDumped = true;
+        auto* sp = pipeline_->GetScreenProbePass();
+        if (sp && sp->GetTraceDiagMode() == 6u &&
+            sp->GetTraceStatsBuffer() != handles::INVALID_RESOURCE) {
+            if (const auto* raw = static_cast<const float*>(device_->MapBuffer(sp->GetTraceStatsBuffer()))) {
+                FILE* out = fopen("/tmp/spgi_right_ray_samples.csv", "w");
+                if (FILE* neighbours = fopen("/tmp/spgi_ddgi_neighbours.csv", "w")) {
+                    fprintf(neighbours, "sample_slot,ordinal,anchor_x,anchor_y,anchor_z,state,distance,mean,variance,probe_index,base_weight,visibility,radiance_lum,oct_bin\n");
+                    constexpr u32 kNeighbourOffset = 4u * (7u * 17u + 36u * 4u + 36u * 8u * 2u + 6u * 4u);
+                    for (u32 slot = 0; slot < 36; ++slot)
+                    for (u32 ordinal = 0; ordinal < 8; ++ordinal) {
+                        const float* v = raw + kNeighbourOffset + (slot * 8u + ordinal) * 12u;
+                        if (v[8] <= 0.0f) continue;
+                        fprintf(neighbours, "%u,%u,%.6f,%.6f,%.6f,%.2f,%.6f,%.6f,%.6f,%.0f,%.6f,%.6f,%.6f,%.0f\n",
+                            slot, ordinal, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
+                    }
+                    fclose(neighbours);
+                    std::cerr << "[SPGI_RIGHT_RAY_SAMPLES] wrote /tmp/spgi_ddgi_neighbours.csv" << std::endl;
+                }
+                if (out) {
+                    fprintf(out, "probe_x,probe_y,ray_idx,hit_x,hit_y,hit_z,hit_distance,"
+                                 "probe_x_world,probe_y_world,probe_z_world,probe_index,"
+                                 "dir_x,dir_y,dir_z,reject_code,"
+                                 "candidates,bounds_rejects,orient_rejects,raw_sdf_distance\n");
+                    constexpr u32 kOffset = 7u * 17u * 4u;
+                    const bool floorSamples = std::getenv("SPGI_RAY_SAMPLES_FLOOR") != nullptr;
+                    const u32 xs[3] = {floorSamples ? 110u : 260u, floorSamples ? 160u : 285u, floorSamples ? 210u : 310u};
+                    const u32 ys[3] = {floorSamples ? 160u : 82u, floorSamples ? 168u : 112u, floorSamples ? 176u : 138u};
+                    const u32 rays[4] = {0u, 12u, 24u, 36u};
+                    for (u32 sy = 0; sy < 3; ++sy)
+                    for (u32 sx = 0; sx < 3; ++sx)
+                    for (u32 sr = 0; sr < 4; ++sr) {
+                        const u32 slot = (sy * 3u + sx) * 4u + sr;
+                        const float* v = raw + kOffset + slot * 16u;
+                        fprintf(out, "%u,%u,%u,%.6f,%.6f,%.6f,%.6f,"
+                                     "%.6f,%.6f,%.6f,%.0f,%.6f,%.6f,%.6f,%.0f,"
+                                     "%.0f,%.0f,%.0f,%.0f\n",
+                                xs[sx], ys[sy], rays[sr], v[0], v[1], v[2], v[3],
+                                v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11],
+                                v[12], v[13], v[14], v[15]);
+                    }
+                    fclose(out);
+                    std::cerr << "[SPGI_RIGHT_RAY_SAMPLES] wrote /tmp/spgi_right_ray_samples.csv"
+                              << std::endl;
+                }
+                FILE* candidates = fopen("/tmp/spgi_right_card_candidates.csv", "w");
+                if (candidates) {
+                    fprintf(candidates, "probe_x,probe_y,ray_idx,candidate_ordinal,card_id,mesh_instance_id,axis,direction,reject_code,accepted,captured_depth,along_error,perp_error,along_tolerance\n");
+                    constexpr u32 kCardOffset = 7u * 17u * 4u + 36u * 4u * 4u;
+                    constexpr u32 kMetricOffset = kCardOffset + 36u * 8u * 4u;
+                    const auto* words = reinterpret_cast<const u32*>(raw);
+                    const bool floorSamples = std::getenv("SPGI_RAY_SAMPLES_FLOOR") != nullptr;
+                    const u32 xs[3] = {floorSamples ? 110u : 260u, floorSamples ? 160u : 285u, floorSamples ? 210u : 310u};
+                    const u32 ys[3] = {floorSamples ? 160u : 82u, floorSamples ? 168u : 112u, floorSamples ? 176u : 138u};
+                    const u32 rays[4] = {0u, 12u, 24u, 36u};
+                    for (u32 sy = 0; sy < 3; ++sy)
+                    for (u32 sx = 0; sx < 3; ++sx)
+                    for (u32 sr = 0; sr < 4; ++sr) {
+                        const u32 slot = (sy * 3u + sx) * 4u + sr;
+                        const float* sample = raw + 7u * 17u * 4u + slot * 16u;
+                        const u32 count = std::min(8u, u32(std::max(0.0f, sample[12])));
+                        for (u32 ordinal = 0; ordinal < count; ++ordinal) {
+                            const u32* card = words + kCardOffset + (slot * 8u + ordinal) * 4u;
+                            const float* metric = raw + kMetricOffset + (slot * 8u + ordinal) * 4u;
+                            fprintf(candidates, "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.6f,%.6f,%.6f,%.6f\n",
+                                    xs[sx], ys[sy], rays[sr], ordinal, card[0], card[2],
+                                    card[3] & 0xFFu, (card[3] >> 8u) & 0xFFu, card[1],
+                                    (card[3] & 0x10000u) != 0u ? 1u : 0u,
+                                    metric[0], metric[1], metric[2], metric[3]);
+                        }
+                    }
+                    fclose(candidates);
+                    std::cerr << "[SPGI_RIGHT_RAY_SAMPLES] wrote /tmp/spgi_right_card_candidates.csv"
+                              << std::endl;
+                }
+                if (auto* sc = pipeline_->GetSurfaceCachePass()) {
+                    if (FILE* meta = fopen("/tmp/spgi_right_card_meta.csv", "w")) {
+                        fprintf(meta, "card_id,mesh_instance_id,cx,cy,cz,ex,ey,ez,axis,direction,resolution,atlas_x,atlas_y\n");
+                        const auto& cards = sc->GetCardGenerator().GetCards();
+                        for (u32 ci = 0; ci < cards.size(); ++ci) {
+                            const auto& c = cards[ci];
+                            fprintf(meta, "%u,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u,%u,%u\n",
+                                    ci, c.mesh_instance_id, c.center.x, c.center.y, c.center.z,
+                                    c.extent.x, c.extent.y, c.extent.z,
+                                    c.axis_direction & 0xFFu, (c.axis_direction >> 8u) & 0xFFu,
+                                    u32(c.resolution), c.atlas_offset_x, c.atlas_offset_y);
+                        }
+                        fclose(meta);
+                    }
+                }
+                if (std::getenv("SPGI_RAY_TRI_AUDIT") && !std::getenv("SPGI_RAY_SAMPLES_FLOOR")) {
+                    struct RayTriHit {
+                        float distance, nx, ny, nz;
+                        u32 meshIndex, triangle;
+                    };
+                    if (FILE* triangles = fopen("/tmp/spgi_right_ray_triangles.csv", "w")) {
+                        fprintf(triangles, "probe_x,probe_y,ray_idx,sdf_hit_distance,triangle_distance,mesh_index,mesh_name,triangle,nx,ny,nz,normal_dot_ray\n");
+                        constexpr u32 kSampleOffset = 7u * 17u * 4u;
+                        const u32 slots[2] = {12u, 21u}; // (260,112)/0 and (310,112)/12
+                        for (u32 sampleIndex = 0; sampleIndex < 2; ++sampleIndex) {
+                            const float* sample = raw + kSampleOffset + slots[sampleIndex] * 16u;
+                            const float hitDistance = sample[3];
+                            const float direction[3] = {sample[8], sample[9], sample[10]};
+                            const float origin[3] = {
+                                sample[0] - direction[0] * hitDistance,
+                                sample[1] - direction[1] * hitDistance,
+                                sample[2] - direction[2] * hitDistance
+                            };
+                            std::vector<RayTriHit> hits;
+                            for (u32 mi = 0; mi < sceneMeshes_.size(); ++mi) {
+                                rhi::RHIMeshAsset mesh{};
+                                if (!primal::content::get_rhi_mesh_asset(sceneMeshes_[mi].meshEntityId, mesh) ||
+                                    (mesh.index_size != 2 && mesh.index_size != 4) ||
+                                    mesh.position_buffer.size() < size_t(mesh.num_vertices) * 12u ||
+                                    mesh.index_buffer.size() < size_t(mesh.num_indices) * mesh.index_size)
+                                    continue;
+                                auto indexAt = [&](u32 at) {
+                                    u32 index = 0;
+                                    if (mesh.index_size == 2) {
+                                        u16 shortIndex = 0;
+                                        std::memcpy(&shortIndex, mesh.index_buffer.data() + size_t(at) * 2u, 2);
+                                        index = shortIndex;
+                                    } else {
+                                        std::memcpy(&index, mesh.index_buffer.data() + size_t(at) * 4u, 4);
+                                    }
+                                    return index;
+                                };
+                                for (u32 ti = 0; ti + 2 < mesh.num_indices; ti += 3) {
+                                    const u32 ia = indexAt(ti), ib = indexAt(ti + 1), ic = indexAt(ti + 2);
+                                    if (ia >= mesh.num_vertices || ib >= mesh.num_vertices || ic >= mesh.num_vertices)
+                                        continue;
+                                    float a[3], b[3], c[3];
+                                    std::memcpy(a, mesh.position_buffer.data() + size_t(ia) * 12u, 12);
+                                    std::memcpy(b, mesh.position_buffer.data() + size_t(ib) * 12u, 12);
+                                    std::memcpy(c, mesh.position_buffer.data() + size_t(ic) * 12u, 12);
+                                    float e1[3], e2[3], p[3], q[3], tvec[3], normal[3];
+                                    for (u32 k = 0; k < 3; ++k) {
+                                        e1[k] = b[k] - a[k]; e2[k] = c[k] - a[k];
+                                        tvec[k] = origin[k] - a[k];
+                                    }
+                                    p[0] = direction[1]*e2[2] - direction[2]*e2[1];
+                                    p[1] = direction[2]*e2[0] - direction[0]*e2[2];
+                                    p[2] = direction[0]*e2[1] - direction[1]*e2[0];
+                                    const float det = e1[0]*p[0] + e1[1]*p[1] + e1[2]*p[2];
+                                    if (std::abs(det) < 1e-8f) continue;
+                                    const float invDet = 1.0f / det;
+                                    const float u = (tvec[0]*p[0] + tvec[1]*p[1] + tvec[2]*p[2]) * invDet;
+                                    if (u < -1e-5f || u > 1.00001f) continue;
+                                    q[0] = tvec[1]*e1[2] - tvec[2]*e1[1];
+                                    q[1] = tvec[2]*e1[0] - tvec[0]*e1[2];
+                                    q[2] = tvec[0]*e1[1] - tvec[1]*e1[0];
+                                    const float v = (direction[0]*q[0] + direction[1]*q[1] + direction[2]*q[2]) * invDet;
+                                    if (v < -1e-5f || u + v > 1.00001f) continue;
+                                    const float t = (e2[0]*q[0] + e2[1]*q[1] + e2[2]*q[2]) * invDet;
+                                    if (t < 1e-5f || t > std::max(1.0f, hitDistance + 0.5f)) continue;
+                                    normal[0] = e1[1]*e2[2] - e1[2]*e2[1];
+                                    normal[1] = e1[2]*e2[0] - e1[0]*e2[2];
+                                    normal[2] = e1[0]*e2[1] - e1[1]*e2[0];
+                                    const float nlen = std::sqrt(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]);
+                                    if (nlen < 1e-8f) continue;
+                                    hits.push_back({t, normal[0]/nlen, normal[1]/nlen, normal[2]/nlen,
+                                                    mi, ti / 3u});
+                                }
+                            }
+                            std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+                                return a.distance < b.distance;
+                            });
+                            for (u32 hi = 0; hi < hits.size() && hi < 64u; ++hi) {
+                                const auto& h = hits[hi];
+                                fprintf(triangles, "%u,112,%u,%.6f,%.6f,%u,%s,%u,%.6f,%.6f,%.6f,%.6f\n",
+                                        sampleIndex == 0 ? 260u : 310u, sampleIndex == 0 ? 0u : 12u,
+                                        hitDistance, h.distance, h.meshIndex, sceneMeshes_[h.meshIndex].name.c_str(),
+                                        h.triangle, h.nx, h.ny, h.nz,
+                                        h.nx*direction[0] + h.ny*direction[1] + h.nz*direction[2]);
+                            }
+                        }
+                        fclose(triangles);
+                        std::cerr << "[SPGI_RAY_TRI_AUDIT] wrote /tmp/spgi_right_ray_triangles.csv" << std::endl;
+                    }
+                }
+                device_->UnmapBuffer(sp->GetTraceStatsBuffer());
+            }
+        }
+    }
+
+    // [F3-V3 2026-09-20] SPONZA_SPGI_RAY_DUMP=<frame>: 逐射线 radiance 一次性
+    // readback（finalize 后的三缓冲槽，上帧内容）。输出 16 bin 亮度直方图 +
+    // 前 N 条射线样本（binary /tmp/spgi_rays.bin，float4 线性 HDR）——
+    // branch 统计之外的逐射线数值归因（能量不对称修复 F3 基建）。
+    static bool spgiRayDumped = false;
+    if (!spgiRayDumped && std::getenv("SPONZA_SPGI_RAY_DUMP")) {
+        const u32 dumpFrame = (u32)std::atoi(std::getenv("SPONZA_SPGI_RAY_DUMP"));
+        if (frameCount_ == dumpFrame) {
+            spgiRayDumped = true;
+            auto* sp = pipeline_->GetScreenProbePass();
+            if (sp && sp->GetRayRadianceBuffer(0) != handles::INVALID_RESOURCE) {
+                // [修正 2026-09-21] 射线数必须读实际 params（默认 48，T8.13
+                // 64→48）——此前硬编码 64 导致跨探针错位读（每探针末 16 lane
+                // 混入下一探针数据）。
+                const u32 rays = sp->GetParams().rays_per_probe;
+                const u32 gw = sp->GetGridWidth(), gh = sp->GetGridHeight();
+                const u64 count = (u64)gw * gh * rays;
+                if (void* m = device_->MapBuffer(sp->GetRayRadianceBuffer(dumpFrame - 1))) {
+                    const float* f = static_cast<const float*>(m);
+                    std::ofstream bin("/tmp/spgi_rays.bin", std::ios::binary);
+                    bin.write(reinterpret_cast<const char*>(f), count * 4 * sizeof(float));
+                    u32 hist[16] = {};
+                    u64 nz = 0, bad = 0;
+                    double sumL = 0.0;
+                    for (u64 i = 0; i < count; ++i) {
+                        const float* px = f + i * 4;
+                        const float lum = 0.2126f * px[0] + 0.7152f * px[1] + 0.0722f * px[2];
+                        if (!(lum >= 0.0f)) { ++bad; continue; }   // NaN/负值单独计
+                        if (lum > 0.0f) ++nz;
+                        sumL += lum;
+                        float lb = std::floor(std::log2(lum) + 8.0f);
+                        u32 b = (lb >= 0.0f && lb < 15.0f) ? (u32)lb : (lb <= 0.0f ? 0u : 15u);
+                        ++hist[b];
+                    }
+                    std::cerr << "[SPGI_RAY_DUMP] frame=" << dumpFrame << " rays=" << count
+                              << " nonzero=" << nz << " nonfinite=" << bad
+                              << " meanLumPos=" << (nz ? sumL / count : 0.0) << std::endl;
+                    for (u32 b = 0; b < 16; ++b) {
+                        const int lo = (int)b - 8;   // 有符号：避免 u32 下溢
+                        std::cerr << "  bin" << b << " [2^" << lo << "): " << hist[b] << std::endl;
+                    }
+                    device_->UnmapBuffer(sp->GetRayRadianceBuffer(dumpFrame - 1));
+                    std::cerr << "[SPGI_RAY_DUMP] raw float4 dumped to /tmp/spgi_rays.bin" << std::endl;
+                }
+            }
+        }
+    }
+
+    // CardFill bracket is read only after the captured frame has retired
+    // through the normal triple-buffered frame fences. Never Map GPU storage.
+    if (const char* prefix = std::getenv("SC_FILL_AUDIT_PREFIX")) {
+        if (auto* sc = pipeline_->GetSurfaceCachePass()) {
+            const auto audit = sc->GetCardFillAuditView();
+            static ResourceHandle lastWritten = handles::INVALID_RESOURCE;
+            if (audit.queued && audit.staging != lastWritten &&
+                frameCount_ >= audit.frame + 3u) {
+                const u64 segment = u64(audit.atlas_size) * audit.atlas_size * 4u;
+                if (const auto* bytes = static_cast<const char*>(device_->MapBuffer(audit.staging))) {
+                    std::ofstream raw(std::string(prefix) + "-bracket.raw", std::ios::binary);
+                    raw.write(bytes, std::streamsize(segment * 4u));
+                    const bool complete = bool(raw);
+                    device_->UnmapBuffer(audit.staging);
+                    bool sdfComplete = false;
+                    const u64 sdfBytes = u64(audit.sdf_resolution) * audit.sdf_resolution * audit.sdf_resolution * audit.sdf_stride;
+                    if (audit.sdf_stride && audit.sdf_staging != handles::INVALID_RESOURCE) {
+                        if (const auto* sdf = static_cast<const char*>(device_->MapBuffer(audit.sdf_staging))) {
+                            std::ofstream sdfRaw(std::string(prefix) + "-sdf.raw", std::ios::binary);
+                            sdfRaw.write(sdf, std::streamsize(sdfBytes));
+                            sdfComplete = bool(sdfRaw);
+                            device_->UnmapBuffer(audit.sdf_staging);
+                        }
+                    }
+                    std::ofstream meta(std::string(prefix) + "-meta.json");
+                    meta.precision(9);
+                    meta << "{\"frame\":" << audit.frame << ",\"read_frame\":" << frameCount_
+                         << ",\"atlas_size\":" << audit.atlas_size << ",\"bytes\":" << segment * 4u
+                         << ",\"complete\":" << (complete ? "true" : "false")
+                         << ",\"sdf_source0\":{\"offline\":" << (audit.offline_source ? "true" : "false")
+                         << ",\"count\":" << audit.sdf_count << ",\"res\":" << audit.sdf_resolution
+                         << ",\"stride\":" << audit.sdf_stride << ",\"bytes\":" << sdfBytes
+                         << ",\"complete\":" << (sdfComplete ? "true" : "false")
+                         << ",\"origin\":[" << audit.sdf_origin.x << ',' << audit.sdf_origin.y << ',' << audit.sdf_origin.z
+                         << "],\"extent\":[" << audit.sdf_extent.x << ',' << audit.sdf_extent.y << ',' << audit.sdf_extent.z
+                         << "]},\"cards\":[";
+                    const auto& cards = sc->GetCardFillAuditCards();
+                    for (size_t i = 0; i < cards.size(); ++i) {
+                        const auto& c = cards[i];
+                        if (i) meta << ',';
+                        meta << "{\"idx\":" << i << ",\"mesh_instance_id\":" << c.mesh_instance_id
+                             << ",\"res\":" << c.resolution << ",\"atlas_x\":" << c.atlas_offset_x
+                             << ",\"atlas_y\":" << c.atlas_offset_y << ",\"axis\":" << (c.axis_direction & 255u)
+                             << ",\"dir\":" << ((c.axis_direction >> 8u) & 255u)
+                             << ",\"center\":[" << c.center.x << ',' << c.center.y << ',' << c.center.z
+                             << "],\"extent\":[" << c.extent.x << ',' << c.extent.y << ',' << c.extent.z << "]}";
+                    }
+                    meta << "]}";
+                    if(audit.tables_staging!=handles::INVALID_RESOURCE) {
+                        bool tablesComplete=false,materialIdentical=false;
+                        if(const auto* tables=static_cast<const char*>(device_->MapBuffer(audit.tables_staging))) {
+                            std::ofstream resident(std::string(prefix)+"-tables.bin",std::ios::binary);
+                            resident.write(tables,std::streamsize(audit.instance_bytes+audit.material_bytes+160));
+                            const u64 cpuBytes=materialRegistry_->GetMaterialCount()*sizeof(primal::graphics::nanite::GPUMaterialRegistry::MaterialData);
+                            materialIdentical=cpuBytes==audit.material_bytes &&
+                                std::memcmp(tables+audit.instance_bytes,materialRegistry_->GetMaterialData(),size_t(cpuBytes))==0;
+                            std::ofstream expected(std::string(prefix)+"-cpu-material.bin",std::ios::binary);
+                            expected.write(reinterpret_cast<const char*>(materialRegistry_->GetMaterialData()),std::streamsize(cpuBytes));
+                            tablesComplete=bool(resident) && bool(expected);
+                            device_->UnmapBuffer(audit.tables_staging);
+                        }
+                        std::ofstream tableMeta(std::string(prefix)+"-material-meta.json");
+                        tableMeta << "{\"complete\":" << (tablesComplete?"true":"false")
+                            << ",\"material_upload_bit_identical\":" << (materialIdentical?"true":"false")
+                            << ",\"frame\":" << audit.frame << ",\"read_frame\":" << frameCount_
+                            << ",\"instance_bytes\":" << audit.instance_bytes << ",\"material_bytes\":" << audit.material_bytes
+                            << ",\"cb_bytes\":160,\"instance_stride\":192,\"material_stride\":48"
+                            << ",\"instance_source\":" << audit.instance_source << ",\"material_source\":" << audit.material_source
+                            << ",\"albedo_source\":" << audit.albedo_source
+                            << ",\"albedo_size\":[" << audit.albedo_width << ',' << audit.albedo_height << ',' << audit.albedo_layers
+                            << "],\"expected_instances\":[";
+                        for(size_t i=0;i<sceneMeshes_.size();++i) {
+                            if(i) tableMeta << ',';
+                            tableMeta << "{\"mesh\":" << i << ",\"geometry_id\":" << sceneMeshes_[i].meshEntityId
+                                      << ",\"material_id\":" << sceneMeshes_[i].gpuMaterialId << '}';
+                        }
+                        tableMeta << "]}";
+                        PRIMAL_LOG_STREAM(Info,"Render") << "[SC_FILL_MATERIAL_AUDIT] complete=" << tablesComplete
+                            << " material_bit_identical=" << materialIdentical;
+                    }
+                    lastWritten = audit.staging;
+                    PRIMAL_LOG_STREAM(Info,"Render") << "[SC_FILL_AUDIT] capture=" << audit.frame
+                        << " read=" << frameCount_ << " complete=" << complete << std::endl;
+                }
             }
         }
     }
@@ -2192,20 +3365,944 @@ void TestVulkanSponzaRenderGraph::Run() {
     // cross-nave energy" without guessing from screen pixels.
     // DDGI_DUMP=2 (requires a DDGI_PATH_DEBUG-compiled finalize kernel) reads
     // back the full probe×ray buffer instead and aggregates which hit-radiance
-    // path fired: distance fraction 1=SC atlas, 2=prev-screen, 3=analytic.
+    // path fired: distance mantissa low bits 1=SC atlas, 2=prev-screen,
+    // 3=analytic. Geometric distance remains intact for depth moments.
     static bool ddgiDumped = false;
     const char* dumpEnv = std::getenv("DDGI_DUMP");
-    if (!ddgiDumped && dumpEnv && frameCount_ == 350) {
+    const char* dumpFrameEnv = std::getenv("DDGI_DUMP_FRAME");
+    const u32 dumpFrame = dumpFrameEnv ? u32(std::strtoul(dumpFrameEnv, nullptr, 10)) : 350u;
+    bool dumpDue = frameCount_ == dumpFrame;
+    if (const char* targetEnv = std::getenv("DDGI_DUMP_TARGET_PROBE")) {
+        // A target probe may be updated on a different frame in each run
+        // because the adaptive per-frame budget is wall-clock sensitive.
+        // Wait for its actual CPU scheduler selection before reading rays.
+        const u32 target = u32(std::strtoul(targetEnv, nullptr, 10));
+        auto* targetPass = pipeline_->GetDDGIPass();
+        // Bounded target search also works for late steady-state captures.
+        const u64 targetEnd = u64(dumpFrame) + 50u;
+        dumpDue = frameCount_ >= dumpFrame && u64(frameCount_) <= targetEnd &&
+                  targetPass && targetPass->GetProbeLastUpdateFrame(target) == frameCount_;
+    }
+    if (!ddgiDumped && dumpEnv && dumpDue) {
         ddgiDumped = true;
+
+        // SC_CAPTURE_SOURCE_AUDIT is intentionally drained only from the
+        // checked DDGI_DUMP=2 retirement point.  The writer image and the
+        // resident Nanite source buffers are copied by one standalone graphics
+        // command, then mapped only after its completion fence.
+        const char* scAuditEnv = std::getenv("SC_CAPTURE_SOURCE_AUDIT");
+        if (dumpEnv[0] == '2' && scAuditEnv && std::strcmp(scAuditEnv, "1") == 0) {
+            static bool scWriterDumped = false;
+            if (!scWriterDumped) {
+                scWriterDumped = true;
+                struct WriterSource {
+                    const char* key;
+                    const char* rawFile;
+                    ResourceHandle handle;
+                    u64 bytes;
+                    u32 stride;
+                    u32 validCount;
+                    ResourceHandle staging;
+                };
+                struct GeometryWitness {
+                    const char* key;
+                    const char* rawFile;
+                    ResourceHandle handle;
+                    u32 width;
+                    u32 height;
+                    DataFormat format;
+                    u64 bytes;
+                    ResourceHandle staging;
+                };
+                constexpr u64 kMaxWriterBufferBytes = 256ull * 1024ull * 1024ull;
+                constexpr u64 kMaxGeometryAggregateBytes = 384ull * 1024ull * 1024ull;
+                auto& draw = nanite::GPUDrivenDrawPipeline::Get();
+                auto* sc = pipeline_ ? pipeline_->GetSurfaceCachePass() : nullptr;
+                const char* scGeometryEnv = std::getenv("SC_CAPTURE_GEOMETRY_AUDIT");
+                const bool geometryRequested =
+                    scGeometryEnv && std::strcmp(scGeometryEnv, "1") == 0;
+                const ResourceHandle writer = sc ? sc->GetSourceWriterAtlas()
+                                                  : handles::INVALID_RESOURCE;
+                u32 writerW = 0, writerH = 0;
+                const DataFormat writerFormat =
+                    writer != handles::INVALID_RESOURCE ? device_->GetTextureFormat(writer)
+                                                         : DataFormat::Unknown;
+                const bool writerSized = writer != handles::INVALID_RESOURCE &&
+                    device_->GetTextureSize(writer, writerW, writerH);
+                const auto textureBytes = [](u32 width, u32 height) -> u64 {
+                    if (width == 0 || height == 0) return 0;
+                    const u64 pixels = u64(width) * u64(height);
+                    if (pixels > std::numeric_limits<u64>::max() / 16u) return 0;
+                    return pixels * 16u;
+                };
+                const u64 writerBytes = textureBytes(writerW, writerH);
+
+                WriterSource sources[] = {
+                    {"positions", "ddgi_sc_writer_positions.raw",
+                        draw.GetGlobalVertexBuffer(), 0, 12, 0, handles::INVALID_RESOURCE},
+                    {"meshlets", "ddgi_sc_writer_meshlets.raw",
+                        draw.GetGlobalMeshletBuffer(), 0, u32(sizeof(rhi::RHIMeshlet)),
+                        draw.GetTotalMeshletCount(), handles::INVALID_RESOURCE},
+                    {"meshlet_vertices", "ddgi_sc_writer_meshlet_vertices.raw",
+                        draw.GetGlobalMeshletVerticesBuffer(), 0, 4, 0, handles::INVALID_RESOURCE},
+                    {"meshlet_triangles", "ddgi_sc_writer_meshlet_triangles.raw",
+                        draw.GetGlobalMeshletTrianglesBuffer(), 0, 1, 0, handles::INVALID_RESOURCE},
+                    {"cluster_map", "ddgi_sc_writer_cluster_map.raw",
+                        draw.GetClusterMapBuffer(), 0, 16, draw.GetClusterMapEntryCount(),
+                        handles::INVALID_RESOURCE},
+                    {"instances", "ddgi_sc_writer_instances.raw",
+                        draw.GetGlobalInstanceDataBuffer(), 0, 192, 0, handles::INVALID_RESOURCE},
+                    {"materials", "ddgi_sc_writer_materials.raw",
+                        draw.GetMaterialDataBuffer(), 0, 48, 0, handles::INVALID_RESOURCE},
+                };
+                GeometryWitness geometry[] = {
+                    {"point", "ddgi_sc_capture_world_point.raw",
+                        sc ? sc->GetGeometryWitness(0) : handles::INVALID_RESOURCE,
+                        0, 0, DataFormat::Unknown, 0, handles::INVALID_RESOURCE},
+                    {"triangle0", "ddgi_sc_capture_triangle0.raw",
+                        sc ? sc->GetGeometryWitness(1) : handles::INVALID_RESOURCE,
+                        0, 0, DataFormat::Unknown, 0, handles::INVALID_RESOURCE},
+                    {"triangle1", "ddgi_sc_capture_triangle1.raw",
+                        sc ? sc->GetGeometryWitness(2) : handles::INVALID_RESOURCE,
+                        0, 0, DataFormat::Unknown, 0, handles::INVALID_RESOURCE},
+                    {"triangle2", "ddgi_sc_capture_triangle2.raw",
+                        sc ? sc->GetGeometryWitness(3) : handles::INVALID_RESOURCE,
+                        0, 0, DataFormat::Unknown, 0, handles::INVALID_RESOURCE},
+                };
+
+                bool metadataComplete = sc && sc->IsSourceWriterAuditEnabled() &&
+                    !sc->IsSourceWriterAuditFailed() &&
+                    writer != handles::INVALID_RESOURCE && writerSized &&
+                    writerFormat == DataFormat::RGBA32_UInt && writerW == writerH &&
+                    writerBytes > 0 && writerBytes <= kMaxWriterBufferBytes;
+                bool explicitDependencies = false;
+                bool beginEndSubmitChecked = false;
+                bool completionChecked = false;
+                bool mapAfterCompletion = false;
+                bool readbackCompleted = false;
+                std::string failure;
+
+                auto fail = [&](const char* why) {
+                    metadataComplete = false;
+                    if (failure.empty()) failure = why;
+                };
+                if (!metadataComplete) fail("writer_binding_or_extent_invalid");
+
+                u64 geometryAggregateBytes = writerBytes;
+                bool geometryPrerequisites = !geometryRequested;
+                if (geometryRequested) {
+                    geometryPrerequisites = sc && sc->IsGeometryAuditEnabled() &&
+                        !sc->IsGeometryAuditFailed() && metadataComplete;
+                    for (auto& witness : geometry) {
+                        if (witness.handle == handles::INVALID_RESOURCE ||
+                            !device_->GetTextureSize(witness.handle, witness.width, witness.height)) {
+                            geometryPrerequisites = false;
+                            continue;
+                        }
+                        witness.format = device_->GetTextureFormat(witness.handle);
+                        witness.bytes = textureBytes(witness.width, witness.height);
+                        if (witness.width == 0 || witness.height == 0 ||
+                            witness.width != writerW || witness.height != writerH ||
+                            witness.format != DataFormat::RGBA32_UInt ||
+                            witness.bytes == 0 || witness.bytes > kMaxWriterBufferBytes) {
+                            geometryPrerequisites = false;
+                        }
+                        geometryAggregateBytes += witness.bytes;
+                    }
+                    if (!geometryPrerequisites ||
+                        geometryAggregateBytes > kMaxGeometryAggregateBytes) {
+                        fail("geometry_witness_binding_or_capacity_invalid");
+                    }
+                }
+
+                auto* vk = static_cast<VulkanDevice*>(device_);
+                for (auto& source : sources) {
+                    if (source.handle == handles::INVALID_RESOURCE ||
+                        !vk->GetBufferByteSize(source.handle, source.bytes) ||
+                        source.bytes == 0 || source.bytes > kMaxWriterBufferBytes) {
+                        fail("resident_source_buffer_invalid_or_over_capacity");
+                        continue;
+                    }
+                    if (source.stride == 0 || source.bytes % source.stride != 0) {
+                        fail("resident_source_stride_mismatch");
+                    }
+                }
+
+                ResourceHandle writerStage = handles::INVALID_RESOURCE;
+                CommandBufferHandle readbackCommand = handles::INVALID_COMMAND_BUFFER;
+                auto makeStage = [&](u64 bytes, const char* name) -> ResourceHandle {
+                    if (bytes == 0 || bytes > kMaxWriterBufferBytes) return handles::INVALID_RESOURCE;
+                    BufferDesc desc{};
+                    desc.size = bytes;
+                    desc.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                    desc.usage = GPUMemoryUsage::Readback;
+                    desc.memoryUsage = GPUMemoryUsage::Readback;
+                    desc.name = name;
+                    return device_->CreateBuffer(desc);
+                };
+                if (metadataComplete) {
+                    writerStage = makeStage(writerBytes, "SC_SourceWriter_Readback");
+                    if (writerStage == handles::INVALID_RESOURCE) fail("writer_staging_allocation_failed");
+                    for (auto& source : sources) {
+                        if (!metadataComplete) break;
+                        source.staging = makeStage(source.bytes, source.key);
+                        if (source.staging == handles::INVALID_RESOURCE)
+                            fail("source_staging_allocation_failed");
+                    }
+                    if (geometryRequested) {
+                        for (auto& witness : geometry) {
+                            if (!metadataComplete) break;
+                            witness.staging = makeStage(witness.bytes, witness.key);
+                            if (witness.staging == handles::INVALID_RESOURCE)
+                                fail("geometry_witness_staging_allocation_failed");
+                        }
+                    }
+                }
+
+                if (metadataComplete) {
+                    readbackCommand = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (readbackCommand == handles::INVALID_COMMAND_BUFFER) {
+                        fail("graphics_readback_command_allocation_failed");
+                    } else {
+                        auto* cmd = vk->GetCommandBuffer(readbackCommand);
+                        const bool resetOk = cmd && cmd->Reset();
+                        const bool beginOk = resetOk && cmd->Begin();
+                        if (!beginOk) {
+                            fail("graphics_readback_begin_failed");
+                        } else {
+                            // InsertBarrier intentionally does not certify
+                            // buffers on Vulkan.  This explicit dependency
+                            // covers the real writer color attachment, CardFill
+                            // image writes, resident source visibility, and
+                            // host-visible upload writes.
+                            cmd->MemoryBarrier(
+                                PipelineStage::ColorAttachmentOutput |
+                                    PipelineStage::ComputeShader |
+                                    PipelineStage::Host |
+                                    PipelineStage::AllCommands,
+                                PipelineStage::Transfer,
+                                AccessFlag::ColorAttachmentWrite |
+                                    AccessFlag::ShaderRead |
+                                    AccessFlag::ShaderWrite |
+                                    AccessFlag::MemoryWrite |
+                                    AccessFlag::HostWrite |
+                                    AccessFlag::TransferWrite,
+                                AccessFlag::TransferRead);
+                            explicitDependencies = true;
+
+                            ResourceBarrier writerToCopy{};
+                            writerToCopy.resource = writer;
+                            writerToCopy.beforeState =
+                                (sc && sc->IsSourceWriterAtlasInUAV())
+                                    ? ResourceState::UnorderedAccess
+                                    : ResourceState::ShaderResource;
+                            writerToCopy.afterState = ResourceState::CopySource;
+                            writerToCopy.subresource = 0xFFFFFFFF;
+                            cmd->InsertBarrier(&writerToCopy, 1);
+                            BufferTextureCopyRegion region{};
+                            region.bufferOffset = 0;
+                            region.bufferRowLength = writerW;
+                            region.bufferImageHeight = writerH;
+                            region.imageSubresource = {0, 0, 1};
+                            region.imageExtent = {writerW, writerH, 1};
+                            cmd->CopyTextureToBuffer(writer, writerStage, &region, 1);
+                            ResourceBarrier writerBack = writerToCopy;
+                            writerBack.beforeState = ResourceState::CopySource;
+                            writerBack.afterState = ResourceState::UnorderedAccess;
+                            cmd->InsertBarrier(&writerBack, 1);
+
+                            if (geometryRequested) {
+                                for (auto& witness : geometry) {
+                                    ResourceBarrier witnessToCopy{};
+                                    witnessToCopy.resource = witness.handle;
+                                    witnessToCopy.beforeState =
+                                        (sc && sc->IsGeometryWitnessInUAV())
+                                            ? ResourceState::UnorderedAccess
+                                            : ResourceState::ShaderResource;
+                                    witnessToCopy.afterState = ResourceState::CopySource;
+                                    witnessToCopy.subresource = 0xFFFFFFFF;
+                                    cmd->InsertBarrier(&witnessToCopy, 1);
+                                    BufferTextureCopyRegion witnessRegion{};
+                                    witnessRegion.bufferOffset = 0;
+                                    witnessRegion.bufferRowLength = witness.width;
+                                    witnessRegion.bufferImageHeight = witness.height;
+                                    witnessRegion.imageSubresource = {0, 0, 1};
+                                    witnessRegion.imageExtent = {witness.width, witness.height, 1};
+                                    cmd->CopyTextureToBuffer(witness.handle, witness.staging,
+                                                              &witnessRegion, 1);
+                                    ResourceBarrier witnessBack = witnessToCopy;
+                                    witnessBack.beforeState = ResourceState::CopySource;
+                                    witnessBack.afterState = ResourceState::UnorderedAccess;
+                                    cmd->InsertBarrier(&witnessBack, 1);
+                                }
+                            }
+
+                            for (auto& source : sources) {
+                                cmd->CopyBuffer(source.handle, source.staging, 0, 0, source.bytes);
+                            }
+                            cmd->MemoryBarrier(
+                                PipelineStage::Transfer,
+                                PipelineStage::Host,
+                                AccessFlag::TransferWrite,
+                                AccessFlag::HostRead);
+                            const bool endOk = cmd->End();
+                            const bool submitOk = endOk && cmd->Submit();
+                            beginEndSubmitChecked = resetOk && beginOk && endOk && submitOk;
+                            if (!endOk || !submitOk) {
+                                fail("graphics_readback_end_or_submit_failed");
+                            } else {
+                                completionChecked = cmd->WaitForCompletion();
+                                readbackCompleted = completionChecked;
+                                if (!completionChecked) fail("graphics_readback_completion_failed");
+                            }
+                        }
+                    }
+                }
+
+                bool rawComplete = metadataComplete && readbackCompleted;
+                auto saveMappedRaw = [&](ResourceHandle stage, u64 bytes, const std::string& path) {
+                    if (!rawComplete || stage == handles::INVALID_RESOURCE) return false;
+                    const auto* mapped = static_cast<const char*>(device_->MapBuffer(stage));
+                    if (!mapped) return false;
+                    mapAfterCompletion = completionChecked;
+                    std::ofstream raw(path, std::ios::binary);
+                    raw.write(mapped, static_cast<std::streamsize>(bytes));
+                    const bool ok = bool(raw);
+                    device_->UnmapBuffer(stage);
+                    return ok;
+                };
+                const bool writerRaw = saveMappedRaw(writerStage, writerBytes,
+                                                     "/tmp/ddgi_sc_writer.raw");
+                rawComplete = rawComplete && writerRaw;
+                for (auto& source : sources) {
+                    const bool ok = saveMappedRaw(source.staging, source.bytes,
+                                                  std::string("/tmp/") + source.rawFile);
+                    rawComplete = rawComplete && ok;
+                }
+                bool geometryRawComplete = !geometryRequested;
+                if (geometryRequested) {
+                    geometryRawComplete = rawComplete;
+                    for (auto& witness : geometry) {
+                        const bool ok = saveMappedRaw(witness.staging, witness.bytes,
+                            std::string("/tmp/") + witness.rawFile);
+                        geometryRawComplete = geometryRawComplete && ok;
+                        rawComplete = rawComplete && ok;
+                    }
+                }
+                metadataComplete = metadataComplete && rawComplete && mapAfterCompletion;
+
+                if (readbackCommand != handles::INVALID_COMMAND_BUFFER)
+                    device_->DestroyCommandBuffer(readbackCommand);
+                if (writerStage != handles::INVALID_RESOURCE)
+                    device_->DestroyBuffer(writerStage);
+                for (auto& source : sources) {
+                    if (source.staging != handles::INVALID_RESOURCE)
+                        device_->DestroyBuffer(source.staging);
+                }
+                for (auto& witness : geometry) {
+                    if (witness.staging != handles::INVALID_RESOURCE)
+                        device_->DestroyBuffer(witness.staging);
+                }
+
+                std::ofstream meta("/tmp/ddgi_sc_writer_meta.json");
+                const bool geometryComplete = geometryRequested && geometryRawComplete &&
+                    metadataComplete && readbackCompleted && beginEndSubmitChecked &&
+                    completionChecked && explicitDependencies && mapAfterCompletion;
+                auto writeGeometryEntry = [&](const GeometryWitness& witness) {
+                    meta << '\"' << witness.key << "\":{\"raw_file\":\""
+                         << witness.rawFile << "\",\"bytes\":" << witness.bytes
+                         << ",\"resource_handle\":" << witness.handle
+                         << ",\"runtime_format\":"
+                         << static_cast<u32>(witness.format)
+                         << ",\"extent\":[" << witness.width << ',' << witness.height << "]}";
+                };
+                meta << "{\"schema\":\"ddgi_sc_writer_v1\",\"complete\":"
+                     << (metadataComplete ? "true" : "false")
+                     << ",\"readback_completed\":" << (readbackCompleted ? "true" : "false")
+                     << ",\"begin_end_submit_checked\":" << (beginEndSubmitChecked ? "true" : "false")
+                     << ",\"completion_checked\":" << (completionChecked ? "true" : "false")
+                     << ",\"explicit_buffer_dependencies\":" << (explicitDependencies ? "true" : "false")
+                     << ",\"map_after_completion\":" << (mapAfterCompletion ? "true" : "false")
+                     << ",\"frame\":" << frameCount_
+                     << ",\"atlas_size\":" << writerW
+                     << ",\"format\":\"RGBA32_UInt\""
+                     << ",\"writer_raw_file\":\"ddgi_sc_writer.raw\""
+                     << ",\"writer_bytes\":" << writerBytes
+                     << ",\"source_handle\":" << writer
+                     << ",\"runtime_format\":" << static_cast<u32>(writerFormat)
+                     << ",\"writer_extent\":[" << writerW << ',' << writerH << "]"
+                     << ",\"static_scene_assumption\":true"
+                     << ",\"historical_source_identity_verified\":false";
+                if (geometryRequested) {
+                    meta << ",\"geometry_witness\":{\"schema\":\"sc_capture_geometry_v1\",\"complete\":"
+                         << (geometryComplete ? "true" : "false")
+                         << ",\"readback_completed\":" << (readbackCompleted ? "true" : "false")
+                         << ",\"begin_end_submit_checked\":"
+                         << (beginEndSubmitChecked ? "true" : "false")
+                         << ",\"completion_checked\":" << (completionChecked ? "true" : "false")
+                         << ",\"explicit_buffer_dependencies\":"
+                         << (explicitDependencies ? "true" : "false")
+                         << ",\"map_after_completion\":"
+                         << (mapAfterCompletion ? "true" : "false")
+                         << ",\"aggregate_bytes\":" << geometryAggregateBytes
+                     << ",\"capacity_bytes\":" << kMaxGeometryAggregateBytes
+                     << ",\"device_max_render_targets\":"
+                         << device_->GetDeviceInfo().maxRenderTargets
+                         << ",\"device_max_texture_2d_size\":"
+                         << device_->GetDeviceInfo().maxTexture2DSize << ',';
+                    writeGeometryEntry(geometry[0]);
+                    meta << ',';
+                    writeGeometryEntry(geometry[1]);
+                    meta << ',';
+                    writeGeometryEntry(geometry[2]);
+                    meta << ',';
+                    writeGeometryEntry(geometry[3]);
+                    meta << '}';
+                }
+                meta
+                     << ",\"sources\":{";
+                for (size_t i = 0; i < std::size(sources); ++i) {
+                    if (i) meta << ',';
+                    const auto& source = sources[i];
+                    meta << '"' << source.key << "\":{\"raw_file\":\""
+                         << source.rawFile << "\",\"bytes\":" << source.bytes
+                         << ",\"resource_handle\":" << source.handle
+                         << ",\"stride\":" << source.stride;
+                    if (std::strcmp(source.key, "meshlets") == 0 ||
+                        std::strcmp(source.key, "cluster_map") == 0) {
+                        meta << ",\"valid_count\":" << source.validCount;
+                    }
+                    meta << '}';
+                }
+                meta << '}';
+                if (!failure.empty()) meta << ",\"error\":\"" << failure << "\"";
+                meta << "}\n";
+                if (metadataComplete) {
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[SC_CAPTURE_SOURCE_AUDIT] raw_complete=true "
+                        << "writer=/tmp/ddgi_sc_writer.raw" << std::endl;
+                    if (geometryRequested && geometryComplete) {
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[SC_CAPTURE_GEOMETRY_AUDIT] raw_complete=true "
+                            << "point=/tmp/ddgi_sc_capture_world_point.raw"
+                            << " triangle0=/tmp/ddgi_sc_capture_triangle0.raw"
+                            << " triangle1=/tmp/ddgi_sc_capture_triangle1.raw"
+                            << " triangle2=/tmp/ddgi_sc_capture_triangle2.raw"
+                            << std::endl;
+                    }
+                } else {
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << (geometryRequested ? "[SC_CAPTURE_GEOMETRY_AUDIT] "
+                                              : "[SC_CAPTURE_SOURCE_AUDIT] ")
+                        << "readback incomplete; diagnostic evidence closed" << std::endl;
+                }
+            }
+        }
+
         auto* pass = pipeline_->GetDDGIPass();
         if (!pass) return;
-        u32 fidx = renderSystem_.GetCurrentFrameIndex();
+        // This diagnostic executes after RenderSystem::EndFrame(), which has
+        // already advanced the swapchain slot. DDGI is keyed by the absolute
+        // frame number passed to AddPass, not that next-frame swapchain slot.
+        const u32 fidx = frameCount_;
         auto vol = pass->GetVolumeView(fidx);
         std::cerr << "[DDGI_DUMP] valid=" << vol.IsValid()
                   << " origin=(" << vol.origin.x << "," << vol.origin.y << "," << vol.origin.z << ")"
                   << " counts=(" << vol.counts.x << "," << vol.counts.y << "," << vol.counts.z << ")"
                   << " spacing=" << vol.spacing << std::endl;
         if (!vol.IsValid()) return;
+        if (dumpEnv[0] == '8') {
+            // Read-only triangle oracle for mode5 depth-only rays. Only the
+            // latest update-list slots are valid; never audit stale distances.
+            const auto vd = pass->GetVolumeData();
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_DEPTH_TRI_AUDIT] evidence_mode=" << vd.SdfVoxelSizes[0].y << std::endl;
+            if (vd.RaySampleMode != 5 && vd.RaySampleMode != 0) {
+                std::cerr << "[DDGI_DEPTH_TRI_AUDIT] supports legacy0 or depth-only5 split trace" << std::endl;
+                return;
+            }
+            const bool depthOnlyAudit = vd.RaySampleMode == 5;
+            const u32 auditRayCount = depthOnlyAudit ? 128u : vd.RaysPerProbe;
+            std::vector<u32> auditProbes{409u, 410u, 507u};
+            if (const char* requested = std::getenv("DDGI_DEPTH_TRI_PROBES")) {
+                auditProbes.clear();
+                std::istringstream input(requested);
+                std::string token;
+                while (std::getline(input, token, ',')) {
+                    char* end = nullptr;
+                    const auto probe = std::strtoul(token.c_str(), &end, 10);
+                    if (token.empty() || end == token.c_str() || *end != '\0' || probe >= vd.ProbeCountTotal) {
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI_DEPTH_TRI_AUDIT] invalid probe list" << std::endl;
+                        return;
+                    }
+                    if (std::find(auditProbes.begin(), auditProbes.end(), u32(probe)) == auditProbes.end())
+                        auditProbes.push_back(u32(probe));
+                }
+                if (auditProbes.empty() || std::string(requested).back() == ',') return;
+            }
+            auto readBytes = [&](ResourceHandle source, u64 offset, u64 bytes) {
+                std::vector<u8> result;
+                if (source == handles::INVALID_RESOURCE || !bytes) return result;
+                BufferDesc desc{};
+                desc.size = bytes;
+                desc.usage = GPUMemoryUsage::Readback;
+                desc.memoryUsage = GPUMemoryUsage::Readback;
+                const auto stage = device_->CreateBuffer(desc);
+                const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER) {
+                    auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                    cmd->Begin();
+                    ResourceBarrier barrier{};
+                    barrier.resource = source;
+                    barrier.beforeState = ResourceState::UnorderedAccess;
+                    barrier.afterState = ResourceState::CopySource;
+                    cmd->InsertBarrier(&barrier, 1);
+                    cmd->CopyBuffer(source, stage, offset, 0, bytes);
+                    std::swap(barrier.beforeState, barrier.afterState);
+                    cmd->InsertBarrier(&barrier, 1);
+                    cmd->End(); cmd->Submit(); cmd->WaitForCompletion();
+                    if (const auto* data = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                        result.assign(data, data + bytes);
+                        device_->UnmapBuffer(stage);
+                    }
+                }
+                if (command != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(command);
+                if (stage != handles::INVALID_RESOURCE) device_->DestroyBuffer(stage);
+                return result;
+            };
+            const u32 updates = std::min(vd.ProbeUpdateCount, vd.ProbeCountTotal);
+            const auto listBytes = readBytes(pass->GetProbeUpdateListBuffer(fidx), 0, u64(updates) * 4u);
+            const auto originBytes = readBytes(pass->GetRelocatedOriginsBuffer(), 0, u64(vd.ProbeCountTotal) * 16u);
+            const auto hitBytes = readBytes(pass->GetHitDistanceBuffer(),
+                depthOnlyAudit ? u64(vd.ProbeCountTotal) * vd.RaysPerProbe * 4u : 0u,
+                u64(updates) * auditRayCount * 4u);
+            const auto radianceBytes = depthOnlyAudit ? readBytes(pass->GetHitDistanceBuffer(),
+                0, u64(updates) * vd.RaysPerProbe * 4u) : hitBytes;
+            const auto colorBytes = readBytes(pass->GetRayDataBuffer(), 0,
+                u64(vd.ProbeCountTotal) * vd.RaysPerProbe * 16u);
+            if (listBytes.empty() || originBytes.empty() || hitBytes.empty() || radianceBytes.empty() || colorBytes.empty()) {
+                PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_DEPTH_TRI_AUDIT] incomplete readback updates=" << updates
+                    << " list=" << listBytes.size() << " origins=" << originBytes.size() << " hits=" << hitBytes.size()
+                    << " radiance=" << radianceBytes.size() << " colors=" << colorBytes.size() << std::endl;
+                return;
+            }
+            const auto* listed = reinterpret_cast<const u32*>(listBytes.data());
+            const auto* origins = reinterpret_cast<const math::v4*>(originBytes.data());
+            const auto* distances = reinterpret_cast<const float*>(hitBytes.data());
+            const auto* radianceDistances = reinterpret_cast<const float*>(radianceBytes.data());
+            const auto* rayColors = reinterpret_cast<const float*>(colorBytes.data());
+            // Both arrays are update-slot indexed, not absolute-probe indexed.
+            // Export raw trace signs to independently reconcile mode5's extras
+            // with the same-frame provenance (extras are consumed only in bins
+            // without a radiance hit). No new rendering resource or dispatch.
+            if (FILE* rays = fopen("/tmp/ddgi_depth_radiance.csv", "w")) {
+                fprintf(rays, "frame,probe_index,slot,ray_index,sdf_distance,rad_r,rad_g,rad_b,final_distance\n");
+                for (u32 slot = 0; slot < updates; ++slot) {
+                    if (std::find(auditProbes.begin(), auditProbes.end(), listed[slot]) == auditProbes.end()) continue;
+                    for (u32 ray = 0; ray < vd.RaysPerProbe; ++ray) {
+                        const auto* color = rayColors + (u64(listed[slot]) * vd.RaysPerProbe + ray) * 4u;
+                        fprintf(rays, "%u,%u,%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g\n", frameCount_, listed[slot], slot, ray,
+                            radianceDistances[slot * vd.RaysPerProbe + ray], color[0], color[1], color[2], color[3]);
+                    }
+                }
+                fclose(rays);
+            }
+            if (FILE* meta = fopen("/tmp/ddgi_depth_audit_meta.json", "w")) {
+                fprintf(meta, "{\"frame\":%u,\"ddgi_frame\":%u,\"mode\":%d,\"rays_per_probe\":%u,\"ray_max_m\":%.9g,\"evidence_mode\":%.9g,\"depth_only_evidence_mode\":%.9g,\"requested_probes\":[",
+                    frameCount_, vd.FrameIndex, vd.RaySampleMode, vd.RaysPerProbe, vd.RayMaxDistance, vd.SdfVoxelSizes[0].y, vd.SdfVoxelSizes[1].w);
+                for (size_t i = 0; i < auditProbes.size(); ++i) fprintf(meta, "%s%u", i ? "," : "", auditProbes[i]);
+                fprintf(meta, "]}\n");
+                fclose(meta);
+            }
+            struct OracleTriangle { float a[3], e1[3], e2[3], lo[3], hi[3]; u32 mesh, index; };
+            std::vector<OracleTriangle> triangles;
+            // All loaded Sponza transforms are identity; RHIMeshAsset positions
+            // are exactly the world geometry drawn by this test (double-sided
+            // intersection includes cloth as geometry, not alpha-test holes).
+            for (u32 mi = 0; mi < sceneMeshes_.size(); ++mi) {
+                rhi::RHIMeshAsset mesh{};
+                if (!primal::content::get_rhi_mesh_asset(sceneMeshes_[mi].meshEntityId, mesh) ||
+                    (mesh.index_size != 2 && mesh.index_size != 4) ||
+                    mesh.position_buffer.size() < size_t(mesh.num_vertices) * 12u ||
+                    mesh.index_buffer.size() < size_t(mesh.num_indices) * mesh.index_size) continue;
+                auto indexAt = [&](u32 at) {
+                    u32 index = 0;
+                    std::memcpy(&index, mesh.index_buffer.data() + size_t(at) * mesh.index_size, mesh.index_size);
+                    return index;
+                };
+                for (u32 ti = 0; ti + 2 < mesh.num_indices; ti += 3) {
+                    const u32 ia = indexAt(ti), ib = indexAt(ti+1), ic = indexAt(ti+2);
+                    if (ia >= mesh.num_vertices || ib >= mesh.num_vertices || ic >= mesh.num_vertices) continue;
+                    OracleTriangle tri{};
+                    float b[3], c[3];
+                    std::memcpy(tri.a, mesh.position_buffer.data() + size_t(ia) * 12u, 12);
+                    std::memcpy(b, mesh.position_buffer.data() + size_t(ib) * 12u, 12);
+                    std::memcpy(c, mesh.position_buffer.data() + size_t(ic) * 12u, 12);
+                    for (u32 k = 0; k < 3; ++k) {
+                        tri.e1[k] = b[k] - tri.a[k]; tri.e2[k] = c[k] - tri.a[k];
+                        tri.lo[k] = std::min({tri.a[k], b[k], c[k]}) - 1e-5f;
+                        tri.hi[k] = std::max({tri.a[k], b[k], c[k]}) + 1e-5f;
+                    }
+                    tri.mesh = mi; tri.index = ti / 3u;
+                    triangles.push_back(tri);
+                }
+            }
+            if (std::getenv("SDF_TRACE_REPLAY")) {
+                // Shared read-only geometry oracle for CPU replay hit points:
+                // float32 little-endian a/e1/e2, nine floats per triangle.
+                std::ofstream geometry("/tmp/ddgi_oracle_triangles.bin", std::ios::binary);
+                for (const auto& tri : triangles) {
+                    geometry.write(reinterpret_cast<const char*>(tri.a), 12);
+                    geometry.write(reinterpret_cast<const char*>(tri.e1), 12);
+                    geometry.write(reinterpret_cast<const char*>(tri.e2), 12);
+                }
+                PRIMAL_LOG_STREAM(Error, "Render") << "[SDFTraceEvidence] oracle triangles=" << triangles.size()
+                    << " written=" << bool(geometry) << std::endl;
+            }
+            if (FILE* out = fopen("/tmp/ddgi_depth_triangles.csv", "w")) {
+                fprintf(out, "frame,probe_index,slot,ray_index,oct_bin,origin_x,origin_y,origin_z,state,dir_x,dir_y,dir_z,sdf_distance,triangle_distance,mesh_index,triangle_index,mesh_name,closest_surface_distance,closest_surface_mesh,ray_kind\n");
+                u32 audited = 0;
+                for (u32 slot = 0; slot < updates; ++slot) {
+                    const u32 pi = listed[slot];
+                    if (std::find(auditProbes.begin(), auditProbes.end(), pi) == auditProbes.end()) continue;
+                    if (pi >= vd.ProbeCountTotal || origins[pi].w <= 0.0f) continue;
+                    ++audited;
+                    const float origin[3] = {origins[pi].x, origins[pi].y, origins[pi].z};
+                    for (u32 ray = 0; ray < auditRayCount; ++ray) {
+                        u32 cell = ray / 2u;
+                        const float offset = (ray & 1u) == 0u ? .25f : .75f;
+                        float d[3] = {(float(cell % 8u) + offset) * .25f - 1.f,
+                                      (float(cell / 8u) + offset) * .25f - 1.f, 0.f};
+                        d[2] = 1.f - std::abs(d[0]) - std::abs(d[1]);
+                        if (d[2] < 0.f) {
+                            const float oldX = d[0];
+                            d[0] = (1.f - std::abs(d[1])) * (oldX >= 0.f ? 1.f : -1.f);
+                            d[1] = (1.f - std::abs(oldX)) * (d[1] >= 0.f ? 1.f : -1.f);
+                        }
+                        if (!depthOnlyAudit) {
+                            constexpr float invPhi = .61803398875f;
+                            const float r = float(ray) + .5f;
+                            const float u = r*invPhi - std::floor(r*invPhi);
+                            const float v = r*invPhi*invPhi - std::floor(r*invPhi*invPhi);
+                            const float theta = 6.283185307179586f*u;
+                            const float phi = std::acos(std::clamp(1.f-2.f*v,-1.f,1.f));
+                            d[0] = std::sin(phi)*std::cos(theta); d[1] = std::sin(phi)*std::sin(theta); d[2] = std::cos(phi);
+                            const float l1 = std::abs(d[0])+std::abs(d[1])+std::abs(d[2]);
+                            float ox=d[0]/l1, oy=d[1]/l1;
+                            if (d[2]<0.f) {
+                                const float oldX=ox;
+                                ox=(1.f-std::abs(oy))*(oldX>=0.f?1.f:-1.f);
+                                oy=(1.f-std::abs(oldX))*(oy>=0.f?1.f:-1.f);
+                            }
+                            cell=std::min(7u,u32((oy*.5f+.5f)*8.f))*8u+std::min(7u,u32((ox*.5f+.5f)*8.f));
+                        }
+                        const float norm = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                        for (auto& component : d) component /= norm;
+                        float nearest = vd.RayMaxDistance + 1.f;
+                        u32 meshIndex = ~0u, triangleIndex = ~0u;
+                        const float sdfDistance = distances[slot*auditRayCount+ray];
+                        float sdfPoint[3];
+                        for (u32 k = 0; k < 3; ++k) sdfPoint[k] = origin[k] + d[k] * std::max(sdfDistance,0.f);
+                        float closestSurface2 = 1e30f;
+                        u32 closestSurfaceMesh = ~0u;
+                        for (const auto& tri : triangles) {
+                            // Point-to-triangle distance distinguishes a valid
+                            // inflated/grazing hit from a phantom SDF surface.
+                            float boxDistance2 = 0.f;
+                            for (u32 k = 0; k < 3; ++k) {
+                                const float separation = std::max({tri.lo[k]-sdfPoint[k], sdfPoint[k]-tri.hi[k], 0.f});
+                                boxDistance2 += separation * separation;
+                            }
+                            if (sdfDistance >= 0.f && boxDistance2 < closestSurface2) {
+                                const float n[3] = {tri.e1[1]*tri.e2[2]-tri.e1[2]*tri.e2[1],
+                                    tri.e1[2]*tri.e2[0]-tri.e1[0]*tri.e2[2], tri.e1[0]*tri.e2[1]-tri.e1[1]*tri.e2[0]};
+                                const float n2 = n[0]*n[0]+n[1]*n[1]+n[2]*n[2];
+                                if (n2 > 1e-12f) {
+                                    const float v[3] = {sdfPoint[0]-tri.a[0], sdfPoint[1]-tri.a[1], sdfPoint[2]-tri.a[2]};
+                                    const float plane = (v[0]*n[0]+v[1]*n[1]+v[2]*n[2])/n2;
+                                    const float projection[3] = {v[0]-plane*n[0], v[1]-plane*n[1], v[2]-plane*n[2]};
+                                    auto dot3 = [](const float* a,const float* b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+                                    const float d00=dot3(tri.e1,tri.e1), d01=dot3(tri.e1,tri.e2), d11=dot3(tri.e2,tri.e2);
+                                    const float denominator=d00*d11-d01*d01;
+                                    float distance2 = 1e30f;
+                                    if (std::abs(denominator)>1e-12f) {
+                                        const float d20=dot3(projection,tri.e1), d21=dot3(projection,tri.e2);
+                                        const float a=(d11*d20-d01*d21)/denominator, b=(d00*d21-d01*d20)/denominator;
+                                        if (a>=0.f && b>=0.f && a+b<=1.f) distance2=plane*plane*n2;
+                                    }
+                                    if (distance2 == 1e30f) {
+                                        const float endpoints[3][3] = {{0.f,0.f,0.f},
+                                            {tri.e1[0],tri.e1[1],tri.e1[2]}, {tri.e2[0],tri.e2[1],tri.e2[2]}};
+                                        for (u32 edge=0;edge<3;++edge) {
+                                            const float* a=endpoints[edge]; const float* b=endpoints[(edge+1)%3];
+                                            const float delta[3]={b[0]-a[0],b[1]-a[1],b[2]-a[2]};
+                                            const float toward[3]={v[0]-a[0],v[1]-a[1],v[2]-a[2]};
+                                            const float t=std::clamp(dot3(toward,delta)/std::max(dot3(delta,delta),1e-12f),0.f,1.f);
+                                            const float separation[3]={toward[0]-t*delta[0],toward[1]-t*delta[1],toward[2]-t*delta[2]};
+                                            distance2=std::min(distance2,dot3(separation,separation));
+                                        }
+                                    }
+                                    if (distance2<closestSurface2) { closestSurface2=distance2; closestSurfaceMesh=tri.mesh; }
+                                }
+                            }
+                            float enter = 0.f, exit = nearest;
+                            bool boxHit = true;
+                            for (u32 k = 0; k < 3; ++k) {
+                                if (std::abs(d[k]) < 1e-8f) {
+                                    if (origin[k] < tri.lo[k] || origin[k] > tri.hi[k]) boxHit = false;
+                                } else {
+                                    float a = (tri.lo[k] - origin[k]) / d[k], b = (tri.hi[k] - origin[k]) / d[k];
+                                    if (a > b) std::swap(a,b);
+                                    enter = std::max(enter,a); exit = std::min(exit,b);
+                                }
+                            }
+                            if (!boxHit || enter > exit) continue;
+                            const float p[3] = {d[1]*tri.e2[2]-d[2]*tri.e2[1], d[2]*tri.e2[0]-d[0]*tri.e2[2], d[0]*tri.e2[1]-d[1]*tri.e2[0]};
+                            const float det = tri.e1[0]*p[0] + tri.e1[1]*p[1] + tri.e1[2]*p[2];
+                            if (std::abs(det) < 1e-8f) continue;
+                            const float v[3] = {origin[0]-tri.a[0], origin[1]-tri.a[1], origin[2]-tri.a[2]};
+                            const float u = (v[0]*p[0]+v[1]*p[1]+v[2]*p[2])/det;
+                            if (u < -1e-5f || u > 1.00001f) continue;
+                            const float q[3] = {v[1]*tri.e1[2]-v[2]*tri.e1[1], v[2]*tri.e1[0]-v[0]*tri.e1[2], v[0]*tri.e1[1]-v[1]*tri.e1[0]};
+                            const float baryV = (d[0]*q[0]+d[1]*q[1]+d[2]*q[2])/det;
+                            if (baryV < -1e-5f || u + baryV > 1.00001f) continue;
+                            const float t = (tri.e2[0]*q[0]+tri.e2[1]*q[1]+tri.e2[2]*q[2])/det;
+                            if (t > 1e-4f && t < nearest && t <= vd.RayMaxDistance) {
+                                nearest = t; meshIndex = tri.mesh; triangleIndex = tri.index;
+                            }
+                        }
+                        fprintf(out, "%u,%u,%u,%u,%u,%.6f,%.6f,%.6f,%.2f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%s,%.6f,%s,%s\n",
+                            frameCount_, pi, slot, ray, cell, origin[0], origin[1], origin[2], origins[pi].w,
+                            d[0], d[1], d[2], sdfDistance, meshIndex == ~0u ? -1.f : nearest,
+                            meshIndex, triangleIndex, meshIndex == ~0u ? "none" : sceneMeshes_[meshIndex].name.c_str(),
+                            closestSurfaceMesh == ~0u ? -1.f : std::sqrt(closestSurface2),
+                            closestSurfaceMesh == ~0u ? "none" : sceneMeshes_[closestSurfaceMesh].name.c_str(),
+                            depthOnlyAudit ? "depth_only" : "legacy_radiance");
+                    }
+                }
+                fclose(out);
+                std::cerr << "[DDGI_DEPTH_TRI_AUDIT] wrote /tmp/ddgi_depth_triangles.csv probes=" << audited
+                          << " triangles=" << triangles.size() << std::endl;
+            }
+        }
+        if (dumpEnv[0] == '7') {
+            // Map screen-space comparison windows to actual receiver world
+            // positions.  The post-tonemap ROI is not necessarily lit by
+            // probes near visually adjacent architecture.
+            auto& draw = nanite::GPUDrivenDrawPipeline::Get();
+            const ResourceHandle depth = draw.GetGBufferDepthSampleable();
+            const ResourceHandle normal = draw.GetGBufferNormal();
+            const u32 width = draw.GetVisibilityConfig().width;
+            const u32 height = draw.GetVisibilityConfig().height;
+            if (depth == handles::INVALID_RESOURCE || normal == handles::INVALID_RESOURCE ||
+                !width || !height) return;
+            BufferDesc desc{};
+            desc.size = u64(width) * height * sizeof(float);
+            desc.usage = GPUMemoryUsage::Readback;
+            desc.memoryUsage = GPUMemoryUsage::Readback;
+            const ResourceHandle stage = device_->CreateBuffer(desc);
+            const ResourceHandle normalStage = device_->CreateBuffer(desc);
+            const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (stage != handles::INVALID_RESOURCE && normalStage != handles::INVALID_RESOURCE &&
+                command != handles::INVALID_COMMAND_BUFFER) {
+                auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                cmd->Begin();
+                ResourceBarrier toCopy{};
+                toCopy.resource = depth;
+                toCopy.beforeState = ResourceState::ShaderResource;
+                toCopy.afterState = ResourceState::CopySource;
+                toCopy.subresource = 0xFFFFFFFFu;
+                cmd->InsertBarrier(&toCopy, 1);
+                BufferTextureCopyRegion region{};
+                region.bufferOffset = 0;
+                region.bufferRowLength = width;
+                region.imageSubresource = {0, 0, 1};
+                region.imageExtent = {width, height, 1};
+                cmd->CopyTextureToBuffer(depth, stage, &region, 1);
+                ResourceBarrier normalToCopy{};
+                normalToCopy.resource = normal;
+                normalToCopy.beforeState = ResourceState::ShaderResource;
+                normalToCopy.afterState = ResourceState::CopySource;
+                normalToCopy.subresource = 0xFFFFFFFFu;
+                cmd->InsertBarrier(&normalToCopy, 1);
+                cmd->CopyTextureToBuffer(normal, normalStage, &region, 1);
+                ResourceBarrier normalBack{};
+                normalBack.resource = normal;
+                normalBack.beforeState = ResourceState::CopySource;
+                normalBack.afterState = ResourceState::ShaderResource;
+                normalBack.subresource = 0xFFFFFFFFu;
+                cmd->InsertBarrier(&normalBack, 1);
+                ResourceBarrier back{};
+                back.resource = depth;
+                back.beforeState = ResourceState::CopySource;
+                back.afterState = ResourceState::ShaderResource;
+                back.subresource = 0xFFFFFFFFu;
+                cmd->InsertBarrier(&back, 1);
+                cmd->End();
+                cmd->Submit();
+                cmd->WaitForCompletion();
+                const auto* pixels = static_cast<const float*>(device_->MapBuffer(stage));
+                const auto* normals = static_cast<const u8*>(device_->MapBuffer(normalStage));
+                if (pixels && normals) {
+                    const auto invVP = rhimath::Inverse(view_.GetViewProjectionMatrix());
+                    struct Window { const char* name; float x0, x1, y0, y1; };
+                    const Window windows[] = {
+                        {"L_arcade", 0.00f, 0.22f, 0.42f, 0.78f},
+                        {"R_arcade", 0.80f, 1.00f, 0.42f, 0.78f},
+                        {"floor_near", 0.30f, 0.70f, 0.88f, 1.00f},
+                    };
+                    if (FILE* out = fopen("/tmp/ddgi_roi_receivers.csv", "w")) {
+                        fprintf(out, "roi,x,y,depth,wx,wy,wz,nx,ny,nz\n");
+                        for (const auto& w : windows)
+                        for (u32 j = 0; j < 12; ++j)
+                        for (u32 i = 0; i < 12; ++i) {
+                            const float u = w.x0 + (w.x1 - w.x0) * (float(i) + 0.5f) / 12.0f;
+                            const float v = w.y0 + (w.y1 - w.y0) * (float(j) + 0.5f) / 12.0f;
+                            const u32 x = std::min(u32(u * width), width - 1u);
+                            const u32 y = std::min(u32(v * height), height - 1u);
+                            const float d = pixels[u64(y) * width + x];
+                            if (!std::isfinite(d) || d >= 0.9999f || d < 0.0f) continue;
+                            const math::v4 clip{u * 2.0f - 1.0f, 1.0f - v * 2.0f, d, 1.0f};
+                            const math::v4 world = invVP * clip;
+                            if (std::abs(world.w) < 1e-6f) continue;
+                            // BGRA8_UNorm storage; shader sampling exposes RGB.
+                            const u64 n = (u64(y) * width + x) * 4u;
+                            const float nx = float(normals[n + 2]) * (2.0f / 255.0f) - 1.0f;
+                            const float ny = float(normals[n + 1]) * (2.0f / 255.0f) - 1.0f;
+                            const float nz = float(normals[n + 0]) * (2.0f / 255.0f) - 1.0f;
+                            fprintf(out, "%s,%u,%u,%.6f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f\n",
+                                    w.name, x, y, d, world.x / world.w, world.y / world.w,
+                                    world.z / world.w, nx, ny, nz);
+                        }
+                        fclose(out);
+                        std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_roi_receivers.csv" << std::endl;
+                    }
+                }
+                if (normals) device_->UnmapBuffer(normalStage);
+                if (pixels) device_->UnmapBuffer(stage);
+            }
+            if (command != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(command);
+            if (normalStage != handles::INVALID_RESOURCE) device_->DestroyBuffer(normalStage);
+            if (stage != handles::INVALID_RESOURCE) device_->DestroyBuffer(stage);
+
+            const u64 probeCount = u64(vol.counts.x) * vol.counts.y * vol.counts.z;
+            if (FILE* out = fopen("/tmp/ddgi_roi_probe_ages.csv", "w")) {
+                fprintf(out, "ix,iy,iz,wx,wy,wz,last_update_frame,capture_frame\n");
+                for (u32 z = 0; z < u32(vol.counts.z); ++z)
+                for (u32 y = 0; y < u32(vol.counts.y); ++y)
+                for (u32 x = 0; x < u32(vol.counts.x); ++x) {
+                    const u32 index = x + y * u32(vol.counts.x) +
+                                      z * u32(vol.counts.x) * u32(vol.counts.y);
+                    fprintf(out, "%u,%u,%u,%.2f,%.2f,%.2f,%u,%u\n", x, y, z,
+                            vol.origin.x + x * vol.spacing,
+                            vol.origin.y + y * vol.spacing,
+                            vol.origin.z + z * vol.spacing,
+                            pass->GetProbeLastUpdateFrame(index), frameCount_);
+                }
+                fclose(out);
+            }
+            const u64 momentBytes = probeCount * 128u * sizeof(float);
+            const ResourceHandle momentSource = pass->GetDepthBuffer(fidx);
+            BufferDesc momentDesc{};
+            momentDesc.size = momentBytes;
+            momentDesc.usage = GPUMemoryUsage::Readback;
+            momentDesc.memoryUsage = GPUMemoryUsage::Readback;
+            const ResourceHandle momentStage = device_->CreateBuffer(momentDesc);
+            const auto momentCommand = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (momentSource != handles::INVALID_RESOURCE && momentStage != handles::INVALID_RESOURCE &&
+                momentCommand != handles::INVALID_COMMAND_BUFFER) {
+                auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(momentCommand);
+                cmd->Begin();
+                ResourceBarrier toCopy{};
+                toCopy.resource = momentSource;
+                toCopy.beforeState = ResourceState::UnorderedAccess;
+                toCopy.afterState = ResourceState::CopySource;
+                cmd->InsertBarrier(&toCopy, 1);
+                cmd->CopyBuffer(momentSource, momentStage, 0, 0, momentBytes);
+                ResourceBarrier back{};
+                back.resource = momentSource;
+                back.beforeState = ResourceState::CopySource;
+                back.afterState = ResourceState::UnorderedAccess;
+                cmd->InsertBarrier(&back, 1);
+                cmd->End();
+                cmd->Submit();
+                cmd->WaitForCompletion();
+                if (const void* data = device_->MapBuffer(momentStage)) {
+                    if (FILE* out = fopen("/tmp/ddgi_roi_depth_moments.bin", "wb")) {
+                        fwrite(data, 1, momentBytes, out);
+                        fclose(out);
+                    }
+                    device_->UnmapBuffer(momentStage);
+                }
+            }
+            if (momentCommand != handles::INVALID_COMMAND_BUFFER)
+                device_->DestroyCommandBuffer(momentCommand);
+            if (momentStage != handles::INVALID_RESOURCE) device_->DestroyBuffer(momentStage);
+            // Same-frame SH coefficients for an offline per-receiver probe
+            // attribution. Depth moments alone reveal visibility holes but
+            // cannot identify which surviving probes carry excessive energy.
+            const u64 shBytes = probeCount * 9u * sizeof(math::v4);
+            const ResourceHandle shSource = pass->GetIrradianceBuffer(fidx);
+            BufferDesc shDesc{};
+            shDesc.size = shBytes;
+            shDesc.usage = GPUMemoryUsage::Readback;
+            shDesc.memoryUsage = GPUMemoryUsage::Readback;
+            const ResourceHandle shStage = device_->CreateBuffer(shDesc);
+            const auto shCommand = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            if (shSource != handles::INVALID_RESOURCE && shStage != handles::INVALID_RESOURCE &&
+                shCommand != handles::INVALID_COMMAND_BUFFER) {
+                auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(shCommand);
+                cmd->Begin();
+                ResourceBarrier toCopy{};
+                toCopy.resource = shSource;
+                toCopy.beforeState = ResourceState::UnorderedAccess;
+                toCopy.afterState = ResourceState::CopySource;
+                cmd->InsertBarrier(&toCopy, 1);
+                cmd->CopyBuffer(shSource, shStage, 0, 0, shBytes);
+                ResourceBarrier back{};
+                back.resource = shSource;
+                back.beforeState = ResourceState::CopySource;
+                back.afterState = ResourceState::UnorderedAccess;
+                cmd->InsertBarrier(&back, 1);
+                cmd->End();
+                cmd->Submit();
+                cmd->WaitForCompletion();
+                if (const void* data = device_->MapBuffer(shStage)) {
+                    if (FILE* out = fopen("/tmp/ddgi_roi_sh.bin", "wb")) {
+                        fwrite(data, 1, shBytes, out);
+                        fclose(out);
+                    }
+                    device_->UnmapBuffer(shStage);
+                }
+            }
+            if (shCommand != handles::INVALID_COMMAND_BUFFER)
+                device_->DestroyCommandBuffer(shCommand);
+            if (shStage != handles::INVALID_RESOURCE) device_->DestroyBuffer(shStage);
+            // The gather's openSky V2 path uses two floats per probe:
+            // escape ratio and sky-energy ratio. Without both, an offline
+            // receiver attribution can misidentify a bright SH as a leak
+            // even when the runtime classification suppresses it.
+            if (const ResourceHandle sky = pass->GetOpenSkyBuffer();
+                sky != handles::INVALID_RESOURCE) {
+                const u64 skyBytes = probeCount * 2u * sizeof(float);
+                if (const void* values = device_->MapBuffer(sky, 0, skyBytes)) {
+                    if (FILE* out = fopen("/tmp/ddgi_roi_opensky.bin", "wb")) {
+                        fwrite(values, 1, skyBytes, out);
+                        fclose(out);
+                    }
+                    device_->UnmapBuffer(sky);
+                }
+            }
+            u32 originCount = 0, originVersion = 0;
+            if (const math::v4* origins = pass->GetRelocatedOriginsCpu(originCount, originVersion)) {
+                if (originCount == probeCount) {
+                    if (FILE* out = fopen("/tmp/ddgi_roi_relocated_origins.bin", "wb")) {
+                        fwrite(origins, sizeof(math::v4), originCount, out);
+                        fclose(out);
+                    }
+                }
+            }
+            return;
+        }
         if (dumpEnv[0] == '3') {
             // ---- GIGather half-res output readback (DDGI_DUMP=3) ----
             // RGBA16F, actual gather dimensions (render scale can differ from the window).
@@ -2305,6 +4402,73 @@ void TestVulkanSponzaRenderGraph::Run() {
             return;
         }
         const u32 cx = (u32)vol.counts.x, cy = (u32)vol.counts.y, cz = (u32)vol.counts.z;
+        if (dumpEnv[0] == '6') {
+            // Raw near-volume octahedral depth moments.  Path-debug mode keeps
+            // hit distances intact, so this diagnostic is valid with either mode.
+            const u64 bytes = u64(cx) * cy * cz * 128u * sizeof(float);
+            BufferDesc rbDesc{};
+            rbDesc.size = bytes;
+            rbDesc.usage = GPUMemoryUsage::Readback;
+            rbDesc.memoryUsage = GPUMemoryUsage::Readback;
+            ResourceHandle staging = device_->CreateBuffer(rbDesc);
+            auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            const ResourceHandle depth = pass->GetDepthBuffer(fidx);
+            if (staging != handles::INVALID_RESOURCE &&
+                capCmdHandle != handles::INVALID_COMMAND_BUFFER &&
+                depth != handles::INVALID_RESOURCE) {
+                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                capCmd->Begin();
+                ResourceBarrier toCopy{};
+                toCopy.resource = depth;
+                toCopy.beforeState = ResourceState::UnorderedAccess;
+                toCopy.afterState = ResourceState::CopySource;
+                capCmd->InsertBarrier(&toCopy, 1);
+                capCmd->CopyBuffer(depth, staging, 0, 0, bytes);
+                ResourceBarrier back{};
+                back.resource = depth;
+                back.beforeState = ResourceState::CopySource;
+                back.afterState = ResourceState::UnorderedAccess;
+                capCmd->InsertBarrier(&back, 1);
+                capCmd->End();
+                capCmd->Submit();
+                capCmd->WaitForCompletion();
+                device_->DestroyCommandBuffer(capCmdHandle);
+                if (float* data = static_cast<float*>(device_->MapBuffer(staging))) {
+                    FILE* out = fopen("/tmp/ddgi_depth_moments.csv", "w");
+                    if (out) {
+                        fprintf(out, "wx,wy,wz,mean_min,mean_avg,mean_max,var_avg,open_texels,near_texels,invalid_texels\n");
+                        for (u32 z = 0; z < cz; ++z)
+                        for (u32 y = 0; y < cy; ++y)
+                        for (u32 x = 0; x < cx; ++x) {
+                            const float* p = data + (u64(x) + u64(y) * cx + u64(z) * cx * cy) * 128u;
+                            float dmin = 1e30f, dmax = 0.0f;
+                            double dsum = 0.0, vsum = 0.0;
+                            u32 open = 0, near = 0, invalid = 0;
+                            for (u32 t = 0; t < 64; ++t) {
+                                const float d = p[t], v = p[64 + t];
+                                if (!std::isfinite(d) || !std::isfinite(v) || d < 0 || v < 0) ++invalid;
+                                dmin = std::min(dmin, d);
+                                dmax = std::max(dmax, d);
+                                dsum += d; vsum += v;
+                                if (d >= pass->GetParams().ray_max_distance * 0.9f) ++open;
+                                if (d < vol.spacing) ++near;
+                            }
+                            fprintf(out, "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%u,%u,%u\n",
+                                    vol.origin.x + x * vol.spacing, vol.origin.y + y * vol.spacing,
+                                    vol.origin.z + z * vol.spacing, dmin, float(dsum / 64.0),
+                                    dmax, float(vsum / 64.0), open, near, invalid);
+                        }
+                        fclose(out);
+                        std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_depth_moments.csv" << std::endl;
+                    }
+                    device_->UnmapBuffer(staging);
+                }
+            } else if (capCmdHandle != handles::INVALID_COMMAND_BUFFER) {
+                device_->DestroyCommandBuffer(capCmdHandle);
+            }
+            if (staging != handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);
+            return;
+        }
         if (dumpEnv[0] == '4') {
             // ---- SC lighting-atlas bit-sample dump (dim-propagation probe) --
             // Writes a strided raw-u16 sample of the RGBA16F lighting atlas.
@@ -2313,7 +4477,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             // LightEval and the response=NO root is upstream of the probes.
             auto* sc = pipeline_ ? pipeline_->GetSurfaceCachePass() : nullptr;
             if (!sc) return;
-            u32 ai = renderSystem_.GetCurrentFrameIndex();
+            u32 ai = frameCount_;
             auto atlasTex = sc->GetLightingAtlas(ai);
             if (atlasTex == rhi::handles::INVALID_RESOURCE) return;
             const u32 A = sc->GetAtlasSize();
@@ -2382,7 +4546,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             // → trace/lookup break).
             auto* sc = pipeline_ ? pipeline_->GetSurfaceCachePass() : nullptr;
             if (!sc) return;
-            u32 ai = renderSystem_.GetCurrentFrameIndex();
+            u32 ai = frameCount_;
             auto atlasTex = sc->GetLightingAtlas(ai);
             if (atlasTex == rhi::handles::INVALID_RESOURCE) return;
             const u32 A = sc->GetAtlasSize();
@@ -2482,6 +4646,53 @@ void TestVulkanSponzaRenderGraph::Run() {
             return;
         }
         if (dumpEnv[0] == '2') {
+            // Diagnostic only: buffer InsertBarrier is a Vulkan no-op.
+            // A completed submission is necessary but does not replace the
+            // producer->copy memory dependency within the submission.
+            auto requireReadback = [&](bool ok, const char* operation) {
+                if (!ok) {
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI_READBACK_FAILED] " << operation;
+                    throw std::runtime_error(std::string("DDGI diagnostic readback: ") + operation);
+                }
+            };
+            auto prepareReadback = [&](VulkanCommandBuffer* command) {
+                requireReadback(command && command->Begin(), "Begin");
+                // This is the diagnostic-only producer -> copy dependency.
+                // Vulkan InsertBarrier does not emit VkBufferMemoryBarrier
+                // in this tree, so buffer freshness must come from the real
+                // pipeline barrier below.  Include host/transfer writes for
+                // the dynamic update-list and staging-backed resources.
+                command->MemoryBarrier(PipelineStage::Host | PipelineStage::ComputeShader |
+                    PipelineStage::Transfer | PipelineStage::AllCommands,
+                    PipelineStage::Transfer, AccessFlag::HostWrite | AccessFlag::ShaderWrite | AccessFlag::TransferWrite | AccessFlag::ColorAttachmentWrite,
+                    AccessFlag::TransferRead);
+            };
+            auto completeReadback = [&](VulkanCommandBuffer* command) {
+                command->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                    AccessFlag::TransferWrite, AccessFlag::HostRead);
+                command->MemoryBarrier(PipelineStage::Transfer, PipelineStage::AllCommands,
+                    AccessFlag::TransferRead, AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+                requireReadback(command->End(), "End");
+                requireReadback(command->Submit(), "Submit");
+                requireReadback(command->WaitForCompletion(), "WaitForCompletion");
+            };
+            auto saveReadback = [&](const char* name, const void* bytes, u64 size) {
+                std::ofstream raw(std::string("/tmp/ddgi_") + name, std::ios::binary);
+                raw.write(static_cast<const char*>(bytes), std::streamsize(size));
+                raw.close();
+                requireReadback(bool(raw), "write raw evidence");
+            };
+            if (pass->GetVolumeData().RaysPerProbe != 128u ||
+                (pass->GetVolumeData().RaySampleMode != 0 && pass->GetVolumeData().RaySampleMode != 5)) {
+                PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_RADIANCE_AUDIT] ray CSV requires fixed mode0/5 and128 rays" << std::endl;
+                return;
+            }
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_RADIANCE_AUDIT] evidence_mode="
+                << pass->GetVolumeData().SdfVoxelSizes[0].y << " analytic_mode="
+                << pass->GetVolumeData().SkyColor.w << " evidence_normal="
+                << pass->GetVolumeData().SdfVoxelSizes[0].z << " analytic_audit="
+                << pass->GetVolumeData().SdfVoxelSizes[0].w << " material_project="
+                << pass->GetVolumeData().SdfExtents[0].w << std::endl;
             // ---- ray-level path histogram ----
             const u64 probeFloats = 4u; // DDGIRayData vec4
             const u32 raysPerProbe = 128u; // 2026-09-06 修正：实际 RaysPerProbe=128（init 日志），旧值 64 使 dump 读到错位数据
@@ -2495,23 +4706,14 @@ void TestVulkanSponzaRenderGraph::Run() {
             auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
                 auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
-                capCmd->Begin();
-                ResourceBarrier toCopy{};
-                toCopy.resource = pass->GetRayDataBuffer();
-                toCopy.beforeState = ResourceState::UnorderedAccess;
-                toCopy.afterState = ResourceState::CopySource;
-                capCmd->InsertBarrier(&toCopy, 1);
+                prepareReadback(capCmd);
                 capCmd->CopyBuffer(pass->GetRayDataBuffer(), staging, 0, 0, copyBytes);
-                ResourceBarrier back{};
-                back.resource = pass->GetRayDataBuffer();
-                back.beforeState = ResourceState::CopySource;
-                back.afterState = ResourceState::UnorderedAccess;
-                capCmd->InsertBarrier(&back, 1);
-                capCmd->End();
-                capCmd->Submit();
-                capCmd->WaitForCompletion();
+                completeReadback(capCmd);
                 device_->DestroyCommandBuffer(capCmdHandle);
-                if (float* data = static_cast<float*>(device_->MapBuffer(staging))) {
+                float* data = static_cast<float*>(device_->MapBuffer(staging));
+                requireReadback(data != nullptr, "Map ray data");
+                if (data) {
+                    saveReadback("ray_data.raw", data, copyBytes);
                     // Only probes the latest trace refreshed carry valid ray
                     // data — everything else in ray_data_buffer_ is stale or
                     // never written. Read the update list (same slot) first.
@@ -2526,42 +4728,388 @@ void TestVulkanSponzaRenderGraph::Run() {
                     std::vector<u32> listed;
                     if (ulCmdHandle != handles::INVALID_COMMAND_BUFFER && ulStaging != handles::INVALID_RESOURCE) {
                         auto* ulCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(ulCmdHandle);
-                        ulCmd->Begin();
-                        ResourceBarrier ub{};
-                        ub.resource = pass->GetProbeUpdateListBuffer(fidx);
-                        ub.beforeState = ResourceState::UnorderedAccess;
-                        ub.afterState = ResourceState::CopySource;
-                        ulCmd->InsertBarrier(&ub, 1);
+                        prepareReadback(ulCmd);
                         ulCmd->CopyBuffer(pass->GetProbeUpdateListBuffer(fidx), ulStaging, 0, 0,
                                           size_t(updateCount) * sizeof(u32));
-                        ResourceBarrier ub2{};
-                        ub2.resource = pass->GetProbeUpdateListBuffer(fidx);
-                        ub2.beforeState = ResourceState::CopySource;
-                        ub2.afterState = ResourceState::UnorderedAccess;
-                        ulCmd->InsertBarrier(&ub2, 1);
-                        ulCmd->End();
-                        ulCmd->Submit();
-                        ulCmd->WaitForCompletion();
+                        completeReadback(ulCmd);
                         device_->DestroyCommandBuffer(ulCmdHandle);
                         if (u32* l = static_cast<u32*>(device_->MapBuffer(ulStaging))) {
                             listed.assign(l, l + updateCount);
+                            saveReadback("update_list.raw", l, u64(updateCount) * sizeof(u32));
                             device_->UnmapBuffer(ulStaging);
                         }
                     }
                     if (ulStaging != handles::INVALID_RESOURCE) device_->DestroyBuffer(ulStaging);
 
+                    requireReadback(updateCount > 0 && listed.size() == updateCount, "complete update list");
+                    auto sortedListed = listed;
+                    std::sort(sortedListed.begin(), sortedListed.end());
+                    requireReadback(sortedListed.back() < u64(cx)*cy*cz &&
+                        std::adjacent_find(sortedListed.begin(), sortedListed.end()) == sortedListed.end(), "valid unique update list");
+                    if (const char* target = std::getenv("DDGI_DUMP_TARGET_PROBE"))
+                        requireReadback(std::binary_search(sortedListed.begin(), sortedListed.end(), u32(std::strtoul(target, nullptr, 10))), "target in actual update list");
+                    // Capture the actual ray origins and SDF hit normals from
+                    // this frame.  Earlier hit_xyz diagnostics assumed the
+                    // logical lattice centre, which is wrong for relocated
+                    // probes near the arcade geometry.
+                    auto readVec4Buffer = [&](ResourceHandle source, u64 count, u64 sourceOffset = 0) {
+                        std::vector<math::v4> values;
+                        if (source == handles::INVALID_RESOURCE || count == 0) return values;
+                        BufferDesc desc{};
+                        desc.size = count * sizeof(math::v4);
+                        desc.usage = GPUMemoryUsage::Readback;
+                        desc.memoryUsage = GPUMemoryUsage::Readback;
+                        ResourceHandle stage = device_->CreateBuffer(desc);
+                        auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                        if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER) {
+                            u64 sourceBytes = 0;
+                            requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(source, sourceBytes),
+                                "query vec4 source extent");
+                            requireReadback(sourceOffset <= sourceBytes && desc.size <= sourceBytes - sourceOffset,
+                                "vec4 source range");
+                            auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                            prepareReadback(cmd);
+                            cmd->CopyBuffer(source, stage, sourceOffset, 0, desc.size);
+                            completeReadback(cmd);
+                            auto* mapped = static_cast<const math::v4*>(device_->MapBuffer(stage));
+                            requireReadback(mapped != nullptr, "Map vec4 evidence");
+                            if (mapped) {
+                                values.assign(mapped, mapped + count);
+                                device_->UnmapBuffer(stage);
+                            }
+                        }
+                        requireReadback(values.size() == count, "complete vec4 evidence");
+                        if (command != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(command);
+                        if (stage != handles::INVALID_RESOURCE) device_->DestroyBuffer(stage);
+                        return values;
+                    };
+                    const auto relocated = readVec4Buffer(pass->GetRelocatedOriginsBuffer(),
+                                                          u64(cx) * cy * cz);
+                    requireReadback(relocated.size() == u64(cx)*cy*cz, "complete relocated origins");
+                    saveReadback("relocated_origins.raw", relocated.data(), relocated.size()*sizeof(math::v4));
+                    const bool analyticAudit=pass->GetVolumeData().SdfVoxelSizes[0].w>.5f;
+                    const u64 normalCapacity=u64(cx)*cy*cz*raysPerProbe;
+                    const auto hitNormals = readVec4Buffer(pass->GetHitNormalBuffer(),
+                        analyticAudit?5u*normalCapacity:u64(updateCount)*raysPerProbe);
+                    requireReadback(hitNormals.size() == (analyticAudit ? 5u*normalCapacity : u64(updateCount)*raysPerProbe), "complete hit normals/components");
+                    saveReadback("hit_normals.raw", hitNormals.data(), hitNormals.size()*sizeof(math::v4));
+                    std::vector<math::v4> sourceRecordsForProof;
+                    std::vector<math::v4> firstSurfaceRecordsForProof;
+                    std::vector<math::v4> firstSurfaceTrianglesForProof;
+                    // DDGI_RAY_SOURCE_AUDIT uses a separate tail of the
+                    // existing hit-normal SSBO.  Keep hit_normals.raw at its
+                    // established N/5N extent so prior analytic evidence
+                    // remains byte-compatible; copy only the new 4N tail to
+                    // its own raw file.  The full-capacity file is intentionally
+                    // accompanied by the actual update list: every slot not
+                    // listed there is stale or never written and must not be
+                    // substituted into an analysis.
+                    const bool sourceAudit = pass->GetVolumeData().Albedo.w > 0.5f;
+                    if (sourceAudit) {
+                        requireReadback(analyticAudit, "ray source audit analytic tail");
+                        const u64 sourceBaseVec4 = 5u * normalCapacity;
+                        const u64 sourceVec4Count = 4u * normalCapacity;
+                        const auto sourceRecords = readVec4Buffer(
+                            pass->GetHitNormalBuffer(), sourceVec4Count,
+                            sourceBaseVec4 * sizeof(math::v4));
+                        requireReadback(sourceRecords.size() == sourceVec4Count,
+                            "complete ray source records");
+                        const u64 sourceBytes = sourceRecords.size() * sizeof(math::v4);
+                        sourceRecordsForProof = sourceRecords;
+                        saveReadback("ray_source.raw", sourceRecords.data(), sourceBytes);
+                        std::ofstream sourceMeta("/tmp/ddgi_ray_source_meta.json");
+                        requireReadback(bool(sourceMeta), "open ray source metadata");
+                        sourceMeta << "{\"frame\":" << fidx
+                                   << ",\"ddgi_frame\":" << pass->GetVolumeData().FrameIndex
+                                   << ",\"source_audit\":true"
+                                   << ",\"flag_component\":\"DDGIVolumeData.Albedo.w\""
+                                   << ",\"flag_value\":1"
+                                   << ",\"buffer_handle\":" << pass->GetHitNormalBuffer()
+                                   << ",\"full_ray_capacity\":" << normalCapacity
+                                   << ",\"rays_per_probe\":" << raysPerProbe
+                                   << ",\"base_vec4\":" << sourceBaseVec4
+                                   << ",\"record_vec4_stride\":4"
+                                   << ",\"raw_vec4_count\":" << sourceVec4Count
+                                   << ",\"raw_bytes\":" << sourceBytes
+                                   << ",\"raw_file\":\"ddgi_ray_source.raw\""
+                                   << ",\"layout\":[\"trace_origin\",\"trace_direction\",\"finalize_origin\",\"finalize_direction\"]"
+                                   << ",\"trace_origin_w\":\"uint_bits_frameLo16_probePlus1Lo16\""
+                                   << ",\"trace_direction_w\":\"ray_index_plus_one\""
+                                   << ",\"finalize_origin_w\":\"uint_bits_frameLo16_probePlus1Lo16\""
+                                   << ",\"finalize_direction_w\":\"ray_index_plus_one\""
+                                   << ",\"frame_stamp_bits\":16"
+                                   << ",\"probe_id_bits\":16"
+                                   << ",\"expected_frame_stamp\":" << (pass->GetVolumeData().FrameIndex & 65535u)
+                                   << ",\"fresh_slot_base\":0"
+                                   << ",\"fresh_slot_count\":" << updateCount
+                                   << ",\"fresh_ray_count\":" << (u64(updateCount) * raysPerProbe)
+                                   << ",\"fresh_record_vec4_count\":" << (4u * u64(updateCount) * raysPerProbe)
+                                   << ",\"only_listed_fresh\":true"
+                                   << ",\"update_list_handle\":" << pass->GetProbeUpdateListBuffer(fidx)
+                                   << ",\"update_probes\":[";
+                        for (u32 i = 0; i < listed.size(); ++i) {
+                            if (i) sourceMeta << ',';
+                            sourceMeta << listed[i];
+                        }
+                        sourceMeta << "]"
+                                   << ",\"readback_completed\":true"
+                                   << ",\"explicit_buffer_dependencies\":true"
+                                   << ",\"insert_barrier_buffer_ignored\":true"
+                                   << ",\"submit_checked\":true"
+                                   << ",\"completion_checked\":true"
+                                   << ",\"map_after_completion\":true}";
+                        sourceMeta.close();
+                        requireReadback(bool(sourceMeta), "write ray source metadata");
+                    }
+                    if (pass->IsQuerySourceAuditEnabled()) {
+                        const u64 queryBaseVec4=9u*normalCapacity;
+                        const u64 queryVec4Count=18u*normalCapacity;
+                        const auto records=readVec4Buffer(pass->GetHitNormalBuffer(),queryVec4Count,
+                            queryBaseVec4*sizeof(math::v4));
+                        saveReadback("query_source.raw",records.data(),records.size()*sizeof(math::v4));
+                        std::ofstream meta("/tmp/ddgi_query_source_meta.json");
+                        meta << "{\"frame\":" << fidx << ",\"ddgi_frame\":" << pass->GetVolumeData().FrameIndex
+                             << ",\"full_ray_capacity\":" << normalCapacity << ",\"record_vec4_stride\":18"
+                             << ",\"base_vec4\":" << queryBaseVec4 << ",\"max_candidate_reads\":16"
+                             << ",\"readback_completed\":true,\"explicit_buffer_dependencies\":true"
+                             << ",\"begin_end_submit_checked\":true,\"completion_checked\":true,\"only_listed_fresh\":true"
+                             << ",\"flag_component\":\"DDGIVolumeData.SdfExtents[2].w\",\"flag_value\":1"
+                             << ",\"layout\":[\"actual_position_frameProbeStamp\",\"bestKey_cardPlus1_cellBits_rayPlus1\",\"16x_cardPlus1_key_reject_texelBits\"]"
+                             << ",\"texel_packing\":\"y*atlasSize+x; uintBits, 0xffffffff invalid\""
+                             << ",\"default_on\":false,\"algorithm_changed\":false}\n";
+                        meta.close();requireReadback(bool(meta),"write query source metadata");
+                    }
+                    if (pass->IsFirstSurfaceEnabled()) {
+                        const bool zeroCrossScope = pass->IsFirstZeroCrossEnabled();
+                        const auto records=readVec4Buffer(pass->GetFirstSurfaceAuditBuffer(),3u*normalCapacity);
+                        firstSurfaceRecordsForProof = records;
+                        saveReadback("first_surface.raw",records.data(),records.size()*sizeof(math::v4));
+                        for (const auto item : {std::pair{pass->GetFirstSurfaceNodesBuffer(),"first_surface_nodes.raw"},
+                                                std::pair{pass->GetFirstSurfaceTrianglesBuffer(),"first_surface_triangles.raw"}}) {
+                            u64 bytes=0;
+                            requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(item.first,bytes) && bytes%sizeof(math::v4)==0,"first surface input extent");
+                            const auto input=readVec4Buffer(item.first,bytes/sizeof(math::v4));
+                            if (std::strcmp(item.second, "first_surface_triangles.raw") == 0)
+                                firstSurfaceTrianglesForProof = input;
+                            saveReadback(item.second,input.data(),bytes);
+                        }
+                        std::ofstream meta("/tmp/ddgi_first_surface_meta.json");
+                        meta << "{\"frame\":" << fidx << ",\"ddgi_frame\":" << pass->GetVolumeData().FrameIndex
+                             << ",\"full_ray_capacity\":" << normalCapacity << ",\"record_vec4_stride\":3"
+                             << ",\"candidate\":\""
+                             << (zeroCrossScope ? "DDGI_FIRST_ZERO_CROSS" : "DDGI_FIRST_SURFACE") << "\""
+                             << ",\"variant\":\""
+                             << (zeroCrossScope ? "DDGITraceSDF_first_zero_cross" : "DDGITraceSDF_firstsurface")
+                             << "\""
+                             << ",\"scope\":\""
+                             << (zeroCrossScope ? "signed-zero-crossing-distance-only"
+                                                : "first-surface-distance") << "\""
+                             << ",\"zero_cross_only\":" << (zeroCrossScope ? "true" : "false")
+                             << ",\"distance_replacement_only\":true"
+                             << ",\"readback_completed\":true,\"explicit_buffer_dependencies\":true,\"only_listed_fresh\":true"
+                             << ",\"nodes_handle\":" << pass->GetFirstSurfaceNodesBuffer()
+                             << ",\"triangles_handle\":" << pass->GetFirstSurfaceTrianglesBuffer()
+                             << ",\"audit_handle\":" << pass->GetFirstSurfaceAuditBuffer()
+                             << ",\"hit_distance_handle\":" << pass->GetHitDistanceBuffer()
+                             << ",\"hit_normal_handle\":" << pass->GetHitNormalBuffer()
+                             << ",\"update_list_handle\":" << pass->GetProbeUpdateListBuffer(fidx)
+                             << ",\"fresh_slot_count\":" << updateCount
+                             << ",\"fresh_ray_count\":" << (u64(updateCount) * raysPerProbe)
+                             << ",\"layout\":[\"old_new_first_status\",\"triangle_flags_residual_frameProbeStamp\",\"barycentric_rayID\"]"
+                             << ",\"distance_only\":true,\"default_on\":false,\"physical_opacity_certified\":false}\n";
+                        meta.close();requireReadback(bool(meta),"write first surface metadata");
+                    }
+                    if (const char* proofPrefix = std::getenv("DDGI_FIRST_NORMAL_PROOF_PREFIX")) {
+                        (void)proofPrefix;
+                        requireReadback(RunDDGIFirstNormalProof(
+                            device_, pass, fidx, listed, firstSurfaceRecordsForProof,
+                            firstSurfaceTrianglesForProof, sourceRecordsForProof,
+                            u32(normalCapacity), raysPerProbe, sceneMeshes_, materialRegistry_),
+                            "complete first normal proof");
+                    }
+                    if (const char* nativePrefix = std::getenv("DDGI_FIRST_NATIVE_NORMAL_PREFIX")) {
+                        (void)nativePrefix;
+                        requireReadback(RunDDGIFirstNativeNormalCandidate(
+                            device_, pass, fidx, listed, firstSurfaceRecordsForProof,
+                            firstSurfaceTrianglesForProof, sourceRecordsForProof,
+                            u32(normalCapacity), raysPerProbe, sceneMeshes_, materialRegistry_),
+                            "complete first native normal candidate");
+                    }
+                    if (const char* analyticRhoPrefix =
+                            std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX")) {
+                        (void)analyticRhoPrefix;
+                        requireReadback(RunDDGIAnalyticFirstRhoCandidate(
+                            device_, pass, fidx, listed, u32(normalCapacity), raysPerProbe,
+                            materialRegistry_), "complete analytic-first-rho candidate");
+                    }
+                    if (const char* recordPrefix = std::getenv("DDGI_FIRST_RECORD_PROOF_PREFIX")) {
+                        if (*recordPrefix) {
+                            requireReadback(RunDDGIFirstRecordProof(
+                                device_, pass, fidx, listed, u32(normalCapacity), raysPerProbe,
+                                materialRegistry_), "complete read-only first record proof");
+                        }
+                    }
+                    if (const char* oraclePrefix = std::getenv("DDGI_DEFAULT_FIRST_ORACLE_PREFIX")) {
+                        (void)oraclePrefix;
+                        requireReadback(RunDDGIFirstDefaultOracle(
+                            device_, pass, fidx, listed, sourceRecordsForProof,
+                            u32(normalCapacity), raysPerProbe, sceneMeshes_,
+                            materialRegistry_, scene_.GetProxies()),
+                            "complete default first oracle");
+                    }
+                    // Opt-in history replay: Vulkan previousIndex is read-only
+                    // throughout this frame. SC's idle-slot mirroring is Metal
+                    // only, so the post-EndFrame snapshot is the same source
+                    // bound at Finalize binding10 (not this frame's output).
+                    if (std::getenv("DDGI_HISTORY_AUDIT")) {
+                        requireReadback(analyticAudit, "history replay requires analytic audit");
+                        const auto slots = lumen::DDGISlotsForFrame(fidx);
+                        const auto historySource = pass->GetIrradianceBufferBySlot(slots.previousIndex);
+                        const u64 historyVec4Count = u64(cx)*cy*cz*9u;
+                        const auto history = readVec4Buffer(historySource, historyVec4Count);
+                        requireReadback(history.size() == historyVec4Count, "complete history SH");
+                        saveReadback("history_sh.raw", history.data(), history.size()*sizeof(math::v4));
+                        const auto output = readVec4Buffer(pass->GetIrradianceBufferBySlot(slots.currentIndex), historyVec4Count);
+                        saveReadback("output_sh.raw", output.data(), output.size()*sizeof(math::v4));
+                        const auto distances = readVec4Buffer(pass->GetHitDistanceBuffer(), u64(updateCount)*raysPerProbe/4u);
+                        requireReadback(distances.size()*4u == u64(updateCount)*raysPerProbe, "complete finalize input distances");
+                        saveReadback("hit_distances.raw", distances.data(), distances.size()*sizeof(math::v4));
+                        const auto& vd = pass->GetVolumeData();
+                        saveReadback("history_volume_cpu.raw", &vd, sizeof(vd));
+                        // Independent resident CB bytes, not a reconstruction
+                        // from GetVolumeData. Keep the whole allocation and its
+                        // semantic prefix separate (the unused padding is not
+                        // part of DDGIVolumeData). readVec4Buffer checks explicit
+                        // dependencies and Reset/Begin/End/Submit/Wait/Map.
+                        const auto volumeSource = pass->GetVolumeUniformBuffer(fidx);
+                        u64 volumeBytes = 0u;
+                        requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(
+                            volumeSource, volumeBytes), "query actual history volume CB extent");
+                        requireReadback(volumeBytes >= sizeof(vd) && volumeBytes <= 4096u &&
+                            volumeBytes % sizeof(math::v4) == 0u, "bounded actual volume CB extent");
+                        const auto volume = readVec4Buffer(volumeSource, volumeBytes / sizeof(math::v4));
+                        saveReadback("history_volume_gpu_allocation.raw", volume.data(), volumeBytes);
+                        saveReadback("history_volume_gpu.raw", volume.data(), sizeof(vd));
+                        lumen::DDGIVolumeData resident{};
+                        std::memcpy(&resident, volume.data(), sizeof(resident));
+                        requireReadback(resident.FrameIndex == fidx &&
+                            resident.ProbeUpdateCount == updateCount &&
+                            resident.RaysPerProbe == raysPerProbe &&
+                            resident.ProbeCounts[0] == cx && resident.ProbeCounts[1] == cy &&
+                            resident.ProbeCounts[2] == cz, "actual GPU volume frame/update identity");
+                        std::ofstream historyMeta("/tmp/ddgi_history_meta.json");
+                        historyMeta << "{\"frame\":" << fidx << ",\"history_slot\":" << slots.previousIndex
+                            << ",\"output_slot\":" << slots.currentIndex << ",\"history_handle\":" << historySource
+                            << ",\"history_bytes\":" << history.size()*sizeof(math::v4)
+                            << ",\"binding\":10,\"vulkan_previous_slot_readonly\":true"
+                            << ",\"volume_source\":\"completed independent GPU CB readback\""
+                            << ",\"volume_handle\":" << volumeSource
+                            << ",\"volume_binding\":1,\"volume_slot\":" << slots.currentIndex
+                            << ",\"volume_bytes\":" << sizeof(vd)
+                            << ",\"volume_allocation_bytes\":" << volumeBytes
+                            << ",\"volume_gpu_frame\":" << resident.FrameIndex
+                            << ",\"volume_gpu_update_count\":" << resident.ProbeUpdateCount
+                            << ",\"readback_completed\":true,\"begin_end_submit_checked\":true"
+                            << ",\"completion_checked\":true,\"explicit_buffer_dependencies\":true"
+                            << ",\"map_after_completion\":true}";
+                        historyMeta.close();
+                        requireReadback(bool(historyMeta), "write history identity");
+                    }
+                    // Read-only opt-in scalar producer audit. This texture is
+                    // wired to DDGI cascade0 by SetOfflineSDFSource; the full
+                    // retained field allows an independent march/cache check.
+                    if (std::getenv("DDGI_SDF_SOURCE_AUDIT")) {
+                        requireReadback(offlineSDFMerger_ && offlineSDFMerger_->IsValid(), "SDF source available");
+                        const auto source = offlineSDFMerger_->GetTexture();
+                        const u32 res = offlineSDFMerger_->GetResolution();
+                        requireReadback(device_->GetTextureFormat(source) == DataFormat::R16_Float, "scalar R16F SDF source");
+                        const auto& vd = pass->GetVolumeData();
+                        requireReadback(vd.SdfCascadeCount == 1u && vd.SdfResolutions[0] == res && vd.SdfVoxelSizes[0].y == 0.f,
+                            "single production scalar cascade");
+                        const u64 bytes = u64(res)*res*res*2u;
+                        BufferDesc desc{};
+                        desc.size = bytes;
+                        desc.usage = GPUMemoryUsage::Readback;
+                        desc.memoryUsage = GPUMemoryUsage::Readback;
+                        const auto stage = device_->CreateBuffer(desc);
+                        const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                        requireReadback(stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER, "allocate SDF readback");
+                        auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                        prepareReadback(cmd);
+                        ResourceBarrier barrier{};
+                        barrier.resource = source;
+                        barrier.beforeState = ResourceState::ShaderResource;
+                        barrier.afterState = ResourceState::CopySource;
+                        barrier.subresource = 0xFFFFFFFFu;
+                        cmd->InsertBarrier(&barrier, 1);
+                        BufferTextureCopyRegion region{};
+                        region.imageSubresource = {0, 0, 1};
+                        region.imageExtent = {res, res, res};
+                        cmd->CopyTextureToBuffer(source, stage, &region, 1);
+                        barrier.beforeState = ResourceState::CopySource;
+                        barrier.afterState = ResourceState::ShaderResource;
+                        cmd->InsertBarrier(&barrier, 1);
+                        completeReadback(cmd);
+                        device_->DestroyCommandBuffer(command);
+                        const void* mapped = device_->MapBuffer(stage);
+                        requireReadback(mapped != nullptr, "Map SDF readback");
+                        saveReadback("sdf_source.raw", mapped, bytes);
+                        device_->UnmapBuffer(stage);
+                        device_->DestroyBuffer(stage);
+                        std::ofstream meta("/tmp/ddgi_sdf_source_meta.json");
+                        meta << "{\"frame\":" << fidx << ",\"handle\":" << source << ",\"resolution\":" << res
+                            << ",\"bytes\":" << bytes << ",\"format\":\"R16F\",\"readback_completed\":true,\"cascade\":0,\"binding_identity\":\"host wiring, not independent descriptor capture\"}";
+                        meta.close();
+                        requireReadback(bool(meta), "write SDF identity");
+                    }
+                    FILE* analyticOut=analyticAudit?fopen("/tmp/ddgi_analytic_components.csv","w"):nullptr;
+                    requireReadback(!analyticAudit || analyticOut, "open analytic CSV");
+                    if (analyticOut) fprintf(analyticOut,"wx,wy,wz,rayId,path,albedo_source,albedo_r,albedo_g,albedo_b,sky_r,sky_g,sky_b,history_r,history_g,history_b,ray_lum,material_x,material_y,material_z,material_projected\n");
+
                     FILE* out = fopen("/tmp/ddgi_ray_paths.csv", "w");
-                    fprintf(out, "wx,wy,wz,hits,miss,p_scatlas,p_screen,p_analytic,p_unknown,wmin,wmax,rad_r,rad_g,rad_b\n");
+                    requireReadback(out != nullptr, "open ray paths CSV");
+                    fprintf(out, "wx,wy,wz,hits,miss,p_scatlas,p_screen,p_analytic,p_unknown,wmin,wmax,rad_r,rad_g,rad_b,lum_scatlas,lum_screen,lum_analytic,lum_miss,escape,exhaust,lum_escape,lum_exhaust\n");
                     // M3-A1: per-ray detail for IN-BOX probes — escape-rate vs
-                    // ray direction (Fibonacci set recomputable offline) to
+                    // ray direction (mode-0 golden lattice recomputable offline) to
                     // separate legit long-axis rays from band tunneling.
                     FILE* det = fopen("/tmp/ddgi_ray_detail.csv", "w");
-                    fprintf(det, "wx,wy,wz,rayId,dist\n");
+                    requireReadback(det != nullptr, "open ray detail CSV");
+                    fprintf(det, "wx,wy,wz,rayId,dist,path,sc_reject,lum,hit_x,hit_y,hit_z,dir_x,dir_y,dir_z,origin_x,origin_y,origin_z,relocated,nx,ny,nz,normal_valid,sc_card,sc_texel_x,sc_texel_y\n");
+                    if (std::getenv("DDGI_DUMP_CARD_META")) {
+                        // Join per-ray bounds rejections to the card planes
+                        // actually allocated for this frame. A rejected
+                        // backside hit must not be "fixed" by sampling the
+                        // front-side lighting of an unrelated card.
+                        if (auto* sc = pipeline_->GetSurfaceCachePass()) {
+                            if (FILE* cardsOut = fopen("/tmp/ddgi_card_meta.csv", "w")) {
+                                fprintf(cardsOut, "idx,mesh_instance_id,cx,cy,cz,ex,ey,ez,axis,dir,res,atlas_x,atlas_y\n");
+                                const auto& cards = sc->GetCardGenerator().GetCards();
+                                const auto residentCards = readVec4Buffer(sc->GetCardDataBuffer(), cards.size()*4u);
+                                requireReadback(residentCards.size()*sizeof(math::v4) == cards.size()*sizeof(cards[0]) &&
+                                    std::memcmp(residentCards.data(), cards.data(), cards.size()*sizeof(cards[0])) == 0,
+                                    "resident card mapping matches CPU allocation");
+                                saveReadback("card_data.raw", residentCards.data(), residentCards.size()*sizeof(math::v4));
+                                for (u32 ci = 0; ci < cards.size(); ++ci) {
+                                    const auto& c = cards[ci];
+                                    fprintf(cardsOut, "%u,%u,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%u,%u,%u,%u,%u\n",
+                                            ci, c.mesh_instance_id,
+                                            c.center.x, c.center.y, c.center.z,
+                                            c.extent.x, c.extent.y, c.extent.z,
+                                            c.axis_direction & 0xFFu,
+                                            (c.axis_direction >> 8u) & 0xFFu,
+                                            u32(c.resolution), c.atlas_offset_x, c.atlas_offset_y);
+                                }
+                                fclose(cardsOut);
+                                std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_card_meta.csv" << std::endl;
+                            }
+                        }
+                    }
                     const math::v3 detO = offlineSDFMerger_ && offlineSDFMerger_->IsValid()
                         ? offlineSDFMerger_->GetOrigin() : math::v3{0.0f};
                     const math::v3 detE = offlineSDFMerger_ && offlineSDFMerger_->IsValid()
                         ? offlineSDFMerger_->GetExtent() : math::v3{0.0f};
-                    for (u32 idx : listed) {
+                    for (size_t slot = 0; slot < listed.size(); ++slot) {
+                        const u32 idx = listed[slot];
                         u32 x = idx % cx3;
                         u32 y = (idx / cx3) % cy3;
                         u32 z = idx / (cx3 * cy3);
@@ -2569,37 +5117,346 @@ void TestVulkanSponzaRenderGraph::Run() {
                         const float pwx = vol.origin.x + x * vol.spacing;
                         const float pwy = vol.origin.y + y * vol.spacing;
                         const float pwz = vol.origin.z + z * vol.spacing;
+                        const bool relocatedValid = idx < relocated.size() && relocated[idx].w > 0.5f;
+                        const float ox = relocatedValid ? relocated[idx].x : pwx;
+                        const float oy = relocatedValid ? relocated[idx].y : pwy;
+                        const float oz = relocatedValid ? relocated[idx].z : pwz;
                         const bool detInBox =
                             pwx >= detO.x && pwx <= detO.x + detE.x &&
                             pwy >= detO.y && pwy <= detO.y + detE.y &&
                             pwz >= detO.z && pwz <= detO.z + detE.z;
                         double rad[3] = {0.0, 0.0, 0.0}; u32 radN = 0;
                         uint32_t path[4] = {0,0,0,0}; uint32_t miss = 0;
+                        double pathLum[4] = {0.0, 0.0, 0.0, 0.0};
+                        u32 escape = 0, exhaust = 0;
+                        double escapeLum = 0.0, exhaustLum = 0.0;
                         float wmin = 1e30f, wmax = -1e30f;
                         for (u32 r = 0; r < raysPerProbe; ++r) {
                             float dist = base[r*4+3];
                             rad[0] += base[r*4+0]; rad[1] += base[r*4+1]; rad[2] += base[r*4+2];
+                            const double lum = 0.2126 * base[r*4+0] +
+                                               0.7152 * base[r*4+1] + 0.0722 * base[r*4+2];
                             ++radN;
-                            if (detInBox)
-                                fprintf(det, "%.2f,%.2f,%.2f,%u,%.4f\n",
-                                        pwx, pwy, pwz, r, dist);
-                            if (dist < 0.0f) { ++miss; continue; }
+                            if (detInBox) {
+                                // Mode-0 golden lattice, matching ProbeSampleLib.glsl.
+                                const float invPhi = 0.6180339887498948482f;
+                                const float u = std::fmod((r + 0.5f) * invPhi, 1.0f);
+                                const float v = std::fmod((r + 0.5f) * invPhi * invPhi, 1.0f);
+                                const float theta = 6.2831853071795864769f * u;
+                                const float yy = 1.0f - 2.0f * v;
+                                const float ss = std::sqrt(std::max(1.0f - yy * yy, 0.0f));
+                                const float dx = ss * std::cos(theta);
+                                const float dy = ss * std::sin(theta);
+                                const float dz = yy;
+                                uint32_t distanceBits = 0;
+                                std::memcpy(&distanceBits, &dist, sizeof(distanceBits));
+                                const uint32_t taggedPath = dist < 0.0f ? 0u : (distanceBits & 3u);
+                                const uint32_t scReject = dist < 0.0f ? 0u : ((distanceBits >> 2u) & 15u);
+                                uint32_t provenance[3] = {};
+                                if (taggedPath == 1u) {
+                                    for (int c = 0; c < 3; ++c) {
+                                        uint32_t bits = 0;
+                                        std::memcpy(&bits, &base[r*4+c], sizeof(bits));
+                                        provenance[c] = bits & 4095u;
+                                    }
+                                }
+                                const float hitDist = std::max(dist, 0.0f);
+                                const u64 normalIdx = u64(slot) * raysPerProbe + r;
+                                const bool normalValid = normalIdx < hitNormals.size() && hitNormals[normalIdx].w > 0.5f;
+                                const float nx = normalValid ? hitNormals[normalIdx].x : -dx;
+                                const float ny = normalValid ? hitNormals[normalIdx].y : -dy;
+                                const float nz = normalValid ? hitNormals[normalIdx].z : -dz;
+                                const u64 auditIdx=normalCapacity+4u*normalIdx;
+                                if (analyticOut && auditIdx+3u<hitNormals.size() &&
+                                    hitNormals[auditIdx+1u].w>.5f) {
+                                    const auto& a=hitNormals[auditIdx];
+                                    const auto& s=hitNormals[auditIdx+1u];
+                                    const auto& h=hitNormals[auditIdx+2u];
+                                    const auto& m=hitNormals[auditIdx+3u];
+                                    fprintf(analyticOut,"%.2f,%.2f,%.2f,%u,%u,%u,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%u\n",
+                                        pwx,pwy,pwz,r,taggedPath,u32(a.w),a.x,a.y,a.z,
+                                        s.x,s.y,s.z,h.x,h.y,h.z,lum,m.x,m.y,m.z,m.w>.5f?1u:0u);
+                                }
+                                fprintf(det, "%.2f,%.2f,%.2f,%u,%.4f,%u,%u,%.4f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%u,%.4f,%.4f,%.4f,%u,%u,%u,%u\n",
+                                        pwx, pwy, pwz, r, dist, taggedPath, scReject, lum,
+                                        ox + hitDist * dx, oy + hitDist * dy,
+                                        oz + hitDist * dz, dx, dy, dz,
+                                        ox, oy, oz, relocatedValid ? 1u : 0u,
+                                        nx, ny, nz, normalValid ? 1u : 0u,
+                                        provenance[0], provenance[1], provenance[2]);
+                            }
+                            if (dist < 0.0f) {
+                                ++miss; pathLum[0] += lum;
+                                if (dist <= -1.5f) { ++escape; escapeLum += lum; }
+                                else { ++exhaust; exhaustLum += lum; }
+                                continue;
+                            }
                             wmin = dist < wmin ? dist : wmin;
                             wmax = dist > wmax ? dist : wmax;
-                            // DDGI_PATH_DEBUG encode: w = 40 + pathId·0.001
-                            float tag = dist - 40.0f;
-                            uint32_t p = (tag >= 0.0f) ? (uint32_t)(tag * 1000.0f + 0.5f) : 999u;
-                            if (p <= 3u) path[p]++; else path[0]++;
+                            // DDGI_PATH_DEBUG: low two distance mantissa bits.
+                            uint32_t distanceBits = 0;
+                            std::memcpy(&distanceBits, &dist, sizeof(distanceBits));
+                            uint32_t p = distanceBits & 3u;
+                            if (p <= 3u) { path[p]++; pathLum[p] += lum; }
+                            else { path[0]++; pathLum[0] += lum; }
                         }
-                        fprintf(out, "%.2f,%.2f,%.2f,%u,%u,%u,%u,%u,%u,%.3f,%.3f,%.4f,%.4f,%.4f\n",
+                        fprintf(out, "%.2f,%.2f,%.2f,%u,%u,%u,%u,%u,%u,%.3f,%.3f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,%u,%.4f,%.4f\n",
                                 vol.origin.x + x*vol.spacing, vol.origin.y + y*vol.spacing,
                                 vol.origin.z + z*vol.spacing,
                                 raysPerProbe-miss, miss, path[1], path[2], path[3],
                                 raysPerProbe-miss-path[1]-path[2]-path[3], wmin, wmax,
-                                rad[0]/radN, rad[1]/radN, rad[2]/radN);
+                                rad[0]/radN, rad[1]/radN, rad[2]/radN,
+                                path[1] ? pathLum[1]/path[1] : 0.0,
+                                path[2] ? pathLum[2]/path[2] : 0.0,
+                                path[3] ? pathLum[3]/path[3] : 0.0,
+                                miss ? pathLum[0]/miss : 0.0,
+                                escape, exhaust,
+                                escape ? escapeLum/escape : 0.0,
+                                exhaust ? exhaustLum/exhaust : 0.0);
                     }
-                    fclose(out);
-                    if (det) fclose(det);
+                    requireReadback(fclose(out) == 0, "close ray paths CSV");
+                    if (analyticOut) requireReadback(fclose(analyticOut) == 0, "close analytic CSV");
+                    requireReadback(fclose(det) == 0, "close ray detail CSV");
+                    // Same-frame SC supply for an offline join on the debug
+                    // provenance columns above. Opt-in: five 2048² atlases
+                    // plus the visibility buffer are substantial readbacks.
+                    if (std::getenv("DDGI_SC_COMPONENTS")) {
+                        auto* sc = pipeline_ ? pipeline_->GetSurfaceCachePass() : nullptr;
+                        if (sc) {
+                            if (std::getenv("DDGI_SC_LOOKUP_AUDIT")) {
+                                auto& draw = nanite::GPUDrivenDrawPipeline::Get();
+                                const ResourceHandle sources[] = {sc->GetGridOffsetsBuffer(), sc->GetGridCardsBuffer(),
+                                    draw.GetGlobalInstanceDataBuffer(), draw.GetMaterialDataBuffer(), sc->GetCardLookupBuffer()};
+                                const char* names[] = {"sc_grid_offsets.raw", "sc_grid_cards.raw", "material_instances.raw", "material_table.raw", "sc_card_lookups.raw"};
+                                std::ofstream meta("/tmp/ddgi_sc_lookup_meta.json");
+                                meta << "{\"frame\":" << fidx << ",\"source_identity\":\"host wiring, not independent descriptor capture\",\"buffers\":[";
+                                for (u32 i = 0; i < 5u; ++i) {
+                                    u64 bytes = 0;
+                                    requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(sources[i], bytes) &&
+                                        bytes > 0 && bytes <= 64u*1024u*1024u && bytes % 4u == 0, "lookup/material buffer extent");
+                                    // Copy the exact byte extent, including a
+                                    // non-vec4 tail; never round a u32 buffer up.
+                                    BufferDesc desc{};
+                                    desc.size = bytes;
+                                    desc.usage = GPUMemoryUsage::Readback;
+                                    desc.memoryUsage = GPUMemoryUsage::Readback;
+                                    const auto stage = device_->CreateBuffer(desc);
+                                    const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                                    requireReadback(stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER,
+                                        "allocate lookup/material readback");
+                                    auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                                    prepareReadback(cmd);
+                                    cmd->CopyBuffer(sources[i], stage, 0, 0, bytes);
+                                    completeReadback(cmd);
+                                    device_->DestroyCommandBuffer(command);
+                                    const void* mapped = device_->MapBuffer(stage);
+                                    requireReadback(mapped != nullptr, "Map lookup/material evidence");
+                                    saveReadback(names[i], mapped, bytes);
+                                    device_->UnmapBuffer(stage);
+                                    device_->DestroyBuffer(stage);
+                                    if (i) meta << ',';
+                                    meta << "{\"name\":\"" << names[i] << "\",\"handle\":" << sources[i] << ",\"bytes\":" << bytes << '}';
+                                }
+                                meta << "],\"readback_completed\":true,\"explicit_buffer_dependencies\":true}";
+                                meta.close();
+                                requireReadback(bool(meta), "write lookup/material identity");
+                            }
+                            const u32 atlasSize = sc->GetAtlasSize();
+                            auto dumpTexture = [&](const char* name, ResourceHandle source, u32 bpp) {
+                                requireReadback(source != handles::INVALID_RESOURCE, "atlas source");
+                                const u64 bytes = u64(atlasSize) * atlasSize * bpp;
+                                BufferDesc desc{};
+                                desc.size = bytes;
+                                desc.usage = GPUMemoryUsage::Readback;
+                                desc.memoryUsage = GPUMemoryUsage::Readback;
+                                auto stage = device_->CreateBuffer(desc);
+                                auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                                if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER) {
+                                    auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                                    prepareReadback(cmd);
+                                    ResourceBarrier barrier{};
+                                    barrier.resource = source;
+                                    barrier.beforeState = ResourceState::Unknown;
+                                    barrier.afterState = ResourceState::CopySource;
+                                    barrier.subresource = 0xFFFFFFFF;
+                                    cmd->InsertBarrier(&barrier, 1);
+                                    BufferTextureCopyRegion region{};
+                                    region.bufferRowLength = atlasSize;
+                                    region.imageSubresource = {0, 0, 1};
+                                    region.imageExtent = {atlasSize, atlasSize, 1};
+                                    cmd->CopyTextureToBuffer(source, stage, &region, 1);
+                                    ResourceBarrier back{};
+                                    back.resource = source;
+                                    back.beforeState = ResourceState::CopySource;
+                                    back.afterState = ResourceState::UnorderedAccess;
+                                    back.subresource = 0xFFFFFFFF;
+                                    cmd->InsertBarrier(&back, 1);
+                                    completeReadback(cmd);
+                                    device_->DestroyCommandBuffer(command);
+                                    const void* mapped = device_->MapBuffer(stage);
+                                    requireReadback(mapped != nullptr, "Map atlas");
+                                    if (mapped) {
+                                        std::ofstream raw(std::string("/tmp/ddgi_sc_") + name + ".raw", std::ios::binary);
+                                        raw.write(static_cast<const char*>(mapped), std::streamsize(bytes));
+                                        raw.close();
+                                        requireReadback(bool(raw), "write atlas evidence");
+                                        device_->UnmapBuffer(stage);
+                                    }
+                                } else {
+                                    requireReadback(false, "allocate atlas readback");
+                                }
+                                if (stage != handles::INVALID_RESOURCE) device_->DestroyBuffer(stage);
+                            };
+                            dumpTexture("lighting", sc->GetLightingAtlas(fidx), 8);
+                            dumpTexture("nodirect", sc->GetLightingNoDirectAtlas(fidx), 8);
+                            dumpTexture("tile", sc->GetIndirectOutTexture(fidx), 8);
+                            dumpTexture("albedo", sc->GetAlbedoAtlas(), 4);
+                            dumpTexture("emissive", sc->GetEmissiveAtlas(), 8);
+                            if (std::getenv("DDGI_SC_GEOMETRY")) {
+                                dumpTexture("depth", sc->GetDepthAtlas(), 4);
+                                dumpTexture("normal", sc->GetNormalAtlas(), 4);
+                            }
+                            // Optional one-tile trace audit. Tile coordinates
+                            // come from sc_texel_x/y divided by the active
+                            // PRIMAL_SC_RADIOSITY_TILE (default 8).
+                            if (const char* tileXEnv = std::getenv("DDGI_SC_TILE_X")) {
+                                dumpTexture("depth", sc->GetDepthAtlas(), 4);
+                                dumpTexture("normal", sc->GetNormalAtlas(), 4);
+                                // Opt-in 3x3x3 GPU SDF readback around a world
+                                // point. Compare against the on-disk R16F
+                                // merged cache to distinguish upload/binding
+                                // errors from a genuinely empty field.
+                                if (const char* pointEnv = std::getenv("DDGI_SC_SDF_POINT")) {
+                                    float px = 0, py = 0, pz = 0;
+                                    if (offlineSDFMerger_ && offlineSDFMerger_->IsValid() &&
+                                        std::sscanf(pointEnv, "%f,%f,%f", &px, &py, &pz) == 3) {
+                                        const auto org = offlineSDFMerger_->GetOrigin();
+                                        const auto ext = offlineSDFMerger_->GetExtent();
+                                        const int res = int(offlineSDFMerger_->GetResolution());
+                                        const int ix = std::clamp(int((px - org.x) / ext.x * res), 1, res - 2);
+                                        const int iy = std::clamp(int((py - org.y) / ext.y * res), 1, res - 2);
+                                        const int iz = std::clamp(int((pz - org.z) / ext.z * res), 1, res - 2);
+                                        BufferDesc sdfDesc{};
+                                        sdfDesc.size = 64;
+                                        sdfDesc.usage = GPUMemoryUsage::Readback;
+                                        sdfDesc.memoryUsage = GPUMemoryUsage::Readback;
+                                        auto sdfStage = device_->CreateBuffer(sdfDesc);
+                                        auto sdfCommand = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                                        auto sdfSource = offlineSDFMerger_->GetTexture();
+                                        if (sdfStage != handles::INVALID_RESOURCE &&
+                                            sdfCommand != handles::INVALID_COMMAND_BUFFER) {
+                                            auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(sdfCommand);
+                                            prepareReadback(cmd);
+                                            ResourceBarrier toCopy{};
+                                            toCopy.resource = sdfSource;
+                                            toCopy.beforeState = ResourceState::ShaderResource;
+                                            toCopy.afterState = ResourceState::CopySource;
+                                            toCopy.subresource = 0xFFFFFFFFu;
+                                            cmd->InsertBarrier(&toCopy, 1);
+                                            BufferTextureCopyRegion region{};
+                                            region.imageSubresource = {0, 0, 1};
+                                            region.imageOffset = {ix - 1, iy - 1, iz - 1};
+                                            region.imageExtent = {3, 3, 3};
+                                            cmd->CopyTextureToBuffer(sdfSource, sdfStage, &region, 1);
+                                            ResourceBarrier back{};
+                                            back.resource = sdfSource;
+                                            back.beforeState = ResourceState::CopySource;
+                                            back.afterState = ResourceState::ShaderResource;
+                                            back.subresource = 0xFFFFFFFFu;
+                                            cmd->InsertBarrier(&back, 1);
+                                            completeReadback(cmd);
+                                            if (const void* mapped = device_->MapBuffer(sdfStage)) {
+                                                std::ofstream raw("/tmp/ddgi_sc_sdf_3x3x3.raw", std::ios::binary);
+                                                raw.write(static_cast<const char*>(mapped), 54);
+                                                device_->UnmapBuffer(sdfStage);
+                                            }
+                                            std::cerr << "[DDGI_SC_SDF_POINT] voxel=(" << ix << "," << iy << "," << iz
+                                                      << ") world=(" << px << "," << py << "," << pz << ")" << std::endl;
+                                        }
+                                        if (sdfCommand != handles::INVALID_COMMAND_BUFFER)
+                                            device_->DestroyCommandBuffer(sdfCommand);
+                                        if (sdfStage != handles::INVALID_RESOURCE)
+                                            device_->DestroyBuffer(sdfStage);
+                                    }
+                                }
+                                const char* tileYEnv = std::getenv("DDGI_SC_TILE_Y");
+                                const char* tileSizeEnv = std::getenv("PRIMAL_SC_RADIOSITY_TILE");
+                                u32 tileSize = tileSizeEnv ? u32(std::atoi(tileSizeEnv)) : 8u;
+                                u32 tileX = u32(std::atoi(tileXEnv));
+                                u32 tileY = tileYEnv ? u32(std::atoi(tileYEnv)) : 0u;
+                                if (tileSize >= 4u && tileSize <= 128u &&
+                                    tileX < atlasSize / tileSize && tileY < atlasSize / tileSize) {
+                                    const u32 cx = tileX * tileSize + tileSize / 2u;
+                                    const u32 cy = tileY * tileSize + tileSize / 2u;
+                                    const auto& cardList = sc->GetCardGenerator().GetCards();
+                                    for (u32 ci = 0; ci < std::min<u32>(u32(cardList.size()), 24u); ++ci) {
+                                        const auto& card = cardList[ci];
+                                        if (cx >= card.atlas_offset_x && cx < card.atlas_offset_x + card.resolution &&
+                                            cy >= card.atlas_offset_y && cy < card.atlas_offset_y + card.resolution) {
+                                            std::cerr << "[DDGI_SC_TILE] card=" << ci
+                                                << " center=(" << card.center.x << "," << card.center.y << "," << card.center.z << ")"
+                                                << " extent=(" << card.extent.x << "," << card.extent.y << "," << card.extent.z << ")"
+                                                << " axis=" << card.axis_direction << " res=" << card.resolution
+                                                << " atlas=(" << card.atlas_offset_x << "," << card.atlas_offset_y << ")" << std::endl;
+                                            break;
+                                        }
+                                    }
+                                    const u64 rayOffset = (u64(tileY) * (atlasSize / tileSize) + tileX) * 32u * 32u;
+                                    const u64 rayBytes = 32u * 32u;
+                                    BufferDesc desc{};
+                                    desc.size = rayBytes;
+                                    desc.usage = GPUMemoryUsage::Readback;
+                                    desc.memoryUsage = GPUMemoryUsage::Readback;
+                                    auto stage = device_->CreateBuffer(desc);
+                                    auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                                    auto source = sc->GetIndirectRayHitsBuffer();
+                                    if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER &&
+                                        source != handles::INVALID_RESOURCE) {
+                                        auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                                        prepareReadback(cmd);
+                                        cmd->CopyBuffer(source, stage, rayOffset, 0, rayBytes);
+                                        completeReadback(cmd);
+                                        device_->DestroyCommandBuffer(command);
+                                        if (const void* mapped = device_->MapBuffer(stage)) {
+                                            std::ofstream raw("/tmp/ddgi_sc_tile_hits.raw", std::ios::binary);
+                                            raw.write(static_cast<const char*>(mapped), std::streamsize(rayBytes));
+                                            device_->UnmapBuffer(stage);
+                                        }
+                                    } else if (command != handles::INVALID_COMMAND_BUFFER) {
+                                        device_->DestroyCommandBuffer(command);
+                                    }
+                                    if (stage != handles::INVALID_RESOURCE) device_->DestroyBuffer(stage);
+                                }
+                            }
+                            auto visibility = readVec4Buffer(sc->GetShadowVisibilityBuffer(),
+                                u64(atlasSize) * atlasSize / 4u);
+                            requireReadback(visibility.size() == u64(atlasSize)*atlasSize/4u, "complete visibility evidence");
+                            if (!visibility.empty()) {
+                                std::ofstream raw("/tmp/ddgi_sc_visibility.raw", std::ios::binary);
+                                raw.write(reinterpret_cast<const char*>(visibility.data()),
+                                    std::streamsize(visibility.size() * sizeof(math::v4)));
+                            }
+                            std::cerr << "[DDGI_SC_COMPONENTS] same-frame atlas size " << atlasSize << std::endl;
+                        }
+                    }
+                    // Readback identity for offline SC joins. Consumers must
+                    // reject missing/truncated files rather than reuse /tmp
+                    // output from an earlier run. Only listed slots are fresh.
+                    if (std::ofstream meta("/tmp/ddgi_ray_audit_meta.json"); meta) {
+                        auto* sc = pipeline_->GetSurfaceCachePass();
+                        meta << "{\"frame\":" << fidx
+                             << ",\"readback_completed\":true,\"explicit_buffer_dependencies\":true"
+                             << ",\"ray_sample_mode\":" << pass->GetVolumeData().RaySampleMode << ",\"rays_per_probe\":128"
+                             << ",\"path_debug\":" << (std::getenv("DDGI_PATH_DEBUG") ? "true" : "false")
+                             << ",\"atlas_size\":" << (sc ? sc->GetAtlasSize() : 0u)
+                             << ",\"complete_update_list\":" << (listed.size() == updateCount && updateCount > 0u ? "true" : "false")
+                             << ",\"update_probes\":[";
+                        for (size_t i = 0; i < listed.size(); ++i) {
+                            if (i) meta << ',';
+                            meta << listed[i];
+                        }
+                        meta << "]}";
+                    }
                     device_->UnmapBuffer(staging);
                     std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_ray_paths.csv" << std::endl;
                 }

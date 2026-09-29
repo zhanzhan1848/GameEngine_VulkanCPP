@@ -11,6 +11,7 @@
 #include "Graphics/Lumen/DDGI/LumenDDGIPass.h"
 #include "Graphics/Lumen/WRC/LumenWRCPass.h"
 #include "Graphics/Lumen/WRC/WRCFitGrid.h"
+#include "Graphics/Lumen/Reflections/ReflSpecularTrace.h"
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include <array>
@@ -28,6 +29,8 @@
 #include "Graphics/RenderPipeline/Modules/PlanarReflectionModule.h"
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
+#include "Graphics/RenderPipeline/Modules/PassDebugViewModule.h"
+#include "Graphics/RenderPipeline/PassDebugView.h"
 #include "Graphics/RenderPipeline/Modules/SDFVisualizationModule.h"
 #include "Graphics/RenderPipeline/Modules/NeuralDebugModule.h"
 #include "Graphics/RenderPipeline/Modules/NeuralCaptureModule.h"
@@ -219,6 +222,37 @@ public:
     }
 
     // Debug/testing: primary DDGI volume access.
+    // Default-off Vulkan source-distance candidate. CPU geometry survives the
+    // deferred Lumen rebuild and is uploaded to each actual DDGI volume.
+    bool SetDDGIFirstSurfaceGeometry(const void* nodes, u64 nodeBytes,
+                                    const void* triangles, u64 triangleBytes);
+    // Default-off child candidate.  The source handles are borrowed from the
+    // live GPUDrivenDraw scene; the DDGI pass owns only its triangle mapping
+    // and audit buffers.  This is staged across deferred Lumen rebuilds.
+    bool SetDDGIFirstNativeNormalSources(
+        rhi::ResourceHandle positions,
+        rhi::ResourceHandle elements,
+        rhi::ResourceHandle instances,
+        rhi::ResourceHandle materials,
+        rhi::ResourceHandle normalTexture,
+        rhi::SamplerHandle normalSampler,
+        const void* triangleMapping,
+        u64 triangleMappingBytes);
+    // Default-off Vulkan analytic fallback rho candidate.  Geometry/mapping
+    // are staged in CPU memory and borrowed native sources are refreshed after
+    // GPUDrivenDraw creates the current scene buffers.
+    bool SetDDGIAnalyticFirstRhoSources(
+        const void* nodes, u64 nodeBytes,
+        const void* triangles, u64 triangleBytes,
+        rhi::ResourceHandle positions,
+        rhi::ResourceHandle elements,
+        rhi::ResourceHandle instances,
+        rhi::ResourceHandle materials,
+        rhi::ResourceHandle albedoTexture,
+        rhi::SamplerHandle albedoSampler,
+        const void* triangleMapping,
+        u64 triangleMappingBytes);
+
     lumen::LumenDDGIPass* GetDDGIPass() const {
         return ddgi_volumes_[0] ? ddgi_volumes_[0].get() : nullptr;
     }
@@ -226,6 +260,11 @@ public:
     // Debug/testing: screen-probe GI access（SPGI_TRACE_DIAG 读回用）.
     lumen::ScreenProbeGIPass* GetScreenProbePass() const {
         return screen_probe_pass_ ? screen_probe_pass_.get() : nullptr;
+    }
+    // Debug/testing: logical GI age after SDF + snapshot + SC cards become
+    // ready. Diagnostics must not use the absolute render-frame clock.
+    u32 GetGIFrameIndex() const {
+        return GIFrame(static_cast<u32>(frameCount_));
     }
     // P1（reaudit §4.1/4.2）: trace 分支诊断模式（0=off，1/2/3 见 diag_params）。
     // 重建 screen_probe_pass_ 时保留（创建点读取成员）。
@@ -236,10 +275,24 @@ public:
     // P1（reaudit §4.4 验收）: 雾的体积阴影开关（FROXEL_NO_SHADOW A/B 用）。
     // false 时不给 FroxelFogPass 传任何阴影输入（shadowMode=0 恒 lit）。
     void SetFroxelShadowsEnabled(bool enabled) { froxel_shadows_enabled_ = enabled; }
+    // WP1/WP2/WP3（froxel-upgrade 计划）: 运行时旋钮透传（免 pass 重建，
+    // 门禁 G5 双相位 / FROXEL_TEMPORAL / FROXEL_SPGI_AMBIENT A-B 用）。
+    // pass 未初始化时安全 no-op。
+    void SetFroxelMarchSteps(u32 steps) {
+        if (froxel_fog_pass_) froxel_fog_pass_->SetMarchSteps(steps);
+    }
+    void SetFroxelTemporalEnabled(bool on) {
+        if (froxel_fog_pass_) froxel_fog_pass_->SetTemporalEnabled(on);
+    }
+    void SetFroxelAmbientSPGI(bool on) {
+        if (froxel_fog_pass_) froxel_fog_pass_->SetAmbientSourceSPGI(on);
+    }
 
     rhi::RHIDeviceBase* GetDevice() const { return device_; }
 
     // --- Editor mode (lightweight forward rendering) ---
+    // PassDebugView 激活期间 SetEditorMode(true) 被忽略（debug 视图需要完整
+    // 渲染图路径；PASS=Off 后恢复正常切换语义，见 SetPassDebugView）。
     void SetEditorMode(bool enabled);
     bool IsEditorMode() const { return editor_mode_; }
     bool LoadEditorScene(const std::string& model_path) {
@@ -247,6 +300,24 @@ public:
         return forward_renderer_->LoadScene(model_path);
     }
     ForwardSceneRenderer* GetForwardRenderer() const { return forward_renderer_.get(); }
+
+    // --- Pass Debug View（视口实时 pass 可视化，编辑器 PASS 下拉 / CLI 共用）---
+    // view 取 PassDebugView 枚举值（0=Off）。非 Off 时 Step 11 用
+    // PassDebugViewModule 整屏显示目标中间资源；目标 pass 本帧未产出则回退
+    // 正常 FinalBlit。切换是 per-frame 值，无管线重建。
+    void SetPassDebugView(u32 view);
+    u32 GetPassDebugView() const { return debug_view_; }
+    // WRC 探针球 overlay（对齐 SetProbeSphereDebug 的 DDGI 先例）。
+    // [P0 2026-09-21] env PRIMAL_WRC_PROBE_SPHERES=1 = 测试/离线入口（此前
+    // 仅编辑器 C ABI 可达）；显式 setter 仍可覆盖。
+    void SetWRCProbeDebug(bool enabled) { wrc_probe_debug_ = enabled; }
+    bool IsWRCProbeDebugEnabled() const {
+        static const bool envOn = [] {
+            const char* e = std::getenv("PRIMAL_WRC_PROBE_SPHERES");
+            return e && e[0] == '1';
+        }();
+        return wrc_probe_debug_ || envOn;
+    }
 
     /// Toggle fullscreen GlobalSDF visualization (replaces FinalBlit output).
     /// Cheap per-frame bool — does NOT trigger pipeline re-initialization.
@@ -264,6 +335,15 @@ public:
     /// (2=Unlit reserved; needs a deferred-shader variant, see plan A7.)
     void SetViewMode(u32 mode) { view_mode_ = mode; }
     u32 GetViewMode() const { return view_mode_; }
+
+    /// Pass Debug View 当前视图（PassDebugView 枚举值）+ 回退提示去重。
+    u32 debug_view_{0};
+    bool debug_view_fallback_warned_{false};
+    /// 本帧 BackBuffer 实际格式（PassDebugView 管线变体选择用——Metal 对
+    /// 管线 pixel format 与 attach 格式不一致会静默丢 draw）。
+    rhi::DataFormat current_output_format_{ rhi::DataFormat::BGRA8_UNorm };
+    /// WRC 探针球 overlay 开关。
+    bool wrc_probe_debug_{false};
 
     /// Geometry debug overlay (meshlets / SDF slices / vector fields / voxels).
     /// Drawn on the tone-mapped frame before FinalBlit. Cheap per-frame
@@ -312,6 +392,17 @@ public:
     // --- Offline SDF data source for SDF visualization ---
     // When set, SDF visualization uses this pre-built global SDF texture
     // instead of the runtime GlobalSDF cascades.
+    // [双稳态修复] 场景卡片注册（从 NeedsFullRebuild 分支提取——
+    // 内容就绪重注册路径复用同一实现）。
+    void RegisterSceneCardsForCache(const RenderScene& scene);
+    void TryLatchGIContentReady();
+    // Persist across lazy GI-volume creation / auto-fit rebuilds.
+    // Caller certifies offline texture is experimental RG16F evidence.
+    void SetOfflineSDFHitEvidence(u32 mode) {
+        offline_sdf_hit_evidence_=std::min(mode,3u);
+        if (ddgi_pass_) ddgi_pass_->SetOfflineHitEvidence(offline_sdf_hit_evidence_);
+    }
+
     void SetOfflineSDFSource(rhi::ResourceHandle texture,
                              math::v3 origin, math::v3 extent, u32 resolution,
                              bool signed_field = false) {
@@ -360,6 +451,7 @@ public:
         // Forward to DDGI pass so it uses the same high-res SDF for ray tracing.
         if (ddgi_pass_) {
             ddgi_pass_->SetOfflineSDFSource(texture, origin, extent, resolution);
+            ddgi_pass_->SetOfflineHitEvidence(offline_sdf_hit_evidence_);
         }
         // T8.13: forward to the SC shadow march as well (runtime cascades
         // misplace SC shadow hits just like they did for the DDGI trace).
@@ -443,11 +535,35 @@ private:
 
     void UpdatePerFrame(RenderScene& scene, RenderView& view);
     void BuildRenderGraph(rhi::ResourceHandle backBuffer, u32 currentBufferIndex);
+
+    // 编辑器路径着色器自加载：SetShaderHandles 未被调用（编辑器 EngineDLL
+    // 路径）时补齐 blit/deferred/gi_gather/fusion 系句柄，装配表对齐测试壳。
+    void SelfLoadPipelineShaders();
+
+    // Pass Debug View：解析当前 debug_view_ 的源资源为 RG 节点（经
+    // ImportResource 声明读 barrier）。全部 out 有效返回 true；目标 pass
+    // 本帧未产出返回 false（调用方回退正常 FinalBlit）。深度 + 可见性缓冲
+    // + cluster map 是所有视图的副输入（着色器静态引用），缺失同样按不可
+    // 用处理。
+    bool ResolvePassDebugViewSource(rendergraph::RenderGraph& graph, u32 cbIdx,
+                                    const DeferredLightingOutputs& deferredOut,
+                                    const FusionOutputs& fusionOut,
+                                    rendergraph::RGResourceHandle& out_source,
+                                    rendergraph::RGResourceHandle& out_id,
+                                    rendergraph::RGResourceHandle& out_depth,
+                                    rhi::ResourceHandle& out_cluster_map,
+                                    rhi::ResourceHandle& out_aux_buffer,
+                                    u32& out_aux_count);
     // B11: DDGI/探针射线的 prev-screen 辐射度供给源（上一帧 Fusion HDR，
     // 含 GI；不可用时返回 invalid，调用方回退 DeferredLighting 直射输出）。
     rendergraph::RGResourceHandle MakeProbeRadianceSource(rendergraph::RenderGraph& graph,
                                                           u32 currentBufferIndex);
     bool ApplyConfigChanges();
+    // Rebind the opt-in native-normal child after GPUDrivenDraw has created or
+    // rebuilt its borrowed geometry buffers.  Both render entry points call
+    // this immediately before recording DDGI passes.
+    bool RefreshDDGIFirstNativeNormalSources();
+    bool RefreshDDGIAnalyticFirstRhoSources();
 
     rhi::RHIDeviceBase* device_{nullptr};
     std::unique_ptr<rendergraph::RenderGraph> renderGraph_;
@@ -512,6 +628,8 @@ private:
     // 与 DDGI 逐项同构、互不包含——禁止从 WRC 读 DDGI 内部（反之亦然）。
     std::array<std::unique_ptr<lumen::LumenWRCPass>, 2> wrc_volumes_{};
     u32 wrc_volume_count_ = 0;
+    // [REFL R4/R5] 屏幕外 specular 兜底（PRIMAL_REFL=2 创建；Vulkan 先行）。
+    std::unique_ptr<lumen::ReflSpecularTracePass> refl_specular_pass_{};
     // [双稳态修复] GI 内容就绪闩锁——首次满足（离线 SDF 就位 + GlobalSDF
     // 体素化就绪 + 快照无待处理重建）的帧号。GI 暖启动时钟从此帧计数
     // （gi_frame = frame - ready_frame），消除异步内容加载时序导致的
@@ -521,6 +639,16 @@ private:
         return gi_content_ready_frame_ == 0xFFFFFFFFu
             ? 0u : (frame - gi_content_ready_frame_);
     }
+    // [SC 卡片 Lumen 对齐 Phase 2]（2026-09-19 计划，WRC 遗留 #5）：
+    // content-ready 注册门禁——首次 SC 卡片注册推迟到"快照内全部实例都
+    // 携带离线 bake 或有效 mesh 紧致 AABB"为止，消除异步加载时序导致的
+    // 注册 AABB 质量漂移（374/256 运行间两态）。超时 PRIMAL_SC_REG_GATE_
+    // TIMEOUT（默认 600 帧）后按现状注册并告警，防几何永远缺 bounds 的
+    // 资产卡死 SC。
+    bool sc_registration_done_ = false;
+    u32 sc_registration_deferred_frames_ = 0;
+    bool sc_registration_warned_ = false;
+    bool sc_gate_diag_logged_ = false;   // [R2.3] 门禁阻塞实例一次性诊断
     lumen::GIPlatformProfile gi_profile_{};                // T4.5/C5 capability ceiling
     std::unique_ptr<lumen::LumenSSAOPass> ssao_pass_;
     std::unique_ptr<lumen::LumenSSGIPass> ssgi_pass_;
@@ -617,6 +745,7 @@ private:
     bool has_offline_sdf_{false};
     // GI 根治 Phase 4: 离线场是否为有符号编码（DDGI 零穿越命中判定）。
     bool offline_sdf_signed_{false};
+    u32 offline_sdf_hit_evidence_{0};
     rhi::ResourceHandle offline_sdf_texture_{rhi::handles::INVALID_RESOURCE};
     math::v3 offline_sdf_origin_{0, 0, 0};
     math::v3 offline_sdf_extent_{0, 0, 0};
@@ -625,6 +754,26 @@ private:
     // --- Utility textures ---
     rhi::ResourceHandle black_texture_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle white_texture_{rhi::handles::INVALID_RESOURCE};
+
+    // Explicit candidate CPU geometry retained across deferred pass rebuilds.
+    std::vector<u8> ddgi_first_surface_nodes_;
+    std::vector<u8> ddgi_first_surface_triangles_;
+    std::vector<u8> ddgi_first_native_triangle_mapping_;
+    rhi::ResourceHandle ddgi_first_native_positions_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_first_native_elements_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_first_native_instances_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_first_native_materials_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_first_native_normal_texture_{rhi::handles::INVALID_RESOURCE};
+    rhi::SamplerHandle ddgi_first_native_normal_sampler_{rhi::handles::INVALID_SAMPLER};
+    std::vector<u8> ddgi_analytic_first_rho_nodes_;
+    std::vector<u8> ddgi_analytic_first_rho_triangles_;
+    std::vector<u8> ddgi_analytic_first_rho_mapping_;
+    rhi::ResourceHandle ddgi_analytic_first_rho_positions_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_analytic_first_rho_elements_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_analytic_first_rho_instances_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_analytic_first_rho_materials_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle ddgi_analytic_first_rho_albedo_{rhi::handles::INVALID_RESOURCE};
+    rhi::SamplerHandle ddgi_analytic_first_rho_sampler_{rhi::handles::INVALID_SAMPLER};
 
     // T4.6.5 part 37: IBL cached handles. Forwarded to deferred_module_ when
     // it's created by InitializeSubsystems. Allows SetIBLResources to be

@@ -38,8 +38,24 @@ struct FroxelParams {
     float4 LightDirection;      // 352
     float4 LightColor;          // 368
 
-    // Shadow VP matrices (128 bytes)
-    float4 ShadowVP[2][4];      // 384: [cascade][column], lightProj * lightView
+    // Shadow VP matrices (256 bytes) — P2-B: 4 cascades（与 C++ 逐字节镜像，
+    // 当前路径仅消费 [0..1]）
+    float4 ShadowVP[4][4];      // 384: [cascade][column], lightProj * lightView
+
+    // 2026-09-16（audit V3/V5，与 GLSL 同步）: 真实相机 near/far + 常量介质
+    // 调试密度。
+    float4 FrustumParams2;      // 640: x=camNear, y=camFar, z=density_uniform_debug, w=pad
+
+    // 2026-09-30（froxel-upgrade 计划 WP1/WP2/WP3，与 C++ FroxelTypes.h /
+    // GLSL FroxelCommon.glsl 逐字节一致，800B）。Metal 端行为接线在本文件
+    // 的 integrate/后续 pass 移植时消费；布局先行同步是三方镜像铁律
+    //（计划 §3.4：布局不一致 = MSL 端未定义行为）。
+    float4 VolumeParams4;       // 656: x=march_steps(0=legacy 单查询),
+                                //      y=march_distance(世界单位),
+                                //      z=ambient_source(0=硬编码,1=SPGI),
+                                //      w=temporal_blend(0=关)
+    float4 ViewProj[4];         // 672: 当前帧 view-projection（WP2）
+    float4 PrevInvViewProj[4];  // 736: 上一帧 inverse view-projection（WP3）
 };
 
 // ============================================================================
@@ -48,14 +64,15 @@ struct FroxelParams {
 
 float3 froxel_to_world(uint3 froxel_xyz, constant FroxelParams& params) {
     // Exponential Z: z_view = near * pow(far/near, (slice + 0.5) / depth_count)
-    float z_frac = (float(froxel_xyz.z) + 0.5) * params.FroxelDims2.y;
+    // 契约（audit V2，与 GLSL 一致）: 整数 = 单元中心，helper 内统一 +0.5。
+    float z_frac = (float(froxel_xyz.z) + 0.5) * params.FrustumParams.w;
     float z_view = params.FrustumParams.x *
                    pow(params.FrustumParams.y / params.FrustumParams.x, z_frac);
 
-    // Screen UV → NDC
+    // Screen UV → NDC：引擎表面约定 ndc=(2u-1, 1-2v)（旧式 1-(2u-1) 得
+    // 2-2v，Y 偏了半个视场）
     float2 screen_uv = (float2(froxel_xyz.xy) + 0.5) / float2(params.FroxelDims.xy);
-    float2 ndc = screen_uv * 2.0 - 1.0;
-    ndc.y = 1.0 - ndc.y; // Metal V-flip
+    float2 ndc = float2(screen_uv.x * 2.0 - 1.0, 1.0 - 2.0 * screen_uv.y);
 
     // Near plane world position for this pixel (NDC z = 0)
     float4 near4 = params.InvViewProj[0] * ndc.x
@@ -64,9 +81,10 @@ float3 froxel_to_world(uint3 froxel_xyz, constant FroxelParams& params) {
                  + params.InvViewProj[3];
     near4 /= near4.w;
 
-    // Scale from near plane: perspective rays are linear in depth
+    // Scale from near plane: 近点在相机 near 平面，基准必须是 camNear
+    //（audit V3: 旧式除以雾 near 放大 5 倍）
     float3 cam_to_near = near4.xyz - params.CameraPos.xyz;
-    float scale = z_view / params.FrustumParams.x;
+    float scale = z_view / params.FrustumParams2.x;
     return params.CameraPos.xyz + cam_to_near * scale;
 }
 
@@ -75,7 +93,7 @@ float3 froxel_to_world(uint3 froxel_xyz, constant FroxelParams& params) {
 // ============================================================================
 
 float froxel_z_to_depth(float slice, constant FroxelParams& params) {
-    float z_frac = (slice + 0.5) * params.FroxelDims2.y;
+    float z_frac = (slice + 0.5) * params.FrustumParams.w;
     return params.FrustumParams.x *
            pow(params.FrustumParams.y / params.FrustumParams.x, z_frac);
 }
@@ -84,10 +102,38 @@ float froxel_z_to_depth(float slice, constant FroxelParams& params) {
 // NDC depth → view-space Z
 // ============================================================================
 
+// scene depth 解码用真实相机 near/far（audit V3，与 GLSL 同步）
 float ndc_to_view_z(float ndc_z, constant FroxelParams& params) {
-    float near = params.FrustumParams.x;
-    float far = params.FrustumParams.y;
+    float near = params.FrustumParams2.x;
+    float far = params.FrustumParams2.y;
     return (near * far) / (far - ndc_z * (far - near));
+}
+
+// 相机 forward 轴（屏幕中心远平面点方向，与 GLSL froxelCameraForward 同式）
+float3 froxel_camera_forward(constant FroxelParams& params) {
+    float4 far4 = params.InvViewProj[0] * 0.0
+                + params.InvViewProj[1] * 0.0
+                + params.InvViewProj[2] * 1.0
+                + params.InvViewProj[3];
+    far4 /= far4.w;
+    return normalize(far4.xyz - params.CameraPos.xyz);
+}
+
+// WP1: 世界坐标 → froxel 归一化 UVW（与 GLSL froxelWorldToUvw 逐式一致；
+// Metal march 移植时消费）
+float3 froxel_world_to_uvw(float3 world_pos, constant FroxelParams& params) {
+    float4 clip = params.ViewProj[0] * world_pos.x
+                + params.ViewProj[1] * world_pos.y
+                + params.ViewProj[2] * world_pos.z
+                + params.ViewProj[3];
+    float3 sc = clip.xyz / clip.w;
+    float2 uv = float2(sc.x * 0.5 + 0.5, 0.5 - sc.y * 0.5);
+    float z_view = max(dot(world_pos - params.CameraPos.xyz,
+                           froxel_camera_forward(params)),
+                       params.FrustumParams.x);
+    float w = clamp(log2(z_view / params.FrustumParams.x) / params.FrustumParams.z,
+                    0.0, 1.0);
+    return float3(uv, w);
 }
 
 // ============================================================================
@@ -140,6 +186,9 @@ float froxel_sample_density(float3 world_pos,
                              texture3d<float, access::sample> sdf1,
                              texture3d<float, access::sample> sdf2,
                              constant FroxelParams& params) {
+    // V-Test-A: 常量介质调试模式（与 GLSL 同步）
+    if (params.FrustumParams2.z > 0.0) return params.FrustumParams2.z;
+
     // Height gradient (world-space Y)
     float height_grad = 1.0;
     if (params.VolumeParams2.y > 0.0) {
@@ -166,15 +215,24 @@ float froxel_sample_density(float3 world_pos,
     uint cascade_count = uint(params.SdfResolutions.w);
     if (cascade_count > 0) {
         float sdf = froxel_sample_best_sdf(world_pos, sdf0, sdf1, sdf2, params);
-        if (sdf > 10.0) return 0.0;
-        density *= smoothstep(10.0, 0.0, sdf);
+        // audit V5（与 GLSL 同步）: 固体内部剔除 + 远场 0.25 霾底；覆盖外
+        // 保留霾底。所有 smoothstep 保证 edge0<edge1（旧式反向写法未定义）。
+        float sdf_gate;
+        if (sdf > 1e9f) {
+            sdf_gate = 0.25f;
+        } else {
+            float air = 1.0 - smoothstep(0.0, 10.0, max(sdf, 0.0));
+            float not_solid = smoothstep(-1.5, -0.1, sdf);
+            sdf_gate = mix(0.25, 1.0, air) * not_solid;
+        }
+        density *= sdf_gate;
     }
 
     // Density fade with distance
     float dist = length(world_pos - params.CameraPos.xyz);
     if (params.VolumeParams1.w > 0.0) {
-        float fade = smoothstep(params.VolumeParams1.w, 0.0,
-                                dist - params.VolumeParams1.w);
+        float fade = 1.0 - smoothstep(0.0, params.VolumeParams1.w,
+                                      dist - params.VolumeParams1.w);
         density *= fade;
     }
 
@@ -185,13 +243,13 @@ float froxel_sample_density(float3 world_pos,
 // Shadow VP matrix multiply (column-major float4[4] * float4 → NDC)
 // ============================================================================
 
+// audit V4（与 GLSL 同步）: 旧式逐列 dot = Mᵀ·p（转置）。列主序契约下的
+// 标准乘法是 col0*p.x + col1*p.y + col2*p.z + col3*p.w。
 float3 shadow_project(float3 world_pos, constant float4 vp[4]) {
-    float4 clip = float4(
-        dot(float4(world_pos, 1.0), vp[0]),
-        dot(float4(world_pos, 1.0), vp[1]),
-        dot(float4(world_pos, 1.0), vp[2]),
-        dot(float4(world_pos, 1.0), vp[3])
-    );
+    float4 clip = vp[0] * world_pos.x
+                + vp[1] * world_pos.y
+                + vp[2] * world_pos.z
+                + vp[3];
     return clip.xyz / clip.w;
 }
 

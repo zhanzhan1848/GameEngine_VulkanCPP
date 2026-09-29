@@ -36,6 +36,10 @@
 #include "TestNaniteStreamingPipeline.h"
 #elif TEST_VULKAN_SPONZA_RENDERGRAPH
 #include "TestVulkanSponzaRenderGraph.h"
+#elif TEST_VULKAN_DLSS_RENDERGRAPH
+#include "TestVulkanDLSSRenderGraph.h"
+#elif TEST_VULKAN_FROXEL_RENDERGRAPH
+#include "TestVulkanFroxelRenderGraph.h"
 #elif defined(TEST_DAWN_RENDERING)
 #include "TestDawnRendering.h"
 #elif defined(TEST_DAWN_RENDERGRAPH)

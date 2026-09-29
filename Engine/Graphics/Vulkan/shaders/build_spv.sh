@@ -1,5 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # build_spv.sh — dev tool for Tier 4 production Vulkan shaders.
+#
+# shebang 用 env bash（优先 Homebrew bash 5）：2026-09-22 实测 /bin/bash 3.2.57
+# 在 darwin25 上有 malloc 堆损坏 heisenbug（POINTER_BEING_FREED，crash 报告
+# bash-*.ips），经由 make/cmake 中间层调用时确定性崩溃致 VulkanShaderFreshnessGate
+# Error 134；bash 5 无此问题。无 Homebrew bash 的机器回退 /bin/bash 行为不变。
 #
 # Compiles engine WGSL shaders (from Engine/Graphics/Dawn/shaders/) and
 # hand-written GLSL shaders (colocated) into SPIR-V .spv files for use by
@@ -11,6 +16,7 @@
 # Requirements:
 #   - naga  (cargo install naga-cli --locked)   — WGSL → SPIR-V
 #   - glslangValidator (/usr/local/bin or brew) — GLSL → SPIR-V
+#   - spirv-link (SPIRV-Tools) — link multi-entry-point modules
 
 SPV_FAILURES=0
 set -e
@@ -20,6 +26,219 @@ cd "$SCRIPT_DIR"
 
 ENGINE_DAWN_DIR="../../Dawn/shaders"
 DEST_DIR="."
+
+# The Vulkan integration tests load checked-in/generated .spv files directly
+# from this directory.  Keep an explicit freshness check next to the compiler
+# entry point so a source/include edit cannot silently leave the test running
+# an older module.  This mode intentionally does not require any shader
+# compiler: a clean tree remains buildable on machines which only consume the
+# pre-generated SPIR-V.  If regeneration is required, the diagnostic below
+# names the missing tool(s) and the command to run.
+shader_mtime() {
+    if stat -f %m "$1" >/dev/null 2>&1; then
+        stat -f %m "$1"
+    else
+        stat -c %Y "$1"
+    fi
+}
+
+freshness_stale=0
+freshness_missing_include=0
+freshness_missing_tools=""
+
+freshness_has_tool() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+freshness_note_tool_for_source() {
+    case "$1" in
+        *.wgsl)
+            if ! freshness_has_tool naga && [[ "$freshness_missing_tools" != *" naga"* ]]; then
+                freshness_missing_tools="$freshness_missing_tools naga"
+            fi
+            ;;
+        *)
+            if ! freshness_has_tool glslangValidator && [[ "$freshness_missing_tools" != *" glslangValidator"* ]]; then
+                freshness_missing_tools="$freshness_missing_tools glslangValidator"
+            fi
+            ;;
+    esac
+}
+
+# build_spv.sh historically inlines includes relative to the root shader's
+# directory (the same base passed to inline_includes).  Use that exact rule so
+# this check tracks the byte stream that the compiler actually sees.
+freshness_check_tree() {
+    local source="$1"
+    local include_base="$2"
+    local output="$3"
+    local output_mtime include include_path include_mtime
+
+    output_mtime="$(shader_mtime "$output")"
+    while IFS= read -r include; do
+        [ -n "$include" ] || continue
+        include_path="$include_base/$include"
+        if [ ! -f "$include_path" ]; then
+            echo "  MISSING INCLUDE: $source -> $include_path" >&2
+            freshness_missing_include=1
+            continue
+        fi
+        include_mtime="$(shader_mtime "$include_path")"
+        if [ "$include_mtime" -gt "$output_mtime" ]; then
+            echo "  STALE: $output (include newer: $include_path)" >&2
+            freshness_stale=1
+            freshness_note_tool_for_source "$source"
+        fi
+        freshness_check_tree "$include_path" "$include_base" "$output"
+    done < <(sed -n 's/^[[:space:]]*#include[[:space:]]*"\([^"]*\)".*/\1/p' "$source")
+}
+
+freshness_candidates_for_spv() {
+    local rel="$1"
+    local stem name candidate
+    stem="${rel%.spv}"
+    name="$(basename "$stem")"
+
+    # 历史遗留孤儿产物：运行时加载 GlobalSDFVoxelization / GlobalSDFMipmap
+    # （GlobalSDF.cpp:570/712），本 spv 无生产者亦无消费者（全仓 0 引用）。
+    # 按孤儿忽略，否则 .comp 任何编辑都会让门禁永久 STALE。必须放在
+    # Foo.comp→Foo.comp.spv 快路径之前——否则快路径会先命中同名源文件。
+    case "$rel" in
+        Nanite/GlobalSDFVoxelizationGLSL.comp.spv)
+            return 1
+            ;;
+    esac
+
+    # Most hand-written GLSL outputs keep the source stage suffix in the SPV
+    # name (Foo.comp -> Foo.comp.spv).  Resolve these before the exceptional
+    # build products below; doing this explicitly also works on Bash 3.2.
+    candidate="$DEST_DIR/$stem"
+    if [ -f "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    case "$rel" in
+        */DDGIFirstNormalProof_named.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/DDGIFirstNormalProof.comp"
+            ;;
+        */DDGIShProducerAudit_shadow.comp.spv|*/DDGIShProducerAudit_compare.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/DDGIShProducerAudit.comp"
+            ;;
+        Bloom.spv)
+            printf '%s\n' "$DEST_DIR/Bloom.vert" "$DEST_DIR/Bloom.frag"
+            ;;
+        Nanite/VisibilityBuffer.spv)
+            printf '%s\n' "$DEST_DIR/Nanite/VisibilityBuffer.vert" "$DEST_DIR/Nanite/VisibilityBuffer.frag"
+            ;;
+        Nanite/GlobalSDFMipmap.spv)
+            printf '%s\n' "$DEST_DIR/Nanite/GlobalSDFVoxelizationGLSL.comp"
+            ;;
+        */DDGITraceSDFCone.comp.spv|*/DDGITraceSDF_firstsurface.comp.spv|*/DDGITraceSDF_firstnative.comp.spv|*/DDGITraceSDF_first_zero_cross.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/DDGITraceSDF.comp"
+            ;;
+        */SurfaceCacheCardFill_writer.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/SurfaceCacheCardFill.comp"
+            ;;
+        */CardCapture_writer.vert.spv|*/CardCapture_geometry.vert.spv)
+            printf '%s\n' "$DEST_DIR/Nanite/CardCapture.vert"
+            ;;
+        */CardCapture_writer.frag.spv|*/CardCapture_geometry.frag.spv)
+            printf '%s\n' "$DEST_DIR/Nanite/CardCapture.frag"
+            ;;
+        */DDGIGIGather_source.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/DDGIGIGather.comp"
+            ;;
+        */DDGITraceFinalize_pathdbg.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/DDGITraceFinalize.comp"
+            ;;
+        */DDGITraceFinalize_analytic_first_rho.comp.spv|*/DDGITraceFinalize_analytic_first_rho_pathdbg.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/DDGITraceFinalize.comp"
+            ;;
+        */DDGIUpdateDepth_provenance.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/DDGIUpdateDepth.comp"
+            ;;
+        Lumen/SCGeometrySupportProof_echo.comp.spv|Lumen/SCGeometrySupportProof_trace.comp.spv|Lumen/SCGeometrySupportProof_fixed.comp.spv|Lumen/SCGeometrySupportProof_ray.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/SCGeometrySupportProof.comp"
+            ;;
+        */*_legacy.comp.spv)
+            printf '%s\n' "$DEST_DIR/${rel%_legacy.comp.spv}.comp"
+            ;;
+        Lumen/FusionIndirect_no*.frag.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/FusionIndirect.frag"
+            ;;
+        Lumen/SurfaceCacheCaptureWrite.comp.spv|Lumen/SurfaceCacheCaptureClear.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/SurfaceCacheCapture.comp"
+            ;;
+        Forward/DeferredLighting_probeocc.frag.spv|Forward/DeferredLighting_specocc.frag.spv)
+            printf '%s\n' "$DEST_DIR/Forward/DeferredLighting.frag"
+            ;;
+        Lumen/SurfaceCacheLightEval_pi.comp.spv|Lumen/SurfaceCacheLightEval_pi_r2.comp.spv|Lumen/SurfaceCacheLightEval_r2.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/SurfaceCacheLightEval.comp"
+            ;;
+        *.spv)
+            # WGSL-backed modules have no stage suffix.  Keep Vulkan source
+            # candidates first, then look in the Dawn source tree by output
+            # family (root/Nanite/Lumen).
+            printf '%s\n' "$DEST_DIR/$stem.comp" "$DEST_DIR/$stem.frag" "$DEST_DIR/$stem.vert" "$DEST_DIR/$stem.wgsl"
+            printf '%s\n' "$ENGINE_DAWN_DIR/$stem.wgsl" \
+                "$ENGINE_DAWN_DIR/Nanite/$name.wgsl" \
+                "$ENGINE_DAWN_DIR/Lumen/$name.wgsl"
+            ;;
+    esac
+}
+
+check_spv_freshness() {
+    local spv rel source source_mtime output_mtime candidate_count
+    echo "==> Vulkan SPIR-V freshness check ===="
+    # Shader paths in this tree do not contain whitespace.  Use a plain for
+    # loop here instead of nested process substitutions: the latter can make
+    # Bash 3.2 interleave the candidate stream with the recursive include
+    # walk, which would turn valid mappings into false UNMAPPED reports.
+    for spv in $(find "$DEST_DIR" -type f -name '*.spv' -print | sort); do
+        rel="${spv#./}"
+        candidate_count=0
+        for source in $(freshness_candidates_for_spv "$rel"); do
+            [ -f "$source" ] || continue
+            candidate_count=$((candidate_count + 1))
+            source_mtime="$(shader_mtime "$source")"
+            output_mtime="$(shader_mtime "$spv")"
+            if [ "$source_mtime" -gt "$output_mtime" ]; then
+                echo "  STALE: $spv (source newer: $source)" >&2
+                freshness_stale=1
+                freshness_note_tool_for_source "$source"
+            fi
+            freshness_check_tree "$source" "$(dirname "$source")" "$spv"
+        done
+        # Some checked-in modules are historical A/B products or are emitted
+        # by external asset tools.  They are not allowed to weaken the gate:
+        # every output which *does* have a source mapping is checked, while an
+        # orphan output is ignored until its producing tool registers one.
+    done
+
+    if [ "$freshness_missing_include" -ne 0 ]; then
+        echo "Vulkan SPIR-V freshness check FAILED: an input include is missing." >&2
+        echo "Fix the include or remove the obsolete SPIR-V before rebuilding." >&2
+        return 1
+    fi
+    if [ "$freshness_stale" -ne 0 ]; then
+        echo "Vulkan SPIR-V freshness check FAILED: generated SPIR-V is older than source/include input." >&2
+        if [ -n "$freshness_missing_tools" ]; then
+            echo "Missing compiler(s) needed to regenerate:$freshness_missing_tools" >&2
+            echo "Install them, then run: $SCRIPT_DIR/build_spv.sh" >&2
+        else
+            echo "Regenerate with: $SCRIPT_DIR/build_spv.sh" >&2
+        fi
+        return 1
+    fi
+
+    echo "Vulkan SPIR-V freshness check passed."
+}
+
+if [ "${1:-}" = "--check-freshness" ]; then
+    check_spv_freshness
+    exit $?
+fi
 
 # WGSL shaders consumed by ForwardRenderer (T4.1.3) + IBL precomputer (T4.0.4).
 WGSL_SHADERS=(
@@ -32,7 +251,6 @@ WGSL_SHADERS=(
     ForwardPBR_NoShadow          # forward PBR no-shadow variant
     BlurPass                     # VSM blur (compute)
     ToneMapping                  # tonemap
-    Bloom                        # bloom
     IBL_BRDFIntegration          # IBL precompute
     IBL_IrradianceConvolution
     IBL_SpecularPrefilter
@@ -93,6 +311,32 @@ for s in "${WGSL_SHADERS[@]}"; do
     fi
     rm -rf "$tmpdir"
 done
+
+# Bloom bright extraction uses a Vulkan-specific GLSL source because the HDR
+# threshold/soft-knee is intentionally independent of the Metal/Dawn display
+# paths.  Link the two entry points into the single module consumed by
+# BloomPass.cpp (which creates each stage by entry-point name).
+if [ -f "$DEST_DIR/Bloom.vert" ] && [ -f "$DEST_DIR/Bloom.frag" ]; then
+    tmpdir="$(mktemp -d)"
+    if glslangValidator --quiet -V --source-entrypoint main -e bloom_vs \
+           "$DEST_DIR/Bloom.vert" -o "$tmpdir/Bloom.vert.spv" 2>"$tmpdir/err_v" && \
+       glslangValidator --quiet -V --source-entrypoint main -e bright_pass_fs \
+           "$DEST_DIR/Bloom.frag" -o "$tmpdir/Bloom.frag.spv" 2>"$tmpdir/err_f" && \
+       spirv-link "$tmpdir/Bloom.vert.spv" "$tmpdir/Bloom.frag.spv" \
+           -o "$DEST_DIR/Bloom.spv" 2>"$tmpdir/err_link"; then
+        sz=$(stat -f %z "$DEST_DIR/Bloom.spv")
+        printf "OK    Bloom.spv (Vulkan GLSL soft-knee, %d bytes)\n" "$sz"
+    else
+        echo "FAIL  Bloom.vert/Bloom.frag"
+        [ -s "$tmpdir/err_v" ] && sed 's/^/    [v] /' "$tmpdir/err_v"
+        [ -s "$tmpdir/err_f" ] && sed 's/^/    [f] /' "$tmpdir/err_f"
+        [ -s "$tmpdir/err_link" ] && sed 's/^/    [link] /' "$tmpdir/err_link"
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+    rm -rf "$tmpdir"
+else
+    echo "MISS  Bloom.vert/Bloom.frag (skipped)"
+fi
 
 # Nanite subdir (T4.4.1+) — WGSL shaders in Dawn/shaders/Nanite/, output to Vulkan/shaders/Nanite/
 NANITE_SHADERS=(
@@ -345,9 +589,27 @@ mkdir -p "$DEST_DIR/Lumen"
 
 # Parallel arrays (Bash 3.2 on macOS lacks associative arrays).
 # Compute shaders use .comp → .comp.spv; fragment shaders use .frag → .frag.spv.
-LUMEN_GLSL_NAMES=( "Lumen/SSAOTrace" "Lumen/SSAOFilter" "Lumen/DDGIGIGather" "Lumen/FusionIndirect" "Lumen/FusionComposite" "Lumen/DDGITraceRays" "Lumen/DDGIUpdateIrradiance" "Lumen/DDGIUpdateDepth" "Lumen/SSGITrace" "Lumen/SSGITemporal" "Lumen/SSGIFilter" "Lumen/SSGIHalfResDenoise" "Lumen/SSRTrace" "Lumen/SSRTemporal" "Lumen/SSRComposite" "Lumen/TAA" "Lumen/SurfaceCacheDilate" "Lumen/SurfaceCacheLightCull" "Lumen/SurfaceCacheLightEval" "Lumen/SurfaceCacheIndirectTrace" "Lumen/SurfaceCacheIndirectResolve" "Lumen/SurfaceCacheIndirectReconstruct" "Lumen/SurfaceCacheAtlasInit" "Lumen/ScreenProbePlace" "Lumen/ScreenProbeTraceRays" "Lumen/ScreenProbeAverage" "Lumen/ScreenProbeTemporal" "Lumen/ScreenProbeSpatialFilter" "Lumen/ScreenProbeGather" "Lumen/ScreenProbeDenoise" "Lumen/DDGICardRadianceAvg" "Lumen/DDGIProbeIrradianceFromCards" "Lumen/SurfaceCacheCapture" "Lumen/DDGITraceSDF" "Lumen/DDGITraceFinalize" "Lumen/ScreenProbeTraceHZB" "Lumen/ScreenProbeTraceSDF" "Lumen/ScreenProbeTraceFinalize" )
-LUMEN_GLSL_ENTRIES=( "ssao_trace" "ssao_filter" "ddgi_gi_gather" "fusion_indirect" "fusion_composite" "ddgi_trace_rays" "ddgi_update_irradiance" "ddgi_update_depth" "ssgi_trace" "ssgi_temporal" "ssgi_filter" "ssgi_halfres_denoise" "ssr_trace" "ssr_temporal" "ssr_composite" "taa_main" "surface_cache_dilate" "surface_cache_light_cull" "surface_cache_light_eval" "surface_cache_indirect_trace" "surface_cache_indirect_resolve" "surface_cache_indirect_reconstruct" "surface_cache_atlas_init" "screen_probe_place" "screen_probe_trace_rays" "screen_probe_average" "screen_probe_temporal" "screen_probe_spatial_filter" "screen_probe_gather" "screen_probe_denoise" "ddgi_card_radiance_avg" "ddgi_probe_irradiance_from_cards" "surface_cache_capture" "ddgi_trace_sdf" "ddgi_trace_finalize" "screen_probe_trace_hzb" "screen_probe_trace_sdf" "screen_probe_trace_finalize" )
-LUMEN_GLSL_STAGES=( "comp" "comp" "comp" "frag" "frag" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" )
+LUMEN_GLSL_NAMES=( "Lumen/SSAOTrace" "Lumen/SSAOFilter" "Lumen/DDGIGIGather" "Lumen/FusionIndirect" "Lumen/FusionComposite" "Lumen/DDGITraceRays" "Lumen/DDGIUpdateIrradiance" "Lumen/DDGIUpdateDepth" "Lumen/SSGITrace" "Lumen/SSGITemporal" "Lumen/SSGIFilter" "Lumen/SSGIHalfResDenoise" "Lumen/SSRTrace" "Lumen/SSRTemporal" "Lumen/SSRComposite" "Lumen/TAA" "Lumen/SurfaceCacheDilate" "Lumen/SurfaceCacheLightCull" "Lumen/SurfaceCacheLightEval" "Lumen/SurfaceCacheShadow" "Lumen/SurfaceCacheIndirectTrace" "Lumen/SurfaceCacheIndirectResolve" "Lumen/SurfaceCacheIndirectReconstruct" "Lumen/SurfaceCacheAtlasInit" "Lumen/ScreenProbePlace" "Lumen/ScreenProbeTraceRays" "Lumen/ScreenProbeAverage" "Lumen/ScreenProbeTemporal" "Lumen/ScreenProbeSpatialFilter" "Lumen/ScreenProbeGather" "Lumen/ScreenProbeDenoise" "Lumen/DDGICardRadianceAvg" "Lumen/DDGIProbeIrradianceFromCards" "Lumen/SurfaceCacheCapture" "Lumen/DDGITraceSDF" "Lumen/DDGITraceFinalize" "Lumen/ScreenProbeTraceHZB" "Lumen/ScreenProbeTraceSDF" "Lumen/ScreenProbeTraceFinalize" "Lumen/ScreenProbeCompact" "Lumen/ScreenProbeLightVar" "Volume/FroxelDensityInject" "Volume/FroxelLightIntegrate" "Volume/FroxelResolve" "Volume/FroxelReproject" "Lumen/EyeAdaptation" "Lumen/SurfaceCacheCardFill" "Lumen/WRCTraceSDF" "Lumen/WRCTraceFinalize" "Lumen/WRCUpdateRadiance" "Lumen/WRCPrefilterIrradiance" "Lumen/WRCCardInject" "Lumen/ReflSpecularTrace" )
+LUMEN_GLSL_ENTRIES=( "ssao_trace" "ssao_filter" "ddgi_gi_gather" "fusion_indirect" "fusion_composite" "ddgi_trace_rays" "ddgi_update_irradiance" "ddgi_update_depth" "ssgi_trace" "ssgi_temporal" "ssgi_filter" "ssgi_halfres_denoise" "ssr_trace" "ssr_temporal" "ssr_composite" "taa_main" "surface_cache_dilate" "surface_cache_light_cull" "surface_cache_light_eval" "surface_cache_shadow" "surface_cache_indirect_trace" "surface_cache_indirect_resolve" "surface_cache_indirect_reconstruct" "surface_cache_atlas_init" "screen_probe_place" "screen_probe_trace_rays" "screen_probe_average" "screen_probe_temporal" "screen_probe_spatial_filter" "screen_probe_gather" "screen_probe_denoise" "ddgi_card_radiance_avg" "ddgi_probe_irradiance_from_cards" "surface_cache_capture" "ddgi_trace_sdf" "ddgi_trace_finalize" "screen_probe_trace_hzb" "screen_probe_trace_sdf" "screen_probe_trace_finalize" "screen_probe_compact" "screen_probe_light_var" "froxel_density_inject" "froxel_light_integrate" "froxel_resolve" "froxel_reproject" "eye_adaptation" "surface_cache_card_fill" "wrc_trace_sdf" "wrc_trace_finalize" "wrc_update_radiance" "wrc_prefilter_irradiance" "wrc_card_inject" "refl_specular_trace" )
+LUMEN_GLSL_STAGES=( "comp" "comp" "comp" "frag" "frag" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" )
+# Keep the parallel name/entry/stage arrays in lockstep. SurfaceCacheShadow
+# and FroxelReproject are ordinary entries in the base arrays above.
+LUMEN_GLSL_NAMES+=( "Lumen/SCGeometrySupportProof" )
+LUMEN_GLSL_ENTRIES+=( "main" )
+LUMEN_GLSL_STAGES+=( "comp" )
+LUMEN_GLSL_NAMES+=( "Lumen/SCMaterialSampleProof" )
+LUMEN_GLSL_ENTRIES+=( "main" )
+LUMEN_GLSL_STAGES+=( "comp" )
+# Independent default-ray oracle; no production TraceSDF variant.
+LUMEN_GLSL_NAMES+=( "Lumen/DDGIDefaultFirstOracle" )
+LUMEN_GLSL_ENTRIES+=( "ddgi_default_first_oracle" )
+LUMEN_GLSL_STAGES+=( "comp" )
+# Private first-hit raster companion.  The production GPUDrivenDraw module is
+# loaded separately by the integration proof; this fragment only writes the
+# six RGBA32F witness attachments.
+LUMEN_GLSL_NAMES+=( "Lumen/DDGIFirstPrimaryRasterWitness" )
+LUMEN_GLSL_ENTRIES+=( "main" )
+LUMEN_GLSL_STAGES+=( "frag" )
 
 for i in "${!LUMEN_GLSL_NAMES[@]}"; do
     pair="${LUMEN_GLSL_NAMES[$i]}"
@@ -374,7 +636,61 @@ for i in "${!LUMEN_GLSL_NAMES[@]}"; do
     rm -rf "$tmpdir"
 done
 
+# Runtime-selectable diagnostic/quality variants must be regenerated by the
+# same build entry point as their canonical source.  Otherwise an environment
+# variable can silently select an older module even when the default is fresh.
+for v in "SurfaceCacheLightEval_pi:" \
+         "SurfaceCacheLightEval_r2:PRIMAL_SC_GATHER_R2" \
+         "SurfaceCacheLightEval_pi_r2:PRIMAL_SC_GATHER_R2"; do
+    out_name="${v%%:*}"; define="${v#*:}"
+    src="$DEST_DIR/Lumen/SurfaceCacheLightEval.comp"
+    out="$DEST_DIR/Lumen/$out_name.comp.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/SurfaceCacheLightEval.comp"
+    inline_includes "$src" > "$tmp"
+    args=(--quiet -V --source-entrypoint main -e surface_cache_light_eval)
+    [ -n "$define" ] && args+=("-D$define")
+    if glslangValidator "${args[@]}" "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        printf "OK    Lumen/%s.comp.spv\n" "$out_name"
+    else
+        printf "FAIL  Lumen/%s.comp.spv\n" "$out_name"
+        sed 's/^/    /' "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+    rm -rf "$tmpdir"
+done
+
+for v in "DeferredLighting_specocc:PRIMAL_SPEC_OCC" \
+         "DeferredLighting_probeocc:PRIMAL_PROBE_OCC"; do
+    out_name="${v%%:*}"; define="${v#*:}"
+    if ! glslangValidator --quiet -V -I"$DEST_DIR" "-D$define" \
+            --source-entrypoint main -e deferred_lighting_fs \
+            "$DEST_DIR/Forward/DeferredLighting.frag" \
+            -o "$DEST_DIR/Forward/$out_name.frag.spv"; then
+        printf "FAIL  Forward/%s.frag.spv\n" "$out_name"
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+done
+
+if ! glslangValidator --quiet -V --source-entrypoint main -e main \
+        "$DEST_DIR/Debug/ProbeSphereWRC.frag" \
+        -o "$DEST_DIR/Debug/ProbeSphereWRC.frag.spv"; then
+    echo "FAIL  Debug/ProbeSphereWRC.frag.spv"
+    SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+
 # T3.5: RadianceCascadeUpdate — 32³ world-space radiance cascade update.
+for variant in echo trace fixed ray; do
+    proof_define="SC_GPU_PROOF_ECHO"
+    if [ "$variant" = trace ]; then proof_define="SC_GPU_PROOF_TRACE"; fi
+    if [ "$variant" = fixed ]; then proof_define="SC_GPU_PROOF_FIXED_ARRAYS"; fi
+    if [ "$variant" = ray ]; then proof_define="SC_GPU_PROOF_RAY"; fi
+    if ! glslangValidator --quiet -V "-D${proof_define}=1" \
+            "$DEST_DIR/Lumen/SCGeometrySupportProof.comp" \
+            -o "$DEST_DIR/Lumen/SCGeometrySupportProof_${variant}.comp.spv"; then
+        printf "FAIL  Lumen/SCGeometrySupportProof_%s.comp.spv\n" "$variant"
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+done
+
 src="$DEST_DIR/Lumen/RadianceCascadeUpdate.comp"
 if [ -f "$src" ]; then
     out="$DEST_DIR/Lumen/RadianceCascadeUpdate.comp.spv"
@@ -401,6 +717,32 @@ if [ -f "$src" ]; then
     else
         echo "FAIL  Lumen/DDGITraceSDFCone.comp.spv"
         sed 's/^/    /' "$tmpdir/err"
+    fi
+    rm -rf "$tmpdir"
+fi
+
+# Bounded opt-in DDGI_FIRST_ZERO_CROSS TraceSDF variant. It shares the
+# first-surface BVH/audit descriptor contract, but only permits a certified
+# first-triangle distance to replace an incumbent signed zero crossing.
+# Keep this recipe separate so the incumbent DDGITraceSDF and the existing
+# FIRST_SURFACE/FIRST_NATIVE_NORMAL variants remain byte-stable when the
+# candidate is not requested.
+src="$DEST_DIR/Lumen/DDGITraceSDF.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Lumen/DDGITraceSDF_first_zero_cross.comp.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGITraceSDF.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V \
+            -DDDGI_FIRST_SURFACE=1 \
+            -DDDGI_FIRST_SURFACE_VARIANT=1 \
+            -DDDGI_FIRST_ZERO_CROSS_VARIANT=1 \
+            --source-entrypoint main -e ddgi_trace_sdf "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out")
+        printf "OK    Lumen/DDGITraceSDF_first_zero_cross.comp.spv (%d bytes)\n" "$sz"
+    else
+        echo "FAIL  Lumen/DDGITraceSDF_first_zero_cross.comp.spv"
+        sed 's/^/    /' "$tmpdir/err"
+        SPV_FAILURES=$((SPV_FAILURES+1))
     fi
     rm -rf "$tmpdir"
 fi
@@ -448,10 +790,211 @@ for v in "surface_cache_capture_write:SurfaceCacheCaptureWrite" \
 done
 
 # Keep the path diagnostic on the same descriptor/UBO layout as production.
+glslangValidator --quiet -V -I"$DEST_DIR" -DDDGI_DEPTH_PROVENANCE \
+    --source-entrypoint main -e ddgi_update_depth \
+    "$DEST_DIR/Lumen/DDGIUpdateDepth.comp" \
+    -o "$DEST_DIR/Lumen/DDGIUpdateDepth_provenance.comp.spv"
+
 glslangValidator --quiet -V -I"$DEST_DIR" -DDDGI_PATH_DEBUG \
     --source-entrypoint main -e ddgi_trace_finalize \
     "$DEST_DIR/Lumen/DDGITraceFinalize.comp" \
     -o "$DEST_DIR/Lumen/DDGITraceFinalize_pathdbg.comp.spv"
+
+# Bounded opt-in analytic-first-rho Finalize variants.  The entry points share
+# the incumbent ddgi_trace_finalize source, while the candidate has its own
+# descriptor layout and is never selected unless DDGI_ANALYTIC_FIRST_RHO is
+# explicitly requested.  Keep both normal and path-debug files registered so
+# DDGI_PATH_DEBUG cannot silently fall back to the incumbent module.
+for variant in "analytic_first_rho:ddgi_analytic_first_rho" \
+               "analytic_first_rho_pathdbg:ddgi_analytic_first_rho"; do
+    suffix="${variant%%:*}"; entry="${variant##*:}"
+    defines="-DDDGI_ANALYTIC_FIRST_RHO_VARIANT=1"
+    if [ "$suffix" = "analytic_first_rho_pathdbg" ]; then
+        defines="$defines -DDDGI_PATH_DEBUG"
+    fi
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGITraceFinalize.comp"
+    inline_includes "$DEST_DIR/Lumen/DDGITraceFinalize.comp" > "$tmp"
+    if glslangValidator --quiet -V $defines -I"$DEST_DIR" \
+            --source-entrypoint ddgi_trace_finalize -e "$entry" "$tmp" \
+            -o "$DEST_DIR/Lumen/DDGITraceFinalize_${suffix}.comp.spv" \
+            2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$DEST_DIR/Lumen/DDGITraceFinalize_${suffix}.comp.spv")
+        printf "OK    Lumen/DDGITraceFinalize_%s.comp.spv (%d bytes)\n" "$suffix" "$sz"
+    else
+        printf "FAIL  Lumen/DDGITraceFinalize_%s.comp.spv\n" "$suffix"
+        sed 's/^/    /' "$tmpdir/err"
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+    rm -rf "$tmpdir"
+done
+
+# Same unchanged first-normal proof body, distinct zero-parent native identity.
+src="$DEST_DIR/Lumen/DDGIFirstNormalProof.comp"
+if [ -f "$src" ]; then
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGIFirstNormalProof.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V --source-entrypoint main -e ddgi_first_normal_proof \
+            "$tmp" -o "$DEST_DIR/Lumen/DDGIFirstNormalProof_named.comp.spv" 2>"$tmpdir/err"; then
+        printf "OK    Lumen/DDGIFirstNormalProof_named.comp.spv\n"
+    else
+        cat "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+    rm -rf "$tmpdir"
+fi
+
+# Private zero-parent N-only replay of resident P/rho/previous SH.
+src="$DEST_DIR/Lumen/DDGIZeroNormalFactor.comp"
+if [ -f "$src" ]; then
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGIZeroNormalFactor.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V --source-entrypoint main -e ddgi_zero_normal_factor \
+            "$tmp" -o "$DEST_DIR/Lumen/DDGIZeroNormalFactor.comp.spv" 2>"$tmpdir/err" && \
+       spirv-val --target-env vulkan1.2 "$DEST_DIR/Lumen/DDGIZeroNormalFactor.comp.spv" 2>>"$tmpdir/err"; then
+        printf "OK    Lumen/DDGIZeroNormalFactor.comp.spv\n"
+    else
+        cat "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+    rm -rf "$tmpdir"
+fi
+
+# Read-only DUMP2 first point/native shading-normal witness. This module is
+# loaded by the test host only when DDGI_FIRST_RECORD_PROOF_PREFIX is nonempty.
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGIFirstRecordProof.comp"
+inline_includes "$DEST_DIR/Lumen/DDGIFirstRecordProof.comp" > "$tmp"
+if glslangValidator --quiet -V --source-entrypoint main -e ddgi_first_record_proof \
+        "$tmp" -o "$DEST_DIR/Lumen/DDGIFirstRecordProof.comp.spv" 2>"$tmpdir/err"; then
+    printf "OK    Lumen/DDGIFirstRecordProof.comp.spv\n"
+else
+    printf "FAIL  Lumen/DDGIFirstRecordProof.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/err"
+    SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+# Private strict variant: explicit scalar normalization, core NoContraction,
+# and supported float32 RTE/SignedZeroInfNanPreserve execution modes.
+if glslangValidator --quiet -V -DDDGI_FIRST_RECORD_STRICT=1 --source-entrypoint main -e ddgi_first_record_proof \
+        "$tmp" -o "$tmpdir/strict-uncontrolled.spv" 2>"$tmpdir/strict-err" && \
+   python3 "$SCRIPT_DIR/../../../../scripts/make_ddgi_strict_spirv.py" \
+        "$tmpdir/strict-uncontrolled.spv" "$DEST_DIR/Lumen/DDGIFirstRecordProof_strict.comp.spv" \
+        >"$tmpdir/strict-metadata" && \
+   spirv-val --target-env vulkan1.2 "$DEST_DIR/Lumen/DDGIFirstRecordProof_strict.comp.spv" 2>>"$tmpdir/strict-err"; then
+    printf "OK    Lumen/DDGIFirstRecordProof_strict.comp.spv\n"
+else
+    printf "FAIL  Lumen/DDGIFirstRecordProof_strict.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/strict-err"
+    SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+# Single-variable private fallback-axis alignment; original strict stays control.
+if glslangValidator --quiet -V -DDDGI_FIRST_RECORD_STRICT=1 -DDDGI_FIRST_RECORD_PRIMARY_FRAME=1 --source-entrypoint main -e ddgi_first_record_proof \
+        "$tmp" -o "$tmpdir/strict-primary-uncontrolled.spv" 2>"$tmpdir/primary-err" && \
+   python3 "$SCRIPT_DIR/../../../../scripts/make_ddgi_strict_spirv.py" \
+        "$tmpdir/strict-primary-uncontrolled.spv" "$DEST_DIR/Lumen/DDGIFirstRecordProof_strict_primary.comp.spv" \
+        >"$tmpdir/primary-metadata" && \
+   spirv-val --target-env vulkan1.2 "$DEST_DIR/Lumen/DDGIFirstRecordProof_strict_primary.comp.spv" 2>>"$tmpdir/primary-err"; then
+    printf "OK    Lumen/DDGIFirstRecordProof_strict_primary.comp.spv\n"
+else
+    printf "FAIL  Lumen/DDGIFirstRecordProof_strict_primary.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/primary-err"
+    SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+# Private endpoint-interval arithmetic variant.  It is a separate module so
+# the default 41-vec4 proof and the strict-primary single-variable candidate
+# remain byte-stable.  Runtime selection additionally requires STRICT and
+# PRIMARY_FRAME host gates; this build output never feeds production buffers.
+if glslangValidator --quiet -V -DDDGI_FIRST_RECORD_STRICT=1 -DDDGI_FIRST_RECORD_PRIMARY_FRAME=1 \
+        -DDDGI_FIRST_RECORD_INTERVAL=1 --source-entrypoint main -e ddgi_first_record_proof \
+        "$tmp" -o "$tmpdir/strict-primary-interval-uncontrolled.spv" 2>"$tmpdir/interval-err" && \
+   python3 "$SCRIPT_DIR/../../../../scripts/make_ddgi_strict_spirv.py" \
+        "$tmpdir/strict-primary-interval-uncontrolled.spv" \
+        "$DEST_DIR/Lumen/DDGIFirstRecordProof_strict_primary_interval.comp.spv" \
+        >"$tmpdir/interval-metadata" && \
+   spirv-val --target-env vulkan1.2 \
+        "$DEST_DIR/Lumen/DDGIFirstRecordProof_strict_primary_interval.comp.spv" \
+        2>>"$tmpdir/interval-err"; then
+    printf "OK    Lumen/DDGIFirstRecordProof_strict_primary_interval.comp.spv\n"
+else
+    printf "FAIL  Lumen/DDGIFirstRecordProof_strict_primary_interval.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/interval-err"
+    SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+rm -rf "$tmpdir"
+
+# Private same-record GPU history replay; never selected by a production pass.
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGIFirstCoherentReplay.comp"
+inline_includes "$DEST_DIR/Lumen/DDGIFirstCoherentReplay.comp" > "$tmp"
+if glslangValidator --quiet -V --source-entrypoint main -e ddgi_first_coherent_replay \
+        "$tmp" -o "$DEST_DIR/Lumen/DDGIFirstCoherentReplay.comp.spv" 2>"$tmpdir/err" && \
+   spirv-val --target-env vulkan1.2 "$DEST_DIR/Lumen/DDGIFirstCoherentReplay.comp.spv" 2>>"$tmpdir/err"; then
+    printf "OK    Lumen/DDGIFirstCoherentReplay.comp.spv\n"
+else
+    printf "FAIL  Lumen/DDGIFirstCoherentReplay.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/err"
+    SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+rm -rf "$tmpdir"
+
+# Private eight-combination GPU history replay; never selected by a production pass.
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGIFirstFactorReplay.comp"
+inline_includes "$DEST_DIR/Lumen/DDGIFirstFactorReplay.comp" > "$tmp"
+if glslangValidator --quiet -V --source-entrypoint main -e ddgi_first_factor_replay \
+        "$tmp" -o "$DEST_DIR/Lumen/DDGIFirstFactorReplay.comp.spv" 2>"$tmpdir/err" && \
+   spirv-val --target-env vulkan1.2 "$DEST_DIR/Lumen/DDGIFirstFactorReplay.comp.spv" 2>>"$tmpdir/err"; then
+    printf "OK    Lumen/DDGIFirstFactorReplay.comp.spv\n"
+else
+    printf "FAIL  Lumen/DDGIFirstFactorReplay.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/err"
+    SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+rm -rf "$tmpdir"
+
+# Private producer shadow and after-compare; the original 8-binding module is unchanged.
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGIShProducerAudit.comp"
+inline_includes "$DEST_DIR/Lumen/DDGIShProducerAudit.comp" > "$tmp"
+for variant in shadow compare; do
+    audit_def=""
+    if [ "$variant" = compare ]; then audit_def="-DDDGI_SH_PRODUCER_COMPARE=1"; fi
+    if glslangValidator --quiet -V $audit_def --source-entrypoint main -e "ddgi_sh_producer_$variant" \
+            "$tmp" -o "$DEST_DIR/Lumen/DDGIShProducerAudit_$variant.comp.spv" 2>"$tmpdir/err" && \
+       spirv-val --target-env vulkan1.2 "$DEST_DIR/Lumen/DDGIShProducerAudit_$variant.comp.spv" 2>>"$tmpdir/err"; then
+        printf "OK    Lumen/DDGIShProducerAudit_%s.comp.spv\n" "$variant"
+    else
+        printf "FAIL  Lumen/DDGIShProducerAudit_%s.comp.spv\n" "$variant"
+        sed 's/^/    /' "$tmpdir/err"
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+done
+rm -rf "$tmpdir"
+
+# Opt-in receiver-source audit: regenerate from the same gather/include tree.
+# This variant is never selected by the default production descriptor layout.
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/DDGIGIGather.comp"
+inline_includes "$DEST_DIR/Lumen/DDGIGIGather.comp" > "$tmp"
+if glslangValidator --quiet -V -DDDGI_GLOSSY_SOURCE_AUDIT \
+        --source-entrypoint main -e ddgi_gi_gather "$tmp" \
+        -o "$DEST_DIR/Lumen/DDGIGIGather_source.comp.spv" 2>"$tmpdir/err"; then
+    printf "OK    Lumen/DDGIGIGather_source.comp.spv\n"
+else
+    printf "FAIL  Lumen/DDGIGIGather_source.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+rm -rf "$tmpdir"
+
+# 2026-09-17 归因 A/B 变体：DDGI_LEGACY_CONSUMERS=1 时 C++ 加载本变体——
+# Finalize/Gather 回到旧原格点消费行为（relocated origins 缓冲仍照常写）。
+for pair in "DDGITraceFinalize:ddgi_trace_finalize" "DDGIGIGather:ddgi_gi_gather"; do
+    name="${pair%%:*}"; entry="${pair##*:}"
+    src="$DEST_DIR/Lumen/$name.comp"
+    out="$DEST_DIR/Lumen/${name}_legacy.comp.spv"
+    if [ -f "$src" ]; then
+        tmpdir="$(mktemp -d)"; tmp="$tmpdir/$name.comp"
+        inline_includes "$src" > "$tmp"
+        if glslangValidator --quiet -V -DDDGI_LEGACY_CONSUMERS --source-entrypoint main -e "$entry" "$tmp" -o "$out" 2>"$tmpdir/err"; then
+            sz=$(stat -f %z "$out"); printf "OK    Lumen/%-26s (%d bytes)\n" "${name}_legacy.comp.spv" "$sz"
+        else
+            echo "FAIL  Lumen/${name}_legacy.comp.spv"; sed 's/^/    /' "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+        fi
+        rm -rf "$tmpdir"
+    fi
+done
 
 # M8/T8.7 GI_ISOLATE A/B variants of FusionIndirect (one source zeroed each).
 # Compiled from the same source with a -D so they can never drift semantically
@@ -507,6 +1050,46 @@ for i in "${!DEBUG_GLSL_NAMES[@]}"; do
         SPV_FAILURES=$((SPV_FAILURES+1))
     fi
     rm -rf "$tmpdir"
+done
+
+# M0 neural debug inference kernel + blit (hand-written GLSL, MSL twin in
+# Engine/Graphics/Metal/shaders/Neural/MLPInferDebug.metal).
+src="$DEST_DIR/Neural/MLPInfer.comp"
+if [ -f "$src" ]; then
+    out="$DEST_DIR/Neural/MLPInfer.comp.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/MLPInfer.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V --source-entrypoint main -e main "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        sz=$(stat -f %z "$out"); printf "OK    Neural/MLPInfer.comp.spv              (%d bytes)\n" "$sz"
+    else echo "FAIL  Neural/MLPInfer.comp"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
+    rm -rf "$tmpdir"
+else echo "MISS  Neural/MLPInfer.comp (skipped)"; fi
+
+for stage in vert frag; do
+    src="$DEST_DIR/Neural/NeuralDebugView.$stage"
+    if [ -f "$src" ]; then
+        out="$DEST_DIR/Neural/NeuralDebugView.$stage.spv"
+        tmpdir="$(mktemp -d)"; tmp="$tmpdir/NeuralDebugView.$stage"
+        inline_includes "$src" > "$tmp"
+        if glslangValidator --quiet -V "$tmp" -o "$out" 2>"$tmpdir/err"; then
+            sz=$(stat -f %z "$out"); printf "OK    Neural/NeuralDebugView.%s.spv        (%d bytes)\n" "$stage" "$sz"
+        else echo "FAIL  Neural/NeuralDebugView.$stage"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
+        rm -rf "$tmpdir"
+    else echo "MISS  Neural/NeuralDebugView.$stage (skipped)"; fi
+done
+
+# M1 neural capture kernels (Welford accumulation + pack), GLSL twins of
+# Metal/shaders/Neural/NeuralCapture.metal.
+for s in Neural/NeuralCaptureUpdate.comp Neural/NeuralCapturePack.comp Neural/NeuralDenoisePack.comp Neural/NeuralConv.comp; do
+    if [ -f "$DEST_DIR/$s" ]; then
+        out="$DEST_DIR/$s.spv"
+        tmpdir="$(mktemp -d)"; tmp="$tmpdir/$(basename "$s")"
+        inline_includes "$DEST_DIR/$s" > "$tmp"
+        if glslangValidator --quiet -V --source-entrypoint main -e main "$tmp" -o "$out" 2>"$tmpdir/err"; then
+            sz=$(stat -f %z "$out"); printf "OK    %-37s (%d bytes)\n" "$s.spv" "$sz"
+        else echo "FAIL  $s"; SPV_FAILURES=$((SPV_FAILURES+1)); sed 's/^/    /' "$tmpdir/err"; fi
+        rm -rf "$tmpdir"
+    else echo "MISS  $s (skipped)"; fi
 done
 
 echo

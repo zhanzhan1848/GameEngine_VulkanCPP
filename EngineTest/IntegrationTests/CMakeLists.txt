@@ -162,6 +162,10 @@ if(APPLE)
     )
     setup_test_target(TestRendererMac)
     target_compile_definitions(TestRendererMac PRIVATE "TEST_RENDERER=1")
+    # CardBake.h（经 Geometry.h 传递引入）include 的是 ContentTools/ 根的
+    # ToolsCommon.h——setup_test_target 的默认路径不含该目录。
+    target_include_directories(TestRendererMac PRIVATE
+        ${CMAKE_SOURCE_DIR}/ContentTools)
 
     # 2. TestMetalRenderer
     add_executable(TestMetalRenderer
@@ -330,6 +334,26 @@ if(APPLE)
     )
     setup_test_target(TestVulkanDLSSRenderGraph)
     target_compile_definitions(TestVulkanDLSSRenderGraph PRIVATE "TEST_VULKAN_DLSS_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
+
+    # 10c. TestVulkanFroxelRenderGraph：Froxel 体积雾集成门禁（G1-G4，_Exit
+    # 0/1；WP1 后加 G5 双相位）。与 Sponza/DLSS 完全独立——本测试 Initialize
+    # 内 setenv(FROXEL=1...)，运行：
+    #   Darwin/Debug/TestVulkanFroxelRenderGraph; echo $?
+    add_executable(TestVulkanFroxelRenderGraph
+        "Main.cpp"
+        "TestVulkanFroxelRenderGraph.cpp"
+        "MacKeyboard.mm"
+        ${COMMON_HEADERS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
+    )
+    setup_test_target(TestVulkanFroxelRenderGraph)
+    target_compile_definitions(TestVulkanFroxelRenderGraph PRIVATE "TEST_VULKAN_FROXEL_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
+    add_dependencies(TestVulkanFroxelRenderGraph VulkanShaderFreshnessGate)
+    add_custom_command(TARGET TestVulkanFroxelRenderGraph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+        $<TARGET_FILE_DIR:TestVulkanFroxelRenderGraph>/Engine/Graphics/Vulkan/shaders
+    )
 
     # Refuse to link/run the Vulkan Sponza target with a source-backed shader
     # older than its GLSL/WGSL input (including recursively included GLSL).
