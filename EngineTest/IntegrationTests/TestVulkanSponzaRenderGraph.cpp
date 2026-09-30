@@ -4828,6 +4828,41 @@ void TestVulkanSponzaRenderGraph::Run() {
                         if (stage != handles::INVALID_RESOURCE) device_->DestroyBuffer(stage);
                         return values;
                     };
+                    // TraceSDF's slot-indexed distance is the direct producer
+                    // input to Finalize.  Preserve it separately from the
+                    // Finalize ray-data .w and from any SC lookup distance.
+                    // This uses the same checked producer->copy and
+                    // transfer->host path as the other DUMP=2 buffers.
+                    const u64 sdfDistanceCount = u64(updateCount) * raysPerProbe;
+                    requireReadback((sdfDistanceCount & 3u) == 0u,
+                        "SDF distance vec4 alignment");
+                    const auto sdfDistances = readVec4Buffer(pass->GetHitDistanceBuffer(),
+                        sdfDistanceCount / 4u);
+                    requireReadback(sdfDistances.size() * 4u == sdfDistanceCount,
+                        "complete current SDF hit distances");
+                    saveReadback("hit_distances.raw", sdfDistances.data(),
+                        sdfDistanceCount * sizeof(float));
+                    const auto volumeWords = readVec4Buffer(pass->GetVolumeUniformBuffer(fidx),
+                        sizeof(pass->GetVolumeData()) / sizeof(math::v4));
+                    requireReadback(volumeWords.size() * sizeof(math::v4) == sizeof(pass->GetVolumeData()),
+                        "complete current GPU volume uniform");
+                    saveReadback("volume_uniform.raw", volumeWords.data(),
+                        sizeof(pass->GetVolumeData()));
+                    {
+                        std::ofstream meta("/tmp/ddgi_hit_distance_meta.json");
+                        meta << "{\"frame\":" << fidx
+                             << ",\"ddgi_frame\":" << pass->GetVolumeData().FrameIndex
+                             << ",\"fresh_update_count\":" << updateCount
+                             << ",\"rays_per_probe\":" << raysPerProbe
+                             << ",\"only_listed_slots_fresh\":true"
+                             << ",\"source_buffer\":" << pass->GetHitDistanceBuffer()
+                             << ",\"volume_buffer\":" << pass->GetVolumeUniformBuffer(fidx)
+                             << ",\"explicit_buffer_dependencies\":true"
+                             << ",\"begin_end_submit_checked\":true"
+                             << ",\"completion_checked\":true"
+                             << ",\"map_after_completion\":true}";
+                        requireReadback(bool(meta), "write SDF hit distance metadata");
+                    }
                     const auto relocated = readVec4Buffer(pass->GetRelocatedOriginsBuffer(),
                                                           u64(cx) * cy * cz);
                     requireReadback(relocated.size() == u64(cx)*cy*cz, "complete relocated origins");

@@ -205,8 +205,10 @@ kernel void froxel_light_integrate(
             // 散射源项：WP2 环境项（SPGI 辐照 × 观感校准）或硬编码天空色
             float3 ambient_term = float3(0.4, 0.45, 0.6) * ambient;
             if (params.VolumeParams4.z > 0.5) {
-                ambient_term = froxel_spgi_bilinear(spgi_ambient, col_screen_uv)
-                               * (ambient * 9.55);   // GAIN 30 × 1/π
+                // 下限 = 硬编码天空项 ×0.55（SPGI 只能增亮不能黑化，与 GLSL 同步）
+                float3 spgi_term = froxel_spgi_bilinear(spgi_ambient, col_screen_uv)
+                                   * (ambient * 9.55);   // GAIN 30 × 1/π
+                ambient_term = max(spgi_term, float3(0.4, 0.45, 0.6) * (ambient * 0.55));
             }
 
             // 散射源项 + audit V6 解析段积分

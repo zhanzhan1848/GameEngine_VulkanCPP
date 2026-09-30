@@ -67,7 +67,7 @@ kernel void froxel_density_inject(
     if (params.CloudA.x > 0.5) {
         float radius = params.CloudA.y;
         float3 q = world_pos - params.CloudB.xyz;
-        q.y *= 1.18;
+        q.y *= 1.02;
         float dist = length(q);
         if (dist < radius) {
             constexpr sampler noise_s(coord::normalized, filter::linear,
@@ -80,8 +80,8 @@ kernel void froxel_density_inject(
                 world_pos * params.CloudA.w + float3(drift, drift * 0.23, 0.0)).r;
             float detail = worley_noise_3d(world_pos * (params.CloudA.w * 3.1)
                                            + float3(drift * 1.7, 0.0, 0.0));
-            float shape = clamp((base * 0.72 + detail * 0.38) * body * 1.85 - 0.32,
-                                0.0, 1.0);
+            float puff = clamp(0.30 + 0.85 * (base * 0.72 + detail * 0.38), 0.0, 1.0);
+            float shape = puff * body;
             density = max(density, params.CloudA.z * shape);
         }
     }
