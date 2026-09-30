@@ -16,6 +16,7 @@ kernel void froxel_density_inject(
     texture3d<float, access::sample>  sdf_cascade_1  [[texture(3)]],
     texture3d<float, access::sample>  sdf_cascade_2  [[texture(4)]],
     texture2d<float, access::read>    depth_buffer   [[texture(5)]],
+    texture3d<float, access::sample>  cloud_volume   [[texture(7)]],
     constant FroxelParams& params                    [[buffer(6)]],
     uint3 gid [[thread_position_in_grid]])
 {
@@ -62,27 +63,16 @@ kernel void froxel_density_inject(
                                           sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
                                           params);
 
-    // WP5 云原语（与 GLSL FroxelDensityInject.comp 同式）：球形包络略压扁 ×
-    // FBM 基底 × Worley 细节侵蚀,云底淡出；绕过 SDF/高度门。
+    // WP5 云原语（3D 纹理路线，与 GLSL 同式）：云 AABB 内采样预烘焙体积
     if (params.CloudA.x > 0.5) {
-        float radius = params.CloudA.y;
-        float3 q = world_pos - params.CloudB.xyz;
-        q.y *= 1.02;
-        float dist = length(q);
-        if (dist < radius) {
-            constexpr sampler noise_s(coord::normalized, filter::linear,
-                                      address::repeat, mip_filter::none);
-            float drift = params.CloudB.w * params.VolumeParams2.w;
-            float body = smoothstep(radius, radius * 0.42, dist);
-            body *= 0.55 + 0.45 * smoothstep(-radius * 0.5, -radius * 0.12,
-                                             q.y / max(radius, 1e-3));
-            float base = noise_tex.sample(noise_s,
-                world_pos * params.CloudA.w + float3(drift, drift * 0.23, 0.0)).r;
-            float detail = worley_noise_3d(world_pos * (params.CloudA.w * 3.1)
-                                           + float3(drift * 1.7, 0.0, 0.0));
-            float puff = clamp(0.30 + 0.85 * (base * 0.72 + detail * 0.38), 0.0, 1.0);
-            float shape = puff * body;
-            density = max(density, params.CloudA.z * shape);
+        float3 cuvw = (world_pos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
+        if (cuvw.x > 0.0 && cuvw.x < 1.0 &&
+            cuvw.y > 0.0 && cuvw.y < 1.0 &&
+            cuvw.z > 0.0 && cuvw.z < 1.0) {
+            constexpr sampler cloud_s(coord::normalized, filter::linear,
+                                      address::clamp_to_edge, mip_filter::none);
+            float cd = cloud_volume.sample(cloud_s, cuvw).r;
+            density = max(density, params.CloudA.z * cd);
         }
     }
 

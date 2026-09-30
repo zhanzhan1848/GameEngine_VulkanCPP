@@ -179,6 +179,13 @@ static float WorleyNoise3D(float x, float y, float z) {
     return minDist;
 }
 
+static float smoothstepf(float e0, float e1, float x) {
+    float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+static float clampf(float v, float lo, float hi) {
+    return std::max(lo, std::min(hi, v));
+}
 static float FBMWorley(float x, float y, float z, int octaves) {
     float value = 0.0f, amplitude = 0.5f, frequency = 1.0f;
     for (int i = 0; i < octaves; i++) {
@@ -240,6 +247,8 @@ bool FroxelFogPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
         dummyDesc.name = "FroxelDummyAmbient2D";
         dummy_ambient_2d_ = device_->CreateTexture(dummyDesc);
     }
+    if (config_.cloud_enable > 0.0f)
+        CreateCloudTexture();
     CreateFroxelTextures();
     CreateScatterTextures();
 
@@ -273,8 +282,9 @@ void FroxelFogPass::CreateDescriptorSetLayouts() {
             {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // sdf_cascade_2
             {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_buffer
             {6, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
+            {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // WP5 cloud volume
         };
-        DescriptorSetLayoutDesc layoutDesc{7, bindings};
+        DescriptorSetLayoutDesc layoutDesc{8, bindings};
         density_inject_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -489,6 +499,106 @@ void FroxelFogPass::CreateNoiseTexture() {
     device_->DestroyBuffer(staging);
 
     PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] Noise texture created (128^3)" << std::endl;
+}
+
+void FroxelFogPass::CreateCloudTexture() {
+    // WP5（3D 纹理路线，用户建议对齐参考实现）：CPU 一次性烘焙积云体积。
+    // 形状 = 球形包络（y 压扁 + 云底淡出）× 三尺度细节（大团块 plateau
+    // + FBM 中尺度 + Worley 蚀边）。CPU 生成可验证、确定性强，规避
+    // inject 内程序化噪声的不可见问题（v7/v8/cumulus_v1 排查记录）。
+    constexpr u32 RES = 96;
+    TextureDesc desc{};
+    desc.size = {RES, RES, RES};
+    desc.mipLevels = 1;
+    desc.arraySize = 1;
+    // R32_Float：与 128³ 噪声纹理完全同格式同上传路径（已验证）；R8 在该
+    // 路径上采样恒 0（2026-09-30 排查），疑 RHI 对 1 字节格式的拷贝处理。
+    desc.format = DataFormat::R32_Float;
+    desc.type = TextureType::Texture3D;
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    desc.memoryUsage = GPUMemoryUsage::Static;
+    desc.name = "FroxeCloudVolume";
+    cloud_texture_ = device_->CreateTexture(desc);
+    if (cloud_texture_ == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Engine") << "[FroxelFogPass] cloud volume create failed" << std::endl;
+        return;
+    }
+
+    std::vector<float> voxels(size_t(RES) * RES * RES);
+    const float freq = std::max(config_.cloud_noise_freq, 0.05f);
+    for (u32 z = 0; z < RES; ++z)
+    for (u32 y = 0; y < RES; ++y)
+    for (u32 x = 0; x < RES; ++x) {
+        float px = (float(x) + 0.5f) / RES * 2.0f - 1.0f;
+        float py = (float(y) + 0.5f) / RES * 2.0f - 1.0f;
+        float pz = (float(z) + 0.5f) / RES * 2.0f - 1.0f;
+        float qy = py * 1.05f;
+        float r = std::sqrt(px * px + qy * qy + pz * pz);
+        if (r >= 1.0f) { voxels[z*RES*RES + y*RES + x] = 0.0f; continue; }
+        float body = 1.0f - smoothstepf(0.40f, 1.0f, r);
+        body *= 0.55f + 0.45f * smoothstepf(-0.50f, -0.12f, py);
+
+        const float wx = px * config_.cloud_radius;
+        const float wy = py * config_.cloud_radius;
+        const float wz = pz * config_.cloud_radius;
+        float big = WorleyNoise3D(wx * freq * 0.85f + 31.7f,
+                                  wy * freq * 0.85f + 11.3f,
+                                  wz * freq * 0.85f + 7.9f);
+        float lumps = smoothstepf(0.30f, 0.62f, big);
+        float mid = FBMWorley(wx * freq * 1.7f + 5.1f,
+                              wy * freq * 1.7f + 13.7f,
+                              wz * freq * 1.7f + 3.3f, 3);
+        float det = WorleyNoise3D(wx * freq * 3.4f + 91.3f,
+                                  wy * freq * 3.4f + 47.9f,
+                                  wz * freq * 3.4f + 23.1f);
+        float shell = 1.0f - 0.55f * smoothstepf(0.45f, 0.95f, det);
+        float d = body * clampf(lumps * (0.35f + 0.65f * mid) * shell * 1.9f,
+                                0.06f, 1.0f);
+        voxels[z*RES*RES + y*RES + x] = clampf(d, 0.0f, 1.0f);   // 归一化 float 密度
+    }
+
+    {
+        u64 nz = 0; double sum = 0.0; float mx = 0.0f;
+        for (float v : voxels) { if (v > 0.03f) ++nz; sum += v; mx = std::max(mx, v); }
+        PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] cloud voxels nonzero="
+                  << nz << "/" << voxels.size() << " mean=" << sum / voxels.size()
+                  << " max=" << mx << std::endl;
+    }
+    BufferDesc sdesc{};
+    sdesc.size = voxels.size() * sizeof(float);
+    sdesc.memoryUsage = GPUMemoryUsage::Staging;
+    sdesc.name = "FroxeCloudStaging";
+    auto staging = device_->CreateBuffer(sdesc);
+    if (staging == handles::INVALID_RESOURCE) return;
+    if (float* mapped = static_cast<float*>(device_->MapBuffer(staging))) {
+        memcpy(mapped, voxels.data(), voxels.size() * sizeof(float));
+        device_->UnmapBuffer(staging);
+
+        auto cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        if (cmdHandle != handles::INVALID_COMMAND_BUFFER) {
+            auto* cmd = GetCommandBuffer(cmdHandle);
+            cmd->Begin();
+            BufferTextureCopyRegion region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = RES;
+            region.imageSubresource = {0, 0, 1};
+            region.imageExtent = {RES, RES, RES};
+            cmd->CopyBufferToTexture(staging, cloud_texture_, &region, 1);
+            ResourceBarrier barrier{};
+            barrier.resource = cloud_texture_;
+            barrier.beforeState = ResourceState::CopyDest;
+            barrier.afterState = ResourceState::ShaderResource;
+            barrier.subresource = 0xFFFFFFFF;
+            cmd->InsertBarrier(&barrier, 1);
+            cmd->End();
+            cmd->Submit();
+            cmd->WaitForCompletion();
+            device_->DestroyCommandBuffer(cmdHandle);
+            PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] cloud volume baked ("
+                      << RES << "^3 R8)" << std::endl;
+        }
+    }
+    device_->DestroyBuffer(staging);
 }
 
 void FroxelFogPass::CreateFroxelTextures() {
@@ -878,8 +988,9 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     {4, DescriptorType::SampledImage,  sdfTex2},
                     {5, DescriptorType::SampledImage,  depthTex},
                     {6, DescriptorType::UniformBuffer, params_cb_[outIdx]},
+                    {7, DescriptorType::SampledImage,  cloud_texture_},
                 };
-                UpdateDescriptorSet(device_, density_inject_ds_[outIdx], params, 7);
+                UpdateDescriptorSet(device_, density_inject_ds_[outIdx], params, 8);
 
                 // P2-B: froxel textures are module-owned (not RG-imported);
                 // prime the write slot to UA — on the first rotation cycle the

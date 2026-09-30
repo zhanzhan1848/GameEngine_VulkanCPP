@@ -160,6 +160,10 @@ private:
 
     // Persistent noise texture
     rhi::ResourceHandle noise_texture_{ rhi::handles::INVALID_RESOURCE };
+    // WP5 云原语（3D 纹理路线，用户建议对齐参考实现）：初始化时 CPU 生成
+    // 积云体积（R8, CLOUD_RES³，密度 0-1 归一化），注入 pass 按云 AABB 采样。
+    rhi::ResourceHandle cloud_texture_{ rhi::handles::INVALID_RESOURCE };
+    void CreateCloudTexture();
     // P2-B: 1x1 2D shadow-moments stand-in（空槽位绑定，保持 view type 合法）
     rhi::ResourceHandle dummy_shadow_2d_{ rhi::handles::INVALID_RESOURCE };
 

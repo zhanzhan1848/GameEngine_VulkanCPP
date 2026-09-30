@@ -20,6 +20,8 @@ layout(set = 0, binding = 2) uniform texture3D sdf_cascade_0;
 layout(set = 0, binding = 3) uniform texture3D sdf_cascade_1;
 layout(set = 0, binding = 4) uniform texture3D sdf_cascade_2;
 layout(set = 0, binding = 5) uniform texture2D depth_buffer;
+// WP5 云原语（3D 纹理路线）: CPU 预烘焙积云体积（96³ R8, 密度 0-1）
+layout(set = 0, binding = 7) uniform texture3D cloud_volume;
 
 void main() {
     ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
@@ -68,33 +70,16 @@ void main() {
     float density = froxelSampleDensity(worldPos, noise_tex, noiseDims,
                                         sdf_cascade_0, sdf_cascade_1, sdf_cascade_2);
 
-    // WP5 云原语：局部云体（球形包络略压扁 × FBM 基底 × Worley 细节侵蚀,
-    // 云底淡出成平底盘）。绕过 SDF/高度门——云悬空于开放空域。噪声坐标加
-    // wind·time 漂移（VolumeParams2.w = time）。
+    // WP5 云原语（3D 纹理路线）：云 AABB(center ± radius) 内采样预烘焙
+    // 云体积（CPU 生成的三尺度积云），max() 叠加在基础霾上。uvw 出界 =
+    // 云外，不采样。
     if (params.CloudA.x > 0.5) {
-        float radius = params.CloudA.y;
-        vec3 q = worldPos - params.CloudB.xyz;
-        q.y *= 1.05;                       // 近球形（积云轮廓）
-        float dist = length(q);
-        if (dist < radius) {
-            float drift = params.CloudB.w * params.VolumeParams2.w;
-            float body = smoothstep(radius, radius * 0.40, dist);
-            // 云底淡出：中心下缘 0.35R 以下收平（平底盘轮廓）
-            body *= 0.55 + 0.45 * smoothstep(-radius * 0.5, -radius * 0.12, q.y / max(radius, 1e-3));
-            // 三尺度积云（参考图对标）：低频 Worley 出大团块骨架（团间深谷）、
-            // FBM 中尺度调制、高频 Worley 蚀边——高对比雕刻使团块结构与
-            // 整朵轮廓可读；谷底 6% 密度兜底（完全透明会失去云的形体）。
-            float bigPuff = froxelWorley(worldPos * (params.CloudA.w * 0.85)
-                                         + vec3(drift, drift * 0.2, 0.0));
-            float base = froxelTrilinearRepeat(noise_tex,
-                worldPos * params.CloudA.w * 1.7 + vec3(drift * 1.3, 0.0, 0.0), noiseDims);
-            float detail = froxelWorley(worldPos * (params.CloudA.w * 3.4)
-                                        + vec3(drift * 2.2, 0.0, 0.0));
-            float lumps = smoothstep(0.30, 0.62, bigPuff);             // 大团块体/谷
-            float mid = 0.35 + 0.65 * base;                            // 中尺度调制
-            float shell = 1.0 - 0.55 * smoothstep(0.45, 0.95, detail); // 细节蚀边
-            float shape = body * clamp(lumps * mid * shell * 1.9, 0.06, 1.0);
-            density = max(density, params.CloudA.z * shape);
+        vec3 cuvw = (worldPos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
+        if (cuvw.x > 0.0 && cuvw.x < 1.0 &&
+            cuvw.y > 0.0 && cuvw.y < 1.0 &&
+            cuvw.z > 0.0 && cuvw.z < 1.0) {
+            float cd = froxelTrilinearClamp(cloud_volume, cuvw, vec3(96.0));
+            density = max(density, params.CloudA.z * cd);
         }
     }
 

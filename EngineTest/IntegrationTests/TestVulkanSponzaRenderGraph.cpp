@@ -2710,7 +2710,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                                 s += v; if (v > 0.001f) ++c;
                             }
                             total += s; nz += c;
-                            if (z % 8 == 0 || z == gd - 1)
+                            if (true)   // 2026-09-30: 全 slice 打印（云体定位）
                                 std::cerr << "  z=" << z << " mean=" << s / sliceN
                                           << " nz=" << 100.0 * c / sliceN << "%" << std::endl;
                         }
@@ -4862,6 +4862,33 @@ void TestVulkanSponzaRenderGraph::Run() {
                              << ",\"completion_checked\":true"
                              << ",\"map_after_completion\":true}";
                         requireReadback(bool(meta), "write SDF hit distance metadata");
+                    }
+                    if (const char* lightDump = std::getenv("DDGI_FIRST_LIGHT_INPUT_DUMP");
+                        lightDump && std::strcmp(lightDump, "1") == 0) {
+                        auto* sc = pipeline_ ? pipeline_->GetSurfaceCachePass() : nullptr;
+                        requireReadback(sc != nullptr, "SC lighting source pass");
+                        const ResourceHandle sources[] = {sc->GetLightInfoBuffer(),
+                            sc->GetLightingParamsBuffer(frameIdx), sc->GetShadowParamsBuffer(frameIdx)};
+                        const char* names[] = {"sc_light_info.raw", "sc_light_params.raw", "sc_shadow_params.raw"};
+                        u64 sizes[3]{};
+                        for (u32 i = 0; i < 3; ++i) {
+                            requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(sources[i], sizes[i]),
+                                "query SC lighting source extent");
+                            requireReadback(sizes[i] && sizes[i] <= 64u * 1024u && sizes[i] % sizeof(math::v4) == 0u,
+                                "bounded SC lighting source extent");
+                            const auto values = readVec4Buffer(sources[i], sizes[i] / sizeof(math::v4));
+                            saveReadback(names[i], values.data(), sizes[i]);
+                        }
+                        std::ofstream meta("/tmp/ddgi_sc_light_input_meta.json");
+                        requireReadback(bool(meta), "open SC lighting source metadata");
+                        meta << "{\"schema\":\"sc_first_light_inputs_v1\",\"complete\":true,\"frame\":" << fidx
+                             << ",\"render_slot\":" << frameIdx
+                             << ",\"buffer_handles\":[" << sources[0] << ',' << sources[1] << ',' << sources[2] << ']'
+                             << ",\"buffer_bytes\":[" << sizes[0] << ',' << sizes[1] << ',' << sizes[2] << ']'
+                             << ",\"explicit_buffer_dependencies\":true,\"insert_barrier_buffer_ignored\":true"
+                             << ",\"begin_end_submit_checked\":true,\"completion_checked\":true"
+                             << ",\"map_after_completion\":true,\"production_writes\":false,\"default_changed\":false}";
+                        requireReadback(bool(meta), "write SC lighting source metadata");
                     }
                     const auto relocated = readVec4Buffer(pass->GetRelocatedOriginsBuffer(),
                                                           u64(cx) * cy * cz);
