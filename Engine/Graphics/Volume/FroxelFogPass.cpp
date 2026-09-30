@@ -524,8 +524,30 @@ void FroxelFogPass::CreateCloudTexture() {
         return;
     }
 
-    std::vector<float> voxels(size_t(RES) * RES * RES);
+    // 积云 puff 群（单位空间，y 向上）：平底、中部大团、顶部/边缘小团——
+    // 参考图轮廓。包络 = puff 场阈值穿越（凹凸剪影直接来自堆叠），
+    // 内部保持高密度（实心）——参考图的团块结构靠 march 阴影明暗表达，
+    // 靠透明度表达会退化成雾（本轮前的失败根因）。
+    static const float kPuffs[][4] = {
+        // ox     oy     oz     rad
+        {  0.00f, -0.12f,  0.00f, 0.52f },   // 中央主团
+        { -0.34f, -0.20f,  0.08f, 0.40f },
+        {  0.33f, -0.16f, -0.10f, 0.44f },
+        {  0.08f,  0.08f,  0.28f, 0.36f },
+        { -0.16f,  0.10f, -0.24f, 0.38f },
+        {  0.44f,  0.04f,  0.14f, 0.28f },
+        { -0.44f,  0.00f, -0.12f, 0.30f },
+        {  0.04f,  0.34f, -0.06f, 0.28f },   // 顶部团
+        { -0.24f,  0.30f,  0.14f, 0.25f },
+        {  0.28f,  0.28f,  0.22f, 0.23f },
+        {  0.00f, -0.32f,  0.18f, 0.34f },   // 底部团
+        {  0.20f, -0.30f, -0.18f, 0.28f },
+        { -0.20f, -0.28f, -0.22f, 0.26f },
+    };
+    constexpr int kPuffCount = sizeof(kPuffs) / sizeof(kPuffs[0]);
     const float freq = std::max(config_.cloud_noise_freq, 0.05f);
+
+    std::vector<float> voxels(size_t(RES) * RES * RES);
     for (u32 z = 0; z < RES; ++z)
     for (u32 y = 0; y < RES; ++y)
     for (u32 x = 0; x < RES; ++x) {
@@ -533,28 +555,39 @@ void FroxelFogPass::CreateCloudTexture() {
         float py = (float(y) + 0.5f) / RES * 2.0f - 1.0f;
         float pz = (float(z) + 0.5f) / RES * 2.0f - 1.0f;
         float qy = py * 1.05f;
-        float r = std::sqrt(px * px + qy * qy + pz * pz);
-        if (r >= 1.0f) { voxels[z*RES*RES + y*RES + x] = 0.0f; continue; }
-        float body = 1.0f - smoothstepf(0.40f, 1.0f, r);
-        body *= 0.55f + 0.45f * smoothstepf(-0.50f, -0.12f, py);
 
+        // 1) puff 场（二次衰减求和 → 阈值体 = 凹凸包络）
+        float field = 0.0f;
+        for (int i = 0; i < kPuffCount; ++i) {
+            float dx = px - kPuffs[i][0];
+            float dy = qy - kPuffs[i][1];
+            float dz = pz - kPuffs[i][2];
+            float rr = kPuffs[i][3] * 1.4f;
+            float t = 1.0f - std::sqrt(dx*dx + dy*dy + dz*dz) / rr;
+            if (t > 0.0f) field += t * t;
+        }
+        float body = clampf(field * 1.6f, 0.0f, 1.0f);
+        if (body <= 0.003f) { voxels[z*RES*RES + y*RES + x] = 0.0f; continue; }
+
+        // 2) 世界尺度三尺度细节：团间谷（低频 worley plateau）+ FBM 调制
+        //    + 高频蚀边。只调制不清零（实心剪影）。
         const float wx = px * config_.cloud_radius;
-        const float wy = py * config_.cloud_radius;
+        const float wy = qy * config_.cloud_radius;
         const float wz = pz * config_.cloud_radius;
-        float big = WorleyNoise3D(wx * freq * 0.85f + 31.7f,
-                                  wy * freq * 0.85f + 11.3f,
-                                  wz * freq * 0.85f + 7.9f);
-        float lumps = smoothstepf(0.30f, 0.62f, big);
-        float mid = FBMWorley(wx * freq * 1.7f + 5.1f,
-                              wy * freq * 1.7f + 13.7f,
-                              wz * freq * 1.7f + 3.3f, 3);
-        float det = WorleyNoise3D(wx * freq * 3.4f + 91.3f,
-                                  wy * freq * 3.4f + 47.9f,
-                                  wz * freq * 3.4f + 23.1f);
-        float shell = 1.0f - 0.55f * smoothstepf(0.45f, 0.95f, det);
-        float d = body * clampf(lumps * (0.35f + 0.65f * mid) * shell * 1.9f,
-                                0.06f, 1.0f);
-        voxels[z*RES*RES + y*RES + x] = clampf(d, 0.0f, 1.0f);   // 归一化 float 密度
+        float big = WorleyNoise3D(wx * freq * 0.7f + 31.7f,
+                                  wy * freq * 0.7f + 11.3f,
+                                  wz * freq * 0.7f + 7.9f);
+        float valleys = 0.55f + 0.45f * smoothstepf(0.15f, 0.55f, big);
+        float mid = FBMWorley(wx * freq * 1.4f + 5.1f,
+                              wy * freq * 1.4f + 13.7f,
+                              wz * freq * 1.4f + 3.3f, 3);
+        float det = WorleyNoise3D(wx * freq * 3.2f + 91.3f,
+                                  wy * freq * 3.2f + 47.9f,
+                                  wz * freq * 3.2f + 23.1f);
+        float shell = 1.0f - 0.40f * smoothstepf(0.50f, 0.95f, det);
+
+        float d = body * valleys * (0.55f + 0.45f * mid) * shell;
+        voxels[z*RES*RES + y*RES + x] = clampf(d, 0.0f, 1.0f);
     }
 
     {

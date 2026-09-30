@@ -4890,6 +4890,32 @@ void TestVulkanSponzaRenderGraph::Run() {
                              << ",\"map_after_completion\":true,\"production_writes\":false,\"default_changed\":false}";
                         requireReadback(bool(meta), "write SC lighting source metadata");
                     }
+                    if (const char* writer = std::getenv("DDGI_SC_WRITER_SNAPSHOT");
+                        writer && std::strcmp(writer, "1") == 0) {
+                        auto* sc = pipeline_ ? pipeline_->GetSurfaceCachePass() : nullptr;
+                        requireReadback(sc != nullptr, "SC writer snapshot pass");
+                        const auto& witness = sc->GetLightWriterSnapshot();
+                        requireReadback(witness.recorded && !witness.failed && witness.frame == fidx &&
+                            witness.render_slot == frameIdx && witness.bytes % 16u == 0u, "fresh SC writer snapshot");
+                        const auto raw = readVec4Buffer(witness.staging, witness.bytes / 16u);
+                        saveReadback("sc_writer_snapshot.raw", raw.data(), witness.bytes);
+                        std::ofstream meta("/tmp/ddgi_sc_writer_snapshot.json");
+                        const char* names[] = {"tile_input","albedo_input","normal_input","depth_input","emissive_input",
+                            "visibility_input","params_input","lights_input","cards_input","dispatch_input",
+                            "lighting_output","nodirect_output"};
+                        meta << "{\"frame\":" << witness.frame << ",\"render_slot\":" << witness.render_slot
+                             << ",\"output_slot\":" << witness.output_slot << ",\"dispatch_cards\":" << witness.dispatch_cards
+                             << ",\"complete\":true,\"copy_at_actual_writer_dispatch\":true,\"items\":[";
+                        for (u32 i = 0; i < 12; ++i) {
+                            if (i) meta << ',';
+                            meta << "{\"name\":\"" << names[i] << "\",\"source_handle\":" << witness.sources[i]
+                                 << ",\"offset\":" << witness.offsets[i] << ",\"bytes\":" << witness.sizes[i] << '}';
+                        }
+                        meta << "],\"explicit_buffer_dependencies\":true,\"begin_end_submit_checked\":true,"
+                             << "\"completion_checked\":true,\"map_after_completion\":true,\"production_value_writes\":false}";
+                        meta.close();
+                        requireReadback(bool(meta), "write writer snapshot metadata");
+                    }
                     const auto relocated = readVec4Buffer(pass->GetRelocatedOriginsBuffer(),
                                                           u64(cx) * cy * cz);
                     requireReadback(relocated.size() == u64(cx)*cy*cz, "complete relocated origins");
