@@ -1,0 +1,288 @@
+// FroxelLightIntegrate.comp — P2.1 (2026-09-15): GLSL 移植自
+// Metal/shaders/Volume/FroxelLightIntegrate.metal（路线图 Phase 2）。
+// 每线程一条 froxel 列（x,y），沿 Z 串行积分 Beer-Lambert + 直射光，
+// 逐片写 (scatter_rgb, transmittance)。
+// 阴影图采样：SampledImage 无采样器 → 手写双线性（4 tap clamp）。
+// P1 (2026-09-16, reaudit §4.4): 阴影模式三态——0=恒 lit（无输入）、
+// 1=VSM moments Chebyshev、2=PCSS light-space 深度比较（默认场景，
+// 消费 D32→R32 blit 与 ShadowVP[4]）；级联全越界收敛恒 lit。
+// WP1 (2026-09-30, froxel-upgrade 计划): march_steps>0 时阴影查询升级为
+// 沿光方向 N 步 light march——逐步累乘 Beer 雾衰减（雾对雾自阴影）×
+// 几何阴影查询。0=legacy 单查询（回滚位）。
+// WP2 (2026-09-30): ambient_source=1 时环境项采样上一帧 SPGI 辐照
+// （屏幕空间，世界坐标经 ViewProj 投影），无效域回退硬编码天空色。
+
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+#define FROXEL_PARAMS_BINDING 3
+#include "FroxelCommon.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture3D froxel_density;
+layout(set = 0, binding = 1, rgba16f) writeonly uniform image3D froxel_scatter;
+// P2-B: binding 2 是旧契约的屏幕空间表面可见性图——屏幕 UV 与 light VP UV
+// 不对应，且表面可见性不描述任意空间点的遮挡，integrate 不再采样它。
+// 新契约：binding 4..7 = 每级联 light-space VSM moments（RG32F z,z²），
+// 与 UBO ShadowVP[4] 同源同帧；VolumeParams3.w 选择模式（0=恒lit）。
+layout(set = 0, binding = 2) uniform texture2D shadow_map_legacy;
+layout(set = 0, binding = 4) uniform texture2D shadow_moments_c0;
+layout(set = 0, binding = 5) uniform texture2D shadow_moments_c1;
+layout(set = 0, binding = 6) uniform texture2D shadow_moments_c2;
+layout(set = 0, binding = 7) uniform texture2D shadow_moments_c3;
+// WP2: 上一帧 SPGI 过滤输出（屏幕空间间接光辐照）。雾积分在渲染图中先于
+// SPGI 本帧输出，读"最近完成帧"（体积雾低频，上一帧辐照可接受——计划 §4
+// WP2 风险段退路）。ambient_source=0 时 shader 不采样。
+layout(set = 0, binding = 8) uniform texture2D spgi_ambient;
+
+// P2-B: moments 双线性（同时取 z 与 z² 通道），Chebyshev 上界。
+// 约定与 DeferredLighting.frag::chebyshevVisibility 一致（variance 下限
+// 0.00002，smoothstep(0.05, 1.0) 抗 light bleed）。
+vec2 froxelShadowBilinear2(texture2D tex, vec2 uv) {
+    ivec2 dims = textureSize(tex, 0);
+    vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * vec2(dims) - 0.5;
+    ivec2 c0 = ivec2(floor(p));
+    vec2 t = fract(p);
+    ivec2 c1 = min(c0 + ivec2(1), dims - ivec2(1));
+    c0 = max(c0, ivec2(0));
+    vec2 v00 = texelFetch(tex, c0, 0).xy;
+    vec2 v10 = texelFetch(tex, ivec2(c1.x, c0.y), 0).xy;
+    vec2 v01 = texelFetch(tex, ivec2(c0.x, c1.y), 0).xy;
+    vec2 v11 = texelFetch(tex, ivec2(c1.x, c1.y), 0).xy;
+    return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
+}
+
+float froxelChebyshevVisibility(vec2 moments, float t) {
+    if (t <= moments.x) return 1.0;
+    float variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, 0.00002);
+    float d = t - moments.x;
+    float pMax = variance / (variance + d * d);
+    return smoothstep(0.05, 1.0, pMax);
+}
+
+// 单级联 VSM 查询：越界返回 -1（调用方试下一级联），否则 [0,1] 可见性。
+float froxelVsmCascade(vec3 ndc, texture2D moments) {
+    if (ndc.x < -1.0 || ndc.x > 1.0 ||
+        ndc.y < -1.0 || ndc.y > 1.0 ||
+        ndc.z <  0.0 || ndc.z > 1.0) return -1.0;
+    vec2 uv = froxelShadowNdcToUv(ndc);
+    vec2 m = froxelShadowBilinear2(moments, uv);
+    return froxelChebyshevVisibility(m, ndc.z);
+}
+
+// P1（sponza-gap-reaudit §4.4）: shadow_mode=2——PCSS 链的 light-space 深度
+// 比较（D32→R32 blit，与 DeferredLighting/ShadowFilter 同 VP、同 UV 约定：
+// sc.x = ndc.x*0.5+0.5, sc.y = 0.5-ndc.y*0.5）。froxel 中心是空气点、无表面
+// 法线，bias 取固定 NDC 值 + 4 tap PCF（手动双线性，同 moments 路径）。
+float froxelDepthCascade(vec3 ndc, texture2D depthMap) {
+    if (ndc.x < -1.0 || ndc.x > 1.0 ||
+        ndc.y < -1.0 || ndc.y > 1.0 ||
+        ndc.z <  0.0 || ndc.z > 1.0) return -1.0;
+    vec2 uv = froxelShadowNdcToUv(ndc);
+    ivec2 dims = textureSize(depthMap, 0);
+    vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * vec2(dims) - 0.5;
+    ivec2 c0 = ivec2(floor(p));
+    vec2 t = fract(p);
+    ivec2 c1 = min(c0 + ivec2(1), dims - ivec2(1));
+    c0 = max(c0, ivec2(0));
+    const float bias = 0.002;
+    float lit = 0.0;
+    lit += (ndc.z - bias > texelFetch(depthMap, c0, 0).r) ? 0.0 : 1.0;
+    lit += (ndc.z - bias > texelFetch(depthMap, ivec2(c1.x, c0.y), 0).r) ? 0.0 : 1.0;
+    lit += (ndc.z - bias > texelFetch(depthMap, ivec2(c0.x, c1.y), 0).r) ? 0.0 : 1.0;
+    lit += (ndc.z - bias > texelFetch(depthMap, ivec2(c1.x, c1.y), 0).r) ? 0.0 : 1.0;
+    return lit * 0.25;
+}
+
+// 逐级联由近到远查询；返回值：[0,1] 可见性。全部级联越界 → -1 语义收敛为
+// 恒 lit（覆盖边界外不再被 clamp 成全遮挡——reaudit §4.4 记录的注释/实现
+// 不符缺陷）。
+float froxelShadowQuery(vec3 worldPos, int mode) {
+    float v = -1.0;
+    if (mode == 2) {
+        v = froxelDepthCascade(froxelShadowProject(worldPos, params.ShadowVP[0][0],
+                                params.ShadowVP[0][1], params.ShadowVP[0][2],
+                                params.ShadowVP[0][3]), shadow_moments_c0);
+        if (v < 0.0)
+            v = froxelDepthCascade(froxelShadowProject(worldPos, params.ShadowVP[1][0],
+                                   params.ShadowVP[1][1], params.ShadowVP[1][2],
+                                   params.ShadowVP[1][3]), shadow_moments_c1);
+        if (v < 0.0)
+            v = froxelDepthCascade(froxelShadowProject(worldPos, params.ShadowVP[2][0],
+                                   params.ShadowVP[2][1], params.ShadowVP[2][2],
+                                   params.ShadowVP[2][3]), shadow_moments_c2);
+        if (v < 0.0)
+            v = froxelDepthCascade(froxelShadowProject(worldPos, params.ShadowVP[3][0],
+                                   params.ShadowVP[3][1], params.ShadowVP[3][2],
+                                   params.ShadowVP[3][3]), shadow_moments_c3);
+    } else {
+        v = froxelVsmCascade(froxelShadowProject(worldPos, params.ShadowVP[0][0],
+                             params.ShadowVP[0][1], params.ShadowVP[0][2],
+                             params.ShadowVP[0][3]), shadow_moments_c0);
+        if (v < 0.0)
+            v = froxelVsmCascade(froxelShadowProject(worldPos, params.ShadowVP[1][0],
+                                 params.ShadowVP[1][1], params.ShadowVP[1][2],
+                                 params.ShadowVP[1][3]), shadow_moments_c1);
+        if (v < 0.0)
+            v = froxelVsmCascade(froxelShadowProject(worldPos, params.ShadowVP[2][0],
+                                 params.ShadowVP[2][1], params.ShadowVP[2][2],
+                                 params.ShadowVP[2][3]), shadow_moments_c2);
+        if (v < 0.0)
+            v = froxelVsmCascade(froxelShadowProject(worldPos, params.ShadowVP[3][0],
+                                 params.ShadowVP[3][1], params.ShadowVP[3][2],
+                                 params.ShadowVP[3][3]), shadow_moments_c3);
+    }
+    return (v < 0.0) ? 1.0 : clamp(v, 0.0, 1.0);
+}
+
+// WP2: SPGI 辐照双线性（4 tap clamp，SampledImage 无采样器惯例同上）。
+vec3 froxelSpgiBilinear(texture2D tex, vec2 uv) {
+    ivec2 dims = textureSize(tex, 0);
+    vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * vec2(dims) - 0.5;
+    ivec2 c0 = ivec2(floor(p));
+    vec2 t = fract(p);
+    ivec2 c1 = min(c0 + ivec2(1), dims - ivec2(1));
+    c0 = max(c0, ivec2(0));
+    vec3 v00 = texelFetch(tex, c0, 0).rgb;
+    vec3 v10 = texelFetch(tex, ivec2(c1.x, c0.y), 0).rgb;
+    vec3 v01 = texelFetch(tex, ivec2(c0.x, c1.y), 0).rgb;
+    vec3 v11 = texelFetch(tex, ivec2(c1.x, c1.y), 0).rgb;
+    return mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y);
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(params.FroxelDims.x) ||
+        gid.y >= int(params.FroxelDims.y)) return;
+
+    vec3 totalScatter = vec3(0.0);
+    float transmittance = 1.0;
+    float extinctionScale = params.VolumeParams1.x;
+    float scatteringAlbedo = params.VolumeParams1.y;
+    float ambient = params.VolumeParams2.z;
+    vec3 lightColor = params.LightColor.xyz;
+    vec3 lightDir = normalize(params.LightDirection.xyz);
+
+    // audit V6: dz 是视轴厚度，斜 ray 的真实段长 ds = Δz / cosView。
+    // cosView 对整列只算一次（本列近平面点方向 · 相机 forward）。
+    vec3 nearWorld;
+    {
+        vec2 screenUv = (vec2(gid) + 0.5) / params.FroxelDims.xy;
+        vec2 ndc = vec2(screenUv.x * 2.0 - 1.0, 1.0 - 2.0 * screenUv.y);
+        vec4 near4 = params.InvViewProj[0] * ndc.x
+                   + params.InvViewProj[1] * ndc.y
+                   + params.InvViewProj[2] * 0.0
+                   + params.InvViewProj[3];
+        nearWorld = near4.xyz / near4.w;
+    }
+    vec3 rayDir = normalize(nearWorld - params.CameraPos.xyz);
+    float cosView = max(dot(rayDir, froxelCameraForward()), 1e-3);
+
+    int depthCount = int(params.FroxelDims.z);
+
+    // WP2: 本列的屏幕 UV——froxel 网格与屏幕对齐，列 xy 即屏幕瓦片，
+    // 直接作为 SPGI 辐照采样坐标（无需 ViewProj 重投影；重投影实测把
+    // UV 打到纹理零内容区——grep auv 排查记录 2026-09-30）。
+    vec2 colScreenUv = (vec2(gid) + 0.5) / params.FroxelDims.xy;
+
+    for (int z = 0; z < depthCount; ++z) {
+        // 上一 pass 的密度（texelFetch 单元中心）
+        float density = texelFetch(froxel_density, ivec3(gid, z), 0).r;
+
+        float z0 = froxelZToDepth(float(z) - 0.5);
+        float z1 = froxelZToDepth(float(z) + 0.5);
+        float ds = (z1 - z0) / cosView;   // 本段真实 ray 长度（audit V6）
+
+        if (density > 0.001) {
+            float sigmaT = density * extinctionScale;
+            float sigmaS = density * scatteringAlbedo * extinctionScale;
+
+            vec3 worldPos = froxelToWorld(vec3(vec2(gid), float(z)));
+
+            // P2-B: 直射光阴影——世界坐标投影到各级联 light clip space。
+            // mode 1 = light-space VSM moments（Chebyshev）；mode 2 = PCSS
+            // light-space 深度比较。全部级联越界或 shadowMode=0（无阴影输入）
+            // → 明确定义的 fallback：恒 lit。
+            // WP1: march_steps>0 → 沿光传播方向的逆方向（指向光源）N 步
+            // light march：vis 累乘 exp(-σt·stepLen)（雾对雾自阴影，密度取自
+            // froxel_density 3D；常量介质模式 σt 沿路不变、免 3D 采样）×
+            // 每步几何阴影查询。0=legacy 单查询（FROXEL_MARCH=0 回滚位）。
+            // 计划 §4 WP1 伪码写的 +LightDir 未区分传播方向约定；本引擎
+            // light_direction 是传播方向（audit V7），朝光 march 取负号。
+            float shadow = 1.0;
+            if (params.VolumeParams3.w > 0.5) {
+                int marchSteps = int(params.VolumeParams4.x + 0.5);
+                if (marchSteps > 0) {
+                    float stepLen = params.VolumeParams4.y / float(marchSteps);
+                    // 半步起步（中点采样，均匀介质下无偏）
+                    vec3 lp = worldPos - lightDir * (0.5 * stepLen);
+                    float vis = 1.0;
+                    bool uniformMedium = params.FrustumParams2.z > 0.0;
+                    for (int s = 0; s < marchSteps; ++s) {
+                        if (uniformMedium) {
+                            vis *= exp(-sigmaT * stepLen);
+                        } else {
+                            vec3 uvw = froxelWorldToUvw(lp);
+                            float d = froxelTrilinearClamp(froxel_density, uvw,
+                                                           vec3(params.FroxelDims.xyz));
+                            vis *= exp(-d * extinctionScale * stepLen);
+                        }
+                        vis *= froxelShadowQuery(lp,
+                                                 int(params.VolumeParams3.w + 0.5));
+                        lp -= lightDir * stepLen;
+                    }
+                    shadow = clamp(vis, 0.0, 1.0);
+                } else {
+                    shadow = froxelShadowQuery(worldPos,
+                                               int(params.VolumeParams3.w + 0.5));
+                }
+            }
+
+            // HG 相位（audit V7 方向契约）：lighting.light_direction 是光的
+            // **传播**方向（指向场景）。cosTheta = dot(入射传播, 出射传播)，
+            // 出射传播 = sample→camera = -viewDir。旧式 +dot(viewDir, lightDir)
+            // 符号相反，g>0 时前向散射亮区会翻到背阳侧。
+            float g = clamp(params.VolumeParams3.x, -0.95, 0.95);
+            float phase;
+            if (abs(g) < 1e-4) {
+                phase = 1.0 / (4.0 * 3.14159265);
+            } else {
+                float g2 = g * g;
+                vec3 viewDir = normalize(worldPos - params.CameraPos.xyz);
+                float cosTheta = dot(-viewDir, lightDir);
+                float denom = 1.0 + g2 - 2.0 * g * cosTheta;
+                phase = (1.0 - g2) / (4.0 * 3.14159265 * denom * sqrt(denom));
+            }
+
+            // 散射源项 j = sigmaS * 入射辐射（单位：与 surface 直射同源）
+            // WP2: ambient_source=1 → 环境项采上一帧 SPGI 辐照（froxel 世界
+            // 坐标经 ViewProj 投影到屏幕；越界/背后回退硬编码天空色）。
+            // 单位换算：SPGI 纹理是辐照度 E（FusionIndirect 用 albedo×E×
+            // gain/π 消费）；各向同性相位的雾入射源 = σs·L_avg = σs·E/π。
+            // 0 = 历史硬编码（FROXEL_SPGI_AMBIENT=0 回滚位，G1-G5 基准）。
+            vec3 ambientTerm = vec3(0.4, 0.45, 0.6) * ambient;
+            if (params.VolumeParams4.z > 0.5) {
+                // 观感校准（2026-09-30 实测）：SPGI 辐照 E 场内 ~0.001-0.05，
+                // 物理量级（E/π）下雾几乎不可见（场均值较硬编码项 -10×）。
+                // GAIN 30 把亮 GI 区抬回历史观感档；**下限 = 硬编码天空项
+                // ×0.55**——SPGI 只能增亮不能黑化（v10 排查：暗屏幕区 SPGI≈0
+                // 时纯 SPGI 环境项把雾/云拖成黑体）。
+                vec3 spgiTerm = froxelSpgiBilinear(spgi_ambient, colScreenUv)
+                                * (ambient * 9.55);   // GAIN 30 × 1/π
+                ambientTerm = max(spgiTerm, vec3(0.4, 0.45, 0.6) * (ambient * 0.55));
+            }
+            vec3 sourceJ = sigmaS * (lightColor * shadow * phase
+                                     + ambientTerm);
+
+            // audit V6: 段内常量源的解析积分（旧式段末 T 近似在 τ=1 时仅得
+            // 解析值 58%，加密度只会变暗、光束不成比例）。
+            float tr = exp(-sigmaT * ds);
+            float segW = (sigmaT > 1e-5) ? (1.0 - tr) / sigmaT : ds;
+            totalScatter += transmittance * sourceJ * segW;
+            transmittance *= tr;
+        }
+
+        imageStore(froxel_scatter, ivec3(gid, z), vec4(totalScatter, transmittance));
+    }
+}

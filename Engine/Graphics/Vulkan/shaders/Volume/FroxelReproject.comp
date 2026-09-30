@@ -1,0 +1,74 @@
+// FroxelReproject.comp — WP3 (2026-09-30, froxel-upgrade 计划 §4): 体积时间
+// 重投影。排在 integrate 之后、resolve 之前：
+//   每 froxel 一线程（92 万线程，独立 pass——27 读邻域钳制不能并进
+//   integrate 的 64 层循环线程，见计划 §3.2 读预算）：
+//     当前相机网格点 → froxelToWorld → 上一帧 InvViewProj 投影 → 采上一帧
+//     混合结果（三线性）→ 3×3×3 邻域 min/max 钳制（27 读 < 32 读/线程 ✓）
+//     → out = mix(current, history_clamped, blend)。
+// 雾低频，blend 默认 0.35；视轴快速平移的 froxel 深度重映射鬼影由钳制兜底；
+// 首帧/切镜（prev==curr 矩阵）退化为恒等。VolumeParams4.w=0 完全旁路
+// （FROXEL_TEMPORAL=0 回滚位）。
+// 输出写独立纹理：resolve 采"混合结果"，下一帧它作为 prev（triple 轮转）。
+
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+#define FROXEL_PARAMS_BINDING 3
+#include "FroxelCommon.glsl"
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0) uniform texture3D froxel_scatter_curr;
+layout(set = 0, binding = 1) uniform texture3D froxel_scatter_prev;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image3D froxel_scatter_out;
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+    ivec3 dims = imageSize(froxel_scatter_out);
+    if (gid.x >= dims.x || gid.y >= dims.y || gid.z >= dims.z) return;
+
+    vec4 cur = texelFetch(froxel_scatter_curr, gid, 0);
+    float blend = params.VolumeParams4.w;
+    if (blend <= 0.0) {
+        imageStore(froxel_scatter_out, gid, cur);
+        return;
+    }
+
+    // 当前相机网格点的世界坐标（整数 = 单元中心，与 inject/integrate 同契约）
+    vec3 worldPos = froxelToWorld(vec3(gid));
+
+    // 投影到上一帧 froxel 网格
+    vec4 pclip = params.PrevInvViewProj[0] * worldPos.x
+               + params.PrevInvViewProj[1] * worldPos.y
+               + params.PrevInvViewProj[2] * worldPos.z
+               + params.PrevInvViewProj[3];
+    vec3 pndc = pclip.xyz / pclip.w;
+    if (pndc.x < -1.0 || pndc.x > 1.0 ||
+        pndc.y < -1.0 || pndc.y > 1.0 ||
+        pndc.z <  0.0 || pndc.z > 1.0) {
+        // 上一帧视野外（含切镜）：无有效历史，passthrough 当前值
+        imageStore(froxel_scatter_out, gid, cur);
+        return;
+    }
+    vec3 puvw = vec3(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5, pndc.z);
+
+    // 历史三线性采样
+    vec3 fdims = vec3(params.FroxelDims.xyz);
+    vec4 hist = froxelTrilinearClamp4(froxel_scatter_prev, puvw, fdims);
+
+    // 3×3×3 邻域 min/max 钳制（消除深度重映射/几何运动鬼影）
+    vec3 pcoord = puvw * fdims - 0.5;
+    ivec3 c0 = ivec3(floor(pcoord));
+    vec4 mn = vec4(1e30);
+    vec4 mx = vec4(-1e30);
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        ivec3 c = clamp(c0 + ivec3(dx, dy, dz), ivec3(0), ivec3(fdims) - ivec3(1));
+        vec4 v = texelFetch(froxel_scatter_prev, c, 0);
+        mn = min(mn, v);
+        mx = max(mx, v);
+    }
+    vec4 histClamped = clamp(hist, mn, mx);
+
+    imageStore(froxel_scatter_out, gid, mix(cur, histClamped, blend));
+}

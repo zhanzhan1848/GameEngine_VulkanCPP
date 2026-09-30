@@ -1,0 +1,48 @@
+// FroxelResolve.comp — P2.1 (2026-09-15): GLSL 移植自
+// Metal/shaders/Volume/FroxelResolve.metal（路线图 Phase 2）。
+// 每线程一个半分辨率屏幕像素：取全分辨率中心深度，算 froxel W，
+// 三线性采样 froxel_scatter，输出 RGBA16F（RGB=scatter，A=transmittance）。
+
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+#define FROXEL_PARAMS_BINDING 3
+#include "FroxelCommon.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture3D froxel_scatter;
+layout(set = 0, binding = 1) uniform texture2D depth_buffer;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D output_color;
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outDims = imageSize(output_color);
+    if (gid.x >= outDims.x || gid.y >= outDims.y) return;
+
+    // 半分辨率像素的全分辨率中心
+    ivec2 fullResPixel = min(gid * 2 + ivec2(1),
+                             ivec2(params.ScreenParams.xy) - ivec2(1));
+    float depth = texelFetch(depth_buffer, fullResPixel, 0).x;
+
+    // audit V8: 天空/远开口像素同样要积分到雾 far（旧式直接返回恒等
+    // (0,0,0,1)，开口与遮挡边缘的雾出现硬断层）。
+    bool isSky = (depth <= 0.0 || depth >= 1.0);
+    float zView = isSky ? params.FrustumParams.y : ndcToViewZ(depth);
+
+    // 雾体覆盖范围内取边界分数（0=fogNear，1=fogFar）
+    float f = clamp(log2(zView / params.FrustumParams.x) / params.FrustumParams.z,
+                    0.0, 1.0);
+
+    // 前缀语义统一（audit V8）：slice z 存的是"积分到 z 的**后**边界"
+    // （边界分数 (z+1)/N）。目标边界分数 f 对应的连续 slice 坐标为
+    // f*N-1（整数 = texel 中心 = 该 slice 的累计值）。
+    float sliceCoord = f * float(params.FroxelDims.z) - 1.0;
+
+    vec2 screenUv = (vec2(gid) + 0.5) / vec2(outDims);
+    vec3 dims = vec3(textureSize(froxel_scatter, 0));
+    vec4 result = froxelTrilinearClamp4(froxel_scatter,
+                                        vec3(screenUv, sliceCoord / params.FroxelDims.z),
+                                        dims);
+
+    imageStore(output_color, gid, result);
+}
