@@ -1,3 +1,4 @@
+#include "Graphics/RHI/Core/CardSurfaceIdentity.h"
 #include <iomanip>
 // T4.6.5 part 30.4 — TestVulkanSponzaRenderGraph.cpp
 //
@@ -191,6 +192,8 @@ std::vector<u8> LoadSpvBytes(const char* relpath) {
     return bytes;
 }
 
+#include "SCSurfaceSelfTest.inl"
+
 std::string ResolveTexturePath(const std::string& base, const std::string& filename) {
     if (filename.empty()) return "";
     std::string path = base + filename;
@@ -247,6 +250,7 @@ bool TestVulkanSponzaRenderGraph::Initialize() {
         std::cerr << "[Part30.4] InitializeDevice failed" << std::endl;
         return false;
     }
+    if (std::getenv("SC_SURFACE_SELFTEST") && !RunSCSurfaceSelfTest(device_)) return false;
     if (!InitializeWindowAndRenderSystem()) {
         std::cerr << "[Part30.4] InitializeWindowAndRenderSystem failed" << std::endl;
         return false;
@@ -1088,6 +1092,8 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
             }
         } else ormLoaded++;
 
+        const u64 surfaceTextureDigest = decAlbedo[i].valid
+            ? rhi::card_surface_identity::Texture(u32(decAlbedo[i].width), u32(decAlbedo[i].height), decAlbedo[i].data) : 0;
         // Free stbi buffers now that CreateTextureFromData has copied the pixels.
         if (decAlbedo[i].data) stbi_image_free(decAlbedo[i].data);
         if (decNormal[i].data) stbi_image_free(decNormal[i].data);
@@ -1098,6 +1104,7 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         matInst->SetTexture(2, ormTex);
         matInst->SetSampler(3, materialSampler_);
         matInst->Update(device_);
+        matInst->CertifySurfaceBakeTexture(surfaceTextureDigest);
 
         meshInfo.materialInstance = matInst;
         materialInstances_.push_back(matInst);
@@ -2398,6 +2405,18 @@ void TestVulkanSponzaRenderGraph::Run() {
     device_->Submit(submitInfo);
 
     renderSystem_.EndFrame(renderDoneSem);
+    if (const char* audit = std::getenv("SC_RAY_ORACLE_PREFIX"); audit && audit[0]) {
+        const char* f = std::getenv("SC_RAY_ORACLE_FRAME");
+        if (frameCount_ == u32(f ? std::atoi(f) : 350)) {
+            if (auto* sc = pipeline_->GetSurfaceCachePass()) sc->ReadbackRayLookupStats(frameCount_);
+        }
+    }
+    if (const char* stats = std::getenv("PRIMAL_SC_RAY_LOOKUP_STATS");
+        stats && std::strcmp(stats, "1") == 0 && frameCount_ % 30u == 0u) {
+        if (auto* sc = pipeline_->GetSurfaceCachePass())
+            if (!sc->ReadbackRayLookupStats(frameCount_))
+                std::cerr << "[SC_P4] checked readback failed frame=" << frameCount_ << std::endl;
+    }
 
     // Read-only, exact-frame Vulkan diagnostic.  The shadow depth textures
     // are the persistent physical R32 resources consumed by SurfaceCacheShadow

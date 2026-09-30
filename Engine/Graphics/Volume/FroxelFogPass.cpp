@@ -554,7 +554,7 @@ void FroxelFogPass::CreateCloudTexture() {
         float px = (float(x) + 0.5f) / RES * 2.0f - 1.0f;
         float py = (float(y) + 0.5f) / RES * 2.0f - 1.0f;
         float pz = (float(z) + 0.5f) / RES * 2.0f - 1.0f;
-        float qy = py * 1.05f;
+        float qy = py * 1.30f;   // 压扁:积云宽 > 高(用户反馈高度略高)
 
         // 1) puff 场（二次衰减求和 → 阈值体 = 凹凸包络）
         float field = 0.0f;
