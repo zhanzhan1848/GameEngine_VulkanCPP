@@ -67,9 +67,15 @@ struct FroxelParams {
     math::v4 PrevInvViewProj[4];  // 736: 上一帧 inverse view-projection（WP3:
                                   //      体积时间重投影；首帧/切镜无效，
                                   //      temporal_blend=0 时 passthrough）
+
+    // 2026-09-30（云原语 WP5）: 局部云体密度源——球形包络 × FBM × Worley
+    // 细节,云底压扁；绕过 SDF/高度门(云悬空于开放空域)。
+    math::v4 CloudA;             // 800: x=enable(0/1), y=radius(世界),
+                                 //      z=density(峰值), w=noise_freq(噪声频率)
+    math::v4 CloudB;             // 816: xyz=center(world), w=wind(漂移速度)
 };
 
-static_assert(sizeof(FroxelParams) == 800, "FroxelParams GPU layout mismatch");
+static_assert(sizeof(FroxelParams) == 832, "FroxelParams GPU layout mismatch");
 
 // ============================================================================
 // Froxel Grid Configuration
@@ -103,6 +109,13 @@ struct FroxelGridConfig {
     u32   ambient_source_spgi = 0;
     // WP3: temporal_blend>0 时启用体积时间重投影（当前:历史 = blend）。
     float temporal_blend = 0.0f;
+    // WP5 云原语（2026-09-30）: 局部云体密度源,默认关。
+    float cloud_enable = 0.0f;
+    float cloud_radius = 6.0f;
+    float cloud_density = 1.2f;
+    float cloud_noise_freq = 0.16f;
+    float cloud_center[3] = {8.0f, 4.0f, 1.0f};
+    float cloud_wind = 0.0f;
 };
 
 // Reuse VolumeCameraData from VolumeTypes.h for per-frame camera/light input.

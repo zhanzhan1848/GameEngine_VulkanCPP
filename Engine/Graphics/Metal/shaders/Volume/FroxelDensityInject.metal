@@ -57,10 +57,34 @@ kernel void froxel_density_inject(
         return;
     }
 
-    // Sample density
+    // 全场景基础霾保留；WP5 云体在下方 max() 叠加（与 GLSL 同步）
     float density = froxel_sample_density(world_pos, noise_tex,
-                                           sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
-                                           params);
+                                          sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
+                                          params);
+
+    // WP5 云原语（与 GLSL FroxelDensityInject.comp 同式）：球形包络略压扁 ×
+    // FBM 基底 × Worley 细节侵蚀,云底淡出；绕过 SDF/高度门。
+    if (params.CloudA.x > 0.5) {
+        float radius = params.CloudA.y;
+        float3 q = world_pos - params.CloudB.xyz;
+        q.y *= 1.18;
+        float dist = length(q);
+        if (dist < radius) {
+            constexpr sampler noise_s(coord::normalized, filter::linear,
+                                      address::repeat, mip_filter::none);
+            float drift = params.CloudB.w * params.VolumeParams2.w;
+            float body = smoothstep(radius, radius * 0.42, dist);
+            body *= 0.55 + 0.45 * smoothstep(-radius * 0.5, -radius * 0.12,
+                                             q.y / max(radius, 1e-3));
+            float base = noise_tex.sample(noise_s,
+                world_pos * params.CloudA.w + float3(drift, drift * 0.23, 0.0)).r;
+            float detail = worley_noise_3d(world_pos * (params.CloudA.w * 3.1)
+                                           + float3(drift * 1.7, 0.0, 0.0));
+            float shape = clamp((base * 0.72 + detail * 0.38) * body * 1.85 - 0.32,
+                                0.0, 1.0);
+            density = max(density, params.CloudA.z * shape);
+        }
+    }
 
     // Threshold
     if (density < params.VolumeParams1.z) density = 0.0;

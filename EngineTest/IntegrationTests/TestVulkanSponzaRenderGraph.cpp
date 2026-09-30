@@ -212,6 +212,7 @@ std::string ResolveTexturePath(const std::string& base, const std::string& filen
 #include "DDGIFirstRecordProof.inl"
 #include "DDGIDefaultFirstOracle.inl"
 #include "SCMaterialSampleProof.inl"
+#include "DDGIFirstShadowMapDump.inl"
 
 m4x4 make_identity_m4x4() {
     m4x4 r{};
@@ -593,6 +594,29 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
             renderSettings.froxel.extinction_scale = EnvFloat("FROXEL_EXT", 0.35f);
         if (EnvFloat("FROXEL_AMBIENT", -1.0f) >= 0.0f)
             renderSettings.froxel.ambient_intensity = EnvFloat("FROXEL_AMBIENT", 0.3f);
+        // WP5 云原语：FROXEL_CLOUD=1 + FROXEL_CLOUD_POS=x,y,z /
+        // FROXEL_CLOUD_R=radius / FROXEL_CLOUD_D=density / FROXEL_CLOUD_FREQ
+        // / FROXEL_CLOUD_WIND（参考图对标的局部云体）。
+        if (EnvEnabled("FROXEL_CLOUD")) {
+            renderSettings.froxel.cloud_enable = 1.0f;
+            if (const char* e = std::getenv("FROXEL_CLOUD_POS")) {
+                float x, y, z;
+                if (sscanf(e, "%f,%f,%f", &x, &y, &z) == 3) {
+                    renderSettings.froxel.cloud_center[0] = x;
+                    renderSettings.froxel.cloud_center[1] = y;
+                    renderSettings.froxel.cloud_center[2] = z;
+                }
+            }
+            renderSettings.froxel.cloud_radius = EnvFloat("FROXEL_CLOUD_R", 6.0f);
+            renderSettings.froxel.cloud_density = EnvFloat("FROXEL_CLOUD_D", 1.2f);
+            renderSettings.froxel.cloud_noise_freq = EnvFloat("FROXEL_CLOUD_FREQ", 0.16f);
+            renderSettings.froxel.cloud_wind = EnvFloat("FROXEL_CLOUD_WIND", 0.0f);
+            std::cerr << "[FROXEL] cloud on pos=" << renderSettings.froxel.cloud_center[0]
+                      << "," << renderSettings.froxel.cloud_center[1]
+                      << "," << renderSettings.froxel.cloud_center[2]
+                      << " r=" << renderSettings.froxel.cloud_radius
+                      << " d=" << renderSettings.froxel.cloud_density << std::endl;
+        }
         // 2026-09-30（froxel-upgrade 计划 WP1/WP2/WP3）:
         // FROXEL_MARCH=<N> light march 步数（0=legacy 单查询回滚位）；
         // FROXEL_SPGI_AMBIENT=1 环境项采上一帧 SPGI 辐照（0=硬编码天空色）；
@@ -1371,10 +1395,12 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     }
     const char* analyticRhoFlag = std::getenv("DDGI_ANALYTIC_FIRST_RHO");
     const char* analyticPositionFlag = std::getenv("DDGI_ANALYTIC_FIRST_POSITION");
+    const char* scFirstAuditFlag = std::getenv("DDGI_SC_FIRST_SOURCE_AUDIT");
     const char* analyticRhoPrefix = std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX");
     const char* analyticRhoDump = std::getenv("DDGI_DUMP");
     const bool analyticRhoRequested =
         (analyticRhoFlag && std::strcmp(analyticRhoFlag, "1") == 0) ||
+        (scFirstAuditFlag && std::strcmp(scFirstAuditFlag, "1") == 0) ||
         (analyticPositionFlag && (std::strcmp(analyticPositionFlag, "1") == 0 ||
                                   std::strcmp(analyticPositionFlag, "0") == 0)) ||
         (analyticRhoPrefix && analyticRhoPrefix[0] && analyticRhoDump &&
@@ -2372,6 +2398,25 @@ void TestVulkanSponzaRenderGraph::Run() {
     device_->Submit(submitInfo);
 
     renderSystem_.EndFrame(renderDoneSem);
+
+    // Read-only, exact-frame Vulkan diagnostic.  The shadow depth textures
+    // are the persistent physical R32 resources consumed by SurfaceCacheShadow
+    // in this frame; copy only after the render submission, with explicit
+    // image and transfer-to-host dependencies and checked completion.
+    if (const char* prefix = std::getenv("DDGI_FIRST_SHADOW_MAP_DUMP_PREFIX")) {
+        const char* requested = std::getenv("DDGI_FIRST_SHADOW_MAP_DUMP_FRAME");
+        static bool shadowMapDumped = false;
+        if (!shadowMapDumped && requested &&
+            frameCount_ == u32(std::strtoul(requested, nullptr, 10))) {
+            shadowMapDumped = true;
+            if (!RunDDGIFirstShadowMapDump(device_, pipeline_.get(), frameCount_, frameIdx, prefix)) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_FIRST_SHADOW_MAP_DUMP] failed at frame " << frameCount_ << std::endl;
+                Shutdown();
+                std::exit(2);
+            }
+        }
+    }
 
     if (std::getenv("DDGI_SH_PRODUCER_AUDIT_PREFIX")) {
         auto* ddgi = pipeline_ ? pipeline_->GetDDGIPass() : nullptr;

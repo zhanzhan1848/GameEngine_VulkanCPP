@@ -56,6 +56,9 @@ struct FroxelParams {
                                 //      w=temporal_blend(0=关)
     float4 ViewProj[4];         // 672: 当前帧 view-projection（WP2）
     float4 PrevInvViewProj[4];  // 736: 上一帧 inverse view-projection（WP3）
+    float4 CloudA;              // 800: x=enable, y=radius, z=density,
+                                //      w=noise_freq（WP5 云原语）
+    float4 CloudB;              // 816: xyz=center(world), w=wind(漂移速度)
 };
 
 // ============================================================================

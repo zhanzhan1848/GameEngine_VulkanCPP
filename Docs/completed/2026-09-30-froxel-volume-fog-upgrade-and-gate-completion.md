@@ -163,6 +163,25 @@ emission-absorption 前向积分 + Beer 自阴影 + 环境项照亮的实时 fro
   测试既有观感问题(与雾无关,本文不处理);显示器休眠时窗口截图不可用
   (CG 全黑)——统一走进程内 PPM 捕获。
 
+## 8a. 追加:云原语(WP5,2026-09-30 用户验收反馈后追加)
+
+用户对比参考图反馈"有大气雾效果,但没有云的效果",并定调形态:**全场景雾霾 +
+中间一小块独立云体**。追加实现:
+
+- 契约:FroxelParams 800→**832B**(`CloudA`=enable/radius/density/noise_freq、
+  `CloudB`=center/wind),三方镜像 + static_assert 832。
+- 密度源(注入 pass,GLSL/MSL 同式):球形包络(略压扁 ×1.18,云底 0.5R 下淡出
+  成平底盘)× FBM 基底 × Worley 细节侵蚀,`max()` 叠加在基础霾之上;绕过
+  SDF/高度门(云悬空于开放空域);`CloudB.w·time` 漂移。云模式不影响基础霾
+  (用户明确要"全场景雾霾 + 独立云块")。
+- env:`FROXEL_CLOUD=1 FROXEL_CLOUD_POS=x,y,z FROXEL_CLOUD_R=4.3
+  FROXEL_CLOUD_D=2.6 FROXEL_CLOUD_FREQ=0.24 FROXEL_CLOUD_WIND`(Vulkan/Metal
+  同款);成品档 extinction 0.55 + phase_g 0.5 + SPGI ambient。
+- 验证:门禁回归 5/5(默认云关,832B 布局无回归);Metal 同步编译运行无错
+  (进程内捕获 `metal_cloud.png`,基线过曝为测试既有观感)。
+- 截图:`cloud_v1-v4.png` 迭代过程,`cloud_v4.png` 成品,`comparison_vs_
+  reference.png` 已更新为参考图 vs 云块成品对比。
+
 ## 9. 回归
 
 - `TestVulkanFroxelRenderGraph` 默认与 `FROXEL_TEMPORAL=1`/`FROXEL_SPGI_AMBIENT=1`

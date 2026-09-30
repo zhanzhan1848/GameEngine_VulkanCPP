@@ -615,6 +615,24 @@ bool TestModularPipeline::InitializePipeline() {
                 rs.froxel.ambient_source_spgi = 1u;
             if (std::getenv("FROXEL_TEMPORAL"))
                 rs.froxel.temporal_blend = 0.35f;
+            if (const char* v = std::getenv("FROXEL_CLOUD")) {
+                if (!(strcmp(v, "0") == 0 || strcmp(v, "false") == 0)) {
+                    rs.froxel.cloud_enable = 1.0f;
+                    rs.froxel.cloud_radius = 6.0f;
+                    rs.froxel.cloud_density = 1.2f;
+                    rs.froxel.cloud_noise_freq = 0.16f;
+                    if (const char* e = std::getenv("FROXEL_CLOUD_POS")) {
+                        float x, y, z;
+                        if (sscanf(e, "%f,%f,%f", &x, &y, &z) == 3) {
+                            rs.froxel.cloud_center[0] = x;
+                            rs.froxel.cloud_center[1] = y;
+                            rs.froxel.cloud_center[2] = z;
+                        }
+                    }
+                    rs.froxel.cloud_radius = strtof(std::getenv("FROXEL_CLOUD_R") ? std::getenv("FROXEL_CLOUD_R") : "6", nullptr);
+                    rs.froxel.cloud_density = strtof(std::getenv("FROXEL_CLOUD_D") ? std::getenv("FROXEL_CLOUD_D") : "1.2", nullptr);
+                }
+            }
             pipeline_->UpdateSettings(rs);
             std::cerr << "[FROXEL] Metal fog on march=" << rs.froxel.march_steps
                       << " spgi=" << rs.froxel.ambient_source_spgi

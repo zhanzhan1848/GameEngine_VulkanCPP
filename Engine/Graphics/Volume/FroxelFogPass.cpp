@@ -759,6 +759,12 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                         fp.PrevInvViewProj[3] = prev.columns[3];
                     }
 
+                    // WP5 云原语：局部云体密度源（config 默认关）
+                    fp.CloudA = {config_.cloud_enable, config_.cloud_radius,
+                                 config_.cloud_density, config_.cloud_noise_freq};
+                    fp.CloudB = {config_.cloud_center[0], config_.cloud_center[1],
+                                 config_.cloud_center[2], config_.cloud_wind};
+
                     // Screen
                     fp.ScreenParams = {(float)inputs.width, (float)inputs.height,
                                        1.0f / (float)inputs.width,
