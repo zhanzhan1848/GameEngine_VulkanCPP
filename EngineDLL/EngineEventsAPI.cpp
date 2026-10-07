@@ -21,7 +21,12 @@ namespace primal::engine_dll::events {
 
 namespace {
 
-std::mutex g_mutex;
+std::mutex& EventMutex() {
+    // Diagnostics' worker and unload logs remain live during static teardown.
+    // Match DiagState's process lifetime; never lock a destroyed global mutex.
+    static auto* mutex = new std::mutex();
+    return *mutex;
+}
 primal_engine_events_v1 g_events{};
 bool g_installed = false;
 
@@ -31,7 +36,7 @@ void FireLog(std::uint32_t level, const char* category, const char* message, std
 {
     primal_engine_events_v1 local{};
     {
-        std::lock_guard<std::mutex> lock(g_mutex);
+        std::lock_guard<std::mutex> lock(EventMutex());
         if (!g_installed || g_events.on_log == nullptr) return;
         local = g_events;
     }
@@ -47,7 +52,7 @@ void FireDeviceLost(const char* backend, const char* detail)
 {
     primal_engine_events_v1 local{};
     {
-        std::lock_guard<std::mutex> lock(g_mutex);
+        std::lock_guard<std::mutex> lock(EventMutex());
         if (!g_installed || g_events.on_device_lost == nullptr) return;
         local = g_events;
     }
@@ -70,7 +75,7 @@ extern "C" {
 EDITOR_INTERFACE std::uint32_t InstallEngineEvents(const primal_engine_events_v1* events)
 {
     using namespace primal::engine_dll::events;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> lock(EventMutex());
 
     if (events == nullptr)
     {
