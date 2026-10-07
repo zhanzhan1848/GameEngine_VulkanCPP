@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderTestFramework.h"
+#include "Engine/Graphics/RenderPipeline/Modules/PassDebugViewModule.h"
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
 #include "Engine/Graphics/RHI/Components/RHICamera.h"
@@ -491,4 +492,9 @@ private:
     // SSGI visualization mode: 0=Composite(scene+SSGI), 1=SSGI only, 2=Scene only
     u32 ssgiVisMode_{ 0 };  // Composite (default)
     u32 mode_diag_{ 0 };    // Mode 6 diagnostic: 0=simple blit, 1=FusionRender output
+
+    // [PassDebugView] PRIMAL_PASS_DEBUG=<name> 激活的整屏 pass 可视化（对齐
+    // 编辑器 PASS 下拉；开发对照用，绕开 F 系模式）。
+    primal::graphics::PassDebugViewModule* pass_debug_module_{ nullptr };
+    u32 pass_debug_view_{ 0 };  // 0=Off
 };

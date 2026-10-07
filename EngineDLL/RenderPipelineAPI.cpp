@@ -890,6 +890,75 @@ u32 PipelineRenderFrameInternal(u64 target_handle, u32 camera_id_in, u32 surface
 }
 
 // ============================================================================
+// PipelineRenderFrameRWCB — 编辑器 PassDebugView 激活期的渲染入口。
+// ============================================================================
+// 与 PipelineRenderFrame 相同的目标/相机语义，但走 RenderWithCommandBuffer
+// 路径（caller-command-buffer 双胞胎，与 TestModularPipeline/TestSponzaVT 的
+// 成熟用法同构）。为什么存在：编辑器 Render() 路径（自建 cmd）在离屏
+// RGBA16F RT 上的 RG 输出链（含 FinalBlit）无法落盘——PassDebugView 功能
+// 首次暴露该组合（2026-09-20 GUI 冒烟），RWCB 路径经测试壳验证全绿，故
+// pass 视图激活期由编辑器视口改走本入口。参数与失败语义同 PipelineRenderFrame。
+
+EDITOR_INTERFACE u32 PipelineRenderFrameRWCB(u64 target_handle, u32 camera_id_in,
+                                             u32 surface_id) {
+    constexpr u32 kInvalidCameraId = static_cast<u32>(~0u);
+    if (camera_id_in == kInvalidCameraId) return 0;
+    auto* entry = engine_dll::GetRenderTarget(target_handle);
+    if (!entry || !entry->texture) return 0;
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    RenderScene* scene = p->GetCurrentScene();
+    if (!scene) return 0;
+    const auto& desc = entry->texture->GetDesc();
+    if (desc.size.x == 0 || desc.size.y == 0) return 0;
+
+    rhi::ViewportDesc viewport{};
+    viewport.topLeft.x = 0.f;
+    viewport.topLeft.y = 0.f;
+    viewport.size.x = static_cast<f32>(desc.size.x);
+    viewport.size.y = static_cast<f32>(desc.size.y);
+    viewport.minDepth = 0.f;
+    viewport.maxDepth = 1.f;
+
+    RenderView view = BuildRenderViewFromCameraId(camera_id{camera_id_in}, viewport);
+    view.SetIsEditorCamera(true);
+
+    scene_sync::SyncLightsFromECS(*scene);
+
+    // 命令缓冲生命周期由本入口管理（编辑器无 RenderSystem 宿主）。
+    CommandBufferHandle cmdHandle = get_rhi_device()->CreateCommandBuffer(CommandQueueType::Graphics);
+    if (cmdHandle == handles::INVALID_COMMAND_BUFFER) return 0;
+    RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmdHandle);
+    if (!cmd || !cmd->Initialize() || !cmd->Begin()) {
+        get_rhi_device()->DestroyCommandBuffer(cmdHandle);
+        return 0;
+    }
+
+    static std::atomic<u32> s_rwcbFrame{0};
+    const u32 bufferIndex = s_rwcbFrame.fetch_add(1, std::memory_order_relaxed) % 3;
+    p->RenderWithCommandBuffer(*scene, view, entry->texture->GetHandle(), desc,
+                               cmd, bufferIndex, cmdHandle,
+                               rhi::handles::INVALID_SYNC);
+
+    cmd->End();
+    QueueSubmitInfo submitInfo{};
+    submitInfo.cmdBuffer = cmdHandle;
+    get_rhi_device()->Submit(submitInfo);
+    get_rhi_device()->DestroyCommandBuffer(cmdHandle);
+
+    // GC drain（同 PipelineRenderFrameInternal，防 deferred-destroy 积压）。
+    if (auto* dev = graphics::get_rhi_device()) {
+        static std::atomic<u64> s_frame_counter{0};
+        const u64 cur = s_frame_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        const u64 completed = (cur > 3) ? (cur - 3) : 0;
+        auto& gc = dev->GetGarbageCollector();
+        gc.SetCurrentFrame(cur);
+        gc.Update(completed);
+    }
+    return 1;
+}
+
+// ============================================================================
 // BlitRenderTargetToSurface (Path B present step)
 // ============================================================================
 //
@@ -1350,6 +1419,59 @@ EDITOR_INTERFACE void PipelineSetSkyboxEnabled(u32 enable) {
     auto* fwd = p->GetForwardRenderer();
     if (!fwd) return;
     fwd->SetSkyboxEnabled(enable != 0);
+}
+
+// ============================================================================
+// Pass Debug View（视口实时 pass 可视化，编辑器 PASS 下拉 / CLI 共用）
+// ============================================================================
+// view 取 PassDebugView 枚举值（0=Off，上限 PipelineGetPassDebugViewCount-1）。
+// 前置条件：需要完整渲染图路径——设为非 Off 会自动 SetEditorMode(false)；
+// Off 恢复编辑器轻量前向。失败语义：越界值被拒绝并保持原视图（stderr 告警）；
+// 目标 pass 本帧未产出时引擎回退正常输出（日志提示一次），不报错。
+
+EDITOR_INTERFACE void PipelineSetPassDebugView(u32 view) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    p->SetPassDebugView(view);
+}
+
+EDITOR_INTERFACE u32 PipelineGetPassDebugView() {
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    return p->GetPassDebugView();
+}
+
+// 视图总数（含 Off）。UI/CLI 据此遍历，0 = 管线未初始化。
+EDITOR_INTERFACE u32 PipelineGetPassDebugViewCount() {
+    return static_cast<u32>(PassDebugView::Count);
+}
+
+// 视图名（小写，如 "off"/"albedo"/"gi_indirect"）。out_name 置于静态存储，
+// 调用方不需释放；越界返回 0 且 *out_name 置 nullptr。
+EDITOR_INTERFACE u32 PipelineGetPassDebugViewName(u32 view, const char** out_name) {
+    if (out_name) *out_name = nullptr;
+    const char* name = GetPassDebugViewName(view);
+    if (!name) return 0;
+    if (out_name) *out_name = name;
+    return 1;
+}
+
+// ============================================================================
+// WRC 探针球 overlay（world space radiance probe 可视化）
+// ============================================================================
+// 前置条件：PRIMAL_WRC_ENABLE 场景存在 WRC volume（wrc_volumes_[0] 初始化）
+// 且探针球着色器可用。无 WRC volume 时开关保持但帧内静默跳过。
+
+EDITOR_INTERFACE void PipelineSetWRCProbeDebug(u32 enable) {
+    auto* p = GetStdPipeline();
+    if (!p) return;
+    p->SetWRCProbeDebug(enable != 0);
+}
+
+EDITOR_INTERFACE u32 PipelineGetWRCProbeDebug() {
+    auto* p = GetStdPipeline();
+    if (!p) return 0;
+    return p->IsWRCProbeDebugEnabled() ? 1u : 0u;
 }
 
 } // extern "C"

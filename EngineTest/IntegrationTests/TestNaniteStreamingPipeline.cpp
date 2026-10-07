@@ -10,6 +10,7 @@
 #include "Engine/Graphics/Nanite/HZBSystem.h"
 #include "Engine/Graphics/Nanite/DepthHistoryManager.h"
 #include "Engine/Graphics/Nanite/VisibilityBufferSystem.h"
+#include "Engine/Graphics/RenderPipeline/Modules/PassDebugViewModule.h"
 #include "Engine/Input/Input.h"
 #include "Engine/Components/Entity.h"
 #include "ShaderCompilation.h"
@@ -624,6 +625,43 @@ bool TestNaniteStreamingPipeline::InitializeStreamingComponents() {
 
     // Initialize Blit Pipeline for final presentation
     //std::cout << "[TestNanite] Initializing Blit Pipeline..." << std::endl;
+
+    // [PassDebugView] PRIMAL_PASS_DEBUG=<name> 激活整屏 pass 可视化（模块
+    // 自加载，开发对照用；Off 时零开销）。
+    if (const char* pd = std::getenv("PRIMAL_PASS_DEBUG"); pd && pd[0]) {
+        const s32 v = primal::graphics::ParsePassDebugViewName(pd);
+        if (v > 0) {
+            pass_debug_module_ = new primal::graphics::PassDebugViewModule();
+            if (pass_debug_module_->Initialize(device_)) {
+                pass_debug_view_ = static_cast<u32>(v);
+                std::cout << "[TestNanite] PassDebugView active: " << pd << std::endl;
+            } else {
+                std::cerr << "[TestNanite] PassDebugView init failed — disabled" << std::endl;
+                delete pass_debug_module_;
+                pass_debug_module_ = nullptr;
+            }
+        }
+        // 对照诊断：同一读回方法在测试壳的输出（编辑器 indirect args 全零）。
+        if (const char* e = std::getenv("PRIMAL_NANITE_DIAG"); e && e[0] == '1') {
+            auto ih = cullingPipeline_->GetIndirectBuffer(0);
+            auto ch = cullingPipeline_->GetVisibleCounterBuffer(0);
+            if (ih != primal::graphics::rhi::handles::INVALID_RESOURCE) {
+                if (void* m = device_->MapBuffer(ih)) {
+                    const u32* a = static_cast<const u32*>(m);
+                    std::cout << "[TestNanite][Diag@Init] indirect: vc=" << a[0]
+                              << " ic=" << a[1] << std::endl;
+                    device_->UnmapBuffer(ih);
+                }
+            }
+            if (ch != primal::graphics::rhi::handles::INVALID_RESOURCE) {
+                if (void* m = device_->MapBuffer(ch)) {
+                    std::cout << "[TestNanite][Diag@Init] visibleCounter="
+                              << *static_cast<const u32*>(m) << std::endl;
+                    device_->UnmapBuffer(ch);
+                }
+            }
+        }
+    }
 
     // Create descriptor set layout for blit
     primal::graphics::rhi::DescriptorSetLayoutBinding blit_bindings[] = {
@@ -2810,6 +2848,32 @@ void TestNaniteStreamingPipeline::Run() {
     UpdateTestScene();
     ProcessStreamingFeedback();
     RecordTestMetrics();
+
+    // [PassDebugView 排查] 每 300 帧读回一次 culling 输出（编辑器 indirect args
+    // 全零问题的对照基线——本壳同代码有画面时的读数）。
+    if (const char* e = std::getenv("PRIMAL_NANITE_DIAG"); e && e[0] == '1') {
+        static u32 diagFrame = 0;
+        if ((diagFrame++ % 300u) == 0u && cullingPipeline_) {
+            auto ih = cullingPipeline_->GetIndirectBuffer(frameCount_);
+            auto ch = cullingPipeline_->GetVisibleCounterBuffer(frameCount_);
+            u32 vc = 0xFFFFFFFF, ic = 0xFFFFFFFF;
+            if (ih != primal::graphics::rhi::handles::INVALID_RESOURCE) {
+                if (void* m = device_->MapBuffer(ih)) {
+                    ic = static_cast<const u32*>(m)[1];
+                    device_->UnmapBuffer(ih);
+                }
+            }
+            if (ch != primal::graphics::rhi::handles::INVALID_RESOURCE) {
+                if (void* m = device_->MapBuffer(ch)) {
+                    vc = *static_cast<const u32*>(m);
+                    device_->UnmapBuffer(ch);
+                }
+            }
+            std::cout << "[TestNanite][Diag] frame=" << frameCount_
+                      << " indirect.instanceCount=" << ic
+                      << " visibleCounter=" << vc << std::endl;
+        }
+    }
 
     rhi::ResourceHandle backBuffer;
     rhi::SyncHandle imageAvailable;
@@ -5280,6 +5344,70 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
         );
     }
 
+    // [PassDebugView] PRIMAL_PASS_DEBUG 激活时整屏渲染目标 pass（替代
+    // FinalBlit；源 handle 均为本图内已声明资源）。
+    if (pass_debug_module_ && pass_debug_module_->IsInitialized() &&
+        pass_debug_view_ != 0) {
+        // 源选择：视图 → 本图资源句柄（壳内无独立 RT 的视图回退 deferred/primary）。
+        rendergraph::RGResourceHandle src{};
+        rhi::ResourceHandle physSrc = rhi::handles::INVALID_RESOURCE;  // depth 原始纹理
+        bool srcIsDepth = false;
+        switch (pass_debug_view_) {
+            case 1:  src = gbufferAlbedoHandle; break;              // albedo
+            case 2:  src = gbufferNormalHandle; break;              // normal
+            case 3:  physSrc = sceneDepthTexture_; srcIsDepth = true; break;  // depth
+            case 9:  src = ssaoOutputHandle; break;                 // ssao
+            case 10: src = primaryInputHandle; break;               // deferred
+            case 11: src = giOutputHandle; break;                   // gi_indirect
+            case 12: src = screenProbeGIOutputHandle; break;        // spgi
+            case 13: src = scLightingH; break;                      // sc_atlas
+            default: src = primaryInputHandle; break;               // velocity/ID 类壳内无独立 RT，回退 deferred
+        }
+        if (!src.IsValid() && physSrc == rhi::handles::INVALID_RESOURCE)
+            src = primaryInputHandle;
+
+        struct PDVData { rendergraph::RGResourceHandle output; };
+        graph.AddPass<PDVData>("PassDebugView",
+            graphics::rendergraph::RGPassType::Graphics,
+            graphics::rendergraph::RGPassCategory::PostProcess,
+            [src, backBufferHandle](PDVData& data, graphics::rendergraph::RenderGraphBuilder& builder) {
+                builder.SideEffect();
+                if (src.IsValid()) builder.Read(src, rhi::ResourceState::ShaderResource);
+                data.output = builder.Write(backBufferHandle, rhi::ResourceState::RenderTarget);
+                graphics::rendergraph::RGRenderPassDesc rp;
+                rp.colors.push_back({ .texture = data.output,
+                                      .loadOp = rhi::LoadAction::DontCare,
+                                      .storeOp = rhi::StoreAction::Store,
+                                      .clearColor = { primal::math::v4{0,0,0,1} } });
+                builder.DeclareRenderPass(rp);
+            },
+            [this, src, physSrc, srcIsDepth, view = pass_debug_view_](const PDVData&, graphics::rendergraph::RenderGraphContext& ctx) {
+                auto cmd = ctx.cmdBuffer;
+                const u32 cbIdx = static_cast<u32>(frameCount_) % 3;
+
+                rhi::ResourceHandle srcHandle = rhi::handles::INVALID_RESOURCE;
+                if (src.IsValid()) {
+                    auto* res = ctx.graph->GetResource(src);
+                    if (res) srcHandle = res->GetPhysicalHandle();
+                } else {
+                    srcHandle = physSrc;
+                }
+                if (srcHandle == rhi::handles::INVALID_RESOURCE) return;
+
+                // 深度视图：源即 D32 深度纹理（着色器线性化）。非 depth 视图的
+                // 背景判定需要 GBuffer 深度——壳内用 sceneDepthTexture_。
+                rhi::ResourceHandle depthHandle =
+                    srcIsDepth ? srcHandle : sceneDepthTexture_;
+
+                pass_debug_module_->DrawInline(cmd, srcHandle, depthHandle,
+                                               rhi::handles::INVALID_RESOURCE,
+                                               rhi::handles::INVALID_RESOURCE,
+                                               static_cast<PassDebugView>(view),
+                                               renderWidth_, renderHeight_,
+                                               0.1f, 1000.0f, 0, cbIdx);
+            }
+        );
+    } else {
     graph.AddPass<BlitPassData>("FinalBlit",
         graphics::rendergraph::RGPassType::Graphics,
         graphics::rendergraph::RGPassCategory::PostProcess,
@@ -5704,6 +5832,7 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
             }
         }
     );
+    } // pass view else-branch（FinalBlit 的替代包裹）
 }
 
 void TestNaniteStreamingPipeline::ProcessStreamingFeedback() {

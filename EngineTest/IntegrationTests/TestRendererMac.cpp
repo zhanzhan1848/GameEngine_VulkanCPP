@@ -205,7 +205,7 @@ bool test_initialize()
 	source.source_type = input::input_source::keyboard;
 	source.code = input::input_code::key_a;
 	source.multiplier = 1.f;
-	source.axis = input::axis::x;
+	source.dst_axis = input::axis::x;
 	input::bind(source);
 
 	source.code = input::input_code::key_d;
@@ -214,7 +214,7 @@ bool test_initialize()
 
 	source.code = input::input_code::key_w;
 	source.multiplier = 1.f;
-	source.axis = input::axis::z;
+	source.dst_axis = input::axis::z;
 	input::bind(source);
 
 	source.code = input::input_code::key_s;
@@ -223,7 +223,7 @@ bool test_initialize()
 
 	source.code = input::input_code::key_q;
 	source.multiplier = -1.f;
-	source.axis = input::axis::y;
+	source.dst_axis = input::axis::y;
 	input::bind(source);
 
 	source.code = input::input_code::key_e;
@@ -290,7 +290,7 @@ void Engine_Test::run()
 			info.render_item_count = 1;
 			info.thresholds = &thresholds[0];
 			info.light_set_key = light_set_key;
-			info.camera_id = _surfaces[i].camera.get_id();
+			info.camera = _surfaces[i].camera.get_id();
 
 			assert(_countof(thresholds) >= info.render_item_count);
 			_surfaces[i].surface.surface.render(info);

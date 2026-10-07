@@ -2468,7 +2468,7 @@ bool Engine_Test::InitializeMeshletPipeline() {
     // 2a. GlobalSDF init — needed for Mode 11 canonical dynamic DDGI.
     // F1-F4 (2026-07-13) fixed the 4 runtime blockers. S5 previously reverted
     // this test-side call; re-adding it now that the engine side is sound.
-    // Spec: Docs/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md
+    // Spec: Docs/completed/superpowers/specs/2026-07-13-globalsdf-dawn-port-v2-design.md
     {
         auto& globalSDF = primal::graphics::nanite::GlobalSDF::Get();
         primal::graphics::nanite::GlobalSDFConfig sdfConfig;

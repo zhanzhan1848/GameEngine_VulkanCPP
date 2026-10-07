@@ -645,6 +645,7 @@ private:
     // 注册 AABB 质量漂移（374/256 运行间两态）。超时 PRIMAL_SC_REG_GATE_
     // TIMEOUT（默认 600 帧）后按现状注册并告警，防几何永远缺 bounds 的
     // 资产卡死 SC。
+    std::vector<u64> sc_material_signatures_;
     bool sc_registration_done_ = false;
     u32 sc_registration_deferred_frames_ = 0;
     bool sc_registration_warned_ = false;

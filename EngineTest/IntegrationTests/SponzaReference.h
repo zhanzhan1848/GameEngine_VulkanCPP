@@ -14,7 +14,19 @@ inline bool Enabled() {
 
 inline void Camera(float& x, float& y, float& z, float& pitch, float& yaw) {
     if (!Enabled()) return;
-    x = -12.5f; y = 1.7f; z = -0.7f; pitch = 14.0f; yaw = 2.0f;
+    x = -12.5f; y = 1.7f; z = -0.7f; pitch = 14.0f; yaw = 12.0f;
+}
+
+inline float FovDegrees(float fallback = 60.0f) {
+    const char* value = std::getenv("SPGI_FOV");
+    if (!value) return Enabled() ? 75.0f : fallback;
+    float fov = fallback;
+    char trailing;
+    if (std::sscanf(value, "%f %c", &fov, &trailing) == 1 &&
+        std::isfinite(fov) && fov >= 30.0f && fov <= 120.0f) {
+        return fov;
+    }
+    return fallback;
 }
 
 template<class Vector>
@@ -33,9 +45,10 @@ inline void ReadRGB(const char* name, Vector& target) {
 template<class Lighting>
 inline void LightingSettings(Lighting& lighting) {
     if (Enabled()) {
-        // Light travels downwards across the courtyard, giving the right
-        // arcade a warm key while leaving the entrance in shade.
-        lighting.light_direction = {0.15f, -0.8f, 0.6f};
+        // Art direction for the reference view: the steeper sun reaches the
+        // right arcade and floor. Keep light energy below unchanged; this is
+        // a viewpoint match, not a GI calibration change.
+        lighting.light_direction = {0.12f, -0.97f, 0.22f};
         lighting.light_color = {3.0f, 2.64f, 2.16f, 1.0f};
         // 2026-09-06 GI 对齐 UE 参考（第 8-13 轮标定）：解析探针驱动取
         // 1.5×直射档，同机位实测 mean 40.9 / 深暗 61.0% / 贴白 0.31%，

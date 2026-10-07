@@ -403,7 +403,7 @@ void Engine_Test::run()
 			info.thresholds = &thresholds[0];
 			info.light_set_key = light_set_key;
 			info.average_frame_time = dt;
-			info.camera_id = _surfaces[i].camera.get_id();
+			info.camera = _surfaces[i].camera.get_id();
 
 			assert(_countof(thresholds) >= info.render_item_count);
 			_surfaces[i].surface.surface.render(info);

@@ -671,10 +671,13 @@ bool StandardRenderPipeline::SetDDGIAnalyticFirstRhoSources(
     rhi::ResourceHandle albedoTexture, rhi::SamplerHandle albedoSampler,
     const void* triangleMapping, u64 triangleMappingBytes) {
     const char* apply = std::getenv("DDGI_ANALYTIC_FIRST_RHO");
+    const char* position = std::getenv("DDGI_ANALYTIC_FIRST_POSITION");
     const char* prefix = std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX");
     const char* dump = std::getenv("DDGI_DUMP");
     const bool requested =
         (apply && std::strcmp(apply, "1") == 0) ||
+        (position && (std::strcmp(position, "1") == 0 ||
+                      std::strcmp(position, "0") == 0)) ||
         (prefix && prefix[0] && dump && std::strcmp(dump, "2") == 0);
     if (!device_ || device_->GetPlatform() != rhi::RHIPlatform::Vulkan || !requested ||
         !nodes || !triangles || nodeBytes == 0 || triangleBytes == 0 ||
@@ -803,10 +806,13 @@ bool StandardRenderPipeline::RefreshDDGIFirstNativeNormalSources() {
 
 bool StandardRenderPipeline::RefreshDDGIAnalyticFirstRhoSources() {
     const char* apply = std::getenv("DDGI_ANALYTIC_FIRST_RHO");
+    const char* position = std::getenv("DDGI_ANALYTIC_FIRST_POSITION");
     const char* prefix = std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX");
     const char* dump = std::getenv("DDGI_DUMP");
     const bool requested =
         (apply && std::strcmp(apply, "1") == 0) ||
+        (position && (std::strcmp(position, "1") == 0 ||
+                      std::strcmp(position, "0") == 0)) ||
         (prefix && prefix[0] && dump && std::strcmp(dump, "2") == 0);
     if (!requested) return true;
     if (ddgi_analytic_first_rho_nodes_.empty() ||
@@ -2181,8 +2187,23 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
             liveProxies != snapshot_proxy_count_) {
             scene_snapshot_->MarkFullRebuild();
         }
+        if (surface_cache_pass_ && surface_cache_pass_->StaticPagesEnabled()) {
+            const auto& current = scene_snapshot_->GetInstanceData();
+            bool changed = sc_material_signatures_.size() != current.size();
+            for (u32 i = 0; i < current.size() && !changed; ++i)
+                changed = sc_material_signatures_[i] != nanite::GPUDrivenDrawPipeline::Get().GetSurfaceBakeMaterialDigest(current[i].material_id);
+            for (const auto& proxy : scene.GetProxies()) {
+                u8 flag = 0; game_entity::entity_id eid{proxy.entityId};
+                transform::get_updated_components_flags(&eid, 1, &flag);
+                changed |= flag != 0;
+            }
+            if (changed) scene_snapshot_->MarkFullRebuild();
+        }
         if (scene_snapshot_->NeedsFullRebuild()) {
             scene_snapshot_->Rebind(scene);
+            sc_material_signatures_.clear();
+            for (const auto& inst : scene_snapshot_->GetInstanceData())
+                sc_material_signatures_.push_back(nanite::GPUDrivenDrawPipeline::Get().GetSurfaceBakeMaterialDigest(inst.material_id));
             scene_snapshot_->ClearFullRebuildFlag();
             snapshot_proxy_count_ = liveProxies;   // A14: re-arm the growth check
 
@@ -2320,7 +2341,13 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                     // meshes, pre-T4.2 blobs, zero-occupancy geometry).
                     rhi::RHICardBakeData bake;
                     if (primal::content::get_rhi_mesh_card_bake(inst.geometry_id, bake)) {
-                        cardGen.RegisterMeshBaked(bake, inst.world_matrix, i);
+                        // [SC per-mesh 计划 P2] 双摘要键控静态页槽位；无页/
+                        // 无合成能力 = INVALID → 原 capture 路径。
+                        const u32 staticSlot = surface_cache_pass_
+                            ? surface_cache_pass_->ResolveStaticSlot(bake.geometry_digest, bake.layout_digest,
+                                nanite::GPUDrivenDrawPipeline::Get().GetSurfaceBakeMaterialDigest(inst.material_id))
+                            : 0xFFFFFFFFu;
+                        cardGen.RegisterMeshBaked(bake, inst.world_matrix, i, staticSlot);
                     } else {
                         // [WRC 计划 Stream E1]: fallback AABB 从 bounds_radius
                         // 球转立方体换 mesh 紧致 AABB——本地 bounds 经 world
@@ -2368,6 +2395,15 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                         }
                     }
                 }
+                    if(surface_cache_pass_ && surface_cache_pass_->WantsGeometryFirstHit()) {
+                        std::vector<ray_geometry::InstanceInput> geometryInstances;
+                        geometryInstances.reserve(instances.size());
+                        for(u32 id=0;id<instances.size();++id) {
+                            const auto& item=instances[id];
+                            geometryInstances.push_back({primal::content::get_rhi_mesh_blas(item.geometry_id),item.world_matrix,id});
+                        }
+                        surface_cache_pass_->SetGeometryScene(geometryInstances);
+                    }
                     cardGen.RebuildCardAllocation();
                     PRIMAL_LOG_STREAM(Info, "Render") << "[LumenSC] Registered " << instances.size()
                               << " scene instances with CardGenerator → "
@@ -2412,6 +2448,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                 // 失败回退球转立方体）。allocation_dirty_ 触发下一次
                 // RebuildCardAllocation（Rebind 重建帧内先于注册循环执行）。
                 if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+                    if (surface_cache_pass_->StaticPagesEnabled()) continue;
                     auto& cardGen = surface_cache_pass_->GetCardGenerator();
                     const auto& instances = scene_snapshot_->GetInstanceData();
                     if (pi < instances.size()) {
@@ -2447,6 +2484,8 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                 }
             }
             if (anyDirty && frameCount_ != lastDirtyRebuildFrame) {
+                if(surface_cache_pass_ && surface_cache_pass_->WantsGeometryFirstHit())
+                    surface_cache_pass_->InvalidateGeometryScene();
                 lastDirtyRebuildFrame = static_cast<u32>(frameCount_);
                 scene_snapshot_->MarkFullRebuild();
                 nanite::GlobalSDF::Get().MarkAllCascadesForRevox();
@@ -3785,6 +3824,26 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                         << " card_count=" << scView.card_count << std::endl; }
             }
             screen_probe_pass_->SetSurfaceCacheData(scView);
+            // Opt-in validated first-surface owner qualification. SC owner IDs
+            // are exactly snapshot order; ambiguous proxy contracts stay unknown.
+            std::vector<math::u32v4> zeroOwners;
+            const char* firstEnv=std::getenv("PRIMAL_SPGI_ZERO_HIT_GEOMETRY");
+            if(scene_snapshot_ && device_->GetPlatform()==rhi::RHIPlatform::Vulkan && firstEnv &&
+               (std::strcmp(firstEnv,"1")==0 || std::strcmp(firstEnv,"2")==0)) {
+                for(const auto& inst:scene_snapshot_->GetInstanceData()) {
+                    bool found=false,supported=true;
+                    for(const auto& proxy:GetCurrentScene()->GetProxies()) {
+                        const auto* cache=cluster::get(proxy.meshId);
+                        if(!cache || !cache->exists || cache->geometry_content_id!=inst.geometry_id || proxy.materialId!=inst.material_id ||
+                           std::memcmp(&proxy.transform,&inst.world_matrix,sizeof(inst.world_matrix))!=0) continue;
+                        found=true;
+                        supported &= proxy.technique==ShaderTechnique::Opaque && proxy.base_color[3]==1.0f && proxy.graphVariant==0;
+                    }
+                    zeroOwners.push_back(math::u32v4{inst.material_id,found&&supported?1u:0u,u32(zeroOwners.size()),u32(frameCount_)});
+                }
+            }
+            screen_probe_pass_->SetFirstSurfaceInputs(surface_cache_pass_.get(),std::move(zeroOwners),
+                nanite::GPUDrivenDrawPipeline::Get().GetMaterialDataBuffer());
         }
 
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
@@ -5394,6 +5453,26 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                             << " card_count=" << scView.card_count << std::endl; }
                 }
                 screen_probe_pass_->SetSurfaceCacheData(scView);
+            // Opt-in validated first-surface owner qualification. SC owner IDs
+            // are exactly snapshot order; ambiguous proxy contracts stay unknown.
+            std::vector<math::u32v4> zeroOwners;
+            const char* firstEnv=std::getenv("PRIMAL_SPGI_ZERO_HIT_GEOMETRY");
+            if(scene_snapshot_ && device_->GetPlatform()==rhi::RHIPlatform::Vulkan && firstEnv &&
+               (std::strcmp(firstEnv,"1")==0 || std::strcmp(firstEnv,"2")==0)) {
+                for(const auto& inst:scene_snapshot_->GetInstanceData()) {
+                    bool found=false,supported=true;
+                    for(const auto& proxy:GetCurrentScene()->GetProxies()) {
+                        const auto* cache=cluster::get(proxy.meshId);
+                        if(!cache || !cache->exists || cache->geometry_content_id!=inst.geometry_id || proxy.materialId!=inst.material_id ||
+                           std::memcmp(&proxy.transform,&inst.world_matrix,sizeof(inst.world_matrix))!=0) continue;
+                        found=true;
+                        supported &= proxy.technique==ShaderTechnique::Opaque && proxy.base_color[3]==1.0f && proxy.graphVariant==0;
+                    }
+                    zeroOwners.push_back(math::u32v4{inst.material_id,found&&supported?1u:0u,u32(zeroOwners.size()),u32(frameCount_)});
+                }
+            }
+            screen_probe_pass_->SetFirstSurfaceInputs(surface_cache_pass_.get(),std::move(zeroOwners),
+                nanite::GPUDrivenDrawPipeline::Get().GetMaterialDataBuffer());
             }
         }
 
