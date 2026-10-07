@@ -1,0 +1,165 @@
+#version 450 core
+// NeuralConv.comp — 通用 3×3 conv 层推理 kernel（Vulkan/GLSL 侧）。
+// MSL 孪生：Engine/Graphics/Metal/shaders/Neural/NeuralDenoise.metal
+//
+// 每层一次 dispatch；通道按 rgba 打包（通道 c → inTex[c>>2][pix][c&3]）。
+// 数值语义与 CPU 参考（NeuralWeights.cpp ReferenceForwardConv）逐位对齐：
+//   zero-pad 边界、c → ky → kx 累加顺序、隐层 relu；
+//   末层（flags bit1 = expm1）+ 网络残差（net flags bit0）组合：
+//     out.rgb = expm1(net_log + input_log.rgb)（残差加输入 ch0..2 的 log 域值）
+//
+// Flat bindings:
+//   0..5  = SampledImage   inTex[6]   (rgba16f)
+//   6..11 = StorageImage   outImg[6]  (rgba16f writeonly)
+//   12    = StorageBuffer  weights    (f32 平铺)
+//   13    = UBO            ConvLayerCB (48B)
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(set = 0, binding = 0)  uniform texture2D inTex0;
+layout(set = 0, binding = 1)  uniform texture2D inTex1;
+layout(set = 0, binding = 2)  uniform texture2D inTex2;
+layout(set = 0, binding = 3)  uniform texture2D inTex3;
+layout(set = 0, binding = 4)  uniform texture2D inTex4;
+layout(set = 0, binding = 5)  uniform texture2D inTex5;
+layout(set = 0, binding = 6,  rgba16f) writeonly uniform image2D outImg0;
+layout(set = 0, binding = 7,  rgba16f) writeonly uniform image2D outImg1;
+layout(set = 0, binding = 8,  rgba16f) writeonly uniform image2D outImg2;
+layout(set = 0, binding = 9,  rgba16f) writeonly uniform image2D outImg3;
+layout(set = 0, binding = 10, rgba16f) writeonly uniform image2D outImg4;
+layout(set = 0, binding = 11, rgba16f) writeonly uniform image2D outImg5;
+layout(set = 0, binding = 12, std430) readonly buffer WeightsBuf { float pw[]; };
+layout(set = 0, binding = 14) uniform texture2D resIn;   // 残差源（pack T0：ch0..2=log1p(noisy)）
+layout(set = 0, binding = 13, std140) uniform ConvLayerCBUBO {
+    vec4 layer0;   // x=in_c y=out_c z=w_offset(f32 idx) w=b_offset
+    vec4 layer1;   // x=kernel y=pad z=flags(bit0=expm1) w=net_residual
+    vec4 res;      // x=w y=h
+} cb;
+
+float fetchIn(int c, ivec2 pix, ivec2 dims) {
+    ivec2 tc = clamp(pix, ivec2(0), dims - ivec2(1));   // 越界由调用方 zero 跳过
+    int t = c >> 2;
+    vec4 v = c >> 2 == 0 ? texelFetch(inTex0, tc, 0)
+             : c >> 2 == 1 ? texelFetch(inTex1, tc, 0)
+             : c >> 2 == 2 ? texelFetch(inTex2, tc, 0)
+             : c >> 2 == 3 ? texelFetch(inTex3, tc, 0)
+             : c >> 2 == 4 ? texelFetch(inTex4, tc, 0)
+             :                texelFetch(inTex5, tc, 0);
+    return v[c & 3];
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dims = ivec2(cb.res.x, cb.res.y);
+    if (pix.x >= dims.x || pix.y >= dims.y) return;
+
+    const int in_c = int(cb.layer0.x);
+    const int out_c = int(cb.layer0.y);
+    const int w_off = int(cb.layer0.z);
+    const int b_off = int(cb.layer0.w);
+    const bool use_expm1 = cb.layer1.z > 0.5;
+    const bool residual = cb.layer1.w > 0.5;
+
+    // ---- 3×3 邻域一次取齐（性能关键：避免逐 tap×逐通道的纹理链选择）----
+    // tap 索引 = ky*3+kx（与权重 W[o][c][ky][kx] 展平序一致）；zero-pad。
+    vec4 nb0[9], nb1[9], nb2[9], nb3[9], nb4[9], nb5[9];
+    for (int tap = 0; tap < 9; ++tap) {
+        ivec2 o = ivec2(tap % 3 - 1, tap / 3 - 1);
+        ivec2 p = pix + o;
+        bool inb = p.x >= 0 && p.y >= 0 && p.x < dims.x && p.y < dims.y;
+        vec4 z = vec4(0.0);
+        nb0[tap] = (inb && in_c > 0)  ? texelFetch(inTex0, p, 0) : z;
+        nb1[tap] = (inb && in_c > 4)  ? texelFetch(inTex1, p, 0) : z;
+        nb2[tap] = (inb && in_c > 8)  ? texelFetch(inTex2, p, 0) : z;
+        nb3[tap] = (inb && in_c > 12) ? texelFetch(inTex3, p, 0) : z;
+        nb4[tap] = (inb && in_c > 16) ? texelFetch(inTex4, p, 0) : z;
+        nb5[tap] = (inb && in_c > 20) ? texelFetch(inTex5, p, 0) : z;
+    }
+
+    // ---- MAC：c → tap 顺序与 CPU 参考逐位一致 ----
+    float acc[24];
+    for (int o = 0; o < out_c; ++o) acc[o] = pw[b_off + o];
+    for (int o = 0; o < out_c; ++o) {
+        int wb = w_off + o * in_c * 9;
+        for (int q = 0; q < 4; ++q) {
+            int c = q;
+            if (c < in_c) {
+                acc[o] += nb0[0][q] * pw[wb + c*9 + 0] + nb0[1][q] * pw[wb + c*9 + 1]
+                        + nb0[2][q] * pw[wb + c*9 + 2] + nb0[3][q] * pw[wb + c*9 + 3]
+                        + nb0[4][q] * pw[wb + c*9 + 4] + nb0[5][q] * pw[wb + c*9 + 5]
+                        + nb0[6][q] * pw[wb + c*9 + 6] + nb0[7][q] * pw[wb + c*9 + 7]
+                        + nb0[8][q] * pw[wb + c*9 + 8];
+            }
+            c = 4 + q;
+            if (c < in_c) {
+                acc[o] += nb1[0][q] * pw[wb + c*9 + 0] + nb1[1][q] * pw[wb + c*9 + 1]
+                        + nb1[2][q] * pw[wb + c*9 + 2] + nb1[3][q] * pw[wb + c*9 + 3]
+                        + nb1[4][q] * pw[wb + c*9 + 4] + nb1[5][q] * pw[wb + c*9 + 5]
+                        + nb1[6][q] * pw[wb + c*9 + 6] + nb1[7][q] * pw[wb + c*9 + 7]
+                        + nb1[8][q] * pw[wb + c*9 + 8];
+            }
+            c = 8 + q;
+            if (c < in_c) {
+                acc[o] += nb2[0][q] * pw[wb + c*9 + 0] + nb2[1][q] * pw[wb + c*9 + 1]
+                        + nb2[2][q] * pw[wb + c*9 + 2] + nb2[3][q] * pw[wb + c*9 + 3]
+                        + nb2[4][q] * pw[wb + c*9 + 4] + nb2[5][q] * pw[wb + c*9 + 5]
+                        + nb2[6][q] * pw[wb + c*9 + 6] + nb2[7][q] * pw[wb + c*9 + 7]
+                        + nb2[8][q] * pw[wb + c*9 + 8];
+            }
+            c = 12 + q;
+            if (c < in_c) {
+                acc[o] += nb3[0][q] * pw[wb + c*9 + 0] + nb3[1][q] * pw[wb + c*9 + 1]
+                        + nb3[2][q] * pw[wb + c*9 + 2] + nb3[3][q] * pw[wb + c*9 + 3]
+                        + nb3[4][q] * pw[wb + c*9 + 4] + nb3[5][q] * pw[wb + c*9 + 5]
+                        + nb3[6][q] * pw[wb + c*9 + 6] + nb3[7][q] * pw[wb + c*9 + 7]
+                        + nb3[8][q] * pw[wb + c*9 + 8];
+            }
+            c = 16 + q;
+            if (c < in_c) {
+                acc[o] += nb4[0][q] * pw[wb + c*9 + 0] + nb4[1][q] * pw[wb + c*9 + 1]
+                        + nb4[2][q] * pw[wb + c*9 + 2] + nb4[3][q] * pw[wb + c*9 + 3]
+                        + nb4[4][q] * pw[wb + c*9 + 4] + nb4[5][q] * pw[wb + c*9 + 5]
+                        + nb4[6][q] * pw[wb + c*9 + 6] + nb4[7][q] * pw[wb + c*9 + 7]
+                        + nb4[8][q] * pw[wb + c*9 + 8];
+            }
+            c = 20 + q;
+            if (c < in_c) {
+                acc[o] += nb5[0][q] * pw[wb + c*9 + 0] + nb5[1][q] * pw[wb + c*9 + 1]
+                        + nb5[2][q] * pw[wb + c*9 + 2] + nb5[3][q] * pw[wb + c*9 + 3]
+                        + nb5[4][q] * pw[wb + c*9 + 4] + nb5[5][q] * pw[wb + c*9 + 5]
+                        + nb5[6][q] * pw[wb + c*9 + 6] + nb5[7][q] * pw[wb + c*9 + 7]
+                        + nb5[8][q] * pw[wb + c*9 + 8];
+            }
+        }
+    }
+
+    // ---- 激活 + 末层 expm1/log 域残差，rgba 打包写 6 张输出图 ----
+    vec4 packs[6];
+    for (int t = 0; t < 6; ++t) {
+        vec4 v = vec4(0.0);
+        for (int q = 0; q < 4; ++q) {
+            int o = t * 4 + q;
+            if (o >= out_c) break;
+            float val = acc[o];
+            if (use_expm1) {
+                // GLSL 无 expm1 内建：exp(x)-1（与 CPU/MSL 容差内一致）。
+                // 残差从专用 resIn 纹理取（pack 输出不被 ping-pong 覆写）。
+                val = (residual && o < 3)
+                    ? exp(val + texelFetch(resIn, pix, 0)[o]) - 1.0
+                    : exp(val) - 1.0;
+            } else {
+                val = max(val, 0.0);   // 隐层 relu
+            }
+            v[q] = val;
+        }
+        packs[t] = v;
+    }
+    imageStore(outImg0, pix, packs[0]);
+    imageStore(outImg1, pix, packs[1]);
+    imageStore(outImg2, pix, packs[2]);
+    imageStore(outImg3, pix, packs[3]);
+    imageStore(outImg4, pix, packs[4]);
+    imageStore(outImg5, pix, packs[5]);
+}

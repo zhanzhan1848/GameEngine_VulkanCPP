@@ -1,0 +1,124 @@
+#version 450 core
+// MLPInfer.comp — M0 神经渲染 debug 推理 kernel（Vulkan/GLSL 侧，手写 GLSL）。
+//
+// MSL 孪生：Engine/Graphics/Metal/shaders/Neural/MLPInferDebug.metal
+// CPU 参考拷贝：Engine/Graphics/Neural/NeuralWeights.cpp
+// 训练/规格权威：ContentTools/neural/train_image_fit.py
+//
+// === PRIMAL NEURAL SPEC v1（四处同步，勿单处修改） ===
+// hash grid: L 级 × F=2 特征，table 布局 [level][entry][F]，
+//   线性索引 (level*T + idx)*F + comp；
+//   h = l*0x9E3779B9 ^ i*0x85EBCA6B ^ j*0xC2B2AE35; h *= 0x27D4EB2F; h ^= h>>15;
+//   网格坐标全 float32：q = uv*res, i0=min(floor(q),res-1), f=q-floor(q),
+//   i1=min(i0+1,res-1)，双线性插值；raw (u,v) 追加尾部；
+//   MLP 逐 i 升序累加（acc = b; acc += x[i]*W[o][i]），与 CPU/Python 同序。
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) writeonly uniform image2D outImg;
+layout(set = 0, binding = 1, std430) readonly buffer ParamsBuf { float pw[]; };
+layout(set = 0, binding = 2, std140) uniform NeuralDebugCBUBO {
+    vec4  res_mode;        // x=outW y=outH z=split(1)/NN-full(0) w=layer_count
+    vec4  enc;             // x=levels y=features z=log2(T) w=table_count(f32 个数)
+    vec4  level_res[4];    // 每级分辨率（f32 精确整数）
+    vec4  layers[8];       // x=in_dim y=out_dim z=W 偏移(f32 idx) w=B 偏移
+} cb;
+
+uint NeuralHash3(uint i, uint j, uint l) {
+    uint h = l * 0x9E3779B9u;
+    h ^= i * 0x85EBCA6Bu;
+    h ^= j * 0xC2B2AE35u;
+    h *= 0x27D4EB2Fu;
+    h ^= h >> 15u;
+    return h;
+}
+
+// GT 参考函数（训练目标；与 Python gt_image / MSL 孪生逐 op 一致）。
+vec3 NeuralGtImage(float u, float v) {
+    vec3 sky_lo = vec3(0.06, 0.12, 0.38);
+    vec3 sky_hi = vec3(1.00, 0.50, 0.18);
+    vec3 sky = sky_lo + (sky_hi - sky_lo) * smoothstep(0.12, 0.88, v);
+    float d = sqrt((u - 0.62) * (u - 0.62) + (v - 0.40) * (v - 0.40));
+    float sun = exp(-d * 14.0) * 1.6;
+    float rh = 0.30 + 0.08 * sin(u * 9.0) + 0.05 * sin(u * 23.0 + 1.7)
+             + 0.02 * sin(u * 57.0 + 0.5);
+    float ridge = smoothstep(rh + 0.004, rh - 0.004, v);
+    vec3 mtn = vec3(0.05, 0.07, 0.10)
+             + (vec3(0.16, 0.13, 0.17) - vec3(0.05, 0.07, 0.10)) * smoothstep(0.0, 0.25, v);
+    vec3 col = sky * (1.0 - ridge) + mtn * ridge;
+    col += sun * (1.0 - ridge) + sun * 0.25 * ridge;
+    return clamp(col, vec3(0.0), vec3(1.0));
+}
+
+void NeuralHashEncode(float u, float v, out float feat[64]) {
+    uint levels = uint(cb.enc.x);
+    uint table_count = uint(cb.enc.w);
+    for (uint l = 0u; l < levels; ++l) {
+        float res = cb.level_res[l >> 2u][l & 3u];
+        float res_m1 = res - 1.0;
+        float qx = u * res;
+        float qy = v * res;
+        float flx = floor(qx);
+        float fly = floor(qy);
+        float i0 = min(flx, res_m1);
+        float j0 = min(fly, res_m1);
+        float fx = qx - flx;
+        float fy = qy - fly;
+        float i1 = min(i0 + 1.0, res_m1);
+        float j1 = min(j0 + 1.0, res_m1);
+        uint per_level = table_count / levels;
+        uint mask = (1u << uint(cb.enc.z)) - 1u;   // entries = 2^log2T
+        uint base = l * per_level;
+        uint h00 = NeuralHash3(uint(i0), uint(j0), l) & mask;
+        uint h10 = NeuralHash3(uint(i1), uint(j0), l) & mask;
+        uint h01 = NeuralHash3(uint(i0), uint(j1), l) & mask;
+        uint h11 = NeuralHash3(uint(i1), uint(j1), l) & mask;
+        float w00 = (1.0 - fx) * (1.0 - fy);
+        float w10 = fx * (1.0 - fy);
+        float w01 = (1.0 - fx) * fy;
+        float w11 = fx * fy;
+        for (uint c = 0u; c < 2u; ++c) {   // F = 2
+            feat[l * 2u + c] =
+                w00 * pw[base + h00 * 2u + c] + w10 * pw[base + h10 * 2u + c]
+              + w01 * pw[base + h01 * 2u + c] + w11 * pw[base + h11 * 2u + c];
+        }
+    }
+    feat[levels * 2u + 0] = u;
+    feat[levels * 2u + 1] = v;
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dims = imageSize(outImg);
+    if (pix.x >= dims.x || pix.y >= dims.y) return;
+
+    float u = (float(pix.x) + 0.5) / float(dims.x);
+    float v = (float(pix.y) + 0.5) / float(dims.y);
+
+    float arr[2][64];
+    NeuralHashEncode(u, v, arr[0]);
+    int cur = 0;
+
+    uint layer_count = uint(cb.res_mode.w);
+    for (uint k = 0u; k < layer_count; ++k) {
+        uint in_dim  = uint(cb.layers[k].x);
+        uint out_dim = uint(cb.layers[k].y);
+        uint w_off = uint(cb.layers[k].z);
+        uint b_off = uint(cb.layers[k].w);
+        bool last = (k + 1u == layer_count);
+        for (uint o = 0u; o < out_dim; ++o) {
+            float acc = pw[b_off + o];
+            for (uint i = 0u; i < in_dim; ++i) acc += arr[cur][i] * pw[w_off + o * in_dim + i];
+            // 隐层 relu，末层 sigmoid（与 MSL/CPU 一致）
+            acc = last ? (1.0 / (1.0 + exp(-acc))) : max(acc, 0.0);
+            arr[1 - cur][o] = acc;
+        }
+        cur = 1 - cur;
+    }
+
+    bool split = cb.res_mode.z > 0.5;
+    bool left = pix.x < dims.x / 2;
+    vec3 col = vec3(arr[cur][0], arr[cur][1], arr[cur][2]);
+    if (split && !left) col = NeuralGtImage(u, v);
+    imageStore(outImg, pix, vec4(col, 1.0));
+}

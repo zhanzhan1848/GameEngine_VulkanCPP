@@ -158,6 +158,12 @@ freshness_candidates_for_spv() {
         */DDGIUpdateDepth_provenance.comp.spv)
             printf '%s\n' "$DEST_DIR/Lumen/DDGIUpdateDepth.comp"
             ;;
+        Lumen/SurfaceCacheIndirectResolve_geometry.comp.spv|Lumen/SurfaceCacheIndirectResolve_consumer.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/SurfaceCacheIndirectResolve.comp"
+            ;;
+        Lumen/SurfaceCacheIndirectTrace_geometry.comp.spv)
+            printf '%s\n' "$DEST_DIR/Lumen/SurfaceCacheIndirectTrace.comp"
+            ;;
         Lumen/SCGeometrySupportProof_echo.comp.spv|Lumen/SCGeometrySupportProof_trace.comp.spv|Lumen/SCGeometrySupportProof_fixed.comp.spv|Lumen/SCGeometrySupportProof_ray.comp.spv)
             printf '%s\n' "$DEST_DIR/Lumen/SCGeometrySupportProof.comp"
             ;;
@@ -589,11 +595,20 @@ mkdir -p "$DEST_DIR/Lumen"
 
 # Parallel arrays (Bash 3.2 on macOS lacks associative arrays).
 # Compute shaders use .comp → .comp.spv; fragment shaders use .frag → .frag.spv.
-LUMEN_GLSL_NAMES=( "Lumen/SSAOTrace" "Lumen/SSAOFilter" "Lumen/DDGIGIGather" "Lumen/FusionIndirect" "Lumen/FusionComposite" "Lumen/DDGITraceRays" "Lumen/DDGIUpdateIrradiance" "Lumen/DDGIUpdateDepth" "Lumen/SSGITrace" "Lumen/SSGITemporal" "Lumen/SSGIFilter" "Lumen/SSGIHalfResDenoise" "Lumen/SSRTrace" "Lumen/SSRTemporal" "Lumen/SSRComposite" "Lumen/TAA" "Lumen/SurfaceCacheDilate" "Lumen/SurfaceCacheLightCull" "Lumen/SurfaceCacheLightEval" "Lumen/SurfaceCacheShadow" "Lumen/SurfaceCacheIndirectTrace" "Lumen/SurfaceCacheIndirectResolve" "Lumen/SurfaceCacheIndirectReconstruct" "Lumen/SurfaceCacheAtlasInit" "Lumen/ScreenProbePlace" "Lumen/ScreenProbeTraceRays" "Lumen/ScreenProbeAverage" "Lumen/ScreenProbeTemporal" "Lumen/ScreenProbeSpatialFilter" "Lumen/ScreenProbeGather" "Lumen/ScreenProbeDenoise" "Lumen/DDGICardRadianceAvg" "Lumen/DDGIProbeIrradianceFromCards" "Lumen/SurfaceCacheCapture" "Lumen/DDGITraceSDF" "Lumen/DDGITraceFinalize" "Lumen/ScreenProbeTraceHZB" "Lumen/ScreenProbeTraceSDF" "Lumen/ScreenProbeTraceFinalize" "Lumen/ScreenProbeCompact" "Lumen/ScreenProbeLightVar" "Volume/FroxelDensityInject" "Volume/FroxelLightIntegrate" "Volume/FroxelResolve" "Volume/FroxelReproject" "Lumen/EyeAdaptation" "Lumen/SurfaceCacheCardFill" "Lumen/WRCTraceSDF" "Lumen/WRCTraceFinalize" "Lumen/WRCUpdateRadiance" "Lumen/WRCPrefilterIrradiance" "Lumen/WRCCardInject" "Lumen/ReflSpecularTrace" )
-LUMEN_GLSL_ENTRIES=( "ssao_trace" "ssao_filter" "ddgi_gi_gather" "fusion_indirect" "fusion_composite" "ddgi_trace_rays" "ddgi_update_irradiance" "ddgi_update_depth" "ssgi_trace" "ssgi_temporal" "ssgi_filter" "ssgi_halfres_denoise" "ssr_trace" "ssr_temporal" "ssr_composite" "taa_main" "surface_cache_dilate" "surface_cache_light_cull" "surface_cache_light_eval" "surface_cache_shadow" "surface_cache_indirect_trace" "surface_cache_indirect_resolve" "surface_cache_indirect_reconstruct" "surface_cache_atlas_init" "screen_probe_place" "screen_probe_trace_rays" "screen_probe_average" "screen_probe_temporal" "screen_probe_spatial_filter" "screen_probe_gather" "screen_probe_denoise" "ddgi_card_radiance_avg" "ddgi_probe_irradiance_from_cards" "surface_cache_capture" "ddgi_trace_sdf" "ddgi_trace_finalize" "screen_probe_trace_hzb" "screen_probe_trace_sdf" "screen_probe_trace_finalize" "screen_probe_compact" "screen_probe_light_var" "froxel_density_inject" "froxel_light_integrate" "froxel_resolve" "froxel_reproject" "eye_adaptation" "surface_cache_card_fill" "wrc_trace_sdf" "wrc_trace_finalize" "wrc_update_radiance" "wrc_prefilter_irradiance" "wrc_card_inject" "refl_specular_trace" )
-LUMEN_GLSL_STAGES=( "comp" "comp" "comp" "frag" "frag" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" )
+LUMEN_GLSL_NAMES=( "Lumen/SSAOTrace" "Lumen/SSAOFilter" "Lumen/DDGIGIGather" "Lumen/FusionIndirect" "Lumen/FusionComposite" "Lumen/DDGITraceRays" "Lumen/DDGIUpdateIrradiance" "Lumen/DDGIUpdateDepth" "Lumen/SSGITrace" "Lumen/SSGITemporal" "Lumen/SSGIFilter" "Lumen/SSGIHalfResDenoise" "Lumen/SSRTrace" "Lumen/SSRTemporal" "Lumen/SSRComposite" "Lumen/TAA" "Lumen/SurfaceCacheDilate" "Lumen/SurfaceCacheLightCull" "Lumen/SurfaceCacheLightEval" "Lumen/SurfaceCacheShadow" "Lumen/SurfaceCacheIndirectTrace" "Lumen/SurfaceCacheIndirectResolve" "Lumen/SurfaceCacheIndirectReconstruct" "Lumen/SurfaceCacheAtlasInit" "Lumen/ScreenProbePlace" "Lumen/ScreenProbeTraceRays" "Lumen/ScreenProbeAverage" "Lumen/ScreenProbeTemporal" "Lumen/ScreenProbeSpatialFilter" "Lumen/ScreenProbeGather" "Lumen/ScreenProbeDenoise" "Lumen/DDGICardRadianceAvg" "Lumen/DDGIProbeIrradianceFromCards" "Lumen/SurfaceCacheCapture" "Lumen/DDGITraceSDF" "Lumen/DDGITraceFinalize" "Lumen/ScreenProbeTraceHZB" "Lumen/ScreenProbeTraceSDF" "Lumen/ScreenProbeTraceFinalize" "Lumen/ScreenProbeCompact" "Lumen/ScreenProbeLightVar" "Volume/FroxelDensityInject" "Volume/FroxelLightIntegrate" "Volume/FroxelResolve" "Volume/FroxelReproject" "Lumen/EyeAdaptation" "Lumen/SurfaceCacheCardFill" "Lumen/SurfaceCacheStaticComposite" "Lumen/SurfaceCachePageClear" "Lumen/WRCTraceSDF" "Lumen/WRCTraceFinalize" "Lumen/WRCUpdateRadiance" "Lumen/WRCPrefilterIrradiance" "Lumen/WRCCardInject" "Lumen/ReflSpecularTrace" )
+LUMEN_GLSL_ENTRIES=( "ssao_trace" "ssao_filter" "ddgi_gi_gather" "fusion_indirect" "fusion_composite" "ddgi_trace_rays" "ddgi_update_irradiance" "ddgi_update_depth" "ssgi_trace" "ssgi_temporal" "ssgi_filter" "ssgi_halfres_denoise" "ssr_trace" "ssr_temporal" "ssr_composite" "taa_main" "surface_cache_dilate" "surface_cache_light_cull" "surface_cache_light_eval" "surface_cache_shadow" "surface_cache_indirect_trace" "surface_cache_indirect_resolve" "surface_cache_indirect_reconstruct" "surface_cache_atlas_init" "screen_probe_place" "screen_probe_trace_rays" "screen_probe_average" "screen_probe_temporal" "screen_probe_spatial_filter" "screen_probe_gather" "screen_probe_denoise" "ddgi_card_radiance_avg" "ddgi_probe_irradiance_from_cards" "surface_cache_capture" "ddgi_trace_sdf" "ddgi_trace_finalize" "screen_probe_trace_hzb" "screen_probe_trace_sdf" "screen_probe_trace_finalize" "screen_probe_compact" "screen_probe_light_var" "froxel_density_inject" "froxel_light_integrate" "froxel_resolve" "froxel_reproject" "eye_adaptation" "surface_cache_card_fill" "surface_cache_static_composite" "surface_cache_page_clear" "wrc_trace_sdf" "wrc_trace_finalize" "wrc_update_radiance" "wrc_prefilter_irradiance" "wrc_card_inject" "refl_specular_trace" )
+LUMEN_GLSL_STAGES=("comp" "comp" "comp" "frag" "frag" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp" "comp")
 # Keep the parallel name/entry/stage arrays in lockstep. SurfaceCacheShadow
 # and FroxelReproject are ordinary entries in the base arrays above.
+LUMEN_GLSL_NAMES+=( "Lumen/SCSurfaceLookupTest" )
+LUMEN_GLSL_ENTRIES+=( "sc_surface_lookup_test" )
+LUMEN_GLSL_STAGES+=( "comp" )
+LUMEN_GLSL_NAMES+=( "Lumen/SCGeometryFirstHitTest" )
+LUMEN_GLSL_ENTRIES+=( "main" )
+LUMEN_GLSL_STAGES+=( "comp" )
+LUMEN_GLSL_NAMES+=( "Lumen/SCBoundaryIndexTest" )
+LUMEN_GLSL_ENTRIES+=( "main" )
+LUMEN_GLSL_STAGES+=( "comp" )
 LUMEN_GLSL_NAMES+=( "Lumen/SCGeometrySupportProof" )
 LUMEN_GLSL_ENTRIES+=( "main" )
 LUMEN_GLSL_STAGES+=( "comp" )
@@ -639,6 +654,46 @@ done
 # Runtime-selectable diagnostic/quality variants must be regenerated by the
 # same build entry point as their canonical source.  Otherwise an environment
 # variable can silently select an older module even when the default is fresh.
+src="$DEST_DIR/Lumen/SurfaceCacheIndirectTrace.comp"
+out="$DEST_DIR/Lumen/SurfaceCacheIndirectTrace_geometry.comp.spv"
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/SurfaceCacheIndirectTrace.comp"
+inline_includes "$src" > "$tmp"
+if glslangValidator --quiet -V --source-entrypoint main -e surface_cache_indirect_trace \
+        -DSC_GEOMETRY_FIRST=1 "$tmp" -o "$out" 2>"$tmpdir/err" && spirv-val "$out" 2>>"$tmpdir/err"; then
+    printf "OK    Lumen/SurfaceCacheIndirectTrace_geometry.comp.spv\n"
+else
+    printf "FAIL  Lumen/SurfaceCacheIndirectTrace_geometry.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+rm -rf "$tmpdir"
+
+src="$DEST_DIR/Lumen/SurfaceCacheIndirectResolve.comp"
+out="$DEST_DIR/Lumen/SurfaceCacheIndirectResolve_geometry.comp.spv"
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/SurfaceCacheIndirectResolve.comp"
+inline_includes "$src" > "$tmp"
+if glslangValidator --quiet -V --source-entrypoint main -e surface_cache_indirect_resolve \
+        -DSC_GEOMETRY_FIRST=1 "$tmp" -o "$out" 2>"$tmpdir/err" && spirv-val "$out" 2>>"$tmpdir/err"; then
+    printf "OK    Lumen/SurfaceCacheIndirectResolve_geometry.comp.spv\n"
+else
+    printf "FAIL  Lumen/SurfaceCacheIndirectResolve_geometry.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+rm -rf "$tmpdir"
+
+src="$DEST_DIR/Lumen/SurfaceCacheShadow.comp"
+out="$DEST_DIR/Lumen/SurfaceCacheShadow_validzero.comp.spv"
+tmpdir="$(mktemp -d)"; tmp="$tmpdir/SurfaceCacheShadow.comp"
+inline_includes "$src" > "$tmp"
+if glslangValidator --quiet -V --source-entrypoint main -e surface_cache_shadow \
+        -DSC_SHADOW_VALID_ZERO=1 "$tmp" -o "$out" 2>"$tmpdir/err" &&
+        spirv-val "$out" 2>>"$tmpdir/err"; then
+    printf "OK    Lumen/SurfaceCacheShadow_validzero.comp.spv\n"
+else
+    printf "FAIL  Lumen/SurfaceCacheShadow_validzero.comp.spv\n"
+    sed 's/^/    /' "$tmpdir/err"; SPV_FAILURES=$((SPV_FAILURES+1))
+fi
+rm -rf "$tmpdir"
+
 for v in "SurfaceCacheLightEval_pi:" \
          "SurfaceCacheLightEval_r2:PRIMAL_SC_GATHER_R2" \
          "SurfaceCacheLightEval_pi_r2:PRIMAL_SC_GATHER_R2"; do
@@ -666,6 +721,30 @@ for v in "DeferredLighting_specocc:PRIMAL_SPEC_OCC" \
             "$DEST_DIR/Forward/DeferredLighting.frag" \
             -o "$DEST_DIR/Forward/$out_name.frag.spv"; then
         printf "FAIL  Forward/%s.frag.spv\n" "$out_name"
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+done
+
+# One-shot true-position SC boundary lighting diagnostic. Reuses production
+# shadow/gather functions and never writes the atlas or enables cache hits.
+for name in SurfaceCacheShadow SurfaceCacheLightEval; do
+    entry=surface_cache_shadow
+    [ "$name" = SurfaceCacheLightEval ] && entry=surface_cache_light_eval
+    if ! glslangValidator --quiet -V -DSC_BOUNDARY_LIGHT_PROOF=1 -I"$DEST_DIR/Lumen" \
+        --source-entrypoint main -e "$entry" "$DEST_DIR/Lumen/$name.comp" \
+        -o "$DEST_DIR/Lumen/${name}_boundary.comp.spv" || \
+       ! spirv-val "$DEST_DIR/Lumen/${name}_boundary.comp.spv"; then
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+done
+
+for name in SurfaceCacheIndirectTrace SurfaceCacheIndirectResolve; do
+    entry=surface_cache_indirect_trace
+    [ "$name" = SurfaceCacheIndirectResolve ] && entry=surface_cache_indirect_resolve
+    if ! glslangValidator --quiet -V -DSC_BOUNDARY_RADIOSITY_PROOF=1 -DSC_GEOMETRY_FIRST=1 -I"$DEST_DIR/Lumen" \
+        --source-entrypoint main -e "$entry" "$DEST_DIR/Lumen/$name.comp" \
+        -o "$DEST_DIR/Lumen/${name}_boundary.comp.spv" || \
+       ! spirv-val "$DEST_DIR/Lumen/${name}_boundary.comp.spv"; then
         SPV_FAILURES=$((SPV_FAILURES+1))
     fi
 done
@@ -763,6 +842,26 @@ if [ -f "$src" ]; then
     fi
     rm -rf "$tmpdir"
 fi
+
+# [SC per-mesh 计划 P2] SurfaceCacheCardFill_writer 审计变体（同一源
+# + SC_CAPTURE_SOURCE_AUDIT_VARIANT define）。此前是手工编译孤儿——每次
+# SurfaceCacheCardFill.comp / SurfaceCacheData.glsl 更新都会让 freshness
+# 门禁永久 STALE。随主构建再生成。
+{
+    src="$DEST_DIR/Lumen/SurfaceCacheCardFill.comp"
+    out="$DEST_DIR/Lumen/SurfaceCacheCardFill_writer.comp.spv"
+    tmpdir="$(mktemp -d)"; tmp="$tmpdir/SurfaceCacheCardFill.comp"
+    inline_includes "$src" > "$tmp"
+    if glslangValidator --quiet -V --source-entrypoint main -e surface_cache_card_fill \
+            -DSC_CAPTURE_SOURCE_AUDIT_VARIANT=1 "$tmp" -o "$out" 2>"$tmpdir/err"; then
+        printf "OK    Lumen/SurfaceCacheCardFill_writer.comp.spv\n"
+    else
+        printf "FAIL  Lumen/SurfaceCacheCardFill_writer.comp.spv\n"
+        sed 's/^/    /' "$tmpdir/err"
+        SPV_FAILURES=$((SPV_FAILURES+1))
+    fi
+    rm -rf "$tmpdir"
+}
 
 # A7: SurfaceCacheCapture write/clear phases — extra entry points of the SAME
 # source (SurfaceCacheCapture.comp), each into its own .comp.spv because the
@@ -1096,5 +1195,23 @@ echo
 echo "Done."
 if [ "$SPV_FAILURES" -ne 0 ]; then
     echo "FAILED: $SPV_FAILURES shader(s) failed to compile" >&2
+    exit 1
+fi
+
+# Current-frame auxiliary radiance composition; no production lookup binding.
+if ! glslangValidator --quiet -V -I"$DEST_DIR/Lumen" "$DEST_DIR/Lumen/SCBoundaryCompose.comp" \
+    -o "$DEST_DIR/Lumen/SCBoundaryCompose.comp.spv" || ! spirv-val "$DEST_DIR/Lumen/SCBoundaryCompose.comp.spv"; then
+    exit 1
+fi
+
+if ! glslangValidator --quiet -V -I"$DEST_DIR/Lumen" "$DEST_DIR/Lumen/SCBoundaryLookupProof.comp" \
+    -o "$DEST_DIR/Lumen/SCBoundaryLookupProof.comp.spv" || ! spirv-val "$DEST_DIR/Lumen/SCBoundaryLookupProof.comp.spv"; then
+    exit 1
+fi
+
+# Opt-in main resolve consumer; existing geometry variant remains available.
+if ! glslangValidator --quiet -V -DSC_BOUNDARY_CONSUMER=1 -DSC_GEOMETRY_FIRST=1 -Dsurface_cache_indirect_resolve=main -I"$DEST_DIR/Lumen" \
+    --source-entrypoint main -e surface_cache_indirect_resolve "$DEST_DIR/Lumen/SurfaceCacheIndirectResolve.comp" \
+    -o "$DEST_DIR/Lumen/SurfaceCacheIndirectResolve_consumer.comp.spv" || ! spirv-val "$DEST_DIR/Lumen/SurfaceCacheIndirectResolve_consumer.comp.spv"; then
     exit 1
 fi

@@ -1,0 +1,47 @@
+#version 450 core
+// NeuralDenoisePack.comp — M1 降噪器输入打包（Vulkan/GLSL 侧）。
+// MSL 孪生：Engine/Graphics/Metal/shaders/Neural/NeuralDenoise.metal
+//
+// 7ch 输入（与 train_denoiser.py load_take(channels=7) 一致）：
+//   ch0..2 = log1p(SPGI 1spp GI rgb)
+//   ch3..5 = world normal（GBuffer N*0.5+0.5 编码解码）
+//   ch6    = depth_raw / 16（与训练同一定数；线性化/归一化都在这一步）
+// 打包为 2 张 rgba16f：T0=(log1p.rgb, normal.x)  T1=(normal.yz, depth16, 0)
+//
+// Flat bindings:
+//   0 = SampledImage       gi      (SPGI gather 输出)
+//   1 = SampledDepthImage  depth   (GBuffer)
+//   2 = SampledImage       normal  (GBuffer)
+//   3 = StorageImage       outT0   (rgba16f)
+//   4 = StorageImage       outT1   (rgba16f)
+//   5 = UBO                CB(32B)
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(set = 0, binding = 0) uniform texture2D inGi;
+layout(set = 0, binding = 1) uniform texture2D inDepth;
+layout(set = 0, binding = 2) uniform texture2D inNormal;
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D outT0;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D outT1;
+
+layout(set = 0, binding = 5, std140) uniform PackCBUBO {
+    vec4 res_misc;   // x=w y=h z=depth_norm_inv w=unused
+} cb;
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(cb.res_misc.x) || pix.y >= int(cb.res_misc.y)) return;
+
+    vec3 gi = texelFetch(inGi, pix, 0).rgb;
+    gi = clamp(gi, vec3(0.0), vec3(27.0));            // 与训练 clip 同域
+    vec3 glog = log(1.0 + gi);
+    float d = clamp(texelFetch(inDepth, pix, 0).r * cb.res_misc.z, 0.0, 1.0);
+    vec3 nrm = clamp(texelFetch(inNormal, pix, 0).xyz * 2.0 - 1.0, vec3(-1.0), vec3(1.0));
+
+    // 通道布局与模型一致：ch0..2=log(gi) ch3..5=normal ch6=depth/16
+    //   T0 = (log.x, log.y, log.z, normal.x)   T1 = (normal.y, normal.z, depth16, 0)
+    imageStore(outT0, pix, vec4(glog, nrm.x));
+    imageStore(outT1, pix, vec4(nrm.y, nrm.z, d, 0.0));
+}

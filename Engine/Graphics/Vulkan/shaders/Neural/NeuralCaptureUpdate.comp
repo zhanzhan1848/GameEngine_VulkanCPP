@@ -1,0 +1,71 @@
+#version 450 core
+// NeuralCaptureUpdate.comp — M1 神经降噪训练数据采集：逐帧累积 pass。
+//
+// MSL 孪生：Engine/Graphics/Metal/shaders/Neural/NeuralCapture.metal
+//          （entry neural_capture_update / neural_capture_pack）
+//
+// 输入 = SPGI ScreenProbeGather 的输出（Denoise 之前、全分辨率、每帧
+// probe/ray jitter —— 时序上零均值的 1spp 估计量）。用 Welford 在线
+// 统计累积均值/方差（数值稳定，且全部量保持在 O(1) 量级，fp16 纹理
+// 可存）：固定相机下 N 帧收敛值 = GT，任意单帧 = 降噪器的 1spp 输入。
+//
+// Ping-pong：读 prev 槽（sampled），写 dst 槽（writeonly）——不使用
+// read-write storage image，全部沿用仓库已验证的资源语义。
+//
+// Flat bindings:
+//   0 = SampledImage  gi_noisy      (rgba16f, SPGI gather 输出)
+//   1 = SampledImage  mean_prev     (rgba16f)
+//   2 = SampledImage  m2_prev       (rgba16f)
+//   3 = StorageImage  mean_dst      (rgba16f, writeonly)
+//   4 = StorageImage  m2_dst        (rgba16f, writeonly)
+//   5 = StorageImage  noisy_sample  (rgba16f, writeonly —— 仅首帧写入)
+//   6 = UBO           NeuralCaptureCB (32B)
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(set = 0, binding = 0) uniform texture2D giNoisy;
+layout(set = 0, binding = 1) uniform texture2D meanPrev;
+layout(set = 0, binding = 2) uniform texture2D m2Prev;
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D meanDst;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D m2Dst;
+layout(set = 0, binding = 5, rgba16f) writeonly uniform image2D noisySample;
+
+layout(set = 0, binding = 6, std140) uniform NeuralCaptureCBUBO {
+    vec4 res_frame;   // x=w y=h z=frame_in_take(0-based) w=frames_total
+    vec4 misc;        // x=near y=far z=take_idx w=reserved
+} cb;
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(cb.res_frame.x) || pix.y >= int(cb.res_frame.y)) return;
+
+    vec3 x = texelFetch(giNoisy, pix, 0).rgb;
+
+    // 噪声样本：每帧覆盖写，pack 时即最新一帧（take 末帧，SPGI 已收敛）。
+    // 2026-09-22 由"仅 z==8 写一次"改为每帧写：z==8 帧在 Vulkan 上可能落
+    // SPGI 暖启动瞬态（全 1.0 白帧），末帧更稳定。
+    imageStore(noisySample, pix, vec4(x, 1.0));
+
+    if (cb.res_frame.z < 0.5) {
+        // 首帧：mean = x，M2 = 0。
+        imageStore(meanDst, pix, vec4(x, 1.0));
+        imageStore(m2Dst, pix, vec4(0.0));
+        return;
+    }
+
+    // Welford：n' = n+1（frame_in_take 0 基 → n' = z+1）
+    float n = cb.res_frame.z;             // 已累积样本数
+    float np1 = cb.res_frame.z + 1.0;     // 新样本数
+    vec3 mean = texelFetch(meanPrev, pix, 0).rgb;
+    vec3 m2   = texelFetch(m2Prev, pix, 0).rgb;
+
+    vec3 delta = x - mean;
+    vec3 meanNew = mean + delta / np1;
+    vec3 delta2 = x - meanNew;
+    vec3 m2New = m2 + delta * delta2;
+
+    imageStore(meanDst, pix, vec4(meanNew, np1));
+    imageStore(m2Dst, pix, vec4(m2New, 0.0));
+}

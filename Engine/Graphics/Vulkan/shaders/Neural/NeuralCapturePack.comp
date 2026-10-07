@@ -1,0 +1,56 @@
+#version 450 core
+// NeuralCapturePack.comp — M1 采集收尾：把 Welford 统计 + 特征打包成
+// 5 个 rgba32f 平面（每像素 20 f32，行主序），供一次性 CopyTextureToBuffer
+// → staging → 落盘。平面顺序（与 meta.json planes 一致）：
+//   0 gt_mean (rgb, a=n)  1 gt_var (rgb)  2 depth_raw (r)  3 normal (xyz)
+//   4 noisy_1spp (rgb)
+//
+// Flat bindings:
+//   0 = SampledImage  mean      (rgba16f, 最终槽)
+//   1 = SampledImage  m2        (rgba16f, 最终槽)
+//   2 = SampledImage  noisy_sample (rgba16f)
+//   3 = SampledDepthImage depth  (GBuffer 深度，原样导出，线性化在 python 侧)
+//   4 = SampledImage  normal    (GBuffer 法线，N*0.5+0.5 编码)
+//   5..9 = StorageImage rgba32f writeonly（导出平面，绑定到同一 staging
+//          拷贝链的 5 张过渡纹理）
+//   10 = UBO NeuralCaptureCB (32B)
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(set = 0, binding = 0) uniform texture2D inMean;
+layout(set = 0, binding = 1) uniform texture2D inM2;
+layout(set = 0, binding = 2) uniform texture2D inNoisy;
+layout(set = 0, binding = 3) uniform texture2D inDepth;
+layout(set = 0, binding = 4) uniform texture2D inNormal;
+layout(set = 0, binding = 5, rgba32f) writeonly uniform image2D outMean;
+layout(set = 0, binding = 6, rgba32f) writeonly uniform image2D outVar;
+layout(set = 0, binding = 7, rgba32f) writeonly uniform image2D outDepth;
+layout(set = 0, binding = 8, rgba32f) writeonly uniform image2D outNormal;
+layout(set = 0, binding = 9, rgba32f) writeonly uniform image2D outNoisy;
+
+layout(set = 0, binding = 10, std140) uniform NeuralCaptureCBUBO {
+    vec4 res_frame;
+    vec4 misc;
+} cb;
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(cb.res_frame.x) || pix.y >= int(cb.res_frame.y)) return;
+
+    vec4 mean = texelFetch(inMean, pix, 0);
+    vec3 m2 = texelFetch(inM2, pix, 0).rgb;
+    float n = max(cb.res_frame.w, 1.0);
+    vec3 var = max(m2 / n - mean.rgb * mean.rgb, vec3(0.0));
+
+    vec3 noisy = texelFetch(inNoisy, pix, 0).rgb;
+    float depth = texelFetch(inDepth, pix, 0).r;
+    vec3 nrm = clamp(texelFetch(inNormal, pix, 0).xyz * 2.0 - 1.0, vec3(-1.0), vec3(1.0));
+
+    imageStore(outMean, pix, vec4(mean.rgb, n));
+    imageStore(outVar, pix, vec4(var, 0.0));
+    imageStore(outDepth, pix, vec4(depth, 0.0, 0.0, 0.0));
+    imageStore(outNormal, pix, vec4(nrm, 0.0));
+    imageStore(outNoisy, pix, vec4(noisy, 0.0));
+}
