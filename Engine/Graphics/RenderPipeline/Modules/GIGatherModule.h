@@ -50,6 +50,8 @@ struct GIGatherInputs {
 };
 
 struct GIGatherOutputs {
+    // UNITS: Irradiance（GIGather 已 ×π——PROBE_SH_RAD_TO_IRRAD；消费端
+    // FusionIndirect 自行 ×albedo/π 得 Lo，见审计 §5 四量表）。
     rendergraph::RGResourceHandle gi_output_rg;
     rhi::ResourceHandle gi_output_tex;
     // T4.3: half-res glossy specular (RGB = SH(R) lobe radiance, A = NdotV).
@@ -60,7 +62,8 @@ struct GIGatherOutputs {
 class GIGatherModule {
 public:
     bool Initialize(rhi::RHIDeviceBase* device, rhi::ShaderHandle shader,
-                    u32 render_width, u32 render_height);
+                    u32 render_width, u32 render_height,
+                    rhi::ShaderHandle glossy_source_audit_shader = rhi::handles::INVALID_SHADER);
     void Shutdown();
 
     GIGatherOutputs AddPasses(rendergraph::RenderGraph& graph, const GIGatherInputs& inputs);
@@ -72,6 +75,56 @@ public:
     bool IsInitialized() const { return pipeline_ != rhi::handles::INVALID_PIPELINE; }
 
 private:
+    struct GatherAuditSource {
+        rhi::ResourceHandle staging{rhi::handles::INVALID_RESOURCE};
+        rhi::ResourceHandle resource{rhi::handles::INVALID_RESOURCE};
+        const char* name{nullptr};
+        const char* format{"f32"};
+        const char* layout{"unknown"};
+        const char* source_identity{""};
+        u32 binding{0xFFFFFFFFu};
+        u32 runtime_format{0};
+        u64 bytes{0};
+        u32 width{0}, height{0};
+    };
+    GatherAuditSource gather_audit_sources_[15]{};
+    u32 gather_audit_source_count_{10};
+    u32 gather_audit_ddgi_frame_{0},gather_audit_ray_mode_{0},gather_audit_rays_{0};
+    u32 gather_audit_frame_{0}, gather_audit_slot_{0};
+    bool gather_audit_queued_{false}, gather_audit_dumped_{false};
+    // The material audit is correlated with the imageView actually written to
+    // descriptor binding 13 (including the existing fallback chain).  Keep
+    // these values from the captured dispatch for the deferred metadata write.
+    rhi::ResourceHandle gather_audit_orm_resource_{rhi::handles::INVALID_RESOURCE};
+    rhi::DataFormat gather_audit_orm_runtime_format_{rhi::DataFormat::Unknown};
+    u32 gather_audit_orm_width_{0}, gather_audit_orm_height_{0};
+    bool gather_audit_orm_metadata_valid_{false};
+    bool gather_audit_orm_from_scene_{false};
+
+    // DDGI_GLOSSY_SOURCE_AUDIT=1 is a Vulkan-only diagnostic path.  The
+    // regular gather pipeline/layout and its 19 production bindings stay
+    // untouched; the source shader is dispatched into shadow textures with an
+    // auxiliary binding for the per-pixel source records.
+    rhi::PipelineHandle glossy_source_audit_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineLayoutHandle glossy_source_audit_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::DescriptorSetLayoutHandle glossy_source_audit_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetHandle glossy_source_audit_sets_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET};
+    rhi::ResourceHandle glossy_source_audit_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle glossy_source_audit_output_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle glossy_source_audit_specular_{rhi::handles::INVALID_RESOURCE};
+    u64 glossy_source_audit_bytes_{0};
+    rhi::ResourceHandle glossy_material_audit_buffer_[3]{
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
+    u64 glossy_material_audit_bytes_{0};
+    bool glossy_source_audit_enabled_{false};
     rhi::RHIDeviceBase* device_ = nullptr;
     u32 render_width_ = 0;
     u32 render_height_ = 0;

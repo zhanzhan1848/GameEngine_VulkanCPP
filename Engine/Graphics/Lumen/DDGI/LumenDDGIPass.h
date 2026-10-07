@@ -6,8 +6,10 @@
 #include "Graphics/Dawn/DawnDebugParams.h"
 #include "Graphics/Lumen/GIDebugParams.h"
 #include "Graphics/Lumen/GICacheView.h"
+#include "Graphics/Lumen/DDGISlotMap.h"
 #include "Graphics/RHI/Core/RHIReadbackRing.h"
 #include <vector>
+#include <memory>
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
@@ -21,6 +23,7 @@ namespace primal::graphics::lumen {
 
 // Forward declaration
 class StaticProbeVolume;
+struct DDGIShProducerAudit;
 
 // ============================================================================
 // DDGI Probe State (for importance-based partial update scheduling)
@@ -67,6 +70,9 @@ struct DDGICameraData {
     math::v3   light_direction;   // normalized world-space light direction
     math::v3   light_color;       // linear HDR light color
     u32        frame_index;
+    // GI-local startup clock. Unlike frame_index (absolute frame / readback
+    // ring identity), this starts at zero only after cards + SDF are ready.
+    u32        gi_frame_index = 0;
     float      delta_time;
     // Vulkan screen-hit validation. Missing depth rejects screen samples;
     // Surface Cache / world probes remain available as fallback.
@@ -168,11 +174,13 @@ struct DDGIRayData {
  */
 class LumenDDGIPass {
 public:
-    LumenDDGIPass() = default;
+    LumenDDGIPass();
     ~LumenDDGIPass();
 
     bool Initialize(rhi::RHIDeviceBase* device, const DDGIRuntimeParams& params = {});
     void Shutdown();
+    // Optional DUMP2-only producer readback after the frame has been submitted.
+    bool FlushSHProducerAudit(u32 absoluteFrame);
 
     LumenDDGIOutput AddPass(
         rendergraph::RenderGraph& graph,
@@ -184,8 +192,17 @@ public:
     bool IsInitialized() const { return initialized_; }
 
     // Accessors for probe data (for sampling in other passes)
+    // frame_idx = 绝对帧号（不是槽号）：内部经 DDGISlotMap.h 派生槽位。
+    // 调用端语义约定：读"最近完成帧"传 frame+2（previousIndex），GIGather
+    // 读"本帧 DDGI 完成后的数据"传 frame（currentIndex，RG 定序保证写先
+    // 于读）。裸传槽号已废除（Phase 1d）。
     rhi::ResourceHandle GetIrradianceBuffer(u32 frame_idx) const {
-        return irradiance_buffers_[frame_idx % 3];
+        return irradiance_buffers_[DDGISlotsForFrame(frame_idx).currentIndex];
+    }
+    // 槽位显式版（Phase 1d）：调用端先取 DDGISlotsForFrame(frame)，再把
+    // .previousIndex / .currentIndex 传入——读侧语义自证，禁止裸算槽号。
+    rhi::ResourceHandle GetIrradianceBufferBySlot(u32 slot) const {
+        return irradiance_buffers_[slot];
     }
 
     // A12/T0.10: zero the probe field (all 3 frame slots' irradiance + depth
@@ -195,11 +212,39 @@ public:
     // T4.1 (D8): reset convergence ages so ALL probes become high-priority
     // in the partial-update scheduler — used on scene/dirty-transform events.
     void BoostProbePriority();
+    // GI 能量所有权修复 Phase 5a（GIHistoryValidity 最小版）: 灯光修改事件 →
+    // BoostProbePriority + 事件驱动 TemporalAlpha 抬升窗（0.35，30 帧——
+    // 复用 PRIMAL_DDGI_ALPHA_HOLD 机制改为事件驱动）。
+    void NotifyLightingChanged(u32 frame) {
+        BoostProbePriority();
+        alpha_hold_until_frame_ = frame + 30u;
+    }
     rhi::ResourceHandle GetDepthBuffer(u32 frame_idx) const {
-        return depth_buffers_[frame_idx % 3];
+        return depth_buffers_[DDGISlotsForFrame(frame_idx).currentIndex];
+    }
+    // 槽位显式版（Phase 1d，语义同 GetIrradianceBufferBySlot）。
+    rhi::ResourceHandle GetDepthBufferBySlot(u32 slot) const {
+        return depth_buffers_[slot];
+    }
+    // Optional measurement provenance, paired with the SAME moments slot.
+    // 64 cells/probe,8 uint32/cell: H/E/X counts, observation stamp,
+    // last H/E/X/sample stamps. Stamps=UBO FrameIndex+1; zero=never.
+    rhi::ResourceHandle GetDepthProvenanceBufferBySlot(u32 slot) const {
+        return depth_provenance_buffers_[slot];
     }
     const DDGIRuntimeParams& GetParams() const { return params_; }
     const DDGIVolumeData& GetVolumeData() const { return volume_data_; }
+    // Read-only diagnostic source. Absolute frame clock, same slot as
+    // Finalize binding1; callers must copy to Readback and wait before Map.
+    rhi::ResourceHandle GetVolumeUniformBuffer(u32 frame) const {
+        return volume_cb_[DDGISlotsForFrame(frame).currentIndex];
+    }
+    // CPU scheduler diagnostic: a zero value also represents a probe that
+    // has not been selected since initialization. No GPU synchronization.
+    u32 GetProbeLastUpdateFrame(u32 probe_index) const {
+        return probe_index < probe_states_.size()
+            ? probe_states_[probe_index].last_update_frame : 0u;
+    }
     // First-class probe position buffer (float4 xyz = world pos, one per
     // probe, grid lattice order) — filled ONCE in Initialize, before the
     // render loop (the grid is static; UpdateProbeOrigin early-returns).
@@ -218,6 +263,129 @@ public:
     // fires per ray (DDGI_PATH_DEBUG build tags the path in the distance
     // fraction). Read-only handle; consumers stage-copy off the render queue.
     rhi::ResourceHandle GetRayDataBuffer() const { return ray_data_buffer_; }
+    // Same update-slot × ray indexing as DDGITraceFinalize's hit-normal input.
+    // Diagnostic consumers must stage-copy it after the trace has completed.
+    rhi::ResourceHandle GetHitNormalBuffer() const { return hit_normal_buffer_; }
+    // Optional Vulkan DDGI_FIRST_SURFACE=1 candidate.  Its geometry and audit
+    // buffers are deliberately independent of the existing hit-normal/source
+    // audit allocation, so the default 13-binding trace remains unchanged.
+    bool SetFirstSurfaceGeometry(const void* nodes, u64 nodeBytes,
+                                 const void* triangles, u64 triangleBytes);
+    bool IsFirstSurfaceEnabled() const { return first_surface_enabled_; }
+    rhi::ResourceHandle GetFirstSurfaceNodesBuffer() const {
+        return first_surface_nodes_buffer_;
+    }
+    rhi::ResourceHandle GetFirstSurfaceTrianglesBuffer() const {
+        return first_surface_triangles_buffer_;
+    }
+    rhi::ResourceHandle GetFirstSurfaceAuditBuffer() const {
+        return first_surface_audit_buffer_;
+    }
+    // Vulkan-only DDGI_FIRST_ZERO_CROSS=1 candidate.  It reuses the bounded
+    // first-surface BVH/audit buffers, but its TraceSDF module can replace a
+    // distance only for an incumbent signed zero crossing.  The default path
+    // and the full DDGI_FIRST_SURFACE candidate remain separate.
+    bool IsFirstZeroCrossRequested() const { return first_zero_cross_requested_; }
+    bool IsFirstZeroCrossEnabled() const { return first_zero_cross_enabled_; }
+    // Vulkan-only DDGI_FIRST_NATIVE_NORMAL=1 candidate.  The four geometry
+    // buffers and the normal texture/sampler are borrowed from the native
+    // GPUDrivenDraw path; only the original-triangle mapping and per-ray audit
+    // buffers are owned here.  This setter is deliberately separate from
+    // SetFirstSurfaceGeometry so a deferred Lumen rebuild can rebind the exact
+    // live native resources without changing the incumbent 13-binding trace.
+    bool SetFirstNativeNormalSources(
+        rhi::ResourceHandle positions,
+        rhi::ResourceHandle elements,
+        rhi::ResourceHandle instances,
+        rhi::ResourceHandle materials,
+        rhi::ResourceHandle normalTexture,
+        rhi::SamplerHandle normalSampler,
+        const void* triangleMapping,
+        u64 triangleMappingBytes);
+    bool IsFirstNativeNormalEnabled() const { return first_native_normal_enabled_; }
+    rhi::ResourceHandle GetFirstNativeNormalAuditBuffer() const {
+        return first_native_normal_audit_buffer_;
+    }
+    u64 GetFirstNativeNormalAuditBytes() const {
+        return first_native_normal_audit_bytes_;
+    }
+
+    // Vulkan-only analytic fallback rho candidate.  This is deliberately
+    // independent of DDGI_FIRST_SURFACE/FIRST_NATIVE_NORMAL: it reuses the
+    // same finalized hit ray, but only overrides the material rho for the
+    // existing analytic source-11/source-14 fallback.  Source handles are
+    // borrowed from GPUDrivenDraw; the pass owns the BVH/mapping/audit SSBOs.
+    bool SetAnalyticFirstRhoSources(
+        const void* nodes, u64 nodeBytes,
+        const void* triangles, u64 triangleBytes,
+        rhi::ResourceHandle positions,
+        rhi::ResourceHandle elements,
+        rhi::ResourceHandle instances,
+        rhi::ResourceHandle materials,
+        rhi::ResourceHandle albedoTexture,
+        rhi::SamplerHandle albedoSampler,
+        const void* triangleMapping, u64 triangleMappingBytes);
+    bool IsAnalyticFirstRhoRequested() const { return analytic_first_rho_requested_; }
+    bool IsAnalyticFirstRhoEnabled() const { return analytic_first_rho_enabled_; }
+    bool IsAnalyticFirstRhoApplied() const { return analytic_first_rho_apply_; }
+    bool IsAnalyticFirstPositionApplied() const { return analytic_first_position_apply_; }
+    rhi::ResourceHandle GetAnalyticFirstRhoNodesBuffer() const {
+        return analytic_first_rho_nodes_buffer_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoTrianglesBuffer() const {
+        return analytic_first_rho_triangles_buffer_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoMappingBuffer() const {
+        return analytic_first_rho_mapping_buffer_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoAuditBuffer() const {
+        return analytic_first_rho_audit_buffer_;
+    }
+    u64 GetAnalyticFirstRhoAuditBytes() const {
+        return analytic_first_rho_audit_bytes_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoPositions() const {
+        return analytic_first_rho_positions_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoElements() const {
+        return analytic_first_rho_elements_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoInstances() const {
+        return analytic_first_rho_instances_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoMaterials() const {
+        return analytic_first_rho_materials_;
+    }
+    rhi::ResourceHandle GetAnalyticFirstRhoAlbedoTexture() const {
+        return analytic_first_rho_albedo_texture_;
+    }
+    rhi::SamplerHandle GetAnalyticFirstRhoAlbedoSampler() const {
+        return analytic_first_rho_albedo_sampler_;
+    }
+    rhi::ResourceHandle GetFirstNativeNormalTriangleMappingBuffer() const {
+        return first_native_normal_triangle_mapping_buffer_;
+    }
+    rhi::ResourceHandle GetFirstNativeNormalPositions() const {
+        return first_native_normal_positions_;
+    }
+    rhi::ResourceHandle GetFirstNativeNormalElements() const {
+        return first_native_normal_elements_;
+    }
+    rhi::ResourceHandle GetFirstNativeNormalInstances() const {
+        return first_native_normal_instances_;
+    }
+    rhi::ResourceHandle GetFirstNativeNormalMaterials() const {
+        return first_native_normal_materials_;
+    }
+    rhi::ResourceHandle GetFirstNativeNormalTexture() const {
+        return first_native_normal_texture_;
+    }
+    rhi::SamplerHandle GetFirstNativeNormalSampler() const {
+        return first_native_normal_sampler_;
+    }
+    // Vulkan-only DDGI_QUERY_SOURCE_AUDIT=1.  This is a read-only diagnostic
+    // tail appended after the existing 9N hit-normal/source-audit records.
+    bool IsQuerySourceAuditEnabled() const { return query_source_audit_enabled_; }
     // 诊断：hit_distance_buffer 直读（ray0/1 被 ddgi_trace_sdf 写入
     // 探针原点/重定位后的原始 SDF 距离——级联外为 5555 哨兵）。
     rhi::ResourceHandle GetHitDistanceBuffer() const { return hit_distance_buffer_; }
@@ -243,10 +411,12 @@ public:
 
     // X2/A3: 统一 Cache View —— 消费者（SPGI 回退、GIGather 远场）从这里取
     // volume 数据快照，不再逐个摸 pass 内部 getter。irradiance 取
-    // frame_idx % 3 槽位；origin/counts/spacing 与旧上传字段逐一对应。
+    // frame_idx 派生槽位（DDGISlotMap.h，语义见 GetIrradianceBuffer）；
+    // origin/counts/spacing 与旧上传字段逐一对应。
     DDGIVolumeView GetVolumeView(u32 frame_idx) const {
         DDGIVolumeView view;
-        view.irradiance = irradiance_buffers_[frame_idx % 3];
+        view.irradiance = irradiance_buffers_[DDGISlotsForFrame(frame_idx).currentIndex];
+        view.depth = depth_buffers_[DDGISlotsForFrame(frame_idx).currentIndex];
         view.origin = math::v3{ volume_data_.ProbeOrigin.x,
                                 volume_data_.ProbeOrigin.y,
                                 volume_data_.ProbeOrigin.z };
@@ -262,6 +432,24 @@ public:
 
     // GI 能量根治方案 Phase 3.2: SC 卡片 texel gather 的天空分类数据源。
     rhi::ResourceHandle GetOpenSkyBuffer() const { return opensky_buffer_; }
+
+    // 槽位显式版（Phase 1d）：与 GetVolumeView 相同，irradiance 槽由调用端
+    // 传入 DDGISlotsForFrame(frame) 的具名槽（previousIndex/currentIndex）。
+    DDGIVolumeView GetVolumeViewBySlot(u32 slot) const {
+        DDGIVolumeView view;
+        view.irradiance = irradiance_buffers_[slot];
+        view.depth = depth_buffers_[slot];
+        view.origin = math::v3{ volume_data_.ProbeOrigin.x,
+                                volume_data_.ProbeOrigin.y,
+                                volume_data_.ProbeOrigin.z };
+        view.counts = math::v3{ static_cast<float>(params_.probe_count_x),
+                                static_cast<float>(params_.probe_count_y),
+                                static_cast<float>(params_.probe_count_z) };
+        view.spacing = params_.probe_spacing;
+        view.relocated_origins = relocated_origins_;
+        view.opensky = opensky_buffer_;
+        return view;
+    }
 
     // X2/A3: 时域策略映射 —— EMA 即现有 irradiance/depth EMA（默认，行为
     // 不变）；EMAVarianceClamp/Reprojection 暂等同 EMA（TODO X3 落地完整实现）。
@@ -282,7 +470,7 @@ public:
 
     // Accessors for Surface Cache → DDGI integration
     rhi::ResourceHandle GetProbeUpdateListBuffer(u32 frame_idx = 0) const {
-        return probe_update_list_buffers_[frame_idx % 3];
+        return probe_update_list_buffers_[DDGISlotsForFrame(frame_idx).writeIndex];
     }
 
     // Update probe origin to follow camera (grid-snapped).
@@ -314,6 +502,7 @@ public:
     // 零穿越命中判定（sign change + 5 次二分），根治无符号场 thin-wall
     // tunneling（R6/T8.10f 正解的运行时半）。
     void SetCoarseSdfSigned(bool s) { coarse_sdf_signed_ = s; }
+    void SetOfflineHitEvidence(u32 mode) { offline_hit_evidence_ = std::min(mode,3u); }
 
     // Live-tunable debug params (WASM sidebar). Indices 4..6 of DawnDebugParams
     // map to SkyColor intensity, Albedo intensity, ProbeHysteresis. Values are
@@ -453,11 +642,37 @@ private:
     // Compute pipelines (3 sub-passes)
     rhi::PipelineHandle trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle irradiance_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    std::unique_ptr<DDGIShProducerAudit> sh_producer_audit_;
     rhi::PipelineHandle depth_pipeline_{ rhi::handles::INVALID_PIPELINE };
 
     // Split trace pipelines (Apple Silicon: separate texture3D from buffer reads)
     rhi::PipelineHandle sdf_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
     rhi::PipelineHandle finalize_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    // Vulkan-only first-surface variant.  It has a separate descriptor layout
+    // because the incumbent DDGITraceSDF contract remains 13 bindings.
+    rhi::PipelineHandle first_surface_sdf_trace_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::ShaderHandle first_surface_sdf_trace_shader_{ rhi::handles::INVALID_SHADER };
+    // Vulkan-only zero-cross distance child.  It shares the 16-binding
+    // first-surface descriptor contract, but has an independent SPIR-V module
+    // and pipeline so the incumbent FIRST_SURFACE path is not mutated.
+    rhi::PipelineHandle first_zero_cross_sdf_trace_pipeline_{
+        rhi::handles::INVALID_PIPELINE };
+    rhi::ShaderHandle first_zero_cross_sdf_trace_shader_{
+        rhi::handles::INVALID_SHADER };
+    // Vulkan-only native first-hit normal candidate.  It extends the
+    // first-surface descriptor contract to bindings 16..23 and is never
+    // selected when the exact opt-in flag is absent.
+    rhi::PipelineHandle first_native_normal_sdf_trace_pipeline_{
+        rhi::handles::INVALID_PIPELINE };
+    rhi::ShaderHandle first_native_normal_sdf_trace_shader_{
+        rhi::handles::INVALID_SHADER };
+    // Vulkan-only analytic fallback rho variant.  The incumbent Finalize
+    // module/layout remain untouched; this variant is created only when the
+    // exact candidate flag or diagnostic prefix is present.
+    rhi::PipelineHandle analytic_first_rho_finalize_pipeline_{
+        rhi::handles::INVALID_PIPELINE };
+    rhi::ShaderHandle analytic_first_rho_finalize_shader_{
+        rhi::handles::INVALID_SHADER };
 
     // Pipeline layouts
     rhi::PipelineLayoutHandle trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
@@ -465,6 +680,11 @@ private:
     rhi::PipelineLayoutHandle depth_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle sdf_trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::PipelineLayoutHandle finalize_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle first_surface_sdf_trace_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle first_native_normal_sdf_trace_layout_{
+        rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle analytic_first_rho_finalize_layout_{
+        rhi::handles::INVALID_PIPELINE_LAYOUT };
 
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
@@ -472,6 +692,12 @@ private:
     rhi::DescriptorSetLayoutHandle depth_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle sdf_trace_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     rhi::DescriptorSetLayoutHandle finalize_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle first_surface_sdf_trace_set_layout_{
+        rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle first_native_normal_sdf_trace_set_layout_{
+        rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle analytic_first_rho_finalize_set_layout_{
+        rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
 
     // Descriptor sets (triple-buffered)
     rhi::DescriptorSetHandle trace_ds_[3]{
@@ -486,8 +712,20 @@ private:
     rhi::DescriptorSetHandle sdf_trace_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
     };
+    rhi::DescriptorSetHandle first_surface_sdf_trace_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle first_native_normal_sdf_trace_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET
+    };
     rhi::DescriptorSetHandle finalize_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET
+    };
+    rhi::DescriptorSetHandle analytic_first_rho_finalize_ds_[3]{
+        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+        rhi::handles::INVALID_DESCRIPTOR_SET
     };
 
     // Constant buffers (triple-buffered)
@@ -499,6 +737,8 @@ private:
     };
 
     // Probe irradiance buffers (persistent, triple-buffered for history)
+    // UNITS: Radiance-SH（9×float4 per probe，radiance 投影，mcWeight=4π/N；
+    // 消费端评基单源 EvalLib.glsl——评出 E/π 后须 ×π 才是 E，见审计文档 §5）。
     // Concurrency contract (audited 2026-09-10): with outIdx = frame % 3 and
     // histIdx = (frame + 2) % 3, frame N writes slot N%3 while frames N-1/N-2
     // read slots (N-1)%3/(N-2)%3 and frame N-2 reads slot N%3 as history.
@@ -514,8 +754,14 @@ private:
     rhi::ResourceHandle depth_buffers_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+    bool depth_provenance_enabled_{false}; // Vulkan diagnostic, allocation latched.
+    rhi::ResourceHandle depth_provenance_buffers_[3]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
+    };
 
     // Ray data storage buffer (single, reused each frame)
+    // UNITS: Radiance（逐射线命中 radiance L；SC 采样/prev-screen/解析回退
+    // 三源在此汇合——三者均为 radiance 量纲，直用合法，见审计文档 §5 铁律 2）。
     rhi::ResourceHandle ray_data_buffer_{ rhi::handles::INVALID_RESOURCE };
 
     // Hit distance buffer (intermediate between split trace dispatches)
@@ -523,6 +769,72 @@ private:
 
     // T4.3: per-ray refined hit normals (xyz, w>0.5 = valid), written by the
     // split SDF trace (zeros when no detail slots), consumed by finalize.
+    bool analytic_audit_enabled_{false}; // Latched with allocation; never enable an unallocated tail.
+    // Vulkan-only DDGI_RAY_SOURCE_AUDIT=1.  When latched this also enables the
+    // existing analytic audit records; the source records live after the
+    // unchanged 5*full-ray-capacity normal/analytic region.
+    bool ray_source_audit_enabled_{false};
+    // Vulkan-only card-query source audit.  Allocation is latched together
+    // with ray_source_audit_enabled_; the extra 18N records are appended after
+    // the unchanged N/5N/9N regions and are never bound in the default path.
+    bool query_source_audit_enabled_{false};
+    bool material_projection_enabled_{false}; // Vulkan evidence experiment, allocation-latched.
+    bool first_surface_requested_{false};
+    bool first_surface_enabled_{false};
+    bool first_zero_cross_requested_{false};
+    bool first_zero_cross_enabled_{false};
+    bool first_native_normal_requested_{false};
+    bool first_native_normal_enabled_{false};
+    rhi::ResourceHandle first_surface_nodes_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle first_surface_triangles_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // Three vec4 records per full-capacity ray: old/new/first+status,
+    // triangle/flags/residual/frame+probe stamp, GPU barycentric+ray id.
+    rhi::ResourceHandle first_surface_audit_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // Borrowed native sources.  These are refreshed by the pipeline when the
+    // current scene's GPUDrivenDraw resources are ready and are never destroyed
+    // by this pass.
+    rhi::ResourceHandle first_native_normal_positions_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle first_native_normal_elements_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle first_native_normal_instances_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle first_native_normal_materials_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle first_native_normal_texture_{ rhi::handles::INVALID_RESOURCE };
+    rhi::SamplerHandle first_native_normal_sampler_{ rhi::handles::INVALID_SAMPLER };
+    rhi::ResourceHandle first_native_normal_triangle_mapping_buffer_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle first_native_normal_audit_buffer_{
+        rhi::handles::INVALID_RESOURCE };
+    u64 first_native_normal_audit_bytes_{ 0 };
+    // Candidate request is latched before descriptor creation.  A nonempty
+    // PREFIX creates/binds the exact module with application disabled, which
+    // gives the control run the same descriptor/variant proof.
+    bool analytic_first_rho_requested_{false};
+    bool analytic_first_rho_enabled_{false};
+    bool analytic_first_rho_apply_{false};
+    bool analytic_first_position_apply_{false};
+    bool analytic_first_rho_audit_{false};
+    bool analytic_sc_first_audit_{false};
+    bool analytic_first_rho_prefix_{false};
+    rhi::ResourceHandle analytic_first_rho_nodes_buffer_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle analytic_first_rho_triangles_buffer_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle analytic_first_rho_mapping_buffer_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle analytic_first_rho_audit_buffer_{
+        rhi::handles::INVALID_RESOURCE };
+    u64 analytic_first_rho_audit_bytes_{0};
+    rhi::ResourceHandle analytic_first_rho_positions_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle analytic_first_rho_elements_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle analytic_first_rho_instances_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle analytic_first_rho_materials_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle analytic_first_rho_albedo_texture_{
+        rhi::handles::INVALID_RESOURCE };
+    rhi::SamplerHandle analytic_first_rho_albedo_sampler_{
+        rhi::handles::INVALID_SAMPLER };
     rhi::ResourceHandle hit_normal_buffer_{
         rhi::handles::INVALID_RESOURCE
     };
@@ -554,6 +866,8 @@ private:
     // M2: probe-light override (light-response half-life gate).
     math::v4 probe_light_override_{};
     bool probe_light_override_active_{ false };
+    // Phase 5a: 事件驱动的年轻档 α 窗（灯光修改后 30 帧 TemporalAlpha=0.35）。
+    u32 alpha_hold_until_frame_{ 0 };
 
     // Finalize screen-space sampling: current/radiance VP, inverse matrices
     // and depth validity (272B per slot). Metal reads the leading current VP.
@@ -631,6 +945,7 @@ private:
 
     // Offline SDF data source (replaces GlobalSDF cascades when active)
     bool                has_offline_sdf_{ false };
+    u32                 offline_hit_evidence_{0}; // Vulkan split trace only, explicit RG16F contract
     rhi::ResourceHandle offline_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
     math::v3            offline_sdf_origin_{ 0, 0, 0 };
     math::v3            offline_sdf_extent_{ 0, 0, 0 };

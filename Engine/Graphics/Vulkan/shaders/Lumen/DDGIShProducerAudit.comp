@@ -1,0 +1,961 @@
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+// DDGIShProducerAudit.comp — private read-only shadow/compare copy of the
+// production DDGIUpdateIrradiance arithmetic.  The host binds private clones
+// at bindings 4, 6, 7; no production resource is written by this shader.
+// Entrypoints are selected by the source-main recipe:
+//   ddgi_sh_producer_shadow / ddgi_sh_producer_compare
+//
+// Projects ray radiance into SH9 (9 coeffs/probe) and blends temporally
+// with a history buffer using a hysteresis EMA.
+//
+// Why GLSL (not naga-compiled WGSL): the WGSL DDGIVolumeData uniform struct
+// contains array<vec4<f32>, 3> fields (SdfOrigins/VoxelSizes/Extents). naga
+// emits these as spvUnsafeArray, which MoltenVK cannot consume inside a uniform
+// struct. GLSL std140 handles vec4[3] natively. Same pattern as SSAOTrace.comp
+// and DDGIGIGather.comp.
+//
+// Flat descriptor bindings 0..7 retain the production layout.  Bindings 8..14
+// are private persistent audit/read-only production resources supplied by the
+// diagnostic host.
+//   binding 0 = UniformBuffer        GlobalShaderData
+//   binding 1 = UniformBuffer        DDGIVolumeData
+//   binding 2 = StorageBuffer (ro)   ray_buffer
+//   binding 3 = StorageBuffer (ro)   irradiance_history
+//   binding 4 = StorageBuffer (rw)   irradiance_output
+//   binding 5 = StorageBuffer (ro)   probe_update_list
+//   binding 6 = StorageBuffer (rw)   private probe confidence (4 floats/probe)
+//   binding 7 = StorageBuffer (rw)   private openSky (vec2/probe)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ----------------------------------------------------------------------------
+// Bindings (flat — see header)
+// ----------------------------------------------------------------------------
+
+// GlobalShaderData UBO — mirrors C++ RHIShaderCommon.h / WGSL GlobalShaderData.
+layout(set = 0, binding = 0, std140) uniform GlobalShaderData {
+    mat4 View;
+    mat4 Projection;
+    mat4 InvProjection;
+    mat4 ViewProjection;
+    mat4 PreviousViewProjection;
+    mat4 InvViewProjection;
+    vec4 CameraPositionAndViewWidth;
+    vec4 CameraDirectionAndViewHeight;
+    uint NumDirectionalLights;
+    float DeltaTime;
+    float FrameCount;
+    uint  _padding;
+} globalData;
+
+// DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h.
+// Keep every original offset and include SkyColor/Albedo because Albedo.w is
+// the actual-source latch for this diagnostic.
+layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88  (Surface Cache card lookup count)
+    uint  SCAtlasSize;              //  92  (Surface Cache lighting atlas size)
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    int   RaySampleMode;            // 108 — ray sampler mode (ProbeSampleLib)
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+    vec4  SkyColor;                 // 304
+    vec4  Albedo;                   // 320: w = actual-source flag
+} volume;
+
+// DDGIRayData — storage buffer element. Packed as vec4 (16B stride).
+struct DDGIRayData {
+    vec4 radiance_and_dist;  // xyz = radiance, w = hit_distance
+};
+
+layout(set = 0, binding = 2) readonly buffer RayBuffer {
+    DDGIRayData ray_buffer[];
+};
+// Packed float[] layout: 9 coeffs/probe * 3 floats/coeff = 27 floats/probe
+// (12-byte stride). Declaring this as vec3[] would silently use 16-byte stride
+// under std140/std430 rules for vec3 arrays.
+// Packed as vec4[] (16B stride per coeff) — matches GIGather's declaration.
+// Each coeff: xyz = SH coefficient (RGB), w = unused.
+layout(set = 0, binding = 3) readonly buffer IrradianceHistory {
+    vec4 irradiance_history[];
+};
+layout(set = 0, binding = 4) buffer IrradianceOutput {
+    vec4 irradiance_output[];
+};
+layout(set = 0, binding = 5) readonly buffer ProbeUpdateList {
+    uint probe_update_list[];
+};
+layout(set = 0, binding = 6) buffer ConfidenceBuffer {
+    float probe_confidence[];
+};
+// GI 根治 Phase 3.1 + 能量所有权 Phase 4a（openSky V2）: 每探针 openSky
+// 统计，vec2 = {escapeRatio, skyEnergyRatio}。
+//   x = escapeRatio——逃逸射线占比 EMA（原 float 语义，原样保留）；
+//   y = skyEnergyRatio——逃逸射线能量占总能量的比值 EMA（P3 拆分用：
+//       E = E_geo + classify·E_sky 的 sER 分量）。
+// gather 端（DDGIGIGather / SurfaceCacheLightEval）据此把 sky-dominant 探针
+// 的**天空分量**按分类一致度衰减（V2）——露天探针携带的几何反弹不再被
+// 整探针压暗（审计 §2.5：旧整探针分类最多 ×0.15 属过度衰减）。
+layout(set = 0, binding = 7) buffer ProbeOpenSky {
+    vec2 probe_opensky[];
+};
+
+// Private persistent audit planes.  Bindings 4/6/7 remain writable only into
+// host-owned clone buffers; these two planes are the diagnostic's own state.
+layout(set = 0, binding = 8, std430) buffer ProbeAuditBuf {
+    vec4 probe_audit[];
+} probe_audit_buf;
+
+layout(set = 0, binding = 9, std430) buffer RayAuditBuf {
+    vec4 ray_audit[];
+} ray_audit_buf;
+
+layout(set = 0, binding = 10, std430) readonly buffer RelocatedOriginsBuf {
+    vec4 relocated_origins[];
+} relocated_origins_buf;
+
+layout(set = 0, binding = 11, std430) readonly buffer ActualHitNormalBuf {
+    vec4 actual_hn[];
+} actual_hn_buf;
+
+layout(set = 0, binding = 12, std430) readonly buffer ActualProductionSHBuf {
+    vec4 actual_production_sh[];
+} actual_production_sh_buf;
+
+layout(set = 0, binding = 13, std430) readonly buffer ActualProductionConfidenceBuf {
+    float actual_production_confidence[];
+} actual_production_confidence_buf;
+
+layout(set = 0, binding = 14, std430) readonly buffer ActualProductionOpenSkyBuf {
+    vec2 actual_production_opensky[];
+} actual_production_opensky_buf;
+
+// ----------------------------------------------------------------------------
+// Shared probe ray sampler — single source with the trace shaders. The SH
+// projection MUST map rayIndex→direction identically to DDGITraceRays/SDF or
+// the coefficients desynchronize from the traced radiance. pdf-correct:
+// importance-sampled modes divide the MC weight by the sampler's pdf.
+// ----------------------------------------------------------------------------
+#include "ShaderLib/ProbeSampleLib.glsl"
+
+// ----------------------------------------------------------------------------
+// Constants
+// ----------------------------------------------------------------------------
+// GI 能量根治方案 Phase 1.2：DDGI_SKY_COLOR 常量已删除（R2 根因）。逃逸射线
+// 的天空能量由 Finalize 的 EvaluateSkyBase(rayDir) × volume.SkyColor.xyz 单一
+// 事实源写入 ray_buffer，本 kernel 直接沿用——SkyColor 档位旋钮恢复效力，
+// 逃逸注入与可见天空/SPGI 门控同源。（旧常量 (2.75,2.88,3.00) 是全天空档，
+// 绕过 Finalize 已做的 SkyColor 门控，注释自称"0.3 档"实为 10× 过驱。）
+
+const float DDGI_SH_C0   = 0.282095;
+const float DDGI_SH_C1   = 0.488603;
+const float DDGI_SH_C2_0 = 1.092548;
+const float DDGI_SH_C2_1 = 0.315392;
+const float DDGI_SH_C2_2 = 0.546274;
+
+const uint DDGI_SH_PRODUCER_RAYS = 128u;
+const uint DDGI_SH_PRODUCER_HISTORY_STRIDE = 9u;
+const uint DDGI_SH_PRODUCER_CONFIDENCE_STRIDE = 4u;
+const uint DDGI_SH_PRODUCER_PROBE_AUDIT_STRIDE = 80u;
+const uint DDGI_SH_PRODUCER_RAY_AUDIT_STRIDE = 10u;
+const uint DDGI_SH_PRODUCER_HN_STRIDE = 27u;
+const uint DDGI_SH_PRODUCER_SOURCE_BASE = 5u;
+const uint DDGI_SH_PRODUCER_AUDIT_SOURCE_FLAG = 1u;
+
+bool shProducerFinite(float value) {
+    return !isnan(value) && !isinf(value);
+}
+
+bool shProducerFiniteVec2(vec2 value) {
+    return shProducerFinite(value.x) && shProducerFinite(value.y);
+}
+
+bool shProducerFiniteVec3(vec3 value) {
+    return shProducerFinite(value.x) && shProducerFinite(value.y) &&
+           shProducerFinite(value.z);
+}
+
+bool shProducerFiniteVec4(vec4 value) {
+    return shProducerFinite(value.x) && shProducerFinite(value.y) &&
+           shProducerFinite(value.z) && shProducerFinite(value.w);
+}
+
+bool shProducerSameFloatBits(float a, float b) {
+    return floatBitsToUint(a) == floatBitsToUint(b);
+}
+
+bool shProducerSameVec2Bits(vec2 a, vec2 b) {
+    return shProducerSameFloatBits(a.x, b.x) &&
+           shProducerSameFloatBits(a.y, b.y);
+}
+
+bool shProducerMulU32(uint a, uint b, out uint result) {
+    if (a != 0u && b > 0xffffffffu / a) {
+        result = 0u;
+        return false;
+    }
+    result = a * b;
+    return true;
+}
+
+bool shProducerAddU32(uint a, uint b, out uint result) {
+    if (b > 0xffffffffu - a) {
+        result = 0u;
+        return false;
+    }
+    result = a + b;
+    return true;
+}
+
+bool shProducerRangeFits(uint base, uint count, uint length) {
+    return base <= length && count <= length - base;
+}
+
+bool shProducerFiniteInteger(float value, out uint result) {
+    if (!shProducerFinite(value) || value < 0.0 || value != floor(value)) {
+        result = 0xffffffffu;
+        return false;
+    }
+    result = uint(value);
+    if (float(result) != value) {
+        result = 0xffffffffu;
+        return false;
+    }
+    return true;
+}
+
+vec4 shProducerUvec4Bits(uvec4 value) {
+    return uintBitsToFloat(value);
+}
+
+void shProducerClearProbeAudit(uint base) {
+    for (uint i = 0u; i < DDGI_SH_PRODUCER_PROBE_AUDIT_STRIDE; ++i)
+        probe_audit_buf.probe_audit[base + i] = vec4(0.0);
+}
+
+void shProducerClearRayAudit(uint base) {
+    for (uint i = 0u; i < DDGI_SH_PRODUCER_RAYS * DDGI_SH_PRODUCER_RAY_AUDIT_STRIDE; ++i)
+        ray_audit_buf.ray_audit[base + i] = vec4(0.0);
+}
+
+void shProducerWriteFailedAttempt(uint probeBase, uint rayBase,
+                                  vec4 previousAudit0, vec4 audit79Value,
+                                  uint gid,
+                                  uint probeIdx) {
+    shProducerClearProbeAudit(probeBase);
+    shProducerClearRayAudit(rayBase);
+    probe_audit_buf.probe_audit[probeBase + 0u] = vec4(
+        uintBitsToFloat(volume.FrameIndex), uintBitsToFloat(probeIdx),
+        uintBitsToFloat(gid), uintBitsToFloat(volume.RaysPerProbe));
+    // Index 68 is the shadow-complete gate.  Leave it zero on every failed
+    // source/shape/arithmetic attempt so stale compare data cannot survive.
+    probe_audit_buf.probe_audit[probeBase + 68u] = vec4(0.0);
+    probe_audit_buf.probe_audit[probeBase + 79u] = audit79Value;
+}
+
+void shProducerWriteVolumeEcho(uint base) {
+    // These 21 vec4s are a raw 336-byte UBO echo.  Integer lanes are copied
+    // through uintBitsToFloat so padding and bit patterns stay untouched.
+    probe_audit_buf.probe_audit[base + 47u] = volume.ProbeOrigin;
+    probe_audit_buf.probe_audit[base + 48u] = vec4(
+        volume.ProbeSpacing, volume._pad_before_counts_0,
+        volume._pad_before_counts_1, volume._pad_before_counts_2);
+    probe_audit_buf.probe_audit[base + 49u] = shProducerUvec4Bits(volume.ProbeCounts);
+    probe_audit_buf.probe_audit[base + 50u] = vec4(
+        uintBitsToFloat(volume.RaysPerProbe),
+        uintBitsToFloat(volume.ProbeCountTotal),
+        volume.IrradianceBlurSigma, volume.DepthBlurSigma);
+    probe_audit_buf.probe_audit[base + 51u] = vec4(
+        volume.DeltaTime, uintBitsToFloat(volume.FrameIndex),
+        volume.RayMaxDistance, volume.ProbeHysteresis);
+    probe_audit_buf.probe_audit[base + 52u] = vec4(
+        volume.TemporalAlpha, uintBitsToFloat(volume.ProbeUpdateCount),
+        uintBitsToFloat(volume.SCLookupCount), uintBitsToFloat(volume.SCAtlasSize));
+    probe_audit_buf.probe_audit[base + 53u] = vec4(
+        intBitsToFloat(volume.ProbeRelocationShiftX),
+        intBitsToFloat(volume.ProbeRelocationShiftY),
+        intBitsToFloat(volume.ProbeRelocationShiftZ),
+        intBitsToFloat(volume.RaySampleMode));
+    probe_audit_buf.probe_audit[base + 54u] = volume.SdfOrigins[0];
+    probe_audit_buf.probe_audit[base + 55u] = volume.SdfOrigins[1];
+    probe_audit_buf.probe_audit[base + 56u] = volume.SdfOrigins[2];
+    probe_audit_buf.probe_audit[base + 57u] = volume.SdfVoxelSizes[0];
+    probe_audit_buf.probe_audit[base + 58u] = volume.SdfVoxelSizes[1];
+    probe_audit_buf.probe_audit[base + 59u] = volume.SdfVoxelSizes[2];
+    probe_audit_buf.probe_audit[base + 60u] = volume.SdfExtents[0];
+    probe_audit_buf.probe_audit[base + 61u] = volume.SdfExtents[1];
+    probe_audit_buf.probe_audit[base + 62u] = volume.SdfExtents[2];
+    probe_audit_buf.probe_audit[base + 63u] = shProducerUvec4Bits(volume.SdfResolutionsAndCount);
+    probe_audit_buf.probe_audit[base + 64u] = volume.LightDirection;
+    probe_audit_buf.probe_audit[base + 65u] = volume.LightColor;
+    probe_audit_buf.probe_audit[base + 66u] = volume.SkyColor;
+    probe_audit_buf.probe_audit[base + 67u] = volume.Albedo;
+}
+
+bool shProducerVolumeShape(out uint totalRays, out uint historyCount,
+                           out uint confidenceCount, out uint probeAuditCount,
+                           out uint rayAuditCount, out uint hnCount) {
+    totalRays = 0u;
+    historyCount = 0u;
+    confidenceCount = 0u;
+    probeAuditCount = 0u;
+    rayAuditCount = 0u;
+    hnCount = 0u;
+    if (volume.ProbeCounts.x == 0u || volume.ProbeCounts.y == 0u ||
+        volume.ProbeCounts.z == 0u || volume.ProbeCountTotal == 0u ||
+        volume.RaysPerProbe != DDGI_SH_PRODUCER_RAYS ||
+        volume.ProbeUpdateCount > volume.ProbeCountTotal ||
+        volume.Albedo.w != 1.0 ||
+        !shProducerFiniteVec4(volume.ProbeOrigin) ||
+        !shProducerFinite(volume.ProbeSpacing) || volume.ProbeSpacing <= 0.0 ||
+        !shProducerFinite(volume.RayMaxDistance) || volume.RayMaxDistance <= 0.0 ||
+        !shProducerFinite(volume.TemporalAlpha) ||
+        !shProducerFiniteVec4(volume.LightDirection) ||
+        !shProducerFiniteVec4(volume.LightColor) ||
+        !shProducerFiniteVec4(volume.SkyColor) ||
+        !shProducerFiniteVec4(volume.Albedo) ||
+        !shProducerFiniteVec4(volume.SdfVoxelSizes[0]) ||
+        !shProducerFinite(volume._pad_before_counts_0) ||
+        !shProducerFinite(volume._pad_before_counts_1) ||
+        !shProducerFinite(volume._pad_before_counts_2) ||
+        !shProducerFinite(volume.IrradianceBlurSigma) ||
+        !shProducerFinite(volume.DepthBlurSigma) ||
+        !shProducerFinite(volume.DeltaTime) ||
+        !shProducerFinite(volume.ProbeHysteresis) ||
+        volume.RaySampleMode < DDGI_RAY_SAMPLE_UNIFORM ||
+        volume.RaySampleMode > DDGI_RAY_SAMPLE_DEPTH_ONLY ||
+        volume.SdfVoxelSizes[0].x <= 0.0)
+        return false;
+
+    for (uint i = 0u; i < 3u; ++i) {
+        if (!shProducerFiniteVec4(volume.SdfOrigins[i]) ||
+            !shProducerFiniteVec4(volume.SdfVoxelSizes[i]) ||
+            !shProducerFiniteVec4(volume.SdfExtents[i]))
+            return false;
+    }
+
+    uint xy = 0u;
+    uint probeProduct = 0u;
+    if (!shProducerMulU32(volume.ProbeCounts.x, volume.ProbeCounts.y, xy) ||
+        !shProducerMulU32(xy, volume.ProbeCounts.z, probeProduct) ||
+        probeProduct != volume.ProbeCountTotal ||
+        !shProducerMulU32(volume.ProbeCountTotal, DDGI_SH_PRODUCER_RAYS,
+                          totalRays) ||
+        !shProducerMulU32(volume.ProbeCountTotal, DDGI_SH_PRODUCER_HISTORY_STRIDE,
+                          historyCount) ||
+        !shProducerMulU32(volume.ProbeCountTotal, DDGI_SH_PRODUCER_CONFIDENCE_STRIDE,
+                          confidenceCount) ||
+        !shProducerMulU32(volume.ProbeCountTotal,
+                          DDGI_SH_PRODUCER_PROBE_AUDIT_STRIDE,
+                          probeAuditCount) ||
+        !shProducerMulU32(totalRays, DDGI_SH_PRODUCER_RAY_AUDIT_STRIDE,
+                          rayAuditCount) ||
+        !shProducerMulU32(totalRays, DDGI_SH_PRODUCER_HN_STRIDE, hnCount))
+        return false;
+
+    return ray_buffer.length() == totalRays &&
+           irradiance_history.length() == historyCount &&
+           irradiance_output.length() == historyCount &&
+           probe_update_list.length() >= volume.ProbeUpdateCount &&
+           probe_confidence.length() == confidenceCount &&
+           probe_opensky.length() == volume.ProbeCountTotal &&
+           probe_audit_buf.probe_audit.length() == probeAuditCount &&
+           ray_audit_buf.ray_audit.length() == rayAuditCount &&
+           relocated_origins_buf.relocated_origins.length() == volume.ProbeCountTotal &&
+           actual_hn_buf.actual_hn.length() == hnCount &&
+           actual_production_sh_buf.actual_production_sh.length() == historyCount &&
+           actual_production_confidence_buf.actual_production_confidence.length() == confidenceCount &&
+           actual_production_opensky_buf.actual_production_opensky.length() == volume.ProbeCountTotal;
+}
+
+// ----------------------------------------------------------------------------
+// Main kernel body.  `compareMode` selects only the post-production readback;
+// the shadow arithmetic and private clone writes are identical in both modes.
+// ----------------------------------------------------------------------------
+void shProducerImpl(bool compareMode) {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (gid >= volume.ProbeUpdateCount) {
+        return;
+    }
+
+    if (!shProducerRangeFits(gid, 1u, probe_update_list.length()))
+        return;
+
+    // Map sparse update index to real probe index
+    uint probeIdx = probe_update_list[gid];
+    if (probeIdx >= volume.ProbeCountTotal || probeIdx > 0xfffeu)
+        return;
+
+    uint totalRays = 0u;
+    if (!shProducerMulU32(volume.ProbeCountTotal, DDGI_SH_PRODUCER_RAYS,
+                          totalRays))
+        return;
+    uint rayOffset = 0u;
+    uint probeBase = 0u;
+    uint confidenceBase = 0u;
+    uint probeAuditBase = 0u;
+    if (!shProducerMulU32(probeIdx, DDGI_SH_PRODUCER_RAYS, rayOffset) ||
+        !shProducerMulU32(probeIdx, DDGI_SH_PRODUCER_HISTORY_STRIDE, probeBase) ||
+        !shProducerMulU32(probeIdx, DDGI_SH_PRODUCER_CONFIDENCE_STRIDE, confidenceBase) ||
+        !shProducerMulU32(probeIdx, DDGI_SH_PRODUCER_PROBE_AUDIT_STRIDE, probeAuditBase))
+        return;
+
+    uint probeAuditCapacity = probe_audit_buf.probe_audit.length();
+    uint probeAuditEnd = 0u;
+    if (!shProducerAddU32(probeAuditBase, DDGI_SH_PRODUCER_PROBE_AUDIT_STRIDE,
+                          probeAuditEnd) ||
+        probeAuditEnd > probeAuditCapacity)
+        return;
+
+    uint rayAuditBase = 0u;
+    uint rayAuditCapacity = ray_audit_buf.ray_audit.length();
+    if (!shProducerMulU32(rayOffset, DDGI_SH_PRODUCER_RAY_AUDIT_STRIDE,
+                          rayAuditBase) ||
+        !shProducerRangeFits(rayAuditBase,
+                             DDGI_SH_PRODUCER_RAYS * DDGI_SH_PRODUCER_RAY_AUDIT_STRIDE,
+                             rayAuditCapacity))
+        return;
+
+    // Preserve the prior shadow/actual-update stamp before this invocation
+    // clears and rewrites the persistent audit row.  Compare uses this exact
+    // previous value to prove that the production pass updated this gid.
+    vec4 previousAudit0 = probe_audit_buf.probe_audit[probeAuditBase + 0u];
+    vec4 previousAudit68 = probe_audit_buf.probe_audit[probeAuditBase + 68u];
+    vec4 previousAudit69 = probe_audit_buf.probe_audit[probeAuditBase + 69u];
+    vec4 previousAudit70 = probe_audit_buf.probe_audit[probeAuditBase + 70u];
+    vec4 previousAudit79 = probe_audit_buf.probe_audit[probeAuditBase + 79u];
+    vec4 previousAudit1 = probe_audit_buf.probe_audit[probeAuditBase + 1u];
+    vec4 previousAudit2 = probe_audit_buf.probe_audit[probeAuditBase + 2u];
+    vec4 previousAudit3 = probe_audit_buf.probe_audit[probeAuditBase + 3u];
+    vec4 previousAudit4 = probe_audit_buf.probe_audit[probeAuditBase + 4u];
+    vec4 previousAudit5 = probe_audit_buf.probe_audit[probeAuditBase + 5u];
+    vec4 previousAudit6 = probe_audit_buf.probe_audit[probeAuditBase + 6u];
+    vec4 previousAuditAccum[9];
+    vec4 previousAuditHistory[9];
+    vec4 previousAuditFiltered[9];
+    for (uint i = 0u; i < 9u; ++i) {
+        previousAuditAccum[i] = probe_audit_buf.probe_audit[
+            probeAuditBase + 8u + i];
+        previousAuditHistory[i] = probe_audit_buf.probe_audit[
+            probeAuditBase + 17u + i];
+        previousAuditFiltered[i] = probe_audit_buf.probe_audit[
+            probeAuditBase + 26u + i];
+    }
+    bool previousShadowComplete = previousAudit68.x == 1.0;
+    bool previousAuditIdentity =
+        floatBitsToUint(previousAudit0.x) == volume.FrameIndex &&
+        floatBitsToUint(previousAudit0.y) == probeIdx &&
+        floatBitsToUint(previousAudit0.z) == gid &&
+        floatBitsToUint(previousAudit0.w) == volume.RaysPerProbe;
+    bool compareJoin = compareMode && previousAuditIdentity &&
+                       previousShadowComplete;
+    uint historyCount = 0u;
+    uint confidenceCount = 0u;
+    uint probeAuditCount = 0u;
+    uint rayAuditCount = 0u;
+    uint hnCount = 0u;
+    if (!shProducerVolumeShape(totalRays, historyCount, confidenceCount,
+                               probeAuditCount, rayAuditCount, hnCount)) {
+        shProducerWriteFailedAttempt(
+            probeAuditBase, rayAuditBase, previousAudit0,
+            compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+        return;
+    }
+    if (!shProducerRangeFits(rayOffset, DDGI_SH_PRODUCER_RAYS, totalRays) ||
+        !shProducerRangeFits(probeBase, DDGI_SH_PRODUCER_HISTORY_STRIDE, historyCount) ||
+        !shProducerRangeFits(confidenceBase, DDGI_SH_PRODUCER_CONFIDENCE_STRIDE,
+                             confidenceCount) ||
+        !shProducerRangeFits(probeAuditBase, DDGI_SH_PRODUCER_PROBE_AUDIT_STRIDE,
+                             probeAuditCount)) {
+        shProducerWriteFailedAttempt(
+            probeAuditBase, rayAuditBase, previousAudit0,
+            compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+        return;
+    }
+    // The compare dispatch is a post-production consumer of the completed
+    // shadow row.  It may not create a new complete row when the shadow was
+    // absent or stale; clear this legal slot and leave valid=0 instead.
+    if (compareMode && (!previousAuditIdentity || !previousShadowComplete)) {
+        shProducerWriteFailedAttempt(
+            probeAuditBase, rayAuditBase, previousAudit0,
+            compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+        return;
+    }
+
+    vec4 actualRelocatedOrigin = relocated_origins_buf.relocated_origins[probeIdx];
+    bool sourceOk = shProducerFiniteVec4(actualRelocatedOrigin);
+    uint expectedStamp = ((volume.FrameIndex & 0xffffu) << 16u) | (probeIdx + 1u);
+    uint sourcePrefix = 0u;
+    uint sourceRayBase = 0u;
+    if (!shProducerMulU32(DDGI_SH_PRODUCER_SOURCE_BASE, totalRays,
+                          sourcePrefix) ||
+        !shProducerMulU32(gid, DDGI_SH_PRODUCER_RAYS, sourceRayBase))
+        sourceOk = false;
+
+    // The production ray buffer is indexed by absolute probeIdx, while the
+    // trace/finalize source tail is indexed by this update-list row gid.
+    // Keep those two domains separate for sparse update lists.
+
+    // Validate every raw ray and every actual trace/finalize source record
+    // before any audit stamp is published.  Invalid/unknown source leaves a
+    // zero row and never fabricates a direction, origin, or ray identity.
+    for (uint r = 0u; r < DDGI_SH_PRODUCER_RAYS && sourceOk; ++r) {
+        uint rayIdx = 0u;
+        uint sourceRayIdx = 0u;
+        uint sourceRayOffset = 0u;
+        uint sourceBase = 0u;
+        if (!shProducerAddU32(rayOffset, r, rayIdx) ||
+            !shProducerAddU32(sourceRayBase, r, sourceRayIdx) ||
+            !shProducerMulU32(sourceRayIdx, 4u, sourceRayOffset) ||
+            !shProducerAddU32(sourcePrefix, sourceRayOffset, sourceBase) ||
+            !shProducerRangeFits(rayIdx, 1u, ray_buffer.length()) ||
+            !shProducerRangeFits(sourceBase, 4u, actual_hn_buf.actual_hn.length())) {
+            sourceOk = false;
+            break;
+        }
+        vec4 rawRay = ray_buffer[rayIdx].radiance_and_dist;
+        vec4 traceOrigin = actual_hn_buf.actual_hn[sourceBase + 0u];
+        vec4 traceDirection = actual_hn_buf.actual_hn[sourceBase + 1u];
+        vec4 finalizeOrigin = actual_hn_buf.actual_hn[sourceBase + 2u];
+        vec4 finalizeDirection = actual_hn_buf.actual_hn[sourceBase + 3u];
+        uint traceRayPlusOne = 0u;
+        uint finalizeRayPlusOne = 0u;
+        sourceOk = shProducerFiniteVec4(rawRay) &&
+                   shProducerFiniteVec3(traceOrigin.xyz) &&
+                   shProducerFiniteVec3(traceDirection.xyz) &&
+                   shProducerFiniteVec3(finalizeOrigin.xyz) &&
+                   shProducerFiniteVec3(finalizeDirection.xyz) &&
+                   floatBitsToUint(traceOrigin.w) == expectedStamp &&
+                   floatBitsToUint(finalizeOrigin.w) == expectedStamp &&
+                   shProducerFiniteInteger(traceDirection.w, traceRayPlusOne) &&
+                   shProducerFiniteInteger(finalizeDirection.w, finalizeRayPlusOne) &&
+                   traceRayPlusOne == r + 1u &&
+                   finalizeRayPlusOne == r + 1u;
+    }
+    if (!sourceOk) {
+        shProducerWriteFailedAttempt(
+            probeAuditBase, rayAuditBase, previousAudit0,
+            compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+        return;
+    }
+    shProducerClearProbeAudit(probeAuditBase);
+    shProducerClearRayAudit(rayAuditBase);
+
+    // Accumulate L0+L1+L2 (9 coefficients)
+    vec3 shAccum[9];
+    for (uint i = 0u; i < 9u; i++) {
+        shAccum[i] = vec3(0.0);
+    }
+
+    // Phase 3.1: 本帧逃逸射线计数（真·露天射线，w ≤ -1.5；步数耗尽的密闭
+    // 爬行不计入——它不是可见天空）。
+    // Phase 4a: 同一分类面上累计能量占比（skyEnergyRatio 分子/分母）。
+    uint escapeCount = 0u;
+    float skyEnergySum = 0.0;
+    float totalEnergySum = 0.0;
+
+    bool arithmeticOk = true;
+    for (uint r = 0u; r < volume.RaysPerProbe; r++) {
+        uint rayIdx = rayOffset + r;
+        vec4 rawRay = ray_buffer[rayIdx].radiance_and_dist;
+        vec3 radiance = rawRay.xyz;
+        float hitDist = rawRay.w;
+        uint branch = 1u;
+        float distWeight = 0.0;
+        float bail = 0.0;
+
+        if (hitDist <= -1.5) {
+            // 逃逸→沿用 Finalize 写入的 EvaluateSkyBase × SkyColor.xyz
+            //（Phase 1.2：不再覆盖成硬编码常量）。
+            ++escapeCount;
+            branch = 0u;
+            skyEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+            totalEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+        } else if (hitDist < 0.0) {
+            // 步数耗尽：保留 Finalize 解析结果（SC 回退或黑），不再覆盖成天空
+        } else {
+            branch = 2u;
+            // Gentler distance falloff — only attenuate near max distance
+            distWeight = 1.0 - smoothstep(volume.RayMaxDistance * 0.8, volume.RayMaxDistance, hitDist);
+            radiance = radiance * max(distWeight, 0.2);
+            // T3.4 (D4): irradiance bailing — see Metal twin.
+            bail = smoothstep(0.0, volume.SdfVoxelSizes[0].x * 2.0, hitDist);
+            radiance = radiance * bail;
+            totalEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        // Same sampler the trace side used for this ray index — the projection
+        // must reproduce the exact direction the radiance came from.
+        vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
+        vec4 raySample = ddgiSampleRayDirection(r, volume.RaysPerProbe,
+                                                volume.FrameIndex,
+                                                uint(volume.RaySampleMode), toLight);
+        vec3 d = raySample.xyz;
+        float x = d.x;
+        float y = d.y;
+        float z = d.z;
+        float x2 = x * x;
+        float y2 = y * y;
+        float z2 = z * z;
+
+        // L0+L1+L2 SH basis
+        float basis[9];
+        basis[0] =  DDGI_SH_C0;
+        basis[1] = -DDGI_SH_C1 * y;
+        basis[2] =  DDGI_SH_C1 * z;
+        basis[3] = -DDGI_SH_C1 * x;
+        basis[4] =  DDGI_SH_C2_0 * y * x;
+        basis[5] = -DDGI_SH_C2_0 * y * z;
+        basis[6] =  DDGI_SH_C2_1 * (3.0 * z2 - 1.0);
+        basis[7] = -DDGI_SH_C2_0 * x * z;
+        basis[8] =  DDGI_SH_C2_2 * (x2 - y2);
+
+        // PDF-correct Monte Carlo weight for the radiance-SH integral
+        // sh_i = ∫ L(ω)·Y_i(ω) dΩ ≈ Σ_k L(ω_k)·Y_i(ω_k) / (N·p(ω_k)).
+        // Mode 0 keeps the legacy uniform expression bit-for-bit;
+        // importance-sampled modes divide by the sampler's pdf instead.
+        float mcWeight = (volume.RaySampleMode == DDGI_RAY_SAMPLE_UNIFORM)
+            ? (4.0 * 3.14159265 / float(volume.RaysPerProbe))
+            : 1.0 / (float(volume.RaysPerProbe) * max(raySample.w, 1e-5));
+
+        if (!shProducerFiniteVec4(rawRay) || !shProducerFiniteVec4(raySample) ||
+            !shProducerFiniteVec3(radiance) || !shProducerFinite(distWeight) ||
+            !shProducerFinite(bail) || !shProducerFinite(mcWeight)) {
+            arithmeticOk = false;
+            break;
+        }
+        for (uint i = 0u; i < 9u; ++i) {
+            if (!shProducerFinite(basis[i])) arithmeticOk = false;
+        }
+        if (!arithmeticOk) break;
+
+        for (uint i = 0u; i < 9u; i++) {
+            shAccum[i] = shAccum[i] + radiance * basis[i] * mcWeight;
+        }
+
+        uint rayAuditEntry = rayAuditBase + r * DDGI_SH_PRODUCER_RAY_AUDIT_STRIDE;
+        uint sourceRayIdx = 0u;
+        uint sourceRayOffset = 0u;
+        uint sourceBase = 0u;
+        if (!shProducerAddU32(sourceRayBase, r, sourceRayIdx) ||
+            !shProducerMulU32(sourceRayIdx, 4u, sourceRayOffset) ||
+            !shProducerAddU32(sourcePrefix, sourceRayOffset, sourceBase) ||
+            !shProducerRangeFits(rayAuditEntry, DDGI_SH_PRODUCER_RAY_AUDIT_STRIDE,
+                                 rayAuditCount) ||
+            !shProducerRangeFits(sourceBase, 4u, actual_hn_buf.actual_hn.length())) {
+            arithmeticOk = false;
+            break;
+        }
+        ray_audit_buf.ray_audit[rayAuditEntry + 0u] = vec4(d, raySample.w);
+        ray_audit_buf.ray_audit[rayAuditEntry + 1u] = rawRay;
+        ray_audit_buf.ray_audit[rayAuditEntry + 2u] = vec4(radiance, mcWeight);
+        ray_audit_buf.ray_audit[rayAuditEntry + 3u] = vec4(
+            basis[0], basis[1], basis[2], basis[3]);
+        ray_audit_buf.ray_audit[rayAuditEntry + 4u] = vec4(
+            basis[4], basis[5], basis[6], basis[7]);
+        ray_audit_buf.ray_audit[rayAuditEntry + 5u] = vec4(
+            basis[8], distWeight, bail, float(branch));
+        ray_audit_buf.ray_audit[rayAuditEntry + 6u] = actual_hn_buf.actual_hn[sourceBase + 1u];
+        ray_audit_buf.ray_audit[rayAuditEntry + 7u] = actual_hn_buf.actual_hn[sourceBase + 3u];
+        ray_audit_buf.ray_audit[rayAuditEntry + 8u] = actual_hn_buf.actual_hn[sourceBase + 0u];
+        ray_audit_buf.ray_audit[rayAuditEntry + 9u] = actual_hn_buf.actual_hn[sourceBase + 2u];
+    }
+
+    for (uint i = 0u; i < 9u; ++i) {
+        if (!shProducerFiniteVec3(shAccum[i])) arithmeticOk = false;
+    }
+    if (!arithmeticOk || !shProducerFinite(skyEnergySum) ||
+        !shProducerFinite(totalEnergySum)) {
+        shProducerWriteFailedAttempt(
+            probeAuditBase, rayAuditBase, previousAudit0,
+            compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+        return;
+    }
+
+    // Temporal blend with history (9 coeffs as vec4 = 9 vec4s per probe).
+    vec4 historyBefore[9];
+    vec4 filteredValues[9];
+
+    // A probe that has never converged must not EMA-blend against the cleared
+    // buffer: with the normal 0.02 alpha that made its first valid result only
+    // 2% bright and left the rotating update batches effectively black.  The
+    // fourth confidence component is initialized to zero by C++; publish the
+    // first sample directly, then use the configured temporal filter.
+    float confidenceBefore[4];
+    vec4 productionConfidenceBefore = vec4(0.0);
+    vec2 productionOpenBefore = vec2(0.0);
+    bool temporalInputsOk = true;
+    for (uint i = 0u; i < 4u; ++i) {
+        confidenceBefore[i] = probe_confidence[confidenceBase + i];
+        productionConfidenceBefore[i] =
+            actual_production_confidence_buf.actual_production_confidence[
+                confidenceBase + i];
+        if (!shProducerFinite(confidenceBefore[i]) ||
+            !shProducerFinite(productionConfidenceBefore[i]))
+            temporalInputsOk = false;
+    }
+    productionOpenBefore =
+        actual_production_opensky_buf.actual_production_opensky[probeIdx];
+    if (!shProducerFiniteVec2(productionOpenBefore)) temporalInputsOk = false;
+    float conv = confidenceBefore[3];
+    bool firstUpdate = conv < 0.5;
+    // Young probes blend aggressively (alpha 0.35, τ≈3 frames) so the
+    // multi-bounce SC↔probe loop becomes VISIBLE within the first seconds
+    // instead of needing 300+ frames; alpha settles to the configured
+    // TemporalAlpha once the convergence ramp passes 0.5 (~15 updates).
+    float settledAlpha = clamp(volume.TemporalAlpha, 0.0, 1.0);
+    float alpha = firstUpdate ? 1.0 : mix(0.35, settledAlpha, min(conv * 2.0, 1.0));
+
+    vec3 sh0 = shAccum[0];
+    // 2026-09-05 对齐 Metal 修复：上限随未钳位 sh0 无界放大时，prev-screen
+    // 辐射尖峰同步抬高 l1/l2 上限（Metal 实测 L1=1661=3×553.6），钳位失效。
+    // T2.4 (B7): L0 钳位 10→64、比例上限 30/20→192/128（see Metal twin）。
+    float l1Limit = max(min(length(sh0) * 3.0, 192.0), 0.1);
+    float l2Limit = max(min(length(sh0) * 2.0, 128.0), 0.05);
+    if (!shProducerFinite(alpha) || !shProducerFinite(l1Limit) ||
+        !shProducerFinite(l2Limit)) temporalInputsOk = false;
+
+    for (uint i = 0u; i < 9u; i++) {
+        historyBefore[i] = irradiance_history[probeBase + i];
+        if (!shProducerFiniteVec4(historyBefore[i])) temporalInputsOk = false;
+        vec3 history = historyBefore[i].xyz;
+        vec3 filtered = mix(history, shAccum[i], alpha);
+
+        // Energy-aware clamp
+        if (i == 0u) {
+            float mag = length(filtered);
+            if (mag > 64.0) filtered = filtered * (64.0 / mag);   // T2.4 (B7): was 10.0
+        } else if (i < 4u) {
+            float mag = length(filtered);
+            if (mag > l1Limit) filtered = filtered * (l1Limit / mag);
+        } else {
+            float mag = length(filtered);
+            if (mag > l2Limit) filtered = filtered * (l2Limit / mag);
+        }
+
+        filteredValues[i] = vec4(filtered, 0.0);
+        if (!shProducerFiniteVec4(filteredValues[i])) temporalInputsOk = false;
+    }
+
+    // The private confidence/openSky clones are copied immediately before the
+    // production dispatch.  In the shadow pass, require the direct read-only
+    // production sources to match those snapshots bit-for-bit; a mismatch is
+    // an unknown history source and must not publish a complete audit row.
+    vec2 prevOpen = probe_opensky[probeIdx];
+    if (!shProducerFiniteVec2(prevOpen)) temporalInputsOk = false;
+    if (!compareMode) {
+        for (uint i = 0u; i < 4u; ++i) {
+            if (!shProducerSameFloatBits(productionConfidenceBefore[i],
+                                         confidenceBefore[i]))
+                temporalInputsOk = false;
+        }
+        if (!shProducerSameVec2Bits(productionOpenBefore, prevOpen))
+            temporalInputsOk = false;
+    }
+
+    float curOpen = float(escapeCount) / float(volume.RaysPerProbe);
+    float curSer = (totalEnergySum > 1e-6)
+        ? clamp(skyEnergySum / totalEnergySum, 0.0, 1.0)
+        : prevOpen.y;
+    bool firstPublish = (prevOpen.x <= 0.0 && curOpen > 0.0 && conv < 0.5);
+    float newOpen = firstPublish ? curOpen : mix(prevOpen.x, curOpen, 0.35);
+    float newSer = (totalEnergySum > 1e-6)
+        ? ((firstPublish ? curSer : mix(prevOpen.y, curSer, 0.35)))
+        : prevOpen.y;
+    if (!shProducerFinite(curOpen) || !shProducerFinite(curSer) ||
+        !shProducerFinite(newOpen) || !shProducerFinite(newSer))
+        temporalInputsOk = false;
+
+    if (!temporalInputsOk) {
+        shProducerWriteFailedAttempt(
+            probeAuditBase, rayAuditBase, previousAudit0,
+            compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+        return;
+    }
+    vec4 expectedFiltered[9];
+    for (uint i = 0u; i < 9u; ++i) {
+        expectedFiltered[i] = compareJoin
+            ? previousAuditFiltered[i] : filteredValues[i];
+        if (compareJoin &&
+            (!shProducerFiniteVec4(previousAuditAccum[i]) ||
+             !shProducerFiniteVec4(previousAuditHistory[i]) ||
+             !shProducerFiniteVec4(expectedFiltered[i]))) {
+            shProducerWriteFailedAttempt(
+                probeAuditBase, rayAuditBase, previousAudit0,
+                compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+            return;
+        }
+    }
+    if (compareJoin &&
+        (!shProducerFiniteVec4(previousAudit1) ||
+         !shProducerFiniteVec4(previousAudit2) ||
+         !shProducerFiniteVec4(previousAudit3) ||
+         !shProducerFiniteVec4(previousAudit4) ||
+         !shProducerFiniteVec4(previousAudit5) ||
+         !shProducerFiniteVec4(previousAudit6))) {
+        shProducerWriteFailedAttempt(
+            probeAuditBase, rayAuditBase, previousAudit0,
+            compareJoin ? previousAudit79 : previousAudit0, gid, probeIdx);
+        return;
+    }
+
+    // Compare is a post-production read-only diagnostic.  It recomputes the
+    // expected values for the audit, but never mutates the private SH/conf/open
+    // clone resources; only the shadow variant publishes those clone writes.
+    if (!compareMode) {
+        for (uint i = 0u; i < 9u; ++i)
+            irradiance_output[probeBase + i] = filteredValues[i];
+    }
+
+    // Convergence ramp: confidence[3] climbs by 1/30 per update instead of
+    // snapping to 1, giving probe_vis (and any future consumer) a real
+    // "how settled is this probe" signal.
+    float confidenceAfter[4];
+    for (uint i = 0u; i < 4u; ++i) confidenceAfter[i] = confidenceBefore[i];
+    confidenceAfter[3] = min(conv + 0.0333, 1.0);
+    if (!compareMode) {
+        probe_confidence[confidenceBase + 3u] = confidenceAfter[3];
+        probe_opensky[probeIdx] = vec2(newOpen, newSer);
+    }
+
+    // Publish the shadow audit only after every source and arithmetic guard
+    // above succeeded.  Index 79 preserves the previous index-0 stamp so the
+    // post-production compare can prove that this exact update slot ran.
+    probe_audit_buf.probe_audit[probeAuditBase + 0u] = vec4(
+        uintBitsToFloat(volume.FrameIndex), uintBitsToFloat(probeIdx),
+        uintBitsToFloat(gid), uintBitsToFloat(volume.RaysPerProbe));
+    probe_audit_buf.probe_audit[probeAuditBase + 1u] = compareJoin
+        ? previousAudit1 : vec4(conv, alpha, l1Limit, l2Limit);
+    probe_audit_buf.probe_audit[probeAuditBase + 2u] = compareJoin
+        ? previousAudit2
+        : vec4(float(escapeCount), skyEnergySum, totalEnergySum,
+               firstUpdate ? 1.0 : 0.0);
+    probe_audit_buf.probe_audit[probeAuditBase + 3u] = compareJoin
+        ? previousAudit3 : vec4(prevOpen.x, prevOpen.y, curOpen, curSer);
+    probe_audit_buf.probe_audit[probeAuditBase + 4u] = compareJoin
+        ? previousAudit4
+        : vec4(confidenceBefore[0], confidenceBefore[1],
+               confidenceBefore[2], confidenceBefore[3]);
+    probe_audit_buf.probe_audit[probeAuditBase + 5u] = compareJoin
+        ? previousAudit5
+        : vec4(confidenceAfter[0], confidenceAfter[1],
+               confidenceAfter[2], confidenceAfter[3]);
+    probe_audit_buf.probe_audit[probeAuditBase + 6u] = compareJoin
+        ? previousAudit6
+        : vec4(newOpen, newSer, firstPublish ? 1.0 : 0.0, 1.0);
+    probe_audit_buf.probe_audit[probeAuditBase + 7u] = actualRelocatedOrigin;
+    for (uint i = 0u; i < 9u; ++i) {
+        probe_audit_buf.probe_audit[probeAuditBase + 8u + i] = compareJoin
+            ? previousAuditAccum[i] : vec4(shAccum[i], 0.0);
+        probe_audit_buf.probe_audit[probeAuditBase + 17u + i] = compareJoin
+            ? previousAuditHistory[i] : historyBefore[i];
+        probe_audit_buf.probe_audit[probeAuditBase + 26u + i] =
+            expectedFiltered[i];
+    }
+    shProducerWriteVolumeEcho(probeAuditBase);
+
+    // A successful shadow is the only producer of a current complete gate.
+    // Keep the direct pre-production history source in 69/70.  The compare
+    // dispatch reruns the shadow body after production; when it joins the
+    // prior shadow row, preserve that row's pre-production source values
+    // instead of replacing them with post-production history.
+    probe_audit_buf.probe_audit[probeAuditBase + 68u] =
+        vec4(1.0, 0.0, 0.0, 0.0);
+    vec4 historyAuditConfidence = productionConfidenceBefore;
+    vec4 historyAuditOpen = vec4(productionOpenBefore, 0.0, 1.0);
+    if (compareMode && previousShadowComplete && previousAuditIdentity &&
+        shProducerFiniteVec4(previousAudit69) &&
+        shProducerFiniteVec4(previousAudit70)) {
+        historyAuditConfidence = previousAudit69;
+        historyAuditOpen = previousAudit70;
+    }
+    probe_audit_buf.probe_audit[probeAuditBase + 69u] = historyAuditConfidence;
+    probe_audit_buf.probe_audit[probeAuditBase + 70u] = historyAuditOpen;
+
+    // Compare is deliberately post-production and read-only with respect to
+    // the actual resources.  The prior shadow stamp must match this frame,
+    // update slot, absolute probe, and 128-ray contract before actual values
+    // can enter the audit row.
+    bool auditJoin = previousAuditIdentity && previousShadowComplete;
+    if (compareMode && auditJoin) {
+        vec4 actualSH[9];
+        float actualConfidence[4];
+        vec2 actualOpen;
+        bool actualOk = true;
+        for (uint i = 0u; i < 9u; ++i) {
+            actualSH[i] = actual_production_sh_buf.actual_production_sh[probeBase + i];
+            if (!shProducerFiniteVec4(actualSH[i])) actualOk = false;
+        }
+        for (uint i = 0u; i < 4u; ++i) {
+            actualConfidence[i] = actual_production_confidence_buf.actual_production_confidence[
+                confidenceBase + i];
+            if (!shProducerFinite(actualConfidence[i])) actualOk = false;
+        }
+        actualOpen = actual_production_opensky_buf.actual_production_opensky[probeIdx];
+        if (!shProducerFiniteVec2(actualOpen)) actualOk = false;
+        float maxSHerror = 0.0;
+        for (uint i = 0u; i < 9u; ++i) {
+            // Compare the same coefficient payload published for independent
+            // host verification. This diagnostic never writes actual SH.
+            vec4 publishedExpected = probe_audit_buf.probe_audit[
+                probeAuditBase + 26u + i];
+            vec4 error = abs(actualSH[i] - publishedExpected);
+            maxSHerror = max(maxSHerror,
+                max(max(error.x, error.y), max(error.z, error.w)));
+        }
+        if (!shProducerFinite(maxSHerror)) actualOk = false;
+        if (actualOk) {
+            for (uint i = 0u; i < 9u; ++i)
+                probe_audit_buf.probe_audit[probeAuditBase + 35u + i] = actualSH[i];
+            probe_audit_buf.probe_audit[probeAuditBase + 44u] = vec4(
+                maxSHerror, uintBitsToFloat(volume.FrameIndex),
+                uintBitsToFloat(probeIdx), 1.0);
+            probe_audit_buf.probe_audit[probeAuditBase + 45u] = vec4(
+                actualConfidence[0], actualConfidence[1],
+                actualConfidence[2], actualConfidence[3]);
+            probe_audit_buf.probe_audit[probeAuditBase + 46u] = vec4(
+                actualOpen.x, actualOpen.y, 0.0, 1.0);
+        }
+    }
+    probe_audit_buf.probe_audit[probeAuditBase + 79u] =
+        compareJoin ? previousAudit79 : previousAudit0;
+}
+
+void ddgi_sh_producer_shadow_impl() {
+    shProducerImpl(false);
+}
+
+void ddgi_sh_producer_compare_impl() {
+    shProducerImpl(true);
+}
+
+void main() {
+#if defined(DDGI_SH_PRODUCER_COMPARE) && DDGI_SH_PRODUCER_COMPARE
+    ddgi_sh_producer_compare_impl();
+#else
+    ddgi_sh_producer_shadow_impl();
+#endif
+}

@@ -23,9 +23,12 @@
 //   binding 0 = UniformBuffer       DDGIVolumeData (336 bytes, inline)
 //   binding 1 = readonly buffer     ProbeContribRange ranges[]
 //   binding 2 = readonly buffer     ProbeCardContrib contribs[]
-//   binding 3 = readonly buffer     vec4 card_radiance[] (per card)
+//   binding 3 = readonly buffer     vec4 card_radiance[] (per card block;
+//                                                        16 blocks/card)
 //   binding 4 = readonly buffer     vec4 irradiance_history[] (9 vec4/probe)
 //   binding 5 = buffer vec4         irradiance_output[] (9 vec4/probe, write)
+//   binding 6 = readonly buffer     vec4 probe_confidence[] (Phase 3 置信门)
+//   binding 7 = UniformBuffer        ScInjectParams（注入模式，Phase 3 二轮）
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -75,12 +78,11 @@ layout(set = 0, binding = 0, std140) uniform DDGIVolumeData {
 // 16/32 bytes per std430 rules for array element alignment.
 // --------------------------------------------------------------------------------
 
-// ProbeContribRange — 16 bytes (2 uints + 2 pad).
+// ProbeContribRange — 8 bytes. In std430 a scalar-only struct has 4-byte
+// alignment, so the array stride matches the C++ {u32 start,u32 count} ABI.
 struct ProbeContribRange {
     uint start;
     uint count;
-    uint _pad0;
-    uint _pad1;
 };
 
 // ProbeCardContrib — 40 bytes tight: card_index + 9 SH weights, all scalars so
@@ -100,7 +102,7 @@ layout(set = 0, binding = 2, std430) readonly buffer ContribBuffer {
     ProbeCardContrib contribs[];
 };
 
-// Per-card radiance from DDGICardRadianceAvg (xyz = radiance, w = 1.0).
+// Per-block radiance from DDGICardRadianceAvg (xyz = radiance, w = coverage).
 layout(set = 0, binding = 3, std430) readonly buffer CardRadianceBuffer {
     vec4 card_radiance[];
 };
@@ -114,6 +116,22 @@ layout(set = 0, binding = 4, std430) readonly buffer IrradianceHistoryBuffer {
 // wrote this frame's L0+L1+L2 here; this shader rewrites L0+L1 only.
 layout(set = 0, binding = 5, std430) buffer IrradianceOutputBuffer {
     vec4 irradiance_output[];
+};
+
+// Phase 3（GI 能量所有权修复 P2）: per-probe confidence（float4：hitRatio/
+// stability/visibility/convergence）。[3] = convergence 0→1 ramp（每次更新
+// +1/30，UpdateIrradiance 写）——注入置信门的置信源。C++ 端 env 回滚或
+// DDGI confidence 无效时绑零 stand-in（settled=0 = 旧式恒档）。
+layout(set = 0, binding = 6, std430) readonly buffer ConfidenceBuffer {
+    vec4 probe_confidence[];
+};
+
+// 能量所有权修复（P2 二轮，2026-09-18 消融后）: 注入模式（CPU 经 env 下发）。
+//   x = 0 legacy45（Phase 3 前恒 0.45）| 1 gate（Phase 3：settled→0.15 档）
+//     | 2 coldstart（默认，见下方权重块）——注入定位收缩为初始化/恢复。
+//   yzw 保留。std140 float4。
+layout(set = 0, binding = 7, std140) uniform ScInjectParams {
+    vec4 sc_inject;
 };
 
 // --------------------------------------------------------------------------------
@@ -131,9 +149,14 @@ void ddgi_probe_irradiance_from_cards() {
 
     uint n = min(range.count, 12u);
     float validSum = 0.0;
+    uint validCount = 0u;
     for (uint i = 0u; i < n; ++i) {
         ProbeCardContrib c = contribs[range.start + i];
         vec4 cr = card_radiance[c.card_index];
+        // Reject blocks with no captured texels; CPU block selection alone is
+        // not evidence that this portion of the card carries transport.
+        if (cr.w <= 0.0) continue;
+        validCount += 1u;
         vec3 radiance = cr.xyz;
         validSum += cr.w;   // per-card atlas coverage (0..1, from CardRadianceAvg)
         for (uint b = 0u; b < 9u; ++b)
@@ -187,13 +210,37 @@ void ddgi_probe_irradiance_from_cards() {
     // per hit texel through the high-res offline SDF, so it keeps authority;
     // the card average now only stabilizes the low-frequency floor (cap 0.45)
     // and still fills where SC coverage is thin (countCoverage).
-    float countCoverage = clamp(float(n) / 6.0, 0.0, 1.0);
-    float validCoverage = (n > 0u) ? clamp(validSum / float(n), 0.0, 1.0) : 0.0;
+    float countCoverage = clamp(float(validCount) / 6.0, 0.0, 1.0);
+    float validCoverage = (validCount > 0u) ? clamp(validSum / float(validCount), 0.0, 1.0) : 0.0;
     float scLum = dot(scResult[0], vec3(0.2126, 0.7152, 0.0722));
-    float pathLum = max(dot(pathA[0], vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+    // 2026-09-18 消融（quality-issues-diagnosis.md）: pathA 的原始亮度（未
+    // 夹 1e-4）另存——coldstart 模式用"pathA 是否存在供给"判恢复档。
+    float rawPathLum = dot(pathA[0], vec3(0.2126, 0.7152, 0.0722));
+    float pathLum = max(rawPathLum, 1e-4);
     float agree = smoothstep(0.0, 1.0, scLum / pathLum);
+    // SC 注入 = initialization / low-confidence recovery，不是常开供给。
+    // 模式（sc_inject.x，CPU 下发）:
+    //   legacy45 — Phase 3 前恒 0.45（env 回滚 PRIMAL_SC_INJECT_SETTLED=0）；
+    //   gate     — Phase 3：已收敛降 0.15 档；
+    //   coldstart（默认）— 已收敛探针注入归零（E2 逐射线采样拥有收敛场；
+    //       消融证明常开注入的 occlusion-unaware 卡片均值会把阴影区探针
+    //       钉死在穿墙能量上，且非本帧 traced 探针的 0.85/0.15 重混会让
+    //       全场漂向卡片均值），仅 rawPathLum≈0（pathA 无供给）时保留
+    //       0.15 低频恢复；未收敛探针保留 0.45 初始化档。
     const float SC_TAKEOVER_MAX = 0.45;
-    float scWeight = countCoverage * validCoverage * SC_TAKEOVER_MAX * agree;
+    const float SC_SETTLED_FLOOR = 0.15;
+    float convergence = probe_confidence[gl_GlobalInvocationID.x][3];
+    float settled = smoothstep(0.5, 1.0, convergence);
+    const float injectBase = countCoverage * validCoverage;
+    float scWeight;
+    if (sc_inject.x < 0.5) {
+        scWeight = injectBase * SC_TAKEOVER_MAX * agree;
+    } else if (sc_inject.x < 1.5) {
+        scWeight = injectBase * agree * mix(SC_TAKEOVER_MAX, SC_SETTLED_FLOOR, settled);
+    } else {
+        float settledWeight = (rawPathLum <= 1e-3) ? SC_SETTLED_FLOOR : 0.0;
+        scWeight = injectBase * agree * mix(SC_TAKEOVER_MAX, settledWeight, settled);
+    }
 
     for (uint i = 0u; i < 9u; ++i) {
         vec3 blended = mix(pathA[i], scResult[i], scWeight);

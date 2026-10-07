@@ -56,7 +56,7 @@ layout(set = 0, binding = 7, std430) buffer ProbeRadianceBlock {
     vec4 data[];
 } probeRadiance;
 
-// ScreenProbeGlobalData UBO — 352 bytes, mirrors C++ struct. Declared inline.
+// ScreenProbeGlobalData UBO — mirrors C++ struct. Declared inline.
 layout(set = 0, binding = 8, std140) uniform GlobalBlock {
     mat4 view_projection;
     mat4 inv_view_projection;
@@ -71,7 +71,22 @@ layout(set = 0, binding = 8, std140) uniform GlobalBlock {
     vec4 ddgi_fb[2];             // T2.2: [0]=origin.xyz+spacing, [1]=counts.xyz+enabled
     vec4 hzb_params;             // declared for offset parity (unused here)
     vec4 cache_params;           // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
+    vec4 diag_params;            // offset 416 (unused here — offset parity)
+    vec4 hint_params;            // offset 432 (unused here — offset parity)
+    vec4 sky_params;             // offset 448 (unused here — offset parity)
+    vec4 wrc_fb[2];              // offset 464 (unused here — offset parity)
+    vec4 repr_params;            // offset 496 (unused here — offset parity)
+    // x = tier3 slot layout; y = T_n; z = lightVar mask enable;
+    // w = P4 tier rays enable (16/32/64 by slot).
+    vec4 tier_params;            // offset 512
+    // x = radiance capacity in slots (compacted layout upper bound).
+    vec4 tier_counts;            // offset 528
 } global;
+
+// P2 (tier3): compacted slot list — flat radiance id → slot index.
+layout(set = 0, binding = 15, std430) readonly buffer CompactListBlock {
+    uint data[];
+} compactList;
 
 // F2 (M7): previous frame's final probe SH — importance-resampling proposal.
 layout(set = 0, binding = 14, std430) readonly buffer ImportanceSHBlock {
@@ -162,12 +177,25 @@ void screen_probe_trace_rays() {
     uint gridW = uint(global.grid_params.x);
     uint gridH = uint(global.grid_params.y);
     uint raysPerProbe = uint(global.grid_params.w);
-    uint totalRays = gridW * gridH * raysPerProbe;
 
-    if (global_id >= totalRays) return;
-
-    uint probeIdx = global_id / raysPerProbe;
-    uint rayIdx   = global_id % raysPerProbe;
+    // P2/P4: compacted slot indirection + per-slot tier gate (see HZB).
+    uint probeIdx;
+    uint rayIdx;
+    if (global.tier_params.x > 0.5) {
+        probeIdx = compactList.data[global_id / raysPerProbe];
+        if (probeIdx == 0xFFFFFFFFu) return;
+        rayIdx = global_id % raysPerProbe;
+        if (global.tier_params.w > 0.5 &&
+            float(rayIdx) >= probeNormals.data[probeIdx].w) {
+            probeRadiance.data[global_id] = vec4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+    } else {
+        uint totalRays = gridW * gridH * raysPerProbe;
+        if (global_id >= totalRays) return;
+        probeIdx = global_id / raysPerProbe;
+        rayIdx = global_id % raysPerProbe;
+    }
 
     // Read probe position and normal
     vec4 posData = probePositions.data[probeIdx];

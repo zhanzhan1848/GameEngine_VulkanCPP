@@ -21,8 +21,9 @@
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
 
-// Shared shader library (axis refactor X1): SDF cascade sampling + relaxed
-// march and Fibonacci + TBN direction generation live in ShaderLib/.
+// Shared shader library (axis refactor X1): SDF cascade sampling and
+// Fibonacci + TBN direction generation live in ShaderLib/. This kernel uses
+// a local conservative marcher so other TraceLib consumers keep their policy.
 #include "ShaderLib/TraceLib.glsl"
 #include "ShaderLib/EncodeLib.glsl"
 
@@ -55,13 +56,27 @@ layout(set = 0, binding = 6, std140) uniform GlobalData {
     vec4 ddgi_fb[2];
     vec4 hzb_params;
     vec4 cache_params;   // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
-    vec4 hint_params;    // G2 A/B: x = 三线性梯度 hint（PRIMAL_SPGI_TRILINEAR_HINT）
+    vec4 diag_params;    // offset 416, matches ScreenProbeGlobalData
+    vec4 hint_params;    // offset 432: x = 三线性梯度 hint; z = SPGI SDF step scale
+    vec4 sky_params;     // offset 448 (unused here — offset parity)
+    vec4 wrc_fb[2];      // offset 464 (unused here — offset parity)
+    vec4 repr_params;    // offset 496 (unused here — offset parity)
+    // x = tier3 slot layout; y = T_n; z = lightVar mask enable;
+    // w = P4 tier rays enable (16/32/64 by slot).
+    vec4 tier_params;    // offset 512
+    // x = radiance capacity in slots (compacted layout upper bound).
+    vec4 tier_counts;    // offset 528
 } global;
 
 // F2 (M7): previous frame's final probe SH — importance-resampling proposal.
 layout(set = 0, binding = 7, std430) readonly buffer ImportanceSHBlock {
     vec4 data[];
 } importanceSH;
+
+// P2 (tier3): compacted slot list — flat radiance id → slot index.
+layout(set = 0, binding = 13, std430) readonly buffer CompactListBlock {
+    uint data[];
+} compactList;
 
 // ----------------------------------------------------------------------------
 // T4.3 二批: per-mesh detail SDF slots (mirror of DDGITraceSDF.comp — distance
@@ -175,8 +190,9 @@ bool detailSDFRefine(vec3 rayOrigin, vec3 rayDir, inout float t) {
 }
 
 // fibonacciDirection / orientAroundNormalTBN (was orientAroundNormal),
-// sampleSDFCascade / sampleBestSDF and the relaxed march moved to
-// ShaderLib/{EncodeLib,TraceLib}.glsl (axis refactor X1).
+// sampleSDFCascade / sampleBestSDF and the original relaxed marcher moved to
+// ShaderLib/{EncodeLib,TraceLib}.glsl (axis refactor X1). This kernel now
+// calls traceSDFStepScale below instead of the shared relaxed marcher.
 //
 // NOTE (X1): the old local sampleSDFCascade divided uvw by sdf_origins[c].w,
 // which the C++ UBO upload (FieldView::WriteSDFToScreenProbe) sets to 0.0 —
@@ -216,27 +232,74 @@ float sampleBestSDFTrilinear(vec3 pos) {
     return 1.0e10;
 }
 
+// SPGI-only conservative step scale. The shared TraceLib marcher retains its
+// 1.2x policy for other consumers. At the Sponza right arcade, 1.2x skips a
+// real 0.5 m foreground wall (2.64 -> 3.99 m); 1.0x hits at 3.45 m.
+SDFTraceResult traceSDFStepScale(vec3 origin, vec3 direction, float maxDist,
+                                float stepScale) {
+    SDFTraceResult result;
+    result.hit = false;
+    result.position = origin;
+    result.distance = 0.0;
+    vec3 pos = origin;
+    float remaining = maxDist;
+    float hitThreshold = global.sdf_voxel_sizes[0].x * 0.5;
+    float minStep = global.sdf_voxel_sizes[0].x * 0.25;
+    for (uint step = 0u; step < LUMEN_MAX_SDF_STEPS; ++step) {
+        float d = sampleBestSDF(pos, sdf0, sdf1, sdf2,
+                                global.sdf_origins, global.sdf_extents,
+                                uint(global.sdf_resolutions.w));
+        if (d < hitThreshold) {
+            result.hit = true;
+            result.position = pos;
+            result.distance = length(pos - origin);
+            return result;
+        }
+        float advance = d > hitThreshold * 4.0
+            ? d * stepScale : max(d, minStep);
+        if (advance > remaining) break;
+        pos += direction * advance;
+        remaining -= advance;
+    }
+    result.distance = length(pos - origin);
+    return result;
+}
+
 void screen_probe_trace_sdf() {
     uint global_id = gl_GlobalInvocationID.x;
     uint gridW = uint(global.grid_params.x);
     uint gridH = uint(global.grid_params.y);
     uint raysPerProbe = uint(global.grid_params.w);
-    uint totalRays = gridW * gridH * raysPerProbe;
-    if (global_id >= totalRays) return;
+
+    // P2/P4: compacted slot indirection + per-slot tier gate (see HZB).
+    uint probeIdx;
+    uint rayIdx;
+    if (global.tier_params.x > 0.5) {
+        probeIdx = compactList.data[global_id / raysPerProbe];
+        if (probeIdx == 0xFFFFFFFFu) return;
+        rayIdx = global_id % raysPerProbe;
+        if (global.tier_params.w > 0.5 &&
+            float(rayIdx) >= probeNormals.data[probeIdx].w) {
+            return;   // tier-gated: Finalize zero-fills this ray
+        }
+    } else {
+        uint totalRays = gridW * gridH * raysPerProbe;
+        if (global_id >= totalRays) return;
+        probeIdx = global_id / raysPerProbe;
+        rayIdx = global_id % raysPerProbe;
+    }
 
     // HZB kernel already resolved this ray — keep its result.
     if (global.hzb_params.z > 0.0 && hit_buffer.data[global_id].w == 1.0) return;
 
-    vec4 posData = probePositions.data[global_id / raysPerProbe];
+    vec4 posData = probePositions.data[probeIdx];
     if (posData.w <= 0.0) {
         hit_buffer.data[global_id] = vec4(-1.0, 0.0, 0.0, 0.0);
         return;
     }
-    vec3 probeNormal = normalize(probeNormals.data[global_id / raysPerProbe].xyz);
+    vec3 probeNormal = normalize(probeNormals.data[probeIdx].xyz);
     vec3 probePos = posData.xyz;
 
-    uint probeIdx = global_id / raysPerProbe;
-    uint rayIdx = global_id % raysPerProbe;
     vec3 rayDir;
     float invNq;   // unused here; Finalize owns the importance weight
     if (global.cache_params.y > 0.5) {
@@ -269,14 +332,11 @@ void screen_probe_trace_sdf() {
         ? min(global.trace_params.x, cacheStart)
         : global.trace_params.x;
 
-    // Relaxed sphere march (TraceLib): 32 steps, hitThreshold = voxel0 * 0.5,
-    // minStep = voxel0 * 0.25, d * 1.2 overstep when far — same march the
-    // monolithic ScreenProbeTraceRays kernel runs.
-    SDFTraceResult res = traceSDF_relaxed(origin, rayDir, marchDist,
-                                          sdf0, sdf1, sdf2,
-                                          global.sdf_origins, global.sdf_extents,
-                                          global.sdf_voxel_sizes,
-                                          uint(global.sdf_resolutions.w));
+    // Conservative SPGI march: 32 steps, hitThreshold = voxel0 * 0.5,
+    // minStep = voxel0 * 0.25. The 1.2x legacy scale remains available as an
+    // explicit A/B/rollback through SPGI_SDF_STEP_SCALE.
+    SDFTraceResult res = traceSDFStepScale(origin, rayDir, marchDist,
+                                          global.hint_params.z);
 
     if (res.hit) {
         // T4.3 二批: refine the coarse hit distance against detail slots.
@@ -333,7 +393,9 @@ void screen_probe_trace_sdf() {
         vec2 octS = clamp(oct * 2.0 - 1.0, vec2(-1.0), vec2(1.0));
         hit_buffer.data[global_id] = vec4(t,
                                           uintBitsToFloat(packSnorm2x16(octS)),
-                                          0.0, 2.0);
+                                          global.diag_params.x > 5.5 && global.diag_params.x < 6.5
+                                              ? res.distance : 0.0,
+                                          2.0);
     } else if (cacheStart > 0.0) {
         // F1 far-cache: x = travelled distance (stop point = origin + dir * x).
         hit_buffer.data[global_id] = vec4(res.distance, 0.0, 0.0, 3.0);

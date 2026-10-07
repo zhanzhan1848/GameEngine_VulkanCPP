@@ -37,11 +37,124 @@
 // P1.1: 共享解析天空（DDGI 不可用时的探针回退与可见天空同源同色）
 #include "ShaderLib/SkyAtmosphere.glsl"
 
+// 48B nodes/triangles, 64B instances; mirrors GeometryFirstHit.h.
+struct GeometryNode { vec4 lo; vec4 hi; uvec4 links; };
+struct GeometryTriangle { vec4 a; vec4 e1; vec4 e2; };
+struct GeometryInstance { vec4 inverse0; vec4 inverse1; vec4 inverse2; uvec4 identity; };
+layout(set=0,binding=26,std430) readonly buffer GeometryTop { GeometryNode data[]; } geometryTop;
+layout(set=0,binding=27,std430) readonly buffer GeometryBottom { GeometryNode data[]; } geometryBottom;
+layout(set=0,binding=28,std430) readonly buffer GeometryTriangles { GeometryTriangle data[]; } geometryTriangles;
+layout(set=0,binding=29,std430) readonly buffer GeometryInstances { GeometryInstance data[]; } geometryInstances;
+// Compensated difference of products prevents skinny-triangle normals from
+// losing their small component. No shaderFloat64 capability is required.
+float geometryDifferenceOfProducts(float a,float b,float c,float d) {
+    precise float cd=c*d;
+    precise float error=fma(-c,d,cd);
+    precise float difference=fma(a,b,-cd);
+    return difference+error;
+}
+vec3 geometryTriangleNormal(vec3 a,vec3 b) {
+    return vec3(geometryDifferenceOfProducts(a.y,b.z,a.z,b.y),
+                geometryDifferenceOfProducts(a.z,b.x,a.x,b.z),
+                geometryDifferenceOfProducts(a.x,b.y,a.y,b.x));
+}
+bool geometryBox(GeometryNode n,vec3 o,vec3 d,float nearT,float farT) {
+    for(uint k=0u;k<3u;++k) {
+        if(d[k]==0.) { if(o[k]<n.lo[k] || o[k]>n.hi[k]) return false; }
+        else { float a=(n.lo[k]-o[k])/d[k], b=(n.hi[k]-o[k])/d[k]; nearT=max(nearT,min(a,b)); farT=min(farT,max(a,b)); if(nearT>farT) return false; }
+    } return true;
+}
+#ifndef SC_GEO_NONZERO_ONLY
+#define SC_GEO_NONZERO_ONLY false
+#endif
+// This is exactly the original nonzero-axis branch, in the same axis order.
+// Only finite directions with all three components nonzero use it.
+bool geometryBoxNonzero(GeometryNode n,vec3 o,vec3 d,float nearT,float farT) {
+    for(uint k=0u;k<3u;++k) {
+        float a=(n.lo[k]-o[k])/d[k], b=(n.hi[k]-o[k])/d[k];
+        nearT=max(nearT,min(a,b)); farT=min(farT,max(a,b)); if(nearT>farT)return false;
+    } return true;
+}
+// -1 unknown, 0 segment miss, 1 first geometric triangle. Material and
+// captured surface qualification are checked separately; never skip it.
+int geometryFirstHit(vec3 o,vec3 d,float nearT,float farT,out float bestT,out uint owner,out uint bestPrimitive,out vec3 firstN,out vec3 firstA,out vec3 firstE1,out vec3 firstE2) {
+    bool topNonzero=SC_GEO_NONZERO_ONLY && all(notEqual(d,vec3(0))) && !any(isnan(d)) && !any(isinf(d));
+    firstN=vec3(0);firstA=vec3(0);firstE1=vec3(0);firstE2=vec3(0);bestT=farT; owner=0u; bestPrimitive=0xffffffffu; bool found=false;
+    uint ts[64]; uint tp=1u; ts[0]=0u;
+    while(tp!=0u) {
+        uint at=ts[--tp]; if(at>=geometryTop.data.length()) return -1;
+        GeometryNode n=geometryTop.data[at];bool topHit;
+        if(topNonzero)topHit=geometryBoxNonzero(n,o,d,nearT,bestT);else topHit=geometryBox(n,o,d,nearT,bestT);
+        if(!topHit)continue;
+        if(n.links.w==0u) { if(tp+2u>64u) return -1; ts[tp++]=n.links.x; ts[tp++]=n.links.y; continue; }
+        if(n.links.z>=geometryInstances.data.length()) return -1;
+        GeometryInstance inst=geometryInstances.data[n.links.z];
+        vec3 lo=vec3(dot(inst.inverse0,vec4(o,1)),dot(inst.inverse1,vec4(o,1)),dot(inst.inverse2,vec4(o,1)));
+        // Do not normalize: inverse scaling must preserve world ray parameter.
+        vec3 ld=vec3(dot(inst.inverse0.xyz,d),dot(inst.inverse1.xyz,d),dot(inst.inverse2.xyz,d));
+        if(any(isnan(lo))||any(isinf(lo))||any(isnan(ld))||any(isinf(ld))) return -1;
+        bool bottomNonzero=SC_GEO_NONZERO_ONLY && all(notEqual(ld,vec3(0)));
+        uint bs[64]; uint bp=1u; bs[0]=inst.identity.x;
+        while(bp!=0u) {
+            at=bs[--bp]; if(at>=geometryBottom.data.length()) return -1;
+            GeometryNode b=geometryBottom.data[at];bool bottomHit;
+            if(bottomNonzero)bottomHit=geometryBoxNonzero(b,lo,ld,nearT,bestT);else bottomHit=geometryBox(b,lo,ld,nearT,bestT);
+            if(!bottomHit)continue;
+            if(b.links.w==0u) { if(bp+2u>64u) return -1; bs[bp++]=b.links.x; bs[bp++]=b.links.y; continue; }
+            if(b.links.z>geometryTriangles.data.length() || b.links.w>geometryTriangles.data.length()-b.links.z) return -1;
+            for(uint i=0u;i<b.links.w;++i) {
+                GeometryTriangle tri=geometryTriangles.data[b.links.z+i];
+                vec3 p=cross(ld,tri.e2.xyz); float det=dot(tri.e1.xyz,p);
+                if(det==0.) continue;
+                vec3 v=lo-tri.a.xyz; float u=dot(v,p)/det;
+                if(u<0. || u>1.) continue;
+                vec3 q=cross(v,tri.e1.xyz); float bary=dot(ld,q)/det;
+                // Barycentrics decide containment; solve t from the plane.
+                // The triple product e2 dot ((origin-a) cross e1) suffers
+                // cancellation on long thin triangles even for interior hits.
+                vec3 normal=geometryTriangleNormal(tri.e1.xyz,tri.e2.xyz);
+                float planeDet=dot(ld,normal);
+                if(planeDet==0.) return -1;
+                float t=dot(tri.a.xyz-lo,normal)/planeDet;
+                if(isnan(t)||isinf(t)||isnan(bary)||isinf(bary)||isnan(u)||isinf(u)) return -1;
+                if(bary<0. || u+bary>1. || t<nearT || t>bestT) continue;
+                uint primitive=floatBitsToUint(tri.a.w);
+                if(found && t==bestT && (inst.identity.y>owner || (inst.identity.y==owner && primitive>=bestPrimitive))) continue;
+                owner=inst.identity.y; bestPrimitive=primitive; bestT=t; found=true;
+                bool identity=all(equal(inst.inverse0,vec4(1,0,0,0))) && all(equal(inst.inverse1,vec4(0,1,0,0))) && all(equal(inst.inverse2,vec4(0,0,1,0)));
+                firstN=identity?normalize(normal):vec3(0);firstA=tri.a.xyz;firstE1=tri.e1.xyz;firstE2=tri.e2.xyz;
+            }
+        }
+    } return found?1:0;
+}
+
+layout(set=0,binding=30,std430) readonly buffer ZeroOwners {uvec4 data[];} zeroOwners;
+layout(set=0,binding=31,std430) readonly buffer ZeroMaterials {uvec4 data[];} zeroMaterials;
+bool zeroTrianglePoint(vec3 p,vec3 a,vec3 e1,vec3 e2,vec3 n) {
+    if(abs(dot(p-a,n))>0.002)return false;
+    vec3 v=p-a;float aa=dot(e1,e1),bb=dot(e2,e2),ab=dot(e1,e2);
+    float det=geometryDifferenceOfProducts(aa,bb,ab,ab);if(det<=1e-12)return false;
+    float u=(dot(v,e1)*bb-dot(v,e2)*ab)/det;
+    float w=(dot(v,e2)*aa-dot(v,e1)*ab)/det;
+    return u>=0. && w>=0. && u+w<=1.;
+}
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D prevFrameColor;
 layout(set = 0, binding = 1) uniform texture2D surface_cache_lighting;
 layout(set = 0, binding = 17) uniform texture2D surface_cache_depth;
+// CardCapture alpha: bit7 validity, bits3..6 transmission UNorm4,
+// bits0..2 thickness UNorm3.  Used only to authorize a thin-material
+// back-face lookup; opaque cards retain the strict orientation gate.
+layout(set = 0, binding = 23) uniform texture2D surface_cache_albedo;
+// Opt-in SPGI DDGI visibility experiment. Depth uses the same previous
+// completed slot as SH, not the concurrently updated current slot.
+layout(set = 0, binding = 24, std430) readonly buffer DDGIDepthHistory {
+    float values[];
+} ddgiDepth;
+layout(set = 0, binding = 25, std430) readonly buffer DDGIEffectiveOrigins {
+    vec4 values[];
+} ddgiOrigins;
 
 layout(set = 0, binding = 2) readonly buffer ProbePositionsBuf {
     vec4 data[];
@@ -67,13 +180,29 @@ layout(set = 0, binding = 5, std140) uniform GlobalData {
     vec4 hzb_params;
     vec4 cache_params;   // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
     vec4 diag_params;    // P1（reaudit §4.1/4.2）: x = diag mode（0/1/2/3，见 C++）
+    // 2026-09-21 修正：本声明此前缺 hint_params，sky_params 实际落在 C++
+    // hint_params（432）上、wrc_fb 落在 sky_params/wrc_fb[0] 上——天空档位
+    // 门读到 {0,0,0}（sky 回退全黑）、F1-a 限幅 w 恒 0、WRC header 错位。
+    // 对齐 C++ 布局后三处恢复设计语义。
+    vec4 hint_params;    // offset 432: x = 三线性 hint（PRIMAL_SPGI_TRILINEAR_HINT）
     // GI 能量根治方案 Phase 1.3（R3）: far-cache 天空回退的 SkyColor 档位门——
     // 与 DDGITraceFinalize 逃逸分支同源同门（EvaluateSkyBase × SkyColor.xyz）。
     // 旧实现无门控，探针拿到 ~3.0 全额天空而 DDGI 只有 0.4 档（6-7× 失配）。
-    vec4 sky_params;     // x = sky_color_intensity（GIDebug 单一事实源）
+    vec4 sky_params;     // offset 448: x = sky_color_intensity（GIDebug 单一事实源）, w = 回退限幅 k
     // [WRC] A3 尾扩: [0] = origin.xyz + spacing; [1] = counts.xyz + enabled。
-    vec4 wrc_fb[2];
+    vec4 wrc_fb[2];      // offset 464
+    vec4 repr_params;    // offset 496 (unused here — offset parity)
+    // x = tier3 slot layout; y = T_n; z = lightVar mask enable;
+    // w = P4 tier rays enable (16/32/64 by slot).
+    vec4 tier_params;    // offset 512
+    // x = radiance capacity in slots (compacted layout upper bound).
+    vec4 tier_counts;    // offset 528
 } global;
+
+// P2 (tier3): compacted slot list — flat radiance id → slot index.
+layout(set = 0, binding = 21, std430) readonly buffer CompactListBlock {
+    uint data[];
+} compactList;
 
 // [WRC] A3（fallback_spgi_to_wrc 边）: WRC radiance 方向格 + 消费计数。
 // 存储布局契约见 WRCTypes.h（K=64，kWRCProbeStrideU32 = K*2+4）。
@@ -86,12 +215,50 @@ layout(set = 0, binding = 20, std430) buffer WrcConsumeBuf {
 
 // P1（sponza-gap-reaudit §4.1/4.2 逐阶段台账）: 分支计数 + 辐射累计。
 // branch: 0=HZB hit(w==1), 1=SC card(w==2 且通过校验), 2=far-cache(w==3),
-// 3=world-fallback/DDGI/miss。bucket 0=全局，1..16 = 屏幕 4×4 桶
+// 3=world-fallback/DDGI/miss。4=其中 DDGI SH，5=其中天空/级联，
+// 6=其中被 SC 校验拒绝的 SDF 命中（4/5 互斥，6 是重叠子集）。
+// bucket 0=全局，1..16 = 屏幕 4×4 桶
 // （x 主序，bucket1=左上——拱顶热点 ROI 所在）。
 // 分量：x=count，y=luminance 累计（×64 定点），z=max luminance（×64 定点），
-// w=cosTheta 累计（×256）。atomic 写由 global.diag_params.x 门控。
+// w=cosTheta 累计（×32；×256 在 25 帧全局窗口溢出）；branch 6 的 w 改记 SDF hit.x 距离
+// （×16、上限 4m）。低精度/限幅让 25 帧窗口的 uint32 原子和不溢出。
+// atomic 由 diag_params.x 门控。
 layout(std430, set = 0, binding = 18) buffer SpgiTraceStats {
-    uvec4 spgi_stats[4][17];
+    uvec4 spgi_stats[7][17];
+    // Mode 6 only: 3x3 right-arcade probes x 4 directions, four vec4s each.
+    // [0]=hit.xyz/distance, [1]=probe.xyz/index, [2]=ray.xyz/reject reason.
+    // [3]=candidate eval/bounds/orient counts and raw coarse-SDF distance.
+    vec4 audit_samples[36][4];
+    // Mode 6 only: exact cards traversed by each sampled ray.  The grid
+    // builder caps each cell at eight cards; x=id, y=reject, z=mesh id,
+    // w=axis/direction plus bit 16 when the query accepted the candidate.
+    uvec4 audit_candidates[36][8];
+    // depth, signed along error, lateral error, allowed along tolerance.
+    vec4 audit_candidate_metrics[36][8];
+    // Exact projected receiver ROI; count, sum luminance*64,
+    // sum luminance*cosTheta*64, sum cosTheta*256. Categories:
+    // near-origin rejected SDF / farther rejected SDF / HZB+SC / other.
+    uvec4 roi_stats[6][4];
+    // Mode 6: actual consumed neighbour origin/state, distance/mean/variance/
+    // index, and base weight/visibility/radiance luminance/oct bin.
+    vec4 audit_ddgi[36][8][3];
+};
+
+// [E0-I 2026-09-21 决策仪表（能量-排查 §6 第 0 步 I-2/K-3）] SC 分支产出率
+// 漏斗（移植 WRC_SC_FUNNEL 分级，SurfaceCacheData scQueryCardCandidateDbg
+// 的 outReject 0=接受 1=bounds 2=orient-朝向 7=orient-hint软罚计数 ≥3=depth
+// 家族）+ 下行失败射线计数。永远累加（无 diag 门——每 SC 分支射线仅 2-5 次
+// atomic，量级与 wrc_consume 相同）。布局 16×u32：
+//   [0]=SC 候选评估数  [1]=boundsFail  [2]=orientFacingFail  [3]=depth 家族
+//   [4]=SC found（usedSurfaceCache）  [5]=下行失败且无兜底（黑）
+//   [6]=下行失败由 F1-a 级联兜底服务    [7]=orientHintFail（旧硬门会拒，
+//                        [①治理] 现为软键罚，仅计数）
+//   [8..15 射线级，①治理新增] [8]保留 [9]=raysFound [10]=raysAllReject
+//   (orient 主导) [11]=raysZeroCandidate（cell 空/无效）
+//   [12]=raysRejectNearOrigin（仅诊断）[13]=raysAllReject(bounds 主导)
+//   [14]=raysAllReject(depth 主导) [15]=raysRejectBeyondSkin（仅诊断）
+layout(std430, set = 0, binding = 22) buffer SpgiFailStats {
+    uint fail_stats[16];
 };
 
 // F2 (M7): previous frame's final probe SH — importance-resampling proposal.
@@ -147,7 +314,7 @@ vec3 wrcSampleRadiance(vec3 stopPos, vec3 dir, out bool ok) {
     ok = false;
     if (global.wrc_fb[1].w <= 0.5) return vec3(0.0);
     const uint K = 64u;                     // kWRCDirsPerProbe
-    const uint stride = K * 2u + 4u;        // kWRCProbeStrideU32
+    const uint radStride = K * 2u;          // kWRCProbeRadianceStrideU32 [P2 SoA]
     vec3 org = global.wrc_fb[0].xyz;
     float spacing = max(global.wrc_fb[0].w, 0.01);
     ivec3 counts = ivec3(global.wrc_fb[1].xyz);
@@ -156,8 +323,11 @@ vec3 wrcSampleRadiance(vec3 stopPos, vec3 dir, out bool ok) {
     if (any(lessThan(gp, vec3(0.0))) || any(greaterThan(gp, gridMax))) return vec3(0.0);
     ivec3 c0 = clamp(ivec3(round(gp)), ivec3(0), counts - ivec3(1));
     uint pidx = uint(c0.x) + uint(counts.x) * (uint(c0.y) + uint(counts.y) * uint(c0.z));
-    uint base = pidx * stride;
-    uint state = wrc_probe_data[base + K * 2u + 2u];
+    // [P2 SoA]: metaBase = probeTotal × K×2；meta 条目 +2 = state。
+    const uint rbase = pidx * radStride;
+    const uint metaBase = uint(counts.x) * uint(counts.y) * uint(counts.z) * radStride
+                        + pidx * 4u;
+    uint state = wrc_probe_data[metaBase + 2u];
     if ((state & 1u) == 0u || (state & 2u) != 0u) return vec3(0.0);   // 未收敛 / 入几何
 
     vec3 acc = vec3(0.0);
@@ -170,16 +340,21 @@ vec3 wrcSampleRadiance(vec3 stopPos, vec3 dir, out bool ok) {
         float c = dot(wk, dir);
         if (c <= 0.25) continue;
         float w = c * c * c * c * c * c;    // c^6：K=64 的紧凑瓣（≈35° 有效带宽）
-        uvec2 p = uvec2(wrc_probe_data[base + k * 2u], wrc_probe_data[base + k * 2u + 1u]);
+        uvec2 p = uvec2(wrc_probe_data[rbase + k * 2u], wrc_probe_data[rbase + k * 2u + 1u]);
         vec2 lo = unpackHalf2x16(p.x);
         vec2 hi = unpackHalf2x16(p.y);
         acc += vec3(lo.x, lo.y, hi.x) * w;
         wSum += w;
     }
     if (wSum <= 0.0) return vec3(0.0);
+    vec3 r = acc / wSum;
+    // [③radiance 卫生 2026-09-21] half 解码可产出 NaN/Inf（max(NaN,0) 不
+    // 消毒，向下游 SH/ Average 传播）；同时 64 上限对齐 WRCUpdateRadiance
+    // 的混合钳制（far-cache maxLum 3390 溯源）。
+    if (any(isnan(r)) || any(isinf(r))) return vec3(0.0);
     ok = true;
     atomicAdd(wrc_consume[pidx], 1u);
-    return acc / wSum;
+    return min(r, vec3(64.0));
 }
 
 
@@ -224,7 +399,9 @@ void spgiStatRecord(uint probeIdx, uint branch, vec3 radiance, float cosTheta) {
     uint gridH = max(uint(global.grid_params.y), 1u);
     float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
     uint lumQ = uint(clamp(lum, 0.0, 65535.0) * 64.0);
-    uint cosQ = uint(clamp(cosTheta, 0.0, 1.0) * 256.0);
+    uint cosQ = branch == 6u
+        ? uint(clamp(cosTheta, 0.0, 4.0) * 16.0)
+        : uint(clamp(cosTheta, 0.0, 1.0) * 32.0);
     uint col = min((probeIdx % gridW) * 4u / gridW, 3u);
     uint row = min((probeIdx / gridW) * 4u / gridH, 3u);
     uint bucket = 1u + col + row * 4u;   // bucket1 = 屏幕左上（拱顶热点 ROI）
@@ -243,12 +420,32 @@ void screen_probe_trace_finalize() {
     uint gridW = uint(global.grid_params.x);
     uint gridH = uint(global.grid_params.y);
     uint raysPerProbe = uint(global.grid_params.w);
-    uint totalRays = gridW * gridH * raysPerProbe;
-    if (global_id >= totalRays) return;
 
-    uint probeIdx = global_id / raysPerProbe;
-    uint rayIdx   = global_id % raysPerProbe;
+    // P2/P4: compacted slot indirection + per-slot tier gate (see HZB).
+    // Tier-gated rays are zero-filled here (Average treats w == 0 as an
+    // inactive lane); their hit_buffer entries are never consumed.
+    uint probeIdx;
+    uint rayIdx;
+    if (global.tier_params.x > 0.5) {
+        probeIdx = compactList.data[global_id / raysPerProbe];
+        if (probeIdx == 0xFFFFFFFFu) {
+            probeRadiance.data[global_id] = vec4(0.0, 0.0, 0.0, -1.0);
+            return;
+        }
+        rayIdx = global_id % raysPerProbe;
+        if (global.tier_params.w > 0.5 &&
+            float(rayIdx) >= probeNormals.data[probeIdx].w) {
+            probeRadiance.data[global_id] = vec4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+    } else {
+        uint totalRays = gridW * gridH * raysPerProbe;
+        if (global_id >= totalRays) return;
+        probeIdx = global_id / raysPerProbe;
+        rayIdx = global_id % raysPerProbe;
+    }
 
+    const uint zeroFlags=uint(global.surface_cache_params.w);
     vec4 posData = probePositions.data[probeIdx];
     vec4 normData = probeNormals.data[probeIdx];
     if (posData.w <= 0.0) {
@@ -285,6 +482,20 @@ void screen_probe_trace_finalize() {
     vec3 radiance = vec3(0.0);
     float cosTheta = 0.0;
     bool useWorldFallback = false;
+    uint scRejectReason = 5u; // no validation path / unknown
+    uint auditEvalCount = 0u, auditBounds = 0u, auditOrient = 0u, auditDepth = 0u;
+    uint auditCardSlot = 0xFFFFFFFFu;
+    if (global.diag_params.x > 5.5 && global.diag_params.x < 6.5) {
+        uint px = probeIdx % gridW, py = probeIdx / gridW;
+        uint sx = px == 260u ? 0u : (px == 285u ? 1u : (px == 310u ? 2u : 3u));
+        uint sy = py == 82u ? 0u : (py == 112u ? 1u : (py == 138u ? 2u : 3u));
+        if (global.hint_params.y > 0.5) {
+            sx = px == 110u ? 0u : (px == 160u ? 1u : (px == 210u ? 2u : 3u));
+            sy = py == 160u ? 0u : (py == 168u ? 1u : (py == 176u ? 2u : 3u));
+        }
+        uint sr = rayIdx == 0u ? 0u : (rayIdx == 12u ? 1u : (rayIdx == 24u ? 2u : (rayIdx == 36u ? 3u : 4u)));
+        if (sx < 3u && sy < 3u && sr < 4u) auditCardSlot = (sy * 3u + sx) * 4u + sr;
+    }
     // P1: 逐射线分支归因（0=HZB, 1=SC, 2=far-cache, 3=fallback/miss）
     uint statBranch = 3u;
 
@@ -301,8 +512,12 @@ void screen_probe_trace_finalize() {
         float hzbHitLum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
         // P1（reaudit §4.2）: diag mode 2 = HZB 去惩罚（raw 对照，量化该
         // 经验钳制对热点/整图的贡献）。0/1/3 维持默认。
+        // [E0-B 2026-09-21] 亮度惩罚退役为 firefly 软限幅：膝点从 1.0 抬到
+        // global.tier_counts.y（CPU env PRIMAL_SPGI_PENALTY_KNEE，默认 8.0）
+        // ——lum<8 的合法中亮反弹（白地面→墙，L_o 2-8）全额通过，只有
+        // lum>8 的 firefly/直射峰值被压。回滚 knee=1.0 即旧语义。
         if (global.diag_params.x < 1.5 || global.diag_params.x > 2.5) {
-            radiance *= 1.0 / (1.0 + max(hzbHitLum - 1.0, 0.0) * 2.0);
+            radiance *= 1.0 / (1.0 + max(hzbHitLum - global.tier_counts.y, 0.0) * 2.0);
         }
         cosTheta = max(dot(probeNormal, rayDir), 0.0);
         statBranch = 0u;
@@ -322,6 +537,34 @@ void screen_probe_trace_finalize() {
         }
         const float faceGate = global.diag_params.y;
         bool usedSurfaceCache = false;
+        uint zeroOwner=0xffffffffu,zeroPrimitive=0xffffffffu;
+        vec3 zeroN=vec3(0),zeroA=vec3(0),zeroE1=vec3(0),zeroE2=vec3(0);
+        uint zeroStatus=0u;
+        float firstT=-1.0;
+        for(uint zeroAttempt=0u;zeroAttempt<3u;++zeroAttempt) {
+        if(zeroAttempt==1u) {
+            if(usedSurfaceCache || (zeroFlags&1u)==0u || hit.x!=0.0)break;
+            zeroStatus=1u;
+            int first=geometryFirstHit(origin,rayDir,0.00002,global.trace_params.x,firstT,zeroOwner,zeroPrimitive,zeroN,zeroA,zeroE1,zeroE2);
+            zeroStatus=first<0?2u:(first==0?3u:4u);
+            // Opaque first surfaces must face the incoming ray. Back faces and
+            // uncertain winding keep the original estimate; do not skip them.
+            if(first!=1 || dot(zeroN,zeroN)<0.5 || dot(zeroN,rayDir)>=0.0 || zeroOwner>=zeroOwners.data.length())break;
+            uvec4 own=zeroOwners.data[zeroOwner];
+            if(own.y!=1u || own.z!=zeroOwner || own.w!=uint(global.camera_position.w) || own.x>=zeroMaterials.data.length()/3u) {zeroStatus=5u;break;}
+            if(zeroMaterials.data[own.x*3u+2u].w!=0u) {zeroStatus=6u;break;}
+            if(global.cache_params.x>0. && firstT>global.cache_params.x) {zeroStatus=7u;break;}
+            hitPos=origin+rayDir*firstT;hitNormalHint=zeroN;zeroStatus=8u;
+        }
+
+
+        if(zeroAttempt==2u) {
+            if(usedSurfaceCache || zeroStatus!=8u || (zeroFlags&4u)==0u)break;
+            if(zeroOwner>=cardLookup.data.length()/12u) {zeroStatus=12u;break;}
+            uint db=cardLookup.data[zeroOwner*12u+10u],de=cardLookup.data[zeroOwner*12u+11u];
+            if(db>de || de>cards.data.length() || de>uint(global.surface_cache_params.y)) {zeroStatus=12u;break;}
+            zeroStatus=10u;
+        }
 
         // A card projection only proves UV coverage, not surface identity.
         // Validate against captured geometry and choose the closest matching
@@ -338,42 +581,183 @@ void screen_probe_trace_finalize() {
             // of a two-sided wall) and decomposed along/perp tolerances to the
             // existing depth + min-error scheme. Valid black stays accepted.
             float bestKey = 1e30;
-            if (cell != 0xFFFFFFFFu) {
-                uint begin = scgo.sc_grid_offsets[16u + cell];
-                uint end = scgo.sc_grid_offsets[17u + cell];
+            // [①治理 2026-09-21] 逐射线结果分类（fail_stats[8..15]）：
+            // 区分"候选级拒绝率"（受卡密度/单元格大小影响）与"射线级失败率"
+            // （真正决定 transport 送达）。
+            bool anyAccept = false, anyOrient = false, anyBounds = false, anyDepth = false;
+            uint evalCount = 0u;
+            const bool ownerRetry=zeroAttempt==2u;
+            if (ownerRetry || cell != 0xFFFFFFFFu) {
+                uint begin = ownerRetry?cardLookup.data[zeroOwner*12u+10u]:scgo.sc_grid_offsets[16u + cell];
+                uint end = ownerRetry?cardLookup.data[zeroOwner*12u+11u]:scgo.sc_grid_offsets[17u + cell];
                 for (uint gi = begin; gi < end; ++gi) {
-                    uint ci = scgc.sc_grid_cards[gi];
+                    uint ci = ownerRetry?gi:scgc.sc_grid_cards[gi];
                     vec3 candidate; float key;
-                    // 门阈值经 hint 缩放实现（SurfaceCacheData 的硬编码门
-                    // 是 n_true·hint < 0.5 拒绝）：k=0.5/T 使有效阈值=T。
-                    // T<0 → 零向量（门关）。
-                    vec3 hintForQuery = (faceGate < 0.0) ? vec3(0.0)
-                                        : hitNormalHint * (0.5 / max(faceGate, 1e-3));
-                    if (scQueryCardCandidate(cards.data[ci], hitPos, -rayDir,
-                                             max(0.15, global.sdf_voxel_sizes[0].x * 1.25),
-                                             surface_cache_depth, surface_cache_lighting,
-                                             hintForQuery, candidate, key)) {
+                // 门阈值经 hint 缩放实现（SurfaceCacheData 的硬编码门
+                // 是 n_true·hint < 0.5 拒绝）：k=0.5/T 使有效阈值=T。
+                // T<0 → 零向量（门关）。[①治理] hint 错位软键惩罚：
+                // tier_counts.z>0.5 时放行错位候选（key 加罚、码 7 计数），
+                // 否则回旧硬拒绝语义（PRIMAL_SPGI_HINT_SOFT 默认关——
+                // 软罚放大 found 3× 后与 SC↔probe 双稳态边界相互作用，
+                // 780 帧间歇发散，见完工文档；单变量重开验证后再定默认）。
+                vec3 hintForQuery = (faceGate < 0.0) ? vec3(0.0)
+                                    : hitNormalHint * (0.5 / max(faceGate, 1e-3));
+                const bool hintSoft = global.tier_counts.z > 0.5;
+                    uint scReject = 0u;
+                    atomicAdd(fail_stats[0], 1u);
+                    ++evalCount;
+                    SurfaceCacheCard queryCard = cards.data[ci];
+                    if(zeroAttempt>=1u && queryCard.mesh_instance_id!=zeroOwner)continue;
+                    const float queryTol = max(0.15, global.sdf_voxel_sizes[0].x * 1.25);
+                    // Expand only the UV discovery domain.  The shared query
+                    // still requires captured-depth along/perp agreement, so
+                    // a clamped edge texel cannot validate unrelated geometry.
+                    const float queryPad = min(queryTol, 0.45);
+
+                    vec3 queryFacing = -rayDir;
+                    float backsideTransport = 1.0;
+                    bool transmissiveBackface = false;
+                    if (dot(scCardFaceNormal(queryCard), queryFacing) >= 0.0) {
+                        vec2 materialUV;
+                        if (worldToCardUVMarginPad(hitPos, queryCard, materialUV,
+                                1.0 / float(max(queryCard.resolution, 1u)), queryPad)) {
+                            uvec2 materialTexel = uvec2(clamp(materialUV, vec2(0.0),
+                                vec2(queryCard.atlas_offset_x + queryCard.resolution - 1u,
+                                     queryCard.atlas_offset_y + queryCard.resolution - 1u)));
+                            uint transportBits = uint(round(clamp(
+                                texelFetch(surface_cache_albedo, ivec2(materialTexel), 0).a,
+                                0.0, 1.0) * 255.0));
+                            float transmission = float((transportBits >> 3u) & 0xFu) / 15.0;
+                            float thickness = float(transportBits & 0x7u) / 7.0;
+                            backsideTransport = transmission * exp(-2.0 * thickness);
+                            transmissiveBackface = (transportBits & 0x80u) != 0u &&
+                                                   backsideTransport > (1.0 / 255.0);
+                        }
+                        if (transmissiveBackface) queryFacing = rayDir;
+                    }
+
+                    bool candidateAccepted=scQueryCardCandidateDbg(queryCard,hitPos,queryFacing,queryTol,queryPad,surface_cache_depth,surface_cache_lighting,hintForQuery,candidate,key,scReject);
+                    if (auditCardSlot != 0xFFFFFFFFu && gi - begin < 8u) {
+                        audit_candidates[auditCardSlot][gi - begin] =
+                            uvec4(ci, scReject, queryCard.mesh_instance_id,
+                                  queryCard.axis_direction | (candidateAccepted ? 0x10000u : 0u));
+                        vec4 metrics = vec4(-1.0);
+                        vec2 auditUV;
+                        if (worldToCardUVMarginPad(hitPos, queryCard, auditUV,
+                                1.0 / float(max(queryCard.resolution, 1u)), queryPad)) {
+                            uvec2 auditTexel = uvec2(clamp(auditUV, vec2(0.0),
+                                vec2(queryCard.atlas_offset_x + queryCard.resolution - 1u,
+                                     queryCard.atlas_offset_y + queryCard.resolution - 1u)));
+                            float capturedDepth = texelFetch(surface_cache_depth,
+                                ivec2(auditTexel), 0).r;
+                            if (!isnan(capturedDepth) && !isinf(capturedDepth) && capturedDepth >= 0.0) {
+                                vec3 delta = cardTexelToWorld(auditTexel, capturedDepth, queryCard) - hitPos;
+                                vec3 face = scCardFaceNormal(queryCard);
+                                float along = dot(delta, face);
+                                float footprint = length(queryCard.extent.xyz) /
+                                    float(max(queryCard.resolution, 1u));
+                                metrics = vec4(capturedDepth, along,
+                                               length(delta - face * along), queryTol + footprint);
+                            }
+                        }
+                        audit_candidate_metrics[auditCardSlot][gi - begin] = metrics;
+                    }
+                    if(candidateAccepted && zeroAttempt>=1u) {
+                        vec2 uv;candidateAccepted=worldToCardUVMarginPad(hitPos,queryCard,uv,1.0/float(max(queryCard.resolution,1u)),queryPad);
+                        if(candidateAccepted) {
+                            ivec2 px=ivec2(clamp(uv,vec2(0),vec2(queryCard.atlas_offset_x+queryCard.resolution-1u,queryCard.atlas_offset_y+queryCard.resolution-1u)));
+                            float d=texelFetch(surface_cache_depth,px,0).r;
+                            vec3 p=cardTexelToWorld(uvec2(px),d,queryCard);
+                            uint transport=uint(round(clamp(texelFetch(surface_cache_albedo,px,0).a,0.,1.)*255.));
+                            candidateAccepted=(transport&0x80u)!=0u && ((transport>>3u)&15u)==0u && !transmissiveBackface && zeroTrianglePoint(p,zeroA,zeroE1,zeroE2,zeroN);
+                        }
+                    }
+                    if (candidateAccepted) {
+                        // The atlas is spatial rather than directional.  A
+                        // back-face read therefore gets an explicit material
+                        // attenuation so front-side radiance cannot leak
+                        // through a weakly transmissive cloth.
+                        if (transmissiveBackface) candidate *= backsideTransport;
+                        if (transmissiveBackface) atomicAdd(fail_stats[8], 1u);
+                        // [①治理] 软罚候选被接受时 outReject 保留 7。
+                        if (scReject == 7u) {
+                            atomicAdd(fail_stats[7], 1u);
+                            if (!hintSoft) {
+                                // 硬模式（回滚位）：等价旧 G2 门——直接拒绝。
+                                atomicAdd(fail_stats[2], 1u);
+                                anyOrient = true;
+                                ++auditOrient;
+                                continue;
+                            }
+                        }
                         if (key < bestKey) {
                             bestKey = key;
                             radiance = candidate;
                             usedSurfaceCache = true;
+                            if(zeroAttempt!=0u)zeroStatus=zeroAttempt==2u?11u:9u;
                         }
+                    } else if (scReject == 1u) {
+                        atomicAdd(fail_stats[1], 1u);
+                        anyBounds = true;
+                        ++auditBounds;
+                    } else if (scReject == 2u) {
+                        atomicAdd(fail_stats[2], 1u);
+                        anyOrient = true;
+                        ++auditOrient;
+                    } else if (scReject == 7u) {
+                        atomicAdd(fail_stats[7], 1u);   // hint 软罚计数（旧硬门会拒）
+                        anyOrient = true;
+                        ++auditOrient;
+                    } else if (scReject >= 3u) {
+                        atomicAdd(fail_stats[3], 1u);
+                        anyDepth = true;
+                        ++auditDepth;
                     }
                 }
+                auditEvalCount = evalCount;
+                if (evalCount == 0u) atomicAdd(fail_stats[11], 1u);   // 空 cell
+            } else {
+                atomicAdd(fail_stats[11], 1u);   // cell 无效
+            }
+            if (usedSurfaceCache) {
+                scRejectReason = 0u;
+                atomicAdd(fail_stats[4], 1u);
+                atomicAdd(fail_stats[9], 1u);    // 射线级 found
+            } else if (evalCount > 0u) {
+                // 射线级失败分类（优先级 orient > bounds > depth）
+                if (anyOrient)      { atomicAdd(fail_stats[10], 1u); scRejectReason = 1u; }
+                else if (anyBounds) { atomicAdd(fail_stats[13], 1u); scRejectReason = 2u; }
+                else if (anyDepth)  { atomicAdd(fail_stats[14], 1u); scRejectReason = 3u; }
+                else scRejectReason = 5u;
+            } else {
+                scRejectReason = 4u; // grid cell has no card candidate
             }
         }
+        } // retry only after the original query failed
         if (!usedSurfaceCache) {
             // A coarse SDF hit has no matching raster-depth proof. Projecting
             // it into screen color can borrow sunlight from an occluder.
             // Use the existing world-probe estimate until a validated screen
             // hit (HZB) or a surface-cache card supplies this ray.
             useWorldFallback = true;
+            if (global.diag_params.x > 0.5) {
+                atomicAdd(fail_stats[hit.x <= global.sdf_voxel_sizes[0].x * 0.5 ? 12u : 15u], 1u);
+            }
         }
-        // P1（reaudit §4.2）: diag mode 3 = 对 SC card radiance 施加与 HZB
-        // 相同的亮度惩罚——两路径同处理的能量一致性对照。
-        if (global.diag_params.x > 2.5) {
+        // [F2 2026-09-20 能量不对称修复 A3] SC 命中惩罚默认开——与 HZB 分支
+        // 同式同阈（惩罚对称性）。三跑实测（配方 frame≤350，25 帧窗）：
+        // SC 分支 meanLum 1.212（无惩罚）→ 0.182（惩罚），max 47.6→0.98，
+        // 与 HZB 惩罚后 0.141 对称；全桶均匀 ~5-10× 压制（无选择性——
+        // 压的是整体 SC 泵入）。回滚：PRIMAL_SPGI_SC_NOPENALTY=1（CPU 置
+        // diag_params.w=1）。原 diag-only 语义（mode>2.5）作废。
+        // [E0-B 2026-09-21] 惩罚退役为 firefly 软限幅（膝点 tier_counts.y，
+        // 默认 8）：SC 直射随 nodirect atlas 分离（E0-B 主根治）后，此处的
+        // 职责只剩压 firefly 峰；膝点 8 以下合法反弹全额通过。三重回滚：
+        // NOPENALTY=1（全关）/ PRIMAL_SPGI_SC_NODIRECT=0（回混合 atlas，
+        // 此时膝点建议同时回 1.0）/ knee env=1.0（旧语义）。
+        if (global.diag_params.w < 0.5) {
             float scLum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
-            radiance *= 1.0 / (1.0 + max(scLum - 1.0, 0.0) * 2.0);
+            radiance *= 1.0 / (1.0 + max(scLum - global.tier_counts.y, 0.0) * 2.0);
         }
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
         cosTheta = max(dot(probeNormal, rayDir), 0.0);
@@ -424,7 +808,9 @@ void screen_probe_trace_finalize() {
                              - 0.488603 * cL1x * rayDir.y
                              + 0.488603 * cL1y * rayDir.z
                              - 0.488603 * cL1z * rayDir.x;
-                    radiance = max(irr, vec3(0.0));
+                    // [③卫生] 级联值域消毒（NaN→0，上限 64 对齐 Average）。
+                    if (any(isnan(irr)) || any(isinf(irr))) irr = vec3(0.0);
+                    radiance = min(max(irr, vec3(0.0)), vec3(64.0));
                     cosTheta = max(dot(probeNormal, rayDir), 0.0);
                     ddgiOk = true;
                 }
@@ -484,6 +870,9 @@ void screen_probe_trace_finalize() {
                 }
                 if (wsum > 0.0) {
                     radiance = acc / wsum;
+                    // [③卫生] NaN/Inf 消毒 + 64 上限。
+                    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+                    radiance = min(radiance, vec3(64.0));
                     cosTheta = max(dot(probeNormal, rayDir), 0.0);
                     ddgiOk = true;
                 }
@@ -500,6 +889,36 @@ void screen_probe_trace_finalize() {
             if (skyWeight > 0.0) {
                 radiance = EvaluateSkyBase(rayDir) * global.sky_params.xyz;
                 cosTheta = skyWeight;
+            } else {
+                // [F1-a 2026-09-20 能量不对称修复] 失败射线低频有界回退：
+                // 下行射线无天空门——全部回退腿（WRC/级联/DDGI）耗尽后落黑，
+                // 与邻近亮回退（天空 9-12）拼出空间二值化。以 RadianceCascade
+                // 32³ 低频场填充（真实测量的低频近似，不编造卡片辐射），上限
+                // min(级联值, 天空×k)，k = sky_params.w
+                //（PRIMAL_GI_FALLBACK_CLAMP，默认 0.3；0 = 回旧黑语义）。
+                // [E0-I K-3] served=false = 下行失败且无兜底（黑区面积的直接
+                // 计量）；served=true = F1-a 级联兜底服务。
+                bool servedF1a = false;
+                if (global.sky_params.w > 0.0 && global.ddgi_fb[1].w > 0.5 && global.cache_params.w > 0.5) {
+                    float ddgiSpanF = max(max(global.ddgi_fb[1].x, global.ddgi_fb[1].y),
+                                          global.ddgi_fb[1].z) * global.ddgi_fb[0].w;
+                    float cExtentF = max(ddgiSpanF * 2.0, 1.0);
+                    vec3 cOrgF = global.ddgi_fb[0].xyz - vec3(cExtentF * 0.25);
+                    vec3 cgpF = (probePos - cOrgF) / (cExtentF / 32.0);
+                    if (all(greaterThanEqual(cgpF, vec3(0.0))) && all(lessThan(cgpF, vec3(32.0)))) {
+                        ivec3 ctF = clamp(ivec3(floor(cgpF)), ivec3(0), ivec3(31));
+                        vec4 cL0F = texelFetch(radianceCascadeL0, ctF, 0);
+                        if (cL0F.a > 0.5 && any(greaterThan(cL0F.rgb, vec3(0.0)))) {
+                            vec3 fb = 0.282095 * cL0F.rgb;
+                            if (any(isnan(fb)) || any(isinf(fb))) fb = vec3(0.0);   // [③卫生]
+                            vec3 cap = EvaluateSkyBase(rayDir) * global.sky_params.xyz * global.sky_params.w;
+                            radiance = min(fb, cap);
+                            cosTheta = max(dot(probeNormal, rayDir), 0.0);
+                            servedF1a = true;
+                        }
+                    }
+                }
+                atomicAdd(fail_stats[servedF1a ? 6u : 5u], 1u);
             }
         }
     }
@@ -522,6 +941,7 @@ void screen_probe_trace_finalize() {
 
                 vec3 acc = vec3(0.0);
                 float wsum = 0.0;
+                float unoccludedWsum = 0.0;
                 for (int z = 0; z < 2; ++z)
                 for (int y = 0; y < 2; ++y)
                 for (int x = 0; x < 2; ++x) {
@@ -536,6 +956,33 @@ void screen_probe_trace_finalize() {
                     // carry the bounce this ray is looking for.
                     float dirW = 0.25 + 0.75 * clamp(dot(toProbe, rayDir) * 0.5 + 0.5, 0.0, 1.0);
                     float w = tw * dirW;
+                    unoccludedWsum += w;
+                    if (global.hint_params.w > 0.5) {
+                        vec4 relocated = ddgiOrigins.values[pidx];
+                        vec3 anchor = relocated.w > 0.0 ? relocated.xyz : org + vec3(pc) * spacing;
+                        vec3 delta = probePos - anchor;
+                        float distanceToProbe = length(delta);
+                        vec3 direction = delta / max(distanceToProbe, 0.0001);
+                        vec2 oct = direction.xy / max(dot(abs(direction), vec3(1.0)), 0.0001);
+                        if (direction.z < 0.0)
+                            oct = (1.0 - abs(oct.yx)) * mix(vec2(-1.0), vec2(1.0), greaterThanEqual(oct, vec2(0.0)));
+                        uvec2 texel = uvec2(clamp((oct * 0.5 + 0.5) * 8.0, vec2(0.0), vec2(7.0)));
+                        uint depthIndex = pidx * 128u + texel.y * 8u + texel.x;
+                        float mean = ddgiDepth.values[depthIndex];
+                        // Stored value is variance, NOT a second moment.
+                        float variance = max(ddgiDepth.values[depthIndex + 64u], 0.0001);
+                        float beyond = max(distanceToProbe - mean, 0.0);
+                        float visibility = clamp(2.0 * variance / (variance + beyond * beyond), 0.2, 1.0);
+                        // A borrowed origin/SH is not an independent measurement.
+                        visibility *= relocated.w > 0.75 ? 1.0 : (relocated.w > 0.0 ? 0.5 : 0.0);
+                        if (auditCardSlot != 0xFFFFFFFFu) {
+                            uint ordinal = uint(z * 4 + y * 2 + x);
+                            audit_ddgi[auditCardSlot][ordinal][0] = vec4(anchor, relocated.w);
+                            audit_ddgi[auditCardSlot][ordinal][1] = vec4(distanceToProbe, mean, variance, float(pidx));
+                            audit_ddgi[auditCardSlot][ordinal][2] = vec4(w, visibility, 0.0, float(texel.y * 8u + texel.x));
+                        }
+                        w *= visibility;
+                    }
 
                     // Full L0-L2 evaluation, canonical basis (matches
                     // DDGIUpdateIrradiance's projection).
@@ -558,11 +1005,21 @@ void screen_probe_trace_finalize() {
                              + sh6v * ( 0.315392 * (3.0 * dz * dz - 1.0))
                              + sh7v * (-1.092548 * dx * dz)
                              + sh8v * ( 0.546274 * (dx * dx - dy * dy));
+                    if (global.hint_params.w > 0.5 && auditCardSlot != 0xFFFFFFFFu)
+                        audit_ddgi[auditCardSlot][uint(z * 4 + y * 2 + x)][2].z =
+                            dot(max(irr, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
                     acc += max(irr, vec3(0.0)) * w;
                     wsum += w;
                 }
-                if (wsum > 0.0) {
-                    radiance = acc / wsum;
+                if (wsum > 0.0 || global.hint_params.w > 0.5) {
+                    radiance = acc / max(wsum, 0.0001);
+                    // Mode 1 only changes neighbour selection. Mode 2 also
+                    // preserves attenuation erased by normalized interpolation.
+                    if (global.hint_params.w > 1.5)
+                        radiance *= clamp(wsum / max(unoccludedWsum, 0.0001), 0.0, 1.0);
+                    // [③卫生] NaN/Inf 消毒 + 64 上限。
+                    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+                    radiance = min(radiance, vec3(64.0));
                     cosTheta = max(dot(probeNormal, rayDir), 0.0);
                     ddgiOk = true;
                 }
@@ -576,14 +1033,91 @@ void screen_probe_trace_finalize() {
             if (skyWeight > 0.0) {
                 radiance = EvaluateSkyBase(rayDir) * global.sky_params.xyz;
                 cosTheta = skyWeight;
+            } else {
+                // [F1-a 2026-09-20] 同 far-cache 尾：下行失败射线 →
+                // RadianceCascade 低频有界回退（min(级联, 天空×k)）。
+                // [E0-I K-3] 同 far-cache 尾计数。
+                bool servedF1a = false;
+                if (global.sky_params.w > 0.0 && global.ddgi_fb[1].w > 0.5 && global.cache_params.w > 0.5) {
+                    float ddgiSpanF = max(max(global.ddgi_fb[1].x, global.ddgi_fb[1].y),
+                                          global.ddgi_fb[1].z) * global.ddgi_fb[0].w;
+                    float cExtentF = max(ddgiSpanF * 2.0, 1.0);
+                    vec3 cOrgF = global.ddgi_fb[0].xyz - vec3(cExtentF * 0.25);
+                    vec3 cgpF = (probePos - cOrgF) / (cExtentF / 32.0);
+                    if (all(greaterThanEqual(cgpF, vec3(0.0))) && all(lessThan(cgpF, vec3(32.0)))) {
+                        ivec3 ctF = clamp(ivec3(floor(cgpF)), ivec3(0), ivec3(31));
+                        vec4 cL0F = texelFetch(radianceCascadeL0, ctF, 0);
+                        if (cL0F.a > 0.5 && any(greaterThan(cL0F.rgb, vec3(0.0)))) {
+                            vec3 fb = 0.282095 * cL0F.rgb;
+                            if (any(isnan(fb)) || any(isinf(fb))) fb = vec3(0.0);   // [③卫生]
+                            vec3 cap = EvaluateSkyBase(rayDir) * global.sky_params.xyz * global.sky_params.w;
+                            radiance = min(fb, cap);
+                            cosTheta = max(dot(probeNormal, rayDir), 0.0);
+                            servedF1a = true;
+                        }
+                    }
+                }
+                atomicAdd(fail_stats[servedF1a ? 6u : 5u], 1u);
             }
         }
+        // Diagnostic-only subtypes preserve the original four-way branch
+        // totals while identifying the provenance of the bright fallback.
+        spgiStatRecord(probeIdx, ddgiOk ? 4u : 5u, radiance, cosTheta);
+        if (hit.w == 2.0) spgiStatRecord(probeIdx, 6u, radiance, hit.x);
+    }
+
+    if (auditCardSlot != 0xFFFFFFFFu) {
+            uint slot = auditCardSlot;
+            audit_samples[slot][0] = vec4(origin + rayDir * max(hit.x, 0.0), hit.x);
+            audit_samples[slot][1] = vec4(probePos, float(probeIdx));
+            float reason = hit.w == 2.0 ? float(scRejectReason)
+                         : (hit.w == 1.0 ? -1.0 : (hit.w == 3.0 ? -3.0 : -4.0));
+            audit_samples[slot][2] = vec4(rayDir, reason);
+            audit_samples[slot][3] = vec4(float(auditEvalCount), float(auditBounds),
+                                          float(auditOrient), hit.w == 2.0 ? hit.z : -1.0);
     }
 
     // w carries the SH-projection weight: cosθ × importance factor (F2).
-    // B5: negative w for miss rays (sign is the geometry-hit flag).
-    const bool geoHit = (hit.w == 1.0) || (hit.w == 2.0) || (hit.w == 3.0);
+    // B5: the sign is source reliability, not merely the SDF march result.
+    // A rejected SC candidate and a far-cache stop both use borrowed world
+    // radiance, so treating hit.w==2/3 as a measured hit made hitRatio and
+    // SPGI confidence stay high even when most rays were fallback.
+    const bool geoHit = statBranch <= 1u;
     // P1: fallback/DDGI/miss 分支统一记为 3（含 w==2 校验失败→世界回退）
     spgiStatRecord(probeIdx, statBranch, radiance, cosTheta);
+    // [E0-I R4 Debug A/B/C（能量-排查 §5.5）] 分通路隔离：归因统计已按原始
+    // radiance 记账（同跑读回 fill/transport 各自份额），写出的探针场按
+    // mode 置零对应分支——
+    //   mode 4 = fill-only：HZB/SC 命中（branch 0/1）→ 0，保留 far-cache/
+    //            miss 天空链（含 w==2 校验失败的世界回退，branch 3）；
+    //   mode 5 = transport-only：far-cache/miss（branch 2/3）→ 0，保留
+    //            HZB/SC。
+    if (global.diag_params.x > 3.5 && global.diag_params.x < 4.5) {
+        if (statBranch <= 1u) radiance = vec3(0.0);
+    } else if (global.diag_params.x > 4.5 && global.diag_params.x < 5.5) {
+        if (statBranch >= 2u) radiance = vec3(0.0);
+    }
+    if (global.diag_params.x > 0.5) {
+        vec4 clip = global.view_projection * vec4(probePos, 1.0);
+        if (clip.w > 0.0) {
+            vec2 uv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+            const vec4 boxes[6] = vec4[6](
+                vec4(0.46,0.26,0.60,0.44), vec4(0.00,0.42,0.22,0.78),
+                vec4(0.80,0.42,1.00,0.78), vec4(0.42,0.50,0.58,0.75),
+                vec4(0.44,0.10,0.55,0.22), vec4(0.30,0.88,0.70,1.00));
+            uint category = statBranch <= 1u ? 2u : 3u;
+            if (useWorldFallback && hit.w == 2.0)
+                category = hit.x <= global.sdf_voxel_sizes[0].x * 0.5 ? 0u : 1u;
+            float lum = clamp(dot(radiance, vec3(0.2126,0.7152,0.0722)), 0.0, 64.0);
+            for (uint r = 0u; r < 6u; ++r) {
+                if (all(greaterThanEqual(uv, boxes[r].xy)) && all(lessThan(uv, boxes[r].zw))) {
+                    atomicAdd(roi_stats[r][category].x, 1u);
+                    atomicAdd(roi_stats[r][category].y, uint(lum * 64.0));
+                    atomicAdd(roi_stats[r][category].z, uint(lum * max(cosTheta,0.0) * 64.0));
+                    atomicAdd(roi_stats[r][category].w, uint(clamp(cosTheta,0.0,1.0) * 256.0));
+                }
+            }
+        }
+    }
     probeRadiance.data[global_id] = vec4(radiance, geoHit ? cosTheta * invNq : -cosTheta * invNq);
 }

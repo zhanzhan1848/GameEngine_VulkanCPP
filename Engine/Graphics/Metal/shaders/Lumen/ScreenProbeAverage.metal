@@ -303,10 +303,10 @@ kernel void screen_probe_average(
             // Scale factor: variance of 1.0 → consistency ≈ 0.02
             float radianceConsistency = exp(-lumVariance * 4.0f);
 
-            // 来源可靠性分级：几何命中线性抬升到 1；纯 fallback 保 0.35 底
+            // 来源可靠性分级：几何命中线性抬升到 1；纯 fallback 保 0.25 底
             // （非零才能通过 Gather 的 sh0w>0 门；完整来源感知分级按审计
             // 顺序属 fallback/confidence 阶段）。
-            float confidence = mix(0.35f, 1.0f, hitRatio) * radianceConsistency;
+            float confidence = mix(0.25f, 1.0f, hitRatio) * radianceConsistency;
 
             probeSHOut[base + 0] = float4(sharedSH[0][0] * sumScale, confidence);
             probeSHOut[base + 1] = float4(sharedSH[1][0] * sumScale, 1.0f);

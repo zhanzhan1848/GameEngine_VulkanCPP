@@ -36,10 +36,11 @@ layout(set = 0, binding = 5) uniform sampler defaultSampler;
 // CPU 端默认写入 1.0（物理恒等）——gain 仅为调试旋钮，显示增益永不进入
 // 反馈回路；PRIMAL_GI_INDIRECT_GAIN 可调（0..8，设 3.0 回滚旧行为）。
 // WRC 计划 Stream C1（Fusion 档位化）：第二个 float = 像素级 GI 来源
-// mode switch——0=旧逐像素置信度混合（PRIMAL_FUSION_PERPIXEL=1 A/B 回滚），
-// 1=High/Ultra 档只读 SPGI，2=Medium 档只读 DDGI。CPU 端由
-// axes.use_screen_probes 档位结构驱动（use_screen_probes 决定 SPGI 是否
-// 运行，mode switch 只决定像素读哪路；两条线正交）。
+// mode switch——0=旧逐像素置信度混合（legacy/A-B 行为），
+// 1=High/Ultra 档按 SPGI confidence 在 DDGI 与 SPGI 间替换，
+// 2=Medium 档只读 DDGI。CPU 端由 axes.use_screen_probes 档位结构驱动
+//（use_screen_probes 决定 SPGI 是否运行，mode switch 只决定像素读哪路；
+// 两条线正交）。
 layout(set = 0, binding = 6) uniform GiGainUBO {
     float giIndirectGain;
     float fusionMode;
@@ -86,24 +87,28 @@ void fusion_indirect() {
     float ssgi_hit_norm = clamp(ssgi_hit, 0.0, 30.0) / 30.0;
     float ssgi_conf = clamp(1.0 - ssgi_hit_norm * 0.7, 0.3, 1.0);
 
-    // Both probe sources now carry irradiance in the same units. Confidence
-    // controls replacement; selecting only brighter samples biases feedback.
+    // Both probe sources carry irradiance in the same units. spgi_w is the
+    // existing SPGI confidence/validity channel, shared by the source
+    // replacement and SSGI degradation below. Selecting only brighter samples
+    // would bias feedback, so low-confidence SPGI falls back to DDGI.
     float spgi_w = clamp(spgi4.a, 0.0, 0.9);
 
     albedo = clamp(albedo, vec3(0.0), vec3(1.0));
 
-    // WRC 计划 Stream C1: mode switch（档位化）。High/Ultra 像素只读 SPGI
-    //（DDGI 继续作为 SPGI 远场 fallback 的供给——axis-4 边——但不再逐像素
-    // 进 Fusion）；Medium 像素只读 DDGI（UE IFG/Lumen Lite 语义）。SSGI 全档
-    // 保留，混合权重取该档的 spgi_w 档位值（High=0.15 / Medium=0.25）。
+    // WRC 计划 Stream C1: mode switch（档位化）。High/Ultra keeps the
+    // low-frequency DDGI estimate where SPGI confidence is missing, then
+    // replaces it continuously with SPGI as confidence rises. Both values are
+    // irradiance, so this is a unit-preserving blend. SSGI follows the same
+    // confidence, from 0.25 with no SPGI support to 0.15 at full support.
+    // Medium remains DDGI-only; mode 0 keeps the legacy confidence blend.
     vec3 gi;
     float ssgiBlend;
     if (fusionMode < 0.5) {
         gi = mix(ddgi, spgi4.rgb, spgi_w);
         ssgiBlend = mix(0.25, 0.15, spgi_w);
     } else if (fusionMode < 1.5) {
-        gi = spgi4.rgb;
-        ssgiBlend = 0.15;
+        gi = mix(ddgi, spgi4.rgb, spgi_w);
+        ssgiBlend = mix(0.25, 0.15, spgi_w);
     } else {
         gi = ddgi;
         ssgiBlend = 0.25;

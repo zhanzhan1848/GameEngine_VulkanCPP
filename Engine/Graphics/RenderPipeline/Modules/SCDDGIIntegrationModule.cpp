@@ -113,8 +113,16 @@ bool SCDDGIIntegrationModule::Initialize(RHIDeviceBase* device,
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_radiance
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance history
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // irradiance output
+            // Phase 3（GI 能量所有权修复）: per-probe confidence（float4，[3]=
+            // convergence 0→1 ramp）——注入置信门：高置信探针的 SC 注入降为
+            // floor 档。PRIMAL_SC_INJECT_SETTLED=0 或 confidence 无效时绑零
+            // stand-in → settled=0 → 旧式 0.45 恒档（shader 自门控）。
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe confidence
+            // P2 二轮（2026-09-18 消融后）: 注入模式 UBO（x = legacy45/gate/
+            // coldstart）——coldstart 下已收敛探针注入归零（E2 拥有收敛场）。
+            {7, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // ScInjectParams
         };
-        probe_irradiance_set_layout_ = device->CreateDescriptorSetLayout({6, bindings});
+        probe_irradiance_set_layout_ = device->CreateDescriptorSetLayout({8, bindings});
         probe_irradiance_layout_ = device->CreatePipelineLayout({1, &probe_irradiance_set_layout_});
 
         ComputePipelineDesc pd{};
@@ -150,7 +158,8 @@ bool SCDDGIIntegrationModule::EnsureResources(lumen::LumenDDGIPass* ddgi, lumen:
 
     if (card_radiance_buf_ == handles::INVALID_RESOURCE) {
         BufferDesc radDesc{};
-        radDesc.size = (u64)max_cards_ * 16;   // float3 @ 16B stride
+        radDesc.size = (u64)max_cards_ * SC_CARD_BLOCK_COUNT * 16u;
+        // One vec4 (xyz=radiance, w=coverage) per 4x4 card block.
         radDesc.type = BufferType::Structured;
         radDesc.usage = GPUMemoryUsage::Dynamic;
         radDesc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -189,14 +198,43 @@ bool SCDDGIIntegrationModule::EnsureResources(lumen::LumenDDGIPass* ddgi, lumen:
             d.memoryUsage = GPUMemoryUsage::Dynamic;
             ddgi_vol_cb_[i] = device_->CreateBuffer(d);
         }
+        if (sc_inject_cb_ == handles::INVALID_RESOURCE) {
+            BufferDesc d{};
+            d.size = 16;
+            d.type = BufferType::Constant;
+            d.usage = GPUMemoryUsage::Dynamic;
+            d.memoryUsage = GPUMemoryUsage::Dynamic;
+            sc_inject_cb_ = device_->CreateBuffer(d);
+            // 注入模式（x 分量）：PRIMAL_SC_INJECT_MODE=legacy45|gate|coldstart
+            //（默认 coldstart）；PRIMAL_SC_INJECT_SETTLED=0 兼容映射 legacy45。
+            float mode = 2.0f;
+            if (const char* e = std::getenv("PRIMAL_SC_INJECT_SETTLED")) {
+                if (e[0] == '0') mode = 0.0f;
+            }
+            if (const char* e = std::getenv("PRIMAL_SC_INJECT_MODE")) {
+                if (std::strcmp(e, "legacy45") == 0) mode = 0.0f;
+                else if (std::strcmp(e, "gate") == 0) mode = 1.0f;
+                else if (std::strcmp(e, "coldstart") == 0) mode = 2.0f;
+            }
+            if (float* m = static_cast<float*>(device_->MapBuffer(sc_inject_cb_))) {
+                m[0] = mode; m[1] = 0.0f; m[2] = 0.0f; m[3] = 0.0f;
+                device_->UnmapBuffer(sc_inject_cb_);
+            }
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[SCDDGI] inject mode=" << (mode < 0.5f ? "legacy45"
+                    : (mode < 1.5f ? "gate" : "coldstart")) << std::endl;
+        }
     }
 
     return BuildCardProbeAssignment(ddgi, sc);
 }
 
 // ============================================================================
-// CPU contribution builder (ported from TestNaniteStreamingPipeline —
-// solid-angle × NdotL × SH-basis weights, top-6 per probe by weight).
+// CPU contribution builder.  A probe first selects the 4x4 radiance block
+// nearest its projection on each card.  We keep only the top 3*N candidates
+// by geometric weight, then run the relatively expensive card-rectangle
+// segment test on that small set and retain N visible blocks.  This preserves
+// the old 40B contribution ABI while making the radiance lookup spatial.
 // ============================================================================
 
 bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddgi, lumen::SurfaceCachePass* sc) {
@@ -217,13 +255,24 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
 
     struct ProbeBuilder {
         SCProbeCardContrib entries[SC_MAX_CONTRIBS_PER_PROBE];
-        float weights[SC_MAX_CONTRIBS_PER_PROBE];
         u32 count = 0;
     };
     std::vector<ProbeBuilder> builders(total_probes_);
 
-    constexpr float PI = 3.14159265358979f;
-    constexpr float FOUR_PI = 4.0f * PI;
+    struct Candidate {
+        SCProbeCardContrib contribution{};
+        float weight = 0.0f;
+        u32 card = 0;
+        float target_x = 0.0f;
+        float target_y = 0.0f;
+        float target_z = 0.0f;
+    };
+    constexpr u32 kCandidateLimit = SC_MAX_CONTRIBS_PER_PROBE * 3u;
+    std::vector<Candidate> candidates;
+    candidates.reserve(kCandidateLimit);
+    u64 visibleContributionCount = 0;
+    u64 occludedBackfillCount = 0;
+
     constexpr float SH_C0   = 0.282095f;
     constexpr float SH_C1   = 0.488603f;
     constexpr float SH_C2_0 = 1.092548f;
@@ -240,38 +289,86 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
             probeOrigin.y + (float)iy * probeSpacing,
             probeOrigin.z + (float)iz * probeSpacing};
 
+        candidates.clear();
         for (u32 c = 0; c < cardCount; ++c) {
             const auto& card = cards[c];
             if (card.resolution == 0) continue;
 
-            const float dx = card.center.x - probePos.x;
-            const float dy = card.center.y - probePos.y;
-            const float dz = card.center.z - probePos.z;
+            const uint8_t axis = card.axis_direction & 0xFF;
+            const uint8_t dir  = (card.axis_direction >> 8) & 0xFF;
+            if (axis > 2) continue;
+
+            // Project the probe onto the card plane in the two tangential
+            // axes.  The clamped projection selects the spatially nearest
+            // block, while the block center supplies the actual direction and
+            // distance used by the solid-angle estimate.
+            float extentU = 0.0f, extentV = 0.0f;
+            float relativeU = 0.0f, relativeV = 0.0f;
+            if (axis == 0) {
+                extentU = card.extent.y; extentV = card.extent.z;
+                relativeU = probePos.y - card.center.y;
+                relativeV = probePos.z - card.center.z;
+            } else if (axis == 1) {
+                extentU = card.extent.x; extentV = card.extent.z;
+                relativeU = probePos.x - card.center.x;
+                relativeV = probePos.z - card.center.z;
+            } else {
+                extentU = card.extent.x; extentV = card.extent.y;
+                relativeU = probePos.x - card.center.x;
+                relativeV = probePos.y - card.center.y;
+            }
+            if (extentU <= 1e-4f || extentV <= 1e-4f) continue;
+
+            const float u = std::clamp(relativeU / (2.0f * extentU) + 0.5f,
+                                       0.0f, 0.999999f);
+            const float v = std::clamp(relativeV / (2.0f * extentV) + 0.5f,
+                                       0.0f, 0.999999f);
+            const u32 blockX = std::min<u32>(SC_CARD_BLOCK_GRID - 1u,
+                                              static_cast<u32>(u * SC_CARD_BLOCK_GRID));
+            const u32 blockY = std::min<u32>(SC_CARD_BLOCK_GRID - 1u,
+                                              static_cast<u32>(v * SC_CARD_BLOCK_GRID));
+            const u32 blockIndex = blockY * SC_CARD_BLOCK_GRID + blockX;
+            const float blockU = ((static_cast<float>(blockX) + 0.5f) /
+                                  static_cast<float>(SC_CARD_BLOCK_GRID) - 0.5f) *
+                                 (2.0f * extentU);
+            const float blockV = ((static_cast<float>(blockY) + 0.5f) /
+                                  static_cast<float>(SC_CARD_BLOCK_GRID) - 0.5f) *
+                                 (2.0f * extentV);
+
+            float targetX = card.center.x;
+            float targetY = card.center.y;
+            float targetZ = card.center.z;
+            if (axis == 0) { targetY += blockU; targetZ += blockV; }
+            else if (axis == 1) { targetX += blockU; targetZ += blockV; }
+            else { targetX += blockU; targetY += blockV; }
+
+            const float dx = targetX - probePos.x;
+            const float dy = targetY - probePos.y;
+            const float dz = targetZ - probePos.z;
             const float dist2 = dx * dx + dy * dy + dz * dz;
             if (dist2 > maxDist * maxDist) continue;
 
             const float dist = std::sqrt(dist2);
             if (dist < 0.01f) continue;
-
             const float invDist = 1.0f / dist;
             const float dirX = dx * invDist, dirY = dy * invDist, dirZ = dz * invDist;
 
-            const uint8_t axis = card.axis_direction & 0xFF;
-            const uint8_t dir  = (card.axis_direction >> 8) & 0xFF;
-            math::v3 cardNormal{0, 0, 0};
-            if (axis == 0) cardNormal.x = dir ? 1.0f : -1.0f;
-            else if (axis == 1) cardNormal.y = dir ? 1.0f : -1.0f;
-            else cardNormal.z = dir ? 1.0f : -1.0f;
+            const float normalSign = dir ? 1.0f : -1.0f;
+            float normalX = 0.0f, normalY = 0.0f, normalZ = 0.0f;
+            if (axis == 0) normalX = normalSign;
+            else if (axis == 1) normalY = normalSign;
+            else normalZ = normalSign;
 
-            const float NdotL = -(cardNormal.x * dirX + cardNormal.y * dirY + cardNormal.z * dirZ);
+            const float NdotL = -(normalX * dirX + normalY * dirY + normalZ * dirZ);
             if (NdotL < 0.01f) continue;
 
-            float cardArea;
-            if (axis == 0) cardArea = card.extent.y * card.extent.z * 4.0f;
-            else if (axis == 1) cardArea = card.extent.x * card.extent.z * 4.0f;
-            else cardArea = card.extent.x * card.extent.y * 4.0f;
+            const float cardArea = 4.0f * extentU * extentV;
             if (cardArea < 0.001f) continue;
 
+            // One spatial block represents this card in the fixed 12-entry
+            // probe budget. Keep the card's previous solid-angle energy here;
+            // dividing by 16 would silently reduce SC transport by 16x just
+            // because its radiance representation became spatially richer.
             const float solidAngle = cardArea / (dist2 + 1.0f);
             // 2026-09-05 物理化归一化（修"GI 平了"）：辐射度投影本形
             // C_j = Σ Ω_i·L_i·Y_j(dir_i)——不带 4π（Y0 基已归一化；旧
@@ -297,23 +394,108 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
                  SH_C2_2 * (dirX * dirX - dirY * dirY)};
 
             SCProbeCardContrib contrib;
-            contrib.card_index = c;
+            contrib.card_index = c * SC_CARD_BLOCK_COUNT + blockIndex;
             for (int i = 0; i < 9; ++i) contrib.sh_weights[i] = totalWeight * basis[i];
 
-            if (b.count < SC_MAX_CONTRIBS_PER_PROBE) {
-                b.entries[b.count] = contrib;
-                b.weights[b.count] = totalWeight;
-                ++b.count;
+            Candidate candidate;
+            candidate.contribution = contrib;
+            candidate.weight = totalWeight;
+            candidate.card = c;
+            candidate.target_x = targetX;
+            candidate.target_y = targetY;
+            candidate.target_z = targetZ;
+            if (candidates.size() < kCandidateLimit) {
+                candidates.push_back(candidate);
             } else {
-                u32 minIdx = 0;
-                for (u32 j = 1; j < SC_MAX_CONTRIBS_PER_PROBE; ++j) {
-                    if (b.weights[j] < b.weights[minIdx]) minIdx = j;
-                }
-                if (totalWeight > b.weights[minIdx]) {
-                    b.entries[minIdx] = contrib;
-                    b.weights[minIdx] = totalWeight;
-                }
+                auto weakest = std::min_element(
+                    candidates.begin(), candidates.end(),
+                    [](const Candidate& a, const Candidate& z) { return a.weight < z.weight; });
+                if (weakest != candidates.end() && candidate.weight > weakest->weight)
+                    *weakest = candidate;
             }
+        }
+
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& z) { return a.weight > z.weight; });
+
+        // Test only the top weighted candidates.  Every blocker is an
+        // axis-aligned card rectangle; intersections at either endpoint are
+        // ignored so the target card (and a probe starting on a card) cannot
+        // self-occlude.  This is O(topCandidates * cardCount), instead of
+        // doing a visibility walk for every probe/card pair.
+        auto isOccluded = [&](const Candidate& candidate) {
+            // Cards are conservative boxes and often overlap at the target
+            // mesh. Ignore the final 2% of the segment so sibling faces at
+            // the destination are not mistaken for intervening occluders.
+            constexpr float kEndpointEpsilon = 2e-2f;
+            const float sx = candidate.target_x - probePos.x;
+            const float sy = candidate.target_y - probePos.y;
+            const float sz = candidate.target_z - probePos.z;
+            const float segmentLength2 = sx * sx + sy * sy + sz * sz;
+            if (segmentLength2 <= 1e-8f) return false;
+
+            for (u32 blockerIndex = 0; blockerIndex < cardCount; ++blockerIndex) {
+                if (blockerIndex == candidate.card) continue;
+                const auto& blocker = cards[blockerIndex];
+                if (blocker.resolution == 0) continue;
+                const uint8_t blockerAxis = blocker.axis_direction & 0xFF;
+                if (blockerAxis > 2) continue;
+
+                const float segmentAxis = blockerAxis == 0 ? sx :
+                                          (blockerAxis == 1 ? sy : sz);
+                if (std::abs(segmentAxis) <= 1e-6f) continue;
+                const float probeAxis = blockerAxis == 0 ? probePos.x :
+                                        (blockerAxis == 1 ? probePos.y : probePos.z);
+                const float blockerPlane = blockerAxis == 0 ? blocker.center.x :
+                                           (blockerAxis == 1 ? blocker.center.y : blocker.center.z);
+                const float t = (blockerPlane - probeAxis) / segmentAxis;
+                if (t <= kEndpointEpsilon || t >= 1.0f - kEndpointEpsilon) continue;
+
+                const float hitX = probePos.x + sx * t;
+                const float hitY = probePos.y + sy * t;
+                const float hitZ = probePos.z + sz * t;
+                float du = 0.0f, dv = 0.0f;
+                float extentU = 0.0f, extentV = 0.0f;
+                if (blockerAxis == 0) {
+                    du = hitY - blocker.center.y; dv = hitZ - blocker.center.z;
+                    extentU = blocker.extent.y; extentV = blocker.extent.z;
+                } else if (blockerAxis == 1) {
+                    du = hitX - blocker.center.x; dv = hitZ - blocker.center.z;
+                    extentU = blocker.extent.x; extentV = blocker.extent.z;
+                } else {
+                    du = hitX - blocker.center.x; dv = hitY - blocker.center.y;
+                    extentU = blocker.extent.x; extentV = blocker.extent.y;
+                }
+                constexpr float kRectangleEpsilon = 1e-3f;
+                if (std::abs(du) <= extentU + kRectangleEpsilon &&
+                    std::abs(dv) <= extentV + kRectangleEpsilon)
+                    return true;
+            }
+            return false;
+        };
+
+        // Visible blocks always win the fixed probe budget.  Card rectangles
+        // are deliberately conservative, though, so treating their CPU test
+        // as a binary truth left many probes with only 4-5 contributors and
+        // collapsed real SC transport.  If visibility cannot fill the budget,
+        // backfill the best occluded candidates at a strongly reduced weight.
+        // This keeps visibility meaningful without turning conservative card
+        // overlap into false black occlusion.
+        for (const Candidate& candidate : candidates) {
+            if (b.count >= SC_MAX_CONTRIBS_PER_PROBE) break;
+            if (isOccluded(candidate)) continue;
+            b.entries[b.count++] = candidate.contribution;
+            ++visibleContributionCount;
+        }
+        constexpr float kOccludedBackfillWeight = 0.15f;
+        for (const Candidate& candidate : candidates) {
+            if (b.count >= SC_MAX_CONTRIBS_PER_PROBE) break;
+            if (!isOccluded(candidate)) continue;
+            SCProbeCardContrib attenuated = candidate.contribution;
+            for (float& shWeight : attenuated.sh_weights)
+                shWeight *= kOccludedBackfillWeight;
+            b.entries[b.count++] = attenuated;
+            ++occludedBackfillCount;
         }
     }
 
@@ -356,7 +538,9 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
     assignment_card_count_ = sc->GetCardGenerator().GetCardCount();
     assignment_built_ = true;
     PRIMAL_LOG_STREAM(Info, "Render") << "[SC→DDGI] Card→Probe assignment built: " << cardCount << " cards, "
-              << total_probes_ << " probes, " << flat.size() << " contributions" << std::endl;
+              << total_probes_ << " probes, " << flat.size() << " contributions (visible="
+              << visibleContributionCount << ", occluded-backfill=" << occludedBackfillCount
+              << ", attenuation=0.15)" << std::endl;
     return true;
 }
 
@@ -431,7 +615,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 if (auto* rad = static_cast<const float*>(
                         device_->MapBuffer(card_radiance_staging_))) {
                     const auto& cards = sc->GetCardGenerator().GetCards();
-                    const u32 n = dump_card_count_;
+                    const u32 n = dump_card_count_ * SC_CARD_BLOCK_COUNT;
                     std::vector<u32> order(n);
                     for (u32 i = 0; i < n; ++i) order[i] = i;
                     auto lum = [&](u32 i) {
@@ -464,12 +648,15 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                         }
                     }
                     PRIMAL_LOG_STREAM(Error, "Render") << "[SC_CARDS] frame=" << dump_pending_frame_
-                              << " cards=" << n << " lit(lum>0.05)=" << litCount
+                              << " blocks=" << n << " lit(lum>0.05)=" << litCount
                               << " — top 24 by radiance:" << std::endl;
                     for (u32 k = 0; k < n && k < 24; ++k) {
                         const u32 i = order[k];
-                        const auto& c = cards[i];
-                        PRIMAL_LOG_STREAM(Error, "Render") << "  #" << k << " card=" << i
+                        const u32 cardIndex = i / SC_CARD_BLOCK_COUNT;
+                        const u32 blockIndex = i % SC_CARD_BLOCK_COUNT;
+                        const auto& c = cards[cardIndex];
+                        PRIMAL_LOG_STREAM(Error, "Render") << "  #" << k << " card=" << cardIndex
+                                  << " block=" << blockIndex
                                   << " center=(" << (int)c.center.x << "," << (int)c.center.y
                                   << "," << (int)c.center.z << ")"
                                   << " axis=" << (c.axis_direction & 0xFF)
@@ -483,8 +670,9 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 // copy above can lag / hit uninitialized heap on frame 0).
                 if (auto* rad = static_cast<const float*>(
                         device_->MapBuffer(card_radiance_buf_))) {
-                    u32 n2 = dump_card_count_;
+                    u32 n2 = dump_card_count_ * SC_CARD_BLOCK_COUNT;
                     std::vector<float> lums2;
+                    lums2.reserve(n2);
                     for (u32 i = 0; i < n2; ++i) {
                         float l = 0.2126f*rad[i*4+0] + 0.7152f*rad[i*4+1] + 0.0722f*rad[i*4+2];
                         if (!std::isnan(l)) lums2.push_back(l);
@@ -495,7 +683,8 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                                   << std::count_if(lums2.begin(), lums2.end(),
                                                    [](float v){ return v > 0.05f; })
                                   << "/" << n2
-                                  << " p50=" << lums2[n2/2] << " p90=" << lums2[(n2*9)/10]
+                                  << " p50=" << lums2[lums2.size()/2]
+                                  << " p90=" << lums2[(lums2.size()*9)/10]
                                   << " max=" << lums2.back() << std::endl;
                     }
                     device_->UnmapBuffer(card_radiance_buf_);
@@ -681,8 +870,11 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
             // Slot indices follow the render frame count — the same base the
             // DDGI pass and SurfaceCache LightEval used to pick their triple-
             // buffer slots. current_buffer_index only rotates descriptor sets.
-            const u32 frameIdx = inputs.frame_index % 3;
-            const u32 histIdx = (inputs.frame_index + 2) % 3;
+            // Phase 1d: 槽位单一事实源 DDGISlotMap.h（writeIndex=本帧 SC 写槽
+            // ——本模块在 SC LightEval 之后执行；previousIndex=上一完成帧）。
+            const auto scSlots = lumen::DDGISlotsForFrame(inputs.frame_index);
+            const u32 frameIdx = scSlots.writeIndex;
+            const u32 histIdx = scSlots.previousIndex;
 
             // --- Sub-pass 1: CardRadianceAvg ---
             {
@@ -709,7 +901,13 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 cmd->BindComputePipeline(card_radiance_pipeline_);
                 const DescriptorSetHandle sets[] = { card_radiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, card_radiance_layout_, 0, 1, sets, 0, nullptr);
-                cmd->Dispatch((cardCount + 63) / 64, 1, 1);
+                const u32 radianceBlockCount = cardCount * SC_CARD_BLOCK_COUNT;
+                cmd->Dispatch((radianceBlockCount + 63) / 64, 1, 1);
+                // InsertBarrier currently has no Vulkan buffer path.  Publish
+                // card_radiance_buf_ explicitly before ProbeIrradiance reads
+                // it in the next compute dispatch.
+                cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                   AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
             }
 
             // Barrier: card_radiance write → read
@@ -736,14 +934,15 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 dump_pending_frame_ == 0xFFFFFFFFu) {
                 if (card_radiance_staging_ == handles::INVALID_RESOURCE) {
                     BufferDesc d{};
-                    d.size = (u64)max_cards_ * 16u;
+                    d.size = (u64)max_cards_ * SC_CARD_BLOCK_COUNT * 16u;
                     d.usage = GPUMemoryUsage::Readback;
                     d.memoryUsage = GPUMemoryUsage::Readback;
                     card_radiance_staging_ = device_->CreateBuffer(d);
                 }
                 if (card_radiance_staging_ != handles::INVALID_RESOURCE) {
                     cmd->CopyBuffer(card_radiance_buf_, card_radiance_staging_,
-                                    0, 0, (u64)cardCount * 16u);
+                                    0, 0,
+                                    (u64)cardCount * SC_CARD_BLOCK_COUNT * 16u);
                     dump_pending_frame_ = inputs.frame_index;
                     dump_card_count_ = cardCount;
                 }
@@ -759,7 +958,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 // comparable (copy current probe state).
                 if (dumpCards && dump_pending_frame_ == inputs.frame_index &&
                     ddgi_irr_staging_ != handles::INVALID_RESOURCE) {
-                    cmd->CopyBuffer(ddgi->GetIrradianceBuffer(frameIdx),
+                    cmd->CopyBuffer(ddgi->GetIrradianceBufferBySlot(frameIdx),
                                     ddgi_irr_staging_, 0, 0,
                                     (u64)totalProbes * 9u * 16u);
                 }
@@ -772,15 +971,45 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     device_->UnmapBuffer(ddgi_vol_cb_[frameIdx]);
                 }
 
-                DescriptorData params[6] = {
+                // Phase 3: confidence 绑定（binding 6）。PRIMAL_SC_INJECT_
+                // SETTLED=0 回滚 → 零 stand-in → settled=0 → 旧式 0.45 恒档。
+                static const bool scInjectSettled = [] {
+                    const char* e = std::getenv("PRIMAL_SC_INJECT_SETTLED");
+                    return !(e && std::atoi(e) == 0);
+                }();
+                ResourceHandle confBuf = ddgi->GetConfidenceBuffer();
+                if (!scInjectSettled || confBuf == handles::INVALID_RESOURCE) {
+                    // 零 stand-in（惰性创建一次）：convergence 读 0 = 全探针
+                    // 未收敛 = 旧式注入行为。
+                    if (confidence_standin_ == handles::INVALID_RESOURCE) {
+                        BufferDesc cd{};
+                        cd.size = (u64)totalProbes * 16u;
+                        cd.type = BufferType::Structured;
+                        cd.usage = GPUMemoryUsage::Dynamic;
+                        cd.memoryUsage = GPUMemoryUsage::Dynamic;
+                        cd.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+                        cd.structured.elementCount = totalProbes;
+                        cd.structured.elementStride = 16u;
+                        confidence_standin_ = device_->CreateBuffer(cd);
+                        if (float* m = static_cast<float*>(device_->MapBuffer(confidence_standin_))) {
+                            for (u32 i = 0; i < totalProbes * 4u; ++i) m[i] = 0.0f;
+                            device_->UnmapBuffer(confidence_standin_);
+                        }
+                    }
+                    confBuf = confidence_standin_;
+                }
+
+                DescriptorData params[8] = {
                     {0, DescriptorType::UniformBuffer, ddgi_vol_cb_[frameIdx]},
                     {1, DescriptorType::StorageBuffer, probe_contrib_range_buf_},
                     {2, DescriptorType::StorageBuffer, flat_contrib_buf_},
                     {3, DescriptorType::StorageBuffer, card_radiance_buf_},
-                    {4, DescriptorType::StorageBuffer, ddgi->GetIrradianceBuffer(histIdx)},
-                    {5, DescriptorType::StorageBuffer, ddgi->GetIrradianceBuffer(frameIdx)},
+                    {4, DescriptorType::StorageBuffer, ddgi->GetIrradianceBufferBySlot(histIdx)},
+                    {5, DescriptorType::StorageBuffer, ddgi->GetIrradianceBufferBySlot(frameIdx)},
+                    {6, DescriptorType::StorageBuffer, confBuf},
+                    {7, DescriptorType::UniformBuffer, sc_inject_cb_},
                 };
-                UpdateDescriptorSet(device_, probe_irradiance_ds_[frameIdx], params, 6);
+                UpdateDescriptorSet(device_, probe_irradiance_ds_[frameIdx], params, 8);
 
                 cmd->BindComputePipeline(probe_irradiance_pipeline_);
                 const DescriptorSetHandle sets[] = { probe_irradiance_ds_[frameIdx] };
@@ -790,6 +1019,11 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 // (≤ SC_MAX_CONTRIBS_PER_PROBE card reads each); the SDF trace
                 // fills in where SC coverage is thin instead of vice versa.
                 cmd->Dispatch((totalProbes + 63) / 64, 1, 1);
+                // Publish the injected probe field before the following
+                // GIGather/SPGI compute consumers.  ResourceBarrier on these
+                // buffers is a no-op in the Vulkan backend today.
+                cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                   AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
 
                 // Same debug dump frame: copy the just-updated probe L0s so
                 // the print can track card vs probe energy separately.
@@ -802,7 +1036,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                         ddgi_irr_staging_ = device_->CreateBuffer(d);
                     }
                     if (ddgi_irr_staging_ != handles::INVALID_RESOURCE) {
-                        cmd->CopyBuffer(ddgi->GetIrradianceBuffer(frameIdx),
+                        cmd->CopyBuffer(ddgi->GetIrradianceBufferBySlot(frameIdx),
                                         ddgi_irr_staging_, 0, 0,
                                         (u64)totalProbes * 9u * 16u);
                         dump_probe_count_ = totalProbes;
@@ -828,8 +1062,8 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     AccessFlag::ShaderWrite, AccessFlag::TransferRead);
                 for (u32 slot = 0; slot < 3; ++slot) {
                     if (slot == frameIdx) continue;
-                    cmd->CopyBuffer(ddgi->GetIrradianceBuffer(frameIdx),
-                                    ddgi->GetIrradianceBuffer(slot),
+                    cmd->CopyBuffer(ddgi->GetIrradianceBufferBySlot(frameIdx),
+                                    ddgi->GetIrradianceBufferBySlot(slot),
                                     0, 0, irradianceBytes);
                 }
                 cmd->MemoryBarrier(

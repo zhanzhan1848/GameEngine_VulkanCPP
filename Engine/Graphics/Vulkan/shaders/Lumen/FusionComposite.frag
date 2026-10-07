@@ -13,6 +13,8 @@
 //   binding 5 = SampledImage  albedoTex      (metallic F0 source, T4.3)
 //   binding 6 = SampledImage  ddgiSpecular   (half-res: RGB=SH(R) lobe radiance, A=NdotV, T4.3)
 //   binding 7 = Sampler       defaultSampler  (Vulkan-only)
+//   binding 8 = SampledImage  reflSpecular   (R4/R5: offscreen specular, RGB=fresnel-weighted
+//                                             radiance, A=weight; black when v1)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
@@ -32,6 +34,7 @@ layout(set = 0, binding = 4) uniform texture2D ormTex;
 layout(set = 0, binding = 5) uniform texture2D albedoTex;
 layout(set = 0, binding = 6) uniform texture2D ddgiSpecular;
 layout(set = 0, binding = 7) uniform sampler defaultSampler;
+layout(set = 0, binding = 8) uniform texture2D reflSpecular;
 
 // envBRDFApproxAB moved to ShaderLib/EncodeLib.glsl (axis refactor X1):
 // returns the (scale, bias) pair, specular = F0 * AB.x + AB.y.
@@ -44,6 +47,7 @@ void fusion_composite() {
     vec4 orm      = texture(sampler2D(ormTex,        defaultSampler), inUv);
     vec3 albedo   = texture(sampler2D(albedoTex,     defaultSampler), inUv).rgb;
     vec4 ddgiSpec = texture(sampler2D(ddgiSpecular,  defaultSampler), inUv);
+    vec4 reflOff  = texture(sampler2D(reflSpecular,  defaultSampler), inUv);
 
     float roughness = clamp(orm.g, 0.04, 1.0);
     float metallic  = orm.b;
@@ -59,8 +63,19 @@ void fusion_composite() {
     vec3 ddgiGlossy = ddgiSpec.rgb * (F0 * ab.x + ab.y);
     ddgiGlossy *= (1.0 - roughness * roughness) * 0.75;
 
+    // [R3 2026-09-20] 粗糙度接力整定：ssr.rgb 已在 SSRComposite 内乘过
+    // roughFade × strength(0.7)——旧 ×ssrW×0.25 是把强度二次衰减（v1 前
+    // SSR 默认关、该路径从未被消费）。ssr.rgb 本身随 ssrW→0 收敛到 0，
+    // 加法形态 + relay 兜底即为接力语义。
+    // [R4/R5] 屏幕外 specular（WRC 探针 / SC 卡片 specular trace）：生产端
+    // 已按 Fresnel 加权，仅在 SSR 未命中段 (1-ssrW) 接力；glossy relay 让出
+    // 已被屏幕外 specular 覆盖的份额。v1（reflOff=black）行为退化回
+    //   reflection = ssr.rgb + (1-ssrW)·ddgiGlossy。
     float ssrW = clamp(ssr.a, 0.0, 1.0);
-    vec3 reflection = ssr.rgb * ssrW * 0.25 + (1.0 - ssrW) * ddgiGlossy;
+    float offW = clamp(reflOff.a, 0.0, 1.0);
+    vec3 reflection = ssr.rgb
+                    + reflOff.rgb * offW * (1.0 - ssrW)
+                    + ddgiGlossy * (1.0 - ssrW) * (1.0 - offW);
 
     // Beer-Lambert: attenuate scene by transmittance, add scattered light.
     // Output HDR linear — tonemap is handled by FinalBlit (Blit.frag) to avoid

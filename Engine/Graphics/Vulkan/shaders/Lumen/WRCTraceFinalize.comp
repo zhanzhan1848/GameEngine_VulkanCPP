@@ -12,6 +12,15 @@
 // 没有 prev-screen 回灌、没有 analytic 直射、没有探针自反弹——WRC 从不下
 // 注能量到任何被缓存对象。
 //
+// [R0/R1 2026-09-20] SC 正确性专项：
+//   - SCQueryParams.x/y 下发查询容差覆盖（PRIMAL_WRC_QUERY_TOL）与查询侧
+//     UV 接受域米制 pad（PRIMAL_SC_QPAD_M，掠射带收口）；
+//   - 漏斗六段细分（wrc_dbg3/wrc_dbg4）：boundsFail 拆"卡外/贴边获救"，
+//     queryFail 拆 along/perp，kMaxReads 饱和独立计数——计数自洽：
+//     cands = bounds + orient + along + perp + depth + nan + 接受；
+//   - 拒绝位置 8³ 分箱（binding 11，PRIMAL_WRC_BOUNDS_DUMP=1 时 CPU 读回
+//     打印热点分布）——区分"未卡化几何"vs"掠射带"的空间证据。
+//
 // Flat bindings:
 //   0 = SampledImage (2D)             SC lighting_atlas
 //   1 = SampledImage (2D)             SC depth_atlas
@@ -23,6 +32,8 @@
 //   7 = StorageBuffer (readonly)      SC card data
 //   8 = StorageBuffer (readonly)      SC grid offsets
 //   9 = StorageBuffer (readonly)      SC grid cards
+//  10 = StorageBuffer (rw)            漏斗计数 dbg（16 u32）
+//  11 = StorageBuffer (rw)            拒绝位置分箱 8³（512 uvec4）
 
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
@@ -51,6 +62,7 @@ layout(set = 0, binding = 2, std140) uniform WRCVolumeDataBlock {
     vec4  LightColor;
     vec4  SkyColor;
     uvec4 SCParams;
+    vec4  SCQueryParams;
 } volume;
 
 layout(set = 0, binding = 3, std430) readonly buffer HitDistanceBuf {
@@ -82,11 +94,30 @@ layout(set = 0, binding = 9, std430) readonly buffer SCGridCardsBuf {
 } scgc;
 
 // [Q2 排查] SC 查询漏斗计数（DebugChannel=1 时累加；CPU 读回定位失败级）。
-// wrc_dbg2: x=candidates y=boundsFail z=orientFail w=queryFail(深度/误差)。
+// wrc_dbg2: x=candidates y=boundsFail z=orientFail w=found rays（历史段，位
+// 置不变——A/B 口径延续）。
+// wrc_dbg3: x=boundsFar(卡外) y=boundsEdgeSaved(贴边获救) z=alongFail
+//           w=perpFail。
+// wrc_dbg4: x=depthInvalid y=nanReject z=readSat(kMaxReads 饱和射线)
+//           w=acceptedCands。
 layout(set = 0, binding = 10, std430) buffer WrcDbgBuf {
     uvec4 wrc_dbg;
     uvec4 wrc_dbg2;
+    uvec4 wrc_dbg3;
+    uvec4 wrc_dbg4;
 } dbg;
+
+// [R1] 拒绝位置 8³ 分箱（SC grid 包围盒均匀切分；x=全部拒绝 y=bounds 拒绝
+// z=along/perp 拒绝 w=未用）。CPU 侧 PRIMAL_WRC_BOUNDS_DUMP=1 时读回。
+// [F4 2026-09-20 能量不对称修复] 逐卡 boundsFail 计数（PRIMAL_WRC_BOUNDS_DUMP
+// 读回 top-N）——全局/8³ 分箱只回答"哪里拒绝"，本表回答"哪张卡"：
+// 定位未卡化几何/掠射带的具体卡片（如"柱子哪张卡失败"）。
+layout(set = 0, binding = 12, std430) buffer WrcCardFailBuf {
+    uint card_fail[];   // cardIdx → boundsFail(reject==1) 累计
+};
+layout(set = 0, binding = 11, std430) buffer WrcRejectBinsBuf {
+    uvec4 reject_bins[512];
+} bins;
 
 // 手动双线性（samplerless，clamp-to-edge）——miss 回退的卡片采样。
 vec3 wrcSampleAtlasBilinear(vec2 uvPx) {
@@ -113,6 +144,13 @@ SCGridParams wrcGridLoad() {
               scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]),
         uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
               scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]));
+}
+
+// [R1] 拒绝位置分箱：SC grid 包围盒 → 8³ 均匀格；盒外钳到边缘格。
+uint wrcRejectBin(SCGridParams gp, vec3 p) {
+    vec3 g = (p - gp.grid_min) / max(gp.grid_max - gp.grid_min, vec3(1e-3));
+    uvec3 c = uvec3(clamp(g * 8.0, vec3(0.0), vec3(7.0)));
+    return c.x + 8u * (c.y + 8u * c.z);
 }
 
 void wrc_trace_finalize() {
@@ -160,45 +198,104 @@ void wrc_trace_finalize() {
                 if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg.z, 1u);
                 uint begin = scgo.sc_grid_offsets[16u + cell];
                 uint end   = scgo.sc_grid_offsets[17u + cell];
+                if (end - begin > kMaxReads && volume.SCParams.w != 0u)
+                    atomicAdd(dbg.wrc_dbg4.z, 1u);   // [R1.4] 读取上限饱和射线
                 for (uint gi = begin; gi < end && deviceReads < kMaxReads; ++gi) {
                     uint cardIdx = scgc.sc_grid_cards[gi];
                     if (cardIdx >= 4096u) continue;
                     SurfaceCacheCard card = cd.card_data[cardIdx];
                     ++deviceReads;
                     if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg2.x, 1u);
-                    // [产出率定位] 拒绝原因预分类（与 scQueryCardCandidate 同
-                    // 逻辑的前两级——bounds / orientation）。
-                    vec2 dbgUV;
-                    const bool boundsOk = worldToCardUV(hitPos, card, dbgUV);
-                    if (!boundsOk) { atomicAdd(dbg.wrc_dbg2.y, 1u); continue; }
-                    const bool orientOk = dot(scCardFaceNormal(card), -rayDir) < 0.0;
-                    if (!orientOk) { atomicAdd(dbg.wrc_dbg2.z, 1u); continue; }
-                    vec3 scRadiance; float key;
-                    // [产出率专项] tolFloor 0.45→0.9：SDF 命中带 0.45m 是
-                    // 单侧误差，斜射命中投影到卡片平面的误差翻倍；0.9 覆盖
-                    // 45° 入射。tolPerp = max(footprint*1.5, tolFloor) 同步
-                    // 放宽。env PRIMAL_WRC_QUERY_TOL 回调。
-                    const float kQueryTol = max(volume.SdfVoxelSizes[0].x * 1.25, 0.9);
-                    if (scQueryCardCandidate(card, hitPos, -rayDir,
-                                             kQueryTol,
-                                             depth_atlas, lighting_atlas,
-                                             vec3(0.0), scRadiance, key)) {
+                    // [R0 漏斗细分] 严格边界预判（margin=0/pad=0）：命中投影
+                    // 在卡片严格域外 = "卡外"候选；查询侧 margin+pad 把其中
+                    // 掠射带成员救回（贴边获救计数）。计数与接受路径同源。
+                    vec2 strictUV;
+                    const bool strictIn = worldToCardUVMarginPad(
+                        hitPos, card, strictUV, 0.0, 0.0);
+                    // [产出率专项] tolFloor 由 CPU 经 SCQueryParams.x 下发
+                    //（PRIMAL_WRC_QUERY_TOL；0 = 编译期缺省 max(voxel*1.25,
+                    // 0.9)）。tolPerp = max(footprint*1.5, tolFloor) 同步。
+                    // qpad = SCQueryParams.y（PRIMAL_SC_QPAD_M，0 = 关）。
+                    const float kQueryTol = volume.SCQueryParams.x > 0.0
+                        ? volume.SCQueryParams.x
+                        : max(volume.SdfVoxelSizes[0].x * 1.25, 0.9);
+                    vec3 scRadiance; float key; uint reject;
+                    if (scQueryCardCandidateDbg(card, hitPos, -rayDir,
+                                                kQueryTol,
+                                                volume.SCQueryParams.y,
+                                                depth_atlas, lighting_atlas,
+                                                vec3(0.0), scRadiance, key, reject)) {
+                        if (volume.SCParams.w != 0u) {
+                            atomicAdd(dbg.wrc_dbg4.w, 1u);
+                            if (!strictIn) atomicAdd(dbg.wrc_dbg3.y, 1u);
+                        }
                         if (key < bestKey) {
                             bestKey = key;
                             result.xyz = scRadiance;
                             found = true;
                             if (volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg.w, 1u);
                         }
+                    } else {
+                        if (volume.SCParams.w != 0u) {
+                            if (reject == 1u) {
+                                atomicAdd(dbg.wrc_dbg2.y, 1u);
+                                if (!strictIn) atomicAdd(dbg.wrc_dbg3.x, 1u);
+                                if (cardIdx < 4096u) atomicAdd(card_fail[cardIdx], 1u);   // [F4]
+                                uint rb = wrcRejectBin(gp, hitPos);
+                                atomicAdd(bins.reject_bins[rb].x, 1u);
+                                atomicAdd(bins.reject_bins[rb].y, 1u);
+                            } else if (reject == 2u || reject == 7u) atomicAdd(dbg.wrc_dbg2.z, 1u);
+                            // [①治理 2026-09-21] 码 7 = orient-hint（SPGI 拆分
+                            // 新码；WRC hint 恒零向量不会产生，并入 orient 口径保持一致）
+                            else if (reject == 3u) atomicAdd(dbg.wrc_dbg4.x, 1u);
+                            else if (reject == 4u) { atomicAdd(dbg.wrc_dbg3.z, 1u); atomicAdd(bins.reject_bins[wrcRejectBin(gp, hitPos)].z, 1u); }
+                            else if (reject == 5u) { atomicAdd(dbg.wrc_dbg3.w, 1u); atomicAdd(bins.reject_bins[wrcRejectBin(gp, hitPos)].z, 1u); }
+                        }
                     }
                 }
             }
         }
-        // 查询失败 → 保持黑（测量缺失，不伪造能量）。
-        if (!found) result.xyz = vec3(0.0);
+        // 查询失败 → [F1-a 2026-09-20 能量不对称修复] 低频有界回退：原语义
+        // 直接落黑（"测量缺失不伪造能量"契约保持——不编造卡片辐射；这里借
+        // 用 miss 分支同款"周边卡片双线性"真实测量作低频近似，并以
+        // min(借用值, 天空×k) 限幅，k = SCQueryParams.z
+        //（PRIMAL_WRC_FALLBACK_CLAMP，默认 0.3；0 = 回旧黑语义）。消除
+        // SC 命中→查询失败的空间硬边界（二值化成因之一）。
+        if (found && volume.SCParams.w != 0u) atomicAdd(dbg.wrc_dbg2.w, 1u);
+        if (!found) {
+            result.xyz = vec3(0.0);
+            const float fbK = volume.SCQueryParams.z;
+            if (fbK > 0.0 && volume.SCParams.z != 0u) {
+                uint deviceReads = 0u;
+                const uint kMaxMissReads = 8u;
+                SCGridParams gpF = wrcGridLoad();
+                uint cellF = scGridCellIndex(gpF, probePos);
+                if (cellF != 0xFFFFFFFFu) {
+                    uint beginF = scgo.sc_grid_offsets[16u + cellF];
+                    uint endF   = scgo.sc_grid_offsets[17u + cellF];
+                    for (uint gi = beginF; gi < endF && deviceReads < kMaxMissReads; ++gi) {
+                        uint cardIdx = scgc.sc_grid_cards[gi];
+                        if (cardIdx >= 4096u) continue;
+                        const SurfaceCacheCard cardF = cd.card_data[cardIdx];
+                        ++deviceReads;
+                        vec2 atlasUVF;
+                        if (worldToCardUV(probePos, cardF, atlasUVF)) {
+                            vec3 fbRad = wrcSampleAtlasBilinear(atlasUVF);
+                            if (dot(fbRad, fbRad) > 0.0001) {
+                                vec3 capF = EvaluateSkyBase(rayDir) * volume.SkyColor.xyz
+                                          * volume.SkyColor.w * fbK;
+                                result.xyz = min(fbRad, capF);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } else if (hitDistance <= -1.5) {
         // ---- 逃逸 → 天空契约 ----
         // 共享 EvaluateSkyBase；档位 kWRCSkyTier 由 CPU 经 SkyColor.w 下发
-        //（0.4，与 DDGI 天空档同值、常量源独立）。
+        //（0.15 反弹档，与 GI 全局天空档同源、常量独立）。
         result.xyz = EvaluateSkyBase(rayDir) * volume.SkyColor.xyz * volume.SkyColor.w;
     } else {
         // ---- 步数耗尽（密闭）→ 周边卡片回退（DDGI miss 分支移植）----
@@ -234,6 +331,11 @@ void wrc_trace_finalize() {
         if (!found) result.xyz = vec3(0.0);
     }
 
+    if (any(isnan(result.xyz)) || any(isinf(result.xyz))) result.xyz = vec3(0.0);
+    result.xyz = min(result.xyz, vec3(64.0));
+    // [③卫生 2026-09-21] 写出前消毒——NaN/Inf 射线会在 EMA（mix）与 half
+    // 打包两处传播，污染整个方向槽（下游 wrcSampleRadiance 的消毒只兜底
+    // 消费端，源头掐断才能保住 probe_data 与 cascade 的值域）。
     if (any(isnan(result.xyz)) || any(isinf(result.xyz))) result.xyz = vec3(0.0);
     result.xyz = min(result.xyz, vec3(64.0));
     rd.wrc_rays[probeIdx * volume.ProbeMeta.x + tid] = result;   // 绝对探针索引

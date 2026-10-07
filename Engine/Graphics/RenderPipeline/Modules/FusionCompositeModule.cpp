@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <utility>
 #include <vector>
+#include <cstdio>
+#include <string>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
@@ -51,6 +53,34 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const Des
         }
     }
     device->UpdateDescriptorSets(count, writes.data());
+}
+
+// GI_ROI_AUDIT is intentionally strict about texture layout.  The readback
+// size is derived from the live RHI format; an unknown/unsupported format is
+// rejected instead of being treated as a guessed RGBA16F/BGRA8 source.
+static const char* RoiAuditFormatName(DataFormat format) {
+    switch (format) {
+        case DataFormat::R16_Float:    return "r16f";
+        case DataFormat::RGBA16_Float: return "rgba16f";
+        case DataFormat::BGRA8_UNorm:  return "bgra8";
+        case DataFormat::RGBA8_UNorm:  return "rgba8";
+        default:                       return "unknown";
+    }
+}
+
+static u32 RoiAuditFormatBytes(DataFormat format) {
+    switch (format) {
+        case DataFormat::R16_Float:    return 2;
+        case DataFormat::RGBA16_Float: return 8;
+        case DataFormat::BGRA8_UNorm:  return 4;
+        case DataFormat::RGBA8_UNorm:  return 4;
+        default:                       return 0;
+    }
+}
+
+static u32 RoiAuditRequestedFrame() {
+    const char* frame = std::getenv("GI_ROI_FRAME");
+    return frame ? u32(std::max(0, std::atoi(frame))) : 350u;
 }
 
 // RGBA16F 输出按四竖条统计亮度 mean/max + RGB 分量 mean（颜色对齐用），与
@@ -170,12 +200,13 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         }
     }
 
-    // --- Pass 2: FusionComposite (full-res, 7 texture reads + 1 sampler on Vulkan) ---
+    // --- Pass 2: FusionComposite (full-res, 8 texture reads + 1 sampler on Vulkan) ---
     {
         // bindings: 0=scene, 1=indirect, 2=volume_scatter, 3=ssr, 4=orm,
-        //           5=albedo, 6=ddgi_specular (T4.3), [7=sampler(Vk)]
-        const u32 compositeBindingCount = isVk ? 8 : 7;
-        DescriptorSetLayoutBinding bindings[8];
+        //           5=albedo, 6=ddgi_specular (T4.3), [7=sampler(Vk)],
+        //           8=refl_specular (R4/R5 offscreen specular)
+        const u32 compositeBindingCount = isVk ? 9 : 7;
+        DescriptorSetLayoutBinding bindings[9];
         bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // scene
         bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // indirect
         bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // volume_scatter
@@ -185,6 +216,7 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         bindings[6] = {6, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // ddgi_specular (T4.3)
         if (isVk) {
             bindings[7] = {7, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
+            bindings[8] = {8, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr}; // refl_specular
         }
         composite_set_layout_ = device->CreateDescriptorSetLayout({compositeBindingCount, bindings});
         composite_layout_ = device->CreatePipelineLayout({1, &composite_set_layout_});
@@ -282,6 +314,19 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
 }
 
 void FusionCompositeModule::Shutdown() {
+    for (auto& source : roi_audit_sources_) {
+        if (device_ && source.staging!=handles::INVALID_RESOURCE)
+            device_->DestroyBuffer(source.staging);
+        source={};
+    }
+    for (u32 slot = 0; slot < 3; ++slot) {
+        for (u32 binding = 0; binding < kRoiAuditCompositeBindingCount; ++binding)
+            roi_audit_composite_bound_[slot][binding] = handles::INVALID_RESOURCE;
+        roi_audit_composite_bound_frame_[slot] = 0;
+        roi_audit_composite_bound_valid_[slot] = false;
+    }
+    roi_audit_queued_=roi_audit_dumped_=false;
+    for (auto& valid : roi_audit_indirect_bound_valid_) valid=false;
     if (device_ && volume_identity_tex_ != handles::INVALID_RESOURCE) {
         device_->DestroyTexture(volume_identity_tex_);
         volume_identity_tex_ = handles::INVALID_RESOURCE;
@@ -387,7 +432,7 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
     // 2026-09-17 P0（probe-selection-density-audit §8.1）：新增 ssgi 与 albedo
     // 两个源——台账期望值改为逐像素镜像 FusionIndirect.frag 的真实融合式
     // （mix+SSGI 项+真实 albedo+gain），取代旧 (ddgi+spgi)×0.25/π 启发式。
-    const Source sources[7] = {
+    const Source sources[8] = {
         {"direct", in.primary_input_tex != handles::INVALID_RESOURCE ? in.primary_input_tex : in.black_texture, 1.0f, 8},
         {"ddgi", in.ddgi_tex != handles::INVALID_RESOURCE ? in.ddgi_tex : in.black_texture, 0.5f, 8},
         {"spgi", spgiTex != handles::INVALID_RESOURCE ? spgiTex : in.black_texture, 0.5f, 8},
@@ -396,7 +441,11 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
         {"ssgi", in.ssgi_tex != handles::INVALID_RESOURCE ? in.ssgi_tex : in.black_texture, 0.5f, 8},
         // GBuffer albedo 是 BGRA8_UNorm（4B/px）——按 8B 半浮点读会得到垃圾。
         {"albedo", in.gbuffer_albedo != handles::INVALID_RESOURCE ? in.gbuffer_albedo : in.black_texture, 1.0f, 4},
+        // [R5 2026-09-20] spec 列（追加在 CSV 尾部，不挪既有列位）：屏幕外
+        // specular 兜底输出（RGB=Fresnel 加权辐射 A=权重，全分辨率）。
+        {"spec", in.refl_specular_tex != handles::INVALID_RESOURCE ? in.refl_specular_tex : in.black_texture, 1.0f, 8},
     };
+    constexpr int kSpecSrc = 7;
     // 与 FusionIndirect pass 同源的增益（PRIMAL_GI_INDIRECT_GAIN，
     // Phase 1.1 起默认 1.0）。
     const float ladderGain = [] {
@@ -418,7 +467,7 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
         << " albedo_tex=" << (in.gbuffer_albedo != handles::INVALID_RESOURCE ? "bound" : "black")
         << " gain=" << ladderGain
         << " (CSV: px,py,rayx,rayy,rayz,vis,direct_rgb,ddgi_rgb,spgi_rgb,indirect_rgb"
-           ",ssgi_rgb,albedo_rgb,spgi_a,expected_lum,residual_lum)"
+           ",ssgi_rgb,albedo_rgb,spgi_a,expected_lum,residual_lum,spec_rgb)"
         << std::endl;
 
     // ROI 级亮度收集（判定用）：[roi][stage]
@@ -429,10 +478,10 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
     for (int ri = 0; ri < 2; ++ri) {
         const GiLadderRoi r = rois[ri];
         // 每源一段（256 对齐）；段尺寸按源缩放后的纹素数。
-        u64 secAlign[7];
-        u32 secW[7], secH[7];
+        u64 secAlign[8];
+        u32 secW[8], secH[8];
         u64 total = 0;
-        for (int k = 0; k < 7; ++k) {
+        for (int k = 0; k < 8; ++k) {
             secW[k] = std::max(1u, u32((r.x1 - r.x0) * sources[k].scale));
             secH[k] = std::max(1u, u32((r.y1 - r.y0) * sources[k].scale));
             const u64 bytes = (u64)secW[k] * secH[k] * sources[k].bytesPx;
@@ -447,13 +496,13 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
         if (stage == handles::INVALID_RESOURCE) continue;
 
         bool copied = false;
-        bool live[7] = {};
+        bool live[8] = {};
         {
             auto ch = device->CreateCommandBuffer(CommandQueueType::Graphics);
             auto* c2 = rhi::GetCommandBuffer(ch);
             if (c2) {
                 c2->Begin();
-                for (int k = 0; k < 7; ++k) {
+                for (int k = 0; k < 8; ++k) {
                     if (sources[k].tex == in.black_texture) continue; // 1×1 占位不可拷 ROI
                     live[k] = true;
                     BufferTextureCopyRegion rr{};
@@ -489,10 +538,10 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
                     dir[k] = fz - nz;
                 }
                 const float dl = std::sqrt(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
-                float rgb[7][3] = {};   // 清零：未绑定源保持 0（模型 ssgi 项随之归零）
-                float lum[7] = {0, 0, 0, 0, 0, 0, 0};
+                float rgb[8][3] = {};   // 清零：未绑定源保持 0（模型 ssgi 项随之归零）
+                float lum[8] = {0, 0, 0, 0, 0, 0, 0, 0};
                 float spgiA = 0.0f, ssgiA = 0.0f;
-                for (int k = 0; k < 7; ++k) {
+                for (int k = 0; k < 8; ++k) {
                     if (!live[k]) continue; // 静音/缺资源段：保持 0
                     // 全分辨率采样点 → 该源缩放空间最近纹素
                     const u32 sx = std::min(secW[k] - 1u, u32((x - r.x0) * sources[k].scale));
@@ -550,6 +599,7 @@ void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
                     << "," << rgb[6][0] << "," << rgb[6][1] << "," << rgb[6][2]
                     << "," << spgiA
                     << "," << expectedLum << "," << residual
+                    << "," << rgb[kSpecSrc][0] << "," << rgb[kSpecSrc][1] << "," << rgb[kSpecSrc][2]
                     << std::endl;
                 visL.push_back(rgb[4][0]);
                 dirL.push_back(lum[0]); ddgiL.push_back(lum[1]);
@@ -921,6 +971,16 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 params[6] = {6, DescriptorType::UniformBuffer, indirect_gain_cb_[cbIdx]};
                 paramCount = 7;
             }
+            // Diagnostic source identity comes from the actual selected descriptor
+            // array, including ScreenProbeGI's filtered-output fallback.
+            if (isVk) {
+                const char* auditPrefix=std::getenv("GI_ROI_AUDIT");
+                if (auditPrefix && auditPrefix[0] && inputs.frame_index==RoiAuditRequestedFrame()) {
+                    for (u32 i=0;i<5;++i) roi_audit_indirect_bound_[cbIdx][i]=params[i].resource;
+                    roi_audit_indirect_bound_frame_[cbIdx]=inputs.frame_index;
+                    roi_audit_indirect_bound_valid_[cbIdx]=true;
+                }
+            }
             // TEMP diagnosis: what really lands in each GI texture slot.
             static int s_fusion_slots = 0;
             if (s_fusion_slots < 3) {
@@ -1050,13 +1110,14 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
         [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, ssrRG = inputs.ssr_rg,
-         specRG = inputs.ddgi_specular_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
+         specRG = inputs.ddgi_specular_rg, reflRG = inputs.refl_specular_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling
             if (primaryRG.IsValid()) builder.Read(primaryRG, ResourceState::ShaderResource);
             builder.Read(indirectRG, ResourceState::ShaderResource);
             if (volumeRG.IsValid()) builder.Read(volumeRG, ResourceState::ShaderResource);
             if (ssrRG.IsValid()) builder.Read(ssrRG, ResourceState::ShaderResource);
             if (specRG.IsValid()) builder.Read(specRG, ResourceState::ShaderResource);
+            if (reflRG.IsValid()) builder.Read(reflRG, ResourceState::ShaderResource);
             data.output = builder.Write(fusionOutRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
@@ -1105,8 +1166,14 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             if (albedoTex == handles::INVALID_RESOURCE) albedoTex = inputs.black_texture;
 
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
-            const u32 paramCount = isVk ? 8 : 7;
-            DescData params[8] = {
+            const u32 paramCount = isVk ? 9 : 7;
+            // [R4/R5] 屏幕外 specular 输入（ReflSpecularTrace）；缺席 → black
+            //（合成式退化为 v1：SSR + glossy relay）。
+            ResourceHandle reflTex = inputs.refl_specular_tex;
+            if (reflTex == handles::INVALID_RESOURCE && inputs.refl_specular_rg.IsValid())
+                reflTex = resolve(inputs.refl_specular_rg);
+            if (reflTex == handles::INVALID_RESOURCE) reflTex = inputs.black_texture;
+            DescData params[9] = {
                 {0, DescriptorType::SampledImage, inputs.primary_input_tex},
                 {1, DescriptorType::SampledImage, indirectTex},
                 {2, DescriptorType::SampledImage, volTex},
@@ -1115,7 +1182,23 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 {5, DescriptorType::SampledImage, albedoTex},
                 {6, DescriptorType::SampledImage, specTex},
                 {7, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
+                {8, DescriptorType::SampledImage, reflTex},
             };
+            // Capture the exact handles that reach the live FusionComposite
+            // descriptor set.  The later GI_ROI_AUDIT pass consumes this
+            // snapshot; it must not reconstruct a fallback from FusionInputs
+            // after the render-graph callback has run.  This is diagnostics
+            // only and is gated by the existing Vulkan audit environment.
+            if (isVk) {
+                const char* auditPrefix = std::getenv("GI_ROI_AUDIT");
+                if (auditPrefix && auditPrefix[0] &&
+                    inputs.frame_index == RoiAuditRequestedFrame()) {
+                    for (u32 binding = 0; binding < kRoiAuditCompositeBindingCount; ++binding)
+                        roi_audit_composite_bound_[cbIdx][binding] = params[binding].resource;
+                    roi_audit_composite_bound_frame_[cbIdx] = inputs.frame_index;
+                    roi_audit_composite_bound_valid_[cbIdx] = true;
+                }
+            }
             UpdateDesc(device_, composite_ds_[cbIdx], params, paramCount);
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = { composite_ds_[cbIdx] };
@@ -1264,6 +1347,218 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         }
     }
 
+    // Opt-in same-frame consumer snapshot. Copies are encoded on the actual
+    // RG command buffer AFTER the producers; no mid-frame submit/wait. Read
+    // staging only three frames later on the same completed frame slot, like
+    // the existing async stats ring. Texture dimensions come from the RHI.
+    const char* roiPrefix=std::getenv("GI_ROI_AUDIT");
+    if (roiPrefix && roiPrefix[0] && device_->GetPlatform()==RHIPlatform::Vulkan) {
+        if (roi_audit_queued_ && !roi_audit_dumped_ &&
+            inputs.frame_index>=roi_audit_frame_+3u && cbIdx==roi_audit_slot_) {
+            bool complete=true;
+            bool beginEndSubmitChecked=false;
+            bool completionChecked=false;
+            bool explicitHostDependency=false;
+
+            // A Vulkan InsertBarrier on a buffer is currently a no-op in this
+            // RHI.  Before mapping any staging buffer, submit a standalone
+            // graphics command containing a real Transfer→Host dependency and
+            // wait for that command's completion.  If any part of this check
+            // fails, do not map or report a complete snapshot: a stale map is
+            // evidence of nothing.
+            const auto syncHandle=device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* syncCmd=rhi::GetCommandBuffer(syncHandle);
+            if (syncCmd && syncCmd->Begin()) {
+                explicitHostDependency=true;
+                syncCmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                    AccessFlag::TransferWrite, AccessFlag::HostRead);
+                const bool ended=syncCmd->End();
+                const bool submitted=ended && syncCmd->Submit();
+                const bool waited=submitted && syncCmd->WaitForCompletion();
+                beginEndSubmitChecked=ended && submitted;
+                completionChecked=beginEndSubmitChecked && waited;
+            }
+            if (syncHandle!=handles::INVALID_COMMAND_BUFFER)
+                device_->DestroyCommandBuffer(syncHandle);
+            if (!completionChecked) complete=false;
+
+            if (completionChecked) {
+                for (auto& source : roi_audit_sources_) {
+                    if (source.staging==handles::INVALID_RESOURCE) {
+                        complete=false;
+                        continue;
+                    }
+                    const u64 bytes=u64(source.width)*source.height*source.bytes_per_pixel;
+                    auto* mapped=device_->MapBuffer(source.staging,0,bytes);
+                    if (!mapped) { complete=false; continue; }
+                    std::string path=std::string(roiPrefix)+"-"+source.name+".raw";
+                    if (FILE* out=std::fopen(path.c_str(),"wb")) {
+                        complete &= std::fwrite(mapped,1,bytes,out)==bytes;
+                        std::fclose(out);
+                    } else complete=false;
+                    device_->UnmapBuffer(source.staging);
+                }
+            }
+            std::string metaPath=std::string(roiPrefix)+"-meta.json";
+            if (FILE* meta=std::fopen(metaPath.c_str(),"w")) {
+                std::fprintf(meta,"{\"frame\":%u,\"read_frame\":%u,\"width\":%u,\"height\":%u,\"gain\":%.9g,\"fusion_mode\":%.9g,\"complete\":%s,\"completion_checked\":%s,\"begin_end_submit_checked\":%s,\"explicit_host_dependency\":%s,\"completion_scope\":\"checked_graphics_queue_after_snapshot_copies\",\"sources\":[",
+                    roi_audit_frame_,inputs.frame_index,render_width_,render_height_,roi_audit_gain_,roi_audit_mode_,
+                    complete?"true":"false",completionChecked?"true":"false",
+                    beginEndSubmitChecked?"true":"false",explicitHostDependency?"true":"false");
+                for (u32 i=0;i<kRoiAuditSourceCount;++i) {
+                    const auto& source=roi_audit_sources_[i];
+                    std::fprintf(meta,"%s{\"name\":\"%s\",\"format\":\"%s\",\"runtime_format\":%u,\"width\":%u,\"height\":%u,\"live\":%s,\"constant_black\":%s,\"resource_handle\":%llu,\"binding\":%u,\"layout\":\"%s\",\"source_identity\":\"%s\",\"readback_layout\":\"copy_source_then_shader_resource\"}",
+                        i?",":"",source.name?source.name:"unknown",source.format?source.format:"unknown",
+                        static_cast<unsigned>(source.runtime_format),source.width,source.height,
+                        source.staging!=handles::INVALID_RESOURCE?"true":"false",source.constant_black?"true":"false",
+                        static_cast<unsigned long long>(source.bound_resource),source.binding,
+                        source.layout?source.layout:"unknown",source.source_identity?source.source_identity:"unknown");
+                }
+                std::fprintf(meta,"]}\n");std::fclose(meta);
+            } else complete=false;
+            roi_audit_dumped_=true;
+            PRIMAL_LOG_STREAM(Error,"Render") << "[GI_ROI_AUDIT] frame=" << roi_audit_frame_
+                << " read_frame=" << inputs.frame_index << " complete=" << complete
+                << " completion_checked=" << completionChecked
+                << " begin_end_submit_checked=" << beginEndSubmitChecked
+                << " explicit_host_dependency=" << explicitHostDependency << std::endl;
+        }
+        const u32 requestedFrame=RoiAuditRequestedFrame();
+        if (!roi_audit_queued_ && inputs.frame_index==requestedFrame) {
+            struct RoiAuditData {};
+            graph.AddPass<RoiAuditData>("FusionConsumerRoiAudit",rendergraph::RGPassType::Compute,
+                rendergraph::RGPassCategory::PostProcess,
+                [inputs,indirectRG,fusionOutRG](RoiAuditData&,rendergraph::RenderGraphBuilder& builder) {
+                    builder.SideEffect();
+                    builder.Read(indirectRG,ResourceState::CopySource);
+                    builder.Read(fusionOutRG,ResourceState::CopySource);
+                    for (auto h : {inputs.ddgi_rg,inputs.spgi_rg,inputs.ssgi_rg,inputs.ssao_rg,
+                                   inputs.primary_input_rg,inputs.volume_scatter_rg,inputs.ssr_rg,
+                                   inputs.ddgi_specular_rg,inputs.refl_specular_rg})
+                        if (h.IsValid()) builder.Read(h,ResourceState::CopySource);
+                },
+                [this,inputs,cbIdx,resolve](const RoiAuditData&,rendergraph::RenderGraphContext& context) {
+                    struct Source {
+                        const char* name;
+                        ResourceHandle tex;
+                        u32 binding;
+                        const char* identity;
+                    };
+
+                    const bool boundCaptured =
+                        roi_audit_composite_bound_valid_[cbIdx] &&
+                        roi_audit_composite_bound_frame_[cbIdx] == inputs.frame_index;
+                    const auto& compositeBound = roi_audit_composite_bound_[cbIdx];
+                    const auto compositeSource = [&](u32 binding) -> ResourceHandle {
+                        return boundCaptured ? compositeBound[binding] : handles::INVALID_RESOURCE;
+                    };
+
+                    const bool indirectCaptured=roi_audit_indirect_bound_valid_[cbIdx] &&
+                        roi_audit_indirect_bound_frame_[cbIdx]==inputs.frame_index;
+                    const auto indirectSource=[&](u32 binding) -> ResourceHandle {
+                        return indirectCaptured ? roi_audit_indirect_bound_[cbIdx][binding] : handles::INVALID_RESOURCE;
+                    };
+                    // Preserve the established eight names, then append the
+                    // five actual FusionComposite sampled inputs.  Volume is
+                    // the live identity handle when the production callback
+                    // selected that fallback; it is not replaced by black.
+                    const Source sources[kRoiAuditSourceCount]={
+                        {"ddgi",          indirectSource(1),
+                                         1, "FusionIndirect binding 1"},
+                        {"spgi",          indirectSource(2),
+                                         2, "FusionIndirect binding 2"},
+                        {"ssgi",          indirectSource(0),
+                                         0, "FusionIndirect binding 0"},
+                        {"albedo",        compositeSource(5),
+                                         5, "FusionComposite binding 5"},
+                        {"ao",            indirectSource(4),
+                                         4, "FusionIndirect binding 4"},
+                        {"indirect",      compositeSource(1),
+                                         1, "FusionComposite binding 1"},
+                        {"direct",         compositeSource(0),
+                                         0, "FusionComposite binding 0"},
+                        {"composite",     fusion_output_[cbIdx],
+                                         0xFFFFFFFFu, "FusionComposite current render target"},
+                        {"orm",            compositeSource(4),
+                                         4, "FusionComposite binding 4"},
+                        {"ddgi_specular", compositeSource(6),
+                                         6, "FusionComposite binding 6"},
+                        {"ssr",            compositeSource(3),
+                                         3, "FusionComposite binding 3"},
+                        {"refl_off",      compositeSource(8),
+                                         8, "FusionComposite binding 8"},
+                        {"volume",         compositeSource(2),
+                                         2, "FusionComposite binding 2 (identity fallback is live)"},
+                    };
+
+                    // A rerun must not accidentally map a previous source
+                    // array.  This pass is opt-in and one-shot; clear any
+                    // leftover staging before tying metadata to this frame.
+                    for (auto& dst : roi_audit_sources_) {
+                        if (dst.staging!=handles::INVALID_RESOURCE)
+                            device_->DestroyBuffer(dst.staging);
+                        dst={};
+                    }
+
+                    bool copiedAny=false;
+                    for (u32 i=0;i<kRoiAuditSourceCount;++i) {
+                        const auto& src=sources[i];
+                        auto& dst=roi_audit_sources_[i];
+                        dst.name=src.name;
+                        dst.binding=src.binding;
+                        dst.source_identity=src.identity;
+                        dst.bound_resource=src.tex;
+                        dst.constant_black=(src.tex==inputs.black_texture && src.tex!=handles::INVALID_RESOURCE);
+                        dst.layout=(src.tex!=handles::INVALID_RESOURCE) ? "shader_resource" : "unknown";
+                        if (src.tex==handles::INVALID_RESOURCE) continue;
+
+                        dst.runtime_format=device_->GetTextureFormat(src.tex);
+                        dst.format=RoiAuditFormatName(dst.runtime_format);
+                        dst.bytes_per_pixel=RoiAuditFormatBytes(dst.runtime_format);
+                        // Unknown formats are intentionally not copied: a
+                        // guessed byte width would make invalid replay look
+                        // like valid GPU data.
+                        if (!dst.bytes_per_pixel) continue;
+                        if (!device_->GetTextureSize(src.tex,dst.width,dst.height)) continue;
+
+                        BufferDesc bd{};
+                        bd.size=u64(dst.width)*dst.height*dst.bytes_per_pixel;
+                        bd.bindFlags=u32(BufferUsageFlags::TransferDst);
+                        bd.memoryUsage=GPUMemoryUsage::Readback;
+                        dst.staging=device_->CreateBuffer(bd);
+                        if (dst.staging==handles::INVALID_RESOURCE) continue;
+                        ResourceBarrier barrier{};
+                        barrier.resource=src.tex;
+                        barrier.beforeState=ResourceState::Unknown;
+                        barrier.afterState=ResourceState::CopySource;
+                        context.cmdBuffer->InsertBarrier(&barrier,1);
+                        BufferTextureCopyRegion rr{};
+                        rr.imageSubresource.layerCount=1;
+                        rr.imageExtent={dst.width,dst.height,1};
+                        context.cmdBuffer->CopyTextureToBuffer(src.tex,dst.staging,&rr,1);
+                        barrier.beforeState=ResourceState::CopySource;
+                        barrier.afterState=ResourceState::ShaderResource;
+                        context.cmdBuffer->InsertBarrier(&barrier,1);
+                        copiedAny=true;
+                    }
+                    if (copiedAny) {
+                        // InsertBarrier cannot certify destination buffers on
+                        // Vulkan.  Keep this explicit dependency on the RG
+                        // command and the checked standalone completion below.
+                        context.cmdBuffer->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                            AccessFlag::TransferWrite, AccessFlag::HostRead);
+                    }
+                    roi_audit_gain_=1.f;
+                    if (const char* g=std::getenv("PRIMAL_GI_INDIRECT_GAIN")) {
+                        const float v=float(std::atof(g));if (v>=0.f && v<=8.f) roi_audit_gain_=v;
+                    }
+                    roi_audit_mode_=inputs.pixel_gi_spgi_only?1.f:2.f;
+                    if (const char* p=std::getenv("PRIMAL_FUSION_PERPIXEL"))
+                        if (p[0]=='1') roi_audit_mode_=0.f;
+                    roi_audit_frame_=inputs.frame_index;roi_audit_slot_=cbIdx;roi_audit_queued_=true;
+                });
+        }
+    }
     return outputs;
 }
 

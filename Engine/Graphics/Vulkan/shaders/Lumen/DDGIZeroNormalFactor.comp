@@ -1,0 +1,605 @@
+#version 450 core
+
+// DDGI_ZERO_NORMAL_FACTOR: private, default-off, N-only factor audit.
+//
+// This entry consumes the completed 20-vec4 named native-normal proof, the
+// previous SH slot, the exact 336-byte volume UBO, the complete 27N Finalize
+// HN/query/source audit, and the current fresh update prefix.  It writes only
+// a private 52-vec4 result per proof row.  No production DDGI resource is
+// written and no native status, history, rho, sampler, or SC decision changes.
+//
+// Binding 3 is the complete HN allocation.  The shader explicitly addresses
+// the old HN, analytic tail, source audit, and query audit regions so the
+// joins remain visible to the native reader.
+
+#extension GL_GOOGLE_include_directive : require
+#include "ShaderLib/EvalLib.glsl"
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer NormalProofBuf {
+    vec4 records[];
+} normal_proof;
+
+layout(set = 0, binding = 1, std430) readonly buffer PreviousHistoryBuf {
+    vec4 history[];
+} previous_history;
+
+// DDGIVolumeData UBO — exact 336-byte std140 layout used by Finalize.
+layout(set = 0, binding = 2, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88
+    uint  SCAtlasSize;              //  92
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    int   RaySampleMode;            // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+    vec4  SkyColor;                 // 304
+    vec4  Albedo;                   // 320
+} volume;
+
+layout(set = 0, binding = 3, std430) readonly buffer FullHitNormalBuf {
+    vec4 records[];
+} full_hn;
+
+// The prefix is copied from the current frame's update-list allocation.  A
+// proof stamp finds its absolute probe here before deriving dense slot/ray.
+layout(set = 0, binding = 4, std430) readonly buffer FreshUpdatePrefixBuf {
+    uint probes[];
+} fresh_updates;
+
+layout(set = 0, binding = 5, std430) writeonly buffer ZeroNormalFactorOutputBuf {
+    vec4 records[];
+} factor_output;
+
+const uint DDGI_ZERO_NORMAL_FACTOR_PROOF_STRIDE = 20u;
+const uint DDGI_ZERO_NORMAL_FACTOR_QUERY_STRIDE = 18u;
+const uint DDGI_ZERO_NORMAL_FACTOR_OUTPUT_STRIDE = 52u;
+const uint DDGI_ZERO_NORMAL_FACTOR_IDENTITY_STRIDE = 4u;
+const uint DDGI_ZERO_NORMAL_FACTOR_BLOCK_STRIDE = 12u;
+const uint DDGI_ZERO_NORMAL_FACTOR_SAMPLE_BASE = 4u;
+const uint DDGI_ZERO_NORMAL_FACTOR_SCHEMA = 1u;
+const uint DDGI_ZERO_NORMAL_FACTOR_NAN_BITS = 0x7fc00000u;
+const uint DDGI_ZERO_NORMAL_FACTOR_INVALID_ID = 0xffffffffu;
+const float DDGI_ZERO_NORMAL_FACTOR_PI = 3.14159265358979;
+
+bool factorFinite(float value) {
+    return !isnan(value) && !isinf(value);
+}
+
+bool factorFiniteVec3(vec3 value) {
+    return factorFinite(value.x) && factorFinite(value.y) &&
+           factorFinite(value.z);
+}
+
+bool factorFiniteVec4(vec4 value) {
+    return factorFinite(value.x) && factorFinite(value.y) &&
+           factorFinite(value.z) && factorFinite(value.w);
+}
+
+bool factorMulU32(uint a, uint b, out uint result) {
+    if (a != 0u && b > 0xffffffffu / a) {
+        result = 0u;
+        return false;
+    }
+    result = a * b;
+    return true;
+}
+
+bool factorAddU32(uint a, uint b, out uint result) {
+    if (b > 0xffffffffu - a) {
+        result = 0u;
+        return false;
+    }
+    result = a + b;
+    return true;
+}
+
+bool factorRangeFits(uint base, uint count, uint length) {
+    return base <= length && count <= length - base;
+}
+
+bool factorFiniteInteger(float value, out uint result) {
+    if (!factorFinite(value) || value < 0.0 || value != floor(value)) {
+        result = DDGI_ZERO_NORMAL_FACTOR_INVALID_ID;
+        return false;
+    }
+    result = uint(value);
+    if (float(result) != value) {
+        result = DDGI_ZERO_NORMAL_FACTOR_INVALID_ID;
+        return false;
+    }
+    return true;
+}
+
+float factorQuietNaN() {
+    return uintBitsToFloat(DDGI_ZERO_NORMAL_FACTOR_NAN_BITS);
+}
+
+void factorClearOutput(uint base) {
+    const float qnan = uintBitsToFloat(DDGI_ZERO_NORMAL_FACTOR_NAN_BITS);
+    for (uint i = 0u; i < DDGI_ZERO_NORMAL_FACTOR_OUTPUT_STRIDE; ++i)
+        factor_output.records[base + i] = vec4(qnan);
+}
+
+struct FactorTetraResult {
+    uint pi[4];
+    float bw[4];
+};
+
+// This is the Finalize tetrahedral rule copied without changing branch order,
+// owner order, or the signed weights.
+FactorTetraResult factorTetrahedral(vec3 gp, uvec3 gd) {
+    FactorTetraResult r;
+    uvec3 b0 = clamp(uvec3(floor(gp)), uvec3(0u), gd - 1u);
+    uvec3 b1 = min(b0 + 1u, gd - 1u);
+    uint gx = gd.x;
+    uint gxy = gd.x * gd.y;
+
+    uint p[8];
+    p[0] = b0.x + b0.y * gx + b0.z * gxy;
+    p[1] = b1.x + b0.y * gx + b0.z * gxy;
+    p[2] = b0.x + b1.y * gx + b0.z * gxy;
+    p[3] = b1.x + b1.y * gx + b0.z * gxy;
+    p[4] = b0.x + b0.y * gx + b1.z * gxy;
+    p[5] = b1.x + b0.y * gx + b1.z * gxy;
+    p[6] = b0.x + b1.y * gx + b1.z * gxy;
+    p[7] = b1.x + b1.y * gx + b1.z * gxy;
+
+    float fx = fract(gp.x);
+    float fy = fract(gp.y);
+    float fz = fract(gp.z);
+
+    if (fx >= fy && fy >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fy; r.bw[2] = fy - fz; r.bw[3] = fz;
+    } else if (fx >= fz && fz >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fz; r.bw[2] = fz - fy; r.bw[3] = fy;
+    } else if (fy >= fx && fx >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fx; r.bw[2] = fx - fz; r.bw[3] = fz;
+    } else if (fy >= fz && fz >= fx) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fz; r.bw[2] = fz - fx; r.bw[3] = fx;
+    } else if (fz >= fx && fx >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fx; r.bw[2] = fx - fy; r.bw[3] = fy;
+    } else {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fy; r.bw[2] = fy - fx; r.bw[3] = fx;
+    }
+    for (uint i = 0u; i < 4u; ++i) r.bw[i] = max(r.bw[i], 0.0);
+    return r;
+}
+
+struct FactorSampleResult {
+    bool valid;
+    uint gridInside;
+    uint owners[4];
+    vec4 rawWeights;
+    vec3 gp;
+    float totalWeight;
+    uint activeCount;
+    vec3 lprev;
+    vec3 esky;
+    vec3 skyLo;
+    vec3 historyLo;
+    vec3 lo;
+};
+
+void factorInitSample(out FactorSampleResult result) {
+    result.valid = false;
+    result.gridInside = 0u;
+    for (uint i = 0u; i < 4u; ++i) result.owners[i] = DDGI_ZERO_NORMAL_FACTOR_INVALID_ID;
+    result.rawWeights = vec4(0.0);
+    result.gp = vec3(0.0);
+    result.totalWeight = 0.0;
+    result.activeCount = 0u;
+    result.lprev = vec3(0.0);
+    result.esky = vec3(0.0);
+    result.skyLo = vec3(0.0);
+    result.historyLo = vec3(0.0);
+    result.lo = vec3(0.0);
+}
+
+// Common Finalize normalSampleResult rule: out-of-grid returns zero; weights below .001
+// are skipped; the signed SH result is divided by the active weight sum; no
+// depth or relocation-owner weighting is introduced here.
+bool factorEvaluate(vec3 position, vec3 normal, vec3 rho,
+                      out FactorSampleResult result) {
+    factorInitSample(result);
+    if (!factorFiniteVec3(position) || !factorFiniteVec3(normal) ||
+        !factorFiniteVec3(rho)) return false;
+
+    vec3 gp = (position - volume.ProbeOrigin.xyz) / volume.ProbeSpacing;
+    result.gp = gp;
+    // A non-finite grid coordinate is an unknown evaluation, not a finite
+    // out-of-grid point.  Keep the latter on the normal zero-history path.
+    if (!factorFiniteVec3(gp)) return false;
+
+    vec3 gridMax = vec3(float(volume.ProbeCounts.x - 1u),
+                        float(volume.ProbeCounts.y - 1u),
+                        float(volume.ProbeCounts.z - 1u));
+    if (any(lessThan(gp, vec3(0.0))) || any(greaterThan(gp, gridMax))) {
+        result.valid = true;
+        result.esky = volume.SkyColor.xyz *
+                      (0.5 + 0.5 * max(0.0, normal.y)) * 0.3;
+        vec3 rhoOverPi = rho / DDGI_ZERO_NORMAL_FACTOR_PI;
+        result.skyLo = rhoOverPi * result.esky;
+        result.historyLo = vec3(0.0);
+        result.lo = result.skyLo;
+        return factorFiniteVec3(result.esky) && factorFiniteVec3(result.skyLo);
+    }
+
+    FactorTetraResult tetra = factorTetrahedral(gp, volume.ProbeCounts.xyz);
+    result.gridInside = 1u;
+    result.owners[0] = tetra.pi[0];
+    result.owners[1] = tetra.pi[1];
+    result.owners[2] = tetra.pi[2];
+    result.owners[3] = tetra.pi[3];
+    result.rawWeights = vec4(tetra.bw[0], tetra.bw[1], tetra.bw[2], tetra.bw[3]);
+
+    vec3 weightedSignedLprev = vec3(0.0);
+    float totalWeight = 0.0;
+    uint activeCount = 0u;
+    for (uint p = 0u; p < 4u; ++p) {
+        if (tetra.bw[p] < 0.001) continue;
+        ++activeCount;
+        uint base = tetra.pi[p] * 9u;
+        vec3 sh[9];
+        for (uint i = 0u; i < 9u; ++i) {
+            vec4 coefficient = previous_history.history[base + i];
+            if (!factorFiniteVec4(coefficient)) return false;
+            sh[i] = coefficient.xyz;
+        }
+        vec3 evaluated = evalProbeRadianceSH9(sh, normal);
+        if (!factorFiniteVec3(evaluated)) return false;
+        weightedSignedLprev += evaluated * tetra.bw[p];
+        totalWeight += tetra.bw[p];
+    }
+
+    result.totalWeight = totalWeight;
+    result.activeCount = activeCount;
+    result.lprev = totalWeight > 0.0
+        ? weightedSignedLprev / totalWeight : vec3(0.0);
+    result.esky = volume.SkyColor.xyz *
+                  (0.5 + 0.5 * max(0.0, normal.y)) * 0.3;
+    vec3 rhoOverPi = rho / DDGI_ZERO_NORMAL_FACTOR_PI;
+    result.skyLo = rhoOverPi * result.esky;
+    result.historyLo = rhoOverPi *
+                       (DDGI_ZERO_NORMAL_FACTOR_PI * result.lprev);
+    result.lo = rhoOverPi *
+                (result.esky + DDGI_ZERO_NORMAL_FACTOR_PI * result.lprev);
+    result.valid = factorFiniteVec3(result.lprev) &&
+                   factorFinite(result.totalWeight) &&
+                   factorFiniteVec3(result.esky) &&
+                   factorFiniteVec3(result.skyLo) &&
+                   factorFiniteVec3(result.historyLo) &&
+                   factorFiniteVec3(result.lo);
+    return result.valid;
+}
+
+void factorWriteSample(uint base, vec3 position, vec3 normal, vec3 rho,
+                         float normalValid, vec4 baselineHistory,
+                         FactorSampleResult result, bool copyHistory) {
+    factor_output.records[base + 0u] = vec4(position, float(result.gridInside));
+    factor_output.records[base + 1u] = vec4(normal, normalValid);
+    factor_output.records[base + 2u] = vec4(rho, 3.0);
+    factor_output.records[base + 3u] = vec4(result.skyLo, 1.0);
+    factor_output.records[base + 4u] = vec4(result.historyLo, 1.0);
+    factor_output.records[base + 5u] = vec4(result.lo, 1.0);
+    factor_output.records[base + 6u] = vec4(
+        uintBitsToFloat(result.owners[0]), uintBitsToFloat(result.owners[1]),
+        uintBitsToFloat(result.owners[2]), uintBitsToFloat(result.owners[3]));
+    factor_output.records[base + 7u] = result.rawWeights;
+    factor_output.records[base + 8u] = vec4(result.gp, result.totalWeight);
+    factor_output.records[base + 9u] = vec4(result.lprev, float(result.activeCount));
+    factor_output.records[base + 10u] = vec4(result.esky, 1.0);
+    if (copyHistory) factor_output.records[base + 11u] = baselineHistory;
+}
+
+bool zeroFactorVolumeShape(out uint fullRayCapacity, out uint freshRayCount,
+                           out uint historyCount, out uint proofCount,
+                           out uint hnCount) {
+    fullRayCapacity = 0u;
+    freshRayCount = 0u;
+    historyCount = 0u;
+    proofCount = 0u;
+    hnCount = 0u;
+
+    if (volume.ProbeCounts.x == 0u || volume.ProbeCounts.y == 0u ||
+        volume.ProbeCounts.z == 0u || volume.ProbeCountTotal == 0u ||
+        volume.RaysPerProbe == 0u || volume.ProbeUpdateCount == 0u ||
+        volume.ProbeUpdateCount > volume.ProbeCountTotal ||
+        volume.RaySampleMode != 0 ||
+        !factorFiniteVec4(volume.ProbeOrigin) ||
+        !factorFinite(volume.ProbeSpacing) || volume.ProbeSpacing <= 0.0 ||
+        !factorFiniteVec4(volume.SkyColor) || volume.SkyColor.w != 0.0 ||
+        !factorFiniteVec4(volume.Albedo) || volume.Albedo.w <= 0.5 ||
+        !factorFiniteVec4(volume.SdfExtents[2]) || volume.SdfExtents[2].w <= 0.5)
+        return false;
+
+    uint xy = 0u;
+    uint product = 0u;
+    if (!factorMulU32(volume.ProbeCounts.x, volume.ProbeCounts.y, xy) ||
+        !factorMulU32(xy, volume.ProbeCounts.z, product) ||
+        product != volume.ProbeCountTotal)
+        return false;
+    if (!factorMulU32(volume.ProbeCountTotal, volume.RaysPerProbe,
+                     fullRayCapacity) ||
+        !factorMulU32(volume.ProbeUpdateCount, volume.RaysPerProbe,
+                     freshRayCount) || freshRayCount == 0u)
+        return false;
+    if (!factorMulU32(volume.ProbeCountTotal, 9u, historyCount) ||
+        !factorMulU32(fullRayCapacity, 27u, hnCount))
+        return false;
+    if (normal_proof.records.length() == 0u ||
+        normal_proof.records.length() % DDGI_ZERO_NORMAL_FACTOR_PROOF_STRIDE != 0u)
+        return false;
+    proofCount = normal_proof.records.length() /
+                 DDGI_ZERO_NORMAL_FACTOR_PROOF_STRIDE;
+    uint expectedOutput = 0u;
+    if (!factorMulU32(proofCount, DDGI_ZERO_NORMAL_FACTOR_OUTPUT_STRIDE,
+                      expectedOutput))
+        return false;
+    return previous_history.history.length() == historyCount &&
+           full_hn.records.length() == hnCount &&
+           fresh_updates.probes.length() == volume.ProbeUpdateCount &&
+           factor_output.records.length() == expectedOutput;
+}
+
+bool zeroFactorFindDense(uint fullRayCapacity, uint probe, uint rayPlusOne,
+                         out uint dense) {
+    dense = DDGI_ZERO_NORMAL_FACTOR_INVALID_ID;
+    if (probe >= volume.ProbeCountTotal || rayPlusOne == 0u ||
+        rayPlusOne > volume.RaysPerProbe)
+        return false;
+    uint ray = rayPlusOne - 1u;
+    uint found = 0u;
+    uint selectedSlot = 0u;
+    for (uint slot = 0u; slot < volume.ProbeUpdateCount; ++slot) {
+        uint listedProbe = fresh_updates.probes[slot];
+        if (listedProbe >= volume.ProbeCountTotal) return false;
+        if (listedProbe == probe) {
+            ++found;
+            selectedSlot = slot;
+        }
+    }
+    if (found != 1u) return false;
+    uint slotBase = 0u;
+    if (!factorMulU32(selectedSlot, volume.RaysPerProbe, slotBase) ||
+        !factorAddU32(slotBase, ray, dense) || dense >= fullRayCapacity)
+        return false;
+    return true;
+}
+
+bool zeroFactorNormalize(vec3 raw, out vec3 normal) {
+    normal = vec3(0.0);
+    if (!factorFiniteVec3(raw)) return false;
+    float length2 = dot(raw, raw);
+    if (!factorFinite(length2) || length2 <= 0.25) return false;
+    normal = normalize(raw);
+    if (!factorFiniteVec3(normal)) return false;
+    float normalizedLength2 = dot(normal, normal);
+    return factorFinite(normalizedLength2) &&
+           abs(normalizedLength2 - 1.0) <= 2.0e-5;
+}
+
+bool zeroFactorPointMatches(vec3 a, vec3 b) {
+    if (!factorFiniteVec3(a) || !factorFiniteVec3(b)) return false;
+    vec3 delta = a - b;
+    float length2 = dot(delta, delta);
+    return factorFinite(length2) && sqrt(length2) <= 2.0e-5;
+}
+
+void zeroFactorWriteIdentity(uint outputBase, vec4 proof0, vec4 proof2,
+                             vec4 proof7, vec4 proof8) {
+    // Identity is an exact four-row echo of proof records 0/2/7/8.  Their
+    // bitcast stamp, ray+1, status=1, and query index are intentionally kept
+    // in the original lanes for an independent native join.
+    factor_output.records[outputBase + 0u] = proof0;
+    factor_output.records[outputBase + 1u] = proof2;
+    factor_output.records[outputBase + 2u] = proof7;
+    factor_output.records[outputBase + 3u] = proof8;
+}
+
+void ddgi_zero_normal_factor_impl() {
+    uint fullRayCapacity = 0u;
+    uint freshRayCount = 0u;
+    uint historyCount = 0u;
+    uint proofCount = 0u;
+    uint hnCount = 0u;
+    if (!zeroFactorVolumeShape(fullRayCapacity, freshRayCount, historyCount,
+                               proofCount, hnCount))
+        return;
+
+    uint proofIndex = gl_GlobalInvocationID.x;
+    if (proofIndex >= proofCount) return;
+    uint outputBase = 0u;
+    uint proofBase = 0u;
+    if (!factorMulU32(proofIndex, DDGI_ZERO_NORMAL_FACTOR_OUTPUT_STRIDE,
+                      outputBase) ||
+        !factorMulU32(proofIndex, DDGI_ZERO_NORMAL_FACTOR_PROOF_STRIDE,
+                      proofBase) ||
+        !factorRangeFits(outputBase, DDGI_ZERO_NORMAL_FACTOR_OUTPUT_STRIDE,
+                         factor_output.records.length()) ||
+        !factorRangeFits(proofBase, DDGI_ZERO_NORMAL_FACTOR_PROOF_STRIDE,
+                         normal_proof.records.length()))
+        return;
+    factorClearOutput(outputBase);
+
+    vec4 proof0 = normal_proof.records[proofBase + 0u];
+    vec4 proof2 = normal_proof.records[proofBase + 2u];
+    vec4 proof3 = normal_proof.records[proofBase + 3u];
+    vec4 proof7 = normal_proof.records[proofBase + 7u];
+    vec4 proof8 = normal_proof.records[proofBase + 8u];
+    zeroFactorWriteIdentity(outputBase, proof0, proof2, proof7, proof8);
+
+    uint stampBits = floatBitsToUint(proof0.w);
+    uint rayPlusOne = DDGI_ZERO_NORMAL_FACTOR_INVALID_ID;
+    uint statusBits = floatBitsToUint(proof7.w);
+    uint queryIndex = floatBitsToUint(proof8.w);
+    if (statusBits != 1u || queryIndex != proofIndex ||
+        !factorFiniteInteger(proof2.w, rayPlusOne) ||
+        !factorFiniteVec3(proof0.xyz) || rayPlusOne == 0u)
+        return;
+
+    uint frameLo = volume.FrameIndex & 0xffffu;
+    uint probePlusOne = stampBits & 0xffffu;
+    if (probePlusOne == 0u || (stampBits >> 16u) != frameLo)
+        return;
+    uint probe = probePlusOne - 1u;
+    if (probe >= volume.ProbeCountTotal ||
+        ((probe + 1u) & 0xffffu) != probePlusOne)
+        return;
+
+    uint dense = 0u;
+    if (!zeroFactorFindDense(fullRayCapacity, probe, rayPlusOne, dense))
+        return;
+
+    uint queryBase = 0u;
+    uint queryOffset = 0u;
+    uint queryCount = 0u;
+    uint queryBaseSum = 0u;
+    if (!factorMulU32(dense, DDGI_ZERO_NORMAL_FACTOR_QUERY_STRIDE,
+                      queryOffset) ||
+        !factorMulU32(fullRayCapacity, 9u, queryBase) ||
+        !factorAddU32(queryBase, queryOffset, queryBaseSum) ||
+        !factorMulU32(fullRayCapacity, 27u, queryCount) ||
+        !factorRangeFits(queryBaseSum, DDGI_ZERO_NORMAL_FACTOR_QUERY_STRIDE,
+                         queryCount) ||
+        queryBaseSum + DDGI_ZERO_NORMAL_FACTOR_QUERY_STRIDE >
+            full_hn.records.length())
+        return;
+    queryBase = queryBaseSum;
+
+    vec4 query0 = full_hn.records[queryBase + 0u];
+    vec4 query1 = full_hn.records[queryBase + 1u];
+    uint queryRayPlusOne = DDGI_ZERO_NORMAL_FACTOR_INVALID_ID;
+    if (!factorFiniteVec3(query0.xyz) ||
+        !factorFiniteInteger(query1.w, queryRayPlusOne) ||
+        queryRayPlusOne != rayPlusOne || floatBitsToUint(query0.w) != stampBits ||
+        !zeroFactorPointMatches(proof0.xyz, query0.xyz))
+        return;
+    vec3 position = query0.xyz;
+
+    uint sourceBase = 0u;
+    uint sourcePrefix = 0u;
+    uint sourceBaseSum = 0u;
+    if (!factorMulU32(fullRayCapacity, 5u, sourcePrefix) ||
+        !factorMulU32(dense, 4u, sourceBase) ||
+        !factorAddU32(sourcePrefix, sourceBase, sourceBaseSum) ||
+        !factorRangeFits(sourceBaseSum, 4u, full_hn.records.length()))
+        return;
+    sourceBase = sourceBaseSum;
+    vec4 sourceOrigin = full_hn.records[sourceBase + 2u];
+    vec4 sourceDirection = full_hn.records[sourceBase + 3u];
+    uint sourceRayPlusOne = DDGI_ZERO_NORMAL_FACTOR_INVALID_ID;
+    if (!factorFiniteVec3(sourceOrigin.xyz) ||
+        !factorFiniteVec3(sourceDirection.xyz) ||
+        !factorFiniteInteger(sourceDirection.w, sourceRayPlusOne) ||
+        sourceRayPlusOne != rayPlusOne ||
+        floatBitsToUint(sourceOrigin.w) != stampBits)
+        return;
+    vec3 rayDirection = sourceDirection.xyz;
+    float rayLength2 = dot(rayDirection, rayDirection);
+    if (!factorFinite(rayLength2) || abs(rayLength2 - 1.0) > 2.0e-5)
+        return;
+
+    uint historyBase = 0u;
+    uint analyticPrefix = 0u;
+    uint analyticOffset = 0u;
+    if (!factorAddU32(fullRayCapacity, 0u, analyticPrefix) ||
+        !factorMulU32(dense, 4u, analyticOffset) ||
+        !factorAddU32(analyticPrefix, analyticOffset, historyBase) ||
+        !factorRangeFits(historyBase, 4u, full_hn.records.length()))
+        return;
+    vec4 rhoRecord = full_hn.records[historyBase + 0u];
+    vec4 tailSky = full_hn.records[historyBase + 1u];
+    vec4 oldHistory = full_hn.records[historyBase + 2u];
+    if (!factorFiniteVec4(rhoRecord) || !factorFiniteVec4(tailSky) ||
+        !factorFiniteVec4(oldHistory) || tailSky.w != 1.0 ||
+        oldHistory.w != 1.0)
+        return;
+    vec3 rho = rhoRecord.xyz;
+    if (!factorFiniteVec3(rho)) return;
+
+    // This is the exact Finalize fallback: -RD unless a valid actual HN
+    // record is present.  It is the baseline sample, so the old HN is not a
+    // separate counterfactual block and no stale ray can enter it.
+    vec3 baselineNormal = -rayDirection;
+    vec3 actualHnNormal;
+    bool actualHnValid = false;
+    vec4 oldHn = full_hn.records[dense];
+    if (factorFinite(oldHn.w) && oldHn.w > 0.5)
+        actualHnValid = zeroFactorNormalize(oldHn.xyz, actualHnNormal);
+    if (actualHnValid) baselineNormal = actualHnNormal;
+    if (!factorFiniteVec3(baselineNormal)) return;
+
+    FactorSampleResult baselineSample;
+    if (factorEvaluate(position, baselineNormal, rho, baselineSample))
+        factorWriteSample(outputBase + DDGI_ZERO_NORMAL_FACTOR_SAMPLE_BASE,
+                          position, baselineNormal, rho, 1.0, oldHistory,
+                          baselineSample, true);
+
+    // The remaining blocks are independent N-only counterfactuals.  A
+    // non-finite or non-unit candidate stays qNaN; it is never replaced by
+    // baseline/-RD and never converted to an out-of-grid sky sample.
+    vec3 vertexNormal;
+    if (zeroFactorNormalize(proof2.xyz, vertexNormal)) {
+        FactorSampleResult normalSampleResult;
+        if (factorEvaluate(position, vertexNormal, rho, normalSampleResult))
+            factorWriteSample(outputBase + DDGI_ZERO_NORMAL_FACTOR_SAMPLE_BASE +
+                                  1u * DDGI_ZERO_NORMAL_FACTOR_BLOCK_STRIDE,
+                              position, vertexNormal, rho, 1.0,
+                              vec4(factorQuietNaN()), normalSampleResult, false);
+    }
+
+    vec4 proof17 = normal_proof.records[proofBase + 17u];
+    uint mappedPath = floatBitsToUint(proof17.w);
+    vec3 mappedNormal;
+    if (mappedPath == 2u && zeroFactorNormalize(proof17.xyz, mappedNormal)) {
+        FactorSampleResult normalSampleResult;
+        if (factorEvaluate(position, mappedNormal, rho, normalSampleResult))
+            factorWriteSample(outputBase + DDGI_ZERO_NORMAL_FACTOR_SAMPLE_BASE +
+                                  2u * DDGI_ZERO_NORMAL_FACTOR_BLOCK_STRIDE,
+                              position, mappedNormal, rho, 1.0,
+                              vec4(factorQuietNaN()), normalSampleResult, false);
+    }
+
+    vec3 geomNormal;
+    if (zeroFactorNormalize(proof3.xyz, geomNormal)) {
+        FactorSampleResult normalSampleResult;
+        if (factorEvaluate(position, geomNormal, rho, normalSampleResult))
+            factorWriteSample(outputBase + DDGI_ZERO_NORMAL_FACTOR_SAMPLE_BASE +
+                                  3u * DDGI_ZERO_NORMAL_FACTOR_BLOCK_STRIDE,
+                              position, geomNormal, rho, 1.0,
+                              vec4(factorQuietNaN()), normalSampleResult, false);
+    }
+}
+
+void main() {
+    ddgi_zero_normal_factor_impl();
+}

@@ -53,14 +53,30 @@ layout(set = 0, binding = 4, std140) uniform GlobalData {
     vec4 sdf_resolutions;        // offset 320
     vec4 surface_cache_params;   // offset 336
     vec4 ddgi_fb[2];             // offset 352
-    vec4 hzb_params;             // offset 368: near, far, mip_levels, max_distance
+    vec4 hzb_params;             // offset 384: near, far, mip_levels, max_distance
     vec4 cache_params;           // F1: x = far_cache_start (0 off); F2: y = importance (0/1)
+    vec4 diag_params;            // offset 416 (unused here — offset parity)
+    vec4 hint_params;            // offset 432 (unused here — offset parity)
+    vec4 sky_params;             // offset 448 (unused here — offset parity)
+    vec4 wrc_fb[2];              // offset 464 (unused here — offset parity)
+    vec4 repr_params;            // offset 496 (unused here — offset parity)
+    // x = tier3 slot layout; y = T_n; z = lightVar mask enable;
+    // w = P4 tier rays enable (16/32/64 by slot).
+    vec4 tier_params;            // offset 512
+    // x = radiance capacity in slots (compacted layout upper bound).
+    vec4 tier_counts;            // offset 528
 } global;
 
 // F2 (M7): previous frame's final probe SH — importance-resampling proposal.
 layout(set = 0, binding = 5, std430) readonly buffer ImportanceSHBlock {
     vec4 data[];
 } importanceSH;
+
+// P2 (tier3): compacted slot list — flat radiance id → slot index
+// (0xFFFFFFFF = inactive/over-capacity; bound as a dummy when tier3 is off).
+layout(set = 0, binding = 6, std430) readonly buffer CompactListBlock {
+    uint data[];
+} compactList;
 
 #define MAX_HZB_STEPS 32u
 
@@ -79,19 +95,37 @@ void screen_probe_trace_hzb() {
     uint gridW = uint(global.grid_params.x);
     uint gridH = uint(global.grid_params.y);
     uint raysPerProbe = uint(global.grid_params.w);
-    uint totalRays = gridW * gridH * raysPerProbe;
-    if (global_id >= totalRays) return;
+
+    // P2/P4: under tier3 the radiance layout is compacted (dense probe ids,
+    // stride fixed at 64) and each slot traces only the leading rays its
+    // tier needs (normals.w). Slot identity — for buffer reads, direction
+    // hashing and the F2 SH proposal — always resolves to the SLOT index;
+    // global_id stays the flat radiance index.
+    uint probeIdx;
+    uint rayIdx;
+    if (global.tier_params.x > 0.5) {
+        probeIdx = compactList.data[global_id / raysPerProbe];
+        if (probeIdx == 0xFFFFFFFFu) return;   // inactive / over-capacity slot
+        rayIdx = global_id % raysPerProbe;
+        if (global.tier_params.w > 0.5 &&
+            float(rayIdx) >= probeNormals.data[probeIdx].w) {
+            return;   // tier-gated: this slot traces fewer rays (Finalize zero-fills)
+        }
+    } else {
+        uint totalRays = gridW * gridH * raysPerProbe;
+        if (global_id >= totalRays) return;
+        probeIdx = global_id / raysPerProbe;
+        rayIdx = global_id % raysPerProbe;
+    }
 
     // Default: unresolved.
     hit_buffer.data[global_id] = vec4(-1.0, 0.0, 0.0, 0.0);
 
-    vec4 posData = probePositions.data[global_id / raysPerProbe];
+    vec4 posData = probePositions.data[probeIdx];
     if (posData.w <= 0.0) return;  // inactive probe — Average skips (-1 sentinel)
-    vec3 probeNormal = normalize(probeNormals.data[global_id / raysPerProbe].xyz);
+    vec3 probeNormal = normalize(probeNormals.data[probeIdx].xyz);
     vec3 probePos = posData.xyz;
 
-    uint probeIdx = global_id / raysPerProbe;
-    uint rayIdx = global_id % raysPerProbe;
     vec3 rayDir;
     float invNq;   // unused here; Finalize owns the importance weight
     if (global.cache_params.y > 0.5) {

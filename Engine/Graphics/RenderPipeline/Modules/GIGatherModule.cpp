@@ -12,6 +12,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <string>
 #include <vector>
 #include <iostream>
 #include "Engine/Common/CoreLogStream.h"
@@ -20,6 +22,18 @@ namespace primal::graphics {
 
 using namespace rhi;
 using namespace rhi::math;
+
+static const char* GatherAuditFormatName(DataFormat format) {
+    switch (format) {
+        case DataFormat::R16_Float:    return "r16f";
+        case DataFormat::RGBA16_Float: return "rgba16f";
+        case DataFormat::BGRA8_UNorm:  return "bgra8";
+        case DataFormat::RGBA8_UNorm:  return "rgba8";
+        case DataFormat::D32_Float:    return "d32f";
+        case DataFormat::R32_Float:    return "r32f";
+        default:                       return "unknown";
+    }
+}
 
 struct GIGatherCB {
     math::m4x4 inv_view_projection;
@@ -45,6 +59,8 @@ struct FlatVolumeCB {
     math::v4 origin_spacing[4];   // xyz = origin, w = spacing
     math::v4 counts_offset[4];    // xyz = counts, w = probe offset (flat SSBO)
     math::v4 meta;                // x = 有效 volume 数（0 = flat 路径关闭）
+                                  // w = low-frequency gather blend override
+                                  //     [0,1], -1 keeps backend default.
 };
 
 struct GPUStaticProbeData {
@@ -58,7 +74,8 @@ struct GPUStaticProbeData {
 };
 
 bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
-                                 u32 render_width, u32 render_height) {
+                                 u32 render_width, u32 render_height,
+                                 ShaderHandle glossy_source_audit_shader) {
     device_ = device;
     render_width_ = render_width;
     render_height_ = render_height;
@@ -69,11 +86,35 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     // Metal: overlapping texture/buffer namespaces (idiomatic Metal).
     // Vulkan: flat 0..14 (depth as SampledDepthImage) — matches GLSL shader.
     const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    const char* glossyAuditEnv = std::getenv("DDGI_GLOSSY_SOURCE_AUDIT");
+    const bool glossyAuditRequested = isVk && glossyAuditEnv &&
+        glossyAuditEnv[0] == '1' && glossyAuditEnv[1] == '\0';
+    const char* gatherAuditPrefix = std::getenv("DDGI_GATHER_AUDIT");
+    if (glossyAuditRequested && (!gatherAuditPrefix || !gatherAuditPrefix[0])) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_GLOSSY_SOURCE_AUDIT] requested without DDGI_GATHER_AUDIT prefix"
+            << std::endl;
+        return false;
+    }
+    if (glossyAuditRequested && glossy_source_audit_shader == handles::INVALID_SHADER) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_GLOSSY_SOURCE_AUDIT] requested but auxiliary shader handle is invalid"
+            << std::endl;
+        return false;
+    }
+    glossy_source_audit_enabled_ = glossyAuditRequested;
+    auto failAuditInitialization = [&]() {
+        // A diagnostic setup failure must never leave the production pipeline
+        // looking usable to a caller that ignores Initialize's bool result.
+        if (glossyAuditRequested)
+            pipeline_ = handles::INVALID_PIPELINE;
+        return false;
+    };
     // T3.6/D1: flat-buffer 路径取代 N-volume descriptor-indexing 数组与
     // near/far 双槽 legacy 路径——不再依赖 descriptor indexing，Metal 与
     // Vulkan 同一条路径（消除 nvolume_supported_ 能力差异）。
     if (isVk) {
-        DescriptorSetLayoutBinding vkBindings[] = {
+        DescriptorSetLayoutBinding vkBindings[21] = {
             {0,  DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // depth
             {1,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // normal
             {2,  DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // output
@@ -100,6 +141,18 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {20, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // flat probe openSky
         };
         set_layout_ = device->CreateDescriptorSetLayout({19, vkBindings});
+        if (glossy_source_audit_enabled_) {
+            // Binding 19/20 are already live production resources (relocated
+            // origins/openSky).  Keep the regular 19-entry descriptor layout
+            // byte-for-byte stable and append the diagnostic SSBOs only to
+            // the auxiliary source layout.
+            vkBindings[19] = {21, DescriptorType::StorageBuffer, 1,
+                               ShaderStage::Compute, nullptr};
+            vkBindings[20] = {22, DescriptorType::StorageBuffer, 1,
+                               ShaderStage::Compute, nullptr};
+            glossy_source_audit_set_layout_ =
+                device->CreateDescriptorSetLayout({21, vkBindings});
+        }
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth
@@ -132,6 +185,18 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
+    if (glossy_source_audit_enabled_) {
+        glossy_source_audit_layout_ =
+            device->CreatePipelineLayout({1, &glossy_source_audit_set_layout_});
+        if (glossy_source_audit_layout_ == handles::INVALID_PIPELINE_LAYOUT ||
+            glossy_source_audit_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_GLOSSY_SOURCE_AUDIT] failed to create auxiliary layout"
+                << std::endl;
+            return failAuditInitialization();
+        }
+    }
+
     ComputePipelineDesc pd{};
     pd.computeShader = shader;
     pd.layout = layout_;
@@ -139,19 +204,39 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     pipeline_ = device->CreateComputePipeline(pd);
     if (pipeline_ == handles::INVALID_PIPELINE) return false;
 
+    if (glossy_source_audit_enabled_) {
+        ComputePipelineDesc auditPd{};
+        auditPd.computeShader = glossy_source_audit_shader;
+        auditPd.layout = glossy_source_audit_layout_;
+        auditPd.threadGroupSize = {8, 8, 1};
+        glossy_source_audit_pipeline_ = device->CreateComputePipeline(auditPd);
+        if (glossy_source_audit_pipeline_ == handles::INVALID_PIPELINE) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_GLOSSY_SOURCE_AUDIT] auxiliary pipeline creation failed"
+                << std::endl;
+            return failAuditInitialization();
+        }
+    }
+
     for (u32 i = 0; i < 3; ++i)
         descriptor_sets_[i] = device->CreateDescriptorSet({set_layout_});
 
-    // Gather 输出分辨率：Metal 走全分辨率（用户对齐要求——半分辨率下边缘像素
-    // 深度/法线取错探针，GI 呈块状锯齿），Vulkan 维持半分辨率基线不动。
+    // Vulkan 全分辨率诊断直接使用各接收像素的深度/法线，避免半分辨率
+    // DDGI 在线性上采样时混合不同表面。默认保留半分辨率；Metal 沿用全分辨率。
     // 命名 gi_halfres_* 沿用历史，实际尺寸以 gather_width_/gather_height_ 为准。
-    if (device->GetPlatform() == RHIPlatform::Metal) {
+    const char* fullResGatherEnv = std::getenv("PRIMAL_DDGI_FULL_RES_GATHER");
+    const bool fullResGatherOptIn = isVk && fullResGatherEnv &&
+        std::strcmp(fullResGatherEnv, "1") == 0;
+    if (device->GetPlatform() == RHIPlatform::Metal || fullResGatherOptIn) {
         gather_width_ = render_width;
         gather_height_ = render_height;
     } else {
         gather_width_ = render_width / 2;
         gather_height_ = render_height / 2;
     }
+    PRIMAL_LOG_STREAM(Info, "Render") << "[DDGI_GATHER_RESOLUTION] "
+        << gather_width_ << "x" << gather_height_
+        << " vulkan_full_res_opt_in=" << fullResGatherOptIn << std::endl;
     TextureDesc texDesc{};
     texDesc.size = {gather_width_, gather_height_, 1};
     texDesc.format = DataFormat::RGBA16_Float;
@@ -166,6 +251,104 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     texDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
     gi_specular_texture_ = device->CreateTexture(texDesc);
     device->PrimeTextureLayout(gi_specular_texture_);  // P0-B 首帧 priming
+
+    if (glossy_source_audit_enabled_) {
+        // Nine vec4 records per output pixel: the first three carry the
+        // receiver/source tuple, the remaining six carry the exact packed
+        // fetch/weight/index fields.  Keep the opt-in allocation bounded so a
+        // diagnostic request cannot consume an unbounded amount of VRAM.
+        const u64 pixels = static_cast<u64>(gather_width_) * gather_height_;
+        constexpr u64 kRecordsPerPixel = 9;
+        constexpr u64 kBytesPerRecord = 16;
+        constexpr u64 kMaxBytes = 128ull * 1024ull * 1024ull;
+        glossy_source_audit_bytes_ = pixels * kRecordsPerPixel * kBytesPerRecord;
+        if (glossy_source_audit_bytes_ == 0 || glossy_source_audit_bytes_ > kMaxBytes) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_GLOSSY_SOURCE_AUDIT] refusing auxiliary buffer size "
+                << glossy_source_audit_bytes_ << " bytes (limit=" << kMaxBytes << ")"
+                << std::endl;
+            return failAuditInitialization();
+        }
+
+        TextureDesc auditTexDesc{};
+        auditTexDesc.size = {gather_width_, gather_height_, 1};
+        auditTexDesc.format = DataFormat::RGBA16_Float;
+        auditTexDesc.type = TextureType::Texture2D;
+        auditTexDesc.usage = TextureUsage::ShaderResource |
+                             TextureUsage::UnorderedAccess |
+                             TextureUsage::CopySource;
+        auditTexDesc.name = "DDGI_GlossySourceAuditOutput";
+        glossy_source_audit_output_ = device->CreateTexture(auditTexDesc);
+        auditTexDesc.name = "DDGI_GlossySourceAuditSpecular";
+        glossy_source_audit_specular_ = device->CreateTexture(auditTexDesc);
+        if (glossy_source_audit_output_ == handles::INVALID_RESOURCE ||
+            glossy_source_audit_specular_ == handles::INVALID_RESOURCE) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_GLOSSY_SOURCE_AUDIT] auxiliary output allocation failed"
+                << std::endl;
+            return failAuditInitialization();
+        }
+        device->PrimeTextureLayout(glossy_source_audit_output_);
+        device->PrimeTextureLayout(glossy_source_audit_specular_);
+
+        BufferDesc auditDesc{};
+        auditDesc.size = glossy_source_audit_bytes_;
+        auditDesc.type = BufferType::Structured;
+        auditDesc.usage = GPUMemoryUsage::Dynamic;
+        auditDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        auditDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                              static_cast<u32>(BufferUsageFlags::TransferSrc);
+        auditDesc.name = "DDGI_GlossySourceAuditRecords";
+        for (u32 i = 0; i < 3; ++i) {
+            glossy_source_audit_buffer_[i] = device->CreateBuffer(auditDesc);
+            if (glossy_source_audit_buffer_[i] == handles::INVALID_RESOURCE) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_GLOSSY_SOURCE_AUDIT] auxiliary record allocation failed"
+                    << std::endl;
+                return failAuditInitialization();
+            }
+            glossy_source_audit_sets_[i] = device->CreateDescriptorSet({glossy_source_audit_set_layout_});
+            if (glossy_source_audit_sets_[i] == handles::INVALID_DESCRIPTOR_SET) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_GLOSSY_SOURCE_AUDIT] auxiliary descriptor allocation failed"
+                    << std::endl;
+                return failAuditInitialization();
+            }
+        }
+
+        // Two vec4 records per half-res pixel: actual ORM texel/roughness/
+        // frame stamp plus the exact fetched RGBA sample.  This is an
+        // independent 32 MiB-per-buffer budget; the existing 9-vec4 source
+        // records keep their separate 128 MiB budget above.
+        constexpr u64 kMaterialRecordsPerPixel = 2;
+        constexpr u64 kMaxMaterialBytes = 32ull * 1024ull * 1024ull;
+        glossy_material_audit_bytes_ = pixels * kMaterialRecordsPerPixel * kBytesPerRecord;
+        if (glossy_material_audit_bytes_ == 0 ||
+            glossy_material_audit_bytes_ > kMaxMaterialBytes) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_GLOSSY_SOURCE_AUDIT] refusing material buffer size "
+                << glossy_material_audit_bytes_ << " bytes (limit=" << kMaxMaterialBytes << ")"
+                << std::endl;
+            return failAuditInitialization();
+        }
+        BufferDesc materialDesc{};
+        materialDesc.size = glossy_material_audit_bytes_;
+        materialDesc.type = BufferType::Structured;
+        materialDesc.usage = GPUMemoryUsage::Dynamic;
+        materialDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        materialDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                                 static_cast<u32>(BufferUsageFlags::TransferSrc);
+        materialDesc.name = "DDGI_GlossyMaterialAuditRecords";
+        for (u32 i = 0; i < 3; ++i) {
+            glossy_material_audit_buffer_[i] = device->CreateBuffer(materialDesc);
+            if (glossy_material_audit_buffer_[i] == handles::INVALID_RESOURCE) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_GLOSSY_SOURCE_AUDIT] material record allocation failed"
+                    << std::endl;
+                return failAuditInitialization();
+            }
+        }
+    }
 
     // Constant buffers — need UniformBuffer bind flag for UBO descriptors.
     BufferDesc cbDesc{};
@@ -203,11 +386,132 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     return true;
 }
 
-void GIGatherModule::Shutdown() {}
+void GIGatherModule::Shutdown() {
+    if (device_) for (auto& s : gather_audit_sources_) {
+        if (s.staging!=handles::INVALID_RESOURCE) device_->DestroyBuffer(s.staging);
+        s={};
+    }
+    if (device_) {
+        for (u32 i = 0; i < 3; ++i) {
+            if (glossy_source_audit_sets_[i] != handles::INVALID_DESCRIPTOR_SET)
+                device_->DestroyDescriptorSet(glossy_source_audit_sets_[i]);
+            if (glossy_source_audit_buffer_[i] != handles::INVALID_RESOURCE)
+                device_->DestroyBuffer(glossy_source_audit_buffer_[i]);
+            if (glossy_material_audit_buffer_[i] != handles::INVALID_RESOURCE)
+                device_->DestroyBuffer(glossy_material_audit_buffer_[i]);
+            glossy_source_audit_sets_[i] = handles::INVALID_DESCRIPTOR_SET;
+            glossy_source_audit_buffer_[i] = handles::INVALID_RESOURCE;
+            glossy_material_audit_buffer_[i] = handles::INVALID_RESOURCE;
+        }
+        if (glossy_source_audit_output_ != handles::INVALID_RESOURCE)
+            device_->DestroyTexture(glossy_source_audit_output_);
+        if (glossy_source_audit_specular_ != handles::INVALID_RESOURCE)
+            device_->DestroyTexture(glossy_source_audit_specular_);
+        if (glossy_source_audit_pipeline_ != handles::INVALID_PIPELINE)
+            device_->DestroyPipeline(glossy_source_audit_pipeline_);
+        if (glossy_source_audit_layout_ != handles::INVALID_PIPELINE_LAYOUT)
+            device_->DestroyPipelineLayout(glossy_source_audit_layout_);
+        if (glossy_source_audit_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+            device_->DestroyDescriptorSetLayout(glossy_source_audit_set_layout_);
+    }
+    glossy_source_audit_output_ = handles::INVALID_RESOURCE;
+    glossy_source_audit_specular_ = handles::INVALID_RESOURCE;
+    glossy_source_audit_pipeline_ = handles::INVALID_PIPELINE;
+    glossy_source_audit_layout_ = handles::INVALID_PIPELINE_LAYOUT;
+    glossy_source_audit_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    glossy_source_audit_bytes_ = 0;
+    glossy_material_audit_bytes_ = 0;
+    glossy_source_audit_enabled_ = false;
+    gather_audit_orm_resource_ = handles::INVALID_RESOURCE;
+    gather_audit_orm_runtime_format_ = DataFormat::Unknown;
+    gather_audit_orm_width_ = gather_audit_orm_height_ = 0;
+    gather_audit_orm_metadata_valid_ = false;
+    gather_audit_orm_from_scene_ = false;
+    gather_audit_queued_=gather_audit_dumped_=false;
+}
 
 GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const GIGatherInputs& inputs) {
     GIGatherOutputs outputs{};
     if (!inputs.ddgi_pass || pipeline_ == handles::INVALID_PIPELINE) return outputs;
+
+    // One-shot, opt-in snapshot of the actual consumer inputs, read only once
+    // this completed frame slot is reused. No diagnostic mid-frame submit.
+    const char* auditPrefix=std::getenv("DDGI_GATHER_AUDIT");
+    if (auditPrefix && auditPrefix[0] && gather_audit_queued_ && !gather_audit_dumped_ &&
+        inputs.frame_index>=gather_audit_frame_+3u &&
+        inputs.current_buffer_index%3==gather_audit_slot_) {
+        // Diagnostic-only queue completion certificate. The captured copies
+        // were submitted on this graphics queue in the older frame. Submit a
+        // checked host dependency after them, wait its fence, then map. Do not
+        // infer completion merely from a reused swapchain/triple-buffer slot.
+        const auto completionHandle=device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        auto* completion=rhi::GetCommandBuffer(completionHandle);
+        auto requireAudit=[&](bool ok,const char* operation) {
+            if (!ok) {
+                PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_GATHER_AUDIT] failed " << operation;
+                std::abort(); // Explicit opt-in diagnostic failure; never export stale data.
+            }
+        };
+        requireAudit(completion!=nullptr,"completion command");
+        requireAudit(completion->Begin(),"Begin");
+        completion->MemoryBarrier(PipelineStage::Transfer | PipelineStage::ComputeShader,
+            PipelineStage::Host,AccessFlag::TransferWrite | AccessFlag::ShaderWrite,AccessFlag::HostRead);
+        requireAudit(completion->End(),"End");
+        requireAudit(completion->Submit(),"Submit");
+        requireAudit(completion->WaitForCompletion(),"WaitForCompletion");
+        device_->DestroyCommandBuffer(completionHandle);
+        // The material record is only certifiable together with the exact ORM
+        // imageView selected for descriptor binding 13 at the captured
+        // dispatch.  A fallback is recorded explicitly so replay cannot call
+        // it a scene ORM source.
+        bool complete=gather_audit_orm_metadata_valid_;
+        for (u32 i=0;i<gather_audit_source_count_;++i) {
+            const auto& s=gather_audit_sources_[i];
+            if (s.staging==handles::INVALID_RESOURCE) { complete=false;continue; }
+            auto* mapped=device_->MapBuffer(s.staging,0,s.bytes);
+            if (!mapped) { complete=false;continue; }
+            const std::string path=std::string(auditPrefix)+"-"+s.name+".raw";
+            if (FILE* out=std::fopen(path.c_str(),"wb")) {
+                complete &= std::fwrite(mapped,1,s.bytes,out)==s.bytes;
+                std::fclose(out);
+            } else complete=false;
+            device_->UnmapBuffer(s.staging);
+        }
+        const std::string path=std::string(auditPrefix)+"-meta.json";
+        if (FILE* out=std::fopen(path.c_str(),"w")) {
+            const auto glossySourceResource = glossy_source_audit_enabled_
+                ? glossy_source_audit_buffer_[gather_audit_slot_]
+                : handles::INVALID_RESOURCE;
+            const auto materialSourceResource = glossy_source_audit_enabled_
+                ? glossy_material_audit_buffer_[gather_audit_slot_]
+                : handles::INVALID_RESOURCE;
+            std::fprintf(out,"{\"frame\":%u,\"read_frame\":%u,\"ddgi_frame\":%u,\"ray_sample_mode\":%u,\"rays_per_probe\":%u,\"width\":%u,\"height\":%u,\"complete\":%s,\"glossy_source_audit\":{\"enabled\":%s,\"records_per_pixel\":9,\"bytes\":%llu,\"resource_handle\":%llu,\"binding\":21,\"auxiliary_scope\":\"same_inputs_shadow_dispatch\",\"default_main_preserved\":true,\"comparison_policy\":\"aux_delta_only; mismatch_unknown; never_substitute\"},\"material_source_audit\":{\"enabled\":%s,\"schema\":1,\"records_per_pixel\":2,\"bytes\":%llu,\"resource_handle\":%llu,\"binding\":22,\"layout\":\"storage_buffer\",\"format\":\"vec4x2_f32\",\"runtime_format\":%u,\"record_format\":\"vec4x2_f32\",\"record_runtime_format\":0,\"record_width\":%u,\"record_height\":%u,\"orm_width\":%u,\"orm_height\":%u,\"orm_descriptor_handle\":%llu,\"orm_binding\":13,\"orm_layout\":\"shader_resource\",\"orm_format\":\"%s\",\"orm_runtime_format\":%u,\"orm_selection\":\"%s\",\"source_identity\":\"DDGI_GLOSSY_SOURCE_AUDIT material records\",\"auxiliary_scope\":\"same_inputs_shadow_dispatch\"},\"sources\":[",
+                gather_audit_frame_,inputs.frame_index,gather_audit_ddgi_frame_,gather_audit_ray_mode_,gather_audit_rays_,gather_width_,gather_height_,complete?"true":"false",
+                glossy_source_audit_enabled_?"true":"false",
+                static_cast<unsigned long long>(glossy_source_audit_bytes_),
+                static_cast<unsigned long long>(glossySourceResource),
+                materialSourceResource!=handles::INVALID_RESOURCE?"true":"false",
+                static_cast<unsigned long long>(glossy_material_audit_bytes_),
+                static_cast<unsigned long long>(materialSourceResource),
+                0u,
+                gather_width_,gather_height_,gather_audit_orm_width_,gather_audit_orm_height_,
+                static_cast<unsigned long long>(gather_audit_orm_resource_),
+                GatherAuditFormatName(gather_audit_orm_runtime_format_),
+                static_cast<u32>(gather_audit_orm_runtime_format_),
+                gather_audit_orm_from_scene_?"scene_gbuffer_orm":"fallback_descriptor");
+            for (u32 i=0;i<gather_audit_source_count_;++i) {
+                const auto& s=gather_audit_sources_[i];
+                std::fprintf(out,"%s{\"name\":\"%s\",\"format\":\"%s\",\"runtime_format\":%u,\"bytes\":%llu,\"width\":%u,\"height\":%u,\"live\":%s,\"resource_handle\":%llu,\"binding\":%u,\"layout\":\"%s\",\"source_identity\":\"%s\"}",
+                    i?",":"",s.name,s.format,s.runtime_format,static_cast<unsigned long long>(s.bytes),s.width,s.height,
+                    s.staging!=handles::INVALID_RESOURCE?"true":"false",
+                    static_cast<unsigned long long>(s.resource),s.binding,s.layout,s.source_identity);
+            }
+            std::fprintf(out,"],\"completion_checked\":true,\"begin_end_submit_checked\":true,\"explicit_host_dependency\":true,\"completion_scope\":\"checked_graphics_queue_command_after_snapshot_copies\"}\n");std::fclose(out);
+        } else complete=false;
+        gather_audit_dumped_=true;
+        PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_GATHER_AUDIT] frame=" << gather_audit_frame_
+            << " read_frame=" << inputs.frame_index << " complete=" << complete << std::endl;
+    }
 
     outputs.gi_output_tex = gi_halfres_texture_;
     outputs.gi_output_rg = graph.ImportResource("DDGIHalfResGI", gi_halfres_texture_);
@@ -246,18 +550,36 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
         rendergraph::RGResourceHandle output;
     };
 
+    // The auxiliary source shader writes only shadow outputs.  Import them
+    // into the same pass so the render graph owns their UAV/SRV transitions;
+    // they never replace the production gather outputs consumed downstream.
+    const auto glossyAuditOutputRG = glossy_source_audit_enabled_
+        ? graph.ImportResource("DDGIGlossySourceAuditOutput", glossy_source_audit_output_)
+        : rendergraph::RGResourceHandle{};
+    const auto glossyAuditSpecRG = glossy_source_audit_enabled_
+        ? graph.ImportResource("DDGIGlossySourceAuditSpecular", glossy_source_audit_specular_)
+        : rendergraph::RGResourceHandle{};
+
     graph.AddPass<PassData>("DDGIGIGather",
         rendergraph::RGPassType::Compute,
         rendergraph::RGPassCategory::Lighting,
         [outRG = outputs.gi_output_rg, specRG = outputs.gi_specular_rg,
+         glossyAuditOutputRG, glossyAuditSpecRG,
+         irrHandle, depthHandle,
          depthRG = inputs.gbuffer_depth_rg, normalRG = inputs.gbuffer_normal_rg, ormRG = inputs.gbuffer_orm_rg]
         (PassData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling — outputs go to imported textures
+            builder.Read(irrHandle, ResourceState::ShaderResource);
+            builder.Read(depthHandle, ResourceState::ShaderResource);
             if (depthRG.IsValid()) builder.Read(depthRG, ResourceState::ShaderResource);
             if (normalRG.IsValid()) builder.Read(normalRG, ResourceState::ShaderResource);
             if (ormRG.IsValid()) builder.Read(ormRG, ResourceState::ShaderResource);
             data.output = builder.Write(outRG, ResourceState::UnorderedAccess);
             builder.Write(specRG, ResourceState::UnorderedAccess);
+            if (glossyAuditOutputRG.IsValid())
+                builder.Write(glossyAuditOutputRG, ResourceState::UnorderedAccess);
+            if (glossyAuditSpecRG.IsValid())
+                builder.Write(glossyAuditSpecRG, ResourceState::UnorderedAccess);
         },
         [this, inputs, ddgiReadIdx](const PassData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
@@ -267,6 +589,17 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             const ResourceHandle probeCB = probe_cb_[bindingIdx];
             const ResourceHandle staticProbeCB = static_probe_cb_[bindingIdx];
             const ResourceHandle nvolumesCB = nvolumes_cb_[bindingIdx];
+            const char* gatherPrefix = std::getenv("DDGI_GATHER_AUDIT");
+            const u32 auditFrame = std::getenv("DDGI_GATHER_FRAME")
+                ? u32(std::max(0, std::atoi(std::getenv("DDGI_GATHER_FRAME"))))
+                : 350u;
+            const bool glossyAuditDispatch = glossy_source_audit_enabled_ &&
+                gatherPrefix && gatherPrefix[0] && inputs.frame_index == auditFrame;
+            const DescriptorSetHandle glossyAuditSet = glossy_source_audit_sets_[bindingIdx];
+            // This is populated from imgInfos[4].imageView below.  The
+            // deferred material metadata must describe the descriptor that
+            // actually reached the auxiliary shader, including fallback use.
+            ResourceHandle actualBoundORM = handles::INVALID_RESOURCE;
 
             // X2/A3: 远场 volume 数据优先走 view；view 未填时回退旧 pass 指针
             // 路径。两条来源字段一致（origin/counts/spacing/irradiance 同源同
@@ -381,13 +714,31 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     const auto& vol = ddgi->GetVolumeData();
                     const auto& params = ddgi->GetParams();
                     cb->probe_origin_spacing = math::v4{vol.ProbeOrigin.x, vol.ProbeOrigin.y, vol.ProbeOrigin.z, params.probe_spacing};
-                    cb->probe_counts = math::v4{(float)params.probe_count_x, (float)params.probe_count_y, (float)params.probe_count_z, 9.0f};
+                    const u32 auditFrameStamp =
+                        inputs.frame_index == GIGatherInputs::kFrameIndexUnset
+                            ? 0u : inputs.frame_index + 1u;
+                    cb->probe_counts = math::v4{(float)params.probe_count_x, (float)params.probe_count_y, (float)params.probe_count_z,
+                        glossy_source_audit_enabled_ ? static_cast<float>(auditFrameStamp) : 9.0f};
                     cb->camera_pos = math::v4{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2], 1.0f};
                     // T6.3 sub-A: probe_vis 数据面——GIDebug() 热调旋钮进 CB，
                     // shader binding 6 第三 vec4（offset 112）。Off（默认）时
                     // x=0，gather 输出零变化。
                     cb->debug_vis = math::v4{static_cast<float>(
                         static_cast<u32>(lumen::GIDebug().probe_vis)), 0.0f, 0.0f, 0.0f};
+                    // Opt-in scene-floor oracle, NOT a production visibility
+                    // heuristic. The patch must be independently certified from
+                    // loaded triangles. Only dual-policy mode5 may consume it.
+                    const auto& depthPolicy=ddgi->GetVolumeData();
+                    if (device_->GetPlatform()==RHIPlatform::Vulkan && depthPolicy.RaySampleMode==5 && depthPolicy.RaysPerProbe==128 &&
+                        depthPolicy.SdfVoxelSizes[0].y==0.f && depthPolicy.SdfVoxelSizes[1].w==3.f) {
+                        if (const char* e=std::getenv("DDGI_GATHER_FLOOR_PATCH")) {
+                            float plane=0,halfX=0,halfZ=0; char trailing=0;
+                            if (std::sscanf(e,"%f,%f,%f%c",&plane,&halfX,&halfZ,&trailing)==3 &&
+                                std::isfinite(plane) && std::isfinite(halfX) && std::isfinite(halfZ) && halfX>0 && halfZ>0) {
+                                cb->debug_vis.y=halfX; cb->debug_vis.z=halfZ; cb->debug_vis.w=plane;
+                            }
+                        }
+                    }
                     // TEMP diagnosis: verify the CB the gather will read.
                     static bool s_cbDbg = false;
                     if (!s_cbDbg) { s_cbDbg = true;
@@ -417,6 +768,16 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             if (const char* e = std::getenv("PRIMAL_GI_OPENSKY_V2")) {
                 if (e[0] == '0') openskyV2 = false;
             }
+            // Diagnostic/quality control for the visibility-free trilinear
+            // component.  Keep -1 as the default so this instrumentation does
+            // not silently alter either backend's established image.
+            float lowFrequencyBlend = -1.0f;
+            if (const char* e = std::getenv("PRIMAL_DDGI_LOW_FREQ_BLEND")) {
+                char* end = nullptr;
+                const float parsed = std::strtof(e, &end);
+                if (end != e && std::isfinite(parsed))
+                    lowFrequencyBlend = std::clamp(parsed, 0.0f, 1.0f);
+            }
             // T6.3 sub-B → T3.6/D1: upload FlatVolumeCB（binding 18）。flatActive
             // 时写入 volume[0..nvolCount) 的 origin/spacing/counts + probe
             // offset（w 槽，原 NVolumeCB 的 enabled 位改型）；否则整块清零
@@ -440,7 +801,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         // 回滚旧整探针分类——shader 侧 sER=1 等价旧行为）。
                         nv->meta = math::v4{(float)nvolCount,
                                             openskyActive ? 1.0f : 0.0f,
-                                            openskyV2 ? 1.0f : 0.0f, 0.0f};
+                                            openskyV2 ? 1.0f : 0.0f,
+                                            lowFrequencyBlend};
                     }
                     device_->UnmapBuffer(nvolumesCB);
                 }
@@ -549,7 +911,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             ResourceHandle skyFactor = inputs.static_probe_volume ? inputs.static_probe_volume->GetStaticSkyFactor() : handles::INVALID_RESOURCE;
 
             // Texture bindings (6: depth/normal/output/history/orm/specular)
-            WriteDescriptorSet texWrites[6];
+            WriteDescriptorSet texWrites[6] = {};
             DescriptorImageInfo imgInfos[6];
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
             const u32 ormBinding = isVk ? 13u : 4u;
@@ -599,6 +961,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 ResourceHandle ormTex = inputs.gbuffer_orm;
                 if (ormTex == handles::INVALID_RESOURCE) ormTex = inputs.fallback_texture;
                 if (ormTex == handles::INVALID_RESOURCE) ormTex = gi_halfres_history_;
+                actualBoundORM = ormTex;
                 texWrites[4].dstSet = descriptorSet;
                 texWrites[4].dstBinding = ormBinding;
                 texWrites[4].dstArrayElement = 0;
@@ -619,14 +982,24 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[5].imageView = gi_specular_texture_;
                 imgInfos[5].imageLayout = ResourceState::UnorderedAccess;
                 device_->UpdateDescriptorSets(6, texWrites);
+                if (glossyAuditDispatch) {
+                    // Reuse the exact input image descriptors, changing only
+                    // the two write targets and descriptor set.  This keeps
+                    // the auxiliary pass on the same receiver data.
+                    for (u32 i = 0; i < 6; ++i)
+                        texWrites[i].dstSet = glossyAuditSet;
+                    imgInfos[2].imageView = glossy_source_audit_output_;
+                    imgInfos[5].imageView = glossy_source_audit_specular_;
+                    device_->UpdateDescriptorSets(6, texWrites);
+                }
             }
 
             // T3.6/D1: Vulkan flat 绑定（17 = flat SSBO offset 256 跳过头部，
             // 18 = FlatVolumeCB）。原 15/16（far 双槽）与 17 array[4] 描述符
             // 写入删除。Metal 的 flat 槽（10/11）走下方 bufWrites 路径。
             if (isVk) {
-                WriteDescriptorSet flatWrites[4];
-                DescriptorBufferInfo flatInfos[4];
+                WriteDescriptorSet flatWrites[6] = {};
+                DescriptorBufferInfo flatInfos[6];
                 flatWrites[0].dstSet = descriptorSet;
                 flatWrites[0].dstBinding = 17;
                 flatWrites[0].dstArrayElement = 0;
@@ -681,10 +1054,35 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 flatInfos[3].offset = 256;
                 flatInfos[3].range = ~0ull;
                 device_->UpdateDescriptorSets(4, flatWrites);
+                if (glossyAuditDispatch) {
+                    for (u32 i = 0; i < 4; ++i)
+                        flatWrites[i].dstSet = glossyAuditSet;
+                    flatWrites[4].dstSet = glossyAuditSet;
+                    flatWrites[4].dstBinding = 21;
+                    flatWrites[4].dstArrayElement = 0;
+                    flatWrites[4].descriptorCount = 1;
+                    flatWrites[4].descriptorType = DescriptorType::StorageBuffer;
+                    flatWrites[4].imageInfo = nullptr;
+                    flatWrites[4].bufferInfo = &flatInfos[4];
+                    flatInfos[4].buffer = glossy_source_audit_buffer_[bindingIdx];
+                    flatInfos[4].offset = 0;
+                    flatInfos[4].range = glossy_source_audit_bytes_;
+                    flatWrites[5].dstSet = glossyAuditSet;
+                    flatWrites[5].dstBinding = 22;
+                    flatWrites[5].dstArrayElement = 0;
+                    flatWrites[5].descriptorCount = 1;
+                    flatWrites[5].descriptorType = DescriptorType::StorageBuffer;
+                    flatWrites[5].imageInfo = nullptr;
+                    flatWrites[5].bufferInfo = &flatInfos[5];
+                    flatInfos[5].buffer = glossy_material_audit_buffer_[bindingIdx];
+                    flatInfos[5].offset = 0;
+                    flatInfos[5].range = glossy_material_audit_bytes_;
+                    device_->UpdateDescriptorSets(6, flatWrites);
+                }
             }
 
             // Buffer bindings with sub-allocation from probe_cb_
-            WriteDescriptorSet bufWrites[10];
+            WriteDescriptorSet bufWrites[10] = {};
             DescriptorBufferInfo bufInfos[10];
             {
                 for (int i = 0; i < 10; ++i) {
@@ -721,6 +1119,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 if (isVk) {
                     // Vulkan: bindings 4..12（flat 槽 17/18 已由上方 flatWrites 写入）。
                     device_->UpdateDescriptorSets(9, bufWrites);
+                    if (glossyAuditDispatch) {
+                        for (u32 i = 0; i < 9; ++i)
+                            bufWrites[i].dstSet = glossyAuditSet;
+                        device_->UpdateDescriptorSets(9, bufWrites);
+                    }
                 } else {
                     // T3.6/D1: Metal flat 槽（10 = flat SSBO offset 256，11 = fvCB）。
                     // 原 7（near irr）/9（dual-slot dup）/10（far irr）/11（far
@@ -764,6 +1167,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     }
                     roInfo.offset = 0;
                     roInfo.range = ~0ull;
+                    device_->UpdateDescriptorSets(1, &roWrite);   // 2026-09-15 补提交：此前填充后从未 Update，buffer(12) 缺绑 → validation abort
                     // GI 根治 Phase 3.2: Metal buffer(13) = flat openSky。
                     WriteDescriptorSet osWrite{};
                     DescriptorBufferInfo osInfo{};
@@ -788,6 +1192,29 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, layout_, 0, 1, sets, 0, nullptr);
             cmd->Dispatch((gather_width_ + 7) / 8, (gather_height_ + 7) / 8, 1);
 
+            // Optional receiver-source pass.  It consumes the same descriptor
+            // inputs and frame constants as the production dispatch, but its
+            // writes go only to diagnostic shadow textures and the auxiliary
+            // 9-vec4/pixel SSBO.  Production GI remains the first dispatch.
+            if (glossyAuditDispatch) {
+                cmd->BindComputePipeline(glossy_source_audit_pipeline_);
+                const DescriptorSetHandle auditSets[] = { glossyAuditSet };
+                cmd->BindDescriptorSets(PipelineBindPoint::Compute,
+                                        glossy_source_audit_layout_, 0, 1,
+                                        auditSets, 0, nullptr);
+                cmd->Dispatch((gather_width_ + 7) / 8, (gather_height_ + 7) / 8, 1);
+                ResourceBarrier auditBarriers[2]{};
+                auditBarriers[0].resource = glossy_source_audit_output_;
+                auditBarriers[0].beforeState = ResourceState::UnorderedAccess;
+                auditBarriers[0].afterState = ResourceState::ShaderResource;
+                auditBarriers[0].subresource = 0xFFFFFFFF;
+                auditBarriers[1].resource = glossy_source_audit_specular_;
+                auditBarriers[1].beforeState = ResourceState::UnorderedAccess;
+                auditBarriers[1].afterState = ResourceState::ShaderResource;
+                auditBarriers[1].subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(auditBarriers, 2);
+            }
+
             // Barrier output UAV → SRV for downstream Fusion pass.
             // History blit disabled (temporal accumulation not used — causes
             // layout issues with uninitialized history texture on first frame).
@@ -802,6 +1229,144 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 outBarriers[1].afterState = ResourceState::ShaderResource;
                 outBarriers[1].subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(outBarriers, 2);
+            }
+
+            // Exact same-frame inputs for CPU replay/probe attribution. The
+            // snapshot happens after both dispatches, while all bound buffers
+            // still contain the values just consumed. No stale ray/source is
+            // substituted when the auxiliary dispatch was not requested.
+            if (gatherPrefix && gatherPrefix[0] && isVk && !gather_audit_queued_ &&
+                inputs.frame_index==auditFrame) {
+                const u64 nearProbes=u64(nvolViews[0].counts.x)*u64(nvolViews[0].counts.y)*u64(nvolViews[0].counts.z);
+                gather_audit_orm_resource_ = actualBoundORM;
+                gather_audit_orm_runtime_format_ = DataFormat::Unknown;
+                gather_audit_orm_width_ = gather_audit_orm_height_ = 0;
+                gather_audit_orm_metadata_valid_ = false;
+                gather_audit_orm_from_scene_ =
+                    inputs.gbuffer_orm != handles::INVALID_RESOURCE &&
+                    actualBoundORM == inputs.gbuffer_orm;
+                if (actualBoundORM != handles::INVALID_RESOURCE) {
+                    gather_audit_orm_runtime_format_ = device_->GetTextureFormat(actualBoundORM);
+                    const bool sized = device_->GetTextureSize(actualBoundORM,
+                                                               gather_audit_orm_width_,
+                                                               gather_audit_orm_height_);
+                    gather_audit_orm_metadata_valid_ =
+                        sized && gather_audit_orm_runtime_format_ != DataFormat::Unknown;
+                }
+                struct Source {
+                    const char* name;
+                    ResourceHandle resource;
+                    u64 bytes;
+                    u32 bpp;
+                    const char* format;
+                    u32 binding;
+                    const char* identity;
+                    const char* layout;
+                };
+                Source sources[15]{};
+                u32 sourceCount = 0;
+                bool sourceListOverflow = false;
+                auto addSource = [&](const char* name, ResourceHandle resource,
+                                     u64 bytes, u32 bpp, const char* format,
+                                     u32 binding, const char* identity,
+                                     const char* layout) {
+                    if (sourceCount >= 15) {
+                        sourceListOverflow = true;
+                        return;
+                    }
+                    sources[sourceCount++] = {name, resource, bytes, bpp, format,
+                                              binding, identity, layout};
+                };
+                addSource("view", probeCB, sizeof(GIGatherCB), 0, "f32", 6,
+                          "GIGather probe/camera/debug CB", "uniform_buffer");
+                addSource("volumes", nvolumesCB, sizeof(FlatVolumeCB), 0, "f32", 18,
+                          "GIGather FlatVolumeCB", "uniform_buffer");
+                addSource("irradiance", flatBuf, 256ull + u64(fvTotalProbes) * 144ull, 0, "f32", 17,
+                          "GIGather flat irradiance", "storage_buffer");
+                addSource("opensky", flatOpenSkyBuf, 256ull + u64(fvTotalProbes) * 8ull, 0, "f32", 20,
+                          "GIGather flat openSky", "storage_buffer");
+                addSource("moments", ddgi->GetDepthBufferBySlot(ddgiReadIdx), nearProbes * 128ull * 4ull, 0, "f32", 12,
+                          "GIGather DDGI depth moments", "storage_buffer");
+                addSource("origins", nvolViews[0].relocated_origins, nearProbes * 16ull, 0, "f32", 19,
+                          "GIGather near relocated origins", "storage_buffer");
+                addSource("depth", inputs.gbuffer_depth, 0, 4, "", 0,
+                          "GIGather gbuffer depth", "shader_resource");
+                addSource("normal", inputs.gbuffer_normal, 0, 8, "", 1,
+                          "GIGather gbuffer normal", "shader_resource");
+                addSource("output", gi_halfres_texture_, 0, 8, "", 2,
+                          "GIGather production diffuse output", "shader_resource");
+                const ResourceHandle provenance = ddgi->GetDepthProvenanceBufferBySlot(ddgiReadIdx);
+                if (provenance != handles::INVALID_RESOURCE)
+                    addSource("provenance", provenance, nearProbes * 64ull * 8ull * 4ull, 0, "u32", 0xFFFFFFFFu,
+                              "DDGI depth provenance", "storage_buffer");
+                addSource("spec_output", gi_specular_texture_, 0, 8, "", 14,
+                          "GIGather production glossy output", "shader_resource");
+                if (glossyAuditDispatch) {
+                    addSource("glossy-source", glossy_source_audit_buffer_[bindingIdx],
+                              glossy_source_audit_bytes_, 0, "vec4x9_f32", 21,
+                              "DDGI_GLOSSY_SOURCE_AUDIT receiver records", "storage_buffer");
+                    addSource("glossy-aux-output", glossy_source_audit_output_, 0, 8, "", 2,
+                              "DDGI_GLOSSY_SOURCE_AUDIT auxiliary diffuse", "shader_resource");
+                    addSource("glossy-aux-spec", glossy_source_audit_specular_, 0, 8, "", 14,
+                              "DDGI_GLOSSY_SOURCE_AUDIT auxiliary glossy", "shader_resource");
+                    addSource("glossy-material-source", glossy_material_audit_buffer_[bindingIdx],
+                              glossy_material_audit_bytes_, 0, "vec4x2_f32", 22,
+                              "DDGI_GLOSSY_SOURCE_AUDIT material records", "storage_buffer");
+                }
+                if (sourceListOverflow) {
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << "[DDGI_GATHER_AUDIT] source snapshot exceeds 15-entry bound"
+                        << std::endl;
+                    gather_audit_orm_metadata_valid_ = false;
+                }
+                gather_audit_source_count_=sourceCount;
+                const auto auditVolume=ddgi->GetVolumeData();
+                gather_audit_ddgi_frame_=auditVolume.FrameIndex;
+                gather_audit_ray_mode_=u32(auditVolume.RaySampleMode);
+                gather_audit_rays_=auditVolume.RaysPerProbe;
+                cmd->MemoryBarrier(PipelineStage::ComputeShader | PipelineStage::Transfer | PipelineStage::Host,
+                    PipelineStage::Transfer,AccessFlag::ShaderWrite | AccessFlag::TransferWrite | AccessFlag::HostWrite,
+                    AccessFlag::TransferRead);
+                for (u32 i=0;i<gather_audit_source_count_;++i) {
+                    const auto& src=sources[i];auto& dst=gather_audit_sources_[i];
+                    dst.name=src.name;dst.resource=src.resource;dst.bytes=src.bytes;
+                    dst.format=src.format;dst.layout=src.layout;
+                    dst.source_identity=src.identity;dst.binding=src.binding;
+                    dst.runtime_format=0;
+                    if (src.resource==handles::INVALID_RESOURCE) continue;
+                    u32 bpp=src.bpp;
+                    if (src.bpp) {
+                        const auto format=device_->GetTextureFormat(src.resource);
+                        dst.runtime_format=static_cast<u32>(format);
+                        if (format==DataFormat::BGRA8_UNorm) { bpp=4;dst.format="bgra8"; }
+                        else if (format==DataFormat::RGBA8_UNorm) { bpp=4;dst.format="rgba8"; }
+                        else if (format==DataFormat::RGBA16_Float) { bpp=8;dst.format="rgba16f"; }
+                        else if (format==DataFormat::D32_Float) { bpp=4;dst.format="r32f"; }
+                        else continue; // Never copy an unknown format into a guessed-size buffer.
+                        if (!device_->GetTextureSize(src.resource,dst.width,dst.height)) continue;
+                        dst.bytes=u64(dst.width)*dst.height*bpp;
+                    }
+                    if (!dst.bytes) continue;
+                    BufferDesc bd{};bd.size=dst.bytes;
+                    bd.bindFlags=u32(BufferUsageFlags::TransferDst);bd.memoryUsage=GPUMemoryUsage::Readback;
+                    dst.staging=device_->CreateBuffer(bd);
+                    if (dst.staging==handles::INVALID_RESOURCE) continue;
+                    if (!src.bpp) cmd->CopyBuffer(src.resource,dst.staging,0,0,dst.bytes);
+                    else {
+                        ResourceBarrier bar{};bar.resource=src.resource;
+                        bar.beforeState=ResourceState::ShaderResource;bar.afterState=ResourceState::CopySource;
+                        cmd->InsertBarrier(&bar,1);
+                        BufferTextureCopyRegion rr{};rr.imageSubresource.layerCount=1;
+                        rr.imageExtent={dst.width,dst.height,1};
+                        cmd->CopyTextureToBuffer(src.resource,dst.staging,&rr,1);
+                        bar.beforeState=ResourceState::CopySource;bar.afterState=ResourceState::ShaderResource;
+                        cmd->InsertBarrier(&bar,1);
+                    }
+                }
+                cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,
+                    AccessFlag::TransferWrite,AccessFlag::HostRead);
+                gather_audit_frame_=inputs.frame_index;gather_audit_slot_=bindingIdx;
+                gather_audit_queued_=true;
             }
 
             // SC_DUMP_CARDS=1 — deferred luminance stats of the gather output

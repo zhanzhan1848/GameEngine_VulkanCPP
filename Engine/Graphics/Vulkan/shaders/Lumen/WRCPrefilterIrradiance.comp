@@ -84,9 +84,11 @@ void wrc_prefilter_irradiance() {
     if (probeIdx >= volume.ProbeMeta.y) return;
 
     const uint K = volume.ProbeMeta.x;
-    const uint base = probeIdx * (K * 2u + 4u);
+    // [P2 SoA]: radiance / meta 双区域寻址（WRCTypes.h 布局 v2）。
+    const uint rbase = probeIdx * (K * 2u);
+    const uint metaBase = volume.ProbeMeta.y * (K * 2u) + probeIdx * 4u;
 
-    uint state = pd.probe_data[base + K * 2u + 2u];
+    uint state = pd.probe_data[metaBase + 2u];
     if ((state & 1u) == 0u) {
         for (uint i = 0u; i < 9u; ++i) sh.sh9_out[probeIdx * 9u + i] = vec4(0.0);
         return;
@@ -98,8 +100,8 @@ void wrc_prefilter_irradiance() {
     for (uint i = 0u; i < 9u; ++i) acc[i] = vec4(0.0);
     float Y[9];
     for (uint d = 0u; d < K; ++d) {
-        uvec2 p0 = uvec2(pd.probe_data[base + d * 2u + 0],
-                         pd.probe_data[base + d * 2u + 1]);
+        uvec2 p0 = uvec2(pd.probe_data[rbase + d * 2u + 0],
+                         pd.probe_data[rbase + d * 2u + 1]);
         vec3 L = wrcUnpackRGB(p0);
         wrcSHBasis(wrcDir(d, K), Y);
         for (uint i = 0u; i < 9u; ++i) acc[i].xyz += L * Y[i];

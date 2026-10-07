@@ -45,7 +45,10 @@
 // ShaderLib/EncodeLib.glsl. Constants are float32-identical to the previous
 // inline bodies. The SH expansions inside the trilinear loops stay inline
 // (they share precomputed axis products across two evaluations).
+// Phase 1b: DDGI 评基（real-SH 约定 + cos-lobe 因子）单源到 EvalLib.glsl，
+// trilinear 环内展开改调库函数（原"展开留内联"的理由随单源撤销）。
 #include "ShaderLib/EncodeLib.glsl"
+#include "ShaderLib/EvalLib.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -117,6 +120,10 @@ layout(set = 0, binding = 18, std140) uniform FlatVolumeCB {
     vec4 fvMeta;               // x = 有效 volume 数（0 = 防御 dim ambient）
                                // y = openSky 分类开关（GI 根治 Phase 3.2；
                                //     PRIMAL_GI_OPENSKY=0 时 CPU 置 0 关闭）
+                               // z = openSky V2 开关（能量所有权 Phase 4a；
+                               //     PRIMAL_GI_OPENSKY_V2=0 → CPU 置 0，
+                               //     sER=1 = 旧整探针分类）
+                               // w = 无可见性低频旁路混合比；-1 保留后端默认。
 };
 // 2026-09-17 P0（probe-selection-density-audit §5.1 末段）：近场 volume 的
 // 重定位后有效起点（DDGITraceSDF 本帧/近期 trace 时发布，w = 1.0 有效）。
@@ -131,6 +138,20 @@ layout(set = 0, binding = 19) readonly buffer NearRelocatedOriginsBuf {
 layout(set = 0, binding = 20) readonly buffer FlatOpenSkyBuf {
     float flatProbeOpenSky[];
 };
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+// Auxiliary receiver/source records.  Binding 21 is absent from the regular
+// production descriptor layout; the source shader is selected only for the
+// opt-in Vulkan diagnostic dispatch.
+layout(set = 0, binding = 21, std430) buffer GlossySourceAuditBuf {
+    vec4 glossySourceAudit[];
+};
+// Independent material source records.  Binding 22 exists only in the
+// auxiliary source layout; the regular 19-entry production layout is
+// unchanged.  Two vec4s are written per output pixel.
+layout(set = 0, binding = 22, std430) buffer GlossyMaterialAuditBuf {
+    vec4 glossyMaterialAudit[];
+};
+#endif
 
 // --------------------------------------------------------------------------------
 // Constants
@@ -150,10 +171,16 @@ layout(set = 0, binding = 20) readonly buffer FlatOpenSkyBuf {
 // PAIRED CHANGE (keep both in sync): the probe trace chain shades hits with
 // ddgi_light_color, which the CPU divides by π in the same commit. That keeps
 // the SC↔probe feedback loop's absolute drive unchanged, so only the screen-end
-// scale is corrected. NEVER apply this factor inside
-// SurfaceCacheLightEval.comp::gatherProbeIrradiance — its loop gain budget
-// (collection ≤ 0.85 × albedo < 1) was calibrated without it and a boost there
-// diverges high-albedo walls within minutes (see that file, gather clamp note).
+// scale is corrected.
+//
+// [F6 2026-09-20 能量不对称修复] 下方"NEVER apply this factor inside
+// SurfaceCacheLightEval"已作废（化石警告）：其前提是已被取代的 CPU /π 平衡
+// 方案。2026-09-10 起 SurfaceCacheLightEval.comp::gatherProbeIrradiance 默认
+// ×π（PRIMAL_SC_GATHER_PI，radiance-SH 的正确 L→E 换算；两腿 π 一致，实测
+// 回路固定点 ×~1.7-2.1 有界、DC gain ~0.53 <1——见该文件 2026-09-10 十 注）。
+// 两侧约束等价且互补：本端 = 屏幕端 diffuse 输出恰一次 ×π；SC 端 = 卡片
+// 入射恰一次 ×π。改任何一端的 π 必须两腿同步（见 SurfaceCacheLightEval
+// 回滚警示），否则 SC↔probe 回路增益单腿漂移。
 const float PROBE_SH_RAD_TO_IRRAD = 3.14159265;
 
 // --------------------------------------------------------------------------------
@@ -206,6 +233,25 @@ vec2 sampleNearProbeDepth(uint probeIdx, vec3 dir) {
     uint base = probeIdx * DEPTH_FLOATS_PER_PROBE;
     return vec2(ddgiDepthBuffer[base + octIdx],
                 ddgiDepthBuffer[base + uint(DEPTH_TEXELS) + octIdx]);
+}
+
+// Scene-specific diagnostic oracle: debugVis.y/z = centered patch half extents,
+// w = horizontal plane Y. Only extra-only fixed-mode0 bins may be tested.
+// This is NOT a generic per-bin validity gate; an independent mesh certificate
+// is required. Legacy scalar-hit cells and unmeasured/escape depths are excluded.
+bool certifiedFloorBlock(vec3 probe, vec3 receiver, vec3 dir, float distance, vec2 mv) {
+    if (debugVis.y<=0.0 || debugVis.z<=0.0) return false;
+    vec2 uv=gatherOctEncode(dir);
+    uvec2 cell=uvec2(clamp(uv*8.0,vec2(0.0),vec2(7.0)));
+    uint bin=cell.y*8u+cell.x;
+    uint radianceMask=bin<32u?0x80c06327u:0x00386cccu;
+    if ((radianceMask & (1u<<(bin%32u)))!=0u) return false;
+    float plane=debugVis.w;
+    if (probe.y>=plane-0.10 || receiver.y<=plane+0.01) return false;
+    if (mv.x<=0.0 || mv.y<=0.0 || mv.x+2.0*sqrt(mv.y)>=distance-0.15) return false;
+    float t=(plane-probe.y)/(receiver.y-probe.y);
+    vec3 crossing=mix(probe,receiver,t);
+    return t>0.0 && t<1.0 && abs(crossing.x)<debugVis.y && abs(crossing.z)<debugVis.z;
 }
 
 vec3 evalSH9Shared(int probeIdx, vec3 d) {
@@ -351,6 +397,30 @@ void ddgi_gi_gather() {
     vec3 normal = vec3(0.0, 1.0, 0.0);
     vec3 gp = vec3(0.0);
     bool isActive = false;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+    // These are populated from the same production fetch/weight variables.
+    // Zero values deliberately mark unsupported/invalid fields for the strict
+    // reader instead of inventing a replacement ray or probe.
+    bool auditRecordValid = true;
+    ivec2 auditDepthTexel = ivec2(-1);
+    ivec2 auditNormalTexel = ivec2(-1);
+    float auditSelectedVolumePlus2 = 1.0; // sel=-1; near=2, far=3, ...
+    vec3 auditR = vec3(0.0);
+    float auditNoV = 0.0;
+    float auditVisibilityConfidence = 0.0;
+    float auditLowFrequencyBlend = 0.0;
+    ivec2 auditFullOrmTexel = ivec2(-1);
+    float auditOrmRoughness = 0.0;
+    vec4 auditOrmSample = vec4(0.0);
+    float auditW[8];
+    float auditLowW[8];
+    uint auditProbeIds[8];
+    for (int auditInit = 0; auditInit < 8; ++auditInit) {
+        auditW[auditInit] = 0.0;
+        auditLowW[auditInit] = 0.0;
+        auditProbeIds[auditInit] = 0u;
+    }
+#endif
 
     if (inBounds) {
         uv = (vec2(tid) + 0.5) / vec2(width, height);
@@ -358,6 +428,9 @@ void ddgi_gi_gather() {
         // with full-res dimensions to sample the correct GBuffer pixel.
         ivec2 fullResSize = textureSize(gbuffer_depth, 0);
         ivec2 fullTexel = ivec2(vec2(fullResSize) * uv);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+        auditDepthTexel = fullTexel;
+#endif
         depth = texelFetch(gbuffer_depth, fullTexel, 0).r;
         if (depth < 1.0) {
             // Reconstruct invViewProj from 4 vec4 rows (column-major)
@@ -368,6 +441,9 @@ void ddgi_gi_gather() {
 
             ivec2 fullNormSize = textureSize(gbuffer_normal, 0);
             ivec2 fullNormTexel = ivec2(vec2(fullNormSize) * uv);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+            auditNormalTexel = fullNormTexel;
+#endif
             vec3 n = texelFetch(gbuffer_normal, fullNormTexel, 0).xyz;
             n = normalize(n * 2.0 - 1.0);
             // GLSL has no isnormal() on vec3; check components
@@ -586,6 +662,11 @@ void ddgi_gi_gather() {
                     }
                 }
             }
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+            // Preserve the actual volume choice, including the invalid -1
+            // case encoded as +1.  No CPU or shader-side fallback is applied.
+            auditSelectedVolumePlus2 = float(sel + 2);
+#endif
             if (sel >= 0) {
                 uint volOff = uint(fvCountsOffset[sel].w);
                 vec3 gpn = (worldPos - fvOriginSpacing[sel].xyz) / fvOriginSpacing[sel].w;
@@ -611,28 +692,24 @@ void ddgi_gi_gather() {
                 pc[4] = uvec3(b0.x, b0.y, b1.z); pc[5] = uvec3(b1.x, b0.y, b1.z);
                 pc[6] = uvec3(b0.x, b1.y, b1.z); pc[7] = uvec3(b1.x, b1.y, b1.z);
 
-                // SH reconstruction coefficients — 与 legacy 路径同值。
-                const float SH_C0   = 0.28209479;
-                const float SH_C1   = 0.48860251;
-                const float SH_C2_0 = 1.09254843;  // xy
-                const float SH_C2_1 = 0.31539157;  // 3zz-1
-                const float SH_C2_2 = 0.54627421;  // xx-yy
-                float nx = normal.x, ny = normal.y, nz = normal.z;
-                float nxy = nx*ny, nyz = ny*nz, nzx = nz*nx;
-                float nxx = nx*nx, nyy = ny*ny, nzz = nz*nz;
-
-                // sel==0(近场)时与 legacy 相同的 R lobe 输入。
+                // Phase 1b: SH 重建常量/轴积预计算移除——评基单源
+                // EvalLib.glsl（函数内自算轴积，逐字同序）。
                 vec3 V = normalize(cameraPos.xyz - worldPos);
                 float NdotV = clamp(dot(normal, V), 0.05, 1.0);
+                // sel==0(近场)时与 legacy 相同的 R lobe 输入。
                 vec3 R = reflect(-V, normal);
-                float rx = R.x, ry = R.y, rz = R.z;
-                float rxy = rx*ry, ryz = ry*rz, rzx = rz*rx;
-                float rxx = rx*rx, ryy = ry*ry, rzz = rz*rz;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                if (sel == 0) {
+                    auditR = R;
+                    auditNoV = NdotV;
+                }
+#endif
 
                 vec3 result = vec3(0.0);
                 float totalW = 0.0;
                 vec3 lowFrequencyGI = vec3(0.0);
                 float lowFrequencyW = 0.0;
+                float confidenceBaseW = 0.0;
                 vec3 reflResult = vec3(0.0);
                 vec3 bestIrr = vec3(0.0);
                 vec3 bestRefl = vec3(0.0);
@@ -645,13 +722,15 @@ void ddgi_gi_gather() {
                 // 不再隔墙渗透。PRIMAL_GI_OPENSKY=0 时 CPU 置 fvMeta.y=0
                 // （回滚开关），shader 完全跳过分类读。
                 const bool classifyEnable = fvMeta.y > 0.5;
+                // Phase 4a（openSky V2）: fvMeta.z>0.5 = E_geo/E_sky 拆分消费。
+                const bool openSkyV2 = fvMeta.z > 0.5;
                 float pixOpen = 0.0;
                 float pixOpenW = 0.0;
                 if (classifyEnable) {
                     for (int q = 0; q < 8; ++q) {
                         if (tw[q] < 0.01) continue;
                         uint qIdx = pc[q].x + pc[q].y * ncounts.x + pc[q].z * ncounts.x * ncounts.y;
-                        pixOpen += flatProbeOpenSky[volOff + qIdx] * tw[q];
+                        pixOpen += flatProbeOpenSky[(volOff + qIdx) * 2u] * tw[q];
                         pixOpenW += tw[q];
                     }
                     if (pixOpenW > 0.0) pixOpen /= pixOpenW;
@@ -667,28 +746,34 @@ void ddgi_gi_gather() {
                     // Must exactly match DDGIUpdateIrradiance's real-SH basis.
                     // The previous Vulkan N-volume path swapped coefficients
                     // 6/7 and omitted four signs, cancelling directional GI.
-                    vec3 irr = sh[0] * SH_C0
-                             + sh[1] * (-SH_C1 * 0.6666667 * ny)   // B4: A1 = 2π/3 (÷π ⇒ ×2/3)
-                             + sh[2] * ( SH_C1 * 0.6666667 * nz)
-                             + sh[3] * (-SH_C1 * 0.6666667 * nx)
-                             + sh[4] * ( SH_C2_0 * 0.25 * nxy)   // B4: A2 = π/4 (÷π ⇒ ×1/4)
-                             + sh[5] * (-SH_C2_0 * 0.25 * nyz)
-                             + sh[6] * ( SH_C2_1 * 0.25 * (3.0*nzz - 1.0))
-                             + sh[7] * (-SH_C2_0 * 0.25 * nzx)
-                             + sh[8] * (SH_C2_2 * 0.25 * (nxx - nyy));
+                    // Phase 1b: 展开单源 EvalLib——cos-lobe 因子内置，返回
+                    // E(n)/π（调用端 ×π 得 E，PROBE_SH_RAD_TO_IRRAD 不变）。
+                    vec3 irr = evalProbeIrradianceSH9(sh, normal);
 
                     float w = tw[p];
+                    float lowGate = 1.0;
                     // Phase 3.2: 探针露天度 × 像素封闭度 → 一致度衰减
                     //（最多压到 0.15，保留环境地板；露天像素 enclosed≈0
                     // 完全不受影响）。复用现有权重管线，无新增 trace。
-                    float classify = 1.0;
+                    // Phase 4a（V2）: 衰减只作用于探针贡献的**天空分量**——
+                    //   atten = mix(1, classify, sER)，sER = 探针天空能量占比
+                    //   （flat openSky 第二分量）。几何主导探针（sER≈0）携带
+                    //   的地面/建筑反弹不再被整探针压暗（审计 §2.5）；天空
+                    //   主导探针（sER≈1）在封闭像素处仍压到 0.15。
+                    //   V2 关闭（PRIMAL_GI_OPENSKY_V2=0）：sER=1 → atten=
+                    //   classify = 旧整探针衰减（逐位回滚）。
+                    float atten = 1.0;
                     if (classifyEnable) {
-                        float pOpen = flatProbeOpenSky[volOff + pIdx];
+                        float pOpen = flatProbeOpenSky[(volOff + pIdx) * 2u];
                         float skyness = smoothstep(0.15, 0.45, pOpen);
                         float enclosed = 1.0 - smoothstep(0.05, 0.25, pixOpen);
-                        classify = 1.0 - skyness * enclosed * 0.85;
+                        const float classify = 1.0 - skyness * enclosed * 0.85;
+                        atten = openSkyV2
+                            ? mix(1.0, classify,
+                                  flatProbeOpenSky[(volOff + pIdx) * 2u + 1u])
+                            : classify;
                     }
-                    w *= classify;
+                    w *= atten;
                     // Buried-probe gate for the low-frequency average (near
                     // volume only). A probe inside the wall records near-zero
                     // octahedral mean depth toward every direction; at raw
@@ -745,6 +830,10 @@ void ddgi_gi_gather() {
                         float nwSoft = max(normalWeight, 0.40); // T8.10c leak tighten
                         float vw = visibilityWeight(distToProbe, depthMV.x, depthMV.y, selSpacing);
                         vw = max(vw, 0.38); // T8.10c leak tighten
+                        if (certifiedFloorBlock(probePos,biasedPos,fromProbe,distToProbe,depthMV)) {
+                            vw=0.0;
+                            lowGate=0.0;
+                        }
 #ifndef DDGI_LEGACY_CONSUMERS
                         // 借格半权：其 SH 不是原格位的独立测量（审计 §5.3-4）。
                         vw *= mix(0.5, 1.0, step(0.75, originState));
@@ -760,8 +849,28 @@ void ddgi_gi_gather() {
                     // Buried probes are excluded from this component — their
                     // SH is wall interior, not a legitimate low-frequency
                     // source.
-                    lowFrequencyGI += irr * tw[p] * burial * classify;
-                    lowFrequencyW += tw[p] * burial * classify;
+                    confidenceBaseW += tw[p] * burial * atten;
+                    lowFrequencyGI += irr * tw[p] * burial * atten * lowGate;
+                    lowFrequencyW += tw[p] * burial * atten * lowGate;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    // Capture the exact production contribution after all
+                    // visibility/classification terms.  The strict reader
+                    // treats an out-of-range global ID as unsupported.
+                    uint auditGlobalProbeId = volOff + pIdx;
+                    if (auditGlobalProbeId <= 65535u) {
+                        auditW[p] = w;
+                        auditLowW[p] = tw[p] * burial * atten * lowGate;
+                        auditProbeIds[p] = auditGlobalProbeId;
+                    } else {
+                        // ID 0 is a valid probe.  An out-of-range ID therefore
+                        // carries zero contribution as well as a zero stamp so
+                        // the strict reader cannot mistake it for probe 0.
+                        auditRecordValid = false;
+                        auditW[p] = 0.0;
+                        auditLowW[p] = 0.0;
+                        auditProbeIds[p] = 0u;
+                    }
+#endif
 
                     if (tw[p] > bestBaseWeight) {
                         bestBaseWeight = tw[p];
@@ -770,17 +879,12 @@ void ddgi_gi_gather() {
                     result += irr * w;
                     totalW += w;
 
-                    if (sel == 0) {
-                        // Same coefficients along R — no extra device reads.
-                        vec3 reflIrr = sh[0] * SH_C0
-                                     + sh[1] * (-SH_C1 * ry)
-                                     + sh[2] * ( SH_C1 * rz)
-                                     + sh[3] * (-SH_C1 * rx)
-                                     + sh[4] * ( SH_C2_0 * rxy)
-                                     + sh[5] * (-SH_C2_0 * ryz)
-                                     + sh[6] * ( SH_C2_1 * (3.0*rzz - 1.0))
-                                     + sh[7] * (-SH_C2_0 * rzx)
-                                     + sh[8] * (SH_C2_2 * (rxx - ryy));
+                if (sel == 0) {
+                    // Same coefficients along R — no extra device reads.
+                        // Phase 1b: R-lobe 是纯 radiance 评基（specular 无
+                        // cos-lobe 因子）→ evalProbeRadianceSH9（≤1 ulp 关联
+                        // 序差异，见 EvalLib 注释）。
+                        vec3 reflIrr = evalProbeRadianceSH9(sh, R);
                         reflResult += reflIrr * w;
                         if (tw[p] >= bestBaseWeight) bestRefl = reflIrr;
                     }
@@ -788,20 +892,67 @@ void ddgi_gi_gather() {
                 if (totalW > 0.0) {
                     result /= totalW;
                     reflResult /= totalW;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    for (int auditP = 0; auditP < 8; ++auditP)
+                        auditW[auditP] /= totalW;
+#endif
                 } else {
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    auditRecordValid = false;
+#endif
                     // Defensive fallback for malformed depth data.  Normal
                     // operation uses the non-zero continuous weights above.
                     result = bestIrr;
                     reflResult = bestRefl;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    for (int auditP = 0; auditP < 8; ++auditP) {
+                        auditW[auditP] = 0.0;
+                        auditProbeIds[auditP] = 0u;
+                    }
+#endif
                 }
                 if (lowFrequencyW > 0.0) {
                     lowFrequencyGI /= lowFrequencyW;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    for (int auditP = 0; auditP < 8; ++auditP)
+                        auditLowW[auditP] /= lowFrequencyW;
+#endif
                     // 65% leak-resistant visibility gather + 35% smooth
                     // low-frequency colour bleeding. Correct vec4 probe
                     // strides and the removed screen-space box blur prevent
                     // this component from recreating the former white grid.
-                    result = mix(lowFrequencyGI, result, 0.45);  // thin-geometry probes get Chebyshev-rejected; 55% low-freq keeps near-light bounce
+                    // [2026-09-20 观感轮] 45%->70% 可见性 gather 占比：55% 低频旁路把
+                    // 跨拱廊探针辐照原样混入，抹平中庭一二层间接光梯度。回退 0.45。
+                    float lowFrequencyBlend = fvMeta.w >= 0.0
+                        ? clamp(fvMeta.w, 0.0, 1.0) : 0.30;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    auditLowFrequencyBlend = lowFrequencyBlend;
+#endif
+                    result = mix(result, lowFrequencyGI, lowFrequencyBlend);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                } else {
+                    // A zero low-frequency denominator is unsupported for
+                    // source replay.  Clear the IDs too so they cannot be
+                    // interpreted as valid probe 0 records.
+                    for (int auditP = 0; auditP < 8; ++auditP) {
+                        auditLowW[auditP] = 0.0;
+                        auditProbeIds[auditP] = 0u;
+                    }
+#endif
                 }
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                if (!(lowFrequencyW > 0.0)) auditRecordValid = false;
+#endif
+                // Normalized interpolation alone erases visibility magnitude:
+                // eight probes rejected by nearby geometry divide back to full
+                // energy.  Retain the aggregate confidence to suppress that
+                // enclosure leak without changing the surviving probes' hue.
+                float visibilityConfidence = clamp(
+                    totalW / max(confidenceBaseW, 1e-4), 0.0, 1.0);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                auditVisibilityConfidence = visibilityConfidence;
+#endif
+                result *= visibilityConfidence;
                 // B13 (2026-09-11): sky-leak ambient floor REMOVED — same B12
                 // rationale (fused-supply transport B11 made the leak proxies
                 // obsolete). The old max(result, 0.05) pre-π floored every
@@ -817,8 +968,21 @@ void ddgi_gi_gather() {
                     // cosine-projected) and KEEPS the 0.05 floor — glossy chain
                     // preserves its pre-B13 scale; only the diffuse leg dropped
                     // the sky-leak floor.
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    // The source variant names the production lookup once so
+                    // the material record and glossy calculation consume the
+                    // same texel/sample/roughness values.  The macro-off
+                    // branch below preserves the original two expressions.
+                    ivec2 fullOrmTexel = ivec2(vec2(textureSize(gbuffer_orm, 0)) * uv);
+                    vec4 ormSample = texelFetch(gbuffer_orm, fullOrmTexel, 0);
+                    float roughness = clamp(ormSample.g, 0.04, 1.0);
+                    auditFullOrmTexel = fullOrmTexel;
+                    auditOrmSample = ormSample;
+                    auditOrmRoughness = roughness;
+#else
                     ivec2 fullOrmTexel = ivec2(vec2(textureSize(gbuffer_orm, 0)) * uv);
                     float roughness = clamp(texelFetch(gbuffer_orm, fullOrmTexel, 0).g, 0.04, 1.0);
+#endif
                     vec3 radBase = max(result, vec3(0.05, 0.05, 0.06));
                     vec3 specIrr = mix(reflResult, radBase, roughness * roughness);
                     imageStore(spec_output_tex, ivec2(tid), vec4(specIrr, NdotV));
@@ -841,4 +1005,72 @@ void ddgi_gi_gather() {
         imageStore(output_tex, ivec2(tid), vec4(0.03, 0.03, 0.035, 1.0));
         imageStore(spec_output_tex, ivec2(tid), vec4(0.0));
     }
+
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+    // Every in-bounds output pixel gets a fresh complete record, including
+    // sky, debug, inactive-volume, and unsupported zero-denominator cases.
+    // The slot is implicit in the pixel index, so no CPU-side ray identity is
+    // guessed or borrowed from an earlier frame.
+    if (inBounds) {
+        uint record = (tid.y * width + tid.x) * 9u;
+        uint depthPacked = 0u;
+        if (auditDepthTexel.x >= 0 && auditDepthTexel.y >= 0 &&
+            auditDepthTexel.x <= 65535 && auditDepthTexel.y <= 65535) {
+            depthPacked = (uint(auditDepthTexel.x) & 0xffffu) |
+                          ((uint(auditDepthTexel.y) & 0xffffu) << 16u);
+        }
+        if (auditDepthTexel.x < 0 || auditDepthTexel.y < 0 ||
+            auditDepthTexel.x > 65535 || auditDepthTexel.y > 65535)
+            auditRecordValid = false;
+        uint normalPacked = 0xffffffffu;
+        if (auditNormalTexel.x >= 0 && auditNormalTexel.y >= 0) {
+            // Positive but unrepresentable fetch coordinates are unsupported
+            // and use zero; negative coordinates retain the inactive sentinel.
+            normalPacked = 0u;
+            if (auditNormalTexel.x > 65535 || auditNormalTexel.y > 65535)
+                auditRecordValid = false;
+            if (auditNormalTexel.x <= 65535 && auditNormalTexel.y <= 65535) {
+                normalPacked = (uint(auditNormalTexel.x) & 0xffffu) |
+                               ((uint(auditNormalTexel.y) & 0xffffu) << 16u);
+            }
+        }
+        uint ids01 = (auditProbeIds[0] & 0xffffu) |
+                     ((auditProbeIds[1] & 0xffffu) << 16u);
+        uint ids23 = (auditProbeIds[2] & 0xffffu) |
+                     ((auditProbeIds[3] & 0xffffu) << 16u);
+        uint ids45 = (auditProbeIds[4] & 0xffffu) |
+                     ((auditProbeIds[5] & 0xffffu) << 16u);
+        uint ids67 = (auditProbeIds[6] & 0xffffu) |
+                     ((auditProbeIds[7] & 0xffffu) << 16u);
+        // Record layout (9 vec4/pixel):
+        // 0 world.xyz/frame, 1 normal.xyz/selected+2, 2 R.xyz/NoV,
+        // 3 packed fetch coords/confidence/blend, 4/5 W[0..7],
+        // 6/7 lowW[0..7], 8 packed IDs[0..7].
+        glossySourceAudit[record + 0u] = vec4(worldPos, auditRecordValid ? probeCounts.w : 0.0);
+        glossySourceAudit[record + 1u] = vec4(normal, auditSelectedVolumePlus2);
+        glossySourceAudit[record + 2u] = vec4(auditR, auditNoV);
+        glossySourceAudit[record + 3u] = vec4(uintBitsToFloat(depthPacked),
+                                               uintBitsToFloat(normalPacked),
+                                               auditVisibilityConfidence,
+                                               auditLowFrequencyBlend);
+        glossySourceAudit[record + 4u] = vec4(auditW[0], auditW[1], auditW[2], auditW[3]);
+        glossySourceAudit[record + 5u] = vec4(auditW[4], auditW[5], auditW[6], auditW[7]);
+        glossySourceAudit[record + 6u] = vec4(auditLowW[0], auditLowW[1],
+                                               auditLowW[2], auditLowW[3]);
+        glossySourceAudit[record + 7u] = vec4(auditLowW[4], auditLowW[5],
+                                               auditLowW[6], auditLowW[7]);
+        glossySourceAudit[record + 8u] = vec4(uintBitsToFloat(ids01),
+                                               uintBitsToFloat(ids23),
+                                               uintBitsToFloat(ids45),
+                                               uintBitsToFloat(ids67));
+        uint materialRecord = (tid.y * width + tid.x) * 2u;
+        // Unlike the legacy source record's validity stamp, the material
+        // record is fresh for every in-bounds pixel, including inactive/far
+        // pixels whose texel/sample fields retain their explicit sentinels.
+        glossyMaterialAudit[materialRecord + 0u] = vec4(
+            float(auditFullOrmTexel.x), float(auditFullOrmTexel.y),
+            auditOrmRoughness, probeCounts.w);
+        glossyMaterialAudit[materialRecord + 1u] = auditOrmSample;
+    }
+#endif
 }

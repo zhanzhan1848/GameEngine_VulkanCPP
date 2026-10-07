@@ -33,10 +33,14 @@ struct GIDebugParams {
     // ------------------------------------------------------------------
     // 权重热调（CPU 侧即时生效；shader 内常量旋钮随 T6.1 CB 化）
     // ------------------------------------------------------------------
-    // 默认 0.15（2026-09-19 反弹专项证据翻转）：0.4 档的天空填充把室内
-    // 抬到 64/255 的均匀灰（"间接光平/室内亮"的主源）；0.15 档室内 ~30
-    // 且保留反弹衰减层次。env PRIMAL_GI_SKY_INTENSITY 可覆盖（0.4 回旧观感）。
-    float sky_color_intensity = 0.15f;   ///< DDGI/WRC 天空色强度
+    // [2026-09-20 观感轮 默认 0.15→2.0]（Sponza vs Lumen 参考，用户驱动）：
+    // 旧 0.15 档叠加 WRC 天空双重压缩（sky_color.xyz=tier 再乘 SkyColor.w）
+    // 使探针场天空贡献 ≈0，中庭二层/一层天光梯度消失（f2/f1 = 1.06，参考
+    // 1.47）。2.0 档：f2/f1 = 1.34、室内/一层 0.15（参考 0.20）；GI_DCGain
+    // amp 0.08 有界（超历史 0.05 断言线，已知偏差入档）。tier 1.5 位于
+    // 过渡区（无梯度且振荡更大 0.11）——禁止回落该区间。
+    // env PRIMAL_GI_SKY_INTENSITY 可覆盖（0.15 回旧观感）。
+    float sky_color_intensity = 2.0f;   ///< DDGI/WRC 天空色强度
     float albedo_intensity = 0.5f;       ///< DDGI 多反弹 albedo 强度（原 [5]）
     float probe_hysteresis = 0.2f;       ///< probe EMA 滞回（原 [6]）
     float fusion_glossy_strength = 0.75f; ///< T4.3 光泽项强度（0.75 为实测达标值）

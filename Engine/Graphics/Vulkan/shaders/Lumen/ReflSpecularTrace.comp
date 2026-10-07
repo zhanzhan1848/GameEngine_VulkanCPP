@@ -1,0 +1,389 @@
+#version 450 core
+// [REFL] ReflSpecularTrace — 屏幕外 specular 兜底（R4 探针采样 + R5 SC 卡片
+// specular trace）。Entry point: refl_specular_trace
+//
+// SSR 未命中屏幕的反射方向（ssr.a 低置信段）沿反射射线走 GlobalSDF，
+// 命中点做与 WRCTraceFinalize 同构的卡片查询（scQueryCardCandidateDbg——
+// 复用公共真值层 + R0 六段漏斗语义 + R1 查询侧 pad）；无命中/查询失败时
+// （PRIMAL_REFL_PROBE=1）回退 WRC 近场探针的 cos-lobe 方向采样。逃逸射线
+// → 与 WRC 同款天空契约。有效性语义（albedo.alpha=有效 / depth<0 拒绝）
+// 由查询契约守护——伪反射（无效 texel 泄漏）= 0。
+//
+// 输出全分辨率 RGBA16F：RGB = Fresnel 加权后的屏幕外反射辐射，
+// A = 置信权重（0 = 无贡献 → FusionComposite 落回 glossy relay）。
+//
+// Flat bindings:
+//   0  = SampledImage (2D)        GBuffer depth（全分辨率）
+//   1  = SampledImage (2D)        GBuffer ORM（.g roughness .b metallic）
+//   2  = SampledImage (2D)        GBuffer albedo（F0）
+//   3  = SampledImage (2D)        SSR composite 输出（A = 屏内置信）
+//   4  = StorageImage (rgba16f)   reflSpecular 输出
+//   5  = StorageBuffer (ro)       WRC probe radiance（探针档）
+//   6  = UniformBuffer            ReflTraceParams
+//   7..9 = SampledImage (3D)      SDF cascades
+//  10  = SampledImage (2D)        SC lighting atlas
+//  11  = SampledImage (2D)        SC depth atlas
+//  12  = StorageBuffer (ro)       SC card data
+//  13  = StorageBuffer (ro)       SC grid offsets
+//  14  = StorageBuffer (ro)       SC grid cards
+//  15  = SampledImage (2D)        GBuffer normal（xyz*0.5+0.5 编码）
+
+#extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
+
+#include "SurfaceCacheData.glsl"
+#include "ShaderLib/SkyAtmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D depthTex;
+layout(set = 0, binding = 1) uniform texture2D ormTex;
+layout(set = 0, binding = 2) uniform texture2D albedoTex;
+layout(set = 0, binding = 3) uniform texture2D ssrTex;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D reflOutput;
+layout(set = 0, binding = 5, std430) readonly buffer WrcProbeBuf {
+    uint probe_data[];
+} wrc;
+
+layout(set = 0, binding = 6, std140) uniform ReflTraceParams {
+    mat4  invViewProj;      //   0
+    vec4  camPos;           //  64: xyz camera world pos
+    vec4  screenSize;       //  80: x=w y=h z=1/w w=1/h
+    vec4  reflParams;       //  96: x=mode(0 probe/1 card/2 both) y=ssrW gate
+                            //      z=maxRoughness w=rayMaxDistance
+    vec4  queryParams;      // 112: x=tolFloor(0=缺省) y=qpadM z=skyTier
+                            //      w=signedSDF
+    vec4  SdfOrigins[3];    // 128
+    vec4  SdfVoxelSizes[3]; // 176
+    vec4  SdfExtents[3];    // 224
+    uvec4 SdfResAndCount;   // 272
+    vec4  probeOrigin;      // 288: xyz origin, w spacing
+    uvec4 probeCounts;      // 304: xyz counts, w = K dirs
+    vec4  skyColor;         // 320: xyz sky, w = tier gate
+    uvec4 scParams;         // 336: x = gridValid
+} prm;
+
+layout(set = 0, binding = 7) uniform texture3D sdf_cascade_0;
+layout(set = 0, binding = 8) uniform texture3D sdf_cascade_1;
+layout(set = 0, binding = 9) uniform texture3D sdf_cascade_2;
+
+layout(set = 0, binding = 10) uniform texture2D lighting_atlas;
+layout(set = 0, binding = 11) uniform texture2D depth_atlas;
+
+layout(set = 0, binding = 12, std430) readonly buffer CardDataBuf {
+    SurfaceCacheCard card_data[];
+} cd;
+
+layout(set = 0, binding = 13, std430) readonly buffer SCGridOffsetsBuf {
+    uint sc_grid_offsets[];
+} scgo;
+
+layout(set = 0, binding = 14, std430) readonly buffer SCGridCardsBuf {
+    uint sc_grid_cards[];
+} scgc;
+
+layout(set = 0, binding = 15) uniform texture2D gbufferNormalTex;
+
+// ----------------------------------------------------------------------------
+// SDF 步进（与 WRCTraceSDF 同构——shared truth layer 语义，非复制实现细节：
+// 薄墙三线性、Phase 4 零穿越、clearedSkin 自表面逃逸全部保留）。
+// ----------------------------------------------------------------------------
+bool isInsideCascade(vec3 pos, vec3 origin, vec3 extent) {
+    vec3 local = pos - origin;
+    return local.x >= 0.0 && local.x < extent.x &&
+           local.y >= 0.0 && local.y < extent.y &&
+           local.z >= 0.0 && local.z < extent.z;
+}
+
+float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
+                       vec3 cascadeOrigin, vec3 cascadeExtent, uint resolution) {
+    vec3 uvw = (worldPos - cascadeOrigin) / cascadeExtent;
+    if (uvw.x < 0.0 || uvw.x > 1.0 ||
+        uvw.y < 0.0 || uvw.y > 1.0 ||
+        uvw.z < 0.0 || uvw.z > 1.0) {
+        return 1.0e10;
+    }
+    vec3 p = uvw * float(resolution) - 0.5;
+    ivec3 base = ivec3(floor(p));
+    vec3 f = p - vec3(base);
+    ivec3 resI = ivec3(int(resolution) - 1);
+    ivec3 c0 = clamp(base, ivec3(0), resI);
+    ivec3 c1 = clamp(base + ivec3(1), ivec3(0), resI);
+    float d000 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c0.z), 0).r;
+    float d100 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c0.z), 0).r;
+    float d010 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c0.z), 0).r;
+    float d110 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c0.z), 0).r;
+    float d001 = texelFetch(sdfTexture, ivec3(c0.x, c0.y, c1.z), 0).r;
+    float d101 = texelFetch(sdfTexture, ivec3(c1.x, c0.y, c1.z), 0).r;
+    float d011 = texelFetch(sdfTexture, ivec3(c0.x, c1.y, c1.z), 0).r;
+    float d111 = texelFetch(sdfTexture, ivec3(c1.x, c1.y, c1.z), 0).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+
+float sampleBestSDF(vec3 pos) {
+    uint cc = prm.SdfResAndCount.w;
+    if (cc > 0u && isInsideCascade(pos, prm.SdfOrigins[0].xyz, prm.SdfExtents[0].xyz)) {
+        return sampleSDFCascade(sdf_cascade_0, pos, prm.SdfOrigins[0].xyz,
+                                prm.SdfExtents[0].xyz, prm.SdfResAndCount.x);
+    } else if (cc > 1u && isInsideCascade(pos, prm.SdfOrigins[1].xyz, prm.SdfExtents[1].xyz)) {
+        return sampleSDFCascade(sdf_cascade_1, pos, prm.SdfOrigins[1].xyz,
+                                prm.SdfExtents[1].xyz, prm.SdfResAndCount.y);
+    } else if (cc > 2u && isInsideCascade(pos, prm.SdfOrigins[2].xyz, prm.SdfExtents[2].xyz)) {
+        return sampleSDFCascade(sdf_cascade_2, pos, prm.SdfOrigins[2].xyz,
+                                prm.SdfExtents[2].xyz, prm.SdfResAndCount.z);
+    }
+    return 1.0e10;
+}
+
+// 返回值：>=0 命中距离；-1 步数耗尽；-2 逃逸。
+float reflMarchSDF(vec3 origin, vec3 dir) {
+    float t = 0.0;
+    float hitDistance = -1.0;
+    float hitThreshold = max(prm.SdfVoxelSizes[0].x * 1.25, 0.45);
+    float minStep      = prm.SdfVoxelSizes[0].x * 0.25;
+    uint coarsest      = min(2u, prm.SdfResAndCount.w - 1u);
+    float fallbackStride = prm.SdfExtents[coarsest].x * 0.1;
+    const uint MAX_SDF_STEPS = 48u;
+    float prevD = 3.4e38;
+    float prevT = 0.0;
+    bool clearedSkin = false;
+    const bool signedCoarseField = prm.queryParams.w != 0.0;
+
+    for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
+        vec3 pos = origin + dir * t;
+        float d = sampleBestSDF(pos);
+
+        if (d >= 1.0e9) {
+            t += fallbackStride;
+            if (t > prm.reflParams.w) { hitDistance = -2.0; break; }
+            continue;
+        }
+
+        if (signedCoarseField && clearedSkin && d <= 0.0 && prevD > 0.0 && prevD < 1.0e9) {
+            float tLo = prevT;
+            float tHi = t;
+            for (int b = 0; b < 5; ++b) {
+                float tMid = 0.5 * (tLo + tHi);
+                float dMid = sampleBestSDF(origin + dir * tMid);
+                if (dMid <= 0.0) { tHi = tMid; } else { tLo = tMid; }
+            }
+            hitDistance = tHi;
+            break;
+        }
+
+        if (d < hitThreshold) {
+            if (!clearedSkin) {
+                // 自表面逃逸：G-buffer 起点天然在 SDF 零面——先爬出肤带。
+                t += max(d, minStep);
+                if (t > prm.reflParams.w) { hitDistance = -2.0; break; }
+                continue;
+            }
+            hitDistance = t;
+            break;
+        }
+        clearedSkin = true;
+
+        float advance;
+        if (d > 6.0 && d >= prevD) {
+            advance = d * 1.5;
+        } else {
+            advance = clamp(d, minStep, max(prm.SdfVoxelSizes[0].x * 2.0, 0.20));
+        }
+        prevD = d;
+        prevT = t;
+        t += advance;
+        if (t > prm.reflParams.w) { hitDistance = -2.0; break; }
+    }
+    return hitDistance;
+}
+
+SCGridParams reflGridLoad() {
+    return scGridDecode(
+        uvec4(scgo.sc_grid_offsets[0], scgo.sc_grid_offsets[1],
+              scgo.sc_grid_offsets[2], scgo.sc_grid_offsets[3]),
+        uvec4(scgo.sc_grid_offsets[4], scgo.sc_grid_offsets[5],
+              scgo.sc_grid_offsets[6], scgo.sc_grid_offsets[7]),
+        uvec4(scgo.sc_grid_offsets[8], scgo.sc_grid_offsets[9],
+              scgo.sc_grid_offsets[10], scgo.sc_grid_offsets[11]));
+}
+
+// [R5 守卫] SDF 外向梯度（中心差分，步长 = voxel）——作 G2 朝向身份门：
+// 粗 SDF 上平行近邻面（拱腹 vs 外墙）位置不可分、朝向类可分，错面采样
+// 是 per-pixel 卡片 trace 噪点的主源（2026-09-20 首跑实证）。
+vec3 reflSdfGradient(vec3 p, float h) {
+    return normalize(vec3(
+        sampleBestSDF(p + vec3(h, 0, 0)) - sampleBestSDF(p - vec3(h, 0, 0)),
+        sampleBestSDF(p + vec3(0, h, 0)) - sampleBestSDF(p - vec3(0, h, 0)),
+        sampleBestSDF(p + vec3(0, 0, h)) - sampleBestSDF(p - vec3(0, 0, h))));
+}
+
+// [R5] 卡片 specular trace：命中点做与 WRC finalize 同构的候选查询（最近
+// key 胜出）；查询失败 → 黑（测量缺失，不伪造）。
+vec3 reflCardRadiance(vec3 hitPos, vec3 rayDir, float tolFloor, float qpadM,
+                      out bool found) {
+    found = false;
+    if (prm.scParams.x == 0u) return vec3(0.0);
+    SCGridParams gp = reflGridLoad();
+    uint cell = scGridCellIndex(gp, hitPos);
+    if (cell == 0xFFFFFFFFu) return vec3(0.0);
+    uint begin = scgo.sc_grid_offsets[16u + cell];
+    uint end   = scgo.sc_grid_offsets[17u + cell];
+    float bestKey = 1e30;
+    vec3 best = vec3(0.0);
+    uint deviceReads = 0u;
+    const uint kMaxReads = 16u;
+    const vec3 gradHint = reflSdfGradient(
+        hitPos, max(prm.SdfVoxelSizes[0].x * 0.75, 0.10));
+    for (uint gi = begin; gi < end && deviceReads < kMaxReads; ++gi) {
+        uint cardIdx = scgc.sc_grid_cards[gi];
+        if (cardIdx >= 4096u) continue;
+        SurfaceCacheCard card = cd.card_data[cardIdx];
+        ++deviceReads;
+        vec3 radiance; float key; uint reject;
+        if (scQueryCardCandidateDbg(card, hitPos, -rayDir, tolFloor, qpadM,
+                                    depth_atlas, lighting_atlas, gradHint,
+                                    radiance, key, reject)) {
+            if (key < bestKey) { bestKey = key; best = radiance; found = true; }
+        }
+    }
+    return best;
+}
+
+// [R4] WRC 探针 specular 采样：最近探针的 K=64 Fibonacci 方向格 cos-lobe
+// 加权（原型：最近探针单点，未做 8 探针三线性——高频段探针间距 2m 的
+// 视线相关闪烁由权重平滑承担）。返回 radiance 与格是否命中。
+vec3 reflProbeRadiance(vec3 pos, vec3 dir, out bool valid) {
+    valid = false;
+    uvec3 counts = prm.probeCounts.xyz;
+    if (counts.x == 0u || counts.y == 0u || counts.z == 0u) return vec3(0.0);
+    vec3 g = (pos - prm.probeOrigin.xyz) / prm.probeOrigin.w;
+    ivec3 c = clamp(ivec3(floor(g + 0.5)), ivec3(0), ivec3(counts) - ivec3(1));
+    uint probeIdx = uint(c.x) + counts.x * (uint(c.y) + counts.y * uint(c.z));
+    uint K = prm.probeCounts.w;
+    if (K == 0u) return vec3(0.0);
+    // [P2 SoA]: radiance / meta 双区域寻址（WRCTypes.h 布局 v2）。
+    uint rbase = probeIdx * (K * 2u);
+    uint metaBase = counts.x * counts.y * counts.z * (K * 2u) + probeIdx * 4u;
+    // 探针有效性：state bit0（未更新探针全零 → 黑权重 0，等价无效）。
+    uint state = wrc.probe_data[metaBase + 2u];
+    if ((state & 1u) == 0u) return vec3(0.0);
+    float wSum = 0.0;
+    vec3 acc = vec3(0.0);
+    for (uint k = 0u; k < K; ++k) {
+        float y = 1.0 - 2.0 * (float(k) + 0.5) / float(K);
+        float r = sqrt(max(1.0 - y * y, 0.0));
+        float ga = 2.399963229728653;
+        float a = ga * float(k);
+        vec3 d = vec3(cos(a) * r, y, sin(a) * r);
+        float w = pow(max(dot(dir, d), 0.0), 24.0);
+        if (w < 1e-4) continue;
+        uint lo = wrc.probe_data[rbase + k * 2u + 0u];
+        uint hi = wrc.probe_data[rbase + k * 2u + 1u];
+        vec2 rg = unpackHalf2x16(lo);
+        vec2 b_ = unpackHalf2x16(hi);
+        acc += vec3(rg.x, rg.y, b_.x) * w;
+        wSum += w;
+    }
+    if (wSum <= 0.0) return vec3(0.0);
+    valid = true;
+    return acc / wSum;
+}
+
+void refl_specular_trace() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(prm.screenSize.x) || pix.y >= int(prm.screenSize.y)) return;
+
+    // 缺省输出：零贡献（FusionComposite 落回 glossy relay）。
+    vec4 outVal = vec4(0.0);
+
+    vec4 orm = texelFetch(ormTex, pix, 0);
+    float roughness = clamp(orm.g, 0.04, 1.0);
+    float metallic  = orm.b;
+    float ssrW = texelFetch(ssrTex, pix, 0).a;
+
+    // 屏幕外 specular 路径的粗糙度门比 SSR（0.85）更紧：粗粒度表面
+    // （布幔 ~0.7+）的"反射"本就由 diffuse/glossy relay 承担；硬走卡片
+    // trace 会在薄几何/埋没射线上产出亮斑伪反射（2026-09-20 首跑实证）。
+    if (roughness <= 0.6 && ssrW < prm.reflParams.y) {
+        float depth = texelFetch(depthTex, pix, 0).r;
+        if (depth > 0.0 && depth < 1.0) {
+            vec2 uv = (vec2(pix) + 0.5) * prm.screenSize.zw;
+            vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+            // Vulkan [0,1] 深度：NDC z = depth 直传。
+            vec4 wp = prm.invViewProj * vec4(ndc, depth, 1.0);
+            vec3 worldPos = wp.xyz / max(wp.w, 1e-5);
+            // 法线：优先 G-buffer 世界法线（SSGITrace 同款 *2-1 解码）；
+            // 编码无效（长度≈0）时回退深度差分。
+            vec3 gN = normalize(texelFetch(gbufferNormalTex, pix, 0).xyz * 2.0 - 1.0);
+            vec3 N;
+            if (dot(gN, gN) > 0.25) {
+                N = gN;
+            } else {
+                vec4 wpX = prm.invViewProj * vec4(ndc + vec2(2.0 * prm.screenSize.z, 0.0), depth, 1.0);
+                vec4 wpY = prm.invViewProj * vec4(ndc + vec2(0.0, 2.0 * prm.screenSize.w), depth, 1.0);
+                vec3 nX = wpX.xyz / max(wpX.w, 1e-5) - worldPos;
+                vec3 nY = wpY.xyz / max(wpY.w, 1e-5) - worldPos;
+                N = normalize(cross(nX, nY));
+            }
+            vec3 V = normalize(worldPos - prm.camPos.xyz);
+            if (dot(N, V) < 0.0) N = -N;   // 背向视线（薄几何）翻转
+            float NoV = clamp(dot(N, -V), 0.05, 1.0);
+            vec3 R = reflect(V, N);
+
+            vec3 albedo = texelFetch(albedoTex, pix, 0).rgb;
+            vec3 F0 = mix(vec3(0.04), albedo, metallic);
+            vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - NoV, 5.0);
+            float fW = clamp(max(F.r, max(F.g, F.b)), 0.0, 1.0);
+
+            float tolFloor = prm.queryParams.x > 0.0
+                ? prm.queryParams.x
+                : max(prm.SdfVoxelSizes[0].x * 1.25, 0.9);
+            float qpadM = prm.queryParams.y;
+
+            uint mode = uint(prm.reflParams.x + 0.5);
+            vec3 radiance = vec3(0.0);
+            bool have = false;
+            // [R5 守卫] 最小行进距离：命中必须离起点至少一个 skin 带——
+            // 起点即命中（埋没射线/自表面）= 布幔亮斑伪反射的来源，
+            // 语义上等同"步数耗尽"（测量缺失 → 黑 → relay 兜底）。
+            const float skinGuard = max(prm.SdfVoxelSizes[0].x * 1.5, 0.30);
+
+            if (mode == 1u || mode == 2u) {
+                // ---- [R5] SC 卡片 specular trace ----
+                const float startOff = max(prm.SdfVoxelSizes[0].x * 0.5, 0.02);
+                float hit = reflMarchSDF(worldPos + R * startOff, R);
+                if (hit >= skinGuard) {
+                    vec3 hitPos = worldPos + R * (hit + startOff);
+                    bool found;
+                    radiance = reflCardRadiance(hitPos, R, tolFloor, qpadM, found);
+                    have = found;
+                } else if (hit <= -1.5) {
+                    // 逃逸 → 与 WRC 同款天空契约。
+                    radiance = EvaluateSkyBase(R) * prm.skyColor.xyz * prm.skyColor.w;
+                    have = true;
+                }
+                // 步数耗尽 / 起点即命中（黑）→ 探针档可接。
+            }
+            if ((!have) && mode != 1u) {
+                // ---- [R4] WRC 探针 specular 采样（原型，仅兜底：卡片查询
+                // 无测量时才接——探针按亮度覆盖卡片会让近场噪点洗掉正确
+                // 测量，2026-09-20 首跑实证）----
+                bool pValid;
+                vec3 pRad = reflProbeRadiance(worldPos + N * prm.probeOrigin.w * 0.5, R, pValid);
+                if (pValid) {
+                    radiance = pRad;
+                    have = true;
+                }
+            }
+
+            if (have) {
+                float lobe = 1.0 - roughness;                  // 粗糙面权重衰减
+                outVal = vec4(radiance * F, clamp(fW * lobe, 0.0, 1.0));
+            }
+        }
+    }
+
+    if (any(isnan(outVal.xyz)) || any(isinf(outVal.xyz))) outVal = vec4(0.0);
+    imageStore(reflOutput, pix, min(outVal, vec4(vec3(64.0), 1.0)));
+}

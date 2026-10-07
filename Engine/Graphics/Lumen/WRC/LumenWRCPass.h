@@ -141,6 +141,13 @@ public:
         u32 in_geometry_probes = 0;
         u32 total_probes = 0;
         float mean_lum = 0.0f;
+        // [P4 2026-09-21 probe-repr-plan] 角向方差（各向异性健康度）——
+        // 每探针 64 方向亮度的 var/mean 归一化比率的分布。"单色球"争议的
+        // 直接量化：比率 → 0 = 方向信息塌缩（纯 DC）。
+        float ang_var_p50 = 0.0f;
+        float ang_var_p95 = 0.0f;
+        float ang_var_max = 0.0f;
+        float mono_fraction = 0.0f;   // var/mean < 0.01 的探针占比
     };
     const DumpStats& GetLastDumpStats() const { return dump_stats_; }
     /// [A2 验收] prefilter SH9 vs 消费端 cos 加权积分的探针级误差统计。
@@ -149,6 +156,10 @@ public:
         float median_rel_err = 0.0f;   // 探针中位相对误差（验收线 <5%）
         float p95_rel_err = 0.0f;
         float max_rel_err = 0.0f;
+        // [P4 2026-09-21] 最差探针定位 + 阈值门（P95>15% 告警）。
+        u32 worst_probe = 0xFFFFFFFFu;
+        u32 worst_coords[3] = {0, 0, 0};
+        bool p95_over_threshold = false;  // P95 > 0.15 告警位
     };
     const PrefilterCheckStats& GetLastPrefilterCheck() const { return prefilter_check_; }
 
@@ -251,8 +262,19 @@ private:
     rhi_readback_ring rays_ring_;
     u32 rays_copies_{ 0 };
     bool trace_stats_enabled_{ false };
-    // [Q2 排查] SC 查询漏斗计数（uvec4，DebugChannel 门控）。
+    // [Q2 排查] SC 查询漏斗计数（uvec4×4 = 64B，DebugChannel 门控）。
     rhi::ResourceHandle dbg_buf_{ rhi::handles::INVALID_RESOURCE };
+    // [R1 2026-09-20] 拒绝位置 8³ 分箱（512 uvec4 = 8KB；GPU 侧恒累计，
+    // PRIMAL_WRC_BOUNDS_DUMP=1 时 CPU 周期读回打印热点分布）。
+    rhi::ResourceHandle bins_buf_{ rhi::handles::INVALID_RESOURCE };
+    bool bounds_dump_enabled_{ false };
+    rhi_readback_ring bins_ring_;
+    u32 bins_copies_{ 0 };
+    // [F4 2026-09-20 能量不对称修复] 逐卡 boundsFail 计数（4096 u32；GPU 恒
+    // 累计，bounds dump 周期读回 top-N——定位"柱子哪张卡失败"）。
+    rhi::ResourceHandle card_fail_buf_{ rhi::handles::INVALID_RESOURCE };
+    rhi_readback_ring card_fail_ring_;
+    u32 card_fail_copies_{ 0 };
     // [反弹修复] 卡片→探针注入状态。
     bool card_inject_enabled_{ true };             ///< PRIMAL_WRC_CARD_INJECT=0 回滚
     rhi::PipelineHandle inject_pipeline_{ rhi::handles::INVALID_PIPELINE };

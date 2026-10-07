@@ -1,0 +1,344 @@
+#version 450 core
+
+// DDGI_FIRST_RECORD_PROOF_PREFIX diagnostic only.
+//
+// This pass consumes the already written 16-vec4 analytic-first-rho audit for
+// the current fresh update slots.  It never writes a production DDGI buffer:
+// the output is a private 41-vec4 record per fresh ray consisting of the exact
+// 16-vec4 input echo, the existing 24-vec4 native-normal witness, and one
+// explicit GPU ray first-point record.  The extra point is kept separate from
+// the existing witness's barycentric point so the host can check both sides of
+// the 2e-5 m gate without reconstructing either point or normal on the CPU.
+// The strict primary interval variant appends a gated 28-vec4 tail; the
+// original 41-vec4 ABI and all production buffers stay unchanged.
+
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_GOOGLE_include_directive : require
+
+#define DDGI_FIRST_SURFACE 1
+#define DDGI_FIRST_NATIVE_NORMAL_VARIANT 1
+#define DDGI_FIRST_NATIVE_NORMAL_MAPPING_STRIDE32 1
+// Collect payload after bound rejection while keeping status UNKNOWN/5.
+// This cannot turn a rejected normal into a production or certified value.
+#define DDGI_FIRST_NATIVE_DIAGNOSTIC_CONTINUE_BOUNDS 1
+#if defined(DDGI_FIRST_RECORD_PRIMARY_FRAME) && DDGI_FIRST_RECORD_PRIMARY_FRAME
+#if !defined(DDGI_FIRST_RECORD_STRICT) || !DDGI_FIRST_RECORD_STRICT
+#error Primary-frame proof variant requires strict arithmetic
+#endif
+#define DDGI_FIRST_NATIVE_PRIMARY_FRAME 1
+#endif
+#if defined(DDGI_FIRST_RECORD_INTERVAL) && DDGI_FIRST_RECORD_INTERVAL
+#if !defined(DDGI_FIRST_RECORD_STRICT) || !DDGI_FIRST_RECORD_STRICT || \
+    !defined(DDGI_FIRST_RECORD_PRIMARY_FRAME) || !DDGI_FIRST_RECORD_PRIMARY_FRAME
+#error Interval proof requires strict arithmetic and the primary-frame source variant
+#endif
+#endif
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+// Existing Finalize analytic-rho audit: exactly 16 vec4 per update-slot ray.
+layout(set = 0, binding = 0, std430) readonly buffer AnalyticRhoAuditBuf {
+    vec4 records[];
+} analytic_rho_audit_input;
+
+// Existing analytic-rho first-surface BVH payload.  The include expects these
+// names and the same 48-byte node/triangle ABI used by Finalize.
+layout(set = 0, binding = 1, std430) readonly buffer FirstSurfaceNodeBuf {
+    uvec4 node_words[];
+} first_surface_nodes;
+layout(set = 0, binding = 2, std430) readonly buffer FirstSurfaceTriangleBuf {
+    vec4 triangle_words[];
+} first_surface_triangles;
+
+// Existing analytic-rho 32-byte mapping: map0 native vertex ids + instance;
+// map1 scene material, source mesh, checked cluster material, flags.
+layout(set = 0, binding = 3, std430) readonly buffer FirstNativeTriangleSourceBuf {
+    uvec4 triangle_source[];
+} first_native_triangle_source;
+
+// Current GPUDrivenDraw source buffers, borrowed read-only for this proof.
+layout(set = 0, binding = 4, std430) readonly buffer FirstNativePositionBuf {
+    float positions[];
+} first_native_positions;
+layout(set = 0, binding = 5, std430) readonly buffer FirstNativeElementBuf {
+    uint elements[];
+} first_native_elements;
+struct DDGIFirstNativeInstance {
+    mat4 world_matrix;
+    mat4 inverse_world_matrix;
+    uvec4 meta0;
+    uvec4 meta1;
+    float bounds_center_x;
+    float bounds_center_y;
+    float bounds_center_z;
+    uint pad_after_center;
+    float bounds_radius;
+    uint pad_br0;
+    uint pad_br1;
+    uint pad_br2;
+};
+layout(set = 0, binding = 6, std430) readonly buffer FirstNativeInstanceBuf {
+    DDGIFirstNativeInstance instances[];
+} first_native_instances;
+layout(set = 0, binding = 7, std430) readonly buffer FirstNativeMaterialBuf {
+    uint material_words[];
+} first_native_materials;
+
+// Output: [0,16) exact audit echo, [16,40) existing native-normal witness,
+// [40] explicit GPU ray first point + point_guard.
+layout(set = 0, binding = 8, std430) writeonly buffer FirstRecordProofBuf {
+    vec4 audit_records[];
+} first_native_audit;
+
+layout(set = 0, binding = 9) uniform texture2DArray first_native_normal_textures;
+layout(set = 0, binding = 10) uniform sampler first_native_normal_sampler;
+
+// values.x = float bits of DDGI RayMaxDistance; values.y = fresh ray count;
+// values.z = output vec4 stride (41); values.w = schema (1).
+layout(set = 0, binding = 11, std430) readonly buffer FirstRecordProofParams {
+    uvec4 values;
+} proof_params;
+
+#include "ShaderLib/DDGIFirstSurface.glsl"
+#if defined(DDGI_FIRST_RECORD_STRICT) && DDGI_FIRST_RECORD_STRICT
+#include "ShaderLib/DDGIFirstStrictMath.glsl"
+#define dot ddgiStrictDot
+#define cross ddgiStrictCross
+#define sqrt ddgiStrictSqrt
+#define DDGI_FIRST_NATIVE_LENGTH ddgiStrictLength
+#define normalize ddgiStrictNormalize
+#endif
+#include "ShaderLib/DDGIFirstNativeNormal.glsl"
+#if defined(DDGI_FIRST_RECORD_STRICT) && DDGI_FIRST_RECORD_STRICT
+#undef dot
+#undef cross
+#undef sqrt
+#undef DDGI_FIRST_NATIVE_LENGTH
+#undef normalize
+#endif
+#if defined(DDGI_FIRST_RECORD_INTERVAL) && DDGI_FIRST_RECORD_INTERVAL
+#include "ShaderLib/DDGIFirstRteInterval.glsl"
+#endif
+
+const uint DDGI_FIRST_RECORD_PROOF_AUDIT_VEC4 = 16u;
+const uint DDGI_FIRST_RECORD_PROOF_NATIVE_VEC4 = 24u;
+const uint DDGI_FIRST_RECORD_PROOF_POINT_VEC4 = 1u;
+const uint DDGI_FIRST_RECORD_PROOF_STRIDE =
+    DDGI_FIRST_RECORD_PROOF_AUDIT_VEC4 +
+    DDGI_FIRST_RECORD_PROOF_NATIVE_VEC4 +
+    DDGI_FIRST_RECORD_PROOF_POINT_VEC4
+#if defined(DDGI_FIRST_RECORD_INTERVAL) && DDGI_FIRST_RECORD_INTERVAL
+    + DDGI_FIRST_INTERVAL_TAIL_VEC4
+#endif
+    ;
+
+void ddgiFirstRecordClearWitness(uint base) {
+    for (uint i = 0u; i < DDGI_FIRST_RECORD_PROOF_NATIVE_VEC4; ++i)
+        first_native_audit.audit_records[base + i] = vec4(0.0);
+}
+
+void ddgiFirstRecordWriteWitness(uint base, uint ray_id,
+                                 uint stamp_bits,
+                                 DDGIFirstNativeNormalResult result) {
+    first_native_audit.audit_records[base + 0u] =
+        vec4(result.world_point, uintBitsToFloat(stamp_bits));
+    first_native_audit.audit_records[base + 1u] =
+        vec4(result.bary_native_n, result.bary_native_length);
+    first_native_audit.audit_records[base + 2u] =
+        vec4(result.ray_native_n, float(ray_id + 1u));
+    first_native_audit.audit_records[base + 3u] =
+        vec4(result.ray_geom_n, result.geom_length);
+    first_native_audit.audit_records[base + 4u] =
+        vec4(result.vertex_n0, uintBitsToFloat(result.packed_n0));
+    first_native_audit.audit_records[base + 5u] =
+        vec4(result.vertex_n1, uintBitsToFloat(result.packed_n1));
+    first_native_audit.audit_records[base + 6u] =
+        vec4(result.vertex_n2, uintBitsToFloat(result.packed_n2));
+    first_native_audit.audit_records[base + 7u] =
+        vec4(uintBitsToFloat(result.material_id),
+             uintBitsToFloat(result.material_flags),
+             uintBitsToFloat(result.instance_id),
+             uintBitsToFloat(result.source_status));
+    first_native_audit.audit_records[base + 8u] =
+        vec4(uintBitsToFloat(result.vertex_ids.x),
+             uintBitsToFloat(result.vertex_ids.y),
+             uintBitsToFloat(result.vertex_ids.z),
+             uintBitsToFloat(base / DDGI_FIRST_RECORD_PROOF_STRIDE));
+    first_native_audit.audit_records[base + 9u] =
+        vec4(result.raw_geom_n, result.flip_geom);
+    first_native_audit.audit_records[base + 10u] =
+        vec4(result.uv, result.scaled_uv);
+    first_native_audit.audit_records[base + 11u] =
+        vec4(result.tangent, uintBitsToFloat(result.normal_layer));
+    first_native_audit.audit_records[base + 12u] = result.normal_sample;
+    first_native_audit.audit_records[base + 13u] = result.texel00;
+    first_native_audit.audit_records[base + 14u] = result.texel10;
+    first_native_audit.audit_records[base + 15u] = result.texel01;
+    first_native_audit.audit_records[base + 16u] = result.texel11;
+    first_native_audit.audit_records[base + 17u] =
+        vec4(result.mapped_n, uintBitsToFloat(result.path_code));
+    first_native_audit.audit_records[base + 18u] =
+        vec4(result.tangent_normal, result.normal_scale);
+    first_native_audit.audit_records[base + 19u] =
+        vec4(result.base_texel, result.flip_native,
+             uintBitsToFloat(result.normal_layer));
+    first_native_audit.audit_records[base + 20u] =
+        vec4(result.n_bound, result.t_bound, result.mapped_bound,
+             uintBitsToFloat(result.status_bits));
+    first_native_audit.audit_records[base + 21u] =
+        vec4(result.before_hn, result.old_hn_valid);
+    first_native_audit.audit_records[base + 22u] =
+        vec4(result.after_hn, uintBitsToFloat(result.status));
+    first_native_audit.audit_records[base + 23u] =
+        vec4(uintBitsToFloat(result.parent_status),
+             uintBitsToFloat(result.material_flags),
+             uintBitsToFloat(result.point_guard),
+             uintBitsToFloat(result.instance_guard));
+}
+
+// Load the accepted first hit from Finalize's 16-vec4 audit.  The BVH trace
+// below is only used to recover the source triangle payload and independently
+// join it to the audited logical triangle; it never replaces audit t/bary or
+// invents a record when the audit is missing or stale.
+bool ddgiFirstRecordLoadHit(uint ray_index, float ray_max,
+                            out DDGIFirstSurfaceHit first,
+                            out vec3 ray_origin, out vec3 ray_direction,
+                            out vec3 old_hn, out bool old_hn_valid,
+                            out uint stamp_bits, out uint ray_id) {
+    const uint in_base = ray_index * DDGI_FIRST_RECORD_PROOF_AUDIT_VEC4;
+    vec4 a0 = analytic_rho_audit_input.records[in_base + 0u];
+    vec4 a1 = analytic_rho_audit_input.records[in_base + 1u];
+    vec4 a2 = analytic_rho_audit_input.records[in_base + 2u];
+    vec4 a3 = analytic_rho_audit_input.records[in_base + 3u];
+    vec4 a4 = analytic_rho_audit_input.records[in_base + 4u];
+    vec4 a14 = analytic_rho_audit_input.records[in_base + 14u];
+    vec4 a15 = analytic_rho_audit_input.records[in_base + 15u];
+
+    ray_origin = a0.xyz;
+    ray_direction = a1.xyz;
+    stamp_bits = floatBitsToUint(a0.w);
+    ray_id = (a1.w >= 1.0 && a1.w == floor(a1.w))
+        ? uint(a1.w - 1.0) : 0xffffffffu;
+    old_hn = a14.xyz;
+    old_hn_valid = a14.w > 0.5;
+
+    first.status = floatBitsToUint(a15.x);
+    first.t = a3.x;
+    first.triangle = a2.x;
+    first.flags = floatBitsToUint(a4.z);
+    first.residual = a15.y;
+    first.bary = a3.yzw;
+    first.source_a = vec3(0.0);
+    first.source_e1 = vec3(0.0);
+    first.source_e2 = vec3(0.0);
+    first.source_mesh = -1.0;
+
+    if (first.status != 1u || ray_id == 0xffffffffu ||
+        !ddgiFirstFiniteVec3(ray_origin) || !ddgiFirstFiniteVec3(ray_direction) ||
+        !ddgiFirstFinite(ray_max) || ray_max <= 2.0e-5 ||
+        !ddgiFirstFinite(first.t) || first.t <= 2.0e-5 ||
+        first.t >= ray_max - 2.0e-5 || !ddgiFirstFinite(first.triangle) ||
+        first.triangle < 0.0 || first.triangle != floor(first.triangle) ||
+        !ddgiFirstFinite(first.residual) || first.residual > 2.0e-5 ||
+        first.flags != 0u || floatBitsToUint(a15.z) != 0u ||
+        !ddgiFirstFiniteVec3(first.bary) ||
+        any(lessThan(first.bary, vec3(-2.0e-5))) ||
+        any(greaterThan(first.bary, vec3(1.0 + 2.0e-5))) ||
+        abs(dot(first.bary, vec3(1.0)) - 1.0) > 2.0e-5 ||
+        abs(dot(ray_direction, ray_direction) - 1.0) > 2.0e-5) {
+        return false;
+    }
+
+    // Resolve source_a/e1/e2/source_mesh from the current BVH.  The audit's
+    // logical triangle/t/bary remain authoritative; any mismatch is UNKNOWN.
+    DDGIFirstSurfaceHit resolved = ddgiFirstSurfaceTrace(
+        ray_origin, ray_direction, 0.0, ray_max);
+    if (resolved.status != 1u || resolved.triangle != first.triangle ||
+        resolved.flags != first.flags || !ddgiFirstFinite(resolved.t) ||
+        abs(resolved.t - first.t) > 2.0e-5 ||
+        !ddgiFirstFiniteVec3(resolved.bary) ||
+        max(max(abs(resolved.bary.x - first.bary.x),
+                abs(resolved.bary.y - first.bary.y)),
+            abs(resolved.bary.z - first.bary.z)) > 2.0e-5 ||
+        !ddgiFirstFiniteVec3(resolved.source_a) ||
+        !ddgiFirstFiniteVec3(resolved.source_e1) ||
+        !ddgiFirstFiniteVec3(resolved.source_e2) ||
+        !ddgiFirstFinite(resolved.source_mesh)) {
+        return false;
+    }
+    first.source_a = resolved.source_a;
+    first.source_e1 = resolved.source_e1;
+    first.source_e2 = resolved.source_e2;
+    first.source_mesh = resolved.source_mesh;
+    return true;
+}
+
+void main() {
+    const uint ray_index = gl_GlobalInvocationID.x;
+    const uint query_count = proof_params.values.y;
+    if (proof_params.values.z != DDGI_FIRST_RECORD_PROOF_STRIDE ||
+        proof_params.values.w != 1u || ray_index >= query_count) return;
+
+    const uint input_base = ray_index * DDGI_FIRST_RECORD_PROOF_AUDIT_VEC4;
+    const uint output_base = ray_index * DDGI_FIRST_RECORD_PROOF_STRIDE;
+    for (uint i = 0u; i < DDGI_FIRST_RECORD_PROOF_AUDIT_VEC4; ++i)
+        first_native_audit.audit_records[output_base + i] =
+            analytic_rho_audit_input.records[input_base + i];
+    ddgiFirstRecordClearWitness(output_base + DDGI_FIRST_RECORD_PROOF_AUDIT_VEC4);
+#if defined(DDGI_FIRST_RECORD_INTERVAL) && DDGI_FIRST_RECORD_INTERVAL
+    // Initialize the private tail before any early payload/source return.
+    // Invalid rows therefore retain the max-finite sentinel and schema=1.
+    ddgiFirstIntervalClearTail(output_base + 41u);
+#endif
+
+    float ray_max = uintBitsToFloat(proof_params.values.x);
+    DDGIFirstSurfaceHit first;
+    vec3 ray_origin, ray_direction, old_hn;
+    bool old_hn_valid = false;
+    uint stamp_bits = 0u;
+    uint ray_id = 0xffffffffu;
+    const bool hit_ok = ddgiFirstRecordLoadHit(
+        ray_index, ray_max, first, ray_origin, ray_direction, old_hn,
+        old_hn_valid, stamp_bits, ray_id);
+    if (!hit_ok) {
+        ray_origin = vec3(0.0);
+        ray_direction = vec3(0.0, 1.0, 0.0);
+        first.status = 0u;
+        first.t = -1.0;
+        first.triangle = -1.0;
+        first.flags = 0u;
+        first.residual = 3.4e38;
+        first.bary = vec3(0.0);
+        first.source_a = vec3(0.0);
+        first.source_e1 = vec3(0.0);
+        first.source_e2 = vec3(0.0);
+        first.source_mesh = -1.0;
+    }
+    DDGIFirstNativeNormalResult result = ddgiFirstNativeEvaluate(
+        first, ray_origin, ray_direction, old_hn, old_hn_valid);
+
+    // Audit record 2.y is the independently stored instance identity.  The
+    // 32-byte map adapter and the helper's resident instance table must agree
+    // with it before this row can be called an accepted native proof.
+    vec4 audit_instance = analytic_rho_audit_input.records[input_base + 2u];
+    const uint expected_instance = floatBitsToUint(audit_instance.y);
+    if (result.status == DDGI_FIRST_NATIVE_ACCEPTED &&
+        result.instance_id != expected_instance) {
+        result.status = DDGI_FIRST_NATIVE_SOURCE_GUARD;
+        result.status_bits |= DDGI_FIRST_NATIVE_BIT_IDENTITY;
+        result.after_hn = result.before_hn;
+    }
+    if (ray_id == 0xffffffffu) ray_id = 0u;
+    ddgiFirstRecordWriteWitness(
+        output_base + DDGI_FIRST_RECORD_PROOF_AUDIT_VEC4, ray_id,
+        stamp_bits, result);
+    const vec3 gpu_first_point = ray_origin + ray_direction * first.t;
+    first_native_audit.audit_records[output_base + 40u] =
+        vec4(ddgiFirstFiniteVec3(gpu_first_point) ? gpu_first_point : vec3(0.0),
+             result.point_guard);
+#if defined(DDGI_FIRST_RECORD_INTERVAL) && DDGI_FIRST_RECORD_INTERVAL
+    DDGIFirstRteIntervalResult interval_result =
+        ddgiFirstRteEvaluate(first, ray_direction, result);
+    ddgiFirstIntervalWriteTail(output_base + 41u, interval_result);
+#endif
+}

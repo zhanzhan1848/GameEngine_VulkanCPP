@@ -11,6 +11,11 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanTexture.h"
+#endif
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Engine/Graphics/Dawn/ShaderLoader.h"  // for dawn::LoadWGSL
@@ -23,6 +28,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
+#include <limits>
 #include <set>
 #include <algorithm>
 #include "Engine/Common/CoreLogStream.h"
@@ -31,6 +38,8 @@ namespace primal::graphics::lumen {
 
 using namespace rhi;
 using namespace rendergraph;
+
+#include "DDGIShProducerAudit.inl"
 
 namespace {
 
@@ -53,6 +62,25 @@ struct DescriptorData {
     ResourceHandle resource;
     uint32_t count = 1;
 };
+
+// The Sponza proof currently uploads ~33k nodes / ~262k triangles.  Keep the
+// opt-in production bridge bounded so a malformed host request cannot create a
+// descriptor-sized allocation or make the fixed 64-entry GPU traversal stack
+// meaningless.  These limits are deliberately scene-independent.
+static constexpr u64 kFirstSurfaceNodeStride = 48u;
+static constexpr u64 kFirstSurfaceTriangleStride = 48u;
+static constexpr u64 kFirstSurfaceMaxNodes = 1ull << 20;
+static constexpr u64 kFirstSurfaceMaxTriangles = 1ull << 22;
+static constexpr u64 kFirstNativeNormalMappingStride = 16u;
+static constexpr u64 kFirstNativeNormalAuditVec4Stride = 24u;
+static constexpr u64 kFirstNativeNormalAuditCapBytes = 64ull * 1024ull * 1024ull;
+static constexpr u64 kNativeVertexStride = 12u;
+static constexpr u64 kNativeElementStride = 24u;
+static constexpr u64 kNativeInstanceStride = 192u;
+static constexpr u64 kNativeMaterialStride = 48u;
+static constexpr u64 kAnalyticFirstRhoMappingStride = 32u;
+static constexpr u64 kAnalyticFirstRhoAuditVec4Stride = 16u;
+static constexpr u64 kAnalyticFirstRhoAuditCapBytes = 64ull * 1024ull * 1024ull;
 
 static void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
                                 const DescriptorData* params, uint32_t count) {
@@ -317,10 +345,9 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDevice
     std::set<std::string> included;
     std::string resolved = ResolveIncludes(source, DDGI_SHADER_DIR, included);
 
-    // DDGI_PATH_DEBUG=1：注入路径标签编译宏——finalize 把辐射来源 id
-    // （0=miss 1=SC 2=prev-screen 3=analytic）编码进 ray_buffer 的距离
-    // 字段（40+k·0.001，UpdateIrradiance 权重平面区），配合
-    // GIFusionVerify 的 ray-path 直方图读回定位辐射来源。
+    // DDGI_PATH_DEBUG=1：finalize 将辐射来源 id（1=SC 2=prev-screen
+    // 3=analytic）编码进命中距离的低两位尾数；保留真实距离供深度矩更新，
+    // 配合 DDGI_DUMP=2 的 ray-path 读回定位辐射来源。
     if (std::getenv("DDGI_PATH_DEBUG")) {
         resolved = "#define DDGI_PATH_DEBUG 1\n" + resolved;
     }
@@ -362,6 +389,7 @@ struct LumenDDGIData {
 // LumenDDGIPass Implementation
 // ============================================================================
 
+LumenDDGIPass::LumenDDGIPass() = default;
 LumenDDGIPass::~LumenDDGIPass() {
     Shutdown();
 }
@@ -377,6 +405,8 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
 
     device_ = device;
     params_ = params;
+    depth_provenance_enabled_=device_->GetPlatform()==RHIPlatform::Vulkan &&
+        std::getenv("DDGI_DEPTH_PROVENANCE")!=nullptr;
 
     // Probe ray sampler mode (M8/T8.4): DEFAULT 1 (per-frame golden-angle
     // jitter) — uniform pdf, so the SH estimator is unchanged; the EMA simply
@@ -391,17 +421,189 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     ray_sample_mode_ = 0;
     if (const char* env = std::getenv("DDGI_RAY_SAMPLE")) {
         int m = atoi(env);
-        if (m >= 0 && m <= 2) {
+        if (m >= 0 && m <= 5 && (m != 5 || device_->GetPlatform() == RHIPlatform::Vulkan)) {
             ray_sample_mode_ = (u32)m;
         } else {
-            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0/1/2), keeping default" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0/1/2/3/4 or Vulkan-only 5), keeping default" << std::endl;
         }
     }
     PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
               << (ray_sample_mode_ == 0 ? " (legacy uniform Fibonacci)"
                   : ray_sample_mode_ == 1 ? " (per-frame golden-angle jitter)"
-                                          : " (cosine mixture around light)")
+                  : ray_sample_mode_ == 2 ? " (cosine mixture around light)"
+                  : ray_sample_mode_ == 3 ? " (fixed stratified latitude)"
+                  : ray_sample_mode_ == 4 ? " (legacy rays, depth-hole fill on Vulkan)"
+                                          : " (legacy radiance, independent oct depth rays)")
               << std::endl;
+
+    // The first-surface distance candidate is intentionally a Vulkan-only,
+    // scalar-mode experiment.  Latching the exact request before descriptor
+    // layout creation lets the opt-in pipeline use its independent 16-binding
+    // layout while leaving the incumbent 13-binding path untouched.  The
+    // geometry itself is supplied later through SetFirstSurfaceGeometry(); a
+    // requested-but-unprovisioned candidate never binds null buffers.
+    const char* firstSurfaceEnv = std::getenv("DDGI_FIRST_SURFACE");
+    first_surface_requested_ =
+        device_->GetPlatform() == RHIPlatform::Vulkan &&
+        ray_sample_mode_ == 0u && firstSurfaceEnv &&
+        std::strcmp(firstSurfaceEnv, "1") == 0;
+    if (firstSurfaceEnv && !first_surface_requested_) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_FIRST_SURFACE] rejected: requires Vulkan and DDGI_RAY_SAMPLE=0"
+            << " (requested value='" << firstSurfaceEnv << "')" << std::endl;
+    }
+    if (first_surface_requested_) {
+        const u64 totalProbeCount = u64(params_.probe_count_x) *
+                                    u64(params_.probe_count_y) *
+                                    u64(params_.probe_count_z);
+        if (totalProbeCount == 0 || totalProbeCount > 65535u) {
+            first_surface_requested_ = false;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_FIRST_SURFACE] rejected: probe count " << totalProbeCount
+                << " cannot fit the 16-bit audit identity" << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[DDGI_FIRST_SURFACE] requested; waiting for validated BVH resources"
+                << std::endl;
+        }
+    }
+
+    // The zero-cross child is a separate, default-off TraceSDF variant.  It
+    // deliberately owns no new geometry contract: SetFirstSurfaceGeometry()
+    // supplies the same bounded BVH and audit SSBOs used by the full
+    // FIRST_SURFACE experiment.  Fail closed when any full first-surface,
+    // native-normal, analytic-rho, or evidence experiment is present so a
+    // DUMP2 diagnostic cannot accidentally turn into a mixed candidate run.
+    const char* firstZeroCrossEnv = std::getenv("DDGI_FIRST_ZERO_CROSS");
+    const bool firstZeroCrossValue = firstZeroCrossEnv &&
+                                     std::strcmp(firstZeroCrossEnv, "1") == 0;
+    const auto envValueOne = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && std::strcmp(value, "1") == 0;
+    };
+    const auto envNonEmpty = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && value[0] != '\0';
+    };
+    const bool zeroCrossConflict =
+        (firstSurfaceEnv && std::strcmp(firstSurfaceEnv, "1") == 0) ||
+        envValueOne("DDGI_FIRST_NATIVE_NORMAL") ||
+        envValueOne("DDGI_ANALYTIC_FIRST_RHO") ||
+        envNonEmpty("DDGI_ANALYTIC_FIRST_RHO_PREFIX") ||
+        envNonEmpty("SDF_GPU_EVIDENCE") ||
+        envNonEmpty("DDGI_EVIDENCE_NORMAL") ||
+        envNonEmpty("DDGI_DEPTH_ONLY_EVIDENCE") ||
+        envNonEmpty("DDGI_SDF_EVIDENCE_MODE");
+    first_zero_cross_requested_ =
+        firstZeroCrossValue && device_->GetPlatform() == RHIPlatform::Vulkan &&
+        ray_sample_mode_ == 0u && !zeroCrossConflict;
+    if (firstZeroCrossEnv && !first_zero_cross_requested_) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_FIRST_ZERO_CROSS] rejected: requires Vulkan, "
+               "DDGI_RAY_SAMPLE=0, no full FIRST_SURFACE/FIRST_NATIVE_NORMAL/"
+               "analytic-rho/evidence candidate, and value=1 (requested value='"
+            << firstZeroCrossEnv << "')" << std::endl;
+    }
+    if (first_zero_cross_requested_) {
+        const u64 totalProbeCount = u64(params_.probe_count_x) *
+                                    u64(params_.probe_count_y) *
+                                    u64(params_.probe_count_z);
+        if (totalProbeCount == 0 || totalProbeCount > 65535u) {
+            first_zero_cross_requested_ = false;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_FIRST_ZERO_CROSS] rejected: probe count " << totalProbeCount
+                << " cannot fit the 16-bit audit identity" << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[DDGI_FIRST_ZERO_CROSS] requested; scope=zero-crossing-distance-only, "
+                   "default_on=false; waiting for validated BVH resources" << std::endl;
+        }
+    }
+
+    // The native normal candidate is strictly a child of the first-surface
+    // experiment.  Latch the exact request before descriptor-layout creation;
+    // a requested-but-unprovisioned source set must fail closed rather than
+    // silently selecting the incumbent 13-binding shader.
+    const char* firstNativeNormalEnv = std::getenv("DDGI_FIRST_NATIVE_NORMAL");
+    first_native_normal_requested_ =
+        first_surface_requested_ && firstNativeNormalEnv &&
+        std::strcmp(firstNativeNormalEnv, "1") == 0;
+    if (firstNativeNormalEnv && !first_native_normal_requested_) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_FIRST_NATIVE_NORMAL] rejected: requires DDGI_FIRST_SURFACE=1, "
+               "Vulkan, and DDGI_RAY_SAMPLE=0 (requested value='"
+            << firstNativeNormalEnv << "')" << std::endl;
+    } else if (first_native_normal_requested_) {
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[DDGI_FIRST_NATIVE_NORMAL] requested; waiting for live native sources"
+            << std::endl;
+    }
+
+    // The analytic-first-rho candidate is an independent Finalize variant.
+    // The exact scalar-mode gate keeps ray identity and the old probe sampler
+    // unchanged.  A diagnostic prefix alone still creates/binds the variant
+    // with application disabled, so control and apply runs share the module
+    // and descriptor proof.
+    const char* analyticFirstRhoEnv = std::getenv("DDGI_ANALYTIC_FIRST_RHO");
+    const char* analyticFirstPositionEnv = std::getenv("DDGI_ANALYTIC_FIRST_POSITION");
+    const bool analyticPositionControl = analyticFirstPositionEnv &&
+        std::strcmp(analyticFirstPositionEnv, "0") == 0;
+    const char* analyticFirstRhoPrefix = std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX");
+    const char* ddgiDump = std::getenv("DDGI_DUMP");
+    const bool analyticFirstRhoDump2 = ddgiDump && std::strcmp(ddgiDump, "2") == 0;
+    analytic_first_rho_apply_ =
+        device_->GetPlatform() == RHIPlatform::Vulkan &&
+        ray_sample_mode_ == 0u && analyticFirstRhoEnv &&
+        std::strcmp(analyticFirstRhoEnv, "1") == 0;
+    analytic_first_position_apply_ =
+        device_->GetPlatform() == RHIPlatform::Vulkan &&
+        ray_sample_mode_ == 0u && analyticFirstPositionEnv &&
+        std::strcmp(analyticFirstPositionEnv, "1") == 0 &&
+        !analytic_first_rho_apply_;
+    analytic_first_rho_prefix_ =
+        analyticFirstRhoDump2 && analyticFirstRhoPrefix && analyticFirstRhoPrefix[0] != '\0';
+    const char* analyticRhoSourceAudit = std::getenv("DDGI_RAY_SOURCE_AUDIT");
+    analytic_first_rho_audit_ = analytic_first_rho_prefix_ && analyticRhoSourceAudit &&
+                                std::strcmp(analyticRhoSourceAudit, "1") == 0;
+    const char* scFirstAudit = std::getenv("DDGI_SC_FIRST_SOURCE_AUDIT");
+    analytic_sc_first_audit_ = analytic_first_rho_audit_ && !analytic_first_rho_apply_ &&
+        !analytic_first_position_apply_ && scFirstAudit && std::strcmp(scFirstAudit, "1") == 0;
+    if (scFirstAudit && !analytic_sc_first_audit_) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_SC_FIRST_SOURCE_AUDIT] rejected: requires Vulkan scalar mode0, "
+               "DDGI_DUMP=2, DDGI_RAY_SOURCE_AUDIT=1, "
+               "DDGI_ANALYTIC_FIRST_RHO_PREFIX and no rho/position application"
+            << std::endl;
+    }
+    if (analyticFirstRhoPrefix && analyticFirstRhoPrefix[0] != '\0' &&
+        !analyticFirstRhoDump2) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_ANALYTIC_FIRST_RHO] PREFIX rejected: requires DDGI_DUMP=2"
+            << std::endl;
+    }
+    analytic_first_rho_requested_ =
+        device_->GetPlatform() == RHIPlatform::Vulkan &&
+        ray_sample_mode_ == 0u &&
+        (analytic_first_rho_apply_ || analytic_first_position_apply_ ||
+         analyticPositionControl || analytic_first_rho_prefix_);
+    if (analyticFirstPositionEnv && !analytic_first_position_apply_ &&
+        !analyticPositionControl) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_ANALYTIC_FIRST_POSITION] rejected: requires Vulkan, scalar mode0, "
+               "value=1 and no simultaneous rho application" << std::endl;
+    }
+    if (analyticFirstRhoEnv && !analytic_first_rho_apply_) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_ANALYTIC_FIRST_RHO] application rejected: requires Vulkan, "
+               "DDGI_RAY_SAMPLE=0, and value=1 (requested value='"
+            << analyticFirstRhoEnv << "')" << std::endl;
+    }
+    if (analytic_first_rho_requested_) {
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[DDGI_ANALYTIC_FIRST_RHO] requested; application="
+            << (analytic_first_rho_apply_ ? 1 : analytic_first_position_apply_ ? 2 : 0)
+            << " waiting for validated BVH/native/albedo sources" << std::endl;
+    }
 
     // T4.3: per-mesh detail-SDF hit refinement (first slice of detail
     // tracing). Opt-in: PRIMAL_DDGI_DETAIL_SDF=1 binds up to 4 per-mesh SDF
@@ -474,12 +676,25 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
 
     // Create compute pipelines + descriptor sets
     CreatePipelines();
+    if (depth_provenance_enabled_ && depth_pipeline_==handles::INVALID_PIPELINE) {
+        PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_DEPTH_PROVENANCE] shader/pipeline unavailable" << std::endl;
+        return false;
+    }
 
     // Create triple-buffered constant buffers
     CreateConstantBuffers();
 
     // Create persistent probe textures
     CreateProbeTextures();
+    if (depth_provenance_enabled_ && std::any_of(std::begin(depth_provenance_buffers_),
+        std::end(depth_provenance_buffers_),[](ResourceHandle h){return h==handles::INVALID_RESOURCE;})) {
+        PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_DEPTH_PROVENANCE] allocation/zero-init failed" << std::endl;
+        for (auto& buffer:depth_provenance_buffers_) {
+            if (buffer!=handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
+            buffer=handles::INVALID_RESOURCE;
+        }
+        return false;
+    }
 
     // Initialize probes from static bake data (or sky estimate fallback)
     InitializeProbesFromStatic();
@@ -521,11 +736,652 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     return true;
 }
 
+bool LumenDDGIPass::SetFirstSurfaceGeometry(const void* nodes, u64 nodeBytes,
+                                            const void* triangles, u64 triangleBytes) {
+    const bool zeroCross = first_zero_cross_requested_;
+    const char* candidateName = zeroCross ? "DDGI_FIRST_ZERO_CROSS" : "DDGI_FIRST_SURFACE";
+    auto reject = [&](const char* reason) {
+        first_surface_enabled_ = false;
+        first_zero_cross_enabled_ = false;
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[" << candidateName << "] rejected: " << reason << std::endl;
+        return false;
+    };
+
+    if ((!first_surface_requested_ && !first_zero_cross_requested_) || !device_ ||
+        device_->GetPlatform() != RHIPlatform::Vulkan || ray_sample_mode_ != 0u)
+        return reject("request is not active (requires Vulkan and scalar mode 0)");
+    if (!nodes || !triangles || nodeBytes == 0 || triangleBytes == 0)
+        return reject("null or empty geometry");
+    if ((nodeBytes % kFirstSurfaceNodeStride) != 0 ||
+        (triangleBytes % kFirstSurfaceTriangleStride) != 0)
+        return reject("geometry byte size is not a 48-byte record multiple");
+
+    const u64 nodeCount = nodeBytes / kFirstSurfaceNodeStride;
+    const u64 triangleCount = triangleBytes / kFirstSurfaceTriangleStride;
+    if (nodeCount == 0 || nodeCount > kFirstSurfaceMaxNodes ||
+        triangleCount == 0 || triangleCount > kFirstSurfaceMaxTriangles)
+        return reject("geometry exceeds bounded node/triangle capacity");
+    const u64 maxU64 = std::numeric_limits<u64>::max();
+    const u64 probeXY = u64(params_.probe_count_x) * u64(params_.probe_count_y);
+    if (params_.probe_count_z != 0 && probeXY > maxU64 / u64(params_.probe_count_z))
+        return reject("probe count multiplication overflow");
+    const u64 totalProbes = probeXY * u64(params_.probe_count_z);
+    if (params_.rays_per_probe != 0 && totalProbes > maxU64 / u64(params_.rays_per_probe))
+        return reject("ray count multiplication overflow");
+    const u64 totalRays = totalProbes * u64(params_.rays_per_probe);
+    if (totalRays > maxU64 / 3u)
+        return reject("audit record count multiplication overflow");
+    const u64 auditVec4Count = totalRays * 3u;
+    if (totalProbes == 0 || totalProbes > 65535u || totalRays == 0 ||
+        totalRays > (maxU64 / (3u * sizeof(math::v4))) ||
+        auditVec4Count > std::numeric_limits<u32>::max())
+        return reject("probe/ray capacity is invalid for the audit identity");
+    const auto candidatePipeline = zeroCross ? first_zero_cross_sdf_trace_pipeline_
+                                             : first_surface_sdf_trace_pipeline_;
+    if (candidatePipeline == handles::INVALID_PIPELINE ||
+        first_surface_sdf_trace_layout_ == handles::INVALID_PIPELINE_LAYOUT ||
+        first_surface_sdf_trace_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        return reject(zeroCross ? "zero-cross SPIR-V pipeline/layout is unavailable"
+                                : "first-surface SPIR-V pipeline/layout is unavailable");
+    for (const auto set : first_surface_sdf_trace_ds_) {
+        if (set == handles::INVALID_DESCRIPTOR_SET)
+            return reject("first-surface descriptor set allocation failed");
+    }
+
+    BufferDesc nodeDesc{};
+    nodeDesc.size = nodeBytes;
+    nodeDesc.type = BufferType::Structured;
+    nodeDesc.usage = GPUMemoryUsage::Static;
+    nodeDesc.memoryUsage = GPUMemoryUsage::Static;
+    nodeDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    nodeDesc.structured.elementCount = static_cast<u32>(nodeCount * 3u);
+    nodeDesc.structured.elementStride = sizeof(math::v4);
+    nodeDesc.name = "DDGI_FirstSurfaceNodes";
+
+    BufferDesc triangleDesc{};
+    triangleDesc.size = triangleBytes;
+    triangleDesc.type = BufferType::Structured;
+    triangleDesc.usage = GPUMemoryUsage::Static;
+    triangleDesc.memoryUsage = GPUMemoryUsage::Static;
+    triangleDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    triangleDesc.structured.elementCount = static_cast<u32>(triangleCount * 3u);
+    triangleDesc.structured.elementStride = sizeof(math::v4);
+    triangleDesc.name = "DDGI_FirstSurfaceTriangles";
+
+    BufferDesc auditDesc{};
+    auditDesc.size = auditVec4Count * sizeof(math::v4);
+    auditDesc.type = BufferType::Structured;
+    auditDesc.usage = GPUMemoryUsage::Dynamic;
+    auditDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    auditDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    auditDesc.structured.elementCount = static_cast<u32>(auditVec4Count);
+    auditDesc.structured.elementStride = sizeof(math::v4);
+    auditDesc.name = "DDGI_FirstSurfaceAudit";
+
+    ResourceHandle newNodes = device_->CreateBuffer(nodeDesc);
+    ResourceHandle newTriangles = device_->CreateBuffer(triangleDesc);
+    ResourceHandle newAudit = device_->CreateBuffer(auditDesc);
+    auto destroyNew = [&]() {
+        if (newNodes != handles::INVALID_RESOURCE) device_->DestroyBuffer(newNodes);
+        if (newTriangles != handles::INVALID_RESOURCE) device_->DestroyBuffer(newTriangles);
+        if (newAudit != handles::INVALID_RESOURCE) device_->DestroyBuffer(newAudit);
+    };
+    if (newNodes == handles::INVALID_RESOURCE ||
+        newTriangles == handles::INVALID_RESOURCE ||
+        newAudit == handles::INVALID_RESOURCE) {
+        destroyNew();
+        return reject("geometry/audit buffer allocation failed");
+    }
+    if (!device_->UpdateBufferData(newNodes, nodes, nodeBytes, 0) ||
+        !device_->UpdateBufferData(newTriangles, triangles, triangleBytes, 0)) {
+        destroyNew();
+        return reject("geometry upload failed");
+    }
+    if (void* mapped = device_->MapBuffer(newAudit)) {
+        std::memset(mapped, 0, static_cast<size_t>(auditDesc.size));
+        device_->UnmapBuffer(newAudit);
+    } else {
+        destroyNew();
+        return reject("audit buffer map/initialization failed");
+    }
+
+    // Replace only after every new resource is complete.  The call is made
+    // before the first render, so the old resources cannot be in flight here.
+    if (first_surface_nodes_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(first_surface_nodes_buffer_);
+    if (first_surface_triangles_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(first_surface_triangles_buffer_);
+    if (first_surface_audit_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(first_surface_audit_buffer_);
+    first_surface_nodes_buffer_ = newNodes;
+    first_surface_triangles_buffer_ = newTriangles;
+    first_surface_audit_buffer_ = newAudit;
+    first_surface_enabled_ = true;
+    first_zero_cross_enabled_ = zeroCross;
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[" << candidateName << "] enabled: nodes=" << nodeCount
+        << " triangles=" << triangleCount << " audit_vec4=" << auditVec4Count
+        << " (3 records/ray, scalar mode 0, scope="
+        << (zeroCross ? "zero-crossing-distance-only" : "first-surface-distance")
+        << ", default_on=false)" << std::endl;
+    return true;
+}
+
+bool LumenDDGIPass::SetFirstNativeNormalSources(
+    ResourceHandle positions, ResourceHandle elements, ResourceHandle instances,
+    ResourceHandle materials, ResourceHandle normalTexture,
+    SamplerHandle normalSampler, const void* triangleMapping,
+    u64 triangleMappingBytes) {
+    auto reject = [&](const char* reason) {
+        first_native_normal_enabled_ = false;
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_FIRST_NATIVE_NORMAL] rejected: " << reason << std::endl;
+        return false;
+    };
+    if (!first_native_normal_requested_ || !first_surface_enabled_ || !device_ ||
+        device_->GetPlatform() != RHIPlatform::Vulkan || ray_sample_mode_ != 0u)
+        return reject("request is not active (requires first-surface Vulkan scalar mode 0)");
+    if (first_native_normal_sdf_trace_pipeline_ == handles::INVALID_PIPELINE ||
+        first_native_normal_sdf_trace_layout_ == handles::INVALID_PIPELINE_LAYOUT ||
+        first_native_normal_sdf_trace_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        return reject("first-native SPIR-V pipeline/layout is unavailable");
+    for (const auto set : first_native_normal_sdf_trace_ds_) {
+        if (set == handles::INVALID_DESCRIPTOR_SET)
+            return reject("first-native descriptor set allocation failed");
+    }
+    if (positions == handles::INVALID_RESOURCE ||
+        elements == handles::INVALID_RESOURCE ||
+        instances == handles::INVALID_RESOURCE ||
+        materials == handles::INVALID_RESOURCE ||
+        normalTexture == handles::INVALID_RESOURCE ||
+        normalSampler == handles::INVALID_SAMPLER || !triangleMapping ||
+        triangleMappingBytes == 0u ||
+        (triangleMappingBytes % kFirstNativeNormalMappingStride) != 0u)
+        return reject("native source handle, sampler, or mapping is missing");
+
+#if !defined(ENABLE_VULKAN) || !ENABLE_VULKAN
+    // VulkanDevice/VulkanTexture are backend-only types.  Keep this public
+    // opt-in entry point linkable in Metal/Dawn builds while failing closed;
+    // the incumbent first-surface/default path remains untouched there.
+    return reject("Vulkan backend is not compiled");
+#else
+    auto* vk = static_cast<VulkanDevice*>(device_);
+    u64 positionBytes = 0, elementBytes = 0, instanceBytes = 0, materialBytes = 0;
+    if (!vk->GetBufferByteSize(positions, positionBytes) ||
+        !vk->GetBufferByteSize(elements, elementBytes) ||
+        !vk->GetBufferByteSize(instances, instanceBytes) ||
+        !vk->GetBufferByteSize(materials, materialBytes) ||
+        positionBytes == 0 || elementBytes == 0 || instanceBytes == 0 ||
+        materialBytes == 0)
+        return reject("native source buffer size query failed");
+    if ((positionBytes % kNativeVertexStride) != 0u ||
+        (elementBytes % kNativeElementStride) != 0u ||
+        (instanceBytes % kNativeInstanceStride) != 0u ||
+        (materialBytes % kNativeMaterialStride) != 0u ||
+        elementBytes != (positionBytes / kNativeVertexStride) * kNativeElementStride)
+        return reject("native source strides do not match GPUDrivenDraw");
+    const u64 vertexCount = positionBytes / kNativeVertexStride;
+    const u64 elementCount = elementBytes / kNativeElementStride;
+    const u64 instanceCount = instanceBytes / kNativeInstanceStride;
+    const u64 materialCount = materialBytes / kNativeMaterialStride;
+    if (vertexCount == 0 || vertexCount > 16ull * 1024ull * 1024ull ||
+        elementCount == 0 || instanceCount == 0 || instanceCount > 1ull * 1024ull * 1024ull ||
+        materialCount == 0 || materialCount > 1ull * 1024ull * 1024ull)
+        return reject("native source count is outside the bounded contract");
+
+    auto* normalTex = vk->GetTexture(normalTexture);
+    if (!normalTex) return reject("native normal texture lookup failed");
+    const TextureDesc& normalDesc = normalTex->GetTextureDesc();
+    if (normalDesc.type != TextureType::Texture2DArray ||
+        normalDesc.size.x == 0 || normalDesc.size.y == 0 ||
+        normalDesc.arraySize == 0 || normalDesc.mipLevels == 0 ||
+        (normalDesc.format != DataFormat::RGBA8_UNorm &&
+         normalDesc.format != DataFormat::RGBA8_sRGB))
+        return reject("native normal texture must be a nonempty RGBA8 2D array");
+
+    u64 triangleBytes = 0;
+    if (first_surface_triangles_buffer_ == handles::INVALID_RESOURCE ||
+        !vk->GetBufferByteSize(first_surface_triangles_buffer_, triangleBytes) ||
+        triangleBytes == 0 || (triangleBytes % kFirstSurfaceTriangleStride) != 0u ||
+        triangleMappingBytes / kFirstNativeNormalMappingStride !=
+            triangleBytes / kFirstSurfaceTriangleStride)
+        return reject("triangle mapping does not match the uploaded first-surface table");
+
+    // The trace shader indexes this audit by update-slot ray.  Keep a fixed,
+    // descriptor-visible bound so an unexpectedly large update budget fails
+    // closed at the host reader instead of creating an unbounded allocation.
+    const u64 maxAuditVec4 = kFirstNativeNormalAuditCapBytes / sizeof(math::v4);
+    const u64 auditRayCapacity = maxAuditVec4 / kFirstNativeNormalAuditVec4Stride;
+    if (auditRayCapacity == 0 ||
+        auditRayCapacity > std::numeric_limits<u32>::max() /
+                               kFirstNativeNormalAuditVec4Stride)
+        return reject("native audit capacity arithmetic overflow");
+    const u64 auditVec4Count = auditRayCapacity * kFirstNativeNormalAuditVec4Stride;
+    const u64 auditBytes = auditVec4Count * sizeof(math::v4);
+
+    BufferDesc mappingDesc{};
+    mappingDesc.size = triangleMappingBytes;
+    mappingDesc.type = BufferType::Structured;
+    mappingDesc.usage = GPUMemoryUsage::Static;
+    mappingDesc.memoryUsage = GPUMemoryUsage::Static;
+    mappingDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    mappingDesc.structured.elementCount = static_cast<u32>(triangleMappingBytes /
+                                                             kFirstNativeNormalMappingStride);
+    mappingDesc.structured.elementStride = kFirstNativeNormalMappingStride;
+    mappingDesc.name = "DDGI_FirstNativeNormalTriangleMapping";
+
+    BufferDesc auditDesc{};
+    auditDesc.size = auditBytes;
+    auditDesc.type = BufferType::Structured;
+    auditDesc.usage = GPUMemoryUsage::Dynamic;
+    auditDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    auditDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    auditDesc.structured.elementCount = static_cast<u32>(auditVec4Count);
+    auditDesc.structured.elementStride = sizeof(math::v4);
+    auditDesc.name = "DDGI_FirstNativeNormalAudit";
+
+    ResourceHandle newMapping = device_->CreateBuffer(mappingDesc);
+    ResourceHandle newAudit = device_->CreateBuffer(auditDesc);
+    auto destroyNew = [&]() {
+        if (newMapping != handles::INVALID_RESOURCE) device_->DestroyBuffer(newMapping);
+        if (newAudit != handles::INVALID_RESOURCE) device_->DestroyBuffer(newAudit);
+    };
+    if (newMapping == handles::INVALID_RESOURCE || newAudit == handles::INVALID_RESOURCE) {
+        destroyNew();
+        return reject("native mapping/audit buffer allocation failed");
+    }
+    if (!device_->UpdateBufferData(newMapping, triangleMapping, triangleMappingBytes, 0)) {
+        destroyNew();
+        return reject("native triangle mapping upload failed");
+    }
+    if (void* mapped = device_->MapBuffer(newAudit)) {
+        std::memset(mapped, 0, static_cast<size_t>(auditBytes));
+        device_->UnmapBuffer(newAudit);
+    } else {
+        destroyNew();
+        return reject("native audit buffer initialization failed");
+    }
+
+    // Source handles belong to GPUDrivenDraw/material setup.  Replace only
+    // after the owned buffers are complete; the setter is called before the
+    // first candidate dispatch or during a deferred pass rebuild.
+    if (first_native_normal_triangle_mapping_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(first_native_normal_triangle_mapping_buffer_);
+    if (first_native_normal_audit_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(first_native_normal_audit_buffer_);
+    first_native_normal_positions_ = positions;
+    first_native_normal_elements_ = elements;
+    first_native_normal_instances_ = instances;
+    first_native_normal_materials_ = materials;
+    first_native_normal_texture_ = normalTexture;
+    first_native_normal_sampler_ = normalSampler;
+    first_native_normal_triangle_mapping_buffer_ = newMapping;
+    first_native_normal_audit_buffer_ = newAudit;
+    first_native_normal_audit_bytes_ = auditBytes;
+    first_native_normal_enabled_ = true;
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[DDGI_FIRST_NATIVE_NORMAL] enabled: vertices=" << vertexCount
+        << " elements=" << elementCount << " instances=" << instanceCount
+        << " materials=" << materialCount << " mapping_records="
+        << (triangleMappingBytes / kFirstNativeNormalMappingStride)
+        << " audit_bytes=" << auditBytes << " audit_ray_capacity=" << auditRayCapacity
+        << " format=" << static_cast<u32>(normalDesc.format) << std::endl;
+    return true;
+#endif
+}
+
+bool LumenDDGIPass::SetAnalyticFirstRhoSources(
+    const void* nodes, u64 nodeBytes, const void* triangles, u64 triangleBytes,
+    ResourceHandle positions, ResourceHandle elements, ResourceHandle instances,
+    ResourceHandle materials, ResourceHandle albedoTexture,
+    SamplerHandle albedoSampler, const void* triangleMapping,
+    u64 triangleMappingBytes) {
+    auto reject = [&](const char* reason) {
+        analytic_first_rho_enabled_ = false;
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[DDGI_ANALYTIC_FIRST_RHO] rejected: " << reason << std::endl;
+        return false;
+    };
+    if (!analytic_first_rho_requested_ || !device_ ||
+        device_->GetPlatform() != RHIPlatform::Vulkan || ray_sample_mode_ != 0u)
+        return reject("request is not active (requires Vulkan scalar mode 0)");
+    if (!nodes || !triangles || nodeBytes == 0 || triangleBytes == 0 ||
+        !triangleMapping || triangleMappingBytes == 0 ||
+        positions == handles::INVALID_RESOURCE ||
+        elements == handles::INVALID_RESOURCE ||
+        instances == handles::INVALID_RESOURCE ||
+        materials == handles::INVALID_RESOURCE ||
+        albedoTexture == handles::INVALID_RESOURCE ||
+        albedoSampler == handles::INVALID_SAMPLER)
+        return reject("candidate source handle, sampler, or geometry is missing");
+    if ((nodeBytes % kFirstSurfaceNodeStride) != 0 ||
+        (triangleBytes % kFirstSurfaceTriangleStride) != 0 ||
+        (triangleMappingBytes % kAnalyticFirstRhoMappingStride) != 0)
+        return reject("geometry/mapping does not use the bounded record strides");
+    const u64 nodeCount = nodeBytes / kFirstSurfaceNodeStride;
+    const u64 triangleCount = triangleBytes / kFirstSurfaceTriangleStride;
+    const u64 mappingCount = triangleMappingBytes / kAnalyticFirstRhoMappingStride;
+    if (nodeCount == 0 || nodeCount > kFirstSurfaceMaxNodes ||
+        triangleCount == 0 || triangleCount > kFirstSurfaceMaxTriangles ||
+        mappingCount != triangleCount)
+        return reject("geometry or mapping count is outside the bounded contract");
+    const u64 probeXY = u64(params_.probe_count_x) * u64(params_.probe_count_y);
+    if (params_.probe_count_z != 0 &&
+        probeXY > std::numeric_limits<u64>::max() / u64(params_.probe_count_z))
+        return reject("probe count multiplication overflow");
+    const u64 totalProbes = probeXY * u64(params_.probe_count_z);
+    if (params_.rays_per_probe == 0 ||
+        totalProbes > std::numeric_limits<u64>::max() / u64(params_.rays_per_probe))
+        return reject("ray count multiplication overflow");
+    const u64 totalRays = totalProbes * u64(params_.rays_per_probe);
+    const u64 maxAuditVec4 = kAnalyticFirstRhoAuditCapBytes / sizeof(math::v4);
+    const u64 maxAuditRays = maxAuditVec4 / kAnalyticFirstRhoAuditVec4Stride;
+    if (totalProbes == 0 || totalRays == 0 || totalRays > maxAuditRays ||
+        totalRays > std::numeric_limits<u64>::max() /
+                         (kAnalyticFirstRhoAuditVec4Stride * sizeof(math::v4)))
+        return reject("full update-ray capacity exceeds the fixed audit bound");
+    if (analytic_first_rho_finalize_pipeline_ == handles::INVALID_PIPELINE ||
+        analytic_first_rho_finalize_layout_ == handles::INVALID_PIPELINE_LAYOUT ||
+        analytic_first_rho_finalize_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        return reject("analytic-first-rho SPIR-V pipeline/layout is unavailable");
+    for (const auto set : analytic_first_rho_finalize_ds_) {
+        if (set == handles::INVALID_DESCRIPTOR_SET)
+            return reject("analytic-first-rho descriptor set allocation failed");
+    }
+
+#if !defined(ENABLE_VULKAN) || !ENABLE_VULKAN
+    return reject("Vulkan backend is not compiled");
+#else
+    auto* vk = static_cast<VulkanDevice*>(device_);
+    u64 positionBytes = 0, elementBytes = 0, instanceBytes = 0, materialBytes = 0;
+    if (!vk->GetBufferByteSize(positions, positionBytes) ||
+        !vk->GetBufferByteSize(elements, elementBytes) ||
+        !vk->GetBufferByteSize(instances, instanceBytes) ||
+        !vk->GetBufferByteSize(materials, materialBytes) ||
+        positionBytes == 0 || elementBytes == 0 || instanceBytes == 0 || materialBytes == 0)
+        return reject("native source buffer size query failed");
+    if (positionBytes % kNativeVertexStride != 0 ||
+        elementBytes % kNativeElementStride != 0 ||
+        instanceBytes % kNativeInstanceStride != 0 ||
+        materialBytes % kNativeMaterialStride != 0 ||
+        elementBytes != (positionBytes / kNativeVertexStride) * kNativeElementStride)
+        return reject("native source strides do not match GPUDrivenDraw");
+    const u64 vertexCount = positionBytes / kNativeVertexStride;
+    const u64 elementCount = elementBytes / kNativeElementStride;
+    const u64 instanceCount = instanceBytes / kNativeInstanceStride;
+    const u64 materialCount = materialBytes / kNativeMaterialStride;
+    if (vertexCount == 0 || vertexCount > 16ull * 1024ull * 1024ull ||
+        elementCount == 0 || instanceCount == 0 || instanceCount > 1ull * 1024ull * 1024ull ||
+        materialCount == 0 || materialCount > 1ull * 1024ull * 1024ull)
+        return reject("native source count is outside the bounded contract");
+    auto* albedo = vk->GetTexture(albedoTexture);
+    if (!albedo) return reject("albedo texture lookup failed");
+    const TextureDesc& albedoDesc = albedo->GetTextureDesc();
+    if (albedoDesc.type != TextureType::Texture2DArray || albedoDesc.size.x == 0 ||
+        albedoDesc.size.y == 0 || albedoDesc.arraySize == 0 || albedoDesc.mipLevels == 0 ||
+        (albedoDesc.format != DataFormat::RGBA8_UNorm &&
+         albedoDesc.format != DataFormat::RGBA8_sRGB))
+        return reject("albedo texture must be a nonempty RGBA8 2D array");
+
+    const u64 auditBytes = totalRays * kAnalyticFirstRhoAuditVec4Stride * sizeof(math::v4);
+    BufferDesc nodeDesc{};
+    nodeDesc.size = nodeBytes;
+    nodeDesc.type = BufferType::Structured;
+    nodeDesc.usage = GPUMemoryUsage::Static;
+    nodeDesc.memoryUsage = GPUMemoryUsage::Static;
+    nodeDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    nodeDesc.structured.elementCount = static_cast<u32>(nodeCount * 3u);
+    nodeDesc.structured.elementStride = sizeof(math::v4);
+    nodeDesc.name = "DDGI_AnalyticFirstRhoNodes";
+    BufferDesc triangleDesc = nodeDesc;
+    triangleDesc.size = triangleBytes;
+    triangleDesc.structured.elementCount = static_cast<u32>(triangleCount * 3u);
+    triangleDesc.name = "DDGI_AnalyticFirstRhoTriangles";
+    BufferDesc mappingDesc{};
+    mappingDesc.size = triangleMappingBytes;
+    mappingDesc.type = BufferType::Structured;
+    mappingDesc.usage = GPUMemoryUsage::Static;
+    mappingDesc.memoryUsage = GPUMemoryUsage::Static;
+    mappingDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    mappingDesc.structured.elementCount = static_cast<u32>(mappingCount * 2u);
+    mappingDesc.structured.elementStride = sizeof(math::v4);
+    mappingDesc.name = "DDGI_AnalyticFirstRhoMapping";
+    BufferDesc auditDesc{};
+    auditDesc.size = auditBytes;
+    auditDesc.type = BufferType::Structured;
+    auditDesc.usage = GPUMemoryUsage::Dynamic;
+    auditDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+    auditDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    auditDesc.structured.elementCount = static_cast<u32>(totalRays * kAnalyticFirstRhoAuditVec4Stride);
+    auditDesc.structured.elementStride = sizeof(math::v4);
+    auditDesc.name = "DDGI_AnalyticFirstRhoAudit";
+    ResourceHandle newNodes = device_->CreateBuffer(nodeDesc);
+    ResourceHandle newTriangles = device_->CreateBuffer(triangleDesc);
+    ResourceHandle newMapping = device_->CreateBuffer(mappingDesc);
+    ResourceHandle newAudit = device_->CreateBuffer(auditDesc);
+    auto destroyNew = [&]() {
+        if (newNodes != handles::INVALID_RESOURCE) device_->DestroyBuffer(newNodes);
+        if (newTriangles != handles::INVALID_RESOURCE) device_->DestroyBuffer(newTriangles);
+        if (newMapping != handles::INVALID_RESOURCE) device_->DestroyBuffer(newMapping);
+        if (newAudit != handles::INVALID_RESOURCE) device_->DestroyBuffer(newAudit);
+    };
+    if (newNodes == handles::INVALID_RESOURCE || newTriangles == handles::INVALID_RESOURCE ||
+        newMapping == handles::INVALID_RESOURCE || newAudit == handles::INVALID_RESOURCE) {
+        destroyNew();
+        return reject("candidate BVH/mapping/audit allocation failed");
+    }
+    if (!device_->UpdateBufferData(newNodes, nodes, nodeBytes, 0) ||
+        !device_->UpdateBufferData(newTriangles, triangles, triangleBytes, 0) ||
+        !device_->UpdateBufferData(newMapping, triangleMapping, triangleMappingBytes, 0)) {
+        destroyNew();
+        return reject("candidate BVH/mapping upload failed");
+    }
+    if (void* mapped = device_->MapBuffer(newAudit)) {
+        std::memset(mapped, 0, static_cast<size_t>(auditBytes));
+        device_->UnmapBuffer(newAudit);
+    } else {
+        destroyNew();
+        return reject("candidate audit buffer map/initialization failed");
+    }
+    if (analytic_first_rho_nodes_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(analytic_first_rho_nodes_buffer_);
+    if (analytic_first_rho_triangles_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(analytic_first_rho_triangles_buffer_);
+    if (analytic_first_rho_mapping_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(analytic_first_rho_mapping_buffer_);
+    if (analytic_first_rho_audit_buffer_ != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(analytic_first_rho_audit_buffer_);
+    analytic_first_rho_nodes_buffer_ = newNodes;
+    analytic_first_rho_triangles_buffer_ = newTriangles;
+    analytic_first_rho_mapping_buffer_ = newMapping;
+    analytic_first_rho_audit_buffer_ = newAudit;
+    analytic_first_rho_audit_bytes_ = auditBytes;
+    analytic_first_rho_positions_ = positions;
+    analytic_first_rho_elements_ = elements;
+    analytic_first_rho_instances_ = instances;
+    analytic_first_rho_materials_ = materials;
+    analytic_first_rho_albedo_texture_ = albedoTexture;
+    analytic_first_rho_albedo_sampler_ = albedoSampler;
+    analytic_first_rho_enabled_ = true;
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[DDGI_ANALYTIC_FIRST_RHO] enabled: nodes=" << nodeCount
+        << " triangles=" << triangleCount << " native_vertices=" << vertexCount
+        << " instances=" << instanceCount << " materials=" << materialCount
+        << " mapping_records=" << mappingCount << " audit_bytes=" << auditBytes
+        << " application=" << (analytic_first_rho_apply_ ? 1 : 0) << std::endl;
+    return true;
+#endif
+}
+
+bool LumenDDGIPass::FlushSHProducerAudit(u32 absoluteFrame) {
+    if (!DDGIShProducerAudit::Requested()) return true;
+    const char* f = std::getenv("DDGI_SH_PRODUCER_AUDIT_FRAME");
+    if (f && absoluteFrame < static_cast<u32>(std::strtoul(f,nullptr,10))) return true;
+    return sh_producer_audit_ && sh_producer_audit_->Flush(absoluteFrame);
+}
+
 void LumenDDGIPass::Shutdown() {
-    if (!initialized_) return;
+    // A rejected opt-in can leave the device/pipeline members alive while
+    // Initialize() is unwinding before initialized_ is set.  Keep the
+    // candidate cleanup reachable for that partial-lifecycle case too.
+    if (!initialized_ && !device_) return;
     initialized_ = false;
+    sh_producer_audit_.reset();
 
     depth_readback_ring_.shutdown(device_);
+    for (auto& buffer:depth_provenance_buffers_) {
+        if (buffer!=handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
+        buffer=handles::INVALID_RESOURCE;
+    }
+    depth_provenance_enabled_=false;
+    analytic_audit_enabled_=false;
+    ray_source_audit_enabled_=false;
+    query_source_audit_enabled_=false;
+
+    // First-surface resources are allocated after Initialize() by an explicit
+    // host call, so release them here rather than relying on the incumbent
+    // pass's deferred-handle convention.  No in-flight render may remain when
+    // Shutdown is entered by the owner.
+    if (device_) {
+        for (auto& set : first_surface_sdf_trace_ds_) {
+            if (set != handles::INVALID_DESCRIPTOR_SET) {
+                device_->DestroyDescriptorSet(set);
+                set = handles::INVALID_DESCRIPTOR_SET;
+            }
+        }
+        for (auto& set : first_native_normal_sdf_trace_ds_) {
+            if (set != handles::INVALID_DESCRIPTOR_SET) {
+                device_->DestroyDescriptorSet(set);
+                set = handles::INVALID_DESCRIPTOR_SET;
+            }
+        }
+        if (first_surface_sdf_trace_pipeline_ != handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(first_surface_sdf_trace_pipeline_);
+            first_surface_sdf_trace_pipeline_ = handles::INVALID_PIPELINE;
+        }
+        if (first_zero_cross_sdf_trace_pipeline_ != handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(first_zero_cross_sdf_trace_pipeline_);
+            first_zero_cross_sdf_trace_pipeline_ = handles::INVALID_PIPELINE;
+        }
+        if (first_native_normal_sdf_trace_pipeline_ != handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(first_native_normal_sdf_trace_pipeline_);
+            first_native_normal_sdf_trace_pipeline_ = handles::INVALID_PIPELINE;
+        }
+        if (first_surface_sdf_trace_shader_ != handles::INVALID_SHADER) {
+            device_->DestroyShader(first_surface_sdf_trace_shader_);
+            first_surface_sdf_trace_shader_ = handles::INVALID_SHADER;
+        }
+        if (first_zero_cross_sdf_trace_shader_ != handles::INVALID_SHADER) {
+            device_->DestroyShader(first_zero_cross_sdf_trace_shader_);
+            first_zero_cross_sdf_trace_shader_ = handles::INVALID_SHADER;
+        }
+        if (first_native_normal_sdf_trace_shader_ != handles::INVALID_SHADER) {
+            device_->DestroyShader(first_native_normal_sdf_trace_shader_);
+            first_native_normal_sdf_trace_shader_ = handles::INVALID_SHADER;
+        }
+        if (first_surface_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(first_surface_sdf_trace_layout_);
+            first_surface_sdf_trace_layout_ = handles::INVALID_PIPELINE_LAYOUT;
+        }
+        if (first_native_normal_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(first_native_normal_sdf_trace_layout_);
+            first_native_normal_sdf_trace_layout_ = handles::INVALID_PIPELINE_LAYOUT;
+        }
+        if (first_surface_sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            device_->DestroyDescriptorSetLayout(first_surface_sdf_trace_set_layout_);
+            first_surface_sdf_trace_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+        }
+        if (first_native_normal_sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            device_->DestroyDescriptorSetLayout(first_native_normal_sdf_trace_set_layout_);
+            first_native_normal_sdf_trace_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+        }
+        if (first_surface_nodes_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(first_surface_nodes_buffer_);
+            first_surface_nodes_buffer_ = handles::INVALID_RESOURCE;
+        }
+        if (first_surface_triangles_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(first_surface_triangles_buffer_);
+            first_surface_triangles_buffer_ = handles::INVALID_RESOURCE;
+        }
+        if (first_surface_audit_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(first_surface_audit_buffer_);
+            first_surface_audit_buffer_ = handles::INVALID_RESOURCE;
+        }
+        if (first_native_normal_triangle_mapping_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(first_native_normal_triangle_mapping_buffer_);
+            first_native_normal_triangle_mapping_buffer_ = handles::INVALID_RESOURCE;
+        }
+        if (first_native_normal_audit_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(first_native_normal_audit_buffer_);
+            first_native_normal_audit_buffer_ = handles::INVALID_RESOURCE;
+        }
+        for (auto& set : analytic_first_rho_finalize_ds_) {
+            if (set != handles::INVALID_DESCRIPTOR_SET) {
+                device_->DestroyDescriptorSet(set);
+                set = handles::INVALID_DESCRIPTOR_SET;
+            }
+        }
+        if (analytic_first_rho_finalize_pipeline_ != handles::INVALID_PIPELINE) {
+            device_->DestroyPipeline(analytic_first_rho_finalize_pipeline_);
+            analytic_first_rho_finalize_pipeline_ = handles::INVALID_PIPELINE;
+        }
+        if (analytic_first_rho_finalize_shader_ != handles::INVALID_SHADER) {
+            device_->DestroyShader(analytic_first_rho_finalize_shader_);
+            analytic_first_rho_finalize_shader_ = handles::INVALID_SHADER;
+        }
+        if (analytic_first_rho_finalize_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            device_->DestroyPipelineLayout(analytic_first_rho_finalize_layout_);
+            analytic_first_rho_finalize_layout_ = handles::INVALID_PIPELINE_LAYOUT;
+        }
+        if (analytic_first_rho_finalize_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            device_->DestroyDescriptorSetLayout(analytic_first_rho_finalize_set_layout_);
+            analytic_first_rho_finalize_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+        }
+        if (analytic_first_rho_nodes_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(analytic_first_rho_nodes_buffer_);
+            analytic_first_rho_nodes_buffer_ = handles::INVALID_RESOURCE;
+        }
+        if (analytic_first_rho_triangles_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(analytic_first_rho_triangles_buffer_);
+            analytic_first_rho_triangles_buffer_ = handles::INVALID_RESOURCE;
+        }
+        if (analytic_first_rho_mapping_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(analytic_first_rho_mapping_buffer_);
+            analytic_first_rho_mapping_buffer_ = handles::INVALID_RESOURCE;
+        }
+        if (analytic_first_rho_audit_buffer_ != handles::INVALID_RESOURCE) {
+            device_->DestroyBuffer(analytic_first_rho_audit_buffer_);
+            analytic_first_rho_audit_buffer_ = handles::INVALID_RESOURCE;
+        }
+    }
+    first_surface_requested_ = false;
+    first_surface_enabled_ = false;
+    first_zero_cross_requested_ = false;
+    first_zero_cross_enabled_ = false;
+    first_native_normal_requested_ = false;
+    first_native_normal_enabled_ = false;
+    first_native_normal_positions_ = handles::INVALID_RESOURCE;
+    first_native_normal_elements_ = handles::INVALID_RESOURCE;
+    first_native_normal_instances_ = handles::INVALID_RESOURCE;
+    first_native_normal_materials_ = handles::INVALID_RESOURCE;
+    first_native_normal_texture_ = handles::INVALID_RESOURCE;
+    first_native_normal_sampler_ = handles::INVALID_SAMPLER;
+    first_native_normal_audit_bytes_ = 0;
+    analytic_first_rho_requested_ = false;
+    analytic_first_rho_enabled_ = false;
+    analytic_first_rho_apply_ = false;
+    analytic_first_position_apply_ = false;
+    analytic_first_rho_audit_ = false;
+    analytic_sc_first_audit_ = false;
+    analytic_first_rho_prefix_ = false;
+    analytic_first_rho_positions_ = handles::INVALID_RESOURCE;
+    analytic_first_rho_elements_ = handles::INVALID_RESOURCE;
+    analytic_first_rho_instances_ = handles::INVALID_RESOURCE;
+    analytic_first_rho_materials_ = handles::INVALID_RESOURCE;
+    analytic_first_rho_albedo_texture_ = handles::INVALID_RESOURCE;
+    analytic_first_rho_albedo_sampler_ = handles::INVALID_SAMPLER;
+    analytic_first_rho_audit_bytes_ = 0;
     device_ = nullptr;
 
     // No explicit GPU resource destruction needed -- handles are POD types
@@ -695,12 +1551,18 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // depth history buffer (read)
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // depth output buffer (read_write)
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // probe update list (read)
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // Vulkan depth-only distances
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // optional provenance history
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},   // optional provenance output
         };
         depthBindings[2].readonly = true;  // ray_buffer: var<storage, read>
         depthBindings[3].readonly = true;  // depth_history: var<storage, read>
         depthBindings[5].readonly = true;  // probe_update_list: var<storage, read>
         // depthBindings[4] (depth_output) stays read_write.
-        DescriptorSetLayoutDesc layoutDesc{6, depthBindings};
+        depthBindings[6].readonly = true;
+        depthBindings[7].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{device_->GetPlatform() == RHIPlatform::Vulkan ?
+            (depth_provenance_enabled_?9u:7u) : 6u, depthBindings};
         depth_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -742,6 +1604,92 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         }
         DescriptorSetLayoutDesc layoutDesc{13, sdfTraceBindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+
+        // DDGI_FIRST_SURFACE=1 and DDGI_FIRST_ZERO_CROSS=1 share this
+        // first-surface resource contract.  The incumbent 13-binding layout
+        // above is intentionally retained for every default run and for
+        // rejected opt-ins; zero-cross gets a separate pipeline/module below.
+        if (first_surface_requested_ || first_zero_cross_requested_) {
+            DescriptorSetLayoutBinding firstSurfaceBindings[] = {
+                {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},
+                {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {15, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            };
+            for (u32 bi = 0; bi < 3; ++bi) {
+                firstSurfaceBindings[bi].is3D = true;
+                firstSurfaceBindings[bi].unfilterableFloat = true;
+            }
+            for (u32 bi = 7; bi <= 10; ++bi) {
+                firstSurfaceBindings[bi].is3D = true;
+                firstSurfaceBindings[bi].unfilterableFloat = true;
+            }
+            firstSurfaceBindings[5].readonly = true;
+            firstSurfaceBindings[13].readonly = true;
+            firstSurfaceBindings[14].readonly = true;
+            first_surface_sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(
+                DescriptorSetLayoutDesc{16, firstSurfaceBindings});
+
+            // Native-normal child variant: preserve bindings 0..15 exactly and
+            // append only the borrowed GPUDrivenDraw sources, the original
+            // triangle mapping, and the independent 24-vec4 audit SSBO.
+            if (first_native_normal_requested_) {
+                DescriptorSetLayoutBinding firstNativeBindings[] = {
+                    {0,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {1,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {2,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {3,  DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                    {4,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {5,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {6,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {7,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {8,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {9,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {10, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                    {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {15, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {16, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {17, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {18, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {19, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {20, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                    {21, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                    {22, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr},
+                    {23, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                };
+                for (u32 bi = 0; bi < 3; ++bi) {
+                    firstNativeBindings[bi].is3D = true;
+                    firstNativeBindings[bi].unfilterableFloat = true;
+                }
+                for (u32 bi = 7; bi <= 10; ++bi) {
+                    firstNativeBindings[bi].is3D = true;
+                    firstNativeBindings[bi].unfilterableFloat = true;
+                }
+                firstNativeBindings[5].readonly = true;
+                firstNativeBindings[13].readonly = true;
+                firstNativeBindings[14].readonly = true;
+                for (u32 bi = 16; bi <= 22; ++bi)
+                    firstNativeBindings[bi].readonly = true;
+                firstNativeBindings[21].isArray = true;
+                first_native_normal_sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(
+                    DescriptorSetLayoutDesc{24, firstNativeBindings});
+            }
+        }
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding sdfTraceBindings[] = {
             {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // SDF cascade 0
@@ -815,6 +1763,52 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         finalizeBindings[17].readonly = true;
         DescriptorSetLayoutDesc layoutDesc{18, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
+
+        // Analytic-first-rho Finalize variant.  Bindings 0..17 intentionally
+        // mirror the incumbent flat contract; 18..27 are candidate-only
+        // geometry/material/audit resources.  The candidate is created only
+        // for the exact opt-in flag or diagnostic PREFIX, so the default
+        // descriptor layout and bytecode stay unchanged.
+        if (analytic_first_rho_requested_) {
+            DescriptorSetLayoutBinding analyticBindings[] = {
+                {0,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {1,  DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                {2,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {3,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {4,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {5,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {6,  DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {7,  DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},
+                {8,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {9,  DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {13, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {15, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {16, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {17, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {18, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {19, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {20, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {21, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {22, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {23, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {24, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+                {25, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
+                {26, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr},
+                {27, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            };
+            for (u32 bi : {0u, 8u, 9u, 13u, 15u, 16u, 25u}) {
+                analyticBindings[bi].isArray = (bi == 25u);
+            }
+            for (u32 bi : {2u, 3u, 5u, 6u, 10u, 11u, 12u, 14u, 17u,
+                           18u, 19u, 20u, 21u, 22u, 23u, 24u, 25u, 26u})
+                analyticBindings[bi].readonly = true;
+            analytic_first_rho_finalize_set_layout_ = device_->CreateDescriptorSetLayout(
+                DescriptorSetLayoutDesc{28, analyticBindings});
+        }
     } else if (!skipSplitPass) {
         DescriptorSetLayoutBinding finalizeBindings[] = {
             {3, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},   // lighting_atlas
@@ -852,8 +1846,14 @@ void LumenDDGIPass::CreatePipelines() {
         // kernel so ray-path A/B never races the POST_BUILD shader staging
         // copy. Repository keeps both .comp.spv files side by side.
         std::string effectiveName = name;
+        if (depth_provenance_enabled_ && std::string(name)=="DDGIUpdateDepth")
+            effectiveName="DDGIUpdateDepth_provenance";
         if (std::getenv("DDGI_PATH_DEBUG") && std::string(name) == "DDGITraceFinalize") {
             effectiveName = "DDGITraceFinalize_pathdbg";
+        }
+        if (std::getenv("DDGI_PATH_DEBUG") &&
+            std::string(name) == "DDGITraceFinalize_analytic_first_rho") {
+            effectiveName = "DDGITraceFinalize_analytic_first_rho_pathdbg";
         }
         // 2026-09-17 归因 A/B：DDGI_LEGACY_CONSUMERS=1 → 消费端旧原格点行为
         // 变体（build_spv.sh 以 -DDDGI_LEGACY_CONSUMERS 编译；缓冲仍照常写）。
@@ -880,13 +1880,37 @@ void LumenDDGIPass::CreatePipelines() {
     const bool isMetalOrVkSplit = (device_->GetPlatform() == rhi::RHIPlatform::Metal) || isVulkanPlatform;
     ShaderHandle sdfTraceShader = handles::INVALID_SHADER;
     ShaderHandle finalizeShader = handles::INVALID_SHADER;
+    ShaderHandle firstSurfaceSdfTraceShader = handles::INVALID_SHADER;
+    ShaderHandle firstZeroCrossSdfTraceShader = handles::INVALID_SHADER;
+    ShaderHandle firstNativeNormalSdfTraceShader = handles::INVALID_SHADER;
+    ShaderHandle analyticFirstRhoFinalizeShader = handles::INVALID_SHADER;
     if (device_->GetPlatform() == rhi::RHIPlatform::Metal) {
         sdfTraceShader = CompileShader("DDGITraceRays", "ddgi_trace_sdf");
         finalizeShader = CompileShader("DDGITraceRays", "ddgi_trace_finalize");
     } else if (isVulkanPlatform) {
         sdfTraceShader = CompileShader("DDGITraceSDF", "ddgi_trace_sdf");
         finalizeShader = CompileShader("DDGITraceFinalize", "ddgi_trace_finalize");
+        if (analytic_first_rho_requested_) {
+            analyticFirstRhoFinalizeShader = CompileShader(
+                "DDGITraceFinalize_analytic_first_rho", "ddgi_analytic_first_rho");
+        }
+        if (first_surface_requested_) {
+            firstSurfaceSdfTraceShader = CompileShader(
+                "DDGITraceSDF_firstsurface", "ddgi_trace_sdf");
+        }
+        if (first_zero_cross_requested_) {
+            firstZeroCrossSdfTraceShader = CompileShader(
+                "DDGITraceSDF_first_zero_cross", "ddgi_trace_sdf");
+        }
+        if (first_native_normal_requested_) {
+            firstNativeNormalSdfTraceShader = CompileShader(
+                "DDGITraceSDF_firstnative", "ddgi_trace_sdf");
+        }
     }
+    first_surface_sdf_trace_shader_ = firstSurfaceSdfTraceShader;
+    first_zero_cross_sdf_trace_shader_ = firstZeroCrossSdfTraceShader;
+    first_native_normal_sdf_trace_shader_ = firstNativeNormalSdfTraceShader;
+    analytic_first_rho_finalize_shader_ = analyticFirstRhoFinalizeShader;
 
     if (traceShader == handles::INVALID_SHADER ||
         irradianceShader == handles::INVALID_SHADER ||
@@ -922,11 +1946,32 @@ void LumenDDGIPass::CreatePipelines() {
         plDesc.setLayouts = &sdf_trace_set_layout_;
         sdf_trace_layout_ = device_->CreatePipelineLayout(plDesc);
     }
+    if ((first_surface_requested_ || first_zero_cross_requested_) &&
+        first_surface_sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &first_surface_sdf_trace_set_layout_;
+        first_surface_sdf_trace_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+    if (first_native_normal_requested_ &&
+        first_native_normal_sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &first_native_normal_sdf_trace_set_layout_;
+        first_native_normal_sdf_trace_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
     if (!skipSplitPass && finalize_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
         PipelineLayoutDesc plDesc;
         plDesc.setLayoutCount = 1;
         plDesc.setLayouts = &finalize_set_layout_;
         finalize_layout_ = device_->CreatePipelineLayout(plDesc);
+    }
+    if (analytic_first_rho_requested_ &&
+        analytic_first_rho_finalize_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        PipelineLayoutDesc plDesc;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &analytic_first_rho_finalize_set_layout_;
+        analytic_first_rho_finalize_layout_ = device_->CreatePipelineLayout(plDesc);
     }
 
     // Create compute pipelines
@@ -969,6 +2014,60 @@ void LumenDDGIPass::CreatePipelines() {
             pipeDesc.threadGroupSize = {8, 8, 1};
             sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
         }
+        if (first_surface_requested_ &&
+            firstSurfaceSdfTraceShader != handles::INVALID_SHADER &&
+            first_surface_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = firstSurfaceSdfTraceShader;
+            pipeDesc.layout = first_surface_sdf_trace_layout_;
+            pipeDesc.threadGroupSize = {8, 8, 1};
+            first_surface_sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+            if (first_surface_sdf_trace_pipeline_ == handles::INVALID_PIPELINE) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_FIRST_SURFACE] candidate pipeline creation failed"
+                    << std::endl;
+            }
+        } else if (first_surface_requested_) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_FIRST_SURFACE] candidate shader/layout unavailable"
+                << std::endl;
+        }
+        if (first_zero_cross_requested_ &&
+            firstZeroCrossSdfTraceShader != handles::INVALID_SHADER &&
+            first_surface_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = firstZeroCrossSdfTraceShader;
+            pipeDesc.layout = first_surface_sdf_trace_layout_;
+            pipeDesc.threadGroupSize = {8, 8, 1};
+            first_zero_cross_sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+            if (first_zero_cross_sdf_trace_pipeline_ == handles::INVALID_PIPELINE) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_FIRST_ZERO_CROSS] candidate pipeline creation failed"
+                    << std::endl;
+            }
+        } else if (first_zero_cross_requested_) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_FIRST_ZERO_CROSS] candidate shader/layout unavailable"
+                << std::endl;
+        }
+        if (first_native_normal_requested_ &&
+            firstNativeNormalSdfTraceShader != handles::INVALID_SHADER &&
+            first_native_normal_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = firstNativeNormalSdfTraceShader;
+            pipeDesc.layout = first_native_normal_sdf_trace_layout_;
+            pipeDesc.threadGroupSize = {8, 8, 1};
+            first_native_normal_sdf_trace_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+            if (first_native_normal_sdf_trace_pipeline_ == handles::INVALID_PIPELINE) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_FIRST_NATIVE_NORMAL] candidate pipeline creation failed"
+                    << std::endl;
+            }
+        } else if (first_native_normal_requested_) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_FIRST_NATIVE_NORMAL] candidate shader/layout unavailable"
+                << std::endl;
+        }
         // Finalize (split pass 2): buffer-only, (8,8,1) threadgroup
         if (finalizeShader != handles::INVALID_SHADER &&
             finalize_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
@@ -977,6 +2076,24 @@ void LumenDDGIPass::CreatePipelines() {
             pipeDesc.layout = finalize_layout_;
             pipeDesc.threadGroupSize = {8, 8, 1};
             finalize_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+        }
+        if (analytic_first_rho_requested_ &&
+            analyticFirstRhoFinalizeShader != handles::INVALID_SHADER &&
+            analytic_first_rho_finalize_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            ComputePipelineDesc pipeDesc{};
+            pipeDesc.computeShader = analyticFirstRhoFinalizeShader;
+            pipeDesc.layout = analytic_first_rho_finalize_layout_;
+            pipeDesc.threadGroupSize = {8, 8, 1};
+            analytic_first_rho_finalize_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+            if (analytic_first_rho_finalize_pipeline_ == handles::INVALID_PIPELINE) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[DDGI_ANALYTIC_FIRST_RHO] candidate pipeline creation failed"
+                    << std::endl;
+            }
+        } else if (analytic_first_rho_requested_) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_ANALYTIC_FIRST_RHO] candidate shader/layout unavailable"
+                << std::endl;
         }
     }
     // Irradiance update uses (8,8,1) — cooperative, one group per probe
@@ -1014,9 +2131,24 @@ void LumenDDGIPass::CreatePipelines() {
             DescriptorSetDesc dsDesc{sdf_trace_set_layout_};
             sdf_trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
+        if ((first_surface_requested_ || first_zero_cross_requested_) &&
+            first_surface_sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{first_surface_sdf_trace_set_layout_};
+            first_surface_sdf_trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        if (first_native_normal_requested_ &&
+            first_native_normal_sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{first_native_normal_sdf_trace_set_layout_};
+            first_native_normal_sdf_trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
         {
             DescriptorSetDesc dsDesc{finalize_set_layout_};
             finalize_ds_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        if (analytic_first_rho_requested_ &&
+            analytic_first_rho_finalize_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{analytic_first_rho_finalize_set_layout_};
+            analytic_first_rho_finalize_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
     }
 }
@@ -1152,6 +2284,25 @@ void LumenDDGIPass::CreateProbeTextures() {
 
     CreateDepthReadbackRing();
 
+    if (depth_provenance_enabled_) {
+        for (auto& buffer:depth_provenance_buffers_) {
+            BufferDesc desc{};desc.size=u64(totalProbes)*64u*8u*sizeof(u32);
+            desc.type=BufferType::Structured;
+            desc.usage=desc.memoryUsage=GPUMemoryUsage::Dynamic;
+            desc.bindFlags=u32(BufferUsageFlags::Storage);
+            desc.structured.elementCount=totalProbes*64u*2u;
+            desc.structured.elementStride=sizeof(math::v4);
+            buffer=device_->CreateBuffer(desc);
+            if (buffer!=handles::INVALID_RESOURCE) {
+                if (auto* p=device_->MapBuffer(buffer)) {
+                    std::memset(p,0,desc.size);device_->UnmapBuffer(buffer);
+                } else {
+                    device_->DestroyBuffer(buffer);buffer=handles::INVALID_RESOURCE;
+                }
+            }
+        }
+    }
+
     // Confidence buffer (single-buffered). convergenceAge is a monotonic
     // per-probe counter (+1/30 per update); the previous triple-buffered
     // array rotated the written slot each frame, so every slot only advanced
@@ -1227,20 +2378,72 @@ void LumenDDGIPass::CreateProbeTextures() {
     {
         u32 totalRays = totalProbes * params_.rays_per_probe;
         BufferDesc desc{};
-        desc.size = (u64)totalRays * sizeof(float);
+        const u32 distanceCount = totalRays + (ray_sample_mode_ == 5 ? totalProbes * 128u : 0u);
+        desc.size = (u64)distanceCount * sizeof(float);
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = totalRays;
+        desc.structured.elementCount = distanceCount;
         desc.structured.elementStride = sizeof(float);
         hit_distance_buffer_ = device_->CreateBuffer(desc);
 
         // T4.3: parallel refined-normal buffer — xyz = world normal,
         // w = 1.0 valid / 0.0 fallback (finalize keeps -rayDir). Zero-filled
         // by the trace every frame (slot count 0 → all zeros).
-        desc.size = (u64)totalRays * 4 * sizeof(float);
+        material_projection_enabled_=device_->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+            std::getenv("DDGI_MATERIAL_PROJECT");
+        // DDGI_RAY_SOURCE_AUDIT is deliberately an exact opt-in.  The
+        // diagnostic is Vulkan split-pass only; unset/0/invalid values keep
+        // the allocation and UBO layout at the incumbent size.
+        const char* sourceAuditEnv = std::getenv("DDGI_RAY_SOURCE_AUDIT");
+        const bool splitPassAvailable = device_->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+            sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
+            finalize_pipeline_ != handles::INVALID_PIPELINE;
+        ray_source_audit_enabled_=splitPassAvailable && totalProbes <= 65535u &&
+            sourceAuditEnv && std::strcmp(sourceAuditEnv, "1") == 0;
+        // DDGI_QUERY_SOURCE_AUDIT is a stricter, scalar-mode-only extension of
+        // the existing source audit.  Latch it before allocating the hit-
+        // normal buffer so the extra tail can never be enabled without its
+        // storage.  Albedo.w remains the incumbent source-audit flag.
+        const char* querySourceAuditEnv = std::getenv("DDGI_QUERY_SOURCE_AUDIT");
+        query_source_audit_enabled_ = ray_source_audit_enabled_ &&
+            ray_sample_mode_ == 0u && querySourceAuditEnv &&
+            std::strcmp(querySourceAuditEnv, "1") == 0;
+        if (querySourceAuditEnv && std::strcmp(querySourceAuditEnv, "1") == 0 &&
+            !query_source_audit_enabled_) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[DDGI_QUERY_SOURCE_AUDIT] rejected: requires Vulkan split-pass, "
+                << "DDGI_RAY_SOURCE_AUDIT=1, scalar ray mode 0, and <=65535 probes"
+                << std::endl;
+        }
+        analytic_audit_enabled_=device_->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+            (std::getenv("DDGI_ANALYTIC_AUDIT") || material_projection_enabled_ ||
+             ray_source_audit_enabled_);
+        // Record layout:
+        //   [0, N)       refined hit normal
+        //   [N, 5N)      existing four analytic records (unchanged)
+        //   [5N, 9N)     source audit: Trace origin/direction, Finalize
+        //                 origin/direction (one vec4 per item per ray).
+        //   [9N, 27N)    optional query-source audit: two headers and sixteen
+        //                 actual card reads (one vec4 per item per ray).
+        const u32 normalRecordMultiplier=query_source_audit_enabled_ ? 27u :
+            (ray_source_audit_enabled_ ? 9u :
+             (analytic_audit_enabled_ ? 5u : 1u));
+        desc.size = (u64)totalRays * normalRecordMultiplier * 4 * sizeof(float);
+        desc.structured.elementCount = totalRays * normalRecordMultiplier;
         desc.structured.elementStride = 4 * sizeof(float);
         hit_normal_buffer_ = device_->CreateBuffer(desc);
+        if (ray_source_audit_enabled_) {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[DDGI_RAY_SOURCE_AUDIT] enabled (Vulkan split-pass); hit-normal records="
+                << normalRecordMultiplier << "N, source tail starts at 5N" << std::endl;
+        }
+        if (query_source_audit_enabled_) {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[DDGI_QUERY_SOURCE_AUDIT] enabled; records="
+                << normalRecordMultiplier << "N, query tail starts at 9N"
+                << " (18 vec4/ray)" << std::endl;
+        }
 
         // 2026-09-17 P0：重定位后有效起点（float4 per probe，绝对 probeIdx）。
         // 显式清零：w=0 表示"该 probe 尚未被 trace 发布过有效起点"，消费方
@@ -1352,11 +2555,10 @@ void LumenDDGIPass::CreateProbeTextures() {
 // Initialize probes from static bake data or sky estimate fallback
 // ============================================================================
 
-// T4.1 (D8): reset convergence ages — the partial-update scheduler's
-// ageScore term (min(age,30)/30 × 0.3) puts ALL probes at max urgency.
+// T4.1 (D8): reset convergence ages so the partial-update scheduler
+// prioritizes every probe for re-initialization after a field clear.
 void LumenDDGIPass::BoostProbePriority() {
-    // The scheduler's ageScore = min(frame - lastUpdate, 30)/30 × 0.3 —
-    // resetting lastUpdate to 0 puts every probe at max urgency.
+    // Resetting lastUpdate to 0 puts every probe at high age urgency.
     for (auto& ps : probe_states_) {
         ps.last_update_frame = 0;
     }
@@ -1366,10 +2568,18 @@ void LumenDDGIPass::ClearProbeField() {
     if (!device_ || !initialized_) return;
     const u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
     for (int f = 0; f < 3; f++) {
-        // Irradiance: 9 float3 coefficients per probe, flat float[3] layout.
+        if (depth_provenance_buffers_[f]!=handles::INVALID_RESOURCE) {
+            if (auto* p=device_->MapBuffer(depth_provenance_buffers_[f])) {
+                std::memset(p,0,u64(probeCount)*64u*8u*sizeof(u32));
+                device_->UnmapBuffer(depth_provenance_buffers_[f]);
+            }
+        }
+        // Irradiance: 9 vec4 coefficients per probe.  The shader/C++ buffer
+        // ABI uses a 16-byte stride per coefficient; clearing only float3
+        // leaves every fourth lane (and the tail of the allocation) stale.
         if (irradiance_buffers_[f] != rhi::handles::INVALID_RESOURCE) {
             if (float* irr = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]))) {
-                memset(irr, 0, static_cast<u64>(probeCount) * 9 * sizeof(float) * 3);
+                memset(irr, 0, static_cast<u64>(probeCount) * 9 * sizeof(math::v4));
                 device_->UnmapBuffer(irradiance_buffers_[f]);
             }
         }
@@ -1391,8 +2601,34 @@ void LumenDDGIPass::ClearProbeField() {
             }
         }
     }
+
+    // These single-buffered fields are part of the temporal probe state too.
+    // Keeping convergence/open-sky from the pre-card phase makes a late SC
+    // registration enter the settled injection path with stale visibility,
+    // selecting a different fixed point than a frame-0 registration.
+    if (confidence_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        if (float* conf = static_cast<float*>(device_->MapBuffer(confidence_buffer_))) {
+            const float initAge = (static_volume_ && static_volume_->IsLoaded()) ? 0.5f : 0.0f;
+            for (u32 p = 0; p < probeCount; ++p) {
+                conf[p * 4 + 0] = 0.0f;
+                conf[p * 4 + 1] = 0.0f;
+                conf[p * 4 + 2] = 1.0f;
+                conf[p * 4 + 3] = initAge;
+            }
+            device_->UnmapBuffer(confidence_buffer_);
+        }
+    }
+    if (opensky_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        if (float* sky = static_cast<float*>(device_->MapBuffer(opensky_buffer_))) {
+            std::memset(sky, 0, static_cast<u64>(probeCount) * 2u * sizeof(float));
+            device_->UnmapBuffer(opensky_buffer_);
+        }
+    }
+    for (auto& ps : probe_states_) ps = {};
+    probe_update_offset_ = 0;
+    depth_ring_copies_ = 0;
     PRIMAL_LOG_STREAM(Info, "Render")
-        << "[LumenDDGI] Probe field cleared (scene switch) — re-seeding from trace."
+        << "[LumenDDGI] Probe field cleared — re-seeding irradiance/depth/confidence/open-sky."
         << std::endl;
 }
 
@@ -1655,6 +2891,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
         tag + "LumenDDGI_Depth_" + std::to_string(outIdx), depth_buffers_[outIdx]);
     auto depthHistHandle = graph.ImportResource(
         tag + "LumenDDGI_DepthHist_" + std::to_string(histIdx), depth_buffers_[histIdx]);
+    RGResourceHandle provenanceOutHandle{},provenanceHistHandle{};
+    if (depth_provenance_enabled_) {
+        provenanceOutHandle=graph.ImportResource(tag+"DDGI_DepthProvenance_"+std::to_string(outIdx),depth_provenance_buffers_[outIdx]);
+        provenanceHistHandle=graph.ImportResource(tag+"DDGI_DepthProvenanceHist_"+std::to_string(histIdx),depth_provenance_buffers_[histIdx]);
+    }
 
     output.ddgi_irradiance = irradianceOutHandle;
     output.ddgi_irradiance_hist = irradianceHistHandle;
@@ -1666,7 +2907,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
         // Setup lambda: declare resource dependencies
         // ====================================================================
         [prev_frame_color, irradianceOutHandle, irradianceHistHandle,
-         depthOutHandle, depthHistHandle, sc_lighting_atlas, camera_data](
+         depthOutHandle, depthHistHandle, provenanceOutHandle, provenanceHistHandle, sc_lighting_atlas, camera_data](
             LumenDDGIData& data, RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling — outputs go to imported buffers
             // Read previous frame color (for lighting lookup during trace)
@@ -1690,6 +2931,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             builder.Read(irradianceHistHandle, ResourceState::ShaderResource);
             builder.Write(depthOutHandle, ResourceState::UnorderedAccess);
             builder.Read(depthHistHandle, ResourceState::ShaderResource);
+            if (provenanceOutHandle.IsValid()) {
+                builder.Write(provenanceOutHandle,ResourceState::UnorderedAccess);
+                builder.Read(provenanceHistHandle,ResourceState::ShaderResource);
+            }
         },
 
         // ====================================================================
@@ -1765,7 +3010,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // see remediation plan §执行日志 for the recorded rationale).
             {
                 const u32 kWarmupFrames = GIWarmupFrames();
-                if (kWarmupFrames > 0u && current_frame_index < kWarmupFrames) updateCount = 0;
+                if (kWarmupFrames > 0u && camera_data.gi_frame_index < kWarmupFrames) updateCount = 0;
             }
 
             // Resolve physical handles from render graph
@@ -2029,7 +3274,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // 成为封闭区的隐性泵浦（分类加权的供给端补充）。
                     vd.SkyColor = {sky * far_sky_scale_, sky * far_sky_scale_,
                                    sky * far_sky_scale_, 0.0f};
-                    vd.Albedo   = {alb, alb, alb, 0.0f};
+                    // Albedo.w is an unused DDGI VolumeData component across
+                    // all current consumers (Albedo.xyz remains the material
+                    // fallback).  Vulkan split shaders use it only as the
+                    // latched source-audit flag; other backends always see 0.
+                    vd.Albedo   = {alb, alb, alb, ray_source_audit_enabled_ ? 1.0f : 0.0f};
 
                     // Fill SDF cascade data — offline SDF or runtime GlobalSDF.
                     if (has_offline_sdf_) {
@@ -2051,6 +3300,23 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         float maxExt = std::max({offline_sdf_extent_.x, offline_sdf_extent_.y,
                                                  offline_sdf_extent_.z});
                         vd.SdfVoxelSizes[0] = {maxExt / (float)offline_sdf_resolution_, 0, 0, 0};
+                        if (device_->GetPlatform()==rhi::RHIPlatform::Vulkan)
+                            vd.SdfVoxelSizes[0].y=float(offline_hit_evidence_);
+                        // Diagnostic dual policy: keep scalar radiance/relocation
+                        // rules while only mode5 extras use measured G evidence.
+                        // RG cache R must match the incumbent scalar cache (audit
+                        // preflight); this flag is NOT a geometry-validity mark.
+                        if (device_->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+                            offline_hit_evidence_>0 && ray_sample_mode_==5 &&
+                            std::getenv("DDGI_DEPTH_ONLY_EVIDENCE")) {
+                            vd.SdfVoxelSizes[0].y=0.f;
+                            vd.SdfVoxelSizes[1].w=float(offline_hit_evidence_);
+                        }
+                        // Evidence G is a measured distance, unlike scalar R's
+                        // conservative stepping bounds. Never enable on R-only.
+                        if (device_->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+                            offline_hit_evidence_>0 && std::getenv("DDGI_EVIDENCE_NORMAL"))
+                            vd.SdfVoxelSizes[0].z=1.f;
                         vd.SdfResolutions[0] = offline_sdf_resolution_;
                         vd.SdfCascadeCount = 1;
                     } else {
@@ -2070,12 +3336,69 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     vd.ProbeRelocationShift[1] = relocation_shift_[1];
                     vd.ProbeRelocationShift[2] = relocation_shift_[2];
                     vd.RaySampleMode = (int)ray_sample_mode_;
+                    // Mode 5 needs split-SDF's appended depth-only distances.
+                    // Never consume uninitialized extras on the unified or
+                    // no-SDF fallback path; its radiance sampler is mode 0.
+                    if (vd.RaySampleMode == 5 &&
+                        (!sdfAvailable || sdf_trace_pipeline_ == handles::INVALID_PIPELINE ||
+                         finalize_pipeline_ == handles::INVALID_PIPELINE ||
+                         hit_distance_buffer_ == handles::INVALID_RESOURCE))
+                        vd.RaySampleMode = 0;
 
                     // Preserve Surface Cache params (set by SetSurfaceCacheResources)
                     // These are lost when vd{} zero-initializes. Must copy from members.
                     vd.SCLookupCount = sc_lookup_count_;
                     vd.SCAtlasSize = sc_atlas_size_;
 
+                    // Opt-in energy ablation: split-finalize analytic HIT
+                    // fallback drops only history bounce, not SC/screen/sky.
+                    if (device_->GetPlatform()==rhi::RHIPlatform::Vulkan) {
+                        // Opt-in split-finalize environment boundary ablation.
+                        // Spare SdfOrigins[0].w stores suppression (default0).
+                        // Does not alter visible sky, SC or analytic HIT Lo.
+                        if (const char* e=std::getenv("DDGI_LOWER_ENV_SCALE")) {
+                            char* end=nullptr;
+                            const float scale=std::strtof(e,&end);
+                            if (end!=e && *end=='\0' && std::isfinite(scale)) {
+                                vd.SdfOrigins[0].w=1.f-std::clamp(scale,0.f,1.f);
+                                static bool lowerEnvLogged=false;
+                                if (!lowerEnvLogged) {
+                                    lowerEnvLogged=true;
+                                    PRIMAL_LOG_STREAM(Info,"Render")
+                                        << "[DDGI_LOWER_ENV] scale=" << 1.f-vd.SdfOrigins[0].w
+                                        << " split-finalize only" << std::endl;
+                                }
+                            }
+                        }
+                        if (std::getenv("DDGI_ANALYTIC_NO_HISTORY")) vd.SkyColor.w=1.f;
+                        else if (std::getenv("DDGI_ANALYTIC_IRRADIANCE")) vd.SkyColor.w=2.f;
+                        // Matches the appended capacity allocated at init.
+                        if (analytic_audit_enabled_) vd.SdfVoxelSizes[0].w=1.f;
+                        if (material_projection_enabled_ && offline_hit_evidence_>0)
+                            vd.SdfExtents[0].w=1.f;
+                        // Candidate-only control word.  Scalar mode 0 is a
+                        // prerequisite, so this spare lane cannot collide
+                        // with the mode-5 depth-only evidence diagnostic.
+                        // 1 = rho, 2 = control, 3 = rho+diagnostic, 4 =
+                        // control+diagnostic, 5 = position, 6 = position+diagnostic,
+                        // 7 = SC-path first native material/alpha source audit only.
+                        // Diagnostic writes are latched
+                        // only for DDGI_DUMP=2 plus source-audit prerequisites.
+                        if (analytic_first_rho_requested_) {
+                            const u32 mode = analytic_sc_first_audit_ ? 7u :
+                                analytic_first_position_apply_
+                                    ? (analytic_first_rho_audit_ ? 6u : 5u)
+                                    : ((analytic_first_rho_apply_ ? 1u : 2u) +
+                                       (analytic_first_rho_audit_ ? 2u : 0u));
+                            vd.SdfExtents[1].w = static_cast<float>(mode);
+                        }
+                        // SdfExtents[2].w is an otherwise unused Vulkan DDGI
+                        // volume slot.  Set it only after all SDF cascade
+                        // fields and existing diagnostic slots are prepared;
+                        // the finalize shader uses it solely to publish the
+                        // optional query-source audit tail.
+                        vd.SdfExtents[2].w = query_source_audit_enabled_ ? 1.f : 0.f;
+                    }
                     *mapped = vd;
                     device_->UnmapBuffer(volume_cb_[frameIdx]);
 
@@ -2161,7 +3484,12 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     float dist2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
                     float distScore = 1.0f / (1.0f + dist2);
                     float varianceScore = std::min(probe_states_[i].max_depth_variance / maxExpectedVariance, 1.0f);
-                    float ageScore = std::min(float(current_frame_index - probe_states_[i].last_update_frame), 30.0f) / 30.0f;
+                    // Do not cap age at 30 frames: camera-distance and variance
+                    // terms otherwise starve the right-arcade probes for >200
+                    // frames. DDGI_AGE_CAP=30 restores the former scheduler.
+                    static const bool cappedAge = std::getenv("DDGI_AGE_CAP") != nullptr;
+                    float age = float(current_frame_index - probe_states_[i].last_update_frame);
+                    float ageScore = (cappedAge ? std::min(age, 30.0f) : age) / 30.0f;
 
                     priorities[i] = { i, distScore + varianceScore * 0.5f + ageScore * 0.3f };
                 }
@@ -2319,6 +3647,18 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                                 0, 0, irradianceBytes);
                 cmd->CopyBuffer(depth_buffers_[histIdx], depth_buffers_[outIdx],
                                 0, 0, depthBytes);
+                if (depth_provenance_enabled_) {
+                    ResourceBarrier barriers[2]{};
+                    barriers[0].resource=depth_provenance_buffers_[histIdx];
+                    barriers[0].beforeState=ResourceState::ShaderResource;barriers[0].afterState=ResourceState::CopySource;
+                    barriers[1].resource=depth_provenance_buffers_[outIdx];
+                    barriers[1].beforeState=ResourceState::UnorderedAccess;barriers[1].afterState=ResourceState::CopyDest;
+                    cmd->InsertBarrier(barriers,2);
+                    cmd->CopyBuffer(depth_provenance_buffers_[histIdx],depth_provenance_buffers_[outIdx],
+                        0,0,u64(probeCountTotal)*64u*8u*sizeof(u32));
+                    for (auto& b:barriers) std::swap(b.beforeState,b.afterState);
+                    cmd->InsertBarrier(barriers,2);
+                }
                 cmd->MemoryBarrier(
                     PipelineStage::Transfer, PipelineStage::ComputeShader,
                     AccessFlag::TransferWrite,
@@ -2339,6 +3679,33 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 {
                     const bool splitIsVk =
                         (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                    const bool useFirstSurface = splitIsVk && first_surface_enabled_ &&
+                        !first_zero_cross_enabled_ &&
+                        first_surface_sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
+                        first_surface_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT &&
+                        first_surface_nodes_buffer_ != handles::INVALID_RESOURCE &&
+                        first_surface_triangles_buffer_ != handles::INVALID_RESOURCE &&
+                        first_surface_audit_buffer_ != handles::INVALID_RESOURCE;
+                    const bool useFirstZeroCross = splitIsVk && first_zero_cross_enabled_ &&
+                        first_zero_cross_sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
+                        first_surface_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT &&
+                        first_surface_sdf_trace_ds_[frameIdx] != handles::INVALID_DESCRIPTOR_SET &&
+                        first_surface_nodes_buffer_ != handles::INVALID_RESOURCE &&
+                        first_surface_triangles_buffer_ != handles::INVALID_RESOURCE &&
+                        first_surface_audit_buffer_ != handles::INVALID_RESOURCE;
+                    const bool useFirstNativeNormal = splitIsVk && first_native_normal_enabled_ &&
+                        first_surface_enabled_ &&
+                        first_native_normal_sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
+                        first_native_normal_sdf_trace_layout_ != handles::INVALID_PIPELINE_LAYOUT &&
+                        first_native_normal_sdf_trace_ds_[frameIdx] != handles::INVALID_DESCRIPTOR_SET &&
+                        first_native_normal_positions_ != handles::INVALID_RESOURCE &&
+                        first_native_normal_elements_ != handles::INVALID_RESOURCE &&
+                        first_native_normal_instances_ != handles::INVALID_RESOURCE &&
+                        first_native_normal_materials_ != handles::INVALID_RESOURCE &&
+                        first_native_normal_texture_ != handles::INVALID_RESOURCE &&
+                        first_native_normal_sampler_ != handles::INVALID_SAMPLER &&
+                        first_native_normal_triangle_mapping_buffer_ != handles::INVALID_RESOURCE &&
+                        first_native_normal_audit_buffer_ != handles::INVALID_RESOURCE;
                     // T4.3: upload the detail slot table into this frame's
                     // UBO slot (656B; count=0 when the feature is off — the
                     // shader then skips refinement and writes zero normals).
@@ -2390,7 +3757,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // Metal keeps overlapping slots (UBO=1, hit_dist=2, list=3).
                     // T4.3: hit_normal + 4 detail textures + table UBO appended
                     // (Vulkan flat 6..11; Metal buffer 4/5 + texture 3..6).
-                    DescriptorData sdfTraceParams[] = {
+                    DescriptorData sdfTraceParams[24] = {
                         {0, DescriptorType::SampledImage,  sdfTextures[0]},
                         {1, DescriptorType::SampledImage,  sdfTextures[1]},
                         {2, DescriptorType::SampledImage,  sdfTextures[2]},
@@ -2406,15 +3773,72 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         // 2026-09-17 P0：重定位后有效起点（本 pass 写，finalize/gather 读）
                         {splitIsVk ? 12u : 6u, DescriptorType::StorageBuffer, relocated_origins_},
                     };
-                    UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfTraceParams, 13);
+                    if (useFirstNativeNormal || useFirstSurface || useFirstZeroCross) {
+                        // The immutable BVH upload is a host/transfer producer;
+                        // make that dependency explicit before the compute
+                        // shader reads the new storage buffers.  The ordinary
+                        // InsertBarrier path is texture-only on Vulkan.
+                        cmd->MemoryBarrier(
+                            PipelineStage::Host | PipelineStage::Transfer,
+                            PipelineStage::ComputeShader,
+                            AccessFlag::HostWrite | AccessFlag::TransferWrite,
+                            AccessFlag::ShaderRead);
+                        sdfTraceParams[13] = {13, DescriptorType::StorageBuffer,
+                                              first_surface_nodes_buffer_};
+                        sdfTraceParams[14] = {14, DescriptorType::StorageBuffer,
+                                              first_surface_triangles_buffer_};
+                        sdfTraceParams[15] = {15, DescriptorType::StorageBuffer,
+                                              first_surface_audit_buffer_};
+                        if (useFirstNativeNormal) {
+                            sdfTraceParams[16] = {16, DescriptorType::StorageBuffer,
+                                                  first_native_normal_positions_};
+                            sdfTraceParams[17] = {17, DescriptorType::StorageBuffer,
+                                                  first_native_normal_elements_};
+                            sdfTraceParams[18] = {18, DescriptorType::StorageBuffer,
+                                                  first_native_normal_instances_};
+                            sdfTraceParams[19] = {19, DescriptorType::StorageBuffer,
+                                                  first_native_normal_materials_};
+                            sdfTraceParams[20] = {20, DescriptorType::StorageBuffer,
+                                                  first_native_normal_triangle_mapping_buffer_};
+                            sdfTraceParams[21] = {21, DescriptorType::SampledImage,
+                                                  first_native_normal_texture_};
+                            sdfTraceParams[22] = {22, DescriptorType::Sampler,
+                                                  static_cast<ResourceHandle>(first_native_normal_sampler_)};
+                            sdfTraceParams[23] = {23, DescriptorType::StorageBuffer,
+                                                  first_native_normal_audit_buffer_};
+                            UpdateDescriptorSet(device_, first_native_normal_sdf_trace_ds_[frameIdx],
+                                                sdfTraceParams, 24);
+                        } else {
+                            UpdateDescriptorSet(device_, first_surface_sdf_trace_ds_[frameIdx],
+                                                sdfTraceParams, 16);
+                        }
+                    } else {
+                        UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx],
+                                            sdfTraceParams, 13);
+                    }
 
                     // barrier: 上一帧 irradiance/depth 写入对本帧 trace 可见
                     cmd->MemoryBarrier(
                         PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                         AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
-                    cmd->BindComputePipeline(sdf_trace_pipeline_);
-                    const DescriptorSetHandle sets[] = { sdf_trace_ds_[frameIdx] };
-                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, sdf_trace_layout_, 0, 1, sets, 0, nullptr);
+                    const PipelineHandle tracePipeline = useFirstNativeNormal
+                        ? first_native_normal_sdf_trace_pipeline_
+                        : (useFirstZeroCross ? first_zero_cross_sdf_trace_pipeline_
+                                             : (useFirstSurface ? first_surface_sdf_trace_pipeline_
+                                                                 : sdf_trace_pipeline_));
+                    const PipelineLayoutHandle traceLayout = useFirstNativeNormal
+                        ? first_native_normal_sdf_trace_layout_
+                        : (useFirstZeroCross ? first_surface_sdf_trace_layout_
+                                             : (useFirstSurface ? first_surface_sdf_trace_layout_
+                                                                 : sdf_trace_layout_));
+                    const DescriptorSetHandle traceSet = useFirstNativeNormal
+                        ? first_native_normal_sdf_trace_ds_[frameIdx]
+                        : ((useFirstZeroCross || useFirstSurface)
+                               ? first_surface_sdf_trace_ds_[frameIdx]
+                               : sdf_trace_ds_[frameIdx]);
+                    cmd->BindComputePipeline(tracePipeline);
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, traceLayout,
+                                            0, 1, &traceSet, 0, nullptr);
 
                     cmd->Dispatch(updateCount, 1, 1);
                 }
@@ -2422,9 +3846,18 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 // Barrier: end encoder for strict Apple Silicon synchronization.
                 // memoryBarrier() alone may not flush GPU L2 cache for heap-allocated
                 // StorageModeShared buffers. Ending the encoder guarantees visibility.
+                // Vulkan's InsertBarrier intentionally skips buffers, so the
+                // compute memory barrier is the real TraceSDF -> Finalize
+                // dependency for hit_distance, hit_normal and the optional
+                // ray-source tail. Finalize both reads and writes that SSBO.
+                const AccessFlag finalizeAccess =
+                    (analytic_audit_enabled_ || first_surface_enabled_ || first_zero_cross_enabled_ || first_native_normal_enabled_ ||
+                     analytic_first_rho_enabled_)
+                    ? (AccessFlag::ShaderRead | AccessFlag::ShaderWrite)
+                    : AccessFlag::ShaderRead;
                 cmd->MemoryBarrier(
                     PipelineStage::ComputeShader, PipelineStage::ComputeShader,
-                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                    AccessFlag::ShaderWrite, finalizeAccess);
 
                 // --- 1b: Finalize (buffer + texture2D, no texture3D) ---
                 {
@@ -2441,6 +3874,21 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                     const bool finIsVk =
                         (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                    const bool useAnalyticFirstRho = finIsVk &&
+                        analytic_first_rho_enabled_ &&
+                        analytic_first_rho_finalize_pipeline_ != handles::INVALID_PIPELINE &&
+                        analytic_first_rho_finalize_layout_ != handles::INVALID_PIPELINE_LAYOUT &&
+                        analytic_first_rho_finalize_ds_[frameIdx] != handles::INVALID_DESCRIPTOR_SET &&
+                        analytic_first_rho_nodes_buffer_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_triangles_buffer_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_mapping_buffer_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_audit_buffer_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_positions_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_elements_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_instances_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_materials_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_albedo_texture_ != handles::INVALID_RESOURCE &&
+                        analytic_first_rho_albedo_sampler_ != handles::INVALID_SAMPLER;
 
                     // Match each screen source to its own projection and depth.
                     if (finIsVk && finalize_vp_cb_[frameIdx] != handles::INVALID_RESOURCE) {
@@ -2462,7 +3910,49 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     }
 
                     // Flat bindings on Vulkan; Metal overlap.
-                    if (finIsVk) {
+                    if (finIsVk && useAnalyticFirstRho) {
+                        // Candidate-only host/transfer producer dependency.
+                        // Vulkan InsertBarrier intentionally does not certify
+                        // buffer contents; this explicit memory barrier is the
+                        // contract for the uploaded BVH/mapping and audit SSBO.
+                        cmd->MemoryBarrier(
+                            PipelineStage::Host | PipelineStage::Transfer,
+                            PipelineStage::ComputeShader,
+                            AccessFlag::HostWrite | AccessFlag::TransferWrite,
+                            AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+                        DescriptorData analyticParams[] = {
+                            {0,  DescriptorType::SampledImage,  lightingAtlasTex},
+                            {1,  DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
+                            {2,  DescriptorType::StorageBuffer, hit_distance_buffer_},
+                            {3,  DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                            {4,  DescriptorType::StorageBuffer, ray_data_buffer_},
+                            {5,  DescriptorType::StorageBuffer, sc_card_lookup_buffer_},
+                            {6,  DescriptorType::StorageBuffer, sc_card_data_buffer_},
+                            {7,  DescriptorType::UniformBuffer, finalize_vp_cb_[frameIdx]},
+                            {8,  DescriptorType::SampledImage,  prevColorTex},
+                            {9,  DescriptorType::SampledImage,  gbufferAlbedoTex},
+                            {10, DescriptorType::StorageBuffer, irradiance_buffers_[histIdx]},
+                            {11, DescriptorType::StorageBuffer, sc_grid_offsets_buffer_},
+                            {12, DescriptorType::StorageBuffer, sc_grid_cards_buffer_},
+                            {13, DescriptorType::SampledImage,  sc_depth_atlas_},
+                            {14, DescriptorType::StorageBuffer, hit_normal_buffer_},
+                            {15, DescriptorType::SampledImage, screenDepthTex != handles::INVALID_RESOURCE ? screenDepthTex : prevColorTex},
+                            {16, DescriptorType::SampledImage, radianceDepthTex != handles::INVALID_RESOURCE ? radianceDepthTex : prevColorTex},
+                            {17, DescriptorType::StorageBuffer, relocated_origins_},
+                            {18, DescriptorType::StorageBuffer, analytic_first_rho_nodes_buffer_},
+                            {19, DescriptorType::StorageBuffer, analytic_first_rho_triangles_buffer_},
+                            {20, DescriptorType::StorageBuffer, analytic_first_rho_positions_},
+                            {21, DescriptorType::StorageBuffer, analytic_first_rho_elements_},
+                            {22, DescriptorType::StorageBuffer, analytic_first_rho_instances_},
+                            {23, DescriptorType::StorageBuffer, analytic_first_rho_materials_},
+                            {24, DescriptorType::StorageBuffer, analytic_first_rho_mapping_buffer_},
+                            {25, DescriptorType::SampledImage,  analytic_first_rho_albedo_texture_},
+                            {26, DescriptorType::Sampler, static_cast<ResourceHandle>(analytic_first_rho_albedo_sampler_)},
+                            {27, DescriptorType::StorageBuffer, analytic_first_rho_audit_buffer_},
+                        };
+                        UpdateDescriptorSet(device_, analytic_first_rho_finalize_ds_[frameIdx],
+                                            analyticParams, 28);
+                    } else if (finIsVk) {
                         DescriptorData finalizeParams[] = {
                             {0, DescriptorType::SampledImage,  lightingAtlasTex},
                             {1, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
@@ -2506,9 +3996,15 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 16);
                     }
 
-                    cmd->BindComputePipeline(finalize_pipeline_);
-                    const DescriptorSetHandle sets[] = { finalize_ds_[frameIdx] };
-                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, sets, 0, nullptr);
+                    const PipelineHandle finalizePipeline = useAnalyticFirstRho
+                        ? analytic_first_rho_finalize_pipeline_ : finalize_pipeline_;
+                    const PipelineLayoutHandle finalizeLayout = useAnalyticFirstRho
+                        ? analytic_first_rho_finalize_layout_ : finalize_layout_;
+                    const DescriptorSetHandle finalizeSet = useAnalyticFirstRho
+                        ? analytic_first_rho_finalize_ds_[frameIdx] : finalize_ds_[frameIdx];
+                    cmd->BindComputePipeline(finalizePipeline);
+                    const DescriptorSetHandle sets[] = { finalizeSet };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalizeLayout, 0, 1, sets, 0, nullptr);
 
                     cmd->Dispatch(updateCount, 1, 1);
                     {
@@ -2644,6 +4140,16 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 };
                 UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 8);
 
+                const ResourceHandle producerSources[9] = {global_cb_[frameIdx], volume_cb_[frameIdx],
+                    ray_data_buffer_, irradiance_buffers_[histIdx], probe_update_list_buffers_[frameIdx],
+                    confidence_buffer_, opensky_buffer_, relocated_origins_, hit_normal_buffer_};
+                if (updateCount && DDGIShProducerAudit::Requested()) {
+                    if (!sh_producer_audit_) sh_producer_audit_ = std::make_unique<DDGIShProducerAudit>(device_);
+                    sh_producer_audit_->Before(cmd, current_frame_index, frameIdx, probeCountTotal,
+                        params_.rays_per_probe, updateCount, producerSources, irradiance_buffers_[outIdx],
+                        irradiance_pipeline_, irradiance_layout_, irradiance_ds_[frameIdx]);
+                }
+
                 cmd->BindComputePipeline(irradiance_pipeline_);
                 const DescriptorSetHandle sets[] = { irradiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, irradiance_layout_, 0, 1, sets, 0, nullptr);
@@ -2656,6 +4162,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         ? updateCount
                         : ((updateCount + 63) / 64);
                 cmd->Dispatch(irradianceGroups, 1, 1);
+                if (updateCount && sh_producer_audit_)
+                    sh_producer_audit_->After(cmd, frameIdx, updateCount, producerSources, irradiance_buffers_[outIdx]);
             }
             // barrier: irradiance 写完后才开始 depth update
             cmd->MemoryBarrier(
@@ -2671,8 +4179,12 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {3, DescriptorType::StorageBuffer, depth_buffers_[histIdx]},  // history
                     {4, DescriptorType::StorageBuffer, depth_buffers_[outIdx]},   // output
                     {5, DescriptorType::StorageBuffer, probe_update_list_buffers_[frameIdx]},
+                    {6, DescriptorType::StorageBuffer, hit_distance_buffer_},
+                    {7, DescriptorType::StorageBuffer, depth_provenance_buffers_[histIdx]},
+                    {8, DescriptorType::StorageBuffer, depth_provenance_buffers_[outIdx]},
                 };
-                UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams, 6);
+                UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams,
+                    device_->GetPlatform() == RHIPlatform::Vulkan ? (depth_provenance_enabled_?9u:7u) : 6u);
 
                 cmd->BindComputePipeline(depth_pipeline_);
                 const DescriptorSetHandle sets[] = { depth_ds_[frameIdx] };

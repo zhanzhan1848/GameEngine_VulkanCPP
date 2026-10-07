@@ -38,7 +38,7 @@ layout(set = 0, binding = 4, std430) readonly buffer ProbeSHBlock {
     vec4 data[];
 } probeSH;
 
-// ScreenProbeGlobalData UBO — 352 bytes, mirrors C++ struct. Declared inline.
+// ScreenProbeGlobalData UBO — mirrors C++ struct. Declared inline.
 layout(set = 0, binding = 5, std140) uniform GlobalBlock {
     mat4 view_projection;
     mat4 inv_view_projection;
@@ -50,6 +50,17 @@ layout(set = 0, binding = 5, std140) uniform GlobalBlock {
     vec4 sdf_extents[3];
     uvec4 sdf_resolutions;       // xyz=res0/1/2, w=cascadeCount
     vec4 surface_cache_params;   // x=atlasSize, y=cardCount, z=available, w=unused
+    vec4 ddgi_fb[2];             // offset 352
+    vec4 hzb_params;             // offset 384 (unused here)
+    vec4 cache_params;           // offset 400
+    vec4 diag_params;            // offset 416 (unused here)
+    vec4 hint_params;            // offset 432 (unused here)
+    vec4 sky_params;             // offset 448 (unused here)
+    vec4 wrc_fb[2];              // offset 464 (unused here)
+    vec4 repr_params;            // offset 496 (unused here)
+    // x = tier3 slot layout (P2): tiles carry up to 4 slots, probeIdx =
+    // tile*4 + slot; per-tap the best-matching active slot is used.
+    vec4 tier_params;            // offset 512
 } global;
 
 layout(set = 0, binding = 6, std430) readonly buffer ProbeNormalsBlock {
@@ -169,17 +180,35 @@ void screen_probe_gather() {
             continue;
         }
 
-        uint probeIdx = uint(npc.y) * gridW + uint(npc.x);
+        // P2 (tier3): the tap covers a tile that may hold up to 4 slots.
+        // Among active slots pick the one whose surface best matches the
+        // receiver (max world-plane agreement) — the placement-error patch
+        // the bilateral weights used to paper over. tier3 off → exactly one
+        // slot per tile, identical to the pre-plan indexing.
+        uint slotsPerTile = (global.tier_params.x > 0.5) ? 4u : 1u;
+        uint tileIdx = uint(npc.y) * gridW + uint(npc.x);
+        uint bestSlot = 0xFFFFFFFFu;
+        float bestGeomW = -1.0;
+        vec4 bestPos = vec4(0.0);
+        for (uint s = 0u; s < slotsPerTile; ++s) {
+            uint candIdx = tileIdx * slotsPerTile + s;
+            vec4 posData = probePositions.data[candIdx];
+            if (posData.w <= 0.0) continue;
+            vec3 surfaceDelta = posData.xyz - receiverPos;
+            float planeDistance = abs(dot(surfaceDelta, surfaceNormal));
+            float geometryWeight = exp(-0.5 * planeDistance * planeDistance / (planeSigma * planeSigma));
+            if (geometryWeight > bestGeomW) {
+                bestGeomW = geometryWeight;
+                bestSlot = candIdx;
+                bestPos = posData;
+            }
+        }
+        if (bestSlot == 0xFFFFFFFFu) continue;
+        if (bestGeomW < 1e-5) continue;   // every active slot lies on another surface
 
-        vec4 posData = probePositions.data[probeIdx];
-        if (posData.w <= 0.0) continue;
-
-        vec3 surfaceDelta = posData.xyz - receiverPos;
-        float planeDistance = abs(dot(surfaceDelta, surfaceNormal));
-        float geometryWeight = exp(-0.5 * planeDistance * planeDistance / (planeSigma * planeSigma));
-        // Underflow means this tap lies on a different surface; do not let
-        // confidence normalization resurrect an entirely rejected neighbour.
-        if (geometryWeight < 1e-5) continue;
+        uint probeIdx = bestSlot;
+        vec4 posData = bestPos;
+        float geometryWeight = bestGeomW;
 
         uint shBase = probeIdx * 4u;
         float sh0w = probeSH.data[shBase + 0u].w;

@@ -110,12 +110,15 @@ struct ScreenProbeGlobalData {
     math::v4   cache_params;           // offset 400: x=far_cache_start, y=importance, z=adaptive_thr, w=cascade
     // P1（sponza-gap-reaudit §4.1/4.2 逐阶段台账）: trace 诊断模式。
     // x = mode: 0=off, 1=分支统计, 2=HZB hit 去亮度惩罚（raw 对照）,
-    // 3=SC card 同亮度惩罚（两端一致对照）。yzw 保留。
+    // 3=SC card 同亮度惩罚（两端一致对照）。
+    // [E0-I R4 2026-09-21] 4 = fill-only（HZB/SC 分支置零，保留 far-cache/
+    // miss 天空链），5 = transport-only（far-cache/miss 置零，保留 HZB/SC）
+    // ——归因统计照记原始 radiance（Debug A/B/C，能量-排查 §5.5）。yzw 见下。
     math::v4   diag_params;            // offset 416
     // G2 A/B（2026-09-16）: x = 三线性 SDF 梯度 hint 开关（TraceSDF 消费，
     // 供 SC 朝向门的命中法线）。仅声明尾扩；未读取该字段的 kernel 其
     // std140 前缀布局稳定，无需同步改声明。
-    math::v4   hint_params;            // offset 432
+    math::v4   hint_params;            // offset 432; x=trilinear hint, y=floor audit samples, z=SDF step scale, w=Vulkan DDGI visibility A/B
     // GI 能量根治方案 Phase 1.3（R3）: far-cache / world-fallback 天空回退的
     // SkyColor 档位门（GIDebug().sky_color_intensity，与 DDGI volume 同一
     // 单一事实源）。同 hint_params 的尾扩惯例：未读取的 kernel 不改声明。
@@ -125,13 +128,24 @@ struct ScreenProbeGlobalData {
     // K 固定 64（WRCTypes.h kWRCDirsPerProbe，shader 侧同常量）。尾扩惯例：
     // 未读取该字段的 kernel / Metal 旧声明不受影响。
     math::v4   wrc_fb[2];              // offset 464
+    // SPGI probe-distribution plan（Docs/2026-09-21-spgi-probe-distribution-
+    // optimization-plan.md）尾扩：
+    //   repr_params (496): x=P0 代表像素开关, y=w_d, z=w_n, w=P1 normal 门开关
+    //   tier_params (512): x=tier3 槽位布局, y=T_n, z=lightVar 掩码开关, w=P4 分档 ray
+    //   tier_counts (528): x=radiance 容量（compact 槽上限）
+    //                      y=[E0-B 2026-09-21] 亮度惩罚 firefly 膝点
+    //                     （PRIMAL_SPGI_PENALTY_KNEE，默认 8.0；1.0=旧语义）
+    math::v4   repr_params;            // offset 496
+    math::v4   tier_params;            // offset 512
+    math::v4   tier_counts;            // offset 528
 };
 
-static_assert(sizeof(ScreenProbeGlobalData) == 496, "ScreenProbe shader constants must stay 496 bytes");
+static_assert(sizeof(ScreenProbeGlobalData) == 544, "ScreenProbe shader constants must stay 544 bytes");
 static_assert(offsetof(ScreenProbeGlobalData, ddgi_fb) == 352, "DDGI constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, hzb_params) == 384, "HZB constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, cache_params) == 400, "Cache constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, diag_params) == 416, "Diag constants offset mismatch");
+static_assert(offsetof(ScreenProbeGlobalData, hint_params) == 432, "SDF hint constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, sky_params) == 448, "Sky constants offset mismatch");
 static_assert(offsetof(ScreenProbeGlobalData, wrc_fb) == 464, "WRC constants offset mismatch");
 
@@ -169,6 +183,8 @@ static_assert(sizeof(RadianceCascadeParams) == 80, "RadianceCascade shader const
  *   2. AddPass(graph, ..., camera_data)            -- every frame
  *   3. Shutdown()                                   -- once
  */
+class SurfaceCachePass;
+
 class ScreenProbeGIPass {
 public:
     ScreenProbeGIPass() = default;
@@ -196,6 +212,11 @@ public:
     // 绕开 RG 瞬态资源的 CopySource 布局迁移（Vulkan 下拷贝回零）。
     rhi::ResourceHandle GetFilteredOutputTexture() const { return output_texture_filtered_; }
 
+    // Internal owner mirror: material ID, opaque proxy contract, owner ID,
+    // camera frame stamp. Unknown contracts keep the original fallback.
+    void SetFirstSurfaceInputs(SurfaceCachePass* cache,std::vector<math::u32v4> owners,rhi::ResourceHandle materials) {
+        first_cache_=cache;first_owners_=std::move(owners);first_materials_=materials;
+    }
     const ScreenProbeParams& GetParams() const { return params_; }
 
     // T5.1: HZB near-field input (nanite::HZBSystem R32F min-mip chain).
@@ -211,7 +232,12 @@ public:
     // surface_cache_max_cards），与旧注入点逐字节等价；活跃卡片数在
     // view.card_count，供后续消费者使用。
     void SetSurfaceCacheData(const SurfaceCacheView& view) {
+        surface_cache_albedo_atlas_ = view.albedo_atlas;
         surface_cache_lighting_atlas_ = view.lighting_atlas;
+        // [E0-B 2026-09-21] nodirect atlas（LightEval 另存的"直射剥离"副本）。
+        // 可缺省（INVALID → 绑定交换回退混合 atlas）。env
+        // PRIMAL_SPGI_SC_NODIRECT=0 回退混合（默认 1 = 分离开）。
+        surface_cache_lighting_nodirect_atlas_ = view.lighting_nodirect_atlas;
         surface_cache_depth_atlas_ = view.depth_atlas;
         surface_cache_card_data_buffer_ = view.card_data;
         surface_cache_card_lookup_buffer_ = view.card_lookup;
@@ -228,6 +254,9 @@ public:
     // import, which aliased the same physical texture under a second
     // identity (cross-identity RAW deps invisible to the scheduler).
     void SetExternalLightingRG(rendergraph::RGResourceHandle rg) { external_lighting_rg_ = rg; }
+    // [E0-B 2026-09-21] nodirect 副本的管线侧单 RG 身份（对齐上方 T1.1 C2
+    // 别名治理——SC 写与 SPGI 读必须同一身份，跨身份依赖对调度器不可见）。
+    void SetExternalNoDirectLightingRG(rendergraph::RGResourceHandle rg) { external_nodirect_rg_ = rg; }
 
     // --- T4.3 二批: per-mesh detail SDF slots (PRIMAL_DDGI_DETAIL_SDF=1) ---
     // Same contract as LumenDDGIPass::DetailSDFSlot (POD, 160 B, keep in
@@ -275,6 +304,8 @@ public:
     // X2/A3: 视图签名（推荐）—— 从 LumenDDGIPass::GetVolumeView() 直传。
     void SetDDGIFallbackData(const DDGIVolumeView& view) {
         ddgi_irradiance_buffer_ = view.irradiance;
+        ddgi_depth_buffer_ = view.depth;
+        ddgi_relocated_origins_ = view.relocated_origins;
         ddgi_fb_origin_ = view.origin;
         ddgi_fb_counts_ = view.counts;
         ddgi_fb_spacing_ = view.spacing;
@@ -343,6 +374,39 @@ public:
     rhi::ResourceHandle GetTraceStatsBuffer() const { return trace_stats_buffer_; }
     u32 GetGridWidth() const { return grid_width_; }
     u32 GetGridHeight() const { return grid_height_; }
+    // [F3-V3 2026-09-20] 逐射线诊断 getter（DDGI LumenDDGIPass::GetRayDataBuffer
+    // 先例）：finalize 后的原始逐射线 radiance（gridW*gridH*rays float4）与
+    // SDF hit 距离。测试壳经 SPONZA_SPGI_RAY_DUMP 触发 readback
+    // dump，服务能量不对称排查（branch 归因之外的逐射线数值）。
+    // P1（2026-09-21）：raw ray 缓冲已单缓冲化，frameIdx 仅保留 API 兼容。
+    rhi::ResourceHandle GetRayRadianceBuffer(u32 frameIdx) const {
+        (void)frameIdx;
+        return probe_radiance_buffer_;
+    }
+    rhi::ResourceHandle GetHitDistanceBuffer() const { return hit_distance_buffer_; }
+    // [E0-I 2026-09-21 决策仪表] SC 产出率漏斗 + 下行失败射线计数
+    //（8×u32，永远累加，Vulkan host-visible；语义见 finalize shader 声明）。
+    rhi::ResourceHandle GetFailStatsBuffer() const { return fail_stats_buffer_; }
+    // [P4 2026-09-21] SH2 重建误差统计（env PRIMAL_SPGI_SH2_CHECK=1 时分配；
+    // vec4/probe {Σ|Δ|lum, 样本数, active, 0}，CPU 端 per-probe 均值出分位数）。
+    rhi::ResourceHandle GetSH2CheckBuffer() const { return sh2_check_buffer_; }
+    // [②K-4 2026-09-21 显式 V(x,ω) 切片] 每探针天空可见性（vec4/probe：
+    // x=miss 占比=天空/回退，y=几何命中占比；Vulkan 常配）。
+    rhi::ResourceHandle GetProbeOpenSkyBuffer() const { return probe_opensky_buffer_; }
+
+    // --- SPGI probe-distribution plan（P2/P3/P4，tier3 = Vulkan pilot）---
+    // tier3 槽位布局是否生效（env PRIMAL_SPGI_TIER3，仅 Vulkan；Metal 旧链
+    // 无 compact/lightvar 通道，强制回退棋盘两档）。
+    bool Tier3Enabled() const { return tier3_enabled_; }
+    u32  SlotCount() const { return slot_count_; }
+    // host-visible 统计（compact 原子计数，测试壳在收敛帧读回）：
+    // [0]=活跃槽累计（每帧清零后的当帧值）, [1]=16-ray 槽, [2]=32-ray 槽,
+    // [3]=64-ray 槽（余量）。
+    rhi::ResourceHandle GetTierStatsBuffer() const { return compact_stats_buffer_; }
+    rhi::ResourceHandle GetLightVarStatsBuffer() const { return lightvar_stats_buffer_; }
+    bool LightVarEnabled() const { return light_var_enabled_; }
+    rhi::ResourceHandle GetSlotToCompactBuffer() const { return slot_to_compact_buffer_; }
+    u32  RadianceCapacity() const { return radiance_capacity_; }
 
 private:
     void CreateDescriptorSetLayouts();
@@ -457,10 +521,20 @@ private:
     rhi::ResourceHandle probe_normals_buffer_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // gridW * gridH * float4
-    rhi::ResourceHandle probe_radiance_buffer_[3]{
-        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
-    };  // gridW * gridH * raysPerProbe * float4
+    // [P1 2026-09-21 probe-repr-plan] raw ray radiance SINGLE buffer（原三缓冲）。
+    // 生命周期审计（计划 §P1）：唯一消费者是当帧 finalize（写）→ Average（读，
+    // 同一帧 RG 内，barrier :2524）；temporal/spatial 链读的是 SH 域的
+    // probe_temporal_radiance_[3]，历史原始射线无任何消费者——三缓冲中 2 个
+    // 槽是 in-flight 冗余。单缓冲节省 88.5MB（57,600 探针×48 射线×16B×2 槽）。
+    rhi::ResourceHandle probe_radiance_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // gridW * gridH * raysPerProbe * float4
     rhi::ResourceHandle hit_distance_buffer_{ rhi::handles::INVALID_RESOURCE };  // GPU-only intermediate (single buffer)
+    // [E0-I 2026-09-21] SC 漏斗 + 下行失败计数（8×u32，Vulkan readback）。
+    rhi::ResourceHandle fail_stats_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // [P4 2026-09-21] SH2 重建误差统计（env 门控分配）。
+    rhi::ResourceHandle sh2_check_buffer_{ rhi::handles::INVALID_RESOURCE };
+    // [②K-4 2026-09-21] 每探针 openSky 统计（Vulkan 常配）。
+    rhi::ResourceHandle probe_opensky_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle probe_avg_radiance_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };  // gridW * gridH * 4 * float4 (SH2: L0+L1 coefficients per probe)
@@ -519,19 +593,30 @@ private:
     rhi::ResourceHandle dummy_texture_2d_{ rhi::handles::INVALID_RESOURCE };
 
     // Surface Cache integration
+    rhi::ResourceHandle surface_cache_albedo_atlas_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_lighting_atlas_{ rhi::handles::INVALID_RESOURCE };
+    // [E0-B 2026-09-21] LightEval 另存的直射剥离副本（可缺省——上游未分配时
+    // INVALID，绑定交换回退混合 atlas）。
+    rhi::ResourceHandle surface_cache_lighting_nodirect_atlas_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_depth_atlas_{ rhi::handles::INVALID_RESOURCE };
     rendergraph::RGResourceHandle external_lighting_rg_{};   // T1.1 (C2)
+    rendergraph::RGResourceHandle external_nodirect_rg_{};   // [E0-B] nodirect 单身份
     rhi::ResourceHandle surface_cache_card_data_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_card_lookup_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_grid_offsets_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle surface_cache_grid_cards_buffer_{ rhi::handles::INVALID_RESOURCE };
     u32  surface_cache_atlas_size_ = 0;
+    SurfaceCachePass* first_cache_{};
+    std::vector<math::u32v4> first_owners_;
+    rhi::ResourceHandle first_owner_buffers_[3]{rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle first_materials_{rhi::handles::INVALID_RESOURCE};
     u32  surface_cache_card_count_ = 0;
     bool surface_cache_available_ = false;
 
     // DDGI probe fallback (T2.2)
     rhi::ResourceHandle ddgi_irradiance_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle ddgi_depth_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle ddgi_relocated_origins_{ rhi::handles::INVALID_RESOURCE };
     math::v3 ddgi_fb_origin_{ 0.0f };    math::v3 ddgi_fb_counts_{ 0.0f };
     float ddgi_fb_spacing_ = 0.0f;
     bool ddgi_fallback_available_ = false;
@@ -560,10 +645,38 @@ private:
     // A11: one-shot temporal reset flag (alpha forced to 1.0 for one pass)
     bool temporal_reset_pending_ = false;
 
-    // P1（reaudit §4.1/4.2）: finalize 分支统计缓冲（uvec4[4][17]，host-visible
+    // P1（reaudit §4.1/4.2）: finalize 分支统计缓冲（uvec4[7][17] +
+    // mode-6 的 vec4[36][4] 右廊射线样本，host-visible；
     // 便于读回；atomic 仅在 diag_params.x>0.5 时执行，默认路径零开销）。
     u32 trace_diag_mode_{ 0 };
     rhi::ResourceHandle trace_stats_buffer_{ rhi::handles::INVALID_RESOURCE };
+
+    // --- SPGI probe-distribution plan（P0-P4）状态 ---
+    bool tier3_enabled_{ false };      // PRIMAL_SPGI_TIER3（仅 Vulkan 生效）
+    bool light_var_enabled_{ false };  // PRIMAL_SPGI_LIGHTVAR_TOPK > 0 且 tier3
+    bool tier_rays_enabled_{ false };  // PRIMAL_SPGI_TIER_RAYS 且 tier3
+    u32  slot_count_{ 0 };             // tier3: tiles*4；否则 tiles
+    u32  radiance_capacity_{ 0 };      // radiance/hit 缓冲的探针容量（compact 上限）
+    rhi::PipelineHandle compact_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineHandle lightvar_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle compact_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::PipelineLayoutHandle lightvar_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle compact_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetLayoutHandle lightvar_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::DescriptorSetHandle compact_ds_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    rhi::DescriptorSetHandle lightvar_ds_{ rhi::handles::INVALID_DESCRIPTOR_SET };
+    rhi::ResourceHandle compact_constants_cb_{ rhi::handles::INVALID_RESOURCE };   // 16B
+    rhi::ResourceHandle lightvar_constants_cb_{ rhi::handles::INVALID_RESOURCE }; // 32B
+    // P2 compaction 映射（GPU 内部单缓冲；同队列跨帧天然串行）
+    rhi::ResourceHandle slot_to_compact_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle compact_list_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle compact_stats_buffer_{ rhi::handles::INVALID_RESOURCE };  // host-visible
+    // P3 lightvar 状态/掩码（持久）+ 活跃计数（自平衡，无需每帧清零）
+    rhi::ResourceHandle lightvar_state_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle lightvar_mask_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle lightvar_stats_buffer_{ rhi::handles::INVALID_RESOURCE }; // host-visible
+    // 32B 零缓冲：每帧 CopyBuffer 清零 compact_stats（GPU 序内，无 CPU/GPU 竞态）
+    rhi::ResourceHandle zero_buffer_{ rhi::handles::INVALID_RESOURCE };
 };
 
 } // namespace primal::graphics::lumen

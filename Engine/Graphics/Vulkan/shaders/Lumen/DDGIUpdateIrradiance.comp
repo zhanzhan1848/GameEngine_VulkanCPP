@@ -104,11 +104,16 @@ layout(set = 0, binding = 5) readonly buffer ProbeUpdateList {
 layout(set = 0, binding = 6) buffer ConfidenceBuffer {
     float probe_confidence[];
 };
-// GI 能量根治方案 Phase 3.1: 每探针 openSky 统计（逃逸射线占比，EMA 平滑）。
+// GI 根治 Phase 3.1 + 能量所有权 Phase 4a（openSky V2）: 每探针 openSky
+// 统计，vec2 = {escapeRatio, skyEnergyRatio}。
+//   x = escapeRatio——逃逸射线占比 EMA（原 float 语义，原样保留）；
+//   y = skyEnergyRatio——逃逸射线能量占总能量的比值 EMA（P3 拆分用：
+//       E = E_geo + classify·E_sky 的 sER 分量）。
 // gather 端（DDGIGIGather / SurfaceCacheLightEval）据此把 sky-dominant 探针
-// 对封闭像素的贡献按分类一致度衰减——露天能量不再隔墙三线性渗透（R7）。
+// 的**天空分量**按分类一致度衰减（V2）——露天探针携带的几何反弹不再被
+// 整探针压暗（审计 §2.5：旧整探针分类最多 ×0.15 属过度衰减）。
 layout(set = 0, binding = 7) buffer ProbeOpenSky {
-    float probe_opensky[];
+    vec2 probe_opensky[];
 };
 
 // ----------------------------------------------------------------------------
@@ -156,7 +161,10 @@ void ddgi_update_irradiance() {
 
     // Phase 3.1: 本帧逃逸射线计数（真·露天射线，w ≤ -1.5；步数耗尽的密闭
     // 爬行不计入——它不是可见天空）。
+    // Phase 4a: 同一分类面上累计能量占比（skyEnergyRatio 分子/分母）。
     uint escapeCount = 0u;
+    float skyEnergySum = 0.0;
+    float totalEnergySum = 0.0;
 
     for (uint r = 0u; r < volume.RaysPerProbe; r++) {
         uint rayIdx = rayOffset + r;
@@ -167,6 +175,8 @@ void ddgi_update_irradiance() {
             // 逃逸→沿用 Finalize 写入的 EvaluateSkyBase × SkyColor.xyz
             //（Phase 1.2：不再覆盖成硬编码常量）。
             ++escapeCount;
+            skyEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+            totalEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
         } else if (hitDist < 0.0) {
             // 步数耗尽：保留 Finalize 解析结果（SC 回退或黑），不再覆盖成天空
         } else {
@@ -176,6 +186,7 @@ void ddgi_update_irradiance() {
             // T3.4 (D4): irradiance bailing — see Metal twin.
             float bail = smoothstep(0.0, volume.SdfVoxelSizes[0].x * 2.0, hitDist);
             radiance = radiance * bail;
+            totalEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
         }
 
         // Same sampler the trace side used for this ray index — the projection
@@ -269,9 +280,17 @@ void ddgi_update_irradiance() {
     // Phase 3.1: openSky 统计写入——逃逸占比 EMA 平滑（射线随机抽样逐帧
     // 噪声大；α=0.35 ≈ τ3 帧收敛，与年轻探针 SH 的激进混合一致）。首次
     // 写入直接发布（EMA 从 0 起步会系统性低估露天探针）。
+    // Phase 4a: y 分量 = 天空能量占比（逃逸射线能量 / 全部射线能量，
+    // 亮度加权），同款 EMA + 首发规则；分母 0（全 miss）保持上一帧值。
     float curOpen = float(escapeCount) / float(volume.RaysPerProbe);
-    float prevOpen = probe_opensky[probeIdx];
-    probe_opensky[probeIdx] = (prevOpen <= 0.0 && curOpen > 0.0 && conv < 0.5)
-                                  ? curOpen
-                                  : mix(prevOpen, curOpen, 0.35);
+    vec2 prevOpen = probe_opensky[probeIdx];
+    float curSer = (totalEnergySum > 1e-6)
+        ? clamp(skyEnergySum / totalEnergySum, 0.0, 1.0)
+        : prevOpen.y;
+    bool firstPublish = (prevOpen.x <= 0.0 && curOpen > 0.0 && conv < 0.5);
+    float newOpen = firstPublish ? curOpen : mix(prevOpen.x, curOpen, 0.35);
+    float newSer = (totalEnergySum > 1e-6)
+        ? ((firstPublish ? curSer : mix(prevOpen.y, curSer, 0.35)))
+        : prevOpen.y;
+    probe_opensky[probeIdx] = vec2(newOpen, newSer);
 }

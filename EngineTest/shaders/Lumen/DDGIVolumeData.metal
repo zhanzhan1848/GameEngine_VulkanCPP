@@ -158,6 +158,8 @@ static float3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex)
 //   0 UNIFORM — legacy fixed spiral, bit-identical to ddgiRayDirection.
 //   1 JITTER  — golden-angle rotation per frame.
 //   2 COSINE  — 50% cosine lobe around the light + 50% uniform mixture.
+//   3 STRATIFIED — fixed golden-angle azimuth + stratified latitude.
+//   4 DEPTH_FILL — same directions/pdf as mode 0 (Vulkan-only depth diagnostic).
 // Returns float4(dir, pdf).
 // ============================================================================
 static float4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameIndex,
@@ -169,10 +171,13 @@ static float4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameInd
     float u = fract((float(rayIndex) + 0.5f) * INV_PHI);
     float v = fract((float(rayIndex) + 0.5f) * INV_PHI * INV_PHI);
 
-    if (mode != 0u) {
+    if (mode != 0u && mode != 3u && mode != 4u) {
         u = fract(u + float(frameIndex) * INV_PHI);
         v = fract(v + float(frameIndex) * INV_PHI * INV_PHI);
     }
+
+    if (mode == 3u)
+        v = (float(rayIndex) + 0.5f) / max(float(rayCount), 1.0f);
 
     if (mode == 2u) {
         float3 w = normalize(toLight);
@@ -202,7 +207,7 @@ static float4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameInd
         return float4(dir, pdf);
     }
 
-    // Modes 0 and 1: uniform on the sphere, pdf = 1/(4π).
+    // Modes 0, 1, 3 and 4: uniform on the sphere, pdf = 1/(4π).
     float theta = TWO_PI * u;
     float phi   = acos(clamp(1.0f - 2.0f * v, -1.0f, 1.0f));
     float sinPhi = sin(phi);

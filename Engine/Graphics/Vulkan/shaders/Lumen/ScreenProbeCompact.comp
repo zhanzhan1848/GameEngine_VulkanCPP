@@ -1,0 +1,87 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — active-slot compaction (P2, tier3 only).
+//
+// Runs after Place. Scans the tile*4 slot arrays and packs active slots into
+// a dense list so the trace chain dispatches (and stores radiance for) only
+// live probes instead of the full slot grid:
+//   slotToCompact[slot]  = dense ray id (probe index into radiance/hit
+//                          arrays), 0xFFFFFFFF when inactive / over capacity
+//   compactList[flat]    = slot index (inverse map consumed by the trace
+//                          kernels: flat = global_id / 64)
+//   compactStats[0]     += 1 per packed slot (monotonic; host-visible for
+//                          diagnostics — kernels never read it)
+//   compactStats[1..2]  += 1 per packed slot of ray tier 16/32 (P4
+//                          activation-distribution statistics; 64-ray slots
+//                          are the remainder)
+//
+// Slots beyond the radiance capacity (PRIMAL_SPGI_TIER3_CAP) are dropped:
+// slotToCompact stays invalid so Average never reads a radiance id that was
+// never written, and stale compactList entries from a previous frame die on
+// the trace kernels' posData.w <= 0 early-out.
+//
+// Flat descriptor bindings:
+//   binding 0 = SSBO ro  probePositions (slots)
+//   binding 1 = SSBO ro  probeNormals   (w = slot ray tier under P4)
+//   binding 2 = SSBO rw  slotToCompact (slots, u32)
+//   binding 3 = SSBO rw  compactList (capacity, u32)
+//   binding 4 = SSBO rw  compactStats (u32 x8)
+//   binding 5 = UBO      ScreenProbeGlobalData (prefix — counts in tail v4)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer ProbePositionsBlock {
+    vec4 data[];
+} probePositions;
+
+layout(set = 0, binding = 1, std430) readonly buffer ProbeNormalsBlock {
+    vec4 data[];
+} probeNormals;
+
+layout(set = 0, binding = 2, std430) buffer SlotToCompactBlock {
+    uint data[];
+} slotToCompact;
+
+layout(set = 0, binding = 3, std430) buffer CompactListBlock {
+    uint data[];
+} compactList;
+
+layout(set = 0, binding = 4, std430) buffer CompactStatsBlock {
+    uint data[];
+} compactStats;
+
+// Dedicated 16B constants (own CB, not the shared ScreenProbeGlobalData):
+// x = total slot count, y = radiance capacity in slots.
+layout(set = 0, binding = 5, std140) uniform CompactConstantsBlock {
+    uvec4 constants;
+} compactConstants;
+
+void screen_probe_compact() {
+    uint global_id = gl_GlobalInvocationID.x;
+    uint totalSlots = compactConstants.constants.x;
+    if (global_id >= totalSlots) return;
+
+    vec4 pos = probePositions.data[global_id];
+    if (pos.w <= 0.0) {
+        slotToCompact.data[global_id] = 0xFFFFFFFFu;
+        return;
+    }
+
+    uint capacity = compactConstants.constants.y;
+    uint denseId = atomicAdd(compactStats.data[0], 1u);
+    if (denseId >= capacity) {
+        slotToCompact.data[global_id] = 0xFFFFFFFFu;
+        return;
+    }
+
+    slotToCompact.data[global_id] = denseId;
+    compactList.data[denseId] = global_id;
+
+    // P4 activation distribution: normals.w = slot ray tier (16 coarse /
+    // 32 quadrant under PRIMAL_SPGI_TIER_RAYS, 64 when off).
+    float tier = probeNormals.data[global_id].w;
+    if (tier <= 16.5)      atomicAdd(compactStats.data[1], 1u);
+    else if (tier <= 32.5) atomicAdd(compactStats.data[2], 1u);
+    // 64-ray slots: remainder = stats[0] - stats[1] - stats[2]
+}

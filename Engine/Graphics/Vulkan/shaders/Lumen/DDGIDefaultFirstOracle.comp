@@ -1,0 +1,519 @@
+#version 450 core
+
+// Default-off, read-only DDGI first-triangle oracle.
+//
+// This pass is deliberately separate from TraceSDF/Finalize.  It consumes the
+// completed DDGI_RAY_SOURCE_AUDIT tail, the same-frame update list, and the
+// existing first-surface BVH, then writes only a bounded diagnostic buffer.
+// It does not write hit distance, hit normal, radiance, relocation, or any
+// production DDGI resource.  The host must dispatch this pass only for an
+// explicit diagnostic opt-in after the source-tail producer has completed.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// The shader-side cap is an additional fail-closed bound.  The host must
+// allocate exactly enough records for updateCount * RaysPerProbe and reject a
+// capture whose full update list does not fit this bound.
+const uint DDGI_FIRST_ORACLE_MAX_RAYS = 32768u;
+const uint DDGI_FIRST_ORACLE_RECORD_STRIDE = 12u;
+const float DDGI_FIRST_ORACLE_EPS = 2.0e-5;
+
+// Report status codes.  A non-accepted status is an audit category and never a
+// permission to replace production distance, normal, sky, or radiance.
+const uint DDGI_FIRST_ORACLE_UNKNOWN = 0u;
+const uint DDGI_FIRST_ORACLE_ACCEPTED = 1u;
+const uint DDGI_FIRST_ORACLE_SEGMENT_MISS = 2u;
+const uint DDGI_FIRST_ORACLE_ENDPOINT = 3u;
+const uint DDGI_FIRST_ORACLE_OVERFLOW = 4u;
+const uint DDGI_FIRST_ORACLE_TRANSMIT = 5u;
+const uint DDGI_FIRST_ORACLE_RESIDUAL = 6u;
+
+// Reason bits are carried as uint bit patterns in output record 8.
+const uint DDGI_FIRST_ORACLE_REASON_SOURCE = 1u << 0u;
+const uint DDGI_FIRST_ORACLE_REASON_CAPACITY = 1u << 1u;
+const uint DDGI_FIRST_ORACLE_REASON_SEGMENT = 1u << 2u;
+const uint DDGI_FIRST_ORACLE_REASON_ENDPOINT = 1u << 3u;
+const uint DDGI_FIRST_ORACLE_REASON_OVERFLOW = 1u << 4u;
+const uint DDGI_FIRST_ORACLE_REASON_TRANSMIT = 1u << 5u;
+const uint DDGI_FIRST_ORACLE_REASON_RESIDUAL = 1u << 6u;
+
+// Source validation bits.  The source tail stores four interleaved vec4
+// records at 5N + 4 * dense_update_slot_ray: trace origin, trace direction,
+// Finalize origin, Finalize direction. Origin.w is frame/probe stamp bits;
+// direction.w is rayId+1 as the producer writes it.
+const uint DDGI_FIRST_ORACLE_SRC_TRACE_STAMP = 1u << 0u;
+const uint DDGI_FIRST_ORACLE_SRC_FINAL_STAMP = 1u << 1u;
+const uint DDGI_FIRST_ORACLE_SRC_TRACE_RAY = 1u << 2u;
+const uint DDGI_FIRST_ORACLE_SRC_FINAL_RAY = 1u << 3u;
+const uint DDGI_FIRST_ORACLE_SRC_FINITE = 1u << 4u;
+const uint DDGI_FIRST_ORACLE_SRC_UNIT = 1u << 5u;
+const uint DDGI_FIRST_ORACLE_SRC_MATCH = 1u << 6u;
+const uint DDGI_FIRST_ORACLE_SRC_ALL =
+    DDGI_FIRST_ORACLE_SRC_TRACE_STAMP |
+    DDGI_FIRST_ORACLE_SRC_FINAL_STAMP |
+    DDGI_FIRST_ORACLE_SRC_TRACE_RAY |
+    DDGI_FIRST_ORACLE_SRC_FINAL_RAY |
+    DDGI_FIRST_ORACLE_SRC_FINITE |
+    DDGI_FIRST_ORACLE_SRC_UNIT |
+    DDGI_FIRST_ORACLE_SRC_MATCH;
+
+// This declaration matches the runtime DDGIVolumeData block.  Keeping the
+// complete block avoids changing offsets when the oracle is bound beside the
+// existing trace resources.
+layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;
+    float ProbeSpacing;
+    float _pad_before_counts_0;
+    float _pad_before_counts_1;
+    float _pad_before_counts_2;
+    uvec4 ProbeCounts;
+    uint  RaysPerProbe;
+    uint  ProbeCountTotal;
+    float IrradianceBlurSigma;
+    float DepthBlurSigma;
+    float DeltaTime;
+    uint  FrameIndex;
+    float RayMaxDistance;
+    float ProbeHysteresis;
+    float TemporalAlpha;
+    uint  ProbeUpdateCount;
+    uint  SCLookupCount;
+    uint  SCAtlasSize;
+    int   ProbeRelocationShiftX;
+    int   ProbeRelocationShiftY;
+    int   ProbeRelocationShiftZ;
+    int   RaySampleMode;
+    vec4  SdfOrigins[3];
+    vec4  SdfVoxelSizes[3];
+    vec4  SdfExtents[3];
+    uvec4 SdfResolutionsAndCount;
+    vec4  LightDirection;
+    vec4  LightColor;
+    vec4  SkyColor;
+    vec4  Albedo;
+} volume;
+
+layout(set = 0, binding = 5, std430) readonly buffer ProbeUpdateBuf {
+    uint probe_update_list[];
+} pul;
+
+// This is the completed DDGI_RAY_SOURCE_AUDIT buffer from TraceSDF/Finalize.
+// The oracle reads only the [5N,9N) source tail and never interprets the
+// incumbent normal or analytic records as a source fallback.
+layout(set = 0, binding = 6, std430) readonly buffer HitNormalBuf {
+    vec4 hit_normal[];
+} hnb;
+
+// Existing native first-surface BVH.  The node/triangle records and traversal
+// semantics are shared with DDGITraceSDF through DDGIFirstSurface.glsl.
+layout(set = 0, binding = 13, std430) readonly buffer FirstSurfaceNodeBuf {
+    uvec4 node_words[];
+} first_surface_nodes;
+layout(set = 0, binding = 14, std430) readonly buffer FirstSurfaceTriangleBuf {
+    vec4 triangle_words[];
+} first_surface_triangles;
+
+// Twelve vec4 records per dense update-slot/ray.  This is a new diagnostic
+// destination; binding 15 is not the production hit-normal or radiance buffer
+// in this standalone pipeline.
+//
+//   0 trace origin.xyz + raw frame/probe stamp bits
+//   1 trace direction.xyz + raw ray+1 value
+//   2 Finalize origin.xyz + raw frame/probe stamp bits
+//   3 Finalize direction.xyz + raw ray+1 value
+//   4 uint bits: dense slot, absolute probe, ray, expected stamp
+//   5 first point.xyz + first t
+//   6 first bary.xyz + raw BVH status code
+//   7 first logical triangle, mesh id, raw material flags, residual
+//   8 uint bits: oracle status, reason bits, source mask, runtime triangle
+//   9 uint bits: query count, update count, rays/probe, frame
+//  10 barycentric reconstructed point.xyz + residual
+//  11 traceOrigin-finalizeOrigin.xyz + source mask bits
+layout(set = 0, binding = 15, std430) writeonly buffer FirstOracleOutputBuf {
+    vec4 records[];
+} oracle_output;
+
+#include "ShaderLib/DDGIFirstSurface.glsl"
+
+struct DDGIFirstOracleHit {
+    uint status;
+    float t;
+    float triangle;
+    float mesh;
+    uint flags;
+    float residual;
+    vec3 bary;
+    vec3 point;
+    vec3 reconstructed;
+    uint runtime_triangle;
+};
+
+DDGIFirstOracleHit ddgiFirstOracleClear() {
+    DDGIFirstOracleHit result;
+    result.status = DDGI_FIRST_ORACLE_UNKNOWN;
+    result.t = -1.0;
+    result.triangle = -1.0;
+    result.mesh = -1.0;
+    result.flags = 0u;
+    result.residual = 0.0;
+    result.bary = vec3(0.0);
+    result.point = vec3(0.0);
+    result.reconstructed = vec3(0.0);
+    result.runtime_triangle = 0xffffffffu;
+    return result;
+}
+
+// Same bounded stack traversal and Möller-Trumbore arithmetic as the existing
+// first-surface helper, with the runtime triangle index and e2.w mesh payload
+// retained for the oracle record.  The existing helper cannot return mesh, so
+// this local read-only replay avoids a second unbounded scan by triangle ID.
+DDGIFirstOracleHit ddgiFirstOracleTrace(vec3 origin, vec3 direction,
+                                        float tMin, float tMax) {
+    DDGIFirstOracleHit result = ddgiFirstOracleClear();
+    const uint node_word_count = first_surface_nodes.node_words.length();
+    const uint triangle_word_count = first_surface_triangles.triangle_words.length();
+    if (node_word_count == 0u || triangle_word_count == 0u ||
+        (node_word_count % 3u) != 0u || (triangle_word_count % 3u) != 0u ||
+        !ddgiFirstFiniteVec3(origin) || !ddgiFirstFiniteVec3(direction) ||
+        !ddgiFirstFinite(tMin) || !ddgiFirstFinite(tMax) ||
+        tMin < 0.0 || tMax <= tMin ||
+        abs(dot(direction, direction) - 1.0) > DDGI_FIRST_ORACLE_EPS) {
+        return result;
+    }
+
+    const uint node_count = node_word_count / 3u;
+    const uint triangle_count = triangle_word_count / 3u;
+    if (node_count == 0u || triangle_count == 0u) return result;
+
+    uint stack[64];
+    uint stack_size = 1u;
+    uint visited = 0u;
+    stack[0] = 0u;
+    float best_t = tMax;
+    uint best_runtime_triangle = 0xffffffffu;
+    float best_triangle = 0.0;
+    float best_mesh = -1.0;
+    uint best_flags = 0u;
+    vec3 best_bary = vec3(0.0);
+
+    while (stack_size > 0u) {
+        if (stack_size > 64u || visited >= node_count) {
+            result.status = DDGI_FIRST_ORACLE_OVERFLOW;
+            return result;
+        }
+        const uint node_index = stack[--stack_size];
+        if (node_index >= node_count) {
+            result.status = DDGI_FIRST_ORACLE_OVERFLOW;
+            return result;
+        }
+        DDGIFirstSurfaceNode node = ddgiFirstLoadNode(node_index);
+        if (!ddgiFirstFiniteVec3(node.lo) || !ddgiFirstFiniteVec3(node.hi) ||
+            any(greaterThan(node.lo, node.hi))) {
+            result.status = DDGI_FIRST_ORACLE_UNKNOWN;
+            return result;
+        }
+        ++visited;
+        float node_near = 0.0;
+        if (!ddgiFirstRayBox(origin, direction, node, tMin,
+                             best_t + DDGI_FIRST_ORACLE_EPS, node_near)) {
+            continue;
+        }
+
+        if (node.links.w > 0u) {
+            if (node.links.z >= triangle_count ||
+                node.links.w > triangle_count - node.links.z) {
+                result.status = DDGI_FIRST_ORACLE_OVERFLOW;
+                return result;
+            }
+            for (uint i = 0u; i < node.links.w; ++i) {
+                const uint runtime_triangle = node.links.z + i;
+                DDGIFirstSurfaceTriangle tri =
+                    ddgiFirstLoadTriangle(runtime_triangle);
+                if (!ddgiFirstFiniteVec3(tri.a.xyz) ||
+                    !ddgiFirstFiniteVec3(tri.e1.xyz) ||
+                    !ddgiFirstFiniteVec3(tri.e2.xyz) ||
+                    !ddgiFirstFinite(tri.a.w) ||
+                    !ddgiFirstFinite(tri.e2.w)) {
+                    result.status = DDGI_FIRST_ORACLE_UNKNOWN;
+                    return result;
+                }
+                vec3 p = cross(direction, tri.e2.xyz);
+                float det = dot(tri.e1.xyz, p);
+                if (!ddgiFirstFinite(det) || abs(det) <= 1.0e-12) continue;
+                vec3 delta = origin - tri.a.xyz;
+                float u = dot(delta, p) / det;
+                vec3 q = cross(delta, tri.e1.xyz);
+                float v = dot(direction, q) / det;
+                float t = dot(tri.e2.xyz, q) / det;
+                if (!ddgiFirstFinite(u) || !ddgiFirstFinite(v) ||
+                    !ddgiFirstFinite(t)) {
+                    result.status = DDGI_FIRST_ORACLE_UNKNOWN;
+                    return result;
+                }
+                if (u < 0.0 || v < 0.0 || u + v > 1.0 ||
+                    t < tMin - DDGI_FIRST_ORACLE_EPS ||
+                    t > best_t + DDGI_FIRST_ORACLE_EPS) continue;
+                const float triangle_id = tri.a.w;
+                if (t < best_t ||
+                    (t == best_t &&
+                     (best_runtime_triangle == 0xffffffffu ||
+                      triangle_id < best_triangle))) {
+                    best_t = t;
+                    best_runtime_triangle = runtime_triangle;
+                    best_triangle = triangle_id;
+                    best_mesh = tri.e2.w;
+                    best_flags = floatBitsToUint(tri.e1.w);
+                    best_bary = vec3(1.0 - u - v, u, v);
+                }
+            }
+        } else {
+            const uint left = node.links.x;
+            const uint right = node.links.y;
+            if (left >= node_count || right >= node_count) {
+                result.status = DDGI_FIRST_ORACLE_OVERFLOW;
+                return result;
+            }
+            DDGIFirstSurfaceNode left_node = ddgiFirstLoadNode(left);
+            DDGIFirstSurfaceNode right_node = ddgiFirstLoadNode(right);
+            if (!ddgiFirstFiniteVec3(left_node.lo) ||
+                !ddgiFirstFiniteVec3(left_node.hi) ||
+                !ddgiFirstFiniteVec3(right_node.lo) ||
+                !ddgiFirstFiniteVec3(right_node.hi) ||
+                any(greaterThan(left_node.lo, left_node.hi)) ||
+                any(greaterThan(right_node.lo, right_node.hi))) {
+                result.status = DDGI_FIRST_ORACLE_UNKNOWN;
+                return result;
+            }
+            float left_near = 0.0;
+            float right_near = 0.0;
+            const bool hit_left = ddgiFirstRayBox(origin, direction, left_node,
+                                                  tMin, best_t + DDGI_FIRST_ORACLE_EPS,
+                                                  left_near);
+            const bool hit_right = ddgiFirstRayBox(origin, direction, right_node,
+                                                   tMin, best_t + DDGI_FIRST_ORACLE_EPS,
+                                                   right_near);
+            const uint needed = (hit_left ? 1u : 0u) +
+                                (hit_right ? 1u : 0u);
+            if (stack_size + needed > 64u) {
+                result.status = DDGI_FIRST_ORACLE_OVERFLOW;
+                return result;
+            }
+            if (hit_left && hit_right) {
+                if (left_near <= right_near) {
+                    stack[stack_size++] = right;
+                    stack[stack_size++] = left;
+                } else {
+                    stack[stack_size++] = left;
+                    stack[stack_size++] = right;
+                }
+            } else if (hit_left) {
+                stack[stack_size++] = left;
+            } else if (hit_right) {
+                stack[stack_size++] = right;
+            }
+        }
+    }
+
+    if (best_runtime_triangle == 0xffffffffu || !ddgiFirstFinite(best_t)) {
+        result.status = DDGI_FIRST_ORACLE_SEGMENT_MISS;
+        return result;
+    }
+
+    DDGIFirstSurfaceTriangle best = ddgiFirstLoadTriangle(best_runtime_triangle);
+    result.t = best_t;
+    result.triangle = best_triangle;
+    result.mesh = best_mesh;
+    result.flags = best_flags;
+    result.bary = best_bary;
+    result.point = origin + direction * best_t;
+    result.reconstructed = best.a.xyz + best_bary.y * best.e1.xyz +
+                           best_bary.z * best.e2.xyz;
+    result.runtime_triangle = best_runtime_triangle;
+    if (best_t <= tMin + DDGI_FIRST_ORACLE_EPS ||
+        best_t >= tMax - DDGI_FIRST_ORACLE_EPS) {
+        result.status = DDGI_FIRST_ORACLE_ENDPOINT;
+        return result;
+    }
+
+    vec3 absolute_terms = abs(best.a.xyz) +
+                          abs(best_bary.y * best.e1.xyz) +
+                          abs(best_bary.z * best.e2.xyz) +
+                          abs(origin) + abs(direction * best_t);
+    float roundoff_budget = 4.0 * 1.1920928955078125e-7 *
+                            length(absolute_terms);
+    float residual = length(result.reconstructed - result.point) +
+                     roundoff_budget;
+    if (!ddgiFirstFinite(residual)) {
+        result.status = DDGI_FIRST_ORACLE_UNKNOWN;
+        return result;
+    }
+    result.residual = residual;
+    result.status = residual > DDGI_FIRST_ORACLE_EPS
+        ? DDGI_FIRST_ORACLE_RESIDUAL : DDGI_FIRST_ORACLE_ACCEPTED;
+    return result;
+}
+
+void ddgiFirstOracleClearRecords(uint base) {
+    for (uint i = 0u; i < DDGI_FIRST_ORACLE_RECORD_STRIDE; ++i)
+        oracle_output.records[base + i] = vec4(0.0);
+}
+
+void main() {
+    uint query_index = gl_GlobalInvocationID.x;
+    uint output_count = oracle_output.records.length();
+    uint base = query_index * DDGI_FIRST_ORACLE_RECORD_STRIDE;
+    if (query_index >= DDGI_FIRST_ORACLE_MAX_RAYS ||
+        base > output_count ||
+        DDGI_FIRST_ORACLE_RECORD_STRIDE > output_count - base) return;
+    ddgiFirstOracleClearRecords(base);
+
+    uint status = DDGI_FIRST_ORACLE_UNKNOWN;
+    uint reason = 0u;
+    uint source_mask = 0u;
+    uint runtime_triangle = 0xffffffffu;
+    vec4 trace_origin = vec4(0.0);
+    vec4 trace_direction = vec4(0.0);
+    vec4 finalize_origin = vec4(0.0);
+    vec4 finalize_direction = vec4(0.0);
+
+    if (volume.RaysPerProbe == 0u || volume.ProbeCountTotal == 0u ||
+        volume.ProbeUpdateCount == 0u ||
+        volume.ProbeCountTotal > 0xffffffffu / volume.RaysPerProbe) {
+        reason |= DDGI_FIRST_ORACLE_REASON_CAPACITY;
+        oracle_output.records[base + 8u] = vec4(
+            uintBitsToFloat(status), uintBitsToFloat(reason),
+            uintBitsToFloat(source_mask), uintBitsToFloat(runtime_triangle));
+        return;
+    }
+
+    uint full_ray_capacity = volume.ProbeCountTotal * volume.RaysPerProbe;
+    if (volume.ProbeUpdateCount >
+        DDGI_FIRST_ORACLE_MAX_RAYS / volume.RaysPerProbe) {
+        reason |= DDGI_FIRST_ORACLE_REASON_CAPACITY;
+        oracle_output.records[base + 8u] = vec4(
+            uintBitsToFloat(status), uintBitsToFloat(reason),
+            uintBitsToFloat(source_mask), uintBitsToFloat(runtime_triangle));
+        return;
+    }
+    uint query_count = volume.ProbeUpdateCount * volume.RaysPerProbe;
+    if (query_index >= query_count) return;
+
+    uint slot = query_index / volume.RaysPerProbe;
+    uint ray = query_index % volume.RaysPerProbe;
+    uint probe = 0xffffffffu;
+    if (slot >= pul.probe_update_list.length()) {
+        reason |= DDGI_FIRST_ORACLE_REASON_CAPACITY;
+    } else {
+        probe = pul.probe_update_list[slot];
+    }
+
+    uint expected_stamp = 0xffffffffu;
+    if (probe < volume.ProbeCountTotal && probe < 65535u) {
+        expected_stamp = ((volume.FrameIndex & 0xffffu) << 16u) |
+                         ((probe + 1u) & 0xffffu);
+    } else {
+        reason |= DDGI_FIRST_ORACLE_REASON_SOURCE;
+    }
+
+    // Explicit identity echo: all fields are uint bit patterns so the host
+    // can reject a reordered or rounded update list without guessing.
+    oracle_output.records[base + 4u] = vec4(
+        uintBitsToFloat(slot), uintBitsToFloat(probe), uintBitsToFloat(ray),
+        uintBitsToFloat(expected_stamp));
+    oracle_output.records[base + 9u] = vec4(
+        uintBitsToFloat(query_count), uintBitsToFloat(volume.ProbeUpdateCount),
+        uintBitsToFloat(volume.RaysPerProbe), uintBitsToFloat(volume.FrameIndex));
+
+    if (full_ray_capacity > 0xffffffffu / 9u ||
+        full_ray_capacity > (0xffffffffu - 5u * full_ray_capacity) / 4u) {
+        reason |= DDGI_FIRST_ORACLE_REASON_CAPACITY;
+    } else {
+        uint tail_base = 5u * full_ray_capacity + 4u * query_index;
+        uint required_tail_records = 9u * full_ray_capacity;
+        if (required_tail_records > hnb.hit_normal.length() ||
+            tail_base > hnb.hit_normal.length() ||
+            4u > hnb.hit_normal.length() - tail_base) {
+            reason |= DDGI_FIRST_ORACLE_REASON_CAPACITY;
+        } else {
+            trace_origin = hnb.hit_normal[tail_base + 0u];
+            trace_direction = hnb.hit_normal[tail_base + 1u];
+            finalize_origin = hnb.hit_normal[tail_base + 2u];
+            finalize_direction = hnb.hit_normal[tail_base + 3u];
+            oracle_output.records[base + 0u] = trace_origin;
+            oracle_output.records[base + 1u] = trace_direction;
+            oracle_output.records[base + 2u] = finalize_origin;
+            oracle_output.records[base + 3u] = finalize_direction;
+
+            if (floatBitsToUint(trace_origin.w) == expected_stamp)
+                source_mask |= DDGI_FIRST_ORACLE_SRC_TRACE_STAMP;
+            if (floatBitsToUint(finalize_origin.w) == expected_stamp)
+                source_mask |= DDGI_FIRST_ORACLE_SRC_FINAL_STAMP;
+            if (trace_direction.w == float(ray + 1u))
+                source_mask |= DDGI_FIRST_ORACLE_SRC_TRACE_RAY;
+            if (finalize_direction.w == float(ray + 1u))
+                source_mask |= DDGI_FIRST_ORACLE_SRC_FINAL_RAY;
+            const bool finite_source =
+                ddgiFirstFiniteVec3(trace_origin.xyz) &&
+                ddgiFirstFiniteVec3(trace_direction.xyz) &&
+                ddgiFirstFiniteVec3(finalize_origin.xyz) &&
+                ddgiFirstFiniteVec3(finalize_direction.xyz);
+            if (finite_source) source_mask |= DDGI_FIRST_ORACLE_SRC_FINITE;
+            const float trace_len2 = dot(trace_direction.xyz, trace_direction.xyz);
+            const float finalize_len2 = dot(finalize_direction.xyz,
+                                            finalize_direction.xyz);
+            if (finite_source && ddgiFirstFinite(trace_len2) &&
+                ddgiFirstFinite(finalize_len2) &&
+                abs(trace_len2 - 1.0) <= DDGI_FIRST_ORACLE_EPS &&
+                abs(finalize_len2 - 1.0) <= DDGI_FIRST_ORACLE_EPS)
+                source_mask |= DDGI_FIRST_ORACLE_SRC_UNIT;
+            if (finite_source &&
+                all(equal(trace_origin.xyz, finalize_origin.xyz)) &&
+                all(equal(trace_direction.xyz, finalize_direction.xyz)))
+                source_mask |= DDGI_FIRST_ORACLE_SRC_MATCH;
+        }
+    }
+
+    if (source_mask != DDGI_FIRST_ORACLE_SRC_ALL) {
+        reason |= DDGI_FIRST_ORACLE_REASON_SOURCE;
+    } else {
+        DDGIFirstOracleHit first = ddgiFirstOracleTrace(
+            trace_origin.xyz, trace_direction.xyz, 0.0, volume.RayMaxDistance);
+        runtime_triangle = first.runtime_triangle;
+        if (first.status == DDGI_FIRST_ORACLE_ACCEPTED) {
+            if (first.flags != 0u) {
+                status = DDGI_FIRST_ORACLE_TRANSMIT;
+                reason |= DDGI_FIRST_ORACLE_REASON_TRANSMIT;
+            } else {
+                status = DDGI_FIRST_ORACLE_ACCEPTED;
+            }
+        } else if (first.status == DDGI_FIRST_ORACLE_SEGMENT_MISS) {
+            status = DDGI_FIRST_ORACLE_SEGMENT_MISS;
+            reason |= DDGI_FIRST_ORACLE_REASON_SEGMENT;
+        } else if (first.status == DDGI_FIRST_ORACLE_ENDPOINT) {
+            status = DDGI_FIRST_ORACLE_ENDPOINT;
+            reason |= DDGI_FIRST_ORACLE_REASON_ENDPOINT;
+        } else if (first.status == DDGI_FIRST_ORACLE_OVERFLOW) {
+            status = DDGI_FIRST_ORACLE_OVERFLOW;
+            reason |= DDGI_FIRST_ORACLE_REASON_OVERFLOW;
+        } else if (first.status == DDGI_FIRST_ORACLE_RESIDUAL) {
+            status = DDGI_FIRST_ORACLE_RESIDUAL;
+            reason |= DDGI_FIRST_ORACLE_REASON_RESIDUAL;
+        }
+
+        oracle_output.records[base + 5u] = vec4(first.point, first.t);
+        oracle_output.records[base + 6u] = vec4(
+            first.bary, uintBitsToFloat(first.status));
+        oracle_output.records[base + 7u] = vec4(
+            first.triangle, first.mesh, uintBitsToFloat(first.flags),
+            first.residual);
+        oracle_output.records[base + 10u] = vec4(
+            first.reconstructed, first.residual);
+    }
+
+    oracle_output.records[base + 8u] = vec4(
+        uintBitsToFloat(status), uintBitsToFloat(reason),
+        uintBitsToFloat(source_mask), uintBitsToFloat(runtime_triangle));
+    oracle_output.records[base + 11u] = vec4(
+        trace_origin.xyz - finalize_origin.xyz,
+        uintBitsToFloat(source_mask));
+}

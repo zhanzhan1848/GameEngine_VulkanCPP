@@ -964,7 +964,25 @@ kernel void screen_probe_trace_finalize(
     }
 
     // w carries the SH-projection weight: cosθ × importance factor (F2).
-    // B5: negate for miss rays (sky fallback) — sign is the geometry-hit flag.
-    const bool geoHit = (hit.w == 1.0f) || (hit.w == 2.0f) || (hit.w == 3.0f);
+    // B5: sign tracks measured transport, not merely an SDF stop.  Rejected
+    // SC candidates and far-cache values are borrowed world radiance.
+    const bool geoHit = (hit.w == 1.0f) || (hit.w == 2.0f && !useWorldFallback);
+    // [E0-I R4 2026-09-21 Debug A/B/C 分通路隔离]（Vulkan 孪生
+    // ScreenProbeTraceFinalize.comp 同语义）：mode 4 = fill-only（HZB/SC 置零，
+    // 保留 far-cache/miss 天空链）；mode 5 = transport-only（far-cache/miss
+    // 置零，保留 HZB/SC）。Metal 侧无分支统计（diag stats 为 Vulkan 通道），
+    // 分支号就地派生。SPGI_TRACE_DIAG=4/5 经 diag_params.x 直通。
+    {
+        uint statBranch = 3u;
+        if (hit.w == 1.0f) statBranch = 0u;
+        else if (hit.w == 2.0f) statBranch = useWorldFallback ? 3u : 1u;
+        else if (hit.w == 3.0f) statBranch = 2u;
+        const float diagMode = global.diag_params.x;
+        if (diagMode > 3.5f && diagMode < 4.5f) {
+            if (statBranch <= 1u) radiance = float3(0.0f);
+        } else if (diagMode > 4.5f && diagMode < 5.5f) {
+            if (statBranch >= 2u) radiance = float3(0.0f);
+        }
+    }
     probeRadiance[global_id] = float4(radiance, geoHit ? cosTheta * invNq : -cosTheta * invNq);
 }

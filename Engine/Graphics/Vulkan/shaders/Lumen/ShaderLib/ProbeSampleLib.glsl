@@ -25,9 +25,14 @@
 //         (sun-facing surfaces); the uniform half keeps the lower hemisphere
 //         (and shadowed lobes) covered, and the 1/(8π) mixture floor bounds
 //         the MC weight. Jittered like mode 1.
+//   3 STRATIFIED — fixed golden-angle azimuth, stratified latitude. The
+//         legacy two golden-ratio coordinates hit only 22/64 octahedral
+//         depth texels at 128 rays; this mode reaches 62/64. Experimental
+//         A/B only until the whole-image GI response has been validated.
+//   4 DEPTH_FILL — identical rays/pdf to mode 0; Vulkan depth update fills
+//         never-sampled octahedral texels from the nearest observed texel.
 //
-// NOT consumed by DDGIUpdateDepth: the octahedral depth map needs a fixed
-// frame-stable direction set (its texels ARE the directions).
+// Also consumed by DDGIUpdateDepth, which bins the same traced directions.
 
 #ifndef PROBE_SAMPLE_LIB_GLSL
 #define PROBE_SAMPLE_LIB_GLSL
@@ -35,6 +40,9 @@
 #define DDGI_RAY_SAMPLE_UNIFORM 0
 #define DDGI_RAY_SAMPLE_JITTER  1
 #define DDGI_RAY_SAMPLE_COSINE  2
+#define DDGI_RAY_SAMPLE_STRATIFIED 3
+#define DDGI_RAY_SAMPLE_DEPTH_FILL 4
+#define DDGI_RAY_SAMPLE_DEPTH_ONLY 5
 
 // dir.xyz = sampled direction (unit), dir.w = pdf(dir).
 // toLight: unit vector from surfaces toward the directional light
@@ -45,17 +53,21 @@ vec4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameIndex,
     const float INV_PHI = 0.6180339887498948482;
     const float TWO_PI  = 6.28318530717958647692;
 
-    // Base stratified coordinates — the golden-ratio lattice all modes share,
-    // so stratification quality is identical across modes.
+    // Legacy golden-ratio coordinates; mode 3 replaces the correlated
+    // latitude coordinate below while retaining this fixed azimuth.
     float u = fract((float(rayIndex) + 0.5) * INV_PHI);
     float v = fract((float(rayIndex) + 0.5) * INV_PHI * INV_PHI);
 
-    if (mode != DDGI_RAY_SAMPLE_UNIFORM) {
+    if (mode != DDGI_RAY_SAMPLE_UNIFORM && mode != DDGI_RAY_SAMPLE_STRATIFIED &&
+        mode != DDGI_RAY_SAMPLE_DEPTH_FILL && mode != DDGI_RAY_SAMPLE_DEPTH_ONLY) {
         // Temporal rotation: golden-angle offsets per frame (never aligned
         // with the lattice, so the union of frame sets stays low-discrepancy).
         u = fract(u + float(frameIndex) * INV_PHI);
         v = fract(v + float(frameIndex) * INV_PHI * INV_PHI);
     }
+
+    if (mode == DDGI_RAY_SAMPLE_STRATIFIED)
+        v = (float(rayIndex) + 0.5) / max(float(rayCount), 1.0);
 
     if (mode == DDGI_RAY_SAMPLE_COSINE) {
         vec3 w = normalize(toLight);
@@ -90,12 +102,25 @@ vec4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameIndex,
         return vec4(dir, pdf);
     }
 
-    // Modes 0 and 1: uniform on the sphere, pdf = 1/(4π).
+    // Modes 0, 1, 3, 4 and 5: uniform on the sphere, pdf = 1/(4π).
+    // Mode 5, like 4, MUST keep the exact fixed mode-0 radiance directions.
     float theta = TWO_PI * u;
     float phi   = acos(clamp(1.0 - 2.0 * v, -1.0, 1.0));
     float sinPhi = sin(phi);
     return vec4(sinPhi * cos(theta), sinPhi * sin(theta), cos(phi),
                 0.25 / 3.14159265358979);
+}
+
+// Depth-only octahedral strata: exactly two measured directions per 8x8
+// texel. These are NOT radiance samples and must never enter SH projection.
+vec3 ddgiDepthRayDirection(uint rayIndex) {
+    uint cell = rayIndex / 2u;
+    float offset = (rayIndex & 1u) == 0u ? 0.25 : 0.75;
+    vec2 uv = (vec2(cell % 8u, cell / 8u) + offset) / 8.0 * 2.0 - 1.0;
+    vec3 d = vec3(uv, 1.0 - abs(uv.x) - abs(uv.y));
+    if (d.z < 0.0)
+        d.xy = (1.0 - abs(d.yx)) * mix(vec2(-1.0), vec2(1.0), greaterThanEqual(d.xy, vec2(0.0)));
+    return normalize(d);
 }
 
 #endif  // PROBE_SAMPLE_LIB_GLSL

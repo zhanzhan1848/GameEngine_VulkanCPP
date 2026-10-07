@@ -2,13 +2,14 @@
 // [WRC] WRCUpdateRadiance — radiance 方向格 EMA + Chebyshev 可见性 + 状态。
 // Entry point: wrc_update_radiance
 //
-// 存储布局（WRCTypes.h kWRCProbeStrideU32，单 storage buffer）：
-//   [base + d*2 + 0] = packHalf2x16(r, g)
-//   [base + d*2 + 1] = packHalf2x16(b, 0)
-//   [base + K*2 + 0] = hit_dist_mean
-//   [base + K*2 + 1] = hit_dist_var
-//   [base + K*2 + 2] = state: bit0 valid / bit1 in-geometry / bits[16..31] 消费计数
-//   [base + K*2 + 3] = pad
+// 存储布局（WRCTypes.h，[P2 SoA] 单 storage buffer 双区域）：
+//   radiance 区域：rbase = probeIdx * K*2（128，512B 对齐）
+//     [rbase + d*2 + 0] = packHalf2x16(r, g)
+//     [rbase + d*2 + 1] = packHalf2x16(b, 0)
+//   meta 区域：metaBase = probeTotal * K*2 + probeIdx * 4
+//     [+0] = hit_dist_mean  [+1] = hit_dist_var
+//     [+2] = state: bit0 valid / bit1 in-geometry / bits[16..31] 消费计数
+//     [+3] = pad
 //
 // 语义（设计文档 §2.2）：
 //   - EMA α = 0.1（独立于 DDGI 的 0.02/0.2 双系数）；
@@ -80,12 +81,14 @@ void wrc_update_radiance() {
     if (probeIdx >= volume.ProbeMeta.y) return;
 
     const uint K = volume.ProbeMeta.x;
-    const uint base = probeIdx * (K * 2u + 4u);
+    // [P2 SoA]: radiance / meta 双区域寻址（WRCTypes.h 布局 v2）。
+    const uint rbase = probeIdx * (K * 2u);
+    const uint metaBase = volume.ProbeMeta.y * (K * 2u) + probeIdx * 4u;
 
     // 暖启动冻结（§6-2）：窗口内 EMA 不写——WRC 不采未收敛 SC。
     if (volume.TraceParams.z < volume.TraceParams.w) return;
 
-    uint state = pd.probe_data[base + K * 2u + 2u];
+    uint state = pd.probe_data[metaBase + 2u];
 
     // A2 入几何排除：trace 端 lane 0 写入的起点 SDF 距离（hit 缓冲尾部）。
     // d0 < skin（同 DDGI relocation 的 skin 公式）→ 探针在墙内：置 in-geometry
@@ -95,12 +98,12 @@ void wrc_update_radiance() {
         float d0 = hd.hit_distance[volume.ProbeMeta.w * K + slot];
         if (d0 >= 0.0 && d0 < skin) {
             for (uint d = 0u; d < K; ++d) {
-                pd.probe_data[base + d * 2u + 0] = 0u;
-                pd.probe_data[base + d * 2u + 1] = 0u;
+                pd.probe_data[rbase + d * 2u + 0] = 0u;
+                pd.probe_data[rbase + d * 2u + 1] = 0u;
             }
-            pd.probe_data[base + K * 2u + 0] = 0u;   // mean
-            pd.probe_data[base + K * 2u + 1] = 0u;   // var
-            pd.probe_data[base + K * 2u + 2] = (state & 0xFFFF0000u) | (1u << 1);   // in-geometry，保留消费计数
+            pd.probe_data[metaBase + 0u] = 0u;   // mean
+            pd.probe_data[metaBase + 1u] = 0u;   // var
+            pd.probe_data[metaBase + 2u] = (state & 0xFFFF0000u) | (1u << 1);   // in-geometry，保留消费计数
             return;
         }
     }
@@ -117,8 +120,8 @@ void wrc_update_radiance() {
     const bool firstFill = (state & 1u) == 0u;
 
     // mean/var 的旧值（Chebyshev 参照）。首次更新无历史 → 权重恒 1。
-    uint meanU = pd.probe_data[base + K * 2u + 0u];
-    uint varU  = pd.probe_data[base + K * 2u + 1u];
+    uint meanU = pd.probe_data[metaBase + 0u];
+    uint varU  = pd.probe_data[metaBase + 1u];
     float meanD = firstFill ? 0.0 : uintBitsToFloat(meanU);
     float varD  = firstFill ? 0.0 : uintBitsToFloat(varU);
     bool haveStats = !firstFill && meanU != 0u && varU != 0u;
@@ -130,9 +133,12 @@ void wrc_update_radiance() {
         vec4 raySample = rd.wrc_rays[probeIdx * K + d];
         float dist = raySample.w;
         vec3 rad = max(raySample.xyz, vec3(0.0));
+        // [③卫生 2026-09-21] NaN 射线不进 EMA（NaN 经 mix 传播会把整个方向
+        // 槽乃至 mean/var 毒化，最终经消费端 half 打包扩散）。
+        if (any(isnan(rad)) || any(isinf(rad))) { rad = vec3(0.0); dist = -1.0; }
 
-        uvec2 oldPacked = uvec2(pd.probe_data[base + d * 2u + 0],
-                                pd.probe_data[base + d * 2u + 1]);
+        uvec2 oldPacked = uvec2(pd.probe_data[rbase + d * 2u + 0],
+                                pd.probe_data[rbase + d * 2u + 1]);
         vec3 oldRad = wrcUnpackRGB(oldPacked);
 
         // Chebyshev 可见性：命中距离偏离探针均值的射线降权（对齐 DDGI 已
@@ -145,8 +151,8 @@ void wrc_update_radiance() {
 
         vec3 blended = firstFill ? rad : mix(oldRad, rad, alpha * w);
         uvec2 packed = wrcPackRGB(min(blended, vec3(64.0)));
-        pd.probe_data[base + d * 2u + 0] = packed.x;
-        pd.probe_data[base + d * 2u + 1] = packed.y;
+        pd.probe_data[rbase + d * 2u + 0] = packed.x;
+        pd.probe_data[rbase + d * 2u + 1] = packed.y;
 
         if (dist >= 0.0) {
             sumD += w * dist;
@@ -162,9 +168,9 @@ void wrc_update_radiance() {
         float newVar = max(sumD2 / wSum - newMean * newMean, 0.0);
         float outMean = firstFill ? newMean : mix(meanD, newMean, alpha);
         float outVar  = firstFill ? newVar  : mix(varD,  newVar,  alpha);
-        pd.probe_data[base + K * 2u + 0] = floatBitsToUint(outMean);
-        pd.probe_data[base + K * 2u + 1] = floatBitsToUint(outVar);
+        pd.probe_data[metaBase + 0u] = floatBitsToUint(outMean);
+        pd.probe_data[metaBase + 1u] = floatBitsToUint(outVar);
     }
 
-    pd.probe_data[base + K * 2u + 2] = state | 1u;   // 置 valid，保留消费计数
+    pd.probe_data[metaBase + 2u] = state | 1u;   // 置 valid，保留消费计数
 }

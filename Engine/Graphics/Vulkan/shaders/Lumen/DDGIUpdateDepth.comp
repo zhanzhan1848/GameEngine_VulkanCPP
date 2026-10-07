@@ -1,4 +1,5 @@
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 // DDGIUpdateDepth.comp — Vulkan Lumen hand-written GLSL port of
 // DDGIUpdateDepth.wgsl. Entry point: ddgi_update_depth
 //   (glslangValidator --source-entrypoint main -e ddgi_update_depth)
@@ -106,6 +107,16 @@ layout(set = 0, binding = 4) buffer DepthOutput {
 layout(set = 0, binding = 5) readonly buffer ProbeUpdateList {
     uint probe_update_list[];
 };
+layout(set = 0, binding = 6) readonly buffer DepthOnlyHits {
+    float depth_only_hits[];
+};
+#ifdef DDGI_DEPTH_PROVENANCE
+// Diagnostic sidecar mirrors depth history slot identity, NOT inferred from
+// the moments. Per cell: H/E/X counts + observation stamp; last H/E/X/sample
+// stamps. All stamps are volume.FrameIndex+1 (zero=never observed).
+layout(set=0,binding=7) readonly buffer ProvenanceHistory { uvec4 provenance_history[]; };
+layout(set=0,binding=8) buffer ProvenanceOutput { uvec4 provenance_output[]; };
+#endif
 
 // ----------------------------------------------------------------------------
 // Constants
@@ -154,10 +165,16 @@ void ddgi_update_depth() {
     float sumDist[64];
     float sumDistSq[64];
     uint  rayCountArr[64];
+#ifdef DDGI_DEPTH_PROVENANCE
+    uvec3 observed[64];
+#endif
     for (uint t = 0u; t < texels; t++) {
         sumDist[t]   = 0.0;
         sumDistSq[t] = 0.0;
         rayCountArr[t] = 0u;
+#ifdef DDGI_DEPTH_PROVENANCE
+        observed[t]=uvec3(0u);
+#endif
     }
 
     uint res = DDGI_DEPTH_RES;
@@ -165,10 +182,13 @@ void ddgi_update_depth() {
     for (uint r = 0u; r < volume.RaysPerProbe; r++) {
         DDGIRayData ray = ray_buffer[probeIdx * volume.RaysPerProbe + r];
 
-        // Skip miss rays (negative distance)
+        // Production skips negative rays for moments; diagnostic counts them
+        // independently, preserving escape vs exhausted/unknown semantics.
+#ifndef DDGI_DEPTH_PROVENANCE
         if (ray.radiance_and_dist.w < 0.0) {
             continue;
         }
+#endif
 
         // Compute ray direction and map to octahedral texel — same sampler the
         // trace side used for this ray index.
@@ -181,10 +201,58 @@ void ddgi_update_depth() {
                             clamp(uint(uv.y * float(res)), 0u, res - 1u));
         uint texelIdx = texel.y * res + texel.x;
 
+#ifdef DDGI_DEPTH_PROVENANCE
+        float measured=ray.radiance_and_dist.w;
+        if (measured>=0.0) observed[texelIdx].x++;
+        else if (measured<=-1.5) observed[texelIdx].y++;
+        else observed[texelIdx].z++;
+        if (measured<0.0) continue;
+#endif
+
         float dist = ray.radiance_and_dist.w;
         sumDist[texelIdx]   = sumDist[texelIdx] + dist;
         sumDistSq[texelIdx] = sumDistSq[texelIdx] + dist * dist;
         rayCountArr[texelIdx] = rayCountArr[texelIdx] + 1u;
+    }
+
+    // Mode 5 measures previously empty bins independently, preserving every
+    // legacy measured bin and all radiance/PDF/SH. -1 (step exhaustion) is
+    // unknown, NOT sky; only -2 (true escape) becomes max-distance evidence.
+    if (volume.RaySampleMode == 5) {
+        uint extraBase = volume.ProbeCountTotal * volume.RaysPerProbe + gid * 128u;
+        for (uint cell = 0u; cell < texels; ++cell) {
+            if (rayCountArr[cell] != 0u) continue;
+            for (uint sampleIdx = 0u; sampleIdx < 2u; ++sampleIdx) {
+                float distance = depth_only_hits[extraBase + cell * 2u + sampleIdx];
+#ifdef DDGI_DEPTH_PROVENANCE
+                if (distance>=0.0) observed[cell].x++;
+                else if (distance==-2.0) observed[cell].y++;
+                else observed[cell].z++;
+#endif
+                if (distance == -2.0) distance = volume.RayMaxDistance;
+                if (distance < 0.0) continue;
+                sumDist[cell] += distance;
+                sumDistSq[cell] += distance * distance;
+                rayCountArr[cell] += 1u;
+            }
+        }
+    }
+
+    // Diagnostic mode 4 keeps the legacy ray set/SH projection intact. Track
+    // directions with both hits and misses so genuine open-sky bins retain
+    // their history; only bins never visited by any ray may borrow a depth.
+    uint sampledArr[64];
+    if (volume.RaySampleMode == 4) {
+        for (uint t = 0u; t < texels; ++t) sampledArr[t] = 0u;
+        for (uint r = 0u; r < volume.RaysPerProbe; ++r) {
+            vec3 rayDir = ddgiSampleRayDirection(r, volume.RaysPerProbe,
+                                                 volume.FrameIndex, 4u,
+                                                 vec3(0.0, -1.0, 0.0)).xyz;
+            vec2 uv = octahedralEncode(rayDir);
+            uvec2 cell = uvec2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
+                               clamp(uint(uv.y * float(res)), 0u, res - 1u));
+            sampledArr[cell.y * res + cell.x] = 1u;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -202,9 +270,47 @@ void ddgi_update_depth() {
     for (uint texelIdx = 0u; texelIdx < texels; texelIdx++) {
         uint meanIdx = probeBase + texelIdx;
         uint varIdx  = probeBase + texels + texelIdx;
+#ifdef DDGI_DEPTH_PROVENANCE
+        uint provenanceIdx=(probeIdx*64u+texelIdx)*2u;
+        uint stamp=volume.FrameIndex+1u;
+        uvec4 old=provenance_history[provenanceIdx+1u];
+        uvec3 counts=observed[texelIdx];
+        provenance_output[provenanceIdx]=uvec4(counts,stamp);
+        provenance_output[provenanceIdx+1u]=uvec4(
+            counts.x>0u?stamp:old.x,counts.y>0u?stamp:old.y,
+            counts.z>0u?stamp:old.z,any(greaterThan(counts,uvec3(0u)))?stamp:old.w);
+#endif
 
-        // No rays hit in this texel: keep history unchanged
+        // No hit: retain the measured open-sky history. Mode 4 separately
+        // repairs only directions the fixed 128-ray lattice never sampled.
         if (rayCountArr[texelIdx] == 0u) {
+            if (volume.RaySampleMode == 4 && sampledArr[texelIdx] == 0u) {
+                uint nearest = texels;
+                uint bestDist2 = 0xffffffffu;
+                for (uint candidate = 0u; candidate < texels; ++candidate) {
+                    if (sampledArr[candidate] == 0u) continue;
+                    int dx = int(candidate % res) - int(texelIdx % res);
+                    int dy = int(candidate / res) - int(texelIdx / res);
+                    uint dist2 = uint(dx * dx + dy * dy);
+                    if (dist2 < bestDist2) { bestDist2 = dist2; nearest = candidate; }
+                }
+                if (nearest < texels) {
+                    // A sampled miss legitimately represents open space; its
+                    // existing mean (normally max distance) is not replaced.
+                    if (rayCountArr[nearest] == 0u) {
+                        depth_output[meanIdx] = depth_history[probeBase + nearest];
+                        depth_output[varIdx] = depth_history[probeBase + texels + nearest];
+                    } else {
+                        float mean = sumDist[nearest] / float(rayCountArr[nearest]);
+                        float variance = abs(sumDistSq[nearest] / float(rayCountArr[nearest]) - mean * mean);
+                        if (rayCountArr[nearest] < 4u)
+                            variance = max(variance, volume.ProbeSpacing * volume.ProbeSpacing * 0.1);
+                        depth_output[meanIdx] = mean;
+                        depth_output[varIdx] = max(variance, 0.001);
+                    }
+                    continue;
+                }
+            }
             depth_output[meanIdx] = depth_history[meanIdx];
             depth_output[varIdx]  = depth_history[varIdx];
             continue;

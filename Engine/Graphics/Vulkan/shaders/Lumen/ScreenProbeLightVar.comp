@@ -1,0 +1,137 @@
+#version 450 core
+// Vulkan Lumen Screen Probe GI — lighting-variance activation mask (P3).
+//
+// Runs before Place (tier3 only). Geometry gates never fire on flat tiles
+// crossing a sun/shadow boundary or a bright bounce edge, yet those are
+// exactly where probe SH reconstruction needs the extra quadrant probes.
+// This pass derives a per-tile activation mask from the PREVIOUS frame's
+// final probe SH (one-frame lag — the [[sc-probe-bistability]] guard: a
+// same-frame SC/probe feedback loop once produced 3x run-to-run variance).
+//
+// Variance input is EMA-smoothed (exponential decay of the criterion input)
+// and activation is bounded by a persistent total-active cap
+// (atomicAdd/atomicAdd(-1) on activate/deactivate — reset-free Top-K
+// substitute; the EMA + hysteresis rate-limit per-frame bursts). Tiles stay
+// active for LIGHTVAR_HYSTERESIS consecutive low-variance frames before
+// releasing their budget slot (anti-flicker).
+//
+// state[tile] packing: bits [7:0] = EMA luminance variance, quantized
+// (var * 4096, saturating); [15:8] = consecutive below-threshold frames;
+// [23:16] = active flag (0/1). mask[tile] = active (Place consumes it).
+//
+// Flat descriptor bindings:
+//   binding 0 = SSBO ro  prevSH (previous frame's final probe SH, slot
+//                        indexed — 4 vec4 per slot; only slot0 is read)
+//   binding 1 = SSBO rw  lightVarState (u32 per tile)
+//   binding 2 = SSBO rw  lightVarMask (u32 per tile)
+//   binding 3 = SSBO rw  lightVarStats (u32: [0] = total active)
+//   binding 4 = UBO      LightVarConstants (32B, dedicated CB)
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer PrevSHBlock {
+    vec4 data[];
+} prevSH;
+
+layout(set = 0, binding = 1, std430) buffer LightVarStateBlock {
+    uint data[];
+} lightVarState;
+
+layout(set = 0, binding = 2, std430) buffer LightVarMaskBlock {
+    uint data[];
+} lightVarMask;
+
+layout(set = 0, binding = 3, std430) buffer LightVarStatsBlock {
+    uint data[];
+} lightVarStats;
+
+// Dedicated constants (own CB): [0] = (tileCount, gridW, gridH, activeCap),
+// [1] = (hi threshold, lo threshold, -, -) as float bits.
+layout(set = 0, binding = 4, std140) uniform LightVarConstantsBlock {
+    uvec4 constants[2];
+} lightVarConstants;
+
+const uint LIGHTVAR_HYSTERESIS = 30u;
+
+float tapLuminance(uint tileIdx, uint gridW, uint gridH) {
+    uint totalTiles = gridW * gridH;
+    if (tileIdx >= totalTiles) return -1.0;   // out of grid
+    uint slot = tileIdx * 4u;                 // slot0 (coarse anchor)
+    vec4 sh0 = prevSH.data[slot * 4u + 0u];
+    if (sh0.w <= 0.0) return -1.0;            // invalid probe
+    return dot(sh0.rgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void screen_probe_light_var() {
+    uint global_id = gl_GlobalInvocationID.x;
+    uint totalTiles = lightVarConstants.constants[0].x;
+    if (global_id >= totalTiles) return;
+
+    uint gridW = lightVarConstants.constants[0].y;
+    uint gridH = lightVarConstants.constants[0].z;
+    uint cap = lightVarConstants.constants[0].w;
+    float hi = uintBitsToFloat(lightVarConstants.constants[1].x);
+    float lo = uintBitsToFloat(lightVarConstants.constants[1].y);
+
+    uint gx = global_id % gridW;
+    uint gy = global_id / gridW;
+
+    // Neighborhood luminances from the previous frame's final SH.
+    float l[5];
+    l[0] = tapLuminance(global_id, gridW, gridH);
+    l[1] = (gx > 0u)        ? tapLuminance(global_id - 1u, gridW, gridH) : -1.0;
+    l[2] = (gx + 1u < gridW)? tapLuminance(global_id + 1u, gridW, gridH) : -1.0;
+    l[3] = (gy > 0u)        ? tapLuminance(global_id - gridW, gridW, gridH) : -1.0;
+    l[4] = (gy + 1u < gridH)? tapLuminance(global_id + gridW, gridW, gridH) : -1.0;
+
+    float sum = 0.0, sumSq = 0.0; float n = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        if (l[i] < 0.0) continue;
+        sum += l[i]; sumSq += l[i] * l[i]; n += 1.0;
+    }
+
+    float variance = 0.0;
+    if (n > 1.5) {
+        float mean = sum / n;
+        variance = max(sumSq / n - mean * mean, 0.0);
+    }
+
+    // EMA smoothing of the criterion input (bistability guard: a single
+    // noisy frame cannot toggle activation).
+    uint state = lightVarState.data[global_id];
+    float emaPrev = float(state & 0xFFu) / 4096.0;
+    float ema = mix(emaPrev, variance, 0.3);
+
+    bool isActive = ((state >> 16u) & 0xFFu) != 0u;
+    uint below = (state >> 8u) & 0xFFu;
+
+    if (!isActive && ema > hi && l[0] >= 0.0) {
+        // Total-active cap (reset-free Top-K substitute): activation takes a
+        // budget slot only if one is free.
+        uint prev = atomicAdd(lightVarStats.data[0], 1u);
+        if (prev < cap) {
+            isActive = true;
+            below = 0u;
+        } else {
+            atomicAdd(lightVarStats.data[0], 0xFFFFFFFFu);   // refund (-1)
+        }
+    } else if (isActive) {
+        if (ema < lo) {
+            ++below;
+            if (below >= LIGHTVAR_HYSTERESIS) {
+                isActive = false;
+                below = 0u;
+                atomicAdd(lightVarStats.data[0], 0xFFFFFFFFu);  // release (-1)
+            }
+        } else {
+            below = 0u;
+        }
+    }
+
+    uint emaQ = uint(clamp(ema, 0.0, 0.0625) * 4096.0);
+    lightVarState.data[global_id] =
+        (emaQ & 0xFFu) | ((below & 0xFFu) << 8u) | ((isActive ? 1u : 0u) << 16u);
+    lightVarMask.data[global_id] = isActive ? 1u : 0u;
+}

@@ -21,6 +21,32 @@
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
+// The native-normal child is intentionally a separate scalar macro.  It is
+// meaningful only together with the scalar DDGI_FIRST_SURFACE=1 parent; a
+// partial descriptor set must fail at shader preprocessing instead of
+// silently borrowing a production binding.
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+#if !defined(DDGI_FIRST_SURFACE) || !(DDGI_FIRST_SURFACE) || \
+    !defined(DDGI_FIRST_SURFACE_VARIANT) || !(DDGI_FIRST_SURFACE_VARIANT)
+#error "DDGI_FIRST_NATIVE_NORMAL_VARIANT requires DDGI_FIRST_SURFACE=1 and DDGI_FIRST_SURFACE_VARIANT=1"
+#endif
+#endif
+
+// The zero-cross child uses exactly the first-surface BVH contract, but only
+// applies a certified first-triangle distance to an incumbent signed-field
+// zero crossing.  Keep it independent from the full FIRST_SURFACE and native
+// normal candidates; an accidental partial descriptor/module build must fail
+// during preprocessing.
+#if defined(DDGI_FIRST_ZERO_CROSS_VARIANT) && DDGI_FIRST_ZERO_CROSS_VARIANT
+#if !defined(DDGI_FIRST_SURFACE) || !(DDGI_FIRST_SURFACE) || \
+    !defined(DDGI_FIRST_SURFACE_VARIANT) || !(DDGI_FIRST_SURFACE_VARIANT)
+#error "DDGI_FIRST_ZERO_CROSS_VARIANT requires DDGI_FIRST_SURFACE=1 and DDGI_FIRST_SURFACE_VARIANT=1"
+#endif
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+#error "DDGI_FIRST_ZERO_CROSS_VARIANT cannot be combined with DDGI_FIRST_NATIVE_NORMAL_VARIANT"
+#endif
+#endif
+
 // Shared probe ray sampler (single source with DDGITraceRays / UpdateIrradiance):
 // mode 0 = legacy Fibonacci (bit-identical), 1 = per-frame jitter,
 // 2 = cosine-lobe mixture around the light. See ShaderLib/ProbeSampleLib.glsl.
@@ -38,6 +64,8 @@ layout(set = 0, binding = 4) writeonly buffer HitDistanceBuf {
 
 // T4.3: refined hit normals — xyz world normal (0 when not refined),
 // w = 1.0 valid / 0.0 fallback. Finalize keeps -rayDir when w <= 0.5.
+// Existing analytic records occupy [N,5N).  The Vulkan-only source audit
+// appends Trace origin/direction and Finalize origin/direction at [5N,9N).
 layout(set = 0, binding = 6) writeonly buffer HitNormalBuf {
     vec4 hit_normal[];
 } hn;
@@ -74,6 +102,62 @@ layout(set = 0, binding = 12) writeonly buffer RelocatedOriginBuf {
     vec4 relocated_origin[];
 } robuf;
 
+#ifdef DDGI_FIRST_SURFACE
+// Optional first-surface candidate inputs.  The buffers use the established
+// SCGeometrySupportProof byte layout: three uvec4/vec4 records per 48-byte
+// node/triangle.  Binding 15 is a separate full-capacity audit SSBO; the
+// incumbent hit-normal/source-audit buffer is never repurposed.
+layout(set = 0, binding = 13, std430) readonly buffer FirstSurfaceNodeBuf {
+    uvec4 node_words[];
+} first_surface_nodes;
+layout(set = 0, binding = 14, std430) readonly buffer FirstSurfaceTriangleBuf {
+    vec4 triangle_words[];
+} first_surface_triangles;
+layout(set = 0, binding = 15, std430) buffer FirstSurfaceAuditBuf {
+    vec4 audit_records[];
+} first_surface_audit;
+#endif
+
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+// Child-only native vertex/material/normal-map source proof.  Binding 23 is a
+// 24-vec4-per-fresh-ray witness (384 bytes/ray); the host caps this readback at
+// 64 MiB and checks the completed resource identity independently.
+layout(set = 0, binding = 16, std430) readonly buffer FirstNativePositionBuf {
+    float positions[];
+} first_native_positions;
+layout(set = 0, binding = 17, std430) readonly buffer FirstNativeElementBuf {
+    uint elements[];
+} first_native_elements;
+struct DDGIFirstNativeInstance {
+    mat4 world_matrix;
+    mat4 inverse_world_matrix;
+    uvec4 meta0;
+    uvec4 meta1;
+    float bounds_center_x;
+    float bounds_center_y;
+    float bounds_center_z;
+    uint pad_after_center;
+    float bounds_radius;
+    uint pad_br0;
+    uint pad_br1;
+    uint pad_br2;
+};
+layout(set = 0, binding = 18, std430) readonly buffer FirstNativeInstanceBuf {
+    DDGIFirstNativeInstance instances[];
+} first_native_instances;
+layout(set = 0, binding = 19, std430) readonly buffer FirstNativeMaterialBuf {
+    uint material_words[];
+} first_native_materials;
+layout(set = 0, binding = 20, std430) readonly buffer FirstNativeTriangleSourceBuf {
+    uvec4 triangle_source[];
+} first_native_triangle_source;
+layout(set = 0, binding = 21) uniform texture2DArray first_native_normal_textures;
+layout(set = 0, binding = 22) uniform sampler first_native_normal_sampler;
+layout(set = 0, binding = 23, std430) writeonly buffer FirstNativeAuditBuf {
+    vec4 audit_records[];
+} first_native_audit;
+#endif
+
 // DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h (336 bytes).
 // Same declaration as DDGITraceRays.comp.
 layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
@@ -108,6 +192,13 @@ layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
     vec4  SkyColor;                 // 304
     vec4  Albedo;                   // 320
 } volume;
+
+#ifdef DDGI_FIRST_SURFACE
+#include "ShaderLib/DDGIFirstSurface.glsl"
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+#include "ShaderLib/DDGIFirstNativeNormal.glsl"
+#endif
+#endif
 
 // ----------------------------------------------------------------------------
 // Helpers (copied from DDGITraceRays.comp for consistency)
@@ -167,6 +258,66 @@ float sampleSDFCascade(texture3D sdfTexture, vec3 worldPos,
 }
 
 // Else-if cascade selection — 1 texture3D read per step (finest first).
+// Evidence is not a marching distance. Unknown corners must not blend down
+// into a finite hit: require every nonzero-weight corner to be supported.
+float sampleHitEvidence(vec3 pos) {
+    vec3 uv=(pos-volume.SdfOrigins[0].xyz)/volume.SdfExtents[0].xyz;
+    if (any(lessThan(uv,vec3(0))) || any(greaterThan(uv,vec3(1)))) return 1e10;
+    uint res=volume.SdfResolutionsAndCount.x;
+    vec3 p=uv*float(res)-.5, f=fract(p);
+    ivec3 base=ivec3(floor(p));
+    float value=0;
+    for (int c=0;c<8;++c) {
+        ivec3 off=ivec3(c&1,(c>>1)&1,(c>>2)&1);
+        vec3 w=mix(vec3(1)-f,f,vec3(off));
+        float weight=w.x*w.y*w.z;
+        if (weight<=1e-7) continue;
+        float d=texelFetch(sdf_cascade_0,clamp(base+off,ivec3(0),ivec3(int(res)-1)),0).g;
+        if (d>=65000) return 1e10;
+        value+=weight*d;
+    }
+    return value;
+}
+
+// Opt-in evidence normal only; never differentiate the scalar marching bound.
+// Keep hit distance and detail-refinement priority unchanged. Invalid stencils
+// retain the existing -rayDir fallback in finalize.
+bool evidenceRawNormal(vec3 pos, out vec3 n) {
+    vec3 h=volume.SdfExtents[0].xyz/float(volume.SdfResolutionsAndCount.x);
+    vec3 plus=vec3(sampleHitEvidence(pos+vec3(h.x,0,0)),
+                   sampleHitEvidence(pos+vec3(0,h.y,0)),
+                   sampleHitEvidence(pos+vec3(0,0,h.z)));
+    vec3 minus=vec3(sampleHitEvidence(pos-vec3(h.x,0,0)),
+                    sampleHitEvidence(pos-vec3(0,h.y,0)),
+                    sampleHitEvidence(pos-vec3(0,0,h.z)));
+    if (any(isnan(plus)) || any(isinf(plus)) || any(isnan(minus)) ||
+        any(isinf(minus)) || any(greaterThanEqual(plus,vec3(65000))) ||
+        any(greaterThanEqual(minus,vec3(65000)))) return false;
+    vec3 g=(plus-minus)/(2.0*h);
+    if (dot(g,g)<1e-8) return false;
+    n=normalize(g);
+    return true;
+}
+
+bool evidenceHitNormal(vec3 pos, vec3 rayDir, out vec3 n) {
+    if (!evidenceRawNormal(pos,n)) return false;
+    if (dot(n,rayDir)>0.0) n=-n;
+    return true;
+}
+
+// Material-only point: do NOT use a face-forward normal, change hitDistance,
+// or certify visibility here. Finalize still applies the strict raster gate.
+bool evidenceMaterialPoint(vec3 pos, float band, out vec3 projected) {
+    float d=sampleHitEvidence(pos);
+    vec3 rawN;
+    if (isnan(d) || isinf(d) || d<0.0 || d>band ||
+        !evidenceRawNormal(pos,rawN)) return false;
+    projected=pos-rawN*d;
+    float residual=sampleHitEvidence(projected);
+    return !isnan(residual) && !isinf(residual) && residual>=0.0 &&
+           (residual<d || d<1e-4);
+}
+
 float sampleBestSDF(vec3 pos) {
     uint cc = volume.SdfResolutionsAndCount.w;
     if (cc > 0u && isInsideCascade(pos, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz)) {
@@ -440,7 +591,7 @@ void ddgi_trace_sdf() {
     uint group_id = gl_WorkGroupID.x;
 
     if (group_id >= volume.ProbeUpdateCount) return;
-    if (tid >= volume.RaysPerProbe) return;
+    if (tid >= volume.RaysPerProbe && volume.RaySampleMode != 5) return;
 
     uint probeIdx = pul.probe_update_list[group_id];
     if (probeIdx >= volume.ProbeCountTotal) return;
@@ -459,10 +610,24 @@ void ddgi_trace_sdf() {
     vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
     // T8.13 P2: lane-strided ray loop — 64 lanes serve any RaysPerProbe
     // multiple of 64 (128 = two strided rays per lane).
-    for (uint rayId = tid; rayId < volume.RaysPerProbe; rayId += 64u) {
-    vec3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
+    uint traceRayCount = volume.RaysPerProbe + (volume.RaySampleMode == 5 ? 128u : 0u);
+    for (uint rayId = tid; rayId < traceRayCount; rayId += 64u) {
+    bool depthOnly = rayId >= volume.RaysPerProbe;
+    vec3 rayDir = depthOnly ? ddgiDepthRayDirection(rayId - volume.RaysPerProbe)
+        : ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
                                          volume.FrameIndex,
                                          uint(volume.RaySampleMode), toLight).xyz;
+    // Albedo.w is a DDGI-only padding component.  An exact host opt-in stores
+    // the values actually calculated by this shader before the SDF march.
+    // Mode-5 depth-only rays are excluded: the tail has one record per
+    // radiance update-slot/ray (full N capacity).
+    if (!depthOnly && volume.Albedo.w > 0.5) {
+        uint sourceRayIdx = group_id * volume.RaysPerProbe + rayId;
+        uint sourceBase = 5u * volume.ProbeCountTotal * volume.RaysPerProbe +
+                          4u * sourceRayIdx;
+        hn.hit_normal[sourceBase + 0u] = vec4(probePos, uintBitsToFloat(((volume.FrameIndex & 65535u) << 16u) | (probeIdx + 1u)));
+        hn.hit_normal[sourceBase + 1u] = vec4(rayDir, float(rayId + 1u));
+    }
     float t = 0.0;
     // -1 = 步数耗尽（密闭内部爬行，非天空）；-2 = 越出 RayMaxDistance（真逃逸→天空）。
     // 2026-09-06 逃逸门控：可见天空提到 2.9 档后，耗尽射线误吃天空会把暗拱
@@ -489,7 +654,11 @@ void ddgi_trace_sdf() {
     // could not cross a full atrium: probes inside deep-shadow arcades never
     // reached the sunlit geometry, so their SH only ever accumulated the gray
     // sky constant and shadowed regions stayed flat.
-    const uint MAX_SDF_STEPS = 64u;
+    // Spare second-cascade voxel.w: opt-in mode5 depth-only policy.
+    // Radiance rays retain global policy0 with the incumbent scalar R field.
+    uint evidenceMode=depthOnly && volume.SdfVoxelSizes[1].w>0.0
+        ?uint(volume.SdfVoxelSizes[1].w):uint(volume.SdfVoxelSizes[0].y);
+    uint MAX_SDF_STEPS = evidenceMode==3u?256u:64u;
     float prevD = 3.4e38;   // B13: distance trend across steps
     // 2026-09-10 M3-A1: buried-start crawl. Topologically-ambiguous air
     // (open-top courtyards) can hold exact-0 voxels from the merge winding —
@@ -499,9 +668,22 @@ void ddgi_trace_sdf() {
     // masonry) exhaust into the miss branch (dim SC fallback), which is the
     // correct answer for wall-interior probes.
     bool clearedSkin = false;
+    // GI 能量根治方案 Phase 4（R6/T8.10f 运行时半）：有符号粗场的零穿越
+    // 命中。旗标经 ProbeCounts[3]（原 padding 槽）由 CPU 传入（资产为
+    // signed 烘焙时置位；PRIMAL_DDGI_UNSIGNED_TRACE=1 回滚为无符号带判定）。
+    const bool signedCoarseField = volume.ProbeCounts.w != 0u;
+#if defined(DDGI_FIRST_ZERO_CROSS_VARIANT) && DDGI_FIRST_ZERO_CROSS_VARIANT
+    // Only the incumbent scalar signed zero-crossing branch may authorize the
+    // child first-triangle distance query. Positive-band hits and every miss
+    // remain untouched, even when a BVH hit is available.
+    bool coarseZeroCrossHit = false;
+#endif
+    float prevT = t;
     for (uint step = 0u; step < MAX_SDF_STEPS; ++step) {
         vec3 pos = probePos + rayDir * t;
         float d = sampleBestSDF(pos);
+        float evidence=evidenceMode>0u?sampleHitEvidence(pos):d;
+        bool supportedHit=evidence< hitThreshold;
 
         // Outside all cascades — fallback stride
         if (d >= 1.0e9) {
@@ -510,7 +692,26 @@ void ddgi_trace_sdf() {
             continue;
         }
 
-        if (d < hitThreshold) {
+        // Phase 4: 零穿越命中——步进从正距离跨到非正距离即保证存在表面
+        // 穿越（无符号场斜掠采样点从命中带两侧跳过 = thin-wall tunneling
+        // 的机理）。5 次二分把命中点收敛到零穿越处（ddgiDetailRefine
+        // signed 分支的粗场版）；随后梯度法线在 signed 场下天然朝外。
+        if (signedCoarseField && clearedSkin && supportedHit && d <= 0.0 && prevD > 0.0 && prevD < 1.0e9) {
+#if defined(DDGI_FIRST_ZERO_CROSS_VARIANT) && DDGI_FIRST_ZERO_CROSS_VARIANT
+            coarseZeroCrossHit = true;
+#endif
+            float tLo = prevT;
+            float tHi = t;
+            for (int b = 0; b < 5; ++b) {
+                float tMid = 0.5 * (tLo + tHi);
+                float dMid = evidenceMode>0u?sampleHitEvidence(probePos + rayDir*tMid):sampleBestSDF(probePos + rayDir * tMid);
+                if (dMid <= 0.0) { tHi = tMid; } else { tLo = tMid; }
+            }
+            hitDistance = tHi;
+            break;
+        }
+
+        if (d < hitThreshold && supportedHit) {
             if (!clearedSkin) {
                 // Still inside the origin skin — crawl out, don't register.
                 t += max(d, minStep);
@@ -520,7 +721,7 @@ void ddgi_trace_sdf() {
             hitDistance = t;
             break;
         }
-        clearedSkin = true;
+        if (evidenceMode==0u || (evidence>=hitThreshold && evidence<1e9)) clearedSkin = true;
 
         // Relaxed advancement: overstep when far, conservative when close.
         // B13: no ω overstep while the field shrinks (thin-wall jump guard).
@@ -535,12 +736,15 @@ void ddgi_trace_sdf() {
         // M3-A1 残项：封顶区扩到 6 m——mesh 网格接缝的高估区（薄网格如地板
         // 只覆盖 ±0.35 m，其余高度 min() 取远处墙体 → d 虚高 2-5 m）恰在
         // 1.8-6 m 带，-y 射线一步跳过地板网格（arcade 逃逸的 -y 15%）。
-        if (d > 6.0 && d >= prevD) {
+        if (evidenceMode>0u && d<hitThreshold && !supportedHit) {
+            advance=evidenceMode>=2u?max(volume.SdfVoxelSizes[0].x*2.0,.20):max(d,minStep);
+        } else if (d > 6.0 && d >= prevD) {
             advance = d * 1.5;
         } else {
             advance = clamp(d, minStep, max(volume.SdfVoxelSizes[0].x * 2.0, 0.20));
         }
         prevD = d;
+        prevT = t;
         t += advance;
         if (t > volume.RayMaxDistance) { hitDistance = -2.0; break; }
     }
@@ -557,9 +761,170 @@ void ddgi_trace_sdf() {
         if (ddgiDetailRefine(probePos, rayDir, tRefined, hitN)) {
             hitDistance = tRefined;
             hnValid = 1.0;
+        } else if (evidenceMode>0u && volume.SdfVoxelSizes[0].z>.5 &&
+                   evidenceHitNormal(probePos+rayDir*hitDistance,rayDir,hitN)) {
+            hnValid = 1.0;
         }
     }
-    hn.hit_normal[globalRayIdx] = vec4(hitN, hnValid);
+#ifdef DDGI_FIRST_SURFACE
+    // First-surface candidate: geometric certification is independent of the
+    // incumbent SDF result.  Only a finite, non-transmitting first triangle
+    // may replace hitDistance; misses/unknowns retain the incumbent (including
+    // the existing -1/-2 miss classification) and never become sky.
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+    DDGIFirstSurfaceHit nativeFirstHit;
+    nativeFirstHit.status = 0u;
+    nativeFirstHit.t = -1.0;
+    nativeFirstHit.triangle = -1.0;
+    nativeFirstHit.flags = 0u;
+    nativeFirstHit.residual = 0.0;
+    nativeFirstHit.bary = vec3(0.0);
+    nativeFirstHit.source_a = vec3(0.0);
+    nativeFirstHit.source_e1 = vec3(0.0);
+    nativeFirstHit.source_e2 = vec3(0.0);
+    nativeFirstHit.source_mesh = -1.0;
+#endif
+    if (!depthOnly) {
+        const uint auditBase = globalRayIdx * 3u;
+        const uint auditCapacity = first_surface_audit.audit_records.length();
+        float oldDistance = hitDistance;
+        float newDistance = hitDistance;
+        float firstT = -1.0;
+        float firstTriangle = -1.0;
+        uint firstFlags = 0u;
+        float reconstructionResidual = 0.0;
+        uint auditStatus = 0u;
+        vec3 firstBary = vec3(0.0);
+
+#if defined(DDGI_FIRST_ZERO_CROSS_VARIANT) && DDGI_FIRST_ZERO_CROSS_VARIANT
+        // Zero-cross scope: an audit row is UNKNOWN unless this ray actually
+        // took the incumbent signed crossing and still has no valid detail /
+        // evidence normal. In that unselected case leave old/new equal and
+        // firstT=-1; no stale or unrelated first-surface ray may substitute.
+        if (volume.RaySampleMode != 0 || evidenceMode != 0u ||
+            globalRayIdx >= volume.ProbeCountTotal * volume.RaysPerProbe ||
+            auditBase + 2u >= auditCapacity || !coarseZeroCrossHit || hnValid > 0.5) {
+            auditStatus = 0u;
+        } else {
+            DDGIFirstSurfaceHit first = ddgiFirstSurfaceTrace(
+                probePos, rayDir, 0.0, volume.RayMaxDistance);
+            firstT = first.t;
+            firstTriangle = first.triangle;
+            firstFlags = first.flags;
+            reconstructionResidual = first.residual;
+            firstBary = first.bary;
+            auditStatus = first.status;
+            if (first.status == 1u) {
+                // Reuse the established finite/material/endpoint/residual
+                // acceptance guard. The child changes distance only after a
+                // real first triangle passes every guard; normals, rho,
+                // history, sampler, and SC remain on the incumbent path.
+                if (first.flags == 0u && ddgiFirstFinite(first.t) &&
+                    first.t > 2.0e-5 &&
+                    first.t < volume.RayMaxDistance - 2.0e-5 &&
+                    ddgiFirstFinite(first.residual) && first.residual <= 2.0e-5) {
+                    newDistance = first.t;
+                    hitDistance = first.t;
+                    auditStatus = 1u;
+                } else {
+                    newDistance = oldDistance;
+                    auditStatus = 3u;
+                }
+            }
+        }
+#else
+        if (volume.RaySampleMode != 0 || evidenceMode != 0u ||
+            globalRayIdx >= volume.ProbeCountTotal * volume.RaysPerProbe ||
+            auditBase + 2u >= auditCapacity) {
+            // Unsupported mode or a descriptor capacity mismatch is UNKNOWN;
+            // the host-side capacity check makes this visible in diagnostics.
+            auditStatus = 0u;
+        } else if (hnValid > 0.5) {
+            // Do not disturb an already certified detail/evidence normal.  The
+            // candidate remains distance-only and leaves that normal intact.
+            firstT = hitDistance;
+            auditStatus = 7u;
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+            nativeFirstHit.status = 7u;
+            nativeFirstHit.t = firstT;
+#endif
+        } else {
+            DDGIFirstSurfaceHit first = ddgiFirstSurfaceTrace(
+                probePos, rayDir, 0.0, volume.RayMaxDistance);
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+            nativeFirstHit = first;
+#endif
+            firstT = first.t;
+            firstTriangle = first.triangle;
+            firstFlags = first.flags;
+            reconstructionResidual = first.residual;
+            firstBary = first.bary;
+            auditStatus = first.status;
+            if (first.status == 1u) {
+                // Current material contract is intentionally conservative:
+                // only flags==0 are eligible.  In particular this prevents
+                // tracing through cloth/alpha/proxy geometry to a later wall.
+                if (first.flags == 0u && ddgiFirstFinite(first.t) &&
+                    first.t > 2.0e-5 &&
+                    first.t < volume.RayMaxDistance - 2.0e-5 &&
+                    ddgiFirstFinite(first.residual) && first.residual <= 2.0e-5) {
+                    newDistance = first.t;
+                    hitDistance = first.t;
+                    auditStatus = 1u;
+                } else {
+                    newDistance = oldDistance;
+                    auditStatus = 3u;
+                }
+            }
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+            // Keep the child tied to the parent's final acceptance decision.
+            // A geometric hit rejected by a material/endpoint/residual guard
+            // must not install a native HN.
+            nativeFirstHit.status = auditStatus;
+#endif
+        }
+#endif
+        if (auditBase + 2u < auditCapacity) {
+            const uint frameProbeStamp = ((volume.FrameIndex & 65535u) << 16u) |
+                                         (probeIdx + 1u);
+            first_surface_audit.audit_records[auditBase + 0u] =
+                vec4(oldDistance, newDistance, firstT, float(auditStatus));
+            first_surface_audit.audit_records[auditBase + 1u] =
+                vec4(firstTriangle, uintBitsToFloat(firstFlags),
+                     reconstructionResidual, uintBitsToFloat(frameProbeStamp));
+            first_surface_audit.audit_records[auditBase + 2u] =
+                vec4(firstBary, float(rayId + 1u));
+        }
+    }
+#if defined(DDGI_FIRST_NATIVE_NORMAL_VARIANT) && DDGI_FIRST_NATIVE_NORMAL_VARIANT
+    // The child is a normal-only source candidate.  It runs for every fresh
+    // radiance ray, including parent misses and unsupported statuses, so the
+    // readback retains a stamp instead of silently borrowing an old ray.
+    if (!depthOnly) {
+        DDGIFirstNativeNormalResult nativeResult = ddgiFirstNativeEvaluate(
+            nativeFirstHit, probePos, rayDir, hitN, hnValid > 0.5);
+        if (nativeResult.status == DDGI_FIRST_NATIVE_ACCEPTED && hnValid <= 0.5) {
+            hitN = nativeResult.after_hn;
+            hnValid = 1.0;
+        }
+        if (volume.Albedo.w > 0.5) {
+            ddgiFirstNativeWriteAudit(globalRayIdx, probeIdx, rayId,
+                                      volume.FrameIndex, nativeResult);
+        }
+    }
+#endif
+#endif
+    if (!depthOnly) hn.hit_normal[globalRayIdx] = vec4(hitN, hnValid);
+    if (!depthOnly && volume.SdfVoxelSizes[0].w>.5) {
+        uint materialIdx=volume.ProbeCountTotal*volume.RaysPerProbe+4u*globalRayIdx+3u;
+        vec3 projected;
+        bool valid=hitDistance>=0.0 && evidenceMode>0u && volume.SdfExtents[0].w>.5 &&
+            evidenceMaterialPoint(probePos+rayDir*hitDistance,hitThreshold,projected);
+        hn.hit_normal[materialIdx]=valid?vec4(projected,1.0):vec4(0.0);
+    }
+
+    if (depthOnly)
+        globalRayIdx = volume.ProbeCountTotal * volume.RaysPerProbe + group_id * 128u + rayId - volume.RaysPerProbe;
 
     hd.hit_distance[globalRayIdx] = hitDistance;
     } // T8.13 P2 stride loop

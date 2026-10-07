@@ -37,6 +37,12 @@ struct FusionInputs {
     rendergraph::RGResourceHandle ddgi_specular_rg{};
     rhi::ResourceHandle ddgi_specular_tex{rhi::handles::INVALID_RESOURCE};
 
+    // [R4/R5 2026-09-20] 屏幕外 specular 兜底（ReflSpecularTrace 输出，
+    // 全分辨率 RGBA16F：RGB = Fresnel 加权后的屏幕外反射辐射，A = 权重）。
+    // Invalid → black → v1 形态（SSR + glossy relay）。
+    rendergraph::RGResourceHandle refl_specular_rg{};
+    rhi::ResourceHandle refl_specular_tex{rhi::handles::INVALID_RESOURCE};
+
     // Volume scatter (RGBA16_Float: RGB=scatter, A=transmittance)
     rendergraph::RGResourceHandle volume_scatter_rg{};
     rhi::ResourceHandle volume_scatter_tex{rhi::handles::INVALID_RESOURCE};
@@ -95,6 +101,58 @@ public:
     FusionOutputs AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs);
 
 private:
+    static constexpr u32 kRoiAuditSourceCount = 13;
+    static constexpr u32 kRoiAuditCompositeBindingCount = 9;
+
+    struct RoiAuditSource {
+        bool constant_black{false};
+        rhi::ResourceHandle staging{rhi::handles::INVALID_RESOURCE};
+        // The handle that was actually written into the sampled-image
+        // descriptor.  This is kept separately from staging so the audit
+        // cannot accidentally turn a guessed/fallback source into evidence.
+        rhi::ResourceHandle bound_resource{rhi::handles::INVALID_RESOURCE};
+        u32 width{0}, height{0}, bytes_per_pixel{0};
+        u32 binding{0xFFFFFFFFu};
+        const char* name{nullptr};
+        const char* format{nullptr};
+        const char* layout{"unknown"};
+        const char* source_identity{nullptr};
+        rhi::DataFormat runtime_format{rhi::DataFormat::Unknown};
+    };
+    RoiAuditSource roi_audit_sources_[kRoiAuditSourceCount]{};
+    // Captured at the point where FusionComposite's descriptor params are
+    // assembled.  The later RG readback pass consumes these exact handles;
+    // it never reconstructs them from FusionInputs or guessed formats.
+    rhi::ResourceHandle roi_audit_composite_bound_[3][kRoiAuditCompositeBindingCount]{
+        {
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE
+        },
+        {
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE
+        },
+        {
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE
+        }
+    };
+    rhi::ResourceHandle roi_audit_indirect_bound_[3][5]{};
+    u32 roi_audit_indirect_bound_frame_[3]{};
+    bool roi_audit_indirect_bound_valid_[3]{};
+    u32 roi_audit_composite_bound_frame_[3]{};
+    bool roi_audit_composite_bound_valid_[3]{};
+    bool roi_audit_queued_{false}, roi_audit_dumped_{false};
+    u32 roi_audit_frame_{0}, roi_audit_slot_{0};
+    float roi_audit_gain_{1}, roi_audit_mode_{0};
     rhi::RHIDeviceBase* device_ = nullptr;
     u32 render_width_ = 0;
     u32 render_height_ = 0;

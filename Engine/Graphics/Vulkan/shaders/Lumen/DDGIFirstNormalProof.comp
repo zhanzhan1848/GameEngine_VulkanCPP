@@ -1,0 +1,295 @@
+#version 450 core
+#extension GL_EXT_samplerless_texture_functions : require
+
+// DDGI_FIRST_NORMAL_PROOF_PREFIX diagnostic only.  This compute pass consumes
+// accepted first-surface queries from the same DDGI_DUMP=2 iteration and reads
+// the native GPUDrivenDraw buffers and normal texture array.  It never writes a
+// production resource.  The decoder below mirrors the native
+// GPUDrivenDraw.wgsl vertex path: packed 2x16-bit normal, signed Z from the
+// color/sign byte, then the world matrix and per-vertex normalization.
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct ProofQuery {
+    uvec4 vertex_ids_mesh_instance;
+    vec4 bary_stamp;
+    vec4 ray_ray_plus_one;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer QueryBuffer {
+    uvec4 header; // x = query count, yzw = schema/reserved
+    ProofQuery queries[];
+} query_buffer;
+
+layout(set = 0, binding = 1, std430) readonly buffer PositionBuffer {
+    float positions[];
+} position_buffer;
+
+layout(set = 0, binding = 2, std430) readonly buffer ElementBuffer {
+    uint elements[];
+} element_buffer;
+
+struct InstanceData {
+    mat4 world_matrix;
+    mat4 inverse_world_matrix;
+    uvec4 meta0; // geometry, material, cluster start/count
+    uvec4 meta1;
+    float bounds_center_x;
+    float bounds_center_y;
+    float bounds_center_z;
+    uint pad_after_center;
+    float bounds_radius;
+    uint pad_br0;
+    uint pad_br1;
+    uint pad_br2;
+};
+
+layout(set = 0, binding = 3, std430) readonly buffer InstanceBuffer {
+    InstanceData instances[];
+} instance_buffer;
+
+layout(set = 0, binding = 4, std430) readonly buffer MaterialBuffer {
+    uint material_words[];
+} material_buffer;
+
+layout(set = 0, binding = 5, std430) writeonly buffer ResultBuffer {
+    vec4 records[]; // 20 vec4 values per query
+} result_buffer;
+
+layout(set = 0, binding = 6) uniform texture2DArray normal_textures;
+layout(set = 0, binding = 7) uniform sampler normal_sampler;
+
+bool finite1(float v) { return !isnan(v) && !isinf(v); }
+bool finite3(vec3 v) {
+    return finite1(v.x) && finite1(v.y) && finite1(v.z);
+}
+bool finite4(vec4 v) {
+    return finite1(v.x) && finite1(v.y) && finite1(v.z) && finite1(v.w);
+}
+
+vec3 unpack_normal(uint packed, uint color_t_sign) {
+    float hi = float((packed >> 16u) & 0xFFFFu);
+    float lo = float(packed & 0xFFFFu);
+    float inv = 2.0 / 65535.0;
+    vec2 f = vec2(hi * inv - 1.0, lo * inv - 1.0);
+    float d = dot(f, f);
+    if (d > 1.0) return vec3(0.0, 0.0, 1.0);
+    float z = sqrt(max(0.0, 1.0 - d));
+    uint signs = (color_t_sign >> 24u) & 0xFFu;
+    float n_sign = float(signs & 0x02u) - 1.0;
+    return vec3(f.x, f.y, z * n_sign);
+}
+
+vec3 load_position(uint vertex_id) {
+    uint base = vertex_id * 3u;
+    return vec3(position_buffer.positions[base + 0u],
+                position_buffer.positions[base + 1u],
+                position_buffer.positions[base + 2u]);
+}
+
+vec4 load_uv_normal_tangent(uint vertex_id, out vec3 object_normal,
+                            out vec3 object_tangent, out uint packed_normal_bits) {
+    uint base = vertex_id * 6u;
+    uint color_sign = element_buffer.elements[base + 0u];
+    uint packed_normal = element_buffer.elements[base + 1u];
+    uint packed_tangent = element_buffer.elements[base + 2u];
+    packed_normal_bits = packed_normal;
+    object_normal = unpack_normal(packed_normal, color_sign);
+    object_tangent = unpack_normal(packed_tangent, color_sign);
+    return vec4(uintBitsToFloat(element_buffer.elements[base + 4u]),
+                1.0 - uintBitsToFloat(element_buffer.elements[base + 5u]),
+                0.0, 0.0);
+}
+
+vec3 world_vertex_normal(mat3 normal_matrix, vec3 object_normal) {
+    return normalize(normal_matrix * object_normal);
+}
+
+vec3 world_vertex_tangent(mat3 normal_matrix, vec3 object_tangent,
+                          vec3 world_normal) {
+    vec3 tangent = normalize(normal_matrix * object_tangent);
+    if (abs(dot(tangent, world_normal)) > 0.999) {
+        vec3 up = (abs(world_normal.y) < 0.999)
+            ? vec3(0.0, 1.0, 0.0)
+            : vec3(1.0, 0.0, 0.0);
+        tangent = normalize(cross(up, world_normal));
+    } else {
+        tangent = normalize(tangent - dot(tangent, world_normal) * world_normal);
+    }
+    return tangent;
+}
+
+ivec2 wrap_texel(ivec2 p, ivec2 extent) {
+    ivec2 result = p;
+    result.x = ((result.x % extent.x) + extent.x) % extent.x;
+    result.y = ((result.y % extent.y) + extent.y) % extent.y;
+    return result;
+}
+
+void clear_record(uint base, uint query_index, uvec4 ids) {
+    for (uint i = 0u; i < 20u; ++i) result_buffer.records[base + i] = vec4(0.0);
+    // Preserve the fresh source identities even when resident data rejects a
+    // query.  Zero normal/geometry fields then mean UNKNOWN, never stale data.
+    result_buffer.records[base + 7u] = vec4(uintBitsToFloat(0u), uintBitsToFloat(0u),
+                                               uintBitsToFloat(ids.w), uintBitsToFloat(0u));
+    result_buffer.records[base + 8u] = vec4(uintBitsToFloat(ids.x), uintBitsToFloat(ids.y),
+                                             uintBitsToFloat(ids.z), uintBitsToFloat(query_index));
+}
+
+void main() {
+    uint query_index = gl_GlobalInvocationID.x;
+    uint query_count = query_buffer.header.x;
+    if (query_index >= query_count) return;
+
+    const uint out_base = query_index * 20u;
+    ProofQuery q = query_buffer.queries[query_index];
+    clear_record(out_base, query_index, q.vertex_ids_mesh_instance);
+    result_buffer.records[out_base + 0u].w = q.bary_stamp.w;
+    result_buffer.records[out_base + 2u].w = q.ray_ray_plus_one.w;
+
+    uvec3 vertex_ids = q.vertex_ids_mesh_instance.xyz;
+    uint instance_id = q.vertex_ids_mesh_instance.w;
+    uint stamp_bits = floatBitsToUint(q.bary_stamp.w);
+
+    uint position_count = position_buffer.positions.length() / 3u;
+    uint element_count = element_buffer.elements.length() / 6u;
+    uint material_count = material_buffer.material_words.length() / 12u;
+    bool valid = (vertex_ids.x < position_count && vertex_ids.y < position_count &&
+                  vertex_ids.z < position_count && vertex_ids.x < element_count &&
+                  vertex_ids.y < element_count && vertex_ids.z < element_count &&
+                  instance_id < instance_buffer.instances.length());
+    if (!valid) return;
+
+    InstanceData instance = instance_buffer.instances[instance_id];
+    uint material_id = instance.meta0.y;
+    valid = material_id < material_count;
+    if (!valid) return;
+    uint material_base = material_id * 12u;
+    uint normal_layer = material_buffer.material_words[material_base + 1u];
+    uint material_flags = material_buffer.material_words[material_base + 11u];
+    float normal_scale = uintBitsToFloat(material_buffer.material_words[material_base + 8u]);
+    vec2 uv_scale = vec2(uintBitsToFloat(material_buffer.material_words[material_base + 9u]),
+                         uintBitsToFloat(material_buffer.material_words[material_base + 10u]));
+    if (!finite1(normal_scale) || !finite1(uv_scale.x) || !finite1(uv_scale.y)) return;
+
+    vec3 p0 = load_position(vertex_ids.x);
+    vec3 p1 = load_position(vertex_ids.y);
+    vec3 p2 = load_position(vertex_ids.z);
+    if (!finite3(p0) || !finite3(p1) || !finite3(p2)) return;
+    vec3 object_n0, object_t0, object_n1, object_t1, object_n2, object_t2;
+    uint packed_n0 = 0u, packed_n1 = 0u, packed_n2 = 0u;
+    vec4 uv0_4 = load_uv_normal_tangent(vertex_ids.x, object_n0, object_t0, packed_n0);
+    vec4 uv1_4 = load_uv_normal_tangent(vertex_ids.y, object_n1, object_t1, packed_n1);
+    vec4 uv2_4 = load_uv_normal_tangent(vertex_ids.z, object_n2, object_t2, packed_n2);
+    vec3 bary = q.bary_stamp.xyz;
+    vec3 ray_dir = q.ray_ray_plus_one.xyz;
+    if (!finite3(bary) || abs(bary.x + bary.y + bary.z - 1.0) > 2.0e-5 ||
+        any(lessThan(bary, vec3(-2.0e-5))) || !finite3(ray_dir)) return;
+    float ray_len = length(ray_dir);
+    if (!finite1(ray_len) || ray_len <= 1.0e-12 || abs(ray_len - 1.0) > 2.0e-5) return;
+    ray_dir /= ray_len;
+
+    mat3 normal_matrix = mat3(instance.world_matrix[0].xyz,
+                              instance.world_matrix[1].xyz,
+                              instance.world_matrix[2].xyz);
+    vec3 n0 = world_vertex_normal(normal_matrix, object_n0);
+    vec3 n1 = world_vertex_normal(normal_matrix, object_n1);
+    vec3 n2 = world_vertex_normal(normal_matrix, object_n2);
+    if (!finite3(n0) || !finite3(n1) || !finite3(n2)) return;
+    vec3 t0 = world_vertex_tangent(normal_matrix, object_t0, n0);
+    vec3 t1 = world_vertex_tangent(normal_matrix, object_t1, n1);
+    vec3 t2 = world_vertex_tangent(normal_matrix, object_t2, n2);
+    if (!finite3(t0) || !finite3(t1) || !finite3(t2)) return;
+
+    vec3 world_p0 = (instance.world_matrix * vec4(p0, 1.0)).xyz;
+    vec3 world_p1 = (instance.world_matrix * vec4(p1, 1.0)).xyz;
+    vec3 world_p2 = (instance.world_matrix * vec4(p2, 1.0)).xyz;
+    vec3 world_point = bary.x * world_p0 + bary.y * world_p1 + bary.z * world_p2;
+    vec3 raw_interp_n = bary.x * n0 + bary.y * n1 + bary.z * n2;
+    float interp_n_length = length(raw_interp_n);
+    vec3 interp_n = normalize(raw_interp_n);
+    vec3 interp_t = normalize(bary.x * t0 + bary.y * t1 + bary.z * t2);
+    vec3 raw_geom = cross(world_p1 - world_p0, world_p2 - world_p0);
+    float geom_length = length(raw_geom);
+    vec3 geom_n = normalize(raw_geom);
+    if (!finite3(world_point) || !finite1(interp_n_length) || interp_n_length <= 1.0e-12 ||
+        !finite3(interp_n) || !finite3(interp_t) || !finite1(geom_length) || geom_length <= 1.0e-12 ||
+        !finite3(geom_n)) return;
+
+    float flip_native = dot(interp_n, ray_dir) > 0.0 ? -1.0 : 1.0;
+    float flip_geom = dot(geom_n, ray_dir) > 0.0 ? -1.0 : 1.0;
+    vec3 ray_native_n = interp_n * flip_native;
+    vec3 ray_geom_n = geom_n * flip_geom;
+    // The fragment path aligns the interpolated shading normal to the
+    // ray-facing geometric normal before applying its normal map.
+    if (dot(ray_native_n, ray_geom_n) < 0.0) ray_native_n = -ray_native_n;
+    vec3 tangent = normalize(interp_t);
+    vec3 bitangent = normalize(cross(ray_native_n, tangent));
+    vec2 uv = uv0_4.xy * bary.x + uv1_4.xy * bary.y + uv2_4.xy * bary.z;
+    vec2 scaled_uv = fract(uv * uv_scale);
+    if (!finite3(vec3(uv, 0.0)) || !finite3(vec3(scaled_uv, 0.0))) return;
+
+    vec4 normal_sample = vec4(0.0);
+    vec4 texel0 = vec4(0.0);
+    vec4 texel1 = vec4(0.0);
+    vec4 texel2 = vec4(0.0);
+    vec4 texel3 = vec4(0.0);
+    vec3 mapped_n = ray_native_n;
+    uint normal_path = 0u;
+    ivec2 base_texel = ivec2(0);
+    ivec3 texture_extent = textureSize(sampler2DArray(normal_textures, normal_sampler), 0);
+    if (normal_layer != 0xFFFFFFFFu && normal_layer < uint(texture_extent.z) &&
+        texture_extent.x > 0 && texture_extent.y > 0) {
+        normal_sample = textureLod(sampler2DArray(normal_textures, normal_sampler),
+                                   vec3(scaled_uv, float(normal_layer)), 0.0);
+        vec2 texel_pos = scaled_uv * vec2(texture_extent.xy) - vec2(0.5);
+        base_texel = ivec2(floor(texel_pos));
+        ivec2 p00 = wrap_texel(base_texel, texture_extent.xy);
+        ivec2 p10 = wrap_texel(base_texel + ivec2(1, 0), texture_extent.xy);
+        ivec2 p01 = wrap_texel(base_texel + ivec2(0, 1), texture_extent.xy);
+        ivec2 p11 = wrap_texel(base_texel + ivec2(1, 1), texture_extent.xy);
+        texel0 = texelFetch(sampler2DArray(normal_textures, normal_sampler),
+                            ivec3(p00, int(normal_layer)), 0);
+        texel1 = texelFetch(sampler2DArray(normal_textures, normal_sampler),
+                            ivec3(p10, int(normal_layer)), 0);
+        texel2 = texelFetch(sampler2DArray(normal_textures, normal_sampler),
+                            ivec3(p01, int(normal_layer)), 0);
+        texel3 = texelFetch(sampler2DArray(normal_textures, normal_sampler),
+                            ivec3(p11, int(normal_layer)), 0);
+        if (length(normal_sample.xyz) > 0.1) {
+            vec3 tangent_normal = normal_sample.xyz * 2.0 - 1.0;
+            mapped_n = normalize(mat3(tangent, bitangent, ray_native_n) * tangent_normal);
+            normal_path = 2u;
+        } else {
+            normal_path = 1u;
+        }
+    }
+
+    result_buffer.records[out_base + 0u] = vec4(world_point, uintBitsToFloat(stamp_bits));
+    result_buffer.records[out_base + 1u] = vec4(interp_n, interp_n_length);
+    result_buffer.records[out_base + 2u] = vec4(ray_native_n, q.ray_ray_plus_one.w);
+    result_buffer.records[out_base + 3u] = vec4(ray_geom_n, geom_length);
+    result_buffer.records[out_base + 4u] = vec4(n0, uintBitsToFloat(packed_n0));
+    result_buffer.records[out_base + 5u] = vec4(n1, uintBitsToFloat(packed_n1));
+    result_buffer.records[out_base + 6u] = vec4(n2, uintBitsToFloat(packed_n2));
+    result_buffer.records[out_base + 7u] = vec4(uintBitsToFloat(material_id),
+                                                 uintBitsToFloat(material_flags),
+                                                 uintBitsToFloat(instance_id),
+                                                 uintBitsToFloat(1u));
+    result_buffer.records[out_base + 8u] = vec4(uintBitsToFloat(vertex_ids.x),
+                                                 uintBitsToFloat(vertex_ids.y),
+                                                 uintBitsToFloat(vertex_ids.z),
+                                                 uintBitsToFloat(query_index));
+    result_buffer.records[out_base + 9u] = vec4(geom_n, flip_geom);
+    result_buffer.records[out_base + 10u] = vec4(uv, scaled_uv);
+    result_buffer.records[out_base + 11u] = vec4(interp_t, uintBitsToFloat(normal_layer));
+    result_buffer.records[out_base + 12u] = normal_sample;
+    result_buffer.records[out_base + 13u] = texel0;
+    result_buffer.records[out_base + 14u] = texel1;
+    result_buffer.records[out_base + 15u] = texel2;
+    result_buffer.records[out_base + 16u] = texel3;
+    result_buffer.records[out_base + 17u] = vec4(mapped_n, uintBitsToFloat(normal_path));
+    result_buffer.records[out_base + 18u] = vec4(normal_sample.xyz * 2.0 - 1.0, normal_scale);
+    result_buffer.records[out_base + 19u] = vec4(vec2(base_texel), flip_native,
+                                                  uintBitsToFloat(normal_layer));
+}

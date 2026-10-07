@@ -13,8 +13,17 @@ namespace lumen { class LumenDDGIPass; class SurfaceCachePass; }
 // SC → DDGI card→probe projection data (T2.1).
 // Layouts must match DDGIProbeIrradianceFromCards.metal / .comp byte-for-byte:
 // ProbeCardContrib = 40B tight (card_index + 9 SH weights),
-// ProbeContribRange = 8B tight.
+// ProbeContribRange = 8B tight.  card_index is a flattened radiance-block
+// index (card * SC_CARD_BLOCK_COUNT + block), not a card index.
 // ============================================================================
+
+// Each Surface Cache card is represented by a fixed 4x4 radiance-block grid.
+// CardRadianceAvg samples a 2x2 texel footprint per block.  Keep these values
+// in one C++ header so the CPU assignment, readback diagnostics, and the GPU
+// shaders share the same flattened layout.
+constexpr u32 SC_CARD_BLOCK_GRID  = 4;
+constexpr u32 SC_CARD_BLOCK_COUNT = SC_CARD_BLOCK_GRID * SC_CARD_BLOCK_GRID;
+constexpr u32 SC_CARD_BLOCK_SAMPLES = 2;
 
 struct SCProbeCardContrib {
     u32  card_index;
@@ -80,6 +89,10 @@ private:
     };
 
     // GPU resources (created on first valid frame — counts come from the passes)
+    // UNITS: card_radiance_buf_ = DiffuseOutgoingRadiance（SC lighting_atlas
+    // 的卡片分块投影，CardRadianceAvg 产出；ProbeIrradianceFromCards 由此
+    // 合成探针 irradiance——注入侧，非能量叠加，见审计 §2.3）。
+    // Layout: max_cards_ * SC_CARD_BLOCK_COUNT vec4, xyz=radiance, w=coverage.
     rhi::ResourceHandle card_radiance_buf_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle probe_contrib_range_buf_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle flat_contrib_buf_{rhi::handles::INVALID_RESOURCE};
@@ -96,6 +109,12 @@ private:
     // ONCE, so after a rebuild the injection aggregated WRONG cards'
     // radiance — intermittent probe corruption. Track the count and rebuild.
     u32 assignment_card_count_ = 0;
+
+    // Phase 3（GI 能量所有权修复）: confidence 零 stand-in——PRIMAL_SC_
+    // INJECT_SETTLED=0 或 DDGI confidence 无效时绑定（settled=0 = 旧式注入）。
+    rhi::ResourceHandle confidence_standin_{rhi::handles::INVALID_RESOURCE};
+    // P2 二轮: 注入模式 UBO（float4，x=mode；PRIMAL_SC_INJECT_MODE 下发）。
+    rhi::ResourceHandle sc_inject_cb_{rhi::handles::INVALID_RESOURCE};
 
     // Debug (SC_DUMP_CARDS=1): staging copy of card_radiance_buf_ + the frame
     // its copy was enqueued; the print happens >=3 frames later so the copy

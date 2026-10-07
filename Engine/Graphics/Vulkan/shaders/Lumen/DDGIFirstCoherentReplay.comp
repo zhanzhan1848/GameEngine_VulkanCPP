@@ -1,0 +1,564 @@
+#version 450 core
+
+// DDGI_FIRST_COHERENT_REPLAY: private, default-off read-only replay.
+//
+// This entry consumes the completed 69-vec4 first-record proof, the resident
+// previous SH history, the actual 336-byte DDGI volume UBO, the query-source
+// descriptor already offset by 9*fullRayCapacity, and the complete hit-normal
+// audit buffer.  It writes only a private 32-vec4 result per fresh ray.  The
+// pass never writes a production DDGI resource and never changes the native
+// status or any production-accept decision.
+//
+// Binding 3 is intentionally the dense fresh query range.  The host binds the
+// same HN allocation at byte offset 9*fullRayCapacity*sizeof(vec4); adding
+// that prefix here would read the wrong range.
+
+#extension GL_GOOGLE_include_directive : require
+#include "ShaderLib/EvalLib.glsl"
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer FirstRecordBuf {
+    vec4 records[];
+} first_record;
+
+layout(set = 0, binding = 1, std430) readonly buffer PreviousHistoryBuf {
+    vec4 history[];
+} previous_history;
+
+// DDGIVolumeData UBO — exact 336-byte std140 layout used by Finalize.
+layout(set = 0, binding = 2, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88
+    uint  SCAtlasSize;              //  92
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    int   RaySampleMode;            // 108
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+    vec4  SkyColor;                 // 304
+    vec4  Albedo;                   // 320
+} volume;
+
+// The descriptor range for this binding starts at the query-source audit
+// prefix (9*fullRayCapacity vec4) on the host.  Shader indices are therefore
+// denseFreshRay*18 + {0..17}.
+layout(set = 0, binding = 3, std430) readonly buffer DenseFreshQueryBuf {
+    vec4 records[];
+} dense_fresh_query;
+
+// Full actual HN allocation: old HN at [0,fullRayCapacity), analytic
+// rho/sky/history at [fullRayCapacity, fullRayCapacity+4*freshRayCount).
+layout(set = 0, binding = 4, std430) readonly buffer ActualHitNormalBuf {
+    vec4 hit_normal[];
+} actual_hn;
+
+layout(set = 0, binding = 5, std430) writeonly buffer CoherentReplayOutputBuf {
+    vec4 records[];
+} replay_output;
+
+const uint DDGI_FIRST_COHERENT_RECORD_STRIDE = 69u;
+const uint DDGI_FIRST_COHERENT_QUERY_STRIDE = 18u;
+const uint DDGI_FIRST_COHERENT_OUTPUT_STRIDE = 32u;
+const uint DDGI_FIRST_COHERENT_BLOCK_STRIDE = 12u;
+const uint DDGI_FIRST_COHERENT_SCHEMA = 1u;
+const uint DDGI_FIRST_COHERENT_NAN_BITS = 0x7fc00000u;
+const uint DDGI_FIRST_COHERENT_INVALID_ID = 0xffffffffu;
+const float DDGI_FIRST_COHERENT_PI = 3.14159265358979;
+
+bool coherentFinite(float value) {
+    return !isnan(value) && !isinf(value);
+}
+
+bool coherentFiniteVec3(vec3 value) {
+    return coherentFinite(value.x) && coherentFinite(value.y) &&
+           coherentFinite(value.z);
+}
+
+bool coherentFiniteVec4(vec4 value) {
+    return coherentFinite(value.x) && coherentFinite(value.y) &&
+           coherentFinite(value.z) && coherentFinite(value.w);
+}
+
+bool coherentMulU32(uint a, uint b, out uint result) {
+    if (a != 0u && b > 0xffffffffu / a) {
+        result = 0u;
+        return false;
+    }
+    result = a * b;
+    return true;
+}
+
+bool coherentAddU32(uint a, uint b, out uint result) {
+    if (b > 0xffffffffu - a) {
+        result = 0u;
+        return false;
+    }
+    result = a + b;
+    return true;
+}
+
+bool coherentRangeFits(uint base, uint count, uint length) {
+    return base <= length && count <= length - base;
+}
+
+bool coherentFiniteInteger(float value, out uint result) {
+    if (!coherentFinite(value) || value < 0.0 || value != floor(value)) {
+        result = DDGI_FIRST_COHERENT_INVALID_ID;
+        return false;
+    }
+    result = uint(value);
+    if (float(result) != value) {
+        result = DDGI_FIRST_COHERENT_INVALID_ID;
+        return false;
+    }
+    return true;
+}
+
+float coherentQuietNaN() {
+    return uintBitsToFloat(DDGI_FIRST_COHERENT_NAN_BITS);
+}
+
+void coherentClearOutput(uint base) {
+    const float qnan = uintBitsToFloat(DDGI_FIRST_COHERENT_NAN_BITS);
+    for (uint i = 0u; i < DDGI_FIRST_COHERENT_OUTPUT_STRIDE; ++i)
+        replay_output.records[base + i] = vec4(qnan);
+}
+
+void coherentWriteInvalidIdentity(uint outputBase,
+                                  bool recordRow,
+                                  vec4 record0,
+                                  vec4 record1,
+                                  uint stampBits,
+                                  uint rayId,
+                                  uint nativeStatus) {
+    replay_output.records[outputBase + 0u] = vec4(
+        uintBitsToFloat(stampBits), uintBitsToFloat(rayId),
+        uintBitsToFloat(nativeStatus), uintBitsToFloat(DDGI_FIRST_COHERENT_SCHEMA));
+    replay_output.records[outputBase + 1u] = vec4(0.0);
+    if (recordRow) {
+        replay_output.records[outputBase + 2u] = record0;
+        replay_output.records[outputBase + 3u] = record1;
+    }
+}
+
+struct CoherentTetraResult {
+    uint pi[4];
+    float bw[4];
+};
+
+// This is the Finalize tetrahedral rule copied without changing branch order,
+// owner order, or the signed weights.
+CoherentTetraResult coherentTetrahedral(vec3 gp, uvec3 gd) {
+    CoherentTetraResult r;
+    uvec3 b0 = clamp(uvec3(floor(gp)), uvec3(0u), gd - 1u);
+    uvec3 b1 = min(b0 + 1u, gd - 1u);
+    uint gx = gd.x;
+    uint gxy = gd.x * gd.y;
+
+    uint p[8];
+    p[0] = b0.x + b0.y * gx + b0.z * gxy;
+    p[1] = b1.x + b0.y * gx + b0.z * gxy;
+    p[2] = b0.x + b1.y * gx + b0.z * gxy;
+    p[3] = b1.x + b1.y * gx + b0.z * gxy;
+    p[4] = b0.x + b0.y * gx + b1.z * gxy;
+    p[5] = b1.x + b0.y * gx + b1.z * gxy;
+    p[6] = b0.x + b1.y * gx + b1.z * gxy;
+    p[7] = b1.x + b1.y * gx + b1.z * gxy;
+
+    float fx = fract(gp.x);
+    float fy = fract(gp.y);
+    float fz = fract(gp.z);
+
+    if (fx >= fy && fy >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fy; r.bw[2] = fy - fz; r.bw[3] = fz;
+    } else if (fx >= fz && fz >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[1]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fx; r.bw[1] = fx - fz; r.bw[2] = fz - fy; r.bw[3] = fy;
+    } else if (fy >= fx && fx >= fz) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[3]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fx; r.bw[2] = fx - fz; r.bw[3] = fz;
+    } else if (fy >= fz && fz >= fx) {
+        r.pi[0] = p[0]; r.pi[1] = p[2]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fy; r.bw[1] = fy - fz; r.bw[2] = fz - fx; r.bw[3] = fx;
+    } else if (fz >= fx && fx >= fy) {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[5]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fx; r.bw[2] = fx - fy; r.bw[3] = fy;
+    } else {
+        r.pi[0] = p[0]; r.pi[1] = p[4]; r.pi[2] = p[6]; r.pi[3] = p[7];
+        r.bw[0] = 1.0 - fz; r.bw[1] = fz - fy; r.bw[2] = fy - fx; r.bw[3] = fx;
+    }
+    for (uint i = 0u; i < 4u; ++i) r.bw[i] = max(r.bw[i], 0.0);
+    return r;
+}
+
+struct CoherentSampleResult {
+    bool valid;
+    uint gridInside;
+    uint owners[4];
+    vec4 rawWeights;
+    vec3 gp;
+    float totalWeight;
+    uint activeCount;
+    vec3 lprev;
+    vec3 esky;
+    vec3 skyLo;
+    vec3 historyLo;
+    vec3 lo;
+};
+
+void coherentInitSample(out CoherentSampleResult result) {
+    result.valid = false;
+    result.gridInside = 0u;
+    for (uint i = 0u; i < 4u; ++i) result.owners[i] = DDGI_FIRST_COHERENT_INVALID_ID;
+    result.rawWeights = vec4(0.0);
+    result.gp = vec3(0.0);
+    result.totalWeight = 0.0;
+    result.activeCount = 0u;
+    result.lprev = vec3(0.0);
+    result.esky = vec3(0.0);
+    result.skyLo = vec3(0.0);
+    result.historyLo = vec3(0.0);
+    result.lo = vec3(0.0);
+}
+
+// Common Finalize sample rule: out-of-grid returns zero; weights below .001
+// are skipped; the signed SH result is divided by the active weight sum; no
+// depth or relocation-owner weighting is introduced here.
+bool coherentEvaluate(vec3 position, vec3 normal, vec3 rho,
+                      out CoherentSampleResult result) {
+    coherentInitSample(result);
+    if (!coherentFiniteVec3(position) || !coherentFiniteVec3(normal) ||
+        !coherentFiniteVec3(rho)) return false;
+
+    vec3 gp = (position - volume.ProbeOrigin.xyz) / volume.ProbeSpacing;
+    result.gp = gp;
+    // A non-finite grid coordinate is an unknown evaluation, not a finite
+    // out-of-grid point.  Keep the latter on the normal zero-history path.
+    if (!coherentFiniteVec3(gp)) return false;
+
+    vec3 gridMax = vec3(float(volume.ProbeCounts.x - 1u),
+                        float(volume.ProbeCounts.y - 1u),
+                        float(volume.ProbeCounts.z - 1u));
+    if (any(lessThan(gp, vec3(0.0))) || any(greaterThan(gp, gridMax))) {
+        result.valid = true;
+        result.esky = volume.SkyColor.xyz *
+                      (0.5 + 0.5 * max(0.0, normal.y)) * 0.3;
+        vec3 rhoOverPi = rho / DDGI_FIRST_COHERENT_PI;
+        result.skyLo = rhoOverPi * result.esky;
+        result.historyLo = vec3(0.0);
+        result.lo = result.skyLo;
+        return coherentFiniteVec3(result.esky) && coherentFiniteVec3(result.skyLo);
+    }
+
+    CoherentTetraResult tetra = coherentTetrahedral(gp, volume.ProbeCounts.xyz);
+    result.gridInside = 1u;
+    result.owners[0] = tetra.pi[0];
+    result.owners[1] = tetra.pi[1];
+    result.owners[2] = tetra.pi[2];
+    result.owners[3] = tetra.pi[3];
+    result.rawWeights = vec4(tetra.bw[0], tetra.bw[1], tetra.bw[2], tetra.bw[3]);
+
+    vec3 weightedSignedLprev = vec3(0.0);
+    float totalWeight = 0.0;
+    uint activeCount = 0u;
+    for (uint p = 0u; p < 4u; ++p) {
+        if (tetra.bw[p] < 0.001) continue;
+        ++activeCount;
+        uint base = tetra.pi[p] * 9u;
+        vec3 sh[9];
+        for (uint i = 0u; i < 9u; ++i) {
+            vec4 coefficient = previous_history.history[base + i];
+            if (!coherentFiniteVec4(coefficient)) return false;
+            sh[i] = coefficient.xyz;
+        }
+        vec3 evaluated = evalProbeRadianceSH9(sh, normal);
+        if (!coherentFiniteVec3(evaluated)) return false;
+        weightedSignedLprev += evaluated * tetra.bw[p];
+        totalWeight += tetra.bw[p];
+    }
+
+    result.totalWeight = totalWeight;
+    result.activeCount = activeCount;
+    result.lprev = totalWeight > 0.0
+        ? weightedSignedLprev / totalWeight : vec3(0.0);
+    result.esky = volume.SkyColor.xyz *
+                  (0.5 + 0.5 * max(0.0, normal.y)) * 0.3;
+    vec3 rhoOverPi = rho / DDGI_FIRST_COHERENT_PI;
+    result.skyLo = rhoOverPi * result.esky;
+    result.historyLo = rhoOverPi *
+                       (DDGI_FIRST_COHERENT_PI * result.lprev);
+    result.lo = rhoOverPi *
+                (result.esky + DDGI_FIRST_COHERENT_PI * result.lprev);
+    result.valid = coherentFiniteVec3(result.lprev) &&
+                   coherentFinite(result.totalWeight) &&
+                   coherentFiniteVec3(result.esky) &&
+                   coherentFiniteVec3(result.skyLo) &&
+                   coherentFiniteVec3(result.historyLo) &&
+                   coherentFiniteVec3(result.lo);
+    return result.valid;
+}
+
+void coherentWriteSample(uint base, vec3 position, vec3 normal, vec3 rho,
+                         float normalValid, vec4 baselineHistory,
+                         CoherentSampleResult result, bool copyHistory) {
+    replay_output.records[base + 0u] = vec4(position, float(result.gridInside));
+    replay_output.records[base + 1u] = vec4(normal, normalValid);
+    replay_output.records[base + 2u] = vec4(rho, 3.0);
+    replay_output.records[base + 3u] = vec4(result.skyLo, 1.0);
+    replay_output.records[base + 4u] = vec4(result.historyLo, 1.0);
+    replay_output.records[base + 5u] = vec4(result.lo, 1.0);
+    replay_output.records[base + 6u] = vec4(
+        uintBitsToFloat(result.owners[0]), uintBitsToFloat(result.owners[1]),
+        uintBitsToFloat(result.owners[2]), uintBitsToFloat(result.owners[3]));
+    replay_output.records[base + 7u] = result.rawWeights;
+    replay_output.records[base + 8u] = vec4(result.gp, result.totalWeight);
+    replay_output.records[base + 9u] = vec4(result.lprev, float(result.activeCount));
+    replay_output.records[base + 10u] = vec4(result.esky, 1.0);
+    if (copyHistory) replay_output.records[base + 11u] = baselineHistory;
+}
+
+bool coherentVolumeShape(out uint fullRayCapacity, out uint freshRayCount,
+                         out uint historyCount, out uint recordCount,
+                         out uint queryCount, out uint hnCount) {
+    fullRayCapacity = 0u;
+    freshRayCount = 0u;
+    historyCount = 0u;
+    recordCount = 0u;
+    queryCount = 0u;
+    hnCount = 0u;
+
+    if (volume.ProbeCounts.x == 0u || volume.ProbeCounts.y == 0u ||
+        volume.ProbeCounts.z == 0u || volume.ProbeCountTotal == 0u ||
+        volume.RaysPerProbe == 0u || volume.ProbeUpdateCount == 0u ||
+        volume.ProbeUpdateCount > volume.ProbeCountTotal ||
+        !coherentFiniteVec4(volume.ProbeOrigin) ||
+        !coherentFinite(volume.ProbeSpacing) || volume.ProbeSpacing <= 0.0 ||
+        !coherentFiniteVec4(volume.SkyColor) || volume.SkyColor.w != 0.0)
+        return false;
+
+    uint xy = 0u;
+    uint product = 0u;
+    if (!coherentMulU32(volume.ProbeCounts.x, volume.ProbeCounts.y, xy) ||
+        !coherentMulU32(xy, volume.ProbeCounts.z, product) ||
+        product != volume.ProbeCountTotal)
+        return false;
+    if (!coherentMulU32(volume.ProbeCountTotal, volume.RaysPerProbe,
+                        fullRayCapacity) ||
+        !coherentMulU32(volume.ProbeUpdateCount, volume.RaysPerProbe,
+                        freshRayCount) || freshRayCount == 0u)
+        return false;
+    if (!coherentMulU32(volume.ProbeCountTotal, 9u, historyCount) ||
+        !coherentMulU32(freshRayCount, DDGI_FIRST_COHERENT_RECORD_STRIDE,
+                        recordCount) ||
+        !coherentMulU32(freshRayCount, DDGI_FIRST_COHERENT_QUERY_STRIDE,
+                        queryCount) ||
+        !coherentMulU32(fullRayCapacity, 27u, hnCount))
+        return false;
+
+    return previous_history.history.length() == historyCount &&
+           first_record.records.length() == recordCount &&
+           dense_fresh_query.records.length() == queryCount &&
+           actual_hn.hit_normal.length() == hnCount;
+}
+
+void ddgi_first_coherent_replay_impl() {
+    uint freshRayCount = 0u;
+    if (!coherentMulU32(volume.ProbeUpdateCount, volume.RaysPerProbe,
+                        freshRayCount) || freshRayCount == 0u)
+        return;
+    uint dense = gl_GlobalInvocationID.x;
+    if (dense >= freshRayCount) return;
+
+    uint outputBase = 0u;
+    if (!coherentMulU32(dense, DDGI_FIRST_COHERENT_OUTPUT_STRIDE, outputBase) ||
+        !coherentRangeFits(outputBase, DDGI_FIRST_COHERENT_OUTPUT_STRIDE,
+                           replay_output.records.length()))
+        return;
+    coherentClearOutput(outputBase);
+
+    uint recordBase = 0u;
+    uint queryBase = 0u;
+    bool recordBaseOk = coherentMulU32(dense, DDGI_FIRST_COHERENT_RECORD_STRIDE,
+                                       recordBase);
+    bool queryBaseOk = coherentMulU32(dense, DDGI_FIRST_COHERENT_QUERY_STRIDE,
+                                      queryBase);
+    bool recordRow = recordBaseOk && coherentRangeFits(
+        recordBase, DDGI_FIRST_COHERENT_RECORD_STRIDE,
+        first_record.records.length());
+    bool queryRow = queryBaseOk && coherentRangeFits(
+        queryBase, DDGI_FIRST_COHERENT_QUERY_STRIDE,
+        dense_fresh_query.records.length());
+
+    vec4 record0 = vec4(0.0);
+    vec4 record1 = vec4(0.0);
+    uint stampBits = DDGI_FIRST_COHERENT_INVALID_ID;
+    uint rayId = DDGI_FIRST_COHERENT_INVALID_ID;
+    uint nativeStatus = DDGI_FIRST_COHERENT_INVALID_ID;
+    if (recordRow) {
+        record0 = first_record.records[recordBase + 0u];
+        record1 = first_record.records[recordBase + 1u];
+        stampBits = floatBitsToUint(record0.w);
+        nativeStatus = floatBitsToUint(first_record.records[recordBase + 38u].w);
+        uint rayPlusOne = DDGI_FIRST_COHERENT_INVALID_ID;
+        if (coherentFiniteInteger(record1.w, rayPlusOne) && rayPlusOne > 0u)
+            rayId = rayPlusOne - 1u;
+    }
+    coherentWriteInvalidIdentity(outputBase, recordRow, record0, record1,
+                                 stampBits, rayId, nativeStatus);
+    if (recordRow) {
+        // These four source echoes are row identity, not an eligibility
+        // result.  Keep them for every fresh row, including non-target and
+        // rejected rows, so the host can prove the replay consumed the
+        // resident fields verbatim.
+        replay_output.records[outputBase + 28u] = first_record.records[recordBase + 6u];
+        replay_output.records[outputBase + 29u] = first_record.records[recordBase + 33u];
+        replay_output.records[outputBase + 30u] = first_record.records[recordBase + 40u];
+        replay_output.records[outputBase + 31u] = first_record.records[recordBase + 41u];
+    }
+
+    uint fullRayCapacity = 0u;
+    uint checkedFreshRayCount = 0u;
+    uint historyCount = 0u;
+    uint recordCount = 0u;
+    uint queryCount = 0u;
+    uint hnCount = 0u;
+    if (!coherentVolumeShape(fullRayCapacity, checkedFreshRayCount,
+                             historyCount, recordCount, queryCount, hnCount) ||
+        checkedFreshRayCount != freshRayCount || !recordRow || !queryRow)
+        return;
+
+    vec4 query0 = dense_fresh_query.records[queryBase + 0u];
+    vec4 query1 = dense_fresh_query.records[queryBase + 1u];
+    uint ray = dense % volume.RaysPerProbe;
+    uint expectedProbePlusOne = 0u;
+    uint probe = 0u;
+    bool rayPlusOneOk = false;
+    uint recordRayPlusOne = DDGI_FIRST_COHERENT_INVALID_ID;
+    uint queryRayPlusOne = DDGI_FIRST_COHERENT_INVALID_ID;
+    rayPlusOneOk = coherentFiniteInteger(record1.w, recordRayPlusOne) &&
+                   coherentFiniteInteger(query1.w, queryRayPlusOne) &&
+                   recordRayPlusOne == ray + 1u &&
+                   queryRayPlusOne == ray + 1u;
+    bool recordFinite = coherentFiniteVec3(record0.xyz) &&
+                        coherentFiniteVec3(record1.xyz) &&
+                        coherentFinite(record1.w);
+    bool queryFinite = coherentFiniteVec3(query0.xyz) &&
+                       coherentFinite(query1.w);
+
+    uint recordStamp = floatBitsToUint(record0.w);
+    uint queryStamp = floatBitsToUint(query0.w);
+    uint frameLo = volume.FrameIndex & 0xffffu;
+    uint probePlusOne = recordStamp & 0xffffu;
+    bool stampProbeOk = probePlusOne > 0u;
+    if (stampProbeOk) {
+        probe = probePlusOne - 1u;
+        expectedProbePlusOne = (probe < 0xffffu) ? probe + 1u : 0u;
+    }
+    bool targetProbe = probe == 409u || probe == 410u || probe == 507u;
+    bool identityOk = recordFinite && queryFinite && rayPlusOneOk &&
+                      stampProbeOk && probe < volume.ProbeCountTotal &&
+                      expectedProbePlusOne == probePlusOne &&
+                      (recordStamp >> 16u) == frameLo &&
+                      queryStamp == recordStamp;
+
+    if (!identityOk) return;
+
+    uint rhoStatus = floatBitsToUint(first_record.records[recordBase + 4u].y);
+    bool pathThree = coherentFinite(first_record.records[recordBase + 5u].w) &&
+                     first_record.records[recordBase + 5u].w == 3.0;
+    bool baselineEligible = targetProbe && pathThree && rhoStatus == 12u;
+
+    bool runtimeDomain = floatBitsToUint(first_record.records[recordBase + 44u].y) == 1u &&
+                         floatBitsToUint(first_record.records[recordBase + 44u].z) == 1u;
+    bool runtimeMath = coherentFinite(first_record.records[recordBase + 43u].w) &&
+                       first_record.records[recordBase + 43u].w == 1.0;
+
+    // Eligibility and runtime evidence are independent row fields.  In
+    // particular, a fresh row outside the fixed 409/410/507 target still
+    // reports the raw domain/math bits while retaining NaN replay blocks.
+    replay_output.records[outputBase + 1u] = vec4(
+        baselineEligible ? 1.0 : 0.0,
+        0.0,
+        runtimeDomain ? 1.0 : 0.0,
+        runtimeMath ? 1.0 : 0.0);
+
+    uint historyBase = fullRayCapacity + 4u * dense;
+    if (historyBase < fullRayCapacity || !coherentRangeFits(
+            historyBase, 4u, actual_hn.hit_normal.length()))
+        return;
+    vec4 oldHn = actual_hn.hit_normal[dense];
+    vec4 oldRhoRecord = actual_hn.hit_normal[historyBase + 0u];
+    vec4 oldBaselineHistory = actual_hn.hit_normal[historyBase + 2u];
+    if (!coherentFiniteVec4(oldHn) || !coherentFiniteVec4(oldRhoRecord) ||
+        !coherentFiniteVec4(oldBaselineHistory))
+        return;
+
+    // Flags are written only after all required input guards pass.  No old
+    // field is substituted for a missing query, stale stamp, or invalid row.
+    vec3 oldNormal = -record1.xyz;
+    float oldNormalValid = 0.0;
+    float oldHnLength2 = dot(oldHn.xyz, oldHn.xyz);
+    if (oldHn.w > 0.5 && oldHnLength2 > 0.25) {
+        oldNormal = normalize(oldHn.xyz);
+        oldNormalValid = coherentFiniteVec3(oldNormal) ? 1.0 : 0.0;
+    }
+    vec3 oldPosition = query0.xyz;
+    vec3 oldRho = oldRhoRecord.xyz;
+    bool oldInputsFinite = coherentFiniteVec3(oldNormal) &&
+                           coherentFiniteVec3(oldPosition) &&
+                           coherentFiniteVec3(oldRho);
+    if (!oldInputsFinite || !baselineEligible) {
+        if (!oldInputsFinite) replay_output.records[outputBase + 1u] = vec4(0.0);
+        return;
+    }
+
+    CoherentSampleResult oldSample;
+    if (!coherentEvaluate(oldPosition, oldNormal, oldRho, oldSample)) {
+        replay_output.records[outputBase + 1u] = vec4(0.0);
+        return;
+    }
+    coherentWriteSample(outputBase + 4u, oldPosition, oldNormal, oldRho,
+                        oldNormalValid, oldBaselineHistory, oldSample, true);
+
+    bool newInputsFinite = runtimeDomain && runtimeMath &&
+        coherentFiniteVec3(first_record.records[recordBase + 40u].xyz) &&
+        coherentFiniteVec3(first_record.records[recordBase + 33u].xyz) &&
+        coherentFiniteVec3(first_record.records[recordBase + 6u].xyz);
+    if (!newInputsFinite) return;
+
+    vec3 newPosition = first_record.records[recordBase + 40u].xyz;
+    vec3 newNormal = first_record.records[recordBase + 33u].xyz;
+    vec3 newRho = first_record.records[recordBase + 6u].xyz;
+    CoherentSampleResult newSample;
+    if (!coherentEvaluate(newPosition, newNormal, newRho, newSample)) return;
+
+    coherentWriteSample(outputBase + 16u, newPosition, newNormal, newRho,
+                        0.0, vec4(coherentQuietNaN()), newSample, false);
+    replay_output.records[outputBase + 1u].y = 1.0;
+}
+
+void main() {
+    ddgi_first_coherent_replay_impl();
+}

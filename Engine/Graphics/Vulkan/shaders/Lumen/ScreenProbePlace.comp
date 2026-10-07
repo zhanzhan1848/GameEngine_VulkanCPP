@@ -6,18 +6,34 @@
 // GBuffer depth/normal at its center to determine its world position. Sky
 // pixels (depth ~0 or very far) are marked inactive (w = 0).
 //
-// ThreadGroupSize: (64, 1, 1), 1D dispatch.
+// SPGI probe-distribution plan (Docs/2026-09-21-spgi-probe-distribution-
+// optimization-plan.md):
+//   P0  representative pixel — 5 candidates (tile center ± half-cell),
+//       median-depth + normal-consistency scoring picks the pixel whose
+//       surface the tile's GI actually describes (mixed tiles no longer
+//       land on the wrong depth face). repr_params gates it.
+//   P1  F4 interpolation-failure test gains a normal term — the 4 edge
+//       neighbor coarse probes' normals must agree with the center (wall/
+//       column foot previously slipped through the position-only gate).
+//   P2  tier3 slot layout: probeIdx = tileIdx*4 + slot. slot0 = coarse
+//       (representative pixel, always active on non-sky tiles); slots 1..3
+//       = quadrant probes at tile-relative (0.25,0.25)/(0.75,0.25)/
+//       (0.75,0.75), activated by their own position/normal gates (+P3
+//       lighting-variance mask). Checkerboard is retired in tier3 — every
+//       tile carries slot0 and the compact pass packs the active slots.
+//   P3  tileLightVar mask (ScreenProbeLightVar pass) forces quadrant slots
+//       on flat-but-high-variance tiles (sun/shadow boundaries).
+//
+// ThreadGroupSize: (64, 1, 1), 1D dispatch over tiles (tier3 off) or
+// tile*4 slots (tier3 on).
 //
 // Flat descriptor bindings (Vulkan — no overlapping Metal namespaces):
 //   binding 0 = texture2D   depthTexture  (sampled, texelFetch nearest)
 //   binding 1 = texture2D   normalTexture (sampled, texelFetch nearest)
-//   binding 2 = SSBO write  probePositions[]
-//   binding 3 = SSBO write  probeNormals[]
-//   binding 4 = UBO         ScreenProbeGlobalData (352B, inline)
-//
-// Metal buffer mapping note: Metal uses buffer(0)/buffer(1) for positions/
-// normals, buffer(3) for global (skips buffer(2)). Vulkan flat layout:
-// depth=0, normal=1, positions=2, normals=3, global=4.
+//   binding 2 = SSBO write  probePositions[]  (tile or slot indexed)
+//   binding 3 = SSBO write  probeNormals[]    (w = tier ray count in tier3)
+//   binding 4 = UBO         ScreenProbeGlobalData (528B, inline)
+//   binding 5 = SSBO read   tileLightVar[] (P3 mask; dummy when P3 off)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 #extension GL_GOOGLE_include_directive : require
@@ -41,7 +57,11 @@ layout(set = 0, binding = 3, std430) writeonly buffer ProbeNormalsBlock {
     vec4 data[];
 } probeNormals;
 
-// ScreenProbeGlobalData UBO — 416 bytes, mirrors C++ struct.
+layout(set = 0, binding = 5, std430) readonly buffer TileLightVarBlock {
+    uint data[];
+} tileLightVar;
+
+// ScreenProbeGlobalData UBO — 528 bytes, mirrors C++ struct.
 // Declared inline per established pattern (see SSAOTrace.comp).
 layout(set = 0, binding = 4, std140) uniform GlobalBlock {
     mat4 view_projection;
@@ -57,6 +77,20 @@ layout(set = 0, binding = 4, std140) uniform GlobalBlock {
     vec4 ddgi_fb[2];             // offset 352; preserve the C++ layout even when unused
     vec4 hzb_params;             // offset 384 (unused here)
     vec4 cache_params;           // offset 400: z = adaptive_pos_error threshold (0 → legacy variance test)
+    vec4 diag_params;            // offset 416 (unused here)
+    vec4 hint_params;            // offset 432 (unused here)
+    vec4 sky_params;             // offset 448 (unused here)
+    vec4 wrc_fb[2];              // offset 464 (unused here)
+    // SPGI distribution plan tail (offset 496):
+    //   x = P0 representative pixel enable (PRIMAL_SPGI_PLACE_REPR)
+    //   y = P0 depth weight w_d (1.0)
+    //   z = P0 normal weight w_n (0.5)
+    //   w = P1 F4 normal-term enable (PRIMAL_SPGI_ADAPTIVE_NORMAL)
+    vec4 repr_params;
+    // offset 512: x = tier3 slot layout (PRIMAL_SPGI_TIER3),
+    //             y = P1/P2 quadrant normal threshold T_n (0.85),
+    //             z = unused here, w = unused here.
+    vec4 tier_params;
 } global;
 
 // --------------------------------------------------------------------------------
@@ -71,6 +105,50 @@ vec3 reconstructWorldPos(vec2 uv, float depth, mat4 invVP) {
     return worldPos.xyz / worldPos.w;
 }
 
+ivec2 clampTexel(vec2 pixel, float renderW, float renderH) {
+    return ivec2(clamp(pixel, vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
+}
+
+bool depthValid(float d) { return d > 0.0001 && d < 0.999; }
+
+// --------------------------------------------------------------------------------
+// P0: representative-pixel scoring over the 5 candidates. Input: candidate
+// depths (texel order: center, -X, +X, -Y, +Y). Returns the candidate index
+// minimizing w_d·|z − z_med| + w_n·(1 − dot(N_p, N_med)); sky candidates are
+// excluded from both the median and the argmin. -1 when every candidate is sky.
+// --------------------------------------------------------------------------------
+int pickRepresentative(float d0, float d1, float d2, float d3, float d4,
+                       ivec2 t0, ivec2 t1, ivec2 t2, ivec2 t3, ivec2 t4,
+                       float wDepth, float wNormal, float renderW, float renderH) {
+    float d[5] = float[5](d0, d1, d2, d3, d4);
+    ivec2 t[5] = ivec2[5](t0, t1, t2, t3, t4);
+
+    // Collect valid candidates; median of their depths (insertion sort, ≤5).
+    float zd[5]; int idx[5]; int n = 0;
+    for (int i = 0; i < 5; ++i) {
+        if (!depthValid(d[i])) continue;
+        int j = n - 1;
+        while (j >= 0 && zd[j] > d[i]) { zd[j + 1] = zd[j]; idx[j + 1] = idx[j]; --j; }
+        zd[j + 1] = d[i]; idx[j + 1] = i; ++n;
+    }
+    if (n == 0) return -1;
+    float zMed = zd[n / 2];
+
+    // N_med = normal at the median-depth candidate (1 fetch).
+    vec3 nMed = normalize(texelFetch(normalTexture, t[idx[n / 2]], 0).rgb * 2.0 - 1.0);
+
+    int best = -1;
+    float bestCost = 3.4e38;
+    for (int i = 0; i < 5; ++i) {
+        if (!depthValid(d[i])) continue;
+        vec3 np = normalize(texelFetch(normalTexture, t[i], 0).rgb * 2.0 - 1.0);
+        float cost = wDepth * abs(d[i] - zMed)
+                   + wNormal * (1.0 - max(dot(np, nMed), 0.0));
+        if (cost < bestCost) { bestCost = cost; best = i; }
+    }
+    return best;
+}
+
 // --------------------------------------------------------------------------------
 // Main
 // --------------------------------------------------------------------------------
@@ -79,13 +157,18 @@ void screen_probe_place() {
 
     uint gridW = uint(global.grid_params.x);
     uint gridH = uint(global.grid_params.y);
-    uint totalProbes = gridW * gridH;
+    uint totalTiles = gridW * gridH;
 
-    if (global_id >= totalProbes) return;
+    const bool tier3 = global.tier_params.x > 0.5;
+    uint totalSlots = tier3 ? totalTiles * 4u : totalTiles;
+    if (global_id >= totalSlots) return;
 
-    // Compute 2D grid coordinates from 1D index
-    uint gx = global_id % gridW;
-    uint gy = global_id / gridW;
+    uint slot = 0u;
+    uint tileIdx = global_id;
+    if (tier3) { slot = global_id & 3u; tileIdx = global_id >> 2u; }
+
+    uint gx = tileIdx % gridW;
+    uint gy = tileIdx / gridW;
 
     float downsample = global.grid_params.z;
     float renderW = global.trace_params.z;
@@ -93,71 +176,162 @@ void screen_probe_place() {
 
     uint probeIdx = global_id;
 
-    // Screen-space center of this probe
+    float frameSeed = global.camera_position.w;
+    float jitterMaxWorld = global.surface_cache_params.w;
+    uint gridRays = uint(global.grid_params.w);
+
+    // =====================================================================
+    // Quadrant slots (tier3, slots 1..3): quadrant center + own position /
+    // normal gates. Read budget ≈ 6 (2 depth + 2 normal + mask + resample).
+    // =====================================================================
+    if (tier3 && slot != 0u) {
+        // Quadrant centers, tile-relative pixel offsets: (0.25,0.25),
+        // (0.75,0.25), (0.75,0.75) for slots 1..3.
+        vec2 quadOff = vec2(0.25, 0.25);
+        if (slot == 2u) quadOff = vec2(0.75, 0.25);
+        else if (slot == 3u) quadOff = vec2(0.75, 0.75);
+        vec2 pixelCenter = vec2(gx * downsample, gy * downsample) + quadOff * downsample;
+
+        vec2 jitterPx = (frameSeed >= 0.0 && jitterMaxWorld > 0.0)
+            ? spgiJitterOffset01(probeIdx, frameSeed) * (downsample * 0.25)
+            : vec2(0.0);
+        vec2 pixel = pixelCenter + jitterPx;
+
+        ivec2 texel = clampTexel(pixel, renderW, renderH);
+        float depth = texelFetch(depthTexture, texel, 0).r;
+
+        bool isActive = depthValid(depth);
+        if (isActive) {
+            // World-position gate against the tile anchor (tile center).
+            ivec2 anchorTexel = clampTexel(vec2(gx * downsample + downsample * 0.5,
+                                                gy * downsample + downsample * 0.5),
+                                           renderW, renderH);
+            float anchorDepth = texelFetch(depthTexture, anchorTexel, 0).r;
+            if (depthValid(anchorDepth)) {
+                vec2 anchorUV = (vec2(anchorTexel) + 0.5) / vec2(renderW, renderH);
+                vec3 anchorPos = reconstructWorldPos(anchorUV, anchorDepth,
+                                                     global.inv_view_projection);
+                vec2 uv = pixel / vec2(renderW, renderH);
+                vec3 worldPos = reconstructWorldPos(uv, depth, global.inv_view_projection);
+                // Same threshold knob as the F4 tile-level test; quadrants
+                // sit half a cell from the anchor so the same world-space
+                // budget applies.
+                isActive = distance(worldPos, anchorPos) > global.cache_params.z;
+
+                // Normal gate (P1 threshold, shared with the F4 path).
+                if (!isActive && global.tier_params.y > 0.0) {
+                    vec3 nQ = normalize(texelFetch(normalTexture, texel, 0).rgb * 2.0 - 1.0);
+                    vec3 nA = normalize(texelFetch(normalTexture, anchorTexel, 0).rgb * 2.0 - 1.0);
+                    isActive = dot(nQ, nA) < global.tier_params.y;
+                }
+            } else {
+                // Anchor on sky — quadrant decides alone on validity.
+                isActive = true;
+            }
+            // P3: lighting-variance mask forces quadrant probes on flat but
+            // high-variance tiles (sun/shadow boundary crossing).
+            if (!isActive && global.tier_params.z > 0.5) {
+                isActive = tileLightVar.data[tileIdx] != 0u;
+            }
+        }
+
+        if (!isActive) {
+            probePositions.data[probeIdx] = vec4(0.0);
+            probeNormals.data[probeIdx] = vec4(0.0);
+            return;
+        }
+
+        vec2 uv = pixel / vec2(renderW, renderH);
+        vec3 worldPos = reconstructWorldPos(uv, depth, global.inv_view_projection);
+        vec3 normal = normalize(texelFetch(normalTexture, texel, 0).rgb * 2.0 - 1.0);
+        // normals.w carries the slot's ray tier when PRIMAL_SPGI_TIER_RAYS=1
+        // (quadrant slots = 32; coarse keeps 16); tier rays off → full budget.
+        // It doubles as the validity flag (> 0).
+        float tierRays = global.tier_params.w > 0.5 ? 32.0 : float(gridRays);
+        probePositions.data[probeIdx] = vec4(worldPos, 1.0);
+        probeNormals.data[probeIdx] = vec4(normal, tierRays);
+        return;
+    }
+
+    // =====================================================================
+    // Coarse slot (slot0; the only slot when tier3 is off). Representative
+    // pixel (P0) → jitter + world clamp (F5) → fine-tier gate (F4 + P1)
+    // exactly as the pre-plan path when tier3 is off.
+    // =====================================================================
     vec2 pixelCenter = vec2(gx * downsample + downsample * 0.5,
                             gy * downsample + downsample * 0.5);
 
     // ------------------------------------------------------------------
-    // F5 (M7) per-frame position jitter: quarter-cell screen offset,
-    // world-space clamped so the Temporal pass's position-consistency gate
-    // (posThreshold) never rejects a probe solely because it moved by the
-    // jitter. camera_position.w = frame seed (< 0 disables);
-    // surface_cache_params.w = jitter_max_world (<= 0 disables).
-    // Read budget: +1 depth (center) + up to +1 resampled depth on the rare
-    // clamp path — worst case 13 device reads/thread, within the 32 cap.
+    // P0 representative pixel: 5 candidates = tile center ± half-cell.
+    // POINT sampling everywhere (linear depth ghosts at edges). Read
+    // budget: 5 depth + 1 N_med + ≤4 candidate normals.
     // ------------------------------------------------------------------
-    float frameSeed = global.camera_position.w;
-    float jitterMaxWorld = global.surface_cache_params.w;
+    ivec2 repTexel = clampTexel(pixelCenter, renderW, renderH);
+    float repDepth = texelFetch(depthTexture, repTexel, 0).r;
+    if (global.repr_params.x > 0.5) {
+        float halfCell = downsample * 0.5;
+        vec2 offsets[5] = vec2[5](vec2(0.0), vec2(-halfCell, 0.0), vec2(halfCell, 0.0),
+                                  vec2(0.0, -halfCell), vec2(0.0, halfCell));
+        float cd[5]; ivec2 ct[5];
+        for (int i = 0; i < 5; ++i) {
+            ct[i] = clampTexel(pixelCenter + offsets[i], renderW, renderH);
+            cd[i] = texelFetch(depthTexture, ct[i], 0).r;
+        }
+        int pick = pickRepresentative(cd[0], cd[1], cd[2], cd[3], cd[4],
+                                      ct[0], ct[1], ct[2], ct[3], ct[4],
+                                      global.repr_params.y, global.repr_params.z,
+                                      renderW, renderH);
+        if (pick < 0) {
+            // All-sky tile — current semantics: inactive.
+            probePositions.data[probeIdx] = vec4(0.0);
+            probeNormals.data[probeIdx] = vec4(0.0);
+            return;
+        }
+        repTexel = ct[pick];
+        repDepth = cd[pick];
+        pixelCenter = vec2(repTexel) + 0.5;   // jitter now orbits p*
+    }
+
+    // ------------------------------------------------------------------
+    // F5 (M7) per-frame position jitter around the representative pixel:
+    // quarter-cell screen offset, world-space clamped so the Temporal
+    // pass's position-consistency gate (posThreshold) never rejects a
+    // probe solely because it moved by the jitter.
+    // ------------------------------------------------------------------
     vec2 jitterPx = (frameSeed >= 0.0 && jitterMaxWorld > 0.0)
         ? spgiJitterOffset01(probeIdx, frameSeed) * (downsample * 0.25)
         : vec2(0.0);
 
     vec2 pixel = pixelCenter + jitterPx;
-
-    // UV coordinates [0, 1]
     vec2 uv = pixel / vec2(renderW, renderH);
-
-    // Sample depth with POINT filtering — linear interpolation on depth
-    // produces ghost values at object edges, creating floating probes.
-    ivec2 depthTexel = ivec2(clamp(uv * vec2(renderW, renderH),
-                                   vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
+    ivec2 depthTexel = clampTexel(pixel, renderW, renderH);
     float depth = texelFetch(depthTexture, depthTexel, 0).r;
 
-    // World-space amplitude clamp: nearby surfaces turn a few pixels of
-    // screen offset into a large world offset — shrink the jitter (and
-    // re-sample) so it stays under the temporal gate budget.
+    // World-space amplitude clamp (re-sample on the rare clamp path).
     if (jitterPx != vec2(0.0)) {
-        ivec2 centerTexel = ivec2(clamp(pixelCenter,
-                                        vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
-        float depthC = texelFetch(depthTexture, centerTexel, 0).r;
-        vec3 worldC = reconstructWorldPos(pixelCenter / vec2(renderW, renderH),
-                                          depthC, global.inv_view_projection);
+        float depthC = texelFetch(depthTexture, repTexel, 0).r;
+        vec2 repUV = (vec2(repTexel) + 0.5) / vec2(renderW, renderH);
+        vec3 worldC = reconstructWorldPos(repUV, depthC, global.inv_view_projection);
         vec3 worldJ = reconstructWorldPos(uv, depth, global.inv_view_projection);
         float delta = distance(worldC, worldJ);
         if (delta > jitterMaxWorld) {
             pixel = pixelCenter + jitterPx * (jitterMaxWorld / max(delta, 1e-5));
             uv = pixel / vec2(renderW, renderH);
-            depthTexel = ivec2(clamp(pixel,
-                                     vec2(0.0), vec2(renderW - 1.0, renderH - 1.0)));
+            depthTexel = clampTexel(pixel, renderW, renderH);
             depth = texelFetch(depthTexture, depthTexel, 0).r;
         }
     }
 
-    // Check for sky / far plane ('active' is a GLSL reserved word -> use isActive)
-    bool isActive = (depth > 0.0001 && depth < 0.999);
+    bool isActive = depthValid(depth);
 
     // ------------------------------------------------------------------
-    // T5.3 two-level adaptive grid + F4 (M7) refinement: checkerboard
-    // coarse tier always active; fine-tier activation driven by the UE-style
-    // interpolation-failure test — reconstruct the center's world position
-    // by bilinear blend of the 4 edge-neighbor COARSE probes' depth-
-    // reprojected positions; a large error means the bilinear Gather
-    // reconstruction would be wrong here. cache_params.z <= 0 falls back to
-    // the T5.3 depth/normal variance heuristic.
-    // Read budget: F4 path 4 depth fetches (legacy path: 8) — worst case
-    // with jitter 13 device reads/thread, within the 32 cap.
+    // Fine-tier gate (tier3 off only — tier3 slot0 is unconditional).
+    // F4: world-position interpolation failure from the 4 edge-neighbor
+    // coarse probes. P1: normal term — the same neighbors' normals must
+    // agree with the center (wall/column foot). cache_params.z <= 0 falls
+    // back to the T5.3 depth/normal variance heuristic.
     // ------------------------------------------------------------------
-    if (isActive && ((gx + gy) & 1u) != 0u) {
+    if (isActive && !tier3 && ((gx + gy) & 1u) != 0u) {
         bool highVariance;
         float posErrThresh = global.cache_params.z;
         if (posErrThresh > 0.0) {
@@ -176,8 +350,6 @@ void screen_probe_place() {
                                   ivec2(0), maxTexel);
                 float d = texelFetch(depthTexture, tex, 0).r;
                 if (d <= 0.0001 || d >= 0.999) {
-                    // Sky/invalid coarse neighbor — interpolation cannot be
-                    // trusted across a depth discontinuity: activate.
                     interpFailed = true;
                     break;
                 }
@@ -186,10 +358,25 @@ void screen_probe_place() {
                 wsum += 0.25;
             }
             if (!interpFailed && wsum > 0.0) {
-                // Partial neighborhoods (screen edge) loosen the threshold
-                // proportionally to the missing weight.
                 float scale = 1.0 + (1.0 - wsum);
                 interpFailed = distance(acc / wsum, posC) > posErrThresh * scale;
+            }
+            // P1: normal term — a ~90° normal jump across the tile (wall/
+            // column foot) means bilinear SH reconstruction would blur two
+            // surfaces even when positions agree. T_n = tier_params.y.
+            if (!interpFailed && wsum > 0.0 && global.repr_params.w > 0.5) {
+                vec3 nC = normalize(texelFetch(normalTexture, depthTexel, 0).rgb * 2.0 - 1.0);
+                float minNDot = 1.0;
+                for (int i = 0; i < 4; ++i) {
+                    ivec2 cc = ncell[i];
+                    if (cc.x < 0 || cc.y < 0 || cc.x >= int(gridW) || cc.y >= int(gridH)) continue;
+                    ivec2 tex = clamp(ivec2(cc.x * int(downsample) + int(downsample) / 2,
+                                            cc.y * int(downsample) + int(downsample) / 2),
+                                      ivec2(0), maxTexel);
+                    vec3 n = normalize(texelFetch(normalTexture, tex, 0).rgb * 2.0 - 1.0);
+                    minNDot = min(minNDot, dot(nC, n));
+                }
+                interpFailed = minNDot < global.tier_params.y;
             }
             highVariance = interpFailed || (wsum <= 0.0);
         } else {
@@ -219,7 +406,6 @@ void screen_probe_place() {
     }
 
     if (!isActive) {
-        // Mark as inactive: position = (0,0,0,0), normal = (0,0,0,0)
         probePositions.data[probeIdx] = vec4(0.0, 0.0, 0.0, 0.0);
         probeNormals.data[probeIdx]   = vec4(0.0, 0.0, 0.0, 0.0);
         return;
@@ -233,7 +419,12 @@ void screen_probe_place() {
     vec3 normal = texelFetch(normalTexture, depthTexel, 0).rgb;
     normal = normalize(normal * 2.0 - 1.0);
 
-    // Write outputs: w = 1.0 = active flag
+    // Coarse slot: 16 rays under P4 tier rays (fine slots carry 32; the
+    // full budget = grid_params.w is the remainder tier), exact legacy
+    // values when tier rays are off. tier3 off writes the legacy 1.0 flag —
+    // the rollback path stays bit-identical (w is only a > 0 validity bit
+    // outside tier3).
+    float tierRays = tier3 ? ((global.tier_params.w > 0.5) ? 16.0 : float(gridRays)) : 1.0;
     probePositions.data[probeIdx] = vec4(worldPos, 1.0);
-    probeNormals.data[probeIdx]   = vec4(normal, 1.0);
+    probeNormals.data[probeIdx]   = vec4(normal, tierRays);
 }

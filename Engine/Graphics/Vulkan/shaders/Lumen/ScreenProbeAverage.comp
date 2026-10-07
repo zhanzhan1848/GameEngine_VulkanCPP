@@ -51,6 +51,17 @@ layout(set = 0, binding = 2, std140) uniform AvgConstantsBlock {
     uint raysPerProbe;
     float frameSeed;   // F5: same value as camera_position.w (< 0 disables)
     float isMode;      // F2: importance resampling on/off (matches cache_params.y)
+    // P2/P4 tail (std140 pads the block to 48B):
+    uint tier3Mode;    // 1 = slot layout + compacted radiance indirection
+    uint tierRaysMode; // 1 = respect per-slot ray tier (normals.w)
+    uint sh2CheckMode; // [P4] 1 = 写 SH2 重建误差统计（binding 6）
+    uint pad0;
+    // [②K-4 2026-09-21] 纯天空探针 confidence 地板（根治 Phase 3 条目 4）：
+    // hitRatio≈0 的探针 SH 全是解析天空/回退辐射（非测量 bounce），gather
+    // 权重按此地板降档——天空能量不再与几何命中探针同权隔墙渗透。
+    // env PRIMAL_GI_SKY_CONF_FLOOR（默认 0.18；0.35 = 旧地板）。
+    float skyConfFloor;
+    float pad1;
 } constants;
 
 layout(set = 0, binding = 3, std430) readonly buffer ProbeNormalsBlock {
@@ -62,6 +73,28 @@ layout(set = 0, binding = 3, std430) readonly buffer ProbeNormalsBlock {
 layout(set = 0, binding = 4, std430) readonly buffer ImportanceSHBlock {
     vec4 data[];
 } importanceSH;
+
+// P2 (tier3): slot → compacted radiance id (0xFFFFFFFF = inactive/over-cap).
+layout(set = 0, binding = 5, std430) readonly buffer SlotToCompactBlock {
+    uint data[];
+} slotToCompact;
+
+// [P4 2026-09-21 probe-repr-plan] SH2 重建误差检查（env PRIMAL_SPGI_SH2_CHECK=1
+// 时分配绑定，否则 dummy）：每探针 vec4 {Σ|Δ|lum·w, Σw, activeCount, 0}。
+// Δ = SH2(rayDir) 重代入求值 vs 逐射线亮度（重代入 = 重建误差下界代理；
+// 严格留一需 64 次去一重投影，计划 §P4 的"SH2 积分 vs 射线加权 |Δ|"取此口径）。
+// CPU 读回后按探针取均值出 P50/P95——回答"SPGI SH2 够不够"（评审 #7）。
+layout(set = 0, binding = 6, std430) buffer Sh2CheckBlock {
+    vec4 data[];
+} sh2Check;
+
+// [②K-4 2026-09-21 显式 V(x,ω) 切片] 每探针天空可见性统计：x = miss 占比
+//（=天空/回退射线占比——finalize 侧 miss 全部落到解析天空或级联兜底），
+// y = 几何命中占比。显式 V 的空间差异化：探针场"哪里看得见天"从隐式
+// （SH 内容）提升为显式统计，诊断与下游分类加权共用。
+layout(set = 0, binding = 7, std430) buffer ProbeOpenSkyBlock {
+    vec4 data[];
+} probeOpenSky;
 
 #include "ShaderLib/EncodeLib.glsl"
 
@@ -94,6 +127,10 @@ shared float sharedLum[AVG_TG_SIZE];    // luminance sum for variance
 shared float sharedLumSq[AVG_TG_SIZE];  // luminance^2 sum for variance
 shared float sharedHit[AVG_TG_SIZE];    // 1.0 if geometry hit, 0.0 if miss/inactive (B5)
 shared float sharedActive[AVG_TG_SIZE]; // 1.0 if the lane carries a ray (B5: variance divisor)
+// [P4] SH2 重建误差检查的逐射线数据 + 误差归约。
+shared vec3  sharedRayDir[AVG_TG_SIZE];
+shared vec3  sharedRayRad[AVG_TG_SIZE];
+shared vec3  sharedErrSum[AVG_TG_SIZE];  // |Δ|lum 加权累计（归约）
 
 // --------------------------------------------------------------------------------
 // Main
@@ -104,11 +141,38 @@ void screen_probe_average() {
 
     if (group_id >= constants.totalProbes) return;
 
-    // Each thread reads exactly 1 ray
-    uint rayIdx = group_id * constants.raysPerProbe + tid;
-    // Keep all lanes in the reduction without reading beyond this probe.
+    // P2/P4: group_id is the SLOT index under tier3; the rays live at the
+    // slot's compacted radiance id and only the leading tier rays exist.
+    // NOTE: the compact-invalid check is workgroup-uniform (whole group
+    // exits); the tier gate below must NOT return early — every lane has to
+    // reach the reduction barriers, so gated lanes simply contribute zero.
+    uint radianceBase = group_id * constants.raysPerProbe;
+    float tierRays = float(constants.raysPerProbe);
+    if (constants.tier3Mode > 0u) {
+        uint compact = slotToCompact.data[group_id];
+        if (compact == 0xFFFFFFFFu) {
+            if (tid == 0u) {
+                uint base = group_id * 4u;
+                probeSHOut.data[base + 0u] = vec4(0.0);
+                probeSHOut.data[base + 1u] = vec4(0.0);
+                probeSHOut.data[base + 2u] = vec4(0.0);
+                probeSHOut.data[base + 3u] = vec4(0.0);
+            }
+            return;
+        }
+        radianceBase = compact * constants.raysPerProbe;   // compacted layout: stride = rays/probe
+        if (constants.tierRaysMode > 0u) {
+            tierRays = probeNormals.data[group_id].w;
+        }
+    }
+
+    // Each thread reads exactly 1 ray (tier-gated lanes read nothing and
+    // fall through as miss lanes — the reduction below requires all 64).
+    uint rayIdx = radianceBase + tid;
     vec4 rayData = vec4(0.0, 0.0, 0.0, 0.0);
-    if (tid < constants.raysPerProbe) rayData = rayRadiance.data[rayIdx];
+    if (float(tid) < tierRays && tid < constants.raysPerProbe) {
+        rayData = rayRadiance.data[rayIdx];
+    }
 
     // B5: sign encodes geometry hit (positive) vs miss→sky / inactive (≤ 0).
     // Integration uses the magnitude; hit count requires w > 0.
@@ -164,6 +228,9 @@ void screen_probe_average() {
         float lum = dot(rayData.rgb, vec3(0.2126, 0.7152, 0.0722));
         sharedLum[tid] = lum;
         sharedLumSq[tid] = lum * lum;
+        // [P4] 存逐射线数据供归约后的 SH2 重建误差评估。
+        sharedRayDir[tid] = rayDir;
+        sharedRayRad[tid] = rayData.rgb;
     } else {
         // Miss: contribute nothing
         sharedSH[0][tid] = vec3(0.0);
@@ -175,6 +242,9 @@ void screen_probe_average() {
         sharedLumSq[tid] = 0.0;
         sharedHit[tid] = 0.0;
         sharedActive[tid] = 0.0;
+        sharedRayDir[tid] = vec3(0.0);
+        sharedRayRad[tid] = vec3(0.0);
+        sharedErrSum[tid] = vec3(0.0);
     }
 
     barrier();
@@ -195,6 +265,31 @@ void screen_probe_average() {
         barrier();
     }
 
+    // [P4 2026-09-21] SH2 重建误差（重代入代理）：SH 归约完成后，每条射线
+    // 用最终 SH2 沿自身方向重建亮度，与射线亮度取 |Δ| 等权累计。SH 归一化
+    // 与 tid==0 写出路径一致（sumScale 同式重算）。
+    if (constants.sh2CheckMode > 0u) {
+        const float effRaysC =
+            (constants.tier3Mode > 0u && constants.tierRaysMode > 0u)
+                ? max(sharedActive[0], 1.0) : float(constants.raysPerProbe);
+        const float sumScaleC = 12.566370614 / effRaysC;
+        const vec4 Yc = shBasis(sharedRayDir[tid]);
+        const vec3 recon = (sharedSH[0][0] * Yc.x + sharedSH[1][0] * Yc.y
+                         + sharedSH[2][0] * Yc.z + sharedSH[3][0] * Yc.w) * sumScaleC;
+        const float dLumRaw = abs(dot(recon, vec3(0.2126, 0.7152, 0.0722))
+                                - dot(sharedRayRad[tid], vec3(0.2126, 0.7152, 0.0722)));
+        // [P4 实测修正 2026-09-21] WRC 逃逸/回退腿可产出 NaN radiance
+        //（max(NaN,0) 不消毒）——统计里把非有限差计 0（NaN 污染本身已由
+        // far-cache meanLum 3390/NaN P95 记录在案，根治属 radiance 卫生专项）。
+        const float dLum = (isnan(dLumRaw) || isinf(dLumRaw)) ? 0.0 : dLumRaw;
+        sharedErrSum[tid] = (sharedActive[tid] > 0.0) ? vec3(dLum, 1.0, 0.0) : vec3(0.0);
+        barrier();
+        for (uint stride = AVG_TG_SIZE >> 1; stride > 0u; stride >>= 1u) {
+            if (tid < stride) sharedErrSum[tid] += sharedErrSum[tid + stride];
+            barrier();
+        }
+    }
+
     // Thread 0 writes the final SH coefficients + multi-factor confidence
     if (tid == 0u) {
         uint base = group_id * 4u;
@@ -210,11 +305,18 @@ void screen_probe_average() {
         if (totalWeight > 0.0 && activeCount > 0.0) {
             // Both modes store canonical radiance SH. No division by the
             // observed cosine-weight sum: that destroys the integral scale.
-            const float sumScale = 12.566370614 / float(constants.raysPerProbe);
+            // P4: tier-gated slots trace only the leading rays, so the 4π/N
+            // factor uses the participating lane count there; the default
+            // path keeps the exact raysPerProbe divisor (bit-identical).
+            float effRays = float(constants.raysPerProbe);
+            if (constants.tier3Mode > 0u && constants.tierRaysMode > 0u) {
+                effRays = max(activeCount, 1.0);
+            }
+            const float sumScale = 12.566370614 / effRays;
 
             // Geometry-hit ratio: how many rays hit geometry directly (the
             // rest carry sky or DDGI-fallback radiance — valid but borrowed).
-            float hitRatio = hitCount / float(constants.raysPerProbe);
+            float hitRatio = hitCount / effRays;
 
             // Radiance variance: Var(X) = E[X^2] - E[X]^2
             float avgLum = (activeCount > 0.0) ? (sharedLum[0] / activeCount) : 0.0;
@@ -229,10 +331,11 @@ void screen_probe_average() {
             float radianceConsistency = mix(0.55, 1.0, exp(-lumVariance * 4.0));
 
             // 来源可靠性分级：几何命中线性抬升到 1；纯 fallback（天空解析/
-            // DDGI 借来辐射）保 0.35 底——非零才能通过 Gather 的 sh0w>0 门，
-            // 低于命中探针使其在混合中占次位。来源感知的完整分级（可见性/
-            // 年龄）按审计顺序属 fallback/confidence 阶段。
-            float confidence = mix(0.35, 1.0, hitRatio) * radianceConsistency;
+            // DDGI 借来辐射）地板 = constants.skyConfFloor（[②K-4] 默认
+            // 0.18，旧 0.35）——非零才能通过 Gather 的 sh0w>0 门；降档后
+            // 纯天空探针在 gather 混合中让位给几何命中探针（能量所有权：
+            // 天空 fill 只在确实看得见天的邻域起主导）。
+            float confidence = mix(constants.skyConfFloor, 1.0, hitRatio) * radianceConsistency;
 
             probeSHOut.data[base + 0u] = vec4(sharedSH[0][0] * sumScale, confidence);
             probeSHOut.data[base + 1u] = vec4(sharedSH[1][0] * sumScale, 1.0);
@@ -243,6 +346,20 @@ void screen_probe_average() {
             probeSHOut.data[base + 1u] = vec4(0.0, 0.0, 0.0, 0.0);
             probeSHOut.data[base + 2u] = vec4(0.0, 0.0, 0.0, 0.0);
             probeSHOut.data[base + 3u] = vec4(0.0, 0.0, 0.0, 0.0);
+        }
+        // [P4] 误差统计写出（{Σ|Δ|, 样本数, active, 0}；disabled 时缓冲为
+        // dummy，不写）。
+        if (constants.sh2CheckMode > 0u) {
+            sh2Check.data[group_id] = vec4(sharedErrSum[0].x, sharedErrSum[0].y,
+                                           sharedActive[0], 0.0);
+        }
+        // [②K-4] 每探针天空可见性：miss 占比（天空/回退）+ 命中占比。
+        {
+            const float activeC = sharedActive[0];
+            const float hitC = sharedHit[0];
+            const float missC = max(activeC - hitC, 0.0);
+            const float denom = max(activeC, 1.0);
+            probeOpenSky.data[group_id] = vec4(missC / denom, hitC / denom, 0.0, 1.0);
         }
     }
 }

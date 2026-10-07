@@ -36,6 +36,8 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
+// Phase 1b: DDGI 评基单源（EvalLib——shDot9 展开随之撤销）。
+#include "ShaderLib/EvalLib.glsl"
 
 // Shared probe ray sampler — the finalize pass re-derives each ray's direction
 // from its index to shade the SC-first hierarchy; it MUST agree with the
@@ -80,6 +82,12 @@ layout(set = 0, binding = 15) uniform texture2D screen_depth;
 layout(set = 0, binding = 16) uniform texture2D radiance_depth;
 
 layout(set = 0, binding = 8) uniform texture2D prev_frame_color;
+// UNITS: prev_frame_color 双语义（审计 §5/Phase 1c）——历史链上本槽绑定
+// Deferred 直射输出时 = DirectOnly radiance（B11 前的旧供给）；绑定
+// FusionIndirect 时 = Fused Lo（PRIMAL_PROBE_FUSED_SUPPLY=1 回接态）。
+// 两者都是 radiance 量纲（沿射线不变），只允许作 ray radiance 直用，
+// 严禁当 irradiance 入 BRDF。断边默认态（Phase 2）本 binding 绑 INVALID，
+// samplePrevColor 由 screenValidity 门短路。
 layout(set = 0, binding = 9) uniform texture2D gbuffer_albedo;
 
 layout(set = 0, binding = 10, std430) readonly buffer IrradianceHistoryBuf {
@@ -141,7 +149,12 @@ layout(set = 0, binding = 12, std430) readonly buffer SCGridCardsBuf {
 
 // T4.3: refined hit normals from the split SDF trace (xyz world normal,
 // w = 1.0 valid / 0.0 → fall back to the -rayDir fake).
-layout(set = 0, binding = 14, std430) readonly buffer HitNormalBuf {
+// Existing analytic records remain [N,5N). The optional Vulkan source audit
+// appends Trace origin/direction and Finalize origin/direction at [5N,9N).
+// DDGI_QUERY_SOURCE_AUDIT appends an additional [9N,27N) tail: two headers
+// plus sixteen records for the actual card reads in query order.  It reuses
+// this existing SSBO and has no production binding/layout change.
+layout(set = 0, binding = 14, std430) buffer HitNormalBuf {
     vec4 hit_normal[];
 } hnb;
 
@@ -152,6 +165,59 @@ layout(set = 0, binding = 14, std430) readonly buffer HitNormalBuf {
 layout(set = 0, binding = 17, std430) readonly buffer RelocatedOriginBuf {
     vec4 relocated_origin[];
 } robuf;
+
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+// Candidate-only source geometry/material contract.  Bindings 0..17 remain
+// byte-for-byte compatible with the incumbent Finalize resources; these ten
+// bindings exist only in the named rho variant.
+layout(set = 0, binding = 18, std430) readonly buffer AnalyticRhoNodeBuf {
+    uvec4 node_words[];
+} first_surface_nodes;
+layout(set = 0, binding = 19, std430) readonly buffer AnalyticRhoTriangleBuf {
+    vec4 triangle_words[];
+} first_surface_triangles;
+layout(set = 0, binding = 20, std430) readonly buffer AnalyticRhoPositionBuf {
+    float positions[];
+} analytic_rho_positions;
+layout(set = 0, binding = 21, std430) readonly buffer AnalyticRhoElementBuf {
+    uint elements[];
+} analytic_rho_elements;
+struct DDGIAnalyticRhoInstance {
+    mat4 world_matrix;
+    mat4 inverse_world_matrix;
+    uvec4 meta0;
+    uvec4 meta1;
+    float bounds_center_x;
+    float bounds_center_y;
+    float bounds_center_z;
+    uint pad_after_center;
+    float bounds_radius;
+    uint pad_br0;
+    uint pad_br1;
+    uint pad_br2;
+};
+layout(set = 0, binding = 22, std430) readonly buffer AnalyticRhoInstanceBuf {
+    DDGIAnalyticRhoInstance instances[];
+} analytic_rho_instances;
+layout(set = 0, binding = 23, std430) readonly buffer AnalyticRhoMaterialBuf {
+    uint material_words[];
+} analytic_rho_materials;
+// Two uvec4 words per original triangle:
+//   word0 = native vertex ids + native instance id
+//   word1 = scene material id, source mesh id, checked cluster material id, flags
+layout(set = 0, binding = 24, std430) readonly buffer AnalyticRhoMappingBuf {
+    uvec4 mapping_words[];
+} analytic_rho_mapping;
+layout(set = 0, binding = 25) uniform texture2DArray analytic_rho_albedo;
+layout(set = 0, binding = 26) uniform sampler analytic_rho_sampler;
+layout(set = 0, binding = 27, std430) writeonly buffer AnalyticRhoAuditBuf {
+    vec4 records[];
+} analytic_rho_audit;
+
+#define DDGI_FIRST_SURFACE 1
+#include "ShaderLib/DDGIFirstSurface.glsl"
+#include "ShaderLib/DDGIAnalyticFirstRho.glsl"
+#endif
 
 SCGridParams scGridLoad() {
     return scGridDecode(
@@ -212,21 +278,26 @@ vec3 sampleAtlasBilinear(vec2 uvPx) {
 // The 0.15 world-unit limit is conservative: coarse SDF hits with larger
 // position error must use world-space lighting instead of borrowing a pixel.
 bool projectVisibleHit(vec3 hitPos, mat4 viewProjection, mat4 inverseVP,
-                       texture2D depthTexture, out ivec2 texel) {
+                       texture2D depthTexture, out ivec2 texel, out uint reject) {
+    reject=10u; // Behind camera.
     vec4 clip = viewProjection * vec4(hitPos, 1.0);
     if (clip.w <= 0.0) return false;
     vec3 ndc = clip.xyz / clip.w;
+    reject=11u; // Outside view frustum.
     if (any(lessThan(ndc, vec3(-1.0, -1.0, 0.0))) ||
         any(greaterThan(ndc, vec3(1.0)))) return false;
     ivec2 dims = textureSize(depthTexture, 0);
     vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     texel = clamp(ivec2(uv * vec2(dims)), ivec2(0), dims - 1);
     float depth = texelFetch(depthTexture, texel, 0).r;
+    reject=12u; // Sky/invalid raster depth.
     if (depth >= 1.0 || depth < 0.0) return false;
     vec2 center = (vec2(texel) + 0.5) / vec2(dims);
     vec4 surface = inverseVP * vec4(center.x * 2.0 - 1.0,
                                     1.0 - center.y * 2.0, depth, 1.0);
+    reject=13u; // Invalid reconstruction homogeneous coordinate.
     if (abs(surface.w) < 1e-6) return false;
+    reject=14u; // Raster surface differs from the coarse SDF hit point.
     return distance(surface.xyz / surface.w, hitPos) <= vp.screenValidity.z;
 }
 
@@ -234,8 +305,9 @@ bool samplePrevColor(vec3 hitPos, out vec3 radiance) {
     radiance = vec3(0.0);
     if (vp.screenValidity.y < 0.5) return false;
     ivec2 texel;
+    uint reject;
     if (!projectVisibleHit(hitPos, vp.radianceViewProjection,
-                           vp.inverseRadianceViewProjection, radiance_depth, texel)) return false;
+                           vp.inverseRadianceViewProjection, radiance_depth, texel,reject)) return false;
     if (any(notEqual(textureSize(prev_frame_color, 0), textureSize(radiance_depth, 0)))) return false;
     radiance = texelFetch(prev_frame_color, texel, 0).rgb;
     if (any(isnan(radiance)) || any(isinf(radiance))) return false;
@@ -243,23 +315,24 @@ bool samplePrevColor(vec3 hitPos, out vec3 radiance) {
     return true; // Valid black is a measurement, not a missing sample.
 }
 
-vec3 sampleHitAlbedo(vec3 hitPos) {
+vec3 sampleHitAlbedo(vec3 hitPos, out uint source) {
+    source=1u; // Screen resources unavailable: uniform volume fallback.
     if (vp.screenValidity.x < 0.5) return volume.Albedo.xyz;
     ivec2 texel;
     if (!projectVisibleHit(hitPos, vp.viewProjection, vp.inverseViewProjection,
-                           screen_depth, texel)) return volume.Albedo.xyz;
+                           screen_depth, texel,source)) return volume.Albedo.xyz;
+    source=3u; // GBuffer/depth dimensions mismatch.
     if (any(notEqual(textureSize(gbuffer_albedo, 0), textureSize(screen_depth, 0)))) return volume.Albedo.xyz;
+    source=4u; // Depth-validated screen material.
     return clamp(texelFetch(gbuffer_albedo, texel, 0).rgb, vec3(0.0), vec3(1.0));
 }
 
 // ----------------------------------------------------------------------------
 // Tetrahedral 4-probe SH interpolation (from DDGITraceRays.comp)
+// Phase 1b: L2 常量随 shDot9 展开撤销（→ EvalLib 单源）；L0/L1 留给 shDot4。
 // ----------------------------------------------------------------------------
 const float _C0 = 0.282095;
 const float _C1 = 0.488603;
-const float _C2_0 = 1.092548;
-const float _C2_1 = 0.315392;
-const float _C2_2 = 0.546274;
 
 struct TetraResult {
     uint pi[4];
@@ -320,17 +393,9 @@ vec3 shDot4(vec3 c[4], vec3 d) {
 // Full L0-L2 evaluation with the canonical basis (matches
 // DDGIUpdateIrradiance's projection). The old 4-coefficient evaluation left
 // the directional colour detail the SC path now projects into bands 4-8
-// unread.
+// unread. Phase 1b: 展开 → EvalLib 单源（radiance 语义，纯 Σc_iY_i）。
 vec3 shDot9(vec3 c[9], vec3 d) {
-    return c[0] * _C0
-         + c[1] * (-_C1 * d.y)
-         + c[2] * ( _C1 * d.z)
-         + c[3] * (-_C1 * d.x)
-         + c[4] * ( _C2_0 * d.y * d.x)
-         + c[5] * (-_C2_0 * d.y * d.z)
-         + c[6] * ( _C2_1 * (3.0 * d.z * d.z - 1.0))
-         + c[7] * (-_C2_0 * d.x * d.z)
-         + c[8] * ( _C2_2 * (d.x * d.x - d.y * d.y));
+    return evalProbeRadianceSH9(c, d);
 }
 
 // Previous-frame probe irradiance at a world position (multi-bounce feedback).
@@ -358,11 +423,17 @@ vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
         for (uint i = 0u; i < 9u; i++) {
             sh[i] = ih.irradiance_history[base + i].xyz;
         }
-        vec3 irradiance = shDot9(sh, N);
+        // Opt-in corrected diffuse history: EvalLib returns E(N)/pi.
+        // Convolve BEFORE interpolation (linear); positivity AFTER it.
+        vec3 irradiance = volume.SkyColor.w>1.5
+            ? evalProbeIrradianceSH9(sh,N) : shDot9(sh, N);
         result += irradiance * tet.bw[p];
         totalWeight += tet.bw[p];
     }
-    if (totalWeight > 0.0) return result / totalWeight;
+    if (totalWeight > 0.0) {
+        vec3 value=result/totalWeight;
+        return volume.SkyColor.w>1.5?max(value,vec3(0.0)):value;
+    }
     return vec3(0.0);
 }
 
@@ -409,9 +480,76 @@ void ddgi_trace_finalize() {
                                          uint(volume.RaySampleMode),
                                          (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0))).xyz;
 
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+    const float analyticRhoMode = volume.SdfExtents[1].w;
+    const bool analyticRhoAudit = (analyticRhoMode == 3.0 || analyticRhoMode == 4.0 ||
+                                   analyticRhoMode == 6.0 || analyticRhoMode == 7.0) &&
+                                  volume.Albedo.w > 0.5;
+    const bool analyticScFirstAudit = analyticRhoMode == 7.0 && analyticRhoAudit;
+    const bool analyticRhoApply = analyticRhoMode == 1.0 || analyticRhoMode == 3.0;
+    const bool analyticPositionApply = analyticRhoMode == 5.0 || analyticRhoMode == 6.0;
+    bool analyticPositionApplied = false;
+    const uint analyticRhoBase = 16u * globalRayIdx;
+    const vec4 analyticRhoOriginalHN = hnb.hit_normal[globalRayIdx];
+    DDGIAnalyticFirstRhoResult analyticRho;
+    ddgiAnalyticFirstRhoClear(analyticRho);
+    uint analyticRhoPath = 0u; // 1=SC, 2=prev-screen, 3=analytic, 4=miss
+    uint analyticRhoAlbedoSource = 0u;
+    if (analyticRhoAudit) {
+        analytic_rho_audit.records[analyticRhoBase + 0u] =
+            vec4(rayOrigin, uintBitsToFloat(((volume.FrameIndex & 65535u) << 16u) | (probeIdx + 1u)));
+        analytic_rho_audit.records[analyticRhoBase + 1u] =
+            vec4(rayDir, float(rayId + 1u));
+
+        analytic_rho_audit.records[analyticRhoBase + 14u] =
+            hnb.hit_normal[globalRayIdx];
+    }
+#endif
+
+    // Record the exact origin/direction used by Finalize.  The fourth lane
+    // carries a frameLo16/probePlus1Lo16 word and rayId+1 for joins;
+    // xyz remains the unmodified shader value. This is diagnostic-only.
+    if (volume.Albedo.w > 0.5) {
+        uint sourceBase = 5u * volume.ProbeCountTotal * volume.RaysPerProbe +
+                          4u * globalRayIdx;
+        hnb.hit_normal[sourceBase + 2u] = vec4(rayOrigin, uintBitsToFloat(((volume.FrameIndex & 65535u) << 16u) | (probeIdx + 1u)));
+        hnb.hit_normal[sourceBase + 3u] = vec4(rayDir, float(rayId + 1u));
+    }
+
     vec4 result = vec4(vec3(0.0), -1.0);   // default = exhausted miss（黑，非天空）
+    bool analyticAudit=volume.SdfVoxelSizes[0].w>.5;
+    uint auditBase=volume.ProbeCountTotal*volume.RaysPerProbe+4u*globalRayIdx;
+    if (analyticAudit) {
+        hnb.hit_normal[auditBase]=vec4(0.0);
+        hnb.hit_normal[auditBase+1u]=vec4(0.0);
+        hnb.hit_normal[auditBase+2u]=vec4(0.0);
+    }
+    // Query-source audit is an exact host-latched Vulkan diagnostic.  Keep
+    // all initialization inside this guard so the incumbent N/5N/9N storage
+    // and writes remain untouched when it is disabled.
+    bool querySourceAudit = volume.SdfExtents[2].w > 0.5;
+    uint queryAuditBase = 9u * volume.ProbeCountTotal * volume.RaysPerProbe +
+                          18u * globalRayIdx;
+    uint querySelectedCard = 0u;
+    float queryBestKey = 1e30;
+    uint queryCell = 0xFFFFFFFFu;
+    if (querySourceAudit) {
+        vec3 queryHeaderPos = rayOrigin; // Hit branch records the actual reused hitPos below.
+        uint queryStamp = ((volume.FrameIndex & 65535u) << 16u) | (probeIdx + 1u);
+        hnb.hit_normal[queryAuditBase] =
+            vec4(queryHeaderPos, uintBitsToFloat(queryStamp));
+        hnb.hit_normal[queryAuditBase + 1u] =
+            vec4(1e30, 0.0, uintBitsToFloat(0xFFFFFFFFu), float(rayId + 1u));
+        for (uint i = 0u; i < 16u; ++i) {
+            hnb.hit_normal[queryAuditBase + 2u + i] =
+                vec4(0.0, 1e30, 0.0, uintBitsToFloat(0xFFFFFFFFu));
+        }
+    }
 #ifdef DDGI_PATH_DEBUG
     uint dbgPath = 0u;  // 1=SC atlas 2=prev-screen 3=analytic (miss stays 0)
+    uint dbgSCReject = 0u; // dominant failed SC stage; 8=no cell, 9=empty cell
+    uint dbgCardIdx = 0u;
+    uvec2 dbgAtlasTexel = uvec2(0u);
 #endif
 
     if (hitDistance >= 0.0) {
@@ -423,6 +561,10 @@ void ddgi_trace_finalize() {
         // 2. Depth-validated screen radiance, including valid black.
         // 3. Sky + world-probe bounce as the last resort.
         vec3 hitPos = rayOrigin + rayDir * hitDistance;
+        if (querySourceAudit) {
+            uint queryStamp = ((volume.FrameIndex & 65535u) << 16u) | (probeIdx + 1u);
+            hnb.hit_normal[queryAuditBase] = vec4(hitPos, uintBitsToFloat(queryStamp));
+        }
         result.w = hitDistance;
 
         // T4.3: real gradient normal when the detail-SDF refinement ran;
@@ -434,17 +576,46 @@ void ddgi_trace_finalize() {
                 N = normalize(hn.xyz);
             }
         }
-        vec3 albedo = sampleHitAlbedo(hitPos);
+        uint albedoSource;
+        vec3 materialPos=hitPos;
+        bool materialProjected=false;
+        if (analyticAudit && volume.SdfExtents[0].w>.5) {
+            vec4 projected=hnb.hit_normal[auditBase+3u];
+            if (projected.w>.5) {
+                materialPos=projected.xyz;
+                materialProjected=true;
+            }
+        }
+        vec3 albedo = sampleHitAlbedo(materialPos,albedoSource);
+        // A failed projected lookup must not discard a previously valid
+        // original material measurement. No visibility tolerance relaxation.
+        if (materialProjected && albedoSource!=4u)
+            albedo=sampleHitAlbedo(hitPos,albedoSource);
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+        analyticRhoAlbedoSource = albedoSource;
+#endif
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+        analyticRhoAlbedoSource = albedoSource;
+#endif
 
         bool scUsed = false;
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+        bool analyticRhoPrevUsed = false;
+#endif
         {
             uint deviceReads = 0u;
             const uint kMaxDeviceReads = 16u;
             SCGridParams gp = scGridLoad();
             uint cell = scGridCellIndex(gp, hitPos);
             if (cell != 0xFFFFFFFFu) {
+                if (querySourceAudit) queryCell = cell;
                 uint begin = scgo.sc_grid_offsets[16u + cell];
                 uint end   = scgo.sc_grid_offsets[17u + cell];
+#ifdef DDGI_PATH_DEBUG
+                if (begin == end) dbgSCReject = 9u;
+                uint failCount[8];
+                for (uint i = 0u; i < 8u; ++i) failCount[i] = 0u;
+#endif
                 // C (plan §三.C): unified query contract over ALL candidates —
                 // replaces the T3.4 plane test's extent-proportional
                 // single-sided tolerance (0.35×extent accepted captures metres
@@ -459,26 +630,119 @@ void ddgi_trace_finalize() {
                     uint cardIdx = scgc.sc_grid_cards[gi];
                     if (cardIdx >= 4096u) continue;
                     SurfaceCacheCard card = cd.card_data[cardIdx];
+                    uint queryCandidateSlot = deviceReads;
                     ++deviceReads;
-                    vec3 scRadiance; float key;
-                    if (scQueryCardCandidate(card, hitPos, -rayDir,
-                                             max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
-                                             depth_atlas, lighting_atlas,
-                                             vec3(0.0), scRadiance, key)) {
+                    vec3 scRadiance;
+                    float key = 1e30;
+                    uint reject = 0u;
+                    bool accepted;
+#ifdef DDGI_PATH_DEBUG
+                    // PATH_DEBUG already uses the diagnostic wrapper and
+                    // emits the existing path/card labels.  Query audit
+                    // reuses this same invocation and only adds the raw
+                    // per-candidate record below.
+                    accepted = scQueryCardCandidateDbg(card, hitPos, -rayDir,
+                                                       max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
+                                                       0.0, depth_atlas, lighting_atlas,
+                                                       vec3(0.0), scRadiance, key, reject);
+                    if (!accepted && reject < 8u) failCount[reject]++;
+#else
+                    if (querySourceAudit) {
+                        // The debug wrapper is the same query algorithm with
+                        // an outReject result.  Calling it only for this
+                        // diagnostic avoids inventing a second predicate while
+                        // keeping the production wrapper on the default path.
+                        accepted = scQueryCardCandidateDbg(card, hitPos, -rayDir,
+                                                           max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
+                                                           0.0, depth_atlas, lighting_atlas,
+                                                           vec3(0.0), scRadiance, key, reject);
+                    } else {
+                        accepted = scQueryCardCandidate(card, hitPos, -rayDir,
+                                                        max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
+                                                        depth_atlas, lighting_atlas,
+                                                        vec3(0.0), scRadiance, key);
+                    }
+#endif
+                    if (querySourceAudit) {
+                        uint packedTexel = 0xFFFFFFFFu;
+                        vec2 candidateUV;
+                        if (volume.SCAtlasSize > 0u &&
+                            worldToCardUVMarginPad(hitPos, card, candidateUV,
+                                1.0 / float(max(card.resolution, 1u)), 0.0) &&
+                            !any(isnan(candidateUV)) && !any(isinf(candidateUV))) {
+                            uvec2 texel = uvec2(clamp(candidateUV, vec2(0.0),
+                                vec2(card.atlas_offset_x + card.resolution - 1u,
+                                     card.atlas_offset_y + card.resolution - 1u)));
+                            packedTexel = texel.y * volume.SCAtlasSize + texel.x;
+                        }
+                        hnb.hit_normal[queryAuditBase + 2u + queryCandidateSlot] =
+                            vec4(float(cardIdx + 1u), key, float(reject),
+                                 uintBitsToFloat(packedTexel));
+                    }
+                    if (accepted) {
                         if (key < bestKey) {
                             bestKey = key;
                             result.xyz = scRadiance;
                             scUsed = true;
+                            if (querySourceAudit) {
+                                queryBestKey = key;
+                                querySelectedCard = cardIdx + 1u;
+                            }
 #ifdef DDGI_PATH_DEBUG
                             dbgPath = 1u;
+                            dbgCardIdx = cardIdx;
+                            vec2 dbgUV;
+                            if (worldToCardUVMarginPad(hitPos, card, dbgUV,
+                                    1.0 / float(max(card.resolution, 1u)), 0.0)) {
+                                dbgAtlasTexel = uvec2(clamp(dbgUV, vec2(0.0),
+                                    vec2(card.atlas_offset_x + card.resolution - 1u,
+                                         card.atlas_offset_y + card.resolution - 1u)));
+                            }
 #endif
                         }
                     }
                 }
+#ifdef DDGI_PATH_DEBUG
+                if (!scUsed && deviceReads > 0u) {
+                    uint most = 0u;
+                    for (uint reason = 1u; reason <= 6u; ++reason) {
+                        if (failCount[reason] > most) {
+                            most = failCount[reason];
+                            dbgSCReject = reason;
+                        }
+                    }
+                    if (most == 0u) dbgSCReject = 10u;
+                }
+#endif
+            } else {
+#ifdef DDGI_PATH_DEBUG
+                dbgSCReject = 8u;
+#endif
             }
         }
+        if (querySourceAudit) {
+            // Publish the actual min-key winner only after the complete
+            // production candidate loop.  A miss keeps the initialized
+            // selected=0/key=1e30/cell=0xffffffff header above.
+            hnb.hit_normal[queryAuditBase + 1u] =
+                vec4(queryBestKey, float(querySelectedCard),
+                     uintBitsToFloat(queryCell), float(rayId + 1u));
+        }
+        // Diagnostic-only source witness for rays that actually selected SC.
+        // Reuse the already-bound native BVH/material/texture path; no sampled
+        // first-point radiance replaces the incumbent SC result.
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+        if (analyticScFirstAudit && scUsed) {
+            DDGIFirstSurfaceHit scFirst = ddgiFirstSurfaceTrace(
+                rayOrigin, rayDir, 0.0, volume.RayMaxDistance);
+            analyticRho = ddgiAnalyticFirstRhoEvaluate(
+                scFirst, rayOrigin, rayDir, hitDistance, albedo, false);
+        }
+#endif
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+        if (scUsed) analyticRhoPath = 1u;
+#endif
         if (!scUsed) {
-            vec3 L_i_prev = samplePrevProbeGrid(hitPos, N);
             vec3 prevRadiance;
             if (samplePrevColor(hitPos, prevRadiance)) {
                 // Screen radiance already includes this surface's material
@@ -490,10 +754,36 @@ void ddgi_trace_finalize() {
                 float prevLum = dot(prevRadiance, vec3(0.2126, 0.7152, 0.0722));
                 prevRadiance *= 1.0 / (1.0 + max(prevLum - 1.0, 0.0) * 2.0);
                 result.xyz = prevRadiance;
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+                analyticRhoPrevUsed = true;
+                analyticRhoPath = 2u;
+#endif
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 2u;
 #endif
             } else {
+                vec3 historyPos = hitPos;
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+                analyticRho.old_rho = albedo;
+                if (albedoSource == 11u || albedoSource == 14u) {
+                    DDGIFirstSurfaceHit rhoFirst = ddgiFirstSurfaceTrace(
+                        rayOrigin, rayDir, 0.0, volume.RayMaxDistance);
+                    analyticRho = ddgiAnalyticFirstRhoEvaluate(
+                        rhoFirst, rayOrigin, rayDir, hitDistance, albedo,
+                        analyticRhoApply);
+                    if (analyticRho.status == DDGI_RHO_STATUS_ACCEPTED)
+                        albedo = analyticRho.sample_rho;
+                    if (analyticPositionApply &&
+                        analyticRho.status == DDGI_RHO_STATUS_CONTROL &&
+                        analyticRho.first_t > hitDistance + DDGI_RHO_RESIDUAL_GATE) {
+                        historyPos = rayOrigin + rayDir * analyticRho.first_t;
+                        analyticPositionApplied = true;
+                    }
+                } else {
+                    analyticRho.status = DDGI_RHO_STATUS_SOURCE;
+                }
+#endif
+                vec3 L_i_prev = samplePrevProbeGrid(historyPos, N);
                 // Analytic: sky floor + single diffuse bounce.
                 // C3.1: the old unshadowed E_direct here injected sunlight
                 // through walls for every ray whose SC/prev-screen lookups
@@ -508,13 +798,31 @@ void ddgi_trace_finalize() {
                 float NdotUp = max(0.0, N.y);
                 vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp) * 0.3;
                 const float PI_VAL = 3.14159265358979;
-                result.xyz = (albedo / PI_VAL) * (E_sky + PI_VAL * L_i_prev);
+                // Opt-in diagnostic only: SkyColor.w is set by the Vulkan
+                // host for the analytic history diagnostics. Default0 retains exact
+                // legacy one-hop history; no SC/direct/escape changes.
+                // mode1 removes history; mode2 keeps rho*E/pi instead of
+                // rho*L(N). PI here cancels the common /PI below exactly once.
+                vec3 historyBounce=volume.SkyColor.w>.5 && volume.SkyColor.w<1.5
+                    ?vec3(0.0):PI_VAL*L_i_prev;
+                result.xyz = (albedo / PI_VAL) * (E_sky + historyBounce);
+                if (analyticAudit) {
+                    hnb.hit_normal[auditBase]=vec4(albedo,float(albedoSource));
+                    hnb.hit_normal[auditBase+1u]=vec4((albedo/PI_VAL)*E_sky,1.0);
+                    hnb.hit_normal[auditBase+2u]=vec4((albedo/PI_VAL)*historyBounce,1.0);
+                }
 #ifdef DDGI_PATH_DEBUG
                 dbgPath = 3u;
+#endif
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+                analyticRhoPath = 3u;
 #endif
             }
         }
     } else if (hitDistance <= -1.5) {
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+        analyticRhoPath = 4u;
+#endif
         // GI 根治 Phase 3.1 修复：逃逸射线的 w 编码对齐 Metal（-2）——旧实现
         // 只写 .xyz，w 保持默认 -1，update 端无法区分"逃逸（露天）"与
         // "步数耗尽（密闭）"，openSky 统计恒 0。天空能量值不变（xyz 仍由
@@ -526,8 +834,17 @@ void ddgi_trace_finalize() {
         // 与下方 SC-miss 回退路径的暖色 E_sky（×xyz）在同一探针网格里拼出
         // 灰/暖色块。两处统一为同一天空色度，能量仍由 SkyColor 档位控制。
         // 漫反射探针不含日晕热点（直射阳光由 SC 单独供给，防重复计能）。
-        result.xyz = EvaluateSkyBase(rayDir) * volume.SkyColor.xyz;
+        // Scene-wide lower environment boundary ablation. Zero suppression
+        // preserves the old full-sphere horizon environment exactly. Only
+        // escaping downward rays change; no probe-ID/height rejection and
+        // no changes to visible sky, SC hits or analytic history transport.
+        float lowerEnvScale = rayDir.y < 0.0
+            ? 1.0 - clamp(volume.SdfOrigins[0].w, 0.0, 1.0) : 1.0;
+        result.xyz = EvaluateSkyBase(rayDir) * volume.SkyColor.xyz * lowerEnvScale;
     } else {
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+        analyticRhoPath = 4u;
+#endif
         // ---- Miss（步数耗尽）：仅回退探针周边 SC 卡，不再兜底天空 ----
         // P0 坐标契约：卡片查询同样从有效起点出发——耗尽射线物理上是从
         // 重定位后的位置爬行失败，周边卡片的语义以该位置为准。
@@ -565,11 +882,59 @@ void ddgi_trace_finalize() {
 
     // Write at ABSOLUTE probe index (remap from update-slot is intentional).
 #ifdef DDGI_PATH_DEBUG
-    // Diagnostic build: park the path id at distance 40+k·0.001 —
-    // UpdateIrradiance's falloff is 1-smoothstep(40, 50, d), i.e. flat 1 for
-    // d ≥ 40, so replacing real hit distance there keeps radiance weighting
-    // identical while making the tag decodable on CPU.
-    if (result.w >= 0.0) result.w = 40.0 + float(dbgPath) * 0.001;
+    // Preserve the geometric distance for the depth-moment pass.  The old
+    // 40+k*0.001 tag made every hit look 40 m away and invalidated any
+    // path-debug capture's visibility feedback.  Two low mantissa bits carry
+    // the path ID; bits 2..5 record the dominant SC reject stage.  The six
+    // mantissa bits perturb distance by <8 ppm, diagnostic builds only.
+    if (result.w >= 0.0) {
+        uint bits = floatBitsToUint(result.w);
+        result.w = uintBitsToFloat((bits & ~63u) | (dbgSCReject << 2u) | dbgPath);
+    }
+    // Debug-only provenance: 12 low mantissa bits of RGB identify the winning
+    // card and atlas texel. This changes radiance by <0.05%, never production.
+    if (dbgPath == 1u) {
+        result.x = uintBitsToFloat((floatBitsToUint(result.x) & ~4095u) | dbgCardIdx);
+        result.y = uintBitsToFloat((floatBitsToUint(result.y) & ~4095u) | dbgAtlasTexel.x);
+        result.z = uintBitsToFloat((floatBitsToUint(result.z) & ~4095u) | dbgAtlasTexel.y);
+    }
+#endif
+#if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
+    if (analyticRhoAudit) {
+        if (analyticRhoPath == 0u) {
+            analyticRhoPath = (hitDistance >= 0.0) ? 1u : 4u;
+            if (analyticRho.status == DDGI_RHO_STATUS_NONE)
+                analyticRho.status = DDGI_RHO_STATUS_PATH;
+        }
+        analytic_rho_audit.records[analyticRhoBase + 2u] =
+            vec4(analyticRho.triangle_id, uintBitsToFloat(analyticRho.instance_id),
+                 uintBitsToFloat(analyticRhoAlbedoSource), hitDistance);
+        analytic_rho_audit.records[analyticRhoBase + 14u] = analyticRhoOriginalHN;
+        analytic_rho_audit.records[analyticRhoBase + 15u] =
+            vec4(uintBitsToFloat(analyticRho.first_status), analyticRho.first_residual,
+                 uintBitsToFloat(analyticRho.material_flags),
+                 analyticPositionApplied ? 2.0 : (analyticRhoApply ? 1.0 : 0.0));
+        analytic_rho_audit.records[analyticRhoBase + 3u] =
+            vec4(analyticRho.first_t, analyticRho.bary);
+        analytic_rho_audit.records[analyticRhoBase + 4u] =
+            vec4(uintBitsToFloat(analyticRho.material_id),
+                 uintBitsToFloat(analyticRho.status),
+                 uintBitsToFloat(analyticRho.triangle_flags),
+                 uintBitsToFloat(analyticRho.mapped_material));
+        analytic_rho_audit.records[analyticRhoBase + 5u] =
+            vec4(analyticRho.old_rho, float(analyticRhoPath));
+        analytic_rho_audit.records[analyticRhoBase + 6u] =
+            vec4(analyticRho.sample_rho, analyticRho.residual);
+        analytic_rho_audit.records[analyticRhoBase + 7u] = analyticRho.sample_rgba;
+        analytic_rho_audit.records[analyticRhoBase + 8u] =
+            vec4(analyticRho.tint, uintBitsToFloat(analyticRho.cluster_material));
+        analytic_rho_audit.records[analyticRhoBase + 9u] =
+            vec4(analyticRho.uv, analyticRho.uv_scale);
+        analytic_rho_audit.records[analyticRhoBase + 10u] = analyticRho.texel00;
+        analytic_rho_audit.records[analyticRhoBase + 11u] = analyticRho.texel10;
+        analytic_rho_audit.records[analyticRhoBase + 12u] = analyticRho.texel01;
+        analytic_rho_audit.records[analyticRhoBase + 13u] = analyticRho.texel11;
+    }
 #endif
     rb.ray_buffer[probeIdx * volume.RaysPerProbe + rayId] = result;
     } // T8.13 P2 stride loop

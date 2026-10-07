@@ -81,9 +81,6 @@ std::vector<u8> LoadWrcSpv(const char* shaderName) {
 }
 
 struct WRCRGData {
-    RGResourceHandle probe_data{};
-    RGResourceHandle ray_data{};
-    RGResourceHandle hit_distance{};
     RGResourceHandle sc_atlas{};    ///< SC atlas 写读屏障声明（vi==0 时有效）
 };
 
@@ -120,6 +117,10 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         desc.structured.elementStride = kWRCProbeStrideU32 * sizeof(u32);
         probe_data_ = device->CreateBuffer(desc);
         if (probe_data_ == handles::INVALID_RESOURCE) return false;
+        if (void* mapped = device->MapBuffer(probe_data_)) {
+            std::memset(mapped, 0, static_cast<size_t>(desc.size));
+            device->UnmapBuffer(probe_data_);
+        }
     }
     // 逐射线 scratch（绝对探针索引 × K × vec4）。
     {
@@ -229,17 +230,47 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         const char* e = std::getenv("PRIMAL_WRC_TRACE_STATS");
         return e && e[0] == '1';
     }();
-    if (trace_stats_enabled_) {
+    // [R1] 拒绝位置分箱 dump（PRIMAL_WRC_BOUNDS_DUMP=1）。
+    bounds_dump_enabled_ = [] {
+        const char* e = std::getenv("PRIMAL_WRC_BOUNDS_DUMP");
+        return e && e[0] == '1';
+    }();
+    if (trace_stats_enabled_ || bounds_dump_enabled_) {
         rays_ring_.initialize(device_, u64(probeTotal) * kWRCDirsPerProbe * sizeof(math::v4), 3);
         BufferDesc dbgDesc{};
-        dbgDesc.size = 32;
+        dbgDesc.size = 64;
         dbgDesc.type = BufferType::Structured;
         dbgDesc.usage = GPUMemoryUsage::Dynamic;
         dbgDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         dbgDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
-        dbgDesc.structured.elementCount = 4;
+        dbgDesc.structured.elementCount = 16;
         dbgDesc.structured.elementStride = sizeof(u32);
         dbg_buf_ = device->CreateBuffer(dbgDesc);
+        // 拒绝位置 8³ 分箱（512 uvec4）——binding 恒有效；读回仅 dump 门开启。
+        BufferDesc binsDesc{};
+        binsDesc.size = 512u * 16u;
+        binsDesc.type = BufferType::Structured;
+        binsDesc.usage = GPUMemoryUsage::Dynamic;
+        binsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        binsDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        binsDesc.structured.elementCount = 512u;
+        binsDesc.structured.elementStride = 16u;
+        bins_buf_ = device->CreateBuffer(binsDesc);
+        // [F4 2026-09-20] 逐卡 boundsFail 计数（4096 u32）——binding 恒有效
+        //（shader 侧 reject==1 且 cardIdx<4096 才写）；读回仅 dump 门开启。
+        BufferDesc cfDesc{};
+        cfDesc.size = 4096u * sizeof(u32);
+        cfDesc.type = BufferType::Structured;
+        cfDesc.usage = GPUMemoryUsage::Dynamic;
+        cfDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        cfDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        cfDesc.structured.elementCount = 4096u;
+        cfDesc.structured.elementStride = sizeof(u32);
+        card_fail_buf_ = device->CreateBuffer(cfDesc);
+    }
+    if (bounds_dump_enabled_) {
+        bins_ring_.initialize(device_, u64(512) * 16u, 3);
+        card_fail_ring_.initialize(device_, u64(4096) * sizeof(u32), 3);   // [F4]
     }
     // [A2 验收] prefilter SH9 读回环（prefilter 开启时启用）。Initialize 早于
     // 管线侧 SetPrefilterEnabled 调用——此处直接读 env 同源判定。
@@ -247,7 +278,8 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         const char* e = std::getenv("PRIMAL_WRC_PREFILTER");
         return e && e[0] == '1';
     }();
-    if (prefilter_enabled_) {
+    if (prefilter_enabled_ || WRCDumpEnabled()) {
+        // [P4 2026-09-21] DUMP=1 即标准启用（指标不再依赖 PREFILTER 附属开关）。
         prefilter_ring_.initialize(device_, u64(probeTotal) * 9u * sizeof(math::v4), 3);
     }
 
@@ -276,6 +308,7 @@ void LumenWRCPass::Shutdown() {
     consume_ring_.shutdown(device_);
     prefilter_ring_.shutdown(device_);
     rays_ring_.shutdown(device_);
+    bins_ring_.shutdown(device_);
     initialized_ = false;
     device_ = nullptr;
     // 句柄为 POD 类型，由 RHI device 的垃圾回收管理（同 LumenDDGIPass 约定）。
@@ -321,11 +354,13 @@ void LumenWRCPass::CreatePipelines() {
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc grid offsets (ro)
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc grid cards (ro)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [Q2] 查询漏斗计数
+            {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [R1] 拒绝位置分箱
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [F4] 逐卡 boundsFail 计数
         };
         b[1].readonly = true; b[3].readonly = true;
         b[5].readonly = true; b[6].readonly = true;
         b[7].readonly = true; b[8].readonly = true; b[9].readonly = true;
-        finalize_set_layout_ = device_->CreateDescriptorSetLayout({11, b});
+        finalize_set_layout_ = device_->CreateDescriptorSetLayout({13, b});
         PipelineLayoutDesc pl{}; pl.setLayoutCount = 1; pl.setLayouts = &finalize_set_layout_;
         finalize_layout_ = device_->CreatePipelineLayout(pl);
     }
@@ -337,7 +372,11 @@ void LumenWRCPass::CreatePipelines() {
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // list (ro)
             {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // hit (ro)
         };
-        b[3].readonly = true; b[5].readonly = true; b[6].readonly = true;
+        // Array indices are descriptor-list positions, not shader binding
+        // numbers (bindings here start at 2).
+        b[1].readonly = true;  // binding 3: ray_data
+        b[3].readonly = true;  // binding 5: update list
+        b[4].readonly = true;  // binding 6: hit distance
         update_set_layout_ = device_->CreateDescriptorSetLayout({5, b});
         PipelineLayoutDesc pl{}; pl.setLayoutCount = 1; pl.setLayouts = &update_set_layout_;
         update_layout_ = device_->CreatePipelineLayout(pl);
@@ -348,7 +387,7 @@ void LumenWRCPass::CreatePipelines() {
             {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probe_data (ro)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // sh9 (write)
         };
-        b[4].readonly = true;
+        b[1].readonly = true;  // binding 4: probe_data
         prefilter_set_layout_ = device_->CreateDescriptorSetLayout({3, b});
         PipelineLayoutDesc pl{}; pl.setLayoutCount = 1; pl.setLayouts = &prefilter_set_layout_;
         prefilter_layout_ = device_->CreatePipelineLayout(pl);
@@ -380,11 +419,11 @@ void LumenWRCPass::CreatePipelines() {
             {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
             {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},
         };
-        b[4].readonly = true;
-        b[6].readonly = true;
-        b[7].is3D = true;
-        b[8].is3D = true;
-        b[9].is3D = true;
+        b[2].readonly = true;  // binding 4: cards
+        b[4].readonly = true;  // binding 6: card list
+        b[5].is3D = true;      // binding 7: SDF cascade 0
+        b[6].is3D = true;      // binding 8: SDF cascade 1
+        b[7].is3D = true;      // binding 9: SDF cascade 2
         inject_set_layout_ = device_->CreateDescriptorSetLayout({8, b});
         PipelineLayoutDesc pl{}; pl.setLayoutCount = 1; pl.setLayouts = &inject_set_layout_;
         inject_layout_ = device_->CreatePipelineLayout(pl);
@@ -428,8 +467,17 @@ void LumenWRCPass::ClearSurfaceCacheResources() {
 }
 
 void LumenWRCPass::ClearProbeField() {
-    // valid 位全清：EMA 首帧改直写（A1 首填语义），场景切换不继承旧 GI。
+    // Clear both the CPU-side seed state and the GPU validity/radiance
+    // storage.  Otherwise SPGI may observe a random/stale valid bit before a
+    // probe receives its first update after initialization or a scene cut.
     probe_field_seeded_ = false;
+    if (device_ && probe_data_ != handles::INVALID_RESOURCE) {
+        if (void* mapped = device_->MapBuffer(probe_data_)) {
+            const u64 bytes = u64(GetProbeCountTotal()) * kWRCProbeStrideU32 * sizeof(u32);
+            std::memset(mapped, 0, static_cast<size_t>(bytes));
+            device_->UnmapBuffer(probe_data_);
+        }
+    }
 }
 
 WRCCacheView LumenWRCPass::GetCacheView(u32 frame_idx) const {
@@ -615,7 +663,27 @@ void LumenWRCPass::FillVolumeData(WRCVolumeData& vd, const WRCCameraData& cam, u
     vd.SCAtlasSize = sc_atlas_size_;
     vd.SCGridValid = (sc_grid_offsets_ != rhi::handles::INVALID_RESOURCE &&
                       sc_grid_cards_ != rhi::handles::INVALID_RESOURCE) ? 1u : 0u;
-    vd.DebugChannel = WRCDumpEnabled() ? 1u : 0u;
+    vd.DebugChannel = (WRCDumpEnabled() || trace_stats_enabled_ || bounds_dump_enabled_) ? 1u : 0u;
+    // [R0/R1 2026-09-20] SC 查询容差与查询侧 UV pad 经 std140 尾部下发：
+    //   x = PRIMAL_WRC_QUERY_TOL（0 = shader 编译期缺省 max(voxel*1.25, 0.9)，
+    //       三档 0.45/0.9/1.5 A/B 逐位可复现——路径确定性不受运行时影响）；
+    //   y = PRIMAL_SC_QPAD_M（默认 0.45 = SDF 命中带单侧；0 = 关，回滚位）。
+    vd.SCQueryParams = math::v4{ 0.0f, 0.45f, 0.0f, 0.0f };
+    if (const char* e = std::getenv("PRIMAL_WRC_QUERY_TOL")) {
+        const f32 v = static_cast<f32>(std::atof(e));
+        if (v > 0.0f && v <= 8.0f) vd.SCQueryParams.x = v;
+    }
+    if (const char* e = std::getenv("PRIMAL_SC_QPAD_M")) {
+        const f32 v = static_cast<f32>(std::atof(e));
+        if (v >= 0.0f && v <= 4.0f) vd.SCQueryParams.y = v;
+    }
+    // [F1-a 2026-09-20 能量不对称修复] z = 查询失败低频回退限幅 k
+    //（PRIMAL_WRC_FALLBACK_CLAMP，默认 0.3；0 = 回旧黑语义）。回滚位同 env。
+    vd.SCQueryParams.z = 0.3f;
+    if (const char* e = std::getenv("PRIMAL_WRC_FALLBACK_CLAMP")) {
+        const f32 v = static_cast<f32>(std::atof(e));
+        if (v >= 0.0f && v <= 1.0f) vd.SCQueryParams.z = v;
+    }
 }
 
 void LumenWRCPass::AddPass(
@@ -632,20 +700,17 @@ void LumenWRCPass::AddPass(
     const u32 budget = std::min(params_.update_budget_probes_per_frame, probeTotal);
     const std::string tag = rg_name_prefix_.empty() ? std::string{} : (rg_name_prefix_ + "_");
 
-    auto probeHandle = graph.ImportResource(tag + "LumenWRC_ProbeData", probe_data_);
-    auto rayHandle = graph.ImportResource(tag + "LumenWRC_RayData", ray_data_);
-    auto hitHandle = graph.ImportResource(tag + "LumenWRC_HitDistance", hit_distance_);
-
     graph.AddPass<WRCRGData>(tag + "LumenWRC",
         RGPassType::Compute, RGPassCategory::Lighting,
-        [probeHandle, rayHandle, hitHandle, sc_lighting_atlas_rg](WRCRGData& data, RenderGraphBuilder& builder) {
+        [sc_lighting_atlas_rg](WRCRGData& data, RenderGraphBuilder& builder) {
             builder.SideEffect();   // 纯 cache 无像素输出——防 RG 裁剪
-            data.probe_data = probeHandle;
-            builder.Write(probeHandle, ResourceState::UnorderedAccess);
-            data.ray_data = rayHandle;
-            builder.Write(rayHandle, ResourceState::UnorderedAccess);
-            data.hit_distance = hitHandle;
-            builder.Write(hitHandle, ResourceState::UnorderedAccess);
+            // Vulkan InsertBarrier 当前只实现 image barrier；ResourceHandle
+            // 的 buffer/texture 注册表又是独立编号空间。把这三个
+            // 持久 buffer 作为 Unknown RG 资源 Write 导入，会让同号
+            // texture 被错当成 UA image 转到 GENERAL（实测命中
+            // AlbedoTextureArray）。WRC 子通道已有显式 MemoryBarrier，
+            // 且本 pass 以 SideEffect 保活，因此 buffer 不进图像状态机；
+            // 只保留真正的 SC atlas texture 读依赖。
             // SC atlas 写读屏障声明（cache 填充路径的合法性前提）。
             if (sc_lighting_atlas_rg.IsValid()) {
                 builder.Read(sc_lighting_atlas_rg, ResourceState::ShaderResource);
@@ -783,8 +848,20 @@ void LumenWRCPass::AddPass(
 
             if (dbg_buf_ != handles::INVALID_RESOURCE) {
                 if (auto* d = static_cast<u32*>(device_->MapBuffer(dbg_buf_))) {
-                    for (u32 i = 0; i < 8; ++i) d[i] = 0u;
+                    for (u32 i = 0; i < 16; ++i) d[i] = 0u;
                     device_->UnmapBuffer(dbg_buf_);
+                }
+            }
+            if (bins_buf_ != handles::INVALID_RESOURCE) {
+                if (auto* d = static_cast<u32*>(device_->MapBuffer(bins_buf_))) {
+                    std::memset(d, 0, 512u * 16u);
+                    device_->UnmapBuffer(bins_buf_);
+                }
+            }
+            if (card_fail_buf_ != handles::INVALID_RESOURCE) {
+                if (auto* d = static_cast<u32*>(device_->MapBuffer(card_fail_buf_))) {
+                    std::memset(d, 0, 4096u * sizeof(u32));
+                    device_->UnmapBuffer(card_fail_buf_);
                 }
             }
 
@@ -837,8 +914,12 @@ cmd->BindComputePipeline(trace_pipeline_);
                     {9, DescriptorType::StorageBuffer, gCards},
                     {10, DescriptorType::StorageBuffer,
                         dbg_buf_ != handles::INVALID_RESOURCE ? dbg_buf_ : hit_distance_},
+                    {11, DescriptorType::StorageBuffer,
+                        bins_buf_ != handles::INVALID_RESOURCE ? bins_buf_ : hit_distance_},
+                    {12, DescriptorType::StorageBuffer,
+                        card_fail_buf_ != handles::INVALID_RESOURCE ? card_fail_buf_ : hit_distance_},
                 };
-                UpdateDescriptorSet(device_, finalize_ds_[frameIdx], params, 11);
+                UpdateDescriptorSet(device_, finalize_ds_[frameIdx], params, 13);
                 DescriptorSetHandle sets[] = { finalize_ds_[frameIdx] };
 cmd->BindComputePipeline(finalize_pipeline_);
                                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, sets, 0, nullptr);
@@ -868,26 +949,124 @@ cmd->BindComputePipeline(update_pipeline_);
             // [Q2 排查] SC 查询漏斗：GPU 侧拷贝进 consume_ring（+2 帧读回，
             // 同 rays/dump ring 的 fence 语义；槽位互不冲突见注）。
             if (dbg_buf_ != handles::INVALID_RESOURCE && consume_ring_.is_initialized()) {
-                cmd->CopyBuffer(dbg_buf_, consume_ring_.buffer(consume_ring_.slot_for_frame(current_frame_index)), 0, 0, 32);
+                cmd->CopyBuffer(dbg_buf_, consume_ring_.buffer(consume_ring_.slot_for_frame(current_frame_index)), 0, 0, 64);
                 cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
                                    AccessFlag::TransferWrite, AccessFlag::HostRead);
             }
 
-            // [Q2 排查] SC 查询漏斗读回（+2 帧）。
+            // [Q2 排查] SC 查询漏斗读回（+2 帧）。六段细分（R0 2026-09-20）：
+            //   boundsFail = boundsFar(卡外) + 贴边获救；queryFail 细分 =
+            //   along/perp；kMaxReads 饱和独立计数。计数自洽：
+            //   cands = bounds + orient + along + perp + depth + nan + candOK。
             if (dbg_buf_ != handles::INVALID_RESOURCE && consume_ring_.is_initialized() &&
                 current_frame_index >= 2u && (current_frame_index % 120u) == 0u) {
                 const u32 fRb = consume_ring_.slot_for_frame(current_frame_index - 2u);
                 if (void* fp = consume_ring_.map(device_, fRb)) {
                     const u32* d = static_cast<const u32*>(fp);
+                    const u64 cands = d[4], total = d[4] ? cands : 1;
                     PRIMAL_LOG_STREAM(Info, "Render")
                         << "[WRC_SC_FUNNEL] tag="
                         << (rg_name_prefix_.empty() ? "near" : rg_name_prefix_)
                         << " hits=" << d[0] << " gridOk=" << d[1]
                         << " cellFound=" << d[2] << " found=" << d[3]
                         << " | cands=" << d[4] << " boundsFail=" << d[5]
-                        << " orientFail=" << d[6] << " queryFail=" << d[7]
+                        << " (" << (100.0 * d[5] / total) << "%)"
+                        << " orientFail=" << d[6]
+                        << " (" << (100.0 * d[6] / total) << "%)"
+                        << " foundRays=" << d[7]
+                        << " | bFar=" << d[8] << " bEdgeSaved=" << d[9]
+                        << " qAlong=" << d[10] << " qPerp=" << d[11]
+                        << " | depthInvalid=" << d[12] << " nanReject=" << d[13]
+                        << " readSat=" << d[14] << " candOK=" << d[15]
                         << std::endl;
                     consume_ring_.unmap(device_, fRb);
+                }
+            }
+
+            // [R1] 拒绝位置分箱读回（PRIMAL_WRC_BOUNDS_DUMP=1；120 帧周期，
+            // 独立 ring 避免与漏斗槽位互踩）：打印热点格世界坐标 + 拒绝构成
+            // ——区分"未卡化几何"（拒绝聚集在无卡区域）vs"掠射带"（聚集在
+            // 卡片边缘/平行面带）。
+            if (bounds_dump_enabled_ && bins_buf_ != handles::INVALID_RESOURCE &&
+                bins_ring_.is_initialized()) {
+                const u32 bSlot = bins_ring_.slot_for_frame(current_frame_index);
+                cmd->CopyBuffer(bins_buf_, bins_ring_.buffer(bSlot), 0, 0, 512u * 16u);
+                cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                                   AccessFlag::TransferWrite, AccessFlag::HostRead);
+                ++bins_copies_;
+                if (bins_copies_ > 2u && current_frame_index >= 2u &&
+                    (current_frame_index % 120u) == 0u) {
+                    const u32 rb = bins_ring_.slot_for_frame(current_frame_index - 2u);
+                    if (void* bp = bins_ring_.map(device_, rb)) {
+                        struct HotBin { u32 total, bounds, alongperp, idx; };
+                        HotBin hot[4] = {};
+                        for (u32 b = 0; b < 512u; ++b) {
+                            const u32* e = static_cast<const u32*>(bp) + size_t(b) * 4u;
+                            if (e[0] == 0u) continue;
+                            if (e[0] > hot[3].total) { hot[3] = {e[0], e[1], e[2], b};
+                                for (u32 k = 3; k > 0 && hot[k].total > hot[k-1].total; --k)
+                                    std::swap(hot[k], hot[k-1]); }
+                        }
+                        // grid 包围盒从 SC grid offsets header 解出（CPU 侧
+                        // 保存一份近场 grid 拷贝代价高——直接以探针场 bounds
+                        // 近似：分箱只用于空间定位，绝对框够用）。
+                        std::string tops;
+                        for (int k = 0; k < 4; ++k) {
+                            if (!hot[k].total) break;
+                            const u32 b = hot[k].idx;
+                            const u32 bx = b & 7u, by = (b >> 3) & 7u, bz = (b >> 6) & 7u;
+                            tops += " [bin " + std::to_string(bx) + "," + std::to_string(by)
+                                  + "," + std::to_string(bz) + "] total=" + std::to_string(hot[k].total)
+                                  + " bounds=" + std::to_string(hot[k].bounds)
+                                  + " alongperp=" + std::to_string(hot[k].alongperp);
+                        }
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[WRC_BOUNDS_DUMP] tag="
+                            << (rg_name_prefix_.empty() ? "near" : rg_name_prefix_)
+                            << " top-reject-bins(8³ over SC grid AABB):" << tops
+                            << std::endl;
+                        bins_ring_.unmap(device_, rb);
+                    }
+                    // [F4 2026-09-20] 逐卡 boundsFail top-N（同周期读回）：
+                    // 回答"哪张卡失败"——卡Idx 经 SC_DUMP_CARDS/SC_CARDVIEW
+                    // 交叉定位（atlas 原点/朝向/分辨率）。
+                    if (card_fail_buf_ != handles::INVALID_RESOURCE &&
+                        card_fail_ring_.is_initialized()) {
+                        const u32 cSlot = card_fail_ring_.slot_for_frame(current_frame_index);
+                        cmd->CopyBuffer(card_fail_buf_, card_fail_ring_.buffer(cSlot), 0, 0, 4096u * sizeof(u32));
+                        cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                                           AccessFlag::TransferWrite, AccessFlag::HostRead);
+                        ++card_fail_copies_;
+                        if (card_fail_copies_ > 2u && current_frame_index >= 2u &&
+                            (current_frame_index % 120u) == 0u) {
+                            const u32 crb = card_fail_ring_.slot_for_frame(current_frame_index - 2u);
+                            if (void* cp = card_fail_ring_.map(device_, crb)) {
+                                struct HotCard { u32 fails, idx; };
+                                HotCard hot[8] = {};
+                                const u32* cf = static_cast<const u32*>(cp);
+                                for (u32 c = 0; c < 4096u; ++c) {
+                                    if (cf[c] == 0u) continue;
+                                    if (cf[c] > hot[7].fails) {
+                                        hot[7] = {cf[c], c};
+                                        for (u32 k = 7; k > 0 && hot[k].fails > hot[k-1].fails; --k)
+                                            std::swap(hot[k], hot[k-1]);
+                                    }
+                                }
+                                std::string cardTops;
+                                for (int k = 0; k < 8; ++k) {
+                                    if (!hot[k].fails) break;
+                                    cardTops += " card" + std::to_string(hot[k].idx)
+                                              + "=" + std::to_string(hot[k].fails);
+                                }
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[WRC_CARD_FAIL_DUMP] tag="
+                                    << (rg_name_prefix_.empty() ? "near" : rg_name_prefix_)
+                                    << " top-boundsFail-cards:" << cardTops
+                                    << std::endl;
+                                card_fail_ring_.unmap(device_, crb);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -967,8 +1146,8 @@ cmd->BindComputePipeline(update_pipeline_);
                                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
             }
 
-            // ---- dispatch 4（调试/降级，PRIMAL_WRC_PREFILTER=1）----
-            if (prefilter_enabled_ && prefilter_pipeline_ != handles::INVALID_PIPELINE) {
+            // ---- dispatch 4（调试/降级 + [P4] DUMP=1 标准指标）----
+            if ((prefilter_enabled_ || WRCDumpEnabled()) && prefilter_pipeline_ != handles::INVALID_PIPELINE) {
                 DescriptorData params[] = {
                     {2, DescriptorType::UniformBuffer, volume_cb_[frameIdx]},
                     {4, DescriptorType::StorageBuffer, probe_data_},
@@ -982,7 +1161,7 @@ cmd->BindComputePipeline(prefilter_pipeline_);
             }
 
             // ---- [A2 验收] prefilter SH9 copy（+2 帧读回对照）----
-            if (prefilter_enabled_ && prefilter_ring_.is_initialized()) {
+            if ((prefilter_enabled_ || WRCDumpEnabled()) && prefilter_ring_.is_initialized()) {
                 const u32 pfCopySlot = prefilter_ring_.slot_for_frame(current_frame_index);
                 cmd->CopyBuffer(prefilter_sh_, prefilter_ring_.buffer(pfCopySlot), 0, 0,
                                 u64(probeTotal) * 9u * sizeof(math::v4));
@@ -1013,28 +1192,66 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                         stats.total_probes = probeTotal;
                         double lumSum = 0.0;
                         u32 counted = 0;
+                        // [P4 2026-09-21] 角向方差分布（全 64 方向亮度 var/mean）。
+                        std::vector<float> angVarRatios;
+                        u32 monoCount = 0;
+                        auto h16 = [](u32 h) {
+                            u32 sign = (h >> 15) & 1u, e2 = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+                            if (e2 == 0u) return 0.0f;
+                            u32 bits = (sign << 31) | ((e2 + 112u) << 23) | (m << 13);
+                            float f; std::memcpy(&f, &bits, 4); return f;
+                        };
+                        // [P2 SoA] dump 读回按布局 v2 寻址（radiance/meta 双区域）。
+                        const u32 radStride = kWRCProbeRadianceStrideU32;
                         for (u32 pi = 0; pi < probeTotal; ++pi) {
-                            const u32 base = pi * kWRCProbeStrideU32;
-                            const u32 state = pd[base + kWRCDirsPerProbe * 2u + 2u];
+                            const u32 rbase = pi * radStride;
+                            const u32 metaBase = probeTotal * radStride + pi * kWRCProbeMetaStrideU32;
+                            const u32 state = pd[metaBase + 2u];
                             if ((state & kWRCProbeStateValid) == 0u) continue;
                             if ((state & kWRCProbeStateInGeometry) != 0u) { ++stats.in_geometry_probes; continue; }
                             ++stats.valid_probes;
-                            // 8 方向子采样亮度（dump 只为诊断）。
+                            // 8 方向子采样亮度（dump 只为诊断；保持原口径——
+                            // meanLum(sub) 是 P2 布局重构的逐位对照基线）。
                             for (u32 d = 0; d < kWRCDirsPerProbe; d += 8u) {
-                                u32 lo = pd[base + d * 2u];
-                                u32 hi = pd[base + d * 2u + 1u];
-                                auto h16 = [](u32 h) {
-                                    u32 sign = (h >> 15) & 1u, e2 = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
-                                    if (e2 == 0u) return 0.0f;
-                                    u32 bits = (sign << 31) | ((e2 + 112u) << 23) | (m << 13);
-                                    float f; std::memcpy(&f, &bits, 4); return f;
-                                };
+                                u32 lo = pd[rbase + d * 2u];
+                                u32 hi = pd[rbase + d * 2u + 1u];
                                 float r = h16(lo & 0xFFFFu), g = h16(lo >> 16), b = h16(hi & 0xFFFFu);
                                 lumSum += 0.2126f * r + 0.7152f * g + 0.0722f * b;
                                 ++counted;
                             }
+                            // 全 64 方向亮度 mean/var → 归一化比率。
+                            float m = 0.0f;
+                            float lums[kWRCDirsPerProbe];
+                            for (u32 d = 0; d < kWRCDirsPerProbe; ++d) {
+                                u32 lo = pd[rbase + d * 2u];
+                                u32 hi = pd[rbase + d * 2u + 1u];
+                                lums[d] = 0.2126f * h16(lo & 0xFFFFu)
+                                        + 0.7152f * h16(lo >> 16)
+                                        + 0.0722f * h16(hi & 0xFFFFu);
+                                m += lums[d];
+                            }
+                            m /= float(kWRCDirsPerProbe);
+                            if (m > 1e-4f) {
+                                float v = 0.0f;
+                                for (u32 d = 0; d < kWRCDirsPerProbe; ++d) {
+                                    const float dv = lums[d] - m;
+                                    v += dv * dv;
+                                }
+                                v /= float(kWRCDirsPerProbe);
+                                const float ratio = v / (m * m);
+                                angVarRatios.push_back(ratio);
+                                if (ratio < 0.01f) ++monoCount;
+                            }
                         }
                         stats.mean_lum = counted ? float(lumSum / counted) : 0.0f;
+                        if (!angVarRatios.empty()) {
+                            std::sort(angVarRatios.begin(), angVarRatios.end());
+                            stats.ang_var_p50 = angVarRatios[angVarRatios.size() / 2];
+                            stats.ang_var_p95 = angVarRatios[std::min(
+                                (size_t)(angVarRatios.size() * 0.95), angVarRatios.size() - 1)];
+                            stats.ang_var_max = angVarRatios.back();
+                            stats.mono_fraction = float(monoCount) / float(angVarRatios.size());
+                        }
                         dump_ring_.unmap(device_, rbSlot);
                         dump_stats_ = stats;
                         PRIMAL_LOG_STREAM(Info, "Render")
@@ -1042,13 +1259,23 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                             << " valid=" << stats.valid_probes << "/" << stats.total_probes
                             << " inGeometry=" << stats.in_geometry_probes
                             << " meanLum(sub)=" << stats.mean_lum << std::endl;
+                        // [P4] 角向方差（各向异性健康度）标准输出。
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[WRC_ANGVAR] frame=" << current_frame_index
+                            << " probes=" << angVarRatios.size()
+                            << " var/mean p50=" << stats.ang_var_p50
+                            << " p95=" << stats.ang_var_p95
+                            << " max=" << stats.ang_var_max
+                            << " mono(<1%)=" << (100.0 * stats.mono_fraction) << "%"
+                            << std::endl;
                     }
                 }
             }
 
             // ---- [A2 验收] prefilter SH9 vs 消费端 cos 加权积分——探针级
-            // 误差统计（+2 帧读回；PRIMAL_WRC_PREFILTER=1 + PRIMAL_WRC_DUMP=1）。
-            if (prefilter_enabled_ && prefilter_ring_.is_initialized() &&
+            // 误差统计（+2 帧读回；[P4] PRIMAL_WRC_DUMP=1 即标准输出，
+            // PRIMAL_WRC_PREFILTER 保留为独立 A/B 位）。
+            if ((prefilter_enabled_ || WRCDumpEnabled()) && prefilter_ring_.is_initialized() &&
                 WRCDumpEnabled() && dump_ring_.is_initialized() &&
                 prefilter_copies_ > 2u && current_frame_index >= 2u &&
                 (current_frame_index % 120u) == 0u) {
@@ -1081,9 +1308,14 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                         return math::v3{ h16(lo & 0xFFFFu), h16(lo >> 16), h16(hi & 0xFFFFu) };
                     };
                     std::vector<float> relErrs;
+                    u32 worstProbe = 0xFFFFFFFFu;
+                    float worstErr = -1.0f;
+                    // [P2 SoA] 布局 v2 寻址。
+                    const u32 radStride = kWRCProbeRadianceStrideU32;
                     for (u32 pi = 0; pi < probeTotal; ++pi) {
-                        const u32 base = pi * kWRCProbeStrideU32;
-                        const u32 state = pd[base + K * 2u + 2u];
+                        const u32 base = pi * radStride;
+                        const u32 metaBase = probeTotal * radStride + pi * kWRCProbeMetaStrideU32;
+                        const u32 state = pd[metaBase + 2u];
                         if ((state & 1u) == 0u || (state & 2u) != 0u) continue;
                         std::vector<float> lobe(K);
                         float meanLum = 0.0f;
@@ -1131,6 +1363,9 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                             errSum += std::abs(lum - lobe[k]);
                         }
                         relErrs.push_back(errSum / (float(K) * std::max(meanLum, 1e-4f)));
+                        // [P4] 记录最差探针（坐标可回溯定位：咔嚓面/方向塌缩）。
+                        const float relErr = relErrs.back();
+                        if (relErr > worstErr) { worstErr = relErr; worstProbe = pi; }
                     }
                     prefilter_ring_.unmap(device_, pfRb);
                     dump_ring_.unmap(device_, dumpSlot);
@@ -1144,8 +1379,20 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                         prefilter_check_.median_rel_err = med;
                         prefilter_check_.p95_rel_err = p95;
                         prefilter_check_.max_rel_err = mx;
+                        // [P4 2026-09-21] 最差探针网格坐标 + P95>15% 阈值门。
+                        prefilter_check_.worst_probe = worstProbe;
+                        prefilter_check_.p95_over_threshold = p95 > 0.15f;
+                        const u32 cx = params_.probe_count_x;
+                        const u32 cy = params_.probe_count_y;
+                        if (worstProbe != 0xFFFFFFFFu) {
+                            prefilter_check_.worst_coords[0] = worstProbe % cx;
+                            prefilter_check_.worst_coords[1] = (worstProbe / cx) % cy;
+                            prefilter_check_.worst_coords[2] = worstProbe / (cx * cy);
+                        }
                         const bool pass = med < 0.05f;
-                        if (pass) {
+                        // P4: 阈值门 P95>15% 告警（独立于中位 PASS/FAIL 线）。
+                        const bool warn95 = prefilter_check_.p95_over_threshold;
+                        if (pass && !warn95) {
                             PRIMAL_LOG_STREAM(Info, "Render")
                                 << "[WRC_PF_CHECK] frame=" << current_frame_index
                                 << " probes=" << relErrs.size()
@@ -1156,7 +1403,13 @@ cmd->BindComputePipeline(prefilter_pipeline_);
                                 << "[WRC_PF_CHECK] frame=" << current_frame_index
                                 << " probes=" << relErrs.size()
                                 << " median=" << med << " p95=" << p95 << " max=" << mx
-                                << "  FAIL(>=5%)" << std::endl;
+                                << (pass ? "  PASS(<5%)" : "  FAIL(>=5%)")
+                                << (warn95 ? "  WARN(P95>15%)" : "")
+                                << " worstProbe=" << worstProbe
+                                << " coords=(" << prefilter_check_.worst_coords[0]
+                                << "," << prefilter_check_.worst_coords[1]
+                                << "," << prefilter_check_.worst_coords[2] << ")"
+                                << std::endl;
                         }
                     }
                 } else {

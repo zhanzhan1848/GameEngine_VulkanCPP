@@ -12,15 +12,20 @@ namespace primal::graphics::lumen {
 // 消费者（A3 起：ScreenProbeGIPass 远场段）经本视图取 WRC 数据，不摸
 // LumenWRCPass 内部。header-only；视图只搬运句柄/尺寸，不持有资源。
 //
-// 排布契约（WRCTypes.h kWRCProbeStrideU32）：单 storage buffer 内每探针
-// K 个方向的 RGB16F 打包 radiance + Chebyshev mean/var + state（含消费
-// 计数）。消费端 cos 加权积分在此 radiance 方向格上进行（方向性保留到
-// 消费端——与 DDGI SH 预积分的本质区别）。
+// 排布契约（WRCTypes.h，[P2 SoA] 布局 v2）：单 storage buffer 双区域——
+// radiance 区（probeIdx × 128 u32 起，K 个方向 RGB16F 打包）+ meta 区
+//（probeTotal×128 + probeIdx×4 起：Chebyshev mean/var + state（含消费
+// 计数）+ pad）。消费端 cos 加权积分在此 radiance 方向格上进行（方向性
+// 保留到消费端——与 DDGI SH 预积分的本质区别）。
 // ============================================================================
 
 // 与 WRCTypes.h 常量同步的视图侧副本（消费端无需 include pass 头）。
 inline constexpr u32 kWRCViewDirsPerProbe = 64;
-inline constexpr u32 kWRCViewProbeStrideU32 = kWRCViewDirsPerProbe * 2u + 4u;
+// [P2 SoA]: radiance 区 stride（u32/probe）与 meta 区条目宽。
+inline constexpr u32 kWRCViewProbeRadianceStrideU32 = kWRCViewDirsPerProbe * 2u;      // 128
+inline constexpr u32 kWRCViewProbeMetaStrideU32 = 4u;
+// 兼容别名（AoS 总 stride——仅缓冲总尺寸语义仍成立）。
+inline constexpr u32 kWRCViewProbeStrideU32 = kWRCViewProbeRadianceStrideU32 + kWRCViewProbeMetaStrideU32;
 // state 位域（同 WRCTypes.h）
 inline constexpr u32 kWRCViewStateValid      = 1u << 0;
 inline constexpr u32 kWRCViewStateInGeometry = 1u << 1;
