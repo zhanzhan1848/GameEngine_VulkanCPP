@@ -384,6 +384,7 @@ namespace primal::graphics::rhi
             bytesPerPixel = 1; break;
         case DataFormat::R16_Float:
         case DataFormat::R16_UInt:
+        case DataFormat::R16_UNorm:   // T4.3: per-mesh SDF（u16 unorm 距离）
             bytesPerPixel = 2; break;
         case DataFormat::RG16_Float:
         case DataFormat::RGBA8_UNorm:
@@ -471,6 +472,19 @@ namespace primal::graphics::rhi
         region.imageExtent = { width, height, depth };
 
         cmd->CopyBufferToTexture(stagingBuffer, out_texture, &region, 1);
+
+        // P0（2026-09-16，同 FroxelFogPass 噪声纹理修法）: CopyBufferToTexture
+        // 停在 TRANSFER_DST_OPTIMAL；此纹理不经 RenderGraph 管理，首次
+        // shader 采样即报布局 validation。收尾收敛到 ShaderResource。
+        {
+            ResourceBarrier sdfBarrier{};
+            sdfBarrier.resource = out_texture;
+            sdfBarrier.beforeState = ResourceState::CopyDest;
+            sdfBarrier.afterState = ResourceState::ShaderResource;
+            sdfBarrier.subresource = 0xFFFFFFFF;
+            cmd->InsertBarrier(&sdfBarrier, 1);
+        }
+
         cmd->End();
         cmd->Submit();
         cmd->WaitForCompletion();

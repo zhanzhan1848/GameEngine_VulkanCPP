@@ -79,10 +79,13 @@ namespace primal::content
 
     // RHI Forwarding Helpers
     graphics::rhi::ResourceHandle get_rhi_texture_handle(id::id_type id);
+    std::shared_ptr<const graphics::ray_geometry::MeshBLAS> get_rhi_mesh_blas(id::id_type id);
     bool get_rhi_mesh_asset(id::id_type id, graphics::rhi::RHIMeshAsset& asset);
     // T4.2：只拷贝 id 对应资产的 card bake（无数据返回 false）。供运行时
     // 卡片注册按实例调用——避免整资产拷贝，也避免 get_rhi_gpu_mesh 的按需建 GPU mesh。
     bool get_rhi_mesh_card_bake(id::id_type id, graphics::rhi::RHICardBakeData& out);
+    // [Phase 2 content-ready 门禁]：零拷贝存在性检查（门禁每帧按实例轮询）。
+    bool has_rhi_mesh_card_bake(id::id_type id);
     graphics::rhi::RHIGpuMesh* get_rhi_gpu_mesh(id::id_type id);
 
     // Register a pre-built RHIMeshAsset (from custom binary parsing or procedural generation).

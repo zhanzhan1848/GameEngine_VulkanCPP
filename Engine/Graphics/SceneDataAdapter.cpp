@@ -661,16 +661,19 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                  }
              }
 
-             // T4.2: card bake ("CDBK") section. Peek-gated on the magic like
+             // T4.2: card bake section. Peek-gated on the magic like
              // the UVLM block above; cards/surfels go straight into the asset
-             // (32 B wire records).
+             // (32 B wire records). v2 ("CDB2") prepends a version u32;
+             // legacy "CDBK" sections have no version field.
              if (hasCardBake) {
                  bool cardBakeConsumed = false;
                  if (reader.Remaining() >= 8) {
                      const u8* cdbkPeek = static_cast<const u8*>(reader.GetCurrentPtr());
                      u32 cdbkMagic = ReadPackedValue<u32>(cdbkPeek);
-                     if (cdbkMagic == 0x4B424443) { // "CDBK"
+                     if (cdbkMagic == 0x4B424443 || // "CDBK"
+                         cdbkMagic == 0x32424443) { // "CDB2"
                          reader.Skip(4);
+                         if (cdbkMagic == 0x32424443) reader.Skip(4);  // version
                          u32 cardCount = reader.Read<u32>();
                          const u32 cardBytes = cardCount * 32; // sizeof(RHICardBakeCard)
                          if (cardCount <= 4096 && reader.Remaining() >= cardBytes + 4) {
@@ -683,6 +686,8 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
                                  meshAsset.card_bake.surfels.resize(surfelCount);
                                  reader.Read(meshAsset.card_bake.surfels.data(),
                                              surfelCount * sizeof(rhi::RHICardBakeSurfel));
+                                              // [SC per-mesh 计划 P0 身份契约] 双摘要随解析固定。
+                                             rhi::ComputeCardBakeDigests(meshAsset);
                                  cardBakeConsumed = true;
                              }
                          }
@@ -1378,15 +1383,18 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
                 }
             }
 
-            // T4.2: card bake ("CDBK") section — same peek-gate pattern as
-            // the UVLM block above.
+            // T4.2: card bake section — same peek-gate pattern as
+            // the UVLM block above. v2 ("CDB2") prepends a version u32;
+            // legacy "CDBK" sections have no version field.
             if (hasCardBake) {
                 bool cardBakeConsumed = false;
                 if (reader.Remaining() >= 8) {
                     const u8* cdbkPeek = static_cast<const u8*>(reader.GetCurrentPtr());
                     u32 cdbkMagic = ReadPackedValue<u32>(cdbkPeek);
-                    if (cdbkMagic == 0x4B424443) { // "CDBK"
+                    if (cdbkMagic == 0x4B424443 || // "CDBK"
+                        cdbkMagic == 0x32424443) { // "CDB2"
                         reader.Skip(4);
+                        if (cdbkMagic == 0x32424443) reader.Skip(4);  // version
                         u32 cardCount = reader.Read<u32>();
                         const u32 cardBytes = cardCount * 32; // sizeof(RHICardBakeCard)
                         if (cardCount <= 4096 && reader.Remaining() >= cardBytes + 4) {
@@ -1399,6 +1407,8 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
                                 meshAsset.card_bake.surfels.resize(surfelCount);
                                 reader.Read(meshAsset.card_bake.surfels.data(),
                                             surfelCount * sizeof(rhi::RHICardBakeSurfel));
+                                             // [SC per-mesh 计划 P0 身份契约] 双摘要随解析固定。
+                                            rhi::ComputeCardBakeDigests(meshAsset);
                                 cardBakeConsumed = true;
                             }
                         }
@@ -1731,6 +1741,8 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
                 meshAsset.sdf.signed_encoding = hasSdfSigned ? u8(1) : u8(0);
             }
 
+            // [SC per-mesh 计划 P0 身份契约] 全部缓冲就绪后固定双摘要。
+            rhi::ComputeCardBakeDigests(meshAsset);
             id::id_type meshEntityId = content::register_mesh_asset(meshAsset);
 
             RenderMesh* mesh = new RenderMesh();

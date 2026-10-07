@@ -19,7 +19,14 @@ namespace primal::graphics::lumen {
 
 /// Surface Cache atlas + 卡片缓冲的只读快照。
 struct SurfaceCacheView {
+    /// Material payload atlas. Alpha packs validity/transmission/thickness;
+    /// consumers use it to distinguish a transmissive back face from an
+    /// opaque card whose opposite side must stay rejected.
+    rhi::ResourceHandle albedo_atlas{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle lighting_atlas{ rhi::handles::INVALID_RESOURCE };  ///< 三缓冲 lighting atlas（GetCacheView 的 atlas_idx 槽位）
+    /// [E0-B 2026-09-21] 直射剥离副本（同槽位轮转；LightEval 另存
+    /// result − direct·ρ/π）。可缺省（INVALID = 上游未分配，消费者回退混合 atlas）。
+    rhi::ResourceHandle lighting_nodirect_atlas{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle card_data{ rhi::handles::INVALID_RESOURCE };       ///< CardGenerator 卡片数据 SSBO
     rhi::ResourceHandle card_lookup{ rhi::handles::INVALID_RESOURCE };     ///< CardGenerator mesh→card 查找 SSBO
     rhi::ResourceHandle grid_offsets{ rhi::handles::INVALID_RESOURCE };    ///< T1.3 uniform card grid offsets（可缺省）
@@ -41,6 +48,7 @@ struct SurfaceCacheView {
 /// DDGI 单个 volume 的只读快照（irradiance 三缓冲取 frame_idx % 3 槽位）。
 struct DDGIVolumeView {
     rhi::ResourceHandle irradiance{ rhi::handles::INVALID_RESOURCE };  ///< irradiance_buffers_[frame_idx % 3]
+    rhi::ResourceHandle depth{ rhi::handles::INVALID_RESOURCE }; ///< matching SH slot; mean[64], variance[64] per probe
 
     math::v3 origin{};     ///< volume_data_.ProbeOrigin.xyz
     math::v3 counts{};    ///< params_.probe_count_{x,y,z}（float 化，与旧上传一致）

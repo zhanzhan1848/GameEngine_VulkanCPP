@@ -4,6 +4,10 @@
 // IWYU：本头直接使用 utl::vector——此前依赖其他 TU 的传递包含，
 // EngineDLL/RenderPipelineAPI.cpp 的包含顺序触发编译失败。
 #include "Utilities/Vector.h"
+#include <memory>
+#include "CardSurfaceIdentity.h"
+
+namespace primal::graphics::ray_geometry { struct MeshBLAS; }
 
 namespace primal::graphics::rhi
 {
@@ -65,6 +69,16 @@ namespace primal::graphics::rhi
         utl::vector<RHICardBakeCard> cards;
         utl::vector<RHICardBakeSurfel> surfels;
 
+        // [SC per-mesh 计划 P0 身份契约]（Docs/2026-09-30-sc-per-mesh-surface-
+        // bake-and-lookup-plan.md §3.1）：MeshAssetID+GeometryVersion /
+        // CardID+LayoutVersion 的落地指纹。geometry_digest = 顶点数+索引数+
+        // 位置/索引字节逐字节 FNV-1a64；layout_digest = 卡片数组逐字节
+        // FNV-1a64。静态表面页 sidecar（"SCS1"）以双摘要键控——任一不匹配
+        // 即拒绝旧页（运行时 SurfaceStaticPages 消费；离线
+        // ContentTools/common/CardSurfaceBake.h 同约定生成）。
+        u64 geometry_digest{ 0 };
+        u64 layout_digest{ 0 };
+
         // 空 cards = 该 mesh 无烘焙数据（旧 blob / 退化网格），运行时走 AABB fallback。
         [[nodiscard]] bool HasCards() const { return !cards.empty(); }
     };
@@ -75,6 +89,9 @@ namespace primal::graphics::rhi
         u32 material_idx;
         f32 lod_threshold;
         
+        // Immutable runtime BLAS, shared across instances and asset snapshots.
+        std::shared_ptr<const ray_geometry::MeshBLAS> triangle_blas;
+
         // Raw buffers
         utl::vector<u8> position_buffer;
         utl::vector<u8> element_buffer;
@@ -104,4 +121,26 @@ namespace primal::graphics::rhi
         // 空 = 无烘焙数据，SurfaceCache CardGenerator 走 AABB fallback。
         RHICardBakeData card_bake;
     };
+
+    // [SC per-mesh 计划 P0 身份契约] 计算 geometry/layout 双摘要并写入
+    // asset.card_bake。解析路径有二（ContentToEngine::parse_mesh_to_asset 与
+    // SceneDataAdapter 的自解析注册），摘要必须单一事实源——离线
+    // CardSurfaceBake 同约定生成：FNV-1a64(顶点数 | 索引数 | 位置字节 |
+    // 索引字节) 与 FNV-1a64(卡片数组字节)。
+    inline u64 ComputeGeometryDigest(const RHIMeshAsset& asset)
+    {
+        using card_surface_identity::Hash;
+        u64 h=Hash(&asset.num_vertices,sizeof(u32));
+        h=Hash(&asset.num_indices,sizeof(u32),h);
+        h=Hash(asset.position_buffer.data(),asset.position_buffer.size(),h);
+        h=Hash(asset.index_buffer.data(),asset.index_buffer.size(),h);
+        return Hash(asset.element_buffer.data(),asset.element_buffer.size(),h);
+    }
+    inline void ComputeCardBakeDigests(RHIMeshAsset& asset)
+    {
+        asset.card_bake.geometry_digest=ComputeGeometryDigest(asset);
+        asset.card_bake.layout_digest=asset.card_bake.cards.empty()?0ull:
+            card_surface_identity::Hash(asset.card_bake.cards.data(),
+                asset.card_bake.cards.size()*sizeof(RHICardBakeCard));
+    }
 }

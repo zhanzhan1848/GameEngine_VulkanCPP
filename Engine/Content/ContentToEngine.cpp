@@ -7,6 +7,8 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 #include "Graphics/RHI/Core/RHIMeshAsset.h"
+#include "Graphics/Utilities/GeometryFirstHit.h"
+#include "Graphics/Utilities/GeometryBVHStore.h"
 #include "Graphics/RHI/Core/RHIGpuMesh.h"
 #include "Engine/Common/CoreLogStream.h"
 #ifdef __APPLE__
@@ -160,10 +162,13 @@ namespace primal::content
 		constexpr u32 lightmap_uv_magic{ 0x4D4C5655 };  // "UVLM"
 
 		// T4.2 offline card bake: mirrors elements_type::card_bake_flag and
-		// the "CDBK" trailing section (u32 magic | u32 card_count |
-		// card_count * RHICardBakeCard | u32 surfel_count | surfels).
+		// the trailing card-bake section. v1 layout: "CDBK" magic | u32
+		// card_count | cards | u32 surfel_count | surfels. v2 (2026-09-19
+		// SC 卡片 Lumen 对齐): "CDB2" magic | u32 version | 同 v1 其余字段。
+		// 双 magic 都收，旧 blob 视作 v1。
 		constexpr u32 card_bake_flag{ 0x20 };
-		constexpr u32 card_bake_magic{ 0x4B424443 };  // "CDBK"
+		constexpr u32 card_bake_magic_v1{ 0x4B424443 };  // "CDBK"
+		constexpr u32 card_bake_magic_v2{ 0x32424443 };  // "CDB2"
 
 		// T4.3 per-mesh SDF signed encoding: metadata flag only — when set,
 		// the SDF data array decodes as (unorm*2*max_dim - max_dim).
@@ -180,7 +185,8 @@ namespace primal::content
 		void skip_card_bake_section(utl::blob_stream_reader& blob)
 		{
 			const u32 magic{ blob.read<u32>() };
-			assert(magic == card_bake_magic);
+			assert(magic == card_bake_magic_v1 || magic == card_bake_magic_v2);
+			if (magic == card_bake_magic_v2) blob.skip(sizeof(u32));  // version
 			const u32 card_count{ blob.read<u32>() };
 			blob.skip((size_t)card_count * sizeof(graphics::rhi::RHICardBakeCard));
 			const u32 surfel_count{ blob.read<u32>() };
@@ -419,11 +425,13 @@ namespace primal::content
 
 			// T4.2: card bake section — cards + surfels straight into the
 			// asset (32 B wire records, memcpy is layout-stable via
-			// static_assert on both sides).
+			// static_assert on both sides). v2 ("CDB2") prepends a version
+			// u32; legacy "CDBK" sections have no version field.
 			if (has_card_bake)
 			{
 				const u32 magic{ blob.read<u32>() };
-				assert(magic == card_bake_magic);
+				assert(magic == card_bake_magic_v1 || magic == card_bake_magic_v2);
+				if (magic == card_bake_magic_v2) blob.skip(sizeof(u32));  // version
 				const u32 card_count{ blob.read<u32>() };
 				asset.card_bake.cards.resize(card_count);
 				if (card_count > 0)
@@ -440,6 +448,9 @@ namespace primal::content
 					       (size_t)surfel_count * sizeof(graphics::rhi::RHICardBakeSurfel));
 					blob.skip((size_t)surfel_count * sizeof(graphics::rhi::RHICardBakeSurfel));
 				}
+
+				// [SC per-mesh 计划 P0 身份契约]：解析期固定几何/布局双摘要。
+				graphics::rhi::ComputeCardBakeDigests(asset);
 			}
 		}
 
@@ -1293,6 +1304,21 @@ namespace primal::content
         return graphics::rhi::handles::INVALID_RESOURCE;
     }
 
+    std::shared_ptr<const graphics::ray_geometry::MeshBLAS> get_rhi_mesh_blas(id::id_type id)
+    {
+        std::lock_guard lock{rhi_mesh_mutex};
+        if (!rhi_mesh_assets.is_valid(id)) return {};
+        auto& asset=rhi_mesh_assets[id];
+        if (!asset.triangle_blas) {
+            bool persisted=false;
+            asset.triangle_blas=graphics::ray_geometry::LoadOrBuildMeshBLAS(asset,
+                graphics::ray_geometry::GeometryCacheDirectory(),nullptr,&persisted);
+            if(asset.triangle_blas && !persisted)
+                PRIMAL_LOG_STREAM(Warn,"Render") << "[SC_BVH_CACHE] unable to persist mesh digest=" << asset.triangle_blas->geometry_digest;
+        }
+        return asset.triangle_blas;
+    }
+
 	bool get_rhi_mesh_asset(id::id_type id, graphics::rhi::RHIMeshAsset& asset)
 	{
 		std::lock_guard lock{ rhi_mesh_mutex };
@@ -1316,7 +1342,18 @@ namespace primal::content
 		const graphics::rhi::RHICardBakeData& bake{ rhi_mesh_assets[id].card_bake };
 		out.cards = bake.cards;
 		out.surfels = bake.surfels;
+		// [SC per-mesh 计划 P0/P2] 双摘要随拷贝输出——注册循环用它向
+		// SurfaceStaticPages 键控静态页。
+		out.geometry_digest = bake.geometry_digest;
+		out.layout_digest = bake.layout_digest;
 		return !out.cards.empty();
+	}
+
+	bool has_rhi_mesh_card_bake(id::id_type id)
+	{
+		std::lock_guard lock{ rhi_mesh_mutex };
+		if (!rhi_mesh_assets.is_valid(id)) return false;
+		return !rhi_mesh_assets[id].card_bake.cards.empty();
 	}
 
     graphics::rhi::RHIGpuMesh* get_rhi_gpu_mesh(id::id_type id)
@@ -1335,7 +1372,16 @@ namespace primal::content
         graphics::rhi::RHIMeshAsset asset;
         {
             // Avoid deadlock? No, rhi_mesh_mutex is different.
-            if (!get_rhi_mesh_asset(id, asset)) return nullptr;
+            if (!get_rhi_mesh_asset(id, asset)) {
+                // [PassDebugView 排查] 一次性打印（编辑器导入 mesh 的 gpu_mesh=null 断点定位）。
+                static bool s_assetMissLogged = false;
+                if (!s_assetMissLogged) {
+                    s_assetMissLogged = true;
+                    PRIMAL_LOG_STREAM(Error, "Content")
+                        << "[GpuMeshDiag] get_rhi_mesh_asset(" << id << ") failed — mesh not in rhi_mesh_assets" << std::endl;
+                }
+                return nullptr;
+            }
         }
 
         auto* device = graphics::rhi::g_deviceManager.GetActiveDevice();
@@ -1343,6 +1389,16 @@ namespace primal::content
 
         auto mesh = std::make_unique<graphics::rhi::RHIGpuMesh>();
         if (!mesh->Initialize(*device, asset)) {
+            // [PassDebugView 排查] Initialize 失败点（SDF 上传/缓冲上传等）。
+            static bool s_initFailLogged = false;
+            if (!s_initFailLogged) {
+                s_initFailLogged = true;
+                PRIMAL_LOG_STREAM(Error, "Content")
+                    << "[GpuMeshDiag] RHIGpuMesh::Initialize failed for rhi_mesh_id=" << id
+                    << " (meshlets=" << asset.meshlets.size()
+                    << " positions=" << asset.position_buffer.size() / 12
+                    << " sdf_voxels=" << asset.sdf.voxels.size() << ")" << std::endl;
+            }
             return nullptr;
         }
         
@@ -1359,6 +1415,7 @@ namespace primal::content
 
     id::id_type register_mesh_asset(graphics::rhi::RHIMeshAsset& asset)
     {
+        asset.triangle_blas.reset(); // raw geometry may have changed in a copied asset
         id::id_type rhi_id;
         {
             std::lock_guard lock{ rhi_mesh_mutex };

@@ -505,6 +505,12 @@ scripts/spgi_plan_*.py
 scripts/sponza_sdf_*.py
 scripts/gi_ownership_baseline.sh
 
+# Versioned derived mesh BLAS / instance TLAS cache
+.primal-cache/
+
 # 本地渲染实验报告、审计证据与派生网页：保留在磁盘，不加入Git。
 # 正式结论与交接文档放在Docs/completed，索引在Docs/ARCHIVE.md。
 /Docs/reports/
+
+# Vulkan shader compiler timing marker; local scratch, not source.
+/Engine/Graphics/Vulkan/[Ss]haders/*.markertest

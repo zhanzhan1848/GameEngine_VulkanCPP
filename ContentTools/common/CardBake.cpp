@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 #include <vector>
 
@@ -203,6 +204,8 @@ void bake_v2(const OccupancyGrid& grid, const Params& params, data& out)
     u32 max_cards = params.max_cards;
     if (const char* e = std::getenv("PRIMAL_SC_BAKE_MAX_CARDS_PER_MESH"))
         max_cards = (u32)std::max(1, atoi(e));
+    const char* axial_env = std::getenv("PRIMAL_SC_BAKE_FULL_AXIAL_SLAB");
+    const bool full_axial_slab = axial_env && std::strcmp(axial_env, "1") == 0;
 
     // ---- 1. 样本集（+ surfel 输出） --------------------------------------
     std::vector<Sample> samples;
@@ -373,8 +376,12 @@ void bake_v2(const OccupancyGrid& grid, const Params& params, data& out)
         card c{};
         c.axis_direction = axis | (neg << 8);
         c.center[axis] = neg ? (dmin - backoff) : (dmax + backoff);
-        // 沿轴半厚 = 薄板：块深度范围 + backoff + 半体素外垫（slab 罩住全块）。
-        c.extent[axis] = (dmax - dmin) * 0.5f + backoff + step[axis] * 0.5f;
+        // 仅离线候选 opt-in：plane 位于 dmin-backoff 或 dmax+backoff，
+        // 因此从 plane 到块的远端是完整 (dmax-dmin)+backoff。
+        // 原半段范围会让有效 capture 点落在 card AABB 外，运行时网格漏列该卡。
+        // 未启用时保留旧 CDB2 字节行为，等待画面门禁后再考虑默认迁移。
+        c.extent[axis] = (dmax - dmin) * (full_axial_slab ? 1.0f : 0.5f)
+                       + backoff + step[axis] * 0.5f;
         // 投影包围 = cell 范围 + 1 体素外垫（cell 中心即样本位置，+0.5 归位）。
         c.center[uu] = comp(grid.grid_min, uu)
                      + ((f32)umin + (f32)(umax - umin + 1) * 0.5f + 0.5f) * step[uu];

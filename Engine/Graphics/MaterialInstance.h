@@ -82,6 +82,9 @@ namespace primal::graphics {
         /**
          * @brief Get the parent material
          */
+        void CertifySurfaceBakeTexture(u64 digest) { surface_bake_texture_digest_ = digest; }
+        u64 GetSurfaceBakeDigest() const;
+        std::weak_ptr<void> SurfaceBakeLifetime() const { return surface_bake_lifetime_; }
         Material* GetMaterial() const { return material_; }
 
         // ============================================================================
@@ -114,6 +117,19 @@ namespace primal::graphics {
         ) const;
 
         /**
+         * @brief Set the thin-surface transmission factor used by GPU-driven
+         *        Nanite and Surface Cache material data (0 = opaque).
+         */
+        void SetTransmissionFactor(float transmission);
+
+        /** @return transmission factor in the inclusive range [0, 1]. */
+        float GetTransmissionFactor() const { return transmission_factor_; }
+
+        /** Thin-surface optical thickness, normalized to [0, 1]. */
+        void SetThicknessFactor(float thickness);
+        float GetThicknessFactor() const { return thickness_factor_; }
+
+        /**
          * @brief Get all bound texture handles at once
          * @param out_albedo [out] Albedo texture handle
          * @param out_normal [out] Normal map texture handle
@@ -133,6 +149,8 @@ namespace primal::graphics {
         // ============================================================================
 
     private:
+        u64 surface_bake_texture_digest_{0};
+        std::shared_ptr<void> surface_bake_lifetime_{std::make_shared<int>(0)};
         Material* material_{nullptr};
         utl::vector<rhi::DescriptorSetHandle> descriptorSets_;
         
@@ -168,6 +186,11 @@ namespace primal::graphics {
         // bound texture handles at any time, not just before the first Update.
         // Indexed by binding slot; resized on demand in SetTexture.
         utl::vector<rhi::ResourceHandle> boundTextures_;
+
+        // Stored outside the legacy uniform block so the fixed MaterialData
+        // ABI can encode it in flags without changing descriptor layouts.
+        float transmission_factor_{0.0f};
+        float thickness_factor_{0.0f};
 
         rhi::RHIDeviceBase* device_{nullptr}; // Cached for destruction
     };

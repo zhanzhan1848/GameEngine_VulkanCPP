@@ -3643,3 +3643,22 @@ target_include_directories(TestPhysicsM4 PRIVATE
     ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
 target_link_libraries(TestPhysicsM4 PRIVATE Engine)
 add_test(NAME UnitPhysicsM4 COMMAND TestPhysicsM4)
+
+# SCS1 v2 reader contracts; independent of Engine and GPU.
+add_executable(UnitSCSurfacePages Graphics/TestSCSurfacePages.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Lumen/SurfaceCache/SurfaceStaticPages.cpp)
+target_include_directories(UnitSCSurfacePages PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(UnitSCSurfacePages PRIVATE -O2 -ffast-math)
+endif()
+add_test(NAME UnitSCSurfacePages COMMAND UnitSCSurfacePages)
+
+add_executable(UnitGeometryFirstHit Graphics/TestGeometryFirstHit.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Utilities/GeometryFirstHit.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Utilities/GeometryBVHStore.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Utilities/BVH.cpp)
+target_include_directories(UnitGeometryFirstHit PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(UnitGeometryFirstHit PRIVATE -O2 -ffast-math)
+endif()
+add_test(NAME UnitGeometryFirstHit COMMAND UnitGeometryFirstHit)

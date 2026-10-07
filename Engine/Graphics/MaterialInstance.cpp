@@ -2,6 +2,9 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIResource.h"
 #include <cstring>
+#include <algorithm>
+#include <cmath>
+#include "Graphics/RHI/Core/CardSurfaceIdentity.h"
 #include <fstream>
 #include <iostream>
 
@@ -25,13 +28,19 @@ MaterialInstance::MaterialInstance(MaterialInstance&& other) noexcept
       pendingSamplers_(std::move(other.pendingSamplers_)),
       pendingBuffers_(std::move(other.pendingBuffers_)),
       boundTextures_(std::move(other.boundTextures_)),
+      transmission_factor_(other.transmission_factor_),
+      thickness_factor_(other.thickness_factor_),
       device_(other.device_) {
+    surface_bake_texture_digest_ = other.surface_bake_texture_digest_;
+    other.surface_bake_texture_digest_ = 0;
 
     other.descriptorSets_.clear();
     other.uniformBuffers_.clear();
     other.uniformBuffersMapped_.clear();
     other.currentFrameIndex_ = 0;
     other.uniformDirty_ = false;
+    other.transmission_factor_ = 0.0f;
+    other.thickness_factor_ = 0.0f;
     other.device_ = nullptr;
 }
 
@@ -53,6 +62,8 @@ MaterialInstance& MaterialInstance::operator=(MaterialInstance&& other) noexcept
         }
         
         // Move resources
+        surface_bake_texture_digest_ = other.surface_bake_texture_digest_;
+        other.surface_bake_texture_digest_ = 0;
         material_ = other.material_;
         descriptorSets_ = std::move(other.descriptorSets_);
         uniformBuffers_ = std::move(other.uniformBuffers_);
@@ -63,6 +74,8 @@ MaterialInstance& MaterialInstance::operator=(MaterialInstance&& other) noexcept
         pendingSamplers_ = std::move(other.pendingSamplers_);
         pendingBuffers_ = std::move(other.pendingBuffers_);
         boundTextures_ = std::move(other.boundTextures_);
+        transmission_factor_ = other.transmission_factor_;
+        thickness_factor_ = other.thickness_factor_;
         device_ = other.device_;
         
         // Invalidate other
@@ -71,12 +84,15 @@ MaterialInstance& MaterialInstance::operator=(MaterialInstance&& other) noexcept
         other.uniformBuffersMapped_.clear();
         other.currentFrameIndex_ = 0;
         other.uniformDirty_ = false;
+        other.transmission_factor_ = 0.0f;
+        other.thickness_factor_ = 0.0f;
         other.device_ = nullptr;
     }
     return *this;
 }
 
 MaterialInstance::~MaterialInstance() {
+    surface_bake_lifetime_.reset();
     if (device_) {
         for (auto buf : uniformBuffers_) {
             if (buf != rhi::handles::INVALID_RESOURCE) {
@@ -153,7 +169,21 @@ bool MaterialInstance::Initialize(rhi::RHIDeviceBase* device) {
     return true;
 }
 
+u64 MaterialInstance::GetSurfaceBakeDigest() const {
+    // SCS v2 supports opaque materials. Transport/unknown sources use owner capture.
+    if (transmission_factor_ != 0.f || thickness_factor_ != 0.f) return 0;
+    math::v3 tint; float metallic, roughness;
+    GetMaterialFactors(tint, metallic, roughness);
+    const float rgb[3] = {tint.x, tint.y, tint.z};
+    for (float v : rgb) if (!std::isfinite(v)) return 0;
+    if (!std::isfinite(roughness) || !std::isfinite(metallic)) return 0;
+    return rhi::card_surface_identity::Material(surface_bake_texture_digest_, rgb,
+        u8(std::clamp(roughness, 0.f, 1.f) * 255.f + .5f),
+        u8(std::clamp(metallic, 0.f, 1.f) * 255.f + .5f));
+}
+
 void MaterialInstance::SetTexture(u32 binding, rhi::ResourceHandle texture, u32 arrayElement) {
+    if (binding == 0) surface_bake_texture_digest_ = 0;
     TextureUpdate update;
     update.binding = binding;
     update.arrayElement = arrayElement;
@@ -171,6 +201,7 @@ void MaterialInstance::SetTexture(u32 binding, rhi::ResourceHandle texture, u32 
 }
 
 void MaterialInstance::SetSampler(u32 binding, rhi::SamplerHandle sampler, u32 arrayElement) {
+    surface_bake_texture_digest_ = 0; // Sampling changes invalidate the baked source certificate.
     SamplerUpdate update;
     update.binding = binding;
     update.arrayElement = arrayElement;
@@ -188,6 +219,7 @@ void MaterialInstance::SetBuffer(u32 binding, rhi::ResourceHandle buffer, u32 si
 }
 
 void MaterialInstance::SetUniformData(u32 offset, const void* data, u32 size) {
+    if (data && size) surface_bake_texture_digest_ = 0; // Arbitrary uniforms cannot be reproduced offline.
     if (uniformBuffers_.empty() || currentFrameIndex_ >= uniformBuffers_.size() || !data || size == 0) {
         return;
     }
@@ -343,6 +375,18 @@ void MaterialInstance::GetMaterialFactors(
         out_metallic = 0.0f;
         out_roughness = 0.5f;
     }
+}
+
+void MaterialInstance::SetTransmissionFactor(float transmission) {
+    // Keep the source value normalized before MaterialDataBuilder quantizes it
+    // to the ABI-stable flags word.
+    transmission_factor_ = transmission > 1.0f ? 1.0f :
+                           (transmission > 0.0f ? transmission : 0.0f);
+}
+
+void MaterialInstance::SetThicknessFactor(float thickness) {
+    thickness_factor_ = thickness > 1.0f ? 1.0f :
+                        (thickness > 0.0f ? thickness : 0.0f);
 }
 
 void MaterialInstance::GetBoundTextures(

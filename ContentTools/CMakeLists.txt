@@ -35,6 +35,8 @@ set(PROJECTION_SOURCES
     common/SDF.cpp
     common/CardBake.h
     common/CardBake.cpp
+    common/CardSurfaceBake.h
+    common/CardSurfaceBake.cpp
     common/ProcessableMesh.h
     common/ProcessableMesh.cpp
     common/ErrorReport.h

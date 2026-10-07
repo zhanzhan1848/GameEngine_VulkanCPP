@@ -69,7 +69,14 @@ namespace primal::graphics::utl
 			bool hit{ false };
 		};
 
-		BVH() = default;
+		// std430 representation shared by software GPU traversal and CPU oracle.
+        struct PackedNode { float lo[4]{}, hi[4]{}; u32 links[4]{}; };
+        struct PackedTriangle { float a[4]{}, e1[4]{}, e2[4]{}; };
+        static_assert(sizeof(PackedNode) == 48 && sizeof(PackedTriangle) == 48);
+        void Export(primal::utl::vector<PackedNode>& nodes,
+                    primal::utl::vector<PackedTriangle>& triangles) const;
+
+        BVH() = default;
 
 		void Build(const primal::utl::vector<math::v3>& vertices, const primal::utl::vector<u32>& indices);
 		bool Intersect(const Ray& ray, HitInfo& out_hit) const;

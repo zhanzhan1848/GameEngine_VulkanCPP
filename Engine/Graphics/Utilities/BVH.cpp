@@ -42,6 +42,26 @@ namespace primal::graphics::utl
         Subdivide(0);
     }
 
+    void BVH::Export(primal::utl::vector<PackedNode>& nodes,
+                     primal::utl::vector<PackedTriangle>& triangles) const
+    {
+        nodes.resize(m_nodes.size()); triangles.resize(m_primitive_indices.size());
+        for (u32 i = 0; i < m_nodes.size(); ++i) {
+            const auto& n = m_nodes[i]; auto& out = nodes[i]; out = {};
+            out.lo[0]=n.bbox.min.x; out.lo[1]=n.bbox.min.y; out.lo[2]=n.bbox.min.z;
+            out.hi[0]=n.bbox.max.x; out.hi[1]=n.bbox.max.y; out.hi[2]=n.bbox.max.z;
+            out.links[0]=n.left; out.links[1]=n.right;
+            out.links[2]=n.first_primitive; out.links[3]=n.primitive_count;
+        }
+        for (u32 i = 0; i < m_primitive_indices.size(); ++i) {
+            const auto& t=m_triangles[m_primitive_indices[i]]; auto& out=triangles[i]; out={};
+            out.a[0]=t.v0.x; out.a[1]=t.v0.y; out.a[2]=t.v0.z;
+            out.e1[0]=t.v1.x-t.v0.x; out.e1[1]=t.v1.y-t.v0.y; out.e1[2]=t.v1.z-t.v0.z;
+            out.e2[0]=t.v2.x-t.v0.x; out.e2[1]=t.v2.y-t.v0.y; out.e2[2]=t.v2.z-t.v0.z;
+            std::memcpy(&out.a[3], &t.original_index, sizeof(u32));
+        }
+    }
+
     void BVH::UpdateNodeBounds(u32 node_index)
     {
         BVHNode& node = m_nodes[node_index];
