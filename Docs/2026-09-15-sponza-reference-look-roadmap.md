@@ -1,6 +1,7 @@
 # Sponza 参考画质路线图：从「结构正确」到「参考级画面」
 
 > 创建：2026-09-15 ｜ 状态：🚧 进行中（规划稿，未动手）
+> 新视觉参考（用户于 2026-10-04 确认）：[Unreal 同资产 Sponza 实采图及参数](completed/render-comparisons/2026-10-04-unreal-sponza-reference/README.md)。后续视觉对照使用此图；下文历史参考分析与 ROI 数值仍对应各自原始采样。
 > 上游证据：[completed/render-comparisons/2026-09-06-sponza](completed/render-comparisons/2026-09-06-sponza/README.md)（同参考图四轮对比结案）、[diagnostics/2026-09-14-sponza-reference-match](diagnostics/2026-09-14-sponza-reference-match/README.md)（活跃诊断）、[2026-09-07-gi-supplement-plan.md](2026-09-07-gi-supplement-plan.md)（GI 全栈审计）
 > 定位：GI 能量专项（修复计划阶段2/3、gi-physical-relation-calibration）继续独立推进；本文档负责**画面表现层**——参考图里 GI 之外缺的东西，以及把已有 pass 调成参考级观感的路径。
 

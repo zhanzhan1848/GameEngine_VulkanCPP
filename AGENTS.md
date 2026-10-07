@@ -89,3 +89,12 @@ Darwin/DebugVulkan/TestVulkanSponzaRenderGraph 2>&1 | tee /tmp/regress_vulkan.lo
   PhysicsCollision.radius 是"缩放 1 时的半径"（内置几何基准 0.05）且需 SIM ▶ Play；
   新增编辑器组件必须登记 Serializer.cs 三处，否则保存抛 Unknown component type；
   同 guid scene.load 不重建原生实体（强制重建需跨场景切换）。
+
+## 渲染诊断中间数据的磁盘纪律
+
+- 每轮开始记录本轮创建的临时目录；实验归档并逐 SHA 核验成功后，清理本轮已归档的 raw/bin 副本，保留 capture、日志、失败摘要及重建命令。不要等到 session 交接才清理。
+- 跨阶段相同 SHA 的原始数据只保留一个物理副本；可用硬链接保留各归档逻辑路径。归档视为只读，不原地改写硬链接文件；需更新时写新文件再原子替换。
+- 完整逐帧大窗口仅在证明跨帧来源所必需时捕获；不默认重复导出未变化的全 atlas／几何。减少诊断导出不应减少实际渲染射线、更新或改变验证契约。
+- 不删除其他正在运行会话的近期数据、未归档输入、生产资产或构建对象。清理须保留范围清单、SHA对应和释放空间实测。
+
+- 临时诊断 PNG 在持久截图或阶段归档中已有逐 SHA 相同副本后也应及时清理；保留 capture.json、重建网页所需 frame.ppm、日志和失败摘要，不盲删未归档或近期图片。
