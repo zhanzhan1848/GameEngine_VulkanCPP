@@ -36,6 +36,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -155,17 +156,32 @@ void generate_input_pattern(std::vector<u8>& out) {
 // IMPORTANT: WGSL uses u32 subtraction for `texCoord - offset`, which wraps
 // to a large u32 on underflow. textureLoad with OOB coord returns vec4(0).
 // The CPU reference must mirror this — unsigned-wrap then clamp to "no sample".
-struct BlurParams { u32 direction; u32 mipLevel; u32 pad0; u32 pad1; };
+//
+// P0.2 契约(2026-09-15):上传参数必须是生产 C++ BlurPass::BlurParams 的
+// 32 字节布局(direction 在 byte 20)。旧测试自造 16 字节布局(direction 在
+// byte 0),恰好与旧 shader 的错误布局互相印证,盖住了 bloom/VSM blur 的
+// 方向错位。static_assert 与 BlurPass.h 逐字节锁定。
+struct BlurParams {
+    u32 textureWidth;
+    u32 textureHeight;
+    int32_t blurRadius;
+    float sigma;
+    u32 arrayLayer;
+    u32 direction; // 0: Horizontal, 1: Vertical
+    u32 padding[2];
+};
+static_assert(sizeof(BlurParams) == 32, "must match production BlurPass::BlurParams");
+static_assert(offsetof(BlurParams, direction) == 20, "direction at byte 20");
 
-void cpu_blur(const std::vector<u8>& input, std::vector<u8>& output, const BlurParams& params) {
+void cpu_blur(const std::vector<u8>& input, std::vector<u8>& output, u32 direction) {
     output.resize(size_t(kW) * kH * 8);
     // Weights — keep full float precision (don't quantize to half yet).
     constexpr float wCenter = 0.2270270270f;
     constexpr float wNear   = 0.3162162162f;
     constexpr float wFar    = 0.070270270f;
 
-    int32_t offsetX = (params.direction == 1u) ? 0 : 1;
-    int32_t offsetY = (params.direction == 1u) ? 1 : 0;
+    int32_t offsetX = (direction == 1u) ? 0 : 1;
+    int32_t offsetY = (direction == 1u) ? 1 : 0;
 
     for (u32 y = 0; y < kH; ++y) {
         for (u32 x = 0; x < kW; ++x) {
@@ -313,10 +329,16 @@ TestResult TestBlurPass_DispatchAndCompare() {
     ResourceHandle outTex = fx.base->CreateTexture(outDesc);
     TEST_ASSERT(outTex != handles::INVALID_RESOURCE, "CreateTexture output");
 
-    // ----- 4. BlurParams UBO (direction=0 horizontal) -----
-    BlurParams params{ /*direction*/ 0u, /*mipLevel*/ 0u, 0u, 0u };
+    // ----- 4. BlurParams UBO — 生产 32 字节契约,direction 在 byte 20 -----
+    BlurParams params{};
+    params.textureWidth = kW;
+    params.textureHeight = kH;
+    params.blurRadius = 2;
+    params.sigma = 1.14f;
+    params.arrayLayer = 0;
+    params.direction = 0; // horizontal
     BufferDesc ubufDesc{};
-    ubufDesc.size = sizeof(BlurParams);  // 16
+    ubufDesc.size = sizeof(BlurParams);  // 32
     ubufDesc.type = BufferType::Constant;
     ubufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
     ubufDesc.name = "BlurPass_UBO";
@@ -365,7 +387,7 @@ TestResult TestBlurPass_DispatchAndCompare() {
     DescriptorBufferInfo uboInfo{};
     uboInfo.buffer = ubo;
     uboInfo.offset = 0;
-    uboInfo.range = sizeof(BlurParams);
+    uboInfo.range = sizeof(BlurParams);  // 32
     WriteDescriptorSet writes[3]{};
     writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].dstArrayElement = 0;
     writes[0].descriptorCount = 1; writes[0].descriptorType = DescriptorType::SampledImage;
@@ -453,7 +475,7 @@ TestResult TestBlurPass_DispatchAndCompare() {
     fx.base->UnmapBuffer(readback);
 
     std::vector<u8> cpuOutput;
-    cpu_blur(inputBytes, cpuOutput, params);
+    cpu_blur(inputBytes, cpuOutput, /*direction*/ 0u);
 
     // Per-pixel comparison (RGBA channels, float domain).
     float maxAbsDiff = 0.0f;
@@ -507,6 +529,110 @@ TestResult TestBlurPass_DispatchAndCompare() {
                   << " in_lum=" << inputLum << " out_lum=" << outputLum << std::endl;
         TEST_ASSERT(std::fabs(outputLum - inputLum) > 0.1f,
                     "Blur must produce visible change at neighbor pixel");
+    }
+
+    // ----- 9. 契约检查:direction=1(垂直)必须真正改变核方向 -----
+    // 旧 shader 布局错位时两个方向读到的都是 textureWidth(≠1),永远水平。
+    // 水平/垂直各自对齐 CPU 参考后,二者在非对称图样上必须可区分。
+    {
+        BlurParams paramsV = params;
+        paramsV.direction = 1; // vertical
+        ResourceHandle uboV = fx.base->CreateBuffer(ubufDesc);
+        TEST_ASSERT(uboV != handles::INVALID_RESOURCE, "CreateBuffer BlurParams V");
+        TEST_ASSERT(fx.base->UpdateBufferData(uboV, &paramsV, sizeof(paramsV), 0),
+                    "UpdateBufferData BlurParams V");
+
+        TextureDesc outDescV = inDesc;
+        outDescV.usage = TextureUsage::UnorderedAccess | TextureUsage::CopySource;
+        outDescV.name = "BlurPass_Output_V";
+        ResourceHandle outTexV = fx.base->CreateTexture(outDescV);
+        TEST_ASSERT(outTexV != handles::INVALID_RESOURCE, "CreateTexture output V");
+
+        DescriptorSetHandle dsV = fx.base->CreateDescriptorSet(dsDesc);
+        TEST_ASSERT(dsV != handles::INVALID_RESOURCE, "CreateDescriptorSet V");
+        DescriptorImageInfo outInfoV{};
+        outInfoV.imageView = outTexV;
+        outInfoV.imageLayout = ResourceState::UnorderedAccess;
+        DescriptorBufferInfo uboInfoV{};
+        uboInfoV.buffer = uboV;
+        uboInfoV.offset = 0;
+        uboInfoV.range = sizeof(BlurParams);
+        WriteDescriptorSet writesV[3]{};
+        writesV[0] = writes[0];
+        writesV[0].dstSet = dsV;
+        writesV[1] = writes[1];
+        writesV[1].dstSet = dsV;
+        writesV[1].imageInfo = &outInfoV;
+        writesV[2] = writes[2];
+        writesV[2].dstSet = dsV;
+        writesV[2].bufferInfo = &uboInfoV;
+        fx.base->UpdateDescriptorSets(3, writesV);
+
+        CommandBufferHandle cmdV = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
+        VulkanCommandBuffer* vcmdV = fx.vk->GetCommandBuffer(cmdV);
+        TEST_ASSERT(vcmdV->Reset() && vcmdV->Begin(), "Begin dispatch cmd V");
+        ResourceBarrier initOutV{};
+        initOutV.resource = outTexV;
+        initOutV.beforeState = ResourceState::Unknown;
+        initOutV.afterState = ResourceState::UnorderedAccess;
+        initOutV.subresource = 0xFFFFFFFF;
+        initOutV.queueFamily = 0xFFFFFFFF;
+        vcmdV->InsertBarrier(&initOutV, 1);
+        vcmdV->BindComputePipeline(pipe);
+        vcmdV->BindDescriptorSets(PipelineBindPoint::Compute, pl, 0, 1, &dsV, 0, nullptr);
+        vcmdV->Dispatch(gx, gy, 1);
+        vcmdV->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                             AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+        ResourceBarrier outBarrierV{};
+        outBarrierV.resource = outTexV;
+        outBarrierV.beforeState = ResourceState::UnorderedAccess;
+        outBarrierV.afterState = ResourceState::CopySource;
+        outBarrierV.subresource = 0xFFFFFFFF;
+        outBarrierV.queueFamily = 0xFFFFFFFF;
+        vcmdV->InsertBarrier(&outBarrierV, 1);
+
+        ResourceHandle readbackV = fx.base->CreateBuffer(readbackDesc);
+        TEST_ASSERT(readbackV != handles::INVALID_RESOURCE, "CreateBuffer readback V");
+        BufferTextureCopyRegion regionV = region;
+        vcmdV->CopyTextureToBuffer(outTexV, readbackV, &regionV, 1);
+        TEST_ASSERT(vcmdV->End() && vcmdV->Submit(0) && vcmdV->WaitForCompletion(), "Submit dispatch V");
+        fx.base->DestroyCommandBuffer(cmdV);
+
+        void* mappedV = fx.base->MapBuffer(readbackV, 0, readbackDesc.size);
+        TEST_ASSERT(mappedV != nullptr, "MapBuffer readback V");
+        std::vector<u8> gpuOutputV(static_cast<const u8*>(mappedV),
+                                   static_cast<const u8*>(mappedV) + readbackDesc.size);
+        fx.base->UnmapBuffer(readbackV);
+
+        // 垂直方向对齐 CPU 参考。
+        std::vector<u8> cpuOutputV;
+        cpu_blur(inputBytes, cpuOutputV, /*direction*/ 1u);
+        float maxDiffV = 0.0f;
+        for (u32 i = 0; i < kW * kH; ++i) {
+            float gpu[4], cpu[4];
+            unpack_rgba16f(gpuOutputV.data() + i * 8, gpu);
+            unpack_rgba16f(cpuOutputV.data() + i * 8, cpu);
+            for (int c = 0; c < 4; ++c) maxDiffV = std::max(maxDiffV, std::fabs(gpu[c] - cpu[c]));
+        }
+        std::cout << "[TestVulkanBlurPass] vertical max abs diff = " << maxDiffV << std::endl;
+        TEST_ASSERT(maxDiffV < 0.05f, "Vertical blur matches CPU reference (direction honored)");
+
+        // 水平 vs 垂直在十字臂端点必须不同(方向真实生效的证明)。
+        // 取 (16+3,16):水平核混入亮十字横向能量,垂直核几乎不改变该点。
+        float hOut[4], vOut[4];
+        unpack_rgba16f(gpuOutput.data() + (16 * kW + 19) * 8, hOut);
+        unpack_rgba16f(gpuOutputV.data() + (16 * kW + 19) * 8, vOut);
+        float hLum = 0.2126f * hOut[0] + 0.7152f * hOut[1] + 0.0722f * hOut[2];
+        float vLum = 0.2126f * vOut[0] + 0.7152f * vOut[1] + 0.0722f * vOut[2];
+        std::cout << "[TestVulkanBlurPass] direction contract: H_lum=" << hLum
+                  << " V_lum=" << vLum << std::endl;
+        TEST_ASSERT(std::fabs(hLum - vLum) > 0.05f,
+                    "H and V blur outputs must differ (direction actually read from byte 20)");
+
+        fx.base->DestroyBuffer(readbackV);
+        fx.base->DestroyDescriptorSet(dsV);
+        fx.base->DestroyTexture(outTexV);
+        fx.base->DestroyBuffer(uboV);
     }
 
     // Cleanup

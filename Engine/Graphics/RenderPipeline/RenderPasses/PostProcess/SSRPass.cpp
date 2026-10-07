@@ -95,7 +95,8 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, const char* shaderN
     path = std::string(shaderName);
     src = dawn::LoadWGSL(shaderName);
 #else
-    path = utils::ShaderRegistry::GetShaderPath(platform, shaderName);
+    path = utils::ShaderRegistry::ResolveShaderPath(
+        utils::ShaderRegistry::GetShaderPath(platform, shaderName));
     std::ifstream file(path);
     if (!file.is_open()) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Shader empty: " << shaderName << " (path=" << path << ")" << std::endl;
@@ -111,8 +112,13 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, const char* shaderN
 static bool EnsurePipelines(RHIDeviceBase& device) {
     if (s_TracePipeline != handles::INVALID_PIPELINE) return true;
 
+    // [卡顿修复] 着色器缺失/入口不匹配是一次性代码问题——失败后每帧重试
+    // 编译 MSL 是可感知的 CPU 卡顿源。置粘性失败位：每会话只尝试一次
+    //（代码变更 + 重启即恢复）。
+    static bool s_ensureFailedPermanently = false;
+    if (s_ensureFailedPermanently) return false;
+
     auto platform = device.GetPlatform();
-    // Lumen shader subdir for Metal; Vulkan uses explicit Lumen/ path in LoadShaderBytes.
     const char* lumenDir = (platform == RHIPlatform::Metal)
                            ? "Engine/Graphics/Metal/shaders/Lumen/"
                            : "Engine/Graphics/Dawn/shaders/";
@@ -147,7 +153,8 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
 
     if (traceCS == handles::INVALID_SHADER || temporalCS == handles::INVALID_SHADER ||
         upsampleCS == handles::INVALID_SHADER) {
-        PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Shader compilation failed — aborting pipeline creation" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SSR] Shader compilation failed — aborting pipeline creation (will not retry this session)" << std::endl;
+        s_ensureFailedPermanently = true;
         return false;
     }
 
@@ -439,7 +446,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_TraceParamsBuf[fi]; bufInfo.offset = 0;
                 bufInfo.range = sizeof(TraceParamsCPU);
 
-                WriteDescriptorSet writes[6];
+                WriteDescriptorSet writes[6] = {};
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledDepthImage; writes[0].imageInfo = &depthInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -509,7 +516,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_TemporalParamsBuf[fi]; bufInfo.offset = 0;
                 bufInfo.range = sizeof(TemporalParamsCPU);
 
-                WriteDescriptorSet writes[5];
+                WriteDescriptorSet writes[5] = {};
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &traceInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -576,7 +583,7 @@ const SSRPassData& AddSSRPass(RenderGraph& graph,
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_UpsampleParamsBuf[fi]; bufInfo.offset = 0;
                 bufInfo.range = sizeof(UpsampleParamsCPU);
 
-                WriteDescriptorSet writes[4];
+                WriteDescriptorSet writes[4] = {};
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &ssrInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;

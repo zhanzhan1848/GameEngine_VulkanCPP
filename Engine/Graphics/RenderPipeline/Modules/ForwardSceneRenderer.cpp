@@ -85,9 +85,12 @@ struct SceneData {
     math::v4 viewPos;
     math::m4x4 shadowMatrix0;
     math::m4x4 shadowMatrix1;
+    math::m4x4 shadowMatrix2;   // P4.2: 级联 2（对齐 DeferredLighting.metal 544B）
+    math::m4x4 shadowMatrix3;   // P4.2: 级联 3
     math::v4 shadowParams;
     math::v4 ambientLight;
 };
+static_assert(sizeof(SceneData) == 544, "SceneData must match DeferredLighting.metal P4.2 544B layout");
 
 // RG pass data structs
 struct ShadowPassData { RGResourceHandle shadowMap; };
@@ -1894,6 +1897,23 @@ bool ForwardSceneRenderer::SetEnvironmentMap(const std::string& hdr_path) {
 void ForwardSceneRenderer::SetLightDirection(math::v3 dir) { light_dir_ = dir; }
 void ForwardSceneRenderer::SetLightColor(math::v4 color) { light_color_ = color; }
 ParticlePass* ForwardSceneRenderer::GetParticlePass() { return &particle_pass_; }
+
+SceneDataMeshInfo* ForwardSceneRenderer::GetMeshInfoMutable(u32 index) {
+    if (index >= mesh_infos_.size()) return nullptr;
+    return &mesh_infos_[index];
+}
+
+void ForwardSceneRenderer::GetMeshTextureHandles(u32 index, rhi::ResourceHandle& albedo,
+                                                 rhi::ResourceHandle& normal, rhi::ResourceHandle& orm) const {
+    albedo = normal = orm = rhi::handles::INVALID_RESOURCE;
+    if (index >= mesh_infos_.size()) return;
+    const u32 base = index * 3;
+    if (base + 2 < material_textures_.size()) {
+        albedo = material_textures_[base + 0];
+        normal = material_textures_[base + 1];
+        orm = material_textures_[base + 2];
+    }
+}
 
 const SceneDataMeshInfo* ForwardSceneRenderer::GetMeshInfo(u32 index) const {
     if (index >= mesh_infos_.size()) return nullptr;

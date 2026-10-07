@@ -1,0 +1,98 @@
+// EyeAdaptation.comp — P3.1 (2026-09-15): GPU 亮度统计 + 时域适应（路线图
+// Phase 3.1）。单 workgroup 16×16 线程稀疏采样 HDR 场色（每线程 4×4 = 共
+// 4096 样本），共享内存归约 log2 平均亮度，与上一帧适应值做 EMA 后写
+// 1×1 适应态（r32f，存 log2 平均亮度）。免 CPU 回读——ToneMapping 直接
+// 采样适应态得 avgLum，驱动 exposure_ev 接口。
+// 绑定与 ToneMappingPass.cpp 的 adaptation 布局一致（Vulkan-only v1；
+// Metal/Dawn 维持手动 EV，见文档 §7）。
+
+#version 450 core
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D hdr_scene;      // HDR 场色
+layout(set = 0, binding = 1) uniform texture2D prev_state;     // 1×1 r32f（log2 avgLum）
+layout(set = 0, binding = 2, r32f) writeonly uniform image2D new_state;
+// P3.9（sponza-gap-audit §4.9）: 适应参数——dt 派生的上/下行速率（C++ 端按
+// 墙钟帧间隔与时间常数 τ 计算）、单样本亮度裁剪（剔除太阳直射像素的离群值，
+// 近似百分位鲁棒化）、适应态 EV 上下限。
+layout(set = 0, binding = 3) uniform AdaptParamsBlock {
+    float rateUp;      // 变亮方向每帧混合率（由 τ_up 与 dt 派生）
+    float rateDown;    // 变暗方向每帧混合率（由 τ_down 与 dt 派生）
+    float minLogLum;   // 适应态下限（EV 钳制）
+    float maxLogLum;   // 适应态上限
+    float brightClip;  // 单样本 luminance 上限（HDR 离群值裁剪）
+    float cutSnap;     // |Δlog2L| 超过此值视为场景切换，直接 snap（1.0=禁用）
+    vec2  _pad;
+} adaptParams;
+
+const int   kSampleStride = 8;
+const float kLumEps = 1e-4;
+
+shared float sLogLum[16 * 16];
+
+float luminance(vec3 c) {
+    // [③卫生 2026-09-21] NaN 毒化防御：GI 腿偶发 NaN/Inf 像素一旦被 4096
+    // 稀疏样本采中——max/min/clamp 遇 NaN 全是 UB，sumLog→adapted NaN 后
+    // mix/比较链持续失灵（NaN 比较恒 false），整帧压黑且不可自愈——
+    // 即间歇 780 帧坍黑的根因链末端。
+    if (any(isnan(c)) || any(isinf(c))) return 0.0;
+    return dot(max(c, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_LocalInvocationID.xy);
+    ivec2 dims = textureSize(hdr_scene, 0);
+
+    // 每线程负责 (dims/16) 的块，块内按 kSampleStride 稀疏取 4×4 点
+    ivec2 tileSize = max(dims / 16, ivec2(1));
+    ivec2 tileOrigin = gid * tileSize;
+    float sumLog = 0.0;
+    uint count = 0u;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            ivec2 p = tileOrigin + ivec2(x, y) * kSampleStride
+                    + tileSize / 8;
+            p = clamp(p, ivec2(0), dims - ivec2(1));
+            float l = luminance(texelFetch(hdr_scene, p, 0).rgb);
+            // §4.9: 单样本亮度裁剪——太阳直射/高光像素（远超场景均值）会把
+            // log 平均拉高，等价于往亮处适应；裁剪到 brightClip 后的均值对
+            // 少数离群值鲁棒（4096 样本的轻量百分位替代）。
+            l = min(l, adaptParams.brightClip);
+            sumLog += log2(max(l, kLumEps));
+            ++count;
+        }
+    }
+    sLogLum[gid.y * 16 + gid.x] = sumLog / float(count);
+
+    barrier();
+
+    // 256 → 1 归约
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (uint(gid.y * 16 + gid.x) < s) {
+            sLogLum[gid.y * 16 + gid.x] += sLogLum[gid.y * 16 + gid.x + s];
+        }
+        barrier();
+    }
+
+    if (gid == ivec2(0)) {
+        float avgLogLum = sLogLum[0] / 256.0;
+        float prev = texelFetch(prev_state, ivec2(0), 0).r;
+        // 首帧/资源垃圾消毒：非有限或量级离谱（|log2L|>64）回 0（=1.0 亮度）
+        if (!(prev > -64.0 && prev < 64.0)) prev = 0.0;
+        // [③卫生 2026-09-21] 当前帧均值同样消毒：仍有一个 NaN 样本漏进归约
+        // 就整帧跳过适应（保持 prev），不让单帧毒化进入适应态。
+        if (!(avgLogLum > -64.0 && avgLogLum < 64.0)) avgLogLum = prev;
+        // §4.9: 方向化 dt 适应——变亮快（τ_up）变暗慢（τ_down），替代固定
+        // 每帧 EMA=0.10（帧率相关、上下行不对称缺失）。大幅跳变（场景/
+        // 相机切换）按 cutSnap 阈值直接 snap，避免切换后长时间欠曝。
+        float delta = avgLogLum - prev;
+        float rate = delta > 0.0 ? adaptParams.rateUp : adaptParams.rateDown;
+        if (abs(delta) > adaptParams.cutSnap) rate = 1.0;
+        float adapted = mix(prev, avgLogLum, clamp(rate, 0.0, 1.0));
+        // EV 上下限：适应态不许跑出合理亮度范围（防极端场景推爆曝光）
+        adapted = clamp(adapted, adaptParams.minLogLum, adaptParams.maxLogLum);
+        imageStore(new_state, ivec2(0), vec4(adapted));
+    }
+}

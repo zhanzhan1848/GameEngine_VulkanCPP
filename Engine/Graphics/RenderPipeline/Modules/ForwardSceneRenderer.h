@@ -84,6 +84,12 @@ public:
 
     // Accessors for ECS bridge (Phase 3c)
     const SceneDataMeshInfo* GetMeshInfo(u32 index) const;
+    // [PassDebugView 排查] 返回该 slot 已解析的 albedo/normal/orm GPU 纹理句柄
+    //（与 off 前向路径采样完全一致）；slot 越界返回全 INVALID
+    void GetMeshTextureHandles(u32 index, rhi::ResourceHandle& albedo,
+                               rhi::ResourceHandle& normal, rhi::ResourceHandle& orm) const;
+    // [PassDebugView 排查] 编辑器材质接线：写回 gpuMaterialId 用
+    SceneDataMeshInfo* GetMeshInfoMutable(u32 index);
     u32 GetMeshInfoCount() const;
 
     // RenderScene-based rendering (Phase 3d)

@@ -89,7 +89,7 @@ void ShadowMapModule::Shutdown() {
     }
     shadow_cache_globally_valid_ = false;
     for (int b = 0; b < 3; ++b)
-        for (int c = 0; c < 2; ++c)
+        for (int c = 0; c < 4; ++c)
             shadow_cache_valid_[b][c] = false;
 
     // T4.6.5 part 40: sampler cleanup. Other resources (pipeline/layout/DS/
@@ -133,10 +133,13 @@ bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) 
         {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // Params UBO
         {1, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap0
         {2, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadowMap1
+        {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // P4.2: shadowMap2
+        {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // P4.2: shadowMap3
         {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // visibilityOut
         {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // normalTex
         {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depthTex (Vulkan)
         {6, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr},  // linearSampler
+        {9, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // P4.1: translucentOut
     };
     if (device_->GetPlatform() != RHIPlatform::Vulkan) {
         bindings.push_back(
@@ -162,6 +165,14 @@ bool ShadowMapModule::InitializeShadowFilter(ShaderHandle shadow_filter_shader) 
     visDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::RenderTarget;
     shadow_visibility_tex_ = device_->CreateTexture(visDesc);
     if (shadow_visibility_tex_ == handles::INVALID_RESOURCE) return false;
+
+    // P4.1: 透光强度纹理（r8 半分辨率，与 vis 同生命周期）
+    TextureDesc transDesc{};
+    transDesc.size = {(render_width_ / 2), (render_height_ / 2), 1};
+    transDesc.format = DataFormat::R8_UNorm;
+    transDesc.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::RenderTarget;
+    shadow_translucent_tex_ = device_->CreateTexture(transDesc);
+    if (shadow_translucent_tex_ == handles::INVALID_RESOURCE) return false;
 
     for (int i = 0; i < 3; ++i) {
         BufferDesc cbDesc{};
@@ -281,6 +292,10 @@ math::m4x4 ShadowMapModule::ComputeCascadeVP(math::v3 lightDir, math::v3 cameraP
 
 ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, const ShadowMapInputs& inputs) {
     ShadowMapOutputs outputs{};
+    // P0（sun-audit §7）: 尺寸 provenance 真值随输出走（与级联循环内的
+    // 2048 常量同源，[SunContract] 直接读取，避免导出端复写常量）。
+    outputs.shadow_map_resolution = 2048;
+    outputs.shadow_cascade_count = 4;
     if (!gpu_draw_pipeline_ || !inputs.scene_snapshot) return outputs;
 
     // T4.6.5 part 24.9 (B7 fix): skip shadow passes entirely on empty scene.
@@ -299,14 +314,16 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     const bool vsm = vsm_enabled_ && moments_blur_ &&
                      moments_temp_ != handles::INVALID_RESOURCE;
 
-    rendergraph::RGResourceHandle shadowMapRG[2];
-    rendergraph::RGResourceHandle momentsRG[2];
-    for (u32 c = 0; c < 2; ++c) {
+    rendergraph::RGResourceHandle shadowMapRG[4];
+    rendergraph::RGResourceHandle momentsRG[4];
+    for (u32 c = 0; c < 4; ++c) {
         auto smHandle = gpu_draw_pipeline_->GetShadowMap(c, inputs.current_buffer_index);
         if (smHandle != handles::INVALID_RESOURCE) {
             shadowMapRG[c] = graph.ImportResource(
                 "ShadowMap_C" + std::to_string(c) + "_" + std::to_string(inputs.current_buffer_index),
                 smHandle);
+            // P1（reaudit §4.4）: 把 PCSS 深度图导出给体积雾（mode 2 消费）
+            outputs.shadow_depth_rg[c] = shadowMapRG[c];
         }
         if (vsm) {
             auto momHandle = gpu_draw_pipeline_->GetShadowMoments(c, inputs.current_buffer_index);
@@ -335,7 +352,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     };
 
     struct ShadowPassData {};
-    bool rasteredThisFrame[2] = {false, false};
+    bool rasteredThisFrame[4] = {false, false, false, false};
 
     // B17（2026-09-11）薄遮挡器泄漏修复：ShadowFilter 需要每级联的世界尺度
     // 参数才能做 slope 自适应 normal-offset + 世界单位 bias——常数 0.003 NDC
@@ -345,10 +362,15 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     //   y = depth_span = farPlane - nearPlane（NDC z=1 对应的世界深度跨度）
     //   z = orthoExtent
     //   w = 保留
-    float filterCascadeParams[2][4] = {};
+    float filterCascadeParams[4][4] = {};
 
-    for (u32 cascade = 0; cascade < 2; ++cascade) {
-        float orthoExtent = (cascade == 0) ? 30.0f : 150.0f;
+    // P4.2 (2026-09-15): 2→4 级联——extent 12/30/90/270（近物半影分辨率
+    // 显著提升；远档 270 覆盖原 150 的全场景范围）。档位边界（世界距离）
+    // 由各 extent 对角近似推得，供 cascadeSplits/选择使用。
+    const float kCascadeExtents[4] = { 12.0f, 30.0f, 90.0f, 270.0f };
+    for (u32 c = 0; c < 4; ++c) outputs.shadow_cascade_extents[c] = kCascadeExtents[c];
+    for (u32 cascade = 0; cascade < 4; ++cascade) {
+        float orthoExtent = kCascadeExtents[cascade];
         float cascadeNear = 0.0f, cascadeFar = 0.0f;
         math::m4x4 lightVP = ComputeCascadeVP(lightDir, inputs.camera_position, orthoExtent, 2048, inputs, cascade,
                                               &cascadeNear, &cascadeFar);
@@ -361,8 +383,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                          shadow_cache_valid_[cbIdx][cascade] &&
                          vp_equal(lightVP, cached_shadow_vp_[cbIdx][cascade]);
 
-        if (cascade == 0) outputs.shadow_matrix0 = lightVP;
-        else outputs.shadow_matrix1 = lightVP;
+        outputs.shadow_matrix[cascade] = lightVP;
 
         // TEMP-DIAG: CPU 侧矩阵字节真值（PRIMAL_DUMP_MATRIX=1）
         if (cascade == 0 && std::getenv("PRIMAL_DUMP_MATRIX")) {
@@ -381,9 +402,16 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
         lightData.direction = {lightDir.x, lightDir.y, lightDir.z, 0.0f};
         lightData.color = {5.0f, 5.0f, 5.0f, 1.0f};
         lightData.viewPos = {inputs.camera_position.x, inputs.camera_position.y, inputs.camera_position.z, 1.0f};
-        if (cascade == 0) lightData.shadowMatrix0 = lightVP;
-        else lightData.shadowMatrix1 = lightVP;
-        lightData.cascadeSplits = {600.0f, 2000.0f, 0.0f, 0.0f};
+        // P4.2: culling 端只消费当前级联的 VP（CPU 按 cascade%2 选槽），
+        // cascade≥2 时两个槽都写本 VP 保证取到正确矩阵。
+        lightData.shadowMatrix0 = lightVP;
+        lightData.shadowMatrix1 = lightVP;
+        // 档位边界：取相邻 extent 的对角距离近似（正交盒对角 ×2）
+        float split = orthoExtent * 2.0f * 1.4142f;
+        lightData.cascadeSplits = {(cascade == 0) ? split : 0.0f,
+                                   (cascade == 1) ? split : 0.0f,
+                                   (cascade == 2) ? split : 0.0f,
+                                   (cascade == 3) ? split : 0.0f};
 
         // Shadow Culling
         graph.AddPass<ShadowPassData>("ShadowCulling_C" + std::to_string(cascade),
@@ -443,7 +471,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
             rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Lighting,
             [momentsRG](ShadowPassData&, rendergraph::RenderGraphBuilder& builder) {
                 builder.SideEffect();
-                for (u32 c = 0; c < 2; ++c)
+                for (u32 c = 0; c < 4; ++c)
                     if (momentsRG[c].IsValid())
                         builder.Write(momentsRG[c], ResourceState::UnorderedAccess);
             },
@@ -451,7 +479,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
              rastered = rasteredThisFrame]
             (const ShadowPassData&, rendergraph::RenderGraphContext& context) {
                 auto cmd = context.cmdBuffer;
-                for (u32 c = 0; c < 2; ++c) {
+                for (u32 c = 0; c < 4; ++c) {
                     // VP-cache hit: moments unchanged since last frame —
                     // re-blurring would soften them progressively.
                     if (!rastered[c]) continue;
@@ -475,7 +503,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
             }
         );
 
-        for (u32 c = 0; c < 2; ++c) {
+        for (u32 c = 0; c < 4; ++c) {
             outputs.shadow_moments_rg[c] = momentsRG[c];
             outputs.shadow_moments_tex[c] = gpu_draw_pipeline_->GetShadowMoments(c, inputs.current_buffer_index);
         }
@@ -487,28 +515,36 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     outputs.shadow_visibility_tex = shadow_visibility_tex_;
     if (shadow_filter_pipeline_ != handles::INVALID_PIPELINE && shadow_visibility_tex_ != handles::INVALID_RESOURCE) {
         outputs.shadow_visibility_rg = graph.ImportResource("ShadowVisibility", shadow_visibility_tex_);
+        outputs.shadow_translucent_tex = shadow_translucent_tex_;
+        outputs.shadow_translucent_rg = graph.ImportResource("ShadowTranslucent", shadow_translucent_tex_);
 
         struct ShadowFilterData { rendergraph::RGResourceHandle output; };
 
-        // Capture outputs by value for shadow matrices
-        auto mat0 = outputs.shadow_matrix0;
-        auto mat1 = outputs.shadow_matrix1;
-        const float cascadeParams[2][4] = {
+        // P4.2: capture 4 cascades 的 VP 与世界尺度参数
+        math::m4x4 mats[4] = {outputs.shadow_matrix[0], outputs.shadow_matrix[1],
+                              outputs.shadow_matrix[2], outputs.shadow_matrix[3]};
+        const float cascadeParams[4][4] = {
             {filterCascadeParams[0][0], filterCascadeParams[0][1],
              filterCascadeParams[0][2], filterCascadeParams[0][3]},
             {filterCascadeParams[1][0], filterCascadeParams[1][1],
              filterCascadeParams[1][2], filterCascadeParams[1][3]},
+            {filterCascadeParams[2][0], filterCascadeParams[2][1],
+             filterCascadeParams[2][2], filterCascadeParams[2][3]},
+            {filterCascadeParams[3][0], filterCascadeParams[3][1],
+             filterCascadeParams[3][2], filterCascadeParams[3][3]},
         };
 
         graph.AddPass<ShadowFilterData>("ShadowFilter",
             rendergraph::RGPassType::Compute, rendergraph::RGPassCategory::Copy,
-            [visRG = outputs.shadow_visibility_rg, shadowMapRG](ShadowFilterData& data, rendergraph::RenderGraphBuilder& builder) {
+            [visRG = outputs.shadow_visibility_rg, transRG = outputs.shadow_translucent_rg,
+             shadowMapRG](ShadowFilterData& data, rendergraph::RenderGraphBuilder& builder) {
                 data.output = builder.Write(visRG, ResourceState::UnorderedAccess);
-                for (u32 c = 0; c < 2; ++c)
+                if (transRG.IsValid()) builder.Write(transRG, ResourceState::UnorderedAccess);
+                for (u32 c = 0; c < 4; ++c)
                     if (shadowMapRG[c].IsValid())
                         builder.Read(shadowMapRG[c], ResourceState::ShaderResource);
             },
-            [this, inputs, cbIdx, mat0, mat1, cascadeParams](const ShadowFilterData&, rendergraph::RenderGraphContext& context) {
+            [this, inputs, cbIdx, mats, cascadeParams](const ShadowFilterData&, rendergraph::RenderGraphContext& context) {
                 auto cmd = context.cmdBuffer;
                 math::m4x4 invVP = Inverse(inputs.proj_matrix * inputs.view_matrix);
                 // TEMP-DIAG: shadow 模块的 proj/view 真值
@@ -528,17 +564,31 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
 
                 struct Params {
                     math::m4x4 inv_view_proj;
-                    math::m4x4 shadow_vp[2];
+                    math::m4x4 shadow_vp[4];   // P4.2: 4 级联
                     math::v4   light_dir;
                     math::v2   texel_size;
                     math::v2   depth_texel_size;
                     u32 shadow_quality;
                     u32 render_width;
                     u32 render_height;
-                    float _pad0;
+                    // sun-audit §5.3: 复用原 _pad0 槽（float，std140 布局不变，
+                    // Metal 孪生 kernel 读到的是无语义 pad——其有意分歧注释
+                    // 继续成立）。值 = tan(角直径/2)；0 = 回退固定 0.012。
+                    float sun_tan_half_angle;
                     // B17: per-cascade {texel_world, depth_span, ortho_extent, _}
-                    math::v4   cascade_params[2];
+                    math::v4   cascade_params[4];
                 };
+
+                // 0.5357° 物理日光（sun-audit §5.3）；夹在 [0.05°, 10°]。
+                // 0（或负）= 显式关档：tan_half 记 0，shader 回退固定 0.012。
+                const bool sunDiameterOn = inputs.sun_angular_diameter_deg > 0.0f;
+                const float sunDiameterDeg = sunDiameterOn
+                    ? std::min(std::max(inputs.sun_angular_diameter_deg, 0.05f), 10.0f)
+                    : 0.0f;
+                const float sunTanHalf =
+                    sunDiameterOn
+                        ? std::tan(sunDiameterDeg * (3.14159265f / 180.0f) * 0.5f)
+                        : 0.0f;
 
                 auto* p = static_cast<Params*>(device_->MapBuffer(shadow_filter_cb_[cbIdx]));
                 if (p) {
@@ -551,8 +601,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                                      invVP.columns[2].x, invVP.columns[2].y, invVP.columns[2].z, invVP.columns[2].w,
                                      invVP.columns[3].x, invVP.columns[3].y, invVP.columns[3].z, invVP.columns[3].w);
                     }
-                    p->shadow_vp[0] = mat0;
-                    p->shadow_vp[1] = mat1;
+                    for (u32 c = 0; c < 4; ++c) p->shadow_vp[c] = mats[c];
                     p->light_dir = math::v4{L.x, L.y, L.z, 0.0f};
                     p->texel_size = math::v2{1.0f / 2048.0f, 1.0f / 2048.0f};
                     p->depth_texel_size = math::v2{1.0f / (float)render_width_, 1.0f / (float)render_height_};
@@ -570,25 +619,27 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                                        : static_cast<u32>(inputs.shadow_quality))))));
                     p->render_width = render_width_;
                     p->render_height = render_height_;
-                    p->_pad0 = 0.0f;
-                    p->cascade_params[0] = math::v4{cascadeParams[0][0], cascadeParams[0][1],
-                                                    cascadeParams[0][2], cascadeParams[0][3]};
-                    p->cascade_params[1] = math::v4{cascadeParams[1][0], cascadeParams[1][1],
-                                                    cascadeParams[1][2], cascadeParams[1][3]};
+                    p->sun_tan_half_angle = sunTanHalf;
+                    for (u32 c = 0; c < 4; ++c) {
+                        p->cascade_params[c] = math::v4{cascadeParams[c][0], cascadeParams[c][1],
+                                                        cascadeParams[c][2], cascadeParams[c][3]};
+                    }
                     // B17: quality 解析真值 + 级联参数（一次性）
                     static bool filterParamLogged = false;
                     if (!filterParamLogged) {
                         filterParamLogged = true;
                         std::fprintf(stderr,
-                            "[FilterParams] quality=%u cascade0(texel=%.4f span=%.1f) cascade1(texel=%.4f span=%.1f)\n",
+                            "[FilterParams] quality=%u cascade0(texel=%.4f span=%.1f) cascade1(texel=%.4f span=%.1f) sun_diameter=%.4fdeg tan_half=%.6f\n",
                             p->shadow_quality, cascadeParams[0][0], cascadeParams[0][1],
-                            cascadeParams[1][0], cascadeParams[1][1]);
+                            cascadeParams[1][0], cascadeParams[1][1],
+                            sunDiameterDeg, sunTanHalf);
                     }
                     device_->UnmapBuffer(shadow_filter_cb_[cbIdx]);
                 }
 
-                ResourceHandle sm0 = gpu_draw_pipeline_->GetShadowMap(0, inputs.current_buffer_index);
-                ResourceHandle sm1 = gpu_draw_pipeline_->GetShadowMap(1, inputs.current_buffer_index);
+                ResourceHandle sm[4];
+                for (u32 c = 0; c < 4; ++c)
+                    sm[c] = gpu_draw_pipeline_->GetShadowMap(c, inputs.current_buffer_index);
 
                 // Manual barriers: shadow maps may be in UnorderedAccess state from a
                 // previous frame's ShadowBlit (cache hit skips the blit this frame).
@@ -605,22 +656,29 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     visToStorage.subresource = 0xFFFFFFFF;
                     visToStorage.queueFamily = 0xFFFFFFFF;
                     cmd->InsertBarrier(&visToStorage, 1);
+                    rhi::ResourceBarrier transToStorage{};
+                    transToStorage.resource = shadow_translucent_tex_;
+                    transToStorage.beforeState = rhi::ResourceState::ShaderResource;
+                    transToStorage.afterState = rhi::ResourceState::UnorderedAccess;
+                    transToStorage.subresource = 0xFFFFFFFF;
+                    transToStorage.queueFamily = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&transToStorage, 1);
                 }
                 {
-                    ResourceBarrier barriers[4];
-                    barriers[0].resource = sm0;
-                    barriers[0].beforeState = ResourceState::Unknown;
-                    barriers[0].afterState = ResourceState::ShaderResource;
-                    barriers[1].resource = sm1;
-                    barriers[1].beforeState = ResourceState::Unknown;
-                    barriers[1].afterState = ResourceState::ShaderResource;
-                    barriers[2].resource = gpu_draw_pipeline_->GetGBufferDepthSampleable();
-                    barriers[2].beforeState = ResourceState::Unknown;
-                    barriers[2].afterState = ResourceState::ShaderResource;
-                    barriers[3].resource = gpu_draw_pipeline_->GetGBufferNormal();
-                    barriers[3].beforeState = ResourceState::RenderTarget;
-                    barriers[3].afterState = ResourceState::ShaderResource;
-                    cmd->InsertBarrier(barriers, 4);
+                    // P4.2: 4 张级联 shadow map 全部 Unknown→SR
+                    ResourceBarrier barriers[6];
+                    for (u32 c = 0; c < 4; ++c) {
+                        barriers[c].resource = sm[c];
+                        barriers[c].beforeState = ResourceState::Unknown;
+                        barriers[c].afterState = ResourceState::ShaderResource;
+                    }
+                    barriers[4].resource = gpu_draw_pipeline_->GetGBufferDepthSampleable();
+                    barriers[4].beforeState = ResourceState::Unknown;
+                    barriers[4].afterState = ResourceState::ShaderResource;
+                    barriers[5].resource = gpu_draw_pipeline_->GetGBufferNormal();
+                    barriers[5].beforeState = ResourceState::RenderTarget;
+                    barriers[5].afterState = ResourceState::ShaderResource;
+                    cmd->InsertBarrier(barriers, 6);
                 }
 
                 // Texture slot conventions differ per backend:
@@ -632,24 +690,30 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 // kernel's texture(0) (depth) UNBOUND → vis sampled garbage →
                 // direct-light visibility dead on the whole Metal PCSS path.
                 const bool isVkShadow = device_->GetPlatform() == RHIPlatform::Vulkan;
-                DescData filterParams[7] = {
+                // P2-B: binding 9（translucentOut）此前从未写入——DSL 声明了
+                // 该 storage image 但 filterParams 只填到 8，validation 报
+                // "never been updated"，且透光输出实际未落到任何资源。
+                DescData filterParams[10] = {
                     {0, DescriptorType::UniformBuffer, shadow_filter_cb_[cbIdx]},
-                    {1, DescriptorType::SampledImage, sm0},
-                    {2, DescriptorType::SampledImage, sm1},
+                    {1, DescriptorType::SampledImage, sm[0]},
+                    {2, DescriptorType::SampledImage, sm[1]},
                     {3, DescriptorType::StorageImage, shadow_visibility_tex_},
                     {4, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferNormal()},
                     {5, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()},
                     {6, DescriptorType::Sampler, shadow_filter_sampler_},
+                    {7, DescriptorType::SampledImage, sm[2]},   // P4.2
+                    {8, DescriptorType::SampledImage, sm[3]},   // P4.2
+                    {9, DescriptorType::StorageImage, shadow_translucent_tex_},  // P2-B
                 };
                 if (!isVkShadow) {
                     filterParams[1] = {0, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()};
-                    filterParams[2] = {1, DescriptorType::SampledImage, sm0};
-                    filterParams[3] = {2, DescriptorType::SampledImage, sm1};
+                    filterParams[2] = {1, DescriptorType::SampledImage, sm[0]};
+                    filterParams[3] = {2, DescriptorType::SampledImage, sm[1]};
                     filterParams[4] = {3, DescriptorType::StorageImage, shadow_visibility_tex_};
                     filterParams[5] = {4, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferNormal()};
                     filterParams[6] = {6, DescriptorType::Sampler, shadow_filter_sampler_};
                 }
-                UpdateDesc(device_, shadow_filter_ds_[cbIdx], filterParams, 7);
+                UpdateDesc(device_, shadow_filter_ds_[cbIdx], filterParams, 10);
 
                 cmd->BindComputePipeline(shadow_filter_pipeline_);
                 const DescriptorSetHandle sets[] = { shadow_filter_ds_[cbIdx] };
@@ -669,6 +733,14 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 visBarrier.subresource = 0xFFFFFFFF;
                 visBarrier.queueFamily = 0xFFFFFFFF;
                 cmd->InsertBarrier(&visBarrier, 1);
+                // P4.1: 透光纹理同 vis——imageStore 后回 SR 供 DeferredLighting 采样
+                rhi::ResourceBarrier transBarrier{};
+                transBarrier.resource = shadow_translucent_tex_;
+                transBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
+                transBarrier.afterState = rhi::ResourceState::ShaderResource;
+                transBarrier.subresource = 0xFFFFFFFF;
+                transBarrier.queueFamily = 0xFFFFFFFF;
+                cmd->InsertBarrier(&transBarrier, 1);
             }
         );
     }

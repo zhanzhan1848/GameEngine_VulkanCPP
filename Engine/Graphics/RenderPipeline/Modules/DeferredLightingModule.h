@@ -13,6 +13,14 @@ struct DeferredLightingInputs {
     nanite::GPUDrivenDrawPipeline* gpu_draw_pipeline = nullptr;
     lumen::LumenSSAOPass* ssao_pass = nullptr;
 
+    // sun-audit P2 第二步: DDGI 探针深度可见性（PRIMAL_PROBE_OCC 变体）。
+    // probe_depth_buf = 128 floats/probe 的 SSBO（64 mean + 64 variance，
+    // 8×8 octahedral）；origin/spacing/counts 来自 DDGIVolumeData。句柄
+    // 无效时模块绑定 1-float dummy 且 params.counts=0（shader 早退）。
+    rhi::ResourceHandle probe_depth_buf{rhi::handles::INVALID_RESOURCE};
+    math::v4 probe_origin_spacing{0.0f, 0.0f, 0.0f, 3.0f};  // xyz=origin, w=spacing
+    math::v4 probe_counts{0.0f, 0.0f, 0.0f, 0.0f};          // xyz=counts, w=total
+
     math::m4x4 view_matrix{};
     math::m4x4 proj_matrix{};
     math::v3 camera_position{};
@@ -21,12 +29,16 @@ struct DeferredLightingInputs {
     math::v4 cascade_splits{600.0f, 2000.0f, 0.0f, 0.0f};
     math::m4x4 shadow_matrix0{};
     math::m4x4 shadow_matrix1{};
+    math::m4x4 shadow_matrix2{};   // P4.2: 级联 2
+    math::m4x4 shadow_matrix3{};   // P4.2: 级联 3
 
     u32 current_buffer_index = 0;
 
     // From ShadowMapModule outputs
     rendergraph::RGResourceHandle shadow_visibility_rg;
     rhi::ResourceHandle shadow_visibility_tex;
+    rendergraph::RGResourceHandle shadow_translucent_rg;   // P4.1
+    rhi::ResourceHandle shadow_translucent_tex;            // P4.1
 
     // VSM path (ShadowMapModule vsm_enabled): blurred RG32 moments per
     // cascade — shader samples + Chebyshev upper bound instead of the
@@ -34,7 +46,8 @@ struct DeferredLightingInputs {
     // vsm_enabled is set, otherwise binding 6 (R8) is used.
     bool vsm_enabled = false;
     rendergraph::RGResourceHandle shadow_moments_rg[2];
-    rhi::ResourceHandle shadow_moments_tex[2]{
+    rhi::ResourceHandle shadow_moments_tex[4]{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
 
     // GBuffer RG handles for render graph dependency tracking
@@ -103,6 +116,13 @@ private:
         rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE
     };
+    // sun-audit P2 第二步: 探针参数 UBO（三缓冲）+ dummy 探针深度 SSBO
+    rhi::ResourceHandle probe_param_cb_[3]{
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE
+    };
+    rhi::ResourceHandle probe_depth_dummy_{rhi::handles::INVALID_RESOURCE};
     rhi::SamplerHandle sampler_{rhi::handles::INVALID_SAMPLER};
 
     // T4.6.5 part 24.4 (B2 fix): 1x1 fallback texture for invalid bindings

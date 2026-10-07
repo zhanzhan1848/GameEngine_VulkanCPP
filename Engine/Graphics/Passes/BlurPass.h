@@ -8,6 +8,7 @@
 #include "Graphics/RHI/Core/RHIPipelineLayout.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 
+#include <cstddef>
 #include <vector>
 
 namespace primal::graphics {
@@ -40,6 +41,11 @@ private:
         u32 direction; // 0: Horizontal, 1: Vertical
         u32 padding[2];
     };
+    // Keep the CPU block byte-for-byte compatible with the Vulkan 2D kernel's
+    // std140 block.  In particular, direction is at byte 20; the legacy
+    // WGSL module has a different 16-byte block and is kept for its array path.
+    static_assert(sizeof(BlurParams) == 32, "BlurParams must remain a 32-byte UBO");
+    static_assert(offsetof(BlurParams, direction) == 20, "BlurParams.direction offset changed");
 
     rhi::RHIDeviceBase* device_ = nullptr;
     rhi::ShaderHandle computeShader_ = rhi::handles::INVALID_SHADER;

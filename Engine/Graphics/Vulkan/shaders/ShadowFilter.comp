@@ -81,19 +81,24 @@ const vec2 POISSON_DISK_16[16] = vec2[16](
 // (16B) + v4×2 cascade_params (32B).
 layout(set = 0, binding = 0, std140) uniform Params {
     mat4 inv_view_proj;
-    mat4 shadow_vp[2];
+    mat4 shadow_vp[4];   // P4.2: 4 级联
     vec4 light_dir;
     vec2 texel_size;          // 1.0 / 2048.0
     vec2 depth_texel_size;    // 1.0 / (render_width, render_height)
     uint shadow_quality;      // 0=Hard, 1=PCF, 2=PCSS, 3-7=debug sentinels
     uint render_width;
     uint render_height;
-    float _pad0;
-    vec4 cascade_params[2];   // x=texel_world, y=depth_span(wu per NDC z), z=extent, w=_
+    float sun_tan_half_angle; // sun-audit §5.3: tan(角直径/2)；0 = 旧固定 0.012
+    vec4 cascade_params[4];   // P4.2: x=texel_world, y=depth_span(wu per NDC z), z=extent, w=_
 };
 
 layout(set = 0, binding = 1) uniform texture2D shadowMap0;
 layout(set = 0, binding = 2) uniform texture2D shadowMap1;
+// P4.2: 级联 2/3（binding 7/8 与 C++ 布局对齐）
+layout(set = 0, binding = 7) uniform texture2D shadowMap2;
+layout(set = 0, binding = 8) uniform texture2D shadowMap3;
+// P4.1: 布帘透光强度（r8）= exp(-厚度世界单位×1.5) × max(-NdotL,0) × (1-vis)
+layout(set = 0, binding = 9, r8) writeonly uniform image2D translucentOut;
 layout(set = 0, binding = 3, r8) uniform writeonly image2D visibilityOut;
 layout(set = 0, binding = 4) uniform texture2D normalTex;
 layout(set = 0, binding = 5) uniform texture2D depthTex;
@@ -158,7 +163,8 @@ float pcssShadow(texture2D<float> sm, vec3 sc, vec2 screenPos,
 }
 
 float sampleShadowMap(texture2D<float> sm, vec3 sc, vec2 screenPos,
-                      vec2 texSize, float bias, uint quality) {
+                      vec2 texSize, float bias, uint quality,
+                      float lightSizeUV) {
     if (quality == 0u) {
         float d = texture(sampler2D(sm, linearSampler), sc.xy).r;
         return (sc.z - bias > d) ? 0.0 : 1.0;
@@ -171,8 +177,30 @@ float sampleShadowMap(texture2D<float> sm, vec3 sc, vec2 screenPos,
         // 0.05，且当时该分支是死代码）——0.05 UV ≈ 3wu"太阳"（物理太阳
         // ≈0.0087 UV），把 PCSS 激活为默认后光池带被人为半影化（vis 0.4-0.7）。
         // 0.012 ≈ 1.4× 物理太阳角径，与 T8.13 记录一致。
-        return pcssShadow(sm, sc, screenPos, texSize, bias, 0.012);
+        // sun-audit §5.3: 0.012 固定值不随级联世界跨度缩放——同一世界点在
+        // 级联切换时软硬会突变。现在由调用方传入按级联换算的物理 UV 值；
+        // sun_tan_half_angle<=0（角直径关档）时调用方回退本常量。
+        return pcssShadow(sm, sc, screenPos, texSize, bias, lightSizeUV);
     }
+}
+
+// sun-audit §5.3: 物理半影换算。正交方向光下，沿光轴深度 z（NDC）到级联
+// 近面的世界距离 = z * cascade_params.y（depth_span）；太阳角直径 θ 的
+// 半影半径世界值 ≈ 距离 * tan(θ/2)；再除级联世界宽度（2*extent，级联
+// 正交半宽在 cascade_params.z）得 UV 半径。同一世界点在四级联下得到
+// 一致的软硬，遮挡板离接收面越远半影自然越宽。
+float physicalLightSizeUV(uint c, float ndcZ) {
+    float span = max(cascade_params[c].y, 1e-3);
+    float worldWidth = max(cascade_params[c].z * 2.0, 1e-3);
+    return ndcZ * span * sun_tan_half_angle / worldWidth;
+}
+
+// PCSS 的 lightSizeUV：角直径开启时用物理值（夹到 ≥1 纹素、≤0.05 UV
+// ——0.05 即 2026-09-09 V1 记录的"3wu 假太阳"上限，防止调参失手退化）；
+// 关档（0）回退 T8.13 的固定 0.012 以保留旧行为 A/B。
+float pcssLightSizeUV(uint c, vec3 sc, vec2 texSize) {
+    if (sun_tan_half_angle <= 0.0) return 0.012;
+    return clamp(physicalLightSizeUV(c, sc.z), texSize.x, 0.05);
 }
 
 // --- B17 world-scale bias / normal-offset helpers ---
@@ -268,6 +296,7 @@ void main() {
 
     vec2 screenPos = vec2(gid);
     float visibility = 1.0;
+    float transmission = 0.0;  // P4.1
 
     vec3 offset0 = cascadeNormalOffset(0u, N, slope, NdotL);
     float bias0 = cascadeBiasNDC(0u, slope, NdotL);
@@ -308,21 +337,66 @@ void main() {
         return;
     }
 
-    // Cascade 0
-    if (scInBounds(sc0) && sc0.z >= 0.0 && sc0.z <= 1.0) {
-        visibility = sampleShadowMap(shadowMap0, sc0, screenPos,
-                                     texel_size, bias0, shadow_quality);
-    } else {
-        // Cascade 1
-        vec3 offset1 = cascadeNormalOffset(1u, N, slope, NdotL);
-        float bias1 = cascadeBiasNDC(1u, slope, NdotL);
-        vec3 sc1 = projectToCascade(shadow_vp[1], worldPos + offset1);
-
-        if (scInBounds(sc1) && sc1.z >= 0.0 && sc1.z <= 1.0) {
-            visibility = sampleShadowMap(shadowMap1, sc1, screenPos,
-                                         texel_size, bias1, shadow_quality);
+    // P4.2: 4 级联由近到远逐级选取（texel 密度随 extent 递减）
+    {
+        vec3 offset = cascadeNormalOffset(0u, N, slope, NdotL);
+        float bias = cascadeBiasNDC(0u, slope, NdotL);
+        vec3 sc = projectToCascade(shadow_vp[0], worldPos + offset);
+        bool inCascade = scInBounds(sc) && sc.z >= 0.0 && sc.z <= 1.0;
+        if (inCascade) {
+            visibility = sampleShadowMap(shadowMap0, sc, screenPos,
+                                         texel_size, bias, shadow_quality,
+                                         pcssLightSizeUV(0u, sc, texel_size));
+            float occ = texture(sampler2D(shadowMap0, linearSampler), sc.xy).r;
+            // P2-B（audit §4.7）: 厚度方向修正。遮挡判断约定是
+            // `receiverDepth - bias > blockerDepth` = 阴影，故光线路径上
+            // 遮挡物到接收面的 NDC 深度差 = (sc.z - bias) - occ。旧表达式
+            // `occ - (sc.z - bias)` 只在“未被遮挡”时为正，透光项实际恒 0，
+            // exp(-thW*1.5) 无法随厚度衰减。
+            float thW = max((sc.z - bias) - occ, 0.0) * cascade_params[0].y;
+            transmission = exp(-thW * 1.5) * max(-NdotL, 0.0) * (1.0 - visibility);
+        } else {
+            offset = cascadeNormalOffset(1u, N, slope, NdotL);
+            bias = cascadeBiasNDC(1u, slope, NdotL);
+            sc = projectToCascade(shadow_vp[1], worldPos + offset);
+            inCascade = scInBounds(sc) && sc.z >= 0.0 && sc.z <= 1.0;
+            if (inCascade) {
+                visibility = sampleShadowMap(shadowMap1, sc, screenPos,
+                                             texel_size, bias, shadow_quality,
+                                             pcssLightSizeUV(1u, sc, texel_size));
+                float occ1 = texture(sampler2D(shadowMap1, linearSampler), sc.xy).r;
+                float thW1 = max((sc.z - bias) - occ1, 0.0) * cascade_params[1].y;
+                transmission = exp(-thW1 * 1.5) * max(-NdotL, 0.0) * (1.0 - visibility);
+            } else {
+                offset = cascadeNormalOffset(2u, N, slope, NdotL);
+                bias = cascadeBiasNDC(2u, slope, NdotL);
+                sc = projectToCascade(shadow_vp[2], worldPos + offset);
+                inCascade = scInBounds(sc) && sc.z >= 0.0 && sc.z <= 1.0;
+                if (inCascade) {
+                    visibility = sampleShadowMap(shadowMap2, sc, screenPos,
+                                                 texel_size, bias, shadow_quality,
+                                                 pcssLightSizeUV(2u, sc, texel_size));
+                    float occ2 = texture(sampler2D(shadowMap2, linearSampler), sc.xy).r;
+                    float thW2 = max((sc.z - bias) - occ2, 0.0) * cascade_params[2].y;
+                    transmission = exp(-thW2 * 1.5) * max(-NdotL, 0.0) * (1.0 - visibility);
+                } else {
+                    offset = cascadeNormalOffset(3u, N, slope, NdotL);
+                    bias = cascadeBiasNDC(3u, slope, NdotL);
+                    sc = projectToCascade(shadow_vp[3], worldPos + offset);
+                    if (scInBounds(sc) && sc.z >= 0.0 && sc.z <= 1.0) {
+                        visibility = sampleShadowMap(shadowMap3, sc, screenPos,
+                                                     texel_size, bias, shadow_quality,
+                                                     pcssLightSizeUV(3u, sc, texel_size));
+                        float occ3 = texture(sampler2D(shadowMap3, linearSampler), sc.xy).r;
+                        float thW3 = max((sc.z - bias) - occ3, 0.0) * cascade_params[3].y;
+                        transmission = exp(-thW3 * 1.5) * max(-NdotL, 0.0) * (1.0 - visibility);
+                    }
+                    // 全部越界：无级联覆盖 —— 保持 lit（1.0）
+                }
+            }
         }
     }
 
     imageStore(visibilityOut, ivec2(gid), vec4(visibility));
+    imageStore(translucentOut, ivec2(gid), vec4(clamp(transmission, 0.0, 1.0)));
 }

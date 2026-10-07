@@ -39,16 +39,24 @@ float3 ACESFilm(float3 x) {
 // 标定：同机位实测 Metal LDR 均值 131/255（贴白率 27.5%）vs Vulkan
 // 40/255（0.7%）——用户判定 Metal 过曝、Vulkan 偏暗，取中点迭代。
 // 上游 parity bisect 落地后本系数应回归 1.0。
-constant float CAL_EXPOSURE = 0.26f; // 2026-09-06 对齐 UE 参考：GI 提亮后全局回拉（0.42 → 0.36，mean 52.9 → 目标 ~43）
+// P0.3 (2026-09-15): 收编为 exposure_ev 单旋钮——标定值移入 ToneParams
+// UBO（C++ 每帧上传 base × 2^EV，EV0 时与旧常数逐位同值，画面零变化）。
+struct ToneParams {
+    float exposure;   // 0
+    uint  _pad0;      // 4
+    uint  _pad1;      // 8
+    uint  _pad2;      // 12
+};
 
 // Fragment Shader
 // 注意（2026-09-11 B10.5）：两平台 ACES 路径的曝光语义有意分叉——Metal 的
-// 上游是 LDR（fusion 已做过 exposure+ACES+gamma），继续用 CAL_EXPOSURE；
-// Vulkan/Dawn 的上游是线性 HDR，曝光在 WGSL tonemap_fs 的 HDR_ACES_EXPOSURE
-// （0.10，Dawn/shaders/ToneMapping.wgsl）。不要把两边"对齐"——上游单位制不同。
+// 上游是 LDR（fusion 已做过 exposure+ACES+gamma），继续用 0.26 基值；
+// Vulkan/Dawn 的上游是线性 HDR，曝光在 WGSL tonemap_fs 的 0.10 基值。
+// 不要把两边"对齐"——上游单位制不同。
 fragment float4 tonemap_fs(VertexOut in [[stage_in]],
                            texture2d<float> sceneTexture [[texture(0)]],
-                           texture2d<float> bloomTexture [[texture(1)]]) // Optional
+                           texture2d<float> bloomTexture [[texture(1)]],
+                           constant ToneParams& params [[buffer(6)]]) // Optional
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
 
@@ -61,8 +69,8 @@ fragment float4 tonemap_fs(VertexOut in [[stage_in]],
     float3 bloom = bloomTexture.sample(s, in.uv).rgb;
     color += bloom;
 
-    // 曝光标定（见 CAL_EXPOSURE 注释）
-    color *= CAL_EXPOSURE;
+    // 曝光标定（P0.3: EV0 时 params.exposure 与旧 CAL_EXPOSURE 逐位同值）
+    color *= params.exposure;
 
     // Tone Mapping
     color = ACESFilm(color);
@@ -80,13 +88,15 @@ fragment float4 tonemap_fs(VertexOut in [[stage_in]],
 // HDR，仍走 tonemap_fs。
 fragment float4 tonemap_fs_passthrough(VertexOut in [[stage_in]],
                                        texture2d<float> sceneTexture [[texture(0)]],
-                                       texture2d<float> bloomTexture [[texture(1)]])
+                                       texture2d<float> bloomTexture [[texture(1)]],
+                                       constant ToneParams& params [[buffer(6)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 color = sceneTexture.sample(s, in.uv).rgb;
     float3 bloom = bloomTexture.sample(s, in.uv).rgb;
-    // 曝光标定（见 CAL_EXPOSURE 注释）——passthrough 直出下线性值 ≥1.0
-    // 全部贴白，Metal GI 场均值 ~1.0 曾致 27.5% 贴白率。
-    color = (color + bloom) * CAL_EXPOSURE;
+    // 曝光标定（P0.3: EV0 时 params.exposure 与旧 CAL_EXPOSURE 逐位同值）——
+    // passthrough 直出下线性值 ≥1.0 全部贴白，Metal GI 场均值 ~1.0 曾致
+    // 27.5% 贴白率。
+    color = (color + bloom) * params.exposure;
     return float4(color, 1.0);
 }

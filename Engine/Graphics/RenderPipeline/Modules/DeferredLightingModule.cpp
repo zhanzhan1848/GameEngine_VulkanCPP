@@ -1,4 +1,5 @@
 #include "DeferredLightingModule.h"
+#include "Engine/Common/CoreLogStream.h"
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
@@ -30,14 +31,16 @@ struct SceneData {
     math::v4 viewPos;           // offset 232
     math::m4x4 shadowMatrix0;   // offset 240
     math::m4x4 shadowMatrix1;   // offset 304
-    // offset 368: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
+    math::m4x4 shadowMatrix2;   // offset 368 (P4.2: 级联 2)
+    math::m4x4 shadowMatrix3;   // offset 432 (P4.2: 级联 3)
+    // offset 496: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
     // y = cascade 0 split distance (world units from camera), zw unused.
     math::v4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
-    // offset 384: rgb = scene ambient color, a = intensity. 0 = 无环境抬升
+    // offset 512: rgb = scene ambient color, a = intensity. 0 = 无环境抬升
     // （与旧行为一致；接 ForwardSceneRenderer::ambient_light_ 待接线）。
     math::v4 ambientLight{0.0f, 0.0f, 0.0f, 0.0f};
 };
-static_assert(sizeof(SceneData) == 416, "SceneData must match DeferredLighting.metal (416B)");
+static_assert(sizeof(SceneData) == 544, "SceneData must match DeferredLighting.frag (P4.2: 4 级联 544B)");
 
 // ViewData struct
 struct ViewData {
@@ -112,9 +115,35 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         {12, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
         {13, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
         {14, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},
+        {15, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // P4.2 moments2
+        {16, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // P4.2 moments3
+        {17, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr},  // P4.1 translucent
+        // sun-audit P2 第二步: DDGI 探针深度可见性（PRIMAL_PROBE_OCC 变体
+        // 访问；其余变体不访问——绑定常驻有效：18=dummy SSBO、19=零参数）。
+        {18, DescriptorType::StorageBuffer, 1, ShaderStage::Pixel, nullptr},  // 探针深度 SSBO
+        {19, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr},  // 探针参数
     };
-    set_layout_ = device->CreateDescriptorSetLayout({15, bindings});
+    set_layout_ = device->CreateDescriptorSetLayout({20, bindings});
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
+
+    // sun-audit P2 第二步: 探针参数 UBO（三缓冲）+ 1-float dummy SSBO
+    //（探针不可用时占位——shader 以 counts=0 早退，不产生越界访问）。
+    {
+        BufferDesc ppDesc{};
+        ppDesc.size = 32;  // 2 × vec4
+        ppDesc.type = BufferType::Constant;
+        ppDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        for (int i = 0; i < 3; ++i) probe_param_cb_[i] = device->CreateBuffer(ppDesc);
+
+        BufferDesc dummyDesc{};
+        dummyDesc.size = 4;
+        dummyDesc.type = BufferType::Structured;
+        dummyDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        dummyDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        dummyDesc.structured.elementCount = 1;
+        dummyDesc.structured.elementStride = sizeof(float);
+        probe_depth_dummy_ = device->CreateBuffer(dummyDesc);
+    }
 
     // Triple-buffered output textures (RGBA16_Float for HDR)
     // T4.6.5 part 24.3 (B5 fix): CopySource required because the output is
@@ -362,6 +391,8 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                     sd->viewPos = math::v4{inputs.camera_position.x, inputs.camera_position.y, inputs.camera_position.z, 1.0f};
                     sd->shadowMatrix0 = inputs.shadow_matrix0;
                     sd->shadowMatrix1 = inputs.shadow_matrix1;
+                    sd->shadowMatrix2 = inputs.shadow_matrix2;   // P4.2
+                    sd->shadowMatrix3 = inputs.shadow_matrix3;   // P4.2
                     // PRIMAL_SHADOW_VIS_DEBUG=1: vis-only visualization (0.5).
                     // PRIMAL_GBUFFER_ALBEDO_DEBUG=1: raw albedo (0.25).
                     // Both keep the PCSS branch semantics; see the frag.
@@ -373,11 +404,14 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         std::fprintf(stderr, "[VIS_DEBUG] shadowParams.x=%s active\n",
                                      albedoDebug ? "0.25 (albedo)" : "0.5 (vis)");
                     }
+                    float translucency = 0.0f;
+                    if (const char* tl = std::getenv("PRIMAL_TONE_TRANSLUCENCY"))
+                        translucency = static_cast<float>(std::atof(tl));
                     sd->shadowParams = math::v4{
                         albedoDebug ? 0.25f
                             : (visDebug ? 0.5f : (inputs.vsm_enabled ? 1.0f : 0.0f)),
                         inputs.cascade_splits.x,
-                        0.0f, 0.0f};
+                        0.0f, translucency};
                     // Raw Vulkan diagnostics keep the selected shadow method.
                     if (const char* debug = std::getenv("PRIMAL_LIGHTING_DEBUG");
                         debug && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
@@ -386,6 +420,17 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         if (std::strcmp(debug, "shadow") == 0) sd->shadowParams.z = 3.0f;
                         if (std::strcmp(debug, "albedo") == 0) sd->shadowParams.z = 4.0f;
                     }
+                    // sun-audit P2 材质消融（z+10 编码，与 PRIMAL_LIGHTING_DEBUG
+                    // 互斥，后写覆盖）：gray_albedo/flat_normal/fixed_roughness。
+                    static const float s_materialAblation = [] {
+                        const char* e = std::getenv("PRIMAL_MATERIAL_ABLATION");
+                        if (!e) return 0.0f;
+                        if (std::strcmp(e, "gray_albedo") == 0) return 11.0f;
+                        if (std::strcmp(e, "flat_normal") == 0) return 12.0f;
+                        if (std::strcmp(e, "fixed_roughness") == 0) return 13.0f;
+                        return 0.0f;
+                    }();
+                    if (s_materialAblation > 0.0f) sd->shadowParams.z = s_materialAblation;
                     device_->UnmapBuffer(scene_cb_[cbIdx]);
                     // TEMP-DIAG: SceneData 上传字节真值（PRIMAL_DUMP_MATRIX=1）
                     if (std::getenv("PRIMAL_DUMP_MATRIX")) {
@@ -409,8 +454,11 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
             // T4.6.5 part 24.4 (B2 fix): use fallback_tex_ for invalid bindings
             // so descriptor has a valid imageView. SSAO/shadow_visibility may
             // be INVALID when those features aren't enabled.
+            // 2026-09-22 加固：0 句柄同样视为无效（ShadowMapOutputs 曾以
+            // 零初始化句柄上流，见 ShadowMapModule.h 同日修复注释）。
             auto validOrFallback = [](ResourceHandle h, ResourceHandle fb) {
-                return h != handles::INVALID_RESOURCE ? h : fb;
+                return (h != handles::INVALID_RESOURCE && h != rhi::ResourceHandle(0))
+                           ? h : fb;
             };
 
             ResourceHandle albedoTex = validOrFallback(inputs.gpu_draw_pipeline->GetGBufferAlbedo(), fallback_tex_);
@@ -452,8 +500,35 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                  validOrFallback(inputs.shadow_moments_tex[0], fallback_tex_)},
                 {14, DescriptorType::SampledImage,
                  validOrFallback(inputs.shadow_moments_tex[1], fallback_tex_)},
+                {15, DescriptorType::SampledImage,
+                 validOrFallback(inputs.shadow_moments_tex[2], fallback_tex_)},
+                {16, DescriptorType::SampledImage,
+                 validOrFallback(inputs.shadow_moments_tex[3], fallback_tex_)},
+                {17, DescriptorType::SampledImage,
+                 validOrFallback(inputs.shadow_translucent_tex, fallback_tex_)},  // P4.1
+                // sun-audit P2 第二步: 探针深度 SSBO + 参数（PRIMAL_PROBE_OCC
+                // 变体访问；其余变体不访问——无效时 dummy + counts=0 早退）。
+                {18, DescriptorType::StorageBuffer,
+                 inputs.probe_depth_buf != handles::INVALID_RESOURCE
+                     ? inputs.probe_depth_buf : probe_depth_dummy_},
+                {19, DescriptorType::UniformBuffer, probe_param_cb_[cbIdx]},
             };
-            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 15);
+            UpdateDesc(device_, descriptor_sets_[cbIdx], params, 20);
+
+            // 探针参数上传（origin/spacing/counts；句柄无效时 counts=0）
+            if (probe_param_cb_[cbIdx] != handles::INVALID_RESOURCE) {
+                struct ProbeParamsGPU {
+                    math::v4 origin_spacing;
+                    math::v4 counts;
+                };
+                static_assert(sizeof(ProbeParamsGPU) == 32, "ProbeParams must be 32B");
+                const bool probeValid = inputs.probe_depth_buf != handles::INVALID_RESOURCE &&
+                                        inputs.probe_counts.w > 0.5f;
+                const ProbeParamsGPU pp{
+                    inputs.probe_origin_spacing,
+                    probeValid ? inputs.probe_counts : math::v4{0.0f, 0.0f, 0.0f, 0.0f}};
+                device_->UpdateBufferData(probe_param_cb_[cbIdx], &pp, sizeof(pp), 0);
+            }
 
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});

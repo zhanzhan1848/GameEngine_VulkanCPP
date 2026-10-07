@@ -101,6 +101,11 @@ struct SceneData {
     float4 viewPos;
     float4x4 shadowMatrix0;
     float4x4 shadowMatrix1;
+    // P4.2 (2026-09-15): C++ 侧扩到 4 级联（SceneData 544B）——Metal 端
+    // 结构体必须同步扩容以保持 shadowParams/ambientLight 偏移一致。
+    // Metal 光栅/采样路径暂只用级联 0/1（与 Vulkan 4 级联选择解耦）。
+    float4x4 shadowMatrix2;
+    float4x4 shadowMatrix3;
     // x = shadow mode (0 = pre-filtered R8 visibility, 1 = VSM moments +
     // Chebyshev), y = cascade 0 split distance, zw unused.
     float4 shadowParams;

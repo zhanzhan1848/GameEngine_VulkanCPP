@@ -1,4 +1,8 @@
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
+
+// P1.1: 共享程序化天空（可见天空背景与 GI miss 项同源，路线图 P1.2）
+#include "../Lumen/ShaderLib/SkyAtmosphere.glsl"
 
 // T4.6.5 part 37 — Cook-Torrance PBR + IBL port of Metal
 // `fragmentLighting_v3` (DeferredLighting.metal:197-290).
@@ -59,8 +63,23 @@ const float PI = 3.14159265358979;
 // 直射相对冲击力下降（用户目测"直射偏弱"）。7.5 → 10.0（+33%）。
 // 只缩放屏幕直射——不进探针回路，不移动 SC↔probe 平衡（T8.4 教训）。
 const float DIRECT_INTENSITY   = 50.0;   // 2026-09-10 十七: 用户实验 20→50（SC 尺度同步 ×2.5，C2.1 单位统一保持）
-const float IBL_INTENSITY      = 0.0;
+// P2-A（sponza-gap-audit §4.8）: diffuse 与 specular IBL 分开门控。
+// 旧 IBL_INTENSITY=0 同时压掉两路——为防 diffuse 环境光与 DDGI fusion 重复
+// 累加而把镜面反射也一起归零，石材只剩漫反射响应。现在 diffuse 保持 0
+// （DDGI 全权负责 diffuse ambient，2026-09-06 校准不变），specular 以低系
+// 数开启：0.35 对照 HDR 天空 4.2-6.0 量级给出宽而弱的环境高光，能量可解释。
+// 注意此处 IBL cube 是独立加载的 HDR 环境，与解析天空未做单位统一；后续
+// 校准只动 IBL_SPECULAR_INTENSITY，不回退 diffuse 门。
+const float IBL_DIFFUSE_INTENSITY  = 0.0;
+const float IBL_SPECULAR_INTENSITY = 0.35;
 const float SHADOW_AMBIENT_SCALE = 0.05;
+// P2（sponza-gap-reaudit §4.6）: 环境镜面遮挡与日光阴影分离。旧式把太阳
+// shadowVisibility 直接乘进 IBL specular（mix(0.05,1,vis)），阴影内环境镜面
+// 被同步压掉 95%——太阳转到阴影侧时本应来自天空/建筑的反射一同消失。
+// 镜面分支改用独立地板 0.35（阴影内天空仍经由开口可见，拱腹掠射 sheen
+// 不再被日光阴影抹掉）；这是缺乏方向性环境可见性项之前的保守 stand-in，
+// 漫反射分支维持 0.05 压制语义不变（当前 diffuse IBL=0，实际无操作）。
+const float SHADOW_SPECULAR_SCALE = 0.35;
 
 layout(set = 0, binding = 0) uniform ViewData {
     mat4 viewProjection;
@@ -87,6 +106,8 @@ layout(set = 0, binding = 1) uniform SceneData {
     vec4 viewPos;
     mat4 shadowMatrix0;
     mat4 shadowMatrix1;
+    mat4 shadowMatrix2;  // P4.2: 级联 2
+    mat4 shadowMatrix3;  // P4.2: 级联 3
     // x = shadow mode (0 = pre-filtered R8 visibility, 1 = VSM moments +
     // Chebyshev), y = cascade 0 split distance, zw unused.
     vec4 shadowParams;
@@ -106,9 +127,56 @@ layout(set = 0, binding = 9) uniform texture2D fallbackTex;  // unused
 layout(set = 0, binding = 10) uniform textureCube irradianceMap;
 layout(set = 0, binding = 11) uniform textureCube prefilterMap;
 layout(set = 0, binding = 12) uniform texture2D brdfLUT;
+
+// sun-audit P2 第二步: DDGI 探针深度可见性（PRIMAL_PROBE_OCC 变体专用；
+// 其余变体不访问。绑定常驻有效——探针不可用时 params.counts=0 早退，
+// SSBO 绑 dummy 1-float 缓冲）。
+layout(std430, set = 0, binding = 18) readonly buffer ProbeDepthSSBO {
+    float ddgiProbeDepthBuffer[];
+};
+layout(set = 0, binding = 19) uniform ProbeParamsUBO {
+    vec4 probeOrigin_spacing;  // xyz = grid origin, w = spacing (wu)
+    vec4 probeCounts;          // xyz = counts, w = total (0 = 不可用)
+};
+
+// 与 DDGIGIGather 的 gatherOctEncode 同式：8×8 octahedral mean/variance。
+vec2 probeOctDepth(vec3 dir, uint pi) {
+    float l1 = abs(dir.x) + abs(dir.y) + abs(dir.z);
+    vec2 uv = dir.xy / max(l1, 1e-6);
+    if (dir.z < 0.0) {
+        uv = (1.0 - abs(uv.yx)) * mix(vec2(-1.0), vec2(1.0),
+             greaterThanEqual(uv.xy, vec2(0.0)));
+    }
+    uv = uv * 0.5 + 0.5;
+    ivec2 texel = ivec2(clamp(int(uv.x * 8.0), 0, 7), clamp(int(uv.y * 8.0), 0, 7));
+    int idx = texel.y * 8 + texel.x;
+    uint base = pi * 128u;   // DEPTH_FLOATS_PER_PROBE = 128（64 mean + 64 var）
+    return vec2(ddgiProbeDepthBuffer[base + idx],
+                ddgiProbeDepthBuffer[base + 64u + idx]);
+}
+
+// 最近探针 Chebyshev 可见性（DDGIGIGather.visibilityWeight 同式）。
+// 返回 [0.2,1]；不可用返回 -1（调用方回退 stand-in）。
+float probeSpecVisibility(vec3 P) {
+    if (probeCounts.w < 0.5) return -1.0;
+    vec3 gridf = (P - probeOrigin_spacing.xyz) / max(probeOrigin_spacing.w, 1e-4);
+    vec3 c = clamp(floor(gridf + 0.5), vec3(0.0), probeCounts.xyz - vec3(1.0));
+    uint pi = uint(c.x + c.y * probeCounts.x + c.z * probeCounts.x * probeCounts.y);
+    vec3 probePos = probeOrigin_spacing.xyz + c * probeOrigin_spacing.w;
+    vec3 toProbe = probePos - P;
+    float dist = length(toProbe);
+    vec2 mv = probeOctDepth(-toProbe, pi);  // 探针→点方向（gather 同口径）
+    if (mv.y < 0.0001) return -1.0;
+    float d = max(dist - mv.x, 0.0);
+    float cheb = mv.y / (mv.y + d * d);
+    return clamp(max(cheb * 2.0, 0.2), 0.0, 1.0);
+}
 // VSM blurred RG32 shadow moments per cascade (Chebyshev upper bound).
 layout(set = 0, binding = 13) uniform texture2D shadowMoments0;
 layout(set = 0, binding = 14) uniform texture2D shadowMoments1;
+layout(set = 0, binding = 15) uniform texture2D shadowMoments2;  // P4.2
+layout(set = 0, binding = 16) uniform texture2D shadowMoments3;  // P4.2
+layout(set = 0, binding = 17) uniform texture2D translucentTex;  // P4.1 透光强度
 
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
@@ -167,6 +235,10 @@ void main() {
     vec3 albedo = albedoV.rgb;
     vec3 normalEnc = texture(sampler2D(normalTex, defaultSampler), inUv).rgb;
     vec3 orm = texture(sampler2D(ormTex, defaultSampler), inUv).rgb;
+    // P2-B: ORM.a 现在携带 per-instance 透光材质掩码（GBuffer 写入：
+    // 石材/水体/unlit=0，布料实例>0）。旧 GBuffer 全家族写常数 1.0，
+    // 透光项无法区分材质——石墙背光面也会被加"透光"。
+    float transmissionMask = texture(sampler2D(ormTex, defaultSampler), inUv).a;
     float depth = texture(sampler2D(depthTex, defaultSampler), inUv).r;
 
 
@@ -178,20 +250,17 @@ void main() {
     // （216）。只影响可见天空像素的显示——探针 GI 供给走独立的
     // DDGI_SKY_COLOR×SkyColor.x 门（C3.3），此改动不进 GI 回路。
     if (depth >= 1.0) {
-        if (shadowParams.z > 0.5) {
+        if (shadowParams.z > 0.5 && shadowParams.z < 10.5) {
             outColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
         vec2 skyNdc = vec2(inUv.x * 2.0 - 1.0, 1.0 - inUv.y * 2.0);
         vec4 pFar = invViewProjection * vec4(skyNdc, 1.0, 1.0);
         vec3 skyDir = normalize(pFar.xyz / max(pFar.w, 1e-6) - viewPos.xyz);
-        float up = clamp(skyDir.y, 0.0, 1.0);
-        vec3 horizonCol = vec3(4.40, 4.20, 3.80); // 暖白地平雾
-        vec3 zenithCol  = vec3(5.50, 5.76, 6.00); // 亮淡蓝天顶（UE 参考实测 rgb 210,220,229）
-        vec3 sky = mix(horizonCol, zenithCol, pow(up, 0.45));
-        vec3 sunL = normalize(lightPos.xyz);
-        float sunAmount = pow(clamp(dot(skyDir, sunL), 0.0, 1.0), 16.0);
-        sky += vec3(1.0, 0.85, 0.6) * sunAmount * 1.2; // 前向散射日晕
+        // P1.1: 内联程序化天空 → 共享 EvaluateSky（含前向散射日晕），
+        // 数值与原实现一致；GI miss 项经同文件 EvaluateSkyBase 统一档位。
+        // sun-audit §7 P2: 日晕色度跟随太阳线性色（Y 归一保能量档）。
+        vec3 sky = EvaluateSky(skyDir, normalize(lightPos.xyz), lightColor.rgb);
         outColor = vec4(sky, 1.0);
         return;
     }
@@ -215,6 +284,19 @@ void main() {
     float ao = (ssao.r > 0.0) ? ssao.r : 1.0;
     float roughness = max(orm.g, 0.04);
     float metallic = orm.b;
+
+    // sun-audit P2 材质消融（PRIMAL_MATERIAL_ABLATION → shadowParams.z+10
+    // 编码，与 PRIMAL_LIGHTING_DEBUG 互斥；layout 零变更）：
+    //   11 = gray_albedo（反照率 → 0.5 灰，定位强饱和来源）
+    //   12 = flat_normal（法线 → 常量上向量，定位法线驱动的高频明暗）
+    //   13 = fixed_roughness(=1)（完全粗糙，定位镜面太阳辉点）
+    // 只消融直射光照响应的材质输入；GI 供给（SC 缓存）保持真实材质，
+    // 避免同时改掉 GI 弹射源。
+    if (shadowParams.z >= 10.5) {
+        if (shadowParams.z < 11.5) albedo = vec3(0.5);
+        else if (shadowParams.z < 12.5) N = vec3(0.0, 1.0, 0.0);
+        else if (shadowParams.z < 13.5) roughness = 1.0;
+    }
 
     // Light + view vectors.
     vec3 V = normalize(viewPos.xyz - worldPos);
@@ -272,8 +354,28 @@ void main() {
             if (inCascade1) {
                 vec2 moments = texture(sampler2D(shadowMoments1, defaultSampler), uv1).xy;
                 shadowVisibility = chebyshevVisibility(moments, sc1.z);
+            } else {
+                // P4.2: 级联 2/3（由近到远）
+                vec4 clip2 = shadowMatrix2 * vec4(worldPos, 1.0);
+                vec3 sc2 = clip2.xyz / clip2.w;
+                vec2 uv2 = vec2(sc2.x * 0.5 + 0.5, 0.5 - sc2.y * 0.5);
+                bool inCascade2 = uv2.x >= 0.0 && uv2.x <= 1.0 && uv2.y >= 0.0 && uv2.y <= 1.0 &&
+                                  sc2.z >= 0.0 && sc2.z <= 1.0;
+                if (inCascade2) {
+                    vec2 moments = texture(sampler2D(shadowMoments2, defaultSampler), uv2).xy;
+                    shadowVisibility = chebyshevVisibility(moments, sc2.z);
+                } else {
+                    vec4 clip3 = shadowMatrix3 * vec4(worldPos, 1.0);
+                    vec3 sc3 = clip3.xyz / clip3.w;
+                    vec2 uv3 = vec2(sc3.x * 0.5 + 0.5, 0.5 - sc3.y * 0.5);
+                    if (uv3.x >= 0.0 && uv3.x <= 1.0 && uv3.y >= 0.0 && uv3.y <= 1.0 &&
+                        sc3.z >= 0.0 && sc3.z <= 1.0) {
+                        vec2 moments = texture(sampler2D(shadowMoments3, defaultSampler), uv3).xy;
+                        shadowVisibility = chebyshevVisibility(moments, sc3.z);
+                    }
+                    // 全部越界：lit
+                }
             }
-            // Else: outside both shadow maps — lit.
         }
     } else {
         shadowVisibility = texture(sampler2D(shadowVisTex, defaultSampler), inUv).r;
@@ -285,11 +387,35 @@ void main() {
     // ShadowFilter blocker 搜索），见后续 B17。
 
     // Raw diagnostics: no exposure, gamma, GI, or temporal filtering.
-    if (shadowParams.z > 0.5) {
+    // （z+10 = 材质消融档，不是诊断视图——消融走完整光照，此处必须放行）
+    if (shadowParams.z > 0.5 && shadowParams.z < 10.5) {
         vec3 diagnostic = normalEnc;
         if (shadowParams.z == 2.0) diagnostic = vec3(NdotL);
         if (shadowParams.z == 3.0) diagnostic = vec3(shadowVisibility);
         if (shadowParams.z == 4.0) diagnostic = albedo;
+        if (shadowParams.z == 5.0) {
+            // sun-audit P2: IBL ambient 项直出（环境镜面解耦 A/B 测量）。
+            // IBL_DIFFUSE_INTENSITY=0 时 = 纯环境镜面；可见性处理与主路径
+            // 同分支（stand-in 地板或 PRIMAL_SPEC_OCC 的 GTAO 遮挡）。
+            vec3 dFil = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+            vec3 dR = reflect(-V, N);
+            vec3 dPre = textureLod(samplerCube(prefilterMap, defaultSampler),
+                                   dR, roughness * 4.0).rgb;
+            vec2 dBrdf = texture(sampler2D(brdfLUT, defaultSampler),
+                                 vec2(max(dot(N, V), 0.0), roughness)).rg;
+            vec3 dSpecIBL = dPre * (dFil * dBrdf.x + dBrdf.y);
+#if defined(PRIMAL_PROBE_OCC)
+            float dPv = probeSpecVisibility(worldPos);
+            float dVis2 = dPv < 0.0 ? mix(SHADOW_SPECULAR_SCALE, 1.0, shadowVisibility) : dPv;
+            diagnostic = dSpecIBL * IBL_SPECULAR_INTENSITY * dVis2;
+#elif defined(PRIMAL_SPEC_OCC)
+            const float dOcc = clamp(pow(max(dot(N, V), 0.0) + ao, 4.0) - 1.0 + ao, 0.0, 1.0);
+            diagnostic = dSpecIBL * IBL_SPECULAR_INTENSITY * dOcc;
+#else
+            diagnostic = dSpecIBL * IBL_SPECULAR_INTENSITY
+                       * mix(SHADOW_SPECULAR_SCALE, 1.0, shadowVisibility) * ao;
+#endif
+        }
         outColor = vec4(diagnostic, 1.0);
         return;
     }
@@ -312,6 +438,17 @@ void main() {
     vec3 Lo = (diffuse + specular) * lightColor.rgb * NdotL * shadowVisibility
             * DIRECT_INTENSITY;
 
+    // P4.1: 布帘透光——阴影区背光透射合成。ShadowFilter 输出的透光强度
+    // 已含厚度衰减与背面因子；shadowParams.w = 全局透光系数
+    // （PRIMAL_TONE_TRANSLUCENCY，默认 0 = 关闭，画面零变化）。
+    // P2-B: 再乘 ORM.a 材质掩码——只有标注为透光的薄布料实例生效，
+    // 石墙系数严格为 0（不再依赖全局开关单独兜底材质区分）。
+    {
+        float trans = texture(sampler2D(translucentTex, defaultSampler), inUv).r
+                    * shadowParams.w * transmissionMask;
+        Lo += albedo * lightColor.rgb * trans * DIRECT_INTENSITY;
+    }
+
     // T4.6.5 part 37: IBL ambient (image-based lighting).
     // Mirror Metal fragmentLighting_v3 lines 270-287. Cube samples use the
     // shared defaultSampler (linear + repeat — fine for env maps). Prefilter
@@ -333,9 +470,34 @@ void main() {
 
     // T4.6.5 part 40.3: scale overall IBL down, and further crush ambient in
     // shadowed pixels so the shadow side reads darker against lit regions.
+    // P2-A: per-branch gating — diffuse off (DDGI owns ambient), specular on.
+    // P2（reaudit §4.6）: 镜面/漫反射分支使用各自的阴影地板——太阳阴影不再
+    // 直接决定环境镜面可见性。
     float ambientVisibility = mix(SHADOW_AMBIENT_SCALE, 1.0, shadowVisibility);
-    vec3 ambient = (kDil * diffuseIBL + specularIBL) * ao
-                 * IBL_INTENSITY * ambientVisibility;
+    float specularVisibility = mix(SHADOW_SPECULAR_SCALE, 1.0, shadowVisibility);
+#if defined(PRIMAL_PROBE_OCC)
+    // sun-audit P2 第二步（PRIMAL_SPEC_OCC=2 → PROBE_OCC 编译变体）：以
+    // DDGI 探针 Chebyshev 可见性（真实方向几何遮挡）替换 GTAO 饱和近似
+    // ——消除高 N·V+ao 处 specOcc≡1 的局限。探针不可用时回退 stand-in。
+    float pv = probeSpecVisibility(worldPos);
+    specularVisibility = pv < 0.0 ? mix(SHADOW_SPECULAR_SCALE, 1.0, shadowVisibility) : pv;
+    vec3 ambient = (kDil * diffuseIBL * IBL_DIFFUSE_INTENSITY * ambientVisibility) * ao
+                 + specularIBL * IBL_SPECULAR_INTENSITY * specularVisibility;
+#elif defined(PRIMAL_SPEC_OCC)
+    // sun-audit P2 环境镜面解耦第一步（PRIMAL_SPEC_OCC 变体，编译期 -D）：
+    // 以屏幕空间可见性（GTAO AO）+ N·V 的 GTAO 镜面遮挡近似**替换**太阳
+    // shadowVisibility 代理——固定天空旋转太阳时环境镜面不再仅因太阳入
+    // 阴影而骤降（审计验收线）。直射镜面（Cook-Torrance specular）仍用
+    // shadowVisibility（直射本应被太阳阴影遮蔽）。遮挡公式自带 ao 项，
+    // 故本分支不再外乘 ao。
+    const float specOcc = clamp(pow(max(dot(N, V), 0.0) + ao, 4.0) - 1.0 + ao, 0.0, 1.0);
+    vec3 ambient = (kDil * diffuseIBL * IBL_DIFFUSE_INTENSITY * ambientVisibility) * ao
+                 + specularIBL * IBL_SPECULAR_INTENSITY * specOcc;
+#else
+    vec3 ambient = (kDil * diffuseIBL * IBL_DIFFUSE_INTENSITY * ambientVisibility
+                  + specularIBL * IBL_SPECULAR_INTENSITY * specularVisibility)
+                 * ao;
+#endif
 
     outColor = vec4(Lo + ambient, 1.0);
 }
