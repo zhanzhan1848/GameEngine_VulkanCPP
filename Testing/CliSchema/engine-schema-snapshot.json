@@ -1,0 +1,274 @@
+{
+  "$version": "offline-v3",
+  "protocol": "primal.cli.v1",
+  "channel": "offline",
+  "commands": [
+    {
+      "verb": "engine info",
+      "description": "引擎健康检查 + 设备信息",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "render",
+      "description": "离屏渲染测试场景存 PNG",
+      "params": [
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--width",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "--height",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "--frames",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "cook-mesh",
+      "description": "源网格离线 cook 为引擎 .mesh",
+      "params": [
+        {
+          "name": "--in",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--uvatlas",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "--uvatlas-lightmap",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "--sdf",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "bake-sdf",
+      "description": "为已有 .model 的空 SDF 段填充 per-mesh SDF（几何逐字节不变，detail-SDF refine 数据源）",
+      "params": [
+        {
+          "name": "--in",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--resolution",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "--top",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "bake-cards",
+      "description": "为已有 .model 补 per-mesh 离线卡片烘焙（v2 贴面 coverage 贪心，几何逐字节不变；SC 卡片 Lumen 对齐 Phase 2）",
+      "params": [
+        {
+          "name": "--in",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--resolution",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "--surfels",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "--v1",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sc-bake-surface",
+      "description": "为 .model 的 CDB2 卡片烘焙 per-card 真实表面页（mask/depth/normal/albedo/材质参数）到 SCS1 sidecar；owner mesh 几何与材质，几何/布局/材质三摘要键控",
+      "params": [
+        {
+          "name": "--in",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--texture-dir",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "--texture-variant",
+          "type": "string",
+          "required": false,
+          "description": "可重复：纹理路径子串:非负线性比例；按 sRGB 解码/缩放/重新量化源 RGBA8，保留原始材质页并添加三摘要变体。需有效纹理和 CDB2；任一变体无匹配或缺源返回 ENGINE_ERROR，不写输出"
+        },
+        {
+          "name": "--boundary-out",
+          "type": "string",
+          "required": false,
+          "description": "独立 SCB1 补点文件路径，必须与 --in/--out 不同且配合非空 --boundary-texture；只保存真实 mesh 局部位置及表面属性，不生成光照或启用 GPU 查询。有效输出采用同目录临时文件 rename；SCB1/SCS1 两文件提交非联合事务"
+        },
+        {
+          "name": "--boundary-texture",
+          "type": "string",
+          "required": false,
+          "description": "大小写无关的 diffuse 纹理路径子串；为匹配 owner mesh 的全部原始 primitive 及已请求材质变体生成三摘要隔离补点。需 CDB2 和有效纹理；无匹配、退化几何、单 mesh 超过 1048576 点或文件超过 64MiB 返回 ENGINE_ERROR，验证失败不写输出"
+        },
+        {
+          "name": "--boundary-spacing",
+          "type": "number",
+          "required": false,
+          "description": "边界最大理想采样间距，正有限 mesh 局部单位（缩放前），默认 0.1；需 --boundary-out/--boundary-texture。参数非法返回 INVALID_PARAMS，预算不足不截断 primitive"
+        },
+        {
+          "name": "--texels-per-unit",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "--verbose",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "--max-meshes",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "--albedo-scale",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "--tint",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "import-texture",
+      "description": "源纹理离线 cook 为引擎 .texture（TEXR 容器）",
+      "params": [
+        {
+          "name": "--in",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--format",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "--compress",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "bake-vt",
+      "description": "虚拟纹理烘焙（薄包装 vtbake）：PNG 源图为引擎 .vtex",
+      "params": [
+        {
+          "name": "--in",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "--kind",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "--quality",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "build-shaders",
+      "description": "重建引擎着色器 metallib（cmake --target BuildEngineShaderBlob）",
+      "params": [
+        {
+          "name": "--build-dir",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "bake-gi",
+      "description": "静态 GI 探针烘焙（需活管线场景；离线持久化通道未接，当前结构化拒绝）",
+      "params": [],
+      "returns": "object"
+    }
+  ]
+}

@@ -51,6 +51,15 @@ endif()
 find_package(ZLIB REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL ContentTools contenttools_pipeline ZLIB::ZLIB)
 
+# Offline command surface has its own snapshot (the editor attribute registry
+# snapshot does not include these one-shot verbs). No GPU or running editor.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME PrimalEngineCliSchema
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Testing/CliSchema/test_engine_schema.py
+                --engine $<TARGET_FILE:${PROJECT_NAME}>)
+endif()
+
 # 运行时依赖部署：本 exe 的输出目录与两个 DLL 的输出目录在 Windows 的多配置
 # 生成器下不同目录（EngineDLL→Windows/<cfg>，ContentTools→build/bin/<cfg>），
 # 不拷贝就无法加载。macOS/Linux 天然同目录，copy_if_different 为 no-op。

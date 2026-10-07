@@ -25,6 +25,9 @@
 #include "Geometry.h"
 #include "common/SDF.h"
 #include "common/CardBake.h"
+// sc-bake-surface: per-card 真实表面页烘焙（SC per-mesh 计划 P1）
+#include "common/CardSurfaceBake.h"
+#include <stb_image.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -32,6 +35,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <filesystem>
 #include <sys/stat.h>
 
 #if defined(__APPLE__)
@@ -1144,6 +1148,28 @@ int VerbBakeCards(int argc, char** argv)
         std::vector<Submesh> subs;
         auto readStr = [&]() {
             const u32 len = cur.u32_(); cur.skip(len); };
+        // Pipeline scene blobs begin with a printable scene name, then
+        // materials and named LOD groups. A partial walk must never be
+        // published as a successful card rebake.
+        bool pipelineScene = false;
+        if (inSize >= 12) {
+            const u32 first = peek_magic(0);
+            if (first <= 200u && 4ull + first + 4ull <= inSize) {
+                pipelineScene = true;
+                for (u32 i = 0; i < first; ++i) {
+                    const u8 ch = inBuf[4u + i];
+                    if (ch < 32u || ch > 126u) { pipelineScene = false; break; }
+                }
+                if (pipelineScene) {
+                    const u32 materials = peek_magic(4u + first);
+                    pipelineScene = materials > 0u && materials < 10000u;
+                }
+            }
+        }
+        if (pipelineScene) {
+            const u32 sceneNameLength = cur.u32_();
+            cur.skip(sceneNameLength);
+        }
         const u32 matCount = cur.u32_();
         auto probeFields = [&](u32 fields) -> bool {
             u64 probe = cur.pos;
@@ -1158,13 +1184,14 @@ int VerbBakeCards(int argc, char** argv)
             u32 maybeLod; std::memcpy(&maybeLod, inBuf.data() + probe, 4);
             return maybeLod > 0 && maybeLod < 100000;
         };
-        u32 fieldsPerMaterial = probeFields(5) ? 5u : (probeFields(3) ? 3u : 5u);
+        u32 fieldsPerMaterial = pipelineScene ? 3u :
+            (probeFields(5) ? 5u : (probeFields(3) ? 3u : 5u));
         for (u32 m = 0; m < matCount; ++m)
             for (u32 f = 0; f < fieldsPerMaterial; ++f) readStr();
         const u32 lodCount = cur.u32_();
-        cur.skip(4ull * lodCount);            // thresholds
-        bool pipelineLayout = false;
-        {
+        if (!pipelineScene) cur.skip(4ull * lodCount); // legacy thresholds
+        bool pipelineLayout = pipelineScene;
+        if (!pipelineScene) {
             u64 probe = cur.pos;
             if (lodCount == 1 && probe + 4 <= inSize) {
                 u32 peek; std::memcpy(&peek, inBuf.data() + probe, 4);
@@ -1175,6 +1202,11 @@ int VerbBakeCards(int argc, char** argv)
             cur.skip(4ull * lodCount);        // lod_offsets（旧格式）
         for (u32 lod = 0; lod < lodCount && !cur.bad; ++lod)
         {
+            if (pipelineScene) {
+                const u32 lodNameLength = cur.u32_();
+                if (lodNameLength > 10000u) { walkBad = true; break; }
+                cur.skip(lodNameLength);
+            }
             if (cur.pos + 8 > inSize) { std::fprintf(stderr, "[walk] lod %u: pos+8>inSize\n", lod); break; }
             u32 idCount = cur.u32_();
             if (!pipelineLayout)
@@ -1288,7 +1320,6 @@ int VerbBakeCards(int argc, char** argv)
                         cur.skip(4);
                         if (magic == 0x32424443) cur.skip(4);   // version
                         const u32 cc = cur.u32_(); cur.skip(32ull * cc);
-                        cur.skip(4);
                         const u32 sc = cur.u32_(); cur.skip(32ull * sc);
                         sm.cdbkEnd = cur.pos;
                     }
@@ -1314,7 +1345,7 @@ int VerbBakeCards(int argc, char** argv)
                 subs.push_back(std::move(sm));
             }
         }
-        if (cur.bad) walkBad = true;
+        if (cur.bad || (pipelineScene && cur.pos != inSize)) walkBad = true;
         return subs;
     };
     std::vector<Submesh> subs = walk(true);
@@ -1445,6 +1476,547 @@ int VerbBakeCards(int argc, char** argv)
     return kExitOk;
 }
 
+// ============================================================================
+// sc-bake-surface（2026-09-30，SC per-mesh 计划 P1）：为已有 .model 的 CDB2
+// 卡片布局烘焙 per-card 真实表面页（mask/depth/normal/albedo/材质参数），
+// 写 "SCS1" sidecar（不进 blob）。owner 契约：只提交 owner mesh 的几何与
+// 材质。几何/布局/材质三摘要键控——资产或卡片重排变化即失效。
+// 纹理解析复刻运行时约定：stbi 加载（sRGB 源）、双线性、repeat wrap、
+// 顶点级 uv.y=1-uv.y 翻转；纹理变体先改 RGBA8 源字节，再计算材质摘要。
+// ============================================================================
+static int VerbScBakeSurface(int argc, char** argv)
+{
+    namespace cs = primal::tools::card_surface;
+    const char* inPath = nullptr;
+    const char* outPath = nullptr;
+    const char* textureDir = nullptr;
+    const char* boundaryOut = nullptr;
+    std::string boundaryTexture;
+    f32 boundarySpacing = .1f;
+    bool boundarySpacingSet = false;
+    f32 albedoScale = 1.0f;
+    f32 texelsPerUnit = 64.0f;
+    f32 tintR = 1.f, tintG = 1.f, tintB = 1.f;
+    // Repeatable substring:scale pairs add records without replacing the base.
+    std::vector<std::pair<std::string, f32>> textureVariants;
+    u32 verbosity = 0;
+    u32 maxMeshes = 0xFFFFFFFFu;
+    for (int i = 0; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--in") == 0 && i + 1 < argc) inPath = argv[++i];
+        else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
+        else if (std::strcmp(argv[i], "--texture-dir") == 0 && i + 1 < argc) textureDir = argv[++i];
+        else if (std::strcmp(argv[i], "--boundary-out") == 0 && i + 1 < argc) boundaryOut = argv[++i];
+        else if (std::strcmp(argv[i], "--boundary-texture") == 0 && i + 1 < argc) boundaryTexture = argv[++i];
+        else if (std::strcmp(argv[i], "--boundary-spacing") == 0 && i + 1 < argc) {
+            boundarySpacingSet=true;
+            char* end=nullptr; const char* value=argv[++i]; boundarySpacing=std::strtof(value,&end);
+            if (end==value || *end || !primal::graphics::rhi::card_boundary::Finite(boundarySpacing) || boundarySpacing<=0) {
+                PrintError("INVALID_PARAMS","补点间距需为正有限 mesh 局部单位","--boundary-spacing 0.1"); return kExitUsage;
+            }
+        }
+        else if (std::strcmp(argv[i], "--texels-per-unit") == 0 && i + 1 < argc) texelsPerUnit = (f32)std::atof(argv[++i]);
+        else if (std::strcmp(argv[i], "--albedo-scale") == 0 && i + 1 < argc) albedoScale = (f32)std::atof(argv[++i]);
+        else if (std::strcmp(argv[i], "--tint") == 0 && i + 1 < argc)
+            std::sscanf(argv[++i], "%f,%f,%f", &tintR, &tintG, &tintB);
+        else if (std::strcmp(argv[i], "--texture-variant") == 0 && i + 1 < argc) {
+            std::string spec = argv[++i];
+            const auto colon = spec.find_last_of(':');
+            char* end = nullptr;
+            const float scale = colon == std::string::npos ? -1.f
+                : std::strtof(spec.c_str() + colon + 1, &end);
+            if (colon == std::string::npos || colon == 0 || !end || *end ||
+                end == spec.c_str() + colon + 1 || !std::isfinite(scale) || scale < 0.f) {
+                PrintError("INVALID_PARAMS", "变体需为非空纹理路径子串:非负有限线性比例", "--texture-variant sponza_floor_diffuse:0.5");
+                return kExitUsage;
+            }
+            std::string name = spec.substr(0, colon);
+            for (auto& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+            textureVariants.emplace_back(std::move(name), scale);
+        }
+        else if (std::strcmp(argv[i], "--verbose") == 0) verbosity = 1;
+        else if (std::strcmp(argv[i], "--max-meshes") == 0 && i + 1 < argc) maxMeshes = (u32)std::atoi(argv[++i]);
+        else
+        {
+            PrintError("INVALID_PARAMS", (std::string("未知参数: ") + argv[i]).c_str(),
+                       "支持 --in/--out/--texture-dir/--texture-variant/--boundary-out/--boundary-texture/--boundary-spacing/--texels-per-unit/--albedo-scale/--tint/--verbose/--max-meshes");
+            return kExitUsage;
+        }
+    }
+    if (!inPath || !outPath)
+    {
+        PrintError("INVALID_PARAMS", "需要 --in <.model> 与 --out <.scsurf>",
+                   "示例: primal-engine sc-bake-surface --in Sponza.model --out Sponza.model.scsurf "
+                   "--texture-dir EngineTest/assets");
+        return kExitUsage;
+    }
+
+    if ((boundaryOut && (!*boundaryOut || boundaryTexture.empty())) || (!boundaryOut && (!boundaryTexture.empty() || boundarySpacingSet))) {
+        PrintError("INVALID_PARAMS","补点输出与非空纹理子串必须一起指定","--boundary-out <.scboundary> --boundary-texture sponza_floor_diffuse"); return kExitUsage;
+    }
+    if (boundaryOut) {
+        std::error_code ec;
+        if (std::filesystem::absolute(boundaryOut).lexically_normal()==std::filesystem::absolute(outPath).lexically_normal() ||
+            std::filesystem::equivalent(boundaryOut,outPath,ec) ||
+            std::filesystem::absolute(boundaryOut).lexically_normal()==std::filesystem::absolute(inPath).lexically_normal() ||
+            std::filesystem::equivalent(boundaryOut,inPath,ec)) {
+            PrintError("INVALID_PARAMS","SCB1 路径必须与输入模型及 SCS1 输出不同","--boundary-out <独立 .scboundary>"); return kExitUsage;
+        }
+        for (auto& c:boundaryTexture) c=char(std::tolower(static_cast<unsigned char>(c)));
+    }
+
+    if (!std::isfinite(texelsPerUnit) || texelsPerUnit < 16.f || texelsPerUnit > 256.f ||
+        !std::isfinite(albedoScale) || albedoScale < 0.f ||
+        !std::isfinite(tintR) || !std::isfinite(tintG) || !std::isfinite(tintB)) {
+        PrintError("INVALID_PARAMS", "密度需在 [16,256]，比例与 tint 需为有限值", "sc-bake-surface");
+        return kExitUsage;
+    }
+    FILE* in = std::fopen(inPath, "rb");
+    if (!in) { PrintError("ENGINE_ERROR", "无法打开输入文件", inPath); return kExitEngine; }
+    std::fseek(in, 0, SEEK_END);
+    long long inSize64 = std::ftell(in);
+    std::fseek(in, 0, SEEK_SET);
+    std::vector<u8> inBuf((size_t)inSize64);
+    if (std::fread(inBuf.data(), 1, (size_t)inSize64, in) != (size_t)inSize64)
+    { std::fclose(in); PrintError("ENGINE_ERROR", "读取输入失败", inPath); return kExitEngine; }
+    std::fclose(in);
+    const u64 inSize = (u64)inSize64;
+
+    // 纹理搜索路径：--texture-dir、模型同目录、models/Sponza/、textures/
+    //（与 TestVulkanSponzaRenderGraph::ResolveTexturePath 同序）。
+    std::vector<std::string> searchDirs;
+    if (textureDir && *textureDir) searchDirs.push_back(textureDir);
+    {
+        std::string modelDir(inPath);
+        const size_t slash = modelDir.find_last_of('/');
+        searchDirs.push_back(slash == std::string::npos ? std::string(".") : modelDir.substr(0, slash));
+        const size_t assets = modelDir.find("/assets/");
+        if (assets != std::string::npos)
+        {
+            const std::string base = modelDir.substr(0, assets + strlen("/assets/"));
+            searchDirs.push_back(base + "models/Sponza");
+            searchDirs.push_back(base + "textures");
+        }
+    }
+    auto resolve_texture = [&](const std::string& name) -> std::string {
+        if (name.empty()) return {};
+        for (const std::string& dir : searchDirs)
+        {
+            const std::string p = dir + "/" + name;
+            FILE* t = std::fopen(p.c_str(), "rb");
+            if (t) { std::fclose(t); return p; }
+        }
+        return {};
+    };
+
+    struct Cursor {
+        const u8* p;
+        u64 pos = 0;
+        u64 size = 0;
+        bool bad = false;
+        u32 u32_() {
+            if (pos + 4 > size) { bad = true; pos = size; return 0; }
+            u32 v; std::memcpy(&v, p + pos, 4); pos += 4; return v;
+        }
+        void skip(u64 n) {
+            if (pos + n > size) { bad = true; pos = size; return; }
+            pos += n;
+        }
+    };
+
+    // 与 VerbBakeCards 同一容器探测/头部解析；额外收集 element 缓冲、
+    // CDB2 卡片与材质 diffuse 引用。
+    struct Submesh {
+        u32 elemType = 0;
+        u32 elemSize = 0;
+        u32 materialIdx = 0xFFFFFFFFu;
+        std::string name;
+        std::vector<f32> positions;
+        std::vector<u8> elements;
+        std::vector<u32> indices;   // 统一展宽为 u32（视图端 index_size=4）
+        // [P0 身份契约] blob 原生索引字节（digest 用，与运行时一致）。
+        std::vector<u8> rawIndices;
+        u32 cardCount = 0;
+        std::vector<u8> cardBytes;  // CDB2 cards[] 原始 32B/张
+    };
+
+    bool walkBad = false;
+    u32 meshIndex = 0;
+    std::vector<std::string> materialDiffuse;
+    std::vector<Submesh> subs;
+    auto walk = [&]() {
+        Cursor cur{inBuf.data(), 0, inSize, false};
+        auto peek_magic = [&](u64 at) -> u32 {
+            u32 v = 0;
+            if (at + 4 <= inSize) std::memcpy(&v, inBuf.data() + at, 4);
+            return v;
+        };
+        auto readStr = [&](std::string* out) {
+            const u32 len = cur.u32_();
+            if (out && !cur.bad && len < 4096 && cur.pos + len <= inSize)
+                out->assign((const char*)inBuf.data() + cur.pos, len);
+            cur.skip(len);
+        };
+        // pipeline 容器 = 可打印场景名开头。
+        bool pipelineScene = false;
+        if (inSize >= 12) {
+            const u32 first = peek_magic(0);
+            if (first <= 200u && 4ull + first + 4ull <= inSize) {
+                pipelineScene = true;
+                for (u32 i = 0; i < first; ++i) {
+                    const u8 ch = inBuf[4u + i];
+                    if (ch < 32u || ch > 126u) { pipelineScene = false; break; }
+                }
+                if (pipelineScene) {
+                    const u32 materials = peek_magic(4u + first);
+                    pipelineScene = materials > 0u && materials < 10000u;
+                }
+            }
+        }
+        std::string sceneName;
+        if (pipelineScene) readStr(&sceneName);
+        const u32 matCount = cur.u32_();
+        if (pipelineScene) {
+            // pipeline 材质 = name/diffuse/normal 三字段。
+            for (u32 m = 0; m < matCount && !cur.bad; ++m) {
+                std::string mn, diff, nrm;
+                readStr(&mn); readStr(&diff); readStr(&nrm);
+                materialDiffuse.push_back(std::move(diff));
+            }
+        } else {
+            auto probeFields = [&](u32 fields) -> bool {
+                u64 probe = cur.pos;
+                for (u32 s = 0; s < matCount * fields; ++s) {
+                    if (probe + 4 > inSize) return false;
+                    u32 sLen; std::memcpy(&sLen, inBuf.data() + probe, 4);
+                    if (sLen > 500) return false;
+                    probe += 4 + sLen;
+                    if (probe > inSize) return false;
+                }
+                if (probe + 4 > inSize) return false;
+                u32 maybeLod; std::memcpy(&maybeLod, inBuf.data() + probe, 4);
+                return maybeLod > 0 && maybeLod < 100000;
+            };
+            // 材质字段数探测：Geometry::material 的文档布局是 name/diffuse/
+            // normal 三字段，3 探测优先；5 是历史变体兜底。（VerbBakeCards 先
+            // 5 后 3 是因为它不消费字段内容——这里 diffuse 必须取对。）
+            const u32 fieldsPerMaterial = probeFields(3) ? 3u : (probeFields(5) ? 5u : 3u);
+            for (u32 m = 0; m < matCount && !cur.bad; ++m)
+                for (u32 f = 0; f < fieldsPerMaterial; ++f)
+                    readStr(f == 1 ? &materialDiffuse.emplace_back() : nullptr);
+            if ((u32)materialDiffuse.size() > matCount) materialDiffuse.resize(matCount);
+        }
+        const u32 lodCount = cur.u32_();
+        if (!pipelineScene) cur.skip(4ull * lodCount);
+        const bool pipelineLayout = pipelineScene;
+        if (!pipelineLayout) cur.skip(4ull * lodCount);
+        for (u32 lod = 0; lod < lodCount && !cur.bad; ++lod)
+        {
+            if (pipelineScene) { const u32 ll = cur.u32_(); cur.skip(ll); }
+            if (cur.pos + 8 > inSize) break;
+            const u32 idCount = cur.u32_();
+            if (!pipelineLayout) cur.skip(4);
+            if (cur.bad || idCount > 1000000u) break;
+            for (u32 id = 0; id < idCount && !cur.bad; ++id)
+            {
+                if (cur.pos + 28 > inSize) break;
+                Submesh sm{};
+                const u32 firstVal = cur.u32_();
+                bool compact = false;
+                u32 elemSize = 0, elemType = 0, V = 0, N = 0, idxSize = 2;
+                if (firstVal > 0 && firstVal < 200 && cur.pos + firstVal + 32 <= inSize) {
+                    bool printable = true;
+                    for (u32 c = 0; c < firstVal && c < 50; ++c) {
+                        const u8 ch = inBuf[cur.pos + c];
+                        if (ch != 0 && (ch < 32 || ch > 126)) { printable = false; break; }
+                    }
+                    if (printable) {
+                        sm.name.assign((const char*)inBuf.data() + cur.pos, firstVal);
+                        cur.skip(firstVal);
+                        (void)cur.u32_();   // lodId
+                        sm.materialIdx = cur.u32_();
+                        elemSize = cur.u32_();
+                        elemType = cur.u32_();
+                        V = cur.u32_();
+                        const u32 idxSzField = cur.u32_();
+                        N = cur.u32_();
+                        cur.skip(4);
+                        if ((idxSzField == 2 || idxSzField == 4) &&
+                            V > 0 && V < 10000000u && N > 0 && N < 30000000u) {
+                            compact = true;
+                            idxSize = idxSzField;
+                        }
+                    }
+                }
+                if (!compact) {
+                    const u32 second = cur.u32_();
+                    if (second > 200) {
+                        // Old Format：[ElemSize][V][N][ElemType][PrimTopo]（无材质）。
+                        elemSize = firstVal; V = second;
+                    } else {
+                        // pack_geometry Engine Format：[MatIdx][ElemSize][V][N]…——
+                        // firstVal = MatIdx（与 SceneDataAdapter 权威实现一致）。
+                        sm.materialIdx = firstVal;
+                        elemSize = second; V = cur.u32_();
+                    }
+                    N = cur.u32_();
+                    elemType = cur.u32_();
+                    cur.skip(4);
+                    idxSize = (V < (1u << 16)) ? 2u : 4u;
+                }
+                const u64 posOff = cur.pos;
+                {
+                    const u64 endP = cur.pos + 12ull * V;
+                    const u64 aligned = pipelineLayout ? endP : ((endP + 15) & ~15ull);
+                    cur.skip(aligned - cur.pos);
+                }
+                const u64 elemOff = cur.pos;
+                {
+                    const u64 endE = cur.pos + (u64)elemSize * V;
+                    const u64 aligned = pipelineLayout ? endE : ((endE + 15) & ~15ull);
+                    cur.skip(aligned - cur.pos);
+                }
+                const u64 idxOff = cur.pos;
+                cur.skip((u64)idxSize * N);
+                if (peek_magic(cur.pos) == 0x4C48534D) {   // MSHL
+                    cur.skip(4);
+                    const u32 mc = cur.u32_();
+                    if (mc > 0 && mc < 100000u) {
+                        cur.skip(60ull * mc);
+                        if (cur.pos + 4 <= inSize) { const u32 mvc = cur.u32_(); if (mvc < 10000000u) cur.skip(4ull * mvc); }
+                        if (cur.pos + 4 <= inSize) { const u32 mtc = cur.u32_(); if (mtc < 10000000u) cur.skip(mtc); }
+                    }
+                }
+                if (peek_magic(cur.pos) == 0x20464453) {   // SDF
+                    cur.skip(4);
+                    cur.skip(12 + 24);
+                    const u32 dc = cur.u32_(); cur.skip(2ull * dc);
+                    const u32 vc = cur.u32_(); cur.skip(vc);
+                    const u32 fc = cur.u32_(); cur.skip(2ull * fc);
+                }
+                if ((elemType & 0x10) && peek_magic(cur.pos) == 0x4D4C5655) {   // UVLM
+                    cur.skip(4);
+                    const u32 uvc = cur.u32_(); cur.skip(8ull * uvc);
+                }
+                if ((elemType & 0x20) && cur.pos + 8 <= inSize) {   // CDBK/CDB2
+                    const u32 magic = peek_magic(cur.pos);
+                    if (magic == 0x4B424443 || magic == 0x32424443) {
+                        cur.skip(4);
+                        if (magic == 0x32424443) cur.skip(4);
+                        const u32 cc = cur.u32_();
+                        if (cc > 0 && cc < 100000u) {
+                            sm.cardCount = cc;
+                            sm.cardBytes.resize(size_t(cc) * 32u);
+                            if (cur.pos + 32ull * cc <= inSize)
+                                std::memcpy(sm.cardBytes.data(), inBuf.data() + cur.pos, 32ull * cc);
+                            else cur.bad = true;
+                            cur.skip(32ull * cc);
+                        }
+                        const u32 sc = cur.u32_(); cur.skip(32ull * sc);
+                    }
+                }
+                if (V > 0 && N > 0 &&
+                    posOff + 12ull * V <= inSize && idxOff + (u64)idxSize * N <= inSize &&
+                    elemOff + (u64)elemSize * V <= inSize)
+                {
+                    sm.positions.resize((size_t)V * 3);
+                    std::memcpy(sm.positions.data(), inBuf.data() + posOff, 12ull * V);
+                    sm.indices.resize((size_t)N);
+                    if (idxSize == 4)
+                        std::memcpy(sm.indices.data(), inBuf.data() + idxOff, 4ull * N);
+                    else
+                        for (u32 i = 0; i < N; ++i) {
+                            u16 v; std::memcpy(&v, inBuf.data() + idxOff + 2ull * i, 2);
+                            sm.indices[i] = v;
+                        }
+                    sm.elemSize = elemSize;
+                    sm.elemType = elemType;
+                    if (elemSize > 0)
+                    {
+                        sm.elements.resize((size_t)elemSize * V);
+                        std::memcpy(sm.elements.data(), inBuf.data() + elemOff, (size_t)elemSize * V);
+                    }
+                    sm.rawIndices.resize(size_t(idxSize) * N);
+                    std::memcpy(sm.rawIndices.data(), inBuf.data() + idxOff, size_t(idxSize) * N);
+                    subs.push_back(std::move(sm));
+                    ++meshIndex;
+                }
+            }
+        }
+        if (cur.bad) walkBad = true;
+    };
+    walk();
+    std::fprintf(stderr, "[sc-bake-surface] subs=%zu walkBad=%d materials=%zu\n",
+                 subs.size(), (int)walkBad, materialDiffuse.size());
+    if (subs.empty() || walkBad) {
+        PrintError("ENGINE_ERROR", "容器解析失败（非 pack_geometry/pack_mesh_data 格式？）",
+                   "sc-bake-surface 支持 legacy 与 pipeline 两种 .model 容器");
+        return kExitEngine;
+    }
+
+    // ---- 逐 mesh 烘焙表面页 ----
+    cs::ScsHeader header{};
+    header.albedo_scale = albedoScale;
+    header.texels_per_unit = texelsPerUnit;
+    std::vector<cs::MeshBakeResult> results;
+    std::vector<cs::BoundaryBakeResult> boundaryResults;
+    u32 bakedMeshes = 0, totalCards = 0, validTexels = 0, totalTexels = 0;
+    u32 texturesLoaded = 0, texturesMissing = 0, variantsBaked = 0;
+    std::vector<bool> variantMatches(textureVariants.size(), false);
+    for (size_t k = 0; k < subs.size() && bakedMeshes < maxMeshes; ++k)
+    {
+        const Submesh& sm = subs[k];
+        if (sm.cardBytes.empty() || sm.positions.empty()) continue;
+
+        primal::tools::card_bake::data cards;
+        cards.cards.resize(sm.cardCount);
+        std::memcpy(cards.cards.data(), sm.cardBytes.data(), sm.cardBytes.size());
+
+        cs::MeshGeometryView geom;
+        geom.positions = sm.positions.data();
+        geom.vertex_count = u32(sm.positions.size() / 3);
+        geom.indices = reinterpret_cast<const u8*>(sm.indices.data());
+        geom.index_size = 4;
+        geom.index_count = u32(sm.indices.size());
+        geom.elements = sm.elements.empty() ? nullptr : sm.elements.data();
+        geom.element_stride = sm.elemSize;
+        geom.digest_indices = sm.rawIndices.empty() ? nullptr : sm.rawIndices.data();
+        geom.digest_index_size = sm.rawIndices.empty() ? 0u
+            : u32(sm.rawIndices.size() / (sm.indices.size() ? sm.indices.size() : 1));
+
+        cs::RgbaImage tex;
+        const std::string diff = (sm.materialIdx < materialDiffuse.size())
+            ? materialDiffuse[sm.materialIdx] : std::string();
+        const std::string texPath = resolve_texture(diff);
+        if (!texPath.empty()) {
+            int tw = 0, th = 0, tc = 0;
+            u8* px = stbi_load(texPath.c_str(), &tw, &th, &tc, 4);
+            if (px) {
+                tex.width = u32(tw); tex.height = u32(th);
+                tex.rgba.assign(px, px + size_t(tw) * th * 4);
+                stbi_image_free(px);
+                tex.valid = true;
+                ++texturesLoaded;
+            }
+        }
+        if (!tex.valid) ++texturesMissing;
+
+        cs::BakeParams bp{};
+        bp.albedo_scale = albedoScale;
+        bp.texels_per_unit = texelsPerUnit;
+        bp.tint[0] = tintR; bp.tint[1] = tintG; bp.tint[2] = tintB;
+        bp.verbosity = verbosity;
+
+        cs::MeshBakeResult res;
+        res.name_hash = cs::fnv1a64(sm.name.data(), sm.name.size());
+        if (!cs::bake_mesh(geom, cards, tex, bp, res)) continue;
+        for (const auto& pg : res.pages) {
+            totalCards++;
+            totalTexels += pg.resolution * pg.resolution;
+            validTexels += pg.valid_texels;
+        }
+        ++bakedMeshes;
+        const u64 baseDigest = res.material_digest;
+        results.push_back(std::move(res));
+        std::string lowerDiff = diff;
+        for (auto& ch : lowerDiff) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        const bool boundarySelected=boundaryOut && lowerDiff.find(boundaryTexture)!=std::string::npos;
+        auto appendBoundary=[&](const cs::RgbaImage& source,const cs::MeshBakeResult& primary) {
+            if (!boundarySelected) return true;
+            std::vector<u32> ids(geom.index_count/3u);
+            for (u32 i=0;i<ids.size();++i) ids[i]=i;
+            cs::BoundaryBakeResult supplementary;
+            if (!source.valid || !cs::bake_boundary_samples(geom,cards,source,bp,ids,boundarySpacing,
+                    primal::graphics::rhi::card_boundary::MaxSamplesPerMesh,supplementary) ||
+                supplementary.geometry_digest!=primary.geometry_digest || supplementary.layout_digest!=primary.layout_digest ||
+                supplementary.material_digest!=primary.material_digest) return false;
+            boundaryResults.push_back(std::move(supplementary)); return true;
+        };
+        if (!appendBoundary(tex,results.back())) {
+            PrintError("ENGINE_ERROR","补点源缺失/几何无效/预算超限或身份不匹配，拒绝写出",diff.c_str()); return kExitEngine;
+        }
+        for (size_t vi = 0; vi < textureVariants.size(); ++vi) {
+            const auto& [name, scale] = textureVariants[vi];
+            if (lowerDiff.find(name) == std::string::npos) continue;
+            variantMatches[vi] = true;
+            if (!tex.valid) {
+                PrintError("ENGINE_ERROR", "变体纹理源缺失，拒绝写出不完整 sidecar", diff.c_str());
+                return kExitEngine;
+            }
+            cs::RgbaImage variant = tex;
+            primal::graphics::rhi::card_surface_identity::ScaleTextureRgb(
+                variant.rgba.data(), size_t(variant.width) * variant.height, scale);
+            cs::MeshBakeResult extra;
+            extra.name_hash = results.back().name_hash;
+            if (!cs::bake_mesh(geom, cards, variant, bp, extra)) {
+                PrintError("ENGINE_ERROR", "材质变体烘焙失败", diff.c_str());
+                return kExitEngine;
+            }
+            // Identical rounded textures and repeated pairs must not introduce
+            // ambiguous duplicate triple keys.
+            if (extra.material_digest == baseDigest) continue;
+            bool duplicate = false;
+            for (const auto& prior : results)
+                if (prior.geometry_digest == extra.geometry_digest &&
+                    prior.layout_digest == extra.layout_digest &&
+                    prior.material_digest == extra.material_digest) { duplicate = true; break; }
+            if (duplicate) continue;
+            if (!appendBoundary(variant,extra)) {
+                PrintError("ENGINE_ERROR","变体补点烘焙失败，拒绝写出",diff.c_str()); return kExitEngine;
+            }
+            for (const auto& pg : extra.pages) {
+                ++totalCards;
+                totalTexels += pg.resolution * pg.resolution;
+                validTexels += pg.valid_texels;
+            }
+            results.push_back(std::move(extra));
+            ++variantsBaked;
+        }
+    }
+
+    for (size_t vi = 0; vi < textureVariants.size(); ++vi) {
+        if (!variantMatches[vi]) {
+            PrintError("ENGINE_ERROR", "变体未匹配纹理，拒绝写出；检查子串和 --max-meshes", textureVariants[vi].first.c_str());
+            return kExitEngine;
+        }
+    }
+    if (results.empty()) {
+        PrintError("ENGINE_ERROR", "无卡可烘（资产无 CDB2 段？）",
+                   "先运行 bake-cards 生成卡片布局，再 sc-bake-surface");
+        return kExitEngine;
+    }
+    if (boundaryOut) {
+        std::vector<u8> encoded;
+        if (!primal::graphics::rhi::card_boundary::Encode(boundaryResults,encoded)) {
+            PrintError("ENGINE_ERROR","补点无匹配/身份重复或超出 64MiB 文件预算，拒绝写出",boundaryTexture.c_str()); return kExitEngine;
+        }
+        if (!primal::graphics::rhi::card_boundary::Write(boundaryOut,boundaryResults)) {
+            PrintError("ENGINE_ERROR","SCB1 原子写出失败",boundaryOut); return kExitEngine;
+        }
+    }
+    if (!cs::write_sidecar(outPath, header, results)) {
+        PrintError("ENGINE_ERROR", "sidecar 写出失败", outPath);
+        return kExitEngine;
+    }
+
+    u64 boundarySamples=0;
+    for (const auto& mesh:boundaryResults) boundarySamples+=mesh.samples.size();
+    char msg[768];
+    std::snprintf(msg, sizeof(msg),
+                  "{\"meshes_baked\":%u,\"material_variants\":%u,\"cards_total\":%u,\"valid_texels\":%u,"
+                  "\"total_texels\":%u,\"coverage_mean\":%.3f,\"textures_loaded\":%u,"
+                  "\"textures_missing\":%u,\"albedo_scale\":%.3f,"
+                  "\"bytes_in\":%llu,\"bytes_out\":%llu,\"boundary_meshes\":%zu,\"boundary_samples\":%llu}",
+                  bakedMeshes, variantsBaked, totalCards, validTexels, totalTexels,
+                  totalTexels ? (double)validTexels / (double)totalTexels : 0.0,
+                  texturesLoaded, texturesMissing, (double)albedoScale,
+                  (unsigned long long)inSize,
+                  (unsigned long long)std::filesystem::file_size(outPath),boundaryResults.size(),
+                  (unsigned long long)boundarySamples);
+    PrintOk(msg);
+    return kExitOk;
+}
+
 int VerbCookMesh(int argc, char** argv)
 {
     const char* inPath = nullptr;
@@ -1536,7 +2108,7 @@ int VerbSchema()
     // 离线 verb 表（聚合 schema 的 offline 半张，§3.2）。手工维护：
     // 离线命令少且稳定；C++ 侧无反射，DRY 化等 C# 侧聚合器做一致性校验。
     const char* table =
-        "{\"$version\":\"offline-v2\",\"protocol\":\"primal.cli.v1\",\"channel\":\"offline\",\"commands\":["
+        "{\"$version\":\"offline-v3\",\"protocol\":\"primal.cli.v1\",\"channel\":\"offline\",\"commands\":["
         "{\"verb\":\"engine info\",\"description\":\"引擎健康检查 + 设备信息\",\"params\":[],\"returns\":\"object\"},"
         "{\"verb\":\"render\",\"description\":\"离屏渲染测试场景存 PNG\",\"params\":["
         "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
@@ -1560,6 +2132,19 @@ int VerbSchema()
         "{\"name\":\"--resolution\",\"type\":\"integer\",\"required\":false},"
         "{\"name\":\"--surfels\",\"type\":\"boolean\",\"required\":false},"
         "{\"name\":\"--v1\",\"type\":\"boolean\",\"required\":false}],\"returns\":\"object\"},"
+        "{\"verb\":\"sc-bake-surface\",\"description\":\"为 .model 的 CDB2 卡片烘焙 per-card 真实表面页（mask/depth/normal/albedo/材质参数）到 SCS1 sidecar；owner mesh 几何与材质，几何/布局/材质三摘要键控\",\"params\":["
+        "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
+        "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
+        "{\"name\":\"--texture-dir\",\"type\":\"string\",\"required\":false},"
+        "{\"name\":\"--texture-variant\",\"type\":\"string\",\"required\":false,\"description\":\"可重复：纹理路径子串:非负线性比例；按 sRGB 解码/缩放/重新量化源 RGBA8，保留原始材质页并添加三摘要变体。需有效纹理和 CDB2；任一变体无匹配或缺源返回 ENGINE_ERROR，不写输出\"},"
+        "{\"name\":\"--boundary-out\",\"type\":\"string\",\"required\":false,\"description\":\"独立 SCB1 补点文件路径，必须与 --in/--out 不同且配合非空 --boundary-texture；只保存真实 mesh 局部位置及表面属性，不生成光照或启用 GPU 查询。有效输出采用同目录临时文件 rename；SCB1/SCS1 两文件提交非联合事务\"},"
+        "{\"name\":\"--boundary-texture\",\"type\":\"string\",\"required\":false,\"description\":\"大小写无关的 diffuse 纹理路径子串；为匹配 owner mesh 的全部原始 primitive 及已请求材质变体生成三摘要隔离补点。需 CDB2 和有效纹理；无匹配、退化几何、单 mesh 超过 1048576 点或文件超过 64MiB 返回 ENGINE_ERROR，验证失败不写输出\"},"
+        "{\"name\":\"--boundary-spacing\",\"type\":\"number\",\"required\":false,\"description\":\"边界最大理想采样间距，正有限 mesh 局部单位（缩放前），默认 0.1；需 --boundary-out/--boundary-texture。参数非法返回 INVALID_PARAMS，预算不足不截断 primitive\"},"
+        "{\"name\":\"--texels-per-unit\",\"type\":\"number\",\"required\":false},"
+        "{\"name\":\"--verbose\",\"type\":\"boolean\",\"required\":false},"
+        "{\"name\":\"--max-meshes\",\"type\":\"integer\",\"required\":false},"
+        "{\"name\":\"--albedo-scale\",\"type\":\"number\",\"required\":false},"
+        "{\"name\":\"--tint\",\"type\":\"string\",\"required\":false}],\"returns\":\"object\"},"
         "{\"verb\":\"import-texture\",\"description\":\"源纹理离线 cook 为引擎 .texture（TEXR 容器）\",\"params\":["
         "{\"name\":\"--in\",\"type\":\"string\",\"required\":true},"
         "{\"name\":\"--out\",\"type\":\"string\",\"required\":true},"
@@ -2037,6 +2622,7 @@ int Run(int argc, char** argv)
                      "  primal-engine cook-mesh --in m.obj --out m.mesh [--uvatlas|--uvatlas-lightmap] [--sdf]\n"
                      "  primal-engine bake-sdf --in m.model --out mSDF.model [--resolution 48] [--top 16]\n"
                      "  primal-engine bake-cards --in m.model --out m2.model [--resolution 32] [--surfels 0] [--v1]\n"
+                     "  primal-engine sc-bake-surface --in m.model --out m.model.scsurf [--texture-dir DIR] [--albedo-scale S]\n"
                      "  primal-engine import-texture --in t.png --out t.texture [--format bc7]\n"
                      "  primal-engine bake-vt --in t.png --out t.vtex [--kind color|normal|scalar|auto]\n"
                      "  primal-engine build-shaders [--build-dir DIR]\n"
@@ -2052,6 +2638,7 @@ int Run(int argc, char** argv)
     if (verb == "cook-mesh") return VerbCookMesh(argc - 2, argv + 2);
     if (verb == "bake-sdf") return VerbBakeSdf(argc - 2, argv + 2);
     if (verb == "bake-cards") return VerbBakeCards(argc - 2, argv + 2);
+    if (verb == "sc-bake-surface") return VerbScBakeSurface(argc - 2, argv + 2);
     if (verb == "import-texture") return VerbImportTexture(argc - 2, argv + 2);
     if (verb == "bake-vt") return VerbBakeVt(argc - 2, argv + 2);
     if (verb == "build-shaders") return VerbBuildShaders(argc - 2, argv + 2);
