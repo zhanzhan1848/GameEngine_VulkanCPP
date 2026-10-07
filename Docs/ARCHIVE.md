@@ -1,3 +1,7 @@
+- 2026-10-07 Git范围整理：`/Docs/reports/` 全部为本地诊断/审计/派生网页，已加入.gitignore，磁盘文件保留；正式结论与交接在Docs/completed，仍可提交。此时Docs实际已跟踪150项，报告文件均未跟踪，无git rm/index修改。报告路径在其他机器/新clone不保证存在，应按交接说明重捕获或传递本地归档。
+
+- 2026-10-07 新会话主交接：[遮挡、后处理与五点收敛排查](completed/2026-10-07-sc-lumen-occlusion-postprocess-convergence-handoff.md)，[可复制提示词](completed/2026-10-07-sc-lumen-next-session-prompt.md)。本轮仅Docs交接与授权报告裁剪，无新Engine/渲染收益；当前生产265/231SPV恢复。旧LIVE状态均为历史。清理范围/SHA/空间实测：reports/sc-session-handoff-2026-10-07；旧大网页改近期轻量入口，11关键阶段可重放，其余旧raw/image不再保证存在。
+
 # 引擎文档归档总览（ARCHIVE）
 
 > 归档日期：2026-09-14 ｜ 范围：`Docs/` 全量 90+ 份 markdown 及附属资源
