@@ -22,7 +22,11 @@ struct CullingConfig {
     u32 max_clusters_per_dispatch{ 100000 };
     u32 max_instances_per_dispatch{ 10000 };
     float lod_bias{ 1.0f };
-    bool enable_occlusion_culling{ true };
+    // [PassDebugView 排查] PRIMAL_OCCLUSION=0 可关遮挡剔除（HZB 异常时全剔的 A/B 位）。
+    bool enable_occlusion_culling{ [] {
+        const char* e = std::getenv("PRIMAL_OCCLUSION");
+        return !(e && e[0] == '0');
+    }() };
     bool enable_lod_selection{ true };
     bool enable_small_object_culling{ false }; // Keep disabled for now
     bool enable_streaming_feedback{ true };
@@ -150,6 +154,11 @@ public:
         return frame_resources_[frame_index % 3].visible_cluster_list_buffer;
     }
 
+    // [PassDebugView 排查] 可见 counter（atomic，u32）——GPU 剔除输出的真实可见数。
+    rhi::ResourceHandle GetVisibleCounterBuffer(u32 frame_index) const {
+        return frame_resources_[frame_index % 3].visible_counter_buffer;
+    }
+
 private:
     rhi::RHIDeviceBase* device_{ nullptr };
     CullingConfig config_;
@@ -237,6 +246,10 @@ private:
     bool basic_descriptor_sets_created_{ false };
     bool backface_descriptor_sets_created_{ false };
     bool hzb_bindings_updated_{ false };
+    // [PassDebugView/RG] 编辑器场景异步加载：ResizeBuffersIfNeeded 重建
+    // snapshot GPU buffers 后，已绑定的旧句柄失效（dispatch 读空 → 全剔）。
+    // 记录上次绑定的 instance buffer，句柄变化即重建 descriptor sets。
+    rhi::ResourceHandle last_bound_instance_buffer_{ rhi::handles::INVALID_RESOURCE };
     u32 matrix_print_count_{ 0 };
 
     // T4.6.5 part 30.2: converted from function-scope statics for the same reason.
@@ -269,7 +282,12 @@ private:
         u32 enable_debug_output; // 🔥 DEBUG: Enable debug output
         // T4.6.5 part 35.2: OOB guard for cluster_map → meshlets lookup.
         u32 total_meshlet_count;
-        u32 _pad_cm0;
+        // [PassDebugView 排查] 视锥近平面符号：+1 = view space +Z forward
+        //（编辑器 MetalCamera::createLookToLH），-1 = -Z forward（测试壳
+        // CreateLookAtMatrix）。stage1 用它统一近/远平面判据，两种相机约定
+        // 都不再全拒。偏移必须与 EngineTest/shaders/GPUCullingPipeline.metal
+        // 的 CullingUniforms 追加字段对齐（total_meshlet_count 之后）。
+        float view_forward_sign;
         u32 _pad_cm1;
         u32 _pad_cm2;
     };

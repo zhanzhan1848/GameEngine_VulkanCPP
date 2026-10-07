@@ -60,7 +60,7 @@ struct InstanceData {
     float roughness;
     float metallic;
     float alphaCutoff;
-    float _pad;
+    float transmission;  // P2-B: per-instance 透光材质掩码（0=石材，>0=薄布料）
 };
 layout(set = SET_GLOBAL, binding = 2) readonly buffer InstanceBuffer {
     InstanceData models[];
@@ -81,6 +81,7 @@ layout(location = 5) out vec4 outPreviousPos;
 layout(location = 6) out vec4 outInstanceBaseColor;
 layout(location = 7) out float outInstanceRoughness;
 layout(location = 8) out float outInstanceMetallic;
+layout(location = 9) out float outInstanceTransmission;  // P2-B
 
 const float InvIntervals = 2.0 / ((1 << 16) - 1);
 
@@ -103,11 +104,13 @@ void main() {
         outInstanceBaseColor = inst.baseColor;
         outInstanceRoughness = inst.roughness;
         outInstanceMetallic  = inst.metallic;
+        outInstanceTransmission = inst.transmission;
     } else {
         model = pc.transform;
         outInstanceBaseColor = vec4(1.0, 1.0, 1.0, 1.0);
         outInstanceRoughness = 0.5;
         outInstanceMetallic  = 0.0;
+        outInstanceTransmission = 0.0;
     }
 
     vec4 worldPos = model * vec4(in_position, 1.0);

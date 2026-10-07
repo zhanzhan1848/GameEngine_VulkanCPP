@@ -67,7 +67,7 @@ void main() {
 
     vec4 ormSample = texture(sampler2D(ormMap, defaultSampler), inUV);
     if (length(ormSample.rgb) < 0.01) {
-        outORM = vec4(1.0, instanceRoughness, instanceMetallic, 1.0);
+        outORM = vec4(1.0, instanceRoughness, instanceMetallic, 0.0);  // P2-B: streaming 路径透光掩码暂不启用
     } else {
         outORM = vec4(ormSample.r,
                       ormSample.g * instanceRoughness,

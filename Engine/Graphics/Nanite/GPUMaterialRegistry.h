@@ -47,6 +47,45 @@ public:
     static constexpr uint32_t kMaterialVTFlag = 0x1u;
     static constexpr uint32_t kMaterialVTIdShift = 4;
     static constexpr uint32_t kMaterialVTIdMask = 0xFu;
+
+    // Per-material thin-surface transport.  Keep this in the existing flags
+    // word so MaterialData remains the 48-byte ABI shared by all backends.
+    // bits[8:16) carry transmission as UNorm8.  bits[16:24) are reserved for
+    // the Surface Cache thickness term (stage 3); do not consume them for
+    // unrelated flags.
+    static constexpr uint32_t kMaterialTransmissionShift = 8u;
+    static constexpr uint32_t kMaterialTransmissionMask = 0xFFu << kMaterialTransmissionShift;
+    static constexpr uint32_t kMaterialThicknessShift = 16u;
+    static constexpr uint32_t kMaterialThicknessMask = 0xFFu << kMaterialThicknessShift;
+
+    static uint32_t EncodeTransmissionFlags(uint32_t flags, float transmission) {
+        // Avoid <cmath> in this header; the ordered comparisons also map NaN
+        // to the safe opaque default of zero.
+        const float clamped = transmission > 1.0f ? 1.0f :
+                              (transmission > 0.0f ? transmission : 0.0f);
+        const uint32_t encoded = static_cast<uint32_t>(clamped * 255.0f + 0.5f);
+        return (flags & ~kMaterialTransmissionMask) |
+               ((encoded & 0xFFu) << kMaterialTransmissionShift);
+    }
+
+    static float DecodeTransmissionFactor(uint32_t flags) {
+        return static_cast<float>((flags & kMaterialTransmissionMask) >>
+                                  kMaterialTransmissionShift) / 255.0f;
+    }
+
+    static uint32_t EncodeThicknessFlags(uint32_t flags, float thickness) {
+        const float clamped = thickness > 1.0f ? 1.0f :
+                              (thickness > 0.0f ? thickness : 0.0f);
+        const uint32_t encoded = static_cast<uint32_t>(clamped * 255.0f + 0.5f);
+        return (flags & ~kMaterialThicknessMask) |
+               ((encoded & 0xFFu) << kMaterialThicknessShift);
+    }
+
+    static float DecodeThicknessFactor(uint32_t flags) {
+        return static_cast<float>((flags & kMaterialThicknessMask) >>
+                                  kMaterialThicknessShift) / 255.0f;
+    }
+
     static uint32_t EncodeVTFlags(uint32_t vtId) {
         return kMaterialVTFlag | ((vtId & kMaterialVTIdMask) << kMaterialVTIdShift);
     }

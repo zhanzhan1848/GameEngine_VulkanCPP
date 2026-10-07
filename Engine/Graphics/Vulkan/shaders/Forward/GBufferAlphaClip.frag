@@ -38,6 +38,7 @@ layout(location = 5) in vec4 inPreviousPos;
 layout(location = 6) in vec4 inInstanceBaseColor;
 layout(location = 7) in float inInstanceRoughness;
 layout(location = 8) in float inInstanceMetallic;
+layout(location = 9) in float inInstanceTransmission;  // P2-B 透光材质掩码
 
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
@@ -56,12 +57,12 @@ void main() {
 
     vec4 ormSample = texture(sampler2D(ormMap, defaultSampler), inUV);
     if (length(ormSample.rgb) < 0.01) {
-        outORM = vec4(1.0, inInstanceRoughness, inInstanceMetallic, 1.0);
+        outORM = vec4(1.0, inInstanceRoughness, inInstanceMetallic, inInstanceTransmission);
     } else {
         outORM = vec4(ormSample.r,
                       ormSample.g * inInstanceRoughness,
                       ormSample.b * inInstanceMetallic,
-                      1.0);
+                      inInstanceTransmission);
         outORM.r = max(outORM.r, 0.1);
     }
 

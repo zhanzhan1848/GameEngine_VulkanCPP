@@ -7,5 +7,5 @@ struct InstanceData {
     float    roughness;
     float    metallic;
     float    alphaCutoff;
-    float    _pad;
+    float    transmission;  // P2-B: per-instance 透光材质掩码（0=石材，>0=薄布料）
 };

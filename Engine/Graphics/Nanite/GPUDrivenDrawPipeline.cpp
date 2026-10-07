@@ -1,3 +1,4 @@
+#include "Graphics/MaterialInstance.h"
 #include "GPUDrivenDrawPipeline.h"
 #include "GPUCullingPipeline.h"
 #include "NaniteResourceManager.h"
@@ -201,7 +202,25 @@ bool GPUDrivenDrawPipeline::Initialize(rhi::RHIDeviceBase* device,
     return true;
 }
 
+void GPUDrivenDrawPipeline::SetSurfaceBakeMaterialSource(u32 id, MaterialInstance* source) {
+    if (source) surface_bake_materials_[id] = {source,source->SurfaceBakeLifetime()};
+    else surface_bake_materials_.erase(id);
+}
+
+void GPUDrivenDrawPipeline::RemoveSurfaceBakeMaterialSource(const MaterialInstance* source) {
+    for (auto it = surface_bake_materials_.begin(); it != surface_bake_materials_.end();) {
+        if (it->second.instance == source) it = surface_bake_materials_.erase(it);
+        else ++it;
+    }
+}
+
+u64 GPUDrivenDrawPipeline::GetSurfaceBakeMaterialDigest(u32 id) const {
+    const auto it = surface_bake_materials_.find(id);
+    return it == surface_bake_materials_.end() || it->second.lifetime.expired() ? 0 : it->second.instance->GetSurfaceBakeDigest();
+}
+
 void GPUDrivenDrawPipeline::Shutdown() {
+    surface_bake_materials_.clear();
     if (!initialized_) return;
 
     // std::cout << "[GPUDrivenDrawPipeline] Shutting down..." << std::endl;
@@ -433,29 +452,354 @@ bool GPUDrivenDrawPipeline::CreateResources() {
     // For now, textures will use default values
 
     // Material data buffer: if no caller wired one up via SetMaterialDataBuffer,
-    // allocate a small dummy SSBO so binding 9 isn't VK_NULL_HANDLE. Without this,
+    // allocate a small default SSBO so binding 9 isn't VK_NULL_HANDLE. Without this,
     // vkUpdateDescriptorSets + vkCmdDrawIndirect both fire validation errors
     // (VUID-VkWriteDescriptorSet-descriptorType-00330 + VUID-vkCmdDraw-None-02749).
-    // The pipeline doesn't sample material data when materials aren't bound, so a
-    // 16-byte zeroed buffer is sufficient.
+    // [PassDebugView 排查] 旧实现是 16B 全零 → 记录 0 的 albedo_tint 读出
+    // (0,0,0) → 无材质实体 albedo 全黑。填成一条"无纹理白模"记录
+    // （纹理 idx=0xFFFFFFFF→采样回退白，tint=1.0），语义对齐
+    // CreateDefaultMaterial 的未纹理化默认材质。
     if (global_material_data_buffer_ == rhi::handles::INVALID_RESOURCE) {
         rhi::BufferDesc matDesc{};
-        matDesc.size = 16;
+        matDesc.size = 48; // 12 words × u32，与 GPUDrivenDraw.metal 的 material_base 步长一致
         matDesc.type = rhi::BufferType::Structured;
         matDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::Storage);
-        matDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
-        matDesc.name = "GPUDrivenDrawPipeline_dummy_material_data";
+        // Metal 上 Static→Private，contents() 为 null，MapBuffer 写入静默丢失
+        //（对齐 GPUMaterialRegistry 的 Unknown=Shared 做法）
+        matDesc.memoryUsage = device_->GetPlatform() == rhi::RHIPlatform::Metal
+                                  ? rhi::GPUMemoryUsage::Unknown
+                                  : rhi::GPUMemoryUsage::Dynamic;
+        matDesc.name = "GPUDrivenDrawPipeline_default_material_data";
         global_material_data_buffer_ = device_->CreateBuffer(matDesc);
         if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
             owns_material_data_buffer_ = true;
+            const u32 default_words[12] = {
+                0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,          // albedo/normal/orm 纹理 idx：无效
+                0x3F800000u, 0x3F800000u, 0x3F800000u,          // albedo_tint = (1,1,1)
+                0u,          0x3F800000u, 0x3F800000u,          // metallic=0, roughness=1, normal_scale=1
+                0x3F800000u, 0x3F800000u, 0u,                   // uv_scale=(1,1), flags=0
+            };
+            // [PassDebugView 排查] 默认记录必须同时进入 editor_material_words_，
+            // 否则 RegisterEditorMaterial 重建缓冲时记录 0（白模）丢失 →
+            // 未绑材质实体读到错误记录（此前表现为 albedo 全黑/洋红）。
+            for (u32 w : default_words) editor_material_words_.push_back(w);
+            if (auto* mapped = device_->MapBuffer(global_material_data_buffer_)) {
+                std::memcpy(mapped, default_words, sizeof(default_words));
+                device_->UnmapBuffer(global_material_data_buffer_);
+            }
         } else {
-            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create dummy material data buffer" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to create default material data buffer" << std::endl;
             return false;
         }
     }
 
     // std::cout << "[GPUDrivenDrawPipeline] Resources created successfully" << std::endl;
     return true;
+}
+
+// ============================================================================
+// [PassDebugView 排查] 编辑器材质注册（GPUMaterialRegistry 未接入前的轻量路径）
+// ============================================================================
+// 把内容系统纹理 blit 进编辑器纹理数组的新层，追加一条 MaterialData 记录
+//（与 GPUDrivenDraw.metal 的 12-word 布局一致），返回记录索引。
+// 记录 0/层 0 保留给无纹理白模默认；首个注册材质 = 1。
+bool GPUDrivenDrawPipeline::EnsureEditorCopyPipeline() {
+    if (editor_copy_pipeline_ != rhi::handles::INVALID_PIPELINE) return true;
+
+    auto vs = LoadShaderBytecode("EditorTextureCopy", "editor_texture_copy_vs", device_);
+    auto fs = LoadShaderBytecode("EditorTextureCopy", "editor_texture_copy_fs", device_);
+    if (vs.empty() || fs.empty()) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] EditorTextureCopy shader missing" << std::endl;
+        return false;
+    }
+    rhi::ShaderHandle vsh = device_->CreateShader(vs.data(), vs.size(), rhi::ShaderStage::Vertex, "editor_texture_copy_vs");
+    rhi::ShaderHandle fsh = device_->CreateShader(fs.data(), fs.size(), rhi::ShaderStage::Pixel, "editor_texture_copy_fs");
+    if (vsh == rhi::handles::INVALID_SHADER || fsh == rhi::handles::INVALID_SHADER) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] EditorTextureCopy shader creation failed" << std::endl;
+        return false;
+    }
+
+    rhi::DescriptorSetLayoutBinding bindings[3]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = rhi::DescriptorType::SampledImage;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = rhi::ShaderStage::Pixel;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = rhi::DescriptorType::Sampler;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = rhi::ShaderStage::Pixel;
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = rhi::DescriptorType::UniformBuffer;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Pixel; // FS 读 uv_scale
+    rhi::DescriptorSetLayoutDesc dslDesc{};
+    dslDesc.bindingCount = 3;
+    dslDesc.bindings = bindings;
+    editor_copy_dsl_ = device_->CreateDescriptorSetLayout(dslDesc);
+
+    rhi::PipelineLayoutDesc layoutDesc{};
+    if (editor_copy_dsl_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        layoutDesc.setLayoutCount = 1;
+        layoutDesc.setLayouts = &editor_copy_dsl_;
+    }
+    editor_copy_layout_ = device_->CreatePipelineLayout(layoutDesc);
+
+    rhi::GraphicsPipelineDesc pso{};
+    pso.vertexShader = vsh;
+    pso.pixelShader = fsh;
+    pso.layout = editor_copy_layout_;
+    pso.renderTargetCount = 1;
+    pso.renderTargetFormats[0] = rhi::DataFormat::RGBA8_UNorm;
+    pso.enableDepthTest = false;
+    pso.enableBlend = false;
+    pso.cullMode = rhi::CullMode::None; // 全屏三角形，默认 Back 会把它整个剔掉
+    editor_copy_pipeline_ = device_->CreateGraphicsPipeline(pso);
+    if (editor_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] EditorTextureCopy pipeline creation failed" << std::endl;
+        return false;
+    }
+
+    rhi::SamplerDesc samp{};
+    samp.minFilter = rhi::FilterMode::Linear;
+    samp.magFilter = rhi::FilterMode::Linear;
+    samp.mipFilter = rhi::FilterMode::Point;
+    samp.addressU = rhi::TextureAddressMode::Clamp;
+    samp.addressV = rhi::TextureAddressMode::Clamp;
+    samp.addressW = rhi::TextureAddressMode::Clamp;
+    editor_copy_sampler_ = device_->CreateSampler(samp);
+    return editor_copy_pipeline_ != rhi::handles::INVALID_PIPELINE;
+}
+
+rhi::ResourceHandle GPUDrivenDrawPipeline::CreateEditorArrayLayerView(rhi::ResourceHandle array, u32 layer) {
+    rhi::TextureViewDesc desc{};
+    desc.texture = array;
+    desc.viewType = rhi::TextureType::Texture2D;
+    desc.format = rhi::DataFormat::RGBA8_UNorm;
+    desc.mostDetailedMip = 0;
+    desc.mipCount = 1;
+    desc.firstArraySlice = layer;
+    desc.arraySize = 1;
+    return device_->CreateTextureView(desc);
+}
+
+bool GPUDrivenDrawPipeline::EditorBlitToLayer(rhi::ResourceHandle src, rhi::RenderPassHandle pass,
+                                              float uv_scale_x, float uv_scale_y) {
+    // 缩放常量
+    rhi::BufferDesc cbDesc{};
+    cbDesc.size = 16;
+    cbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform);
+    cbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    rhi::ResourceHandle scaleCB = device_->CreateBuffer(cbDesc);
+    if (scaleCB == rhi::handles::INVALID_RESOURCE) return false;
+    if (auto* mapped = device_->MapBuffer(scaleCB)) {
+        float v[4] = { uv_scale_x, uv_scale_y, 0.f, 0.f };
+        std::memcpy(mapped, v, sizeof(v));
+        device_->UnmapBuffer(scaleCB);
+    }
+
+    // 描述符集
+    rhi::DescriptorSetHandle ds = device_->CreateDescriptorSet({ editor_copy_dsl_ });
+    if (ds == rhi::handles::INVALID_DESCRIPTOR_SET) { device_->DestroyBuffer(scaleCB); return false; }
+    rhi::DescriptorBufferInfo cbInfo{ scaleCB, 0, ~0ULL };
+    rhi::DescriptorImageInfo imgInfo{ editor_copy_sampler_, src, rhi::ResourceState::ShaderResource };
+    rhi::WriteDescriptorSet writes[3]{};
+    writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
+    writes[0].descriptorType = rhi::DescriptorType::SampledImage; writes[0].imageInfo = &imgInfo;
+    rhi::DescriptorImageInfo sampInfo{ editor_copy_sampler_, src, rhi::ResourceState::ShaderResource };
+    writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
+    writes[1].descriptorType = rhi::DescriptorType::Sampler; writes[1].imageInfo = &sampInfo;
+    writes[2].dstSet = ds; writes[2].dstBinding = 2; writes[2].descriptorCount = 1;
+    writes[2].descriptorType = rhi::DescriptorType::UniformBuffer; writes[2].bufferInfo = &cbInfo;
+    device_->UpdateDescriptorSets(3, writes);
+
+    rhi::CommandBufferHandle cbh = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+    if (cbh == rhi::handles::INVALID_COMMAND_BUFFER) { device_->DestroyBuffer(scaleCB); return false; }
+    rhi::RHICommandBuffer* cmd = rhi::GetCommandBuffer(cbh);
+    bool ok = false;
+    if (cmd && cmd->Initialize() && cmd->Begin()) {
+        cmd->BeginRenderPass(pass);
+        cmd->SetViewport({ {0,0}, {1024.f, 1024.f}, 0.f, 1.f });
+        cmd->SetScissor({ {0,0}, {1024, 1024} });
+        cmd->BindGraphicsPipeline(editor_copy_pipeline_);
+        rhi::DescriptorSetHandle dsHandles[] = { ds };
+        cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, editor_copy_layout_, 0, 1, dsHandles, 0, nullptr);
+        cmd->Draw(3, 0, 1, 0); // vertexCount=3, startVertex=0, instanceCount=1, startInstance=0
+        cmd->EndRenderPass();
+        cmd->End();
+        rhi::QueueSubmitInfo submit{};
+        submit.cmdBuffer = cbh;
+        device_->Submit(submit);
+        ok = true;
+    }
+    device_->DestroyCommandBuffer(cbh);
+    device_->DestroyBuffer(scaleCB);
+    device_->DestroyDescriptorSet(ds);
+    return ok;
+}
+
+u32 GPUDrivenDrawPipeline::RegisterEditorMaterial(rhi::ResourceHandle albedo_tex,
+                                                  rhi::ResourceHandle normal_tex,
+                                                  rhi::ResourceHandle orm_tex) {
+    if (!device_) return 0;
+
+    constexpr u32 kCanvas = 1024;
+    constexpr u32 kLayers = 16;
+    if (editor_array_layers_ == 0) {
+        rhi::TextureDesc arr{};
+        arr.size = { kCanvas, kCanvas, 1 };
+        arr.arraySize = kLayers;
+        arr.mipLevels = 1;
+        arr.format = rhi::DataFormat::RGBA8_UNorm;
+        arr.type = rhi::TextureType::Texture2DArray;
+        arr.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest
+                  | rhi::TextureUsage::RenderTarget;
+        arr.memoryUsage = rhi::GPUMemoryUsage::Static;
+        editor_albedo_array_ = device_->CreateTexture(arr);
+        editor_normal_array_ = device_->CreateTexture(arr);
+        editor_orm_array_ = device_->CreateTexture(arr);
+        if (editor_albedo_array_ == rhi::handles::INVALID_RESOURCE) return 0;
+        editor_array_layers_ = kLayers;
+        // 释放 1×1 占位数组（成员已被编辑器数组接管）
+        if (albedo_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(albedo_texture_array_);
+        if (normal_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(normal_texture_array_);
+        if (orm_texture_array_ != rhi::handles::INVALID_RESOURCE) device_->DestroyTexture(orm_texture_array_);
+        albedo_texture_array_ = rhi::handles::INVALID_RESOURCE;
+        normal_texture_array_ = rhi::handles::INVALID_RESOURCE;
+        orm_texture_array_ = rhi::handles::INVALID_RESOURCE;
+        // 采样端数组句柄切到编辑器数组（Stage3 描述符每帧重写，下一帧生效）
+        albedo_texture_array_ = editor_albedo_array_;
+        normal_texture_array_ = editor_normal_array_;
+        orm_texture_array_ = editor_orm_array_;
+    }
+
+    const u32 layer = editor_material_count_;
+    if (layer >= editor_array_layers_) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[GPUDrivenDrawPipeline] editor material slots exhausted (" << layer << ")" << std::endl;
+        return 0;
+    }
+
+    if (!EnsureEditorCopyPipeline()) return 0;
+
+    // 层视图 + 渲染通道（每次注册各建一份，层数 ≤16）
+    rhi::TextureViewDesc viewDesc{};
+    viewDesc.texture = editor_albedo_array_;
+    viewDesc.viewType = rhi::TextureType::Texture2D;
+    viewDesc.format = rhi::DataFormat::RGBA8_UNorm;
+    viewDesc.mostDetailedMip = 0;
+    viewDesc.mipCount = 1;
+    viewDesc.firstArraySlice = layer;
+    viewDesc.arraySize = 1;
+    rhi::ResourceHandle albedoLayerView = device_->CreateTextureView(viewDesc);
+    if (albedoLayerView == rhi::handles::INVALID_RESOURCE) return 0;
+
+    rhi::RenderPassDesc passDesc{};
+    rhi::RenderPassDesc::Attachment colorAtt{};
+    colorAtt.texture = albedoLayerView;
+    colorAtt.format = rhi::DataFormat::RGBA8_UNorm;
+    colorAtt.loadOp = rhi::LoadAction::Clear;
+    colorAtt.storeOp = rhi::StoreAction::Store;
+    colorAtt.clearValue.color = math::v4{0.0f, 0.0f, 0.0f, 1.0f};
+    passDesc.colorAttachments.push_back(colorAtt);
+    passDesc.viewport.size.x = kCanvas;
+    passDesc.viewport.size.y = kCanvas;
+    passDesc.scissor.extent.x = kCanvas;
+    passDesc.scissor.extent.y = kCanvas;
+    rhi::RenderPassHandle copyPass = device_->CreateRenderPass(passDesc);
+    editor_copy_passes_.push_back(copyPass);
+    if (copyPass == rhi::handles::INVALID_RENDER_PASS) return 0;
+
+    // uv_scale = 源尺寸 / 画布尺寸（≤1；源小于画布时只占用左上区域，
+    // 实体 uv 0..1 映射到该区域）
+    u32 sw = 0, sh = 0;
+    device_->GetTextureSize(albedo_tex, sw, sh);
+    if (sw == 0 || sh == 0) { sw = kCanvas; sh = kCanvas; }
+    const float sx = std::min(1.0f, float(sw) / kCanvas);
+    const float sy = std::min(1.0f, float(sh) / kCanvas);
+
+    // 源纹理始终拉伸铺满整层（uv_scale=1）：层 = 该实体自己的纹理。
+    // 之前用 src/canvas 缩放会让小纹理（如 1×1 白色回退）只占一层的一角，
+    // 其余为 clear 黑色 → 对应实体在 albedo 里变黑。
+    if (!EditorBlitToLayer(albedo_tex, copyPass, 1.0f, 1.0f)) return 0;
+
+    // [PassDebugView 排查] 回读 albedo 层 4×4 像素验证拷贝落地；写 /tmp 文件
+    //（open 启动的 .app stderr 不落盘，CLI 日志环被刷屏）。
+    {
+        rhi::BufferDesc rbDesc{};
+        rbDesc.size = 4 * 4 * 4;
+        rbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::TransferDst);
+        rbDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+        auto rb = device_->CreateBuffer(rbDesc);
+        if (rb != rhi::handles::INVALID_RESOURCE) {
+            rhi::BufferTextureCopyRegion rbRegion{};
+            rbRegion.imageSubresource = { 0, layer, 1 };
+            rbRegion.imageOffset = { 508, 508, 0 };  // 纹理中心区（Lion 中心非黑，可判别拷贝成败）
+            rbRegion.imageExtent = { 4, 4, 1 };
+            rhi::CommandBufferHandle cbh2 = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+            if (cbh2 != rhi::handles::INVALID_COMMAND_BUFFER) {
+                rhi::RHICommandBuffer* cmd2 = rhi::GetCommandBuffer(cbh2);
+                if (cmd2 && cmd2->Initialize() && cmd2->Begin()) {
+                    cmd2->CopyTextureToBuffer(editor_albedo_array_, rb, &rbRegion, 1);
+                    cmd2->End();
+                    rhi::QueueSubmitInfo sub2{};
+                    sub2.cmdBuffer = cbh2;
+                    device_->Submit(sub2);
+                }
+                device_->DestroyCommandBuffer(cbh2);
+            }
+            device_->WaitIdle();
+            if (const u8* px = static_cast<const u8*>(device_->MapBuffer(rb))) {
+                if (FILE* f = std::fopen("/tmp/primal_mat_diag.txt", "a")) {
+                    std::fprintf(f, "[EditorMatDiag] layer=%u src=%ux%u px(0,0)=(%u,%u,%u,%u) px(1,1)=(%u,%u,%u,%u)\n",
+                                 layer, sw, sh,
+                                 (unsigned)px[0], (unsigned)px[1], (unsigned)px[2], (unsigned)px[3],
+                                 (unsigned)px[4], (unsigned)px[5], (unsigned)px[6], (unsigned)px[7]);
+                    std::fclose(f);
+                }
+                device_->UnmapBuffer(rb);
+            }
+            device_->DestroyBuffer(rb);
+        }
+    }
+
+    // 追加 MaterialData 记录（12 words，见 GPUDrivenDraw.metal）。
+    // normal/orm 未提供时 idx=0xFFFFFFFF → PS 回退顶点法线/标量。
+    u32 oneBits = 0;
+    { const f32 one = 1.0f; std::memcpy(&oneBits, &one, sizeof(oneBits)); }
+    const u32 nIdx = (normal_tex != rhi::handles::INVALID_RESOURCE) ? layer : 0xFFFFFFFFu;
+    const u32 oIdx = (orm_tex != rhi::handles::INVALID_RESOURCE) ? layer : 0xFFFFFFFFu;
+    const u32 words[12] = {
+        layer, nIdx, oIdx,
+        oneBits, oneBits, oneBits,          // albedo_tint = (1,1,1)
+        0u, oneBits, oneBits,               // metallic=0, roughness=1, normal_scale=1
+        oneBits, oneBits, 0u,               // uv_scale=(1,1), flags=0
+    };
+    for (u32 w : words) editor_material_words_.push_back(w);
+    ++editor_material_count_;
+
+    // 重建材质数据缓冲（含记录 0 默认白模 + 全部已注册记录）
+    if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(global_material_data_buffer_);
+        global_material_data_buffer_ = rhi::handles::INVALID_RESOURCE;
+    }
+    rhi::BufferDesc matDesc{};
+    matDesc.size = (u64)editor_material_words_.size() * sizeof(u32);
+    matDesc.type = rhi::BufferType::Structured;
+    matDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    // Metal 上 Static→Private 不可 MapBuffer 写入（同上）
+    matDesc.memoryUsage = device_->GetPlatform() == rhi::RHIPlatform::Metal
+                              ? rhi::GPUMemoryUsage::Unknown
+                              : rhi::GPUMemoryUsage::Dynamic;
+    matDesc.name = "GPUDrivenDrawPipeline_editor_material_data";
+    global_material_data_buffer_ = device_->CreateBuffer(matDesc);
+    if (global_material_data_buffer_ == rhi::handles::INVALID_RESOURCE) return 0;
+    owns_material_data_buffer_ = true;
+    if (auto* mapped = device_->MapBuffer(global_material_data_buffer_)) {
+        std::memcpy(mapped, editor_material_words_.data(), editor_material_words_.size() * sizeof(u32));
+        device_->UnmapBuffer(global_material_data_buffer_);
+    }
+
+    return layer;
 }
 
 bool GPUDrivenDrawPipeline::CreateRenderPasses() {
@@ -642,6 +986,8 @@ bool GPUDrivenDrawPipeline::CreateRenderPasses() {
 }
 
 bool GPUDrivenDrawPipeline::CreatePipelines() {
+    PRIMAL_LOG_STREAM(Info, "Render") << "[GPUDrivenDrawPipeline] CreatePipelines enter (platform="
+              << (device_ ? static_cast<int>(device_->GetPlatform()) : -1) << ")" << std::endl;
     // std::cout << "[GPUDrivenDrawPipeline] Creating pipelines..." << std::endl;
 
     // TEMPORARILY DISABLE minimal test pipeline to test fixed complex pipeline
@@ -814,7 +1160,12 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             // descriptor sets from it after pipeline creation. Was destroyed
             // immediately before, which made it impossible to write Stage2 descriptors.
             const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
-            if (isVulkan) {
+            // [PassDebugView 排查] 原本整块 `if (isVulkan)`：Metal 上不建 DSL →
+            // per-frame visibility_cb/descriptor 恒 INVALID → Stage2 在
+            // visibility_cb 检查处静默 return → visibility buffer 永不写入，
+            // visibility/meshlet/cluster/mesh 四视图全空。Metal 的
+            // DSL/PipelineLayout/DescriptorSet 三件套实现齐全，全平台创建。
+            {
                 rhi::DescriptorSetLayoutBinding visBindings[8]{};
                 visBindings[0].binding = 0;  // UBO  DrawConstants
                 visBindings[0].descriptorType = rhi::DescriptorType::UniformBuffer;
@@ -856,7 +1207,7 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             }
 
             rhi::PipelineLayoutDesc visibilityLayoutDesc{};
-            if (isVulkan && visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            if (visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
                 visibilityLayoutDesc.setLayoutCount = 1;
                 visibilityLayoutDesc.setLayouts = &visibility_descriptor_set_layout_;
             }
@@ -879,6 +1230,9 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
                 visibilityPipelineDesc.enableDepthTest = true;
                 visibilityPipelineDesc.enableDepthWrite = true;
                 visibilityPipelineDesc.depthFunc = rhi::ComparisonFunc::Less;
+                // [PassDebugView 排查] 默认 Back 剔除会随相机绕向丢一半三角形
+                //（ID 视图"缺 triangle/随角度变"的直接原因）→ None。
+                visibilityPipelineDesc.cullMode = rhi::CullMode::None;
 
                 // No blending for visibility buffer
                 visibilityPipelineDesc.enableBlend = false;
@@ -893,7 +1247,9 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
                     // Single-set version caused VUID-vkUpdateDescriptorSets-None-03047
                     // when the next frame's Stage2 updated the same set the prior frame's
                     // cmd buffer was still referencing.
-                    if (isVulkan && visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+                    // [PassDebugView 排查] 移除 isVulkan 门：Metal 上 cb/descriptor
+                    // 恒 INVALID → Stage2 静默跳过（见上方 DSL 注记）。
+                    if (visibility_descriptor_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
                         rhi::BufferDesc visCbDesc{};
                         visCbDesc.size = 256;  // DrawConstants is 208B (3 m4x4 + 4 u32); 256B padded
                         visCbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Uniform | rhi::BufferUsageFlags::TransferDst);
@@ -1292,10 +1648,67 @@ bool GPUDrivenDrawPipeline::CreateDescriptorSets() {
     return true;
 }
 
+void GPUDrivenDrawPipeline::DestroyGlobalGeometryBuffers() {
+    // [PassDebugView 排查] 几何集签名重建用：销毁一次构建的全局几何缓冲。
+    // 材质数据缓冲（owns_material_data_buffer_）不在此列——记录索引随
+    // 注册递增，与几何集无关。
+    if (global_meshlet_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_meshlet_buffer_);
+    if (global_meshlet_vertices_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_meshlet_vertices_buffer_);
+    if (global_meshlet_triangles_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_meshlet_triangles_buffer_);
+    if (global_vertex_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_vertex_buffer_);
+    if (global_element_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_element_buffer_);
+    if (global_instance_data_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(global_instance_data_buffer_);
+    if (cluster_map_buffer_ != rhi::handles::INVALID_RESOURCE) device_->DestroyBuffer(cluster_map_buffer_);
+    global_meshlet_buffer_ = rhi::handles::INVALID_RESOURCE;
+    global_meshlet_vertices_buffer_ = rhi::handles::INVALID_RESOURCE;
+    global_meshlet_triangles_buffer_ = rhi::handles::INVALID_RESOURCE;
+    global_vertex_buffer_ = rhi::handles::INVALID_RESOURCE;
+    global_element_buffer_ = rhi::handles::INVALID_RESOURCE;
+    global_instance_data_buffer_ = rhi::handles::INVALID_RESOURCE;
+    cluster_map_buffer_ = rhi::handles::INVALID_RESOURCE;
+    total_meshlet_count_ = 0;
+    cluster_map_entry_count_ = 0;
+    results_ = {};
+}
+
 void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_snapshot) {
+    // [PassDebugView 排查] 快照实例数变化时打一条——观察编辑器 RG 路径下
+    // 场景几何是否到达 Nanite。
+    {
+        static u32 s_lastInst = 0xFFFFFFFF;
+        const u32 instCount = scene_snapshot.GetInstanceCount();
+        if (instCount != s_lastInst) {
+            s_lastInst = instCount;
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[NaniteGeo] snapshot instances=" << instCount
+                << " builtMeshlets=" << total_meshlet_count_ << std::endl;
+        }
+    }
     if (total_meshlet_count_ > 0) {
-        // Already built global buffers
-        return;
+        // [PassDebugView 排查] 原实现恒早退：编辑器运行中注册的实体（用户
+        // 启动后拖入/后注册的 sphere 等）没有全局 meshlet/cluster map/
+        // instance 数据 → 所有 Nanite 视图缺 mesh。改为几何集签名变化
+        // 即全量重建（编辑器增删频率低，重建成本可接受）。
+        const auto& inst0 = scene_snapshot.GetInstanceData();
+        u64 sig = 1469598103934665603ull;
+        for (const auto& inst : inst0) {
+            sig = (sig ^ (u64(inst.geometry_id) * 0x9E3779B97F4A7C15ull + u64(inst.cluster_count))) * 1099511628211ull;
+        }
+        if (sig == geometry_signature_ || inst0.empty()) {
+            return;
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[NaniteGeo] geometry set changed — rebuilding global buffers (instances="
+            << inst0.size() << ")" << std::endl;
+        DestroyGlobalGeometryBuffers();
+        geometry_signature_ = sig;
+    } else {
+        const auto& inst0 = scene_snapshot.GetInstanceData();
+        u64 sig = 1469598103934665603ull;
+        for (const auto& inst : inst0) {
+            sig = (sig ^ (u64(inst.geometry_id) * 0x9E3779B97F4A7C15ull + u64(inst.cluster_count))) * 1099511628211ull;
+        }
+        geometry_signature_ = sig;
     }
 
     const auto& instanceData = scene_snapshot.GetInstanceData();
@@ -1323,7 +1736,13 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
         if (processedGeometries.count(instance.geometry_id)) continue;
 
         graphics::rhi::RHIMeshAsset meshAsset;
-        if (primal::content::get_rhi_mesh_asset(instance.geometry_id, meshAsset)) {
+        // [PassDebugView 排查] 必须与下方填充循环一致地走 get_rhi_mesh_id
+        // 两步解析：geometry_content_id 是 hierarchy ID 空间，直接当 rhi
+        // asset ID 查会拿到别的网格 → 尺寸按错资产算、数据按对资产填，
+        // 错位产生退化几何（内置 Plane 只剩一条细线）。hierarchy ID 与
+        // rhi asset ID 只在注册时序恰好重合时才相等（corridor 侥幸命中）。
+        if (primal::content::get_rhi_mesh_asset(
+                primal::content::get_rhi_mesh_id(instance.geometry_id), meshAsset)) {
             const bool needsSynthesis = meshAsset.meshlets.empty();
             if (needsSynthesis) {
                 SynthesizedMeshlets& synth = synthesized[instance.geometry_id];
@@ -1730,7 +2149,11 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
             map.instanceIndex = i; // Index into Instance Data Buffer (transforms)
             // 🔥 NEW: Use instance material_id for now
             // TODO: This needs to be per-cluster material_id from meshlet/submesh mapping
-            map.materialID = instance.material_id;
+            // [PassDebugView 排查] meshInfo->gpuMaterialId 目前无写入点，恒为
+            // invalid(0xFFFFFFFF)→ PS 以 0xFFFFFFFC*12 越界索引材质 buffer
+            // 读零 → tint 黑 → albedo 全黑。无效时钳到 0 = 默认白模记录
+            //（CreateResources 里填充的 untextured default material）。
+            map.materialID = (instance.material_id == id::invalid_id) ? 0u : instance.material_id;
             map.padding = 0;
             clusterMapData.push_back(map);
 
@@ -1751,6 +2174,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     mapDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     
     cluster_map_buffer_ = device_->CreateBuffer(mapDesc);
+    cluster_map_entry_count_ = static_cast<u32>(clusterMapData.size());
     UploadBuffer(cluster_map_buffer_, clusterMapData.data(), clusterMapData.size() * sizeof(ClusterMap));
 
     // 5. Build Global Instance Data Buffer (Full InstanceData for material access)
@@ -1775,6 +2199,40 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
 //              << " instances (full InstanceData with material_id)" << std::endl;
 
     total_meshlet_count_ = totalMeshlets;
+
+    // [PassDebugView 排查] 一次性回读材质数据缓冲头 48B，验证记录 0（白模默认）落地。
+    if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+        rhi::BufferDesc rbDesc2{};
+        rbDesc2.size = 48;
+        rbDesc2.bindFlags = (u32)(rhi::BufferUsageFlags::TransferDst);
+        rbDesc2.memoryUsage = rhi::GPUMemoryUsage::Readback;
+        auto rb2 = device_->CreateBuffer(rbDesc2);
+        if (rb2 != rhi::handles::INVALID_RESOURCE) {
+            rhi::CommandBufferHandle cbh3 = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+            if (cbh3 != rhi::handles::INVALID_COMMAND_BUFFER) {
+                rhi::RHICommandBuffer* cmd3 = rhi::GetCommandBuffer(cbh3);
+                if (cmd3 && cmd3->Initialize() && cmd3->Begin()) {
+                    cmd3->CopyBuffer(global_material_data_buffer_, rb2, 0, 0, 48);
+                    cmd3->End();
+                    rhi::QueueSubmitInfo sub3{};
+                    sub3.cmdBuffer = cbh3;
+                    device_->Submit(sub3);
+                }
+                device_->DestroyCommandBuffer(cbh3);
+            }
+            device_->WaitIdle();
+            if (const u32* w = static_cast<const u32*>(device_->MapBuffer(rb2))) {
+                if (FILE* f = std::fopen("/tmp/primal_mat_words.txt", "a")) {
+                    std::fprintf(f, "[MatWords]");
+                    for (int i = 0; i < 12; ++i) std::fprintf(f, " %08x", w[i]);
+                    std::fprintf(f, "\n");
+                    std::fclose(f);
+                }
+                device_->UnmapBuffer(rb2);
+            }
+            device_->DestroyBuffer(rb2);
+        }
+    }
     total_meshlet_vertex_count_ = totalVertices;
     total_meshlet_triangle_count_ = totalTriangles;
     total_vertex_count_ = totalPositions;
@@ -2050,6 +2508,16 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
     // transition must happen here in the producer.
     if (scene_snapshot.GetInstanceCount() == 0 ||
         scene_snapshot.GetClusterRefCount() == 0) {
+        // [PassDebugView 排查] 空场景命中时打一条（限频）。
+        {
+            static u32 s_emptyLogged = 0;
+            if (s_emptyLogged++ % 300 == 0) {
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[NaniteGeo] empty-scene branch: instances="
+                    << scene_snapshot.GetInstanceCount()
+                    << " clusterRefs=" << scene_snapshot.GetClusterRefCount() << std::endl;
+            }
+        }
         if (final_render_pass_ != rhi::handles::INVALID_RENDER_PASS) {
             cmd_buffer->BeginRenderPass(final_render_pass_);
             cmd_buffer->EndRenderPass();
@@ -2106,12 +2574,60 @@ bool GPUDrivenDrawPipeline::Execute(rhi::RHICommandBuffer* cmd_buffer,
             PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] GPU Draw Calls failed" << std::endl;
             return false;
         }
+        // [PassDebugView 排查] 绘制统计变化时打一条（draws=0 → 没有可见几何）。
+        {
+            static u32 s_lastDraws = 0xFFFFFFFF;
+            const u32 draws = results_.total_draw_calls;
+            const u32 clusters = results_.total_clusters_rendered;
+            if (draws != s_lastDraws) {
+                s_lastDraws = draws;
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[NaniteDraw] draw_calls=" << draws
+                    << " clusters_rendered=" << clusters
+                    << " total_meshlets=" << total_meshlet_count_ << std::endl;
+            }
+        }
     }
 
     // T4.6.5 part 23: auto-resolve. Execute() now leaves resolve_output_texture_
     // populated; callers no longer need a separate ResolveVisibilityBuffer() call.
     // Self-gates on INVALID handles, so this is safe even when Stage2 was skipped.
     ResolveVisibilityBuffer(cmd_buffer);
+
+    // [PassDebugView 排查] PRIMAL_NANITE_DIAG=1：读回 indirect args（GPU 写入的
+    // 绘制参数）一次。instanceCount=0 = culling dispatch 输出空；>0 = draw 有
+    // 实例但 raster 无像素。indirect buffer 为 Dynamic（shared），GPU 写后 CPU
+    // 直读（此前已有 fence 的路径可安全读）。
+    if (const char* e = std::getenv("PRIMAL_NANITE_DIAG"); e && e[0] == '1') {
+        static bool s_diagDone = false;
+        if (!s_diagDone && frame_index > 4 && culling_pipeline_) {
+            s_diagDone = true;
+            auto indirectHandle = culling_pipeline_->GetIndirectBuffer(buffer_index);
+            auto counterHandle = culling_pipeline_->GetVisibleCounterBuffer(buffer_index);
+            if (indirectHandle != rhi::handles::INVALID_RESOURCE) {
+                if (void* m = device_->MapBuffer(indirectHandle)) {
+                    const u32* args = static_cast<const u32*>(m);
+                    u32 visibleFromCounter = 0xFFFFFFFF;
+                    if (counterHandle != rhi::handles::INVALID_RESOURCE) {
+                        if (void* cm = device_->MapBuffer(counterHandle)) {
+                            visibleFromCounter = *static_cast<const u32*>(cm);
+                            device_->UnmapBuffer(counterHandle);
+                        }
+                    }
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[NaniteDiag] indirect args: vertexCount=" << args[0]
+                        << " instanceCount=" << args[1]
+                        << " firstVertex=" << args[2]
+                        << " firstInstance=" << args[3]
+                        << " | visibleCounter=" << visibleFromCounter << std::endl;
+                    device_->UnmapBuffer(indirectHandle);
+                } else {
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[NaniteDiag] indirect args MapBuffer failed" << std::endl;
+                }
+            }
+        }
+    }
 
     if (frame_index == 0) {
 //        std::cout << "[GPUDrivenDrawPipeline] Pipeline execution complete" << std::endl;
@@ -2199,9 +2715,25 @@ bool GPUDrivenDrawPipeline::Stage2_VisibilityBuffer(rhi::RHICommandBuffer* cmd_b
     // render pass, per-frame CB, and descriptor set are all initialized.
     // On Dawn the R32_UInt storage format isn't always supported, so
     // visibility_buffer_ may be INVALID — skip silently in that case.
-    if (visibility_pipeline_ == rhi::handles::INVALID_PIPELINE) return true;
-    if (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS) return true;
-    if (visibility_buffer_ == rhi::handles::INVALID_RESOURCE) return true;
+    // [PassDebugView 排查] 三个 INVALID 任一成立会静默跳过整个 visibility
+    // raster——一次性日志定位编辑器路径的断链点。
+    if (visibility_pipeline_ == rhi::handles::INVALID_PIPELINE ||
+        visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS ||
+        visibility_buffer_ == rhi::handles::INVALID_RESOURCE) {
+        static bool s_stage2SkipLogged = false;
+        if (!s_stage2SkipLogged) {
+            s_stage2SkipLogged = true;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[Stage2] SKIP: visibility_pipeline_="
+                << (visibility_pipeline_ == rhi::handles::INVALID_PIPELINE ? "INVALID" : "ok")
+                << " render_pass="
+                << (visibility_render_pass_ == rhi::handles::INVALID_RENDER_PASS ? "INVALID" : "ok")
+                << " buffer="
+                << (visibility_buffer_ == rhi::handles::INVALID_RESOURCE ? "INVALID" : "ok")
+                << std::endl;
+        }
+        return true;
+    }
 
     // T4.6.5 part 30 X10: per-frame CB + descriptor set (triple-buffered).
     u32 visResourceIndex = buffer_index;
@@ -3045,7 +3577,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     for (u32 f = 0; f < 3; ++f) {
         auto& frame = shadow_frames_[f];
 
-        for (u32 cascade = 0; cascade < 2; ++cascade) {
+        for (u32 cascade = 0; cascade < GPUDrivenDrawPipeline::ShadowFrameResources::kShadowCascades; ++cascade) {
             // Shadow depth render target (D32_Float, 2048x2048)
             {
                 rhi::TextureDesc desc{};
@@ -3053,7 +3585,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.format = rhi::DataFormat::D32_Float;
                 desc.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
                 desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-                auto& rt = (cascade == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
+                auto& rt = frame.shadow_depth_rt[cascade];
                 rt = device_->CreateTexture(desc);
                 if (rt == rhi::handles::INVALID_RESOURCE) return false;
             }
@@ -3067,7 +3599,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource |
                               rhi::TextureUsage::UnorderedAccess;
                 desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-                auto& mom = (cascade == 0) ? frame.shadow_moments_0 : frame.shadow_moments_1;
+                auto& mom = frame.shadow_moments[cascade];
                 mom = device_->CreateTexture(desc);
                 PRIMAL_LOG_STREAM(Error, "Render") << "[SHADOW_TEX] cascade=" << cascade
                           << " handle=" << mom << " usage=" << (int)desc.usage << std::endl;
@@ -3081,7 +3613,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.format = rhi::DataFormat::R32_Float;
                 desc.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
                 desc.memoryUsage = rhi::GPUMemoryUsage::Static;
-                auto& sm = (cascade == 0) ? frame.shadow_map_0 : frame.shadow_map_1;
+                auto& sm = frame.shadow_map[cascade];
                 sm = device_->CreateTexture(desc);
                 if (sm == rhi::handles::INVALID_RESOURCE) return false;
             }
@@ -3191,16 +3723,14 @@ void GPUDrivenDrawPipeline::ShutdownShadowResources() {
     for (u32 f = 0; f < 3; ++f) {
         auto& frame = shadow_frames_[f];
 
-        // Cascade 0 resources
-        if (frame.shadow_depth_rt_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_depth_rt_0); frame.shadow_depth_rt_0 = rhi::handles::INVALID_RESOURCE; }
-        if (frame.shadow_map_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_map_0); frame.shadow_map_0 = rhi::handles::INVALID_RESOURCE; }
-        if (frame.shadow_moments_0 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_moments_0); frame.shadow_moments_0 = rhi::handles::INVALID_RESOURCE; }
-        // Cascade 1 resources
-        if (frame.shadow_depth_rt_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_depth_rt_1); frame.shadow_depth_rt_1 = rhi::handles::INVALID_RESOURCE; }
-        if (frame.shadow_map_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_map_1); frame.shadow_map_1 = rhi::handles::INVALID_RESOURCE; }
-        if (frame.shadow_moments_1 != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_moments_1); frame.shadow_moments_1 = rhi::handles::INVALID_RESOURCE; }
+        // P4.2: 按级联循环销毁（原具名 _0/_1 分段销毁）
+        for (u32 cascade = 0; cascade < ShadowFrameResources::kShadowCascades; ++cascade) {
+            if (frame.shadow_depth_rt[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_depth_rt[cascade]); frame.shadow_depth_rt[cascade] = rhi::handles::INVALID_RESOURCE; }
+            if (frame.shadow_map[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_map[cascade]); frame.shadow_map[cascade] = rhi::handles::INVALID_RESOURCE; }
+            if (frame.shadow_moments[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyTexture(frame.shadow_moments[cascade]); frame.shadow_moments[cascade] = rhi::handles::INVALID_RESOURCE; }
+        }
 
-        for (u32 cascade = 0; cascade < 2; ++cascade) {
+        for (u32 cascade = 0; cascade < ShadowFrameResources::kShadowCascades; ++cascade) {
             if (frame.visible_counter_buffer[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyBuffer(frame.visible_counter_buffer[cascade]); frame.visible_counter_buffer[cascade] = rhi::handles::INVALID_RESOURCE; }
             if (frame.visible_clusters_buffer[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyBuffer(frame.visible_clusters_buffer[cascade]); frame.visible_clusters_buffer[cascade] = rhi::handles::INVALID_RESOURCE; }
             if (frame.indirect_draw_buffer[cascade] != rhi::handles::INVALID_RESOURCE) { device_->DestroyBuffer(frame.indirect_draw_buffer[cascade]); frame.indirect_draw_buffer[cascade] = rhi::handles::INVALID_RESOURCE; }
@@ -3304,7 +3834,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
                                                    u32 cascade_index,
                                                    u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
-    if (cascade_index > 1) return false;
+    if (cascade_index >= ShadowFrameResources::kShadowCascades) return false;
 
     // T4.6.5 part 24.1 (B4 fix): mirror Execute's empty-scene guard. Without
     // this, ExecuteShadowRaster's "geometry buffers not ready" path fires per
@@ -3519,7 +4049,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
                                                   u32 cascade_index,
                                                   u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
-    if (cascade_index > 1) return false;
+    if (cascade_index >= ShadowFrameResources::kShadowCascades) return false;
 
     // TEMP DIAGNOSTIC
     static u32 rasterDiag = 0;
@@ -3533,7 +4063,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
     u32 bi = buffer_index % 3;
     auto& frame = shadow_frames_[bi];
     auto& ds = frame.shadow_depth_descriptor_set[cascade_index];
-    auto& depthRT = (cascade_index == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
+    auto& depthRT = frame.shadow_depth_rt[cascade_index];
 
     // Validate critical geometry buffers before proceeding.
     // T4.6.5 part 24.1 (B4 fix): post-empty-scene-guard, INVALID buffers here
@@ -3621,14 +4151,14 @@ bool GPUDrivenDrawPipeline::ExecuteShadowMomentsRaster(rhi::RHICommandBuffer* cm
                                                         u32 cascade_index,
                                                         u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
-    if (cascade_index > 1) return false;
+    if (cascade_index >= ShadowFrameResources::kShadowCascades) return false;
     if (shadow_moments_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
 
     u32 bi = buffer_index % 3;
     auto& frame = shadow_frames_[bi];
     auto& ds = frame.shadow_depth_descriptor_set[cascade_index];
-    auto& depthRT = (cascade_index == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
-    auto& momentsRT = (cascade_index == 0) ? frame.shadow_moments_0 : frame.shadow_moments_1;
+    auto& depthRT = frame.shadow_depth_rt[cascade_index];
+    auto& momentsRT = frame.shadow_moments[cascade_index];
 
     // Same geometry-readiness guard as ExecuteShadowRaster (B4 fix).
     if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
@@ -3716,7 +4246,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
                                                      u32 cascade_index,
                                                      u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
-    if (cascade_index > 1) return false;
+    if (cascade_index >= ShadowFrameResources::kShadowCascades) return false;
 
     // T4.6.5 part 24.9 (B7 fix): mirror ExecuteShadowRaster's empty-scene
     // guard. In empty scene, ExecuteShadowRaster early-returns leaving
@@ -3733,8 +4263,8 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     u32 bi = buffer_index % 3;
     auto& frame = shadow_frames_[bi];
     auto& ds = frame.shadow_blit_descriptor_set[cascade_index];
-    auto& depthRT = (cascade_index == 0) ? frame.shadow_depth_rt_0 : frame.shadow_depth_rt_1;
-    auto& shadowMap = (cascade_index == 0) ? frame.shadow_map_0 : frame.shadow_map_1;
+    auto& depthRT = frame.shadow_depth_rt[cascade_index];
+    auto& shadowMap = frame.shadow_map[cascade_index];
 
     // Upload resolution
     struct { u32 x, y; } resolution = {2048, 2048};
@@ -4143,9 +4673,117 @@ struct CardCaptureParamsCB {
     math::v4   misc;   // x=depth_near, y=depth_far
 };
 
-bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
-    if (card_capture_initialized_) return true;
+bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters,
+                                                           bool writer_audit,
+                                                           bool geometry_audit) {
     if (!device_) return false;
+
+    // The writer variant is deliberately a separate Vulkan pipeline.  It
+    // shares the production 12-binding set and scratch buffers, but never
+    // changes the default three-RT pipeline or its layout.
+    auto ensureWriterPipeline = [&]() -> bool {
+        if (card_capture_writer_initialized_) return true;
+        if (device_->GetPlatform() != rhi::RHIPlatform::Vulkan) return false;
+        if (card_capture_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+
+        auto vsCode = LoadShaderBytecode("CardCapture_writer.vert", "main", device_);
+        auto fsCode = LoadShaderBytecode("CardCapture_writer.frag", "main", device_);
+        if (vsCode.empty() || fsCode.empty()) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[CardCapture] SC_CAPTURE_SOURCE_AUDIT requested but writer shader variant is missing"
+                << std::endl;
+            return false;
+        }
+        const auto vs = device_->CreateShader(vsCode.data(), vsCode.size(),
+                                               rhi::ShaderStage::Vertex, "main");
+        const auto fs = device_->CreateShader(fsCode.data(), fsCode.size(),
+                                               rhi::ShaderStage::Pixel, "main");
+        if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[CardCapture] failed to create writer shader variant" << std::endl;
+            return false;
+        }
+
+        rhi::GraphicsPipelineDesc writerDesc{};
+        writerDesc.layout = card_capture_layout_;
+        writerDesc.vertexShader = vs;
+        writerDesc.pixelShader = fs;
+        writerDesc.renderTargetCount = 4;
+        writerDesc.renderTargetFormats[0] = rhi::DataFormat::RGBA8_UNorm;
+        writerDesc.renderTargetFormats[1] = rhi::DataFormat::RG16_Float;
+        writerDesc.renderTargetFormats[2] = rhi::DataFormat::R32_Float;
+        writerDesc.renderTargetFormats[3] = rhi::DataFormat::RGBA32_UInt;
+        writerDesc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        writerDesc.enableDepthTest = true;
+        writerDesc.enableDepthWrite = true;
+        writerDesc.depthFunc = rhi::ComparisonFunc::Less;
+        writerDesc.cullMode = rhi::CullMode::None;
+        card_capture_writer_pipeline_ = device_->CreateGraphicsPipeline(writerDesc);
+        if (card_capture_writer_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[CardCapture] failed to create writer graphics pipeline" << std::endl;
+            return false;
+        }
+        card_capture_writer_initialized_ = true;
+        return true;
+    };
+
+    auto ensureGeometryPipeline = [&]() -> bool {
+        if (card_capture_geometry_initialized_) return true;
+        if (device_->GetPlatform() != rhi::RHIPlatform::Vulkan) return false;
+        const auto& caps = device_->GetDeviceInfo();
+        if (caps.maxRenderTargets < 8u ||
+            caps.maxTexture2DSize == 0u) return false;
+        if (card_capture_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+
+        auto vsCode = LoadShaderBytecode("CardCapture_geometry.vert", "main", device_);
+        auto fsCode = LoadShaderBytecode("CardCapture_geometry.frag", "main", device_);
+        if (vsCode.empty() || fsCode.empty()) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[CardCapture] SC_CAPTURE_GEOMETRY_AUDIT requested but geometry shader variant is missing"
+                << std::endl;
+            return false;
+        }
+        const auto vs = device_->CreateShader(vsCode.data(), vsCode.size(),
+                                               rhi::ShaderStage::Vertex, "main");
+        const auto fs = device_->CreateShader(fsCode.data(), fsCode.size(),
+                                               rhi::ShaderStage::Pixel, "main");
+        if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[CardCapture] failed to create geometry witness shader variant" << std::endl;
+            return false;
+        }
+
+        rhi::GraphicsPipelineDesc geometryDesc{};
+        geometryDesc.layout = card_capture_layout_;
+        geometryDesc.vertexShader = vs;
+        geometryDesc.pixelShader = fs;
+        geometryDesc.renderTargetCount = 8;
+        geometryDesc.renderTargetFormats[0] = rhi::DataFormat::RGBA8_UNorm;
+        geometryDesc.renderTargetFormats[1] = rhi::DataFormat::RG16_Float;
+        geometryDesc.renderTargetFormats[2] = rhi::DataFormat::R32_Float;
+        for (u32 i = 3; i < 8; ++i)
+            geometryDesc.renderTargetFormats[i] = rhi::DataFormat::RGBA32_UInt;
+        geometryDesc.depthStencilFormat = rhi::DataFormat::D32_Float;
+        geometryDesc.enableDepthTest = true;
+        geometryDesc.enableDepthWrite = true;
+        geometryDesc.depthFunc = rhi::ComparisonFunc::Less;
+        geometryDesc.cullMode = rhi::CullMode::None;
+        card_capture_geometry_pipeline_ = device_->CreateGraphicsPipeline(geometryDesc);
+        if (card_capture_geometry_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[CardCapture] failed to create geometry witness graphics pipeline" << std::endl;
+            return false;
+        }
+        card_capture_geometry_initialized_ = true;
+        return true;
+    };
+
+    if (card_capture_initialized_) {
+        return (!writer_audit || ensureWriterPipeline()) &&
+               (!geometry_audit || ensureGeometryPipeline());
+    }
+
     card_capture_max_clusters_ = max_clusters;
 
     // T8.13 Vulkan↔Metal sync: Metal hosts both entries in one
@@ -4228,6 +4866,17 @@ bool GPUDrivenDrawPipeline::InitializeCardCaptureResources(u32 max_clusters) {
         }
     }
 
+    if (writer_audit && !ensureWriterPipeline()) {
+        // Keep the failure explicit.  The caller must not silently fall back
+        // to the production three-RT pipeline for an audit run.
+        return false;
+    }
+    if (geometry_audit && !ensureGeometryPipeline()) {
+        // Keep the geometry witness request fail-closed.  The caller must not
+        // silently bind the four MRTs to the production or writer-only PSO.
+        return false;
+    }
+
     for (u32 f = 0; f < kCardCaptureFrameCopies * kCardCaptureSlots; ++f) {
         rhi::BufferDesc visDesc{};
         visDesc.size = (u64)max_clusters * 4;  // u32 per visible cluster
@@ -4288,14 +4937,22 @@ void GPUDrivenDrawPipeline::ShutdownCardCaptureResources() {
     }
     if (card_capture_pipeline_ != rhi::handles::INVALID_PIPELINE)
         device_->DestroyPipeline(card_capture_pipeline_);
+    if (card_capture_writer_pipeline_ != rhi::handles::INVALID_PIPELINE)
+        device_->DestroyPipeline(card_capture_writer_pipeline_);
+    if (card_capture_geometry_pipeline_ != rhi::handles::INVALID_PIPELINE)
+        device_->DestroyPipeline(card_capture_geometry_pipeline_);
     if (card_capture_layout_ != rhi::handles::INVALID_PIPELINE_LAYOUT)
         device_->DestroyPipelineLayout(card_capture_layout_);
     if (card_capture_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT)
         device_->DestroyDescriptorSetLayout(card_capture_set_layout_);
     card_capture_pipeline_ = rhi::handles::INVALID_PIPELINE;
+    card_capture_writer_pipeline_ = rhi::handles::INVALID_PIPELINE;
+    card_capture_geometry_pipeline_ = rhi::handles::INVALID_PIPELINE;
     card_capture_layout_ = rhi::handles::INVALID_PIPELINE_LAYOUT;
     card_capture_set_layout_ = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     card_capture_initialized_ = false;
+    card_capture_writer_initialized_ = false;
+    card_capture_geometry_initialized_ = false;
 }
 
 bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_buffer,
@@ -4310,13 +4967,39 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
                                                    rhi::ResourceHandle albedo_rt,
                                                    rhi::ResourceHandle normal_rt,
                                                    rhi::ResourceHandle depth_rt,
-                                                   rhi::ResourceHandle depth_attachment_rt) {
+                                                   rhi::ResourceHandle depth_attachment_rt,
+                                                   u32 owning_instance_id,
+                                                   bool owner_only,
+                                                   rhi::ResourceHandle writer_rt,
+                                                   rhi::ResourceHandle geometry_rt0,
+                                                   rhi::ResourceHandle geometry_rt1,
+                                                   rhi::ResourceHandle geometry_rt2,
+                                                   rhi::ResourceHandle geometry_rt3) {
     if (!card_capture_initialized_ || !cmd_buffer) return false;
     if (face_slot >= kCardCaptureSlots) return false;
     if (albedo_rt == rhi::handles::INVALID_RESOURCE ||
         normal_rt == rhi::handles::INVALID_RESOURCE ||
         depth_rt == rhi::handles::INVALID_RESOURCE ||
         depth_attachment_rt == rhi::handles::INVALID_RESOURCE) return false;
+    const bool writer = writer_rt != rhi::handles::INVALID_RESOURCE;
+    const bool geometry = geometry_rt0 != rhi::handles::INVALID_RESOURCE ||
+                          geometry_rt1 != rhi::handles::INVALID_RESOURCE ||
+                          geometry_rt2 != rhi::handles::INVALID_RESOURCE ||
+                          geometry_rt3 != rhi::handles::INVALID_RESOURCE;
+    if (geometry && (!writer || geometry_rt0 == rhi::handles::INVALID_RESOURCE ||
+                     geometry_rt1 == rhi::handles::INVALID_RESOURCE ||
+                     geometry_rt2 == rhi::handles::INVALID_RESOURCE ||
+                     geometry_rt3 == rhi::handles::INVALID_RESOURCE ||
+                     !card_capture_geometry_initialized_ ||
+                     device_->GetPlatform() != rhi::RHIPlatform::Vulkan)) {
+        return false;
+    }
+    if (writer && (!card_capture_writer_initialized_ ||
+                   device_->GetPlatform() != rhi::RHIPlatform::Vulkan)) {
+        // An audit request must fail closed; do not render the default path and
+        // claim that MRT3 was captured.
+        return false;
+    }
     if (scene_snapshot.GetInstanceCount() == 0) return true;
 
     if (cluster_map_buffer_ == rhi::handles::INVALID_RESOURCE ||
@@ -4329,7 +5012,10 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
         global_material_data_buffer_ == rhi::handles::INVALID_RESOURCE ||
         albedo_texture_array_ == rhi::handles::INVALID_RESOURCE ||
         texture_sampler_ == rhi::handles::INVALID_SAMPLER) {
-        return true;
+        // The historical production path treats an unavailable Nanite source
+        // as a no-op.  A writer audit must instead report that no actual card
+        // source was bound, so the caller can close the evidence run.
+        return !writer;
     }
 
     // Triple-buffered scratch: (frame%3) selects the per-frame copy so the
@@ -4361,6 +5047,10 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
             const auto* meshlets = cpu_meshlet_cache_.data();
             for (u32 instIdx = 0; instIdx < instances.size(); ++instIdx) {
                 const auto& inst = instances[instIdx];
+                // [Phase 3 实验项]（PRIMAL_SC_CAPTURE_OWNER=1）：只提交
+                // owning 实例的 cluster——贴面卡（Phase 1 v2 布局）语义下
+                // "卡片负责的表面 = owning 表面"，近邻遮挡物不再抢深度。
+                if (owner_only && instIdx != owning_instance_id) continue;
                 if (!sphereVsFrustum(inst.bounds_center, inst.bounds_radius)) continue;
                 for (u32 c = 0; c < inst.cluster_count; ++c) {
                     u32 globalIdx = inst.cluster_start + c;
@@ -4385,6 +5075,11 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
         if (vis) {
             memcpy(vis, visibleClusters.data(), totalVisible * sizeof(u32));
             device_->UnmapBuffer(card_capture_visible_buffer_[slot]);
+        } else if (writer) {
+            // A writer run cannot claim a fresh MRT tag if its visible-list
+            // upload did not happen.  Preserve the historical default path's
+            // behavior, but fail the opt-in evidence path closed.
+            return false;
         }
     }
     if (totalVisible > 0) {
@@ -4396,6 +5091,8 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
             p[2] = 0;
             p[3] = 0;
             device_->UnmapBuffer(card_capture_indirect_buffer_[slot]);
+        } else if (writer) {
+            return false;
         }
     }
     {
@@ -4408,7 +5105,17 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
             p->center = card_center;
             p->fwd = card_fwd;
             p->misc = math::v4{depth_near, depth_far, 0.0f, 0.0f};
+            if (writer) {
+                // CardCapture_writer.frag consumes misc.z as raw uint bits.
+                // memcpy avoids a float conversion/rounding step.
+                u32 frame_bits = frame_index;
+                static_assert(sizeof(math::v4) == 4u * sizeof(f32));
+                std::memcpy(reinterpret_cast<u8*>(&p->misc) + 2u * sizeof(f32),
+                            &frame_bits, sizeof(frame_bits));
+            }
             device_->UnmapBuffer(card_capture_params_buffer_[slot]);
+        } else if (writer) {
+            return false;
         }
     }
 
@@ -4454,7 +5161,7 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
     // Render one card face into the atlas region. Colors LOAD (preserve every
     // other card's pages); depth CLEARS (scratch, pass-local).
     rhi::RenderPassDesc rpDesc{};
-    rpDesc.colorAttachments.resize(3);
+    rpDesc.colorAttachments.resize(geometry ? 8u : (writer ? 4u : 3u));
     rpDesc.colorAttachments[0].texture = albedo_rt;
     rpDesc.colorAttachments[0].format = rhi::DataFormat::RGBA8_UNorm;
     rpDesc.colorAttachments[0].loadOp = rhi::LoadAction::Load;
@@ -4467,6 +5174,23 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
     rpDesc.colorAttachments[2].format = rhi::DataFormat::R32_Float;
     rpDesc.colorAttachments[2].loadOp = rhi::LoadAction::Load;
     rpDesc.colorAttachments[2].storeOp = rhi::StoreAction::Store;
+    if (writer) {
+        rpDesc.colorAttachments[3].texture = writer_rt;
+        rpDesc.colorAttachments[3].format = rhi::DataFormat::RGBA32_UInt;
+        rpDesc.colorAttachments[3].loadOp = rhi::LoadAction::Load;
+        rpDesc.colorAttachments[3].storeOp = rhi::StoreAction::Store;
+    }
+    if (geometry) {
+        const rhi::ResourceHandle geometryTargets[4] = {
+            geometry_rt0, geometry_rt1, geometry_rt2, geometry_rt3 };
+        for (u32 i = 0; i < 4; ++i) {
+            auto& attachment = rpDesc.colorAttachments[4 + i];
+            attachment.texture = geometryTargets[i];
+            attachment.format = rhi::DataFormat::RGBA32_UInt;
+            attachment.loadOp = rhi::LoadAction::Load;
+            attachment.storeOp = rhi::StoreAction::Store;
+        }
+    }
     rpDesc.depthAttachment.texture = depth_attachment_rt;
     rpDesc.depthAttachment.format = rhi::DataFormat::D32_Float;
     rpDesc.depthAttachment.loadOp = rhi::LoadAction::Clear;
@@ -4478,7 +5202,9 @@ bool GPUDrivenDrawPipeline::ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_bu
                              {float(resolution), float(resolution)}, 0.0f, 1.0f});
     cmd_buffer->SetScissor({{int(viewport_x), int(viewport_y)}, {resolution, resolution}});
 
-    cmd_buffer->BindGraphicsPipeline(card_capture_pipeline_);
+    cmd_buffer->BindGraphicsPipeline(geometry ? card_capture_geometry_pipeline_
+                                              : (writer ? card_capture_writer_pipeline_
+                                                         : card_capture_pipeline_));
     rhi::DescriptorSetHandle dsHandle = card_capture_ds_[slot];
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, card_capture_layout_, 0, 1, &dsHandle, 0, nullptr);
 

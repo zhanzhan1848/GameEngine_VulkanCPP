@@ -90,6 +90,9 @@ struct CullingUniforms {
     uint cluster_count;
     uint force_pass_all; // 🔥 DEBUG: Force all geometry to pass culling
     uint enable_debug_output; // 🔥 DEBUG: Enable debug output
+    // 与 CPU CullingConstants（GPUCullingPipeline.h）尾部字段逐位对齐：
+    uint total_meshlet_count;   // T4.6.5 part 35.2 OOB guard（Metal 路径暂未消费）
+    float view_forward_sign;    // +1 = +Z forward（LH, MetalCamera），-1 = -Z forward（RH）
 };
 
 // Intermediate visibility results (progressive filtering)
@@ -444,12 +447,17 @@ kernel void stage1_instance_frustum_culling(
     float bounds_radius = instances[instance_id].bounds_radius;
     float4 view_center_4 = uniforms.view_matrix * float4(bounds_center, 1.0);
 
+    // [PassDebugView 排查] 统一两种相机 forward 约定：view_forward_sign=+1
+    // （LH，MetalCamera::createLookToLH）时 view z 正值在前方；-1（RH，
+    // CreateLookAtMatrix）时负值在前方。z' 恒为"前方为正"。
+    float view_z = view_center_4.z * uniforms.view_forward_sign;
+
     // 🔥 CORRECTED: Basic near/far plane check considering object radius
-    // In view space: camera looks down -Z axis, so visible objects have negative Z values
+    // z' > 0 = in front of camera（两种约定统一后）
     // Near plane culling: only cull if object's closest point is BEHIND the camera
     // Objects that cross the camera plane (partially in front) should still be visible
-    if (view_center_4.z - bounds_radius > 0.0) {
-        // Entire object is behind camera (farthest point is still behind camera at Z > 0)
+    if (view_z + bounds_radius < 0.0) {
+        // Entire object is behind camera (farthest point is still behind camera)
 
         // 🔥 DEBUG: Record culled objects for debugging
         if (uniforms.enable_debug_output) {
@@ -479,7 +487,7 @@ kernel void stage1_instance_frustum_culling(
         return;
     }
 
-    if (view_center_4.z < -uniforms.far_plane - bounds_radius) {
+    if (view_z > uniforms.far_plane + bounds_radius) {
         // Entire object is beyond far plane (center is further than far_plane + radius)
 
         // 🔥 DEBUG: Record culled objects for debugging

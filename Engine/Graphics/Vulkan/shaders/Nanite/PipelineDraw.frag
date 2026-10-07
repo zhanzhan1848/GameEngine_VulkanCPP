@@ -149,7 +149,10 @@ void main() {
         roughness = orm_sample.g;
         metallic  = orm_sample.b;
     }
-    out_orm = vec4(occlusion, roughness, metallic, 1.0);
+    // MaterialData.flags bits[8:16) carry transmission as UNorm8.  ORM.a is
+    // the existing GBuffer transport channel consumed by deferred lighting.
+    float transmission = float((mat.flags >> 8u) & 0xFFu) / 255.0;
+    out_orm = vec4(occlusion, roughness, metallic, transmission);
 
     // === Velocity ===
     out_velocity = vec2(0.0);

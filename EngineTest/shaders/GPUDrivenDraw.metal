@@ -292,6 +292,7 @@ fragment GBufferOutput gpu_driven_fragment_shader(
     const float2 uv_scale = float2(
         as_type<float>(material_words[material_base + 9u]),
         as_type<float>(material_words[material_base + 10u]));
+    const uint material_flags = material_words[material_base + 11u];
 
     // Sample textures
     constexpr sampler linear_sampler(mip_filter::linear, mag_filter::linear, min_filter::linear, address::repeat);
@@ -364,7 +365,10 @@ fragment GBufferOutput gpu_driven_fragment_shader(
         metallic = orm_sample.b;
     }
 
-    out.orm = float4(occlusion, roughness, metallic, 1.0);
+    // MaterialData.flags bits[8:16) carry transmission as UNorm8.  ORM.a is
+    // the shared GBuffer transport channel consumed by deferred lighting.
+    const float transmission = float((material_flags >> 8u) & 0xFFu) / 255.0f;
+    out.orm = float4(occlusion, roughness, metallic, transmission);
 
     // Calculate velocity (screen-space motion vectors)
     if (uniforms.has_prev_frame) {

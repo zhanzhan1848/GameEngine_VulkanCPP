@@ -55,7 +55,10 @@ GPUMaterialRegistry::MaterialData MaterialDataBuilder::ExtractMaterialData(
     data.normal_scale = 1.0f;
     data.uv_scale[0] = 1.0f;
     data.uv_scale[1] = 1.0f;
-    data.flags = 0;
+    data.flags = GPUMaterialRegistry::EncodeThicknessFlags(
+        GPUMaterialRegistry::EncodeTransmissionFlags(
+            0u, instance->GetTransmissionFactor()),
+        instance->GetThicknessFactor());
 
     return data;
 }
@@ -100,7 +103,10 @@ GPUMaterialRegistry::MaterialData MaterialDataBuilder::ExtractMaterialData(
     data.normal_scale = 1.0f;
     data.uv_scale[0] = 1.0f;  // 🔥 NEW: Default UV scaling (no repetition)
     data.uv_scale[1] = 1.0f;
-    data.flags = 0;
+    data.flags = GPUMaterialRegistry::EncodeThicknessFlags(
+        GPUMaterialRegistry::EncodeTransmissionFlags(
+            0u, instance->GetTransmissionFactor()),
+        instance->GetThicknessFactor());
 
     return data;
 }
@@ -144,6 +150,14 @@ bool MaterialDataBuilder::AreMaterialsCompatible(
 
     // Check roughness difference
     if (std::abs(a_roughness - b_roughness) > tolerance) return false;
+
+    // Thin-surface transport is part of the material identity.  Omitting it
+    // here would merge an opaque and a cloth material that happen to share
+    // textures and scalar PBR factors.
+    if (std::abs(a.GetTransmissionFactor() - b.GetTransmissionFactor()) > tolerance)
+        return false;
+    if (std::abs(a.GetThicknessFactor() - b.GetThicknessFactor()) > tolerance)
+        return false;
 
     return true;
 }

@@ -103,8 +103,15 @@ LocalBounds ComputeLocalBounds(nanite::NaniteRuntimeResource* resource,
         // Runs when gpu_mesh is null (WASM Sponza) OR when gpu_mesh
         // exists but its bounds are garbage (SDF-baked without bounds
         // metadata).
+        // Recompute from raw vertex positions in the mesh asset.
+        // Runs when gpu_mesh is null (WASM Sponza) OR when gpu_mesh
+        // exists but its bounds are garbage (SDF-baked without bounds
+        // metadata).
+        // [PassDebugView 排查] geometry_id 是 hierarchy ID 空间，须
+        // get_rhi_mesh_id 两步解析后才能查 rhi_mesh_assets。
         graphics::rhi::RHIMeshAsset asset;
-        if (primal::content::get_rhi_mesh_asset(geometry_id, asset)
+        if (primal::content::get_rhi_mesh_asset(
+                primal::content::get_rhi_mesh_id(geometry_id), asset)
             && asset.num_vertices > 0
             && asset.position_buffer.size() >= asset.num_vertices * sizeof(f32) * 3) {
             const f32* pos = reinterpret_cast<const f32*>(asset.position_buffer.data());
@@ -329,7 +336,16 @@ bool RenderSceneSnapshot::Rebind(const RenderScene& scene) {
     instance_count_ = static_cast<u32>(instances.size());
     cluster_ref_count_ = static_cast<u32>(cluster_refs.size());
     needs_full_rebuild_ = false;
-    
+
+    // [PassDebugView 排查] Rebind 完成摘要（实例/引用计数 + GPU 缓冲有效性）。
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[SnapshotRebind] instances=" << instance_count_
+        << " clusterRefs=" << cluster_ref_count_
+        << " staging=" << (instance_staging_buffer_ != rhi::handles::INVALID_RESOURCE ? "ok" : "INVALID")
+        << " gpuBuffer=" << (instance_buffer_ != rhi::handles::INVALID_RESOURCE ? "ok" : "INVALID")
+        << " clusterStaging=" << (cluster_ref_staging_buffer_ != rhi::handles::INVALID_RESOURCE ? "ok" : "INVALID")
+        << std::endl;
+
     return true;
 }
 
@@ -452,6 +468,20 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
 
         nanite::NaniteRuntimeResource* resource =
             resource_manager.GetOrCreateResource(cluster_cache->geometry_content_id);
+
+        // [PassDebugView 排查] 每次全量重建打印收录摘要（实例数/cluster 数/世界平移）。
+        {
+            static u32 s_extractLog = 0;
+            if (s_extractLog < 8) {
+                ++s_extractLog;
+                const math::v4 t = proxy.transform.columns[3];
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[SnapshotExtract] geom=" << instance.geometry_id
+                    << " resource=" << (resource ? "ok" : "null")
+                    << " clusterCount=" << (resource ? resource->cluster_data.cluster_count : 0u)
+                    << " worldT=(" << t.x << "," << t.y << "," << t.z << ")" << std::endl;
+            }
+        }
 
         if (resource) {
             instance.cluster_count = resource->cluster_data.cluster_count;
@@ -643,10 +673,24 @@ bool RenderSceneSnapshot::UploadToGPUBuffers(rhi::RHICommandBuffer* cmd_buffer) 
     }
 
     // Copy instance data from staging buffer to GPU buffer
+    // [PassDebugView 排查] 上传摘要一次性打印（实例/引用计数 + 缓冲有效性）。
+    {
+        static bool s_uploadLogged = false;
+        if (!s_uploadLogged) {
+            s_uploadLogged = true;
+            PRIMAL_LOG_STREAM(Info, "Scene")
+                << "[SnapshotUpload] instStaging="
+                << (instance_staging_buffer_ != rhi::handles::INVALID_RESOURCE ? "ok" : "INVALID")
+                << " instGpu=" << (instance_buffer_ != rhi::handles::INVALID_RESOURCE ? "ok" : "INVALID")
+                << " instCount=" << instance_count_
+                << " refStaging=" << (cluster_ref_staging_buffer_ != rhi::handles::INVALID_RESOURCE ? "ok" : "INVALID")
+                << " refGpu=" << (cluster_ref_buffer_ != rhi::handles::INVALID_RESOURCE ? "ok" : "INVALID")
+                << " refCount=" << cluster_ref_count_ << std::endl;
+        }
+    }
     if (instance_staging_buffer_ != rhi::handles::INVALID_RESOURCE &&
         instance_buffer_ != rhi::handles::INVALID_RESOURCE &&
         instance_count_ > 0) {
-
         u64 instance_data_size = instance_count_ * sizeof(InstanceData);
         u64 instance_buffer_capacity = instance_capacity_ * sizeof(InstanceData);
 

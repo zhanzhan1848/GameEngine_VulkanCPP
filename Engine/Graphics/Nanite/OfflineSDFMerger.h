@@ -3,6 +3,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHITypes.h"
+#include <string>
 
 namespace primal::graphics::nanite {
 
@@ -31,6 +32,7 @@ public:
     static constexpr u32 GLOBAL_RES = 384;
 
     struct MeshSDF {
+        std::string source_name;    // CPU diagnostic identity; not a GPU/asset layout
         u32  resolution[3];
         f32  bounds_min[3];
         f32  bounds_max[3];
@@ -69,6 +71,22 @@ public:
     // upload it — no pipeline model parse, no merge. Returns false when the
     // cache is missing/stale (caller should fall back to the slow path).
     bool LoadFromCache(rhi::RHIDeviceBase* device, const char* cachePath);
+    // Opt-in experimental RG16F: R retains scalar marching field, G is
+    // mesh-supported hit evidence (65504 means unknown). Separate cache magic.
+    void EnableHitEvidence() { hit_evidence_ = true; }
+    // Default-off encoding experiment. Separate scalar cache magic; cannot
+    // combine with hit-evidence caches. Grid bounds stay unchanged.
+    void EnableGeometryDistanceDecode() { geometry_decode_ = true; }
+    // Read-only replay of current merge candidates at the eight cached
+    // texels around triangle-audited hit points. Requires loaded mesh SDFs;
+    // does not upload, rebuild or modify either model or cache.
+    bool AuditCachePoints(const char* raysCsv, const char* cachePath, const char* outputCsv) const;
+    // Exact integer voxels (CSV id,gx,gy,gz), no interpolation/filtering.
+    // Read-only scalar cache/model replay plus all participating candidates.
+    bool AuditCacheVoxels(const char* voxelsCsv, const char* cachePath, const char* outputCsv) const;
+    // CPU-only fixed-origin ray experiment: cached scalar marching lower
+    // bound versus independently replayed, mesh-supported hit evidence.
+    bool AuditTraceEvidence(const char* raysCsv, const char* cachePath, const char* outputCsv) const;
 
     // --- Accessors (valid after BuildAndUpload) ---
     rhi::ResourceHandle GetTexture() const { return global_sdf_texture_; }
@@ -81,6 +99,8 @@ public:
 private:
     utl::vector<MeshSDF> mesh_sdfs_;
     bool signed_encoding_{true};
+    bool hit_evidence_{false};
+    bool geometry_decode_{false};
     math::v3 origin_{0, 0, 0};
     math::v3 extent_{0, 0, 0};
     f32      voxel_size_{0};

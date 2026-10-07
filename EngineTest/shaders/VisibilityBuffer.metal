@@ -4,17 +4,54 @@ using namespace metal;
 // Visibility Buffer Shader
 // Renders geometry to a visibility buffer storing cluster + primitive IDs
 // This is the FIRST PASS of GPU-driven rendering
+//
+// [PassDebugView 排查 2026-09-24] 旧版 VS 是假实现：无视 compact_cluster_ids/
+// cluster_map/instance_data（instance_id 直接当 meshlet_id、顶点裸拉 positions),
+// 产物是乱三角形 + 错 ID。现镜像 GPUDrivenDraw.metal 的 gpu_driven_vertex_shader
+// 正确管线（compact list → cluster_map → meshlet 顶点拉取 + 实例变换），
+// 使 visibility/meshlet/cluster/mesh 四个 pass 视图拿到真实 ID。
+// 注意 buffer(4) 必须是 packed_float3（全局 position 流是 12B 紧凑布局）。
 
 struct MeshletData {
-    uint center_offset;
-    uint radius;
-    uint primitive_offset;
-    uint primitive_count;
+    uint vertex_offset;      // u32 单位（meshlet_vertices 数组内偏移）
+    uint triangle_offset;    // 字节单位（u8 数组内偏移）
+    uint vertex_count;
+    uint triangle_count;
+
+    // 与 C++ rhi::RHIMeshlet 对齐（64 字节总量）
+    packed_float3 cone_apex;
+    packed_float3 cone_axis;
+    float cone_cutoff;
+    packed_float3 center;
+    float radius;
+    uint padding;
+};
+
+struct ClusterMap {
+    uint globalMeshletIndex;
+    uint instanceIndex;
+    uint materialID;
+    uint padding;
+};
+
+struct InstanceData {
+    float4x4 world_matrix;              // 64 bytes - offsets 0-63
+    float4x4 inverse_world_matrix;      // 64 bytes - offsets 64-127
+    uint geometry_id;                   // offset 128
+    uint material_id;                   // offset 132
+    uint cluster_start;                 // offset 136
+    uint cluster_count;                 // offset 140
+    uint cluster_map_base;              // offset 144
+    uint padding;
+    uint padding1;
+    uint padding2;
+    float3 bounds_center;               // offsets 160-171
+    float bounds_radius;                // offset 172
+    uint bounds_padding[4];             // total 192 bytes
 };
 
 struct VertexOut {
     float4 position [[position]];
-    float depth [[depth_any]];
     uint meshlet_id [[flat]];
     uint primitive_id [[flat]];
 };
@@ -31,39 +68,52 @@ struct DrawConstants {
 
 // Vertex shader for visibility buffer generation
 vertex VertexOut visibility_vertex_shader(
-    const device float3* positions [[buffer(4)]],           // Position buffer
-    const device uint* meshlet_vertices [[buffer(2)]],      // Meshlet vertices
-    const device uint* meshlet_triangles [[buffer(3)]],     // Meshlet triangles
+    const device packed_float3* positions [[buffer(4)]],    // Global position data (12B stride)
+    const device uint* meshlet_vertices [[buffer(2)]],      // Meshlet vertices (global vertex indices)
+    device const uchar* meshlet_triangles [[buffer(3)]],    // Local vertex indices (uchar)
     constant DrawConstants& constants [[buffer(0)]],        // Camera constants
     constant MeshletData* meshlets [[buffer(1)]],           // Meshlet data
+    const device uint* compact_cluster_ids [[buffer(5)]],   // Visible cluster IDs
+    constant ClusterMap* cluster_map [[buffer(6)]],         // Cluster mapping
+    constant InstanceData* instance_data [[buffer(7)]],     // Per-instance transform data
     uint vid [[vertex_id]],
     uint instance_id [[instance_id]])
 {
     VertexOut out;
 
-    // Calculate which meshlet and primitive we're rendering
-    uint meshlet_id = instance_id;
-    uint vertex_in_meshlet = vid / 3;  // Which vertex in the meshlet
-    uint vertex_in_triangle = vid % 3; // Which vertex in the triangle
+    // 1. Global cluster id from the compacted visible list
+    uint globalClusterID = compact_cluster_ids[instance_id];
 
-    // Get primitive data for this meshlet
-    uint primitive_idx = (vertex_in_meshlet / 3) + (meshlet_id * 128); // Approximate
-    if (primitive_idx >= (meshlet_id * 128 + 128)) {
-        primitive_idx = meshlet_id * 128; // Safety clamp
+    // 2. Map to global meshlet + instance
+    ClusterMap map = cluster_map[globalClusterID];
+    uint globalMeshletIndex = map.globalMeshletIndex;
+    uint instanceIndex = map.instanceIndex;
+
+    MeshletData meshlet = meshlets[globalMeshletIndex];
+    InstanceData instance = instance_data[instanceIndex];
+
+    // 3. Meshlet vertex pulling（与 gpu_driven_vertex_shader 相同）
+    uint actualTriangles = meshlet.triangle_count;
+    uint actualVertexCount = actualTriangles * 3;
+
+    if (vid >= actualVertexCount) {
+        // Padding vertices → degenerate（clip 外）
+        out.position = float4(2.0, 2.0, 2.0, 1.0);
+        out.meshlet_id = globalMeshletIndex;
+        out.primitive_id = 0;
+        return out;
     }
 
-    // Get actual vertex index from meshlet data
-    uint vertex_idx = vid;
+    uchar localVertIdx = meshlet_triangles[meshlet.triangle_offset + vid];
+    uint vertIdx = meshlet_vertices[meshlet.vertex_offset + localVertIdx];
 
-    // Read position and transform
-    float3 world_pos = positions[vertex_idx];
-    float4 clip_pos = constants.proj_matrix * constants.view_matrix * constants.world_matrix * float4(world_pos, 1.0);
+    float3 world_pos = float3(positions[vertIdx]);
+    float4 clip_pos = constants.proj_matrix * constants.view_matrix
+                    * instance.world_matrix * float4(world_pos, 1.0);
 
     out.position = clip_pos;
-    out.depth = clip_pos.z / clip_pos.w;
-    out.meshlet_id = meshlet_id;
-    out.primitive_id = primitive_idx;
-
+    out.meshlet_id = globalMeshletIndex;             // 与 cluster map 反查键一致
+    out.primitive_id = vid / 3;                      // meshlet 内本地三角形序号
     return out;
 }
 
@@ -74,6 +124,7 @@ fragment uint visibility_fragment_shader(
 {
     // Pack meshlet_id and primitive_id into single uint
     // High 8 bits: meshlet_id (255 meshlets max), Low 24 bits: primitive_id (16M primitives max)
+    // PassDebugView.metal 的 cluster 反查即用 globalMeshletIndex 作键。
     uint meshlet_part = (in.meshlet_id & 0xFF) << 24;
     uint primitive_part = in.primitive_id & 0x00FFFFFF;
     uint visibility_value = meshlet_part | primitive_part;

@@ -8,6 +8,7 @@
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #if defined(__APPLE__)
 #include "Metal/MetalCore.h"
+#include "Engine/Common/CoreLogStream.h"
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #endif
 
@@ -483,8 +484,20 @@ namespace primal::graphics
 		// graphics backend is already tearing down. Material creation is a
 		// fallible resource operation (callers handle invalid_id), so do not
 		// turn that lifecycle race into a process-wide SIGABRT in debug builds.
-		if (!gfx.resources.add_material) return id::invalid_id;
-		return gfx.resources.add_material(info);
+		if (!gfx.resources.add_material) {
+			// [PassDebugView 排查] CreateDefaultMaterial invalid 根因定位：
+			// 区分"函数指针空（legacy gfx 未初始化）"与"实现返回 invalid"。
+			PRIMAL_LOG_STREAM(Error, "Render")
+				<< "[AddMaterialDiag] gfx.resources.add_material is NULL — legacy platform_interface 未初始化" << std::endl;
+			return id::invalid_id;
+		}
+		const id::id_type result{ gfx.resources.add_material(info) };
+		if (!id::is_valid(result)) {
+			PRIMAL_LOG_STREAM(Error, "Render")
+				<< "[AddMaterialDiag] platform add_material returned invalid (texture_count="
+				<< info.texture_count << ")" << std::endl;
+		}
+		return result;
 	}
 
 	void remove_material(id::id_type id)

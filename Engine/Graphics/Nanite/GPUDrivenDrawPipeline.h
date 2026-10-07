@@ -5,6 +5,7 @@
 #include "../RHI/Core/RHIMeshAsset.h"
 #include "GPUCullingPipeline.h"
 #include <mutex>
+#include <unordered_map>
 #include <iostream>
 
 namespace primal::graphics::rhi {
@@ -14,6 +15,7 @@ namespace primal::graphics::rhi {
 
 namespace primal::graphics {
     class RenderScene;
+    class MaterialInstance;
 }
 
 namespace primal::graphics::nanite {
@@ -133,12 +135,21 @@ public:
     void SetRenderScene(RenderScene* scene) { render_scene_ = scene; }
 
     void UpdateGeometryData(const RenderSceneSnapshot& scene_snapshot);
+    // [PassDebugView 排查] 几何集签名重建：销毁一次构建的全局几何缓冲
+    void DestroyGlobalGeometryBuffers();
     bool CreateGeometryBuffers(u32 vertex_count, u32 index_count);
     void UploadGeometryData(const RenderSceneSnapshot& scene_snapshot);
 
     void SetMaterialDataBuffer(rhi::ResourceHandle material_buffer) {
         global_material_data_buffer_ = material_buffer;
     }
+
+    // [PassDebugView 排查] 编辑器材质注册：内容纹理 blit 进编辑器纹理数组
+    // 新层 + 追加 MaterialData 记录，返回记录索引（cluster map materialID）。
+    // 记录 0 = 无纹理白模默认，首个注册材质从 1 开始。
+    u32 RegisterEditorMaterial(rhi::ResourceHandle albedo_tex,
+                               rhi::ResourceHandle normal_tex,
+                               rhi::ResourceHandle orm_tex);
 
     void SetTextureArrays(rhi::ResourceHandle albedo_array,
                           rhi::ResourceHandle normal_array,
@@ -183,26 +194,50 @@ public:
     };
 
     struct ShadowFrameResources {
-        rhi::ResourceHandle shadow_depth_rt_0{ rhi::handles::INVALID_RESOURCE };  // D32_Float, 2048x2048
-        rhi::ResourceHandle shadow_depth_rt_1{ rhi::handles::INVALID_RESOURCE };
-        rhi::ResourceHandle shadow_map_0{ rhi::handles::INVALID_RESOURCE };       // R32_Float sampleable
-        rhi::ResourceHandle shadow_map_1{ rhi::handles::INVALID_RESOURCE };
+        // P4.2 (2026-09-15): CSM 2→4 级联。具名 _0/_1 成员转 [4] 数组，
+        // 创建/销毁/选取全部按级联索引参数化。
+        static constexpr u32 kShadowCascades = 4;
+        rhi::ResourceHandle shadow_depth_rt[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};  // D32_Float, 2048x2048
+        rhi::ResourceHandle shadow_map[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};  // R32_Float sampleable
         // VSM moments (RG32_Float = (z, z²)), written directly by the moments
         // raster pass — replaces the D32→R32 blit + ShadowFilter chain.
-        rhi::ResourceHandle shadow_moments_0{ rhi::handles::INVALID_RESOURCE };
-        rhi::ResourceHandle shadow_moments_1{ rhi::handles::INVALID_RESOURCE };
+        rhi::ResourceHandle shadow_moments[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
 
         // Per-cascade resources to avoid CPU/GPU data races and descriptor set overwrite issues
-        rhi::ResourceHandle visible_clusters_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
-        rhi::ResourceHandle visible_counter_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };  // atomic counter per cascade
-        rhi::ResourceHandle indirect_draw_buffer[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
-        rhi::ResourceHandle light_frustum_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
-        rhi::ResourceHandle shadow_depth_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };    // ShadowDepthUniforms for raster pass
-        rhi::ResourceHandle blit_resolution_cb[2]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE }; // BlitResolution for depth blit
+        rhi::ResourceHandle visible_clusters_buffer[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+        rhi::ResourceHandle visible_counter_buffer[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};  // atomic counter per cascade
+        rhi::ResourceHandle indirect_draw_buffer[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+        rhi::ResourceHandle light_frustum_cb[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
+        rhi::ResourceHandle shadow_depth_cb[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};    // ShadowDepthUniforms for raster pass
+        rhi::ResourceHandle blit_resolution_cb[kShadowCascades]{
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+            rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE}; // BlitResolution for depth blit
 
-        rhi::DescriptorSetHandle shadow_cull_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
-        rhi::DescriptorSetHandle shadow_depth_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };  // 8 bindings for vertex pulling
-        rhi::DescriptorSetHandle shadow_blit_descriptor_set[2]{ rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };   // 3 bindings for D32→R32 blit
+        rhi::DescriptorSetHandle shadow_cull_descriptor_set[kShadowCascades]{
+            rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+            rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };
+        rhi::DescriptorSetHandle shadow_depth_descriptor_set[kShadowCascades]{
+            rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+            rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };  // 8 bindings for vertex pulling
+        rhi::DescriptorSetHandle shadow_blit_descriptor_set[kShadowCascades]{
+            rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
+            rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET };   // 3 bindings for D32→R32 blit
     };
 
     bool InitializeShadowResources(u32 num_instances, u32 max_clusters);
@@ -259,9 +294,14 @@ public:
     // PipelineDraw-style cib→cmap decode) and the pixel shader writes the
     // card-axis depth (worldToCardUV semantics). Call once per captured card
     // face; face_slot selects triple-safe scratch buffers (0..31).
-    bool InitializeCardCaptureResources(u32 max_clusters);
+    // `writer_audit` is an opt-in Vulkan-only variant.  The default call keeps
+    // the original three-render-target pipeline and descriptor layout.
+    bool InitializeCardCaptureResources(u32 max_clusters, bool writer_audit = false,
+                                        bool geometry_audit = false);
     void ShutdownCardCaptureResources();
     bool IsCardCaptureReady() const { return card_capture_initialized_; }
+    bool IsCardCaptureWriterReady() const { return card_capture_writer_initialized_; }
+    bool IsCardCaptureGeometryReady() const { return card_capture_geometry_initialized_; }
     bool ExecuteCardCapturePass(rhi::RHICommandBuffer* cmd_buffer,
                                 const RenderSceneSnapshot& scene_snapshot,
                                 const math::m4x4& view,
@@ -274,22 +314,33 @@ public:
                                 rhi::ResourceHandle albedo_rt,
                                 rhi::ResourceHandle normal_rt,
                                 rhi::ResourceHandle depth_rt,
-                                rhi::ResourceHandle depth_attachment_rt);
+                                rhi::ResourceHandle depth_attachment_rt,
+                                // [SC 卡片 Lumen 对齐 Phase 3 实验项]
+                                // （PRIMAL_SC_CAPTURE_OWNER=1，默认关）：
+                                // 只提交 owning 实例的 cluster——贴面卡语义下
+                                // 捕获面 = 卡片负责面，近邻遮挡物不再污染
+                                // 深度；A/B 以 WRC_SC_FUNNEL queryFail 裁决。
+                                u32 owning_instance_id = 0xFFFFFFFFu,
+                                bool owner_only = false,
+                                // Optional diagnostic MRT3.  It is accepted only
+                                // by the Vulkan writer pipeline; the default
+                                // path remains the original three RTs.
+                                rhi::ResourceHandle writer_rt = rhi::handles::INVALID_RESOURCE,
+                                rhi::ResourceHandle geometry_rt0 = rhi::handles::INVALID_RESOURCE,
+                                rhi::ResourceHandle geometry_rt1 = rhi::handles::INVALID_RESOURCE,
+                                rhi::ResourceHandle geometry_rt2 = rhi::handles::INVALID_RESOURCE,
+                                rhi::ResourceHandle geometry_rt3 = rhi::handles::INVALID_RESOURCE);
 
     const ShadowFrameResources& GetShadowFrameResources(u32 buffer_index) const {
         return shadow_frames_[buffer_index % 3];
     }
 
     rhi::ResourceHandle GetShadowMap(u32 cascade_index, u32 buffer_index) const {
-        return (cascade_index == 0)
-            ? shadow_frames_[buffer_index % 3].shadow_map_0
-            : shadow_frames_[buffer_index % 3].shadow_map_1;
+        return shadow_frames_[buffer_index % 3].shadow_map[cascade_index % ShadowFrameResources::kShadowCascades];
     }
 
     rhi::ResourceHandle GetShadowMoments(u32 cascade_index, u32 buffer_index) const {
-        return (cascade_index == 0)
-            ? shadow_frames_[buffer_index % 3].shadow_moments_0
-            : shadow_frames_[buffer_index % 3].shadow_moments_1;
+        return shadow_frames_[buffer_index % 3].shadow_moments[cascade_index % ShadowFrameResources::kShadowCascades];
     }
 
     // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
@@ -312,18 +363,32 @@ public:
 
     // Geometry buffer accessors for GlobalSDF voxelization
     rhi::ResourceHandle GetGlobalVertexBuffer() const { return global_vertex_buffer_; }
+    // Read-only diagnostic access; no new resource or shader binding.
+    rhi::ResourceHandle GetGlobalElementBuffer() const { return global_element_buffer_; }
     rhi::ResourceHandle GetGlobalMeshletVerticesBuffer() const { return global_meshlet_vertices_buffer_; }
     rhi::ResourceHandle GetGlobalMeshletTrianglesBuffer() const { return global_meshlet_triangles_buffer_; }
     rhi::ResourceHandle GetClusterMapBuffer() const { return cluster_map_buffer_; }
+    // cluster map 条目数（PassDebugView 的 ClusterID/MeshID 反查扫描上限）。
+    u32 GetClusterMapEntryCount() const { return cluster_map_entry_count_; }
     rhi::ResourceHandle GetGlobalInstanceDataBuffer() const { return global_instance_data_buffer_; }
+    void RemoveSurfaceBakeMaterialSource(const MaterialInstance* source);
+    void SetSurfaceBakeMaterialSource(u32 id, MaterialInstance* source);
+    u64 GetSurfaceBakeMaterialDigest(u32 id) const;
     rhi::ResourceHandle GetMaterialDataBuffer() const { return global_material_data_buffer_; }
     rhi::ResourceHandle GetAlbedoTextureArray() const { return albedo_texture_array_; }
+    // Read-only diagnostic access for the opt-in DDGI first-surface proof.
+    // These return the exact array and sampler bound by the native draw path;
+    // production descriptor bindings are unchanged.
+    rhi::ResourceHandle GetNormalTextureArray() const { return normal_texture_array_; }
+    rhi::SamplerHandle GetTextureSampler() const { return texture_sampler_; }
 
     // T4.6.5 part 35.2: total meshlet count for OOB validation in culling
     // shader's per-cluster bounds lookup. Returns 0 before first Execute().
     u32 GetTotalMeshletCount() const { return total_meshlet_count_; }
 
 private:
+    struct SurfaceBakeSource { MaterialInstance* instance; std::weak_ptr<void> lifetime; };
+    std::unordered_map<u32, SurfaceBakeSource> surface_bake_materials_;
     GPUDrivenDrawPipeline() = default;
 
     bool CreatePipelines();
@@ -414,6 +479,7 @@ private:
     rhi::ResourceHandle global_vertex_buffer_{ rhi::handles::INVALID_RESOURCE }; // Merged Positions
     rhi::ResourceHandle global_element_buffer_{ rhi::handles::INVALID_RESOURCE }; // Merged Vertex Elements (Normal, Tangent, UV)
     rhi::ResourceHandle cluster_map_buffer_{ rhi::handles::INVALID_RESOURCE }; // Cluster ID -> (MeshletID, InstanceID)
+    u32 cluster_map_entry_count_{ 0 };
     rhi::ResourceHandle global_instance_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Instance ID -> World Matrix
     rhi::ResourceHandle global_material_data_buffer_{ rhi::handles::INVALID_RESOURCE }; // Material Data (for material sampling)
     bool owns_material_data_buffer_{ false };     // True if pipeline allocated a dummy buffer
@@ -427,6 +493,26 @@ private:
 
     // Total counts for global buffers
     u32 total_meshlet_count_{ 0 };
+    // [PassDebugView 排查] 几何集签名：实例集（geometry_id+cluster_count 序列）
+    // 变化时触发全局几何缓冲重建，晚注册实体不再缺 mesh
+    u64 geometry_signature_{ 0 };
+    // 编辑器材质数组（GPUMaterialRegistry 未接入前的轻量路径）
+    rhi::ResourceHandle editor_albedo_array_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle editor_normal_array_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle editor_orm_array_{ rhi::handles::INVALID_RESOURCE };
+    u32 editor_array_layers_{ 0 };
+    u32 editor_material_count_{ 1 };   // 记录 0 = 白模默认，注册材质从 1 开始
+    std::vector<u32> editor_material_words_;
+    // 拷贝 PSO（源纹理采样 → RGBA8 层视图渲染；块压缩源必须走采样路径）
+    rhi::PipelineHandle editor_copy_pipeline_{ rhi::handles::INVALID_PIPELINE };
+    rhi::PipelineLayoutHandle editor_copy_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
+    rhi::DescriptorSetLayoutHandle editor_copy_dsl_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+    rhi::SamplerHandle editor_copy_sampler_{ rhi::handles::INVALID_SAMPLER };
+    std::vector<rhi::RenderPassHandle> editor_copy_passes_;
+    bool EnsureEditorCopyPipeline();
+    rhi::ResourceHandle CreateEditorArrayLayerView(rhi::ResourceHandle array, u32 layer);
+    bool EditorBlitToLayer(rhi::ResourceHandle src, rhi::RenderPassHandle pass,
+                           float uv_scale_x, float uv_scale_y);
     u32 total_meshlet_vertex_count_{ 0 };
     u32 total_meshlet_triangle_count_{ 0 };
     u32 total_vertex_count_{ 0 };
@@ -518,8 +604,12 @@ private:
     static constexpr u32 kCardCaptureSlots = 32;
     static constexpr u32 kCardCaptureFrameCopies = 3;
     bool card_capture_initialized_{false};
+    bool card_capture_writer_initialized_{false};
+    bool card_capture_geometry_initialized_{false};
     u32 card_capture_max_clusters_{0};
     rhi::PipelineHandle card_capture_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle card_capture_writer_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineHandle card_capture_geometry_pipeline_{rhi::handles::INVALID_PIPELINE};
     rhi::PipelineLayoutHandle card_capture_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::DescriptorSetLayoutHandle card_capture_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
     rhi::ResourceHandle card_capture_visible_buffer_[kCardCaptureFrameCopies * kCardCaptureSlots]{

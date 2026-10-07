@@ -101,7 +101,7 @@ void main() {
     outNormal = vec4(N * 0.5 + 0.5, 1.0);
 
     // --- ORM: low roughness, no metallic ---
-    outORM = vec4(1.0, 0.05, 0.0, 1.0);
+    outORM = vec4(1.0, 0.05, 0.0, 0.0);  // P2-B: 水体不走布料透光
 
     // --- Velocity (jitter-subtracted, mirrors GBufferWater.metal:174-178) ---
     vec2 currentNDC = inCurrentPos.xy / inCurrentPos.w;

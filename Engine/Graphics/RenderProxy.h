@@ -21,6 +21,7 @@ struct RenderProxy {
     f32 roughness{0.5f};                     ///< PBR roughness
     f32 metallic{0.0f};                      ///< PBR metallic
     f32 alpha_cutoff{0.5f};                  ///< alpha clip threshold
+    f32 transmission{0.0f};                  ///< P2-B: 透光材质掩码（薄布料>0，石材=0）
     u64 graphVariant{0};                     ///< compiled material-graph content hash (0 = fixed material path)
 
     RenderProxy();

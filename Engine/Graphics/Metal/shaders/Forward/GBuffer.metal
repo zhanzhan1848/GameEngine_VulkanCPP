@@ -18,6 +18,7 @@ struct VertexOut {
     float4 instanceBaseColor;
     float  instanceRoughness;
     float  instanceMetallic;
+    float  instanceTransmission;  // P2-B: 透光材质掩码
 };
 
 struct FragmentOut {
@@ -102,11 +103,13 @@ vertex VertexOut vertexMain(
         out.instanceBaseColor  = inst.baseColor;
         out.instanceRoughness  = inst.roughness;
         out.instanceMetallic   = inst.metallic;
+        out.instanceTransmission = inst.transmission;
     } else {
         model = pushConsts.model;
         out.instanceBaseColor  = float4(1.0, 1.0, 1.0, 1.0);
         out.instanceRoughness  = 0.5;
         out.instanceMetallic   = 0.0;
+        out.instanceTransmission = 0.0;
     }
 
     // Position
@@ -211,12 +214,12 @@ fragment FragmentOut fragmentMain(
     
     // Default Fallback if ORM is black (likely missing)
     if (length(ormSample.rgb) < 0.01) {
-        out.orm = float4(1.0, in.instanceRoughness, in.instanceMetallic, 1.0);
+        out.orm = float4(1.0, in.instanceRoughness, in.instanceMetallic, in.instanceTransmission);
     } else {
         out.orm = float4(ormSample.r,
                          ormSample.g * in.instanceRoughness,
                          ormSample.b * in.instanceMetallic,
-                         1.0);
+                         in.instanceTransmission);
         out.orm.r = max(out.orm.r, 0.1);
     }
     

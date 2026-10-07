@@ -440,7 +440,10 @@ fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: boo
         roughness = orm_sample.g;
         metallic  = orm_sample.b;
     }
-    out.orm = vec4<f32>(occlusion, roughness, metallic, 1.0);
+    // MaterialData.flags bits[8:16) carry transmission as UNorm8.  Keep the
+    // same ORM.a contract as Vulkan/Metal for deferred transport.
+    let transmission = f32((mat.flags >> 8u) & 0xFFu) / 255.0;
+    out.orm = vec4<f32>(occlusion, roughness, metallic, transmission);
 
     // === Velocity ===
     if (uniforms.has_prev_frame != 0u) {

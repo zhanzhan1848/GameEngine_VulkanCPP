@@ -1,4 +1,5 @@
 #include "GPUMaterialRegistry.h"
+#include "GPUDrivenDrawPipeline.h"
 #include "../MaterialInstance.h"
 #include "MaterialDataBuilder.h"
 #include "../RHI/Core/RHIDevice.h"
@@ -20,6 +21,8 @@ GPUMaterialRegistry::~GPUMaterialRegistry() {
 
 void GPUMaterialRegistry::Shutdown(RHIDeviceBase* device) {
     if (!device) return;
+    for (const auto* source : registeredInstances_)
+        GPUDrivenDrawPipeline::Get().RemoveSurfaceBakeMaterialSource(source);
     if (materialIDBuffer_ != rhi::handles::INVALID_RESOURCE) {
         device->DestroyBuffer(materialIDBuffer_);
         materialIDBuffer_ = rhi::handles::INVALID_RESOURCE;
@@ -63,6 +66,7 @@ GPUMaterialRegistry::MaterialID GPUMaterialRegistry::RegisterMaterial(graphics::
 
     materials_.push_back(data);
     materialToID_[instance] = newID;
+    GPUDrivenDrawPipeline::Get().SetSurfaceBakeMaterialSource(newID, instance);
     registeredInstances_.push_back(instance);  // 🔥 NEW: Preserve registration order
 
 //    std::cout << "[GPUMaterialRegistry] Registered material ID " << newID

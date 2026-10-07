@@ -618,8 +618,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                  const math::m4x4& projectionMatrix,
                  NaniteStreamingManager* streamingManager,
                  u32 bufferIndex) {
-    if (execute_call_count_ == 0) {
-//        std::cout << "[GPUCulling] GPU Progressive Filtering Execute called, initialized_=" << initialized_ << std::endl;
+    if (execute_call_count_ == 0) {//        std::cout << "[GPUCulling] GPU Progressive Filtering Execute called, initialized_=" << initialized_ << std::endl;
     }
     ++execute_call_count_;
     callCount = execute_call_count_;  // mirror for any debug-log reads; remove after Part 30 cleanup.
@@ -627,6 +626,12 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     if (!initialized_) {
         PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Not initialized" << std::endl;
         return false;
+    }
+
+    // [PassDebugView 排查] PRIMAL_CULL_FORCEPASS=1 强制全部 cluster 通过剔除
+    // （A/B：区分"剔除输出空"与"GBuffer 写入故障"）。
+    if (const char* e = std::getenv("PRIMAL_CULL_FORCEPASS"); e && e[0] == '1') {
+        force_pass_all_debug_ = true;
     }
 
     if (!config_.enable_gpu_culling) {
@@ -660,6 +665,18 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     const u32 instanceCount = snapshot.GetInstanceCount();
     const u32 clusterCount = snapshot.GetClusterRefCount();
 
+    // [PassDebugView 排查] 输入计数变化时打一条（0 = 快照收录/cluster_refs 缺失）。
+    {
+        static u32 s_lastInst = 0xFFFFFFFF, s_lastClu = 0xFFFFFFFF;
+        if (instanceCount != s_lastInst || clusterCount != s_lastClu) {
+            s_lastInst = instanceCount;
+            s_lastClu = clusterCount;
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[GPUCulling] inputs: instances=" << instanceCount
+                << " clusterRefs=" << clusterCount << std::endl;
+        }
+    }
+
     if (instanceCount == 0 || clusterCount == 0) {
         results_.visible_instance_count = 0;
         results_.visible_cluster_count = 0;
@@ -668,6 +685,15 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
 
     math::m4x4 viewProjection = projectionMatrix * viewMatrix;
     math::v3 cameraPos = extract_camera_position(viewMatrix);
+
+    // [PassDebugView 排查] 前 3 次调用打印相机位置/VP 元素（矩阵传递验证）。
+    if (execute_call_count_ <= 3) {
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[GPUCulling] camPos=(" << cameraPos.x << "," << cameraPos.y << ","
+            << cameraPos.z << ") VP00=" << viewProjection.columns[0][0]
+            << " VP32=" << viewProjection.columns[3][2]
+            << " far-ish VP23=" << viewProjection.columns[2][3] << std::endl;
+    }
 
     // current_frame_resource_ is already set at the beginning of Execute()
     auto& current_frame_res = frame_resources_[current_frame_resource_];
@@ -750,10 +776,19 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                     auto& resource_manager = nanite::NaniteResourceManager::Get();
                     nanite::NaniteRuntimeResource* resource = resource_manager.GetOrCreateResource(geometryId);
 
-                    if (callCount == 1 && i < 3) {
-//                        std::cout << "[GPUCulling] Instance " << i << ": geometry_id=" << geometryId
-//                                  << ", resource=" << (void*)resource
-//                                  << ", gpu_mesh=" << (resource ? (void*)resource->gpu_mesh : nullptr) << std::endl;
+                    // [PassDebugView 排查] mesh 数据完整性（resource/gpu_mesh/bounds 来源）。
+                    if (callCount <= 2 && i < 6) {
+                        const f32* bmin = (resource && resource->gpu_mesh) ? resource->gpu_mesh->GetBoundsMin() : nullptr;
+                        const f32* bmax = (resource && resource->gpu_mesh) ? resource->gpu_mesh->GetBoundsMax() : nullptr;
+                        PRIMAL_LOG_STREAM(Info, "Render")
+                            << "[CullBounds] inst=" << i
+                            << " geom=" << geometryId
+                            << " resource=" << (resource ? "ok" : "null")
+                            << " gpu_mesh=" << ((resource && resource->gpu_mesh) ? "ok" : "null")
+                            << " bounds=" << ((bmin && bmax) ? "ok" : "null")
+                            << " center=(" << instanceData[i].world_matrix.columns[3].x << ","
+                            << instanceData[i].world_matrix.columns[3].y << ","
+                            << instanceData[i].world_matrix.columns[3].z << ")" << std::endl;
                     }
 
                     if (resource && resource->gpu_mesh) {
@@ -878,17 +913,32 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // Frame 3: Recreate descriptor sets with meshlet buffer binding for backface culling
     // T4.6.5 part 30.2: basic_/backface_descriptor_sets_created_ are members now (reset on Shutdown).
 
-    if (!basic_descriptor_sets_created_ && callCount == 1) {
+    // [PassDebugView/RG] 场景异步加载时 ResizeBuffersIfNeeded 会重建 snapshot
+    // GPU buffers（instance/cluster 句柄变化）——已创建的 descriptor set 绑定
+    // 旧句柄，dispatch 读空 → 全部剔除 → indirect args 全零 → GBuffer 空。
+    // 句柄变化即重建 descriptor sets（每帧比对，开销可忽略）。
+    const rhi::ResourceHandle liveInstanceBuffer = snapshot.GetInstanceBuffer();
+    const bool snapshotBuffersRebuilt =
+        liveInstanceBuffer != rhi::handles::INVALID_RESOURCE &&
+        liveInstanceBuffer != last_bound_instance_buffer_ &&
+        last_bound_instance_buffer_ != rhi::handles::INVALID_RESOURCE;
+
+    if (!basic_descriptor_sets_created_ && (callCount == 1 || snapshotBuffersRebuilt)) {
 //        std::cout << "[GPUCulling] Frame " << bufferIndex << ": Creating basic descriptor sets (backface culling disabled until frame 3)..." << std::endl;
         if (!CreateDescriptorSets(snapshot)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "Failed to create basic descriptor sets" << std::endl;
             return false;
         }
         basic_descriptor_sets_created_ = true;
+        last_bound_instance_buffer_ = liveInstanceBuffer;
+        if (snapshotBuffersRebuilt) {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[GPUCulling] descriptor sets recreated — snapshot buffers were rebuilt (async scene load)" << std::endl;
+        }
     }
 
     // Frame 3: Recreate descriptor sets with meshlet buffer for backface culling
-    if (!backface_descriptor_sets_created_ && callCount >= 3) {
+    if (!backface_descriptor_sets_created_ && (callCount >= 3 || snapshotBuffersRebuilt)) {
         // Check if meshlet buffer is now available
         if (gpuDrawPipeline_) {
             auto meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();
@@ -909,6 +959,9 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                     return false;
                 }
                 backface_descriptor_sets_created_ = true;
+                if (snapshotBuffersRebuilt) {
+                    last_bound_instance_buffer_ = liveInstanceBuffer;
+                }
 //                std::cout << "[GPUCulling] Frame " << bufferIndex << ": Backface culling descriptor sets created successfully!" << std::endl;
             } else {
                 if (bufferIndex == 0) {
@@ -947,6 +1000,54 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
         return false;
     }
     
+    // [PassDebugView 排查] stage1 视锥判据 CPU 复算（精确镜像
+    // EngineTest/shaders/GPUCullingPipeline.metal stage1 的近平面 + 侧平面
+    // 分支，输入 = snapshot InstanceData 的 bounds 字段，即 GPU 实际消费值）。
+    if (callCount <= 2) {
+        const auto& insts = snapshot.GetInstanceData();
+        auto mkPlane = [&viewProjection](int row, float sign) {
+            const math::v4& c3 = viewProjection.columns[3];
+            const math::v4& cr = viewProjection.columns[row];
+            math::v4 p{c3.x + sign * cr.x, c3.y + sign * cr.y,
+                       c3.z + sign * cr.z, c3.w + sign * cr.w};
+            const float len = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z + p.w*p.w);
+            if (len > 1e-8f) { p.x /= len; p.y /= len; p.z /= len; p.w /= len; }
+            return p;
+        };
+        // 与 UpdateCullingConstants 相同的投影实测法（列主序索引同上）
+        auto clipDepthP = [&projectionMatrix](float z) {
+            const float zc = projectionMatrix.columns[2].z * z + projectionMatrix.columns[3].z;
+            const float wc = projectionMatrix.columns[2].w * z + projectionMatrix.columns[3].w;
+            return (wc > 1e-6f) ? (zc / wc) : -1.0f;
+        };
+        const float dPlus = clipDepthP(1.0f), dMinus = clipDepthP(-1.0f);
+        const float fwdSign = (dPlus >= 0.0f && dPlus <= 1.0f && !(dMinus >= 0.0f && dMinus <= 1.0f)) ? 1.0f : -1.0f;
+        for (u32 i = 0; i < safeInstanceCount && i < 6; ++i) {
+            const math::v3 c = insts[i].bounds_center;
+            const float r = insts[i].bounds_radius;
+            const math::v4 vc = viewMatrix * math::v4{c.x, c.y, c.z, 1.0f};
+            const float viewZ = vc.z * fwdSign; // 统一"前方为正"
+            const bool nearCull = (viewZ + r) < 0.0f;
+            const bool farCull = (viewZ > 1000.0f + r); // far_plane 与 UpdateCullingConstants 的 1000 硬编码一致
+            float side[4]; bool sideCull = false; int sidePlane = -1;
+            for (int k = 0; k < 4; ++k) {
+                const math::v4 pl = mkPlane(k / 2, (k % 2 == 0) ? 1.0f : -1.0f);
+                side[k] = pl.x * vc.x + pl.y * vc.y + pl.w; // xy-only trick，同 shader
+                if (side[k] < -2.0f * (r + 2.0f)) { sideCull = true; if (sidePlane < 0) sidePlane = k; }
+            }
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[CullProbe] fwdSign=" << fwdSign
+                << " i=" << i
+                << " center=(" << c.x << "," << c.y << "," << c.z << ") r=" << r
+                << " viewz=" << vc.z << " viewxy=(" << vc.x << "," << vc.y << ")"
+                << " nearCull=" << (nearCull ? 1 : 0)
+                << " farCull=" << (farCull ? 1 : 0)
+                << " side=[" << side[0] << "," << side[1] << "," << side[2] << "," << side[3] << "]"
+                << " sideCull=" << (sideCull ? 1 : 0) << " sidePlane=" << sidePlane
+                << std::endl;
+        }
+    }
+
     if (!Stage1_FrustumCulling(cmdBuffer, snapshot, viewProjection, bufferIndex)) {
         PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 1 failed" << std::endl;
         return false;
@@ -1803,6 +1904,27 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     constants.camera_position = math::v4{ camera_position.x, camera_position.y, camera_position.z, 0.0f };
     constants.near_plane = 0.1f;
     constants.far_plane = 1000.0f;
+    // [PassDebugView 排查] 视锥近平面符号判别（投影变换实测法，约定无关）：
+    // 把视空间 (0,0,±1,1) 各做过投影，深度落入 [0,1]（Metal 裁剪域，兼容
+    // reversed-Z）且 w>0 的方向即前方。编辑器 MetalCamera 为 +Z forward（LH），
+    // 测试壳 CreateLookAtMatrix 为 -Z forward（RH）。旧 P22*P23 同号/异号
+    // 启发式在编辑器投影上判错（实得 -1 而 view 实测 +Z forward）。
+    {
+        // 列主序 m[col][row]：P22=columns[2].z、P23=columns[3].z、
+        // P32=columns[2].w、P33=columns[3].w（勿混用 columns[2].w=P32）。
+        auto clipDepth = [&projection_matrix](float z) {
+            const float zc = projection_matrix.columns[2].z * z + projection_matrix.columns[3].z;
+            const float wc = projection_matrix.columns[2].w * z + projection_matrix.columns[3].w;
+            return (wc > 1e-6f) ? (zc / wc) : -1.0f;
+        };
+        const float dPlus = clipDepth(1.0f);
+        const float dMinus = clipDepth(-1.0f);
+        const bool plusIsFront = (dPlus >= 0.0f && dPlus <= 1.0f);
+        const bool minusIsFront = (dMinus >= 0.0f && dMinus <= 1.0f);
+        constants.view_forward_sign = (plusIsFront && !minusIsFront) ? 1.0f
+                                    : (minusIsFront && !plusIsFront) ? -1.0f
+                                    : -1.0f;
+    }
     constants.frame_index = frame_index;
     constants.enable_occlusion_culling = config_.enable_occlusion_culling ? 1 : 0;
     constants.enable_lod_selection = config_.enable_lod_selection ? 1 : 0;
@@ -1817,7 +1939,8 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     // T4.6.5 part 35.2: per-cluster bounds OOB guard. 0 on first frame
     // (gpuDraw hasn't run yet) — Stage4 falls back to instance bounds.
     constants.total_meshlet_count = gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0u;
-    constants._pad_cm0 = 0;
+    // view_forward_sign 已在本函数上方（near/far 赋值处）按投影矩阵算出；
+    // 勿在此处清零覆盖。
     constants._pad_cm1 = 0;
     constants._pad_cm2 = 0;
 

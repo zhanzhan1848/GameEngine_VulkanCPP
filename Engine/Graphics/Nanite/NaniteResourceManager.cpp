@@ -127,8 +127,24 @@ NaniteRuntimeResource* NaniteResourceManager::GetOrCreateResource(id::id_type ge
         resource->cluster_data.meshlet_count = 1;
     }
 
-    resource->gpu_mesh = primal::content::get_rhi_gpu_mesh(
-        primal::content::get_rhi_mesh_id(geometry_id));
+    // [PassDebugView/RG 修复] gpu_mesh 延迟重试：编辑器场景走异步 ImportMesh，
+    // resource 创建瞬间 mesh 可能尚未 cooked——此前 null 被永久缓存，culling
+    // bounds 全部退化为原点球 → 编辑器视锥剔除全拒 → GBuffer 空（异步时序
+    // bug，2026-09-22 pass view 排查定位）。幂等重试：mesh cooked 后自动恢复。
+    if (!resource->gpu_mesh) {
+        const id::id_type rhiMeshId = primal::content::get_rhi_mesh_id(geometry_id);
+        resource->gpu_mesh = primal::content::get_rhi_gpu_mesh(rhiMeshId);
+        // 一次性诊断：定位编辑器路径 gpu_mesh=null 的确切断点。
+        static bool s_gpuMeshRetryLogged = false;
+        if (!s_gpuMeshRetryLogged) {
+            s_gpuMeshRetryLogged = true;
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[GpuMeshRetry] geometry_id=" << geometry_id
+                << " rhi_mesh_id=" << rhiMeshId
+                << (rhiMeshId == id::invalid_id ? " (invalid mapping!)" : "")
+                << " gpu_mesh=" << (resource->gpu_mesh ? "ok" : "null") << std::endl;
+        }
+    }
     
     if (resource->gpu_mesh) {
         // std::cout << "[NaniteResourceManager]   RHIGpuMesh obtained successfully" << std::endl;

@@ -57,7 +57,8 @@ public:
      * @param cmd_buffer Command buffer for GPU operations
      */
     BuildResult BuildHZB(rhi::ResourceHandle depth_texture,
-                        rhi::RHICommandBuffer* cmd_buffer);
+                        rhi::RHICommandBuffer* cmd_buffer,
+                        u32 frame_slot = 0);
 
     /**
      * @brief Get HZB texture for reading
@@ -102,7 +103,8 @@ private:
     bool CreateHZBSampler();
 
     bool GenerateHZBOnCPU(rhi::ResourceHandle depth_texture);
-    bool GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::ResourceHandle depth_texture);
+    bool GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::ResourceHandle depth_texture,
+                          u32 frame_slot);
 
     bool CreateHZBTexture();
     bool UpdateHZBMipLevel(u32 mip_level, rhi::RHICommandBuffer* cmd_buffer);
@@ -123,6 +125,18 @@ private:
     // binding types at slot 0 in one module, so we split copy into its own DSL+PL.
     rhi::PipelineLayoutHandle hzb_copy_pipeline_layout_{ rhi::handles::INVALID_PIPELINE_LAYOUT };
     rhi::DescriptorSetLayoutHandle hzb_copy_descriptor_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
+
+    // P0.1 (03047) 修复:mip 派发的持久描述符集池,按帧槽(3)+迭代(≤16 级)
+    // 分槽。此前 Vulkan 每帧「创建→录制→销毁」11 个 set,GC 立即回收同 id,
+    // 下一帧更新时上一帧 pending 的 command buffer 仍握着旧 native 句柄,
+    // MoltenVK 判 set 在用(03047)并作废整条 recording。持久池下每个 set
+    // 每帧槽只更新一次,槽间由 BeginFrame 的 fence 等待隔离。
+    static constexpr u32 kMipPoolFrames = 3;
+    static constexpr u32 kMipPoolPerFrame = 16;
+    rhi::DescriptorSetHandle mip_set_pool_[kMipPoolFrames][kMipPoolPerFrame]{};
+    // copy 阶段(Dawn/Vulkan)同理:每帧一槽,避免「帧内创建销毁→GC 同 id
+    // 回收→旧 pending command buffer 握着新 set」的 03047。
+    rhi::DescriptorSetHandle copy_set_pool_[kMipPoolFrames]{};
 
     u32 mip_levels_{ 0 };
     bool initialized_{ false };

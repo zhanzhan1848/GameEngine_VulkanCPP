@@ -65,7 +65,7 @@ void main() {
 
     // ORM sentinel: AO=1, Roughness=1, Metallic=0 — fully rough, non-metallic,
     // full AO so deferred lighting attenuates nothing from this surface.
-    outORM = vec4(1.0, 1.0, 0.0, 1.0);
+    outORM = vec4(1.0, 1.0, 0.0, 0.0);  // P2-B: unlit 无透光
 
     // Velocity with jitter subtraction (matches GBufferUnlit.metal:153).
     vec2 currentNDC = inCurrentPos.xy / inCurrentPos.w;
