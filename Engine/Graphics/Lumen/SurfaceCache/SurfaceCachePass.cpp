@@ -1,5 +1,16 @@
+#include "OwnerCardRanges.h"
+#include "BoundaryLightingPoints.h"
+#include "CardTileOwners.h"
+#include "StaticSurfacePool.h"
+#include "TriangleSupportIndex.h"
+#include "GeometrySurfaceResample.h"
+#include "Graphics/Utilities/GeometryBVHStore.h"
+#include "Engine/Graphics/RHI/Core/CardSurfaceIdentity.h"
 #include "SurfaceCachePass.h"
 #include "Engine/Graphics/Lumen/GIWarmup.h"
+#include "Graphics/Lumen/GIDebugParams.h"
+#include <cstdlib>
+#include <chrono>
 #include "Engine/Graphics/Lumen/DDGISlotMap.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
@@ -18,12 +29,53 @@
 #include <cstdio>
 #include <set>
 #include "Engine/Common/CoreLogStream.h"
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanTexture.h"
+#include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
+#endif
 
 namespace primal::graphics::lumen {
 
 using namespace rhi;
 using namespace rendergraph;
 namespace rhimath = primal::graphics::rhi::math;
+
+// Diagnostic labels only: preserve dispatch, barriers, resources and shader bytes.
+// Native profilers may retain these as encoder labels or debug-group events.
+static void DispatchScNativeLabel(RHIDeviceBase* device, RHICommandBuffer* cmd,
+                                  const char* label, u32 x, u32 y, u32 z) {
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+    static const bool requested = [] {
+        const char* value = std::getenv("SC_NATIVE_LABELS");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (requested && device->GetPlatform() == RHIPlatform::Vulkan) {
+        auto* vk = static_cast<VulkanDevice*>(device);
+        auto begin = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+            vkGetDeviceProcAddr(vk->GetNativeDevice(), "vkCmdBeginDebugUtilsLabelEXT"));
+        auto end = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+            vkGetDeviceProcAddr(vk->GetNativeDevice(), "vkCmdEndDebugUtilsLabelEXT"));
+        if (begin && end) {
+            VkDebugUtilsLabelEXT info{};
+            info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+            info.pLabelName = label;
+            auto native = static_cast<VulkanCommandBuffer*>(cmd)->GetNativeCmdBuffer();
+            begin(native, &info);
+            cmd->Dispatch(x, y, z);
+            end(native);
+            return;
+        }
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            PRIMAL_LOG_STREAM(Warn, "Render") << "[SC_NATIVE_LABELS] debug utils unavailable" << std::endl;
+        }
+    }
+#endif
+    cmd->Dispatch(x, y, z);
+}
+
 
 namespace {
 
@@ -322,8 +374,57 @@ void SurfaceCachePass::SetInstanceEmissive(uint32_t instance_id, const math::v3&
     auto* m = static_cast<math::v4*>(device_->MapBuffer(instance_emissive_buffer_));
     if (m) {
         m[instance_id] = math::v4{rgb.x, rgb.y, rgb.z, 1.0f};
+        instance_emissive_cpu_[instance_id] = m[instance_id];
+        surface_seed_epoch_ = static_composite_epoch_ = page_clear_epoch_ = 0xFFFFFFFFu;
+        RequestTileValidityReset();
         device_->UnmapBuffer(instance_emissive_buffer_);
     }
+}
+
+// ============================================================================
+// [SC per-mesh 计划 P2] 静态表面页：sidecar 挂载 + 注册期双摘要键控。
+// 合成管线不可用（Metal v1）时 ResolveStaticSlot 恒 INVALID——旗标与合成
+// 能力同生同灭，保证不会出现"跳了 capture 却没页可合成"的黑卡状态。
+// ============================================================================
+bool SurfaceCachePass::AttachStaticPages(const char* path)
+{
+    boundary_samples_.Detach();
+    boundary_radiance_cache_.Clear();
+    boundary_atlas_groups_.clear();boundary_atlas_epoch_=UINT32_MAX;static_composite_epoch_=UINT32_MAX;
+    if (!static_pages_) static_pages_ = std::make_unique<SurfaceStaticPages>();
+    return static_pages_->Attach(path);
+}
+
+bool SurfaceCachePass::AttachBoundarySamples(const char* path)
+{
+    boundary_samples_.Detach();
+    boundary_radiance_cache_.Clear();
+    boundary_atlas_groups_.clear();boundary_atlas_epoch_=UINT32_MAX;static_composite_epoch_=UINT32_MAX;
+    return static_pages_ && boundary_samples_.Attach(path,*static_pages_);
+}
+
+uint32_t SurfaceCachePass::ResolveStaticSlot(uint64_t geometry_digest, uint64_t layout_digest, uint64_t material_digest) const
+{
+    if (!StaticPagesEnabled() || atlas_init_pipeline_ == handles::INVALID_PIPELINE ||
+        page_clear_pipeline_ == handles::INVALID_PIPELINE ||
+        static_composite_pipeline_ == handles::INVALID_PIPELINE ||
+        static_composite_set_ == handles::INVALID_DESCRIPTOR_SET)
+    {
+        return SurfaceStaticPages::kInvalidSlot;
+    }
+    float nearDepth = rhi::card_surface_identity::CaptureNear;
+    if (const char* e = std::getenv("PRIMAL_SC_CAPTURE_NEAR")) {
+        const float v = std::atof(e);
+        if (v >= 0.f && v < 1.f) nearDepth = v;
+    }
+    if (nearDepth != static_pages_->CaptureNear()) return SurfaceStaticPages::kInvalidSlot;
+    float density = 64.f;
+    if (const char* e = std::getenv("PRIMAL_SC_TEXELS_PER_UNIT")) {
+        const float v = std::atof(e);
+        if (std::isfinite(v) && v >= 16.f && v <= 256.f) density = v;
+    }
+    if (std::abs(density - static_pages_->TexelsPerUnit()) > 1e-4f) return SurfaceStaticPages::kInvalidSlot;
+    return static_pages_->FindMesh(geometry_digest, layout_digest, material_digest);
 }
 
 bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& config) {
@@ -335,7 +436,9 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
     page_size_ = config.surface_cache_page_size;
     light_eval_rr_cursor_ = 0;
     lighting_atlas_seed_mask_ = 0;
+    instance_emissive_cpu_.fill(math::v4{});
     atlas_seeded_ = false;
+    surface_seed_epoch_ = static_composite_epoch_ = page_clear_epoch_ = 0xFFFFFFFFu;
 
     // Initialize card generator (meshes registered later by the pipeline
     // when the scene snapshot rebuilds — real per-mesh AABBs, not test data).
@@ -351,12 +454,194 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // Create atlas textures
     CreateAtlasTextures();
+    if(device_->GetPlatform()==rhi::RHIPlatform::Vulkan && triangle_atlas_buffer_==handles::INVALID_RESOURCE) return false;
 
     // T8.12: card-view capture — DEFAULT ON (validated 2026-08-28: L_2F
     // 39.4→46.6 median, REDBOX 9.4→16.6, colored bounce visible, 0 reg).
     // SC_CARDVIEW=0 falls back to the legacy screen-space gather.
+    // [SC per-mesh 计划 P2] 静态表面页 sidecar（PRIMAL_SC_STATIC_PAGES=<path>，
+    // 默认关）。Attach 失败 = 无静态页，全部 mesh 保持 capture 路径（可区分
+    // 状态，不静默伪有效——计划 §3.2）。
+    if (const char* spEnv = std::getenv("PRIMAL_SC_STATIC_PAGES"); spEnv && spEnv[0]) {
+        if (AttachStaticPages(spEnv)) {
+            char msg[512];
+            std::snprintf(msg, sizeof(msg),
+                "[SurfaceCache] PRIMAL_SC_STATIC_PAGES attached: %s (%u meshes, albedo_scale %.3f)",
+                spEnv, static_pages_->MeshCount(), static_pages_->AlbedoScale());
+            PRIMAL_LOG_STREAM(Error, "Render") << msg << std::endl;
+        } else {
+            static_pages_->Detach();
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[SurfaceCache] PRIMAL_SC_STATIC_PAGES attach FAILED — keeping capture path: "
+                << spEnv << std::endl;
+        }
+    }
+    if (const char* boundary=std::getenv("PRIMAL_SC_BOUNDARY_SAMPLES"); boundary && *boundary) {
+        if (AttachBoundarySamples(boundary)) {
+            PRIMAL_LOG_STREAM(Info,"Render") << "[SurfaceCache] SCB1 CPU samples attached: "
+                << boundary_samples_.MeshCount() << " meshes, " << boundary_samples_.SampleCount()
+                << " samples (GPU path inactive)" << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Warn,"Render") << "[SurfaceCache] SCB1 attach rejected; auxiliary samples disabled: "
+                << boundary << std::endl;
+        }
+    }
     const char* cvEnv = std::getenv("SC_CARDVIEW");
     card_view_enabled_ = !(cvEnv && strcmp(cvEnv, "0") == 0);
+    const char* ownerEnv = std::getenv("PRIMAL_SC_CAPTURE_OWNER");
+    const bool ownerIsolation = !(ownerEnv && std::strcmp(ownerEnv, "0") == 0);
+    if (!card_view_enabled_ && ownerIsolation) {
+        card_view_enabled_ = true;
+        PRIMAL_LOG_STREAM(Warn, "Render") << "[SurfaceCache] owner isolation requires card-view capture; overriding SC_CARDVIEW=0" << std::endl;
+    }
+
+    // Exact opt-in gate for the card writer provenance diagnostic.  It is
+    // Vulkan-only and is valid only with the default card-view capture path;
+    // a GBuffer capture run must not be presented as the same evidence.
+    const char* writerEnv = std::getenv("SC_CAPTURE_SOURCE_AUDIT");
+    source_writer_audit_requested_ = writerEnv && strcmp(writerEnv, "1") == 0;
+    source_writer_audit_enabled_ = false;
+    source_writer_audit_failed_ = false;
+    source_writer_atlas_in_uav_ = false;
+    const char* geometryEnv = std::getenv("SC_CAPTURE_GEOMETRY_AUDIT");
+    geometry_audit_requested_ = geometryEnv && strcmp(geometryEnv, "1") == 0;
+    geometry_audit_enabled_ = false;
+    geometry_audit_failed_ = false;
+    geometry_witness_in_uav_ = false;
+    for (auto& witness : geometry_witness_)
+        witness = handles::INVALID_RESOURCE;
+    if (source_writer_audit_requested_) {
+        const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+        if (!isVk || !card_view_enabled_) {
+            source_writer_audit_failed_ = true;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[SC_CAPTURE_SOURCE_AUDIT] requires Vulkan with card-view capture enabled; "
+                << "writer diagnostic closed (no fallback)" << std::endl;
+        } else {
+            const u64 writerBytes = u64(atlas_size_) * atlas_size_ * 16u;
+            constexpr u64 kMaxAuditBufferBytes = 256ull * 1024ull * 1024ull;
+            if (atlas_size_ == 0u || writerBytes > kMaxAuditBufferBytes) {
+                source_writer_audit_failed_ = true;
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[SC_CAPTURE_SOURCE_AUDIT] writer atlas exceeds diagnostic capacity" << std::endl;
+            } else {
+                TextureDesc writerDesc{};
+                writerDesc.size = {atlas_size_, atlas_size_, 1};
+                writerDesc.mipLevels = 1;
+                writerDesc.arraySize = 1;
+                writerDesc.format = DataFormat::RGBA32_UInt;
+                writerDesc.type = TextureType::Texture2D;
+                writerDesc.usage = TextureUsage::ShaderResource |
+                    TextureUsage::UnorderedAccess | TextureUsage::RenderTarget |
+                    TextureUsage::CopySource;
+                writerDesc.name = "SurfaceCache_CaptureWriter_RGBA32UInt";
+                source_writer_atlas_ = device_->CreateTexture(writerDesc);
+
+                // This is intentionally an off-frame blocking initialization.
+                // The RHI contract rejects unsupported backends/call sites;
+                // failure closes the audit instead of leaving stale tags.
+                if (source_writer_atlas_ == handles::INVALID_RESOURCE) {
+                    source_writer_audit_failed_ = true;
+                } else {
+                    std::vector<u32> zero(writerBytes / sizeof(u32), 0u);
+                    TextureRegionUpdate region{};
+                    region.width = atlas_size_;
+                    region.height = atlas_size_;
+                    region.depth = 1;
+                    if (!device_->UpdateTextureRegion(source_writer_atlas_, zero.data(),
+                                                      writerBytes, region)) {
+                        source_writer_audit_failed_ = true;
+                        device_->DestroyTexture(source_writer_atlas_);
+                        source_writer_atlas_ = handles::INVALID_RESOURCE;
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[SC_CAPTURE_SOURCE_AUDIT] blocking writer atlas clear failed"
+                            << std::endl;
+                    }
+                }
+            }
+        }
+    }
+    if (geometry_audit_requested_) {
+        const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+        const auto& caps = device_->GetDeviceInfo();
+        const u64 witnessBytes = u64(atlas_size_) * atlas_size_ * 16u;
+        const u64 aggregateBytes = u64(witnessBytes) * 4u +
+                                    (u64(atlas_size_) * atlas_size_ * 16u);
+        constexpr u64 kMaxWitnessTextureBytes = 256ull * 1024ull * 1024ull;
+        constexpr u64 kMaxGeometryAggregateBytes = 384ull * 1024ull * 1024ull;
+        const bool prerequisites = source_writer_audit_requested_ && isVk &&
+            card_view_enabled_ && caps.maxRenderTargets >= 8u &&
+            caps.maxTexture2DSize >= atlas_size_ && atlas_size_ > 0u &&
+            witnessBytes > 0u && witnessBytes <= kMaxWitnessTextureBytes &&
+            aggregateBytes <= kMaxGeometryAggregateBytes &&
+            source_writer_atlas_ != handles::INVALID_RESOURCE;
+        if (!prerequisites) {
+            geometry_audit_failed_ = true;
+            if (source_writer_audit_requested_) {
+                source_writer_audit_failed_ = true;
+                source_writer_audit_enabled_ = false;
+            }
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[SC_CAPTURE_GEOMETRY_AUDIT] requires source writer/Vulkan/card-view, "
+                << "8 MRTs, texture cap, and geometry capacity; diagnostic closed" << std::endl;
+        } else {
+            const char* names[4] = {
+                "SurfaceCache_CaptureGeometryWorldPoint_RGBA32UInt",
+                "SurfaceCache_CaptureGeometryTriangle0_RGBA32UInt",
+                "SurfaceCache_CaptureGeometryTriangle1_RGBA32UInt",
+                "SurfaceCache_CaptureGeometryTriangle2_RGBA32UInt" };
+            bool ok = true;
+            for (u32 i = 0; i < 4; ++i) {
+                TextureDesc witnessDesc{};
+                witnessDesc.size = {atlas_size_, atlas_size_, 1};
+                witnessDesc.mipLevels = 1;
+                witnessDesc.arraySize = 1;
+                witnessDesc.format = DataFormat::RGBA32_UInt;
+                witnessDesc.type = TextureType::Texture2D;
+                witnessDesc.usage = TextureUsage::ShaderResource |
+                    TextureUsage::UnorderedAccess | TextureUsage::RenderTarget |
+                    TextureUsage::CopySource;
+                witnessDesc.name = names[i];
+                geometry_witness_[i] = device_->CreateTexture(witnessDesc);
+                u32 actualW = 0, actualH = 0;
+                if (geometry_witness_[i] == handles::INVALID_RESOURCE ||
+                    device_->GetTextureFormat(geometry_witness_[i]) != DataFormat::RGBA32_UInt ||
+                    !device_->GetTextureSize(geometry_witness_[i], actualW, actualH) ||
+                    actualW != atlas_size_ || actualH != atlas_size_) {
+                    ok = false;
+                    break;
+                }
+                std::vector<u32> zero(witnessBytes / sizeof(u32), 0u);
+                TextureRegionUpdate region{};
+                region.width = atlas_size_;
+                region.height = atlas_size_;
+                region.depth = 1;
+                if (!device_->UpdateTextureRegion(geometry_witness_[i], zero.data(),
+                                                  witnessBytes, region)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) {
+                geometry_audit_failed_ = true;
+                source_writer_audit_failed_ = true;
+                source_writer_audit_enabled_ = false;
+                for (auto& witness : geometry_witness_) {
+                    if (witness != handles::INVALID_RESOURCE)
+                        device_->DestroyTexture(witness);
+                    witness = handles::INVALID_RESOURCE;
+                }
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[SC_CAPTURE_GEOMETRY_AUDIT] witness format/extent/zero initialization failed; "
+                    << "diagnostic closed" << std::endl;
+            } else {
+                geometry_audit_enabled_ = true;
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[SC_CAPTURE_GEOMETRY_AUDIT] four RGBA32_UInt witness atlases allocated and cleared"
+                    << std::endl;
+            }
+        }
+    }
     if (card_view_enabled_) {
         rhi::TextureDesc dv{};
         dv.size = { atlas_size_, atlas_size_, 1 };
@@ -383,6 +668,10 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // Create pipelines and triple-buffered descriptor sets
     CreatePipelines();
+    card_generator_.SetCoveragePackingDefault(geometry_first_requested_ && StaticPagesEnabled());
+
+    // [SC per-mesh P4] 射线 lookup 分类统计缓冲。
+    CreateRayLookupStats();
 
     initialized_ = true;
 
@@ -394,10 +683,89 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 }
 
 void SurfaceCachePass::Shutdown() {
+    boundary_samples_.Detach();
+    boundary_radiance_cache_.Clear();
+    boundary_atlas_groups_.clear();boundary_atlas_epoch_=UINT32_MAX;
+    for(u32 slot=0;slot<3;++slot){boundary_proof_slot_=slot;ReleaseBoundaryLightingProof();}
+    boundary_proof_slot_=0;
     if (!initialized_) return;
     initialized_ = false;
 
     card_view_depth_ = rhi::handles::INVALID_RESOURCE;
+    for (auto* resource : {&static_composite_info_buffer_, &static_composite_pool_buffer_, &ray_lookup_stats_buffer_, &page_clear_rects_buffer_, &triangle_atlas_buffer_, &triangle_support_buffer_, &ray_triangle_buffer_}) {
+        if (*resource != handles::INVALID_RESOURCE) device_->DestroyBuffer(*resource);
+        *resource = handles::INVALID_RESOURCE;
+    }
+    triangle_support_word_count_=0u;
+    for(auto& slot:geometry_buffers_) {
+        for(auto& b:slot.buffers) { if(b!=handles::INVALID_RESOURCE) device_->DestroyBuffer(b); b=handles::INVALID_RESOURCE; }
+        slot.epoch=~u64(0); slot.ready=false;
+    }
+    geometry_scene_={};
+    for (auto& b : indirect_tile_owner_buffers_) {
+        if (b != handles::INVALID_RESOURCE) device_->DestroyBuffer(b);
+        b = handles::INVALID_RESOURCE;
+    }
+    for (auto& s : indirect_tile_owner_signatures_) s = ~u64(0);
+    for (auto& s : indirect_tile_owner_bytes_) s = 0;
+    for (auto pipeline : {static_composite_pipeline_, page_clear_pipeline_})
+        if (pipeline != handles::INVALID_PIPELINE) device_->DestroyPipeline(pipeline);
+    for (auto layout : {static_composite_layout_, page_clear_layout_})
+        if (layout != handles::INVALID_PIPELINE_LAYOUT) device_->DestroyPipelineLayout(layout);
+    for (auto set : {static_composite_set_, page_clear_set_})
+        if (set != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(set);
+    for (auto layout : {static_composite_set_layout_, page_clear_set_layout_})
+        if (layout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) device_->DestroyDescriptorSetLayout(layout);
+
+    static_composite_pipeline_ = page_clear_pipeline_ = handles::INVALID_PIPELINE;
+    static_composite_layout_ = page_clear_layout_ = handles::INVALID_PIPELINE_LAYOUT;
+    static_composite_set_ = page_clear_set_ = handles::INVALID_DESCRIPTOR_SET;
+    static_composite_set_layout_ = page_clear_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+
+    if(card_fill_audit_.tables_staging!=handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(card_fill_audit_.tables_staging);
+    if (light_writer_snapshot_.staging != handles::INVALID_RESOURCE)
+        device_->DestroyBuffer(light_writer_snapshot_.staging);
+    light_writer_snapshot_ = {};
+    card_fill_audit_ = {};
+    card_fill_audit_cards_.clear();
+
+    for (auto cb : card_fill_writer_cb_)
+        if (cb != handles::INVALID_RESOURCE) device_->DestroyBuffer(cb);
+    for (auto set : card_fill_writer_set_)
+        if (set != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(set);
+    if (card_fill_writer_pipeline_ != handles::INVALID_PIPELINE)
+        device_->DestroyPipeline(card_fill_writer_pipeline_);
+    if (card_fill_writer_layout_ != handles::INVALID_PIPELINE_LAYOUT)
+        device_->DestroyPipelineLayout(card_fill_writer_layout_);
+    if (card_fill_writer_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        device_->DestroyDescriptorSetLayout(card_fill_writer_set_layout_);
+    if (source_writer_atlas_ != handles::INVALID_RESOURCE)
+        device_->DestroyTexture(source_writer_atlas_);
+    for (auto& witness : geometry_witness_) {
+        if (witness != handles::INVALID_RESOURCE)
+            device_->DestroyTexture(witness);
+    }
+
+    // Clear diagnostic handles only after the corresponding destruction calls.
+    // The handles are POD values, so clearing them before the checks above would
+    // leak the opt-in writer resources during shutdown.
+    source_writer_atlas_ = rhi::handles::INVALID_RESOURCE;
+    source_writer_audit_enabled_ = false;
+    source_writer_audit_requested_ = false;
+    source_writer_audit_failed_ = false;
+    source_writer_atlas_in_uav_ = false;
+    card_fill_writer_pipeline_ = handles::INVALID_PIPELINE;
+    card_fill_writer_layout_ = handles::INVALID_PIPELINE_LAYOUT;
+    card_fill_writer_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    for (auto& set : card_fill_writer_set_) set = handles::INVALID_DESCRIPTOR_SET;
+    for (auto& cb : card_fill_writer_cb_) cb = handles::INVALID_RESOURCE;
+    geometry_audit_requested_ = false;
+    geometry_audit_enabled_ = false;
+    geometry_audit_failed_ = false;
+    geometry_witness_in_uav_ = false;
+    for (auto& witness : geometry_witness_)
+        witness = handles::INVALID_RESOURCE;
 
     device_ = nullptr;
 
@@ -433,6 +801,14 @@ void SurfaceCachePass::CreateAtlasTextures() {
     // Depth: R32F — RenderTarget for CardCapture
     CreateAtlas("SurfaceCache_Depth", DataFormat::R32_Float, depth_atlas_, true);
 
+    if(device_->GetPlatform()==rhi::RHIPlatform::Vulkan) {
+        BufferDesc desc{}; desc.size=u64(atlas_size_)*atlas_size_*sizeof(u32);
+        desc.type=BufferType::Structured; desc.memoryUsage=desc.usage=GPUMemoryUsage::Static;
+        desc.structured.elementCount=atlas_size_*atlas_size_; desc.structured.elementStride=sizeof(u32);
+        triangle_atlas_buffer_=device_->CreateBuffer(desc);
+        if(triangle_atlas_buffer_==handles::INVALID_RESOURCE) PRIMAL_LOG_STREAM(Error,"Render") << "[SC_TRIANGLE] atlas allocation failed";
+    }
+
     // Emissive: RGBA16F — RenderTarget for CardCapture
     CreateAtlas("SurfaceCache_Emissive", DataFormat::RGBA16_Float, emissive_atlas_, true);
 
@@ -442,6 +818,15 @@ void SurfaceCachePass::CreateAtlasTextures() {
             ("SurfaceCache_Lighting_" + std::to_string(i)).c_str(),
             DataFormat::RGBA16_Float,
             lighting_atlas_[i]);
+    }
+
+    // [E0-B 2026-09-21] nodirect 副本 ×3（LightEval 同帧另存 result −
+    // direct·ρ/π；SC/SPGI 查询侧用它收敛 indirect-only 查询）。
+    for (int i = 0; i < 3; ++i) {
+        CreateAtlas(
+            ("SurfaceCache_Lighting_NoDirect_" + std::to_string(i)).c_str(),
+            DataFormat::RGBA16_Float,
+            lighting_nodirect_atlas_[i]);
     }
 
     // Runtime buffers
@@ -490,7 +875,7 @@ void SurfaceCachePass::CreateAtlasTextures() {
             cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
             indirect_trace_params_cb_[i] = device_->CreateBuffer(cbDesc);
 
-            cbDesc.size = 96;    // sizeof(IndirectResolveParamsGPU) padded (88 → std140 round-up)
+            cbDesc.size = 128;  // sizeof(IndirectResolveParamsGPU) padded (std140 round-up; K-1 tile_sky_color + 稳定性 tile_growth_cap)
             indirect_resolve_params_cb_[i] = device_->CreateBuffer(cbDesc);
 
             TextureDesc outDesc{};
@@ -584,6 +969,10 @@ void SurfaceCachePass::CreateConstantBuffers() {
         }
     }
     CreateCBs(card_fill_cb_, 176); // CardFillParams: SDF cascades + light + counts
+    if (source_writer_audit_requested_ && !source_writer_audit_failed_) {
+        // binding15 of SurfaceCacheCardFill_writer is a four-u32 frame tag.
+        CreateCBs(card_fill_writer_cb_, 16);
+    }
     CreateCBs(shadow_cb_, 464);    // T3.3/G2: ShadowParams（96B 基础 + 256B shadow 矩阵 + 16B meta）
 
     // T3.3: atlas-space visibility buffer (float per atlas texel), CPU-
@@ -601,6 +990,202 @@ void SurfaceCachePass::CreateConstantBuffers() {
         if (vis) {
             for (u64 i = 0; i < (u64)atlas_size_ * atlas_size_; ++i) vis[i] = 1.0f;
             device_->UnmapBuffer(shadow_visibility_buffer_);
+        }
+    }
+}
+
+// [SC per-mesh 计划 P4] 射线 lookup 分类统计缓冲（host-visible，原子累加；
+// 15×u32——布局见 SurfaceCacheIndirectResolve.comp binding 17 注释）。
+// PRIMAL_SC_RAY_LOOKUP_STATS=1 时定期读回。
+bool SurfaceCachePass::SetGeometryScene(std::span<const ray_geometry::InstanceInput> instances)
+{
+    ++geometry_epoch_;
+    bool identityValid=true;
+    for(const auto& instance:instances)
+        if(!instance.mesh || !card_generator_.BindGeometryIdentity(instance.instance_id,instance.mesh->geometry_digest)) {
+            identityValid=false;
+            PRIMAL_LOG_STREAM(Error,"Render") << "[SC_GEOMETRY_FIRST] BVH/SC geometry identity mismatch instance=" << instance.instance_id;
+        }
+    bool loaded=false,persisted=false;
+    const bool ok=identityValid && ray_geometry::LoadOrBuildSceneBVH(instances,
+        ray_geometry::GeometryCacheDirectory(),geometry_scene_,&loaded,&persisted);
+    if(!ok)geometry_scene_={};
+    else if(!persisted)PRIMAL_LOG_STREAM(Warn,"Render") << "[SC_BVH_CACHE] unable to persist scene; using validated memory BVH";
+    RequestTileValidityReset();
+    PRIMAL_LOG_STREAM(Info,"Render") << "[SC_GEOMETRY_FIRST] scene_complete=" << ok
+        << " cache=" << (loaded?"loaded":persisted?"saved":"memory") << " source_digest=" << ray_geometry::SceneSourceDigest(instances)
+        << " instances=" << geometry_scene_.instances.size() << " blas_nodes=" << geometry_scene_.bottom.size()
+        << " triangles=" << geometry_scene_.triangles.size();
+    return ok;
+}
+
+bool SurfaceCachePass::UploadGeometryScene(u32 frame)
+{
+    auto& slot=geometry_buffers_[frame];
+    if(slot.epoch==geometry_epoch_) return slot.ready;
+    const void* data[4]={geometry_scene_.top.data(),geometry_scene_.bottom.data(),
+        geometry_scene_.triangles.data(),geometry_scene_.instances.data()};
+    const u64 size[4]={geometry_scene_.top.size()*sizeof(ray_geometry::Node),geometry_scene_.bottom.size()*sizeof(ray_geometry::Node),
+        geometry_scene_.triangles.size()*sizeof(ray_geometry::Triangle),geometry_scene_.instances.size()*sizeof(ray_geometry::Instance)};
+    slot.ready=false;
+    // Each slot is updated only after the frame fence. Never destroy another
+    // in-flight slot when scene geometry or transforms change.
+    const u8 zero[64]{};
+    bool ok=!geometry_scene_.top.empty();
+    for(u32 i=0;i<4;++i) {
+        const u64 bytes=std::max<u64>(64,size[i]);
+        if(slot.sizes[i]!=bytes || slot.buffers[i]==handles::INVALID_RESOURCE) {
+            if(slot.buffers[i]!=handles::INVALID_RESOURCE) device_->DestroyBuffer(slot.buffers[i]);
+            BufferDesc desc{}; desc.size=bytes; desc.type=BufferType::Structured;
+            desc.usage=desc.memoryUsage=GPUMemoryUsage::Dynamic;
+            slot.buffers[i]=device_->CreateBuffer(desc); slot.sizes[i]=bytes;
+        }
+        auto* dst=slot.buffers[i]!=handles::INVALID_RESOURCE?device_->MapBuffer(slot.buffers[i]):nullptr;
+        if(!dst) { ok=false; continue; }
+        if(size[i]) std::memcpy(dst,data[i],size[i]); else std::memcpy(dst,zero,64);
+        device_->UnmapBuffer(slot.buffers[i]);
+    }
+    slot.epoch=ok?geometry_epoch_:~u64(0); slot.ready=ok; return ok;
+}
+
+bool SurfaceCachePass::ReadbackRayLookupStats(uint32_t frame)
+{
+    if (ray_lookup_stats_buffer_ == handles::INVALID_RESOURCE) return false;
+    rhi::BufferDesc rb{};
+    const char* auditPrefix = std::getenv("SC_RAY_ORACLE_PREFIX");
+    const bool audit = auditPrefix && auditPrefix[0] && device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+    rb.size = (audit ? 16u + 16384u * 16u : 15u) * sizeof(u32); rb.memoryUsage = rhi::GPUMemoryUsage::Readback;
+    rb.bindFlags = u32(rhi::BufferUsageFlags::TransferDst);
+    auto staging = device_->CreateBuffer(rb);
+    auto handle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+    auto* cmd = rhi::GetCommandBuffer(handle);
+    bool complete = false;
+    if (staging != handles::INVALID_RESOURCE && cmd && cmd->Begin()) {
+        cmd->MemoryBarrier(rhi::PipelineStage::AllCommands, rhi::PipelineStage::Transfer,
+                           rhi::AccessFlag::MemoryWrite, rhi::AccessFlag::TransferRead);
+        cmd->CopyBuffer(ray_lookup_stats_buffer_, staging, 0, 0, rb.size);
+        cmd->MemoryBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::Host,
+                           rhi::AccessFlag::TransferWrite, rhi::AccessFlag::HostRead);
+        complete = cmd->End() && cmd->Submit() && cmd->WaitForCompletion();
+    }
+    bool read = false;
+    if (complete) {
+        if (auto* st = static_cast<const u32*>(device_->MapBuffer(staging))) {
+            if (FILE* sf = std::fopen("/tmp/sc_ray_lookup_stats.log", "a")) {
+                std::fprintf(sf, "{\"frame\":%u,\"queried\":%u,\"found\":%u,\"d005\":%u,\"d015\":%u,\"d045\":%u,\"dgt\":%u,\"rej\":[%u,%u,%u,%u,%u,%u,%u,%u]}\n",
+                    frame, st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11], st[12], st[13]);
+                std::fclose(sf); read = true;
+            }
+            if (audit) {
+                std::vector<u32> records;
+                for (u32 i=0; i<16384; ++i) {
+                    const u32* r = st + 16 + i*16;
+                    if (r[12] && r[11] <= 2u) records.insert(records.end(),r,r+16);
+                }
+                const std::string path = std::string(auditPrefix) + ".samples.bin";
+                if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                    const u32 h[2] = {u32(records.size()/16),16};
+                    std::fwrite(h,sizeof(h),1,f); std::fwrite(records.data(),4,records.size(),f); std::fclose(f);
+                }
+                const std::string query = std::string(auditPrefix) + ".rays.bin";
+                if (FILE* f = std::fopen(query.c_str(), "wb")) {
+                    std::fwrite("PGRAYS01",8,1,f); const u32 h[2] = {u32(records.size()/16),0};
+                    std::fwrite(h,sizeof(h),1,f);
+                    for (size_t i=0; i<records.size(); i+=16) std::fwrite(records.data()+i,4,8,f);
+                    std::fclose(f);
+                }
+            }
+            device_->UnmapBuffer(staging);
+        }
+    }
+    if (handle != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+    if (staging != handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);
+    // Optional post-frame snapshot of the exact atlas consumed by the identity
+    // resolver. A separate submitted copy preserves normal dispatch behavior.
+    if (audit && std::getenv("SC_ATLAS_COVERAGE_AUDIT") &&
+        triangle_atlas_buffer_ != handles::INVALID_RESOURCE && !card_generator_.IsPageTableEnabled()) {
+        const u64 atlasBytes = u64(atlas_size_) * atlas_size_ * sizeof(u32);
+        bool saved = true;
+        for (u32 plane = 0; plane < (triangle_support_word_count_ && std::getenv("SC_CARD_TRIANGLE_AUDIT")?3u:2u); ++plane) {
+            const u64 bytes=plane==2u?u64(triangle_support_word_count_)*4u:atlasBytes;
+            rhi::BufferDesc desc{};
+            desc.size = bytes;
+            desc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+            desc.bindFlags = u32(rhi::BufferUsageFlags::TransferDst);
+            auto dest = device_->CreateBuffer(desc);
+            auto copyHandle = device_->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
+            auto* copy = rhi::GetCommandBuffer(copyHandle);
+            bool done = false;
+            if (dest != handles::INVALID_RESOURCE && copy && copy->Begin()) {
+                copy->MemoryBarrier(rhi::PipelineStage::AllCommands, rhi::PipelineStage::Transfer,
+                                    rhi::AccessFlag::MemoryWrite, rhi::AccessFlag::TransferRead);
+                if (plane == 0) {
+                    rhi::ResourceBarrier transition{};
+                    transition.resource = depth_atlas_;
+                    transition.beforeState = rhi::ResourceState::ShaderResource;
+                    transition.afterState = rhi::ResourceState::CopySource;
+                    transition.subresource = 0xFFFFFFFFu;
+                    copy->InsertBarrier(&transition, 1);
+                    rhi::BufferTextureCopyRegion region{};
+                    region.imageSubresource.layerCount = 1;
+                    region.imageExtent = {atlas_size_, atlas_size_, 1};
+                    copy->CopyTextureToBuffer(depth_atlas_, dest, &region, 1);
+                    transition.beforeState = rhi::ResourceState::CopySource;
+                    transition.afterState = rhi::ResourceState::ShaderResource;
+                    copy->InsertBarrier(&transition, 1);
+                } else {
+                    copy->CopyBuffer(plane==2u?triangle_support_buffer_:triangle_atlas_buffer_, dest, 0, 0, bytes);
+                }
+                copy->MemoryBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::Host,
+                                    rhi::AccessFlag::TransferWrite, rhi::AccessFlag::HostRead);
+                done = copy->End() && copy->Submit() && copy->WaitForCompletion();
+            }
+            bool written = false;
+            if (done) if (auto* data = device_->MapBuffer(dest)) {
+                const std::string path = std::string(auditPrefix) + (plane == 0 ? ".atlas-depth.bin" : plane==1?".atlas-ids.bin":".triangle-presence.bin");
+                if (FILE* file = std::fopen(path.c_str(), "wb")) {
+                    written = std::fwrite(data, 1, bytes, file) == bytes;
+                    written = std::fclose(file) == 0 && written;
+                }
+                device_->UnmapBuffer(dest);
+            }
+            saved &= written;
+            if (copyHandle != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(copyHandle);
+            if (dest != handles::INVALID_RESOURCE) device_->DestroyBuffer(dest);
+        }
+        const auto& cards = card_generator_.GetCards();
+        const std::string path = std::string(auditPrefix) + ".atlas-cards.bin";
+        if (FILE* file = std::fopen(path.c_str(), "wb")) {
+            const u32 header[4] = {atlas_size_, u32(cards.size()), frame, card_generator_.GetAllocationEpoch()};
+            saved &= std::fwrite(header, sizeof(header), 1, file) == 1;
+            saved &= std::fwrite(cards.data(), sizeof(SurfaceCacheCard), cards.size(), file) == cards.size();
+            saved &= std::fclose(file) == 0;
+        } else saved = false;
+        // The metadata file commits the snapshot; an incomplete copy must
+        // never leave a readable header certifying stale planes.
+        if (!saved) std::remove(path.c_str());
+        PRIMAL_LOG_STREAM(Info, "Render") << "[SC_ATLAS_COVERAGE_AUDIT] complete=" << saved
+            << " frame=" << frame << " epoch=" << card_generator_.GetAllocationEpoch();
+    }
+    return read;
+}
+
+void SurfaceCachePass::CreateRayLookupStats()
+{
+    rhi::BufferDesc sbDesc{};
+    const char* audit = std::getenv("SC_RAY_ORACLE_PREFIX");
+    const u32 words = audit && audit[0] && device_->GetPlatform() == rhi::RHIPlatform::Vulkan ? 16u + 16384u*16u : 15u;
+    sbDesc.size = words * sizeof(uint32_t);
+    sbDesc.type = rhi::BufferType::Structured;
+    sbDesc.usage = rhi::GPUMemoryUsage::Dynamic;
+    sbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+    sbDesc.structured.elementCount = words;
+    sbDesc.structured.elementStride = sizeof(uint32_t);
+    ray_lookup_stats_buffer_ = device_->CreateBuffer(sbDesc);
+    if (ray_lookup_stats_buffer_ != handles::INVALID_RESOURCE) {
+        if (auto* z = static_cast<uint32_t*>(device_->MapBuffer(ray_lookup_stats_buffer_))) {
+            memset(z, 0, words * sizeof(uint32_t));
+            device_->UnmapBuffer(ray_lookup_stats_buffer_);
         }
     }
 }
@@ -667,6 +1252,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ddgi depth (Chebyshev gather visibility, C 系列)
             {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // GI 根治 Phase 3.2: ddgi openSky (天空分类)
             {15, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [WRC Stream D2]: 卡片页表（过表寻址）
+            {16, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // [E0-B] nodirect 副本输出
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[9].readonly = true;
@@ -674,7 +1260,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         b[13].readonly = true;
         b[14].readonly = true;
         b[15].readonly = true;
-        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({16, bindings});
+        light_eval_set_layout_ = device_->CreateDescriptorSetLayout({17, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // albedo_atlas  [[texture(0)]]
@@ -694,6 +1280,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {6, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // indirect_out [[texture(6)]] (T3.3 tile radiosity)
             {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi depth [[buffer(7)]] (Chebyshev gather visibility, C 系列)
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // GI 根治 Phase 3.2: ddgi openSky [[buffer(8)]] (天空分类)
+            {7, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // [E0-B] nodirect 副本输出 [[texture(7)]]
         };
         DescriptorSetLayoutBinding* bm = bindings;
         bm[5].readonly = true;
@@ -703,7 +1290,8 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         // 修复：15 个条目（含 openSky buffer(8)）但 count 传 14——最后一个
         // 条目从未进布局，Metal LightEval 编码期断言
         // "missing Buffer binding at index 8 for ddgi_opensky_buffer"。
-        DescriptorSetLayoutDesc layoutDesc{15, bindings};
+        // [E0-B] +1：nodirect 副本输出 [[texture(7)]]（纹理命名空间 7 空闲）。
+        DescriptorSetLayoutDesc layoutDesc{16, bindings};
         light_eval_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -726,6 +1314,9 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         capture_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
+    geometry_first_requested_=isVk && std::getenv("PRIMAL_SC_GEOMETRY_FIRST") &&
+        std::strcmp(std::getenv("PRIMAL_SC_GEOMETRY_FIRST"),"1")==0;
+
     // --- IndirectTrace: 5 textures (depth+normal+3 SDF) + 3 SDF mips + 1 UBO + 1 UBO + 2 SSBO ---
     if (isVk) {
         DescriptorSetLayoutBinding bindings[] = {
@@ -744,6 +1335,12 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {9,  DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // cascade0 mip1 (3D)
             {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // cascade0 mip2 (3D)
             {11, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // cascade0 mip3 (3D)
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // tile owner
+            {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // instance BVH
+            {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // mesh BVHs
+            {15, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // triangles
+            {16, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // inverse transforms
+            {17, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // original ray TriangleID
         };
         // Mark SDF textures as 3D view dimension
         bindings[2].is3D = true;
@@ -752,7 +1349,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         bindings[9].is3D = true;
         bindings[10].is3D = true;
         bindings[11].is3D = true;
-        indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout({12, bindings});
+        indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout({geometry_first_requested_ ? 18u : 13u, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},   // depth_atlas  [[texture(0)]]
@@ -767,8 +1364,9 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // params       [[buffer(1)]]
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // cards        [[buffer(2)]]
             {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ray_hits     [[buffer(3)]]
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // tile owner   [[buffer(4)]]
         };
-        DescriptorSetLayoutDesc layoutDesc{12, bindings};
+        DescriptorSetLayoutDesc layoutDesc{13, bindings};
         indirect_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -792,8 +1390,18 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {14, DescriptorType::StorageImage, 1, ShaderStage::Compute, nullptr},  // tile_aux (A)
             {15, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},  // prev tile_grid (A EMA)
             {16, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [WRC Stream D2]: 卡片页表（过表寻址）
+            {17, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // [SC per-mesh P4]: 射线 lookup 分类统计（原子累加）
+            {18, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // ray triangle
+            {19, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // atlas triangle
+            {20, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // epoch-local triangle support
         };
-        indirect_resolve_set_layout_ = device_->CreateDescriptorSetLayout({17, bindings});
+        const char* boundaryConsumer=std::getenv("SC_BOUNDARY_CONSUMER");
+        const char* continuous=std::getenv("SC_BOUNDARY_CONTINUOUS");
+        boundary_continuous_requested_=geometry_first_requested_ && continuous && std::strcmp(continuous,"1")==0;
+        boundary_consumer_requested_=boundary_continuous_requested_ || (geometry_first_requested_ && boundaryConsumer && std::strcmp(boundaryConsumer,"1")==0);
+        std::vector<DescriptorSetLayoutBinding> resolveBindings(bindings,bindings+(geometry_first_requested_?21u:18u));
+        if(boundary_consumer_requested_)for(u32 i=21;i<24;++i)resolveBindings.push_back({i,DescriptorType::StorageBuffer,1,ShaderStage::Compute,nullptr});
+        indirect_resolve_set_layout_=device_->CreateDescriptorSetLayout({u32(resolveBindings.size()),resolveBindings.data()});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},   // prev_lighting [[texture(0)]]
@@ -855,10 +1463,11 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // emissive_atlas
             {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FlattenedLightingParams
             {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // card_dispatch
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // atlas TriangleID
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[5].readonly = true;
-        atlas_init_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
+        atlas_init_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas   [[texture(0)]]
@@ -871,6 +1480,38 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
         DescriptorSetLayoutBinding* b = bindings;
         b[5].readonly = true;
         atlas_init_set_layout_ = device_->CreateDescriptorSetLayout({6, bindings});
+    }
+
+    // --- [SC per-mesh P2] StaticComposite: 3 write images + 2 readonly SSBOs
+    //     (Vulkan-only; Metal 保持 capture 路径) ---
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // albedo_atlas
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // normal_atlas
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // depth_atlas
+            {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // StaticCompositeInfo[]
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // 页字节池（uint words）
+            {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},  // emissive_atlas
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // atlas TriangleID
+        };
+        bindings[3].readonly = true;
+        bindings[4].readonly = true;
+        static_composite_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
+    }
+
+    // --- [SC per-mesh P2] PageClear: 6 lighting storage images + 1 rects SSRO
+    if (isVk) {
+        DescriptorSetLayoutBinding bindings[] = {
+            {0, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {1, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {2, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {3, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {4, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {5, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr},
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+        };
+        bindings[6].readonly = true;
+        page_clear_set_layout_ = device_->CreateDescriptorSetLayout({7, bindings});
     }
 
     // --- Capture (GBuffer-gather, Vulkan-only): 3 GBuffer inputs + 3 atlas
@@ -938,6 +1579,22 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
                           // + 全局页表/atlas 绑定接入(VT 系统初始化后)
         }
         card_fill_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
+
+        if (source_writer_audit_requested_ && !source_writer_audit_failed_) {
+            // Keep bindings 0..13 byte-for-byte identical to the production
+            // layout.  The diagnostic variant appends only the writer image
+            // and its frame constant (14/15).
+            DescriptorSetLayoutBinding writerBindings[16]{};
+            std::memcpy(writerBindings, bindings, sizeof(bindings));
+            writerBindings[14] = {14, DescriptorType::StorageImage, 1,
+                                  ShaderStage::Compute, nullptr};
+            writerBindings[15] = {15, DescriptorType::UniformBuffer, 1,
+                                  ShaderStage::Compute, nullptr};
+            card_fill_writer_set_layout_ = device_->CreateDescriptorSetLayout({16, writerBindings});
+            if (card_fill_writer_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+                source_writer_audit_failed_ = true;
+            }
+        }
     }
 
     // --- Shadow (T3.3): 3 SDF texture3D + depth/normal atlas reads + params CB
@@ -1041,9 +1698,9 @@ void SurfaceCachePass::CreatePipelines() {
     }
     auto lightEvalShader    = CompileComputeShader(lightEvalName,
         isVk ? "surface_cache_light_eval" : "surfaceCacheLightEval");
-    auto indirectTraceShader  = CompileComputeShader("SurfaceCacheIndirectTrace",
+    auto indirectTraceShader  = CompileComputeShader(geometry_first_requested_ ? "SurfaceCacheIndirectTrace_geometry" : "SurfaceCacheIndirectTrace",
         isVk ? "surface_cache_indirect_trace" : "surfaceCacheIndirectTrace");
-    auto indirectResolveShader = CompileComputeShader("SurfaceCacheIndirectResolve",
+    auto indirectResolveShader = CompileComputeShader(boundary_consumer_requested_ ? "SurfaceCacheIndirectResolve_consumer" : geometry_first_requested_ ? "SurfaceCacheIndirectResolve_geometry" : "SurfaceCacheIndirectResolve",
         isVk ? "surface_cache_indirect_resolve" : "surfaceCacheIndirectResolve");
     // Atlas default-content init (stands in for Capture coverage gaps).
     // T8.13 sync: compiled on Metal too — heap atlases need the seed.
@@ -1059,8 +1716,19 @@ void SurfaceCachePass::CreatePipelines() {
     }
     // Vulkan-only: SDF-based card fill (all card texels get geometry + lighting)
     ShaderHandle cardFillShader = handles::INVALID_SHADER;
+    ShaderHandle cardFillWriterShader = handles::INVALID_SHADER;
     if (isVk) {
         cardFillShader = CompileComputeShader("SurfaceCacheCardFill", "surface_cache_card_fill");
+        if (source_writer_audit_requested_ && !source_writer_audit_failed_) {
+            cardFillWriterShader = CompileComputeShader("SurfaceCacheCardFill_writer",
+                                                        "surface_cache_card_fill");
+            if (cardFillWriterShader == handles::INVALID_SHADER) {
+                source_writer_audit_failed_ = true;
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[SC_CAPTURE_SOURCE_AUDIT] CardFill writer shader variant missing"
+                    << std::endl;
+            }
+        }
     }
 
     // --- Compile capture graphics shaders (Metal only — no Vulkan .vert.spv/.frag.spv yet) ---
@@ -1175,6 +1843,37 @@ void SurfaceCachePass::CreatePipelines() {
         pipeDesc.layout = atlas_init_layout_;
         pipeDesc.threadGroupSize = {256, 1, 1};
         atlas_init_pipeline_ = device_->CreateComputePipeline(pipeDesc);
+
+        // [SC per-mesh P2] 静态页合成管线（Vulkan-only）。
+        if (isVk) {
+            auto staticCompositeShader = CompileComputeShader("SurfaceCacheStaticComposite",
+                                                              "surface_cache_static_composite");
+            if (staticCompositeShader != handles::INVALID_SHADER &&
+                static_composite_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+                ComputePipelineDesc sPipeDesc{};
+                sPipeDesc.computeShader = staticCompositeShader;
+                PipelineLayoutDesc sPlDesc{};
+                sPlDesc.setLayoutCount = 1;
+                sPlDesc.setLayouts = &static_composite_set_layout_;
+                static_composite_layout_ = device_->CreatePipelineLayout(sPlDesc);
+                sPipeDesc.layout = static_composite_layout_;
+                static_composite_pipeline_ = device_->CreateComputePipeline(sPipeDesc);
+            }
+            // [SC per-mesh P2] 挤页 rect 清零管线。
+            auto pageClearShader = CompileComputeShader("SurfaceCachePageClear",
+                                                        "surface_cache_page_clear");
+            if (pageClearShader != handles::INVALID_SHADER &&
+                page_clear_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+                ComputePipelineDesc pcPipeDesc{};
+                pcPipeDesc.computeShader = pageClearShader;
+                PipelineLayoutDesc pcPlDesc{};
+                pcPlDesc.setLayoutCount = 1;
+                pcPlDesc.setLayouts = &page_clear_set_layout_;
+                page_clear_layout_ = device_->CreatePipelineLayout(pcPlDesc);
+                pcPipeDesc.layout = page_clear_layout_;
+                page_clear_pipeline_ = device_->CreateComputePipeline(pcPipeDesc);
+            }
+        }
     }
     // IndirectReconstruct (A): (8,8,1) over the full atlas — tile-center
     // continuous reconstruction. Built on both backends (Metal kernel twin).
@@ -1237,9 +1936,39 @@ void SurfaceCachePass::CreatePipelines() {
         pipeDesc.threadGroupSize = {256, 1, 1};
         card_fill_pipeline_ = device_->CreateComputePipeline(pipeDesc);
     }
+    if (isVk && source_writer_audit_requested_ && !source_writer_audit_failed_ &&
+        cardFillWriterShader != handles::INVALID_SHADER &&
+        card_fill_writer_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+        PipelineLayoutDesc plDesc{};
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &card_fill_writer_set_layout_;
+        card_fill_writer_layout_ = device_->CreatePipelineLayout(plDesc);
+        if (card_fill_writer_layout_ != handles::INVALID_PIPELINE_LAYOUT) {
+            ComputePipelineDesc writerDesc{};
+            writerDesc.computeShader = cardFillWriterShader;
+            writerDesc.layout = card_fill_writer_layout_;
+            writerDesc.threadGroupSize = {256, 1, 1};
+            card_fill_writer_pipeline_ = device_->CreateComputePipeline(writerDesc);
+        }
+        if (card_fill_writer_pipeline_ == handles::INVALID_PIPELINE) {
+            source_writer_audit_failed_ = true;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[SC_CAPTURE_SOURCE_AUDIT] CardFill writer pipeline creation failed"
+                << std::endl;
+        }
+    }
     // Shadow (T3.3): (256,1,1) — per-texel SDF shadow march toward the light
     {
-        auto shadowShader = CompileComputeShader("SurfaceCacheShadow",
+        const bool traceValidZero = isVk && [] {
+            const char* value = std::getenv("SC_SHADOW_TRACE_VALID_ZERO");
+            return value && std::atoi(value) == 1;
+        }();
+        if (traceValidZero) {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[SurfaceCache] tracing shadow for valid depth-zero texels" << std::endl;
+        }
+        auto shadowShader = CompileComputeShader(
+            traceValidZero ? "SurfaceCacheShadow_validzero" : "SurfaceCacheShadow",
             isVk ? "surface_cache_shadow" : "surfaceCacheShadow");
         if (shadowShader != handles::INVALID_SHADER) {
             PipelineLayoutDesc plDesc;
@@ -1302,6 +2031,14 @@ void SurfaceCachePass::CreatePipelines() {
             DescriptorSetDesc dsDesc{atlas_init_set_layout_};
             atlas_init_set_[i] = device_->CreateDescriptorSet(dsDesc);
         }
+        if (i == 0 && static_composite_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{static_composite_set_layout_};
+            static_composite_set_ = device_->CreateDescriptorSet(dsDesc);
+        }
+        if (i == 0 && page_clear_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{page_clear_set_layout_};
+            page_clear_set_ = device_->CreateDescriptorSet(dsDesc);
+        }
         if (isVk && capture_gather_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             DescriptorSetDesc dsDesc{capture_gather_set_layout_};
             capture_gather_set_[i] = device_->CreateDescriptorSet(dsDesc);
@@ -1309,6 +2046,13 @@ void SurfaceCachePass::CreatePipelines() {
         if (isVk && card_fill_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             DescriptorSetDesc dsDesc{card_fill_set_layout_};
             card_fill_set_[i] = device_->CreateDescriptorSet(dsDesc);
+        }
+        if (isVk && source_writer_audit_requested_ && !source_writer_audit_failed_ &&
+            card_fill_writer_set_layout_ != rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
+            DescriptorSetDesc dsDesc{card_fill_writer_set_layout_};
+            card_fill_writer_set_[i] = device_->CreateDescriptorSet(dsDesc);
+            if (card_fill_writer_set_[i] == handles::INVALID_DESCRIPTOR_SET)
+                source_writer_audit_failed_ = true;
         }
         {
             DescriptorSetDesc dsDesc{dilate_set_layout_};
@@ -1339,6 +2083,19 @@ void SurfaceCachePass::CreatePipelines() {
             indirect_reconstruct_set_[i] = device_->CreateDescriptorSet(dsDesc);
         }
     }
+
+    if (source_writer_audit_requested_ && !source_writer_audit_failed_) {
+        source_writer_audit_enabled_ =
+            source_writer_atlas_ != handles::INVALID_RESOURCE &&
+            card_fill_writer_pipeline_ != handles::INVALID_PIPELINE &&
+            card_fill_writer_layout_ != handles::INVALID_PIPELINE_LAYOUT;
+        if (!source_writer_audit_enabled_) {
+            source_writer_audit_failed_ = true;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[SC_CAPTURE_SOURCE_AUDIT] writer resources incomplete; audit closed"
+                << std::endl;
+        }
+    }
 }
 
 // ============================================================================
@@ -1357,6 +2114,27 @@ void SurfaceCachePass::AddCardCapturePasses(
     u32 current_frame_index) {
     if (!card_view_enabled_ || !initialized_) return;
 
+    if (source_writer_audit_requested_) {
+        if (source_writer_audit_failed_ ||
+            source_writer_atlas_ == handles::INVALID_RESOURCE ||
+            device_->GetPlatform() != rhi::RHIPlatform::Vulkan) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[SC_CAPTURE_SOURCE_AUDIT] card capture writer unavailable; "
+                << "diagnostic pass closed" << std::endl;
+            source_writer_audit_enabled_ = false;
+            return;
+        }
+    }
+    if (geometry_audit_requested_ &&
+        (geometry_audit_failed_ || !geometry_audit_enabled_)) {
+        source_writer_audit_failed_ = true;
+        source_writer_audit_enabled_ = false;
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[SC_CAPTURE_GEOMETRY_AUDIT] geometry witness resources unavailable; "
+            << "diagnostic pass closed" << std::endl;
+        return;
+    }
+
     // [WRC 计划 Stream D1]（PRIMAL_SC_PRIORITY=1）：卡片重要性打分 + Top-K
     // 替换轮转游标。静态局部定义（文件内 AddPass 侧同读）。
     static const bool kScPriorityCapture = [] {
@@ -1364,8 +2142,65 @@ void SurfaceCachePass::AddCardCapturePasses(
         return e && e[0] == '1';
     }();
 
+    // [SC 卡片 Lumen 对齐 Phase 3 实验项 → SC per-mesh 计划 P2 生产约束]
+    // （PRIMAL_SC_CAPTURE_OWNER，默认开；=0 回滚旧全场景写入路径）：
+    // capture 只提交 owning 实例的 cluster。计划 §3.2"owner-only 不能仅作为
+    // 诊断开关；最终生产路径必须建立不可绕过的约束"——静态卡已由离线页
+    // 供给（合成后跳过 capture），本约束管住剩余 fallback 卡的运行时捕获；
+    // 外来几何的 albedo/normal/depth 从此无法进入任何卡片。
+    static const bool kScCaptureOwnerOnly = [] {
+        const char* e = std::getenv("PRIMAL_SC_CAPTURE_OWNER");
+        return !e || e[0] != '0';   // 默认 ON；"0" 显式回滚
+    }();
+
     auto& gpuDraw = nanite::GPUDrivenDrawPipeline::Get();
-    if (!gpuDraw.IsCardCaptureReady() && !gpuDraw.InitializeCardCaptureResources(1u << 20)) return;
+    if (!gpuDraw.InitializeCardCaptureResources(1u << 20,
+                                                source_writer_audit_requested_,
+                                                geometry_audit_requested_)) {
+        if (source_writer_audit_requested_) {
+            source_writer_audit_failed_ = true;
+            source_writer_audit_enabled_ = false;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[SC_CAPTURE_SOURCE_AUDIT] GPU card writer pipeline unavailable; "
+                << "no production fallback" << std::endl;
+        }
+        return;
+    }
+    if (source_writer_audit_requested_ && !gpuDraw.IsCardCaptureWriterReady()) {
+        source_writer_audit_failed_ = true;
+        source_writer_audit_enabled_ = false;
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[SC_CAPTURE_SOURCE_AUDIT] GPU card writer readiness check failed" << std::endl;
+        return;
+    }
+    if (geometry_audit_requested_ && !gpuDraw.IsCardCaptureGeometryReady()) {
+        geometry_audit_failed_ = true;
+        source_writer_audit_failed_ = true;
+        source_writer_audit_enabled_ = false;
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[SC_CAPTURE_GEOMETRY_AUDIT] geometry witness pipeline unavailable; "
+            << "diagnostic closed without fallback" << std::endl;
+        return;
+    }
+    if (source_writer_audit_requested_) {
+        source_writer_audit_enabled_ = true;
+        static bool writerReadyLogged = false;
+        if (!writerReadyLogged) {
+            writerReadyLogged = true;
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[SC_CAPTURE_SOURCE_AUDIT] card capture + CardFill writer pipelines ready; "
+                << "RGBA32_UInt writer atlas bound" << std::endl;
+        }
+    }
+    if (geometry_audit_requested_) {
+        static bool geometryReadyLogged = false;
+        if (!geometryReadyLogged) {
+            geometryReadyLogged = true;
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[SC_CAPTURE_GEOMETRY_AUDIT] 8-MRT geometry witness pipeline ready; "
+                << "four RGBA32_UInt targets bound" << std::endl;
+        }
+    }
 
     const auto& cards = card_generator_.GetCards();
     const u32 total = card_generator_.GetCardCount();
@@ -1390,12 +2225,28 @@ void SurfaceCachePass::AddCardCapturePasses(
             if (const char* b = std::getenv("SC_CARDVIEW_BATCH"))
                 batch = (u32)std::max(1, atoi(b));
 
-            // Storage (GENERAL) → color-attachment layouts for the three pages.
-            ResourceHandle pages[3] = { albedo_atlas_, normal_atlas_, depth_atlas_ };
-            for (auto h : pages) {
+            // Storage (GENERAL) → color-attachment layouts.  Diagnostic
+            // attachments start in ShaderResource after their blocking zero
+            // upload, then remain in UnorderedAccess between frames.
+            ResourceHandle pages[8] = {
+                albedo_atlas_, normal_atlas_, depth_atlas_,
+                source_writer_audit_enabled_ ? source_writer_atlas_ : handles::INVALID_RESOURCE,
+                geometry_audit_enabled_ ? geometry_witness_[0] : handles::INVALID_RESOURCE,
+                geometry_audit_enabled_ ? geometry_witness_[1] : handles::INVALID_RESOURCE,
+                geometry_audit_enabled_ ? geometry_witness_[2] : handles::INVALID_RESOURCE,
+                geometry_audit_enabled_ ? geometry_witness_[3] : handles::INVALID_RESOURCE
+            };
+            const u32 pageCount = geometry_audit_enabled_ ? 8u :
+                (source_writer_audit_enabled_ ? 4u : 3u);
+            for (u32 page = 0; page < pageCount; ++page) {
+                const auto h = pages[page];
                 ResourceBarrier b{};
                 b.resource = h;
-                b.beforeState = ResourceState::UnorderedAccess;
+                const bool diagnostic = page >= 3u;
+                const bool inUav = page == 3u ? source_writer_atlas_in_uav_
+                                              : geometry_witness_in_uav_;
+                b.beforeState = diagnostic && !inUav
+                    ? ResourceState::ShaderResource : ResourceState::UnorderedAccess;
                 b.afterState  = ResourceState::RenderTarget;
                 b.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&b, 1);
@@ -1404,6 +2255,14 @@ void SurfaceCachePass::AddCardCapturePasses(
             u32 faces = 0;
             // 单卡片正交捕获（两条调度路径共享；faces = face-slot，帧内唯一）。
             auto captureOne = [&](const SurfaceCacheCard& card, u32 faceSlot) -> bool {
+                // [SC per-mesh P2] 静态卡不走运行时 capture：表面数据只能来自
+                // 离线 owner 页（§3.2 生产约束，非诊断开关——合成管线不可用的
+                // 后端不设旗标，走原路径）。
+                if (card._pad1[1] & 1u) return false;
+                if (source_writer_audit_requested_ && !source_writer_audit_enabled_)
+                    return false;
+                if (geometry_audit_requested_ && !geometry_audit_enabled_)
+                    return false;
                 const uint axis = card.axis_direction & 0xFFu;
                 const uint dir  = (card.axis_direction >> 8u) & 0xFFu;
 
@@ -1438,22 +2297,50 @@ void SurfaceCachePass::AddCardCapturePasses(
                 const math::v3 center{card.center.x, card.center.y, card.center.z};
                 const math::v3 at = center + fwd;
                 const math::m4x4 view = rhimath::CreateLookAtMatrix(center, at, up);
-                // 注：near=0.05 与捕获像素着色器的深度编码耦合（曾试
-                // near=0 触发探针场崩溃 0.42→0.03，假设证伪已回滚）——
-                // 深度编码语义见 capture/query 一致性专项后续。
+                // [R2.1 2026-09-20] 捕获近平面参数化：PRIMAL_SC_CAPTURE_NEAR
+                //（默认 0.05 = 历史校准值，逐位现行为）。near 只控制光栅化
+                // 裁剪（存储的 axis-depth 与 near 解耦——机制排查见
+                // Docs/2026-09-20-sc-capture-near-plane-mechanism.md）；
+                // near<0.05 实验须同时开捕获端 min-depth 无效化（同文档 §4）。
+                static const f32 kCaptureNear = [] {
+                    const char* e = std::getenv("PRIMAL_SC_CAPTURE_NEAR");
+                    if (!e) return 0.05f;
+                    const f32 v = static_cast<f32>(std::atof(e));
+                    return (v >= 0.0f && v < 1.0f) ? v : 0.05f;
+                }();
+                const f32 captureFar = 2.0f * halfAxis * rhi::card_surface_identity::CaptureFarScale + rhi::card_surface_identity::CaptureFarBias;
                 const math::m4x4 proj = rhimath::CreateOrthographicMatrix(
                     mirror_u ? hu : -hu, mirror_u ? -hu : hu, -hv, hv,
-                    0.05f, 2.0f * halfAxis + 0.5f);
+                    kCaptureNear, captureFar);
 
-                return gpuDraw.ExecuteCardCapturePass(
+                const bool captureOk = gpuDraw.ExecuteCardCapturePass(
                     cmd, scene_snapshot, view, proj,
                     math::v4{center.x, center.y, center.z, 1.0f},
                     math::v4{fwd.x, fwd.y, fwd.z, 0.0f},
-                    0.05f, 2.0f * halfAxis + 0.5f,
+                    kCaptureNear, captureFar,
                     faceSlot,       // face_slot — unique within this frame
                     current_frame_index,
                     card.atlas_offset_x, card.atlas_offset_y, card.resolution,
-                    albedo_atlas_, normal_atlas_, depth_atlas_, card_view_depth_);
+                    albedo_atlas_, normal_atlas_, depth_atlas_, card_view_depth_,
+                    /*owning_instance_id=*/card.mesh_instance_id,
+                    /*owner_only=*/kScCaptureOwnerOnly,
+                    /*writer_rt=*/source_writer_audit_enabled_ ? source_writer_atlas_ : handles::INVALID_RESOURCE,
+                    /*geometry_rt0=*/geometry_audit_enabled_ ? geometry_witness_[0] : handles::INVALID_RESOURCE,
+                    /*geometry_rt1=*/geometry_audit_enabled_ ? geometry_witness_[1] : handles::INVALID_RESOURCE,
+                    /*geometry_rt2=*/geometry_audit_enabled_ ? geometry_witness_[2] : handles::INVALID_RESOURCE,
+                    /*geometry_rt3=*/geometry_audit_enabled_ ? geometry_witness_[3] : handles::INVALID_RESOURCE);
+                if (!captureOk && (source_writer_audit_requested_ || geometry_audit_requested_)) {
+                    source_writer_audit_failed_ = true;
+                    source_writer_audit_enabled_ = false;
+                    geometry_audit_failed_ = geometry_audit_requested_;
+                    geometry_audit_enabled_ = false;
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << (geometry_audit_requested_ ? "[SC_CAPTURE_GEOMETRY_AUDIT] "
+                                                       : "[SC_CAPTURE_SOURCE_AUDIT] ")
+                        << "card writer draw preparation failed; "
+                        << "diagnostic closed without production fallback" << std::endl;
+                }
+                return captureOk;
             };
 
             // [WRC 计划 Stream D1]（PRIMAL_SC_PRIORITY=1）：Top-K 替换轮转
@@ -1505,7 +2392,8 @@ void SurfaceCachePass::AddCardCapturePasses(
             }
 
             // Back to storage layouts for the LightEval/consumer imageLoads.
-            for (auto h : pages) {
+            for (u32 page = 0; page < pageCount; ++page) {
+                const auto h = pages[page];
                 ResourceBarrier b{};
                 b.resource = h;
                 b.beforeState = ResourceState::RenderTarget;
@@ -1513,6 +2401,17 @@ void SurfaceCachePass::AddCardCapturePasses(
                 b.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&b, 1);
             }
+            if (source_writer_audit_enabled_ || geometry_audit_enabled_) {
+                // These images may be consumed by CardFill or a later transfer
+                // read. State transitions alone do not carry the writer's
+                // color-attachment visibility on every RHI.
+                cmd->MemoryBarrier(PipelineStage::ColorAttachmentOutput,
+                                   PipelineStage::ComputeShader,
+                                   AccessFlag::ColorAttachmentWrite,
+                                   AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+            }
+            if (source_writer_audit_enabled_) source_writer_atlas_in_uav_ = true;
+            if (geometry_audit_enabled_) geometry_witness_in_uav_ = true;
         });
 }
 
@@ -1596,8 +2495,14 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
     auto lightingHandle = graph.ImportResource(
         "SurfaceCache_Lighting_" + std::to_string(outIdx),
         lighting_atlas_[outIdx]);
+    // [E0-B 2026-09-21] nodirect 副本同帧身份——Write(UA) 声明闭环布局轮转
+    //（SC 写 UA → SPGI 读 SR），避免显式 barrier 与 RG 追踪错位。
+    auto nodirectHandle = graph.ImportResource(
+        "SurfaceCache_Lighting_NoDirect_" + std::to_string(outIdx),
+        lighting_nodirect_atlas_[outIdx]);
 
     output.lighting_atlas = lightingHandle;
+    output.lighting_nodirect_atlas = nodirectHandle;
 
     graph.AddPass<SurfaceCacheRGData>("LumenSurfaceCache",
         RGPassType::Compute, RGPassCategory::Lighting,
@@ -1605,7 +2510,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
         // ====================================================================
         // Setup lambda: declare resource dependencies
         // ====================================================================
-        [prev_frame_color, lightingHandle, frame_data](
+        [prev_frame_color, lightingHandle, nodirectHandle, frame_data](
             SurfaceCacheRGData& data, RenderGraphBuilder& builder) {
             // Read previous frame color
             builder.Read(prev_frame_color, ResourceState::ShaderResource);
@@ -1623,6 +2528,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // Write declaration (prevents RG cull). DEBUG: imported under a
             // side name so the "SurfaceCache_Lighting_N" identity isn't shared.
             builder.Write(lightingHandle, ResourceState::UnorderedAccess);
+            // [E0-B] nodirect 副本同帧 Write(UA)——LightEval 的第二个存储写。
+            builder.Write(nodirectHandle, ResourceState::UnorderedAccess);
         },
 
         // ====================================================================
@@ -1661,6 +2568,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 dispatch_info[i].atlas_offset_y = cards[i].atlas_offset_y;
                 dispatch_info[i].card_index = i;
                 memset(dispatch_info[i]._pad, 0, sizeof(dispatch_info[i]._pad));
+                // [SC per-mesh P2] bit0 = static：CardFill 据此跳过（静态卡
+                // 表面只能来自离线 owner 页，SDF 回填不得覆盖——§3.2）。
+                dispatch_info[i]._pad[0] = cards[i]._pad1[1] & 1u;
                 total_texels += count;
             }
 
@@ -1941,11 +2851,21 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // T3.3 runtime weight knob: radiosity_gate.y packs the
                     // tile-radiosity consumption weight as raw float bits
                     // (0 = shader-side legacy 0.25). PRIMAL_SC_RADIOSITY_W.
-                    params.radiosity_gate[1] = [] {
-                        // Promoted default 2.0 (W sweep: monotonic gain to
-                        // +38% on the darkest strips, stable at frame 800).
+                    params.radiosity_gate[1] = [this] {
+                        // [2026-09-20 P5 默认 2.0→1.0] 物理衰减。w=2.0 的每跳
+                        // 有效增益 w×ρ 达 0.6-1.0，稳态放大 2.5×（物理 1.43×），
+                        // 阴影被人为泵住（差距分析 §2.5）；闩锁修复后重跑 A/B
+                        // （tier0.25、frame780 锁机位）：w=1.0 室内 ROI 32.6→28.5
+                        // （−13%）、lit/shadow 4.4→5.1×，直射区不变。
+                        // [2026-09-25 Vulkan 参考机位] 1.0→0.5：第 350 帧
+                        // 右廊 37.36→32.95、近地 93.25→87.40，亮墙与天空
+                        // 仍接近参考。只调整已验证的 Vulkan 默认；Metal/Dawn
+                        // 维持 1.0，跨端校准须另行 A/B。环境变量可逐次覆盖。
+                        // 回退：PRIMAL_SC_RADIOSITY_W=1.0。
                         const char* e = std::getenv("PRIMAL_SC_RADIOSITY_W");
-                        const float v = e ? (float)std::atof(e) : 2.0f;
+                        const float defaultWeight =
+                            device_->GetPlatform() == rhi::RHIPlatform::Vulkan ? 0.5f : 1.0f;
+                        const float v = e ? (float)std::atof(e) : defaultWeight;
                         if (v <= 0.0f || v > 4.0f) return 0u;
                         u32 bits; std::memcpy(&bits, &v, 4);
                         return bits;
@@ -1968,7 +2888,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // WRC 计划 Stream B1/B2（能量单向化）：引导因子 + 单轨标志。
                     // 旧语义（bootstrap 关）factor=1、solo=0，shader 端逐位不变。
                     params.probe_feed_bootstrap =
-                        lumen::GIProbeBootstrapFactor(current_frame_index);
+                        lumen::GIProbeBootstrapFactor(frame_data.gi_frame);
                     params.radiosity_solo = kProbeFeedBootstrap ? 1u : 0u;
                     // [WRC 计划 Stream D2]: LightEval 采样契约过表寻址开关。
                     params.page_table_enabled =
@@ -2002,13 +2922,39 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 }
                 cmd->InsertBarrier(atlasBarriers, 6);
             }
+            if (source_writer_audit_enabled_ && !source_writer_atlas_in_uav_) {
+                // No card-view draw may have run on an empty/late card list;
+                // the off-frame zero upload leaves the persistent writer in
+                // ShaderResource layout.  Bring it to the storage layout before
+                // the diagnostic CardFill writer can bind it.
+                ResourceBarrier writerInit{};
+                writerInit.resource = source_writer_atlas_;
+                writerInit.beforeState = ResourceState::ShaderResource;
+                writerInit.afterState = ResourceState::UnorderedAccess;
+                writerInit.subresource = 0xFFFFFFFF;
+                cmd->InsertBarrier(&writerInit, 1);
+                source_writer_atlas_in_uav_ = true;
+            }
+            if (geometry_audit_enabled_ && !geometry_witness_in_uav_) {
+                ResourceBarrier witnessInit[4]{};
+                for (u32 i = 0; i < 4; ++i) {
+                    witnessInit[i].resource = geometry_witness_[i];
+                    witnessInit[i].beforeState = ResourceState::ShaderResource;
+                    witnessInit[i].afterState = ResourceState::UnorderedAccess;
+                    witnessInit[i].subresource = 0xFFFFFFFF;
+                }
+                cmd->InsertBarrier(witnessInit, 4);
+                geometry_witness_in_uav_ = true;
+            }
 
             // ================================================================
             // 3.5 AtlasInit dispatch (Vulkan-only, FIRST FRAME ONLY): write
             //     default material into card atlas regions so LightEval has
             //     alpha=1 albedo to process even before Capture covers texels.
             // ================================================================
-            if (atlas_init_pipeline_ != handles::INVALID_PIPELINE && !atlas_seeded_) {
+            if (atlas_init_pipeline_ != handles::INVALID_PIPELINE &&
+                (!atlas_seeded_ || surface_seed_epoch_ != card_generator_.GetAllocationEpoch() ||
+                 (StaticPagesEnabled() && static_composite_epoch_ != card_generator_.GetAllocationEpoch()))) {
                 static bool s_ai_once = false;
                 if (!s_ai_once) {
                     s_ai_once = true;
@@ -2029,8 +2975,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     {3, DescriptorType::StorageImage,  emissive_atlas_},
                     {aiIsVk ? 4u : 1u, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
                     {aiIsVk ? 5u : 2u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                    {6, DescriptorType::StorageBuffer, triangle_atlas_buffer_},
                 };
-                UpdateDescriptorSet(device_, atlas_init_set_[frameIdx], initParams, 6);
+                UpdateDescriptorSet(device_, atlas_init_set_[frameIdx], initParams, aiIsVk?7u:6u);
 
                 cmd->BindComputePipeline(atlas_init_pipeline_);
                 const DescriptorSetHandle initSets[] = { atlas_init_set_[frameIdx] };
@@ -2043,12 +2990,283 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // scene registers cards — the first dispatch then runs with
                 // total_texels == 0, and marking seeded there left the atlas
                 // unseeded (albedo alpha 0) permanently black.
-                if (total_texels > 0) atlas_seeded_ = true;
+                if (total_texels > 0) {
+                    atlas_seeded_ = true;
+                    surface_seed_epoch_ = card_generator_.GetAllocationEpoch();
+                    RequestTileValidityReset();
+                }
 
                 // Compute→compute memory barrier (storage images stay in
                 // GENERAL layout; LightEval reads via imageLoad).
                 cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
-                                   AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                                   AccessFlag::ShaderWrite, AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+            }
+
+            // ================================================================
+            // 3.55 [SC per-mesh 计划 P2] 静态页合成（Vulkan-only，分配纪元
+            //      变化时一次）：owner mesh 离线页 → SC albedo/normal/depth
+            //      atlas。合成后静态卡跳过 capture/CardFill（§3.2 外来写入
+            //      生产约束）；单卡页缺失 → 该卡保持显式无效种子并记日志
+            //      （缺页可区分，不静默伪有效）。
+            // ================================================================
+            if (static_composite_pipeline_ != handles::INVALID_PIPELINE &&
+                static_composite_set_ != handles::INVALID_DESCRIPTOR_SET &&
+                StaticPagesEnabled() &&
+                card_generator_.GetAllocationEpoch() != static_composite_epoch_) {
+                const auto& scCards = card_generator_.GetCards();
+                const auto& scRefs = card_generator_.GetStaticRefs();
+                std::vector<StaticCompositeInfo> scInfos;
+                std::vector<u32> scPool;
+                boundary_atlas_groups_.clear();boundary_atlas_epoch_=UINT32_MAX;
+                bool boundaryAtlasValid=true;
+                const char* boundaryAutoIndex=std::getenv("SC_BOUNDARY_AUTO_INDEX");
+                const bool collectBoundaryAtlas=boundary_continuous_requested_ || (boundaryAutoIndex && std::strcmp(boundaryAutoIndex,"1")==0);
+                const char* presenceEnv=std::getenv("PRIMAL_SC_CARD_TRIANGLE_FILTER");
+                const char* maskEnv=std::getenv("PRIMAL_SC_OWNER_TRIANGLE_MASK");
+                const bool buildMask=maskEnv && (std::strcmp(maskEnv,"0")==0 || std::strcmp(maskEnv,"1")==0);
+                const bool buildPresence=buildMask || (presenceEnv && (std::strcmp(presenceEnv,"0")==0 || std::strcmp(presenceEnv,"1")==0));
+                TriangleSupportIndex support(u32(scCards.size()),card_generator_.GetAllocationEpoch(),buildPresence);
+                triangle_support_epoch_=0xffffffffu;
+                u32 scTexelOffset = 0;
+                u32 scMissing = 0;
+                bool compositeUploaded = false;
+                const char* resampleEnv = std::getenv("PRIMAL_SC_GEOMETRY_RESAMPLE");
+                const bool geometryResample = geometry_first_requested_ && (!resampleEnv || std::strcmp(resampleEnv,"1")==0);
+                const auto resampleStart = std::chrono::steady_clock::now();
+                u64 resampleValid=0,resampleNoSource=0,resampleMiss=0;
+                u32 resampledCards=0;
+                for (size_t i = 0; i < scCards.size(); ++i) {
+                    const SurfaceCacheCard& c = scCards[i];
+                    const CardGenerator::CardStaticRef& ref = i < scRefs.size()
+                        ? scRefs[i] : CardGenerator::CardStaticRef{};
+                    if ((c._pad1[1] & 1u) == 0u ||
+                        ref.mesh_slot == CardGenerator::kNoStaticSlot) continue;
+                    std::vector<u8> pageAlbedo, pageNormal;
+                    std::vector<f32> pageDepth;
+                    std::vector<u32> pageTriangles;
+                    u32 pageRes = 0;
+                    if (!static_pages_->ReadCardPlanes(ref.mesh_slot, c._pad1[2],
+                                                       pageAlbedo, pageNormal, pageDepth, pageRes, &pageTriangles)) {
+                        ++scMissing;
+                        continue;   // 缺页卡：保持显式无效种子（black + 日志可辨）
+                    }
+                    const u32 res = c.resolution;
+                    if (geometryResample && pageRes != res) {
+                        const auto instance = std::find_if(geometry_scene_.instances.begin(),geometry_scene_.instances.end(),
+                            [&](const auto& value){return value.instance_id==c.mesh_instance_id;});
+                        GeometrySurfacePage rebuilt;
+                        const float center[3]={ref.local_center.x,ref.local_center.y,ref.local_center.z};
+                        const float extent[3]={ref.local_extent.x,ref.local_extent.y,ref.local_extent.z};
+                        if (instance==geometry_scene_.instances.end() || !ResampleGeometrySurface(
+                            geometry_scene_.bottom,geometry_scene_.triangles,instance->root,center,extent,
+                            ref.local_axis_direction,pageRes,res,pageAlbedo,pageNormal,pageTriangles,rebuilt)) {
+                            ++scMissing;continue; // Unavailable geometry cannot certify a resampled surface.
+                        }
+                        resampleValid+=rebuilt.valid;resampleNoSource+=rebuilt.no_source;resampleMiss+=rebuilt.geometry_miss;
+                        ++resampledCards;
+                        pageAlbedo=std::move(rebuilt.albedo);pageNormal=std::move(rebuilt.normal);
+                        pageDepth=std::move(rebuilt.depth);pageTriangles=std::move(rebuilt.triangles);pageRes=res;
+                    }
+                    // Only positive diagonal transforms preserve source pixel ordering.
+                    // Every indexed pixel is also revalidated against the actual GPU atlas.
+                    const auto& wm=ref.world.columns;
+                    const bool aligned=wm[0].x>0 && wm[1].y>0 && wm[2].z>0 &&
+                        wm[0].y==0 && wm[0].z==0 && wm[1].x==0 && wm[1].z==0 && wm[2].x==0 && wm[2].y==0;
+                    if(geometry_first_requested_ && aligned && pageRes==res)
+                        support.Add(u32(i),res,pageTriangles,pageDepth,pageAlbedo);
+                    if(collectBoundaryAtlas && BoundarySamplesForStaticSlot(ref.mesh_slot) && aligned && pageRes==res){
+                        if(!AppendBoundaryAtlasPoints(c,ref.world,u32(i),ref.local_axis_direction,pageRes,
+                            pageTriangles,pageDepth,pageAlbedo,boundary_atlas_groups_))boundaryAtlasValid=false;
+                    }
+                    StaticCompositeInfo info{};
+                    info.meta0[0] = c.atlas_offset_x;
+                    info.meta0[1] = c.atlas_offset_y;
+                    info.meta0[2] = res;
+                    info.meta0[3] = pageRes;
+                    info.meta1[0] = scTexelOffset;
+                    info.meta1[1] = 0u;   // 首条稍后写 static_count
+                    info.meta1[2] = c.axis_direction;
+                    info.meta1[3] = ref.local_axis_direction;
+                    info.meta2[0] = (u32)scPool.size();
+                    scPool.insert(scPool.end(), pageAlbedo.size() / 4u, 0u);
+                    memcpy(scPool.data() + info.meta2[0], pageAlbedo.data(), pageAlbedo.size());
+                    info.meta2[1] = (u32)scPool.size();
+                    scPool.insert(scPool.end(), pageNormal.size() / 4u, 0u);
+                    memcpy(scPool.data() + info.meta2[1], pageNormal.data(), pageNormal.size());
+                    info.meta2[2] = AppendStaticDepthPlane(scPool, pageDepth);
+                    info.meta2[3] = (u32)scPool.size();
+                    scPool.insert(scPool.end(),pageTriangles.begin(),pageTriangles.end());
+                    info.center_w[0] = c.center.x; info.center_w[1] = c.center.y;
+                    info.center_w[2] = c.center.z; info.center_w[3] = 0.0f;
+                    for (u32 k = 0; k < 3; ++k) {
+                        const math::v4& col = ref.world.columns[k];
+                        float* dst = (k == 0) ? info.mcol0 : (k == 1) ? info.mcol1 : info.mcol2;
+                        dst[0] = col.x; dst[1] = col.y; dst[2] = col.z; dst[3] = 0.0f;
+                    }
+                    math::v4 emission{};
+                    if (const char* e = std::getenv("PRIMAL_SC_EMISSIVE")) {
+                        float r=0, g=0, b=0;
+                        if (std::sscanf(e, "%f,%f,%f", &r, &g, &b) == 3) emission = math::v4{r,g,b,0.f};
+                    }
+                    if (c.mesh_instance_id < kMaxEmissiveInstances && instance_emissive_cpu_[c.mesh_instance_id].w > .5f)
+                        emission = instance_emissive_cpu_[c.mesh_instance_id];
+                    info.local0[0] = emission.x;
+                    info.local0[1] = emission.y;
+                    info.local0[2] = emission.z;
+                    info.local0[3] = ref.local_extent.x;
+                    info.local1[0] = ref.local_extent.y;
+                    info.local1[1] = ref.local_extent.z;
+                    scInfos.push_back(info);
+                    scTexelOffset += res * res;
+                }
+                if(geometryResample) PRIMAL_LOG_STREAM(Info,"Render") << "[SC_GEOMETRY_RESAMPLE] cards=" << resampledCards
+                    << " valid=" << resampleValid << " no_source=" << resampleNoSource << " geometry_miss=" << resampleMiss
+                    << " missing=" << scMissing << " milliseconds=" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now()-resampleStart).count();
+                if (!scInfos.empty() && scTexelOffset > 0) {
+                    scInfos[0].meta1[1] = (u32)scInfos.size();   // shader 侧 count 槽
+                    // 上传（销毁重建——epoch 级一次性）。
+                    if (static_composite_info_buffer_ != handles::INVALID_RESOURCE)
+                        device_->DestroyBuffer(static_composite_info_buffer_);
+                    if (static_composite_pool_buffer_ != handles::INVALID_RESOURCE)
+                        device_->DestroyBuffer(static_composite_pool_buffer_);
+                    auto makeBuf = [&](rhi::ResourceHandle& h, const void* data, u64 bytes) {
+                        rhi::BufferDesc desc{};
+                        desc.size = bytes;
+                        desc.type = rhi::BufferType::Structured;
+                        desc.usage = rhi::GPUMemoryUsage::Dynamic;
+                        desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+                        desc.structured.elementCount = (u32)((bytes + 3u) / 4u);
+                        desc.structured.elementStride = 4;   // 按 uint word 寻址（shader 侧 std430 uint[]）
+                        h = device_->CreateBuffer(desc);
+                        if (h != handles::INVALID_RESOURCE) {
+                            void* mapped = device_->MapBuffer(h);
+                            if (mapped) { memcpy(mapped, data, bytes); device_->UnmapBuffer(h); }
+                            else { device_->DestroyBuffer(h); h = handles::INVALID_RESOURCE; }
+                        }
+                    };
+                    if(geometry_first_requested_) {
+                        if(triangle_support_buffer_!=handles::INVALID_RESOURCE) device_->DestroyBuffer(triangle_support_buffer_);
+                        if(buildMask){std::vector<u32> owners;owners.reserve(scCards.size());for(const auto& card:scCards)owners.push_back(card.mesh_instance_id);
+                            support.FinalizeOwnerMasks(owners,card_generator_.GetLookupCount());}
+                        if(buildPresence)support.FinalizePresence();
+                        makeBuf(triangle_support_buffer_,support.words.data(),u64(support.words.size())*sizeof(u32));
+                        triangle_support_word_count_=triangle_support_buffer_!=handles::INVALID_RESOURCE?u32(support.words.size()):0u;
+                        if(triangle_support_buffer_!=handles::INVALID_RESOURCE) triangle_support_epoch_=card_generator_.GetAllocationEpoch();
+                        PRIMAL_LOG_STREAM(Info,"Render") << "[SC_TRIANGLE_SUPPORT] words=" << support.words.size()
+                            << " epoch=" << triangle_support_epoch_;
+                    }
+                    makeBuf(static_composite_info_buffer_, scInfos.data(),
+                            u64(scInfos.size()) * sizeof(StaticCompositeInfo));
+                    makeBuf(static_composite_pool_buffer_, scPool.data(),
+                            u64(scPool.size()) * sizeof(u32));
+                    if (static_composite_info_buffer_ != handles::INVALID_RESOURCE &&
+                        static_composite_pool_buffer_ != handles::INVALID_RESOURCE) {
+                        const bool ccIsVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+                        DescriptorData ccParams[] = {
+                            {0, DescriptorType::StorageImage,  albedo_atlas_},
+                            {1, DescriptorType::StorageImage,  normal_atlas_},
+                            {2, DescriptorType::StorageImage,  depth_atlas_},
+                            {3, DescriptorType::StorageBuffer, static_composite_info_buffer_},
+                            {4, DescriptorType::StorageBuffer, static_composite_pool_buffer_},
+                            {5, DescriptorType::StorageImage, emissive_atlas_},
+                            {6, DescriptorType::StorageBuffer, triangle_atlas_buffer_},
+                        };
+                        (void)ccIsVk;
+                        UpdateDescriptorSet(device_, static_composite_set_, ccParams, 7);
+                        cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
+                                           AccessFlag::HostWrite, AccessFlag::ShaderRead);
+                        cmd->BindComputePipeline(static_composite_pipeline_);
+                        const DescriptorSetHandle ccSets[] = { static_composite_set_ };
+                        cmd->BindDescriptorSets(PipelineBindPoint::Compute, static_composite_layout_,
+                                                0, 1, ccSets, 0, nullptr);
+                        const u32 ccGroups = (scTexelOffset + 255) / 256;
+                        cmd->Dispatch(ccGroups, 1, 1);
+                        cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                           AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                        compositeUploaded = true;
+                        static_composite_card_count_ = (u32)scInfos.size();
+                        static_composite_pool_bytes_ = u64(scPool.size()) * 4u;
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[SC_STATIC] composite dispatched: cards=" << scInfos.size()
+                            << " texels=" << scTexelOffset
+                            << " poolMB=" << (static_composite_pool_bytes_ >> 20)
+                            << " missing_pages=" << scMissing << std::endl;
+                    }
+                } else if (scMissing > 0) {
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << "[SC_STATIC] no composite dispatched, missing_pages=" << scMissing << std::endl;
+                }
+                if (compositeUploaded && scMissing == 0)
+                    static_composite_epoch_ = card_generator_.GetAllocationEpoch();
+                    if(collectBoundaryAtlas && boundaryAtlasValid)boundary_atlas_epoch_=static_composite_epoch_;
+            }
+
+            // ================================================================
+            // 3.56 [SC per-mesh 计划 P2] 页复用拒绝旧引用（Vulkan-only）：
+            //      页表模式 LRU 挤页释放的 atlas rect → 6 个 lighting atlas
+            //      清零。旧引用在物理页复用前被显式拒绝（§3.1）。
+            // ================================================================
+            if (page_clear_pipeline_ != handles::INVALID_PIPELINE &&
+                page_clear_set_ != handles::INVALID_DESCRIPTOR_SET &&
+                card_generator_.GetAllocationEpoch() != page_clear_epoch_) {
+                // Whole allocation was repacked: reject every previous identity, not only LRU slices.
+                const std::vector<CardGenerator::EvictedRect> evicted = {{0, 0, atlas_size_, atlas_size_}};
+                if (!evicted.empty()) {
+                    std::vector<u32> rectWords;
+                    rectWords.push_back((u32)evicted.size());
+                    u32 clearTexels = 0;
+                    for (const auto& r : evicted) {
+                        rectWords.push_back(r.x); rectWords.push_back(r.y);
+                        rectWords.push_back(r.w); rectWords.push_back(r.h);
+                        clearTexels += r.w * r.h;
+                    }
+                    if (page_clear_rects_buffer_ != handles::INVALID_RESOURCE)
+                        device_->DestroyBuffer(page_clear_rects_buffer_);
+                    rhi::BufferDesc rd{};
+                    rd.size = u64(rectWords.size()) * sizeof(u32);
+                    rd.type = rhi::BufferType::Structured;
+                    rd.usage = rhi::GPUMemoryUsage::Dynamic;
+                    rd.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+                    rd.structured.elementCount = (u32)rectWords.size();
+                    rd.structured.elementStride = sizeof(u32);
+                    page_clear_rects_buffer_ = device_->CreateBuffer(rd);
+                    if (page_clear_rects_buffer_ != handles::INVALID_RESOURCE) {
+                        if (auto* mp = static_cast<u32*>(device_->MapBuffer(page_clear_rects_buffer_))) {
+                            memcpy(mp, rectWords.data(), rd.size);
+                            device_->UnmapBuffer(page_clear_rects_buffer_);
+                        }
+                        DescriptorData pcParams[] = {
+                            {0, DescriptorType::StorageImage,  lighting_atlas_[0]},
+                            {1, DescriptorType::StorageImage,  lighting_atlas_[1]},
+                            {2, DescriptorType::StorageImage,  lighting_atlas_[2]},
+                            {3, DescriptorType::StorageImage,  lighting_nodirect_atlas_[0]},
+                            {4, DescriptorType::StorageImage,  lighting_nodirect_atlas_[1]},
+                            {5, DescriptorType::StorageImage,  lighting_nodirect_atlas_[2]},
+                            {6, DescriptorType::StorageBuffer, page_clear_rects_buffer_},
+                        };
+                        rhi::ResourceBarrier clearBarriers[6]{};
+                        for (u32 k = 0; k < 6u; ++k) {
+                            clearBarriers[k].resource = pcParams[k].resource;
+                            clearBarriers[k].beforeState = rhi::ResourceState::Unknown;
+                            clearBarriers[k].afterState = rhi::ResourceState::UnorderedAccess;
+                            clearBarriers[k].subresource = 0xFFFFFFFFu;
+                        }
+                        cmd->InsertBarrier(clearBarriers, 6);
+                        cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
+                                           AccessFlag::HostWrite, AccessFlag::ShaderRead);
+                        UpdateDescriptorSet(device_, page_clear_set_, pcParams, 7);
+                        cmd->BindComputePipeline(page_clear_pipeline_);
+                        const DescriptorSetHandle pcSets[] = { page_clear_set_ };
+                        cmd->BindDescriptorSets(PipelineBindPoint::Compute, page_clear_layout_,
+                                                0, 1, pcSets, 0, nullptr);
+                        const u32 pcGroups = (clearTexels + 255) / 256;
+                        if (pcGroups > 0) cmd->Dispatch(pcGroups, 1, 1);
+                        cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                                           AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                    }
+                }
+                page_clear_epoch_ = card_generator_.GetAllocationEpoch();
             }
 
             // ================================================================
@@ -2057,7 +3275,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             //     depth) into card atlas texels. Uncovered texels keep previous
             //     content (persistent atlas = cache semantics).
             // ================================================================
-            if (!card_view_enabled_ &&
+            if (!card_view_enabled_ && !source_writer_audit_requested_ &&
+                GIDebug().sc_capture &&   // [F3-V4] 死旋钮接门控（false=跳过 dispatch，atlas 保持上帧内容）
                 capture_gather_pipeline_ != handles::INVALID_PIPELINE &&
                 frame_data.gbuffer_depth  != handles::INVALID_RESOURCE &&
                 frame_data.gbuffer_albedo != handles::INVALID_RESOURCE &&
@@ -2198,7 +3417,21 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // lighting write is transient (LightEval recomputes with real
             // light + T3.3 shadows right after). Metal stays gather-only
             // until a Metal CardFill port lands (M5).
-            if (card_fill_pipeline_ != handles::INVALID_PIPELINE) {
+            if (source_writer_audit_requested_ && !source_writer_audit_enabled_) {
+                // The opt-in audit is fail-closed.  In particular, do not
+                // dispatch the production CardFill shader after a missing
+                // writer variant and later call its atlas state evidence.
+                static bool writerFailureLogged = false;
+                if (!writerFailureLogged) {
+                    writerFailureLogged = true;
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << "[SC_CAPTURE_SOURCE_AUDIT] CardFill writer unavailable; "
+                        << "production CardFill dispatch suppressed" << std::endl;
+                }
+            } else if (GIDebug().sc_capture &&   // [F3-V4] 死旋钮接门控
+                       (source_writer_audit_enabled_
+                            ? card_fill_writer_pipeline_ != handles::INVALID_PIPELINE
+                            : card_fill_pipeline_ != handles::INVALID_PIPELINE)) {
                 // Get SDF cascade textures + data from GlobalSDF.
                 auto& globalSDF = nanite::GlobalSDF::Get();
                 ResourceHandle sdfTex[3] = {handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
@@ -2210,6 +3443,24 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             sdfTex[c] = cascade.sdf_texture;
                             cascadeCount++;
                         }
+                    }
+                }
+
+                // Single-variable, default-off CardFill source control. Bind
+                // matching coordinates/resolution with the texture; do not
+                // silently substitute coarse runtime data if unavailable.
+                const char* fillSource = std::getenv("SC_FILL_OFFLINE_SDF");
+                const bool offlineFillRequested = device_->GetPlatform() == RHIPlatform::Vulkan &&
+                    fillSource && fillSource[0] == '1';
+                const bool offlineFill = offlineFillRequested &&
+                    sc_offline_sdf_texture_ != handles::INVALID_RESOURCE &&
+                    sc_offline_sdf_resolution_ > 0u;
+                if (offlineFillRequested) {
+                    cascadeCount = offlineFill ? 1u : 0u;
+                    if (offlineFill) {
+                        for (auto& tex : sdfTex) tex = sc_offline_sdf_texture_;
+                    } else if (current_frame_index == 0u) {
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[SC_FILL_SOURCE] offline requested but unavailable; fill skipped" << std::endl;
                     }
                 }
 
@@ -2228,6 +3479,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             u32 _pad0;
                             u32 _pad1;
                         };
+                        static_assert(sizeof(CardFillParamsCB) == 160);
                         auto* cfm = static_cast<CardFillParamsCB*>(device_->MapBuffer(card_fill_cb_[frameIdx]));
                         if (cfm) {
                             for (u32 c = 0; c < cascadeCount; ++c) {
@@ -2236,12 +3488,27 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                 cfm->sdf_extents[c] = {cascade.extent.x, cascade.extent.y, cascade.extent.z, 0.0f};
                                 cfm->sdf_res[c] = cascade.resolution;
                             }
+                            if (offlineFill) {
+                                cfm->sdf_origins[0] = {sc_offline_sdf_origin_.x, sc_offline_sdf_origin_.y, sc_offline_sdf_origin_.z, 0.0f};
+                                cfm->sdf_extents[0] = {sc_offline_sdf_extent_.x, sc_offline_sdf_extent_.y, sc_offline_sdf_extent_.z, 0.0f};
+                                cfm->sdf_res[0] = sc_offline_sdf_resolution_;
+                            }
                             cfm->sdf_count = cascadeCount;
                             cfm->light_direction = math::v4{0.707f, -1.0f, 0.408f, 0.0f};
                             cfm->light_color = math::v4{5.0f, 5.0f, 5.0f, 1.0f};
                             cfm->total_texels = total_texels;
                             cfm->card_count = card_count;
                             cfm->_pad0 = cfm->_pad1 = 0;
+                            // Diagnostic-only flags in existing unused words;
+                            // CardFill is Vulkan-only. Metal/Dawn stay zero.
+                            if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+                                const char* originHit = std::getenv("SC_FILL_REJECT_ORIGIN_HIT");
+                                const char* axisLimit = std::getenv("SC_FILL_AXIS_LIMIT");
+                                const char* materialBits = std::getenv("SC_FILL_MATERIAL_BITS");
+                                cfm->_pad0 = originHit && originHit[0] == '1' ? 1u : 0u;
+                                cfm->_pad1 = axisLimit && axisLimit[0] == '1' ? 1u : 0u;
+                                if(materialBits && materialBits[0]=='1') cfm->_pad0 |= 2u;
+                            }
                             device_->UnmapBuffer(card_fill_cb_[frameIdx]);
                         }
                     }
@@ -2278,14 +3545,168 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {12, DescriptorType::SampledImage,  albedoTexArr},
                         {13, DescriptorType::Sampler,       static_cast<ResourceHandle>(s_cf_sampler)},
                     };
-                    UpdateDescriptorSet(device_, card_fill_set_[frameIdx], fillParams, 14);
+                    DescriptorData writerParams[16];
+                    if (source_writer_audit_enabled_) {
+                        std::memcpy(writerParams, fillParams, sizeof(fillParams));
+                        writerParams[14] = {14, DescriptorType::StorageImage, source_writer_atlas_};
+                        writerParams[15] = {15, DescriptorType::UniformBuffer, card_fill_writer_cb_[frameIdx]};
+                        struct WriterParams { u32 frame, pad0, pad1, pad2; };
+                        auto* writerCB = static_cast<WriterParams*>(device_->MapBuffer(card_fill_writer_cb_[frameIdx]));
+                        if (!writerCB) {
+                            source_writer_audit_failed_ = true;
+                            source_writer_audit_enabled_ = false;
+                            PRIMAL_LOG_STREAM(Error, "Render")
+                                << "[SC_CAPTURE_SOURCE_AUDIT] writer frame CB map failed" << std::endl;
+                            return;
+                        }
+                        writerCB->frame = current_frame_index;
+                        writerCB->pad0 = writerCB->pad1 = writerCB->pad2 = 0;
+                        device_->UnmapBuffer(card_fill_writer_cb_[frameIdx]);
+                        UpdateDescriptorSet(device_, card_fill_writer_set_[frameIdx], writerParams, 16);
+                    } else {
+                        UpdateDescriptorSet(device_, card_fill_set_[frameIdx], fillParams, 14);
+                    }
 
-                    cmd->BindComputePipeline(card_fill_pipeline_);
-                    const DescriptorSetHandle fillSets[] = { card_fill_set_[frameIdx] };
-                    cmd->BindDescriptorSets(PipelineBindPoint::Compute, card_fill_layout_, 0, 1, fillSets, 0, nullptr);
+                    cmd->BindComputePipeline(source_writer_audit_enabled_
+                        ? card_fill_writer_pipeline_ : card_fill_pipeline_);
+                    const DescriptorSetHandle fillSets[] = { source_writer_audit_enabled_
+                        ? card_fill_writer_set_[frameIdx] : card_fill_set_[frameIdx] };
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute,
+                        source_writer_audit_enabled_ ? card_fill_writer_layout_ : card_fill_layout_,
+                        0, 1, fillSets, 0, nullptr);
+
+                    // One-shot bracket around the ONLY intervening writer.
+                    // No shader tags, radiance changes, or extra bindings.
+                    bool auditFill = false;
+                    const char* auditFrameEnv = std::getenv("SC_FILL_AUDIT_FRAME");
+                    const u32 auditFrame = auditFrameEnv ? u32(std::strtoul(auditFrameEnv, nullptr, 10)) : 0u;
+                    if (device_->GetPlatform() == RHIPlatform::Vulkan &&
+                        std::getenv("SC_FILL_AUDIT_PREFIX") && total_texels > 0u &&
+                        current_frame_index >= auditFrame &&
+                        card_fill_audit_.staging == handles::INVALID_RESOURCE) {
+                        BufferDesc rb{};
+                        rb.size = u64(atlas_size_) * atlas_size_ * 16u;
+                        rb.memoryUsage = GPUMemoryUsage::Readback;
+                        rb.bindFlags = u32(BufferUsageFlags::TransferDst);
+                        rb.name = "SC_CardFillBracket";
+                        card_fill_audit_.staging = device_->CreateBuffer(rb);
+                        card_fill_audit_.frame = current_frame_index;
+                        card_fill_audit_.atlas_size = atlas_size_;
+                        const auto& firstCascade = globalSDF.GetCascade(0);
+                        card_fill_audit_.offline_source = offlineFill;
+                        card_fill_audit_.sdf_count = cascadeCount;
+                        card_fill_audit_.sdf_origin = offlineFill ? sc_offline_sdf_origin_ : firstCascade.origin;
+                        card_fill_audit_.sdf_extent = offlineFill ? sc_offline_sdf_extent_ : firstCascade.extent;
+                        card_fill_audit_.sdf_resolution = offlineFill ? sc_offline_sdf_resolution_ : firstCascade.resolution;
+                        card_fill_audit_cards_ = cards;
+                        auditFill = card_fill_audit_.staging != handles::INVALID_RESOURCE;
+                        // Only explicit opt-in: record the same resource handles
+                        // installed in this CardFill descriptor set above.
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+                        const char* materialAudit=std::getenv("SC_FILL_MATERIAL_AUDIT");
+                        if(auditFill && materialAudit && materialAudit[0]=='1') {
+                            auto* vk=static_cast<VulkanDevice*>(device_);
+                            u64 instanceBytes=0,materialBytes=0;
+                            auto* texture=vk->GetTexture(albedoTexArr);
+                            if(vk->GetBufferByteSize(instBuf,instanceBytes) && vk->GetBufferByteSize(matBuf,materialBytes) &&
+                               instanceBytes%192==0 && materialBytes%48==0 &&
+                               instanceBytes<=192u*1048576u && materialBytes<=48u*1048576u && texture) {
+                                BufferDesc tables{};
+                                tables.size=instanceBytes+materialBytes+160;
+                                tables.memoryUsage=GPUMemoryUsage::Readback;
+                                tables.bindFlags=u32(BufferUsageFlags::TransferDst);
+                                tables.name="SC_CardFillResidentTables";
+                                card_fill_audit_.tables_staging=device_->CreateBuffer(tables);
+                                if(card_fill_audit_.tables_staging!=handles::INVALID_RESOURCE) {
+                                    card_fill_audit_.instance_source=instBuf;
+                                    card_fill_audit_.material_source=matBuf;
+                                    card_fill_audit_.albedo_source=albedoTexArr;
+                                    card_fill_audit_.instance_bytes=instanceBytes;
+                                    card_fill_audit_.material_bytes=materialBytes;
+                                    const auto& textureDesc=texture->GetTextureDesc();
+                                    card_fill_audit_.albedo_width=textureDesc.size.x;
+                                    card_fill_audit_.albedo_height=textureDesc.size.y;
+                                    card_fill_audit_.albedo_layers=textureDesc.arraySize;
+                                    // InsertBarrier currently skips Vulkan buffers;
+                                    // these read-only inputs need explicit dependencies.
+                                    cmd->MemoryBarrier(PipelineStage::Host|PipelineStage::AllCommands,PipelineStage::Transfer,
+                                                       AccessFlag::HostWrite|AccessFlag::MemoryWrite,AccessFlag::TransferRead);
+                                    cmd->CopyBuffer(instBuf,card_fill_audit_.tables_staging,0,0,instanceBytes);
+                                    cmd->CopyBuffer(matBuf,card_fill_audit_.tables_staging,0,instanceBytes,materialBytes);
+                                    cmd->CopyBuffer(card_fill_cb_[frameIdx],card_fill_audit_.tables_staging,0,instanceBytes+materialBytes,160);
+                                    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,
+                                                       AccessFlag::TransferWrite,AccessFlag::HostRead);
+                                    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::ComputeShader,
+                                                       AccessFlag::TransferRead,AccessFlag::ShaderRead);
+                                }
+                            }
+                        }
+#endif
+                        // Optional actual source0 snapshot, not a CPU surrogate
+                        // or Map of GPU-only storage. Preserve ShaderResource
+                        // state around the transfer; same retirement as bracket.
+                        if (auditFill && std::getenv("SC_FILL_SDF_AUDIT")) {
+                            const auto format = device_->GetTextureFormat(sdfTex[0]);
+                            const u32 stride = format == DataFormat::R32_Float ? 4u :
+                                (format == DataFormat::R16_Float ? 2u : 0u);
+                            if (stride) {
+                                const u32 res = card_fill_audit_.sdf_resolution;
+                                BufferDesc sb{};
+                                sb.size = u64(res) * res * res * stride;
+                                sb.memoryUsage = GPUMemoryUsage::Readback;
+                                sb.bindFlags = u32(BufferUsageFlags::TransferDst);
+                                sb.name = "SC_CardFillSource0";
+                                card_fill_audit_.sdf_staging = device_->CreateBuffer(sb);
+                                card_fill_audit_.sdf_stride = stride;
+                                if (card_fill_audit_.sdf_staging != handles::INVALID_RESOURCE && card_fill_audit_.sdf_stride) {
+                                    ResourceBarrier toCopy{};
+                                    toCopy.resource = sdfTex[0];
+                                    toCopy.beforeState = ResourceState::ShaderResource;
+                                    toCopy.afterState = ResourceState::CopySource;
+                                    toCopy.subresource = 0xFFFFFFFF;
+                                    cmd->InsertBarrier(&toCopy, 1);
+                                    BufferTextureCopyRegion region{};
+                                    region.bufferRowLength = res;
+                                    region.imageSubresource = {0, 0, 1};
+                                    region.imageExtent = {res, res, res};
+                                    cmd->CopyTextureToBuffer(sdfTex[0], card_fill_audit_.sdf_staging, &region, 1);
+                                    ResourceBarrier back = toCopy;
+                                    back.beforeState = ResourceState::CopySource;
+                                    back.afterState = ResourceState::ShaderResource;
+                                    cmd->InsertBarrier(&back, 1);
+                                }
+                            }
+                        }
+                    }
+                    auto copyFillAudit = [&](u32 phase) {
+                        const ResourceHandle sources[] = {depth_atlas_, albedo_atlas_};
+                        for (u32 i = 0; i < 2u; ++i) {
+                            ResourceBarrier toCopy{};
+                            toCopy.resource = sources[i];
+                            toCopy.beforeState = ResourceState::UnorderedAccess;
+                            toCopy.afterState = ResourceState::CopySource;
+                            toCopy.subresource = 0xFFFFFFFF;
+                            cmd->InsertBarrier(&toCopy, 1);
+                            BufferTextureCopyRegion region{};
+                            region.bufferOffset = u64(phase * 2u + i) * atlas_size_ * atlas_size_ * 4u;
+                            region.bufferRowLength = atlas_size_;
+                            region.imageSubresource = {0, 0, 1};
+                            region.imageExtent = {atlas_size_, atlas_size_, 1};
+                            cmd->CopyTextureToBuffer(sources[i], card_fill_audit_.staging, &region, 1);
+                            ResourceBarrier back = toCopy;
+                            back.beforeState = ResourceState::CopySource;
+                            back.afterState = ResourceState::UnorderedAccess;
+                            cmd->InsertBarrier(&back, 1);
+                        }
+                    };
+                    if (auditFill) copyFillAudit(0);
 
                     u32 fillGroups = (total_texels + 255) / 256;
                     cmd->Dispatch(fillGroups, 1, 1);
+                    if (auditFill) {
+                        copyFillAudit(1);
+                        card_fill_audit_.queued = true;
+                    }
 
                     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
@@ -2298,9 +3719,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // buffer/image-only LightEval consumes the visibility buffer.
             // Skipped when GlobalSDF is unavailable — visibility stays 1.0.
             // ================================================================
+            const bool boundaryProofNow=PrepareBoundaryLightingProof(current_frame_index,frameIdx);
             {
                 auto& globalSDF = nanite::GlobalSDF::Get();
-                if (shadow_pipeline_ != handles::INVALID_PIPELINE &&
+                if (GIDebug().sc_shadow &&   // [F3-V4] 死旋钮接门控（visibility 保持上帧）
+                    shadow_pipeline_ != handles::INVALID_PIPELINE &&
                     shadow_visibility_buffer_ != handles::INVALID_RESOURCE &&
                     globalSDF.IsInitialized()) {
                     static bool s_scshadow_once = false;
@@ -2328,6 +3751,15 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         }
                     }
 
+                    // The shader reads only c < cascadeCount, but Vulkan
+                    // still requires every declared sampled-image descriptor
+                    // to contain a valid image view. Alias unused slots to
+                    // cascade 0 when the offline volume has just one level.
+                    if (cascadeCount > 0) {
+                        for (u32 c = 1; c < 3; ++c)
+                            if (sdfTex[c] == handles::INVALID_RESOURCE) sdfTex[c] = sdfTex[0];
+                    }
+
                     if (cascadeCount > 0) {
                         const bool shIsVk =
                             device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
@@ -2346,6 +3778,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             math::m4x4 shadow_matrices[4];  // lightProj*lightView（列主序）
                             math::v4 shadow_meta;     // x=cascade_count, y=normal_offset_scale
                         };
+                        static_assert(sizeof(ShadowParamsGPU)==432,"boundary proof shadow parameter mirror");
                         auto* sp = static_cast<ShadowParamsGPU*>(device_->MapBuffer(shadow_cb_[frameIdx]));
                         if (sp) {
                             memset(sp, 0, sizeof(ShadowParamsGPU));
@@ -2423,6 +3856,17 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         u32 shGroups = (total_texels + 255) / 256;
                         cmd->Dispatch(shGroups, 1, 1);
 
+                        if(boundaryProofNow && !BoundaryProof().failed){
+                            auto& p=BoundaryProof();
+                            std::vector<DescriptorData> descriptors(std::begin(shadowParams),std::end(shadowParams));
+                            descriptors[8].resource=p.visibility;
+                            descriptors.push_back({13,DescriptorType::StorageBuffer,p.points});
+                            UpdateDescriptorSet(device_,p.sets[0],descriptors.data(),u32(descriptors.size()));
+                            cmd->MemoryBarrier(PipelineStage::Host|PipelineStage::Transfer,PipelineStage::ComputeShader,
+                                AccessFlag::HostWrite|AccessFlag::TransferWrite,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+                            cmd->BindComputePipeline(p.pipelines[0]);cmd->BindDescriptorSets(PipelineBindPoint::Compute,p.layouts[0],0,1,&p.sets[0],0,nullptr);
+                            BoundaryTimestamp(cmd,0);DispatchScNativeLabel(device_,cmd,"SC.boundary.shadow",(p.count+255)/256,1,1);BoundaryTimestamp(cmd,1);p.shadowed=true;
+                        }
                         // visibility write → LightEval read
                         cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                            AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
@@ -2442,15 +3886,34 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // ================================================================
             // 4. Single merged LightEval dispatch (1D, per-card texel)
             // ================================================================
-            {
+            // [F3-V4] sc_lighting 门控：false = 跳过 dispatch（lighting atlas
+            // 保持上帧内容）。GI_ALL_OFF 的 direct-only A/B 语义由此生效。
+            if (GIDebug().sc_lighting) {
                 const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
-                // histIdx = 2 frames ago — the lighting atlas from 2 frames
-                // back is safe to read (GPU finished with it) and serves as
-                // the multi-bounce feedback source. Phase 1d: (N+1)%3 与
-                // DDGISlotMap 恒等（N-2 ≡ N+1 mod 3，+1 写法避免 unsigned
-                // 下溢），槽位语义以 DDGISlotMap.h 为准。
-                const u32 histIdx = DDGISlotsForFrame(current_frame_index + 1u).currentIndex;
-                DescriptorData evalParams[16];
+                // feedbackIdx = 2 frames ago — the lighting atlas from 2
+                // frames back is safe to read (GPU finished with it) and
+                // remains the multi-bounce feedback/query source. Phase 1d:
+                // (N+1)%3 与 DDGISlotMap 恒等（N-2 ≡ N+1 mod 3，+1 写法避免
+                // unsigned 下溢），槽位语义以 DDGISlotMap.h 为准。
+                const u32 feedbackIdx = DDGISlotsForFrame(current_frame_index + 1u).currentIndex;
+                // temporalPrevIdx = the most recently completed frame (N-1).
+                // This is intentionally a separate history clock for the tile
+                // solver's indirect_out EMA and tile-grid EMA/carry. Reusing
+                // feedbackIdx here splits partial-refresh history by parity and
+                // prevents non-refreshed tiles from carrying the latest frame.
+                const u32 temporalPrevIdx = DDGISlotsForFrame(current_frame_index).previousIndex;
+                // [E0-B 2026-09-21 + 780 帧稳定性修正] prev_light（legacy 自反馈）
+                // 必须继续读混合 atlas：自反馈回路每代重注入 fresh 直射
+                //（direct 逐帧解析计算），是 SC 场的能量源；若改读 nodirect，
+                // 每代递归剥一次直射 → 指数衰减 → frame 780 全图坍黑（实测
+                // meanY 64.6→9.4，B14 "indirect fading" 的回路机制复现）。
+                // nodirect 副本因此只做探针/查询侧的"静态直射项隔离"——
+                // result 本体（含 prev 直射库）稳定，nodirect = result −
+                // direct·ρ/π 同样稳定。
+                const ResourceHandle prevLightingAtlas = lighting_atlas_[feedbackIdx];
+                // Vulkan 17 项 / Metal 15 项（[E0-B] nodirect 输出各 +1）。
+                DescriptorData evalParams[18];
+                u32 evalParamCount = 0;
                 // [WRC 计划 Stream D2]: 页表缓冲（页表模式用真表；关闭时绑
                 // stand-in，flag=0 shader 不读）。
                 const bool ptOn = card_generator_.IsPageTableEnabled();
@@ -2467,7 +3930,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {5, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
                         {6, DescriptorType::StorageBuffer, light_info_buffer_},
                         {7, DescriptorType::StorageBuffer, card_dispatch_buffer_},
-                        {8, DescriptorType::StorageImage,  lighting_atlas_[histIdx]},  // prev for multi-bounce
+                        {8, DescriptorType::StorageImage,  prevLightingAtlas},  // prev for multi-bounce [E0-B: nodirect]
                         {9, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
                         // Probe-fed indirect: bind the previous-frame slot
                         // even when invalid (CB flag gates the shader term).
@@ -2493,8 +3956,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                              : card_dispatch_buffer_},
                         // [WRC 计划 Stream D2]: 卡片页表（过表寻址）。
                         {15, DescriptorType::StorageBuffer, pageTableBuf},
+                        // [E0-B 2026-09-21] nodirect 副本输出（result − direct·ρ/π）。
+                        {16, DescriptorType::StorageImage,  lighting_nodirect_atlas_[outIdx]},
                     };
                     memcpy(evalParams, p, sizeof(p));
+                    evalParamCount = (u32)std::size(p);
                 } else {
                     // T8.13 Vulkan↔Metal sync: same 12-resource set as the
                     // Vulkan branch — Metal slot indices differ only by
@@ -2509,7 +3975,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {3, DescriptorType::StorageBuffer, light_info_buffer_},
                         {4, DescriptorType::StorageBuffer, card_dispatch_buffer_},
                         {5, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
-                        {4, DescriptorType::StorageImage,  lighting_atlas_[histIdx]},   // prev for multi-bounce
+                        {4, DescriptorType::StorageImage,  prevLightingAtlas},   // prev for multi-bounce [E0-B: nodirect]
                         {5, DescriptorType::StorageImage,  depth_atlas_},               // surface-point probe gather
                         // Probe-fed indirect: bind the previous-frame slot even
                         // when invalid (CB flag gates the shader term).
@@ -2529,8 +3995,11 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                          frame_data.ddgi_opensky != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_opensky
                              : card_dispatch_buffer_},
+                        // [E0-B 2026-09-21] nodirect 副本输出 [[texture(7)]]。
+                        {7, DescriptorType::StorageImage,  lighting_nodirect_atlas_[outIdx]},
                     };
                     memcpy(evalParams, p, sizeof(p));
+                    evalParamCount = (u32)std::size(p);
                 }
                 // C 系列诊断：深度缓冲真值（量级/单位校验）
                 if (std::getenv("SC_DEPTH_STATS")) {
@@ -2558,13 +4027,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     }
                 }
 
-                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, 16);
+                UpdateDescriptorSet(device_, light_eval_set_[frameIdx], evalParams, evalParamCount);
 
                 // Explicit GENERAL transition for the lighting atlases — do not
                 // rely on the render graph's Write declaration having put them
                 // in a storage-compatible layout before this dispatch. Both the
                 // written slot (outIdx) and the multi-bounce feedback slot
-                // (histIdx) are bound as storage images; histIdx is not RG-
+                // (feedbackIdx) are bound as storage images; feedbackIdx is not RG-
                 // declared, and on its first frames it is still UNDEFINED.
                 // The Vulkan backend resolves oldLayout from the tracked layout,
                 // so the first such barrier correctly performs UNDEFINED→UAV.
@@ -2574,25 +4043,152 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // EMA history 被 sampled（tracked=SRO），写前必须转回
                     // GENERAL；否则 storage 写在 SRO 上发生（UB，validation 钉
                     // real=GENERAL），后续 resolve 前置 UA barrier 触发 01197。
-                    ResourceBarrier lb[3]{};
+                    // [E0-B] nodirect 两个槽（outIdx 写 + feedbackIdx 作为
+                    // prev_lighting 的 imageLoad/resolve 采样源）与混合 atlas
+                    // 完全同构地显式转 GENERAL——barrier 覆盖必须对称。
+                    ResourceBarrier lb[5]{};
                     lb[0].resource = lighting_atlas_[outIdx];
-                    lb[1].resource = lighting_atlas_[histIdx];
+                    lb[1].resource = lighting_atlas_[feedbackIdx];
                     lb[2].resource = indirect_out_tex_[outIdx];
+                    lb[3].resource = lighting_nodirect_atlas_[outIdx];
+                    lb[4].resource = lighting_nodirect_atlas_[feedbackIdx];
                     for (auto& b : lb) {
                         b.beforeState = ResourceState::UnorderedAccess;
                         b.afterState  = ResourceState::UnorderedAccess;
                         b.subresource = 0xFFFFFFFF;
                     }
-                    cmd->InsertBarrier(lb, 3);
+                    cmd->InsertBarrier(lb, 5);
                 }
 
+                // Exact Vulkan/DUMP2 opt-in: copy actual inputs immediately
+                // before this writer and outputs immediately after it. No replay
+                // shader, production binding, or production-value modification.
+                const char* snapshotEnv = std::getenv("DDGI_SC_WRITER_SNAPSHOT");
+                const char* snapshotDump = std::getenv("DDGI_DUMP");
+                const char* snapshotFrame = std::getenv("DDGI_DUMP_FRAME");
+                const bool snapshotNow = isVk && snapshotEnv && strcmp(snapshotEnv, "1") == 0 &&
+                    snapshotDump && strcmp(snapshotDump, "2") == 0 && snapshotFrame &&
+                    current_frame_index == u32(std::strtoul(snapshotFrame, nullptr, 10)) &&
+                    !light_writer_snapshot_.recorded && !light_writer_snapshot_.failed;
+                auto snapshotTexture = [&](u32 index) {
+                    ResourceBarrier toCopy{};
+                    toCopy.resource = light_writer_snapshot_.sources[index];
+                    toCopy.beforeState = ResourceState::Unknown;
+                    toCopy.afterState = ResourceState::CopySource;
+                    toCopy.subresource = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&toCopy, 1);
+                    BufferTextureCopyRegion region{};
+                    region.bufferOffset = light_writer_snapshot_.offsets[index];
+                    region.bufferRowLength = atlas_size_;
+                    region.imageSubresource = {0, 0, 1};
+                    region.imageExtent = {atlas_size_, atlas_size_, 1};
+                    cmd->CopyTextureToBuffer(toCopy.resource, light_writer_snapshot_.staging, &region, 1);
+                    toCopy.beforeState = ResourceState::CopySource;
+                    toCopy.afterState = ResourceState::UnorderedAccess;
+                    cmd->InsertBarrier(&toCopy, 1);
+                };
+                if (snapshotNow) {
+                    auto& witness = light_writer_snapshot_;
+                    witness.frame = current_frame_index;
+                    witness.render_slot = frameIdx;
+                    witness.output_slot = outIdx;
+                    witness.dispatch_cards = card_count;
+                    const ResourceHandle sources[] = {indirect_out_tex_[outIdx], albedo_atlas_, normal_atlas_,
+                        depth_atlas_, emissive_atlas_, shadow_visibility_buffer_, params_cb_[frameIdx],
+                        light_info_buffer_, card_generator_.GetCardDataBuffer(), card_dispatch_buffer_,
+                        lighting_atlas_[outIdx], lighting_nodirect_atlas_[outIdx]};
+                    const u64 texels = u64(atlas_size_) * atlas_size_;
+                    const u64 sizes[] = {texels*8,texels*4,texels*4,texels*4,texels*8,texels*4,
+                        sizeof(FlattenedLightingParams),4096,
+                        u64(card_generator_.GetCardCount())*sizeof(SurfaceCacheCard),
+                        u64(card_count)*sizeof(CardDispatchInfo),texels*8,texels*8};
+                    for (u32 i = 0; i < 12; ++i) {
+                        witness.sources[i] = sources[i];
+                        witness.offsets[i] = witness.bytes;
+                        witness.sizes[i] = sizes[i];
+                        witness.bytes += (sizes[i] + 15u) & ~u64(15u);
+                        if (sources[i] == handles::INVALID_RESOURCE || !sizes[i]) witness.failed = true;
+                    }
+                    if (witness.bytes > 256ull*1024ull*1024ull) witness.failed = true;
+                    if (!witness.failed) {
+                        BufferDesc desc{};
+                        desc.size = witness.bytes;
+                        desc.memoryUsage = GPUMemoryUsage::Readback;
+                        desc.bindFlags = u32(BufferUsageFlags::TransferDst);
+                        desc.name = "SC_LightWriterInputsOutputs";
+                        witness.staging = device_->CreateBuffer(desc);
+                        witness.failed = witness.staging == handles::INVALID_RESOURCE;
+                    }
+                    if (!witness.failed) {
+                        // Vulkan InsertBarrier skips buffers. Authenticate the
+                        // Host/compute producer and transfer copies explicitly.
+                        cmd->MemoryBarrier(PipelineStage::Host | PipelineStage::AllCommands, PipelineStage::Transfer,
+                            AccessFlag::HostWrite | AccessFlag::MemoryWrite, AccessFlag::TransferRead);
+                        for (u32 i = 0; i < 5; ++i) snapshotTexture(i);
+                        for (u32 i = 5; i < 10; ++i)
+                            cmd->CopyBuffer(witness.sources[i], witness.staging, 0, witness.offsets[i], witness.sizes[i]);
+                        cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::ComputeShader,
+                            AccessFlag::TransferRead, AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+                    } else {
+                        PRIMAL_LOG_STREAM(Error, "Render") << "[SC_LIGHT_WRITER_SNAPSHOT] allocation/source failed" << std::endl;
+                    }
+                }
                 cmd->BindComputePipeline(light_eval_pipeline_);
                 const DescriptorSetHandle sets[] = { light_eval_set_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, light_eval_layout_, 0, 1, sets, 0, nullptr);
 
                 u32 groups = (total_texels + 255) / 256;
                 cmd->Dispatch(groups, 1, 1);
+                if (snapshotNow && !light_writer_snapshot_.failed) {
+                    cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                        AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+                    snapshotTexture(10);
+                    snapshotTexture(11);
+                    cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                        AccessFlag::TransferWrite, AccessFlag::HostRead);
+                    cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::ComputeShader,
+                        AccessFlag::TransferRead, AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+                    light_writer_snapshot_.recorded = true;
+                }
 
+                if(boundaryProofNow && BoundaryProof().shadowed && !BoundaryProof().failed){
+                    auto& p=BoundaryProof();
+                    std::vector<DescriptorData> descriptors(evalParams,evalParams+evalParamCount);
+                    for(auto& d:descriptors)if(d.binding==9)d.resource=p.visibility;
+                    descriptors.push_back({17,DescriptorType::StorageBuffer,p.points});
+                    descriptors.push_back({18,DescriptorType::StorageBuffer,p.results});
+                    UpdateDescriptorSet(device_,p.sets[1],descriptors.data(),u32(descriptors.size()));
+                    cmd->MemoryBarrier(PipelineStage::ComputeShader|PipelineStage::Host,PipelineStage::ComputeShader,
+                        AccessFlag::ShaderWrite|AccessFlag::HostWrite,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+                    cmd->BindComputePipeline(p.pipelines[1]);cmd->BindDescriptorSets(PipelineBindPoint::Compute,p.layouts[1],0,1,&p.sets[1],0,nullptr);
+                    BoundaryTimestamp(cmd,2);DispatchScNativeLabel(device_,cmd,"SC.boundary.light",(p.count+255)/256,1,1);BoundaryTimestamp(cmd,3);
+                    if(p.readback_requested){
+                    const u64 probes=u64(frame_data.ddgi_counts[0])*frame_data.ddgi_counts[1]*frame_data.ddgi_counts[2];
+                    ResourceHandle sources[]={p.points,p.results,p.visibility,params_cb_[frameIdx],shadow_cb_[frameIdx],light_info_buffer_,
+                        frame_data.ddgi_irradiance,frame_data.ddgi_depth,frame_data.ddgi_opensky,card_generator_.GetCardDataBuffer()};
+                    const u64 sizes[]={u64(p.count)*64,u64(p.count)*64,u64(p.count)*4,sizeof(FlattenedLightingParams),432,4096,
+                        sources[6]!=handles::INVALID_RESOURCE?probes*9*16:0,
+                        sources[7]!=handles::INVALID_RESOURCE?probes*128*4:0,
+                        sources[8]!=handles::INVALID_RESOURCE?probes*2*4:0,u64(card_generator_.GetCardCount())*sizeof(SurfaceCacheCard)};
+                    if(probes>131072)p.failed=true;
+                    for(u32 i=0;i<10;++i){p.offsets[i]=p.bytes;p.sizes[i]=sizes[i];p.bytes+=(sizes[i]+15)&~u64(15);}
+                    if(p.bytes>128ull*1024*1024)p.failed=true;
+                    if(!p.failed){BufferDesc d{};d.size=p.bytes;d.memoryUsage=d.usage=GPUMemoryUsage::Readback;
+                        if(p.staging!=handles::INVALID_RESOURCE && p.staging_capacity!=p.bytes){device_->DestroyBuffer(p.staging);p.staging=handles::INVALID_RESOURCE;}
+                        p.staging_capacity=p.bytes;
+                        if(p.staging==handles::INVALID_RESOURCE)p.staging=device_->CreateBuffer(d);p.failed=p.staging==handles::INVALID_RESOURCE;}
+                    if(!p.failed){
+                        cmd->MemoryBarrier(PipelineStage::ComputeShader|PipelineStage::Host,PipelineStage::Transfer,
+                            AccessFlag::ShaderWrite|AccessFlag::HostWrite,AccessFlag::TransferRead);
+                        for(u32 i=0;i<10;++i)if(sizes[i])cmd->CopyBuffer(sources[i],p.staging,0,p.offsets[i],sizes[i]);
+                        cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+                        cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::ComputeShader,
+                            AccessFlag::TransferRead,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+                        p.recorded=true;
+                        PRIMAL_LOG_STREAM(Info,"Render")<<"[SC_BOUNDARY_LIGHT_PROOF] recorded points="<<p.count<<" frame="<<p.frame<<std::endl;
+                    }
+                    }else p.recorded=true;
+                }
                 // Mark this slot as holding one full evaluation (the budget
                 // block above only clips slots that already passed through
                 // here once). AtlasInit sets atlas_seeded_ on frame 0 for
@@ -2608,6 +4204,12 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // consumer lands in the next slice, until then this stays a
                 // bring-up path.
                 const bool scIndirectOn = scIndirectEnabled(device_);
+                { static bool sReach2 = false;
+                  if (!sReach2) { sReach2 = true;
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                      << "[SC_P4] indirect block: on=" << scIndirectOn
+                      << " gi_frame=" << frame_data.gi_frame
+                      << " warmup=" << scWarmupFrames() << std::endl; } }
                 if (scIndirectOn && frame_data.gi_frame >= scWarmupFrames())
                 // trace: per-tile cosine ray fan → SDF march → ray_hits.
                 // resolve: aggregate ray_hits and expand into full-atlas indirect_out.
@@ -2687,6 +4289,19 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         }
                     }
 
+                    if(geometry_first_requested_ && (ray_triangle_buffer_==handles::INVALID_RESOURCE || ray_triangle_capacity_!=kTotalHits)) {
+                        if(ray_triangle_buffer_!=handles::INVALID_RESOURCE) device_->DestroyBuffer(ray_triangle_buffer_);
+                        BufferDesc desc{}; desc.size=kTotalHits*sizeof(u32); desc.type=BufferType::Structured;
+                        desc.memoryUsage=desc.usage=GPUMemoryUsage::Dynamic;
+                        desc.structured.elementCount=u32(kTotalHits); desc.structured.elementStride=sizeof(u32);
+                        ray_triangle_buffer_=device_->CreateBuffer(desc); ray_triangle_capacity_=kTotalHits;
+                        if(ray_triangle_buffer_!=handles::INVALID_RESOURCE) {
+                            if(void* dst=device_->MapBuffer(ray_triangle_buffer_)) {
+                                std::memset(dst,255,desc.size); device_->UnmapBuffer(ray_triangle_buffer_);
+                            } else kTilesEff=0;
+                        } else kTilesEff=0;
+                    }
+
                     // B (plan §三.B): per-tile validity bitmask. Config
                     // signature = tile grid + card-set identity — a changed
                     // tile size or regenerated card set zeroes every tile's
@@ -2730,11 +4345,42 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     }
                     }
 
+                    // Triple-buffered exact owner lookup. Rebuild on atlas allocation
+                    // epoch, not merely card count: same-count relocation changes ownership.
+                    const u64 ownerBytes = u64(kTiles)*kTiles*sizeof(u32);
+                    const u64 ownerSig = (u64(card_generator_.GetAllocationEpoch())<<32) ^ kTile;
+                    auto& ownerBuffer = indirect_tile_owner_buffers_[frameIdx];
+                    if (ownerBuffer == handles::INVALID_RESOURCE || indirect_tile_owner_bytes_[frameIdx] != ownerBytes) {
+                        if (ownerBuffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(ownerBuffer);
+                        BufferDesc desc{}; desc.size=ownerBytes; desc.type=BufferType::Structured;
+                        desc.memoryUsage=desc.usage=GPUMemoryUsage::Dynamic;
+                        desc.structured.elementCount=kTiles*kTiles; desc.structured.elementStride=sizeof(u32);
+                        ownerBuffer=device_->CreateBuffer(desc);
+                        indirect_tile_owner_bytes_[frameIdx]=ownerBytes;
+                        indirect_tile_owner_signatures_[frameIdx]=~u64(0);
+                    }
+                    if (indirect_tile_owner_signatures_[frameIdx] != ownerSig) {
+                        std::vector<u32> owners;
+                        const auto& liveCards=card_generator_.GetCards();
+                        const bool valid=BuildCardTileOwners(std::span<const SurfaceCacheCard>(liveCards),atlas_size_,kTile,owners);
+                        if (!valid) {
+                            owners.assign(u64(kTiles)*kTiles,0xFFFFFFFFu);
+                            PRIMAL_LOG_STREAM(Error,"Render") << "[SC_TILE_OWNER] invalid/overlapping atlas placement";
+                        }
+                        auto* dst=ownerBuffer!=handles::INVALID_RESOURCE ? device_->MapBuffer(ownerBuffer) : nullptr;
+                        if (dst) {
+                            std::memcpy(dst,owners.data(),ownerBytes); device_->UnmapBuffer(ownerBuffer);
+                            indirect_tile_owner_signatures_[frameIdx]=ownerSig;
+                        } else kTilesEff=0;
+                    }
+
                     // C3.5 slice 4: offline propagated SDF for the tile march
                     // (thin-arch sky leaks in the coarse runtime GlobalSDF).
                     const bool useOfflineSdf = sc_offline_sdf_texture_ != handles::INVALID_RESOURCE;
 
                     auto& gsdf = nanite::GlobalSDF::Get();
+
+                    const bool geometryReady=geometry_first_requested_ && UploadGeometryScene(frameIdx);
 
                     // ---- trace params upload ----
                     if (auto* tp = static_cast<IndirectTraceParamsGPU*>(
@@ -2742,7 +4388,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         *tp = IndirectTraceParamsGPU{};
                         tp->sc_params.atlas_size = atlas_size_;
                         tp->sc_params.page_size = page_size_;
-                        tp->sc_params.max_cards = config_.surface_cache_max_cards;
+                        tp->sc_params.max_cards = u32(card_generator_.GetCards().size());
                         tp->sc_params.lookup_count = card_generator_.GetLookupCount();
                         tp->sc_params.indirect_rays_per_probe = kRays;
                         tp->tile_size = kTilesEff != 0u ? kTile : 0u;
@@ -2779,7 +4425,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             }
                         }
                         }
-                        tp->sdf_cascade_count = math::u32v4{cc, 0, 0, 0};
+                        const char* nonzero=std::getenv("PRIMAL_SC_BVH_NONZERO_AXIS");
+                        tp->sdf_cascade_count = math::u32v4{cc, geometryReady?1u:0u, 0,
+                            isVk && geometryReady && nonzero && std::strcmp(nonzero,"1")==0?1u:0u};
                         device_->UnmapBuffer(indirect_trace_params_cb_[frameIdx]);
                     }
 
@@ -2804,7 +4452,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             if (useOfflineSdf) h = sc_offline_sdf_texture_;
                             mipTex[m] = h;
                         }
-                        DescriptorData ip[12];
+                        DescriptorData ip[18];
                         // C3.5 slice 4: offline SDF (when present) replaces the
                         // GlobalSDF cascade bindings for the tile march.
                         const rhi::ResourceHandle tileSdf0 = useOfflineSdf
@@ -2840,11 +4488,37 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             ip[10] = {2, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
                             ip[11] = {3, DescriptorType::StorageBuffer, ray_hits_buffer_};
                         }
-                        UpdateDescriptorSet(device_, indirect_trace_set_[frameIdx], ip, 12);
+                        ip[12] = {isVk ? 12u : 4u, DescriptorType::StorageBuffer, ownerBuffer};
+                        if(geometry_first_requested_) for(u32 g=0;g<4;++g)
+                            ip[13+g]={13+g,DescriptorType::StorageBuffer,geometry_buffers_[frameIdx].buffers[g]!=handles::INVALID_RESOURCE?geometry_buffers_[frameIdx].buffers[g]:ownerBuffer};
+                        if(geometry_first_requested_) ip[17]={17,DescriptorType::StorageBuffer,ray_triangle_buffer_!=handles::INVALID_RESOURCE?ray_triangle_buffer_:ownerBuffer};
+                        UpdateDescriptorSet(device_, indirect_trace_set_[frameIdx], ip, geometry_first_requested_?18u:13u);
+                        cmd->MemoryBarrier(PipelineStage::Host,PipelineStage::ComputeShader,AccessFlag::HostWrite,AccessFlag::ShaderRead);
                         cmd->BindComputePipeline(indirect_trace_pipeline_);
                         const DescriptorSetHandle isets[] = { indirect_trace_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_trace_layout_, 0, 1, isets, 0, nullptr);
-                        cmd->Dispatch(kTilesEff, kTilesEff, 1);
+                        DispatchScNativeLabel(device_,cmd,"SC.main.trace",kTilesEff,kTilesEff,1);
+                        if(boundaryProofNow && isVk && geometry_first_requested_){
+                            auto& p=BoundaryProof();
+                            std::vector<DescriptorData> descriptors(ip,ip+18);
+                            descriptors[8].resource=p.radio_buffers[0];descriptors[17].resource=p.radio_buffers[1];
+                            descriptors.push_back({18,DescriptorType::StorageBuffer,p.points});
+                            descriptors.push_back({19,DescriptorType::StorageBuffer,p.radio_buffers[2]});
+                            std::vector<DescriptorSetLayoutBinding> bindings;
+                            for(const auto& d:descriptors){DescriptorSetLayoutBinding b{d.binding,d.type,1,ShaderStage::Compute,nullptr};
+                                b.is3D=(d.binding>=2 && d.binding<=4)||(d.binding>=9 && d.binding<=11);bindings.push_back(b);}
+                            if(PrepareBoundaryRadiosityProof(2,bindings)){
+                                descriptors[8].resource=p.radio_buffers[0];descriptors[17].resource=p.radio_buffers[1];descriptors[19].resource=p.radio_buffers[2];
+                                UpdateDescriptorSet(device_,p.sets[2],descriptors.data(),u32(descriptors.size()));
+                                cmd->MemoryBarrier(PipelineStage::Host|PipelineStage::Transfer,PipelineStage::ComputeShader,AccessFlag::HostWrite|AccessFlag::TransferWrite,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+                                cmd->BindComputePipeline(p.pipelines[2]);cmd->BindDescriptorSets(PipelineBindPoint::Compute,p.layouts[2],0,1,&p.sets[2],0,nullptr);
+                                BoundaryTimestamp(cmd,4);DispatchScNativeLabel(device_,cmd,"SC.boundary.trace",(p.count+63)/64,1,1);BoundaryTimestamp(cmd,5);p.radio_traced=true;
+                            }
+                        }
+                        // Vulkan InsertBarrier skips buffers. Publish actual first-hit
+                        // writes before resolve reads them in the next compute dispatch.
+                        cmd->MemoryBarrier(PipelineStage::ComputeShader,PipelineStage::ComputeShader,
+                            AccessFlag::ShaderWrite,AccessFlag::ShaderRead);
                         rhi::ResourceBarrier rb{};
                         rb.resource = ray_hits_buffer_;
                         rb.beforeState = rhi::ResourceState::UnorderedAccess;
@@ -2947,6 +4621,81 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                 ? gsdf.GetCascade(0).extent.x / float(std::max(gsdf.GetCascade(0).resolution, 1u))
                                 : 0.30f);
                         rp->hit_band = std::max(voxel0 * 1.25f, 0.30f);
+                        // [F0 2026-09-20 能量不对称修复 A1] tile 天空档接线：
+                        // 与探针路径（DDGI/SPGI/WRC）同一 GIDebug() 旋钮驱动。
+                        // [K-1 2026-09-21 E0-K] 基色从旧梯度 (2.75,2.88,3.00)
+                        // 收口到探针天空单一事实源 EvaluateSkyBase：shader 侧
+                        // 逐射线方向求值（tileRayDir 上仰更亮，与 SPGI/DDGI/
+                        // WRC miss 同源同色），cpu 只传档位 + 方向化使能位
+                        // (w=1)。残差 ~2×（[能量-排查] §3.3，A1 半程）由此消除。
+                        // env PRIMAL_SC_TILE_SKY_OVERRIDE="r,g,b" 回退常量基色
+                        // 路径（w=0，旧语义；旧观感传 "1.1,1.152,1.2"）。
+                        {
+                            const float tier = GIDebug().sky_color_intensity;
+                            math::v4 sky{tier, tier, tier, 1.0f};
+                            if (const char* e = std::getenv("PRIMAL_SC_TILE_SKY_OVERRIDE")) {
+                                float r, g, b;
+                                if (std::sscanf(e, "%f , %f , %f", &r, &g, &b) == 3) {
+                                    sky = math::v4{r, g, b, 0.0f};
+                                }
+                            }
+                            rp->tile_sky_color = sky;
+                        }
+                        // [稳定性 2026-09-21] tile 增长率钳制
+                        //（PRIMAL_SC_TILE_GROWTH_CAP，默认 0.5；0 = 关）。
+                        rp->tile_growth_cap = [] {
+                            float cap = 0.5f;
+                            if (const char* e = std::getenv("PRIMAL_SC_TILE_GROWTH_CAP")) {
+                                const float v = static_cast<float>(std::atof(e));
+                                if (v >= 0.0f && v <= 16.0f) cap = v;
+                            }
+                            return cap;
+                        }();
+                        // [SC per-mesh 计划 P4]（PRIMAL_SC_RAY_LOOKUP=1，默认关；
+                        // P6 完整门禁通过才考虑翻默认）。
+                        rp->ray_max_distance = 50.0f; // same segment as IndirectTrace
+                        rp->ray_lookup = [] {
+                            static const int k = [] {
+                                const char* e = std::getenv("PRIMAL_SC_RAY_LOOKUP");
+                                return e && e[0] == '1' ? 1 : 0;
+                            }();
+                            return (uint32_t)k;
+                        }();
+                        if (const char* audit = std::getenv("SC_RAY_ORACLE_PREFIX");
+                            audit && audit[0] && device_->GetPlatform() == rhi::RHIPlatform::Vulkan)
+                            rp->ray_lookup |= 2u;
+                        if (const char* dda = std::getenv("PRIMAL_SC_RAY_DDA");
+                            dda && std::strcmp(dda,"1") == 0 && device_->GetPlatform() == rhi::RHIPlatform::Vulkan)
+                            rp->ray_lookup |= 4u; // experimental; first-hit/image gates currently fail
+                        if(geometry_first_requested_) rp->ray_lookup=(rp->ray_lookup & ~5u)|8u;
+                        if(geometry_first_requested_ && !card_generator_.IsPageTableEnabled() && triangle_support_buffer_!=handles::INVALID_RESOURCE && triangle_support_epoch_==static_composite_epoch_ && triangle_support_epoch_==card_generator_.GetAllocationEpoch()) {
+                            const char* filter=std::getenv("PRIMAL_SC_CARD_TRIANGLE_FILTER");if(filter && std::strcmp(filter,"1")==0)rp->ray_lookup|=8192u;
+                            const char* component=std::getenv("PRIMAL_SC_POINT_COMPONENT_REJECT");if(component && std::strcmp(component,"1")==0)rp->ray_lookup|=262144u;
+                            const char* sourceBinary=std::getenv("PRIMAL_SC_SOURCE_BINARY_INSERT");if(sourceBinary && std::strcmp(sourceBinary,"1")==0)rp->ray_lookup|=131072u;
+                            const char* binary=std::getenv("PRIMAL_SC_BOUNDARY_BINARY_INSERT");if(binary && std::strcmp(binary,"1")==0)rp->ray_lookup|=65536u;
+                            const char* mask=std::getenv("PRIMAL_SC_OWNER_TRIANGLE_MASK");if((rp->ray_lookup&8192u)!=0u && mask && std::strcmp(mask,"1")==0)rp->ray_lookup|=32768u;
+                        }
+                        if(geometry_first_requested_) {
+                            const char* interpolate=std::getenv("PRIMAL_SC_TRIANGLE_INTERPOLATION");
+                            const bool requested=interpolate ? std::strcmp(interpolate,"1")==0
+                                : StaticPagesEnabled() && card_generator_.GetStaticCardCount()!=0u;
+                            if(requested) rp->ray_lookup|=16u;
+                            const char* simplex=std::getenv("PRIMAL_SC_TRIANGLE_SIMPLEX");
+                            if(requested && (!simplex || std::strcmp(simplex,"1")==0)) rp->ray_lookup|=32u;
+                            const char* segment=std::getenv("PRIMAL_SC_TRIANGLE_SEGMENT");
+                            if(requested && (!segment || std::strcmp(segment,"1")==0)) rp->ray_lookup|=64u;
+                            const char* wide=std::getenv("PRIMAL_SC_TRIANGLE_WIDE_SEGMENT");
+                            if(requested && (!wide || std::strcmp(wide,"1")==0)) rp->ray_lookup|=128u;
+                            const char* hull=std::getenv("PRIMAL_SC_TRIANGLE_HULL");
+                            if(requested && (!hull || std::strcmp(hull,"1")==0)) rp->ray_lookup|=256u;
+                            const char* indexed=std::getenv("PRIMAL_SC_TRIANGLE_SUPPORT");
+                            if(requested && !card_generator_.IsPageTableEnabled() && (!indexed || std::strcmp(indexed,"1")==0) && triangle_support_buffer_!=handles::INVALID_RESOURCE && triangle_support_epoch_==card_generator_.GetAllocationEpoch() && triangle_support_epoch_==static_composite_epoch_) rp->ray_lookup|=512u;
+                        }
+                        if(const char* ranges=std::getenv("PRIMAL_SC_OWNER_CARD_RANGES");isVk && geometry_first_requested_ && ranges && std::strcmp(ranges,"1")==0 &&
+                            ValidateOwnerCardRanges(card_generator_.GetCards(),card_generator_.GetLookups())){
+                            rp->ray_lookup|=2048u;
+                            if(card_generator_.HasOwnerCardDirectory())rp->ray_lookup|=4096u;
+                        }
                         device_->UnmapBuffer(indirect_resolve_params_cb_[frameIdx]);
                     }
 
@@ -2966,11 +4715,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         // this dispatch writes it as StorageImage (GENERAL).
                         {
                             ResourceBarrier resolveBarriers[8]{};
-                            resolveBarriers[0].resource = lighting_atlas_[histIdx];
+                            // feedbackIdx remains the N-2 lighting source;
+                            // temporalPrevIdx is the N-1 tile EMA/carry source.
+                            resolveBarriers[0].resource = lighting_atlas_[feedbackIdx];
                             resolveBarriers[1].resource = depth_atlas_;
                             resolveBarriers[2].resource = normal_atlas_;
-                            resolveBarriers[3].resource = indirect_out_tex_[histIdx];
-                            resolveBarriers[4].resource = indirect_tile_tex_[histIdx];
+                            resolveBarriers[3].resource = indirect_out_tex_[temporalPrevIdx];
+                            resolveBarriers[4].resource = indirect_tile_tex_[temporalPrevIdx];
                             for (u32 bi = 0; bi < 5; ++bi) {
                                 resolveBarriers[bi].beforeState = ResourceState::ShaderResource;
                                 resolveBarriers[bi].afterState  = ResourceState::ShaderResource;
@@ -2986,15 +4737,32 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                 resolveBarriers[bi].afterState  = ResourceState::UnorderedAccess;
                                 resolveBarriers[bi].subresource = 0xFFFFFFFF;
                             }
-                            cmd->InsertBarrier(resolveBarriers, 7);
+                            // Eight resources are initialized above: five SR
+                            // inputs, two per-frame UAV outputs, and the
+                            // single-buffered tile_aux UAV. Keep the count in
+                            // sync so tile_aux is not silently omitted.
+                            cmd->InsertBarrier(resolveBarriers, 8);
                         }
-                        DescriptorData rp2[17];
+                        DescriptorData rp2[21]{};
                         const bool ptOn = card_generator_.IsPageTableEnabled();
                         const ResourceHandle pageTableBuf = ptOn
                             ? card_generator_.GetPageTableBuffer()
                             : ResourceHandle(card_dispatch_buffer_);
+                        // [E0-B 2026-09-21 + 780 帧稳定性修正] tile 反弹的 SC
+                        // 查询源保持混合 atlas：tile 环路（radiosity）的能量源
+                        // 是每帧 fresh 解析直射烘进 atlas 的 L_o（受光面反弹 =
+                        // 合法一跳）；若读 nodirect 则 tile 环同样指数衰减
+                        //（与 prev_light 同机制，frame 780 坍黑实测复现）。
+                        // nodirect 的消费端收敛为 SPGI finalize 查询（静态直射
+                        // 项隔离）。PRIMAL_SC_NODIRECT=0 现只回滚 SPGI 侧。
+                        static const bool kScTileNoDirect = [] {
+                            const char* e = std::getenv("PRIMAL_SC_NODIRECT");
+                            return !(e && e[0] == '0');
+                        }();
+                        (void)kScTileNoDirect;
+                        const ResourceHandle tileQuerySource = lighting_atlas_[feedbackIdx];
                         if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
-                            rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
+                            rp2[0] = {0, DescriptorType::SampledImage,  tileQuerySource};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
                             rp2[2] = {2, DescriptorType::SampledImage,  indirect_dummy_tex_};   // dummy (unused)
                             rp2[3] = {3, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
@@ -3003,7 +4771,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[6] = {6, DescriptorType::StorageBuffer, card_generator_.GetCardLookupBuffer()};
                             rp2[7] = {7, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
                             rp2[8] = {8, DescriptorType::StorageBuffer, ray_hits_buffer_};
-                            rp2[9] = {9, DescriptorType::SampledImage,  indirect_out_tex_[histIdx]};   // T3.3 EMA history
+                            rp2[9] = {9, DescriptorType::SampledImage,  indirect_out_tex_[temporalPrevIdx]};   // T3.3 EMA history (N-1)
                             // B: per-tile validity bitmask (resolve writes the
                             // bit for tiles it consumed current hits for; the
                             // INVALID stand-in keeps the binding valid when
@@ -3018,11 +4786,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             // A: tile-grid output + aux evidence + EMA history.
                             rp2[13] = {13, DescriptorType::StorageImage, indirect_tile_tex_[outIdx]};
                             rp2[14] = {14, DescriptorType::StorageImage, indirect_tile_aux_};
-                            rp2[15] = {15, DescriptorType::SampledImage, indirect_tile_tex_[histIdx]};
+                            rp2[15] = {15, DescriptorType::SampledImage, indirect_tile_tex_[temporalPrevIdx]};
                             // [WRC 计划 Stream D2]: 卡片页表（过表寻址）。
                             rp2[16] = {16, DescriptorType::StorageBuffer, pageTableBuf};
+                            // [SC per-mesh P4]: 射线 lookup 分类统计（原子累加）。
+                            rp2[17] = {17, DescriptorType::StorageBuffer, ray_lookup_stats_buffer_};
                         } else {
-                            rp2[0] = {0, DescriptorType::SampledImage,  lighting_atlas_[histIdx]};
+                            rp2[0] = {0, DescriptorType::SampledImage,  tileQuerySource};
                             rp2[1] = {1, DescriptorType::StorageImage,  albedo_atlas_};
                             rp2[2] = {2, DescriptorType::SampledImage,  indirect_dummy_tex_};   // dummy (unused)
                             rp2[3] = {3, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]};
@@ -3031,7 +4801,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[6] = {2, DescriptorType::StorageBuffer, card_generator_.GetCardLookupBuffer()};
                             rp2[7] = {3, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()};
                             rp2[8] = {4, DescriptorType::StorageBuffer, ray_hits_buffer_};
-                            rp2[9] = {6, DescriptorType::SampledImage,  indirect_out_tex_[histIdx]};   // T3.3 EMA history
+                            rp2[9] = {6, DescriptorType::SampledImage,  indirect_out_tex_[temporalPrevIdx]};   // T3.3 EMA history (N-1)
                             rp2[10] = {5, DescriptorType::StorageBuffer,   // [[buffer(5)]]
                                        indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE
                                            ? indirect_tile_valid_buffer_
@@ -3046,13 +4816,76 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             // prev tile grid [[texture(11)]].
                             rp2[13] = {9, DescriptorType::StorageImage, indirect_tile_tex_[outIdx]};
                             rp2[14] = {10, DescriptorType::StorageImage, indirect_tile_aux_};
-                            rp2[15] = {11, DescriptorType::SampledImage, indirect_tile_tex_[histIdx]};
+                            rp2[15] = {11, DescriptorType::SampledImage, indirect_tile_tex_[temporalPrevIdx]};
                         }
-                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, 17);
+                        if(geometry_first_requested_) {
+                            rp2[18]={18,DescriptorType::StorageBuffer,ray_triangle_buffer_!=handles::INVALID_RESOURCE?ray_triangle_buffer_:ownerBuffer};
+                            rp2[19]={19,DescriptorType::StorageBuffer,triangle_atlas_buffer_};
+                            rp2[20]={20,DescriptorType::StorageBuffer,triangle_support_buffer_!=handles::INVALID_RESOURCE?triangle_support_buffer_:triangle_atlas_buffer_};
+                        }
+                        if(!boundary_consumer_requested_){
+                        UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, isVk?(geometry_first_requested_?21u:18u):16u);
                         cmd->BindComputePipeline(indirect_resolve_pipeline_);
                         const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);
-                        cmd->Dispatch(kTilesEff, kTilesEff, 1);
+                        DispatchScNativeLabel(device_,cmd,"SC.main.resolve.base",kTilesEff,kTilesEff,1);
+                        }
+                        if(boundaryProofNow && BoundaryProof().radio_traced && isVk && geometry_first_requested_){
+                            auto& p=BoundaryProof();std::vector<DescriptorData> descriptors(rp2,rp2+21);
+                            descriptors[8].resource=p.radio_buffers[0];descriptors[18].resource=p.radio_buffers[1];
+                            descriptors.push_back({21,DescriptorType::StorageBuffer,p.points});descriptors.push_back({22,DescriptorType::StorageBuffer,p.radio_buffers[3]});
+                            descriptors.push_back({23,DescriptorType::StorageBuffer,p.radio_buffers[4]});
+                            std::vector<DescriptorSetLayoutBinding> bindings;
+                            for(const auto& d:descriptors)bindings.push_back({d.binding,d.type,1,ShaderStage::Compute,nullptr});
+                            if(PrepareBoundaryRadiosityProof(3,bindings)){
+                                UpdateDescriptorSet(device_,p.sets[3],descriptors.data(),u32(descriptors.size()));
+                                cmd->MemoryBarrier(PipelineStage::ComputeShader|PipelineStage::Host,PipelineStage::ComputeShader,AccessFlag::ShaderWrite|AccessFlag::HostWrite,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+                                cmd->BindComputePipeline(p.pipelines[3]);cmd->BindDescriptorSets(PipelineBindPoint::Compute,p.layouts[3],0,1,&p.sets[3],0,nullptr);BoundaryTimestamp(cmd,6);DispatchScNativeLabel(device_,cmd,"SC.boundary.resolve",(p.count+63)/64,1,1);BoundaryTimestamp(cmd,7);
+                                if(p.readback_requested){
+                                const ResourceHandle sources[]={p.radio_buffers[0],p.radio_buffers[1],p.radio_buffers[2],p.radio_buffers[3],p.radio_buffers[4],indirect_trace_params_cb_[frameIdx],indirect_resolve_params_cb_[frameIdx],card_generator_.GetCardLookupBuffer()};
+                                const u64 rays=u64(p.count)*32,sizes[]={rays*32,rays*4,rays*32,u64(p.count)*64,rays*16,sizeof(IndirectTraceParamsGPU),sizeof(IndirectResolveParamsGPU),u64(card_generator_.GetLookups().size())*sizeof(SurfaceCacheCardLookup)};
+                                for(u32 i=0;i<8;++i){p.radio_offsets[i]=p.radio_bytes;p.radio_sizes[i]=sizes[i];p.radio_bytes+=(sizes[i]+15)&~u64(15);}
+                                BufferDesc d{};d.size=p.radio_bytes;d.memoryUsage=d.usage=GPUMemoryUsage::Readback;if(p.radio_buffers[5]!=handles::INVALID_RESOURCE && p.radio_staging_capacity<p.radio_bytes){device_->DestroyBuffer(p.radio_buffers[5]);p.radio_buffers[5]=handles::INVALID_RESOURCE;}
+                                if(p.radio_buffers[5]==handles::INVALID_RESOURCE){p.radio_buffers[5]=device_->CreateBuffer(d);p.radio_staging_capacity=p.radio_bytes;}
+                                if(p.radio_buffers[5]==handles::INVALID_RESOURCE)p.failed=true;
+                                else {cmd->MemoryBarrier(PipelineStage::ComputeShader|PipelineStage::Host,PipelineStage::Transfer,AccessFlag::ShaderWrite|AccessFlag::HostWrite,AccessFlag::TransferRead);
+                                    for(u32 i=0;i<8;++i)if(sizes[i])cmd->CopyBuffer(sources[i],p.radio_buffers[5],0,p.radio_offsets[i],sizes[i]);
+                                    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+                                    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::ComputeShader,AccessFlag::TransferRead,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+
+
+                                }
+                                }
+                                if(!p.failed){p.radio_recorded=true;p.lookup_lighting=rp2[0].resource;
+                                    if(!RecordBoundaryRadianceCache(cmd,params_cb_[frameIdx]))p.failed=true;}
+                            }
+                        }
+                        if(boundary_consumer_requested_){
+                            auto& p=BoundaryProof();
+                            const bool ready=boundaryProofNow && !p.failed && p.cache_recorded &&
+                                p.mixed_index!=handles::INVALID_RESOURCE && p.epoch==card_generator_.GetAllocationEpoch() &&
+                                p.frame==current_frame_index && p.cache_key.geometry==geometry_epoch_;
+                            std::vector<DescriptorData> consumer(rp2,rp2+21);
+                            consumer.push_back({21,DescriptorType::StorageBuffer,ready?p.mixed_index:ownerBuffer});
+                            consumer.push_back({22,DescriptorType::StorageBuffer,ready?p.points:ownerBuffer});
+                            consumer.push_back({23,DescriptorType::StorageBuffer,ready?p.cache:ownerBuffer});
+                            if(auto* params=static_cast<IndirectResolveParamsGPU*>(device_->MapBuffer(indirect_resolve_params_cb_[frameIdx]))){
+                                if(ready)params->ray_lookup|=1024u;else params->ray_lookup&=~1024u;
+                                device_->UnmapBuffer(indirect_resolve_params_cb_[frameIdx]);
+                            }else {p.failed=true;PRIMAL_LOG_STREAM(Error,"Render")<<"[SC_BOUNDARY_CONSUMER] params update failed"<<std::endl;}
+                            UpdateDescriptorSet(device_,indirect_resolve_set_[frameIdx],consumer.data(),u32(consumer.size()));
+                            cmd->MemoryBarrier(PipelineStage::ComputeShader|PipelineStage::Transfer|PipelineStage::Host,PipelineStage::ComputeShader,
+                                AccessFlag::ShaderWrite|AccessFlag::TransferRead|AccessFlag::HostWrite,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+                            cmd->BindComputePipeline(indirect_resolve_pipeline_);
+                            cmd->BindDescriptorSets(PipelineBindPoint::Compute,indirect_resolve_layout_,0,1,&indirect_resolve_set_[frameIdx],0,nullptr);
+                            if(ready)BoundaryTimestamp(cmd,10);DispatchScNativeLabel(device_,cmd,"SC.main.resolve.consumer",kTilesEff,kTilesEff,1);if(ready)BoundaryTimestamp(cmd,11);
+                            p.consumer_recorded=ready;
+                            if(ready)PRIMAL_LOG_STREAM(Info,"Render")<<"[SC_BOUNDARY_CONSUMER] main resolve frame="<<current_frame_index<<" slot="<<frameIdx
+                                <<" completion="<<p.completion_serial<<" readback="<<p.readback_requested<<" reused="<<p.reused
+                                <<" points="<<p.points<<" cache="<<p.cache<<" index="<<p.mixed_index<<std::endl;
+                        }
+                        // Readback is performed by ReadbackRayLookupStats only after the
+                        // caller has submitted this frame. Never Map a recording dispatch.
                         rhi::ResourceBarrier rb{};
                         rb.resource = indirect_out_tex_[outIdx];
                         rb.beforeState = rhi::ResourceState::UnorderedAccess;
@@ -3122,9 +4955,17 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // DEBUG: immediate post-dispatch memory barrier + inline readback
                 // to prove/disprove whether the imageStore landed in this very
                 // command buffer (rules out later-pass overwrite).
-                PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] LightEval dispatch: " << total_texels
-                          << " texels, " << card_count << " cards, "
-                          << groups << " groups" << std::endl;
+                // [2026-09-24] 曾以 Error 级每帧打印 → 编辑器日志红色刷屏；
+                // 改 Info + 一次性。
+                {
+                    static bool s_lightEvalLogged = false;
+                    if (!s_lightEvalLogged) {
+                        s_lightEvalLogged = true;
+                        PRIMAL_LOG_STREAM(Info, "Render") << "[SurfaceCache] LightEval dispatch: " << total_texels
+                                  << " texels, " << card_count << " cards, "
+                                  << groups << " groups" << std::endl;
+                    }
+                }
 
                 // TEMP diagnosis: two-shot readback — albedo/normal seed-match
                 // rate at an early and a late frame splits "capture never
@@ -3227,5 +5068,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
     return output;
 }
+
+
+#include "BoundaryLightingProof.inl"
 
 } // namespace primal::graphics::lumen

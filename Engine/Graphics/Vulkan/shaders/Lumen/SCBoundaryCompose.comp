@@ -1,0 +1,38 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "SurfaceCacheData.glsl"
+#include "BoundaryLightingData.glsl"
+layout(local_size_x=64) in;
+struct SCBoundaryRadiosity {vec4 incident;vec4 outgoing;uvec4 counts;uvec4 identity;};
+struct SCBoundaryRadianceEntry {vec4 radiance;vec4 indirect;uvec4 identity;uvec4 state;};
+layout(set=0,binding=0,std430) readonly buffer Points {SCBoundaryLightPoint points[];};
+layout(set=0,binding=1,std430) readonly buffer Base {SCBoundaryLightResult base[];};
+layout(set=0,binding=2,std430) readonly buffer Radio {SCBoundaryRadiosity radio[];};
+layout(set=0,binding=3,std430) writeonly buffer Cache {SCBoundaryRadianceEntry cache[];};
+layout(set=0,binding=4,std140) uniform Params {FlattenedLightingParams params;} flp;
+void main(){
+    uint i=gl_GlobalInvocationID.x;if(i>=uint(points.length()) || i>=uint(cache.length()))return;
+    SCBoundaryLightPoint p=points[i];SCBoundaryRadianceEntry e;
+    e.radiance=vec4(0);e.indirect=vec4(0);e.identity=p.identity;e.state=uvec4(p.identity.w,p.identity.z,0,0);
+    if(i>=uint(base.length()) || i>=uint(radio.length())){e.state.w|=1u;cache[i]=e;return;}
+    SCBoundaryLightResult b=base[i];SCBoundaryRadiosity r=radio[i];
+    if(any(notEqual(p.identity,b.identity)) || any(notEqual(p.identity,r.identity)))e.state.w|=2u;
+    // Legacy prev-light feedback/emission has no auxiliary point source. Reject
+    // unsupported configurations rather than silently omit an energy term.
+    if(flp.params.radiosity_solo!=1u || flp.params.radiosity_gate.x==0u)e.state.w|=4u;
+    float weight=flp.params.radiosity_gate.y==0u?.25:uintBitsToFloat(flp.params.radiosity_gate.y);
+    if(b.radiance.a!=1 || r.outgoing.a!=1 || r.incident.a!=1 || r.counts.x!=32u || r.counts.y<4u)e.state.w|=8u;
+    if(!scBoundaryLightFinite(b.radiance.rgb) || !scBoundaryLightFinite(b.irradiance.rgb) ||
+       !scBoundaryLightFinite(b.directVisibility.rgb) || !scBoundaryLightFinite(r.outgoing.rgb) || !scBoundaryLightFinite(p.albedo.rgb) || isnan(weight) || isinf(weight) || weight<0 ||
+       any(lessThan(b.radiance.rgb,vec3(0))) || any(lessThan(r.outgoing.rgb,vec3(0))))e.state.w|=16u;
+    if(e.state.w==0u){
+        vec3 value=b.radiance.rgb+r.outgoing.rgb*weight;
+        if(!scBoundaryLightFinite(value))e.state.w|=16u;
+        else {
+            value=min(value,vec3(64));
+            vec3 direct=b.directVisibility.rgb*p.albedo.rgb*.31830988;
+            e.radiance=vec4(value,1);e.indirect=vec4(clamp(value-direct,vec3(0),vec3(64)),1);e.state.z=1u;
+        }
+    }
+    cache[i]=e;
+}

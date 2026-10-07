@@ -1,0 +1,44 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : enable
+// Independent read-only diagnostic: not called from CardFill/lighting.
+layout(local_size_x=32) in;
+struct Query { uvec4 verticesOwner; vec4 baryHit; };
+layout(set=0,binding=0,std430) readonly buffer Queries { uvec4 sizes; Query rows[]; } q;
+layout(set=0,binding=1,std430) readonly buffer Elements { uint words[]; } e;
+layout(set=0,binding=2,std430) readonly buffer Instances { uint words[]; } inst;
+layout(set=0,binding=3,std430) readonly buffer Materials { uint words[]; } mat;
+layout(set=0,binding=4) uniform texture2DArray albedo;
+layout(set=0,binding=5) uniform sampler linearClamp;
+layout(set=0,binding=6,std430) writeonly buffer Results { vec4 rows[]; } outbuf;
+vec2 vertexUV(uint i) { return vec2(uintBitsToFloat(e.words[i*6+4]),uintBitsToFloat(e.words[i*6+5])); }
+void sampleAndQuad(uint resultBase, uint colorSlot, uint quadSlot, vec2 uv, uint layer) {
+    outbuf.rows[resultBase+colorSlot]=textureLod(sampler2DArray(albedo,linearClamp),vec3(uv,float(layer)),0.0);
+    ivec2 size=textureSize(albedo,0).xy;
+    ivec2 base=ivec2(floor(uv*vec2(size)-vec2(.5)));
+    for(int y=0;y<2;y++) for(int x=0;x<2;x++) {
+        ivec2 p=clamp(base+ivec2(x,y),ivec2(0),size-1);
+        outbuf.rows[resultBase+quadSlot+uint(y*2+x)]=texelFetch(albedo,ivec3(p,int(layer)),0);
+    }
+}
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=q.sizes.x) return;
+    uint base=i*18;
+    for(uint k=0;k<18;k++) outbuf.rows[base+k]=vec4(0);
+    Query r=q.rows[i]; uint owner=r.verticesOwner.w; uint hit=floatBitsToUint(r.baryHit.w);
+    if(any(greaterThanEqual(r.verticesOwner.xyz,uvec3(q.sizes.y))) || owner>=q.sizes.z || hit>=q.sizes.z) return;
+    uint ownerMat=inst.words[owner*48+33],hitMat=inst.words[hit*48+33];
+    if(ownerMat>=q.sizes.w || hitMat>=q.sizes.w) return;
+    uint ownerLayer=mat.words[ownerMat*12],hitLayer=mat.words[hitMat*12];
+    ivec3 dims=textureSize(albedo,0);
+    if(ownerLayer>=uint(dims.z) || hitLayer>=uint(dims.z)) return;
+    vec2 uv=vertexUV(r.verticesOwner.x)*r.baryHit.x+vertexUV(r.verticesOwner.y)*r.baryHit.y+vertexUV(r.verticesOwner.z)*r.baryHit.z;
+    if(any(isnan(uv)) || any(isinf(uv))) return;
+    vec2 wrapped=fract(vec2(uv.x,1.0-uv.y));
+    outbuf.rows[base]=vec4(uv,wrapped);
+    outbuf.rows[base+4]=uintBitsToFloat(uvec4(ownerMat,hitMat,ownerLayer,hitLayer));
+    outbuf.rows[base+5]=vec4(1,vec3(dims));
+    sampleAndQuad(base,1,6,vec2(.5),ownerLayer);
+    sampleAndQuad(base,2,10,vec2(.5),hitLayer);
+    sampleAndQuad(base,3,14,wrapped,hitLayer);
+}

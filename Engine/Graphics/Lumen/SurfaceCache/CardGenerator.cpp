@@ -1,4 +1,7 @@
+#include "OwnerCardRanges.h"
 #include "CardGenerator.h"
+#include "CoverageCardBudget.h"
+#include "Common/CoreLogStream.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 
 namespace primal::graphics::lumen {
@@ -40,15 +43,27 @@ void CardGenerator::RegisterMesh(const math::v3& aabb_min, const math::v3& aabb_
     allocation_dirty_ = true;
 }
 
-void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const math::m4x4& world, uint32_t instance_id) {
+void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const math::m4x4& world, uint32_t instance_id,
+                                      uint32_t static_mesh_slot) {
     MeshInstanceInfo info;
+    info.geometry_digest = bake.geometry_digest;
     info.aabb_min = {3.402823466e+38f, 3.402823466e+38f, 3.402823466e+38f};
     info.aabb_max = {-3.402823466e+38f, -3.402823466e+38f, -3.402823466e+38f};
     info.instance_id = instance_id;
     info.screen_space_area = 0.0f;
     info.baked_card_start = static_cast<uint32_t>(baked_cards_pool_.size());
     info.baked_card_count = 0;
+    bool diagonal = true;
+    for (u32 k = 0; k < 3; ++k) {
+        const auto& col = world.columns[k];
+        const f32 xyz[3] = {col.x, col.y, col.z};
+        for (u32 j = 0; j < 3; ++j)
+            diagonal &= std::isfinite(xyz[j]) && (j == k ? std::abs(xyz[j]) > 1e-6f : std::abs(xyz[j]) < 1e-6f);
+    }
+    info.static_mesh_slot = diagonal ? static_mesh_slot : MeshInstanceInfo::kNoStaticSlot;
+    info.world = world;
 
+    u32 page_card = 0;
     for (const auto& bc : bake.cards) {
         SurfaceCacheCard card;
         memset(&card, 0, sizeof(card));
@@ -69,9 +84,20 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
         card.center = {center_w.x, center_w.y, center_w.z, 0.0f};
         card.extent = {extent_w[0], extent_w[1], extent_w[2], 0.0f};
         card.axis_direction = bc.axis_direction;
+        if (diagonal) {
+            const u32 a = bc.axis_direction & 0xFFu;
+            const auto& col = world.columns[a];
+            const f32 scale = a == 0u ? col.x : a == 1u ? col.y : col.z;
+            if (scale < 0.f) card.axis_direction ^= 1u << 8u;
+        }
         card.resolution = 0;
         card.mesh_instance_id = instance_id;
         baked_cards_pool_.push_back(card);
+        // [P2] 离线局部帧 + 页卡序号（静态页合成的坐标系来源）。
+        baked_local_.push_back({
+            {bc.center[0], bc.center[1], bc.center[2]},
+            {bc.extent[0], bc.extent[1], bc.extent[2]},
+            page_card++, bc.axis_direction });
         info.baked_card_count++;
 
         info.aabb_min = {std::min(info.aabb_min.x, center_w.x - extent_w[0]),
@@ -90,6 +116,9 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
 void CardGenerator::ResetRegistrations() {
     meshes_.clear();
     baked_cards_pool_.clear();
+    baked_local_.clear();
+    static_refs_.clear();
+    static_card_count_ = 0;
     page_table_.clear();
     card_last_touch_.clear();
     free_runs_.clear();
@@ -119,12 +148,16 @@ void CardGenerator::RebuildCardAllocation() {
 
     cards_.clear();
     lookups_.clear();
+    static_refs_.clear();
+    static_card_count_ = 0;
     baked_mesh_count_ = 0;
     fallback_mesh_count_ = 0;
+    capacity_truncated_meshes_ = 0;
     // [WRC 计划 Stream D2/D3]: 并行表与自由段随全量重分配重建。
     page_table_.clear();
     card_last_touch_.clear();
     free_runs_.clear();
+    evicted_rects_.clear();   // [P2] 纪元起始清空（SurfaceCachePass 消费后即弃）
 
     uint32_t current_atlas_x = 0;
     uint32_t current_atlas_y = 0;
@@ -136,6 +169,263 @@ void CardGenerator::RebuildCardAllocation() {
         const char* e = std::getenv("SC_MIN_CARD_RES");
         return e ? (u32)std::max(32, atoi(e)) : 64u;
     }();
+
+    // Projection area of one card view: extent[u]·extent[v]·4 where
+    // {u,v} are the two axes perpendicular to the card's axis.
+    auto view_area = [](const math::v4& extent, uint32_t axis) -> float {
+        const uint32_t u = (axis == 0) ? 1u : 0u;
+        const uint32_t v = (axis == 2) ? 1u : 2u;
+        const float e[3] = {extent.x, extent.y, extent.z};
+        return e[u] * e[v] * 4.0f;
+    };
+
+    // ======================================================================
+    // [SC 卡片 Lumen 对齐 Phase 2] 秩轮转预装箱：baked 卡片在 pool 内已按
+    // 离线贪心的选取顺序存放（rank 0 = 该 mesh 覆盖面积最大的主卡）。装箱
+    // 按"秩为主、mesh 为辅"轮转执行——全部 mesh 的主卡先占 atlas，atlas
+    // 耗尽只损失精化卡（rank≥1），而不是注册序靠后的整个 mesh（mesh 序
+    // 装箱会让 2532 张烘焙卡只喂饱前 ~40 个 mesh，大墙面全灭）。
+    // 装箱结果预存于 baked_placement，主循环按 mesh 连续推卡——lookup 的
+    // 连续区间契约（trace 扫 card_start..card_start+count）不变。
+    // ======================================================================
+    struct BakedPlacement { u32 res = 0, ox = 0, oy = 0; bool placed = false; };
+    std::vector<BakedPlacement> baked_placement(baked_cards_pool_.size());
+    // Diagnostic-only packing ledger. Each row is the actual rank-interleaved
+    // attempt, including failed placements; no atlas decision depends on it.
+    const char* pack_trace_path = std::getenv("SC_PACK_TRACE_PATH");
+    FILE* pack_trace = pack_trace_path && *pack_trace_path
+        ? std::fopen(pack_trace_path, "w") : nullptr;
+    if (pack_trace) {
+        std::fprintf(pack_trace,
+            "step,rank,mesh,owner,pool,axis,dir,requested,before_x,before_y,before_row,placed,res,offset_x,offset_y,after_x,after_y,after_row\n");
+    }
+
+    // 共享装箱逻辑（预装箱与 fallback emit 共用同一来源）：过滤 →
+    // 分辨率公式 → 货架/挤页 → 写出 atlas 放置。cards_/页表/lookup 的
+    // 推入由调用方负责。
+    auto pack_placement = [&](const math::v4& card_center,
+                                  const math::v4& card_extent,
+                                  uint32_t axis_direction,
+                                  bool apply_fraction_filter,
+                                  float mesh_max_proj_area,
+                                  SurfaceCacheCard& card) -> bool {
+            const uint32_t axis = axis_direction & 0xFF;
+            const float e[3] = {card_extent.x, card_extent.y, card_extent.z};
+
+            if (view_area(card_extent, axis) < 0.01f) return false;
+            if (apply_fraction_filter &&
+                view_area(card_extent, axis) < mesh_max_proj_area * 0.05f) return false;
+            if (cards_.size() >= max_cards_) return false;
+
+            card.center = card_center;
+            card.extent = card_extent;
+            card.axis_direction = axis_direction;
+            card.resolution = 0;
+            card._pad0 = 0;
+            card.atlas_offset_x = 0;
+            card.atlas_offset_y = 0;
+            card.mesh_instance_id = 0;
+            memset(card._pad1, 0, sizeof(card._pad1));
+
+            const uint32_t u = (axis == 0) ? 1u : 0u;
+            const uint32_t v = (axis == 2) ? 1u : 2u;
+            float proj_size = std::max(e[u], e[v]) * 2.0f;
+
+            // [SC per-mesh 计划 P3] 单变量密度候选（PRIMAL_SC_TEXELS_PER_UNIT，
+            // 默认 64 = 历史行为；候选默认"关"即不设 env）。离线烘焙端
+            //（CardSurfaceBake::BakeParams 无 env——离线分辨率必须与运行时
+            // 分配一致，见 CardGenerator.cpp 注释）由 sc-bake-surface 显式
+            // 参数化；运行时此 env 只影响 atlas 分配密度。
+            static const float tpu = [] {
+                const char* e = std::getenv("PRIMAL_SC_TEXELS_PER_UNIT");
+                if (!e) return 64.0f;
+                const float v = static_cast<float>(std::atof(e));
+                return (v >= 16.0f && v <= 256.0f) ? v : 64.0f;
+            }();
+            uint32_t res = static_cast<uint32_t>(proj_size * tpu);
+            uint32_t min_res = std::max(page_size_, sc_min_card_res);
+            res = std::max(res, min_res);
+            uint32_t max_card_res = page_size_ * 4;  // cap at 4 pages
+            res = std::min(res, max_card_res);
+            res = ((res + page_size_ - 1) / page_size_) * page_size_;
+            card.resolution = static_cast<uint16_t>(res);
+
+            if (current_atlas_x + res > atlas_size_) {
+                current_atlas_x = 0;
+                current_atlas_y += row_height;
+                row_height = 0;
+            }
+            // T8.13 P3: coverage > detail — a raised card that cannot fit
+            // drops back to one page before being skipped entirely.
+            if (current_atlas_y + res > atlas_size_ && res > page_size_) {
+                res = page_size_;
+                card.resolution = static_cast<uint16_t>(res);
+            }
+            // [WRC 计划 Stream D3]（PRIMAL_SC_PAGE_TABLE=1）: 挤页/自由段
+            // 复用（语义同原 emit_card）。
+            auto emit_from_free_run = [&](uint32_t want) -> bool {
+                for (size_t i = 0; i < free_runs_.size(); ++i) {
+                    if (free_runs_[i].res >= want) {
+                        card.atlas_offset_x = free_runs_[i].x;
+                        card.atlas_offset_y = free_runs_[i].y;
+                        if (free_runs_[i].res > want) {
+                            free_runs_[i].x += want;
+                            free_runs_[i].res -= want;
+                        } else {
+                            free_runs_.erase(free_runs_.begin() + i);
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            };
+            bool squeezed = false;
+            if (current_atlas_y + res > atlas_size_ && page_table_enabled_) {
+                int victim = -1;
+                u32 oldest = 0xFFFFFFFFu;
+                for (u32 ci = 0; ci < cards_.size(); ++ci) {
+                    if (cards_[ci].resolution <= page_size_) continue;
+                    const u32 touch = ci < card_last_touch_.size() ? card_last_touch_[ci] : 0u;
+                    if (touch < oldest) { oldest = touch; victim = (int)ci; }
+                }
+                if (victim >= 0) {
+                    SurfaceCacheCard& v = cards_[victim];
+                    const u32 freed = v.resolution - page_size_;
+                    free_runs_.push_back({ v.atlas_offset_x + page_size_,
+                                           v.atlas_offset_y, freed });
+                    // [P2] 页复用拒绝旧引用：释放段记录给 SurfaceCachePass 清零。
+                    evicted_rects_.push_back({ v.atlas_offset_x + page_size_,
+                                               v.atlas_offset_y, freed, page_size_ });
+                    v.resolution = static_cast<uint16_t>(page_size_);
+                    if (emit_from_free_run(res)) squeezed = true;
+                }
+            }
+            if (!squeezed &&
+                (current_atlas_y + res > atlas_size_ || !free_runs_.empty()) &&
+                page_table_enabled_ && emit_from_free_run(res)) {
+                squeezed = true;
+            }
+            if (!squeezed && current_atlas_y + res > atlas_size_) return false;
+
+            if (!squeezed) {
+                card.atlas_offset_x = current_atlas_x;
+                card.atlas_offset_y = current_atlas_y;
+                current_atlas_x += res;
+                row_height = std::max(row_height, res);
+            } else {
+                card.resolution = static_cast<uint16_t>(res);
+            }
+            return true;
+    };
+
+    {
+        u32 max_rank = 0;
+        for (const auto& m : meshes_)
+            max_rank = std::max(max_rank, m.baked_card_count);
+        const char* res_sort_env = std::getenv("SC_PACK_RES_DESC");
+        const bool pack_res_desc = res_sort_env && std::strcmp(res_sort_env, "1") == 0;
+        auto requested_for = [&](const SurfaceCacheCard& bc) -> u32 {
+            const u32 axis = bc.axis_direction & 0xFFu;
+            const float e[3] = {bc.extent.x, bc.extent.y, bc.extent.z};
+            const u32 u = axis == 0 ? 1u : 0u;
+            const u32 v = axis == 2 ? 1u : 2u;
+            // [P3] 与 pack_placement 同源（预排序口径必须与实际分配一致）。
+            static const float tpu2 = [] {
+                const char* e = std::getenv("PRIMAL_SC_TEXELS_PER_UNIT");
+                if (!e) return 64.0f;
+                const float v = static_cast<float>(std::atof(e));
+                return (v >= 16.0f && v <= 256.0f) ? v : 64.0f;
+            }();
+            u32 res = static_cast<u32>(std::max(e[u], e[v]) * 2.0f * tpu2);
+            res = std::max(res, std::max(page_size_, sc_min_card_res));
+            res = std::min(res, page_size_ * 4u);
+            return ((res + page_size_ - 1u) / page_size_) * page_size_;
+        };
+        u32 pack_step = 0;
+        bool coverage_packed=false;
+        const char* coverage_env=std::getenv("PRIMAL_SC_COVERAGE_PACK");
+        const bool has_static_mesh=std::any_of(meshes_.begin(),meshes_.end(),[](const auto& mesh) {
+            return mesh.static_mesh_slot!=MeshInstanceInfo::kNoStaticSlot;
+        });
+        const bool coverage_requested=coverage_env ? std::strcmp(coverage_env,"1")==0
+            : coverage_packing_default_ && has_static_mesh;
+        if(device_->GetPlatform()==rhi::RHIPlatform::Vulkan && coverage_requested) {
+            const char* densityEnv=std::getenv("PRIMAL_SC_DENSITY_PACK");
+            const bool densityRefinement=densityEnv && std::strcmp(densityEnv,"1")==0;
+            std::vector<CoverageCardRequest> requests;
+            std::vector<size_t> pool_mesh(baked_cards_pool_.size());
+            std::vector<u32> pool_rank(baked_cards_pool_.size());
+            for(size_t mi=0;mi<meshes_.size();++mi) for(u32 rank=0;rank<meshes_[mi].baked_card_count;++rank) {
+                u32 at=meshes_[mi].baked_card_start+rank;
+                const auto& bc=baked_cards_pool_[at];
+                const float area=view_area(bc.extent,bc.axis_direction&0xffu);
+                if(area<=0.f) continue;
+                pool_mesh[at]=mi;pool_rank[at]=rank;
+                const u32 axis=bc.axis_direction&0xffu;
+                const float side[3]={bc.extent.x,bc.extent.y,bc.extent.z};
+                const float span=2.f*std::max(side[axis==0?1:0],side[axis==2?1:2]);
+                requests.push_back({at,rank,requested_for(bc),area,span});
+            }
+            CoverageCardPlan plan;
+            coverage_packed=PlanCoverageCards(requests,atlas_size_,page_size_,max_cards_,plan,densityRefinement);
+            if(coverage_packed) {
+                for(const auto& pl:plan.placements) {
+                    baked_placement[pl.pool_index]={pl.resolution,pl.atlas_offset_x,pl.atlas_offset_y,true};
+                    if(pack_trace) {
+                        const auto& bc=baked_cards_pool_[pl.pool_index];
+                        size_t mi=pool_mesh[pl.pool_index];
+                        std::fprintf(pack_trace,"%u,%u,%zu,%u,%u,%u,%u,%u,%u,%u,%u,1,%u,%u,%u,%u,%u,%u\n",
+                            pack_step++,pool_rank[pl.pool_index],mi,meshes_[mi].instance_id,pl.pool_index,
+                            bc.axis_direction&0xffu,(bc.axis_direction>>8)&0xffu,requested_for(bc),
+                            pl.atlas_offset_x,pl.atlas_offset_y,pl.resolution,pl.resolution,
+                            pl.atlas_offset_x,pl.atlas_offset_y,pl.atlas_offset_x+pl.resolution,pl.atlas_offset_y,pl.resolution);
+                    }
+                }
+                current_atlas_x=plan.cursor_x;current_atlas_y=plan.cursor_y;row_height=plan.row_height;
+            }
+            PRIMAL_LOG_STREAM(Info,"Render") << "[SC_COVERAGE_PACK] complete=" << coverage_packed
+                << " candidates=" << requests.size() << " placed=" << plan.placements.size()
+                << " atlas=" << atlas_size_ << " min_resolution=" << page_size_
+                << " density_refinement=" << densityRefinement;
+        }
+        for (u32 rank = 0; !coverage_packed && rank < max_rank; ++rank) {
+            std::vector<size_t> ranked_meshes;
+            for (size_t mi = 0; mi < meshes_.size(); ++mi)
+                if (rank < meshes_[mi].baked_card_count) ranked_meshes.push_back(mi);
+            if (pack_res_desc) {
+                std::stable_sort(ranked_meshes.begin(), ranked_meshes.end(), [&](size_t a, size_t b) {
+                    return requested_for(baked_cards_pool_[meshes_[a].baked_card_start + rank]) >
+                           requested_for(baked_cards_pool_[meshes_[b].baked_card_start + rank]);
+                });
+            }
+            for (size_t mi : ranked_meshes) {
+                const auto& m = meshes_[mi];
+                const u32 pool_idx = m.baked_card_start + rank;
+                const SurfaceCacheCard& bc = baked_cards_pool_[pool_idx];
+                const u32 axis = bc.axis_direction & 0xFFu;
+                const u32 requested = pack_trace ? requested_for(bc) : 0u;
+                const u32 before_x = current_atlas_x, before_y = current_atlas_y;
+                const u32 before_row = row_height;
+                SurfaceCacheCard tmp{};
+                const bool placed = pack_placement(bc.center, bc.extent, bc.axis_direction,
+                                                   /*apply_fraction_filter=*/false, 0.0f, tmp);
+                if (placed) {
+                    baked_placement[pool_idx] = { tmp.resolution, tmp.atlas_offset_x,
+                                                  tmp.atlas_offset_y, true };
+                }
+                if (pack_trace) {
+                    std::fprintf(pack_trace, "%u,%u,%zu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                        pack_step, rank, mi, m.instance_id, pool_idx, axis,
+                        (bc.axis_direction >> 8) & 0xFFu, requested,
+                        before_x, before_y, before_row, placed ? 1u : 0u,
+                        placed ? u32(tmp.resolution) : 0u, tmp.atlas_offset_x,
+                        tmp.atlas_offset_y, current_atlas_x, current_atlas_y, row_height);
+                }
+                ++pack_step;
+            }
+        }
+    }
+    if (pack_trace) std::fclose(pack_trace);
 
     for (auto& mesh : meshes_) {
         const bool baked = mesh.baked_card_count > 0;
@@ -155,25 +445,10 @@ void CardGenerator::RebuildCardAllocation() {
         lookup.card_count = 0;
         lookup._pad[0] = lookup._pad[1] = 0;
 
-        // Projection area of one card view: extent[u]·extent[v]·4 where
-        // {u,v} are the two axes perpendicular to the card's axis.
-        auto view_area = [](const math::v4& extent, uint32_t axis) -> float {
-            const uint32_t u = (axis == 0) ? 1u : 0u;
-            const uint32_t v = (axis == 2) ? 1u : 2u;
-            const float e[3] = {extent.x, extent.y, extent.z};
-            return e[u] * e[v] * 4.0f;
-        };
-
-        // Max projection area — degenerate-view filter baseline (same rule
-        // for both sources; the bake already applied it offline).
+        // Max projection area — degenerate-view filter baseline (fallback
+        // only; the bake already applied its own selection offline).
         float max_proj_area = 0.0f;
-        if (baked) {
-            for (u32 bi = 0; bi < mesh.baked_card_count; ++bi) {
-                const SurfaceCacheCard& bc = baked_cards_pool_[mesh.baked_card_start + bi];
-                max_proj_area = std::max(max_proj_area,
-                                         view_area(bc.extent, bc.axis_direction & 0xFF));
-            }
-        } else {
+        if (!baked) {
             for (uint8_t a = 0; a < 3; ++a) {
                 max_proj_area = std::max(max_proj_area, view_area(
                     math::v4{half_extent.x, half_extent.y, half_extent.z, 0.0f}, a));
@@ -182,117 +457,22 @@ void CardGenerator::RebuildCardAllocation() {
 
         bool capacity_full = false;
 
-        // T4.2: shared card emission tail — candidate cards (from the offline
-        // bake or the legacy 6-direction derivation below) funnel through the
-        // same filters, resolution formula and atlas packing, so the baked
-        // path inherits max_cards truncation and shelf-packing behavior.
+        // Fallback 发卡（6 向 AABB 推导）：过滤 + 装箱 + 推卡。
+        // [SC 卡片 Lumen 对齐 Phase 1]：baked 卡片不走此路径（秩轮转预装箱
+        // 见上），且 baked 卡片豁免"最大投影 5%"剔除——v2 的局部小卡正是
+        // coverage 贪心的产出，重要性排序已由离线贪心完成。
         auto emit_card = [&](const math::v4& card_center, const math::v4& card_extent,
                              uint32_t axis_direction) -> bool {
-            const uint32_t axis = axis_direction & 0xFF;
-            const float e[3] = {card_extent.x, card_extent.y, card_extent.z};
-
-            if (view_area(card_extent, axis) < 0.01f) return false;
-            if (view_area(card_extent, axis) < max_proj_area * 0.05f) return false;
             if (cards_.size() >= max_cards_) { capacity_full = true; return false; }
-
             SurfaceCacheCard card;
-            card.center = card_center;
-            card.extent = card_extent;
-            card.axis_direction = axis_direction;
-            card.resolution = 0;
-            card._pad0 = 0;
-            card.atlas_offset_x = 0;
-            card.atlas_offset_y = 0;
-            card.mesh_instance_id = mesh.instance_id;
-            memset(card._pad1, 0, sizeof(card._pad1));
-
-            float texels_per_unit = 64.0f;
-            const uint32_t u = (axis == 0) ? 1u : 0u;
-            const uint32_t v = (axis == 2) ? 1u : 2u;
-            float proj_size = std::max(e[u], e[v]) * 2.0f;
-
-            uint32_t res = static_cast<uint32_t>(proj_size * texels_per_unit);
-            uint32_t min_res = std::max(page_size_, sc_min_card_res);
-            res = std::max(res, min_res);
-            uint32_t max_card_res = page_size_ * 4;  // cap at 4 pages
-            res = std::min(res, max_card_res);
-            res = ((res + page_size_ - 1) / page_size_) * page_size_;
-            card.resolution = static_cast<uint16_t>(res);
-
-            if (current_atlas_x + res > atlas_size_) {
-                current_atlas_x = 0;
-                current_atlas_y += row_height;
-                row_height = 0;
-            }
-            // T8.13 P3: coverage > detail — a raised card that cannot fit
-            // drops back to one page before being skipped entirely.
-            if (current_atlas_y + res > atlas_size_ && res > page_size_) {
-                res = page_size_;
-                card.resolution = static_cast<uint16_t>(res);
-            }
-            // ==================================================================
-            // [WRC 计划 Stream D3]（PRIMAL_SC_PAGE_TABLE=1）: capacity_full
-            // 静默丢弃改挤页——货架写满时优先把 LRU 最久未服务的已发大卡
-            // （res > page）降档到单页，把腾出的页段推入自由段表，供本卡
-            // 重试。降档保留卡片槽位连续性（lookup 区间不变），只损失该卡
-            // 的纹理解析度。自由段耗尽才回到丢弃。
-            // ==================================================================
-            auto emit_from_free_run = [&](uint32_t want) -> bool {
-                for (size_t i = 0; i < free_runs_.size(); ++i) {
-                    if (free_runs_[i].res >= want) {
-                        card.atlas_offset_x = free_runs_[i].x;
-                        card.atlas_offset_y = free_runs_[i].y;
-                        if (free_runs_[i].res > want) {
-                            free_runs_[i].x += want;
-                            free_runs_[i].res -= want;
-                        } else {
-                            free_runs_.erase(free_runs_.begin() + i);
-                        }
-                        return true;
-                    }
-                }
+            if (!pack_placement(card_center, card_extent, axis_direction,
+                                /*apply_fraction_filter=*/true, max_proj_area, card)) {
                 return false;
-            };
-            bool squeezed = false;
-            if (current_atlas_y + res > atlas_size_ && page_table_enabled_) {
-                // 找 LRU 最旧的大卡降档（至少释放 (res-page) 宽度的行段）。
-                int victim = -1;
-                u32 oldest = 0xFFFFFFFFu;
-                for (u32 ci = 0; ci < cards_.size(); ++ci) {
-                    if (cards_[ci].resolution <= page_size_) continue;
-                    const u32 touch = ci < card_last_touch_.size() ? card_last_touch_[ci] : 0u;
-                    if (touch < oldest) { oldest = touch; victim = (int)ci; }
-                }
-                if (victim >= 0) {
-                    SurfaceCacheCard& v = cards_[victim];
-                    const u32 freed = v.resolution - page_size_;
-                    free_runs_.push_back({ v.atlas_offset_x + page_size_,
-                                           v.atlas_offset_y, freed });
-                    v.resolution = static_cast<uint16_t>(page_size_);
-                    if (emit_from_free_run(res)) squeezed = true;
-                }
             }
-            // 自由段复用（D3 挤页/重发路径）。
-            if (!squeezed &&
-                (current_atlas_y + res > atlas_size_ || !free_runs_.empty()) &&
-                page_table_enabled_ && emit_from_free_run(res)) {
-                squeezed = true;
-            }
-            // Skip card if it still doesn't fit in remaining atlas space
-            if (!squeezed && current_atlas_y + res > atlas_size_) return false;
+            card.mesh_instance_id = mesh.instance_id;
 
-            if (!squeezed) {
-                card.atlas_offset_x = current_atlas_x;
-                card.atlas_offset_y = current_atlas_y;
-                current_atlas_x += res;
-                row_height = std::max(row_height, res);
-            } else {
-                card.resolution = static_cast<uint16_t>(res);
-            }
-
-            // [WRC 计划 Stream D2]: 页表记账（页粒度 pack：x_page<<16|y_page）
-            // + LRU 新近度表扩容。卡片随后经 sort 重排——并行表随 sort 同步
-            // 置换（见下方 sort 块）。
+            // [WRC 计划 Stream D2]: 页表记账 + LRU 新近度表扩容（与推卡
+            // 顺序严格同序——sort 重排时并行表同步置换）。
             if (page_table_enabled_) {
                 const u32 p = page_size_ ? page_size_ : 1u;
                 const u32 px = card.atlas_offset_x / p;
@@ -300,17 +480,60 @@ void CardGenerator::RebuildCardAllocation() {
                 page_table_.push_back((px << 16) | (py & 0xFFFFu));
                 card_last_touch_.push_back(0u);
             }
-
+            card._pad1[0] = MeshInstanceInfo::kNoStaticSlot;
+            card._pad1[1] = 0u;
+            card._pad1[2] = 0u;
+            static_refs_.push_back(CardStaticRef{});
             cards_.push_back(card);
             lookup.card_count++;
             return true;
         };
 
         if (baked) {
-            // Baked source: emit the world-transformed cards as registered.
-            for (u32 bi = 0; bi < mesh.baked_card_count && !capacity_full; ++bi) {
-                const SurfaceCacheCard& bc = baked_cards_pool_[mesh.baked_card_start + bi];
-                emit_card(bc.center, bc.extent, bc.axis_direction);
+            // Baked source: push the world-transformed cards with their
+            // pre-computed rank-interleaved atlas placements (greedy order
+            // preserved within the mesh → lookup range stays contiguous).
+            for (u32 bi = 0; bi < mesh.baked_card_count; ++bi) {
+                if (cards_.size() >= max_cards_) { capacity_full = true; break; }
+                const u32 pool_idx = mesh.baked_card_start + bi;
+                const BakedPlacement& pl = baked_placement[pool_idx];
+                if (!pl.placed) continue;
+                SurfaceCacheCard card = baked_cards_pool_[pool_idx];
+                card.resolution = static_cast<uint16_t>(pl.res);
+                card.atlas_offset_x = pl.ox;
+                card.atlas_offset_y = pl.oy;
+                card.mesh_instance_id = mesh.instance_id;
+                // [P2] 静态页身份：bit0 = static；slot/page_card 供合成与
+                // 外来写入隔离（SurfaceCachePass 消费）。静态卡的表面数据
+                // 只能来自离线 owner 页（计划 §3.2 生产约束）。
+                if (mesh.static_mesh_slot != MeshInstanceInfo::kNoStaticSlot) {
+                    card._pad1[0] = mesh.static_mesh_slot;
+                    card._pad1[1] = 1u;
+                    card._pad1[2] = baked_local_[pool_idx].page_card;
+                    CardStaticRef ref;
+                    ref.mesh_slot = mesh.static_mesh_slot;
+                    ref.page_card = baked_local_[pool_idx].page_card;
+                    ref.local_axis_direction = baked_local_[pool_idx].axis_direction;
+                    ref.local_center = baked_local_[pool_idx].center;
+                    ref.local_extent = baked_local_[pool_idx].extent;
+                    ref.world = mesh.world;
+                    static_refs_.push_back(ref);
+                    ++static_card_count_;
+                } else {
+                    card._pad1[0] = MeshInstanceInfo::kNoStaticSlot;
+                    card._pad1[1] = 0u;
+                    card._pad1[2] = 0u;
+                    static_refs_.push_back(CardStaticRef{});
+                }
+                if (page_table_enabled_) {
+                    const u32 p = page_size_ ? page_size_ : 1u;
+                    const u32 px = card.atlas_offset_x / p;
+                    const u32 py = card.atlas_offset_y / p;
+                    page_table_.push_back((px << 16) | (py & 0xFFFFu));
+                    card_last_touch_.push_back(0u);
+                }
+                cards_.push_back(card);
+                lookup.card_count++;
             }
         } else {
             // Fallback source: legacy 6-direction AABB derivation.
@@ -323,6 +546,8 @@ void CardGenerator::RebuildCardAllocation() {
                 if (cards_.size() >= max_cards_) break;
             }
         }
+        if (capacity_full) ++capacity_truncated_meshes_;
+
 
         lookups_.push_back(lookup);
     }
@@ -348,6 +573,36 @@ void CardGenerator::RebuildCardAllocation() {
                bucket[0], bucket[1], bucket[2], bucket[3],
                (unsigned long long)texels, (unsigned long long)capacity,
                100.0 * double(texels) / double(capacity));
+    }
+
+    // ========================================================================
+    // [SC 卡片 Lumen 对齐 Phase 0]（2026-09-19 计划）：per-mesh 卡数分布 +
+    // 容量截断仪表——一次运行即可回答"每个 mesh 几张卡、谁被 max_cards
+    // 截断"。注意 lookup 体积降序排序（下）保住前 kMaxLookups=128 个可被
+    // trace 扫描路径命中的 mesh；Sponza 393 lookup > 128 的矛盾以 grid
+    // 查询路径为主路径消化（kMaxCardsPerGridCell=8/cell），lookup 仅兜底。
+    // ========================================================================
+    {
+        u32 cards_min = 0xFFFFFFFFu, cards_max = 0, cards_sum = 0;
+        u32 hist[5] = {0, 0, 0, 0, 0};   // 1 / 2-4 / 5-8 / 9-12 / >12 cards per mesh
+        for (const auto& lk : lookups_) {
+            const u32 cnt = lk.card_count;
+            cards_min = std::min(cards_min, cnt);
+            cards_max = std::max(cards_max, cnt);
+            cards_sum += cnt;
+            if (cnt <= 1u) ++hist[0];
+            else if (cnt <= 4u) ++hist[1];
+            else if (cnt <= 8u) ++hist[2];
+            else if (cnt <= 12u) ++hist[3];
+            else ++hist[4];
+        }
+        if (!lookups_.empty()) {
+            const u32 meshes = (u32)lookups_.size();
+            printf("[CardGen] cards/mesh: min=%u avg=%.1f max=%u | 1=%u 2-4=%u 5-8=%u 9-12=%u >12=%u | truncated_by_max_cards=%u\n",
+                   cards_min, double(cards_sum) / double(meshes), cards_max,
+                   hist[0], hist[1], hist[2], hist[3], hist[4],
+                   capacity_truncated_meshes_);
+        }
     }
 
     // Sort lookups by AABB volume descending — largest meshes first.
@@ -377,6 +632,8 @@ void CardGenerator::RebuildCardAllocation() {
         // Reorder cards to match new lookup order
         std::vector<SurfaceCacheCard> sorted_cards;
         sorted_cards.reserve(cards_.size());
+        std::vector<CardStaticRef> sorted_static_refs;
+        sorted_static_refs.reserve(cards_.size());
         std::vector<SurfaceCacheCardLookup> sorted_lookups;
         sorted_lookups.reserve(lookups_.size());
         // [WRC 计划 Stream D2]: 页表/LRU 并行表随卡片置换同步重排。
@@ -393,6 +650,7 @@ void CardGenerator::RebuildCardAllocation() {
             for (u32 c = 0; c < lk.card_count; ++c) {
                 const u32 src = lk.card_start + c;
                 sorted_cards.push_back(cards_[src]);
+                if (src < static_refs_.size()) sorted_static_refs.push_back(static_refs_[src]);
                 if (page_table_enabled_) {
                     sorted_pages.push_back(src < page_table_.size() ? page_table_[src] : 0u);
                     sorted_touch.push_back(src < card_last_touch_.size() ? card_last_touch_[src] : 0u);
@@ -402,6 +660,7 @@ void CardGenerator::RebuildCardAllocation() {
             sorted_lookups.push_back(lk);
         }
         cards_ = std::move(sorted_cards);
+        static_refs_ = std::move(sorted_static_refs);
         lookups_ = std::move(sorted_lookups);
         if (page_table_enabled_) {
             page_table_ = std::move(sorted_pages);
@@ -413,6 +672,7 @@ void CardGenerator::RebuildCardAllocation() {
     UploadToGPU();
     BuildCardGrid();
     allocation_dirty_ = false;
+    ++allocation_epoch_;   // [P2] 合成门控：SurfaceCachePass 以 epoch 变化重合成
 }
 
 void CardGenerator::BuildCardGrid() {
@@ -427,16 +687,62 @@ void CardGenerator::BuildCardGrid() {
     }
     if (cards_.empty()) return;
 
-    // World AABB over all cards (a card's world AABB equals its mesh AABB).
+
+    // Opt-in broadphase experiment: baked projection half-extents may not
+    // contain the card's captured depth. Extend only the projection axis
+    // through the owner's lookup AABB; the shader still validates each texel.
+    const char* axis_env = std::getenv("SC_GRID_OWNER_AXIS");
+    const bool preserve_base = axis_env && std::strcmp(axis_env, "2") == 0;
+    const bool owner_axis = preserve_base || (axis_env && std::strcmp(axis_env, "1") == 0);
+    // Default-off DDGI broadphase diagnostic. The Finalize query accepts
+    // captured positions within at least 0.45 m of its SDF hit, so the card
+    // cell list can omit an otherwise accepted card at an axial cell edge.
+    // Keep the original grid domain and capped list order for a direct A/B.
+    const char* band_env = std::getenv("SC_GRID_QUERY_AXIAL_BAND");
+    const bool query_band = !owner_axis && band_env && std::strcmp(band_env, "1") == 0;
+    struct GridBounds { float minimum[3]; float maximum[3]; };
+    std::vector<GridBounds> bounds(cards_.size());
+    for (size_t i = 0; i < cards_.size(); ++i) {
+        const auto& c = cards_[i];
+        bounds[i] = {{c.center.x - c.extent.x, c.center.y - c.extent.y, c.center.z - c.extent.z},
+                     {c.center.x + c.extent.x, c.center.y + c.extent.y, c.center.z + c.extent.z}};
+    }
+    // Mode2 keeps the original grid domain and capped candidate entries.
+    // Expanded axial coverage only appends to vacancies; no old card is evicted.
+    std::vector<GridBounds> base_bounds;
+    if (preserve_base || query_band) base_bounds = bounds;
+    if (query_band) {
+        for (size_t i = 0; i < cards_.size(); ++i) {
+            const uint32_t axis = cards_[i].axis_direction & 0xFFu;
+            if (axis >= 3u) continue;
+            bounds[i].minimum[axis] -= 0.45f;
+            bounds[i].maximum[axis] += 0.45f;
+        }
+    }
+    if (owner_axis) {
+        for (const auto& lookup : lookups_) {
+            const float lower[3] = {lookup.aabb_min.x, lookup.aabb_min.y, lookup.aabb_min.z};
+            const float upper[3] = {lookup.aabb_max.x, lookup.aabb_max.y, lookup.aabb_max.z};
+            const size_t begin = std::min<size_t>(lookup.card_start, cards_.size());
+            const size_t end = begin + std::min<size_t>(lookup.card_count, cards_.size() - begin);
+            for (size_t i = begin; i < end; ++i) {
+                const uint32_t axis = cards_[i].axis_direction & 0xFF;
+                if (axis >= 3 || !std::isfinite(lower[axis]) || !std::isfinite(upper[axis]) || lower[axis] > upper[axis]) continue;
+                bounds[i].minimum[axis] = std::min(bounds[i].minimum[axis], lower[axis]);
+                bounds[i].maximum[axis] = std::max(bounds[i].maximum[axis], upper[axis]);
+            }
+        }
+    }
+
     float wminx = 3.402823466e+38f, wminy = wminx, wminz = wminx;
     float wmaxx = -3.402823466e+38f, wmaxy = wmaxx, wmaxz = wmaxx;
-    for (const auto& c : cards_) {
-        wminx = std::min(wminx, c.center.x - c.extent.x);
-        wminy = std::min(wminy, c.center.y - c.extent.y);
-        wminz = std::min(wminz, c.center.z - c.extent.z);
-        wmaxx = std::max(wmaxx, c.center.x + c.extent.x);
-        wmaxy = std::max(wmaxy, c.center.y + c.extent.y);
-        wmaxz = std::max(wmaxz, c.center.z + c.extent.z);
+    for (const auto& b : (preserve_base || query_band) ? base_bounds : bounds) {
+        wminx = std::min(wminx, b.minimum[0]);
+        wminy = std::min(wminy, b.minimum[1]);
+        wminz = std::min(wminz, b.minimum[2]);
+        wmaxx = std::max(wmaxx, b.maximum[0]);
+        wmaxy = std::max(wmaxy, b.maximum[1]);
+        wmaxz = std::max(wmaxz, b.maximum[2]);
     }
 
     // Cell size: aim ≤64 cells per axis, never below 1 world unit.
@@ -453,25 +759,35 @@ void CardGenerator::BuildCardGrid() {
     // sorted by mesh AABB volume descending, so per-cell lists inherit
     // large-mesh-first priority. Cap per cell to bound shader worst case.
     std::vector<std::vector<uint32_t>> per_cell(cell_count);
+    auto rasterize = [&](const std::vector<GridBounds>& ranges, bool unique) {
     for (uint32_t i = 0; i < cards_.size(); ++i) {
-        const auto& c = cards_[i];
+        const auto& b = ranges[i];
         const auto clampi = [](float v, int lo, int hi) {
             return std::min(std::max(static_cast<int>(v), lo), hi);
         };
-        const int x0 = clampi((c.center.x - c.extent.x - wminx) / cell, 0, int(dx - 1));
-        const int x1 = clampi((c.center.x + c.extent.x - wminx) / cell, 0, int(dx - 1));
-        const int y0 = clampi((c.center.y - c.extent.y - wminy) / cell, 0, int(dy - 1));
-        const int y1 = clampi((c.center.y + c.extent.y - wminy) / cell, 0, int(dy - 1));
-        const int z0 = clampi((c.center.z - c.extent.z - wminz) / cell, 0, int(dz - 1));
-        const int z1 = clampi((c.center.z + c.extent.z - wminz) / cell, 0, int(dz - 1));
+        const int x0 = clampi((b.minimum[0] - wminx) / cell, 0, int(dx - 1));
+        const int x1 = clampi((b.maximum[0] - wminx) / cell, 0, int(dx - 1));
+        const int y0 = clampi((b.minimum[1] - wminy) / cell, 0, int(dy - 1));
+        const int y1 = clampi((b.maximum[1] - wminy) / cell, 0, int(dy - 1));
+        const int z0 = clampi((b.minimum[2] - wminz) / cell, 0, int(dz - 1));
+        const int z1 = clampi((b.maximum[2] - wminz) / cell, 0, int(dz - 1));
         for (int z = z0; z <= z1; ++z) {
             for (int y = y0; y <= y1; ++y) {
                 for (int x = x0; x <= x1; ++x) {
                     auto& list = per_cell[(uint32_t)x + dx * ((uint32_t)y + dy * (uint32_t)z)];
-                    if (list.size() < kMaxCardsPerGridCell) list.push_back(i);
+                    if (list.size() < kMaxCardsPerGridCell &&
+                        (!unique || std::find(list.begin(), list.end(), i) == list.end())) list.push_back(i);
                 }
             }
         }
+    }
+
+    };
+    if (preserve_base) {
+        rasterize(base_bounds, false);
+        rasterize(bounds, true);
+    } else {
+        rasterize(bounds, false);
     }
 
     std::vector<uint32_t> offsets(cell_count + 1, 0);
@@ -523,6 +839,7 @@ void CardGenerator::BuildCardGrid() {
 }
 
 void CardGenerator::UploadToGPU() {
+    owner_directory_ready_=false;
     if (cards_.empty()) return;
 
     auto* card_data = static_cast<SurfaceCacheCard*>(device_->MapBuffer(card_data_buffer_));
@@ -532,10 +849,16 @@ void CardGenerator::UploadToGPU() {
     }
 
     if (!lookups_.empty()) {
+        std::vector<SurfaceCacheCardLookup> directory;
+        const char* requested=std::getenv("PRIMAL_SC_OWNER_CARD_DIRECTORY");
+        const bool built=device_->GetPlatform()==rhi::RHIPlatform::Vulkan && requested && std::strcmp(requested,"1")==0 &&
+            lookups_.size()==meshes_.size() && BuildOwnerCardDirectory(cards_,lookups_,directory);
+        const auto* source=built?directory.data():lookups_.data();
         auto* lookup_data = static_cast<SurfaceCacheCardLookup*>(device_->MapBuffer(card_lookup_buffer_));
         if (lookup_data) {
-            memcpy(lookup_data, lookups_.data(), lookups_.size() * sizeof(SurfaceCacheCardLookup));
+            memcpy(lookup_data, source, lookups_.size() * sizeof(SurfaceCacheCardLookup));
             device_->UnmapBuffer(card_lookup_buffer_);
+            owner_directory_ready_=built && card_data!=nullptr;
         }
     }
 

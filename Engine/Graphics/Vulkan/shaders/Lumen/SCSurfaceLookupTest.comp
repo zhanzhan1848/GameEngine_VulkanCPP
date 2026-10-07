@@ -1,0 +1,266 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "SurfaceCacheData.glsl"
+layout(local_size_x=8) in;
+layout(set=0,binding=0) uniform texture2D depthAtlas;
+layout(set=0,binding=1) uniform texture2D albedoAtlas;
+layout(set=0,binding=2) uniform texture2D normalAtlas;
+layout(set=0,binding=4) uniform texture2D emissiveAtlas;
+layout(set=0,binding=3,std430) buffer Results { uvec4 result[]; } rb;
+layout(set=0,binding=5,std430) readonly buffer TriangleSupport { uint data[]; } supportIndex;
+#include "TriangleSupportIndex.glsl"
+SurfaceCacheCard testCard(uint c) {
+    SurfaceCacheCard card;
+    card.center = c == 0u ? vec4(10,20,30,0) : c == 1u ? vec4(-5,6,7,0) : vec4(8,-9,10,0);
+    card.extent = c == 0u ? vec4(.25,1,2,0) : c == 1u ? vec4(.5,1.5,4,0) : vec4(.25,1,2,0);
+    card.axis_direction = c == 0u ? 256u : c == 1u ? 257u : 2u;
+    card.resolution=64u; card.atlas_offset_x=c*64u; card.atlas_offset_y=0u;
+    card.mesh_instance_id=c; card.static_mesh_slot=c; card.flags=1u; card.page_card=0u;
+    return card;
+}
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=112u) return;
+    if(i>=96u) {
+        uint card=0u,triangle=7u,offset,count;
+        if(i==97u) triangle=8u;
+        if(i==99u) triangle=9u;
+        if(i==100u) triangle=0xffffffffu;
+        if(i==101u) card=8u;
+        if(i>=102u && i<=108u) card=i-101u;
+        if(i==109u) triangle=0u;
+        if(i==110u) triangle=10u;
+        if(i==111u) {card=7u;triangle=9u;}
+        bool valid=scIndexedSupport(card,triangle,offset,count);
+        bool expected=i==96u || i==98u || i==99u || i==108u;
+        bool ok=expected ? valid && count==(i==99u || i==108u?2u:3u) : !valid;
+        rb.result[i]=uvec4(ok?1u:0u,0u,0u,0u);return;
+    }
+    if(i>=72u) {
+        SurfaceCacheCard card=testCard((i-72u)%3u);
+        uint axis=card.axis_direction&255u,u=axis==0u?1u:0u,v=axis==2u?1u:2u;
+        card.extent[u]=card.extent[v]=16.;
+        bool ok=false;
+        if(i>=87u && i<=91u) {
+            ivec2 coords[64];uint hull[128];uint count=0u,expected=0u;
+            if(i==88u) {coords[0]=ivec2(0);count=1u;expected=1u;}
+            if(i==89u) {for(uint k=0u;k<3u;++k) coords[k]=ivec2(k);count=3u;expected=2u;}
+            if(i==90u) {coords[0]=ivec2(0);coords[1]=ivec2(0,7);coords[2]=ivec2(3);
+                coords[3]=ivec2(7,0);coords[4]=ivec2(7);count=5u;expected=4u;}
+            if(i==91u) {for(uint x=0u;x<8u;++x) for(uint y=0u;y<8u;++y) coords[count++]=ivec2(x,y);expected=4u;}
+            uint vertices=scSupportHull(coords,count,hull);ok=vertices==expected;
+            if(expected>=3u) for(uint k=0u;k<vertices;++k)
+                ok=ok && scSupportCross(coords[hull[k]],coords[hull[(k+1u)%vertices]],coords[hull[(k+2u)%vertices]])>0;
+        } else if(i==92u || i==93u) {
+            ivec2 lo,hi;vec2 uv=vec2(card.atlas_offset_x,0)+vec2(i==92u?.75:63.75,.75);
+            bool valid=scGeometryHullBounds(uv,card,lo,hi);
+            ok=i==93u ? !valid : valid && lo.x==int(card.atlas_offset_x) && lo.y==0 && hi.y==4;
+        } else {
+            ivec2 a=ivec2(card.atlas_offset_x+31u,31u),b=a+ivec2(7,0),c=a+ivec2(0,7);
+            vec3 depths=vec3(.2,.6,.9);uvec3 ids=uvec3(7u);uint triangle=7u;
+            vec3 hit=.3*cardTexelToWorld(uvec2(a),depths.x,card)
+                    +.35*cardTexelToWorld(uvec2(b),depths.y,card)
+                    +.35*cardTexelToWorld(uvec2(c),depths.z,card);
+            vec2 uv=vec2(a)+vec2(.5+7.*.35);
+            if(i==75u || i==95u) uv=vec2(a)+vec2(6.5);
+            if(i==76u) ids.z=8u;
+            if(i==77u) triangle=0xffffffffu;
+            if(i==78u) depths.x=-1.;
+            if(i==79u) depths.y=uintBitsToFloat(0x7fc00000u);
+            if(i==80u) depths.z=uintBitsToFloat(0x7f800000u);
+            if(i==81u) b=a;
+            if(i==82u) c.x=int(card.atlas_offset_x)-1;
+            if(i==83u) hit.x=uintBitsToFloat(0x7fc00000u);
+            if(i==84u) hit[axis]+=.051;
+            if(i==85u) hit[axis]+=.049;
+            if(i==86u) uv.x=float(card.atlas_offset_x)+63.75;
+            if(i==94u) {ivec2 swap=b;b=c;c=swap;float d=depths.y;depths.y=depths.z;depths.z=d;}
+            vec3 captured,weights;bool valid=scGeometryTriangleSupport(uv,card,a,b,c,triangle,ids,depths,hit,captured,weights);
+            bool expected=i<75u || i==85u || i==94u;
+            ok=expected ? valid && all(greaterThanEqual(weights,vec3(0))) && abs(weights.x+weights.y+weights.z-1.)<1e-6 && distance(hit,captured)<=.05 : !valid;
+        }
+        rb.result[i]=uvec4(ok?1u:0u,0u,0u,0u);return;
+    }
+    if(i>=55u) {
+        SurfaceCacheCard card=testCard((i-55u)%3u);
+        uint axis=card.axis_direction&255u,u=axis==0u?1u:0u,v=axis==2u?1u:2u;
+        card.extent[u]=card.extent[v]=16.;
+        ivec2 a=ivec2(card.atlas_offset_x+31u,31u),b=a+ivec2(3);
+        vec2 depths=vec2(.2,.8);uvec2 ids=uvec2(7u);uint triangle=7u;
+        vec3 first=cardTexelToWorld(uvec2(a),depths.x,card),last=cardTexelToWorld(uvec2(b),depths.y,card);
+        vec3 hit=mix(first,last,.35);vec3 transverse=vec3(0);transverse[v]=1.;
+        vec3 normal=normalize(cross(last-first,transverse));
+        if(i==58u) hit+=normal*.051;
+        if(i==59u) hit=first-(last-first);
+        if(i==60u) ids.y=8u;
+        if(i==61u) triangle=0xffffffffu;
+        if(i==62u) depths.x=-1.;
+        if(i==63u) depths.x=uintBitsToFloat(0x7fc00000u);
+        if(i==64u) depths.y=uintBitsToFloat(0x7f800000u);
+        if(i==65u) a.x=int(card.atlas_offset_x)-1;
+        if(i==66u) b.y=64;
+        if(i==67u) {b=a;depths.y=depths.x;}
+        if(i==68u) hit.x=uintBitsToFloat(0x7fc00000u);
+        if(i==69u) hit+=normal*.049;
+        bool ok;
+        if(i>=70u) {
+            ivec2 lo,hi;vec2 uv=vec2(card.atlas_offset_x,0)+vec2(i==70u?63.75:.75,.75);
+            bool valid=scGeometryExpandedBounds(uv,card,lo,hi);
+            ok=i==70u ? !valid : valid && lo.x==int(card.atlas_offset_x) && lo.y==0 && hi.y==2;
+        } else {
+            vec3 captured;float weight;
+            bool valid=scGeometrySegmentPair(card,a,b,triangle,ids,depths,hit,captured,weight);
+            bool expected=i<58u || i==69u;
+            ok=expected ? valid && weight>=0. && weight<=1. && distance(captured,hit)<=.05 : !valid;
+        }
+        rb.result[i]=uvec4(ok?1u:0u,0u,0u,0u);return;
+    }
+    if(i>=37u) {
+        const uvec2 pairs[6]=uvec2[6](uvec2(0,1),uvec2(0,2),uvec2(0,3),uvec2(1,2),uvec2(1,3),uvec2(2,3));
+        SurfaceCacheCard card=testCard((i-37u)%3u);
+        uint axis=card.axis_direction&255u,u=axis==0u?1u:0u,v=axis==2u?1u:2u;
+        card.extent[u]=card.extent[v]=16.;
+        uvec2 pair=pairs[i<43u?i-37u:0u];
+        ivec2 base=ivec2(card.atlas_offset_x+32u,32u);
+        vec4 depths=vec4(.4,.5,.6,.7);uvec4 identities=uvec4(8u);
+        identities[pair.x]=identities[pair.y]=7u;
+        vec3 first=cardTexelToWorld(uvec2(base+ivec2(int(pair.x&1u),int(pair.x>>1u))),depths[pair.x],card);
+        vec3 last=cardTexelToWorld(uvec2(base+ivec2(int(pair.y&1u),int(pair.y>>1u))),depths[pair.y],card);
+        vec3 hit=mix(first,last,.35);
+        if(pair.x/2u==pair.y/2u) hit[v]+=(pair.x/2u==0u?.01:-.01);
+        if((pair.x&1u)==(pair.y&1u)) hit[u]+=((pair.x&1u)==0u?.01:-.01);
+        vec3 transverse=vec3(0);transverse[v]=1.;
+        vec3 normal=normalize(cross(last-first,transverse));
+        if(i==43u) hit=mix(first,last,.35)+normal*.051;
+        if(i==44u) hit=first-(last-first)*2.;
+        if(i==45u) identities=uvec4(8u);
+        if(i==46u) identities[pair.y]=8u;
+        if(i==47u) depths[pair.x]=uintBitsToFloat(0x7fc00000u);
+        if(i==49u) hit.x=uintBitsToFloat(0x7fc00000u);
+        if(i==50u) for(uint k=0u;k<4u;++k) if(k!=pair.x && k!=pair.y) depths[k]=uintBitsToFloat(0x7fc00000u);
+        if(i==52u) hit=mix(first,last,.35)+normal*.049;
+        if(i==53u) {
+            card.extent[u]=card.extent[v]=0.;depths=vec4(.4);
+            hit=cardTexelToWorld(uvec2(base),.4,card); // coincident endpoints: no division by zero
+        }
+        if(i==54u) depths[pair.x]=uintBitsToFloat(0x7f800000u);
+        vec2 uv=vec2(card.atlas_offset_x,card.atlas_offset_y)+vec2(
+            (hit[u]-card.center[u])/32.+.5,(hit[v]-card.center[v])/32.+.5)*64.;
+        if(i==53u) uv=vec2(card.atlas_offset_x+32u,32u)+vec2(.9);
+        if(i==48u) uv.x=float(card.atlas_offset_x)+63.75;
+        vec3 captured;vec4 weights;
+        bool valid=scGeometrySegmentSurface(uv,card,i==51u?0xffffffffu:7u,identities,depths,hit,captured,weights);
+        bool expected=i<43u || i==50u || i==52u;
+        bool ok=expected ? valid && distance(captured,hit)<=.05 && all(greaterThanEqual(weights,vec4(0))) &&
+            abs(dot(weights,vec4(1))-1.)<.00001 : !valid;
+        if(valid) for(uint k=0u;k<4u;++k) if(identities[k]!=7u) ok=ok && weights[k]==0.;
+        rb.result[i]=uvec4(ok?1u:0u,valid?1u:0u,0u,0u);return;
+    }
+    if(i>=25u) {
+        uint missing=(i-25u)%4u;SurfaceCacheCard card=testCard(missing%3u);
+        uint axis=card.axis_direction&255u,u=axis==0u?1u:0u,v=axis==2u?1u:2u;
+        card.extent[u]=16.;card.extent[v]=16.;
+        vec2 f=missing==0u?vec2(.75,.75):missing==1u?vec2(.25,.75):missing==2u?vec2(.75,.25):vec2(.25,.25);
+        if(i>=29u && i<33u) f=vec2(1)-f;
+        if(i>=33u) {missing=3u;f=vec2(.25,.25);}
+        vec2 uv=vec2(card.atlas_offset_x,card.atlas_offset_y)+vec2(32.5)+f;
+        vec4 depths=vec4(.4,.5,.6,.7);uvec4 identities=uvec4(7u);identities[missing]=8u;
+        vec3 hit=card.center.xyz;hit[u]+=((32.5+f.x)/64.-.5)*32.;hit[v]+=((32.5+f.y)/64.-.5)*32.;
+        hit[axis]+=scCardFaceNormal(card)[axis]*(.4+.1*f.x+.2*f.y);
+        if(i==33u) depths.w=uintBitsToFloat(0x7fc00000u); // unused corner must not contaminate sum
+        if(i==34u) identities.x=8u;
+        if(i==35u) depths.x=uintBitsToFloat(0x7fc00000u);
+        if(i==36u) hit[axis]+=.051;
+        vec3 captured;vec4 weights;
+        bool valid=scGeometrySimplexSurface(uv,card,7u,identities,depths,hit,captured,weights);
+        bool expected=i<29u || i==33u;
+        bool ok=expected ? valid && distance(captured,hit)<.00001 && weights[missing]==0. && abs(dot(weights,vec4(1))-1.)<.00001 : !valid;
+        rb.result[i]=uvec4(ok?1u:0u,valid?1u:0u,0u,0u);return;
+    }
+    if(i>=13u) {
+        uint c=i<16u?i-13u:0u;SurfaceCacheCard card=testCard(c);
+        uint axis=card.axis_direction&255u,u=axis==0u?1u:0u,v=axis==2u?1u:2u;
+        card.extent[u]=16.;card.extent[v]=16.;
+        vec2 uv=vec2(card.atlas_offset_x,card.atlas_offset_y)+vec2(32.75,33.25);
+        vec4 depths=vec4(.4,.5,.6,.7);uvec4 identities=uvec4(7u);uint triangle=7u;
+        vec3 hit=card.center.xyz;
+        hit[u]+=(32.75/64.-.5)*32.;hit[v]+=(33.25/64.-.5)*32.;
+        hit[axis]+=scCardFaceNormal(card)[axis]*.575;
+        if(i==16u) identities.y=8u;
+        if(i==17u) identities=uvec4(0xffffffffu);
+        if(i==18u) depths.z=-1.;
+        if(i==19u) depths.w=uintBitsToFloat(0x7fc00000u);
+        if(i==20u) uv.x=float(card.atlas_offset_x)+63.75; // no cross-owner edge quad
+        if(i==21u) hit[axis]+=.051;
+        if(i==22u) uv.x=uintBitsToFloat(0x7fc00000u);
+        if(i==23u) depths.x=uintBitsToFloat(0x7f800000u);
+        if(i==24u) triangle=0xffffffffu;
+        vec3 captured;vec4 weights;
+        bool valid=scGeometryBilinearSurface(uv,card,triangle,identities,depths,hit,captured,weights);
+        bool ok=i<16u ? valid && distance(captured,hit)<.00001 && abs(dot(weights,vec4(1))-1.)<.00001 : !valid;
+        rb.result[i]=uvec4(ok?1u:0u,valid?1u:0u,0u,0u);return;
+    }
+    if(i>=10u) {
+        SurfaceCacheCard test=testCard(1u);
+        if(i==10u) test.extent=vec4(.064,.5,.064,0);
+        vec2 query=i==11u?vec2(64.01,.01):vec2(96.25,32.25);
+        if(i==12u) query.x=uintBitsToFloat(0x7fc00000u);
+        ivec2 lo,hi;
+        bool valid=scGeometryCacheTexelBounds(query,test,.05,lo,hi);
+        bool ok=valid;
+        if(i==12u) ok=!valid;
+        else {
+            ok=ok && all(greaterThanEqual(lo,ivec2(64,0))) && all(lessThanEqual(hi,ivec2(127,63)));
+            for(int y=0;y<64;++y) for(int x=64;x<128;++x) {
+                vec2 delta=(vec2(x,y)+.5-query)*vec2(test.extent.x,test.extent.z)*2./64.;
+                if(length(delta)<=.05) ok=ok && x>=lo.x && x<=hi.x && y>=lo.y && y<=hi.y;
+            }
+            if(i==10u) ok=ok && hi.x>98 && lo.x<94; // outside old 3x3
+        }
+        rb.result[i]=uvec4(ok?1u:0u,0u,0u,0u);return;
+    }
+    uint c=i<3u?i:0u;
+    SurfaceCacheCard card=testCard(c);
+    vec3 f=scCardFaceNormal(card);
+    float expectedDepth=c==0u?.1:c==1u?.9:.4;
+    vec3 o=card.center.xyz-f*5.; vec3 d=f;
+    float expectedT=5.+expectedDepth;
+    if(i==3u) { o-=f*100.; expectedT+=100.; }
+    if(i==4u) d=-f;
+    if(i==5u) { o=cardTexelToWorld(uvec2(0,0),0.,card)-f*5.; }
+    if(i==7u) {
+        d=normalize(f+vec3(0,.05,0));
+        o=card.center.xyz+f*expectedDepth-d*5.; expectedT=5.;
+    }
+    if(i>=8u) {
+        d=normalize(f+vec3(0,.8,0));
+        vec3 planePoint=cardTexelToWorld(uvec2(0,0),0.,card);
+        if(i==9u) planePoint.y=card.center.y-1.04;
+        o=planePoint-d*5.;expectedT=5.+expectedDepth/dot(d,f);
+    }
+    float t; vec3 p; vec2 uv; uint rej;
+    bool hit;
+    if(i>=8u) hit=scRayCardSurfaceDDA(card,o,d,.05,200.,.45,depthAtlas,t,p,uv,rej);
+    else hit=scRayCardSurfaceT(card,o,d,.05,200.,.45,depthAtlas,t,p,uv,rej);
+    bool pass=hit && abs(t-expectedT)<.0002;
+    if(i==4u) pass=!hit && rej==2u;
+    if(i==5u) pass=!hit && rej==5u;
+    if(i==6u) {
+        float a,b;
+        bool inBox=scRayAabbInterval(vec3(0,0,0),1./vec3(0,0,1),vec3(0,-1,1),vec3(1,1,2),0.,10.,a,b);
+        bool outside=scRayAabbInterval(vec3(-.1,0,0),1./vec3(0,0,1),vec3(0,-1,1),vec3(1,1,2),0.,10.,a,b);
+        pass=inBox && !outside;
+    }
+    if(i<3u) {
+        ivec2 pixel=ivec2(int(c*64u+32u),32);
+        vec4 albedo=texelFetch(albedoAtlas,pixel,0);
+        pass=pass && distance(texelFetch(emissiveAtlas,pixel,0).rgb,vec3(.25,.5,1))<.001;
+        pass=pass && length(texelFetch(emissiveAtlas,ivec2(int(c*64u),0),0).rgb)==0.;
+        vec3 n=octDecode(texelFetch(normalAtlas,pixel,0).rg);
+        vec3 expectedN=c==0u?vec3(-1,0,0):c==1u?normalize(vec3(.6/2.,-.8/3.,0)):vec3(0,0,1);
+        pass=pass && abs(albedo.r-64./255.)<.001 && abs(albedo.a-128./255.)<.001 && dot(n,expectedN)>.999;
+        // Far edge must stay valid: catches extent swizzles and local-center subtraction.
+        pass=pass && texelFetch(depthAtlas,ivec2(int(c*64u+62u),62),0).r>=0.;
+    }
+    rb.result[i]=uvec4(pass?1u:0u,hit?1u:0u,floatBitsToUint(t),rej);
+}

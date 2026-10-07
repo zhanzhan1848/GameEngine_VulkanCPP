@@ -158,6 +158,7 @@ vertex CardCaptureVSOut card_capture_vertex(
 struct CardMaterialInfo {
     uint  albedo_texture_idx;
     float3 albedo_tint;
+    uint  flags;
 };
 
 static CardMaterialInfo cardLoadMaterial(device const uint* mats, uint idx) {
@@ -168,7 +169,18 @@ static CardMaterialInfo cardLoadMaterial(device const uint* mats, uint idx) {
         as_type<float>(mats[base + 3u]),
         as_type<float>(mats[base + 4u]),
         as_type<float>(mats[base + 5u]));
+    m.flags = mats[base + 11u];
     return m;
+}
+
+// bit7 validity, bits[3:7) transmission UNorm4, bits[0:3) thickness UNorm3
+// reserved for the next Surface Cache transport phase.
+static uint cardEncodeTransportAlpha(uint flags) {
+    uint transmission8 = (flags >> 8u) & 0xFFu;
+    uint transmission4 = (transmission8 + 8u) / 17u;
+    uint thickness8 = (flags >> 16u) & 0xFFu;
+    uint thickness3 = (thickness8 + 18u) / 36u;
+    return 0x80u | (transmission4 << 3u) | thickness3;
 }
 
 static float2 cardOctEncode(float3 n) {
@@ -212,7 +224,8 @@ fragment CardCapturePSOut card_capture_fragment(
     if (dot(N, cb.fwd.xyz) > 0.0f) N = -N;
 
     CardCapturePSOut OUT;
-    OUT.albedo = float4(base_color, 1.0f);
+    OUT.albedo = float4(base_color,
+                        float(cardEncodeTransportAlpha(mat.flags)) / 255.0f);
     OUT.normal = float4(cardOctEncode(N), 0.0f, 1.0f);
     OUT.axis_depth = dot(IN.world_pos - cb.center.xyz, cb.fwd.xyz);
     return OUT;

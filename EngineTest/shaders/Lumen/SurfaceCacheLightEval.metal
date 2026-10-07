@@ -251,6 +251,11 @@ kernel void surfaceCacheLightEval(
     float4 albedo = albedo_atlas.read(atlas_uv);
     if (albedo.a < 0.01) return;
 
+    uint transportBits = uint(round(clamp(albedo.a, 0.0f, 1.0f) * 255.0f));
+    float transmission = float((transportBits >> 3u) & 0xFu) / 15.0f;
+    float thickness = float(transportBits & 0x7u) / 7.0f;
+    float backTransmittance = transmission * exp(-2.0f * thickness);
+
     float2 enc_n = normal_atlas.read(atlas_uv).rg;
     float3 normal = octDecode(enc_n);
     float3 emissive = emissive_atlas.read(atlas_uv).rgb;
@@ -306,8 +311,10 @@ kernel void surfaceCacheLightEval(
             attenuation = max(1.0 - (dist * dist) / r2, 0.0);
         }
 
-        float NdotL = max(dot(normal, L), 0.0);
-        direct_light += lights[li].color.xyz * NdotL * attenuation;
+        float signedNdotL = dot(normal, L);
+        float frontTerm = max(signedNdotL, 0.0f);
+        float backTerm = max(-signedNdotL, 0.0f) * backTransmittance;
+        direct_light += lights[li].color.xyz * (frontTerm + backTerm) * attenuation;
     }
 
     // --------------------------------------------------------------------------------

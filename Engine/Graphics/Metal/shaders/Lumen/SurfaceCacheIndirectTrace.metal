@@ -32,17 +32,6 @@ struct ProbeRayHit {
     float  _pad;
 };
 
-static uint findOwningCard(uint2 uv, constant SurfaceCacheCard* cards, uint count) {
-    // Apple Silicon: cap device reads to ~24 to stay within limits
-    uint limit = min(count, 24u);
-    for (uint i = 0; i < limit; ++i) {
-        if (uv.x >= cards[i].atlas_offset_x && uv.x < cards[i].atlas_offset_x + cards[i].resolution &&
-            uv.y >= cards[i].atlas_offset_y && uv.y < cards[i].atlas_offset_y + cards[i].resolution)
-            return i;
-    }
-    return count;
-}
-
 // Apple Silicon: else-if cascade selection = 1 texture3D read per step (not 3)
 // 2026-09-11 Metal sync (C3.5 slice 1 parity): drop the ×sdf_extents
 // multiplier — the GlobalSDF voxelization stores RAW METERS (the runtime
@@ -94,7 +83,8 @@ kernel void surfaceCacheIndirectTrace(
     device GlobalShaderData&        gd           [[buffer(0)]],
     constant IndirectTraceParams&   params       [[buffer(1)]],
     constant SurfaceCacheCard*      cards        [[buffer(2)]],
-    device ProbeRayHit*             ray_hits     [[buffer(3)]])
+    device ProbeRayHit*             ray_hits     [[buffer(3)]],
+    device const uint*             owners       [[buffer(4)]])
 {
     uint probe_x = global_id.x;
     uint probe_y = global_id.y;
@@ -110,18 +100,28 @@ kernel void surfaceCacheIndirectTrace(
                                probe_y * params.tile_size + params.tile_size/2);
     if (tile_origin.x >= params.sc_params.atlas_size || tile_origin.y >= params.sc_params.atlas_size) return;
 
+    // Invalidate every slot owned by this refreshed tile before any early-out.
+    uint rays = params.rays_per_probe;
+    for (uint r = 0; r < rays; ++r) {
+        uint hit_idx = probe_idx * rays + r;
+        ray_hits[hit_idx].hit_position = float3(0.0f);
+        ray_hits[hit_idx].hit_distance = 0.0f;
+        ray_hits[hit_idx].hit_type = 4u;
+        ray_hits[hit_idx]._pad = 0.0f;
+    }
+
     float depth = depth_atlas.read(tile_origin).r;
-    if (depth <= 0.0) return;
+    if (!isfinite(depth) || depth <= 0.0) return;
 
     float2 enc_n = normal_atlas.read(tile_origin).rg;
     float3 probe_normal = octDecode(enc_n);
 
     // Find owning card for correct world position
-    uint card_idx = findOwningCard(tile_origin, cards, params.sc_params.max_cards);
+    uint card_idx = owners[probe_idx];
     if (card_idx >= params.sc_params.max_cards) return;
     float3 probe_pos = cardTexelToWorld(tile_origin, depth, cards[card_idx]);
+    if (!all(isfinite(probe_pos)) || !all(isfinite(probe_normal))) return;
 
-    uint rays = params.rays_per_probe;
     // 2026-09-11 Metal sync (C3.5 slice 1 parity): real march parameters.
     // The stub used 4 steps with hitThreshold = cascade extent × 0.5 (21 m)
     // — every ray "hit" instantly and far hits resolved to the Phase-A 0.02
@@ -136,8 +136,7 @@ kernel void surfaceCacheIndirectTrace(
     // texel, and the "transport" degenerates into self-feedback).
     float3 ray_origin = probe_pos + probe_normal * (hitThreshold + 0.05f);
     for (uint r = 0; r < rays; ++r) {
-        float2 seed = float2(hash(float2(float(probe_idx * rays + r), float(params.frame_index))),
-                             hash(float2(float(params.frame_index), float(probe_idx * rays + r))));
+        float2 seed = scTileRayXi(probe_idx, r, params.frame_index);
         float r1 = seed.x;
         float r2 = seed.y * 2.0 * 3.14159265;
         float sin_t = sqrt(r1);
@@ -151,13 +150,27 @@ kernel void surfaceCacheIndirectTrace(
 
         float t = 0.0;
         bool hit = false;
+        bool clearedOriginSkin = false;
         float3 hit_pos = float3(0.0);
 
         for (uint step = 0; step < kMaxSDFSteps; ++step) {
             float3 p = ray_origin + ray_dir * t;
             float d = sampleSDF(p, sdf0, sdf1, sdf2, params);
 
-            if (d < hitThreshold) { hit = true; hit_pos = p; break; }
+            // Match Vulkan: signed offline SDF may keep the normal-offset
+            // start inside a zero-valued skin. Do not turn that into a t=0
+            // same-tile bounce; clear the skin before accepting a hit.
+            if (d < hitThreshold) {
+                if (!clearedOriginSkin) {
+                    t += max(abs(d), max(minStep, 0.05f));
+                    if (t > params.max_ray_distance) break;
+                    continue;
+                }
+                hit = true;
+                hit_pos = p;
+                break;
+            }
+            clearedOriginSkin = true;
             if (t > params.max_ray_distance) break;
 
             // Relaxed advancement: overstep when far, conservative when close
@@ -176,7 +189,7 @@ kernel void surfaceCacheIndirectTrace(
         // cone footprint — geometry in the cone → cone-occluded (no sky).
         // Type contract (D): 0=near, 1=far, 2=sky, 3=cone-occluded, ≥4=INVALID.
         bool coneOccluded = false;
-        if (!hit) {
+        if (!hit && clearedOriginSkin) {
             const float3 org = params.sdf_origins[0].xyz;
             const float3 ext = params.sdf_extents[0].xyz;
             // Ray-AABB slab: clamp the sample t into the cascade volume — the
@@ -228,7 +241,7 @@ kernel void surfaceCacheIndirectTrace(
         } else if (hit) {
             ray_hits[hit_idx].hit_type = 1;
             ray_hits[hit_idx].hit_position = hit_pos;
-        } else if (coneOccluded) {
+        } else if (coneOccluded || !clearedOriginSkin) {
             ray_hits[hit_idx].hit_type = 3;
             ray_hits[hit_idx].hit_position = float3(0.0);   // no position evidence
         } else {

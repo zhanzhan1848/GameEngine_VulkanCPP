@@ -1,0 +1,51 @@
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+// ============================================================================
+// SurfaceCachePageClear — SC per-mesh 计划 P2：页复用拒绝旧引用。
+//
+// 页表模式（PRIMAL_SC_PAGE_TABLE=1）LRU 挤页把受害卡降为 1 页并释放其页段
+// 到 free-run；新卡复用这些物理页时会读到受害卡的旧 radiance（幽灵亮度）。
+// 分配纪元变化时本 pass 对全部 freed rect 清零 6 个 lighting atlas
+//（三缓冲 × 主/nodirect）——旧引用在复用前被显式拒绝（§3.1 atlas 地址不是
+// 身份；generation 由"分配即清除"保证）。
+//
+// Dispatch: 1D, Σ(rect area) threads (256,1,1)。
+//
+// Flat bindings:
+//   0-5 = StorageImage(rgba16f)  lighting_atlas ×3 + nodirect ×3 (write)
+//   6   = readonly buffer        u32 rects[]（每 rect 4 word：x,y,w,h + 首条=rect 数）
+// ============================================================================
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) writeonly uniform image2D lighting0;
+layout(set = 0, binding = 1, rgba16f) writeonly uniform image2D lighting1;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D lighting2;
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D nodirect0;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D nodirect1;
+layout(set = 0, binding = 5, rgba16f) writeonly uniform image2D nodirect2;
+
+layout(set = 0, binding = 6, std430) readonly buffer RectBuf {
+    uint words[];   // [0]=rect_count, 后随 rect_count×4（x,y,w,h）
+} rb;
+
+void surface_cache_page_clear() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint count = rb.words[0];
+    // 线性扫 rect（挤页每纪元 ≤ 数个，无二分必要）。
+    for (uint r = 0u; r < count; ++r) {
+        uint base = 1u + r * 4u;
+        uint area = rb.words[base + 2u] * rb.words[base + 3u];
+        if (tid >= area) { tid -= area; continue; }
+        uint lx = tid % rb.words[base + 2u];
+        uint ly = tid / rb.words[base + 2u];
+        ivec2 uv = ivec2(int(rb.words[base + 0u] + lx), int(rb.words[base + 1u] + ly));
+        imageStore(lighting0, uv, vec4(0.0));
+        imageStore(lighting1, uv, vec4(0.0));
+        imageStore(lighting2, uv, vec4(0.0));
+        imageStore(nodirect0, uv, vec4(0.0));
+        imageStore(nodirect1, uv, vec4(0.0));
+        imageStore(nodirect2, uv, vec4(0.0));
+        return;
+    }
+}

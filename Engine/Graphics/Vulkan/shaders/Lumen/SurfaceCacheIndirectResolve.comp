@@ -19,10 +19,17 @@
 //   binding 12 = image2D              normal_atlas     (C: tile-side orientation)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
+// [K-1 2026-09-21 E0-K]: tile 反弹天空基色与探针天空同一函数（单一事实源）。
+#include "ShaderLib/SkyAtmosphere.glsl"
 
+#ifdef SC_BOUNDARY_RADIOSITY_PROOF
+layout(local_size_x=64) in;
+#else
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#endif
 
 // --------------------------------------------------------------------------------
 // Bindings (flat)
@@ -82,11 +89,32 @@ struct IndirectResolveParams {
     uint card_count;
     // [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 过表寻址开关。Offset 88。
     uint page_table_enabled;
+    // [F0 2026-09-20 能量不对称修复 A1]: tile 天空反弹源——CPU 填
+    // GIDebug().sky_color_intensity × 基色梯度（探针路径同旋钮，天空单一
+    // 事实源收口）。Offset 96。回滚 env PRIMAL_SC_TILE_SKY_OVERRIDE。
+    // [K-1 2026-09-21] xyz = 档位 tier，w = 方向化使能。
+    vec4 tile_sky_color;
+    // [稳定性 2026-09-21] tile 增长率钳制（PRIMAL_SC_TILE_GROWTH_CAP，0=关）。
+    // Offset 112，std140 块 128。
+    float tile_growth_cap;
+    // [SC per-mesh 计划 P4]（PRIMAL_SC_RAY_LOOKUP=1）：射线最近有效表面
+    // lookup 开关（C++ IndirectResolveParamsGPU._pad[0] 同位）。Offset 116。
+    uint  ray_lookup;
+    float ray_max_distance;
+    float _pad_gr;
 };
 
 layout(set = 0, binding = 5, std140) uniform IndirectResolveParamsBlock {
     IndirectResolveParams params;
 } irp;
+
+// [P4] 射线 lookup 分类统计（PRIMAL_SC_RAY_LOOKUP_STATS=1 时 CPU 读回；
+// 无统计环境时缓冲仍绑定但无人写入）。布局：
+//  [0] rays_queried [1] found [2] |Δ|≤0.05 [3] ≤0.15 [4] ≤0.45 [5] >0.45
+//  [6..13] reject 码 1..8 直方图 [14] 保守淘汰（bbox 进入距离 > 当前最优）
+layout(set = 0, binding = 17, std430) buffer RayLookupStatsBlock {
+    uint data[];
+} ray_stats;
 
 layout(set = 0, binding = 6, std430) readonly buffer LookupsBlock {
     SurfaceCacheCardLookup data[];
@@ -131,6 +159,321 @@ layout(set = 0, binding = 10, std430) buffer TileValidBlock {
 } tile_valid;
 
 // --------------------------------------------------------------------------------
+bool findRaySurface(vec3 rayO, vec3 tileRayDir, out float bestT, out vec2 bestUV,
+                    out uint rejectHist, out uint bestCard) {
+    const float tMin = 0.05;
+    const float tMax = irp.params.ray_max_distance;
+    const float band = max(irp.params.hit_band, 0.15);
+    const vec3 invD = 1.0 / tileRayDir;
+    const bool ptOn2 = irp.params.page_table_enabled != 0u;
+    const uint ptPage2 = max(irp.params.sc_params.page_size, 1u);
+    bool found = false; bestCard = 0xFFFFFFFFu;
+    bestT = 1e30;
+    vec3 bestPos = vec3(0.0);
+    bestUV = vec2(0.0);
+    rejectHist = 0u;
+    for (uint li = 0u; li < irp.params.lookup_count; ++li) {
+        float t0, t1;
+        if (!scRayAabbInterval(rayO, invD, lookups.data[li].aabb_min.xyz,
+                   lookups.data[li].aabb_max.xyz, tMin, tMax, t0, t1)) continue;
+        // §6.6 保守淘汰：bbox 进入距离不早于当前最优 → 无可能改善
+        if (found && t0 > bestT) continue;
+        for (uint ci = lookups.data[li].card_start;
+             ci < lookups.data[li].card_start + lookups.data[li].card_count; ++ci) {
+            SurfaceCacheCard card = scResolveCardOrigin(
+                cards.data[ci], ptOn2, pageTable.card_page_table[ci], ptPage2);
+            float tS; vec3 pS; vec2 uvS; uint rej;
+            bool surfaceHit;
+            if ((irp.params.ray_lookup & 4u) != 0u)
+                surfaceHit=scRayCardSurfaceDDA(card,rayO,tileRayDir,tMin,tMax,band,depth_atlas,tS,pS,uvS,rej);
+            else
+                surfaceHit=scRayCardSurfaceT(card,rayO,tileRayDir,tMin,tMax,band,depth_atlas,tS,pS,uvS,rej);
+            if (surfaceHit) {
+                if (tS < bestT) { bestT = tS; bestPos = pS; bestUV = uvS; bestCard = ci; found = true; }
+            } else {
+                if (rej >= 1u && rej <= 8u) rejectHist |= (1u << (rej + 3u));
+            }
+        }
+    }
+    return found;
+}
+
+#ifdef SC_GEOMETRY_FIRST
+layout(set=0,binding=18,std430) readonly buffer RayTriangles { uint data[]; } rayTriangles;
+layout(set=0,binding=19,std430) readonly buffer AtlasTriangles { uint data[]; } atlasTriangles;
+layout(set=0,binding=20,std430) readonly buffer TriangleSupport { uint data[]; } supportIndex;
+#endif
+#ifdef SC_GEOMETRY_FIRST
+#include "TriangleSupportIndex.glsl"
+#endif
+#ifdef SC_BOUNDARY_CONSUMER
+#include "BoundaryLightingData.glsl"
+struct SCBoundaryRadianceEntry {vec4 radiance;vec4 indirect;uvec4 identity;uvec4 state;};
+layout(set=0,binding=21,std430) readonly buffer BoundaryIndex {uint scBoundaryWords[];};
+layout(set=0,binding=22,std430) readonly buffer BoundaryPoints {SCBoundaryLightPoint boundaryPoints[];};
+layout(set=0,binding=23,std430) readonly buffer BoundaryCache {SCBoundaryRadianceEntry boundaryCache[];};
+#define lookupCards cards.data
+#define lookupTriangles atlasTriangles.data
+#define lookupDepth depth_atlas
+#define lookupLighting prev_lighting
+#define SC_BOUNDARY_BINARY_INSERT ((irp.params.ray_lookup&65536u)!=0u)
+#define SC_SOURCE_BINARY_INSERT ((irp.params.ray_lookup&131072u)!=0u)
+#include "BoundaryRadianceLookup.glsl"
+#undef SC_SOURCE_BINARY_INSERT
+#undef SC_BOUNDARY_BINARY_INSERT
+#undef lookupCards
+#undef lookupTriangles
+#undef lookupDepth
+#undef lookupLighting
+#endif
+uint rayTriangle(uint idx) {
+#ifdef SC_GEOMETRY_FIRST
+    return rayTriangles.data[idx];
+#else
+    return 0xffffffffu;
+#endif
+}
+bool findGeometryCache(vec3 hitPos,vec3 rayO,vec3 rayD,uint owner,uint triangle,
+                       out vec3 radiance,out float cacheT,out uint bestCard,out uint rejectMask) {
+    radiance=vec3(0); cacheT=-1.; bestCard=0xffffffffu; rejectMask=1u; float bestKey=1e30;
+    const bool ptOn=irp.params.page_table_enabled!=0u;
+    const uint ptPage=max(irp.params.sc_params.page_size,1u);
+    uint cardBegin=0u,cardEnd=irp.params.sc_params.max_cards;
+    // Host has verified complete, single-owner lookup partitions. Preserve
+    // ascending card order and all existing per-card identity/face checks.
+    if((irp.params.ray_lookup&2048u)!=0u){
+        bool direct=false;
+        if((irp.params.ray_lookup&4096u)!=0u){
+            if(owner>=irp.params.lookup_count)return false;
+            uint first=lookups.data[owner]._pad0,last=lookups.data[owner]._pad1;
+            if(first==0u && last==0u)return false;
+            if(first<last && last<=irp.params.sc_params.max_cards &&
+               cards.data[first].mesh_instance_id==owner && cards.data[last-1u].mesh_instance_id==owner){
+                cardBegin=first;cardEnd=last;direct=true;
+            }
+        }
+        if(!direct){
+            cardBegin=cardEnd;cardEnd=0u;
+            for(uint li=0u;li<irp.params.lookup_count;++li){
+                uint first=lookups.data[li].card_start,count=lookups.data[li].card_count;
+                if(count==0u)continue;
+                if(first>=irp.params.sc_params.max_cards || count>irp.params.sc_params.max_cards-first){
+                    cardBegin=0u;cardEnd=irp.params.sc_params.max_cards;break;
+                }
+                if(cards.data[first].mesh_instance_id==owner){cardBegin=min(cardBegin,first);cardEnd=max(cardEnd,first+count);}
+            }
+        }
+        if(cardBegin>=cardEnd)return false;
+    }
+
+#ifdef SC_GEOMETRY_FIRST
+    uvec2 allowedCards=uvec2(0);bool ownerMaskReady=false;
+    if((irp.params.ray_lookup&32768u)!=0u && (irp.params.ray_lookup&8192u)!=0u)
+        ownerMaskReady=scOwnerTriangleMask(owner,cardBegin,cardEnd,triangle,allowedCards);
+#endif
+
+    for(uint ci=cardBegin;ci<cardEnd;++ci) {
+        if(cards.data[ci].mesh_instance_id!=owner || cards.data[ci].resolution==0u) continue;
+        rejectMask &= ~1u;
+        SurfaceCacheCard card=scResolveCardOrigin(cards.data[ci],ptOn,pageTable.card_page_table[ci],ptPage);
+        vec2 uv;
+        if(!worldToCardUVMarginPad(hitPos,card,uv,0.,0.) ||
+            dot(scCardFaceNormal(card),-rayD)>=0.) { rejectMask|=2u; continue; }
+#ifdef SC_GEOMETRY_FIRST
+        if((card.flags&1u)==0u || triangle==0xffffffffu) { rejectMask|=4u; continue; }
+        ivec2 minimum,maximum;
+        if(!scGeometryCacheTexelBounds(uv,card,.05,minimum,maximum)) { rejectMask|=2u; continue; }
+        if((irp.params.ray_lookup&8192u)!=0u && !scTriangleCandidate(ci,triangle,ownerMaskReady,cardBegin,allowedCards)){rejectMask|=4u;continue;}
+        // Project the existing distance tolerance into texel coordinates. A
+        // fixed 3x3 neighborhood misses close points on finely sampled cards.
+        for(int y=minimum.y;y<=maximum.y;++y) for(int x=minimum.x;x<=maximum.x;++x) {
+            ivec2 texel=ivec2(x,y);
+            uint at=uint(texel.y)*irp.params.sc_params.atlas_size+uint(texel.x);
+            if(atlasTriangles.data[at]!=triangle) { rejectMask|=4u; continue; }
+            float depth=texelFetch(depth_atlas,texel,0).r;
+            if(isnan(depth)||isinf(depth)||depth<0.) { rejectMask|=2u; continue; }
+            vec3 captured=cardTexelToWorld(uvec2(texel),depth,card);
+            // A component outside the original 0.05m radius cannot pass the
+            // Euclidean distance gate. Keep original length and selection
+            // arithmetic for every remaining candidate.
+            if((irp.params.ray_lookup&262144u)!=0u &&
+               any(greaterThan(abs(captured-hitPos),vec3(0.05)))) {rejectMask|=8u;continue;}
+            float error=length(captured-hitPos);
+            if(isnan(error)||isinf(error)||error>0.05) { rejectMask|=8u; continue; }
+            vec3 candidate=texelFetch(prev_lighting,texel,0).rgb;
+            if(any(isnan(candidate))||any(isinf(candidate))) { rejectMask|=2u; continue; }
+            if(error<bestKey) {
+                bestKey=error; radiance=candidate;
+                cacheT=dot(captured-rayO,rayD); bestCard=ci;
+            }
+        }
+#endif
+    }
+    // Preserve all previously accepted point samples. Only cache misses may
+    // use the explicitly enabled identity-conditioned interpolation fallback.
+#ifdef SC_GEOMETRY_FIRST
+    if(bestCard==0xffffffffu && (irp.params.ray_lookup&16u)!=0u) {
+        for(uint mode=0u;mode<3u;++mode) {
+        if(mode>0u && bestCard!=0xffffffffu) break;
+        if(mode==1u && (irp.params.ray_lookup&32u)==0u) continue;
+        if(mode==2u && (irp.params.ray_lookup&64u)==0u) continue;
+        for(uint ci=cardBegin;ci<cardEnd;++ci) {
+            if(cards.data[ci].mesh_instance_id!=owner || cards.data[ci].resolution==0u) continue;
+            SurfaceCacheCard card=scResolveCardOrigin(cards.data[ci],ptOn,pageTable.card_page_table[ci],ptPage);
+            vec2 uv;ivec2 base;vec4 weights;
+            if((card.flags&1u)==0u || triangle==0xffffffffu ||
+               !worldToCardUVMarginPad(hitPos,card,uv,0.,0.) ||
+               dot(scCardFaceNormal(card),-rayD)>=0. ||
+               !scGeometryBilinearFootprint(uv,card,base,weights)) continue;
+            if((irp.params.ray_lookup&8192u)!=0u && !scTriangleCandidate(ci,triangle,ownerMaskReady,cardBegin,allowedCards)){rejectMask|=mode==0u?4u:8u;continue;}
+            uint at=uint(base.y)*irp.params.sc_params.atlas_size+uint(base.x);
+            uint stride=irp.params.sc_params.atlas_size;
+            uvec4 identities=uvec4(atlasTriangles.data[at],atlasTriangles.data[at+1u],
+                                  atlasTriangles.data[at+stride],atlasTriangles.data[at+stride+1u]);
+            if(mode==0u && any(notEqual(identities,uvec4(triangle)))) {rejectMask|=4u;continue;}
+            vec4 depths=vec4(texelFetch(depth_atlas,base,0).r,texelFetch(depth_atlas,base+ivec2(1,0),0).r,
+                             texelFetch(depth_atlas,base+ivec2(0,1),0).r,texelFetch(depth_atlas,base+ivec2(1,1),0).r);
+            vec3 captured;
+            bool valid=mode==0u ? scGeometryBilinearSurface(uv,card,triangle,identities,depths,hitPos,captured,weights)
+                               : mode==1u ? scGeometrySimplexSurface(uv,card,triangle,identities,depths,hitPos,captured,weights)
+                               : scGeometrySegmentSurface(uv,card,triangle,identities,depths,hitPos,captured,weights);
+            if(!valid) {rejectMask|=8u;continue;}
+            vec3 candidate=vec3(0);bool finite=true;
+            for(uint k=0u;k<4u;++k) if(mode==0u || weights[k]>0.) {
+                vec3 value=texelFetch(prev_lighting,base+ivec2(int(k&1u),int(k>>1u)),0).rgb;
+                if(any(isnan(value))||any(isinf(value))) {finite=false;break;}
+                candidate+=weights[k]*value;
+            }
+            if(!finite) {rejectMask|=2u;continue;}
+            float error=length(captured-hitPos);
+            if(error<bestKey) {bestKey=error;radiance=candidate;cacheT=dot(captured-rayO,rayD);bestCard=ci;}
+        }
+        }
+    }
+#endif
+#ifdef SC_GEOMETRY_FIRST
+    // Preserve all local support selections. Only remaining misses may look
+    // for a finite same-primitive chord in the surrounding 4x4 source region.
+    if(bestCard==0xffffffffu && (irp.params.ray_lookup&128u)!=0u) {
+        for(uint ci=cardBegin;ci<cardEnd;++ci) {
+            if(cards.data[ci].mesh_instance_id!=owner || cards.data[ci].resolution==0u) continue;
+            SurfaceCacheCard card=scResolveCardOrigin(cards.data[ci],ptOn,pageTable.card_page_table[ci],ptPage);
+            vec2 uv;ivec2 lo,hi;
+            if((card.flags&1u)==0u || triangle==0xffffffffu ||
+               !worldToCardUVMarginPad(hitPos,card,uv,0.,0.) || dot(scCardFaceNormal(card),-rayD)>=0. ||
+               !scGeometryExpandedBounds(uv,card,lo,hi)) continue;
+            if((irp.params.ray_lookup&8192u)!=0u && !scTriangleCandidate(ci,triangle,ownerMaskReady,cardBegin,allowedCards))continue;
+            ivec2 coords[16];uint identities[16];float depths[16];uint count=0u;
+            for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) {
+                ivec2 pixel=ivec2(x,y);uint at=uint(y)*irp.params.sc_params.atlas_size+uint(x);
+                uint id=atlasTriangles.data[at];if(id!=triangle) continue;
+                float depth=texelFetch(depth_atlas,pixel,0).r;
+                if(isnan(depth)||isinf(depth)||depth<0.) continue;
+                coords[count]=pixel;identities[count]=id;depths[count]=depth;++count;
+            }
+            for(uint a=0u;a<count;++a) for(uint b=a+1u;b<count;++b) {
+                vec3 captured;float weight;
+                if(!scGeometrySegmentPair(card,coords[a],coords[b],triangle,
+                    uvec2(identities[a],identities[b]),vec2(depths[a],depths[b]),hitPos,captured,weight)) continue;
+                vec3 candidate=vec3(0);bool finite=true;
+                if(weight<1.) {vec3 value=texelFetch(prev_lighting,coords[a],0).rgb;
+                    finite=finite && !any(isnan(value)) && !any(isinf(value));candidate+=(1.-weight)*value;}
+                if(weight>0.) {vec3 value=texelFetch(prev_lighting,coords[b],0).rgb;
+                    finite=finite && !any(isnan(value)) && !any(isinf(value));candidate+=weight*value;}
+                if(!finite) continue;
+                float error=length(captured-hitPos);
+                if(error<bestKey) {bestKey=error;radiance=candidate;cacheT=dot(captured-rayO,rayD);bestCard=ci;}
+            }
+        }
+    }
+#endif
+#ifdef SC_GEOMETRY_FIRST
+    // Last fallback: bounded 8x8 same-primitive convex hull, sorted by x/y.
+    // Existing selections are immutable; at most 64 vertices and 62 triangles.
+    for(uint supportMode=0u;supportMode<2u;++supportMode) {
+        if(bestCard!=0xffffffffu) break;
+        if((irp.params.ray_lookup&(supportMode==0u?256u:512u))==0u) continue;
+        for(uint ci=cardBegin;ci<cardEnd;++ci) {
+            if(cards.data[ci].mesh_instance_id!=owner || cards.data[ci].resolution==0u) continue;
+            SurfaceCacheCard card=scResolveCardOrigin(cards.data[ci],ptOn,pageTable.card_page_table[ci],ptPage);
+            vec2 uv;ivec2 lo,hi;
+            if((card.flags&1u)==0u || triangle==0xffffffffu ||
+               !worldToCardUVMarginPad(hitPos,card,uv,0.,0.) || dot(scCardFaceNormal(card),-rayD)>=0. ||
+               !scGeometryHullBounds(uv,card,lo,hi)) continue;
+            if((irp.params.ray_lookup&8192u)!=0u && !scTriangleCandidate(ci,triangle,ownerMaskReady,cardBegin,allowedCards))continue;
+            ivec2 coords[64];float depths[64];uint count=0u;uint hull[128];uint vertices=0u;
+            if(supportMode==0u) {
+                for(int x=lo.x;x<=hi.x;++x) for(int y=lo.y;y<=hi.y;++y) {
+                    ivec2 pixel=ivec2(x,y);uint at=uint(y)*irp.params.sc_params.atlas_size+uint(x);
+                    if(atlasTriangles.data[at]!=triangle) continue;
+                    float depth=texelFetch(depth_atlas,pixel,0).r;
+                    if(isnan(depth)||isinf(depth)||depth<0.) continue;
+                    coords[count]=pixel;depths[count]=depth;++count;
+                }
+                vertices=scSupportHull(coords,count,hull);
+            } else {
+                uint offset;if(!scIndexedSupport(ci,triangle,offset,count)) continue;
+                bool valid=true;
+                for(uint k=0u;k<count;++k) {
+                    uint packed=supportIndex.data[offset+k];uvec2 local=uvec2(packed&65535u,packed>>16u);
+                    if(any(greaterThanEqual(local,uvec2(card.resolution)))) {valid=false;break;}
+                    ivec2 pixel=ivec2(local+uvec2(card.atlas_offset_x,card.atlas_offset_y));
+                    uint at=uint(pixel.y)*irp.params.sc_params.atlas_size+uint(pixel.x);
+                    float depth=texelFetch(depth_atlas,pixel,0).r;
+                    if(atlasTriangles.data[at]!=triangle || isnan(depth) || isinf(depth) || depth<0.) {valid=false;break;}
+                    coords[k]=pixel;depths[k]=depth;hull[k]=k;
+                }
+                if(!valid) continue;vertices=count;
+            }
+            for(uint j=1u;j+1u<vertices;++j) {
+                uint a=hull[0],b=hull[j],c=hull[j+1u];vec3 captured,weights;
+                if(!scGeometryTriangleSupport(uv,card,coords[a],coords[b],coords[c],triangle,
+                    uvec3(triangle),vec3(depths[a],depths[b],depths[c]),hitPos,captured,weights)) continue;
+                uint source[3]=uint[3](a,b,c);vec3 candidate=vec3(0);bool finite=true;
+                for(uint k=0u;k<3u;++k) if(weights[k]>0.) {
+                    vec3 value=texelFetch(prev_lighting,coords[source[k]],0).rgb;
+                    finite=finite && !any(isnan(value)) && !any(isinf(value));candidate+=weights[k]*value;
+                }
+                if(!finite || any(isnan(candidate)) || any(isinf(candidate))) continue;
+                float error=length(captured-hitPos);
+                if(error<bestKey) {bestKey=error;radiance=candidate;cacheT=dot(captured-rayO,rayD);bestCard=ci;}
+            }
+            for(uint j=0u;j<vertices && vertices>1u;++j) {
+                uint a=hull[j],b=hull[(j+1u)%vertices];vec3 captured;float weight;
+                if(!scGeometrySegmentPair(card,coords[a],coords[b],triangle,uvec2(triangle),
+                    vec2(depths[a],depths[b]),hitPos,captured,weight)) continue;
+                vec3 candidate=vec3(0);bool finite=true;
+                if(weight<1.) {vec3 value=texelFetch(prev_lighting,coords[a],0).rgb;
+                    finite=finite && !any(isnan(value)) && !any(isinf(value));candidate+=(1.-weight)*value;}
+                if(weight>0.) {vec3 value=texelFetch(prev_lighting,coords[b],0).rgb;
+                    finite=finite && !any(isnan(value)) && !any(isinf(value));candidate+=weight*value;}
+                if(!finite || any(isnan(candidate)) || any(isinf(candidate))) continue;
+                float error=length(captured-hitPos);
+                if(error<bestKey) {bestKey=error;radiance=candidate;cacheT=dot(captured-rayO,rayD);bestCard=ci;}
+            }
+        }
+    }
+#endif
+#ifdef SC_BOUNDARY_CONSUMER
+    // All existing selections stay immutable. The host enables bit 1024 only
+    // after current-frame auxiliary compose has completed in this command buffer.
+    if(bestCard==0xffffffffu && !ptOn && (irp.params.ray_lookup&1024u)!=0u && scBoundaryWords.length()>1){
+        uint epoch=scBoundaryWords[1];
+        for(uint ci=cardBegin;ci<cardEnd;++ci){
+            SurfaceCacheCard card=cards.data[ci];vec2 uv;
+            if(card.mesh_instance_id!=owner || card.resolution==0u ||
+               !worldToCardUVMarginPad(hitPos,card,uv,0.,0.) || dot(scCardFaceNormal(card),-rayD)>=0.)continue;
+            vec3 value,witness,weights;uvec3 sources;
+            if(!scBoundaryRadianceLookup(ci,triangle,epoch,irp.params.frame_index,hitPos,value,witness,sources,weights))continue;
+            float error=length(witness-hitPos);
+            if(error<bestKey){bestKey=error;radiance=value;cacheT=dot(witness-rayO,rayD);bestCard=ci;}
+        }
+    }
+#endif
+    return bestCard!=0xffffffffu;
+}
+
+#ifndef SC_BOUNDARY_RADIOSITY_PROOF
 void surface_cache_indirect_resolve()
 {
     uint probe_x = gl_GlobalInvocationID.x;
@@ -151,7 +494,12 @@ void surface_cache_indirect_resolve()
                            (probe_idx % irp.params.refresh_stride) == irp.params.refresh_phase;
     const uint tvWord = probe_idx >> 5u;
     const uint tvBit = 1u << (probe_idx & 31u);
-    const bool tileWasValid = (tile_valid.data[tvWord] & tvBit) != 0u;
+    // One uint is shared by 32 tile invocations.  Plain read/modify/write
+    // loses bits when several freshly traced tiles publish validity in the
+    // same dispatch; use atomics for both the observation and publication so
+    // the carry decision never races a sibling invocation's update.
+    const uint validityWord = atomicOr(tile_valid.data[tvWord], 0u);
+    const bool tileWasValid = (validityWord & tvBit) != 0u;
 
     // C (plan §三.C): the tile receiver normal — regeneration seed for the
     // per-ray direction (must match the trace's generation exactly; the
@@ -162,13 +510,15 @@ void surface_cache_indirect_resolve()
 
     vec3 tileRayDir = vec3(0.0, -1.0, 0.0);   // C: regenerated per ray below
     vec3 indirect = vec3(0.0);
-    float total_weight = 0.0;
+    uint currentRayCount = 0u;
+    uint measurementCount = 0u;
 
     if (refreshed) {
     for (uint r = 0u; r < rays; ++r) {
         uint hit_idx = probe_idx * rays + r;
         vec3 hit_pos = ray_hits.data[hit_idx].hit_position_dist.xyz;
-        uint hit_type = ray_hits.data[hit_idx].hit_type_pad.x;
+        uint hit_identity = ray_hits.data[hit_idx].hit_type_pad.x;
+        uint hit_type = hit_identity & 7u;
         vec3 radiance = vec3(0.0);
 
         // D (plan §三.D): hit_type 3 = cone-occluded — the min-mip test only
@@ -179,12 +529,12 @@ void surface_cache_indirect_resolve()
         // position (the old code stitched one from a mismatched origin).
         // hit_type ≥ 4 is the INVALID sentinel (unwritten/garbage slot):
         // skipped entirely so a partially-written tile synthesises nothing.
+        if (hit_type >= 4u) continue;
+        ++currentRayCount;
         if (hit_type == 3u) {
-            indirect += vec3(0.0);
-            total_weight += 1.0;
+            ++measurementCount;  // proven occluder = valid zero-radiance sample
             continue;
         }
-        if (hit_type >= 4u) continue;
 
         // 2026-09-10 C3.5 slice 1: near AND far hits both resolve through the
         // atlas — the card lookup is position-based and works at any distance.
@@ -195,20 +545,92 @@ void surface_cache_indirect_resolve()
         // check at all. Valid black is accepted; an exhausted search skips
         // the ray (WRC 计划 Stream B3：0.02 灰占位符删除——查询失败 =
         // 无测量，不再向反馈回路伪造微弱亮度)。
+        // Regenerate this ray's direction exactly as the trace does
+        // (same hash sequence, same tangent frame) — the orientation
+        // test needs the direction the hit ARRIVED from, and [K-1]
+        // needs it to evaluate the directional sky on hit_type == 2.
+        // [K-1 2026-09-21] hoisted from the hit branch: sky rays need
+        // the true direction too (they previously reused the stale
+        // seed value — harmless while the sky color was a constant,
+        // wrong once the sky became directional).
+        {
+            vec2 xi = scTileRayXi(probe_idx, r, irp.params.frame_index);
+            float r1 = xi.x;
+            float r2 = xi.y * 2.0 * 3.14159265;
+            float sin_t = sqrt(r1);
+            float cos_t = sqrt(1.0 - r1);
+            vec3 local_dir = vec3(cos_t * cos(r2), cos_t * sin(r2), sin_t);
+            vec3 up = abs(probe_normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+            vec3 tangent = normalize(cross(up, probe_normal));
+            vec3 bitangent = cross(probe_normal, tangent);
+            tileRayDir = normalize(tangent * local_dir.x + bitangent * local_dir.y + probe_normal * local_dir.z);
+        }
+        // Read-only audit: query the SAME trace ray, including sky. Each sampled
+        // hit index owns a unique slot; the frame stamp distinguishes refreshes.
+        if ((irp.params.ray_lookup & 2u) != 0u && hit_idx % 37u == 0u && hit_idx / 37u < 16384u) {
+            vec3 origin = uintBitsToFloat(ray_hits.data[hit_idx].hit_type_pad.yzw);
+            float bestT; vec2 bestUV; uint rejects, bestCard;
+            bool found = findRaySurface(origin, tileRayDir, bestT, bestUV, rejects, bestCard);
+            if((irp.params.ray_lookup&8u)!=0u) {
+                vec3 cacheRadiance; rejects=0u;
+                found=(hit_type==0u || hit_type==1u) && (hit_identity>>3u)!=0u &&
+                    findGeometryCache(hit_pos,origin,tileRayDir,(hit_identity>>3u)-1u,rayTriangle(hit_idx),cacheRadiance,bestT,bestCard,rejects);
+            }
+            uint at = 16u + (hit_idx / 37u) * 16u;
+            ray_stats.data[at+0u]=floatBitsToUint(origin.x); ray_stats.data[at+1u]=floatBitsToUint(origin.y); ray_stats.data[at+2u]=floatBitsToUint(origin.z);
+            ray_stats.data[at+3u]=floatBitsToUint(0.05);
+            ray_stats.data[at+4u]=floatBitsToUint(tileRayDir.x); ray_stats.data[at+5u]=floatBitsToUint(tileRayDir.y); ray_stats.data[at+6u]=floatBitsToUint(tileRayDir.z);
+            ray_stats.data[at+7u]=floatBitsToUint(irp.params.ray_max_distance);
+            ray_stats.data[at+8u]=floatBitsToUint(ray_hits.data[hit_idx].hit_position_dist.w);
+            ray_stats.data[at+9u]=floatBitsToUint(found ? bestT : -1.);
+            ray_stats.data[at+10u]=hit_idx; ray_stats.data[at+11u]=hit_type;
+            ray_stats.data[at+12u]=irp.params.frame_index+1u; ray_stats.data[at+13u]=found?1u:0u;
+            ray_stats.data[at+14u]=rejects; ray_stats.data[at+15u]=bestCard;
+        }
         if (hit_type == 0u || hit_type == 1u) {
-            // Regenerate this ray's direction exactly as the trace does
-            // (same hash sequence, same tangent frame) — the orientation
-            // test needs the direction the hit ARRIVED from.
-            {
-                float r1 = hash(vec2(float(probe_idx * rays + r), float(irp.params.frame_index)));
-                float r2 = hash(vec2(float(irp.params.frame_index), float(probe_idx * rays + r))) * 2.0 * 3.14159265;
-                float sin_t = sqrt(r1);
-                float cos_t = sqrt(1.0 - r1);
-                vec3 local_dir = vec3(cos_t * cos(r2), cos_t * sin(r2), sin_t);
-                vec3 up = abs(probe_normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-                vec3 tangent = normalize(cross(up, probe_normal));
-                vec3 bitangent = cross(probe_normal, tangent);
-                tileRayDir = normalize(tangent * local_dir.x + bitangent * local_dir.y + probe_normal * local_dir.z);
+            if ((irp.params.ray_lookup & 8u)!=0u) {
+                if((hit_identity>>3u)==0u) continue;
+                vec3 origin=uintBitsToFloat(ray_hits.data[hit_idx].hit_type_pad.yzw);
+                float cacheT; uint bestCard, rejectMask;
+                if(!findGeometryCache(hit_pos,origin,tileRayDir,(hit_identity>>3u)-1u,rayTriangle(hit_idx),radiance,cacheT,bestCard,rejectMask)) continue;
+                indirect+=radiance; ++measurementCount; continue;
+            }
+            // ============================================================
+            // [SC per-mesh 计划 P4]（PRIMAL_SC_RAY_LOOKUP=1）：射线最近有效
+            // 表面 lookup——bbox broad phase（§6.1）→ 卡级 t_surface 校验
+            // （§6.3-6.5）→ 完整射线范围内最小有效正向 t；Δ 相对 SDF
+            // 分类进统计，避免用 SDF 窗口预先限制 Δ。
+            // ============================================================
+            if ((irp.params.ray_lookup & 1u) != 0u) {
+                const float band = max(irp.params.hit_band, 0.15);
+                const float sdfDist = ray_hits.data[hit_idx].hit_position_dist.w;
+                const vec3 rayO = hit_pos - tileRayDir * sdfDist;
+                float bestT; vec2 bestUV; uint rejectHist, bestCard;
+                bool found = findRaySurface(rayO, tileRayDir, bestT, bestUV, rejectHist, bestCard);
+                // 分类统计（原子累加；缓冲常驻绑定）
+                atomicAdd(ray_stats.data[0u], 1u);
+                if (rejectHist != 0u) {
+                    for (uint b = 0u; b < 8u; ++b)
+                        if ((rejectHist & (1u << (b + 4u))) != 0u) atomicAdd(ray_stats.data[b + 6u], 1u);
+                }
+                if (found) {
+                    const float delta = abs(bestT - sdfDist);
+                    if (delta <= 0.05) atomicAdd(ray_stats.data[2u], 1u);
+                    else if (delta <= 0.15) atomicAdd(ray_stats.data[3u], 1u);
+                    else if (delta <= 0.45) atomicAdd(ray_stats.data[4u], 1u);
+                    else atomicAdd(ray_stats.data[5u], 1u);
+                    atomicAdd(ray_stats.data[1u], 1u);
+                    uvec2 texel = uvec2(clamp(bestUV, vec2(0.0),
+                        vec2(irp.params.sc_params.atlas_size - 1u)));
+                    vec3 cand = texelFetch(prev_lighting, ivec2(texel), 0).rgb;
+                    if (any(isnan(cand)) || any(isinf(cand))) continue;
+                    radiance = cand;
+                    ++measurementCount;
+                    indirect += cand;
+                    continue;
+                }
+                // 无有效匹配（§6.7）：明确无测量——跳过该射线，不伪造亮度。
+                continue;
             }
             bool found = false;
             float bestKey = 1e30;
@@ -238,24 +660,41 @@ void surface_cache_indirect_resolve()
             }
             if (!found) continue;
         } else {
-            // Sky — same tier as DDGITraceFinalize's escape
-            // (DDGI_SKY_COLOR × SkyColor.x with the 0.4 default intensity).
-            radiance = vec3(2.75, 2.88, 3.00) * 0.4;
+            // Sky — [F0 2026-09-20 能量不对称修复 A1] 天空单一事实源收口：
+            // 档位经 irp.params.tile_sky_color 由 GIDebug().sky_color_intensity
+            // 驱动（与 DDGI/SPGI/WRC 探针路径同旋钮）。旧硬编码
+            // vec3(2.75,2.88,3.00)*0.4 删除——其引用的 DDGI_SKY_COLOR 常量
+            // 已在根治 Phase 1.2 删除（化石注释）。
+            // [K-1 2026-09-21 E0-K] 基色收口到 EvaluateSkyBase（探针天空同一
+            // 函数）：cpu 填 (tier,tier,tier,1)，shader 逐射线方向求值——
+            // tile 反弹天空源与探针天空的 ~2× 残差（[能量-排查] §3.3）由此
+            // 消除，且上仰射线按解析天空变亮（方向性）。w=0（env override）
+            // 回退常量基色路径。
+            if (irp.params.tile_sky_color.w > 0.5) {
+                radiance = EvaluateSkyBase(tileRayDir) * irp.params.tile_sky_color.xyz;
+            } else {
+                radiance = irp.params.tile_sky_color.rgb;
+            }
         }
 
         indirect += radiance;
-        total_weight += 1.0;
+        ++measurementCount;
     }
     }
 
-    if (total_weight > 0.0) indirect /= total_weight;
+    // Fixed-budget estimator: failed SC queries contribute zero instead of
+    // shrinking the denominator and amplifying a few bright hits. A partially
+    // published trace is unavailable data, so carry valid history instead.
+    const uint minMeasurements = min(rays, 4u);
+    const bool currentEstimateValid = refreshed && currentRayCount == rays &&
+                                      measurementCount >= minMeasurements;
+    if (currentEstimateValid) indirect /= float(max(rays, 1u));
+    else indirect = vec3(0.0);
 
     // B: this tile's ray_hits were consumed while CURRENT — from now on its
     // history is legitimate carry data. Non-refreshed tiles keep whatever
     // validity they had (their hits were not touched).
-    if (refreshed && (tile_valid.data[tvWord] & tvBit) == 0u) {
-        tile_valid.data[tvWord] |= tvBit;
-    }
+    if (currentEstimateValid) atomicOr(tile_valid.data[tvWord], tvBit);
 
     // T3.3: temporal accumulation — the trace ray directions are frame-hashed
     // (blue-noise-ish), so per-frame tile estimates carry visible variance.
@@ -264,6 +703,19 @@ void surface_cache_indirect_resolve()
     // (frame_index < 2) write directly — no history exists yet.
     const float tw = clamp(irp.params.temporal_weight, 0.0, 0.95);
     const bool hasHistory = irp.params.frame_index >= 2u;
+
+    // [稳定性 2026-09-21] tile 增长率钳制：SC↔tile↔prev 回路局部增益>1 的
+    // 区域（封闭龛）指数泵浦 → 全局坍黑（实测 SC_INDIRECT=0 时 6/6 稳定，
+    // 默认 ~20% 坍黑率；坍黑态逐位可复现=确定性第二稳态）。每帧 tile 新增
+    // 幅度上限 cap×prev + ε——回路增益上界化；灯光跳变仍在数帧内跟上
+    //（env PRIMAL_SC_TILE_GROWTH_CAP，0=关）。
+    if (irp.params.tile_growth_cap > 0.0 && currentEstimateValid && tileWasValid && hasHistory) {
+        vec3 prevCap = texelFetch(prev_tile_grid, ivec2(probe_x, probe_y), 0).rgb;
+        if (all(greaterThanEqual(prevCap, vec3(0.0)))) {
+            vec3 cap = prevCap * irp.params.tile_growth_cap + vec3(0.02);
+            indirect = min(indirect, prevCap + cap);
+        }
+    }
 
     if (irp.params.recon_enabled != 0u) {
         // A (plan §三.A): TILE-DOMAIN output — store the INCIDENT estimate
@@ -274,7 +726,7 @@ void surface_cache_indirect_resolve()
         // owns the full-atlas indirect_out from here on.
         vec3 tileValue = indirect;
         float tileValid;
-        if (!refreshed) {
+        if (!currentEstimateValid) {
             tileValid = (tileWasValid && hasHistory) ? 1.0 : 0.0;
             vec3 prev = (tileWasValid && hasHistory)
                 ? texelFetch(prev_tile_grid, ivec2(probe_x, probe_y), 0).rgb : vec3(0.0);
@@ -284,9 +736,9 @@ void surface_cache_indirect_resolve()
             tileValue = mix(indirect, prev, tw);
             // WRC 计划 Stream B3: 本帧刷新但零有效测量（全部射线被跳过）→
             // A=0 显式无效——"valid black"会伪装成一次"无间接"测量。
-            tileValid = total_weight > 0.0 ? 1.0 : 0.0;
+            tileValid = 1.0;
         } else {
-            tileValid = total_weight > 0.0 ? 1.0 : 0.0;
+            tileValid = 1.0;
         }
         imageStore(tile_grid, ivec2(probe_x, probe_y), vec4(tileValue, tileValid));
 
@@ -325,7 +777,7 @@ void surface_cache_indirect_resolve()
             // albedo product); a cleared bit means never-traced/post-reset —
             // explicit zeros with validity A=0 so LightEval skips the term
             // instead of reading stale or uninitialized slots as black light.
-            if (!refreshed) {
+            if (!currentEstimateValid) {
                 if (tileWasValid && hasHistory) {
                     vec3 prev = texelFetch(prev_indirect_out, ivec2(texel), 0).rgb;
                     imageStore(indirect_out, ivec2(texel), vec4(prev, 1.0));
@@ -343,7 +795,53 @@ void surface_cache_indirect_resolve()
             }
             // WRC 计划 Stream B3: 零有效测量 → A=0 显式无效（同 recon 路径）。
             imageStore(indirect_out, ivec2(texel),
-                       vec4(current, total_weight > 0.0 ? 1.0 : 0.0));
+                       vec4(current, 1.0));
         }
     }
 }
+#else
+#include "BoundaryLightingData.glsl"
+struct SCBoundaryRadiosity {vec4 incident;vec4 outgoing;uvec4 counts;uvec4 identity;};
+layout(set=0,binding=21,std430) readonly buffer BoundaryPoints {SCBoundaryLightPoint boundaryPoints[];};
+layout(set=0,binding=22,std430) writeonly buffer BoundaryRadiosity {SCBoundaryRadiosity boundaryRadiosity[];};
+layout(set=0,binding=23,std430) writeonly buffer BoundaryContributions {vec4 boundaryContributions[];};
+void surface_cache_indirect_resolve(){
+    uint pidx=gl_GlobalInvocationID.x;
+    if(pidx>=uint(boundaryPoints.length()) || pidx>=uint(boundaryRadiosity.length()) || irp.params.rays_per_probe!=32u)return;
+    SCBoundaryLightPoint point=boundaryPoints[pidx];SCBoundaryRadiosity outputValue;
+    outputValue.incident=vec4(0);outputValue.outgoing=vec4(0);outputValue.counts=uvec4(0);outputValue.identity=point.identity;
+    boundaryRadiosity[pidx]=outputValue;
+    uint rays=32u;
+    if((pidx+1u)*rays>uint(ray_hits.data.length()) || (pidx+1u)*rays>uint(rayTriangles.data.length()) ||
+       (pidx+1u)*rays>uint(boundaryContributions.length()))return;
+    for(uint r=0u;r<rays;++r)boundaryContributions[pidx*rays+r]=vec4(0);
+    if(point.identity.w!=irp.params.frame_index || point.normal.w!=1.0 || !scBoundaryLightFinite(point.normal.xyz) ||
+       !scBoundaryLightFinite(point.albedo.xyz))return;
+    vec3 sum=vec3(0),normal=point.normal.xyz;
+    for(uint r=0u;r<rays;++r){uint at=pidx*rays+r;uint identity=ray_hits.data[at].hit_type_pad.x,type=identity&7u;
+        if(type>=4u)continue;++outputValue.counts.x;
+        vec2 xi=scTileRayXi(pidx,r,irp.params.frame_index);float angle=xi.y*2.0*3.14159265;
+        vec3 local=vec3(sqrt(1.0-xi.x)*cos(angle),sqrt(1.0-xi.x)*sin(angle),sqrt(xi.x));
+        vec3 up=abs(normal.y)<.999?vec3(0,1,0):vec3(1,0,0);vec3 tangent=normalize(cross(up,normal));
+        vec3 direction=normalize(tangent*local.x+cross(normal,tangent)*local.y+normal*local.z),radiance=vec3(0);
+        bool measured=false;
+        if(type==2u){radiance=irp.params.tile_sky_color.w>.5?
+            EvaluateSkyBase(direction)*irp.params.tile_sky_color.xyz:irp.params.tile_sky_color.xyz;
+            measured=true;++outputValue.counts.z;
+        }else if((identity>>3u)!=0u){float cacheT;uint card,rejected;
+            vec3 origin=uintBitsToFloat(ray_hits.data[at].hit_type_pad.yzw);
+            measured=findGeometryCache(ray_hits.data[at].hit_position_dist.xyz,origin,direction,(identity>>3u)-1u,
+                rayTriangles.data[at],radiance,cacheT,card,rejected);
+            if(measured)++outputValue.counts.w;
+        }
+        if(measured && scBoundaryLightFinite(radiance) && all(greaterThanEqual(radiance,vec3(0)))){
+            sum+=radiance;++outputValue.counts.y;boundaryContributions[at]=vec4(radiance,1);
+        }
+    }
+    // Same fixed-denominator validity contract as the primary tile estimator.
+    bool valid=outputValue.counts.x==rays && outputValue.counts.y>=4u && scBoundaryLightFinite(sum);
+    vec3 incident=valid?sum/float(rays):vec3(0);
+    outputValue.incident=vec4(incident,valid?1:0);outputValue.outgoing=vec4(incident*point.albedo.xyz,valid?1:0);
+    boundaryRadiosity[pidx]=outputValue;
+}
+#endif

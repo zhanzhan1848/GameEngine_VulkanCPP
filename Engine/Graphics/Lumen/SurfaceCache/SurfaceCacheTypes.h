@@ -28,6 +28,7 @@ struct SurfaceCacheCardLookup {
     uint32_t  _pad[2];
 };
 static_assert(sizeof(SurfaceCacheCardLookup) == 48, "SurfaceCacheCardLookup must be 48 bytes");
+static_assert(offsetof(SurfaceCacheCardLookup, _pad) == 40, "GPU owner-directory sideband offset");
 
 struct SurfaceCacheParams {
     uint32_t  atlas_size;
@@ -92,8 +93,27 @@ struct IndirectResolveParamsGPU {
     // [WRC 计划 Stream D2]（PRIMAL_SC_PAGE_TABLE=1）: 过表寻址开关——
     // resolve 查询契约经 card_page_table 解析卡片 atlas 原点。
     uint32_t page_table_enabled;
+    // [F0 2026-09-20 能量不对称修复 A1] SC tile 天空档接线——天空单一事实源
+    // 收口：tile 反弹源改由 GIDebug().sky_color_intensity × 基色梯度
+    // (2.75,2.88,3.00) 驱动（与 DDGI/SPGI/WRC 探针路径同一旋钮）。
+    // [K-1 2026-09-21] rgb 改传档位 (tier,tier,tier)，w=1 方向化使能
+    // （shader 侧 EvaluateSkyBase(rayDir)）；override 时 rgb=常量基色，w=0。
+    // 回滚：PRIMAL_SC_TILE_SKY_OVERRIDE="1.1,1.152,1.2"
+    //（= 旧硬编码 vec3(2.75,2.88,3.00)*0.4）。Offset 96（92→pad 16 对齐）。
+    math::v4 tile_sky_color;        // xyz = sky radiance/tier, w = 方向化使能
+    // [稳定性 2026-09-21] tile 增长率钳制：SC↔tile↔prev 回路局部增益>1 的
+    // 区域（封闭龛）指数泵浦 → 全局坍黑（实测 SC_INDIRECT=0 时 6/6 稳定，
+    // 默认 ~20% 坍黑率）。每帧 tile 新增幅度上限 cap×prev + ε——回路增益
+    // 上界化， legitimate 增长仍可在数帧内跟上。PRIMAL_SC_TILE_GROWTH_CAP
+    // （默认 0.5；0 = 关）。Offset 112（std140 块 128）。
+    float    tile_growth_cap;
+    // [SC per-mesh 计划 P4]（PRIMAL_SC_RAY_LOOKUP=1）：射线最近有效表面
+    // lookup 开关（resolve shader IndirectResolveParams.ray_lookup 同位）。
+    uint32_t ray_lookup;
+    float    ray_max_distance;
+    float    _pad;
 };
-static_assert(sizeof(IndirectResolveParamsGPU) == 92, "std140 layout drift");
+static_assert(sizeof(IndirectResolveParamsGPU) == 128, "std140 layout drift");
 
 // Per-card dispatch info for flattened texel dispatch.
 // CPU builds prefix-sum array, GPU binary-searches to map thread_id → card → atlas UV.
@@ -221,8 +241,29 @@ static_assert(sizeof(SurfaceCacheCardGridHeader) == 64, "Header must stay 16 u32
 
 constexpr uint32_t kMaxCardsPerGridCell = 8;   // build-side cap; shaders mirror this
 
+// ============================================================================
+// [SC per-mesh 计划 P2] 静态页合成信息——离线 SCS1 页 → SC atlas 一次性合成
+// 的 per-card 参数。与 SurfaceCacheStaticComposite.comp 逐字节镜像（144 B =
+// 9×vec4）。合成后静态卡跳过 capture/CardFill（§3.2 外来写入生产约束）。
+// ============================================================================
+struct StaticCompositeInfo {
+    uint32_t meta0[4];   // atlas_offset_x, atlas_offset_y, card_res, page_res
+    uint32_t meta1[4];   // texel_offset, (count slot: 首条=static_count), world_axis_dir, local_axis_dir
+    uint32_t meta2[4];   // pool_albedo_word, pool_normal_word, pool_depth_word, pool_triangle_word
+    float    center_w[4];   // xyz 世界卡中心
+    float    mcol0[4];      // 世界矩阵线性列 0
+    float    mcol1[4];
+    float    mcol2[4];
+    float    local0[4];     // xyz emissive RGB, w = local extent.x
+    float    local1[4];     // xy = local extent.yz, zw reserved
+};
+static_assert(sizeof(StaticCompositeInfo) == 144, "StaticCompositeInfo must mirror the composite shader (9 x vec4 = 144 B)");
+
 struct SurfaceCacheOutput {
     rendergraph::RGResourceHandle lighting_atlas;
+    // [E0-B 2026-09-21] nodirect 副本的 RG 身份（单身份跨 SC 写/SPGI 读，
+    // 对齐 lighting_atlas 的 T1.1 C2 别名治理）。可缺省。
+    rendergraph::RGResourceHandle lighting_nodirect_atlas;
 };
 
 } // namespace

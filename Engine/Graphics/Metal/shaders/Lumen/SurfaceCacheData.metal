@@ -4,17 +4,38 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Mirror of SurfaceCacheData.glsl::scTileRayXi. The float/sin hash collapses
+// high atlas tile indices to identical directions on 32-bit shader floats.
+inline uint scTileHash32(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+inline float2 scTileRayXi(uint tileIndex, uint rayIndex, uint frameIndex) {
+    uint seed = tileIndex * 0x9e3779b9u ^ rayIndex * 0x85ebca6bu ^
+                frameIndex * 0xc2b2ae35u;
+    return float2(float(scTileHash32(seed ^ 0x68bc21ebu) >> 8u),
+                  float(scTileHash32(seed ^ 0x02e5be93u) >> 8u)) *
+           (1.0f / 16777216.0f);
+}
+
 // Uses float4 for 16-byte alignment (matches DDGIVolumeData pattern)
 struct SurfaceCacheCard {
-    float4   center;         // xyz = center, w unused
-    float4   extent;         // xyz = half-extents, w unused
-    uint     axis_direction; // low byte = axis, high byte = direction
-    uint16_t resolution;
-    uint16_t _pad0;
-    uint     atlas_offset_x;
-    uint     atlas_offset_y;
-    uint     mesh_instance_id;
-    uint     _pad1[3];
+    float4 center;          // xyz = center, w unused
+    float4 extent;          // xyz = half-extents, w unused
+    uint axis_direction;    // low byte = axis, high byte = direction
+    uint resolution;
+    uint atlas_offset_x;
+    uint atlas_offset_y;
+    uint mesh_instance_id;
+    // [SC per-mesh 计划 P2] 静态页身份（与 C++/GLSL 镜像同位）：
+    uint static_mesh_slot;  // SurfaceStaticPages 槽位；0xFFFFFFFF = 非静态
+    uint flags;             // bit0 = static（表面来自离线 owner 页）
+    uint page_card;         // 页在 mesh bake.cards 内的序号
 };
 
 struct SurfaceCacheCardLookup {

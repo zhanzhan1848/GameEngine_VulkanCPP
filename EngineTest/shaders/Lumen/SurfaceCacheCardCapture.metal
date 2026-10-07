@@ -125,7 +125,9 @@ fragment FragmentOut cardCaptureFS(
     float3 albedoColor = albedo.rgb * float3(mat.albedo_tint[0], mat.albedo_tint[1], mat.albedo_tint[2]);
 
     FragmentOut out;
-    out.albedo = float4(albedoColor, albedo.a);
+    // This legacy capture path has no MaterialData flags; preserve validity
+    // while explicitly encoding opaque transport.
+    out.albedo = float4(albedoColor, 128.0f / 255.0f);
     out.normal = float4(octEncode(in.world_normal), 0.0, 1.0);
     out.depth = float4(in.local_depth, 0.0, 0.0, 1.0);
     out.emissive = float4(0.0, 0.0, 0.0, 1.0);

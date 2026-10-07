@@ -147,6 +147,7 @@ bool surfaceCacheScatter(vec3 worldPos, vec3 albedo, vec2 encN, bool writePhase)
     uint end   = scgo.sc_grid_offsets[17u + cell];
     for (uint gi = begin; gi < end; ++gi) {
         SurfaceCacheCard card = cb.cards[scgc.sc_grid_cards[gi]];
+        if ((card.flags & 1u) != 0u) continue; // owner pages are immutable
         vec2 atlasUV;
         float axisDepth;
         if (projectToCard(worldPos, card, atlasUV, axisDepth)) {
@@ -156,7 +157,10 @@ bool surfaceCacheScatter(vec3 worldPos, vec3 albedo, vec2 encN, bool writePhase)
                 atomicMin(cdm.capture_depth_min[texelIdx],
                           floatBitsToUint(axisDepth));
             } else if (cdm.capture_depth_min[texelIdx] == floatBitsToUint(axisDepth)) {
-                imageStore(albedo_atlas, texel, vec4(albedo, 1.0));
+                // Legacy capture has no material transport words: mark the
+                // texel opaque-valid (bit7) rather than alpha=255, which the
+                // packed contract would decode as max transmission/thickness.
+                imageStore(albedo_atlas, texel, vec4(albedo, 128.0 / 255.0));
                 imageStore(normal_atlas, texel, vec4(encN, 0.0, 1.0));
                 imageStore(depth_atlas,  texel, vec4(axisDepth, 0.0, 0.0, 1.0));
                 // T4.4: emissive atlas 与 albedo 同步散射。

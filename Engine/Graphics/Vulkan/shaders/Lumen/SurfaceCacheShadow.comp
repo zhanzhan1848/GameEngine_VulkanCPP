@@ -177,54 +177,13 @@ float scShadowMapVisibility(vec3 world, vec3 normal, float footprint) {
     return -1.0;   // 全级联越界 → 调用方走 SDF march 回退
 }
 
-void surface_cache_shadow()
+float scEvaluateShadowPoint(vec3 world,vec3 normal,float footprint)
 {
-    uint global_tid = gl_GlobalInvocationID.x;
-    if (global_tid >= uint(sp.counts.x)) return;
-
-    // Same binary search as LightEval: thread → card → atlas texel.
-    uint lo = 0u;
-    uint hi = uint(sp.counts.y);
-    while (lo < hi) {
-        uint mid = (lo + hi) >> 1;
-        if (card_dispatch.data[mid].texel_offset + card_dispatch.data[mid].texel_count <= global_tid)
-            lo = mid + 1u;
-        else
-            hi = mid;
-    }
-    if (lo >= uint(sp.counts.y)) return;
-
-    uint local_texel = global_tid - card_dispatch.data[lo].texel_offset;
-    uint res = card_dispatch.data[lo].resolution;
-    uint local_x = local_texel % res;
-    uint local_y = local_texel / res;
-    uvec2 atlas_uv = uvec2(
-        card_dispatch.data[lo].atlas_offset_x + local_x,
-        card_dispatch.data[lo].atlas_offset_y + local_y);
-    uint card_idx = card_dispatch.data[lo].card_index;
-
-    uint atlas_size = uint(sp.shadow_params.z);
-    uint vis_index = atlas_uv.x + atlas_size * atlas_uv.y;
-
-    float depth = imageLoad(depth_atlas, ivec2(atlas_uv)).r;
-    if (depth <= 0.0) {
-        vis.visibility[vis_index] = 1.0;   // never captured — stay lit
-        return;
-    }
-
-    vec2 enc_n = imageLoad(normal_atlas, ivec2(atlas_uv)).rg;
-    vec3 normal = octDecode(enc_n);
-
-    vec3 world = cardTexelToWorld(atlas_uv, depth, cards.data[card_idx]);
-    float texelRes = float(max(cards.data[card_idx].resolution, 1u));
-    float footprint = length(cards.data[card_idx].extent.xyz) / texelRes;
-
     // G2: PCSS 深度优先——与表面直射同一份阴影；越界/无输入走 SDF march
     if (sp.shadow_meta.x > 0.5) {
         float v = scShadowMapVisibility(world, normal, footprint);
         if (v >= 0.0) {
-            vis.visibility[vis_index] = v;
-            return;
+            return v;
         }
     }
 
@@ -256,5 +215,70 @@ void surface_cache_shadow()
         if (t >= maxDist) break;
     }
 
-    vis.visibility[vis_index] = shadow;
+    return shadow;
 }
+
+#ifdef SC_BOUNDARY_LIGHT_PROOF
+#include "BoundaryLightingData.glsl"
+layout(set=0,binding=13,std430) readonly buffer BoundaryPoints { SCBoundaryLightPoint boundaryPoints[]; };
+void surface_cache_shadow() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=uint(boundaryPoints.length()) || i>=uint(vis.visibility.length()))return;
+    SCBoundaryLightPoint p=boundaryPoints[i];
+    if(!scBoundaryLightFinite(p.worldFootprint.xyz) || !scBoundaryLightFinite(p.normal.xyz) || p.normal.w!=1.0 ||
+        p.worldFootprint.w<=0.0 || isnan(p.worldFootprint.w) || isinf(p.worldFootprint.w)) {vis.visibility[i]=-1.0;return;}
+    float value=scEvaluateShadowPoint(p.worldFootprint.xyz,p.normal.xyz,p.worldFootprint.w);
+    vis.visibility[i]=isnan(value)||isinf(value)||value<0.0||value>1.0?-1.0:value;
+}
+#else
+void surface_cache_shadow()
+{
+    uint global_tid = gl_GlobalInvocationID.x;
+    if (global_tid >= uint(sp.counts.x)) return;
+
+    // Same binary search as LightEval: thread → card → atlas texel.
+    uint lo = 0u;
+    uint hi = uint(sp.counts.y);
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        if (card_dispatch.data[mid].texel_offset + card_dispatch.data[mid].texel_count <= global_tid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo >= uint(sp.counts.y)) return;
+
+    uint local_texel = global_tid - card_dispatch.data[lo].texel_offset;
+    uint res = card_dispatch.data[lo].resolution;
+    uint local_x = local_texel % res;
+    uint local_y = local_texel / res;
+    uvec2 atlas_uv = uvec2(
+        card_dispatch.data[lo].atlas_offset_x + local_x,
+        card_dispatch.data[lo].atlas_offset_y + local_y);
+    uint card_idx = card_dispatch.data[lo].card_index;
+
+    uint atlas_size = uint(sp.shadow_params.z);
+    uint vis_index = atlas_uv.x + atlas_size * atlas_uv.y;
+
+    float depth = imageLoad(depth_atlas, ivec2(atlas_uv)).r;
+#if defined(SC_SHADOW_VALID_ZERO) && SC_SHADOW_VALID_ZERO
+    // AtlasInit marks uncaptured texels with -1; CardFill may write a valid
+    // surface at exactly zero. Trace those surfaces instead of forcing sun.
+    if (depth < 0.0) {
+#else
+    if (depth <= 0.0) {
+#endif
+        vis.visibility[vis_index] = 1.0;
+        return;
+    }
+
+    vec2 enc_n = imageLoad(normal_atlas, ivec2(atlas_uv)).rg;
+    vec3 normal = octDecode(enc_n);
+
+    vec3 world = cardTexelToWorld(atlas_uv, depth, cards.data[card_idx]);
+    float texelRes = float(max(cards.data[card_idx].resolution, 1u));
+    float footprint = length(cards.data[card_idx].extent.xyz) / texelRes;
+
+    vis.visibility[vis_index] = scEvaluateShadowPoint(world,normal,footprint);
+}
+#endif

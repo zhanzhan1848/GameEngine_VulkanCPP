@@ -1,0 +1,131 @@
+#version 450 core
+// Vulkan Lumen Surface Cache Indirect Reconstruct — GLSL (entry:
+// surface_cache_indirect_reconstruct). Plan §三.A slice 1.
+//
+// The tile radiosity solve is piecewise-CONSTANT per tile: resolve splats one
+// tile-center estimate across the tile footprint, so same-plane same-material
+// surfaces show a staircase at every tile boundary. This pass replaces that
+// splat with a CONTINUOUS reconstruction on the tile-center lattice:
+//
+//   1. resolve stores per-tile INCIDENT radiance (the cosine-weighted ray
+//      average — NOT albedo-weighted; separation of incident light and
+//      material response, plan §三.A) in tile_grid (rgb), validity in a.
+//   2. tile_aux carries each tile center's compat evidence: oct16 normal (rg),
+//      capture depth (b), owning card id (a, half — exact ≤2048).
+//   3. per atlas texel: bilinear reconstruction over the 4 surrounding tile
+//      centers. A tap only contributes when it passes the same-surface
+//      contract (plan: "邻居必须经过 Card 身份、捕获位置、几何法线/深度验证"):
+//      valid, SAME owning card as the texel's own tile, normal within ~45°,
+//      and capture depth within 2×hit_band (same card ⇒ same depth domain, so
+//      the depth compare is meaningful — cross-card depth is not).
+//      Weights renormalize over the passing taps; a fully-rejected texel (or
+//      invalid own tile) writes explicit zeros with A=0.
+//   4. the receiving texel's OWN albedo is applied HERE — downstream
+//      (LightEval) keeps reading outgoing radiance from indirect_out.
+//
+// PRIMAL_SC_TILE_RECON=0 (C++ side) keeps the legacy piecewise-constant
+// expansion for A/B; this pass is skipped and resolve expands the atlas.
+//
+// Bindings (flat):
+//   0 = UniformBuffer         IndirectResolveParams (tile_size, hit_band, ...)
+//   1 = StorageImage(rgba8)   albedo_atlas   (readonly)
+//   2 = texture2D(r32f)       depth_atlas    (readonly, texelFetch)
+//   3 = texture2D(rg16f)      normal_atlas   (readonly, texelFetch)
+//   4 = texture2D(rgba16f)    tile_grid      (readonly)
+//   5 = texture2D(rgba16f)    tile_aux       (readonly)
+//   6 = StorageImage(rgba16f) indirect_out   (writeonly)
+//
+// ThreadGroupSize: (8, 8, 1).
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+#include "SurfaceCacheData.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct IndirectResolveParams {
+    SurfaceCacheParams sc_params;
+    uint tile_size;
+    uint rays_per_probe;
+    float temporal_weight;
+    uint frame_index;
+    uint lookup_count;
+    uint refresh_stride;
+    uint refresh_phase;
+    float hit_band;
+    uint recon_enabled;
+};
+
+layout(set = 0, binding = 0, std140) uniform IndirectResolveParamsBlock {
+    IndirectResolveParams params;
+} irp;
+
+layout(set = 0, binding = 1, rgba8) readonly uniform image2D albedo_atlas;
+layout(set = 0, binding = 2) uniform texture2D depth_atlas;
+layout(set = 0, binding = 3) uniform texture2D normal_atlas;
+layout(set = 0, binding = 4) uniform texture2D tile_grid;
+layout(set = 0, binding = 5) uniform texture2D tile_aux;
+layout(set = 0, binding = 6, rgba16f) writeonly uniform image2D indirect_out;
+
+void surface_cache_indirect_reconstruct()
+{
+    uvec2 texel = gl_GlobalInvocationID.xy;
+    const uint A = irp.params.sc_params.atlas_size;
+    if (texel.x >= A || texel.y >= A) return;
+
+    const uint T = irp.params.tile_size;
+    const uint tilesX = A / T;
+
+    // Own surface evidence at this texel.
+    vec3 albedo = imageLoad(albedo_atlas, ivec2(texel)).rgb;
+    vec2 ownEnc = texelFetch(normal_atlas, ivec2(texel), 0).rg;
+    vec3 ownN = octDecode(ownEnc);
+
+    // Own tile (the tile CONTAINING this texel) — its compat evidence gates
+    // the whole reconstruction; without an own-tile card identity the taps
+    // cannot be trusted to describe the same surface.
+    uvec2 ownTile = texel / T;
+    vec4 ownAux = texelFetch(tile_aux, ivec2(ownTile), 0);
+    uint ownCard = uint(round(ownAux.a));
+
+    // Bilinear lattice over tile CENTERS: center of tile i sits at
+    // (i*T + T/2); this texel's position inside that lattice.
+    vec2 g = (vec2(texel) + 0.5) / float(T) - 0.5;
+    ivec2 i0 = ivec2(floor(g));
+    vec2 f = fract(g);
+
+    float wsum = 0.0;
+    vec3 incident = vec3(0.0);
+    for (int dy = 0; dy < 2; ++dy)
+    for (int dx = 0; dx < 2; ++dx) {
+        ivec2 ti = clamp(i0 + ivec2(dx, dy), ivec2(0), ivec2(tilesX - 1));
+        float w = (dx == 0 ? (1.0 - f.x) : f.x) * (dy == 0 ? (1.0 - f.y) : f.y);
+        if (w <= 0.0) continue;
+
+        vec4 grid = texelFetch(tile_grid, ti, 0);
+        if (grid.a <= 0.0) continue;                      // never-traced / invalid
+
+        vec4 aux = texelFetch(tile_aux, ti, 0);
+        uint card = uint(round(aux.a));
+        if (card != ownCard) continue;                    // Card 身份 (plan §三.A)
+
+        vec3 tapN = octDecode(aux.rg);
+        if (dot(tapN, ownN) < 0.7) continue;              // 几何法线
+
+        float tapDepth = aux.b;
+        float ownDepth = texelFetch(depth_atlas, ivec2(texel), 0).r;
+        float dDepth = abs(tapDepth - ownDepth);
+        if (dDepth > 2.0 * max(irp.params.hit_band, 0.30)) continue;   // 捕获深度
+
+        incident += grid.rgb * w;
+        wsum += w;
+    }
+
+    vec3 outRadiance = vec3(0.0);
+    float outValid = 0.0;
+    if (wsum > 0.0) {
+        outRadiance = (incident / wsum) * albedo;   // 材质乘法在此分离（plan §三.A）
+        outValid = 1.0;
+    }
+    imageStore(indirect_out, ivec2(texel), vec4(outRadiance, outValid));
+}

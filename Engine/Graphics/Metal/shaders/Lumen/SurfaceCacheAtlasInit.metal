@@ -54,10 +54,12 @@ kernel void surfaceCacheAtlasInit(
     uint2 atlas_uv = uint2(cd[lo].atlas_offset_x + local_x,
                            cd[lo].atlas_offset_y + local_y);
 
-    // Default material: gray albedo (alpha=1 passes the LightEval gate),
-    // +Z normal (oct-encoded (0.5, 0.5)), depth=0.5, zero emissive.
-    albedo_atlas.write(float4(0.5f, 0.5f, 0.5f, 1.0f), atlas_uv);
+    // [P0 有效性种子 2026-09-20，与 .comp 同步] 未捕获 texel 显式无效：
+    // alpha=0（LightEval 门跳过）、depth=-1（查询契约 depth<0 拒绝）。
+    // 旧种子 alpha=1/depth=0.5 伪造"卡平面前 0.5m 的灰色表面"——恰落在
+    // 0.9 查询容差带内被当合法测量接受（均匀灰填充源之一）。
+    albedo_atlas.write(float4(0.0f, 0.0f, 0.0f, 0.0f), atlas_uv);
     normal_atlas.write(float4(0.5f, 0.5f, 0.0f, 1.0f), atlas_uv);
-    depth_atlas.write(float4(0.5f, 0.0f, 0.0f, 1.0f), atlas_uv);
+    depth_atlas.write(float4(-1.0f, 0.0f, 0.0f, 1.0f), atlas_uv);
     emissive_atlas.write(float4(0.0f, 0.0f, 0.0f, 1.0f), atlas_uv);
 }

@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8) in;
+layout(set=0,binding=0,std430) readonly buffer Index { uint scBoundaryWords[]; };
+layout(set=0,binding=1,std430) readonly buffer Queries { uvec4 queries[]; };
+layout(set=0,binding=2,std430) writeonly buffer Results { uint results[]; };
+bool scBoundaryBinaryInsert=false;
+#define SC_BOUNDARY_BINARY_INSERT scBoundaryBinaryInsert
+#include "BoundaryPointIndex.glsl"
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=uint(queries.length())/2u)return;
+    uvec4 key=queries[2u*i],point=queries[2u*i+1u];
+    scBoundaryBinaryInsert=(key.w&1u)!=0u;
+    uint offsets[32],count;
+    bool ok=scBoundaryNearest(key.x,key.y,key.z,uintBitsToFloat(point.xyz),offsets,count);
+    results[34u*i]=ok?1u:0u;results[34u*i+1u]=ok?count:0u;
+    for(uint j=0u;j<32u;++j)results[34u*i+2u+j]=ok && j<count?scBoundaryWords[offsets[j]+3u]:0xffffffffu;
+}

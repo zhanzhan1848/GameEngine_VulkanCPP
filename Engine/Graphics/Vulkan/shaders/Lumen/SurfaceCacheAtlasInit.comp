@@ -33,6 +33,8 @@ layout(set = 0, binding = 5, std430) readonly buffer CardDispatchBuf {
     CardDispatchInfo dispatch[];
 } cd;
 
+layout(set=0,binding=6,std430) buffer AtlasTriangles { uint data[]; } atlasTriangles;
+
 void surface_cache_atlas_init() {
     uint tid = gl_GlobalInvocationID.x;
     if (tid >= pb.params.total_texels) return;
@@ -57,10 +59,16 @@ void surface_cache_atlas_init() {
         int(cd.dispatch[lo].atlas_offset_x + local_x),
         int(cd.dispatch[lo].atlas_offset_y + local_y));
 
-    // Write default material: gray albedo (alpha=1 to pass LightEval gate),
-    // +Z normal (oct-encoded as (0.5, 0.5) in RG16F), depth=0.5, zero emissive.
-    imageStore(albedo_atlas,   atlas_uv, vec4(0.5, 0.5, 0.5, 1.0));
+    atlasTriangles.data[uint(atlas_uv.y)*uint(imageSize(depth_atlas).x)+uint(atlas_uv.x)]=0xffffffffu;
+
+    // [P0 有效性种子 2026-09-20] 未捕获 texel 显式无效：alpha=0（LightEval
+    // 门跳过，不为幽灵表面算光照）、depth=-1（查询契约 depth<0 直接拒绝）。
+    // 旧种子 alpha=1/depth=0.5 伪造"卡平面前 0.5m 的灰色表面"——恰落在
+    // 0.9 查询容差带内被当合法测量接受（均匀灰填充源之一）。CardFill 每帧
+    // 用 SDF 命中回填几何 texel（alpha=1），card-view 捕获再覆盖为真实
+    // 材质；种子只需保证 atlas 非垃圾，不必伪造测量。
+    imageStore(albedo_atlas,   atlas_uv, vec4(0.0, 0.0, 0.0, 0.0));
     imageStore(normal_atlas,   atlas_uv, vec4(0.5, 0.5, 0.0, 1.0));
-    imageStore(depth_atlas,    atlas_uv, vec4(0.5, 0.0, 0.0, 1.0));
+    imageStore(depth_atlas,    atlas_uv, vec4(-1.0, 0.0, 0.0, 1.0));
     imageStore(emissive_atlas, atlas_uv, vec4(0.0, 0.0, 0.0, 1.0));
 }

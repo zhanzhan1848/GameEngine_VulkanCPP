@@ -1,0 +1,227 @@
+#version 450
+// Diagnostic only. Never supplies production radiance, alpha or material.
+layout(local_size_x=32) in;
+struct Node { vec4 lo; vec4 hi; uvec4 links; };
+struct Triangle { vec4 a; vec4 e1; vec4 e2; };
+struct Result { vec4 closestDistance; vec4 baryTriangle; vec4 status; };
+#ifdef SC_GPU_PROOF_FIXED_ARRAYS
+// Scene-specific diagnostic to isolate runtime-array access; exact input
+// sizes are independently checked, not a production fixed-scene solution.
+layout(std430, binding=0) readonly buffer Nodes { uvec4 nodeWords[99039]; };
+layout(std430, binding=1) readonly buffer Triangles { vec4 triangleWords[786801]; };
+layout(std430, binding=2) readonly buffer Queries { uvec4 counts; vec4 queries[94]; };
+layout(std430, binding=3) writeonly buffer Results { vec4 resultWords[282]; };
+#else
+layout(std430, binding=0) readonly buffer Nodes { uvec4 nodeWords[]; };
+layout(std430, binding=1) readonly buffer Triangles { vec4 triangleWords[]; };
+layout(std430, binding=2) readonly buffer Queries { uvec4 counts; vec4 queries[]; };
+layout(std430, binding=3) writeonly buffer Results { vec4 resultWords[]; };
+#endif
+
+Node loadNode(uint at) {
+    return Node(uintBitsToFloat(nodeWords[at*3]),uintBitsToFloat(nodeWords[at*3+1]),nodeWords[at*3+2]);
+}
+Triangle loadTriangle(uint at) {
+    return Triangle(triangleWords[at*3],triangleWords[at*3+1],triangleWords[at*3+2]);
+}
+void storeResult(uint at, Result value) {
+    resultWords[at*3]=value.closestDistance;
+    resultWords[at*3+1]=value.baryTriangle;
+    resultWords[at*3+2]=value.status;
+}
+
+float boxDistance(vec3 p, vec3 lo, vec3 hi) {
+    return length(max(max(lo-p,p-hi),vec3(0)));
+}
+
+struct Witness { vec4 closestDistance; vec4 baryTriangle; };
+Witness triangleWitness(vec3 p, Triangle tri) {
+    Witness witness=Witness(vec4(0,0,0,3.402823e38),vec4(0,0,0,-1));
+    vec3 a=tri.a.xyz, e1=tri.e1.xyz, e2=tri.e2.xyz;
+    vec3 n=cross(e1,e2); float nn=dot(n,n);
+    if (nn<=1e-16) return witness; // same surface rule as CPU oracle
+    vec3 v=p-a;
+    // Cross products avoid cancellation in dot(e1,e1)*dot(e2,e2)-dot(e1,e2)^2.
+    float u=dot(cross(v,e2),n)/nn;
+    float w=dot(cross(e1,v),n)/nn;
+    vec3 q=p-n*(dot(v,n)/nn);
+    if (u>=0 && w>=0 && u+w<=1) {
+        float d=length(p-q);
+        witness=Witness(vec4(q,d),vec4(1-u-w,u,w,tri.a.w));
+    }
+    for (uint edge=0;edge<3;++edge) {
+        vec3 start=edge==2 ? a+e1 : a;
+        vec3 direction=edge==0 ? e1 : (edge==1 ? e2 : e2-e1);
+        float denom=dot(direction,direction);
+        float t=denom>1e-16 ? clamp(dot(p-start,direction)/denom,0,1) : 0;
+        q=start+t*direction;
+        float d=length(p-q);
+        if (d<witness.closestDistance.w) {
+            vec3 bary=edge==0 ? vec3(1-t,t,0) : (edge==1 ? vec3(1-t,0,t) : vec3(0,1-t,t));
+            witness=Witness(vec4(q,d),vec4(bary,tri.a.w));
+        }
+    }
+    return witness;
+}
+
+#ifdef SC_GPU_PROOF_RAY
+// Geometric segment intersection only, double-sided. Never an opacity/sky certificate.
+// queries[2*i]={origin,tmin}, queries[2*i+1]={unit direction,tmax}.
+bool rayBox(vec3 origin,vec3 direction,Node node,float minimum,float maximum,out float nearT) {
+    float lo=minimum, hi=maximum;
+    for(uint k=0;k<3;++k) {
+        if(direction[k]==0) {
+            if(origin[k]<node.lo[k] || origin[k]>node.hi[k]) return false;
+        } else {
+            float a=(node.lo[k]-origin[k])/direction[k], b=(node.hi[k]-origin[k])/direction[k];
+            lo=max(lo,min(a,b)); hi=min(hi,max(a,b));
+            if(lo>hi) return false;
+        }
+    }
+    nearT=lo; return true;
+}
+void rayProof(uint id) {
+    Result result=Result(vec4(0,0,0,-1),vec4(0,0,0,-1),vec4(0,0,0,2));
+    if(counts.x==0 || counts.y==0 || counts.w==0 || counts.w>64 ||
+       counts.x*3!=nodeWords.length() || counts.y*3!=triangleWords.length() ||
+       counts.z*2!=queries.length() || counts.z*3!=resultWords.length()) {
+        storeResult(id,result); return;
+    }
+    vec4 inputOrigin=queries[id*2], inputDirection=queries[id*2+1];
+    vec3 origin=inputOrigin.xyz, direction=inputDirection.xyz;
+    float minimum=inputOrigin.w, maximum=inputDirection.w;
+    if(any(isnan(inputOrigin)) || any(isinf(inputOrigin)) || any(isnan(inputDirection)) ||
+       any(isinf(inputDirection)) || abs(dot(direction,direction)-1)>2e-5 || minimum<0 || maximum<=minimum) {
+        storeResult(id,result); return;
+    }
+    uint stack[64]; uint size=1; stack[0]=0;
+    uint visited=0, tested=0, failure=0;
+    float best=maximum, index=-1; vec3 bary=vec3(0);
+    while(size>0) {
+        uint at=stack[--size];
+        if(at>=counts.x || visited>=counts.x) { failure=2; break; }
+        Node node=loadNode(at); ++visited; float nearT;
+        if(!rayBox(origin,direction,node,minimum,best+2e-5,nearT)) continue;
+        if(node.links.w>0) {
+            if(node.links.z>=counts.y || node.links.w>counts.y-node.links.z) { failure=2; break; }
+            for(uint i=0;i<node.links.w;++i) {
+                Triangle tri=loadTriangle(node.links.z+i); ++tested;
+                vec3 p=cross(direction,tri.e2.xyz); float det=dot(tri.e1.xyz,p);
+                if(abs(det)<=1e-12) continue;
+                vec3 delta=origin-tri.a.xyz;
+                float u=dot(delta,p)/det;
+                vec3 q=cross(delta,tri.e1.xyz);
+                float v=dot(direction,q)/det;
+                // Independent flattened-scene proof: use the plane equation
+                // for distance rather than the cancellation-prone triple
+                // product. Endpoint-near hits still remain UNKNOWN below.
+                vec3 normal=cross(tri.e1.xyz,tri.e2.xyz);
+                float denominator=dot(direction,normal);
+                if(denominator==0) continue;
+                float t=dot(tri.a.xyz-origin,normal)/denominator;
+                if(u>=0 && v>=0 && u+v<=1 && t>=minimum-2e-5 && t<=maximum+2e-5 &&
+                   (index<0 || t<best || (t==best && tri.a.w<index))) {
+                    best=t; index=tri.a.w; bary=vec3(1-u-v,u,v);
+                }
+            }
+        } else {
+            uint left=node.links.x, right=node.links.y;
+            if(left>=counts.x || right>=counts.x) { failure=2; break; }
+            float dl,dr;
+            bool hl=rayBox(origin,direction,loadNode(left),minimum,best+2e-5,dl);
+            bool hr=rayBox(origin,direction,loadNode(right),minimum,best+2e-5,dr);
+            uint needed=(hl?1u:0u)+(hr?1u:0u);
+            if(size+needed>counts.w) { failure=1; break; }
+            if(hl && hr) {
+                stack[size++]=dl<dr ? right : left; stack[size++]=dl<dr ? left : right;
+            } else if(hl) stack[size++]=left;
+            else if(hr) stack[size++]=right;
+        }
+    }
+    result.status=vec4(0,float(tested),float(visited),float(failure));
+    if(failure==0 && index>=0) {
+        // Endpoint-near intersections remain unresolved under float rounding.
+        if(best-minimum<=2e-5 || maximum-best<=2e-5) result.status.w=4;
+        else {
+            result.closestDistance=vec4(origin+direction*best,best);
+            result.baryTriangle=vec4(bary,index); result.status.x=1;
+        }
+    } else if(failure==0) result.status.x=2; // geometric segment miss, NOT sky
+    storeResult(id,result);
+}
+#endif
+
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+#ifdef SC_GPU_PROOF_RAY
+    if(id<counts.z) rayProof(id);
+    return;
+#endif
+#ifdef SC_GPU_PROOF_ECHO
+    // Bounded dispatch/binding diagnostic, independent of any query values.
+    if (id==0) storeResult(0,Result(vec4(101,102,103,104),vec4(counts),
+        vec4(float(nodeWords.length()/3),float(triangleWords.length()/3),float(queries.length()),float(resultWords.length()/3))));
+    if (id==1 && counts.z>1) { Node n=loadNode(0); storeResult(1,Result(n.lo,n.hi,vec4(n.links))); }
+    if (id==2 && counts.z>2 && counts.x>1) { Node n=loadNode(1); storeResult(2,Result(n.lo,n.hi,vec4(n.links))); }
+    if (id==3 && counts.z>3) { Triangle t=loadTriangle(0); storeResult(3,Result(t.a,t.e1,t.e2)); }
+    return;
+#endif
+    if (id>=counts.z) return;
+    // status.x: 0 unresolved, 1 geometric near-surface support, 2 far support.
+    // status.w: 1 overflow, 2 invalid bounds/layout, 3 no triangle witness.
+    Result result=Result(vec4(0,0,0,-1),vec4(0,0,0,-1),vec4(0,0,0,2));
+    if (counts.x==0 || counts.y==0 || counts.w==0 || counts.w>64 ||
+        counts.x*3!=nodeWords.length() || counts.y*3!=triangleWords.length() || counts.z!=queries.length()) {
+        storeResult(id,result); return;
+    }
+    vec3 p=queries[id].xyz; float band=queries[id].w;
+    if (any(isnan(p)) || any(isinf(p)) || isnan(band) || isinf(band) || band<=0) {
+        storeResult(id,result); return;
+    }
+    uint stack[64]; uint size=1; stack[0]=0;
+    uint visited=0, tested=0;
+    float best=3.402823e38, index=-1;
+    vec3 closest=vec3(0), bary=vec3(0);
+    uint failure=0;
+#ifdef SC_GPU_PROOF_TRACE
+    storeResult(id,result);
+#endif
+    while (size>0) {
+        uint at=stack[--size];
+#ifdef SC_GPU_PROOF_TRACE
+        resultWords[id*3+2]=vec4(float(at),float(size),float(visited),100);
+        if (visited>=32) { failure=4; break; }
+#endif
+        if (at>=counts.x || visited>=counts.x) { failure=2; break; }
+        Node node=loadNode(at); ++visited;
+        if (boxDistance(p,node.lo.xyz,node.hi.xyz)>best+2e-5) continue;
+        if (node.links.w>0) {
+            if (node.links.z>=counts.y || node.links.w>counts.y-node.links.z) { failure=2; break; }
+            for (uint i=0;i<node.links.w;++i) {
+                Witness witness=triangleWitness(p,loadTriangle(node.links.z+i)); ++tested;
+                if (witness.closestDistance.w<best) {
+                    best=witness.closestDistance.w; closest=witness.closestDistance.xyz;
+                    bary=witness.baryTriangle.xyz; index=witness.baryTriangle.w;
+                }
+            }
+        } else {
+            uint left=node.links.x, right=node.links.y;
+            if (left>=counts.x || right>=counts.x) { failure=2; break; }
+            if (size+2>counts.w) { failure=1; break; }
+            Node ln=loadNode(left), rn=loadNode(right);
+            float dl=boxDistance(p,ln.lo.xyz,ln.hi.xyz);
+            float dr=boxDistance(p,rn.lo.xyz,rn.hi.xyz);
+            stack[size++]=dl<dr ? right : left;
+            stack[size++]=dl<dr ? left : right;
+        }
+    }
+    result.status=vec4(0,float(tested),float(visited),float(failure));
+    // Overflow/invalid input is always UNKNOWN, even after finding a triangle.
+    if (failure==0 && index>=0) {
+        result.closestDistance=vec4(closest,best);
+        result.baryTriangle=vec4(bary,index);
+        const float epsilon=2e-5;
+        result.status.x=best+epsilon<=band ? 1 : (best-epsilon>band ? 2 : 0);
+    } else if (failure==0) result.status.w=3;
+    storeResult(id,result);
+}

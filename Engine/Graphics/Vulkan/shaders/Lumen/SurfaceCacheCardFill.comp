@@ -6,11 +6,14 @@
 // For each card texel:
 //   1. Compute world-space position on the card's orthographic plane
 //   2. March along the card's forward axis through the GlobalSDF
-//   3. At surface hit: compute normal from SDF gradient, evaluate lighting
-//   4. Write albedo(gray)/normal/depth/lighting to atlas
+//   3. At surface hit: write tint albedo(alpha=1)/SDF-gradient normal/
+//      hit_dist depth + transient lighting (LightEval re-lights right after)
+//   4. On miss: write an INVALID texel (alpha=0, depth=-1) — [P0 2026-09-20]
+//      曾写 depth=0 + 硬编码天空渐变光照，伪造测量进入查询
 //
-// GBuffer gather (separate pass) overwrites visible texels with real material
-// colors. CardFill ensures ALL texels have geometric + lighting data.
+// card-view capture (T8.12) overwrites visible texels with real material
+// colors; CardFill fills only texels that never received a valid measurement
+// (alpha<=0.5). 有效性语义 = albedo.alpha（跳过谓词）+ depth 符号（查询契约）。
 //
 // Dispatch: 1D, total_texels threads. Threadgroup (256,1,1).
 //
@@ -74,14 +77,32 @@ layout(set = 0, binding = 11, std430) readonly buffer MaterialDataBuf {
 layout(set = 0, binding = 12) uniform texture2DArray albedo_textures;
 layout(set = 0, binding = 13) uniform sampler albedo_sampler;
 
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+// Diagnostic-only persistent writer tag.  The host clears this atlas before
+// the capture/fill sequence; each writer preserves the frame and source kind
+// in integer texels without touching the existing material atlases.
+layout(set = 0, binding = 14, rgba32ui) uniform uimage2D writer_atlas;
+layout(set = 0, binding = 15, std140) uniform WriterParamsBlock {
+    uvec4 params; // frame, 0, 0, 0
+} writer_params;
+// CardFill tags use (last_writer_frame, kind=2/3, card_owner, material_id).
+#endif
+
 // Get per-mesh color by sampling the albedo texture at its center.
 // Guards against black/invalid texture layers that would create permanent
 // dark patches in the atlas (the skip logic preserves non-gray writes).
 vec3 getMeshTint(uint meshInstanceId) {
-    // instance → material_id
-    uint matId = uint(inst.inst_data[meshInstanceId * 12u + 8u].y);
+    // Default-off POD interpretation correction. Both fields are uint32
+    // words in the uploaded structs, not floats containing numeric indices.
+    bool bits=(cfp._pad0 & 2u)!=0u;
+    if(bits && meshInstanceId>=uint(inst.inst_data.length())/12u) return vec3(0.5);
+    // instance → material_id (offset132 of 192B InstanceData)
+    float materialWord=inst.inst_data[meshInstanceId * 12u + 8u].y;
+    uint matId=bits ? floatBitsToUint(materialWord) : uint(materialWord);
+    if(bits && matId>=uint(mat.mat_data.length())/3u) return vec3(0.5);
     // material → albedo_texture_idx
-    uint texIdx = uint(mat.mat_data[matId * 3u + 0u].x);
+    float textureWord=mat.mat_data[matId * 3u + 0u].x;
+    uint texIdx=bits ? floatBitsToUint(textureWord) : uint(textureWord);
     if (texIdx == 0xFFFFFFFFu) return vec3(0.5);  // invalid material
 
     // Sample albedo texture at center UV
@@ -96,6 +117,32 @@ vec3 getMeshTint(uint meshInstanceId) {
 
     return tex_color;
 }
+
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+// A read-only copy of the existing instance → material word decode.  The
+// production tint path above remains untouched; this helper only reports the
+// material index that that path would use, with an explicit UNKNOWN sentinel
+// when the resident table cannot be safely indexed.
+uint getMeshTintAuditMaterialId(uint meshInstanceId) {
+    bool bits=(cfp._pad0 & 2u)!=0u;
+    uint instance_count = uint(inst.inst_data.length()) / 12u;
+    if (meshInstanceId >= instance_count) return 0xFFFFFFFFu;
+
+    float materialWord=inst.inst_data[meshInstanceId * 12u + 8u].y;
+    if (!bits && (isnan(materialWord) || isinf(materialWord) ||
+                  materialWord < 0.0 || materialWord >= 4294967296.0)) {
+        return 0xFFFFFFFFu;
+    }
+    uint matId=bits ? floatBitsToUint(materialWord) : uint(materialWord);
+    uint material_count = uint(mat.mat_data.length()) / 3u;
+    if (matId >= material_count) return 0xFFFFFFFFu;
+    return matId;
+}
+
+uvec4 makeWriterTag(uint kind, uint meshInstanceId, uint materialId) {
+    return uvec4(writer_params.params.x, kind, meshInstanceId, materialId);
+}
+#endif
 
 // ----------------------------------------------------------------------------
 // SDF sampling
@@ -149,6 +196,10 @@ void surface_cache_card_fill() {
             hi = mid;
     }
     if (lo >= cfp.card_count) return;
+    // [SC per-mesh 计划 P2] 静态卡跳过 SDF 回填：表面数据只能来自离线
+    // owner 页（§3.2 禁止用全局 SDF + 中心 UV 材质填充把空 texel 标记为
+    // 有效表面）。dispatch._pad1 bit0 = static（CPU 构建点同位填充）。
+    if ((cd.dispatch[lo]._pad1 & 1u) != 0u) return;
 
     SurfaceCacheCard card = cb.cards[cd.dispatch[lo].card_index];
     if (card.resolution == 0u) return;
@@ -160,18 +211,16 @@ void surface_cache_card_fill() {
     ivec2 atlas_uv = ivec2(int(card.atlas_offset_x + lx),
                            int(card.atlas_offset_y + ly));
 
-    // Skip texels already captured by the GBuffer gather (real material).
-    // The gather writes alpha=1 with actual material colors. AtlasInit also
-    // writes alpha=1 with gray — but the gather runs first and overwrites.
-    // We detect "gathered" by checking if albedo is non-gray (any channel
-    // differs from 0.5 by > 0.05). Gray texels (AtlasInit default or
-    // uncaptured) get CardFill's SDF-informed data.
+    // Skip texels with a valid measurement (card-view capture 写入真实材质
+    // alpha=1；CardFill 自己的 SDF 命中回填也是 alpha=1——一次回填后不再
+    // 重复覆盖，静态场景下 texel 归属收敛：真捕获 > SDF 回填 > 无效)。
+    // [P0 2026-09-20] 旧谓词额外要求"非灰"（|rgb-0.5|>0.05 才算已捕获）——
+    // 灰色石材（Sponza 主体）的真实捕获被误判为未捕获，每帧遭 SDF tint
+    // 近似覆盖，反弹的材质细节/色彩被洗掉。有效性语义现在只看 alpha
+    // （AtlasInit 种子 alpha=0 = 未捕获）。
     vec4 existing_albedo = imageLoad(albedo_atlas, atlas_uv);
-    bool is_gray = abs(existing_albedo.r - 0.5) < 0.05 &&
-                   abs(existing_albedo.g - 0.5) < 0.05 &&
-                   abs(existing_albedo.b - 0.5) < 0.05;
-    if (!is_gray && existing_albedo.a > 0.5) {
-        return;  // Already has real material from gather — don't overwrite
+    if (existing_albedo.a > 0.5) {
+        return;  // Valid measurement (capture or prior fill) — don't overwrite
     }
 
     // Texel UV in [0,1] on the card plane.
@@ -207,7 +256,7 @@ void surface_cache_card_fill() {
                    + up    * ((v - 0.5) * ey * 2.0);
 
     // March along the forward axis through the SDF.
-    float max_depth = card.extent.x;  // depth extent
+    float max_depth = cfp._pad1 != 0u ? card.extent[axis] : card.extent.x;
     float t = 0.0;
     float hit_dist = -1.0;
     vec3 hit_pos = plane_pos;
@@ -229,6 +278,11 @@ void surface_cache_card_fill() {
         }
 
         if (d < hit_threshold) {
+            // Opt-in source ablation: do not turn the scalar hit-band at
+            // the unmeasured origin into a valid zero-depth surface. Reject
+            // this fill attempt (not march ahead to a different surface).
+            // Captured/previously valid texels already returned above.
+            if ((cfp._pad0 & 1u) != 0u && t == 0.0) break;
             hit_dist = t;
             hit_pos = p;
             break;
@@ -242,29 +296,26 @@ void surface_cache_card_fill() {
 
     // Get this mesh's material tint (per-mesh color from material data).
     vec3 mesh_tint = getMeshTint(card.mesh_instance_id);
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+    uint audit_material_id = getMeshTintAuditMaterialId(card.mesh_instance_id);
+#endif
     // Hard floor: never allow near-black (prevents permanent dark patches
     // that the skip-logic would preserve). Minimum luminance ≈ 0.18.
     mesh_tint = clamp(mesh_tint, vec3(0.18), vec3(1.0));
 
     if (hit_dist < 0.0) {
-        // No surface along this ray → sample directional sky gradient.
-        // Sky color varies with the card's forward direction: blue from above,
-        // warm at horizon, dim from below — matching how a sky box would look.
-        float up_component = fwd.y;  // +1 = zenith, -1 = nadir, 0 = horizon
-        vec3 zenith  = vec3(0.20, 0.25, 0.40);   // blue sky from above
-        vec3 horizon = vec3(0.35, 0.32, 0.28);   // warm haze at horizon
-        vec3 nadir   = vec3(0.08, 0.08, 0.10);   // dark ground bounce
-        vec3 sky_color;
-        if (up_component >= 0.0) {
-            sky_color = mix(horizon, zenith, up_component);
-        } else {
-            sky_color = mix(horizon, nadir, -up_component);
-        }
-
-        imageStore(albedo_atlas,  atlas_uv, vec4(mesh_tint, 1.0));
+        // [P0 2026-09-20] 无命中 texel 显式无效：depth=-1（查询契约拒绝——
+        // 旧值 0.0 伪装成"恰好位于卡平面上的表面"，把 SDF 命中带内的查询
+        // 引到伪造测量上）、alpha=0（LightEval 门跳过，不再为不存在的表面
+        // 算光照）、不写光照（旧硬编码天空渐变是伪能量源）。无效 texel 的
+        // 查询会落到同 cell 的其他卡/其他 texel 上——正确回退而非黑斑。
+        imageStore(albedo_atlas,  atlas_uv, vec4(0.0, 0.0, 0.0, 0.0));
         imageStore(normal_atlas,  atlas_uv, vec4(0.5, 0.5, 0.0, 1.0));
-        imageStore(depth_atlas,   atlas_uv, vec4(0.0, 0.0, 0.0, 1.0));
-        imageStore(lighting_out,  atlas_uv, vec4(sky_color, 1.0));
+        imageStore(depth_atlas,   atlas_uv, vec4(-1.0, 0.0, 0.0, 1.0));
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+        imageStore(writer_atlas, atlas_uv,
+                   makeWriterTag(3u, card.mesh_instance_id, audit_material_id));
+#endif
         return;
     }
 
@@ -302,8 +353,13 @@ void surface_cache_card_fill() {
     vec3 total_light = (direct + sky) * mesh_tint;
     total_light = max(total_light, vec3(0.08, 0.08, 0.09));  // minimum ambient
 
-    imageStore(albedo_atlas,  atlas_uv, vec4(mesh_tint, 1.0));
+    // Opaque-valid transport payload: bit7 set, transmission/thickness zero.
+    imageStore(albedo_atlas,  atlas_uv, vec4(mesh_tint, 128.0 / 255.0));
     imageStore(normal_atlas,  atlas_uv, vec4(octEncode(N), 0.0, 1.0));
     imageStore(depth_atlas,   atlas_uv, vec4(hit_dist, 0.0, 0.0, 1.0));
     imageStore(lighting_out,  atlas_uv, vec4(total_light, 1.0));
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+    imageStore(writer_atlas, atlas_uv,
+               makeWriterTag(2u, card.mesh_instance_id, audit_material_id));
+#endif
 }

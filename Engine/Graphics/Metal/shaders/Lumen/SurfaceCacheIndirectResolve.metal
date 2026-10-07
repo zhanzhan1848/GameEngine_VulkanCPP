@@ -23,6 +23,15 @@ struct IndirectResolveParams {
     uint refresh_phase;
     // C (plan §三.C): the trace's SDF hit band — along-axis tolerance floor.
     float hit_band;
+    // Vulkan-twin ABI parity（共享 C++ IndirectResolveParamsGPU 一直在此写入，
+    // 旧 Metal struct 缺这三个字段读取错位——2026-09-20 F0 顺带补齐）。
+    uint recon_enabled;
+    uint card_count;
+    uint page_table_enabled;
+    // [F0 2026-09-20 能量不对称修复 A1]: tile 天空反弹源——CPU 填
+    // GIDebug().sky_color_intensity × 基色梯度。回滚
+    // PRIMAL_SC_TILE_SKY_OVERRIDE（旧值 = 1.1,1.152,1.2）。
+    float4 tile_sky_color;
 };
 
 kernel void surfaceCacheIndirectResolve(
@@ -37,7 +46,7 @@ kernel void surfaceCacheIndirectResolve(
     constant SurfaceCacheCardLookup*   lookups      [[buffer(2)]],
     constant SurfaceCacheCard*         cards        [[buffer(3)]],
     device const ProbeRayHit*          ray_hits     [[buffer(4)]],
-    device uint*                       tile_valid   [[buffer(5)]],   // B: per-tile validity bitmask
+    device atomic_uint*                tile_valid   [[buffer(5)]],   // B: per-tile validity bitmask
     texture2d<float, access::read>     depth_atlas  [[texture(7)]],  // C: capture validation
     texture2d<float, access::read>     normal_atlas [[texture(8)]])  // C: orientation
 {
@@ -65,10 +74,14 @@ kernel void surfaceCacheIndirectResolve(
                            (probe_idx % params.refresh_stride) == params.refresh_phase;
     const uint tvWord = probe_idx >> 5u;
     const uint tvBit = 1u << (probe_idx & 31u);
-    const bool tileWasValid = (tile_valid[tvWord] & tvBit) != 0u;
+    // One uint is shared by 32 tile invocations.  Atomic access prevents
+    // sibling invocations from losing each other's validity bits.
+    const uint validityWord = atomic_load_explicit(&tile_valid[tvWord], memory_order_relaxed);
+    const bool tileWasValid = (validityWord & tvBit) != 0u;
 
     float3 indirect = float3(0.0);
-    float total_weight = 0.0;
+    uint currentRayCount = 0u;
+    uint measurementCount = 0u;
 
     for (uint r = 0; r < rays && refreshed; ++r) {
         uint hit_idx = probe_idx * rays + r;
@@ -79,12 +92,12 @@ kernel void surfaceCacheIndirectResolve(
         // D (plan §三.D): 3 = cone-occluded — occluder proven, position
         // unknown. Count with ZERO radiance (no sky through the occluder, no
         // exact SC fetch at a fabricated position). ≥4 = INVALID sentinel.
+        if (hit_type >= 4u) continue;
+        ++currentRayCount;
         if (hit_type == 3u) {
-            indirect += float3(0.0);
-            total_weight += 1.0;
+            ++measurementCount;  // proven occluder = valid zero-radiance sample
             continue;
         }
-        if (hit_type >= 4u) continue;
 
         // 2026-09-11 Metal sync (C3.5 slice 1 parity): near AND far hits both
         // resolve through the atlas — the card lookup is position-based and
@@ -117,20 +130,27 @@ kernel void surfaceCacheIndirectResolve(
             }
             if (!found) continue;   // WRC 计划 Stream B3: 查询失败 = 无测量（0.02 灰占位符删除）
         } else {
-            // Sky — same tier as DDGITraceFinalize's escape
-            // (DDGI_SKY_COLOR × SkyColor.x with the 0.4 default intensity).
-            radiance = float3(2.75f, 2.88f, 3.00f) * 0.4f;
+            // Sky — [F0] 天空单一事实源收口：档位由 tile_sky_color 驱动
+            //（与探针路径同旋钮）；旧硬编码 float3(2.75,2.88,3.00)*0.4 删除。
+            radiance = params.tile_sky_color.rgb;
         }
 
         indirect += radiance;
-        total_weight += 1.0;
+        ++measurementCount;
     }
 
-    if (total_weight > 0.0) indirect /= total_weight;
+    // Fixed-budget estimator: failed SC queries contribute zero instead of
+    // shrinking the denominator and amplifying a few bright hits. A partially
+    // published trace is unavailable data, so carry valid history instead.
+    const uint minMeasurements = min(rays, 4u);
+    const bool currentEstimateValid = refreshed && currentRayCount == rays &&
+                                      measurementCount >= minMeasurements;
+    if (currentEstimateValid) indirect /= float(max(rays, 1u));
+    else indirect = float3(0.0);
 
     // B: consumed current hits — the tile's history is legitimate carry data.
-    if (refreshed && (tile_valid[tvWord] & tvBit) == 0u) {
-        tile_valid[tvWord] |= tvBit;
+    if (currentEstimateValid) {
+        atomic_fetch_or_explicit(&tile_valid[tvWord], tvBit, memory_order_relaxed);
     }
 
     // T3.3: temporal accumulation — see Vulkan twin (mix with the previous
@@ -142,9 +162,9 @@ kernel void surfaceCacheIndirectResolve(
         for (uint dx = 0; dx < tile_size; ++dx) {
             uint2 texel = tile_origin + uint2(dx, dy);
             if (texel.x >= params.sc_params.atlas_size || texel.y >= params.sc_params.atlas_size) continue;
-            if (!refreshed) {
-                // B: no new estimate this frame — carry valid history
-                // verbatim, otherwise explicit zeros with A=0.
+            if (!currentEstimateValid) {
+                // No complete, sufficiently supported estimate this frame:
+                // carry valid history verbatim, otherwise explicit A=0.
                 if (tileWasValid && hasHistory) {
                     float3 prev = prev_indirect_out.read(texel).rgb;
                     indirect_out.write(float4(prev, 1.0), texel);
@@ -159,8 +179,7 @@ kernel void surfaceCacheIndirectResolve(
                 float3 prev = prev_indirect_out.read(texel).rgb;
                 current = mix(current, prev, tw);
             }
-            // WRC 计划 Stream B3: 零有效测量 → A=0 显式无效（Vulkan 孪生同步）。
-            indirect_out.write(float4(current, total_weight > 0.0f ? 1.0f : 0.0f), texel);
+            indirect_out.write(float4(current, 1.0f), texel);
         }
     }
 }

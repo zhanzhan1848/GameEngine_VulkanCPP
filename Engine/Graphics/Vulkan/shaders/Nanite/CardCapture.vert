@@ -1,5 +1,9 @@
 #version 450 core
 
+#if defined(SC_CAPTURE_GEOMETRY_AUDIT_VARIANT) && !defined(SC_CAPTURE_SOURCE_AUDIT_VARIANT)
+#error "SC_CAPTURE_GEOMETRY_AUDIT_VARIANT requires SC_CAPTURE_SOURCE_AUDIT_VARIANT"
+#endif
+
 // CardCapture.vert — T8.12 card-view capture vertex shader.
 // Draws scene geometry from one Surface Cache card's orthographic view into
 // the card's atlas pages (MRT: albedo / oct-normal / axis-depth).
@@ -56,6 +60,21 @@ layout(location = 0) out VSOut {
     vec3 normal;
     flat uint material_id;
     vec3 world_pos;
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+    // Actual source of the rasterized meshlet triangle.  These are carried
+    // flat to the fragment tag so the audit can replay the resident meshlet
+    // bytes without inferring a triangle from the card or ray.
+    flat uint actual_cluster_id;
+    flat uint actual_triangle_id;
+#ifdef SC_CAPTURE_GEOMETRY_AUDIT_VARIANT
+    // Capture-time primitive witness.  The three values are flat so every
+    // fragment of the primitive carries the same resident triangle source.
+    flat vec3 geometry_triangle0_world;
+    flat vec3 geometry_triangle1_world;
+    flat vec3 geometry_triangle2_world;
+    flat uint geometry_instance_index;
+#endif
+#endif
 } OUT;
 
 vec3 unpack_normal(uint packed, uint color_t_sign) {
@@ -70,6 +89,25 @@ vec3 unpack_normal(uint packed, uint color_t_sign) {
     float nSign = float(signs & 0x02u) - 1.0;
     return vec3(f.x, f.y, z * nSign);
 }
+
+#ifdef SC_CAPTURE_GEOMETRY_AUDIT_VARIANT
+// Fetch the three packed-index corners using the same meshlet triangle byte
+// stream, global position buffer, and instance world transform as production.
+// This helper is diagnostic-only and does not replace the production fetch.
+vec3 fetch_audit_world_vertex(Meshlet meshlet, InstanceData inst,
+                               uint local_triangle_id, uint corner) {
+    uint byte_index = meshlet.header.y + local_triangle_id * 3u + corner;
+    uint local_vertex_idx =
+        (mtb.mts[byte_index >> 2u] >> ((byte_index & 3u) * 8u)) & 0xFFu;
+    uint vert_idx = mvb.mvs[meshlet.header.x + local_vertex_idx];
+    vec3 p = vec3(
+        pb.pos[vert_idx * 3u + 0u],
+        pb.pos[vert_idx * 3u + 1u],
+        pb.pos[vert_idx * 3u + 2u]
+    );
+    return (inst.world_matrix * vec4(p, 1.0)).xyz;
+}
+#endif
 
 void main() {
     uint vid = gl_VertexIndex;
@@ -92,6 +130,16 @@ void main() {
         OUT.normal = vec3(0.0, 1.0, 0.0);
         OUT.material_id = material_id;
         OUT.world_pos = vec3(0.0);
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+        OUT.actual_cluster_id = global_cluster_id;
+        OUT.actual_triangle_id = 0xFFFFFFFFu;
+#ifdef SC_CAPTURE_GEOMETRY_AUDIT_VARIANT
+        OUT.geometry_triangle0_world = vec3(0.0);
+        OUT.geometry_triangle1_world = vec3(0.0);
+        OUT.geometry_triangle2_world = vec3(0.0);
+        OUT.geometry_instance_index = 0xFFFFFFFFu;
+#endif
+#endif
         gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
@@ -130,6 +178,20 @@ void main() {
     OUT.normal = world_normal;
     OUT.material_id = material_id;
     OUT.world_pos = world_pos.xyz;
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+    OUT.actual_cluster_id = global_cluster_id;
+    OUT.actual_triangle_id = vid / 3u;
+#ifdef SC_CAPTURE_GEOMETRY_AUDIT_VARIANT
+    uint local_triangle_id = vid / 3u;
+    OUT.geometry_triangle0_world = fetch_audit_world_vertex(meshlet, inst,
+                                                            local_triangle_id, 0u);
+    OUT.geometry_triangle1_world = fetch_audit_world_vertex(meshlet, inst,
+                                                            local_triangle_id, 1u);
+    OUT.geometry_triangle2_world = fetch_audit_world_vertex(meshlet, inst,
+                                                            local_triangle_id, 2u);
+    OUT.geometry_instance_index = instance_index;
+#endif
+#endif
 
     gl_Position = cb.proj * (cb.view * world_pos);
     // Card views use Metal's Y-up clip convention; Vulkan uses a positive

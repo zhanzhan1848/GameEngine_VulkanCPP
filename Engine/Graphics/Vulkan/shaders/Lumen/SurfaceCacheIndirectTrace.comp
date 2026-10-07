@@ -17,10 +17,18 @@
 //   binding 8 = StorageBuffer        ray_hits[]        (ProbeRayHit, read-write, std430)
 
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : require
 
 #include "SurfaceCacheData.glsl"
 
+#ifdef SC_BOUNDARY_RADIOSITY_PROOF
+layout(local_size_x=64) in;
+#include "BoundaryLightingData.glsl"
+layout(set=0,binding=18,std430) readonly buffer BoundaryPoints { SCBoundaryLightPoint boundaryPoints[]; };
+layout(set=0,binding=19,std430) writeonly buffer BoundaryRays { vec4 boundaryQueries[]; };
+#else
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#endif
 
 // --------------------------------------------------------------------------------
 // Bindings (flat)
@@ -84,7 +92,7 @@ struct IndirectTraceParams {
     vec4 sdf_voxel_sizes[3];
     vec4 sdf_extents[3];
     uint sdf_resolutions[3];
-    uint sdf_cascade_count;
+    uvec4 sdf_cascade_count;
 };
 
 layout(set = 0, binding = 6, std140) uniform IndirectTraceParamsBlock {
@@ -94,6 +102,12 @@ layout(set = 0, binding = 6, std140) uniform IndirectTraceParamsBlock {
 layout(set = 0, binding = 7, std430) readonly buffer CardsBlock {
     SurfaceCacheCard data[];
 } cards;
+
+#ifdef SC_GEOMETRY_FIRST
+#define SC_GEO_NONZERO_ONLY ((itp.params.sdf_cascade_count.w&1u)!=0u)
+#include "GeometryFirstHit.glsl"
+layout(set=0,binding=17,std430) buffer RayTriangles { uint data[]; } rayTriangles;
+#endif
 
 // ProbeRayHit — two vec4s (32 bytes) per hit.
 //   hit_position_dist.xyz = position, .w = hit_distance
@@ -110,19 +124,7 @@ layout(set = 0, binding = 8, std430) buffer RayHitsBlock {
 // --------------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------------
-uint findOwningCard(uvec2 uv, int count) {
-    // Apple Silicon: cap device reads to ~24 to stay within limits
-    uint limit = min(uint(count), 24u);
-    for (uint i = 0u; i < limit; ++i) {
-        if (uv.x >= cards.data[i].atlas_offset_x &&
-            uv.x <  cards.data[i].atlas_offset_x + cards.data[i].resolution &&
-            uv.y >= cards.data[i].atlas_offset_y &&
-            uv.y <  cards.data[i].atlas_offset_y + cards.data[i].resolution)
-            return i;
-    }
-    return uint(count);
-}
-
+layout(set=0,binding=12,std430) readonly buffer TileOwners { uint data[]; } owners;
 // Nearest-sample SDF from a 3D texture at normalized uvw (samplerless texelFetch).
 // uvw==1 lands exactly on coord==size — clamp the INTEGER coord to size-1
 // (plan §三.E 边界漏洞；Shadow 孪生早已夹取，此处补齐半开域语义).
@@ -217,21 +219,22 @@ bool coneHitOccluded(texture3D mip0, texture3D mip1, texture3D mip2,
 // The old ×extent made every d value ~42× too large and the march dimensionally
 // meaningless.
 float sampleSDF(vec3 pos) {
-    if (itp.params.sdf_cascade_count > 0u) {
-        vec3 local_p = (pos - itp.params.sdf_origins[0].xyz) / itp.params.sdf_extents[0].xyz;
-        vec3 uvw = local_p * 0.5 + 0.5;
+    if (itp.params.sdf_cascade_count.x > 0u) {
+        // SDF origin is the MIN corner and extent is the full box size,
+        // exactly as in DDGITraceSDF. The former center/half-extent remap
+        // sampled the wrong half of the volume and classified occluded tiles
+        // as sky (the right-arcade card #8 measured 32/32 false sky rays).
+        vec3 uvw = (pos - itp.params.sdf_origins[0].xyz) / itp.params.sdf_extents[0].xyz;
         if (uvw.x >= 0.0 && uvw.x <= 1.0 && uvw.y >= 0.0 && uvw.y <= 1.0 && uvw.z >= 0.0 && uvw.z <= 1.0)
             return sampleSDFNearest(sdf0, uvw);
     }
-    if (itp.params.sdf_cascade_count > 1u) {
-        vec3 local_p = (pos - itp.params.sdf_origins[1].xyz) / itp.params.sdf_extents[1].xyz;
-        vec3 uvw = local_p * 0.5 + 0.5;
+    if (itp.params.sdf_cascade_count.x > 1u) {
+        vec3 uvw = (pos - itp.params.sdf_origins[1].xyz) / itp.params.sdf_extents[1].xyz;
         if (uvw.x >= 0.0 && uvw.x <= 1.0 && uvw.y >= 0.0 && uvw.y <= 1.0 && uvw.z >= 0.0 && uvw.z <= 1.0)
             return sampleSDFNearest(sdf1, uvw);
     }
-    if (itp.params.sdf_cascade_count > 2u) {
-        vec3 local_p = (pos - itp.params.sdf_origins[2].xyz) / itp.params.sdf_extents[2].xyz;
-        vec3 uvw = local_p * 0.5 + 0.5;
+    if (itp.params.sdf_cascade_count.x > 2u) {
+        vec3 uvw = (pos - itp.params.sdf_origins[2].xyz) / itp.params.sdf_extents[2].xyz;
         if (uvw.x >= 0.0 && uvw.x <= 1.0 && uvw.y >= 0.0 && uvw.y <= 1.0 && uvw.z >= 0.0 && uvw.z <= 1.0)
             return sampleSDFNearest(sdf2, uvw);
     }
@@ -241,6 +244,20 @@ float sampleSDF(vec3 pos) {
 // --------------------------------------------------------------------------------
 void surface_cache_indirect_trace()
 {
+#ifdef SC_BOUNDARY_RADIOSITY_PROOF
+    uint probe_idx=gl_GlobalInvocationID.x;
+    if(probe_idx>=uint(boundaryPoints.length()) || itp.params.rays_per_probe!=32u)return;
+    uint rays=32u;
+    if((probe_idx+1u)*rays>uint(ray_hits.data.length()) || (probe_idx+1u)*rays>uint(rayTriangles.data.length()) ||
+       (probe_idx+1u)*rays*2u>uint(boundaryQueries.length()))return;
+    for(uint r=0u;r<rays;++r){uint idx=probe_idx*rays+r;
+        ray_hits.data[idx].hit_position_dist=vec4(0);ray_hits.data[idx].hit_type_pad=uvec4(4u,0u,0u,0u);
+        rayTriangles.data[idx]=0xffffffffu;boundaryQueries[2u*idx]=vec4(0);boundaryQueries[2u*idx+1u]=vec4(0);}
+    SCBoundaryLightPoint point=boundaryPoints[probe_idx];
+    vec3 probe_pos=point.worldFootprint.xyz,probe_normal=point.normal.xyz;
+    if(point.normal.w!=1.0 || point.identity.w!=itp.params.frame_index || !scBoundaryLightFinite(probe_pos) ||
+       !scBoundaryLightFinite(probe_normal) || abs(dot(probe_normal,probe_normal)-1.0)>.01)return;
+#else
     uint probe_x = gl_GlobalInvocationID.x;
     uint probe_y = gl_GlobalInvocationID.y;
     if (itp.params.tile_size == 0u) return;
@@ -255,18 +272,31 @@ void surface_cache_indirect_trace()
                               probe_y * itp.params.tile_size + itp.params.tile_size / 2u);
     if (tile_origin.x >= itp.params.sc_params.atlas_size || tile_origin.y >= itp.params.sc_params.atlas_size) return;
 
+    // A refreshed tile owns every ray slot for this frame. Invalidate first
+    // so a later depth/card early-out cannot expose a previous frame's hit.
+    uint rays = itp.params.rays_per_probe;
+    for (uint r = 0u; r < rays; ++r) {
+        uint hit_idx = probe_idx * rays + r;
+        ray_hits.data[hit_idx].hit_position_dist = vec4(0.0);
+        ray_hits.data[hit_idx].hit_type_pad = uvec4(4u, 0u, 0u, 0u);
+#ifdef SC_GEOMETRY_FIRST
+        rayTriangles.data[hit_idx]=0xffffffffu;
+#endif
+    }
+
     float depth = imageLoad(depth_atlas, ivec2(tile_origin)).r;
-    if (depth <= 0.0) return;
+    if (isnan(depth) || isinf(depth) || depth <= 0.0) return;
 
     vec2 enc_n = imageLoad(normal_atlas, ivec2(tile_origin)).rg;
     vec3 probe_normal = octDecode(enc_n);
 
     // Find owning card for correct world position
-    uint card_idx = findOwningCard(tile_origin, int(itp.params.sc_params.max_cards));
+    uint card_idx = owners.data[probe_idx];
     if (card_idx >= itp.params.sc_params.max_cards) return;
     vec3 probe_pos = cardTexelToWorld(tile_origin, depth, cards.data[card_idx]);
+    if (any(isnan(probe_pos)) || any(isinf(probe_pos)) || any(isnan(probe_normal)) || any(isinf(probe_normal))) return;
 
-    uint rays = itp.params.rays_per_probe;
+#endif
     // 2026-09-10 C3.5 slice 1: real march parameters. The stub used 4 steps
     // with hitThreshold = cascade extent × 0.5 (21 m) — every ray "hit"
     // instantly and far hits resolved to the Phase-A 0.02 placeholder.
@@ -281,8 +311,9 @@ void surface_cache_indirect_trace()
     // texel, and the "transport" degenerates into self-feedback).
     vec3 ray_origin = probe_pos + probe_normal * (hitThreshold + 0.05);
     for (uint r = 0u; r < rays; ++r) {
-        float r1 = hash(vec2(float(probe_idx * rays + r), float(itp.params.frame_index)));
-        float r2 = hash(vec2(float(itp.params.frame_index), float(probe_idx * rays + r))) * 2.0 * 3.14159265;
+        vec2 xi = scTileRayXi(probe_idx, r, itp.params.frame_index);
+        float r1 = xi.x;
+        float r2 = xi.y * 2.0 * 3.14159265;
         float sin_t = sqrt(r1);
         float cos_t = sqrt(1.0 - r1);
         vec3 local_dir = vec3(cos_t * cos(r2), cos_t * sin(r2), sin_t);
@@ -292,15 +323,48 @@ void surface_cache_indirect_trace()
         vec3 bitangent = cross(probe_normal, tangent);
         vec3 ray_dir = normalize(tangent * local_dir.x + bitangent * local_dir.y + probe_normal * local_dir.z);
 
+#ifdef SC_GEOMETRY_FIRST
+#ifdef SC_BOUNDARY_RADIOSITY_PROOF
+        uint queryIndex=probe_idx*rays+r;
+        boundaryQueries[2u*queryIndex]=vec4(ray_origin,.05);
+        boundaryQueries[2u*queryIndex+1u]=vec4(ray_dir,itp.params.max_ray_distance);
+#endif
+        float geometryT=itp.params.max_ray_distance; uint geometryOwner=0u, geometryTriangle=0xffffffffu;
+        int geometryStatus=itp.params.sdf_cascade_count.y!=0u ?
+            geometryFirstHit(ray_origin,ray_dir,0.05,itp.params.max_ray_distance,geometryT,geometryOwner,geometryTriangle) : -1;
+        uint geometryIndex=probe_idx*rays+r;
+        rayTriangles.data[geometryIndex]=geometryStatus==1 ? geometryTriangle : 0xffffffffu;
+        ray_hits.data[geometryIndex].hit_position_dist=vec4(ray_origin+ray_dir*geometryT,geometryT);
+        ray_hits.data[geometryIndex].hit_type_pad=uvec4(
+            geometryStatus<0 ? 4u : geometryStatus==0 ? 2u : ((geometryOwner+1u)<<3u)|(geometryT<itp.params.near_distance?0u:1u),
+            floatBitsToUint(ray_origin));
+        continue;
+#endif
+
         float t = 0.0;
         bool hit = false;
+        bool clearedOriginSkin = false;
         vec3 hit_pos = vec3(0.0);
 
         for (uint step = 0u; step < kMaxSDFSteps; ++step) {
             vec3 p = ray_origin + ray_dir * t;
             float d = sampleSDF(p);
 
-            if (d < hitThreshold) { hit = true; hit_pos = p; break; }
+            // The signed offline field contains a finite zero-valued skin
+            // around captured surfaces. The normal-offset start can still
+            // land inside it; reporting t=0 would fetch the same tile as its
+            // own bounce. March out of that skin before accepting a hit.
+            if (d < hitThreshold) {
+                if (!clearedOriginSkin) {
+                    t += max(abs(d), max(minStep, 0.05));
+                    if (t > itp.params.max_ray_distance) break;
+                    continue;
+                }
+                hit = true;
+                hit_pos = p;
+                break;
+            }
+            clearedOriginSkin = true;
             if (t > itp.params.max_ray_distance) break;
 
             // Relaxed advancement: overstep when far, conservative when close
@@ -320,10 +384,12 @@ void surface_cache_indirect_trace()
         // 遮挡"，不是表面定位——绝不构造伪精确 hit_pos 去 SC 精确查询
         // （旧实现用 probe_pos 原点 + march 的 t 拼一个假命中点）。类型
         // 契约：0=near, 1=far, 2=sky, 3=cone-occluded, ≥4=INVALID。
-        const bool coneOccluded = !hit &&
+        const bool coneOccluded = !hit && clearedOriginSkin &&
             coneHitOccluded(sdf0_mip0, sdf0_mip1, sdf0_mip2,
                             ray_origin, ray_dir, t, itp.params.max_ray_distance,
                             float(rays));
+        // Preserve the actual march origin in previously unused padding (32B ABI unchanged).
+        ray_hits.data[hit_idx].hit_type_pad.yzw = floatBitsToUint(ray_origin);
         ray_hits.data[hit_idx].hit_position_dist.w = t;
         if (hit && t < itp.params.near_distance) {
             ray_hits.data[hit_idx].hit_type_pad.x = 0u;
@@ -331,7 +397,7 @@ void surface_cache_indirect_trace()
         } else if (hit) {
             ray_hits.data[hit_idx].hit_type_pad.x = 1u;
             ray_hits.data[hit_idx].hit_position_dist.xyz = hit_pos;
-        } else if (coneOccluded) {
+        } else if (coneOccluded || !clearedOriginSkin) {
             ray_hits.data[hit_idx].hit_type_pad.x = 3u;
             ray_hits.data[hit_idx].hit_position_dist.xyz = vec3(0.0);   // 无位置依据
         } else {

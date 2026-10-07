@@ -102,6 +102,14 @@ layout(set = 0, binding = 15, std430) readonly buffer PageTableBlock {
     uint card_page_table[];        // card_index → (x_page<<16|y_page)
 } pageTable;
 
+// [E0-B 2026-09-21 直射/间接分离（能量-排查 §6 B-1，根治 Phase 2 合流）]:
+// nodirect 副本输出——result 减去本 texel 的解析直射项 direct_light·ρ/π，
+// 即 (E_indirect)·ρ/π + tiles + prev·ρ/π + emissive。SC/SPGI 的探针查询
+// 侧（SurfaceCachePass 绑定交换 + PRIMAL_SC_NODIRECT / PRIMAL_SPGI_SC_
+// NODIRECT）读它，把探针可见链路收敛到 indirect-only；亮度惩罚随之退役为
+// firefly 软限幅（finalize tier_counts.y 膝点）。混合 atlas 语义不变。
+layout(set = 0, binding = 16, rgba16f) writeonly uniform image2D nodirect_out;
+
 #define SC_DEPTH_RES 8u
 #define SC_DEPTH_TEXELS 64u
 #define SC_DEPTH_FLOATS_PER_PROBE 128u
@@ -389,6 +397,12 @@ vec3 gatherProbeIrradiance(vec3 worldPos, vec3 N, out bool inVolume) {
     result *= 3.14159265;
     // The stored SH is RADIANCE (mcWeight = 4π/N, no cosine projection); with
     // the ×π above this function now returns physical irradiance.
+    // [F6 2026-09-20 回滚警示] 本 ×π 与屏幕端 DDGIGIGather
+    // PROBE_SH_RAD_TO_IRRAD 是"两腿 π 一致"的对偶约束（radiance-SH →
+    // irradiance 的正确 L→E 换算，各端恰一次）。改本端 π 必须同步屏幕端，
+    // 反之亦然——单腿改动 = SC↔probe 回路增益漂移。DDGIGIGather.comp
+    // 的"NEVER ×π"旧注释已按此修订（2026-09-20，化石前提=已取代的 CPU /π
+    // 平衡方案）。复验工具：GI_DCGAIN=1 配方跑，amp 有界 (<~0.05) 为通过。
     // Clamp the feedback loop (SC → probes → SC accumulates one bounce per
     // cycle). NO gain boost beyond the π units correction: collection(≤0.85)
     // × albedo must stay < 1 or high-albedo walls diverge over minutes
@@ -414,6 +428,7 @@ float scRadiosityWeight(uint bits) {
 }
 
 // --------------------------------------------------------------------------------
+#ifndef SC_BOUNDARY_LIGHT_PROOF
 void surface_cache_light_eval()
 {
     uint global_tid = gl_GlobalInvocationID.x;
@@ -452,6 +467,16 @@ void surface_cache_light_eval()
     // Read material data
     vec4 albedo = imageLoad(albedo_atlas, ivec2(atlas_uv));
     if (albedo.a < 0.01) return;
+
+    // RGBA8 alpha is a compact material payload written by CardCapture:
+    // bit7 validity, bits3..6 transmission UNorm4, bits0..2 thickness UNorm3.
+    // Legacy/fallback opaque writers use exactly 0x80, while alpha=0 remains
+    // invalid.  Decode via the quantized byte so Vulkan conversion rounding
+    // cannot leak into the bit fields.
+    uint transportBits = uint(round(clamp(albedo.a, 0.0, 1.0) * 255.0));
+    float transmission = float((transportBits >> 3u) & 0xFu) / 15.0;
+    float thickness = float(transportBits & 0x7u) / 7.0;
+    float backTransmittance = transmission * exp(-2.0 * thickness);
 
 
     vec2 enc_n = imageLoad(normal_atlas, ivec2(atlas_uv)).rg;
@@ -496,8 +521,10 @@ void surface_cache_light_eval()
             attenuation = max(1.0 - (dist * dist) / r2, 0.0);
         }
 
-        float NdotL = max(dot(normal, L), 0.0);
-        direct_light += lights.data[li].color.xyz * NdotL * attenuation;
+        float signedNdotL = dot(normal, L);
+        float frontTerm = max(signedNdotL, 0.0);
+        float backTerm = max(-signedNdotL, 0.0) * backTransmittance;
+        direct_light += lights.data[li].color.xyz * (frontTerm + backTerm) * attenuation;
     }
 
     // Phase 3 (Lumen hierarchy): incoming INDIRECT light gathered from the
@@ -577,4 +604,49 @@ void surface_cache_light_eval()
                 + emissive;
     result = min(result, vec3(64.0));
     imageStore(lighting_out, ivec2(atlas_uv), vec4(result, 1.0));
+    // [E0-B] 直射剥离副本——探针查询读这份（同 clamp 上限，同帧同 texel）。
+    vec3 result_nodirect = result - direct_light * albedo.rgb * 0.31830988;
+    result_nodirect = max(result_nodirect, vec3(0.0));
+    result_nodirect = min(result_nodirect, vec3(64.0));
+    imageStore(nodirect_out, ivec2(atlas_uv), vec4(result_nodirect, 1.0));
 }
+#else
+#include "BoundaryLightingData.glsl"
+layout(set=0,binding=17,std430) readonly buffer BoundaryPoints { SCBoundaryLightPoint boundaryPoints[]; };
+layout(set=0,binding=18,std430) writeonly buffer BoundaryLighting { SCBoundaryLightResult boundaryResults[]; };
+void surface_cache_light_eval() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=uint(boundaryPoints.length()) || i>=uint(boundaryResults.length()))return;
+    SCBoundaryLightPoint p=boundaryPoints[i];
+    SCBoundaryLightResult outputValue;
+    outputValue.radiance=vec4(0);outputValue.irradiance=vec4(0);outputValue.directVisibility=vec4(0);
+    outputValue.identity=p.identity;
+    boundaryResults[i]=outputValue;
+    if(i>=uint(shadow_vis.shadow_visibility.length()) || p.normal.w!=1.0 ||
+       !scBoundaryLightFinite(p.worldFootprint.xyz) || !scBoundaryLightFinite(p.normal.xyz) ||
+       !scBoundaryLightFinite(p.albedo.xyz) || any(lessThan(p.albedo.xyz,vec3(0))) || any(greaterThan(p.albedo.xyz,vec3(1))) ||
+       abs(dot(p.normal.xyz,p.normal.xyz)-1.0)>0.01)return;
+    float visibility=shadow_vis.shadow_visibility[i];
+    if(isnan(visibility)||isinf(visibility)||visibility<0.0||visibility>1.0)return;
+    vec3 direct=vec3(0),normal=p.normal.xyz,world=p.worldFootprint.xyz;
+    uint lightCount=min(flp.params.light_count,min(uint(lights.data.length()),256u));
+    for(uint li=0u;li<lightCount;++li){
+        LightInfo light=lights.data[li];vec3 L;float attenuation;
+        if(uint(light.direction.w)==1u){L=-normalize(light.direction.xyz);attenuation=visibility;}
+        else {vec3 toLight=light.position.xyz-world;float distance=length(toLight),radius=light.position.w;
+            if(radius<=0.0 || distance>radius)continue;
+            L=toLight/max(distance,0.001);attenuation=max(1.0-distance*distance/(radius*radius),0.0);}
+        direct+=light.color.xyz*max(dot(normal,L),0.0)*attenuation;
+    }
+    bool inVolume=false;
+    vec3 indirect=gatherProbeIrradiance(world,normal,inVolume)*flp.params.probe_feed_bootstrap;
+    vec3 radiance=(direct+indirect)*p.albedo.xyz*0.31830988;
+    if(!scBoundaryLightFinite(direct)||!scBoundaryLightFinite(indirect)||!scBoundaryLightFinite(radiance))return;
+    // Diagnostic direct + probe-feed components only. No atlas tile transfer,
+    // copied texel shadow, previous-frame self-feedback or production hit flag.
+    outputValue.radiance=vec4(min(radiance,vec3(64)),1);
+    outputValue.irradiance=vec4(indirect,inVolume?1:0);
+    outputValue.directVisibility=vec4(direct,visibility);
+    boundaryResults[i]=outputValue;
+}
+#endif
