@@ -603,6 +603,28 @@ VulkanTexture* VulkanDevice::GetTexture(ResourceHandle handle) {
     return textureAllocator_->Get(static_cast<u32>(handle));
 }
 
+bool VulkanDevice::GetBufferByteSize(ResourceHandle buffer, u64& bytes) {
+    auto* resource=GetBuffer(buffer);
+    bytes=resource ? resource->GetSize() : 0;
+    return bytes!=0;
+}
+
+bool VulkanDevice::GetTextureSize(ResourceHandle texture, u32& width, u32& height) {
+    auto* tex = GetTexture(texture);
+    if (!tex || !tex->GetNativeImage()) return false;
+    const auto& desc = tex->GetTextureDesc();
+    if (!desc.size.x || !desc.size.y) return false;
+    const u32 mip = tex->isView_ ? tex->viewDesc_.mostDetailedMip : 0u;
+    width = std::max(1u, desc.size.x >> mip);
+    height = std::max(1u, desc.size.y >> mip);
+    return true;
+}
+
+DataFormat VulkanDevice::GetTextureFormat(ResourceHandle texture) {
+    auto* tex=GetTexture(texture);
+    return tex && tex->GetNativeImage() ? tex->GetTextureDesc().format : DataFormat::Unknown;
+}
+
 VulkanCommandBuffer* VulkanDevice::GetCommandBuffer(CommandBufferHandle handle) {
     if (handle == handles::INVALID_COMMAND_BUFFER || !commandBufferAllocator_) return nullptr;
     return commandBufferAllocator_->Get(static_cast<u32>(handle));
@@ -1306,6 +1328,21 @@ bool VulkanDevice::pickPhysicalDevice() {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physicalDevice_, &props);
     PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Picked physical device: " << props.deviceName << std::endl;
+    // Multiple ICDs can expose the same GPU name. Record the selected driver's
+    // identity so captures cannot silently attribute another compiler's output.
+    if (props.apiVersion >= VK_API_VERSION_1_2) {
+        VkPhysicalDeviceDriverProperties driver{};
+        driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+        VkPhysicalDeviceProperties2 details{};
+        details.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        details.pNext = &driver;
+        vkGetPhysicalDeviceProperties2(physicalDevice_, &details);
+        PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Driver: driver_id=" << u32(driver.driverID)
+            << " api_version=" << props.apiVersion << " driver_version=" << props.driverVersion
+            << " vendor_id=" << props.vendorID << " device_id=" << props.deviceID
+            << " name=" << driver.driverName << " info=" << driver.driverInfo << std::endl;
+    }
+
     return true;
 }
 

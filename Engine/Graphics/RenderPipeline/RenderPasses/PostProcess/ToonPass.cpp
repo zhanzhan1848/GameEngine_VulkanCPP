@@ -203,7 +203,7 @@ const ToonPassData& AddToonPass(RenderGraph& graph, RGResourceHandle inputColor,
             bufInfo.offset = 0;
             bufInfo.range = sizeof(ToonConstantsCPU);
 
-            WriteDescriptorSet writes[5];
+            WriteDescriptorSet writes[5] = {};
             writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
             writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &colorInfo;
             writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;

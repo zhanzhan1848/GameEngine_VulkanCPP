@@ -132,6 +132,10 @@ public:
     /// Phase 3: Per-type lookup(tests + 外部 caller 用)
     /// Buffer/Sync/QueryPool 在 protected 区域,future 可能 hoist 出来
     VulkanTexture* GetTexture(ResourceHandle handle);
+    bool GetTextureSize(ResourceHandle texture, u32& width, u32& height) override;
+    DataFormat GetTextureFormat(ResourceHandle texture) override;
+    /// Vulkan-only read-only diagnostic metadata; does not expose/map storage.
+    bool GetBufferByteSize(ResourceHandle buffer, u64& bytes);
     VulkanCommandBuffer* GetCommandBuffer(CommandBufferHandle handle);
 
     /// Phase 4: Per-type lookup

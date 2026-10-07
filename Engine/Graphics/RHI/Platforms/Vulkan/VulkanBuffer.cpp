@@ -244,6 +244,12 @@ void VulkanBuffer::destroyImpl() {
 void* VulkanBuffer::mapImpl(u64 offset, u64 /*size*/) {
     // Persistent-mapped 路径(零成本):Dynamic/Staging/Readback 走这里
     if (persistentMappedPtr_) {
+        // 2026-09-22 修复：非 coherent 的 HOST_VISIBLE(如 MoltenVK Managed)
+        // 必须 invalidate 后 CPU 才能看到 GPU 写入——否则读到 stale 视图。
+        // 神经采集 take 的平面在 25% 处被截断即此根因；对 coherent 内存
+        // 本调用是无害 no-op。
+        VulkanDevice& vkDev = static_cast<VulkanDevice&>(device_);
+        vmaInvalidateAllocation(vkDev.GetVmaAllocator(), allocation_, 0, VK_WHOLE_SIZE);
         return static_cast<u8*>(persistentMappedPtr_) + offset;
     }
 

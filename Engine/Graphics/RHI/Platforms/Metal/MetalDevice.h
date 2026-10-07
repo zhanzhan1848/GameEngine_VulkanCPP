@@ -99,6 +99,16 @@ public:
     MetalTexture* GetTexture(ResourceHandle handle);
 
     /**
+     * @brief null 纹理绑定的设备级回退（1×1 白色 rgba8，ShaderRead）。
+     * 描述符编码遇 null 时替换，避免 Metal validation "Null texture
+     * access" 中止（2026-09-22 SPGI 排障引入；null 的来源仍由
+     * MetalCommandBuffer 的 NULL 绑定诊断日志暴露）。
+     */
+    MTL::Texture* GetNullTextureFallback();
+    /// 深度比较槽位（SampledDepthImage）专用回退（1×1 d32 = 1.0，远平面）。
+    MTL::Texture* GetNullDepthFallback();
+
+    /**
      * @brief 获取命令缓冲区对象 (内部使用)
      */
     MetalCommandBuffer* GetCommandBuffer(CommandBufferHandle handle);
@@ -300,6 +310,8 @@ protected:
     DescriptorSetLayoutHandle createDescriptorSetLayoutImpl(const DescriptorSetLayoutDesc& desc);
     PipelineLayoutHandle createPipelineLayoutImpl(const PipelineLayoutDesc& desc);
     DescriptorSetHandle createDescriptorSetImpl(const DescriptorSetDesc& desc);
+    // [PassDebugView 排查] 内部 C++ 查询，不进 C ABI
+    bool GetTextureSize(ResourceHandle texture, u32& width, u32& height) override;
     void updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes);
 
     /**
@@ -343,6 +355,10 @@ private:
     MTL::CommandQueue* graphicsQueue_{nullptr}; ///< 图形命令队列
     MTL::CommandQueue* computeQueue_{nullptr};  ///< 计算命令队列
     MTL::CommandQueue* transferQueue_{nullptr}; ///< 传输命令队列
+
+    // null 绑定回退纹理（惰性创建，设备生命周期持有）
+    MTL::Texture* nullTexFallback_{nullptr};
+    MTL::Texture* nullDepthFallback_{nullptr};
     
     // Shader 依赖图: ShaderHandle -> [PipelineHandle]
     std::mutex pipelineDependencyMutex_;

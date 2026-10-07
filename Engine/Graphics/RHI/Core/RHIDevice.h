@@ -8,6 +8,7 @@
  */
 
 #pragma once
+#include "FrameSlotCompletion.h"
 
 #include "CommonHeaders.h"
 #include "RHITypes.h"
@@ -165,7 +166,10 @@ struct QueryPoolDesc {
  * @details 提供非模板的设备接口，用于需要类型擦除的场景
  */
 class RHIDeviceBase {
+    FrameSlotCompletion frame_slot_completion_;
 public:
+    FrameSlotCompletion& FrameSlotCompletions(){return frame_slot_completion_;}
+    const FrameSlotCompletion& FrameSlotCompletions()const{return frame_slot_completion_;}
     virtual ~RHIDeviceBase() = default;
     virtual bool IsValid() const = 0;
     virtual const DeviceInfo& GetDeviceInfo() const = 0;
@@ -203,6 +207,11 @@ public:
     virtual DescriptorSetHandle CreateDescriptorSet(const DescriptorSetDesc& desc) = 0;
     virtual void DestroyDescriptorSet(DescriptorSetHandle handle) = 0;
     virtual void UpdateDescriptorSets(u32 writeCount, const WriteDescriptorSet* writes) = 0;
+    // [PassDebugView 排查] 查询纹理尺寸（编辑器材质数组 blit 需要源尺寸裁剪）。
+    // 默认 false = 平台未实现；仅内部 C++ 使用，不进 C ABI。
+    virtual bool GetTextureSize(ResourceHandle texture, u32& width, u32& height) { (void)texture; (void)width; (void)height; return false; }
+    // Optional diagnostic query; unsupported backends return Unknown.
+    virtual DataFormat GetTextureFormat(ResourceHandle texture) { (void)texture; return DataFormat::Unknown; }
     virtual RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) = 0;
     virtual void DestroySwapChain(RHISwapChain* swapChain) = 0;
     virtual ResourceHandle CreateBuffer(const BufferDesc& desc) = 0;
@@ -217,6 +226,10 @@ public:
     virtual void DestroyCommandBuffer(CommandBufferHandle handle) = 0;
     virtual void DestroyBuffer(ResourceHandle handle) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
+    // P0-B: 首帧 priming（可选能力）——把新建纹理立即转入明确的初始 layout。
+    // 默认 no-op；Vulkan 实现一次性 UNDEF→SHADER_READ_ONLY 提交。用于
+    // "创建后即被 raw descriptor 绑成 SampledImage" 的模块三缓冲纹理。
+    virtual void PrimeTextureLayout(ResourceHandle /*texture*/) {}
     virtual void DestroyShader(ShaderHandle handle) = 0;
     virtual void DestroyPipeline(PipelineHandle handle) = 0;
     virtual bool GetQueryPoolResults(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride) = 0;

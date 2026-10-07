@@ -216,6 +216,26 @@ bool ColorHistoryManager::CopyColorTexture(rhi::ResourceHandle source,
 
     cmd_buffer->BlitTexture(source, destination, &region, 1, rhi::FilterMode::Nearest);
 
+    // P0-B（queue-submit 09600 定位）: BlitTexture 把 src 停在 TRANSFER_SRC、
+    // dst 停在 TRANSFER_DST 且不回置。两者随后都被绑成 SampledImage（
+    // 承诺 SHADER_READ_ONLY）——deferred 输出被下游反复采样，history 槽
+    // 下帧被 TAA/SSGI/SPGI 读。补回置 barrier：后端按 tracked 解析，
+    // 恰好各发一次 XFER_SRC→SRO / XFER_DST→SRO。
+    {
+        rhi::ResourceBarrier rb[2]{};
+        rb[0].resource = source;
+        rb[0].beforeState = rhi::ResourceState::ShaderResource;
+        rb[0].afterState  = rhi::ResourceState::ShaderResource;
+        rb[0].subresource = 0xFFFFFFFF;
+        rb[0].queueFamily = 0xFFFFFFFF;
+        rb[1].resource = destination;
+        rb[1].beforeState = rhi::ResourceState::CopyDest;
+        rb[1].afterState  = rhi::ResourceState::ShaderResource;
+        rb[1].subresource = 0xFFFFFFFF;
+        rb[1].queueFamily = 0xFFFFFFFF;
+        cmd_buffer->InsertBarrier(rb, 2);
+    }
+
     return true;
 }
 

@@ -19,14 +19,27 @@
 #include "VulkanDescriptorSet.h"
 #include "VulkanMath.h"
 #include "Engine/Common/CoreLogStream.h"
+#include "VulkanDDGIAuditPrefix.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
 #include <cstring>
 #include <iostream>
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
+#include <unordered_set>
 
 namespace primal::graphics::rhi {
+
+static const char* firstPrimaryRasterAuditPrefix() {
+    const char* enabled = std::getenv("DDGI_FIRST_PRIMARY_RASTER");
+    const char* dump = std::getenv("DDGI_DUMP");
+    const char* prefix = std::getenv("DDGI_FIRST_RECORD_PROOF_PREFIX");
+    return enabled && std::strcmp(enabled, "1") == 0 &&
+           dump && std::strcmp(dump, "2") == 0 && prefix && *prefix ? prefix : nullptr;
+}
 
 VulkanCommandBuffer::VulkanCommandBuffer(VulkanDevice& device, CommandQueueType type)
     : RHICommandBuffer(device, type) {
@@ -38,12 +51,16 @@ VulkanCommandBuffer::VulkanCommandBuffer(VulkanCommandBuffer&& other) noexcept
       cmdBuffer_(other.cmdBuffer_),
       submitFence_(other.submitFence_),
       queueFamily_(other.queueFamily_),
-      scope_(other.scope_) {
+      scope_(other.scope_),
+      rasterAuditPipeline_(other.rasterAuditPipeline_),
+      rasterAuditSerial_(other.rasterAuditSerial_) {
     other.cmdPool_ = VK_NULL_HANDLE;
     other.cmdBuffer_ = VK_NULL_HANDLE;
     other.submitFence_ = VK_NULL_HANDLE;
     other.queueFamily_ = UINT32_MAX;
     other.scope_ = Scope::None;
+    other.rasterAuditPipeline_ = VK_NULL_HANDLE;
+    other.rasterAuditSerial_ = 0;
 }
 
 VulkanCommandBuffer& VulkanCommandBuffer::operator=(VulkanCommandBuffer&& other) noexcept {
@@ -55,11 +72,15 @@ VulkanCommandBuffer& VulkanCommandBuffer::operator=(VulkanCommandBuffer&& other)
         submitFence_ = other.submitFence_;
         queueFamily_ = other.queueFamily_;
         scope_ = other.scope_;
+        rasterAuditPipeline_ = other.rasterAuditPipeline_;
+        rasterAuditSerial_ = other.rasterAuditSerial_;
         other.cmdPool_ = VK_NULL_HANDLE;
         other.cmdBuffer_ = VK_NULL_HANDLE;
         other.submitFence_ = VK_NULL_HANDLE;
         other.queueFamily_ = UINT32_MAX;
         other.scope_ = Scope::None;
+        other.rasterAuditPipeline_ = VK_NULL_HANDLE;
+        other.rasterAuditSerial_ = 0;
     }
     return *this;
 }
@@ -179,6 +200,8 @@ bool VulkanCommandBuffer::resetImpl() {
     externalFence_ = VK_NULL_HANDLE;  // P0.1: 同步清空,避免等待已失效的旧句柄
     scope_ = Scope::None;
     pendingSecondaryMode_ = false;
+    rasterAuditPipeline_ = VK_NULL_HANDLE;
+    rasterAuditSerial_ = 0;
     return true;
 }
 
@@ -1180,6 +1203,14 @@ void VulkanCommandBuffer::SetViewport(const ViewportDesc& viewport) {
     vp.minDepth = viewport.minDepth;
     vp.maxDepth = viewport.maxDepth;
     vkCmdSetViewport(cmdBuffer_, 0, 1, &vp);
+    if (const char* prefix = firstPrimaryRasterAuditPrefix()) {
+        std::ofstream trace(std::string(prefix) + ".raster.native-viewports.jsonl", std::ios::app);
+        trace << "{\"native_command_buffer\":" << (u64)(uintptr_t)cmdBuffer_
+              << ",\"viewport\":[" << vp.x << ',' << vp.y << ',' << vp.width
+              << ',' << vp.height << ',' << vp.minDepth << ',' << vp.maxDepth << "]}\n";
+        trace.close();
+        if (!trace) PRIMAL_LOG_STREAM(Error, "RHI") << "[FirstPrimaryRasterAudit] viewport write failed" << std::endl;
+    }
 }
 
 void VulkanCommandBuffer::SetScissor(const Rect& scissor) {
@@ -1197,7 +1228,30 @@ void VulkanCommandBuffer::BindGraphicsPipeline(PipelineHandle pipeline) {
     VulkanPipeline* p = vk.GetPipeline(pipeline);
     if (!p || p->IsCompute()) return;
     vkCmdBindPipeline(cmdBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->GetNativePipeline());
+    // First real native binding of each audited creation serial. Creation state
+    // alone is not evidence that this pipeline was used by a command buffer.
+    if (const char* prefix = std::getenv("VK_NATIVE_PIPELINE_AUDIT"); prefix && *prefix && p->GetNativeAuditSerial()) {
+        static std::mutex auditMutex;
+        static std::unordered_set<u64> recorded;
+        std::lock_guard<std::mutex> lock(auditMutex);
+        const u64 serial=p->GetNativeAuditSerial();
+        if (!recorded.count(serial)) {
+            std::ofstream trace(std::string(prefix) + ".bindings.jsonl", std::ios::app);
+            trace << "{\"serial\":" << serial << ",\"pipeline_handle\":" << pipeline
+                  << ",\"native_pipeline\":" << (u64)(uintptr_t)p->GetNativePipeline()
+                  << ",\"native_layout\":" << (u64)(uintptr_t)p->GetNativePipelineLayout()
+                  << ",\"native_command_buffer\":" << (u64)(uintptr_t)cmdBuffer_
+                  << ",\"bind_point\":0,\"scope_renderpass\":" << (scope_==Scope::RenderPass ? "true" : "false") << "}\n";
+            trace.close();
+            if (trace) recorded.insert(serial);
+            else PRIMAL_LOG_STREAM(Error, "RHI") << "[NativePipelineAudit] binding evidence write failed: " << serial << std::endl;
+        }
+    }
     boundPipelineLayout_ = p->GetNativePipelineLayout();
+    if (firstPrimaryRasterAuditPrefix()) {
+        rasterAuditPipeline_ = p->GetNativePipeline();
+        rasterAuditSerial_ = p->GetNativeAuditSerial();
+    }
 }
 
 void VulkanCommandBuffer::BindVertexBuffers(u32 firstSlot, u32 slotCount,
@@ -1251,11 +1305,59 @@ void VulkanCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint, Pipeli
     vkCmdBindDescriptorSets(cmdBuffer_, pbp, boundPipelineLayout_,
                             firstSet, setCount, sets.data(),
                             dynamicOffsetCount, dynamicOffsets);
+    if (const char* prefix = firstPrimaryRasterAuditPrefix();
+        prefix && bindPoint == PipelineBindPoint::Graphics) {
+        std::ofstream trace(std::string(prefix) + ".raster.native-descriptors.jsonl", std::ios::app);
+        for (u32 i = 0; i < setCount; ++i) {
+            trace << "{\"native_command_buffer\":" << (u64)(uintptr_t)cmdBuffer_
+                  << ",\"native_pipeline\":" << (u64)(uintptr_t)rasterAuditPipeline_
+                  << ",\"serial\":" << rasterAuditSerial_
+                  << ",\"native_layout\":" << (u64)(uintptr_t)boundPipelineLayout_
+                  << ",\"native_set\":" << (u64)(uintptr_t)sets[i]
+                  << ",\"set_handle\":" << descriptorSets[i]
+                  << ",\"first_set\":" << firstSet+i << ",\"dynamic_offsets\":[";
+            for (u32 j = 0; j < dynamicOffsetCount; ++j) {
+                if (j) trace << ',';
+                trace << dynamicOffsets[j];
+            }
+            trace << "]}\n";
+        }
+        trace.close();
+        if (!trace) PRIMAL_LOG_STREAM(Error, "RHI") << "[FirstPrimaryRasterAudit] descriptor write failed" << std::endl;
+    }
+    if (const char* prefix = ddgiRecordedComputeAuditPrefix();
+        prefix && *prefix &&
+        (bindPoint == PipelineBindPoint::Compute ||
+         (std::getenv("DDGI_FIRST_RECORD_PROOF_PREFIX") &&
+          *std::getenv("DDGI_FIRST_RECORD_PROOF_PREFIX"))) &&
+        std::getenv("DDGI_DUMP") && std::strcmp(std::getenv("DDGI_DUMP"), "2") == 0) {
+        std::ofstream trace(std::string(prefix) + ".native-descriptor-bindings.jsonl", std::ios::app);
+        for (u32 i = 0; i < setCount; ++i)
+            trace << "{\"native_command_buffer\":" << (u64)(uintptr_t)cmdBuffer_
+                  << ",\"native_layout\":" << (u64)(uintptr_t)boundPipelineLayout_
+                  << ",\"set_handle\":" << descriptorSets[i]
+                  << ",\"native_set\":" << (u64)(uintptr_t)sets[i]
+                  << ",\"first_set\":" << firstSet+i << ",\"bind_point\":"
+                  << (bindPoint == PipelineBindPoint::Compute ? 1 : 0) << "}\n";
+        trace.close();
+        if (!trace) PRIMAL_LOG_STREAM(Error,"RHI") << "[FirstRhoNativeAudit] descriptor binding evidence failed" << std::endl;
+    }
 }
 
 void VulkanCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCount, u32 startInstance) {
     if (scope_ != Scope::RenderPass) return;
     vkCmdDraw(cmdBuffer_, vertexCount, instanceCount, startVertex, startInstance);
+    if (const char* prefix = firstPrimaryRasterAuditPrefix()) {
+        std::ofstream trace(std::string(prefix) + ".raster.native-draws.jsonl", std::ios::app);
+        trace << "{\"native_command_buffer\":" << (u64)(uintptr_t)cmdBuffer_
+              << ",\"native_pipeline\":" << (u64)(uintptr_t)rasterAuditPipeline_
+              << ",\"serial\":" << rasterAuditSerial_
+              << ",\"native_layout\":" << (u64)(uintptr_t)boundPipelineLayout_
+              << ",\"scope_renderpass\":true,\"draw\":[" << vertexCount << ','
+              << startVertex << ',' << instanceCount << ',' << startInstance << "]}\n";
+        trace.close();
+        if (!trace) PRIMAL_LOG_STREAM(Error, "RHI") << "[FirstPrimaryRasterAudit] draw write failed" << std::endl;
+    }
     UpdateStats(CommandType::Draw);
 }
 
@@ -1278,6 +1380,20 @@ void VulkanCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
     VulkanPipeline* p = vk.GetPipeline(pipeline);
     if (!p || !p->IsCompute()) return;
     vkCmdBindPipeline(cmdBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, p->GetNativePipeline());
+    if (const char* prefix = (p->IsAnalyticFirstRhoAudit() ? ddgiRecordedComputeAuditPrefix()
+            : std::getenv("DDGI_DEFAULT_FIRST_ORACLE_PREFIX"));
+        prefix && *prefix && p->GetNativeAuditSerial()) {
+        std::ofstream trace(std::string(prefix) + ".native-compute-bindings.jsonl", std::ios::app);
+        trace << "{\"serial\":" << p->GetNativeAuditSerial()
+              << ",\"pipeline_handle\":" << pipeline
+              << ",\"native_pipeline\":" << (u64)(uintptr_t)p->GetNativePipeline()
+              << ",\"native_layout\":" << (u64)(uintptr_t)p->GetNativePipelineLayout()
+              << ",\"native_command_buffer\":" << (u64)(uintptr_t)cmdBuffer_
+              << ",\"bind_point\":1}\n";
+        trace.close();
+        if (!trace) PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[DefaultFirstOracleNativeAudit] binding evidence write failed" << std::endl;
+    }
     boundPipelineLayout_ = p->GetNativePipelineLayout();
     scope_ = Scope::Compute;
 }
@@ -1338,6 +1454,16 @@ void VulkanCommandBuffer::SetComputeBytes(u32 index, const void* data, u32 size)
 void VulkanCommandBuffer::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     if (scope_ != Scope::Compute) return;
     vkCmdDispatch(cmdBuffer_, groupCountX, groupCountY, groupCountZ);
+    if (const char* prefix = ddgiRecordedComputeAuditPrefix(); prefix && *prefix && std::getenv("DDGI_DUMP") &&
+        std::strcmp(std::getenv("DDGI_DUMP"), "2") == 0) {
+        std::ofstream trace(std::string(prefix) + ".native-dispatches.jsonl", std::ios::app);
+        trace << "{\"native_command_buffer\":" << (u64)(uintptr_t)cmdBuffer_
+              << ",\"native_layout\":" << (u64)(uintptr_t)boundPipelineLayout_
+              << ",\"groups\":[" << groupCountX << ',' << groupCountY << ',' << groupCountZ
+              << "],\"scope_compute\":true}\n";
+        trace.close();
+        if (!trace) PRIMAL_LOG_STREAM(Error,"RHI") << "[FirstRhoNativeAudit] dispatch evidence failed" << std::endl;
+    }
     UpdateStats(CommandType::Dispatch);
 }
 

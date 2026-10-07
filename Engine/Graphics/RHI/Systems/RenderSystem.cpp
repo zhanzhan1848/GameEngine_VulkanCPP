@@ -193,6 +193,7 @@ void RenderSystem::Wait(u32 frameIndex) {
         // Debug frames take 1-2s GPU, so 30s is generous; on timeout proceed
         // with the stale-slot warning (degrade, don't wedge).
         u32 waitRetries = 0;
+        bool completed=true;
         while (!device_->WaitForSync(fence, 1000)) {
             ++waitRetries;
             if (waitRetries == 1 || waitRetries % 5 == 0) {
@@ -201,12 +202,14 @@ void RenderSystem::Wait(u32 frameIndex) {
                           << ") — GPU-bound, still waiting" << std::endl;
             }
             if (waitRetries >= 30) {
+                completed=false;
                 PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: frame fence unsignaled after 30s "
                           << "(frame " << frameIndex << ") — proceeding (stale "
                           << "triple-buffered params possible this frame)" << std::endl;
                 break;
             }
         }
+        if(completed)device_->FrameSlotCompletions().Publish(idx);
         auto waitEnd = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> waitTime = waitEnd - waitStart;
         if (waitTime.count() > 5.0) {
@@ -249,7 +252,8 @@ bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandl
     // ~20 frames ("vkAllocateDescriptorSets failed").
     device_->BeginFrame();
 
-    // Internal Frame Sync
+    // Internal Frame Sync: failed waits must never authorize resource reuse.
+    device_->FrameSlotCompletions().Invalidate();
     Wait(currentFrameIndex_);
 
     // Acquire Next Image — T4.6.5 part 30.5 (Bug A): pass GPU-GPU acquire

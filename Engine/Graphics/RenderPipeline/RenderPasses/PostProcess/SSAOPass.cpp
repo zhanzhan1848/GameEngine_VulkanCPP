@@ -245,7 +245,7 @@ const SSAOPassData& AddSSAOPass(RenderGraph& graph, RGResourceHandle depthTextur
             DescriptorImageInfo aoInfo; aoInfo.imageView = aoHandle;
             DescriptorBufferInfo bufInfo; bufInfo.buffer = s_ParamsBuffer[fi]; bufInfo.offset = 0; bufInfo.range = sizeof(SSAOParamsCPU);
 
-            WriteDescriptorSet writes[3];
+            WriteDescriptorSet writes[3] = {};
             writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
             writes[0].descriptorType = DescriptorType::SampledDepthImage; writes[0].imageInfo = &depthInfo;
             writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -301,7 +301,7 @@ const SSAOPassData& AddSSAOPass(RenderGraph& graph, RGResourceHandle depthTextur
             DescriptorImageInfo blurInfo; blurInfo.imageView = blurHandle;
             DescriptorBufferInfo bufInfo; bufInfo.buffer = s_BlurParamsBuffer[fi]; bufInfo.offset = 0; bufInfo.range = sizeof(BlurParamsCPU);
 
-            WriteDescriptorSet writes[4];
+            WriteDescriptorSet writes[4] = {};
             writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
             writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &aoInfo;
             writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;

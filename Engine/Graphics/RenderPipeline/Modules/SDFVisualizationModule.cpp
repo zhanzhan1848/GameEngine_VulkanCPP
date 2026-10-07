@@ -407,7 +407,7 @@ void SDFVisualizationModule::AddPass(RenderGraph& graph,
             uboInfo.offset = 0;
             uboInfo.range = sizeof(SDFVizUniforms);
 
-            WriteDescriptorSet writes[5];
+            WriteDescriptorSet writes[5] = {};
             for (u32 c = 0; c < 3; ++c) {
                 writes[c].dstSet = compute_sets_[cbIdx];
                 writes[c].dstBinding = c;
@@ -505,7 +505,7 @@ void SDFVisualizationModule::AddPass(RenderGraph& graph,
             DescriptorImageInfo sampInfo;
             sampInfo.sampler = blit_sampler_;
 
-            WriteDescriptorSet writes[2];
+            WriteDescriptorSet writes[2] = {};
             writes[0].dstSet = blit_sets_[cbIdx];
             writes[0].dstBinding = 0;
             writes[0].descriptorCount = 1;

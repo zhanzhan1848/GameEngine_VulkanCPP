@@ -12,12 +12,16 @@
 #include "VulkanTexture.h"
 #include "VulkanSampler.h"
 #include "Engine/Common/CoreLogStream.h"
+#include "VulkanDDGIAuditPrefix.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
 #include <iostream>
 #include <cstdio>
 #include <vector>
+#include <fstream>
+#include <cstdlib>
+#include <cstring>
 
 namespace primal::graphics::rhi {
 
@@ -177,6 +181,47 @@ void VulkanDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCoun
 
     if (!vkWrites.empty()) {
         vkUpdateDescriptorSets(dev, static_cast<u32>(vkWrites.size()), vkWrites.data(), 0, nullptr);
+        // Explicit rho diagnostic only: record the exact native writes supplied
+        // to Vulkan, for joining to actual compute descriptor-set bindings.
+        if (const char* prefix = ddgiRecordedComputeAuditPrefix(); prefix && *prefix && std::getenv("DDGI_DUMP") &&
+            std::strcmp(std::getenv("DDGI_DUMP"), "2") == 0) {
+            std::ofstream trace(std::string(prefix) + ".native-descriptor-writes.jsonl", std::ios::app);
+            for (const auto& w : vkWrites) {
+                const WriteDescriptorSet* original = nullptr;
+                for (u32 i = 0; i < writeCount; ++i) {
+                    if (writes[i].dstSet == handle_ && writes[i].dstBinding == w.dstBinding &&
+                        writes[i].dstArrayElement == w.dstArrayElement) {
+                        original = &writes[i];
+                        break;
+                    }
+                }
+                for (u32 j = 0; j < w.descriptorCount; ++j) {
+                    trace << "{\"set_handle\":" << handle_
+                          << ",\"native_set\":" << (u64)(uintptr_t)w.dstSet
+                          << ",\"binding\":" << w.dstBinding << ",\"array_element\":" << w.dstArrayElement+j
+                          << ",\"type\":" << w.descriptorType;
+                    if (original && original->bufferInfo)
+                        trace << ",\"resource_handle\":" << original->bufferInfo[j].buffer;
+                    if (original && original->imageInfo)
+                        trace << ",\"resource_handle\":" << original->imageInfo[j].imageView
+                              << ",\"sampler_handle\":" << original->imageInfo[j].sampler;
+                    if (w.pBufferInfo) {
+                        const auto& b = w.pBufferInfo[j];
+                        trace << ",\"native_buffer\":" << (u64)(uintptr_t)b.buffer
+                              << ",\"offset\":" << b.offset << ",\"range\":" << b.range;
+                    }
+                    if (w.pImageInfo) {
+                        const auto& im = w.pImageInfo[j];
+                        trace << ",\"native_view\":" << (u64)(uintptr_t)im.imageView
+                              << ",\"native_sampler\":" << (u64)(uintptr_t)im.sampler
+                              << ",\"image_layout\":" << im.imageLayout;
+                    }
+                    trace << "}\n";
+                }
+            }
+            trace.close();
+            if (!trace) PRIMAL_LOG_STREAM(Error,"RHI") << "[FirstRhoNativeAudit] native descriptor write evidence failed" << std::endl;
+        }
     }
 }
 

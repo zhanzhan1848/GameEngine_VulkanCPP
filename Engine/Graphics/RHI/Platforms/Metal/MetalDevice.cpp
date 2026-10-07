@@ -338,6 +338,52 @@ MetalTexture* MetalDevice::GetTexture(ResourceHandle handle) {
     return textureAllocator_.Get(static_cast<u32>(handle));
 }
 
+MTL::Texture* MetalDevice::GetNullTextureFallback() {
+    if (!nullTexFallback_) {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+        desc->setWidth(1);
+        desc->setHeight(1);
+        desc->setDepth(1);
+        desc->setUsage(MTL::TextureUsageShaderRead);
+        // Shared：CPU 写初值需要（Private 不允许 replaceRegion）；
+        // Apple Silicon 统一内存下 Shared 纹理合法。
+        desc->setStorageMode(MTL::StorageModeShared);
+        nullTexFallback_ = mtlDevice_->newTexture(desc);
+        desc->release();
+        // 白色 = 中性值（visibility/权重语义下 1.0 = 无遮蔽/全通过）
+        if (nullTexFallback_) {
+            const u32 white = 0xFFFFFFFFu;
+            nullTexFallback_->replaceRegion(
+                MTL::Region(0, 0, 0, 1, 1, 1), 0, &white, sizeof(white));
+        }
+    }
+    return nullTexFallback_;
+}
+
+MTL::Texture* MetalDevice::GetNullDepthFallback() {
+    if (!nullDepthFallback_) {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatDepth32Float);
+        desc->setWidth(1);
+        desc->setHeight(1);
+        desc->setDepth(1);
+        desc->setUsage(MTL::TextureUsageShaderRead);
+        desc->setStorageMode(MTL::StorageModeShared);
+        nullDepthFallback_ = mtlDevice_->newTexture(desc);
+        desc->release();
+        // 1.0 = 远平面 → 深度比较语义下 "未被遮蔽"
+        if (nullDepthFallback_) {
+            const float farDepth = 1.0f;
+            nullDepthFallback_->replaceRegion(
+                MTL::Region(0, 0, 0, 1, 1, 1), 0, &farDepth, sizeof(farDepth));
+        }
+    }
+    return nullDepthFallback_;
+}
+
 MetalCommandBuffer* MetalDevice::GetCommandBuffer(CommandBufferHandle handle) {
     return commandBufferAllocator_.Get(static_cast<u32>(handle));
 }
@@ -758,6 +804,14 @@ DescriptorSetHandle MetalDevice::createDescriptorSetImpl(const DescriptorSetDesc
     }
     descriptorSetAllocator_.Free(id);
     return static_cast<DescriptorSetHandle>(handles::INVALID_RESOURCE);
+}
+
+bool MetalDevice::GetTextureSize(ResourceHandle texture, u32& width, u32& height) {
+    MetalTexture* tex = GetTexture(texture);
+    if (!tex || !tex->GetNativeTexture()) return false;
+    width = static_cast<u32>(tex->GetNativeTexture()->width());
+    height = static_cast<u32>(tex->GetNativeTexture()->height());
+    return true;
 }
 
 void MetalDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {

@@ -317,7 +317,7 @@ void PlanarReflectionModule::AddPasses(rendergraph::RenderGraph& graph,
             DescriptorImageInfo sampInfo;
             sampInfo.sampler = composite_sampler_;
 
-            WriteDescriptorSet writes[3];
+            WriteDescriptorSet writes[3] = {};
             writes[0] = {};
             writes[0].dstSet = composite_ds_[cbIdx];
             writes[0].dstBinding = 0;

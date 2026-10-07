@@ -155,6 +155,9 @@ private:
     VkRenderPass       pendingRenderPass_{VK_NULL_HANDLE};
     VkFramebuffer      pendingFramebuffer_{VK_NULL_HANDLE};
     VkPipelineLayout   boundPipelineLayout_{VK_NULL_HANDLE};  // BindGraphicsPipeline 设置
+    // Read-only DUMP2 raster observer; never controls a command or barrier.
+    VkPipeline rasterAuditPipeline_{VK_NULL_HANDLE};
+    u64 rasterAuditSerial_{0};
 
     // Tracks attachment textures + their finalLayouts so EndRenderPass can
     // update currentLayout_ (Vulkan render pass does implicit layout transitions

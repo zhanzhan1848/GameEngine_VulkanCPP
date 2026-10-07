@@ -188,6 +188,7 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     // Allocate persistent history textures (size-tracked) + params buffers
     // and descriptor sets (size-independent, created once) per frame slot.
     TextureDesc histDesc;
+    histDesc.name = "TAA_History";
     histDesc.size = {width, height, 1};
     histDesc.format = DataFormat::RGBA16_Float;
     histDesc.type = TextureType::Texture2D;
@@ -197,12 +198,15 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     for (u32 i = 0; i < MAX_FRAMES; ++i) {
         if (needHistory) {
             s_HistoryTex[i] = device.CreateTexture(histDesc);
+            device.PrimeTextureLayout(s_HistoryTex[i]);  // P0-B 首帧 priming
             // 输出纹理与 history 同尺寸同生命周期（见 s_OutputTex 注释）。
             TextureDesc outTexDesc = histDesc;
+            outTexDesc.name = "TAA_Output";
             outTexDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource | TextureUsage::CopySource;
             if (s_OutputTex[i] != handles::INVALID_RESOURCE)
                 device.DestroyTexture(s_OutputTex[i]);
             s_OutputTex[i] = device.CreateTexture(outTexDesc);
+            device.PrimeTextureLayout(s_OutputTex[i]);  // P0-B 首帧 priming
         }
 
         if (s_ParamsBuf[i] == handles::INVALID_RESOURCE) {
@@ -316,7 +320,17 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             outDesc.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource | TextureUsage::CopySource;
             data.output = builder.Write(
                 graph.ImportTexture("TAA_Output", s_OutputTex[fi], outDesc,
-                                    ResourceState::UnorderedAccess),
+                                    // P0-B（01197 定位）: initialState 必须是
+                                    // Unknown——上帧末尾 restore barrier 把该槽
+                                    // tracked 在 SRO（blit 源回读态）。声明 UA
+                                    // 会让 RG 认为"已在 UA"而不发发射转换，
+                                    // resolve 的 storage 写就发生在 SRO 上，
+                                    // validation 把实际 layout 钉成 GENERAL，
+                                    // 随后 outWriteBarrier 的 SRO→XFER_SRC 触发
+                                    // VUID-01197 ×18/帧。Unknown → RG 发
+                                    // Unknown→UA 初始转换，后端按 tracked 解析
+                                    // （GENERAL→GENERAL 时自然 no-op）。
+                                    ResourceState::Unknown),
                 ResourceState::UnorderedAccess);
         },
         [inputHDR, velocityTexture, width, height, fi, histReadIdx, histValid, depthActive,
@@ -387,7 +401,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             prevDepthInfo.imageView = depthActive ? prevDepthTex : inHandle;
             prevDepthInfo.imageLayout = ResourceState::ShaderResource;
 
-            WriteDescriptorSet writes[7];
+            WriteDescriptorSet writes[7] = {};
             writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
             writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &currInfo;
             writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;

@@ -16,6 +16,7 @@
 #include "MetalQuery.h"
 #include "Engine/Common/CoreDiag.h"
 #include <iostream>
+#include <set>
 #include <thread>
 #include "Engine/Common/CoreLogStream.h"
 
@@ -994,18 +995,28 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     break;
                 }
                 case DescriptorType::SampledImage:
-                case DescriptorType::StorageImage: 
-                case DescriptorType::CombinedImageSampler: 
+                case DescriptorType::StorageImage:
+                case DescriptorType::CombinedImageSampler:
                 case DescriptorType::InputAttachment: {
                     if (binding.resources.empty()) break;
 
                     // Support for Descriptor Arrays
                     utl::vector<MTL::Texture*> mtlTextures;
                     mtlTextures.reserve(binding.resources.size());
-                    
+
+                    const bool isDepth = binding.type == DescriptorType::SampledDepthImage;
                     for (auto handle : binding.resources) {
                          MetalTexture* texture = metalDevice.GetTexture(handle);
-                         mtlTextures.push_back((texture && texture->GetNativeTexture()) ? texture->GetNativeTexture() : nullptr);
+                         if (!texture || !texture->GetNativeTexture()) {
+                             // 2026-09-22：null 绑定会触发 Metal validation
+                             // "Null texture access" 中止。统一替换为设备级
+                             // 中性回退纹理（来源诊断日志保留在下方）。
+                             mtlTextures.push_back(isDepth
+                                 ? metalDevice.GetNullDepthFallback()
+                                 : metalDevice.GetNullTextureFallback());
+                         } else {
+                             mtlTextures.push_back(texture->GetNativeTexture());
+                         }
                     }
                     
                     utl::vector<MTL::SamplerState*> mtlSamplers;
@@ -1022,8 +1033,30 @@ void MetalCommandBuffer::BindDescriptorSets(PipelineBindPoint bindPoint,
                     if (renderEncoder) {
                         if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Vertex))
                             renderEncoder->setVertexTextures(mtlTextures.data(), range);
-                        if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Pixel))
+                        if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Pixel)) {
+                            // 诊断：fragment 槽位解析为 null 会触发 Metal
+                            // validation "Null texture access" 中止（2026-09-22
+                            // SPGI 配排障）。按 (槽位, 句柄) 去重打印——同一
+                            // 空洞只报一次，不同空洞各报一次。
+                            for (size_t ti = 0; ti < mtlTextures.size(); ++ti) {
+                                if (!mtlTextures[ti]) {
+                                    static std::set<std::pair<u32, u64>> nullLogged;
+                                    const auto key = std::make_pair(
+                                        u32(slot + ti), u64(binding.resources[ti]));
+                                    if (nullLogged.insert(key).second) {
+                                        auto lbl = renderEncoder->label();
+                                        PRIMAL_LOG_STREAM(Error, "RHI")
+                                            << "[MetalCommandBuffer] NULL fragment texture: slot="
+                                            << (slot + ti) << " handle=" << binding.resources[ti]
+                                            << " type=" << (int)binding.type
+                                            << " set=" << descriptorSets[i]
+                                            << " enc=" << (lbl ? lbl->utf8String() : "?")
+                                            << std::endl;
+                                    }
+                                }
+                            }
                             renderEncoder->setFragmentTextures(mtlTextures.data(), range);
+                        }
                     } else if (computeEncoder) {
                         if (static_cast<u8>(binding.stageFlags) & static_cast<u8>(ShaderStage::Compute))
                             computeEncoder->setTextures(mtlTextures.data(), range);

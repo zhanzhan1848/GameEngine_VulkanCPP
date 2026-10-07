@@ -49,12 +49,17 @@ public:
     void SetHandle(PipelineHandle h) { handle_ = h; }
 
     const GraphicsPipelineDesc& GetGraphicsDesc() const { return graphicsDesc_; }
+    // Nonzero only for opt-in native creation/binding evidence; no RHI ABI change.
+    u64 GetNativeAuditSerial() const { return nativeAuditSerial_; }
+    bool IsAnalyticFirstRhoAudit() const { return analyticFirstRhoAudit_; }
 
 private:
     VulkanDevice& device_;
     PipelineHandle handle_{handles::INVALID_PIPELINE};
 
     bool isCompute_{false};
+    u64 nativeAuditSerial_{0};
+    bool analyticFirstRhoAudit_{false};
     GraphicsPipelineDesc graphicsDesc_{};
     ComputePipelineDesc  computeDesc_{};
 

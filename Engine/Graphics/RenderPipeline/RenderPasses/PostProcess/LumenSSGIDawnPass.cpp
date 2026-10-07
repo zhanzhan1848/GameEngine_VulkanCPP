@@ -380,7 +380,7 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
                 DescriptorImageInfo outInfo; outInfo.imageView = s_TraceTexture;
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_TraceParamsBuf[fi]; bufInfo.offset = 0; bufInfo.range = sizeof(TraceParamsCPU);
 
-                WriteDescriptorSet writes[5];
+                WriteDescriptorSet writes[5] = {};
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledDepthImage; writes[0].imageInfo = &depthInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -439,7 +439,7 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
                 DescriptorImageInfo outInfo; outInfo.imageView = s_DenoisedTexture;
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_DenoiseParamsBuf[fi]; bufInfo.offset = 0; bufInfo.range = sizeof(DenoiseParamsCPU);
 
-                WriteDescriptorSet writes[3];
+                WriteDescriptorSet writes[3] = {};
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &inInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -512,7 +512,7 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
                 DescriptorImageInfo outInfo; outInfo.imageView = s_FilterTexture;
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_FilterParamsBuf[fi]; bufInfo.offset = 0; bufInfo.range = sizeof(FilterParamsCPU);
 
-                WriteDescriptorSet writes[4];
+                WriteDescriptorSet writes[4] = {};
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &inInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
@@ -575,7 +575,7 @@ const LumenSSGIData& AddLumenSSGIPass(RenderGraph& graph,
                 DescriptorImageInfo outInfo; outInfo.imageView = temporalOutHandle;
                 DescriptorBufferInfo bufInfo; bufInfo.buffer = s_TemporalParamsBuf[fi]; bufInfo.offset = 0; bufInfo.range = sizeof(TemporalParamsCPU);
 
-                WriteDescriptorSet writes[6];
+                WriteDescriptorSet writes[6] = {};
                 writes[0].dstSet = ds; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
                 writes[0].descriptorType = DescriptorType::SampledImage; writes[0].imageInfo = &spatialInfo;
                 writes[1].dstSet = ds; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;

@@ -12,6 +12,7 @@
  */
 
 #include "VulkanPipeline.h"
+#include "VulkanDDGIAuditPrefix.h"
 #include "VulkanDevice.h"
 #include "VulkanShader.h"
 #include "VulkanPipelineLayout.h"
@@ -22,6 +23,11 @@
 
 #include <iostream>
 #include <vector>
+#include <atomic>
+#include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
 
 namespace primal::graphics::rhi {
 
@@ -139,6 +145,8 @@ VulkanPipeline::VulkanPipeline(VulkanPipeline&& other) noexcept
     : device_(other.device_),
       handle_(other.handle_),
       isCompute_(other.isCompute_),
+      nativeAuditSerial_(other.nativeAuditSerial_),
+      analyticFirstRhoAudit_(other.analyticFirstRhoAudit_),
       graphicsDesc_(std::move(other.graphicsDesc_)),
       computeDesc_(std::move(other.computeDesc_)),
       pipeline_(other.pipeline_),
@@ -146,6 +154,8 @@ VulkanPipeline::VulkanPipeline(VulkanPipeline&& other) noexcept
     other.pipeline_ = VK_NULL_HANDLE;
     other.ownedLayout_ = VK_NULL_HANDLE;
     other.handle_ = handles::INVALID_PIPELINE;
+    other.nativeAuditSerial_ = 0;
+    other.analyticFirstRhoAudit_ = false;
 }
 
 VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
@@ -153,6 +163,8 @@ VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
         Destroy();
         handle_ = other.handle_;
         isCompute_ = other.isCompute_;
+        nativeAuditSerial_ = other.nativeAuditSerial_;
+        analyticFirstRhoAudit_ = other.analyticFirstRhoAudit_;
         graphicsDesc_ = std::move(other.graphicsDesc_);
         computeDesc_ = std::move(other.computeDesc_);
         pipeline_ = other.pipeline_;
@@ -160,6 +172,8 @@ VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
         other.pipeline_ = VK_NULL_HANDLE;
         other.ownedLayout_ = VK_NULL_HANDLE;
         other.handle_ = handles::INVALID_PIPELINE;
+        other.nativeAuditSerial_ = 0;
+        other.analyticFirstRhoAudit_ = false;
     }
     return *this;
 }
@@ -178,6 +192,7 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
 
     // === 1. Shader stages ===
     std::vector<VkPipelineShaderStageCreateInfo> stages;
+    std::vector<VulkanShader*> stageSources;
     auto addStage = [&](ShaderHandle h, VkShaderStageFlagBits stage) {
         if (h == handles::INVALID_SHADER) return;
         VulkanShader* sh = vk.GetShader(h);
@@ -188,6 +203,7 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
         s.module = sh->GetNativeModule();
         s.pName = sh->GetEntryPoint();
         stages.push_back(s);
+        stageSources.push_back(sh);
     };
     addStage(desc.vertexShader,  VK_SHADER_STAGE_VERTEX_BIT);
     addStage(desc.pixelShader,   VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -436,6 +452,56 @@ bool VulkanPipeline::Initialize(const GraphicsPipelineDesc& desc) {
         return false;
     }
 
+    // Opt-in evidence from the exact native creation inputs and module-owned
+    // bytes. Serial distinguishes recreated/recycled native handles. This does
+    // not change pipeline state or submit work, and is separate from transport.
+    nativeAuditSerial_ = 0;
+    if (const char* prefix = std::getenv("VK_NATIVE_PIPELINE_AUDIT"); prefix && *prefix) {
+        static std::atomic<u64> nextSerial{1};
+        const u64 serial = nextSerial.fetch_add(1);
+        const std::string stem = std::string(prefix) + ".pipeline-" + std::to_string(serial);
+        std::ofstream meta(stem + ".json");
+        bool complete = bool(meta);
+        meta << "{\"serial\":" << serial << ",\"native_pipeline\":" << (u64)(uintptr_t)pipeline_
+             << ",\"native_layout\":" << (u64)(uintptr_t)gci.layout
+             << ",\"native_device\":" << (u64)(uintptr_t)dev
+             << ",\"create_result\":0,\"cull_mode\":" << rs.cullMode
+             << ",\"front_face\":" << rs.frontFace << ",\"rasterizer_discard\":" << rs.rasterizerDiscardEnable
+             << ",\"depth_state_present\":" << (gci.pDepthStencilState ? "true" : "false")
+             << ",\"depth_test\":" << ds.depthTestEnable << ",\"depth_write\":" << ds.depthWriteEnable
+             << ",\"depth_compare\":" << ds.depthCompareOp << ",\"stencil_test\":" << ds.stencilTestEnable
+             << ",\"alpha_to_coverage\":" << ms.alphaToCoverageEnable
+             << ",\"topology\":" << ias.topology << ",\"stages\":[";
+        for (size_t i=0; i<stages.size(); ++i) {
+            VulkanShader* sh = stageSources[i];
+            const std::string file = stem + ".stage-" + std::to_string(i) + ".spv";
+            std::ofstream bytes(file, std::ios::binary);
+            const bool identity = sh->GetNativeModule() == stages[i].module;
+            bytes.write(reinterpret_cast<const char*>(sh->spirv_.data()), std::streamsize(sh->spirv_.size()));
+            bytes.close();
+            complete = complete && identity && bool(bytes);
+            if (i) meta << ',';
+            meta << "{\"stage\":" << stages[i].stage << ",\"module\":" << (u64)(uintptr_t)stages[i].module
+                 << ",\"shader_handle\":" << sh->GetHandle() << ",\"entrypoint\":" << std::quoted(stages[i].pName)
+                 << ",\"bytes\":" << sh->spirv_.size() << ",\"bytecode_file\":" << std::quoted(file)
+                 << ",\"module_identity\":" << (identity ? "true" : "false") << '}';
+        }
+        meta << "],\"blend_attachments\":[";
+        for (size_t i=0; i<attachments.size(); ++i) {
+            const auto& a=attachments[i];
+            if (i) meta << ',';
+            meta << "{\"enable\":" << a.blendEnable << ",\"src_color\":" << a.srcColorBlendFactor
+                 << ",\"dst_color\":" << a.dstColorBlendFactor << ",\"color_op\":" << a.colorBlendOp
+                 << ",\"src_alpha\":" << a.srcAlphaBlendFactor << ",\"dst_alpha\":" << a.dstAlphaBlendFactor
+                 << ",\"alpha_op\":" << a.alphaBlendOp << ",\"write_mask\":" << a.colorWriteMask << '}';
+        }
+        meta << "],\"dynamic_states\":[";
+        for (u32 i=0; i<dys.dynamicStateCount; ++i) { if(i) meta << ','; meta << dys.pDynamicStates[i]; }
+        meta << "],\"capture_complete\":" << (complete ? "true" : "false") << "}\n";
+        meta.close();
+        if (complete && meta) nativeAuditSerial_ = serial;
+        else PRIMAL_LOG_STREAM(Error, "RHI") << "[NativePipelineAudit] incomplete creation evidence: " << serial << std::endl;
+    }
     return true;
 }
 
@@ -487,6 +553,98 @@ bool VulkanPipeline::Initialize(const ComputePipelineDesc& desc) {
         pipeline_ = VK_NULL_HANDLE;
         return false;
     }
+    // Explicitly requested oracle/rho diagnostics export exact native compute
+    // creation bytes; all unrequested production pipelines retain no audit.
+    nativeAuditSerial_ = 0;
+    analyticFirstRhoAudit_ = false;
+    const char* oraclePrefix = nullptr;
+    if (std::strcmp(css.pName, "ddgi_default_first_oracle") == 0)
+        oraclePrefix = std::getenv("DDGI_DEFAULT_FIRST_ORACLE_PREFIX");
+    else if (std::strcmp(css.pName, "ddgi_analytic_first_rho") == 0 ||
+             std::strcmp(css.pName, "ddgi_first_record_proof") == 0 ||
+             std::strcmp(css.pName, "ddgi_first_coherent_replay") == 0 ||
+             std::strcmp(css.pName, "ddgi_first_factor_replay") == 0) {
+        oraclePrefix = std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX");
+        const char* rhoDump = std::getenv("DDGI_DUMP");
+        if (!rhoDump || std::strcmp(rhoDump, "2") != 0) oraclePrefix = nullptr;
+        if (std::strcmp(css.pName, "ddgi_first_record_proof") == 0) {
+            const char* recordPrefix = std::getenv("DDGI_FIRST_RECORD_PROOF_PREFIX");
+            if (!recordPrefix || !*recordPrefix) oraclePrefix = nullptr;
+        }
+        if (std::strcmp(css.pName, "ddgi_first_coherent_replay") == 0) {
+            const char* replay = std::getenv("DDGI_FIRST_COHERENT_REPLAY");
+            if (!replay || std::strcmp(replay, "1") != 0) oraclePrefix = nullptr;
+        }
+        if (std::strcmp(css.pName, "ddgi_first_factor_replay") == 0) {
+            const char* replay = std::getenv("DDGI_FIRST_FACTOR_REPLAY");
+            if (!replay || std::strcmp(replay, "1") != 0) oraclePrefix = nullptr;
+        }
+        analyticFirstRhoAudit_ = oraclePrefix && *oraclePrefix;
+    }
+    if (std::strcmp(css.pName,"ddgi_update_irradiance")==0 ||
+        std::strcmp(css.pName,"ddgi_sh_producer_shadow")==0 ||
+        std::strcmp(css.pName,"ddgi_sh_producer_compare")==0) {
+        const char* requested=std::getenv("DDGI_SH_PRODUCER_AUDIT_PREFIX");
+        const char* dump=std::getenv("DDGI_DUMP");
+        if (requested && *requested && dump && std::strcmp(dump,"2")==0) {
+            oraclePrefix=std::getenv("DDGI_ANALYTIC_FIRST_RHO_PREFIX");
+            analyticFirstRhoAudit_=oraclePrefix && *oraclePrefix;
+        }
+    }
+    if (std::strcmp(css.pName, "ddgi_trace_sdf") == 0 ||
+        std::strcmp(css.pName, "ddgi_trace_finalize") == 0 ||
+        std::strcmp(css.pName, "ddgi_first_normal_proof") == 0 ||
+        std::strcmp(css.pName, "ddgi_zero_normal_factor") == 0) {
+        const char* zero = std::getenv("DDGI_FIRST_ZERO_CROSS");
+        const char* requested = std::getenv("DDGI_FIRST_ZERO_CROSS_AUDIT_PREFIX");
+        const char* dump = std::getenv("DDGI_DUMP");
+        if (zero && std::strcmp(zero, "1") == 0 && requested && *requested &&
+            dump && std::strcmp(dump, "2") == 0) {
+            oraclePrefix = ddgiRecordedComputeAuditPrefix();
+            analyticFirstRhoAudit_ = true; // Preserve every actual native create.
+        }
+    }
+    if (std::strcmp(css.pName, "surface_cache_light_eval") == 0 ||
+        std::strcmp(css.pName, "surface_cache_shadow") == 0) {
+        const char* requested = std::getenv("DDGI_FIRST_LIGHT_INPUT_DUMP");
+        const char* dump = std::getenv("DDGI_DUMP");
+        if (requested && std::strcmp(requested, "1") == 0 &&
+            dump && std::strcmp(dump, "2") == 0) {
+            oraclePrefix = ddgiRecordedComputeAuditPrefix();
+            analyticFirstRhoAudit_ = oraclePrefix && *oraclePrefix;
+        }
+    }
+    if (oraclePrefix && *oraclePrefix) {
+        static std::atomic<u64> nextOracleSerial{1};
+        const u64 serial = nextOracleSerial.fetch_add(1);
+        // Each DDGI volume creates its own child pipeline. Preserve every
+        // successful create so a later volume cannot overwrite its identity.
+        const std::string stem = std::string(oraclePrefix) + ".native-compute" +
+            (analyticFirstRhoAudit_ ? "-" + std::to_string(serial) : "");
+        std::ofstream bytes(stem + ".spv", std::ios::binary);
+        const bool identity = sh->GetNativeModule() == css.module;
+        bytes.write(reinterpret_cast<const char*>(sh->spirv_.data()),
+                    std::streamsize(sh->spirv_.size()));
+        bytes.close();
+        const bool complete = identity && bool(bytes);
+        std::ofstream meta(stem + ".json");
+        meta << "{\"serial\":" << serial
+             << ",\"native_pipeline\":" << (u64)(uintptr_t)pipeline_
+             << ",\"native_device\":" << (u64)(uintptr_t)dev
+             << ",\"native_layout\":" << (u64)(uintptr_t)cci.layout
+             << ",\"create_result\":0,\"bind_point\":1,\"stage\":" << css.stage
+             << ",\"module\":" << (u64)(uintptr_t)css.module
+             << ",\"shader_handle\":" << sh->GetHandle()
+             << ",\"entrypoint\":" << std::quoted(css.pName)
+             << ",\"bytes\":" << sh->spirv_.size()
+             << ",\"bytecode_file\":" << std::quoted(stem + ".spv")
+             << ",\"module_identity\":" << (identity ? "true" : "false")
+             << ",\"capture_complete\":" << (complete ? "true" : "false") << "}\n";
+        meta.close();
+        if (complete && meta) nativeAuditSerial_ = serial;
+        else PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[DefaultFirstOracleNativeAudit] incomplete creation evidence" << std::endl;
+    }
     return true;
 }
 
@@ -517,6 +675,8 @@ void VulkanPipeline::Destroy() {
         }
     });
     pipeline_ = VK_NULL_HANDLE;
+    nativeAuditSerial_ = 0;
+    analyticFirstRhoAudit_ = false;
     ownedLayout_ = VK_NULL_HANDLE;
 }
 

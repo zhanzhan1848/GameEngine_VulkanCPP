@@ -7,11 +7,15 @@
 
 #include "VulkanSampler.h"
 #include "VulkanDevice.h"
+#include "VulkanDDGIAuditPrefix.h"
 #include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
 #include <iostream>
+#include <fstream>
+#include <cstdlib>
+#include <cstring>
 
 namespace primal::graphics::rhi {
 
@@ -104,6 +108,20 @@ bool VulkanSampler::Initialize(const SamplerDesc& desc) {
     if (vkCreateSampler(dev, &ci, nullptr, &sampler_) != VK_SUCCESS) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSampler] vkCreateSampler failed" << std::endl;
         return false;
+    }
+    if (const char* prefix = ddgiRecordedComputeAuditPrefix(); prefix && *prefix && std::getenv("DDGI_DUMP") &&
+        std::strcmp(std::getenv("DDGI_DUMP"), "2") == 0) {
+        std::ofstream trace(std::string(prefix) + ".native-samplers.jsonl", std::ios::app);
+        trace << "{\"native_sampler\":" << (u64)(uintptr_t)sampler_
+              << ",\"create_result\":0,\"min_filter\":" << ci.minFilter
+              << ",\"mag_filter\":" << ci.magFilter << ",\"mipmap_mode\":" << ci.mipmapMode
+              << ",\"address_u\":" << ci.addressModeU << ",\"address_v\":" << ci.addressModeV
+              << ",\"address_w\":" << ci.addressModeW << ",\"lod_bias\":" << ci.mipLodBias
+              << ",\"min_lod\":" << ci.minLod << ",\"max_lod\":" << ci.maxLod
+              << ",\"anisotropy_enable\":" << ci.anisotropyEnable << ",\"max_anisotropy\":" << ci.maxAnisotropy
+              << ",\"compare_enable\":" << ci.compareEnable << ",\"unnormalized_coordinates\":" << ci.unnormalizedCoordinates << "}\n";
+        trace.close();
+        if (!trace) PRIMAL_LOG_STREAM(Error,"RHI") << "[FirstRhoNativeAudit] sampler creation evidence failed" << std::endl;
     }
     return true;
 }
