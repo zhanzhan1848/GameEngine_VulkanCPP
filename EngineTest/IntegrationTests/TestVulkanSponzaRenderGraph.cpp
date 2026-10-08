@@ -11,6 +11,7 @@
 
 #include "TestVulkanSponzaRenderGraph.h"
 #include "SponzaReference.h"
+#include "Engine/Graphics/RenderPipeline/PassChainCapture.h"
 
 #include "Engine/Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
@@ -2343,8 +2344,11 @@ void TestVulkanSponzaRenderGraph::Run() {
     const char* captureDir = std::getenv("SPONZA_CAPTURE_DIR");
     // A sequence is directory-based, so SPONZA_CAPTURE_DIR is sufficient to
     // activate it.  Keep SPONZA_CAPTURE as the legacy single-file trigger.
-    const bool referenceCapture = (capturePath || (captureCount > 1u && captureDir)) &&
-        frameCount_ >= captureStart && frameCount_ < captureStart + captureCount;
+    const bool discreteCapture = std::getenv("SPONZA_CAPTURE_FRAMES") != nullptr;
+    const bool referenceCapture = discreteCapture
+        ? captureDir && passcapture::Requested(frameCount_)
+        : (capturePath || (captureCount > 1u && captureDir)) &&
+          frameCount_ >= captureStart && frameCount_ < captureStart + captureCount;
     const bool diagnosticCapture = std::getenv("SPONZA_DIAGNOSTIC_CAPTURE") &&
         (frameCount_ == 60 || frameCount_ == 61 || frameCount_ == 360 ||
          frameCount_ == 361 || frameCount_ == 1800);
@@ -2400,6 +2404,13 @@ void TestVulkanSponzaRenderGraph::Run() {
     device_->Submit(submitInfo);
 
     renderSystem_.EndFrame(renderDoneSem);
+    static const auto captureClockStart = std::chrono::steady_clock::now();
+    static u64 captureProbeUpdates = 0;
+    if (auto* ddgi=pipeline_->GetDDGIPass()) captureProbeUpdates += ddgi->GetLastUpdateCount();
+    if (!passcapture::Drain(device_,frameCount_,std::chrono::duration<double>(std::chrono::steady_clock::now()-captureClockStart).count(),captureProbeUpdates)) {
+        PRIMAL_LOG_STREAM(Error,"Render") << "[PASS_CAPTURE] checked snapshot failed frame=" << frameCount_ << std::endl;
+        Shutdown(); std::exit(2);
+    }
     if(const char* prefix=std::getenv("SC_BOUNDARY_LIGHT_PROOF_PREFIX");prefix && prefix[0]){
         if(lumen::SurfaceCachePass::BoundaryLightingProofFrame(frameCount_)){auto* sc=pipeline_->GetSurfaceCachePass();
             const std::string destination=std::getenv("SC_BOUNDARY_CACHE_PROOF_FRAMES")?std::string(prefix)+".f"+std::to_string(frameCount_):std::string(prefix);
@@ -2521,9 +2532,9 @@ void TestVulkanSponzaRenderGraph::Run() {
             // Preserve the historical single-frame exact-path contract.  A
             // sequence uses SPONZA_CAPTURE_DIR + reference_<frame>.ppm so
             // adjacent frames cannot overwrite one another.
-            if (std::string(tag) == "reference" && captureCount == 1u)
+            if (std::string(tag) == "reference" && captureCount == 1u && !discreteCapture)
                 ppmPath = std::getenv("SPONZA_CAPTURE");
-            const bool sequenceStats = std::getenv("SPONZA_CAPTURE_SEQUENCE_STATS") != nullptr &&
+            const bool sequenceStats = !discreteCapture && std::getenv("SPONZA_CAPTURE_SEQUENCE_STATS") != nullptr &&
                                        std::string(tag) == "reference";
             std::vector<u8> sequenceRgb;
             if (sequenceStats) sequenceRgb.reserve((size_t)capW * capH * 3u);

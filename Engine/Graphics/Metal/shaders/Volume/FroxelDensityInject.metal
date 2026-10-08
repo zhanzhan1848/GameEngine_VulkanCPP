@@ -27,6 +27,26 @@ kernel void froxel_density_inject(
     // Reconstruct world position from froxel coordinates（整数 = 单元中心）
     float3 world_pos = froxel_to_world(gid, params);
 
+    // WP5 云原语：**先于深度清零采样**（4 象限 min-depth 清零是霾的保守
+    // 策略,云的屏幕足迹沾到近处槽沿像素时整格被清——与 GLSL 同步）。
+    // 墙体相交由 SDF 固体门剔除。
+    float cloudD = 0.0;
+    if (params.CloudA.x > 0.5) {
+        float3 cuvw = (world_pos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
+        if (cuvw.x > 0.0 && cuvw.x < 1.0 &&
+            cuvw.y > 0.0 && cuvw.y < 1.0 &&
+            cuvw.z > 0.0 && cuvw.z < 1.0) {
+            constexpr sampler cloud_s(coord::normalized, filter::linear,
+                                      address::clamp_to_edge, mip_filter::none);
+            float cd = cloud_volume.sample(cloud_s, cuvw).r;
+            float sdf = froxel_sample_best_sdf(world_pos, sdf_cascade_0,
+                                               sdf_cascade_1, sdf_cascade_2,
+                                               params);
+            float not_solid = smoothstep(-1.0, -0.2, sdf);
+            cloudD = params.CloudA.z * cd * not_solid;
+        }
+    }
+
     // 场景几何之后的 froxel 置零：屏幕足迹 4 象限取最小深度（最近表面），
     // 与 GLSL 同步（audit V2/V3）；切片后边界越面即清零。
     bool cleared = false;
@@ -47,7 +67,7 @@ kernel void froxel_density_inject(
             }
         }
     }
-    if (cleared) {
+    if (cleared && cloudD <= 0.0) {
         froxel_density.write(0.0, gid);
         return;
     }
@@ -58,23 +78,12 @@ kernel void froxel_density_inject(
         return;
     }
 
-    // 全场景基础霾保留；WP5 云体在下方 max() 叠加（与 GLSL 同步）
-    float density = froxel_sample_density(world_pos, noise_tex,
-                                          sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
-                                          params);
-
-    // WP5 云原语（3D 纹理路线，与 GLSL 同式）：云 AABB 内采样预烘焙体积
-    if (params.CloudA.x > 0.5) {
-        float3 cuvw = (world_pos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
-        if (cuvw.x > 0.0 && cuvw.x < 1.0 &&
-            cuvw.y > 0.0 && cuvw.y < 1.0 &&
-            cuvw.z > 0.0 && cuvw.z < 1.0) {
-            constexpr sampler cloud_s(coord::normalized, filter::linear,
-                                      address::clamp_to_edge, mip_filter::none);
-            float cd = cloud_volume.sample(cloud_s, cuvw).r;
-            density = max(density, params.CloudA.z * cd);
-        }
-    }
+    // 全场景基础霾保留（受深度清零）；WP5 云体 max() 叠加（与 GLSL 同步）
+    float density = (cleared ? 0.0f
+        : froxel_sample_density(world_pos, noise_tex,
+                                sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
+                                params));
+    density = max(density, cloudD);
 
     // Threshold
     if (density < params.VolumeParams1.z) density = 0.0;

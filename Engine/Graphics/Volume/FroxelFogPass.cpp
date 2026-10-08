@@ -586,7 +586,10 @@ void FroxelFogPass::CreateCloudTexture() {
                                   wz * freq * 3.2f + 23.1f);
         float shell = 1.0f - 0.40f * smoothstepf(0.50f, 0.95f, det);
 
-        float d = body * valleys * (0.55f + 0.45f * mid) * shell;
+        // 垂直密度梯度(真实积云 LWC 分布):底浓顶淡——march 阴影下
+        // 自然形成参考图的"暗底亮顶"对比。
+        float grad = 1.15f - 0.35f * smoothstepf(-0.75f, 0.75f, py);
+        float d = body * valleys * (0.55f + 0.45f * mid) * shell * grad;
         voxels[z*RES*RES + y*RES + x] = clampf(d, 0.0f, 1.0f);
     }
 

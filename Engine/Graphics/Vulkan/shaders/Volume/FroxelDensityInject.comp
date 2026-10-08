@@ -32,6 +32,24 @@ void main() {
     // 内 +0.5 叠加，把中心采样成了角点——audit V2）。
     vec3 worldPos = froxelToWorld(vec3(gid));
 
+    // WP5 云原语：**先于深度清零采样**。4 象限 min-depth 清零是霾的保守
+    // 策略——云的屏幕足迹沾到近处槽沿/屋檐像素时整格被清（puff_v12 排查：
+    // 小块云在该策略下必然全灭）。云是显式放置的体积实体，墙体相交由
+    // SDF 固体门剔除。
+    float cloudD = 0.0;
+    if (params.CloudA.x > 0.5) {
+        vec3 cuvw = (worldPos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
+        if (cuvw.x > 0.0 && cuvw.x < 1.0 &&
+            cuvw.y > 0.0 && cuvw.y < 1.0 &&
+            cuvw.z > 0.0 && cuvw.z < 1.0) {
+            float cd = froxelTrilinearClamp(cloud_volume, cuvw, vec3(96.0));
+            float sdf = froxelSampleBestSdf(worldPos, sdf_cascade_0,
+                                            sdf_cascade_1, sdf_cascade_2);
+            float notSolid = smoothstep(-1.0, -0.2, sdf);
+            cloudD = params.CloudA.z * cd * notSolid;
+        }
+    }
+
     // 场景几何之后的 froxel 置零。取本 froxel 屏幕足迹 4 象限的最小深度
     // （最近表面）——单点采样会漏掉细柱/栏杆，让光束穿缝。
     bool cleared = false;
@@ -53,7 +71,7 @@ void main() {
             }
         }
     }
-    if (cleared) {
+    if (cleared && cloudD <= 0.0) {
         imageStore(froxel_density, gid, vec4(0.0));
         return;
     }
@@ -65,23 +83,11 @@ void main() {
     }
 
     vec3 noiseDims = vec3(textureSize(noise_tex, 0));
-    // 全场景基础霾（噪声霾+高度雾）始终保留；WP5 云体在下方 max() 叠加为
-    // 独立的局部云块（用户定调：全场景雾霾 + 中间一小块独立云体）。
-    float density = froxelSampleDensity(worldPos, noise_tex, noiseDims,
-                                        sdf_cascade_0, sdf_cascade_1, sdf_cascade_2);
-
-    // WP5 云原语（3D 纹理路线）：云 AABB(center ± radius) 内采样预烘焙
-    // 云体积（CPU 生成的三尺度积云），max() 叠加在基础霾上。uvw 出界 =
-    // 云外，不采样。
-    if (params.CloudA.x > 0.5) {
-        vec3 cuvw = (worldPos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
-        if (cuvw.x > 0.0 && cuvw.x < 1.0 &&
-            cuvw.y > 0.0 && cuvw.y < 1.0 &&
-            cuvw.z > 0.0 && cuvw.z < 1.0) {
-            float cd = froxelTrilinearClamp(cloud_volume, cuvw, vec3(96.0));
-            density = max(density, params.CloudA.z * cd);
-        }
-    }
+    // 全场景基础霾（噪声霾+高度雾,受上方深度清零）；WP5 云体 max() 叠加。
+    float density = (cleared ? 0.0f
+        : froxelSampleDensity(worldPos, noise_tex, noiseDims,
+                              sdf_cascade_0, sdf_cascade_1, sdf_cascade_2));
+    density = max(density, cloudD);
 
     if (density < params.VolumeParams1.z) density = 0.0;
 
