@@ -99,6 +99,7 @@ public static class RuntimeSceneExporter
             AppendMesh(sb, ctx, entity);
             AppendTextures(sb, ctx, entity);
             AppendScript(sb, ctx, entity);
+            AppendPhysics(sb, entity);
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
                 // type/intensity/rgb/range/umbra/penumbra/enabled — the same
@@ -251,6 +252,31 @@ public static class RuntimeSceneExporter
         BuiltinMeshKind.Capsule => "capsule",
         _ => "unknown",
     };
+
+    /// <summary>
+    /// physics S1（2026-10-14）：collider/rigidbody 行——字段序与
+    /// AddEntityCollider/AddEntityRigidBody 一一对应（PhysicsAPI 同契约；
+    /// RigidBody 依赖 Collider，player 侧先挂 collider）。形状 0=Box 1=Sphere
+    ///（Sphere 用 half[0] 当半径，同编辑器推送）；模式 0=Static 1=Dynamic
+    /// 2=Kinematic。场景含任一 rigidbody → player 开 PhysicsSetRunning。
+    /// </summary>
+    private static void AppendPhysics(StringBuilder sb, GameEntity entity)
+    {
+        var collider = entity.GetComponent<ColliderComponent>();
+        if (collider != null)
+        {
+            sb.AppendLine(
+                $"collider {(uint)collider.Shape} {Fmt(collider.HalfX)} {Fmt(collider.HalfY)} {Fmt(collider.HalfZ)} " +
+                $"0 0 0 {(collider.IsTrigger ? 1 : 0)} {collider.Layer}");
+        }
+        var body = entity.GetComponent<RigidBodyComponent>();
+        if (body != null)
+        {
+            sb.AppendLine(
+                $"rigidbody {(uint)body.Mode} {Fmt(body.Mass)} {Fmt(body.Restitution)} {Fmt(body.Friction)} " +
+                $"{Fmt(body.VelocityX)} {Fmt(body.VelocityY)} {Fmt(body.VelocityZ)}");
+        }
+    }
 
     private static void AppendTextures(StringBuilder sb, ExportContext ctx, GameEntity entity)
     {

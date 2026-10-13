@@ -89,6 +89,13 @@ std::uint64_t ScriptCreateForEntity(std::uint32_t entity_id, const char* lua_pat
                                     std::uint32_t param_count);
 void          ScriptDestroyForEntity(std::uint64_t script_id);
 void          ScriptSetInputState(const char* action, std::uint32_t down);
+std::uint32_t AddEntityCollider(std::uint32_t entity_id, std::uint32_t shape,
+                                const float* half_extents, const float* offset,
+                                std::uint32_t is_trigger, std::uint32_t layer);
+std::uint32_t AddEntityRigidBody(std::uint32_t entity_id, std::uint32_t mode, float mass,
+                                 float restitution, float friction, const float* velocity);
+std::uint32_t PhysicsInitialize(const void* settings_pod);
+std::uint32_t PhysicsSetRunning(std::uint32_t running);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
 void          DestroyRenderTarget(std::uint64_t handle);
@@ -137,6 +144,16 @@ struct RuntimeEntity {
     float light_umbra = 0.f;
     float light_penumbra = 0.f;
     bool light_enabled = true;
+    // physics S1：collider/rigidbody（字段序同 AddEntity* 导出）。
+    bool has_collider = false;
+    std::uint32_t collider_shape = 0;   // 0=Box 1=Sphere（Sphere 用 half[0] 当半径）
+    float collider_half[3]{0.5f, 0.5f, 0.5f};
+    bool collider_trigger = false;
+    std::uint32_t collider_layer = 0;
+    bool has_rigidbody = false;
+    std::uint32_t rb_mode = 1;          // 0=Static 1=Dynamic 2=Kinematic
+    float rb_mass = 1.f, rb_restitution = 0.f, rb_friction = 0.5f;
+    float rb_velocity[3]{0.f, 0.f, 0.f};
     bool has_camera = false;
     std::uint32_t camera_projection = 0;
     float camera_fov_deg = 60.f;
@@ -271,6 +288,27 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
             if (key_end != std::string::npos) {
                 current.script_params.emplace_back(
                     rest.substr(0, key_end), ParseQuoted(rest.substr(key_end + 1)));
+            }
+        }
+        else if (key == "collider") {
+            // "collider <shape> <hx hy hz> <ox oy oz> <trigger> <layer>"（9 值；offset 恒 0 预留）
+            float v[9];
+            if (ParseFloats(rest, v, 9)) {
+                current.has_collider = true;
+                current.collider_shape = static_cast<std::uint32_t>(v[0]);
+                current.collider_half[0] = v[1]; current.collider_half[1] = v[2]; current.collider_half[2] = v[3];
+                current.collider_trigger = v[7] != 0.f;
+                current.collider_layer = static_cast<std::uint32_t>(v[8]);
+            }
+        }
+        else if (key == "rigidbody") {
+            // "rigidbody <mode> <mass> <restitution> <friction> <vx vy vz>"
+            float v[7];
+            if (ParseFloats(rest, v, 7)) {
+                current.has_rigidbody = true;
+                current.rb_mode = static_cast<std::uint32_t>(v[0]);
+                current.rb_mass = v[1]; current.rb_restitution = v[2]; current.rb_friction = v[3];
+                current.rb_velocity[0] = v[4]; current.rb_velocity[1] = v[5]; current.rb_velocity[2] = v[6];
             }
         }
         else if (key == "light") {
@@ -521,6 +559,56 @@ std::uint32_t InjectScene(RuntimeScene& scene,
                          lua_path.c_str(), e.name.c_str(),
                          static_cast<unsigned long long>(handle));
         out_script_handles.push_back(handle);
+    }
+
+    // physics S1（2026-10-14）：collider 先挂（RigidBody 依赖 Collider——
+    // AddEntityRigidBody 无 Collider 直接拒）。字段序与导出行一一对应；
+    // owner 绑定后 simulation::step 自动回写 ECS transform（PhysicsAPI:104
+    // 契约）——渲染与脚本 entity.position() 都能看到下落。
+    bool any_physics = false;
+    for (const auto& e : scene.entities)
+        any_physics = any_physics || e.has_collider || e.has_rigidbody;
+    if (any_physics) {
+        // 惰性初始化（编辑器同款缺省 POD：gravity(0,-9.81,0)/4096 体/单线程
+        // 确定性/固定步长 1:60/子步 5——28 字节，布局与 PhysicsAPI 一致）。
+        struct PlayerPhysicsSettings {
+            float gravity[3];
+            std::uint32_t max_bodies;
+            std::uint32_t workers;
+            float fixed_dt;
+            std::uint32_t sub_steps;
+        };
+        static_assert(sizeof(PlayerPhysicsSettings) == 28, "PhysicsSettingsPod 布局");
+        const PlayerPhysicsSettings settings{
+            {0.f, -9.81f, 0.f}, 4096u, 0u, 1.f / 60.f, 5u};
+        if (PhysicsInitialize(&settings) == 0)
+            std::fprintf(stderr, "[player] PhysicsInitialize failed — physics disabled\n");
+    }
+    bool any_rigidbody = false;
+    for (auto& e : scene.entities) {
+        if (e.engine_entity == kInvalidEntityId) continue;
+        if (e.has_collider) {
+            const float offset[3] = {0.f, 0.f, 0.f};
+            if (AddEntityCollider(e.engine_entity, e.collider_shape,
+                                  e.collider_half, offset,
+                                  e.collider_trigger ? 1u : 0u, e.collider_layer) == 0)
+                std::fprintf(stderr, "[player] collider attach failed (entity '%s')\n",
+                             e.name.c_str());
+        }
+        if (e.has_rigidbody) {
+            if (AddEntityRigidBody(e.engine_entity, e.rb_mode, e.rb_mass,
+                                   e.rb_restitution, e.rb_friction, e.rb_velocity) == 0)
+                std::fprintf(stderr, "[player] rigidbody attach failed (entity '%s')\n",
+                             e.name.c_str());
+            else
+                any_rigidbody = true;
+        }
+    }
+    // 引擎物理 running 默认 false（编辑器 SIM ▶ Play 才开）。Player 场景带
+    // 刚体 = 用户意图运行物理；无刚体场景保持关闭（不空转 step）。
+    if (any_rigidbody) {
+        const std::uint32_t running = PhysicsSetRunning(1);
+        std::fprintf(stderr, "[player] physics running=%u (scene has rigid bodies)\n", running);
     }
 
     out_camera = chosen;

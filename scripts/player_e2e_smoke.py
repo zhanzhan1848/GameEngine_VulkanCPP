@@ -26,17 +26,24 @@ def build_package(pkg_dir: Path) -> Path:
     # 旋转脚本：update 里连续转，管线 tick 生效即有日志可查（frame 计数落
     # Scripts/Log 沙箱，失败也会在 stderr 报 attach/执行错误）。input-camera
     # E2E：首次 update 校验 input 表存在且无输入时 is_down 为 false。
+    # physics E2E：每 15 帧打印实体 y（"phy y=<val>"）——下落序列递减即证明
+    # 物理步进 + ECS transform 回写在 Player 成立。
     (assets / "spin.lua").write_text(
         "local M = {}\n"
         "local r = 0\n"
-        "function M:begin_play() r = 0 end\n"
+        "local n = 0\n"
+        "function M:begin_play() r = 0 n = 0 end\n"
         "function M:update(dt)\n"
         "    r = r + (params.speed or 1.0) * dt\n"
-        "    if not M.checked then\n"
-        "        M.checked = true\n"
+        "    n = n + 1\n"
+        "    if n == 1 then\n"
         "        if input and input.is_down and not input.is_down('MoveForward') then\n"
         "            print('input-ok')\n"
         "        end\n"
+        "    end\n"
+        "    if n % 15 == 0 then\n"
+        "        local x, y, z = entity.position()\n"
+        "        print(string.format('phy y=%.3f', y))\n"
         "    end\n"
         "end\n"
         "return M\n",
@@ -54,6 +61,8 @@ def build_package(pkg_dir: Path) -> Path:
         "action Fast Shift\n",
         encoding="utf-8",
     )
+    # physics E2E：动态方块（含脚本采样 y 打印）落到静态地面——
+    # y 序列递减即证明 PipelineTick 的物理段在 Player 真正步进且回写实体。
     pkg = pkg_dir / "e2e.primalrun"
     pkg.write_text(
         "# primal-runtime-scene v2\n"
@@ -68,13 +77,16 @@ def build_package(pkg_dir: Path) -> Path:
         'name "ground"\n'
         "pos 0 -1 0\nrot 0 0 0\nscl 1 1 1\n"
         "builtin plane\n"
+        "collider 0 5 5 5 0 0 0 0 0\n"
         "end\n"
         "entity\n"
         'name "spinner"\n'
-        "pos 0 0 0\nrot 0 0 0\nscl 1 1 1\n"
+        "pos 0 4 0\nrot 0 0 0\nscl 1 1 1\n"
         "builtin box\n"
         'script "_assets/spin.lua"\n'
         'param speed "2.0"\n'
+        "collider 0 0.5 0.5 0.5 0 0 0 0 0\n"
+        "rigidbody 1 1 0.1 0.5 0 0 0\n"
         "end\n"
         "entity\n"
         'name "cam"\n'
@@ -129,6 +141,12 @@ def main() -> int:
             "无脚本执行错误": "script error" not in log.lower()
                             and "script attach failed" not in log,
         }
+        # physics：stdout 的 "phy y=" 样本序列须递减（下落）
+        ys = [float(m) for m in
+              __import__("re").findall(r"phy y=([-\d.]+)", proc.stdout)]
+        checks["物理步进（y 递减）"] = len(ys) >= 2 and all(
+            ys[i + 1] < ys[i] for i in range(len(ys) - 1))
+        checks["物理开启日志"] = "physics running=1" in log
         ok = True
         for name, passed in checks.items():
             print(f"{'PASS' if passed else 'FAIL'}: {name}")

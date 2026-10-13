@@ -246,6 +246,37 @@ public sealed class RuntimeSceneExporterTests
     // ---- release S1：builtin 行 + portable 可搬移包 ----
 
     [Fact]
+    public void Export_WritesColliderAndRigidbodyLines()
+    {
+        using var fx = new Fixture();
+        fx.Rescan();
+
+        var scene = new Scene("PhysTest");
+        var entity = new GameEntity("faller");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new MeshRendererComponent { BuiltinMesh = BuiltinMeshKind.Box });
+        entity.Components.Add(new ColliderComponent
+        {
+            Shape = ColliderShape.Box,
+            HalfX = 0.5f, HalfY = 0.5f, HalfZ = 0.5f,
+            IsTrigger = false,
+            Layer = 3,
+        });
+        entity.Components.Add(new RigidBodyComponent
+        {
+            Mode = RigidBodyMode.Dynamic,
+            Mass = 2.5f, Restitution = 0.1f, Friction = 0.6f,
+            VelocityX = 0f, VelocityY = -1f, VelocityZ = 0f,
+        });
+        scene.Entities.Add(entity);
+
+        var package = fx.ExportScene(scene);
+
+        Assert.Contains("collider 0 0.5 0.5 0.5 0 0 0 0 3", package);
+        Assert.Contains("rigidbody 1 2.5 0.1 0.6 0 -1 0", package);
+    }
+
+    [Fact]
     public void Export_WritesBuiltinLineForBuiltinMeshEntity()
     {
         using var fx = new Fixture();
