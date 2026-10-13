@@ -112,6 +112,12 @@ public static class BuildManifestGenerator
                 if (lua.ScriptAssetGuid.Value != Guid.Empty)
                     AddDependencyClosure(lua.ScriptAssetGuid.Value, visited, manifest);
             }
+            // audio S1：音源资产同样是运行依赖。
+            foreach (var audio in entity.GetComponents<AudioSourceComponent>())
+            {
+                if (audio.AudioAssetGuid.Value != Guid.Empty)
+                    AddDependencyClosure(audio.AudioAssetGuid.Value, visited, manifest);
+            }
             // PFX：AssetPath（项目相对）指向 .pfx_emitter JSON——按路径入注册表
             // 再闭包；未注册（坏路径）警告不中断。
             foreach (var pfx in entity.GetComponents<ParticleFXComponent>())

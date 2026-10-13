@@ -24,6 +24,7 @@ set(SOURCE_FILES
     "ParticleMaterialAPI.cpp"
     "ParticleEmitterAPI.cpp"
     "ScriptAPI.cpp"
+    "AudioAPI.cpp"
     "ParticleFXAPI.cpp"
     "ShaderCompilerAPI.cpp"
     "FrameAPI.cpp"

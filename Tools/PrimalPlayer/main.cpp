@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cfloat>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,15 @@
 #else
 #include <unistd.h>
 #endif
+
+// audio S1：EngineDLL AudioAPI 的 POD 镜像（32B，static_assert 锁尺寸——
+// 宿主不依赖引擎头；字段语义见 EngineDLL/AudioAPI.cpp）。
+struct PlayerWavInfo {
+    std::uint16_t format_tag, channels, bits_per_sample, block_align;
+    std::uint32_t sample_rate;
+    std::uint64_t data_bytes, frame_count;
+};
+static_assert(sizeof(PlayerWavInfo) == 32, "PlayerWavInfo 布局锁");
 
 // ----------------------------------------------------------------------------
 // EngineDLL C ABI —— 函数声明镜像（非 POD 内存镜像，与 primal-engine 同纪律；
@@ -96,6 +106,7 @@ std::uint32_t AddEntityRigidBody(std::uint32_t entity_id, std::uint32_t mode, fl
                                  float restitution, float friction, const float* velocity);
 std::uint32_t PhysicsInitialize(const void* settings_pod);
 std::uint32_t PhysicsSetRunning(std::uint32_t running);
+std::uint32_t AudioParseWavHeader(const void* data, std::uint64_t size, PlayerWavInfo* out);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
 void          DestroyRenderTarget(std::uint64_t handle);
@@ -160,6 +171,11 @@ struct RuntimeEntity {
     float camera_near = 0.1f;
     float camera_far = 1000.f;
     bool camera_is_main = false;
+    // audio S1：`audio "<path>" <volume 0..1> <loop 0|1> <autoplay 0|1>`
+    std::string audio_path;
+    float audio_volume = 1.f;
+    bool audio_loop = false;
+    bool audio_autoplay = true;
 };
 
 // 渲染相机最终选择：主相机 > 第一个场景相机 > 默认机位。
@@ -310,6 +326,17 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
                 current.rb_mass = v[1]; current.rb_restitution = v[2]; current.rb_friction = v[3];
                 current.rb_velocity[0] = v[4]; current.rb_velocity[1] = v[5]; current.rb_velocity[2] = v[6];
             }
+        }
+        else if (key == "audio") {
+            // "audio \"<路径>\" <volume> <loop> <autoplay>"——缺省 1/0/1。
+            current.audio_path = ParseQuoted(rest);
+            const auto close = rest.rfind('"');
+            float v[3] = {1.f, 0.f, 1.f};
+            if (close != std::string::npos && close + 1 < rest.length())
+                ParseFloats(rest.substr(close + 1), v, 3);
+            current.audio_volume = v[0];
+            current.audio_loop = v[1] != 0.f;
+            current.audio_autoplay = v[2] != 0.f;
         }
         else if (key == "light") {
             float v[9];
@@ -817,6 +844,41 @@ int main(int argc, char** argv)
     if (camera_id == kInvalidEntityId) {  // 只认哨兵——slot 0 合法
         std::fprintf(stderr, "[player] CreateCamera failed\n");
         return 3;
+    }
+
+    // audio S1（2026-10-14）：autoplay 音源注入后即播。解码层先过 WAV 头解析
+    // （确定性元信息 + 坏文件早失败）；播放交平台（macOS AVAudioPlayer），
+    // 无窗口平台只解码不发声（E2E/CI 路径仍可断言元信息）。
+    for (const auto& e : scene.entities) {
+        if (e.audio_path.empty() || !e.audio_autoplay) continue;
+        const auto audio_abs = ResolveAssetPath(e.audio_path, scene_path);
+        PlayerWavInfo info{};
+        bool wav_parsed = false;
+        if (std::FILE* f = std::fopen(audio_abs.c_str(), "rb")) {
+            std::vector<unsigned char> header(4096, 0);
+            const std::size_t got = std::fread(header.data(), 1, header.size(), f);
+            std::fclose(f);
+            wav_parsed = AudioParseWavHeader(header.data(), got, &info) != 0;
+        }
+        int playing = 0;
+#if defined(PRIMAL_PLAYER_WINDOW)
+        playing = PlayerAudioPlayFile(audio_abs.c_str(), e.audio_volume,
+                                      e.audio_loop ? 1 : 0);
+#endif
+        if (wav_parsed) {
+            const char* fmt = info.format_tag == 1 ? "PCM"
+                            : info.format_tag == 3 ? "IEEE-float" : "unknown";
+            std::fprintf(stderr,
+                         "[player] audio %s '%s' (%s %uHz %uch %.2fs, vol=%.2f, loop=%d)\n",
+                         playing ? "playing" : "decoded-only",
+                         audio_abs.c_str(), fmt, info.sample_rate,
+                         info.channels,
+                         info.sample_rate ? static_cast<double>(info.frame_count) / info.sample_rate : 0.0,
+                         e.audio_volume, e.audio_loop ? 1 : 0);
+        } else
+            std::fprintf(stderr, "[player] audio %s '%s' (not WAV; vol=%.2f, loop=%d)\n",
+                         playing ? "playing" : "failed",
+                         audio_abs.c_str(), e.audio_volume, e.audio_loop ? 1 : 0);
     }
 
     const std::uint64_t target = CreateRenderTarget(width, height, kRtFormatRgba16F);

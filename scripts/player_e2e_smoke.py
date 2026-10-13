@@ -61,6 +61,20 @@ def build_package(pkg_dir: Path) -> Path:
         "action Fast Shift\n",
         encoding="utf-8",
     )
+    # audio E2E：程序化 0.5s 440Hz 正弦 WAV（PCM16 立体声 44.1kHz）——
+    # Player 解析头（时长/格式）并经 AVAudioPlayer 播放（E2E 断言元信息行）。
+    import math
+    import struct
+    import wave as wavlib
+    with wavlib.open(str(assets / "beep.wav"), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        frames = bytearray()
+        for i in range(44100 // 2):
+            v = int(12000 * math.sin(2 * math.pi * 440 * i / 44100))
+            frames += struct.pack("<hh", v, v)
+        w.writeframes(bytes(frames))
     # physics E2E：动态方块（含脚本采样 y 打印）落到静态地面——
     # y 序列递减即证明 PipelineTick 的物理段在 Player 真正步进且回写实体。
     pkg = pkg_dir / "e2e.primalrun"
@@ -78,6 +92,7 @@ def build_package(pkg_dir: Path) -> Path:
         "pos 0 -1 0\nrot 0 0 0\nscl 1 1 1\n"
         "builtin plane\n"
         "collider 0 5 5 5 0 0 0 0 0\n"
+        'audio "_assets/beep.wav" 0.8 0 1\n'
         "end\n"
         "entity\n"
         'name "spinner"\n'
@@ -147,6 +162,10 @@ def main() -> int:
         checks["物理步进（y 递减）"] = len(ys) >= 2 and all(
             ys[i + 1] < ys[i] for i in range(len(ys) - 1))
         checks["物理开启日志"] = "physics running=1" in log
+        # audio：AVAudioPlayer 播放 + WAV 头解析（0.5s PCM 立体声 44100Hz）
+        checks["音频播放（WAV 解析+平台播放）"] = (
+            "audio playing" in log and "PCM 44100Hz 2ch 0.50s" in log
+            and "vol=0.80" in log)
         ok = True
         for name, passed in checks.items():
             print(f"{'PASS' if passed else 'FAIL'}: {name}")

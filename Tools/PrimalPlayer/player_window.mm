@@ -3,6 +3,8 @@
 
 #include "player_window.h"
 
+#include <cstdio>
+
 namespace {
 NSApplication* g_app = nullptr;
 NSWindow* g_window = nullptr;
@@ -184,14 +186,59 @@ void PlayerWindowPollInput(PlayerInputState* out)
     g_scroll_dy = 0.f;
 }
 
+// audio S1 的停止入口在文件尾部定义（AVFoundation 段），此处前置声明。
+static void PlayerAudioStopAll(void);
+
 void PlayerWindowDestroy(void)
 {
     @autoreleasepool {
+        PlayerAudioStopAll();
         if (g_window) {
             [g_window orderOut:nil];
             [g_window release];
             g_window = nullptr;
         }
         g_content = nullptr;
+    }
+}
+
+// ---- audio S1（2026-10-14）：AVAudioPlayer 播放 --------------------------
+#import <AVFoundation/AVFoundation.h>
+
+static NSMutableArray* g_audio_players = nil;
+
+int PlayerAudioPlayFile(const char* path, float volume, int loop)
+{
+    if (!path || !*path) return 0;
+    @autoreleasepool {
+        NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]
+                                isDirectory:NO];
+        NSError* error = nil;
+        AVAudioPlayer* player = [[AVAudioPlayer alloc] initWithContentsOfURL:url
+                                                                       error:&error];
+        if (!player || error) {
+            std::fprintf(stderr, "[player] audio open failed: %s (%s)\n", path,
+                         error ? error.localizedDescription.UTF8String : "unknown");
+            return 0;
+        }
+        player.volume = volume < 0.f ? 0.f : (volume > 1.f ? 1.f : volume);
+        player.numberOfLoops = loop ? -1 : 0;   // -1 = 循环到 stop
+        player.enableRate = NO;
+        if (![player play]) {
+            std::fprintf(stderr, "[player] audio play failed: %s\n", path);
+            return 0;
+        }
+        if (!g_audio_players) g_audio_players = [[NSMutableArray alloc] init];
+        [g_audio_players addObject:player];
+        return 1;
+    }
+}
+
+static void PlayerAudioStopAll(void)
+{
+    @autoreleasepool {
+        if (!g_audio_players) return;
+        for (AVAudioPlayer* p in g_audio_players) [p stop];
+        [g_audio_players removeAllObjects];
     }
 }

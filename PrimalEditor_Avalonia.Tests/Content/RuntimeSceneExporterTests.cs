@@ -277,6 +277,31 @@ public sealed class RuntimeSceneExporterTests
     }
 
     [Fact]
+    public void Export_WritesAudioLine()
+    {
+        using var fx = new Fixture();
+        var audioPath = fx.WriteAssetBytes("Content/Audio/beep.wav");
+        fx.Rescan();
+        var audioGuid = new AssetGuid(AssetRegistry.Get(audioPath)!.Guid);
+
+        var scene = new Scene("AudioTest");
+        var entity = new GameEntity("speaker");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new AudioSourceComponent
+        {
+            AudioAssetGuid = audioGuid,
+            Volume = 0.8f,
+            Loop = true,
+            AutoPlay = true,
+        });
+        scene.Entities.Add(entity);
+
+        var package = fx.ExportScene(scene);
+
+        Assert.Contains($"audio \"Content/Audio/beep.wav\" 0.8 1 1", package);
+    }
+
+    [Fact]
     public void Export_WritesBuiltinLineForBuiltinMeshEntity()
     {
         using var fx = new Fixture();

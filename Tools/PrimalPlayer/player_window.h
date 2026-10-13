@@ -50,6 +50,12 @@ int PlayerWindowPump(void);
 // 只在 windowed 路径使用。
 void PlayerWindowPollInput(PlayerInputState* out);
 
+// audio S1（2026-10-14）：播放一个音频文件（macOS AVAudioPlayer）。
+// loop=1 → 无限循环；音量 0..1。返回 1=已开始播放，0=失败（文件缺/格式
+// 不支持——stderr 留痕）。多次调用叠加（多音源）；PlayerWindowDestroy
+// 停止全部。非 Apple 构建不链接本符号——调用方按平台守卫。
+int PlayerAudioPlayFile(const char* path, float volume, int loop);
+
 // Tears the window down. Call before ShutdownEngine.
 void PlayerWindowDestroy(void);
 

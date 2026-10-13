@@ -91,6 +91,21 @@ set_target_properties(TestScriptInput PROPERTIES
     FOLDER "Tests/Components"
 )
 
+# audio S1（2026-10-14）：WAV 头解析契约测试——只依赖 Engine/Audio/WavInfo。
+add_executable(TestWavInfo
+    ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptLuaBackend/TestWavInfo.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Audio/WavInfo.cpp
+)
+target_include_directories(TestWavInfo PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+)
+add_test(NAME TestWavInfo COMMAND TestWavInfo)
+set_target_properties(TestWavInfo PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/Components"
+)
+
 # Script.cpp uses -fexceptions; the Lua adapter wraps each hook in try/catch
 # and the test driver's lambdas may allocate.
 if(NOT MSVC)

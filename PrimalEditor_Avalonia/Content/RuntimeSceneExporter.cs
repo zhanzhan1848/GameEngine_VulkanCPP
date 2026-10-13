@@ -100,6 +100,7 @@ public static class RuntimeSceneExporter
             AppendTextures(sb, ctx, entity);
             AppendScript(sb, ctx, entity);
             AppendPhysics(sb, entity);
+            AppendAudio(sb, ctx, entity);
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
                 // type/intensity/rgb/range/umbra/penumbra/enabled — the same
@@ -340,6 +341,27 @@ public static class RuntimeSceneExporter
             }
             sb.AppendLine($"param {key} \"{value.Replace("\"", "'")}\"");
         }
+    }
+
+    /// <summary>
+    /// audio S1（2026-10-14）：`audio "&lt;path&gt;" &lt;volume 0..1&gt; &lt;loop 0|1&gt;
+    /// &lt;autoplay 0|1&gt;`——Player 注入后经 WAV 头解析 + 平台播放（macOS
+    /// AVAudioPlayer）。非空间声（音量全局）。
+    /// </summary>
+    private static void AppendAudio(StringBuilder sb, ExportContext ctx, GameEntity entity)
+    {
+        var audio = entity.GetComponent<AudioSourceComponent>();
+        if (audio == null || audio.AudioAssetGuid.Value == Guid.Empty) return;
+        var info = AssetRegistry.GetByGuid(audio.AudioAssetGuid.Value);
+        if (info == null || string.IsNullOrEmpty(info.FullPath))
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"[Run] audio asset not registered, entity '{entity.Name}' (guid={audio.AudioAssetGuid}) skipped");
+            return;
+        }
+        sb.AppendLine(
+            $"audio \"{ToPackagePath(ctx, info.FullPath, entity.Name)}\" " +
+            $"{Fmt(audio.Volume)} {(audio.Loop ? 1 : 0)} {(audio.AutoPlay ? 1 : 0)}");
     }
 
     private static string Fmt(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);

@@ -287,6 +287,8 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Scripting/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Scripting/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Audio/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Audio/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Core/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Core/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.h"
