@@ -4,31 +4,43 @@ using System.Linq;
 using System.Text;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
+using PrimalEditor_Avalonia.Native;
 
 namespace PrimalEditor_Avalonia.Content;
 
 /// <summary>
-/// Exports the live scene as a "Primal Runtime Scene v1" package for the
-/// PrimalPlayer host (plan §Run/Stop, 2026-09-03). Line-based format — the
-/// player parses it with a dependency-free scanner; keep the two sides in
-/// sync (Tools/PrimalPlayer/main.cpp RuntimeScene::Load).
+/// Exports the live scene as a "Primal Runtime Scene v2" package for the
+/// PrimalPlayer host (plan §Run/Stop, 2026-09-03; v2 材质注入 2026-10-09，
+/// 原规划留痕②). Line-based format — the player parses it with a
+/// dependency-free scanner; keep the two sides in sync
+/// (Tools/PrimalPlayer/main.cpp RuntimeScene::Load).
 ///
-///   # primal-runtime-scene v1
+///   # primal-runtime-scene v2
 ///   env <24 floats — UpdateSceneEnvironment layout verbatim>
 ///   entity
 ///   name "Name"
 ///   pos x y z                    / rot x y z / scl x y z
-///   mesh "/absolute/source/asset/path"
+///   mesh "<cooked .mesh path>"
+///   tex <slot> "<cooked .texture path>"     (slot 0=albedo 1=normal 2=orm)
 ///   light type intensity r g b range umbra_deg penumbra_deg enabled
 ///   camera projection fov_deg near far is_main
 ///   end
+///
+/// v2 与 v1 的差异（player 两者都接受，未知键本来就被忽略）：
+///   - mesh 不再写源资产/sidecar 路径，写 CookedArtifactResolver 解析后的
+///     cooked .mesh（与 SceneRuntimeSynchronizer 同一事实源；引擎
+///     ImportMeshAsync 拒绝 .model.json）。
+///   - 新增 tex 槽位行：MaterialGuids[0] 经 MaterialWorldTextureResolver
+///     解析出的世界纹理三元组（与编辑器视口绑定同一条链），槽位空洞省行。
+///   - 路径优先项目相对（'/' 分隔，相对项目根）；越出项目根的回退绝对路径。
+///     player 按包位置（&lt;project&gt;/.Primal/runtime/）反推项目根解析相对路径。
 ///
 /// The editor is the single source of truth for the schema (文档模型优先) —
 /// the player never reads .primal/scene JSON or the migration logic.
 /// </summary>
 public static class RuntimeSceneExporter
 {
-    public const string FormatHeader = "# primal-runtime-scene v1";
+    public const string FormatHeader = "# primal-runtime-scene v2";
 
     /// <summary>
     /// Export <paramref name="scene"/> to
@@ -51,6 +63,7 @@ public static class RuntimeSceneExporter
             sb.AppendLine($"name \"{entity.Name.Replace("\"", "'")}\"");
             AppendTransform(sb, entity);
             AppendMesh(sb, entity);
+            AppendTextures(sb, entity);
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
                 // type/intensity/rgb/range/umbra/penumbra/enabled — the same
@@ -124,7 +137,51 @@ public static class RuntimeSceneExporter
                 $"[Run] mesh asset not registered, entity '{entity.Name}' (guid={mesh.MeshGuid}) skipped");
             return;
         }
-        sb.AppendLine($"mesh \"{info.FullPath}\"");
+        // 与 SceneRuntimeSynchronizer 同一解析链：cooked .mesh 优先，
+        // sidecar 旁同名 .mesh 回退。直接写 sidecar 会被引擎
+        // ImportMeshAsync 拒绝（2026-10-09 实测，存量问题③）。
+        var cooked = CookedArtifactResolver.ResolveCookedPath(info);
+        if (string.IsNullOrEmpty(cooked))
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"[Run] cooked mesh not found for entity '{entity.Name}' (source={info.FullPath}) skipped");
+            return;
+        }
+        sb.AppendLine($"mesh \"{ToPackagePath(cooked, entity.Name)}\"");
+    }
+
+    private static void AppendTextures(StringBuilder sb, GameEntity entity)
+    {
+        var mesh = entity.GetComponent<MeshRendererComponent>();
+        if (mesh == null || mesh.MaterialGuids.Count == 0) return;
+
+        // 世界渲染器只消费第一个材质槽的 [albedo, normal, orm] 三元组
+        // （SceneRuntimeSynchronizer.ResolveWorldTextureIds 同契约）；
+        // 解析器与编辑器视口共用，避免第二份材质图遍历实现。
+        var material = AssetRegistry.GetByGuid(mesh.MaterialGuids[0].Value);
+        if (material == null || string.IsNullOrEmpty(material.FullPath))
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"[Run] material asset not registered, entity '{entity.Name}' — textures skipped");
+            return;
+        }
+        var paths = MaterialWorldTextureResolver.Resolve(material.FullPath);
+        for (var slot = 0; slot < paths.Length; slot++)
+        {
+            if (string.IsNullOrWhiteSpace(paths[slot])) continue;
+            sb.AppendLine($"tex {slot} \"{ToPackagePath(paths[slot]!, entity.Name)}\"");
+        }
+    }
+
+    /// <summary>包内路径规则：项目相对优先（GetRelativePath，'/' 分隔）；
+    /// 越出项目根回退绝对路径并留痕——player 两种都接受。</summary>
+    private static string ToPackagePath(string absolutePath, string entityName)
+    {
+        var rel = AssetRegistry.GetRelativePath(absolutePath);
+        if (rel is { } r) return r.Value;
+        PrimalEditor_Avalonia.Common.Logger.Warning(
+            $"[Run] asset outside project root, entity '{entityName}' — absolute path exported: {absolutePath}");
+        return absolutePath;
     }
 
     private static string Fmt(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);

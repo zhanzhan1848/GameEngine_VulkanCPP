@@ -162,6 +162,13 @@ public static class RuntimeLauncher
 
         var arguments = new List<string> { "--scene", package };
 
+        // 临时绕行（2026-10-09）：PipelineSetEditorMode(0) 的 Metal runtime 全延迟
+        // 路径当前输出全黑（编辑器视口/primal-engine 均走 mode 1 正常；证据见
+        // Docs/completed/2026-10-09-runtime-chain-material-injection.md 的引擎侧
+        // 移交段）。引擎侧修复后删除本段，恢复 Player 默认的 runtime 路径。
+        arguments.Add("--editor-mode");
+        arguments.Add("1");
+
         // 固定分辨率模式：窗口内容恰为 WxH 且不可缩放（确定性录制/比对前置）。
         if (ResolveMode(vm.RunModeIndex) == RunMode.FixedResolution)
             AppendResolutionArguments(arguments, vm.RunWidth, vm.RunHeight);
@@ -178,6 +185,29 @@ public static class RuntimeLauncher
                 Every: 1,
                 Metrics: vm.RecordMetrics));
             Logger.Info($"[Run] recording enabled → {recordDir} (frames={vm.RecordFrames}, metrics={vm.RecordMetrics})");
+
+            // 录完自动编码（2026-10-09 增补，09-05 二期 run.record 的编辑器侧
+            // 最小版）：player 进程退出后把 PNG 序列合成 mp4——VideoEncoder 与
+            // sequence.render 同一实现（libx264/crf20/yuv420p）。一段式订阅，
+            // 触发即摘除；不因 player 退出码非零跳过（RHIAllocator 泄漏 abort
+            // 期间帧序列仍完整，调试场景照样出片），仅记录退出码。
+            void EncodeOnExit(int exitCode, bool success)
+            {
+                BuildService.OnCompleted -= EncodeOnExit;
+                if (!success)
+                    Logger.Warning($"[Run] player exited with code {exitCode} — encoding captured frames anyway.");
+                _ = System.Threading.Tasks.Task.Run(() =>
+                {
+                    var videoPath = Path.Combine(recordDir, "capture.mp4");
+                    var (encoded, hint) = VideoEncoder.EncodePngSequence(
+                        recordDir, videoPath, vm.RunWidth, vm.RunHeight, framerate: 30);
+                    if (encoded)
+                        Logger.Info($"[Run] recording encoded → {videoPath}");
+                    else
+                        Logger.Warning($"[Run] auto-encode skipped: {hint} (PNG 序列保留在 {recordDir})");
+                });
+            }
+            BuildService.OnCompleted += EncodeOnExit;
         }
 
         var ok = BuildService.StartPlayer(playerPath, arguments, workingDirectory: Path.GetDirectoryName(playerPath)!);

@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -66,9 +67,12 @@ std::uint32_t AddEntityCamera(std::uint32_t entity_id, std::uint32_t projection_
 std::uint32_t CreateCamera(std::uint32_t entity_id, float fov, float aspect,
                            float near_z, float far_z);
 
+std::uint32_t InitializeAssetSystem();
+void          ShutdownAssetSystem();
 std::uint64_t ImportMeshAsync(const char* path);
 void          TryGetMeshImportResult(std::uint64_t request_id,
                                      std::uint64_t* out_mesh_content_id, std::uint32_t* out_status);
+std::uint64_t PipelineImportCookedTexture(const char* path);
 void          TickMainThreadJobs();
 void          TickAssetSystem();
 
@@ -101,12 +105,17 @@ constexpr std::uint32_t kInvalidEntityId  = 0xFFFFFFFFu;
 enum class LightKind : std::uint32_t { Directional = 0, Point = 1, Spot = 2 };
 enum class CameraProjection : std::uint32_t { Perspective = 0, Orthographic = 1 };
 
+// 引擎 PipelineRegisterMeshEntity 的纹理槽契约：[albedo, normal, orm]
+// （RenderPipelineAPI "typically [albedo, normal, orm]"，最多 8 槽）。
+constexpr std::uint32_t kMaxTextureSlots = 3;
+
 struct RuntimeEntity {
     std::string name;
     float pos[3]{0.f, 0.f, 0.f};
     float rot[3]{0.f, 0.f, 0.f};
     float scl[3]{1.f, 1.f, 1.f};
     std::string mesh_path;
+    std::string tex_paths[kMaxTextureSlots]; // 槽位空洞 = 空串
     bool has_light = false;
     std::uint32_t light_type = 0;
     float light_intensity = 1.f;
@@ -129,6 +138,8 @@ struct ChosenCamera {
     float fov_deg = 60.f;
     float near_z = 0.1f;
     float far_z = 1000.f;
+    float pos[3]{0.f, 0.f, -8.f};
+    float rot[3]{0.f, 0.f, 0.f}; // 欧拉度——飞行相机的 yaw/pitch 播种值
 };
 
 struct RuntimeScene {
@@ -181,8 +192,14 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
         if (!std::fgets(buf, sizeof(buf), f)) { std::fclose(f); return false; }
         header = Trim(buf);
     }
-    if (header != "# primal-runtime-scene v1") {
+    if (header.rfind("# primal-runtime-scene v", 0) != 0) {
         std::fprintf(stderr, "[player] unsupported package header: %s\n", header.c_str());
+        std::fclose(f);
+        return false;
+    }
+    const int format_version = std::atoi(header.c_str() + header.rfind('v') + 1);
+    if (format_version < 1 || format_version > 2) {
+        std::fprintf(stderr, "[player] unsupported package version: %d\n", format_version);
         std::fclose(f);
         return false;
     }
@@ -216,6 +233,16 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
         else if (key == "rot") ParseFloats(rest, current.rot, 3);
         else if (key == "scl") ParseFloats(rest, current.scl, 3);
         else if (key == "mesh") current.mesh_path = ParseQuoted(rest);
+        else if (key == "tex") {
+            // "tex <slot> \"<path>\"" — v2 材质槽位行；槽位越界静默忽略
+            // （未来扩展槽位对旧 player 无害）。
+            const long slot = std::strtol(rest.c_str(), nullptr, 10);
+            const auto quote = rest.find('"');
+            if (slot >= 0 && slot < static_cast<long>(kMaxTextureSlots) &&
+                quote != std::string::npos) {
+                current.tex_paths[slot] = ParseQuoted(rest.substr(quote));
+            }
+        }
         else if (key == "light") {
             float v[9];
             if (ParseFloats(rest, v, 9)) {
@@ -251,12 +278,25 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
     return true;
 }
 
+// v2 包内路径规则：绝对路径直用；项目相对路径按包位置反推项目根
+// （包位于 <proj>/.Primal/runtime/，三级上溯）。v1 包的 mesh 行本就是
+// 绝对路径，同样命中"绝对直用"分支。
+std::string ResolveAssetPath(const std::string& raw, const std::string& package_path)
+{
+    if (raw.empty() || raw.front() == '/') return raw;
+    std::filesystem::path pkg(package_path);
+    const auto root = pkg.parent_path().parent_path().parent_path();
+    return (root / std::filesystem::path(raw)).lexically_normal().string();
+}
+
 // deg 单位契约与编辑器 SceneRuntimeSynchronizer 一致：CreateCamera 的 fov 传
 // degrees/180；灯光角度原样直传（引擎 Light 组件自行换算）。
 // 实体分两路：带网格的走 PipelineRegisterMeshEntity（注册即建实体），灯光/
 // 相机/空实体走 CreateEntity + AddEntityLight。相机组件不在此挂——由调用方
 // 对最终选中的相机实体调一次 CreateCamera 拿渲染用 camera slot。
 std::uint32_t InjectScene(const RuntimeScene& scene,
+                          const std::string& package_path,
+                          std::unordered_map<std::string, std::uint64_t>& texture_cache,
                           ChosenCamera& out_camera,
                           std::vector<std::uint64_t>& out_mesh_entities)
 {
@@ -264,11 +304,28 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
 
     ChosenCamera chosen{};
 
+    // v2 tex 槽位 → 纹理 content id（路径为键缓存去重，对齐编辑器
+    // SceneRuntimeSynchronizer._worldTextureIds 语义；失败槽留哨兵走白材质）。
+    const auto import_texture = [&](const std::string& raw) -> std::uint64_t {
+        const auto path = ResolveAssetPath(raw, package_path);
+        if (const auto it = texture_cache.find(path); it != texture_cache.end())
+            return it->second;
+        const auto id = PipelineImportCookedTexture(path.c_str());
+        if (id == 0xFFFFFFFFFFFFFFFFull)
+            std::fprintf(stderr, "[player] texture import failed: %s\n", path.c_str());
+        else
+            std::fprintf(stderr, "[player] bound world texture '%s' (content=%llu)\n",
+                         path.c_str(), static_cast<unsigned long long>(id));
+        texture_cache[path] = id;
+        return id;
+    };
+
     for (const auto& e : scene.entities) {
         if (e.mesh_path.empty()) continue;
-        const std::uint64_t request = ImportMeshAsync(e.mesh_path.c_str());
+        const auto mesh_path = ResolveAssetPath(e.mesh_path, package_path);
+        const std::uint64_t request = ImportMeshAsync(mesh_path.c_str());
         if (request == 0) {
-            std::fprintf(stderr, "[player] ImportMeshAsync rejected: %s\n", e.mesh_path.c_str());
+            std::fprintf(stderr, "[player] ImportMeshAsync rejected: %s\n", mesh_path.c_str());
             continue;
         }
         std::uint64_t mesh_id = 0;
@@ -281,17 +338,32 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
             if (status != 0) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        if (status != 1 || mesh_id == 0) { // 1 = Success（编辑器 MeshImportResultStatus 同值）
+        if (status != 1 || mesh_id == 0xFFFFFFFFFFFFFFFFull) { // 1 = Success（编辑器同值）；content id 0 是合法首槽，只认 0xFFFFFFFF 哨兵
             std::fprintf(stderr, "[player] mesh import failed (status=%u): %s\n",
-                         status, e.mesh_path.c_str());
+                         status, mesh_path.c_str());
             continue;
         }
-        const std::uint64_t texture_ids[1] = {0}; // 默认白材质（primal-engine 同款）
+        // 纹理槽位数组：有任一槽位则长度 = 最高非空洞槽 +1（空洞/失败 =
+        // 0xFFFFFFFF 哨兵，引擎按槽回退默认材质）；全空保持 {0} 白材质
+        // （primal-engine 同款默认）。
+        std::uint64_t texture_ids[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        std::uint32_t texture_count = 1;
+        int last_slot = -1;
+        for (std::uint32_t s = 0; s < kMaxTextureSlots; ++s)
+            if (!e.tex_paths[s].empty()) last_slot = static_cast<int>(s);
+        if (last_slot >= 0) {
+            texture_count = static_cast<std::uint32_t>(last_slot) + 1;
+            for (std::uint32_t s = 0; s < texture_count; ++s) {
+                texture_ids[s] = e.tex_paths[s].empty()
+                    ? 0xFFFFFFFFFFFFFFFFull
+                    : import_texture(e.tex_paths[s]);
+            }
+        }
         const std::uint64_t entity =
-            PipelineRegisterMeshEntity(mesh_id, texture_ids, 1);
-        if (entity == 0 || entity == 0xFFFFFFFFFFFFFFFFull) {
+            PipelineRegisterMeshEntity(mesh_id, texture_ids, texture_count);
+        if (entity == 0xFFFFFFFFFFFFFFFFull) { // ECS slot 0 合法，只认 0xFFFFFFFF 哨兵（同 CreateEntity 约定）
             std::fprintf(stderr, "[player] PipelineRegisterMeshEntity failed: %s\n",
-                         e.mesh_path.c_str());
+                         mesh_path.c_str());
             continue;
         }
         SetEntityTransform(static_cast<std::uint32_t>(entity), e.pos, e.rot, e.scl);
@@ -317,6 +389,8 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
             chosen.fov_deg = e.camera_fov_deg;
             chosen.near_z = e.camera_near;
             chosen.far_z = e.camera_far;
+            chosen.pos[0] = e.pos[0]; chosen.pos[1] = e.pos[1]; chosen.pos[2] = e.pos[2];
+            chosen.rot[0] = e.rot[0]; chosen.rot[1] = e.rot[1]; chosen.rot[2] = e.rot[2];
         }
     }
 
@@ -333,6 +407,7 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
         SetEntityTransform(entity, pos, rot, scl);
         chosen.entity_id = entity;
     }
+
     out_camera = chosen;
     return 1;
 }
@@ -435,6 +510,7 @@ int main(int argc, char** argv)
     bool debug_backend = false;
     bool fixed_size = false; // --fixed：窗口不可缩放（显示分辨率=渲染分辨率）
     std::uint32_t render_mode = 3; // Deferred+Shadow+AO+GI（编辑器默认档一致）
+    std::uint32_t editor_mode = 0; // 0=真 runtime 路径；1=编辑器路径（--editor-mode 诊断旗标）
     RecordConfig record;
 
     for (int i = 1; i < argc; ++i) {
@@ -445,6 +521,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--debug") == 0) debug_backend = true;
         else if (std::strcmp(argv[i], "--fixed") == 0) fixed_size = true;
         else if (std::strcmp(argv[i], "--mode") == 0 && next()) render_mode = static_cast<std::uint32_t>(std::atoi(argv[i]));
+        else if (std::strcmp(argv[i], "--editor-mode") == 0 && next()) editor_mode = static_cast<std::uint32_t>(std::atoi(argv[i]));
         else if (std::strcmp(argv[i], "--record") == 0 && next()) {
             record.enabled = true;
             record.directory = argv[i];
@@ -454,7 +531,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--record-metrics") == 0 && next()) record.metrics_path = argv[i];
         else {
             std::fprintf(stderr, "[player] unknown arg: %s\n", argv[i]);
-            std::fprintf(stderr, "usage: PrimalPlayer --scene <pkg> [--width W] [--height H] [--fixed] [--debug] [--mode 0..3]\n");
+            std::fprintf(stderr, "usage: PrimalPlayer --scene <pkg> [--width W] [--height H] [--fixed] [--debug] [--mode 0..3] [--editor-mode 0|1]\n");
             std::fprintf(stderr, "                   [--record <dir>] [--record-frames N] [--record-every N] [--record-metrics <file.csv>]\n");
             return 2;
         }
@@ -493,6 +570,14 @@ int main(int argc, char** argv)
         return 3;
     }
 
+    // ImportMeshAsync 依赖 JobSystem/AsyncResourceLoader（LoadMeshAsync 在
+    // JobSystem 未运行时直接拒绝请求）——编辑器在启动序列里调
+    // InitializeAssetSystem，宿主此前漏调导致所有 mesh 实体被拒（存量问题③）。
+    if (InitializeAssetSystem() == 0) {
+        std::fprintf(stderr, "[player] InitializeAssetSystem failed — mesh import unavailable\n");
+        return 3;
+    }
+
     void* host_view = nullptr;
 #if defined(PRIMAL_PLAYER_WINDOW)
     host_view = PlayerWindowCreate(static_cast<int>(width), static_cast<int>(height),
@@ -507,12 +592,14 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "[player] CreateStandardRenderPipeline failed\n");
         return 3;
     }
-    PipelineSetEditorMode(0); // runtime 路径
+    PipelineSetEditorMode(editor_mode); // 0=runtime；1=编辑器路径（诊断对照用）
     PipelineApplyModePreset(render_mode);
 
     ChosenCamera camera{};
     std::vector<std::uint64_t> mesh_entities;
-    if (InjectScene(scene, camera, mesh_entities) == 0 || camera.entity_id == kInvalidEntityId) {
+    std::unordered_map<std::string, std::uint64_t> texture_cache;
+    if (InjectScene(scene, scene_path, texture_cache, camera, mesh_entities) == 0 ||
+        camera.entity_id == kInvalidEntityId) {
         std::fprintf(stderr, "[player] scene injection failed (no camera)\n");
         return 3;
     }
@@ -541,15 +628,34 @@ int main(int argc, char** argv)
     }
 #endif
 
-    std::fprintf(stderr, "[player] running '%s' (%u entities, %ux%u, mode %u) — Esc/close to exit\n",
+    std::fprintf(stderr,
+                 "[player] running '%s' (%u entities, %ux%u, mode %u, pipeline %s) — "
+                 "WASD/QE 移动 · 拖拽/方向键视角 · 滚轮调速 · Shift 加速 · Esc 退出\n",
                  scene.scene_name.c_str(), static_cast<unsigned>(scene.entities.size()),
-                 width, height, render_mode);
+                 width, height, render_mode, editor_mode == 0 ? "runtime" : "editor-path");
 
     // 主循环：事件泵 + 渲染都在主线程（编辑器 DispatcherTimer 同款约束，
     // 规避 PipelineRenderFrame 内部互斥锁的双线程崩溃）。无窗口平台跑固定
     // 帧数即退（CI/冒烟用）。
     const bool windowed = surface_id != kInvalidSurfaceId;
     int remaining_frames = windowed ? -1 : 120;
+
+    // 飞行相机（P3 相机桥）：从选中相机的初始 transform 播种，每帧积分
+    // 输入后回写 SetEntityTransform。yaw=0 朝 +Z（默认机位约定）；欧拉
+    // 写回 (pitch, yaw, 0)。单位勘误（2026-10-11）：SetEntityTransform 的
+    // 旋转全链按弧度消费（simd_quaternion 吃 rad，编辑器推送无转换），
+    // 灵敏度/钳位/步进全部按弧度。无窗口路径输入恒零，相机保持静止。
+    struct FlyCamera {
+        float pos[3]{0.f, 0.f, 0.f};
+        float yaw = 0.f;   // 弧度
+        float pitch = 0.f; // 弧度
+        float speed = 4.f; // 单位/秒
+        double last_seconds = 0.0;
+        bool seeded = false;
+    } fly;
+    fly.pos[0] = camera.pos[0]; fly.pos[1] = camera.pos[1]; fly.pos[2] = camera.pos[2];
+    fly.yaw = camera.rot[1];
+    fly.pitch = camera.rot[0];
 
     // 录制状态：rendered 计渲染帧，captured 计已捕获帧（第 1、1+stride、…
     // 渲染帧落盘，文件名按捕获序号）。录满 max_frames 即退出进程——编辑器侧
@@ -571,6 +677,54 @@ int main(int argc, char** argv)
     while (true) {
 #if defined(PRIMAL_PLAYER_WINDOW)
         if (windowed && !PlayerWindowPump()) break;
+#endif
+
+#if defined(PRIMAL_PLAYER_WINDOW)
+        if (windowed) {
+            PlayerInputState input{};
+            PlayerWindowPollInput(&input);
+            const auto now_ns = std::chrono::steady_clock::now().time_since_epoch();
+            const double seconds = std::chrono::duration<double>(now_ns).count();
+            if (!fly.seeded) { fly.last_seconds = seconds; fly.seeded = true; }
+            const float dt = static_cast<float>(
+                seconds - fly.last_seconds < 0.1 ? seconds - fly.last_seconds : 0.1);
+            fly.last_seconds = seconds;
+
+            // 视角：拖拽（点→弧度，≈0.15°/px 手感）+ 方向键步进；pitch 钳 ±89°。
+            constexpr float kLookSensitivity = 0.15f * 3.14159265f / 180.f;
+            constexpr float kArrowStepRad = 2.f * 3.14159265f / 180.f;
+            constexpr float kPitchClamp = 89.f * 3.14159265f / 180.f;
+            fly.yaw += input.look_dx * kLookSensitivity;
+            fly.pitch += input.look_dy * kLookSensitivity;
+            if (input.keys & kPlayerKeyLeftArrow) fly.yaw -= kArrowStepRad;
+            if (input.keys & kPlayerKeyRightArrow) fly.yaw += kArrowStepRad;
+            if (input.keys & kPlayerKeyUpArrow) fly.pitch -= kArrowStepRad;
+            if (input.keys & kPlayerKeyDownArrow) fly.pitch += kArrowStepRad;
+            if (fly.pitch > kPitchClamp) fly.pitch = kPitchClamp;
+            if (fly.pitch < -kPitchClamp) fly.pitch = -kPitchClamp;
+
+            // 速度：滚轮指数调节，Shift ×3。
+            if (input.scroll_dy != 0.f) {
+                const float scaled = fly.speed * std::exp(-input.scroll_dy * 0.05f);
+                fly.speed = scaled < 0.5f ? 0.5f : (scaled > 50.f ? 50.f : scaled);
+            }
+            const float speed =
+                fly.speed * ((input.keys & kPlayerKeyShift) ? 3.f : 1.f);
+
+            // 相机系移动：forward=(sin yaw, 0, cos yaw)，right=(cos yaw, 0, -sin yaw)。
+            const float fx = std::sin(fly.yaw), fz = std::cos(fly.yaw);
+            const float rx = std::cos(fly.yaw), rz = -std::sin(fly.yaw);
+            if (input.keys & kPlayerKeyW) { fly.pos[0] += fx * speed * dt; fly.pos[2] += fz * speed * dt; }
+            if (input.keys & kPlayerKeyS) { fly.pos[0] -= fx * speed * dt; fly.pos[2] -= fz * speed * dt; }
+            if (input.keys & kPlayerKeyD) { fly.pos[0] += rx * speed * dt; fly.pos[2] += rz * speed * dt; }
+            if (input.keys & kPlayerKeyA) { fly.pos[0] -= rx * speed * dt; fly.pos[2] -= rz * speed * dt; }
+            if (input.keys & kPlayerKeyE) fly.pos[1] += speed * dt;
+            if (input.keys & kPlayerKeyQ) fly.pos[1] -= speed * dt;
+
+            const float rot[3] = { fly.pitch, fly.yaw, 0.f };
+            const float scl[3] = { 1.f, 1.f, 1.f };
+            SetEntityTransform(camera.entity_id, fly.pos, rot, scl);
+        }
 #endif
         if (PipelineRenderFrame(target, camera_id, surface_id) == 0) {
             std::fprintf(stderr, "[player] PipelineRenderFrame failed\n");
@@ -642,6 +796,9 @@ int main(int argc, char** argv)
         RemoveRenderSurface(surface_id);
     DestroyRenderTarget(target);
     DestroyStandardRenderPipeline();
+    // 趁 graphics device 仍存活释放 mesh/texture content registries——
+    // AssetAPI 头注释：不这样做事后静态析构会对非空 free-list abort（存量问题②）。
+    ShutdownAssetSystem();
     ShutdownEngine();
 #if defined(PRIMAL_PLAYER_WINDOW)
     PlayerWindowDestroy();
