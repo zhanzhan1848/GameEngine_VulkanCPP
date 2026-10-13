@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using Primal.CliFramework;
@@ -131,6 +132,46 @@ public sealed class RunCommands
             knownLimitation = "编辑器同步链尚未接入 runtime 实体注册（RenderSceneSnapshot），surface 预览画面暂不含场景实体（引擎侧集成项）",
             hint = "editor.screenshot / editor.record 在预览中即捕获 runtime 画面；run.stop 结束预览",
         };
+    }
+
+    [CliCommand("run.export",
+        Description = "导出运行时场景包（与 Run 按钮同一生成器，不启动进程）。" +
+                      "portable=true 时把引用的 cooked mesh/纹理/脚本复制进包目录 _assets/，" +
+                      "行内路径改写为包相对（_assets/…）——整个 portable 目录可 zip 分发，" +
+                      "Player 解析顺序=包内相对→项目根，换机解压即跑（release S1 可搬移资源包）。" +
+                      "返回包路径与资产清单（files=包相对路径数组，bytes=复制总字节；非 portable 为空）。" +
+                      "无项目/无激活场景返回 NOT_READY。",
+        Example = """{"portable":true}""")]
+    public object ExportScene(bool portable = false)
+    {
+        var worldEditor = EditorServices.WorldEditor
+            ?? throw CliError.NotReady("编辑器视图中没有世界编辑器实例", "先在编辑器中打开项目");
+        if (worldEditor.ActiveScene == null)
+            throw CliError.NotReady("当前没有激活场景", "先 scene.load 或 scene.new");
+        var projectDir = worldEditor.Project?.Path
+            ?? throw CliError.NotReady("项目未加载", "先在编辑器中打开项目");
+
+        var path = PrimalEditor_Avalonia.Content.RuntimeSceneExporter.Export(
+            worldEditor.ActiveScene, projectDir, portable)
+            ?? throw new CliError(CliErrorCodes.EngineError, "运行时场景包导出失败", "查看编辑器日志");
+
+        string[] files = Array.Empty<string>();
+        long bytes = 0;
+        if (portable)
+        {
+            var assetsDir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(path)!,
+                PrimalEditor_Avalonia.Content.RuntimeSceneExporter.PortableAssetsDirName);
+            if (System.IO.Directory.Exists(assetsDir))
+            {
+                files = System.IO.Directory.GetFiles(assetsDir)
+                    .Select(f => $"{PrimalEditor_Avalonia.Content.RuntimeSceneExporter.PortableAssetsDirName}/{System.IO.Path.GetFileName(f)}")
+                    .OrderBy(f => f, StringComparer.Ordinal)
+                    .ToArray();
+                bytes = files.Sum(f => new System.IO.FileInfo(System.IO.Path.Combine(assetsDir, System.IO.Path.GetFileName(f))).Length);
+            }
+        }
+        return new { path, portable, files, bytes };
     }
 
     [CliCommand("run.stop",

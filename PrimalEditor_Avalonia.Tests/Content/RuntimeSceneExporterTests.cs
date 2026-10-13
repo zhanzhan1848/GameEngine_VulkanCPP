@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.Content;
 using PrimalEditor_Avalonia.GameProject;
@@ -240,5 +241,123 @@ public sealed class RuntimeSceneExporterTests
         {
             File.Delete(outside);
         }
+    }
+
+    // ---- release S1：builtin 行 + portable 可搬移包 ----
+
+    [Fact]
+    public void Export_WritesBuiltinLineForBuiltinMeshEntity()
+    {
+        using var fx = new Fixture();
+        fx.Rescan();
+
+        var scene = new Scene("BuiltinTest");
+        var entity = new GameEntity("cube");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new MeshRendererComponent { BuiltinMesh = BuiltinMeshKind.Box });
+        scene.Entities.Add(entity);
+
+        var package = fx.ExportScene(scene);
+
+        Assert.Contains("builtin box", package);
+        Assert.DoesNotContain("mesh \"", package); // 无资产行
+    }
+
+    [Fact]
+    public void Export_Portable_CopiesAssetsAndRewritesPaths()
+    {
+        using var fx = new Fixture();
+        var sidecar = fx.WriteAsset("Content/Assets/plain.model.json", "{}");
+        fx.WriteAssetBytes("Content/Assets/plain.mesh");
+        fx.WriteAsset("Content/Assets/tex/albedo.texture", new string('a', 16));
+        var scriptPath = fx.WriteAsset("Content/Scripts/rotate.lua", "return {}");
+        fx.WriteAsset(
+            "Content/Assets/tex/plain.material.material.graph.json",
+            MaterialGraphJson("Content/Assets/tex/albedo.texture", null));
+        var material = fx.WriteAsset(
+            "Content/Assets/tex/plain.material.json",
+            "{\"SchemaVersion\":2,\"Name\":\"plain\",\"Textures\":{}}");
+        fx.Rescan();
+        var meshGuid = new AssetGuid(AssetRegistry.Get(sidecar)!.Guid);
+        var scriptGuid = new AssetGuid(AssetRegistry.Get(scriptPath)!.Guid);
+
+        var scene = new Scene("PortableTest");
+        var entity = new GameEntity("spinner");
+        entity.Components.Add(new Transform());
+        var mesh = new MeshRendererComponent { MeshGuid = meshGuid };
+        mesh.MaterialGuids.Add(new AssetGuid(AssetRegistry.Get(material)!.Guid));
+        entity.Components.Add(mesh);
+        var lua = new PrimalEditor_Avalonia.Components.LuaScriptComponent
+        {
+            ScriptAssetGuid = scriptGuid,
+            ScriptName = "rotate.lua",
+        };
+        entity.Components.Add(lua);
+        scene.Entities.Add(entity);
+
+        var path = RuntimeSceneExporter.Export(scene, fx.ProjectDir, portable: true)!;
+        var package = File.ReadAllText(path);
+        var packageDir = Path.GetDirectoryName(path)!;
+        var assetsDir = Path.Combine(packageDir, RuntimeSceneExporter.PortableAssetsDirName);
+
+        // 行内路径全部包相对（_assets/…），无项目相对/绝对残留
+        Assert.Contains("mesh \"_assets/", package);
+        Assert.Contains("tex 0 \"_assets/", package);
+        Assert.Contains("script \"_assets/", package);
+        Assert.DoesNotContain("Content/Assets", package);
+        Assert.DoesNotContain("Content/Scripts", package);
+
+        // 副本真实落地且内容一致；目录自包含（脚本+mesh+texture）
+        var copied = Directory.GetFiles(assetsDir).Select(Path.GetFileName).ToArray();
+        Assert.Contains("plain.mesh", copied);
+        Assert.Contains("rotate.lua", copied);
+        Assert.Contains("albedo.texture", copied);
+        Assert.Equal(
+            new string('a', 16),
+            File.ReadAllText(Path.Combine(assetsDir, "albedo.texture")));
+
+        // 同一资产二次导出复用副本（路径稳定，重跑可增量覆盖）
+        var path2 = RuntimeSceneExporter.Export(scene, fx.ProjectDir, portable: true)!;
+        Assert.Equal(path, path2);
+        Assert.Equal(package, File.ReadAllText(path2));
+    }
+
+    [Fact]
+    public void Export_Portable_NameCollisionGetsDistinctCopies()
+    {
+        using var fx = new Fixture();
+        // 两个不同内容的同名 albedo.texture（不同目录）
+        fx.WriteAsset("Content/A/Plain.model.json", "{}");
+        fx.WriteAssetBytes("Content/A/Plain.mesh");
+        fx.WriteAsset("Content/A/m/albedo.texture", new string('x', 8));
+        fx.WriteAsset("Content/B/m/albedo.texture", new string('y', 8));
+        fx.WriteAsset("Content/A/t.material.json", "{\"SchemaVersion\":2,\"Name\":\"a\",\"Textures\":{}}");
+        fx.WriteAsset("Content/B/t.material.json", "{\"SchemaVersion\":2,\"Name\":\"b\",\"Textures\":{}}");
+        fx.WriteAsset("Content/A/t.material.material.graph.json", MaterialGraphJson("Content/A/m/albedo.texture", null));
+        fx.WriteAsset("Content/B/t.material.material.graph.json", MaterialGraphJson("Content/B/m/albedo.texture", null));
+        fx.Rescan();
+        // 共用同一 cooked mesh（A），只有材质/纹理不同——碰撞场景只针对 texture。
+        var meshGuid = new AssetGuid(AssetRegistry.Get(Path.Combine(fx.ProjectDir, "Content/A/Plain.model.json"))!.Guid);
+
+        var scene = new Scene("CollisionTest");
+        foreach (var dir in new[] { "A", "B" })
+        {
+            var entity = new GameEntity(dir);
+            entity.Components.Add(new Transform());
+            var mesh = new MeshRendererComponent { MeshGuid = meshGuid };
+            mesh.MaterialGuids.Add(new AssetGuid(AssetRegistry.Get(Path.Combine(fx.ProjectDir, $"Content/{dir}/t.material.json"))!.Guid));
+            entity.Components.Add(mesh);
+            scene.Entities.Add(entity);
+        }
+
+        var path = RuntimeSceneExporter.Export(scene, fx.ProjectDir, portable: true)!;
+        var package = File.ReadAllText(path);
+
+        // 两个 tex 0 行指向不同的 _assets 副本（同名不互相覆盖）
+        var texLines = package.Split('\n').Where(l => l.StartsWith("tex 0 ")).ToArray();
+        Assert.Equal(2, texLines.Length);
+        Assert.NotEqual(texLines[0], texLines[1]);
+        var assetsDir = Path.Combine(Path.GetDirectoryName(path)!, RuntimeSceneExporter.PortableAssetsDirName);
+        Assert.Equal(2, Directory.GetFiles(assetsDir, "albedo*.texture").Length);
     }
 }

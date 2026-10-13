@@ -80,6 +80,8 @@ std::uint64_t PipelineRegisterMeshEntity(std::uint64_t geometry_content_id,
                                          const std::uint64_t* texture_ids,
                                          std::uint32_t texture_count);
 void          PipelineUnregisterMeshEntity(std::uint64_t entity_id);
+std::uint64_t ProceduralMeshCreate(std::uint32_t mesh_type, const float* params,
+                                   std::uint32_t param_count);
 void          PipelineTick(float dt_seconds);
 std::uint64_t ScriptCreateForEntity(std::uint32_t entity_id, const char* lua_path,
                                     const char** param_keys, const char** param_values,
@@ -120,6 +122,7 @@ struct RuntimeEntity {
     float rot[3]{0.f, 0.f, 0.f};
     float scl[3]{1.f, 1.f, 1.f};
     std::string mesh_path;
+    std::string builtin;                      // v2：内置几何名（与 mesh_path 互斥）
     std::string tex_paths[kMaxTextureSlots]; // 槽位空洞 = 空串
     std::string script_path;                 // v2：实体挂的 .lua（相对包根或绝对）
     std::vector<std::pair<std::string, std::string>> script_params; // param <k> "<v>"
@@ -251,6 +254,11 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
                 current.tex_paths[slot] = ParseQuoted(rest.substr(quote));
             }
         }
+        else if (key == "builtin") {
+            // v2：`builtin <sphere|box|plane|capsule>` — 内置几何（无资产），
+            // 注入期 ProceduralMeshCreate 现场生成（release S1）。
+            current.builtin = Trim(rest);
+        }
         else if (key == "script") {
             // v2：`script "<路径>"` — 实体挂的 .lua（scripting S1）。
             current.script_path = ParseQuoted(rest);
@@ -298,15 +306,38 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
     return true;
 }
 
-// v2 包内路径规则：绝对路径直用；项目相对路径按包位置反推项目根
-// （包位于 <proj>/.Primal/runtime/，三级上溯）。v1 包的 mesh 行本就是
+// v2 包内路径规则：绝对路径直用；相对路径先按包文件所在目录解析（portable
+// 包的 _assets/… 即此形态，目录整体可搬移），不存在再按包位置反推项目根
+// （包位于 <proj>/.Primal/runtime/…，三级上溯）。v1 包的 mesh 行本就是
 // 绝对路径，同样命中"绝对直用"分支。
 std::string ResolveAssetPath(const std::string& raw, const std::string& package_path)
 {
     if (raw.empty() || raw.front() == '/') return raw;
     std::filesystem::path pkg(package_path);
+    const auto beside = (pkg.parent_path() / std::filesystem::path(raw)).lexically_normal();
+    if (std::filesystem::exists(beside)) return beside.string();
     const auto root = pkg.parent_path().parent_path().parent_path();
     return (root / std::filesystem::path(raw)).lexically_normal().string();
+}
+
+// builtin <name> → ProceduralMeshCreate 类型码 + 参数（与编辑器
+// SceneRuntimeSynchronizer.EnsureBuiltinGeometry 同一张表；mesh type 枚举
+// 见 EngineDLL/ProceduralMeshAPI.cpp：0=Sphere 3=Box 9=Plane 5=Capsule）。
+bool ResolveBuiltinMesh(const std::string& name, std::uint32_t& out_type,
+                        float (&out_params)[4], std::uint32_t& out_count)
+{
+    if (name == "sphere") {
+        out_type = 0; out_params[0]=0.5f; out_params[1]=24.f; out_params[2]=16.f; out_count=3;
+    } else if (name == "box") {
+        out_type = 3; out_params[0]=1.f; out_params[1]=1.f; out_params[2]=1.f; out_count=3;
+    } else if (name == "plane") {
+        out_type = 9; out_params[0]=2.f; out_params[1]=2.f; out_params[2]=1.f; out_params[3]=1.f; out_count=4;
+    } else if (name == "capsule") {
+        out_type = 5; out_params[0]=0.5f; out_params[1]=1.f; out_params[2]=20.f; out_params[3]=8.f; out_count=4;
+    } else {
+        return false;
+    }
+    return true;
 }
 
 // deg 单位契约与编辑器 SceneRuntimeSynchronizer 一致：CreateCamera 的 fov 传
@@ -341,28 +372,59 @@ std::uint32_t InjectScene(RuntimeScene& scene,
         return id;
     };
 
+    // builtin 几何缓存（名称 → content id）：一次生成，多实体复用（同编辑器
+    // EnsureBuiltinGeometry 的 per-kind 缓存语义）。
+    std::unordered_map<std::string, std::uint64_t> builtin_geometry;
+
     for (auto& e : scene.entities) {
-        if (e.mesh_path.empty()) continue;
-        const auto mesh_path = ResolveAssetPath(e.mesh_path, package_path);
-        const std::uint64_t request = ImportMeshAsync(mesh_path.c_str());
-        if (request == 0) {
-            std::fprintf(stderr, "[player] ImportMeshAsync rejected: %s\n", mesh_path.c_str());
-            continue;
-        }
+        if (e.mesh_path.empty() && e.builtin.empty()) continue;
+
+        // 网格 content id 两路：内置几何现场生成；资产走 cooked 导入。
         std::uint64_t mesh_id = 0;
-        std::uint32_t status = 0; // Pending
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-        while (std::chrono::steady_clock::now() < deadline) {
-            TickMainThreadJobs();
-            TickAssetSystem();
-            TryGetMeshImportResult(request, &mesh_id, &status);
-            if (status != 0) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        if (status != 1 || mesh_id == 0xFFFFFFFFFFFFFFFFull) { // 1 = Success（编辑器同值）；content id 0 是合法首槽，只认 0xFFFFFFFF 哨兵
-            std::fprintf(stderr, "[player] mesh import failed (status=%u): %s\n",
-                         status, mesh_path.c_str());
-            continue;
+        if (!e.builtin.empty()) {
+            if (const auto it = builtin_geometry.find(e.builtin); it != builtin_geometry.end()) {
+                mesh_id = it->second;
+            } else {
+                std::uint32_t type = 0, count = 0;
+                float params[4] = {0, 0, 0, 0};
+                if (!ResolveBuiltinMesh(e.builtin, type, params, count)) {
+                    std::fprintf(stderr, "[player] unknown builtin mesh '%s' (entity '%s') skipped\n",
+                                 e.builtin.c_str(), e.name.c_str());
+                    builtin_geometry[e.builtin] = 0xFFFFFFFFFFFFFFFFull;
+                    continue;
+                }
+                mesh_id = ProceduralMeshCreate(type, params, count);
+                if (mesh_id == 0xFFFFFFFFFFFFFFFFull) {
+                    std::fprintf(stderr, "[player] ProceduralMeshCreate failed: %s (entity '%s')\n",
+                                 e.builtin.c_str(), e.name.c_str());
+                    builtin_geometry[e.builtin] = 0xFFFFFFFFFFFFFFFFull;
+                    continue;
+                }
+                builtin_geometry[e.builtin] = mesh_id;
+                std::fprintf(stderr, "[player] builtin geometry '%s' created (content=%llu)\n",
+                             e.builtin.c_str(), static_cast<unsigned long long>(mesh_id));
+            }
+        } else {
+            const auto mesh_path = ResolveAssetPath(e.mesh_path, package_path);
+            const std::uint64_t request = ImportMeshAsync(mesh_path.c_str());
+            if (request == 0) {
+                std::fprintf(stderr, "[player] ImportMeshAsync rejected: %s\n", mesh_path.c_str());
+                continue;
+            }
+            std::uint32_t status = 0; // Pending
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            while (std::chrono::steady_clock::now() < deadline) {
+                TickMainThreadJobs();
+                TickAssetSystem();
+                TryGetMeshImportResult(request, &mesh_id, &status);
+                if (status != 0) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (status != 1 || mesh_id == 0xFFFFFFFFFFFFFFFFull) { // 1 = Success（编辑器同值）；content id 0 是合法首槽，只认 0xFFFFFFFF 哨兵
+                std::fprintf(stderr, "[player] mesh import failed (status=%u): %s\n",
+                             status, mesh_path.c_str());
+                continue;
+            }
         }
         // 纹理槽位数组：有任一槽位则长度 = 最高非空洞槽 +1（空洞/失败 =
         // 0xFFFFFFFF 哨兵，引擎按槽回退默认材质）；全空保持 {0} 白材质
@@ -384,7 +446,7 @@ std::uint32_t InjectScene(RuntimeScene& scene,
             PipelineRegisterMeshEntity(mesh_id, texture_ids, texture_count);
         if (entity == 0xFFFFFFFFFFFFFFFFull) { // ECS slot 0 合法，只认 0xFFFFFFFF 哨兵（同 CreateEntity 约定）
             std::fprintf(stderr, "[player] PipelineRegisterMeshEntity failed: %s\n",
-                         mesh_path.c_str());
+                         e.builtin.empty() ? e.mesh_path.c_str() : e.builtin.c_str());
             continue;
         }
         SetEntityTransform(static_cast<std::uint32_t>(entity), e.pos, e.rot, e.scl);

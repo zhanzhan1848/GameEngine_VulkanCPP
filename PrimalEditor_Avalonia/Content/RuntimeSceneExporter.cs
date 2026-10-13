@@ -21,6 +21,7 @@ namespace PrimalEditor_Avalonia.Content;
 ///   name "Name"
 ///   pos x y z                    / rot x y z / scl x y z
 ///   mesh "<cooked .mesh path>"
+///   builtin <sphere|box|plane|capsule>        (内置几何——player 用 ProceduralMeshCreate 现场生成)
 ///   tex <slot> "<cooked .texture path>"     (slot 0=albedo 1=normal 2=orm)
 ///   light type intensity r g b range umbra_deg penumbra_deg enabled
 ///   camera projection fov_deg near far is_main
@@ -32,8 +33,13 @@ namespace PrimalEditor_Avalonia.Content;
 ///     ImportMeshAsync 拒绝 .model.json）。
 ///   - 新增 tex 槽位行：MaterialGuids[0] 经 MaterialWorldTextureResolver
 ///     解析出的世界纹理三元组（与编辑器视口绑定同一条链），槽位空洞省行。
+///   - 新增 builtin 行：BuiltinMesh 内置几何实体（MeshGuid 为空）不落资产，
+///     player 端 ProceduralMeshCreate 同参数生成（2026-10-14，release S1）。
 ///   - 路径优先项目相对（'/' 分隔，相对项目根）；越出项目根的回退绝对路径。
 ///     player 按包位置（&lt;project&gt;/.Primal/runtime/）反推项目根解析相对路径。
+///   - portable=true：所有被引用文件复制进包目录 _assets/，行内路径改写为
+///     包相对（_assets/…）；player 解析顺序 = 包内相对 → 项目根。整个目录
+///     可搬移/压缩分发（release S1 可搬移资源包）。
 ///
 /// The editor is the single source of truth for the schema (文档模型优先) —
 /// the player never reads .primal/scene JSON or the migration logic.
@@ -42,16 +48,44 @@ public static class RuntimeSceneExporter
 {
     public const string FormatHeader = "# primal-runtime-scene v2";
 
+    /// <summary>portable 模式资产落地子目录（包文件旁）。</summary>
+    public const string PortableAssetsDirName = "_assets";
+
     /// <summary>
     /// Export <paramref name="scene"/> to
     /// <c>&lt;projectDir&gt;/.Primal/runtime/active.primalrun</c>.
     /// Returns the written path, or null when the scene/project is missing.
     /// </summary>
-    public static string? Export(Scene? scene, string? projectDir)
+    public static string? Export(Scene? scene, string? projectDir) => Export(scene, projectDir, portable: false);
+
+    /// <summary>
+    /// portable=true：包写到 <c>runtime/portable/&lt;scene&gt;.primalrun</c>，
+    /// 引用的 cooked mesh/纹理/脚本复制进包旁 <c>_assets/</c>，行内路径改写为
+    /// 包相对——目录整体可搬移（zip 分发/换机器解压即跑）。复制失败：跳过该
+    /// 资产并警告（包仍生成，缺项在 player 侧按各自缺省处理，不静默成功）。
+    /// </summary>
+    public static string? Export(Scene? scene, string? projectDir, bool portable)
     {
         if (scene == null || string.IsNullOrEmpty(projectDir)) return null;
 
-        var sb = new StringBuilder(64 * 1024);
+        var runtimeDir = Path.Combine(projectDir, ".Primal", "runtime");
+        string path;
+        ExportContext ctx;
+        if (portable)
+        {
+            var packageDir = Path.Combine(runtimeDir, "portable");
+            Directory.CreateDirectory(packageDir);
+            path = Path.Combine(packageDir, $"{SanitizeFileName(scene.Name)}.primalrun");
+            ctx = new ExportContext(portable: true, Path.Combine(packageDir, PortableAssetsDirName));
+        }
+        else
+        {
+            Directory.CreateDirectory(runtimeDir);
+            path = Path.Combine(runtimeDir, "active.primalrun");
+            ctx = new ExportContext(portable: false, assetsDir: null);
+        }
+
+        var sb = ctx.Sb;
         sb.AppendLine(FormatHeader);
         sb.AppendLine($"scene \"{scene.Name.Replace("\"", "'")}\"");
         AppendEnvironment(sb, scene);
@@ -62,9 +96,9 @@ public static class RuntimeSceneExporter
             sb.AppendLine("entity");
             sb.AppendLine($"name \"{entity.Name.Replace("\"", "'")}\"");
             AppendTransform(sb, entity);
-            AppendMesh(sb, entity);
-            AppendTextures(sb, entity);
-            AppendScript(sb, entity);
+            AppendMesh(sb, ctx, entity);
+            AppendTextures(sb, ctx, entity);
+            AppendScript(sb, ctx, entity);
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
                 // type/intensity/rgb/range/umbra/penumbra/enabled — the same
@@ -83,13 +117,61 @@ public static class RuntimeSceneExporter
             sb.AppendLine("end");
         }
 
-        var runtimeDir = Path.Combine(projectDir, ".Primal", "runtime");
-        Directory.CreateDirectory(runtimeDir);
-        var path = Path.Combine(runtimeDir, "active.primalrun");
         File.WriteAllText(path, sb.ToString());
         PrimalEditor_Avalonia.Common.Logger.Info(
-            $"[Run] runtime scene exported: {path}");
+            $"[Run] runtime scene exported: {path}{(portable ? $"（portable，{ctx.CopiedFiles.Count} 个资产复制进 {ctx.AssetsDir}）" : "")}");
         return path;
+    }
+
+    /// <summary>包内路径规则：项目相对优先（GetRelativePath，'/' 分隔）；
+    /// 越出项目根回退绝对路径并留痕——player 两种都接受。</summary>
+    private static string ToPackagePath(ExportContext ctx, string absolutePath, string entityName)
+    {
+        if (ctx.Portable)
+        {
+            if (ctx.CopiedFiles.TryGetValue(absolutePath, out var cached)) return cached;
+            try
+            {
+                Directory.CreateDirectory(ctx.AssetsDir!);
+                var fileName = SanitizeFileName(Path.GetFileName(absolutePath));
+                var target = Path.Combine(ctx.AssetsDir, fileName);
+                // 同名不同源：追加全路径短哈希，副本互不覆盖（原件永不改写）。
+                if (File.Exists(target))
+                {
+                    var existing = System.Security.Cryptography.SHA1.HashData(File.ReadAllBytes(target));
+                    var incoming = System.Security.Cryptography.SHA1.HashData(File.ReadAllBytes(absolutePath));
+                    if (!existing.SequenceEqual(incoming))
+                    {
+                        var hash = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(
+                            System.Text.Encoding.UTF8.GetBytes(absolutePath)))[..6];
+                        var stem = Path.GetFileNameWithoutExtension(fileName);
+                        fileName = $"{stem}_{hash}{Path.GetExtension(fileName)}";
+                        target = Path.Combine(ctx.AssetsDir, fileName);
+                    }
+                }
+                File.Copy(absolutePath, target, overwrite: true);
+                var packageRelative = $"{PortableAssetsDirName}/{fileName}";
+                ctx.CopiedFiles[absolutePath] = packageRelative;
+                return packageRelative;
+            }
+            catch (Exception ex)
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning(
+                    $"[Run] portable copy failed for '{absolutePath}' ({ex.Message}) — entity '{entityName}' 行回退项目相对路径");
+            }
+        }
+        var rel = AssetRegistry.GetRelativePath(absolutePath);
+        if (rel is { } r) return r.Value;
+        PrimalEditor_Avalonia.Common.Logger.Warning(
+            $"[Run] asset outside project root, entity '{entityName}' — absolute path exported: {absolutePath}");
+        return absolutePath;
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        foreach (var c in System.IO.Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return string.IsNullOrEmpty(name) ? "asset" : name;
     }
 
     private static void AppendEnvironment(StringBuilder sb, Scene scene)
@@ -127,10 +209,19 @@ public static class RuntimeSceneExporter
         sb.AppendLine($"scl {Fmt(sx)} {Fmt(sy)} {Fmt(sz)}");
     }
 
-    private static void AppendMesh(StringBuilder sb, GameEntity entity)
+    private static void AppendMesh(StringBuilder sb, ExportContext ctx, GameEntity entity)
     {
         var mesh = entity.GetComponent<MeshRendererComponent>();
-        if (mesh == null || mesh.MeshGuid.Value == Guid.Empty) return;
+        if (mesh == null) return;
+
+        // 内置几何（release S1）：无资产 GUID，player 端 ProceduralMeshCreate
+        // 同参数生成（参数表与 SceneRuntimeSynchronizer.EnsureBuiltinGeometry 一致）。
+        if (mesh.MeshGuid.Value == Guid.Empty)
+        {
+            if (mesh.BuiltinMesh == BuiltinMeshKind.None) return;
+            sb.AppendLine($"builtin {BuiltinMeshName(mesh.BuiltinMesh)}");
+            return;
+        }
         var info = AssetRegistry.GetByGuid(mesh.MeshGuid.Value);
         if (info == null || string.IsNullOrEmpty(info.FullPath))
         {
@@ -148,17 +239,28 @@ public static class RuntimeSceneExporter
                 $"[Run] cooked mesh not found for entity '{entity.Name}' (source={info.FullPath}) skipped");
             return;
         }
-        sb.AppendLine($"mesh \"{ToPackagePath(cooked, entity.Name)}\"");
+        sb.AppendLine($"mesh \"{ToPackagePath(ctx, cooked, entity.Name)}\"");
     }
 
-    private static void AppendTextures(StringBuilder sb, GameEntity entity)
+    /// <summary>内置几何包内名（player 侧同名映射到 ProceduralMeshCreate 类型码）。</summary>
+    internal static string BuiltinMeshName(BuiltinMeshKind kind) => kind switch
+    {
+        BuiltinMeshKind.Sphere => "sphere",
+        BuiltinMeshKind.Box => "box",
+        BuiltinMeshKind.Plane => "plane",
+        BuiltinMeshKind.Capsule => "capsule",
+        _ => "unknown",
+    };
+
+    private static void AppendTextures(StringBuilder sb, ExportContext ctx, GameEntity entity)
     {
         var mesh = entity.GetComponent<MeshRendererComponent>();
         if (mesh == null || mesh.MaterialGuids.Count == 0) return;
 
         // 世界渲染器只消费第一个材质槽的 [albedo, normal, orm] 三元组
         // （SceneRuntimeSynchronizer.ResolveWorldTextureIds 同契约）；
-        // 解析器与编辑器视口共用，避免第二份材质图遍历实现。
+        // 多材质槽需要引擎侧 per-submesh 材质支持，待渲染专项协调
+        // （总规划 §1.2：必须新增渲染才能完成的功能明确标记待协调）。
         var material = AssetRegistry.GetByGuid(mesh.MaterialGuids[0].Value);
         if (material == null || string.IsNullOrEmpty(material.FullPath))
         {
@@ -170,7 +272,7 @@ public static class RuntimeSceneExporter
         for (var slot = 0; slot < paths.Length; slot++)
         {
             if (string.IsNullOrWhiteSpace(paths[slot])) continue;
-            sb.AppendLine($"tex {slot} \"{ToPackagePath(paths[slot]!, entity.Name)}\"");
+            sb.AppendLine($"tex {slot} \"{ToPackagePath(ctx, paths[slot]!, entity.Name)}\"");
         }
     }
 
@@ -190,7 +292,7 @@ public static class RuntimeSceneExporter
     /// 字符串 KV。param 键不得含空格（player 行式解析按空格切键）——含空格
     /// 键跳过并警告。
     /// </summary>
-    private static void AppendScript(StringBuilder sb, GameEntity entity)
+    private static void AppendScript(StringBuilder sb, ExportContext ctx, GameEntity entity)
     {
         var script = entity.GetComponent<Components.LuaScriptComponent>();
         if (script == null || script.ScriptAssetGuid.Value == Guid.Empty) return;
@@ -201,7 +303,7 @@ public static class RuntimeSceneExporter
                 $"[Run] script asset not registered, entity '{entity.Name}' (guid={script.ScriptAssetGuid}) skipped");
             return;
         }
-        sb.AppendLine($"script \"{ToPackagePath(info.FullPath, entity.Name)}\"");
+        sb.AppendLine($"script \"{ToPackagePath(ctx, info.FullPath, entity.Name)}\"");
         foreach (var (key, value) in script.Parameters)
         {
             if (string.IsNullOrWhiteSpace(key) || key.Contains(' '))
@@ -215,6 +317,22 @@ public static class RuntimeSceneExporter
     }
 
     private static string Fmt(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>单次导出状态：普通导出只拼行；portable 导出同时收集要复制进
+    /// 包目录的资产（abs → 包相对，去重）。</summary>
+    private sealed class ExportContext
+    {
+        public readonly StringBuilder Sb = new(64 * 1024);
+        public readonly bool Portable;
+        public readonly string? AssetsDir;
+        public readonly System.Collections.Generic.Dictionary<string, string> CopiedFiles = new();
+
+        public ExportContext(bool portable, string? assetsDir)
+        {
+            Portable = portable;
+            AssetsDir = assetsDir;
+        }
+    }
 
     private static System.Collections.Generic.IEnumerable<GameEntity> Enumerate(
         System.Collections.Generic.IEnumerable<GameEntity> roots)

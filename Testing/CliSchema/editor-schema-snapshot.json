@@ -1,5 +1,5 @@
 {
-  "$version": "84a8b807c5b06390",
+  "$version": "79f6fdaa8d932c96",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -574,6 +574,20 @@
         {
           "name": "text",
           "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "run.export",
+      "channel": "editor",
+      "description": "导出运行时场景包（与 Run 按钮同一生成器，不启动进程）。portable=true 时把引用的 cooked mesh/纹理/脚本复制进包目录 _assets/，行内路径改写为包相对（_assets/…）——整个 portable 目录可 zip 分发，Player 解析顺序=包内相对→项目根，换机解压即跑（release S1 可搬移资源包）。返回包路径与资产清单（files=包相对路径数组，bytes=复制总字节；非 portable 为空）。无项目/无激活场景返回 NOT_READY。",
+      "example": "{\"portable\":true}",
+      "params": [
+        {
+          "name": "portable",
+          "type": "boolean",
           "required": false
         }
       ],
