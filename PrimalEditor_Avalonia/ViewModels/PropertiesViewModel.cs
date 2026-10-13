@@ -243,6 +243,185 @@ public class PropertiesViewModel : ViewModelBase
 
     private static System.Action<string>? PfxOpenEditorCallbackStatic;
 
+    // ---- Lua 脚本（scripting S1 收官：Inspector 参数编辑段）----
+    // 语义与 CLI script.set-param 一致：Parameters 是唯一事实源（文档模型），
+    // 应用 = 快照旧值 → 写新字典 → UndoRedo → SyncEntity 销毁重建引擎实例
+    //（begin_play 以新参数重放）→ MarkProjectDirty。
+
+    public bool HasLuaScriptComponent => SingleSelection.Count == 1 &&
+        SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.LuaScriptComponent>() != null;
+
+    public PrimalEditor_Avalonia.Components.LuaScriptComponent? LuaScript
+    {
+        get
+        {
+            LuaActivate(this);
+            return SingleSelection.Count == 1
+                ? SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.LuaScriptComponent>()
+                : null;
+        }
+    }
+
+    /// <summary>资产显示名：注册表解析失败回退组件 ScriptName，再回退占位。</summary>
+    public string LuaScriptAssetName
+    {
+        get
+        {
+            var script = LuaScript;
+            if (script == null) return "";
+            if (script.ScriptAssetGuid.Value != Guid.Empty)
+            {
+                var info = AssetRegistry.GetByGuid(script.ScriptAssetGuid.Value);
+                if (!string.IsNullOrEmpty(info?.FileName)) return info.FileName;
+            }
+            return string.IsNullOrEmpty(script.ScriptName) ? "(未绑定)" : script.ScriptName;
+        }
+    }
+
+    private System.Collections.ObjectModel.ObservableCollection<ScriptParamRow>? _luaParamRows;
+
+    public System.Collections.ObjectModel.ObservableCollection<ScriptParamRow>? LuaParamRows
+    {
+        get
+        {
+            LuaActivate(this);
+            if (_luaParamRows == null && LuaScript != null)
+            {
+                _luaParamRows = new System.Collections.ObjectModel.ObservableCollection<ScriptParamRow>();
+                foreach (var kv in LuaScript.Parameters.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                    _luaParamRows.Add(new ScriptParamRow(kv.Key, kv.Value));
+            }
+            return _luaParamRows;
+        }
+    }
+
+    public void RefreshLuaParamRows()
+    {
+        _luaParamRows = null;
+        OnPropertyChanged(nameof(LuaParamRows));
+    }
+
+    // 添加行输入缓冲
+    private string _luaNewParamName = "";
+    public string LuaNewParamName
+    {
+        get => _luaNewParamName;
+        set { _luaNewParamName = value; OnPropertyChanged(); }
+    }
+
+    private string _luaNewParamValue = "";
+    public string LuaNewParamValue
+    {
+        get => _luaNewParamValue;
+        set { _luaNewParamValue = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>WorldEditorViewModel 注入：参数应用后同步器销毁重建该实体的
+    /// 引擎脚本实例（EnsureScript；等价 CLI 路径的 SceneSynchronizer.SyncEntity）。</summary>
+    public static System.Action<PrimalEditor_Avalonia.Components.GameEntity>? ScriptResyncCallback;
+
+    /// <summary>添加参数行（仅编辑缓冲；键规则同 script.set-param：非空、不含空格、
+    /// 不与现有行重复）。非法输入记警告不动行集。</summary>
+    public System.Windows.Input.ICommand LuaAddParamCommand { get; } =
+        new PrimalEditor_Avalonia.Common.RelayCommand(_ =>
+        {
+            var vm = LuaActive;
+            var rows = vm?._luaParamRows;
+            if (vm == null || rows == null) return;
+            var name = (vm.LuaNewParamName ?? "").Trim();
+            if (name.Length == 0)
+            {
+                Logger.Warning("[Script] add param: name empty");
+                return;
+            }
+            if (name.Contains(' '))
+            {
+                Logger.Warning($"[Script] add param: key '{name}' contains space — rejected");
+                return;
+            }
+            if (rows.Any(r => r.Name == name))
+            {
+                Logger.Warning($"[Script] add param: key '{name}' already exists");
+                return;
+            }
+            rows.Add(new ScriptParamRow(name, vm.LuaNewParamValue ?? ""));
+            vm.LuaNewParamName = "";
+            vm.LuaNewParamValue = "";
+        });
+
+    public void LuaRemoveParam(ScriptParamRow row) => _luaParamRows?.Remove(row);
+
+    /// <summary>提交参数表到组件（文档模型）：跳过空键/含空格键并警告；成功才
+    /// 记 Undo、触发重建与标脏。整表一次提交——逐行提交会在重建语义下产生
+    /// 大量中间 begin_play 重放。</summary>
+    public System.Windows.Input.ICommand LuaApplyParamsCommand { get; } =
+        new PrimalEditor_Avalonia.Common.RelayCommand(_ => LuaActive?.ApplyLuaParams());
+
+    private void ApplyLuaParams()
+    {
+        var script = LuaScript;
+        var rows = _luaParamRows;
+        if (script == null || rows == null) return;
+
+        var next = new Dictionary<string, string>(StringComparer.Ordinal);
+        var rejected = 0;
+        foreach (var row in rows)
+        {
+            var name = (row.Name ?? "").Trim();
+            if (name.Length == 0 || name.Contains(' ') || next.ContainsKey(name))
+            {
+                ++rejected;
+                Logger.Warning($"[Script] apply params: key '{row.Name}' invalid (empty/space/duplicate) — skipped");
+                continue;
+            }
+            next[name] = row.Value ?? "";
+        }
+
+        var entity = SingleSelection[0];
+        var oldParams = new Dictionary<string, string>(script.Parameters, StringComparer.Ordinal);
+        var changed = !oldParams.OrderBy(kv => kv.Key).SequenceEqual(
+            next.OrderBy(kv => kv.Key), new KeyValuePairComparer());
+        if (!changed)
+        {
+            Logger.Info("[Script] apply params: no change — skipped rebuild");
+            return;
+        }
+
+        script.Parameters = next;
+        var undoRedo = TryGetUndoRedo();
+        if (undoRedo != null && !undoRedo.IsUndoingOrRedoing)
+        {
+            undoRedo.Add(new PrimalEditor_Avalonia.Common.DelegateAction("script.apply-params",
+                () =>
+                {
+                    script.Parameters = new Dictionary<string, string>(oldParams, StringComparer.Ordinal);
+                    ScriptResyncCallback?.Invoke(entity);
+                },
+                () =>
+                {
+                    script.Parameters = new Dictionary<string, string>(next, StringComparer.Ordinal);
+                    ScriptResyncCallback?.Invoke(entity);
+                }));
+        }
+        ScriptResyncCallback?.Invoke(entity);
+        MarkProjectDirty();
+        RefreshLuaParamRows();
+        Logger.Info($"[Script] applied {next.Count} params ({rejected} rejected) to '{entity.Name}'");
+    }
+
+    // RelayCommand 闭包无法捕获实例——经静态中转（编辑器单实例语义，PFX 同款）：
+    // Entities 绑定选中集时登记活动实例，命令经它取行集与输入缓冲。
+    private static PropertiesViewModel? LuaActive;
+    private static void LuaActivate(PropertiesViewModel vm) => LuaActive = vm;
+
+    private sealed class KeyValuePairComparer : IEqualityComparer<KeyValuePair<string, string>>
+    {
+        public bool Equals(KeyValuePair<string, string> x, KeyValuePair<string, string> y) =>
+            x.Key == y.Key && x.Value == y.Value;
+        public int GetHashCode(KeyValuePair<string, string> obj) =>
+            System.HashCode.Combine(obj.Key, obj.Value);
+    }
+
     // ---- ExposedParams 行模型（DataGrid 绑定）----
 
     private System.Collections.ObjectModel.ObservableCollection<PfxExposedParamRow>? _pfxParamRows;
@@ -509,6 +688,7 @@ public class PropertiesViewModel : ViewModelBase
         set
         {
             var ms = new MSEntity();
+            LuaActivate(this);
             if (value != null)
                 foreach (var e in value) ms.SelectedEntities.Add(e);
             MSEntity = ms;
@@ -539,6 +719,7 @@ public class PropertiesViewModel : ViewModelBase
                 RebuildMaterialOverrides(ms.SelectedEntities);
                 RebuildMeshMaterials(ms.SelectedEntities);
             }
+            RefreshLuaParamRows();
             UpdateFromEntities();
         }
     }
@@ -1043,6 +1224,10 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(HasMaterialOverrideComponent));
         OnPropertyChanged(nameof(HasParticleComponent));
         OnPropertyChanged(nameof(Particle));
+        // scripting S1 收官：Lua 区段可见性/资产名/参数行随选中集刷新。
+        OnPropertyChanged(nameof(HasLuaScriptComponent));
+        OnPropertyChanged(nameof(LuaScriptAssetName));
+        OnPropertyChanged(nameof(LuaParamRows));
         // Section visibility alone is not enough: without these the Preset
         // combo / Spawn Rate / Enabled keep the values they had before the
         // emitter existed (empty / 0 / unchecked) after re-selection.

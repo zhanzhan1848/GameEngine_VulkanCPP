@@ -381,6 +381,45 @@
                         Padding="8,2" Margin="0,4,0,0" HorizontalAlignment="Left"/>
             </StackPanel>
 
+            <!-- Lua Script（scripting S1 收官：参数编辑段；应用语义 = script.set-param CLI） -->
+            <StackPanel IsVisible="{Binding HasLuaScriptComponent}" Spacing="6">
+                <Separator Margin="0,12"/>
+                <TextBlock Text="LUA SCRIPT" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <Grid ColumnDefinitions="90,*">
+                    <TextBlock Grid.Column="0" Text="Asset" VerticalAlignment="Center"
+                               ToolTip.Tip="绑定到实体的 .lua 资产；换绑 = 从 Content Browser 把 .lua 拖到实体上"/>
+                    <TextBox Grid.Column="1" Text="{Binding LuaScriptAssetName, Mode=OneWay}" IsReadOnly="True"
+                             FontSize="11" Watermark="(未绑定)"/>
+                </Grid>
+                <TextBlock Text="Params" FontSize="11" Margin="0,8,0,2"
+                           ToolTip.Tip="params.&lt;key&gt;（字符串值，Lua 算术自然转型）；应用后引擎实例销毁重建，begin_play 以新参数重放"/>
+                <ItemsControl ItemsSource="{Binding LuaParamRows}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnDefinitions="*,*,26" Margin="0,1">
+                                <TextBox Grid.Column="0" Text="{Binding Name, Mode=TwoWay}" IsReadOnly="True" FontSize="11"/>
+                                <TextBox Grid.Column="1" Text="{Binding Value, Mode=TwoWay}" Margin="4,0,0,0" FontSize="11"
+                                         ToolTip.Tip="字符串值（数字/true/false 按需填；键含空格会在应用时被拒）"/>
+                                <Button Grid.Column="2" Content="✕" Padding="0" Margin="4,0,0,0" FontSize="10"
+                                        Click="OnLuaParamRemoveClick" Tag="{Binding}"
+                                        ToolTip.Tip="删除该参数行（应用后生效）"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Grid ColumnDefinitions="*,*,Auto" Margin="0,2,0,0">
+                    <TextBox Grid.Column="0" Text="{Binding LuaNewParamName, Mode=TwoWay}" FontSize="11"
+                             Watermark="新参数名" ToolTip.Tip="键规则：非空、不含空格、不与现有键重复"/>
+                    <TextBox Grid.Column="1" Text="{Binding LuaNewParamValue, Mode=TwoWay}" Margin="4,0,0,0" FontSize="11"
+                             Watermark="值（字符串）"/>
+                    <Button Grid.Column="2" Content="＋" Padding="6,0" Margin="4,0,0,0"
+                            Command="{Binding LuaAddParamCommand}" ToolTip.Tip="添加参数行（应用后生效）"/>
+                </Grid>
+                <Button Content="应用参数（销毁重建实例）" Command="{Binding LuaApplyParamsCommand}"
+                        Padding="8,2" HorizontalAlignment="Left"
+                        ToolTip.Tip="把行集写回组件 Parameters（唯一事实源，可 Undo），并销毁重建引擎脚本实例"/>
+            </StackPanel>
+
             <StackPanel IsVisible="{Binding HasMeshRendererComponent}" Spacing="6">
                 <Separator Margin="0,12"/>
 

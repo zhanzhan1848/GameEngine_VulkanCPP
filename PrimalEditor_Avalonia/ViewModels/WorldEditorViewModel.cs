@@ -723,6 +723,12 @@ public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredCont
             if (SelectedEntities.Length == 1)
                 SceneSynchronizer.ResyncPfxEmitter(SelectedEntities[0]);
         };
+        // scripting S1 收官：Inspector Lua 参数应用后销毁重建引擎脚本实例
+        //（EnsureScript；与 script.set-param CLI 的 SyncEntity 同路径）。
+        PrimalEditor_Avalonia.ViewModels.PropertiesViewModel.ScriptResyncCallback = entity =>
+        {
+            if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
+        };
         // PFX 编辑器 Save：落盘后重建场景中使用该资产的活动发射器（热更新），
         // 否则场景会一直跑资产打开时编译的旧程序——改 lifetime/alpha/collider
         // 都"不生效"。

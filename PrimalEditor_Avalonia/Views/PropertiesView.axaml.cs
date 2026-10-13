@@ -143,6 +143,12 @@ public partial class PropertiesView : UserControl
         Logger.Info("Particle FX asset binding cleared.");
     }
 
+    private void OnLuaParamRemoveClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is Avalonia.Controls.Button { Tag: ViewModels.ScriptParamRow row })
+            (DataContext as ViewModels.PropertiesViewModel)?.LuaRemoveParam(row);
+    }
+
     private async void OnBrowseLightEnvMapClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not ViewModels.PropertiesViewModel vm) return;
