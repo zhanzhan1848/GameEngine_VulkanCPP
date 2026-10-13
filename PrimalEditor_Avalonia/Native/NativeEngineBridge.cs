@@ -682,6 +682,32 @@ public static class NativeEngineBridge
         catch (Exception ex) { Logger.Error("PipelineImportCookedTexture failed", ex); return InvalidContentId; }
     }
 
+    // scripting S1：Lua 脚本实例生命周期（EngineDLL/ScriptAPI.cpp）。
+    // 失败返回 InvalidContentId（0xFFFFFFFF）——坏脚本/缺文件由引擎 stderr
+    // 定位（实体/文件/行），编辑器不退出。script id 0 是合法首槽。
+    [DllImport("PrimalEngine", EntryPoint = "ScriptCreateForEntity", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern UInt64 _ScriptCreateForEntity(uint entityId, IntPtr luaPath,
+        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string[]? paramKeys,
+        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string[]? paramValues,
+        uint paramCount);
+    public static UInt64 ScriptCreateForEntity(uint entityId, string luaPath, string[]? paramKeys, string[]? paramValues)
+    {
+        if (!_isLoaded || string.IsNullOrWhiteSpace(luaPath)) return InvalidContentId;
+        var count = paramKeys?.Length ?? 0;
+        var values = paramValues is { Length: var n } && n == count ? paramValues : new string[count];
+        try { return _ScriptCreateForEntity(entityId, MarshalUtf8(luaPath), paramKeys, values, (uint)count); }
+        catch (Exception ex) { Logger.Error("ScriptCreateForEntity failed", ex); return InvalidContentId; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "ScriptDestroyForEntity", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _ScriptDestroyForEntity(UInt64 scriptId);
+    public static void ScriptDestroyForEntity(UInt64 scriptId)
+    {
+        if (!_isLoaded || scriptId == InvalidContentId) return;
+        try { _ScriptDestroyForEntity(scriptId); }
+        catch (Exception ex) { Logger.Error("ScriptDestroyForEntity failed", ex); }
+    }
+
     // HDR environment map (equirect .hdr): skybox + baked IBL. Returns true
     // when the map was loaded and baked (or was already cached).
     [DllImport("PrimalEngine", EntryPoint = "PipelineSetEnvironmentMap", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]

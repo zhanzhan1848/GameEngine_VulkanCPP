@@ -269,9 +269,27 @@ public partial class MainWindow : Window
 
     private static string ScriptStub(string language, string name)
     {
-        return language == "lua"
-            ? $"-- {name}.lua\nprint(\"Hello from {name}!\")\n"
-            : $"# {name}.py\nprint(\"Hello from {name}!\")\n";
+        if (language != "lua")
+            return $"# {name}.py\nprint(\"Hello from {name}!\")\n";
+        // scripting S1 默认模板：绕 X 轴旋转（params.speed，弧度/秒，默认 0.8）。
+        // 钩子按方法语义派发（':' 声明）；实体操作走 entity 表（弧度）；
+        // 参数经组件 Parameters / script.set-param 传入（字符串值）。
+        return
+            $"-- {name}.lua（scripting S1 模板：绕 X 轴旋转）\n" +
+            "-- 挂载：把本文件拖到实体上（或 script.attach）；运行：Run → Player。\n" +
+            "-- 钩子契约：begin_play / fixed_update / update / late_update / destroy（':' 声明）。\n" +
+            "-- 实体操作：entity.position()/set_position(x,y,z)、entity.rotation()/set_rotation(欧拉弧度)、scale/set_scale。\n" +
+            "-- 参数：params.<key>（字符串，算术自然转型）；改参数用 Inspector 或 script.set-param。\n" +
+            "local M = {}\n" +
+            "local rx, ry, rz = 0, 0, 0\n" +
+            "function M:begin_play()\n" +
+            "    rx, ry, rz = entity.rotation()\n" +
+            "end\n" +
+            "function M:update(dt)\n" +
+            "    rx = rx + (params.speed or 0.8) * dt\n" +
+            "    entity.set_rotation(rx, ry, rz)\n" +
+            "end\n" +
+            "return M\n";
     }
 
     protected override async void OnClosing(Avalonia.Controls.WindowClosingEventArgs e)

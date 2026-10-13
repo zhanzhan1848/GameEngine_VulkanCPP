@@ -80,6 +80,11 @@ std::uint64_t PipelineRegisterMeshEntity(std::uint64_t geometry_content_id,
                                          const std::uint64_t* texture_ids,
                                          std::uint32_t texture_count);
 void          PipelineUnregisterMeshEntity(std::uint64_t entity_id);
+void          PipelineTick(float dt_seconds);
+std::uint64_t ScriptCreateForEntity(std::uint32_t entity_id, const char* lua_path,
+                                    const char** param_keys, const char** param_values,
+                                    std::uint32_t param_count);
+void          ScriptDestroyForEntity(std::uint64_t script_id);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
 void          DestroyRenderTarget(std::uint64_t handle);
@@ -116,6 +121,9 @@ struct RuntimeEntity {
     float scl[3]{1.f, 1.f, 1.f};
     std::string mesh_path;
     std::string tex_paths[kMaxTextureSlots]; // 槽位空洞 = 空串
+    std::string script_path;                 // v2：实体挂的 .lua（相对包根或绝对）
+    std::vector<std::pair<std::string, std::string>> script_params; // param <k> "<v>"
+    std::uint32_t engine_entity = 0xFFFFFFFFu; // 注入期回填（脚本挂载用）
     bool has_light = false;
     std::uint32_t light_type = 0;
     float light_intensity = 1.f;
@@ -243,6 +251,18 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
                 current.tex_paths[slot] = ParseQuoted(rest.substr(quote));
             }
         }
+        else if (key == "script") {
+            // v2：`script "<路径>"` — 实体挂的 .lua（scripting S1）。
+            current.script_path = ParseQuoted(rest);
+        }
+        else if (key == "param") {
+            // v2：`param <key> "<value>"` — 键为无引号 token，值为引号串。
+            const auto key_end = rest.find(' ');
+            if (key_end != std::string::npos) {
+                current.script_params.emplace_back(
+                    rest.substr(0, key_end), ParseQuoted(rest.substr(key_end + 1)));
+            }
+        }
         else if (key == "light") {
             float v[9];
             if (ParseFloats(rest, v, 9)) {
@@ -294,11 +314,12 @@ std::string ResolveAssetPath(const std::string& raw, const std::string& package_
 // 实体分两路：带网格的走 PipelineRegisterMeshEntity（注册即建实体），灯光/
 // 相机/空实体走 CreateEntity + AddEntityLight。相机组件不在此挂——由调用方
 // 对最终选中的相机实体调一次 CreateCamera 拿渲染用 camera slot。
-std::uint32_t InjectScene(const RuntimeScene& scene,
+std::uint32_t InjectScene(RuntimeScene& scene,
                           const std::string& package_path,
                           std::unordered_map<std::string, std::uint64_t>& texture_cache,
                           ChosenCamera& out_camera,
-                          std::vector<std::uint64_t>& out_mesh_entities)
+                          std::vector<std::uint64_t>& out_mesh_entities,
+                          std::vector<std::uint64_t>& out_script_handles)
 {
     UpdateSceneEnvironment(scene.env);
 
@@ -320,7 +341,7 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
         return id;
     };
 
-    for (const auto& e : scene.entities) {
+    for (auto& e : scene.entities) {
         if (e.mesh_path.empty()) continue;
         const auto mesh_path = ResolveAssetPath(e.mesh_path, package_path);
         const std::uint64_t request = ImportMeshAsync(mesh_path.c_str());
@@ -367,17 +388,21 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
             continue;
         }
         SetEntityTransform(static_cast<std::uint32_t>(entity), e.pos, e.rot, e.scl);
+        e.engine_entity = static_cast<std::uint32_t>(entity);
         out_mesh_entities.push_back(entity);
     }
 
-    for (const auto& e : scene.entities) {
-        if (!e.has_light && !e.has_camera) continue;
+    for (auto& e : scene.entities) {
+        // 灯光/相机/纯脚本实体走 CreateEntity（带网格的已在上一循环建过）。
+        if (!e.has_light && !e.has_camera && e.script_path.empty()) continue;
+        if (e.engine_entity != kInvalidEntityId) continue;
         const std::uint32_t entity = CreateEntity(e.pos[0], e.pos[1], e.pos[2]);
         if (entity == kInvalidEntityId) {  // 只认哨兵——slot 0 是合法分配（primal-engine 同约定）
             std::fprintf(stderr, "[player] CreateEntity failed: %s\n", e.name.c_str());
             continue;
         }
         SetEntityTransform(entity, e.pos, e.rot, e.scl);
+        e.engine_entity = entity;
         if (e.has_light) {
             AddEntityLight(entity, e.light_type, e.light_intensity, e.light_color,
                            e.light_range, e.light_umbra, e.light_penumbra,
@@ -406,6 +431,32 @@ std::uint32_t InjectScene(const RuntimeScene& scene,
         const float scl[3]{1.f, 1.f, 1.f};
         SetEntityTransform(entity, pos, rot, scl);
         chosen.entity_id = entity;
+    }
+    // v2：脚本挂载（scripting S1）。mesh 实体用注册时的引擎 id，其余用上一
+    // 循环回填的 id；坏脚本/缺文件由 ScriptAPI 报 stderr 并返回哨兵，宿主继续。
+    for (auto& e : scene.entities) {
+        if (e.script_path.empty() || e.engine_entity == kInvalidEntityId) continue;
+        const auto lua_path = ResolveAssetPath(e.script_path, package_path);
+        std::vector<const char*> keys, values;
+        keys.reserve(e.script_params.size());
+        values.reserve(e.script_params.size());
+        for (const auto& kv : e.script_params) {
+            keys.push_back(kv.first.c_str());
+            values.push_back(kv.second.c_str());
+        }
+        const std::uint64_t handle = ScriptCreateForEntity(
+            e.engine_entity, lua_path.c_str(),
+            keys.empty() ? nullptr : keys.data(),
+            values.empty() ? nullptr : values.data(),
+            static_cast<std::uint32_t>(keys.size()));
+        if (handle == 0xFFFFFFFFFFFFFFFFull)
+            std::fprintf(stderr, "[player] script attach failed: %s (entity '%s')\n",
+                         lua_path.c_str(), e.name.c_str());
+        else
+            std::fprintf(stderr, "[player] script attached '%s' → entity '%s' (handle=%llu)\n",
+                         lua_path.c_str(), e.name.c_str(),
+                         static_cast<unsigned long long>(handle));
+        out_script_handles.push_back(handle);
     }
 
     out_camera = chosen;
@@ -597,8 +648,9 @@ int main(int argc, char** argv)
 
     ChosenCamera camera{};
     std::vector<std::uint64_t> mesh_entities;
+    std::vector<std::uint64_t> script_handles;
     std::unordered_map<std::string, std::uint64_t> texture_cache;
-    if (InjectScene(scene, scene_path, texture_cache, camera, mesh_entities) == 0 ||
+    if (InjectScene(scene, scene_path, texture_cache, camera, mesh_entities, script_handles) == 0 ||
         camera.entity_id == kInvalidEntityId) {
         std::fprintf(stderr, "[player] scene injection failed (no camera)\n");
         return 3;
@@ -657,6 +709,9 @@ int main(int argc, char** argv)
     fly.yaw = camera.rot[1];
     fly.pitch = camera.rot[0];
 
+    // 帧计时（PipelineTick 的 dt 源）。
+    auto last_frame_time = std::chrono::steady_clock::now();
+
     // 录制状态：rendered 计渲染帧，captured 计已捕获帧（第 1、1+stride、…
     // 渲染帧落盘，文件名按捕获序号）。录满 max_frames 即退出进程——编辑器侧
     // 依赖"进程退出 = 录制完成"的契约做后续编码/通知。
@@ -678,6 +733,17 @@ int main(int argc, char** argv)
 #if defined(PRIMAL_PLAYER_WINDOW)
         if (windowed && !PlayerWindowPump()) break;
 #endif
+
+        // 宿主帧 tick（scripting S1）：script → physics → pfx → bindings
+        // （EngineDLL 顺序契约），渲染前驱动。dt 钳 0.1s 防切后台回来跳变。
+        {
+            const auto frame_now = std::chrono::steady_clock::now();
+            float dt = std::chrono::duration<float>(frame_now - last_frame_time).count();
+            last_frame_time = frame_now;
+            if (dt < 0.f) dt = 0.f;
+            if (dt > 0.1f) dt = 0.1f;
+            PipelineTick(dt);
+        }
 
 #if defined(PRIMAL_PLAYER_WINDOW)
         if (windowed) {
@@ -796,6 +862,9 @@ int main(int argc, char** argv)
         RemoveRenderSurface(surface_id);
     DestroyRenderTarget(target);
     DestroyStandardRenderPipeline();
+    // 脚本先行拆除（destroy 钩子解绑事件订阅，防止后续 tick 派发悬空句柄）。
+    for (const auto handle : script_handles)
+        ScriptDestroyForEntity(handle);
     // 趁 graphics device 仍存活释放 mesh/texture content registries——
     // AssetAPI 头注释：不这样做事后静态析构会对非空 free-list abort（存量问题②）。
     ShutdownAssetSystem();

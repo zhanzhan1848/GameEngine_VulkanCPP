@@ -140,6 +140,17 @@ public interface INativeEngineBridgeLike
     ulong ProceduralMeshCreate(uint meshType, float[] parameters);
 
     void ProceduralMeshDestroy(ulong contentId);
+
+    /// <summary>
+    /// scripting S1：给引擎实体挂 Lua 脚本实例（EngineDLL ScriptAPI）。
+    /// 返回脚本 handle；失败返回 <see cref="NativeEngineBridge.InvalidContentId"/>
+    /// （坏脚本/缺文件由引擎 stderr 定位，宿主继续）。默认实现保持测试桥兼容。
+    /// </summary>
+    ulong ScriptCreateForEntity(uint entityId, string luaPath, string[]? paramKeys, string[]? paramValues)
+        => NativeEngineBridge.InvalidContentId;
+
+    /// <summary>scripting S1：销毁脚本实例（幂等；invalid 容忍）。</summary>
+    void ScriptDestroyForEntity(ulong scriptHandle) { }
 }
 
 public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
@@ -173,6 +184,13 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
 
     public uint AddEntityLight(uint entityId, uint lightType, float intensity, float[] colorRgb, float range, float umbraRad, float penumbraRad, bool isEnabled) =>
         NativeEngineBridge.AddEntityLight(entityId, lightType, intensity, colorRgb, range, umbraRad, penumbraRad, isEnabled);
+
+    public ulong ScriptCreateForEntity(uint entityId, string luaPath, string[]? paramKeys, string[]? paramValues) =>
+        NativeEngineBridge.ScriptCreateForEntity(entityId, luaPath, paramKeys, paramValues);
+
+    public void ScriptDestroyForEntity(ulong scriptHandle) =>
+        NativeEngineBridge.ScriptDestroyForEntity(scriptHandle);
+
     public bool ParticleEnsureSystems() => NativeEngineBridge.ParticleEnsureSystems();
     public uint ParticleEmitterConfigSize() => NativeEngineBridge.ParticleEmitterConfigSize();
     public uint EmitterCreateForEntity(uint entityId, byte[] config) => NativeEngineBridge.EmitterCreateForEntity(entityId, config);

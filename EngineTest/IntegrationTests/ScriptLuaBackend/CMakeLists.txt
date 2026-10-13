@@ -35,6 +35,9 @@ set(LUA_SRC
     ${CMAKE_SOURCE_DIR}/third_party/lua/lutf8lib.c
 )
 
+# scripting S1（2026-10-11）：Engine 侧现在自带同款 lua_static 定义（生产
+# Lua 后端）。先到先得——Engine 已定义时这里直接复用，避免目标重名冲突。
+if(NOT TARGET lua_static)
 add_library(lua_static STATIC ${LUA_SRC})
 target_include_directories(lua_static PUBLIC ${CMAKE_SOURCE_DIR}/third_party/lua)
 
@@ -46,6 +49,7 @@ elseif(WIN32)
     target_compile_definitions(lua_static PRIVATE LUA_USE_WINDOWS=1)
 else()
     target_compile_definitions(lua_static PRIVATE LUA_USE_LINUX=1)
+endif()
 endif()
 
 # === Phase 2a Task 2: TestLuaBackend skeleton ===

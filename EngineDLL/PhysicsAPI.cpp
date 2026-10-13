@@ -15,6 +15,7 @@
 #include "Components/Collider.h"
 #include "Components/RigidBody.h"
 #include "Components/Entity.h"
+#include "Components/Script.h"
 #include "EngineAPI/GameEntity.h"
 #include "EngineAPI/GameEntity_impl.h"
 #include "Id.h"
@@ -184,11 +185,16 @@ EDITOR_INTERFACE u32 PhysicsSetRunning(u32 running)
 }
 
 // 宿主每帧在渲染前调用（PrimalPlayer / 编辑器视口 / 测试）。
-// M0 步进物理；script::frame_tick 在 M2 组件落地时接入（见设计文档 §4）。
-// PFX（N0）：粒子框架骨架 tick 挂在物理 step 之后 —— 到期回收产生的 death 事件
-// 下帧被消费者拉取；未初始化时惰性 ensure（幂等）。
+// 帧内顺序契约（scripting S1 冻结）：script → physics → pfx → bindings——
+// 脚本先产出意图（entity.set_position/rotation 写变换、事件发射），物理步进
+// 与粒子消费其后；到期回收产生的 death 事件下帧被消费者拉取。
+// script 段有 is_initialized 守卫：编辑器进程无脚本组件时从不调
+// ScriptEnsureSystems，而 frame_tick 入口的 check_main_thread 断言
+// g_initialized——无守卫时编辑器视口首帧即 SIGABRT（2026-10-12 实测）。
 EDITOR_INTERFACE void PipelineTick(f32 dt_seconds)
 {
+    if (primal::script::is_initialized())
+        primal::script::frame_tick(dt_seconds);
     simulation::step(dt_seconds);
     pfx::tick(dt_seconds);
     // P2:逐粒子刚体绑定——drain 事件一次、路由、物理 transform 回写

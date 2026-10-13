@@ -23,6 +23,7 @@ set(SOURCE_FILES
     "MaterialGraphReflectionAPI.cpp"
     "ParticleMaterialAPI.cpp"
     "ParticleEmitterAPI.cpp"
+    "ScriptAPI.cpp"
     "ParticleFXAPI.cpp"
     "ShaderCompilerAPI.cpp"
     "FrameAPI.cpp"

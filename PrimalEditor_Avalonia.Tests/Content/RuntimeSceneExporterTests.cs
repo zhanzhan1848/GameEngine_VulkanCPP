@@ -158,6 +158,39 @@ public sealed class RuntimeSceneExporterTests
     }
 
     [Fact]
+    public void Export_WritesScriptAndParamLines()
+    {
+        using var fx = new Fixture();
+        fx.WriteAsset("Content/Assets/plain.model.json", "{}");
+        fx.WriteAssetBytes("Content/Assets/plain.mesh");
+        var scriptPath = fx.WriteAsset("Content/Scripts/rotate.lua", "return {}");
+        fx.Rescan();
+        var meshGuid = new AssetGuid(AssetRegistry.Get(
+            Path.Combine(fx.ProjectDir, "Content/Assets/plain.model.json"))!.Guid);
+        var scriptGuid = new AssetGuid(AssetRegistry.Get(scriptPath)!.Guid);
+
+        var scene = new Scene("ScriptTest");
+        var entity = new GameEntity("spinner");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new MeshRendererComponent { MeshGuid = meshGuid });
+        var lua = new PrimalEditor_Avalonia.Components.LuaScriptComponent
+        {
+            ScriptAssetGuid = scriptGuid,
+            ScriptName = "rotate.lua",
+        };
+        lua.Parameters["speed"] = "0.8";
+        lua.Parameters["bad key"] = "rejected";
+        entity.Components.Add(lua);
+        scene.Entities.Add(entity);
+
+        var package = fx.ExportScene(scene);
+
+        Assert.Contains("script \"Content/Scripts/rotate.lua\"", package);
+        Assert.Contains("param speed \"0.8\"", package);
+        Assert.DoesNotContain("param bad key", package); // 含空格键被拒
+    }
+
+    [Fact]
     public void Export_OmitsTexLinesWithoutMaterial()
     {
         using var fx = new Fixture();

@@ -1048,6 +1048,15 @@ public uint GetNativeEntityId(GameEntity? entity)
                 return SelectedEntities[0];
             return CreatePfxEntity(info, posX, posY, posZ);
         }
+        // scripting S1：脚本拖放——单选实体时挂/换 LuaScriptComponent（拖到
+        // 实体上），空投时在落点建一个纯脚本实体。仅 .lua（.py/.cs 无后端）。
+        if (info.Type == AssetType.Script &&
+            info.FullPath.EndsWith(".lua", StringComparison.OrdinalIgnoreCase))
+        {
+            if (SelectedEntities.Length == 1 && ApplyScriptToSelectedEntity(info))
+                return SelectedEntities[0];
+            return CreateScriptEntity(info, posX, posY, posZ);
+        }
         var (nativeMeshPath, entityName) = ResolveDropTarget(info);
         if (nativeMeshPath == null)
         {
@@ -1199,6 +1208,56 @@ public uint GetNativeEntityId(GameEntity? entity)
         if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
         PrimalEditor_Avalonia.Common.Logger.Info(
             $"[PFX] asset dropped: {info.FileName} → entity {entity.Name}");
+        return entity;
+    }
+
+    // scripting S1：脚本资产 → 选中实体挂/换 LuaScriptComponent（抄 PFX 的
+    // author-then-apply 范式；GUID 身份走注册表）。
+    public bool ApplyScriptToSelectedEntity(AssetInfo info)
+    {
+        if (info == null) return false;
+        if (SelectedEntities.Length != 1)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                "[Script] apply: select exactly one entity");
+            return false;
+        }
+        var entity = SelectedEntities[0];
+        var script = entity.GetComponent<PrimalEditor_Avalonia.Components.LuaScriptComponent>();
+        if (script == null)
+        {
+            script = new PrimalEditor_Avalonia.Components.LuaScriptComponent();
+            entity.Components.Add(script);
+        }
+        script.ScriptAssetGuid = new AssetGuid(info.Guid);
+        script.ScriptName = info.FileName;
+        if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
+        MarkProjectDirty();
+        PrimalEditor_Avalonia.Common.Logger.Info(
+            $"[Script] asset applied: {info.FileName} → entity '{entity.Name}'");
+        return true;
+    }
+
+    // scripting S1：脚本空投 = 落点建纯脚本实体（AddEntityAction undo 标准流）。
+    private GameEntity? CreateScriptEntity(AssetInfo info, float posX, float posY, float posZ)
+    {
+        var entityName = Path.GetFileNameWithoutExtension(info.FullPath);
+        var entity = new GameEntity(entityName);
+        entity.Components.Add(new Transform { PositionX = posX, PositionY = posY, PositionZ = posZ });
+        entity.Components.Add(new PrimalEditor_Avalonia.Components.LuaScriptComponent
+        {
+            ScriptAssetGuid = new AssetGuid(info.Guid),
+            ScriptName = info.FileName,
+        });
+
+        AddEntity(entity);
+        var action = new AddEntityAction(this, entity);
+        UndoRedo.Add(action);
+        action.Redo();
+        SelectedEntities = new[] { entity };
+        if (NativeEngineBridge.IsLoaded) SceneSynchronizer.SyncEntity(entity);
+        PrimalEditor_Avalonia.Common.Logger.Info(
+            $"[Script] asset dropped: {info.FileName} → entity {entity.Name}");
         return entity;
     }
 

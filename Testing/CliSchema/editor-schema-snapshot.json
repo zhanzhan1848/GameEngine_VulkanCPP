@@ -1,5 +1,5 @@
 {
-  "$version": "00db28a01300985a",
+  "$version": "84a8b807c5b06390",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -632,6 +632,68 @@
       "description": "序列化当前激活场景：场景 guid/名称 + 全部实体的 guid、名称、启用状态、组件清单。Transform 汇总为 position/rotation/scale（单位米/度，右手系，+Y 向上）。这是修改类命令的前置查询：先拿到 entityGuid 再调用实体/组件命令。无打开项目时返回 NOT_READY。",
       "example": "{}",
       "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "script.attach",
+      "channel": "editor",
+      "description": "把 Content 内的 .lua 脚本资产挂到实体（已有 LuaScriptComponent 则换绑）。前置：编辑器已打开项目、脚本资产在 Content 内且已注册。parametersJson 为 JSON 对象字符串（键不得含空格；值为字符串）。失败：实体/资产不存在抛 NOT_FOUND，参数非法抛 INVALID_PARAMS。改动走 UndoRedo。",
+      "example": "{\"entityGuid\":\"…\",\"path\":\"Content/Scripts/rotate.lua\",\"parametersJson\":\"{\\\"speed\\\":\\\"0.8\\\"}\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "parametersJson",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "script.info",
+      "channel": "editor",
+      "description": "查询实体脚本组件状态（资产 GUID/名字/路径/参数表）。只读，无副作用。失败：实体不存在或无 LuaScriptComponent。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "script.set-param",
+      "channel": "editor",
+      "description": "设置/更新/删除实体脚本的单个参数（value=null 删除该键）。改动立即销毁重建引擎实例（begin_play 以新参数重放），走 UndoRedo。失败：无 LuaScriptComponent 或键含空格。",
+      "example": "{\"entityGuid\":\"…\",\"key\":\"speed\",\"value\":\"1.5\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "string",
+          "required": true
+        }
+      ],
       "returns": "object"
     },
     {

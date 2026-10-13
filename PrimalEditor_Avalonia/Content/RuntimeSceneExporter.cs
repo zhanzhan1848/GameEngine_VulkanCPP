@@ -64,6 +64,7 @@ public static class RuntimeSceneExporter
             AppendTransform(sb, entity);
             AppendMesh(sb, entity);
             AppendTextures(sb, entity);
+            AppendScript(sb, entity);
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
                 // type/intensity/rgb/range/umbra/penumbra/enabled — the same
@@ -182,6 +183,35 @@ public static class RuntimeSceneExporter
         PrimalEditor_Avalonia.Common.Logger.Warning(
             $"[Run] asset outside project root, entity '{entityName}' — absolute path exported: {absolutePath}");
         return absolutePath;
+    }
+
+    /// <summary>
+    /// scripting S1：script 行写 .lua 资产路径（项目相对优先），param 行写
+    /// 字符串 KV。param 键不得含空格（player 行式解析按空格切键）——含空格
+    /// 键跳过并警告。
+    /// </summary>
+    private static void AppendScript(StringBuilder sb, GameEntity entity)
+    {
+        var script = entity.GetComponent<Components.LuaScriptComponent>();
+        if (script == null || script.ScriptAssetGuid.Value == Guid.Empty) return;
+        var info = AssetRegistry.GetByGuid(script.ScriptAssetGuid.Value);
+        if (info == null || string.IsNullOrEmpty(info.FullPath))
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"[Run] script asset not registered, entity '{entity.Name}' (guid={script.ScriptAssetGuid}) skipped");
+            return;
+        }
+        sb.AppendLine($"script \"{ToPackagePath(info.FullPath, entity.Name)}\"");
+        foreach (var (key, value) in script.Parameters)
+        {
+            if (string.IsNullOrWhiteSpace(key) || key.Contains(' '))
+            {
+                PrimalEditor_Avalonia.Common.Logger.Warning(
+                    $"[Run] param key '{key}' invalid (empty/contains space), entity '{entity.Name}' skipped");
+                continue;
+            }
+            sb.AppendLine($"param {key} \"{value.Replace("\"", "'")}\"");
+        }
     }
 
     private static string Fmt(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);

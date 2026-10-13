@@ -37,6 +37,8 @@ public sealed class SceneRuntimeSynchronizer
     private ulong _defaultMaterialId;
     private readonly Dictionary<BuiltinMeshKind, ulong> _builtinGeometryIds = new();
     private readonly Dictionary<EditorHelperKind, ulong> _editorHelperGeometryIds = new();
+    // scripting S1：实体 GUID → 引擎脚本 handle（Teardown/参数热改时销毁重建）。
+    private readonly Dictionary<Guid, ulong> _scriptHandles = new();
 
     private enum EditorHelperKind
     {
@@ -104,6 +106,15 @@ public sealed class SceneRuntimeSynchronizer
 
     public void Teardown()
     {
+        // 脚本先行拆除（remove_for_entity 需要实体仍存活；destroy 钩子解绑
+        // 事件订阅，防后续派发悬空）。
+        foreach (var handle in _scriptHandles.Values)
+        {
+            try { _bridge.ScriptDestroyForEntity(handle); }
+            catch { /* engine might be torn down already */ }
+        }
+        _scriptHandles.Clear();
+
         foreach (var entity in _live)
         {
             var id = _entities.GetEntityId(entity.EntityGuid);
@@ -148,6 +159,11 @@ public sealed class SceneRuntimeSynchronizer
 		ArgumentNullException.ThrowIfNull(entity);
 		foreach (var child in entity.Children.ToArray()) RemoveEntity(child);
 
+		if (_scriptHandles.Remove(entity.EntityGuid.Value, out var scriptHandle))
+		{
+			try { _bridge.ScriptDestroyForEntity(scriptHandle); }
+			catch { /* ignore: engine might be torn down already */ }
+		}
 		if (_entities.GetEntityId(entity.EntityGuid) is { } runtimeId)
 		{
 			_bridge.DestroyEntity(runtimeId);
@@ -376,6 +392,10 @@ public sealed class SceneRuntimeSynchronizer
                 Logger.Info($"[ParticleFX] emitter {pfxEmitterId} created for '{entity.Name}' (asset={pfx.AssetPath})");
             }
 
+            // scripting S1：Lua 脚本组件（编辑态只挂实例不 tick——编辑器
+            // EngineTick 不驱动 PipelineTick，运行语义在 Player/runtime 预览）。
+            EnsureScript(entity, runtimeId);
+
             BindEditorHelperMesh(entity, runtimeId);
 
             var transform = entity.GetTransform();
@@ -393,6 +413,43 @@ public sealed class SceneRuntimeSynchronizer
                     transform.PositionX, transform.PositionY, transform.PositionZ);
             }
         }
+    }
+
+    /// <summary>
+    /// scripting S1：把实体上的 LuaScriptComponent 挂成引擎脚本实例。
+    /// 已有实例先销毁重建（ScriptSetParams 的宿主侧语义——begin_play 以新
+    /// 参数重放）。GUID 解析失败/坏脚本：警告 + 跳过，不中断同步。
+    /// </summary>
+    private void EnsureScript(GameEntity entity, uint runtimeId)
+    {
+        var script = entity.GetComponent<Components.LuaScriptComponent>();
+        if (script is null) return;
+
+        // 无脚本资产 = 用户清空了引用：只拆不建。
+        if (script.ScriptAssetGuid.Value == Guid.Empty)
+        {
+            if (_scriptHandles.Remove(entity.EntityGuid.Value, out var old))
+                _bridge.ScriptDestroyForEntity(old);
+            return;
+        }
+        var info = AssetRegistry.GetByGuid(script.ScriptAssetGuid.Value);
+        if (info is null || string.IsNullOrEmpty(info.FullPath))
+        {
+            Logger.Warning($"[Script] asset not registered, entity '{entity.Name}' (guid={script.ScriptAssetGuid}) skipped");
+            return;
+        }
+        if (_scriptHandles.Remove(entity.EntityGuid.Value, out var existing))
+            _bridge.ScriptDestroyForEntity(existing);
+
+        var keys = script.Parameters.Keys.ToArray();
+        var values = script.Parameters.Values.ToArray();
+        var handle = _bridge.ScriptCreateForEntity(runtimeId, info.FullPath, keys, values);
+        if (handle == NativeEngineBridge.InvalidContentId)
+        {
+            Logger.Warning($"[Script] attach failed for '{entity.Name}' ({info.FullPath}) — see engine log");
+            return;
+        }
+        _scriptHandles[entity.EntityGuid.Value] = handle;
     }
 
     private uint EnsureMaterial(AssetGuid guid)
@@ -898,6 +955,9 @@ public sealed class SceneRuntimeSynchronizer
                     rigidBody.Friction,
                     new[] { rigidBody.VelocityX, rigidBody.VelocityY, rigidBody.VelocityZ });
             }
+
+            // scripting S1：增量路径同 Sync（拖放挂脚本/参数热改后即时生效）。
+            EnsureScript(entity, runtimeId);
 
             BindEditorHelperMesh(entity, runtimeId);
 

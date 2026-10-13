@@ -285,6 +285,8 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/Common/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Components/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Scripting/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Scripting/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Core/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Core/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/EngineAPI/*.h"
@@ -430,10 +432,15 @@ endif()
 # 全部配置——曾导致 Engine 的 Release 也被注入 _DEBUG：MSVC 的
 # _ITERATOR_DEBUG_LEVEL/RuntimeLibrary 标记随 _DEBUG 翻转（MDd/IDL=2），
 # 测试（MD/IDL=0）链接 LNK2038 + __imp__calloc_dbg LNK2019。
+# NDEBUG 排除 DebugEditor（2026-10-12）：顶层把 Jolt 归一化按 Debug 编
+# （无 NDEBUG → JPH_DEBUG/JPH_ENABLE_ASSERTS 开），Engine 消费者 TU 若带
+# NDEBUG 则 JPH_DEBUG 关——同一份 Jolt 头两套条件编译，JPH 内联状态与库
+# 不一致 → PhysicsInitialize 堆损坏（realloc 非法指针，build-wt 实测
+# DebugEditor 必崩/Debug 干净；见 Docs/completed/2026-10-11-scripting-s1-*.md）。
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     $<$<CONFIG:Debug>:DEBUG>
     $<$<CONFIG:Debug>:_DEBUG>
-    $<$<NOT:$<CONFIG:Debug>>:NDEBUG>
+    $<$<NOT:$<CONFIG:Debug,DebugEditor>>:NDEBUG>
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -525,9 +532,45 @@ if(NOT MSVC)
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/Script.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptState.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Components/ScriptFilesystem.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Scripting/LuaBackend.cpp"
         PROPERTIES COMPILE_FLAGS "-fexceptions"
     )
 endif()
+
+# === scripting S1（2026-10-11）：Lua 后端生产化 ===
+# lua_static 在 Engine 定义（EngineTest/ScriptLuaBackend 有 if(NOT TARGET) 守卫的
+# 同款定义，先到先得）。生产目标缺 lua 源是硬错误——与测试树"submodule 缺失可
+# 跳过"的策略不同，静默跳过会让脚本链路无声消失（scripting S1 契约）。
+if(NOT TARGET lua_static)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/lua/lapi.c")
+        message(FATAL_ERROR
+            "third_party/lua is missing — Engine now requires Lua 5.4 for the "
+            "production script backend (git submodule update --init third_party/lua).")
+    endif()
+    set(PRIMAL_LUA_SRC
+        ../third_party/lua/lapi.c ../third_party/lua/lcode.c ../third_party/lua/lctype.c
+        ../third_party/lua/ldebug.c ../third_party/lua/ldo.c ../third_party/lua/ldump.c
+        ../third_party/lua/lfunc.c ../third_party/lua/lgc.c ../third_party/lua/llex.c
+        ../third_party/lua/lmem.c ../third_party/lua/lobject.c ../third_party/lua/lopcodes.c
+        ../third_party/lua/lparser.c ../third_party/lua/lstate.c ../third_party/lua/lstring.c
+        ../third_party/lua/ltable.c ../third_party/lua/ltm.c ../third_party/lua/lundump.c
+        ../third_party/lua/lvm.c ../third_party/lua/lzio.c ../third_party/lua/lauxlib.c
+        ../third_party/lua/lbaselib.c ../third_party/lua/lcorolib.c ../third_party/lua/ldblib.c
+        ../third_party/lua/liolib.c ../third_party/lua/linit.c ../third_party/lua/lmathlib.c
+        ../third_party/lua/loadlib.c ../third_party/lua/loslib.c ../third_party/lua/lstrlib.c
+        ../third_party/lua/ltablib.c ../third_party/lua/lutf8lib.c)
+    add_library(lua_static STATIC ${PRIMAL_LUA_SRC})
+    target_include_directories(lua_static PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/lua)
+    if(APPLE)
+        target_compile_definitions(lua_static PRIVATE LUA_USE_MACOSX=1)
+    elseif(WIN32)
+        target_compile_definitions(lua_static PRIVATE LUA_USE_WINDOWS=1)
+    else()
+        target_compile_definitions(lua_static PRIVATE LUA_USE_LINUX=1)
+    endif()
+endif()
+# 静态库传递：最终消费者（EngineDLL/Player/测试）经 PUBLIC 继承 lua 头与符号。
+target_link_libraries(${PROJECT_NAME} PUBLIC lua_static)
 
 # 根据平台添加编译定义
 if(WIN32)
