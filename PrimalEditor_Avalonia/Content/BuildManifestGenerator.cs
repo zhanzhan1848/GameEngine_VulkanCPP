@@ -85,7 +85,9 @@ public static class BuildManifestGenerator
     private static void CollectSceneReferences(Scene scene, HashSet<Guid> visited, BuildManifest manifest)
     {
         if (scene == null) return;
-        foreach (var entity in scene.Entities)
+        // 实体层级全量遍历（Children 递归）——场景树深处的网格/脚本/粒子
+        // 同样是运行依赖，只扫顶层会在打包时静默漏资产（asset-pipeline S1）。
+        foreach (var entity in EnumerateHierarchy(scene.Entities))
         {
             foreach (var renderer in entity.GetComponents<MeshRendererComponent>())
             {
@@ -103,6 +105,38 @@ public static class BuildManifestGenerator
                         AddDependencyClosure(slot.MaterialGuid.Value, visited, manifest);
                 }
             }
+            // scripting S1：.lua 是运行时依赖（Player v2 包 script 行直接引用），
+            // 缺包即脚本断链。
+            foreach (var lua in entity.GetComponents<LuaScriptComponent>())
+            {
+                if (lua.ScriptAssetGuid.Value != Guid.Empty)
+                    AddDependencyClosure(lua.ScriptAssetGuid.Value, visited, manifest);
+            }
+            // PFX：AssetPath（项目相对）指向 .pfx_emitter JSON——按路径入注册表
+            // 再闭包；未注册（坏路径）警告不中断。
+            foreach (var pfx in entity.GetComponents<ParticleFXComponent>())
+            {
+                if (string.IsNullOrWhiteSpace(pfx.AssetPath)) continue;
+                var info = AssetRegistry.Get(pfx.AssetPath);
+                if (info == null)
+                {
+                    Logger.Warning(
+                        $"BuildManifestGenerator: PFX asset '{pfx.AssetPath}' not registered — skipped (entity '{entity.Name}')");
+                    continue;
+                }
+                AddDependencyClosure(info.Guid, visited, manifest);
+            }
+        }
+    }
+
+    private static System.Collections.Generic.IEnumerable<GameEntity> EnumerateHierarchy(
+        System.Collections.Generic.IEnumerable<GameEntity> roots)
+    {
+        foreach (var entity in roots)
+        {
+            yield return entity;
+            foreach (var child in EnumerateHierarchy(entity.Children))
+                yield return child;
         }
     }
 

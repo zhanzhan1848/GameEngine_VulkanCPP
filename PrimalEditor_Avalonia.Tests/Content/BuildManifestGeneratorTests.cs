@@ -87,4 +87,100 @@ public sealed class BuildManifestGeneratorTests
         Assert.Contains(registeredShader.Guid, materialEntry!.Dependencies);
         Assert.Contains(registeredAlbedo.Guid, materialEntry.Dependencies);
     }
+
+    // ---- asset-pipeline S1：层级/脚本/PFX 依赖覆盖 ----
+
+    [Fact]
+    public void Generate_CollectsMeshFromChildEntityHierarchy()
+    {
+        AssetRegistry.Reset();
+        using var temp = new TemporaryProject();
+        var contentDir = Path.Combine(temp.Path, "Content");
+        Directory.CreateDirectory(contentDir);
+        AssetRegistry.Initialize(contentDir, temp.Path);
+
+        var sidecar = Path.Combine(contentDir, "part.model.json");
+        File.WriteAllText(sidecar, "{}");
+        File.WriteAllBytes(Path.Combine(contentDir, "part.mesh"), new byte[] { 1 });
+        var mesh = AssetRegistry.Register(sidecar);
+
+        var project = new Project { Path = temp.Path };
+        var scene = new Scene("Main");
+        var parent = new GameEntity("parent");
+        parent.Components.Add(new Transform());
+        var child = new GameEntity("child");
+        child.Components.Add(new Transform());
+        child.Components.Add(new MeshRendererComponent
+        {
+            MeshGuid = new AssetGuid(mesh!.Guid),
+        });
+        parent.Children.Add(child); // 深一层：顶层扫描曾静默漏掉
+        scene.Entities.Add(parent);
+        project.Scenes.Add(scene);
+
+        var manifest = BuildManifestGenerator.Generate(project);
+
+        Assert.Contains(manifest.Entries, e => e.AssetGuid == mesh.Guid);
+    }
+
+    [Fact]
+    public void Generate_CollectsScriptAndPfxAssets()
+    {
+        AssetRegistry.Reset();
+        using var temp = new TemporaryProject();
+        var contentDir = Path.Combine(temp.Path, "Content");
+        Directory.CreateDirectory(contentDir);
+        AssetRegistry.Initialize(contentDir, temp.Path);
+
+        var luaPath = Path.Combine(contentDir, "spin.lua");
+        File.WriteAllText(luaPath, "return {}");
+        var lua = AssetRegistry.Register(luaPath);
+        var pfxPath = Path.Combine(contentDir, "fx.pfx_emitter");
+        File.WriteAllText(pfxPath, "{}");
+        var pfx = AssetRegistry.Register(pfxPath);
+
+        var project = new Project { Path = temp.Path };
+        var scene = new Scene("Main");
+        var entity = new GameEntity("runner");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new LuaScriptComponent
+        {
+            ScriptAssetGuid = new AssetGuid(lua!.Guid),
+            ScriptName = "spin.lua",
+        });
+        var particle = new ParticleFXComponent { AssetPath = pfxPath };
+        entity.Components.Add(particle);
+        scene.Entities.Add(entity);
+        project.Scenes.Add(scene);
+
+        var manifest = BuildManifestGenerator.Generate(project);
+
+        Assert.Contains(manifest.Entries, e => e.AssetGuid == lua.Guid);
+        Assert.Contains(manifest.Entries, e => e.AssetGuid == pfx.Guid);
+    }
+
+    [Fact]
+    public void Generate_SkipsUnregisteredPfxPathWithWarning()
+    {
+        AssetRegistry.Reset();
+        using var temp = new TemporaryProject();
+        var contentDir = Path.Combine(temp.Path, "Content");
+        Directory.CreateDirectory(contentDir);
+        AssetRegistry.Initialize(contentDir, temp.Path);
+
+        var project = new Project { Path = temp.Path };
+        var scene = new Scene("Main");
+        var entity = new GameEntity("broken");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new ParticleFXComponent
+        {
+            AssetPath = "Content/does_not_exist.pfx_emitter",
+        });
+        scene.Entities.Add(entity);
+        project.Scenes.Add(scene);
+
+        var manifest = BuildManifestGenerator.Generate(project);
+
+        Assert.Empty(manifest.Entries); // 坏路径不中断清单生成
+    }
 }

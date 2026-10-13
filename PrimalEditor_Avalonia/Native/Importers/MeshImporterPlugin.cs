@@ -291,7 +291,7 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
     internal static string DefaultMaterialPath(string destinationDir, string sourceStem) =>
         Path.Combine(destinationDir, sourceStem + ".material.json");
 
-    private static void CreateDefaultMaterial(
+    internal static void CreateDefaultMaterial(
         string destinationDir, string sourceStem, string sidecarPath,
         IReadOnlyDictionary<string, string> cookedTextures)
     {
@@ -300,6 +300,12 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
         {
             // Re-import must not clobber a material the user may already
             // have edited in the material editor.
+            // 派生件补齐（asset-pipeline S1）：材质保留，但材质图缺失时（首次
+            // 导入时引擎未加载被跳过/被误删）按“现有材质”解析的纹理三元组
+            // 重建图——绝不按导入期首选材质覆盖用户改过的绑定。
+            var missingGraph = Path.ChangeExtension(materialPath, ".material.graph.json");
+            if (!File.Exists(missingGraph) && NativeEngineBridge.IsLoaded)
+                TryRecoverGraphFromExistingMaterial(materialPath, missingGraph, sourceStem);
             Logger.Debug($"Mesh import: default material '{Path.GetFileName(materialPath)}' already exists; keeping it.");
             return;
         }
@@ -352,6 +358,47 @@ public sealed class MeshImporterPlugin : IAssetImporterPlugin
         catch (Exception ex)
         {
             Logger.Warning($"Mesh import: material graph creation failed for '{sourceStem}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 重导入补齐缺失的材质图（asset-pipeline S1）：以<b>现有</b>材质文件解析
+    /// 出的纹理三元组重建图，不读 sidecar 首选材质——用户在材质编辑器改过的
+    /// 绑定因此被尊重。全空材质（无纹理）只记 Debug 不建图。失败非致命：材质
+    /// 原样保留，下次重导入再试。
+    /// </summary>
+    private static void TryRecoverGraphFromExistingMaterial(
+        string materialPath, string graphPath, string sourceStem)
+    {
+        try
+        {
+            var slots = MaterialWorldTextureResolver.Resolve(materialPath);
+            var albedo = slots.Length > 0 && !string.IsNullOrWhiteSpace(slots[0]) ? slots[0] : null;
+            var normal = slots.Length > 1 && !string.IsNullOrWhiteSpace(slots[1]) ? slots[1] : null;
+            if (albedo == null)
+            {
+                Logger.Debug($"Mesh import: existing material '{Path.GetFileName(materialPath)}' has no textures — graph not recovered.");
+                return;
+            }
+            using var session = MaterialGraphSession.Create();
+            var output = session.AddNode("MaterialOutput");
+            session.SetNodePosition(output, 360f, 0f);
+            ConnectTextureNode(session, output, outputPin: 4, albedo, y: -96f);
+            if (normal != null) ConnectTextureNode(session, output, outputPin: 5, normal, y: 96f);
+            session.Execute();
+            var json = session.SerializeJson();
+            if (json == null)
+            {
+                Logger.Warning($"Mesh import: graph recovery for '{sourceStem}' failed (serialize) — material kept as-is.");
+                return;
+            }
+            File.WriteAllText(graphPath, json);
+            AssetRegistry.Register(graphPath);
+            Logger.Info($"Mesh import: recovered missing material graph for '{Path.GetFileName(materialPath)}' from its current textures.");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warning($"Mesh import: graph recovery failed for '{sourceStem}': {ex.Message} — material kept as-is.");
         }
     }
 

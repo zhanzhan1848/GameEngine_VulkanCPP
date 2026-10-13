@@ -67,17 +67,40 @@ public static class BuildPipeline
         if (backend is not SqliteAssetRegistryBackend sqlite) return;
         try
         {
+            var cookedCount = 0;
             foreach (var entry in manifest.Entries)
             {
+                // 实际 cooked 产物状态（asset-pipeline S1）：能解析出可用的产物
+                // 文件（cooked 目录 / sidecar 旁 .mesh / 源文件回退——.lua 等
+                // 免 cook 类型）记 Cooked+SHA1，否则 PendingCook。清单不再把
+                // "待 cook 占位"当成产物状态——离线重建清单 ≠ 完整烘焙包。
+                var info = AssetRegistry.GetByGuid(entry.AssetGuid);
+                string cookedPath = string.Empty, hash = string.Empty;
+                string status = "PendingCook";
+                if (info != null)
+                {
+                    var resolved = Native.CookedArtifactResolver.ResolveCookedPath(
+                        info, manifest.Platform, manifest.Configuration, useSourceFallback: true);
+                    if (!string.IsNullOrEmpty(resolved) && File.Exists(resolved))
+                    {
+                        cookedPath = resolved;
+                        hash = Convert.ToHexString(
+                            System.Security.Cryptography.SHA1.HashData(File.ReadAllBytes(resolved)));
+                        status = "Cooked";
+                        ++cookedCount;
+                    }
+                }
                 sqlite.UpsertArtifact(
                     entry.AssetGuid.ToString(),
                     manifest.Platform,
                     manifest.Configuration,
-                    cookedPath: string.Empty,
-                    artifactHash: string.Empty,
+                    cookedPath: cookedPath,
+                    artifactHash: hash,
                     producedAtUtc: manifest.ProducedAtUtc,
-                    status: "PendingCook");
+                    status: status);
             }
+            Logger.Info($"[Build] Artifact rows: {cookedCount} cooked, " +
+                        $"{manifest.Entries.Count - cookedCount} pending cook");
         }
         catch (Exception ex)
         {
