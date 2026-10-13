@@ -74,6 +74,23 @@ set_target_properties(TestLuaBackend PROPERTIES
 target_compile_definitions(TestLuaBackend PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
 set_target_properties(TestLuaBackend PROPERTIES FOLDER "Tests/Components")
 
+# input-camera S1（2026-10-14）：InputState + Lua input 表契约测试。
+# 只依赖 lua_static 与两个头文件（Engine/Scripting/Input{State,Lua}.h），
+# 不拉 Engine/EngineDLL 目标。
+add_executable(TestScriptInput
+    ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptLuaBackend/TestScriptInput.cpp
+)
+target_include_directories(TestScriptInput PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+)
+target_link_libraries(TestScriptInput PRIVATE lua_static)
+add_test(NAME TestScriptInput COMMAND TestScriptInput)
+set_target_properties(TestScriptInput PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+    FOLDER "Tests/Components"
+)
+
 # Script.cpp uses -fexceptions; the Lua adapter wraps each hook in try/catch
 # and the test driver's lambdas may allocate.
 if(NOT MSVC)

@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <sstream>
 #include <unordered_map>
 #include <vector>
 
@@ -87,6 +88,7 @@ std::uint64_t ScriptCreateForEntity(std::uint32_t entity_id, const char* lua_pat
                                     const char** param_keys, const char** param_values,
                                     std::uint32_t param_count);
 void          ScriptDestroyForEntity(std::uint64_t script_id);
+void          ScriptSetInputState(const char* action, std::uint32_t down);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
 void          DestroyRenderTarget(std::uint64_t handle);
@@ -624,6 +626,7 @@ int main(int argc, char** argv)
     bool fixed_size = false; // --fixed：窗口不可缩放（显示分辨率=渲染分辨率）
     std::uint32_t render_mode = 3; // Deferred+Shadow+AO+GI（编辑器默认档一致）
     std::uint32_t editor_mode = 0; // 0=真 runtime 路径；1=编辑器路径（--editor-mode 诊断旗标）
+    std::string input_bindings_path; // --input-bindings：显式映射文件（默认包旁 input.bindings）
     RecordConfig record;
 
     for (int i = 1; i < argc; ++i) {
@@ -635,6 +638,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--fixed") == 0) fixed_size = true;
         else if (std::strcmp(argv[i], "--mode") == 0 && next()) render_mode = static_cast<std::uint32_t>(std::atoi(argv[i]));
         else if (std::strcmp(argv[i], "--editor-mode") == 0 && next()) editor_mode = static_cast<std::uint32_t>(std::atoi(argv[i]));
+        else if (std::strcmp(argv[i], "--input-bindings") == 0 && next()) input_bindings_path = argv[i];
         else if (std::strcmp(argv[i], "--record") == 0 && next()) {
             record.enabled = true;
             record.directory = argv[i];
@@ -774,6 +778,85 @@ int main(int argc, char** argv)
     // 帧计时（PipelineTick 的 dt 源）。
     auto last_frame_time = std::chrono::steady_clock::now();
 
+    // ---- input-camera S1：动作映射（键位→语义动作名）----
+    // 行式文件 `# primal-input-bindings v1` + `action <名> <键> [<键>…]`；
+    // 缺文件/解析失败回退内置默认（与历史 WASD/QE/Shift 行为一致）。
+    // 消费方：飞行相机与 Lua input.is_down（经 ScriptSetInputState 每帧推送）。
+    // 键名与 PlayerInputKey 位一一对应；方向键保留给视角步进（模拟量语义）。
+    struct ActionMap {
+        std::vector<std::pair<std::string, unsigned>> bindings;
+        bool is_down(const char* action, unsigned keys) const {
+            for (const auto& [name, mask] : bindings)
+                if (name == action) return (keys & mask) != 0;
+            return false;
+        }
+    };
+    const auto key_bit = [](const std::string& name) -> unsigned {
+        if (name == "W") return kPlayerKeyW;
+        if (name == "A") return kPlayerKeyA;
+        if (name == "S") return kPlayerKeyS;
+        if (name == "D") return kPlayerKeyD;
+        if (name == "Q") return kPlayerKeyQ;
+        if (name == "E") return kPlayerKeyE;
+        if (name == "Shift") return kPlayerKeyShift;
+        if (name == "UpArrow") return kPlayerKeyUpArrow;
+        if (name == "DownArrow") return kPlayerKeyDownArrow;
+        if (name == "LeftArrow") return kPlayerKeyLeftArrow;
+        if (name == "RightArrow") return kPlayerKeyRightArrow;
+        return 0;
+    };
+    const auto default_actions = [&]() {
+        ActionMap m;
+        m.bindings = {
+            {"MoveForward", kPlayerKeyW}, {"MoveBack", kPlayerKeyS},
+            {"MoveLeft", kPlayerKeyA}, {"MoveRight", kPlayerKeyD},
+            {"MoveUp", kPlayerKeyE}, {"MoveDown", kPlayerKeyQ},
+            {"Fast", kPlayerKeyShift},
+        };
+        return m;
+    };
+    const auto load_actions = [&](const std::string& file) {
+        ActionMap fallback = default_actions();
+        FILE* f = std::fopen(file.c_str(), "r");
+        if (!f) return fallback;
+        char line[512];
+        bool header_ok = false;
+        ActionMap parsed;
+        while (std::fgets(line, sizeof(line), f)) {
+            const std::string l = Trim(line);
+            if (l.empty() || l[0] == '#') continue;
+            if (l.rfind("action ", 0) != 0) continue;
+            header_ok = true;
+            std::istringstream iss(l.substr(7));
+            std::string name, key;
+            if (!(iss >> name)) continue;
+            unsigned mask = 0;
+            while (iss >> key) mask |= key_bit(key);
+            if (mask == 0) {
+                std::fprintf(stderr, "[player] input bindings: action '%s' has no valid key — dropped\n",
+                             name.c_str());
+                continue;
+            }
+            // 同名多次出现 = 追加键位（重绑定增量写法）。
+            bool merged = false;
+            for (auto& [n, msk] : parsed.bindings)
+                if (n == name) { msk |= mask; merged = true; break; }
+            if (!merged) parsed.bindings.push_back({name, mask});
+        }
+        std::fclose(f);
+        if (!header_ok || parsed.bindings.empty()) {
+            std::fprintf(stderr, "[player] input bindings: '%s' malformed — using defaults\n",
+                         file.c_str());
+            return fallback;
+        }
+        std::fprintf(stderr, "[player] input bindings loaded: %s (%zu actions)\n",
+                     file.c_str(), parsed.bindings.size());
+        return parsed;
+    };
+    const ActionMap actions = load_actions(input_bindings_path.empty()
+        ? (std::filesystem::path(scene_path).parent_path() / "input.bindings").string()
+        : input_bindings_path);
+
     // 录制状态：rendered 计渲染帧，captured 计已捕获帧（第 1、1+stride、…
     // 渲染帧落盘，文件名按捕获序号）。录满 max_frames 即退出进程——编辑器侧
     // 依赖"进程退出 = 录制完成"的契约做后续编码/通知。
@@ -818,6 +901,11 @@ int main(int argc, char** argv)
                 seconds - fly.last_seconds < 0.1 ? seconds - fly.last_seconds : 0.1);
             fly.last_seconds = seconds;
 
+            // input-camera S1：动作状态每帧推送引擎（Lua input.is_down 读）。
+            // 键位→动作由映射表翻译——重绑定对脚本透明。
+            for (const auto& [name, mask] : actions.bindings)
+                ScriptSetInputState(name.c_str(), (input.keys & mask) ? 1u : 0u);
+
             // 视角：拖拽（点→弧度，≈0.15°/px 手感）+ 方向键步进；pitch 钳 ±89°。
             constexpr float kLookSensitivity = 0.15f * 3.14159265f / 180.f;
             constexpr float kArrowStepRad = 2.f * 3.14159265f / 180.f;
@@ -831,23 +919,24 @@ int main(int argc, char** argv)
             if (fly.pitch > kPitchClamp) fly.pitch = kPitchClamp;
             if (fly.pitch < -kPitchClamp) fly.pitch = -kPitchClamp;
 
-            // 速度：滚轮指数调节，Shift ×3。
+            // 速度：滚轮指数调节，Fast 动作 ×3（默认 Shift，可重绑定）。
             if (input.scroll_dy != 0.f) {
                 const float scaled = fly.speed * std::exp(-input.scroll_dy * 0.05f);
                 fly.speed = scaled < 0.5f ? 0.5f : (scaled > 50.f ? 50.f : scaled);
             }
             const float speed =
-                fly.speed * ((input.keys & kPlayerKeyShift) ? 3.f : 1.f);
+                fly.speed * (actions.is_down("Fast", input.keys) ? 3.f : 1.f);
 
             // 相机系移动：forward=(sin yaw, 0, cos yaw)，right=(cos yaw, 0, -sin yaw)。
+            // 动作名驱动（MoveForward 等）——默认表与历史 WASD/QE 等价。
             const float fx = std::sin(fly.yaw), fz = std::cos(fly.yaw);
             const float rx = std::cos(fly.yaw), rz = -std::sin(fly.yaw);
-            if (input.keys & kPlayerKeyW) { fly.pos[0] += fx * speed * dt; fly.pos[2] += fz * speed * dt; }
-            if (input.keys & kPlayerKeyS) { fly.pos[0] -= fx * speed * dt; fly.pos[2] -= fz * speed * dt; }
-            if (input.keys & kPlayerKeyD) { fly.pos[0] += rx * speed * dt; fly.pos[2] += rz * speed * dt; }
-            if (input.keys & kPlayerKeyA) { fly.pos[0] -= rx * speed * dt; fly.pos[2] -= rz * speed * dt; }
-            if (input.keys & kPlayerKeyE) fly.pos[1] += speed * dt;
-            if (input.keys & kPlayerKeyQ) fly.pos[1] -= speed * dt;
+            if (actions.is_down("MoveForward", input.keys)) { fly.pos[0] += fx * speed * dt; fly.pos[2] += fz * speed * dt; }
+            if (actions.is_down("MoveBack", input.keys))    { fly.pos[0] -= fx * speed * dt; fly.pos[2] -= fz * speed * dt; }
+            if (actions.is_down("MoveRight", input.keys))   { fly.pos[0] += rx * speed * dt; fly.pos[2] += rz * speed * dt; }
+            if (actions.is_down("MoveLeft", input.keys))    { fly.pos[0] -= rx * speed * dt; fly.pos[2] -= rz * speed * dt; }
+            if (actions.is_down("MoveUp", input.keys)) fly.pos[1] += speed * dt;
+            if (actions.is_down("MoveDown", input.keys)) fly.pos[1] -= speed * dt;
 
             const float rot[3] = { fly.pitch, fly.yaw, 0.f };
             const float scl[3] = { 1.f, 1.f, 1.f };

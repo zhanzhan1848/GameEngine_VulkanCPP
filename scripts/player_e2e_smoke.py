@@ -24,13 +24,34 @@ def build_package(pkg_dir: Path) -> Path:
     assets = pkg_dir / "_assets"
     assets.mkdir(parents=True, exist_ok=True)
     # 旋转脚本：update 里连续转，管线 tick 生效即有日志可查（frame 计数落
-    # Scripts/Log 沙箱，失败也会在 stderr 报 attach/执行错误）。
+    # Scripts/Log 沙箱，失败也会在 stderr 报 attach/执行错误）。input-camera
+    # E2E：首次 update 校验 input 表存在且无输入时 is_down 为 false。
     (assets / "spin.lua").write_text(
         "local M = {}\n"
         "local r = 0\n"
         "function M:begin_play() r = 0 end\n"
-        "function M:update(dt) r = r + (params.speed or 1.0) * dt end\n"
+        "function M:update(dt)\n"
+        "    r = r + (params.speed or 1.0) * dt\n"
+        "    if not M.checked then\n"
+        "        M.checked = true\n"
+        "        if input and input.is_down and not input.is_down('MoveForward') then\n"
+        "            print('input-ok')\n"
+        "        end\n"
+        "    end\n"
+        "end\n"
         "return M\n",
+        encoding="utf-8",
+    )
+    # input-camera E2E：自定义映射文件（重绑定路径——MoveForward 同时绑 W/Up）。
+    (pkg_dir / "input.bindings").write_text(
+        "# primal-input-bindings v1\n"
+        "action MoveForward W UpArrow\n"
+        "action MoveBack S\n"
+        "action MoveLeft A\n"
+        "action MoveRight D\n"
+        "action MoveUp E\n"
+        "action MoveDown Q\n"
+        "action Fast Shift\n",
         encoding="utf-8",
     )
     pkg = pkg_dir / "e2e.primalrun"
@@ -98,6 +119,8 @@ def main() -> int:
             "builtin 几何生成日志": "builtin geometry 'plane' created" in log
                                   and "builtin geometry 'box' created" in log,
             "脚本挂载日志": "script attached" in log,
+            "input 映射加载": "input bindings loaded" in log,
+            "Lua input 表可用": "input-ok" in proc.stdout,
             "录制 PNG 数量": len(list(record.glob("frame_*.png"))) == frames,
             "亮度 CSV 存在": (record / "luma.csv").exists()
                             and sum(1 for _ in open(record / "luma.csv")) >= frames,

@@ -19,6 +19,8 @@
 #include "../Engine/Components/Script.h"
 #include "../Engine/Components/ScriptFilesystem.h"
 #include "../Engine/Scripting/LuaBackend.h"
+#include "../Engine/Scripting/InputState.h"
+#include "../Engine/Scripting/InputLua.h"
 #include "../Engine/Components/Entity.h"
 #include "../Engine/Components/Transform.h"
 
@@ -172,6 +174,10 @@ int self_set_position(lua_State* L) { self_write_transform(L, true,  false, fals
 int self_set_rotation(lua_State* L) { self_write_transform(L, false, true,  false); return 0; }
 int self_set_scale(lua_State* L)    { self_write_transform(L, false, false, true);  return 0; }
 
+// input-camera S1：脚本侧动作查询表（实现共用 Engine/Scripting/InputLua.h，
+// 测试树同源验证）。动作状态由宿主经 ScriptSetInputState 每帧写入
+//（键位→动作的映射归宿主，引擎不感知具体设备/键位）。
+
 // LuaBackend 的每类型额外全局注册器：entity 表（读 3 值 / 写 3 参数，弧度）。
 // 命名注意：不能用 `self`——Lua 方法语法（function M:update）的接收者恰好
 // 叫 self，会把本全局遮蔽（实测踩坑）。
@@ -186,6 +192,7 @@ void register_script_globals(void* lua_state)
     lua_pushcfunction(L, self_scale);         lua_setfield(L, -2, "scale");
     lua_pushcfunction(L, self_set_scale);     lua_setfield(L, -2, "set_scale");
     lua_setglobal(L, "entity");
+    primal::scripting::register_input_table(L);
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +297,15 @@ EDITOR_INTERFACE void ScriptDestroyForEntity(u64 script_id)
     if (primal::script::is_initialized())
         primal::script::remove_for_entity(game_entity::entity_id(it->second));
     g_entity_by_script.erase(it);
+}
+
+// input-camera S1：宿主每帧写入动作状态（键位→动作映射在宿主侧完成）。
+// 脚本经 input.is_down(action) 读取。不要求 ScriptEnsureSystems 先行——
+// InputState 独立于脚本子系统（无脚本的宿主也可写）。
+EDITOR_INTERFACE void ScriptSetInputState(const char* action, u32 down)
+{
+    if (!action || !*action) return;
+    primal::scripting::InputState::instance().set(action, down != 0u);
 }
 
 // S1 实现 = 同实体销毁重建（begin_play 会以新 params 重放）。返回新 handle；
