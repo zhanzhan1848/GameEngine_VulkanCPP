@@ -42,6 +42,7 @@ public static class CliHost
             Registry.Register(new FrameCaptureCommands());
             Registry.Register(new SequenceCommands());
             Registry.Register(new RunCommands());
+            Registry.Register(new TaskCommands());
             Registry.Register(new WorkflowCommands(Registry));
             Registry.Register(new DiagnosticsCommands());
 

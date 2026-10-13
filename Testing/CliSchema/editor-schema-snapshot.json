@@ -1,5 +1,5 @@
 {
-  "$version": "79f6fdaa8d932c96",
+  "$version": "a298547130333d12",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -1037,6 +1037,42 @@
           "name": "frames",
           "type": "integer",
           "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "task.cancel",
+      "channel": "editor",
+      "description": "取消运行中的长任务（player 进程 = 终止进程；编码类一次性任务不支持中途取消）。幂等语义：已结束的任务返回 cancelled=false 而非错误。失败：任务不存在返回 NOT_FOUND。",
+      "example": "{\"taskId\":\"t1\"}",
+      "params": [
+        {
+          "name": "taskId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "task.list",
+      "channel": "editor",
+      "description": "列出本编辑器会话的长任务（player 进程录制/PNG→mp4 编码等）。字段：id(t1…)/kind/description/state(Running|Succeeded|Failed|Cancelled)/submittedAtUtc/finishedAtUtc/artifacts 数。会话内存态——编辑器重启即空；断点恢复/持久化排队是后续阶段。按提交时间正序。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "task.status",
+      "channel": "editor",
+      "description": "查询单个长任务详情，含产物清单（kind/绝对路径/存在性/字节数——存在性在查询时实算，产物可能已被后续步骤消费）。失败：任务不存在返回 NOT_FOUND。",
+      "example": "{\"taskId\":\"t1\"}",
+      "params": [
+        {
+          "name": "taskId",
+          "type": "string",
+          "required": true
         }
       ],
       "returns": "object"

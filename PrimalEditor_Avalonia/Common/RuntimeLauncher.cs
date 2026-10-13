@@ -173,13 +173,17 @@ public static class RuntimeLauncher
         if (ResolveMode(vm.RunModeIndex) == RunMode.FixedResolution)
             AppendResolutionArguments(arguments, vm.RunWidth, vm.RunHeight);
 
+        // 录制目录只解析一次（时间戳目录——重复解析会得到不同路径）。
+        var recordDir = vm.RecordOnRun
+            ? ResolveRecordDirectory(vm.Project.Path, vm.ActiveScene.Name)
+            : null;
+
         // Run 录制（Part B）：VM 的录制开关 → player 参数。录满帧数后 player
         // 自动退出，stderr 的 record summary 会经 BuildService.OnOutput 流入
         // BuildLog 面板（PNG 序列主产物；mp4 编码入口由 sequence 模块统一提供）。
         if (vm.RecordOnRun)
         {
-            var recordDir = ResolveRecordDirectory(vm.Project.Path, vm.ActiveScene.Name);
-            AppendRecordArguments(arguments, recordDir, new PlayerRecordOptions(
+            AppendRecordArguments(arguments, recordDir!, new PlayerRecordOptions(
                 Enabled: true,
                 Frames: vm.RecordFrames,
                 Every: 1,
@@ -191,6 +195,8 @@ public static class RuntimeLauncher
             // sequence.render 同一实现（libx264/crf20/yuv420p）。一段式订阅，
             // 触发即摘除；不因 player 退出码非零跳过（RHIAllocator 泄漏 abort
             // 期间帧序列仍完整，调试场景照样出片），仅记录退出码。
+            // agent-workflows S1：编码登记为长任务（task.* 可查询，一次性
+            // 任务不支持中途取消）。
             void EncodeOnExit(int exitCode, bool success)
             {
                 BuildService.OnCompleted -= EncodeOnExit;
@@ -198,9 +204,18 @@ public static class RuntimeLauncher
                     Logger.Warning($"[Run] player exited with code {exitCode} — encoding captured frames anyway.");
                 _ = System.Threading.Tasks.Task.Run(() =>
                 {
-                    var videoPath = Path.Combine(recordDir, "capture.mp4");
+                    var videoPath = Path.Combine(recordDir!, "capture.mp4");
+                    var encodeTask = PrimalEditor_Avalonia.Cli.TaskRegistry.SubmitFromAnyThread(
+                        "encode", $"PNG→mp4：{recordDir}",
+                        artifacts: new[]
+                        {
+                            new PrimalEditor_Avalonia.Cli.TaskRegistry.TaskArtifact
+                                { Path = videoPath, Kind = "video" },
+                        });
                     var (encoded, hint) = VideoEncoder.EncodePngSequence(
                         recordDir, videoPath, vm.RunWidth, vm.RunHeight, framerate: 30);
+                    PrimalEditor_Avalonia.Cli.TaskRegistry.Complete(
+                        encodeTask, encoded, encoded ? null : hint);
                     if (encoded)
                         Logger.Info($"[Run] recording encoded → {videoPath}");
                     else
@@ -214,6 +229,25 @@ public static class RuntimeLauncher
         if (ok)
         {
             Logger.Info($"[Run] PrimalPlayer launched (api={api}, config={config}, scene=\"{vm.ActiveScene.Name}\").");
+            // agent-workflows S1：player 进程登记为可取消长任务（task.cancel =
+            // BuildService.Stop 终止进程；录制产物在查询时实算存在性）。
+            var playerTask = PrimalEditor_Avalonia.Cli.TaskRegistry.Submit(
+                "player-run", $"PrimalPlayer：{vm.ActiveScene.Name}（api={api}）",
+                cancel: BuildService.Stop,
+                artifacts: vm.RecordOnRun
+                    ? new[]
+                    {
+                        new PrimalEditor_Avalonia.Cli.TaskRegistry.TaskArtifact
+                            { Path = recordDir!, Kind = "capture" },
+                    }
+                    : null);
+            void PlayerTaskOnExit(int exitCode, bool success)
+            {
+                BuildService.OnCompleted -= PlayerTaskOnExit;
+                PrimalEditor_Avalonia.Cli.TaskRegistry.Complete(
+                    playerTask, success, success ? null : $"exit code {exitCode}");
+            }
+            BuildService.OnCompleted += PlayerTaskOnExit;
         }
         return ok;
     }
