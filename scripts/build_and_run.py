@@ -47,6 +47,9 @@ EXCLUDE_DIRS = {
     "third_party", "pmp-library",
 }
 
+# 独立构建树（Ninja + DebugEditor）：编辑器原生库需要 DebugEditor 配置
+# （csproj 从 Darwin/DebugEditor/ 取 libEngineDLL.dylib 等产物），单配置生成器
+# 下与测试用的 Darwin/Debug、Darwin/DebugVulkan 无法共用目录。
 BUILD_DIR = REPO_ROOT / "build-wt"
 BUILD_TARGETS = ["Engine", "ContentTools", "EngineDLL"]
 
@@ -141,21 +144,22 @@ def artifacts_present(config: str) -> tuple[bool, list[Path]]:
 
 
 def run_cmake_build(config: str) -> None:
-    if not BUILD_DIR.exists():
-        # 自动 configure：编辑器原生库需要 DebugEditor 配置（csproj 从
-        # Darwin/DebugEditor/ 取 libEngineDLL.dylib 等产物），单配置生成器
-        # 下与测试用的 build/（Debug→Darwin/Debug）无法共用同一目录。
-        log("build", f"build dir missing: {BUILD_DIR} — configuring ({config})")
-        cfg_cmd = [
-            "cmake", "-S", str(REPO_ROOT), "-B", str(BUILD_DIR),
-            "-G", "Ninja",
-            "-DCMAKE_BUILD_TYPE=" + config,
-        ]
-        log("build", f"$ {' '.join(cfg_cmd)}")
-        rc = subprocess.call(cfg_cmd, cwd=str(REPO_ROOT))
-        if rc != 0:
-            log("error", f"CMake configure failed with exit code {rc}")
-            sys.exit(rc)
+    # 无条件 configure（2026-10-12）：Engine 的源文件用 file(GLOB_RECURSE)
+    # 收集，GLOB 结果在 configure 期固化——只新增源文件、不动 CMakeLists 时，
+    # 生成器内置的"CMakeLists 变更自动重跑"规则不会触发，新文件静默漏编。
+    # 每次先跑一遍 configure 幂等且便宜（~1s）：未变化的构建脚本 → Ninja 按
+    # 时间戳/命令行比对，零重编译。注意参数必须每次完全一致（同 -G、同
+    # CMAKE_BUILD_TYPE），否则会全量重编。
+    cfg_cmd = [
+        "cmake", "-S", str(REPO_ROOT), "-B", str(BUILD_DIR),
+        "-G", "Ninja",
+        "-DCMAKE_BUILD_TYPE=" + config,
+    ]
+    log("build", f"$ {' '.join(cfg_cmd)}")
+    rc = subprocess.call(cfg_cmd, cwd=str(REPO_ROOT))
+    if rc != 0:
+        log("error", f"CMake configure failed with exit code {rc}")
+        sys.exit(rc)
     # `--config` is ignored on single-config generators (Makefile/Ninja) and
     # honored by multi-config generators (MSBuild/Xcode) — safe to always pass.
     cmd = [
