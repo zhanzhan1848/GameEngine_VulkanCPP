@@ -501,6 +501,7 @@ flowchart TD
 | [plans/production/rendering-quality-and-parity.md](plans/production/rendering-quality-and-parity.md) | ⏸ | 用户决定全部渲染建设延后，已有专项推进；保留目标/验收参考，S1–S3 不另行启动 |
 | [plans/production/physics.md](plans/production/physics.md) | 📋 | 物理与复杂交互：广度/深度差距、最终目标、独立阶段与代码/交互/成本/视觉验收；尚未实施 |
 | [plans/production/fluid.md](plans/production/fluid.md) | 📋 | 流体、水体与流固交互：广度/深度差距、最终目标、独立阶段与代码/交互/成本/视觉验收；尚未实施 |
+| [plans/production/fluid-longterm-roadmap.md](plans/production/fluid-longterm-roadmap.md) | 📋 | 流体长久路线图（2026-10-15 用户决定本次不启动）：三域算法地图（气体/小水体/大水体/耦合）、现有消费端盘点、F0–F6 长久阶段、CPU 先行决策与启动触发条件 |
 | [plans/production/pfx.md](plans/production/pfx.md) | 📋 | PFX 粒子与特效制作：广度/深度差距、最终目标、独立阶段与代码/交互/成本/视觉验收；尚未实施 |
 | [plans/production/pcg.md](plans/production/pcg.md) | 📋 | PCG、WFC 与程序化制作：广度/深度差距、最终目标、独立阶段与代码/交互/成本/视觉验收；尚未实施 |
 | [plans/production/terrain-vegetation.md](plans/production/terrain-vegetation.md) | 📋 | 地形、植被与环境制作：广度/深度差距、最终目标、独立阶段与代码/交互/成本/视觉验收；尚未实施 |
