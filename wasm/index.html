@@ -312,6 +312,11 @@
 
     <!-- Debug panel sidebar -->
     <aside id="debugPanel">
+      <!-- web-cloud-delivery S1：项目包入口（?package=<url>）加载摘要 -->
+      <div id="package-panel" style="display:none; padding:8px; border-bottom:1px solid #2a2a4a; font-size:12px; line-height:1.5;">
+        <div style="font-weight:600; color:#9f9fff;">Runtime Package</div>
+        <div id="package-summary"></div>
+      </div>
       <h3>Debug Panel</h3>
       <div id="modeInfo" class="hint">Mode: —</div>
 
@@ -363,7 +368,44 @@
     <span id="status-right"></span>
   </div>
 
+  <script src="package_loader.js"></script>
   <script>
+    // web-cloud-delivery S1：项目包入口——?package=<url> 时 fetch+解析 v2 运行时包
+    //（与 PrimalPlayer 同一行式契约），侧栏展示场景/实体/资产/序列摘要与诊断；
+    // 解析失败在错误浮层呈现。渲染接入（Dawn 消费包内容）是后续阶段。
+    (function() {
+      var pkgUrl = new URLSearchParams(window.location.search).get('package');
+      if (pkgUrl) {
+        var panel = document.getElementById('package-panel');
+        var summary = document.getElementById('package-summary');
+        panel.style.display = 'block';
+        summary.textContent = '加载中: ' + pkgUrl;
+        window.PrimalPackage.fetchRuntimePackage(pkgUrl).then(function(pkg) {
+          var counts = {};
+          pkg.entities.forEach(function(e) {
+            ['meshPath','builtin','light','camera','scriptPath','audioPath','navagent']
+              .forEach(function(k) { if (e[k] !== undefined) counts[k] = (counts[k] || 0) + 1; });
+          });
+          var seqInfo = pkg.sequences.propertyTracks.length + pkg.sequences.positionTracks.length > 0
+            ? pkg.sequences.propertyTracks.length + ' 属性轨 / ' + pkg.sequences.positionTracks.length + ' 变换轨'
+            : '无';
+          summary.innerHTML =
+            '<b>场景</b>: ' + pkg.sceneName + '<br>' +
+            '<b>实体</b>: ' + pkg.entities.length + '<br>' +
+            Object.keys(counts).map(function(k) { return k + ': ' + counts[k]; }).join(' · ') + '<br>' +
+            '<b>资产</b>: ' + pkg.assets.length + '<br>' +
+            '<b>序列</b>: ' + seqInfo +
+            (pkg.diagnostics.length > 0
+              ? '<br><span style="color:#e0a040;">诊断 ' + pkg.diagnostics.length + ' 条（见控制台）</span>'
+              : '');
+          if (pkg.diagnostics.length > 0) console.warn('[package] diagnostics:', pkg.diagnostics);
+          if (window.setStatus) window.setStatus('Package loaded: ' + pkg.entities.length + ' entities');
+        }).catch(function(err) {
+          summary.innerHTML = '<span style="color:#e06060;">包加载失败: ' + err.message + '</span>';
+        });
+      }
+    })();
+
     (function() {
       var errorOverlay = document.getElementById('error-overlay');
       var loadingOverlay = document.getElementById('loading-overlay');
