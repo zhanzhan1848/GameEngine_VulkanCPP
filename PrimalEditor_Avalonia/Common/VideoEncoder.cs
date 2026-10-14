@@ -12,11 +12,10 @@ namespace PrimalEditor_Avalonia.Common;
 /// </summary>
 public static class VideoEncoder
 {
-    /// <summary>候选 ffmpeg 路径/命令名（homebrew → 系统 → PATH）。</summary>
-    public static readonly string[] FfmpegCandidates =
-    {
-        "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg",
-    };
+    /// <summary>候选 ffmpeg 路径/命令名——单一事实源已迁移至集成中心适配器
+    /// （Integration/FfmpegAdapter.Candidates，software-integrations S1），
+    /// 本字段转发引用保持编码路径行为不变。</summary>
+    public static readonly string[] FfmpegCandidates = Integration.FfmpegAdapter.Candidates;
 
     /// <summary>找到可用的 ffmpeg；null = 未安装。</summary>
     public static string? FindFfmpeg() =>

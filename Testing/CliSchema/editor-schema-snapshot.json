@@ -1,5 +1,5 @@
 {
-  "$version": "a298547130333d12",
+  "$version": "a666c70d47a2a60a",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -328,6 +328,20 @@
         {
           "name": "scale",
           "type": "vec3",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "integrations.list",
+      "channel": "editor",
+      "description": "集成中心：列出软件/Skill 清单（software-integrations S1）。refresh=false 读用户级缓存（无缓存返回 unknown 状态并提示刷新）；refresh=true 重新静态发现并写缓存（无进程启动/无网络访问）。每条软件记录: softwareId/category/isRemote/status/version(null=未知)/resolvedPath/manualPath/candidates。status: unknown=未扫描、not-found=候选与手动路径均未命中（≠软件不存在）、discovered=入口存在（可调用性未验证，probe 属后续阶段）、config-missing=手动路径缺失。Skill 清单只读扫描 *.skill.json（user=…/.primal/skills；项目根 Skills 由宿主注入），损坏文件计入 skipped。纯读 + 显式刷新，无副作用。",
+      "example": "{\"refresh\":true}",
+      "params": [
+        {
+          "name": "refresh",
+          "type": "boolean",
           "required": false
         }
       ],
