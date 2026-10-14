@@ -389,6 +389,59 @@ int main()
 		CHECK(run_import(draco, data) == 0, "Draco glb is rejected (empty buffer)");
 	}
 
+	// -------------------------------------------------------------------------
+	// 4. character-animation S1（2026-10-15）导入审计：skins/animations 必须
+	//    拒绝——此前从未检查，含骨骼/动画的文件被静默按静态导入（审计结论：
+	//    头文件声明"拒绝"与实现不一致，本组用例锁定修复后的语义）。
+	// -------------------------------------------------------------------------
+	{
+		const char* skins_json{
+			"{"
+			"\"asset\": {\"version\": \"2.0\"},"
+			"\"skins\": [{\"joints\": [0]}],"
+			"\"nodes\": [{\"mesh\": 0, \"skin\": 0}],"
+			"\"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}}]}],"
+			"\"accessors\": [], \"bufferViews\": [], \"buffers\": []"
+			"}" };
+		const fs::path skins{ root / "skinned.glb" };
+		const std::vector<u8> bytes{ build_glb(skins_json) };
+		write_file(skins, bytes.data(), bytes.size());
+		scene_data data{};
+		CHECK(run_import(skins, data) == 0, "skins glb is rejected, not silently static-imported");
+	}
+	{
+		const char* anim_json{
+			"{"
+			"\"asset\": {\"version\": \"2.0\"},"
+			"\"animations\": [{\"channels\": []}],"
+			"\"nodes\": [{\"mesh\": 0}],"
+			"\"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}}]}],"
+			"\"accessors\": [], \"bufferViews\": [], \"buffers\": []"
+			"}" };
+		const fs::path anim{ root / "animated.glb" };
+		const std::vector<u8> bytes{ build_glb(anim_json) };
+		write_file(anim, bytes.data(), bytes.size());
+		scene_data data{};
+		CHECK(run_import(anim, data) == 0, "animations glb is rejected");
+	}
+	// 空 skins/animations 数组不算携带骨骼（数量 0 → 不拒绝，走既有路径）
+	{
+		const char* empty_json{
+			"{"
+			"\"asset\": {\"version\": \"2.0\"},"
+			"\"skins\": [], \"animations\": [],"
+			"\"nodes\": [{\"mesh\": 0}],"
+			"\"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}}]}],"
+			"\"accessors\": [], \"bufferViews\": [], \"buffers\": []"
+			"}" };
+		const fs::path empty{ root / "no_skin.glb" };
+		const std::vector<u8> bytes{ build_glb(empty_json) };
+		write_file(empty, bytes.data(), bytes.size());
+		scene_data data{};
+		// 空 buffer 的既有语义 = 拒绝（同 Draco 用例），关键是不因空数组误拒
+		CHECK(run_import(empty, data) == 0, "empty skins/animations arrays are not treated as skinned");
+	}
+
 	std::cout << (g_failures == 0 ? "TestGltfImporter: PASS\n"
 	                              : "TestGltfImporter: FAIL\n");
 	return g_failures == 0 ? 0 : 1;

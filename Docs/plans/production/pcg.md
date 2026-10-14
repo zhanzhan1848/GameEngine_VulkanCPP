@@ -3,6 +3,18 @@
 > 日期：2026-10-04；状态：📋 规划，未实施。阶段属于本模块，不代表全引擎排期。
 > 上级：[总规划](../../2026-10-04-agent-production-and-3d-printing-roadmap.md)。每阶段须同时通过总规划的 A 代码、B 交互、C 成本、D 视觉门禁。
 
+## Player 侧收尾核对（2026-10-15）
+
+已核对代码路径：`PcgEditorViewModel.ApplyToScene → WorldEditorViewModel.ApplyPcgPointsToScene`
+（WorldEditorViewModel.cs:1402）——PCG"应用场景"把生成点**烘焙为真实 GameEntity**
+（`new GameEntity("图名_i")` + AddEntity + Undo 事务）写入场景文档。因此：
+
+- **Player 侧无缺口**：烘焙实体经 run.export 的普通实体行（mesh/builtin/transform）
+  进入 v2 运行包，Player 与 Web 包加载器（wasm/package_loader.js）按既有链路消费；
+- **边界声明**：PCG 是**编辑时生成**——Player/Web 不携带 PCG 图运行时、不在运行时
+  重求值/增量更新（图修改→重新应用→重新导出，与"生成内容可继续手工编辑"的合同
+  一致）；PCG 运行时重求值若将来需要（程序化世界流送），按子规划独立立项。
+
 ## 现有代码复核与规划调整（2026-10-04）
 
 | 项目 | 结论 |

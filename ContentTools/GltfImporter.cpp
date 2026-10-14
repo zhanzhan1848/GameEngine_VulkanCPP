@@ -473,6 +473,26 @@ namespace primal::tools
 
 			// glTF 2.0 only; refuse required extensions we don't implement
 			// (Draco compression, mesh quantization, BasisU textures…).
+			// character-animation S1（2026-10-15）导入审计落地：skins/animations
+			// 此前从未检查——含骨骼/动画的文件被静默按静态导入（与头文件声明的
+			// "拒绝"矛盾）。现在按声明拒绝并点名特性：蒙皮/动画导入属
+			// character-animation 后续阶段（蒙皮渲染待渲染专项协调）。
+			if (array_count(*json.root, "skins") > 0)
+			{
+				std::cerr << "GltfImporter: skins are not supported yet — "
+						  << "file contains " << array_count(*json.root, "skins")
+						  << " skin(s); imported as static geometry would silently "
+						  << "drop deformation (character-animation 阶段引入蒙皮)\n";
+				return false;
+			}
+			if (array_count(*json.root, "animations") > 0)
+			{
+				std::cerr << "GltfImporter: animations are not supported yet — "
+						  << "file contains " << array_count(*json.root, "animations")
+						  << " animation(s); animation import is deferred with the "
+						  << "character-animation module\n";
+				return false;
+			}
 			if (array_count(*json.root, "extensionsRequired") > 0)
 			{
 				const pfx::json::value* first{ array_elem(*json.root, "extensionsRequired", 0) };
