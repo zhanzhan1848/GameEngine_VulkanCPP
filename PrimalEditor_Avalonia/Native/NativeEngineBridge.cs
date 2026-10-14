@@ -1799,6 +1799,37 @@ public static class NativeEngineBridge
         try { _SetEntityLightType(entityId, lightType); } catch (Exception ex) { Logger.Error("SetEntityLightType failed", ex); }
     }
 
+    // 3d-printing S1 资产桥接（2026-10-15）：cooked .mesh → 三角形汤（两段式：
+    // 先计数后取数，调用方分配缓冲）。返回 null = 文件不可读/格式拒绝（stderr
+    // 有 PrintAPI 原因——旧格式文件引擎侧同样拒绝，语义一致）。
+    [DllImport("PrimalEngine", EntryPoint = "CookedMeshTriangleCounts", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _CookedMeshTriangleCounts([MarshalAs(UnmanagedType.LPStr)] string path, out uint positionCount, out uint indexCount);
+
+    [DllImport("PrimalEngine", EntryPoint = "CookedMeshTriangleData", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _CookedMeshTriangleData([MarshalAs(UnmanagedType.LPStr)] string path, float[] positions, uint positionCapacity, uint[] indices, uint indexCapacity);
+
+    public static (double[] positions, int[] indices)? ReadCookedMeshTriangles(string path)
+    {
+        if (!_isLoaded) return null;
+        try
+        {
+            if (_CookedMeshTriangleCounts(path, out var pc, out var ic) == 0) return null;
+            var positions = new float[pc];
+            var indices = new uint[ic];
+            if (_CookedMeshTriangleData(path, positions, pc, indices, ic) == 0) return null;
+            var p = new double[pc];
+            for (int i = 0; i < pc; ++i) p[i] = positions[i];
+            var t = new int[ic];
+            for (int i = 0; i < ic; ++i) t[i] = (int)indices[i];
+            return (p, t);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("ReadCookedMeshTriangles failed", ex);
+            return null;
+        }
+    }
+
     [DllImport("PrimalEngine", EntryPoint = "SetEntityLightIntensity", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _SetEntityLightIntensity(uint entityId, float intensity);
     public static void SetEntityLightIntensity(uint entityId, float intensity)

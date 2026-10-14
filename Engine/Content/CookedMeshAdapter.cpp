@@ -58,6 +58,15 @@ namespace primal::content
                 std::uint32_t length{};
                 return read_u32(length) && skip(length);
             }
+
+            // 读取 count 字节并推进游标（载荷拷贝用；越界返回 nullptr）
+            const std::uint8_t* read_bytes(std::size_t count)
+            {
+                if (count > size - offset) return nullptr;
+                const std::uint8_t* at = data + offset;
+                offset += count;
+                return at;
+            }
         };
 
         struct mesh_record
@@ -317,7 +326,6 @@ namespace primal::content
             set_error(error, meshes.empty() ? "scene contains no meshes" : "unexpected trailing scene data");
             return false;
         }
-
         if (source_lod_group_count >= (1u << 16))
         {
             set_error(error, "too many normalized LOD groups");
@@ -367,6 +375,160 @@ namespace primal::content
                 if (mesh.group_index == group_index)
                     append_bytes(geometry_blob, input.data + mesh.begin, mesh.end - mesh.begin);
             }
+        }
+        return true;
+    }
+
+    // 3d-printing S1 资产桥接（2026-10-15）：cooked 容器 → 三角形汤。
+    // 容器游走与 normalize 同源（scene 名/材质表/LOD 组），逐 mesh 在头解析后
+    // 拷贝 positions（f32×3）并把 indices（u16/u32）升为 u32（累计顶点基址
+    // 偏移）；meshlet/SDF/lightmap 尾段按 read_mesh 相同序列跳过。
+    bool extract_cooked_mesh_triangles(
+        const void* data,
+        std::size_t size,
+        std::vector<float>& positions_out,
+        std::vector<std::uint32_t>& indices_out,
+        std::string* error)
+    {
+        positions_out.clear();
+        indices_out.clear();
+        if (!data || size < sizeof(std::uint32_t) * 3)
+        {
+            set_error(error, "cooked mesh is empty or truncated");
+            return false;
+        }
+        cursor input{ static_cast<const std::uint8_t*>(data), size };
+        if (!input.skip_string())
+        {
+            set_error(error, "invalid scene name");
+            return false;
+        }
+        std::uint32_t material_count{};
+        if (!input.read_u32(material_count) || material_count > max_collection_count)
+        {
+            set_error(error, "invalid material count");
+            return false;
+        }
+        for (std::uint32_t i = 0; i < material_count; ++i)
+        {
+            if (!input.skip_string() || !input.skip_string() || !input.skip_string())
+            {
+                set_error(error, "invalid material table");
+                return false;
+            }
+        }
+        std::uint32_t lod_group_count{};
+        if (!input.read_u32(lod_group_count) ||
+            lod_group_count == 0 || lod_group_count > max_collection_count)
+        {
+            set_error(error, "invalid LOD group count");
+            return false;
+        }
+
+        std::uint32_t vertex_base = 0;
+        for (std::uint32_t lod = 0; lod < lod_group_count; ++lod)
+        {
+            std::uint32_t mesh_count{};
+            if (!input.skip_string() || !input.read_u32(mesh_count) ||
+                mesh_count == 0 || mesh_count > max_collection_count)
+            {
+                set_error(error, "invalid mesh group");
+                return false;
+            }
+            for (std::uint32_t mesh = 0; mesh < mesh_count; ++mesh)
+            {
+                if (!input.skip_string())
+                {
+                    set_error(error, "invalid packed mesh body");
+                    return false;
+                }
+                std::uint32_t lod_id{}, material_index{}, element_size{}, element_type{};
+                std::uint32_t vertex_count{}, index_size{}, index_count{};
+                float threshold{};
+                if (!input.read_u32(lod_id) || !input.read_u32(material_index) ||
+                    !input.read_u32(element_size) || !input.read_u32(element_type) ||
+                    !input.read_u32(vertex_count) || !input.read_u32(index_size) ||
+                    !input.read_u32(index_count) || !input.read_f32(threshold))
+                {
+                    set_error(error, "invalid packed mesh body");
+                    return false;
+                }
+                (void)lod_id; (void)material_index; (void)threshold;
+                if (element_size > 256 || vertex_count == 0 || vertex_count > 10000000 ||
+                    (index_size != 2 && index_size != 4) ||
+                    index_count == 0 || index_count > 30000000)
+                {
+                    set_error(error, "invalid packed mesh body");
+                    return false;
+                }
+
+                const auto* positions = reinterpret_cast<const float*>(
+                    input.read_bytes(static_cast<std::size_t>(vertex_count) * 12));
+                if (!positions ||
+                    !input.skip(static_cast<std::size_t>(vertex_count) * element_size))
+                {
+                    set_error(error, "invalid packed mesh body");
+                    return false;
+                }
+                positions_out.insert(
+                    positions_out.end(), positions, positions + vertex_count * 3);
+
+                const auto* index_bytes = input.read_bytes(
+                    static_cast<std::size_t>(index_count) * index_size);
+                if (!index_bytes)
+                {
+                    set_error(error, "invalid packed mesh body");
+                    return false;
+                }
+                for (std::uint32_t i = 0; i < index_count; ++i)
+                {
+                    const std::uint32_t index = index_size == 2
+                        ? reinterpret_cast<const std::uint16_t*>(index_bytes)[i]
+                        : reinterpret_cast<const std::uint32_t*>(index_bytes)[i];
+                    indices_out.push_back(index + vertex_base);
+                }
+                vertex_base += vertex_count;
+
+                std::uint32_t magic{}, meshlet_count{};
+                std::size_t meshlet_bytes{};
+                if (!input.read_u32(magic) || magic != meshlet_magic ||
+                    !input.read_u32(meshlet_count) || meshlet_count > max_collection_count ||
+                    !checked_size(meshlet_count, serialized_meshlet_size, meshlet_bytes) ||
+                    !input.skip(meshlet_bytes) ||
+                    !skip_counted_bytes(input, sizeof(std::uint32_t)) ||
+                    !skip_counted_bytes(input, sizeof(std::uint8_t)))
+                {
+                    set_error(error, "invalid packed mesh body");
+                    return false;
+                }
+                if (!input.read_u32(magic) || magic != sdf_magic ||
+                    !input.skip(sizeof(std::uint32_t) * 3 + sizeof(float) * 6) ||
+                    !skip_counted_bytes(input, sizeof(std::uint16_t)) ||
+                    !skip_counted_bytes(input, sizeof(std::uint8_t)) ||
+                    !skip_counted_bytes(input, sizeof(std::uint16_t)))
+                {
+                    set_error(error, "invalid packed mesh body");
+                    return false;
+                }
+                if (element_type & 0x10)
+                {
+                    if (!skip_counted_bytes(input, 8))
+                    {
+                        set_error(error, "invalid lightmap uv sidecar");
+                        return false;
+                    }
+                }
+            }
+        }
+        if (positions_out.empty() || indices_out.empty())
+        {
+            set_error(error, "scene contains no meshes");
+            return false;
+        }
+        if (input.offset != input.size)
+        {
+            set_error(error, "unexpected trailing scene data");
+            return false;
         }
         return true;
     }

@@ -1,5 +1,5 @@
 {
-  "$version": "fb8a600eab5cf0a7",
+  "$version": "6f4ab4b62e65750d",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -733,6 +733,49 @@
         },
         {
           "name": "entityName",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "print.check",
+      "channel": "editor",
+      "description": "3D 打印制造几何检查（print S1）：cooked .mesh → 三角形汤 → 结构化报告。检查项：水密/边界孔洞/非流形边/退化面/绕向不一致/独立壳/有向体积朝向（内朝向警告）/包围盒尺寸。thinWallMeters 省略时薄壁=未判定（不是合格）。ValidationErrors=0 ≠ 打印合格——报告原文如此，不做绿色担保。",
+      "example": "{\"assetGuid\":\"…\",\"thinWallMeters\":0.001}",
+      "params": [
+        {
+          "name": "assetGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "thinWallMeters",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "print.export",
+      "channel": "editor",
+      "description": "导出打印文件（print S1）：cooked .mesh → STL（二进制+旁附清单）或 3MF（Core OPC，unit 显式）。unit: millimeter|centimeter|meter|inch（缺省 millimeter；模型单位=米，自动换算）。输出 <project>/Exports/<资产名>.<ext>——总写新文件，源资产不变。负缩放翻绕向语义在 TransformToUnit（恒等变换下不触发）。导出前自动跑一次检查并在结果附 findings 摘要。",
+      "example": "{\"assetGuid\":\"…\",\"format\":\"3mf\",\"unit\":\"millimeter\"}",
+      "params": [
+        {
+          "name": "assetGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "unit",
           "type": "string",
           "required": false
         }
