@@ -1,7 +1,68 @@
 {
-  "$version": "0b5f50165f4745f2",
+  "$version": "fb8a600eab5cf0a7",
   "protocol": "primal.cli.v1",
   "commands": [
+    {
+      "verb": "devicedata.latest",
+      "channel": "editor",
+      "description": "查询已入库信号的最新值与质量（device-data S1；先跑 devicedata.simulate）。signal 省略 = 全部已知信号。质量门限见 devicedata.simulate 描述。",
+      "example": "{\"deviceId\":\"sim-furnace-01\"}",
+      "params": [
+        {
+          "name": "deviceId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "signal",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "devicedata.simulate",
+      "channel": "editor",
+      "description": "运行确定性模拟设备源并入库（device-data S1）。deviceId 缺省 'sim-furnace-01'；periodMs 采样周期（缺省 500）；seconds 生成时长；seed 缺省 1（同 seed 同序列）；staleWindowSeconds 质量评估窗口（缺省 5）。返回统计（接受/乱序/重复）+ 每信号最新值与质量。纯模拟——无网络、无凭据。",
+      "example": "{\"seconds\":10,\"periodMs\":500,\"seed\":1}",
+      "params": [
+        {
+          "name": "seconds",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "periodMs",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "seed",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "staleWindowSeconds",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "deviceId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "devicedata.units",
+      "channel": "editor",
+      "description": "列出设备数据单位转换表（device-data S1；仿射对 from→to）。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
     {
       "verb": "editor.diff",
       "channel": "editor",

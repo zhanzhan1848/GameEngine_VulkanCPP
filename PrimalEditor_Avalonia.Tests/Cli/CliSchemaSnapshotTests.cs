@@ -30,6 +30,7 @@ public sealed class CliSchemaSnapshotTests
         registry.Register(new ScriptCommands());
         registry.Register(new IntegrationCommands());
         registry.Register(new PrefabCommands());
+        registry.Register(new DeviceDataCommands());
 
         var options = new JsonSerializerOptions
         {
