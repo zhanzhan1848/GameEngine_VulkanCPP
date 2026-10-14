@@ -46,6 +46,7 @@ public static class CliHost
             Registry.Register(new WorkflowCommands(Registry));
             Registry.Register(new DiagnosticsCommands());
             Registry.Register(new IntegrationCommands());
+            Registry.Register(new PrefabCommands());
 
             var server = new CliServer(Registry, MarshalToUiThread, log: message => Logger.Debug(message));
             server.Start(CliServer.DefaultSocketPath());

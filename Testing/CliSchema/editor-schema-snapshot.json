@@ -1,5 +1,5 @@
 {
-  "$version": "d0003f491544a528",
+  "$version": "0b5f50165f4745f2",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -587,6 +587,91 @@
         },
         {
           "name": "text",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "prefab.apply",
+      "channel": "editor",
+      "description": "把覆盖提升回源 prefab 文档并保存（prefab S1；实例覆盖值覆盖源值），随后清空实例覆盖。多个实例可逐个 apply——后写胜出（S1 无冲突面板，同属性多实例冲突的处理是 S2）。记入 undo（文档可整体还原）。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "prefab.capture",
+      "channel": "editor",
+      "description": "捕获 prefab 实例相对源文档的 transform 差异为覆盖（prefab S1）。值与源一致的条目会被移除（还原即清除）。根实体 position 默认不参与（布设意图；includeRootPosition=true 显式包含）。记入 undo。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "includeRootPosition",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "prefab.overrides",
+      "channel": "editor",
+      "description": "列出 prefab 实例的覆盖（prefab S1）。dryRun=true 额外执行一次捕获对比预览（实例 vs 源文档，不写状态）。返回已存条目 + 诊断（stale=覆盖指向源中已删实体、unmapped=实例实体在源中无同名、duplicateSources=源内重名）。纯读操作。",
+      "example": "{\"entityGuid\":\"…\",\"dryRun\":true}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "dryRun",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "prefab.propagate",
+      "channel": "editor",
+      "description": "源 prefab 更新后刷新实例（prefab S1）：无覆盖的属性取源新值，有覆盖的属性保留实例值（合并语义）；根实体 position 不触碰。实例侧新增的源实体不在此路（重新实例化）——S1 语义如实声明。记入 undo。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "prefab.revert",
+      "channel": "editor",
+      "description": "把覆盖的源值写回 prefab 实例并清除条目（prefab S1）。entityName 省略 = 全部还原。源/实例已不存在的条目按清理处理并报告。记入 undo。",
+      "example": "{\"entityGuid\":\"…\",\"entityName\":\"Capital\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "entityName",
           "type": "string",
           "required": false
         }
