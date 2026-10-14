@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <deque>
 #include <vector>
 
 namespace primal::lua_backend {
@@ -108,7 +109,9 @@ private:
     LuaBackend(const LuaBackend&) = delete;
     LuaBackend& operator=(const LuaBackend&) = delete;
 
-    std::vector<LuaScriptType> types_;
+    // 多类型指针稳定（2026-10-15 与 Engine/Scripting 同步修复）：vector 重分配
+    // 曾使先注册类型的实例 back-pointer 悬垂 → 双脚本类型首帧 SIGSEGV。
+    std::deque<LuaScriptType> types_;
     std::unordered_map<u64, std::unique_ptr<LuaScriptInstance>> instances_;
     bool initialized_ = false;
 };

@@ -2583,7 +2583,83 @@ void RunLuaBackendTests() {
     suite.AddTestCase(TestCase("lua_file_write_permission_denied",
                                test_lua_file_write_permission_denied,
                                "write/append/remove denied on data:// and log://"));
+    // Test 5 定义在本文件更下方（main 前）——前置声明保持注册块不动
+    TestResult test_lua_multi_type_pointer_stability();
+    suite.AddTestCase(TestCase("lua_multi_type_pointer_stability",
+                               test_lua_multi_type_pointer_stability,
+                               "two different lua types keep ticking after second register_type"));
     suite.RunAllTests();
+}
+
+// Test 5 (2026-10-15): multi-TYPE pointer stability — two DIFFERENT lua types
+// registered back-to-back. Regression for the std::vector<LuaScriptType>
+// reallocation bug: the second register_type moved the first type's record,
+// leaving the first instance's back-pointer dangling (freed-memory reuse then
+// read lua_state as garbage -> lua_pushnumber(L=0x1) SIGSEGV on first tick;
+// reproduced in PrimalPlayer with two script assets in one scene). types_ is
+// now a deque; this test locks the contract that BOTH types' instances keep
+// ticking after the second registration.
+TestResult test_lua_multi_type_pointer_stability() {
+    LuaBackend::instance().initialize();
+    primal::script::initialize();
+
+    primal::game_entity::entity entity_a = make_test_entity();
+    primal::game_entity::entity entity_b = make_test_entity();
+
+    u64 type_a = LuaBackend::instance().register_type(
+        "minimal_script",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/minimal_script.lua"
+    );
+    u64 script_a = type_a == u64_invalid_id
+        ? u64_invalid_id
+        : LuaBackend::instance().create_instance(type_a, entity_a.get_id());
+    if (script_a == u64_invalid_id) {
+        std::fprintf(stderr, "type A register/create failed\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 关键动作：第二类型注册（旧实现在此让 vector 重分配、A 的记录搬家）
+    u64 type_b = LuaBackend::instance().register_type(
+        "counter_b",
+        "EngineTest/IntegrationTests/ScriptLuaBackend/scripts/counter_b.lua"
+    );
+    u64 script_b = type_b == u64_invalid_id
+        ? u64_invalid_id
+        : LuaBackend::instance().create_instance(type_b, entity_b.get_id());
+    if (script_b == u64_invalid_id) {
+        std::fprintf(stderr, "type B register/create failed\n");
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    LuaScriptInstance* inst_a = LuaBackend::instance().find_instance(script_a);
+    LuaScriptInstance* inst_b = LuaBackend::instance().find_instance(script_b);
+    if (!inst_a || !inst_b) {
+        std::fprintf(stderr, "find_instance null (a=%p, b=%p)\n", (void*)inst_a, (void*)inst_b);
+        primal::script::shutdown();
+        LuaBackend::instance().shutdown();
+        return TestResult::Failed;
+    }
+
+    // 旧实现在首个 tick 内 SIGSEGV；修复后两类型实例都正常推进
+    primal::script::frame_tick(0.016f);
+    primal::script::frame_tick(0.016f);
+    primal::script::frame_tick(0.016f);
+
+    int a_updates = lua_get_instance_int(inst_a, "update_count");
+    int b_updates = lua_call_instance_int(inst_b, "get_updates");
+    bool pass = (a_updates == 3) && (b_updates == 3);
+
+    if (!pass)
+        std::fprintf(stderr, "multi-type counts wrong (a=%d, b=%d; want 3/3)\n",
+                     a_updates, b_updates);
+
+    primal::script::shutdown();
+    LuaBackend::instance().shutdown();
+    return pass ? TestResult::Passed : TestResult::Failed;
 }
 
 int main() {

@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <deque>
 #include <vector>
 
 namespace primal::lua_backend {
@@ -123,7 +124,12 @@ private:
     LuaBackend(const LuaBackend&) = delete;
     LuaBackend& operator=(const LuaBackend&) = delete;
 
-    std::vector<LuaScriptType> types_;
+    // 多类型指针稳定（2026-10-15 修复）：第二个脚本类型注册曾让 vector 重分配，
+    // 先注册类型的实例 back-pointer 全部悬垂（freed 内存复用后 lua_state 读出
+    // 垃圾 → 首帧 lua_pushnumber(L=0x1) SIGSEGV，Player 双脚本场景必现）。
+    // deque 的 push_back 不搬移既有元素；实例的 type 指针与
+    // script_register_external 的 user_data 由此保稳。
+    std::deque<LuaScriptType> types_;
     std::unordered_map<u64, std::unique_ptr<LuaScriptInstance>> instances_;
     bool initialized_ = false;
 };
