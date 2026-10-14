@@ -22,6 +22,7 @@ namespace PrimalEditor_Avalonia.Sequence;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(TransformTrack), "transform")]
 [JsonDerivedType(typeof(CameraCutTrack), "cameraCut")]
+[JsonDerivedType(typeof(PropertyTrack), "property")]
 public abstract class SequenceTrack
 {
     /// <summary>轨道在时间轴面板上的显示名（如 "Camera" / 实体名）。</summary>
@@ -83,6 +84,51 @@ public sealed class CameraShot
     public Guid CameraEntityGuid { get; set; }
 }
 
+/// <summary>
+/// 通用属性关键帧（sequence S1）：标量属性（如 light.intensity）。
+/// 插值语义与 TransformKey 一致——Interpolation 描述"本帧→右邻帧"的过渡。
+/// </summary>
+public sealed class PropertyKey
+{
+    /// <summary>关键帧所在帧号（0 起，整数帧）。</summary>
+    public int Frame { get; set; }
+
+    /// <summary>属性值（light.intensity：坎德拉量纲同 LightComponent）。</summary>
+    public float Value { get; set; }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public KeyInterpolation Interpolation { get; set; } = KeyInterpolation.Linear;
+}
+
+/// <summary>
+/// 通用属性轨（sequence S1）：把实体的一个标量属性动画化。S1 支持面 =
+/// SupportedProperties 声明的（component, property）对；transform 类动画
+/// 走 TransformTrack（九分量轨），属性轨只做标量。Keys 按 Frame 升序维护。
+/// </summary>
+public sealed class PropertyTrack : SequenceTrack
+{
+    /// <summary>S1 支持的 (component, property) 白名单——求值/导出/Player
+    /// 三端同一事实源；新增属性须同步 Player 行式解析与 EngineDLL setter。</summary>
+    public static readonly (string Component, string Property)[] SupportedProperties =
+    {
+        ("light", "intensity"),
+    };
+
+    public static bool IsSupported(string component, string property) =>
+        SupportedProperties.Any(p => p.Component == component && p.Property == property);
+
+    /// <summary>被动画的实体 guid。</summary>
+    public Guid EntityGuid { get; set; }
+
+    /// <summary>属性宿主组件（"light"）。</summary>
+    public string Component { get; set; } = "light";
+
+    /// <summary>属性名（"intensity"）。</summary>
+    public string Property { get; set; } = "intensity";
+
+    public List<PropertyKey> Keys { get; set; } = new();
+}
+
 public sealed class SequenceDocument
 {
     public const int CurrentVersion = 1;
@@ -106,6 +152,10 @@ public sealed class SequenceDocument
 
     public TransformTrack? FindTransformTrack(Guid entityGuid) =>
         Tracks.OfType<TransformTrack>().FirstOrDefault(t => t.EntityGuid == entityGuid);
+
+    public PropertyTrack? FindPropertyTrack(Guid entityGuid, string component, string property) =>
+        Tracks.OfType<PropertyTrack>().FirstOrDefault(
+            t => t.EntityGuid == entityGuid && t.Component == component && t.Property == property);
 
     // ------------------------------------------------------------------
     // 持久化（&lt;project&gt;/Sequences/*.pseq）

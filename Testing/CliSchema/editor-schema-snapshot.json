@@ -1,5 +1,5 @@
 {
-  "$version": "a666c70d47a2a60a",
+  "$version": "d0003f491544a528",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -883,6 +883,35 @@
       "returns": "object"
     },
     {
+      "verb": "sequence.remove-property-key",
+      "channel": "editor",
+      "description": "删除属性轨上指定帧的关键帧（sequence S1）。轨不存在或该帧无 key 返回 NOT_FOUND。记入 undo。",
+      "example": "{\"entityGuid\":\"…\",\"frame\":12}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "frame",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "component",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "property",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
       "verb": "sequence.remove-track",
       "channel": "editor",
       "description": "删除实体变换轨（含全部关键帧）。轨不存在返回 NOT_FOUND。记入 undo。",
@@ -939,6 +968,45 @@
           "name": "frame",
           "type": "integer",
           "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "sequence.set-property-key",
+      "channel": "editor",
+      "description": "给实体属性轨设关键帧（sequence S1；无轨时自动建轨）。component.property 白名单：light.intensity（标量，量纲同 Light 组件）。同帧已有 key 替换；frame 缺省 = 当前播放头。interp: Linear|Constant（缺省 Linear）。目标实体缺对应组件返回 INVALID_PARAMS。记入 undo。",
+      "example": "{\"entityGuid\":\"…\",\"frame\":0,\"value\":0}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        },
+        {
+          "name": "frame",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "value",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "component",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "property",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "interp",
+          "type": "string",
+          "required": false
         }
       ],
       "returns": "object"

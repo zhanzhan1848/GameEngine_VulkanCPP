@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PrimalEditor_Avalonia.Common;
 using PrimalEditor_Avalonia.Components;
 using PrimalEditor_Avalonia.GameProject;
@@ -11,6 +12,9 @@ namespace PrimalEditor_Avalonia.Sequence;
 public sealed class SequencePoseSnapshot
 {
     public List<(GameEntity Entity, TransformData Data)> Entries { get; } = new();
+
+    /// <summary>属性轨覆盖的原值（entity, component.property, value)——sequence S1。</summary>
+    public List<(GameEntity Entity, string Component, string Property, float Value)> PropertyEntries { get; } = new();
 }
 
 /// <summary>
@@ -42,6 +46,22 @@ public static class SequenceDriver
         if (touched.Count > 0)
             worldEditor.PushTransformsToNative(touched);
 
+        // 属性轨（sequence S1）：light.intensity → 文档模型 + 原生 setter 同步
+        foreach (var sample in snapshot.Properties)
+        {
+            var entity = FindEntity(scene?.Entities, sample.EntityGuid);
+            if (entity == null) continue;   // 目标已删除：跳过（合同 A02）
+            if (sample.Component == "light" && sample.Property == "intensity")
+            {
+                var light = entity.GetComponent<LightComponent>();
+                if (light == null) continue;
+                light.Intensity = sample.Value;
+                var nativeId = worldEditor.GetNativeEntityId(entity);
+                if (nativeId != 0 && PrimalEditor_Avalonia.Native.NativeEngineBridge.IsLoaded)
+                    PrimalEditor_Avalonia.Native.NativeEngineBridge.SetEntityLightIntensity(nativeId, sample.Value);
+            }
+        }
+
         uint cameraNativeId = 0;
         if (snapshot.CameraEntityGuid.HasValue)
         {
@@ -64,6 +84,18 @@ public static class SequenceDriver
             if (entity == null || transform == null) continue;
             snap.Entries.Add((entity, TransformData.FromTransform(transform)));
         }
+        foreach (var pt in doc.Tracks.OfType<PropertyTrack>())
+        {
+            if (pt.Keys.Count == 0 || !PropertyTrack.IsSupported(pt.Component, pt.Property)) continue;
+            var entity = FindEntity(scene?.Entities, pt.EntityGuid);
+            if (entity == null) continue;
+            if (pt.Component == "light" && pt.Property == "intensity")
+            {
+                var light = entity.GetComponent<LightComponent>();
+                if (light != null)
+                    snap.PropertyEntries.Add((entity, pt.Component, pt.Property, light.Intensity));
+            }
+        }
         return snap;
     }
 
@@ -78,6 +110,18 @@ public static class SequenceDriver
                 worldEditor.Properties.RefreshFromTransform(t);
             }
         worldEditor.PushTransformsToNative(SnapshotEntities(snapshot));
+        foreach (var (entity, component, property, value) in snapshot.PropertyEntries)
+        {
+            if (component == "light" && property == "intensity")
+            {
+                var light = entity.GetComponent<LightComponent>();
+                if (light == null) continue;
+                light.Intensity = value;
+                var nativeId = worldEditor.GetNativeEntityId(entity);
+                if (nativeId != 0 && PrimalEditor_Avalonia.Native.NativeEngineBridge.IsLoaded)
+                    PrimalEditor_Avalonia.Native.NativeEngineBridge.SetEntityLightIntensity(nativeId, value);
+            }
+        }
     }
 
     private static IEnumerable<GameEntity> SnapshotEntities(SequencePoseSnapshot snapshot)

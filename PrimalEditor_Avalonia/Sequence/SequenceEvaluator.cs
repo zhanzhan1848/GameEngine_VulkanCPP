@@ -13,7 +13,13 @@ public sealed class SequenceFrame
 
     /// <summary>CameraCut 命中的相机实体 guid；null = 无 cut 覆盖（回落编辑器相机）。</summary>
     public Guid? CameraEntityGuid { get; init; }
+
+    /// <summary>属性轨采样（sequence S1）：轨求值非空的 (实体, component.property, 值)。</summary>
+    public IReadOnlyList<PropertySample> Properties { get; init; } = new List<PropertySample>();
 }
+
+/// <summary>属性轨单帧采样结果。</summary>
+public readonly record struct PropertySample(Guid EntityGuid, string Component, string Property, float Value);
 
 /// <summary>
 /// 纯函数求值器（Part A 核心）。无状态、无随机、无墙钟——同一序列同一帧
@@ -66,6 +72,28 @@ public static class SequenceEvaluator
         };
     }
 
+    /// <summary>
+    /// 单条属性轨在 frame 处的标量值。语义与 TransformTrack 完全一致：
+    /// 区间外 clamp 首/末关键帧；Constant 取区间左值保持到右邻帧；Linear 与
+    /// 右邻线性插值；无关键帧返回 null。空轨/不支持属性返回 null。
+    /// </summary>
+    public static float? EvaluateProperty(PropertyTrack track, int frame)
+    {
+        if (track.Keys.Count == 0 || !PropertyTrack.IsSupported(track.Component, track.Property))
+            return null;
+        var keys = track.Keys;
+        int lo = 0;
+        while (lo < keys.Count - 1 && keys[lo + 1].Frame <= frame) lo++;
+        var left = keys[lo];
+        if (lo == keys.Count - 1 || frame < keys[0].Frame ||
+            left.Interpolation == KeyInterpolation.Constant)
+            return left.Value;
+        var right = keys[lo + 1];
+        if (right.Frame == left.Frame) return left.Value;
+        var t = (frame - left.Frame) / (float)(right.Frame - left.Frame);
+        return left.Value + (right.Value - left.Value) * t;
+    }
+
     /// <summary>半开区间 [StartFrame, EndFrame) 查找 shot；越界/无效 shot 跳过。</summary>
     public static CameraShot? FindShot(CameraCutTrack track, int frame)
     {
@@ -81,6 +109,7 @@ public static class SequenceEvaluator
     {
         var transforms = new Dictionary<Guid, TransformData>();
         Guid? camera = null;
+        var properties = new List<PropertySample>();
         foreach (var track in doc.Tracks)
         {
             switch (track)
@@ -92,8 +121,18 @@ public static class SequenceEvaluator
                 case CameraCutTrack ct:
                     camera ??= FindShot(ct, frame)?.CameraEntityGuid;
                     break;
+                case PropertyTrack pt:
+                    var value = EvaluateProperty(pt, frame);
+                    if (value.HasValue)
+                        properties.Add(new PropertySample(pt.EntityGuid, pt.Component, pt.Property, value.Value));
+                    break;
             }
         }
-        return new SequenceFrame { Transforms = transforms, CameraEntityGuid = camera };
+        return new SequenceFrame
+        {
+            Transforms = transforms,
+            CameraEntityGuid = camera,
+            Properties = properties,
+        };
     }
 }

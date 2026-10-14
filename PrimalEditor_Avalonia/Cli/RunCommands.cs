@@ -152,7 +152,7 @@ public sealed class RunCommands
             ?? throw CliError.NotReady("项目未加载", "先在编辑器中打开项目");
 
         var path = PrimalEditor_Avalonia.Content.RuntimeSceneExporter.Export(
-            worldEditor.ActiveScene, projectDir, portable)
+            worldEditor.ActiveScene, projectDir, portable, Sequence.SequenceEditorState.Current)
             ?? throw new CliError(CliErrorCodes.EngineError, "运行时场景包导出失败", "查看编辑器日志");
 
         string[] files = Array.Empty<string>();

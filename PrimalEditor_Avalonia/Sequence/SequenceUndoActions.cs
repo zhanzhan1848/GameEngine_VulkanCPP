@@ -77,6 +77,36 @@ public static class SequenceUndoActions
         }
     }
 
+    /// <summary>属性轨关键帧增改（sequence S1）——语义与 TransformKey 版一致。</summary>
+    public sealed class AddPropertyKeyAction : IUndoRedoAction
+    {
+        private readonly PropertyTrack _track;
+        private readonly PropertyKey _key;
+        private PropertyKey? _replaced;
+
+        public string Name => "Sequence Add Property Key";
+        public AddPropertyKeyAction(PropertyTrack track, PropertyKey key) { _track = track; _key = key; }
+
+        public void Undo()
+        {
+            _track.Keys.Remove(_key);
+            if (_replaced != null) InsertSorted(_replaced);
+        }
+        public void Redo()
+        {
+            _replaced = null;
+            for (int i = 0; i < _track.Keys.Count; i++)
+                if (_track.Keys[i].Frame == _key.Frame) { _replaced = _track.Keys[i]; _track.Keys[i] = _key; return; }
+            InsertSorted(_key);
+        }
+        private void InsertSorted(PropertyKey key)
+        {
+            for (int i = 0; i < _track.Keys.Count; i++)
+                if (_track.Keys[i].Frame > key.Frame) { _track.Keys.Insert(i, key); return; }
+            _track.Keys.Add(key);
+        }
+    }
+
     public sealed class RemoveKeyAction : IUndoRedoAction
     {
         private readonly TransformTrack _track;
@@ -85,6 +115,27 @@ public static class SequenceUndoActions
 
         public string Name => "Sequence Remove Key";
         public RemoveKeyAction(TransformTrack track, TransformKey key)
+        {
+            _track = track; _key = key; _index = track.Keys.IndexOf(key);
+        }
+
+        public void Undo()
+        {
+            if (_index >= 0 && !_track.Keys.Contains(_key))
+                _track.Keys.Insert(Math.Min(_index, _track.Keys.Count), _key);
+        }
+        public void Redo() => _track.Keys.Remove(_key);
+    }
+
+    /// <summary>属性轨关键帧删除（sequence S1）——语义与 TransformKey 版一致。</summary>
+    public sealed class RemovePropertyKeyAction : IUndoRedoAction
+    {
+        private readonly PropertyTrack _track;
+        private readonly PropertyKey _key;
+        private readonly int _index;
+
+        public string Name => "Sequence Remove Property Key";
+        public RemovePropertyKeyAction(PropertyTrack track, PropertyKey key)
         {
             _track = track; _key = key; _index = track.Keys.IndexOf(key);
         }

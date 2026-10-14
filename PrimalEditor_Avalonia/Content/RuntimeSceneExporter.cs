@@ -66,7 +66,8 @@ public static class RuntimeSceneExporter
     /// 包相对——目录整体可搬移（zip 分发/换机器解压即跑）。复制失败：跳过该
     /// 资产并警告（包仍生成，缺项在 player 侧按各自缺省处理，不静默成功）。
     /// </summary>
-    public static string? Export(Scene? scene, string? projectDir, bool portable)
+    public static string? Export(Scene? scene, string? projectDir, bool portable,
+        Sequence.SequenceDocument? sequence = null)
     {
         if (scene == null || string.IsNullOrEmpty(projectDir)) return null;
 
@@ -120,6 +121,17 @@ public static class RuntimeSceneExporter
                     $"camera {(uint)camera.Projection} {Fmt(camera.FieldOfViewDegrees)} {Fmt(camera.NearPlane)} {Fmt(camera.FarPlane)} {(isMain ? 1 : 0)}");
             }
             sb.AppendLine("end");
+        }
+
+        // sequence S1（2026-10-15）：序列行（实体按名引用；CameraCut 不导出——
+        // Player 相机切换是后续切片）。轨道目标不在场景 → 跳过并记 warning。
+        if (sequence != null)
+        {
+            var (lines, skipped) = Sequence.SequenceRows.Build(sequence, guid =>
+                scene?.Entities.FirstOrDefault(e => e.EntityGuid.Value == guid)?.Name);
+            foreach (var line in lines) sb.AppendLine(line);
+            foreach (var sk in skipped)
+                PrimalEditor_Avalonia.Common.Logger.Warning($"[Run] sequence track skipped (target not in scene): {sk}");
         }
 
         File.WriteAllText(path, sb.ToString());

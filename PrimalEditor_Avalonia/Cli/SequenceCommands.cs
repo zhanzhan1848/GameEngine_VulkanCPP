@@ -232,6 +232,71 @@ public sealed class SequenceCommands
         return new { removed = true, frame, keys = track.Keys.Count };
     }
 
+    [CliCommand("sequence.set-property-key",
+        Description = "给实体属性轨设关键帧（sequence S1；无轨时自动建轨）。component.property 白名单：" +
+                      "light.intensity（标量，量纲同 Light 组件）。同帧已有 key 替换；frame 缺省 = 当前播放头。" +
+                      "interp: Linear|Constant（缺省 Linear）。目标实体缺对应组件返回 INVALID_PARAMS。记入 undo。",
+        Example = """{"entityGuid":"…","frame":0,"value":0}""")]
+    public object SetPropertyKey(Guid entityGuid, int? frame, float value,
+        string component = "light", string property = "intensity", string? interp = null)
+    {
+        var doc = RequireOpenSequence();
+        var worldEditor = RequireWorldEditor();
+        if (!PropertyTrack.IsSupported(component, property))
+            throw CliError.InvalidParams($"不支持的属性 {component}.{property}",
+                "支持面: " + string.Join(", ", PropertyTrack.SupportedProperties.Select(p => $"{p.Component}.{p.Property}")));
+        var entity = RequireEntity(worldEditor, entityGuid);
+        if (component == "light" && entity.GetComponent<LightComponent>() == null)
+            throw CliError.InvalidParams($"实体 '{entity.Name}' 没有 Light 组件", "component.add-light 先加组件");
+        var at = frame.HasValue
+            ? Math.Clamp(frame.Value, 0, doc.DurationFrames - 1)
+            : SequenceEditorState.CurrentFrame;
+
+        var track = doc.FindPropertyTrack(entityGuid, component, property);
+        var actions = new List<IUndoRedoAction>();
+        if (track == null)
+        {
+            track = new PropertyTrack
+            {
+                EntityGuid = entityGuid,
+                Component = component,
+                Property = property,
+                Name = $"{TrackName(worldEditor, entityGuid)} · {component}.{property}",
+            };
+            actions.Add(new SequenceUndoActions.AddTrackAction(doc, track));
+        }
+        actions.Add(new SequenceUndoActions.AddPropertyKeyAction(
+            track, new PropertyKey { Frame = at, Value = value, Interpolation = ParseInterp(interp) }));
+        PushUndo(worldEditor, "Sequence Set Property Key", actions.ToArray());
+        return new
+        {
+            entityGuid = entityGuid.ToString("D").ToLowerInvariant(),
+            component,
+            property,
+            frame = at,
+            value,
+            keys = track.Keys.Count,
+        };
+    }
+
+    [CliCommand("sequence.remove-property-key",
+        Description = "删除属性轨上指定帧的关键帧（sequence S1）。轨不存在或该帧无 key 返回 NOT_FOUND。记入 undo。",
+        Example = """{"entityGuid":"…","frame":12}""")]
+    public object RemovePropertyKey(Guid entityGuid, int frame,
+        string component = "light", string property = "intensity")
+    {
+        var doc = RequireOpenSequence();
+        var worldEditor = RequireWorldEditor();
+        var track = doc.FindPropertyTrack(entityGuid, component, property)
+            ?? throw CliError.NotFound($"实体 {entityGuid} 的 {component}.{property} 轨",
+                "sequence.info 查看现有轨道");
+        var key = track.Keys.FirstOrDefault(k => k.Frame == frame)
+            ?? throw CliError.NotFound($"帧 {frame} 上的属性关键帧", "sequence.info 查看关键帧分布");
+        PushUndo(worldEditor, "Sequence Remove Property Key",
+            new SequenceUndoActions.RemovePropertyKeyAction(track, key));
+        return new { removed = true, frame, keys = track.Keys.Count };
+    }
+
     [CliCommand("sequence.remove-track",
         Description = "删除实体变换轨（含全部关键帧）。轨不存在返回 NOT_FOUND。记入 undo。",
         Example = """{"entityGuid":"…"}""")]
@@ -260,8 +325,20 @@ public sealed class SequenceCommands
     {
         var doc = RequireOpenSequence();
         SequenceEditorState.SetFrame(frame); // clamp 到 [0, durationFrames)
-        ApplyCurrent(worldEditor: RequireWorldEditor(), doc);
-        return new { frame = SequenceEditorState.CurrentFrame };
+        var worldEditor = RequireWorldEditor();
+        ApplyCurrent(worldEditor: worldEditor, doc);
+        var snapshot = SequenceEvaluator.Evaluate(doc, SequenceEditorState.CurrentFrame);
+        return new
+        {
+            frame = SequenceEditorState.CurrentFrame,
+            properties = snapshot.Properties.Select(p => new
+            {
+                entityGuid = p.EntityGuid.ToString("D").ToLowerInvariant(),
+                component = p.Component,
+                property = p.Property,
+                value = p.Value,
+            }).ToArray(),
+        };
     }
 
     [CliCommand("sequence.play",
@@ -523,6 +600,17 @@ public sealed class SequenceCommands
                     endFrame = s.EndFrame,
                     cameraEntityGuid = s.CameraEntityGuid.ToString("D").ToLowerInvariant(),
                 }).ToArray(),
+            },
+            PropertyTrack pt => new
+            {
+                type = "property",
+                name = pt.Name,
+                entityGuid = pt.EntityGuid.ToString("D").ToLowerInvariant(),
+                component = pt.Component,
+                property = pt.Property,
+                keyCount = pt.Keys.Count,
+                firstFrame = pt.Keys.Count > 0 ? pt.Keys[0].Frame : -1,
+                lastFrame = pt.Keys.Count > 0 ? pt.Keys[^1].Frame : -1,
             },
             _ => new { type = t.GetType().Name },
         }).ToArray(),
