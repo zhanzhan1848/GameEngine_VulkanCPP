@@ -72,6 +72,8 @@ void          SetEntityTransform(std::uint32_t id, const float* position,
 std::uint32_t AddEntityLight(std::uint32_t entity_id, std::uint32_t light_type,
                              float intensity, const float* color_rgb, float range,
                              float umbra_rad, float penumbra_rad, std::uint32_t is_enabled);
+// sequence S1：属性轨驱动 light.intensity（EngineDLL LightAPI 导出）。
+void          SetEntityLightIntensity(std::uint32_t entity_id, float value);
 std::uint32_t AddEntityCamera(std::uint32_t entity_id, std::uint32_t projection_type,
                               float field_of_view, float aspect_ratio, float near_z,
                               float far_z, const float* up_vector);
@@ -197,7 +199,29 @@ struct ChosenCamera {
     float rot[3]{0.f, 0.f, 0.f}; // 欧拉度——飞行相机的 yaw/pitch 播种值
 };
 
+// ---- sequence S1（2026-10-15）：运行包序列行（seqmeta/seqprop+seqkey/
+// seqpos+seqposkey）。求值语义与编辑器 SequenceEvaluator 逐位一致：区间外
+// clamp 首/末关键帧；interp 0=linear（与右邻线性）1=constant（保持左值）。
+struct RuntimeSeqKey { int frame = 0; float value = 0.f; int interp = 0; };
+struct RuntimeSeqPosKey { int frame = 0; float v[9] = {0,0,0, 0,0,0, 1,1,1}; int interp = 0; };
+struct RuntimeSeqPropTrack {
+    std::string entity_name, component, property;
+    std::vector<RuntimeSeqKey> keys;
+};
+struct RuntimeSeqPosTrack {
+    std::string entity_name;
+    std::vector<RuntimeSeqPosKey> keys;
+};
+struct RuntimeSequence {
+    int fps = 60;
+    int duration = 0;
+    std::vector<RuntimeSeqPropTrack> props;
+    std::vector<RuntimeSeqPosTrack> positions;
+    bool empty() const { return props.empty() && positions.empty(); }
+};
+
 struct RuntimeScene {
+    RuntimeSequence sequence;   // sequence S1：顶层序列行
     std::string scene_name = "Scene";
     float env[24]{};
     std::vector<RuntimeEntity> entities;
@@ -281,6 +305,66 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
         }
         if (key == "scene") { out.scene_name = ParseQuoted(rest); continue; }
         if (key == "env") { ParseFloats(rest, out.env, 24); continue; }
+
+        // sequence S1：顶层序列行（实体按名引用，出现在所有实体块之后）
+        if (key == "seqmeta") {
+            float v[2];
+            if (ParseFloats(rest, v, 2)) {
+                out.sequence.fps = static_cast<int>(v[0]);
+                out.sequence.duration = static_cast<int>(v[1]);
+            }
+            continue;
+        }
+        if (key == "seqprop") {
+            // "seqprop \"<name>\" <component> <property> <keyCount>"
+            RuntimeSeqPropTrack t;
+            t.entity_name = ParseQuoted(rest);
+            const auto close = rest.rfind('"');
+            if (close != std::string::npos && close + 1 < rest.length()) {
+                std::istringstream iss(rest.substr(close + 1));
+                std::string comp, prop;
+                iss >> comp >> prop;
+                t.component = comp;
+                t.property = prop;
+            }
+            out.sequence.props.push_back(std::move(t));
+            continue;
+        }
+        if (key == "seqkey") {
+            // "seqkey <frame> <value> <interp>"
+            if (!out.sequence.props.empty()) {
+                float v[3];
+                if (ParseFloats(rest, v, 3))
+                    out.sequence.props.back().keys.push_back(
+                        RuntimeSeqKey{ static_cast<int>(v[0]), v[1], static_cast<int>(v[2]) });
+            }
+            continue;
+        }
+        if (key == "seqpos") {
+            RuntimeSeqPosTrack t;
+            t.entity_name = ParseQuoted(rest);
+            const auto close = rest.rfind('"');
+            if (close == std::string::npos) {
+                std::fprintf(stderr, "[player] seqpos row missing quoted name\n");
+                continue;
+            }
+            out.sequence.positions.push_back(std::move(t));
+            continue;
+        }
+        if (key == "seqposkey") {
+            // "seqposkey <frame> <p3> <r3> <s3> <interp>"
+            if (!out.sequence.positions.empty()) {
+                float v[11];
+                if (ParseFloats(rest, v, 11)) {
+                    RuntimeSeqPosKey k;
+                    k.frame = static_cast<int>(v[0]);
+                    for (int i = 0; i < 9; ++i) k.v[i] = v[1 + i];
+                    k.interp = static_cast<int>(v[10]);
+                    out.sequence.positions.back().keys.push_back(k);
+                }
+            }
+            continue;
+        }
 
         if (!in_entity) continue;
         if (key == "name") current.name = ParseQuoted(rest);
@@ -431,6 +515,11 @@ bool ResolveBuiltinMesh(const std::string& name, std::uint32_t& out_type,
 // 实体分两路：带网格的走 PipelineRegisterMeshEntity（注册即建实体），灯光/
 // 相机/空实体走 CreateEntity + AddEntityLight。相机组件不在此挂——由调用方
 // 对最终选中的相机实体调一次 CreateCamera 拿渲染用 camera slot。
+// sequence S1：序列轨 → 引擎实体绑定结果（InjectScene 填，主循环消费；
+// 0xFFFFFFFF = 目标不在场景，该轨跳过）。
+static std::vector<std::uint32_t> g_seq_prop_entity;
+static std::vector<std::uint32_t> g_seq_pos_entity;
+
 std::uint32_t InjectScene(RuntimeScene& scene,
                           const std::string& package_path,
                           std::unordered_map<std::string, std::uint64_t>& texture_cache,
@@ -711,6 +800,36 @@ std::uint32_t InjectScene(RuntimeScene& scene,
             nav_idx.data(), static_cast<std::uint32_t>(nav_idx.size()), profile);
         std::fprintf(stderr, "[player] navigation baked from %zu tris, err=%u "
                              "(scene has nav agents)\n", nav_idx.size() / 3, nav_err);
+    }
+
+    // sequence S1：序列轨按实体名绑定引擎实体（目标不在场景 → 跳过并记日志）。
+    g_seq_prop_entity.clear();
+    g_seq_prop_entity.reserve(scene.sequence.props.size());
+    for (const auto& t : scene.sequence.props) {
+        const RuntimeEntity* found = nullptr;
+        for (const auto& e : scene.entities)
+            if (e.name == t.entity_name) { found = &e; break; }
+        if (!found || found->engine_entity == 0xFFFFFFFFu) {
+            std::fprintf(stderr, "[player] seq prop track target '%s' not found — skipped\n",
+                         t.entity_name.c_str());
+            g_seq_prop_entity.push_back(0xFFFFFFFFu);
+            continue;
+        }
+        g_seq_prop_entity.push_back(found->engine_entity);
+    }
+    g_seq_pos_entity.clear();
+    g_seq_pos_entity.reserve(scene.sequence.positions.size());
+    for (const auto& t : scene.sequence.positions) {
+        const RuntimeEntity* found = nullptr;
+        for (const auto& e : scene.entities)
+            if (e.name == t.entity_name) { found = &e; break; }
+        if (!found || found->engine_entity == 0xFFFFFFFFu) {
+            std::fprintf(stderr, "[player] seq pos track target '%s' not found — skipped\n",
+                         t.entity_name.c_str());
+            g_seq_pos_entity.push_back(0xFFFFFFFFu);
+            continue;
+        }
+        g_seq_pos_entity.push_back(found->engine_entity);
     }
 
     out_camera = chosen;
@@ -1099,6 +1218,8 @@ int main(int argc, char** argv)
         }
     }
 
+    int seq_frame = 0;   // sequence S1：渲染帧驱动的序列时间轴
+
     while (true) {
 #if defined(PRIMAL_PLAYER_WINDOW)
         if (windowed && !PlayerWindowPump()) break;
@@ -1113,6 +1234,79 @@ int main(int argc, char** argv)
             if (dt < 0.f) dt = 0.f;
             if (dt > 0.1f) dt = 0.1f;
             PipelineTick(dt);
+        }
+
+        // sequence S1（2026-10-15）：序列帧推进（每渲染帧 +1，到 duration-1
+        // 后 clamp 保持末帧）+ 求值应用。求值语义与编辑器 SequenceEvaluator
+        // 逐位一致（clamp/linear/constant）；在 PipelineTick 之后、渲染之前，
+        // 序列驱动的实体不应再挂 navagent/dynamic rigidbody（单写者纪律）。
+        if (!scene.sequence.empty()) {
+            const int seq_f = seq_frame;
+            const auto eval_scalar = [seq_f](const std::vector<RuntimeSeqKey>& keys) -> float {
+                if (keys.empty()) return 0.f;
+                std::size_t lo = 0;
+                while (lo + 1 < keys.size() && keys[lo + 1].frame <= seq_f) ++lo;
+                const RuntimeSeqKey& left = keys[lo];
+                if (lo == keys.size() - 1 || seq_f < keys[0].frame || left.interp == 1)
+                    return left.value;
+                const RuntimeSeqKey& right = keys[lo + 1];
+                if (right.frame == left.frame) return left.value;
+                const float t = static_cast<float>(seq_f - left.frame)
+                              / static_cast<float>(right.frame - left.frame);
+                return left.value + (right.value - left.value) * t;
+            };
+            for (std::size_t i = 0; i < scene.sequence.props.size(); ++i) {
+                const auto& t = scene.sequence.props[i];
+                if (i >= g_seq_prop_entity.size()
+                    || g_seq_prop_entity[i] == 0xFFFFFFFFu || t.keys.empty()) continue;
+                const float v = eval_scalar(t.keys);
+                if (t.component == "light" && t.property == "intensity")
+                    SetEntityLightIntensity(g_seq_prop_entity[i], v);
+            }
+            const auto eval_pos9 = [&scene](std::size_t i, int f, float (&out9)[9]) {
+                const auto& keys = scene.sequence.positions[i].keys;
+                std::size_t lo = 0;
+                while (lo + 1 < keys.size() && keys[lo + 1].frame <= f) ++lo;
+                const RuntimeSeqPosKey& left = keys[lo];
+                for (int k = 0; k < 9; ++k) out9[k] = left.v[k];
+                if (lo + 1 < keys.size() && f >= keys[0].frame && left.interp == 0
+                    && keys[lo + 1].frame > left.frame) {
+                    const RuntimeSeqPosKey& right = keys[lo + 1];
+                    const float tt = static_cast<float>(f - left.frame)
+                                   / static_cast<float>(right.frame - left.frame);
+                    for (int k = 0; k < 9; ++k)
+                        out9[k] = left.v[k] + (right.v[k] - left.v[k]) * tt;
+                }
+            };
+            for (std::size_t i = 0; i < scene.sequence.positions.size(); ++i) {
+                const auto& t = scene.sequence.positions[i];
+                if (i >= g_seq_pos_entity.size()
+                    || g_seq_pos_entity[i] == 0xFFFFFFFFu || t.keys.empty()) continue;
+                float out9[9];
+                eval_pos9(i, seq_f, out9);
+                SetEntityTransform(g_seq_pos_entity[i], &out9[0], &out9[3], &out9[6]);
+            }
+            if (seq_f % 15 == 0) {
+                std::string sample;
+                for (std::size_t i = 0; i < scene.sequence.props.size(); ++i) {
+                    const auto& t = scene.sequence.props[i];
+                    if (i >= g_seq_prop_entity.size()
+                        || g_seq_prop_entity[i] == 0xFFFFFFFFu || t.keys.empty()) continue;
+                    sample += " " + t.component + "." + t.property + "="
+                            + std::to_string(eval_scalar(t.keys));
+                }
+                for (std::size_t i = 0; i < scene.sequence.positions.size(); ++i) {
+                    const auto& t = scene.sequence.positions[i];
+                    if (i >= g_seq_pos_entity.size()
+                        || g_seq_pos_entity[i] == 0xFFFFFFFFu || t.keys.empty()) continue;
+                    // 采样插值后的 y（E2E 断言位移用——与实际写入实体的值同源）
+                    float out9[9];
+                    eval_pos9(i, seq_f, out9);
+                    sample += " pos.y=" + std::to_string(out9[1]);
+                }
+                std::printf("seq f=%d%s\n", seq_f, sample.c_str());
+            }
+            if (seq_frame < (std::max)(1, scene.sequence.duration) - 1) ++seq_frame;
         }
 
 #if defined(PRIMAL_PLAYER_WINDOW)

@@ -131,10 +131,23 @@ def build_package(pkg_dir: Path) -> Path:
         "navagent 0.4 1.8 3\n"
         "end\n"
         "entity\n"
+        'name "mover"\n'
+        "pos 0 4 0\nrot 0 0 0\nscl 1 1 1\n"
+        "builtin box\n"
+        "end\n"
+        "entity\n"
         'name "cam"\n'
         "pos 0 1.5 -6\nrot 0 0 0\nscl 1 1 1\n"
         "camera 0 60 0.1 500 1\n"
-        "end\n",
+        "end\n"
+        # sequence S1 E2E：sun.intensity 1→8 线性（属性轨）+ mover y 4→1（变换轨）
+        "seqmeta 60 60\n"
+        'seqprop "sun" light intensity 2\n'
+        "seqkey 0 1 0\n"
+        "seqkey 59 8 0\n"
+        'seqpos "mover" 2\n'
+        "seqposkey 0 0 4 0 0 0 0 1 1 1 0\n"
+        "seqposkey 59 0 1 0 0 0 0 1 1 1 0\n",
         encoding="utf-8",
     )
     return pkg
@@ -214,6 +227,20 @@ def main() -> int:
             checks["导航推进（x/z 递增）"] = False
             checks["导航贴地（y≈4）"] = False
             checks["导航位移（≥2m）"] = False
+        # sequence S1：属性轨（sun.intensity 1→8 线性）+ 变换轨（mover y 4→1）
+        seq_frames = [int(m) for m in __import__("re").findall(r"seq f=(\d+)", proc.stdout)]
+        seq_intensity = [float(m) for m in
+                         __import__("re").findall(r"light\.intensity=([\d.]+)", proc.stdout)]
+        seq_posy = [float(m) for m in __import__("re").findall(r"pos\.y=([-\d.]+)", proc.stdout)]
+        checks["序列采样数"] = len(seq_frames) >= 3
+        checks["序列强度递增"] = (
+            len(seq_intensity) >= 3
+            and all(seq_intensity[i + 1] > seq_intensity[i] for i in range(len(seq_intensity) - 1))
+            and 6.0 <= seq_intensity[-1] <= 8.5)
+        checks["序列位移递减"] = (
+            len(seq_posy) >= 3
+            and all(seq_posy[i + 1] < seq_posy[i] for i in range(len(seq_posy) - 1))
+            and seq_posy[0] >= 3.9 and seq_posy[-1] <= 1.9)
         ok = True
         for name, passed in checks.items():
             print(f"{'PASS' if passed else 'FAIL'}: {name}")
