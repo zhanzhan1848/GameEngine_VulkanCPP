@@ -105,6 +105,21 @@ public static class RuntimeSceneExporter
             AppendPhysics(sb, entity);
             AppendAudio(sb, ctx, entity);
             AppendNavigation(sb, entity);
+            // pfx Player 接通（2026-10-15）：.pfx_emitter JSON 资产行（portable 复制进
+            // _assets/）。暴露参数覆盖不随行（名字→Murmur3 哈希在引擎侧）——S1 声明。
+            var pfxComponent = entity.GetComponent<Components.ParticleFXComponent>();
+            if (pfxComponent != null && pfxComponent.IsEnabled
+                && !string.IsNullOrEmpty(pfxComponent.AssetPath))
+            {
+                var pfxPath = System.IO.Path.IsPathRooted(pfxComponent.AssetPath)
+                    ? pfxComponent.AssetPath
+                    : System.IO.Path.Combine(projectDir ?? "", pfxComponent.AssetPath);
+                if (System.IO.File.Exists(pfxPath))
+                    sb.AppendLine($"pfx \"{ToPackagePath(ctx, pfxPath, entity.Name)}\"");
+                else
+                    PrimalEditor_Avalonia.Common.Logger.Warning(
+                        $"[Run] pfx asset missing, entity '{entity.Name}' skipped ({pfxComponent.AssetPath})");
+            }
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
                 // type/intensity/rgb/range/umbra/penumbra/enabled — the same

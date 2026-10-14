@@ -74,6 +74,13 @@ std::uint32_t AddEntityLight(std::uint32_t entity_id, std::uint32_t light_type,
                              float umbra_rad, float penumbra_rad, std::uint32_t is_enabled);
 // sequence S1：属性轨驱动 light.intensity（EngineDLL LightAPI 导出）。
 void          SetEntityLightIntensity(std::uint32_t entity_id, float value);
+// pfx Player 接通（2026-10-15）：ParticleFXAPI——惰性 Ensure + 从 .pfx_emitter
+// JSON 建发射器 + 位置绑定（创建时定一次位；逐帧跟随实体是后续阶段）。
+std::uint32_t PfxSystemEnsure(void);
+std::uint32_t PfxEmitterCreateFromAsset(const char* json_path);
+std::uint32_t PfxEmitterRemove(std::uint32_t emitter_id);
+std::uint32_t PfxSetEmitterPosition(std::uint32_t emitter_id, float x, float y, float z);
+std::uint32_t PfxGetEmitterStats(std::uint32_t emitter_id, std::uint32_t* out_active, std::uint32_t* out_capacity);
 std::uint32_t AddEntityCamera(std::uint32_t entity_id, std::uint32_t projection_type,
                               float field_of_view, float aspect_ratio, float near_z,
                               float far_z, const float* up_vector);
@@ -187,6 +194,8 @@ struct RuntimeEntity {
     // 的 radius/height 作烘焙 profile；speed 是缺省移动速度。
     bool has_navagent = false;
     float nav_radius = 0.4f, nav_height = 1.8f, nav_speed = 2.f;
+    // pfx：`pfx "<.pfx_emitter json>"`（与 script/audio 同一包内相对解析）。
+    std::string pfx_path;
 };
 
 // 渲染相机最终选择：主相机 > 第一个场景相机 > 默认机位。
@@ -431,6 +440,10 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
             current.audio_loop = v[1] != 0.f;
             current.audio_autoplay = v[2] != 0.f;
         }
+        else if (key == "pfx") {
+            // "pfx \"<路径>\""——ParticleFX 发射器资产
+            current.pfx_path = ParseQuoted(rest);
+        }
         else if (key == "navagent") {
             // ai-navigation S1："navagent <radius> <height> <speed>"
             float v[3];
@@ -518,6 +531,8 @@ bool ResolveBuiltinMesh(const std::string& name, std::uint32_t& out_type,
 // sequence S1：序列轨 → 引擎实体绑定结果（InjectScene 填，主循环消费；
 // 0xFFFFFFFF = 目标不在场景，该轨跳过）。
 static std::vector<std::uint32_t> g_seq_prop_entity;
+// pfx：（引擎实体 id, 发射器 id）——主循环定期打印首个发射器统计
+static std::vector<std::pair<std::uint32_t, std::uint32_t>> g_pfx_emitters;
 static std::vector<std::uint32_t> g_seq_pos_entity;
 
 std::uint32_t InjectScene(RuntimeScene& scene,
@@ -800,6 +815,31 @@ std::uint32_t InjectScene(RuntimeScene& scene,
             nav_idx.data(), static_cast<std::uint32_t>(nav_idx.size()), profile);
         std::fprintf(stderr, "[player] navigation baked from %zu tris, err=%u "
                              "(scene has nav agents)\n", nav_idx.size() / 3, nav_err);
+    }
+
+    // pfx：惰性 Ensure + 从资产建发射器 + 创建时定位（逐帧跟随是后续阶段）
+    g_pfx_emitters.clear();
+    {
+        bool any_pfx = false;
+        for (const auto& e : scene.entities) any_pfx = any_pfx || !e.pfx_path.empty();
+        if (any_pfx) {
+            if (PfxSystemEnsure() == 0)
+                std::fprintf(stderr, "[player] PfxSystemEnsure failed — pfx disabled\n");
+            for (const auto& e : scene.entities) {
+                if (e.pfx_path.empty() || e.engine_entity == 0xFFFFFFFFu) continue;
+                const auto abs = ResolveAssetPath(e.pfx_path, package_path);
+                const std::uint32_t emitter = PfxEmitterCreateFromAsset(abs.c_str());
+                if (emitter == 0) {
+                    std::fprintf(stderr, "[player] pfx emitter create failed (entity '%s', %s)\n",
+                                 e.name.c_str(), abs.c_str());
+                    continue;
+                }
+                PfxSetEmitterPosition(emitter, e.pos[0], e.pos[1], e.pos[2]);
+                g_pfx_emitters.push_back({ e.engine_entity, emitter });
+                std::fprintf(stderr, "[player] pfx emitter %u created (entity '%s')\n",
+                             emitter, e.name.c_str());
+            }
+        }
     }
 
     // sequence S1：序列轨按实体名绑定引擎实体（目标不在场景 → 跳过并记日志）。
@@ -1219,6 +1259,7 @@ int main(int argc, char** argv)
     }
 
     int seq_frame = 0;   // sequence S1：渲染帧驱动的序列时间轴
+    long frame_counter = 0;
 
     while (true) {
 #if defined(PRIMAL_PLAYER_WINDOW)
@@ -1308,6 +1349,14 @@ int main(int argc, char** argv)
             }
             if (seq_frame < (std::max)(1, scene.sequence.duration) - 1) ++seq_frame;
         }
+
+        // pfx：周期性统计（E2E 冒烟断言粒子系统真正在跑）
+        if (!g_pfx_emitters.empty() && frame_counter % 30 == 0) {
+            std::uint32_t active = 0, capacity = 0;
+            if (PfxGetEmitterStats(g_pfx_emitters.front().second, &active, &capacity))
+                std::printf("pfx active=%u capacity=%u\n", active, capacity);
+        }
+        ++frame_counter;
 
 #if defined(PRIMAL_PLAYER_WINDOW)
         if (windowed) {

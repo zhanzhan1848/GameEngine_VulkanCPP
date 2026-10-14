@@ -69,6 +69,14 @@ def build_package(pkg_dir: Path) -> Path:
         "return M\n",
         encoding="utf-8",
     )
+    # pfx Player 接通 E2E：最小 .pfx_emitter（SpawnRate 50/s + 1~2s 寿命）
+    # ——统计行 "pfx active=..." 非零即证明 ParticleFX 在 Player 真正步进。
+    (assets / "e2e.pfx_emitter").write_text(
+        '{"name":"e2e","blend":"alpha","capacity":256,'
+        '"stages":{"spawn":[{"module":"SpawnRate","rate":50}],'
+        '"init":[{"module":"SetLifetime","min":1,"max":2}]}}',
+        encoding="utf-8",
+    )
     # input-camera E2E：自定义映射文件（重绑定路径——MoveForward 同时绑 W/Up）。
     (pkg_dir / "input.bindings").write_text(
         "# primal-input-bindings v1\n"
@@ -112,6 +120,7 @@ def build_package(pkg_dir: Path) -> Path:
         "pos 0 -1 0\nrot 0 0 0\nscl 1 1 1\n"
         "builtin plane\n"
         "collider 0 5 5 5 0 0 0 0 0\n"
+        'pfx "_assets/e2e.pfx_emitter"\n'
         'audio "_assets/beep.wav" 0.8 0 1\n'
         "end\n"
         "entity\n"
@@ -237,6 +246,10 @@ def main() -> int:
             len(seq_intensity) >= 3
             and all(seq_intensity[i + 1] > seq_intensity[i] for i in range(len(seq_intensity) - 1))
             and 6.0 <= seq_intensity[-1] <= 8.5)
+        # pfx：发射器创建日志 + 粒子统计非零（系统在跑）
+        pfx_active = [int(m) for m in __import__("re").findall(r"pfx active=(\d+)", proc.stdout)]
+        checks["PFX 发射器创建"] = "pfx emitter" in log and "created" in log
+        checks["PFX 粒子活跃"] = len(pfx_active) >= 2 and max(pfx_active) > 0
         checks["序列位移递减"] = (
             len(seq_posy) >= 3
             and all(seq_posy[i + 1] < seq_posy[i] for i in range(len(seq_posy) - 1))
